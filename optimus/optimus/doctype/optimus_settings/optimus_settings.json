@@ -488,15 +488,15 @@
   {
    "default": "Anthropic",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "Wire format / hosted defaults. \"Aerele\" is the managed option — purchase a token pack at aerele.in/optimus/signup and paste the issued key into API Key below. Each pack is a fixed quantity of tokens; calls draw from the pack until it's exhausted, then you buy another. \"OpenAI-compatible\" requires a Base URL and Model — use it for Ollama, LM Studio, vLLM, OpenRouter, Together, Groq, etc.",
+   "description": "Wire format / hosted defaults. \"OpenAI-compatible\" requires a Base URL and Model — use it for Ollama, LM Studio, vLLM, OpenRouter, Together, Groq, etc.",
    "fieldname": "ai_provider",
    "fieldtype": "Select",
    "label": "Provider",
-   "options": "Anthropic\nOpenAI\nKimi (Moonshot)\nAerele\nOpenAI-compatible"
+   "options": "Anthropic\nOpenAI\nKimi (Moonshot)\nOpenAI-compatible"
   },
   {
-   "depends_on": "eval:doc.ai_enabled",
-   "description": "Leave blank to use the hosted default for the chosen provider. Required for \"OpenAI-compatible\" — e.g. http://localhost:11434/v1 (Ollama), http://localhost:1234/v1 (LM Studio).",
+   "depends_on": "eval:doc.ai_enabled && doc.ai_provider == 'OpenAI-compatible'",
+   "description": "The OpenAI-compatible endpoint base (include /v1) — e.g. http://localhost:11434/v1 (Ollama), http://localhost:1234/v1 (LM Studio), https://openrouter.ai/api/v1. Hosted providers (Anthropic, OpenAI, Kimi) use their built-in default, so this is hidden for them.",
    "fieldname": "ai_base_url",
    "fieldtype": "Data",
    "label": "Base URL"
@@ -514,7 +514,7 @@
   },
   {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "API key for the provider, if it needs one. Stored encrypted per-site. Most local OpenAI-compatible endpoints (Ollama, LM Studio, vLLM) don't need a key; hosted ones (OpenAI, Anthropic, Kimi, Aerele, OpenRouter, Together, Groq) do.",
+   "description": "API key for the provider, if it needs one. Stored encrypted per-site. Most local OpenAI-compatible endpoints (Ollama, LM Studio, vLLM) don't need a key; hosted ones (OpenAI, Anthropic, Kimi, OpenRouter, Together, Groq) do.",
    "fieldname": "ai_api_key",
    "fieldtype": "Password",
    "label": "API Key"

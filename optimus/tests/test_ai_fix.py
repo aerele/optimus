@@ -54,6 +54,19 @@ def _post_raising(exc):
 	return _fake_post
 
 
+def _post_sequence(*resps):
+	"""Return successive responses on successive calls; snapshots each request
+	body (shallow copy, since callers may mutate the dict between attempts)."""
+	calls = []
+	it = iter(resps)
+
+	def _fake_post(url, headers=None, json=None, timeout=None):  # noqa: A002, F811
+		calls.append(SimpleNamespace(url=url, headers=headers, body=dict(json or {}), timeout=timeout))
+		return next(it)
+	_fake_post.calls = calls
+	return _fake_post
+
+
 # --------------------------------------------------------------------------
 # _build_messages — pure
 # --------------------------------------------------------------------------
@@ -312,6 +325,25 @@ class TestOpenAiCall:
 		ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage)
 		assert usage == {"prompt_tokens": 120, "completion_tokens": 45, "total_tokens": 165}
 
+	def test_retries_without_temperature_on_400_temperature_error(self, monkeypatch):
+		# Kimi "thinking" / other reasoning models reject a non-default
+		# temperature with HTTP 400; we retry once without it.
+		err = '{"error":{"message":"invalid temperature: only 1 is allowed for this model"}}'
+		fp = _post_sequence(_FakeResp(400, text=err), _FakeResp(200, _OPENAI_OK))
+		monkeypatch.setattr(requests, "post", fp)
+		text = ai_fix._call_openai_chat("u", "k", "kimi-k2.6", "s", [{"role": "user", "content": "x"}])
+		assert text == "**Fix**\n\nuse a join"
+		assert len(fp.calls) == 2
+		assert "temperature" in fp.calls[0].body   # first attempt sent it
+		assert "temperature" not in fp.calls[1].body  # retry dropped it
+
+	def test_non_temperature_400_is_not_retried(self, monkeypatch):
+		fp = _post_sequence(_FakeResp(400, text='{"error":{"message":"context_length_exceeded"}}'))
+		monkeypatch.setattr(requests, "post", fp)
+		with pytest.raises(ai_fix.AiFixError):
+			ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}])
+		assert len(fp.calls) == 1  # no retry for unrelated 400s
+
 
 class TestAereleSessionAttribution:
 	"""The Aerele managed proxy is sent a ``metadata`` block attributing each
@@ -482,12 +514,24 @@ class TestResolveProvider:
 		assert p["protocol"] == "openai"
 		assert "moonshot" in p["base_url"]
 
-	def test_overrides_win_over_defaults(self):
+	def test_base_url_override_ignored_for_hosted_provider(self):
+		# A hosted provider (Anthropic / OpenAI / Kimi) ALWAYS uses its default
+		# endpoint — a stored ai_base_url must NOT override it. The Settings
+		# field is hidden for hosted providers, so a stale value would
+		# otherwise silently route calls to a dead host (ConnectionError). The
+		# model override still applies (that field stays visible/editable).
 		with patch("optimus.settings.get_config",
 		           return_value=_cfg(ai_provider="OpenAI", ai_base_url="https://router.example/v1", ai_model="my-model")):
 			p = ai_fix._resolve_provider()
+		assert p["base_url"] == "https://api.openai.com/v1"  # default wins; override ignored
+		assert p["model"] == "my-model"                       # model override still honoured
+
+	def test_base_url_override_honoured_only_for_openai_compatible(self):
+		# The one provider with no built-in default DOES honour the override.
+		with patch("optimus.settings.get_config",
+		           return_value=_cfg(ai_provider="OpenAI-compatible", ai_base_url="https://router.example/v1", ai_model="m")):
+			p = ai_fix._resolve_provider()
 		assert p["base_url"] == "https://router.example/v1"
-		assert p["model"] == "my-model"
 
 	def test_unknown_provider_raises(self):
 		with patch("optimus.settings.get_config", return_value=_cfg(ai_provider="Bogus")):
