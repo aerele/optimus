@@ -102,12 +102,18 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 	# proxy fronts an OpenAI-shaped wire so ``_call_openai_chat`` routes
 	# correctly without a new protocol handler. See
 	# ``docs/AI-FIXING.md`` §10.
-	"Aerele": {
-		"protocol": "openai",
-		"base_url": "https://api.aerele.in/optimus/v1",
-		"model": "claude-sonnet-4-6",  # Aerele picks the upstream model
-		"needs_key": True,
-	},
+	#
+	# TEMPORARILY DISABLED until Aerele billing + the managed LLM gateway
+	# are production-ready. To re-enable: uncomment this entry AND add
+	# "Aerele" back to the ai_provider Select options (plus its two
+	# descriptions) in optimus_settings.json. The _aerele_call_metadata
+	# wiring further down is left intact, ready to use.
+	# "Aerele": {
+	# 	"protocol": "openai",
+	# 	"base_url": "https://api.aerele.in/optimus/v1",
+	# 	"model": "claude-sonnet-4-6",  # Aerele picks the upstream model
+	# 	"needs_key": True,
+	# },
 }
 _DEFAULT_PROVIDER = "Anthropic"
 
@@ -553,6 +559,7 @@ def suggest_fix(finding: dict) -> dict:
 		text = _call_openai_chat(
 			provider["base_url"], provider.get("api_key") or "",
 			provider["model"], system, messages, usage_out=usage,
+			metadata=_aerele_call_metadata(provider, finding.get("finding_type")),
 		)
 
 	text = (text or "").strip()
@@ -604,6 +611,7 @@ def humanize_steps(
 		text = _call_openai_chat(
 			provider["base_url"], provider.get("api_key") or "",
 			provider["model"], system, messages, usage_out=usage_out,
+			metadata=_aerele_call_metadata(provider, "Steps to Reproduce"),
 		)
 	text = (text or "").strip()
 	if not text:
@@ -641,6 +649,7 @@ def suggest_index(table_payload: dict) -> dict:
 		text = _call_openai_chat(
 			provider["base_url"], provider.get("api_key") or "",
 			provider["model"], system, messages, usage_out=usage,
+			metadata=_aerele_call_metadata(provider, "Table Index"),
 		)
 	text = (text or "").strip()
 	if not text:
@@ -748,7 +757,16 @@ def _resolve_provider() -> dict:
 		raise AiFixError(f"Unknown AI provider {name!r}. Pick one in Optimus Settings.")
 
 	defaults = _PROVIDER_DEFAULTS[name]
-	base_url = (getattr(cfg, "ai_base_url", "") or "").strip().rstrip("/") or defaults["base_url"]
+	# The Base URL override applies ONLY to bring-your-own providers (those
+	# with no built-in default endpoint — i.e. "OpenAI-compatible"). Hosted
+	# providers (Anthropic / OpenAI / Kimi) ALWAYS use their default: the
+	# Settings field is hidden for them, so a previously-stored value must not
+	# silently override and route calls to a dead host (that stale-value trap
+	# caused a ConnectionError after the field was hidden for hosted providers).
+	if defaults["base_url"]:
+		base_url = defaults["base_url"]
+	else:
+		base_url = (getattr(cfg, "ai_base_url", "") or "").strip().rstrip("/")
 	model = (getattr(cfg, "ai_model", "") or "").strip() or defaults["model"]
 
 	# Always fetch the key (harmless if unset) — some OpenAI-compatible
@@ -1309,6 +1327,37 @@ def _record_session_spend(total_tokens) -> None:
 		pass
 
 
+def _aerele_call_metadata(provider, finding_type=None) -> dict | None:
+	"""Metadata to attach to the Aerele managed-proxy request so the Aerele
+	billing portal can attribute each AI call to the originating Optimus
+	Session (for its per-call usage ledger + a per-session spend breakdown).
+
+	Only the **Aerele** provider consumes this — other providers (OpenAI,
+	Anthropic) get ``None`` so we never send unknown body fields that they
+	might reject. The active session uuid is the one the caller marked on
+	``frappe.local._optimus_spend_session`` (the same hook that powers
+	``ai_tokens_spent``); the human docname is resolved from it so the portal
+	can show the same reference the customer sees in their bench. Best-effort:
+	any failure returns ``None`` and the call proceeds unattributed."""
+	if not provider or provider.get("name") != "Aerele":
+		return None
+	try:
+		import frappe
+
+		uuid = getattr(frappe.local, "_optimus_spend_session", None)
+		if not uuid:
+			return None
+		meta = {"optimus_session_uuid": uuid}
+		docname = frappe.db.get_value("Optimus Session", {"session_uuid": uuid}, "name")
+		if docname:
+			meta["optimus_session"] = docname
+		if finding_type:
+			meta["optimus_finding_type"] = finding_type
+		return meta
+	except Exception:
+		return None
+
+
 def _call_anthropic(
 	base_url: str, api_key: str, model: str, system: str, messages: list[dict],
 	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
@@ -1347,6 +1396,7 @@ def _call_anthropic(
 def _call_openai_chat(
 	base_url: str, api_key: str, model: str, system: str, messages: list[dict],
 	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
+	metadata: dict | None = None,
 ) -> str:
 	url = base_url.rstrip("/") + "/chat/completions"
 	headers = {"content-type": "application/json"}
@@ -1357,9 +1407,26 @@ def _call_openai_chat(
 		"max_tokens": max_tokens,
 		"messages": [{"role": "system", "content": system}, *messages],
 	}
-	if not _is_reasoning_model(model):
+	sent_temperature = not _is_reasoning_model(model)
+	if sent_temperature:
 		body["temperature"] = _TEMPERATURE
-	data = _http_post(url, headers, body, provider="openai", where="chat/completions")
+	# Aerele-only: attribute this call to the originating Optimus Session.
+	if metadata:
+		body["metadata"] = metadata
+	try:
+		data = _http_post(url, headers, body, provider="openai", where="chat/completions")
+	except AiFixError as e:
+		# Some reasoning models reject a non-default `temperature` with HTTP
+		# 400. OpenAI o-series are pre-filtered by `_is_reasoning_model`, but
+		# others — e.g. Moonshot/Kimi "thinking" variants — only allow the
+		# default and say so ("invalid temperature: only 1 is allowed for this
+		# model"). We can't enumerate every such model, so retry once without
+		# `temperature` (letting the model use its own default).
+		if sent_temperature and "temperature" in str(e).lower():
+			body.pop("temperature", None)
+			data = _http_post(url, headers, body, provider="openai", where="chat/completions")
+		else:
+			raise
 	if usage_out is not None:
 		usage_out.update(_usage_from_openai(data))
 		_record_session_spend(usage_out.get("total_tokens"))

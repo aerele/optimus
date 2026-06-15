@@ -54,6 +54,18 @@ frappe.ui.form.on("Optimus Settings", {
 			"blue"
 		);
 
+		// The API Key is a secret token, not a human-chosen password, so the
+		// password-strength meter is meaningless for it. It also POSTs the
+		// value to `test_password_strength` (zxcvbn) on every keystroke — and
+		// for a long key zxcvbn returns a `guesses` integer larger than 64
+		// bits, which the server's orjson serializer can't encode → a 500
+		// "<!doctype" HTML page the form can't parse. Turning the check off
+		// for this field sidesteps both the noise and the crash.
+		const ak = frm.fields_dict.ai_api_key;
+		if (ak && typeof ak.disable_password_checks === "function") {
+			ak.disable_password_checks();
+		}
+
 		frappe.call({
 			method: "optimus.api.get_installed_apps_for_tracking",
 			callback(r) {
@@ -178,5 +190,13 @@ frappe.ui.form.on("Optimus Settings", {
 		// Clear and re-attach the custom button.
 		frm.clear_custom_buttons();
 		frm.trigger("refresh");
+	},
+
+	ai_provider(frm) {
+		// Base URL only applies to the "OpenAI-compatible" provider — the
+		// hosted providers (Anthropic / OpenAI / Kimi) use their built-in
+		// default endpoint. Re-evaluate depends_on so Base URL hides/shows
+		// immediately when the provider changes, without a save + reload.
+		frm.refresh_field("ai_base_url");
 	},
 });
