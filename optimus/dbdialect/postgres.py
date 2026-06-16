@@ -103,11 +103,32 @@ class PostgresDialect(Dialect):
 	def __init__(self) -> None:
 		self._max_connections_cached: int | None = None
 
-	def run_explain(self, query: str) -> NormalizedPlan:
+	@staticmethod
+	def _safe_sql(*args, **kwargs):
+		"""Run a query under a savepoint and roll back to it on failure.
+
+		CRITICAL on Postgres: a failed query aborts the WHOLE transaction
+		(InFailedSqlTransaction) — every later query then fails until a
+		rollback. Catching the Python exception is NOT enough; the savepoint
+		rollback is what restores the transaction so analyze (EXPLAIN on each
+		captured query + introspection) and the request (the infra snapshot)
+		survive a query the database rejects. Re-raises so the caller's own
+		try/except still returns its safe default."""
 		import frappe
 
+		sp = "optimus_pg_q"
+		frappe.db.savepoint(sp)
 		try:
-			rows = frappe.db.sql(f"EXPLAIN (FORMAT JSON) {query}")
+			result = frappe.db.sql(*args, **kwargs)
+		except Exception:
+			frappe.db.rollback(save_point=sp)
+			raise
+		frappe.db.release_savepoint(sp)
+		return result
+
+	def run_explain(self, query: str) -> NormalizedPlan:
+		try:
+			rows = self._safe_sql(f"EXPLAIN (FORMAT JSON) {query}")
 		except Exception:
 			return NormalizedPlan(ok=False, tables=[], raw=None)
 		try:
@@ -121,10 +142,8 @@ class PostgresDialect(Dialect):
 		return NormalizedPlan(ok=True, tables=_walk_plan(root), raw=plan_json)
 
 	def existing_indexes(self, table: str) -> list:
-		import frappe
-
 		try:
-			rows = frappe.db.sql(_PG_INDEX_SQL, (table, _db_schema()), as_dict=True) or []
+			rows = self._safe_sql(_PG_INDEX_SQL, (table, _db_schema()), as_dict=True) or []
 		except Exception:
 			return []
 		by_name: dict[str, dict] = {}
@@ -142,10 +161,8 @@ class PostgresDialect(Dialect):
 		return out
 
 	def column_types(self, table: str) -> dict:
-		import frappe
-
 		try:
-			rows = frappe.db.sql(
+			rows = self._safe_sql(
 				"""
 				SELECT column_name, data_type
 				FROM information_schema.columns
@@ -174,18 +191,16 @@ class PostgresDialect(Dialect):
 		)
 
 	def infra_snapshot(self) -> InfraSnapshot:
-		import frappe
-
 		snap = InfraSnapshot()
 		try:
-			r = frappe.db.sql(
+			r = self._safe_sql(
 				"SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
 			)
 			snap.threads_connected = to_int_or_none(r[0][0]) if r else None
 		except Exception:
 			pass
 		try:
-			r = frappe.db.sql(
+			r = self._safe_sql(
 				"SELECT count(*) FROM pg_stat_activity "
 				"WHERE datname = current_database() AND state = 'active'"
 			)
@@ -195,7 +210,7 @@ class PostgresDialect(Dialect):
 		# slow_queries: no global counter without pg_stat_statements → stays None.
 		if self._max_connections_cached is None:
 			try:
-				r = frappe.db.sql("SELECT setting FROM pg_settings WHERE name = 'max_connections'")
+				r = self._safe_sql("SELECT setting FROM pg_settings WHERE name = 'max_connections'")
 				if r:
 					self._max_connections_cached = to_int_or_none(r[0][0])
 			except Exception:

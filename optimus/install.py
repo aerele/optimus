@@ -213,9 +213,18 @@ def _assign_profiler_user_to_system_managers():
 	# Pull every user-role pair in one query, grouped by user. We only
 	# care about two roles, but fetching them both in one round-trip is
 	# faster than a per-user introspection.
+	# parenttype="User" is REQUIRED: "Has Role" is the shared child table for
+	# the `roles` field on User, Page, Report, Workspace, … so without it the
+	# query also returns System-Manager roles on Pages/Reports/Workspaces
+	# (Printing, Prepared Report Analytics, ToDo, …) whose `parent` is NOT a
+	# User — and the later get_doc("User", parent) then DoesNotExistErrors on a
+	# fresh install.
 	role_rows = frappe.get_all(
 		"Has Role",
-		filters={"role": ("in", ["System Manager", PROFILER_USER_ROLE])},
+		filters={
+			"role": ("in", ["System Manager", PROFILER_USER_ROLE]),
+			"parenttype": "User",
+		},
 		fields=["parent", "role"],
 	)
 	roles_by_user: dict[str, set[str]] = {}

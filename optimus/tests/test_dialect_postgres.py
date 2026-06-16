@@ -21,7 +21,14 @@ from optimus.dbdialect.postgres import PostgresDialect
 def _install_db(monkeypatch, sql_fn):
 	import frappe
 
-	monkeypatch.setattr(frappe, "db", types.SimpleNamespace(sql=sql_fn, db_type="postgres"), raising=False)
+	# _safe_sql wraps every query in savepoint / release / rollback (Postgres
+	# aborts the txn on a failed query) — provide no-ops for them.
+	monkeypatch.setattr(frappe, "db", types.SimpleNamespace(
+		sql=sql_fn, db_type="postgres",
+		savepoint=lambda *a, **k: None,
+		release_savepoint=lambda *a, **k: None,
+		rollback=lambda *a, **k: None,
+	), raising=False)
 
 
 # --- EXPLAIN (FORMAT JSON) plan-tree walk -----------------------------------
