@@ -3,40 +3,205 @@
 
 """PostgreSQL dialect adapter.
 
-Type-classification is in place (no prefix syntax; json/jsonb/geometry need a
-GIN/GiST index, not a plain b-tree). The EXPLAIN (FORMAT JSON) plan-tree walk,
-``pg_index``/``pg_stat_activity`` introspection, and ``CREATE INDEX`` DDL are
-implemented in Phase 3.
+Maps Postgres plan/catalog output onto the same normalized shapes the analyzers
+consume, so the analysis engine is dialect-blind. Plan analysis uses
+``EXPLAIN (FORMAT JSON)`` (plan-only — NEVER ``EXPLAIN ANALYZE``, which would
+execute the user's statement). The Sort / temp-table flags are plan-only
+heuristics: exact spill detection needs ANALYZE, so a ``Sort`` node over a
+relation is treated as the filesort analog and ``HashAggregate`` / ``Materialize``
+as the temporary-table analog. ``selectivity_pct`` has no plan-only Postgres
+equivalent (it needs ANALYZE row counts), so it's left None — the Low Filter
+Ratio finding simply doesn't fire rather than mis-fire.
+
+The raw introspection SQL here is validated against a real ``--db-type postgres``
+bench in phase 5; the parsing/mapping logic is unit-tested with fixtures.
 """
 
 from __future__ import annotations
 
-from optimus.dbdialect.base import Dialect, InfraSnapshot, NormalizedPlan
+import json
 
-# Postgres has no index-prefix syntax; jsonb/geometry need GIN/GiST (a plain
-# b-tree CREATE INDEX is useless or errors), so don't suggest one.
+from optimus.dbdialect.base import (
+	Dialect,
+	IndexInfo,
+	InfraSnapshot,
+	NormalizedPlan,
+	PlanTable,
+	to_int,
+	to_int_or_none,
+)
+
+# json / jsonb / geometry can't take a plain b-tree (need GIN/GiST); don't suggest one.
 _UNINDEXABLE_TYPES = frozenset({"json", "jsonb", "geometry"})
 
-_TODO = "PostgresDialect.{} — implemented in Phase 3 (Postgres adapter)"
+# Plan node types (EXPLAIN FORMAT JSON "Node Type").
+_SCAN_NODES = frozenset({
+	"Seq Scan", "Index Scan", "Index Only Scan", "Bitmap Heap Scan", "Tid Scan",
+})
+_SORT_NODES = frozenset({"Sort", "Incremental Sort"})          # filesort analog
+_TEMP_NODES = frozenset({"HashAggregate", "Materialize"})      # temporary-table analog
+
+# Ordered-column index introspection. ``indkey`` is an int2vector of attnums;
+# unnest it WITH ORDINALITY (via text → int[]) to recover column order. attnum 0
+# = an expression (functional index) → no pg_attribute match → dropped.
+_PG_INDEX_SQL = """
+	SELECT i.relname AS index_name, a.attname AS column_name,
+	       k.ord AS seq, ix.indisunique AS is_unique
+	FROM pg_index ix
+	JOIN pg_class t ON t.oid = ix.indrelid
+	JOIN pg_class i ON i.oid = ix.indexrelid
+	JOIN pg_namespace n ON n.oid = t.relnamespace
+	CROSS JOIN LATERAL unnest(string_to_array(ix.indkey::text, ' ')::int[])
+	     WITH ORDINALITY AS k(attnum, ord)
+	JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+	WHERE t.relname = %s AND n.nspname = %s
+	ORDER BY i.relname, k.ord
+"""
+
+
+def _db_schema() -> str:
+	"""The schema Frappe pins on the Postgres connection (default 'public')."""
+	try:
+		import frappe
+		return frappe.conf.get("db_schema") or "public"
+	except Exception:
+		return "public"
+
+
+def _walk_plan(root: dict) -> list:
+	"""Walk the EXPLAIN plan tree, one PlanTable per scanned relation. Sort /
+	temp flags from ancestor nodes propagate down to the scans they cover."""
+	tables: list = []
+
+	def visit(node, sort_above, temp_above):
+		nt = node.get("Node Type", "")
+		sort_here = sort_above or nt in _SORT_NODES
+		temp_here = temp_above or nt in _TEMP_NODES
+		if nt in _SCAN_NODES:
+			raw = dict(node)
+			raw["filtered"] = None  # no plan-only selectivity; keep key for dialect-agnostic downstream
+			tables.append(PlanTable(
+				table=node.get("Relation Name") or node.get("Alias") or "?",
+				full_scan=(nt == "Seq Scan"),
+				sort_without_index=sort_here,
+				temp_used=temp_here,
+				used_index=node.get("Index Name"),
+				rows_examined=to_int(node.get("Plan Rows")),
+				selectivity_pct=None,
+				raw=raw,
+			))
+		for child in (node.get("Plans") or []):
+			visit(child, sort_here, temp_here)
+
+	visit(root, False, False)
+	return tables
 
 
 class PostgresDialect(Dialect):
 	name = "postgres"
 
+	def __init__(self) -> None:
+		self._max_connections_cached: int | None = None
+
 	def run_explain(self, query: str) -> NormalizedPlan:
-		raise NotImplementedError(_TODO.format("run_explain"))
+		import frappe
+
+		try:
+			rows = frappe.db.sql(f"EXPLAIN (FORMAT JSON) {query}")
+		except Exception:
+			return NormalizedPlan(ok=False, tables=[], raw=None)
+		try:
+			cell = rows[0][0] if rows and rows[0] else None
+			plan_json = json.loads(cell) if isinstance(cell, (str, bytes)) else cell
+			root = plan_json[0]["Plan"] if plan_json else None
+		except Exception:
+			return NormalizedPlan(ok=False, tables=[], raw=rows)
+		if not isinstance(root, dict):
+			return NormalizedPlan(ok=False, tables=[], raw=plan_json)
+		return NormalizedPlan(ok=True, tables=_walk_plan(root), raw=plan_json)
 
 	def existing_indexes(self, table: str) -> list:
-		raise NotImplementedError(_TODO.format("existing_indexes"))
+		import frappe
+
+		try:
+			rows = frappe.db.sql(_PG_INDEX_SQL, (table, _db_schema()), as_dict=True) or []
+		except Exception:
+			return []
+		by_name: dict[str, dict] = {}
+		for r in rows:
+			name = r.get("index_name")
+			if not name:
+				continue
+			entry = by_name.setdefault(name, {"cols": [], "unique": bool(r.get("is_unique"))})
+			entry["cols"].append((to_int(r.get("seq")), r.get("column_name")))
+		out: list = []
+		for name, e in by_name.items():
+			cols = [c for _s, c in sorted(e["cols"]) if c]
+			out.append(IndexInfo(name=name, columns=cols, unique=e["unique"],
+			                     leftmost=(cols[0] if cols else None)))
+		return out
 
 	def column_types(self, table: str) -> dict:
-		raise NotImplementedError(_TODO.format("column_types"))
+		import frappe
+
+		try:
+			rows = frappe.db.sql(
+				"""
+				SELECT column_name, data_type
+				FROM information_schema.columns
+				WHERE table_schema = %s AND table_name = %s
+				""",
+				(_db_schema(), table),
+				as_dict=True,
+			) or []
+		except Exception:
+			return {}
+		out: dict = {}
+		for r in rows:
+			col = r.get("column_name")
+			dtype = (r.get("data_type") or "").lower()
+			if col:
+				out[col] = dtype
+		return out
 
 	def index_ddl(self, table: str, column: str, is_text_col: bool) -> str:
-		raise NotImplementedError(_TODO.format("index_ddl"))
+		# Postgres b-trees index the full value — no prefix length. Long/searched
+		# text may want an expression or GIN/trigram index instead.
+		schema = _db_schema()
+		return (
+			f'CREATE INDEX IF NOT EXISTS "{table}_{column}_index" '
+			f'ON "{schema}"."{table}" ("{column}");'
+		)
 
 	def infra_snapshot(self) -> InfraSnapshot:
-		raise NotImplementedError(_TODO.format("infra_snapshot"))
+		import frappe
+
+		snap = InfraSnapshot()
+		try:
+			r = frappe.db.sql(
+				"SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+			)
+			snap.threads_connected = to_int_or_none(r[0][0]) if r else None
+		except Exception:
+			pass
+		try:
+			r = frappe.db.sql(
+				"SELECT count(*) FROM pg_stat_activity "
+				"WHERE datname = current_database() AND state = 'active'"
+			)
+			snap.threads_running = to_int_or_none(r[0][0]) if r else None
+		except Exception:
+			pass
+		# slow_queries: no global counter without pg_stat_statements → stays None.
+		if self._max_connections_cached is None:
+			try:
+				r = frappe.db.sql("SELECT setting FROM pg_settings WHERE name = 'max_connections'")
+				if r:
+					self._max_connections_cached = to_int_or_none(r[0][0])
+			except Exception:
+				pass
+		snap.max_connections = self._max_connections_cached
+		return snap
 
 	def prefix_required(self, data_type: str) -> bool:
 		return False  # Postgres b-tree indexes the full value — no prefix syntax

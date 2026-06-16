@@ -153,6 +153,33 @@ _FINDING_TYPE_HINTS = {
 	"Hot Line": "A single source line is the dominant time sink inside its function. Fix: optimize that line specifically — hoist invariant work out of a loop, replace an O(n²) pattern, avoid a per-iteration DB/cache hit, or use a set/dict for membership tests.",
 }
 
+# Postgres phrasings for the four EXPLAIN-based hints. The rest of
+# _FINDING_TYPE_HINTS is dialect-neutral; MariaDB uses it verbatim. On Postgres
+# these swap the MariaDB EXPLAIN-column wording (type=ALL / Using filesort / …)
+# for plan-node wording (Seq Scan / Sort node / HashAggregate). The fix advice
+# is identical.
+_POSTGRES_EXPLAIN_HINTS = {
+	"Full Table Scan": "EXPLAIN shows a `Seq Scan` — the whole table is read. Fix: index the filtering column (Search Index), or make the WHERE sargable (no functions on the column, no leading-wildcard LIKE).",
+	"Filesort": "EXPLAIN shows a `Sort` node — no index provides the required order, so Postgres sorts in memory/on disk. Fix: a composite index ending in the ORDER BY column(s) so the read returns rows already ordered; or, if the sort isn't needed, drop the ORDER BY.",
+	"Temporary Table": "EXPLAIN shows a `HashAggregate` / `Materialize` — usually a GROUP BY / DISTINCT that can't use an index. Fix: a covering composite index on the grouped columns, or pre-aggregate, or drop an unnecessary DISTINCT.",
+	"Low Filter Ratio": "EXPLAIN's row-count estimate shows low selectivity — most examined rows are thrown away. Fix: index a more selective column, add a composite index matching the WHERE, or tighten the filter.",
+}
+
+
+def _finding_type_hint(ftype):
+	"""Per-finding-type hint for the LLM prompt. The four EXPLAIN-based hints
+	are phrased for the active dialect (MariaDB EXPLAIN columns vs Postgres plan
+	nodes); the rest are dialect-neutral. MariaDB returns the verbatim
+	_FINDING_TYPE_HINTS text (byte-identical)."""
+	if ftype in _POSTGRES_EXPLAIN_HINTS:
+		try:
+			from optimus.dbdialect import active_db_type
+			if active_db_type() == "postgres":
+				return _POSTGRES_EXPLAIN_HINTS[ftype]
+		except Exception:
+			pass
+	return _FINDING_TYPE_HINTS.get(ftype)
+
 _SYSTEM_PROMPT = (
 	"You are a senior Frappe Framework / ERPNext engineer doing a precise code "
 	"review of one finding from a performance profiler. Propose the smallest "
@@ -1101,7 +1128,7 @@ def _build_messages(finding: dict) -> tuple[str, list[dict]]:
 	parts: list[str] = []
 	ftype = finding.get("finding_type") or "Unknown"
 	parts.append(f"Finding type: {ftype}")
-	type_hint = _FINDING_TYPE_HINTS.get(ftype)
+	type_hint = _finding_type_hint(ftype)
 	if type_hint:
 		parts.append(f"What this finding type means / how it's usually fixed in Frappe: {type_hint}")
 	parts.append(f"Severity: {finding.get('severity') or 'Unknown'}")
