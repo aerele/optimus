@@ -27,19 +27,18 @@ from optimus.analyzers import call_tree
 
 @pytest.fixture
 def fake_frappe_db(monkeypatch):
-	"""Stub ``frappe.db.sql`` so ``get_server_script_record`` can be exercised
-	without a real Frappe site. The fixture returns a mutable
-	``{rows: ...}`` dict the test can set to drive the SQL response."""
+	"""Stub ``frappe.get_all`` so ``get_server_script_record`` can be exercised
+	without a real Frappe site. The function now scans Server Scripts via the
+	portable ORM (frappe.get_all) and matches with frappe.scrub. Returns a
+	mutable ``{rows: ...}`` dict the test sets to drive the candidate list."""
 	import frappe
 
 	state = {"rows": []}
 
-	def fake_sql(query, params=None, as_dict=False, **kw):
-		return list(state["rows"])
+	def fake_get_all(doctype, **kw):
+		return [dict(r) for r in state["rows"]]
 
-	# frappe.db is a Werkzeug Local proxy per [[feedback_frappe_db_local_proxy]];
-	# replace it wholesale rather than patching its attributes.
-	monkeypatch.setattr(frappe, "db", types.SimpleNamespace(sql=fake_sql), raising=False)
+	monkeypatch.setattr(frappe, "get_all", fake_get_all, raising=False)
 	return state
 
 
@@ -107,7 +106,7 @@ class TestGetServerScriptRecord:
 		def boom(*a, **kw):
 			raise RuntimeError("db is on fire")
 
-		monkeypatch.setattr(frappe, "db", types.SimpleNamespace(sql=boom), raising=False)
+		monkeypatch.setattr(frappe, "get_all", boom, raising=False)
 		# Must NOT raise — best-effort guarantee.
 		assert sss.get_server_script_record("my_script") is None
 

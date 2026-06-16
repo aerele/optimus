@@ -103,6 +103,7 @@ except ImportError:
 		get_doc=lambda *a, **kw: None,
 		get_roles=lambda *a, **kw: [],
 		get_all=lambda *a, **kw: [],
+		scrub=lambda txt: (txt or "").replace(" ", "_").replace("-", "_").lower(),
 		get_app_path=lambda *a, **kw: "",
 		get_hooks=lambda *a, **kw: {},
 		enqueue=lambda *a, **kw: None,
@@ -239,6 +240,19 @@ def _sys_modules_fence():
 		if frappe_was_swapped:
 			for leaf in _FRAPPE_DEPENDENT_LEAVES:
 				sys.modules.pop(leaf, None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_dbdialect_cache():
+	"""Each test gets a fresh dialect adapter — prevents the cached
+	MariaDBDialect (and its max_connections cache) leaking across tests, and
+	lets the dialect-factory tests flip db_type freely."""
+	try:
+		from optimus import dbdialect
+		dbdialect._cache.clear()
+	except Exception:
+		pass
+	yield
 
 
 def load_fixture(name: str) -> dict:

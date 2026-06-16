@@ -96,24 +96,17 @@ def get_server_script_record(scrubbed_name: str, *, cache: dict | None = None) -
 	try:
 		import frappe
 
-		# Frappe's scrub() is the canonical transform; replicate it in SQL so
-		# we can match against the original name in one query. scrub lowercases
-		# + replaces non-alphanumeric (excluding ``_``) with ``_``. SQL
-		# REPLACE chains approximate the common cases (`` `` / ``-``).
-		rows = frappe.db.sql(
-			"""
-			SELECT name, script
-			FROM `tabServer Script`
-			WHERE LOWER(name) = %(s)s
-			   OR LOWER(REPLACE(name, ' ', '_')) = %(s)s
-			   OR LOWER(REPLACE(REPLACE(name, ' ', '_'), '-', '_')) = %(s)s
-			LIMIT 1
-			""",
-			{"s": scrubbed_name.lower()},
-			as_dict=True,
-		)
-		if rows:
-			record = {"name": rows[0]["name"], "script": rows[0]["script"] or ""}
+		# Match the requested (already-scrubbed) name against every Server
+		# Script by scrubbing each candidate the way Frappe canonically does
+		# (frappe.scrub). Done in Python rather than SQL REPLACE chains so it's
+		# portable across MariaDB/Postgres (no backticks) and exactly correct —
+		# the Server Script table is tiny, so the full scan is cheap.
+		target = (scrubbed_name or "").lower()
+		for cand in frappe.get_all("Server Script", fields=["name", "script"]):
+			cname = cand.get("name") or ""
+			if frappe.scrub(cname) == scrubbed_name or cname.lower() == target:
+				record = {"name": cname, "script": cand.get("script") or ""}
+				break
 	except Exception:
 		record = None
 

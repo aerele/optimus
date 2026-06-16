@@ -24,6 +24,7 @@ import os
 import re
 import time
 from collections import OrderedDict
+from dataclasses import asdict
 
 import frappe
 import sqlparse
@@ -49,6 +50,7 @@ from optimus.analyzers import (
 	top_queries,
 )
 from optimus.analyzers.base import SEVERITY_ORDER, AnalyzeContext
+from optimus.dbdialect import get_dialect
 
 # v0.3.0: per-analyzer wall-clock budget. If the cumulative analyze
 # elapsed time crosses this threshold, remaining analyzers are skipped
@@ -1350,9 +1352,11 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 					continue
 
 			try:
-				result = frappe.db.sql(
-					f"EXPLAIN {call['query']}", as_dict=True
-				)
+				# Route EXPLAIN through the dialect → normalized PlanTable
+				# dicts (run_explain returns ok=False / empty tables on failure,
+				# so the stored shape matches the old empty-list-on-error path).
+				plan = get_dialect().run_explain(call["query"])
+				result = [asdict(t) for t in plan.tables]
 				call["explain_result"] = result
 				_cap_explain_cache(explain_cache, cache_key, result)
 				if use_shared_cache:
@@ -2411,24 +2415,16 @@ def _table_index_sample_queries(recordings: list[dict], table: str, limit: int =
 
 
 def _table_existing_indexes(table: str) -> list[dict]:
-	"""``SHOW INDEX FROM `table`` → ``[{name, columns:[...by seq], unique}]``.
-	Best-effort: returns ``[]`` if the table doesn't exist / on any error."""
-	try:
-		rows = frappe.db.sql(f"SHOW INDEX FROM `{table}`", as_dict=True) or []
-	except Exception:
-		return []
-	by_name: dict[str, dict] = {}
-	for r in rows:
-		name = r.get("Key_name")
-		if not name:
-			continue
-		entry = by_name.setdefault(name, {"name": name, "_cols": [], "unique": not r.get("Non_unique")})
-		entry["_cols"].append((int(r.get("Seq_in_index") or 0), r.get("Column_name")))
-	out = []
-	for e in by_name.values():
-		cols = [c for _seq, c in sorted(e["_cols"]) if c]
-		out.append({"name": e["name"], "columns": cols, "unique": bool(e["unique"])})
-	return out
+	"""``[{name, columns:[...by seq], unique}]`` for ``table`` (best-effort, []
+	on error). Delegates to the dialect adapter so it's portable across
+	MariaDB / Postgres; the MariaDB adapter is the verbatim lift of the old
+	``SHOW INDEX`` parsing this used to do inline."""
+	from optimus.dbdialect import get_dialect
+
+	return [
+		{"name": ix.name, "columns": ix.columns, "unique": ix.unique}
+		for ix in get_dialect().existing_indexes(table)
+	]
 
 
 def _ai_payload_for_table(t_entry: dict, recordings: list[dict]) -> dict:

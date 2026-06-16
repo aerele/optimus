@@ -234,10 +234,10 @@ def test_malformed_row_is_isolated_not_crashing(empty_context):
 		],
 	}
 
-	# Monkeypatch _inspect_row to raise on the first call only,
-	# simulating a weird row shape we can't foresee. The per-row
+	# Monkeypatch _inspect_table to raise on the first call only,
+	# simulating a weird row shape we can't foresee. The per-item
 	# try/except should catch it and continue.
-	original = explain_flags._inspect_row
+	original = explain_flags._inspect_table
 	call_count = {"n": 0}
 
 	def sometimes_fail(*args, **kwargs):
@@ -246,7 +246,7 @@ def test_malformed_row_is_isolated_not_crashing(empty_context):
 			raise TypeError("simulated: '<' not supported between str and int")
 		return original(*args, **kwargs)
 
-	with mock.patch.object(explain_flags, "_inspect_row", side_effect=sometimes_fail):
+	with mock.patch.object(explain_flags, "_inspect_table", side_effect=sometimes_fail):
 		result = explain_flags.analyze([recording, recording], empty_context)
 
 	# Row 1 failed, row 2 succeeded. One Full Table Scan finding from

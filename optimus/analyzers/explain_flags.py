@@ -27,6 +27,29 @@ from optimus.analyzers.base import (
 	project_post_fix_ms,
 	walk_callsite,
 )
+from optimus.dbdialect import PlanTable
+from optimus.dbdialect.mariadb import MariaDBDialect
+
+
+def _item_to_plan_table(item: dict) -> PlanTable:
+	"""Coerce one ``explain_result`` item to a normalized PlanTable.
+
+	The EXPLAIN runner now stores normalized PlanTable dicts, but older
+	persisted recordings / cache entries / fixtures hold raw MariaDB EXPLAIN
+	rows — distinguish by the presence of the ``full_scan`` key and map a
+	legacy row through the MariaDB adapter so old data still analyzes."""
+	if "full_scan" in item:
+		return PlanTable(
+			table=item.get("table") or "?",
+			full_scan=bool(item.get("full_scan")),
+			sort_without_index=bool(item.get("sort_without_index")),
+			temp_used=bool(item.get("temp_used")),
+			used_index=item.get("used_index"),
+			rows_examined=item.get("rows_examined") or 0,
+			selectivity_pct=item.get("selectivity_pct"),
+			raw=item.get("raw") or {},
+		)
+	return MariaDBDialect._row_to_plan_table(item)
 
 # A query is "high severity" full-scan if it touched more than this many rows.
 HIGH_ROWS_EXAMINED = 10000
@@ -79,17 +102,23 @@ def _get_framework_doctypes() -> frozenset[str]:
 
 		from optimus.analyzers.base import FRAMEWORK_APPS
 
-		rows = frappe.db.sql(
-			"""
-			SELECT dt.name
-			FROM `tabDocType` dt
-			JOIN `tabModule Def` md ON dt.module = md.name
-			WHERE md.app_name IN %(apps)s
-			""",
-			{"apps": tuple(FRAMEWORK_APPS)},
-			as_dict=True,
+		# Portable ORM (no raw JOIN/backticks): framework Module Defs, then the
+		# DocTypes in them. Works on MariaDB and Postgres alike.
+		framework_modules = frappe.get_all(
+			"Module Def",
+			filters={"app_name": ["in", list(FRAMEWORK_APPS)]},
+			pluck="name",
 		)
-		_framework_doctypes_cache = frozenset(r["name"] for r in rows)
+		names = (
+			frappe.get_all(
+				"DocType",
+				filters={"module": ["in", framework_modules]},
+				pluck="name",
+			)
+			if framework_modules
+			else []
+		)
+		_framework_doctypes_cache = frozenset(names)
 	except Exception:
 		_framework_doctypes_cache = frozenset()
 	return _framework_doctypes_cache
@@ -149,13 +178,14 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 				drop_framework_callsite += 1
 				continue
 
-			for row in explain_rows:
-				if not isinstance(row, dict):
+			for item in explain_rows:
+				if not isinstance(item, dict):
 					continue
-				# v0.5.1: per-row try/except for resilience (see previous comment).
+				# v0.5.1: per-item try/except for resilience (see previous comment).
 				try:
-					skipped = _inspect_row(
-						row, normalized, action_idx, query_duration, buckets,
+					plan_table = _item_to_plan_table(item)
+					skipped = _inspect_table(
+						plan_table, normalized, action_idx, query_duration, buckets,
 					)
 					if skipped == "alias":
 						drop_alias += 1
@@ -164,7 +194,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 					if len(first_error_reasons) < 3:
 						first_error_reasons.append(
 							f"{type(e).__name__}: {e} "
-							f"(row keys: {sorted(list(row.keys()))[:10]})"
+							f"(row keys: {sorted(list(item.keys()))[:10]})"
 						)
 
 	raw_findings = list(buckets.values())
@@ -469,30 +499,27 @@ def _is_likely_alias(table: str) -> bool:
 	return False
 
 
-def _inspect_row(row, normalized_query, action_idx, query_duration, buckets):
-	"""Check one EXPLAIN row against four red-flag patterns.
+def _inspect_table(pt, normalized_query, action_idx, query_duration, buckets):
+	"""Check one normalized PlanTable against four red-flag patterns.
 
-	Returns:
-	  - ``"alias"`` when the row's table is a SQL alias (skipped,
-	    caller counts it for the warning).
-	  - ``None`` on normal processing.
+	Returns ``"alias"`` when the table is a SQL alias (skipped, caller counts
+	it for the warning), or ``None`` on normal processing. The plan fields are
+	dialect-blind — the dialect adapter already mapped a MariaDB EXPLAIN row /
+	Postgres plan node onto them; ``pt.raw`` keeps the dialect blob for the
+	report + LLM (it's what ``explain_row`` in technical_detail holds).
 	"""
-	table = row.get("table") or "?"
+	table = pt.table or "?"
 
-	# v0.5.2: skip SQL aliases (single-letter JOIN aliases,
-	# <derivedN> subquery markers). "Full table scan on a" is
-	# uninterpretable — the user can't index "a", they'd need
-	# the real underlying table name.
+	# v0.5.2: skip SQL aliases (single-letter JOIN aliases, <derivedN>
+	# subquery markers). "Full table scan on a" is uninterpretable — the user
+	# can't index "a", they'd need the real underlying table name.
 	if _is_likely_alias(table):
 		return "alias"
 
-	# v0.5.1: explicit coercion — see _to_int docstring.
-	rows_examined = _to_int(row.get("rows"))
-	extra = (row.get("Extra") or row.get("extra") or "").lower()
-	type_ = (row.get("type") or "").lower()
+	rows_examined = pt.rows_examined
 
 	# Full table scan
-	if type_ == "all":
+	if pt.full_scan:
 		severity = "High" if rows_examined > HIGH_ROWS_EXAMINED else "Medium"
 		_upsert(
 			buckets,
@@ -501,7 +528,7 @@ def _inspect_row(row, normalized_query, action_idx, query_duration, buckets):
 			severity=severity,
 			query_duration=query_duration,
 			action_idx=action_idx,
-			row=row,
+			row=pt.raw,
 			normalized_query=normalized_query,
 			title=f"Full table scan on {table}",
 			customer_description=(
@@ -517,7 +544,7 @@ def _inspect_row(row, normalized_query, action_idx, query_duration, buckets):
 	# actually matter (see MIN_ROWS_TO_FLAG_SORT). Otherwise "Filesort
 	# on tabCustom DocPerm" fires on single-row parent lookups that the
 	# user can't act on.
-	if "using filesort" in extra and rows_examined >= MIN_ROWS_TO_FLAG_SORT:
+	if pt.sort_without_index and rows_examined >= MIN_ROWS_TO_FLAG_SORT:
 		_upsert(
 			buckets,
 			finding_type="Filesort",
@@ -525,7 +552,7 @@ def _inspect_row(row, normalized_query, action_idx, query_duration, buckets):
 			severity="Medium",
 			query_duration=query_duration,
 			action_idx=action_idx,
-			row=row,
+			row=pt.raw,
 			normalized_query=normalized_query,
 			title=f"Filesort on {table}",
 			customer_description=(
@@ -539,7 +566,7 @@ def _inspect_row(row, normalized_query, action_idx, query_duration, buckets):
 
 	# Temporary table — same row floor as Filesort. Materializing a
 	# tiny intermediate table is free; flagging it is noise.
-	if "using temporary" in extra and rows_examined >= MIN_ROWS_TO_FLAG_SORT:
+	if pt.temp_used and rows_examined >= MIN_ROWS_TO_FLAG_SORT:
 		_upsert(
 			buckets,
 			finding_type="Temporary Table",
@@ -547,7 +574,7 @@ def _inspect_row(row, normalized_query, action_idx, query_duration, buckets):
 			severity="Medium",
 			query_duration=query_duration,
 			action_idx=action_idx,
-			row=row,
+			row=pt.raw,
 			normalized_query=normalized_query,
 			title=f"Temporary table created for query on {table}",
 			customer_description=(
@@ -565,7 +592,7 @@ def _inspect_row(row, normalized_query, action_idx, query_duration, buckets):
 	# clause isn't selective enough (or isn't using an index to filter).
 	# v0.5.1: coerce explicitly so Decimal/str values from unusual drivers
 	# don't silently fall through the isinstance guard.
-	filtered = _to_float(row.get("filtered"))
+	filtered = pt.selectivity_pct
 	if (
 		filtered is not None
 		and filtered < LOW_FILTERED_THRESHOLD
@@ -579,7 +606,7 @@ def _inspect_row(row, normalized_query, action_idx, query_duration, buckets):
 			severity=severity,
 			query_duration=query_duration,
 			action_idx=action_idx,
-			row=row,
+			row=pt.raw,
 			normalized_query=normalized_query,
 			title=f"Low filter ratio on {table}",
 			customer_description=(

@@ -25,7 +25,7 @@ import time
 
 import frappe
 from frappe.rate_limiter import rate_limit
-from frappe.utils import now_datetime
+from frappe.utils import add_to_date, now_datetime
 
 from optimus import safe_commit, session
 
@@ -769,57 +769,70 @@ def health() -> dict:
 	counts.
 	"""
 	_require_profiler_user()
-
-	# Count by status
-	rows = (
-		frappe.db.sql(
-			"SELECT status, COUNT(*) FROM `tabOptimus Session` GROUP BY status",
-			as_list=True,
-		)
-		or []
-	)
-	by_status = {row[0]: int(row[1]) for row in rows}
-
-	# Analyze performance over the last 24 hours. Only count Ready
-	# sessions — Failed sessions don't have a meaningful analyze time.
-	recent = frappe.db.sql(
-		"""
-		SELECT
-			COUNT(*),
-			COALESCE(AVG(analyze_duration_ms), 0),
-			COALESCE(MAX(analyze_duration_ms), 0)
-		FROM `tabOptimus Session`
-		WHERE status = 'Ready'
-		  AND modified > NOW() - INTERVAL 1 DAY
-		"""
-	)
-	count, avg_ms, max_ms = recent[0] if recent else (0, 0, 0)
-
-	# Count by top severity for Ready sessions (useful signal for
-	# "are customers finding issues?")
-	severity_rows = (
-		frappe.db.sql(
-			"""
-			SELECT COALESCE(top_severity, 'None'), COUNT(*)
-			FROM `tabOptimus Session`
-			WHERE status = 'Ready'
-			GROUP BY top_severity
-			""",
-			as_list=True,
-		)
-		or []
-	)
-	by_severity = {row[0] or "None": int(row[1]) for row in severity_rows}
-
 	return {
-		"by_status": by_status,
-		"by_top_severity_ready": by_severity,
-		"last_24h": {
-			"sessions_ready": int(count or 0),
-			"analyze_avg_ms": round(float(avg_ms or 0), 2),
-			"analyze_max_ms": round(float(max_ms or 0), 2),
-		},
+		"by_status": _session_count_by_status(),
+		"by_top_severity_ready": _session_count_by_severity(),
+		"last_24h": _session_perf_24h(),
 	}
+
+
+# The health aggregates go through frappe.qb (the query builder), not raw SQL
+# and not get_all aggregate-strings: Frappe v16 rejects "count(name) as x" as a
+# field string, and the get_all ``{'COUNT': 'name'}`` dict form returns a
+# dialect-specific key (``COUNT(`name`)``). qb with explicit ``.as_()`` aliases
+# is the one portable form (MariaDB + Postgres). Imports are local so api.py
+# still imports under the unit-test frappe stub (which has no query builder);
+# health() is unit-tested by mocking these three helpers.
+
+def _session_count_by_status() -> dict:
+	"""``{status: count}`` across all sessions."""
+	from frappe.query_builder.functions import Count
+
+	s = frappe.qb.DocType("Optimus Session")
+	rows = (
+		frappe.qb.from_(s)
+		.select(s.status, Count(s.name).as_("cnt"))
+		.groupby(s.status)
+	).run(as_dict=True)
+	return {r["status"]: int(r["cnt"]) for r in rows}
+
+
+def _session_perf_24h() -> dict:
+	"""Analyze-pipeline perf over the last 24h for Ready sessions. Cutoff is
+	computed in Python (no MariaDB-only ``NOW() - INTERVAL``)."""
+	from frappe.query_builder.functions import Avg, Count, Max
+
+	cutoff = add_to_date(now_datetime(), days=-1)
+	s = frappe.qb.DocType("Optimus Session")
+	rows = (
+		frappe.qb.from_(s)
+		.select(
+			Count(s.name).as_("cnt"),
+			Avg(s.analyze_duration_ms).as_("avg_ms"),
+			Max(s.analyze_duration_ms).as_("max_ms"),
+		)
+		.where((s.status == "Ready") & (s.modified > cutoff))
+	).run(as_dict=True)
+	agg = rows[0] if rows else {}
+	return {
+		"sessions_ready": int(agg.get("cnt") or 0),
+		"analyze_avg_ms": round(float(agg.get("avg_ms") or 0), 2),
+		"analyze_max_ms": round(float(agg.get("max_ms") or 0), 2),
+	}
+
+
+def _session_count_by_severity() -> dict:
+	"""``{top_severity: count}`` for Ready sessions; NULL/'' → 'None'."""
+	from frappe.query_builder.functions import Count
+
+	s = frappe.qb.DocType("Optimus Session")
+	rows = (
+		frappe.qb.from_(s)
+		.select(s.top_severity, Count(s.name).as_("cnt"))
+		.where(s.status == "Ready")
+		.groupby(s.top_severity)
+	).run(as_dict=True)
+	return {(r["top_severity"] or "None"): int(r["cnt"]) for r in rows}
 
 
 # v0.4.0: onboarding toast state endpoints. Used by floating_widget.js
@@ -1830,12 +1843,15 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 	cfg = get_config()
 	doc = frappe.get_doc("Optimus Session", row["name"])
 
-	# v0.13: count this refresh (cumulative; only ever increases).
-	frappe.db.sql(
-		"update `tabOptimus Session` "
-		"set ai_refresh_count = coalesce(ai_refresh_count, 0) + 1 "
-		"where session_uuid = %s",
-		(session_uuid,),
+	# v0.13: count this refresh (cumulative; only ever increases). Portable
+	# read-modify-write off the already-loaded doc; update_modified=False so
+	# this counter bump doesn't touch `modified` (the health 24h query filters
+	# on it). Refresh is user-initiated + rate-limited, so the non-atomic
+	# increment is acceptable.
+	frappe.db.set_value(
+		"Optimus Session", doc.name, "ai_refresh_count",
+		(getattr(doc, "ai_refresh_count", 0) or 0) + 1,
+		update_modified=False,
 	)
 
 	fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None}
@@ -2267,16 +2283,19 @@ def force_stop_phase2() -> dict:
 	# table reflects the recovery. We scope to rows where parent.user ==
 	# the calling user so a System Manager hitting this doesn't sweep
 	# other users' active runs.
-	stuck_rows = frappe.db.sql(
-		"""
-		SELECT pp2r.name, pp2r.parent, pp2r.run_uuid
-		FROM `tabOptimus Phase Two Run` pp2r
-		JOIN `tabOptimus Session` ps ON ps.name = pp2r.parent
-		WHERE pp2r.status = 'Recording'
-		  AND ps.user = %s
-		""",
-		(user,),
-		as_dict=True,
+	# Portable, no join: the user's session names first, then their Recording
+	# Phase-2 Run child rows (parent == session name). Works on MariaDB + PG.
+	session_names = frappe.get_all(
+		"Optimus Session", filters={"user": user}, pluck="name"
+	)
+	stuck_rows = (
+		frappe.get_all(
+			"Optimus Phase Two Run",
+			filters={"status": "Recording", "parent": ["in", session_names]},
+			fields=["name", "parent", "run_uuid"],
+		)
+		if session_names
+		else []
 	)
 
 	# v0.6.x: group stuck rows by their parent Optimus Session so each

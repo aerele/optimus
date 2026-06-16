@@ -23,23 +23,13 @@ def execute():
 	if not frappe.db.table_exists("tabVersion"):
 		return
 
-	# Count before deletion for the log
-	count = frappe.db.sql(
-		"""
-		SELECT COUNT(*) FROM `tabVersion`
-		WHERE ref_doctype = 'Optimus Session'
-		"""
-	)[0][0]
+	# Count before deletion for the log. Portable ORM (no raw SQL/backticks).
+	count = frappe.db.count("Version", {"ref_doctype": "Optimus Session"})
 
 	if not count:
 		return
 
-	frappe.db.sql(
-		"""
-		DELETE FROM `tabVersion`
-		WHERE ref_doctype = 'Optimus Session'
-		"""
-	)
+	frappe.db.delete("Version", {"ref_doctype": "Optimus Session"})
 	frappe.db.commit()
 
 	try:
