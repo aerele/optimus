@@ -115,3 +115,16 @@ class TestTypeClassification:
 		assert not d.prefix_required("text")  # PG has no prefix syntax
 		assert d.unindexable("jsonb") and d.unindexable("json")
 		assert not d.unindexable("text")
+
+
+class TestQueryOptimizerCapability:
+	"""Frappe's DBOptimizer (recorder._optimize_query) uses DESCRIBE / SHOW
+	INDEX FROM, which only exist on MariaDB and abort the whole transaction on
+	Postgres. index_suggestions gates on this flag so it never invokes the
+	optimizer where it can't run."""
+
+	def test_mariadb_supports_optimizer(self):
+		assert MariaDBDialect().supports_query_optimizer is True
+
+	def test_postgres_does_not_support_optimizer(self):
+		assert PostgresDialect().supports_query_optimizer is False

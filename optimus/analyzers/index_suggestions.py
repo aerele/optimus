@@ -319,6 +319,24 @@ def _classify_column(
 
 
 def analyze(recordings: list[dict], context) -> AnalyzerResult:
+	# Frappe's query optimizer fetches table stats with MariaDB-only
+	# introspection (DESCRIBE / SHOW INDEX FROM). On Postgres those statements
+	# raise a syntax error that aborts the whole transaction — and since the
+	# optimizer call below is in a try/except that swallows the error, the
+	# poisoned transaction would silently break every later query in the analyze
+	# (the original symptom: analyze crashed at _persist with
+	# InFailedSqlTransaction). Gate on the dialect capability so we never invoke
+	# the optimizer where it can't run; the EXPLAIN-based findings still apply.
+	if not get_dialect().supports_query_optimizer:
+		return AnalyzerResult(
+			warnings=[
+				"Missing-index suggestions are skipped on PostgreSQL: they rely on "
+				"Frappe's query optimizer, which uses MariaDB-only introspection "
+				"(DESCRIBE / SHOW INDEX) to estimate table cardinality. The per-query "
+				"EXPLAIN plans (sequential-scan and sort flags) are still in the report."
+			]
+		)
+
 	try:
 		from frappe.core.doctype.recorder.recorder import _optimize_query
 	except Exception:

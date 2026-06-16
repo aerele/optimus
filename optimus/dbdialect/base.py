@@ -124,6 +124,17 @@ class Dialect(ABC):
 
 	name: str = "base"
 
+	# Whether Frappe's own query optimizer (``recorder._optimize_query`` /
+	# ``DBOptimizer``) can run on this database. That optimizer fetches table
+	# stats with MariaDB-only introspection (``DESCRIBE`` / ``SHOW INDEX FROM``),
+	# so on Postgres it raises a syntax error that ABORTS the whole transaction
+	# (Postgres poisons the txn on any failed statement — every later query then
+	# fails until rollback). The index-suggestions analyzer gates on this flag so
+	# it never invokes the optimizer on a dialect that can't run it. True by
+	# default (MariaDB); Postgres overrides to False until a PG-native table-stats
+	# provider exists.
+	supports_query_optimizer: bool = True
+
 	@abstractmethod
 	def run_explain(self, query: str) -> NormalizedPlan:
 		"""Run a plan-only EXPLAIN (NEVER one that executes the statement) and

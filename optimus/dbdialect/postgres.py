@@ -100,6 +100,14 @@ def _walk_plan(root: dict) -> list:
 class PostgresDialect(Dialect):
 	name = "postgres"
 
+	# Frappe's DBOptimizer (recorder._optimize_query) introspects table stats
+	# with DESCRIBE / SHOW INDEX FROM, which don't exist on Postgres (and a
+	# failed statement aborts the whole PG transaction). Until a PG-native
+	# table-stats provider exists, the index-suggestions analyzer skips the
+	# optimizer on Postgres rather than crash the analyze. The plan/EXPLAIN-based
+	# findings (Seq Scan → Full Table Scan, Sort, …) are unaffected.
+	supports_query_optimizer = False
+
 	def __init__(self) -> None:
 		self._max_connections_cached: int | None = None
 

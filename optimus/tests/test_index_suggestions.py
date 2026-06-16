@@ -86,6 +86,49 @@ def test_single_suggestion_per_table_column(monkeypatch, empty_context):
 	assert "ALTER TABLE" in detail["suggested_ddl"]
 
 
+def test_optimizer_skipped_when_dialect_unsupported(monkeypatch, empty_context):
+	"""On a dialect whose ``supports_query_optimizer`` is False (Postgres),
+	the analyzer must NOT invoke Frappe's DBOptimizer at all — it returns a
+	single explanatory warning and no findings, and never calls
+	``_optimize_query``.
+
+	Regression: on Postgres, ``_optimize_query`` runs DESCRIBE / SHOW INDEX
+	FROM (MariaDB-only), which raises a syntax error that aborts the whole
+	transaction. The analyzer's try/except swallowed that error but couldn't
+	un-abort the txn, so the entire analyze later crashed at _persist with
+	InFailedSqlTransaction. Gating on the dialect capability prevents the call."""
+
+	def fake_optimize(query: str):
+		raise AssertionError("_optimize_query must not be called on an unsupported dialect")
+
+	_install_fake_recorder_module(monkeypatch, fake_optimize)
+
+	class _PGLikeDialect:
+		supports_query_optimizer = False
+
+	monkeypatch.setattr(index_suggestions, "get_dialect", lambda: _PGLikeDialect())
+
+	recording = {
+		"uuid": "ixpg",
+		"path": "/",
+		"cmd": None,
+		"method": "GET",
+		"event_type": "HTTP Request",
+		"duration": 200,
+		"calls": [
+			{
+				"query": "SELECT * FROM tabLead WHERE status = 'Open'",
+				"normalized_query": "SELECT * FROM tabLead WHERE STATUS = 'Open'",
+				"duration": 30.0,
+				"stack": [],
+			}
+		],
+	}
+	result = index_suggestions.analyze([recording], empty_context)
+	assert result.findings == []
+	assert any("PostgreSQL" in w for w in result.warnings)
+
+
 def test_parser_limitation_valueerror_gets_soft_warning(monkeypatch, empty_context):
 	"""v0.5.1: ValueError from sql_metadata is a parser limitation, not
 	a bug we should scream about. It must produce the soft "Skipped N
