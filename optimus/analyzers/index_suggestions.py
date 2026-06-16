@@ -27,6 +27,7 @@ from optimus.analyzers.base import (
 	AnalyzerResult,
 	is_frappe_meta_table,
 )
+from optimus.dbdialect import get_dialect
 
 
 def _scrub_literals(text: str) -> str:
@@ -139,23 +140,11 @@ def _get_query_type(sql: str) -> str:
 		return ""
 	return m.group(1).upper()
 
-# v0.5.1: prefix length for text/blob column indexes. MariaDB requires
-# a length hint for TEXT/BLOB columns and for VARCHARs that would
-# exceed the 767-byte index-key limit. 255 is a safe default for
-# common Frappe Data / Small Text columns; developers can adjust the
-# prefix length based on the actual column's selectivity profile.
-TEXT_INDEX_PREFIX_LENGTH = 255
-
-# Column types that CANNOT be usefully indexed with a simple
-# single-column btree index. JSON requires a functional or generated-
-# column approach, which is outside the scope of a heuristic suggestion.
-_UNINDEXABLE_TYPES = frozenset({"json", "geometry"})
-
-# Column types that REQUIRE a prefix length when indexing.
-_PREFIX_REQUIRED_TYPES = frozenset({
-	"text", "tinytext", "mediumtext", "longtext",
-	"blob", "tinyblob", "mediumblob", "longblob",
-})
+# Index-type classification (which column types need a key-length prefix, which
+# can't take a plain b-tree index) + the ADD INDEX / CREATE INDEX DDL now live in
+# the dialect adapter (optimus.dbdialect) so they're correct for MariaDB AND
+# Postgres. (The _is_safe_table_name guard + regexes below are likewise now
+# enforced inside the MariaDB adapter; left here unused pending a de-dup pass.)
 
 # v0.5.1 → v0.6.0: never suggest indexing any of Frappe's standard
 # metadata columns, even when the DBOptimizer heuristic thinks one would
@@ -223,62 +212,18 @@ def _get_indexed_columns(table: str) -> set[str]:
 	Returns an empty set on any DB error (table missing, access denied,
 	no real Frappe site), which conservatively keeps all suggestions.
 
-	The table name is **interpolated** into the SQL (MariaDB doesn't
-	accept parameterised identifiers in DDL), so it must pass the
-	``_is_safe_table_name`` whitelist first. Anything outside the
-	``tab<DocType>`` / ``information_schema.<simple>`` grammar is
-	rejected without ever reaching the database.
+	Index introspection (and the table-name safety guard for the raw
+	``SHOW INDEX`` it issues) now lives in the dialect adapter
+	(``optimus.dbdialect``), so this works on MariaDB and Postgres alike.
 	"""
-	if not _is_safe_table_name(table):
-		return set()
-	try:
-		import frappe
-		rows = frappe.db.sql(f"SHOW INDEX FROM `{table}`", as_dict=True) or []
-	except Exception:
-		return set()
-
-	indexed: set[str] = set()
-	for row in rows:
-		# SHOW INDEX returns "Seq_in_index" — 1-indexed. We only count
-		# columns at position 1 because a composite index
-		# (a, b, c) only accelerates queries filtering on a, (a,b),
-		# or (a,b,c); a query on just b or c wouldn't use it.
-		try:
-			seq = int(row.get("Seq_in_index") or row.get("seq_in_index") or 0)
-		except (TypeError, ValueError):
-			seq = 0
-		if seq == 1:
-			col = row.get("Column_name") or row.get("column_name")
-			if col:
-				indexed.add(col)
-	return indexed
+	return {ix.leftmost for ix in get_dialect().existing_indexes(table) if ix.leftmost}
 
 
 def _get_column_types(table: str) -> dict[str, str]:
-	"""Return ``{column_name: data_type_lower}`` for ``table`` or an
-	empty dict on DB error. Used to check indexability and to pick
-	the right DDL shape (plain index vs. prefix index)."""
-	try:
-		import frappe
-		rows = frappe.db.sql(
-			"""
-			SELECT column_name, data_type
-			FROM information_schema.columns
-			WHERE table_schema = DATABASE() AND table_name = %s
-			""",
-			(table,),
-			as_dict=True,
-		) or []
-	except Exception:
-		return {}
-
-	out: dict[str, str] = {}
-	for r in rows:
-		name = r.get("column_name") or r.get("COLUMN_NAME")
-		dtype = (r.get("data_type") or r.get("DATA_TYPE") or "").lower()
-		if name:
-			out[name] = dtype
-	return out
+	"""Return ``{column_name: data_type_lower}`` for ``table`` or an empty dict
+	on DB error. Used to check indexability and to pick the right DDL shape
+	(plain index vs. prefix index). Delegates to the dialect adapter."""
+	return get_dialect().column_types(table)
 
 
 def _classify_column(
@@ -337,9 +282,7 @@ def _classify_column(
 	# (unit test, pre-migrate site). Return "unknown" so the caller
 	# keeps the suggestion as-is using the legacy plain-index DDL.
 	if not types and not indexed:
-		return "unknown", (
-			f"ALTER TABLE `{table}` ADD INDEX IF NOT EXISTS `{column}_index` (`{column}`);"
-		)
+		return "unknown", get_dialect().index_ddl(table, column, is_text_col=False)
 
 	# Column doesn't exist on the table.
 	if types and column not in types:
@@ -358,29 +301,42 @@ def _classify_column(
 
 	dtype = types.get(column, "") if types else ""
 
-	if dtype in _UNINDEXABLE_TYPES:
+	dialect = get_dialect()
+	if dialect.unindexable(dtype):
 		return "unindexable", (
 			f"column `{column}` on `{table}` has type `{dtype}`, "
 			f"which cannot be indexed with a simple btree. Consider "
 			f"a functional index or a generated column."
 		)
 
-	if dtype in _PREFIX_REQUIRED_TYPES:
-		return "actionable", (
-			f"ALTER TABLE `{table}` ADD INDEX IF NOT EXISTS `{column}_index` "
-			f"(`{column}`({TEXT_INDEX_PREFIX_LENGTH}));"
-		)
+	if dialect.prefix_required(dtype):
+		return "actionable", dialect.index_ddl(table, column, is_text_col=True)
 
-	# Regular indexable type (varchar, int, datetime, etc.) — and
-	# even if we don't recognise the dtype (empty string because
-	# information_schema lookup returned no row), fall through to
-	# plain DDL rather than silently drop.
-	return "actionable", (
-		f"ALTER TABLE `{table}` ADD INDEX IF NOT EXISTS `{column}_index` (`{column}`);"
-	)
+	# Regular indexable type (varchar, int, datetime, etc.) — and even if we
+	# don't recognise the dtype (empty string because the column-type lookup
+	# returned no row), fall through to a plain index rather than silently drop.
+	return "actionable", dialect.index_ddl(table, column, is_text_col=False)
 
 
 def analyze(recordings: list[dict], context) -> AnalyzerResult:
+	# Frappe's query optimizer fetches table stats with MariaDB-only
+	# introspection (DESCRIBE / SHOW INDEX FROM). On Postgres those statements
+	# raise a syntax error that aborts the whole transaction — and since the
+	# optimizer call below is in a try/except that swallows the error, the
+	# poisoned transaction would silently break every later query in the analyze
+	# (the original symptom: analyze crashed at _persist with
+	# InFailedSqlTransaction). Gate on the dialect capability so we never invoke
+	# the optimizer where it can't run; the EXPLAIN-based findings still apply.
+	if not get_dialect().supports_query_optimizer:
+		return AnalyzerResult(
+			warnings=[
+				"Missing-index suggestions are skipped on PostgreSQL: they rely on "
+				"Frappe's query optimizer, which uses MariaDB-only introspection "
+				"(DESCRIBE / SHOW INDEX) to estimate table cardinality. The per-query "
+				"EXPLAIN plans (sequential-scan and sort flags) are still in the report."
+			]
+		)
+
 	try:
 		from frappe.core.doctype.recorder.recorder import _optimize_query
 	except Exception:

@@ -324,11 +324,12 @@ class TestAnalyzeIndexHelpers:
 			{"Key_name": "idx_cust_date", "Seq_in_index": 2, "Column_name": "posting_date", "Non_unique": 1},
 			{"Key_name": "idx_cust_date", "Seq_in_index": 1, "Column_name": "customer", "Non_unique": 1},
 		]
-		# Patch the `frappe` reference inside the analyze module directly —
-		# robust against the suite's sys.modules['frappe'] churn.
+		# _table_existing_indexes now delegates to the dialect adapter, which
+		# reads the global ``frappe.db`` — patch that (the dialect tests' shape).
+		import frappe
 		monkeypatch.setattr(
-			_analyze, "frappe",
-			types.SimpleNamespace(db=types.SimpleNamespace(sql=lambda *a, **k: rows)),
+			frappe, "db",
+			types.SimpleNamespace(sql=lambda *a, **k: rows),
 			raising=False,
 		)
 		out = _analyze._table_existing_indexes("tabSales Invoice")
