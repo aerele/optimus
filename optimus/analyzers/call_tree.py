@@ -40,13 +40,37 @@ from optimus.analyzers.base import (
 
 
 def _summarize_explain(explain_result):
-	"""Extract the four red-flag fields from an EXPLAIN result list."""
+	"""Extract the four red-flag fields from an EXPLAIN result list.
+
+	Handles BOTH shapes:
+	  - the normalized ``PlanTable`` dict the live pipeline stores
+	    (``full_scan`` / ``sort_without_index`` / ``temp_used`` /
+	    ``selectivity_pct``), dialect-blind across MariaDB + Postgres; and
+	  - the legacy raw-MariaDB-row shape (``type`` / ``Extra`` / ``filtered``)
+	    still found in old persisted recordings and cache entries.
+	Same dual-shape bridge as ``explain_flags._item_to_plan_table``. Without the
+	normalized branch this returned ``{}`` for every current session (the row
+	keys it looked for no longer exist post dialect-abstraction)."""
 	if not explain_result or not isinstance(explain_result, list):
 		return {}
 	flags = {}
 	for row in explain_result:
 		if not isinstance(row, dict):
 			continue
+		if "full_scan" in row:
+			# Normalized PlanTable dict (asdict). selectivity_pct is None on
+			# Postgres (no plan-only equivalent) → low_filter simply won't fire.
+			if row.get("full_scan"):
+				flags["full_scan"] = True
+			if row.get("sort_without_index"):
+				flags["filesort"] = True
+			if row.get("temp_used"):
+				flags["temporary"] = True
+			sel = row.get("selectivity_pct")
+			if isinstance(sel, (int, float)) and sel < 10:
+				flags["low_filter"] = True
+			continue
+		# Legacy raw MariaDB EXPLAIN row.
 		t = (row.get("type") or "").lower()
 		if t == "all":
 			flags["full_scan"] = True

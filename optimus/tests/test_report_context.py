@@ -407,6 +407,24 @@ class TestActionPlanShape:
 		assert step["savings_display"] == "−1414 ms"
 		assert step["savings_label"] == "est. saving"
 
+	def test_step_title_and_desc_are_html_escaped(self):
+		"""SECURITY: title/desc can carry attacker-controlled captured data
+		(e.g. a client-supplied page_url in a Slow Frontend Render title) and
+		the template renders title_html/description_html with ``| safe`` — so
+		they MUST be HTML-escaped here or it's stored XSS in the report viewer."""
+		ap_in = [{
+			"n": 1,
+			"title": "LCP 99999ms on <img src=x onerror=alert(1)>",
+			"desc": "The page '<script>steal()</script>' took 99999ms",
+			"gain_ms": 0, "gain_label": "", "callsite": "",
+			"finding_type": "Slow Frontend Render",
+		}]
+		step = build_report_context(_doc(), _ctx(action_plan=ap_in))["action_plan"][0]
+		assert "<img" not in step["title_html"]
+		assert "&lt;img" in step["title_html"]
+		assert "<script>" not in step["description_html"]
+		assert "&lt;script&gt;" in step["description_html"]
+
 
 class TestWaterfallShape:
 	def test_row_has_contract_fields(self):

@@ -253,10 +253,17 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 
 		findings.append({
 			"finding_type": "Redundant Call",
+			# Title/description report the per-action LOOP magnitude
+			# (max_in_any_action), not the cross-action total (count) — the
+			# loop ran max_in_any_action times in its hottest request, and
+			# saying "(50 times)" when 50 = 10×5 requests overstates the loop
+			# ("almost always a loop" reads as 50-in-a-row). Severity already
+			# uses max_in_any_action; the total + distinct_actions stay in
+			# technical_detail_json.
 			"severity": severity,
-			"title": _title_for(fn_name, identifier_safe, count),
+			"title": _title_for(fn_name, identifier_safe, max_in_any_action),
 			"customer_description": _customer_description_for(
-				fn_name, count, callsite=callsite
+				fn_name, max_in_any_action, callsite=callsite
 			),
 			"technical_detail_json": json.dumps({
 				"fn_name": fn_name,

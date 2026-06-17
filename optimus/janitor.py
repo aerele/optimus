@@ -109,6 +109,8 @@ def _sweep_orphan_redis_state():
 	Safe to run repeatedly. Uses SCAN with small batches so large
 	keyspaces don't block Redis.
 	"""
+	from optimus import redis_keys
+
 	try:
 		redis_conn = frappe.cache.get_redis_connection()
 	except Exception:
@@ -126,27 +128,32 @@ def _sweep_orphan_redis_state():
 	except Exception:
 		site_prefix = ""
 
-	pattern = f"{site_prefix}profiler:session:*"
+	# Scan BOTH per-session key families so a session whose only surviving keys
+	# are frontend metrics is still discovered. (profiler:session:<uuid>:* and
+	# profiler:frontend:<uuid>:*). Per-RECORDING keys — profiler:tree/sidecar/
+	# infra:<recording_uuid> — carry a recording uuid (no session linkage in the
+	# key), so they can't be orphan-checked here; they rely on SESSION_TTL expiry.
+	markers = ("profiler:session:", "profiler:frontend:")
 
 	# Collect session UUIDs from the Redis keyspace
 	uuids_in_redis: set[str] = set()
 	try:
-		cursor = 0
-		while True:
-			cursor, keys = redis_conn.scan(cursor, match=pattern, count=100)
-			for key in keys:
-				key_str = key.decode() if isinstance(key, bytes) else key
-				# Key shape: "<site_prefix>profiler:session:<uuid>:meta"
-				# or "<site_prefix>profiler:session:<uuid>:recordings"
-				parts = key_str.split("profiler:session:", 1)
-				if len(parts) < 2:
-					continue
-				suffix = parts[1]  # "<uuid>:meta" or "<uuid>:recordings"
-				uuid = suffix.split(":", 1)[0]
-				if uuid:
-					uuids_in_redis.add(uuid)
-			if cursor == 0:
-				break
+		for marker in markers:
+			cursor = 0
+			while True:
+				cursor, keys = redis_conn.scan(cursor, match=f"{site_prefix}{marker}*", count=100)
+				for key in keys:
+					key_str = key.decode() if isinstance(key, bytes) else key
+					# Shapes: "<prefix><marker><uuid>:<suffix>" or (frontend
+					# legacy) "<prefix>profiler:frontend:<uuid>".
+					parts = key_str.split(marker, 1)
+					if len(parts) < 2:
+						continue
+					uuid = parts[1].split(":", 1)[0]
+					if uuid:
+						uuids_in_redis.add(uuid)
+				if cursor == 0:
+					break
 	except Exception:
 		return
 
@@ -165,12 +172,21 @@ def _sweep_orphan_redis_state():
 	if not orphan_uuids:
 		return
 
-	# Delete the orphan keys. Each orphan uuid corresponds to at most
-	# two keys: :meta and :recordings.
+	# Delete ALL per-session keys for each orphan (redis_keys is the inventory).
+	# The earlier sweep deleted only :meta + :recordings, leaving :pending_jobs,
+	# :jobs, and the three frontend keys to leak forever.
 	deleted = 0
 	for uuid in orphan_uuids:
-		for suffix in (":meta", ":recordings"):
-			key = f"{site_prefix}profiler:session:{uuid}{suffix}"
+		for builder in (
+			redis_keys.session_meta,
+			redis_keys.session_recordings,
+			redis_keys.session_pending_jobs,
+			redis_keys.session_jobs,
+			redis_keys.frontend_xhr,
+			redis_keys.frontend_vitals,
+			redis_keys.frontend_legacy,
+		):
+			key = f"{site_prefix}{builder(uuid)}"
 			try:
 				if redis_conn.delete(key):
 					deleted += 1
@@ -346,6 +362,20 @@ def _sweep_stale_recording():
 		filters={"status": "Recording", "started_at": ["<", cutoff]},
 		fields=["name", "session_uuid", "user"],
 	)
+	# ``started_at`` is fixed at session creation, so a genuinely LIVE long flow
+	# (45min of real traffic) crosses the cutoff and would be wrongly stopped. The
+	# real liveness signal is the Redis active pointer, whose TTL is refreshed on
+	# every captured request — so only force-stop rows whose pointer is gone or
+	# has moved to a different session (the true "user walked away" condition).
+	def _pointer_gone(row) -> bool:
+		try:
+			return session.get_active_session_for(row["user"]) != row["session_uuid"]
+		except Exception:
+			# Can't read the pointer → fall back to the old started_at behavior
+			# (treat as stale) rather than leave a possibly-dead row recording.
+			return True
+
+	stale = [r for r in stale if _pointer_gone(r)]
 	if not stale:
 		return
 
@@ -381,15 +411,26 @@ def _sweep_stale_recording():
 
 
 def _sweep_stuck_analyzing():
-	"""Find Analyzing rows older than STALE_ANALYZING_MINUTES and mark Failed."""
+	"""Find Analyzing rows older than STALE_ANALYZING_MINUTES and mark Failed.
+
+	A genuinely long analyze (heavy EXPLAIN burst + AI suggestions, up to ~25min)
+	can cross the threshold WITHOUT bumping ``modified`` — the liveness heartbeat
+	is Redis-only (no risky mid-analyze DB commit). So before failing a row, skip
+	it if it still holds the live single-flight flag: that flag is heartbeated
+	throughout analyze, so its presence proves the run is progressing, not wedged.
+	Only the current holder is ever skipped (the flag is a global mutex), so a row
+	that actually crashed is still failed promptly."""
+	from optimus.analyze import is_singleflight_holder
+
 	cutoff = add_to_date(now_datetime(), minutes=-STALE_ANALYZING_MINUTES)
 	# We use modified as a proxy for "when did the analyze start", since
 	# analyze.run sets status to Analyzing first thing.
 	stuck = frappe.db.get_all(
 		"Optimus Session",
 		filters={"status": "Analyzing", "modified": ["<", cutoff]},
-		fields=["name"],
+		fields=["name", "session_uuid"],
 	)
+	stuck = [r for r in stuck if not is_singleflight_holder(r.get("session_uuid"))]
 	if not stuck:
 		return
 

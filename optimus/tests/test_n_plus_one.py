@@ -89,6 +89,61 @@ def test_threshold_respected(empty_context):
 	assert result.findings == []  # 5 < 10 threshold
 
 
+def test_one_query_per_request_across_many_requests_is_not_n_plus_one(empty_context):
+	"""Regression: the same query run ONCE per request across 50 separate
+	requests is NOT an N+1 (no loop) and must not be flagged. The old code
+	counted occurrences across all recordings, so 50 requests × 1 query =
+	"Same query ran 50× — usually a Python loop", a confident false positive.
+	N+1 must require the loop to be WITHIN a single action."""
+	recordings = [
+		{
+			"uuid": f"req-{i}",
+			"path": "/",
+			"cmd": None,
+			"method": "GET",
+			"event_type": "HTTP Request",
+			"duration": 20,
+			"calls": [
+				{
+					"query": "SELECT name FROM tabUser WHERE x=1",
+					"normalized_query": "SELECT NAME FROM tabUser WHERE X=?",
+					"duration": 5,
+					"stack": [
+						{"filename": "apps/myapp/module.py", "lineno": 100, "function": "f"},
+					],
+				}
+			],
+		}
+		for i in range(50)
+	]
+	result = n_plus_one.analyze(recordings, empty_context)
+	assert result.findings == []  # one-per-request × 50 ≠ a loop
+
+
+def test_loop_within_single_request_still_detected(empty_context):
+	"""Sanity counterpart: 15 of the same query in ONE request IS an N+1."""
+	recording = {
+		"uuid": "loop",
+		"path": "/",
+		"cmd": None,
+		"method": "GET",
+		"event_type": "HTTP Request",
+		"duration": 100,
+		"calls": [
+			{
+				"query": "SELECT name FROM tabUser WHERE x=1",
+				"normalized_query": "SELECT NAME FROM tabUser WHERE X=?",
+				"duration": 5,
+				"stack": [
+					{"filename": "apps/myapp/module.py", "lineno": 100, "function": "f"},
+				],
+			}
+		] * 15,
+	}
+	result = n_plus_one.analyze([recording], empty_context)
+	assert any(f["finding_type"] in ("N+1 Query", "Framework N+1") for f in result.findings)
+
+
 def test_fallback_to_deepest_frame_when_only_frappe_frames(empty_context):
 	"""If the only /apps/ frame is in frappe itself, we still emit a
 	finding rather than silently dropping it — but as the

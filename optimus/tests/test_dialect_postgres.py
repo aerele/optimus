@@ -14,6 +14,8 @@ from __future__ import annotations
 import types
 from dataclasses import asdict
 
+import pytest
+
 from optimus.dbdialect.base import PlanTable
 from optimus.dbdialect.postgres import PostgresDialect
 
@@ -175,3 +177,46 @@ def test_ai_finding_hint_is_dialect_aware(monkeypatch):
 
 	# A dialect-neutral finding type is identical regardless of dialect.
 	assert ai_fix._finding_type_hint("N+1 Query") == ai_fix._FINDING_TYPE_HINTS["N+1 Query"]
+
+
+# --- _safe_sql transaction-safety hardening -----------------------------------
+
+class TestSafeSql:
+	def test_original_error_survives_a_failing_rollback(self, monkeypatch):
+		"""If the savepoint rollback itself raises, the ORIGINAL query error must
+		still propagate (not be masked by the rollback error) — the caller's
+		try/except turns the original into its safe default."""
+		import frappe
+
+		def sql_fn(*a, **k):
+			raise ValueError("original query error")
+
+		def rollback(*a, **k):
+			raise RuntimeError("rollback also failed")
+
+		monkeypatch.setattr(frappe, "db", types.SimpleNamespace(
+			sql=sql_fn, db_type="postgres",
+			savepoint=lambda *a, **k: None,
+			release_savepoint=lambda *a, **k: None,
+			rollback=rollback,
+		), raising=False)
+		with pytest.raises(ValueError, match="original query error"):
+			PostgresDialect._safe_sql("EXPLAIN (FORMAT JSON) SELECT 1")
+
+	def test_savepoint_names_are_unique_per_call(self, monkeypatch):
+		"""Each _safe_sql call uses a distinct savepoint name, so a future nested
+		caller can't RELEASE/ROLLBACK the wrong savepoint."""
+		import frappe
+
+		names: list[str] = []
+		monkeypatch.setattr(frappe, "db", types.SimpleNamespace(
+			sql=lambda *a, **k: [(1,)], db_type="postgres",
+			savepoint=lambda name, *a, **k: names.append(name),
+			release_savepoint=lambda *a, **k: None,
+			rollback=lambda *a, **k: None,
+		), raising=False)
+		PostgresDialect._safe_sql("SELECT 1")
+		PostgresDialect._safe_sql("SELECT 2")
+		assert len(names) == 2
+		assert names[0] != names[1]
+		assert all(n.startswith("optimus_pg_q_") for n in names)

@@ -19,6 +19,7 @@ bench in phase 5; the parsing/mapping logic is unit-tested with fixtures.
 
 from __future__ import annotations
 
+import itertools
 import json
 
 from optimus.dbdialect.base import (
@@ -40,6 +41,10 @@ _SCAN_NODES = frozenset({
 })
 _SORT_NODES = frozenset({"Sort", "Incremental Sort"})          # filesort analog
 _TEMP_NODES = frozenset({"HashAggregate", "Materialize"})      # temporary-table analog
+
+# Monotonic sequence for unique per-call savepoint names (see _safe_sql).
+# next() on an itertools.count() is atomic in CPython, so it's thread-safe.
+_savepoint_seq = itertools.count()
 
 # Ordered-column index introspection. ``indkey`` is an int2vector of attnums;
 # unnest it WITH ORDINALITY (via text → int[]) to recover column order. attnum 0
@@ -70,7 +75,16 @@ def _db_schema() -> str:
 
 def _walk_plan(root: dict) -> list:
 	"""Walk the EXPLAIN plan tree, one PlanTable per scanned relation. Sort /
-	temp flags from ancestor nodes propagate down to the scans they cover."""
+	temp flags from ancestor nodes propagate down to the scans they cover.
+
+	BY DESIGN, an ancestor Sort/temp flag attaches to EVERY scan beneath it. In a
+	``Sort → Join → (Scan A, Scan B)`` plan the sort applies to the joined output,
+	but both A and B are tagged ``sort_without_index`` — Postgres's plan-tree model
+	doesn't decompose a sort back to a single relation the way MariaDB's row-per-
+	table EXPLAIN does. The over-attribution is bounded: ``selectivity_pct`` is None
+	on PG so Low Filter Ratio never fires, and the Filesort finding still needs a
+	large ``rows_examined``. (Phase-5 follow-up: measure finding noise on real join
+	plans and tighten if needed.)"""
 	tables: list = []
 
 	def visit(node, sort_above, temp_above):
@@ -124,12 +138,22 @@ class PostgresDialect(Dialect):
 		try/except still returns its safe default."""
 		import frappe
 
-		sp = "optimus_pg_q"
+		# Unique savepoint name per call: no two _safe_sql invocations share a
+		# name, so if a future caller ever nests one inside another's open
+		# savepoint the RELEASE/ROLLBACK can't target the wrong (inner) savepoint.
+		sp = f"optimus_pg_q_{next(_savepoint_seq)}"
 		frappe.db.savepoint(sp)
 		try:
 			result = frappe.db.sql(*args, **kwargs)
 		except Exception:
-			frappe.db.rollback(save_point=sp)
+			# Roll back to the savepoint so the failed statement doesn't poison
+			# the rest of the transaction — but never let a rollback error mask
+			# the ORIGINAL exception (the caller's try/except turns the re-raised
+			# original into its safe default).
+			try:
+				frappe.db.rollback(save_point=sp)
+			except Exception:
+				pass
 			raise
 		frappe.db.release_savepoint(sp)
 		return result

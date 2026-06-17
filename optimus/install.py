@@ -315,10 +315,17 @@ def _clear_redis_state():
 	except Exception:
 		site_prefix = ""
 
+	# Cover EVERY namespace the app writes (redis_keys.py is the inventory):
+	# profiler:* = all per-session / per-recording / frontend / line-profile /
+	# explain / active / onboarding keys; optimus:* = analyze-inflight,
+	# retention-backlog, schema-version; optimus_settings_cached = the cached
+	# OptimusConfig (legacy un-prefixed name). The earlier 3-pattern list left
+	# trees/sidecars/frontend/lp keys + the settings cache behind, so a reinstall
+	# on the same site read a stale config until the next save.
 	patterns = (
-		f"{site_prefix}profiler:active:*",
-		f"{site_prefix}profiler:session:*",
-		f"{site_prefix}profiler:explain:*",
+		f"{site_prefix}profiler:*",
+		f"{site_prefix}optimus:*",
+		f"{site_prefix}optimus_settings_cached",
 	)
 
 	deleted_count = 0

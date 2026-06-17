@@ -874,8 +874,19 @@ def _metadata_columns() -> frozenset:
 # (DDL like CREATE / ALTER is intentionally outside the scope — those are
 # legit administrative paths and the prompt already rarely produces them).
 _RAW_SQL_IN_FIX_RE = re.compile(
-	r'frappe\.db\.sql\s*\(\s*[fr]?["\']\s*'
-	r'(?:SELECT|INSERT|UPDATE|DELETE|REPLACE)\b',
+	# ``[a-z]{0,2}`` allows any string prefix (f / r / b / rb / br / fr …);
+	# ``["\']{1,3}`` covers single- AND triple-quoted literals (the common shape
+	# for a multi-line "fix" query). ``WITH`` catches CTE-led SELECTs.
+	r'frappe\.db\.sql\s*\(\s*[a-z]{0,2}["\']{1,3}\s*'
+	r'(?:WITH|SELECT|INSERT|UPDATE|DELETE|REPLACE)\b',
+	re.IGNORECASE,
+)
+
+# Multi-line opener: ``frappe.db.sql("""`` (triple-quoted query whose verb is on
+# a later line). A multi-line frappe.db.sql is essentially always a hand-built
+# query, so flag the opener regardless of the (off-line) verb.
+_RAW_SQL_OPENER_RE = re.compile(
+	r'frappe\.db\.sql\s*\(\s*[a-z]{0,2}(?:"""|\'\'\')',
 	re.IGNORECASE,
 )
 
@@ -946,7 +957,11 @@ def _flag_raw_sql_in_fix(text: str) -> str:
 		else:
 			line_to_scan = line
 
-		if _RAW_SQL_IN_FIX_RE.search(line_to_scan):
+		# Two detectors: the verb-anchored one (single-line ``frappe.db.sql("SELECT
+		# …")``) and a multi-line OPENER (``frappe.db.sql("""`` with the SQL verb
+		# on a following line — the common multi-line shape this line-by-line scan
+		# would otherwise miss).
+		if _RAW_SQL_IN_FIX_RE.search(line_to_scan) or _RAW_SQL_OPENER_RE.search(line_to_scan):
 			flagged = True
 			break
 

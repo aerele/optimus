@@ -75,13 +75,13 @@ def _require_session_permission(session_uuid: str, permission_type: str = "read"
 	Returns the resolved docname. Throws ``frappe.PermissionError``
 	when:
 	  - the ``session_uuid`` doesn't resolve to any row, OR
-	  - ``frappe.has_permission`` denies access for ``permission_type``.
+	  - ``frappe.has_permission`` denies access for ``permission_type``, OR
+	  - ``frappe.has_permission`` itself raises.
 
-	Best-effort fallback: if ``has_permission`` raises (e.g. during a
-	mid-migration upgrade where the DocType permission rules aren't
-	loaded yet), log a warning and allow the call through - the
-	prior ``_require_profiler_user`` role check still applies, so a
-	non-Optimus-User can't reach this branch.
+	SECURITY: this fails CLOSED. ``has_permission`` is a core Frappe call that
+	practically never raises; if it does, denying is the safe outcome — a
+	permission check that errors must not silently downgrade to the role-only
+	gate (that would let any Optimus User reach another user's session).
 	"""
 	if not session_uuid:
 		frappe.throw("session_uuid is required", frappe.ValidationError)
@@ -99,11 +99,14 @@ def _require_session_permission(session_uuid: str, permission_type: str = "read"
 		try:
 			frappe.logger().warning(
 				"optimus._require_session_permission: has_permission raised "
-				f"for {docname} / {permission_type}; falling through to role-only gate"
+				f"for {docname} / {permission_type}; denying (fail-closed)"
 			)
 		except Exception:
 			pass
-		return docname
+		frappe.throw(
+			"You do not have permission to access this Optimus Session.",
+			frappe.PermissionError,
+		)
 	if not allowed:
 		frappe.throw(
 			"You do not have permission to access this Optimus Session.",
@@ -2001,14 +2004,10 @@ def get_phase2_candidates(session_uuid: str) -> dict:
 	from optimus.line_profile import picker as _lp_picker
 
 	_require_profiler_user()
-
-	parent_docname = frappe.db.get_value(
-		"Optimus Session",
-		{"session_uuid": session_uuid},
-		"name",
-	)
-	if not parent_docname:
-		frappe.throw(f"Optimus Session {session_uuid!r} not found.")
+	# SECURITY: ownership gate — a phase-2 read exposes the session's captured
+	# call-tree internals (function names, file paths). Without this, any Optimus
+	# User holding another user's session_uuid could read it.
+	parent_docname = _require_session_permission(session_uuid, "read")
 
 	doc = frappe.get_doc("Optimus Session", parent_docname)
 
@@ -2089,6 +2088,10 @@ def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 	from optimus.line_profile import picker as _lp_picker
 
 	user = _require_profiler_user()
+	# SECURITY: ownership gate — this instruments code and writes Phase Two Run
+	# rows onto the session (save(ignore_permissions=True)). Only the owner /
+	# System Manager may start a pass on it.
+	_require_session_permission(session_uuid, "write")
 
 	# The picks arg often arrives as a string from JS — accept both shapes.
 	if isinstance(picks, str):
@@ -2373,6 +2376,9 @@ def stop_line_profile_pass(run_uuid: str) -> dict:
 
 	parent_docname = row.parent
 	session_uuid = frappe.db.get_value("Optimus Session", parent_docname, "session_uuid")
+	# SECURITY: ownership gate on the resolved parent session — a run_uuid is not
+	# self-authorizing; only the session owner / System Manager may stop its run.
+	_require_session_permission(session_uuid, "write")
 
 	# Clear the active flag (capture won't instrument further requests).
 	_lp_capture.stop_line_profile_pass(run_uuid, user)
@@ -2474,6 +2480,9 @@ def retry_phase2_analyze(run_uuid: str) -> dict:
 		frappe.throw(f"Phase 2 run {run_uuid!r} not found.")
 	parent_docname = row.parent
 	session_uuid = frappe.db.get_value("Optimus Session", parent_docname, "session_uuid")
+	# SECURITY: ownership gate on the resolved parent session (run_uuid alone is
+	# not self-authorizing).
+	_require_session_permission(session_uuid, "write")
 
 	# Reset to Analyzing so the realtime event flow still makes sense.
 	parent = frappe.get_doc("Optimus Session", parent_docname)

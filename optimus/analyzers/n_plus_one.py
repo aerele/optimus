@@ -18,7 +18,7 @@ callsite makes the distinction.
 """
 
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from optimus.analyzers.base import (
 	FRAMEWORK_PREFIXES,  # noqa: F401  (kept for any external importers)
@@ -105,12 +105,23 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		# Total count across ALL variants at this callsite.
 		total_count = sum(len(occ) for occ in variants.values())
 		# N+1 signal: the MOST-repeated query variant must clear the
-		# threshold. If 10 different queries each ran once from this
-		# callsite, it's not an N+1 — it's a fan-out call site.
-		max_variant_count = max(
-			(len(occ) for occ in variants.values()), default=0
+		# threshold WITHIN A SINGLE ACTION. An N+1 is a loop inside ONE
+		# request/job — counting occurrences across actions would mis-flag a
+		# normal per-request query (run once per request × N requests) as a
+		# "loop", emitting a confident but wrong "Same query ran N× in a row"
+		# at High severity. Mirrors redundant_calls' max_in_any_action guard.
+		# If 10 different queries each ran once from this callsite, it's also
+		# not an N+1 — it's a fan-out call site (still excluded by the per-
+		# variant max).
+		max_variant_in_action = max(
+			(
+				Counter(o["action_idx"] for o in occ).most_common(1)[0][1]
+				for occ in variants.values()
+				if occ
+			),
+			default=0,
 		)
-		if max_variant_count < min_occurrences:
+		if max_variant_in_action < min_occurrences:
 			continue
 
 		per_hit_durations = [
