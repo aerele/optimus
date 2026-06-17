@@ -11,6 +11,7 @@
 frappe.ui.form.on("Optimus Session", {
 	refresh(frm) {
 		render_status_indicator(frm);
+		render_phase2_progress(frm);
 		render_drain_progress(frm);
 		render_download_buttons(frm);
 		render_retry_button(frm);
@@ -826,6 +827,28 @@ function render_regenerate_report_button(frm) {
 			},
 		);
 	});
+}
+
+// Parent-level, NON-status hint that an additive phase-2 line-profile drill-down
+// is still computing. The session's own `status` intentionally stays "Ready" (the
+// phase-1 report is rendered and available, and a session can have many phase-2
+// passes) — this just resolves the "parent Ready but a Phase 2 run says Analyzing"
+// confusion without flapping the real status. Driven by the already-loaded child
+// rows, so no extra round-trip; cleared automatically on the next refresh once the
+// run finishes (the phase_2_run_ready realtime event reloads the form).
+function render_phase2_progress(frm) {
+	if (frm.is_new()) return;
+	const in_flight = (frm.doc.phase_2_runs || []).filter(
+		(r) => r.status === "Recording" || r.status === "Analyzing"
+	);
+	if (!in_flight.length) return;
+	frm.dashboard.add_indicator(
+		__("Phase 2 analyzing… ({0} run{1} in progress)", [
+			in_flight.length,
+			in_flight.length === 1 ? "" : "s",
+		]),
+		"orange"
+	);
 }
 
 function render_status_indicator(frm) {

@@ -79,12 +79,16 @@ def before_request_line_profile(*args, **kwargs) -> None:
 
 		# Self-heal: if a prior request was killed mid-flight (skipping its
 		# after_request teardown) and left tool 2 registered, clear the orphan
-		# before enabling so the worker recovers without a bench restart. Guarded
-		# on "no active profiler in this thread" so it can't drop our own run.
-		# Log when the reclaim actually fires — silent reclaim masked the leak
-		# class in production for months (Critical Risk #3 of the architecture
-		# review).
-		if getattr(frappe.local, "_lp_profiler", None) is None:
+		# before enabling so the worker recovers without a bench restart. Gated on
+		# the PROCESS-WIDE active count, not this thread's local: under a gthread
+		# worker a sibling thread mid-profile legitimately owns tool 2, and
+		# reclaiming it would desync that thread (the tool-2 leak class). The
+		# thread-local check stays as a cheap first gate. Log when the reclaim
+		# actually fires — silent reclaim masked the leak class in production.
+		if (
+			capture.active_profiler_count() == 0
+			and getattr(frappe.local, "_lp_profiler", None) is None
+		):
 			import sys as _sys
 
 			_mon = getattr(_sys, "monitoring", None)
@@ -94,7 +98,14 @@ def before_request_line_profile(*args, **kwargs) -> None:
 					"tool 2 from a prior request that skipped teardown."
 				)
 			capture.release_monitoring_tool()
-		profiler.enable_by_count()
+		# Register process-wide BEFORE enabling so a concurrent sibling's teardown
+		# can't observe a 0 count and free the tool we're about to enable.
+		capture.incr_active_profilers()
+		try:
+			profiler.enable_by_count()
+		except Exception:
+			capture.decr_active_profilers()
+			raise
 		frappe.local._lp_profiler = profiler
 		frappe.local._lp_run_uuid = run_uuid
 		# Arm the overhead watchdog: if this request runs past the budget,
@@ -141,9 +152,13 @@ def after_request_line_profile(*args, **kwargs) -> None:
 			message=f"{type(exc).__name__}: {exc}",
 		)
 	finally:
-		# Guarantee no process-global sys.monitoring line-trace hook survives
-		# this request — a leaked tool would line-trace every later request.
-		capture.release_monitoring_tool()
+		# Unregister this profiler, then force-free tool 2 ONLY when no sibling
+		# thread is still profiling. Freeing it while a concurrent gthread request
+		# is enabled would desync line_profiler's shared manager (the tool-2 leak
+		# class). When this is the last active profiler, the free guarantees no
+		# line-trace hook survives to slow later requests.
+		if capture.decr_active_profilers() == 0:
+			capture.release_monitoring_tool()
 
 
 # ---------------------------------------------------------------------------
@@ -195,9 +210,13 @@ def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
 
 		# Self-heal a tool 2 orphaned by a previously-killed job (see
 		# before_request_line_profile). RQ workers run one job at a time, so
-		# there's no in-process concurrency to disturb here. Log when the
-		# reclaim actually fires (Critical Risk #3).
-		if getattr(frappe.local, "_lp_profiler", None) is None:
+		# the process-wide count is 0 between jobs and this is equivalent to the
+		# old thread-local gate — but we share the same count mechanism for
+		# consistency and strict safety. Log when the reclaim actually fires.
+		if (
+			capture.active_profiler_count() == 0
+			and getattr(frappe.local, "_lp_profiler", None) is None
+		):
 			import sys as _sys
 
 			_mon = getattr(_sys, "monitoring", None)
@@ -207,7 +226,12 @@ def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
 					"tool 2 from a prior job that skipped teardown."
 				)
 			capture.release_monitoring_tool()
-		profiler.enable_by_count()
+		capture.incr_active_profilers()
+		try:
+			profiler.enable_by_count()
+		except Exception:
+			capture.decr_active_profilers()
+			raise
 		frappe.local._lp_profiler = profiler
 		frappe.local._lp_run_uuid = run_uuid
 		frappe.local._lp_watchdog = capture.start_overhead_watchdog(
@@ -248,4 +272,7 @@ def after_job_line_profile(method=None, kwargs=None, result=None, **rest) -> Non
 			message=f"{type(exc).__name__}: {exc}",
 		)
 	finally:
-		capture.release_monitoring_tool()
+		# Force-free tool 2 only when no sibling profiler is still active (see
+		# after_request_line_profile).
+		if capture.decr_active_profilers() == 0:
+			capture.release_monitoring_tool()

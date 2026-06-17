@@ -410,8 +410,13 @@ def _build_action_plan(action_plan, fmt_ms=None) -> list[dict]:
 		gain_ms = step.get("gain_ms", 0) or 0
 		result.append({
 			"number": step.get("n", 0),
-			"title_html": step.get("title", "") or "",
-			"description_html": step.get("desc", "") or "",
+			# SECURITY: title/desc are plain-text analyzer strings that may embed
+			# attacker-controlled captured data (e.g. a client-supplied page_url in
+			# a Slow Frontend Render title). The template renders these with
+			# ``| safe``, so they MUST be HTML-escaped here or a crafted page_url /
+			# header becomes stored XSS in the report viewer's session.
+			"title_html": _html.escape(step.get("title", "") or ""),
+			"description_html": _html.escape(step.get("desc", "") or ""),
 			# Use Markup so the `<span class="time-high">…</span>` that
 			# ``_format_duration_ms`` returns for ≥1s values isn't escaped
 			# when the template renders it. f-string would coerce Markup to

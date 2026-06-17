@@ -102,7 +102,14 @@ def unwrap_value(
 	"""
 	if value is None:
 		return default, None
-	if isinstance(value, dict) and _ENVELOPE_VERSION_FIELD in value:
+	# Require BOTH envelope fields. ``wrap_value`` always writes both, so a dict
+	# carrying only ``_v`` (a legacy payload that happens to use that key) is NOT
+	# an envelope — treating it as one would discard its real value.
+	if (
+		isinstance(value, dict)
+		and _ENVELOPE_VERSION_FIELD in value
+		and _ENVELOPE_PAYLOAD_FIELD in value
+	):
 		try:
 			observed = int(value.get(_ENVELOPE_VERSION_FIELD) or 0)
 		except (TypeError, ValueError):

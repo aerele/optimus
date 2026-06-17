@@ -75,15 +75,33 @@ def _install_frappe_stub(monkeypatch):
 	fu.add_to_date = _add_to_date
 	monkeypatch.setitem(sys.modules, "frappe.utils", fu)
 
-	# Session-helper stubs.
+	# Session-helper stubs. get_active_session_for drives the stale-recording
+	# liveness check; default None = "pointer expired" so all candidates are
+	# treated as stale (tests override stub._active_pointers per user).
+	stub._active_pointers = {}
 	session_mod = types.ModuleType("optimus.session")
 	session_mod.clear_active_session = lambda user: None
+	session_mod.get_active_session_for = lambda user: stub._active_pointers.get(user)
 	monkeypatch.setitem(sys.modules, "optimus.session", session_mod)
+	# janitor binds via ``from optimus import session`` — that reads the package
+	# ATTRIBUTE, not just sys.modules — so patch the attribute too or the reload
+	# picks up the real session module (which needs a live frappe.cache).
+	import optimus as _optimus_pkg
+	monkeypatch.setattr(_optimus_pkg, "session", session_mod, raising=False)
 
 	# Phase-2 capture stub.
 	lp_capture = types.ModuleType("optimus.line_profile.capture")
 	lp_capture.cleanup_run = lambda run_uuid: None
 	monkeypatch.setitem(sys.modules, "optimus.line_profile.capture", lp_capture)
+
+	# analyze.is_singleflight_holder stub (the stuck-analyzing sweep consults it
+	# so it won't fail a session that's still actively heartbeating). Default:
+	# nobody holds the flag; tests override stub._holder_uuid to simulate a live
+	# run.
+	stub._holder_uuid = None
+	analyze_mod = types.ModuleType("optimus.analyze")
+	analyze_mod.is_singleflight_holder = lambda uuid: uuid is not None and uuid == stub._holder_uuid
+	monkeypatch.setitem(sys.modules, "optimus.analyze", analyze_mod)
 
 	return stub
 
@@ -134,6 +152,25 @@ class TestSweepStaleRecording:
 		janitor._sweep_stale_recording()
 		assert stub._set_value_calls == []
 
+	def test_live_recording_with_active_pointer_is_not_stopped(self, monkeypatch):
+		"""A long but LIVE recording (its Redis active pointer still points to it)
+		must not be force-stopped just because started_at crossed the cutoff —
+		only rows whose pointer expired / moved are stopped."""
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [
+			{"name": "PS-LIVE", "session_uuid": "u-live", "user": "live@x.com"},
+			{"name": "PS-GONE", "session_uuid": "u-gone", "user": "gone@x.com"},
+		]
+		stub._active_pointers = {"live@x.com": "u-live"}  # live@x still recording; gone@x expired
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_recording()
+
+		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Session"]
+		assert len(set_value_calls) == 1
+		_, filters, _ = set_value_calls[0]
+		assert filters == {"name": ("in", ["PS-GONE"])}     # only the walked-away one
+		assert len(stub._enqueue_calls) == 1                # analyze enqueued once
+
 
 # --------------------------------------------------------------------------
 # Stuck Analyzing sweep — single batched UPDATE.
@@ -161,6 +198,26 @@ class TestSweepStuckAnalyzing:
 		janitor = _reload_janitor(monkeypatch)
 		janitor._sweep_stuck_analyzing()
 		assert stub._set_value_calls == []
+
+	def test_live_singleflight_holder_is_not_failed(self, monkeypatch):
+		"""A long-but-live analyze (still heartbeating the single-flight flag)
+		must NOT be force-failed even though its row crossed the staleness
+		threshold — only the genuinely-wedged row is failed."""
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [
+			{"name": "PS-LIVE", "session_uuid": "u-live"},   # still heartbeating
+			{"name": "PS-DEAD", "session_uuid": "u-dead"},   # genuinely wedged
+		]
+		stub._holder_uuid = "u-live"  # u-live currently holds the flag
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stuck_analyzing()
+
+		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Session"]
+		assert len(set_value_calls) == 1
+		_, filters, fields = set_value_calls[0]
+		# Only the dead one is failed; the live holder is skipped.
+		assert filters == {"name": ("in", ["PS-DEAD"])}
+		assert fields["status"] == "Failed"
 
 
 # --------------------------------------------------------------------------

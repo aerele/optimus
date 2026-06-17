@@ -361,6 +361,46 @@ def _get_or_resolve_picks(run_uuid: str) -> list:
 	return fns
 
 
+# ---------------------------------------------------------------------------
+# Process-wide active-profiler registry.
+# ---------------------------------------------------------------------------
+# ``sys.monitoring`` tool 2 is PROCESS-global, but each request/job thread holds
+# its own thread-local ``_lp_profiler``. Under a multi-threaded (gunicorn
+# ``gthread``) worker, two requests can profile concurrently and co-own tool 2.
+# The forcible ``release_monitoring_tool`` (free_tool_id) and the before-hook's
+# orphan self-heal therefore must NOT key on the calling thread's local — freeing
+# tool 2 while a sibling thread is still enabled desyncs line_profiler's shared
+# manager (the tool-2 leak class that froze production). This counter is the
+# process-wide truth: reclaim / force-free only when it reads 0.
+#
+# A thread killed mid-flight (without running its after-hook) would leak its
+# increment — but a gunicorn timeout recycles the whole worker, resetting this
+# global, so that path self-corrects on the next request.
+_active_profiler_lock = threading.Lock()
+_active_profiler_count = 0
+
+
+def incr_active_profilers() -> int:
+	"""Register an enabled phase-2 profiler; return the new process-wide count."""
+	global _active_profiler_count
+	with _active_profiler_lock:
+		_active_profiler_count = _active_profiler_count + 1
+		return _active_profiler_count
+
+
+def decr_active_profilers() -> int:
+	"""Unregister a profiler; return the new count (floored at 0)."""
+	global _active_profiler_count
+	with _active_profiler_lock:
+		_active_profiler_count = max(0, _active_profiler_count - 1)
+		return _active_profiler_count
+
+
+def active_profiler_count() -> int:
+	with _active_profiler_lock:
+		return _active_profiler_count
+
+
 def release_monitoring_tool() -> None:
 	"""Guarantee phase-2 leaves no ``sys.monitoring`` line-trace hook behind.
 

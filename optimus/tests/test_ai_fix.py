@@ -873,6 +873,31 @@ class TestRawSqlGuardrail:
 		)
 		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
 
+	def test_raw_sql_triple_quoted_is_flagged(self):
+		# The most common multi-line "fix" shape — previously slipped through
+		# because the regex only matched a single opening quote.
+		txt = (
+			'```python\n'
+			'rows = frappe.db.sql("""\n'
+			'    SELECT name FROM `tabUser` WHERE enabled = 1\n'
+			'""", as_dict=True)\n'
+			'```'
+		)
+		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
+
+	def test_raw_sql_cte_with_is_flagged(self):
+		# CTE-led SELECT (WITH ... SELECT) — previously not in the verb list.
+		txt = (
+			'```python\n'
+			'frappe.db.sql("WITH t AS (SELECT 1) SELECT * FROM t")\n'
+			'```'
+		)
+		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
+
+	def test_raw_sql_byte_string_prefix_is_flagged(self):
+		txt = '```python\nfrappe.db.sql(rb"SELECT 1")\n```'
+		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
+
 	def test_raw_sql_in_plain_python_code_block_flagged(self):
 		# Non-diff code block — every line is "proposed code".
 		txt = (

@@ -47,15 +47,24 @@ from functools import lru_cache
 # Canonical default patterns. These match the historical renderer-side
 # values 1:1 so the relocation is behavior-preserving; the test suite
 # locks them in.
+# NOTE: key matching is SUBSTRING (case-insensitive), so very short tokens are
+# avoided — e.g. ``sid`` is intentionally NOT here (it would match "consider",
+# "inside", …); the Frappe session id rides in the ``Cookie`` header, already
+# covered. SQL-column matching below is word-boundary, so it's safe from that.
 DEFAULT_SENSITIVE_KEYS: tuple[str, ...] = (
 	"password", "pwd", "api_key", "apikey", "token", "secret",
 	"csrf", "authorization", "cookie", "encryption_key",
 	"private_key", "session_id",
+	# v0.13.x: broaden coverage for common secret / PII field names.
+	"access_key", "salt", "hash", "otp", "ssn", "recovery",
+	"credit", "card", "bank",
 )
 DEFAULT_SENSITIVE_SQL_COLUMNS: tuple[str, ...] = (
 	"password", "pwd", "api_key", "apikey", "token", "secret",
 	"csrf", "authorization", "cookie", "encryption_key",
 	"private_key", "session_id",
+	"access_key", "salt", "hash", "otp", "ssn", "recovery",
+	"credit", "card", "bank",
 )
 
 
@@ -105,8 +114,13 @@ def _sql_literal_regex(columns: tuple[str, ...]) -> re.Pattern:
 	deployments have ONE extras list (from Optimus Settings) so the
 	cache holds the default pattern + at most one per setting variant.
 	"""
+	# RHS literal alternatives, tried left-to-right: double-quoted, single-quoted,
+	# parenthesised IN-list, then a BARE token (unquoted number/hex/identifier) —
+	# the last catches ``WHERE password = 123`` / ``= 0xDEAD`` / ``= admin`` which
+	# the quoted-only pattern leaked verbatim.
 	return re.compile(
-		r"""(\b(?:""" + "|".join(re.escape(c) for c in columns) + r""")\b\s*(?:=|LIKE|IN)\s*)("[^"]*"|'[^']*'|\([^)]*\))""",
+		r"""(\b(?:""" + "|".join(re.escape(c) for c in columns)
+		+ r""")\b\s*(?:=|LIKE|IN)\s*)("[^"]*"|'[^']*'|\([^)]*\)|[\w.+-]+)""",
 		re.IGNORECASE,
 	)
 

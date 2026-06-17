@@ -272,6 +272,18 @@ def _touch_singleflight(session_uuid: str) -> None:
 		pass
 
 
+def is_singleflight_holder(session_uuid: str) -> bool:
+	"""True iff ``session_uuid`` currently holds the single-flight flag. The flag
+	is heartbeated throughout analyze (the analyzer loop + AI phases), so its
+	presence is a reliable liveness signal. The janitor consults this before
+	failing a long-running Analyzing row — the heartbeat is Redis-only (no DB
+	write mid-analyze), so the row's ``modified`` can't be used for liveness."""
+	try:
+		return frappe.cache.get_value(_SINGLEFLIGHT_KEY) == session_uuid
+	except Exception:
+		return False
+
+
 def _release_singleflight(session_uuid: str) -> None:
 	"""Release the flag, but only if we still hold it (compare-then-delete) —
 	a TTL-expired-then-reacquired flag belonging to another session must not be
@@ -841,6 +853,15 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 				)
 				break
 
+			# M2: heartbeat the single-flight flag each iteration. The analyzer
+			# loop can run up to ANALYZE_TOTAL_BUDGET_SECONDS (1200s) — well past
+			# the flag's 300s TTL. Without this, the flag would lapse mid-analyze,
+			# a second queued session could acquire it, and two heavy analyzes
+			# would run concurrently at ~2× peak RAM — exactly the OOM the
+			# single-flight guard exists to prevent. Redis-only, so it also keeps
+			# is_singleflight_holder() truthy for the janitor's liveness check.
+			_touch_singleflight(session_uuid)
+
 			analyzer_name = getattr(analyzer, "__module__", "<unknown>")
 			analyzer_start = time.monotonic()
 			try:
@@ -886,6 +907,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# was unavailable / errored, the session still completes; you can
 		# fill the suggestions in afterward via the "Generate AI fixes"
 		# button on the form (api.backfill_ai_fixes).
+		_touch_singleflight(session_uuid)  # AI auto-suggest can run up to its own timeout (240s)
 		try:
 			_enrich_findings_with_ai_suggestions(context, recordings=recordings)
 		except Exception:
@@ -901,6 +923,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 
 		# v0.6.0: same toggle also bakes an LLM-vetted index recommendation
 		# onto the top few tables in the breakdown. Best-effort + double-wrapped.
+		_touch_singleflight(session_uuid)  # AI index-suggest can run up to 90s
 		try:
 			_enrich_table_breakdown_with_ai_suggestions(context, recordings)
 		except Exception:

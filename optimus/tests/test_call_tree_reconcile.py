@@ -69,6 +69,43 @@ def test_make_sql_leaf_carries_partial_match_flag():
 	assert leaf["partial_match"] is True
 
 
+def test_summarize_explain_reads_normalized_plantable_shape():
+	"""Regression: the live pipeline stores explain_result as normalized
+	PlanTable dicts (full_scan / sort_without_index / temp_used /
+	selectivity_pct), not raw MariaDB rows. _summarize_explain must read that
+	shape — it previously only knew the legacy type/Extra/filtered keys and so
+	returned {} for every current session."""
+	normalized = [{
+		"table": "tabGL Entry", "full_scan": True, "sort_without_index": True,
+		"temp_used": False, "selectivity_pct": 4.0, "rows_examined": 12000,
+		"used_index": None, "raw": {},
+	}]
+	flags = call_tree._summarize_explain(normalized)
+	assert flags.get("full_scan") is True
+	assert flags.get("filesort") is True
+	assert flags.get("temporary") is not True
+	assert flags.get("low_filter") is True  # selectivity 4 < 10
+
+
+def test_summarize_explain_postgres_none_selectivity_does_not_fire_low_filter():
+	"""On Postgres selectivity_pct is None — low_filter must simply not fire."""
+	flags = call_tree._summarize_explain([{
+		"table": "t", "full_scan": True, "sort_without_index": False,
+		"temp_used": True, "selectivity_pct": None, "raw": {},
+	}])
+	assert flags.get("full_scan") is True
+	assert flags.get("temporary") is True
+	assert "low_filter" not in flags
+
+
+def test_summarize_explain_still_reads_legacy_rows():
+	"""Old persisted recordings (raw MariaDB rows) must still work."""
+	flags = call_tree._summarize_explain([{"type": "ALL", "Extra": "Using temporary", "filtered": 3}])
+	assert flags.get("full_scan") is True
+	assert flags.get("temporary") is True
+	assert flags.get("low_filter") is True
+
+
 def test_find_graft_point_exact_match_descends_to_deepest():
 	tree = _make_node("<root>", "", 100, [
 		_make_node("erpnext.selling.validate", "apps/erpnext/x.py", 80, [

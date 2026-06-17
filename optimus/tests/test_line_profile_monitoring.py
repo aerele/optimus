@@ -288,3 +288,48 @@ def test_pyproject_pins_line_profiler_5_x():
 	assert ">=5" in spec or "==5" in spec or "~=5" in spec, (
 		f"line_profiler must be pinned to >=5.x; pyproject has: {spec!r}"
 	)
+
+
+# ---------------------------------------------------------------------------
+# Cross-thread safety: the process-wide active-profiler count gates the
+# forcible free + the orphan reclaim. Under a gthread worker, freeing tool 2
+# while a sibling thread is mid-profile desyncs line_profiler's shared manager
+# (the tool-2 leak class). The count ensures we only free / reclaim at 0.
+# ---------------------------------------------------------------------------
+
+
+class _NoopProfiler:
+	def disable_by_count(self):
+		pass
+
+
+class TestActiveProfilerCountGate:
+	@pytest.fixture(autouse=True)
+	def _reset_count(self):
+		cap._active_profiler_count = 0
+		yield
+		cap._active_profiler_count = 0
+
+	def test_after_request_keeps_tool_while_sibling_active(self, monkeypatch):
+		"""Two concurrent profilers (count==2). When the first finishes, tool 2
+		must NOT be freed — the sibling is still tracing. Only the last one out
+		frees it."""
+		cap._active_profiler_count = 2  # two gthread requests profiling at once
+		_leak_tool()                    # tool 2 registered (a profiler is active)
+		assert sys.monitoring.get_tool(PID) == "line_profiler"
+
+		_drive_after_request(monkeypatch, _NoopProfiler())   # first finishes: 2 -> 1
+		assert cap.active_profiler_count() == 1
+		assert sys.monitoring.get_tool(PID) == "line_profiler"  # NOT freed
+
+		_drive_after_request(monkeypatch, _NoopProfiler())   # last finishes: 1 -> 0
+		assert cap.active_profiler_count() == 0
+		assert sys.monitoring.get_tool(PID) is None             # now freed
+
+	def test_incr_decr_floor_and_roundtrip(self):
+		assert cap.incr_active_profilers() == 1
+		assert cap.incr_active_profilers() == 2
+		assert cap.decr_active_profilers() == 1
+		assert cap.decr_active_profilers() == 0
+		# Never goes negative even if decremented past zero.
+		assert cap.decr_active_profilers() == 0

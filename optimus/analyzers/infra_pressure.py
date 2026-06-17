@@ -92,6 +92,11 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
     cpu_critical = False
     swap_active = False
     db_pool_breaches = []
+    # Which ratio actually triggered the DB-pool finding (the primary path
+    # measures pool FILL = connections/max; the fallback measures pool
+    # SATURATION = active/open). Recorded so the finding describes what it
+    # measured instead of always claiming "running/connected".
+    pool_metric = None
     rq_backlog_breaches = []
 
     actions_with_infra = 0
@@ -155,11 +160,14 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
             ratio = dbc / db_max
             if ratio > pool_high:
                 db_pool_breaches.append(idx)
+                pool_metric = "connections-in-use / max_connections"
         elif dbc and dbr is not None and dbc > 0:
             # Legacy fallback for pre-v0.5.1 infra blobs without db_max_connections.
             ratio = dbr / dbc
             if ratio > pool_high:
                 db_pool_breaches.append(idx)
+                if pool_metric is None:
+                    pool_metric = "active / open connections"
 
         # RQ backlog: any queue above the warning threshold this action.
         for qname, val in (("default", rq_def), ("short", rq_short), ("long", rq_long)):
@@ -263,22 +271,25 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
     # ---- DB Pool Saturation ---------------------------------------------
     if len(db_pool_breaches) >= MIN_ACTIONS_AFFECTED:
+        metric = pool_metric or "connection-pool ratio"
         findings.append({
             "finding_type": "DB Pool Saturation",
             "severity": "High",
-            "title": f"MariaDB running/connected ratio > {pool_high} on {len(db_pool_breaches)} actions",
+            "title": f"Database {metric} > {pool_high} on {len(db_pool_breaches)} actions",
             "customer_description": (
-                "MariaDB had nearly all of its active connections executing "
-                "queries during parts of your flow. This usually means too "
-                "many concurrent requests for the connection pool size. "
-                "Consider raising max_connections or reducing worker count."
+                "The database had nearly all of its connections in use during "
+                "parts of your flow. This usually means too many concurrent "
+                "requests for the connection pool size. Consider raising "
+                "max_connections / the pool size or reducing worker count."
             ),
             "technical_detail_json": json.dumps({
                 "breached_action_indices": db_pool_breaches,
                 "threshold_ratio": pool_high,
+                "metric": metric,
                 "fix_hint": (
-                    "Raise MariaDB max_connections, or reduce Frappe gunicorn "
-                    "workers to match. The pool should have headroom."
+                    "Raise the database's max_connections (or connection-pool "
+                    "size), or reduce Frappe gunicorn workers to match. The pool "
+                    "should have headroom."
                 ),
             }, default=str),
             "estimated_impact_ms": 0,

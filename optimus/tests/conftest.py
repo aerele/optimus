@@ -102,6 +102,14 @@ except ImportError:
 		msgprint=lambda *a, **kw: None,
 		get_doc=lambda *a, **kw: None,
 		get_roles=lambda *a, **kw: [],
+		# Real frappe exposes a top-level ``frappe.has_permission`` (re-export of
+		# frappe.permissions.has_permission). The baseline stub must too:
+		# ``api._require_session_permission`` calls ``frappe.has_permission`` and now
+		# fails CLOSED if it raises — so a MISSING stub attribute (AttributeError)
+		# would deny every session-scoped endpoint test. Default-allow here; the
+		# deny / fail-closed paths are covered explicitly in
+		# test_api_session_permission.py by monkeypatching this.
+		has_permission=lambda *a, **kw: True,
 		get_all=lambda *a, **kw: [],
 		scrub=lambda txt: (txt or "").replace(" ", "_").replace("-", "_").lower(),
 		get_app_path=lambda *a, **kw: "",
