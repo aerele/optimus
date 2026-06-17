@@ -547,11 +547,20 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 			f"Phase 2 Run {run_uuid} not found on session {session_uuid}"
 		)
 	parent_docname = run_row.parent
+	# Resolve the session owner so realtime events reach their Desk tab. This runs
+	# in an RQ worker with no browser socket, so publish_realtime needs an EXPLICIT
+	# user (a None target won't reach the form) — same as phase-1's
+	# _publish_session_event. Without this the form never auto-updates the run row.
+	try:
+		owner = frappe.db.get_value("Optimus Session", parent_docname, "user")
+	except Exception:
+		owner = None
 
 	try:
 		_publish("phase_2_run_analyzing", {
 			"session_uuid": session_uuid,
 			"run_uuid": run_uuid,
+			"user": owner,
 		})
 
 		# Drain samples + load picks meta with source snapshot.
@@ -611,6 +620,7 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 			"session_uuid": session_uuid,
 			"run_uuid": run_uuid,
 			"parent": parent_docname,
+			"user": owner,
 		})
 
 	except Exception as exc:
@@ -623,6 +633,7 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 			"session_uuid": session_uuid,
 			"run_uuid": run_uuid,
 			"error": str(exc),
+			"user": owner,
 		})
 		raise
 

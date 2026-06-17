@@ -382,3 +382,35 @@ class TestLeafPickAndChain:
 		td = _json.loads(hot[0]["technical_detail_json"])
 		# Content doesn't match the call-site shape, so no hint attempt.
 		assert "phase1_hint" not in td
+
+
+# ---------------------------------------------------------------------------
+# Realtime targeting — phase-2 events must reach the session OWNER's Desk tab.
+# run_analyze runs in an RQ worker with no browser socket, so publish_realtime
+# needs an explicit user (a None target won't reach the form). This pins that
+# _publish forwards the payload's "user" as the target.
+# ---------------------------------------------------------------------------
+
+
+def test_publish_targets_user_from_payload(monkeypatch):
+	import frappe
+
+	calls = []
+	monkeypatch.setattr(
+		frappe, "publish_realtime",
+		lambda event, payload=None, user=None, **k: calls.append((event, user)),
+		raising=False,
+	)
+	analyzer._publish("phase_2_run_ready", {"session_uuid": "s", "user": "alice@example.com"})
+	assert calls == [("phase_2_run_ready", "alice@example.com")]
+
+
+def test_publish_swallows_errors(monkeypatch):
+	import frappe
+
+	def boom(*a, **k):
+		raise RuntimeError("socket down")
+
+	monkeypatch.setattr(frappe, "publish_realtime", boom, raising=False)
+	# Best-effort: a realtime failure must never derail analyze.
+	analyzer._publish("phase_2_run_ready", {"user": "x@y.z"})
