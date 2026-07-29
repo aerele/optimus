@@ -692,7 +692,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 		# Tail-preferring trim: keep the last N entries.
 		try:
 			frappe.cache.ltrim(xhr_key, -SOFT_CAP_FRONTEND_XHR, -1)
-			frappe.cache.expire_key(xhr_key, session.SESSION_TTL_SECONDS)
+			session.expire_key(xhr_key, session.SESSION_TTL_SECONDS)
 		except Exception:
 			frappe.log_error(title="optimus frontend ltrim (xhr)")
 
@@ -704,7 +704,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 				frappe.log_error(title="optimus frontend rpush (vitals)")
 		try:
 			frappe.cache.ltrim(vitals_key, -SOFT_CAP_FRONTEND_VITALS, -1)
-			frappe.cache.expire_key(vitals_key, session.SESSION_TTL_SECONDS)
+			session.expire_key(vitals_key, session.SESSION_TTL_SECONDS)
 		except Exception:
 			frappe.log_error(title="optimus frontend ltrim (vitals)")
 
