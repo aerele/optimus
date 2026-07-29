@@ -173,6 +173,21 @@ _pending_jobs_key = _redis_keys.session_pending_jobs
 _jobs_key = _redis_keys.session_jobs
 
 
+def expire_key(key: str, ttl: int):
+	"""Refresh a key's TTL, whichever RedisWrapper this bench is running.
+
+	frappe v15's RedisWrapper has no ``expire_key``; it inherits redis-py's
+	``expire``, which is not one of the wrapped commands and so needs the
+	namespaced key ``make_key`` builds. Calling ``expire_key`` blind raises
+	AttributeError on every recorded request.
+	"""
+	cache = frappe.cache
+	if hasattr(cache, "expire_key"):
+		return cache.expire_key(key, ttl)
+
+	return cache.expire(cache.make_key(key), ttl)
+
+
 # ----- active session pointer (per-user) -----------------------------------
 
 
@@ -309,7 +324,7 @@ def register_recording(
 		# to keep being recorded into the (now-stopped) session and
 		# the widget to silently flip back to Recording state.
 		# EXPIRE returns 0 for a missing key — no key resurrected.
-		frappe.cache.expire_key(_active_key(user), SESSION_TTL_SECONDS)
+		expire_key(_active_key(user), SESSION_TTL_SECONDS)
 
 	return True
 
