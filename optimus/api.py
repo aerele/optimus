@@ -1948,7 +1948,7 @@ def get_config_profiles() -> dict:
 # this surface is the thin transport layer.
 
 
-def _picker_empty_hint(action_count, with_tree, parsed_ok, candidate_count):
+def _picker_empty_hint(action_count, with_tree, parsed_ok, candidate_count, ignored_apps_filtered=0):
 	"""Phase K diagnostic: map the picker's empty-state counter triple
 	to a human-readable reason. Surfaced in the dialog when the
 	curated list is empty so the operator can self-diagnose
@@ -1973,6 +1973,15 @@ def _picker_empty_hint(action_count, with_tree, parsed_ok, candidate_count):
 			"Actions carry call trees but none parsed as valid "
 			"JSON. Check the bench log for 'Failed to deserialize "
 			"pyi tree' or 'optimus analyze' error entries."
+		)
+	if candidate_count and ignored_apps_filtered >= candidate_count:
+		# Built, but all dropped as Ignored Apps.
+		return (
+			f"Call trees loaded, but all {ignored_apps_filtered} candidate "
+			"frame(s) belong to apps on your Ignored Apps list, so none are "
+			"offered here. Remove that app from Optimus Settings › Ignored "
+			"Apps (keep at least one entry — clearing the list restores the "
+			"framework-app defaults), or type the function you want below."
 		)
 	if candidate_count == 0:
 		return (
@@ -2030,6 +2039,20 @@ def get_phase2_candidates(session_uuid: str) -> dict:
 	# list before their children, each row tagged with ``depth`` so
 	# the JS dialog can render hierarchy via indented labels.
 	candidates = _lp_picker._build_tree_indented_candidates(trees)
+	# Pre-filter count for the diagnostic/hint — captured before the ignored
+	# filter reassigns ``candidates`` below.
+	raw_candidate_count = len(candidates)
+
+	# Drop candidates whose app is on the Ignored Apps list — the report
+	# already excludes those apps, so offering them here would be inconsistent.
+	try:
+		from optimus.settings import get_ignored_apps
+		_ignored_apps = get_ignored_apps()
+	except Exception:
+		_ignored_apps = ()
+	candidates, ignored_apps_filtered = _lp_picker.filter_out_ignored_apps(
+		candidates, _ignored_apps
+	)
 
 	# v0.6.0 Round 6: surface the configured auto-expand default so the
 	# picker dialog ticks/un-ticks its checkbox per Optimus Settings.
@@ -2044,7 +2067,6 @@ def get_phase2_candidates(session_uuid: str) -> dict:
 		1 for a in (doc.actions or []) if a.call_tree_json
 	)
 	trees_parsed_ok = len(trees)
-	raw_candidate_count = len(candidates)
 
 	return {
 		"session_uuid": session_uuid,
@@ -2058,11 +2080,13 @@ def get_phase2_candidates(session_uuid: str) -> dict:
 			"actions_with_call_tree_json": actions_with_tree,
 			"trees_parsed_ok": trees_parsed_ok,
 			"raw_candidates_before_filter": raw_candidate_count,
+			"ignored_apps_filtered": ignored_apps_filtered,
 			"hint": _picker_empty_hint(
 				action_count,
 				actions_with_tree,
 				trees_parsed_ok,
 				raw_candidate_count,
+				ignored_apps_filtered=ignored_apps_filtered,
 			),
 		},
 	}

@@ -1,9 +1,9 @@
 // Copyright (c) 2026, Optimus contributors
 // For license information, please see license.txt
 
-// Populate the `Tracked Apps` child table's `app_name` Autocomplete
-// with the bench's actual installed apps — same UX as picking a
-// Module Def, but for the list of apps rather than modules.
+// Fill the `app_name` Autocomplete on BOTH the Tracked Apps and Ignored Apps
+// child tables with the bench's installed apps — both share the field on the
+// `Optimus Tracked App` child doctype, so both must be filled.
 //
 // Why on refresh: the Autocomplete options live on the grid docfield,
 // which Frappe re-creates whenever the form rebinds. Setting options
@@ -72,20 +72,39 @@ frappe.ui.form.on("Optimus Settings", {
 				if (!r || !r.message) {
 					return;
 				}
-				const apps = r.message;
-				const grid = frm.fields_dict.tracked_apps.grid;
-				if (!grid) {
-					return;
+				// Options are a newline-separated string (Frappe splits on \n).
+				const options = r.message.join("\n");
+				// New rows rebuild their docfield from frappe.meta, so set the
+				// base child-doctype meta too — both docfield_map AND
+				// docfield_list — or a freshly-added row's dropdown is blank on
+				// older Frappe (e.g. 15.98).
+				try {
+					const child_dt = "Optimus Tracked App";
+					const base_df = frappe.meta.get_docfield(child_dt, "app_name");
+					if (base_df) {
+						base_df.options = options;
+					}
+					const list = (frappe.meta.docfield_list || {})[child_dt] || [];
+					list.forEach((d) => {
+						if (d.fieldname === "app_name") {
+							d.options = options;
+						}
+					});
+				} catch (e) {
+					// meta not ready — per-grid update below covers existing rows.
 				}
-				// Autocomplete fieldtype accepts options as a
-				// newline-separated string (Frappe's renderer splits
-				// on \n). Passing an array also works in v14+, but
-				// the string form is the safe cross-version shape.
-				grid.update_docfield_property(
-					"app_name",
-					"options",
-					apps.join("\n")
-				);
+				// Fill each grid that's present.
+				["tracked_apps", "ignored_apps"].forEach((fieldname) => {
+					const field = frm.fields_dict[fieldname];
+					const grid = field && field.grid;
+					if (grid) {
+						grid.update_docfield_property(
+							"app_name",
+							"options",
+							options
+						);
+					}
+				});
 			},
 		});
 
