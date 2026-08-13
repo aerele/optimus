@@ -58,6 +58,21 @@ def _is_synthetic_frame(function: str) -> bool:
 	return function.startswith("<") or function.startswith("[")
 
 
+def filter_out_ignored_apps(candidates, ignored_apps):
+	"""Drop candidates whose owning ``app`` is on the Ignored Apps list.
+
+	Returns ``(kept, dropped_count)``. Pure — the caller resolves the ignored
+	set (``settings.get_ignored_apps``) and passes it in, so the manual picker
+	(``api.get_phase2_candidates``) and auto-arm (``analyze._auto_arm_phase2``)
+	share ONE matching rule and can't silently drift.
+	"""
+	ignored = frozenset(a for a in (ignored_apps or ()) if a)
+	if not ignored:
+		return list(candidates), 0
+	kept = [c for c in candidates if c.get("app") not in ignored]
+	return kept, len(candidates) - len(kept)
+
+
 def _derive_module_path(filename: str) -> str:
 	"""Build a Python module dotted path from a captured filename.
 

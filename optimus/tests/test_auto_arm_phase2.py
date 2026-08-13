@@ -170,6 +170,24 @@ class TestAutoArmPhase2:
 		monkeypatch.setattr(frappe, "get_doc", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")), raising=False)
 		analyze._auto_arm_phase2("PS-1", _ctx())  # must not raise
 
+	def test_ignored_app_candidates_are_dropped(self, arm_env, monkeypatch):
+		"""A recommended candidate whose app is on the Ignored Apps list must
+		not be auto-armed (same filter the manual picker applies)."""
+		import optimus.settings as settings_mod
+		monkeypatch.setattr(settings_mod, "get_config",
+			lambda: types.SimpleNamespace(phase2_max_runs_per_session=10,
+				ignored_apps=("ignored_app",)))
+		arm_env.candidates = [
+			{"dotted_path": "ignored_app.tasks.slow", "app": "ignored_app",
+				"recommended": True},
+			{"dotted_path": "my_app.tasks.slow", "app": "my_app",
+				"recommended": True},
+		]
+		analyze._auto_arm_phase2("PS-1", _ctx())
+		assert len(arm_env.start_calls) == 1
+		armed = [p["dotted_path"] for p in arm_env.start_calls[0]["picks"]]
+		assert armed == ["my_app.tasks.slow"]  # ignored_app dropped
+
 
 def test_run_calls_auto_arm_after_ready():
 	src = inspect.getsource(analyze.run)

@@ -641,6 +641,13 @@ def _auto_arm_phase2(docname: str, context) -> None:
 			trees.append(tree)
 
 		candidates = _lp_picker._build_tree_indented_candidates(trees)
+		# Don't auto-arm Ignored-App functions (same filter as the picker).
+		try:
+			from optimus.settings import get_ignored_apps
+			_ignored_apps = get_ignored_apps()
+		except Exception:
+			_ignored_apps = ()
+		candidates, _ = _lp_picker.filter_out_ignored_apps(candidates, _ignored_apps)
 		picks = [
 			{"dotted_path": c["dotted_path"], "source": "curated"}
 			for c in candidates

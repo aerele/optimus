@@ -870,3 +870,68 @@ class TestPickerDialogIndent:
 		# The dialog must still re-nest the flat DFS list via the depth stack
 		# (the Python picker assigns the depths the tests above pin down).
 		assert "stack[stack.length - 1].depth >= depth" in self._js_source()
+
+
+class TestFilterOutIgnoredApps:
+	"""picker.filter_out_ignored_apps — the ONE shared filter used by both the
+	manual picker (api.get_phase2_candidates) and auto-arm."""
+
+	def _cands(self):
+		return [
+			{"app": "erpnext", "dotted_path": "a"},
+			{"app": "my_app", "dotted_path": "b"},
+			{"app": "erpnext", "dotted_path": "c"},
+		]
+
+	def test_drops_matching_apps_and_counts(self):
+		kept, dropped = picker.filter_out_ignored_apps(self._cands(), ("erpnext",))
+		assert [c["dotted_path"] for c in kept] == ["b"]
+		assert dropped == 2
+
+	def test_empty_ignored_returns_all_unchanged(self):
+		kept, dropped = picker.filter_out_ignored_apps(self._cands(), ())
+		assert [c["dotted_path"] for c in kept] == ["a", "b", "c"]
+		assert dropped == 0
+
+	def test_none_ignored_is_safe(self):
+		kept, dropped = picker.filter_out_ignored_apps(self._cands(), None)
+		assert dropped == 0 and len(kept) == 3
+
+	def test_falsy_entries_in_ignored_never_match(self):
+		# "" / None entries must not swallow a candidate that has no "app".
+		kept, dropped = picker.filter_out_ignored_apps([{"dotted_path": "a"}], ("", None))
+		assert dropped == 0 and kept == [{"dotted_path": "a"}]
+
+	def test_candidate_without_app_key_is_kept(self):
+		kept, dropped = picker.filter_out_ignored_apps([{"dotted_path": "a"}], ("erpnext",))
+		assert dropped == 0 and [c["dotted_path"] for c in kept] == ["a"]
+
+
+class TestPickerEmptyHintIgnored:
+	"""The empty-state hint distinguishes 'all candidates were on the Ignored
+	Apps list' from 'only framework plumbing / too short'."""
+
+	def _hint(self, **kw):
+		from optimus.api import _picker_empty_hint
+
+		return _picker_empty_hint(**kw)
+
+	def test_all_ignored_reports_ignored_apps(self):
+		msg = self._hint(action_count=3, with_tree=3, parsed_ok=3,
+			candidate_count=5, ignored_apps_filtered=5)
+		assert "Ignored Apps" in msg
+		assert "5 candidate" in msg
+		# Must NOT push the operator to clear the whole list (that resurrects
+		# the framework-app defaults) — it must say to keep at least one entry.
+		assert "keep at least one entry" in msg
+
+	def test_some_survivors_give_no_hint(self):
+		# 5 built, 2 ignored → 3 survive → picker isn't empty → no hint.
+		msg = self._hint(action_count=3, with_tree=3, parsed_ok=3,
+			candidate_count=5, ignored_apps_filtered=2)
+		assert msg == ""
+
+	def test_zero_built_is_framework_plumbing_not_ignored(self):
+		msg = self._hint(action_count=3, with_tree=3, parsed_ok=3,
+			candidate_count=0, ignored_apps_filtered=0)
+		assert "framework plumbing" in msg
