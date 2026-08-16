@@ -1,0 +1,252 @@
+name: CI
+
+# Unified CI for the pure-pytest checks (lint / tests / coverage / audit).
+#
+# Trigger split is deliberate and is the whole efficiency story: running on
+# BOTH ``push: ['**']`` and ``pull_request: ['**']`` (the pre-CI ``tests.yml``
+# behaviour) fired every job TWICE for any branch with an open PR — the
+# concurrency group is keyed on ``github.ref`` which differs between a push
+# (refs/heads/<b>) and a PR (refs/pull/N/merge), so cancel-in-progress could
+# not dedupe them. Here:
+#   * pull_request (any branch) — the merge gate; the only run a feature
+#     branch with an open PR produces.
+#   * push to main only         — post-merge / trunk signal; the only run a
+#     merge to main produces.
+# A given commit therefore runs each check exactly once.
+#
+# NB: intentionally NO ``paths-ignore``. These checks are required by the
+# main branch protection rule, and a required check that never reports (e.g.
+# skipped on a docs-only PR) blocks the PR forever. Always-run keeps the gate
+# honest; the jobs are fast enough that the cost is negligible.
+#
+# Installs use ``uv`` (astral-sh/setup-uv) rather than ``python -m pip``: the
+# dominant CI cost here is dependency install (~33s — ``line_profiler`` ships a
+# C extension), not the test run (~6-10s), so sharding the suite would barely
+# move wall-clock. uv's resolver + a wheel cache keyed on pyproject.toml attack
+# that install cost directly and cache the built line_profiler wheel across
+# runs. ``uv pip install --system`` installs into the actions/setup-python 3.14
+# interpreter that ``python -m pytest`` then runs.
+on:
+  pull_request:
+    branches: ['**']
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel a superseded in-flight run when a new commit lands on the same PR —
+# saves CI minutes on rapid-push branches. Scoped to pull_request events only:
+# every push-to-main run shares the ``refs/heads/main`` ref, so an
+# unconditional cancel would let one merge abort the previous merge's trunk
+# build, leaving a main commit with no complete CI result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: 'pyproject.toml'
+
+      - name: Install ruff
+        # Pinned major; ruff's CLI surface is stable within a major version
+        # and the config in pyproject.toml is already authored against this
+        # series.
+        run: uv pip install --system 'ruff>=0.6,<1'
+
+      - name: Lint (uses pyproject.toml [tool.ruff] config)
+        run: ruff check optimus/
+
+      # Format-check is deferred — the codebase predates the [tool.ruff.format]
+      # config and a large reformat is its own piece of work. Add a
+      # ``ruff format --check optimus/`` step here once that lands.
+
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        # 3.14 is the only target. It matches the dev bench's interpreter
+        # (Python 3.14.2 locally) and the deployment target for every bench in
+        # scope. The sys.monitoring / line_profiler tool-2 handling that
+        # diverges across Python 3.12+ is exercised natively on 3.14, so
+        # multi-version coverage added CI minutes without adding signal — hence
+        # a single version, no matrix (which also keeps the check name a clean
+        # ``CI / tests`` rather than ``tests (Python 3.14)``).
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: 'pyproject.toml'
+
+      - name: Install runtime + test dependencies
+        # ``-e .`` installs the project's runtime deps declared in
+        # pyproject.toml. The second line adds pytest + the small set of
+        # test-only deps the suite imports. Frappe itself is intentionally NOT
+        # installed — the conftest baseline stub satisfies module-top frappe
+        # imports at collection time. uv provides build isolation, so no
+        # separate pip/wheel/setuptools bootstrap step is needed for the
+        # line_profiler C-extension build.
+        run: |
+          uv pip install --system -e .
+          uv pip install --system pytest pytest-github-actions-annotate-failures hypothesis Faker pdfplumber pypdf sql_metadata jsonschema
+
+      - name: Run pytest
+        # ``set -eo pipefail`` is required: without it, the ``| tee`` at the
+        # end of the pipeline returns 0 (tee always succeeds) and pytest's
+        # non-zero exit code is silently discarded — the step would report
+        # green even when tests fail. GitHub Actions' default step shell runs
+        # ``bash -e {0}`` (no pipefail), so the explicit ``set -eo pipefail``
+        # before the ``| tee`` is required.
+        run: |
+          set -eo pipefail
+          python -m pytest optimus/tests/ -v --tb=long -rA 2>&1 | tee pytest.log
+
+      - name: Publish pytest summary
+        # Surface the -rA short summary on the run page's "Summary" tab so
+        # readers don't have to click into the log to see pass/fail counts.
+        # ``if: always()`` so the summary still appears when pytest exits
+        # non-zero; the ``|| true`` on grep keeps the step green even when no
+        # lines match (e.g. catastrophic collection error).
+        if: always()
+        run: |
+          {
+            echo "## pytest summary"
+            echo '```'
+            grep -E '^(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS|=+ .* =+|short test summary)' \
+              pytest.log | tail -200 || true
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload pytest log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log
+          path: pytest.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: 'pyproject.toml'
+
+      - name: Install runtime + test dependencies (+ pytest-cov)
+        # Same dependency set as the ``tests`` job, plus ``pytest-cov`` for the
+        # coverage plugin. Kept a separate job (rather than folding --cov into
+        # ``tests``) so ``CI / coverage`` is its own required check, matching
+        # the intended CI layout.
+        run: |
+          uv pip install --system -e .
+          uv pip install --system pytest pytest-cov pytest-github-actions-annotate-failures hypothesis Faker pdfplumber pypdf sql_metadata jsonschema
+
+      - name: Run pytest with coverage
+        # INFORMATIONAL coverage: no ``--cov-fail-under``, so this job goes red
+        # only if the suite itself fails, never on a coverage number. A
+        # threshold is a deliberate follow-up once the baseline is known.
+        # ``set -eo pipefail`` for the same reason as the tests job — the
+        # ``| tee`` would otherwise mask a failing suite.
+        run: |
+          set -eo pipefail
+          python -m pytest optimus/tests/ \
+            --cov=optimus --cov-report=term-missing --cov-report=xml \
+            2>&1 | tee coverage.log
+
+      - name: Publish coverage summary
+        # ``awk`` prints from pytest-cov's ``coverage:`` banner to EOF — i.e.
+        # the whole per-file table + the TOTAL line — onto the run's Summary
+        # tab. ``if: always()`` so the table still appears on a failing run.
+        if: always()
+        run: |
+          {
+            echo "## Coverage"
+            echo '```'
+            awk '/coverage:/{p=1} p' coverage.log || true
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload coverage.xml
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: warn
+          retention-days: 7
+
+  pip-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: 'pyproject.toml'
+
+      - name: Install project + pip-audit
+        # ``-e .`` installs the same runtime deps the test job uses, so the
+        # audit reports against the same resolved tree CI actually runs against.
+        run: |
+          uv pip install --system -e .
+          uv pip install --system pip-audit
+
+      - name: Run pip-audit on installed env
+        # ``--skip-editable`` excludes the in-place install of ``optimus``
+        # itself, which isn't on PyPI (it's a private Frappe app installed via
+        # ``bench``). Without the skip, pip-audit treats "package not found on
+        # PyPI" as an un-auditable dependency. Dropping ``--strict`` then
+        # preserves the security gate (vulnerabilities in real deps still exit
+        # non-zero) while no longer failing on the editable carve-out. If a
+        # known-not-applicable CVE blocks CI later, add ``--ignore-vuln
+        # <GHSA-ID>`` here to document the carve-out.
+        run: pip-audit --skip-editable
