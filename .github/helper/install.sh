@@ -125,8 +125,8 @@ _step "pip install -e apps/optimus + test deps"
 # module top for fixtures + parametrize; without these in the bench
 # venv the discovery import crashes with ``ModuleNotFoundError: No
 # module named 'pytest'`` and bench never reaches the integration
-# module. Mirror the install line ``tests.yml`` uses for the
-# pure-pytest workflow.
+# module. Mirror the install line the ``CI`` workflow (``ci.yml``) uses
+# for its pure-pytest jobs.
 ./env/bin/pip install --quiet \
 	pytest pytest-github-actions-annotate-failures \
 	hypothesis Faker pdfplumber pypdf sql_metadata jsonschema

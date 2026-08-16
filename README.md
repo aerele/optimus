@@ -2,7 +2,7 @@
 
 **A flow-aware performance profiler for Frappe and ERPNext.** Records a real business workflow (Sales Invoice save → submit → Delivery Note → submit → …), joins it with server resource state and browser-side timings, and produces two downloadable HTML reports you can actually act on: a **Safe Report** to share with a third-party dev shop without leaking customer data, and a **Raw Report** for internal debugging with full stack traces and SQL literals.
 
-> **Status:** `v0.12.26` — production-ready. MIT-licensed. 1820 unit tests + 39 integration tests in CI on every push (ruff + pytest on Python 3.14; bench-driven integration suite on Frappe v16). See the [CHANGELOG](./CHANGELOG.md) for the full feature history, including the v0.7.0 rename from `frappe_profiler` → `optimus`.
+> **Status:** `v0.12.26` — production-ready. MIT-licensed. 1820 unit tests + 39 integration tests in CI on every pull request and on merge to `main` (ruff + pytest on Python 3.14; bench-driven integration suite on Frappe v16). See the [CHANGELOG](./CHANGELOG.md) for the full feature history, including the v0.7.0 rename from `frappe_profiler` → `optimus`.
 
 ---
 

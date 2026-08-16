@@ -2,7 +2,7 @@
 #
 # Run `pre-commit install` once in your local clone to wire these
 # into `git commit`. The hooks mirror the lint gate that
-# `.github/workflows/tests.yml` runs on push - catching style /
+# `.github/workflows/ci.yml` runs - catching style /
 # import issues before they reach CI.
 #
 # Format-checking (`ruff format --check`) is intentionally NOT here:
