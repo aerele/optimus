@@ -366,6 +366,27 @@ def test_run_count_ignores_requests_where_query_did_not_loop(empty_context):
 	assert detail["projected_total_ms"] <= detail["total_time_ms"]
 
 
+def test_run_count_excludes_sub_threshold_repeats(empty_context):
+	"""A request counts as looping only if it hit the N+1 threshold. A finding that
+	qualifies on one 12× request must NOT fold in requests that repeated the query
+	just 2-9× (below the bar) — else run_count / loop_time / severity inflate and
+	"looped in N requests" overstates the loop's real spread."""
+	def call(dur):
+		return {"query": "SELECT 1", "normalized_query": "SELECT ?", "duration": dur,
+			"stack": [{"filename": "apps/myapp/mod.py", "lineno": 1, "function": "loop"}]}
+
+	def req(uuid, hits, dur):
+		return {"uuid": uuid, "path": "/", "cmd": None, "method": "GET",
+			"event_type": "HTTP Request", "duration": 50, "calls": [call(dur)] * hits}
+
+	recs = [req("A", 12, 3.0)]  # qualifies: 12 >= min_occurrences (10)
+	recs += [req(f"b{i}", 3, 5.0) for i in range(5)]  # 3× each — below the threshold
+	detail = json.loads(n_plus_one.analyze(recs, empty_context).findings[0]["technical_detail_json"])
+	assert detail["run_count"] == 1  # only the 12× request; the 3× ones are excluded
+	assert detail["loop_count"] == 12
+	assert detail["occurrences"] == 27  # 12 + 15 total appearances (session scope)
+
+
 # ---------------------------------------------------------------------------
 # v0.5.1 regression guards: don't surface the profiler's own instrumentation
 # queries as N+1 findings. A production session flagged:

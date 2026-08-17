@@ -156,15 +156,20 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		# but also runs once in 100 others has run_count == 1, so the "ran in N
 		# requests" wording and the post-fix projection don't over-count the
 		# single-run requests — those carry no loop to collapse.
-		looping_actions = {a for a, c in dominant_action_counts.items() if c >= 2}
+		# A request "looped" only if it hit the N+1 threshold (min_occurrences) — the
+		# same bar that qualifies the finding. Counting requests with a mere 2–9
+		# sub-threshold repeats would inflate run_count / loop_time / severity and
+		# make the "looped in N requests" wording dishonest (those requests never
+		# held the flagged loop).
+		looping_actions = {a for a, c in dominant_action_counts.items() if c >= min_occurrences}
 		run_count = len(looping_actions)
 		# Time + P95 for the finding are scoped to the requests where the query
-		# genuinely LOOPED (count >= 2), NOT to a single "busiest" request: a
-		# loop that legitimately recurs in 5 requests keeps all 5 in scope, so
-		# its cumulative-but-recoverable cost still rates severity honestly.
-		# Conversely a tiny 10× loop is not rated High just because the same
-		# query, run once each across 100 unrelated requests, sums past the time
-		# threshold — that cost is NOT recoverable by batching this loop.
+		# genuinely LOOPED at that magnitude, NOT to a single "busiest" request: a
+		# loop that legitimately recurs in 5 requests keeps all 5 in scope, so its
+		# cumulative-but-recoverable cost still rates severity honestly. A tiny loop
+		# is not rated High just because the same query, run below the threshold
+		# across many unrelated requests, sums past the time floor — that cost is
+		# NOT recoverable by batching this loop.
 		# ``total_time`` (all occurrences) stays for cumulative reporting.
 		loop_occurrences = [o for o in canonical_occurrences if o["action_idx"] in looping_actions]
 		loop_time = sum(o["duration"] for o in loop_occurrences)
@@ -318,7 +323,10 @@ def _build_user_finding(
 				# blow out the 140-char title limit / DocType blob.
 				"sample_queries": all_variants[:5],
 				"total_time_ms": round(total_time, 2),
-				"average_time_ms": round(avg_ms, 2),
+				# No session-wide "~X each": for a bimodal loop (loop hits + unrelated
+				# single runs) it blends two costs into a misleading average and would
+				# contradict the impact box's loop-scoped "per hit". The loop's own
+				# per-query cost is shown there instead.
 				# Scope tag for the card's impact box: this finding's estimated_impact_ms
 				# is the loop's own recoverable cost, not the session-wide total that
 				# every other finding reports as "consolidated".
