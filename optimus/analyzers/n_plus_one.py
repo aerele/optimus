@@ -352,8 +352,14 @@ def _build_user_finding(
 			},
 			default=str,
 		),
-		"estimated_impact_ms": round(total_time, 2),
-		"affected_count": total_count,
+		# Headline economics — read by the TL;DR hero (renderer/_internal.py),
+		# the card impact box (report.html), the report-wide sort, and the AI-fix
+		# prompt (ai_fix.py). Loop-scoped to match the loop-scoped title/description:
+		# leaving them cumulative made those surfaces show "60×" / "280ms" beside a
+		# "12×" card. The session-wide totals stay in the detail JSON above
+		# (occurrences / total_time_ms), rendered under a "session-wide" label.
+		"estimated_impact_ms": round(loop_time, 2),
+		"affected_count": loop_count,
 		"action_ref": str(action_idx),
 	}
 

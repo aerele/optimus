@@ -259,8 +259,10 @@ def test_loop_across_many_requests_reports_per_request_count_not_total(empty_con
 	detail = json.loads(f["technical_detail_json"])
 	assert detail["loop_count"] == 12
 	assert detail["run_count"] == 10
-	assert detail["occurrences"] == 120
-	assert f["affected_count"] == 120
+	assert detail["occurrences"] == 120  # session-wide total kept in the detail (scope)
+	# Headline field is LOOP-scoped (matches the "12×" title), not the 120 total —
+	# it feeds the hero, the impact box, the report sort, and the AI-fix prompt.
+	assert f["affected_count"] == 12
 
 
 def test_loop_across_requests_stays_high_when_cumulative_time_is_large(empty_context):
@@ -1038,6 +1040,11 @@ def test_small_loop_low_severity_and_loop_scoped_cost(empty_context):
 	assert detail["total_time_ms"] == 280.0
 	# Projection never exceeds the current total.
 	assert detail["projected_total_ms"] <= detail["total_time_ms"]
+	# Headline economics are LOOP-scoped, so every downstream surface (hero, impact
+	# box, report sort, AI-fix prompt) tells the "10× / 30ms" story — NOT the 60 /
+	# 280 session totals, which stay in the detail above under a "session-wide" label.
+	assert f["affected_count"] == 10  # loop_count, not the 60 total
+	assert f["estimated_impact_ms"] == 30.0  # loop_time, not the 280ms total
 
 
 def test_trivial_loop_suppressed_when_only_noise_lifts_it_over_gate(empty_context):
