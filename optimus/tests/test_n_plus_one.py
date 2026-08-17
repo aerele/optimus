@@ -212,6 +212,181 @@ def test_severity_scales_with_count_and_time(empty_context):
 	assert result.findings[0]["affected_count"] == 60
 
 
+def test_loop_across_many_requests_reports_per_request_count_not_total(empty_context):
+	"""Audit #1: a 12× loop across 10 requests is "12× in a row", not "120×".
+	Time is kept low (120ms) to isolate the count inflation from severity-by-time."""
+	recordings = [
+		{
+			"uuid": f"req-{r}",
+			"path": "/",
+			"cmd": None,
+			"method": "GET",
+			"event_type": "HTTP Request",
+			"duration": 50,
+			"calls": [
+				{
+					"query": "SELECT name FROM tabItem WHERE id = 1",
+					"normalized_query": "SELECT NAME FROM tabItem WHERE ID = ?",
+					"duration": 1.0,
+					"stack": [
+						{"filename": "apps/myapp/module.py", "lineno": 100, "function": "loop"},
+					],
+				}
+			] * 12,  # 12 in a row, WITHIN one request
+		}
+		for r in range(10)  # ...the same loop across 10 requests → 120 total
+	]
+	result = n_plus_one.analyze(recordings, empty_context)
+	assert len(result.findings) == 1
+	f = result.findings[0]
+
+	# Title reports the per-request loop size, not the cross-request total.
+	assert "12×" in f["title"]
+	assert "120" not in f["title"]
+
+	# Count no longer drives severity to High: 12 < 50 occurrences AND
+	# 120ms < 200ms total → Low.
+	assert f["severity"] == "Low"
+
+	# Description states "12 times in a row" and names the spread, never
+	# the false "120 times in a row".
+	desc = f["customer_description"]
+	assert "12 times in a row" in desc
+	assert "120 times in a row" not in desc
+	assert "10 separate requests" in desc
+	# Multi-request loops say "up to N" — loop_count is the busiest request's peak,
+	# not a uniform per-request figure.
+	assert "up to 12 times in a row" in desc
+
+	# Detail keeps the total as scope but exposes the honest loop/run split.
+	detail = json.loads(f["technical_detail_json"])
+	assert detail["loop_count"] == 12
+	assert detail["run_count"] == 10
+	assert detail["occurrences"] == 120  # session-wide total kept in the detail (scope)
+	# affected_count and estimated_impact_ms are on the SAME occurrence set (the
+	# loop's own hits), so the generic per-hit consumers stay correct: this loop
+	# fired 120 hits at 2ms each. affected_count is the loop HIT count (120), NOT
+	# loop_count (12, the per-request peak that drives the title/hero) — mixing the
+	# two denominators inflated per-hit ×10 on multi-request loops.
+	assert f["affected_count"] == 120  # total loop hits (12× across 10 requests)
+	assert f["estimated_impact_ms"] == 120.0  # loop_time (120 hits × 1ms)
+	# per-hit = impact / count = the loop's real per-query cost (1ms). Before this
+	# fix affected_count was loop_count (12), so per-hit read 120/12 = 10ms — ×10.
+	assert f["estimated_impact_ms"] / f["affected_count"] == 1.0
+
+
+def test_loop_across_requests_stays_high_when_cumulative_time_is_large(empty_context):
+	"""Companion guard: the loop stays High when cumulative time warrants it
+	(60 × 5ms = 300ms > 200ms) — severity-by-time is honest, by-count was not."""
+	recordings = [
+		{
+			"uuid": f"req-{r}",
+			"path": "/",
+			"cmd": None,
+			"method": "GET",
+			"event_type": "HTTP Request",
+			"duration": 100,
+			"calls": [
+				{
+					"query": "SELECT name FROM tabItem WHERE id = 1",
+					"normalized_query": "SELECT NAME FROM tabItem WHERE ID = ?",
+					"duration": 5.0,
+					"stack": [
+						{"filename": "apps/myapp/module.py", "lineno": 100, "function": "loop"},
+					],
+				}
+			] * 12,
+		}
+		for r in range(5)  # 12 × 5 requests = 60 queries, 300ms total
+	]
+	result = n_plus_one.analyze(recordings, empty_context)
+	assert len(result.findings) == 1
+	f = result.findings[0]
+	assert "12×" in f["title"]  # still per-request, not 60×
+	assert f["severity"] == "High"  # justified by 300ms cumulative, not count
+	detail = json.loads(f["technical_detail_json"])
+	assert detail["loop_count"] == 12
+	assert detail["run_count"] == 5
+	# Projected post-fix ≈ per-request batched query (2 × 5ms avg) × 5 runs
+	# = 50ms, NOT collapsed to a single 10ms query for the whole session.
+	assert detail["projected_total_ms"] == 50.0
+
+
+def test_run_count_ignores_requests_where_query_did_not_loop(empty_context):
+	"""run_count counts only requests where the query REPEATED. Loops 10× in one
+	request, runs once in 20 others → run_count == 1; projection ≤ total_time."""
+	looping = {
+		"uuid": "loop-req",
+		"path": "/",
+		"cmd": None,
+		"method": "GET",
+		"event_type": "HTTP Request",
+		"duration": 100,
+		"calls": [
+			{
+				"query": "SELECT name FROM tabItem WHERE id = 1",
+				"normalized_query": "SELECT NAME FROM tabItem WHERE ID = ?",
+				"duration": 5.0,
+				"stack": [
+					{"filename": "apps/myapp/module.py", "lineno": 100, "function": "loop"},
+				],
+			}
+		] * 10,  # a real 10× loop in this one request
+	}
+	singles = [
+		{
+			"uuid": f"single-{r}",
+			"path": "/",
+			"cmd": None,
+			"method": "GET",
+			"event_type": "HTTP Request",
+			"duration": 20,
+			"calls": [
+				{
+					"query": "SELECT name FROM tabItem WHERE id = 1",
+					"normalized_query": "SELECT NAME FROM tabItem WHERE ID = ?",
+					"duration": 5.0,
+					"stack": [
+						{"filename": "apps/myapp/module.py", "lineno": 100, "function": "loop"},
+					],
+				}
+			],  # the SAME query, but run once — no loop here
+		}
+		for r in range(20)
+	]
+	result = n_plus_one.analyze([looping, *singles], empty_context)
+	assert len(result.findings) == 1
+	f = result.findings[0]
+	assert "10×" in f["title"]
+	detail = json.loads(f["technical_detail_json"])
+	assert detail["loop_count"] == 10
+	assert detail["run_count"] == 1  # only the one request that looped
+	assert detail["occurrences"] == 30  # 10 + 20 total appearances (scope)
+	# Projection must never read as worse than doing nothing.
+	assert detail["projected_total_ms"] <= detail["total_time_ms"]
+
+
+def test_run_count_excludes_sub_threshold_repeats(empty_context):
+	"""A request counts as looping only if it hit the N+1 threshold. A finding that
+	qualifies on one 12× request must NOT fold in requests that repeated the query
+	just 2-9× (below the bar) — else run_count / loop_time / severity inflate and
+	"looped in N requests" overstates the loop's real spread."""
+	def call(dur):
+		return {"query": "SELECT 1", "normalized_query": "SELECT ?", "duration": dur,
+			"stack": [{"filename": "apps/myapp/mod.py", "lineno": 1, "function": "loop"}]}
+
+	def req(uuid, hits, dur):
+		return {"uuid": uuid, "path": "/", "cmd": None, "method": "GET",
+			"event_type": "HTTP Request", "duration": 50, "calls": [call(dur)] * hits}
+
+	recs = [req("A", 12, 3.0)]  # qualifies: 12 >= min_occurrences (10)
+	recs += [req(f"b{i}", 3, 5.0) for i in range(5)]  # 3× each — below the threshold
+	detail = json.loads(n_plus_one.analyze(recs, empty_context).findings[0]["technical_detail_json"])
+	assert detail["run_count"] == 1  # only the 12× request; the 3× ones are excluded
+	assert detail["loop_count"] == 12
+	assert detail["occurrences"] == 27  # 12 + 15 total appearances (session scope)
+
+
 # ---------------------------------------------------------------------------
 # v0.5.1 regression guards: don't surface the profiler's own instrumentation
 # queries as N+1 findings. A production session flagged:
@@ -271,6 +446,42 @@ def test_framework_n_plus_one_query_builder_utils(empty_context):
 	desc = f["customer_description"]
 	assert "Frappe's own code" in desc
 	assert "not as an action item" in desc or "rarely something you can change" in desc
+
+
+def test_framework_finding_gates_on_cumulative_not_loop_time(empty_context):
+	"""#1: framework loop is 10ms (< 20ms floor) but cumulative 25ms — framework
+	findings gate on total_time, so this survives (the loop_time gate dropped it)."""
+	fw_call = lambda dur: {  # noqa: E731
+		"query": "SELECT ? FROM information_schema.GLOBAL_VARIABLES",
+		"normalized_query": "SELECT ? FROM information_schema.GLOBAL_VARIABLES",
+		"duration": dur,
+		"stack": [{"filename": "frappe/query_builder/utils.py", "lineno": 87, "function": "get_db_type"}],
+	}
+	looping = {
+		"uuid": "loop-req", "path": "/", "cmd": None, "method": "GET",
+		"event_type": "HTTP Request", "duration": 100,
+		"calls": [fw_call(1.0)] * 10,  # loop_time = 10ms < 20ms floor
+	}
+	singles = [
+		{
+			"uuid": f"single-{r}", "path": "/", "cmd": None, "method": "GET",
+			"event_type": "HTTP Request", "duration": 20, "calls": [fw_call(1.0)],
+		}
+		for r in range(15)  # +15ms → cumulative 25ms ≥ 20ms floor
+	]
+	result = n_plus_one.analyze([looping, *singles], empty_context)
+	assert len(result.findings) == 1, "framework N+1 must survive the cumulative gate"
+	f = result.findings[0]
+	assert f["finding_type"] == "Framework N+1"
+	detail = json.loads(f["technical_detail_json"])
+	assert detail["occurrences"] == 25
+	assert detail["loop_count"] == 10  # the one looping request's size
+	assert detail["run_count"] == 1  # only one request actually looped
+	assert round(detail["total_time_ms"]) == 25
+	# Framework title uses the SESSION total (25), never the per-request loop count
+	# (10) — framework findings are cumulative-framed, unlike user N+1s.
+	assert "25×" in f["title"]
+	assert "10×" not in f["title"]
 
 
 def test_user_code_n_plus_one_still_emits_as_actionable(empty_context):
@@ -760,3 +971,128 @@ def test_top_queries_filters_profiler_instrumentation(empty_context):
 	slow = [f for f in result.findings if f["finding_type"] == "Slow Query"]
 	assert len(slow) == 1
 	assert "tabSales Invoice" in slow[0]["technical_detail_json"]
+
+
+# ---------------------------------------------------------------------------
+# v0.12.28 regression guards: cross-request leaks that survived 0.12.27.
+# ---------------------------------------------------------------------------
+
+
+def test_action_ref_points_to_the_looping_request_not_first_appearance(empty_context):
+	"""#1: action_ref must name the dominant (looping) request, not the first the
+	query appeared in. Runs once in req 0, loops 15× in req 1 → ref == "1"."""
+	recordings = [
+		{  # request 0 — the query appears exactly once (NOT a loop)
+			"uuid": "req-0",
+			"path": "/",
+			"cmd": None,
+			"method": "GET",
+			"event_type": "HTTP Request",
+			"duration": 50,
+			"calls": [
+				{
+					"query": "SELECT rate FROM tabItem Price WHERE item = 1",
+					"normalized_query": "SELECT rate FROM tabItem Price WHERE item = ?",
+					"duration": 2.0,
+					"stack": [
+						{"filename": "apps/myapp/pricing.py", "lineno": 42, "function": "price"},
+					],
+				}
+			],
+		},
+		{  # request 1 — the real 15× loop
+			"uuid": "req-1",
+			"path": "/",
+			"cmd": None,
+			"method": "GET",
+			"event_type": "HTTP Request",
+			"duration": 80,
+			"calls": [
+				{
+					"query": "SELECT rate FROM tabItem Price WHERE item = 1",
+					"normalized_query": "SELECT rate FROM tabItem Price WHERE item = ?",
+					"duration": 2.0,
+					"stack": [
+						{"filename": "apps/myapp/pricing.py", "lineno": 42, "function": "price"},
+					],
+				}
+			] * 15,
+		},
+	]
+	result = n_plus_one.analyze(recordings, empty_context)
+	assert len(result.findings) == 1
+	f = result.findings[0]
+	# Points at request 1 (index 1), where the loop ran — NOT request 0.
+	assert f["action_ref"] == "1"
+	assert "15×" in f["title"]
+	detail = json.loads(f["technical_detail_json"])
+	assert detail["loop_count"] == 15
+	assert detail["run_count"] == 1
+	assert detail["occurrences"] == 16  # 1 + 15 total appearances (scope)
+
+
+def _mixed_loop_and_singles(loop_hits, loop_ms, single_count, single_ms):
+	"""One request that loops the query loop_hits× at loop_ms, plus single_count
+	other requests that each run the SAME query once at single_ms."""
+	call = lambda dur: {  # noqa: E731
+		"query": "SELECT name FROM tabItem WHERE id = 1",
+		"normalized_query": "SELECT NAME FROM tabItem WHERE ID = ?",
+		"duration": dur,
+		"stack": [{"filename": "apps/myapp/module.py", "lineno": 100, "function": "loop"}],
+	}
+	looping = {
+		"uuid": "loop-req", "path": "/", "cmd": None, "method": "GET",
+		"event_type": "HTTP Request", "duration": 100,
+		"calls": [call(loop_ms)] * loop_hits,
+	}
+	singles = [
+		{
+			"uuid": f"single-{r}", "path": "/", "cmd": None, "method": "GET",
+			"event_type": "HTTP Request", "duration": 20, "calls": [call(single_ms)],
+		}
+		for r in range(single_count)
+	]
+	return [looping, *singles]
+
+
+def test_small_loop_low_severity_and_loop_scoped_cost(empty_context):
+	"""#2/#1: severity AND the description cost use the loop's own time (30ms),
+	not the 280ms cumulative — so Low, and the description quotes 30ms not 280ms."""
+	recordings = _mixed_loop_and_singles(loop_hits=10, loop_ms=3.0, single_count=50, single_ms=5.0)
+	result = n_plus_one.analyze(recordings, empty_context)
+	assert len(result.findings) == 1
+	f = result.findings[0]
+	# Loop is 30ms → Low, despite the 280ms cumulative that pre-fix read High.
+	assert f["severity"] == "Low"
+	# Description quotes the LOOP's own cost (30ms), never the 280ms total.
+	assert "30ms" in f["customer_description"]
+	assert "280ms" not in f["customer_description"]
+	detail = json.loads(f["technical_detail_json"])
+	assert detail["loop_count"] == 10
+	assert detail["run_count"] == 1
+	assert detail["occurrences"] == 60  # 10 + 50 total appearances (scope)
+	# Cumulative time is still reported honestly for scope/impact.
+	assert detail["total_time_ms"] == 280.0
+	# Projection never exceeds the current total.
+	assert detail["projected_total_ms"] <= detail["total_time_ms"]
+	# Headline economics are LOOP-scoped, so every downstream surface (hero, impact
+	# box, report sort, AI-fix prompt) tells the "10× / 30ms" story — NOT the 60 /
+	# 280 session totals, which stay in the detail above under a "session-wide" label.
+	assert f["affected_count"] == 10  # loop_count, not the 60 total
+	assert f["estimated_impact_ms"] == 30.0  # loop_time, not the 280ms total
+	# P95 + projection sub-fields are populated (10 loop samples ≥ the P95 minimum),
+	# and scoped to the loop's own per-query cost (3ms), not the 5ms singles.
+	assert detail["p95_ms"] is not None
+	assert detail["projected_avg_time_ms"] == 6.0  # loop_avg (3ms) × 2
+	assert detail["projected_speedup_label"] == "~5× fewer queries"  # loop_count // 2
+	# The card's scope tag is analyzer-declared (data-driven) — no surface hardcodes
+	# "N+1 == recoverable"; the impact/count really are the loop's own, not the total.
+	assert detail["impact_scope_label"] == "recoverable"
+
+
+def test_trivial_loop_suppressed_when_only_noise_lifts_it_over_gate(empty_context):
+	"""#2 (gate): a trivial loop (loop_time 5ms < 20ms floor) is suppressed even
+	when the same query, run once across 100 requests, lifts the session total."""
+	recordings = _mixed_loop_and_singles(loop_hits=10, loop_ms=0.5, single_count=100, single_ms=5.0)
+	result = n_plus_one.analyze(recordings, empty_context)
+	assert result.findings == []  # loop_time 5ms < 20ms floor → suppressed

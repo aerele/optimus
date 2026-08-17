@@ -1767,10 +1767,19 @@
         {% endif %}
       </div>
       <div class="finding-impact">
-        <span class="big">{{ fmt_ms(f.estimated_impact_ms) }}</span><small class="scope-tag">consolidated</small>
+        {# The scope tag is analyzer-declared: a finding whose estimated_impact_ms
+           is not the session-wide total sets detail.impact_scope_label (e.g. N+1 →
+           "recoverable"). Everything else falls back to "consolidated". #}
+        <span class="big">{{ fmt_ms(f.estimated_impact_ms) }}</span><small class="scope-tag">{{ detail.impact_scope_label or "consolidated" }}</small>
         {% if f.affected_count and f.affected_count > 1 %}
         {% set _per_hit_ms = f.estimated_impact_ms / f.affected_count %}
         <div class="small">{{ f.affected_count }}× hits{% if _per_hit_ms >= 0.05 %} &middot; {{ fmt_ms(_per_hit_ms, 1) }}<small class="scope-tag">per hit</small>{% endif %}</div>
+        {% endif %}
+        {# Reconcile the per-request title ("ran 12×") with the total hit count
+           ("120× hits") when a loop spans several requests. Gated on the loop-scope
+           marker so it never renders under a framework card (cumulative framing). #}
+        {% if detail.impact_scope_label and detail.run_count and detail.run_count > 1 %}
+        <div class="small muted">looped in {{ detail.run_count }} requests</div>
         {% endif %}
         {% if f.technical_detail and f.technical_detail.intra_action_repetitions and f.technical_detail.intra_action_repetitions > 1 %}
         <div class="small muted">called from {{ f.technical_detail.intra_action_repetitions }} sites in this action</div>
@@ -1963,7 +1972,7 @@
 
       {% if detail.occurrences %}
         <p class="small muted">
-          {{ detail.occurrences }} occurrences
+          {{ detail.occurrences }} occurrences <small class="scope-tag">session-wide</small>
           {% if detail.average_time_ms %} &middot; ~{{ fmt_ms(detail.average_time_ms, 1) }} each{% endif %}
           {% if detail.total_time_ms %} &middot; {{ fmt_ms(detail.total_time_ms) }} total{% endif %}
         </p>

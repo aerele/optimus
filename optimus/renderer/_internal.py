@@ -1792,13 +1792,28 @@ def _compose_tldr(
 				"cost goes away."
 			).format(impact=impact_html, n=affected)
 	elif category == "n_plus_one" and affected:
+		# The "ran N× in a row" count is the per-request loop size, not
+		# affected_count (which for the user N+1 is the loop's TOTAL hit count, kept
+		# on the same set as estimated_impact_ms so per-hit math stays correct). Use
+		# loop_count so the hero matches the finding title. Framework N+1 keeps
+		# affected_count — it is already the cumulative total its title shows.
+		_loop_n = affected
+		_spread = ""
+		if finding_type == "N+1 Query":
+			_detail = top.get("technical_detail") or {}
+			_loop_n = int(_detail.get("loop_count") or 0) or affected
+			# When the loop spans requests, name the spread so the per-request "12×"
+			# and the cumulative impact reconcile — same reconciliation the card has.
+			_run = int(_detail.get("run_count") or 0)
+			if _run > 1:
+				_spread = f" across {_run} requests"
 		headline = Markup(
 			"One line of code is responsible for <span class=\"hot\">~"
 			"{impact}</span> of this session &mdash; same query ran "
-			"<span class=\"hot\">{n}× inside a loop</span>. "
+			"<span class=\"hot\">{n}× inside a loop</span>{spread}. "
 			"Removing the redundant round-trips is the single biggest "
 			"win here."
-		).format(impact=impact_html, n=affected)
+		).format(impact=impact_html, n=_loop_n, spread=_spread)
 	elif category == "slow_hook":
 		headline = Markup(
 			"<span class=\"hot\">{impact}</span> is spent inside a "
