@@ -1775,6 +1775,11 @@
         {% set _per_hit_ms = f.estimated_impact_ms / f.affected_count %}
         <div class="small">{{ f.affected_count }}× hits{% if _per_hit_ms >= 0.05 %} &middot; {{ fmt_ms(_per_hit_ms, 1) }}<small class="scope-tag">per hit</small>{% endif %}</div>
         {% endif %}
+        {# Reconcile the per-request title ("ran 12×") with the total hit count
+           ("120× hits") when a loop spans several requests. #}
+        {% if detail.run_count and detail.run_count > 1 %}
+        <div class="small muted">looped in {{ detail.run_count }} requests</div>
+        {% endif %}
         {% if f.technical_detail and f.technical_detail.intra_action_repetitions and f.technical_detail.intra_action_repetitions > 1 %}
         <div class="small muted">called from {{ f.technical_detail.intra_action_repetitions }} sites in this action</div>
         {% endif %}
