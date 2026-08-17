@@ -319,6 +319,10 @@ def _build_user_finding(
 				"sample_queries": all_variants[:5],
 				"total_time_ms": round(total_time, 2),
 				"average_time_ms": round(avg_ms, 2),
+				# Scope tag for the card's impact box: this finding's estimated_impact_ms
+				# is the loop's own recoverable cost, not the session-wide total that
+				# every other finding reports as "consolidated".
+				"impact_scope_label": "recoverable",
 				# v0.5.3: projected post-fix timing. Batching a loop's N
 				# queries into ONE collapses that request's cost to roughly a
 				# single query. Empirically a batched query with an IN (…)
@@ -354,12 +358,15 @@ def _build_user_finding(
 		),
 		# Headline economics — read by the TL;DR hero (renderer/_internal.py),
 		# the card impact box (report.html), the report-wide sort, and the AI-fix
-		# prompt (ai_fix.py). Loop-scoped to match the loop-scoped title/description:
-		# leaving them cumulative made those surfaces show "60×" / "280ms" beside a
-		# "12×" card. The session-wide totals stay in the detail JSON above
-		# (occurrences / total_time_ms), rendered under a "session-wide" label.
+		# prompt (ai_fix.py). Both are scoped to the SAME occurrence set — the loop's
+		# own hits (loop_durations) — so the generic `per_hit = impact / count`
+		# consumers compute the loop's real per-query cost. estimated_impact_ms is the
+		# loop's total time; affected_count is the loop's total hit COUNT (not
+		# loop_count, the per-request peak — mixing the two denominators inflated
+		# per-hit on multi-request loops). The "in a row" count (loop_count) drives
+		# the title/hero; the session-wide totals stay in the detail JSON above.
 		"estimated_impact_ms": round(loop_time, 2),
-		"affected_count": loop_count,
+		"affected_count": len(loop_durations),
 		"action_ref": str(action_idx),
 	}
 

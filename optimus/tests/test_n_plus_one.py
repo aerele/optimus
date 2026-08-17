@@ -254,15 +254,25 @@ def test_loop_across_many_requests_reports_per_request_count_not_total(empty_con
 	assert "12 times in a row" in desc
 	assert "120 times in a row" not in desc
 	assert "10 separate requests" in desc
+	# Multi-request loops say "up to N" — loop_count is the busiest request's peak,
+	# not a uniform per-request figure.
+	assert "up to 12 times in a row" in desc
 
 	# Detail keeps the total as scope but exposes the honest loop/run split.
 	detail = json.loads(f["technical_detail_json"])
 	assert detail["loop_count"] == 12
 	assert detail["run_count"] == 10
 	assert detail["occurrences"] == 120  # session-wide total kept in the detail (scope)
-	# Headline field is LOOP-scoped (matches the "12×" title), not the 120 total —
-	# it feeds the hero, the impact box, the report sort, and the AI-fix prompt.
-	assert f["affected_count"] == 12
+	# affected_count and estimated_impact_ms are on the SAME occurrence set (the
+	# loop's own hits), so the generic per-hit consumers stay correct: this loop
+	# fired 120 hits at 2ms each. affected_count is the loop HIT count (120), NOT
+	# loop_count (12, the per-request peak that drives the title/hero) — mixing the
+	# two denominators inflated per-hit ×10 on multi-request loops.
+	assert f["affected_count"] == 120  # total loop hits (12× across 10 requests)
+	assert f["estimated_impact_ms"] == 120.0  # loop_time (120 hits × 1ms)
+	# per-hit = impact / count = the loop's real per-query cost (1ms). Before this
+	# fix affected_count was loop_count (12), so per-hit read 120/12 = 10ms — ×10.
+	assert f["estimated_impact_ms"] / f["affected_count"] == 1.0
 
 
 def test_loop_across_requests_stays_high_when_cumulative_time_is_large(empty_context):
@@ -447,6 +457,10 @@ def test_framework_finding_gates_on_cumulative_not_loop_time(empty_context):
 	assert detail["loop_count"] == 10  # the one looping request's size
 	assert detail["run_count"] == 1  # only one request actually looped
 	assert round(detail["total_time_ms"]) == 25
+	# Framework title uses the SESSION total (25), never the per-request loop count
+	# (10) — framework findings are cumulative-framed, unlike user N+1s.
+	assert "25×" in f["title"]
+	assert "10×" not in f["title"]
 
 
 def test_user_code_n_plus_one_still_emits_as_actionable(empty_context):
@@ -1045,6 +1059,14 @@ def test_small_loop_low_severity_and_loop_scoped_cost(empty_context):
 	# 280 session totals, which stay in the detail above under a "session-wide" label.
 	assert f["affected_count"] == 10  # loop_count, not the 60 total
 	assert f["estimated_impact_ms"] == 30.0  # loop_time, not the 280ms total
+	# P95 + projection sub-fields are populated (10 loop samples ≥ the P95 minimum),
+	# and scoped to the loop's own per-query cost (3ms), not the 5ms singles.
+	assert detail["p95_ms"] is not None
+	assert detail["projected_avg_time_ms"] == 6.0  # loop_avg (3ms) × 2
+	assert detail["projected_speedup_label"] == "~5× fewer queries"  # loop_count // 2
+	# The card's scope tag is analyzer-declared (data-driven) — no surface hardcodes
+	# "N+1 == recoverable"; the impact/count really are the loop's own, not the total.
+	assert detail["impact_scope_label"] == "recoverable"
 
 
 def test_trivial_loop_suppressed_when_only_noise_lifts_it_over_gate(empty_context):

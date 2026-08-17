@@ -1767,7 +1767,10 @@
         {% endif %}
       </div>
       <div class="finding-impact">
-        <span class="big">{{ fmt_ms(f.estimated_impact_ms) }}</span><small class="scope-tag">consolidated</small>
+        {# The scope tag is analyzer-declared: a finding whose estimated_impact_ms
+           is not the session-wide total sets detail.impact_scope_label (e.g. N+1 →
+           "recoverable"). Everything else falls back to "consolidated". #}
+        <span class="big">{{ fmt_ms(f.estimated_impact_ms) }}</span><small class="scope-tag">{{ detail.impact_scope_label or "consolidated" }}</small>
         {% if f.affected_count and f.affected_count > 1 %}
         {% set _per_hit_ms = f.estimated_impact_ms / f.affected_count %}
         <div class="small">{{ f.affected_count }}× hits{% if _per_hit_ms >= 0.05 %} &middot; {{ fmt_ms(_per_hit_ms, 1) }}<small class="scope-tag">per hit</small>{% endif %}</div>
