@@ -2,8 +2,9 @@
 # For license information, please see license.txt
 
 """True N+1 detection: group by callsite, then by normalized SQL. A variant
-recurring > `MIN_OCCURRENCES` times WITHIN ONE request is a per-row loop — the
-distinction a bare copy-count can't make."""
+recurring at least `n_plus_one_min_occurrences` (a settings value, default 10)
+times WITHIN ONE request is a per-row loop — the distinction a bare copy-count
+can't make."""
 
 import json
 from collections import Counter, defaultdict

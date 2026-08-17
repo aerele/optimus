@@ -1963,7 +1963,7 @@
 
       {% if detail.occurrences %}
         <p class="small muted">
-          {{ detail.occurrences }} occurrences
+          {{ detail.occurrences }} occurrences <small class="scope-tag">session-wide</small>
           {% if detail.average_time_ms %} &middot; ~{{ fmt_ms(detail.average_time_ms, 1) }} each{% endif %}
           {% if detail.total_time_ms %} &middot; {{ fmt_ms(detail.total_time_ms) }} total{% endif %}
         </p>
