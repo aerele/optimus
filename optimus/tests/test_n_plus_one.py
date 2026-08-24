@@ -240,8 +240,10 @@ def test_loop_across_many_requests_reports_per_request_count_not_total(empty_con
 	assert len(result.findings) == 1
 	f = result.findings[0]
 
-	# Title reports the per-request loop size, not the cross-request total.
-	assert "12×" in f["title"]
+	# Title reports the per-request loop size, not the cross-request total, and
+	# hedges with "up to" because loop_count (12) is the busiest request's peak,
+	# not a uniform per-request figure (run_count=10, so 12×10≠affected_count).
+	assert "up to 12×" in f["title"]
 	assert "120" not in f["title"]
 
 	# Count no longer drives severity to High: 12 < 50 occurrences AND
@@ -357,7 +359,9 @@ def test_run_count_ignores_requests_where_query_did_not_loop(empty_context):
 	result = n_plus_one.analyze([looping, *singles], empty_context)
 	assert len(result.findings) == 1
 	f = result.findings[0]
+	# Single looping request → loop_count is exact, so the title does NOT hedge.
 	assert "10×" in f["title"]
+	assert "up to" not in f["title"]
 	detail = json.loads(f["technical_detail_json"])
 	assert detail["loop_count"] == 10
 	assert detail["run_count"] == 1  # only the one request that looped

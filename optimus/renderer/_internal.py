@@ -1791,28 +1791,43 @@ def _compose_tldr(
 				"cost goes away."
 			).format(impact=impact_html, n=affected)
 	elif category == "n_plus_one" and affected:
-		# The "ran N× in a row" count is the per-request loop size, not
-		# affected_count (which for the user N+1 is the loop's TOTAL hit count, kept
-		# on the same set as estimated_impact_ms so per-hit math stays correct). Use
-		# loop_count so the hero matches the finding title. Framework N+1 keeps
-		# affected_count — it is already the cumulative total its title shows.
-		_loop_n = affected
-		_spread = ""
-		if finding_type == "N+1 Query":
-			_detail = top.get("technical_detail") or {}
+		# User vs Framework N+1 — decided by the analyzer's own scope declaration
+		# ``impact_scope_label``, the SAME field the card gates on (report.html), so
+		# "is this a loop-scoped user win" has ONE source of truth. A user N+1 sets
+		# it to "recoverable" (analyzers/n_plus_one.py); Framework N+1 leaves it
+		# unset — so both surfaces agree even if the label is ever missing.
+		_detail = top.get("technical_detail") or {}
+		if (_detail.get("impact_scope_label") or "") != "recoverable":
+			# Framework N+1: informational — the loop lives inside Frappe, not the
+			# user's code. It can still win the hero slot (highest-impact signal),
+			# but it must NEVER be called "the single biggest win": that contradicts
+			# the finding body's own "rarely something you can change" framing.
+			# affected_count here is the cumulative total the title shows.
+			headline = Markup(
+				"Frappe's own code ran the same query <span class=\"hot\">{n}×"
+				"</span> this session &mdash; <span class=\"hot\">~{impact}</span> "
+				"total. That loop lives in framework code, so it's usually not "
+				"something you can change; shown here for transparency."
+			).format(n=affected, impact=impact_html)
+		else:
+			# User (loop-scoped) N+1. The "ran N× in a row" count is the per-request
+			# loop size, not affected_count (the loop's TOTAL hit count, kept on the
+			# same set as estimated_impact_ms so per-hit math stays correct). Use
+			# loop_count so the hero matches the finding title.
 			_loop_n = int(_detail.get("loop_count") or 0) or affected
-			# When the loop spans requests, name the spread so the per-request "12×"
-			# and the cumulative impact reconcile — same reconciliation the card has.
+			# When the loop spans requests, loop_count is the PEAK single-request
+			# size — hedge ("up to") and name the spread so the per-request count and
+			# the cumulative impact reconcile (as the title/card do).
 			_run = int(_detail.get("run_count") or 0)
-			if _run > 1:
-				_spread = f" across {_run} requests"
-		headline = Markup(
-			"One line of code is responsible for <span class=\"hot\">~"
-			"{impact}</span> of this session &mdash; same query ran "
-			"<span class=\"hot\">{n}× inside a loop</span>{spread}. "
-			"Removing the redundant round-trips is the single biggest "
-			"win here."
-		).format(impact=impact_html, n=_loop_n, spread=_spread)
+			_upto = "up to " if _run > 1 else ""
+			_spread = f" across {_run} requests" if _run > 1 else ""
+			headline = Markup(
+				"One line of code is responsible for <span class=\"hot\">~"
+				"{impact}</span> of this session &mdash; same query ran "
+				"<span class=\"hot\">{upto}{n}× inside a loop</span>{spread}. "
+				"Removing the redundant round-trips is the single biggest "
+				"win here."
+			).format(impact=impact_html, upto=_upto, n=_loop_n, spread=_spread)
 	elif category == "slow_hook":
 		headline = Markup(
 			"<span class=\"hot\">{impact}</span> is spent inside a "

@@ -19,6 +19,12 @@ versions may contain breaking changes — see migration notes below).
   *through* the `def` and moves the highlight + `file:line` onto the `def`
   (e.g. `sales_order.py:795 · calculate_discount`). Render-only — re-run the
   flow or use **Regenerate reports** to see it on existing sessions.
+- **Framework N+1 could hijack the TL;DR hero with actionable wording.** A Low
+  Framework N+1 (Frappe's own code, not user-fixable) could sort into the hero
+  and print "the single biggest win here", contradicting its own body. The hero
+  now routes user-vs-framework on the analyzer-declared `impact_scope_label`
+  (same field the card uses); the user-N+1 title/hero also hedge "up to N×" for
+  loops spanning several requests.
 
 ### Internal
 
@@ -26,6 +32,11 @@ versions may contain breaking changes — see migration notes below).
   (also fixes Server Script callsites silently failing in `_read_source_window`
   / `_skip_decorators_to_def`); removed the now-orphaned
   `_read_function_body_snippet`.
+- `analyzers/n_plus_one.py` review cleanups: `_LoopScope` dataclass instead of
+  duplicated 14-param builders; the analyze loop bails on multi-variant callsites
+  and builds the dominant-action `Counter` once; `min_occurrences` clamped to
+  `>= 2`; `<1ms` instead of a misleading `0ms`; dead `avg_ms` / `variant_count` /
+  `all_variants` removed; shared `_p95`. Behaviour-preserving.
 
 ## [0.12.26] — 2026-05-25
 

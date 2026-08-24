@@ -8,6 +8,7 @@ can't make."""
 
 import json
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 
 from optimus.analyzers.base import (
 	FRAMEWORK_PREFIXES,  # noqa: F401  (kept for any external importers)
@@ -49,6 +50,21 @@ def _get_min_total_time() -> float:
 	return DEFAULT_MIN_TOTAL_TIME_MS
 
 
+@dataclass(frozen=True)
+class _LoopScope:
+	"""One N+1 callsite's scope numbers, passed to the builders as one arg. ``total_*``
+	is session-cumulative (every occurrence); ``loop_*`` is scoped to the requests
+	that actually looped (≥ min_occurrences)."""
+
+	total_count: int  # every occurrence of the query this session
+	loop_count: int  # peak repeats within a single request (the "N" in N+1)
+	run_count: int  # how many requests the query actually looped in
+	total_time: float  # cumulative time across all occurrences
+	loop_time: float  # time in the looping requests only (recoverable)
+	per_hit_durations: list  # every occurrence's duration (framework P95)
+	loop_durations: list  # looping-request durations (user P95 + projection)
+
+
 def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# Single settings read per analyze pass (see redundant_calls for
 	# the same pattern).
@@ -70,7 +86,11 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	callsite_groups: dict[tuple, dict] = defaultdict(
 		lambda: {"variants": defaultdict(list), "function_name": ""}
 	)
-	min_occurrences = cfg.n_plus_one_min_occurrences
+	# Clamp to >= 2: a "loop" needs at least two repeats, and loop_count is
+	# always >= 1, so a misconfigured 0/1 would defeat the within-request gate
+	# (line ``loop_count < min_occurrences``) and re-admit the cross-request
+	# false positive the analyzer exists to prevent.
+	min_occurrences = max(2, cfg.n_plus_one_min_occurrences)
 	min_total_time = _get_min_total_time()
 
 	for action_idx, recording in enumerate(recordings):
@@ -91,66 +111,43 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	findings = []
 	for (filename, lineno), bucket in callsite_groups.items():
 		variants: dict = bucket["variants"]
-		# Total count across ALL variants at this callsite.
-		total_count = sum(len(occ) for occ in variants.values())
-		# N+1 signal: the MOST-repeated query variant must clear the
-		# threshold WITHIN A SINGLE ACTION. An N+1 is a loop inside ONE
-		# request/job — counting occurrences across actions would mis-flag a
-		# normal per-request query (run once per request × N requests) as a
-		# "loop", emitting a confident but wrong "Same query ran N× in a row"
-		# at High severity. Mirrors redundant_calls' max_in_any_action guard.
-		# If 10 different queries each ran once from this callsite, it's also
-		# not an N+1 — it's a fan-out call site (still excluded by the per-
-		# variant max).
-		max_variant_in_action = max(
-			(
-				Counter(o["action_idx"] for o in occ).most_common(1)[0][1]
-				for occ in variants.values()
-				if occ
-			),
-			default=0,
-		)
-		if max_variant_in_action < min_occurrences:
+		# v0.7.x: multi-variant N+1 ("Callsite ran X queries (N variants) at …")
+		# is suppressed — the wording reads as jargon (developers don't think in
+		# "variants"), the fix hint is generic, and the dominant variant is already
+		# surfaced elsewhere (top queries, table breakdown). Only single-variant
+		# "Same query ran N× at …" is actionable, so bail before any per-variant
+		# work when this callsite has more than one query shape. (A fan-out call
+		# site — 10 different queries each run once — is multi-variant too, and is
+		# excluded here rather than by a separate per-variant max.)
+		if len(variants) > 1:
 			continue
 
-		per_hit_durations = [
-			o["duration"]
-			for occ in variants.values()
-			for o in occ
-		]
-		total_time = sum(per_hit_durations)
-
-		# For the finding's "canonical" representative, use the query
-		# variant with the most occurrences (highest-impact loop).
-		top_variant = max(variants.items(), key=lambda kv: len(kv[1]))
-		canonical_query, canonical_occurrences = top_variant
+		# The one query variant at this callsite (every bucket has ≥1 occurrence).
+		canonical_query, canonical_occurrences = next(iter(variants.items()))
+		total_count = len(canonical_occurrences)
 		function_name = bucket["function_name"]
-		variant_count = len(variants)
 
-		# v0.7.x: multi-variant N+1 ("Callsite ran X queries (N
-		# variants) at …") is suppressed. The wording reads as jargon
-		# (developers don't think in terms of "variants"), the fix
-		# hint is generic, and the dominant variant of the loop is
-		# already surfaced elsewhere (top queries, table breakdown).
-		# Single-variant N+1 ("Same query ran N× at …") still fires
-		# and is the actionable shape.
-		if variant_count > 1:
-			continue
-
-		# The true "N+1" magnitude is how many times the loop ran WITHIN A
-		# SINGLE request — not the cross-request total. A 12-query loop that
-		# ran in 5 separate requests is "12× in a row", not "60× in a row":
-		# reporting the cross-request total inflated the count, the "…in a
-		# row" wording, AND the occurrence-based severity. ``total_count``
-		# stays for cumulative cost/averages; ``loop_count`` drives the
-		# count-based wording + severity.
+		# N+1 signal: the query must repeat ≥ min_occurrences WITHIN A SINGLE
+		# request. Counting occurrences ACROSS requests would mis-flag a normal
+		# per-request query (run once per request × N requests) as a loop, emitting
+		# a confident-but-wrong "ran N× in a row" at High severity. The dominant-
+		# action Counter is built ONCE here and reused for the gate, action_ref,
+		# run_count and loop scoping.
 		dominant_action_counts = Counter(o["action_idx"] for o in canonical_occurrences)
-		# ``action_ref`` must point at the request where the loop actually ran
-		# (the dominant action), NOT the first request the query merely appeared
-		# in — the report walks THAT action's call tree for inner-loop detail.
-		# Taking loop_count from the same most_common(1) keeps the two aligned.
+		# loop_count IS the "N+1 magnitude": how many times the loop ran within a
+		# single request — the busiest one — never the cross-request total (which
+		# would inflate the count, the "…in a row" wording, AND the severity).
+		# ``action_ref`` must point at the request where the loop actually ran (the
+		# dominant action), NOT the first request the query merely appeared in — the
+		# report walks THAT action's call tree for inner-loop detail. Taking both
+		# from the same most_common(1) keeps them aligned.
 		dominant_action_idx, loop_count = dominant_action_counts.most_common(1)[0]
+		if loop_count < min_occurrences:
+			continue
 		action_idx = dominant_action_idx
+
+		per_hit_durations = [o["duration"] for o in canonical_occurrences]
+		total_time = sum(per_hit_durations)
 		# ``run_count`` = requests in which the query actually REPEATED (a real
 		# loop to batch), not merely appeared. A query that loops in one request
 		# but also runs once in 100 others has run_count == 1, so the "ran in N
@@ -171,9 +168,10 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		# across many unrelated requests, sums past the time floor — that cost is
 		# NOT recoverable by batching this loop.
 		# ``total_time`` (all occurrences) stays for cumulative reporting.
-		loop_occurrences = [o for o in canonical_occurrences if o["action_idx"] in looping_actions]
-		loop_time = sum(o["duration"] for o in loop_occurrences)
-		loop_durations = [o["duration"] for o in loop_occurrences]
+		loop_durations = [
+			o["duration"] for o in canonical_occurrences if o["action_idx"] in looping_actions
+		]
+		loop_time = sum(loop_durations)
 
 		short_fn = short_filename(filename)
 		is_framework = is_framework_callsite(filename, tracked_apps=tracked_apps)
@@ -189,13 +187,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		if gate_time < min_total_time:
 			continue
 
-		builder = _build_framework_finding if is_framework else _build_user_finding
-		findings.append(builder(
-			short_fn=short_fn,
-			filename=filename,
-			lineno=lineno,
-			function_name=function_name,
-			normalized=canonical_query,
+		scope = _LoopScope(
 			total_count=total_count,
 			loop_count=loop_count,
 			run_count=run_count,
@@ -203,14 +195,16 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			loop_time=loop_time,
 			per_hit_durations=per_hit_durations,
 			loop_durations=loop_durations,
+		)
+		builder = _build_framework_finding if is_framework else _build_user_finding
+		findings.append(builder(
+			scope,
+			short_fn=short_fn,
+			filename=filename,
+			lineno=lineno,
+			function_name=function_name,
+			normalized=canonical_query,
 			action_idx=action_idx,
-			# v0.5.2 round 3: expose variant list so the detail can
-			# show "10 query variants observed" with sample queries.
-			all_variants=sorted(
-				variants.keys(),
-				key=lambda q: -len(variants[q]),
-			),
-			variant_count=variant_count,
 		))
 
 	# Sort: highest severity first, then highest impact within severity
@@ -227,37 +221,43 @@ def _severity(count: int, total_time_ms: float) -> str:
 	return "Low"
 
 
-def _title_for_callsite(short_fn, lineno, count) -> str:
-	"""'Same query ran N×' — multi-variant callsites are suppressed upstream (analyze())."""
-	return f"Same query ran {count}× at {short_fn}:{lineno}"
+def _p95(durations) -> float | None:
+	"""P95 of ``durations``, or None below ``P95_MIN_SAMPLES`` (too small to mean anything)."""
+	if durations and len(durations) >= P95_MIN_SAMPLES:
+		return percentile(durations, 95)
+	return None
+
+
+def _title_for_callsite(short_fn, lineno, count, run_count=1) -> str:
+	"""'Same query ran N×' — hedged 'up to N×' for a multi-request loop, where
+	``count`` is the busiest request's peak, not a uniform figure."""
+	prefix = "Same query ran up to" if run_count > 1 else "Same query ran"
+	return f"{prefix} {count}× at {short_fn}:{lineno}"
 
 
 def _build_user_finding(
+	scope: _LoopScope,
 	*,
 	short_fn: str,
 	filename: str,
 	lineno,
 	function_name: str,
 	normalized: str,
-	total_count: int,
-	loop_count: int,
-	run_count: int = 1,
-	total_time: float,
-	loop_time: float = 0.0,
-	per_hit_durations: list[float] | None = None,
-	loop_durations: list[float] | None = None,
 	action_idx: int,
-	all_variants: list[str] | None = None,
-	variant_count: int = 1,
 ) -> dict:
 	"""User-code N+1 finding — severity by loop size & the loop's own time, with a fix hint."""
-	all_variants = all_variants or [normalized]
-	# avg_ms = session-wide average per occurrence (rendered as "~X each" next
-	# to the total occurrence count). loop_avg = the loop's own per-query cost,
-	# used only for the post-fix projection so unrelated single-run requests
-	# don't skew it (falls back to avg_ms when no loop rows were captured).
-	avg_ms = total_time / total_count if total_count else 0
-	loop_avg = loop_time / len(loop_durations) if loop_durations else avg_ms
+	total_count = scope.total_count
+	loop_count = scope.loop_count
+	run_count = scope.run_count
+	total_time = scope.total_time
+	loop_time = scope.loop_time
+	loop_durations = scope.loop_durations
+	# loop_avg = the loop's own per-query cost, used for the post-fix projection
+	# so unrelated single-run requests don't skew it. loop_durations is always
+	# non-empty here (a user finding is only built once the loop cleared
+	# min_occurrences in ≥1 request); the ``or 0`` is defence-in-depth so the
+	# analyze pass can never divide by zero.
+	loop_avg = loop_time / len(loop_durations) if loop_durations else 0
 
 	# Cost quoted is the LOOP's own time (loop_time), never the cross-request
 	# cumulative total — a query that loops in one request but also runs once
@@ -266,6 +266,11 @@ def _build_user_finding(
 		"This is usually a Python loop that should fetch its data in one "
 		"query instead of one-at-a-time. Typical fix: a few hours of dev work."
 	)
+	# A sub-1ms loop (only reachable when the min-time gate is configured below
+	# the 20ms default) would render as a misleading "0ms" — say "<1ms" instead.
+	# Guard on ``>= 1`` not ``>= 0.5``: f"{0.5:.0f}" is "0" (round-half-to-even),
+	# so 0.5 must take the "<1ms" branch too.
+	cost = f"{loop_time:.0f}ms" if loop_time >= 1 else "<1ms"
 	if run_count > 1:
 		# The loop spanned several requests; loop_count is the WORST request's
 		# count (the peak), not a uniform per-request figure — "up to N" so it
@@ -273,14 +278,14 @@ def _build_user_finding(
 		desc = (
 			f"We noticed the same query repeated up to {loop_count} times in a row "
 			f"from the same line of code ({filename}:{lineno}). That loop ran in "
-			f"{run_count} separate requests, costing about {loop_time:.0f}ms. {tail}"
+			f"{run_count} separate requests, costing about {cost}. {tail}"
 		)
 	else:
 		# One looping request, so loop_count is exact.
 		desc = (
 			f"We noticed the same query was repeated {loop_count} times in a row "
 			f"from the same line of code ({filename}:{lineno}), costing about "
-			f"{loop_time:.0f}ms. {tail}"
+			f"{cost}. {tail}"
 		)
 
 	# v0.7.x M4: P95 of the per-hit duration distribution, when the
@@ -288,11 +293,7 @@ def _build_user_finding(
 	# of the tail beyond the average and consolidated total. Scoped to the
 	# loop's own hits (not single-run appearances) so it describes the
 	# thing being flagged.
-	p95_ms = (
-		percentile(loop_durations, 95)
-		if loop_durations and len(loop_durations) >= P95_MIN_SAMPLES
-		else None
-	)
+	p95_ms = _p95(loop_durations)
 
 	return {
 		"finding_type": "N+1 Query",
@@ -300,7 +301,7 @@ def _build_user_finding(
 		# recoverable time (loop_time) — never the cross-request cumulative
 		# total, which single-run requests would inflate.
 		"severity": _severity(loop_count, loop_time),
-		"title": _title_for_callsite(short_fn, lineno, loop_count),
+		"title": _title_for_callsite(short_fn, lineno, loop_count, run_count),
 		"customer_description": desc,
 		"technical_detail_json": json.dumps(
 			{
@@ -316,12 +317,12 @@ def _build_user_finding(
 				"occurrences": total_count,
 				"loop_count": loop_count,
 				"run_count": run_count,
-				"variant_count": variant_count,
+				# Single-variant is the only shape emitted (multi-variant bails
+				# upstream); kept in the JSON for schema stability.
+				"variant_count": 1,
 				"p95_ms": round(p95_ms, 2) if p95_ms is not None else None,
-				# Up to 5 sample variants for the detail block —
-				# enough to identify the loop, capped so we don't
-				# blow out the 140-char title limit / DocType blob.
-				"sample_queries": all_variants[:5],
+				# The one query shape at this callsite (multi-variant is suppressed).
+				"sample_queries": [normalized],
 				"total_time_ms": round(total_time, 2),
 				# No session-wide "~X each": for a bimodal loop (loop hits + unrelated
 				# single runs) it blends two costs into a misleading average and would
@@ -340,9 +341,9 @@ def _build_user_finding(
 				# otherwise the projection collapses a whole session to one
 				# query and overstates the win. Capped at the current total so
 				# a projection can never read as WORSE than doing nothing.
-				# Uses the LOOP's own per-query average (loop_avg), not the
-				# session-wide avg_ms that single-run requests would skew. Only
-				# the loop collapses — any non-loop appearances of this query
+				# Uses the LOOP's own per-query average (loop_avg = loop_time /
+				# loop hits), not a session-wide average that single-run requests
+				# would skew. Only the loop collapses — any non-loop appearances
 				# (total_time - loop_time) keep their cost, so they're added back
 				# rather than assumed away. Capped at the current total.
 				"projected_total_ms": round(
@@ -380,25 +381,21 @@ def _build_user_finding(
 
 
 def _build_framework_finding(
+	scope: _LoopScope,
 	*,
 	short_fn: str,
 	filename: str,
 	lineno,
 	function_name: str,
 	normalized: str,
-	total_count: int,
-	loop_count: int,
-	run_count: int = 1,
-	total_time: float,
-	loop_time: float = 0.0,
-	per_hit_durations: list[float] | None = None,
-	loop_durations: list[float] | None = None,
 	action_idx: int,
-	all_variants: list[str] | None = None,
-	variant_count: int = 1,
 ) -> dict:
 	"""Framework-level N+1 — always Low, cumulative framing, full technical detail."""
-	all_variants = all_variants or [normalized]
+	total_count = scope.total_count
+	loop_count = scope.loop_count
+	run_count = scope.run_count
+	total_time = scope.total_time
+	per_hit_durations = scope.per_hit_durations
 	# Framework findings are Low + informational and framed around the
 	# CUMULATIVE session cost (the description says "issued N queries in this
 	# session"), so the title uses total_count too — keeping title and body on
@@ -407,11 +404,7 @@ def _build_framework_finding(
 	# carried in the detail JSON below for anyone optimising the framework.
 	title = f"Framework query repeated {total_count}× at {short_fn}:{lineno}"
 
-	p95_ms = (
-		percentile(per_hit_durations, 95)
-		if per_hit_durations and len(per_hit_durations) >= P95_MIN_SAMPLES
-		else None
-	)
+	p95_ms = _p95(per_hit_durations)
 
 	return {
 		"finding_type": "Framework N+1",
@@ -438,9 +431,9 @@ def _build_framework_finding(
 				"occurrences": total_count,
 				"loop_count": loop_count,
 				"run_count": run_count,
-				"variant_count": variant_count,
+				"variant_count": 1,
 				"p95_ms": round(p95_ms, 2) if p95_ms is not None else None,
-				"sample_queries": all_variants[:5],
+				"sample_queries": [normalized],
 				"total_time_ms": round(total_time, 2),
 				"average_time_ms": round(total_time / total_count, 2) if total_count else 0,
 				"is_framework": True,
