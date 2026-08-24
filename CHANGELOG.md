@@ -25,6 +25,12 @@ versions may contain breaking changes — see migration notes below).
   now routes user-vs-framework on the analyzer-declared `impact_scope_label`
   (same field the card uses); the user-N+1 title/hero also hedge "up to N×" for
   loops spanning several requests.
+- **Slow Hot Path findings blamed third-party libraries as user code.**
+  pyinstrument strips the `site-packages/` prefix, so `pydantic`/`click`/… looked
+  like app code and got flagged as fixable hot paths. Now only frames from the
+  site's installed apps (`frappe.get_installed_apps()`, memoised) are actionable;
+  every other package is treated as library code. Needs a **re-analyze**
+  (re-profile) to drop existing findings.
 
 ### Internal
 

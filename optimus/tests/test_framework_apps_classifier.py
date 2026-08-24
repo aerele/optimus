@@ -89,9 +89,48 @@ class TestThirdPartyLibraryDetection:
 		"something/gunicorn/app.py",
 		"something/rq/worker.py",
 		"pyinstrument/frame.py",
+		# v0.12.x: pyinstrument-stripped paths (no site-packages/ prefix) for
+		# libs that were leaking into findings. Only the unambiguous LONGER names
+		# are in base's substring list — short tokens like "click" are handled by
+		# call_tree's exact first-segment match instead (see test_call_tree_findings).
+		"pydantic/type_adapter.py",
+		"pydantic_core/_pydantic_core.py",
+		"sqlparse/engine/grouping.py",
+		"cryptography/hazmat/primitives/serialization.py",
 	])
 	def test_matches(self, path):
 		assert is_framework_callsite(path) is True
+
+
+class TestShortTokenNotSubstringMatched:
+	"""Regression: short lib tokens must NOT substring-match in base — "click/" collided inside …/onclick/… and misrouted real findings."""
+
+	@pytest.mark.parametrize("path", [
+		"apps/myapp/onclick/handler.py",
+		"apps/myapp/babel/messages.py",
+		"click/core.py",  # base leaves this to call_tree's exact-match module
+	])
+	def test_short_token_paths_not_framework(self, path):
+		assert is_framework_callsite(path) is False, (
+			f"{path} must NOT be classified framework by base's substring list"
+		)
+
+
+class TestThirdPartyClassifiersAgree:
+	"""base and call_tree's third-party lists must agree on the unambiguous libs in both, so a one-sided edit can't silently drift (short tokens like click are call_tree-only)."""
+
+	@pytest.mark.parametrize("lib", [
+		"pydantic", "pydantic_core", "sqlparse", "croniter",
+		"cryptography", "num2words", "lxml", "html5lib",
+		"premailer", "oauthlib",
+	])
+	def test_both_classifiers_treat_as_framework(self, lib):
+		from optimus.analyzers.call_tree import _is_pure_helper_frame
+
+		path = f"{lib}/core.py"
+		assert is_framework_callsite(path) is True, f"base misses {lib}"
+		node = {"function": "run", "filename": path, "kind": "python"}
+		assert _is_pure_helper_frame(node) is True, f"call_tree misses {lib}"
 
 
 class TestUserCodeNotMatched:

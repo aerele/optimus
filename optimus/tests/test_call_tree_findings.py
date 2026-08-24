@@ -542,7 +542,10 @@ def test_pure_helper_filters_third_party_libs():
 	from optimus.analyzers.call_tree import _is_pure_helper_frame
 
 	for first_segment in ("MySQLdb", "pymysql", "requests", "urllib3",
-	                      "jinja2", "pandas", "redis"):
+	                      "jinja2", "pandas", "redis",
+	                      # v0.12.x: leaked into Slow Hot Path findings.
+	                      "pydantic", "pydantic_core", "click",
+	                      "sqlparse", "cryptography", "lxml", "croniter"):
 		node = {
 			"function": "execute",
 			"filename": f"{first_segment}/cursors.py",
@@ -550,6 +553,40 @@ def test_pure_helper_filters_third_party_libs():
 		}
 		assert _is_pure_helper_frame(node) is True, (
 			f"third-party lib {first_segment} must be filtered"
+		)
+
+
+def test_installed_apps_allowlist_filters_any_unknown_package(monkeypatch):
+	"""Completeness backstop: on-bench, ANY frame whose top segment isn't an installed app is third-party plumbing — not just the hardcoded set."""
+	from optimus.analyzers import call_tree
+
+	monkeypatch.setattr(
+		call_tree,
+		"_installed_apps_for_site",
+		lambda: frozenset({"frappe", "erpnext", "optimus", "nextnderp"}),
+	)
+	# A lib NOT in the hardcoded _THIRD_PARTY_LIB_SEGMENTS is still filtered.
+	assert call_tree._is_pure_helper_frame(
+		{"function": "run", "filename": "some_obscure_lib/core.py", "kind": "python"}) is True
+	# Real installed apps stay actionable — both bench-stripped and apps/<name>/ forms.
+	assert call_tree._is_pure_helper_frame(
+		{"function": "calc", "filename": "nextnderp/x/y.py", "kind": "python"}) is False
+	assert call_tree._is_pure_helper_frame(
+		{"function": "validate", "filename": "apps/erpnext/erpnext/foo.py", "kind": "python"}) is False
+
+
+def test_walker_skips_third_party_lib_init_and_call():
+	"""Regression: pydantic/click frames (site-packages/ prefix stripped) must be walker-plumbing, not blamed as hot paths."""
+	from optimus.analyzers.call_tree import _is_walker_plumbing_frame
+
+	for fn, filename in (
+		("__init__", "pydantic/type_adapter.py"),
+		("__init__", "pydantic_core/_pydantic_core.py"),
+		("__call__", "click/core.py"),
+	):
+		node = {"function": fn, "filename": filename, "kind": "python"}
+		assert _is_walker_plumbing_frame(node) is True, (
+			f"{filename}::{fn} must be walker plumbing (third-party lib)"
 		)
 
 

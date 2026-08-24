@@ -91,6 +91,26 @@ _THIRD_PARTY_LIB_FRAGMENTS: tuple[str, ...] = (
 	"dateutil/",
 	"MySQLdb/",
 	"pymysql/",
+	# v0.12.x: common Frappe-bench libs whose site-packages/ prefix pyinstrument
+	# strips (pydantic, click, …), so the plain "site-packages/" check above
+	# misses them. These are matched as substrings, so only the unambiguous
+	# longer names from call_tree._THIRD_PARTY_LIB_SEGMENTS are mirrored here —
+	# short tokens (jwt, idna, bs4) are left to that module's exact first-segment
+	# match to avoid false positives inside user paths.
+	"pydantic/",
+	"pydantic_core/",
+	# NB: "click/" is deliberately NOT here — as an unbounded substring it
+	# collides inside legitimate user paths (…/onclick/…). call_tree's exact
+	# first-segment match covers "click" safely; the same caution applies to any
+	# short token added here.
+	"sqlparse/",
+	"croniter/",
+	"cryptography/",
+	"num2words/",
+	"lxml/",
+	"html5lib/",
+	"premailer/",
+	"oauthlib/",
 )
 
 # v0.6.0: Frappe's framework-managed columns — every `tab*` table has these.

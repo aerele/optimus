@@ -415,7 +415,58 @@ _THIRD_PARTY_LIB_SEGMENTS = frozenset({
 	"httpx", "boto3", "botocore", "redis", "celery",
 	"jinja2", "markupsafe", "bleach", "nh3",
 	"pandas", "numpy", "openpyxl", "PIL",
+	# v0.12.x: more common Frappe-bench third-party libraries. A real report
+	# blamed Slow Hot Path findings on pydantic's TypeAdapter.__init__ and
+	# click's __call__ — pyinstrument strips their site-packages/ prefix, so
+	# they arrived as "pydantic/type_adapter.py" / "click/core.py" and slipped
+	# the (frappe/optimus-only) framework-frame filter. The app developer can't
+	# patch any of these, so they're never a user-actionable hot path.
+	"pydantic", "pydantic_core", "click",
+	"sqlparse", "croniter", "cryptography", "jwt",
+	"babel", "num2words", "chardet", "charset_normalizer",
+	"certifi", "idna", "lxml", "bs4", "html5lib",
+	"markdown", "premailer", "oauthlib", "pyparsing",
 })
+
+
+# Installed Frappe apps for the current site, memoised per site — the completeness
+# backstop for the hardcoded lib set above. Any top path segment that ISN'T an
+# installed app is a third-party Python package (pyinstrument strips the
+# site-packages/ prefix), which the user can't patch — covering EVERY lib, not
+# just the enumerated ones. ``get_installed_apps`` is a Redis round-trip and the
+# walker asks per frame, so it's resolved once per site here.
+_installed_apps_cache: dict = {}
+
+
+def _installed_apps_for_site() -> frozenset | None:
+	"""Frozenset of this site's installed apps, or None off-bench / no site (so
+	unit-test frames fall back to the hardcoded set and aren't over-filtered)."""
+	try:
+		import frappe
+
+		site = getattr(frappe.local, "site", None)
+	except Exception:
+		return None
+	if not site:
+		return None
+	if site not in _installed_apps_cache:
+		try:
+			_installed_apps_cache[site] = frozenset(frappe.get_installed_apps() or [])
+		except Exception:
+			_installed_apps_cache[site] = None
+	return _installed_apps_cache[site]
+
+
+def _frame_top_app(stripped: str) -> str:
+	"""App/package name from the first real segment of a bench-stripped or
+	``apps/``-prefixed path: 'erpnext' for both 'erpnext/x.py' and
+	'apps/erpnext/erpnext/x.py'."""
+	idx = stripped.find("apps/")
+	if idx >= 0:
+		name = stripped[idx + len("apps/"):].split("/", 1)[0]
+		if name:
+			return name
+	return stripped.split("/", 1)[0]
 
 
 def _is_pure_helper_frame(node: dict) -> bool:
@@ -491,6 +542,14 @@ def _is_pure_helper_frame(node: dict) -> bool:
 	# a frozen set of common libs used in Frappe benches.
 	first_segment = stripped.split("/", 1)[0]
 	if first_segment in _THIRD_PARTY_LIB_SEGMENTS:
+		return True
+
+	# Completeness backstop (on-bench only): any top segment that isn't one of
+	# THIS SITE's installed apps is a third-party Python package the user can't
+	# patch — catches every lib, not just the set above. None off-bench, so unit
+	# tests keep relying on that set.
+	installed = _installed_apps_for_site()
+	if installed and _frame_top_app(stripped) not in installed:
 		return True
 
 	return False
