@@ -46,7 +46,7 @@ from __future__ import annotations
 import os
 import re
 
-from optimus.renderer.source import _read_source_snippet, _resolve_source_path
+from optimus.renderer.source import _read_source_snippet, _resolve_source_path, _source_lines
 
 
 def _action_dotted_entry(action) -> str | None:
@@ -100,17 +100,9 @@ def _skip_decorators_to_def(
 	"""
 	if not abs_filename or start_lineno <= 0 or not fn_name:
 		return start_lineno
-	# Read source (cache-aware).
-	if cache is not None and abs_filename in cache:
-		lines = cache[abs_filename]
-	else:
-		try:
-			with open(abs_filename, encoding="utf-8") as fh:
-				lines = fh.read().splitlines()
-		except Exception:
-			lines = None
-		if cache is not None:
-			cache[abs_filename] = lines
+	# Read source through the shared primitive (cache-aware; also resolves
+	# Server Script sentinels, which a bare open() here used to miss).
+	lines = _source_lines(abs_filename, cache=cache)
 	if not lines or start_lineno > len(lines):
 		return start_lineno
 	# Cheap early exit: the line at start_lineno isn't a decorator →

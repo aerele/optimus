@@ -8,6 +8,25 @@ versions may contain breaking changes — see migration notes below).
 
 ---
 
+## [0.12.30] — 2026-08-24
+
+### Fixed
+
+- **Self-time "Slow Hot Path" cards showed `@frappe.whitelist()` instead of the
+  function name.** pyinstrument anchors a decorated function on its first
+  decorator line (CPython 3.11+), so the narrowed self-time snippet rendered the
+  decorator rather than the signature. The card now shows the decorator line(s)
+  *through* the `def` and moves the highlight + `file:line` onto the `def`
+  (e.g. `sales_order.py:795 · calculate_discount`). Render-only — re-run the
+  flow or use **Regenerate reports** to see it on existing sessions.
+
+### Internal
+
+- Consolidated the hand-copied source-read code into one `source._source_lines`
+  (also fixes Server Script callsites silently failing in `_read_source_window`
+  / `_skip_decorators_to_def`); removed the now-orphaned
+  `_read_function_body_snippet`.
+
 ## [0.12.26] — 2026-05-25
 
 **Renderer extraction COMPLETE — `finding_enrichment` phase 3 is the

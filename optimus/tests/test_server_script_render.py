@@ -215,21 +215,6 @@ class TestRendererSnippetAndLink:
 		assert resolved[0] == "server_script"
 		assert resolved[1] == "foo"
 
-	def test_read_function_body_snippet_reads_server_script_from_db(self, fake_frappe_db):
-		from optimus import renderer
-
-		fake_frappe_db["rows"] = [
-			{
-				"name": "Foo",
-				"script": "def go():\n    for u in users:\n        do(u)\n",
-			}
-		]
-		snippet = renderer._read_function_body_snippet("<serverscript>: foo", 1)
-		assert snippet, "no snippet returned for a resolvable Server Script"
-		# First entry is the def line; body should follow.
-		contents = " ".join(r["content"] for r in snippet)
-		assert "for u in users" in contents
-
 	def test_read_source_snippet_returns_window_for_server_script(self, fake_frappe_db):
 		from optimus import renderer
 

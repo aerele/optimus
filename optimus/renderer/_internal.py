@@ -142,7 +142,6 @@ from optimus.renderer.finding_enrichment import (
 	_group_findings_by_root_cause,
 	_markdown_to_safe_html,
 	_normalize_callsite,
-	_read_function_body_snippet,
 	_retarget_phase1_callsites_to_drilldown_leaf,
 	_root_cause_key,
 	_walk_drilldown_chain,
@@ -1321,8 +1320,8 @@ def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jo
 
 # v0.12.26+: _finding_to_dict + _SQL_REDFLAG_FINDING_TYPES +
 # _attach_representative_callsites + _markdown_to_safe_html +
-# _read_function_body_snippet + _expand_self_time_snippets moved
-# to optimus/renderer/finding_enrichment.py (phase 3). Re-imported
+# _expand_self_time_snippets moved to
+# optimus/renderer/finding_enrichment.py (phase 3). Re-imported
 # at the top of this module so call sites resolve unchanged.
 
 # v0.12.23+: source-resolution helpers (_action_dotted_entry,
