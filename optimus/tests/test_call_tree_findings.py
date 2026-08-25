@@ -575,6 +575,35 @@ def test_installed_apps_allowlist_filters_any_unknown_package(monkeypatch):
 		{"function": "validate", "filename": "apps/erpnext/erpnext/foo.py", "kind": "python"}) is False
 
 
+def test_frame_top_app_anchors_apps_marker_on_path_boundary():
+	"""``apps/`` must be matched as a whole path segment, not a substring — an app
+	whose name merely ends in 'apps' (webapps/…) is its OWN top segment, not the
+	bench dir; the old ``.find('apps/')`` returned the file after it instead."""
+	from optimus.analyzers.call_tree import _frame_top_app
+
+	assert _frame_top_app("apps/erpnext/erpnext/x.py") == "erpnext"
+	assert _frame_top_app("erpnext/x.py") == "erpnext"
+	assert _frame_top_app("/home/x/frappe-bench/apps/frappe/frappe/handler.py") == "frappe"
+	# The bug: 'webapps/module.py' contains 'apps/' at index 3.
+	assert _frame_top_app("webapps/module.py") == "webapps"
+	assert _frame_top_app("subapps/core.py") == "subapps"
+
+
+def test_installed_app_ending_in_apps_not_dropped_as_third_party(monkeypatch):
+	"""Regression for the substring bug: a real installed app named e.g. 'webapps'
+	(pyinstrument-stripped to 'webapps/…') must stay actionable, not be filtered
+	out as third-party by a misparsed app name."""
+	from optimus.analyzers import call_tree
+
+	monkeypatch.setattr(
+		call_tree,
+		"_installed_apps_for_site",
+		lambda: frozenset({"frappe", "erpnext", "webapps"}),
+	)
+	assert call_tree._is_pure_helper_frame(
+		{"function": "handle", "filename": "webapps/views.py", "kind": "python"}) is False
+
+
 def test_walker_skips_third_party_lib_init_and_call():
 	"""Regression: pydantic/click frames (site-packages/ prefix stripped) must be walker-plumbing, not blamed as hot paths."""
 	from optimus.analyzers.call_tree import _is_walker_plumbing_frame

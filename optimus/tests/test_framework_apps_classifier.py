@@ -147,6 +147,80 @@ class TestUserCodeNotMatched:
 		)
 
 
+class TestVendoredLibSubpackageStaysUserCode:
+	"""A dir under a user app named after a third-party lib (a vendored
+	``apps/myapp/lxml/…``) is the user's own code — the lib substring scan must
+	not misfire on it. But a stripped lib WITHOUT an ``apps/`` prefix
+	(``something/werkzeug/…``) must still classify as framework (that mid-path
+	match is deliberate and separately tested)."""
+
+	@pytest.mark.parametrize("path", [
+		"apps/myapp/lxml/util.py",
+		"apps/myapp/pydantic/schema.py",
+		"apps/acme/cryptography/signer.py",
+		"/home/x/frappe-bench/apps/myapp/sqlparse/patched.py",
+	])
+	def test_vendored_subpackage_is_user_code(self, path):
+		assert is_framework_callsite(path) is False, (
+			f"{path} is a vendored subpackage under a user app, not framework"
+		)
+
+	@pytest.mark.parametrize("path", [
+		"something/werkzeug/routing.py",
+		"something/rq/worker.py",
+		"lxml/etree.py",
+	])
+	def test_stripped_lib_without_apps_prefix_still_framework(self, path):
+		assert is_framework_callsite(path) is True, (
+			f"{path} has no user-app prefix — the lib scan must still catch it"
+		)
+
+
+class TestBenchUnderAppsAncestorDir:
+	"""A bench installed under a path that itself contains an 'apps' ancestor
+	(``/opt/apps/…``, ``/srv/apps/…``) must still resolve the REAL app after the
+	last ``apps/`` — else core framework code is misread as user code."""
+
+	@pytest.mark.parametrize("path", [
+		"/opt/apps/frappe-bench/apps/erpnext/erpnext/accounts/doctype/sales_invoice/sales_invoice.py",
+		"/srv/apps/bench/apps/frappe/frappe/model/document.py",
+		"/data/apps/prod/apps/hrms/hrms/x.py",
+	])
+	def test_core_framework_under_apps_ancestor_still_framework(self, path):
+		assert is_framework_callsite(path) is True, (
+			f"{path} is core framework code — the last 'apps/' segment decides the app"
+		)
+
+	def test_user_app_under_apps_ancestor_still_user(self):
+		# A real user app under an 'apps'-ancestor bench must stay user code.
+		assert is_framework_callsite(
+			"/opt/apps/frappe-bench/apps/myapp/controllers/x.py") is False
+
+
+class TestAppLocalVenvIsThirdParty:
+	"""A third-party lib in an app-local venv sits under ``apps/<app>/`` but is
+	NOT the user's code — the site-packages check must win over the user-app
+	guard."""
+
+	def test_app_local_site_packages_is_framework(self):
+		assert is_framework_callsite(
+			"/home/frappe/frappe-bench/apps/myapp/.venv/lib/python3.11/"
+			"site-packages/werkzeug/wrappers/response.py") is True
+
+
+class TestInclusionModeBoundaryAnchored:
+	"""Inclusion mode (Tracked Apps) must recognise a tracked app whose name ends
+	in 'apps' — the old substring parse hid its real findings as framework."""
+
+	def test_tracked_app_ending_in_apps_is_user_code(self):
+		assert is_framework_callsite("webapps/module.py", ("webapps",)) is False
+		assert is_framework_callsite(
+			"apps/webapps/webapps/doctype/foo.py", ("webapps",)) is False
+
+	def test_untracked_app_still_framework(self):
+		assert is_framework_callsite("apps/other/foo.py", ("webapps",)) is True
+
+
 class TestBoundaryCases:
 	"""Boundary-sensitive matching: ``crm/`` must not false-positive
 	on ``my_crm/``. These regressions are subtle so they get their

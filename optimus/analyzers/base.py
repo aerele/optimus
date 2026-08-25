@@ -249,6 +249,36 @@ def is_write_hot_table(name) -> bool:
 	return bool(name) and str(name).strip().strip("`").lower() in _WRITE_HOT_TABLES_LOWER
 
 
+def _app_under_apps_dir(norm: str) -> str | None:
+	"""The ``<app>`` in a real ``apps/<app>/`` bench path segment, or None.
+
+	The single canonical ``apps/``-segment parser (``_extract_app_segment`` and
+	call_tree's ``_frame_top_app`` both build on it). Two rules keep it from
+	misreading lookalike paths:
+
+	- **Boundary-anchored** — ``apps/`` only counts at a path boundary (start, or
+	  after '/'), so a dir whose name merely ends in 'apps' (``webapps/…``) or a
+	  stripped ``something/werkzeug/…`` path yields None, not a bogus segment.
+	- **Last ``/apps/`` wins** for absolute paths — a bench installed under an
+	  ``apps``-containing directory (``/opt/apps/frappe-bench/apps/erpnext/…``)
+	  must resolve ``erpnext``, not the ``frappe-bench`` ancestor. A relative
+	  ``apps/<app>/…`` path (no leading slash) takes the leading ``apps/``.
+
+	Has NO short-form / absolute-without-apps fallback — returns None so callers
+	that want a best-effort label add their own (see ``_extract_app_segment``).
+	"""
+	if norm.startswith("apps/"):
+		tail = norm[len("apps/"):]
+	elif "/apps/" in norm:
+		# rsplit → the LAST boundary 'apps/', i.e. the real bench apps dir even
+		# when an ancestor directory is also called 'apps'.
+		tail = norm.rsplit("/apps/", 1)[1]
+	else:
+		return None
+	first = tail.split("/", 1)[0]
+	return first or None
+
+
 def _extract_app_segment(norm: str) -> str | None:
 	"""Return the app name from a normalized filename, or None.
 
@@ -258,21 +288,16 @@ def _extract_app_segment(norm: str) -> str | None:
 	- ``/abs/path/to/apps/<app>/<app>/foo.py`` (absolute)
 	- ``/abs/path/<arbitrary>/foo.py`` (absolute without ``apps/``)
 
-	For the short form we treat the first path segment as the app.
-	For the bench-relative / absolute forms we return the segment
-	that follows ``apps/``. When neither ``apps/`` is found nor the
-	path has any non-slash segment, return ``None``.
+	The ``apps/`` case is delegated to ``_app_under_apps_dir`` so it's
+	boundary-anchored and last-``apps``-wins (a tracked app named ``webapps`` or a
+	bench under ``/opt/apps/…`` resolves correctly). The short-form / no-``apps/``
+	fallback treats the first path segment as the app.
 	"""
 	if not norm:
 		return None
-	# Split on 'apps/' if present.
-	marker = "apps/"
-	idx = norm.find(marker)
-	if idx != -1:
-		tail = norm[idx + len(marker):]
-		first = tail.split("/", 1)[0]
-		if first:
-			return first
+	app = _app_under_apps_dir(norm)
+	if app:
+		return app
 	# v0.7.x: strip any leading slashes so absolute paths without
 	# ``apps/`` (e.g. ``/Users/.../foo.py`` test fixtures) still
 	# produce a non-empty segment instead of falling through to
@@ -330,12 +355,27 @@ def is_framework_callsite(
 
 	# Exclusion mode (default): framework if the app is in the built-in
 	# FRAMEWORK_APPS set or the path contains a known third-party marker.
+	# Order matters:
+	#   1. site-packages/dist-packages FIRST — a third-party lib in an app-local
+	#      venv (``apps/myapp/.venv/.../site-packages/werkzeug/…``) is framework
+	#      even though it sits under a user app, so this must beat the user-app
+	#      guard below.
+	#   2. User-app guard — a path under a real ``apps/<app>/`` bench dir where
+	#      ``<app>`` isn't a framework app is the user's OWN code, even when it
+	#      nests a dir named after a framework app or a third-party lib (a vendored
+	#      ``apps/myapp/lxml/…``). Deciding by the app segment here stops the
+	#      FRAMEWORK loop and the substring lib scan from misfiring on it. It does
+	#      NOT touch stripped libs that arrive WITHOUT an ``apps/`` prefix
+	#      (``something/werkzeug/…``) — those fall through to the lib scan.
+	if "site-packages/" in norm or "dist-packages/" in norm:
+		return True
+	user_app = _app_under_apps_dir(norm)
+	if user_app is not None and user_app not in FRAMEWORK_APPS:
+		return False
 	for app in FRAMEWORK_APPS:
 		token = f"{app}/"
 		if norm.startswith(token) or f"/{token}" in norm:
 			return True
-	if "site-packages/" in norm or "dist-packages/" in norm:
-		return True
 	for lib in _THIRD_PARTY_LIB_FRAGMENTS:
 		if lib in norm:
 			return True

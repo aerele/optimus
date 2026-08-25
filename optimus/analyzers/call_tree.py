@@ -31,6 +31,7 @@ from collections import defaultdict
 from optimus.analyzers.base import (
 	SEVERITY_ORDER,
 	AnalyzerResult,
+	_app_under_apps_dir,
 	short_filename,
 )
 
@@ -429,15 +430,15 @@ _THIRD_PARTY_LIB_SEGMENTS = frozenset({
 })
 
 
-# Installed Frappe apps for the current site, memoised per site — the completeness
-# backstop for the hardcoded lib set above. Any top path segment that ISN'T an
-# installed app is a third-party Python package (pyinstrument strips the
-# site-packages/ prefix), which the user can't patch — covering EVERY lib, not
-# just the enumerated ones. ``get_installed_apps`` is a Redis round-trip and the
-# walker asks per frame, so it's resolved once per site here.
-_installed_apps_cache: dict = {}
-
-
+# Installed Frappe apps for the current site — the completeness backstop for the
+# hardcoded lib set above. Any top path segment that ISN'T an installed app is a
+# third-party Python package (pyinstrument strips the site-packages/ prefix),
+# which the user can't patch — covering EVERY lib, not just the enumerated ones.
+# ``get_installed_apps`` is a Redis round-trip and the walker asks per frame, so
+# it's resolved once and cached on ``frappe.local`` — request/job scope, which is
+# torn down and rebuilt per analyze job, so a worker that outlives an
+# install/uninstall picks up the change on its next job instead of serving a
+# stale set for the whole process lifetime (a module-global dict never would).
 def _installed_apps_for_site() -> frozenset | None:
 	"""Frozenset of this site's installed apps, or None off-bench / no site (so
 	unit-test frames fall back to the hardcoded set and aren't over-filtered)."""
@@ -449,24 +450,26 @@ def _installed_apps_for_site() -> frozenset | None:
 		return None
 	if not site:
 		return None
-	if site not in _installed_apps_cache:
+	cache = getattr(frappe.local, "_optimus_installed_apps", None)
+	if cache is None:
+		cache = {}
+		frappe.local._optimus_installed_apps = cache
+	if site not in cache:
 		try:
-			_installed_apps_cache[site] = frozenset(frappe.get_installed_apps() or [])
+			cache[site] = frozenset(frappe.get_installed_apps() or [])
 		except Exception:
-			_installed_apps_cache[site] = None
-	return _installed_apps_cache[site]
+			cache[site] = None
+	return cache[site]
 
 
 def _frame_top_app(stripped: str) -> str:
 	"""App/package name from the first real segment of a bench-stripped or
 	``apps/``-prefixed path: 'erpnext' for both 'erpnext/x.py' and
-	'apps/erpnext/erpnext/x.py'."""
-	idx = stripped.find("apps/")
-	if idx >= 0:
-		name = stripped[idx + len("apps/"):].split("/", 1)[0]
-		if name:
-			return name
-	return stripped.split("/", 1)[0]
+	'apps/erpnext/erpnext/x.py'. Delegates the ``apps/`` case to base's
+	boundary-anchored, last-``apps``-wins parser (so 'webapps/x.py' and a bench
+	under '/opt/apps/…' resolve correctly), falling back to the first path
+	segment when there's no ``apps/`` boundary."""
+	return _app_under_apps_dir(stripped) or stripped.split("/", 1)[0]
 
 
 def _is_pure_helper_frame(node: dict) -> bool:
