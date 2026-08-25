@@ -720,6 +720,14 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 	except Exception:
 		detail = {}
 
+	# Back-compat: a user N+1 always declares impact_scope_label "recoverable"
+	# (analyzers/n_plus_one.py), but sessions analyzed before that field shipped
+	# lack it. Backfill from the stable finding_type so the report card's scope
+	# tag + "looped in N requests" reconciliation line agree with the TL;DR hero
+	# (which routes on finding_type) when an old session is re-rendered.
+	if child.finding_type == "N+1 Query" and "impact_scope_label" not in detail:
+		detail["impact_scope_label"] = "recoverable"
+
 	# v0.6.0 Round 2: synthesize callsite from legacy top-level shape
 	# when the analyzer didn't wrap it.
 	if not detail.get("callsite"):

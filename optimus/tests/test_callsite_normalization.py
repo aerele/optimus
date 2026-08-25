@@ -186,6 +186,39 @@ class TestFindingToDictNormalizes:
 		assert "callsite" not in finding["technical_detail"]
 
 
+class TestImpactScopeLabelBackfill:
+	"""Legacy user N+1 findings (analyzed before impact_scope_label shipped) must
+	get the label backfilled from the stable finding_type so the report card's
+	scope tag agrees with the TL;DR hero on re-render."""
+
+	def _row(self, finding_type, detail):
+		row = types.SimpleNamespace()
+		row.finding_type = finding_type
+		row.severity = "High"
+		row.title = "x"
+		row.customer_description = "y"
+		row.estimated_impact_ms = 100.0
+		row.affected_count = 1
+		row.action_ref = "0"
+		row.technical_detail_json = json.dumps(detail)
+		return row
+
+	def test_legacy_user_n_plus_one_gets_recoverable(self):
+		row = self._row("N+1 Query", {"normalized_query": "SELECT 1"})
+		finding = _finding_to_dict(row)
+		assert finding["technical_detail"]["impact_scope_label"] == "recoverable"
+
+	def test_existing_label_not_overwritten(self):
+		row = self._row("N+1 Query", {"impact_scope_label": "recoverable"})
+		finding = _finding_to_dict(row)
+		assert finding["technical_detail"]["impact_scope_label"] == "recoverable"
+
+	def test_framework_n_plus_one_not_backfilled(self):
+		row = self._row("Framework N+1", {"normalized_query": "SELECT 1"})
+		finding = _finding_to_dict(row)
+		assert "impact_scope_label" not in finding["technical_detail"]
+
+
 class TestEndToEndRender:
 	"""The real scenario: a session with a Slow Query finding (string
 	callsite) + an N+1 finding (dict callsite) must render without

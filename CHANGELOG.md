@@ -8,6 +8,34 @@ versions may contain breaking changes — see migration notes below).
 
 ---
 
+## [0.12.31] — 2026-08-25
+
+### Fixed
+
+- **Re-rendering an old report could mislabel a user N+1 as unfixable framework
+  code.** 0.12.30 routed the TL;DR hero on `impact_scope_label`, a field absent
+  from sessions analyzed before it shipped — so a legacy user N+1 fell into the
+  framework branch on **Regenerate reports**. The hero now routes on the stable
+  `finding_type` (present on every finding), and the card backfills
+  `impact_scope_label` from it, so hero and card agree on legacy re-renders.
+- **App-path classification misread several bench layouts.** The `apps/` marker
+  is now matched only at a path boundary and on the **last** `apps/` segment, so
+  a bench installed under an `apps`-containing directory (`/opt/apps/…`) still
+  resolves the real app (core framework code is no longer flagged as user code),
+  an app whose name ends in `apps` (`webapps`) isn't dropped, and a tracked app
+  with such a name is still recognised. A third-party lib in an app-local venv
+  (`apps/<app>/.venv/…/site-packages/…`) is classified before the user-app check
+  so it stays library code, while a directory vendored under a user app and named
+  after a lib (`apps/myapp/lxml/…`) is kept as user code.
+
+### Internal
+
+- Consolidated three divergent `apps/`-segment parsers into one canonical
+  `base._app_under_apps_dir`; `_extract_app_segment` and `call_tree._frame_top_app`
+  now delegate to it. The installed-apps backstop cache is scoped to `frappe.local`
+  (per request/job) instead of the process lifetime, so a worker picks up an
+  install/uninstall on its next job.
+
 ## [0.12.30] — 2026-08-24
 
 ### Fixed

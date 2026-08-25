@@ -102,6 +102,20 @@ class TestHeadlineByCategory:
 		assert "not something you can change" in head
 		assert "single biggest win" not in head
 
+	def test_legacy_user_n_plus_one_without_impact_scope_label_stays_user(self):
+		# Regression: a user N+1 stored by a pre-``impact_scope_label`` build (the
+		# field is absent from technical_detail) must still render as the user's
+		# own actionable win on re-render — NOT the framework "can't change" copy.
+		# Routing is gated on the stable finding_type, so the missing label is fine.
+		f = _finding(
+			finding_type="N+1 Query",
+			affected_count=100,
+			technical_detail={},
+		)
+		head = str(renderer._compose_tldr([f], _doc())["headline_markup"])
+		assert "single biggest win" in head
+		assert "not something you can change" not in head
+
 	def test_slow_hook_uses_hook_template(self):
 		f = _finding(
 			finding_type="Hook Bottleneck",
