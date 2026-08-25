@@ -8,6 +8,19 @@ versions may contain breaking changes — see migration notes below).
 
 ---
 
+## [0.12.32] — 2026-08-25
+
+### Fixed
+
+- **Long `/api/method/…` URLs (and paths) overflowed their table cell in the
+  report.** Fixed at the shared level instead of per-table: a single
+  `table.data td code` guard now bounds every code cell to its column and wraps
+  it at any character across *all* data tables (XHR timing, Web Vitals, orphaned
+  XHRs, DB tables, flat queries, …). The load-bearing bit is `display:
+  inline-block` — `max-width` is inert on a bare inline `<code>`, which is why the
+  bug kept recurring when patched one table at a time. The XHR-timing table also
+  gets an explicit URL-column width so it can't be squeezed to a sliver.
+
 ## [0.12.31] — 2026-08-25
 
 ### Fixed
