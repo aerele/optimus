@@ -548,6 +548,18 @@ def _is_pure_helper_frame(node: dict) -> bool:
 	if "site-packages/" in filename or "dist-packages/" in filename:
 		return True
 
+	# An INSTALLED app is the user's OWN code — rescue it BEFORE the heuristic
+	# third-party matches below. Without this, a site with an app whose name
+	# collides with a hardcoded lib token (an app literally named ``babel`` /
+	# ``markdown`` / ``click`` / …, whose frame arrives pyinstrument-stripped to
+	# ``babel/x.py``) would be hidden as plumbing. ``get_installed_apps`` is the
+	# authority on what's user code; the hardcoded set below is only a best-effort
+	# fallback for names it doesn't recognise. None off-bench → no rescue, so the
+	# unit suite keeps relying on the hardcoded set.
+	installed = _installed_apps_for_site()
+	if installed and _frame_top_app(stripped) in installed:
+		return False
+
 	# v0.5.2: third-party libraries by first-segment. pyinstrument
 	# sometimes strips the site-packages/ prefix so MySQLdb/cursors.py
 	# arrives without any directory context. Catch by name against
@@ -558,8 +570,7 @@ def _is_pure_helper_frame(node: dict) -> bool:
 
 	# Completeness backstop (on-bench only): any top segment that isn't one of
 	# THIS SITE's installed apps is a third-party Python package the user can't
-	# patch — catches every lib, not just the set above. None off-bench, so unit
-	# tests keep relying on that set.
+	# patch — catches every lib, not just the set above.
 	#
 	# Fail OPEN for absolute paths that don't route through ``/apps/`` (an
 	# out-of-bench custom script like ``/home/frappe/custom/foo.py``): there
@@ -569,7 +580,6 @@ def _is_pure_helper_frame(node: dict) -> bool:
 	# path, or an absolute path with an ``/apps/`` segment ``_frame_top_app`` can
 	# resolve. venv libs on absolute paths are already caught above.
 	backstop_applies = not filename.startswith("/") or "/apps/" in filename
-	installed = _installed_apps_for_site()
 	if backstop_applies and installed and _frame_top_app(stripped) not in installed:
 		return True
 

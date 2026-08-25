@@ -589,6 +589,28 @@ def test_frame_top_app_anchors_apps_marker_on_path_boundary():
 	assert _frame_top_app("subapps/core.py") == "subapps"
 
 
+def test_installed_app_named_like_a_lib_is_rescued(monkeypatch):
+	"""An INSTALLED app whose name collides with a hardcoded third-party lib token
+	(e.g. an app literally named 'babel' or 'markdown') must stay actionable — the
+	installed-apps rescue runs BEFORE the hardcoded _THIRD_PARTY_LIB_SEGMENTS
+	match, so its pyinstrument-stripped frames aren't hidden as plumbing."""
+	from optimus.analyzers import call_tree
+
+	assert "babel" in call_tree._THIRD_PARTY_LIB_SEGMENTS  # guard: still a lib token
+	monkeypatch.setattr(
+		call_tree, "_installed_apps_for_site",
+		lambda: frozenset({"frappe", "erpnext", "babel", "markdown"}))
+
+	# Installed apps named like libs → kept (both stripped and apps/ forms).
+	assert call_tree._is_pure_helper_frame(
+		{"function": "t", "filename": "babel/translate.py", "kind": "python"}) is False
+	assert call_tree._is_pure_helper_frame(
+		{"function": "r", "filename": "markdown/core.py", "kind": "python"}) is False
+	# A lib token that is NOT an installed app is still filtered by the set.
+	assert call_tree._is_pure_helper_frame(
+		{"function": "x", "filename": "click/core.py", "kind": "python"}) is True
+
+
 def test_backstop_fails_open_for_out_of_bench_absolute_path(monkeypatch):
 	"""The installed-apps backstop must NOT fire on an absolute path with no
 	``/apps/`` segment (a custom out-of-bench script). There _frame_top_app returns

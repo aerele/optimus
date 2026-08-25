@@ -8,6 +8,19 @@ versions may contain breaking changes — see migration notes below).
 
 ---
 
+## [0.12.35] — 2026-08-25
+
+### Fixed
+
+- **An installed app whose name collides with a third-party lib token was hidden
+  from hot-path findings.** `_is_pure_helper_frame` checked the hardcoded
+  `_THIRD_PARTY_LIB_SEGMENTS` set (widened in 0.12.x with common tokens like
+  `babel`, `markdown`, `click`, `redis`) *before* the installed-apps backstop, so
+  a site with an app literally named `babel`/`markdown` had its pyinstrument-
+  stripped frames dropped as plumbing. The installed-apps set is now consulted
+  first as a positive rescue — an installed app is the user's own code and always
+  wins over the heuristic lib match.
+
 ## [0.12.34] — 2026-08-25
 
 ### Added
