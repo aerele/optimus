@@ -137,6 +137,62 @@ def _extract_target_doc(form_dict) -> dict | None:
 	return None
 
 
+def _is_temp_docname(name) -> bool:
+	"""True for a name that isn't the document's permanent identity: ``None`` (an
+	unsaved doc) or Frappe's client-side placeholder ``new-<doctype>-<random>``
+	assigned before the first save (autoname replaces it with the series name)."""
+	return not name or (isinstance(name, str) and name.startswith("new-"))
+
+
+def _saved_doc_from_response(response, want_doctype):
+	"""Best-effort: pull the ``{"doctype", "name"}`` of the just-saved PARENT doc
+	out of a request's response, restricted to ``want_doctype`` so a child-table
+	row or a linked doc can't be mistaken for it. Handles ``savedocs``
+	(``response["docs"]`` — a list of ``as_dict()`` docs) and
+	``frappe.client.save|insert|submit`` (``response["message"]`` — the doc dict,
+	or a list). Returns ``None`` when nothing with a real name matches. Never
+	raises."""
+	if not isinstance(response, dict) or not want_doctype:
+		return None
+	try:
+		candidates = []
+		docs = response.get("docs")
+		if isinstance(docs, str):
+			try:
+				docs = json.loads(docs)
+			except Exception:
+				docs = None
+		if isinstance(docs, list):
+			candidates.extend(d for d in docs if isinstance(d, dict))
+		msg = response.get("message")
+		if isinstance(msg, dict):
+			candidates.append(msg)
+		elif isinstance(msg, list):
+			candidates.extend(d for d in msg if isinstance(d, dict))
+		for d in candidates:
+			if d.get("doctype") != want_doctype:
+				continue
+			nm = d.get("name")
+			if isinstance(nm, str) and nm and not _is_temp_docname(nm):
+				return {"doctype": want_doctype, "name": nm}
+	except Exception:
+		return None
+	return None
+
+
+def resolve_target_doc_from_response(form_dict, response):
+	"""Capture-side entry point (called from ``after_request``): when a request
+	created a NEW document (its request-side target name is a ``new-…`` temp name
+	or ``None``), return the real ``{"doctype", "name"}`` the save assigned,
+	pulled from the response. Returns ``None`` when there's nothing to resolve —
+	an edit/submit whose request already carries the permanent name, or no
+	doc-shaped payload. Never raises; safe to call on every request."""
+	req = _extract_target_doc(form_dict)
+	if not req or not _is_temp_docname(req.get("name")):
+		return None
+	return _saved_doc_from_response(response, req.get("doctype"))
+
+
 def _build_doc_event_hook_index(doc_events) -> dict:
 	"""Flatten Frappe's ``doc_events`` map — ``{doctype: {event: [paths]}}``
 	(``doctype`` may be ``"*"``) — into ``{dotted_path: [(doctype, event), …]}``.
@@ -230,6 +286,21 @@ def _attach_action_context(actions, findings, recordings_by_uuid) -> None:
 			continue
 		rec = recordings_by_uuid.get(a.get("recording_uuid") or "")
 		td = _extract_target_doc(rec.get("form_dict") if isinstance(rec, dict) else None)
+		# Resolve a "new-…" temp name (or an unsaved None) to the permanent name
+		# the save assigned server-side, captured from the response at request time
+		# (``resolved_target_doc`` on the recording). This makes an insert action
+		# show the SAME name that submit/cancel already carry for the document,
+		# instead of the throwaway placeholder.
+		if isinstance(rec, dict):
+			_resolved = rec.get("resolved_target_doc")
+			if isinstance(_resolved, dict) and _resolved.get("name"):
+				if td is None:
+					td = {"doctype": _resolved.get("doctype"), "name": _resolved.get("name")}
+				elif _is_temp_docname(td.get("name")):
+					td = {
+						"doctype": td.get("doctype") or _resolved.get("doctype"),
+						"name": _resolved.get("name"),
+					}
 		# v0.7.x J.13: fallback when the recording isn't available
 		# (Redis TTL expired between record-time and regenerate-time) —
 		# infer the action's DocType from any related finding's callsite

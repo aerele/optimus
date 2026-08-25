@@ -397,6 +397,31 @@ def after_request(*args, **kwargs):
 		except Exception:
 			frappe.log_error(title="optimus infra end snapshot")
 
+		# Resolve a new document's real name (assigned server-side during the save)
+		# from the response, and stash it on the recording so the report shows the
+		# same name for the insert action that submit/cancel already carry —
+		# instead of the throwaway "new-…" placeholder. Only writes for a NEW-doc
+		# save in an active session; best-effort, never breaks the request.
+		try:
+			if session_uuid and recording_uuid_for_dump:
+				from optimus.renderer.doc_event_renderer import (
+					resolve_target_doc_from_response,
+				)
+				resolved = resolve_target_doc_from_response(
+					getattr(frappe.local, "form_dict", None),
+					getattr(frappe.local, "response", None),
+				)
+				if resolved:
+					from frappe.recorder import RECORDER_REQUEST_HASH
+					rec = frappe.cache.hget(RECORDER_REQUEST_HASH, recording_uuid_for_dump)
+					if isinstance(rec, dict):
+						rec["resolved_target_doc"] = resolved
+						frappe.cache.hset(
+							RECORDER_REQUEST_HASH, recording_uuid_for_dump, rec
+						)
+		except Exception:
+			frappe.log_error(title="optimus resolve target doc")
+
 		# v0.5.0: correlation header for optimus_frontend.js. Must set
 		# Access-Control-Expose-Headers or browsers will refuse to surface
 		# the custom header to JavaScript, even for same-origin requests.

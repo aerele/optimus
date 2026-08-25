@@ -68,6 +68,62 @@ class TestExtractTargetDoc:
 			assert renderer._extract_target_doc(fd) is None
 
 
+class TestResolveTargetDocFromResponse:
+	"""Capture-side: derive the real name a save assigned (from the response) when
+	the request created a NEW doc, so the report can replace the ``new-…``
+	placeholder with the permanent name."""
+
+	def _resolve(self, fd, resp):
+		from optimus.renderer.doc_event_renderer import resolve_target_doc_from_response
+		return resolve_target_doc_from_response(fd, resp)
+
+	def test_savedocs_new_doc_resolves_real_name(self):
+		fd = {"doc": json.dumps({"doctype": "Sales Order", "name": "new-sales-order-abc"})}
+		resp = {"docs": [{"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"}]}
+		assert self._resolve(fd, resp) == {"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"}
+
+	def test_frappe_client_save_message_shape(self):
+		fd = {"doc": json.dumps({"doctype": "Lead"})}  # unsaved
+		resp = {"message": {"doctype": "Lead", "name": "CRM-LEAD-0001"}}
+		assert self._resolve(fd, resp) == {"doctype": "Lead", "name": "CRM-LEAD-0001"}
+
+	def test_docs_as_json_string(self):
+		fd = {"doc": json.dumps({"doctype": "Item", "name": "new-item-xyz"})}
+		resp = {"docs": json.dumps([{"doctype": "Item", "name": "ITEM-0007"}])}
+		assert self._resolve(fd, resp) == {"doctype": "Item", "name": "ITEM-0007"}
+
+	def test_child_row_not_mistaken_for_parent(self):
+		fd = {"doc": json.dumps({"doctype": "Sales Order", "name": "new-sales-order-abc"})}
+		resp = {"docs": [
+			{"doctype": "Sales Order Item", "name": "abcd1234"},   # child row first
+			{"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"},
+		]}
+		assert self._resolve(fd, resp) == {"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"}
+
+	def test_edit_with_real_request_name_is_noop(self):
+		fd = {"doc": json.dumps({"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"})}
+		resp = {"docs": [{"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"}]}
+		assert self._resolve(fd, resp) is None
+
+	def test_none_cases(self):
+		fd = {"doc": json.dumps({"doctype": "Sales Order", "name": "new-sales-order-abc"})}
+		assert self._resolve(fd, None) is None                                   # no response
+		assert self._resolve(fd, {"docs": []}) is None                            # empty
+		assert self._resolve(fd, {"docs": [{"doctype": "Other", "name": "X-1"}]}) is None  # doctype mismatch
+		assert self._resolve(None, {"docs": [{"doctype": "Sales Order", "name": "X"}]}) is None  # no request doc
+		# Response name is itself still a temp name → nothing resolved.
+		assert self._resolve(fd, {"docs": [{"doctype": "Sales Order", "name": "new-sales-order-abc"}]}) is None
+
+
+class TestIsTempDocname:
+	def test_temp_and_real(self):
+		from optimus.renderer.doc_event_renderer import _is_temp_docname
+		assert _is_temp_docname("new-sales-order-abc") is True
+		assert _is_temp_docname(None) is True
+		assert _is_temp_docname("") is True
+		assert _is_temp_docname("SAL-ORD-2026-00042") is False
+
+
 class TestBuildDocEventHookIndex:
 	def test_flattens_doctype_event_methods(self):
 		idx = renderer._build_doc_event_hook_index({
@@ -145,6 +201,36 @@ class TestAttachActionContext:
 		renderer._attach_action_context(actions, findings, recs)
 		assert actions[0]["target_doc"] == {"doctype": "Sales Invoice", "name": "SINV-1"}
 		assert findings[0]["technical_detail"]["target_doc"] == {"doctype": "Sales Invoice", "name": "SINV-1"}
+
+	def test_temp_name_resolved_from_recording_resolved_target_doc(self):
+		# The insert request carries a "new-…" placeholder; the recording carries the
+		# real name captured from the save response — the action shows the real one.
+		actions = [self._act(0, recording_uuid="r0")]
+		recs = {"r0": {
+			"form_dict": {"doc": json.dumps({"doctype": "Sales Order", "name": "new-sales-order-abc"})},
+			"resolved_target_doc": {"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"},
+		}}
+		renderer._attach_action_context(actions, [], recs)
+		assert actions[0]["target_doc"] == {"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"}
+
+	def test_resolved_used_when_form_dict_has_no_name(self):
+		actions = [self._act(0, recording_uuid="r0")]
+		recs = {"r0": {
+			"form_dict": {"doc": json.dumps({"doctype": "Lead"})},  # unsaved, name None
+			"resolved_target_doc": {"doctype": "Lead", "name": "CRM-LEAD-0001"},
+		}}
+		renderer._attach_action_context(actions, [], recs)
+		assert actions[0]["target_doc"] == {"doctype": "Lead", "name": "CRM-LEAD-0001"}
+
+	def test_real_request_name_not_overridden_by_resolved(self):
+		# A real name in the request (edit/submit) is authoritative — never replaced.
+		actions = [self._act(0, recording_uuid="r0")]
+		recs = {"r0": {
+			"form_dict": {"doc": json.dumps({"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"})},
+			"resolved_target_doc": {"doctype": "Sales Order", "name": "SHOULD-NOT-WIN"},
+		}}
+		renderer._attach_action_context(actions, [], recs)
+		assert actions[0]["target_doc"]["name"] == "SAL-ORD-2026-00042"
 
 	def test_action_without_doc_gets_none_and_finding_key_omitted(self):
 		actions = [self._act(0, action_label="frappe.client.get_value", recording_uuid="r0")]

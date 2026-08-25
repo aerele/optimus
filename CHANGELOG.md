@@ -8,6 +8,22 @@ versions may contain breaking changes — see migration notes below).
 
 ---
 
+## [0.12.34] — 2026-08-25
+
+### Added
+
+- **The "Document:" breadcrumb resolves a new doc's real name.** When a flow
+  creates a document, the insert request only knows Frappe's throwaway
+  `new-<doctype>-<random>` placeholder, while the later submit/cancel already
+  carry the permanent name (e.g. `SAL-ORD-2026-00042`) — so the same document
+  read inconsistently across a session. `after_request` now captures the real
+  name the save assigned (from the response) and stashes it on the recording
+  (`resolved_target_doc`); the renderer replaces the placeholder with it. Only
+  new-doc saves in an active session write it, it rides on the recording (no new
+  Redis key), and old sessions gracefully fall back to the placeholder. Note:
+  this real name shows in **both** reports — consistent with submit/cancel, which
+  already did; ask if you want document names redacted from the Safe report.
+
 ## [0.12.33] — 2026-08-25
 
 ### Fixed
