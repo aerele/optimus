@@ -104,12 +104,9 @@ def _skip_decorators_to_def(
 	# Server Script sentinels, which a bare open() here used to miss).
 	lines = _source_lines(abs_filename, cache=cache)
 	if not lines and not abs_filename.startswith("<"):
-		# _source_lines applies a bench-boundary reject (Phase-K hardening against
-		# untrusted analyzer dicts pointing at /etc/passwd). But abs_filename here
-		# comes from a real runtime stack (co_filename) and we return only a LINE
-		# NUMBER, never file content — so an app installed OUTSIDE the bench tree
-		# (pip / editable) is safe to read directly. Without this its decorated
-		# callsites re-anchor on the decorator instead of the def.
+		# _source_lines rejects out-of-bench paths (Phase-K hardening). But
+		# abs_filename is a trusted co_filename and we return only a line number,
+		# never content — so read an out-of-bench app's source directly.
 		try:
 			with open(abs_filename, encoding="utf-8") as _fh:
 				lines = _fh.read().splitlines()

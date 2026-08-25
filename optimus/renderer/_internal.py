@@ -1791,13 +1791,9 @@ def _compose_tldr(
 				"cost goes away."
 			).format(impact=impact_html, n=affected)
 	elif category == "n_plus_one" and affected:
-		# User vs Framework N+1 — decided by the stable ``finding_type``, which is
-		# equivalent to the card's ``impact_scope_label`` for freshly-analyzed data
-		# (a user N+1 is "N+1 Query" AND sets the label "recoverable"; Framework N+1
-		# is "Framework N+1" AND leaves it unset). ``finding_type`` is present on
-		# EVERY stored finding, including pre-``impact_scope_label`` sessions, so a
-		# re-render (regenerate_reports) of an old user N+1 isn't mislabelled as
-		# unfixable framework code.
+		# User vs Framework N+1 by the stable ``finding_type`` (present on every
+		# stored finding, unlike the newer ``impact_scope_label``), so re-rendering
+		# an old user N+1 isn't mislabelled as unfixable framework code.
 		_detail = top.get("technical_detail") or {}
 		if finding_type == "Framework N+1":
 			# Framework N+1: informational — the loop lives inside Frappe, not the

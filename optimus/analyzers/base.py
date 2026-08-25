@@ -250,22 +250,12 @@ def is_write_hot_table(name) -> bool:
 
 
 def _app_under_apps_dir(norm: str) -> str | None:
-	"""The ``<app>`` in a real ``apps/<app>/`` bench path segment, or None.
+	"""The ``<app>`` in a real ``apps/<app>/`` segment, or None.
 
-	The single canonical ``apps/``-segment parser (``_extract_app_segment`` and
-	call_tree's ``_frame_top_app`` both build on it). Two rules keep it from
-	misreading lookalike paths:
-
-	- **Boundary-anchored** — ``apps/`` only counts at a path boundary (start, or
-	  after '/'), so a dir whose name merely ends in 'apps' (``webapps/…``) or a
-	  stripped ``something/werkzeug/…`` path yields None, not a bogus segment.
-	- **Last ``/apps/`` wins** for absolute paths — a bench installed under an
-	  ``apps``-containing directory (``/opt/apps/frappe-bench/apps/erpnext/…``)
-	  must resolve ``erpnext``, not the ``frappe-bench`` ancestor. A relative
-	  ``apps/<app>/…`` path (no leading slash) takes the leading ``apps/``.
-
-	Has NO short-form / absolute-without-apps fallback — returns None so callers
-	that want a best-effort label add their own (see ``_extract_app_segment``).
+	The canonical ``apps/`` parser (``_extract_app_segment`` and call_tree's
+	``_frame_top_app`` build on it). Boundary-anchored (so ``webapps/…`` yields
+	None) and last-``/apps/``-wins on absolute paths (so a bench under
+	``/opt/apps/…`` resolves the real app). No fallback — None when no ``apps/``.
 	"""
 	if norm.startswith("apps/"):
 		tail = norm[len("apps/"):]
@@ -280,32 +270,18 @@ def _app_under_apps_dir(norm: str) -> str | None:
 
 
 def _extract_app_segment(norm: str) -> str | None:
-	"""Return the app name from a normalized filename, or None.
+	"""App name from a normalized filename, or None.
 
-	Handles both path shapes we see in recorder stacks:
-	- ``apps/<app>/<app>/foo.py`` (bench-relative)
-	- ``<app>/foo.py`` (pyinstrument short form after path strip)
-	- ``/abs/path/to/apps/<app>/<app>/foo.py`` (absolute)
-	- ``/abs/path/<arbitrary>/foo.py`` (absolute without ``apps/``)
-
-	The ``apps/`` case is delegated to ``_app_under_apps_dir`` so it's
-	boundary-anchored and last-``apps``-wins (a tracked app named ``webapps`` or a
-	bench under ``/opt/apps/…`` resolves correctly). The short-form / no-``apps/``
-	fallback treats the first path segment as the app.
+	Delegates the ``apps/`` case to ``_app_under_apps_dir`` (boundary-anchored,
+	last-``apps``-wins), else best-efforts the first path segment — so a
+	no-``apps/`` absolute path (``/Users/.../foo.py``) still buckets under a label
+	rather than vanishing from the Findings section.
 	"""
 	if not norm:
 		return None
 	app = _app_under_apps_dir(norm)
 	if app:
 		return app
-	# v0.7.x: strip any leading slashes so absolute paths without
-	# ``apps/`` (e.g. ``/Users/.../foo.py`` test fixtures) still
-	# produce a non-empty segment instead of falling through to
-	# ``_OTHER_APP_LABEL``. The first non-slash segment is a
-	# reasonable best-effort app label; if the segment ends up
-	# being a meaningless prefix (``Users``, ``tmp``), the row
-	# still buckets under that label rather than disappearing
-	# from the rendered Findings section.
 	stripped = norm.lstrip("/")
 	first = stripped.split("/", 1)[0]
 	return first or None
@@ -353,20 +329,13 @@ def is_framework_callsite(
 			return False
 		return True
 
-	# Exclusion mode (default): framework if the app is in the built-in
-	# FRAMEWORK_APPS set or the path contains a known third-party marker.
-	# Order matters:
-	#   1. site-packages/dist-packages FIRST — a third-party lib in an app-local
-	#      venv (``apps/myapp/.venv/.../site-packages/werkzeug/…``) is framework
-	#      even though it sits under a user app, so this must beat the user-app
-	#      guard below.
-	#   2. User-app guard — a path under a real ``apps/<app>/`` bench dir where
-	#      ``<app>`` isn't a framework app is the user's OWN code, even when it
-	#      nests a dir named after a framework app or a third-party lib (a vendored
-	#      ``apps/myapp/lxml/…``). Deciding by the app segment here stops the
-	#      FRAMEWORK loop and the top-level lib scan from misfiring on it. A stripped
-	#      lib that arrives WITHOUT an ``apps/`` prefix (``werkzeug/serving.py``)
-	#      still gets caught by the top-level lib scan below.
+	# Exclusion mode (default). Order matters:
+	#   1. site-packages/dist-packages first — a venv lib under an app dir
+	#      (``apps/myapp/.venv/.../werkzeug/…``) is still framework.
+	#   2. User-app guard — a path under a non-framework ``apps/<app>/`` is user
+	#      code, even if it nests a lib-named dir (vendored ``apps/myapp/lxml/…``).
+	#   3. Stripped libs match only the TOP segment (``werkzeug/serving.py``), so a
+	#      nested user submodule (``myapp/cryptography/…``) isn't misread.
 	if "site-packages/" in norm or "dist-packages/" in norm:
 		return True
 	user_app = _app_under_apps_dir(norm)
@@ -376,13 +345,6 @@ def is_framework_callsite(
 		token = f"{app}/"
 		if norm.startswith(token) or f"/{token}" in norm:
 			return True
-	#   3. Stripped third-party libs. A pyinstrument-stripped lib arrives with the
-	#      package as the TOP-LEVEL segment (``werkzeug/serving.py``,
-	#      ``pydantic/type_adapter.py``); venv/system copies were already caught by
-	#      the site-packages check above. Match ONLY that top segment — never as an
-	#      arbitrary substring — so a user submodule that merely nests a dir named
-	#      like a lib (``myapp/cryptography/…``, the stripped form of
-	#      ``apps/myapp/cryptography/…``) is NOT misread as framework.
 	norm_top = norm.lstrip("/").split("/", 1)[0]
 	for lib in _THIRD_PARTY_LIB_FRAGMENTS:
 		if norm_top == lib.strip("/"):

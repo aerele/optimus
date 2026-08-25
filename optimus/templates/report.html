@@ -210,17 +210,10 @@
   table.query-table col.col-callsite  { width: 34%; }
   /* col.col-query uses the remaining width implicitly (auto) */
 
-  /* DURABLE GUARD - do not remove. Every <code> cell in a data table holds an
-     unbreakable string (an /api/method/... URL, a filesystem path, a dotted
-     module, a `tab<DocType>` name). Bound it to its cell and let it wrap at any
-     character in EVERY data table, so a table that forgets the per-table
-     .tbl-clip / fixed-layout treatment can't reintroduce the horizontal-overflow
-     bug - which has recurred table-by-table precisely because it was patched one
-     table at a time. `display: inline-block` is the load-bearing part: `max-width`
-     is inert on a bare inline <code>, so without it the box isn't bounded. Placed
-     before `table.query-table td code` (equal specificity) so that rule's more
-     aggressive `break-all` still wins for the query table. Per-table column
-     widths below are unaffected; this only guarantees the box never overflows. */
+  /* DURABLE GUARD - do not remove. Bounds every <code> cell (URL / path / dotted
+     module) in ALL data tables so a table that forgets .tbl-clip can't overflow.
+     `display: inline-block` is load-bearing (max-width is inert on inline). Placed
+     before `table.query-table td code` so that rule's `break-all` still wins. */
   table.data td code {
     display: inline-block;
     max-width: 100%;
@@ -300,9 +293,7 @@
   table.xhr-timing-table { table-layout: fixed; }
   table.xhr-timing-table col.col-action { width: 28%; }
   table.xhr-timing-table col.col-num    { width: 70px; }
-  /* Give the URL column an explicit share so it can't be squeezed to a sliver on
-     a narrow viewport (then wrap the long URL into a very tall cell). The td code
-     guard above keeps the URL itself inside whatever width this column gets. */
+  /* Explicit URL-column width so it isn't squeezed to a sliver on narrow viewports. */
   table.xhr-timing-table col.col-url    { width: 34%; }
 
   /* Frontend disclosure table — URL takes the bulk, Duration stays

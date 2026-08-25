@@ -138,20 +138,16 @@ def _extract_target_doc(form_dict) -> dict | None:
 
 
 def _is_temp_docname(name) -> bool:
-	"""True for a name that isn't the document's permanent identity: ``None`` (an
-	unsaved doc) or Frappe's client-side placeholder ``new-<doctype>-<random>``
-	assigned before the first save (autoname replaces it with the series name)."""
+	"""True for a non-permanent name: ``None``, or Frappe's ``new-<doctype>-<hash>``
+	client placeholder (autoname replaces it on first save)."""
 	return not name or (isinstance(name, str) and name.startswith("new-"))
 
 
 def _saved_doc_from_response(response, want_doctype):
-	"""Best-effort: pull the ``{"doctype", "name"}`` of the just-saved PARENT doc
-	out of a request's response, restricted to ``want_doctype`` so a child-table
-	row or a linked doc can't be mistaken for it. Handles ``savedocs``
-	(``response["docs"]`` — a list of ``as_dict()`` docs) and
-	``frappe.client.save|insert|submit`` (``response["message"]`` — the doc dict,
-	or a list). Returns ``None`` when nothing with a real name matches. Never
-	raises."""
+	"""``{"doctype", "name"}`` of the just-saved doc matching ``want_doctype``, or
+	None. Reads ``savedocs`` (``response["docs"]``) and ``frappe.client.*``
+	(``response["message"]``); filters by doctype so a child row isn't picked.
+	Never raises."""
 	if not isinstance(response, dict) or not want_doctype:
 		return None
 	try:
@@ -181,12 +177,9 @@ def _saved_doc_from_response(response, want_doctype):
 
 
 def resolve_target_doc_from_response(form_dict, response):
-	"""Capture-side entry point (called from ``after_request``): when a request
-	created a NEW document (its request-side target name is a ``new-…`` temp name
-	or ``None``), return the real ``{"doctype", "name"}`` the save assigned,
-	pulled from the response. Returns ``None`` when there's nothing to resolve —
-	an edit/submit whose request already carries the permanent name, or no
-	doc-shaped payload. Never raises; safe to call on every request."""
+	"""Capture-side (from ``after_request``): if the request created a NEW doc
+	(temp/None request name), return the real ``{"doctype", "name"}`` the save
+	assigned. None for an edit (real request name) or no doc. Never raises."""
 	req = _extract_target_doc(form_dict)
 	if not req or not _is_temp_docname(req.get("name")):
 		return None
@@ -286,11 +279,9 @@ def _attach_action_context(actions, findings, recordings_by_uuid) -> None:
 			continue
 		rec = recordings_by_uuid.get(a.get("recording_uuid") or "")
 		td = _extract_target_doc(rec.get("form_dict") if isinstance(rec, dict) else None)
-		# Resolve a "new-…" temp name (or an unsaved None) to the permanent name
-		# the save assigned server-side, captured from the response at request time
-		# (``resolved_target_doc`` on the recording). This makes an insert action
-		# show the SAME name that submit/cancel already carry for the document,
-		# instead of the throwaway placeholder.
+		# Replace a "new-…"/unsaved name with the permanent one the save assigned
+		# (``resolved_target_doc``, captured from the response), so an insert action
+		# shows the same name submit/cancel already carry.
 		if isinstance(rec, dict):
 			_resolved = rec.get("resolved_target_doc")
 			if isinstance(_resolved, dict) and _resolved.get("name"):

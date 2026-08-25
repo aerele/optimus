@@ -430,18 +430,10 @@ _THIRD_PARTY_LIB_SEGMENTS = frozenset({
 })
 
 
-# Installed Frappe apps for the current site — the completeness backstop for the
-# hardcoded lib set above. Any top path segment that ISN'T an installed app is a
-# third-party Python package (pyinstrument strips the site-packages/ prefix),
-# which the user can't patch — covering EVERY lib, not just the enumerated ones.
-# ``get_installed_apps`` is a Redis round-trip and the walker asks per frame, so
-# it's resolved once and cached on ``frappe.local`` — request/job scope, which is
-# torn down and rebuilt per analyze job, so a worker that outlives an
-# install/uninstall picks up the change on its next job instead of serving a
-# stale set for the whole process lifetime (a module-global dict never would).
+# Cached on ``frappe.local`` (per request/job) so a worker picks up an
+# install/uninstall on its next analyze job, and off-bench callers get None.
 def _installed_apps_for_site() -> frozenset | None:
-	"""Frozenset of this site's installed apps, or None off-bench / no site (so
-	unit-test frames fall back to the hardcoded set and aren't over-filtered)."""
+	"""This site's installed apps, or None off-bench / no site."""
 	try:
 		import frappe
 
@@ -463,12 +455,9 @@ def _installed_apps_for_site() -> frozenset | None:
 
 
 def _frame_top_app(stripped: str) -> str:
-	"""App/package name from the first real segment of a bench-stripped or
-	``apps/``-prefixed path: 'erpnext' for both 'erpnext/x.py' and
+	"""Top app/package segment: 'erpnext' for 'erpnext/x.py' and
 	'apps/erpnext/erpnext/x.py'. Delegates the ``apps/`` case to base's
-	boundary-anchored, last-``apps``-wins parser (so 'webapps/x.py' and a bench
-	under '/opt/apps/…' resolve correctly), falling back to the first path
-	segment when there's no ``apps/`` boundary."""
+	boundary-anchored parser, else the first path segment."""
 	return _app_under_apps_dir(stripped) or stripped.split("/", 1)[0]
 
 
@@ -480,12 +469,9 @@ def _is_pure_helper_frame(node: dict) -> bool:
 	bottleneck — and users who ARE Frappe contributors can see those as
 	legitimate targets too.
 
-	Callers: the Repeated Hot Frame aggregator AND ``_is_walker_plumbing_frame``
-	(which gates Slow Hot Path / Hook / BG-job findings) — so the installed-apps
-	backstop below reaches those findings too, not just the leaderboard. Do NOT
-	use this for SQL-to-Python reconciliation, which wants the broader
-	``_is_framework_frame`` so SQL attributes blame to user code above the
-	framework boundary.
+	Called by the Repeated Hot Frame aggregator AND ``_is_walker_plumbing_frame``
+	(Slow Hot Path / Hook / BG-job), so the installed-apps backstop below reaches
+	those too. NOT for SQL reconciliation — that wants ``_is_framework_frame``.
 	"""
 	fn = node.get("function") or ""
 
@@ -541,44 +527,27 @@ def _is_pure_helper_frame(node: dict) -> bool:
 		# a Frappe app.
 		return True
 
-	# Any path inside a venv / system packages dir is third-party, whatever the
-	# absolute prefix — catch it explicitly so the installed-apps backstop below
-	# doesn't have to (its filesystem-prefix resolution is unreliable on absolute
-	# paths, see the guard there).
+	# Any venv / system-packages path is third-party regardless of prefix.
 	if "site-packages/" in filename or "dist-packages/" in filename:
 		return True
 
-	# An INSTALLED app is the user's OWN code — rescue it BEFORE the heuristic
-	# third-party matches below. Without this, a site with an app whose name
-	# collides with a hardcoded lib token (an app literally named ``babel`` /
-	# ``markdown`` / ``click`` / …, whose frame arrives pyinstrument-stripped to
-	# ``babel/x.py``) would be hidden as plumbing. ``get_installed_apps`` is the
-	# authority on what's user code; the hardcoded set below is only a best-effort
-	# fallback for names it doesn't recognise. None off-bench → no rescue, so the
-	# unit suite keeps relying on the hardcoded set.
+	# An installed app is user code — rescue it before the heuristic lib matches
+	# below (an app named like a lib, e.g. ``babel``, would otherwise be hidden).
+	# None off-bench → no rescue, so tests fall back to the hardcoded set.
 	installed = _installed_apps_for_site()
 	if installed and _frame_top_app(stripped) in installed:
 		return False
 
-	# v0.5.2: third-party libraries by first-segment. pyinstrument
-	# sometimes strips the site-packages/ prefix so MySQLdb/cursors.py
-	# arrives without any directory context. Catch by name against
-	# a frozen set of common libs used in Frappe benches.
+	# v0.5.2: known third-party libs by first segment (pyinstrument strips the
+	# site-packages/ prefix, so MySQLdb/cursors.py arrives bare).
 	first_segment = stripped.split("/", 1)[0]
 	if first_segment in _THIRD_PARTY_LIB_SEGMENTS:
 		return True
 
-	# Completeness backstop (on-bench only): any top segment that isn't one of
-	# THIS SITE's installed apps is a third-party Python package the user can't
-	# patch — catches every lib, not just the set above.
-	#
-	# Fail OPEN for absolute paths that don't route through ``/apps/`` (an
-	# out-of-bench custom script like ``/home/frappe/custom/foo.py``): there
-	# ``_frame_top_app`` returns a meaningless filesystem prefix (``home``) that
-	# is never an installed app, so firing the backstop would wrongly hide real
-	# user code. Only apply it to reliable shapes — a relative bench-stripped
-	# path, or an absolute path with an ``/apps/`` segment ``_frame_top_app`` can
-	# resolve. venv libs on absolute paths are already caught above.
+	# Backstop: a top segment that isn't an installed app is a third-party package.
+	# Fail OPEN for absolute paths without ``/apps/`` (an out-of-bench script like
+	# ``/home/frappe/custom/foo.py`` resolves to a bogus ``home`` prefix) — apply
+	# only to relative or ``/apps/`` paths ``_frame_top_app`` can resolve.
 	backstop_applies = not filename.startswith("/") or "/apps/" in filename
 	if backstop_applies and installed and _frame_top_app(stripped) not in installed:
 		return True
