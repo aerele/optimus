@@ -469,3 +469,28 @@ class TestSkipDecoratorsToDef:
 		src.write_text("@d\ndef target_fn():\n    pass\n")
 		assert renderer._skip_decorators_to_def(str(src), 0, "target_fn") == 0
 		assert renderer._skip_decorators_to_def(str(src), -1, "target_fn") == -1
+
+	def test_out_of_bench_source_read_directly_when_primitive_rejects(self, tmp_path, monkeypatch):
+		# On-bench, _source_lines applies a bench-boundary reject, so an app
+		# installed OUTSIDE the bench tree yields no lines. Since this returns only
+		# a line NUMBER (never content), it falls back to a direct read so the
+		# callsite still anchors on the def, not the decorator.
+		import optimus.renderer.source_resolution as sr
+
+		src = tmp_path / "oob_module.py"
+		src.write_text(
+			"import functools\n"  # 1
+			"@functools.wraps\n"  # 2
+			"def target_fn():\n"  # 3
+			"    return 1\n"
+		)
+		monkeypatch.setattr(sr, "_source_lines", lambda *a, **k: [])
+		assert sr._skip_decorators_to_def(str(src), 2, "target_fn") == 3
+
+	def test_synthetic_sentinel_never_read_from_disk(self, monkeypatch):
+		# A Server Script sentinel (``<serverscript:...>``) must never trigger a
+		# disk read in the fallback; it stays unchanged.
+		import optimus.renderer.source_resolution as sr
+
+		monkeypatch.setattr(sr, "_source_lines", lambda *a, **k: [])
+		assert sr._skip_decorators_to_def("<serverscript:foo>", 2, "target_fn") == 2

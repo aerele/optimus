@@ -85,9 +85,12 @@ class TestThirdPartyLibraryDetection:
 		"env/lib/python3.14/site-packages/werkzeug/serving.py",
 		"env/lib/python3.14/site-packages/gunicorn/workers/base.py",
 		"/usr/lib/python3/dist-packages/requests/sessions.py",
-		"something/werkzeug/routing.py",
-		"something/gunicorn/app.py",
-		"something/rq/worker.py",
+		# Pyinstrument-stripped libs arrive with the package as the TOP-LEVEL
+		# segment; that's what marks them framework (a mid-path lib name is a user
+		# submodule — see TestMidPathLibNameIsUserCode).
+		"werkzeug/routing.py",
+		"gunicorn/app.py",
+		"rq/worker.py",
 		"pyinstrument/frame.py",
 		# v0.12.x: pyinstrument-stripped paths (no site-packages/ prefix) for
 		# libs that were leaking into findings. Only the unambiguous LONGER names
@@ -166,13 +169,32 @@ class TestVendoredLibSubpackageStaysUserCode:
 		)
 
 	@pytest.mark.parametrize("path", [
-		"something/werkzeug/routing.py",
-		"something/rq/worker.py",
+		"werkzeug/routing.py",
+		"rq/worker.py",
 		"lxml/etree.py",
 	])
-	def test_stripped_lib_without_apps_prefix_still_framework(self, path):
+	def test_top_level_stripped_lib_is_framework(self, path):
 		assert is_framework_callsite(path) is True, (
-			f"{path} has no user-app prefix — the lib scan must still catch it"
+			f"{path} is a top-level stripped lib — the lib scan must catch it"
+		)
+
+
+class TestMidPathLibNameIsUserCode:
+	"""Regression: a lib name that appears MID-PATH (not the top segment, not under
+	site-packages) is a user submodule, not the library — most importantly the
+	pyinstrument-stripped short form ``myapp/<libname>/…`` of a user app. Matching
+	it as framework hid the user's own findings in Observations."""
+
+	@pytest.mark.parametrize("path", [
+		"myapp/cryptography/signer.py",
+		"myapp/lxml/util.py",
+		"acme/pydantic/schema.py",
+		"something/werkzeug/routing.py",
+		"something/rq/worker.py",
+	])
+	def test_mid_path_lib_name_not_framework(self, path):
+		assert is_framework_callsite(path) is False, (
+			f"{path} nests a lib name mid-path — it's user code, not framework"
 		)
 
 

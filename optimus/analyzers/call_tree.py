@@ -480,10 +480,12 @@ def _is_pure_helper_frame(node: dict) -> bool:
 	bottleneck — and users who ARE Frappe contributors can see those as
 	legitimate targets too.
 
-	Used by the Repeated Hot Frame aggregator only. Do NOT use this for
-	SQL-to-Python reconciliation or Slow Hot Path — those want the
-	broader ``_is_framework_frame`` so SQL attributes blame to user
-	code above the framework boundary.
+	Callers: the Repeated Hot Frame aggregator AND ``_is_walker_plumbing_frame``
+	(which gates Slow Hot Path / Hook / BG-job findings) — so the installed-apps
+	backstop below reaches those findings too, not just the leaderboard. Do NOT
+	use this for SQL-to-Python reconciliation, which wants the broader
+	``_is_framework_frame`` so SQL attributes blame to user code above the
+	framework boundary.
 	"""
 	fn = node.get("function") or ""
 
@@ -539,6 +541,13 @@ def _is_pure_helper_frame(node: dict) -> bool:
 		# a Frappe app.
 		return True
 
+	# Any path inside a venv / system packages dir is third-party, whatever the
+	# absolute prefix — catch it explicitly so the installed-apps backstop below
+	# doesn't have to (its filesystem-prefix resolution is unreliable on absolute
+	# paths, see the guard there).
+	if "site-packages/" in filename or "dist-packages/" in filename:
+		return True
+
 	# v0.5.2: third-party libraries by first-segment. pyinstrument
 	# sometimes strips the site-packages/ prefix so MySQLdb/cursors.py
 	# arrives without any directory context. Catch by name against
@@ -551,8 +560,17 @@ def _is_pure_helper_frame(node: dict) -> bool:
 	# THIS SITE's installed apps is a third-party Python package the user can't
 	# patch — catches every lib, not just the set above. None off-bench, so unit
 	# tests keep relying on that set.
+	#
+	# Fail OPEN for absolute paths that don't route through ``/apps/`` (an
+	# out-of-bench custom script like ``/home/frappe/custom/foo.py``): there
+	# ``_frame_top_app`` returns a meaningless filesystem prefix (``home``) that
+	# is never an installed app, so firing the backstop would wrongly hide real
+	# user code. Only apply it to reliable shapes — a relative bench-stripped
+	# path, or an absolute path with an ``/apps/`` segment ``_frame_top_app`` can
+	# resolve. venv libs on absolute paths are already caught above.
+	backstop_applies = not filename.startswith("/") or "/apps/" in filename
 	installed = _installed_apps_for_site()
-	if installed and _frame_top_app(stripped) not in installed:
+	if backstop_applies and installed and _frame_top_app(stripped) not in installed:
 		return True
 
 	return False

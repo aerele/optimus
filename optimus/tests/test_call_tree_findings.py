@@ -589,6 +589,29 @@ def test_frame_top_app_anchors_apps_marker_on_path_boundary():
 	assert _frame_top_app("subapps/core.py") == "subapps"
 
 
+def test_backstop_fails_open_for_out_of_bench_absolute_path(monkeypatch):
+	"""The installed-apps backstop must NOT fire on an absolute path with no
+	``/apps/`` segment (a custom out-of-bench script). There _frame_top_app returns
+	a filesystem prefix ('home') that's never an installed app, so firing it would
+	hide real user code from Slow Hot Path / hot-frame findings."""
+	from optimus.analyzers import call_tree
+
+	monkeypatch.setattr(
+		call_tree, "_installed_apps_for_site",
+		lambda: frozenset({"frappe", "erpnext", "optimus"}))
+
+	# Out-of-bench custom script — kept (fail open).
+	assert call_tree._is_pure_helper_frame(
+		{"function": "run", "filename": "/home/frappe/custom/foo.py", "kind": "python"}) is False
+	# But a venv lib on an absolute path is still filtered (site-packages catch).
+	assert call_tree._is_pure_helper_frame(
+		{"function": "run", "filename": "/home/frappe/env/lib/python3.11/site-packages/pydantic/x.py",
+		 "kind": "python"}) is True
+	# And a stripped third-party package (relative, not installed) is still filtered.
+	assert call_tree._is_pure_helper_frame(
+		{"function": "run", "filename": "pydantic/type_adapter.py", "kind": "python"}) is True
+
+
 def test_installed_app_ending_in_apps_not_dropped_as_third_party(monkeypatch):
 	"""Regression for the substring bug: a real installed app named e.g. 'webapps'
 	(pyinstrument-stripped to 'webapps/…') must stay actionable, not be filtered

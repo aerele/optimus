@@ -26,6 +26,8 @@ data either.
 import json
 import types
 
+import pytest
+
 from optimus.renderer import (
 	_OTHER_APP_LABEL,
 	_app_from_finding,
@@ -217,6 +219,17 @@ class TestImpactScopeLabelBackfill:
 		row = self._row("Framework N+1", {"normalized_query": "SELECT 1"})
 		finding = _finding_to_dict(row)
 		assert "impact_scope_label" not in finding["technical_detail"]
+
+	@pytest.mark.parametrize("blob", ["null", "[]", "123", '"str"'])
+	def test_non_dict_technical_detail_does_not_crash(self, blob):
+		# A malformed detail blob that parses to a non-object must not crash the
+		# render (the backfill and every downstream detail.get() assume a dict).
+		row = types.SimpleNamespace(
+			finding_type="N+1 Query", severity="High", title="x",
+			customer_description="y", estimated_impact_ms=1.0, affected_count=1,
+			action_ref="0", technical_detail_json=blob)
+		finding = _finding_to_dict(row)
+		assert isinstance(finding["technical_detail"], dict)
 
 
 class TestEndToEndRender:

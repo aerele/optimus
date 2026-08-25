@@ -364,9 +364,9 @@ def is_framework_callsite(
 	#      ``<app>`` isn't a framework app is the user's OWN code, even when it
 	#      nests a dir named after a framework app or a third-party lib (a vendored
 	#      ``apps/myapp/lxml/…``). Deciding by the app segment here stops the
-	#      FRAMEWORK loop and the substring lib scan from misfiring on it. It does
-	#      NOT touch stripped libs that arrive WITHOUT an ``apps/`` prefix
-	#      (``something/werkzeug/…``) — those fall through to the lib scan.
+	#      FRAMEWORK loop and the top-level lib scan from misfiring on it. A stripped
+	#      lib that arrives WITHOUT an ``apps/`` prefix (``werkzeug/serving.py``)
+	#      still gets caught by the top-level lib scan below.
 	if "site-packages/" in norm or "dist-packages/" in norm:
 		return True
 	user_app = _app_under_apps_dir(norm)
@@ -376,8 +376,16 @@ def is_framework_callsite(
 		token = f"{app}/"
 		if norm.startswith(token) or f"/{token}" in norm:
 			return True
+	#   3. Stripped third-party libs. A pyinstrument-stripped lib arrives with the
+	#      package as the TOP-LEVEL segment (``werkzeug/serving.py``,
+	#      ``pydantic/type_adapter.py``); venv/system copies were already caught by
+	#      the site-packages check above. Match ONLY that top segment — never as an
+	#      arbitrary substring — so a user submodule that merely nests a dir named
+	#      like a lib (``myapp/cryptography/…``, the stripped form of
+	#      ``apps/myapp/cryptography/…``) is NOT misread as framework.
+	norm_top = norm.lstrip("/").split("/", 1)[0]
 	for lib in _THIRD_PARTY_LIB_FRAGMENTS:
-		if lib in norm:
+		if norm_top == lib.strip("/"):
 			return True
 	return False
 

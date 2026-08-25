@@ -8,6 +8,28 @@ versions may contain breaking changes — see migration notes below).
 
 ---
 
+## [0.12.33] — 2026-08-25
+
+### Fixed
+
+- **App-path classification edge cases from the 0.12.31 hardening (review
+  follow-up).**
+  - The installed-apps backstop no longer fails *closed*: an out-of-bench absolute
+    path (a custom script like `/home/frappe/custom/foo.py`) resolves to a
+    filesystem prefix, not an app, so firing the backstop wrongly hid real user
+    code from Slow Hot Path / hot-frame findings. It now only fires for reliable
+    shapes (relative, or absolute with an `/apps/` segment); venv libs are caught
+    by an explicit `site-packages/` check.
+  - The stripped third-party lib fragments (`lxml`, `cryptography`, `pydantic`, …)
+    are matched only at the **top-level path segment**, so a user submodule named
+    like a lib (`myapp/cryptography/…`, the pyinstrument-stripped form of a real
+    app path) is no longer misread as framework.
+  - `_skip_decorators_to_def` falls back to a direct read when the source-read
+    primitive rejects an out-of-bench path, so an app installed outside the bench
+    tree still anchors its callsite on the `def`, not the decorator.
+  - `_finding_to_dict` normalizes a non-object `technical_detail_json` (a stray
+    `null`/list) to an empty dict, so one malformed finding can't crash the render.
+
 ## [0.12.32] — 2026-08-25
 
 ### Fixed

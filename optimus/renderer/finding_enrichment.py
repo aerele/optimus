@@ -719,6 +719,11 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 		detail = json.loads(child.technical_detail_json or "{}")
 	except Exception:
 		detail = {}
+	# A malformed detail blob that parses to a non-object (a JSON list or ``null``)
+	# would crash every ``detail.get()`` / ``in`` below. Normalize to an empty dict
+	# so one bad finding can't take down the whole render.
+	if not isinstance(detail, dict):
+		detail = {}
 
 	# Back-compat: a user N+1 always declares impact_scope_label "recoverable"
 	# (analyzers/n_plus_one.py), but sessions analyzed before that field shipped
