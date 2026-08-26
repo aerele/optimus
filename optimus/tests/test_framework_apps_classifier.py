@@ -106,26 +106,53 @@ class TestThirdPartyLibraryDetection:
 
 
 class TestShortTokenNotSubstringMatched:
-	"""Regression: short lib tokens must NOT substring-match in base — "click/" collided inside …/onclick/… and misrouted real findings."""
+	"""Matching is EXACT top-segment, so a short lib token like "click" is
+	framework only when it IS the top segment — never as a substring inside a
+	longer segment ("onclick"), nor as a vendored subdir under a user app."""
 
 	@pytest.mark.parametrize("path", [
-		"apps/myapp/onclick/handler.py",
-		"apps/myapp/babel/messages.py",
-		"click/core.py",  # base leaves this to call_tree's exact-match module
+		"apps/myapp/onclick/handler.py",   # "click" inside "onclick", under a user app
+		"apps/myapp/babel/messages.py",    # vendored lib-named subdir under a user app
+		"onclick/handler.py",              # bare top segment "onclick" != "click"
 	])
-	def test_short_token_paths_not_framework(self, path):
+	def test_lib_token_as_substring_or_vendored_is_not_framework(self, path):
 		assert is_framework_callsite(path) is False, (
-			f"{path} must NOT be classified framework by base's substring list"
+			f"{path} must NOT be framework — the lib token is not the exact top segment"
+		)
+
+	@pytest.mark.parametrize("path", [
+		"click/core.py",      # bare top-segment lib, now recognized in the shared set
+		"babel/messages.py",  # ditto — off-bench there's no installed-app info to rescue it
+	])
+	def test_bare_top_segment_lib_is_framework(self, path):
+		assert is_framework_callsite(path) is True, (
+			f"{path} is a bare top-level lib — the exact top-segment match catches it"
 		)
 
 
 class TestThirdPartyClassifiersAgree:
-	"""base and call_tree's third-party lists must agree on the unambiguous libs in both, so a one-sided edit can't silently drift (short tokens like click are call_tree-only)."""
+	"""base and call_tree share ONE canonical third-party denylist
+	(``base.THIRD_PARTY_LIB_SEGMENTS``), so the SQL classifier
+	(``is_framework_callsite``) and the hot-frame classifier
+	(``_is_pure_helper_frame``) can no longer drift apart — a one-sided edit is
+	structurally impossible. Spot-checks span libs that used to live in only one
+	of the two former lists (requests/numpy/redis: call_tree-only; werkzeug/rq/
+	pytz: base-only), which is exactly where they disagreed before."""
+
+	def test_classifiers_share_the_same_canonical_set(self):
+		from optimus.analyzers import base, call_tree
+
+		assert call_tree.THIRD_PARTY_LIB_SEGMENTS is base.THIRD_PARTY_LIB_SEGMENTS, (
+			"call_tree must reuse base.THIRD_PARTY_LIB_SEGMENTS, not a private copy"
+		)
 
 	@pytest.mark.parametrize("lib", [
-		"pydantic", "pydantic_core", "sqlparse", "croniter",
-		"cryptography", "num2words", "lxml", "html5lib",
-		"premailer", "oauthlib",
+		# in both former lists
+		"pydantic", "sqlparse", "cryptography", "lxml", "oauthlib",
+		# call_tree-only before — base misclassified these as user code
+		"requests", "numpy", "redis", "click", "jinja2", "babel",
+		# base-only before — call_tree relied on other filters for these
+		"werkzeug", "rq", "pytz", "dateutil", "gunicorn",
 	])
 	def test_both_classifiers_treat_as_framework(self, lib):
 		from optimus.analyzers.call_tree import _is_pure_helper_frame
@@ -134,6 +161,39 @@ class TestThirdPartyClassifiersAgree:
 		assert is_framework_callsite(path) is True, f"base misses {lib}"
 		node = {"function": "run", "filename": path, "kind": "python"}
 		assert _is_pure_helper_frame(node) is True, f"call_tree misses {lib}"
+
+
+class TestInstalledAppNamedLikeLibIsRescued:
+	"""On-bench parity with call_tree: an INSTALLED app whose name collides with a
+	canonical third-party token (an app literally named ``babel``/``redis``) is
+	the user's own code. is_framework_callsite gained the same installed-apps
+	rescue call_tree has, ordered AFTER the FRAMEWORK_APPS check so frappe/erpnext
+	stay framework. Off-bench the rescue is a no-op (installed apps → None)."""
+
+	def _patch_installed(self, monkeypatch, apps):
+		monkeypatch.setattr(
+			"optimus.analyzers.base._installed_apps_for_site",
+			lambda: frozenset(apps),
+		)
+
+	def test_installed_app_named_like_a_lib_is_user_code(self, monkeypatch):
+		self._patch_installed(monkeypatch, {"frappe", "erpnext", "babel", "redis"})
+		# babel/redis are installed apps here → their bench-stripped frames are
+		# user code, NOT the libraries, even though both are in the lib denylist.
+		assert is_framework_callsite("babel/messages.py") is False
+		assert is_framework_callsite("redis/client.py") is False
+
+	def test_uninstalled_lib_token_stays_framework(self, monkeypatch):
+		self._patch_installed(monkeypatch, {"frappe", "erpnext"})
+		# requests is a real lib and NOT an installed app → still framework.
+		assert is_framework_callsite("requests/sessions.py") is True
+
+	def test_framework_app_is_not_rescued_even_when_installed(self, monkeypatch):
+		# frappe/erpnext are installed AND framework — the FRAMEWORK_APPS check
+		# runs before the rescue, so they classify as framework, not user code.
+		self._patch_installed(monkeypatch, {"frappe", "erpnext", "babel"})
+		assert is_framework_callsite("frappe/model/document.py") is True
+		assert is_framework_callsite("erpnext/stock/utils.py") is True
 
 
 class TestUserCodeNotMatched:

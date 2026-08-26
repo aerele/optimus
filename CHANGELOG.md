@@ -8,6 +8,53 @@ versions may contain breaking changes — see migration notes below).
 
 ---
 
+## [0.12.37] — 2026-08-26
+
+### Fixed
+
+- **The SQL and hot-frame classifiers disagreed on whether a third-party library
+  is user code.** `call_tree._is_pure_helper_frame` (hot-frame findings) gained an
+  installed-apps backstop and a larger third-party denylist, but
+  `base.is_framework_callsite` (N+1 / redundant-call / EXPLAIN findings) kept a
+  smaller, separate list and no backstop — so an N+1 inside a lib like `requests`,
+  `numpy`, `redis`, `jinja2`, or `click` was reported as an actionable *user* N+1
+  by one path while the same frame was dropped as framework plumbing by the other.
+  The two hand-maintained denylists are now **one canonical
+  `base.THIRD_PARTY_LIB_SEGMENTS`** (the union of both, matched identically on the
+  exact top path segment), and `is_framework_callsite` gained the same
+  installed-apps rescue call_tree has — ordered after the framework-app check so
+  `frappe`/`erpnext` stay framework, and a no-op off-bench. An installed app named
+  like a library (`babel`, `redis`) is still correctly treated as user code on
+  both surfaces. Also corrects now-stale comments that described substring
+  matching (the lists have matched exact top segments since 0.12.x).
+
+## [0.12.36] — 2026-08-26
+
+### Fixed
+
+- **Observation-only findings leaked into the "Fix these first" action plan with
+  a false "est. saving."** The action plan was built from the full, ungrouped
+  `all_findings` list, but `_build_action_plan` is a generic top-N-by-severity/
+  impact renderer with no finding-type guard. So an observation-only finding
+  (e.g. **Framework N+1**, which the verb map even labels "Eliminate the N+1
+  query (framework code)") could sort into the top-3 and render under "Fix these
+  first" with `est. saving` = its cumulative time — directly contradicting its
+  own TL;DR hero ("usually not something you can change") and Observations card.
+  The same list is also the *ungrouped* one, so two findings that root-cause-group
+  into a single card (an N+1 and a Slow Query at the same callsite) double-listed
+  as two separate action steps. The plan is now fed the already-split,
+  root-cause-grouped `actionable_findings`, so it shows only genuinely actionable
+  items and reconciles with the Findings section's grouping.
+
+### Tests
+
+- **Locked the `n_plus_one_min_occurrences` clamp against silent removal.** The
+  `max(2, …)` floor is what stops a misconfigured `min_occurrences ≤ 1` from
+  re-admitting the cross-request false positive ("same query ran 50×" for a
+  once-per-request query). It had no test, so deleting it stayed green; a
+  regression test now misconfigures the setting to 1 and asserts a
+  once-per-request query across 50 requests still produces no finding.
+
 ## [0.12.35] — 2026-08-25
 
 ### Fixed

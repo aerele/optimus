@@ -21,6 +21,13 @@ only on the data passed in. Side-effects are limited to the AnalyzerResult
 they return. The orchestrator (analyze.py) merges all results and persists
 them once.
 
+The one deliberate exception is the shared framework/third-party classifier
+below, which consults ``_installed_apps_for_site`` — a per-job-cached
+``frappe.get_installed_apps()`` read that degrades to ``None`` off-bench. So the
+classifier (and every analyzer that calls it) still runs and stays fixture-
+testable in the unit suite; the lookup only sharpens classification on a live
+site (an installed app named like a lib is rescued as user code).
+
 This makes analyzers trivially unit-testable from JSON fixtures and easy to
 reason about: each one is a pure data transformation.
 """
@@ -80,38 +87,62 @@ FRAMEWORK_APPS: frozenset[str] = frozenset({
 	"drive",
 })
 
-# Well-known third-party libs to catch even when sys.path manipulation
-# bypasses site-packages/. Checked by is_framework_callsite().
-_THIRD_PARTY_LIB_FRAGMENTS: tuple[str, ...] = (
-	"werkzeug/",
-	"gunicorn/",
-	"/rq/",
-	"pyinstrument/",
-	"pytz/",
-	"dateutil/",
-	"MySQLdb/",
-	"pymysql/",
-	# v0.12.x: common Frappe-bench libs whose site-packages/ prefix pyinstrument
-	# strips (pydantic, click, …), so the plain "site-packages/" check above
-	# misses them. These are matched as substrings, so only the unambiguous
-	# longer names from call_tree._THIRD_PARTY_LIB_SEGMENTS are mirrored here —
-	# short tokens (jwt, idna, bs4) are left to that module's exact first-segment
-	# match to avoid false positives inside user paths.
-	"pydantic/",
-	"pydantic_core/",
-	# NB: "click/" is deliberately NOT here — as an unbounded substring it
-	# collides inside legitimate user paths (…/onclick/…). call_tree's exact
-	# first-segment match covers "click" safely; the same caution applies to any
-	# short token added here.
-	"sqlparse/",
-	"croniter/",
-	"cryptography/",
-	"num2words/",
-	"lxml/",
-	"html5lib/",
-	"premailer/",
-	"oauthlib/",
-)
+# Canonical third-party library denylist — bare top-level package names, caught
+# even when sys.path manipulation (pyinstrument stripping the ``site-packages/``
+# prefix) hides the usual marker. This is the SINGLE source of truth shared by
+# both classifiers: ``is_framework_callsite`` (SQL findings) and
+# ``call_tree._is_pure_helper_frame`` (hot-frame findings) both match a frame's
+# EXACT top segment against it, so the two can no longer drift apart. An installed
+# app whose name collides with one of these (an app literally named ``babel`` or
+# ``redis``) is rescued first by ``_installed_apps_for_site`` below, so its own
+# frames are never misread as the library.
+THIRD_PARTY_LIB_SEGMENTS: frozenset[str] = frozenset({
+	# DB drivers / caches / queues / web servers
+	"MySQLdb", "pymysql", "psycopg2", "redis", "celery",
+	"werkzeug", "gunicorn", "rq", "urllib3", "requests", "httpx",
+	# cloud / serialization / templating / sanitization
+	"boto3", "botocore", "jinja2", "markupsafe", "bleach", "nh3",
+	# data / imaging
+	"pandas", "numpy", "openpyxl", "PIL",
+	# validation / parsing / crypto / dates / i18n
+	"pydantic", "pydantic_core", "click", "sqlparse", "pyparsing",
+	"croniter", "cryptography", "jwt", "pytz", "dateutil", "num2words", "babel",
+	# encodings / HTTP plumbing / markup
+	"chardet", "charset_normalizer", "certifi", "idna",
+	"lxml", "bs4", "html5lib", "markdown", "premailer", "oauthlib",
+	# the profiler itself
+	"pyinstrument",
+})
+
+
+def _installed_apps_for_site() -> frozenset | None:
+	"""This site's installed apps, or None off-bench / no site.
+
+	Cached on ``frappe.local`` (per request/job) so a worker picks up an
+	install/uninstall on its next analyze job; off-bench callers (the unit
+	suite) get None, which makes the installed-apps rescue a no-op there.
+	Shared by ``is_framework_callsite`` and ``call_tree._is_pure_helper_frame``
+	so both apply the same "an installed app is the user's own code" rescue —
+	the classifiers stay symmetric on a site with an app named like a lib.
+	"""
+	try:
+		import frappe
+
+		site = getattr(frappe.local, "site", None)
+	except Exception:
+		return None
+	if not site:
+		return None
+	cache = getattr(frappe.local, "_optimus_installed_apps", None)
+	if cache is None:
+		cache = {}
+		frappe.local._optimus_installed_apps = cache
+	if site not in cache:
+		try:
+			cache[site] = frozenset(frappe.get_installed_apps() or [])
+		except Exception:
+			cache[site] = None
+	return cache[site]
 
 # v0.6.0: Frappe's framework-managed columns — every `tab*` table has these.
 # Frappe writes (most of) them on every save (`modified`, `modified_by`,
@@ -334,7 +365,12 @@ def is_framework_callsite(
 	#      (``apps/myapp/.venv/.../werkzeug/…``) is still framework.
 	#   2. User-app guard — a path under a non-framework ``apps/<app>/`` is user
 	#      code, even if it nests a lib-named dir (vendored ``apps/myapp/lxml/…``).
-	#   3. Stripped libs match only the TOP segment (``werkzeug/serving.py``), so a
+	#   3. Framework apps (frappe/erpnext/…) — framework whether bare or apps/.
+	#   4. Installed-apps rescue — a bare top segment (pyinstrument stripped the
+	#      apps/ prefix) that IS an installed app is the user's own code, even when
+	#      its name collides with a lib below (an app named ``babel``/``redis``).
+	#      No-op off-bench (None); mirrors call_tree._is_pure_helper_frame.
+	#   5. Stripped libs match only the TOP segment (``werkzeug/serving.py``), so a
 	#      nested user submodule (``myapp/cryptography/…``) isn't misread.
 	if "site-packages/" in norm or "dist-packages/" in norm:
 		return True
@@ -346,9 +382,11 @@ def is_framework_callsite(
 		if norm.startswith(token) or f"/{token}" in norm:
 			return True
 	norm_top = norm.lstrip("/").split("/", 1)[0]
-	for lib in _THIRD_PARTY_LIB_FRAGMENTS:
-		if norm_top == lib.strip("/"):
-			return True
+	installed = _installed_apps_for_site()
+	if installed and norm_top in installed:
+		return False
+	if norm_top in THIRD_PARTY_LIB_SEGMENTS:
+		return True
 	return False
 
 

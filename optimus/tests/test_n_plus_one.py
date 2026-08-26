@@ -120,6 +120,56 @@ def test_one_query_per_request_across_many_requests_is_not_n_plus_one(empty_cont
 	assert result.findings == []  # one-per-request × 50 ≠ a loop
 
 
+def test_misconfigured_min_occurrences_below_two_cannot_readmit_false_positive(empty_context, monkeypatch):
+	"""The ``max(2, …)`` clamp on ``n_plus_one_min_occurrences`` must hold
+	even when the setting is misconfigured to 0 or 1.
+
+	``loop_count`` (peak repeats within one request) is always ≥ 1, and the
+	within-request gate is ``loop_count < min_occurrences``. If the setting
+	reached the gate as 1, a query that runs exactly ONCE per request would
+	satisfy ``1 < 1 == False`` and be flagged — the very cross-request false
+	positive the analyzer exists to prevent (see
+	test_one_query_per_request_across_many_requests_is_not_n_plus_one). The
+	clamp floors the effective threshold at 2 so a single occurrence can never
+	qualify. This test fails the instant the clamp is dropped from line ~93."""
+	from optimus.settings import OptimusConfig
+
+	# Misconfigure the setting to 1 — the value that would defeat the gate.
+	monkeypatch.setattr(
+		"optimus.settings.get_config",
+		lambda: OptimusConfig(n_plus_one_min_occurrences=1),
+	)
+	# 50 requests, the same query run ONCE each (no within-request loop).
+	# Cumulative time (50 × 5ms = 250ms) clears the min-total-time gate, so the
+	# ONLY thing that can suppress the finding is the occurrence clamp.
+	recordings = [
+		{
+			"uuid": f"req-{i}",
+			"path": "/",
+			"cmd": None,
+			"method": "GET",
+			"event_type": "HTTP Request",
+			"duration": 20,
+			"calls": [
+				{
+					"query": "SELECT name FROM tabUser WHERE x=1",
+					"normalized_query": "SELECT NAME FROM tabUser WHERE X=?",
+					"duration": 5,
+					"stack": [
+						{"filename": "apps/myapp/module.py", "lineno": 100, "function": "f"},
+					],
+				}
+			],
+		}
+		for i in range(50)
+	]
+	result = n_plus_one.analyze(recordings, empty_context)
+	assert result.findings == [], (
+		"min_occurrences=1 must still be clamped to 2 — a once-per-request "
+		"query across many requests is not a loop and must not be flagged"
+	)
+
+
 def test_loop_within_single_request_still_detected(empty_context):
 	"""Sanity counterpart: 15 of the same query in ONE request IS an N+1."""
 	recording = {

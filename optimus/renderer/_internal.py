@@ -849,11 +849,15 @@ def render(
 		list(actions) + list(actions_framework)
 	)
 	# v0.7.x redesign Phase C: Recommended Action plan + waterfall.
-	# Action plan: top-3 highest-impact findings, verb-led titles.
+	# Action plan: top-3 highest-impact ACTIONABLE findings, verb-led
+	# titles. Feed it the pre-split actionable list, NOT all_findings —
+	# else an observation-only finding (Framework N+1, infra pressure)
+	# can sort into "Fix these first" with an "est. saving", directly
+	# contradicting its own "usually not something you can change" body.
 	# Waterfall: top-8 actions by duration, horizontal bars scaled
 	# to the displayed slice's max so short actions stay visible.
 	action_plan = _build_action_plan(
-		all_findings,
+		actionable_findings,
 		large_duration_threshold_ms=_large_duration_threshold_ms,
 	)
 	# Waterfall spans both tracked-apps + framework actions; the

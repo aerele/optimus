@@ -30,8 +30,10 @@ from collections import defaultdict
 
 from optimus.analyzers.base import (
 	SEVERITY_ORDER,
+	THIRD_PARTY_LIB_SEGMENTS,
 	AnalyzerResult,
 	_app_under_apps_dir,
+	_installed_apps_for_site,
 	short_filename,
 )
 
@@ -405,53 +407,9 @@ _PURE_HELPER_FUNCTION_NAMES = frozenset({
 	"work", "execute_in_subprocess", "perform",
 })
 
-# v0.5.2: bench/site third-party libraries whose frames pyinstrument
-# leaves without the site-packages/ prefix. MySQLdb / pymysql /
-# requests etc. These aren't Frappe apps — the user can't optimize
-# them. Already filtered by the donut's _top_level_app but wasn't
-# filtered here, so they leaked into the Repeated Hot Frame
-# leaderboard.
-_THIRD_PARTY_LIB_SEGMENTS = frozenset({
-	"MySQLdb", "pymysql", "psycopg2", "requests", "urllib3",
-	"httpx", "boto3", "botocore", "redis", "celery",
-	"jinja2", "markupsafe", "bleach", "nh3",
-	"pandas", "numpy", "openpyxl", "PIL",
-	# v0.12.x: more common Frappe-bench third-party libraries. A real report
-	# blamed Slow Hot Path findings on pydantic's TypeAdapter.__init__ and
-	# click's __call__ — pyinstrument strips their site-packages/ prefix, so
-	# they arrived as "pydantic/type_adapter.py" / "click/core.py" and slipped
-	# the (frappe/optimus-only) framework-frame filter. The app developer can't
-	# patch any of these, so they're never a user-actionable hot path.
-	"pydantic", "pydantic_core", "click",
-	"sqlparse", "croniter", "cryptography", "jwt",
-	"babel", "num2words", "chardet", "charset_normalizer",
-	"certifi", "idna", "lxml", "bs4", "html5lib",
-	"markdown", "premailer", "oauthlib", "pyparsing",
-})
-
-
-# Cached on ``frappe.local`` (per request/job) so a worker picks up an
-# install/uninstall on its next analyze job, and off-bench callers get None.
-def _installed_apps_for_site() -> frozenset | None:
-	"""This site's installed apps, or None off-bench / no site."""
-	try:
-		import frappe
-
-		site = getattr(frappe.local, "site", None)
-	except Exception:
-		return None
-	if not site:
-		return None
-	cache = getattr(frappe.local, "_optimus_installed_apps", None)
-	if cache is None:
-		cache = {}
-		frappe.local._optimus_installed_apps = cache
-	if site not in cache:
-		try:
-			cache[site] = frozenset(frappe.get_installed_apps() or [])
-		except Exception:
-			cache[site] = None
-	return cache[site]
+# The third-party lib denylist and the installed-apps rescue both live in base
+# now (``THIRD_PARTY_LIB_SEGMENTS`` / ``_installed_apps_for_site``), shared with
+# is_framework_callsite so the SQL and hot-frame classifiers stay symmetric.
 
 
 def _frame_top_app(stripped: str) -> str:
@@ -541,7 +499,7 @@ def _is_pure_helper_frame(node: dict) -> bool:
 	# v0.5.2: known third-party libs by first segment (pyinstrument strips the
 	# site-packages/ prefix, so MySQLdb/cursors.py arrives bare).
 	first_segment = stripped.split("/", 1)[0]
-	if first_segment in _THIRD_PARTY_LIB_SEGMENTS:
+	if first_segment in THIRD_PARTY_LIB_SEGMENTS:
 		return True
 
 	# Backstop: a top segment that isn't an installed app is a third-party package.

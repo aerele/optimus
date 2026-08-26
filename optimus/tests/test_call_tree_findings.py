@@ -596,7 +596,7 @@ def test_installed_app_named_like_a_lib_is_rescued(monkeypatch):
 	match, so its pyinstrument-stripped frames aren't hidden as plumbing."""
 	from optimus.analyzers import call_tree
 
-	assert "babel" in call_tree._THIRD_PARTY_LIB_SEGMENTS  # guard: still a lib token
+	assert "babel" in call_tree.THIRD_PARTY_LIB_SEGMENTS  # guard: still a lib token
 	monkeypatch.setattr(
 		call_tree, "_installed_apps_for_site",
 		lambda: frozenset({"frappe", "erpnext", "babel", "markdown"}))
