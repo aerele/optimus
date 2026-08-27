@@ -462,10 +462,7 @@ def _find_call_line_in_function_body(
 	if not parent_filename or not callee_function or not parent_def_lineno:
 		return None
 
-	# Read source through the shared reader (same per-render cache, same file
-	# read) so a Server Script callsite resolves its body from the DB instead of a
-	# bare open() on the ``('server_script', …)`` sentinel — matching the sibling
-	# readers. File-backed callsites behave exactly as before.
+	# Shared reader so a Server Script callsite resolves its body from the DB (not a bare open() on the sentinel); files behave as before.
 	lines = _source_lines(parent_filename, cache=file_cache)
 
 	if not lines:

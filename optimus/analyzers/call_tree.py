@@ -33,6 +33,7 @@ from optimus.analyzers.base import (
 	THIRD_PARTY_LIB_SEGMENTS,
 	AnalyzerResult,
 	_app_under_apps_dir,
+	_bench_apps,
 	_installed_apps_for_site,
 	short_filename,
 )
@@ -502,12 +503,10 @@ def _is_pure_helper_frame(node: dict) -> bool:
 	if first_segment in THIRD_PARTY_LIB_SEGMENTS:
 		return True
 
-	# Backstop: a top segment that isn't an installed app is a third-party package.
-	# Fail OPEN for absolute paths without ``/apps/`` (an out-of-bench script like
-	# ``/home/frappe/custom/foo.py`` resolves to a bogus ``home`` prefix) — apply
-	# only to relative or ``/apps/`` paths ``_frame_top_app`` can resolve.
+	# Backstop: a top segment that isn't a bench app (installed OR in apps.txt) is third-party; fail OPEN for out-of-bench absolute paths (only relative or /apps/ paths resolve).
 	backstop_applies = not filename.startswith("/") or "/apps/" in filename
-	if backstop_applies and installed and _frame_top_app(stripped) not in installed:
+	user_apps = (installed or frozenset()) | (_bench_apps() or frozenset())
+	if backstop_applies and user_apps and _frame_top_app(stripped) not in user_apps:
 		return True
 
 	return False

@@ -144,14 +144,7 @@ def _is_temp_docname(name) -> bool:
 
 
 def _saved_doc_from_response(response, want_doctype, client_name=None):
-	"""``{"doctype", "name"}`` of the just-saved doc matching ``want_doctype``, or
-	None. Reads ``savedocs`` (``response["docs"]``) and ``frappe.client.*``
-	(``response["message"]``); filters by doctype so a child row isn't picked.
-	The real name is the response name that DIFFERS from the browser's temp name
-	(``client_name``): a response echoing the temp name means the save never
-	renamed it (unsaved → keep the temp name), while a genuine name that merely
-	starts with ``new-`` (e.g. a ``new-0001`` naming series) is no longer thrown
-	away. Never raises."""
+	"""The just-saved ``{"doctype","name"}`` matching ``want_doctype`` (from ``docs``/``message``), taking the response name that DIFFERS from the browser temp name so a real ``new-0001`` isn't discarded and an unsaved doc keeps its temp name; None otherwise. Never raises."""
 	if not isinstance(response, dict) or not want_doctype:
 		return None
 	try:

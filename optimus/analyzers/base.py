@@ -144,6 +144,23 @@ def _installed_apps_for_site() -> frozenset | None:
 			cache[site] = None
 	return cache[site]
 
+
+def _bench_apps() -> frozenset | None:
+	"""All apps in the bench (apps.txt), or None off-bench — a bench app not installed on the profiled site is still the user's own code, not third-party."""
+	try:
+		import frappe
+
+		if not getattr(frappe.local, "site", None):
+			return None
+	except Exception:
+		return None
+	if not hasattr(frappe.local, "_optimus_bench_apps"):
+		try:
+			frappe.local._optimus_bench_apps = frozenset(frappe.get_all_apps() or [])
+		except Exception:
+			frappe.local._optimus_bench_apps = None
+	return frappe.local._optimus_bench_apps
+
 # v0.6.0: Frappe's framework-managed columns — every `tab*` table has these.
 # Frappe writes (most of) them on every save (`modified`, `modified_by`,
 # `idx`), on insert (`creation`, `owner`), on submit/cancel (`docstatus`), or
@@ -339,10 +356,7 @@ def is_framework_callsite(
 	heuristics. This is the default for sites that haven't configured
 	the Single.
 
-	Matching is on the resolved app ROOT (top segment or ``apps/<app>/``),
-	so ``crm`` matches ``crm/…`` but never ``my_crm/…`` nor a mid-path
-	``x/crm/…`` (the framework name deeper in a path is the address, not
-	the code's owner).
+	Matching is on the resolved app ROOT (top segment or ``apps/<app>/``), so ``crm`` matches ``crm/…`` but never ``my_crm/…`` nor a mid-path ``x/crm/…``.
 
 	Used by redundant_calls, explain_flags, and n_plus_one to route
 	findings with framework-only callsites into the Observations bucket.
@@ -376,10 +390,7 @@ def is_framework_callsite(
 	#      No-op off-bench (None); mirrors call_tree._is_pure_helper_frame.
 	#   5. Stripped libs match only the TOP segment (``werkzeug/serving.py``), so a
 	#      nested user submodule (``myapp/cryptography/…``) isn't misread.
-	#   6. Installed-apps backstop — a resolvable top segment that is NOT an
-	#      installed app is third-party (a lib outside the denylist, e.g.
-	#      ``passlib``). Mirrors call_tree's backstop so SQL and hot-frame
-	#      findings agree; no-op off-bench (None), fails open out-of-bench.
+	#   6. Bench-apps backstop — a resolvable top segment that is NOT a bench app (installed OR apps.txt) is third-party; mirrors call_tree, no-op off-bench.
 	if "site-packages/" in norm or "dist-packages/" in norm:
 		return True
 	user_app = _app_under_apps_dir(norm)
@@ -398,13 +409,10 @@ def is_framework_callsite(
 		return False
 	if norm_top in THIRD_PARTY_LIB_SEGMENTS:
 		return True
-	# Backstop: a top segment that isn't an installed app is third-party — the
-	# same rule call_tree._is_pure_helper_frame applies, so SQL and hot-frame
-	# findings agree on a lib outside the denylist (e.g. passlib). Fail OPEN for
-	# an out-of-bench absolute path (a bogus "home"/"Users" top segment resolves
-	# to a non-app that we must not hide); apply only to relative or /apps/ paths.
+	# Backstop: a top segment that isn't a bench app (installed OR in apps.txt) is third-party; fail OPEN for out-of-bench absolute paths (only relative or /apps/ paths resolve).
 	backstop_applies = not norm.startswith("/") or "/apps/" in norm
-	if backstop_applies and installed and norm_top not in installed:
+	user_apps = (installed or frozenset()) | (_bench_apps() or frozenset())
+	if backstop_applies and user_apps and norm_top not in user_apps:
 		return True
 	return False
 

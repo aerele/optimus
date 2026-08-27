@@ -1153,8 +1153,7 @@ def test_trivial_loop_suppressed_when_only_noise_lifts_it_over_gate(empty_contex
 
 
 def test_sub_millisecond_loop_cost_reads_less_than_1ms_not_0ms(empty_context, monkeypatch):
-	"""A sub-1ms loop must read "<1ms", not a misleading "0ms" (0.5ms rounds to
-	"0"). Only reachable with the min-time gate below its 20ms default."""
+	"""A sub-1ms loop must read "<1ms", not a misleading "0ms" (0.5ms rounds to "0")."""
 	from optimus.settings import OptimusConfig
 
 	# Floor the occurrence gate at 2 so a 2× loop qualifies, and drop the min-time

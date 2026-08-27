@@ -311,8 +311,7 @@ class TestEndToEndServerScriptFinding:
 
 class TestServerScriptThroughDefExpansion:
 	def test_decorator_through_def_rows_reads_server_script_body(self, fake_frappe_db):
-		"""A <serverscript> sentinel reads its body from the DB via _source_lines
-		and spans the recorded decorator line down to the def."""
+		"""A <serverscript> sentinel reads its body from the DB via _source_lines, spanning the decorator line down to the def."""
 		from optimus.renderer.finding_enrichment import _decorator_through_def_rows
 
 		fake_frappe_db["rows"] = [
@@ -333,8 +332,7 @@ class TestServerScriptThroughDefExpansion:
 		assert [r["content"] for r in rows] == ["@frappe.whitelist()", "def handler():"]
 
 	def test_expand_self_time_snippet_inlines_server_script_body(self, fake_frappe_db):
-		"""End-to-end: a self-time Slow Hot Path finding on a Server Script gets
-		its body inlined and its line re-anchored on the def."""
+		"""A self-time Slow Hot Path finding on a Server Script gets its body inlined and its line re-anchored on the def."""
 		from optimus.renderer.finding_enrichment import _expand_self_time_snippets
 
 		fake_frappe_db["rows"] = [
@@ -358,8 +356,7 @@ class TestServerScriptThroughDefExpansion:
 		]
 
 	def test_find_call_line_reads_server_script_body(self, fake_frappe_db):
-		"""A Server Script callsite finds its exact call line via _source_lines,
-		instead of the old bare open() returning None."""
+		"""A Server Script callsite finds its exact call line via _source_lines, not the old bare open() returning None."""
 		from optimus.renderer.finding_enrichment import _find_call_line_in_function_body
 
 		fake_frappe_db["rows"] = [

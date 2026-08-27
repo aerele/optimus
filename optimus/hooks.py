@@ -4,7 +4,7 @@ app_publisher = ""
 app_description = "Flow-aware performance profiler for Frappe and ERPNext"
 app_email = ""
 app_license = "mit"
-app_logo_url = "/assets/frappe/images/framework.png"  # placeholder; prevents sidebar 404
+app_logo_url = "/assets/optimus/images/aerele_logo.png"  # aerele logo (optimus/public/images)
 
 # Apps
 # ------------------

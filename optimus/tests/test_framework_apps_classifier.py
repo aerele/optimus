@@ -164,13 +164,10 @@ class TestThirdPartyClassifiersAgree:
 
 
 class TestClassifiersAgreeOnNonDenylistLibOnBench:
-	"""On a real bench (installed apps known), a 3rd-party lib OUTSIDE the denylist
-	(e.g. passlib) must read as framework on BOTH classifiers, not just call_tree."""
+	"""On a real bench, a 3rd-party lib outside the denylist (e.g. passlib) reads as framework on BOTH classifiers, not just call_tree."""
 
 	def _patch_installed(self, monkeypatch, apps):
-		# call_tree imports _installed_apps_for_site from base into its own
-		# namespace, so both bindings must be patched or the hot-frame classifier
-		# keeps the real (off-bench None) lookup.
+		# call_tree binds its own _installed_apps_for_site, so both modules need patching.
 		for mod in ("base", "call_tree"):
 			monkeypatch.setattr(
 				f"optimus.analyzers.{mod}._installed_apps_for_site",
@@ -179,8 +176,7 @@ class TestClassifiersAgreeOnNonDenylistLibOnBench:
 
 	@pytest.mark.parametrize("path", ["passlib/handlers/bcrypt.py", "pypdf/_reader.py"])
 	def test_non_denylist_lib_is_framework_on_both(self, monkeypatch, path):
-		"""Not installed and not in the denylist → the backstop fires on both, so a
-		query here isn't shown as fixable while the same hot frame is hidden."""
+		"""Not installed and not in the denylist → the backstop fires on both surfaces."""
 		from optimus.analyzers.call_tree import _is_pure_helper_frame
 
 		self._patch_installed(monkeypatch, {"frappe", "erpnext", "nextnderp"})
@@ -198,11 +194,21 @@ class TestClassifiersAgreeOnNonDenylistLibOnBench:
 		node = {"function": "process_invoices", "filename": path, "kind": "python"}
 		assert _is_pure_helper_frame(node) is False
 
+	def test_bench_app_not_installed_on_site_is_user_code(self, monkeypatch):
+		"""A bench app in apps.txt but not installed on the profiled site is user code, not third-party — on both classifiers (finding #5)."""
+		from optimus.analyzers.call_tree import _is_pure_helper_frame
+
+		for mod in ("base", "call_tree"):
+			monkeypatch.setattr(f"optimus.analyzers.{mod}._installed_apps_for_site", lambda: frozenset({"frappe", "erpnext"}))
+			monkeypatch.setattr(f"optimus.analyzers.{mod}._bench_apps", lambda: frozenset({"frappe", "erpnext", "myapp"}))
+		path = "myapp/module.py"   # in apps.txt, not installed on this site
+		assert is_framework_callsite(path) is False
+		node = {"function": "proc", "filename": path, "kind": "python"}
+		assert _is_pure_helper_frame(node) is False
+
 
 class TestFrameworkNameMatchedOnAppRootNotMidPath:
-	"""A framework name counts only as the resolved app ROOT, not a folder deeper in
-	the path — so the standard /home/frappe/ home and a user subdir named like a core
-	app are the user's code."""
+	"""A framework name counts only as the resolved app root, not a folder deeper in the path (e.g. /home/frappe/ or a user subdir named crm)."""
 
 	@pytest.mark.parametrize("path", [
 		"/home/frappe/custom_scripts/foo.py",  # the standard Frappe server home dir
@@ -224,8 +230,7 @@ class TestFrameworkNameMatchedOnAppRootNotMidPath:
 		assert is_framework_callsite(path) is True, f"{path} is real framework code"
 
 	def test_home_frappe_path_agrees_with_hot_frame_classifier(self, monkeypatch):
-		"""Both judges now agree (user) on an out-of-bench path under /home/frappe/,
-		closing the divergence."""
+		"""Both classifiers agree (user) on an out-of-bench path under /home/frappe/."""
 		from optimus.analyzers.call_tree import _is_pure_helper_frame
 
 		for mod in ("base", "call_tree"):
