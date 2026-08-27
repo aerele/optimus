@@ -339,8 +339,10 @@ def is_framework_callsite(
 	heuristics. This is the default for sites that haven't configured
 	the Single.
 
-	Matching is boundary-sensitive (``/app/`` or ``startswith(app/)``)
-	so ``crm/`` does NOT false-positive on ``my_crm/``.
+	Matching is on the resolved app ROOT (top segment or ``apps/<app>/``),
+	so ``crm`` matches ``crm/…`` but never ``my_crm/…`` nor a mid-path
+	``x/crm/…`` (the framework name deeper in a path is the address, not
+	the code's owner).
 
 	Used by redundant_calls, explain_flags, and n_plus_one to route
 	findings with framework-only callsites into the Observations bucket.
@@ -365,27 +367,44 @@ def is_framework_callsite(
 	#      (``apps/myapp/.venv/.../werkzeug/…``) is still framework.
 	#   2. User-app guard — a path under a non-framework ``apps/<app>/`` is user
 	#      code, even if it nests a lib-named dir (vendored ``apps/myapp/lxml/…``).
-	#   3. Framework apps (frappe/erpnext/…) — framework whether bare or apps/.
+	#   3. Framework apps (frappe/erpnext/…) matched on the RESOLVED app root
+	#      (top segment or ``apps/<app>/``), NOT mid-path — so ``/home/frappe/x.py``
+	#      and ``myapp/crm/x.py`` stay the user's code, not framework.
 	#   4. Installed-apps rescue — a bare top segment (pyinstrument stripped the
 	#      apps/ prefix) that IS an installed app is the user's own code, even when
 	#      its name collides with a lib below (an app named ``babel``/``redis``).
 	#      No-op off-bench (None); mirrors call_tree._is_pure_helper_frame.
 	#   5. Stripped libs match only the TOP segment (``werkzeug/serving.py``), so a
 	#      nested user submodule (``myapp/cryptography/…``) isn't misread.
+	#   6. Installed-apps backstop — a resolvable top segment that is NOT an
+	#      installed app is third-party (a lib outside the denylist, e.g.
+	#      ``passlib``). Mirrors call_tree's backstop so SQL and hot-frame
+	#      findings agree; no-op off-bench (None), fails open out-of-bench.
 	if "site-packages/" in norm or "dist-packages/" in norm:
 		return True
 	user_app = _app_under_apps_dir(norm)
 	if user_app is not None and user_app not in FRAMEWORK_APPS:
 		return False
-	for app in FRAMEWORK_APPS:
-		token = f"{app}/"
-		if norm.startswith(token) or f"/{token}" in norm:
-			return True
 	norm_top = norm.lstrip("/").split("/", 1)[0]
+	# Framework match on the RESOLVED app root only — the ``apps/<app>/`` segment
+	# (``user_app``) when present, else the top path segment. NOT a substring
+	# anywhere: a path merely nested *under* a framework-named dir (the standard
+	# ``/home/frappe/…`` server home, or a user subfolder named ``crm``) is not
+	# framework code — that name is the address, not the sender.
+	if (user_app or norm_top) in FRAMEWORK_APPS:
+		return True
 	installed = _installed_apps_for_site()
 	if installed and norm_top in installed:
 		return False
 	if norm_top in THIRD_PARTY_LIB_SEGMENTS:
+		return True
+	# Backstop: a top segment that isn't an installed app is third-party — the
+	# same rule call_tree._is_pure_helper_frame applies, so SQL and hot-frame
+	# findings agree on a lib outside the denylist (e.g. passlib). Fail OPEN for
+	# an out-of-bench absolute path (a bogus "home"/"Users" top segment resolves
+	# to a non-app that we must not hide); apply only to relative or /apps/ paths.
+	backstop_applies = not norm.startswith("/") or "/apps/" in norm
+	if backstop_applies and installed and norm_top not in installed:
 		return True
 	return False
 

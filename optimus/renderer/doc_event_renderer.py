@@ -143,11 +143,15 @@ def _is_temp_docname(name) -> bool:
 	return not name or (isinstance(name, str) and name.startswith("new-"))
 
 
-def _saved_doc_from_response(response, want_doctype):
+def _saved_doc_from_response(response, want_doctype, client_name=None):
 	"""``{"doctype", "name"}`` of the just-saved doc matching ``want_doctype``, or
 	None. Reads ``savedocs`` (``response["docs"]``) and ``frappe.client.*``
 	(``response["message"]``); filters by doctype so a child row isn't picked.
-	Never raises."""
+	The real name is the response name that DIFFERS from the browser's temp name
+	(``client_name``): a response echoing the temp name means the save never
+	renamed it (unsaved → keep the temp name), while a genuine name that merely
+	starts with ``new-`` (e.g. a ``new-0001`` naming series) is no longer thrown
+	away. Never raises."""
 	if not isinstance(response, dict) or not want_doctype:
 		return None
 	try:
@@ -169,7 +173,10 @@ def _saved_doc_from_response(response, want_doctype):
 			if d.get("doctype") != want_doctype:
 				continue
 			nm = d.get("name")
-			if isinstance(nm, str) and nm and not _is_temp_docname(nm):
+			# Real name = the response name the save assigned, i.e. one that differs
+			# from the browser's temp name. Comparing to the actual temp name (not a
+			# "new-" prefix guess) keeps a genuine "new-0001" from being discarded.
+			if isinstance(nm, str) and nm and nm != client_name:
 				return {"doctype": want_doctype, "name": nm}
 	except Exception:
 		return None
@@ -183,7 +190,7 @@ def resolve_target_doc_from_response(form_dict, response):
 	req = _extract_target_doc(form_dict)
 	if not req or not _is_temp_docname(req.get("name")):
 		return None
-	return _saved_doc_from_response(response, req.get("doctype"))
+	return _saved_doc_from_response(response, req.get("doctype"), client_name=req.get("name"))
 
 
 def _build_doc_event_hook_index(doc_events) -> dict:

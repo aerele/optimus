@@ -1150,3 +1150,28 @@ def test_trivial_loop_suppressed_when_only_noise_lifts_it_over_gate(empty_contex
 	recordings = _mixed_loop_and_singles(loop_hits=10, loop_ms=0.5, single_count=100, single_ms=5.0)
 	result = n_plus_one.analyze(recordings, empty_context)
 	assert result.findings == []  # loop_time 5ms < 20ms floor → suppressed
+
+
+def test_sub_millisecond_loop_cost_reads_less_than_1ms_not_0ms(empty_context, monkeypatch):
+	"""A sub-1ms loop must read "<1ms", not a misleading "0ms" (0.5ms rounds to
+	"0"). Only reachable with the min-time gate below its 20ms default."""
+	from optimus.settings import OptimusConfig
+
+	# Floor the occurrence gate at 2 so a 2× loop qualifies, and drop the min-time
+	# gate below the loop's 0.5ms so the finding reaches the cost-render branch.
+	monkeypatch.setattr(
+		"optimus.settings.get_config",
+		lambda: OptimusConfig(n_plus_one_min_occurrences=2),
+	)
+	monkeypatch.setattr(n_plus_one, "_get_min_total_time", lambda: 0.0)
+	# One request, the query looped 2× at 0.25ms each → loop_time == 0.5ms exactly.
+	recordings = _mixed_loop_and_singles(loop_hits=2, loop_ms=0.25, single_count=0, single_ms=0.0)
+
+	result = n_plus_one.analyze(recordings, empty_context)
+	assert len(result.findings) == 1
+	f = result.findings[0]
+	# User code, so _build_user_finding — which carries the <1ms branch — runs.
+	assert f["finding_type"] == "N+1 Query"
+	# A regressed ">= 0.5" guard (or a dropped branch) would render "0ms" here.
+	assert "<1ms" in f["customer_description"]
+	assert "0ms" not in f["customer_description"]

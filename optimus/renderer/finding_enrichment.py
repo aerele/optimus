@@ -457,24 +457,16 @@ def _find_call_line_in_function_body(
 	# submodule; importing source.py here is fine (it has no back-ref
 	# into us), but we keep the import inside the function for symmetry
 	# with the other lazy paths in this module.
-	from optimus.renderer.source import _resolve_source_path
+	from optimus.renderer.source import _source_lines
 
 	if not parent_filename or not callee_function or not parent_def_lineno:
 		return None
 
-	# Read source through the shared cache so files visited by
-	# _read_source_snippet aren't re-read here.
-	if file_cache is not None and parent_filename in file_cache:
-		lines = file_cache[parent_filename]
-	else:
-		resolved = _resolve_source_path(parent_filename)
-		try:
-			with open(resolved, encoding="utf-8") as fh:
-				lines = fh.read().splitlines()
-		except Exception:
-			lines = None
-		if file_cache is not None:
-			file_cache[parent_filename] = lines
+	# Read source through the shared reader (same per-render cache, same file
+	# read) so a Server Script callsite resolves its body from the DB instead of a
+	# bare open() on the ``('server_script', …)`` sentinel — matching the sibling
+	# readers. File-backed callsites behave exactly as before.
+	lines = _source_lines(parent_filename, cache=file_cache)
 
 	if not lines:
 		return None

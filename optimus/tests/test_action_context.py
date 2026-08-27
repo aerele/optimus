@@ -105,6 +105,20 @@ class TestResolveTargetDocFromResponse:
 		resp = {"docs": [{"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"}]}
 		assert self._resolve(fd, resp) is None
 
+	def test_real_name_starting_with_new_is_not_discarded(self):
+		# The save assigned a real name that happens to start with "new-" (a naming
+		# series like "new-0001"). It differs from the temp name → it's the real name.
+		fd = {"doc": json.dumps({"doctype": "Widget", "name": "new-widget-abc123"})}
+		resp = {"docs": [{"doctype": "Widget", "name": "new-0001"}]}
+		assert self._resolve(fd, resp) == {"doctype": "Widget", "name": "new-0001"}
+
+	def test_stopped_before_save_keeps_temp_name(self):
+		# Profiling stopped before the insert completed: no response, or the response
+		# still echoes the temp name → nothing resolves, so the temp name stays as-is.
+		fd = {"doc": json.dumps({"doctype": "Widget", "name": "new-widget-abc123"})}
+		assert self._resolve(fd, None) is None
+		assert self._resolve(fd, {"docs": [{"doctype": "Widget", "name": "new-widget-abc123"}]}) is None
+
 	def test_none_cases(self):
 		fd = {"doc": json.dumps({"doctype": "Sales Order", "name": "new-sales-order-abc"})}
 		assert self._resolve(fd, None) is None                                   # no response
