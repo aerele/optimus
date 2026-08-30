@@ -898,17 +898,8 @@ def render(
 	if summary_html_rendered:
 		summary_html_rendered = summary_html_rendered.replace("—", "-")
 
-	# v0.14.x: primary document the flow touched (first action with a resolved target_doc) so the masthead can show its name + doctype instead of the composed title.
-	primary_doc = None
-	for _a in actions or []:
-		_td = _a.get("target_doc") if isinstance(_a, dict) else None
-		if isinstance(_td, dict) and _td.get("doctype"):
-			primary_doc = _td
-			break
-
 	context = {
 		"session": session_doc,
-		"primary_doc": primary_doc,
 		"actions": actions,
 		# v0.6.x: framework-app actions, rendered in a collapsed sub-block
 		# below the primary per-action table. Empty → no sub-block.

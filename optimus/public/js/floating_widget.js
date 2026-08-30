@@ -481,9 +481,10 @@
 					fieldtype: "Data",
 					label: "Session label",
 					reqd: 1,
+					length: 140,
 					default: getDefaultSessionLabel(),
 					description:
-						"Give this session a name you'll recognize later — e.g. 'Sales Invoice flow with 50 items'.",
+						"Give this session a name you'll recognize later — e.g. 'Sales Invoice flow with 50 items'. (up to 140 characters)",
 				},
 				{
 					fieldname: "warning_html",

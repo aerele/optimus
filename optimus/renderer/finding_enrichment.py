@@ -713,9 +713,18 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 	if not isinstance(detail, dict):
 		detail = {}
 
-	# Back-compat: backfill impact_scope_label from the stable finding_type for
-	# sessions analyzed before that field shipped, so card + hero agree on re-render.
-	if child.finding_type == "N+1 Query" and "impact_scope_label" not in detail:
+	# Back-compat: backfill impact_scope_label for sessions analyzed before that
+	# field shipped, so the card's scope tag agrees with the TL;DR hero on
+	# re-render — but ONLY for findings that carry a loop-scoped magnitude
+	# (loop_count / run_count). A pre-loop-scoping session stored
+	# estimated_impact_ms as the cross-request CUMULATIVE total; tagging that
+	# 'recoverable' (a loop-scoped claim) would misdescribe the number, so those
+	# are left unlabelled rather than mislabelled.
+	if (
+		child.finding_type == "N+1 Query"
+		and "impact_scope_label" not in detail
+		and (detail.get("loop_count") is not None or detail.get("run_count") is not None)
+	):
 		detail["impact_scope_label"] = "recoverable"
 
 	# v0.6.0 Round 2: synthesize callsite from legacy top-level shape

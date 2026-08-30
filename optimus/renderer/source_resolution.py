@@ -112,6 +112,11 @@ def _skip_decorators_to_def(
 				lines = _fh.read().splitlines()
 		except Exception:
 			lines = None
+		# Repopulate the shared per-render cache (``_source_lines`` stored None for
+		# this out-of-bench path when it rejected it above) so other decorated
+		# callsites in the same file don't each re-read it from disk.
+		if cache is not None:
+			cache[abs_filename] = lines
 	if not lines or start_lineno > len(lines):
 		return start_lineno
 	# Cheap early exit: the line at start_lineno isn't a decorator →

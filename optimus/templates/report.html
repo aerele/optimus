@@ -636,16 +636,13 @@
     text-align: right;
     display: flex;
     flex-direction: column;
+    justify-content: flex-end;
   }
   .masthead-title h1 {
     font-family: var(--display); font-weight: 600; font-size: 26px;
     line-height: 1.05; letter-spacing: -0.02em; margin: 0;
     border-bottom: none; padding-bottom: 0;
     color: var(--ink);
-  }
-  .masthead-docname {
-    font-size: 13px; color: var(--ink-mute); margin-top: 4px;
-    font-family: var(--mono, ui-monospace, monospace);
   }
   .masthead-title h1 em { font-style: italic; font-weight: 400; color: var(--accent); }
   .masthead-meta {
@@ -2297,12 +2294,7 @@
       </div>
     </div>
     <div class="masthead-title">
-      {% if primary_doc and primary_doc.name %}
-      <h1>{{ primary_doc.doctype }}</h1>
-      <div class="masthead-docname">{{ primary_doc.name }}</div>
-      {% else %}
       <h1>{{ session.title or "Optimus Session" }}</h1>
-      {% endif %}
       <div class="masthead-meta">
         <div class="masthead-meta-row">
           <span class="masthead-meta-label">Recorded by</span>

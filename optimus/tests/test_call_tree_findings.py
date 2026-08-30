@@ -542,10 +542,7 @@ def test_pure_helper_filters_third_party_libs():
 	from optimus.analyzers.call_tree import _is_pure_helper_frame
 
 	for first_segment in ("MySQLdb", "pymysql", "requests", "urllib3",
-	                      "jinja2", "pandas", "redis",
-	                      # v0.12.x: leaked into Slow Hot Path findings.
-	                      "pydantic", "pydantic_core", "click",
-	                      "sqlparse", "cryptography", "lxml", "croniter"):
+	                      "jinja2", "pandas", "redis"):
 		node = {
 			"function": "execute",
 			"filename": f"{first_segment}/cursors.py",
@@ -553,114 +550,6 @@ def test_pure_helper_filters_third_party_libs():
 		}
 		assert _is_pure_helper_frame(node) is True, (
 			f"third-party lib {first_segment} must be filtered"
-		)
-
-
-def test_installed_apps_allowlist_filters_any_unknown_package(monkeypatch):
-	"""Completeness backstop: on-bench, ANY frame whose top segment isn't an installed app is third-party plumbing — not just the hardcoded set."""
-	from optimus.analyzers import call_tree
-
-	monkeypatch.setattr(
-		call_tree,
-		"_installed_apps_for_site",
-		lambda: frozenset({"frappe", "erpnext", "optimus", "nextnderp"}),
-	)
-	# A lib NOT in the hardcoded _THIRD_PARTY_LIB_SEGMENTS is still filtered.
-	assert call_tree._is_pure_helper_frame(
-		{"function": "run", "filename": "some_obscure_lib/core.py", "kind": "python"}) is True
-	# Real installed apps stay actionable — both bench-stripped and apps/<name>/ forms.
-	assert call_tree._is_pure_helper_frame(
-		{"function": "calc", "filename": "nextnderp/x/y.py", "kind": "python"}) is False
-	assert call_tree._is_pure_helper_frame(
-		{"function": "validate", "filename": "apps/erpnext/erpnext/foo.py", "kind": "python"}) is False
-
-
-def test_frame_top_app_anchors_apps_marker_on_path_boundary():
-	"""``apps/`` must be matched as a whole path segment, not a substring — an app
-	whose name merely ends in 'apps' (webapps/…) is its OWN top segment, not the
-	bench dir; the old ``.find('apps/')`` returned the file after it instead."""
-	from optimus.analyzers.call_tree import _frame_top_app
-
-	assert _frame_top_app("apps/erpnext/erpnext/x.py") == "erpnext"
-	assert _frame_top_app("erpnext/x.py") == "erpnext"
-	assert _frame_top_app("/home/x/frappe-bench/apps/frappe/frappe/handler.py") == "frappe"
-	# The bug: 'webapps/module.py' contains 'apps/' at index 3.
-	assert _frame_top_app("webapps/module.py") == "webapps"
-	assert _frame_top_app("subapps/core.py") == "subapps"
-
-
-def test_installed_app_named_like_a_lib_is_rescued(monkeypatch):
-	"""An INSTALLED app whose name collides with a hardcoded third-party lib token
-	(e.g. an app literally named 'babel' or 'markdown') must stay actionable — the
-	installed-apps rescue runs BEFORE the hardcoded _THIRD_PARTY_LIB_SEGMENTS
-	match, so its pyinstrument-stripped frames aren't hidden as plumbing."""
-	from optimus.analyzers import call_tree
-
-	assert "babel" in call_tree.THIRD_PARTY_LIB_SEGMENTS  # guard: still a lib token
-	monkeypatch.setattr(
-		call_tree, "_installed_apps_for_site",
-		lambda: frozenset({"frappe", "erpnext", "babel", "markdown"}))
-
-	# Installed apps named like libs → kept (both stripped and apps/ forms).
-	assert call_tree._is_pure_helper_frame(
-		{"function": "t", "filename": "babel/translate.py", "kind": "python"}) is False
-	assert call_tree._is_pure_helper_frame(
-		{"function": "r", "filename": "markdown/core.py", "kind": "python"}) is False
-	# A lib token that is NOT an installed app is still filtered by the set.
-	assert call_tree._is_pure_helper_frame(
-		{"function": "x", "filename": "click/core.py", "kind": "python"}) is True
-
-
-def test_backstop_fails_open_for_out_of_bench_absolute_path(monkeypatch):
-	"""The installed-apps backstop must NOT fire on an absolute path with no
-	``/apps/`` segment (a custom out-of-bench script). There _frame_top_app returns
-	a filesystem prefix ('home') that's never an installed app, so firing it would
-	hide real user code from Slow Hot Path / hot-frame findings."""
-	from optimus.analyzers import call_tree
-
-	monkeypatch.setattr(
-		call_tree, "_installed_apps_for_site",
-		lambda: frozenset({"frappe", "erpnext", "optimus"}))
-
-	# Out-of-bench custom script — kept (fail open).
-	assert call_tree._is_pure_helper_frame(
-		{"function": "run", "filename": "/home/frappe/custom/foo.py", "kind": "python"}) is False
-	# But a venv lib on an absolute path is still filtered (site-packages catch).
-	assert call_tree._is_pure_helper_frame(
-		{"function": "run", "filename": "/home/frappe/env/lib/python3.11/site-packages/pydantic/x.py",
-		 "kind": "python"}) is True
-	# And a stripped third-party package (relative, not installed) is still filtered.
-	assert call_tree._is_pure_helper_frame(
-		{"function": "run", "filename": "pydantic/type_adapter.py", "kind": "python"}) is True
-
-
-def test_installed_app_ending_in_apps_not_dropped_as_third_party(monkeypatch):
-	"""Regression for the substring bug: a real installed app named e.g. 'webapps'
-	(pyinstrument-stripped to 'webapps/…') must stay actionable, not be filtered
-	out as third-party by a misparsed app name."""
-	from optimus.analyzers import call_tree
-
-	monkeypatch.setattr(
-		call_tree,
-		"_installed_apps_for_site",
-		lambda: frozenset({"frappe", "erpnext", "webapps"}),
-	)
-	assert call_tree._is_pure_helper_frame(
-		{"function": "handle", "filename": "webapps/views.py", "kind": "python"}) is False
-
-
-def test_walker_skips_third_party_lib_init_and_call():
-	"""Regression: pydantic/click frames (site-packages/ prefix stripped) must be walker-plumbing, not blamed as hot paths."""
-	from optimus.analyzers.call_tree import _is_walker_plumbing_frame
-
-	for fn, filename in (
-		("__init__", "pydantic/type_adapter.py"),
-		("__init__", "pydantic_core/_pydantic_core.py"),
-		("__call__", "click/core.py"),
-	):
-		node = {"function": fn, "filename": filename, "kind": "python"}
-		assert _is_walker_plumbing_frame(node) is True, (
-			f"{filename}::{fn} must be walker plumbing (third-party lib)"
 		)
 
 
@@ -1511,3 +1400,87 @@ def test_analyze_handles_missing_pyi_session():
 	assert result.aggregate["session_time_breakdown"]["sql_ms"] == 5
 	# action.call_tree_json is None
 	assert context.actions[0]["call_tree_json"] is None
+
+
+class TestTrackedAppsInclusion:
+	"""Optimus Settings ▸ Tracked Apps: when set, call_tree findings (hot frames,
+	slow paths, BG jobs) only surface frames inside the tracked apps — every other
+	frame is out-of-scope plumbing, matching how the SQL analyzers honour inclusion
+	mode. Empty/None → profile everything (unchanged default)."""
+
+	def _n(self, fn, filename, ms, kids=None):
+		return {"function": fn, "filename": filename, "self_ms": ms,
+			"cumulative_ms": ms, "kind": "python", "children": kids or []}
+
+	def test_gatekeepers_treat_non_tracked_frame_as_plumbing(self):
+		from optimus.analyzers.call_tree import (
+			_is_pure_helper_frame,
+			_is_walker_plumbing_frame,
+		)
+		erpnext = {"function": "validate", "filename": "apps/erpnext/erpnext/si.py", "kind": "python"}
+		myapp = {"function": "recompute", "filename": "apps/myapp/myapp/pricing.py", "kind": "python"}
+		# Default (no tracked apps): both are user code, shown.
+		assert _is_pure_helper_frame(erpnext) is False
+		assert _is_pure_helper_frame(myapp) is False
+		assert _is_walker_plumbing_frame(erpnext) is False
+		# Tracked = myapp: the non-tracked erpnext frame becomes plumbing; myapp stays.
+		assert _is_pure_helper_frame(erpnext, ("myapp",)) is True
+		assert _is_pure_helper_frame(myapp, ("myapp",)) is False
+		assert _is_walker_plumbing_frame(erpnext, ("myapp",)) is True
+		assert _is_walker_plumbing_frame(myapp, ("myapp",)) is False
+
+	def test_repeated_hot_frames_and_leaderboard_scoped_to_tracked_apps(self):
+		from optimus.analyzers import call_tree as ct
+		trees = [self._n("<root>", "", 0, [
+			self._n("validate", "apps/erpnext/erpnext/si.py", 800),
+			self._n("recompute", "apps/myapp/myapp/pricing.py", 800),
+		]) for _ in range(3)]
+
+		# Default: both apps appear in leaderboard + findings.
+		_, board_all = ct._aggregate_hot_frames(trees, None)
+		keys_all = " ".join(r["function"] for r in board_all)
+		assert "erpnext" in keys_all and "myapp" in keys_all
+
+		# Tracked = myapp: only myapp appears; erpnext is filtered out everywhere.
+		findings, board = ct._aggregate_hot_frames(trees, ("myapp",))
+		keys = " ".join(r["function"] for r in board)
+		assert "myapp" in keys and "erpnext" not in keys
+		assert all("erpnext" not in f["title"] for f in findings)
+
+	def test_server_scripts_stay_actionable_even_under_tracked_apps(self):
+		"""A Server Script is the developer's own optimizable code (it lives in the
+		DB, not in any app), so it stays actionable in the walker BOTH by default AND
+		when Tracked Apps is set. Uses the REAL filenames Frappe's safe_exec emits
+		(``<serverscript>`` / ``<serverscript>: <name>``), plus the obsolete
+		``<serverscript-N>`` shape for good measure."""
+		from optimus.analyzers.call_tree import _is_walker_plumbing_frame
+		for fname in ("<serverscript>: my_script", "<serverscript>", "<serverscript-3>"):
+			ss = {"function": "", "filename": fname, "kind": "python"}
+			assert _is_walker_plumbing_frame(ss) is False, f"{fname} actionable (default)"
+			assert _is_walker_plumbing_frame(ss, ("myapp",)) is False, (
+				f"{fname} must stay actionable even under Tracked Apps"
+			)
+
+
+def test_top_level_app_resolves_real_app_under_apps_ancestor():
+	"""Issue C: a bench nested under a folder named 'apps' must resolve the REAL
+	app (last apps/ wins), not the bench dir; and an app whose name ends in 'apps'
+	must not be misparsed by a substring match."""
+	from optimus.analyzers.call_tree import _top_level_app
+	assert _top_level_app("v", "/opt/apps/frappe-bench/apps/erpnext/erpnext/x.py") == "erpnext"
+	assert _top_level_app("v", "/srv/apps/bench/apps/frappe/frappe/x.py") == "frappe"
+	assert _top_level_app("h", "webapps/module.py") == "webapps"
+	# A normal single-apps bench is unchanged.
+	assert _top_level_app("v", "/home/x/frappe-bench/apps/erpnext/erpnext/x.py") == "erpnext"
+
+
+def test_pure_helper_hides_any_site_packages_lib():
+	"""A venv lib outside the hardcoded set (gevent, sentry_sdk, …) must not leak
+	into the hot-frame leaderboard — the blanket site-packages/ guard catches it
+	regardless of the lib name; user code under apps/ is unaffected."""
+	from optimus.analyzers.call_tree import _is_pure_helper_frame
+	for f in ("/home/x/env/lib/python3.11/site-packages/gevent/hub.py",
+		"/usr/lib/python3/dist-packages/sentry_sdk/client.py"):
+		assert _is_pure_helper_frame({"function": "run", "filename": f, "kind": "python"}) is True
+	assert _is_pure_helper_frame(
+		{"function": "run", "filename": "apps/myapp/myapp/api.py", "kind": "python"}) is False

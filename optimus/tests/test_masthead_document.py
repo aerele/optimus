@@ -1,7 +1,8 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Masthead shows the touched document's name + doctype (from the primary action's target_doc), else the session title."""
+"""Masthead top-right shows the session title. (The touched-document doctype/name
+display was reverted — these tests guard that it doesn't creep back.)"""
 
 import types
 
@@ -29,15 +30,19 @@ def _action():
 	)
 
 
-def test_masthead_shows_document_name_and_doctype():
-	"""The doctype is the h1 and the document name sits on the line below it."""
+def test_masthead_shows_session_title_even_with_a_document():
+	"""Even when the session touched a document, the top-right shows the session
+	title — the doctype/name display was reverted."""
 	rec = {"uuid": "u1", "form_dict": {"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"}, "calls": []}
 	html = renderer.render(_doc([_action()]), recordings=[rec])
-	assert "<h1>Sales Order</h1>" in html
-	assert 'class="masthead-docname">SAL-ORD-2026-00042' in html
+	assert "Sales Order · 2026-08-27 21:55" in html  # composed session title
+	assert 'class="masthead-docname"' not in html
+	assert "<h1>Sales Order</h1>" not in html  # doctype is NOT the masthead heading
+	# (the document name may still appear in the per-action breadcrumb — only the
+	#  masthead top-right display was reverted, not the per-action document line.)
 
 
-def test_masthead_falls_back_to_session_title_without_a_document():
+def test_masthead_without_a_document_uses_session_title():
 	"""No touched document → the composed session title is used, no doctype line."""
 	html = renderer.render(_doc([]), recordings=[])
 	assert "Sales Order · 2026-08-27 21:55" in html

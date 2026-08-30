@@ -189,9 +189,10 @@ class TestFindingToDictNormalizes:
 
 
 class TestImpactScopeLabelBackfill:
-	"""Legacy user N+1 findings (analyzed before impact_scope_label shipped) must
-	get the label backfilled from the stable finding_type so the report card's
-	scope tag agrees with the TL;DR hero on re-render."""
+	"""Legacy user N+1 findings (analyzed before impact_scope_label shipped) get
+	the label backfilled from the stable finding_type so the report card's scope
+	tag agrees with the TL;DR hero on re-render — but only when the finding
+	actually carries a loop-scoped magnitude (finding ⑦)."""
 
 	def _row(self, finding_type, detail):
 		row = types.SimpleNamespace()
@@ -205,10 +206,23 @@ class TestImpactScopeLabelBackfill:
 		row.technical_detail_json = json.dumps(detail)
 		return row
 
-	def test_legacy_user_n_plus_one_gets_recoverable(self):
-		row = self._row("N+1 Query", {"normalized_query": "SELECT 1"})
+	def test_legacy_loop_scoped_n_plus_one_gets_recoverable(self):
+		# A loop-scoped finding (carries loop_count / run_count) IS recoverable.
+		row = self._row(
+			"N+1 Query",
+			{"normalized_query": "SELECT 1", "loop_count": 12, "run_count": 1},
+		)
 		finding = _finding_to_dict(row)
 		assert finding["technical_detail"]["impact_scope_label"] == "recoverable"
+
+	def test_legacy_cumulative_only_n_plus_one_not_mislabelled(self):
+		"""Finding ⑦: a pre-loop-scoping finding stored estimated_impact_ms as the
+		cross-request CUMULATIVE total and has no loop_count/run_count. Tagging it
+		'recoverable' (a loop-scoped claim) would misdescribe the number, so the
+		backfill must leave it unlabelled."""
+		row = self._row("N+1 Query", {"normalized_query": "SELECT 1"})
+		finding = _finding_to_dict(row)
+		assert "impact_scope_label" not in finding["technical_detail"]
 
 	def test_existing_label_not_overwritten(self):
 		row = self._row("N+1 Query", {"impact_scope_label": "recoverable"})

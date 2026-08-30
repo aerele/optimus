@@ -21,13 +21,6 @@ only on the data passed in. Side-effects are limited to the AnalyzerResult
 they return. The orchestrator (analyze.py) merges all results and persists
 them once.
 
-The one deliberate exception is the shared framework/third-party classifier
-below, which consults ``_installed_apps_for_site`` — a per-job-cached
-``frappe.get_installed_apps()`` read that degrades to ``None`` off-bench. So the
-classifier (and every analyzer that calls it) still runs and stays fixture-
-testable in the unit suite; the lookup only sharpens classification on a live
-site (an installed app named like a lib is rescued as user code).
-
 This makes analyzers trivially unit-testable from JSON fixtures and easy to
 reason about: each one is a pure data transformation.
 """
@@ -87,79 +80,27 @@ FRAMEWORK_APPS: frozenset[str] = frozenset({
 	"drive",
 })
 
-# Canonical third-party library denylist — bare top-level package names, caught
-# even when sys.path manipulation (pyinstrument stripping the ``site-packages/``
-# prefix) hides the usual marker. This is the SINGLE source of truth shared by
-# both classifiers: ``is_framework_callsite`` (SQL findings) and
-# ``call_tree._is_pure_helper_frame`` (hot-frame findings) both match a frame's
-# EXACT top segment against it, so the two can no longer drift apart. An installed
-# app whose name collides with one of these (an app literally named ``babel`` or
-# ``redis``) is rescued first by ``_installed_apps_for_site`` below, so its own
-# frames are never misread as the library.
-THIRD_PARTY_LIB_SEGMENTS: frozenset[str] = frozenset({
+# Well-known third-party libs to catch even when sys.path manipulation bypasses
+# site-packages/ (pyinstrument strips the prefix, so a lib arrives as
+# ``pandas/core/frame.py``). Checked by is_framework_callsite() by matching the
+# resolved app ROOT (first segment) — NOT a substring anywhere — because frappe's
+# recorder strips the ``apps/`` prefix, so a user callsite is ``<app>/<app>/…`` and
+# a stripped lib is ``<lib>/…``; a lib name DEEPER in a relative path is therefore
+# the user's own submodule (``myapp/myapp/requests/…``), not the library, and must
+# stay actionable. (Bare names, matched like call_tree's _THIRD_PARTY_LIB_SEGMENTS,
+# so the two surfaces agree. Out-of-bench absolute paths get a segment-anywhere
+# fallback in is_framework_callsite for the top-segment-is-a-filesystem-prefix case.)
+_THIRD_PARTY_LIB_NAMES: frozenset[str] = frozenset({
 	# DB drivers / caches / queues / web servers
-	"MySQLdb", "pymysql", "psycopg2", "redis", "celery",
-	"werkzeug", "gunicorn", "rq", "urllib3", "requests", "httpx",
+	"MySQLdb", "pymysql", "psycopg2", "redis", "celery", "rq",
+	"werkzeug", "gunicorn", "urllib3", "requests", "httpx",
 	# cloud / serialization / templating / sanitization
 	"boto3", "botocore", "jinja2", "markupsafe", "bleach", "nh3",
 	# data / imaging
 	"pandas", "numpy", "openpyxl", "PIL",
-	# validation / parsing / crypto / dates / i18n
-	"pydantic", "pydantic_core", "click", "sqlparse", "pyparsing",
-	"croniter", "cryptography", "jwt", "pytz", "dateutil", "num2words", "babel",
-	# encodings / HTTP plumbing / markup
-	"chardet", "charset_normalizer", "certifi", "idna",
-	"lxml", "bs4", "html5lib", "markdown", "premailer", "oauthlib",
-	# the profiler itself
-	"pyinstrument",
+	# parsing / crypto / dates / profiler
+	"sqlparse", "cryptography", "pytz", "dateutil", "pyinstrument",
 })
-
-
-def _installed_apps_for_site() -> frozenset | None:
-	"""This site's installed apps, or None off-bench / no site.
-
-	Cached on ``frappe.local`` (per request/job) so a worker picks up an
-	install/uninstall on its next analyze job; off-bench callers (the unit
-	suite) get None, which makes the installed-apps rescue a no-op there.
-	Shared by ``is_framework_callsite`` and ``call_tree._is_pure_helper_frame``
-	so both apply the same "an installed app is the user's own code" rescue —
-	the classifiers stay symmetric on a site with an app named like a lib.
-	"""
-	try:
-		import frappe
-
-		site = getattr(frappe.local, "site", None)
-	except Exception:
-		return None
-	if not site:
-		return None
-	cache = getattr(frappe.local, "_optimus_installed_apps", None)
-	if cache is None:
-		cache = {}
-		frappe.local._optimus_installed_apps = cache
-	if site not in cache:
-		try:
-			cache[site] = frozenset(frappe.get_installed_apps() or [])
-		except Exception:
-			cache[site] = None
-	return cache[site]
-
-
-def _bench_apps() -> frozenset | None:
-	"""All apps in the bench (apps.txt), or None off-bench — a bench app not installed on the profiled site is still the user's own code, not third-party."""
-	try:
-		import frappe
-
-		if not getattr(frappe.local, "site", None):
-			return None
-	except Exception:
-		return None
-	if not hasattr(frappe.local, "_optimus_bench_apps"):
-		try:
-			frappe.local._optimus_bench_apps = frozenset(frappe.get_all_apps() or [])
-		except Exception:
-			frappe.local._optimus_bench_apps = None
-	return frappe.local._optimus_bench_apps
 
 # v0.6.0: Frappe's framework-managed columns — every `tab*` table has these.
 # Frappe writes (most of) them on every save (`modified`, `modified_by`,
@@ -297,19 +238,27 @@ def is_write_hot_table(name) -> bool:
 	return bool(name) and str(name).strip().strip("`").lower() in _WRITE_HOT_TABLES_LOWER
 
 
-def _app_under_apps_dir(norm: str) -> str | None:
+def _last_app_segment(norm: str) -> str | None:
 	"""The ``<app>`` in a real ``apps/<app>/`` segment, or None.
 
-	The canonical ``apps/`` parser (``_extract_app_segment`` and call_tree's
-	``_frame_top_app`` build on it). Boundary-anchored (so ``webapps/…`` yields
-	None) and last-``/apps/``-wins on absolute paths (so a bench under
-	``/opt/apps/…`` resolves the real app). No fallback — None when no ``apps/``.
+	Boundary-anchored, so:
+	- a bench nested under a folder that is itself named ``apps``
+	  (``/opt/apps/frappe-bench/apps/erpnext/…``) resolves the REAL app
+	  (``erpnext``), not the bench dir — the LAST ``/apps/`` on an ABSOLUTE path
+	  wins; and
+	- an app whose own name merely ends in ``apps`` (``webapps/module.py``) is
+	  NOT mistaken for the bench ``apps/`` dir.
+	A mid-path ``/apps/`` in a RELATIVE path is a user subpackage, not the bench
+	apps dir (the recorder strips the bench prefix, so bench code arrives as
+	``apps/<app>/…`` or ``<app>/<app>/…`` — never ``<app>/apps/…``); so
+	``myapp/apps/foo.py`` resolves to None here, letting the caller fall back to the
+	top segment ``myapp``. Returns None when there's no ``apps/`` boundary at all.
 	"""
 	if norm.startswith("apps/"):
 		tail = norm[len("apps/"):]
-	elif "/apps/" in norm:
-		# rsplit → the LAST boundary 'apps/', i.e. the real bench apps dir even
-		# when an ancestor directory is also called 'apps'.
+	elif norm.startswith("/") and "/apps/" in norm:
+		# Absolute bench path: the LAST '/apps/' boundary = the real bench apps dir
+		# even when an ancestor directory is also called 'apps'.
 		tail = norm.rsplit("/apps/", 1)[1]
 	else:
 		return None
@@ -318,18 +267,32 @@ def _app_under_apps_dir(norm: str) -> str | None:
 
 
 def _extract_app_segment(norm: str) -> str | None:
-	"""App name from a normalized filename, or None.
+	"""Return the app name from a normalized filename, or None.
 
-	Delegates the ``apps/`` case to ``_app_under_apps_dir`` (boundary-anchored,
-	last-``apps``-wins), else best-efforts the first path segment — so a
-	no-``apps/`` absolute path (``/Users/.../foo.py``) still buckets under a label
-	rather than vanishing from the Findings section.
+	Handles both path shapes we see in recorder stacks:
+	- ``apps/<app>/<app>/foo.py`` (bench-relative)
+	- ``<app>/foo.py`` (pyinstrument short form after path strip)
+	- ``/abs/path/to/apps/<app>/<app>/foo.py`` (absolute)
+	- ``/abs/path/<arbitrary>/foo.py`` (absolute without ``apps/``)
+
+	For the bench-relative / absolute forms we return the segment that follows
+	the real (boundary-anchored, last-wins) ``apps/``. For the short form we
+	treat the first path segment as the app. When neither ``apps/`` is found nor
+	the path has any non-slash segment, return ``None``.
 	"""
 	if not norm:
 		return None
-	app = _app_under_apps_dir(norm)
+	app = _last_app_segment(norm)
 	if app:
 		return app
+	# v0.7.x: strip any leading slashes so absolute paths without
+	# ``apps/`` (e.g. ``/Users/.../foo.py`` test fixtures) still
+	# produce a non-empty segment instead of falling through to
+	# ``_OTHER_APP_LABEL``. The first non-slash segment is a
+	# reasonable best-effort app label; if the segment ends up
+	# being a meaningless prefix (``Users``, ``tmp``), the row
+	# still buckets under that label rather than disappearing
+	# from the rendered Findings section.
 	stripped = norm.lstrip("/")
 	first = stripped.split("/", 1)[0]
 	return first or None
@@ -356,7 +319,9 @@ def is_framework_callsite(
 	heuristics. This is the default for sites that haven't configured
 	the Single.
 
-	Matching is on the resolved app ROOT (top segment or ``apps/<app>/``), so ``crm`` matches ``crm/…`` but never ``my_crm/…`` nor a mid-path ``x/crm/…``.
+	Matching is on the resolved app ROOT (the ``apps/<app>/`` segment or the top
+	path segment), never a mid-path substring — so neither ``my_crm/`` nor a user
+	submodule named ``crm/`` deep in a path is misread as the framework app.
 
 	Used by redundant_calls, explain_flags, and n_plus_one to route
 	findings with framework-only callsites into the Observations bucket.
@@ -369,51 +334,53 @@ def is_framework_callsite(
 		return False
 	norm = filename.replace("\\", "/")
 
+	# venv / system packages are always un-patchable library code — checked in BOTH
+	# modes (a vendored lib under a tracked app's own .venv is not that app's code,
+	# so inclusion mode must not report it as an actionable user finding).
+	if "site-packages/" in norm or "dist-packages/" in norm:
+		return True
+
 	if tracked_apps:
 		# Inclusion mode: framework UNLESS the app is in the allowlist.
+		# Server Scripts are the developer's own optimizable code and live in the
+		# database, not in any app — so they stay actionable regardless of the
+		# Tracked Apps allowlist.
+		if norm.startswith("<serverscript") or norm.startswith("<server-script"):
+			return False
 		app = _extract_app_segment(norm)
 		if app and app in tracked_apps:
 			return False
 		return True
 
-	# Exclusion mode (default). Order matters:
-	#   1. site-packages/dist-packages first — a venv lib under an app dir
-	#      (``apps/myapp/.venv/.../werkzeug/…``) is still framework.
-	#   2. User-app guard — a path under a non-framework ``apps/<app>/`` is user
-	#      code, even if it nests a lib-named dir (vendored ``apps/myapp/lxml/…``).
-	#   3. Framework apps (frappe/erpnext/…) matched on the RESOLVED app root
-	#      (top segment or ``apps/<app>/``), NOT mid-path — so ``/home/frappe/x.py``
-	#      and ``myapp/crm/x.py`` stay the user's code, not framework.
-	#   4. Installed-apps rescue — a bare top segment (pyinstrument stripped the
-	#      apps/ prefix) that IS an installed app is the user's own code, even when
-	#      its name collides with a lib below (an app named ``babel``/``redis``).
-	#      No-op off-bench (None); mirrors call_tree._is_pure_helper_frame.
-	#   5. Stripped libs match only the TOP segment (``werkzeug/serving.py``), so a
-	#      nested user submodule (``myapp/cryptography/…``) isn't misread.
-	#   6. Bench-apps backstop — a resolvable top segment that is NOT a bench app (installed OR apps.txt) is third-party; mirrors call_tree, no-op off-bench.
-	if "site-packages/" in norm or "dist-packages/" in norm:
-		return True
-	user_app = _app_under_apps_dir(norm)
+	# Exclusion mode (default). Framework apps are matched on the RESOLVED app
+	# ROOT, never a mid-path substring — so a user app's submodule named like a
+	# framework app (``mybiz/mybiz/crm/…``), the standard ``/home/frappe/…`` server
+	# home, and a vendored lib under a user app (``apps/myapp/…/requests/…``) stay
+	# the user's own code instead of being hidden as framework. (site-packages was
+	# already handled above, for both modes.)
+	#
+	# 2. A path under a real ``apps/<app>/`` where <app> is NOT a framework app is
+	#    the user's own code — a framework/lib name deeper in the path can't hide it.
+	user_app = _last_app_segment(norm)
 	if user_app is not None and user_app not in FRAMEWORK_APPS:
 		return False
-	norm_top = norm.lstrip("/").split("/", 1)[0]
-	# Framework match on the RESOLVED app root only — the ``apps/<app>/`` segment
-	# (``user_app``) when present, else the top path segment. NOT a substring
-	# anywhere: a path merely nested *under* a framework-named dir (the standard
-	# ``/home/frappe/…`` server home, or a user subfolder named ``crm``) is not
-	# framework code — that name is the address, not the sender.
-	if (user_app or norm_top) in FRAMEWORK_APPS:
+	# 3. Framework / stock apps (frappe, erpnext, …) on the resolved app root only
+	#    (the ``apps/<app>/`` segment when present, else the top path segment).
+	app_root = user_app or norm.lstrip("/").split("/", 1)[0]
+	if app_root in FRAMEWORK_APPS:
 		return True
-	installed = _installed_apps_for_site()
-	if installed and norm_top in installed:
-		return False
-	if norm_top in THIRD_PARTY_LIB_SEGMENTS:
+	# 4. Known third-party library as the resolved app ROOT (first segment). A lib
+	#    name deeper in a relative path is the user's own submodule
+	#    (``myapp/myapp/requests/…`` — recorder strips apps/, so real callsites are
+	#    ``<app>/<app>/…``), not the library, so it stays actionable.
+	if app_root in _THIRD_PARTY_LIB_NAMES:
 		return True
-	# Backstop: a top segment that isn't a bench app (installed OR in apps.txt) is third-party; fail OPEN for out-of-bench absolute paths (only relative or /apps/ paths resolve).
-	backstop_applies = not norm.startswith("/") or "/apps/" in norm
-	user_apps = (installed or frozenset()) | (_bench_apps() or frozenset())
-	if backstop_applies and user_apps and norm_top not in user_apps:
-		return True
+	# 5. Out-of-bench ABSOLUTE path (editable install / lib vendored outside
+	#    site-packages, e.g. ``/opt/pkgs/rq/…``): the top segment is a filesystem
+	#    prefix, so match a known lib as any path segment. Relative paths never
+	#    reach here, so a user submodule named like a lib is not misread.
+	if norm.startswith("/") and "/apps/" not in norm:
+		return any(seg in _THIRD_PARTY_LIB_NAMES for seg in norm.split("/"))
 	return False
 
 
