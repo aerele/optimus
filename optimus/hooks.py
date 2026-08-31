@@ -4,7 +4,7 @@ app_publisher = ""
 app_description = "Flow-aware performance profiler for Frappe and ERPNext"
 app_email = ""
 app_license = "mit"
-app_logo_url = "/assets/frappe/images/framework.png"  # placeholder; prevents sidebar 404
+app_logo_url = "/assets/optimus/images/aerele_logo.png"  # aerele logo (optimus/public/images)
 
 # Apps
 # ------------------
@@ -91,8 +91,7 @@ boot_session = "optimus.boot.boot_session"
 # (and is a no-op without the global flag). Our hook then decides per-user
 # whether to force-activate the recorder for this request.
 #
-# `after_request` runs after frappe.recorder.dump(), so the recording is
-# already in Redis by the time we register its UUID with our session.
+# For HTTP, after_request runs in application()'s finally BEFORE frappe.recorder.dump() (WSGI ClosingIterator), so the recorder hash isn't written yet — data to attach must ride an Optimus sidecar key merged at analyze time, never an RMW of the recorder hash (jobs reverse the order: dump before after_job).
 
 before_request = [
 	"optimus.hooks_callbacks.before_request",

@@ -137,6 +137,11 @@ def infra(recording_uuid: str) -> str:
 	return f"profiler:infra:{recording_uuid}"
 
 
+def resolved_doc(recording_uuid: str) -> str:
+	"""Per-recording sidecar holding a created doc's save-assigned ``{doctype, name}``, written by ``after_request`` and merged onto the recording as ``resolved_target_doc`` at analyze time. Frappe-pickled dict; TTL ``SESSION_TTL_SECONDS``."""
+	return f"profiler:resolved_doc:{recording_uuid}"
+
+
 # ---------------------------------------------------------------------------
 # Frontend metrics (v0.5.0+ split lists)
 # ---------------------------------------------------------------------------
@@ -289,6 +294,7 @@ KEY_PATTERNS: tuple[str, ...] = (
 	"profiler:tree:<recording_uuid>",
 	"profiler:sidecar:<recording_uuid>",
 	"profiler:infra:<recording_uuid>",
+	"profiler:resolved_doc:<recording_uuid>",
 	"profiler:frontend:<session_uuid>:xhr",
 	"profiler:frontend:<session_uuid>:vitals",
 	"profiler:frontend:<session_uuid>",

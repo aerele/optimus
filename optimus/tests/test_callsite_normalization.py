@@ -26,6 +26,8 @@ data either.
 import json
 import types
 
+import pytest
+
 from optimus.renderer import (
 	_OTHER_APP_LABEL,
 	_app_from_finding,
@@ -184,6 +186,64 @@ class TestFindingToDictNormalizes:
 		row = self._row({"normalized_query": "SELECT 1"})
 		finding = _finding_to_dict(row)
 		assert "callsite" not in finding["technical_detail"]
+
+
+class TestImpactScopeLabelBackfill:
+	"""Legacy user N+1 findings (analyzed before impact_scope_label shipped) get
+	the label backfilled from the stable finding_type so the report card's scope
+	tag agrees with the TL;DR hero on re-render — but only when the finding
+	actually carries a loop-scoped magnitude (finding ⑦)."""
+
+	def _row(self, finding_type, detail):
+		row = types.SimpleNamespace()
+		row.finding_type = finding_type
+		row.severity = "High"
+		row.title = "x"
+		row.customer_description = "y"
+		row.estimated_impact_ms = 100.0
+		row.affected_count = 1
+		row.action_ref = "0"
+		row.technical_detail_json = json.dumps(detail)
+		return row
+
+	def test_legacy_loop_scoped_n_plus_one_gets_recoverable(self):
+		# A loop-scoped finding (carries loop_count / run_count) IS recoverable.
+		row = self._row(
+			"N+1 Query",
+			{"normalized_query": "SELECT 1", "loop_count": 12, "run_count": 1},
+		)
+		finding = _finding_to_dict(row)
+		assert finding["technical_detail"]["impact_scope_label"] == "recoverable"
+
+	def test_legacy_cumulative_only_n_plus_one_not_mislabelled(self):
+		"""Finding ⑦: a pre-loop-scoping finding stored estimated_impact_ms as the
+		cross-request CUMULATIVE total and has no loop_count/run_count. Tagging it
+		'recoverable' (a loop-scoped claim) would misdescribe the number, so the
+		backfill must leave it unlabelled."""
+		row = self._row("N+1 Query", {"normalized_query": "SELECT 1"})
+		finding = _finding_to_dict(row)
+		assert "impact_scope_label" not in finding["technical_detail"]
+
+	def test_existing_label_not_overwritten(self):
+		row = self._row("N+1 Query", {"impact_scope_label": "recoverable"})
+		finding = _finding_to_dict(row)
+		assert finding["technical_detail"]["impact_scope_label"] == "recoverable"
+
+	def test_framework_n_plus_one_not_backfilled(self):
+		row = self._row("Framework N+1", {"normalized_query": "SELECT 1"})
+		finding = _finding_to_dict(row)
+		assert "impact_scope_label" not in finding["technical_detail"]
+
+	@pytest.mark.parametrize("blob", ["null", "[]", "123", '"str"'])
+	def test_non_dict_technical_detail_does_not_crash(self, blob):
+		# A malformed detail blob that parses to a non-object must not crash the
+		# render (the backfill and every downstream detail.get() assume a dict).
+		row = types.SimpleNamespace(
+			finding_type="N+1 Query", severity="High", title="x",
+			customer_description="y", estimated_impact_ms=1.0, affected_count=1,
+			action_ref="0", technical_detail_json=blob)
+		finding = _finding_to_dict(row)
+		assert isinstance(finding["technical_detail"], dict)
 
 
 class TestEndToEndRender:

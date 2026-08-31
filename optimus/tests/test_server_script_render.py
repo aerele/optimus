@@ -215,21 +215,6 @@ class TestRendererSnippetAndLink:
 		assert resolved[0] == "server_script"
 		assert resolved[1] == "foo"
 
-	def test_read_function_body_snippet_reads_server_script_from_db(self, fake_frappe_db):
-		from optimus import renderer
-
-		fake_frappe_db["rows"] = [
-			{
-				"name": "Foo",
-				"script": "def go():\n    for u in users:\n        do(u)\n",
-			}
-		]
-		snippet = renderer._read_function_body_snippet("<serverscript>: foo", 1)
-		assert snippet, "no snippet returned for a resolvable Server Script"
-		# First entry is the def line; body should follow.
-		contents = " ".join(r["content"] for r in snippet)
-		assert "for u in users" in contents
-
 	def test_read_source_snippet_returns_window_for_server_script(self, fake_frappe_db):
 		from optimus import renderer
 
@@ -315,3 +300,68 @@ class TestEndToEndServerScriptFinding:
 		card_block = re.search(r'class="finding[^"]*".*?</article>', html, re.DOTALL)
 		if card_block:
 			assert "<server-script body>" not in card_block.group(0)
+
+
+# ---------------------------------------------------------------------------
+# Server Script driven through the def-expansion path
+# (``_decorator_through_def_rows`` → ``_source_lines``) — the combination the
+# ±2-window / render tests above never exercise end-to-end.
+# ---------------------------------------------------------------------------
+
+
+class TestServerScriptThroughDefExpansion:
+	def test_decorator_through_def_rows_reads_server_script_body(self, fake_frappe_db):
+		"""A <serverscript> sentinel reads its body from the DB via _source_lines, spanning the decorator line down to the def."""
+		from optimus.renderer.finding_enrichment import _decorator_through_def_rows
+
+		fake_frappe_db["rows"] = [
+			{
+				"name": "My Script",
+				"script": (
+					"@frappe.whitelist()\n"  # 1 — pyinstrument's recorded line
+					"def handler():\n"  # 2 — the def
+					"    for u in frappe.db.get_all('User'):\n"  # 3
+					"        frappe.get_doc('User', u.name)\n"  # 4
+				),
+			}
+		]
+		rows, def_lineno = _decorator_through_def_rows("<serverscript>: my_script", 1, cache=None)
+		assert rows is not None, "server-script body did not resolve through _source_lines"
+		# Anchored on the def, snippet read from the DB body (not a real file).
+		assert def_lineno == 2
+		assert [r["content"] for r in rows] == ["@frappe.whitelist()", "def handler():"]
+
+	def test_expand_self_time_snippet_inlines_server_script_body(self, fake_frappe_db):
+		"""A self-time Slow Hot Path finding on a Server Script gets its body inlined and its line re-anchored on the def."""
+		from optimus.renderer.finding_enrichment import _expand_self_time_snippets
+
+		fake_frappe_db["rows"] = [
+			{"name": "My Script", "script": "@frappe.whitelist()\ndef handler():\n    return 1\n"}
+		]
+		finding = {
+			"finding_type": "Slow Hot Path",
+			"technical_detail": {
+				"drilldown_chain": [],
+				"callsite": {"filename": "<serverscript>: my_script", "lineno": 1},
+			},
+		}
+		_expand_self_time_snippets([finding], file_cache=None)
+
+		callsite = finding["technical_detail"]["callsite"]
+		assert callsite["self_time_no_pinpoint"] is True
+		assert callsite["lineno"] == 2  # re-anchored on the def
+		assert [r["content"] for r in callsite["source_snippet"]] == [
+			"@frappe.whitelist()",
+			"def handler():",
+		]
+
+	def test_find_call_line_reads_server_script_body(self, fake_frappe_db):
+		"""A Server Script callsite finds its exact call line via _source_lines, not the old bare open() returning None."""
+		from optimus.renderer.finding_enrichment import _find_call_line_in_function_body
+
+		fake_frappe_db["rows"] = [
+			{"name": "My Script", "script": "@frappe.whitelist()\ndef run():\n    frappe.get_doc('User', 1)\n"}
+		]
+		# def at line 2, the get_doc call at line 3.
+		line = _find_call_line_in_function_body("<serverscript>: my_script", 2, "get_doc", file_cache=None)
+		assert line == 3

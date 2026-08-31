@@ -137,6 +137,60 @@ def _extract_target_doc(form_dict) -> dict | None:
 	return None
 
 
+def _is_temp_docname(name) -> bool:
+	"""True for a non-permanent name: ``None``, or Frappe's ``new-<doctype>-<hash>``
+	client placeholder (autoname replaces it on first save)."""
+	return not name or (isinstance(name, str) and name.startswith("new-"))
+
+
+def _saved_doc_from_response(response, want_doctype, client_name=None):
+	"""The just-saved ``{"doctype","name"}`` matching ``want_doctype`` (from ``docs``/``message``), taking the response name that DIFFERS from the browser temp name so a real ``new-0001`` isn't discarded and an unsaved doc keeps its temp name; None otherwise. Never raises."""
+	if not isinstance(response, dict) or not want_doctype:
+		return None
+	try:
+		candidates = []
+		docs = response.get("docs")
+		if isinstance(docs, str):
+			try:
+				docs = json.loads(docs)
+			except Exception:
+				docs = None
+		if isinstance(docs, list):
+			candidates.extend(d for d in docs if isinstance(d, dict))
+		msg = response.get("message")
+		if isinstance(msg, dict):
+			candidates.append(msg)
+		elif isinstance(msg, list):
+			candidates.extend(d for d in msg if isinstance(d, dict))
+		for d in candidates:
+			if d.get("doctype") != want_doctype:
+				continue
+			nm = d.get("name")
+			# Real name = the response name the save assigned, i.e. one that differs
+			# from the browser's temp name. Comparing to the actual temp name (not a
+			# "new-" prefix guess) keeps a genuine "new-0001" from being discarded.
+			# Accept a str OR an int (autoincrement naming assigns an integer name — a
+			# standard Frappe option); reject bool and any non-scalar (dict/list/float)
+			# so a malformed response can't stamp a garbage string as the docname.
+			if isinstance(nm, str) or (isinstance(nm, int) and not isinstance(nm, bool)):
+				nm = str(nm)
+				if nm and nm != client_name:
+					return {"doctype": want_doctype, "name": nm}
+	except Exception:
+		return None
+	return None
+
+
+def resolve_target_doc_from_response(form_dict, response):
+	"""Capture-side (from ``after_request``): if the request created a NEW doc
+	(temp/None request name), return the real ``{"doctype", "name"}`` the save
+	assigned. None for an edit (real request name) or no doc. Never raises."""
+	req = _extract_target_doc(form_dict)
+	if not req or not _is_temp_docname(req.get("name")):
+		return None
+	return _saved_doc_from_response(response, req.get("doctype"), client_name=req.get("name"))
+
+
 def _build_doc_event_hook_index(doc_events) -> dict:
 	"""Flatten Frappe's ``doc_events`` map — ``{doctype: {event: [paths]}}``
 	(``doctype`` may be ``"*"``) — into ``{dotted_path: [(doctype, event), …]}``.
@@ -230,6 +284,19 @@ def _attach_action_context(actions, findings, recordings_by_uuid) -> None:
 			continue
 		rec = recordings_by_uuid.get(a.get("recording_uuid") or "")
 		td = _extract_target_doc(rec.get("form_dict") if isinstance(rec, dict) else None)
+		# Replace a "new-…"/unsaved name with the permanent one the save assigned
+		# (``resolved_target_doc``, captured from the response), so an insert action
+		# shows the same name submit/cancel already carry.
+		if isinstance(rec, dict):
+			_resolved = rec.get("resolved_target_doc")
+			if isinstance(_resolved, dict) and _resolved.get("name"):
+				if td is None:
+					td = {"doctype": _resolved.get("doctype"), "name": _resolved.get("name")}
+				elif _is_temp_docname(td.get("name")):
+					td = {
+						"doctype": td.get("doctype") or _resolved.get("doctype"),
+						"name": _resolved.get("name"),
+					}
 		# v0.7.x J.13: fallback when the recording isn't available
 		# (Redis TTL expired between record-time and regenerate-time) —
 		# infer the action's DocType from any related finding's callsite

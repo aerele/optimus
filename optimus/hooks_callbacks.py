@@ -397,6 +397,26 @@ def after_request(*args, **kwargs):
 		except Exception:
 			frappe.log_error(title="optimus infra end snapshot")
 
+		# Stash a new doc's save-assigned name (vs the browser's "new-…" placeholder) on an Optimus sidecar key, not an RMW of the recorder hash (unwritten at after_request time for HTTP); analyze merges it back as resolved_target_doc. Best-effort.
+		try:
+			if session_uuid and recording_uuid_for_dump:
+				from optimus.renderer.doc_event_renderer import (
+					resolve_target_doc_from_response,
+				)
+				resolved = resolve_target_doc_from_response(
+					getattr(frappe.local, "form_dict", None),
+					getattr(frappe.local, "response", None),
+				)
+				if resolved:
+					from optimus import redis_keys
+					frappe.cache.set_value(
+						redis_keys.resolved_doc(recording_uuid_for_dump),
+						resolved,
+						expires_in_sec=session.SESSION_TTL_SECONDS,
+					)
+		except Exception:
+			frappe.log_error(title="optimus resolve target doc")
+
 		# v0.5.0: correlation header for optimus_frontend.js. Must set
 		# Access-Control-Expose-Headers or browsers will refuse to surface
 		# the custom header to JavaScript, even for same-origin requests.

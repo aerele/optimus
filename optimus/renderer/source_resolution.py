@@ -46,7 +46,7 @@ from __future__ import annotations
 import os
 import re
 
-from optimus.renderer.source import _read_source_snippet, _resolve_source_path
+from optimus.renderer.source import _read_source_snippet, _resolve_source_path, _source_lines
 
 
 def _action_dotted_entry(action) -> str | None:
@@ -100,15 +100,21 @@ def _skip_decorators_to_def(
 	"""
 	if not abs_filename or start_lineno <= 0 or not fn_name:
 		return start_lineno
-	# Read source (cache-aware).
-	if cache is not None and abs_filename in cache:
-		lines = cache[abs_filename]
-	else:
+	# Read source through the shared primitive (cache-aware; also resolves
+	# Server Script sentinels, which a bare open() here used to miss).
+	lines = _source_lines(abs_filename, cache=cache)
+	if not lines and not abs_filename.startswith("<"):
+		# _source_lines rejects out-of-bench paths (Phase-K hardening). But
+		# abs_filename is a trusted co_filename and we return only a line number,
+		# never content — so read an out-of-bench app's source directly.
 		try:
-			with open(abs_filename, encoding="utf-8") as fh:
-				lines = fh.read().splitlines()
+			with open(abs_filename, encoding="utf-8") as _fh:
+				lines = _fh.read().splitlines()
 		except Exception:
 			lines = None
+		# Repopulate the shared per-render cache (``_source_lines`` stored None for
+		# this out-of-bench path when it rejected it above) so other decorated
+		# callsites in the same file don't each re-read it from disk.
 		if cache is not None:
 			cache[abs_filename] = lines
 	if not lines or start_lineno > len(lines):

@@ -40,7 +40,8 @@ expanded back-import design):
     ``_action_dotted_entry``, ``_skip_decorators_to_def``,
     ``_resolve_dotted_to_code``, ``_action_entry_callsite``,
     ``_resolve_frame_key_to_callsite``, ``_bench_relative_display``).
-  * ``_expand_self_time_snippets`` (calls ``_read_function_body_snippet``).
+  * ``_expand_self_time_snippets`` (calls ``_decorator_through_def_rows`` →
+    ``_find_header_def_line`` / ``_source_lines``).
   * ``_retarget_phase1_callsites_to_drilldown_leaf`` + its AST
     helper ``_find_call_line_in_function_body``.
 """
@@ -48,6 +49,7 @@ expanded back-import design):
 from __future__ import annotations
 
 import json
+import re
 
 # v0.7.x: severity rank for picking the dominant finding within a
 # root-cause group. Lower number = higher severity. Mirrors
@@ -455,24 +457,13 @@ def _find_call_line_in_function_body(
 	# submodule; importing source.py here is fine (it has no back-ref
 	# into us), but we keep the import inside the function for symmetry
 	# with the other lazy paths in this module.
-	from optimus.renderer.source import _resolve_source_path
+	from optimus.renderer.source import _source_lines
 
 	if not parent_filename or not callee_function or not parent_def_lineno:
 		return None
 
-	# Read source through the shared cache so files visited by
-	# _read_source_snippet aren't re-read here.
-	if file_cache is not None and parent_filename in file_cache:
-		lines = file_cache[parent_filename]
-	else:
-		resolved = _resolve_source_path(parent_filename)
-		try:
-			with open(resolved, encoding="utf-8") as fh:
-				lines = fh.read().splitlines()
-		except Exception:
-			lines = None
-		if file_cache is not None:
-			file_cache[parent_filename] = lines
+	# Shared reader so a Server Script callsite resolves its body from the DB (not a bare open() on the sentinel); files behave as before.
+	lines = _source_lines(parent_filename, cache=file_cache)
 
 	if not lines:
 		return None
@@ -664,6 +655,17 @@ def _retarget_phase1_callsites_to_drilldown_leaf(
 			"phase2_lookup_filename": leaf_filename,
 			"phase2_lookup_function": leaf_function,
 		}
+		# If we anchored on a Server Script parent (its body is now readable, so
+		# call_lineno resolves and the anchor keeps the ``<serverscript>`` filename),
+		# tag it as a Desk link like _finding_to_dict does — otherwise the template
+		# emits a broken ``vscode://file`` link built from the wrapper's real path.
+		if anchor_filename.startswith("<serverscript") or anchor_filename.startswith("<server-script"):
+			from optimus.server_script_source import desk_url, extract_script_name
+
+			_scrubbed = extract_script_name(anchor_filename)
+			if _scrubbed:
+				new_callsite["_abs"] = desk_url(_scrubbed, cache=file_cache)
+				new_callsite["_link_kind"] = "desk"
 		detail["callsite"] = new_callsite
 
 
@@ -717,6 +719,24 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 		detail = json.loads(child.technical_detail_json or "{}")
 	except Exception:
 		detail = {}
+	# A non-object blob (list / ``null``) would crash the ``detail.get()`` calls
+	# below — normalize so one bad finding can't take down the render.
+	if not isinstance(detail, dict):
+		detail = {}
+
+	# Back-compat: backfill impact_scope_label for sessions analyzed before that
+	# field shipped, so the card's scope tag agrees with the TL;DR hero on
+	# re-render — but ONLY for findings that carry a loop-scoped magnitude
+	# (loop_count / run_count). A pre-loop-scoping session stored
+	# estimated_impact_ms as the cross-request CUMULATIVE total; tagging that
+	# 'recoverable' (a loop-scoped claim) would misdescribe the number, so those
+	# are left unlabelled rather than mislabelled.
+	if (
+		child.finding_type == "N+1 Query"
+		and "impact_scope_label" not in detail
+		and (detail.get("loop_count") is not None or detail.get("run_count") is not None)
+	):
+		detail["impact_scope_label"] = "recoverable"
 
 	# v0.6.0 Round 2: synthesize callsite from legacy top-level shape
 	# when the analyzer didn't wrap it.
@@ -915,72 +935,73 @@ def _attach_representative_callsites(findings, recordings, *, file_cache: dict |
 		}
 
 
-def _read_function_body_snippet(
+def _snippet_row(lines: list[str], idx: int, limit: int) -> dict:
+	"""One ``{lineno, content}`` snippet row, truncating an over-long line."""
+	content = lines[idx - 1]
+	if len(content) > limit:
+		content = content[:limit] + "..."
+	return {"lineno": idx, "content": content}
+
+
+# A ``def`` / ``async def`` line (any indent, tab or space).
+_DEF_RE = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]")
+# A ``class`` line. A decorator block that reaches a ``class`` before a ``def``
+# is a class header, not a function's — stop rather than grab a method inside.
+_CLASS_RE = re.compile(r"^[ \t]*class[ \t]")
+# Cap on how far a decorator block may reach before its ``def`` (stacked and/or
+# multi-line decorators). Generous; real whitelisted endpoints use one or two.
+_MAX_DECORATOR_BLOCK_LINES = 25
+
+
+def _find_header_def_line(lines: list[str], ln: int) -> int | None:
+	"""Lineno of the ``def`` for the header at ``lines[ln-1]`` — ``ln`` itself, or
+	(CPython 3.11+, where ``co_firstlineno`` is the first ``@decorator``) scanning
+	forward past the decorator block to it. None if ``ln`` is neither def nor
+	decorator, a ``class`` is hit first, or no ``def`` within the block cap."""
+	if _DEF_RE.match(lines[ln - 1]):
+		return ln
+	if not lines[ln - 1].lstrip().startswith("@"):
+		return None
+	end = min(len(lines), ln + _MAX_DECORATOR_BLOCK_LINES)
+	for i in range(ln + 1, end + 1):
+		row = lines[i - 1]
+		if _DEF_RE.match(row):
+			return i
+		if _CLASS_RE.match(row):
+			return None
+	return None
+
+
+def _decorator_through_def_rows(
 	filename: str,
-	def_lineno,
+	lineno,
 	*,
 	cache: dict | None = None,
-	max_lines: int = 40,
-) -> list[dict] | None:
-	"""v0.7.x: read a whole function body — from its ``def`` line to the end
-	of the function — as ``[{lineno, content}]`` (same shape as
-	``_read_source_snippet``). Used for self-time hot-path findings with no
-	deeper user-code frame: Phase-1 sampling can't pinpoint the hot line, but
-	the function is the relevant unit, so show all of it rather than a ±2-line
-	peek. The function ends at the first non-blank line indented at or below
-	the ``def``'s indentation; capped at ``max_lines``. Returns ``None`` when
-	the file isn't readable / lineno is out of range."""
-	from optimus.renderer.source import _SNIPPET_TRUNCATE_CHARS, _resolve_source_path
+) -> tuple[list[dict] | None, int]:
+	"""``(rows, def_lineno)`` spanning a self-time finding's recorded line through
+	the function's ``def`` — so the card shows the function name, not just a
+	decorator (pyinstrument anchors a decorated fn at its first ``@decorator`` on
+	CPython 3.11+). ``def_lineno`` anchors the highlight; ``(None, lineno)`` when the
+	file can't be read / the line is out of range (caller keeps its snippet)."""
+	from optimus.renderer.source import _SNIPPET_TRUNCATE_CHARS, _source_lines
 
 	try:
-		ln = int(def_lineno)
+		ln = int(lineno)
 	except (TypeError, ValueError):
-		return None
+		return None, lineno
 	if ln <= 0 or not filename:
-		return None
-
-	if cache is not None and filename in cache:
-		lines = cache[filename]
-	else:
-		resolved = _resolve_source_path(filename)
-		if isinstance(resolved, tuple) and resolved[0] == "server_script":
-			from optimus.server_script_source import get_server_script_lines
-
-			lines = get_server_script_lines(resolved[1], cache=cache)
-		else:
-			try:
-				with open(resolved, encoding="utf-8") as fh:
-					lines = fh.read().splitlines()
-			except Exception:
-				lines = None
-		if cache is not None:
-			cache[filename] = lines
-
+		return None, lineno
+	lines = _source_lines(filename, cache=cache)
 	if not lines or ln > len(lines):
-		return None
+		return None, ln
+
+	def_lineno = _find_header_def_line(lines, ln)
+	if def_lineno is None:
+		def_lineno = ln  # not a header line — show only the recorded line.
 
 	limit = _SNIPPET_TRUNCATE_CHARS
-
-	def _row(idx: int) -> dict:
-		content = lines[idx - 1]
-		if len(content) > limit:
-			content = content[:limit] + "..."
-		return {"lineno": idx, "content": content}
-
-	def_line = lines[ln - 1]
-	def_indent = len(def_line) - len(def_line.lstrip())
-
-	out = [_row(ln)]
-	n = ln + 1
-	while n <= len(lines) and len(out) < max_lines:
-		raw = lines[n - 1]
-		if raw.strip():
-			indent = len(raw) - len(raw.lstrip())
-			if indent <= def_indent:
-				break  # dedented to def level — function (and decorators) ended
-		out.append(_row(n))
-		n += 1
-	return out or None
+	rows = [_snippet_row(lines, i, limit) for i in range(ln, def_lineno + 1)]
+	return rows, def_lineno
 
 
 def _expand_self_time_snippets(findings, *, file_cache: dict | None = None) -> None:
@@ -1010,8 +1031,13 @@ def _expand_self_time_snippets(findings, *, file_cache: dict | None = None) -> N
 			continue
 		# Flag drives the "no single hot line — run a Line-Level Drilldown" note.
 		callsite["self_time_no_pinpoint"] = True
-		body = _read_function_body_snippet(fn, ln, cache=file_cache)
-		if body:
-			callsite["source_snippet"] = body[:1]  # signature/def line only
+		# ``ln`` is pyinstrument's frame line; on CPython 3.11+ a decorated
+		# function reports its FIRST decorator line (e.g. @frappe.whitelist()),
+		# not the ``def``. Show the decorator(s) through the ``def`` signature
+		# and anchor the highlight + card file:line on the ``def`` itself.
+		rows, def_lineno = _decorator_through_def_rows(fn, ln, cache=file_cache)
+		if rows:
+			callsite["source_snippet"] = rows
+			callsite["lineno"] = def_lineno
 		detail["callsite"] = callsite
 		finding["technical_detail"] = detail

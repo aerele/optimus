@@ -23,6 +23,7 @@ from collections import defaultdict
 from optimus.analyzers.base import (
 	SEVERITY_ORDER,
 	AnalyzerResult,
+	installed_apps_allowlist,
 	is_framework_callsite,
 	project_post_fix_ms,
 	walk_callsite,
@@ -140,6 +141,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# One settings read per analyze pass.
 	from optimus.settings import get_config
 	tracked_apps = get_config().tracked_apps
+	installed_apps = installed_apps_allowlist()
 	framework_doctypes = _get_framework_doctypes()
 
 	# (finding_type, table) → aggregated finding dict
@@ -174,7 +176,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			# code and isn't user-actionable. Skip the whole call's
 			# EXPLAIN rows rather than emit N findings the user
 			# can't act on.
-			if _is_framework_origin(call_stack, tracked_apps=tracked_apps):
+			if _is_framework_origin(
+				call_stack, tracked_apps=tracked_apps, installed_apps=installed_apps
+			):
 				drop_framework_callsite += 1
 				continue
 
@@ -378,6 +382,7 @@ def _to_float(val):
 def _is_framework_origin(
 	stack: list,
 	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
 ) -> bool:
 	"""Return True when the SQL call's blame frame is inside framework
 	code (frappe, erpnext, hrms, lms, …) or a pip-installed library.
@@ -411,7 +416,7 @@ def _is_framework_origin(
 		# already be gone at this stage — defensive).
 		return True
 	return is_framework_callsite(
-		callsite.get("filename") or "", tracked_apps=tracked_apps
+		callsite.get("filename") or "", tracked_apps=tracked_apps, installed_apps=installed_apps
 	)
 
 

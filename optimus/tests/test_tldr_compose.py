@@ -35,6 +35,10 @@ def _finding(**kw):
 		"title": "Same query ran 100×",
 		"estimated_impact_ms": 449.0,
 		"affected_count": 100,
+		# A user N+1 always carries impact_scope_label="recoverable" (set by the
+		# analyzer); the hero routes user-vs-framework on it, so the default
+		# fixture mirrors production. Framework-N+1 tests override it away.
+		"technical_detail": {"impact_scope_label": "recoverable"},
 	}
 	base.update(kw)
 	return base
@@ -62,6 +66,55 @@ class TestHeadlineByCategory:
 		assert "100× inside a loop" in head
 		# Highlight spans applied to the impact + loop count.
 		assert head.count('<span class="hot">') >= 2
+
+	def test_user_n_plus_one_multi_request_hedges_with_up_to(self):
+		# loop_count is the PEAK single-request size when the loop spans requests,
+		# so the hero hedges ("up to") and names the spread — matching the title.
+		f = _finding(
+			finding_type="N+1 Query",
+			affected_count=120,
+			technical_detail={
+				"impact_scope_label": "recoverable",
+				"loop_count": 12,
+				"run_count": 10,
+			},
+		)
+		head = str(renderer._compose_tldr([f], _doc())["headline_markup"])
+		assert "up to 12× inside a loop" in head
+		assert "across 10 requests" in head
+		assert "single biggest win" in head  # still actionable for user code
+
+	def test_framework_n_plus_one_hero_is_informational_not_actionable(self):
+		# A Framework N+1 can win the hero slot (highest impact), but it must NOT
+		# claim "the single biggest win" — the loop lives in Frappe, not user code.
+		# It carries NO impact_scope_label (only user N+1 sets "recoverable"), which
+		# is exactly what routes it to the informational headline.
+		f = _finding(
+			finding_type="Framework N+1",
+			severity="Low",
+			title="Framework query repeated 138×",
+			affected_count=138,
+			technical_detail={},
+		)
+		head = str(renderer._compose_tldr([f], _doc())["headline_markup"])
+		assert "Frappe's own code" in head
+		assert "138×" in head
+		assert "not something you can change" in head
+		assert "single biggest win" not in head
+
+	def test_legacy_user_n_plus_one_without_impact_scope_label_stays_user(self):
+		# Regression: a user N+1 stored by a pre-``impact_scope_label`` build (the
+		# field is absent from technical_detail) must still render as the user's
+		# own actionable win on re-render — NOT the framework "can't change" copy.
+		# Routing is gated on the stable finding_type, so the missing label is fine.
+		f = _finding(
+			finding_type="N+1 Query",
+			affected_count=100,
+			technical_detail={},
+		)
+		head = str(renderer._compose_tldr([f], _doc())["headline_markup"])
+		assert "single biggest win" in head
+		assert "not something you can change" not in head
 
 	def test_slow_hook_uses_hook_template(self):
 		f = _finding(

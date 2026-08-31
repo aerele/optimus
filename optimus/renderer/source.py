@@ -210,6 +210,30 @@ def _resolve_source_path(filename):
 	return resolved
 
 
+def _source_lines(filename: str, *, cache: dict | None = None) -> list[str] | None:
+	"""``filename``'s source lines, or ``None`` if unreadable. The single
+	source-read primitive: resolves the (app-relative) path via
+	``_resolve_source_path`` (Server Script sentinels read from the DocType) and
+	memoises in the shared per-render ``cache`` (keyed by ``filename``, ``None``
+	included). All the snippet/window/decorator readers go through it."""
+	if cache is not None and filename in cache:
+		return cache[filename]
+	resolved = _resolve_source_path(filename)
+	if isinstance(resolved, tuple) and resolved[0] == "server_script":
+		from optimus.server_script_source import get_server_script_lines
+
+		lines = get_server_script_lines(resolved[1], cache=cache)
+	else:
+		try:
+			with open(resolved, encoding="utf-8") as fh:
+				lines = fh.read().splitlines()
+		except Exception:
+			lines = None
+	if cache is not None:
+		cache[filename] = lines
+	return lines
+
+
 def _read_source_snippet(
 	filename: str,
 	lineno,
@@ -229,23 +253,7 @@ def _read_source_snippet(
 	if ln <= 0 or not filename:
 		return None
 
-	if cache is not None and filename in cache:
-		lines = cache[filename]
-	else:
-		resolved = _resolve_source_path(filename)
-		if isinstance(resolved, tuple) and resolved[0] == "server_script":
-			from optimus.server_script_source import get_server_script_lines
-
-			lines = get_server_script_lines(resolved[1], cache=cache)
-		else:
-			try:
-				with open(resolved, encoding="utf-8") as fh:
-					lines = fh.read().splitlines()
-			except Exception:
-				lines = None
-		if cache is not None:
-			cache[filename] = lines
-
+	lines = _source_lines(filename, cache=cache)
 	if not lines:
 		return None
 
@@ -282,7 +290,8 @@ def _read_source_window(
 	per-line truncation as ``_read_source_snippet`` unless ``max_line_chars``
 	overrides it. Returns ``None`` when the file isn't readable / the lineno
 	is out of range. The (possibly app-relative) ``filename`` is resolved via
-	``_resolve_source_path`` before opening.
+	``_resolve_source_path`` before opening; Server Script sentinels are read
+	from the ``tabServer Script`` DocType (via the shared ``_source_lines``).
 	"""
 	try:
 		ln = int(lineno)
@@ -291,18 +300,7 @@ def _read_source_window(
 	if ln <= 0 or not filename:
 		return None
 
-	if cache is not None and filename in cache:
-		lines = cache[filename]
-	else:
-		resolved = _resolve_source_path(filename)
-		try:
-			with open(resolved, encoding="utf-8") as fh:
-				lines = fh.read().splitlines()
-		except Exception:
-			lines = None
-		if cache is not None:
-			cache[filename] = lines
-
+	lines = _source_lines(filename, cache=cache)
 	if not lines:
 		return None
 

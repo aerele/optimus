@@ -8,6 +8,401 @@ versions may contain breaking changes — see migration notes below).
 
 ---
 
+## [0.12.41] — 2026-08-31
+
+### Fixed
+
+- **Exclusion-mode classification now uses the installed-apps allowlist as ground
+  truth instead of guessing from a name.** For six review rounds the
+  application-vs-library decision swung between an installed-apps *backstop* and a
+  pure hardcoded *denylist*, and each denylist tweak just relocated the bug: an app
+  literally named like a bundled library (`redis`, `requests`, `pandas`) was hidden
+  as framework; an out-of-bench checkout or a library not on the list was
+  misclassified; and the PR's own promise ("only installed apps are treated as
+  application code") wasn't actually implemented. Rewrote `is_framework_callsite`'s
+  exclusion mode to consult `frappe.get_installed_apps()` (resolved ONCE per
+  analyze via `base.installed_apps_allowlist()` and threaded into every classifying
+  analyzer — n_plus_one, redundant_calls, explain_flags, top_queries — and into
+  call_tree's hot-frame leaderboard): a callsite whose app root is an installed
+  Frappe app (and not a framework/stock app) is the developer's code; everything
+  else the developer can't patch. This makes an installed app named `redis`
+  actionable, a real `redis` library non-actionable, and an *unknown* library
+  correctly non-actionable with no denylist to maintain. Framework apps
+  (`frappe`/`erpnext`/…) are still checked first, and Server Scripts stay
+  actionable via an explicit carve-out (so the allowlist can't demote them —
+  the regression that started this). Off-bench (frappe unavailable, e.g. the
+  pure-Python unit suite) it falls back to the previous hardcoded heuristic, so
+  existing tests are unchanged. Verified on `dev.local`. **The hot-frame side keys
+  the allowlist on the RESOLVED app root** (`_last_app_segment`, the same
+  resolution the SQL side and the donut use) — not the raw first path segment,
+  which would read `apps`/`home` for an `apps/`-prefixed or absolute path and
+  silently drop the user's own frames from the leaderboard / Slow Hot Path — and
+  only fires in exclusion mode (a free-text tracked app that isn't installed is
+  kept), with a truthy guard so an empty set falls back to the heuristic. Regression
+  tests exercise the on-bench (`installed_apps` populated) path the pure-Python
+  suite otherwise never hits.
+
+- **New-doc name resolution now handles integer (autoincrement) docnames.**
+  `_saved_doc_from_response` required `isinstance(name, str)`, so a doc using
+  Frappe's autoincrement naming (an integer `name` in the response) silently kept
+  its `new-…` placeholder. Now accepts a `str` or an `int` (not `bool`, not a
+  non-scalar) so a malformed response can't stamp a garbage docname.
+
+- **Fixed a broken editor link when a Slow Hot Path drilldown retargets onto a
+  Server Script parent.** Now that a Server Script body is readable, the drilldown
+  can anchor a finding on a `<serverscript>` parent frame; that anchor is now tagged
+  as a Desk link (`_link_kind="desk"` + `desk_url`) like every other Server Script
+  callsite, instead of emitting a `vscode://file` link built from the wrapper's real
+  path.
+
+---
+
+## [0.12.40] — 2026-08-31
+
+### Changed
+
+- **The SQL and hot-frame classifiers now share one third-party library list.**
+  `call_tree._THIRD_PARTY_LIB_SEGMENTS` had drifted to a subset of
+  `base._THIRD_PARTY_LIB_NAMES` (missing `rq`, `werkzeug`, `gunicorn`, `pytz`,
+  `dateutil`, `pyinstrument`) even though a comment claimed they mirrored — a
+  maintenance hazard that already bit once. Pointed `call_tree` at
+  `base._THIRD_PARTY_LIB_NAMES` directly so the two surfaces can never disagree on
+  whether a library is user code. Behavior-neutral: the six names were already
+  filtered from the hot-frame leaderboard via `_PURE_HELPER_PATH_SUBSTRINGS`, so
+  this only removes the drift risk. Added a guard test that pins the two together.
+
+---
+
+## [0.12.39] — 2026-08-31
+
+### Fixed
+
+- **New-doc name resolution was dead for HTTP/Desk saves.** The feature that shows
+  a doc's real save-assigned name (instead of the browser's `new-…` placeholder)
+  did a read-modify-write of frappe's own `RECORDER_REQUEST_HASH` in
+  `after_request` — but for HTTP, `after_request` runs in `application()`'s
+  `finally` **before** `frappe.recorder.dump()` (which runs later in the WSGI
+  `ClosingIterator`, after the response), so the recorder hash wasn't written yet:
+  the `hget` returned `None` and the resolved name was silently dropped (the
+  `isinstance` guard hid it, and the tests inject the field directly so CI stayed
+  green). A stale code comment even asserted the opposite ordering. Rewrote it to
+  write the resolved `{doctype, name}` to an **Optimus-owned sidecar key**
+  (`redis_keys.resolved_doc`, mirroring the `infra` sidecar) and **merge it at
+  analyze time** — which removes the ordering dependency entirely and takes the
+  read-modify-write off the request hot path. Corrected the `hooks.py` ordering
+  comment. Added source-inspection regression guards
+  (`TestResolvedDocSidecarWiring`) that close the coverage gap that let this ship
+  green: the write must ride the sidecar and never re-introduce the recorder-hash
+  `hset`, and analyze must merge + clean it up.
+
+---
+
+## [0.12.38] — 2026-08-28
+
+### Added
+
+- **Document-header masthead + aerele branding on the Raw Report.** The report now
+  opens with a document-style masthead (brand column + contact links) and the
+  Optimus sidebar/report logo is the aerele logo (`app_logo_url`, a new bundled
+  `aerele_logo.png`, embedded in the template as an inline base64 data URI so the
+  report stays fully self-contained). Purely presentational.
+
+- **Tracked Apps now scopes the call_tree findings, not just the SQL findings.**
+  When *Optimus Settings ▸ Tracked Apps* is set, the inclusion-mode classifier
+  already restricted the N+1 / redundant-call / EXPLAIN / top-query findings to
+  those apps — but the call_tree findings (Repeated Hot Frame, Slow Hot Path, Hook
+  Bottleneck, Slow Background Job) and the hot-frames leaderboard ignored it and
+  still surfaced frames from every app. Plumbed the tracked-apps set into
+  call_tree's two frame gatekeepers (`_is_pure_helper_frame` /
+  `_is_walker_plumbing_frame`) so a frame outside the tracked apps is treated as
+  out-of-scope plumbing — the walker descends past it to your code, exactly as it
+  already does for framework frames. Reuses the same `is_framework_callsite`
+  inclusion decision the SQL side uses, so both surfaces agree. Empty Tracked
+  Apps → profile everything (unchanged default). Verified end-to-end: with
+  `Tracked Apps = ["myapp"]`, only `myapp` frames appear as findings and in the
+  hot-frames leaderboard. **Server Scripts are exempt** — they're the developer's
+  own optimizable code and live in the database, not in any app, so their findings
+  stay actionable on both surfaces even when Tracked Apps is set. **Not yet
+  scoped:** the Phase-2 line-profile candidate picker still offers hot frames from
+  any app — a follow-up.
+
+### Changed
+
+- **Session name capped explicitly at 140 characters.** The session name (the
+  `title` shown in the report header and list view) is a `Data` field. Frappe
+  already caps a `Data` column and its form control at 140 by default, so the new
+  enforcement that actually matters is a defensive `title[:140]` in `api.start` for
+  **direct API callers** (which bypass the form control). The explicit `length: 140`
+  on the DocType field and the Start-dialog input make the limit self-documenting
+  and belt-and-suspenders; they don't change the effective DB/typing limit.
+
+- **Reverted the report masthead's top-right document name.** The header's
+  top-right corner showed the touched document (doctype as the heading + document
+  name below it); reverted to the previous behaviour — it now shows the session
+  title. The per-action "Document:" breadcrumb further down the report is
+  unchanged. (Removed the `primary_doc` computation and the `.masthead-docname`
+  markup/CSS.)
+
+- **Reverted the callsite classifier to the proven `main` approach.** The
+  in-progress rewrite on this branch (the 0.12.37 classifier unification plus the
+  bench-apps backstop / installed-apps rescue) traded simplicity for edge-case
+  handling and, under review, introduced regressions of its own — most notably
+  demoting real Server Script N+1s to non-actionable Observations on live sites.
+  Rather than layer more special-casing on top (an angle-bracket sentinel
+  carve-out, an out-of-bench lib fallback, a shared `_is_third_party_path`), we
+  restored `base.is_framework_callsite` and `call_tree._is_pure_helper_frame` /
+  `_top_level_app` to `main`'s simpler substring-based classification: match
+  framework app names, `site-packages`, and a known-library list, else treat the
+  frame as the user's own code. Server Scripts are correctly actionable again by
+  falling through to that default.
+
+### Fixed
+
+- **Framework/library names matched mid-path hid user code (present on `main`
+  too).** `is_framework_callsite` matched a `FRAMEWORK_APPS` name as a substring
+  anywhere (`norm.startswith("crm/") or "/crm/" in norm`), so a user app's
+  submodule named like a framework app (`mybiz/mybiz/crm/lead_utils.py`), the
+  standard `/home/frappe/…` server home, and `acme/acme/payments/…` were all
+  demoted to non-actionable Observations. Now framework apps match on the
+  **resolved app root** only (the boundary-anchored `apps/<app>/` segment via
+  `_last_app_segment`, else the top segment) — never mid-path — plus a user-app
+  guard so a vendored lib under `apps/<app>/…/requests/…` stays the user's code.
+  Real framework roots, `site-packages`, pyinstrument-stripped libs, and
+  out-of-bench absolute lib paths still classify correctly. (One narrow residual:
+  a lib vendored under a *pyinstrument-stripped* user path — no `apps/` prefix —
+  is still substring-matched; rare and ambiguous.)
+
+- **Third-party libraries could leak into the hot-frame leaderboard.** In default
+  mode (no Tracked Apps), `call_tree._is_pure_helper_frame` only caught libraries
+  in a fixed ~24-name list, so a venv frame outside it (`gevent`, `sentry_sdk`,
+  `greenlet`, …) was aggregated into the Repeated Hot Frame leaderboard as if it
+  were the developer's code. Restored the blanket `site-packages/` / `dist-packages/`
+  guard (which `base.is_framework_callsite` already has) so any venv path is
+  filtered regardless of the lib name.
+
+- **Slow-path / hook / background-job findings inside Server Scripts were silently
+  dropped on real sites.** The Slow-Hot-Path walker's Server Script carve-out
+  (`_is_walker_plumbing_frame`) matched `<serverscript-` (trailing hyphen), but
+  Frappe's `safe_exec` emits `<serverscript>` (bare) or `<serverscript>: <name>` —
+  never the hyphenated form. So on live sites the carve-out never fired, Server
+  Script frames were treated as plumbing, and no Slow Hot Path / Hook Bottleneck /
+  Slow Background Job finding ever surfaced inside a Server Script body (a
+  long-standing bug; the Tracked-Apps work touched this line and a test using the
+  obsolete `<serverscript-N>` shape masked it). Now matches the `<serverscript`
+  prefix, consistent with the sister checks in `_display_name_for_node` /
+  `_top_level_app`; the regression test uses the real `<serverscript>: name` shape.
+
+- **App-name resolution now handles benches nested under a folder named `apps`.**
+  `_top_level_app` (the session-time donut) and `_extract_app_segment` (which
+  powers Tracked Apps inclusion mode) resolved the app with a first-match
+  `.find("apps/")`, so a bench installed under `/opt/apps/frappe-bench/apps/<app>/`
+  (or a multi-bench server holding several benches under one `apps/` dir) bucketed
+  frames under the bogus `frappe-bench` prefix — and, worse, Tracked Apps failed
+  to match a tracked app on such a bench (its findings were hidden as framework).
+  Both now go through one boundary-anchored, last-`apps/`-wins parser
+  (`_last_app_segment`), so the real app resolves and an app whose own name ends
+  in `apps` (`webapps/…`) is no longer misparsed. Normal single-`apps/` benches
+  are unchanged.
+
+- **Widened the third-party library list so N+1s inside common libraries are not
+  blamed on the developer.** `main`'s classifier only shows a library frame as a
+  (non-actionable) Observation if the library is on a hardcoded list, and that
+  list was short — so a query looping inside `pandas`, `redis`, `requests`,
+  `numpy`, `jinja2`, `cryptography`, `psycopg2`, `boto3`, … was reported as an
+  actionable user N+1 the developer can't fix. Expanded the library list
+  (`base._THIRD_PARTY_LIB_NAMES`) to cover the common
+  data/DB/cache/HTTP/serialization/crypto libraries, matched on the **resolved
+  app root** (first segment) like `call_tree._THIRD_PARTY_LIB_SEGMENTS` — **not**
+  a substring anywhere. This matters because frappe's recorder strips the `apps/`
+  prefix, so a SQL callsite is `<app>/<app>/…`; a substring match would blame a
+  user module merely *named* like a library (`myapp/myapp/requests/api.py`) as
+  framework and hide a real, fixable N+1. Out-of-bench absolute paths keep a
+  segment-anywhere fallback (`/opt/pkgs/rq/…`). No backstop, no installed-apps
+  lookup. Verified end-to-end: a `pandas`/`redis` loop renders as "Framework N+1 ·
+  Observation" while a Server Script, the user's own app, and a user module named
+  like a library all stay actionable.
+
+- **Legacy N+1 backfill no longer mislabels a cumulative number as loop-scoped.**
+  The re-render backfill that tags an old `N+1 Query` finding `recoverable` now
+  fires only when the finding carries a loop-scoped magnitude (`loop_count` /
+  `run_count`); a pre-loop-scoping finding whose `estimated_impact_ms` is the
+  cross-request cumulative total is left unlabelled rather than misdescribed.
+
+## [0.12.37] — 2026-08-26
+
+### Fixed
+
+- **The SQL and hot-frame classifiers disagreed on whether a third-party library
+  is user code.** `call_tree._is_pure_helper_frame` (hot-frame findings) gained an
+  installed-apps backstop and a larger third-party denylist, but
+  `base.is_framework_callsite` (N+1 / redundant-call / EXPLAIN findings) kept a
+  smaller, separate list and no backstop — so an N+1 inside a lib like `requests`,
+  `numpy`, `redis`, `jinja2`, or `click` was reported as an actionable *user* N+1
+  by one path while the same frame was dropped as framework plumbing by the other.
+  The two hand-maintained denylists are now **one canonical
+  `base.THIRD_PARTY_LIB_SEGMENTS`** (the union of both, matched identically on the
+  exact top path segment), and `is_framework_callsite` gained the same
+  installed-apps rescue call_tree has — ordered after the framework-app check so
+  `frappe`/`erpnext` stay framework, and a no-op off-bench. An installed app named
+  like a library (`babel`, `redis`) is still correctly treated as user code on
+  both surfaces. Also corrects now-stale comments that described substring
+  matching (the lists have matched exact top segments since 0.12.x).
+
+## [0.12.36] — 2026-08-26
+
+### Fixed
+
+- **Observation-only findings leaked into the "Fix these first" action plan with
+  a false "est. saving."** The action plan was built from the full, ungrouped
+  `all_findings` list, but `_build_action_plan` is a generic top-N-by-severity/
+  impact renderer with no finding-type guard. So an observation-only finding
+  (e.g. **Framework N+1**, which the verb map even labels "Eliminate the N+1
+  query (framework code)") could sort into the top-3 and render under "Fix these
+  first" with `est. saving` = its cumulative time — directly contradicting its
+  own TL;DR hero ("usually not something you can change") and Observations card.
+  The same list is also the *ungrouped* one, so two findings that root-cause-group
+  into a single card (an N+1 and a Slow Query at the same callsite) double-listed
+  as two separate action steps. The plan is now fed the already-split,
+  root-cause-grouped `actionable_findings`, so it shows only genuinely actionable
+  items and reconciles with the Findings section's grouping.
+
+### Tests
+
+- **Locked the `n_plus_one_min_occurrences` clamp against silent removal.** The
+  `max(2, …)` floor is what stops a misconfigured `min_occurrences ≤ 1` from
+  re-admitting the cross-request false positive ("same query ran 50×" for a
+  once-per-request query). It had no test, so deleting it stayed green; a
+  regression test now misconfigures the setting to 1 and asserts a
+  once-per-request query across 50 requests still produces no finding.
+
+## [0.12.35] — 2026-08-25
+
+### Fixed
+
+- **An installed app whose name collides with a third-party lib token was hidden
+  from hot-path findings.** `_is_pure_helper_frame` checked the hardcoded
+  `_THIRD_PARTY_LIB_SEGMENTS` set (widened in 0.12.x with common tokens like
+  `babel`, `markdown`, `click`, `redis`) *before* the installed-apps backstop, so
+  a site with an app literally named `babel`/`markdown` had its pyinstrument-
+  stripped frames dropped as plumbing. The installed-apps set is now consulted
+  first as a positive rescue — an installed app is the user's own code and always
+  wins over the heuristic lib match.
+
+## [0.12.34] — 2026-08-25
+
+### Added
+
+- **The "Document:" breadcrumb resolves a new doc's real name.** When a flow
+  creates a document, the insert request only knows Frappe's throwaway
+  `new-<doctype>-<random>` placeholder, while the later submit/cancel already
+  carry the permanent name (e.g. `SAL-ORD-2026-00042`) — so the same document
+  read inconsistently across a session. `after_request` now captures the real
+  name the save assigned (from the response) and stashes it on the recording
+  (`resolved_target_doc`); the renderer replaces the placeholder with it. Only
+  new-doc saves in an active session write it, it rides on the recording (no new
+  Redis key), and old sessions gracefully fall back to the placeholder. Note:
+  this real name shows in **both** reports — consistent with submit/cancel, which
+  already did; ask if you want document names redacted from the Safe report.
+
+## [0.12.33] — 2026-08-25
+
+### Fixed
+
+- **App-path classification edge cases from the 0.12.31 hardening (review
+  follow-up).**
+  - The installed-apps backstop no longer fails *closed*: an out-of-bench absolute
+    path (a custom script like `/home/frappe/custom/foo.py`) resolves to a
+    filesystem prefix, not an app, so firing the backstop wrongly hid real user
+    code from Slow Hot Path / hot-frame findings. It now only fires for reliable
+    shapes (relative, or absolute with an `/apps/` segment); venv libs are caught
+    by an explicit `site-packages/` check.
+  - The stripped third-party lib fragments (`lxml`, `cryptography`, `pydantic`, …)
+    are matched only at the **top-level path segment**, so a user submodule named
+    like a lib (`myapp/cryptography/…`, the pyinstrument-stripped form of a real
+    app path) is no longer misread as framework.
+  - `_skip_decorators_to_def` falls back to a direct read when the source-read
+    primitive rejects an out-of-bench path, so an app installed outside the bench
+    tree still anchors its callsite on the `def`, not the decorator.
+  - `_finding_to_dict` normalizes a non-object `technical_detail_json` (a stray
+    `null`/list) to an empty dict, so one malformed finding can't crash the render.
+
+## [0.12.32] — 2026-08-25
+
+### Fixed
+
+- **Long `/api/method/…` URLs (and paths) overflowed their table cell in the
+  report.** Fixed at the shared level instead of per-table: a single
+  `table.data td code` guard now bounds every code cell to its column and wraps
+  it at any character across *all* data tables (XHR timing, Web Vitals, orphaned
+  XHRs, DB tables, flat queries, …). The load-bearing bit is `display:
+  inline-block` — `max-width` is inert on a bare inline `<code>`, which is why the
+  bug kept recurring when patched one table at a time. The XHR-timing table also
+  gets an explicit URL-column width so it can't be squeezed to a sliver.
+
+## [0.12.31] — 2026-08-25
+
+### Fixed
+
+- **Re-rendering an old report could mislabel a user N+1 as unfixable framework
+  code.** 0.12.30 routed the TL;DR hero on `impact_scope_label`, a field absent
+  from sessions analyzed before it shipped — so a legacy user N+1 fell into the
+  framework branch on **Regenerate reports**. The hero now routes on the stable
+  `finding_type` (present on every finding), and the card backfills
+  `impact_scope_label` from it, so hero and card agree on legacy re-renders.
+- **App-path classification misread several bench layouts.** The `apps/` marker
+  is now matched only at a path boundary and on the **last** `apps/` segment, so
+  a bench installed under an `apps`-containing directory (`/opt/apps/…`) still
+  resolves the real app (core framework code is no longer flagged as user code),
+  an app whose name ends in `apps` (`webapps`) isn't dropped, and a tracked app
+  with such a name is still recognised. A third-party lib in an app-local venv
+  (`apps/<app>/.venv/…/site-packages/…`) is classified before the user-app check
+  so it stays library code, while a directory vendored under a user app and named
+  after a lib (`apps/myapp/lxml/…`) is kept as user code.
+
+### Internal
+
+- Consolidated three divergent `apps/`-segment parsers into one canonical
+  `base._app_under_apps_dir`; `_extract_app_segment` and `call_tree._frame_top_app`
+  now delegate to it. The installed-apps backstop cache is scoped to `frappe.local`
+  (per request/job) instead of the process lifetime, so a worker picks up an
+  install/uninstall on its next job.
+
+## [0.12.30] — 2026-08-24
+
+### Fixed
+
+- **Self-time "Slow Hot Path" cards showed `@frappe.whitelist()` instead of the
+  function name.** pyinstrument anchors a decorated function on its first
+  decorator line (CPython 3.11+), so the narrowed self-time snippet rendered the
+  decorator rather than the signature. The card now shows the decorator line(s)
+  *through* the `def` and moves the highlight + `file:line` onto the `def`
+  (e.g. `sales_order.py:795 · calculate_discount`). Render-only — re-run the
+  flow or use **Regenerate reports** to see it on existing sessions.
+- **Framework N+1 could hijack the TL;DR hero with actionable wording.** A Low
+  Framework N+1 (Frappe's own code, not user-fixable) could sort into the hero
+  and print "the single biggest win here", contradicting its own body. The hero
+  now routes user-vs-framework on the analyzer-declared `impact_scope_label`
+  (same field the card uses); the user-N+1 title/hero also hedge "up to N×" for
+  loops spanning several requests.
+- **Slow Hot Path findings blamed third-party libraries as user code.**
+  pyinstrument strips the `site-packages/` prefix, so `pydantic`/`click`/… looked
+  like app code and got flagged as fixable hot paths. Now only frames from the
+  site's installed apps (`frappe.get_installed_apps()`, memoised) are actionable;
+  every other package is treated as library code. Needs a **re-analyze**
+  (re-profile) to drop existing findings.
+
+### Internal
+
+- Consolidated the hand-copied source-read code into one `source._source_lines`
+  (also fixes Server Script callsites silently failing in `_read_source_window`
+  / `_skip_decorators_to_def`); removed the now-orphaned
+  `_read_function_body_snippet`.
+- `analyzers/n_plus_one.py` review cleanups: `_LoopScope` dataclass instead of
+  duplicated 14-param builders; the analyze loop bails on multi-variant callsites
+  and builds the dominant-action `Counter` once; `min_occurrences` clamped to
+  `>= 2`; `<1ms` instead of a misleading `0ms`; dead `avg_ms` / `variant_count` /
+  `all_variants` removed; shared `_p95`. Behaviour-preserving.
+
 ## [0.12.26] — 2026-05-25
 
 **Renderer extraction COMPLETE — `finding_enrichment` phase 3 is the

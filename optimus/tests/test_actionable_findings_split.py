@@ -148,6 +148,36 @@ def test_render_drops_function_not_invoked_findings():
 	assert 0 < drop_idx < split_idx, "Function Not Invoked filter must precede the actionable split"
 
 
+def test_action_plan_is_built_from_actionable_findings_only():
+	"""The "Fix these first" action plan must be built from the
+	pre-split ``actionable_findings`` list, NOT ``all_findings``.
+
+	``_build_action_plan`` is a generic top-N-by-severity/impact
+	renderer with no finding_type guard (it renders whatever it is
+	handed — see test_action_plan.py's unknown-type case). If render()
+	feeds it ``all_findings``, an observation-only finding (Framework
+	N+1, which _action_verb_for maps to "Eliminate the N+1 query
+	(framework code)") can rank into the top-3 and print under "Fix
+	these first" with an ``est. saving`` — contradicting its own
+	Observations card and TL;DR hero ("not something you can change").
+	Guard the callsite at the source level so the leak can't return."""
+	src = inspect.getsource(renderer.render)
+
+	call_idx = src.find("_build_action_plan(")
+	assert call_idx > 0, "render() must call _build_action_plan"
+	# The first argument on the line(s) following the call must be the
+	# actionable list, not the unfiltered all_findings.
+	call_window = src[call_idx:call_idx + 120]
+	assert "actionable_findings" in call_window, (
+		"_build_action_plan must be fed actionable_findings so "
+		"observation-only findings never surface in the action plan"
+	)
+	assert "_build_action_plan(\n\t\tall_findings" not in src, (
+		"_build_action_plan must NOT be fed all_findings — that leaks "
+		"observational findings into 'Fix these first'"
+	)
+
+
 def test_severity_counts_cover_all_findings():
 	"""v0.6.0: `severity_counts` (the "Issues found" stat card's sub-line)
 	must count ALL findings — actionable + observational — so the card's

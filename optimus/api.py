@@ -161,6 +161,9 @@ def start(
 	session_uuid = frappe.generate_hash(length=16)
 	now = now_datetime()
 	title = (label or "").strip() or f"Profiling session @ {now.strftime('%Y-%m-%d %H:%M:%S')}"
+	# Session name is a Data field (varchar 140) — cap here so a long label from a
+	# direct API call is cleanly trimmed instead of silently truncated by the DB.
+	title = title[:140]
 
 	# Create the DocType row in Recording state.
 	doc_fields = {

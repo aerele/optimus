@@ -120,6 +120,56 @@ def test_one_query_per_request_across_many_requests_is_not_n_plus_one(empty_cont
 	assert result.findings == []  # one-per-request × 50 ≠ a loop
 
 
+def test_misconfigured_min_occurrences_below_two_cannot_readmit_false_positive(empty_context, monkeypatch):
+	"""The ``max(2, …)`` clamp on ``n_plus_one_min_occurrences`` must hold
+	even when the setting is misconfigured to 0 or 1.
+
+	``loop_count`` (peak repeats within one request) is always ≥ 1, and the
+	within-request gate is ``loop_count < min_occurrences``. If the setting
+	reached the gate as 1, a query that runs exactly ONCE per request would
+	satisfy ``1 < 1 == False`` and be flagged — the very cross-request false
+	positive the analyzer exists to prevent (see
+	test_one_query_per_request_across_many_requests_is_not_n_plus_one). The
+	clamp floors the effective threshold at 2 so a single occurrence can never
+	qualify. This test fails the instant the clamp is dropped from line ~93."""
+	from optimus.settings import OptimusConfig
+
+	# Misconfigure the setting to 1 — the value that would defeat the gate.
+	monkeypatch.setattr(
+		"optimus.settings.get_config",
+		lambda: OptimusConfig(n_plus_one_min_occurrences=1),
+	)
+	# 50 requests, the same query run ONCE each (no within-request loop).
+	# Cumulative time (50 × 5ms = 250ms) clears the min-total-time gate, so the
+	# ONLY thing that can suppress the finding is the occurrence clamp.
+	recordings = [
+		{
+			"uuid": f"req-{i}",
+			"path": "/",
+			"cmd": None,
+			"method": "GET",
+			"event_type": "HTTP Request",
+			"duration": 20,
+			"calls": [
+				{
+					"query": "SELECT name FROM tabUser WHERE x=1",
+					"normalized_query": "SELECT NAME FROM tabUser WHERE X=?",
+					"duration": 5,
+					"stack": [
+						{"filename": "apps/myapp/module.py", "lineno": 100, "function": "f"},
+					],
+				}
+			],
+		}
+		for i in range(50)
+	]
+	result = n_plus_one.analyze(recordings, empty_context)
+	assert result.findings == [], (
+		"min_occurrences=1 must still be clamped to 2 — a once-per-request "
+		"query across many requests is not a loop and must not be flagged"
+	)
+
+
 def test_loop_within_single_request_still_detected(empty_context):
 	"""Sanity counterpart: 15 of the same query in ONE request IS an N+1."""
 	recording = {
@@ -240,8 +290,10 @@ def test_loop_across_many_requests_reports_per_request_count_not_total(empty_con
 	assert len(result.findings) == 1
 	f = result.findings[0]
 
-	# Title reports the per-request loop size, not the cross-request total.
-	assert "12×" in f["title"]
+	# Title reports the per-request loop size, not the cross-request total, and
+	# hedges with "up to" because loop_count (12) is the busiest request's peak,
+	# not a uniform per-request figure (run_count=10, so 12×10≠affected_count).
+	assert "up to 12×" in f["title"]
 	assert "120" not in f["title"]
 
 	# Count no longer drives severity to High: 12 < 50 occurrences AND
@@ -357,7 +409,9 @@ def test_run_count_ignores_requests_where_query_did_not_loop(empty_context):
 	result = n_plus_one.analyze([looping, *singles], empty_context)
 	assert len(result.findings) == 1
 	f = result.findings[0]
+	# Single looping request → loop_count is exact, so the title does NOT hedge.
 	assert "10×" in f["title"]
+	assert "up to" not in f["title"]
 	detail = json.loads(f["technical_detail_json"])
 	assert detail["loop_count"] == 10
 	assert detail["run_count"] == 1  # only the one request that looped
@@ -1096,3 +1150,27 @@ def test_trivial_loop_suppressed_when_only_noise_lifts_it_over_gate(empty_contex
 	recordings = _mixed_loop_and_singles(loop_hits=10, loop_ms=0.5, single_count=100, single_ms=5.0)
 	result = n_plus_one.analyze(recordings, empty_context)
 	assert result.findings == []  # loop_time 5ms < 20ms floor → suppressed
+
+
+def test_sub_millisecond_loop_cost_reads_less_than_1ms_not_0ms(empty_context, monkeypatch):
+	"""A sub-1ms loop must read "<1ms", not a misleading "0ms" (0.5ms rounds to "0")."""
+	from optimus.settings import OptimusConfig
+
+	# Floor the occurrence gate at 2 so a 2× loop qualifies, and drop the min-time
+	# gate below the loop's 0.5ms so the finding reaches the cost-render branch.
+	monkeypatch.setattr(
+		"optimus.settings.get_config",
+		lambda: OptimusConfig(n_plus_one_min_occurrences=2),
+	)
+	monkeypatch.setattr(n_plus_one, "_get_min_total_time", lambda: 0.0)
+	# One request, the query looped 2× at 0.25ms each → loop_time == 0.5ms exactly.
+	recordings = _mixed_loop_and_singles(loop_hits=2, loop_ms=0.25, single_count=0, single_ms=0.0)
+
+	result = n_plus_one.analyze(recordings, empty_context)
+	assert len(result.findings) == 1
+	f = result.findings[0]
+	# User code, so _build_user_finding — which carries the <1ms branch — runs.
+	assert f["finding_type"] == "N+1 Query"
+	# A regressed ">= 0.5" guard (or a dropped branch) would render "0ms" here.
+	assert "<1ms" in f["customer_description"]
+	assert "0ms" not in f["customer_description"]

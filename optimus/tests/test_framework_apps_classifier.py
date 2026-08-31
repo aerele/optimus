@@ -85,13 +85,65 @@ class TestThirdPartyLibraryDetection:
 		"env/lib/python3.14/site-packages/werkzeug/serving.py",
 		"env/lib/python3.14/site-packages/gunicorn/workers/base.py",
 		"/usr/lib/python3/dist-packages/requests/sessions.py",
-		"something/werkzeug/routing.py",
-		"something/gunicorn/app.py",
-		"something/rq/worker.py",
+		# pyinstrument-stripped short forms: the lib IS the top (app-root) segment.
+		"werkzeug/routing.py",
+		"gunicorn/app.py",
+		"rq/worker.py",
 		"pyinstrument/frame.py",
+		# out-of-bench absolute path (editable / vendored outside site-packages).
+		"/opt/pkgs/rq/worker.py",
 	])
 	def test_matches(self, path):
 		assert is_framework_callsite(path) is True
+
+	@pytest.mark.parametrize("path", [
+		# A lib name MID-PATH in a relative (recorder-stripped) path is a user
+		# submodule, not the library — recorder callsites are ``<app>/<app>/…``.
+		"something/werkzeug/routing.py",
+		"something/gunicorn/app.py",
+		"myapp/myapp/rq/worker.py",
+	])
+	def test_mid_path_lib_name_is_user_code(self, path):
+		assert is_framework_callsite(path) is False
+
+
+class TestWidenedLibraryCoverage:
+	"""The library list was widened beyond main's original 8 fragments so a
+	query looping inside a common third-party lib (pandas, redis, requests, …) is
+	routed to Observations instead of blamed on the developer as an actionable
+	N+1. Kept in sync with call_tree's hot-frames set so both surfaces agree."""
+
+	@pytest.mark.parametrize("path", [
+		"pandas/core/frame.py", "numpy/core/fromnumeric.py",
+		"redis/client.py", "requests/sessions.py", "urllib3/connectionpool.py",
+		"httpx/_client.py", "psycopg2/extensions.py", "boto3/session.py",
+		"botocore/client.py", "celery/app/task.py", "jinja2/environment.py",
+		"markupsafe/__init__.py", "bleach/sanitizer.py", "openpyxl/reader/excel.py",
+		"PIL/Image.py", "sqlparse/engine/grouping.py",
+		"cryptography/hazmat/primitives/serialization.py",
+		# also matched when pyinstrument leaves the venv prefix intact
+		"env/lib/python3.11/site-packages/pandas/core/frame.py",
+	])
+	def test_widened_libs_are_framework(self, path):
+		assert is_framework_callsite(path) is True, (
+			f"{path} is un-patchable library code — must be an Observation, not a user N+1"
+		)
+
+	def test_sql_and_hotframe_classifiers_agree_on_widened_libs(self):
+		"""base (SQL findings) and call_tree (hot frames) recognise the same libs."""
+		from optimus.analyzers.call_tree import _is_pure_helper_frame
+
+		for lib in ("pandas", "redis", "requests", "numpy", "cryptography", "sqlparse"):
+			path = f"{lib}/mod.py"
+			assert is_framework_callsite(path) is True, f"base misses {lib}"
+			node = {"function": "run", "filename": path, "kind": "python"}
+			assert _is_pure_helper_frame(node) is True, f"call_tree misses {lib}"
+
+	def test_user_app_named_near_a_lib_still_user(self):
+		"""A user app whose name merely contains a lib token (not the lib itself)
+		is still user code — the fragments carry a trailing slash."""
+		assert is_framework_callsite("apps/pandas_tools/pandas_tools/api.py") is False
+		assert is_framework_callsite("apps/my_redis_app/handlers.py") is False
 
 
 class TestUserCodeNotMatched:
@@ -216,3 +268,228 @@ class TestInclusionMode:
 		assert is_framework_callsite(
 			"apps/my_crm/foo.py", tracked_apps=tracked,
 		) is True
+
+
+class TestInclusionModeUnderAppsAncestor:
+	"""Issue C: Tracked Apps (inclusion mode) must resolve the real app even when
+	the bench is nested under a folder named 'apps' (/opt/apps/…, multi-bench
+	servers) — else a tracked app's own findings get hidden as framework."""
+
+	def test_tracked_app_matches_under_apps_ancestor(self):
+		tracked = ("erpnext",)
+		assert is_framework_callsite(
+			"/opt/apps/frappe-bench/apps/erpnext/erpnext/x.py", tracked) is False
+		assert is_framework_callsite(
+			"/opt/apps/frappe-bench/apps/myapp/myapp/x.py", tracked) is True
+
+	def test_tracked_app_name_ending_in_apps_not_misparsed(self):
+		# An app named 'webapps' is its own top segment, not the bench apps dir.
+		assert is_framework_callsite("webapps/module.py", ("webapps",)) is False
+
+
+class TestFrameworkNameMatchedOnAppRootNotMidPath:
+	"""A framework/lib name counts only as the resolved app ROOT, not a folder
+	deeper in the path — so a user app's submodule named like a framework app, the
+	standard /home/frappe/ server home, and a vendored lib under a user app all stay
+	the user's own code. Regression for the mid-path substring false-positive (which
+	main — and this branch before the fix — got wrong)."""
+
+	@pytest.mark.parametrize("path", [
+		"mybiz/mybiz/crm/lead_utils.py",       # submodule named like a framework app
+		"acme/acme/payments/util.py",
+		"/home/frappe/custom_scripts/foo.py",  # the standard Frappe server home dir
+		"/home/erpnext/scripts/x.py",
+		"apps/myapp/myapp/werkzeug/util.py",   # vendored lib under a user app
+		"apps/acme/acme/requests/client.py",
+		# recorder-stripped user modules named like a common library (the exact
+		# shape frappe's recorder produces — apps/ stripped) must stay actionable.
+		"myapp/myapp/requests/api.py",
+		"myapp/myapp/redis/cache.py",
+		"billing/billing/celery/jobs.py",
+		"myapp/myapp/pandas/report.py",
+	])
+	def test_mid_path_framework_or_lib_name_is_user_code(self, path):
+		assert is_framework_callsite(path) is False, (
+			f"{path} — the framework/lib name is only mid-path, not the app root"
+		)
+
+	@pytest.mark.parametrize("path", [
+		"frappe/model/document.py",                # framework at the root
+		"apps/erpnext/erpnext/x.py",
+		"/home/frappe/bench/apps/hrms/hrms/x.py",  # absolute, real framework root
+		"werkzeug/routing.py",                     # lib at the root (top segment)
+		"/opt/pkgs/rq/worker.py",                  # out-of-bench absolute lib
+	])
+	def test_real_framework_or_lib_still_matches(self, path):
+		assert is_framework_callsite(path) is True, f"{path} is framework/lib code"
+
+
+class TestSitePackagesGuardInBothModes:
+	"""A venv library is un-patchable framework code in BOTH default and Tracked
+	Apps mode — a lib vendored under a tracked app's own .venv must not be reported
+	as an actionable user finding just because its top segment is the tracked app."""
+
+	@pytest.mark.parametrize("path", [
+		"apps/myapp/.venv/lib/python3.11/site-packages/pandas/core/frame.py",
+		"myapp/.venv/lib/python3.11/site-packages/redis/client.py",  # recorder-stripped
+	])
+	def test_site_packages_lib_is_framework_even_under_tracked_apps(self, path):
+		assert is_framework_callsite(path, ("myapp",)) is True
+		assert is_framework_callsite(path) is True  # and in default mode
+
+	def test_tracked_app_own_code_still_actionable(self):
+		assert is_framework_callsite("myapp/myapp/api.py", ("myapp",)) is False
+
+
+class TestUserAppWithAppsSubpackage:
+	"""A user app that itself contains a subpackage literally named 'apps'
+	(``myapp/apps/foo.py``) must resolve to the real app 'myapp', not the segment
+	after the mid-path 'apps' — a relative mid-path '/apps/' is a user subpackage,
+	not the bench apps dir (the recorder strips the bench prefix)."""
+
+	def test_apps_subpackage_resolves_to_real_app_in_inclusion_mode(self):
+		# 'myapp' is tracked → its own code (even under an 'apps' subpackage) is user.
+		assert is_framework_callsite("myapp/apps/foo.py", ("myapp",)) is False
+		# a NON-tracked app with an apps subpackage is still hidden.
+		assert is_framework_callsite("other/apps/foo.py", ("myapp",)) is True
+
+	def test_donut_buckets_apps_subpackage_under_real_app(self):
+		from optimus.analyzers.call_tree import _top_level_app
+		assert _top_level_app("f", "myapp/apps/foo.py") == "myapp"
+		assert _top_level_app("f", "shop/apps/models/order.py") == "shop"
+
+
+class TestThirdPartyLibSetsUnified:
+	"""The SQL-findings classifier (base._THIRD_PARTY_LIB_NAMES) and the hot-frame
+	classifier (call_tree._THIRD_PARTY_LIB_SEGMENTS) must be the SAME app-root set,
+	so the two surfaces can never disagree on whether a library is user code. They
+	drifted apart once (call_tree was missing 6 names); this pins them together."""
+
+	def test_call_tree_reuses_base_lib_set(self):
+		from optimus.analyzers import base, call_tree
+		assert call_tree._THIRD_PARTY_LIB_SEGMENTS is base._THIRD_PARTY_LIB_NAMES
+
+
+class TestInstalledAppsAllowlist:
+	"""Exclusion mode with the ground-truth installed-apps allowlist (what a real
+	site passes). This is the fix that ends the denylist churn: application-vs-
+	library is decided by 'is it an installed Frappe app', not by guessing from a
+	name. Off-bench (installed_apps=None) the hardcoded heuristic still applies —
+	the rest of this file exercises that path."""
+
+	INSTALLED = frozenset({"frappe", "erpnext", "myapp", "redis", "requests"})
+
+	def test_installed_app_named_like_a_library_is_user_code(self):
+		# The whole point: an app literally named `redis`/`requests` that IS
+		# installed is the developer's code — the denylist wrongly hid it.
+		assert is_framework_callsite("redis/redis/api.py", installed_apps=self.INSTALLED) is False
+		assert is_framework_callsite("requests/requests/foo.py", installed_apps=self.INSTALLED) is False
+
+	def test_real_library_not_installed_is_framework(self):
+		# A genuine third-party lib that is NOT an installed app → non-actionable,
+		# WITHOUT needing it in any hardcoded denylist.
+		assert is_framework_callsite("pandas/core/frame.py", installed_apps=self.INSTALLED) is True
+		assert is_framework_callsite("numpy/core/x.py", installed_apps=self.INSTALLED) is True
+
+	def test_installed_user_app_is_actionable(self):
+		assert is_framework_callsite("myapp/myapp/api.py", installed_apps=self.INSTALLED) is False
+
+	def test_framework_app_stays_framework_even_though_installed(self):
+		# FRAMEWORK_APPS is checked before the allowlist, so frappe/erpnext are
+		# never actionable even though they're installed apps.
+		assert is_framework_callsite("frappe/model/document.py", installed_apps=self.INSTALLED) is True
+		assert is_framework_callsite("erpnext/accounts/x.py", installed_apps=self.INSTALLED) is True
+
+	def test_out_of_bench_path_is_framework(self):
+		# An out-of-bench absolute path resolves to a non-installed app root → lib.
+		assert is_framework_callsite("/opt/pkgs/rq/queue.py", installed_apps=self.INSTALLED) is True
+
+	def test_server_script_is_user_code_under_allowlist(self):
+		# The synthetic <serverscript> filename has no app root; the carve-out must
+		# keep it actionable, NOT let the allowlist demote it to framework.
+		assert is_framework_callsite("<serverscript>", installed_apps=self.INSTALLED) is False
+		assert is_framework_callsite("<serverscript>: my_hook", installed_apps=self.INSTALLED) is False
+
+	def test_site_packages_is_framework_even_under_allowlist(self):
+		p = "env/lib/python3.12/site-packages/redis/client.py"
+		assert is_framework_callsite(p, installed_apps=self.INSTALLED) is True
+
+	def test_off_bench_none_falls_back_to_heuristic(self):
+		# installed_apps=None → the hardcoded denylist path (unchanged behavior).
+		# This is EXACTLY the false-positive the allowlist fixes: off-bench, an app
+		# named `redis` is indistinguishable from the library, so the denylist hides
+		# it as framework. On-bench (installed_apps set) it is correctly user code —
+		# see test_installed_app_named_like_a_library_is_user_code above.
+		assert is_framework_callsite("redis/redis/api.py", installed_apps=None) is True
+		assert is_framework_callsite("pandas/core/frame.py", installed_apps=None) is True
+		# A user app NOT named like any bundled lib is still user code off-bench.
+		assert is_framework_callsite("myapp/myapp/api.py", installed_apps=None) is False
+
+	def test_allowlist_resolver_none_off_bench(self):
+		# On this off-bench unit-test host frappe.get_installed_apps isn't callable
+		# in the analyzer context, so the resolver returns None → heuristic fallback.
+		from optimus.analyzers.base import installed_apps_allowlist
+		result = installed_apps_allowlist()
+		assert result is None or isinstance(result, frozenset)
+
+
+class TestPureHelperFrameAllowlistOnBench:
+	"""_is_pure_helper_frame (hot-frame leaderboard + Slow Hot Path walker) with a
+	populated installed-apps set — the ON-BENCH path the pure-Python suite otherwise
+	never hits (every other test passes installed_apps=None). Regression guard for
+	the drop-user-frames bug: the allowlist must key on the RESOLVED app root, not
+	the raw first path segment ('apps'/'home'), and must not fire in inclusion mode."""
+
+	INSTALLED = frozenset({"frappe", "erpnext", "myapp", "redis"})
+
+	def _node(self, filename):
+		return {"kind": "python", "function": "my_slow_fn", "filename": filename}
+
+	def test_apps_prefixed_user_frame_is_kept(self):
+		# The regression: first_segment='apps' → wrongly dropped. Must be KEPT.
+		from optimus.analyzers.call_tree import _is_pure_helper_frame
+		node = self._node("apps/myapp/myapp/api.py")
+		assert _is_pure_helper_frame(node, None, self.INSTALLED) is False
+
+	def test_absolute_user_frame_is_kept(self):
+		# first_segment='home' → wrongly dropped. Must be KEPT.
+		from optimus.analyzers.call_tree import _is_pure_helper_frame
+		node = self._node("/home/frappe/frappe-bench/apps/myapp/myapp/api.py")
+		assert _is_pure_helper_frame(node, None, self.INSTALLED) is False
+
+	def test_relative_user_frame_is_kept(self):
+		from optimus.analyzers.call_tree import _is_pure_helper_frame
+		assert _is_pure_helper_frame(self._node("myapp/myapp/api.py"), None, self.INSTALLED) is False
+
+	def test_installed_app_named_like_lib_is_kept(self):
+		from optimus.analyzers.call_tree import _is_pure_helper_frame
+		assert _is_pure_helper_frame(self._node("redis/redis/api.py"), None, self.INSTALLED) is False
+
+	def test_real_library_not_installed_is_dropped(self):
+		from optimus.analyzers.call_tree import _is_pure_helper_frame
+		assert _is_pure_helper_frame(self._node("pandas/core/frame.py"), None, self.INSTALLED) is True
+
+	def test_inclusion_mode_tracked_app_not_installed_is_kept(self):
+		# Tracked Apps is free-text: a tracked app need not be installed. Inclusion
+		# mode keeps it; the allowlist must NOT re-drop it (bug #2).
+		from optimus.analyzers.call_tree import _is_pure_helper_frame
+		node = self._node("myapp/myapp/api.py")
+		assert _is_pure_helper_frame(node, ("myapp",), frozenset({"frappe", "erpnext"})) is False
+
+	def test_empty_installed_set_falls_back_to_heuristic(self):
+		# Empty frozenset must not classify EVERY frame as plumbing (bug #8): it
+		# falls back to the hardcoded lib set, like base.py's truthy guard.
+		from optimus.analyzers.call_tree import _is_pure_helper_frame
+		assert _is_pure_helper_frame(self._node("MySQLdb/cursors.py"), None, frozenset()) is True
+		assert _is_pure_helper_frame(self._node("myapp/myapp/api.py"), None, frozenset()) is False
+
+	def test_lock_step_with_sql_classifier_for_user_and_lib(self):
+		# The whole point of threading installed_apps here: the leaderboard and the
+		# SQL classifier agree for user apps and libraries.
+		from optimus.analyzers.base import is_framework_callsite
+		from optimus.analyzers.call_tree import _is_pure_helper_frame
+		for path in ("apps/myapp/myapp/api.py", "myapp/myapp/api.py", "redis/redis/api.py",
+		             "pandas/core/frame.py"):
+			sql = is_framework_callsite(path, None, self.INSTALLED)
+			hot = _is_pure_helper_frame(self._node(path), None, self.INSTALLED)
+			assert sql == hot, f"disagreement on {path}: sql={sql} hot={hot}"
