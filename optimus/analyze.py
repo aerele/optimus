@@ -846,6 +846,10 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 			infra_blob = frappe.cache.get_value(_redis_keys.infra(rec_uuid))
 			if infra_blob:
 				rec["infra"] = infra_blob
+			# Merge the resolved target-doc sidecar so the renderer can swap a "new-…" placeholder for the real doc name.
+			resolved_doc = frappe.cache.get_value(_redis_keys.resolved_doc(rec_uuid))
+			if resolved_doc:
+				rec["resolved_target_doc"] = resolved_doc
 
 		_publish_progress(50, "Running analyzers", session_uuid)
 		analyzers = _get_analyzers()
@@ -3120,6 +3124,10 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 			infra_blob = frappe.cache.get_value(_redis_keys.infra(uuid))
 			if isinstance(infra_blob, dict):
 				entry["infra"] = infra_blob
+			# Carry the resolved target-doc onto the snapshotted rec so a regenerated report still shows the real doc name.
+			resolved_doc = frappe.cache.get_value(_redis_keys.resolved_doc(uuid))
+			if isinstance(resolved_doc, dict):
+				rec["resolved_target_doc"] = resolved_doc
 			recordings[uuid] = entry
 
 		if not recordings:
@@ -3199,5 +3207,9 @@ def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:
 			pass
 		try:
 			frappe.cache.delete_value(_redis_keys.sidecar(uuid))
+		except Exception:
+			pass
+		try:
+			frappe.cache.delete_value(_redis_keys.resolved_doc(uuid))
 		except Exception:
 			pass

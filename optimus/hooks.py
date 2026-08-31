@@ -91,8 +91,7 @@ boot_session = "optimus.boot.boot_session"
 # (and is a no-op without the global flag). Our hook then decides per-user
 # whether to force-activate the recorder for this request.
 #
-# `after_request` runs after frappe.recorder.dump(), so the recording is
-# already in Redis by the time we register its UUID with our session.
+# For HTTP, after_request runs in application()'s finally BEFORE frappe.recorder.dump() (WSGI ClosingIterator), so the recorder hash isn't written yet — data to attach must ride an Optimus sidecar key merged at analyze time, never an RMW of the recorder hash (jobs reverse the order: dump before after_job).
 
 before_request = [
 	"optimus.hooks_callbacks.before_request",

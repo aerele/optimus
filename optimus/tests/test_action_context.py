@@ -274,3 +274,37 @@ class TestAttachActionContext:
 	def test_noop_safe_on_empty_or_none(self):
 		renderer._attach_action_context([], [], {})
 		renderer._attach_action_context(None, None, None)
+
+
+class TestResolvedDocSidecarWiring:
+	"""v0.12.39 regression guards: the resolved-doc write must ride the Optimus sidecar (never the recorder-hash RMW, dead for HTTP) and analyze must merge + clean it up."""
+
+	def test_after_request_writes_resolved_doc_to_sidecar(self):
+		import inspect
+
+		from optimus import hooks_callbacks
+
+		src = inspect.getsource(hooks_callbacks.after_request)
+		assert "redis_keys.resolved_doc(" in src
+
+	def test_after_request_does_not_rmw_recorder_hash_for_resolved_doc(self):
+		import inspect
+
+		from optimus import hooks_callbacks
+
+		src = inspect.getsource(hooks_callbacks.after_request)
+		# The RMW imported the recorder hash and wrote it back with hset() — neither may reappear.
+		assert "from frappe.recorder import RECORDER_REQUEST_HASH" not in src
+		assert "hset(" not in src
+
+	def test_analyze_merges_and_cleans_resolved_doc_sidecar(self):
+		import inspect
+
+		from optimus import analyze
+
+		run_src = inspect.getsource(analyze.run)
+		persist_src = inspect.getsource(analyze._persist_recordings_file)
+		cleanup_src = inspect.getsource(analyze._cleanup_redis)
+		assert "resolved_doc(" in run_src
+		assert "resolved_doc(" in persist_src
+		assert "resolved_doc(" in cleanup_src

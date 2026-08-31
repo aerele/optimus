@@ -8,6 +8,30 @@ versions may contain breaking changes — see migration notes below).
 
 ---
 
+## [0.12.39] — 2026-08-31
+
+### Fixed
+
+- **New-doc name resolution was dead for HTTP/Desk saves.** The feature that shows
+  a doc's real save-assigned name (instead of the browser's `new-…` placeholder)
+  did a read-modify-write of frappe's own `RECORDER_REQUEST_HASH` in
+  `after_request` — but for HTTP, `after_request` runs in `application()`'s
+  `finally` **before** `frappe.recorder.dump()` (which runs later in the WSGI
+  `ClosingIterator`, after the response), so the recorder hash wasn't written yet:
+  the `hget` returned `None` and the resolved name was silently dropped (the
+  `isinstance` guard hid it, and the tests inject the field directly so CI stayed
+  green). A stale code comment even asserted the opposite ordering. Rewrote it to
+  write the resolved `{doctype, name}` to an **Optimus-owned sidecar key**
+  (`redis_keys.resolved_doc`, mirroring the `infra` sidecar) and **merge it at
+  analyze time** — which removes the ordering dependency entirely and takes the
+  read-modify-write off the request hot path. Corrected the `hooks.py` ordering
+  comment. Added source-inspection regression guards
+  (`TestResolvedDocSidecarWiring`) that close the coverage gap that let this ship
+  green: the write must ride the sidecar and never re-introduce the recorder-hash
+  `hset`, and analyze must merge + clean it up.
+
+---
+
 ## [0.12.38] — 2026-08-28
 
 ### Added

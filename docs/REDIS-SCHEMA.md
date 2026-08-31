@@ -63,6 +63,7 @@ when you add a new key; the audit test asserts this table matches
 | `profiler:tree:<recording_uuid>` | bytes | **HMAC-signed pickle** | `SESSION_TTL_SECONDS` | 32-byte HMAC-SHA256 prefix + pickled pyinstrument `Profiler.last_session`. See § 6 "HMAC envelope". |
 | `profiler:sidecar:<recording_uuid>` | list[dict] | Frappe pickle | `SESSION_TTL_SECONDS` | Argument-log entries; optional `{"_truncated": True}` tail marker. |
 | `profiler:infra:<recording_uuid>` | dict | Frappe pickle | `SESSION_TTL_SECONDS` | CPU / RAM / DB / RQ delta. |
+| `profiler:resolved_doc:<recording_uuid>` | dict | Frappe pickle | `SESSION_TTL_SECONDS` | A created doc's save-assigned `{doctype, name}`, written by `after_request` and merged onto the recording as `resolved_target_doc` at analyze time. |
 
 ### 2.3 Frontend metrics (v0.5.0+ split lists)
 
