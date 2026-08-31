@@ -357,3 +357,14 @@ class TestUserAppWithAppsSubpackage:
 		from optimus.analyzers.call_tree import _top_level_app
 		assert _top_level_app("f", "myapp/apps/foo.py") == "myapp"
 		assert _top_level_app("f", "shop/apps/models/order.py") == "shop"
+
+
+class TestThirdPartyLibSetsUnified:
+	"""The SQL-findings classifier (base._THIRD_PARTY_LIB_NAMES) and the hot-frame
+	classifier (call_tree._THIRD_PARTY_LIB_SEGMENTS) must be the SAME app-root set,
+	so the two surfaces can never disagree on whether a library is user code. They
+	drifted apart once (call_tree was missing 6 names); this pins them together."""
+
+	def test_call_tree_reuses_base_lib_set(self):
+		from optimus.analyzers import base, call_tree
+		assert call_tree._THIRD_PARTY_LIB_SEGMENTS is base._THIRD_PARTY_LIB_NAMES

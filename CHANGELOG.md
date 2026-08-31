@@ -8,6 +8,22 @@ versions may contain breaking changes — see migration notes below).
 
 ---
 
+## [0.12.40] — 2026-08-31
+
+### Changed
+
+- **The SQL and hot-frame classifiers now share one third-party library list.**
+  `call_tree._THIRD_PARTY_LIB_SEGMENTS` had drifted to a subset of
+  `base._THIRD_PARTY_LIB_NAMES` (missing `rq`, `werkzeug`, `gunicorn`, `pytz`,
+  `dateutil`, `pyinstrument`) even though a comment claimed they mirrored — a
+  maintenance hazard that already bit once. Pointed `call_tree` at
+  `base._THIRD_PARTY_LIB_NAMES` directly so the two surfaces can never disagree on
+  whether a library is user code. Behavior-neutral: the six names were already
+  filtered from the hot-frame leaderboard via `_PURE_HELPER_PATH_SUBSTRINGS`, so
+  this only removes the drift risk. Added a guard test that pins the two together.
+
+---
+
 ## [0.12.39] — 2026-08-31
 
 ### Fixed

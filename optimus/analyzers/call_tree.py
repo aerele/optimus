@@ -29,6 +29,7 @@ import json
 from collections import defaultdict
 
 from optimus.analyzers.base import (
+	_THIRD_PARTY_LIB_NAMES,
 	SEVERITY_ORDER,
 	AnalyzerResult,
 	_last_app_segment,
@@ -412,18 +413,8 @@ _PURE_HELPER_FUNCTION_NAMES = frozenset({
 # them. Already filtered by the donut's _top_level_app but wasn't
 # filtered here, so they leaked into the Repeated Hot Frame
 # leaderboard.
-# Matched on the FIRST segment (app root), like base._THIRD_PARTY_LIB_NAMES, so the
-# SQL-findings and hot-frames classifiers agree on the common libraries. (werkzeug/
-# gunicorn/rq/pytz/dateutil/pyinstrument are matched via _PURE_HELPER_PATH_SUBSTRINGS
-# below — a residual mid-path substring the two surfaces can still differ on for a
-# user submodule named exactly like one of those; rare, tracked as a follow-up.)
-_THIRD_PARTY_LIB_SEGMENTS = frozenset({
-	"MySQLdb", "pymysql", "psycopg2", "requests", "urllib3",
-	"httpx", "boto3", "botocore", "redis", "celery",
-	"jinja2", "markupsafe", "bleach", "nh3",
-	"pandas", "numpy", "openpyxl", "PIL",
-	"sqlparse", "cryptography",
-})
+# Matched on the FIRST segment (app root). Reuses base._THIRD_PARTY_LIB_NAMES as the single source of truth so the SQL-findings and hot-frames classifiers can never drift apart; a few libs that appear mid-path rather than as an app root (werkzeug/gunicorn/rq/pytz/dateutil/pyinstrument) are also caught by _PURE_HELPER_PATH_SUBSTRINGS below.
+_THIRD_PARTY_LIB_SEGMENTS = _THIRD_PARTY_LIB_NAMES
 
 
 def _is_pure_helper_frame(node: dict, tracked_apps: tuple[str, ...] | None = None) -> bool:
