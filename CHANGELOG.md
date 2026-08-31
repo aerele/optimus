@@ -8,6 +8,55 @@ versions may contain breaking changes — see migration notes below).
 
 ---
 
+## [0.12.41] — 2026-08-31
+
+### Fixed
+
+- **Exclusion-mode classification now uses the installed-apps allowlist as ground
+  truth instead of guessing from a name.** For six review rounds the
+  application-vs-library decision swung between an installed-apps *backstop* and a
+  pure hardcoded *denylist*, and each denylist tweak just relocated the bug: an app
+  literally named like a bundled library (`redis`, `requests`, `pandas`) was hidden
+  as framework; an out-of-bench checkout or a library not on the list was
+  misclassified; and the PR's own promise ("only installed apps are treated as
+  application code") wasn't actually implemented. Rewrote `is_framework_callsite`'s
+  exclusion mode to consult `frappe.get_installed_apps()` (resolved ONCE per
+  analyze via `base.installed_apps_allowlist()` and threaded into every classifying
+  analyzer — n_plus_one, redundant_calls, explain_flags, top_queries — and into
+  call_tree's hot-frame leaderboard): a callsite whose app root is an installed
+  Frappe app (and not a framework/stock app) is the developer's code; everything
+  else the developer can't patch. This makes an installed app named `redis`
+  actionable, a real `redis` library non-actionable, and an *unknown* library
+  correctly non-actionable with no denylist to maintain. Framework apps
+  (`frappe`/`erpnext`/…) are still checked first, and Server Scripts stay
+  actionable via an explicit carve-out (so the allowlist can't demote them —
+  the regression that started this). Off-bench (frappe unavailable, e.g. the
+  pure-Python unit suite) it falls back to the previous hardcoded heuristic, so
+  existing tests are unchanged. Verified on `dev.local`. **The hot-frame side keys
+  the allowlist on the RESOLVED app root** (`_last_app_segment`, the same
+  resolution the SQL side and the donut use) — not the raw first path segment,
+  which would read `apps`/`home` for an `apps/`-prefixed or absolute path and
+  silently drop the user's own frames from the leaderboard / Slow Hot Path — and
+  only fires in exclusion mode (a free-text tracked app that isn't installed is
+  kept), with a truthy guard so an empty set falls back to the heuristic. Regression
+  tests exercise the on-bench (`installed_apps` populated) path the pure-Python
+  suite otherwise never hits.
+
+- **New-doc name resolution now handles integer (autoincrement) docnames.**
+  `_saved_doc_from_response` required `isinstance(name, str)`, so a doc using
+  Frappe's autoincrement naming (an integer `name` in the response) silently kept
+  its `new-…` placeholder. Now accepts a `str` or an `int` (not `bool`, not a
+  non-scalar) so a malformed response can't stamp a garbage docname.
+
+- **Fixed a broken editor link when a Slow Hot Path drilldown retargets onto a
+  Server Script parent.** Now that a Server Script body is readable, the drilldown
+  can anchor a finding on a `<serverscript>` parent frame; that anchor is now tagged
+  as a Desk link (`_link_kind="desk"` + `desk_url`) like every other Server Script
+  callsite, instead of emitting a `vscode://file` link built from the wrapper's real
+  path.
+
+---
+
 ## [0.12.40] — 2026-08-31
 
 ### Changed
@@ -52,6 +101,12 @@ versions may contain breaking changes — see migration notes below).
 
 ### Added
 
+- **Document-header masthead + aerele branding on the Raw Report.** The report now
+  opens with a document-style masthead (brand column + contact links) and the
+  Optimus sidebar/report logo is the aerele logo (`app_logo_url`, a new bundled
+  `aerele_logo.png`, embedded in the template as an inline base64 data URI so the
+  report stays fully self-contained). Purely presentational.
+
 - **Tracked Apps now scopes the call_tree findings, not just the SQL findings.**
   When *Optimus Settings ▸ Tracked Apps* is set, the inclusion-mode classifier
   already restricted the N+1 / redundant-call / EXPLAIN / top-query findings to
@@ -74,13 +129,12 @@ versions may contain breaking changes — see migration notes below).
 ### Changed
 
 - **Session name capped explicitly at 140 characters.** The session name (the
-  `title` shown in the report header and list view) is a `Data` field, which the
-  DB caps at 140 chars — but the limit was implicit and nothing stopped a longer
-  name being typed and then silently truncated on save. Made it explicit and
-  enforced end-to-end: `length: 140` on the DocType field and on the Start-dialog
-  "Session label" input (so typing stops at 140), plus a defensive `title[:140]`
-  in `api.start` for direct API callers. Requires `bench migrate` to apply the
-  field-length change.
+  `title` shown in the report header and list view) is a `Data` field. Frappe
+  already caps a `Data` column and its form control at 140 by default, so the new
+  enforcement that actually matters is a defensive `title[:140]` in `api.start` for
+  **direct API callers** (which bypass the form control). The explicit `length: 140`
+  on the DocType field and the Start-dialog input make the limit self-documenting
+  and belt-and-suspenders; they don't change the effective DB/typing limit.
 
 - **Reverted the report masthead's top-right document name.** The header's
   top-right corner showed the touched document (doctype as the heading + document

@@ -33,6 +33,7 @@ from optimus.analyzers.base import (
 	SEVERITY_ORDER,
 	AnalyzerResult,
 	_last_app_segment,
+	installed_apps_allowlist,
 	is_framework_callsite,
 	short_filename,
 )
@@ -417,7 +418,11 @@ _PURE_HELPER_FUNCTION_NAMES = frozenset({
 _THIRD_PARTY_LIB_SEGMENTS = _THIRD_PARTY_LIB_NAMES
 
 
-def _is_pure_helper_frame(node: dict, tracked_apps: tuple[str, ...] | None = None) -> bool:
+def _is_pure_helper_frame(
+	node: dict,
+	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
+) -> bool:
 	"""Narrower than ``_is_framework_frame``. Returns True only for pure
 	plumbing helpers that users can't optimize. Keeps most of frappe/*
 	so hot-frame findings remain useful when application-layer Frappe
@@ -470,7 +475,7 @@ def _is_pure_helper_frame(node: dict, tracked_apps: tuple[str, ...] | None = Non
 	# to profile in Optimus Settings, a frame OUTSIDE those apps is out of scope,
 	# so treat it as plumbing (skip it) — the same decision the SQL classifier
 	# makes via is_framework_callsite's inclusion mode. Off (empty) → no-op.
-	if tracked_apps and is_framework_callsite(filename, tracked_apps):
+	if tracked_apps and is_framework_callsite(filename, tracked_apps, installed_apps):
 		return True
 
 	# Specific files by suffix (works on absolute and relative paths).
@@ -499,18 +504,34 @@ def _is_pure_helper_frame(node: dict, tracked_apps: tuple[str, ...] | None = Non
 		# a Frappe app.
 		return True
 
-	# v0.5.2: third-party libraries by first-segment. pyinstrument
-	# sometimes strips the site-packages/ prefix so MySQLdb/cursors.py
-	# arrives without any directory context. Catch by name against
-	# a frozen set of common libs used in Frappe benches.
 	first_segment = stripped.split("/", 1)[0]
+	# Exclusion mode + on-bench: ground-truth allowlist, keyed on the RESOLVED app
+	# root — the boundary-anchored ``apps/<app>/`` segment (or, for an absolute
+	# path, the last-``apps/``-wins one), exactly as base.is_framework_callsite and
+	# _top_level_app resolve it. Keying on the raw first segment would read "apps"
+	# for an apps/-prefixed path and "home"/"opt" for an absolute one — neither an
+	# installed app — and wrongly drop the user's own frames, diverging from the SQL
+	# classifier this change exists to match. Inclusion mode was already decided
+	# above (line 473); the allowlist must not re-filter a tracked app that isn't
+	# among the site's installed apps. Truthy check (not ``is not None``) so an
+	# empty set falls back to the heuristic, matching base.py.
+	if not tracked_apps and installed_apps:
+		app_root = _last_app_segment(filename) or first_segment
+		return app_root not in installed_apps
+	# Off-bench fallback: hardcoded lib set on the first segment (pyinstrument
+	# sometimes strips the site-packages/ prefix so MySQLdb/cursors.py arrives with
+	# no directory context).
 	if first_segment in _THIRD_PARTY_LIB_SEGMENTS:
 		return True
 
 	return False
 
 
-def _is_walker_plumbing_frame(node: dict, tracked_apps: tuple[str, ...] | None = None) -> bool:
+def _is_walker_plumbing_frame(
+	node: dict,
+	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
+) -> bool:
 	"""Walker-specific plumbing predicate. ``True`` when ``_walk_for_findings``
 	should descend past this node without emitting a finding on it.
 
@@ -536,7 +557,7 @@ def _is_walker_plumbing_frame(node: dict, tracked_apps: tuple[str, ...] | None =
 	# ``<serverscript-N>`` form is covered too.
 	if filename.startswith("<serverscript") or filename.startswith("<server-script"):
 		return False
-	return _is_pure_helper_frame(node, tracked_apps)
+	return _is_pure_helper_frame(node, tracked_apps, installed_apps)
 
 
 def _frames_match(node: dict, frame: dict) -> bool:
@@ -877,7 +898,10 @@ def _display_name_for_node(node: dict) -> str:
 
 
 def _first_user_code_descendant(
-	node: dict, threshold_ms: float, tracked_apps: tuple[str, ...] | None = None
+	node: dict,
+	threshold_ms: float,
+	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
 ) -> dict | None:
 	"""Deepest non-plumbing descendant with cumulative ≥ threshold, or None.
 
@@ -897,14 +921,14 @@ def _first_user_code_descendant(
 		and fn
 		and fn != "<root>"
 		and not fn.startswith("[")
-		and not _is_walker_plumbing_frame(node, tracked_apps)
+		and not _is_walker_plumbing_frame(node, tracked_apps, installed_apps)
 		and (node.get("cumulative_ms") or 0) >= threshold_ms
 	):
 		candidate = node
 	for c in node.get("children", []) or []:
 		if c.get("kind") != "python":
 			continue
-		deeper = _first_user_code_descendant(c, threshold_ms, tracked_apps)
+		deeper = _first_user_code_descendant(c, threshold_ms, tracked_apps, installed_apps)
 		if deeper is not None:
 			candidate = deeper
 	return candidate
@@ -916,6 +940,7 @@ def _emit_per_action_findings(
 	action_label: str,
 	action_wall_time_ms: float,
 	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
 ) -> list:
 	"""Walk the tree and emit Slow Hot Path / Hook Bottleneck findings.
 
@@ -940,6 +965,7 @@ def _emit_per_action_findings(
 		action_wall_time_ms=action_wall_time_ms,
 		findings=findings,
 		tracked_apps=tracked_apps,
+		installed_apps=installed_apps,
 	)
 
 	# v0.7.x: BG-job fallback. When the walker emits nothing for a slow
@@ -950,7 +976,7 @@ def _emit_per_action_findings(
 	if not findings and action_label.startswith("RQ Job: "):
 		med_pct, med_ms, _hi_pct, _hi_ms = _resolve_hot_path_thresholds()
 		if action_wall_time_ms >= med_ms:
-			deepest = _first_user_code_descendant(tree, med_ms, tracked_apps)
+			deepest = _first_user_code_descendant(tree, med_ms, tracked_apps, installed_apps)
 			if deepest is not None:
 				short_label = action_label[len("RQ Job: "):]
 				fn_name = _display_name_for_node(deepest)
@@ -1000,6 +1026,7 @@ def _walk_for_findings(
 	action_wall_time_ms: float,
 	findings: list,
 	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
 ) -> None:
 	cumulative = node.get("cumulative_ms", 0)
 	# v0.7.x A.CR1: clamp pct at the gating + severity site too. The
@@ -1035,7 +1062,7 @@ def _walk_for_findings(
 		# names. _is_walker_plumbing_frame is the union with a
 		# Server-Script carve-out (those have synthetic filenames but
 		# are user code).
-		and not _is_walker_plumbing_frame(node, tracked_apps)
+		and not _is_walker_plumbing_frame(node, tracked_apps, installed_apps)
 	)
 
 	if qualifies:
@@ -1205,7 +1232,7 @@ def _walk_for_findings(
 			continue
 		_walk_for_findings(
 			child, new_chain, action_idx, action_label, action_wall_time_ms, findings,
-			tracked_apps,
+			tracked_apps, installed_apps,
 		)
 
 
@@ -1253,7 +1280,11 @@ def _redacted_module_key(function: str, filename: str = "") -> str | None:
 	return function
 
 
-def _aggregate_hot_frames(per_action_trees: list, tracked_apps: tuple[str, ...] | None = None):
+def _aggregate_hot_frames(
+	per_action_trees: list,
+	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
+):
 	"""Build the cross-action hot frames map → (findings, leaderboard).
 
 	Returns:
@@ -1265,7 +1296,7 @@ def _aggregate_hot_frames(per_action_trees: list, tracked_apps: tuple[str, ...] 
 	occurrences: dict = defaultdict(list)
 
 	for action_idx, tree in enumerate(per_action_trees):
-		_walk_for_aggregation(tree, action_idx, occurrences, tracked_apps)
+		_walk_for_aggregation(tree, action_idx, occurrences, tracked_apps, installed_apps)
 		# Cap intermediate map size to bound memory.
 		if len(occurrences) > HOT_FRAMES_INTERMEDIATE_CAP * 2:
 			by_total = sorted(
@@ -1335,6 +1366,7 @@ def _aggregate_hot_frames(per_action_trees: list, tracked_apps: tuple[str, ...] 
 def _walk_for_aggregation(
 	node: dict, action_idx: int, occurrences: dict,
 	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
 ) -> None:
 	if node.get("kind") == "python":
 		# v0.5.1: skip PURE HELPER frames only, not all framework code.
@@ -1350,7 +1382,7 @@ def _walk_for_aggregation(
 		# here, which hid ALL frappe/* frames — that was too aggressive
 		# and blinded the analyzer to real application-layer bottlenecks
 		# inside Frappe that users could act on.
-		if not _is_pure_helper_frame(node, tracked_apps):
+		if not _is_pure_helper_frame(node, tracked_apps, installed_apps):
 			key = _redacted_module_key(
 				node.get("function", ""),
 				node.get("filename", ""),
@@ -1375,7 +1407,7 @@ def _walk_for_aggregation(
 					(action_idx, node.get("self_ms", 0), node.get("cumulative_ms", 0))
 				)
 	for child in node.get("children", []):
-		_walk_for_aggregation(child, action_idx, occurrences, tracked_apps)
+		_walk_for_aggregation(child, action_idx, occurrences, tracked_apps, installed_apps)
 
 
 # ---------------------------------------------------------------------------
@@ -1637,6 +1669,8 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 		tracked_apps = get_config().tracked_apps or None
 	except Exception:
 		tracked_apps = None
+	# Ground-truth allowlist for exclusion mode; None off-bench → hardcoded fallback.
+	installed_apps = installed_apps_allowlist()
 
 	for action_idx, recording in enumerate(recordings):
 		# v0.7.x (M1): pop, don't get — call_tree is the ONLY consumer of the
@@ -1702,6 +1736,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			action_label=action_label,
 			action_wall_time_ms=action_wall_time or tree.get("cumulative_ms", 0),
 			tracked_apps=tracked_apps,
+			installed_apps=installed_apps,
 		))
 
 		# Persist the tree as JSON on the action (overflow handling in
@@ -1712,7 +1747,9 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			context.actions[action_idx]["call_tree_size_bytes"] = len(tree_json)
 
 	# Cross-action aggregation
-	repeated_findings, leaderboard = _aggregate_hot_frames(per_action_trees, tracked_apps)
+	repeated_findings, leaderboard = _aggregate_hot_frames(
+		per_action_trees, tracked_apps, installed_apps
+	)
 	findings.extend(repeated_findings)
 
 	# Donut breakdown

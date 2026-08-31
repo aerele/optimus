@@ -169,8 +169,13 @@ def _saved_doc_from_response(response, want_doctype, client_name=None):
 			# Real name = the response name the save assigned, i.e. one that differs
 			# from the browser's temp name. Comparing to the actual temp name (not a
 			# "new-" prefix guess) keeps a genuine "new-0001" from being discarded.
-			if isinstance(nm, str) and nm and nm != client_name:
-				return {"doctype": want_doctype, "name": nm}
+			# Accept a str OR an int (autoincrement naming assigns an integer name — a
+			# standard Frappe option); reject bool and any non-scalar (dict/list/float)
+			# so a malformed response can't stamp a garbage string as the docname.
+			if isinstance(nm, str) or (isinstance(nm, int) and not isinstance(nm, bool)):
+				nm = str(nm)
+				if nm and nm != client_name:
+					return {"doctype": want_doctype, "name": nm}
 	except Exception:
 		return None
 	return None

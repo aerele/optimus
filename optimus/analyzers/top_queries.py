@@ -18,6 +18,7 @@ import json
 
 from optimus.analyzers.base import (
 	AnalyzerResult,
+	installed_apps_allowlist,
 	is_framework_callsite_str,
 	is_profiler_own_query,
 	walk_callsite_str,
@@ -68,6 +69,7 @@ def _resolve_tracked_apps() -> tuple[str, ...]:
 def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	slow_threshold, high_threshold = _resolve_slow_query_threshold()
 	tracked_apps = _resolve_tracked_apps()
+	installed_apps = installed_apps_allowlist()
 	all_queries = []
 	for action_idx, recording in enumerate(recordings):
 		for call in recording.get("calls") or []:
@@ -106,7 +108,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	top = [
 		q for q in all_queries
 		if q["query_duration_ms"] >= TOP_QUERY_FLOOR_MS
-		and not is_framework_callsite_str(q["callsite"], tracked_apps)
+		and not is_framework_callsite_str(q["callsite"], tracked_apps, installed_apps)
 	][:DEFAULT_TOP_N]
 
 	findings = []

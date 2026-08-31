@@ -14,6 +14,7 @@ from optimus.analyzers.base import (
 	FRAMEWORK_PREFIXES,  # noqa: F401  (kept for any external importers)
 	SEVERITY_ORDER,
 	AnalyzerResult,
+	installed_apps_allowlist,
 	is_framework_callsite,
 	percentile,
 	short_filename,
@@ -71,6 +72,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	from optimus.settings import get_config
 	cfg = get_config()
 	tracked_apps = cfg.tracked_apps
+	installed_apps = installed_apps_allowlist()
 
 	# v0.5.2 round 3: group by (filename, lineno) instead of
 	# (normalized_query, filename, lineno). A single callsite that
@@ -174,7 +176,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		loop_time = sum(loop_durations)
 
 		short_fn = short_filename(filename)
-		is_framework = is_framework_callsite(filename, tracked_apps=tracked_apps)
+		is_framework = is_framework_callsite(
+			filename, tracked_apps=tracked_apps, installed_apps=installed_apps
+		)
 
 		# Minimum time before we flag, so 10 × 0.1 ms queries aren't reported as an
 		# N+1. Gate on the same time each finding type reports: a user finding is

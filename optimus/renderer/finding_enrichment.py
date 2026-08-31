@@ -655,6 +655,17 @@ def _retarget_phase1_callsites_to_drilldown_leaf(
 			"phase2_lookup_filename": leaf_filename,
 			"phase2_lookup_function": leaf_function,
 		}
+		# If we anchored on a Server Script parent (its body is now readable, so
+		# call_lineno resolves and the anchor keeps the ``<serverscript>`` filename),
+		# tag it as a Desk link like _finding_to_dict does — otherwise the template
+		# emits a broken ``vscode://file`` link built from the wrapper's real path.
+		if anchor_filename.startswith("<serverscript") or anchor_filename.startswith("<server-script"):
+			from optimus.server_script_source import desk_url, extract_script_name
+
+			_scrubbed = extract_script_name(anchor_filename)
+			if _scrubbed:
+				new_callsite["_abs"] = desk_url(_scrubbed, cache=file_cache)
+				new_callsite["_link_kind"] = "desk"
 		detail["callsite"] = new_callsite
 
 

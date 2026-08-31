@@ -112,10 +112,25 @@ class TestResolveTargetDocFromResponse:
 		assert self._resolve(fd, resp) == {"doctype": "Widget", "name": "new-0001"}
 
 	def test_stopped_before_save_keeps_temp_name(self):
-		# Stopped before save: no response, or the temp name echoed → nothing resolves, temp name stays.
+		# Stopped before save (no response) → nothing resolves, temp name stays.
+		# (The temp-name-echoed case is covered in test_none_cases.)
 		fd = {"doc": json.dumps({"doctype": "Widget", "name": "new-widget-abc123"})}
 		assert self._resolve(fd, None) is None
-		assert self._resolve(fd, {"docs": [{"doctype": "Widget", "name": "new-widget-abc123"}]}) is None
+
+	def test_autoincrement_integer_name_is_resolved(self):
+		# Frappe autoincrement naming assigns an INTEGER name in the response. The
+		# resolver must coerce it, not require a str (which silently no-op'd before).
+		fd = {"doc": json.dumps({"doctype": "Ledger Row", "name": "new-ledger-row-xyz"})}
+		resp = {"docs": [{"doctype": "Ledger Row", "name": 42}]}
+		assert self._resolve(fd, resp) == {"doctype": "Ledger Row", "name": "42"}
+
+	def test_non_scalar_response_name_is_rejected(self):
+		# A malformed (non-str/non-int) response name must NOT be stringified into a
+		# garbage docname — the resolver falls back to None (keep the placeholder).
+		fd = {"doc": json.dumps({"doctype": "Widget", "name": "new-widget-abc"})}
+		assert self._resolve(fd, {"docs": [{"doctype": "Widget", "name": {"k": "v"}}]}) is None
+		assert self._resolve(fd, {"docs": [{"doctype": "Widget", "name": 42.0}]}) is None
+		assert self._resolve(fd, {"docs": [{"doctype": "Widget", "name": True}]}) is None
 
 	def test_none_cases(self):
 		fd = {"doc": json.dumps({"doctype": "Sales Order", "name": "new-sales-order-abc"})}

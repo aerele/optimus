@@ -19,6 +19,7 @@ from collections import Counter, defaultdict
 
 from optimus.analyzers.base import (
 	AnalyzerResult,
+	installed_apps_allowlist,
 	is_framework_callsite,
 	walk_callsite,
 )
@@ -121,6 +122,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 	from optimus.settings import get_config
 	cfg = get_config()
 	tracked_apps = cfg.tracked_apps  # may be empty (→ exclusion mode)
+	installed_apps = installed_apps_allowlist()
 
 	# Bucket: (fn_name, identifier_safe_tuple) → list of
 	# (action_idx, raw, caller_stack)
@@ -210,7 +212,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 
 		callsite = walk_callsite(first_stack)
 		if callsite is None or is_framework_callsite(
-			callsite.get("filename") or "", tracked_apps=tracked_apps
+			callsite.get("filename") or "", tracked_apps=tracked_apps, installed_apps=installed_apps
 		):
 			# Pure framework stack. walk_callsite returns None for
 			# profiler-own stacks; for pure frappe/* stacks it falls
