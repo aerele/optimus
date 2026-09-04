@@ -4,7 +4,7 @@
 """Tests for the report's section structure.
 
 Top-level sections (``<section class="section">``) always render
-expanded and non-collapsible — user direction from the redesign:
+expanded and non-collapsible user direction from the redesign:
 "make all section expanded by default not collapsible".
 
 Framework subsections (the four ``actions_framework`` /
@@ -17,7 +17,7 @@ non-framework subsections remain plain ``<section class="subsection">``.
 
 Inline ``<details>`` elements elsewhere (call-tree drill-downs,
 per-row sub-finding expanders, "Slowest queries for this job"
-lookups) stay collapsible — those are row-level affordances, not
+lookups) stay collapsible those are row-level affordances, not
 sections.
 """
 
@@ -33,13 +33,13 @@ def _read_template():
 
 
 def test_top_level_sections_are_non_collapsible():
-	"""Top-level sections always render expanded — no ``<details
+	"""Top-level sections always render expanded no ``<details
 	class="section">`` allowed. The user explicitly requested
 	primary report sections render without a toggle."""
 	template = _read_template()
 	assert '<details class="section"' not in template, (
 		"Top-level sections must be plain <section class='section'> "
-		"blocks — '<details class=\"section\"' means the section is "
+		"blocks '<details class=\"section\"' means the section is "
 		"still collapsible."
 	)
 
@@ -50,9 +50,9 @@ def test_framework_subsections_are_collapsible():
 	class="subsection">`` so the reader can collapse framework noise
 	out of the way. Each one carries a ``framework`` data variable
 	in its surrounding markup. None should have an ``open`` attribute
-	— collapsed by default is the whole point."""
+	collapsed by default is the whole point."""
 	template = _read_template()
-	# Expect at least 4 <details class="subsection"> opens — one per
+	# Expect at least 4 <details class="subsection"> opens one per
 	# framework block. If a new framework subsection is added in the
 	# future this count goes up; the assertion stays ``>= 4`` so
 	# additive changes don't break the test.
@@ -68,7 +68,7 @@ def test_framework_subsections_are_collapsible():
 		r'<details class="subsection"[^>]*\sopen[\s>]',
 		template,
 	), (
-		"<details class=\"subsection\"> should be collapsed by default — "
+		"<details class=\"subsection\"> should be collapsed by default "
 		"no `open` attribute. Remove the `open` to restore the contract."
 	)
 
@@ -118,7 +118,7 @@ def test_primary_actionable_sections_render():
 			f"section heading {section_heading!r} missing from template"
 		)
 	# "Full recordings" was permanently removed (raw SQL literals / headers /
-	# form data / stack traces — sensitive, per user request).
+	# form data / stack traces sensitive, per user request).
 	assert "Full recordings" not in template
 
 
@@ -137,7 +137,7 @@ def test_report_has_navigation_aids():
 def test_section_id_aliases_for_mock_spec_names():
 	"""v0.7.x Phase G: the mock spec uses shorter section IDs (#actions,
 	#jobs, #resource, #queries, #db, #doc-events) alongside the original
-	long-form names. The template carries both — original ID on the
+	long-form names. The template carries both original ID on the
 	section tag so the Jump-to nav keeps working; alias as an empty
 	<a id="..."></a> anchor inside each section so external links /
 	docs that reference the mock names still scroll-to-anchor.
@@ -164,13 +164,13 @@ def test_section_id_aliases_for_mock_spec_names():
 
 def test_net_new_section_ids_from_mock_spec():
 	"""v0.7.x Phase I.1: the redesign mock spec introduced three
-	anchors that don't have a long-form original — they're net-new
+	anchors that don't have a long-form original they're net-new
 	IDs (not aliases). Pin their presence so a future template
 	refactor doesn't quietly drop them.
 
-	#repro    — Steps to Reproduce section
-	#summary  — Summary section (bulleted recap)
-	#hot-frames — Hot frames leaderboard section
+	#repro Steps to Reproduce section
+	#summary Summary section (bulleted recap)
+	#hot-frames Hot frames leaderboard section
 	"""
 	template = _read_template()
 	for net_new in ("repro", "summary", "hot-frames"):
@@ -293,7 +293,7 @@ def test_tldr_hero_renders_before_kpi_strip_and_summary():
 	"""v0.7.x redesign Phase B: the 'At a glance' exec-summary card
 	was replaced by the TL;DR hero (one composed headline keyed on
 	the highest-impact finding). The hero lives RIGHT AFTER the
-	masthead — first prominent block on the page. Pin: TL;DR comes
+	masthead first prominent block on the page. Pin: TL;DR comes
 	before the KPI strip, and the KPI strip comes before the
 	Summary section."""
 	template = _read_template()
@@ -333,7 +333,7 @@ def test_how_to_read_section_appears_after_main_content():
 		"database table' (it was moved to the bottom of the report)"
 	)
 	assert how_to_read_idx < footer_idx, (
-		"'How to read this report' must render BEFORE the footer — "
+		"'How to read this report' must render BEFORE the footer "
 		"don't push it past the report's closing block"
 	)
 
@@ -410,7 +410,7 @@ def test_xhr_timing_table_has_fixed_layout_class():
 
 
 def test_how_to_read_fixes_stale_refs_and_verbs():
-	"""v0.7.x: How-to-read fixed — 'Click' (not 'Hover') to open callsites, and
+	"""v0.7.x: How-to-read fixed 'Click' (not 'Hover') to open callsites, and
 	no references to sections that don't exist by those names / a non-existent
 	'index candidate per table'."""
 	template = _read_template()

@@ -59,13 +59,13 @@ class TestBootSession:
 		bootinfo = _fresh_bootinfo()
 		boot.boot_session(bootinfo)
 		assert bootinfo.optimus_enabled is True, (
-			"boot_session must fail-open — a settings-read error must "
+			"boot_session must fail-open a settings-read error must "
 			"NOT hide the widget. Returning False here would silently "
 			"break the primary UI."
 		)
 
 	def test_returns_bool_not_truthy_value(self, monkeypatch):
-		"""The JS guard does strict `=== false` comparison — so this
+		"""The JS guard does strict `=== false` comparison so this
 		must always be a Python bool, not a truthy/falsy value that
 		would serialize oddly (e.g. 0, 1, None)."""
 		from optimus import boot, settings
@@ -89,7 +89,7 @@ class TestHookWired:
 		with open(hooks_path) as f:
 			content = f.read()
 		assert 'boot_session = "optimus.boot.boot_session"' in content, (
-			"hooks.py must register the boot_session hook — without "
+			"hooks.py must register the boot_session hook without "
 			"it the bootinfo.optimus_enabled flag never reaches the "
 			"client and the widget can't hide itself"
 		)
@@ -109,12 +109,12 @@ class TestWidgetGuard:
 		# The guard must reference the boot flag.
 		assert "frappe.boot.optimus_enabled" in js, (
 			"floating_widget.js must check frappe.boot.optimus_enabled "
-			"before mounting — otherwise a disabled profiler still "
+			"before mounting otherwise a disabled profiler still "
 			"shows the widget"
 		)
 		# The guard must return/skip mount when the flag is False.
 		assert "=== false" in js, (
 			"Must use strict === false so a missing/undefined boot "
 			"flag (e.g. older boot payload without this field) doesn't "
-			"hide the widget — fail-open shape"
+			"hide the widget fail-open shape"
 		)

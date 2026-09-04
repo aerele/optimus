@@ -83,7 +83,7 @@ def test_reconcile_invariants(tree, calls):
 
 	# Invariant 3: every SQL call lands as exactly one leaf, even after
 	# coalescing (coalescing only merges identical query_normalized, and
-	# Hypothesis is unlikely to generate identical queries — but if it
+	# Hypothesis is unlikely to generate identical queries but if it
 	# does, the coalesced count should still equal the original input).
 	def count_sql_query_count(node):
 		c = node.get("query_count", 0) if node.get("kind") == "sql" else 0

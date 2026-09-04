@@ -5,7 +5,7 @@ from frappe.model.document import Document
 
 
 class OptimusBackgroundJob(Document):
-	# Child table on Optimus Session — one row per RQ job the recorded flow
+	# Child table on Optimus Session one row per RQ job the recorded flow
 	# enqueued, with its terminal status. Populated by analyze.run from the
 	# per-session job-meta hash (see optimus.session + optimus.analyze).
 	pass

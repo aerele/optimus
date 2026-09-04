@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Hook-time bg-job status tracking — write Running/Completed + started_at /
+"""Hook-time bg-job status tracking write Running/Completed + started_at /
 ended_at / duration_ms to the session's jobs hash from inside before_job /
 after_job, so analyze doesn't have to re-fetch the data from RQ (whose
 records may have been GC'd by the time analyze persists).
@@ -44,7 +44,7 @@ pytest.importorskip("rq")
 
 
 # ---------------------------------------------------------------------------
-# Test doubles — keep mocks lean so each test owns just what it exercises.
+# Test doubles keep mocks lean so each test owns just what it exercises.
 # ---------------------------------------------------------------------------
 
 
@@ -91,7 +91,7 @@ def fake_local(monkeypatch):
 
 	Also stubs ``frappe.utils.now_datetime`` to a fixed string because the
 	real implementation reads ``frappe.db`` for the site's system timezone
-	— which isn't wired up in a plain-pytest context. The SUT's own
+	which isn't wired up in a plain-pytest context. The SUT's own
 	``try/except: pass`` would swallow the resulting AttributeError and
 	silently skip ``set_job_status``, masking the bug behind a green-ish
 	test. Stubbing here keeps the helpers exercisable end-to-end.
@@ -118,7 +118,7 @@ def fake_rq_job(monkeypatch):
 	holder = {"job": FakeJob("J1", "started")}
 	monkeypatch.setattr(rq, "get_current_job", lambda: holder["job"], raising=False)
 	# Also patch the symbol on the SUT-side module since the helpers do a
-	# fresh ``from rq import get_current_job`` per call — monkeypatching the
+	# fresh ``from rq import get_current_job`` per call monkeypatching the
 	# rq module covers it because the lazy import reads ``rq.__dict__``.
 	return holder
 
@@ -129,7 +129,7 @@ def fake_db(monkeypatch):
 	in ``_track_bg_job_finished`` can be exercised without a real DB.
 
 	frappe.db is a Werkzeug Local proxy in production (per
-	[[feedback_frappe_db_local_proxy]]) — patching its attributes is wrong;
+	[[feedback_frappe_db_local_proxy]]) patching its attributes is wrong;
 	always replace the whole proxy with a stand-in object.
 
 	The SUT calls ``frappe.db.get_value`` in a fixed sequence:
@@ -180,7 +180,7 @@ def fake_db(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _track_bg_job_started — fires from before_job once the marker is valid
+# _track_bg_job_started fires from before_job once the marker is valid
 # ---------------------------------------------------------------------------
 
 
@@ -206,7 +206,7 @@ class TestTrackBgJobStarted:
 		assert isinstance(fake_local.optimus_bg_job_start_mono, float)
 
 	def test_callable_method_uses___name__(self, captures, fake_local, fake_rq_job):
-		"""frappe.enqueue accepts a callable too — extract its __name__ so the
+		"""frappe.enqueue accepts a callable too extract its __name__ so the
 		row doesn't render ``<function foo at 0x...>``."""
 		from optimus import hooks_callbacks
 
@@ -241,7 +241,7 @@ class TestTrackBgJobStarted:
 
 
 # ---------------------------------------------------------------------------
-# _track_bg_job_finished — fires from after_job's finally block
+# _track_bg_job_finished fires from after_job's finally block
 # ---------------------------------------------------------------------------
 
 
@@ -260,12 +260,12 @@ class TestTrackBgJobFinished:
 		assert fields["status"] == "Completed"
 		assert fields["error"] is None
 		assert "ended_at" in fields and fields["ended_at"]
-		# Wide tolerance — test runners vary; we only need to confirm a real
+		# Wide tolerance test runners vary; we only need to confirm a real
 		# value was computed, not jitter-tight precision.
 		assert 400 <= fields["duration_ms"] <= 1500
 
 	def test_failed_when_exception_in_flight(self, captures, fake_local, fake_rq_job):
-		"""after_job runs in a Frappe ``finally`` block — if the user's method
+		"""after_job runs in a Frappe ``finally`` block if the user's method
 		raised, ``sys.exc_info()`` reports it. We must capture that as
 		``status=Failed`` with a useful error string."""
 		from optimus import hooks_callbacks
@@ -284,7 +284,7 @@ class TestTrackBgJobFinished:
 
 	def test_timeout_when_jobtimeoutexception_in_flight(self, captures, fake_local, fake_rq_job):
 		"""RQ kills a job that exceeds its timeout with
-		``rq.timeouts.JobTimeoutException`` — distinguish that from a
+		``rq.timeouts.JobTimeoutException``: distinguish that from a
 		generic user-code failure so the report can flag it specifically."""
 		from optimus import hooks_callbacks
 
@@ -331,7 +331,7 @@ class TestTrackBgJobFinished:
 # Source-inspection: confirm before_job / after_job actually call the helpers
 # ---------------------------------------------------------------------------
 # Mirrors the existing ``test_before_job_honours_the_draining_window`` pattern
-# in test_background_job_capture.py — these hooks have too much real-Frappe
+# in test_background_job_capture.py these hooks have too much real-Frappe
 # dependency to call directly in a unit test, but we can prove the call site
 # is wired up correctly via source-inspection.
 
@@ -372,8 +372,8 @@ class TestHookWiring:
 		)
 
 	def test_after_job_calls_track_bg_job_finished_in_finally(self):
-		"""after_job's existing finally block — where clear_pending_job +
-		set_job_recording already fire — must also call _track_bg_job_finished
+		"""after_job's existing finally block where clear_pending_job +
+		set_job_recording already fire must also call _track_bg_job_finished
 		so the worker writes terminal status while the RQ record is still
 		alive (covers the GC'd-record case)."""
 		body = _fn_body(_src("hooks_callbacks.py"), "after_job")
@@ -487,14 +487,14 @@ class TestEndToEndPersist:
 		assert j["ended_at"] == "2026-05-24 15:20:01.500000"
 		assert j["duration_ms"] == 1500.0
 		assert j["recording_uuid"] == "REC-1"
-		# error=None must NOT clobber an existing (non-None) error — set_job_status
+		# error=None must NOT clobber an existing (non-None) error set_job_status
 		# filters None values out (see session.set_job_status implementation).
 		# Here error never got set to a string, so it's just absent.
 		assert "error" not in j or j["error"] is None
 
 
 # ---------------------------------------------------------------------------
-# Late-finish DocType fallback — for jobs that exceed background_job_wait_seconds
+# Late-finish DocType fallback for jobs that exceed background_job_wait_seconds
 # ---------------------------------------------------------------------------
 # When a bg job runs longer than ``_MAX_BG_JOB_WAIT_SECONDS`` (300s hardcap in
 # ``analyze.py``), analyze persists the row with status=Running and then
@@ -547,7 +547,7 @@ class TestLateFinishDocTypeFallback:
 
 		assert fake_db["set_value_calls"] == []
 		assert fake_db["commit_calls"] == 0
-		# But the existing Redis path still fired — sanity check.
+		# But the existing Redis path still fired sanity check.
 		assert len(captures["set_job_status"]) == 1
 		assert captures["set_job_status"][0][2]["status"] == "Completed"
 
@@ -556,7 +556,7 @@ class TestLateFinishDocTypeFallback:
 	):
 		"""Idempotency guard: if some earlier path (analyze re-run, a retry's
 		earlier attempt) already filled the row with Completed, don't overwrite
-		— only the Running placeholder is a candidate for backfill."""
+		only the Running placeholder is a candidate for backfill."""
 		from optimus import hooks_callbacks
 
 		fake_local.optimus_bg_job_start_mono = time.monotonic() - 0.1
@@ -582,7 +582,7 @@ class TestLateFinishDocTypeFallback:
 		assert fake_db["commit_calls"] == 0
 
 	def test_late_finish_noop_when_child_row_missing(self, captures, fake_local, fake_rq_job, fake_db):
-		"""Session is finalized but no child row for this job_id — analyze
+		"""Session is finalized but no child row for this job_id analyze
 		never tracked it (extremely rare: an enqueue patch failed silently, or
 		the job was enqueued from a context that the marker injection didn't
 		cover). Bail rather than INSERT a phantom row."""
@@ -621,7 +621,7 @@ class TestLateFinishDocTypeFallback:
 	def test_late_finish_swallows_db_errors(self, captures, fake_local, fake_rq_job, fake_db, monkeypatch):
 		"""Best-effort guarantee: a DB error during the fallback must NOT raise
 		out of the hook (which would break the worker's after_job dispatcher).
-		The earlier Redis set_job_status write must NOT be suppressed either —
+		The earlier Redis set_job_status write must NOT be suppressed either
 		the fallback's try/except is separate from the helper's outer try."""
 		from optimus import hooks_callbacks
 

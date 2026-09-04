@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.6.0 finding-card 'smoking gun' block — exercises the
+"""Tests for the v0.6.0 finding-card 'smoking gun' block exercises the
 new prominent callsite + source snippet + Phase 2 hot-line callout above
 the existing technical_detail rows. Uses renderer.render_raw end-to-end
 so we verify the macro within its real context.
@@ -204,7 +204,7 @@ class TestPhase2Crosslink:
 
 	def test_phase2_callout_renders_when_function_match(self):
 		"""When a finding's callsite function was instrumented in Phase 2,
-		the card shows 'Phase 2: hottest line N — Mms / X hits'."""
+		the card shows 'Phase 2: hottest line N Mms / X hits'."""
 		snippet = [{"lineno": 42, "content": "    do_thing()"}]
 		finding = _finding_child(
 			filename="/different/path/myapp/x.py",  # different prefix, same basename
@@ -269,13 +269,13 @@ class TestPhase2Crosslink:
 		from ``looped_validate`` to ``_check_user_exists`` (via the
 		intermediate ``_run_validations``) should re-anchor the
 		smoking-gun snippet on the **call site** of ``_check_user_exists``
-		inside its parent ``_run_validations`` — that's the line in
+		inside its parent ``_run_validations``: that's the line in
 		``_run_validations``'s body that invokes the leaf (e.g.
 		``    _check_user_exists(doc)``), not the leaf's own ``def``.
 
 		The wrapper (``looped_validate``) is preserved as a breadcrumb
 		caption. Phase-2's actually-hot internal line (line 20) still
-		surfaces in the separate Phase 2 callout — and the drill-down
+		surfaces in the separate Phase 2 callout and the drill-down
 		narrative is rooted on ``looped_validate``."""
 		src = tmp_path / "common.py"
 		src.write_text(
@@ -394,7 +394,7 @@ class TestPhase2Crosslink:
 		# call lives at line 13 (``    _check_user_exists(doc)``), not
 		# at the leaf's def line 18. v0.7.x redesign Phase D: the
 		# file:line callsite header moved from inside `.smoking` to
-		# the `.finding-meta` row under the title — slice the broader
+		# the `.finding-meta` row under the title slice the broader
 		# `.finding` card up to the Drill-down chain so both the meta
 		# row AND the smoking-gun snippet are inside the scope.
 		finding_start = html.find('class="finding severity-')
@@ -424,13 +424,13 @@ class TestPhase2Crosslink:
 	def test_retarget_falls_back_to_leaf_def_when_call_site_not_findable(self, tmp_path):
 		"""When the leaf's call can't be located in the parent's body
 		(unparseable source, leaf name not present, etc.), the retarget
-		falls back to the leaf's own def line — the previous behavior.
+		falls back to the leaf's own def line the previous behavior.
 		Anchors are still better than the wrapper's def line."""
 		src = tmp_path / "common.py"
 		# Source where _run_validations doesn't actually contain a call
 		# to _check_user_exists (intentional mismatch to exercise the
-		# fallback). The drill-down chain — built from a pre-cooked
-		# pyinstrument tree, NOT from this source — still has the chain.
+		# fallback). The drill-down chain built from a pre-cooked
+		# pyinstrument tree, NOT from this source still has the chain.
 		src.write_text(
 			"line1\n"
 			"line2\n"
@@ -444,7 +444,7 @@ class TestPhase2Crosslink:
 			"\n"
 			"\n"
 			"def _run_validations(doc):\n"  # 12
-			"    pass\n"  # 13 — NO call to _check_user_exists here
+			"    pass\n"  # 13 NO call to _check_user_exists here
 			"\n"
 			"\n"
 			"\n"
@@ -509,7 +509,7 @@ class TestPhase2Crosslink:
 
 		# Fallback: anchor on the leaf's def line.
 		assert "common.py:18" in html
-		# The parent's body wasn't useful — the call line couldn't be
+		# The parent's body wasn't useful the call line couldn't be
 		# located, so the retarget falls back, NOT to the wrapper's
 		# def line (line 6).
 		assert "common.py:6" not in html or "looped_validate" in html  # 6 may appear in breadcrumb caption text
@@ -520,7 +520,7 @@ class TestPhase2Crosslink:
 		"""When the drill-down chain's deepest entry is the same
 		function as the finding's callsite (single-frame chain or
 		framework-boundary immediately below), the smoking-gun snippet
-		stays on the wrapper — there's nowhere deeper in user code to
+		stays on the wrapper there's nowhere deeper in user code to
 		go. The breadcrumb caption should NOT appear."""
 		src = tmp_path / "x.py"
 		src.write_text(
@@ -548,7 +548,7 @@ class TestPhase2Crosslink:
 			}),
 		)
 		# Call tree where my_func has no eligible user-code descendants
-		# (child is in framework — drill-down walker stops there).
+		# (child is in framework drill-down walker stops there).
 		action = SimpleNamespace(
 			idx=0,
 			action_label="submit",
@@ -575,7 +575,7 @@ class TestPhase2Crosslink:
 
 		# Callsite stays at line 3 (the wrapper itself).
 		assert "x.py:3" in html
-		# No breadcrumb caption — no retargeting happened.
+		# No breadcrumb caption no retargeting happened.
 		assert "Time entered through" not in html
 
 	def test_picks_hottest_line_across_runs(self):
@@ -647,7 +647,7 @@ def _hot_line_finding(file_path, lineno, line_content):
 	return SimpleNamespace(
 		finding_type="Hot Line",
 		severity="High",
-		title=f"some.module:{lineno} consumed 100ms (1 hits) — single hottest line",
+		title=f"some.module:{lineno} consumed 100ms (1 hits) single hottest line",
 		customer_description="dominant time sink",
 		estimated_impact_ms=100.0,
 		affected_count=1,
@@ -666,7 +666,7 @@ def _hot_line_finding(file_path, lineno, line_content):
 
 class TestSlowHotPathLegacyShape:
 	"""call_tree's Slow Hot Path / Hook Bottleneck / Repeated Hot Frame
-	store filename/lineno at top level — the renderer must synthesize a
+	store filename/lineno at top level the renderer must synthesize a
 	callsite from those so the smoking-gun block renders."""
 
 	def test_smoking_gun_renders_for_top_level_filename(self, tmp_path):
@@ -686,7 +686,7 @@ class TestSlowHotPathLegacyShape:
 
 class TestHotLineLegacyShape:
 	"""line_profile.analyzer's Hot Line finding stores `file` (not
-	`filename`) at top level — synthesize and use line_content as the
+	`filename`) at top level synthesize and use line_content as the
 	source snippet (no file read needed)."""
 
 	def test_smoking_gun_renders_with_line_content(self):
@@ -737,7 +737,7 @@ class TestHotLineLegacyShape:
 
 		html = renderer.render_raw(doc, recordings=[])
 
-		# The callout's distinctive HTML — `<strong …>Phase 2:</strong>` —
+		# The callout's distinctive HTML `<strong …>Phase 2:</strong>`:
 		# must NOT appear (the title text "single hottest line" is part
 		# of the Hot Line finding's own title, so we can't filter on
 		# that phrase alone).
@@ -797,7 +797,7 @@ class TestLazySnippetRead:
 		)
 		doc = _fake_doc([finding])
 
-		# Must not crash — best-effort silent skip.
+		# Must not crash best-effort silent skip.
 		html = renderer.render_raw(doc, recordings=[])
 
 		# Callsite line still rendered (file:lineno + function visible).
@@ -806,7 +806,7 @@ class TestLazySnippetRead:
 
 
 # ---------------------------------------------------------------------------
-# v0.6.x: findings that carry no callsite get one resolved at render time —
+# v0.6.x: findings that carry no callsite get one resolved at render time
 # Repeated Hot Frame (from its "path::func" key), Function Not Invoked (from
 # its dotted_path), and SQL red-flag findings (a representative callsite from
 # the recordings).
@@ -814,7 +814,7 @@ class TestLazySnippetRead:
 
 # Same constraint as test_action_entry_callsite: walk_callsite excludes any
 # path containing "frappe/" or "optimus/", so the "user code" frame
-# must be a path with neither — a stdlib module's absolute file works.
+# must be a path with neither a stdlib module's absolute file works.
 _USER_FRAME_FILE = inspect.__file__
 
 
@@ -876,7 +876,7 @@ class TestRenderTimeCallsiteResolution:
 	def test_repeated_hot_frame_unresolvable_is_filtered(self):
 		"""v0.7.x: a Repeated Hot Frame whose ``function`` key can't be
 		resolved to a real file:line is dropped entirely from rendering
-		— it had no callsite to act on. Pre-v0.7 the card rendered
+		it had no callsite to act on. Pre-v0.7 the card rendered
 		title-only; the user opted to suppress no-callsite findings."""
 		doc = _fake_doc([_repeated_hot_frame("nope_xyzq/foo.py::bar")])
 		html = renderer.render_raw(doc, recordings=[])
@@ -886,7 +886,7 @@ class TestRenderTimeCallsiteResolution:
 
 	def test_function_not_invoked_is_filtered_out(self):
 		# v0.7.x: "X was picked but never invoked during phase 2" is
-		# non-actionable noise — render() drops these findings entirely (the
+		# non-actionable noise render() drops these findings entirely (the
 		# Line-Level Drilldown notes uninvoked picks in one concise line).
 		doc = _fake_doc([_function_not_invoked("optimus.renderer.render")])
 		html = renderer.render_raw(doc, recordings=[])
@@ -910,7 +910,7 @@ class TestRenderTimeCallsiteResolution:
 			}],
 		}]
 		html = renderer.render_raw(doc, recordings=recs)
-		# v0.7.x Phase D: smoking-gun label wording trimmed —
+		# v0.7.x Phase D: smoking-gun label wording trimmed
 		# "Most-called from:" / "Representative callsite" prose collapsed
 		# into a single `.smoking-label` line ("most-called from this
 		# callsite ..."). Anchor on the new wording.
@@ -921,7 +921,7 @@ class TestRenderTimeCallsiteResolution:
 	def test_missing_index_without_matching_recording_is_filtered(self):
 		"""v0.7.x: a Missing Index without a representative callsite (no
 		recording matched the normalized query) has no actionable
-		file:line anchor — it's dropped from the render entirely along
+		file:line anchor it's dropped from the render entirely along
 		with the rest of the no-callsite suppression."""
 		doc = _fake_doc([_missing_index("tabUser", "SELECT ... FROM `tabUser`")])
 		# Recording has a different query → no representative callsite.
@@ -946,7 +946,7 @@ class TestDocEventHookInsideSmokingGun:
 		callouts), not in a separate finding-detail box below.
 
 		v0.7.x: the supporting-context box (``.finding-detail``) is
-		now suppressed entirely when no inner row applies — so for
+		now suppressed entirely when no inner row applies so for
 		this finding (callsite + target_doc + hook_events, no other
 		detail fields) it shouldn't render at all. The hook breadcrumb
 		appearing inside the smoking-gun is verified by its presence
@@ -970,13 +970,13 @@ class TestDocEventHookInsideSmokingGun:
 		sg_open = html.find('class="smoking"', 0)
 		assert hook_pos > 0, "Doc-event hook line missing from output"
 		assert sg_open > 0
-		# Hook appears AFTER smoking-gun's opening marker — i.e. inside it.
+		# Hook appears AFTER smoking-gun's opening marker i.e. inside it.
 		assert hook_pos > sg_open, (
 			"Doc-event hook breadcrumb must render INSIDE the smoking-gun "
 			f"block (after sg_open={sg_open}), got {hook_pos}"
 		)
 		# A fix-less finding carries no generic "Where to start" box (removed per
-		# user request) — its meaningful content is the smoking-gun block above.
+		# user request) its meaningful content is the smoking-gun block above.
 		assert "Where to start" not in html
 
 	def test_target_doc_appears_with_hook(self):
@@ -995,7 +995,7 @@ class TestDocEventHookInsideSmokingGun:
 		doc = _fake_doc([finding])
 		html = renderer.render_raw(doc, recordings=[])
 
-		# Both the document chip and the hook chip render — single span line.
+		# Both the document chip and the hook chip render single span line.
 		assert "Document:" in html
 		assert "<strong>Sales Invoice</strong>" in html
 		assert "SI-0001" in html
@@ -1036,7 +1036,7 @@ class TestDrilldownPlaceholder:
 	floor), the template renders a 'no deeper user-code frame'
 	placeholder instead of a silent gap. Findings without an
 	``action_ref`` / tree skip the attachment entirely and show
-	nothing — the placeholder only appears when the walk was attempted
+	nothing the placeholder only appears when the walk was attempted
 	and produced no eligible descendants."""
 
 	def test_empty_chain_renders_placeholder(self, tmp_path):
@@ -1093,7 +1093,7 @@ class TestDrilldownPlaceholder:
 				"cumulative_ms": 955.0,
 				"children": [{
 					"function": "get_doc",
-					# Framework path — walker stops here.
+					# Framework path walker stops here.
 					"filename": "apps/frappe/frappe/__init__.py",
 					"lineno": 100,
 					"kind": "python",
@@ -1115,7 +1115,7 @@ class TestDrilldownPlaceholder:
 
 	def test_finding_without_drilldown_attribute_renders_no_placeholder(self, tmp_path):
 		"""A finding without ``action_ref`` skips _attach_drilldown_chains
-		entirely — no ``drilldown_chain`` key on technical_detail. The
+		entirely no ``drilldown_chain`` key on technical_detail. The
 		template must NOT render the placeholder in this case (otherwise
 		every SQL red-flag finding would show 'no deeper user-code')."""
 		snippet = [{"lineno": 42, "content": "    do_thing()"}]
@@ -1136,7 +1136,7 @@ class TestDrilldownPlaceholder:
 
 	def test_non_empty_chain_renders_chain_not_placeholder(self, tmp_path):
 		"""When the drill-down chain has entries, the existing chain
-		rendering shows them — the placeholder branch is skipped."""
+		rendering shows them the placeholder branch is skipped."""
 		src = tmp_path / "common.py"
 		src.write_text(
 			"line1\n"
@@ -1198,8 +1198,8 @@ class TestDrilldownPlaceholder:
 		# Chain rendered (existing behavior).
 		assert "Drill-down" in html
 		# v0.7.x Phase D: chain steps render as `function:lineno` pills
-		# (filename is dropped from each pill — the meta row above
-		# carries the file path). The inner def line is line 6 — its
+		# (filename is dropped from each pill the meta row above
+		# carries the file path). The inner def line is line 6 its
 		# function name appears as a chain step.
 		assert "inner:6" in html or ":6" in html
 		# Placeholder branch NOT taken.
@@ -1209,7 +1209,7 @@ class TestDrilldownPlaceholder:
 
 def test_phase2_callout_renders_for_empty_drilldown_self_time_finding():
 	"""User's exact case: a Slow Hot Path finding with NO deeper user-code
-	frame (empty drilldown_chain) — e.g. bg_recheck_users — plus a completed
+	frame (empty drilldown_chain) e.g. bg_recheck_users plus a completed
 	phase-2 run on that function. The card MUST show the Line-Level callout."""
 	import json as _json
 	from types import SimpleNamespace as _NS
@@ -1256,7 +1256,7 @@ class TestFindingsRefinements:
 
 	def test_actionable_finding_without_fix_hint_has_no_fallback(self):
 		# Removed per user request: a Slow Hot Path with no fix_hint shows no
-		# generic "Where to start" box — the smoking-gun block already says
+		# generic "Where to start" box the smoking-gun block already says
 		# where the time went, and a boilerplate next-step only added noise.
 		doc = _fake_doc([_finding_child(finding_type="Slow Hot Path")])
 		html = renderer.render_raw(doc, recordings=[])

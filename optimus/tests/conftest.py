@@ -3,7 +3,7 @@
 
 """Pytest configuration for optimus analyzer tests.
 
-These tests are deliberately decoupled from Frappe — each analyzer is
+These tests are deliberately decoupled from Frappe each analyzer is
 a pure function over a list of recording dicts, so we can exercise them
 with JSON fixtures and no running site. Run with:
 
@@ -55,7 +55,7 @@ except ImportError:
 	def _stub_get_bench_path():
 		# Two levels above the package root, so a relpath of files inside
 		# the package against this value yields a tidy display like
-		# ``<package>/<package>/<file>.py`` — that's the shape the
+		# ``<package>/<package>/<file>.py``: that's the shape the
 		# ``_action_entry_callsite`` tests assert on (``endswith
 		# 'optimus/renderer.py'``).
 		here = os.path.abspath(__file__)  # .../optimus/tests/conftest.py
@@ -67,12 +67,12 @@ except ImportError:
 		m = _types.ModuleType(name)
 		# Mark every stub module as a package so submodule attribute access
 		# (e.g. ``frappe.utils.X`` after ``import frappe.utils.X``) works.
-		m.__path__ = []  # arbitrary — Python only needs the attribute to exist
+		m.__path__ = []  # arbitrary Python only needs the attribute to exist
 		for k, v in attrs.items():
 			setattr(m, k, v)
 		sys.modules[name] = m
 		# Link as an attribute on the parent module so ``frappe.utils`` style
-		# access works after ``import frappe.utils`` — Python's import machinery
+		# access works after ``import frappe.utils``: Python's import machinery
 		# normally does this, but only for real packages on disk.
 		if "." in name:
 			parent_name, leaf = name.rsplit(".", 1)
@@ -91,7 +91,7 @@ except ImportError:
 		# tmp_path fixtures pointing at /tmp/... aren't rejected. On a real
 		# bench the same path-resolution attempt raises RuntimeError from
 		# the unbound LocalProxy and the boundary check's outer try/except
-		# catches that — but the SimpleNamespace stub returns False instead
+		# catches that but the SimpleNamespace stub returns False instead
 		# of raising, so we have to set the flag explicitly here.
 		flags=_types.SimpleNamespace(in_test=True),
 		cache=_types.SimpleNamespace(),
@@ -105,7 +105,7 @@ except ImportError:
 		# Real frappe exposes a top-level ``frappe.has_permission`` (re-export of
 		# frappe.permissions.has_permission). The baseline stub must too:
 		# ``api._require_session_permission`` calls ``frappe.has_permission`` and now
-		# fails CLOSED if it raises — so a MISSING stub attribute (AttributeError)
+		# fails CLOSED if it raises so a MISSING stub attribute (AttributeError)
 		# would deny every session-scoped endpoint test. Default-allow here; the
 		# deny / fail-closed paths are covered explicitly in
 		# test_api_session_permission.py by monkeypatching this.
@@ -143,7 +143,7 @@ except ImportError:
 	)
 	_mk_module("frappe.database")
 	_mk_module("frappe.database.utils", is_query_type=lambda *a, **kw: False)
-	# ``rate_limit`` is a decorator factory — ``@rate_limit(key=..., limit=...,
+	# ``rate_limit`` is a decorator factory ``@rate_limit(key=..., limit=...,
 	# seconds=...)`` wraps API handlers in optimus/api.py. The stub returns a
 	# no-op decorator so the wrapped functions stay callable for tests.
 	_mk_module(
@@ -179,11 +179,11 @@ except ImportError:
 # This autouse fixture snapshots ``sys.modules`` BEFORE each test and
 # restores it AFTER, so any test's mutations are contained to that test
 # regardless of whether the test itself remembered to clean up. Cost per
-# test: a shallow ``dict()`` of ~hundreds of keys — well under 1ms.
+# test: a shallow ``dict()`` of ~hundreds of keys well under 1ms.
 #
 # Modules a test legitimately ADDS during its run (e.g. importing a fresh
 # patch module to ``importlib.reload`` it) are dropped from sys.modules
-# at teardown ONLY when they're one of the known pollution targets — so
+# at teardown ONLY when they're one of the known pollution targets so
 # we don't churn the import cache for unrelated tests, but we also don't
 # let stub-installed shims leak.
 _POLLUTION_PRONE_MODULES = frozenset({
@@ -194,7 +194,7 @@ _POLLUTION_PRONE_MODULES = frozenset({
 
 # optimus modules that ``import frappe`` at module top. Their
 # top-level binding captures whatever was in ``sys.modules["frappe"]``
-# AT IMPORT TIME — so if they get imported while a test has installed a
+# AT IMPORT TIME so if they get imported while a test has installed a
 # stub-frappe (and then the fence restores the real frappe at teardown),
 # their captured reference is now stale. We evict these from
 # ``sys.modules`` when we detect the frappe-swap so the next test
@@ -219,7 +219,7 @@ def _sys_modules_fence():
 	try:
 		yield
 	finally:
-		# Detect frappe-swap BEFORE we restore sys.modules — that's the
+		# Detect frappe-swap BEFORE we restore sys.modules that's the
 		# signal that cached optimus.* modules now hold stale refs.
 		frappe_was_swapped = (
 			"frappe" in sys.modules
@@ -242,7 +242,7 @@ def _sys_modules_fence():
 
 		# If frappe was swapped during this test, evict the cached
 		# frappe-dependent leaf modules. They captured the stub at module
-		# top during their import — restoring sys.modules doesn't repair
+		# top during their import restoring sys.modules doesn't repair
 		# that. Eviction forces a fresh import on next use, which rebinds
 		# their ``import frappe`` to the now-restored real module.
 		if frappe_was_swapped:
@@ -252,7 +252,7 @@ def _sys_modules_fence():
 
 @pytest.fixture(autouse=True)
 def _reset_dbdialect_cache():
-	"""Each test gets a fresh dialect adapter — prevents the cached
+	"""Each test gets a fresh dialect adapter prevents the cached
 	MariaDBDialect (and its max_connections cache) leaking across tests, and
 	lets the dialect-factory tests flip db_type freely."""
 	try:
@@ -287,7 +287,7 @@ def clean_recording():
 
 @pytest.fixture
 def empty_context():
-	"""Minimal AnalyzeContext — just enough to satisfy analyzer signatures."""
+	"""Minimal AnalyzeContext just enough to satisfy analyzer signatures."""
 	from optimus.analyzers.base import AnalyzeContext
 
 	return AnalyzeContext(session_uuid="test-uuid", docname="test-docname")

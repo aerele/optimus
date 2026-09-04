@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for optimus.line_profile.analyzer.analyze — the pure
+"""Tests for optimus.line_profile.analyzer.analyze the pure
 function that turns aggregated line-profile results into findings + per-
 function aggregate."""
 
@@ -109,7 +109,7 @@ class TestHotLineFinding:
 
 	def test_below_threshold_total_ms_no_finding(self):
 		# Even though one line is 100% of the function's time, total is
-		# only 30ms — below the 50ms Medium floor → no finding.
+		# only 30ms below the 50ms Medium floor → no finding.
 		fn = _function("my_app.x", [
 			_line(1, "trivial()", 1, 30.0),
 			_line(2, "more = 2", 1, 0.0),
@@ -141,7 +141,7 @@ class TestHotLineFinding:
 class TestFunctionNotInvoked:
 	# v0.7.x: a picked-but-uninvoked function no longer emits a per-function
 	# "Function Not Invoked" finding (it cluttered the Findings list). It's
-	# folded into ONE consolidated warning instead — the report stays clean.
+	# folded into ONE consolidated warning instead the report stays clean.
 	def test_empty_lines_emits_warning_not_finding(self):
 		fn = _function("my_app.never_runs", [])
 
@@ -236,7 +236,7 @@ class TestLeafPickAndChain:
 		result = analyzer.analyze([outer, inner])
 
 		hot = [f for f in result.findings if f["finding_type"] == "Hot Line"]
-		# Only one finding — the leaf.
+		# Only one finding the leaf.
 		assert len(hot) == 1
 		td = _json.loads(hot[0]["technical_detail_json"])
 		assert td["dotted_path"] == "my_app.common._check_user_exists"
@@ -279,7 +279,7 @@ class TestLeafPickAndChain:
 		assert [step["lineno"] for step in chain] == [2, 11, 21]
 
 	def test_leaf_only_function_finding_unchanged(self):
-		# Single function with a real leaf hot line — no chain, no hint.
+		# Single function with a real leaf hot line no chain, no hint.
 		fn = _function("my_app.x", [
 			_line(1, "for x in items:", 1000, 10.0),
 			_line(2, "    cache[x] = expensive(x)", 1000, 800.0),
@@ -294,7 +294,7 @@ class TestLeafPickAndChain:
 		assert "phase1_hint" not in td
 
 	def test_recursive_self_call_is_not_suppressed(self):
-		# A function that calls itself recursively — hot line is the
+		# A function that calls itself recursively hot line is the
 		# recursive call. Self-recursion shouldn't trigger pass-through
 		# suppression; the finding stands.
 		fn = _function("my_app.recur", [
@@ -361,7 +361,7 @@ class TestLeafPickAndChain:
 		assert "_check_user_exists" in hot[0]["customer_description"]
 
 	def test_no_phase1_hint_when_no_eligible_descendant(self):
-		# Hot line content doesn't look like a call site — no hint.
+		# Hot line content doesn't look like a call site no hint.
 		fn = _function("my_app.common.heavy_arith", [
 			_line(1, "def heavy_arith(n):", 1, 0.0),
 			_line(2, "    return sum(i*i for i in range(n))", 1, 600.0),  # not a call site
@@ -385,7 +385,7 @@ class TestLeafPickAndChain:
 
 
 # ---------------------------------------------------------------------------
-# Realtime targeting — phase-2 events must reach the session OWNER's Desk tab.
+# Realtime targeting phase-2 events must reach the session OWNER's Desk tab.
 # run_analyze runs in an RQ worker with no browser socket, so publish_realtime
 # needs an explicit user (a None target won't reach the form). This pins that
 # _publish forwards the payload's "user" as the target.

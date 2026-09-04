@@ -76,13 +76,13 @@ def test_truncate_finding_titles_clamps_overlong():
 	push past the limit. Clamping prevents CharacterLengthExceededError
 	from destroying the whole analyze pipeline."""
 	findings = [
-		# Under the limit — untouched.
+		# Under the limit untouched.
 		{"title": "Short title"},
-		# Exactly at the limit — untouched.
+		# Exactly at the limit untouched.
 		{"title": "A" * 140},
-		# One over the limit — must be clamped to 140 and end with "...".
+		# One over the limit must be clamped to 140 and end with "...".
 		{"title": "B" * 141},
-		# Far over the limit — must be clamped to exactly 140.
+		# Far over the limit must be clamped to exactly 140.
 		{"title": "C" * 500},
 		# The production payload that started this bug.
 		{
@@ -106,7 +106,7 @@ def test_truncate_finding_titles_clamps_overlong():
 	assert len(findings[3]["title"]) == 140
 	assert findings[3]["title"].endswith("...")
 
-	# Production payload — was 144 chars, must now be <= 140.
+	# Production payload was 144 chars, must now be <= 140.
 	assert len(findings[4]["title"]) <= 140
 
 

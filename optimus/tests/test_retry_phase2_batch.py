@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.6.x: surface tests for ``api.retry_phase2_analyzes_batch`` — the
+"""v0.6.x: surface tests for ``api.retry_phase2_analyzes_batch``: the
 batched retry endpoint that replaces the per-run ``frappe.call(...)`` loop
 in ``optimus_session.js``. Pattern: source-inspect (mirrors
 ``test_suggest_fix_api.py``)."""
@@ -61,7 +61,7 @@ class TestRetryPhase2BatchEndpoint:
 		assert "non-empty list" in body
 
 	def test_isolates_per_row_failures(self):
-		"""One bad run_uuid must NOT abort the rest of the batch — that's
+		"""One bad run_uuid must NOT abort the rest of the batch that's
 		the whole point of moving the loop server-side."""
 		body = _fn_body("retry_phase2_analyzes_batch")
 		# Each iteration is wrapped in try/except.
@@ -78,7 +78,7 @@ class TestRetryPhase2BatchEndpoint:
 
 	def test_delegates_to_retry_phase2_analyze(self):
 		"""The batched endpoint should reuse the single-run logic, not
-		duplicate it — otherwise drift between the two paths is inevitable."""
+		duplicate it otherwise drift between the two paths is inevitable."""
 		body = _fn_body("retry_phase2_analyzes_batch")
 		assert "retry_phase2_analyze(run_uuid)" in body
 
@@ -94,7 +94,7 @@ class TestRetryPhase2BatchJsCall:
 
 	def test_js_threshold_is_two_or_more_stuck_runs(self):
 		"""The batch button must only appear when batching actually
-		saves round-trips — i.e. 2+ stuck runs. One stuck run still
+		saves round-trips i.e. 2+ stuck runs. One stuck run still
 		uses the per-run button."""
 		js = _read(_JS_PATH)
 		assert "stuck_runs.length >= 2" in js

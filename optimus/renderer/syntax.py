@@ -16,19 +16,19 @@ Two responsibilities:
     explicit language hint), and wraps each ``+`` / ``-`` / ``@@`` line
     in a classed span so the template's CSS can colour the diff.
 
-Pygments is loaded lazily inside :func:`_ensure_pygments` — paths that
+Pygments is loaded lazily inside :func:`_ensure_pygments`: paths that
 never highlight code (DocType save callbacks, janitor sweeps, the bulk
 of the regenerate path) don't pay the ~30-50ms import cost at app load.
 Module-level slots are populated on first use and cached for the worker
 process's lifetime.
 
-The :func:`_highlight_python_block_cached` LRU has ``maxsize=512`` — large
+The :func:`_highlight_python_block_cached` LRU has ``maxsize=512``: large
 enough that overlapping snippets across N findings tokenise the same
 underlying source exactly once, small enough that the cache fits in the
 worker's heap on extreme-session sizes.
 
 Failures degrade silently: when Pygments is unavailable or tokenisation
-raises (rare — malformed source), the row's ``content_html`` is set to
+raises (rare malformed source), the row's ``content_html`` is set to
 ``None`` and the template falls back to the plain-text ``content``. The
 report stays readable; only the colour goes away.
 """
@@ -147,7 +147,7 @@ def _highlight_all_snippets(actions, all_findings):
 
 
 # ---------------------------------------------------------------------------
-# Diff-block highlighting — used by the AI fix card
+# Diff-block highlighting used by the AI fix card
 # ---------------------------------------------------------------------------
 
 # <pre> block, optionally wrapping a <code>...</code> (with or without a class).
@@ -178,14 +178,14 @@ def _diff_line_class(line: str) -> str | None:
 
 def _highlight_diff_html(html: str) -> str:
 	"""Wrap +/-/@@ lines inside diff-looking ``<pre>`` blocks in classed
-	spans. Pure string transform over already-sanitized HTML — only adds
+	spans. Pure string transform over already-sanitized HTML only adds
 	``<span class="dh-…">`` wrappers around existing escaped text."""
 
 	def _wrap(match: re.Match) -> str:
 		code_attrs = match.group(1) or ""
 		inner = match.group(2) or ""
 		lines = inner.split("\n")
-		# A trailing "" from the markdown renderer's final newline — drop it
+		# A trailing "" from the markdown renderer's final newline drop it
 		# so we don't emit an empty trailing block-span.
 		if lines and lines[-1] == "":
 			lines = lines[:-1]

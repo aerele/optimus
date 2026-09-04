@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for ``optimus.api.refill_ai_suggestions`` — the single-button
+"""Tests for ``optimus.api.refill_ai_suggestions``: the single-button
 entry point that replaces the five legacy AI buttons.
 
 The endpoint chains three core helpers (``_run_ai_backfill``,
@@ -41,7 +41,7 @@ def _row(name="opt-xxx", user="user@example.com", status="Ready", title="t"):
 
 
 def _fake_doc():
-	"""Minimal Optimus Session doc — only `name` is touched by the
+	"""Minimal Optimus Session doc only `name` is touched by the
 	endpoint's orchestration; the helpers are mocked, so the doc body
 	doesn't matter."""
 	return SimpleNamespace(name="opt-xxx", actions=[], findings=[], table_breakdown_json="[]")
@@ -73,7 +73,7 @@ def test_refill_runs_all_three_steps(mock_session_environment, monkeypatch):
 	"""Happy path: every toggle is on, every helper runs once, and the
 	per-step status dict surfaces the counts."""
 	from optimus import ai_fix
-	from optimus.settings import get_config  # noqa: F401 — we patch this below
+	from optimus.settings import get_config  # noqa: F401 we patch this below
 
 	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
 	monkeypatch.setattr("optimus.settings.get_config", lambda: _cfg())

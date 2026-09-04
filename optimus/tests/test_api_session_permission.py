@@ -3,7 +3,7 @@
 
 """_require_session_permission is the per-session ownership gate the phase-2
 (and report/AI/export) endpoints rely on. It must fail CLOSED: deny when
-has_permission returns False AND when has_permission itself raises — a
+has_permission returns False AND when has_permission itself raises a
 permission check that errors must never downgrade to the role-only gate."""
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ def _throw(msg=None, exc=None, **k):
 
 
 def _patch(monkeypatch, *, has_permission):
-	# frappe.db is a Werkzeug Local proxy — replace it wholesale, never patch
+	# frappe.db is a Werkzeug Local proxy replace it wholesale, never patch
 	# its attributes (reading an unbound proxy attr raises RuntimeError). Real
 	# frappe.throw touches the unbound frappe.local, so stub it too.
 	monkeypatch.setattr(

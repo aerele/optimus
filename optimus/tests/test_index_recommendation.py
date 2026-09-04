@@ -24,12 +24,12 @@ import pytest
 
 # Imported at module top (collection time) so a later test that swaps
 # sys.modules['frappe'] / drops optimus.* can't trigger a *re-import*
-# of analyze.py — whose `from frappe.recorder import RECORDER_REQUEST_HASH`
+# of analyze.py whose `from frappe.recorder import RECORDER_REQUEST_HASH`
 # blows up under that pollution. The module object stays usable via this name.
 from optimus import analyze as _analyze  # noqa: E402
 
 # --------------------------------------------------------------------------
-# table_breakdown — co-occurrence → recommended_index
+# table_breakdown co-occurrence → recommended_index
 # --------------------------------------------------------------------------
 
 def _rec(calls):
@@ -61,7 +61,7 @@ class TestRecommendedIndex:
 		assert rec["read_count"] == 4
 
 	def test_columns_ordered_by_usage_frequency(self):
-		# customer in the most reads, then posting_date, then status — all
+		# customer in the most reads, then posting_date, then status all
 		# three filtered together in 2 reads (the dominant combo). The
 		# composite is ordered by per-column hit frequency.
 		bd = self._analyze([_rec([
@@ -118,7 +118,7 @@ class TestRecommendedIndex:
 
 
 # --------------------------------------------------------------------------
-# analyzers.base — write-hot table truth table
+# analyzers.base write-hot table truth table
 # --------------------------------------------------------------------------
 
 def test_is_write_hot_table_truth_table():
@@ -131,7 +131,7 @@ def test_is_write_hot_table_truth_table():
 
 
 # --------------------------------------------------------------------------
-# report.html — the "Index candidate" panel
+# report.html the "Index candidate" panel
 # --------------------------------------------------------------------------
 
 def _doc(table_breakdown):
@@ -186,7 +186,7 @@ class TestRenderedIndexCandidatePanel:
 
 		entry = _table_entry()
 		entry["ai_index"] = {
-			"suggestion": "**Recommendation**\n\nNothing — `idx_customer_date` already covers it.",
+			"suggestion": "**Recommendation**\n\nNothing `idx_customer_date` already covers it.",
 			"model": "claude-sonnet-4-6", "provider": "Anthropic",
 			"generated_at": "2026-05-12T00:00:00+00:00",
 		}
@@ -227,7 +227,7 @@ class TestRenderedIndexCandidatePanel:
 
 
 # --------------------------------------------------------------------------
-# ai_fix — _build_index_messages / suggest_index
+# ai_fix _build_index_messages / suggest_index
 # --------------------------------------------------------------------------
 
 class _FakeResp:
@@ -309,12 +309,12 @@ class TestAiSuggestIndex:
 
 
 # --------------------------------------------------------------------------
-# analyze — helpers + auto-enrich gating
+# analyze helpers + auto-enrich gating
 # --------------------------------------------------------------------------
 
 class TestAnalyzeIndexHelpers:
 	def test_table_existing_indexes_handles_unreadable_table(self):
-		# In the test env frappe.db is unavailable / the table doesn't exist —
+		# In the test env frappe.db is unavailable / the table doesn't exist
 		# the helper must swallow it and return [].
 		assert _analyze._table_existing_indexes("tabDefinitelyNotARealTable") == []
 
@@ -325,7 +325,7 @@ class TestAnalyzeIndexHelpers:
 			{"Key_name": "idx_cust_date", "Seq_in_index": 1, "Column_name": "customer", "Non_unique": 1},
 		]
 		# _table_existing_indexes now delegates to the dialect adapter, which
-		# reads the global ``frappe.db`` — patch that (the dialect tests' shape).
+		# reads the global ``frappe.db``: patch that (the dialect tests' shape).
 		import frappe
 		monkeypatch.setattr(
 			frappe, "db",
@@ -342,7 +342,7 @@ class TestAnalyzeIndexHelpers:
 	def test_table_index_sample_queries_picks_selects_on_table(self):
 		recs = [{"calls": [
 			{"query": "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND status = ?"},
-			{"query": "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND status = ?"},  # dupe — deduped
+			{"query": "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND status = ?"},  # dupe deduped
 			{"query": "UPDATE `tabSales Invoice` SET status = ? WHERE name = ?"},                 # not a SELECT
 			{"query": "SELECT name FROM `tabItem` WHERE item_code = ?"},                          # other table
 		]}]
@@ -377,7 +377,7 @@ class TestAnalyzeIndexHelpers:
 
 
 # --------------------------------------------------------------------------
-# api.suggest_index — source-inspection contract
+# api.suggest_index source-inspection contract
 # --------------------------------------------------------------------------
 
 def _api_src():

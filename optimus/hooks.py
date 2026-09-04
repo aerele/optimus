@@ -24,7 +24,7 @@ required_apps = ["frappe"]
 # Cache-Control: max-age=43200, 12h). A real user report showed
 # realtime-event code shipped in v0.5.2 was still running the v0.5.1
 # HTTP-polling code in the browser because the cache-buster URL
-# /assets/.../floating_widget.js?v=0.5.1 was unchanged — the version
+# /assets/.../floating_widget.js?v=0.5.1 was unchanged the version
 # wasn't bumped when JS was edited. Using mtime auto-invalidates on
 # every file edit during development, and still includes __version__
 # so release-to-release upgrades invalidate cleanly on production
@@ -37,7 +37,7 @@ from optimus import __version__ as _frappe_profiler_version
 def _asset_version(relative_path: str) -> str:
 	"""Return ``<__version__>.<mtime>`` for a file under public/, or
 	just ``<__version__>`` if the file can't be stat'd (unlikely on a
-	healthy install — defensive so the hooks file never fails to
+	healthy install defensive so the hooks file never fails to
 	load).
 
 	The mtime component means ANY edit to the JS/CSS auto-invalidates
@@ -78,7 +78,7 @@ before_uninstall = "optimus.install.before_uninstall"
 # ------------
 # Attaches `optimus_enabled` to `frappe.boot` so the floating widget
 # can hide itself when the master kill-switch is off. Without this,
-# an admin who disables Optimus Settings still sees the widget —
+# an admin who disables Optimus Settings still sees the widget
 # which is a dead button (clicking Start does nothing because
 # before_request short-circuits). See floating_widget.js for the
 # corresponding client-side guard.
@@ -91,7 +91,7 @@ boot_session = "optimus.boot.boot_session"
 # (and is a no-op without the global flag). Our hook then decides per-user
 # whether to force-activate the recorder for this request.
 #
-# For HTTP, after_request runs in application()'s finally BEFORE frappe.recorder.dump() (WSGI ClosingIterator), so the recorder hash isn't written yet — data to attach must ride an Optimus sidecar key merged at analyze time, never an RMW of the recorder hash (jobs reverse the order: dump before after_job).
+# For HTTP, after_request runs in application()'s finally BEFORE frappe.recorder.dump() (WSGI ClosingIterator), so the recorder hash isn't written yet data to attach must ride an Optimus sidecar key merged at analyze time, never an RMW of the recorder hash (jobs reverse the order: dump before after_job).
 
 before_request = [
 	"optimus.hooks_callbacks.before_request",

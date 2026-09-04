@@ -10,16 +10,16 @@ key argument. Inline f-string keys (``f"profiler:..."`` /
 ``f"optimus:..."``) inside a ``frappe.cache.X(...)`` call are orphans
 and fail this test. The audit also asserts the doc inventory
 (``docs/REDIS-SCHEMA.md``) matches the canonical
-:data:`optimus.redis_keys.KEY_PATTERNS` tuple — drift in either
+:data:`optimus.redis_keys.KEY_PATTERNS` tuple drift in either
 direction fails CI.
 
 Excluded:
-  * ``optimus/tests/`` and ``optimus/tests_integration/`` — test
+  * ``optimus/tests/`` and ``optimus/tests_integration/``: test
     fixtures legitimately stub Redis keys.
-  * ``optimus/patches/`` — one-shot DocType migration scripts; their
+  * ``optimus/patches/``: one-shot DocType migration scripts; their
     literal-key uses are by design (cleaning up specific legacy keys
     by name).
-  * ``optimus/redis_keys.py`` itself — the f-string definitions inside
+  * ``optimus/redis_keys.py`` itself the f-string definitions inside
     the builder bodies ARE the canonical strings.
 
 The session.py and line_profile/capture.py modules carry their own
@@ -36,14 +36,14 @@ from pathlib import Path
 
 from optimus import redis_keys
 
-# Excluded directories — every .py file under these paths is skipped.
+# Excluded directories every .py file under these paths is skipped.
 EXCLUDED_DIRS = (
 	"optimus/tests/",
 	"optimus/tests_integration/",
 	"optimus/patches/",
 )
 
-# Excluded files — the audit's own canonical-string definitions live
+# Excluded files the audit's own canonical-string definitions live
 # here, so the f-strings inside :mod:`optimus.redis_keys` are legitimate.
 EXCLUDED_FILES = (
 	"optimus/redis_keys.py",
@@ -101,10 +101,10 @@ def _find_orphan_inline_keys() -> list[str]:
 			# starts with an Optimus namespace prefix, it's an orphan.
 			# Multi-line cache calls (where the key is on the next line
 			# via a continuation) require the f-string + the prefix to
-			# co-occur with the cache call — i.e. the WRITER wrote
+			# co-occur with the cache call i.e. the WRITER wrote
 			# `frappe.cache.X(f"profiler:..."` inline. If the key was
 			# extracted to a previous line via a helper call, this
-			# pattern won't match — and that's the desired behaviour.
+			# pattern won't match and that's the desired behaviour.
 			if _INLINE_KEY_RE.search(line):
 				orphans.append(f"{posix}:{i + 1}  {line.strip()}")
 	return orphans
@@ -130,7 +130,7 @@ def _parse_documented_patterns(doc_text: str) -> list[str]:
 class TestEveryRedisCallUsesKeyBuilder:
 	"""Drift canary: no inline f-string keys inside ``frappe.cache.X(...)``
 	calls outside the exclusion list. If this fails, you wrote a
-	``frappe.cache.set_value(f"profiler:...", ...)`` call — refactor it
+	``frappe.cache.set_value(f"profiler:...", ...)`` call refactor it
 	to call ``optimus.redis_keys.<feature>(...)`` instead (add a builder
 	if one doesn't exist)."""
 
@@ -170,7 +170,7 @@ class TestSchemaSentinel:
 
 	def test_write_sentinel_idempotent(self, monkeypatch):
 		# Install a tiny frappe.cache stub that stores set_value /
-		# get_value in a dict — exercises the real code path without
+		# get_value in a dict exercises the real code path without
 		# needing a bench.
 		import sys
 		from types import SimpleNamespace
@@ -209,7 +209,7 @@ class TestWrapUnwrap:
 		assert version == redis_schema.SCHEMA_VERSION
 
 	def test_unwrap_legacy_returns_none_version(self):
-		"""A bare dict (pre-v0.12.0 shape) flows through as-is — no
+		"""A bare dict (pre-v0.12.0 shape) flows through as-is no
 		envelope, no drift."""
 		from optimus import redis_schema
 

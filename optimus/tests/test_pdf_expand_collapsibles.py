@@ -18,7 +18,7 @@ import types
 import pytest
 
 # pdf_export.py imports frappe at module top. Stub it for this
-# pure-string-transformation test — scoped to a per-test fixture so the
+# pure-string-transformation test scoped to a per-test fixture so the
 # stub doesn't leak to other test files (was a suite-wide pollution
 # source before the conftest fence; even with the fence, doing this
 # via fixture makes the contract explicit and auto-restoring).

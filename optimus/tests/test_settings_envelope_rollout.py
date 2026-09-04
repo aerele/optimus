@@ -6,16 +6,16 @@ to the v0.12.0 ``wrap_value`` / ``unwrap_value`` envelope.
 
 The rollout has three contract pieces under test:
 
-  1. **Write path** — a fresh ``get_config`` call that misses the cache
+  1. **Write path**: a fresh ``get_config`` call that misses the cache
      re-resolves via ``_resolve`` and stores the OptimusConfig field dict
      INSIDE the envelope (``{"_v": 1, "data": {...}}``), not as a bare
      dict.
-  2. **New-shape read path** — a ``get_config`` call against a cache that
+  2. **New-shape read path**: a ``get_config`` call against a cache that
      already holds an enveloped value unwraps cleanly and returns a
      valid OptimusConfig.
-  3. **Legacy-compat read path** — a ``get_config`` call against a cache
+  3. **Legacy-compat read path**: a ``get_config`` call against a cache
      that holds a PRE-v0.12.11 bare-dict value (no ``_v`` key) ALSO
-     unwraps cleanly. This is the migration-safety guarantee — readers
+     unwraps cleanly. This is the migration-safety guarantee readers
      that get rolled out before writers (e.g. a worker on the new code
      hits a Redis value left over from a worker on the old code) must
      NOT crash.
@@ -110,11 +110,11 @@ class TestSettingsEnvelopeWrite:
 		)
 		# Version pins to the current SCHEMA_VERSION (= 1 in v0.12.0
 		# baseline). If the test starts failing on a future bump, that's
-		# the migration moment — bump together with redis_schema.
+		# the migration moment bump together with redis_schema.
 		from optimus.redis_schema import SCHEMA_VERSION
 
 		assert stored["_v"] == SCHEMA_VERSION
-		# Payload is the OptimusConfig.__dict__ shape — same keys the
+		# Payload is the OptimusConfig.__dict__ shape same keys the
 		# OptimusConfig dataclass exposes.
 		assert isinstance(stored["data"], dict)
 		assert "ai_enabled" in stored["data"]
@@ -154,7 +154,7 @@ class TestSettingsEnvelopeLegacyCompat:
 	def test_hit_on_legacy_bare_dict_returns_config(self):
 		fresh = _fresh_settings_module()
 		cache = _FakeCache()
-		# Pre-seed with a BARE OptimusConfig field dict — no envelope, no
+		# Pre-seed with a BARE OptimusConfig field dict no envelope, no
 		# ``_v`` key. This is exactly what pre-v0.12.11 writers stored.
 		seed_payload = fresh.OptimusConfig().__dict__
 		cache.store[fresh._CACHE_KEY] = seed_payload
@@ -164,7 +164,7 @@ class TestSettingsEnvelopeLegacyCompat:
 			cfg = fresh.get_config()
 
 		assert cfg is not None
-		# CRITICAL: the legacy value was NOT discarded — it was used
+		# CRITICAL: the legacy value was NOT discarded it was used
 		# as-is. (Migrating legacy values on read is explicitly OUT of
 		# scope for the rollout; the next on_update cache invalidation
 		# + re-resolve will produce a new-shape envelope.)
@@ -183,7 +183,7 @@ class TestSettingsEnvelopeDriftHandling:
 	def test_drift_falls_through_to_resolve(self):
 		fresh = _fresh_settings_module()
 		cache = _FakeCache()
-		# Seed with an envelope tagged as schema version 999 — a future
+		# Seed with an envelope tagged as schema version 999 a future
 		# version this build doesn't recognise.
 		cache.store[fresh._CACHE_KEY] = {"_v": 999, "data": {"ai_enabled": True}}
 		frappe_stub = _stub_frappe(cache)

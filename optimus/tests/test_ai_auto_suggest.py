@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for analyze._enrich_findings_with_ai_suggestions — the optional
+"""Tests for analyze._enrich_findings_with_ai_suggestions the optional
 "bake AI fixes into the report" step (Optimus Settings ▸ AI Fix
 Suggestions ▸ "Suggest AI fixes by default").
 
@@ -184,7 +184,7 @@ class TestSelectionAndPersistence:
 
 
 # --------------------------------------------------------------------------
-# _backfill_ai_suggestions — the regenerate-time path for existing sessions
+# _backfill_ai_suggestions the regenerate-time path for existing sessions
 # --------------------------------------------------------------------------
 
 class _Row(SimpleNamespace):
@@ -220,7 +220,7 @@ class _FakeDB:
 
 
 def _fake_frappe():
-	"""A stand-in for analyze.py's module-global ``frappe`` — just enough
+	"""A stand-in for analyze.py's module-global ``frappe``: just enough
 	for _backfill_ai_suggestions (``frappe.db.set_value`` / ``.commit`` and
 	``frappe.log_error``). Patching ``analyze.frappe`` directly sidesteps
 	the suite's ``sys.modules['frappe']`` reload pollution."""
@@ -299,7 +299,7 @@ class TestRunAiBackfillCore:
 			_row("F4", "Memory Pressure", "High", 9),  # ineligible type
 		]
 		doc = SimpleNamespace(findings=rows)
-		# No ai_auto_suggest gate here — _run_ai_backfill only needs
+		# No ai_auto_suggest gate here _run_ai_backfill only needs
 		# is_available(). cap=0 → no cap.
 		p1, p2, p3 = _patches(_cfg(ai_auto_suggest=False))
 		with p1, p2, p3, patch.object(analyze, "frappe", _fake_frappe()) as fk:
@@ -356,12 +356,12 @@ class TestRunAiBackfillCore:
 		assert fk.db.writes == []
 
 	def test_regenerate_all_overwrites_existing(self):
-		# Two eligible findings — one already has a (stale) suggestion. With
+		# Two eligible findings one already has a (stale) suggestion. With
 		# regenerate_all=True BOTH get re-generated and overwritten.
 		rows = [
 			_row("F1", "N+1 Query", "High", 500, llm_fix_json='{"suggestion":"STALE"}'),
 			_row("F2", "Slow Query", "Medium", 200),
-			_row("F3", "Memory Pressure", "High", 9),  # ineligible — still skipped
+			_row("F3", "Memory Pressure", "High", 9),  # ineligible still skipped
 		]
 		doc = SimpleNamespace(findings=rows)
 		p1, p2, p3 = _patches(_cfg(ai_auto_suggest=False))

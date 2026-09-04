@@ -4,7 +4,7 @@
 """Unit tests for the optimus.settings cached reader.
 
 The reader is the single place analyzers and hooks call to resolve
-configuration — threshold values, the enabled toggle, the tracked-
+configuration threshold values, the enabled toggle, the tracked-
 apps allowlist. Tests here pin the precedence (DocType > site_config
 > default), the soft-fail behavior (never crash a request), and the
 dataclass immutability that makes caching safe.
@@ -20,7 +20,7 @@ import pytest
 # NOTE at the top of optimus/settings.py), so a frappe stub
 # isn't needed at module-load time. But a handful of tests below DO
 # need ``frappe.cache.get_value`` to exist (so they can patch it). We
-# install a per-test stub via an autouse fixture below — that way the
+# install a per-test stub via an autouse fixture below that way the
 # stub doesn't leak to other test files (was the leading source of the
 # "80 failed" pollution: a module-level ``sys.modules["frappe"] = stub``
 # replaced the real frappe for the entire pytest session).
@@ -75,7 +75,7 @@ class TestDefaults:
 		assert cfg.redundant_perm_threshold == 10
 		assert cfg.n_plus_one_min_occurrences == 10
 		# v0.5.3: per-recording EXPLAIN / enrichment cap. Fallback
-		# default is 2000 — comfortable for most flows, with a clear
+		# default is 2000 comfortable for most flows, with a clear
 		# banner when truncation kicks in for heavier flows.
 		assert cfg.max_queries_per_recording == 2000
 
@@ -142,7 +142,7 @@ class TestSoftFail:
 
 	def test_is_enabled_defaults_true_on_error(self, monkeypatch):
 		"""If the settings read crashes, is_enabled must return True.
-		Returning False would silently disable the profiler — a very
+		Returning False would silently disable the profiler a very
 		confusing support issue ('why isn't it recording anything?')."""
 		def boom():
 			raise RuntimeError("cache down")
@@ -159,7 +159,7 @@ class TestSoftFail:
 class TestTrackedApps:
 	def test_tracked_apps_normalized_to_tuple(self, monkeypatch):
 		"""tracked_apps must be a tuple in the dataclass so it's
-		hashable / immutable. Input from the DocType is a list — the
+		hashable / immutable. Input from the DocType is a list the
 		reader must convert."""
 		monkeypatch.setattr(
 			settings, "_read_doctype_row",
@@ -172,7 +172,7 @@ class TestTrackedApps:
 
 
 class TestIgnoredApps:
-	"""v0.6.x: 'Ignored Apps' — exclusion list whose findings are dropped from
+	"""v0.6.x: 'Ignored Apps' exclusion list whose findings are dropped from
 	the report. Mirrors the tracked_apps wiring."""
 
 	def test_default_seeds_framework_apps(self):

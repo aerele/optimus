@@ -11,7 +11,7 @@ Two related changes:
      5000 or 10000 to get full-coverage analysis.
 
   2. When truncation happens, a prominent red banner renders at the
-     TOP of the report — above the exec-summary card. Previously
+     TOP of the report above the exec-summary card. Previously
      the warning was buried in the collapsed Analyzer Notes at the
      bottom, and developers read incomplete reports without
      noticing.
@@ -86,7 +86,7 @@ class TestTruncationBannerRenders:
 		scrolling at the headline won't see the warning.
 		v0.7.x redesign: the exec-summary card was replaced by the
 		TL;DR hero (mock spec). The banner-must-come-before-the-most-
-		prominent-content rule still applies — the prominent block
+		prominent-content rule still applies the prominent block
 		just changed identity."""
 		from optimus import renderer
 
@@ -128,7 +128,7 @@ class TestTruncationBannerRenders:
 
 	def test_banner_absent_when_warnings_are_not_truncation(self):
 		"""Other analyzer warnings (framework-filter, alias-suppression,
-		etc.) must NOT trigger the truncation banner — it's specifically
+		etc.) must NOT trigger the truncation banner it's specifically
 		for the TRUNCATED marker. (The 'Analyzer notes' section that used
 		to list these was removed, so the warning isn't rendered at all.)"""
 		from optimus import renderer

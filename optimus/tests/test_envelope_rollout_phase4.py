@@ -7,18 +7,18 @@ in ``optimus.session``).
 
 The previous phases covered settings_cache (v0.12.11),
 retention_backlog + onboarding_seen (v0.12.13), and explain_cache
-(v0.12.17). This phase adds ``session_meta`` — the session-scoped
+(v0.12.17). This phase adds ``session_meta``: the session-scoped
 context dict written by ``api.start`` (and updated throughout the
 session's life) and read on every recording's before_request /
 before_job hook.
 
 The contract under test:
 
-  1. **Write path** — ``set_session_meta`` wraps via ``wrap_value``.
-  2. **Read path** — ``get_session_meta`` unwraps via ``unwrap_value``.
-  3. **Legacy compat** — pre-v0.12.21 cached values (bare dict) still
+  1. **Write path**: ``set_session_meta`` wraps via ``wrap_value``.
+  2. **Read path**: ``get_session_meta`` unwraps via ``unwrap_value``.
+  3. **Legacy compat**: pre-v0.12.21 cached values (bare dict) still
      return cleanly through the legacy-detection branch.
-  4. **Defensive non-dict guard** — if a future-version envelope or
+  4. **Defensive non-dict guard**: if a future-version envelope or
      a corrupt write returns a non-dict payload, ``get_session_meta``
      returns ``None`` rather than crashing downstream callers.
 """
@@ -31,7 +31,7 @@ from unittest import mock
 
 
 class _FakeCache:
-	"""Dict-backed ``frappe.cache`` substitute — same shape as the
+	"""Dict-backed ``frappe.cache`` substitute same shape as the
 	other envelope-rollout test modules use."""
 
 	def __init__(self) -> None:
@@ -133,7 +133,7 @@ class TestSessionMetaEnvelopeRead:
 			assert session.get_session_meta("never-written") is None
 
 	def test_get_session_meta_returns_none_for_corrupt_non_dict(self):
-		"""Defensive guard — if a corrupt write stored a non-dict /
+		"""Defensive guard if a corrupt write stored a non-dict /
 		non-envelope value, get_session_meta returns None rather than
 		passing it through to callers (which would crash on
 		``.get(...)``)."""

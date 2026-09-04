@@ -17,7 +17,7 @@ It cannot prove:
   * That the report fetched from the **on-disk File attachment**
     (after ``api.regenerate_reports`` writes it through Frappe's
     real ``file_manager``) is still self-contained. File encoding,
-    Frappe's file-handling middleware, the post-write read path —
+    Frappe's file-handling middleware, the post-write read path
     all could theoretically introduce reference resolution that the
     unit-suite render doesn't see.
   * That the rendered HTML doesn't accidentally reference live-bench
@@ -116,7 +116,7 @@ class TestSafeReportSelfContainedOnRealBench(FrappeTestCase):
 		return doc
 
 	def _read_rendered_html(self, session_name: str) -> str:
-		"""Read raw_report_file content via the File doc — exercises
+		"""Read raw_report_file content via the File doc exercises
 		the same retrieval path a downstream consumer would use."""
 		file_url = frappe.db.get_value(_SESSION_DOCTYPE, session_name, "raw_report_file")
 		assert file_url, f"raw_report_file not set for {session_name!r}"
@@ -130,7 +130,7 @@ class TestSafeReportSelfContainedOnRealBench(FrappeTestCase):
 
 	def test_on_disk_report_has_no_remote_resource_urls(self):
 		"""Mirrors the unit-suite canary (``test_report_a11y.py:143``)
-		against the on-disk HTML. No external resource loads — no
+		against the on-disk HTML. No external resource loads no
 		``https?:`` in ``src=``, no ``https?:`` in ``<link href=``,
 		no ``@import``, no ``url(http``. ``data:`` URIs (the masthead
 		logo) and anchor links (https://aerele.in) are explicitly
@@ -141,35 +141,35 @@ class TestSafeReportSelfContainedOnRealBench(FrappeTestCase):
 		flat = html.replace(" ", "").replace("'", "").replace('"', "")
 
 		assert not re.search(r'src\s*=\s*["\']https?:', html), (
-			"safe-report HTML contains a remote img/script src — breaks "
+			"safe-report HTML contains a remote img/script src breaks "
 			"the offline / dev-shop-interchange guarantee"
 		)
 		assert not re.search(r'<link\b[^>]*href\s*=\s*["\']https?:', html), (
-			"safe-report HTML loads a remote stylesheet — breaks the offline / dev-shop-interchange guarantee"
+			"safe-report HTML loads a remote stylesheet breaks the offline / dev-shop-interchange guarantee"
 		)
-		assert "@import" not in html, "safe-report HTML uses @import — could fetch over network"
-		assert "url(http" not in flat, "safe-report HTML embeds url(http...) — breaks offline"
+		assert "@import" not in html, "safe-report HTML uses @import could fetch over network"
+		assert "url(http" not in flat, "safe-report HTML embeds url(http...) breaks offline"
 		# Sanity check: at least one HUMAN-facing anchor link exists
 		# (so the negative checks above aren't trivially passing on an
 		# empty / error page).
 		assert re.search(r'<a [^>]*href="https?://', html), (
-			"safe-report HTML has no human-facing anchor — the rendered "
+			"safe-report HTML has no human-facing anchor the rendered "
 			"page may be a stub or error, making the negative checks "
 			"vacuously true"
 		)
 
 	def test_on_disk_report_has_no_inline_or_external_javascript(self):
-		"""The renderer must not emit any ``<script>`` tag — neither
+		"""The renderer must not emit any ``<script>`` tag neither
 		inline JS nor an external ``<script src="...">``. This is a
 		stronger constraint than the canary: the safe report is also
 		a JS-free document, which is part of why it's safe to open in
 		an arbitrary browser without consent."""
-		# Case-insensitive substring check — the renderer might emit
+		# Case-insensitive substring check the renderer might emit
 		# uppercase or mixed-case tag names in some pre-existing
 		# block (e.g., template comments). The contract is "no
 		# script tag in any form."
 		assert "<script" not in self._html.lower(), (
-			"safe-report HTML contains a <script tag — should be JS-free "
+			"safe-report HTML contains a <script tag should be JS-free "
 			"per the self-contained-offline contract"
 		)
 
@@ -177,7 +177,7 @@ class TestSafeReportSelfContainedOnRealBench(FrappeTestCase):
 		"""Bench asset URLs (``/assets/...``, ``/files/...``,
 		``/api/method/...``) would render fine when opened from the
 		live bench but break the moment the file is moved off-bench.
-		The safe report must be **fully** self-contained — neither
+		The safe report must be **fully** self-contained neither
 		external NOR bench-local asset references."""
 		html = self._html
 		# These patterns scope to attribute-value positions so we don't
@@ -185,10 +185,10 @@ class TestSafeReportSelfContainedOnRealBench(FrappeTestCase):
 		# "/assets" as part of a code snippet or finding description.
 		assert not re.search(r'(?:src|href)\s*=\s*["\']/(?:assets|files)/', html), (
 			"safe-report HTML references a bench-local asset path "
-			"(/assets/... or /files/...) — breaks when the file is "
+			"(/assets/... or /files/...) breaks when the file is "
 			"moved off-bench"
 		)
 		assert not re.search(r'(?:src|href)\s*=\s*["\']/api/method/', html), (
 			"safe-report HTML references a bench API endpoint "
-			"(/api/method/...) — breaks when opened off-bench"
+			"(/api/method/...) breaks when opened off-bench"
 		)

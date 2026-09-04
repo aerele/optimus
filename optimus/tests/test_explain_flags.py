@@ -263,14 +263,14 @@ def test_malformed_row_is_isolated_not_crashing(empty_context):
 # A real production run flagged "Filesort on tabCustom DocPerm" from a
 # single-row parent lookup:
 #   SELECT * FROM `tabCustom DocPerm` WHERE `parent`=? ORDER BY `creation` ASC
-# with explain rows=1, type=ref, key=parent. The filesort is on ONE row —
+# with explain rows=1, type=ref, key=parent. The filesort is on ONE row
 # free in practice, and the user can't act on it anyway because `parent` is
 # already the ref key. Flagging it was pure noise. These tests cover the
 # MIN_ROWS_TO_FLAG_SORT row floor that suppresses the false positive.
 
 
 def test_filesort_on_single_row_is_not_flagged(empty_context):
-	"""Regression guard — exact payload from the production report:
+	"""Regression guard exact payload from the production report:
 	a ref lookup on tabCustom DocPerm.parent with rows=1 that happens
 	to filesort the result. Must NOT emit a Filesort finding."""
 	recording = {
@@ -299,7 +299,7 @@ def test_filesort_on_single_row_is_not_flagged(empty_context):
 	result = explain_flags.analyze([recording], empty_context)
 	filesorts = [f for f in result.findings if f["finding_type"] == "Filesort"]
 	assert filesorts == [], (
-		"Filesort on a 1-row result is free — must not emit a finding. "
+		"Filesort on a 1-row result is free must not emit a finding. "
 		f"Got: {filesorts}"
 	)
 
@@ -400,7 +400,7 @@ def test_filesort_above_floor_still_flagged(empty_context):
 
 
 def test_full_scan_from_framework_callsite_is_suppressed(empty_context):
-	"""The query lives inside frappe/model/document.py — user can't
+	"""The query lives inside frappe/model/document.py user can't
 	add an index to fix a Frappe framework query. Skip the findings
 	for this call entirely (Full Scan + whatever else)."""
 	recording = {
@@ -428,7 +428,7 @@ def test_full_scan_from_framework_callsite_is_suppressed(empty_context):
 	scans = [f for f in result.findings if f["finding_type"] == "Full Table Scan"]
 	assert scans == [], (
 		"Full Table Scan finding from a frappe/* callsite must be "
-		"suppressed — user can't add an index to fix a framework "
+		"suppressed user can't add an index to fix a framework "
 		f"query. Got: {[f['title'] for f in scans]}"
 	)
 	# And the suppression surfaces as a warning so the user knows
@@ -441,7 +441,7 @@ def test_full_scan_from_framework_callsite_is_suppressed(empty_context):
 def test_alias_table_name_is_suppressed(empty_context):
 	"""EXPLAIN rows for JOIN queries often have the table field as
 	a single-letter alias ('a', 'c', 'ap'). 'Full table scan on a'
-	isn't actionable — the user can't index an alias."""
+	isn't actionable the user can't index an alias."""
 	recording = {
 		"uuid": "alias-scan",
 		"path": "/", "cmd": None, "method": "GET",
@@ -458,7 +458,7 @@ def test_alias_table_name_is_suppressed(empty_context):
 				 "function": "sync_prices"},
 			],
 			"explain_result": [
-				# Alias "a" and "c" — both should be dropped.
+				# Alias "a" and "c" both should be dropped.
 				{"table": "a", "type": "ALL", "rows": 50000, "Extra": ""},
 				{"table": "c", "type": "ALL", "rows": 50000, "Extra": ""},
 			],
@@ -480,7 +480,7 @@ def test_alias_helper_distinguishes_real_tables_from_aliases():
 	"""Direct unit test of the _is_likely_alias helper."""
 	from optimus.analyzers.explain_flags import _is_likely_alias
 
-	# REAL tables — kept
+	# REAL tables kept
 	for real in (
 		"tabItem", "tabSales Invoice", "tabCustom Field", "tabDocType",
 		"MyCustomTable",       # capital letters → real
@@ -490,7 +490,7 @@ def test_alias_helper_distinguishes_real_tables_from_aliases():
 			f"{real!r} is a real table and must NOT be classified as alias"
 		)
 
-	# ALIASES — filtered
+	# ALIASES filtered
 	for alias in ("a", "c", "p", "ap", "cd", "addr", "d"):
 		assert _is_likely_alias(alias) is True, (
 			f"{alias!r} is a SQL alias and should be filtered"
@@ -500,10 +500,10 @@ def test_alias_helper_distinguishes_real_tables_from_aliases():
 	for synthetic in ("<derived2>", "<subquery1>", "<union3,4>"):
 		assert _is_likely_alias(synthetic) is True
 
-	# v0.5.2 round 4: INFORMATION_SCHEMA / MariaDB metadata views —
+	# v0.5.2 round 4: INFORMATION_SCHEMA / MariaDB metadata views
 	# they're real tables but the user can't add indexes to them. A
-	# production report showed "Full table scan on columns — ~129ms"
-	# and "Full table scan on tables — ~21ms" cluttering actionable
+	# production report showed "Full table scan on columns ~129ms"
+	# and "Full table scan on tables ~21ms" cluttering actionable
 	# findings; these are INFORMATION_SCHEMA.columns / .tables, not
 	# user-addressable. Treat them as aliases (suppressed).
 	for system_table in (
@@ -513,7 +513,7 @@ def test_alias_helper_distinguishes_real_tables_from_aliases():
 	):
 		assert _is_likely_alias(system_table) is True, (
 			f"{system_table!r} is an INFORMATION_SCHEMA view; user "
-			"cannot add an index — must be filtered as alias/noise"
+			"cannot add an index must be filtered as alias/noise"
 		)
 
 	# Edge cases
@@ -524,7 +524,7 @@ def test_alias_helper_distinguishes_real_tables_from_aliases():
 def test_user_code_callsite_still_emits_findings(empty_context):
 	"""Positive case: a Full Scan from genuine user-app code
 	(apps/myapp/...) must still produce a finding. The filter is
-	narrow — it only removes framework + alias noise, not real
+	narrow it only removes framework + alias noise, not real
 	findings."""
 	recording = {
 		"uuid": "user-scan",
@@ -567,7 +567,7 @@ def test_no_stack_falls_through_to_legacy_behavior(empty_context):
 			"query": "SELECT * FROM tabItem WHERE name = ?",
 			"normalized_query": "SELECT * FROM tabItem WHERE name = ?",
 			"duration": 150.0,
-			# NOTE: no "stack" field — pre-v0.5.2 recording.
+			# NOTE: no "stack" field pre-v0.5.2 recording.
 			"explain_result": [{
 				"table": "tabItem",
 				"type": "ALL",
@@ -579,7 +579,7 @@ def test_no_stack_falls_through_to_legacy_behavior(empty_context):
 	result = explain_flags.analyze([recording], empty_context)
 	scans = [f for f in result.findings if f["finding_type"] == "Full Table Scan"]
 	assert len(scans) == 1, (
-		"Missing stack must not drop findings — legacy recordings "
+		"Missing stack must not drop findings legacy recordings "
 		"should emit findings as before. "
 		f"Got: {[f['title'] for f in result.findings]}"
 	)

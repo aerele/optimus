@@ -13,7 +13,7 @@ events. The contract is:
     - optimus_session_analyzing   (from analyze.run, at the top)
     - optimus_session_ready       (from analyze.run, at success)
     - optimus_session_failed      (from analyze.run, on exception)
-    - optimus_progress            (existing — multiple points in analyze.run)
+    - optimus_progress            (existing multiple points in analyze.run)
 
   Client subscribes to all five and also calls status() once at
   page-load + on visibility-change (no setInterval).
@@ -70,7 +70,7 @@ def test_analyze_run_publishes_failed_event():
 
 def test_analyze_run_publishes_ready_event():
 	"""Backward-compat guard: the existing optimus_session_ready
-	emission must remain — this is how the widget navigates the user
+	emission must remain this is how the widget navigates the user
 	to the report on success."""
 	from optimus import analyze
 
@@ -94,7 +94,7 @@ def test_publish_session_event_helper_exists_in_both_layers():
 def test_publish_session_event_catches_exceptions():
 	"""publish_realtime can fail (Socket.IO bridge down, dev env
 	without redis-socketio running). The helper must swallow those
-	exceptions — realtime is a UX convenience, not a hard dependency."""
+	exceptions realtime is a UX convenience, not a hard dependency."""
 	from optimus import analyze, api
 
 	for src in (
@@ -104,14 +104,14 @@ def test_publish_session_event_catches_exceptions():
 		# Must have a try/except around the publish_realtime call.
 		assert "try:" in src and "except" in src, (
 			"_publish_session_event must swallow publish_realtime "
-			"failures — realtime is best-effort"
+			"failures realtime is best-effort"
 		)
 
 
 # ---------------------------------------------------------------------------
 # Client-side contract: floating_widget.js
 # ---------------------------------------------------------------------------
-# No Python import here — the widget is JS. Use text-level checks on
+# No Python import here the widget is JS. Use text-level checks on
 # the file to assert the expected subscribe calls + absence of the
 # polling setInterval.
 
@@ -147,7 +147,7 @@ def test_widget_no_longer_polls_status_on_interval():
 	# The only callback should be an inline arrow function (the
 	# elapsed-timer body), NOT a reference to refreshStatus.
 	assert "refreshStatus" not in matches[0], (
-		"setInterval callback must not be refreshStatus — polling "
+		"setInterval callback must not be refreshStatus polling "
 		"of the status endpoint was removed in v0.5.1"
 	)
 
@@ -158,7 +158,7 @@ def test_widget_has_no_polling_helpers():
 	/api/method/optimus.api.status traffic returns."""
 	src = _read_widget_source()
 	assert "startPolling" not in src, (
-		"startPolling() helper must not exist — v0.5.1 removed "
+		"startPolling() helper must not exist v0.5.1 removed "
 		"HTTP polling in favor of realtime events"
 	)
 	assert "stopPolling" not in src, "stopPolling() helper must not exist"
@@ -167,7 +167,7 @@ def test_widget_has_no_polling_helpers():
 
 def test_widget_subscribes_to_all_realtime_events():
 	"""Client must have a frappe.realtime.on() subscription for
-	each of the server-side emit points — otherwise state changes
+	each of the server-side emit points otherwise state changes
 	fire into the void and the widget hangs."""
 	src = _read_widget_source()
 	expected_events = [
@@ -193,7 +193,7 @@ def test_widget_visibility_handler_only_refreshes_once():
 	assert "visibilitychange" in src
 	# And it calls refreshStatus (the one-shot)
 	assert "refreshStatus()" in src
-	# But NOT startPolling — that's gone.
+	# But NOT startPolling that's gone.
 	assert "startPolling" not in src
 
 
@@ -201,7 +201,7 @@ def test_widget_init_calls_status_only_once():
 	"""init() must call refreshStatus exactly once for the one-shot
 	rehydrate. Any additional call is a regression."""
 	src = _read_widget_source()
-	# Extract the init() function body by balanced-brace walking — a
+	# Extract the init() function body by balanced-brace walking a
 	# naive regex like ``function init\(\)\s*\{([^}]+)\}`` would stop at
 	# the first nested ``}`` (inside the early-return if-block, etc.),
 	# missing the actual refreshStatus call below.

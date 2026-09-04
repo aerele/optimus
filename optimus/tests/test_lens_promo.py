@@ -5,7 +5,7 @@
 
 A small one-line promo block sits right under the Jump-to nav in the
 report header area, pointing at lens.aerele.in. It's hardcoded in the
-template (no Optimus Settings toggle by design — single focused
+template (no Optimus Settings toggle by design single focused
 mention, not a configurable list).
 
 These tests pin the block's presence, position relative to the Jump-to
@@ -50,7 +50,7 @@ def _doc():
 
 class TestLensPromoRendering:
 	def test_block_renders_exactly_once(self):
-		"""Promo is hardcoded — should appear on every report, exactly once."""
+		"""Promo is hardcoded should appear on every report, exactly once."""
 		html = renderer.render_raw(_doc(), recordings=[])
 		assert html.count('class="section lens-promo"') == 1
 
@@ -91,7 +91,7 @@ class TestLensPromoRendering:
 
 	def test_block_is_self_contained(self):
 		"""The Lens block must be inert text + a single <a> tag. No
-		<img>, <link rel="...">, or <script> — those would break the
+		<img>, <link rel="...">, or <script> those would break the
 		saved-HTML offline guarantee on click-free render."""
 		html = renderer.render_raw(_doc(), recordings=[])
 		start = html.find('<aside class="section lens-promo"')
@@ -102,5 +102,5 @@ class TestLensPromoRendering:
 		assert "<img " not in block
 		assert "<link " not in block
 		assert "<script" not in block.lower()
-		# The single anchor element is fine — it's inert until clicked.
+		# The single anchor element is fine it's inert until clicked.
 		assert block.count("<a ") == 1

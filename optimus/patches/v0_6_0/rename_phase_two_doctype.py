@@ -15,11 +15,11 @@ Two Run`` as part of the broader DocType rename.
 Idempotent + defensive:
 
 1. No-op when the old DocType is already gone (fresh installs already
-   ship with the new name in JSON — Frappe creates the new DocType
+   ship with the new name in JSON Frappe creates the new DocType
    directly).
 2. No-op when the new name already exists alongside the old (someone
    ran a partial migration). In that case the renamed table would
-   conflict — bail out and let the operator resolve it manually.
+   conflict bail out and let the operator resolve it manually.
 3. Uses ``frappe.rename_doc("DocType", old, new)`` which handles:
      - renaming the row in ``tabDocType``,
      - renaming the underlying SQL table (``tabProfiler Phase 2 Run``
@@ -30,7 +30,7 @@ Idempotent + defensive:
 4. Clears the settings cache as a safety net for any stale references.
 
 Trade-off acknowledged in ``AUDIT_BASELINE.md``: the in-code field name
-on the parent (``phase_2_runs``) stays snake_case — the audit's
+on the parent (``phase_2_runs``) stays snake_case the audit's
 Title-Case rule applies only to DocType names, not field names.
 """
 
@@ -55,7 +55,7 @@ def execute():
 		return
 	if new_exists:
 		frappe.logger().warning(
-			"optimus: skipping Phase-Two DocType rename — both "
+			"optimus: skipping Phase-Two DocType rename both "
 			f"{OLD_NAME!r} AND {NEW_NAME!r} exist. Resolve manually before "
 			"re-running migrate (e.g. `bench --site <s> delete-doc DocType "
 			f"'{NEW_NAME}'` if the empty one is the duplicate)."
@@ -75,7 +75,7 @@ def execute():
 	except Exception:
 		pass
 
-	# Drop our own settings cache too — paranoid but cheap. Both the legacy
+	# Drop our own settings cache too paranoid but cheap. Both the legacy
 	# (``profiler_settings_cached``) and the v0.7.0-renamed
 	# (``optimus_settings_cached``) keys are cleared since either could
 	# be lingering depending on which version the site is upgrading from.

@@ -86,7 +86,7 @@ def test_inject_correlation_header_tokenwise_match_not_substring():
     _inject_correlation_header("rec-uuid-abc123")
 
     expose = headers["Access-Control-Expose-Headers"]
-    # Both tokens must be present — the legacy one preserved, the
+    # Both tokens must be present the legacy one preserved, the
     # real one appended as a new token.
     tokens = [t.strip() for t in expose.split(",")]
     assert "X-Optimus-Recording-Id-Legacy" in tokens
@@ -95,7 +95,7 @@ def test_inject_correlation_header_tokenwise_match_not_substring():
 
 def test_correlation_header_gated_on_profiler_session_id():
     """Pass-5 regression guard: the correlation header must only be
-    injected when an active profiler session is present — not merely
+    injected when an active profiler session is present not merely
     when there's a recording UUID. The standalone Frappe Recorder UI
     sets frappe.local._recorder for non-session traffic, and leaking
     X-Optimus-Recording-Id onto those responses would cause
@@ -121,13 +121,13 @@ def test_correlation_header_gated_on_profiler_session_id():
     preamble = src[:correlation_idx]
     assert "optimus_session_id" in preamble, (
         "_inject_correlation_header must be gated on optimus_session_id, "
-        "not just recording_uuid_for_dump — otherwise non-session "
+        "not just recording_uuid_for_dump otherwise non-session "
         "traffic (e.g. from the standalone Recorder UI) leaks the header"
     )
 
 def test_inject_correlation_header_case_insensitive_idempotency():
     """HTTP header names are case-insensitive. The token check must
-    be too — if another app set the expose header in lowercase, we
+    be too if another app set the expose header in lowercase, we
     shouldn't add our (same) header with different casing and create
     a duplicate."""
     from optimus.hooks_callbacks import _inject_correlation_header

@@ -9,7 +9,7 @@ land in MariaDB:
   * The ``Optimus User`` role is created.
   * Every Optimus DocType is registered in ``tabDocType``.
   * The ``Optimus Settings`` Single doc is creatable + readable.
-  * ``bench migrate`` is idempotent — re-running it leaves the schema
+  * ``bench migrate`` is idempotent re-running it leaves the schema
     untouched and never raises.
 
 Pure-pytest's Frappe stub can mock individual install-time calls in
@@ -24,7 +24,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 # Every DocType optimus declares. Sourced from
-# ``optimus/optimus/doctype/`` directory listing — the install assertion
+# ``optimus/optimus/doctype/`` directory listing the install assertion
 # is that EVERY one of these landed in tabDocType after install-app.
 _OPTIMUS_DOCTYPES = (
 	"Optimus Session",
@@ -43,13 +43,13 @@ class TestInstallSmoke(FrappeTestCase):
 		auto-assigns it to every System Manager. The role is the desk-
 		level permission gate for the floating widget."""
 		assert frappe.db.exists("Role", "Optimus User"), (
-			"Optimus User role not present — install.after_install didn't land"
+			"Optimus User role not present install.after_install didn't land"
 		)
 
 	def test_all_optimus_doctypes_exist(self):
 		"""Every Optimus DocType is registered. Missing entries here
 		would mean ``bench install-app`` skipped reloading a doctype
-		— most likely a missing entry in ``patches.txt`` or a typo in
+		most likely a missing entry in ``patches.txt`` or a typo in
 		the doctype's JSON ``module`` field."""
 		missing = [
 			dt for dt in _OPTIMUS_DOCTYPES
@@ -65,21 +65,21 @@ class TestInstallSmoke(FrappeTestCase):
 		doc = frappe.get_cached_doc("Optimus Settings")
 		assert doc.doctype == "Optimus Settings"
 		# v0.7.x: enabled defaults to 1 on a fresh install. Tolerate
-		# either value here — what we're locking is "readable", not
+		# either value here what we're locking is "readable", not
 		# "set to a specific default" (that's covered by unit tests).
 		assert hasattr(doc, "enabled")
 
 	# v0.12.34: ``test_bench_migrate_idempotent`` removed. Frappe v16
 	# replaced the standalone ``migrate()`` function with the
 	# ``SiteMigration`` class, whose ``run(site)`` method calls
-	# ``frappe.destroy()`` after running — designed for ``bench
+	# ``frappe.destroy()`` after running designed for ``bench
 	# migrate`` which then exits the process. Inside a running test,
 	# the ``destroy`` unbinds ``frappe.local`` (db, conf, etc.), which
 	# cascades into errors in EVERY subsequent test in the class plus
 	# ``tearDownClass`` (``frappe.db.value_cache`` becomes unbound).
 	#
-	# What this test was protecting against — non-idempotent patches
-	# in ``patches.txt`` — is already covered:
+	# What this test was protecting against non-idempotent patches
+	# in ``patches.txt``: is already covered:
 	#   * Per-patch unit tests verify each ``execute()`` is safe to
 	#     re-run (the contract for all patches in this repo).
 	#   * The bench bootstrap itself runs ``bench migrate`` (see

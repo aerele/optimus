@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for ``optimus.report_context.build_report_context`` — the Phase J.1
+"""Tests for ``optimus.report_context.build_report_context``: the Phase J.1
 adapter that turns our flat 45-key render-context into the 19-key contract
 shape per ``template_variable_contract.md`` (reference design package).
 
@@ -137,7 +137,7 @@ class TestIsUserCode:
 
 class TestTopLevelKeys:
 	def test_all_19_contract_keys_present(self):
-		# Subset rather than equality — pragmatic non-contract extensions
+		# Subset rather than equality pragmatic non-contract extensions
 		# like ``actions_framework`` / ``background_jobs_framework`` from
 		# J.2.3 are permitted; the contract just specifies a minimum.
 		out = build_report_context(_doc(), _ctx())
@@ -410,7 +410,7 @@ class TestActionPlanShape:
 	def test_step_title_and_desc_are_html_escaped(self):
 		"""SECURITY: title/desc can carry attacker-controlled captured data
 		(e.g. a client-supplied page_url in a Slow Frontend Render title) and
-		the template renders title_html/description_html with ``| safe`` — so
+		the template renders title_html/description_html with ``| safe``: so
 		they MUST be HTML-escaped here or it's stored XSS in the report viewer."""
 		ap_in = [{
 			"n": 1,
@@ -498,7 +498,7 @@ class TestBackgroundJobsShape:
 		``findings_count: None`` from analyze. The bg-jobs section
 		template sums ``findings_count`` via Jinja's ``map | sum``, and
 		Jinja's ``map('default', 0)`` filter only handles Undefined (NOT
-		None) — so an uncoerced None used to crash the whole render with
+		None) so an uncoerced None used to crash the whole render with
 		``unsupported operand type(s) for +: 'int' and 'NoneType'``.
 		``_build_background_jobs`` now coerces the original
 		``findings_count`` key to ``int(... or 0)`` alongside the contract
@@ -590,7 +590,7 @@ class TestFrontendShape:
 		out = build_report_context(_doc(), _ctx(frontend_vitals_by_page=vitals))
 		row = out["frontend"]["web_vitals"][0]
 		assert row["fcp_class"] == "vital-none"
-		assert row["fcp_display"] == "—"
+		assert row["fcp_display"] == ""
 		assert row["cls_class"] == "vital-meh"
 
 

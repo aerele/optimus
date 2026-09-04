@@ -4,9 +4,9 @@
 """The finding-card "Line-Level Drilldown" callout links a finding to its
 phase-2 hot line via (file-basename, function-name). The index is keyed on the
 phase-2 result's ``qualname``; the lookup uses the finding's callsite
-``function``. These can disagree on the prefix — ``resolve_freeform`` may emit
+``function``. These can disagree on the prefix ``resolve_freeform`` may emit
 ``common.bg_recheck_users`` (module/class walked) while call_tree stores the
-bare ``bg_recheck_users`` — which silently breaks the callout even though the
+bare ``bg_recheck_users``: which silently breaks the callout even though the
 function WAS profiled (and shows in the panel). Matching must be robust to that
 on both sides; this pins it.
 """

@@ -296,7 +296,7 @@
   /* Explicit URL-column width so it isn't squeezed to a sliver on narrow viewports. */
   table.xhr-timing-table col.col-url    { width: 34%; }
 
-  /* Frontend disclosure table — URL takes the bulk, Duration stays
+  /* Frontend disclosure table URL takes the bulk, Duration stays
      narrow, Reason wraps in whatever's left. */
   table.orphaned-xhrs-table { table-layout: fixed; }
   table.orphaned-xhrs-table col.col-url { width: 60%; }
@@ -314,7 +314,7 @@
   table.db-tables-table tbody td:first-child { overflow-wrap: anywhere; }
   /* col.col-url uses the remaining width implicitly (auto) */
 
-  /* resource-table column widths — pairs with the tbl-clip class
+  /* resource-table column widths pairs with the tbl-clip class
      on the same table. Without these the fixed-layout distributes
      width equally and the `#` column gets ~14% of the table while
      the Action column gets crammed. */
@@ -323,7 +323,7 @@
   table.resource-table col.col-num-wide { width: 110px; }
   /* col.col-action gets the remaining width implicitly (auto). */
 
-  /* Queries-per-action flat table — same fixed-column scheme as the resource
+  /* Queries-per-action flat table same fixed-column scheme as the resource
      table so long action labels / callsite paths wrap inside their columns
      and the numeric columns stay aligned (instead of the auto-layout ragged
      widths). col.col-action takes the remaining width. */
@@ -339,7 +339,7 @@
      indexes fit inside the narrow col-idx without wrapping. The
      default table.data td padding (14px each side) eats 28px of
      column width before content; with col-idx at 32-40px, that
-     leaves 4-12px of content area — not enough for "10" or
+     leaves 4-12px of content area not enough for "10" or
      "999". This override gives ~28px of content room at 40px
      total width (40 − 12 = 28). */
   table.per-action-table tbody td:first-child,
@@ -691,7 +691,7 @@
   .kpi-value.danger { color: var(--accent); }
   .kpi-unit { font-size: 14px; color: var(--ink-mute); font-weight: 400; margin-left: 2px; }
   .kpi-sub { font-size: 12px; color: var(--ink-soft); margin-top: 6px; line-height: 1.45; }
-  /* C.UT2: tiny caveat line under a KPI's sub-text — explains a known
+  /* C.UT2: tiny caveat line under a KPI's sub-text explains a known
      limitation of the metric (e.g. sampler interval for Total time). */
   .kpi-caveat {
     font-size: 11px;
@@ -708,7 +708,7 @@
      -----
      Terminology decision (U1, intentional split):
      - Data-layer field names use ``cumulative_ms`` (pyinstrument's
-       term — sum of self_time + descendant time).
+       term sum of self_time + descendant time).
      - UI text uses ``consolidated`` (the user-facing word, picked
        by the project owner for the scope-tag vocabulary).
      This split is intentional. Keep cumulative_ms in fixtures /
@@ -725,7 +725,7 @@
        quietly clipping mid-word. */
     white-space: nowrap;
   }
-  /* Stack scope-tag sub-labels BELOW the main header text — keeps tight
+  /* Stack scope-tag sub-labels BELOW the main header text keeps tight
      numeric columns from having their sub-labels (e.g. "per hit", "per req
      · all queries") overflow into the next column's header. The
      vitals-table used to override this case-by-case; now it's the default
@@ -879,7 +879,7 @@
     color: var(--ink-soft); font-variant-numeric: tabular-nums;
   }
   .waterfall-time.hot { color: var(--accent); font-weight: 600; }
-  /* a11y: per-bar text label (redundant with bar colour). Mini severity pill —
+  /* a11y: per-bar text label (redundant with bar colour). Mini severity pill
      reuses the --X-soft bg + --X text pairing so it's legible over any bar and
      passes AA in light + dark. */
   .bar-label {
@@ -1004,7 +1004,7 @@
   .code-block .added { color: #6A9955; }
   .code-block .removed { color: #F48771; text-decoration: line-through; opacity: 0.85; }
 
-  /* VS Code Dark Modern token palette — smoking-gun .code-block
+  /* VS Code Dark Modern token palette smoking-gun .code-block
      snippet only. The hot-line amber wrapper sits OUTSIDE these
      per-token spans so the highlight composes correctly. */
   .code-block .tok-k, .code-block .tok-kn        { color: #C586C0; }
@@ -1027,7 +1027,7 @@
   .code-block .tok-cm                            { color: #6A9955; font-style: italic; }
   .code-block .tok-o, .code-block .tok-p         { color: #D4D4D4; }
 
-  /* VS Code Light Modern token palette — Line-Level Drilldown
+  /* VS Code Light Modern token palette Line-Level Drilldown
      .line-prof table only (light to match the editorial report
      page). */
   .line-prof .tok-k, .line-prof .tok-kn, .line-prof .tok-kc,
@@ -1472,7 +1472,7 @@
   .job-status-warn { background: var(--warn-soft); color: var(--warn); }
   .job-status-info { background: var(--info-soft); color: var(--info); }
   .job-status-mute { background: var(--rule); color: var(--ink-mute); }
-  /* v0.7.x: RQ Jobs table was cramped across 8 columns — give Method room and
+  /* v0.7.x: RQ Jobs table was cramped across 8 columns give Method room and
      keep the numeric columns tight (fixed layout so the colgroup widths hold). */
   table.bg-jobs-table { table-layout: fixed; }
   table.bg-jobs-table .bgcol-idx { width: 30px; }
@@ -1538,7 +1538,7 @@
   table.line-prof tbody tr.hot td.num { color: var(--accent); font-weight: 600; }
   /* v0.7.x: dim lines that never executed (0 hits / 0ms) - def, comments,
      blank, closing parens - so the lines that actually ran stand out. */
-  /* a11y: dim 0-hit lines via the (now AA-compliant) mute token, not opacity —
+  /* a11y: dim 0-hit lines via the (now AA-compliant) mute token, not opacity
      opacity dropped them back under 4.5:1. Still reads dimmer than the near-black hot lines. */
   table.line-prof tbody tr.zero td { color: var(--ink-mute); }
   table.line-prof tbody tr.added td { background: rgba(45, 106, 60, 0.12); }
@@ -1998,7 +1998,7 @@
     {% if f.llm_fix and f.llm_fix.suggestion_html and not hide_ai_fix %}
     <div class="fix-box">
       <div class="fix-head">
-        <span>Suggested fix <span class="fix-badge">Unverified &mdash; review before applying</span></span>
+        <span>Suggested fix <span class="fix-badge">Unverified review before applying</span></span>
         <span class="ai-tag">AI{% if f.llm_fix.model %} &middot; {{ f.llm_fix.model }}{% endif %}{% if f.llm_fix.tokens and f.llm_fix.tokens.total_tokens %} &middot; {{ f.llm_fix.tokens.total_tokens }} tokens{% endif %}</span>
       </div>
       {% if not f.llm_fix.source_available %}
@@ -2132,7 +2132,7 @@
   {% if action.related_findings %}
   <tr>
     <td colspan="7" class="row-finding">
-      {# Count-only header — the finding card(s) render right below and carry the
+      {# Count-only header the finding card(s) render right below and carry the
          title + impact + detail, so echoing the title here just duplicated it
          (mirrors the clean bg_job_row header). #}
       &#9888; <strong>{{ action.related_findings | length }} finding{{ "s" if action.related_findings | length != 1 else "" }} linked to this action</strong>
@@ -2381,7 +2381,7 @@
      v0.7.x Phase A: restyled as nav pills (editorial design tokens).
      Anchors unchanged so external links / docs still resolve. The
      "Jump to" navigational cue lives in aria-label on the <nav>
-     itself — visually clean, still announced by screen readers. #}
+     itself visually clean, still announced by screen readers. #}
   <nav class="nav-pills" aria-label="Jump to">
     {% if report_data.line_drilldown_html %}<a href="#line-drilldown">Line-Level Drilldown</a>{% endif %}
     <a href="#findings">Findings</a>
@@ -2533,7 +2533,7 @@
       <p class="small muted" style="font-style: italic;">
         Note: finding impacts may overlap when several findings cover the
         same code path (e.g. a Slow Hot Path and an N+1 inside the same
-        function) &mdash; don't sum <em>estimated_impact_ms</em> across findings.
+        function) don't sum <em>estimated_impact_ms</em> across findings.
       </p>
 
       {% if report_data.findings_by_app | length == 1 %}
@@ -2703,12 +2703,12 @@
             <td class="num"><strong>{{ fmt_ms(report_data.actions | map(attribute='duration_ms') | map('default', 0) | sum) }}</strong></td>
             <td class="num"><strong>{{ report_data.actions | map(attribute='queries_count') | map('default', 0) | sum }}</strong></td>
             <td class="num"><strong>{{ fmt_ms(report_data.actions | map(attribute='query_time_ms') | map('default', 0) | sum) }}</strong></td>
-            <td class="num muted" title="Per-row maxes are not additive — column total intentionally suppressed">&mdash;</td>
+            <td class="num muted" title="Per-row maxes are not additive, so the column total is intentionally suppressed"></td>
           </tr>
         </tfoot>
       </table>
       <p class="small muted" style="font-style: italic; margin-top: 6px;">
-        Note: <em>Slowest query</em> values are per-row maxes &mdash; don't sum them.
+        Note: <em>Slowest query</em> values are per-row maxes don't sum them.
         Use the <em>DB time</em> column when you want a column total.
       </p>
       {% else %}
@@ -2782,7 +2782,7 @@
     <p class="small muted" style="font-style: italic;">
       Note: the consolidated total sums each job's wall time. If your
       bench runs multiple RQ workers in parallel, the actual elapsed
-      pool time may be less than this sum &mdash; the per-job Duration
+      pool time may be less than this sum the per-job Duration
       column shows each job's true wall.
     </p>
     <p class="small muted">
@@ -2825,17 +2825,17 @@
       <tfoot>
         <tr class="totals-row">
           <td colspan="2"><strong>Total / {{ report_data.background_jobs | length }} job{{ 's' if report_data.background_jobs | length != 1 else '' }}</strong></td>
-          <td class="muted">&mdash;</td>
+          <td class="muted"></td>
           <td class="num"><strong>{{ fmt_ms(report_data.background_jobs | map(attribute='duration_ms') | map('default', 0) | sum) }}</strong></td>
           <td class="num"><strong>{{ report_data.background_jobs | map(attribute='queries_count') | map('default', 0) | sum }}</strong></td>
           <td class="num"><strong>{{ fmt_ms(report_data.background_jobs | map(attribute='query_time_ms') | map('default', 0) | sum) }}</strong></td>
-          <td class="num muted" title="Per-row maxes are not additive — column total intentionally suppressed">&mdash;</td>
+          <td class="num muted" title="Per-row maxes are not additive, so the column total is intentionally suppressed"></td>
           {% if report_data.background_jobs_summary.any_findings_counted %}<td class="num"><strong>{{ report_data.background_jobs | map(attribute='findings_count') | map('default', 0) | sum }}</strong></td>{% endif %}
         </tr>
       </tfoot>
     </table>
     <p class="small muted" style="font-style: italic; margin-top: 6px;">
-      Note: <em>Slowest query</em> values are per-row maxes &mdash; don't sum them.
+      Note: <em>Slowest query</em> values are per-row maxes don't sum them.
       Use the <em>DB time</em> column when you want a column total.
     </p>
     {% else %}
@@ -3174,7 +3174,7 @@
         <tr>
           <th>Function</th>
           <th class="num">Total time <small class="scope-tag">consolidated</small></th>
-          <th class="num" title="Sampler hits — proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
+          <th class="num" title="Sampler hits proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
           <th class="num">Distinct actions</th>
         </tr>
       </thead>
@@ -3192,7 +3192,7 @@
       <summary class="small muted"><strong>{{ report_data.hot_frames_framework | length }}</strong> framework frame{{ "s" if report_data.hot_frames_framework | length != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code>, and friends; the developer can't easily patch these</summary>
       <p class="small muted" style="margin: 6px 0 8px; font-style: italic;">
         Framework rows show <em>cumulative</em> time (includes nested
-        calls) &mdash; wrapper self-time is sub-sampler-interval and
+        calls) wrapper self-time is sub-sampler-interval and
         would round to 0ms otherwise.
       </p>
       <table class="data hot-frames-table">
@@ -3200,7 +3200,7 @@
           <tr>
             <th>Function</th>
             <th class="num">Total time <small class="scope-tag">consolidated</small></th>
-            <th class="num" title="Sampler hits — proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
+            <th class="num" title="Sampler hits proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
             <th class="num">Distinct actions</th>
           </tr>
         </thead>
@@ -3229,7 +3229,7 @@
         additional quer{{ "ies" if report_data.top_queries_suppressed_count != 1 else "y" }}
         cleared the {{ '%.0f'|format(report_data.top_queries_slow_threshold_ms) }}ms slow threshold but
         {{ "were" if report_data.top_queries_suppressed_count != 1 else "was" }} suppressed from the
-        Findings list to avoid noise &mdash; the full leaderboard above shows
+        Findings list to avoid noise the full leaderboard above shows
         every query above the 10ms display floor.
       </p>
       {% endif %}
@@ -3257,7 +3257,7 @@
     {% else %}
       <div class="empty-state">
         <div class="empty-icon">&check; Clear</div>
-        <p>No queries cleared the 10ms display floor this session &mdash; sub-10ms queries are hidden by default to avoid noise. The per-action breakdown below lists every query, fast and framework ones included.</p>
+        <p>No queries cleared the 10ms display floor this session sub-10ms queries are hidden by default to avoid noise. The per-action breakdown below lists every query, fast and framework ones included.</p>
       </div>
     {% endif %}
     {% if report_data.slow_queries_framework %}
@@ -3299,7 +3299,7 @@
 
     {# Flatten each action's queries into one list, then show the global slowest
        in a single flat table (like Server Resource). Collecting each action's
-       top-20 bounds the work and still captures the overall top-N — a query
+       top-20 bounds the work and still captures the overall top-N a query
        outside its own action's top-20 can't be in the global top-N. #}
     {% set ns = namespace(rows=[]) %}
     {% for action in (report_data.actions + (report_data.actions_framework or [])) %}
@@ -3417,7 +3417,7 @@
          get cards: a concrete `recommended_index` (LLM-vetted) or
          at least one heuristic `index_candidates` column. The
          "nothing to suggest" branches (Frappe meta tables, framework-
-         only filters, full-scan reads) are skipped — they took space
+         only filters, full-scan reads) are skipped they took space
          without telling the reader anything actionable. #}
       {% set _rec_tables = [] %}
       {% for t in report_data.db.tables %}
@@ -3507,10 +3507,10 @@
       <li>The server-resource and frontend panels show CPU / memory / queue pressure and browser timings - only when captured.</li>
       <li>Expand any row of the per-action breakdown for that action's queries and timings - the deep-dive detail.</li>
       <li>Click any <code>file.py:123</code> callsite to open it in VS&nbsp;Code. Anything starting with <code>tab</code> is a database table; the DocType is the part after <code>tab</code>.</li>
-      <li>Every duration carries a small grey scope tag: <strong>per hit</strong> (one occurrence — a single request, one query execution) or <strong>consolidated</strong> (sum across all hits in this session — total time in a table, full impact of a finding's pattern, etc.).</li>
-      <li>Call-tree and Hot-frame timings come from a wall-clock sampler at ≈{{ report_data.sampler_interval_ms }}ms intervals. Functions whose execution is shorter than the interval can be under-sampled or invisible — for exact per-line timings, use the <strong>Line-Level Drilldown</strong>.</li>
-      <li><strong>Self-time</strong> is wall-clock self-time (the sampler measures elapsed time, not CPU). A function that blocks on I/O — <code>requests.get</code>, sync DB calls outside the recorder, <code>time.sleep</code> — counts that wait as self-time. Check the call tree for hidden I/O before optimising compute.</li>
-      <li><strong>Searching with browser find (Ctrl/Cmd-F)?</strong> Text inside collapsed drilldowns and call-tree branches may not be matched — expand the sections you want to search first.</li>
+      <li>Every duration carries a small grey scope tag: <strong>per hit</strong> (one occurrence a single request, one query execution) or <strong>consolidated</strong> (sum across all hits in this session total time in a table, full impact of a finding's pattern, etc.).</li>
+      <li>Call-tree and Hot-frame timings come from a wall-clock sampler at ≈{{ report_data.sampler_interval_ms }}ms intervals. Functions whose execution is shorter than the interval can be under-sampled or invisible for exact per-line timings, use the <strong>Line-Level Drilldown</strong>.</li>
+      <li><strong>Self-time</strong> is wall-clock self-time (the sampler measures elapsed time, not CPU). A function that blocks on I/O <code>requests.get</code>, sync DB calls outside the recorder, <code>time.sleep</code> counts that wait as self-time. Check the call tree for hidden I/O before optimising compute.</li>
+      <li><strong>Searching with browser find (Ctrl/Cmd-F)?</strong> Text inside collapsed drilldowns and call-tree branches may not be matched expand the sections you want to search first.</li>
     </ul>
   </section>
 

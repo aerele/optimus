@@ -18,7 +18,7 @@ builders reduce that to ~10 lines of Python:
     )
 
 Keep the hand-written JSON fixtures in tests/fixtures/ for integration-
-style tests — they exercise the full recording shape. Use these builders
+style tests they exercise the full recording shape. Use these builders
 for narrow unit tests that care only about one aspect (e.g. "does the
 N+1 analyzer handle this stack?").
 """

@@ -113,7 +113,7 @@
   },
   {
    "default": "30",
-   "description": "Optimus Session records older than this are eligible for automatic deletion by the daily housekeeping job. Set to 0 to keep forever (the daily sweep becomes a no-op). Reference values — Strict: 1  ·  Recommended: 30  ·  Relaxed: 7.",
+   "description": "Optimus Session records older than this are eligible for automatic deletion by the daily housekeeping job. Set to 0 to keep forever (the daily sweep becomes a no-op). Reference values: Strict: 1  ·  Recommended: 30  ·  Relaxed: 7.",
    "fieldname": "session_retention_days",
    "fieldtype": "Int",
    "label": "Session Retention (days)",
@@ -128,7 +128,7 @@
   {
    "fieldname": "apps_description_tracked",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\"><b>Tracked Apps</b> is an <i>allowlist</i> — when populated, only those apps' findings are actionable; everything else routes to <i>Framework-level observations</i>. Leave it empty to keep the default (frappe / erpnext / hrms / lms / helpdesk / insights / crm / builder / wiki / drive / payments and pip libs are treated as framework code).</p><p class=\"text-muted small\" style=\"color:#b91c1c\"><b>Do not add frappe or erpnext to Tracked Apps.</b> Doing so flips them to \"user code\" and floods your actionable findings with framework noise — the opposite of what most users want. If you want them gone, add them to <b>Ignored Apps</b> (right) instead.</p>"
+   "options": "<p class=\"text-muted small\"><b>Tracked Apps</b> is an <i>allowlist</i> when populated, only those apps' findings are actionable; everything else routes to <i>Framework-level observations</i>. Leave it empty to keep the default (frappe / erpnext / hrms / lms / helpdesk / insights / crm / builder / wiki / drive / payments and pip libs are treated as framework code).</p><p class=\"text-muted small\" style=\"color:#b91c1c\"><b>Do not add frappe or erpnext to Tracked Apps.</b> Doing so flips them to \"user code\" and floods your actionable findings with framework noise the opposite of what most users want. If you want them gone, add them to <b>Ignored Apps</b> (right) instead.</p>"
   },
   {
    "fieldname": "tracked_apps",
@@ -143,7 +143,7 @@
   {
    "fieldname": "apps_description_ignored",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\"><b>Ignored Apps</b> is an <i>exclusion list</i> — findings whose blame app falls in this list are <b>dropped from the report entirely</b> (both the \"Findings — what to fix\" and \"Framework-level observations\" sections). Use it for apps you can't (or won't) patch. <b>Default on fresh install:</b> every Frappe-organization-maintained app is seeded — <code>frappe</code>, <code>erpnext</code>, <code>hrms</code>, <code>lms</code>, <code>helpdesk</code>, <code>insights</code>, <code>crm</code>, <code>builder</code>, <code>wiki</code>, <code>drive</code>, <code>payments</code> — so a typical custom-app developer doesn't see Frappe-org noise on day one. Remove the rows you actively contribute to (ERPNext core, HRMS, etc.). The \"Issues found\" stat card shows the kept count plus a \"N findings hidden\" note, so the total stays honest.</p>"
+   "options": "<p class=\"text-muted small\"><b>Ignored Apps</b> is an <i>exclusion list</i> findings whose blame app falls in this list are <b>dropped from the report entirely</b> (both the \"Findings what to fix\" and \"Framework-level observations\" sections). Use it for apps you can't (or won't) patch. <b>Default on fresh install:</b> every Frappe-organization-maintained app is seeded <code>frappe</code>, <code>erpnext</code>, <code>hrms</code>, <code>lms</code>, <code>helpdesk</code>, <code>insights</code>, <code>crm</code>, <code>builder</code>, <code>wiki</code>, <code>drive</code>, <code>payments</code> so a typical custom-app developer doesn't see Frappe-org noise on day one. Remove the rows you actively contribute to (ERPNext core, HRMS, etc.). The \"Issues found\" stat card shows the kept count plus a \"N findings hidden\" note, so the total stays honest.</p>"
   },
   {
    "fieldname": "ignored_apps",
@@ -159,7 +159,7 @@
   {
    "fieldname": "skip_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Patterns and users to exclude from instrumentation. Matches against request path / job kwargs / session user. The profiler's own admin endpoints are always skipped — these settings extend the built-in skip list.</p>"
+   "options": "<p class=\"text-muted small\">Patterns and users to exclude from instrumentation. Matches against request path / job kwargs / session user. The profiler's own admin endpoints are always skipped these settings extend the built-in skip list.</p>"
   },
   {
    "description": "One pattern per line. URL paths starting with any of these prefixes are NOT profiled, even when an active session exists. Useful for healthcheck endpoints, polling APIs, etc. Lines starting with # are treated as comments. Example: /api/method/ping",
@@ -185,7 +185,7 @@
   {
    "fieldname": "redaction_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Optimus redacts <b>sensitive values at capture time</b> — passwords, API keys, tokens, CSRF, cookies, and authorization headers never reach Redis or the persisted report. Defaults cover 12 canonical patterns. Add domain-specific names below (one per line) to extend redaction; defaults are <b>never removed</b>. Substring match, case-insensitive. Lines starting with <code>#</code> are comments.</p>"
+   "options": "<p class=\"text-muted small\">Optimus redacts <b>sensitive values at capture time</b> passwords, API keys, tokens, CSRF, cookies, and authorization headers never reach Redis or the persisted report. Defaults cover 12 canonical patterns. Add domain-specific names below (one per line) to extend redaction; defaults are <b>never removed</b>. Substring match, case-insensitive. Lines starting with <code>#</code> are comments.</p>"
   },
   {
    "fieldname": "sensitive_sql_columns",
@@ -211,11 +211,11 @@
   {
    "fieldname": "capacity_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Long-running flows (bulk inserts, complex Submit chains) can exceed the per-recording query cap during analyze-time enrichment — each query needs an <code>EXPLAIN</code> round-trip, so very high counts would exceed RQ's job timeout. When capped, the report covers the first N queries and the rest are truncated; a red banner at the top of the report surfaces the truncation so you know the analysis is partial.</p><p class=\"text-muted small\"><b>Default: 2000</b> — comfortable for most flows. Raise to 5000 or 10000 for flows that legitimately touch more rows (e.g. Manufacturing Plan Submit creating 100+ child orders). Analyze-time cost scales roughly linearly with this value.</p>"
+   "options": "<p class=\"text-muted small\">Long-running flows (bulk inserts, complex Submit chains) can exceed the per-recording query cap during analyze-time enrichment each query needs an <code>EXPLAIN</code> round-trip, so very high counts would exceed RQ's job timeout. When capped, the report covers the first N queries and the rest are truncated; a red banner at the top of the report surfaces the truncation so you know the analysis is partial.</p><p class=\"text-muted small\"><b>Default: 2000</b> comfortable for most flows. Raise to 5000 or 10000 for flows that legitimately touch more rows (e.g. Manufacturing Plan Submit creating 100+ child orders). Analyze-time cost scales roughly linearly with this value.</p>"
   },
   {
    "default": "2000",
-   "description": "Max queries per recording that get enriched (sqlparse format + EXPLAIN + normalization). Anything beyond this is truncated with a warning. Keep reasonable — each query costs one EXPLAIN round-trip. Set to 0 for no cap (enrich every query — analyze time scales linearly with query volume, so reserve this for forensic deep-dives). Reference values — Strict: 0  ·  Recommended: 2000  ·  Relaxed: 1000.",
+   "description": "Max queries per recording that get enriched (sqlparse format + EXPLAIN + normalization). Anything beyond this is truncated with a warning. Keep reasonable each query costs one EXPLAIN round-trip. Set to 0 for no cap (enrich every query analyze time scales linearly with query volume, so reserve this for forensic deep-dives). Reference values: Strict: 0  ·  Recommended: 2000  ·  Relaxed: 1000.",
    "fieldname": "max_queries_per_recording",
    "fieldtype": "Int",
    "label": "Max Queries per Recording",
@@ -224,7 +224,7 @@
   },
   {
    "default": "1.0",
-   "description": "pyinstrument statistical-sampler interval in milliseconds. Lower = finer call-tree resolution but higher overhead. 1ms is the recommended default; raise to 5-10ms for prod-like profiling. Cannot be lower than 0.1ms. Reference values — Strict: 0.5  ·  Recommended: 1.0  ·  Relaxed: 5.0.",
+   "description": "pyinstrument statistical-sampler interval in milliseconds. Lower = finer call-tree resolution but higher overhead. 1ms is the recommended default; raise to 5-10ms for prod-like profiling. Cannot be lower than 0.1ms. Reference values: Strict: 0.5  ·  Recommended: 1.0  ·  Relaxed: 5.0.",
    "fieldname": "pyinstrument_sampler_interval_ms",
    "fieldtype": "Float",
    "label": "Sampler Interval (ms)",
@@ -237,14 +237,14 @@
   },
   {
    "default": "1",
-   "description": "When checked, the \"Time spent per database table\" section in the report drops Frappe schema/meta tables (tabDocType, tabDocField, tabSingles, tabPatch Log, tabWorkspace, tabRole, tabDocType Link/Action/State, …), framework-internal tables (tabHas Role, tabDefaultValue, tabUser Social Login, tabUser Role Profile, tabBlock Module, tabUser Email), and information_schema.* — touched by every request via framework machinery, not user-actionable. A small \"(N tables hidden)\" note replaces them. Other sections (top-queries leaderboard, per-action drill-down, full recordings) are unaffected. Uncheck to see them all.",
+   "description": "When checked, the \"Time spent per database table\" section in the report drops Frappe schema/meta tables (tabDocType, tabDocField, tabSingles, tabPatch Log, tabWorkspace, tabRole, tabDocType Link/Action/State, …), framework-internal tables (tabHas Role, tabDefaultValue, tabUser Social Login, tabUser Role Profile, tabBlock Module, tabUser Email), and information_schema.* touched by every request via framework machinery, not user-actionable. A small \"(N tables hidden)\" note replaces them. Other sections (top-queries leaderboard, per-action drill-down, full recordings) are unaffected. Uncheck to see them all.",
    "fieldname": "hide_framework_tables",
    "fieldtype": "Check",
    "label": "Hide framework / internal database tables in the breakdown"
   },
   {
    "default": "300",
-   "description": "How long (seconds, capped at 300) the analyze job watches the background jobs the profiled flow enqueued, waiting for each to reach a terminal state (completed / failed / timeout) before generating the report. Every enqueued job is listed in the report's \"Background jobs\" section with its status; a job still running when this window elapses is shown as \"Running\" (click Retry Analyze once it finishes to capture its data). 0 = don't wait. On a single-worker bench the analyze job yields the worker between checks so those jobs can actually run; if the scheduler is disabled / no worker is available, the wait is skipped. Reference values — Strict: 300  ·  Recommended: 300  ·  Relaxed: 60.",
+   "description": "How long (seconds, capped at 300) the analyze job watches the background jobs the profiled flow enqueued, waiting for each to reach a terminal state (completed / failed / timeout) before generating the report. Every enqueued job is listed in the report's \"Background jobs\" section with its status; a job still running when this window elapses is shown as \"Running\" (click Retry Analyze once it finishes to capture its data). 0 = don't wait. On a single-worker bench the analyze job yields the worker between checks so those jobs can actually run; if the scheduler is disabled / no worker is available, the wait is skipped. Reference values: Strict: 300  ·  Recommended: 300  ·  Relaxed: 60.",
    "fieldname": "background_job_wait_seconds",
    "fieldtype": "Int",
    "label": "Wait for Background Jobs (seconds)",
@@ -259,11 +259,11 @@
   {
    "fieldname": "display_filters_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">These thresholds affect how Optimus <i>renders</i> the report — they don't change what's captured or analyzed.</p>"
+   "options": "<p class=\"text-muted small\">These thresholds affect how Optimus <i>renders</i> the report they don't change what's captured or analyzed.</p>"
   },
   {
    "default": "0",
-   "description": "Drop actions shorter than this many milliseconds from the per-action breakdown in reports. 0 = show everything. Useful for declutter when a flow generates many sub-millisecond background polls. Reference values — Strict: 1  ·  Recommended: 0  ·  Relaxed: 50.",
+   "description": "Drop actions shorter than this many milliseconds from the per-action breakdown in reports. 0 = show everything. Useful for declutter when a flow generates many sub-millisecond background polls. Reference values: Strict: 1  ·  Recommended: 0  ·  Relaxed: 50.",
    "fieldname": "min_action_duration_ms",
    "fieldtype": "Float",
    "label": "Min Action Duration to Show (ms)",
@@ -276,7 +276,7 @@
   },
   {
    "default": "1000",
-   "description": "Render any duration above this threshold (in milliseconds) as seconds — e.g. with the default of 1000, 5234ms displays as 5.23s but 800ms stays as 800ms. Set to a very large value (e.g. 99999999) to effectively disable. Reference values — Strict: 500  ·  Recommended: 1000  ·  Relaxed: 99999999.",
+   "description": "Render any duration above this threshold (in milliseconds) as seconds e.g. with the default of 1000, 5234ms displays as 5.23s but 800ms stays as 800ms. Set to a very large value (e.g. 99999999) to effectively disable. Reference values: Strict: 500  ·  Recommended: 1000  ·  Relaxed: 99999999.",
    "fieldname": "large_duration_threshold_ms",
    "fieldtype": "Float",
    "label": "Render durations in seconds above (ms)",
@@ -296,7 +296,7 @@
   {
    "fieldname": "sensitivity_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Pick a preset to set every tunable threshold across Optimus in one move — analyzer thresholds (the original nine), capture knobs (max queries / sampler interval / background-job wait), retention, display filters, Phase-2 defaults, and the AI auto-suggest cap. <b>Strict</b> catches more (more findings, more noise) and keeps data longer; <b>Relaxed</b> catches less and prunes faster; <b>Recommended</b> is the shipped default and automatically tracks future tuning. Choose <b>Custom</b> to edit the individual fields yourself — they stay locked under the named presets.</p>"
+   "options": "<p class=\"text-muted small\">Pick a preset to set every tunable threshold across Optimus in one move analyzer thresholds (the original nine), capture knobs (max queries / sampler interval / background-job wait), retention, display filters, Phase-2 defaults, and the AI auto-suggest cap. <b>Strict</b> catches more (more findings, more noise) and keeps data longer; <b>Relaxed</b> catches less and prunes faster; <b>Recommended</b> is the shipped default and automatically tracks future tuning. Choose <b>Custom</b> to edit the individual fields yourself they stay locked under the named presets.</p>"
   },
   {
    "default": "Recommended",
@@ -318,7 +318,7 @@
   },
   {
    "default": "5",
-   "description": "Minimum get_doc calls for the same (doctype, name) from the same callsite before a Redundant Call finding is emitted. Reference values — Strict: 3  ·  Recommended: 5  ·  Relaxed: 10.",
+   "description": "Minimum get_doc calls for the same (doctype, name) from the same callsite before a Redundant Call finding is emitted. Reference values: Strict: 3  ·  Recommended: 5  ·  Relaxed: 10.",
    "fieldname": "redundant_doc_threshold",
    "fieldtype": "Int",
    "label": "Redundant get_doc Threshold",
@@ -327,7 +327,7 @@
   },
   {
    "default": "50",
-   "description": "Minimum cache lookups for the same key from the same callsite before a Redundant Call finding is emitted. Cache lookups aren't individually timed, so low-count loops are indistinguishable from framework background noise — 50 matches the high-severity threshold and cuts 0ms noise. Reference values — Strict: 20  ·  Recommended: 50  ·  Relaxed: 100.",
+   "description": "Minimum cache lookups for the same key from the same callsite before a Redundant Call finding is emitted. Cache lookups aren't individually timed, so low-count loops are indistinguishable from framework background noise 50 matches the high-severity threshold and cuts 0ms noise. Reference values: Strict: 20  ·  Recommended: 50  ·  Relaxed: 100.",
    "fieldname": "redundant_cache_threshold",
    "fieldtype": "Int",
    "label": "Redundant Cache Lookup Threshold",
@@ -340,7 +340,7 @@
   },
   {
    "default": "10",
-   "description": "Minimum has_permission calls for the same (doctype, name, ptype) from the same callsite before a Redundant Call finding is emitted. Reference values — Strict: 5  ·  Recommended: 10  ·  Relaxed: 25.",
+   "description": "Minimum has_permission calls for the same (doctype, name, ptype) from the same callsite before a Redundant Call finding is emitted. Reference values: Strict: 5  ·  Recommended: 10  ·  Relaxed: 25.",
    "fieldname": "redundant_perm_threshold",
    "fieldtype": "Int",
    "label": "Redundant Permission Check Threshold",
@@ -349,7 +349,7 @@
   },
   {
    "default": "10",
-   "description": "Minimum identical queries from the same callsite before an N+1 Query finding is emitted. Reference values — Strict: 5  ·  Recommended: 10  ·  Relaxed: 25.",
+   "description": "Minimum identical queries from the same callsite before an N+1 Query finding is emitted. Reference values: Strict: 5  ·  Recommended: 10  ·  Relaxed: 25.",
    "fieldname": "n_plus_one_min_occurrences",
    "fieldtype": "Int",
    "label": "N+1 Minimum Occurrences",
@@ -368,7 +368,7 @@
   },
   {
    "default": "200",
-   "description": "Single SQL query duration above this is flagged as a Slow Query finding. Default 200ms — anything below is usually within acceptable per-query budget. Reference values — Strict: 100  ·  Recommended: 200  ·  Relaxed: 500.",
+   "description": "Single SQL query duration above this is flagged as a Slow Query finding. Default 200ms anything below is usually within acceptable per-query budget. Reference values: Strict: 100  ·  Recommended: 200  ·  Relaxed: 500.",
    "fieldname": "slow_query_threshold_ms",
    "fieldtype": "Float",
    "label": "Slow Query Threshold (ms)",
@@ -377,7 +377,7 @@
   },
   {
    "default": "25",
-   "description": "Slow Hot Path threshold as a percentage of the action's wall time. A subtree consuming >= this % AND >= the min-ms below qualifies. Default 25% with 200ms minimum. Reference values — Strict: 15  ·  Recommended: 25  ·  Relaxed: 40.",
+   "description": "Slow Hot Path threshold as a percentage of the action's wall time. A subtree consuming >= this % AND >= the min-ms below qualifies. Default 25% with 200ms minimum. Reference values: Strict: 15  ·  Recommended: 25  ·  Relaxed: 40.",
    "fieldname": "slow_hot_path_pct_threshold",
    "fieldtype": "Float",
    "label": "Slow Hot Path Threshold (% of action wall time)",
@@ -386,7 +386,7 @@
   },
   {
    "default": "200",
-   "description": "Slow Hot Path minimum absolute time. A subtree needs both >= the % above AND >= this many ms to qualify. Reference values — Strict: 100  ·  Recommended: 200  ·  Relaxed: 500.",
+   "description": "Slow Hot Path minimum absolute time. A subtree needs both >= the % above AND >= this many ms to qualify. Reference values: Strict: 100  ·  Recommended: 200  ·  Relaxed: 500.",
    "fieldname": "slow_hot_path_min_ms",
    "fieldtype": "Float",
    "label": "Slow Hot Path Minimum (ms)",
@@ -399,7 +399,7 @@
   },
   {
    "default": "50",
-   "description": "Phase 2 Hot Line: a single line consuming this %% of the function's total time AND >= the min-ms below is flagged High severity. Default 50% / 100ms. Reference values — Strict: 35  ·  Recommended: 50  ·  Relaxed: 70.",
+   "description": "Phase 2 Hot Line: a single line consuming this %% of the function's total time AND >= the min-ms below is flagged High severity. Default 50% / 100ms. Reference values: Strict: 35  ·  Recommended: 50  ·  Relaxed: 70.",
    "fieldname": "hot_line_high_pct",
    "fieldtype": "Float",
    "label": "Hot Line High Severity (% of function time)",
@@ -408,7 +408,7 @@
   },
   {
    "default": "100",
-   "description": "Phase 2 Hot Line minimum absolute time for High severity. Reference values — Strict: 50  ·  Recommended: 100  ·  Relaxed: 250.",
+   "description": "Phase 2 Hot Line minimum absolute time for High severity. Reference values: Strict: 50  ·  Recommended: 100  ·  Relaxed: 250.",
    "fieldname": "hot_line_high_min_ms",
    "fieldtype": "Float",
    "label": "Hot Line High Severity Min (ms)",
@@ -427,7 +427,7 @@
   },
   {
    "default": "10",
-   "description": "Cap on how many phase-2 runs can be retained per Optimus Session. When exceeded, the oldest run's full results are archived to a private File and only the row metadata is kept in the DocType. Set to 0 for no cap (every run keeps full results — watch DocType size on heavy users). Reference values — Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
+   "description": "Cap on how many phase-2 runs can be retained per Optimus Session. When exceeded, the oldest run's full results are archived to a private File and only the row metadata is kept in the DocType. Set to 0 for no cap (every run keeps full results watch DocType size on heavy users). Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
    "fieldname": "phase2_max_runs_per_session",
    "fieldtype": "Int",
    "label": "Phase 2: Max Runs per Session",
@@ -447,7 +447,7 @@
   },
   {
    "default": "10",
-   "description": "Maximum levels deep that auto-expand will follow into the call tree from a curated pick. Set to 0 for unlimited depth (walks to the leaf — pairs naturally with auto-expand min-ms 0 for the deepest possible instrumentation). Reference values — Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
+   "description": "Maximum levels deep that auto-expand will follow into the call tree from a curated pick. Set to 0 for unlimited depth (walks to the leaf pairs naturally with auto-expand min-ms 0 for the deepest possible instrumentation). Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
    "fieldname": "auto_expand_max_depth",
    "fieldtype": "Int",
    "label": "Auto-Expand: Max Depth",
@@ -456,7 +456,7 @@
   },
   {
    "default": "50",
-   "description": "Auto-expand stops descending when the next-hottest child consumes less than this many milliseconds. Lower = follow deeper into smaller hot spots; higher = stop earlier and instrument fewer functions. Set to 0 to follow into every measurable child (no minimum). Reference values — Strict: 10  ·  Recommended: 50  ·  Relaxed: 100.",
+   "description": "Auto-expand stops descending when the next-hottest child consumes less than this many milliseconds. Lower = follow deeper into smaller hot spots; higher = stop earlier and instrument fewer functions. Set to 0 to follow into every measurable child (no minimum). Reference values: Strict: 10  ·  Recommended: 50  ·  Relaxed: 100.",
    "fieldname": "auto_expand_min_ms",
    "fieldtype": "Float",
    "label": "Auto-Expand: Minimum Child Time (ms)",
@@ -476,7 +476,7 @@
   {
    "fieldname": "ai_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">When enabled, a <b>Suggest a fix (AI)</b> button appears on the Optimus Session form. Clicking it sends the selected finding's context — finding type, callsite, a window of surrounding <b>source code</b>, the normalized SQL and EXPLAIN row — to the configured LLM and stores the returned fix on the finding (it also shows up in the regenerated HTML report). <b>This sends code and queries to your chosen provider.</b> Point <code>Base URL</code> at a local model (Ollama / LM Studio / vLLM) to keep everything on-box. <a href=\"https://github.com/Aerele-RnD/optimus/blob/main/docs/AI-FIXING.md\" target=\"_blank\">Read the full data-flow documentation</a> — what's sent, what isn't, and step-by-step local-LLM recipes.</p>"
+   "options": "<p class=\"text-muted small\">When enabled, a <b>Suggest a fix (AI)</b> button appears on the Optimus Session form. Clicking it sends the selected finding's context finding type, callsite, a window of surrounding <b>source code</b>, the normalized SQL and EXPLAIN row to the configured LLM and stores the returned fix on the finding (it also shows up in the regenerated HTML report). <b>This sends code and queries to your chosen provider.</b> Point <code>Base URL</code> at a local model (Ollama / LM Studio / vLLM) to keep everything on-box. <a href=\"https://github.com/Aerele-RnD/optimus/blob/main/docs/AI-FIXING.md\" target=\"_blank\">Read the full data-flow documentation</a> what's sent, what isn't, and step-by-step local-LLM recipes.</p>"
   },
   {
    "default": "0",
@@ -488,7 +488,7 @@
   {
    "default": "Anthropic",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "Wire format / hosted defaults. \"OpenAI-compatible\" requires a Base URL and Model — use it for Ollama, LM Studio, vLLM, OpenRouter, Together, Groq, etc.",
+   "description": "Wire format / hosted defaults. \"OpenAI-compatible\" requires a Base URL and Model use it for Ollama, LM Studio, vLLM, OpenRouter, Together, Groq, etc.",
    "fieldname": "ai_provider",
    "fieldtype": "Select",
    "label": "Provider",
@@ -496,7 +496,7 @@
   },
   {
    "depends_on": "eval:doc.ai_enabled && doc.ai_provider == 'OpenAI-compatible'",
-   "description": "The OpenAI-compatible endpoint base (include /v1) — e.g. http://localhost:11434/v1 (Ollama), http://localhost:1234/v1 (LM Studio), https://openrouter.ai/api/v1. Hosted providers (Anthropic, OpenAI, Kimi) use their built-in default, so this is hidden for them.",
+   "description": "The OpenAI-compatible endpoint base (include /v1) e.g. http://localhost:11434/v1 (Ollama), http://localhost:1234/v1 (LM Studio), https://openrouter.ai/api/v1. Hosted providers (Anthropic, OpenAI, Kimi) use their built-in default, so this is hidden for them.",
    "fieldname": "ai_base_url",
    "fieldtype": "Data",
    "label": "Base URL"
@@ -521,7 +521,7 @@
   },
   {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "Pick which sections of the report may use the LLM. Turning one off is a hard disable — that section is never auto-generated, its buttons on the Optimus Session form are hidden, the API refuses, and re-rendered reports omit it.",
+   "description": "Pick which sections of the report may use the LLM. Turning one off is a hard disable that section is never auto-generated, its buttons on the Optimus Session form are hidden, the API refuses, and re-rendered reports omit it.",
    "fieldname": "ai_sections_break",
    "fieldtype": "Section Break",
    "label": "Use the LLM for"
@@ -529,7 +529,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When off: no AI-suggested fix on findings — not auto-generated during analyze, the \"Suggest a fix (AI)\" / \"Generate AI fixes\" / \"Re-evaluate AI fixes\" buttons are hidden, the API refuses, and re-rendered reports omit the AI-fix block.",
+   "description": "When off: no AI-suggested fix on findings not auto-generated during analyze, the \"Suggest a fix (AI)\" / \"Generate AI fixes\" / \"Re-evaluate AI fixes\" buttons are hidden, the API refuses, and re-rendered reports omit the AI-fix block.",
    "fieldname": "ai_suggest_findings",
    "fieldtype": "Check",
    "label": "Fix suggestions on findings"
@@ -537,7 +537,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When off: no \"Index advice (AI)\" block in the \"Time spent per database table\" section — not auto-generated, the \"Suggest an index (AI)\" button is hidden, the API refuses, and re-rendered reports omit it.",
+   "description": "When off: no \"Index advice (AI)\" block in the \"Time spent per database table\" section not auto-generated, the \"Suggest an index (AI)\" button is hidden, the API refuses, and re-rendered reports omit it.",
    "fieldname": "ai_suggest_indexes",
    "fieldtype": "Check",
    "label": "Index recommendations (DB-tables breakdown)"
@@ -564,7 +564,7 @@
   {
    "default": "0",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When checked, the analyze pipeline asks the LLM for a fix for each eligible finding automatically, so suggestions are already in the report — no need to click \"Suggest a fix (AI)\" per finding. Costs LLM tokens (and a little extra analyze time) on every session that's analyzed; keep it off unless you want suggestions baked in by default.",
+   "description": "When checked, the analyze pipeline asks the LLM for a fix for each eligible finding automatically, so suggestions are already in the report no need to click \"Suggest a fix (AI)\" per finding. Costs LLM tokens (and a little extra analyze time) on every session that's analyzed; keep it off unless you want suggestions baked in by default.",
    "fieldname": "ai_auto_suggest",
    "fieldtype": "Check",
    "label": "Suggest AI fixes in the report by default"
@@ -577,7 +577,7 @@
   {
    "default": "5",
    "depends_on": "eval:doc.ai_enabled && doc.ai_auto_suggest",
-   "description": "Cap on how many findings get an automatic suggestion per session — the highest-severity, highest-impact ones first. 0 = every eligible finding (can be slow + costly on big sessions). Reference values — Strict: 0  ·  Recommended: 5  ·  Relaxed: 3.",
+   "description": "Cap on how many findings get an automatic suggestion per session the highest-severity, highest-impact ones first. 0 = every eligible finding (can be slow + costly on big sessions). Reference values: Strict: 0  ·  Recommended: 5  ·  Relaxed: 3.",
    "fieldname": "ai_auto_suggest_max",
    "read_only_depends_on": "eval:doc.config_profile != \"Custom\"",
    "fieldtype": "Int",
@@ -594,11 +594,11 @@
    "depends_on": "eval:doc.ai_enabled",
    "fieldname": "ai_privacy_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Per-type opt-out and the local-LLM timeout. The exclusion list is the only way (short of disabling AI entirely) to keep a specific finding category from ever being built into a payload — useful when a particular type embeds business logic you don't want shared with a hosted provider. The timeout knob exists for local LLMs: hosted providers usually answer in seconds, but a cold-start ollama / vLLM run can take well over a minute on first call.</p>"
+   "options": "<p class=\"text-muted small\">Per-type opt-out and the local-LLM timeout. The exclusion list is the only way (short of disabling AI entirely) to keep a specific finding category from ever being built into a payload useful when a particular type embeds business logic you don't want shared with a hosted provider. The timeout knob exists for local LLMs: hosted providers usually answer in seconds, but a cold-start ollama / vLLM run can take well over a minute on first call.</p>"
   },
   {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "One finding type per line — those types are skipped in both auto-suggest and on-demand (the payload is never built). Exact-match, case-sensitive. Lines starting with '#' are comments. Use the canonical names: Filesort, Framework N+1, Full Table Scan, Hot Line, Low Filter Ratio, Missing Index, N+1 Query, Redundant Call, Slow Query, Temporary Table.",
+   "description": "One finding type per line those types are skipped in both auto-suggest and on-demand (the payload is never built). Exact-match, case-sensitive. Lines starting with '#' are comments. Use the canonical names: Filesort, Framework N+1, Full Table Scan, Hot Line, Low Filter Ratio, Missing Index, N+1 Query, Redundant Call, Slow Query, Temporary Table.",
    "fieldname": "ai_excluded_finding_types",
    "fieldtype": "Small Text",
    "label": "Excluded finding types"

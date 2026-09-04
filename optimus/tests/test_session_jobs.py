@@ -4,7 +4,7 @@
 """Per-job terminal-status tracking (v0.7.x).
 
 A flow's enqueued RQ jobs are recorded in a never-pruned hash so analyze can
-report each one's terminal status (completed / failed / timeout / running) —
+report each one's terminal status (completed / failed / timeout / running)
 including jobs that failed or timed out and produced no recording. Uses a fake
 cache backend so we don't depend on Redis.
 """
@@ -95,18 +95,18 @@ def test_empty_session_uuid_is_safe(fake_cache):
 
 
 # ---------------------------------------------------------------------------
-# _atomic_merge_job_meta — closes the multi-worker read-modify-write race.
+# _atomic_merge_job_meta closes the multi-worker read-modify-write race.
 # ---------------------------------------------------------------------------
 # In multi-long-worker production, the previous read-modify-write (HGET +
 # Python merge + HSET via two Redis calls) can drop fields when two workers
-# update the SAME job_id's meta concurrently — e.g. Worker A's after_job
+# update the SAME job_id's meta concurrently e.g. Worker A's after_job
 # writes recording_uuid while Worker B's analyze.run hits the wait cap and
 # writes status="Running". Whoever writes second clobbers the other's
 # modifications.
 #
 # The fix moves the merge server-side via a Redis Lua script (atomic). The
 # wrapper falls back to the existing read-modify-write for cache backends
-# that reject ``.eval()`` — exercised by these tests through FakeCache,
+# that reject ``.eval()``: exercised by these tests through FakeCache,
 # which doesn't implement eval. The concurrent-write proof against real
 # Redis (TestAtomicMergeJobMetaConcurrent below) is the regression test
 # that the Lua path actually fires and is lossless.
@@ -166,7 +166,7 @@ class TestAtomicMergeJobMeta:
 	def test_fallback_when_eval_raises(self, fake_cache, monkeypatch):
 		"""If frappe.cache.eval exists but raises (e.g. NoScriptError on a
 		Redis variant), the helper must still complete via the non-atomic
-		path — best-effort, never break the caller."""
+		path best-effort, never break the caller."""
 		import frappe
 
 		def boom(*a, **kw):
@@ -206,7 +206,7 @@ class TestAtomicMergeJobMetaConcurrent:
 	"""Stand-in for the production multi-worker race using threads. In real
 	RQ deployments each worker is a SEPARATE PROCESS with its own
 	``frappe.local`` (Werkzeug Local is per-thread/process), so the full
-	``_atomic_merge_job_meta`` wrapper — including ``make_key`` — works
+	``_atomic_merge_job_meta`` wrapper including ``make_key``: works
 	end-to-end in each worker. Threads can't replay that exactly because
 	``frappe.local.conf`` isn't set in non-main threads; the test pre-computes
 	the prefixed key in the main thread and calls the Lua script directly
@@ -223,7 +223,7 @@ class TestAtomicMergeJobMetaConcurrent:
 		try:
 			frappe.cache.ping()
 		except Exception:
-			pytest.skip("No bench Redis available — start with `bench start`")
+			pytest.skip("No bench Redis available start with `bench start`")
 		try:
 			frappe.cache.eval("return 1", 0)
 		except Exception:
@@ -255,10 +255,10 @@ class TestAtomicMergeJobMetaConcurrent:
 			for t in threads:
 				t.join()
 
-			# Read via the SUT (which uses raw redis-py — bypasses the
+			# Read via the SUT (which uses raw redis-py bypasses the
 			# RedisWrapper's pickle wrapper, matches the Lua write encoding).
 			meta = session._read_job(sid, jid)
-			assert meta is not None, "meta missing entirely — Lua write failed"
+			assert meta is not None, "meta missing entirely Lua write failed"
 			missing = [f"field_{i}" for i in range(N) if meta.get(f"field_{i}") != f"value_{i}"]
 			assert not missing, (
 				f"{len(missing)}/{N} fields dropped under concurrent writes; "

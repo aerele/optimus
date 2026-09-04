@@ -6,23 +6,23 @@
 Aggregates, per SQL table touched by the session:
 
   - total time + query count (a multi-table JOIN is counted against each
-    table, so the rows sum to MORE than the session total — the renderer
+    table, so the rows sum to MORE than the session total the renderer
     says so);
   - reads (``SELECT``) vs writes (``INSERT`` / ``UPDATE`` / ``DELETE`` /
-    ``REPLACE``) — count and ms each;
-  - **index candidates** — columns the session actually filtered, joined, or
+    ``REPLACE``) count and ms each;
+  - **index candidates**: columns the session actually filtered, joined, or
     ordered on while *reading* the table, ranked by how often they were
     used. The renderer pairs this with the write count so it's clear that
     every added index also costs write time on a write-heavy table. Frappe's
     framework-managed metadata columns (``creation`` / ``modified`` / ``idx``
-    / ``parent`` / ``docstatus`` / …) are never offered as candidates — they
+    / ``parent`` / ``docstatus`` / …) are never offered as candidates they
     go into ``framework_cols_filtered`` instead, which the renderer shows as
     "also filtered on … (not suggested for indexing)". Frappe's framework
     "meta" tables (``tabDocType`` / ``tabCustom Field`` / ``tabSingles`` / …)
-    get ``is_meta_table: True`` and no candidates at all — ``bench migrate``
+    get ``is_meta_table: True`` and no candidates at all ``bench migrate``
     owns their indexes.
 
-Informational only — no findings (``index_suggestions`` / ``explain_flags``
+Informational only no findings (``index_suggestions`` / ``explain_flags``
 emit the EXPLAIN-driven findings; this is the broad "what does this table
 look like" view). Uses ``sql_metadata.Parser`` (a frappe dependency) to
 extract tables, query type, and per-clause columns.
@@ -40,7 +40,7 @@ from optimus.analyzers.base import (
 
 DEFAULT_TOP_N = 15
 # Writes are usually cheap (a few sub-ms INSERT/UPDATE rows), so a write-target
-# table easily ranks below the time cutoff — pull in the most write-active ones
+# table easily ranks below the time cutoff pull in the most write-active ones
 # that didn't make it so a doc-save's writes are still visible.
 DEFAULT_WRITE_TOP_N = 10
 MAX_INDEX_CANDIDATES_PER_TABLE = 6
@@ -67,7 +67,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		from sql_metadata import Parser  # noqa: F401
 	except Exception:
 		return AnalyzerResult(
-			warnings=["sql_metadata not available — table breakdown skipped"]
+			warnings=["sql_metadata not available table breakdown skipped"]
 		)
 
 	stats: dict[str, dict] = defaultdict(lambda: {
@@ -80,7 +80,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		"col_hits": Counter(),       # (column, source_label) -> count, reads only
 		"framework_cols": set(),     # Frappe metadata cols seen in WHERE/JOIN/ORDER on reads
 		# frozenset(non-metadata WHERE/JOIN columns) -> how many read queries
-		# filtered on exactly that set — drives the composite recommendation.
+		# filtered on exactly that set drives the composite recommendation.
 		"combos": Counter(),
 	})
 
@@ -104,16 +104,16 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 				if is_read:
 					s["read_count"] += 1
 					s["read_duration"] += duration
-					# Index candidates come from READ queries only — that's
+					# Index candidates come from READ queries only that's
 					# what the developer asked for ("fields to index to
 					# improve reads"). Two things are NOT offered as
 					# candidates: (a) Frappe's framework-managed metadata
-					# columns (`modified` / `idx` / `parent` / … — written on
-					# every save, or auto-indexed) — recorded in
+					# columns (`modified` / `idx` / `parent` / … written on
+					# every save, or auto-indexed) recorded in
 					# framework_cols so the report can still surface "also
 					# filtered on … (not suggested)"; (b) anything on a Frappe
 					# framework "meta" table (tabDocType / tabCustom Field /
-					# tabSingles / …) — `bench migrate` owns those tables'
+					# tabSingles / …) `bench migrate` owns those tables'
 					# indexes, so there's nothing to suggest there at all.
 					if not is_frappe_meta_table(table):
 						where_join_cols: list[str] = []
@@ -133,7 +133,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# v0.7.x C.AM2: renamed ``duration_ms`` → ``consolidated_time_ms`` to
 	# disambiguate from action.duration_ms (per-request wall) and
 	# top_queries.query_duration_ms (per-call query exec). The value is
-	# the sum of every query touching this table — a consolidated total
+	# the sum of every query touching this table a consolidated total
 	# across the session, not a per-hit measurement.
 	breakdown = [
 		{
@@ -172,7 +172,7 @@ def _build_recommended_index(table: str, s: dict) -> dict | None:
 	read queries filtered on *together*, with columns ordered by overall
 	usage frequency (a rough selectivity proxy) and capped to a sane
 	composite width. Only for real Frappe doctype tables (``tab*``, not a
-	framework meta table) — those are the ones a developer can actually
+	framework meta table) those are the ones a developer can actually
 	index via a patch.
 	"""
 	t = str(table or "")
@@ -205,8 +205,8 @@ def _build_recommended_index(table: str, s: dict) -> dict | None:
 
 
 def _rank_candidates(col_hits: "Counter") -> list[dict]:
-	"""Collapse ``(column, source_label)`` counts into one entry per column —
-	``{column, sources: [...], hits}`` — ranked by total appearances, top
+	"""Collapse ``(column, source_label)`` counts into one entry per column
+	``{column, sources: [...], hits}``: ranked by total appearances, top
 	``MAX_INDEX_CANDIDATES_PER_TABLE``."""
 	per_col: dict[str, dict] = {}
 	for (col, label), n in col_hits.items():
@@ -234,7 +234,7 @@ def _parse_query(query: str) -> dict:
 	index_cols: {table: [(source_label, column), ...]}}``.
 
 	Best-effort: if ``sql_metadata`` can't parse it we return no tables, so
-	the query simply doesn't appear in the breakdown — same as the
+	the query simply doesn't appear in the breakdown same as the
 	pre-existing behaviour.
 	"""
 	verb = _leading_verb(query)
@@ -243,7 +243,7 @@ def _parse_query(query: str) -> dict:
 
 		# disable_logging: sql_metadata logs at error() for query types it can't
 		# classify (COMMIT/ROLLBACK, SHOW GLOBAL STATUS / SHOW VARIABLES from
-		# frappe's tx control + Optimus's infra capture) and then raises — which
+		# frappe's tx control + Optimus's infra capture) and then raises which
 		# we already catch below and treat as "no tables". Silence the noisy log;
 		# behaviour is unchanged.
 		parsed = Parser(query, disable_logging=True)
@@ -288,7 +288,7 @@ def _parse_query(query: str) -> dict:
 
 def _attribute_column(raw_col, tables: list[str], single_table):
 	"""Map a ``sql_metadata`` column reference (``"tabFoo.bar"`` or ``"bar"``)
-	to ``(table, column)`` — or ``None`` when it can't be attributed
+	to ``(table, column)``: or ``None`` when it can't be attributed
 	confidently (an unresolved alias, an expression, or an ambiguous
 	unqualified column in a multi-table query)."""
 	if not isinstance(raw_col, str):
@@ -298,11 +298,11 @@ def _attribute_column(raw_col, tables: list[str], single_table):
 		return None
 	if "." in col:
 		# Frappe table names contain spaces but never dots; column names
-		# never contain dots — so the first dot separates table from column.
+		# never contain dots so the first dot separates table from column.
 		prefix, _, rest = col.partition(".")
 		if rest and prefix in tables:
 			return (prefix, rest)
-		return None  # qualified by an alias we didn't resolve — don't guess
+		return None  # qualified by an alias we didn't resolve don't guess
 	if single_table:
 		return (single_table, col)
-	return None  # unqualified in a multi-table query — ambiguous, skip
+	return None  # unqualified in a multi-table query ambiguous, skip

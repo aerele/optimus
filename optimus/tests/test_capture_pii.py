@@ -57,7 +57,7 @@ def test_identify_args_handles_missing_name():
 
 
 def test_identify_args_get_doc_with_dict_arg():
-	"""Regression: frappe.get_doc({"doctype": "X", "name": "Y", ...}) — dict
+	"""Regression: frappe.get_doc({"doctype": "X", "name": "Y", ...}) dict
 	form. Previously _identify_args returned the dict as-is, making the
 	bucket key unhashable and crashing the redundant_calls analyzer."""
 	doc_dict = {
@@ -86,7 +86,7 @@ def test_identify_args_get_doc_with_islocal_dict():
 		"__unsaved": 1,
 	}
 	raw, safe = capture._identify_args("get_doc", (doc_dict,), {})
-	# Name should be None — we don't want temp names polluting the buckets
+	# Name should be None we don't want temp names polluting the buckets
 	assert raw == ("Sales Invoice", None)
 	assert safe == ("Sales Invoice", None)
 

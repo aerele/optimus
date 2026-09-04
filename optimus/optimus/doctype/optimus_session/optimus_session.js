@@ -49,7 +49,7 @@ function render_ai_buttons(frm) {
 // Show a live headline on the form while analyze is running (the floating
 // widget shows the same progress, but if you're sitting on the Profiler
 // Session form you shouldn't have to stare at a static "Analyzing" status
-// — especially when AI fix suggestions are being generated, which can take
+// especially when AI fix suggestions are being generated, which can take
 // a while). Cleared + reloaded when the session reaches Ready / Failed.
 function subscribe_session_progress(frm) {
 	if (frm.is_new()) return;
@@ -65,7 +65,7 @@ function subscribe_session_progress(frm) {
 		frm.dashboard.set_headline(
 			'<span class="text-muted">' +
 				'<i class="fa fa-spinner fa-spin" style="margin-right:6px;"></i>' +
-				(pct !== null ? __("Preparing report — {0}% · {1}", [pct, desc]) : desc) +
+				(pct !== null ? __("Preparing report {0}% · {1}", [pct, desc]) : desc) +
 				"</span>"
 		);
 	});
@@ -101,12 +101,12 @@ function subscribe_session_progress(frm) {
 	});
 }
 
-// Single AI button: "Refresh AI suggestions" — replaces five legacy
+// Single AI button: "Refresh AI suggestions" replaces five legacy
 // buttons (Suggest a fix / Generate AI fixes / Re-evaluate AI fixes /
 // Humanize Steps / Suggest an index). One server endpoint runs all
 // three AI operations server-side and re-renders the report once at
 // the end. The per-section toggles still gate which operations run
-// inside the endpoint — a toggle-off section is skipped silently.
+// inside the endpoint a toggle-off section is skipped silently.
 function render_ai_refill_button(frm) {
 	if (frm.is_new()) return;
 	if (frm.doc.status !== "Ready") return;
@@ -118,7 +118,7 @@ function render_ai_refill_button(frm) {
 					"Refresh every AI-generated section of the report? " +
 						"This re-runs fix suggestions on findings, the " +
 						"humanized Steps to Reproduce, and index advice " +
-						"for tables with a candidate — then re-renders " +
+						"for tables with a candidate then re-renders " +
 						"the report once. Calls the configured LLM for " +
 						"each, so it can take a bit. If it doesn't " +
 						"finish in one pass, run it again."
@@ -154,13 +154,13 @@ function _refill_ai_call(frm) {
 			frappe.show_alert({ message: msg, indicator: indicator });
 			if (failed) {
 				frappe.show_alert({
-					message: __("{0} call(s) failed — old suggestions kept (see Error Log).", [failed]),
+					message: __("{0} call(s) failed old suggestions kept (see Error Log).", [failed]),
 					indicator: "red",
 				});
 			}
 			if (skipped) {
 				frappe.show_alert({
-					message: __("{0} skipped (time budget) — run it again for the rest.", [skipped]),
+					message: __("{0} skipped (time budget) run it again for the rest.", [skipped]),
 					indicator: "orange",
 				});
 			}
@@ -168,7 +168,7 @@ function _refill_ai_call(frm) {
 		},
 		error: () => {
 			frappe.show_alert({
-				message: __("The AI refresh request failed — see the error popup for details."),
+				message: __("The AI refresh request failed see the error popup for details."),
 				indicator: "red",
 			});
 		},
@@ -187,7 +187,7 @@ function render_phase2_button(frm) {
 	if (frm.doc.status !== "Ready") return;
 
 	// If there's an in-flight Recording row, surface Stop as the primary
-	// affordance — that's what the user is looking for after they've
+	// affordance that's what the user is looking for after they've
 	// reproduced their flow.
 	var recording = (frm.doc.phase_2_runs || []).find(function (r) {
 		return r.status === "Recording";
@@ -205,7 +205,7 @@ function render_phase2_button(frm) {
 					callback: function () {
 						frappe.show_alert({
 							message: __(
-								"Phase 2 stopped. Analyzing now — the report " +
+								"Phase 2 stopped. Analyzing now the report " +
 								"section will refresh when ready."
 							),
 							indicator: "blue",
@@ -223,11 +223,11 @@ function render_phase2_button(frm) {
 
 		// v0.7.x: a Recording pass does nothing until the flow re-executes and
 		// the pass is stopped. Auto-arm (and the picker) leave users staring at
-		// a Stop button with no context — spell out the two steps.
+		// a Stop button with no context spell out the two steps.
 		frm.set_intro(
 			__(
 				"🔬 Line profiling is armed. Re-run your flow now so the hot " +
-				"path(s) execute again, then click \"Stop Phase 2 Run\" above — " +
+				"path(s) execute again, then click \"Stop Phase 2 Run\" above " +
 				"the report will then pinpoint the exact hot line(s). " +
 				"(Profiling has to re-execute your code; it can't replay the " +
 				"original run.)"
@@ -241,7 +241,7 @@ function render_phase2_button(frm) {
 
 	// Surface a Retry button for any Phase 2 Run row stuck in Analyzing
 	// or Failed. The most common cause of stuck Analyzing is a dev site
-	// running without `bench start` — no RQ worker picks up the long
+	// running without `bench start`: no RQ worker picks up the long
 	// queue. retry_phase2_analyze runs inline so the click resolves
 	// directly to Ready or Failed.
 	var stuck_runs = (frm.doc.phase_2_runs || []).filter(function (row) {
@@ -251,7 +251,7 @@ function render_phase2_button(frm) {
 	// v0.6.x: when there are 2+ stuck runs, surface a SINGLE "Retry all
 	// stuck Phase-2 runs" button that fires ONE batched server call
 	// (addresses Lens-audit "frappe.call(...) inside a loop"). The
-	// per-run buttons below stay — they let the operator retry one
+	// per-run buttons below stay they let the operator retry one
 	// specific run when only one is misbehaving.
 	if (stuck_runs.length >= 2) {
 		frm.add_custom_button(
@@ -267,7 +267,7 @@ function render_phase2_button(frm) {
 						var t = msg.tallies || {};
 						frappe.show_alert({
 							message: __(
-								"Batch retry finished — " +
+								"Batch retry finished " +
 								(t.Ready || 0) + " Ready · " +
 								(t.Failed || 0) + " Failed" +
 								((t.Analyzing || 0) ? " · " + t.Analyzing + " still Analyzing" : "")
@@ -295,7 +295,7 @@ function render_phase2_button(frm) {
 						var msg = (r && r.message) || {};
 						frappe.show_alert({
 							message: __(
-								"Retry finished — status: " +
+								"Retry finished status: " +
 								(msg.status || "unknown") +
 								(msg.error ? " · " + msg.error : "")
 							),
@@ -315,7 +315,7 @@ function render_phase2_button(frm) {
 
 	// Recovery hatch: force-clear a stuck phase-2 active flag if a
 	// previous run never reached Stop (worker crash, tab close, etc.).
-	// Idempotent — safe to click when nothing is stuck.
+	// Idempotent safe to click when nothing is stuck.
 	frm.add_custom_button(__("Force Stop Stuck Run"), function () {
 		frappe.confirm(
 			__(
@@ -330,7 +330,7 @@ function render_phase2_button(frm) {
 						var msg = r && r.message ? r.message : {};
 						frappe.show_alert({
 							message: __(
-								"Phase 2 cleared — flag was " +
+								"Phase 2 cleared flag was " +
 								(msg.cleared_active_flag ? "set" : "already clear") +
 								"; " +
 								(msg.rows_marked_failed || 0) +
@@ -493,7 +493,7 @@ function show_phase2_dialog(frm, data) {
 
 	// When there are no user-app frames at all (vanilla ERPNext or a
 	// site without custom apps), the framework list IS the primary
-	// list — the customer is profiling erpnext / frappe code. Promote
+	// list the customer is profiling erpnext / frappe code. Promote
 	// it to default-expanded so the dialog shows usable candidates
 	// instead of an empty primary section.
 	var no_user_app = primary.length === 0 && framework.length > 0;
@@ -568,7 +568,7 @@ function show_phase2_dialog(frm, data) {
 				: __(
 					"+ " +
 					framework.length +
-					" framework frames (frappe / erpnext) — actionable for " +
+					" framework frames (frappe / erpnext) actionable for " +
 					"customizations or framework-level fixes"
 				),
 			collapsible: !no_user_app,
@@ -615,7 +615,7 @@ function show_phase2_dialog(frm, data) {
 			"following the hottest user-code child until it hits an ORM " +
 			"call or framework wrapper. The run instruments the entire " +
 			"chain so you see exactly which descendant line is the time " +
-			"sink — no need to re-pick and re-record level by level."
+			"sink no need to re-pick and re-record level by level."
 		),
 	});
 
@@ -677,7 +677,7 @@ function start_phase2(frm, picks, auto_expand) {
 			var expansions = r.message.expansions || [];
 
 			var msg = __(
-				"Phase 2 recording started — instrumenting " +
+				"Phase 2 recording started instrumenting " +
 				instrumented +
 				" function" + (instrumented === 1 ? "" : "s") +
 				". Reproduce your flow now, then click Stop on the floating widget."
@@ -694,12 +694,12 @@ function start_phase2(frm, picks, auto_expand) {
 			}
 			frappe.show_alert({ message: msg, indicator: "blue" });
 			frm.dashboard.add_indicator(
-				__("Phase 2 recording — run " + run_uuid.slice(0, 8) + "..."),
+				__("Phase 2 recording run " + run_uuid.slice(0, 8) + "..."),
 				"blue"
 			);
 		},
 		error: function (xhr) {
-			// Frappe surfaces validation errors through frappe.throw — they
+			// Frappe surfaces validation errors through frappe.throw they
 			// already render as a modal; we just re-enable the button.
 		},
 	});
@@ -770,7 +770,7 @@ function render_retry_button(frm) {
 // from the stored session data without re-running the analyzer. Shown
 // on Ready / Failed sessions. Typical use: the report template was
 // upgraded (e.g. noise filters or exec summary added) and the admin
-// wants existing sessions to reflect the new layout — or the original
+// wants existing sessions to reflect the new layout or the original
 // render crashed and a fix was deployed.
 function render_regenerate_report_button(frm) {
 	if (frm.is_new()) return;
@@ -783,7 +783,7 @@ function render_regenerate_report_button(frm) {
 				"Re-render the HTML report from stored session data. This "
 				+ "does NOT re-run the analyzer. Note: if \"Suggest AI fixes "
 				+ "in the report by default\" is enabled, this also asks the "
-				+ "LLM for fixes for any findings that don't have one yet — "
+				+ "LLM for fixes for any findings that don't have one yet "
 				+ "which can take a while."
 			),
 			() => {
@@ -832,7 +832,7 @@ function render_regenerate_report_button(frm) {
 // Parent-level, NON-status hint that an additive phase-2 line-profile drill-down
 // is still computing. The session's own `status` intentionally stays "Ready" (the
 // phase-1 report is rendered and available, and a session can have many phase-2
-// passes) — this just resolves the "parent Ready but a Phase 2 run says Analyzing"
+// passes) this just resolves the "parent Ready but a Phase 2 run says Analyzing"
 // confusion without flapping the real status. Driven by the already-loaded child
 // rows, so no extra round-trip; cleared automatically on the next refresh once the
 // run finishes (the phase_2_run_ready realtime event reloads the form).
@@ -929,7 +929,7 @@ function render_drain_progress(frm) {
 	};
 	const tick = () => {
 		// Stop polling if the user navigated away from this form (no clean
-		// per-form unload hook in Frappe — cur_frm is the active form).
+		// per-form unload hook in Frappe cur_frm is the active form).
 		if (window.cur_frm !== frm) {
 			stop();
 			return;
@@ -946,7 +946,7 @@ function render_drain_progress(frm) {
 					return;
 				}
 				const n = d.pending != null ? d.pending : 0;
-				// One self-managed banner updated in place — set_intro /
+				// One self-managed banner updated in place set_intro /
 				// set_headline both APPEND a dismissible .form-message in this
 				// Frappe version, so polling them stacked a new bar each tick.
 				_drain_banner(
@@ -970,7 +970,7 @@ function render_download_buttons(frm) {
 	if (frm.doc.status !== "Ready") return;
 
 	// v0.6.0 Round 7: safe-mode reporting removed. Single admin-scoped
-	// report — the raw HTML plus a lazy-generated PDF. Server-side
+	// report the raw HTML plus a lazy-generated PDF. Server-side
 	// permission gating still applies (Optimus User role + per-File
 	// permission hook).
 	if (frm.doc.raw_report_file) {
@@ -985,7 +985,7 @@ function render_download_buttons(frm) {
 						// Programmatic <a download="..."> click forces
 						// the browser to save the file rather than navigate
 						// to it. window.open serves the HTML inline because
-						// the file's Content-Type is text/html — that's the
+						// the file's Content-Type is text/html that's the
 						// "Open Report" flow below; this button needs a
 						// real save-to-disk.
 						const link = document.createElement("a");
@@ -1012,7 +1012,7 @@ function render_download_buttons(frm) {
 						// Content-Disposition: attachment, which triggers a
 						// download dialog instead of rendering inline. Fetch
 						// the content, wrap it in a blob URL with the right
-						// MIME type, and window.open that — blob URLs are
+						// MIME type, and window.open that blob URLs are
 						// not governed by the original response's
 						// Content-Disposition, so the browser renders the
 						// HTML inline. Works because the report HTML is

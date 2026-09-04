@@ -70,7 +70,7 @@ class TestBumpCacheThreshold:
 		assert stub._single_values["redundant_cache_threshold"] == 50
 
 	def test_does_not_overwrite_deliberate_custom_value(self, monkeypatch):
-		"""User set a custom threshold like 20 or 100 — don't touch it."""
+		"""User set a custom threshold like 20 or 100 don't touch it."""
 		for custom in [5, 20, 30, 75, 100, 500]:
 			stub = _install_frappe_stub(monkeypatch)
 			stub._single_values["redundant_cache_threshold"] = custom
@@ -133,5 +133,5 @@ class TestPatchRegistered:
 			in entries
 		), (
 			"patches.txt must register the bump_cache_threshold_default "
-			"patch — otherwise bench migrate won't run it"
+			"patch otherwise bench migrate won't run it"
 		)

@@ -1,9 +1,9 @@
-# `optimus.tests_integration` — real-bench integration tests
+# `optimus.tests_integration`: real-bench integration tests
 
 A sibling to `optimus/tests/`. The unit suite (`optimus/tests/`) runs in
 ~6 seconds against a Frappe stub and ships with the pure-pytest CI
 workflow. This directory holds tests that need a **live Frappe bench**
-— real MariaDB, real Redis, real RQ workers — and runs in CI via
+real MariaDB, real Redis, real RQ workers and runs in CI via
 `.github/workflows/integration.yml` against a bench provisioned by
 `.github/helper/install.sh`.
 
@@ -53,16 +53,16 @@ picked up here.)
 
 ## Fixtures (`conftest.py`)
 
-* **`test_site`** — yields `frappe.local.site` (the site the runner
+* **`test_site`**: yields `frappe.local.site` (the site the runner
   connected to). Tests rarely need it explicitly but it's useful for
   shelling out to `bench --site {test_site} …`.
-* **`cleanup_session`** — autouse. After every test, hard-deletes any
+* **`cleanup_session`**: autouse. After every test, hard-deletes any
   `Optimus Session` rows for the current user + clears the user's
   Redis active-session pointer. `FrappeTestCase` already rolls back
   per-test, but the analyze pipeline writes through a background-worker
-  connection that escapes the rollback in production flows — same for
+  connection that escapes the rollback in production flows same for
   Redis state. The cleanup is defence-in-depth.
-* **`seeded_session`** — convenience wrapper. Calls `api.start`, yields
+* **`seeded_session`**: convenience wrapper. Calls `api.start`, yields
   the `session_uuid`, then on teardown calls `api.stop` + waits up to
   60 s for the session to land on a terminal state (`Ready` /
   `Failed`).
@@ -99,7 +99,7 @@ class TestMyFeature(FrappeTestCase):
         frappe.set_user("Administrator")  # or another fixture user
 
     def test_my_invariant(self):
-        # Direct frappe.db / frappe.cache / api calls — no mocks.
+        # Direct frappe.db / frappe.cache / api calls no mocks.
         ...
 ```
 
@@ -117,8 +117,8 @@ using the harness above:
 |---|---|---|
 | ✓ `test_atomic_lua_merge_concurrent.py` (done in v0.12.1) | real-Redis + real-Lua concurrent test exercising the v0.7.x trilogy's invariants (recording+status race, distinct job_ids, setdefault first-writer-wins, fallback path) | Field loss under worker contention |
 | ✓ `test_regenerate_reports_idempotent.py` (done in v0.12.4) | calls `api.regenerate_reports` twice and byte-diffs the two HTML outputs (patches `renderer._now_iso` for determinism), confirms attachment lands on `raw_report_file`, confirms session-field changes produce different HTML, confirms Failed-status sessions still re-render | Re-render path is byte-stable across consecutive calls; silent caching / non-determinism would break upgrade roll-forward |
-| ✓ `test_phase2_tool_orphan_recovery.py` (done in v0.12.5) | leaks `sys.monitoring` tool 2 as `line_profiler`, calls `optimus._startup_probe_tool2()`, asserts the leak is reclaimed (tool freed + events cleared); also asserts the probe respects non-line_profiler ownership boundaries and is a no-op when tool 2 is free | The v0.7.x `fbf3179` fix holds across real worker bounces — without it, a worker line-traces every subsequent request → CPU peg + frozen UI |
-| ✓ `test_safe_report_self_contained_on_real_bench.py` (done in v0.12.6) | renders a session via `api.regenerate_reports`, reads the on-disk attached HTML, asserts no remote-fetch URLs (`src=https?:` / `<link href=https?:` / `@import` / `url(http`), no `<script>` tags (inline or external), no bench-local asset references (`/assets/`, `/files/`, `/api/method/`) | Self-containment canary holds when assets come through real Frappe file_manager paths — load-bearing dev-shop interchange guarantee |
+| ✓ `test_phase2_tool_orphan_recovery.py` (done in v0.12.5) | leaks `sys.monitoring` tool 2 as `line_profiler`, calls `optimus._startup_probe_tool2()`, asserts the leak is reclaimed (tool freed + events cleared); also asserts the probe respects non-line_profiler ownership boundaries and is a no-op when tool 2 is free | The v0.7.x `fbf3179` fix holds across real worker bounces without it, a worker line-traces every subsequent request → CPU peg + frozen UI |
+| ✓ `test_safe_report_self_contained_on_real_bench.py` (done in v0.12.6) | renders a session via `api.regenerate_reports`, reads the on-disk attached HTML, asserts no remote-fetch URLs (`src=https?:` / `<link href=https?:` / `@import` / `url(http`), no `<script>` tags (inline or external), no bench-local asset references (`/assets/`, `/files/`, `/api/method/`) | Self-containment canary holds when assets come through real Frappe file_manager paths load-bearing dev-shop interchange guarantee |
 | ✓ `test_janitor_sweeps_actually_delete.py` (done in v0.12.7) | seeds Optimus Sessions with controlled `started_at` + status, runs `janitor.sweep_old_sessions`, asserts: 100-day Ready session deleted, 30-day Ready session kept, 100-day Analyzing session kept (terminal-state-only contract), attached File rows cascade-deleted alongside parent session | Daily retention cron actually deletes (not just marks); attached file rows don't orphan; active sessions untouched regardless of age |
 
 Each is ~100-200 LOC. Pick the highest-impact one when you're picking

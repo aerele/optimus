@@ -1,10 +1,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""D.M-S2 — hot-frames aggregation uses self_ms, not cumulative_ms.
+"""D.M-S2 hot-frames aggregation uses self_ms, not cumulative_ms.
 
 A recursive (or decorator-wrapped) function appears at multiple call-tree
-depths. Each node's ``cumulative_ms`` includes its descendants — summing
+depths. Each node's ``cumulative_ms`` includes its descendants summing
 cumulative across sibling occurrences double-counts nested self-times.
 
 The fix switched the aggregator to ``self_ms`` (exclusive per-frame), so
@@ -31,7 +31,7 @@ def _node(function, filename, cumulative, self_ms, children):
 
 def test_recursive_frame_uses_self_ms_not_cumulative():
 	"""A recursive function appearing at 3 call-tree depths must
-	contribute its self_ms once per occurrence — not its cumulative
+	contribute its self_ms once per occurrence not its cumulative
 	(which would sum nested-self-times multiple times)."""
 	# A function `rec` recursing 3 levels deep.
 	#   depth 0: cumulative=100, self=40 (inclusive of children's 60ms)
@@ -67,11 +67,11 @@ def test_recursive_frame_uses_self_ms_not_cumulative():
 	# Correct sum (self_ms): 40 + 30 + 30 = 100.
 	# Buggy sum (cumulative_ms): 100 + 60 + 30 = 190.
 	assert rec_row["total_ms"] == 100, (
-		"aggregator must sum self_ms, not cumulative_ms — got "
+		"aggregator must sum self_ms, not cumulative_ms got "
 		f"{rec_row['total_ms']} (cumulative-bug would be 190)"
 	)
 	# v0.7.x: the framework variant uses total_cumulative_ms.
-	# It IS the sum-cumulative — 100 + 60 + 30 = 190 — and that's
+	# It IS the sum-cumulative 100 + 60 + 30 = 190 and that's
 	# intentional. The framework table accepts the overlap risk in
 	# exchange for non-zero, meaningful display values.
 	assert rec_row["total_cumulative_ms"] == 190
@@ -106,21 +106,21 @@ def test_flat_function_aggregates_self_ms_across_actions():
 	# (105 + 155 + 205) = 465.
 	assert row["total_ms"] == 450
 	# v0.7.x: cumulative-sum lands separately for the framework
-	# variant display — 105 + 155 + 205 = 465.
+	# variant display 105 + 155 + 205 = 465.
 	assert row["total_cumulative_ms"] == 465
 	assert row["distinct_actions"] == 3
 
 
 # --------------------------------------------------------------------------
-# build_hot_frames_table — per-variant time metric (v0.7.x)
+# build_hot_frames_table per-variant time metric (v0.7.x)
 # --------------------------------------------------------------------------
 
-from optimus import renderer  # noqa: E402 — co-located with aggregator tests
+from optimus import renderer  # noqa: E402 co-located with aggregator tests
 
 
 def test_framework_variant_displays_cumulative_time():
-	"""``build_hot_frames_table(is_hot=False)`` — the framework
-	variant — displays ``total_cumulative_ms`` because wrapper
+	"""``build_hot_frames_table(is_hot=False)``: the framework
+	variant displays ``total_cumulative_ms`` because wrapper
 	self-time is sub-sampler-interval and aggregated rows would
 	render as 0ms otherwise."""
 	raw = [{
@@ -141,8 +141,8 @@ def test_framework_variant_displays_cumulative_time():
 
 
 def test_user_app_variant_keeps_self_time_total():
-	"""``build_hot_frames_table(is_hot=True)`` — the user-app
-	variant — continues to display ``total_ms`` (self-sum) unchanged.
+	"""``build_hot_frames_table(is_hot=True)``: the user-app
+	variant continues to display ``total_ms`` (self-sum) unchanged.
 	The A.AE1 correctness fix (immune to recursion double-count)
 	is preserved."""
 	raw = [{
@@ -186,7 +186,7 @@ def test_framework_variant_re_sorts_by_displayed_metric():
 	out = renderer.build_hot_frames_table(raw, is_hot=False)
 	displayed = [r["total_ms"] for r in out]
 	assert displayed == [1500, 800, 200], (
-		"framework variant must sort by cumulative DESC — got "
+		"framework variant must sort by cumulative DESC got "
 		f"{displayed}"
 	)
 

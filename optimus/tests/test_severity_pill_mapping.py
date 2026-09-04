@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""D.M-S8 — severity-pill class mirrors finding severity.
+"""D.M-S8 severity-pill class mirrors finding severity.
 
 The finding card renders a colour-coded pill via:
     <span class="severity-pill {{ f.severity | lower }}">{{ f.severity }}</span>
@@ -105,11 +105,11 @@ def test_severity_pill_class_matches_data_severity():
 		html,
 	)
 	assert pills, "expected severity-pill spans in rendered HTML"
-	# At least one of each severity must render — confirms the test
+	# At least one of each severity must render confirms the test
 	# fixture flowed through the finding pipeline.
 	classes_seen = {cls for cls, _label in pills}
 	assert classes_seen >= {"high", "medium", "low"}, (
-		f"missing severity tiers — got {classes_seen!r}"
+		f"missing severity tiers got {classes_seen!r}"
 	)
 	# Every pair must agree.
 	for cls, label in pills:

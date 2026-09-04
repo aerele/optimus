@@ -91,10 +91,10 @@ def test_register_recording_does_not_resurrect_cleared_active_pointer(fake_cache
 	"""v0.7.x regression guard: a Stop call clears the active-session
 	Redis pointer. If an in-flight request's ``after_request`` then calls
 	``register_recording``, the TTL refresh must NOT re-create the
-	pointer — otherwise subsequent HTTP requests get captured into the
+	pointer otherwise subsequent HTTP requests get captured into the
 	already-stopped session and the widget flips back to Recording on
 	the user's next interaction. The fix replaced ``set_value`` (which
-	creates) with ``expire_key`` (Redis EXPIRE — no-op on missing keys).
+	creates) with ``expire_key`` (Redis EXPIRE no-op on missing keys).
 	"""
 	user = "alice@example.com"
 	session_uuid = "uuid-1"

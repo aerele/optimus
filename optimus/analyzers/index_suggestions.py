@@ -8,7 +8,7 @@ Wraps the existing
 `DBOptimizer` heuristic) to identify a single best missing index per query.
 We run it across the union of unique normalized queries in the session,
 then dedupe and aggregate suggestions by (table, column) so a customer
-sees one suggestion per missing index — with the cumulative time it would
+sees one suggestion per missing index with the cumulative time it would
 save and the queries that would benefit.
 
 This is the per-session aggregation that the existing per-request
@@ -39,7 +39,7 @@ def _scrub_literals(text: str) -> str:
 	replace obvious string literals and long numeric sequences with ?
 	placeholders.
 
-	This is paranoid belt-and-suspenders — the upstream query should
+	This is paranoid belt-and-suspenders the upstream query should
 	already be normalized by mark_duplicates by the time we see it, but
 	if normalization was skipped or the query contained an unusual
 	pattern, we scrub here too.
@@ -64,7 +64,7 @@ MAX_EXAMPLE_QUERIES = 3
 #   "Adding an index to tabDocType.modified would speed up 1526 queries
 #    in this session, saving roughly 892ms total."
 #
-# 892 / 1526 = 0.58ms per query — below MariaDB's per-query overhead.
+# 892 / 1526 = 0.58ms per query below MariaDB's per-query overhead.
 # On a small framework table (tabDocType is typically ~800 rows) the
 # table already fits in memory, the scan is effectively free, and
 # adding a btree index yields no measurable improvement. The user
@@ -73,7 +73,7 @@ MAX_EXAMPLE_QUERIES = 3
 # The severity thresholds (HIGH_IMPACT_MS, MEDIUM_IMPACT_MS) gate
 # severity based on CUMULATIVE time, but a 2ms-per-query × 1000-query
 # suggestion still crosses the 500ms cumulative threshold while being
-# individually actionable — so we need a separate per-query minimum
+# individually actionable so we need a separate per-query minimum
 # to distinguish "many tiny queries" from "a few slow queries."
 #
 # 2ms is the floor: below this, query overhead (network roundtrip +
@@ -92,7 +92,7 @@ MAX_LOGGED_FAILURES = 3
 # shapes Frappe apps legitimately emit. When it can't parse a query, it
 # raises either ``ValueError: too many values to unpack`` (from an internal
 # tuple unpacking) or ``TypeError`` (from an unexpected None in its
-# token stream). These are PARSER LIMITATIONS — the user cannot rewrite
+# token stream). These are PARSER LIMITATIONS the user cannot rewrite
 # their query to make sql_metadata happy, and they cannot add an index to
 # fix a parse failure anyway.
 #
@@ -105,7 +105,7 @@ MAX_LOGGED_FAILURES = 3
 # opportunities they could act on.
 #
 # v0.5.1: parser-limitation exceptions are counted but NOT logged to
-# the Error Log, and the user-facing warning is softer — it explains
+# the Error Log, and the user-facing warning is softer it explains
 # that sql_metadata can't parse these shapes and there's nothing to fix.
 # Real errors (AttributeError, ProgrammingError, RuntimeError, etc.)
 # still go to the Error Log and still produce the loud warning, because
@@ -117,7 +117,7 @@ _PARSER_LIMITATION_EXCEPTIONS = (ValueError, TypeError)
 # DDL, stored-procedure CALL) does not benefit from index suggestions,
 # and sql_metadata raises ValueError on many of them. The pre-v0.5.1
 # version fed everything to the optimizer and reported ~47% 'parse
-# failures' on real sessions — most of which were transaction markers
+# failures' on real sessions most of which were transaction markers
 # and connection-state statements, noise the user couldn't act on.
 _OPTIMIZABLE_QUERY_TYPES = frozenset({"SELECT"})
 
@@ -149,13 +149,13 @@ def _get_query_type(sql: str) -> str:
 # v0.5.1 → v0.6.0: never suggest indexing any of Frappe's standard
 # metadata columns, even when the DBOptimizer heuristic thinks one would
 # help a query. The optimizer only sees read patterns (``ORDER BY modified
-# DESC`` looks like it wants an index) — it can't see the write cost.
+# DESC`` looks like it wants an index) it can't see the write cost.
 #
 # These columns are updated on every save (`modified`, `modified_by`,
 # `idx`), on insert (`creation`, `owner`), on submit/cancel (`docstatus`),
 # or are already auto-indexed (`name` is the PK; `parent` is auto-indexed
 # on child tables). On any non-trivially-written table the maintenance cost
-# of an index there dwarfs the read-side gain — and even where the per-
+# of an index there dwarfs the read-side gain and even where the per-
 # insert cost would equal any other index, surfacing these nudges the
 # developer toward a class of change they should make deliberately, not on
 # a tool's say-so. The query's EXPLAIN row is still in the report if
@@ -163,7 +163,7 @@ def _get_query_type(sql: str) -> str:
 #
 # (Origin: a production report surfaced ``Add index on tabDocType(modified)``
 # and the user corrected with "Modified fields can't be indexed as it would
-# affect the system performance" — then later asked us to extend the rule to
+# affect the system performance" then later asked us to extend the rule to
 # `idx`, `parent`, `parentfield`, `parenttype`, `creation`, etc.)
 #
 # Mirrors ``optimus.analyzers.base.FRAPPE_METADATA_COLUMNS``
@@ -175,9 +175,9 @@ _NEVER_SUGGEST_COLUMNS = FRAPPE_METADATA_COLUMNS
 # ``SHOW INDEX FROM ?`` (DDL/SCHEMA statements expect a bare token, not a
 # bind value), so the only safe pattern is **strict input validation** at
 # the boundary. Allowed shapes:
-#   1. ``tab<DocType name>`` — the Frappe convention; DocType names may
+#   1. ``tab<DocType name>``: the Frappe convention; DocType names may
 #      contain letters, digits, spaces, underscores, hyphens.
-#   2. ``information_schema.<simple-name>`` — schema views the analyzer
+#   2. ``information_schema.<simple-name>``: schema views the analyzer
 #      legitimately introspects.
 # Anything else is rejected outright and the index-introspection helper
 # returns an empty set (its "I couldn't read indexes" fall-through).
@@ -195,7 +195,7 @@ def _is_safe_table_name(name) -> bool:
 	if not isinstance(name, str) or not name:
 		return False
 	# Defence in depth: reject backticks, quotes, semicolons even though
-	# the regexes wouldn't match them — make the intent obvious to readers.
+	# the regexes wouldn't match them make the intent obvious to readers.
 	if any(c in name for c in ("`", "'", '"', ";", "\\", "\n", "\r", "\x00")):
 		return False
 	return bool(_SAFE_TAB_TABLE_RE.match(name) or _SAFE_INFOSCHEMA_RE.match(name))
@@ -205,7 +205,7 @@ def _get_indexed_columns(table: str) -> set[str]:
 	"""Return the set of columns on ``table`` that already have at
 	least one index WHERE this column is the leftmost of the index key.
 
-	Non-leftmost composite columns are NOT counted — MariaDB's btree
+	Non-leftmost composite columns are NOT counted MariaDB's btree
 	can't use the index when a query filters on just that column, so
 	a Missing Index suggestion is still actionable.
 
@@ -236,26 +236,26 @@ def _classify_column(
 
 	Returns ``(status, ddl_or_reason)`` where status is one of:
 
-	  - ``"actionable"``   — column exists, is not indexed, can be
+	  - ``"actionable"`` column exists, is not indexed, can be
 	                         indexed; second element is the DDL string
-	  - ``"already_indexed"`` — column exists and is already the
+	  - ``"already_indexed"``: column exists and is already the
 	                         leftmost of at least one index; drop the
 	                         suggestion, second element explains
-	  - ``"unindexable"``  — column is JSON / geometry or doesn't exist
+	  - ``"unindexable"`` column is JSON / geometry or doesn't exist
 	                         on the table; drop the suggestion, second
 	                         element explains
-	  - ``"never_suggest"`` — column is one of Frappe's standard metadata
+	  - ``"never_suggest"``: column is one of Frappe's standard metadata
 	                         columns (``modified``, ``idx``, ``parent``,
-	                         ``creation``, ``docstatus``, …) — written on
+	                         ``creation``, ``docstatus``, …) written on
 	                         every save / submit, or already auto-indexed;
 	                         drop the suggestion, second element explains
-	  - ``"unknown"``      — information_schema lookup failed (likely
+	  - ``"unknown"`` information_schema lookup failed (likely
 	                         no real DB, dev environment); KEEP the
 	                         suggestion with a plain DDL (legacy
 	                         behavior) so we don't silently suppress
 	                         the old pipeline
 	"""
-	# v0.5.1 → v0.6.0: hard blacklist — Frappe's standard metadata columns
+	# v0.5.1 → v0.6.0: hard blacklist Frappe's standard metadata columns
 	# should never be suggested, regardless of read-side heuristics. Checked
 	# BEFORE the information_schema lookups so we don't waste DB roundtrips
 	# on a suggestion we already know to drop. Case-insensitive defensively
@@ -263,7 +263,7 @@ def _classify_column(
 	if (column or "").strip().lower() in _NEVER_SUGGEST_COLUMNS:
 		return "never_suggest", (
 			f"column `{column}` on `{table}` is a Frappe framework column "
-			f"(written on every save or submit, or already auto-indexed) — "
+			f"(written on every save or submit, or already auto-indexed) "
 			f"not a safe index target. The query's EXPLAIN row is in the "
 			f"report if you want to make this call deliberately."
 		)
@@ -288,7 +288,7 @@ def _classify_column(
 	if types and column not in types:
 		return "unindexable", (
 			f"column `{column}` does not exist on table `{table}` "
-			f"— the optimizer's suggestion is likely a parse error; "
+			f" the optimizer's suggestion is likely a parse error; "
 			f"verify the query and try again"
 		)
 
@@ -312,7 +312,7 @@ def _classify_column(
 	if dialect.prefix_required(dtype):
 		return "actionable", dialect.index_ddl(table, column, is_text_col=True)
 
-	# Regular indexable type (varchar, int, datetime, etc.) — and even if we
+	# Regular indexable type (varchar, int, datetime, etc.) and even if we
 	# don't recognise the dtype (empty string because the column-type lookup
 	# returned no row), fall through to a plain index rather than silently drop.
 	return "actionable", dialect.index_ddl(table, column, is_text_col=False)
@@ -321,7 +321,7 @@ def _classify_column(
 def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# Frappe's query optimizer fetches table stats with MariaDB-only
 	# introspection (DESCRIBE / SHOW INDEX FROM). On Postgres those statements
-	# raise a syntax error that aborts the whole transaction — and since the
+	# raise a syntax error that aborts the whole transaction and since the
 	# optimizer call below is in a try/except that swallows the error, the
 	# poisoned transaction would silently break every later query in the analyze
 	# (the original symptom: analyze crashed at _persist with
@@ -379,7 +379,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 	# Run the optimizer on each unique query and aggregate suggestions.
 	# Track per-exception-type failures so we can surface a warning if
-	# the optimizer couldn't analyze a lot of queries — otherwise the
+	# the optimizer couldn't analyze a lot of queries otherwise the
 	# customer reads "no index suggestions" as "no missing indexes"
 	# when the real answer might be "we couldn't analyze your queries".
 	suggestion_buckets: dict[tuple, dict] = defaultdict(
@@ -388,7 +388,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	parser_limit_failures: Counter = Counter()
 	real_failures: Counter = Counter()
 	# Frappe framework "meta" tables (tabDocType, tabCustom Field, tabSingles,
-	# tab__global_search, …) — `bench migrate` owns their schema (indexes
+	# tab__global_search, …) `bench migrate` owns their schema (indexes
 	# included) and they're tiny / write-on-every-customization, so we never
 	# suggest an index on them. Skip before we even bucket the suggestion.
 	dropped_meta_table_tables: set[str] = set()
@@ -400,11 +400,11 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			index = _optimize_query(info["raw"])
 		except _PARSER_LIMITATION_EXCEPTIONS as e:
 			# Expected path for complex queries sql_metadata can't parse.
-			# Count but don't log — the user can't act on these.
+			# Count but don't log the user can't act on these.
 			parser_limit_failures[type(e).__name__] += 1
 			continue
 		except Exception as e:
-			# Unexpected path — this might indicate a real profiler bug.
+			# Unexpected path this might indicate a real profiler bug.
 			# Count, log the first few to Error Log (so they're discoverable
 			# for investigation), and continue.
 			real_failures[type(e).__name__] += 1
@@ -412,7 +412,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 				try:
 					import frappe
 
-					# Scrub literals defensively — the query should already
+					# Scrub literals defensively the query should already
 					# be normalized, but if it isn't (edge case), we don't
 					# want literal customer data landing in the Error Log.
 					scrubbed = _scrub_literals(normalized[:1000])
@@ -465,7 +465,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		# might be high in aggregate but pointless in practice if each
 		# individual query is already fast. A real production case had
 		# tabDocType.modified flagged with 892ms / 1526 queries =
-		# 0.58ms per query — below MariaDB's per-query overhead.
+		# 0.58ms per query below MariaDB's per-query overhead.
 		# Indexing would not measurably help the user, so we suppress
 		# the finding entirely. Checked BEFORE classify_column so we
 		# don't waste SHOW INDEX / information_schema queries on
@@ -493,7 +493,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			unindexable_reasons.append(ddl_or_reason)
 			continue
 
-		# status is "actionable" or "unknown" — both keep the
+		# status is "actionable" or "unknown" both keep the
 		# suggestion. "unknown" uses the legacy plain-DDL template,
 		# matching pre-v0.5.1 behavior for environments without a
 		# live DB connection.
@@ -550,7 +550,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		warnings.append(
 			f"Could not analyze {total_real} of {len(unique_queries)} "
 			f"SELECT statements for index suggestions ({failure_summary}). "
-			"The report may be missing some optimization opportunities — "
+			"The report may be missing some optimization opportunities "
 			"see Error Log for the first few failed queries."
 		)
 
@@ -559,7 +559,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# telling the user there's nothing to fix. Production sessions on
 	# ERPNext frequently hit this for the item search dialog's complex
 	# query (correlated subquery + ORDER BY if/locate/coalesce expression)
-	# and a few reporting queries with window functions — neither of
+	# and a few reporting queries with window functions neither of
 	# which is user-actionable.
 	total_parser_limit = sum(parser_limit_failures.values())
 	if total_parser_limit:
@@ -567,13 +567,13 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			f"Skipped {total_parser_limit} query(ies) whose shape "
 			"exceeds the DBOptimizer heuristic's sql_metadata parser "
 			"(correlated subqueries, complex ORDER BY expressions, window "
-			"functions). These aren't actionable — index suggestions "
+			"functions). These aren't actionable index suggestions "
 			"require a simpler WHERE/JOIN shape the parser can analyze."
 		)
 	# v0.5.1: separate informational line about non-SELECT statements that
 	# were deliberately skipped, so users understand the distinction between
 	# 'we tried to analyze and failed' (above) and 'we didn't try because
-	# the statement type isn't optimizable' (below). Not a warning — more
+	# the statement type isn't optimizable' (below). Not a warning more
 	# of a 'here's what the 705-query number breaks down to.'
 	if skipped_by_type:
 		warnings.append(
@@ -587,7 +587,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			f"Suppressed {drop_low_per_query} index suggestion(s) with "
 			f"average savings below {MIN_AVG_SAVINGS_PER_QUERY_MS:g}ms "
 			"per query. These queries are already running near MariaDB's "
-			"per-query overhead floor — an index wouldn't measurably help."
+			"per-query overhead floor an index wouldn't measurably help."
 		)
 	if drop_never_suggest:
 		# Include the specific columns in the warning so the user can
@@ -600,7 +600,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			f"Suppressed {drop_never_suggest} index suggestion(s) on "
 			f"Frappe metadata columns ({sample}{more}). These columns are "
 			"written on every save or submit (or are already auto-indexed), "
-			"so an index there is a write-cost trap — not suggested."
+			"so an index there is a write-cost trap not suggested."
 		)
 	if dropped_meta_table_tables:
 		sample = ", ".join(sorted(dropped_meta_table_tables)[:5])
@@ -609,14 +609,14 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		warnings.append(
 			f"Skipped index suggestion(s) on Frappe framework meta tables "
 			f"({sample}{more}). `bench migrate` owns those tables' schema "
-			"(indexes included) — a hand-added index there is pointless and "
+			"(indexes included) a hand-added index there is pointless and "
 			"would be clobbered on the next migrate."
 		)
 	if drop_already_indexed:
 		warnings.append(
 			f"Suppressed {drop_already_indexed} index suggestion(s) whose "
 			"target column was already indexed (would have been a false "
-			"positive — the DBOptimizer heuristic doesn't check existing "
+			"positive the DBOptimizer heuristic doesn't check existing "
 			"indexes)."
 		)
 	if drop_unindexable:

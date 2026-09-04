@@ -9,10 +9,10 @@ per-line timings) into report-friendly findings + per-function aggregate.
 Two functions, mirroring the phase-1 ``analyze.run`` ↔ ``analyzers/*``
 split:
 
-- ``analyze(results_json)`` is the **pure** classifier — testable in
+- ``analyze(results_json)`` is the **pure** classifier testable in
   isolation, no Frappe / Redis access.
 - ``run_analyze(session_uuid, run_uuid)`` is the **impure** RQ entry
-  point — pulls samples from Redis, calls aggregate_samples, calls
+  point pulls samples from Redis, calls aggregate_samples, calls
   analyze, persists to the Optimus Phase Two Run row, propagates findings
   to the parent Session, triggers re-render, publishes realtime events.
 """
@@ -70,7 +70,7 @@ def _classify_hot_line(line_ms: float, total_ms: float) -> str | None:
 	"""Return 'High', 'Medium', or None for a candidate hot line.
 
 	The line must concentrate enough fraction AND have enough absolute time
-	to be worth flagging — a single line that's 100% of a 30ms function
+	to be worth flagging a single line that's 100% of a 30ms function
 	isn't actionable noise, but 60% of a 300ms function is.
 	"""
 	if total_ms <= 0:
@@ -87,7 +87,7 @@ def _classify_hot_line(line_ms: float, total_ms: float) -> str | None:
 def _function_invoked(fn: dict) -> bool:
 	"""A function is 'invoked' if at least one line has hits > 0 OR
 	total_ms > 0. line_profiler may report empty stats (no lines), or the
-	full line list with hits=0 — both mean the picked function was never
+	full line list with hits=0 both mean the picked function was never
 	executed during the recording."""
 	lines = fn.get("lines") or []
 	if not lines:
@@ -100,7 +100,7 @@ def _strip_line_comment(content: str) -> str:
 
 	Naively tracks single/double-quoted string state so a ``#`` inside a
 	literal doesn't get treated as a comment boundary. Triple-quoted
-	strings aren't recognised — line_profiler's per-line ``content``
+	strings aren't recognised line_profiler's per-line ``content``
 	carries one source line, so multi-line literals shouldn't appear
 	here in practice. A miss only costs a false negative (regex sees
 	the commented call and we don't suppress); never drops a real leaf.
@@ -136,7 +136,7 @@ def _detect_pass_through_callee(
 	(e.g. ``a(b(c()))``), the **last** one in the iteration order is
 	returned. The caller resolves chains by walking the per-function
 	classifications transitively, so picking any one of the present
-	qualnames suffices to anchor the chain — the leaf is found by
+	qualnames suffices to anchor the chain the leaf is found by
 	following ``passthrough_to`` until ``None``.
 	"""
 	stripped = _strip_line_comment(content or "")
@@ -224,13 +224,13 @@ def _hot_line_finding(fn: dict, line: dict, severity: str) -> dict:
 		# dotted_path stays in the description + technical_detail below.
 		"title": (
 			f"{_qualname_of(fn)}:{lineno} consumed {total_ms:.0f}ms "
-			f"({hits} hits) — single hottest line"
+			f"({hits} hits) single hottest line"
 		),
 		"customer_description": (
 			f"The line **{dotted_path}:{lineno}** is the dominant time sink in "
 			f"this function ({total_ms:.0f}ms across {hits} executions). "
 			"Optimizing it directly will move the needle on the function's "
-			"total cost — line-level timing makes the fix targetable."
+			"total cost line-level timing makes the fix targetable."
 		),
 		"technical_detail_json": json.dumps({
 			"dotted_path": dotted_path,
@@ -290,13 +290,13 @@ def _build_call_chain(
 	the end).
 
 	Empty chain (length 0) is returned when the leaf has no upstream
-	pass-through caller — i.e. it's a standalone function with no
+	pass-through caller i.e. it's a standalone function with no
 	wrapper finding to merge into. Single-step "chain" makes no sense
 	to render either, so we return [] in that case.
 
 	When the leaf has multiple callers (two functions whose hot lines
 	both call into this leaf), the chain follows the **hottest** caller
-	at each step — measured by the caller's function-total ``total_ms``.
+	at each step measured by the caller's function-total ``total_ms``.
 	"""
 	seen: set[str] = {leaf_qualname}
 	chain_qualnames: list[str] = [leaf_qualname]
@@ -405,10 +405,10 @@ def analyze(
 	Output:
 	  - findings: ``Hot Line`` (High/Medium) per **leaf** function whose
 	    hot line is the real cost driver. Functions whose hot line is
-	    just a call into another instrumented function are suppressed —
+	    just a call into another instrumented function are suppressed
 	    their position is preserved as a breadcrumb on the deeper finding.
 	    ``Function Not Invoked`` (Low) per pick that recorded nothing.
-	  - aggregate: ``{phase2_functions: [per-function summary, ...]}`` —
+	  - aggregate: ``{phase2_functions: [per-function summary, ...]}``:
 	    each summary carries top-5 lines by ``total_ms``.
 	  - warnings: human-readable strings for the report's warnings panel.
 	"""
@@ -478,7 +478,7 @@ def analyze(
 			uninvoked_paths.append(c["fn"].get("dotted_path") or qualname)
 			continue
 		if c["passthrough_to"]:
-			# Suppress — defer to the deeper leaf's finding. The chain is
+			# Suppress defer to the deeper leaf's finding. The chain is
 			# rebuilt when we visit that leaf below.
 			continue
 		fn = c["fn"]
@@ -492,7 +492,7 @@ def analyze(
 		if chain:
 			_attach_call_chain(finding, chain)
 		else:
-			# No upstream pass-through caller — try the phase-1 fallback
+			# No upstream pass-through caller try the phase-1 fallback
 			# hint for the rarer case where this finding's hot line is
 			# itself a call into uninstrumented code.
 			hint = _compute_phase1_hint(fn, hottest, call_trees)
@@ -515,7 +515,7 @@ def analyze(
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator (impure — frappe required)
+# Orchestrator (impure frappe required)
 # ---------------------------------------------------------------------------
 
 
@@ -536,7 +536,7 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 	re-raise so RQ logs it.
 	"""
 	if not _FRAPPE_AVAILABLE:
-		raise RuntimeError("frappe not importable — run under bench")
+		raise RuntimeError("frappe not importable run under bench")
 
 	from optimus.line_profile import capture
 
@@ -549,7 +549,7 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 	parent_docname = run_row.parent
 	# Resolve the session owner so realtime events reach their Desk tab. This runs
 	# in an RQ worker with no browser socket, so publish_realtime needs an EXPLICIT
-	# user (a None target won't reach the form) — same as phase-1's
+	# user (a None target won't reach the form) same as phase-1's
 	# _publish_session_event. Without this the form never auto-updates the run row.
 	try:
 		owner = frappe.db.get_value("Optimus Session", parent_docname, "user")
@@ -589,12 +589,12 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 				if isinstance(tree, dict):
 					call_trees.append(tree)
 		except Exception:
-			# Loading phase-1 trees is best-effort — without them we
+			# Loading phase-1 trees is best-effort without them we
 			# fall back to regex-only pass-through detection.
 			call_trees = []
 		result = analyze(results_json, call_trees=call_trees or None)
 		# Observe, don't spoil: if the overhead watchdog cut tracing short to
-		# protect the user's flow, the line data is partial — say so (read the
+		# protect the user's flow, the line data is partial say so (read the
 		# flag before cleanup_run clears it below).
 		if capture.budget_was_hit(run_uuid):
 			result.warnings.append(
@@ -613,7 +613,7 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 		# path (which expects session_uuid, not docname).
 		_regenerate_parent_reports(session_uuid)
 
-		# Done — drop ephemeral Redis state.
+		# Done drop ephemeral Redis state.
 		capture.cleanup_run(run_uuid)
 
 		_publish("phase_2_run_ready", {
@@ -693,7 +693,7 @@ def _persist_run(
 	for finding in result.findings:
 		# Optimus Finding.title is a Data(140) field. Phase-2 findings are
 		# appended directly here (bypassing analyze._truncate_finding_titles),
-		# so clamp defensively — a long title must not trip Frappe's truncation
+		# so clamp defensively a long title must not trip Frappe's truncation
 		# warning while stopping phase 2. Full context lives in the description /
 		# technical_detail_json.
 		_title = finding.get("title") or ""
@@ -727,7 +727,7 @@ def _mark_run_failed(parent_docname: str, run_uuid: str, error: str, tb: str) ->
 		parent.save(ignore_permissions=True)
 		safe_commit()
 	except Exception:
-		# Truly best-effort — don't mask the original exception.
+		# Truly best-effort don't mask the original exception.
 		try:
 			frappe.db.rollback()
 		except Exception:

@@ -91,7 +91,7 @@ _end
 _step "symlink optimus into apps/ + register in apps.txt"
 # Symlink the optimus checkout into apps/. Using a symlink (rather than
 # ``bench get-app``) lets the workflow test the EXACT working-tree state
-# — including uncommitted changes — instead of whatever ``main`` happens
+# including uncommitted changes instead of whatever ``main`` happens
 # to be at the moment.
 ln -snf "${OPTIMUS_REPO_DIR}" apps/optimus
 
@@ -101,7 +101,7 @@ ln -snf "${OPTIMUS_REPO_DIR}" apps/optimus
 # The concatenation gave a single line "frappeoptimus", which
 # ``bench new-site`` tried to ``import_module('frappeoptimus.commands')``
 # → ModuleNotFoundError. The fix: ``printf '\noptimus\n'`` instead of
-# ``echo "optimus"`` — the leading \n forces a line break regardless
+# ``echo "optimus"``: the leading \n forces a line break regardless
 # of whether apps.txt already ends with one (a blank line in apps.txt
 # is ignored by Frappe's app-discovery loop).
 if ! grep -qxF "optimus" sites/apps.txt; then
@@ -147,7 +147,7 @@ _step "bench install-app optimus + set-config + migrate"
 bench --site "${TEST_SITE}" install-app optimus
 bench --site "${TEST_SITE}" set-config developer_mode 1
 # v0.12.31: ``bench set-config -p in_test true`` failed with
-# ValueError("malformed node or string ... Name(id='true', ...)") —
+# ValueError("malformed node or string ... Name(id='true', ...)")
 # the ``-p`` flag runs ``ast.literal_eval`` on the value, which
 # accepts Python literals (``True`` / ``False`` / ``None`` /
 # numbers / strings / lists / dicts) but NOT lowercase ``true``.

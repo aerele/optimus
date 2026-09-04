@@ -3,7 +3,7 @@
 
 """Concurrency guards on analyze (v0.7.x).
 
-Two analyze jobs running at once roughly double peak RAM — the OOM trigger on
+Two analyze jobs running at once roughly double peak RAM the OOM trigger on
 long flows. M2 adds a global single-flight (only one session does the heavy
 phase at a time) built on the existing re-enqueue/yield pattern, NOT a held
 lock, so it can't deadlock with run()'s self-re-enqueue and self-heals if a
@@ -129,7 +129,7 @@ class TestRunWiring:
 
 	def test_self_reenqueues_stay_anonymous(self):
 		"""Neither the bg-wait nor the single-flight re-enqueue may carry a
-		stable job_id — that would deadlock the running job against its own
+		stable job_id that would deadlock the running job against its own
 		continuation."""
 		for fn in (analyze._bg_wait_for_pending_jobs, analyze._acquire_singleflight):
 			src = inspect.getsource(fn)
@@ -166,7 +166,7 @@ class TestEnqueueAnalyzeAsync:
 
 	def test_enqueue_analyze_has_no_is_job_enqueued_dedup(self):
 		# Source guard: the dedup that stranded sessions must stay gone. Check
-		# the import + the call (not prose — the comment explains the removal).
+		# the import + the call (not prose the comment explains the removal).
 		from optimus import api
 		src = inspect.getsource(api._enqueue_analyze)
 		assert "import is_job_enqueued" not in src

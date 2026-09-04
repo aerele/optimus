@@ -5,7 +5,7 @@
 
 Produces one Optimus Action row per recording, with a humanized label
 derived best-effort from the recording's path/cmd/form_dict. The action
-row is the unit the customer sorts/filters by in the report — "which step
+row is the unit the customer sorts/filters by in the report "which step
 of my flow took the longest?".
 
 Label detection strategy:
@@ -45,7 +45,7 @@ def _build_action(recording: dict) -> dict:
 def _label(recording: dict) -> str:
 	"""Technical label for the Per-action table / Frontend XHR panel.
 
-	Intentionally NOT humanized — shows the raw cmd (e.g.
+	Intentionally NOT humanized shows the raw cmd (e.g.
 	``frappe.client.save``) or ``METHOD path`` so developers see
 	exactly what hit the server. The Steps-to-Reproduce section
 	uses ``humanized_label`` instead, which reads like English
@@ -54,7 +54,7 @@ def _label(recording: dict) -> str:
 	v0.5.1: cmd falls back to ``_derive_cmd_from_path`` when the
 	recording's stored cmd is empty (Frappe's recorder captures
 	cmd at hook time, BEFORE the REST routing sets form_dict.cmd
-	— see ``_derive_cmd_from_path`` docstring for the full story).
+	see ``_derive_cmd_from_path`` docstring for the full story).
 
 	v0.5.2: ``frappe.desk.form.save.savedocs`` takes an ``action``
 	field in form_dict ("Save"|"Submit"|"Cancel"|"Update") that
@@ -103,7 +103,7 @@ _SAVEDOCS_ACTIONS = frozenset({"Save", "Submit", "Cancel", "Update"})
 #   run_doc_method                     → form_dict.method (any method name)
 #   frappe.model.workflow.apply_workflow → form_dict.action (Approve/Reject/...)
 #
-# run_doc_method is the biggest one for ERPNext — every custom button
+# run_doc_method is the biggest one for ERPNext every custom button
 # defined via frm.add_custom_button(...) goes through it. Without a
 # suffix, 20 distinct buttons in a Sales Invoice session look like one
 # row of "run_doc_method × 20".
@@ -129,7 +129,7 @@ def _multiplex_suffix(cmd: str, form_dict: dict) -> str:
 
 	Looks up the right form_dict key per cmd, validates the value
 	against ``_SAFE_SUFFIX_RE``, and returns it. Unknown / malformed
-	values return "" so the caller falls back to the bare cmd —
+	values return "" so the caller falls back to the bare cmd
 	keeps grouping-by-label stable when payloads are weird.
 	"""
 	if not isinstance(form_dict, dict):
@@ -143,7 +143,7 @@ def _multiplex_suffix(cmd: str, form_dict: dict) -> str:
 
 	# run_doc_method: method is the actual dotted method name, e.g.
 	# "make_payment_entry", "send_email", "update_items". Frappe's
-	# whitelisting layer already validates the method exists — we
+	# whitelisting layer already validates the method exists we
 	# just need to pick something that renders cleanly and doesn't
 	# include literal user data (most doc-method names are plain
 	# Python identifiers, but defensively validate).
@@ -156,7 +156,7 @@ def _multiplex_suffix(cmd: str, form_dict: dict) -> str:
 	# apply_workflow: action is a user-defined Workflow Action name
 	# like "Approve", "Reject", "Submit for Approval". Validate
 	# shape because workflow admins occasionally name actions with
-	# emoji or non-ASCII characters — those round-trip OK through
+	# emoji or non-ASCII characters those round-trip OK through
 	# Frappe but look weird in a technical label.
 	if cmd == _APPLY_WORKFLOW_CMD:
 		action = (form_dict.get("action") or "").strip()
@@ -172,7 +172,7 @@ def humanized_label(recording: dict) -> str:
 
 	Reads like English ("Create Sales Invoice", "Submit Delivery Note",
 	"Open Customer CUST-001", "Search Item") rather than the technical
-	cmd string. Used exclusively by ``analyze._build_auto_notes_html`` —
+	cmd string. Used exclusively by ``analyze._build_auto_notes_html``:
 	the per-action table and frontend XHR panel continue to show the
 	technical label via ``_label``.
 
@@ -183,11 +183,11 @@ def humanized_label(recording: dict) -> str:
 	informative for a developer looking at the technical report.
 
 	Falls back to ``_label`` when the cmd doesn't match any of the
-	humanization rules — so unknown cmds produce the same technical
+	humanization rules so unknown cmds produce the same technical
 	label they would in the per-action table, not an empty string.
 	"""
 	if recording.get("event_type") == "RQ Job":
-		# RQ Jobs use the same label in both views — the
+		# RQ Jobs use the same label in both views the
 		# "Job: <method>" form is already readable.
 		return _label(recording)
 
@@ -285,7 +285,7 @@ def humanized_label(recording: dict) -> str:
 		if doctype:
 			return f"Search {doctype}"
 
-	# No humanization rule matched — defer to the technical label so
+	# No humanization rule matched defer to the technical label so
 	# the caller always gets a non-empty string.
 	return _label(recording)
 
@@ -296,7 +296,7 @@ def _derive_cmd_from_path(path: str) -> str:
 	``_label`` can run on recordings whose ``cmd`` field is empty.
 
 	Returns "" for any other URL shape (``/app/...``, ``/api/
-	resource/...``, static files) — the caller's fallback to
+	resource/...``, static files) the caller's fallback to
 	``METHOD + path`` still applies.
 
 	Why this is needed: frappe.recorder.Recorder.__init__ reads
@@ -339,7 +339,7 @@ def _extract_doc_info(form_dict) -> tuple[str | None, bool]:
 	if isinstance(doc, dict):
 		doctype = doctype or doc.get("doctype")
 		# __islocal is sent as 1 for unsaved docs, absent/0 otherwise.
-		# Cast defensively — Frappe sends both int 1 and string "1"
+		# Cast defensively Frappe sends both int 1 and string "1"
 		# depending on the client.
 		raw_islocal = doc.get("__islocal")
 		is_new = bool(raw_islocal) and raw_islocal not in ("0", 0, False)

@@ -11,7 +11,7 @@ Server Script bodies with a synthetic filename:
 
 These never resolve to an on-disk file. ``renderer._resolve_source_path``
 rejects them by the ``startswith("<")`` rule, so callsites in Server Script
-bodies render without a code snippet and without an editor link — the user
+bodies render without a code snippet and without an editor link the user
 sees ``<server-script body>`` with no actionable context.
 
 This module is the render-time bridge that loads the Server Script's stored
@@ -47,7 +47,7 @@ def extract_script_name(filename) -> str | None:
 	filename. Returns the scrubbed name (e.g. ``"my_script"``) or ``None`` when:
 
 	  - ``filename`` doesn't match the ``<serverscript>[: name]`` shape;
-	  - the filename is bare ``<serverscript>`` (no name attached — no script
+	  - the filename is bare ``<serverscript>`` (no name attached no script
 	    to look up).
 
 	Examples (matching ``apps/frappe/frappe/utils/safe_exec.py:118``)::
@@ -67,7 +67,7 @@ def extract_script_name(filename) -> str | None:
 
 
 def is_server_script_filename(filename) -> bool:
-	"""``True`` for any ``<serverscript>`` filename — named or bare. Lets
+	"""``True`` for any ``<serverscript>`` filename named or bare. Lets
 	callers branch on the family before bothering with name extraction."""
 	if not filename or not isinstance(filename, str):
 		return False
@@ -99,7 +99,7 @@ def get_server_script_record(scrubbed_name: str, *, cache: dict | None = None) -
 		# Match the requested (already-scrubbed) name against every Server
 		# Script by scrubbing each candidate the way Frappe canonically does
 		# (frappe.scrub). Done in Python rather than SQL REPLACE chains so it's
-		# portable across MariaDB/Postgres (no backticks) and exactly correct —
+		# portable across MariaDB/Postgres (no backticks) and exactly correct
 		# the Server Script table is tiny, so the full scan is cheap.
 		target = (scrubbed_name or "").lower()
 		for cand in frappe.get_all("Server Script", fields=["name", "script"]):

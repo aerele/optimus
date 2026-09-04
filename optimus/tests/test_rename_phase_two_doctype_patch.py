@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.6.x: tests for ``patches/v0_6_0/rename_phase_two_doctype.py`` — the
+"""v0.6.x: tests for ``patches/v0_6_0/rename_phase_two_doctype.py``: the
 one-time DocType rename from ``Profiler Phase 2 Run`` →
 ``Profiler Phase Two Run`` (audit item 2.6). The patch ran BEFORE the
 v0.7.0 app rename, so the DocType names here stay Profiler-prefixed;
@@ -115,7 +115,7 @@ class TestRenamePhaseTwoDoctypePatch:
 
 	def test_rename_failure_logs_and_does_not_commit(self, monkeypatch):
 		"""If rename_doc raises (e.g. table-lock during migrate), the
-		patch must NOT commit and must NOT raise — let the operator
+		patch must NOT commit and must NOT raise let the operator
 		retry migrate."""
 		stub = _install_frappe_stub(monkeypatch, old_exists=True, rename_raises=True)
 		patch = _import_patch()
@@ -126,7 +126,7 @@ class TestRenamePhaseTwoDoctypePatch:
 
 class TestPatchRegistered:
 	def test_patches_txt_lists_in_pre_model_sync(self):
-		"""The rename MUST run before model sync — otherwise model sync
+		"""The rename MUST run before model sync otherwise model sync
 		creates a fresh new-name DocType row alongside the old one."""
 		import os
 		patches_txt = os.path.join(

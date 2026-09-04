@@ -34,7 +34,7 @@ def test_enqueue_analyze_honors_inline_analyze_limit():
     # janitor) gets the same protection uniformly.
     src = inspect.getsource(api._enqueue_analyze)
     assert "optimus_inline_analyze_limit" in src
-    # And must NOT have the cap check still in _stop_session — that
+    # And must NOT have the cap check still in _stop_session that
     # would be a duplicate that could diverge.
     stop_src = inspect.getsource(api._stop_session)
     assert "optimus_inline_analyze_limit" not in stop_src
@@ -125,8 +125,8 @@ def test_enqueue_analyze_swallows_inline_failure(monkeypatch):
 	re-raise and return True.
 
 	If we let the exception propagate up to stop(), the stop API
-	returns a 500 and the widget shows "Failed to stop profiler —
-	try again" — which is wrong, because the stop DID work; only
+	returns a 500 and the widget shows "Failed to stop profiler
+	try again" which is wrong, because the stop DID work; only
 	analyze failed. The session is already marked Failed in the DB.
 	"""
 	import sys
@@ -162,7 +162,7 @@ def test_enqueue_analyze_swallows_inline_failure(monkeypatch):
 		raising=False,
 	)
 
-	# Must NOT raise — the failure has been absorbed so stop() can
+	# Must NOT raise the failure has been absorbed so stop() can
 	# return 200 and report the Failed status to the widget.
 	ran_inline = api_mod._enqueue_analyze("test-uuid-fail")
 	assert ran_inline is True
@@ -192,7 +192,7 @@ def test_enqueue_analyze_blocks_huge_inline_session(monkeypatch):
     _enqueue_analyze must:
       1. Mark the Optimus Session as Failed
       2. Write an actionable message to analyzer_warnings
-         (NOT 'analyze_error' — that field doesn't exist on the doctype,
+         (NOT 'analyze_error' that field doesn't exist on the doctype,
          writing to it would crash with MariaDB 'Unknown column')
       3. NOT invoke frappe.enqueue
       4. Return True so the caller treats it like any other inline
@@ -264,7 +264,7 @@ def test_enqueue_analyze_blocks_huge_inline_session(monkeypatch):
 
     # Return contract: cap-exceeded counts as "session is finalized".
     assert ran_inline is True
-    # And frappe.enqueue must NOT have been called — the cap check
+    # And frappe.enqueue must NOT have been called the cap check
     # fires BEFORE the enqueue.
     assert enqueue_calls == []
 
@@ -281,7 +281,7 @@ def test_enqueue_analyze_blocks_huge_inline_session(monkeypatch):
     # `analyze_error`. The doctype has no `analyze_error` field, so
     # writing to it would crash with MariaDB 'Unknown column' in
     # production. FakeDB accepts any field name so the test would
-    # silently pass if the code regressed to the wrong field name —
+    # silently pass if the code regressed to the wrong field name
     # assert explicitly.
     payload = status_calls[0][2]
     assert "analyzer_warnings" in payload, (
@@ -301,7 +301,7 @@ def test_enqueue_analyze_cap_is_called_by_stop_session():
     """Source-inspection regression guard: _stop_session must pass
     docname to _enqueue_analyze so the cap check has the doc to
     update. Earlier versions had the cap check inline in
-    _stop_session — the refactor moved it to _enqueue_analyze, and
+    _stop_session the refactor moved it to _enqueue_analyze, and
     if _stop_session forgets to pass docname, the cap silently
     skips.
     """
@@ -320,7 +320,7 @@ def test_enqueue_analyze_cap_is_called_by_stop_session():
 
 def test_enqueue_analyze_cap_is_called_by_retry_analyze():
     """Same guard for retry_analyze. v0.5.1 fix ensures retry
-    applies the same inline cap as stop() — a 200-recording Failed
+    applies the same inline cap as stop() a 200-recording Failed
     session on a scheduler-disabled site must not run inline
     without the cap check.
     """

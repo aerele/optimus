@@ -1,12 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""D.M-S1 — gating-clamp regression.
+"""D.M-S1 gating-clamp regression.
 
 The Slow Hot Path finding's percentage is computed as
 ``cumulative_ms / action_wall_time_ms``. Pyinstrument's aggregated tree
 can sum across actions, producing pct > 100% which would render as
-"150% of the action's wall time" — a nonsensical reading.
+"150% of the action's wall time" a nonsensical reading.
 
 The fix clamps ``pct_of_action = min(1.0, raw_pct)`` before display and
 severity gating, AND clamps ``estimated_impact_ms`` to the action wall
@@ -65,7 +65,7 @@ def test_pct_display_clamped_to_100_percent():
 
 
 def test_estimated_impact_ms_clamped_to_action_wall():
-	"""estimated_impact_ms must not exceed action_wall_time_ms — a finding
+	"""estimated_impact_ms must not exceed action_wall_time_ms a finding
 	claiming to consume more than the action took is nonsensical."""
 	tree = _node(
 		"my_app.work.do_work",
@@ -80,12 +80,12 @@ def test_estimated_impact_ms_clamped_to_action_wall():
 
 
 def test_within_action_severity_unchanged():
-	"""Clamp doesn't touch findings whose pct is already <= 100% —
+	"""Clamp doesn't touch findings whose pct is already <= 100%
 	a true 80% hot path still reads as High (> high_pct=50%)."""
 	tree = _node(
 		"my_app.work.do_work",
 		"apps/my_app/work.py",
-		cumulative=800,  # 80% of a 1000ms action — legitimate
+		cumulative=800,  # 80% of a 1000ms action legitimate
 		self_ms=800,
 		children=[],
 	)
@@ -113,7 +113,7 @@ def test_absolute_impact_promotes_to_high():
 	findings = _walk_findings(tree, action_wall_ms=3000)
 	assert findings, "expected a Slow Hot Path finding"
 	assert findings[0]["severity"] == "High", (
-		"a 1.47s subtree should be High regardless of pct — without "
+		"a 1.47s subtree should be High regardless of pct without "
 		"the absolute-impact escape hatch it falls to Medium and the "
 		"TL;DR headline mis-ranks against smaller High findings"
 	)
@@ -122,7 +122,7 @@ def test_absolute_impact_promotes_to_high():
 def test_below_absolute_threshold_stays_medium():
 	"""The escape hatch shouldn't promote borderline Medium findings.
 	A 600ms subtree at 45% pct (below 50% high_pct AND below 1000ms
-	absolute floor) stays Medium — the new rule fires only on
+	absolute floor) stays Medium the new rule fires only on
 	overwhelming absolute impact."""
 	# 45% × 1333ms ≈ 600ms cumulative. Neither rule fires:
 	#   - relative: 45% < 50% high_pct
@@ -137,6 +137,6 @@ def test_below_absolute_threshold_stays_medium():
 	findings = _walk_findings(tree, action_wall_ms=1333)
 	assert findings, "expected a Slow Hot Path finding (pct=45% > med_pct=25%)"
 	assert findings[0]["severity"] == "Medium", (
-		"borderline pct + sub-1s cumulative should stay Medium — the "
+		"borderline pct + sub-1s cumulative should stay Medium the "
 		"absolute-impact rule only promotes overwhelming impact"
 	)

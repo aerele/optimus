@@ -8,20 +8,20 @@ that includes a source window, and every Phase-2 hot-line drilldown
 ultimately calls back here to read source lines from the bench's app
 files. Three responsibilities:
 
-  * **Path resolution** — :func:`_resolve_source_path` turns the
+  * **Path resolution**: :func:`_resolve_source_path` turns the
     app-relative paths recorded by the analyzer (``ugly_code/python/
     common.py``) into real absolute paths via ``frappe.get_app_path`` /
     bench fallback. Server Script callsites resolve to a tuple sentinel
     that downstream branches load from the ``tabServer Script`` DocType
     instead of disk.
 
-  * **Bench-boundary check** — :func:`_path_within_bench` is the Phase-K
+  * **Bench-boundary check**: :func:`_path_within_bench` is the Phase-K
     hardening guard: a synthetic callsite that points at ``/etc/passwd``
     (analyzer dict tampering, malformed pyinstrument frame) is refused.
     Bypassed under ``frappe.flags.in_test`` so pytest fixtures pointing
     at ``/tmp/...`` paths work.
 
-  * **Per-render file cache** — :class:`_BoundedFileCache` is the bounded
+  * **Per-render file cache**: :class:`_BoundedFileCache` is the bounded
     LRU dict the per-render call sites pass around as ``file_cache=``.
     Caps memory growth on sessions that touch many unique source files
     (the unbounded variant could hold ~50MB of file content on a
@@ -33,7 +33,7 @@ share the per-line truncation constant (:data:`_SNIPPET_TRUNCATE_CHARS`,
 or the finding card. Both readers go through :func:`_resolve_source_path`
 so the boundary check and Server Script branching are uniform.
 
-This module imports nothing from ``optimus.renderer._internal`` — the
+This module imports nothing from ``optimus.renderer._internal``: the
 ``_internal`` module is the consumer. ``frappe`` is lazy-imported inside
 the functions so the pure-pytest tests don't need a bench.
 """
@@ -43,10 +43,10 @@ from __future__ import annotations
 import os
 from collections import OrderedDict
 
-# Per-line truncation for source snippets/windows — keeps a single
+# Per-line truncation for source snippets/windows keeps a single
 # multi-kilobyte minified line out of technical_detail_json / the LLM
 # prompt. Kept here (with the readers) rather than imported from
-# analyze.py — so the readers don't pull in analyze.py, which imports
+# analyze.py so the readers don't pull in analyze.py, which imports
 # frappe.recorder.
 _SNIPPET_TRUNCATE_CHARS = 200
 
@@ -118,22 +118,22 @@ def _path_within_bench(path: str) -> bool:
 
 
 def _resolve_source_path(filename):
-	"""Map a finding's callsite ``filename`` to a real file on disk — OR to a
+	"""Map a finding's callsite ``filename`` to a real file on disk OR to a
 	Server Script sentinel for synthetic ``<serverscript>`` filenames.
 
 	Return shapes:
-	  - ``str`` — a real on-disk path (for app code / framework code).
-	  - ``("server_script", scrubbed_name)`` — Server Script tuple sentinel.
+	  - ``str``: a real on-disk path (for app code / framework code).
+	  - ``("server_script", scrubbed_name)``: Server Script tuple sentinel.
 	    Snippet readers branch on ``isinstance(resolved, tuple)`` and load
 	    the script body from the ``tabServer Script`` DocType via
 	    ``optimus.server_script_source.get_server_script_lines``. The
 	    template/callsite-builder side branches similarly to render a Desk
 	    link instead of a ``vscode://file`` editor link.
-	  - ``None`` — unresolvable (truly synthetic frames like ``<string>`` /
+	  - ``None``: unresolvable (truly synthetic frames like ``<string>`` /
 	    ``<frozen …>``, missing files, or paths that escape the bench).
 
 	Call-tree / pyinstrument callsites are stored in app-relative form
-	(``<app>/<module-path-within-the-app-dir>`` — e.g. ``ugly_code/python/
+	(``<app>/<module-path-within-the-app-dir>``: e.g. ``ugly_code/python/
 	common.py`` for ``<bench>/apps/ugly_code/ugly_code/python/common.py``,
 	or ``frappe/handler.py``). A bare ``open()`` fails because the Frappe
 	process cwd is ``<bench>/sites``. Resolve via ``frappe.get_app_path``
@@ -159,7 +159,7 @@ def _resolve_source_path(filename):
 		_scrubbed = extract_script_name(name)
 		if _scrubbed:
 			return ("server_script", _scrubbed)
-		# Bare ``<serverscript>`` — no script to look up; treat as
+		# Bare ``<serverscript>``: no script to look up; treat as
 		# unresolvable so the renderer falls back to plain-text display
 		# without a broken link.
 		return None
@@ -260,7 +260,7 @@ def _read_source_snippet(
 	limit = _SNIPPET_TRUNCATE_CHARS
 	snippet: list[dict] = []
 	# v0.7.x: read a ±2-line window around the anchor (compromise
-	# between ±1 — too tight, body invisible — and ±4 — included
+	# between ±1 too tight, body invisible and ±4 included
 	# preceding-function noise). The template's blank-line filter
 	# drops empties (except the callsite itself), so the visible
 	# snippet ends up at ~3-4 lines: the anchor `def` + a couple of

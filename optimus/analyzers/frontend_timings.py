@@ -98,7 +98,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
         # (context.actions[idx].duration_ms), NOT on the raw
         # recording dict. Pre-v0.5.1 this read `action.get("duration_ms")`
         # from the recording and always got None, so backend_ms was
-        # always 0 in production — making every XHR look like 100%
+        # always 0 in production making every XHR look like 100%
         # network overhead. Prefer context.actions[idx].duration_ms,
         # then fall back through the recording's duration_ms (test
         # fixtures occasionally put it here) and finally the
@@ -158,7 +158,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
         elif name == "fcp":
             bucket["fcp_ms"] = v.get("value_ms")
         elif name == "cls":
-            # CLS accumulates across entries — keep the max seen per page.
+            # CLS accumulates across entries keep the max seen per page.
             current = bucket.get("cls", 0) or 0
             val = v.get("value") or 0
             if val > current:
@@ -196,7 +196,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                 "fix_hint": (
                     "Look at TTFB: if it's large, the backend is slow "
                     "(see Slow Query / N+1 findings). If TTFB is small, "
-                    "the browser spent time downloading or rendering — "
+                    "the browser spent time downloading or rendering "
                     "check response size and JavaScript execution."
                 ),
             }, default=str),
@@ -227,7 +227,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                     "response_size_bytes": m["response_size_bytes"],
                     "url": m["url"],
                     "fix_hint": (
-                        "Large response sizes cause this — check the "
+                        "Large response sizes cause this check the "
                         "Heavy Response finding. If response is small, "
                         "suspect network path: CDN, TLS handshake, proxy."
                     ),

@@ -71,7 +71,7 @@ def test_memory_pressure_does_not_fire_on_small_delta():
 
 
 def test_memory_pressure_fires_on_large_rss_delta():
-    """Synthetic recordings where RSS grows by 300MB — must fire Medium
+    """Synthetic recordings where RSS grows by 300MB must fire Medium
     (delta > 200MB threshold but < 500MB critical)."""
     from optimus.analyzers import infra_pressure
 
@@ -260,7 +260,7 @@ def test_recordings_without_infra_are_ignored():
         {"uuid": "r2", "action_label": "b", "infra": _synth_infra(sys_cpu_percent=95)},
     ]
     result = infra_pressure.analyze(recordings, _empty_context())
-    # Only one action had infra — no sustained-breach finding possible.
+    # Only one action had infra no sustained-breach finding possible.
     rc = [f for f in result.findings if f["finding_type"] == "Resource Contention"]
     assert rc == []
     # Timeline should only include the action with infra.
@@ -350,7 +350,7 @@ def test_infra_timeline_falls_back_to_method_path_without_context():
 def test_infra_timeline_synthetic_only_as_last_resort():
     """If the recording truly has no method/path/cmd AND no matching
     context.actions entry, fall back to synthetic 'action_N'. This
-    is the only path that should produce the old noise — and only
+    is the only path that should produce the old noise and only
     when the analyzer has zero useful data to work with."""
     from optimus.analyzers import infra_pressure
     from optimus.analyzers.base import AnalyzeContext

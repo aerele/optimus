@@ -47,7 +47,7 @@ def test_orphans_are_separated():
 
 
 def test_lcp_dedup_picks_last_per_page():
-    """LCP fires multiple times — analyzer should keep the last value
+    """LCP fires multiple times analyzer should keep the last value
     per page_url, matching the Web Vitals library convention."""
     from optimus.analyzers import frontend_timings
 
@@ -166,14 +166,14 @@ def test_missing_frontend_data_attribute_is_safe():
 # ---------------------------------------------------------------------------
 # v0.5.1 regression guards: action_label + backend_ms come from
 # context.actions, not from the raw recording dict. Real production
-# recordings don't have either field — they have `path`, `method`,
-# `cmd`, `duration` — so the pre-v0.5.1 code fell through to the
+# recordings don't have either field they have `path`, `method`,
+# `cmd`, `duration`: so the pre-v0.5.1 code fell through to the
 # synthetic "action_N" label and `backend_ms = 0` every time.
 # ---------------------------------------------------------------------------
 
 
 def _production_shape_recordings():
-	"""Mimics the dict shape Frappe's recorder actually produces — no
+	"""Mimics the dict shape Frappe's recorder actually produces no
 	action_label, no duration_ms, just path/method/cmd/duration."""
 	return [
 		{
@@ -200,7 +200,7 @@ def _production_shape_recordings():
 def _context_with_per_action_output(recordings):
 	"""Simulate what context.actions looks like AFTER per_action.analyze
 	has run. v0.5.2: action_label on context.actions is the TECHNICAL
-	label (raw cmd with optional :Action suffix, or METHOD+path) —
+	label (raw cmd with optional :Action suffix, or METHOD+path)
 	humanization moved to per_action.humanized_label() and is used
 	only by the Steps-to-Reproduce section. The frontend XHR panel
 	mirrors whatever context.actions holds, so these fixtures match
@@ -230,7 +230,7 @@ def test_action_label_comes_from_context_actions(monkeypatch):
 	recording dict (which never carries it in production). The
 	specific label format evolved across versions (v0.5.1
 	humanized, v0.5.2 technical with :Action suffix), but the
-	routing through context.actions is invariant — that's what
+	routing through context.actions is invariant that's what
 	this test guards.
 	"""
 	from optimus.analyzers import frontend_timings

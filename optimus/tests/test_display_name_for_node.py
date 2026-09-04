@@ -5,7 +5,7 @@
 
 Production trigger: a Server Script with a 5M-iteration CPU loop
 produced a Slow Hot Path finding titled "In savedocs:Save, 86% of
-the time was spent in " — trailing blank because pyinstrument
+the time was spent in " trailing blank because pyinstrument
 returns ``function=""`` for Python code executed via ``exec()``.
 
 The analyzer now walks a preference chain:
@@ -77,7 +77,7 @@ class TestExecDetection:
 
 class TestFilenameFallback:
 	"""``short_filename`` returns the last 2 path segments so the
-	reader sees which app the file lives in — ``myapp/foo.py`` is
+	reader sees which app the file lives in ``myapp/foo.py`` is
 	more useful than just ``foo.py`` for navigation in a bench with
 	many apps."""
 
@@ -133,7 +133,7 @@ class TestLastResort:
 
 
 class TestProductionBug:
-	"""The exact production scenario that motivated this fix —
+	"""The exact production scenario that motivated this fix
 	Server Script containing for-loop, surfaced as empty title."""
 
 	def test_empty_function_with_serverscript_filename(self):

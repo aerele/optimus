@@ -152,7 +152,7 @@ class TestDecoratorThroughDefRows:
 		assert dl == 2
 
 	def test_multiline_decorator_args_span_to_def(self, tmp_path):
-		# A decorator whose args wrap across lines — every continuation line is
+		# A decorator whose args wrap across lines every continuation line is
 		# included through the def.
 		text = (
 			"@frappe.whitelist(\n"      # 1
@@ -197,7 +197,7 @@ class TestDecoratorThroughDefRows:
 
 	def test_class_before_def_is_not_grabbed(self, tmp_path):
 		# A decorated class (no def in its header) must NOT sweep up the first
-		# method's def — fall back to the single recorded line.
+		# method's def fall back to the single recorded line.
 		text = (
 			"@register\n"        # 1  <- recorded
 			"class Widget:\n"    # 2
@@ -246,7 +246,7 @@ class TestDecoratorThroughDefRows:
 
 	def test_idempotent_when_re_fed_the_def_line(self, tmp_path):
 		# Feeding the def line (as a re-render on a CPython<=3.10 anchor would)
-		# still yields the function name — never a crash or an empty snippet.
+		# still yields the function name never a crash or an empty snippet.
 		text = "@frappe.whitelist()\ndef foo():\n    return 1\n"
 		rows, dl = self._rows(tmp_path, text, 2)  # 2 == the def line
 		assert [r["content"] for r in rows] == ["def foo():"]

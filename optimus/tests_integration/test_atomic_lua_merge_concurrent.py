@@ -8,7 +8,7 @@ The v0.7.x bg-tracking trilogy (``a356f64`` → ``0e4a270`` → ``f30f44e``)
 closed a multi-worker field-loss race. Pre-trilogy, two workers writing
 to the same job_id's per-field dict could lose fields under a
 read-modify-write race: Worker A reads meta, modifies, writes; Worker B
-in the interleave reads the pre-A meta, modifies, writes — and Worker A's
+in the interleave reads the pre-A meta, modifies, writes and Worker A's
 change is gone.
 
 The fix moves the merge SERVER-SIDE via :data:`_MERGE_JOB_META_LUA` (and
@@ -17,7 +17,7 @@ invariant under genuine concurrent thread contention against real Redis +
 real Lua.
 
 A unit-suite test exists for this in ``optimus/tests/test_session_jobs.py``
-but it ``pytest.skip``s when Redis or Lua isn't reachable — under the
+but it ``pytest.skip``s when Redis or Lua isn't reachable under the
 pure-pytest workflow, that's every run. The integration version is the
 first-class CI gate: real Redis + real Lua, always runs, richer
 scenarios.
@@ -29,8 +29,8 @@ the bench. Threads in this test can't replicate that because
 non-main Python threads. The mitigation (mirroring the unit test): pre-
 compute the prefixed Redis key in the main thread, then have worker
 threads call ``frappe.cache.eval(_MERGE_JOB_META_LUA, …)`` directly.
-That preserves the load-bearing invariant — Redis Lua serialisation
-of HGET + JSON-merge + HSET — which is exactly what the trilogy
+That preserves the load-bearing invariant Redis Lua serialisation
+of HGET + JSON-merge + HSET which is exactly what the trilogy
 protects.
 
 For the fallback path (Python read-modify-write when Lua isn't
@@ -58,7 +58,7 @@ def _require_redis_and_lua():
 	try:
 		frappe.cache.ping()
 	except Exception:
-		return "No bench Redis available — start with `bench start`"
+		return "No bench Redis available start with `bench start`"
 	try:
 		frappe.cache.eval("return 1", 0)
 	except Exception:
@@ -104,7 +104,7 @@ class TestAtomicLuaMergeConcurrent(FrappeTestCase):
 		super().tearDown()
 
 	# ----------------------------------------------------------------
-	# 1. The exact v0.7.x race — pair threads writing recording_uuid +
+	# 1. The exact v0.7.x race pair threads writing recording_uuid +
 	#    status to the same job_id, looped across 50 distinct job_ids.
 	#    This is the canonical regression test.
 	# ----------------------------------------------------------------
@@ -136,7 +136,7 @@ class TestAtomicLuaMergeConcurrent(FrappeTestCase):
 				json.dumps({"status": status}),
 			)
 
-		# Use a Barrier so all threads release at the exact same moment —
+		# Use a Barrier so all threads release at the exact same moment
 		# maximises the race-window overlap. Without it, t.start() loops
 		# can sequence threads on a fast runner.
 		barrier = threading.Barrier(2 * N_JOBS)
@@ -181,7 +181,7 @@ class TestAtomicLuaMergeConcurrent(FrappeTestCase):
 		)
 
 	# ----------------------------------------------------------------
-	# 2. Distinct job_ids — N threads, N distinct hash fields. The
+	# 2. Distinct job_ids N threads, N distinct hash fields. The
 	#    per-field cjson encode within ONE Lua script should isolate
 	#    each thread's write.
 	# ----------------------------------------------------------------
@@ -218,12 +218,12 @@ class TestAtomicLuaMergeConcurrent(FrappeTestCase):
 			if not meta or meta.get("recording_uuid") != f"rec-{i}":
 				missing.append(f"job-{i}: meta={meta!r}")
 		assert not missing, (
-			f"{len(missing)}/{N} distinct-job-id writes lost — "
+			f"{len(missing)}/{N} distinct-job-id writes lost "
 			f"per-field cjson isolation broken. Missing: {missing!r}"
 		)
 
 	# ----------------------------------------------------------------
-	# 3. setdefault — two threads race to set ``method``; the second
+	# 3. setdefault two threads race to set ``method``; the second
 	#    writer's value MUST NOT clobber the first's. The trilogy's
 	#    _SETDEFAULT_JOB_META_LUA is what protects this on the enqueue
 	#    path (multiple callers can race ``record_job`` if the same
@@ -249,7 +249,7 @@ class TestAtomicLuaMergeConcurrent(FrappeTestCase):
 			json.dumps({"method": "first.writer"}),
 		)
 
-		# Now race many threads — each tries setdefault with a different
+		# Now race many threads each tries setdefault with a different
 		# method. None should win; the original "first.writer" stays.
 		N = 20
 		barrier = threading.Barrier(N)
@@ -277,10 +277,10 @@ class TestAtomicLuaMergeConcurrent(FrappeTestCase):
 		)
 
 	# ----------------------------------------------------------------
-	# 4. Fallback path — when Lua eval raises, _atomic_merge_job_meta
+	# 4. Fallback path when Lua eval raises, _atomic_merge_job_meta
 	#    must still write via the Python read-modify-write fallback.
 	#    Single-threaded so we can exercise the FULL wrapper (which
-	#    needs frappe.local set up — only the main thread has it).
+	#    needs frappe.local set up only the main thread has it).
 	# ----------------------------------------------------------------
 
 	def test_fallback_path_writes_when_lua_unavailable(self):
@@ -294,7 +294,7 @@ class TestAtomicLuaMergeConcurrent(FrappeTestCase):
 		sid = self._session_uuid
 		jid = "job-fallback"
 
-		# Patch frappe.cache.eval to raise — the wrapper must catch and
+		# Patch frappe.cache.eval to raise the wrapper must catch and
 		# fall through to _read_job → merge → _write_job.
 		def _eval_raises(*args, **kwargs):
 			raise RuntimeError("Lua eval disabled for fallback test")
@@ -312,7 +312,7 @@ class TestAtomicLuaMergeConcurrent(FrappeTestCase):
 
 	# ----------------------------------------------------------------
 	# 5. Sanity: with Lua disabled, _atomic_merge_job_meta doesn't
-	#    raise — the wrapper catches the eval failure and falls
+	#    raise the wrapper catches the eval failure and falls
 	#    through silently. Defensive lock-in for the contract that
 	#    "atomic-merge must NEVER break the host code".
 	# ----------------------------------------------------------------

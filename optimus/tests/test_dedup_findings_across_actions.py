@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for analyze._dedupe_findings_across_actions — the post-analyze
+"""Tests for analyze._dedupe_findings_across_actions the post-analyze
 pass that collapses per-action duplicates of the same code path
 (Slow Hot Path / Hook Bottleneck / Self-Time Hot Path / Repeated Hot
 Frame) into a single dominant finding with an 'Also affects N other
@@ -146,7 +146,7 @@ def test_different_keys_do_not_merge():
 
 
 def test_slow_hot_path_and_hot_line_same_leaf_stay_separate():
-	"""Slow Hot Path and Hot Line are different finding types — even if
+	"""Slow Hot Path and Hot Line are different finding types even if
 	they target adjacent code, they don't merge."""
 	findings = [
 		_shp(function="_check_user_exists", filename="common.py", lineno=18, action_ref="0"),
@@ -181,7 +181,7 @@ def test_single_finding_unchanged():
 
 
 def test_hook_bottleneck_findings_are_deduped():
-	"""Hook Bottleneck is also a per-action emitter — should dedupe."""
+	"""Hook Bottleneck is also a per-action emitter should dedupe."""
 	findings = [
 		{
 			"finding_type": "Hook Bottleneck",
@@ -260,7 +260,7 @@ def test_npq_findings_are_not_deduped_by_this_pass():
 
 	_dedupe_findings_across_actions(findings, [_action(0, "Save"), _action(1, "Submit")])
 
-	# N+1 not in the dedup set — both pass through.
+	# N+1 not in the dedup set both pass through.
 	assert len(findings) == 2
 
 
@@ -269,10 +269,10 @@ def test_missing_action_label_falls_back_to_generic_count():
 	label (e.g. the actions list was rebuilt and that idx is gone),
 	the 'also affects' sentence drops the label list and uses just
 	'N other action(s)'. The dominant's label being missing doesn't
-	matter — only the others' labels are shown."""
+	matter only the others' labels are shown."""
 	findings = [
-		_shp(action_ref="99", impact_ms=400.0),  # OTHER — missing label
-		_shp(action_ref="1", impact_ms=800.0),   # DOMINANT — has label
+		_shp(action_ref="99", impact_ms=400.0),  # OTHER missing label
+		_shp(action_ref="1", impact_ms=800.0),   # DOMINANT has label
 	]
 
 	_dedupe_findings_across_actions(findings, [_action(1, "Submit")])

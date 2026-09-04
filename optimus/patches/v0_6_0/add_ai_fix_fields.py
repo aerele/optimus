@@ -11,7 +11,7 @@ Additive only:
 ``bench migrate`` already auto-adds the columns from the updated .json files;
 this patch just reloads the two DocTypes so that happens deterministically
 during the patch run (matching the pattern of the other ``add_*_fields``
-patches in this app). Idempotent — safe to re-run.
+patches in this app). Idempotent safe to re-run.
 """
 
 import frappe

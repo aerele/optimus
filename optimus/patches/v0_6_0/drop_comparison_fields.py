@@ -32,7 +32,7 @@ def execute():
 	# Best-effort: clear baseline-pinning cache keys. These were stored as
 	# `profiler:baseline:<label>` -> docname. Redis SCAN-style deletion
 	# isn't available through frappe.cache's portable API, so we just drop
-	# the keys we can derive from existing session titles — anything else
+	# the keys we can derive from existing session titles anything else
 	# expires on its own (cache, not durable state).
 	try:
 		titles = frappe.get_all("Optimus Session", pluck="title") or []

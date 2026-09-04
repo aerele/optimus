@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for analyze._enrich_findings_with_source_snippets — runs without
+"""Tests for analyze._enrich_findings_with_source_snippets runs without
 Frappe; takes a list of finding dicts (with technical_detail_json) and a
 real file on disk, then asserts the source_snippet shape after enrichment."""
 
@@ -38,7 +38,7 @@ def _read_snippet(finding):
 
 class TestEnrichFindingsWithSourceSnippets:
 	def test_attaches_lines_centered_on_lineno(self, tmp_path):
-		# v0.7.x: snippet window widened from ±1 to ±4 — for a 5-line file
+		# v0.7.x: snippet window widened from ±1 to ±4 for a 5-line file
 		# anchored on line 3, the window covers lines 1..5 (clipped at
 		# file boundaries).
 		src = tmp_path / "fake.py"
@@ -164,7 +164,7 @@ class TestEnrichFindingsWithSourceSnippets:
 		# The function is typed as ``list[dict]`` but defence-in-depth:
 		# a corrupted upstream payload could plant a non-dict entry
 		# (None, scalar, list, string). The whole analyze job must not
-		# crash because of one bad row — silent skip per the function's
+		# crash because of one bad row silent skip per the function's
 		# best-effort contract, valid neighbours still get enriched.
 		src = tmp_path / "fake.py"
 		src.write_text("a\nb\nc\n")
@@ -184,7 +184,7 @@ class TestEnrichFindingsWithSourceSnippets:
 
 	def test_non_dict_detail_skipped_cleanly(self, tmp_path):
 		# ``json.loads("null") -> None``, ``json.loads('"x"') -> "x"``,
-		# ``json.loads("[1,2]") -> [1, 2]`` — all valid JSON, none are
+		# ``json.loads("[1,2]") -> [1, 2]``: all valid JSON, none are
 		# the dict shape the rest of the loop assumes. Each must silent-
 		# skip; the valid neighbour still gets enriched.
 		src = tmp_path / "fake.py"
@@ -213,7 +213,7 @@ class TestEnrichFindingsWithSourceSnippets:
 		# Slow Query findings (optimus/analyzers/top_queries.py:129) store
 		# callsite as a "path:lineno" string, not the canonical
 		# {filename, lineno, function} dict every other finding type uses.
-		# The enrichment loop must not crash on that shape — renderer
+		# The enrichment loop must not crash on that shape renderer
 		# handles snippets for these findings at render time via
 		# _normalize_callsite + lazy attach in _finding_to_dict.
 		#
@@ -242,7 +242,7 @@ class TestEnrichFindingsWithSourceSnippets:
 		analyze._enrich_findings_with_source_snippets([f])
 
 		# Slow Query callsite shape preserved (string, not mutated to
-		# dict) — renderer normalizes it lazily at render time.
+		# dict) renderer normalizes it lazily at render time.
 		detail = json.loads(f["technical_detail_json"])
 		assert detail["callsite"] == f"{src}:1"
 

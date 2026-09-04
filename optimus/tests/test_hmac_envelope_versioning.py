@@ -9,7 +9,7 @@ still verify on read via the backward-compat branch.
 
 The redis_schema.wrap_value envelope (v0.12.0) lives one layer up at
 the cache-value boundary. This module is the equivalent migration-
-safety net at the bytes-on-the-wire boundary — the layer where
+safety net at the bytes-on-the-wire boundary the layer where
 ``unsign_blob`` produces the payload that gets pickle.loads'd or
 JSON.loads'd downstream.
 
@@ -48,7 +48,7 @@ def _ensure_test_secret() -> bytes:
 
 
 # Each test runs in this module's pure-pytest context where frappe.conf
-# is unconfigured, so `_has_stable_hmac_secret()` returns False — which
+# is unconfigured, so `_has_stable_hmac_secret()` returns False which
 # would cause sign_blob to skip signing entirely. Force the stable-secret
 # path by monkey-patching the helper.
 def _force_stable_secret(monkeypatch) -> bytes:
@@ -76,7 +76,7 @@ class TestSignUnsignRoundTrip:
 		assert session.unsign_blob(signed) == b""
 
 	def test_v1_round_trip_pickle_shaped_payload(self, monkeypatch):
-		"""A realistic payload — pickle bytes starting with \\x80
+		"""A realistic payload pickle bytes starting with \\x80
 		(protocol 2-5 PROTO opcode). Confirms the marker doesn't
 		collide with the most common payload shape."""
 		import pickle
@@ -193,7 +193,7 @@ class TestEdgeCases:
 
 	def test_no_secret_path_passes_through_unsigned(self, monkeypatch):
 		"""When _has_stable_hmac_secret returns False (no encryption_key
-		in frappe.conf), sign_blob returns the raw blob unchanged —
+		in frappe.conf), sign_blob returns the raw blob unchanged
 		preserves the existing Phase K behaviour."""
 		monkeypatch.setattr(session, "_has_stable_hmac_secret", lambda: False)
 		payload = b"raw unsigned"

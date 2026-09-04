@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Smoke tests for the fixture builders — verify they produce shapes
+"""Smoke tests for the fixture builders verify they produce shapes
 that match the analyzers' expectations and can replace hand-written
 JSON fixtures in most cases.
 """

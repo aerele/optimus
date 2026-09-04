@@ -55,7 +55,7 @@ def test_other_frames_node_is_dropped():
 
 def test_more_frames_omitted_node_is_dropped():
 	# The analyzer's deep-tree pruning placeholder "[N more frames omitted]" is a
-	# synthetic collapse node with no callsite — drop it like [other: N frames].
+	# synthetic collapse node with no callsite drop it like [other: N frames].
 	tree = _node("handle", "frappe/handler.py", 100, [
 		_node("looped_validate", "ugly_code/python/common.py", 95),
 		{"function": "[208 more frames omitted]", "filename": "", "lineno": 0,
@@ -77,12 +77,12 @@ def test_ct_is_other_frame_matches_both_synthetic_formats():
 
 
 def test_sql_leaves_dropped_from_tree():
-	# ALL <sql> leaf siblings are dropped from the call-tree display — no
+	# ALL <sql> leaf siblings are dropped from the call-tree display no
 	# summary line, no rows. The call tree shows only the Python hierarchy;
 	# the queries themselves live in the Slowest-queries / per-action sections.
 	tree = _node("handle", "frappe/handler.py", 100, [
 		_node("looped_validate", "ugly_code/common.py", 50),
-		_node("<sql>", "ugly_code/common.py", 40),   # 40ms — still dropped
+		_node("<sql>", "ugly_code/common.py", 40),   # 40ms still dropped
 		_node("<sql>", "frappe/db.py", 0.3),
 		_node("<sql>", "frappe/db.py", 0.2),
 	])
@@ -166,7 +166,7 @@ def test_flat_top_action_does_not_hide_deep_action():
 	]
 	panel = renderer._render_call_tree_panel(acts)
 	assert "flat_top" in panel and "deep_second" in panel
-	# the deep action's user frame renders — its structure is no longer hidden
+	# the deep action's user frame renders its structure is no longer hidden
 	assert "looped_validate" in panel
 
 

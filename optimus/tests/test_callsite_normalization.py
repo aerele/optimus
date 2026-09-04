@@ -77,7 +77,7 @@ class TestNormalizeCallsite:
 		assert _normalize_callsite(None) is None
 
 	def test_unknown_type_returns_none(self):
-		# e.g. an int slipped in from somewhere — don't crash, skip.
+		# e.g. an int slipped in from somewhere don't crash, skip.
 		assert _normalize_callsite(12345) is None
 
 	def test_non_numeric_suffix_not_treated_as_lineno(self):
@@ -191,7 +191,7 @@ class TestFindingToDictNormalizes:
 class TestImpactScopeLabelBackfill:
 	"""Legacy user N+1 findings (analyzed before impact_scope_label shipped) get
 	the label backfilled from the stable finding_type so the report card's scope
-	tag agrees with the TL;DR hero on re-render — but only when the finding
+	tag agrees with the TL;DR hero on re-render but only when the finding
 	actually carries a loop-scoped magnitude (finding ⑦)."""
 
 	def _row(self, finding_type, detail):
@@ -318,10 +318,10 @@ class TestEndToEndRender:
 		#   AttributeError: 'str' object has no attribute 'get'
 		html = renderer.render(doc, recordings=[])
 
-		# Both findings rendered — titles present.
+		# Both findings rendered titles present.
 		assert "Slow query: 1374ms" in html
 		assert "Same query ran 15× at myapp/foo.py:10" in html
-		# Both attributed to myapp — since they're the only app, the
+		# Both attributed to myapp since they're the only app, the
 		# bucket-wrapper short-circuits (single-app flat rendering),
 		# but the callsite text appears in the details block.
 		assert "apps/myapp/foo.py:456" in html

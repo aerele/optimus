@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for renderer._render_phase2_panel — exercises the phase-2 HTML
+"""Tests for renderer._render_phase2_panel exercises the phase-2 HTML
 without spinning up Frappe / Jinja. We feed a minimal session-doc-shaped
 object directly to the helper.
 """
@@ -67,7 +67,7 @@ class TestRenderPhase2PanelSingleRun:
 		html = renderer._render_phase2_panel(session)
 
 		assert "my_app.x.compute" in html
-		# v0.7.x Phase I.2: heading dropped the "Phase 2" prefix —
+		# v0.7.x Phase I.2: heading dropped the "Phase 2" prefix
 		# now reads just "Line-Level Drilldown" (the section's own
 		# content makes the line-level drilldown nature self-evident
 		# without the internal-phase jargon).
@@ -268,7 +268,7 @@ class TestRenderPhase2PanelPosition:
 		assert phase2_idx > 0, "id=\"phase2\" wrapper missing from rendered HTML"
 		assert findings_h2 > 0, "Findings <h2> missing from rendered HTML"
 		assert phase2_idx < findings_h2, (
-			"Phase 2 panel must render before the Findings <h2> — it is the "
+			"Phase 2 panel must render before the Findings <h2> it is the "
 			"showcase section, hoisted above the actionable list"
 		)
 

@@ -1,7 +1,7 @@
 // Copyright (c) 2026, Optimus contributors
 // For license information, please see license.txt
 //
-// Optimus — browser-side metrics shim (v0.5.0)
+// Optimus browser-side metrics shim (v0.5.0)
 //
 // Wraps window.fetch + XMLHttpRequest.prototype to capture XHR timings,
 // and uses PerformanceObserver to capture Web Vitals (FCP, LCP, CLS,
@@ -101,7 +101,7 @@
 	// responseText.length is a UTF-16 code unit count, which undercounts
 	// multi-byte characters (emoji, non-ASCII text). TextEncoder gives
 	// us the real wire byte count. For large responses this is O(n)
-	// with an allocation — acceptable because it only runs when
+	// with an allocation acceptable because it only runs when
 	// Content-Length is missing (the common case on modern servers
 	// already sets the header).
 	// -----------------------------------------------------------------
@@ -141,7 +141,7 @@
 			var start = performance.now();
 			xhr.addEventListener("loadend", function () {
 				try {
-					// Gate on active session — without this, Chromium
+					// Gate on active session without this, Chromium
 					// browsers log "Refused to get unsafe header
 					// 'X-Optimus-Recording-Id'" on every API response
 					// because Frappe stamps Access-Control-Allow-Origin
@@ -209,7 +209,7 @@
 			});
 		}
 	} catch (e) {
-		// Older browsers without PerformanceObserver — degrade silently.
+		// Older browsers without PerformanceObserver degrade silently.
 	}
 
 	// -----------------------------------------------------------------
@@ -278,7 +278,7 @@
 				method: "optimus.api.submit_frontend_metrics",
 				args: { payload: body },
 			});
-		} catch (e) { /* last-ditch — nothing more we can do */ }
+		} catch (e) { /* last-ditch nothing more we can do */ }
 	}
 
 	// Watchdog flush: runs every 60s but ONLY does work when there's an

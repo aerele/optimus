@@ -1,11 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Surface tests for the v0.6.0 ``humanize_steps`` API endpoint — the manual
+"""Surface tests for the v0.6.0 ``humanize_steps`` API endpoint the manual
 "rewrite the Steps to Reproduce with the LLM" action on a Optimus Session.
 
 Like ``test_backfill_ai_fixes_api.py`` this is a source-inspection test (the
-endpoint needs a live bench for a true integration run): we pin the contract —
+endpoint needs a live bench for a true integration run): we pin the contract
 whitelisted, permission-gated, Ready-only, AI-enabled guard, re-fetches the
 recordings, calls ``ai_fix.humanize_steps``, persists ``notes``, re-renders.
 
@@ -90,8 +90,8 @@ def test_persists_notes_and_re_renders():
 	assert '"notes"' in core_body
 	assert "_assemble_humanized_notes(" in core_body
 	# v0.6.x: explicit commits now route through ``safe_commit`` (rollback
-	# guard added in the audit-response round). The intent — commit after
-	# the set_value — is preserved.
+	# guard added in the audit-response round). The intent commit after
+	# the set_value is preserved.
 	assert ("frappe.db.commit()" in core_body) or ("safe_commit()" in core_body)
 	endpoint_body = _fn_body("humanize_steps")
 	assert "regenerate_reports(session_uuid)" in endpoint_body

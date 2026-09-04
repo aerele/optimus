@@ -1,16 +1,16 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Sensitive-data redaction — pure functions, no Frappe imports.
+"""Sensitive-data redaction pure functions, no Frappe imports.
 
 Two responsibilities:
 
-  * :func:`redact_sensitive` — walks a dict / list and replaces values
+  * :func:`redact_sensitive`: walks a dict / list and replaces values
     under keys whose name contains a sensitive substring
     (``password``, ``api_key``, ``token``, …) with ``"<REDACTED:keyname>"``.
     Used for ``form_dict``, ``headers``, and any nested envelope.
 
-  * :func:`redact_sql_literals` — replaces literal RHS values in
+  * :func:`redact_sql_literals`: replaces literal RHS values in
     ``<sensitive_column> = '...'`` SQL comparisons with ``'<REDACTED>'``.
     Best-effort regex; misses UPDATE SET clauses and obscure shapes,
     but covers the >95% case (``WHERE password = 'admin123'`` is the
@@ -24,13 +24,13 @@ backed up their DB exfiltrated data they didn't realize they had.
 
 v0.7.x+ the recorder-patch path in ``optimus/__init__.py`` calls these
 at CAPTURE time so raw values never enter Redis. The renderer still
-calls them as defense-in-depth (catches anything the patch didn't —
+calls them as defense-in-depth (catches anything the patch didn't
 e.g. older sessions written under the previous contract).
 
 Settings-driven extension: every function accepts an ``extra_keys`` /
 ``extra_columns`` tuple so customers can add domain-specific patterns
 (``recovery_code``, ``otp_seed``, ``bank_account``, …) via Optimus
-Settings without forking. Extension is ADDITIVE — there's no API to
+Settings without forking. Extension is ADDITIVE there's no API to
 remove a default pattern; a config typo can't accidentally disable
 redaction of a known-sensitive key.
 
@@ -48,7 +48,7 @@ from functools import lru_cache
 # values 1:1 so the relocation is behavior-preserving; the test suite
 # locks them in.
 # NOTE: key matching is SUBSTRING (case-insensitive), so very short tokens are
-# avoided — e.g. ``sid`` is intentionally NOT here (it would match "consider",
+# avoided e.g. ``sid`` is intentionally NOT here (it would match "consider",
 # "inside", …); the Frappe session id rides in the ``Cookie`` header, already
 # covered. SQL-column matching below is word-boundary, so it's safe from that.
 DEFAULT_SENSITIVE_KEYS: tuple[str, ...] = (
@@ -87,7 +87,7 @@ def redact_sensitive(payload, *, extra_keys: tuple[str, ...] = ()):
 	under sensitive keys replaced by ``"<REDACTED:keyname>"``. Non-
 	container scalars pass through unchanged.
 
-	Pure — never mutates the input.
+	Pure never mutates the input.
 	"""
 	if isinstance(payload, dict):
 		out = {}
@@ -110,12 +110,12 @@ def _sql_literal_regex(columns: tuple[str, ...]) -> re.Pattern:
 
 	Caching keeps the patched-recorder hot path fast even when an
 	``extra_columns`` tuple is passed (each unique extras-tuple compiles
-	once per process). The cache size is intentionally small — most
+	once per process). The cache size is intentionally small most
 	deployments have ONE extras list (from Optimus Settings) so the
 	cache holds the default pattern + at most one per setting variant.
 	"""
 	# RHS literal alternatives, tried left-to-right: double-quoted, single-quoted,
-	# parenthesised IN-list, then a BARE token (unquoted number/hex/identifier) —
+	# parenthesised IN-list, then a BARE token (unquoted number/hex/identifier)
 	# the last catches ``WHERE password = 123`` / ``= 0xDEAD`` / ``= admin`` which
 	# the quoted-only pattern leaked verbatim.
 	return re.compile(
@@ -131,7 +131,7 @@ def redact_sql_literals(sql_str: str, *, extra_columns: tuple[str, ...] = ()) ->
 
 	Best-effort regex pass:
 
-	  * Quick exit when no sensitive substring appears (the 95% path —
+	  * Quick exit when no sensitive substring appears (the 95% path
 	    avoids the regex cost on every benign query).
 	  * Regex replacement on ``column (=|LIKE|IN) literal`` where
 	    ``literal`` is single-quoted, double-quoted, or parenthesised.
@@ -159,7 +159,7 @@ def redact_call_queries(calls, *, extra_columns: tuple[str, ...] = ()) -> None:
 	"""Apply :func:`redact_sql_literals` over a recording's ``calls``
 	list in place. Touches ``query`` + ``normalized_query`` fields.
 
-	Mutates input — different shape from the dict/list redactor because
+	Mutates input different shape from the dict/list redactor because
 	calls lists are large and copying is wasteful when the caller
 	already owns the recording dict.
 	"""

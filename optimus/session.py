@@ -3,7 +3,7 @@
 
 """Redis state for the profiler session lifecycle.
 
-This module is intentionally pure state-management — no business logic, no
+This module is intentionally pure state-management no business logic, no
 DocType I/O, no recorder coupling. It owns three Redis key shapes:
 
     profiler:active:<user_email>          → string, value=session_uuid, TTL
@@ -12,7 +12,7 @@ DocType I/O, no recorder coupling. It owns three Redis key shapes:
 
 The active key has a TTL that matches the recorder's auto-disable so a
 forgotten Stop button can never run forever. The meta and recordings keys
-have no TTL — they live until the analyze pipeline finalizes the session
+have no TTL they live until the analyze pipeline finalizes the session
 into a `Optimus Session` DocType row and explicitly deletes them.
 """
 
@@ -43,7 +43,7 @@ _SIG_LEN = 32  # SHA-256 digest size in bytes.
 # HMAC and the payload at sign time, so future signing-scheme bumps
 # (HMAC-SHA512, AES-SIV, key-rotation tag, …) have an extension point
 # without breaking blobs in flight. The version byte is COVERED BY
-# THE HMAC — tampering with it is detected. Backward compatibility on
+# THE HMAC tampering with it is detected. Backward compatibility on
 # read is automatic: if the post-signature body's first byte is the
 # current version marker, strip it; otherwise the body is a legacy
 # pre-v0.12.14 payload. Pickle never uses ``\x01`` as a leading
@@ -128,14 +128,14 @@ def unsign_blob(signed: bytes) -> bytes | None:
 
 	v0.12.14: handles two body shapes after the 32-byte signature:
 
-	  * **v1 (current, v0.12.14+)** — body starts with
+	  * **v1 (current, v0.12.14+)**: body starts with
 	    ``_HMAC_SCHEME_V1``. The signature covers the version-tagged
 	    body. Returns ``body[1:]`` (the payload, with the version
 	    byte stripped).
-	  * **v0 (legacy, pre-v0.12.14)** — body is the raw payload. The
+	  * **v0 (legacy, pre-v0.12.14)**: body is the raw payload. The
 	    signature covers the body directly. Returns ``body``.
 
-	The single HMAC verification step handles both cases — for v1 the
+	The single HMAC verification step handles both cases for v1 the
 	HMAC was computed over ``\\x01 + payload`` AND that's exactly what
 	the body is; for v0 the HMAC was computed over the payload AND
 	the body is just the payload. The post-verify branch inspects the
@@ -161,8 +161,8 @@ def unsign_blob(signed: bytes) -> bytes | None:
 # centralized ``optimus.redis_keys.session_*`` functions. Same byte-
 # identical key strings as the pre-v0.12.24 local helpers (which were
 # the last surviving inline f-strings outside ``redis_keys.py``).
-# Existing call sites — both inside this module and from tests
-# (``session._meta_key(uuid)`` / ``session._jobs_key(sid)``) — keep
+# Existing call sites both inside this module and from tests
+# (``session._meta_key(uuid)`` / ``session._jobs_key(sid)``) keep
 # working unchanged through the module-level aliases.
 from optimus import redis_keys as _redis_keys
 
@@ -216,7 +216,7 @@ def set_active_session(user: str, session_uuid: str) -> None:
 def clear_active_session(user: str) -> None:
 	"""Clear the active session pointer for the user.
 
-	Idempotent — safe to call when no session is active.
+	Idempotent safe to call when no session is active.
 	"""
 	frappe.cache.delete_value(_active_key(user))
 
@@ -309,7 +309,7 @@ def register_recording(
 
 	# Refresh the active-session TTL so long flows don't silently expire.
 	# If the caller didn't pass a user, fall back to reading it from the
-	# session meta — one extra Redis roundtrip in exchange for a safer
+	# session meta one extra Redis roundtrip in exchange for a safer
 	# default.
 	if not user:
 		meta = get_session_meta(session_uuid) or {}
@@ -323,7 +323,7 @@ def register_recording(
 		# call, causing subsequent HTTP requests on the same worker
 		# to keep being recorded into the (now-stopped) session and
 		# the widget to silently flip back to Recording state.
-		# EXPIRE returns 0 for a missing key — no key resurrected.
+		# EXPIRE returns 0 for a missing key no key resurrected.
 		expire_key(_active_key(user), SESSION_TTL_SECONDS)
 
 	return True
@@ -393,7 +393,7 @@ def get_pending_jobs(session_uuid: str) -> set[str]:
 # analyze's ``_finalize_pending_statuses`` at the wait cap) can DROP fields
 # via interleaved read-modify-write. The helper falls back to non-atomic
 # read-modify-write for cache backends without ``.eval()`` (FakeCache in
-# tests, exotic Redis variants) — preserves existing behavior, sheds the
+# tests, exotic Redis variants) preserves existing behavior, sheds the
 # multi-worker guarantee in those contexts.
 
 
@@ -430,7 +430,7 @@ return 1
 # bypasses the pickle wrapper. Returns None in test contexts where
 # ``frappe.cache`` is a FakeCache stand-in (no connection_pool); _read_job /
 # _write_job then fall back to ``frappe.cache.hget`` / ``.hset`` directly,
-# which is fine because FakeCache stores values as-is (no pickling) — the
+# which is fine because FakeCache stores values as-is (no pickling) the
 # encoding stays consistent within either environment.
 _RAW_REDIS = None
 
@@ -497,7 +497,7 @@ def _atomic_merge_job_meta(
 	Filters None values so callers can pass ``error=None`` without nuking a
 	real error already in meta. Falls back to the legacy non-atomic
 	read-modify-write on any backend that rejects ``.eval()`` (FakeCache in
-	tests, exotic Redis variants) — best-effort, never raises."""
+	tests, exotic Redis variants) best-effort, never raises."""
 	if not session_uuid or not job_id:
 		return
 	fields = {k: v for k, v in fields.items() if v is not None}
@@ -596,7 +596,7 @@ def get_jobs(session_uuid: str) -> list[dict]:
 
 def set_draining(session_uuid: str, until_ts: float) -> None:
 	"""Keep accepting job recordings for this session until ``until_ts``
-	(a unix timestamp). Stored on the session meta dict (no separate TTL —
+	(a unix timestamp). Stored on the session meta dict (no separate TTL
 	meta lives until the analyze pipeline deletes it)."""
 	if not session_uuid:
 		return
@@ -636,7 +636,7 @@ def delete_session_state(session_uuid: str) -> None:
 	# v0.6.0: pending-jobs set (the draining_until flag lives inside the
 	# meta hash, deleted above).
 	frappe.cache.delete_value(_pending_jobs_key(session_uuid))
-	# v0.7.x: per-job metadata hash (terminal statuses) — persisted to the
+	# v0.7.x: per-job metadata hash (terminal statuses) persisted to the
 	# Optimus Background Job child table by analyze before this runs.
 	frappe.cache.delete_value(_jobs_key(session_uuid))
 	# v0.5.0: clean up the frontend metrics Redis lists written by

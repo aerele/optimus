@@ -2,10 +2,10 @@
 # For license information, please see license.txt
 
 """Tests for v0.5.2 split of findings into
-"Findings — what to fix" (actionable, concrete fixes) vs
-"Observations" (framework/system/informational — no direct fix).
+"Findings what to fix" (actionable, concrete fixes) vs
+"Observations" (framework/system/informational no direct fix).
 
-Per user feedback: "In Findings — what to fix, Show only the valid
+Per user feedback: "In Findings what to fix, Show only the valid
 fixes." The split keeps the main action-list tight and reads as a
 punchlist while the Observations section preserves full-picture
 transparency.
@@ -33,14 +33,14 @@ def test_actionable_finding_types_has_concrete_fixes_only():
 		"Slow Hot Path",
 		"Hook Bottleneck",
 		# v0.7.x: BG-job fallback finding points at the deepest
-		# user-code frame inside a slow job — a concrete callsite
+		# user-code frame inside a slow job a concrete callsite
 		# to investigate with Line-Level Drilldown.
 		"Slow Background Job",
 		"Redundant Call",
 		"Slow Frontend Render",
 		"Heavy Response",
 		# v0.6.x: Phase-2 line-profile output points at a specific line
-		# of code with a concrete refactor target — actionable.
+		# of code with a concrete refactor target actionable.
 		"Hot Line",
 	}
 	assert renderer._ACTIONABLE_FINDING_TYPES == expected_actionable, (
@@ -63,7 +63,7 @@ def test_actionable_finding_types_has_concrete_fixes_only():
 		"Network Overhead",           # client/proxy path
 	):
 		assert informational not in renderer._ACTIONABLE_FINDING_TYPES, (
-			f"{informational!r} is informational — users can't act on it "
+			f"{informational!r} is informational users can't act on it "
 			"with a shippable fix. It must NOT be in _ACTIONABLE_FINDING_TYPES."
 		)
 
@@ -73,7 +73,7 @@ def test_render_splits_findings_into_actionable_and_observational():
 	session_doc.findings into `findings` (actionable) and
 	`observational_findings` (everything else) via the allowlist.
 	Without this split, observational noise re-pollutes the main
-	'Findings — what to fix' section."""
+	'Findings what to fix' section."""
 	src = inspect.getsource(renderer.render)
 
 	# The partition must use _ACTIONABLE_FINDING_TYPES.
@@ -96,7 +96,7 @@ def test_render_splits_findings_into_actionable_and_observational():
 
 def test_template_has_observations_subsection_inside_findings():
 	"""The report template must include the Observations as a nested
-	subsection INSIDE the Findings section (v0.5.2 restructure — user
+	subsection INSIDE the Findings section (v0.5.2 restructure user
 	asked: 'If its a framework related issue then move a sub-section').
 	Without it the information disappears from the report entirely."""
 	import os
@@ -125,13 +125,13 @@ def test_template_has_observations_subsection_inside_findings():
 	subsection_marker = '<section class="subsection">'
 	assert subsection_marker in template, (
 		"Framework-level observations must be a <section class='subsection'> "
-		"block — non-collapsible by user request"
+		"block non-collapsible by user request"
 	)
 
 
 def test_render_drops_function_not_invoked_findings():
 	"""'Function Not Invoked' ("X was picked but never invoked during phase 2")
-	is non-actionable noise — the pick simply didn't run in the replay. render()
+	is non-actionable noise the pick simply didn't run in the replay. render()
 	must filter it from ``all_findings`` (not merely re-bucket it) so it leaves
 	the Findings list, the Observations subsection, AND the severity counts with
 	no phantom rows. The Line-Level Drilldown notes uninvoked picks concisely
@@ -154,11 +154,11 @@ def test_action_plan_is_built_from_actionable_findings_only():
 
 	``_build_action_plan`` is a generic top-N-by-severity/impact
 	renderer with no finding_type guard (it renders whatever it is
-	handed — see test_action_plan.py's unknown-type case). If render()
+	handed see test_action_plan.py's unknown-type case). If render()
 	feeds it ``all_findings``, an observation-only finding (Framework
 	N+1, which _action_verb_for maps to "Eliminate the N+1 query
 	(framework code)") can rank into the top-3 and print under "Fix
-	these first" with an ``est. saving`` — contradicting its own
+	these first" with an ``est. saving``: contradicting its own
 	Observations card and TL;DR hero ("not something you can change").
 	Guard the callsite at the source level so the leak can't return."""
 	src = inspect.getsource(renderer.render)
@@ -173,14 +173,14 @@ def test_action_plan_is_built_from_actionable_findings_only():
 		"observation-only findings never surface in the action plan"
 	)
 	assert "_build_action_plan(\n\t\tall_findings" not in src, (
-		"_build_action_plan must NOT be fed all_findings — that leaks "
+		"_build_action_plan must NOT be fed all_findings that leaks "
 		"observational findings into 'Fix these first'"
 	)
 
 
 def test_severity_counts_cover_all_findings():
 	"""v0.6.0: `severity_counts` (the "Issues found" stat card's sub-line)
-	must count ALL findings — actionable + observational — so the card's
+	must count ALL findings actionable + observational so the card's
 	big number (total), its sub-line, and the Summary prose's count all
 	agree. (Previously it counted actionable-only, which made the big
 	number and the breakdown disagree.)"""

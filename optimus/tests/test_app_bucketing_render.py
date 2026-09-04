@@ -58,7 +58,7 @@ def _finding_row(*, finding_type="N+1 Query", title="t",
 
 def test_single_app_renders_flat_without_wrapper():
 	"""If every finding is in one app, don't wrap in "myapp (N findings)"
-	— just render flat. Avoids visual noise when there's nothing to
+	just render flat. Avoids visual noise when there's nothing to
 	disambiguate."""
 	from optimus import renderer
 
@@ -114,7 +114,7 @@ def test_multiple_apps_each_in_own_bucket():
 
 
 def test_app_bucket_header_shows_count_and_impact():
-	"""Header reads "myapp · 2 findings · ~30ms" — the meta numbers
+	"""Header reads "myapp · 2 findings · ~30ms" the meta numbers
 	are visible so the user sees cost per app at a glance."""
 	from optimus import renderer
 
@@ -149,7 +149,7 @@ def test_singular_finding_header_uses_singular():
 
 def test_finding_without_callsite_goes_to_other_bucket():
 	"""A finding whose technical_detail has no callsite (e.g. infra-
-	pressure observations) must still render — via the "Other" bucket."""
+	pressure observations) must still render via the "Other" bucket."""
 	from optimus import renderer
 
 	# Build a finding with NO callsite in the detail.
@@ -214,7 +214,7 @@ def test_observations_also_bucketed_by_app():
 
 
 # --------------------------------------------------------------------------
-# v0.6.x: "Ignored Apps" exclusion list — drop findings whose blame app is in
+# v0.6.x: "Ignored Apps" exclusion list drop findings whose blame app is in
 # Optimus Settings ▸ Apps ▸ Ignored Apps, from BOTH the actionable section
 # and Observations. Surfaces a "(N hidden)" note on the report.
 # --------------------------------------------------------------------------
@@ -223,7 +223,7 @@ from unittest.mock import patch  # noqa: E402
 
 
 def _three_apps_doc():
-	from optimus import renderer  # noqa: F401 — exercised via render
+	from optimus import renderer  # noqa: F401 exercised via render
 	return _fake_session_doc_with_findings(
 		_finding_row(title="FrappeFinding", callsite_filename="frappe/model/document.py"),
 		_finding_row(title="ErpnextFinding", callsite_filename="apps/erpnext/erpnext/x.py"),
@@ -237,7 +237,7 @@ class TestIgnoredAppsFilter:
 
 		# v0.13.x: the default seed (frappe + erpnext) would filter the
 		# fixture findings out. The test's intent is "empty ignored_apps
-		# = nothing filtered" — so override the setting to () explicitly.
+		# = nothing filtered" so override the setting to () explicitly.
 		with patch("optimus.settings.get_ignored_apps", return_value=()):
 			html = renderer.render(_three_apps_doc(), recordings=[])
 		assert "FrappeFinding" in html
@@ -271,7 +271,7 @@ class TestIgnoredAppsFilter:
 
 		assert "ErpnextFinding" not in html
 		assert "FrappeFinding" in html and "MyappFinding" in html
-		# "1 finding hidden" — singular noun, not "1 findings".
+		# "1 finding hidden" singular noun, not "1 findings".
 		assert re.search(r">\s*1\s*</strong>\s*finding\b", html)
 		assert "1 findings hidden" not in html
 
@@ -319,7 +319,7 @@ class TestIgnoredAppsFilter:
 	def test_severity_counts_reflect_the_kept_set(self):
 		# The "Issues found" stat card sums to the kept count, not the total.
 		# Build 3 high-severity findings (one per app); ignore frappe+erpnext;
-		# the card should show "1" (myapp survives) — not "3".
+		# the card should show "1" (myapp survives) not "3".
 		import re
 
 		from optimus import renderer

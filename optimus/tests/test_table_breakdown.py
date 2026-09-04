@@ -127,7 +127,7 @@ class TestReadWriteSplit:
 
 	def test_write_target_tables_kept_even_below_the_time_cutoff(self, empty_context):
 		# Lots of slow reads on read-only tables push everything past the
-		# top-N-by-time cutoff — but the one table that was *written* (a
+		# top-N-by-time cutoff but the one table that was *written* (a
 		# single cheap UPDATE) must still show up, so a doc-save's writes
 		# aren't invisible.
 		calls = [
@@ -156,7 +156,7 @@ class TestIndexCandidates:
 		assert "customer" in cands and cands["customer"]["sources"] == ["JOIN"]
 		assert "posting_date" in cands and cands["posting_date"]["sources"] == ["ORDER BY"]
 		# `name` is the JOIN column on the OTHER side (attributed to tabCust) AND
-		# a Frappe metadata column — either way it's not a tabSI candidate.
+		# a Frappe metadata column either way it's not a tabSI candidate.
 		assert "name" not in cands
 
 	def test_candidates_ranked_by_frequency(self, empty_context):
@@ -172,7 +172,7 @@ class TestIndexCandidates:
 		assert hot["hits"] == 3
 
 	def test_candidates_only_from_reads_not_writes(self, empty_context):
-		# The UPDATE's WHERE column must NOT become an index candidate here —
+		# The UPDATE's WHERE column must NOT become an index candidate here
 		# the breakdown's candidates are explicitly "to speed up reads".
 		rec = _rec(("UPDATE `tabFoo` SET `x` = ? WHERE `only_in_update` = ?", 5))
 		row = _row_for(table_breakdown.analyze([rec], empty_context).aggregate["table_breakdown"], "tabFoo")
@@ -249,7 +249,7 @@ def test_is_frappe_meta_table_truth_table():
 	# Case-insensitive + tolerates backticks.
 	assert is_frappe_meta_table("tabdoctype") is True
 	assert is_frappe_meta_table("`tabCustom Field`") is True
-	# Real data tables — NOT meta.
+	# Real data tables NOT meta.
 	for t in ("tabSales Invoice", "tabUser", "tabFile", "tabVersion",
 	          "tabEmail Queue", "tabCommunication", "tabError Log", "tabItem"):
 		assert is_frappe_meta_table(t) is False
@@ -259,7 +259,7 @@ def test_is_frappe_meta_table_truth_table():
 
 class TestFrappeMetaTablesExcluded:
 	def test_meta_table_gets_flag_and_no_candidates(self, empty_context):
-		# tabSingles reads filter on `doctype`/`field` — but it's a meta
+		# tabSingles reads filter on `doctype`/`field`: but it's a meta
 		# table, so no candidates and no framework_cols list either.
 		q = "SELECT `value` FROM `tabSingles` WHERE `doctype` = ? AND `field` = ?"
 		row = _row_for(
@@ -287,7 +287,7 @@ class TestFrappeMetaTablesExcluded:
 		# (bench migrate owns their schema), so they're filtered out of
 		# the index-recommendations cards. They still appear in the timing
 		# breakdown table above (when the "Hide framework tables" toggle
-		# is off) — the row is informational, just not actionable.
+		# is off) the row is informational, just not actionable.
 		from unittest.mock import patch
 
 		from optimus import renderer
@@ -402,7 +402,7 @@ class TestRenderedSection:
 		html = renderer.render_raw(self._doc(breakdown), recordings=[])
 		assert "Time spent per database table" in html
 		# Reads / Writes columns rendered (each carries a "consolidated"
-		# scope tag — match a prefix so the test is robust to tag tweaks).
+		# scope tag match a prefix so the test is robust to tag tweaks).
 		assert "<th class=\"num\">Reads " in html
 		assert "<th class=\"num\">Writes " in html
 		# Candidate columns + their source tooltip + the write-impact note.
@@ -470,14 +470,14 @@ def test_is_framework_db_table_truth_table():
 	          "tabWorkspace", "tabRole"):
 		assert is_framework_db_table(t) is True
 
-	# Framework-internal (new — user/session bookkeeping; deliberately
+	# Framework-internal (new user/session bookkeeping; deliberately
 	# excludes tabUser, which is a real user-data table some apps query
 	# meaningfully).
 	for t in ("tabHas Role", "tabDefaultValue", "tabUser Social Login",
 	          "tabUser Role Profile", "tabBlock Module", "tabUser Email"):
 		assert is_framework_db_table(t) is True
 
-	# MySQL system tables — any information_schema.* name.
+	# MySQL system tables any information_schema.* name.
 	for t in ("information_schema.columns", "information_schema.tables",
 	          "information_schema.statistics", "INFORMATION_SCHEMA.COLUMNS"):
 		assert is_framework_db_table(t) is True
@@ -537,7 +537,7 @@ class TestHideFrameworkTablesToggle:
 
 	def test_default_on_filters_framework_tables(self):
 		from optimus import renderer
-		# Default toggle is True (no patching needed — OptimusConfig() default).
+		# Default toggle is True (no patching needed OptimusConfig() default).
 		html = renderer.render_raw(self._doc(self._four_tables()), recordings=[])
 		# Only the user-app table survives in the table-breakdown section.
 		assert "tabSales Invoice" in html
@@ -598,7 +598,7 @@ class TestHideFrameworkTablesToggle:
 		# Per-action breakdown keeps the action_label (containing "tabUser") intact.
 		assert "frappe.client.get_value:tabUser" in html
 		# But the db-tables section still hides tabUser (the breakdown didn't list it
-		# here — so the note shouldn't render either, since nothing was hidden).
+		# here so the note shouldn't render either, since nothing was hidden).
 		assert "framework/internal tables hidden" not in html
 		assert "framework/internal table hidden" not in html
 
@@ -607,7 +607,7 @@ class TestRenderConfigFooter:
 	"""v0.6.x: the report footer stamps the render-affecting settings that
 	were in effect at render time. Without this stamp, users who toggle a
 	Optimus Settings flag and re-open an existing (un-regenerated) HTML
-	file see no change and assume a bug — when in fact the saved file is
+	file see no change and assume a bug when in fact the saved file is
 	frozen at its rendered-time settings."""
 
 	def _doc(self):
@@ -636,7 +636,7 @@ class TestRenderConfigFooter:
 		assert "hide_framework_tables=on" in html
 		assert "tracked_apps=(none)" in html
 		# v0.13.x: ignored_apps seeded with all Frappe-org apps. The
-		# footer joins names with ", " — assert the full alphabetical list.
+		# footer joins names with ", " assert the full alphabetical list.
 		assert (
 			"ignored_apps=builder, crm, drive, erpnext, frappe, "
 			"helpdesk, hrms, insights, lms, payments, wiki"
@@ -646,7 +646,7 @@ class TestRenderConfigFooter:
 		assert "min_action_duration_ms=0" in html
 		assert "large_duration_threshold_ms=1000" in html
 		# The nudge phrase explains why the user might be looking at stale
-		# data — the whole point of the stamp.
+		# data the whole point of the stamp.
 		assert "Regenerate Reports" in html
 
 	def test_footer_reflects_patched_settings(self):

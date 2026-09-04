@@ -20,7 +20,7 @@ def _js_entries():
 def test_app_include_js_contains_version():
 	"""Every JS entry must have a ?v=<version>.<anything> cache-buster
 	starting with the current __version__. The suffix after the version
-	is the mtime-based auto-invalidator — we don't care about its exact
+	is the mtime-based auto-invalidator we don't care about its exact
 	value, just that the version is present."""
 	pattern = re.compile(
 		rf"\?v={re.escape(__version__)}(\.\d+)?$"
@@ -57,14 +57,14 @@ def test_app_include_paths_are_correct():
 
 def test_mtime_component_auto_invalidates_on_file_edit(tmp_path, monkeypatch):
 	"""v0.5.2: the ?v= suffix includes the file's mtime so ANY edit to
-	the JS/CSS auto-busts the browser cache — even when __version__
+	the JS/CSS auto-busts the browser cache even when __version__
 	hasn't been bumped. Pre-v0.5.2 was a real user incident: v0.5.2's
 	realtime code shipped while the browser kept serving v0.5.1's
 	polling code because the query string was unchanged.
 	"""
 	from optimus.hooks import _asset_version
 
-	# Call twice — result should change if the file is touched.
+	# Call twice result should change if the file is touched.
 	v1 = _asset_version("js/floating_widget.js")
 	# The version string format is "<version>.<mtime>" or just
 	# "<version>" if the file couldn't be stat'd.

@@ -33,7 +33,7 @@ LIST_JS = os.path.join(
 def _node_check(js_path: str) -> None:
 	"""Run `node --check` to validate JS syntax.
 
-	Skips if node isn't installed — that's fine, frappe benches ship with
+	Skips if node isn't installed that's fine, frappe benches ship with
 	node so in practice this will run everywhere that matters.
 	"""
 	if not shutil.which("node"):
@@ -78,7 +78,7 @@ def test_widget_has_visibility_listener():
 	with open(WIDGET_JS) as f:
 		src = f.read()
 	assert "visibilitychange" in src
-	# v0.5.1: no more stopPolling — the handler just re-fetches
+	# v0.5.1: no more stopPolling the handler just re-fetches
 	# state on visibility return. The polling-pause machinery was
 	# removed; see test_realtime_session_events for the new
 	# realtime contract.
@@ -108,7 +108,7 @@ def test_form_js_does_not_render_analyzer_warnings_intro():
 	from the Optimus Session form view. The warning text (about
 	suppressed framework callsites, skipped non-SELECT statements,
 	below-threshold suggestions, etc.) was diagnostic noise that the
-	developer doesn't need to act on — it pushed the actionable
+	developer doesn't need to act on it pushed the actionable
 	findings count below the fold. The data is still stored on the
 	hidden ``analyzer_warnings`` field for offline inspection."""
 	with open(FORM_JS) as f:
@@ -137,7 +137,7 @@ def test_form_js_has_report_buttons():
 	assert "Download Report" in src
 	assert "Open Report" in src
 	assert "raw_report_file" in src
-	# The PDF button is gone — confirm no stale reference leaked
+	# The PDF button is gone confirm no stale reference leaked
 	# into the form JS.
 	assert "Download Report (PDF)" not in src
 	assert "optimus.api.download_pdf" not in src
@@ -156,7 +156,7 @@ def test_widget_start_has_error_callback():
 	"""v0.5.1 regression guard: the Start dialog's frappe.call must
 	include an error callback. Without it, any server-side failure of
 	api.start (permission error, concurrent session, server exception)
-	silently closes the dialog with no feedback to the user — the
+	silently closes the dialog with no feedback to the user the
 	exact 'widget not working as expected' failure mode reported by
 	users who lacked the Optimus User role. The stop API already had
 	an error callback added in an earlier fix; this test forces start
@@ -174,7 +174,7 @@ def test_widget_start_has_error_callback():
 	window = src[start_call_idx : start_call_idx + 2000]
 	assert "error:" in window or "error: " in window, (
 		"openStartDialog's frappe.call(api.start) must have an error "
-		"callback — without it, permission errors and server exceptions "
+		"callback without it, permission errors and server exceptions "
 		"leave the widget silently unresponsive after the dialog closes"
 	)
 
@@ -185,7 +185,7 @@ def test_widget_stop_has_error_callback():
 
 	We look at the entire confirmAndStop function body (finding it
 	from the 'function confirmAndStop' keyword to the closing brace)
-	rather than a fixed-size window after the stop call site — the
+	rather than a fixed-size window after the stop call site the
 	callback body grew in v0.5.1 to handle the 'no active session'
 	reset path and a couple of console.log diagnostics, and a fixed
 	window was both brittle and too narrow.
@@ -223,7 +223,7 @@ def test_widget_stop_has_error_callback():
 
 def test_widget_stop_handles_no_active_session():
 	"""v0.5.1 regression guard: when the stop API returns
-	{stopped: false} (session already gone — auto-stopped, janitor-
+	{stopped: false} (session already gone auto-stopped, janitor-
 	swept, or a retried click after a network blip on the first
 	stop), the widget must reset to inactive, NOT transition to
 	'Analyzing…' (which would hang forever because no session is
@@ -251,7 +251,7 @@ def test_widget_stop_handles_no_active_session():
 	assert "data.stopped === false" in body, (
 		"confirmAndStop's success callback must handle the "
 		"{stopped: false} response (session already gone) and reset "
-		"to inactive — without this check, the widget falls through "
+		"to inactive without this check, the widget falls through "
 		"to the 'Analyzing…' branch and hangs forever"
 	)
 

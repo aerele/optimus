@@ -5,7 +5,7 @@
 apps-in-tracked-apps validation.
 
 Production bug: user populated Tracked Apps with ``frappe`` and
-``erpnext`` — misreading the field as "apps to monitor". Inclusion-
+``erpnext``: misreading the field as "apps to monitor". Inclusion-
 mode semantics kicked in and flooded their actionable findings list
 with framework noise (a 1078-query query_builder N+1 that should
 have gone to Observations landed in Findings). The controller now
@@ -21,7 +21,7 @@ import pytest
 
 def _install_frappe_stub(monkeypatch):
 	"""Install a frappe stub with the minimum surface the controller
-	needs — msgprint, log_error, cache.delete_value, Document parent
+	needs msgprint, log_error, cache.delete_value, Document parent
 	class. Each test gets a fresh ``msgprint`` Mock that collects calls.
 	"""
 	stub = types.ModuleType("frappe")
@@ -62,7 +62,7 @@ def _install_frappe_stub(monkeypatch):
 def _fresh_controller(monkeypatch):
 	"""Return a fresh OptimusSettings instance with msgprint-capturing
 	frappe stub. All sys.modules mutations route via monkeypatch so the
-	real frappe is restored at test teardown — no pollution of
+	real frappe is restored at test teardown no pollution of
 	subsequent test files."""
 	stub = _install_frappe_stub(monkeypatch)
 	# Force re-import so the controller picks up the fresh stub's msgprint.
@@ -134,13 +134,13 @@ class TestFrameworkAppWarning:
 	def test_frappe_profiler_itself_does_not_trigger_warning(self, monkeypatch):
 		"""optimus is in FRAMEWORK_APPS (its own code paths
 		should be filtered out of findings) but it's not a
-		'framework app' in the UX sense — adding it to Tracked Apps
+		'framework app' in the UX sense adding it to Tracked Apps
 		is odd but not actively wrong."""
 		OptimusSettings, stub = _fresh_controller(monkeypatch)
 		doc = OptimusSettings()
 		doc.tracked_apps = [_row("optimus")]
 		doc._warn_on_framework_apps_in_tracked()
-		# No warning — optimus is meta/self and shouldn't
+		# No warning optimus is meta/self and shouldn't
 		# trip the "you probably misread the field" heuristic.
 		assert stub.msgprint_calls == []
 
@@ -170,7 +170,7 @@ class TestNormalization:
 			_row("myapp "),         # trailing space
 			_row(" myapp"),         # leading space
 			_row("second"),
-			_row(""),               # empty — drop
+			_row(""),               # empty drop
 		]
 		doc._normalize_tracked_apps()
 		names = [r.app_name for r in doc.tracked_apps]
@@ -180,7 +180,7 @@ class TestNormalization:
 class TestNumericFloorClamp:
 	"""``_clamp_numeric_floors`` floors each numeric setting at a safe
 	minimum so a typo (e.g. ``-1`` sampler interval, ``0`` session
-	retention) doesn't break the analyzer at runtime. Silently clamps —
+	retention) doesn't break the analyzer at runtime. Silently clamps
 	no msgprint."""
 
 	def test_clamps_negative_sampler_interval_to_floor(self, monkeypatch):
@@ -189,12 +189,12 @@ class TestNumericFloorClamp:
 		doc.pyinstrument_sampler_interval_ms = -1.0
 		doc._clamp_numeric_floors()
 		assert doc.pyinstrument_sampler_interval_ms == 0.1
-		# Silent clamp — no warning.
+		# Silent clamp no warning.
 		assert stub.msgprint_calls == []
 
 	def test_zero_session_retention_allowed(self, monkeypatch):
 		"""v0.13.x: ``session_retention_days = 0`` is the Strict-as-
-		unlimited sentinel — it tells the janitor to never sweep. The
+		unlimited sentinel it tells the janitor to never sweep. The
 		floor dropped from 1 → 0 to admit it; the janitor's
 		``_sweep_old_sessions`` early-returns on ``retention_days <=
 		0``. Pre-v0.13.x the test asserted clamp-to-1 because the
@@ -209,7 +209,7 @@ class TestNumericFloorClamp:
 
 	def test_zero_max_queries_per_recording_allowed(self, monkeypatch):
 		"""v0.13.x: ``max_queries_per_recording = 0`` is the Strict-as-
-		unlimited sentinel — analyze enriches every query (no
+		unlimited sentinel analyze enriches every query (no
 		truncation). Floor lowered 1 → 0 to admit it."""
 		OptimusSettings, _stub = _fresh_controller(monkeypatch)
 		doc = OptimusSettings()
@@ -229,7 +229,7 @@ class TestNumericFloorClamp:
 		assert doc.slow_query_threshold_ms == 200
 
 	def test_zero_min_action_duration_allowed(self, monkeypatch):
-		"""min_action_duration_ms uses 0 as the sentinel for 'no filter' —
+		"""min_action_duration_ms uses 0 as the sentinel for 'no filter'
 		must NOT be clamped above 0."""
 		OptimusSettings, _stub = _fresh_controller(monkeypatch)
 		doc = OptimusSettings()
@@ -238,10 +238,10 @@ class TestNumericFloorClamp:
 		assert doc.min_action_duration_ms == 0
 
 	def test_unset_fields_ignored(self, monkeypatch):
-		"""None / unset fields are skipped — no AttributeError, no clamp."""
+		"""None / unset fields are skipped no AttributeError, no clamp."""
 		OptimusSettings, _stub = _fresh_controller(monkeypatch)
 		doc = OptimusSettings()
-		# Don't set anything — all fields default to None on the stub.
+		# Don't set anything all fields default to None on the stub.
 		doc._clamp_numeric_floors()  # should not raise
 		# Confirm nothing got mutated to a floor value.
 		for fieldname in OptimusSettings._NUMERIC_FLOORS:
@@ -249,12 +249,12 @@ class TestNumericFloorClamp:
 
 	def test_non_numeric_input_left_alone(self, monkeypatch):
 		"""A non-numeric value (someone passing a string by mistake)
-		is silently skipped — let Frappe's field-type validator handle
+		is silently skipped let Frappe's field-type validator handle
 		it. The clamp helper must not raise."""
 		OptimusSettings, _stub = _fresh_controller(monkeypatch)
 		doc = OptimusSettings()
 		doc.session_retention_days = "not a number"
 		doc._clamp_numeric_floors()  # should not raise
-		# String passes through unchanged — Frappe's Int validator
+		# String passes through unchanged Frappe's Int validator
 		# rejects it on save.
 		assert doc.session_retention_days == "not a number"

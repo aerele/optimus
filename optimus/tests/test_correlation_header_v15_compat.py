@@ -5,7 +5,7 @@
 Frappe v15 and v16.
 
 Why this exists: the Per-XHR timings section of the Frontend panel
-was empty on v15 deployments. Root cause — ``frappe.local.response_
+was empty on v15 deployments. Root cause ``frappe.local.response_
 headers`` (the staging dict our injector wrote to) does not exist
 on v15. Only v16's ``frappe/app.py`` has
 ``response.headers.update(frappe.local.response_headers)`` at
@@ -38,12 +38,12 @@ def _install_frappe_stub_with_local(monkeypatch):
 
 	Also stubs ``frappe.recorder`` and the ``optimus.session``
 	/ ``.capture`` submodules because ``hooks_callbacks.py`` imports
-	them at module top — those imports would fail when
+	them at module top those imports would fail when
 	``_fresh_module`` re-imports ``hooks_callbacks``.
 
 	All sys.modules mutations go through ``monkeypatch.setitem`` so the
 	real ``frappe`` (and related submodules) is restored at test
-	teardown — preventing the stub from polluting subsequent test files
+	teardown preventing the stub from polluting subsequent test files
 	in the same pytest session.
 	"""
 	frappe = types.ModuleType("frappe")
@@ -79,7 +79,7 @@ def _install_frappe_stub_with_local(monkeypatch):
 
 def _fresh_module(monkeypatch):
 	"""Re-import hooks_callbacks under the current frappe stub.
-	``monkeypatch.delitem`` evicts cached modules — pytest restores them
+	``monkeypatch.delitem`` evicts cached modules pytest restores them
 	at teardown so subsequent files see the originals (or the conftest
 	fence's re-imports)."""
 	for mod in list(sys.modules.keys()):

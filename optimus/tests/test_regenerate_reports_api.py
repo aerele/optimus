@@ -47,7 +47,7 @@ def _regenerate_reports_body() -> str:
 
 class TestSurface:
 	def test_regenerate_reports_is_whitelisted(self):
-		"""The endpoint must carry @frappe.whitelist() — otherwise
+		"""The endpoint must carry @frappe.whitelist() otherwise
 		the front-end can't call it."""
 		src = _read_api_source()
 		# Allow optional intermediate decorators (e.g. @rate_limit) between
@@ -70,10 +70,10 @@ class TestSurface:
 	def test_does_not_re_enqueue_analyze(self):
 		"""Guardrail: regenerate_reports must NOT call
 		_enqueue_analyze. If it does, it's just a slower
-		retry_analyze — the whole point is to skip the analyzer."""
+		retry_analyze the whole point is to skip the analyzer."""
 		body = _regenerate_reports_body()
 		assert "_enqueue_analyze" not in body, (
-			"regenerate_reports must NOT enqueue analyze — that would "
+			"regenerate_reports must NOT enqueue analyze that would "
 			"defeat the purpose of having a separate endpoint"
 		)
 		# Positive check: it does call _render_and_attach_reports.
@@ -84,11 +84,11 @@ class TestSurface:
 
 	def test_clears_cached_pdf(self):
 		"""After regenerating the safe HTML, the cached PDF is
-		stale — must be invalidated so the next download_pdf call
+		stale must be invalidated so the next download_pdf call
 		regenerates from fresh HTML."""
 		body = _regenerate_reports_body()
 		assert "clear_cached_pdf" in body, (
-			"regenerate_reports must clear the cached PDF — otherwise "
+			"regenerate_reports must clear the cached PDF otherwise "
 			"the download_pdf endpoint would serve a stale PDF rendered "
 			"from the old HTML"
 		)
@@ -103,13 +103,13 @@ class TestSurface:
 
 	def test_best_effort_recording_fetch(self):
 		"""When recordings have expired from Redis, the endpoint
-		must still succeed with empty recordings — the important
+		must still succeed with empty recordings the important
 		stuff is stored in the DocType."""
 		body = _regenerate_reports_body()
-		# try/except around the fetch — falls back to [].
+		# try/except around the fetch falls back to [].
 		assert "try:" in body and "recordings = []" in body, (
 			"regenerate_reports must degrade to empty recordings on "
-			"fetch failure — the safe renderer still produces a useful "
+			"fetch failure the safe renderer still produces a useful "
 			"report without them"
 		)
 
@@ -117,7 +117,7 @@ class TestSurface:
 		"""v0.12.9: regenerate_reports must refuse Recording / Stopping
 		/ Analyzing sessions. Pre-v0.12.9 the code had no status check
 		despite the docstring claiming "Allowed on Ready OR Failed
-		sessions" — a re-render on an in-flight session would attach
+		sessions" a re-render on an in-flight session would attach
 		an incomplete report to a still-running analyze that the
 		pipeline would then overwrite. The gate enforces the
 		docstring's contract."""
@@ -129,7 +129,7 @@ class TestSurface:
 			body,
 		), (
 			"regenerate_reports must gate on row['status'] not in "
-			"('Ready', 'Failed') — pre-v0.12.9 the endpoint accepted "
+			"('Ready', 'Failed') pre-v0.12.9 the endpoint accepted "
 			"any status and re-rendered mid-analyze sessions"
 		)
 		# The error message must mention 'retry_analyze' as the

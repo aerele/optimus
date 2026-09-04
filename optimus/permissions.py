@@ -6,7 +6,7 @@
 Currently exposes one gate: a `has_permission` for the File DocType that
 double-checks downloads of the profiler report. The UI hides the
 "Download Report" button from non-admin/non-owner users, but a malicious
-user who guessed the file URL could try to fetch it directly — this
+user who guessed the file URL could try to fetch it directly this
 gate makes that fail.
 
 v0.6.0 Round 7: safe-mode reports were removed. The single remaining
@@ -25,7 +25,7 @@ def file_has_permission(doc, ptype=None, user=None):
 
 	Allows access to:
 	  - Anyone who passes the underlying parent permission check (handled
-	    by Frappe's built-in private file logic — Optimus User with
+	    by Frappe's built-in private file logic Optimus User with
 	    if_owner=1, System Manager always)
 	  - Plus an additional check for the report files specifically: only
 	    System Manager OR the recording user, even if some other role

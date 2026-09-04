@@ -61,7 +61,7 @@
    "read_only": 1
   },
   {
-   "description": "JSON: aggregated per-function per-line timings — analyzer input + render source.",
+   "description": "JSON: aggregated per-function per-line timings analyzer input + render source.",
    "fieldname": "results_json",
    "fieldtype": "Long Text",
    "label": "Results (JSON)",

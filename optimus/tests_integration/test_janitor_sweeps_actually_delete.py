@@ -16,12 +16,12 @@ The unit suite covers individual sweep functions in isolation
   * That the cron does, in fact, delete the underlying DocType row
     (not just mark or move it).
   * That attached File rows (``raw_report_file``) get deleted along
-    with the session — orphan File rows would inflate disk usage
+    with the session orphan File rows would inflate disk usage
     forever, even though the parent session is gone.
   * That the cutoff math is correct: a session 100 days old → deleted;
     a session 30 days old → kept (with the default 90-day retention).
   * That **active** sessions (Recording, Analyzing, Stopping, etc.)
-    are untouched regardless of age — the daily sweep only prunes
+    are untouched regardless of age the daily sweep only prunes
     terminal-state sessions; the 5-minute sweep handles the others.
 
 That gap is what this final integration test fills. Each test creates
@@ -139,7 +139,7 @@ class TestJanitorSweepsActuallyDelete(FrappeTestCase):
 					"is_private": 1,
 				}
 			)
-			# Avoid validate_file_extension by clearing request — same
+			# Avoid validate_file_extension by clearing request same
 			# trick analyze._save_report_file uses.
 			saved_request = getattr(frappe.local, "request", None)
 			try:
@@ -180,18 +180,18 @@ class TestJanitorSweepsActuallyDelete(FrappeTestCase):
 
 		assert not self._session_exists(fixture["uuid"]), (
 			f"sweep_old_sessions did NOT delete the 100-day-old Ready session "
-			f"{fixture['uuid']!r} — retention policy is broken; the Optimus "
+			f"{fixture['uuid']!r} retention policy is broken; the Optimus "
 			f"Session table will grow forever"
 		)
 
 	def test_sweep_keeps_session_within_retention(self):
 		"""Negative control. A Ready session comfortably INSIDE the
-		configured retention window MUST be left alone by the sweep —
+		configured retention window MUST be left alone by the sweep
 		without this guard the sweep could overzealously delete recent
 		sessions.
 
 		Retention is ``Optimus Settings.session_retention_days`` (default 30,
-		config-profile dependent — see settings.py), so the fixture age is
+		config-profile dependent see settings.py), so the fixture age is
 		taken as HALF that window rather than a hard-coded 30 days. A
 		hard-coded 30 sat exactly on the default-30 boundary and lost the race
 		against the sweep's ``now()`` cutoff."""
@@ -206,17 +206,17 @@ class TestJanitorSweepsActuallyDelete(FrappeTestCase):
 
 		assert self._session_exists(fixture["uuid"]), (
 			f"sweep_old_sessions ate a {within}-day-old session "
-			f"{fixture['uuid']!r} (retention={retention}d) — too aggressive"
+			f"{fixture['uuid']!r} (retention={retention}d) too aggressive"
 		)
 
 	def test_sweep_keeps_active_sessions_regardless_of_age(self):
 		"""The terminal-state contract. Sessions in non-terminal
 		states (Recording, Analyzing, Stopping) MUST NOT be deleted
-		by the daily sweep even when they're ancient — the 5-minute
+		by the daily sweep even when they're ancient the 5-minute
 		``sweep_stale_sessions`` handles those by force-stopping or
 		marking failed. The daily sweep's filter pins to ``status IN
 		(Ready, Failed)`` exclusively."""
-		# Create an OLD Analyzing session — the kind that would be
+		# Create an OLD Analyzing session the kind that would be
 		# tempting to GC but is wrong to.
 		fixture = self._create_session(days_old=100, status="Analyzing")
 		assert self._session_exists(fixture["uuid"])
@@ -225,7 +225,7 @@ class TestJanitorSweepsActuallyDelete(FrappeTestCase):
 
 		assert self._session_exists(fixture["uuid"]), (
 			f"sweep_old_sessions deleted a non-terminal-status session "
-			f"{fixture['uuid']!r} (status=Analyzing) — daily sweep must "
+			f"{fixture['uuid']!r} (status=Analyzing) daily sweep must "
 			f"only touch Ready/Failed; stale active sessions are the "
 			f"5-minute sweep's job"
 		)
@@ -234,7 +234,7 @@ class TestJanitorSweepsActuallyDelete(FrappeTestCase):
 		"""Disk-hygiene contract. Deleting an Optimus Session must
 		cascade to its ``raw_report_file`` File row. Orphan File rows
 		left behind by row-only deletes would inflate disk usage
-		forever — and the safe-report-on-disk is often the largest
+		forever and the safe-report-on-disk is often the largest
 		artefact per session."""
 		fixture = self._create_session(days_old=120, status="Ready", with_attached_file=True)
 		assert self._session_exists(fixture["uuid"])
@@ -243,8 +243,8 @@ class TestJanitorSweepsActuallyDelete(FrappeTestCase):
 		janitor.sweep_old_sessions()
 
 		assert not self._session_exists(fixture["uuid"]), "session not deleted; can't validate file cascade"
-		# The File row MUST also be gone — orphans inflate disk forever.
+		# The File row MUST also be gone orphans inflate disk forever.
 		assert not self._file_exists(fixture["file_url"]), (
 			f"File row {fixture['file_url']!r} survived parent session "
-			f"deletion — orphan File rows inflate disk usage"
+			f"deletion orphan File rows inflate disk usage"
 		)

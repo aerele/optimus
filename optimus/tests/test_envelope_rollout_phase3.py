@@ -8,7 +8,7 @@ result cache in ``analyze.py``).
 The previous phases shipped settings_cache (v0.12.11),
 retention_backlog + onboarding_seen (v0.12.13). This phase adds
 ``explain_cache``, whose payload is a list of dicts (EXPLAIN row
-results) — the most complex shape rolled out so far. Exercising the
+results) the most complex shape rolled out so far. Exercising the
 envelope on a non-primitive collection validates that ``unwrap_value``
 preserves nested structure cleanly.
 """
@@ -17,13 +17,13 @@ from __future__ import annotations
 
 
 class TestExplainCacheEnvelopeRoundTrip:
-	"""End-to-end on the envelope helpers alone — the analyze.py call
+	"""End-to-end on the envelope helpers alone the analyze.py call
 	site uses the same two-line pattern (wrap on write, unwrap on
 	read), so a unit test on the helpers + a source-grep canary
 	together cover the rollout."""
 
 	def test_list_of_dicts_roundtrip(self):
-		"""EXPLAIN results are list[dict] — wrap + unwrap must preserve
+		"""EXPLAIN results are list[dict] wrap + unwrap must preserve
 		the shape, including the inner dict's value types."""
 		from optimus import redis_schema
 

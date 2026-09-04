@@ -5,7 +5,7 @@ from frappe.model.document import Document
 
 
 class OptimusSession(Document):
-	# Phase 0 — scaffold only.
+	# Phase 0 scaffold only.
 	# Lifecycle methods (validate, on_update, on_trash) will be added in
 	# Phase 1 alongside the session API and Redis state tracking.
 	pass

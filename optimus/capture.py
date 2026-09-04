@@ -10,7 +10,7 @@ Owns:
      frappe.cache.get_value / frappe.permissions.has_permission for
      argument capture (with PII-safe hashing)
 
-Argument values that may contain user data are stored in two forms —
+Argument values that may contain user data are stored in two forms
 ``identifier_raw`` (rendered in the report) and ``identifier_safe``
 (a sha256[:12] hash, used as the bucket key for redundant-call
 detection). Doctype names and ptypes are NOT hashed because they're
@@ -26,7 +26,7 @@ single attribute lookup; they never read Redis.
 import hashlib
 import sys as _sys
 
-# Optional dependency — capture degrades gracefully if pyinstrument is
+# Optional dependency capture degrades gracefully if pyinstrument is
 # not installed (e.g. air-gapped environments, broken pip cache).
 try:
 	import pyinstrument  # noqa: F401
@@ -64,7 +64,7 @@ def _capture_caller_stack() -> list:
 	- Depth-bounded at ``_CALLER_STACK_MAX_DEPTH`` so a runaway
 	  recursion doesn't build a huge sidecar entry.
 	- Returns [] on any failure (non-CPython interpreter, f_back
-	  unexpectedly None) rather than raising — observability code
+	  unexpectedly None) rather than raising observability code
 	  never breaks the host call.
 	"""
 	try:
@@ -134,7 +134,7 @@ def _identify_args(fn_name: str, args: tuple, kwargs: dict):
 	if fn_name == "cache_get":
 		# This wraps RedisWrapper.get_value (a method), so args[0] is the
 		# RedisWrapper instance (self) and args[1] is the actual key. We
-		# wrap at the class level — not at frappe.cache — because
+		# wrap at the class level not at frappe.cache because
 		# frappe.cache is None at app-import time (no site bound yet).
 		key = args[1] if len(args) > 1 else kwargs.get("key")
 		# Cache keys may be bytes (Frappe sometimes builds them with the
@@ -166,7 +166,7 @@ def _identify_args(fn_name: str, args: tuple, kwargs: dict):
 		name = str(name) if name is not None else None
 		return (doctype, name, ptype), (doctype, _hash_identifier(name), ptype)
 
-	# Unknown — return None tuples so the bucket key is hashable but
+	# Unknown return None tuples so the bucket key is hashable but
 	# meaningless (the redundant_calls analyzer skips such entries).
 	return (None, None), (None, None)
 
@@ -200,7 +200,7 @@ def _make_wrap(orig, fn_name: str, local_proxy=None):
 	  - Drops entries past SIDECAR_CAP_PER_RECORDING and flags truncation.
 	  - Stores the original on `wrapped._profiler_original` so uninstall
 	    can restore it. If `orig` is itself an already-wrapped function
-	    (has `_profiler_original`), our wrap chains through `orig` —
+	    (has `_profiler_original`), our wrap chains through `orig`:
 	    we never double-wrap.
 	"""
 	def wrapped(*args, **kwargs):
@@ -218,7 +218,7 @@ def _make_wrap(orig, fn_name: str, local_proxy=None):
 
 		# Build the sidecar entry on a best-effort basis. A failure here
 		# (malformed args, exotic types) MUST NOT prevent the user's call
-		# from running — observability code never breaks the host call.
+		# from running observability code never breaks the host call.
 		try:
 			identifier_raw, identifier_safe = _identify_args(fn_name, args, kwargs)
 			entry = {
@@ -230,7 +230,7 @@ def _make_wrap(orig, fn_name: str, local_proxy=None):
 				# only callsites) AND surface file:line in the
 				# finding detail so users can actually navigate to
 				# the loop they need to fix. Pre-v0.5.2 findings
-				# showed only a hashed cache key with no callsite —
+				# showed only a hashed cache key with no callsite
 				# users couldn't act on them.
 				"caller_stack": _capture_caller_stack(),
 			}
@@ -283,7 +283,7 @@ def _start_pyi_session(local_proxy, interval_ms: float = DEFAULT_SAMPLER_INTERVA
 		local_proxy.optimus_pyinstrument = prof
 		return prof
 	except Exception:
-		# Any failure to start pyinstrument is non-fatal — degrade to
+		# Any failure to start pyinstrument is non-fatal degrade to
 		# SQL-only capture for this recording.
 		return None
 
@@ -339,7 +339,7 @@ def _wrap_targets():
 	`frappe.init(site)` runs). Wrapping the class method ensures every
 	cache instance created later uses the wrapped version. Because this
 	is a method wrap, the wrapper sees `self` as args[0] and the actual
-	key as args[1] — handled in `_identify_args` for `cache_get`.
+	key as args[1] handled in `_identify_args` for `cache_get`.
 	"""
 	import frappe
 	import frappe.permissions

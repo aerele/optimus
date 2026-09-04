@@ -24,7 +24,7 @@ def test_stop_session_calls_force_stop_inflight():
 
 
 def test_start_calls_force_stop_inflight():
-	# Same property at the start path — clearing leaked state from a
+	# Same property at the start path clearing leaked state from a
 	# previous request on the same worker before reading session state.
 	src = inspect.getsource(api.start)
 	assert "_force_stop_inflight_capture" in src
@@ -42,7 +42,7 @@ def test_require_profiler_user_does_not_recurse(monkeypatch):
 	"""Regression: _require_profiler_user used to call itself instead of
 	_require_user() (pre-existing v0.2.0 typo at line 52). The infinite
 	recursion only fired in production when the widget actually called
-	api.status — never caught by tests because nothing invoked the
+	api.status never caught by tests because nothing invoked the
 	function. This test calls it directly and asserts it returns within
 	one stack frame."""
 	import frappe

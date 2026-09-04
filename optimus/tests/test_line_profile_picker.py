@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for optimus.line_profile.picker — candidate generation and
+"""Tests for optimus.line_profile.picker candidate generation and
 free-form dotted-path resolution for the phase-2 line-profile picker UI.
 
 pyinstrument captures the *bare* function name in ``function`` and the
@@ -72,7 +72,7 @@ class TestDeriveModulePath:
 	def test_relative_dotdot_segments_stripped(self):
 		# pyinstrument's file_path_short is os.path.relpath(file, <sys.path
 		# entry>); on some benches that yields leading "../" segments. They
-		# are relpath artifacts, NOT module components — if left in,
+		# are relpath artifacts, NOT module components if left in,
 		# ".".join turns ".." into a leading dot ("...pkg"), which then
 		# resolves as a (broken) relative import and 500'd the line-profile
 		# pass. They must be stripped so a clean, importable-shaped path
@@ -90,7 +90,7 @@ class TestDeriveModulePath:
 	def test_build_dotted_path_from_relative_filename_resolvable_shape(self):
 		# End-to-end regression for the reported crash: a curated pick whose
 		# file_path_short carried "../" segments made _build_dotted_path
-		# emit "...acme.acme.acme.report...execute" — a relative-import path
+		# emit "...acme.acme.acme.report...execute" a relative-import path
 		# that crashed. It must now emit a clean, importable-shaped dotted
 		# path.
 		dotted = picker._build_dotted_path(
@@ -140,7 +140,7 @@ class TestBuildCandidatesFromTrees:
 
 	def test_same_function_name_different_files_does_not_collapse(self):
 		# Two unrelated `validate` methods in different modules must remain
-		# separate candidates — that's the whole point of including the
+		# separate candidates that's the whole point of including the
 		# filename in the dedup key.
 		tree = _root(
 			_frame("validate", "apps/erpnext/erpnext/selling/sales_invoice.py", 10, 100.0),
@@ -347,8 +347,8 @@ class TestResolveFreeform:
 	def test_leading_dot_path_degrades_to_picker_error(self):
 		# Regression: a stored/curated dotted_path with a leading "..."
 		# (so split(".") yields empty leading segments) made the import
-		# loop call importlib.import_module("...pkg...") — a RELATIVE
-		# import — which raises TypeError ("the 'package' argument is
+		# loop call importlib.import_module("...pkg...") a RELATIVE
+		# import which raises TypeError ("the 'package' argument is
 		# required to perform a relative import"), NOT ImportError. That
 		# escaped the loop's narrow except and 500'd the request. It must
 		# now degrade to a clean PickerError the caller already handles.
@@ -522,7 +522,7 @@ class TestExpandHotChain:
 		assert [c["depth"] for c in chain] == [0, 1, 2]
 
 	def test_max_depth_zero_walks_to_leaf(self):
-		"""v0.13.x: ``max_depth = 0`` means unbounded — walk to the leaf
+		"""v0.13.x: ``max_depth = 0`` means unbounded walk to the leaf
 		instead of the legacy "0 = no descent" sentinel that the pre-
 		v0.13.x ``while depth < max_depth`` loop accidentally
 		implemented. The Strict Sensitivity Profile uses 0 here so
@@ -539,12 +539,12 @@ class TestExpandHotChain:
 			[tree], "my_app.x.level1", max_depth=0,
 		)
 
-		# 0 (pick) + 4 descendants — walked all the way to ``level5``.
+		# 0 (pick) + 4 descendants walked all the way to ``level5``.
 		assert len(chain) == 5
 		assert [c["depth"] for c in chain] == [0, 1, 2, 3, 4]
 
 	def test_min_ms_zero_includes_every_measurable_child(self):
-		"""v0.13.x: ``min_ms = 0`` means no minimum — every measurable
+		"""v0.13.x: ``min_ms = 0`` means no minimum every measurable
 		child is eligible. Closes the gap where pre-v0.13.x the
 		``or 50.0`` fallback in api.py silently re-applied the default
 		floor and skipped any child < 50ms even when the operator
@@ -602,7 +602,7 @@ class TestExpandHotChain:
 
 	def test_finds_hottest_match_across_trees(self):
 		# Same function appears in two action trees with different
-		# cumulative_ms — picker should pick the hotter instance and
+		# cumulative_ms picker should pick the hotter instance and
 		# walk its children.
 		hot_child = _frame(
 			"hot_descendant", "apps/my_app/my_app/x.py", 5, 100.0,
@@ -696,7 +696,7 @@ class TestResolveFreeformClassMethodFallback:
 class TestRecommendedFlag:
 	"""v0.7.x (P2): candidates carry a ``recommended`` flag so the picker can
 	pre-tick the real hot paths (non-framework user code above a time
-	threshold) — one click to line-profile them, no manual hunting."""
+	threshold) one click to line-profile them, no manual hunting."""
 
 	def test_user_hot_frame_recommended(self):
 		tree = _root(
@@ -721,7 +721,7 @@ class TestRecommendedFlag:
 
 class TestMultiTreePicker:
 	"""v0.13: the picker walks the top-N hottest action trees, not just the
-	single hottest — so a flow with several slow actions surfaces them all
+	single hottest so a flow with several slow actions surfaces them all
 	(previously only the one dominant tree's frames appeared)."""
 
 	def test_surfaces_frames_from_multiple_trees(self):
@@ -766,7 +766,7 @@ class TestMultiTreePicker:
 		fns = {c["qualname"] for c in cands}
 		# The giant tree is budget-limited so the smaller action still surfaces.
 		assert "other_action" in fns
-		# Per-tree cap honored — the giant tree contributes <= _PER_TREE_CAP frames.
+		# Per-tree cap honored the giant tree contributes <= _PER_TREE_CAP frames.
 		giant_frames = [c for c in cands if c["file"].endswith("common.py")]
 		assert len(giant_frames) <= picker._PER_TREE_CAP
 
@@ -794,7 +794,7 @@ class TestMultiTreePicker:
 
 	def test_excludes_stdlib_frames(self, monkeypatch):
 		# A hot user frame that calls into Python stdlib (importlib.import_module
-		# at 53ms — captured as ``importlib/__init__.py``). The stdlib frame is
+		# at 53ms captured as ``importlib/__init__.py``). The stdlib frame is
 		# neither the customer's code nor a Frappe framework app, so it must NOT
 		# appear in the picker; the user-app frame that owns the cost does.
 		# ``_top_level_app`` only returns "[other]" for ``importlib`` when it can
@@ -824,7 +824,7 @@ class TestPickerDialogIndent:
 	(``build_tree_html`` in optimus_session.js).
 
 	The "indent is wrong" report: a top-level (depth-0) LEAF candidate
-	(e.g. ``bg_recheck_users`` — a hot frame with no surfaced children) was
+	(e.g. ``bg_recheck_users``: a hot frame with no surfaced children) was
 	rendered with a hard-coded ``padding:2px 0 2px 22px`` left pad. When it
 	followed a sibling root rendered as a collapsed ``<details>`` (e.g.
 	``_maybe_log_user``), the 22px pad made the leaf look NESTED under that
@@ -873,7 +873,7 @@ class TestPickerDialogIndent:
 
 
 class TestFilterOutIgnoredApps:
-	"""picker.filter_out_ignored_apps — the ONE shared filter used by both the
+	"""picker.filter_out_ignored_apps the ONE shared filter used by both the
 	manual picker (api.get_phase2_candidates) and auto-arm."""
 
 	def _cands(self):
@@ -922,7 +922,7 @@ class TestPickerEmptyHintIgnored:
 		assert "Ignored Apps" in msg
 		assert "5 candidate" in msg
 		# Must NOT push the operator to clear the whole list (that resurrects
-		# the framework-app defaults) — it must say to keep at least one entry.
+		# the framework-app defaults) it must say to keep at least one entry.
 		assert "keep at least one entry" in msg
 
 	def test_some_survivors_give_no_hint(self):

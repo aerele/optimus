@@ -6,7 +6,7 @@
 Call-tree / pyinstrument callsites are stored as `<app>/<module-path>` (e.g.
 `ugly_code/python/common.py` for `<bench>/apps/ugly_code/ugly_code/python/
 common.py`). A bare `open()` fails because the Frappe worker cwd is
-`<bench>/sites` — so the AI-fix prompt and the report's "smoking gun" snippet
+`<bench>/sites`: so the AI-fix prompt and the report's "smoking gun" snippet
 never got the source. `renderer._resolve_source_path` fixes that; the source
 readers and the analyze-time enrichment route through it.
 """
@@ -41,7 +41,7 @@ class TestResolveSourcePath:
 	def test_resolves_a_frappe_core_relative_path(self):
 		# frappe/__init__.py → <bench>/apps/frappe/frappe/__init__.py via
 		# frappe.get_app_path. (In the full suite another test may have left a
-		# stub `frappe` in sys.modules — then this branch can't resolve and
+		# stub `frappe` in sys.modules then this branch can't resolve and
 		# returns None; that's tolerated. It must never return a bogus path.)
 		resolved = renderer._resolve_source_path("frappe/__init__.py")
 		assert resolved is None or os.path.exists(resolved)
@@ -80,7 +80,7 @@ class TestAnalyzeEnrichmentResolves:
 	def test_enriches_call_tree_finding_with_app_relative_callsite(self):
 		# call_tree findings store the location at the TOP level (no `callsite`
 		# wrapper). _enrich_findings_with_source_snippets must synthesize the
-		# callsite AND attach a snippet — resolving the relative path.
+		# callsite AND attach a snippet resolving the relative path.
 		findings = [{
 			"title": "In X, 60% of the time was spent in render",
 			"technical_detail_json": json.dumps({
@@ -103,7 +103,7 @@ class TestAnalyzeEnrichmentResolves:
 		analyze._enrich_findings_with_source_snippets(findings)
 		detail = json.loads(findings[0]["technical_detail_json"])
 		# No crash, no bogus snippet (the callsite may get synthesized for
-		# _finding_to_dict's benefit — that's fine).
+		# _finding_to_dict's benefit that's fine).
 		cs = detail.get("callsite") or {}
 		assert not cs.get("source_snippet")
 
@@ -122,7 +122,7 @@ class TestAiPayloadForFinding:
 			llm_fix_json=None,
 		)
 		# v0.10.0: the phase-2 index keys on the file's basename. The
-		# function "render" now lives in renderer/_internal.py — the index
+		# function "render" now lives in renderer/_internal.py the index
 		# key becomes ("_internal.py", "render").
 		phase2_index = {("_internal.py", "render"): {
 			"lineno": 1, "content": "first line", "total_ms": 387, "hits": 2,
@@ -150,7 +150,7 @@ class TestAiPayloadForFinding:
 class TestAiPayloadRecordedQueries:
 	"""v0.6.x: pass actual recorded SQL queries to the AI as evidence so
 	the model has the verbatim query text to ground against, instead of
-	inferring SQL shape from the Python source — which was the leading
+	inferring SQL shape from the Python source which was the leading
 	cause of bogus refactorings (e.g. inventing filters that copy a
 	variable from elsewhere in the function)."""
 
@@ -227,7 +227,7 @@ class TestAiPayloadRecordedQueries:
 		]
 
 	def test_sub_threshold_queries_dropped(self):
-		"""Trivial sub-half-ms queries (cache hits etc.) are noise — don't
+		"""Trivial sub-half-ms queries (cache hits etc.) are noise don't
 		surface them as 'examples' the AI tries to optimise."""
 		recordings_by_uuid = {"r0": {
 			"uuid": "r0",

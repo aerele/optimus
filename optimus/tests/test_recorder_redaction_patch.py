@@ -5,10 +5,10 @@
 
 These tests verify the patch installed at ``optimus/__init__.py:_patch_recorder``:
 
-  * ``Recorder.__init__`` — after the original runs, ``self.form_dict`` and
+  * ``Recorder.__init__``: after the original runs, ``self.form_dict`` and
     ``self.headers`` are walked through ``redaction.redact_sensitive`` so
     raw passwords / cookies never reach ``dump()`` → ``RECORDER_REQUEST_HASH``.
-  * ``Recorder.register`` — ``data["query"]`` is run through
+  * ``Recorder.register``: ``data["query"]`` is run through
     ``redaction.redact_sql_literals`` before the original appends it to
     ``self.calls``. The renderer-time scrubber stays as defense-in-depth.
 
@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-import optimus  # noqa: F401 — triggers _patch_recorder at import-time
+import optimus  # noqa: F401 triggers _patch_recorder at import-time
 
 
 def _Recorder():
@@ -66,7 +66,7 @@ class TestPatchInstalled:
 
 
 class _FakeRecorderInstance:
-	"""Minimal stand-in for a Recorder instance — we only need a ``calls``
+	"""Minimal stand-in for a Recorder instance we only need a ``calls``
 	list for the original ``register`` to append to."""
 
 	def __init__(self):

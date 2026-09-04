@@ -20,7 +20,7 @@ Frappe's validator has a designed bypass:
 
 analyze runs as a background RQ job in the normal case (no request
 context, bypass fires). But when the site has the scheduler disabled,
-analyze runs INLINE inside api.stop's HTTP handler — frappe.request
+analyze runs INLINE inside api.stop's HTTP handler frappe.request
 is set, bypass doesn't fire, HTML report insert fails with
 FileTypeNotAllowed.
 
