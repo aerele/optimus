@@ -6,19 +6,19 @@
 Three small functions the template's context dict exposes as callables
 (``fmt_ms`` / ``fmt_dt``) plus the server-timezone label resolver:
 
-  * :func:`_format_duration_ms` — turns milliseconds into ``"<n>ms"`` (with
+  * :func:`_format_duration_ms`: turns milliseconds into ``"<n>ms"`` (with
     configurable decimal places) below ``threshold_ms``, or ``"<n.nn>s"``
     above it. The seconds branch wraps the result in a
     ``<span class="time-high">`` so the report's eye-catch CSS draws the
     reader to slow values. Returns ``markupsafe.Markup`` so the wrapper
     isn't escaped when rendered through Jinja.
 
-  * :func:`_format_datetime_display` — formats a datetime per the site's
+  * :func:`_format_datetime_display`: formats a datetime per the site's
     System Settings (Date Format + Time Format), dropping microseconds.
     Falls back to a microsecond-stripped string when Frappe isn't
     importable (pure-pytest path).
 
-  * :func:`_get_server_timezone` — best-effort server timezone label:
+  * :func:`_get_server_timezone`: best-effort server timezone label:
     System Settings → Python's datetime tzname → "UTC". Used by the
     footer to disambiguate "what does '2026-05-24 18:12:53' mean".
 
@@ -34,7 +34,7 @@ from markupsafe import Markup
 
 
 def _format_duration_ms(ms, threshold_ms: float = 1000.0, decimals: int = 0):
-	"""Render a duration as ``"<n>ms"`` (with ``decimals`` digits) — or, if it
+	"""Render a duration as ``"<n>ms"`` (with ``decimals`` digits) or, if it
 	crosses ``threshold_ms``, as ``"<n.nn>s"`` (always 2 decimals). The
 	``decimals`` arg controls only the ms branch so the existing ``%.1f`` /
 	``%.2f`` callsites (sub-ms query timings) keep their resolution below the
@@ -45,7 +45,7 @@ def _format_duration_ms(ms, threshold_ms: float = 1000.0, decimals: int = 0):
 	v0.7.x: returns ``markupsafe.Markup`` so the seconds branch can
 	emit a ``<span class="time-high">`` wrapper without being escaped
 	when rendered via ``{{ fmt_ms(...) }}`` in Jinja. The wrapper draws
-	the reader's eye to values slow enough to roll over into seconds —
+	the reader's eye to values slow enough to roll over into seconds
 	the timing rule itself is unchanged, just the visual emphasis is
 	new. ``Markup`` subclasses ``str`` so Python callers that compare /
 	concat the return value still work.
@@ -61,7 +61,7 @@ def _format_duration_ms(ms, threshold_ms: float = 1000.0, decimals: int = 0):
 
 def _format_datetime_display(value) -> str:
 	"""Format a datetime (or datetime-string) for display in the report using
-	the site's System Settings (Date Format + Time Format) — which also drops
+	the site's System Settings (Date Format + Time Format) which also drops
 	the microseconds. Falls back to the value with any trailing microseconds
 	stripped when Frappe isn't available (standalone / tests)."""
 	if not value:

@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Line-Level Drilldown panel — the Phase-2 per-line profiling section.
+"""Line-Level Drilldown panel the Phase-2 per-line profiling section.
 
 Sourced from the session's ``phase_2_runs`` child table (one row per
 line-profile pass); each row carries a ``results_json`` blob shaped as
@@ -11,17 +11,17 @@ line-profile pass); each row carries a ``results_json`` blob shaped as
 Two public surfaces (called from the render orchestrator in
 ``_internal.py``):
 
-* ``_build_line_drilldown_callsite_index(session_doc)`` — semi-public:
+* ``_build_line_drilldown_callsite_index(session_doc)``: semi-public:
   ``optimus.analyze`` also calls it (via the renderer-package shim) to
   power the finding-card "Line-Level Drilldown hot line: ..." callout.
   Returns a ``(basename, function_name) → hottest-line`` dict.
-* ``_render_line_drilldown_panel(session_doc)`` — the section HTML.
+* ``_render_line_drilldown_panel(session_doc)``: the section HTML.
   Empty string when the session has no phase-2 runs.
 
-Plus four internal helpers — ``_make_line_drilldown_lookup`` (Jinja
+Plus four internal helpers ``_make_line_drilldown_lookup`` (Jinja
 adapter for tuple-keyed lookups), ``_phase2_invoked`` (per-function
 "did it run?" check), ``_render_phase2_function_table``,
-``_render_phase2_diff_table`` (per-function HTML pieces) — and two
+``_render_phase2_diff_table`` (per-function HTML pieces) and two
 back-compat aliases (``_build_phase2_callsite_index``,
 ``_make_phase2_lookup``, ``_render_phase2_panel``) that pre-v0.7.x
 renames left behind.
@@ -31,7 +31,7 @@ package roadmap. The 840-LOC line_drilldown cluster was the README's
 "single biggest remaining chunk." NB: ``_find_call_line_in_function_body``
 (an AST-walking helper used by ``_retarget_phase1_callsites_to_drilldown_leaf``
 which is part of the still-pending finding_enrichment cluster) stays
-in ``_internal.py`` for now — it'll move with that cluster, not this
+in ``_internal.py`` for now it'll move with that cluster, not this
 one. Same for ``_root_cause_key`` / ``_group_findings_by_root_cause``.
 """
 
@@ -47,7 +47,7 @@ from optimus.renderer.time_format import _format_duration_ms
 
 def _e(text: object) -> str:
 	"""HTML-escape. Local copy of ``_internal._e`` (same pattern as
-	``call_tree_renderer.py`` / ``doc_event_renderer.py``) — keeps this
+	``call_tree_renderer.py`` / ``doc_event_renderer.py``) keeps this
 	submodule free of a back-reference into ``_internal.py`` that would
 	create a circular import once ``_internal`` re-imports from here."""
 	import html as _html
@@ -56,7 +56,7 @@ def _e(text: object) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Callsite index — semi-public (analyze.py calls it via the package shim)
+# Callsite index semi-public (analyze.py calls it via the package shim)
 # ---------------------------------------------------------------------------
 
 
@@ -69,9 +69,9 @@ def _build_line_drilldown_callsite_index(session_doc: Any) -> dict:
 	Keyed by file basename (not absolute path) so the lookup survives
 	dev-vs-deploy path differences. When the same function appears in
 	multiple runs, the entry with the largest single-line ``total_ms``
-	wins — that's the most informative callout for the developer.
+	wins that's the most informative callout for the developer.
 
-	Per-function, own hottest line — no cross-function redirection.
+	Per-function, own hottest line no cross-function redirection.
 	The cross-link's job is "this function's hottest internal line";
 	the smoking-gun snippet's job (handled by
 	``_retarget_phase1_callsites_to_drilldown_leaf``) is "land the
@@ -118,7 +118,7 @@ def _build_line_drilldown_callsite_index(session_doc: Any) -> dict:
 			# v0.7.x: key under BOTH the full qualname and its bare last
 			# segment. resolve_freeform may emit a prefixed qualname
 			# (``common.bg_recheck_users`` / ``SalesInvoice.validate``) while a
-			# call_tree finding's callsite carries the bare function name — the
+			# call_tree finding's callsite carries the bare function name the
 			# callout silently missed when the two disagreed on the prefix even
 			# though the function was profiled (and showing in the panel).
 			basename = os.path.basename(file_path)
@@ -130,7 +130,7 @@ def _build_line_drilldown_callsite_index(session_doc: Any) -> dict:
 	return index
 
 
-# Back-compat alias — pre-v0.7.x name.
+# Back-compat alias pre-v0.7.x name.
 _build_phase2_callsite_index = _build_line_drilldown_callsite_index
 
 
@@ -144,7 +144,7 @@ def _make_line_drilldown_lookup(index: dict):
 		if not filename or not function_name:
 			return None
 		base = os.path.basename(filename)
-		# Try the function name as-is, then its bare last segment — mirrors the
+		# Try the function name as-is, then its bare last segment mirrors the
 		# dual keying in _build_line_drilldown_callsite_index so a prefix
 		# mismatch (qualname vs callsite function) can't break the callout.
 		return index.get((base, function_name)) or index.get((base, function_name.rsplit(".", 1)[-1]))
@@ -152,7 +152,7 @@ def _make_line_drilldown_lookup(index: dict):
 	return lookup
 
 
-# Back-compat alias — pre-v0.7.x name.
+# Back-compat alias pre-v0.7.x name.
 _make_phase2_lookup = _make_line_drilldown_lookup
 
 
@@ -195,7 +195,7 @@ def _render_phase2_function_table(fn: dict) -> str:
 	source = fn.get("source") or "curated"
 
 	# v0.7.x: a picked function that never ran (no lines, or all hits/total
-	# zero) renders nothing — the caller folds it into one "Not exercised in
+	# zero) renders nothing the caller folds it into one "Not exercised in
 	# this pass" note instead of a noisy empty per-line table.
 	if not _phase2_invoked(fn):
 		return ""
@@ -242,7 +242,7 @@ def _render_phase2_function_table(fn: dict) -> str:
 			tr_cls = ' class="zero"'
 		else:
 			tr_cls = ""
-		# `per_hit_us` is microseconds — convert to ms so the timing
+		# `per_hit_us` is microseconds convert to ms so the timing
 		# rule (1s threshold for the `.time-high` highlight) applies.
 		per_hit_ms = (line.get("per_hit_us") or 0) / 1000.0
 		_src_html = line.get("content_html")
@@ -263,7 +263,7 @@ def _render_phase2_function_table(fn: dict) -> str:
 
 def _render_phase2_diff_table(diff_rows: list[dict]) -> str:
 	"""Render the cross-run delta table for one function profiled in 2+
-	runs — the verify-the-fix view.
+	runs the verify-the-fix view.
 
 	v0.6.0 Round 7: source column always shows full code (was previously
 	gated by ``mode == "safe"`` + the safe-source toggle).
@@ -311,7 +311,7 @@ def _render_phase2_diff_table(diff_rows: list[dict]) -> str:
 			tr_cls = ' class="removed"'
 
 		def _fmt(v):
-			return "—" if v is None else (f"{v:.2f}" if isinstance(v, float) else str(v))
+			return "" if v is None else (f"{v:.2f}" if isinstance(v, float) else str(v))
 
 		_src_html = row.get("content_html")
 		_src = _src_html if _src_html else _e(row.get("content", ""))
@@ -433,7 +433,7 @@ def _render_line_drilldown_panel(session_doc: Any) -> str:
 		started = _e(run.get("started_at"))
 		status = _e(run.get("status", ""))
 		total_ms = run.get("total_ms", 0)
-		# v0.7.x: the "Picks:" line is dropped — the per-function tables below
+		# v0.7.x: the "Picks:" line is dropped the per-function tables below
 		# enumerate the picks that ran, and the "Not exercised in this pass" note
 		# lists the rest, so listing all picks again here is redundant.
 		html.append(
@@ -472,7 +472,7 @@ def _render_line_drilldown_panel(session_doc: Any) -> str:
 			"</p>"
 		)
 		for path, diff_meta in diffs.items():
-			label = f"{path} — Run {diff_meta['prev_run_idx'] + 1} → Run {diff_meta['curr_run_idx'] + 1}"
+			label = f"{path} Run {diff_meta['prev_run_idx'] + 1} → Run {diff_meta['curr_run_idx'] + 1}"
 			html.append(f'<div class="phase2-func"><div class="fn-name">{_e(label)}</div>')
 			html.append(_render_phase2_diff_table(diff_meta["rows"]))
 			html.append("</div>")
@@ -481,5 +481,5 @@ def _render_line_drilldown_panel(session_doc: Any) -> str:
 	return "".join(html)
 
 
-# Back-compat alias — pre-v0.7.x name.
+# Back-compat alias pre-v0.7.x name.
 _render_phase2_panel = _render_line_drilldown_panel

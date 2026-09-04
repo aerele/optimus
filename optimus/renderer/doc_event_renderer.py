@@ -12,7 +12,7 @@ lifecycle" report sections.
 Two public surfaces (both called from the render orchestrator in
 ``_internal.py``):
 
-* ``_attach_action_context(actions, findings, recordings_by_uuid)`` —
+* ``_attach_action_context(actions, findings, recordings_by_uuid)``:
   in-place enrichment of ``action["target_doc"]``,
   ``finding["technical_detail"]["target_doc"]``, and
   ``finding["technical_detail"]["hook_events"]``. Also rewrites
@@ -20,7 +20,7 @@ Two public surfaces (both called from the render orchestrator in
   ``action["entry_callsite"]["function"]`` / the matching
   ``finding["customer_description"]`` italicised phrase to carry the
   DocType suffix.
-* ``_build_doc_event_breakdown(findings)`` — pure-function transform
+* ``_build_doc_event_breakdown(findings)``: pure-function transform
   that groups findings by DocType → lifecycle event for the
   "Doc-event lifecycle" report section.
 
@@ -38,7 +38,7 @@ import json
 # Constants
 # ---------------------------------------------------------------------------
 
-# Frappe's doc-event lifecycle method names — a function whose bare name is one
+# Frappe's doc-event lifecycle method names a function whose bare name is one
 # of these AND whose file is a controller (``.../doctype/<scrub>/<scrub>.py``)
 # is a lifecycle override.
 _LIFECYCLE_EVENTS = frozenset({
@@ -81,7 +81,7 @@ def _doctype_from_controller_path(filename) -> str | None:
 	"""``erpnext/accounts/doctype/sales_invoice/sales_invoice.py`` → ``"Sales Invoice"``
 	(the segment right after ``doctype/``, un-scrubbed). Works on app-relative,
 	bench-relative, and absolute paths. ``None`` for non-controller paths. NB:
-	``.title()`` mangles multi-cap names ("gl_entry" → "Gl Entry") — same as
+	``.title()`` mangles multi-cap names ("gl_entry" → "Gl Entry") same as
 	``frappe.unscrub``; accepted."""
 	if not filename:
 		return None
@@ -105,7 +105,7 @@ def _doctype_from_controller_path(filename) -> str | None:
 
 def _extract_target_doc(form_dict) -> dict | None:
 	"""Best-effort: pull ``{"doctype", "name"}`` out of a request's form_dict
-	for doc-mutating endpoints — ``savedocs`` / ``frappe.client.save|insert|submit``
+	for doc-mutating endpoints ``savedocs`` / ``frappe.client.save|insert|submit``
 	(a ``doc`` JSON string or dict), ``run_doc_method`` (``dt``/``dn`` or a
 	``docs`` JSON), ``apply_workflow`` (``doc``), or bare ``doctype``/``name``
 	fields. ``name`` may be a temp name ("new-…") or ``None`` for an unsaved
@@ -169,7 +169,7 @@ def _saved_doc_from_response(response, want_doctype, client_name=None):
 			# Real name = the response name the save assigned, i.e. one that differs
 			# from the browser's temp name. Comparing to the actual temp name (not a
 			# "new-" prefix guess) keeps a genuine "new-0001" from being discarded.
-			# Accept a str OR an int (autoincrement naming assigns an integer name — a
+			# Accept a str OR an int (autoincrement naming assigns an integer name a
 			# standard Frappe option); reject bool and any non-scalar (dict/list/float)
 			# so a malformed response can't stamp a garbage string as the docname.
 			if isinstance(nm, str) or (isinstance(nm, int) and not isinstance(nm, bool)):
@@ -192,8 +192,8 @@ def resolve_target_doc_from_response(form_dict, response):
 
 
 def _build_doc_event_hook_index(doc_events) -> dict:
-	"""Flatten Frappe's ``doc_events`` map — ``{doctype: {event: [paths]}}``
-	(``doctype`` may be ``"*"``) — into ``{dotted_path: [(doctype, event), …]}``.
+	"""Flatten Frappe's ``doc_events`` map ``{doctype: {event: [paths]}}``
+	(``doctype`` may be ``"*"``) into ``{dotted_path: [(doctype, event), …]}``.
 	Pure. Empty on bad input."""
 	index: dict[str, list[tuple[str, str]]] = {}
 	if not isinstance(doc_events, dict):
@@ -213,7 +213,7 @@ def _build_doc_event_hook_index(doc_events) -> dict:
 
 
 def _doc_event_hook_index() -> dict:
-	"""``_build_doc_event_hook_index(frappe.get_hooks("doc_events"))`` — or ``{}``
+	"""``_build_doc_event_hook_index(frappe.get_hooks("doc_events"))``: or ``{}``
 	when frappe isn't available (e.g. unit tests with no running site)."""
 	try:
 		import frappe
@@ -260,11 +260,11 @@ def _finding_hook_events(detail, hook_index, *, action_doctype: str | None = Non
 def _attach_action_context(actions, findings, recordings_by_uuid) -> None:
 	"""Enrich ``actions`` and ``findings`` (in place):
 
-	  * ``action["target_doc"]`` — the document a save/submit-style action
+	  * ``action["target_doc"]``: the document a save/submit-style action
 	    touched (from the recording's form_dict), or ``None``.
-	  * ``finding["technical_detail"]["target_doc"]`` — same, via the finding's
+	  * ``finding["technical_detail"]["target_doc"]``: same, via the finding's
 	    ``action_ref`` → action (key omitted when there's no doc).
-	  * ``finding["technical_detail"]["hook_events"]`` — the doc-event lifecycle
+	  * ``finding["technical_detail"]["hook_events"]``: the doc-event lifecycle
 	    hook(s) the finding's hot function fired in (``[{doctype,event}, …]``);
 	    key omitted when the function isn't a registered ``doc_events`` hook.
 	"""
@@ -298,7 +298,7 @@ def _attach_action_context(actions, findings, recordings_by_uuid) -> None:
 						"name": _resolved.get("name"),
 					}
 		# v0.7.x J.13: fallback when the recording isn't available
-		# (Redis TTL expired between record-time and regenerate-time) —
+		# (Redis TTL expired between record-time and regenerate-time)
 		# infer the action's DocType from any related finding's callsite
 		# filepath via the controller-path mapping
 		# (e.g. ``erpnext/.../sales_invoice/sales_invoice.py`` → "Sales Invoice").
@@ -333,7 +333,7 @@ def _attach_action_context(actions, findings, recordings_by_uuid) -> None:
 			a["path"] = f"{_a_path} ({_td_doctype})"
 		# v0.7.x J.11: enrich the entry-callsite `function` so the small
 		# `.action-meta` line under each action row reads
-		# `…/save.py:16 · savedocs (Sales Invoice)` — keeps every filepath
+		# `…/save.py:16 · savedocs (Sales Invoice)`: keeps every filepath
 		# surface in the report consistently tagged with its DocType.
 		_ec = a.get("entry_callsite")
 		if _td_doctype and isinstance(_ec, dict):
@@ -358,7 +358,7 @@ def _attach_action_context(actions, findings, recordings_by_uuid) -> None:
 			# v0.7.x J.7: inject the DocType inline at the end of the
 			# italicised action-label phrase so the reader sees
 			# "During *frappe.desk.form.save.savedocs:Save (Sales Invoice)*"
-			# instead of "During *frappe.desk.form.save.savedocs:Save*" —
+			# instead of "During *frappe.desk.form.save.savedocs:Save*"
 			# keeps the technical label and the doctype emphasised together
 			# inside one self-contained italic phrase. Guards on the
 			# `"During *…*"` prose shape so self-referential / non-action
@@ -381,7 +381,7 @@ def _attach_action_context(actions, findings, recordings_by_uuid) -> None:
 
 
 # ---------------------------------------------------------------------------
-# v0.6.x: "Doc-event lifecycle" section — re-group the slow call-tree findings
+# v0.6.x: "Doc-event lifecycle" section re-group the slow call-tree findings
 # by DocType → lifecycle event (validate / on_submit / …), tagging each as a
 # registered ``doc_events`` hook vs a controller method override, and surfacing
 # cascaded DocTypes (e.g. GL Entry touched during a Sales Invoice submit).
@@ -391,11 +391,11 @@ def _attach_action_context(actions, findings, recordings_by_uuid) -> None:
 
 
 def _finding_lifecycle_bindings(finding) -> list[tuple[str, str, str]]:
-	"""Return ``[(doctype, event, kind), …]`` — the doc-event lifecycle slots a
+	"""Return ``[(doctype, event, kind), …]``: the doc-event lifecycle slots a
 	finding belongs to (usually 0 or 1). ``kind`` is ``_KIND_DOC_EVENTS_HOOK``
 	(from the finding's already-resolved ``technical_detail.hook_events``) or
 	``_KIND_CONTROLLER_OVERRIDE`` (function name is a lifecycle event AND its
-	file is a controller). Deduped by ``(doctype, event)`` — hook bindings first.
+	file is a controller). Deduped by ``(doctype, event)``: hook bindings first.
 	Empty when the finding isn't a lifecycle method (a generic Slow Hot Path on
 	a helper, an N+1 with no controller callsite, …)."""
 	if not isinstance(finding, dict):
@@ -477,7 +477,7 @@ def _build_doc_event_breakdown(findings) -> dict:
 				rec["count"] += 1
 				if _SEVERITY_RANK.get(severity, 0) > _SEVERITY_RANK.get(rec["severity"], 0):
 					rec["severity"] = severity
-				# A controller override is the more specific label — prefer it.
+				# A controller override is the more specific label prefer it.
 				if kind == _KIND_CONTROLLER_OVERRIDE:
 					rec["kind"] = kind
 

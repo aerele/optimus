@@ -3,7 +3,7 @@
 
 """True N+1 detection: group by callsite, then by normalized SQL. A variant
 recurring at least `n_plus_one_min_occurrences` (a settings value, default 10)
-times WITHIN ONE request is a per-row loop — the distinction a bare copy-count
+times WITHIN ONE request is a per-row loop the distinction a bare copy-count
 can't make."""
 
 import json
@@ -30,7 +30,7 @@ P95_MIN_SAMPLES = 10
 # being flagged. Prevents tiny (<1ms each) queries from generating noisy
 # findings even when they repeat many times. The per-occurrence
 # threshold now lives in Optimus Settings as
-# ``n_plus_one_min_occurrences`` (default 10) — see
+# ``n_plus_one_min_occurrences`` (default 10) see
 # ``optimus.settings``.
 DEFAULT_MIN_TOTAL_TIME_MS = 20
 
@@ -79,7 +79,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# generates 10 different query shapes in the same loop (e.g.
 	# frappe/query_builder/utils.py:131 resolving DocField / DocPerm
 	# / Custom Field metadata within one iteration) was emitting 10
-	# separate findings — same fix, 10 rows — which spammed the
+	# separate findings same fix, 10 rows which spammed the
 	# report. Collapsing at callsite level gives ONE finding per
 	# loop with the query variants listed in the detail.
 	#
@@ -114,12 +114,12 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	for (filename, lineno), bucket in callsite_groups.items():
 		variants: dict = bucket["variants"]
 		# v0.7.x: multi-variant N+1 ("Callsite ran X queries (N variants) at …")
-		# is suppressed — the wording reads as jargon (developers don't think in
+		# is suppressed the wording reads as jargon (developers don't think in
 		# "variants"), the fix hint is generic, and the dominant variant is already
 		# surfaced elsewhere (top queries, table breakdown). Only single-variant
 		# "Same query ran N× at …" is actionable, so bail before any per-variant
 		# work when this callsite has more than one query shape. (A fan-out call
-		# site — 10 different queries each run once — is multi-variant too, and is
+		# site 10 different queries each run once is multi-variant too, and is
 		# excluded here rather than by a separate per-variant max.)
 		if len(variants) > 1:
 			continue
@@ -137,10 +137,10 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		# run_count and loop scoping.
 		dominant_action_counts = Counter(o["action_idx"] for o in canonical_occurrences)
 		# loop_count IS the "N+1 magnitude": how many times the loop ran within a
-		# single request — the busiest one — never the cross-request total (which
+		# single request the busiest one never the cross-request total (which
 		# would inflate the count, the "…in a row" wording, AND the severity).
 		# ``action_ref`` must point at the request where the loop actually ran (the
-		# dominant action), NOT the first request the query merely appeared in — the
+		# dominant action), NOT the first request the query merely appeared in the
 		# report walks THAT action's call tree for inner-loop detail. Taking both
 		# from the same most_common(1) keeps them aligned.
 		dominant_action_idx, loop_count = dominant_action_counts.most_common(1)[0]
@@ -154,8 +154,8 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		# loop to batch), not merely appeared. A query that loops in one request
 		# but also runs once in 100 others has run_count == 1, so the "ran in N
 		# requests" wording and the post-fix projection don't over-count the
-		# single-run requests — those carry no loop to collapse.
-		# A request "looped" only if it hit the N+1 threshold (min_occurrences) — the
+		# single-run requests those carry no loop to collapse.
+		# A request "looped" only if it hit the N+1 threshold (min_occurrences) the
 		# same bar that qualifies the finding. Counting requests with a mere 2–9
 		# sub-threshold repeats would inflate run_count / loop_time / severity and
 		# make the "looped in N requests" wording dishonest (those requests never
@@ -167,7 +167,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		# loop that legitimately recurs in 5 requests keeps all 5 in scope, so its
 		# cumulative-but-recoverable cost still rates severity honestly. A tiny loop
 		# is not rated High just because the same query, run below the threshold
-		# across many unrelated requests, sums past the time floor — that cost is
+		# across many unrelated requests, sums past the time floor that cost is
 		# NOT recoverable by batching this loop.
 		# ``total_time`` (all occurrences) stays for cumulative reporting.
 		loop_durations = [
@@ -185,7 +185,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		# rated on the loop's OWN recoverable time (a trivial loop isn't surfaced
 		# just because the same query also runs once across many unrelated requests),
 		# while a framework finding stays cumulative/informational and gates on the
-		# session-wide total_time its text quotes — so a framework callsite with a
+		# session-wide total_time its text quotes so a framework callsite with a
 		# high cumulative cost but a cheap per-request loop isn't silently dropped.
 		gate_time = total_time if is_framework else loop_time
 		if gate_time < min_total_time:
@@ -233,7 +233,7 @@ def _p95(durations) -> float | None:
 
 
 def _title_for_callsite(short_fn, lineno, count, run_count=1) -> str:
-	"""'Same query ran N×' — hedged 'up to N×' for a multi-request loop, where
+	"""'Same query ran N×' hedged 'up to N×' for a multi-request loop, where
 	``count`` is the busiest request's peak, not a uniform figure."""
 	prefix = "Same query ran up to" if run_count > 1 else "Same query ran"
 	return f"{prefix} {count}× at {short_fn}:{lineno}"
@@ -249,7 +249,7 @@ def _build_user_finding(
 	normalized: str,
 	action_idx: int,
 ) -> dict:
-	"""User-code N+1 finding — severity by loop size & the loop's own time, with a fix hint."""
+	"""User-code N+1 finding severity by loop size & the loop's own time, with a fix hint."""
 	total_count = scope.total_count
 	loop_count = scope.loop_count
 	run_count = scope.run_count
@@ -264,20 +264,20 @@ def _build_user_finding(
 	loop_avg = loop_time / len(loop_durations) if loop_durations else 0
 
 	# Cost quoted is the LOOP's own time (loop_time), never the cross-request
-	# cumulative total — a query that loops in one request but also runs once
+	# cumulative total a query that loops in one request but also runs once
 	# elsewhere must not fold those single runs into "the loop".
 	tail = (
 		"This is usually a Python loop that should fetch its data in one "
 		"query instead of one-at-a-time. Typical fix: a few hours of dev work."
 	)
 	# A sub-1ms loop (only reachable when the min-time gate is configured below
-	# the 20ms default) would render as a misleading "0ms" — say "<1ms" instead.
+	# the 20ms default) would render as a misleading "0ms" say "<1ms" instead.
 	# Guard on ``>= 1`` not ``>= 0.5``: f"{0.5:.0f}" is "0" (round-half-to-even),
 	# so 0.5 must take the "<1ms" branch too.
 	cost = f"{loop_time:.0f}ms" if loop_time >= 1 else "<1ms"
 	if run_count > 1:
 		# The loop spanned several requests; loop_count is the WORST request's
-		# count (the peak), not a uniform per-request figure — "up to N" so it
+		# count (the peak), not a uniform per-request figure "up to N" so it
 		# isn't read as N × run_count.
 		desc = (
 			f"We noticed the same query repeated up to {loop_count} times in a row "
@@ -302,7 +302,7 @@ def _build_user_finding(
 	return {
 		"finding_type": "N+1 Query",
 		# Severity by the per-request loop size (loop_count) and the loop's OWN
-		# recoverable time (loop_time) — never the cross-request cumulative
+		# recoverable time (loop_time) never the cross-request cumulative
 		# total, which single-run requests would inflate.
 		"severity": _severity(loop_count, loop_time),
 		"title": _title_for_callsite(short_fn, lineno, loop_count, run_count),
@@ -341,13 +341,13 @@ def _build_user_finding(
 				# single query. Empirically a batched query with an IN (…)
 				# filter or a JOIN costs ~2× a single tight query (same rows
 				# scanned once, bigger result set). You still pay that batched
-				# query once per LOOPING request, so multiply by run_count —
+				# query once per LOOPING request, so multiply by run_count
 				# otherwise the projection collapses a whole session to one
 				# query and overstates the win. Capped at the current total so
 				# a projection can never read as WORSE than doing nothing.
 				# Uses the LOOP's own per-query average (loop_avg = loop_time /
 				# loop hits), not a session-wide average that single-run requests
-				# would skew. Only the loop collapses — any non-loop appearances
+				# would skew. Only the loop collapses any non-loop appearances
 				# (total_time - loop_time) keep their cost, so they're added back
 				# rather than assumed away. Capped at the current total.
 				"projected_total_ms": round(
@@ -361,21 +361,21 @@ def _build_user_finding(
 				"fix_hint": (
 					"This is a classic N+1 pattern. The Python code at "
 					f"{filename}:{lineno} is running the same query in a loop. "
-					"Refactor to fetch all needed data in a single query — for "
+					"Refactor to fetch all needed data in a single query for "
 					"Frappe specifically, that's usually frappe.get_all() with a "
-					"name-IN filter, or a JOIN against the source table — instead "
+					"name-IN filter, or a JOIN against the source table instead "
 					"of one row at a time."
 				),
 			},
 			default=str,
 		),
-		# Headline economics — read by the TL;DR hero (renderer/_internal.py),
+		# Headline economics read by the TL;DR hero (renderer/_internal.py),
 		# the card impact box (report.html), the report-wide sort, and the AI-fix
-		# prompt (ai_fix.py). Both are scoped to the SAME occurrence set — the loop's
-		# own hits (loop_durations) — so the generic `per_hit = impact / count`
+		# prompt (ai_fix.py). Both are scoped to the SAME occurrence set the loop's
+		# own hits (loop_durations) so the generic `per_hit = impact / count`
 		# consumers compute the loop's real per-query cost. estimated_impact_ms is the
 		# loop's total time; affected_count is the loop's total hit COUNT (not
-		# loop_count, the per-request peak — mixing the two denominators inflated
+		# loop_count, the per-request peak mixing the two denominators inflated
 		# per-hit on multi-request loops). The "in a row" count (loop_count) drives
 		# the title/hero; the session-wide totals stay in the detail JSON above.
 		"estimated_impact_ms": round(loop_time, 2),
@@ -394,7 +394,7 @@ def _build_framework_finding(
 	normalized: str,
 	action_idx: int,
 ) -> dict:
-	"""Framework-level N+1 — always Low, cumulative framing, full technical detail."""
+	"""Framework-level N+1 always Low, cumulative framing, full technical detail."""
 	total_count = scope.total_count
 	loop_count = scope.loop_count
 	run_count = scope.run_count
@@ -402,7 +402,7 @@ def _build_framework_finding(
 	per_hit_durations = scope.per_hit_durations
 	# Framework findings are Low + informational and framed around the
 	# CUMULATIVE session cost (the description says "issued N queries in this
-	# session"), so the title uses total_count too — keeping title and body on
+	# session"), so the title uses total_count too keeping title and body on
 	# the same number. (The user-code finding, by contrast, is about a
 	# per-request loop and uses loop_count.) loop_count/run_count are still
 	# carried in the detail JSON below for anyone optimising the framework.
@@ -419,7 +419,7 @@ def _build_framework_finding(
 			f"{total_count} queries in this session, totalling "
 			f"{total_time:.0f}ms. This is typically the framework "
 			"resolving metadata, permissions, or building queries for "
-			"different inputs — it's rarely something you can change "
+			"different inputs it's rarely something you can change "
 			"in your application code. Listed here for transparency, "
 			"not as an action item. If the cumulative cost is high, "
 			"the fix usually lives in the Frappe codebase itself."

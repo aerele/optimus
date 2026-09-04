@@ -25,7 +25,7 @@ import pytest
 
 from optimus import settings
 
-# The DocType field descriptions advertise "Reference values — Strict: X ·
+# The DocType field descriptions advertise "Reference values: Strict: X ·
 # Recommended: Y · Relaxed: Z" to admins. Those numbers MUST equal _PROFILES or
 # the UI lies about what a preset does. This path locates the DocType JSON
 # relative to this test file (no bench needed).
@@ -42,13 +42,13 @@ _REFVAL_RE = re.compile(
 	r"Relaxed:\s*(\d+(?:\.\d+)?)"
 )
 
-# Every knob whose DocType description advertises a "Reference values —
+# Every knob whose DocType description advertises a "Reference values
 # Strict / Recommended / Relaxed" triplet is governed by the preset.
 # Kept here (not imported) so the test pins the contract independently
 # of the implementation's own tuple. v0.13.x expanded the set from 9
-# detection-sensitivity knobs to 19 — including capture caps,
+# detection-sensitivity knobs to 19 including capture caps,
 # retention, display filters, Phase-2 UI knobs, and the AI auto-suggest
-# cap — so the UI's "Reference values" promise is honored everywhere
+# cap so the UI's "Reference values" promise is honored everywhere
 # it's advertised.
 SENSITIVITY_KEYS = (
 	# General → Session retention
@@ -81,7 +81,7 @@ SENSITIVITY_KEYS = (
 
 @pytest.fixture(autouse=True)
 def _frappe_stub(monkeypatch):
-	"""Minimal frappe stub, mirroring test_settings.py — settings.py
+	"""Minimal frappe stub, mirroring test_settings.py settings.py
 	imports frappe lazily, but get_config's cache path touches
 	frappe.cache, so give it harmless no-ops."""
 	stub = types.ModuleType("frappe")
@@ -110,7 +110,7 @@ class TestProfileTable:
 
 	def test_custom_is_not_a_named_profile(self):
 		# Custom means "use stored field values", so it must NOT be in
-		# the preset table — _resolve keys off `_PROFILES.get(profile)`.
+		# the preset table _resolve keys off `_PROFILES.get(profile)`.
 		assert "Custom" not in settings._PROFILES
 
 	def test_recommended_equals_defaults(self):
@@ -122,12 +122,12 @@ class TestProfileTable:
 
 	# ---- Strict-vs-Relaxed semantic ordering ---------------------------
 	#
-	# For DETECTION thresholds the rule is "lower = catch more" — Strict's
+	# For DETECTION thresholds the rule is "lower = catch more" Strict's
 	# number is at-or-below Relaxed's, so a redundant-call loop or a slow
 	# query fires under Strict at a hair lower a cost.
 	#
-	# For RESOURCE / RETENTION knobs the rule inverts — "higher = stricter
-	# data preservation" — Strict's number is at-or-above Relaxed's. A
+	# For RESOURCE / RETENTION knobs the rule inverts "higher = stricter
+	# data preservation" Strict's number is at-or-above Relaxed's. A
 	# Strict deployment keeps sessions for 90 days vs Relaxed's 7,
 	# captures 5000 queries per recording vs 1000, allows 25 Phase-2 runs
 	# per session vs 5, etc. Stricter monitoring → more data.
@@ -136,7 +136,7 @@ class TestProfileTable:
 	# per group. Any new sensitivity key must join one of the two tuples
 	# below or this test will tell the engineer which side it falls on.
 
-	# Strict <= Relaxed (lower number = stricter — for detection
+	# Strict <= Relaxed (lower number = stricter for detection
 	# thresholds, lower = catch more; for ``auto_expand_min_ms``, lower
 	# = follow into smaller hot spots; Strict's 0 is the strictest
 	# possible value).
@@ -166,7 +166,7 @@ class TestProfileTable:
 	# v0.13.x: fields whose read site honors ``0 = unlimited``. Strict
 	# uses 0 (the strictest possible posture: don't cap, don't drop,
 	# don't truncate, don't expire). Relaxed uses a literal positive
-	# number, so ``Strict >= Relaxed`` doesn't hold here — the contract
+	# number, so ``Strict >= Relaxed`` doesn't hold here the contract
 	# is "Strict is 0 AND Relaxed is positive AND Relaxed is positive".
 	_STRICT_UNBOUNDED_KEYS = (
 		"max_queries_per_recording",
@@ -190,7 +190,7 @@ class TestProfileTable:
 	def test_strict_uses_unlimited_sentinel_on_capped_knobs(self):
 		"""v0.13.x: every cap that honors 0-as-unlimited at its read site
 		uses 0 under Strict (the strictest posture). Relaxed always uses
-		a positive literal — the read site code that branches on ``cap
+		a positive literal the read site code that branches on ``cap
 		> 0`` would otherwise act unbounded under Relaxed too, defeating
 		the point of the preset."""
 		for key in self._STRICT_UNBOUNDED_KEYS:
@@ -213,7 +213,7 @@ class TestProfileTable:
 		)
 
 	def test_profiles_match_doctype_reference_values(self):
-		"""_PROFILES must equal the 'Reference values — Strict/Recommended/
+		"""_PROFILES must equal the 'Reference values: Strict/Recommended/
 		Relaxed' numbers advertised in each sensitivity field's DocType
 		description, so the form's help text never contradicts behavior."""
 		with open(_SETTINGS_JSON) as fh:
@@ -268,7 +268,7 @@ class TestProfileResolution:
 		assert settings._resolve().redundant_doc_threshold == 99
 
 	def test_named_profile_bypasses_site_config(self, monkeypatch):
-		"""A named profile wins over site_config — the preset is authoritative."""
+		"""A named profile wins over site_config the preset is authoritative."""
 		monkeypatch.setattr(
 			settings, "_read_doctype_row",
 			lambda: {"config_profile": "Strict"},

@@ -10,7 +10,7 @@ def test_save_sales_invoice_action_label(n_plus_one_recording, empty_context):
 	"""v0.5.1: the per-action table shows the TECHNICAL label (raw
 	cmd), not the humanized Steps-to-Reproduce form. A developer
 	reading the technical report wants to see 'frappe.client.save'
-	— the actual whitelisted method — not a prose summary.
+	the actual whitelisted method not a prose summary.
 	The Steps-to-Reproduce section uses `humanized_label` instead.
 	"""
 	result = per_action.analyze([n_plus_one_recording], empty_context)
@@ -98,12 +98,12 @@ def test_submit_cmd(empty_context):
 
 
 # ---------------------------------------------------------------------------
-# v0.5.1: per_action.humanized_label — Steps-to-Reproduce ONLY
+# v0.5.1: per_action.humanized_label Steps-to-Reproduce ONLY
 # ---------------------------------------------------------------------------
 # These tests target the `humanized_label` helper directly. It's used
 # by analyze._build_auto_notes_html to render the Steps-to-Reproduce
 # section. The per-action table and frontend XHR panel stay on the
-# technical `_label` — per user feedback: "only humanize call name
+# technical `_label`: per user feedback: "only humanize call name
 # in step to reproduce only not on other breakdowns."
 
 
@@ -156,7 +156,7 @@ def test_humanized_savedocs_cancel_action():
 
 def test_humanized_savedocs_without_doctype_falls_back():
 	"""Malformed payload (no parseable doctype) must fall back to
-	the technical label — never emit 'Save <empty>' with trailing
+	the technical label never emit 'Save <empty>' with trailing
 	whitespace."""
 	rec = {
 		"uuid": "sd",
@@ -222,7 +222,7 @@ def test_humanized_client_insert_is_create():
 # The Desk's savedocs endpoint takes different `action` values (Save,
 # Submit, Cancel, Update) that route to semantically different
 # behaviors under the same cmd. Pre-v0.5.2 the per-action table
-# showed the raw cmd for all of them — indistinguishable. v0.5.2
+# showed the raw cmd for all of them indistinguishable. v0.5.2
 # suffixes `:<Action>` so Save vs Submit rows aren't merged visually.
 
 
@@ -275,7 +275,7 @@ def test_savedocs_submit_action_appended_to_technical_label(empty_context):
 
 
 def test_savedocs_save_and_submit_are_distinguishable(empty_context):
-	"""End-to-end regression: user's exact scenario — one session
+	"""End-to-end regression: user's exact scenario one session
 	with one Save and one Submit on the same Sales Invoice. The
 	two Optimus Action rows must have DIFFERENT action_labels
 	so they render as distinct entries in the per-action table."""
@@ -624,7 +624,7 @@ def test_humanization_does_not_leak_into_per_action_table(empty_context):
 
 
 # ---------------------------------------------------------------------------
-# v0.5.1: cmd field is empty in real recordings — derive from path
+# v0.5.1: cmd field is empty in real recordings derive from path
 # ---------------------------------------------------------------------------
 # frappe.recorder.Recorder.__init__ captures cmd at hook time, BEFORE
 # frappe's REST routing sets form_dict.cmd inside handle_rpc_call. So
@@ -642,7 +642,7 @@ def test_label_derives_cmd_from_path_when_cmd_is_empty(empty_context):
 	import json as _json
 	recording = {
 		"uuid": "prod",
-		"cmd": "",  # EMPTY — matches production
+		"cmd": "",  # EMPTY matches production
 		"method": "POST",
 		"path": "/api/method/frappe.desk.form.save.savedocs",
 		"event_type": "HTTP Request",
@@ -655,18 +655,18 @@ def test_label_derives_cmd_from_path_when_cmd_is_empty(empty_context):
 	}
 	result = per_action.analyze([recording], empty_context)
 	# Per-action table gets the technical cmd, disambiguated by
-	# :Save (v0.5.2). Still technical — NOT the humanized form.
+	# :Save (v0.5.2). Still technical NOT the humanized form.
 	assert (
 		result.actions[0]["action_label"]
 		== "frappe.desk.form.save.savedocs:Save"
 	)
-	# humanized_label — used only in Steps-to-Reproduce — still
+	# humanized_label used only in Steps-to-Reproduce still
 	# produces the English form for this same recording.
 	assert per_action.humanized_label(recording) == "Create Sales Invoice"
 
 
 def test_label_derives_v2_api_method(empty_context):
-	"""/api/v2/method/<foo> parse works too — per-action table
+	"""/api/v2/method/<foo> parse works too per-action table
 	shows the raw cmd, humanized_label produces the English form."""
 	recording = {
 		"uuid": "v2",

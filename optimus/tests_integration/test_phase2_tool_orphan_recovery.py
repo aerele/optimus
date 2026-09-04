@@ -12,10 +12,10 @@ subsequent request in that worker line-traced → CPU peg + frozen UI.
 
 The pre-``fbf3179`` failure mode required a ``bench restart`` to
 recover. The ``fbf3179`` fix added two things:
-  * ``capture.release_monitoring_tool()`` — idempotent unwinder called
+  * ``capture.release_monitoring_tool()``: idempotent unwinder called
     from the after_* hooks (covered by the unit suite's
     ``test_line_profile_monitoring.py``).
-  * ``optimus._startup_probe_tool2()`` — worker-respawn recovery: if
+  * ``optimus._startup_probe_tool2()``: worker-respawn recovery: if
     tool 2 is owned by line_profiler at app-import (i.e. the prior
     worker died mid-Phase-2 and its line-tracing state survived the
     process restart in the *same Python process group*), the probe
@@ -33,7 +33,7 @@ release helper at the function-call boundary. It cannot prove:
 
 That gap is what this integration test fills. The tests invoke
 ``optimus._startup_probe_tool2`` directly against manipulated
-``sys.monitoring`` state — same shape as the unit tests'
+``sys.monitoring`` state same shape as the unit tests'
 ``_leak_tool`` helper, but exercised in a real-bench context.
 
 A note on "simulating worker respawn": we can't actually fork a
@@ -41,7 +41,7 @@ worker mid-Phase-2 and re-import optimus inside a test (the optimus
 module is already loaded). Instead, the test manipulates the
 ``sys.monitoring`` state to mirror what a leaked tool 2 looks like
 after a worker death, then calls the probe directly. This exercises
-the probe's recovery logic — which is the contract under test.
+the probe's recovery logic which is the contract under test.
 """
 
 from __future__ import annotations
@@ -106,12 +106,12 @@ class TestPhase2ToolOrphanRecovery(FrappeTestCase):
 
 	def _leak_as(self, owner: str) -> None:
 		"""Register tool 2 as a non-line_profiler owner. Used to
-		validate that the probe respects ownership boundaries — it
+		validate that the probe respects ownership boundaries it
 		MUST NOT reclaim a tool that belongs to a third-party
 		profiler / debugger."""
 		self._ensure_tool_2_is_free()
 		sys.monitoring.use_tool_id(_PID, owner)
-		# Don't set events — keeps the simulation lighter and matches
+		# Don't set events keeps the simulation lighter and matches
 		# the most common third-party-tool registration pattern (claim
 		# the tool slot, install events on demand).
 
@@ -136,7 +136,7 @@ class TestPhase2ToolOrphanRecovery(FrappeTestCase):
 		# the leaked LINE events would line-trace every later request
 		# in this worker → CPU peg + freeze.
 		assert sys.monitoring.get_tool(_PID) is None, (
-			"probe failed to reclaim leaked line_profiler tool 2 — "
+			"probe failed to reclaim leaked line_profiler tool 2 "
 			"a worker would line-trace every subsequent request"
 		)
 		assert sys.monitoring.get_events(_PID) == 0
@@ -151,14 +151,14 @@ class TestPhase2ToolOrphanRecovery(FrappeTestCase):
 
 		optimus._startup_probe_tool2()
 
-		# Still unowned — the probe didn't grab the slot.
+		# Still unowned the probe didn't grab the slot.
 		assert sys.monitoring.get_tool(_PID) is None
 		assert sys.monitoring.get_events(_PID) == 0
 
 	def test_probe_warns_but_does_not_reclaim_non_line_profiler_owner(self):
 		"""Boundary contract. If tool 2 is owned by something OTHER
 		than line_profiler (a third-party debugger, py-spy, an IDE
-		profiler), the probe MUST NOT reclaim it — that would silently
+		profiler), the probe MUST NOT reclaim it that would silently
 		break the third-party tool. The probe should warn (visible in
 		logs) but leave the tool alone."""
 		self._leak_as("third-party-debugger")
@@ -166,9 +166,9 @@ class TestPhase2ToolOrphanRecovery(FrappeTestCase):
 
 		optimus._startup_probe_tool2()
 
-		# The third-party tool is still in place — the probe respected
+		# The third-party tool is still in place the probe respected
 		# the boundary.
 		assert sys.monitoring.get_tool(_PID) == "third-party-debugger", (
-			"probe accidentally reclaimed a tool owned by a non-line_profiler — "
+			"probe accidentally reclaimed a tool owned by a non-line_profiler "
 			"this would silently break the third-party tool's tracing"
 		)

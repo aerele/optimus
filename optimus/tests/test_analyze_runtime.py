@@ -4,7 +4,7 @@
 """Runtime smoothing for analyze (v0.7.x).
 
 M5: lower the analyze worker's CPU priority (os.nice) so a heavy analyze
-doesn't starve live web traffic — gated to the async path (sticky per-process).
+doesn't starve live web traffic gated to the async path (sticky per-process).
 M6: optionally throttle the EXPLAIN/sqlparse burst in _enrich_recordings so the
 DB/CPU aren't hammered continuously. Both default to inert/near-zero and are
 result-invariant.
@@ -20,7 +20,7 @@ import pytest
 from optimus import analyze
 
 # ---------------------------------------------------------------------------
-# M5 — os.nice
+# M5 os.nice
 # ---------------------------------------------------------------------------
 
 class TestApplyNice:
@@ -57,7 +57,7 @@ class TestApplyNice:
 
 
 # ---------------------------------------------------------------------------
-# M6 — enrich throttle
+# M6 enrich throttle
 # ---------------------------------------------------------------------------
 
 class FakeCache:
@@ -151,7 +151,7 @@ class TestEnrichThrottle:
 
 class TestMaxQueriesPerRecordingZeroIsUnlimited:
 	"""v0.13.x: ``max_queries_per_recording = 0`` (Strict preset) means
-	no cap — every query gets enriched. Pre-v0.13.x the ``if cap <= 0:
+	no cap every query gets enriched. Pre-v0.13.x the ``if cap <= 0:
 	cap = DEFAULT`` reset silently re-applied the 2000 default, so the
 	operator's "I want full coverage" intent was clobbered."""
 
@@ -165,7 +165,7 @@ class TestMaxQueriesPerRecordingZeroIsUnlimited:
 		)
 
 		# A recording with 3000 queries (way over the legacy 2000 default).
-		# With cap = 0, every one must be enriched — nothing truncated.
+		# With cap = 0, every one must be enriched nothing truncated.
 		big = _recording([
 			f"SELECT * FROM tab{i} WHERE x = {i}" for i in range(3000)
 		])

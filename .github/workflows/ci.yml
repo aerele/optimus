@@ -4,13 +4,13 @@ name: CI
 #
 # Trigger split is deliberate and is the whole efficiency story: running on
 # BOTH ``push: ['**']`` and ``pull_request: ['**']`` (the pre-CI ``tests.yml``
-# behaviour) fired every job TWICE for any branch with an open PR — the
+# behaviour) fired every job TWICE for any branch with an open PR the
 # concurrency group is keyed on ``github.ref`` which differs between a push
 # (refs/heads/<b>) and a PR (refs/pull/N/merge), so cancel-in-progress could
 # not dedupe them. Here:
-#   * pull_request (any branch) — the merge gate; the only run a feature
+#   * pull_request (any branch) the merge gate; the only run a feature
 #     branch with an open PR produces.
-#   * push to main only         — post-merge / trunk signal; the only run a
+#   * push to main only post-merge / trunk signal; the only run a
 #     merge to main produces.
 # A given commit therefore runs each check exactly once.
 #
@@ -20,7 +20,7 @@ name: CI
 # honest; the jobs are fast enough that the cost is negligible.
 #
 # Installs use ``uv`` (astral-sh/setup-uv) rather than ``python -m pip``: the
-# dominant CI cost here is dependency install (~33s — ``line_profiler`` ships a
+# dominant CI cost here is dependency install (~33s ``line_profiler`` ships a
 # C extension), not the test run (~6-10s), so sharding the suite would barely
 # move wall-clock. uv's resolver + a wheel cache keyed on pyproject.toml attack
 # that install cost directly and cache the built line_profiler wheel across
@@ -33,7 +33,7 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Cancel a superseded in-flight run when a new commit lands on the same PR —
+# Cancel a superseded in-flight run when a new commit lands on the same PR
 # saves CI minutes on rapid-push branches. Scoped to pull_request events only:
 # every push-to-main run shares the ``refs/heads/main`` ref, so an
 # unconditional cancel would let one merge abort the previous merge's trunk
@@ -74,7 +74,7 @@ jobs:
       - name: Lint (uses pyproject.toml [tool.ruff] config)
         run: ruff check optimus/
 
-      # Format-check is deferred — the codebase predates the [tool.ruff.format]
+      # Format-check is deferred the codebase predates the [tool.ruff.format]
       # config and a large reformat is its own piece of work. Add a
       # ``ruff format --check optimus/`` step here once that lands.
 
@@ -91,7 +91,7 @@ jobs:
         # (Python 3.14.2 locally) and the deployment target for every bench in
         # scope. The sys.monitoring / line_profiler tool-2 handling that
         # diverges across Python 3.12+ is exercised natively on 3.14, so
-        # multi-version coverage added CI minutes without adding signal — hence
+        # multi-version coverage added CI minutes without adding signal hence
         # a single version, no matrix (which also keeps the check name a clean
         # ``CI / tests`` rather than ``tests (Python 3.14)``).
         uses: actions/setup-python@v5
@@ -108,7 +108,7 @@ jobs:
         # ``-e .`` installs the project's runtime deps declared in
         # pyproject.toml. The second line adds pytest + the small set of
         # test-only deps the suite imports. Frappe itself is intentionally NOT
-        # installed — the conftest baseline stub satisfies module-top frappe
+        # installed the conftest baseline stub satisfies module-top frappe
         # imports at collection time. uv provides build isolation, so no
         # separate pip/wheel/setuptools bootstrap step is needed for the
         # line_profiler C-extension build.
@@ -119,7 +119,7 @@ jobs:
       - name: Run pytest
         # ``set -eo pipefail`` is required: without it, the ``| tee`` at the
         # end of the pipeline returns 0 (tee always succeeds) and pytest's
-        # non-zero exit code is silently discarded — the step would report
+        # non-zero exit code is silently discarded the step would report
         # green even when tests fail. GitHub Actions' default step shell runs
         # ``bash -e {0}`` (no pipefail), so the explicit ``set -eo pipefail``
         # before the ``| tee`` is required.
@@ -184,7 +184,7 @@ jobs:
         # INFORMATIONAL coverage: no ``--cov-fail-under``, so this job goes red
         # only if the suite itself fails, never on a coverage number. A
         # threshold is a deliberate follow-up once the baseline is known.
-        # ``set -eo pipefail`` for the same reason as the tests job — the
+        # ``set -eo pipefail`` for the same reason as the tests job the
         # ``| tee`` would otherwise mask a failing suite.
         run: |
           set -eo pipefail
@@ -193,8 +193,8 @@ jobs:
             2>&1 | tee coverage.log
 
       - name: Publish coverage summary
-        # ``awk`` prints from pytest-cov's ``coverage:`` banner to EOF — i.e.
-        # the whole per-file table + the TOTAL line — onto the run's Summary
+        # ``awk`` prints from pytest-cov's ``coverage:`` banner to EOF i.e.
+        # the whole per-file table + the TOTAL line onto the run's Summary
         # tab. ``if: always()`` so the table still appears on a failing run.
         if: always()
         run: |

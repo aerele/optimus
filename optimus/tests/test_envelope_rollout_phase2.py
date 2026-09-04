@@ -4,12 +4,12 @@
 """v0.12.13: continues the v0.12.0 ``wrap_value`` / ``unwrap_value``
 envelope rollout to two more values:
 
-  * ``retention_backlog`` (janitor.py) — write-only int. The janitor
+  * ``retention_backlog`` (janitor.py) write-only int. The janitor
     writes 0 (or the backlog count) once per daily sweep; there's no
     in-app reader, but operator-facing tooling could read the value
     directly from Redis, so we wrap on write to make the shape future-
     safe.
-  * ``onboarding_seen`` (api.py) — write/read pair. The dismiss
+  * ``onboarding_seen`` (api.py) write/read pair. The dismiss
     endpoint writes the string ``"1"``; the check endpoint reads
     and coerces to ``bool``. Both sides migrated.
 
@@ -27,7 +27,7 @@ from unittest import mock
 
 
 class _FakeCache:
-	"""Dict-backed ``frappe.cache`` substitute — same as the one used
+	"""Dict-backed ``frappe.cache`` substitute same as the one used
 	in ``test_settings_envelope_rollout.py``; copied here so each
 	rollout test module is self-contained."""
 
@@ -45,7 +45,7 @@ class _FakeCache:
 
 
 # ---------------------------------------------------------------------------
-# retention_backlog (write-only) — janitor writes wrap_value(int)
+# retention_backlog (write-only) janitor writes wrap_value(int)
 # ---------------------------------------------------------------------------
 
 
@@ -53,7 +53,7 @@ class TestRetentionBacklogEnvelope:
 	"""The daily janitor's two write sites for ``retention_backlog`` both
 	wrap the int value in the v0.12.0 envelope. No in-app reader exists
 	(the value is operator-visible monitoring metric only), so the
-	contract under test is write-shape — the future-proofing that lets
+	contract under test is write-shape the future-proofing that lets
 	operator dashboards / migration paths read the envelope cleanly."""
 
 	def test_janitor_writes_envelope_when_setting_backlog(self):
@@ -61,7 +61,7 @@ class TestRetentionBacklogEnvelope:
 		from optimus import redis_schema
 
 		# Synthesize the cache + frappe stub. We only exercise the
-		# write-the-counter branch — _sweep_old_sessions's full body
+		# write-the-counter branch _sweep_old_sessions's full body
 		# is out of scope (it queries Optimus Session which needs a
 		# bench). Instead we invoke the cache-write expression
 		# directly via the same code path.
@@ -115,7 +115,7 @@ class TestRetentionBacklogEnvelope:
 
 
 # ---------------------------------------------------------------------------
-# onboarding_seen (write/read pair) — both sides migrated
+# onboarding_seen (write/read pair) both sides migrated
 # ---------------------------------------------------------------------------
 
 
@@ -124,7 +124,7 @@ class TestOnboardingSeenEnvelopeReadCompat:
 	shape envelopes AND legacy bare ``"1"`` strings (left behind by
 	pre-v0.12.13 writers) resolve to the same truthy result.
 
-	Catches a regression where the read path drops the unwrap call —
+	Catches a regression where the read path drops the unwrap call
 	an OLD reader of a NEW envelope would see the dict as truthy and
 	keep returning ``seen: True``, but a NEW reader of an OLD bare
 	string MUST also return truthy."""

@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Call-tree panel renderer — the hierarchical "where did wall-clock time go"
+"""Call-tree panel renderer the hierarchical "where did wall-clock time go"
 section of the safe report.
 
 Sourced from the slowest action's ``call_tree_json`` (built by the
@@ -9,7 +9,7 @@ analyzer); rendered as nested ``<details>`` elements with auto-open
 breadcrumb down to the user-app's first hot frame and depth-capped
 expanders past ``_CALL_TREE_MAX_DEPTH``. Synthetic placeholder nodes
 (``[other: N frames]``, ``[N more frames omitted]``) and ``<sql>``
-query leaves are dropped from the visible tree per user request — the
+query leaves are dropped from the visible tree per user request the
 queries live in their own table-shaped sections; this panel shows only
 the Python hierarchy.
 
@@ -31,7 +31,7 @@ import re
 _CALL_TREE_MAX_DEPTH = 12
 _CALL_TREE_HARD_CAP = 64
 # v0.13: the panel renders the top-N slowest actions' call trees, not just the
-# single slowest — so a flat #1 action (e.g. an RQ job that just loops one
+# single slowest so a flat #1 action (e.g. an RQ job that just loops one
 # function) doesn't hide the deep, structurally-rich trees of the next-slowest
 # actions in the same session.
 _CALL_TREE_MAX_ACTIONS = 3
@@ -42,7 +42,7 @@ _CT_OTHER_RE = re.compile(
 
 
 def _e(text: object) -> str:
-	"""HTML-escape. Local copy of ``_internal._e`` — keeps this
+	"""HTML-escape. Local copy of ``_internal._e``: keeps this
 	submodule free of a back-reference into ``_internal.py`` (which
 	would create a circular import once ``_internal`` re-imports the
 	call-tree symbols)."""
@@ -52,7 +52,7 @@ def _e(text: object) -> str:
 
 
 def _ct_is_other_frame(fn) -> bool:
-	"""A synthetic call-tree collapse node — either ``[other: N frames]`` or the
+	"""A synthetic call-tree collapse node either ``[other: N frames]`` or the
 	analyzer's deep-tree pruning placeholder ``[N more frames omitted]``
 	(call_tree.py). Both are dropped from the call tree per user request: they
 	carry no callsite to act on, so they're just noise."""
@@ -61,7 +61,7 @@ def _ct_is_other_frame(fn) -> bool:
 
 def _ct_is_sql_leaf(node) -> bool:
 	"""A ``<sql>`` query leaf frame. Dropped from the call-tree display per
-	user request — the tree shows only the Python hierarchy; the queries
+	user request the tree shows only the Python hierarchy; the queries
 	themselves live, itemised, in the Slowest-queries / per-action sections,
 	so nothing is lost. (The analyzer still keeps these in ``call_tree_json``.)"""
 	cn = node or {}
@@ -102,7 +102,7 @@ def _render_call_tree_node(node, parent_ms, depth=0, unlimited=False, breadcrumb
 		return ""
 	fn = node.get("function") or "<?>"
 	# v0.7.x: drop synthetic "[other: N frames]" collapse nodes entirely (user
-	# request — accepts that a branch's visible children may not sum to its total).
+	# request accepts that a branch's visible children may not sum to its total).
 	if _ct_is_other_frame(fn):
 		return ""
 	file = node.get("filename") or ""
@@ -165,7 +165,7 @@ def _render_call_tree_node(node, parent_ms, depth=0, unlimited=False, breadcrumb
 				))
 			out.append('</div>')
 		elif within_hard:
-			# Past default cap — click-to-expand the rest of the
+			# Past default cap click-to-expand the rest of the
 			# subtree. ``unlimited=True`` prevents further wrapping
 			# at every nested level.
 			out.append(
@@ -236,7 +236,7 @@ def _render_call_tree_panel(actions):
 	carries a renderable tree (the template's ``{% if %}`` guard hides the
 	section).
 
-	Was: the single slowest action only — which hid the deep, structurally
+	Was: the single slowest action only which hid the deep, structurally
 	rich trees of every other slow action (a flow whose #1 action is a flat
 	RQ loop surfaced no hierarchy). Now the ``_CALL_TREE_MAX_ACTIONS``
 	slowest actions are each rendered as their own labeled sub-tree.

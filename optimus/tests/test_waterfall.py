@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for `renderer._build_waterfall` — the v0.7.x redesign Phase
+"""Tests for `renderer._build_waterfall`: the v0.7.x redesign Phase
 C horizontal-bar action timeline.
 
 Top-N actions by duration, scaled to the displayed slice's max so
@@ -76,8 +76,8 @@ class TestPctScaling:
 
 	def test_pct_scales_to_displayed_slice_max(self):
 		"""When max_rows=2 selects the top-2 from a larger list,
-		scaling uses those two's max — not the (unshown) overall
-		max — so the second row is comparable visually."""
+		scaling uses those two's max not the (unshown) overall
+		max so the second row is comparable visually."""
 		actions = [
 			_a(0, duration_ms=200),
 			_a(1, duration_ms=100),
@@ -135,14 +135,14 @@ class TestBgFlag:
 class TestLayout:
 	"""Template-side waterfall layout invariants. The waterfall uses a CSS grid
 	with three columns: label / bar-track / duration. The label column has a
-	fixed pixel width — too narrow and typical 40-50 char action labels
+	fixed pixel width too narrow and typical 40-50 char action labels
 	(``POST /api/method/erpnext.accounts.utils.recompute`` ≈ 49 chars) ellipsize
 	even though the bar track has unused empty space."""
 
 	def test_waterfall_label_column_fits_typical_action_label(self):
 		"""The first track of ``.waterfall-row``'s ``grid-template-columns``
 		must be ≥ 320px so typical 47-49 char action labels render fully.
-		At 11.5px monospace each char is ~6.5px, so 320px ≈ 49 chars —
+		At 11.5px monospace each char is ~6.5px, so 320px ≈ 49 chars
 		just covers the longest observed labels."""
 		import os
 		import re
@@ -159,7 +159,7 @@ class TestLayout:
 		)
 		assert m, (
 			".waterfall-row must define grid-template-columns as "
-			"`<label_px> 1fr <duration_px>` — could not locate the rule"
+			"`<label_px> 1fr <duration_px>`: could not locate the rule"
 		)
 		label_px = int(m.group(1))
 		assert label_px >= 320, (

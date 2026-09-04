@@ -3,7 +3,7 @@
 
 """Tests for the renderer's root-cause grouping pass.
 
-A single get-doc-in-a-loop bug often produces 4-5 findings — a Slow
+A single get-doc-in-a-loop bug often produces 4-5 findings a Slow
 Hot Path on the wrapper, a Hot Line on the exact line, a Redundant
 Call for the fetched doc, a Redundant Permission Check downstream
 of it. The dev only has ONE fix to make; rendering 5 separate cards
@@ -55,7 +55,7 @@ def _hot_line(*, function="_check_user_exists", filename="apps/myapp/common.py",
 	return {
 		"finding_type": "Hot Line",
 		"severity": severity,
-		"title": f"{function}:{lineno} consumed {impact_ms}ms (100 hits) — single hottest line",
+		"title": f"{function}:{lineno} consumed {impact_ms}ms (100 hits) single hottest line",
 		"customer_description": "leaf hot line",
 		"estimated_impact_ms": impact_ms,
 		"affected_count": 100,
@@ -106,7 +106,7 @@ def _infra(*, severity="Low", impact_ms=0.0):
 class TestRootCauseKey:
 	def test_drilldown_leaf_wins_over_callsite(self):
 		"""When drilldown_chain is non-empty, the leaf's (file, function)
-		is used — not the (retargeted or not) callsite. This is what
+		is used not the (retargeted or not) callsite. This is what
 		lets a Slow Hot Path on ``looped_validate`` (its retargeted
 		callsite says ``_run_validations`` but its chain ends at
 		``_check_user_exists``) group with a Hot Line that targets
@@ -142,7 +142,7 @@ class TestRootCauseKey:
 class TestGrouping:
 	def test_four_findings_one_leaf_collapse_to_primary(self):
 		"""The user's pattern: Slow Hot Path (looped_validate chain),
-		Hot Line, Redundant Call, Redundant Permission Check — all
+		Hot Line, Redundant Call, Redundant Permission Check all
 		resolve to _check_user_exists. They collapse into one primary
 		with three sub_findings."""
 		shp = _shp(
@@ -155,7 +155,7 @@ class TestGrouping:
 		hot = _hot_line(impact_ms=300.0, severity="High")
 		rc = _redundant_call(severity="High", impact_ms=80.0,
 		                     function="_check_user_exists")
-		# Two redundant calls — same root cause, different subjects.
+		# Two redundant calls same root cause, different subjects.
 		rc2 = {
 			**_redundant_call(severity="Medium", impact_ms=40.0),
 			"finding_type": "Redundant Permission Check",
@@ -209,7 +209,7 @@ class TestGrouping:
 		assert result[-1]["finding_type"] == "System CPU Hot"
 
 	def test_primary_pick_uses_severity_first(self):
-		"""Within a group, severity beats impact_ms — a HIGH 100ms
+		"""Within a group, severity beats impact_ms a HIGH 100ms
 		finding beats a MEDIUM 1000ms finding for primary."""
 		low_impact_high_sev = _hot_line(severity="High", impact_ms=100.0)
 		high_impact_med_sev = _redundant_call(severity="Medium", impact_ms=1000.0,
@@ -230,7 +230,7 @@ class TestGrouping:
 		assert _group_findings_by_root_cause([]) == []
 
 	def test_subs_carry_compact_payload_only(self):
-		"""sub_findings entries are a compact dict — they don't carry
+		"""sub_findings entries are a compact dict they don't carry
 		the full technical_detail or llm_fix, just enough to render the
 		collapsed row (type, severity, title, description, impact, count)."""
 		shp = _shp(

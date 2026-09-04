@@ -3,7 +3,7 @@
 
 """Tests for the v0.9.0 AI privacy-hardening additions.
 
-Pure-pytest — no live Frappe site needed. Mirrors the mock patterns in
+Pure-pytest no live Frappe site needed. Mirrors the mock patterns in
 ``test_ai_fix.py`` (FakeResp + ``_post_capturing``) and
 ``test_settings_round6.py`` (direct ``OptimusConfig`` instantiation +
 ``settings.get_config`` patching).
@@ -13,17 +13,17 @@ Invariants under test (mirror the plan's Risks + Mitigations):
   * ``ai_excluded_finding_types`` parses with the same skip-list semantics
     as the existing ``skip_request_paths``: one-per-line, ``#`` comments,
     blanks dropped, exact match.
-  * ``is_finding_type_excluded`` is case-sensitive — an inert exclude
+  * ``is_finding_type_excluded`` is case-sensitive an inert exclude
     (typo, wrong case) is safer than a partial-match exclude.
   * ``suggest_fix`` short-circuits with ``AiFixError`` before any HTTP
-    call when the finding's type is on the exclusion list — the payload
+    call when the finding's type is on the exclusion list the payload
     is never built and no request leaves the host.
   * ``_http_post`` reads the configured timeout via
     ``_resolve_timeout_seconds``; clamped to ``[10, 600]``.
   * ``OptimusSettings._clamp_numeric_floors`` clamps
     ``ai_request_timeout_seconds`` below 10 up to 10.
   * The doc's enumeration of eligible finding types stays byte-for-line
-    aligned with ``ai_fix.AI_ELIGIBLE_FINDING_TYPES`` — drift fails CI.
+    aligned with ``ai_fix.AI_ELIGIBLE_FINDING_TYPES``: drift fails CI.
 """
 
 import sys
@@ -52,7 +52,7 @@ def _cfg(**over):
 
 
 # --------------------------------------------------------------------------
-# TestExcludeParsing — line-per-entry, # comments, blanks dropped
+# TestExcludeParsing line-per-entry, # comments, blanks dropped
 # --------------------------------------------------------------------------
 
 
@@ -73,7 +73,7 @@ class TestExcludeParsing:
 
 
 # --------------------------------------------------------------------------
-# TestExcludeApplied — is_finding_type_excluded semantics
+# TestExcludeApplied is_finding_type_excluded semantics
 # --------------------------------------------------------------------------
 
 
@@ -97,7 +97,7 @@ class TestExcludeApplied:
 		assert ai_fix.is_finding_type_excluded("Hot Line") is False
 
 	def test_is_case_sensitive(self, monkeypatch):
-		# Typo / wrong case is inert — safer than partial-match leaking data.
+		# Typo / wrong case is inert safer than partial-match leaking data.
 		monkeypatch.setattr(
 			"optimus.settings.get_config",
 			lambda: _cfg(ai_excluded_finding_types=("Slow Query",)),
@@ -127,7 +127,7 @@ class TestExcludeApplied:
 
 
 # --------------------------------------------------------------------------
-# TestSuggestFixRefuses — early-return before payload build
+# TestSuggestFixRefuses early-return before payload build
 # --------------------------------------------------------------------------
 
 
@@ -168,7 +168,7 @@ class TestSuggestFixRefuses:
 
 
 # --------------------------------------------------------------------------
-# TestTimeoutHonored — _http_post reads cfg.ai_request_timeout_seconds
+# TestTimeoutHonored _http_post reads cfg.ai_request_timeout_seconds
 # --------------------------------------------------------------------------
 
 
@@ -184,7 +184,7 @@ class _CaptureResp:
 
 
 def _capture_post():
-	"""Return (post_fake, captured) — when the fake is called, it stashes
+	"""Return (post_fake, captured) when the fake is called, it stashes
 	the kwargs into captured[0] for assertion."""
 	captured: list[dict] = []
 
@@ -197,7 +197,7 @@ def _capture_post():
 
 class TestTimeoutHonored:
 	def test_http_post_uses_configured_timeout(self, monkeypatch):
-		# Pure ai_fix._http_post call — patch requests.post + settings.
+		# Pure ai_fix._http_post call patch requests.post + settings.
 		monkeypatch.setattr(
 			"optimus.settings.get_config",
 			lambda: _cfg(ai_request_timeout_seconds=180),
@@ -257,7 +257,7 @@ class TestTimeoutHonored:
 		assert captured[0]["timeout"] == 600
 
 	def test_http_post_falls_back_when_settings_unreadable(self, monkeypatch):
-		# No bench / pure-pytest path — fallback to _HTTP_TIMEOUT (60).
+		# No bench / pure-pytest path fallback to _HTTP_TIMEOUT (60).
 		def _raise():
 			raise RuntimeError("no bench")
 
@@ -277,7 +277,7 @@ class TestTimeoutHonored:
 
 
 # --------------------------------------------------------------------------
-# TestSettings — defaults + retention-style floor clamp
+# TestSettings defaults + retention-style floor clamp
 # --------------------------------------------------------------------------
 
 
@@ -348,7 +348,7 @@ class TestSettings:
 
 
 # --------------------------------------------------------------------------
-# TestDocStaysFresh — the doc's eligible-types enumeration matches the code
+# TestDocStaysFresh the doc's eligible-types enumeration matches the code
 # --------------------------------------------------------------------------
 
 
@@ -380,5 +380,5 @@ class TestDocStaysFresh:
 		code_types = sorted(ai_fix.AI_ELIGIBLE_FINDING_TYPES)
 		assert doc_types == code_types, (
 			f"docs/AI-FIXING.md § 5 has {doc_types!r} but "
-			f"AI_ELIGIBLE_FINDING_TYPES has {code_types!r} — keep them in sync."
+			f"AI_ELIGIBLE_FINDING_TYPES has {code_types!r} keep them in sync."
 		)

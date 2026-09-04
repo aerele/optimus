@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""D.M-S6 / D.M-S7 — sanity tests for analyzer-base metric helpers.
+"""D.M-S6 / D.M-S7 sanity tests for analyzer-base metric helpers.
 
 ``percentile`` is used by repetition-heavy analyzers (N+1, redundant
 calls) to surface the tail of the per-hit duration distribution; a
@@ -56,7 +56,7 @@ def test_percentile_monotonic_across_percentages():
 		last = current
 
 
-# D.M-S7 — fmt_ms property test (Hypothesis-driven if available).
+# D.M-S7 fmt_ms property test (Hypothesis-driven if available).
 try:
 	from hypothesis import given
 	from hypothesis import strategies as st

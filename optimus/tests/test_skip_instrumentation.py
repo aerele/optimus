@@ -52,7 +52,7 @@ def test_should_skip_frappe_profiler_status_poll():
 	favor of realtime events, but the endpoint is still called once
 	on page load (to rehydrate widget state after navigation/reload)
 	and once on tab-visibility return. Those calls MUST NOT be
-	captured into the profiler session they belong to — they're
+	captured into the profiler session they belong to they're
 	instrumentation, not user work."""
 	from optimus.hooks_callbacks import _should_skip_request
 
@@ -63,7 +63,7 @@ def test_should_skip_frappe_profiler_status_poll():
 def test_should_skip_all_frappe_profiler_api_methods():
 	"""Any `optimus.api.*` whitelisted method is instrumentation
 	noise. Covers start, stop, status, submit_frontend_metrics,
-	retry_analyze, analyze_fetch, regenerate_reports, download_pdf — all of
+	retry_analyze, analyze_fetch, regenerate_reports, download_pdf all of
 	them match the prefix."""
 	from optimus.hooks_callbacks import _should_skip_request
 
@@ -79,7 +79,7 @@ def test_should_skip_all_frappe_profiler_api_methods():
 	):
 		_set_fake_local(cmd=cmd)
 		assert _should_skip_request() is True, (
-			f"{cmd} must be skipped — it's profiler instrumentation, "
+			f"{cmd} must be skipped it's profiler instrumentation, "
 			"not application work"
 		)
 
@@ -100,7 +100,7 @@ def test_should_skip_frappe_builtin_recorder_methods():
 	):
 		_set_fake_local(cmd=cmd)
 		assert _should_skip_request() is True, (
-			f"{cmd} must be skipped — it's the Frappe recorder's own "
+			f"{cmd} must be skipped it's the Frappe recorder's own "
 			"plumbing"
 		)
 
@@ -119,14 +119,14 @@ def test_should_not_skip_regular_application_calls():
 	):
 		_set_fake_local(cmd=cmd)
 		assert _should_skip_request() is False, (
-			f"{cmd} must NOT be skipped — it's real application work"
+			f"{cmd} must NOT be skipped it's real application work"
 		)
 
 
 def test_should_not_skip_page_loads_without_cmd():
 	"""Page loads (`/app/recorder`, `/api/resource/Sales Invoice/…`) have
 	no cmd in form_dict. They must fall through as 'not noise' even
-	when the URL happens to contain the word 'recorder' — the skip
+	when the URL happens to contain the word 'recorder' the skip
 	list matches cmd prefixes, not URL substrings."""
 	from optimus.hooks_callbacks import _should_skip_request
 
@@ -171,7 +171,7 @@ def test_should_skip_is_prefix_match_not_exact():
 def test_should_not_match_similar_but_different_prefixes():
 	"""Guard against over-matching. A hypothetical
 	`frappe_profiler_extensions.api.foo` starts with `optimus`
-	but is NOT our API — the prefix ends with a dot for a reason.
+	but is NOT our API the prefix ends with a dot for a reason.
 	Same for `frappe.core.doctype.recorder_archive.*`."""
 	from optimus.hooks_callbacks import _should_skip_request
 
@@ -197,7 +197,7 @@ def test_should_not_match_similar_but_different_prefixes():
 
 def test_path_based_skip_for_v1_method_url():
 	"""/api/method/<foo> is the most common URL shape. At before_request
-	time, frappe.form_dict.cmd is NOT set for these — Frappe's routing
+	time, frappe.form_dict.cmd is NOT set for these Frappe's routing
 	sets it later, inside handle_rpc_call. The path is the only source."""
 	from optimus.hooks_callbacks import _should_skip_request
 
@@ -240,7 +240,7 @@ def test_path_based_does_not_skip_regular_method_urls():
 
 
 def test_path_based_ignores_rest_resource_urls():
-	"""/api/resource/Sales Invoice/INV-00042 has no /method/ segment —
+	"""/api/resource/Sales Invoice/INV-00042 has no /method/ segment
 	it's a REST resource call, not a whitelisted method. Must fall
 	through as 'not noise'."""
 	from optimus.hooks_callbacks import _should_skip_request
@@ -250,7 +250,7 @@ def test_path_based_ignores_rest_resource_urls():
 
 
 def test_path_based_ignores_desk_app_urls():
-	"""/app/recorder is the Frappe Recorder UI — a page load, not a
+	"""/app/recorder is the Frappe Recorder UI a page load, not a
 	whitelisted method call. Even though the URL contains 'recorder',
 	the path parser must not match because there's no /method/ marker."""
 	from optimus.hooks_callbacks import _should_skip_request
@@ -264,7 +264,7 @@ def test_path_based_handles_trailing_slash():
 	parser must strip it before the prefix check, otherwise
 	'optimus.api.status/' won't match
 	'optimus.api.' via startswith (which would still match,
-	actually — but a follow-on exact comparison wouldn't). Defense-
+	actually but a follow-on exact comparison wouldn't). Defense-
 	in-depth check for cleanup."""
 	from optimus.hooks_callbacks import _should_skip_request
 
@@ -273,7 +273,7 @@ def test_path_based_handles_trailing_slash():
 
 
 def test_path_based_handles_missing_request():
-	"""frappe.local has no `request` attribute at all — edge case during
+	"""frappe.local has no `request` attribute at all edge case during
 	startup or health checks. Must fall through as False."""
 	from optimus.hooks_callbacks import _should_skip_request
 
@@ -295,7 +295,7 @@ def test_form_dict_cmd_still_wins_over_path():
 		cmd="optimus.api.status",
 		path="/api/method/frappe.client.save",
 	)
-	# form_dict.cmd wins — returns the legacy value.
+	# form_dict.cmd wins returns the legacy value.
 	assert _extract_cmd_from_request() == "optimus.api.status"
 
 
@@ -330,7 +330,7 @@ def test_before_request_early_exits_on_skipped_cmd():
 	# The skip call must appear in before_request.
 	assert "_should_skip_request()" in src
 
-	# The skip check must occur BEFORE the optimus_session_id assignment —
+	# The skip check must occur BEFORE the optimus_session_id assignment
 	# setting the flag first would cause after_request to register the
 	# recording anyway, defeating the filter.
 	skip_idx = src.find("_should_skip_request()")

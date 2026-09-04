@@ -7,14 +7,14 @@ Each query-oriented finding now carries a projected per-query time
 estimating what the same query would cost AFTER the suggested fix.
 Lets the developer prioritize by ceiling-of-value: a 20× speedup is
 worth an afternoon, a 1.2× speedup probably isn't. Projections are
-heuristic ceilings, not guarantees — see ``base.project_post_fix_ms``
+heuristic ceilings, not guarantees see ``base.project_post_fix_ms``
 for the per-finding-type factors.
 
 Shape (added to ``technical_detail_json``):
 
   {
     "average_time_ms": 2.7,            # existing
-    "projected_avg_time_ms": 0.5,      # NEW — v0.5.3
+    "projected_avg_time_ms": 0.5,      # NEW v0.5.3
     "projected_total_ms": 24.0,        # NEW
     "projected_speedup_label": "~5× faster",  # NEW (optional)
   }
@@ -58,7 +58,7 @@ class TestHelperFunction:
 		assert project_post_fix_ms("Low Filter Ratio", 10.0) is None
 
 	def test_unknown_finding_type_returns_none(self):
-		"""Redundant Call / Slow Hot Path / etc. — no projection."""
+		"""Redundant Call / Slow Hot Path / etc. no projection."""
 		assert project_post_fix_ms("Redundant Call", 10.0) is None
 		assert project_post_fix_ms("Slow Hot Path", 10.0) is None
 
@@ -69,7 +69,7 @@ class TestHelperFunction:
 	def test_floor_enforced_at_minimum(self):
 		"""A perfect index lookup still costs ~0.3ms of round-trip +
 		plan time. Projection must never claim 0.0ms."""
-		# 20× speedup of 0.5ms would be 0.025ms — but floor is 0.3.
+		# 20× speedup of 0.5ms would be 0.025ms but floor is 0.3.
 		assert project_post_fix_ms(
 			"Full Table Scan", 0.5,
 		) == POST_FIX_FLOOR_MS
@@ -257,7 +257,7 @@ class TestRendering:
 		assert "projected-after-fix" not in html
 
 	def test_finding_without_projection_does_not_render_line(self):
-		"""Redundant Call findings don't project — the projected line
+		"""Redundant Call findings don't project the projected line
 		must NOT appear for them."""
 		import types
 

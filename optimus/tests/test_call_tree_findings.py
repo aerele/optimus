@@ -127,7 +127,7 @@ def test_self_referential_hot_path_uses_clear_phrasing():
 	"""Production bug: the title read as
 	'In erpnext.accounts.doctype.pricing_rule.pricing_rule.apply_pricing_rule,
 	 96% of the time was spent in apply_pricing_rule'
-	— tautological because the action label ends with the same
+	tautological because the action label ends with the same
 	function name. The hot spot is self-time in the function body,
 	not a subcall. We rephrase to surface that fact."""
 	tree = _node("<root>", "", 1000, [
@@ -219,7 +219,7 @@ def test_slow_hot_path_suppressed_when_dominated_by_sql():
 	findings = call_tree._emit_per_action_findings(
 		tree, action_idx=0, action_label="x", action_wall_time_ms=1000,
 	)
-	# 700/800 = 87.5% — suppressed (top_queries handles it)
+	# 700/800 = 87.5% suppressed (top_queries handles it)
 	assert findings == []
 
 
@@ -232,7 +232,7 @@ def test_repeated_hot_frame_finding_aggregates_across_actions():
 	# Same frame in 4 different actions, total 800ms self-time
 	# (v0.7.x A.AE1: hot-frames aggregator switched from cumulative
 	# to self_ms to avoid recursive double-count. Leaf fixtures now
-	# need self_ms set explicitly — cumulative alone no longer feeds
+	# need self_ms set explicitly cumulative alone no longer feeds
 	# the leaderboard.)
 	per_action_trees = []
 	for _ in range(4):
@@ -260,17 +260,17 @@ def test_repeated_hot_frame_no_finding_when_below_thresholds():
 
 def test_repeated_hot_frame_filters_wrappers_entirely():
 	"""v0.5.2 strengthens the v0.5.1 fix: the original bug was
-	'High — wrapper appeared in 11 actions and consumed 3534ms total'
+	'High wrapper appeared in 11 actions and consumed 3534ms total'
 	where each of the 11 was a different decorator wrapper from a
 	different module. v0.5.1 solved it by disambiguating per-file
 	(so each wrapper became its own leaderboard entry). That was
-	better but still noisy — every decorated method produced a
+	better but still noisy every decorated method produced a
 	'wrapper' entry with a cumulative time ≈ the wrapped function's
 	cumulative time, duplicating information.
 
 	v0.5.2 filters all 'wrapper' / 'composer' / 'runner' / 'fn' /
 	'hook' / 'compose' frames entirely. They're decorator internals
-	regardless of file — showing them adds no signal beyond what
+	regardless of file showing them adds no signal beyond what
 	the wrapped function's own leaderboard entry already provides.
 
 	This test now verifies the stronger v0.5.2 behavior: wrappers
@@ -278,7 +278,7 @@ def test_repeated_hot_frame_filters_wrappers_entirely():
 	"""
 	per_action_trees = []
 	# Four different 'wrapper' functions in four different files.
-	# All should be filtered — none should appear in the leaderboard.
+	# All should be filtered none should appear in the leaderboard.
 	for _ in range(4):
 		per_action_trees.append(_node("<root>", "", 500, [
 			_node("wrapper", "my_app/a.py", 50, []),
@@ -289,7 +289,7 @@ def test_repeated_hot_frame_filters_wrappers_entirely():
 
 	findings, leaderboard = call_tree._aggregate_hot_frames(per_action_trees)
 
-	# NO wrapper entries at all — they're decorator plumbing.
+	# NO wrapper entries at all they're decorator plumbing.
 	wrapper_entries = [r for r in leaderboard if "::wrapper" in r["function"]]
 	assert wrapper_entries == [], (
 		f"v0.5.2: wrapper frames must be filtered entirely. Got "
@@ -307,16 +307,16 @@ def test_repeated_hot_frame_skips_pure_helpers_only():
 	"""v0.5.1: Repeated Hot Frame aggregator uses the NARROWER
 	_is_pure_helper_frame filter, not the broad _is_framework_frame.
 	Pure plumbing helpers (frappe/handler.py, frappe/utils/, werkzeug,
-	rq, pyinstrument) are suppressed — those are unoptimizable.
+	rq, pyinstrument) are suppressed those are unoptimizable.
 	"""
 	per_action_trees = []
 	for _ in range(5):
 		per_action_trees.append(_node("<root>", "", 500, [
-			# frappe/handler.py — pure request-dispatch plumbing
+			# frappe/handler.py pure request-dispatch plumbing
 			_node("handle", "apps/frappe/handler.py", 250, []),
-			# frappe/utils/data.py — type conversion helper
+			# frappe/utils/data.py type conversion helper
 			_node("cint", "apps/frappe/frappe/utils/data.py", 100, []),
-			# werkzeug — infra lib
+			# werkzeug infra lib
 			_node(
 				"inner",
 				"env/lib/python3.14/site-packages/werkzeug/wsgi.py",
@@ -351,7 +351,7 @@ def test_repeated_hot_frame_keeps_frappe_application_code():
 	always ≈ the user's validate/on_submit hook times, so showing
 	it as a separate hot frame double-counts information. Users
 	see their actual hooks (erpnext/*.py::validate) as hot frames
-	— that's the actionable signal.
+	that's the actionable signal.
 
 	This test now verifies what remains actionable inside frappe/*:
 
@@ -360,20 +360,20 @@ def test_repeated_hot_frame_keeps_frappe_application_code():
 	  - naming.make_autoname: user's naming-series config can be
 	    optimized (simpler prefix, fewer SQL lookups). KEPT.
 
-	Document.run_method is NOT in this keeper list anymore — the
+	Document.run_method is NOT in this keeper list anymore the
 	user can see their hooks directly instead of the dispatcher.
 	"""
 	per_action_trees = []
 	for _ in range(5):
 		per_action_trees.append(_node("<root>", "", 2000, [
-			# permissions.has_permission — keep (user custom rules).
+			# permissions.has_permission keep (user custom rules).
 			_node(
 				"has_permission",
 				"apps/frappe/frappe/permissions.py",
 				400,
 				[],
 			),
-			# naming.make_autoname — keep (user naming series).
+			# naming.make_autoname keep (user naming series).
 			_node(
 				"make_autoname",
 				"apps/frappe/frappe/model/naming.py",
@@ -408,7 +408,7 @@ def test_repeated_hot_frame_keeps_frappe_application_code():
 
 
 # ---------------------------------------------------------------------------
-# v0.5.2: expanded plumbing filter — decorator wrappers, meta loaders,
+# v0.5.2: expanded plumbing filter decorator wrappers, meta loaders,
 # form-load, query-builder, database layer, stdlib, third-party libs
 # ---------------------------------------------------------------------------
 
@@ -443,7 +443,7 @@ def test_pure_helper_filters_decorator_wrappers():
 			f"{function_name} must be filtered as private delegation"
 		)
 
-	# Public entry points KEPT — users recognize these
+	# Public entry points KEPT users recognize these
 	for function_name in ("save", "insert", "submit", "cancel", "validate"):
 		node = {
 			"function": function_name,
@@ -451,13 +451,13 @@ def test_pure_helper_filters_decorator_wrappers():
 			"kind": "python",
 		}
 		# "validate" etc. are user-implemented hooks that run through
-		# the decorator chain — users should see these in the
+		# the decorator chain users should see these in the
 		# leaderboard. But filtering works on frame FILENAME too:
 		# frappe/model/document.py doesn't fire those here because
 		# "validate" the user wrote lives at apps/myapp/controllers/*.py.
 		# This test verifies the FUNCTION-NAME filter doesn't
 		# accidentally catch them when they happen to be in
-		# document.py (it won't — they're not in the block list).
+		# document.py (it won't they're not in the block list).
 
 
 def test_pure_helper_filters_meta_loaders():
@@ -554,7 +554,7 @@ def test_pure_helper_filters_third_party_libs():
 
 
 def test_pure_helper_filters_pyinstrument_synthetic_markers():
-	"""<built-in>, <string>, <module>, <frozen …> — synthetic
+	"""<built-in>, <string>, <module>, <frozen …> synthetic
 	function names pyinstrument emits for C builtins / compiled-
 	string frames."""
 	from optimus.analyzers.call_tree import _is_pure_helper_frame
@@ -578,21 +578,21 @@ def test_pure_helper_production_payload_all_filtered():
 	to being dominated by framework plumbing."""
 	from optimus.analyzers.call_tree import _is_pure_helper_frame
 
-	# Exact (function, filename) pairs from a production report — the
+	# Exact (function, filename) pairs from a production report the
 	# `must_filter` list below is the curated subset that this test
 	# actually asserts on. Originally recorded here for historical
 	# context; kept as a comment to avoid an unused-variable flag.
 	#   execute_query / frappe/query_builder/utils.py
 	#   save / _save / run_method / composer / runner / fn / __init__ /
-	#   load_from_db / insert / get_doc_str — all frappe/model/document.py
-	#   get_meta / __init__ — frappe/model/meta.py and frappe/desk/form/meta.py
-	#   get_values / sql / execute_query — frappe/database/database.py
-	#   getdoctype / get_meta_bundle — frappe/desk/form/load.py
-	#   execute — frappe/model/qb_query.py
-	#   load_from_db / process — frappe/model/meta.py
-	#   getouterframes / getframeinfo — inspect.py
-	#   wrapper — erpnext/__init__.py, utils/__init__.py
-	#   execute / _query — MySQLdb/cursors.py
+	#   load_from_db / insert / get_doc_str all frappe/model/document.py
+	#   get_meta / __init__ frappe/model/meta.py and frappe/desk/form/meta.py
+	#   get_values / sql / execute_query frappe/database/database.py
+	#   getdoctype / get_meta_bundle frappe/desk/form/load.py
+	#   execute frappe/model/qb_query.py
+	#   load_from_db / process frappe/model/meta.py
+	#   getouterframes / getframeinfo inspect.py
+	#   wrapper erpnext/__init__.py, utils/__init__.py
+	#   execute / _query MySQLdb/cursors.py
 
 	# v0.5.2 round 2: ALL of frappe/model/document.py is filtered
 	# (save / insert / submit / _save / run_method / __init__ /
@@ -640,7 +640,7 @@ def test_pure_helper_production_payload_all_filtered():
 		node = {"function": function_name, "filename": filename, "kind": "python"}
 		assert _is_pure_helper_frame(node) is True, (
 			f"Production noise not filtered: {filename}::{function_name} "
-			"— this frame would re-appear in the Repeated Hot Frame "
+			" this frame would re-appear in the Repeated Hot Frame "
 			"leaderboard if the filter regresses."
 		)
 
@@ -649,7 +649,7 @@ def test_pure_helper_still_keeps_application_frappe_code():
 	"""Critical negative case: user-visible APP code MUST still pass
 	through. v0.5.2 round 2 removed Document.save/insert/submit/
 	run_method from the keepers because their cumulative times
-	always duplicate the user's validate/on_submit hooks —
+	always duplicate the user's validate/on_submit hooks
 	double-counting noise. The user still sees the actual hook
 	code (erpnext/*, myapp/*) as hot frames."""
 	from optimus.analyzers.call_tree import _is_pure_helper_frame
@@ -669,7 +669,7 @@ def test_pure_helper_still_keeps_application_frappe_code():
 	for function_name, filename in keepers:
 		node = {"function": function_name, "filename": filename, "kind": "python"}
 		assert _is_pure_helper_frame(node) is False, (
-			f"{filename}::{function_name} was WRONGLY filtered — "
+			f"{filename}::{function_name} was WRONGLY filtered "
 			"users must see this in the Repeated Hot Frame leaderboard "
 			"as a legitimate optimization target."
 		)
@@ -700,13 +700,13 @@ def test_is_pure_helper_frame_matches_relative_filenames():
 		node = {"function": function, "filename": filename, "kind": "python"}
 		assert _is_pure_helper_frame(node) is True, (
 			f"{filename}::{function} must be classified as a pure helper "
-			f"— it's framework plumbing that every request passes through"
+			f" it's framework plumbing that every request passes through"
 		)
 
 
 def test_is_pure_helper_frame_matches_absolute_filenames():
 	"""Backward compatibility: some environments DO deliver absolute
-	paths from pyinstrument. Those must still match — the filter is
+	paths from pyinstrument. Those must still match the filter is
 	position-insensitive (substring / suffix)."""
 	from optimus.analyzers.call_tree import _is_pure_helper_frame
 
@@ -730,7 +730,7 @@ def test_is_pure_helper_frame_keeps_application_frappe_code():
 	document.py file is now plumbing. Document.save / insert /
 	submit / run_method all show up as hot frames with cumulative
 	times IDENTICAL to the validate / on_submit / etc. hooks
-	inside them — so the Document-level entries are redundant
+	inside them so the Document-level entries are redundant
 	double-counts. Users see their actual hook code (erpnext/…::
 	validate, myapp/…::on_submit) as separate hot frames; that's
 	where the actionable signal lives.
@@ -738,16 +738,16 @@ def test_is_pure_helper_frame_keeps_application_frappe_code():
 	from optimus.analyzers.call_tree import _is_pure_helper_frame
 
 	for filename, function in (
-		# Permissions — slow custom Permission Query Conditions
+		# Permissions slow custom Permission Query Conditions
 		# bubble here. KEPT.
 		("frappe/permissions.py", "has_permission"),
-		# Naming series — user's series config can be optimized
+		# Naming series user's series config can be optimized
 		# (simpler prefix, fewer SQL lookups). KEPT.
 		("frappe/model/naming.py", "make_autoname"),
 		# frappe.client is the REST-ish API layer; get_list is the
 		# entry point users of the REST API actually call. KEPT.
 		("frappe/client.py", "get_list"),
-		# User app code — the whole point of the hot-frames
+		# User app code the whole point of the hot-frames
 		# leaderboard.
 		("apps/erpnext/erpnext/accounts/doctype/sales_invoice/sales_invoice.py", "validate"),
 		("apps/myapp/controllers/invoice.py", "on_submit"),
@@ -755,7 +755,7 @@ def test_is_pure_helper_frame_keeps_application_frappe_code():
 	):
 		node = {"function": function, "filename": filename, "kind": "python"}
 		assert _is_pure_helper_frame(node) is False, (
-			f"{filename}::{function} must NOT be filtered — it's "
+			f"{filename}::{function} must NOT be filtered it's "
 			f"application-layer code users can optimize"
 		)
 
@@ -764,7 +764,7 @@ def test_is_pure_helper_frame_filters_entire_document_py():
 	"""v0.5.2 round 2: frappe/model/document.py is entirely
 	plumbing. save / insert / submit / _save / run_method /
 	__init__ / load_from_db / load_children_from_db /
-	get_cached_doc / get_doc_str — all show up with cumulative
+	get_cached_doc / get_doc_str all show up with cumulative
 	times identical to the user code inside them. Diagnostic
 	against a real stored call tree confirmed all of these leaked
 	before the round-2 fix."""
@@ -786,12 +786,12 @@ def test_is_pure_helper_frame_filters_entire_document_py():
 			node = {"function": function, "filename": filename, "kind": "python"}
 			assert _is_pure_helper_frame(node) is True, (
 				f"{filename}::{function} must be filtered "
-				"(Document plumbing — v0.5.2 round 2)"
+				"(Document plumbing v0.5.2 round 2)"
 			)
 
 
 def test_is_pure_helper_frame_filters_model_utils():
-	"""frappe/model/utils/* is framework plumbing — is_virtual_doctype,
+	"""frappe/model/utils/* is framework plumbing is_virtual_doctype,
 	get_parent_doc, etc. Called by document loader, no user decision
 	behind the time they consume."""
 	from optimus.analyzers.call_tree import _is_pure_helper_frame
@@ -842,7 +842,7 @@ def test_is_pure_helper_frame_keeps_user_code():
 def test_is_framework_frame_matches_relative_filenames():
 	"""Same slash-bug fix applies to the broader _is_framework_frame
 	filter used by Slow Hot Path. Production report showed 'In POST
-	/api/method/..., 99% of time was spent in application' — i.e.
+	/api/method/..., 99% of time was spent in application' i.e.
 	frappe/app.py::application. That frame should have been
 	classified as framework so Slow Hot Path descended into user
 	code below it."""
@@ -945,7 +945,7 @@ def test_strip_profiler_frames_grafts_user_code_children_up():
 	"""Edge case: a user-code frame nested BELOW a optimus
 	frame (e.g. a capture.py wrap that intercepts get_doc and then
 	user's __init__ runs under it). The user-code child must be
-	preserved — grafted up to where the profiler frame was."""
+	preserved grafted up to where the profiler frame was."""
 	tree = _node("<root>", "", 100, [
 		_node("application", "frappe/app.py", 100, [
 			_node(
@@ -1049,7 +1049,7 @@ def test_hooks_callbacks_before_request_snapshot_runs_before_pyi_start():
 
 
 def test_hooks_callbacks_before_job_snapshot_runs_before_pyi_start():
-	"""Same ordering guard for before_job — background jobs have the
+	"""Same ordering guard for before_job background jobs have the
 	same self-capture exposure as HTTP requests."""
 	import inspect
 
@@ -1101,7 +1101,7 @@ def test_production_payload_eight_plumbing_findings_all_filtered():
 		f"Got: {[f['title'] for f in repeated]}"
 	)
 
-	# And they should not be in the leaderboard either — they'd waste
+	# And they should not be in the leaderboard either they'd waste
 	# slots that could go to real user-code hot frames.
 	bad_names = {fn for fn, _, _ in plumbing_frames}
 	for row in leaderboard:
@@ -1172,7 +1172,7 @@ def test_donut_bucketing_by_top_level_module():
 def test_top_level_app_rejects_stdlib_and_third_party(monkeypatch):
 	"""v0.5.1: production donut showed Python(inspect.py),
 	Python(functools.py), Python(MySQLdb), Python(<built-in>) as
-	separate buckets — all noise. Single-segment filenames (stdlib),
+	separate buckets all noise. Single-segment filenames (stdlib),
 	site-packages paths, and angle-bracketed synthetic markers must
 	all collapse to [other]. First-segment paths that AREN'T a
 	known installed Frappe app (MySQLdb etc.) also collapse to
@@ -1193,12 +1193,12 @@ def test_top_level_app_rejects_stdlib_and_third_party(monkeypatch):
 		raising=False,
 	)
 
-	# Python stdlib — single-segment filename
+	# Python stdlib single-segment filename
 	assert _top_level_app("getmembers", "inspect.py") == "[other]"
 	assert _top_level_app("reduce", "functools.py") == "[other]"
 	assert _top_level_app("_bootstrap", "threading.py") == "[other]"
 
-	# Third-party library — pyinstrument stripped site-packages/
+	# Third-party library pyinstrument stripped site-packages/
 	# prefix and left just the lib/file form. Rejected because
 	# "MySQLdb" isn't in the installed-apps list.
 	assert _top_level_app("query", "MySQLdb/connections.py") == "[other]"
@@ -1211,7 +1211,7 @@ def test_top_level_app_rejects_stdlib_and_third_party(monkeypatch):
 		"env/lib/python3.14/site-packages/requests/api.py",
 	) == "[other]"
 
-	# Pyinstrument synthetic — angle-bracketed function name
+	# Pyinstrument synthetic angle-bracketed function name
 	assert _top_level_app("<built-in>", "<built-in>") == "[other]"
 	assert _top_level_app("<module>", "<string>") == "[other]"
 	assert _top_level_app("<lambda>", "frappe/utils.py") == "[other]"
@@ -1225,7 +1225,7 @@ def test_top_level_app_rejects_stdlib_and_third_party(monkeypatch):
 def test_top_level_app_falls_back_when_installed_apps_unavailable(monkeypatch):
 	"""When frappe.get_installed_apps fails (no site context, unit
 	test environment), accept the first-segment as the bucket name.
-	This is the legacy behavior — a conservative fallback that
+	This is the legacy behavior a conservative fallback that
 	preserves the pre-v0.5.1 unit tests, which don't mock frappe."""
 	import frappe
 
@@ -1237,7 +1237,7 @@ def test_top_level_app_falls_back_when_installed_apps_unavailable(monkeypatch):
 	monkeypatch.setattr(frappe, "get_installed_apps", _raise, raising=False)
 
 	# With the fallback, MySQLdb passes through as its first segment
-	# (acceptable for unit tests — real production always has a site).
+	# (acceptable for unit tests real production always has a site).
 	# The stdlib filters still fire: inspect.py has no / so → [other].
 	assert _top_level_app("reduce", "functools.py") == "[other]"
 	# Multi-segment path: legacy first-segment fallback.
@@ -1245,7 +1245,7 @@ def test_top_level_app_falls_back_when_installed_apps_unavailable(monkeypatch):
 
 
 def test_top_level_app_uses_filename_not_function_name():
-	"""Direct unit test — covers the bug root cause without going
+	"""Direct unit test covers the bug root cause without going
 	through the full aggregation path."""
 	from optimus.analyzers.call_tree import _top_level_app
 
@@ -1311,11 +1311,11 @@ def test_production_donut_collapses_plumbing_into_frappe_bucket():
 	breakdown = call_tree._build_session_breakdown(per_action_trees, sql_total_ms=192)
 	by_app = breakdown["by_app"]
 
-	# Before the fix: six buckets — application, init_request, call,
-	# execute_cmd, record_sql, snapshot, before_request — each near 0ms.
+	# Before the fix: six buckets application, init_request, call,
+	# execute_cmd, record_sql, snapshot, before_request each near 0ms.
 	# After the fix: two buckets (frappe + optimus) with real totals.
 	assert set(by_app.keys()) <= {"frappe", "optimus", "[other]"}, (
-		f"Unexpected buckets — should only contain frappe / "
+		f"Unexpected buckets should only contain frappe / "
 		f"optimus / [other]; got: {set(by_app.keys())}"
 	)
 
@@ -1334,7 +1334,7 @@ def test_production_donut_collapses_plumbing_into_frappe_bucket():
 	for bad in ("application", "init_request", "call", "execute_cmd",
 	            "record_sql", "before_request", "snapshot"):
 		assert bad not in by_app, (
-			f"Function name '{bad}' must not be a bucket key — "
+			f"Function name '{bad}' must not be a bucket key "
 			f"bucketing should be by app (filename), not function name. "
 			f"Got by_app: {by_app}"
 		)
@@ -1404,7 +1404,7 @@ def test_analyze_handles_missing_pyi_session():
 
 class TestTrackedAppsInclusion:
 	"""Optimus Settings ▸ Tracked Apps: when set, call_tree findings (hot frames,
-	slow paths, BG jobs) only surface frames inside the tracked apps — every other
+	slow paths, BG jobs) only surface frames inside the tracked apps every other
 	frame is out-of-scope plumbing, matching how the SQL analyzers honour inclusion
 	mode. Empty/None → profile everything (unchanged default)."""
 
@@ -1476,7 +1476,7 @@ def test_top_level_app_resolves_real_app_under_apps_ancestor():
 
 def test_pure_helper_hides_any_site_packages_lib():
 	"""A venv lib outside the hardcoded set (gevent, sentry_sdk, …) must not leak
-	into the hot-frame leaderboard — the blanket site-packages/ guard catches it
+	into the hot-frame leaderboard the blanket site-packages/ guard catches it
 	regardless of the lib name; user code under apps/ is unaffected."""
 	from optimus.analyzers.call_tree import _is_pure_helper_frame
 	for f in ("/home/x/env/lib/python3.11/site-packages/gevent/hub.py",

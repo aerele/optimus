@@ -7,7 +7,7 @@ a loop now calls it ONCE with a ``{"name": ("in", [...])}`` filter, and
 ``_sweep_old_sessions`` preloads every File-doc name in a single
 ``frappe.get_all`` instead of looking each up per row.
 
-We stub ``frappe`` so these tests run pure (no bench / no MariaDB) — via
+We stub ``frappe`` so these tests run pure (no bench / no MariaDB) via
 ``monkeypatch.setitem(sys.modules, ...)`` so the real ``frappe`` (plus
 the lazy submodules) is restored at teardown. Without that, every test
 running AFTER one of these in the same pytest session inherits our
@@ -22,7 +22,7 @@ def _install_frappe_stub(monkeypatch):
 	"""Build a minimal ``frappe`` stub the janitor module can import.
 
 	All ``sys.modules`` mutations go through ``monkeypatch.setitem`` so
-	pytest restores the originals at teardown — that's the entire point
+	pytest restores the originals at teardown that's the entire point
 	of routing through this helper instead of bare assignments."""
 	stub = types.ModuleType("frappe")
 	stub._set_value_calls = []
@@ -83,8 +83,8 @@ def _install_frappe_stub(monkeypatch):
 	session_mod.clear_active_session = lambda user: None
 	session_mod.get_active_session_for = lambda user: stub._active_pointers.get(user)
 	monkeypatch.setitem(sys.modules, "optimus.session", session_mod)
-	# janitor binds via ``from optimus import session`` — that reads the package
-	# ATTRIBUTE, not just sys.modules — so patch the attribute too or the reload
+	# janitor binds via ``from optimus import session``: that reads the package
+	# ATTRIBUTE, not just sys.modules so patch the attribute too or the reload
 	# picks up the real session module (which needs a live frappe.cache).
 	import optimus as _optimus_pkg
 	monkeypatch.setattr(_optimus_pkg, "session", session_mod, raising=False)
@@ -120,7 +120,7 @@ def _reload_janitor(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# Stale Recording sweep — single batched UPDATE.
+# Stale Recording sweep single batched UPDATE.
 # --------------------------------------------------------------------------
 
 class TestSweepStaleRecording:
@@ -142,7 +142,7 @@ class TestSweepStaleRecording:
 		assert filters == {"name": ("in", ["PS-1", "PS-2", "PS-3"])}
 		assert fields["status"] == "Stopping"
 		assert "stopped_at" in fields
-		# Per-row enqueue side effects still fire — once per row.
+		# Per-row enqueue side effects still fire once per row.
 		assert len(stub._enqueue_calls) == 3
 
 	def test_no_set_value_when_no_stale_rows(self, monkeypatch):
@@ -154,7 +154,7 @@ class TestSweepStaleRecording:
 
 	def test_live_recording_with_active_pointer_is_not_stopped(self, monkeypatch):
 		"""A long but LIVE recording (its Redis active pointer still points to it)
-		must not be force-stopped just because started_at crossed the cutoff —
+		must not be force-stopped just because started_at crossed the cutoff
 		only rows whose pointer expired / moved are stopped."""
 		stub = _install_frappe_stub(monkeypatch)
 		stub._get_all_return["Optimus Session"] = [
@@ -173,7 +173,7 @@ class TestSweepStaleRecording:
 
 
 # --------------------------------------------------------------------------
-# Stuck Analyzing sweep — single batched UPDATE.
+# Stuck Analyzing sweep single batched UPDATE.
 # --------------------------------------------------------------------------
 
 class TestSweepStuckAnalyzing:
@@ -202,7 +202,7 @@ class TestSweepStuckAnalyzing:
 	def test_live_singleflight_holder_is_not_failed(self, monkeypatch):
 		"""A long-but-live analyze (still heartbeating the single-flight flag)
 		must NOT be force-failed even though its row crossed the staleness
-		threshold — only the genuinely-wedged row is failed."""
+		threshold only the genuinely-wedged row is failed."""
 		stub = _install_frappe_stub(monkeypatch)
 		stub._get_all_return["Optimus Session"] = [
 			{"name": "PS-LIVE", "session_uuid": "u-live"},   # still heartbeating
@@ -221,7 +221,7 @@ class TestSweepStuckAnalyzing:
 
 
 # --------------------------------------------------------------------------
-# Stale Stopping sweep — re-enqueue analyze for sessions stranded at Stopping.
+# Stale Stopping sweep re-enqueue analyze for sessions stranded at Stopping.
 # --------------------------------------------------------------------------
 
 class TestSweepStaleStopping:
@@ -263,14 +263,14 @@ class TestSweepStaleStopping:
 
 
 # --------------------------------------------------------------------------
-# Stale Phase-2 sweep — one batched UPDATE per branch (Recording + Analyzing).
+# Stale Phase-2 sweep one batched UPDATE per branch (Recording + Analyzing).
 # --------------------------------------------------------------------------
 
 class TestSweepStalePhase2Runs:
 	def test_one_set_value_call_per_branch(self, monkeypatch):
 		stub = _install_frappe_stub(monkeypatch)
 		# The janitor calls get_all twice on "Optimus Phase Two Run" (formerly
-		# "Optimus Phase 2 Run" before the v0.6.x Title-Case rename) — once for
+		# "Optimus Phase 2 Run" before the v0.6.x Title-Case rename) once for
 		# Recording rows, once for Analyzing. We return DIFFERENT row sets on
 		# each call, so the side-effect channel needs an index counter.
 		rec_rows = [
@@ -298,9 +298,9 @@ class TestSweepStalePhase2Runs:
 		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Phase Two Run"]
 		# Exactly 2 batched set_values (one per branch).
 		assert len(set_value_calls) == 2
-		# Recording branch — first call.
+		# Recording branch first call.
 		assert set_value_calls[0][1] == {"name": ("in", ["PR-rec-1", "PR-rec-2"])}
-		# Analyzing branch — second call.
+		# Analyzing branch second call.
 		assert set_value_calls[1][1] == {"name": ("in", ["PR-ana-1"])}
 
 	def test_no_set_value_when_no_phase2_rows(self, monkeypatch):
@@ -313,7 +313,7 @@ class TestSweepStalePhase2Runs:
 
 
 # --------------------------------------------------------------------------
-# _delete_older_than_days (a.k.a. _sweep_old_sessions) — ONE bulk File fetch.
+# _delete_older_than_days (a.k.a. _sweep_old_sessions) ONE bulk File fetch.
 # --------------------------------------------------------------------------
 
 class TestSweepOldSessionsBulkFileFetch:
@@ -345,7 +345,7 @@ class TestSweepOldSessionsBulkFileFetch:
 		janitor = _reload_janitor(monkeypatch)
 		janitor._sweep_old_sessions()
 
-		# EXACTLY one get_all call against "File" — not 6.
+		# EXACTLY one get_all call against "File" not 6.
 		file_calls = [c for c in stub._get_all_calls if c[0] == "File"]
 		assert len(file_calls) == 1, (
 			f"expected ONE batched File lookup, got {len(file_calls)}: {file_calls}"
@@ -357,14 +357,14 @@ class TestSweepOldSessionsBulkFileFetch:
 			"/private/files/r1.html", "/private/files/r1.pdf",
 			"/private/files/r2.html", "/private/files/r2.pdf",
 		}
-		# Session deletion fires per row (that part isn't batched — it's a
+		# Session deletion fires per row (that part isn't batched it's a
 		# delete with permissions + lifecycle events).
 		ps_delete_calls = [c for c in stub._delete_doc_calls if c[0][0] == "Optimus Session"]
 		assert len(ps_delete_calls) == 3
 
 
 # --------------------------------------------------------------------------
-# v0.13.x: ``session_retention_days = 0`` means keep forever — the daily
+# v0.13.x: ``session_retention_days = 0`` means keep forever the daily
 # sweep early-returns without deleting anything. Closes the gap where the
 # pre-v0.13.x ``or DEFAULT_RETENTION_DAYS`` silently fell back to 90 and
 # made the field description's "Set to 0 to keep forever" promise a lie.
@@ -394,7 +394,7 @@ class TestSweepOldSessionsForeverRetention:
 
 		janitor._sweep_old_sessions()
 
-		# No queries at all — the early-return fired before the
+		# No queries at all the early-return fired before the
 		# Optimus Session get_all.
 		session_calls = [c for c in stub._get_all_calls if c[0] == "Optimus Session"]
 		assert session_calls == [], (

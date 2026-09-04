@@ -21,7 +21,7 @@ import json
 
 from optimus.analyzers.base import SEVERITY_ORDER, AnalyzerResult
 
-# Thresholds — tunable via site_config.json: optimus_infra_*
+# Thresholds tunable via site_config.json: optimus_infra_*
 DEFAULT_CPU_HIGH_PCT = 85
 DEFAULT_CPU_CRITICAL_PCT = 95
 DEFAULT_RSS_DELTA_HIGH_MB = 200
@@ -55,8 +55,8 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
     # v0.5.2: per_action builds humanized action_labels on
     # context.actions, NOT on the raw recording dict. Pre-v0.5.2 the
-    # infra timeline read rec.get("action_label") — which is always
-    # None on real recordings — so every row in the "Server Resource"
+    # infra timeline read rec.get("action_label") which is always
+    # None on real recordings so every row in the "Server Resource"
     # table rendered as the synthetic "action_0", "action_1", ...
     # fallback. Same bug pattern the frontend_timings analyzer had
     # earlier; same fix: read from context.actions[idx].action_label
@@ -154,7 +154,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
         # DB pool saturation: ratio of open connections to max_connections.
         # When max_connections is unknown (pre-v0.5.0 infra blobs or a DB
         # that refused the SHOW VARIABLES), fall back to the weaker
-        # threads_running/threads_connected proxy rather than skipping —
+        # threads_running/threads_connected proxy rather than skipping
         # the fallback is noisier but still catches the obvious cases.
         if db_max and db_max > 0 and dbc is not None:
             ratio = dbc / db_max
@@ -197,7 +197,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                 f"The server's CPU was above {cpu_high}% during "
                 f"{len(cpu_breaches)} of {total_actions} steps in your flow "
                 f"(peak {max(cpu_values):.0f}%). This usually means the box is "
-                "overloaded — either your own flow is CPU-bound, or another "
+                "overloaded either your own flow is CPU-bound, or another "
                 "process on the server is competing for CPU while you profile."
             ),
             "technical_detail_json": json.dumps({
@@ -210,7 +210,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                     "If your own code is hot (check the Call Tree / N+1 "
                     "findings), optimize there first. If the call tree looks "
                     "idle but CPU is still high, something else on the server "
-                    "is using CPU — look at other workers, cron jobs, or a "
+                    "is using CPU look at other workers, cron jobs, or a "
                     "noisy neighbor."
                 ),
             }, default=str),
@@ -261,7 +261,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                 "fix_hint": (
                     "Investigate cache growth (frappe.cache, doc caches) and "
                     "long-lived object references. If swap is active, the box "
-                    "is undersized — add RAM or move the profiled workload."
+                    "is undersized add RAM or move the profiled workload."
                 ),
             }, default=str),
             "estimated_impact_ms": 0,

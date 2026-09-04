@@ -210,7 +210,7 @@ def test_cleanup_redis_deletes_tree_and_sidecar_keys(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# v0.13: persisted recordings bundle — re-run AI / regenerate after cleanup
+# v0.13: persisted recordings bundle re-run AI / regenerate after cleanup
 # ---------------------------------------------------------------------------
 
 
@@ -243,7 +243,7 @@ def test_fetch_recordings_rehydrates_from_bundle_when_redis_empty(monkeypatch):
 
 
 def test_fetch_recordings_prefers_redis_over_bundle(monkeypatch):
-	"""When Redis still has the recording the bundle is ignored — the initial
+	"""When Redis still has the recording the bundle is ignored the initial
 	analyze must be byte-identical regardless of any bundle."""
 	import frappe
 	from frappe.recorder import RECORDER_REQUEST_HASH
@@ -353,7 +353,7 @@ def test_load_recordings_bundle_none_without_file():
 
 def test_mark_ai_spend_session_sets_and_is_guarded(monkeypatch):
 	"""The marker is set on frappe.local for the spend recorder, and a stubbed
-	frappe (no .local) must not raise — unit tests rely on this no-op."""
+	frappe (no .local) must not raise unit tests rely on this no-op."""
 	from types import SimpleNamespace
 
 	import frappe

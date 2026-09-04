@@ -5,7 +5,7 @@
 
 The JSON now ships ``"default": "1"`` for the ``hide_framework_tables``
 Check field, but existing Single rows persisted a 0 before the default
-was added — so a one-time patch flips 0/None → 1. Truthy values are
+was added so a one-time patch flips 0/None → 1. Truthy values are
 left alone (idempotent + respects any deliberate ``"1"`` already set).
 """
 
@@ -57,14 +57,14 @@ def _import_patch(monkeypatch):
 	re-execute a module that's still cached in ``sys.modules`` or
 	referenced via the parent package's ``__dict__``. If we delete it
 	first, the next ``from`` lookup either fetches a stale parent-attr
-	or re-imports cleanly — but mixing with ``monkeypatch.delitem`` got
+	or re-imports cleanly but mixing with ``monkeypatch.delitem`` got
 	tangled with pytest's teardown ordering and surfaced an
 	``ImportError: module not in sys.modules`` mid-suite. The reliable
 	path is: ensure the module is in ``sys.modules`` (via plain import,
 	which is cached fast), then ``importlib.reload`` to re-run the
 	top-level code under the current stub. ``monkeypatch`` (unused
-	below — kept in the signature for symmetry / future use) doesn't
-	need to touch the patch module — only the frappe stub.
+	below kept in the signature for symmetry / future use) doesn't
+	need to touch the patch module only the frappe stub.
 	"""
 	import importlib
 
@@ -86,14 +86,14 @@ class TestSetHideFrameworkTablesDefault:
 
 	def test_flips_none_to_one(self, monkeypatch):
 		"""A Single row that existed before the field was added has no
-		stored value for the field — ``get_single_value`` returns None."""
+		stored value for the field ``get_single_value`` returns None."""
 		stub = _install_frappe_stub(monkeypatch)
 		patch = _import_patch(monkeypatch)
 		patch.execute()
 		assert stub._single_values.get("hide_framework_tables") == 1
 
 	def test_flips_empty_string_to_one(self, monkeypatch):
-		"""Some legacy Frappe rows store Checks as ""/"" (empty) — falsy."""
+		"""Some legacy Frappe rows store Checks as ""/"" (empty) falsy."""
 		stub = _install_frappe_stub(monkeypatch)
 		stub._single_values["hide_framework_tables"] = ""
 		patch = _import_patch(monkeypatch)
@@ -141,13 +141,13 @@ class TestPatchRegistered:
 			in entries
 		), (
 			"patches.txt must register the set_hide_framework_tables_default "
-			"patch — otherwise bench migrate won't run it"
+			"patch otherwise bench migrate won't run it"
 		)
 
 
 class TestJSONDefault:
 	def test_json_has_explicit_default_one(self):
-		"""The JSON field MUST carry ``"default": "1"`` — fresh installs
+		"""The JSON field MUST carry ``"default": "1"``: fresh installs
 		need the new default to land in the Single row on first create."""
 		import json
 		import os

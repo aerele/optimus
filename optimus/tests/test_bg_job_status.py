@@ -3,7 +3,7 @@
 
 """analyze captures each enqueued RQ job's terminal status (Completed / Failed
 / Timeout / Stopped) from RQ, and marks jobs still active at the wait ceiling
-as Running — so failed/timed-out jobs are reported instead of vanishing.
+as Running so failed/timed-out jobs are reported instead of vanishing.
 """
 
 import datetime

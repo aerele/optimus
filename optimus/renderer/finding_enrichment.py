@@ -1,31 +1,31 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Finding enrichment helpers — extracted from ``_internal.py``
+"""Finding enrichment helpers extracted from ``_internal.py``
 incrementally to keep the renderer-package boundary clean.
 
 Two phases shipped so far:
 
-  * **Phase 1 (v0.12.16)** — three pure-function helpers with
+  * **Phase 1 (v0.12.16)**: three pure-function helpers with
     minimal back-coupling to ``_internal.py``:
-    - ``_root_cause_key(finding)`` — ``(basename, function)``
+    - ``_root_cause_key(finding)``: ``(basename, function)``
       deepest-user-code anchor for finding grouping.
-    - ``_group_findings_by_root_cause(findings)`` — collapse
+    - ``_group_findings_by_root_cause(findings)``: collapse
       same-root-cause findings into one primary +
       ``sub_findings`` list.
-    - ``_normalize_callsite(callsite)`` — dict-or-string callsite
+    - ``_normalize_callsite(callsite)``: dict-or-string callsite
       shape normalization.
 
-  * **Phase 2 (v0.12.19)** — the drill-down chain attachers (a
+  * **Phase 2 (v0.12.19)**: the drill-down chain attachers (a
     self-contained sub-cluster of the larger finding-enrichment
     family that depends only on stdlib + ``call_tree_renderer.
     _ct_is_other_frame`` + a lazy ``optimus.analyzers.base.
     is_framework_callsite`` import):
-    - ``_find_node_in_tree(tree, basename, function)`` — DFS for
+    - ``_find_node_in_tree(tree, basename, function)``: DFS for
       a node by (basename, function).
-    - ``_walk_drilldown_chain(tree, callsite, ...)`` — hottest-
+    - ``_walk_drilldown_chain(tree, callsite, ...)``: hottest-
       child traversal below a finding's origin frame.
-    - ``_attach_drilldown_chains(findings, actions, ...)`` —
+    - ``_attach_drilldown_chains(findings, actions, ...)``:
       in-place attachment of the chain onto each finding's
       ``technical_detail``.
 
@@ -66,16 +66,16 @@ def _root_cause_key(finding: dict) -> tuple | None:
 	Resolution order:
 
 	1. If the finding has a non-empty ``drilldown_chain``, use the
-	   chain's last entry — that's the deepest user-code frame the
+	   chain's last entry that's the deepest user-code frame the
 	   drill-down walker found. Stable across all per-action analyzer
 	   findings (Slow Hot Path, Hook Bottleneck, ...).
 
 	2. Else use the callsite's own ``(filename, function)``. This is
 	   the path most analyzer findings (Hot Line, Redundant Call,
-	   N+1, etc.) take — their callsite already names the leaf.
+	   N+1, etc.) take their callsite already names the leaf.
 
 	Returns ``None`` only when the finding has no usable callsite at
-	all (e.g. infra/system observations) — those don't group.
+	all (e.g. infra/system observations) those don't group.
 
 	Match is by ``(os.path.basename(filename), function)`` so
 	dev-vs-deploy absolute path differences don't fragment groups.
@@ -111,7 +111,7 @@ def _group_findings_by_root_cause(findings: list[dict]) -> list[dict]:
 	``sub_findings``.
 
 	One root cause (e.g. a hot get_doc call inside ``_check_user_exists``)
-	commonly triggers several different finding types — a Slow Hot Path
+	commonly triggers several different finding types a Slow Hot Path
 	at the wrapper, a Hot Line on the exact line, a Redundant Call for
 	the doc, a Redundant Permission Check for its read perm. Today each
 	renders as its own card; the dev only has ONE fix to make and the
@@ -119,7 +119,7 @@ def _group_findings_by_root_cause(findings: list[dict]) -> list[dict]:
 	highest-impact finding becomes the visible card; the others appear
 	as collapsible sub-rows beneath it.
 
-	Returns a NEW list — primaries kept (with ``sub_findings`` attached
+	Returns a NEW list primaries kept (with ``sub_findings`` attached
 	when applicable), grouped non-primaries dropped, ungrouped findings
 	(no resolvable root cause) passed through as-is.
 
@@ -210,7 +210,7 @@ def _normalize_callsite(callsite) -> dict | None:
 	if isinstance(callsite, dict):
 		return callsite
 	if isinstance(callsite, str):
-		# Shape: "file.py:lineno" — split from the RIGHT so Windows
+		# Shape: "file.py:lineno" split from the RIGHT so Windows
 		# paths ("C:\\foo\\bar.py:12") keep their drive letter.
 		filename = callsite
 		lineno: int | None = None
@@ -223,7 +223,7 @@ def _normalize_callsite(callsite) -> dict | None:
 				except ValueError:
 					lineno = None
 		return {"filename": filename, "lineno": lineno, "function": ""}
-	# Unknown shape — log-worthy but don't crash. Return None so the
+	# Unknown shape log-worthy but don't crash. Return None so the
 	# template skips the Callsite block entirely.
 	return None
 
@@ -284,12 +284,12 @@ def _walk_drilldown_chain(
 	  origin's ``cumulative_ms`` (drops noisy near-leaf frames).
 
 	Returns a list of ``{filename, lineno, function, cumulative_ms,
-	pct_of_origin}`` dicts — one per level *below* the origin. The origin
+	pct_of_origin}`` dicts one per level *below* the origin. The origin
 	itself is omitted (already rendered in the smoking-gun block).
 
 	Defensive: any malformed input → ``[]``.
 	"""
-	# Lazy imports — these belong to sibling modules; importing at
+	# Lazy imports these belong to sibling modules; importing at
 	# module-top would create a circular if call_tree_renderer ever
 	# grew a dependency on this submodule.
 	from optimus.analyzers.base import is_framework_callsite
@@ -303,7 +303,7 @@ def _walk_drilldown_chain(
 		return []
 
 	# If the finding's own callsite is already in framework code, the chain
-	# below would be even further from user-actionable code — skip.
+	# below would be even further from user-actionable code skip.
 	if is_framework_callsite(filename, tracked_apps=tracked_apps or None):
 		return []
 
@@ -323,7 +323,7 @@ def _walk_drilldown_chain(
 		if not children:
 			break
 		# Pick the hottest child by cumulative_ms, skipping synthetic
-		# "[other: N frames]" collapse nodes (v0.7.x: not shown in chains —
+		# "[other: N frames]" collapse nodes (v0.7.x: not shown in chains
 		# you can't drill into a collapsed bucket).
 		hottest = max(
 			(c for c in children
@@ -354,7 +354,7 @@ def _walk_drilldown_chain(
 def _attach_drilldown_chains(findings, actions, tracked_apps: tuple[str, ...] = ()) -> None:
 	"""Walk each finding's representative call tree and attach a
 	``drilldown_chain`` to its ``technical_detail`` dict. Mutates findings in
-	place — same pattern as ``_attach_representative_callsites``.
+	place same pattern as ``_attach_representative_callsites``.
 
 	Tree JSON parses are cached per ``action_idx`` so a session with several
 	findings on the same slow action only deserialises the tree once.
@@ -396,7 +396,7 @@ def _attach_drilldown_chains(findings, actions, tracked_apps: tuple[str, ...] = 
 		if not tree:
 			continue
 		chain = _walk_drilldown_chain(tree, callsite, tracked_apps=tracked_apps)
-		# v0.7.x: always attach the chain — even empty. The template
+		# v0.7.x: always attach the chain even empty. The template
 		# distinguishes "key absent" (no callsite/action/tree, never
 		# attempted) from "empty list" (attempted but no eligible
 		# user-code descendants) to decide whether to render a "no
@@ -410,13 +410,13 @@ def _attach_drilldown_chains(findings, actions, tracked_apps: tuple[str, ...] = 
 # attacher + self-time snippet expander + phase-1 callsite retargeter +
 # their helpers (markdown-to-html, function-body snippet reader, AST
 # call-line finder). The HIGH-coupling subset that was deferred from
-# phases 1 + 2 — now ships because v0.12.23's source_resolution.py
+# phases 1 + 2 now ships because v0.12.23's source_resolution.py
 # extraction supplied the dependency.
 # ---------------------------------------------------------------------------
 
 # v0.6.x: SQL "red flag" findings (Missing Index, Full Table Scan, Filesort,
 # Temporary Table, Low Filter Ratio) are keyed by (finding_type, table) and
-# carry no callsite — the offending query is issued from many places. At
+# carry no callsite the offending query is issued from many places. At
 # render time we still have the recordings, so we pick a *representative*
 # callsite: the hottest user-app frame among the calls whose normalized query
 # matches the finding's. Surfaced as "Most-called from:" with a
@@ -439,14 +439,14 @@ def _find_call_line_in_function_body(
 	``parent_filename``. ``None`` if the source can't be read or no call
 	is found.
 
-	AST primary — locates the matching ``FunctionDef`` / ``AsyncFunctionDef``
+	AST primary locates the matching ``FunctionDef`` / ``AsyncFunctionDef``
 	node by name/lineno, then walks its body for ``Call`` expressions
 	whose target resolves to ``callee_function`` (matches both bare
 	``callee_function(...)`` via ``Name`` and ``obj.callee_function(...)``
 	via ``Attribute``).
 
 	Regex fallback when AST parse fails (truncated file, syntax error
-	elsewhere) — scans lines below the def for ``\\b<callee>\\s*\\(``
+	elsewhere) scans lines below the def for ``\\b<callee>\\s*\\(``
 	stopping at a same-or-lower indented ``def `` / ``class `` /
 	``async def `` or after 200 lines.
 
@@ -478,7 +478,7 @@ def _find_call_line_in_function_body(
 
 	if tree is not None:
 		# Find the function def closest to parent_def_lineno (defensive
-		# against the parent being a nested function — pick by name match
+		# against the parent being a nested function pick by name match
 		# AND minimum lineno distance).
 		candidates: list[_ast.AST] = []
 		for node in _ast.walk(tree):
@@ -486,7 +486,7 @@ def _find_call_line_in_function_body(
 				candidates.append(node)
 		if candidates:
 			# Filter by lineno proximity to the recorded def lineno (within
-			# a few lines is usually enough — pyinstrument's lineno can
+			# a few lines is usually enough pyinstrument's lineno can
 			# be the def or the first executed line of the body).
 			best = min(
 				candidates,
@@ -527,7 +527,7 @@ def _find_call_line_in_function_body(
 	for i in range(parent_def_lineno, max_scan):
 		raw = lines[i]
 		# Strip trailing # comments naively (string-aware comment
-		# stripping is overkill here — the worst case is a false
+		# stripping is overkill here the worst case is a false
 		# negative which falls back to the def-line behavior).
 		hash_idx = raw.find("#")
 		body = raw if hash_idx < 0 else raw[:hash_idx]
@@ -561,10 +561,10 @@ def _retarget_phase1_callsites_to_drilldown_leaf(
 	even that frame's ``def`` line is a function header rather than the
 	expensive call. The reader's eye lands on the most actionable info
 	when the snippet shows the **call expression** for the deepest
-	leaf — typically the line inside the **parent** of the deepest
+	leaf typically the line inside the **parent** of the deepest
 	frame that invokes it.
 
-	Phase-1 only — no phase-2 dependency. Hot Line / Function Not
+	Phase-1 only no phase-2 dependency. Hot Line / Function Not
 	Invoked findings (phase-2 native) are skipped. SQL "red flag"
 	findings whose callsite is a representative one are skipped too.
 
@@ -657,7 +657,7 @@ def _retarget_phase1_callsites_to_drilldown_leaf(
 		}
 		# If we anchored on a Server Script parent (its body is now readable, so
 		# call_lineno resolves and the anchor keeps the ``<serverscript>`` filename),
-		# tag it as a Desk link like _finding_to_dict does — otherwise the template
+		# tag it as a Desk link like _finding_to_dict does otherwise the template
 		# emits a broken ``vscode://file`` link built from the wrapper's real path.
 		if anchor_filename.startswith("<serverscript") or anchor_filename.startswith("<server-script"):
 			from optimus.server_script_source import desk_url, extract_script_name
@@ -673,15 +673,15 @@ def _markdown_to_safe_html(text) -> str:
 	"""Render Markdown → sanitized HTML for embedding in the report.
 
 	Mirrors the notes sanitization path (``frappe.utils.markdown`` +
-	``sanitize_html(..., always_sanitize=True)``). On ANY failure — Frappe
-	not importable, markdown/bleach hiccup — falls back to an HTML-escaped
+	``sanitize_html(..., always_sanitize=True)``). On ANY failure Frappe
+	not importable, markdown/bleach hiccup falls back to an HTML-escaped
 	``<pre>`` block so the report NEVER renders un-sanitized model output.
 
 	After sanitizing, fenced ``diff`` code blocks (which the AI-fix prompt
 	asks the model to use for before/after) get per-line ``dh-add`` /
 	``dh-del`` / ``dh-meta`` span wrappers so the report CSS can colour them
 	like a real diff. We only add ``<span>`` wrappers around already-escaped
-	text — nothing that could re-introduce unsafe markup.
+	text nothing that could re-introduce unsafe markup.
 	"""
 	from optimus.renderer.syntax import _highlight_diff_html
 
@@ -702,7 +702,7 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 
 	v0.6.0 Round 2: synthesize a unified ``callsite`` shape for findings
 	that store their location at the top level. Lazily attach a ±1 source
-	snippet to the callsite when one isn't already persisted — covers
+	snippet to the callsite when one isn't already persisted covers
 	(a) sessions analyzed before the analyze-time enrichment shipped,
 	(b) the synthesized callsites. The optional ``file_cache`` is shared
 	across all findings in the same render so a cluster of findings in
@@ -720,13 +720,13 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 	except Exception:
 		detail = {}
 	# A non-object blob (list / ``null``) would crash the ``detail.get()`` calls
-	# below — normalize so one bad finding can't take down the render.
+	# below normalize so one bad finding can't take down the render.
 	if not isinstance(detail, dict):
 		detail = {}
 
 	# Back-compat: backfill impact_scope_label for sessions analyzed before that
 	# field shipped, so the card's scope tag agrees with the TL;DR hero on
-	# re-render — but ONLY for findings that carry a loop-scoped magnitude
+	# re-render but ONLY for findings that carry a loop-scoped magnitude
 	# (loop_count / run_count). A pre-loop-scoping session stored
 	# estimated_impact_ms as the cross-request CUMULATIVE total; tagging that
 	# 'recoverable' (a loop-scoped claim) would misdescribe the number, so those
@@ -754,7 +754,7 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 	if "callsite" in detail:
 		detail["callsite"] = _normalize_callsite(detail.get("callsite"))
 
-	# v0.6.x: findings that name a function but carry no file:line — resolve
+	# v0.6.x: findings that name a function but carry no file:line resolve
 	# them so the smoking-gun block can render.
 	if not (detail.get("callsite") or {}).get("lineno"):
 		_ftype = child.finding_type or ""
@@ -776,7 +776,7 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 					"source_snippet": _read_source_snippet(_abs, _ln, cache=file_cache),
 				}
 
-	# Hot Line finding line_content windowing — keep the profiled text
+	# Hot Line finding line_content windowing keep the profiled text
 	# authoritative for the hot line itself.
 	callsite = detail.get("callsite") or {}
 	if (
@@ -865,7 +865,7 @@ def _attach_representative_callsites(findings, recordings, *, file_cache: dict |
 	red-flag findings by matching their normalized query against the recording
 	calls and picking the hottest user-app frame. Mutates ``findings`` (the
 	``_finding_to_dict`` output dicts) in place. No-op when there are no such
-	findings, no recordings, or nothing matches — those cards just render
+	findings, no recordings, or nothing matches those cards just render
 	without the block.
 	"""
 	from optimus.renderer.source import _read_source_snippet, _resolve_source_path
@@ -946,7 +946,7 @@ def _snippet_row(lines: list[str], idx: int, limit: int) -> dict:
 # A ``def`` / ``async def`` line (any indent, tab or space).
 _DEF_RE = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]")
 # A ``class`` line. A decorator block that reaches a ``class`` before a ``def``
-# is a class header, not a function's — stop rather than grab a method inside.
+# is a class header, not a function's stop rather than grab a method inside.
 _CLASS_RE = re.compile(r"^[ \t]*class[ \t]")
 # Cap on how far a decorator block may reach before its ``def`` (stacked and/or
 # multi-line decorators). Generous; real whitelisted endpoints use one or two.
@@ -954,7 +954,7 @@ _MAX_DECORATOR_BLOCK_LINES = 25
 
 
 def _find_header_def_line(lines: list[str], ln: int) -> int | None:
-	"""Lineno of the ``def`` for the header at ``lines[ln-1]`` — ``ln`` itself, or
+	"""Lineno of the ``def`` for the header at ``lines[ln-1]``: ``ln`` itself, or
 	(CPython 3.11+, where ``co_firstlineno`` is the first ``@decorator``) scanning
 	forward past the decorator block to it. None if ``ln`` is neither def nor
 	decorator, a ``class`` is hit first, or no ``def`` within the block cap."""
@@ -979,7 +979,7 @@ def _decorator_through_def_rows(
 	cache: dict | None = None,
 ) -> tuple[list[dict] | None, int]:
 	"""``(rows, def_lineno)`` spanning a self-time finding's recorded line through
-	the function's ``def`` — so the card shows the function name, not just a
+	the function's ``def``: so the card shows the function name, not just a
 	decorator (pyinstrument anchors a decorated fn at its first ``@decorator`` on
 	CPython 3.11+). ``def_lineno`` anchors the highlight; ``(None, lineno)`` when the
 	file can't be read / the line is out of range (caller keeps its snippet)."""
@@ -997,7 +997,7 @@ def _decorator_through_def_rows(
 
 	def_lineno = _find_header_def_line(lines, ln)
 	if def_lineno is None:
-		def_lineno = ln  # not a header line — show only the recorded line.
+		def_lineno = ln  # not a header line show only the recorded line.
 
 	limit = _SNIPPET_TRUNCATE_CHARS
 	rows = [_snippet_row(lines, i, limit) for i in range(ln, def_lineno + 1)]
@@ -1009,7 +1009,7 @@ def _expand_self_time_snippets(findings, *, file_cache: dict | None = None) -> N
 	(empty ``drilldown_chain``), narrow the smoking-gun snippet to the function's
 	signature line and flag it ``self_time_no_pinpoint``. Phase-1 sampling can't
 	pinpoint a single hot line inside the function, so dumping the whole body
-	(highlighting only the def) was a misleading wall of code — the card now
+	(highlighting only the def) was a misleading wall of code the card now
 	shows just the def + a note pointing the developer at a Line-Level Drilldown
 	on the function (which CAN give per-line timing).
 
@@ -1029,7 +1029,7 @@ def _expand_self_time_snippets(findings, *, file_cache: dict | None = None) -> N
 		ln = callsite.get("lineno")
 		if not fn or ln is None:
 			continue
-		# Flag drives the "no single hot line — run a Line-Level Drilldown" note.
+		# Flag drives the "no single hot line run a Line-Level Drilldown" note.
 		callsite["self_time_no_pinpoint"] = True
 		# ``ln`` is pyinstrument's frame line; on CPython 3.11+ a decorated
 		# function reports its FIRST decorator line (e.g. @frappe.whitelist()),

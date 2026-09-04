@@ -114,7 +114,7 @@ def test_walker_descends_past_rq_wrappers():
 
 
 def test_walker_skips_wrapper_function_names_regardless_of_file():
-	"""``execute_job`` in a user-app file is still skipped — the bare
+	"""``execute_job`` in a user-app file is still skipped the bare
 	function name is itself a marker of plumbing per
 	``_PURE_HELPER_FUNCTION_NAMES`` (RQ versions emit the frame under
 	various qualified / bare forms). Without this, a user happening
@@ -202,7 +202,7 @@ def test_slow_background_job_fallback_emits_on_deepest_user_frame():
 	deepest non-plumbing frame. The regular walker would emit
 	nothing; the BG-job fallback fires so the reader still gets an
 	actionable callsite instead of an unexplained 12s job."""
-	# 20% of 12s = 2400ms — below default 25% threshold but well
+	# 20% of 12s = 2400ms below default 25% threshold but well
 	# above the absolute 200ms floor. Walker won't emit; fallback
 	# should.
 	user_frame = _node(
@@ -220,7 +220,7 @@ def test_slow_background_job_fallback_emits_on_deepest_user_frame():
 		children=[user_frame],
 	)
 	# Most of the wall time is a sleep / network wait in framework
-	# plumbing — not user-actionable individually but the user-code
+	# plumbing not user-actionable individually but the user-code
 	# frame is still the right callsite to surface.
 	rq_outer = _node(
 		"execute_job",
@@ -250,7 +250,7 @@ def test_slow_background_job_fallback_emits_on_deepest_user_frame():
 	assert "In job long_running_job" in hot["title"]
 	# Action linkage preserved for the per-action table cross-link.
 	assert hot["action_ref"] == "3"
-	# Impact clamped to action wall — never claims more than the job
+	# Impact clamped to action wall never claims more than the job
 	# actually took.
 	assert hot["estimated_impact_ms"] <= 12000
 

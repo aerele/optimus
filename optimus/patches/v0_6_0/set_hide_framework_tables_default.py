@@ -7,7 +7,7 @@ Settings rows that have the field stored as 0 / None.
 Background: the field shipped without a JSON ``default: "1"``, so the
 Single's persisted value initialized to 0 for every install. The
 ``_DEFAULTS`` dict + dataclass default of True only kicked in when the
-DocType row was missing entirely — once the field exists in storage,
+DocType row was missing entirely once the field exists in storage,
 the persisted 0 wins. Users who never explicitly touched the checkbox
 were left with the filter off, even though the docs and the
 description text both say the feature is "default on". A user
@@ -17,10 +17,10 @@ and every framework / internal table was visible.
 This patch is a one-time correction:
 
 1. Only runs if the Optimus Settings Single exists (fresh installs
-   pick up the new JSON default via ``"default": "1"`` — no patch
+   pick up the new JSON default via ``"default": "1"``: no patch
    needed).
 2. Only flips values that are currently 0 / None / empty / unset to 1.
-   Any non-falsy stored value is left alone — if a deployment had
+   Any non-falsy stored value is left alone if a deployment had
    somehow set it to 1 already, the patch is a no-op.
 3. Trade-off: if an admin DELIBERATELY unchecked the box and saved
    (stored 0), the patch flips that 0 → 1. We can't distinguish

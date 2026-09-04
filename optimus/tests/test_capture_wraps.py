@@ -4,7 +4,7 @@
 """Tests for the sidecar wrap factory in capture.py.
 
 These tests exercise the wrap mechanics in isolation by passing in a
-fake `frappe_local_proxy` object — they don't require a real Frappe
+fake `frappe_local_proxy` object they don't require a real Frappe
 runtime. The integration with frappe.local happens in test_capture_pipeline.py.
 """
 
@@ -14,7 +14,7 @@ from optimus import capture
 
 
 class FakeLocal:
-	"""Stand-in for frappe.local — supports getattr/setattr."""
+	"""Stand-in for frappe.local supports getattr/setattr."""
 	pass
 
 
@@ -206,7 +206,7 @@ def test_install_wraps_idempotent():
 	"""Calling install_wraps twice does not double-wrap."""
 	import frappe
 
-	# Reset to a clean state — optimus/__init__.py runs
+	# Reset to a clean state optimus/__init__.py runs
 	# install_wraps() at app-import time, so without this reset
 	# `frappe.get_doc` is already wrapped when this test starts.
 	capture.uninstall_wraps()

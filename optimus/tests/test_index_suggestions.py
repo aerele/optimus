@@ -88,7 +88,7 @@ def test_single_suggestion_per_table_column(monkeypatch, empty_context):
 
 def test_optimizer_skipped_when_dialect_unsupported(monkeypatch, empty_context):
 	"""On a dialect whose ``supports_query_optimizer`` is False (Postgres),
-	the analyzer must NOT invoke Frappe's DBOptimizer at all — it returns a
+	the analyzer must NOT invoke Frappe's DBOptimizer at all it returns a
 	single explanatory warning and no findings, and never calls
 	``_optimize_query``.
 
@@ -132,7 +132,7 @@ def test_optimizer_skipped_when_dialect_unsupported(monkeypatch, empty_context):
 def test_parser_limitation_valueerror_gets_soft_warning(monkeypatch, empty_context):
 	"""v0.5.1: ValueError from sql_metadata is a parser limitation, not
 	a bug we should scream about. It must produce the soft "Skipped N
-	queries whose shape exceeds the parser" warning — NOT the loud
+	queries whose shape exceeds the parser" warning NOT the loud
 	"Could not analyze" warning that tells users to check Error Log.
 	And it must NOT write to frappe.log_error."""
 
@@ -141,7 +141,7 @@ def test_parser_limitation_valueerror_gets_soft_warning(monkeypatch, empty_conte
 
 	_install_fake_recorder_module(monkeypatch, fake_optimize)
 
-	# Track whether log_error was called — parser limitations must NOT
+	# Track whether log_error was called parser limitations must NOT
 	# end up in Frappe's Error Log.
 	log_error_calls = []
 	import frappe
@@ -182,7 +182,7 @@ def test_parser_limitation_valueerror_gets_soft_warning(monkeypatch, empty_conte
 		f"Expected soft parser-limit warning; got: {result.warnings}"
 	)
 	assert "Could not analyze" not in result.warnings[0], (
-		"ValueError is a parser limitation — must not use the "
+		"ValueError is a parser limitation must not use the "
 		"loud 'Could not analyze / see Error Log' phrasing"
 	)
 	# And crucially: no Error Log entry for parser limitations.
@@ -194,7 +194,7 @@ def test_parser_limitation_valueerror_gets_soft_warning(monkeypatch, empty_conte
 
 def test_real_error_still_produces_loud_warning_and_logs(monkeypatch, empty_context):
 	"""Unexpected exception types (not ValueError/TypeError) may indicate
-	a profiler bug — those still get the loud warning + Error Log entries
+	a profiler bug those still get the loud warning + Error Log entries
 	so the team can investigate."""
 
 	def fake_optimize(query: str):
@@ -284,7 +284,7 @@ def _install_fake_frappe_db(monkeypatch, indexed_columns_by_table, column_types_
             cols = indexed_columns_by_table.get(table, set())
             # Realistic SHOW INDEX rows: each leftmost-indexed column is the
             # seq-1 column of its own single-column index. Real MariaDB always
-            # returns Key_name / Non_unique — the dialect groups on them.
+            # returns Key_name / Non_unique the dialect groups on them.
             return [
                 {"Key_name": f"idx_{c}", "Column_name": c, "Seq_in_index": 1, "Non_unique": 1}
                 for c in cols
@@ -319,7 +319,7 @@ def test_already_indexed_column_is_suppressed(monkeypatch, empty_context):
     """v0.5.1 architect-review finding: Missing Index must check
     existing indexes before suggesting one. A suggestion for a
     column that's already the leftmost of an existing index is a
-    false positive — the DB already has the index the user would
+    false positive the DB already has the index the user would
     'add.' Suppress it and surface a warning."""
 
     def fake_optimize(query):
@@ -351,7 +351,7 @@ def test_already_indexed_column_is_suppressed(monkeypatch, empty_context):
     missing = [f for f in result.findings if f["finding_type"] == "Missing Index"]
     assert missing == [], (
         "Already-indexed column must NOT produce a Missing Index finding. "
-        "The DBOptimizer heuristic doesn't check existing indexes — that's "
+        "The DBOptimizer heuristic doesn't check existing indexes that's "
         "our job before emitting."
     )
     # And a warning must explain the suppression.
@@ -424,7 +424,7 @@ def test_text_column_gets_prefix_index_ddl(monkeypatch, empty_context):
     missing = [f for f in result.findings if f["finding_type"] == "Missing Index"]
     assert len(missing) == 1
     detail = json.loads(missing[0]["technical_detail_json"])
-    # DDL must include a prefix length — something like `body`(255).
+    # DDL must include a prefix length something like `body`(255).
     ddl = detail["suggested_ddl"]
     assert "`body`(" in ddl or "body(" in ddl, (
         f"TEXT column DDL must include prefix length; got: {ddl}"
@@ -568,7 +568,7 @@ def test_classifier_caches_per_table(monkeypatch, empty_context):
     # Two distinct findings (col_a, col_b on same table).
     missing = [f for f in result.findings if f["finding_type"] == "Missing Index"]
     assert len(missing) == 2
-    # But only ONE SHOW INDEX call and ONE information_schema call —
+    # But only ONE SHOW INDEX call and ONE information_schema call
     # the classifier cached per-table.
     assert len(show_index_calls) == 1, (
         f"Expected 1 SHOW INDEX call (cached per table), got {len(show_index_calls)}"
@@ -623,7 +623,7 @@ def test_non_select_statements_are_skipped_without_failures(monkeypatch, empty_c
 
 	Pre-v0.5.1, these were counted as 'parse failures' and polluted the
 	report with a warning saying 'Could not analyze 47% of your queries',
-	which was misleading — the queries weren't optimization targets to
+	which was misleading the queries weren't optimization targets to
 	begin with.
 	"""
 	optimize_call_count = {"n": 0}
@@ -667,7 +667,7 @@ def test_non_select_statements_are_skipped_without_failures(monkeypatch, empty_c
 
 	result = index_suggestions.analyze([recording], empty_context)
 
-	# The optimizer must not have been called at all — everything was
+	# The optimizer must not have been called at all everything was
 	# filtered by query type first.
 	assert optimize_call_count["n"] == 0, (
 		f"Non-SELECT statements must be skipped before reaching "
@@ -683,7 +683,7 @@ def test_non_select_statements_are_skipped_without_failures(monkeypatch, empty_c
 		f"Expected a 'Skipped N non-SELECT' warning; got: {result.warnings}"
 	)
 
-	# And crucially — there must NOT be a "Could not analyze" parse-failure
+	# And crucially there must NOT be a "Could not analyze" parse-failure
 	# warning, because nothing actually failed.
 	assert not any("Could not analyze" in w for w in result.warnings), (
 		f"Non-SELECT skips must not be reported as parse failures; "
@@ -770,8 +770,8 @@ def test_select_with_leading_comment_is_still_recognised(monkeypatch, empty_cont
 #   ValueError: too many values to unpack (expected 2, got 4)
 #
 # Pre-fix: this showed up as an Error Log entry ("optimus optimizer
-# failure") AND a loud "Could not analyze 1 of N queries — see Error Log"
-# warning. Neither is actionable — the user cannot rewrite the ERPNext
+# failure") AND a loud "Could not analyze 1 of N queries see Error Log"
+# warning. Neither is actionable the user cannot rewrite the ERPNext
 # core query and cannot add an index to fix a parse failure. v0.5.1
 # classifies these as parser limitations (soft informational warning, no
 # Error Log noise).
@@ -818,7 +818,7 @@ def test_erpnext_item_search_valueerror_is_soft_skip(monkeypatch, empty_context)
 	sql_metadata. The analyzer must:
 
 	  1. Not crash (continue processing other queries)
-	  2. Not write to frappe.log_error — it's not a profiler bug
+	  2. Not write to frappe.log_error it's not a profiler bug
 	  3. Emit the soft 'Skipped N queries whose shape exceeds…' warning
 	  4. Still produce index suggestions for OTHER queries in the same
 	     session that DO parse cleanly
@@ -864,7 +864,7 @@ def test_erpnext_item_search_valueerror_is_soft_skip(monkeypatch, empty_context)
 				"stack": [],
 			},
 			# A clean query that DOES produce a suggestion, alongside
-			# the problematic one — verifies mixed behavior.
+			# the problematic one verifies mixed behavior.
 			{
 				"query": "SELECT * FROM tabLead WHERE status = 'Open'",
 				"normalized_query": "SELECT * FROM tabLead WHERE status = ?",
@@ -937,11 +937,11 @@ def test_typeerror_from_optimizer_is_also_a_soft_skip(monkeypatch, empty_context
 
 
 def test_modified_column_is_never_suggested(monkeypatch, empty_context):
-	"""'modified' is a Frappe metadata column — updated on every save.
+	"""'modified' is a Frappe metadata column updated on every save.
 	Indexing it causes write amplification that outweighs any read-side
 	gain. Must never be suggested, even when the DBOptimizer heuristic
 	points at it. (Origin: a production report surfaced 'Add index on
-	tabDocType(modified)' — user feedback: 'Modified fields can't be
+	tabDocType(modified)' user feedback: 'Modified fields can't be
 	indexed as it would affect the system performance.' We use a non-meta
 	table here so it's the *column* blacklist being exercised, not the
 	separate meta-table rule that also covers tabDocType.)
@@ -982,7 +982,7 @@ def test_modified_column_is_never_suggested(monkeypatch, empty_context):
 	result = index_suggestions.analyze([recording], empty_context)
 	missing = [f for f in result.findings if f["finding_type"] == "Missing Index"]
 	assert missing == [], (
-		"Suggestion on tabSales Invoice.modified must be suppressed — "
+		"Suggestion on tabSales Invoice.modified must be suppressed "
 		f"modified is a Frappe metadata column. Got: {missing}"
 	)
 
@@ -1070,7 +1070,7 @@ def test_never_suggest_skips_schema_lookup(monkeypatch, empty_context):
 	result = index_suggestions.analyze([recording], empty_context)
 	assert result.findings == []
 	# Classifier's schema lookups must not have run for blacklisted
-	# columns — we can drop without checking anything else.
+	# columns we can drop without checking anything else.
 	for sql in sql_calls:
 		assert "SHOW INDEX" not in sql, (
 			f"Classifier ran SHOW INDEX for a blacklisted column: {sql}"
@@ -1082,7 +1082,7 @@ def test_never_suggest_skips_schema_lookup(monkeypatch, empty_context):
 
 def test_frappe_metadata_columns_are_never_suggested(monkeypatch, empty_context):
 	"""v0.6.0: the blacklist now covers the WHOLE Frappe standard-metadata
-	column set — `creation`, `owner`, `idx`, `parent`, `docstatus`, … —
+	column set `creation`, `owner`, `idx`, `parent`, `docstatus`, …
 	not just the per-save-mutated `modified`/`modified_by`. Even though
 	`creation`/`owner` are insert-only (no write amplification), surfacing
 	them nudges developers toward a class of change they should make
@@ -1139,7 +1139,7 @@ def test_frappe_metadata_columns_are_never_suggested(monkeypatch, empty_context)
 
 def test_frappe_meta_tables_are_never_suggested(monkeypatch, empty_context):
 	"""v0.6.0: no index suggestion is emitted on a Frappe framework "meta"
-	table (tabDocType / tabCustom Field / tabSingles / …) — `bench migrate`
+	table (tabDocType / tabCustom Field / tabSingles / …) `bench migrate`
 	owns those tables' schema, so a hand-added index is pointless. The
 	suggestion is dropped before it's even bucketed (no schema lookup), and
 	a single warning names the tables."""
@@ -1153,7 +1153,7 @@ def test_frappe_meta_tables_are_never_suggested(monkeypatch, empty_context):
 
 	_install_fake_recorder_module(monkeypatch, fake_optimize)
 	# A fake DB so a stray classify lookup would be visible (it must NOT
-	# happen — the meta-table check runs before classify).
+	# happen the meta-table check runs before classify).
 	import frappe
 	sql_calls: list[str] = []
 
@@ -1224,12 +1224,12 @@ def test_low_per_query_savings_suggestion_is_suppressed(monkeypatch, empty_conte
 
 	result = index_suggestions.analyze([recording], empty_context)
 
-	# No Missing Index finding despite 892ms cumulative — per-query savings
+	# No Missing Index finding despite 892ms cumulative per-query savings
 	# are below the floor.
 	missing = [f for f in result.findings if f["finding_type"] == "Missing Index"]
 	assert missing == [], (
 		"A suggestion with 0.58ms average savings per query must be "
-		f"suppressed — individual queries are already fast enough. "
+		f"suppressed individual queries are already fast enough. "
 		f"Got findings: {[f['title'] for f in missing]}"
 	)
 
@@ -1309,7 +1309,7 @@ def test_high_per_query_savings_still_emits(monkeypatch, empty_context):
 		{
 			"query": f"SELECT * FROM tabReport WHERE department = 'd{i}'",
 			"normalized_query": "SELECT * FROM tabReport WHERE department = ?",
-			"duration": 55.0,  # 55ms per query — well above 2ms floor
+			"duration": 55.0,  # 55ms per query well above 2ms floor
 			"stack": [],
 		}
 		for i in range(10)
@@ -1371,7 +1371,7 @@ def test_per_query_floor_boundary_at_exactly_2ms(monkeypatch, empty_context):
 
 
 def test_get_query_type_helper_direct():
-	"""Direct unit test of the _get_query_type helper — covers the
+	"""Direct unit test of the _get_query_type helper covers the
 	regex edge cases without the full analyzer path."""
 	from optimus.analyzers.index_suggestions import _get_query_type
 
@@ -1394,7 +1394,7 @@ def test_get_query_type_helper_direct():
 
 def test_classify_column_blacklists_every_frappe_metadata_column():
 	"""v0.6.0: `_classify_column` returns `never_suggest` for every column in
-	the Frappe standard-metadata set — checked before any DB lookup, so it
+	the Frappe standard-metadata set checked before any DB lookup, so it
 	works in a no-site test env."""
 	from optimus.analyzers.base import FRAPPE_METADATA_COLUMNS
 	from optimus.analyzers.index_suggestions import _classify_column
@@ -1406,7 +1406,7 @@ def test_classify_column_blacklists_every_frappe_metadata_column():
 	# Case-insensitive.
 	assert _classify_column("tabFoo", "Creation", {}, {})[0] == "never_suggest"
 	assert _classify_column("tabFoo", "  MODIFIED ", {}, {})[0] == "never_suggest"
-	# A business column is NOT blacklisted — in a no-DB env it falls through
+	# A business column is NOT blacklisted in a no-DB env it falls through
 	# to the legacy "unknown" path (plain DDL kept, not suppressed).
 	assert _classify_column("tabFoo", "customer", {}, {})[0] == "unknown"
 
@@ -1415,7 +1415,7 @@ class TestIsSafeTableName:
 	"""v0.6.x: ``_is_safe_table_name`` whitelists the only two table-name
 	shapes ``_get_indexed_columns`` is allowed to interpolate into raw
 	``SHOW INDEX FROM`` SQL. Everything else routes to an empty-set
-	fallback before the DB is touched — fixes the Lens audit's SQL-
+	fallback before the DB is touched fixes the Lens audit's SQL-
 	injection finding at index_suggestions.py:198."""
 
 	def test_accepts_tab_doctype_names(self):
@@ -1450,13 +1450,13 @@ class TestIsSafeTableName:
 
 	def test_rejects_non_tab_table_names(self):
 		from optimus.analyzers.index_suggestions import _is_safe_table_name
-		# Anything outside the tab<…>/information_schema.<…> shapes — no
+		# Anything outside the tab<…>/information_schema.<…> shapes no
 		# legitimate caller passes these, so they must be rejected.
 		assert _is_safe_table_name("user") is False  # no tab prefix
 		assert _is_safe_table_name("mysql.user") is False  # other schema
 		assert _is_safe_table_name("performance_schema.events_statements_summary") is False
 		assert _is_safe_table_name("foo.tabUser") is False  # schema-prefixed
-		# Unicode oddities — conservative reject.
+		# Unicode oddities conservative reject.
 		assert _is_safe_table_name("tabUser™") is False
 
 	def test_defensive_against_non_string_input(self):
@@ -1471,7 +1471,7 @@ class TestIsSafeTableName:
 class TestGetIndexedColumnsGuard:
 	"""The SHOW INDEX FROM call routes through ``_is_safe_table_name``
 	before touching the DB. An unsafe name must not reach ``frappe.db.sql``
-	at all — proven by raising loudly from the patched stub."""
+	at all proven by raising loudly from the patched stub."""
 
 	def test_unsafe_table_name_returns_empty_set_without_sql(self):
 		import sys
@@ -1481,7 +1481,7 @@ class TestGetIndexedColumnsGuard:
 		stub = types.ModuleType("frappe")
 		def _explode(*args, **kwargs):
 			raise AssertionError(
-				"SHOW INDEX FROM reached frappe.db.sql with an unsafe name — "
+				"SHOW INDEX FROM reached frappe.db.sql with an unsafe name "
 				"the guard at index_suggestions._get_indexed_columns is broken"
 			)
 		stub.db = types.SimpleNamespace(sql=_explode)

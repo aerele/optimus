@@ -3,29 +3,29 @@
 
 """Pytest fixtures for the real-bench integration suite.
 
-This module is **only imported under ``bench --site … run-tests``** — the
+This module is **only imported under ``bench --site … run-tests``**: the
 pure-pytest workflow at ``.github/workflows/tests.yml`` invokes
 ``pytest optimus/tests/`` and never traverses this directory, so the
 Frappe stub in ``optimus/tests/conftest.py`` doesn't apply here.
 
 The fixtures assume a live Frappe site is initialised (``frappe.init`` +
-``frappe.connect`` have already run — Frappe's test runner does this
+``frappe.connect`` have already run Frappe's test runner does this
 before importing the test modules). Direct Frappe access (``frappe.db``,
-``frappe.cache``, ``frappe.get_doc`` etc.) is the whole point — the unit
+``frappe.cache``, ``frappe.get_doc`` etc.) is the whole point the unit
 suite stubs them, the integration suite uses them.
 
 Fixtures:
 
-* :func:`test_site` — yields the site name. Tests rarely need it
+* :func:`test_site`: yields the site name. Tests rarely need it
   explicitly (frappe.local already knows), but it's useful for assertions
   and for shelling out to ``bench --site {test_site} …``.
-* :func:`cleanup_session` (autouse) — defence-in-depth teardown that
+* :func:`cleanup_session` (autouse) defence-in-depth teardown that
   hard-deletes any ``Optimus Session`` rows left behind plus their
   ``profiler:*`` Redis keys. ``FrappeTestCase`` already rolls back the
   per-test transaction, but the analyze pipeline writes through a
   background-worker connection that escapes the transaction in production
-  flows — and the Redis state isn't transactional either way.
-* :func:`seeded_session` — convenience wrapper that calls ``api.start``,
+  flows and the Redis state isn't transactional either way.
+* :func:`seeded_session`: convenience wrapper that calls ``api.start``,
   yields the session_uuid, and on teardown calls ``api.stop`` and waits
   for analyze to finalise. Used by the lifecycle test.
 """
@@ -41,7 +41,7 @@ import pytest
 @pytest.fixture(scope="session")
 def test_site() -> str:
 	"""The name of the Frappe site the test runner is connected to. Returns
-	``frappe.local.site`` so tests stay site-agnostic — the helper script
+	``frappe.local.site`` so tests stay site-agnostic the helper script
 	creates ``test_site`` but a local developer running this suite against
 	their own bench site sees that site name."""
 	return frappe.local.site
@@ -53,7 +53,7 @@ def cleanup_session():
 
 	FrappeTestCase wraps each test in a DB transaction that's rolled back
 	at teardown, but the analyze pipeline runs in a background worker via
-	RQ — its writes are in a separate connection that escapes that
+	RQ its writes are in a separate connection that escapes that
 	transaction in real flows. Same for Redis: the active-session pointer
 	and the per-session metadata hash aren't transactional either way.
 
@@ -64,12 +64,12 @@ def cleanup_session():
 	already rolled back.
 	"""
 	yield
-	# Lazy imports — analyze.py / session.py do their own frappe imports
+	# Lazy imports analyze.py / session.py do their own frappe imports
 	# at module top, but the conftest shouldn't reach them at module load
 	# (it would slow down test-collection in the bench runner).
 	try:
 		_purge_test_sessions()
-	except Exception as exc:  # pragma: no cover — best-effort path
+	except Exception as exc:  # pragma: no cover best-effort path
 		frappe.log_error(
 			title="optimus integration: cleanup_session",
 			message=f"{type(exc).__name__}: {exc}",
@@ -79,7 +79,7 @@ def cleanup_session():
 def _purge_test_sessions() -> None:
 	"""Delete every ``Optimus Session`` row whose user is the current
 	session user, plus their associated Redis state. Safe to call on a
-	bench that holds OTHER sessions (different users) — the user-scoped
+	bench that holds OTHER sessions (different users) the user-scoped
 	filter prevents collateral damage."""
 	user = getattr(frappe.session, "user", None) or "Administrator"
 	rows = frappe.get_all(

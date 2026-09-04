@@ -19,9 +19,9 @@ Aggregates:
   - session_time_breakdown_json: SQL ms + per-app Python ms for the donut
 
 Terminology note (U1): internal field names use ``cumulative_ms``
-(pyinstrument's term — self_time + descendant time). The
+(pyinstrument's term self_time + descendant time). The
 user-facing report tags the same value as ``consolidated``. This
-split is intentional — don't rename one to match the other without
+split is intentional don't rename one to match the other without
 a project-owner sign-off.
 """
 
@@ -200,7 +200,7 @@ def _pyi_to_dict_tree(pyi_session_or_dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-# Module path prefixes treated as "framework" — graft points roll back
+# Module path prefixes treated as "framework" graft points roll back
 # past these so SQL leaves attach under user code, not under helpers.
 #
 # v0.5.1: the fragments used to include leading slashes ("/frappe/",
@@ -212,7 +212,7 @@ def _pyi_to_dict_tree(pyi_session_or_dict) -> dict:
 # "99% of time was spent in application" (i.e. frappe/app.py::application)
 # instead of descending past the framework frame to the user code
 # below. Dropping the leading slashes makes the filter work against
-# both relative and absolute filenames — a relative filename like
+# both relative and absolute filenames a relative filename like
 # "frappe/handler.py" contains "frappe/", and an absolute filename
 # like "/Users/.../frappe/handler.py" also contains "frappe/".
 _FRAMEWORK_PATH_FRAGMENTS = ("frappe/", "optimus/")
@@ -224,14 +224,14 @@ def _is_framework_frame(node_or_frame: dict) -> bool:
 
 	Used by SQL-to-Python reconciliation and Slow Hot Path findings,
 	which want to blame user code ABOVE the framework boundary and
-	therefore skip aggressively — everything in frappe/* and
+	therefore skip aggressively everything in frappe/* and
 	optimus/*.
 
 	For Repeated Hot Frame + hot-frames leaderboard aggregation, use
 	the NARROWER ``_is_pure_helper_frame`` instead. That function keeps
 	application-layer Frappe code (Document lifecycle, permissions,
 	hooks, naming) visible so users can see legitimate optimization
-	targets inside frappe/* — which is a different question than
+	targets inside frappe/* which is a different question than
 	'whose SQL is this.'
 	"""
 	fn = node_or_frame.get("function") or ""
@@ -246,7 +246,7 @@ def _is_framework_frame(node_or_frame: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Pure-helper frame detection (v0.5.1 — narrower than framework-frame)
+# Pure-helper frame detection (v0.5.1 narrower than framework-frame)
 # ---------------------------------------------------------------------------
 # The semantic question for the Repeated Hot Frame finding is:
 #
@@ -256,25 +256,25 @@ def _is_framework_frame(node_or_frame: dict) -> bool:
 # user code." Repeated Hot Frame is different: it asks "is this function
 # itself worth optimizing?" Document.run_method, permissions.has_permission,
 # naming.make_autoname, and most of frappe/core/* and frappe/model/* are
-# INSIDE frappe/* yet legitimately slow optimization targets — they run
+# INSIDE frappe/* yet legitimately slow optimization targets they run
 # the user's hooks, their permission rules, or their custom naming
 # configuration. Surfacing them in the leaderboard is correct.
 #
 # So we skip only:
-#   1. optimus/*                 — always (our own tool)
-#   2. /frappe/utils/                    — data conversion, password, redis wrapper
-#   3. /frappe/handler.py, /frappe/app.py — request dispatch plumbing
-#   4. Infrastructure libraries          — werkzeug, gunicorn, rq, redis
+#   1. optimus/* always (our own tool)
+#   2. /frappe/utils/ data conversion, password, redis wrapper
+#   3. /frappe/handler.py, /frappe/app.py request dispatch plumbing
+#   4. Infrastructure libraries werkzeug, gunicorn, rq, redis
 #                                          client, pyinstrument, pytz, dateutil
 #
-# Everything else — including most of frappe/*, all of erpnext/*, and
-# all user apps — is KEPT so users see legitimate optimization targets
+# Everything else including most of frappe/*, all of erpnext/*, and
+# all user apps is KEPT so users see legitimate optimization targets
 # like "Document.run_method consumed 2.4s across 12 actions."
 
 # v0.5.1: suffix matches (via endswith). Specific framework plumbing
 # files where every request passes through the same function on its way
 # from gunicorn to the user's endpoint. Surfacing these in the Repeated
-# Hot Frame leaderboard is meaningless — they're always going to be in
+# Hot Frame leaderboard is meaningless they're always going to be in
 # every action because they ARE the dispatch pipeline. Report on file
 # against ERPNext showed 8 Repeated Hot Frame findings, ALL of them
 # from this list.
@@ -282,7 +282,7 @@ def _is_framework_frame(node_or_frame: dict) -> bool:
 # endswith() works regardless of whether the stored filename is
 # absolute (/Users/.../apps/frappe/frappe/handler.py) or relative
 # (frappe/handler.py) or bench-relative (apps/frappe/frappe/handler.py)
-# — all three end with "frappe/handler.py".
+# all three end with "frappe/handler.py".
 _PURE_HELPER_PATH_SUFFIXES = (
 	# Frappe WSGI entry + request dispatch
 	"frappe/app.py",
@@ -290,7 +290,7 @@ _PURE_HELPER_PATH_SUFFIXES = (
 	"frappe/middlewares.py",
 	# frappe.call, frappe.get_doc (top-level module dispatchers)
 	"frappe/__init__.py",
-	# REST API routing (v0.5.1 addition — missed before because of the
+	# REST API routing (v0.5.1 addition missed before because of the
 	# leading-slash bug, but also needs explicit entries for v1/v2 files)
 	"frappe/api/__init__.py",
 	"frappe/api/v1.py",
@@ -303,14 +303,14 @@ _PURE_HELPER_PATH_SUFFIXES = (
 	"frappe/recorder.py",
 	# v0.5.2: meta-loading plumbing. A real production report had 11
 	# Repeated Hot Frame entries all from meta.py (Meta.__init__,
-	# load_from_db, process, get_meta, ...) — identical cumulative
+	# load_from_db, process, get_meta, ...) identical cumulative
 	# times because they're the same call tree. Users can't optimize
 	# "how Meta loads its fields"; they ARE the framework's cold path.
 	"frappe/model/meta.py",
 	# v0.5.2: entire frappe/model/document.py is framework plumbing.
 	# Document.save / insert / submit etc. look user-recognisable but
 	# their cumulative time is always just the sum of the validate /
-	# on_submit / etc. hooks inside them — which ARE visible as
+	# on_submit / etc. hooks inside them which ARE visible as
 	# separate hot frames in the user's own app code (erpnext/myapp/
 	# validate). Keeping document.py entries in the leaderboard
 	# produces double-counting noise: save → _save → run_method →
@@ -319,7 +319,7 @@ _PURE_HELPER_PATH_SUFFIXES = (
 	# document.py entries and only validate/set_missing_values (the
 	# actual user code) told the user anything new.
 	"frappe/model/document.py",
-	# Form-level meta loading: getdoctype, get_meta_bundle — these are
+	# Form-level meta loading: getdoctype, get_meta_bundle these are
 	# what Desk calls when you open a form. Cumulative time is always
 	# ~= the doctype cache miss cost, which Frappe handles internally.
 	"frappe/desk/form/load.py",
@@ -327,17 +327,17 @@ _PURE_HELPER_PATH_SUFFIXES = (
 	# Query builder internals. Every SQL query the ORM builds passes
 	# through these. Cumulative time on a report session is the sum
 	# across all queries; the hot frame just means "this session had
-	# a lot of SQL" — the top_queries/index_suggestions analyzers
+	# a lot of SQL" the top_queries/index_suggestions analyzers
 	# already surface that signal more actionably.
 	"frappe/query_builder/utils.py",
 	"frappe/model/qb_query.py",
 	# Low-level DB cursor layer. frappe.db.sql / get_values / execute
 	# all land here. Same "every query passes through" story as the
-	# query builder — not a user-actionable hot frame.
+	# query builder not a user-actionable hot frame.
 	"frappe/database/database.py",
 	"frappe/database/mariadb/database.py",
 	"frappe/database/postgres/database.py",
-	# Intentionally NOT filtered: frappe/model/naming.py — a user's
+	# Intentionally NOT filtered: frappe/model/naming.py a user's
 	# naming-series configuration IS optimizable (simpler series,
 	# fewer SQL lookups), so make_autoname staying visible in the
 	# hot-frames leaderboard is correct.
@@ -345,14 +345,14 @@ _PURE_HELPER_PATH_SUFFIXES = (
 
 # v0.5.1: substring matches (via `in`). Whole directories of framework
 # helpers / infrastructure libraries. Fragment values MUST NOT have
-# leading slashes — the stored filenames are typically relative
+# leading slashes the stored filenames are typically relative
 # (`frappe/utils/foo.py`), and `/frappe/utils/` does not occur as a
 # substring of `frappe/utils/foo.py`. See the comment on
 # _FRAMEWORK_PATH_FRAGMENTS for the full history of this bug.
 _PURE_HELPER_PATH_SUBSTRINGS = (
 	"optimus/",
 	"frappe/utils/",          # typing_validations, response, redis_wrapper, etc.
-	# v0.5.2: frappe/model/utils/ is plumbing too — is_virtual_doctype,
+	# v0.5.2: frappe/model/utils/ is plumbing too is_virtual_doctype,
 	# get_parent_doc, etc. Called by the document loader and doesn't
 	# reflect any user decision. Distinct from frappe/utils/ which
 	# wouldn't have matched it because there's a `/model/` in between.
@@ -381,7 +381,7 @@ _PURE_HELPER_FUNCTION_PREFIXES = (
 # pattern: functools.wraps / frappe.hook / erpnext.naming_decorator
 # produce frames named "wrapper", "composer", "runner", "fn". They
 # forward to the real function and their cumulative_ms is essentially
-# identical to the wrapped function's — so showing BOTH in the hot-
+# identical to the wrapped function's so showing BOTH in the hot-
 # frame leaderboard is noise: the user sees two rows with the same
 # time for every decorated method.
 #
@@ -394,7 +394,7 @@ _PURE_HELPER_FUNCTION_NAMES = frozenset({
 	# functools.wraps + frappe.hook decorator internals
 	"wrapper", "composer", "runner", "fn", "hook", "compose",
 	"add_to_return_value",
-	# Private delegation shims — always called by their non-underscored
+	# Private delegation shims always called by their non-underscored
 	# sibling (save → _save, insert → _insert, etc.). Keep the public
 	# entry point in the leaderboard; hide the private one.
 	"_save", "_insert",
@@ -410,7 +410,7 @@ _PURE_HELPER_FUNCTION_NAMES = frozenset({
 
 # v0.5.2: bench/site third-party libraries whose frames pyinstrument
 # leaves without the site-packages/ prefix. MySQLdb / pymysql /
-# requests etc. These aren't Frappe apps — the user can't optimize
+# requests etc. These aren't Frappe apps the user can't optimize
 # them. Already filtered by the donut's _top_level_app but wasn't
 # filtered here, so they leaked into the Repeated Hot Frame
 # leaderboard.
@@ -427,11 +427,11 @@ def _is_pure_helper_frame(
 	plumbing helpers that users can't optimize. Keeps most of frappe/*
 	so hot-frame findings remain useful when application-layer Frappe
 	code (Document lifecycle, permissions, hooks, naming) is the actual
-	bottleneck — and users who ARE Frappe contributors can see those as
+	bottleneck and users who ARE Frappe contributors can see those as
 	legitimate targets too.
 
 	Called by the Repeated Hot Frame aggregator AND by
-	``_is_walker_plumbing_frame`` (the Slow Hot Path / Hook / BG-job walker) — so
+	``_is_walker_plumbing_frame`` (the Slow Hot Path / Hook / BG-job walker) so
 	both surfaces share this predicate. NOT for SQL-to-Python reconciliation, which
 	wants the broader ``_is_framework_frame`` so SQL attributes blame to user code
 	above the framework boundary.
@@ -465,7 +465,7 @@ def _is_pure_helper_frame(
 		return False
 
 	# Any venv / system-packages path is third-party regardless of whether the lib
-	# is in the hardcoded set below — a real ``site-packages/`` path is never the
+	# is in the hardcoded set below a real ``site-packages/`` path is never the
 	# developer's code, so it must not leak into the hot-frame leaderboard.
 	# (Mirrors the same guard in base.is_framework_callsite.)
 	if "site-packages/" in filename or "dist-packages/" in filename:
@@ -473,7 +473,7 @@ def _is_pure_helper_frame(
 
 	# Tracked Apps (inclusion mode): when the operator has configured which apps
 	# to profile in Optimus Settings, a frame OUTSIDE those apps is out of scope,
-	# so treat it as plumbing (skip it) — the same decision the SQL classifier
+	# so treat it as plumbing (skip it) the same decision the SQL classifier
 	# makes via is_framework_callsite's inclusion mode. Off (empty) → no-op.
 	if tracked_apps and is_framework_callsite(filename, tracked_apps, installed_apps):
 		return True
@@ -506,11 +506,11 @@ def _is_pure_helper_frame(
 
 	first_segment = stripped.split("/", 1)[0]
 	# Exclusion mode + on-bench: ground-truth allowlist, keyed on the RESOLVED app
-	# root — the boundary-anchored ``apps/<app>/`` segment (or, for an absolute
+	# root the boundary-anchored ``apps/<app>/`` segment (or, for an absolute
 	# path, the last-``apps/``-wins one), exactly as base.is_framework_callsite and
 	# _top_level_app resolve it. Keying on the raw first segment would read "apps"
-	# for an apps/-prefixed path and "home"/"opt" for an absolute one — neither an
-	# installed app — and wrongly drop the user's own frames, diverging from the SQL
+	# for an apps/-prefixed path and "home"/"opt" for an absolute one neither an
+	# installed app and wrongly drop the user's own frames, diverging from the SQL
 	# classifier this change exists to match. Inclusion mode was already decided
 	# above (line 473); the allowlist must not re-filter a tracked app that isn't
 	# among the site's installed apps. Truthy check (not ``is not None``) so an
@@ -543,16 +543,16 @@ def _is_walker_plumbing_frame(
 	``_is_pure_helper_frame``'s angle-bracket-filename rule classifies as
 	plumbing for the Repeated Hot Frame aggregator (one-off scripts don't
 	aggregate). For the Slow Hot Path walker, they are legitimate
-	user-actionable hot frames — and they stay actionable even when Tracked Apps
+	user-actionable hot frames and they stay actionable even when Tracked Apps
 	is configured, because a Server Script is the developer's own optimizable code
 	(it lives in the database, not in any app), so it is never "out of scope".
 	"""
 	if _is_framework_frame(node):
 		return True
 	filename = (node.get("filename") or "").replace("\\", "/").lstrip("/")
-	# Server Script bodies → user code for the walker, not plumbing — regardless of
+	# Server Script bodies → user code for the walker, not plumbing regardless of
 	# Tracked Apps. Frappe's safe_exec emits ``<serverscript>`` (bare) or
-	# ``<serverscript>: <name>`` — match on the ``<serverscript`` prefix (same as
+	# ``<serverscript>: <name>``: match on the ``<serverscript`` prefix (same as
 	# the sister checks in _display_name_for_node and _top_level_app); the older
 	# ``<serverscript-N>`` form is covered too.
 	if filename.startswith("<serverscript") or filename.startswith("<server-script"):
@@ -590,11 +590,11 @@ def _find_graft_point(root: dict, stack: list):
 				next_child = child
 				break
 		if next_child is None:
-			# No further match — stop descending
+			# No further match stop descending
 			break
 		current = next_child
 		last_matched_index = i
-		# Track the deepest non-framework match — that's where we graft.
+		# Track the deepest non-framework match that's where we graft.
 		if not _is_framework_frame(current):
 			matched_user_node = current
 
@@ -612,7 +612,7 @@ def _coalesce_sql_siblings(node: dict) -> None:
 	Coalescing key: (query_normalized, partial_match). Coalesced nodes
 	get an `is_n_plus_one_hint=True` flag the renderer uses to show
 	`<sql> ×N` instead of N separate rows. The n_plus_one analyzer still
-	emits its own finding — this is just a renderer hint.
+	emits its own finding this is just a renderer hint.
 	"""
 	children = node.get("children") or []
 	if not children:
@@ -652,7 +652,7 @@ def reconcile(pyi_session_or_dict, sql_calls: list, action_wall_time_ms: float) 
 	where the recorder stack ran past the pyi tree's visible depth.
 
 	Time-accounting invariant: pyinstrument has already counted SQL time
-	in every Python ancestor's cumulative_ms. We DO NOT subtract — the
+	in every Python ancestor's cumulative_ms. We DO NOT subtract the
 	leaf's self_ms is informational only. The renderer always reads
 	cumulative_ms from the node itself, never sums children.
 	"""
@@ -696,7 +696,7 @@ def _prune_recursive(node: dict, threshold: float) -> None:
 	dropped_self_ms = 0.0
 	dropped_cumulative_ms = 0.0
 	for child in children:
-		# Never prune SQL leaves — they're always meaningful
+		# Never prune SQL leaves they're always meaningful
 		if child.get("kind") == "sql":
 			kept.append(child)
 			continue
@@ -776,12 +776,12 @@ def _soft_cap_recursive(node: dict, max_nodes: int, state: dict) -> None:
 # of the Medium pair so a single configured threshold drives both.
 DEFAULT_HOT_PATH_PCT = 0.25  # fallback when settings unreachable
 DEFAULT_HOT_PATH_MS = 200
-HOT_PATH_HIGH_PCT_MULTIPLIER = 2.0     # 0.50 / 0.25 — preserves legacy ratio
+HOT_PATH_HIGH_PCT_MULTIPLIER = 2.0     # 0.50 / 0.25 preserves legacy ratio
 HOT_PATH_HIGH_MS_MULTIPLIER = 2.5      # 500 / 200
 # v0.7.x: absolute-impact escape hatch. A subtree consuming >= this many
 # multiples of high_ms is High regardless of relative pct. Picked at 2.0
 # (≥1s at default) so a 1.4s subtree at 49% of a 3s action gets the
-# severity its absolute impact deserves — without this, the TL;DR
+# severity its absolute impact deserves without this, the TL;DR
 # headline picks smaller High findings over larger Medium ones.
 HOT_PATH_HIGH_ABS_MULTIPLIER = 2.0     # 2× high_ms → 1000ms by default
 SQL_DOMINANCE_SUPPRESSION_PCT = 0.80
@@ -821,7 +821,7 @@ def _largest_sql_child(node: dict):
 # v0.5.3: Uninformative function names pyinstrument emits for dynamically
 # executed code. A Server Script body, a `exec()`'d snippet, a module's
 # top level, or a list/generator/dict-comp with no function context all
-# show up as one of these synthetic names — and plugging them directly
+# show up as one of these synthetic names and plugging them directly
 # into a finding title gives nonsensical output like
 # "spent in <module>" or "spent in " (empty).
 _UNINFORMATIVE_FUNCTION_NAMES = frozenset({
@@ -845,10 +845,10 @@ def _display_name_for_node(node: dict) -> str:
 	  1. ``node["function"]`` if it's a real name (not in the
 	     uninformative list).
 	  2. ``short_filename(filename):lineno`` when we can derive a
-	     file location — useful for module-scope or ``<module>``
+	     file location useful for module-scope or ``<module>``
 	     frames so the title reads "spent in myapp/foo.py:42".
 	  3. A type-aware label based on what the synthetic name
-	     suggests — e.g. a Server Script body becomes
+	     suggests e.g. a Server Script body becomes
 	     "<server-script body>". Better than pass-through because
 	     the report reader immediately understands what's slow.
 	  4. "<unnamed code>" as last resort.
@@ -868,7 +868,7 @@ def _display_name_for_node(node: dict) -> str:
 
 	# Detect Server Scripts: Frappe's safe_exec compiles with filename
 	# "<serverscript>" (bare) or "<serverscript>: <scrubbed-name>". Surface
-	# the script name + lineno so the user can locate the issue — the
+	# the script name + lineno so the user can locate the issue the
 	# v0.7.x+ renderer also links these callsites to the Desk Server Script
 	# form (see optimus/server_script_source.py).
 	if filename.startswith("<serverscript") or filename.startswith("<server-script"):
@@ -907,7 +907,7 @@ def _first_user_code_descendant(
 
 	Walks depth-first so the *deepest* hot user-code frame wins over an
 	enclosing wrapper that just relays its work. Skips frames classified
-	as framework OR pure-helper plumbing — same predicates the walker
+	as framework OR pure-helper plumbing same predicates the walker
 	uses to descend past them.
 
 	Used by the BG-job fallback when the regular Slow Hot Path walker
@@ -950,7 +950,7 @@ def _emit_per_action_findings(
 
 	For BG jobs (action_label starts with "RQ Job: ") that don't produce
 	any per-frame finding but ARE slow, emit a Slow Background Job
-	finding rooted at the deepest user-code frame — so the reader has an
+	finding rooted at the deepest user-code frame so the reader has an
 	actionable callsite instead of an unexplained 12s job entry.
 	"""
 	if action_wall_time_ms <= 0:
@@ -1000,7 +1000,7 @@ def _emit_per_action_findings(
 						f"crossed the Slow Hot Path threshold. **{fn_name}** "
 						f"is the deepest user-code frame and accounts for "
 						f"{impact_ms:.0f}ms ({pct_str} of the job). Start "
-						"there — open the Line-Level Drilldown for a "
+						"there open the Line-Level Drilldown for a "
 						"statement-level breakdown of where the time goes."
 					),
 					"technical_detail_json": json.dumps({
@@ -1034,7 +1034,7 @@ def _walk_for_findings(
 	# across actions and produce pct > 100% (impossible per-action),
 	# which would tier-promote a Medium finding to High purely
 	# because of cross-action aggregation. The absolute-ms gate
-	# (cumulative >= med_ms / high_ms) still uses raw cumulative —
+	# (cumulative >= med_ms / high_ms) still uses raw cumulative
 	# the user *did* spend that much time across actions; we only
 	# refuse to inflate the *percentage* tier.
 	raw_pct = cumulative / action_wall_time_ms if action_wall_time_ms else 0
@@ -1100,7 +1100,7 @@ def _walk_for_findings(
 			# v0.7.x: BG-job action_label carries an "RQ Job: " prefix
 			# for disambiguation in the per-action table. Inside a
 			# finding title that already says "In <label>, …", the
-			# prefix reads as boilerplate — strip it to "In job
+			# prefix reads as boilerplate strip it to "In job
 			# <short>" so the hotspot is the visual anchor, not the
 			# wrapper noise.
 			if action_label.startswith("RQ Job: "):
@@ -1116,7 +1116,7 @@ def _walk_for_findings(
 			# name. Pyinstrument's aggregator merges trivially-identical
 			# siblings, but distinct call sites stay separate nodes;
 			# sharing function name across them means this function was
-			# hit from N call sites in one action — useful signal for
+			# hit from N call sites in one action useful signal for
 			# "called from a loop" diagnoses.
 			parent = parent_chain[-1] if parent_chain else None
 			intra_action_repetitions = (
@@ -1136,7 +1136,7 @@ def _walk_for_findings(
 					"customer_description": (
 						f"During *{_label_for_title}*, the **{fn_name}** doc-event hook "
 						f"consumed {pct_str} of its wall time ({impact_ms:.0f}ms). "
-						"Hook functions run on every save/submit — optimizing this "
+						"Hook functions run on every save/submit optimizing this "
 						"would speed up every similar action across your site."
 					),
 					"technical_detail_json": json.dumps({
@@ -1159,8 +1159,8 @@ def _walk_for_findings(
 				# .apply_pricing_rule" and fn_name = "apply_pricing_rule"),
 				# the classic phrasing "In X, N% of time was spent in
 				# X" reads as tautology. The real signal is that the
-				# function's own body is the hot spot — not a subcall
-				# — so surface THAT. User-reported on a real Sales
+				# function's own body is the hot spot not a subcall
+				# so surface THAT. User-reported on a real Sales
 				# Invoice Submit report.
 				self_referential = (
 					action_label == fn_name
@@ -1175,17 +1175,17 @@ def _walk_for_findings(
 					desc = (
 						f"The body of **{fn_name}** itself consumed "
 						f"{pct_str} of the action time ({impact_ms:.0f}ms). "
-						"This isn't a slow subcall — the function's own logic "
+						"This isn't a slow subcall the function's own logic "
 						"is the bottleneck. To pinpoint the exact hot line, "
 						"run a **Line-Level Drilldown** (the *Run Line-Profile "
 						"Pass* button on the session) and pick this function "
-						"from the candidates — that profiles tight loops, "
+						"from the candidates that profiles tight loops, "
 						"expensive computations, and string/regex work at the "
 						"statement level so you can optimize or cache them."
 						"\n\nNote: self-time here is wall-clock (the sampler "
 						"measures elapsed time, not CPU). If this function "
-						"blocks on I/O — `requests.get`, sync DB calls "
-						"outside the recorder, `time.sleep` — that wait "
+						"blocks on I/O `requests.get`, sync DB calls "
+						"outside the recorder, `time.sleep`: that wait "
 						"counts as self-time. Check the call tree for "
 						"hidden I/O before optimising compute."
 					)
@@ -1220,7 +1220,7 @@ def _walk_for_findings(
 					"action_ref": str(action_idx),
 				})
 			# When we emit a finding for this node, do NOT recurse into
-			# its children — children are already represented in the
+			# its children children are already represented in the
 			# subtree's cumulative_ms, and recursing would create
 			# overlapping nested findings.
 			return
@@ -1255,7 +1255,7 @@ def _redacted_module_key(function: str, filename: str = "") -> str | None:
 	modules, or 20 different ``handle`` methods) don't all collapse
 	into one bucket. Pre-v0.5.1 used the bare function name, which
 	produced misleading 'Repeated Hot Frame' findings blaming generic
-	decorator wrappers that the user cannot optimize — every functools
+	decorator wrappers that the user cannot optimize every functools
 	wrapper, werkzeug wrapper, and frappe.whitelist wrapper in the
 	session would roll up under a single 'wrapper' key.
 
@@ -1288,9 +1288,9 @@ def _aggregate_hot_frames(
 	"""Build the cross-action hot frames map → (findings, leaderboard).
 
 	Returns:
-	  findings   — list of Repeated Hot Frame findings (session-wide,
+	  findings list of Repeated Hot Frame findings (session-wide,
 	               no action_ref)
-	  leaderboard — list of top-N dicts for hot_frames_json
+	  leaderboard list of top-N dicts for hot_frames_json
 	"""
 	# {function_key: [(action_idx, self_ms, cumulative_ms), ...]}
 	occurrences: dict = defaultdict(list)
@@ -1316,10 +1316,10 @@ def _aggregate_hot_frames(
 		row = {
 			"function": key,
 			# A.AE1: self-sum is the precise "time in this function
-			# across the whole tree" metric — what the user-app
+			# across the whole tree" metric what the user-app
 			# variant displays.
 			"total_ms": round(total_self_ms, 2),
-			# Cumulative-sum — what the framework variant displays.
+			# Cumulative-sum what the framework variant displays.
 			# See _walk_for_aggregation's comment for the why.
 			"total_cumulative_ms": round(total_cum_ms, 2),
 			"occurrences": len(occs),
@@ -1370,7 +1370,7 @@ def _walk_for_aggregation(
 ) -> None:
 	if node.get("kind") == "python":
 		# v0.5.1: skip PURE HELPER frames only, not all framework code.
-		# This is the narrower _is_pure_helper_frame check — we want to
+		# This is the narrower _is_pure_helper_frame check we want to
 		# keep Document.run_method, permission checks, naming, and other
 		# application-layer Frappe code in the leaderboard because they
 		# can be legitimate optimization targets (e.g. a slow doc-event
@@ -1379,7 +1379,7 @@ def _walk_for_aggregation(
 		# (werkzeug, rq, etc.) are suppressed.
 		#
 		# An earlier v0.5.1 draft used the broader _is_framework_frame
-		# here, which hid ALL frappe/* frames — that was too aggressive
+		# here, which hid ALL frappe/* frames that was too aggressive
 		# and blinded the analyzer to real application-layer bottlenecks
 		# inside Frappe that users could act on.
 		if not _is_pure_helper_frame(node, tracked_apps, installed_apps):
@@ -1389,7 +1389,7 @@ def _walk_for_aggregation(
 			)
 			if key:
 				# v0.7.x A.AE1: track self_ms (immune to recursion
-				# double-counting) for the user-app variant — that's
+				# double-counting) for the user-app variant that's
 				# the exact "time in this function's body across the
 				# whole action's tree" answer.
 				#
@@ -1400,7 +1400,7 @@ def _walk_for_aggregation(
 				# The framework column displays cumulative_ms instead
 				# (renderer.build_hot_frames_table chooses per
 				# variant). Risk: nested same-name framework frames
-				# would double-count cumulative — acceptable on the
+				# would double-count cumulative acceptable on the
 				# collapsed-by-default framework table, where the
 				# column is informational rather than decision-grade.
 				occurrences[key].append(
@@ -1437,7 +1437,7 @@ def _strip_profiler_frames(node: dict) -> dict:
 
 	67% of the action's time was attributed to the profiler's own
 	infra snapshot. The root cause was _start_pyi_session being
-	called BEFORE infra_capture.snapshot() in before_request — the
+	called BEFORE infra_capture.snapshot() in before_request the
 	snapshot was still on the call stack when pyinstrument began
 	sampling. The primary fix (v0.5.1) reorders the hook so the
 	snapshot happens first. This tree-strip pass is belt-and-
@@ -1475,14 +1475,14 @@ def _top_level_app(function: str, filename: str) -> str:
 	function name), with additional filters to keep Python stdlib /
 	synthetic / third-party frames from polluting the bucket list.
 
-	A real production donut showed these noise buckets — all 0ms each:
+	A real production donut showed these noise buckets all 0ms each:
 
-	    Python (inspect.py)    — Python stdlib (single-segment filename)
-	    Python (functools.py)  — Python stdlib
-	    Python (MySQLdb)       — third-party, pyinstrument stripped
+	    Python (inspect.py) Python stdlib (single-segment filename)
+	    Python (functools.py) Python stdlib
+	    Python (MySQLdb) third-party, pyinstrument stripped
 	                             "site-packages/" so the substring
 	                             filter missed it
-	    Python (<built-in>)    — pyinstrument synthetic for C builtins
+	    Python (<built-in>) pyinstrument synthetic for C builtins
 
 	All four should collapse to the ``[other]`` catch-all. The rules
 	that route them correctly:
@@ -1492,12 +1492,12 @@ def _top_level_app(function: str, filename: str) -> str:
 	  2. Synthetic filenames wrapped in angle brackets → [other]
 	  3. Filenames containing ``site-packages/`` or ``dist-packages/``
 	     (third-party libs) → [other]
-	  4. Single-segment filenames (``inspect.py``, ``functools.py``) —
+	  4. Single-segment filenames (``inspect.py``, ``functools.py``)
 	     these are stdlib or loose scripts, not Frappe apps → [other]
 	  5. ``apps/<name>/`` marker → ``<name>``
 	  6. First path segment of a multi-segment filename, filtered to
 	     actual installed Frappe apps via ``frappe.get_installed_apps()``
-	     when available — otherwise accept the first segment (legacy
+	     when available otherwise accept the first segment (legacy
 	     behavior, used by unit tests that can't import frappe)
 
 	Handles the common pyinstrument path shapes:
@@ -1561,7 +1561,7 @@ def _top_level_app(function: str, filename: str) -> str:
 
 	# Pyinstrument's ``file_path_short`` usually strips bench prefixes
 	# already, leaving something like ``frappe/handler.py``. Take the
-	# first path segment as the app name — but only if it looks like
+	# first path segment as the app name but only if it looks like
 	# an actually installed Frappe app. Third-party libs (``MySQLdb/
 	# connections.py``) otherwise produce a first-segment bucket like
 	# "MySQLdb" that has nothing to do with the user's code.
@@ -1573,7 +1573,7 @@ def _top_level_app(function: str, filename: str) -> str:
 	# Intersect with installed apps when we're running inside a real
 	# Frappe site. When frappe isn't importable (unit tests on an
 	# isolated machine) or get_installed_apps fails, fall back to
-	# accepting any first-segment — the legacy behavior that keeps
+	# accepting any first-segment the legacy behavior that keeps
 	# the pre-v0.5.1 tests green without requiring a mocked frappe.
 	try:
 		import frappe
@@ -1660,7 +1660,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 	node_cap = _conf_int("optimus_tree_node_cap", DEFAULT_TREE_NODE_CAP)
 
 	# Tracked Apps (Optimus Settings ▸ Tracked Apps): when set, only frames in
-	# those apps are surfaced as hot-frame / slow-path / BG-job findings — every
+	# those apps are surfaced as hot-frame / slow-path / BG-job findings every
 	# other frame is treated as out-of-scope plumbing, matching how the SQL
 	# analyzers already honour inclusion mode. Empty → profile everything.
 	try:
@@ -1673,7 +1673,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 	installed_apps = installed_apps_allowlist()
 
 	for action_idx, recording in enumerate(recordings):
-		# v0.7.x (M1): pop, don't get — call_tree is the ONLY consumer of the
+		# v0.7.x (M1): pop, don't get call_tree is the ONLY consumer of the
 		# raw pyinstrument Session, and holding all recordings' trees in RAM at
 		# once was the dominant analyze-time memory spike (OOM on long flows).
 		# Popping frees each tree as soon as it's reconciled, so peak drops from
@@ -1697,7 +1697,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 				"function": "<root>", "children": [],
 				"cumulative_ms": 0, "self_ms": 0, "kind": "python",
 			})
-			# Set null call_tree on the action — renderer falls back gracefully
+			# Set null call_tree on the action renderer falls back gracefully
 			if action_idx < len(context.actions):
 				context.actions[action_idx]["call_tree_json"] = None
 			continue
@@ -1710,7 +1710,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			# v0.5.1: belt-and-suspenders strip of any residual
 			# optimus/* frames that slipped through the hook
 			# ordering fix. See _strip_profiler_frames docstring for
-			# the full rationale — the short version is that even
+			# the full rationale the short version is that even
 			# with _start_pyi_session now running AFTER infra_capture
 			# .snapshot(), pyinstrument can still sample a single
 			# frame of before_request on its way out, or a capture

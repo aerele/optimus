@@ -56,7 +56,7 @@ def after_install():
 		safe_commit()
 
 	# v0.4.0: auto-assign the Optimus User role to every existing
-	# System Manager. Idempotent — users who already have it are skipped.
+	# System Manager. Idempotent users who already have it are skipped.
 	# Wrapped in try/except so a failure can't abort the install.
 	try:
 		_assign_profiler_user_to_system_managers()
@@ -69,7 +69,7 @@ def after_install():
 	# v0.5.2 round 3: pre-populate Optimus Settings ▸ Tracked Apps
 	# with the site's custom apps (anything not in the built-in
 	# FRAMEWORK_APPS set). Admin gets a sensible default inclusion-
-	# mode allowlist on day one — they don't have to remember that
+	# mode allowlist on day one they don't have to remember that
 	# Tracked Apps exists for the framework filter to actually match
 	# their mental model of "user code".
 	try:
@@ -81,7 +81,7 @@ def after_install():
 			pass
 
 	# v0.13.x: pre-populate Optimus Settings ▸ Ignored Apps with the two
-	# framework apps operators most commonly can't (or won't) patch —
+	# framework apps operators most commonly can't (or won't) patch
 	# ``frappe`` and ``erpnext``. Mirrors the tracked-apps seed: writes
 	# only when the table is empty (idempotent, never clobbers an
 	# operator's existing configuration). Operators who DO want frappe /
@@ -101,7 +101,7 @@ def after_install():
 # ``optimus.analyzers.base`` minus ``optimus`` itself (we're a third-
 # party app, not Frappe-org). Operators who actively contribute to one
 # of these (ERPNext core devs, HRMS maintainers, etc.) remove the rows
-# they care about post-install — the seed is a sensible default that
+# they care about post-install the seed is a sensible default that
 # trades a tiny first-time setup step for a clean day-one report on
 # the typical custom-app stack.
 #
@@ -137,7 +137,7 @@ def _seed_ignored_apps_with_framework_apps():
 	An app that isn't installed can't produce findings, so seeding it is
 	pure UI clutter. The intersection with ``frappe.get_installed_apps()``
 	mirrors what ``_seed_tracked_apps_from_installed_apps`` does for the
-	tracked-apps table — keep the seeded rows grounded in reality.
+	tracked-apps table keep the seeded rows grounded in reality.
 
 	Idempotent: if ``ignored_apps`` already has any rows (either from a
 	previous install run on the same site, or from manual operator
@@ -145,18 +145,18 @@ def _seed_ignored_apps_with_framework_apps():
 	seed is a fresh-install convenience, never a retroactive rewrite.
 	"""
 	if not frappe.db.exists("DocType", "Optimus Settings"):
-		# Migration hasn't created the Single yet — skip silently
+		# Migration hasn't created the Single yet skip silently
 		# (mirror the tracked-apps seed's early-return).
 		return
 
 	settings = frappe.get_single("Optimus Settings")
 	if settings.ignored_apps:
-		# Respect existing config — never overwrite.
+		# Respect existing config never overwrite.
 		return
 
 	installed = set(frappe.get_installed_apps() or [])
 	# Preserve _DEFAULT_IGNORED_APPS's alphabetical order in the seeded
-	# rows — iterate the tuple, not the set, so the resulting table is
+	# rows iterate the tuple, not the set, so the resulting table is
 	# stable + predictable.
 	to_seed = [app for app in _DEFAULT_IGNORED_APPS if app in installed]
 	if not to_seed:
@@ -178,12 +178,12 @@ def _seed_tracked_apps_from_installed_apps():
 	from optimus.analyzers.base import FRAMEWORK_APPS
 
 	if not frappe.db.exists("DocType", "Optimus Settings"):
-		# Migration hasn't created the Single yet — skip silently.
+		# Migration hasn't created the Single yet skip silently.
 		return
 
 	settings = frappe.get_single("Optimus Settings")
 	if settings.tracked_apps:
-		# Respect existing config — never overwrite.
+		# Respect existing config never overwrite.
 		return
 
 	installed = frappe.get_installed_apps() or []
@@ -203,7 +203,7 @@ def _assign_profiler_user_to_system_managers():
 	Idempotent: existing Optimus Users are left untouched. Never removes
 	roles. Safe to call repeatedly.
 
-	v0.6.x: was an N+1 — one ``get_doc("User", name)`` per user in the
+	v0.6.x: was an N+1 one ``get_doc("User", name)`` per user in the
 	system. Now uses a single ``Has Role`` query to find users with
 	System Manager (and read their existing roles in the same fetch), so
 	we only ``get_doc`` + ``save`` the subset that actually needs the new
@@ -217,7 +217,7 @@ def _assign_profiler_user_to_system_managers():
 	# the `roles` field on User, Page, Report, Workspace, … so without it the
 	# query also returns System-Manager roles on Pages/Reports/Workspaces
 	# (Printing, Prepared Report Analytics, ToDo, …) whose `parent` is NOT a
-	# User — and the later get_doc("User", parent) then DoesNotExistErrors on a
+	# User and the later get_doc("User", parent) then DoesNotExistErrors on a
 	# fresh install.
 	role_rows = frappe.get_all(
 		"Has Role",
@@ -247,7 +247,7 @@ def on_user_role_change(doc, method=None):
 	"""validate hook on User: auto-add Optimus User when System Manager
 	is present.
 
-	Wired via hooks.py: doc_events["User"]["validate"]. Silent — never
+	Wired via hooks.py: doc_events["User"]["validate"]. Silent never
 	raises and never produces a user-facing message. Idempotent.
 	"""
 	try:
@@ -277,7 +277,7 @@ def before_uninstall():
 	  re-install would lose those assignments).
 	- The `Optimus Session` MariaDB rows (frappe's uninstall flow
 	  drops the DocType tables naturally).
-	- The attached report files (same — frappe's File doctype cleanup
+	- The attached report files (same frappe's File doctype cleanup
 	  handles these).
 	"""
 	# v0.3.0: restore the three monkey-patched functions on uninstall.

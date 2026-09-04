@@ -28,7 +28,7 @@ def test_top_callsite_from_business_code(full_scan_recording, empty_context):
 	"""Top queries should report the business-logic callsite, not frappe internals."""
 	result = top_queries.analyze([full_scan_recording], empty_context)
 	top = result.aggregate["top_queries"]
-	# All fixture frames are in acme_reports (custom app) — should see
+	# All fixture frames are in acme_reports (custom app) should see
 	# those paths, not frappe. v0.5.2: renamed from erpnext because
 	# erpnext is now classified as framework.
 	for q in top:
@@ -52,7 +52,7 @@ def test_framework_callsite_queries_excluded_from_leaderboard(empty_context):
 	"""v0.6.0: the slowest-queries leaderboard is scoped to the user's
 	own app. A slow query whose blame frame is inside frappe/ or
 	erpnext/ must not appear in ``top_queries`` even though it's slower
-	than the user-app queries — it's noise the developer can't act on.
+	than the user-app queries it's noise the developer can't act on.
 	The per-action breakdown still carries it."""
 	recording = {
 		"uuid": "r1",
@@ -108,7 +108,7 @@ def test_query_without_callsite_excluded_from_leaderboard(empty_context):
 def test_trivially_fast_queries_excluded_from_leaderboard(empty_context):
 	"""When every user-app query is sub-floor (a few ms each), the
 	leaderboard stays empty rather than padding itself with queries that
-	aren't worth singling out — there's no "reasonable" slowest query."""
+	aren't worth singling out there's no "reasonable" slowest query."""
 	recording = {
 		"uuid": "r1",
 		"calls": [

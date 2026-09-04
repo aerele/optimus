@@ -8,7 +8,7 @@ Phase 2, `before_job` / `after_job`) via `hooks.py`. Their job is to:
 
 1. Decide whether the current request belongs to an active profiler session.
 2. If yes, activate `frappe.recorder` for this request only (per-user
-   isolation — other users' concurrent traffic is NOT recorded).
+   isolation other users' concurrent traffic is NOT recorded).
 3. After the request, register the new recording UUID with the session
    so the analyze pipeline can find all recordings that belong to a flow.
 
@@ -23,23 +23,23 @@ Hook order
 ----------
 Frappe loads `frappe`'s own hooks first, then app hooks. So on each request:
 
-  1. `frappe.recorder.record()`        — frappe's own (no-op without flag)
-  2. `optimus.hooks_callbacks.before_request()` — ours, may activate
+  1. `frappe.recorder.record()` frappe's own (no-op without flag)
+  2. `optimus.hooks_callbacks.before_request()`: ours, may activate
   3. <request handling>
-  4. `frappe.recorder.dump()`          — frappe's own, dumps the recorder
+  4. `frappe.recorder.dump()` frappe's own, dumps the recorder
                                           we activated
-  5. `optimus.hooks_callbacks.after_request()` — ours, registers
+  5. `optimus.hooks_callbacks.after_request()`: ours, registers
                                           the new UUID with the session
 
 Step 4 happens before step 5 because frappe's `after_request` runs before
-ours (loaded first). That ordering is essential — we need the recording
+ours (loaded first). That ordering is essential we need the recording
 to be dumped to Redis before we ask the analyze pipeline to fetch it later.
 """
 
 import time
 
 import frappe
-import frappe.recorder  # imported at module top so function-local `import frappe.recorder` doesn't rebind `frappe` as a local variable (Python scope rule: any `import frappe.X` inside a function makes `frappe` a function-local for the entire scope, breaking earlier `frappe.local` reads — caused by Python 3.14 stricter scope detection on a pre-existing pattern)
+import frappe.recorder  # imported at module top so function-local `import frappe.recorder` doesn't rebind `frappe` as a local variable (Python scope rule: any `import frappe.X` inside a function makes `frappe` a function-local for the entire scope, breaking earlier `frappe.local` reads caused by Python 3.14 stricter scope detection on a pre-existing pattern)
 
 from optimus import capture as _capture
 from optimus import session
@@ -57,7 +57,7 @@ from optimus import session
 #   - per_action rows (N extra "optimus.api.status" rows per session)
 #   - top_queries / table_breakdown (queries from status polling / recorder
 #     lookups obscure the real hot spots)
-#   - the auto-generated "Steps to Reproduce" bullet list — the widget
+#   - the auto-generated "Steps to Reproduce" bullet list the widget
 #     polls every ~2s while Recording, so a 30-second flow ends up with
 #     a reproducer list that's 90% status polls
 #   - total wall-clock / total query totals on the Optimus Session form
@@ -65,11 +65,11 @@ from optimus import session
 # Filtered at capture time (before_request) rather than at display time so
 # ALL downstream analyzers see a clean recording list, not just auto-notes.
 _IGNORED_CMD_PREFIXES = (
-	# The profiler's own whitelisted API — widget poll, metrics submit,
+	# The profiler's own whitelisted API widget poll, metrics submit,
 	# retry, fetch, etc. None of these represent real application work.
 	"optimus.api.",
 	# Frappe's built-in Recorder doctype. If the user has the Recorder UI
-	# open in another tab while profiling (not uncommon — devs often have
+	# open in another tab while profiling (not uncommon devs often have
 	# both tools handy), its whitelisted calls (export_data, delete,
 	# get_request_details, pluck, start, stop) would otherwise be captured
 	# and attributed to the profiling session. They're the recorder's own
@@ -84,11 +84,11 @@ def _extract_cmd_from_request() -> str:
 
 	Two sources, checked in order:
 
-	1. ``frappe.local.form_dict.cmd`` — set by ``make_form_dict`` for
+	1. ``frappe.local.form_dict.cmd``: set by ``make_form_dict`` for
 	   legacy ``?cmd=foo.bar`` RPC calls. Available at before_request
 	   time because ``make_form_dict`` runs BEFORE the hook dispatcher.
 
-	2. ``frappe.local.request.path`` parsed for ``/method/<name>`` — the
+	2. ``frappe.local.request.path`` parsed for ``/method/<name>``: the
 	   only source for modern ``/api/method/foo.bar`` and
 	   ``/api/v2/method/foo.bar`` URLs, because Frappe's REST API routing
 	   (``handle_rpc_call`` in ``frappe/api/v1.py`` and ``v2.py``) only
@@ -98,10 +98,10 @@ def _extract_cmd_from_request() -> str:
 	   which was empty at hook time for these URLs.
 
 	Works for both v1 and v2 API paths because both route shapes use
-	``.../method/<name>`` — we find the substring ``/method/`` and take
+	``.../method/<name>``: we find the substring ``/method/`` and take
 	everything after it.
 
-	Returns "" when neither source produces a non-empty cmd — the caller
+	Returns "" when neither source produces a non-empty cmd the caller
 	treats that as "don't skip" so that request-path-less contexts
 	(OPTIONS preflights, health checks, pre-init edge cases) fall
 	through to the normal path rather than being filtered.
@@ -146,7 +146,7 @@ def _should_skip_request() -> bool:
 	``/api/method/foo`` URL shapes), then does a prefix match against
 	``_IGNORED_CMD_PREFIXES``. Non-method URLs (``/app/...``,
 	``/api/resource/...``, static files) resolve to "" and fall through
-	as 'not noise', which is the intended behavior — we only skip
+	as 'not noise', which is the intended behavior we only skip
 	endpoints that the profiler / recorder EXPOSES via whitelisted
 	methods, not general page loads or REST resource access.
 
@@ -228,13 +228,13 @@ def before_request(*args, **kwargs):
 	"""Activate the recorder if the current user has an active profiler session.
 
 	Runs on every HTTP request. The hot path (no active session) is one
-	Redis GET — `get_active_session_for(user)` — and an early return.
+	Redis GET `get_active_session_for(user)`: and an early return.
 	"""
 	try:
 		# v0.5.3: deferred sidecar-wrap install. The module-level
 		# install in optimus/__init__.py skips when frappe
 		# isn't fully initialized (to avoid breaking the bench test
-		# runner's bootstrap — see the rationale there). By the time
+		# runner's bootstrap see the rationale there). By the time
 		# the first real before_request fires, frappe is guaranteed
 		# to be up, so we lazy-install here. Idempotent via the
 		# wrap's own `_profiler_original` marker.
@@ -285,7 +285,7 @@ def before_request(*args, **kwargs):
 
 		# If frappe's own recorder already activated (someone has the
 		# standalone Recorder UI running globally), piggyback on its
-		# instance — do NOT create a second Recorder because that would
+		# instance do NOT create a second Recorder because that would
 		# overwrite frappe.local._recorder and orphan the first one's
 		# SQL patch, corrupting both recordings.
 		if getattr(frappe.local, "_recorder", None) is not None:
@@ -295,12 +295,12 @@ def before_request(*args, **kwargs):
 		# We pass force=True so the recorder runs regardless of the
 		# global RECORDER_INTERCEPT_FLAG, leaving the standalone
 		# Recorder UI's flag untouched.
-		# (frappe.recorder is imported at module top — see comment there.)
+		# (frappe.recorder is imported at module top see comment there.)
 		frappe.recorder.record(force=True)
 
 		# v0.5.1: snapshot infra metrics FIRST, BEFORE pyinstrument starts.
 		# Pre-v0.5.1 the order was reversed: _start_pyi_session was called
-		# here and THEN infra_capture.snapshot() ran — which meant pyi
+		# here and THEN infra_capture.snapshot() ran which meant pyi
 		# captured its own ~30ms SHOW GLOBAL STATUS / psutil work as part
 		# of the user's action. A production report on a 47ms realtime
 		# subscribe request showed 31ms (67%!) attributed to
@@ -308,7 +308,7 @@ def before_request(*args, **kwargs):
 		# making it look like the profiler was the bottleneck.
 		#
 		# Moving the snapshot before _start_pyi_session means pyi never
-		# samples the snapshot code path — its first sample lands after
+		# samples the snapshot code path its first sample lands after
 		# before_request returns, in the actual request handler. Fast
 		# actions (<50ms) now show true user-code time instead of being
 		# dominated by instrumentation overhead.
@@ -362,7 +362,7 @@ def after_request(*args, **kwargs):
 			session_uuid, recording_uuid, user=user
 		)
 		if not registered:
-			# Cap hit — the recording is in RECORDER_REQUEST_HASH but not
+			# Cap hit the recording is in RECORDER_REQUEST_HASH but not
 			# registered against our session. The cap_warning is already
 			# written to session meta; log here so the drop is visible
 			# in the error log / journalctl for debugging.
@@ -374,7 +374,7 @@ def after_request(*args, **kwargs):
 		frappe.log_error(title="optimus after_request")
 	finally:
 		# v0.3.0: dump pyinstrument session and sidecar log to Redis under
-		# per-recording-UUID keys. Best-effort — failures here log but
+		# per-recording-UUID keys. Best-effort failures here log but
 		# never break the request.
 		recording_uuid_for_dump = getattr(
 			getattr(frappe.local, "_recorder", None), "uuid", None
@@ -422,7 +422,7 @@ def after_request(*args, **kwargs):
 		# the custom header to JavaScript, even for same-origin requests.
 		#
 		# Gated on `optimus_session_id` specifically (not just the
-		# recorder UUID) — the standalone Frappe Recorder UI may be
+		# recorder UUID) the standalone Frappe Recorder UI may be
 		# activated globally on this site, which sets frappe.local._recorder
 		# and gives us a recording UUID, but THAT recording doesn't belong
 		# to any profiler session. Injecting the header for non-session
@@ -438,7 +438,7 @@ def after_request(*args, **kwargs):
 				# v0.5.3: pass the response object from the hook
 				# kwargs (Frappe passes `response=response,
 				# request=request` via run_after_request_hooks).
-				# Required for v15 compat — v15 doesn't stage
+				# Required for v15 compat v15 doesn't stage
 				# headers on frappe.local.response_headers, so
 				# we set them directly on response.headers.
 				_inject_correlation_header(
@@ -468,18 +468,18 @@ def after_request(*args, **kwargs):
 #
 # Hook order on each job (frappe loads first, our app loads after):
 #
-#   1. frappe.recorder.record       (frappe's own — no-op without flag)
-#   2. frappe.monitor.start         (frappe's own — unrelated)
-#   3. optimus.before_job   (ours — may activate via force=True)
+#   1. frappe.recorder.record       (frappe's own no-op without flag)
+#   2. frappe.monitor.start         (frappe's own unrelated)
+#   3. optimus.before_job   (ours may activate via force=True)
 #   4. <method runs>
-#   5. frappe.recorder.dump         (frappe's own — dumps the recorder we activated)
-#   6. frappe.monitor.stop          (frappe's own — unrelated)
+#   5. frappe.recorder.dump         (frappe's own dumps the recorder we activated)
+#   6. frappe.monitor.stop          (frappe's own unrelated)
 #   7. frappe.utils.file_lock.release_document_locks
-#   8. optimus.after_job    (ours — registers UUID with session)
+#   8. optimus.after_job    (ours registers UUID with session)
 #
 # The kwargs dict is passed by reference from frappe.utils.background_jobs.execute_job,
 # so popping `_profiler_session_id` here removes it from the dict that the
-# user's method will receive. This is essential — without popping, methods
+# user's method will receive. This is essential without popping, methods
 # whose signatures don't include **kwargs would crash with an unexpected
 # keyword argument error.
 
@@ -497,7 +497,7 @@ def before_job(method=None, kwargs=None, **rest):
 		# v0.5.2: honor the master kill-switch here too. If the admin
 		# turned the profiler off, we still need to pop our marker
 		# from kwargs so the user's method doesn't see an unexpected
-		# keyword argument — that happens below after the kill-switch
+		# keyword argument that happens below after the kill-switch
 		# check short-circuits the recorder activation path.
 		from optimus.settings import is_enabled
 		if not is_enabled():
@@ -516,7 +516,7 @@ def before_job(method=None, kwargs=None, **rest):
 		if kwargs is None:
 			return
 		if not isinstance(kwargs, dict):
-			# Unexpected — frappe should always pass a dict. Log once so
+			# Unexpected frappe should always pass a dict. Log once so
 			# we can debug if it ever happens in practice.
 			frappe.log_error(
 				title="optimus before_job unexpected kwargs",
@@ -525,7 +525,7 @@ def before_job(method=None, kwargs=None, **rest):
 			return
 
 		# Pop our marker so the user's method doesn't see it. This MUST
-		# happen regardless of whether we proceed to activate recording —
+		# happen regardless of whether we proceed to activate recording
 		# if we leave the marker in kwargs, the user's method will be
 		# called with an unexpected keyword argument and crash.
 		session_uuid = kwargs.pop("_profiler_session_id", None)
@@ -533,7 +533,7 @@ def before_job(method=None, kwargs=None, **rest):
 			return
 
 		# v0.7.x+: record this job's method + Running/started_at in the
-		# session's jobs hash BEFORE the user/active-session gates — so the
+		# session's jobs hash BEFORE the user/active-session gates so the
 		# bg-jobs report shows it even when we don't activate the recorder
 		# for it (orphan case: ``active != session_uuid`` because the user
 		# started a new session after Stop, but the old session's job is
@@ -563,7 +563,7 @@ def before_job(method=None, kwargs=None, **rest):
 		# pointer matches while the session is running. After Stop the
 		# pointer is cleared, but the session keeps a short "draining"
 		# window during which jobs the flow enqueued are still recorded
-		# (analyze.run waits for them) — but ONLY when the user has NO
+		# (analyze.run waits for them) but ONLY when the user has NO
 		# active session, so a late job never bleeds into a *different*
 		# session the user started after stopping this one. If the user
 		# started a brand-new session (active != session_uuid and not
@@ -572,7 +572,7 @@ def before_job(method=None, kwargs=None, **rest):
 		if active != session_uuid and not (active is None and session.is_draining(session_uuid)):
 			return
 
-		# All checks passed — activate the recorder for this job.
+		# All checks passed activate the recorder for this job.
 		frappe.local.optimus_session_id = session_uuid
 
 		# Same clobber protection as before_request: if the standalone
@@ -581,10 +581,10 @@ def before_job(method=None, kwargs=None, **rest):
 		if getattr(frappe.local, "_recorder", None) is not None:
 			return
 
-		# (frappe.recorder is imported at module top — see comment there.)
+		# (frappe.recorder is imported at module top see comment there.)
 		frappe.recorder.record(force=True)
 
-		# v0.5.1: snapshot BEFORE _start_pyi_session — mirrors the order
+		# v0.5.1: snapshot BEFORE _start_pyi_session mirrors the order
 		# fix in before_request. See the rationale comment there.
 		try:
 			from optimus import infra_capture
@@ -638,7 +638,7 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 		_dump_capture_state_to_redis(recording_uuid=recording_uuid_for_dump)
 
 		# v0.5.0: write the infra diff to Redis for this job's recording.
-		# No correlation header to inject — background jobs have no HTTP
+		# No correlation header to inject background jobs have no HTTP
 		# response, and no browser to correlate with.
 		try:
 			start_snap = getattr(frappe.local, "optimus_infra_start", None)
@@ -654,7 +654,7 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 		except Exception:
 			frappe.log_error(title="optimus infra end snapshot (job)")
 
-		# v0.6.0: this job ran — drop its RQ id from the session's
+		# v0.6.0: this job ran drop its RQ id from the session's
 		# pending-jobs set so analyze.run's wait can end early. Best-effort.
 		# v0.7.x+: also write terminal status + ended_at + duration_ms from
 		# here, while the RQ record is still alive. Falls back to the
@@ -675,7 +675,7 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 				# report can join the captured query data to the job's row.
 				if recording_uuid_for_dump:
 					session.set_job_recording(_su, _rq_jid, recording_uuid_for_dump)
-				# v0.7.x+: authoritative terminal-status write — see the
+				# v0.7.x+: authoritative terminal-status write see the
 				# helper's docstring for why this beats the analyze-time
 				# RQ re-fetch (which silently drops GC'd job records).
 				_track_bg_job_finished(_su, _rq_jid)
@@ -726,7 +726,7 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 	from optimus.session import SESSION_TTL_SECONDS, sign_blob
 
 	if not recording_uuid:
-		# No recorder ran on this request — nothing to dump.
+		# No recorder ran on this request nothing to dump.
 		_clear_capture_locals()
 		return
 
@@ -797,7 +797,7 @@ def _clear_capture_locals() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Background-job status tracking — authoritative writes from the worker
+# Background-job status tracking authoritative writes from the worker
 # ---------------------------------------------------------------------------
 # Pre-fix, the bg-job tracking pipeline relied on analyze re-reading each
 # enqueued job's terminal status from RQ at persist time
@@ -819,15 +819,15 @@ def _clear_capture_locals() -> None:
 #
 # These two helpers move the authoritative writes into the hooks, where:
 #   * before_job calls ``_track_bg_job_started`` right after popping the
-#     marker — has access to the method arg (fixes #1) and the worker's
+#     marker has access to the method arg (fixes #1) and the worker's
 #     wall-clock time (fixes the "no started_at" half of #2).
-#   * after_job calls ``_track_bg_job_finished`` in its finally block —
+#   * after_job calls ``_track_bg_job_finished`` in its finally block
 #     RQ record is still alive, so we capture status + ended_at +
 #     duration_ms ourselves (fixes the other half of #2).
 #
 # analyze's existing ``_capture_job_terminal_status`` stays as the fallback
 # for jobs the hooks couldn't cover (worker SIGKILL on timeout, crash before
-# after_job fires — frappe runs after_job in a try/finally so this is rare
+# after_job fires frappe runs after_job in a try/finally so this is rare
 # but possible). Its persist-time loop only fires for jobs whose status the
 # hooks did NOT already write (``if not _jm.get("status"):``), so no
 # double-work and no overwrite churn.
@@ -836,12 +836,12 @@ def _clear_capture_locals() -> None:
 # ``analyze._bg_wait_for_pending_jobs`` is hard-capped at
 # ``_MAX_BG_JOB_WAIT_SECONDS = 300`` (analyze.py:215). A job that runs longer
 # than 5 min ALWAYS exceeds the cap; at the cap, ``_finalize_pending_statuses``
-# marks the still-active job as ``status="Running"`` (no end times — analyze
+# marks the still-active job as ``status="Running"`` (no end times analyze
 # can't predict when it'll finish), ``_persist`` writes the Optimus
 # Background Job child row from that snapshot, and ``_cleanup_redis`` then
 # DELETES the jobs hash. When the long job actually finishes minutes later,
 # the worker's ``_track_bg_job_finished`` writes to a deleted Redis key
-# (orphan) and the persisted row stays ``Running`` forever — there's no
+# (orphan) and the persisted row stays ``Running`` forever there's no
 # in-band path to update it because re-analyze isn't viable (recordings /
 # meta / jobs hash are all gone).
 #
@@ -851,7 +851,7 @@ def _clear_capture_locals() -> None:
 # row exists at ``status="Running"``, it writes the terminal status +
 # ended_at + duration_ms + error directly via ``frappe.db.set_value`` +
 # commit. Guarded by an idempotency check (only updates Running placeholders
-# — never clobbers a fresher Completed) and a SEPARATE try/except from the
+# never clobbers a fresher Completed) and a SEPARATE try/except from the
 # Redis path so neither failure suppresses the other.
 #
 # Both helpers are best-effort: any failure is swallowed so a tracking bug
@@ -864,7 +864,7 @@ def _track_bg_job_started(session_uuid: str, method) -> None:
 	in ``_track_bg_job_finished``.
 
 	Called from ``before_job`` once the marker is validated, BEFORE the
-	user/active-session gates — so even orphan jobs (whose recorder we
+	user/active-session gates so even orphan jobs (whose recorder we
 	won't activate) get their status reported in the session's bg-jobs
 	list. The ``record_job`` call is idempotent (uses ``setdefault`` for
 	method on the Redis hash) so it's safe even when the fast-path in the
@@ -877,7 +877,7 @@ def _track_bg_job_started(session_uuid: str, method) -> None:
 		job_id = getattr(rq_job, "id", None) if rq_job is not None else None
 		if not job_id:
 			return
-		# frappe.enqueue accepts a callable too — extract its name so the
+		# frappe.enqueue accepts a callable too extract its name so the
 		# row's Method column doesn't render "<function foo at 0x…>".
 		method_str = method if isinstance(method, str) else getattr(method, "__name__", str(method))
 		session.record_job(session_uuid, job_id, method_str)
@@ -901,11 +901,11 @@ def _track_bg_job_finished(session_uuid: str, job_id: str) -> None:
 	"""Write the terminal status + ended_at + duration_ms while the RQ job
 	record is still alive in the worker. Two write paths, in order:
 
-	1. **Redis jobs hash** — primary. analyze's ``session.get_jobs(...)``
+	1. **Redis jobs hash**: primary. analyze's ``session.get_jobs(...)``
 	   reads from here at persist time. The in-flight case where analyze is
 	   still mid-wait gets the authoritative final state via this write.
 
-	2. **Optimus Background Job DocType row** — late-finish fallback. If
+	2. **Optimus Background Job DocType row**: late-finish fallback. If
 	   analyze has already finalized this session (status in {"Ready",
 	   "Failed"}) and ``_cleanup_redis`` has deleted the jobs hash, the
 	   Redis write above is an orphan; this path updates the persisted row
@@ -915,7 +915,7 @@ def _track_bg_job_finished(session_uuid: str, job_id: str) -> None:
 	Failure detection: Frappe runs after_job hooks inside a ``try/finally``
 	wrapping the user's method, so an in-flight exception is visible via
 	``sys.exc_info()``. RQ's timeout-killer raises ``JobTimeoutException``
-	(its class name, regardless of import path) — we map that distinctly so
+	(its class name, regardless of import path) we map that distinctly so
 	the report can flag timeouts separately from generic user-code failures.
 
 	Each write path has its own ``try/except: pass`` so a Redis hiccup
@@ -932,7 +932,7 @@ def _track_bg_job_finished(session_uuid: str, job_id: str) -> None:
 			status, error = "Completed", None
 		else:
 			# Match on the class name (not isinstance) so we don't have to
-			# import rq.timeouts at the worker hot path — and so vendored
+			# import rq.timeouts at the worker hot path and so vendored
 			# / re-exported variants still match.
 			name = exc_type.__name__
 			status = "Timeout" if name == "JobTimeoutException" else "Failed"
@@ -948,7 +948,7 @@ def _track_bg_job_finished(session_uuid: str, job_id: str) -> None:
 			except Exception:
 				duration_ms = None
 	except Exception:
-		# Couldn't even compute the terminal state — bail rather than write
+		# Couldn't even compute the terminal state bail rather than write
 		# half-baked data anywhere.
 		return
 
@@ -975,7 +975,7 @@ def _track_bg_job_finished(session_uuid: str, job_id: str) -> None:
 			"name",
 		)
 		if not docname:
-			return  # session not yet persisted — Redis path is the only path
+			return  # session not yet persisted Redis path is the only path
 		session_status = frappe.db.get_value("Optimus Session", docname, "status")
 		if session_status not in ("Ready", "Failed"):
 			return  # analyze still mid-wait; let it pick up the Redis write
@@ -985,7 +985,7 @@ def _track_bg_job_finished(session_uuid: str, job_id: str) -> None:
 			"name",
 		)
 		if not child_name:
-			return  # no row was persisted for this job — don't INSERT a phantom
+			return  # no row was persisted for this job don't INSERT a phantom
 		cur_status = frappe.db.get_value("Optimus Background Job", child_name, "status")
 		if cur_status not in (None, "Running"):
 			return  # idempotency: don't clobber a fresher Completed / Failed
@@ -1013,7 +1013,7 @@ def _track_bg_job_finished(session_uuid: str, job_id: str) -> None:
 # optimus_frontend.js shim to tie each XHR timing back to a specific
 # server recording. Without the Access-Control-Expose-Headers entry,
 # browsers refuse to surface custom response headers to JavaScript
-# even for same-origin requests — it's the most common frontend
+# even for same-origin requests it's the most common frontend
 # instrumentation failure mode.
 
 
@@ -1038,7 +1038,7 @@ def _inject_correlation_header(recording_uuid: str, response=None) -> None:
 
 	Symptom that motivated this fix: on v15, "Per-XHR timings" in the
 	Frontend panel rendered empty because ``optimus_frontend.js``
-	couldn't read the recording-id header — it was never set. Our
+	couldn't read the recording-id header it was never set. Our
 	v16-only staging dict was silently dropped during response build.
 	"""
 	# v16 path: write to the staged dict if Frappe exposes it.
@@ -1051,7 +1051,7 @@ def _inject_correlation_header(recording_uuid: str, response=None) -> None:
 			existing = ""
 		# Token-by-token check, NOT a substring ``in`` check. A naive
 		# ``in`` would falsely match when another app has already
-		# added "X-Optimus-Recording-Id-Legacy" or similar — our real
+		# added "X-Optimus-Recording-Id-Legacy" or similar our real
 		# header would then NOT be appended, the browser would refuse
 		# to surface it to JavaScript, and the entire frontend
 		# correlation feature would silently break. Split on commas

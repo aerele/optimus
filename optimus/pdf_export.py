@@ -5,7 +5,7 @@
 
 Generated on first request via frappe.utils.pdf.get_pdf (wkhtmltopdf),
 cached to a private File attachment on the Optimus Session. Subsequent
-requests serve from cache. Analyze pipeline is never touched — keeping
+requests serve from cache. Analyze pipeline is never touched keeping
 PDF generation outside the analyze budget.
 """
 
@@ -16,7 +16,7 @@ import frappe
 from optimus import safe_commit
 
 # v0.5.2 round 4: wkhtmltopdf uses old QtWebKit which doesn't reliably
-# render collapsed <details> content even under @media print — the
+# render collapsed <details> content even under @media print the
 # Observations subsection and Analyzer notes section end up invisible
 # in the PDF. We pre-process the HTML to force `open` on every
 # <details> before handing it to wkhtmltopdf, so PDF reports contain
@@ -67,7 +67,7 @@ def clear_cached_pdf(session_uuid: str) -> None:
 	try:
 		# v0.6.x: was get_doc(...).name; switched to a single get_value to
 		# skip loading the full File doc (and its child tables) just to read
-		# one scalar — addresses Lens audit "get_doc used only for reading
+		# one scalar addresses Lens audit "get_doc used only for reading
 		# fields" at this site.
 		file_name = frappe.db.get_value("File", {"file_url": current_url}, "name")
 		if file_name:
@@ -90,7 +90,7 @@ def _load_session(session_uuid: str):
 def _load_raw_html(doc) -> str:
 	if not doc.raw_report_file:
 		frappe.throw("This session has no report to convert.")
-	# audit: ok (get_doc kept — .get_content() is a doc-instance method
+	# audit: ok (get_doc kept .get_content() is a doc-instance method
 	# that streams the attached bytes; db.get_value can only return field
 	# values, not file content. Lens flagged this as "get_doc used only
 	# for reading fields" but it isn't reading a field, it's reading the
@@ -103,7 +103,7 @@ def _expand_collapsible_sections(html: str) -> str:
 	"""Add the ``open`` attribute to every <details> element so the
 	PDF renderer shows their content.
 
-	Idempotent — <details open> and <details ... open> are left alone.
+	Idempotent <details open> and <details ... open> are left alone.
 	Exposed as module-level for unit-testing.
 	"""
 	def _inject_open(match: re.Match) -> str:
@@ -121,12 +121,12 @@ def _expand_collapsible_sections(html: str) -> str:
 def _html_to_pdf(html: str) -> bytes:
 	"""Run HTML through wkhtmltopdf via frappe.utils.pdf.get_pdf.
 
-	Options tuned for the report's CSS — A4, conservative margins,
+	Options tuned for the report's CSS A4, conservative margins,
 	UTF-8, print-media-type so any @media print rules in the report are
 	honored (e.g. the SVG donut fallback).
 
 	Pre-processes the HTML to force-open all <details> blocks so the
-	Observations subsection and Analyzer notes render in the PDF —
+	Observations subsection and Analyzer notes render in the PDF
 	wkhtmltopdf's QtWebKit doesn't reliably expand collapsed <details>
 	via @media print alone.
 	"""

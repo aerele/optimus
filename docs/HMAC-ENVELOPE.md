@@ -1,4 +1,4 @@
-# `sign_blob` / `unsign_blob` — HMAC envelope versioning
+# `sign_blob` / `unsign_blob`: HMAC envelope versioning
 
 `optimus.session.sign_blob` / `unsign_blob` wrap every opaque payload
 (currently pickled pyinstrument trees, but the API is bytes-in,
@@ -59,7 +59,7 @@ Pickle (the only producer of payloads for `sign_blob` today) never uses
 So a legacy pre-v0.12.14 pickle payload's first byte can never
 accidentally trigger the v1 strip branch in `unsign_blob`. Future
 producers (msgpack, JSON, raw binary) need to avoid `\x01` as a leading
-byte — see the producer compatibility table below.
+byte see the producer compatibility table below.
 
 ### Producer compatibility table
 
@@ -67,7 +67,7 @@ byte — see the producer compatibility table below.
 |---|---|---|
 | Pickle protocol 0 | Printable ASCII opcodes | Yes |
 | Pickle protocol 2-5 | `\x80` | Yes |
-| msgpack (positive fixint) | `\x00`-`\x7f` — **collides with `\x01`** | NO (write through v1 path) |
+| msgpack (positive fixint) | `\x00`-`\x7f`: **collides with `\x01`** | NO (write through v1 path) |
 | msgpack (map fixmap) | `\x80`-`\x8f` | Yes |
 | JSON (top-level dict) | `{` (`\x7b`) | Yes |
 | JSON (top-level list) | `[` (`\x5b`) | Yes |
@@ -79,7 +79,7 @@ that's just pickle, which never collides.
 
 ## Future schemes (extension points)
 
-### Scheme v2 — HMAC-SHA512 (hypothetical)
+### Scheme v2: HMAC-SHA512 (hypothetical)
 
 **When to bump**: a credible cryptanalytic finding against SHA-256 in
 the HMAC-style construction, OR a customer regulatory requirement
@@ -131,7 +131,7 @@ malicious_payload` as a v0 blob. (The v0 branch's HMAC over `body` ≠
 the v0 HMAC over an attacker-crafted v0 payload, but defence-in-depth
 matters.)
 
-### Scheme v3 — AES-SIV authenticated encryption (hypothetical)
+### Scheme v3: AES-SIV authenticated encryption (hypothetical)
 
 **When to bump**: when the operator wants to encrypt the payload at
 rest in Redis (not just authenticate it). AES-SIV is the
@@ -149,7 +149,7 @@ HMAC. The reader's verify step is the SIV `decrypt-and-verify` API
 which returns `None`/raises on tag mismatch. Same backward-compat
 strategy: try v1 first, then v3 (the marker bytes differ).
 
-### Scheme v4+ — key rotation
+### Scheme v4+: key rotation
 
 For key rotation (e.g., the operator rotates `encryption_key` and wants
 to migrate without re-signing everything inline), the marker can carry
@@ -161,29 +161,29 @@ a key-id bit:
 
 Reader inspects the marker's low bits to pick which secret to verify
 with. This is the operator-driven extension and requires explicit
-support in `_hmac_secret` (return per-key-id secret) — out of scope
+support in `_hmac_secret` (return per-key-id secret) out of scope
 for the v0.12.14 baseline.
 
 ## Canary tests
 
 `optimus/tests/test_hmac_envelope_versioning.py` (v0.12.14):
 
-* `TestSignUnsignRoundTrip` (3 tests) — v1 round-trip happy path,
+* `TestSignUnsignRoundTrip` (3 tests) v1 round-trip happy path,
   empty payload, pickle-shaped payload.
-* `TestLegacyShapeBackwardCompat` (2 tests) — pre-v0.12.14 v0
+* `TestLegacyShapeBackwardCompat` (2 tests) pre-v0.12.14 v0
   blobs still verify, including pickle-shaped legacy blobs (their
   `\x80` first byte is NOT the v1 marker, so they go through the v0
   branch correctly).
-* `TestNewShapeByteLayout` (1 test) — locks the byte layout
+* `TestNewShapeByteLayout` (1 test) locks the byte layout
   (`32 + 1 + len(payload)`).
-* `TestTamperingDetection` (3 tests) — tampered sig / version-byte /
+* `TestTamperingDetection` (3 tests) tampered sig / version-byte /
   payload all return None.
-* `TestEdgeCases` (4 tests) — too-short, non-bytes, sign rejects
+* `TestEdgeCases` (4 tests) too-short, non-bytes, sign rejects
   non-bytes, no-secret pass-through.
 
 A future scheme v2 PR would add `TestSchemeV2RoundTrip` +
 `TestV0V1V2Coexistence` + `TestV1ReaderRejectsV2Blob` (the v1 reader
-must NOT verify a v2 blob's SHA-256 of `body64` — it would fail
+must NOT verify a v2 blob's SHA-256 of `body64`: it would fail
 trivially because the lengths differ). The existing 13 tests stay
 green throughout (v0/v1 compat is forever).
 
@@ -227,15 +227,15 @@ PR should ship the janitor wiring alongside the scheme code.
 ## Out of scope
 
 * **Nonce-based authenticated encryption** (AES-GCM, ChaCha20-Poly1305)
-  — the deterministic-retrieval pattern of these blobs doesn't fit a
+  the deterministic-retrieval pattern of these blobs doesn't fit a
   nonce-per-blob design without extra state (a per-key counter, a
   per-payload random nonce written alongside, etc.). AES-SIV (scheme
   v3) is the natural fit.
-* **Per-payload-shape versioning** — that's the v0.12.0 `wrap_value`
+* **Per-payload-shape versioning**: that's the v0.12.0 `wrap_value`
   envelope's job (see `docs/REDIS-SCHEMA.md`). The HMAC scheme version
   is about the SIGNING scheme; the payload version is about the
   PAYLOAD shape. Both can evolve independently.
-* **Asymmetric signatures** (Ed25519, etc.) — the cross-process
+* **Asymmetric signatures** (Ed25519, etc.) the cross-process
   shared-secret model fits HMAC's symmetric design; introducing
   asymmetric keys would mean two separate workflows (signing-key
   process, verifying-key process), which is overkill for the
@@ -243,9 +243,9 @@ PR should ship the janitor wiring alongside the scheme code.
 
 ## See also
 
-* `optimus/session.py:sign_blob` / `unsign_blob` — the implementation.
-* `optimus/tests/test_hmac_envelope_versioning.py` — the canary
+* `optimus/session.py:sign_blob` / `unsign_blob`: the implementation.
+* `optimus/tests/test_hmac_envelope_versioning.py`: the canary
   test suite.
-* `docs/REDIS-SCHEMA.md` — the value-shape envelope (different
+* `docs/REDIS-SCHEMA.md`: the value-shape envelope (different
   concern; lives one layer up).
-* CHANGELOG.md v0.12.14 — the rollout entry.
+* CHANGELOG.md v0.12.14 the rollout entry.

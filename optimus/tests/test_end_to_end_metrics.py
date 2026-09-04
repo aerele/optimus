@@ -98,7 +98,7 @@ def test_analyzer_chain_with_missing_frontend_data():
 	]
 
 	ctx = AnalyzeContext(session_uuid="no-frontend", docname="e2e")
-	# ctx.frontend_data intentionally not set — simulates a session from
+	# ctx.frontend_data intentionally not set simulates a session from
 	# a worker that doesn't have v0.5.0's frontend blob in Redis yet.
 
 	infra_result = infra_pressure.analyze(recordings, ctx)
@@ -111,7 +111,7 @@ def test_analyzer_chain_with_missing_frontend_data():
 	ft_types = {f["finding_type"] for f in ctx.findings}
 	assert "Resource Contention" in ft_types
 
-	# Frontend side emits no findings and empty aggregates — clean no-op.
+	# Frontend side emits no findings and empty aggregates clean no-op.
 	assert "Slow Frontend Render" not in ft_types
 	assert "Network Overhead" not in ft_types
 	assert ctx.aggregate["frontend_xhr_matched"] == []

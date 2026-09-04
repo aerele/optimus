@@ -12,7 +12,7 @@ Round 2 fix sets track_changes=0 in the DocType JSON. This patch runs
 on bench migrate to delete existing tabVersion rows for Profiler
 Session so the cleanup is complete.
 
-Safe to run multiple times (the DELETE is idempotent — any new rows
+Safe to run multiple times (the DELETE is idempotent any new rows
 created between migrations are also cleaned up).
 """
 

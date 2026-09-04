@@ -5,7 +5,7 @@
 
 When ``optimus_phase2_auto_arm`` is set in site_config, analyze arms a pass on
 the recommended hot-path functions so the user just re-runs the flow once to
-get line data. Opt-in + admin-only (it instruments the next execution — only
+get line data. Opt-in + admin-only (it instruments the next execution only
 for replay-safe flows). Heavily guarded and best-effort (never fails analyze).
 """
 
@@ -76,7 +76,7 @@ def arm_env(monkeypatch):
 		lambda: types.SimpleNamespace(phase2_max_runs_per_session=10), raising=False)
 
 	# Patch the line_profile collaborators on the REAL (already-imported)
-	# modules — `from optimus.line_profile import capture` binds the package
+	# modules `from optimus.line_profile import capture` binds the package
 	# attribute, so sys.modules swapping wouldn't take effect under bench.
 	import optimus.line_profile.capture as cap_real
 	import optimus.line_profile.picker as picker_real
@@ -145,19 +145,19 @@ class TestAutoArmPhase2:
 
 	def test_zero_cap_means_unlimited(self, arm_env, monkeypatch):
 		"""v0.13.x: ``phase2_max_runs_per_session = 0`` (Strict preset)
-		means no cap — auto-arm fires even with many existing runs.
+		means no cap auto-arm fires even with many existing runs.
 		Pre-v0.13.x the ``or 10`` swallowed 0 and silently re-applied
 		the default cap, so a Strict-profile deployment got the same
 		behavior as Recommended."""
 		import optimus.settings as settings_mod
 		monkeypatch.setattr(settings_mod, "get_config",
 			lambda: types.SimpleNamespace(phase2_max_runs_per_session=0))
-		# Way over the legacy default of 10 — would normally block.
+		# Way over the legacy default of 10 would normally block.
 		arm_env.doc._tables["phase_2_runs"] = [
 			{"run_uuid": f"r{i}"} for i in range(25)
 		]
 		analyze._auto_arm_phase2("PS-1", _ctx())
-		# Arm fired — the cap didn't block.
+		# Arm fired the cap didn't block.
 		assert arm_env.start_calls, "cap = 0 must let auto-arm fire"
 
 	def test_noop_when_user_busy(self, arm_env):

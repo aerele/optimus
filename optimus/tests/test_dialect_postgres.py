@@ -6,7 +6,7 @@
 The plan-tree walk and catalog-row mapping are unit-tested here with fixtures
 (the raw introspection SQL is validated on a real --db-type postgres bench in
 phase 5). The final test feeds a Postgres-derived plan through explain_flags and
-asserts the SAME finding types come out — i.e. the analyzer is dialect-blind.
+asserts the SAME finding types come out i.e. the analyzer is dialect-blind.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ def _install_db(monkeypatch, sql_fn):
 	import frappe
 
 	# _safe_sql wraps every query in savepoint / release / rollback (Postgres
-	# aborts the txn on a failed query) — provide no-ops for them.
+	# aborts the txn on a failed query) provide no-ops for them.
 	monkeypatch.setattr(frappe, "db", types.SimpleNamespace(
 		sql=sql_fn, db_type="postgres",
 		savepoint=lambda *a, **k: None,
@@ -137,7 +137,7 @@ class TestIntrospection:
 # --- dialect-blind: a Postgres plan yields the same finding types -----------
 
 def test_explain_flags_derives_findings_from_postgres_plan(monkeypatch, empty_context):
-	"""A PG Seq Scan over 12k rows must surface a Full Table Scan finding —
+	"""A PG Seq Scan over 12k rows must surface a Full Table Scan finding
 	proving explain_flags reads the normalized fields, not raw EXPLAIN rows."""
 	from optimus.analyzers import explain_flags
 
@@ -184,7 +184,7 @@ def test_ai_finding_hint_is_dialect_aware(monkeypatch):
 class TestSafeSql:
 	def test_original_error_survives_a_failing_rollback(self, monkeypatch):
 		"""If the savepoint rollback itself raises, the ORIGINAL query error must
-		still propagate (not be masked by the rollback error) — the caller's
+		still propagate (not be masked by the rollback error) the caller's
 		try/except turns the original into its safe default."""
 		import frappe
 

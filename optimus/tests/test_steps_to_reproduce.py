@@ -45,7 +45,7 @@ def test_notes_field_is_text_editor():
 
 
 def test_notes_label_reflects_steps_purpose():
-	"""The label must make the field's purpose clear to users — the
+	"""The label must make the field's purpose clear to users the
 	description alone isn't enough because the field header in the
 	form view only shows the label."""
 	meta = _load_doctype_json()
@@ -63,7 +63,7 @@ def test_api_start_accepts_notes():
 
 	sig = inspect.signature(api.start)
 	assert "notes" in sig.parameters
-	# Default should be empty string — keeping start() backward compatible
+	# Default should be empty string keeping start() backward compatible
 	# with callers that don't pass notes.
 	assert sig.parameters["notes"].default == ""
 
@@ -99,13 +99,13 @@ def test_report_template_renders_notes():
 	# "Steps to Reproduce" heading must appear so users know the purpose.
 	assert "Steps to Reproduce" in template
 
-	# Repro section renders ABOVE the "Findings — what to fix" section.
+	# Repro section renders ABOVE the "Findings what to fix" section.
 	repro_idx = template.find("report_data.repro")
 	findings_heading_idx = template.find("Findings - what to fix")
 	assert repro_idx > 0
 	assert findings_heading_idx > 0
 	assert findings_heading_idx > repro_idx, (
-		"repro section must appear above 'Findings — what to fix'"
+		"repro section must appear above 'Findings what to fix'"
 	)
 
 
@@ -136,9 +136,9 @@ def test_notes_are_bleach_sanitized_before_render():
 def test_json_shaped_xss_payload_is_sanitized():
 	"""Architect-review finding: sanitize_html has a fast-path that
 	skips bleach for input detected as valid JSON. An attacker could
-	set notes = '{"x": "<script>alert(1)</script>"}' — which IS valid
+	set notes = '{"x": "<script>alert(1)</script>"}' which IS valid
 	JSON (a JSON dict literal with a string value containing the
-	script) — and sanitize_html without always_sanitize=True returns
+	script) and sanitize_html without always_sanitize=True returns
 	it unchanged. The template's |safe then renders the script as
 	a live <script> tag. always_sanitize=True closes this bypass.
 	"""
@@ -174,7 +174,7 @@ def test_renderer_passes_always_sanitize_true():
 	assert "always_sanitize=True" in src, (
 		"renderer.render must call sanitize_html(..., always_sanitize=True). "
 		"Without it, valid JSON or no-tag input bypasses sanitization "
-		"entirely — stored XSS regression."
+		"entirely stored XSS regression."
 	)
 
 
@@ -234,7 +234,7 @@ def test_auto_notes_produces_ordered_list_with_humanized_labels():
 
 	# Preamble explains auto-generation and invites editing.
 	assert "Auto-generated" in html_out
-	# Ordered list, not unordered — order matters for reproducers.
+	# Ordered list, not unordered order matters for reproducers.
 	assert "<ol>" in html_out and "</ol>" in html_out
 	# First recording resolves to "Save Sales Invoice" via per_action._label.
 	assert "Save Sales Invoice" in html_out
@@ -265,7 +265,7 @@ def test_auto_notes_html_escapes_user_controlled_strings():
 
 def test_auto_notes_caps_long_sessions_with_overflow_marker():
 	"""A 200-action session shouldn't fill the notes field with 200
-	<li> entries — cap at 50 and surface a '… and N more' marker so
+	<li> entries cap at 50 and surface a '… and N more' marker so
 	users know the list is truncated."""
 	from optimus.analyze import _AUTO_NOTES_MAX_ENTRIES, _build_auto_notes_html
 
@@ -275,7 +275,7 @@ def test_auto_notes_caps_long_sessions_with_overflow_marker():
 		for i in range(_AUTO_NOTES_MAX_ENTRIES + 10)
 	]
 	html_out = _build_auto_notes_html(recordings)
-	# Count the <li> entries — should be cap + 1 (for the overflow marker).
+	# Count the <li> entries should be cap + 1 (for the overflow marker).
 	li_count = html_out.count("<li>")
 	assert li_count == _AUTO_NOTES_MAX_ENTRIES + 1
 	assert "10 more" in html_out
@@ -284,21 +284,21 @@ def test_auto_notes_caps_long_sessions_with_overflow_marker():
 def test_auto_notes_unnamed_action_falls_back_gracefully():
 	"""If somehow a recording has no cmd / path / method, the label
 	resolver returns an empty string. The helper must substitute a
-	placeholder rather than emit '<li> — 0 ms</li>'."""
+	placeholder rather than emit '<li>: 0 ms</li>'."""
 	from optimus.analyze import _build_auto_notes_html
 
 	recordings = [{"method": "", "path": "", "cmd": "",
 	               "duration": 0, "calls": []}]
 	html_out = _build_auto_notes_html(recordings)
-	# Must not have a blank label — the per_action._label fallback ends up
+	# Must not have a blank label the per_action._label fallback ends up
 	# as " " (method + " " + path with both empty), so we check the
 	# placeholder OR a non-empty label.
 	assert "<li>" in html_out
-	# The <li> content between <li> and the em-dash separator must be
-	# non-whitespace — otherwise the reproducer is "— 0 ms" which is
+	# The <li> content between <li> and the colon separator must be
+	# non-whitespace otherwise the reproducer is " 0 ms" which is
 	# useless to a reader.
 	import re
-	m = re.search(r"<li>([^<]*?) — ", html_out)
+	m = re.search(r"<li>([^<]*?): ", html_out)
 	assert m is not None
 	label = m.group(1).strip()
 	assert label, f"Auto-notes emitted blank label: {html_out!r}"
@@ -325,9 +325,9 @@ def test_persist_auto_fills_notes_when_field_is_empty():
 def test_auto_notes_filters_realtime_polling_noise():
 	"""v0.5.1: real production reproducer read:
 
-	    GET /api/method/frappe.realtime.has_permission — 25ms
-	    POST /api/method/frappe.desk.form.save.savedocs — 775ms
-	    GET /api/method/frappe.realtime.has_permission — 6ms
+	    GET /api/method/frappe.realtime.has_permission 25ms
+	    POST /api/method/frappe.desk.form.save.savedocs 775ms
+	    GET /api/method/frappe.realtime.has_permission 6ms
 
 	Of those three, only the savedocs is a user action. The two
 	has_permission entries are the Desk polling for realtime
@@ -369,7 +369,7 @@ def test_auto_notes_filters_realtime_polling_noise():
 	]
 
 	html_out = _build_auto_notes_html(recordings)
-	# Only the savedocs survives — humanized as "Create Sales Invoice".
+	# Only the savedocs survives humanized as "Create Sales Invoice".
 	assert "Create Sales Invoice" in html_out
 	assert "774.8 ms" in html_out
 	# Polling endpoints filtered out
@@ -417,7 +417,7 @@ def test_auto_notes_filters_static_assets_and_form_load_boilerplate():
 
 
 def test_auto_notes_all_noise_returns_empty_string():
-	"""A session of only polling/noise returns empty — the caller
+	"""A session of only polling/noise returns empty the caller
 	then leaves the notes field blank rather than filling it with
 	the preamble and an empty list."""
 	from optimus.analyze import _build_auto_notes_html
@@ -461,7 +461,7 @@ def test_auto_notes_real_user_sequence_reads_naturally():
 			"calls": [],
 			"form_dict": {"doctype": "Customer", "name": "CUST-001"},
 		},
-		# (permission polling — filtered)
+		# (permission polling filtered)
 		{
 			"method": "GET",
 			"path": "/api/method/frappe.realtime.has_permission",
@@ -532,14 +532,14 @@ def test_start_dialog_no_longer_asks_for_notes():
 	# fieldname: "notes" any more.
 	assert 'fieldname: "notes"' not in widget_src, (
 		"The start dialog still defines a 'notes' field. The v0.5.1 "
-		"design removed it — notes is now auto-filled from captured "
+		"design removed it notes is now auto-filled from captured "
 		"actions during analyze. Delete the dialog entry."
 	)
 	# And the frappe.call args must not pass notes either.
 	assert "notes: values.notes" not in widget_src, (
 		"The start call still passes a `notes` argument. Since the "
 		"dialog no longer collects it, values.notes is always undefined "
-		"— drop the arg from the frappe.call."
+		" drop the arg from the frappe.call."
 	)
 
 
@@ -573,7 +573,7 @@ def test_actions_for_humanizer_compacts_recordings():
 
 
 def test_assemble_humanized_notes_is_just_the_friendly_steps():
-	"""Only the preamble + the rendered Markdown steps — no raw
+	"""Only the preamble + the rendered Markdown steps no raw
 	"Captured actions" appendix (the per-action breakdown in the report
 	already lists every action with its technical label)."""
 	from optimus.analyze import _assemble_humanized_notes
@@ -601,7 +601,7 @@ def test_build_humanized_notes_html_returns_empty_when_ai_disabled():
 
 
 def test_build_humanized_notes_html_returns_empty_on_llm_failure():
-	"""If the LLM call raises, the helper swallows it and returns "" — the
+	"""If the LLM call raises, the helper swallows it and returns "" the
 	caller then uses _build_auto_notes_html. analyze must never fail just
 	because the humanizer did."""
 	from types import SimpleNamespace

@@ -15,7 +15,7 @@ import hashlib
 def content_hash(source_text: str) -> str:
 	"""Return a sha256 hex digest of the line's stripped source text.
 
-	Whitespace-only edits don't change the hash — leading/trailing
+	Whitespace-only edits don't change the hash leading/trailing
 	whitespace is stripped before hashing, so re-indenting (or trimming
 	a trailing space) keeps the content-identity stable.
 	"""
@@ -42,7 +42,7 @@ def align_function(run_a_lines: list[dict], run_b_lines: list[dict]) -> list[dic
 	rows in ``run_a`` lineno order trailing.
 	"""
 	# Index run_a by content hash so we can look up while walking run_b.
-	# Each hash maps to a list (a line could appear multiple times — a
+	# Each hash maps to a list (a line could appear multiple times a
 	# repeated empty line, for example), so we pop from each list to mark
 	# consumed entries.
 	a_index: dict[str, list[dict]] = {}

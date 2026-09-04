@@ -6,7 +6,7 @@
 A time-budget watchdog auto-disengages line tracing mid-request so a hot-loop
 function can't freeze the user's flow. These tests pin the watchdog wiring and
 the budget-hit flag deterministically (fake profiler for the hooks; raw
-sys.monitoring registration for the disengage path — no real line_profiler
+sys.monitoring registration for the disengage path no real line_profiler
 enable, so line_profiler's process-global manager can't desync across tests).
 """
 
@@ -90,7 +90,7 @@ def test_budget_flag_roundtrip(env):
 
 
 def test_disengage_stops_events_without_freeing_tool(env):
-	"""The watchdog disengages line tracing by zeroing events — it must NOT
+	"""The watchdog disengages line tracing by zeroing events it must NOT
 	free_tool_id. Freeing the tool from the timer thread, mid-request, yanks it
 	out from under line_profiler's still-active manager; its own
 	``disable_by_count`` then fails ("tool 2 is not in use"), leaving an
@@ -159,7 +159,7 @@ def test_started_watchdog_disengages_after_budget(env):
 
 
 # --------------------------------------------------------------------------
-# hook wiring (fake profiler — deterministic)
+# hook wiring (fake profiler deterministic)
 # --------------------------------------------------------------------------
 
 def _arm_before(env, budget):

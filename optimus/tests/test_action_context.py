@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Unit tests for the render-time action/finding context enrichment —
+"""Unit tests for the render-time action/finding context enrichment
 ``renderer._attach_action_context`` and its helpers: which document a
 save/submit-style action touched (from the recording's form_dict) and which
 doc-event lifecycle hook a slow function fired in (from frappe's doc_events).
@@ -126,7 +126,7 @@ class TestResolveTargetDocFromResponse:
 
 	def test_non_scalar_response_name_is_rejected(self):
 		# A malformed (non-str/non-int) response name must NOT be stringified into a
-		# garbage docname — the resolver falls back to None (keep the placeholder).
+		# garbage docname the resolver falls back to None (keep the placeholder).
 		fd = {"doc": json.dumps({"doctype": "Widget", "name": "new-widget-abc"})}
 		assert self._resolve(fd, {"docs": [{"doctype": "Widget", "name": {"k": "v"}}]}) is None
 		assert self._resolve(fd, {"docs": [{"doctype": "Widget", "name": 42.0}]}) is None
@@ -155,7 +155,7 @@ class TestBuildDocEventHookIndex:
 	def test_flattens_doctype_event_methods(self):
 		idx = renderer._build_doc_event_hook_index({
 			"Sales Invoice": {"validate": ["ugly_code.x.f"], "on_submit": ["a.b.g", "a.b.g2"]},
-			"*": {"validate": "a.b.h"},  # string, not list — must still be handled
+			"*": {"validate": "a.b.h"},  # string, not list must still be handled
 		})
 		assert idx == {
 			"ugly_code.x.f": [("Sales Invoice", "validate")],
@@ -231,7 +231,7 @@ class TestAttachActionContext:
 
 	def test_temp_name_resolved_from_recording_resolved_target_doc(self):
 		# The insert request carries a "new-…" placeholder; the recording carries the
-		# real name captured from the save response — the action shows the real one.
+		# real name captured from the save response the action shows the real one.
 		actions = [self._act(0, recording_uuid="r0")]
 		recs = {"r0": {
 			"form_dict": {"doc": json.dumps({"doctype": "Sales Order", "name": "new-sales-order-abc"})},
@@ -250,7 +250,7 @@ class TestAttachActionContext:
 		assert actions[0]["target_doc"] == {"doctype": "Lead", "name": "CRM-LEAD-0001"}
 
 	def test_real_request_name_not_overridden_by_resolved(self):
-		# A real name in the request (edit/submit) is authoritative — never replaced.
+		# A real name in the request (edit/submit) is authoritative never replaced.
 		actions = [self._act(0, recording_uuid="r0")]
 		recs = {"r0": {
 			"form_dict": {"doc": json.dumps({"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"})},
@@ -308,7 +308,7 @@ class TestResolvedDocSidecarWiring:
 		from optimus import hooks_callbacks
 
 		src = inspect.getsource(hooks_callbacks.after_request)
-		# The RMW imported the recorder hash and wrote it back with hset() — neither may reappear.
+		# The RMW imported the recorder hash and wrote it back with hset() neither may reappear.
 		assert "from frappe.recorder import RECORDER_REQUEST_HASH" not in src
 		assert "hset(" not in src
 

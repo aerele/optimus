@@ -11,10 +11,10 @@ The analyzer reads the recording dicts (already enriched by analyze.py with
 sqlparse-formatted queries, EXPLAIN output, normalized queries, and
 exact/normalized copy counts) and returns:
 
-    actions   — Optimus Action child rows (only per_action populates this)
-    findings  — Optimus Finding child rows (each analyzer may emit findings)
-    aggregate — top-level dict-shaped data (e.g. top_queries, table_breakdown)
-    warnings  — non-fatal issues to surface in the report
+    actions Optimus Action child rows (only per_action populates this)
+    findings Optimus Finding child rows (each analyzer may emit findings)
+    aggregate top-level dict-shaped data (e.g. top_queries, table_breakdown)
+    warnings non-fatal issues to surface in the report
 
 Pure means: no Frappe DB access, no Redis access, no I/O. Analyzers operate
 only on the data passed in. Side-effects are limited to the AnalyzerResult
@@ -31,7 +31,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # Shared constants and helpers (Round 2 fixes #19 + #20)
 # ---------------------------------------------------------------------------
-# Severity sort order — lower number is higher severity. Used by every
+# Severity sort order lower number is higher severity. Used by every
 # analyzer when sorting its findings list. Moved here from per-module
 # copies to keep the ordering consistent across the pipeline.
 SEVERITY_ORDER: dict[str, int] = {"High": 0, "Medium": 1, "Low": 2}
@@ -40,7 +40,7 @@ SEVERITY_ORDER: dict[str, int] = {"High": 0, "Medium": 1, "Low": 2}
 # callsite for a query. The goal is to blame the user's business logic,
 # not the frappe helper the query was routed through (get_value,
 # get_all, db.count etc.). See the detailed explanation in
-# analyzers/n_plus_one.py — this is just a shared constant now.
+# analyzers/n_plus_one.py this is just a shared constant now.
 #
 # Intentionally narrower than FRAMEWORK_APPS below: walk_callsite uses
 # this to pick a BLAME frame (skip frappe helpers, surface the caller).
@@ -56,14 +56,14 @@ FRAMEWORK_PREFIXES: tuple[str, ...] = (
 
 # v0.5.2: official Frappe-maintained apps. When a finding's BLAME
 # frame resolves inside one of these apps, the user can't practically
-# act on it — fixes live upstream, not in their bench. The renderer
+# act on it fixes live upstream, not in their bench. The renderer
 # routes these into the collapsed Observations subsection (see the
 # split in renderer.py + redundant_calls / explain_flags / n_plus_one
 # filters).
 #
 # Production trigger: a raw session on a Sales Invoice Save+Submit
 # surfaced 10 "Redundant cache lookup: <hash> (106 times)" findings
-# all landing in apps/erpnext/.../sales_invoice.py:300-321 — a loop
+# all landing in apps/erpnext/.../sales_invoice.py:300-321 a loop
 # inside ERPNext that the application developer can't patch.
 FRAMEWORK_APPS: frozenset[str] = frozenset({
 	"frappe",
@@ -83,7 +83,7 @@ FRAMEWORK_APPS: frozenset[str] = frozenset({
 # Well-known third-party libs to catch even when sys.path manipulation bypasses
 # site-packages/ (pyinstrument strips the prefix, so a lib arrives as
 # ``pandas/core/frame.py``). Checked by is_framework_callsite() by matching the
-# resolved app ROOT (first segment) — NOT a substring anywhere — because frappe's
+# resolved app ROOT (first segment) NOT a substring anywhere because frappe's
 # recorder strips the ``apps/`` prefix, so a user callsite is ``<app>/<app>/…`` and
 # a stripped lib is ``<lib>/…``; a lib name DEEPER in a relative path is therefore
 # the user's own submodule (``myapp/myapp/requests/…``), not the library, and must
@@ -102,17 +102,17 @@ _THIRD_PARTY_LIB_NAMES: frozenset[str] = frozenset({
 	"sqlparse", "cryptography", "pytz", "dateutil", "pyinstrument",
 })
 
-# v0.6.0: Frappe's framework-managed columns — every `tab*` table has these.
+# v0.6.0: Frappe's framework-managed columns every `tab*` table has these.
 # Frappe writes (most of) them on every save (`modified`, `modified_by`,
 # `idx`), on insert (`creation`, `owner`), on submit/cancel (`docstatus`), or
 # they're already auto-indexed (`name` is the PK; `parent` is auto-indexed on
 # child tables). Suggesting an index on any of them is a write-cost trap the
-# developer shouldn't be nudged into — so every index-suggestion path
+# developer shouldn't be nudged into so every index-suggestion path
 # (index_suggestions.py, table_breakdown.py's per-table candidates, and the
 # AI "suggest a fix" prompt) skips them.
 #
 # Mirrors `frappe.model.default_fields` + `frappe.model.optional_fields`.
-# Analyzers are pure (no `import frappe`), so this is a hardcoded snapshot —
+# Analyzers are pure (no `import frappe`), so this is a hardcoded snapshot
 # update it if Frappe adds a standard column.
 FRAPPE_METADATA_COLUMNS: frozenset[str] = frozenset({
 	# frappe.model.default_fields
@@ -128,7 +128,7 @@ def is_frappe_metadata_column(name) -> bool:
 	return bool(name) and str(name).strip().lower() in FRAPPE_METADATA_COLUMNS
 
 
-# v0.6.0: Frappe's framework "meta" tables — the ones that store the schema
+# v0.6.0: Frappe's framework "meta" tables the ones that store the schema
 # itself (DocType / DocField / Custom Field / Property Setter), the Single-
 # doctype value store, the naming-series counters, the global-search index,
 # the migration log, and UI/dashboard/print configuration. `bench migrate`
@@ -139,7 +139,7 @@ def is_frappe_metadata_column(name) -> bool:
 # breakdown still lists it (you may still want to know "30ms in tabSingles"),
 # it just won't get index candidates.
 #
-# Curated snapshot — content / log / queue tables (`tabFile`, `tabVersion`,
+# Curated snapshot content / log / queue tables (`tabFile`, `tabVersion`,
 # `tabEmail Queue`, `tabCommunication`, `tabError Log`, …) are deliberately
 # NOT here: those grow large and DO legitimately want application-chosen
 # indexes.
@@ -176,7 +176,7 @@ def is_frappe_meta_table(name) -> bool:
 	return bool(name) and str(name).strip().strip("`").lower() in _FRAPPE_META_TABLES_LOWER
 
 
-# v0.6.x: framework-internal tables — user/session/auth bookkeeping that
+# v0.6.x: framework-internal tables user/session/auth bookkeeping that
 # every Frappe request touches via session.get_user / get_roles / etc.,
 # irrespective of the app code. Distinct from FRAPPE_META_TABLES (= "Frappe
 # owns the schema, no custom indexes survive a migrate"): these *are* real
@@ -198,7 +198,7 @@ _FRAMEWORK_INTERNAL_TABLES_LOWER: frozenset[str] = frozenset(
 
 def is_framework_db_table(name) -> bool:
 	"""True for tables that are noise in the "Time spent per database table"
-	breakdown — schema/meta (``FRAPPE_META_TABLES``), user/session bookkeeping
+	breakdown schema/meta (``FRAPPE_META_TABLES``), user/session bookkeeping
 	(``FRAMEWORK_INTERNAL_TABLES``), or MySQL system tables
 	(``information_schema.*``). Case-insensitive + backtick-tolerant."""
 	if not name:
@@ -218,10 +218,10 @@ def is_framework_db_table(name) -> bool:
 # Core Frappe/ERPNext tables that take many INSERT/UPDATE rows per business
 # transaction (every submitted voucher, every stock move, …). An extra index
 # on one of these costs write time across many flows even though a single
-# profiling session may only show one write — the report flags that so an
+# profiling session may only show one write the report flags that so an
 # index recommendation here is treated conservatively.
 WRITE_HOT_TABLES: frozenset[str] = frozenset({
-	# Accounting / stock ledgers — written in bulk on every submit
+	# Accounting / stock ledgers written in bulk on every submit
 	"tabGL Entry", "tabStock Ledger Entry", "tabPayment Ledger Entry",
 	"tabSerial and Batch Bundle", "tabSerial and Batch Entry",
 	"tabBin", "tabSerial No", "tabBatch", "tabRepost Item Valuation",
@@ -244,13 +244,13 @@ def _last_app_segment(norm: str) -> str | None:
 	Boundary-anchored, so:
 	- a bench nested under a folder that is itself named ``apps``
 	  (``/opt/apps/frappe-bench/apps/erpnext/…``) resolves the REAL app
-	  (``erpnext``), not the bench dir — the LAST ``/apps/`` on an ABSOLUTE path
+	  (``erpnext``), not the bench dir the LAST ``/apps/`` on an ABSOLUTE path
 	  wins; and
 	- an app whose own name merely ends in ``apps`` (``webapps/module.py``) is
 	  NOT mistaken for the bench ``apps/`` dir.
 	A mid-path ``/apps/`` in a RELATIVE path is a user subpackage, not the bench
 	apps dir (the recorder strips the bench prefix, so bench code arrives as
-	``apps/<app>/…`` or ``<app>/<app>/…`` — never ``<app>/apps/…``); so
+	``apps/<app>/…`` or ``<app>/<app>/…``: never ``<app>/apps/…``); so
 	``myapp/apps/foo.py`` resolves to None here, letting the caller fall back to the
 	top segment ``myapp``. Returns None when there's no ``apps/`` boundary at all.
 	"""
@@ -300,12 +300,12 @@ def _extract_app_segment(norm: str) -> str | None:
 
 def installed_apps_allowlist() -> frozenset[str] | None:
 	"""The site's installed Frappe apps, as the ground-truth allowlist for
-	exclusion-mode classification — or ``None`` when frappe isn't importable
+	exclusion-mode classification or ``None`` when frappe isn't importable
 	(off-bench unit tests), in which case callers fall back to the hardcoded
 	third-party heuristic. Lazy frappe import mirrors ``call_tree._top_level_app``;
 	never raises. Analyzers resolve this ONCE and thread it in, so a real site
 	classifies application-vs-library from ground truth instead of guessing from a
-	name — an installed app named like a library (``redis``) is the user's code,
+	name an installed app named like a library (``redis``) is the user's code,
 	and a real library that isn't an installed app is not."""
 	try:
 		import frappe
@@ -325,14 +325,14 @@ def is_framework_callsite(
 
 	Two modes, chosen by whether ``tracked_apps`` is provided:
 
-	**Inclusion mode** — when ``tracked_apps`` is a non-empty tuple, the
+	**Inclusion mode**: when ``tracked_apps`` is a non-empty tuple, the
 	classifier flips: a callsite is framework *unless* its app matches
 	one of the tracked apps. This is what ``Optimus Settings ▸ Tracked
-	Apps`` configures — it lets the site admin say "I only care about
+	Apps`` configures it lets the site admin say "I only care about
 	findings in myapp" and get everything else routed to Observations
 	without having to enumerate every framework app.
 
-	**Exclusion mode** — when ``tracked_apps`` is None or empty, the classifier
+	**Exclusion mode**: when ``tracked_apps`` is None or empty, the classifier
 	uses the site's installed-apps allowlist as ground truth: an app root that is
 	an installed Frappe app (and not a framework/stock app) is the developer's own
 	code; everything else is library/framework. When ``installed_apps`` is None
@@ -341,7 +341,7 @@ def is_framework_callsite(
 	configured the Single.
 
 	Matching is on the resolved app ROOT (the ``apps/<app>/`` segment or the top
-	path segment), never a mid-path substring — so neither ``my_crm/`` nor a user
+	path segment), never a mid-path substring so neither ``my_crm/`` nor a user
 	submodule named ``crm/`` deep in a path is misread as the framework app.
 
 	Used by redundant_calls, explain_flags, n_plus_one, and top_queries to route
@@ -353,14 +353,14 @@ def is_framework_callsite(
 		return False
 	norm = filename.replace("\\", "/")
 
-	# venv / system packages are always un-patchable library code — checked in BOTH
+	# venv / system packages are always un-patchable library code checked in BOTH
 	# modes (a vendored lib under a tracked app's own .venv is not that app's code,
 	# so inclusion mode must not report it as an actionable user finding).
 	if "site-packages/" in norm or "dist-packages/" in norm:
 		return True
 
 	# Server Scripts are the developer's own optimizable code and live in the
-	# database, not in any app — so they stay actionable in BOTH modes (and must
+	# database, not in any app so they stay actionable in BOTH modes (and must
 	# never be caught by the installed-apps allowlist below, whose set has no entry
 	# for the synthetic ``<serverscript>`` filename).
 	if norm.startswith("<serverscript") or norm.startswith("<server-script"):
@@ -374,22 +374,22 @@ def is_framework_callsite(
 		return True
 
 	# Exclusion mode (default). Resolve the app ROOT (the boundary-anchored
-	# ``apps/<app>/`` segment when present, else the top path segment) — never a
+	# ``apps/<app>/`` segment when present, else the top path segment) never a
 	# mid-path substring, so a user submodule named like a framework app or library
 	# (``mybiz/mybiz/crm/…``, ``myapp/myapp/requests/…``) is not misread.
 	user_app = _last_app_segment(norm)
 	app_root = user_app or norm.lstrip("/").split("/", 1)[0]
 
 	# Framework / stock apps (frappe, erpnext, …) are never actionable, even though
-	# they're installed — so this check precedes the installed-apps allowlist.
+	# they're installed so this check precedes the installed-apps allowlist.
 	if app_root in FRAMEWORK_APPS:
 		return True
 
 	# Ground truth beats name-guessing: when the site's installed-apps allowlist is
 	# available, an app root that IS an installed Frappe app is application code
-	# (actionable) — including an app deliberately named like a library (``redis``,
-	# ``requests``). Anything else — a real third-party library, an out-of-bench
-	# checkout, a stray absolute/Windows path — the developer can't patch → framework.
+	# (actionable) including an app deliberately named like a library (``redis``,
+	# ``requests``). Anything else a real third-party library, an out-of-bench
+	# checkout, a stray absolute/Windows path the developer can't patch → framework.
 	if installed_apps:
 		return app_root not in installed_apps
 
@@ -421,7 +421,7 @@ def is_framework_callsite_str(
 	"""
 	if not callsite:
 		return True
-	# The line number is always the trailing ':N' segment — strip it to
+	# The line number is always the trailing ':N' segment strip it to
 	# recover the filename for the path classifier. Recorder stacks use
 	# forward slashes, so a Windows drive-letter ':' isn't a concern.
 	filename = callsite.rsplit(":", 1)[0] if ":" in callsite else callsite
@@ -434,16 +434,16 @@ def is_profiler_own_query(stack: list | None) -> bool:
 
 	Examples of queries that hit this path:
 
-	- ``optimus/infra_capture.py:176`` — the ``SHOW GLOBAL
+	- ``optimus/infra_capture.py:176``: the ``SHOW GLOBAL
 	  STATUS`` snapshot run inside every ``before_request`` /
 	  ``after_request`` hook. Fired ~2× per captured request.
-	- ``optimus/infra_capture.py`` — the one-shot ``SHOW
+	- ``optimus/infra_capture.py``: the one-shot ``SHOW
 	  VARIABLES`` for ``max_connections`` (cached after first call).
 	- Anything else the profiler queries as part of its own bookkeeping.
 
 	These queries are real SQL that MariaDB executed, so they show up
 	in the recorder's call list with stack traces. The user can't act
-	on them, though — they're profiler overhead, not application work.
+	on them, though they're profiler overhead, not application work.
 	Before this helper, n_plus_one would surface them as:
 
 	    "Same query ran 22× at optimus/infra_capture.py:176"
@@ -456,14 +456,14 @@ def is_profiler_own_query(stack: list | None) -> bool:
 
 	- If we find a user frame (not in ``frappe/`` and not in
 	  ``optimus/``) → return False. The query came from user
-	  code routed through framework helpers — keep it.
+	  code routed through framework helpers keep it.
 	- If we exhaust the stack seeing only ``frappe/`` and
 	  ``optimus/`` frames AND at least one was
 	  ``optimus/`` → return True. The deepest non-frappe frame
 	  is inside the profiler, so the query originated there.
 	- If we exhaust with only ``frappe/`` frames → return False. This
 	  is a legitimate framework query (migration, fixture, internal
-	  bg task) — the ``walk_callsite`` fallback still surfaces it.
+	  bg task) the ``walk_callsite`` fallback still surfaces it.
 	"""
 	if not stack:
 		return False
@@ -485,9 +485,9 @@ def is_profiler_own_query(stack: list | None) -> bool:
 			has_profiler_frame = True
 			continue
 		if "frappe/" in filename:
-			# Keep walking — the profiler or user code may be further out.
+			# Keep walking the profiler or user code may be further out.
 			continue
-		# Non-framework frame — this is user code; the query's origin
+		# Non-framework frame this is user code; the query's origin
 		# is the user's business logic, not our instrumentation.
 		return False
 	return has_profiler_frame
@@ -499,11 +499,11 @@ def walk_callsite(stack: list | None) -> dict | None:
 	Shared implementation of the "skip frappe frames" callsite walker.
 	The recorder builds `stack` outermost-to-innermost (after stripping
 	its own frames), so the LAST entry is the closest /apps/ frame to
-	the SQL call — but that's often a frappe framework helper. We walk
+	the SQL call but that's often a frappe framework helper. We walk
 	from innermost toward outermost and return the first frame whose
 	filename isn't inside a framework directory.
 
-	Returns a dict with keys `filename`, `lineno`, `function` — or None
+	Returns a dict with keys `filename`, `lineno`, `function`: or None
 	if the stack is empty / malformed / belongs to profiler
 	instrumentation. Falls back to the innermost frame if every frame
 	is in ``frappe/`` (legitimate for queries issued from inside
@@ -514,7 +514,7 @@ def walk_callsite(stack: list | None) -> dict | None:
 	``optimus/`` (as detected by ``is_profiler_own_query``)
 	return None instead of falling back to the profiler frame. The
 	caller's ``if not callsite: continue`` guard then drops the query
-	— otherwise the profiler's own ``SHOW GLOBAL STATUS`` snapshots
+	otherwise the profiler's own ``SHOW GLOBAL STATUS`` snapshots
 	show up as "Same query ran 22× at optimus/infra_capture
 	.py:176" findings, which are noise the user can't act on.
 	"""
@@ -536,7 +536,7 @@ def walk_callsite(stack: list | None) -> dict | None:
 		return frame
 
 	# Fallback: every frame was in the framework. If the profiler itself
-	# is in the stack, this is our own instrumentation — drop it.
+	# is in the stack, this is our own instrumentation drop it.
 	if is_profiler_own_query(stack):
 		return None
 
@@ -571,13 +571,13 @@ def walk_callsite_str(stack: list | None) -> str | None:
 #   erpnext/doctype/parent_manufacturing_order/parent_manufacturing_order
 #   .py:503
 #
-# That's 144 chars — just past the 140 limit. Shortening the filename to
+# That's 144 chars just past the 140 limit. Shortening the filename to
 # its last 2 path segments yields:
 #
 #   Same query ran 65× at parent_manufacturing_order/parent_manufacturing
 #   _order.py:503
 #
-# ~90 chars — well under the limit — and still uniquely identifies the
+# ~90 chars well under the limit and still uniquely identifies the
 # file for navigation. The full absolute path remains in the finding's
 # technical_detail_json so the developer can jump to it directly.
 #
@@ -590,20 +590,20 @@ def walk_callsite_str(stack: list | None) -> str | None:
 # ---------------------------------------------------------------------------
 # Per-finding-type speedup factors. Applied to the CURRENT average per-query
 # time to estimate what the same query would cost after the recommended
-# fix. These are ceiling estimates — a real fix could do better or worse,
+# fix. These are ceiling estimates a real fix could do better or worse,
 # but they give the developer a rough sense of "is this worth my afternoon".
 #
 # Derivations:
 #   Full Table Scan: scan O(N) → index lookup O(log N). For N=10k-10M the
 #                    ratio is ~20×. Use 0.05.
-#   Missing Index:   same — the suggestion IS to add an index.
+#   Missing Index:   same the suggestion IS to add an index.
 #   Filesort:        sort cost is O(N log N); with an index-ordered read,
 #                    the sort disappears but the read cost remains. Typical
 #                    observed speedup on Frappe DocTypes is ~3×. Use 0.30.
 #   Temporary Table: materialization cost goes away when a covering index
 #                    supports the GROUP BY / DISTINCT. ~2× speedup. Use 0.50.
 #   Low Filter Ratio: the fix is selectivity, so projected_time ≈ current ×
-#                    (filtered% / 100). Special-cased in explain_flags —
+#                    (filtered% / 100). Special-cased in explain_flags
 #                    not a simple factor.
 #   N+1 Query:       N queries × avg → 1 batched query ≈ 2 × avg. Computed
 #                    directly in n_plus_one, not via this table.
@@ -616,7 +616,7 @@ _POST_FIX_SPEEDUP: dict[str, float] = {
 
 # Minimum projected time per query. Even a perfect index lookup costs
 # client/server round-trip + plan time, which is typically ~0.3-0.5ms on
-# a warm MariaDB connection. Don't project below this floor — otherwise
+# a warm MariaDB connection. Don't project below this floor otherwise
 # the report claims "projected 0.0ms" which is nonsense.
 POST_FIX_FLOOR_MS = 0.3
 
@@ -654,7 +654,7 @@ def percentile(values: list[float], pct: int) -> float:
 	analyzers (N+1, redundant calls) to surface the tail of the per-hit
 	duration distribution alongside the consolidated total.
 
-	No numpy dependency — Optimus already ships pure-Python analyzers,
+	No numpy dependency Optimus already ships pure-Python analyzers,
 	and this is exact enough for finding-card P95 readouts.
 	"""
 	if not values:

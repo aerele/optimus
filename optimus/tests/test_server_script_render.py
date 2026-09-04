@@ -8,7 +8,7 @@ Frappe's ``safe_exec`` (apps/frappe/frappe/utils/safe_exec.py:49,118) compiles
 Server Scripts with a synthetic filename ``<serverscript>: <scrubbed-name>``.
 The capture + analyze halves of Optimus already treat these as user code
 (call_tree.py:475-495 explicitly carves Server Scripts out of the plumbing
-filter). The renderer is what was lacking — labels collapsed to a generic
+filter). The renderer is what was lacking labels collapsed to a generic
 ``<server-script body>``, app bucketing went to ``[other]``, no source
 snippet, no editor link.
 
@@ -54,7 +54,7 @@ class TestExtractScriptName:
 
 	def test_bare_server_script_returns_none(self):
 		# Frappe writes a bare ``<serverscript>`` when no script_filename
-		# is passed — nothing to look up, so callers skip.
+		# is passed nothing to look up, so callers skip.
 		assert sss.extract_script_name("<serverscript>") is None
 		assert sss.extract_script_name("<serverscript> ") is None
 
@@ -107,7 +107,7 @@ class TestGetServerScriptRecord:
 			raise RuntimeError("db is on fire")
 
 		monkeypatch.setattr(frappe, "get_all", boom, raising=False)
-		# Must NOT raise — best-effort guarantee.
+		# Must NOT raise best-effort guarantee.
 		assert sss.get_server_script_record("my_script") is None
 
 	def test_cache_memoizes_lookup(self, fake_frappe_db):
@@ -167,7 +167,7 @@ class TestCallTreeDisplay:
 		assert label != "<server-script body>"
 
 	def test_display_label_for_bare_server_script_keeps_fallback(self):
-		"""Bare ``<serverscript>`` (no name) has nothing better to show — keep
+		"""Bare ``<serverscript>`` (no name) has nothing better to show keep
 		a generic label (no crash, no name confusion)."""
 		node = {"filename": "<serverscript>", "function": "", "lineno": None}
 		label = call_tree._display_name_for_node(node)
@@ -183,12 +183,12 @@ class TestAppBucketing:
 		assert call_tree._top_level_app("", "<serverscript>: my_script") == "Server Scripts"
 
 	def test_bare_server_script_buckets_to_server_scripts(self):
-		# Even without a name, it's still a Server Script — better than the
+		# Even without a name, it's still a Server Script better than the
 		# anonymous [other] bucket.
 		assert call_tree._top_level_app("", "<serverscript>") == "Server Scripts"
 
 	def test_other_angle_bracket_filenames_still_route_to_other(self):
-		"""Regression guard: don't widen the carve-out beyond Server Scripts —
+		"""Regression guard: don't widen the carve-out beyond Server Scripts
 		``<string>`` / ``<frozen …>`` etc. must still go to ``[other]``."""
 		assert call_tree._top_level_app("", "<string>") == "[other]"
 		assert call_tree._top_level_app("", "<frozen importlib._bootstrap>") == "[other]"
@@ -207,7 +207,7 @@ class TestRendererSnippetAndLink:
 
 		fake_frappe_db["rows"] = [{"name": "Foo", "script": "a\nb"}]
 		resolved = renderer._resolve_source_path("<serverscript>: foo")
-		# Tuple sentinel — distinguishes from str (real path) and None.
+		# Tuple sentinel distinguishes from str (real path) and None.
 		assert resolved is not None
 		assert resolved != "<serverscript>: foo"  # not just the raw filename
 		# Sentinel shape: ("server_script", scrubbed_name)
@@ -236,7 +236,7 @@ class TestEndToEndServerScriptFinding:
 	def test_finding_card_shows_snippet_and_desk_link(self, fake_frappe_db):
 		"""Render a session with one finding whose callsite is a Server Script.
 		The card must (a) link to the Desk Server Script form, (b) inline the
-		Server Script's source body — not a vscode:// link, not a bare
+		Server Script's source body not a vscode:// link, not a bare
 		``<server-script body>`` blob."""
 		from optimus import renderer
 
@@ -304,7 +304,7 @@ class TestEndToEndServerScriptFinding:
 
 # ---------------------------------------------------------------------------
 # Server Script driven through the def-expansion path
-# (``_decorator_through_def_rows`` → ``_source_lines``) — the combination the
+# (``_decorator_through_def_rows`` → ``_source_lines``) the combination the
 # ±2-window / render tests above never exercise end-to-end.
 # ---------------------------------------------------------------------------
 
@@ -318,8 +318,8 @@ class TestServerScriptThroughDefExpansion:
 			{
 				"name": "My Script",
 				"script": (
-					"@frappe.whitelist()\n"  # 1 — pyinstrument's recorded line
-					"def handler():\n"  # 2 — the def
+					"@frappe.whitelist()\n"  # 1 pyinstrument's recorded line
+					"def handler():\n"  # 2 the def
 					"    for u in frappe.db.get_all('User'):\n"  # 3
 					"        frappe.get_doc('User', u.name)\n"  # 4
 				),

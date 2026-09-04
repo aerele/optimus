@@ -1,7 +1,7 @@
 # Optimus Redis schema
 
-This doc inventories every Redis key Optimus writes — the key pattern,
-the value's shape and encoding, the TTL, the lifecycle — and the
+This doc inventories every Redis key Optimus writes the key pattern,
+the value's shape and encoding, the TTL, the lifecycle and the
 versioning contract that lets value shapes evolve safely across
 releases.
 
@@ -21,7 +21,7 @@ backlog counter). The Frappe-managed MariaDB DocTypes
 Redis is the working memory.
 
 Every key Optimus writes comes from a builder in
-`optimus/redis_keys.py` — a single source of truth. The audit test
+`optimus/redis_keys.py`: a single source of truth. The audit test
 `optimus/tests/test_redis_audit.py` enforces this: a `frappe.cache.*`
 call site whose key isn't a `redis_keys.*` call fails CI.
 
@@ -35,7 +35,7 @@ Schema versions are tracked by **two** mechanisms working together:
 
 A versioned-value envelope (`optimus.redis_schema.wrap_value` /
 `unwrap_value`) is the opt-in contract for **new** value-shape
-changes. Today (v0.12.0) NO existing value is wrapped — the helpers
+changes. Today (v0.12.0) NO existing value is wrapped the helpers
 are reserved for the next time a shape changes.
 
 ---
@@ -90,7 +90,7 @@ when you add a new key; the audit test asserts this table matches
 | `profiler:onboarding_seen:<user>` | **enveloped** string (v0.12.13+) | Frappe pickle around `{"_v": 1, "data": "1"}` | 1 year (`ONBOARDING_CACHE_TTL_SECONDS`) | Dismissed-toast marker. Migrated to the v0.12.0 envelope in v0.12.13. The reader (`check_onboarding_seen`) uses `unwrap_value` so legacy bare-string writes from pre-v0.12.13 still resolve. |
 | `profiler:explain:<cache_key>` | **enveloped** list[dict] (v0.12.17+) | Frappe pickle around `{"_v": 1, "data": [<row>, ...]}` | TTL via `optimus_explain_cache_ttl_seconds` site_config (default 3600s) | EXPLAIN result hash; persists across sessions. Migrated to the v0.12.0 envelope in v0.12.17. Reads accept legacy bare-list shape for backward compat with pre-v0.12.17 writers. |
 | `optimus:analyze:inflight` | string (heartbeat token) | raw | 300s (`_SINGLEFLIGHT_TTL_SECONDS`) | Single-flight guard; heartbeated by the live analyze; auto-clears on worker death. |
-| `optimus:retention_backlog` | **enveloped** integer (v0.12.13+) | Frappe pickle around `{"_v": 1, "data": <int>}` | 3600s | Janitor backlog counter when daily sweep hits its per-run cap. Migrated to the v0.12.0 envelope in v0.12.13. Write-only inside the app — operator dashboards reading directly from Redis see the envelope shape. |
+| `optimus:retention_backlog` | **enveloped** integer (v0.12.13+) | Frappe pickle around `{"_v": 1, "data": <int>}` | 3600s | Janitor backlog counter when daily sweep hits its per-run cap. Migrated to the v0.12.0 envelope in v0.12.13. Write-only inside the app operator dashboards reading directly from Redis see the envelope shape. |
 | `optimus_settings_cached` | **enveloped** dataclass dict (v0.12.11+) | Frappe pickle around `{"_v": 1, "data": {...}}` | none (invalidated by DocType `on_update`) | Pre-prefix legacy name; kept as-is to avoid a one-shot cache miss on upgrade. **First value migrated to the v0.12.0 versioned envelope (v0.12.11).** Reads still accept legacy bare-dict shape for backward compat with pre-v0.12.11 writers. |
 | `optimus:schema_version` | integer | raw | none | v0.12.0+ sentinel. Written at app import. See § 4. |
 
@@ -104,7 +104,7 @@ of every value Optimus writes. v0.12.0 baseline is `1`.
 ### When to bump
 
 Bump `SCHEMA_VERSION` (in both `optimus/redis_keys.py` and
-`optimus/redis_schema.py` — they must stay in lock-step) when ANY of:
+`optimus/redis_schema.py`: they must stay in lock-step) when ANY of:
 
 * A field is added or removed from a persisted dict (e.g. you add a
   `capture_phase2_too` flag to `session_meta`).
@@ -115,7 +115,7 @@ Bump `SCHEMA_VERSION` (in both `optimus/redis_keys.py` and
 
 Renaming a key, adding a NEW key, or changing only the helper's
 build logic without changing the resulting string does NOT bump
-`SCHEMA_VERSION` — those are non-breaking organisational changes.
+`SCHEMA_VERSION`: those are non-breaking organisational changes.
 
 ### How to wrap a new value shape
 
@@ -142,7 +142,7 @@ On the read side, use `unwrap_value`:
 raw = frappe.cache.get_value(redis_keys.session_meta(uuid))
 payload, observed_version = redis_schema.unwrap_value(raw, default={})
 if observed_version is None:
-    # Legacy un-wrapped value — payload is the bare dict (or whatever
+    # Legacy un-wrapped value payload is the bare dict (or whatever
     # the previous shape was). Code should still work on the old shape
     # OR have a migration path.
     ...
@@ -158,7 +158,7 @@ else:
 
 ### What the unwrap helper does NOT do
 
-* It doesn't migrate the value inline — each value's shape has its
+* It doesn't migrate the value inline each value's shape has its
   own migration rules, and coupling that into one helper would create
   a god-function. The contract is: when drift is detected, the helper
   emits telemetry + returns the default. Future code can read the
@@ -195,10 +195,10 @@ migrators.
 
 Most keys carry an explicit TTL via `frappe.cache.set_value(..., expires_in_sec=N)` or `expire_key()`. The exceptions:
 
-* `profiler:session:<uuid>:meta` / `:recordings` / `:pending_jobs` / `:jobs` — explicit delete by `delete_session_state` on analyze completion. If analyze crashes before that runs, the janitor's `sweep_orphan_redis_state` daily cron picks up the orphans.
-* `profiler:lp:<uuid>:picks` / `:source` / `:samples` — explicit delete by `cleanup_run`. If a worker dies mid-run, the janitor's `sweep_stale_phase2_runs` 5-minute cron picks up the orphans.
-* `profiler:explain:<cache_key>` — persistent read-through cache. Small per-entry; not worth a TTL.
-* `optimus_settings_cached` — invalidated by the Optimus Settings DocType's `on_update` (Frappe's standard cache invalidation pattern, not a TTL).
+* `profiler:session:<uuid>:meta` / `:recordings` / `:pending_jobs` / `:jobs`: explicit delete by `delete_session_state` on analyze completion. If analyze crashes before that runs, the janitor's `sweep_orphan_redis_state` daily cron picks up the orphans.
+* `profiler:lp:<uuid>:picks` / `:source` / `:samples`: explicit delete by `cleanup_run`. If a worker dies mid-run, the janitor's `sweep_stale_phase2_runs` 5-minute cron picks up the orphans.
+* `profiler:explain:<cache_key>`: persistent read-through cache. Small per-entry; not worth a TTL.
+* `optimus_settings_cached`: invalidated by the Optimus Settings DocType's `on_update` (Frappe's standard cache invalidation pattern, not a TTL).
 
 The `profiler:onboarding_seen:<user>` 1-year TTL is the policy lever; bump or shorten via `ONBOARDING_CACHE_TTL_SECONDS` in `api.py` if the user-research story changes.
 
@@ -206,7 +206,7 @@ The `profiler:onboarding_seen:<user>` 1-year TTL is the policy lever; bump or sh
 
 ## 6. The dual-encoding hazard
 
-`profiler:session:<uuid>:jobs` is the one hash where the encoding is **deliberately raw JSON**, not Frappe's pickle wrapping. The v0.7.x trilogy (`a356f64` → `0e4a270` → `f30f44e`) shipped an atomic Lua script `_MERGE_JOB_META_LUA` that does HGET → cjson.decode → merge → cjson.encode → HSET in a single server-side step. Lua can't replicate Python's pickle, so the values are JSON bytes — and they're read/written through `_raw_redis()` in `session.py`, which bypasses Frappe's pickle wrapper.
+`profiler:session:<uuid>:jobs` is the one hash where the encoding is **deliberately raw JSON**, not Frappe's pickle wrapping. The v0.7.x trilogy (`a356f64` → `0e4a270` → `f30f44e`) shipped an atomic Lua script `_MERGE_JOB_META_LUA` that does HGET → cjson.decode → merge → cjson.encode → HSET in a single server-side step. Lua can't replicate Python's pickle, so the values are JSON bytes and they're read/written through `_raw_redis()` in `session.py`, which bypasses Frappe's pickle wrapper.
 
 **The hazard**: if any future code does `frappe.cache.hset(jobs_key, job_id, …)` directly, Frappe's `RedisWrapper.hset` pickles the value. The hash becomes heterogeneous (some JSON-encoded, some pickled), and `hgetall` returns garbage on the next read.
 
@@ -251,6 +251,6 @@ Adding a Redis-backed feature? Four steps:
    - Cross-session caches: an explicit `expires_in_sec` or a manual invalidation hook.
    - If neither applies, document the policy here.
 
-4. **If the value SHAPE is version-controlled**, wrap it via `optimus.redis_schema.wrap_value` on write and unwrap via `unwrap_value` on read. Most new keys don't need this — they're either simple strings, hash-of-IDs, or write-once lists. Only wrap when the shape might evolve.
+4. **If the value SHAPE is version-controlled**, wrap it via `optimus.redis_schema.wrap_value` on write and unwrap via `unwrap_value` on read. Most new keys don't need this they're either simple strings, hash-of-IDs, or write-once lists. Only wrap when the shape might evolve.
 
-The audit test, the schema sentinel, the version-bump rule together form the safety net — but the discipline of routing keys through `redis_keys.py` is what makes them all work.
+The audit test, the schema sentinel, the version-bump rule together form the safety net but the discipline of routing keys through `redis_keys.py` is what makes them all work.

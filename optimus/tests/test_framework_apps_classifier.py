@@ -9,7 +9,7 @@ insights, crm, builder, wiki, drive) so findings rooted inside those
 apps route into the collapsed Observations subsection instead of the
 actionable Findings list. Triggered by a production Sales Invoice
 Save+Submit session that surfaced 10 'Redundant cache lookup'
-findings landing in apps/erpnext/.../sales_invoice.py:300 — the
+findings landing in apps/erpnext/.../sales_invoice.py:300 the
 application developer can't patch ERPNext from their bench.
 
 These tests pin the classifier's behavior so regressions (e.g. an
@@ -98,7 +98,7 @@ class TestThirdPartyLibraryDetection:
 
 	@pytest.mark.parametrize("path", [
 		# A lib name MID-PATH in a relative (recorder-stripped) path is a user
-		# submodule, not the library — recorder callsites are ``<app>/<app>/…``.
+		# submodule, not the library recorder callsites are ``<app>/<app>/…``.
 		"something/werkzeug/routing.py",
 		"something/gunicorn/app.py",
 		"myapp/myapp/rq/worker.py",
@@ -126,7 +126,7 @@ class TestWidenedLibraryCoverage:
 	])
 	def test_widened_libs_are_framework(self, path):
 		assert is_framework_callsite(path) is True, (
-			f"{path} is un-patchable library code — must be an Observation, not a user N+1"
+			f"{path} is un-patchable library code must be an Observation, not a user N+1"
 		)
 
 	def test_sql_and_hotframe_classifiers_agree_on_widened_libs(self):
@@ -141,7 +141,7 @@ class TestWidenedLibraryCoverage:
 
 	def test_user_app_named_near_a_lib_still_user(self):
 		"""A user app whose name merely contains a lib token (not the lib itself)
-		is still user code — the fragments carry a trailing slash."""
+		is still user code the fragments carry a trailing slash."""
 		assert is_framework_callsite("apps/pandas_tools/pandas_tools/api.py") is False
 		assert is_framework_callsite("apps/my_redis_app/handlers.py") is False
 
@@ -173,7 +173,7 @@ class TestBoundaryCases:
 	def test_lookalike_erpnext(self):
 		# Fork of erpnext with renamed top-level should still be user code.
 		assert is_framework_callsite("apps/myerpnext_fork/foo.py") is False
-		# But the jewellery_erpnext case — which is a DIFFERENT app —
+		# But the jewellery_erpnext case which is a DIFFERENT app
 		# must also be user code (it's not in the official list even
 		# though its name ends with 'erpnext').
 		assert is_framework_callsite("apps/jewellery_erpnext/foo.py") is False
@@ -205,7 +205,7 @@ class TestInclusionMode:
 
 	def test_not_in_allowlist_returns_true(self):
 		"""Even erpnext, which is in FRAMEWORK_APPS, still returns
-		True in inclusion mode — the inclusion check is the ONLY
+		True in inclusion mode the inclusion check is the ONLY
 		check when tracked_apps is set."""
 		tracked = ("myapp",)
 		assert is_framework_callsite(
@@ -232,7 +232,7 @@ class TestInclusionMode:
 		) is False
 
 	def test_empty_tracked_apps_falls_back_to_exclusion(self):
-		"""Empty tuple means 'no allowlist configured' — fall back to
+		"""Empty tuple means 'no allowlist configured' fall back to
 		the built-in FRAMEWORK_APPS exclusion list."""
 		assert is_framework_callsite(
 			"apps/erpnext/erpnext/foo.py", tracked_apps=(),
@@ -273,7 +273,7 @@ class TestInclusionMode:
 class TestInclusionModeUnderAppsAncestor:
 	"""Issue C: Tracked Apps (inclusion mode) must resolve the real app even when
 	the bench is nested under a folder named 'apps' (/opt/apps/…, multi-bench
-	servers) — else a tracked app's own findings get hidden as framework."""
+	servers) else a tracked app's own findings get hidden as framework."""
 
 	def test_tracked_app_matches_under_apps_ancestor(self):
 		tracked = ("erpnext",)
@@ -289,10 +289,10 @@ class TestInclusionModeUnderAppsAncestor:
 
 class TestFrameworkNameMatchedOnAppRootNotMidPath:
 	"""A framework/lib name counts only as the resolved app ROOT, not a folder
-	deeper in the path — so a user app's submodule named like a framework app, the
+	deeper in the path so a user app's submodule named like a framework app, the
 	standard /home/frappe/ server home, and a vendored lib under a user app all stay
 	the user's own code. Regression for the mid-path substring false-positive (which
-	main — and this branch before the fix — got wrong)."""
+	main and this branch before the fix got wrong)."""
 
 	@pytest.mark.parametrize("path", [
 		"mybiz/mybiz/crm/lead_utils.py",       # submodule named like a framework app
@@ -302,7 +302,7 @@ class TestFrameworkNameMatchedOnAppRootNotMidPath:
 		"apps/myapp/myapp/werkzeug/util.py",   # vendored lib under a user app
 		"apps/acme/acme/requests/client.py",
 		# recorder-stripped user modules named like a common library (the exact
-		# shape frappe's recorder produces — apps/ stripped) must stay actionable.
+		# shape frappe's recorder produces apps/ stripped) must stay actionable.
 		"myapp/myapp/requests/api.py",
 		"myapp/myapp/redis/cache.py",
 		"billing/billing/celery/jobs.py",
@@ -310,7 +310,7 @@ class TestFrameworkNameMatchedOnAppRootNotMidPath:
 	])
 	def test_mid_path_framework_or_lib_name_is_user_code(self, path):
 		assert is_framework_callsite(path) is False, (
-			f"{path} — the framework/lib name is only mid-path, not the app root"
+			f"{path} the framework/lib name is only mid-path, not the app root"
 		)
 
 	@pytest.mark.parametrize("path", [
@@ -326,7 +326,7 @@ class TestFrameworkNameMatchedOnAppRootNotMidPath:
 
 class TestSitePackagesGuardInBothModes:
 	"""A venv library is un-patchable framework code in BOTH default and Tracked
-	Apps mode — a lib vendored under a tracked app's own .venv must not be reported
+	Apps mode a lib vendored under a tracked app's own .venv must not be reported
 	as an actionable user finding just because its top segment is the tracked app."""
 
 	@pytest.mark.parametrize("path", [
@@ -344,7 +344,7 @@ class TestSitePackagesGuardInBothModes:
 class TestUserAppWithAppsSubpackage:
 	"""A user app that itself contains a subpackage literally named 'apps'
 	(``myapp/apps/foo.py``) must resolve to the real app 'myapp', not the segment
-	after the mid-path 'apps' — a relative mid-path '/apps/' is a user subpackage,
+	after the mid-path 'apps' a relative mid-path '/apps/' is a user subpackage,
 	not the bench apps dir (the recorder strips the bench prefix)."""
 
 	def test_apps_subpackage_resolves_to_real_app_in_inclusion_mode(self):
@@ -374,14 +374,14 @@ class TestInstalledAppsAllowlist:
 	"""Exclusion mode with the ground-truth installed-apps allowlist (what a real
 	site passes). This is the fix that ends the denylist churn: application-vs-
 	library is decided by 'is it an installed Frappe app', not by guessing from a
-	name. Off-bench (installed_apps=None) the hardcoded heuristic still applies —
+	name. Off-bench (installed_apps=None) the hardcoded heuristic still applies
 	the rest of this file exercises that path."""
 
 	INSTALLED = frozenset({"frappe", "erpnext", "myapp", "redis", "requests"})
 
 	def test_installed_app_named_like_a_library_is_user_code(self):
 		# The whole point: an app literally named `redis`/`requests` that IS
-		# installed is the developer's code — the denylist wrongly hid it.
+		# installed is the developer's code the denylist wrongly hid it.
 		assert is_framework_callsite("redis/redis/api.py", installed_apps=self.INSTALLED) is False
 		assert is_framework_callsite("requests/requests/foo.py", installed_apps=self.INSTALLED) is False
 
@@ -418,7 +418,7 @@ class TestInstalledAppsAllowlist:
 		# installed_apps=None → the hardcoded denylist path (unchanged behavior).
 		# This is EXACTLY the false-positive the allowlist fixes: off-bench, an app
 		# named `redis` is indistinguishable from the library, so the denylist hides
-		# it as framework. On-bench (installed_apps set) it is correctly user code —
+		# it as framework. On-bench (installed_apps set) it is correctly user code
 		# see test_installed_app_named_like_a_library_is_user_code above.
 		assert is_framework_callsite("redis/redis/api.py", installed_apps=None) is True
 		assert is_framework_callsite("pandas/core/frame.py", installed_apps=None) is True
@@ -435,7 +435,7 @@ class TestInstalledAppsAllowlist:
 
 class TestPureHelperFrameAllowlistOnBench:
 	"""_is_pure_helper_frame (hot-frame leaderboard + Slow Hot Path walker) with a
-	populated installed-apps set — the ON-BENCH path the pure-Python suite otherwise
+	populated installed-apps set the ON-BENCH path the pure-Python suite otherwise
 	never hits (every other test passes installed_apps=None). Regression guard for
 	the drop-user-frames bug: the allowlist must key on the RESOLVED app root, not
 	the raw first path segment ('apps'/'home'), and must not fire in inclusion mode."""

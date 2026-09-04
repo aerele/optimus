@@ -170,7 +170,7 @@ def test_submit_accepts_and_stores(mock_frappe):
 
 def test_submit_appends_to_existing_list(mock_frappe):
     """Two sequential submits must accumulate into the Redis list
-    atomically — RPUSH semantics preserve both.
+    atomically RPUSH semantics preserve both.
     """
     from optimus import api
 
@@ -249,7 +249,7 @@ def test_frontend_js_wraps_beacon_body_for_frappe_routing():
     Without the wrap, Frappe's request handler parses the raw body
     as JSON and flattens the top-level keys into form_dict, so
     submit_frontend_metrics is called with session_uuid=..., xhr=...,
-    vitals=... — which does NOT match the (payload: str) signature
+    vitals=... which does NOT match the (payload: str) signature
     and fails with TypeError. The beacon path silently drops every
     payload in that case.
 
@@ -268,7 +268,7 @@ def test_frontend_js_wraps_beacon_body_for_frappe_routing():
     # Must construct a beaconBody distinct from the raw frappe.call body.
     assert "beaconBody" in src, (
         "optimus_frontend.js must construct a beaconBody wrapped as "
-        "{payload: body} for sendBeacon — see comment explaining the "
+        "{payload: body} for sendBeacon see comment explaining the "
         "server contract"
     )
     # Must wrap as {payload: body}.
@@ -278,11 +278,11 @@ def test_frontend_js_wraps_beacon_body_for_frappe_routing():
     )
     # The Blob constructor used with sendBeacon must reference
     # beaconBody, not the unwrapped body. Find `new Blob([beaconBody]`
-    # specifically — this string only appears in actual code, not in
+    # specifically this string only appears in actual code, not in
     # the explanatory comment block.
     assert "new Blob([beaconBody]" in src, (
         "sendBeacon must send new Blob([beaconBody], ...), not the "
-        "raw body — otherwise Frappe's JSON body flattening mismatches "
+        "raw body otherwise Frappe's JSON body flattening mismatches "
         "the endpoint signature"
     )
 
@@ -350,7 +350,7 @@ def test_submit_enforces_soft_cap_tail_prefer(mock_frappe):
         "docname": "PS-0004",
     }
 
-    # Push 1500 XHRs — 500 over the cap of 1000.
+    # Push 1500 XHRs 500 over the cap of 1000.
     xhrs = [
         {"recording_id": f"r{i}", "url": f"/api/{i}",
          "method": "GET", "duration_ms": 10, "status": 200,
@@ -365,7 +365,7 @@ def test_submit_enforces_soft_cap_tail_prefer(mock_frappe):
 
     xhr_list = mock_frappe["list_store"]["profiler:frontend:S4:xhr"]
     assert len(xhr_list) == 1000
-    # Tail preferred — the last entry's timestamp should be 1499.
+    # Tail preferred the last entry's timestamp should be 1499.
     # (Client-side slicing first drops the first 500, then LTRIM is a
     # no-op because the list is already at cap.)
     last = json.loads(xhr_list[-1])

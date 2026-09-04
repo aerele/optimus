@@ -11,7 +11,7 @@ threshold.
 Bucket key uses identifier_safe (sha256 hash) for redundancy
 detection so equivalent values cluster regardless of literal text.
 The finding's technical_detail_json carries BOTH identifier_safe AND
-identifier_raw — the renderer uses identifier_raw.
+identifier_raw the renderer uses identifier_raw.
 """
 
 import json
@@ -45,7 +45,7 @@ def _threshold_for(fn_name: str, cfg) -> int:
 	"""Return the count threshold for a given sidecar fn_name.
 
 	Resolved from Optimus Settings (cached) with site_config.json
-	and hardcoded defaults as fallbacks — see settings.get_config()
+	and hardcoded defaults as fallbacks see settings.get_config()
 	for the precedence chain.
 	"""
 	if fn_name == "get_doc":
@@ -72,7 +72,7 @@ def _title_for(fn_name: str, identifier_safe, count: int) -> str:
 def _customer_description_for(fn_name: str, count: int, callsite: dict | None = None) -> str:
 	"""Build the customer description, appending the callsite when
 	available. v0.5.2 requires the callsite (file:line) for the user
-	to actually navigate to the loop — pre-v0.5.2 the description
+	to actually navigate to the loop pre-v0.5.2 the description
 	said 'the same callsite' without revealing where."""
 	site_hint = ""
 	if callsite:
@@ -85,7 +85,7 @@ def _customer_description_for(fn_name: str, count: int, callsite: dict | None = 
 		return (
 			f"The same document was fetched **{count} times** from the same "
 			"line of code. This is almost always a loop that reloads a "
-			"document inside its body — caching the result outside the loop "
+			"document inside its body caching the result outside the loop "
 			"would eliminate the redundant fetches."
 			f"{site_hint}"
 		)
@@ -100,7 +100,7 @@ def _customer_description_for(fn_name: str, count: int, callsite: dict | None = 
 		return (
 			f"The same permission check ran **{count} times** from the same "
 			"callsite. Permission checks involve role lookups and DocType "
-			"validation — caching the result for the duration of the action "
+			"validation caching the result for the duration of the action "
 			"is the standard fix."
 			f"{site_hint}"
 		)
@@ -117,7 +117,7 @@ def _to_hashable(value):
 
 
 def analyze(recordings: list, context) -> AnalyzerResult:
-	# Read settings once for this analyze pass — avoids N cache
+	# Read settings once for this analyze pass avoids N cache
 	# lookups for an N-bucket analysis.
 	from optimus.settings import get_config
 	cfg = get_config()
@@ -159,7 +159,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 
 	if truncation_seen:
 		context.warnings.append(
-			"Sidecar argument log was truncated for at least one recording — "
+			"Sidecar argument log was truncated for at least one recording "
 			"redundant call detection may be incomplete."
 		)
 
@@ -173,7 +173,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 	drop_no_caller_stack = 0
 	# v0.5.2 round 2: buckets whose count threshold was only reached by
 	# summing ACROSS many actions (e.g. "25 calls" that turned out to
-	# be 1 call in each of 25 requests — not a loop, just a call that
+	# be 1 call in each of 25 requests not a loop, just a call that
 	# naturally fires once per request).
 	drop_cross_request_spread = 0
 
@@ -186,10 +186,10 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 		# v0.5.2 round 2: a "redundant call" is a LOOP, meaning the
 		# threshold must be reached WITHIN a single action. Cross-
 		# request aggregation (25 separate requests each calling cache
-		# once) isn't a loop — it's a framework call that naturally
+		# once) isn't a loop it's a framework call that naturally
 		# fires once per request. Production report had 3 "Redundant
 		# cache lookup: … (25 times)" / "(36 times)" findings from
-		# werkzeug/serving.py:370 — each was 1 call per request across
+		# werkzeug/serving.py:370 each was 1 call per request across
 		# 25/36 requests, not a repeated in-loop lookup.
 		action_counts = Counter(idx for idx, _, _ in occurrences)
 		max_in_any_action = action_counts.most_common(1)[0][1]
@@ -201,7 +201,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 		# stack as the representative (all occurrences of the same
 		# (fn_name, identifier) are by definition from the same cache
 		# key, and we flag them BECAUSE they all fire from the same
-		# repeated loop — so first-occurrence stack is canonical).
+		# repeated loop so first-occurrence stack is canonical).
 		first_stack = occurrences[0][2]
 		if not first_stack:
 			# Recording captured before v0.5.2 OR stack capture failed.
@@ -220,7 +220,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			# background-task findings don't disappear). Here we
 			# ADDITIONALLY filter any callsite that resolves to an
 			# official Frappe-maintained app (frappe, erpnext, hrms,
-			# …) or a pip-installed third-party lib — the loop inside
+			# …) or a pip-installed third-party lib the loop inside
 			# those isn't actionable for application developers.
 			# Same rationale as the Framework N+1 filter.
 			drop_framework_callsite += 1
@@ -256,7 +256,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 		findings.append({
 			"finding_type": "Redundant Call",
 			# Title/description report the per-action LOOP magnitude
-			# (max_in_any_action), not the cross-action total (count) — the
+			# (max_in_any_action), not the cross-action total (count) the
 			# loop ran max_in_any_action times in its hottest request, and
 			# saying "(50 times)" when 50 = 10×5 requests overstates the loop
 			# ("almost always a loop" reads as 50-in-a-row). Severity already
@@ -279,7 +279,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 				"distinct_actions": len(action_counts),
 				# v0.5.2: surface the callsite so developers can
 				# actually navigate to the loop. Pre-v0.5.2 the only
-				# identifier was a sha256 hash of the cache key —
+				# identifier was a sha256 hash of the cache key
 				# useless for finding the offending code.
 				"callsite": {
 					"filename": callsite.get("filename"),
@@ -297,7 +297,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			f"Suppressed {drop_cross_request_spread} Redundant Call "
 			"candidate(s) where the threshold was reached only by "
 			"summing across multiple requests (e.g. one cache lookup "
-			"per request × 25 requests). That's not a loop — it's a "
+			"per request × 25 requests). That's not a loop it's a "
 			"call that naturally fires once per request. A real "
 			"redundant loop has the threshold met WITHIN a single "
 			"action."

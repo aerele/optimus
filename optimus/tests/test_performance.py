@@ -45,7 +45,7 @@ def test_wrap_fast_path_microbenchmark():
 		orig("User", "x")
 	baseline_ns = time.perf_counter_ns() - t0
 
-	# Wrapped (no active session — should hit fast path)
+	# Wrapped (no active session should hit fast path)
 	t0 = time.perf_counter_ns()
 	for _ in range(100_000):
 		wrapped("User", "x")

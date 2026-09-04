@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for optimus.line_profile.diff — content-hash line alignment
+"""Tests for optimus.line_profile.diff content-hash line alignment
 across phase-2 runs."""
 
 from optimus.line_profile import diff

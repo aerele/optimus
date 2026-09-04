@@ -83,7 +83,7 @@ class TestRunGcCollect:
 
 class TestNoRecordingDroppedForPerformance:
 	"""HARD INVARIANT (user requirement): analyze must NEVER drop a captured
-	recording — and therefore never a captured background job — for performance
+	recording and therefore never a captured background job for performance
 	reasons. If a flow captured 10 RQ jobs, all 10 must reach the report.
 
 	A v0.7.x change once added a session-wide recording cap (M4) that dropped
@@ -107,7 +107,7 @@ class TestNoRecordingDroppedForPerformance:
 
 	def test_all_captured_jobs_surface_in_report(self):
 		"""End of the pipeline: build_background_jobs must list every RQ Job
-		action — there is no cap that can drop one."""
+		action there is no cap that can drop one."""
 		from optimus import renderer
 
 		n_jobs = 10

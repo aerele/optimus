@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Pure-Python unit tests for ``_format_duration_ms`` — the threshold-aware
+"""Pure-Python unit tests for ``_format_duration_ms``: the threshold-aware
 duration formatter that powers the ``fmt_ms`` Jinja-callable. Below the
 threshold, render as ms (with caller-controlled decimals); at or above,
 render as seconds with 2 decimals.
@@ -9,7 +9,7 @@ render as seconds with 2 decimals.
 v0.7.x: the formatter returns ``markupsafe.Markup`` so the seconds
 branch can wrap the output in a ``<span class="time-high">`` for visual
 emphasis when rendered by Jinja. ``Markup`` subclasses ``str`` so
-equality comparisons against plain strings still work — we just have
+equality comparisons against plain strings still work we just have
 to match against the wrapped form when ≥1000ms."""
 
 from optimus.renderer import _format_duration_ms
@@ -73,7 +73,7 @@ class TestDisabled:
 		# negative would otherwise convert; the abs(v) >= threshold check
 		# would always be true).
 		# Actual behaviour: threshold=-1 is truthy and abs(v) >= -1 is
-		# always true, so 5234 → "5.23s". Documenting actual semantics —
+		# always true, so 5234 → "5.23s". Documenting actual semantics
 		# admins should never set a negative threshold.
 		assert _format_duration_ms(5234, threshold_ms=-1) == _seconds("5.23s")
 

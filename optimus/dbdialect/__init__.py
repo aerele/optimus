@@ -6,7 +6,7 @@
 ``get_dialect()`` returns the adapter for the active ``frappe.db.db_type``
 (mariadb / postgres). It is memoized on the db_type *string* (not on the
 ``frappe.db`` object) so it survives the per-test ``frappe.db`` proxy swaps
-(frappe.db is a Werkzeug Local proxy) — we read the string fresh each call and
+(frappe.db is a Werkzeug Local proxy) we read the string fresh each call and
 only build a new adapter when the db_type changes.
 """
 
@@ -44,7 +44,7 @@ def active_db_type() -> str:
 
 	# frappe.db is a Werkzeug Local proxy: reading .db_type when no DB is bound
 	# (unit tests) raises RuntimeError("object is not bound"), which getattr's
-	# default does NOT catch — so guard explicitly.
+	# default does NOT catch so guard explicitly.
 	dbt = None
 	try:
 		dbt = getattr(frappe.db, "db_type", None)
@@ -76,7 +76,7 @@ def get_dialect() -> Dialect:
 
 				frappe.log_error(
 					title="optimus unknown db_type",
-					message=f"db_type={dbt!r} not recognized — using the MariaDB dialect",
+					message=f"db_type={dbt!r} not recognized using the MariaDB dialect",
 				)
 			except Exception:
 				pass

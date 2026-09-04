@@ -4,7 +4,7 @@
 """Cached reader for Optimus Settings.
 
 Every request goes through ``hooks_callbacks.before_request`` which
-checks ``is_enabled()`` — reading the Single doc directly on every
+checks ``is_enabled()``: reading the Single doc directly on every
 request would be a DB hit per request. We cache the resolved config
 in Redis with a version key; the DocType controller bumps the key
 on save.
@@ -39,15 +39,15 @@ from dataclasses import dataclass, field
 _DEFAULTS = {
 	"enabled": True,
 	"session_retention_days": 30,
-	"tracked_apps": (),  # tuple, not list — immutable for caching
-	# Exclusion list — findings whose blame app falls in this tuple are
+	"tracked_apps": (),  # tuple, not list immutable for caching
+	# Exclusion list findings whose blame app falls in this tuple are
 	# dropped from the report (both Findings and Observations sections).
 	# v0.13.x: default seeded with every Frappe-organization-maintained
 	# app (frappe, erpnext, hrms, lms, helpdesk, insights, crm, builder,
 	# wiki, drive, payments). The install hook
 	# (``optimus.install._seed_ignored_apps_with_framework_apps``) writes
 	# these as initial rows into the Optimus Settings DocType on fresh
-	# installs (idempotent — never overwrites an existing configuration).
+	# installs (idempotent never overwrites an existing configuration).
 	# Pre-v0.13.x sites stay at whatever they configured manually; only
 	# new sites pick up the seed. Operators who actively contribute to
 	# one of these apps (ERPNext core devs, HRMS maintainers, etc.)
@@ -67,7 +67,7 @@ _DEFAULTS = {
 	),
 	# v0.6.x: when True, the "Time spent per database table" section drops
 	# Frappe schema/meta tables, framework-internal tables (User, Has Role,
-	# DefaultValue, …), and information_schema.* — framework noise the app
+	# DefaultValue, …), and information_schema.* framework noise the app
 	# developer can't act on. Default on; admins can uncheck.
 	"hide_framework_tables": True,
 	# v0.5.3: per-recording EXPLAIN / enrichment cap. Long flows (bulk
@@ -96,7 +96,7 @@ _DEFAULTS = {
 	"phase2_default_auto_expand": True,
 	# v0.6.0: how long the analyze job waits (seconds, capped at 300) for the
 	# background jobs the profiled flow enqueued to finish before gathering
-	# recordings — so jobs that a worker picks up shortly after Stop aren't
+	# recordings so jobs that a worker picks up shortly after Stop aren't
 	# lost. 0 = don't wait (pre-v0.6.0 behavior). On a single-worker bench
 	# the analyze job yields the worker between checks (it re-enqueues
 	# itself) so those jobs can actually run; if no worker / scheduler is
@@ -114,7 +114,7 @@ _DEFAULTS = {
 	# entry per line, # comments, blank lines dropped.
 	"sensitive_sql_columns": (),
 	"sensitive_form_keys": (),
-	# v0.6.0: opt-in LLM "suggest a fix" feature. The API key is NOT here —
+	# v0.6.0: opt-in LLM "suggest a fix" feature. The API key is NOT here
 	# it's secret, stored in a Password field, and read on demand by
 	# ai_fix.py via frappe.utils.password.get_decrypted_password.
 	"ai_enabled": False,
@@ -130,7 +130,7 @@ _DEFAULTS = {
 	# readable flow via the LLM (falls back to the raw action list on any
 	# failure). Also available on-demand from the Optimus Session form.
 	"ai_humanize_steps": True,
-	# v0.6.x: per-section "use the LLM for X" toggles — hard off (no auto-
+	# v0.6.x: per-section "use the LLM for X" toggles hard off (no auto-
 	# bake, the form buttons hide, the API refuses, re-rendered reports omit
 	# the block). Default on, so the master ai_enabled switch alone turns
 	# everything on. (ai_humanize_steps above is the third one.)
@@ -139,7 +139,7 @@ _DEFAULTS = {
 	# v0.7.x: Sensitivity Profile. "Custom" means "read the per-field stored
 	# values" (the pre-profile behavior). The named presets below override the
 	# nine detection-sensitivity knobs at resolve time. Default is "Custom" so a
-	# pre-profile Single (no config_profile key) keeps its stored thresholds —
+	# pre-profile Single (no config_profile key) keeps its stored thresholds
 	# see _read_doctype_row's coalesce and the back-compat note in _resolve.
 	"config_profile": "Custom",
 	# v0.9.0: AI privacy hardening (closes Critical Risk #2). Exclusion
@@ -152,11 +152,11 @@ _DEFAULTS = {
 }
 
 # v0.13.x: every knob whose DocType description advertises a
-# "Reference values — Strict: X · Recommended: Y · Relaxed: Z" triplet
+# "Reference values: Strict: X · Recommended: Y · Relaxed: Z" triplet
 # joins the Sensitivity Profile. Pre-v0.13.x this was nine detection-
 # sensitivity thresholds only (the comment block here used to say
 # "display filters / Phase-2 UI / capture caps / retention / AI are
-# deployment choices, not detection sensitivity") — but every one of
+# deployment choices, not detection sensitivity") but every one of
 # those fields ALSO advertises a triplet in its operator-facing
 # description, which made the UI promise something the resolve path
 # wasn't keeping. The fix: honor the triplet everywhere it's
@@ -178,7 +178,7 @@ _SENSITIVITY_KEYS = (
 	# Display filters
 	"min_action_duration_ms",
 	"large_duration_threshold_ms",
-	# Analyzer thresholds (detection — the original nine)
+	# Analyzer thresholds (detection the original nine)
 	"redundant_doc_threshold",
 	"redundant_cache_threshold",
 	"redundant_perm_threshold",
@@ -196,16 +196,16 @@ _SENSITIVITY_KEYS = (
 	"ai_auto_suggest_max",
 )
 
-# Named Sensitivity Profiles — the single source of truth for preset numbers
+# Named Sensitivity Profiles the single source of truth for preset numbers
 # (the DocType JS reads this via the get_config_profiles API; tests assert
 # Recommended == _DEFAULTS). "Recommended" mirrors the shipped _DEFAULTS, so a
 # user on Recommended automatically tracks any future retune. "Strict" catches
 # more (lower count/ms thresholds, lower %); "Relaxed" catches less. All values
-# respect the controller's _NUMERIC_FLOORS. "Custom" is intentionally absent —
+# respect the controller's _NUMERIC_FLOORS. "Custom" is intentionally absent
 # _resolve keys off ``_PROFILES.get(profile)`` so Custom falls through to the
 # stored-value logic. Build Recommended from _DEFAULTS to prevent drift.
 #
-# Numbers below mirror the "Reference values — Strict: X · Recommended: Y ·
+# Numbers below mirror the "Reference values: Strict: X · Recommended: Y ·
 # Relaxed: Z" triplet baked into each field's DocType description, so the
 # operator-facing form text and the resolve-path behaviour stay in sync.
 # ``test_profiles_match_doctype_reference_values`` regression-guards the
@@ -218,11 +218,11 @@ _PROFILES = {
 		# Fields with a "0 = unlimited" sentinel that the read site
 		# honors use 0 where the user actually wants unbounded behavior
 		# (Strict catches the longest possible report by not capping
-		# the data) — but only when leaving zero around makes
+		# the data) but only when leaving zero around makes
 		# operational sense. Session retention isn't one of them: a
 		# Strict deployment treats old session rows as housekeeping
 		# liability, so we set it to 1 day instead of 0/forever. Same
-		# logic for the two display-style "min" timings — Strict's
+		# logic for the two display-style "min" timings Strict's
 		# floor isn't literal-zero noise (sampler jitter, sub-ms
 		# children) but a small meaningful floor: 1ms for action
 		# visibility, 10ms for hot-chain expansion.
@@ -296,7 +296,7 @@ class OptimusConfig:
 	session_retention_days: int = 30
 	tracked_apps: tuple[str, ...] = field(default_factory=tuple)
 	# v0.6.x: drop findings whose blame app is in this tuple (both sections).
-	# v0.13.x: dataclass default mirrors ``_DEFAULTS`` — fresh installs
+	# v0.13.x: dataclass default mirrors ``_DEFAULTS``: fresh installs
 	# get every Frappe-organization-maintained app seeded into the DocType,
 	# and the no-bench / pre-migrate fallback path returns the same tuple
 	# so pure-Python unit tests see the same behaviour as the bench.
@@ -349,13 +349,13 @@ class OptimusConfig:
 	# Small Text fields by splitting on newlines and dropping comments.
 	skip_request_paths: tuple[str, ...] = field(default_factory=tuple)
 	skip_users: tuple[str, ...] = field(default_factory=tuple)
-	# v0.7.x+ — additive lists for capture-time redaction. Defaults
+	# v0.7.x+ additive lists for capture-time redaction. Defaults
 	# carry the 12 canonical patterns inside optimus.redaction; these
-	# extend them. Never replace — a config typo can't disable
+	# extend them. Never replace a config typo can't disable
 	# redaction of a known-sensitive key.
 	sensitive_sql_columns: tuple[str, ...] = field(default_factory=tuple)
 	sensitive_form_keys: tuple[str, ...] = field(default_factory=tuple)
-	# v0.6.0: AI "suggest a fix" config. Non-secret only — the API key is
+	# v0.6.0: AI "suggest a fix" config. Non-secret only the API key is
 	# never cached here (see _DEFAULTS note + ai_fix._resolve_provider).
 	ai_enabled: bool = False
 	ai_provider: str = "Anthropic"
@@ -398,7 +398,7 @@ def _read_doctype_row() -> dict | None:
 
 	We use ``get_single_value`` per-field instead of ``get_single`` so
 	we can degrade cleanly when ``Optimus Settings`` isn't yet in the
-	schema — some deployments install the app but haven't migrated.
+	schema some deployments install the app but haven't migrated.
 	"""
 	import frappe
 	try:
@@ -407,7 +407,7 @@ def _read_doctype_row() -> dict | None:
 		if not frappe.db.exists("DocType", "Optimus Settings"):
 			return None
 	except Exception:
-		# frappe.db unavailable (e.g. schema still loading) — defaults.
+		# frappe.db unavailable (e.g. schema still loading) defaults.
 		return None
 
 	try:
@@ -417,7 +417,7 @@ def _read_doctype_row() -> dict | None:
 
 	return {
 		"enabled": bool(doc.get("enabled", 1)),
-		# v0.13.x: 0 is legitimate (= keep forever — janitor early-returns).
+		# v0.13.x: 0 is legitimate (= keep forever janitor early-returns).
 		# Was ``or 30`` which silently clobbered the operator's "forever"
 		# intent. Preserve the stored value; ``_sens_int_zero_ok`` does
 		# the missing-value fallback.
@@ -436,7 +436,7 @@ def _read_doctype_row() -> dict | None:
 			if (row.app_name or "").strip()
 		),
 		"hide_framework_tables": bool(doc.get("hide_framework_tables", 1)),
-		# v0.13.x: 0 is legitimate (= no cap — enrich every query). Was
+		# v0.13.x: 0 is legitimate (= no cap enrich every query). Was
 		# ``or None`` which fell through to MAX_QUERIES_ENRICHED_PER_
 		# RECORDING. Coerce to int, preserve 0.
 		"max_queries_per_recording": (
@@ -473,7 +473,7 @@ def _read_doctype_row() -> dict | None:
 			int(doc.get("phase2_max_runs_per_session"))
 			if doc.get("phase2_max_runs_per_session") is not None else None
 		),
-		# 0 is legitimate (= don't wait) — don't fall through to the default.
+		# 0 is legitimate (= don't wait) don't fall through to the default.
 		"background_job_wait_seconds": int(
 			doc.get("background_job_wait_seconds", _DEFAULTS["background_job_wait_seconds"]) or 0
 		),
@@ -497,7 +497,7 @@ def _read_doctype_row() -> dict | None:
 		"sensitive_sql_columns": _parse_skip_list(doc.get("sensitive_sql_columns")),
 		"sensitive_form_keys": _parse_skip_list(doc.get("sensitive_form_keys")),
 		# v0.6.0 AI fix config (non-secret). ``ai_enabled`` /
-		# ``ai_auto_suggest`` are Checks — can't use ``or None`` because
+		# ``ai_auto_suggest`` are Checks can't use ``or None`` because
 		# False is legitimate. ``ai_auto_suggest_max`` allows 0 (= all).
 		"ai_enabled": bool(doc.get("ai_enabled")),
 		"ai_provider": (doc.get("ai_provider") or "").strip() or None,
@@ -505,14 +505,14 @@ def _read_doctype_row() -> dict | None:
 		"ai_model": (doc.get("ai_model") or "").strip() or None,
 		"ai_auto_suggest": bool(doc.get("ai_auto_suggest")),
 		"ai_auto_suggest_max": int(doc.get("ai_auto_suggest_max") or 0),
-		# Default-on (when AI is enabled) — pass a default to .get() so a
+		# Default-on (when AI is enabled) pass a default to .get() so a
 		# Single row predating this field still reads as True.
 		"ai_humanize_steps": bool(doc.get("ai_humanize_steps", 1)),
 		"ai_suggest_findings": bool(doc.get("ai_suggest_findings", 1)),
 		"ai_suggest_indexes": bool(doc.get("ai_suggest_indexes", 1)),
 		# v0.7.x: Sensitivity Profile. Empty / missing (a pre-profile Single
 		# that predates the field, or an unsaved fresh Single) coalesces to
-		# "Custom" so existing stored thresholds keep driving analysis — no
+		# "Custom" so existing stored thresholds keep driving analysis no
 		# migration patch, no silent reset to Recommended.
 		"config_profile": (doc.get("config_profile") or "Custom"),
 		# v0.9.0: AI privacy. Exclusion list parsed with the same skip-list
@@ -587,7 +587,7 @@ def _resolve() -> OptimusConfig:
 		return int(_DEFAULTS[key])
 
 	# v0.7.x: Sensitivity Profile. A named preset (Strict/Recommended/Relaxed)
-	# is authoritative for the nine _SENSITIVITY_KEYS — it overrides both the
+	# is authoritative for the nine _SENSITIVITY_KEYS it overrides both the
 	# stored field value and the site_config fallback. "Custom" (or any
 	# unknown/absent value) → preset is None → fall through to the existing
 	# per-field precedence (DocType row > site_config > default).
@@ -606,7 +606,7 @@ def _resolve() -> OptimusConfig:
 
 	# v0.13.x: zero-allowed sensitivity fields use this helper instead of
 	# the generic ``_sens_int`` so an operator who wrote 0 in the form
-	# (under Custom) gets 0 — not the _DEFAULTS fallback the truthy-check
+	# (under Custom) gets 0 not the _DEFAULTS fallback the truthy-check
 	# in ``_threshold`` would trigger.
 	def _sens_int_zero_ok(key: str) -> int:
 		if preset is not None:
@@ -626,12 +626,12 @@ def _resolve() -> OptimusConfig:
 
 	return OptimusConfig(
 		enabled=bool(row.get("enabled", _DEFAULTS["enabled"])),
-		# v0.13.x: profile-aware. 0 is legitimate (= forever — janitor
+		# v0.13.x: profile-aware. 0 is legitimate (= forever janitor
 		# treats it as "never sweep"), so use the zero-OK variant.
 		session_retention_days=_sens_int_zero_ok("session_retention_days"),
 		tracked_apps=tuple(row.get("tracked_apps") or ()),
 		# v0.13.x: fall through to ``_DEFAULTS["ignored_apps"]`` (frappe +
-		# erpnext) when the DocType row hasn't populated this field —
+		# erpnext) when the DocType row hasn't populated this field
 		# i.e. when ``_read_doctype_row`` returned ``None`` (fresh install
 		# / pre-migrate). On a real bench the install hook seeds the
 		# rows themselves, so the row read returns the configured tuple
@@ -645,10 +645,10 @@ def _resolve() -> OptimusConfig:
 			if "hide_framework_tables" in row
 			else _DEFAULTS["hide_framework_tables"]
 		),
-		# v0.13.x: profile-aware. 0 is legitimate (= no cap — analyze
+		# v0.13.x: profile-aware. 0 is legitimate (= no cap analyze
 		# enriches every query); zero-OK variant preserves it.
 		max_queries_per_recording=_sens_int_zero_ok("max_queries_per_recording"),
-		# Original nine detection-sensitivity knobs — profile-aware
+		# Original nine detection-sensitivity knobs profile-aware
 		# (see _sens_* above). Still here for clarity.
 		redundant_doc_threshold=_sens_int("redundant_doc_threshold"),
 		redundant_cache_threshold=_sens_int("redundant_cache_threshold"),
@@ -663,7 +663,7 @@ def _resolve() -> OptimusConfig:
 		pyinstrument_sampler_interval_ms=_sens_float("pyinstrument_sampler_interval_ms"),
 		# v0.13.x: profile-aware. ``min_action_duration_ms`` allows 0 as a
 		# legitimate "show everything" sentinel, so we use the
-		# zero-OK variant — under Custom, a stored 0 doesn't fall
+		# zero-OK variant under Custom, a stored 0 doesn't fall
 		# through to the default.
 		min_action_duration_ms=_sens_float_zero_ok("min_action_duration_ms"),
 		# v0.13.x: profile-aware (was ``_float``).
@@ -683,7 +683,7 @@ def _resolve() -> OptimusConfig:
 		background_job_wait_seconds=max(
 			0, min(300, _sens_int_zero_ok("background_job_wait_seconds"))
 		),
-		# v0.13.x: profile-aware. 0 is legitimate for both — depth 0 =
+		# v0.13.x: profile-aware. 0 is legitimate for both depth 0 =
 		# walk to leaves, min_ms 0 = no minimum. Zero-OK variants.
 		auto_expand_max_depth=_sens_int_zero_ok("auto_expand_max_depth"),
 		auto_expand_min_ms=_sens_float_zero_ok("auto_expand_min_ms"),
@@ -704,7 +704,7 @@ def _resolve() -> OptimusConfig:
 			if "ai_auto_suggest" in row
 			else _DEFAULTS["ai_auto_suggest"]
 		),
-		# v0.13.x: profile-aware. Allows 0 (= every eligible finding) —
+		# v0.13.x: profile-aware. Allows 0 (= every eligible finding)
 		# the zero-OK variant keeps a stored 0 under Custom.
 		ai_auto_suggest_max=_sens_int_zero_ok("ai_auto_suggest_max"),
 		ai_humanize_steps=bool(
@@ -724,7 +724,7 @@ def _resolve() -> OptimusConfig:
 		),
 		config_profile=profile,
 		# v0.9.0: AI privacy. Tuple straight through (already parsed in
-		# _read_doctype_row). Timeout clamped to [10, 600] — below 10s
+		# _read_doctype_row). Timeout clamped to [10, 600] below 10s
 		# breaks the LLM round-trip; above 600s holds the analyze worker
 		# longer than the time budget is willing to tolerate anyway.
 		ai_excluded_finding_types=tuple(row.get("ai_excluded_finding_types") or ()),
@@ -736,7 +736,7 @@ def get_config() -> OptimusConfig:
 	"""Return the resolved config, cached in Redis until the Single is
 	saved (controller's on_update deletes the cache key).
 
-	Fails soft — on ANY exception during lookup (including Frappe not
+	Fails soft on ANY exception during lookup (including Frappe not
 	being importable in unit-test contexts), returns the hardcoded
 	defaults. The profiler must never crash a request because of a
 	settings read, especially on bench startup before Redis is warm.
@@ -744,7 +744,7 @@ def get_config() -> OptimusConfig:
 	try:
 		import frappe
 	except ImportError:
-		# Unit-test path — no bench context.
+		# Unit-test path no bench context.
 		return OptimusConfig()
 
 	try:
@@ -755,7 +755,7 @@ def get_config() -> OptimusConfig:
 		# legacy bare-dict shape (pre-v0.12.11 writes still flow through
 		# unchanged via the legacy-detection branch). On a schema-version
 		# bump WITHOUT a migration, ``unwrap_value`` returns ``(default=
-		# None, observed_version)`` — the request falls through to the slow
+		# None, observed_version)``: the request falls through to the slow
 		# path (``_resolve``) and re-writes a fresh envelope.
 		from optimus import redis_schema
 
@@ -784,12 +784,12 @@ def get_config() -> OptimusConfig:
 
 
 def is_enabled() -> bool:
-	"""Convenience wrapper — hot-path entry point from hooks_callbacks."""
+	"""Convenience wrapper hot-path entry point from hooks_callbacks."""
 	try:
 		return get_config().enabled
 	except Exception:
 		# Fail open: if we can't read the setting, don't silently
-		# disable the profiler — that would be a very confusing
+		# disable the profiler that would be a very confusing
 		# support issue ("why isn't recording working"). Default to
 		# on, matching the DocType default.
 		return True
@@ -810,8 +810,8 @@ def get_tracked_apps() -> tuple[str, ...]:
 
 
 def get_ignored_apps() -> tuple[str, ...]:
-	"""v0.6.x: exclusion list — apps whose findings are dropped from the
-	report entirely (both ``Findings — what to fix`` and ``Framework-level
+	"""v0.6.x: exclusion list apps whose findings are dropped from the
+	report entirely (both ``Findings what to fix`` and ``Framework-level
 	observations``). Empty tuple → no findings dropped."""
 	try:
 		return get_config().ignored_apps

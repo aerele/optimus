@@ -14,7 +14,7 @@ This patch runs on migrate. It's conservative:
 
 1. Only runs if the Optimus Settings Single exists (fresh installs
    pick up the new default from JSON; nothing to patch).
-2. Only bumps the value from **exactly 10** — the prior default.
+2. Only bumps the value from **exactly 10**: the prior default.
    Any other value (user-tuned 5, 20, 100, etc.) is left alone so we
    never silently overwrite a deliberate configuration choice.
 3. Invalidates the settings cache so the next request sees the new
@@ -37,7 +37,7 @@ def execute():
 	except Exception:
 		return
 
-	# Only flip the exact old default — respect any deliberate tuning.
+	# Only flip the exact old default respect any deliberate tuning.
 	try:
 		current_int = int(current) if current is not None else None
 	except (TypeError, ValueError):

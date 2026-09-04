@@ -26,7 +26,7 @@ This single test exercises:
 
 Failure here means the integration layer broke. Pure-pytest can verify
 every component in isolation but cannot catch a regression in the
-inter-component handoff — that's what this test is for.
+inter-component handoff that's what this test is for.
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 	def setUpClass(cls):
 		super().setUpClass()
 		# Run as Administrator so the user-permission gates in api.start
-		# / api.stop don't refuse — the test is exercising the capture
+		# / api.stop don't refuse the test is exercising the capture
 		# pipeline, not the auth surface (that's covered by other tests).
 		frappe.set_user("Administrator")
 
@@ -97,7 +97,7 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 				f"{session_uuid!r}"
 			)
 		finally:
-			# Clean up so the next test starts from a known state — the
+			# Clean up so the next test starts from a known state the
 			# autouse cleanup_session fixture handles this too, but
 			# defence-in-depth keeps the test self-contained.
 			try:
@@ -153,7 +153,7 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 		session_uuid = start_result["session_uuid"]
 		docname = start_result["docname"]
 
-		# No HTTP traffic in between — a stop() immediately after start()
+		# No HTTP traffic in between a stop() immediately after start()
 		# produces a session with zero recordings. analyze.run handles
 		# that gracefully (renders a "no recordings" report) so this is
 		# still a valid smoke. A future PR can add an actual recorded
@@ -173,7 +173,7 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 		# a code path in ``analyze.run`` that DOESN'T attach a report
 		# (the empty-recordings session reaches Ready via early-
 		# return paths inside analyze, leaving ``raw_report_file``
-		# unset — observed in CI runs of this test). The production
+		# unset observed in CI runs of this test). The production
 		# answer for that case is exactly what ``regenerate_reports``
 		# does: re-render from persisted DocType fields without
 		# requiring recordings. v0.12.4's regenerate-tests prove this
@@ -184,7 +184,7 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 		api.regenerate_reports(session_uuid)
 
 		# Report URL is persisted on the session's ``raw_report_file``
-		# field — that's the authoritative side-effect contract
+		# field that's the authoritative side-effect contract
 		# (same one the v0.12.4 regenerate-tests assert against).
 		# ``analyze._render_and_attach_reports`` sets ``raw_report_file``
 		# via ``frappe.db.set_value`` as its last step; same field is
@@ -195,19 +195,19 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 		)
 		assert raw_report_file, (
 			f"no Optimus report HTML attached to session {docname!r} "
-			f"after regenerate_reports — ``raw_report_file`` field is "
+			f"after regenerate_reports ``raw_report_file`` field is "
 			f"empty, meaning the render or the attach step failed "
 			f"silently inside ``analyze._render_and_attach_reports``. "
 			f"Bench logs may show why (uploaded as integration-logs "
 			f"artifact on failure)."
 		)
 
-	# --- 5: sanity-floor — totals are populated ---------------------------
+	# --- 5: sanity-floor totals are populated ---------------------------
 
 	def test_session_totals_populated_after_analyze(self):
 		"""After a successful analyze, the session's persisted totals are
 		set to *something* (zero is fine on an empty-recording session).
-		This is the floor — if totals are None / missing, a write step
+		This is the floor if totals are None / missing, a write step
 		in analyze got skipped."""
 		from optimus import api
 
@@ -226,6 +226,6 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 		# Each field must be a number (int/float), not None.
 		for field in ("total_duration_ms", "total_query_time_ms", "total_queries", "total_requests"):
 			assert row[field] is not None, (
-				f"{field} is None after analyze — analyze.run skipped the totals write"
+				f"{field} is None after analyze analyze.run skipped the totals write"
 			)
 			assert row[field] >= 0, f"{field} should be non-negative, got {row[field]!r}"

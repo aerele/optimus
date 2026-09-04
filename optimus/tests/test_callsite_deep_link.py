@@ -4,7 +4,7 @@
 """Tests for v0.5.2 round 4 clickable callsite → editor deep-link.
 
 A finding's absolute-path callsite renders as a clickable anchor using
-the ``vscode://file`` URL scheme — VS Code, VS Code Insiders, and
+the ``vscode://file`` URL scheme VS Code, VS Code Insiders, and
 Cursor all register this handler on install, so the link jumps the
 developer straight to the file:line in their editor with one click.
 
@@ -64,7 +64,7 @@ def _fake_session_doc(callsite_filename="/abs/path/apps/myapp/foo.py",
 def test_raw_mode_wraps_callsite_in_vscode_link():
 	"""Raw mode + absolute path → clickable ``vscode://file`` anchor.
 
-	URL shape: ``vscode://file{absolute_path}:{lineno}`` — two slashes
+	URL shape: ``vscode://file{absolute_path}:{lineno}``: two slashes
 	after ``vscode:``, the authority ``file``, then the absolute path
 	(which itself starts with ``/``). Matches VS Code's documented
 	URL-handler scheme; Cursor + VS Code Insiders honor the same
@@ -82,13 +82,13 @@ def test_raw_mode_wraps_callsite_in_vscode_link():
 	)
 	# Class marker for the link (used for CSS + future JS hooks).
 	assert 'class="callsite-link"' in html
-	# Link wraps a <code> block — the actual visible callsite text.
+	# Link wraps a <code> block the actual visible callsite text.
 	assert "apps/myapp/foo.py:42" in html
 
 
 def test_bench_relative_path_does_not_emit_link():
-	"""Bench-relative (non-absolute) callsites — e.g. 'frappe/handler.py'
-	from pyinstrument's short form — can't be made into a working
+	"""Bench-relative (non-absolute) callsites e.g. 'frappe/handler.py'
+	from pyinstrument's short form can't be made into a working
 	vscode:// URL without an abs path. Render as plain code instead
 	of emitting a broken link."""
 	from unittest.mock import patch as _patch
@@ -104,7 +104,7 @@ def test_bench_relative_path_does_not_emit_link():
 		html = renderer.render(doc, recordings=[])
 
 	assert 'vscode://file/frappe/handler.py' not in html, (
-		"Non-absolute path must NOT be linked as vscode:// — the URL "
+		"Non-absolute path must NOT be linked as vscode:// the URL "
 		"scheme requires an absolute filesystem path"
 	)
 	assert "frappe/handler.py:10" in html  # still shown, just as plain code

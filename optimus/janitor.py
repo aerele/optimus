@@ -17,7 +17,7 @@ two failure modes:
 Both cases are handled by force-stopping the session: clear the Redis
 state, mark the row as Stopping, and enqueue analyze.run. If the analyze
 itself was the failure cause, it will retry once and end up in `Failed`
-on the next attempt — at least the row no longer pretends to be live.
+on the next attempt at least the row no longer pretends to be live.
 """
 
 import frappe
@@ -57,8 +57,8 @@ def sweep_stale_sessions():
 	except Exception:
 		frappe.log_error(title="optimus janitor sweep_stuck_analyzing")
 
-	# v0.7.x: sessions stranded in "Stopping" (analyze never ran — no worker,
-	# backlog, or an OOM-killed worker left a zombie job) — re-enqueue analyze.
+	# v0.7.x: sessions stranded in "Stopping" (analyze never ran no worker,
+	# backlog, or an OOM-killed worker left a zombie job) re-enqueue analyze.
 	try:
 		_sweep_stale_stopping()
 	except Exception:
@@ -78,7 +78,7 @@ def sweep_old_sessions():
 
 	Only deletes sessions in terminal states (Ready or Failed) older than
 	the configured retention (default: 90 days). Active sessions are
-	never touched here — the 5-minute janitor handles those.
+	never touched here the 5-minute janitor handles those.
 
 	Also cleans up:
 	- Attached report files so MariaDB and file storage shrink together
@@ -102,7 +102,7 @@ def _sweep_orphan_redis_state():
 
 	Round 2 fix #11. A failed analyze that never retries leaves its
 	meta and recordings sets in Redis forever. This daily sweep catches
-	those orphans — scans for profiler:session:* keys, extracts the
+	those orphans scans for profiler:session:* keys, extracts the
 	uuid, checks if the Optimus Session row still exists, and deletes
 	if not.
 
@@ -130,8 +130,8 @@ def _sweep_orphan_redis_state():
 
 	# Scan BOTH per-session key families so a session whose only surviving keys
 	# are frontend metrics is still discovered. (profiler:session:<uuid>:* and
-	# profiler:frontend:<uuid>:*). Per-RECORDING keys — profiler:tree/sidecar/
-	# infra:<recording_uuid> — carry a recording uuid (no session linkage in the
+	# profiler:frontend:<uuid>:*). Per-RECORDING keys profiler:tree/sidecar/
+	# infra:<recording_uuid> carry a recording uuid (no session linkage in the
 	# key), so they can't be orphan-checked here; they rely on SESSION_TTL expiry.
 	markers = ("profiler:session:", "profiler:frontend:")
 
@@ -204,7 +204,7 @@ def _sweep_orphan_redis_state():
 
 
 def _sweep_old_sessions():
-	# v0.13.x: settings precedence — DocType (via get_config) first,
+	# v0.13.x: settings precedence DocType (via get_config) first,
 	# legacy site_config fallback second, hardcoded default last. The
 	# DocType wins when both are set so the operator's UI choice always
 	# takes precedence over a stale site_config knob.
@@ -218,7 +218,7 @@ def _sweep_old_sessions():
 	# v0.13.x: 0 = forever (Strict-as-unlimited semantics). The daily
 	# sweep becomes a no-op; sessions accumulate indefinitely. Honored
 	# here so the field description's "Set to 0 to keep forever" promise
-	# matches the runtime — pre-v0.13.x this was silently overridden by
+	# matches the runtime pre-v0.13.x this was silently overridden by
 	# the legacy ``or DEFAULT_RETENTION_DAYS`` fallback.
 	if retention_days <= 0:
 		return
@@ -306,7 +306,7 @@ def _sweep_old_sessions():
 			}
 		except Exception:
 			# Defensive: if the bulk fetch fails (DB hiccup, perm), the
-			# loop below still runs — it just won't find any File docs to
+			# loop below still runs it just won't find any File docs to
 			# delete and the orphans-cleanup is a no-op for this pass.
 			file_name_by_url = {}
 
@@ -315,7 +315,7 @@ def _sweep_old_sessions():
 		try:
 			# Delete attached report files first so we don't leave
 			# orphaned File docs behind. v0.6.0 Round 7: dropped the
-			# safe_report_file / safe_report_pdf_file slots — single
+			# safe_report_file / safe_report_pdf_file slots single
 			# raw report + lazy PDF.
 			for file_url in (
 				row.get("raw_report_file"),
@@ -365,7 +365,7 @@ def _sweep_stale_recording():
 	# ``started_at`` is fixed at session creation, so a genuinely LIVE long flow
 	# (45min of real traffic) crosses the cutoff and would be wrongly stopped. The
 	# real liveness signal is the Redis active pointer, whose TTL is refreshed on
-	# every captured request — so only force-stop rows whose pointer is gone or
+	# every captured request so only force-stop rows whose pointer is gone or
 	# has moved to a different session (the true "user walked away" condition).
 	def _pointer_gone(row) -> bool:
 		try:
@@ -398,7 +398,7 @@ def _sweep_stale_recording():
 
 		# Enqueue analyze for whatever recordings did get captured before
 		# the user walked away. The analyze job handles empty sessions
-		# gracefully — it will mark the session Ready with a "no traffic
+		# gracefully it will mark the session Ready with a "no traffic
 		# was recorded" summary.
 		try:
 			frappe.enqueue(
@@ -414,7 +414,7 @@ def _sweep_stuck_analyzing():
 	"""Find Analyzing rows older than STALE_ANALYZING_MINUTES and mark Failed.
 
 	A genuinely long analyze (heavy EXPLAIN burst + AI suggestions, up to ~25min)
-	can cross the threshold WITHOUT bumping ``modified`` — the liveness heartbeat
+	can cross the threshold WITHOUT bumping ``modified``: the liveness heartbeat
 	is Redis-only (no risky mid-analyze DB commit). So before failing a row, skip
 	it if it still holds the live single-flight flag: that flag is heartbeated
 	throughout analyze, so its presence proves the run is progressing, not wedged.
@@ -452,7 +452,7 @@ def _sweep_stale_stopping():
 
 	``Stopping`` is meant to last only the instant between ``api._mark_stopping``
 	and ``analyze.run`` setting ``Analyzing``. Lingering there means the analyze
-	job never ran — no worker on the ``long`` queue, a queue backlog, or a
+	job never ran no worker on the ``long`` queue, a queue backlog, or a
 	worker OOM-killed mid-analyze that left a zombie job. Re-enqueue so the
 	session self-heals once a worker is available (analyze is idempotent and
 	handles empty sessions). We bump ``modified`` (re-affirming the status) so a
@@ -525,7 +525,7 @@ def _sweep_stale_phase2_runs():
 					"status": "Failed",
 					"warnings_json": frappe.as_json([
 						"Phase 2 run expired before any line data was captured "
-						"(no flow re-run within the window) — auto-stopped by "
+						"(no flow re-run within the window) auto-stopped by "
 						"janitor. To retry: click \"Run Line-Profile Pass\", "
 						"re-run your flow, then \"Stop Phase 2 Run\".",
 					]),

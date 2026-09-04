@@ -3,7 +3,7 @@
 
 """Phase 2 foundation: the dialect contract + factory.
 
-Covers the dialect-neutral pieces — coercion helpers, normalized dataclass
+Covers the dialect-neutral pieces coercion helpers, normalized dataclass
 defaults, db_type detection, factory dispatch + memoization, and the
 type-classification each adapter ships with. The EXPLAIN/index/infra method
 bodies are exercised by dialect-specific tests once they're filled.

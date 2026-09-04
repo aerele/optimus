@@ -4,7 +4,7 @@
 """``Aerele`` is the hosted/managed AI provider option (token packs bought at
 aerele.in instead of bringing your own Anthropic / OpenAI key). It is
 **TEMPORARILY DISABLED** until Aerele's billing + managed LLM gateway are
-production-ready — removed from the ``ai_provider`` Select and commented out
+production-ready removed from the ``ai_provider`` Select and commented out
 of ``_PROVIDER_DEFAULTS`` in ai_fix.py.
 
 These tests now GUARD that disabled state so the option can't reappear by
@@ -20,7 +20,7 @@ these assertions back to the originals:
     assert "Aerele" in options.split("\\n")
 
 The ``_aerele_call_metadata`` wiring is intentionally left intact in ai_fix.py
-(and still covered by test_ai_fix.py), ready for re-enable — only the
+(and still covered by test_ai_fix.py), ready for re-enable only the
 selectable provider is switched off.
 """
 
@@ -34,7 +34,7 @@ from optimus import ai_fix
 
 class TestAereleProviderDisabled:
 	def test_aerele_not_in_provider_defaults(self):
-		"""While disabled, Aerele must NOT resolve as a provider — so a
+		"""While disabled, Aerele must NOT resolve as a provider so a
 		stale ``ai_provider = "Aerele"`` setting fails cleanly with the
 		'Unknown AI provider' error rather than silently calling a
 		not-yet-ready endpoint."""

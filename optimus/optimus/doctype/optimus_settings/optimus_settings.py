@@ -9,7 +9,7 @@ class OptimusSettings(Document):
 	"""Site-wide configuration for Optimus.
 
 	A Single DocType. The cached reader in ``optimus.settings``
-	is what analyzers and hooks actually call — this controller only
+	is what analyzers and hooks actually call this controller only
 	handles validation + cache invalidation when an admin saves.
 	"""
 
@@ -27,7 +27,7 @@ class OptimusSettings(Document):
 
 		frappe.cache.delete_value(redis_keys.settings_cache())
 
-	# Numeric floors per field — a value below the floor would either
+	# Numeric floors per field a value below the floor would either
 	# break the analyzer at runtime (negative interval, zero retention)
 	# or render a useless report (sub-microsecond thresholds). Floors
 	# of 0 mean "0 is OK as a 'no filter' / 'always flag' sentinel".
@@ -68,7 +68,7 @@ class OptimusSettings(Document):
 		"""Floor each numeric setting at a safe minimum so a typo
 		(e.g. ``-1`` for a sampler interval, ``0`` for session
 		retention) doesn't break the analyzer at runtime. Silently
-		clamps — the operator sees the corrected value on the form
+		clamps the operator sees the corrected value on the form
 		after save."""
 		for fieldname, floor in self._NUMERIC_FLOORS.items():
 			current = self.get(fieldname)
@@ -82,7 +82,7 @@ class OptimusSettings(Document):
 					# behaviour for non-child-table scalar fields.
 					setattr(self, fieldname, floor)
 			except (TypeError, ValueError):
-				# Non-numeric input — let Frappe's field-type validation
+				# Non-numeric input let Frappe's field-type validation
 				# handle it; nothing useful for us to do here.
 				continue
 
@@ -112,13 +112,13 @@ class OptimusSettings(Document):
 		Apps.
 
 		Most users misread "Tracked Apps" as "apps to monitor" and
-		add frappe + erpnext — which has the OPPOSITE effect of what
+		add frappe + erpnext which has the OPPOSITE effect of what
 		they want: it flips the classifier into inclusion mode where
 		framework code becomes "user code", and their actionable
 		findings list gets flooded with framework noise.
 
 		We don't HARD-block the save (ERPNext contributors may
-		legitimately want framework findings as actionable) — just
+		legitimately want framework findings as actionable) just
 		flash a clear warning so the common misconfiguration surfaces
 		itself.
 		"""
@@ -137,7 +137,7 @@ class OptimusSettings(Document):
 		msg = (
 			"<b>Heads up:</b> you added "
 			+ ", ".join(f"<code>{a}</code>" for a in offenders)
-			+ " to Tracked Apps. These are framework/first-party apps — "
+			+ " to Tracked Apps. These are framework/first-party apps "
 			"adding them here flips the filter into <i>inclusion mode</i>, "
 			"so their findings will now show up as <b>actionable</b> "
 			"instead of in the collapsed Framework observations section. "
@@ -149,14 +149,14 @@ class OptimusSettings(Document):
 		)
 		frappe.msgprint(
 			msg,
-			title="Tracked Apps — possible misconfiguration",
+			title="Tracked Apps possible misconfiguration",
 			indicator="orange",
 		)
 
 	def _warn_on_incomplete_ai_config(self):
 		"""Non-blocking warning when AI fix suggestions are enabled but
 		the config is incomplete (no model, or no API key for a provider
-		that needs one). The feature stays enabled — the operator just
+		that needs one). The feature stays enabled the operator just
 		sees a clear hint instead of a cryptic error on first use."""
 		if not self.get("ai_enabled"):
 			return
@@ -179,8 +179,8 @@ class OptimusSettings(Document):
 		frappe.msgprint(
 			"AI Fix Suggestions are enabled but " + ", ".join(missing)
 			+ (" is" if len(missing) == 1 else " are")
-			+ " not set — the <b>Suggest a fix (AI)</b> button will report a "
+			+ " not set the <b>Suggest a fix (AI)</b> button will report a "
 			"configuration error until you fill these in.",
-			title="AI Fix Suggestions — incomplete config",
+			title="AI Fix Suggestions incomplete config",
 			indicator="orange",
 		)

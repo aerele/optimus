@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for `renderer._compose_tldr` — the v0.7.x redesign Phase B
+"""Tests for `renderer._compose_tldr`: the v0.7.x redesign Phase B
 TL;DR hero composer.
 
 The hero picks the single highest-impact finding (severity desc, then
@@ -69,7 +69,7 @@ class TestHeadlineByCategory:
 
 	def test_user_n_plus_one_multi_request_hedges_with_up_to(self):
 		# loop_count is the PEAK single-request size when the loop spans requests,
-		# so the hero hedges ("up to") and names the spread — matching the title.
+		# so the hero hedges ("up to") and names the spread matching the title.
 		f = _finding(
 			finding_type="N+1 Query",
 			affected_count=120,
@@ -86,7 +86,7 @@ class TestHeadlineByCategory:
 
 	def test_framework_n_plus_one_hero_is_informational_not_actionable(self):
 		# A Framework N+1 can win the hero slot (highest impact), but it must NOT
-		# claim "the single biggest win" — the loop lives in Frappe, not user code.
+		# claim "the single biggest win" the loop lives in Frappe, not user code.
 		# It carries NO impact_scope_label (only user N+1 sets "recoverable"), which
 		# is exactly what routes it to the informational headline.
 		f = _finding(
@@ -105,7 +105,7 @@ class TestHeadlineByCategory:
 	def test_legacy_user_n_plus_one_without_impact_scope_label_stays_user(self):
 		# Regression: a user N+1 stored by a pre-``impact_scope_label`` build (the
 		# field is absent from technical_detail) must still render as the user's
-		# own actionable win on re-render — NOT the framework "can't change" copy.
+		# own actionable win on re-render NOT the framework "can't change" copy.
 		# Routing is gated on the stable finding_type, so the missing label is fine.
 		f = _finding(
 			finding_type="N+1 Query",
@@ -167,7 +167,7 @@ class TestHeadlineByCategory:
 class TestSorting:
 	def test_picks_highest_severity_first(self):
 		# Use the fallback finding_type so the headline includes the
-		# title verbatim — sorting test doesn't care about the
+		# title verbatim sorting test doesn't care about the
 		# category-specific prose, just which finding wins.
 		low = _finding(finding_type="?", severity="Low", estimated_impact_ms=5000, title="LOW_FINDING")
 		high = _finding(finding_type="?", severity="High", estimated_impact_ms=100, title="HIGH_FINDING")
@@ -198,7 +198,7 @@ class TestEmptyState:
 		tldr = renderer._compose_tldr([], _doc())
 		sub = str(tldr["sub_markup"])
 		assert "severity finding" not in sub
-		# But session totals stay — sub-line reworded in v0.7.x to make
+		# But session totals stay sub-line reworded in v0.7.x to make
 		# the consolidated-session aggregation explicit.
 		assert "Total active time:" in sub
 		assert "consolidated &middot; session" in sub
@@ -234,7 +234,7 @@ class TestMarkupSafety:
 	def test_user_supplied_title_is_html_escaped(self):
 		"""Finding titles come from analyzer output but can carry
 		user-controlled content (e.g. DocType names, action labels).
-		Markup.format() escapes plain-string args — confirm a stray
+		Markup.format() escapes plain-string args confirm a stray
 		<script> in the title is escaped, not interpolated raw."""
 		f = _finding(
 			finding_type="Hook Bottleneck",

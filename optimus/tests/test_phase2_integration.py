@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Phase-2 integration tests — exercise capture.start_line_profile_pass /
+"""Phase-2 integration tests exercise capture.start_line_profile_pass /
 stop_line_profile_pass / is_active end-to-end with a fake frappe.cache so
 we don't need a live Redis to confirm the Redis-backed lifecycle works.
 
@@ -157,7 +157,7 @@ class TestPhase2Lifecycle:
 			import pytest
 			pytest.skip("line_profiler not installed; integration covered under bench")
 
-		# `len` is a C-extension builtin — picker rejects it.
+		# `len` is a C-extension builtin picker rejects it.
 		picks = [{"dotted_path": "builtins.len", "source": "freeform"}]
 
 		import pytest

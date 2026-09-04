@@ -3,7 +3,7 @@
 
 """Tests for the v0.6.0 Round 6 Optimus Settings additions.
 
-Pure-test path — no live Frappe site needed. Verifies the new fields
+Pure-test path no live Frappe site needed. Verifies the new fields
 default correctly, the multi-line skip-list parser strips blanks +
 comments, and each analyzer's resolver respects the configured value.
 """
@@ -124,12 +124,12 @@ class TestHotLineThresholdResolver:
 			hot_line_high_min_ms=200.0,
 		)
 		with patch("optimus.settings.get_config", return_value=fake_cfg):
-			# 60% of 1000ms = 600ms — under 80% threshold, so Medium
+			# 60% of 1000ms = 600ms under 80% threshold, so Medium
 			# (since med_pct = 80% * 0.5 = 40%).
 			result = lp_analyzer._classify_hot_line(600, 1000)
 			assert result == "Medium"
 
-			# 90% of 1000ms = 900ms — above both threshold and min_ms.
+			# 90% of 1000ms = 900ms above both threshold and min_ms.
 			result = lp_analyzer._classify_hot_line(900, 1000)
 			assert result == "High"
 
@@ -140,7 +140,7 @@ class TestHotLineThresholdResolver:
 	def test_settings_unreachable_falls_back(self):
 		# Resolver still produces classifiable thresholds.
 		with patch("optimus.settings.get_config", side_effect=RuntimeError):
-			# 60% of 1000ms = 600ms — over the legacy 50%/100ms High bar.
+			# 60% of 1000ms = 600ms over the legacy 50%/100ms High bar.
 			assert lp_analyzer._classify_hot_line(600, 1000) == "High"
 
 
@@ -217,7 +217,7 @@ class TestRendererMinActionFilter:
 			html = renderer.render_raw(doc, recordings=[])
 
 		assert "real_action" in html
-		# noise_poll was below the 10ms cutoff — not in the per-action
+		# noise_poll was below the 10ms cutoff not in the per-action
 		# table.
 		assert "noise_poll" not in html
 
@@ -230,10 +230,10 @@ class TestExpandHotChainHonorsSettings:
 
 	# Filename must look like an "apps/<app>/<app>/..." path so the
 	# pure-helper filter classifies frames as user code rather than
-	# framework plumbing — otherwise descent stops at frame_0.
+	# framework plumbing otherwise descent stops at frame_0.
 	_APP_FILE = "apps/myapp/myapp/x.py"
 	# _derive_module_path strips apps/<app>/, dedups the duplicate, and
-	# produces "myapp.x" — so the picked frame's dotted_path is
+	# produces "myapp.x" so the picked frame's dotted_path is
 	# "myapp.x.frame_0".
 	_PICKED_PATH = "myapp.x.frame_0"
 

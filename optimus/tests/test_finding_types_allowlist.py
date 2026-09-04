@@ -9,7 +9,7 @@ updated, Frappe's Select-field validation raises ValidationError at
 doc.save() time, destroying the whole analyze run.
 
 This caught v0.5.1's ``Framework N+1`` type after it had already
-shipped — once a session produced a Framework N+1 finding, analyze
+shipped once a session produced a Framework N+1 finding, analyze
 crashed with:
 
     frappe.exceptions.ValidationError: Row #1: Type cannot be
@@ -89,7 +89,7 @@ def test_framework_n_plus_one_is_in_options():
 	options = _load_doctype_options()
 	assert "Framework N+1" in options, (
 		"'Framework N+1' must be in Optimus Finding's select options "
-		"— n_plus_one.py emits this finding type for pure-frappe "
+		" n_plus_one.py emits this finding type for pure-frappe "
 		"stacks and Frappe's DocType validation will reject it "
 		"otherwise"
 	)

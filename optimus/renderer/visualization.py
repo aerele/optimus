@@ -6,23 +6,23 @@
 Three small public functions the template's context dict exposes as
 callables, plus :func:`redact_frame_name` for tree-node display:
 
-  * :func:`build_donut_data` — turns ``session_time_breakdown_json`` into
+  * :func:`build_donut_data`: turns ``session_time_breakdown_json`` into
     ``[(label, ms, color), …]`` for the donut chart. Hides slices that
-    round to 0ms (v0.5.1 fix — a session with 148ms of SQL and a handful
-    of sub-ms Python self-times was rendering seven "Python (…) — 0ms"
+    round to 0ms (v0.5.1 fix a session with 148ms of SQL and a handful
+    of sub-ms Python self-times was rendering seven "Python (…) 0ms"
     noise entries).
-  * :func:`build_donut_svg` — inline-SVG donut chart for PDF mode (wkhtml
+  * :func:`build_donut_svg`: inline-SVG donut chart for PDF mode (wkhtml
     can't render CSS conic-gradient reliably).
-  * :func:`build_hot_frames_table` — leaderboard row formatter; takes the
+  * :func:`build_hot_frames_table`: leaderboard row formatter; takes the
     ``is_hot`` flag to switch between self-time and cumulative-time
     columns and to mark user-code rows for the tinted CSS variant.
 
-These four are **public** — the renderer passes them into the Jinja
+These four are **public**: the renderer passes them into the Jinja
 context dict and the template calls them as ``{{ build_donut_svg(...) }}``
 helpers. The :data:`_DONUT_COLORS` palette is module-private (8 colours,
 rolls over for slice counts > 8).
 
-No Frappe dependency — pure dicts in, pure HTML strings / list-of-dicts
+No Frappe dependency pure dicts in, pure HTML strings / list-of-dicts
 out. Safe to call from any context the renderer reaches.
 """
 
@@ -39,7 +39,7 @@ _DONUT_COLORS = [
 
 def redact_frame_name(node: dict) -> str:
 	"""Build a tree node's display name. Always emits the full function
-	name plus its short filename and line number — single admin-scoped
+	name plus its short filename and line number single admin-scoped
 	report has no need for the safe-mode app collapse this used to do.
 	"""
 	if not isinstance(node, dict):
@@ -58,7 +58,7 @@ def build_donut_data(breakdown: dict) -> list:
 
 	v0.5.1: hides slices that round to 0ms in display. A session with
 	148ms of SQL and only a handful of sub-ms Python self-times was
-	rendering seven "Python (…) — 0ms" entries, all noise.
+	rendering seven "Python (…) 0ms" entries, all noise.
 	"""
 	if not breakdown:
 		return []
@@ -123,7 +123,7 @@ def build_hot_frames_table(rows: list, is_hot: bool = False) -> list:
 	user-code rows (yellow tint) and leave the framework rows
 	unmarked. The renderer always splits hot frames into user-vs-
 	framework lists before calling this builder, so the flag is a
-	per-list constant — True for the user-code table, False for the
+	per-list constant True for the user-code table, False for the
 	framework sibling.
 
 	v0.7.x: ``is_hot`` also selects WHICH time metric the row
@@ -136,7 +136,7 @@ def build_hot_frames_table(rows: list, is_hot: bool = False) -> list:
 	"""
 	out = []
 	for row in rows or []:
-		# The hot-frame key already encodes "<short_path>::<func>" — use it
+		# The hot-frame key already encodes "<short_path>::<func>" use it
 		# directly. Routing through redact_frame_name appended a bogus "(?:0)"
 		# (placeholder file "?" + lineno 0, since no file/line is known here).
 		display = row.get("function") or "<unknown>"
@@ -154,7 +154,7 @@ def build_hot_frames_table(rows: list, is_hot: bool = False) -> list:
 			"action_refs": row.get("action_refs", []),
 			"is_hot": is_hot,
 		})
-	# Framework variant ranks by the displayed (cumulative) metric —
+	# Framework variant ranks by the displayed (cumulative) metric
 	# the aggregator's outer sort was by self_ms, which produces
 	# all-zero ties on framework rows.
 	if not is_hot:

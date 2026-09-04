@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.6.0 background-job capture path — the bits that make the
+"""Tests for the v0.6.0 background-job capture path the bits that make the
 profiler track the jobs a profiled flow enqueued and wait for them to finish
 before analyzing:
 
@@ -10,7 +10,7 @@ before analyzing:
   * `analyze._bg_wait_for_pending_jobs` (re-enqueue-poll wait, capped, no-op
     when nothing's pending / the wait is disabled / no async worker)
   * `_stop_session` arms the draining window; `before_job` honours it
-    (source-inspection — those run a lot and need a live bench for a true run)
+    (source-inspection those run a lot and need a live bench for a true run)
   * the `background_job_wait_seconds` setting (default + clamp)
 """
 
@@ -23,7 +23,7 @@ from unittest.mock import patch
 import pytest
 
 # --------------------------------------------------------------------------
-# frappe.enqueue monkey-patch — registers the RQ job id with the session
+# frappe.enqueue monkey-patch registers the RQ job id with the session
 # --------------------------------------------------------------------------
 
 def _reset_profiler_modules():
@@ -98,7 +98,7 @@ class TestEnqueueRegistersPendingJob:
 		fake, fake_bg, calls = fake_frappe
 		fake.cache.set_value("profiler:active:alice@example.com", "sess-1")
 		_reset_profiler_modules()
-		import optimus  # noqa: F401 — triggers the patch
+		import optimus  # noqa: F401 triggers the patch
 
 		fake_bg.enqueue("myapp.tasks.go", x=1)
 		assert calls[-1]["kwargs"]["_profiler_session_id"] == "sess-1"
@@ -132,7 +132,7 @@ class TestEnqueueRegistersPendingJob:
 
 
 # --------------------------------------------------------------------------
-# session.py — pending jobs + draining window
+# session.py pending jobs + draining window
 # --------------------------------------------------------------------------
 
 @pytest.fixture
@@ -246,7 +246,7 @@ class TestBgWaitForPendingJobs:
 		monkeypatch.setattr(analyze, "_rq_job_active", lambda jid: True)
 		monkeypatch.setattr(analyze, "_publish_progress", lambda *a, **k: None)
 		monkeypatch.setattr(analyze.time, "sleep", lambda *a, **k: None)
-		# The status-set is best-effort (try/except in the SUT — frappe.db
+		# The status-set is best-effort (try/except in the SUT frappe.db
 		# being unavailable here is fine). Capture the re-enqueue.
 		enq = []
 		monkeypatch.setattr(frappe, "enqueue", lambda *a, **k: enq.append((a, k)), raising=False)
@@ -289,7 +289,7 @@ def test_stop_session_arms_the_draining_window():
 def test_before_job_honours_the_draining_window():
 	body = _fn_body(_src("hooks_callbacks.py"), "before_job")
 	assert "session.is_draining(session_uuid)" in body
-	# Only when there's NO active session — never bleed into a different one.
+	# Only when there's NO active session never bleed into a different one.
 	assert "active is None" in body
 
 

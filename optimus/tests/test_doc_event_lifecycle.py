@@ -1,11 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Unit tests for the "Doc-event lifecycle" breakdown — re-grouping the slow
+"""Unit tests for the "Doc-event lifecycle" breakdown re-grouping the slow
 call-tree findings by DocType → lifecycle event (validate / on_submit / …),
 tagging each as a registered ``doc_events`` hook vs a controller method
 override, and surfacing cascaded DocTypes. All pure functions in
-``renderer`` — no running site needed.
+``renderer``: no running site needed.
 """
 
 from optimus import renderer
@@ -18,7 +18,7 @@ class TestDoctypeFromControllerPath:
 		) == "Sales Invoice"
 
 	def test_absolute_controller_path_titlecase_limitation(self):
-		# .title() mangles multi-cap names ("gl_entry" → "Gl Entry") — same as
+		# .title() mangles multi-cap names ("gl_entry" → "Gl Entry") same as
 		# frappe.unscrub. Accepted.
 		assert renderer._doctype_from_controller_path(
 			"/Users/x/apps/erpnext/erpnext/accounts/doctype/gl_entry/gl_entry.py"
@@ -124,11 +124,11 @@ class TestBuildDocEventBreakdown:
 			   filename="ugly_code/python/common.py", lineno=6, cumulative_ms=697,
 			   hook_events=[{"doctype": "Sales Invoice", "event": "validate"}],
 			   target_doc={"doctype": "Sales Invoice", "name": "SINV-1"}),
-			# SalesInvoice.on_submit — controller override, SI/on_submit.
+			# SalesInvoice.on_submit controller override, SI/on_submit.
 			_f("Slow Hot Path", 450, severity="Medium", action_ref="1", function="SalesInvoice.on_submit",
 			   filename="erpnext/accounts/doctype/sales_invoice/sales_invoice.py", lineno=1200, cumulative_ms=450,
 			   target_doc={"doctype": "Sales Invoice", "name": "SINV-1"}),
-			# GLEntry.validate — controller override on GL Entry, touched during a SI submit.
+			# GLEntry.validate controller override on GL Entry, touched during a SI submit.
 			_f("Slow Hot Path", 22, severity="Low", action_ref="1", function="GLEntry.validate",
 			   filename="erpnext/accounts/doctype/gl_entry/gl_entry.py", lineno=50, cumulative_ms=22,
 			   target_doc={"doctype": "Sales Invoice", "name": "SINV-1"}),
@@ -161,7 +161,7 @@ class TestBuildDocEventBreakdown:
 		assert gl["events"][0]["methods"][0]["kind"] == "controller override"
 
 	def test_controller_override_supersedes_hook_kind_on_merge(self):
-		# Two findings for the same (function, filename) under the same event —
+		# Two findings for the same (function, filename) under the same event
 		# one bound via hook_events, one via controller-path → merged record's
 		# kind ends up "controller override" (the more specific one).
 		findings = [

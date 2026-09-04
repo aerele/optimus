@@ -5,7 +5,7 @@
 
 Registered in ``optimus/hooks.py`` alongside the phase-1 callbacks
 in ``hooks_callbacks.py``. Phase-1 and phase-2 are mutually exclusive for
-a single user — they read separate Redis flags
+a single user they read separate Redis flags
 (``profiler:active:<user>`` vs ``profiler:lp:active:<user>``) and the API
 layer rejects starting one while the other is active.
 
@@ -68,7 +68,7 @@ def before_request_line_profile(*args, **kwargs) -> None:
 		if not run_uuid:
 			return
 
-		# Skip the profiler's own endpoints — same logic phase-1 uses to
+		# Skip the profiler's own endpoints same logic phase-1 uses to
 		# avoid recording its own admin API calls.
 		if hooks_callbacks._should_skip_request():
 			return
@@ -84,7 +84,7 @@ def before_request_line_profile(*args, **kwargs) -> None:
 		# worker a sibling thread mid-profile legitimately owns tool 2, and
 		# reclaiming it would desync that thread (the tool-2 leak class). The
 		# thread-local check stays as a cheap first gate. Log when the reclaim
-		# actually fires — silent reclaim masked the leak class in production.
+		# actually fires silent reclaim masked the leak class in production.
 		if (
 			capture.active_profiler_count() == 0
 			and getattr(frappe.local, "_lp_profiler", None) is None
@@ -175,7 +175,7 @@ def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
 	dict *unconditionally*, even if we end up not instrumenting (run
 	already stopped, line_profiler unavailable, user is Guest, etc.).
 	The kwargs dict is the same one Frappe's ``execute_job`` will splat
-	into the user's method via ``method(**kwargs)`` — leaving our
+	into the user's method via ``method(**kwargs)``: leaving our
 	marker in there crashes the method with an unexpected-keyword-
 	argument error.
 
@@ -183,7 +183,7 @@ def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
 	Frappe's hook dispatcher passes ``method`` + ``kwargs`` as named
 	parameters.
 	"""
-	# Always pop our marker first — before any control-flow that might
+	# Always pop our marker first before any control-flow that might
 	# return early. The mutation propagates because ``kwargs`` is a
 	# reference to the dict execute_job will use.
 	if isinstance(kwargs, dict):
@@ -211,7 +211,7 @@ def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
 		# Self-heal a tool 2 orphaned by a previously-killed job (see
 		# before_request_line_profile). RQ workers run one job at a time, so
 		# the process-wide count is 0 between jobs and this is equivalent to the
-		# old thread-local gate — but we share the same count mechanism for
+		# old thread-local gate but we share the same count mechanism for
 		# consistency and strict safety. Log when the reclaim actually fires.
 		if (
 			capture.active_profiler_count() == 0

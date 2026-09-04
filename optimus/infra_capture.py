@@ -22,7 +22,7 @@ import os
 
 import frappe
 
-# Counter-style metrics — diff() subtracts start from end to produce deltas.
+# Counter-style metrics diff() subtracts start from end to produce deltas.
 # Everything else is a gauge that passes through as the end value.
 _COUNTER_KEYS = {
     "db_slow_queries_total",
@@ -185,7 +185,7 @@ def _read_db(out: dict) -> None:
 def _read_redis(out: dict) -> None:
     # frappe.cache IS a redis.Redis subclass (RedisWrapper at
     # frappe/utils/redis_wrapper.py:38). There is no `.redis` child
-    # attribute — call info() directly on frappe.cache. An earlier
+    # attribute call info() directly on frappe.cache. An earlier
     # v0.5.0 version used `getattr(frappe.cache, "redis", None)` which
     # silently returned None in production (tests masked the bug
     # because the FakeCache mock matched the broken code exactly).

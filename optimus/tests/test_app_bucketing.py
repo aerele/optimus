@@ -80,7 +80,7 @@ class TestBucketing:
 		findings = [
 			_finding("apps/apple/foo.py", impact=5.0),
 			_finding("apps/apple/bar.py", impact=5.0),
-			# Banana has higher total — should come first.
+			# Banana has higher total should come first.
 			_finding("apps/banana/x.py", impact=50.0),
 			_finding("apps/carrot/y.py", impact=20.0),
 		]
@@ -99,7 +99,7 @@ class TestBucketing:
 
 class TestTrackedAppsOrdering:
 	def test_tracked_apps_come_first_in_admin_order(self):
-		"""Admin listed ['my_primary', 'my_secondary'] — those must be
+		"""Admin listed ['my_primary', 'my_secondary'] those must be
 		the first two buckets regardless of their impact. The remaining
 		apps follow in impact-desc order."""
 		findings = [
@@ -128,7 +128,7 @@ class TestTrackedAppsOrdering:
 class TestHotPathBucketRename:
 	"""v0.5.2 round 4: when every finding in the no-callsite bucket is
 	a hot-path / hook / frontend-render type (these finding types
-	legitimately have no code-location callsite — they describe where
+	legitimately have no code-location callsite they describe where
 	time went within a request scope), rename the bucket from
 	"Other (no callsite)" → "Request hotspots". The word "Other"
 	undersells findings that are often the MOST valuable in the
@@ -202,7 +202,7 @@ class TestHotPathBucketRename:
 
 	def test_hotpath_bucket_ordered_last(self):
 		"""Like the Other bucket, 'Request hotspots' stays at the
-		bottom — it's secondary to user-app findings (even though
+		bottom it's secondary to user-app findings (even though
 		the contents are valuable) because the user can't directly
 		jump to a line of code from them."""
 		buckets = _bucket_findings_by_app([
@@ -224,7 +224,7 @@ class TestOtherBucketSuppressed:
 		"""v0.7.x: even when there are no-callsite findings, the
 		'Other (no callsite)' bucket is suppressed from the render
 		output. Findings still exist in the underlying list and still
-		count toward severity totals — only the per-app bucket display
+		count toward severity totals only the per-app bucket display
 		drops them. Named-app buckets render unchanged."""
 		findings = [
 			_finding(app_filename=None, impact=9999.0),  # no callsite
@@ -244,7 +244,7 @@ class TestOtherBucketSuppressed:
 class TestBucketContents:
 	def test_bucket_preserves_input_order_within_app(self):
 		"""The caller sorts globally by severity+impact. Within each
-		app, the bucketer must preserve that order — it must not
+		app, the bucketer must preserve that order it must not
 		re-sort (that would undo the global severity ordering)."""
 		findings = [
 			_finding("apps/myapp/a.py", impact=100.0, severity="High"),

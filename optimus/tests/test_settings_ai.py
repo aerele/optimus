@@ -4,7 +4,7 @@
 """Tests for the v0.6.0 AI-fix config fields on Optimus Settings.
 
 Pure-test path. Verifies the new fields default sensibly, resolve from a
-DocType row, and — importantly — that the secret API key is NOT part of
+DocType row, and importantly that the secret API key is NOT part of
 the cached ``OptimusConfig`` (it's read on demand by ai_fix.py via
 Frappe's encrypted-password store).
 """
@@ -33,7 +33,7 @@ class TestAiConfigDefaults:
 		assert cfg.ai_suggest_indexes is True
 
 	def test_api_key_is_not_part_of_the_config(self):
-		# The key is sensitive — never cached on the config snapshot.
+		# The key is sensitive never cached on the config snapshot.
 		assert not hasattr(settings.OptimusConfig(), "ai_api_key")
 		assert "ai_api_key" not in settings._DEFAULTS
 
@@ -122,7 +122,7 @@ class TestAiConfigResolution:
 		assert cfg.ai_auto_suggest_max == 12
 
 	def test_auto_suggest_max_zero_means_all(self):
-		# 0 is a legitimate value ("every eligible finding") — must not
+		# 0 is a legitimate value ("every eligible finding") must not
 		# fall through to the default of 5.
 		row = self._row(ai_auto_suggest=True, ai_auto_suggest_max=0)
 		with patch.object(settings, "_read_doctype_row", return_value=row), \

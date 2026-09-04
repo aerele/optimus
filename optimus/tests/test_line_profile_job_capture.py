@@ -2,7 +2,7 @@
 # For license information, please see license.txt
 
 """End-to-end reproduction of Phase-2 line capture for a BACKGROUND-JOB
-function — the path P2/P3 assumed works but was never tested.
+function the path P2/P3 assumed works but was never tested.
 
 Drives the real capture functions in-process (no bench/worker): arm a pass,
 run the picked function through the before/after_job hooks, aggregate, and
@@ -83,7 +83,7 @@ def test_bg_job_line_capture_end_to_end(lp_env):
 	ugly_hot.bg_recheck_users(**job_kwargs)
 	lp_hooks.after_job_line_profile(method="ugly_hot.bg_recheck_users", kwargs=job_kwargs, result=None)
 
-	# 3. Aggregate — THE capture assertion: at least one line has real timing.
+	# 3. Aggregate THE capture assertion: at least one line has real timing.
 	samples = cap.read_all_samples(run_uuid)
 	picks = cap.read_picks_meta(run_uuid)
 	results = cap.aggregate_samples(samples, picks)
@@ -91,11 +91,11 @@ def test_bg_job_line_capture_end_to_end(lp_env):
 	lines = results[0]["lines"]
 	hot = [ln for ln in lines if (ln["hits"] or 0) > 0 and (ln["total_ms"] or 0) > 0]
 	assert hot, (
-		"Phase-2 captured NO per-line timing for the bg-job function — "
+		"Phase-2 captured NO per-line timing for the bg-job function "
 		f"samples={samples!r} results={results!r}"
 	)
 
-	# 4. Linking — the (basename, qualname) lookup the finding card uses.
+	# 4. Linking the (basename, qualname) lookup the finding card uses.
 	from optimus import renderer
 	doc = types.SimpleNamespace(phase_2_runs=[
 		types.SimpleNamespace(status="Ready", results_json=__import__("json").dumps(results)),

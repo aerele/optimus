@@ -5,12 +5,12 @@
 
 Maps Postgres plan/catalog output onto the same normalized shapes the analyzers
 consume, so the analysis engine is dialect-blind. Plan analysis uses
-``EXPLAIN (FORMAT JSON)`` (plan-only — NEVER ``EXPLAIN ANALYZE``, which would
+``EXPLAIN (FORMAT JSON)`` (plan-only NEVER ``EXPLAIN ANALYZE``, which would
 execute the user's statement). The Sort / temp-table flags are plan-only
 heuristics: exact spill detection needs ANALYZE, so a ``Sort`` node over a
 relation is treated as the filesort analog and ``HashAggregate`` / ``Materialize``
 as the temporary-table analog. ``selectivity_pct`` has no plan-only Postgres
-equivalent (it needs ANALYZE row counts), so it's left None — the Low Filter
+equivalent (it needs ANALYZE row counts), so it's left None the Low Filter
 Ratio finding simply doesn't fire rather than mis-fire.
 
 The raw introspection SQL here is validated against a real ``--db-type postgres``
@@ -79,7 +79,7 @@ def _walk_plan(root: dict) -> list:
 
 	BY DESIGN, an ancestor Sort/temp flag attaches to EVERY scan beneath it. In a
 	``Sort → Join → (Scan A, Scan B)`` plan the sort applies to the joined output,
-	but both A and B are tagged ``sort_without_index`` — Postgres's plan-tree model
+	but both A and B are tagged ``sort_without_index``: Postgres's plan-tree model
 	doesn't decompose a sort back to a single relation the way MariaDB's row-per-
 	table EXPLAIN does. The over-attribution is bounded: ``selectivity_pct`` is None
 	on PG so Low Filter Ratio never fires, and the Filesort finding still needs a
@@ -130,7 +130,7 @@ class PostgresDialect(Dialect):
 		"""Run a query under a savepoint and roll back to it on failure.
 
 		CRITICAL on Postgres: a failed query aborts the WHOLE transaction
-		(InFailedSqlTransaction) — every later query then fails until a
+		(InFailedSqlTransaction) every later query then fails until a
 		rollback. Catching the Python exception is NOT enough; the savepoint
 		rollback is what restores the transaction so analyze (EXPLAIN on each
 		captured query + introspection) and the request (the infra snapshot)
@@ -147,7 +147,7 @@ class PostgresDialect(Dialect):
 			result = frappe.db.sql(*args, **kwargs)
 		except Exception:
 			# Roll back to the savepoint so the failed statement doesn't poison
-			# the rest of the transaction — but never let a rollback error mask
+			# the rest of the transaction but never let a rollback error mask
 			# the ORIGINAL exception (the caller's try/except turns the re-raised
 			# original into its safe default).
 			try:
@@ -214,7 +214,7 @@ class PostgresDialect(Dialect):
 		return out
 
 	def index_ddl(self, table: str, column: str, is_text_col: bool) -> str:
-		# Postgres b-trees index the full value — no prefix length. Long/searched
+		# Postgres b-trees index the full value no prefix length. Long/searched
 		# text may want an expression or GIN/trigram index instead.
 		schema = _db_schema()
 		return (
@@ -251,7 +251,7 @@ class PostgresDialect(Dialect):
 		return snap
 
 	def prefix_required(self, data_type: str) -> bool:
-		return False  # Postgres b-tree indexes the full value — no prefix syntax
+		return False  # Postgres b-tree indexes the full value no prefix syntax
 
 	def unindexable(self, data_type: str) -> bool:
 		return (data_type or "").lower() in _UNINDEXABLE_TYPES

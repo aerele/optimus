@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for `analyze._build_summary_html` — the plain-language "Summary"
+"""Tests for `analyze._build_summary_html`: the plain-language "Summary"
 prose at the top of the report.
 
 It must read for a non-developer: "operations" not "actions", humanized
@@ -60,7 +60,7 @@ class TestSummaryProse:
 		assert "Submit Sales Invoice" in text
 		assert "frappe.desk.form.save.savedocs" not in html
 		# The finding's title had the raw cmd swapped for the human label too.
-		assert "looped_validate" in text  # the function name stays — it's the actionable bit
+		assert "looped_validate" in text  # the function name stays it's the actionable bit
 		# "priority", not "severity".
 		assert "priority" in text and "severity" not in text.lower()
 		# The query count is still there.
@@ -108,7 +108,7 @@ class TestSummaryProse:
 		assert "potential issue" not in text
 
 	def test_works_without_recordings(self):
-		# Recordings can TTL out before a re-render — fall back to the raw label.
+		# Recordings can TTL out before a re-render fall back to the raw label.
 		ctx = _ctx(
 			actions=[{"action_label": "frappe.client.save:SO-0001", "recording_uuid": "gone", "duration_ms": 200}],
 			findings=[{"severity": "High", "title": "Same query ran 30x", "estimated_impact_ms": 100, "action_ref": "0"}],
@@ -141,7 +141,7 @@ class TestSummaryBulletShape:
 		assert "<li>" in html
 		assert "</ul>" in html
 		# And there are no leftover <p> wrappers from the pre-v0.7.x
-		# shape — those would render as paragraphs interleaved with the
+		# shape those would render as paragraphs interleaved with the
 		# bullet list, looking broken.
 		assert "<p>" not in html
 

@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""MariaDB dialect adapter — Optimus's current behaviour, behind the Dialect
+"""MariaDB dialect adapter Optimus's current behaviour, behind the Dialect
 interface.
 
 The EXPLAIN / index-introspection / infra-metric logic here is lifted
@@ -29,7 +29,7 @@ from optimus.dbdialect.base import (
 )
 
 # MariaDB TEXT/BLOB columns need a key-length prefix to index; JSON/GEOMETRY
-# can't take a plain b-tree index. (Mirrors index_suggestions — de-duplicated
+# can't take a plain b-tree index. (Mirrors index_suggestions de-duplicated
 # when that analyzer is rewired to call the dialect.)
 _PREFIX_REQUIRED_TYPES = frozenset({
 	"text", "tinytext", "mediumtext", "longtext",
@@ -38,7 +38,7 @@ _PREFIX_REQUIRED_TYPES = frozenset({
 _UNINDEXABLE_TYPES = frozenset({"json", "geometry"})
 _TEXT_INDEX_PREFIX_LENGTH = 255  # index_suggestions.TEXT_INDEX_PREFIX_LENGTH
 
-# MariaDB can't parameterise an identifier in ``SHOW INDEX FROM ?`` — the table
+# MariaDB can't parameterise an identifier in ``SHOW INDEX FROM ?``: the table
 # name is interpolated, so it must pass this whitelist first (index_suggestions
 # ._SAFE_TAB_TABLE_RE / _SAFE_INFOSCHEMA_RE / _is_safe_table_name).
 _SAFE_TAB_TABLE_RE = re.compile(r"^tab[A-Za-z0-9 _\-]+$")
@@ -57,7 +57,7 @@ class MariaDBDialect(Dialect):
 	name = "mariadb"
 
 	def __init__(self) -> None:
-		# max_connections is a server config — cached for the adapter's life
+		# max_connections is a server config cached for the adapter's life
 		# (the factory keeps one adapter per process). Mirrors the old
 		# module-level infra_capture._db_max_connections_cached.
 		self._max_connections_cached: int | None = None
@@ -77,7 +77,7 @@ class MariaDBDialect(Dialect):
 
 	@staticmethod
 	def _row_to_plan_table(row: dict) -> PlanTable:
-		"""Map one MariaDB EXPLAIN row to the normalized PlanTable — the exact
+		"""Map one MariaDB EXPLAIN row to the normalized PlanTable the exact
 		field reads from explain_flags._inspect_row."""
 		extra = (row.get("Extra") or row.get("extra") or "").lower()
 		return PlanTable(

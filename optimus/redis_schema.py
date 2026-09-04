@@ -14,7 +14,7 @@ values from older releases.
 **The contract for future schema changes:**
 
 1. Bump :data:`SCHEMA_VERSION` (in this module AND in
-   :data:`optimus.redis_keys.SCHEMA_VERSION` — they must stay in sync).
+   :data:`optimus.redis_keys.SCHEMA_VERSION`: they must stay in sync).
 2. On the WRITE side, wrap the new-shape payload via :func:`wrap_value`
    before passing to ``frappe.cache.set_value`` / ``hset`` / etc.
 3. On the READ side, unwrap via :func:`unwrap_value`. The helper
@@ -40,7 +40,7 @@ values from older releases.
   release can add a janitor pass that enumerates ``profiler:*`` keys
   and migrates / purges those with mismatched versions.
 
-This module imports nothing from Frappe at module top — the helpers
+This module imports nothing from Frappe at module top the helpers
 lazy-import inside their functions so pure-pytest tests can exercise
 the envelope logic without a bench. The sentinel-write path requires
 Frappe (it writes to ``frappe.cache``) but degrades silently when
@@ -65,7 +65,7 @@ _ENVELOPE_PAYLOAD_FIELD = "data"
 
 
 # ---------------------------------------------------------------------------
-# Envelope helpers — opt-in for new schema-change code paths
+# Envelope helpers opt-in for new schema-change code paths
 # ---------------------------------------------------------------------------
 
 
@@ -76,7 +76,7 @@ def wrap_value(payload: Any, *, version: int = SCHEMA_VERSION) -> dict:
 
 	The wrapper is the explicit signal that THIS value's shape is
 	version-controlled. Callers writing legacy un-wrapped values are
-	unaffected — they continue to write the bare payload and readers
+	unaffected they continue to write the bare payload and readers
 	detect the legacy shape by absence of the ``_v`` key.
 	"""
 	return {_ENVELOPE_VERSION_FIELD: int(version), _ENVELOPE_PAYLOAD_FIELD: payload}
@@ -104,7 +104,7 @@ def unwrap_value(
 		return default, None
 	# Require BOTH envelope fields. ``wrap_value`` always writes both, so a dict
 	# carrying only ``_v`` (a legacy payload that happens to use that key) is NOT
-	# an envelope — treating it as one would discard its real value.
+	# an envelope treating it as one would discard its real value.
 	if (
 		isinstance(value, dict)
 		and _ENVELOPE_VERSION_FIELD in value
@@ -116,7 +116,7 @@ def unwrap_value(
 			observed = 0
 		if observed == int(expected):
 			return value.get(_ENVELOPE_PAYLOAD_FIELD), observed
-		# Drift — return the caller's default so the host code path can
+		# Drift return the caller's default so the host code path can
 		# degrade gracefully. We DON'T try to migrate inline; that would
 		# couple this helper to every value shape's migration rules. A
 		# future PR can ship the migration.
@@ -127,13 +127,13 @@ def unwrap_value(
 
 
 # ---------------------------------------------------------------------------
-# Sentinel key — written at app import, read by future migration paths
+# Sentinel key written at app import, read by future migration paths
 # ---------------------------------------------------------------------------
 
 
 def write_schema_sentinel() -> None:
 	"""Write the current :data:`SCHEMA_VERSION` to the sentinel key (see
-	:func:`optimus.redis_keys.schema_version`). Idempotent — overwrites
+	:func:`optimus.redis_keys.schema_version`). Idempotent overwrites
 	whatever was there. Best-effort; a Redis hiccup at app-import must
 	never break app load (the same discipline as
 	:func:`optimus._startup_probe_tool2`).
@@ -153,7 +153,7 @@ def write_schema_sentinel() -> None:
 			SCHEMA_VERSION,
 		)
 	except Exception:
-		# Sentinel-write failure is non-fatal — app continues to function;
+		# Sentinel-write failure is non-fatal app continues to function;
 		# the next worker boot retries.
 		pass
 

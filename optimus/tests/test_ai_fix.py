@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for optimus.ai_fix — the provider-agnostic LLM client
+"""Tests for optimus.ai_fix the provider-agnostic LLM client
 behind the on-demand "Suggest a fix (AI)" action.
 
 Pure-test path: ``_build_messages`` is a pure function; the HTTP layer is
@@ -30,7 +30,7 @@ class _FakeResp:
 		self._raise_on_json = raise_on_json
 		self.text = text
 
-	def json(self):  # noqa: F811 — mimics requests.Response.json()
+	def json(self):  # noqa: F811 mimics requests.Response.json()
 		if self._raise_on_json:
 			raise ValueError("not json")
 		return self._payload
@@ -68,7 +68,7 @@ def _post_sequence(*resps):
 
 
 # --------------------------------------------------------------------------
-# _build_messages — pure
+# _build_messages pure
 # --------------------------------------------------------------------------
 
 class TestBuildMessages:
@@ -117,7 +117,7 @@ class TestBuildMessages:
 		must carry an explicit, emphatic NO RAW SQL rule (not just the
 		soft "never hand-built SQL strings" mention buried in the WRITE
 		IDIOMATIC FRAPPE paragraph). The post-processing detector in
-		``_flag_raw_sql_in_fix`` backstops the prompt — but cutting raw
+		``_flag_raw_sql_in_fix`` backstops the prompt but cutting raw
 		SQL at the prompt layer is cheaper (the model never generates
 		it) and gives the reader a cleaner suggestion (no appended
 		profiler note to wade through).
@@ -125,7 +125,7 @@ class TestBuildMessages:
 		system, _ = ai_fix._build_messages(self._finding())
 		# Loud header so the rule is unmissable in the prompt.
 		assert "NO RAW SQL IN YOUR PROPOSED FIX" in system
-		# Lists every SQL verb the post-processing detector catches —
+		# Lists every SQL verb the post-processing detector catches
 		# prompt + post-processing scope must match.
 		low = system.lower()
 		for verb in ("select", "insert", "update", "delete", "replace"):
@@ -167,7 +167,7 @@ class TestBuildMessages:
 		with NO filters. Counter-example shipped to keep the model from
 		assuming every get_all replacement needs filters."""
 		system, _ = ai_fix._build_messages(self._finding())
-		# The counter-example is recognisable by its content — a raw SQL with
+		# The counter-example is recognisable by its content a raw SQL with
 		# no WHERE clause + a frappe.get_all replacement without filters=.
 		assert "SELECT name, email FROM `tabUser` LIMIT 50" in system
 		assert "frappe.get_all('User', fields=['name', 'email'], limit=50)" in system
@@ -180,7 +180,7 @@ class TestBuildMessages:
 		diff, _, _ = diff_block.partition("```")
 		assert diff.strip(), "diff fence missing in second example"
 		assert "filters=" not in diff, (
-			"counter-example DIFF must NOT contain `filters=` — that's the "
+			"counter-example DIFF must NOT contain `filters=`: that's the "
 			"entire point of showing a no-filter substitution"
 		)
 
@@ -237,7 +237,7 @@ class TestBuildMessages:
 		assert "only code you have" in c
 
 	def test_no_source_notice_when_callsite_but_no_window(self):
-		# A finding that has a callsite but no readable source — the profiler
+		# A finding that has a callsite but no readable source the profiler
 		# couldn't open the file. The user message must say so and tell the
 		# model NOT to invent a before/after.
 		f = {
@@ -284,7 +284,7 @@ class TestBuildMessages:
 
 
 # --------------------------------------------------------------------------
-# _call_openai_chat / _call_anthropic — HTTP layer with requests mocked
+# _call_openai_chat / _call_anthropic HTTP layer with requests mocked
 # --------------------------------------------------------------------------
 
 class TestOpenAiCall:
@@ -480,7 +480,7 @@ class TestHttpErrorMapping:
 
 
 # --------------------------------------------------------------------------
-# _resolve_provider — defaults + overrides
+# _resolve_provider defaults + overrides
 # --------------------------------------------------------------------------
 
 def _cfg(**kw):
@@ -516,7 +516,7 @@ class TestResolveProvider:
 
 	def test_base_url_override_ignored_for_hosted_provider(self):
 		# A hosted provider (Anthropic / OpenAI / Kimi) ALWAYS uses its default
-		# endpoint — a stored ai_base_url must NOT override it. The Settings
+		# endpoint a stored ai_base_url must NOT override it. The Settings
 		# field is hidden for hosted providers, so a stale value would
 		# otherwise silently route calls to a dead host (ConnectionError). The
 		# model override still applies (that field stays visible/editable).
@@ -540,7 +540,7 @@ class TestResolveProvider:
 
 
 # --------------------------------------------------------------------------
-# is_available — truth table
+# is_available truth table
 # --------------------------------------------------------------------------
 
 class TestIsAvailable:
@@ -574,7 +574,7 @@ class TestIsAvailable:
 
 
 # --------------------------------------------------------------------------
-# suggest_fix — end to end with provider + requests patched
+# suggest_fix end to end with provider + requests patched
 # --------------------------------------------------------------------------
 
 class TestSuggestFix:
@@ -664,7 +664,7 @@ class TestSourceAvailableFlag:
 
 	def test_true_when_only_phase2_hotline(self, monkeypatch):
 		# A hot-path finding whose source couldn't be read but that WAS
-		# line-profiled — it has the per-line numbers, so don't show the
+		# line-profiled it has the per-line numbers, so don't show the
 		# "no source" caveat.
 		out = self._suggest(monkeypatch, {
 			"finding_type": "Slow Hot Path", "title": "x", "technical_detail": {},
@@ -704,7 +704,7 @@ class TestHumanizeSteps:
 		low = system.lower()
 		assert "steps to reproduce" in low
 		assert "**summary:**" in low
-		# It's primed with ERPNext domain knowledge — the standard flows and
+		# It's primed with ERPNext domain knowledge the standard flows and
 		# how to decode the raw cmds.
 		assert "erpnext" in low
 		assert "sales order" in low and "delivery note" in low
@@ -764,11 +764,11 @@ class TestMetadataIndexGuardrail:
 		assert ai_fix._flag_metadata_column_index_advice(txt) == txt
 
 	def test_does_not_flag_negated_mention(self):
-		txt = "Do NOT index `modified` — Frappe writes it on every save."
+		txt = "Do NOT index `modified`: Frappe writes it on every save."
 		assert ai_fix._flag_metadata_column_index_advice(txt) == txt
 
 	def test_no_index_advice_is_unchanged(self):
-		txt = "**Diagnosis** — N+1.\n**Fix** — batch with frappe.get_all."
+		txt = "**Diagnosis**: N+1.\n**Fix**: batch with frappe.get_all."
 		assert ai_fix._flag_metadata_column_index_advice(txt) == txt
 
 	def test_suggest_fix_applies_the_guardrail(self, monkeypatch):
@@ -783,11 +783,11 @@ class TestMetadataIndexGuardrail:
 
 
 # ---------------------------------------------------------------------------
-# Raw `frappe.db.sql` guardrail — the model is told via system prompt to
+# Raw `frappe.db.sql` guardrail the model is told via system prompt to
 # "never hand-built SQL strings" and use the Document API or frappe.qb
 # instead. This guardrail backstops that instruction: detect raw SQL in
 # the LLM's proposed fix and append an advisory profiler note. Append-
-# only, never rewrites — same posture as the metadata-column guardrail.
+# only, never rewrites same posture as the metadata-column guardrail.
 # ---------------------------------------------------------------------------
 
 
@@ -817,10 +817,10 @@ class TestRawSqlGuardrail:
 		assert ai_fix._flag_raw_sql_in_fix("") == ""
 
 	def test_text_with_no_code_blocks_returns_unchanged(self):
-		# No code fences anywhere — the guardrail must not fire on prose
+		# No code fences anywhere the guardrail must not fire on prose
 		# alone. (Real LLM output almost always has a code block, but a
 		# diagnosis-only response with no fix block is valid.)
-		txt = "**Diagnosis** — N+1 in the loop.\n**Fix** — batch the lookup."
+		txt = "**Diagnosis**: N+1 in the loop.\n**Fix**: batch the lookup."
 		assert ai_fix._flag_raw_sql_in_fix(txt) == txt
 
 	# --- Inputs that SHOULD trip the guardrail ----------------------------
@@ -865,7 +865,7 @@ class TestRawSqlGuardrail:
 
 	def test_raw_sql_case_insensitive_verb(self):
 		# Models often produce mixed-case keywords. The detector regex is
-		# case-insensitive on the verb — pin that.
+		# case-insensitive on the verb pin that.
 		txt = (
 			"```diff\n"
 			"+frappe.db.sql(\"select email from `tabUser` where name=%s\")\n"
@@ -874,7 +874,7 @@ class TestRawSqlGuardrail:
 		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
 
 	def test_raw_sql_triple_quoted_is_flagged(self):
-		# The most common multi-line "fix" shape — previously slipped through
+		# The most common multi-line "fix" shape previously slipped through
 		# because the regex only matched a single opening quote.
 		txt = (
 			'```python\n'
@@ -886,7 +886,7 @@ class TestRawSqlGuardrail:
 		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
 
 	def test_raw_sql_cte_with_is_flagged(self):
-		# CTE-led SELECT (WITH ... SELECT) — previously not in the verb list.
+		# CTE-led SELECT (WITH ... SELECT) previously not in the verb list.
 		txt = (
 			'```python\n'
 			'frappe.db.sql("WITH t AS (SELECT 1) SELECT * FROM t")\n'
@@ -899,7 +899,7 @@ class TestRawSqlGuardrail:
 		assert "Profiler note" in ai_fix._flag_raw_sql_in_fix(txt)
 
 	def test_raw_sql_in_plain_python_code_block_flagged(self):
-		# Non-diff code block — every line is "proposed code".
+		# Non-diff code block every line is "proposed code".
 		txt = (
 			"```python\n"
 			"def replace_old_call():\n"
@@ -932,11 +932,11 @@ class TestRawSqlGuardrail:
 		assert ai_fix._flag_raw_sql_in_fix(txt) == txt
 
 	def test_raw_sql_in_prose_NOT_flagged(self):
-		# Inline-code mention in a paragraph — the model is talking ABOUT
+		# Inline-code mention in a paragraph the model is talking ABOUT
 		# the anti-pattern, not proposing it. Guardrail must stay silent.
 		txt = (
-			"**Diagnosis** — the code uses `frappe.db.sql(\"SELECT ...\")` "
-			"inside a loop. **Fix** — batch via `frappe.get_all`."
+			"**Diagnosis**: the code uses `frappe.db.sql(\"SELECT ...\")` "
+			"inside a loop. **Fix**: batch via `frappe.get_all`."
 		)
 		assert ai_fix._flag_raw_sql_in_fix(txt) == txt
 
@@ -956,7 +956,7 @@ class TestRawSqlGuardrail:
 		assert ai_fix._flag_raw_sql_in_fix(txt) == txt
 
 	def test_ddl_verb_NOT_flagged(self):
-		# CREATE / ALTER / DROP are intentionally outside scope —
+		# CREATE / ALTER / DROP are intentionally outside scope
 		# legit administrative use (e.g. ADD INDEX when Customize Form
 		# isn't an option).
 		txt = (
@@ -1026,7 +1026,7 @@ def test_eligible_finding_types_is_a_frozenset_of_known_types():
 
 
 # --------------------------------------------------------------------------
-# v0.6.x: is_available(section=...) — per-section LLM toggles (hard off)
+# v0.6.x: is_available(section=...) per-section LLM toggles (hard off)
 # --------------------------------------------------------------------------
 
 from optimus import settings as _settings

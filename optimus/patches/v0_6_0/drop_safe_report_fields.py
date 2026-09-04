@@ -60,7 +60,7 @@ def execute():
 						"File", name, force=True, ignore_permissions=True,
 					)
 				except Exception:
-					# Individual file deletion failures are non-fatal —
+					# Individual file deletion failures are non-fatal
 					# log and move on so a single broken row doesn't
 					# block the rest of the migration.
 					frappe.log_error(

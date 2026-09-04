@@ -6,7 +6,7 @@
 Renders end-to-end via ``renderer.render_raw`` and asserts the a11y pass holds:
 darkened mute token, severity text labels on the waterfall (not colour-only),
 the AI-fix "unverified" badge, back-to-top anchors, and the self-contained /
-offline-safe invariant (no scripts, no external resource loads — aerele.in
+offline-safe invariant (no scripts, no external resource loads aerele.in
 *anchor* links are allowed).
 """
 
@@ -61,7 +61,7 @@ def _render(**kw):
 
 
 # --------------------------------------------------------------------------
-# FIX 1 — contrast token
+# FIX 1 contrast token
 # --------------------------------------------------------------------------
 
 def test_ink_mute_darkened_to_aa():
@@ -73,7 +73,7 @@ def test_ink_mute_darkened_to_aa():
 
 
 # --------------------------------------------------------------------------
-# FIX 4 — waterfall severity labels (not colour-only)
+# FIX 4 waterfall severity labels (not colour-only)
 # --------------------------------------------------------------------------
 
 def test_waterfall_has_text_severity_labels():
@@ -88,7 +88,7 @@ def test_waterfall_has_text_severity_labels():
 
 
 # --------------------------------------------------------------------------
-# Finding impact — show per-hit alongside the consolidated total
+# Finding impact show per-hit alongside the consolidated total
 # --------------------------------------------------------------------------
 
 def test_finding_impact_shows_per_hit_with_consolidated():
@@ -110,7 +110,7 @@ def test_finding_impact_suppresses_per_hit_when_it_would_round_to_zero():
 
 
 # --------------------------------------------------------------------------
-# FIX 5 — AI-fix unverified badge
+# FIX 5 AI-fix unverified badge
 # --------------------------------------------------------------------------
 
 def test_ai_fix_unverified_badge_present():
@@ -137,7 +137,7 @@ def test_back_to_top_links_removed_find_in_page_note_kept():
 
 
 # --------------------------------------------------------------------------
-# Invariant — self-contained / offline-safe
+# Invariant self-contained / offline-safe
 # --------------------------------------------------------------------------
 
 def test_report_is_self_contained_offline():
@@ -152,6 +152,6 @@ def test_report_is_self_contained_offline():
 	assert not re.search(r'<link\b[^>]*href\s*=\s*["\']https?:', html)  # no remote stylesheet
 	assert "@import" not in html
 	assert "url(http" not in html.replace(" ", "").replace("'", "").replace('"', "")
-	# Anchor links (e.g. aerele.in) ARE allowed — sanity-check one exists so the
+	# Anchor links (e.g. aerele.in) ARE allowed sanity-check one exists so the
 	# checks above aren't trivially passing on an empty page.
 	assert re.search(r'<a [^>]*href="https?://', html)

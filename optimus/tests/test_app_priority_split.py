@@ -20,7 +20,7 @@ from optimus import renderer
 from optimus.settings import OptimusConfig
 
 # --------------------------------------------------------------------------
-# _is_framework_app — the tiny classifier adapter
+# _is_framework_app the tiny classifier adapter
 # --------------------------------------------------------------------------
 
 
@@ -174,7 +174,7 @@ class TestPerActionSplit:
 
 	def test_no_split_when_tracked_apps_empty(self):
 		"""v0.7.x: when Tracked Apps is empty (default), the per-action
-		breakdown does NOT split — all actions, including those hitting
+		breakdown does NOT split all actions, including those hitting
 		Frappe endpoints, stay in the main table. Pre-v0.7 every
 		HTTP request to ``/api/method/frappe.*`` was hidden in the
 		collapsed framework subsection, leaving RQ Jobs as the
@@ -192,7 +192,7 @@ class TestPerActionSplit:
 		# Default: get_config returns OptimusConfig with tracked_apps=().
 		html = renderer.render_raw(doc, recordings=[])
 
-		# No subsection summary phrase — no split happened.
+		# No subsection summary phrase no split happened.
 		assert "framework actions (click to expand)" not in html
 		assert "framework action (click to expand)" not in html
 		# Both actions appear in the main table.
@@ -240,7 +240,7 @@ class TestTopQueriesSplit:
 	def test_framework_callsite_query_routes_to_collapsed_block(self):
 		# top_queries normally already excludes framework callsites at
 		# analyze AND render time (``_filter_top_queries_for_display``).
-		# Bypass the render-time filter so both queries reach the split —
+		# Bypass the render-time filter so both queries reach the split
 		# this exercises the framework sub-block code path for the rare
 		# case that a framework query slips through (older sessions).
 		doc = _doc(top_queries=[
@@ -251,7 +251,7 @@ class TestTopQueriesSplit:
 		])
 		# v0.10.0: ``renderer`` is now a package whose ``__init__.py``
 		# re-exports names from ``_internal``. Patching ``renderer.X``
-		# would only swap the package's attribute — the call site inside
+		# would only swap the package's attribute the call site inside
 		# ``_internal.py`` resolves the name through ``_internal``'s own
 		# globals and would see the unpatched original. Patch the actual
 		# location.

@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for `renderer._build_action_plan` — the v0.7.x redesign
+"""Tests for `renderer._build_action_plan`: the v0.7.x redesign
 Phase C punch list.
 
 Top-N findings by severity → impact, each emitted as a step the

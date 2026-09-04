@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Phase J adapter — transform our flat render-context into the 19-key
+"""Phase J adapter transform our flat render-context into the 19-key
 contract shape per ``template_variable_contract.md`` (in the reference
 design package).
 
@@ -23,7 +23,7 @@ from typing import Any
 from markupsafe import Markup
 
 # ---------------------------------------------------------------------------
-# Helpers — small pure functions called by sub-builders below
+# Helpers small pure functions called by sub-builders below
 # ---------------------------------------------------------------------------
 
 
@@ -84,7 +84,7 @@ def _ms_display(ms) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Sub-builders — one per contract key, in contract order
+# Sub-builders one per contract key, in contract order
 # ---------------------------------------------------------------------------
 
 
@@ -141,7 +141,7 @@ def _build_kpis(session_doc, ctx) -> list[dict]:
 	medium = severity_counts.get("Medium", 0) or 0
 	low = severity_counts.get("Low", 0) or 0
 
-	# "X high · Y medium · Z low" — only non-zero buckets, separator-joined.
+	# "X high · Y medium · Z low" only non-zero buckets, separator-joined.
 	sev_parts = []
 	if high:
 		sev_parts.append(f"{high} high")
@@ -152,7 +152,7 @@ def _build_kpis(session_doc, ctx) -> list[dict]:
 	findings_sub = " · ".join(sev_parts) if sev_parts else "none detected"
 
 	server_ms = total_ms - total_query_ms
-	# Markup-aware concat — fmt_ms returns Markup for ≥1s values
+	# Markup-aware concat fmt_ms returns Markup for ≥1s values
 	# (`<span class="time-high">…</span>`). f-string would coerce to plain
 	# str and Jinja autoescape would HTML-encode the span.
 	total_time_sub = (
@@ -161,7 +161,7 @@ def _build_kpis(session_doc, ctx) -> list[dict]:
 
 	ops_plural = "s" if total_requests != 1 else ""
 
-	# C.UT2 — Total-time KPI carries a caveat about wall-clock sampling.
+	# C.UT2 Total-time KPI carries a caveat about wall-clock sampling.
 	# The interval is dynamic (Optimus Settings); read once for the sub-line.
 	try:
 		from optimus.settings import get_config as _get_cfg
@@ -225,7 +225,7 @@ def _build_summary(summary_html) -> dict | None:
 	"""Contract ``summary`` = {paragraphs_html: [...]}.
 
 	Our existing summary is one HTML chunk (``<ul>`` of bullets). Wrap in
-	a single-paragraph list — the contract permits HTML inside each entry.
+	a single-paragraph list the contract permits HTML inside each entry.
 	"""
 	if not summary_html:
 		return None
@@ -453,7 +453,7 @@ def _build_actions(actions, findings, fmt_ms=None) -> list[dict]:
 	J.2.3: We *spread the original action dict* so the existing
 	``action_row`` macro (which reads ``action_label``, ``http_method``,
 	``path``, ``entry_callsite``, ``target_doc``, ``related_findings`` and
-	more) keeps working unchanged. Contract fields are added on top — they
+	more) keeps working unchanged. Contract fields are added on top they
 	never collide with the legacy keys.
 	"""
 	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
@@ -536,7 +536,7 @@ def _build_background_jobs(jobs, fmt_ms=None) -> list[dict]:
 			"queries": job.get("queries_count", 0) or 0,
 			"db_time_display": fmt(job.get("query_time_ms", 0) or 0),
 			"finding_count": job.get("findings_count", 0) or 0,
-			# Also coerce the ORIGINAL ``findings_count`` (with 's') key —
+			# Also coerce the ORIGINAL ``findings_count`` (with 's') key
 			# the existing line above only adds a new ``finding_count``
 			# (without 's'). Jobs that Failed before producing findings
 			# carry ``findings_count: None`` from analyze; the bg_jobs
@@ -545,7 +545,7 @@ def _build_background_jobs(jobs, fmt_ms=None) -> list[dict]:
 			# Undefined (not None), so an uncoerced None crashes the whole
 			# render with ``unsupported operand type(s) for +: 'int' and
 			# 'NoneType'``. The fix is render-time so it applies on
-			# regenerate_reports too — no re-analyze needed.
+			# regenerate_reports too no re-analyze needed.
 			"findings_count": int(job.get("findings_count") or 0),
 		})
 		result.append(entry)
@@ -667,7 +667,7 @@ def _build_resource(infra_summary, infra_timeline) -> dict | None:
 	# J.2.4 non-contract additions: keep the raw summary + timeline reachable
 	# under ``report_data.resource`` so the existing per-action infra table
 	# and the inline rc-card markup migrate as a straight key rename.
-	# J.13: normalise the timeline's snapshotted action labels — the
+	# J.13: normalise the timeline's snapshotted action labels the
 	# rows were stamped by infra_pressure.analyze at analyse-time and
 	# carry the pre-J.12 ``"Job: <method>"`` prefix on bg jobs. Rewrite
 	# at render time so the Server Resource per-action timeline reads
@@ -698,7 +698,7 @@ def _build_frontend(ctx) -> dict | None:
 	if not vitals_by_page and not xhrs and not summary:
 		return None
 
-	# web_vitals — per-page row with computed *_class fields
+	# web_vitals per-page row with computed *_class fields
 	web_vitals = []
 	for page, v in vitals_by_page.items():
 		fcp = v.get("fcp_ms")
@@ -708,19 +708,19 @@ def _build_frontend(ctx) -> dict | None:
 		dcl = v.get("dom_content_loaded_ms")
 		web_vitals.append({
 			"url": page,
-			"fcp_display": f"{fcp:.0f} ms" if fcp else "—",
+			"fcp_display": f"{fcp:.0f} ms" if fcp else "",
 			"fcp_class": _web_vital_class(fcp, 1800, 3000),
-			"lcp_display": f"{lcp:.0f} ms" if lcp else "—",
+			"lcp_display": f"{lcp:.0f} ms" if lcp else "",
 			"lcp_class": _web_vital_class(lcp, 2500, 4000),
-			"cls_display": f"{cls:.3f}" if cls is not None else "—",
+			"cls_display": f"{cls:.3f}" if cls is not None else "",
 			"cls_class": _web_vital_class(cls, 0.1, 0.25) if cls is not None else "vital-none",
-			"ttfb_display": f"{ttfb:.0f} ms" if ttfb else "—",
+			"ttfb_display": f"{ttfb:.0f} ms" if ttfb else "",
 			"ttfb_class": _web_vital_class(ttfb, 800, 1800),
-			"dcl_display": f"{dcl:.0f} ms" if dcl else "—",
+			"dcl_display": f"{dcl:.0f} ms" if dcl else "",
 			"dcl_class": _web_vital_class(dcl, 1500, 3000),
 		})
 
-	# xhrs — display-formatted
+	# xhrs display-formatted
 	xhrs_out = []
 	for x in xhrs:
 		backend_ms = x.get("backend_ms", 0) or 0
@@ -741,7 +741,7 @@ def _build_frontend(ctx) -> dict | None:
 			"browser_is_hot": xhr_ms >= 1000,
 		})
 
-	# kpis — 4-item summary
+	# kpis 4-item summary
 	kpis = []
 	if summary:
 		total_xhrs = summary.get("total_xhrs", 0) or 0
@@ -929,7 +929,7 @@ def _build_footer(render_config) -> dict:
 	"""Contract ``footer`` = {framework, settings}.
 
 	``settings`` lists every render-time toggle that affects the report. The
-	contract example shows 3 toggles; our config has 6 — we include all of
+	contract example shows 3 toggles; our config has 6 we include all of
 	them so the legacy footer's full disclosure carries over post-migration.
 	"""
 	rc = render_config or {}
@@ -980,9 +980,9 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 	except Exception:
 		_sampler_ms = 1.0
 	# AI token-usage transparency: total tokens every AI feature consumed this
-	# session — fix suggestions (per finding), index suggestions (per table),
+	# session fix suggestions (per finding), index suggestions (per table),
 	# and the Steps-to-Reproduce humanization (one per session). Derived at
-	# render time so re-generated reports stay in sync — never baked at
+	# render time so re-generated reports stay in sync never baked at
 	# analyze time. (The connectivity probe is a Settings test, not session
 	# work, so it's deliberately excluded.)
 	_ai_tokens_total = 0
@@ -1032,7 +1032,7 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		"actions": _build_actions(
 			ctx.get("actions", []), ctx.get("findings", []), ctx.get("fmt_ms")
 		),
-		# J.2.3 non-contract addition — pragmatic extension so the framework
+		# J.2.3 non-contract addition pragmatic extension so the framework
 		# sub-block keeps rendering. May be folded into ``actions`` with an
 		# ``is_framework`` flag in J.3.
 		"actions_framework": _build_actions(
@@ -1041,7 +1041,7 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		"background_jobs": _build_background_jobs(
 			(ctx.get("background_jobs") or {}).get("jobs", []) or [], ctx.get("fmt_ms")
 		),
-		# J.2.3 non-contract addition — see actions_framework note above.
+		# J.2.3 non-contract addition see actions_framework note above.
 		"background_jobs_framework": _build_background_jobs(
 			(ctx.get("background_jobs") or {}).get("jobs_framework", []) or [], ctx.get("fmt_ms")
 		),
@@ -1060,11 +1060,11 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		"slow_queries": _build_slow_queries(ctx.get("top_queries", []), ctx.get("fmt_ms")),
 		# J.2.5 non-contract addition for framework split.
 		"slow_queries_framework": _build_slow_queries(ctx.get("top_queries_framework", []), ctx.get("fmt_ms")),
-		# B.DI4 — how many user-app slow queries the analyzer truncated
+		# B.DI4 how many user-app slow queries the analyzer truncated
 		# out of the findings list (5-cap). 0 when nothing was suppressed.
 		"top_queries_suppressed_count": int(ctx.get("top_queries_suppressed_count") or 0),
 		"top_queries_slow_threshold_ms": float(ctx.get("top_queries_slow_threshold_ms") or 0),
-		# B.DI2 — Hot Frames section truncation banner data:
+		# B.DI2 Hot Frames section truncation banner data:
 		# {captured, kept, actions_affected, keep_limit}. actions_affected=0 hides it.
 		"frame_truncation": ctx.get("frame_truncation") or {
 			"captured": 0, "kept": 0, "actions_affected": 0, "keep_limit": 0,
@@ -1072,7 +1072,7 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		"db": _build_db(ctx.get("table_breakdown", []), ctx.get("fmt_ms")),
 		"how_to_read_items": None,
 		"footer": _build_footer(ctx.get("render_config")),
-		# J.3.1 non-contract additions — the remaining two passthroughs
+		# J.3.1 non-contract additions the remaining two passthroughs
 		# the template needs before the legacy top-level keys can be
 		# dropped from renderer.py's context dict.
 		"large_duration_threshold_ms": (
@@ -1093,7 +1093,7 @@ def _build_background_jobs_summary(background_jobs) -> dict:
 	dict can be dropped.
 	"""
 	bj = background_jobs or {}
-	# v0.7.x: per-status tally so the section heading can break down "N jobs —
+	# v0.7.x: per-status tally so the section heading can break down "N jobs
 	# X completed, Y failed, Z timed out, W running" and flag failures. Ordered
 	# worst-first; zero categories are dropped so the line stays terse.
 	sc = bj.get("status_counts") or {}

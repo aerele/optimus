@@ -624,7 +624,7 @@
   .kpi-value.danger { color: var(--accent); }
   .kpi-unit { font-size: 14px; color: var(--ink-mute); font-weight: 400; margin-left: 2px; }
   .kpi-sub { font-size: 12px; color: var(--ink-soft); margin-top: 6px; line-height: 1.45; }
-  /* C.UT2: tiny caveat line under a KPI's sub-text — explains a known
+  /* C.UT2: tiny caveat line under a KPI's sub-text explains a known
      limitation of the metric (e.g. sampler interval for Total time). */
   .kpi-caveat {
     font-size: 11px;
@@ -641,7 +641,7 @@
      -----
      Terminology decision (U1, intentional split):
      - Data-layer field names use ``cumulative_ms`` (pyinstrument's
-       term — sum of self_time + descendant time).
+       term sum of self_time + descendant time).
      - UI text uses ``consolidated`` (the user-facing word, picked
        by the project owner for the scope-tag vocabulary).
      This split is intentional. Keep cumulative_ms in fixtures /
@@ -909,7 +909,7 @@
   .code-block .added { color: #6A9955; }
   .code-block .removed { color: #F48771; text-decoration: line-through; opacity: 0.85; }
 
-  /* VS Code Dark Modern token palette — smoking-gun .code-block
+  /* VS Code Dark Modern token palette smoking-gun .code-block
      snippet only. The hot-line amber wrapper sits OUTSIDE these
      per-token spans so the highlight composes correctly. */
   .code-block .tok-k, .code-block .tok-kn        { color: #C586C0; }
@@ -932,7 +932,7 @@
   .code-block .tok-cm                            { color: #6A9955; font-style: italic; }
   .code-block .tok-o, .code-block .tok-p         { color: #D4D4D4; }
 
-  /* VS Code Light Modern token palette — Line-Level Drilldown
+  /* VS Code Light Modern token palette Line-Level Drilldown
      .line-prof table only (light to match the editorial report
      page). */
   .line-prof .tok-k, .line-prof .tok-kn, .line-prof .tok-kc,
@@ -1732,7 +1732,7 @@
       <p class="small muted" style="font-style: italic;">
         Note: finding impacts may overlap when several findings cover the
         same code path (e.g. a Slow Hot Path and an N+1 inside the same
-        function) &mdash; don't sum <em>estimated_impact_ms</em> across findings.
+        function) don't sum <em>estimated_impact_ms</em> across findings.
       </p>
 
             <div class="finding severity-high">
@@ -1888,15 +1888,15 @@
         <span>Suggested fix</span>
         <span class="ai-tag">AI &middot; qwen3-coder:30b</span>
       </div>
-      <div class="fix-body"><p><strong>Diagnosis</strong> — <code>frappe.get_doc("User", frappe.session.user)</code> on line 20 is called 50 times in a loop — that's 50 redundant round-trips to fetch the same User document.</p>
+      <div class="fix-body"><p><strong>Diagnosis</strong> <code>frappe.get_doc("User", frappe.session.user)</code> on line 20 is called 50 times in a loop that's 50 redundant round-trips to fetch the same User document.</p>
 
 <p><strong>Fix</strong></p>
 
 <pre class="dh"><code class="diff language-diff"><span class="dh-line dh-ctx"> def _check_user_exists(doc):</span><span class="dh-line dh-del">-    for i in range(50):</span><span class="dh-line dh-del">-        user = frappe.get_doc("User", frappe.session.user)</span><span class="dh-line dh-del">-        if user.enabled:</span><span class="dh-line dh-del">-            _maybe_log_user(user, i)</span><span class="dh-line dh-add">+    user = frappe.get_doc("User", frappe.session.user)</span><span class="dh-line dh-add">+    if user.enabled:</span><span class="dh-line dh-add">+        for i in range(50):</span><span class="dh-line dh-add">+            _maybe_log_user(user, i)</span></code></pre>
 
-<p><strong>Why it works</strong> — hoisting the <code>frappe.get_doc</code> call out of the loop eliminates 49 redundant database queries for the same user, while preserving the same logic flow.</p>
+<p><strong>Why it works</strong> hoisting the <code>frappe.get_doc</code> call out of the loop eliminates 49 redundant database queries for the same user, while preserving the same logic flow.</p>
 
-<p><strong>Verify</strong> — re-profile the <code>looped_validate</code> function and confirm the <code>tabUser</code> query count dropped from 50 to 1 for this action.</p>
+<p><strong>Verify</strong> re-profile the <code>looped_validate</code> function and confirm the <code>tabUser</code> query count dropped from 50 to 1 for this action.</p>
 </div>
       <div class="fix-foot">Machine-generated &middot; 19-05-2026 13:31:27 - review before applying.</div>
     </div>
@@ -2198,12 +2198,12 @@ Also affects 1 other action.</p>
             <td class="num"><strong><span class="time-high">1.34s</span></strong></td>
             <td class="num"><strong>140</strong></td>
             <td class="num"><strong>69ms</strong></td>
-            <td class="num muted" title="Per-row maxes are not additive — column total intentionally suppressed">&mdash;</td>
+            <td class="num muted" title="Per-row maxes are not additive, so the column total is intentionally suppressed"></td>
           </tr>
         </tfoot>
       </table>
       <p class="small muted" style="font-style: italic; margin-top: 6px;">
-        Note: <em>Slowest query</em> values are per-row maxes &mdash; don't sum them.
+        Note: <em>Slowest query</em> values are per-row maxes don't sum them.
         Use the <em>DB time</em> column when you want a column total.
       </p>
       <section class="subsection">
@@ -2602,7 +2602,7 @@ Also affects 1 other action.</p>
     <p class="small muted" style="font-style: italic;">
       Note: the consolidated total sums each job's wall time. If your
       bench runs multiple RQ workers in parallel, the actual elapsed
-      pool time may be less than this sum &mdash; the per-job Duration
+      pool time may be less than this sum the per-job Duration
       column shows each job's true wall.
     </p>
     <p class="small muted">
@@ -2789,12 +2789,12 @@ Also affects 1 other action.</p>
           <td class="num"><strong><span class="time-high">1.34s</span></strong></td>
           <td class="num"><strong>140</strong></td>
           <td class="num"><strong>69ms</strong></td>
-          <td class="num muted" title="Per-row maxes are not additive — column total intentionally suppressed">&mdash;</td>
+          <td class="num muted" title="Per-row maxes are not additive, so the column total is intentionally suppressed"></td>
 <td class="num"><strong>2</strong></td>        </tr>
       </tfoot>
     </table>
     <p class="small muted" style="font-style: italic; margin-top: 6px;">
-      Note: <em>Slowest query</em> values are per-row maxes &mdash; don't sum them.
+      Note: <em>Slowest query</em> values are per-row maxes don't sum them.
       Use the <em>DB time</em> column when you want a column total.
     </p>
   </section>
@@ -3256,11 +3256,11 @@ looped_validate            </span>
         </tr>
         <tr>
           <td><code>/desk/sales-invoice/ACC-SINV-2026-00060</code></td>
-          <td class="num"><span class="vital-none">—</span></td>
-          <td class="num"><span class="vital-none">—</span></td>
+          <td class="num"><span class="vital-none"> </span></td>
+          <td class="num"><span class="vital-none"> </span></td>
           <td class="num"><span class="vital-meh">0.135</span></td>
-          <td class="num"><span class="vital-none">—</span></td>
-          <td class="num"><span class="vital-none">—</span></td>
+          <td class="num"><span class="vital-none"> </span></td>
+          <td class="num"><span class="vital-none"> </span></td>
         </tr>
       </tbody>
     </table>
@@ -3277,7 +3277,7 @@ looped_validate            </span>
           <tr>
             <th>Function</th>
             <th class="num">Total time <small class="scope-tag">consolidated</small></th>
-            <th class="num" title="Sampler hits — proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
+            <th class="num" title="Sampler hits proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
             <th class="num">Distinct actions</th>
           </tr>
         </thead>
@@ -3431,7 +3431,7 @@ looped_validate            </span>
     <a id="queries"></a>    <h2>Slowest queries - your app</h2>
       <div class="empty-state">
         <div class="empty-icon">&check; Clear</div>
-        <p>No queries cleared the 10ms display floor this session &mdash; sub-10ms queries are hidden by default to avoid noise. The per-action breakdown below lists every query, fast and framework ones included.</p>
+        <p>No queries cleared the 10ms display floor this session sub-10ms queries are hidden by default to avoid noise. The per-action breakdown below lists every query, fast and framework ones included.</p>
       </div>
   </section>
 
@@ -3564,18 +3564,18 @@ looped_validate            </span>
                   <span>Index advice</span>
                   <span class="ai-tag">AI &middot; qwen3-coder:30b</span>
                 </div>
-                <div class="fix-body"><p><strong>Recommendation</strong> — <code>(communication_type, reference_doctype, reference_name, communication_date)</code> on <code>tabCommunication</code></p>
+                <div class="fix-body"><p><strong>Recommendation</strong> <code>(communication_type, reference_doctype, reference_name, communication_date)</code> on <code>tabCommunication</code></p>
 
-<p><strong>Why</strong> — This composite index covers the most frequent filter pattern <code>(communication_type, reference_doctype, reference_name)</code> and the <code>ORDER BY communication_date</code> clause. It's optimal for the query's WHERE and ORDER BY usage, and the leftmost columns are highly selective.</p>
+<p><strong>Why</strong> This composite index covers the most frequent filter pattern <code>(communication_type, reference_doctype, reference_name)</code> and the <code>ORDER BY communication_date</code> clause. It's optimal for the query's WHERE and ORDER BY usage, and the leftmost columns are highly selective.</p>
 
-<p><strong>How to add</strong> — <code>frappe.db.add_index("Communication", ["communication_type", "reference_doctype", "reference_name", "communication_date"])</code></p>
+<p><strong>How to add</strong> <code>frappe.db.add_index("Communication", ["communication_type", "reference_doctype", "reference_name", "communication_date"])</code></p>
 
-<p><strong>Skip</strong> — 
-- <code>reference_owner</code> — already covered by the new index as a leftmost prefix.
-- <code>creation</code> — Frappe metadata column, not indexed.
-- <code>status_communication_type_index</code> — does not cover the required filter pattern.
-- <code>message_id_index</code> — not used in the queries.
-- <code>comm_ref_type_date_idx</code> — already covers <code>reference_doctype</code>, <code>reference_name</code>, <code>communication_date</code>, but not in the right order for <code>communication_type</code> to be first. The new index improves performance by placing <code>communication_type</code> first.</p>
+<p><strong>Skip</strong>
+- <code>reference_owner</code> already covered by the new index as a leftmost prefix.
+- <code>creation</code> Frappe metadata column, not indexed.
+- <code>status_communication_type_index</code> does not cover the required filter pattern.
+- <code>message_id_index</code> not used in the queries.
+- <code>comm_ref_type_date_idx</code> already covers <code>reference_doctype</code>, <code>reference_name</code>, <code>communication_date</code>, but not in the right order for <code>communication_type</code> to be first. The new index improves performance by placing <code>communication_type</code> first.</p>
 </div>
                 <div class="fix-foot">Machine-generated &middot; 19-05-2026 13:30:43 - verify against <code>SHOW INDEX</code> before applying.</div>
               </div>
@@ -3600,14 +3600,14 @@ looped_validate            </span>
                   <span>Index advice</span>
                   <span class="ai-tag">AI &middot; qwen3-coder:30b</span>
                 </div>
-                <div class="fix-body"><p><strong>Recommendation</strong> — nothing — the existing indexes already cover these read patterns.</p>
+                <div class="fix-body"><p><strong>Recommendation</strong> nothing the existing indexes already cover these read patterns.</p>
 
-<p><strong>Why</strong> — The query filters on <code>(link_doctype, link_name)</code> and orders by <code>communication_date</code>, which is already covered by the existing index <code>link_doctype_link_name_communication_date_parent_index</code>. This index's leftmost columns match the filter pattern and includes <code>communication_date</code> for ordering, making it fully suitable.</p>
+<p><strong>Why</strong> The query filters on <code>(link_doctype, link_name)</code> and orders by <code>communication_date</code>, which is already covered by the existing index <code>link_doctype_link_name_communication_date_parent_index</code>. This index's leftmost columns match the filter pattern and includes <code>communication_date</code> for ordering, making it fully suitable.</p>
 
-<p><strong>Skip</strong> — 
-- <code>link_doctype_link_name_index</code> — already covered by the more comprehensive index <code>link_doctype_link_name_communication_date_parent_index</code>.
-- <code>parent</code> — a Frappe metadata column, not indexed.
-- <code>communication_date</code> — part of the existing composite index, no need for a separate index.</p>
+<p><strong>Skip</strong>
+- <code>link_doctype_link_name_index</code> already covered by the more comprehensive index <code>link_doctype_link_name_communication_date_parent_index</code>.
+- <code>parent</code> a Frappe metadata column, not indexed.
+- <code>communication_date</code> part of the existing composite index, no need for a separate index.</p>
 </div>
                 <div class="fix-foot">Machine-generated &middot; 19-05-2026 13:30:46 - verify against <code>SHOW INDEX</code> before applying.</div>
               </div>
@@ -3631,18 +3631,18 @@ looped_validate            </span>
                   <span>Index advice</span>
                   <span class="ai-tag">AI &middot; qwen3-coder:30b</span>
                 </div>
-                <div class="fix-body"><p><strong>Recommendation</strong> — <code>(company, posting_date)</code> on <code>tabSales Invoice</code></p>
+                <div class="fix-body"><p><strong>Recommendation</strong> <code>(company, posting_date)</code> on <code>tabSales Invoice</code></p>
 
-<p><strong>Why</strong> — This composite index covers the most frequent filter pattern <code>(company, posting_date)</code> seen in the profiler, which appeared together in 1 of 20 reads. It will significantly speed up queries filtering on both columns, especially when <code>company</code> is selective and <code>posting_date</code> is used for range scans.</p>
+<p><strong>Why</strong> This composite index covers the most frequent filter pattern <code>(company, posting_date)</code> seen in the profiler, which appeared together in 1 of 20 reads. It will significantly speed up queries filtering on both columns, especially when <code>company</code> is selective and <code>posting_date</code> is used for range scans.</p>
 
-<p><strong>How to add</strong> — <code>frappe.db.add_index('Sales Invoice', ['company', 'posting_date'])</code></p>
+<p><strong>How to add</strong> <code>frappe.db.add_index('Sales Invoice', ['company', 'posting_date'])</code></p>
 
-<p><strong>Skip</strong> — 
-- <code>customer</code> — already indexed, not part of the profiler's top filter combo
-- <code>posting_date</code> — already indexed, but not in the most selective leftmost position for this pattern
-- <code>creation</code> — Frappe metadata column, not worth indexing
-- <code>docstatus</code> — Frappe metadata column, not worth indexing
-- <code>name</code> — already indexed as PRIMARY key, not part of the profiler's top filter combo</p>
+<p><strong>Skip</strong>
+- <code>customer</code> already indexed, not part of the profiler's top filter combo
+- <code>posting_date</code> already indexed, but not in the most selective leftmost position for this pattern
+- <code>creation</code> Frappe metadata column, not worth indexing
+- <code>docstatus</code> Frappe metadata column, not worth indexing
+- <code>name</code> already indexed as PRIMARY key, not part of the profiler's top filter combo</p>
 </div>
                 <div class="fix-foot">Machine-generated &middot; 19-05-2026 13:30:56 - verify against <code>SHOW INDEX</code> before applying.</div>
               </div>
@@ -3722,9 +3722,9 @@ looped_validate            </span>
       <li>The server-resource and frontend panels show CPU / memory / queue pressure and browser timings - only when captured.</li>
       <li>The full-recordings and queries-per-action sections hold the raw SQL, headers, form data and stack traces - for deep dives.</li>
       <li>Hover any <code>file.py:123</code> callsite to open it in VS&nbsp;Code. Anything starting with <code>tab</code> is a database table; the DocType is the part after <code>tab</code>.</li>
-      <li>Every duration carries a small grey scope tag: <strong>per hit</strong> (one occurrence — a single request, one query execution) or <strong>consolidated</strong> (sum across all hits in this session — total time in a table, full impact of a finding's pattern, etc.).</li>
-      <li>Call-tree and Hot-frame timings come from a wall-clock sampler at ≈1.0ms intervals. Functions whose execution is shorter than the interval can be under-sampled or invisible — for exact per-line timings, use the <strong>Line-Level Drilldown</strong>.</li>
-      <li><strong>Self-time</strong> is wall-clock self-time (the sampler measures elapsed time, not CPU). A function that blocks on I/O — <code>requests.get</code>, sync DB calls outside the recorder, <code>time.sleep</code> — counts that wait as self-time. Check the call tree for hidden I/O before optimising compute.</li>
+      <li>Every duration carries a small grey scope tag: <strong>per hit</strong> (one occurrence a single request, one query execution) or <strong>consolidated</strong> (sum across all hits in this session total time in a table, full impact of a finding's pattern, etc.).</li>
+      <li>Call-tree and Hot-frame timings come from a wall-clock sampler at ≈1.0ms intervals. Functions whose execution is shorter than the interval can be under-sampled or invisible for exact per-line timings, use the <strong>Line-Level Drilldown</strong>.</li>
+      <li><strong>Self-time</strong> is wall-clock self-time (the sampler measures elapsed time, not CPU). A function that blocks on I/O <code>requests.get</code>, sync DB calls outside the recorder, <code>time.sleep</code> counts that wait as self-time. Check the call tree for hidden I/O before optimising compute.</li>
     </ul>
   </section>
 

@@ -25,7 +25,7 @@ _USER_CALLER_STACK = [
 	{"filename": "apps/myapp/controllers/bulk.py", "lineno": 42, "function": "do_import"},
 ]
 
-# Framework-only stack — walk_callsite returns None for this, so
+# Framework-only stack walk_callsite returns None for this, so
 # findings built from it get filtered out.
 _FRAMEWORK_CALLER_STACK = [
 	{"filename": "frappe/app.py", "lineno": 120, "function": "application"},
@@ -109,7 +109,7 @@ def test_high_severity_at_5x_threshold():
 
 
 def test_cache_get_threshold_separate_from_doc_threshold():
-	# 8 cache_get calls — well under cache threshold of 50
+	# 8 cache_get calls well under cache threshold of 50
 	recording = {
 		"uuid": "rec-1",
 		"calls": [],
@@ -127,7 +127,7 @@ def test_cache_get_threshold_separate_from_doc_threshold():
 def test_cache_threshold_suppresses_low_count_noise():
 	"""v0.5.2 round 4: cache threshold bumped from 10 → 50. A loop
 	running a cache lookup 30× from the same callsite was previously
-	a Medium finding at 0ms impact — indistinguishable from framework
+	a Medium finding at 0ms impact indistinguishable from framework
 	background noise. Now suppressed entirely.
 
 	Production report trigger: 6 'Redundant cache lookup: <hash> (19/21/25/26/31×)'
@@ -232,7 +232,7 @@ def test_framework_callsite_filters_finding():
 	ctx = AnalyzeContext(session_uuid="t", docname="t")
 	result = redundant_calls.analyze([recording], ctx)
 
-	# No finding — the callsite was framework-only.
+	# No finding the callsite was framework-only.
 	rc = [f for f in result.findings if f["finding_type"] == "Redundant Call"]
 	assert rc == [], (
 		f"Framework-only callsite must not produce a Redundant Call "
@@ -276,7 +276,7 @@ def test_user_callsite_finding_is_kept():
 def test_erpnext_callsite_filters_finding():
 	"""v0.5.2: official Frappe-maintained apps (erpnext, hrms,
 	payments, lms, helpdesk, insights, crm, builder, wiki, drive) are
-	framework for the purposes of the Redundant Call filter — the
+	framework for the purposes of the Redundant Call filter the
 	application developer can't practically patch upstream. A raw
 	production session on Sales Invoice Save+Submit surfaced 10
 	'Redundant cache lookup' findings all landing in
@@ -313,7 +313,7 @@ def test_erpnext_callsite_filters_finding():
 	rc = [f for f in result.findings if f["finding_type"] == "Redundant Call"]
 	assert rc == [], (
 		"ERPNext-internal cache loop must be suppressed from the "
-		"actionable Redundant Call list — users can't patch ERPNext. "
+		"actionable Redundant Call list users can't patch ERPNext. "
 		f"Got: {[f['title'] for f in rc]}"
 	)
 	# Suppression warning surfaces the reason.
@@ -327,7 +327,7 @@ def test_third_party_lib_callsite_filters_finding():
 	"""v0.5.2 round 2: werkzeug / site-packages / gunicorn / rq are
 	infrastructure users can't modify. Production report had 3
 	Redundant Cache Lookup findings in
-	env/lib/python3.14/site-packages/werkzeug/serving.py — the user
+	env/lib/python3.14/site-packages/werkzeug/serving.py the user
 	can't patch werkzeug. Must filter."""
 	werkzeug_stack = [
 		{"filename": "frappe/app.py", "lineno": 120, "function": "application"},
@@ -362,14 +362,14 @@ def test_third_party_lib_callsite_filters_finding():
 
 def test_cross_request_spread_does_not_count_as_redundant():
 	"""v0.5.2 round 2: a cache lookup called ONCE per request
-	across 25 requests isn't a loop — it's framework code that
+	across 25 requests isn't a loop it's framework code that
 	naturally fires once per request. Production report had
 	findings like 'Redundant cache lookup (25 times)' where each
 	of the 25 was a separate request, 1 call each. Filter these
 	with a per-action threshold check."""
 	# 60 recordings, each with exactly ONE cache_get for the same key.
 	# Total = 60 (above threshold of 50, bumped in v0.5.2 round 4),
-	# but per-action max = 1 — not a loop.
+	# but per-action max = 1 not a loop.
 	recordings = []
 	for i in range(60):
 		recordings.append({

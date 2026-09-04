@@ -66,7 +66,7 @@ class TestHeadlinePace:
 		assert "action" not in es["headline"]
 
 	def test_headline_below_threshold_keeps_ms(self):
-		"""Below the threshold the duration must stay as plain ms — no
+		"""Below the threshold the duration must stay as plain ms no
 		highlight span. Same behaviour as fmt_ms() everywhere else."""
 		es = _build_executive_summary(
 			findings=[], session_doc=_doc(total_ms=800, queries=10, actions=2),
@@ -235,16 +235,16 @@ class TestEndToEndRender:
 		# (used by the Action plan section), so the data assertions
 		# below hold via the TL;DR composition + the KPI strip.
 		assert 'class="tldr"' in html, "TL;DR hero must render"
-		# Duration crosses the 1000ms threshold — rendered as seconds
+		# Duration crosses the 1000ms threshold rendered as seconds
 		# with .time-high (timing rule applies everywhere).
 		assert '<span class="time-high">6.00s</span>' in html
 		assert "operation" in html
-		# Top finding title surfaced — TL;DR fallback branch wraps it.
+		# Top finding title surfaced TL;DR fallback branch wraps it.
 		assert "Same query ran 50× at myapp/foo.py:10" in html
 		# Infra note no longer rendered as a separate exec-summary line
 		# (moved into the Server resource section in a later phase).
-		# Sanity: it's still computed (data layer) — just not shown here.
-		# v0.7.x: KPI strip (replaces stat cards) — plainly-labelled cells,
+		# Sanity: it's still computed (data layer) just not shown here.
+		# v0.7.x: KPI strip (replaces stat cards) plainly-labelled cells,
 		# and the "Issues found" cell's big number is the TOTAL finding
 		# count (not the High count), with a severity breakdown that sums
 		# to it.
@@ -289,7 +289,7 @@ class TestEndToEndRender:
 		html = renderer.render(doc, recordings=[])
 
 		# v0.7.x redesign Phase B: the exec-summary card was replaced
-		# by the TL;DR hero. The hero ALWAYS renders — clean sessions
+		# by the TL;DR hero. The hero ALWAYS renders clean sessions
 		# get a "Nothing to fix" branch instead of being hidden.
 		assert 'class="exec-summary' not in html, (
 			"Old exec-summary card markup must not be present"

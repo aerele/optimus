@@ -6,18 +6,18 @@ resolve free-form dotted paths typed by the customer.
 
 The picker has two responsibilities:
 
-1. **Curated list** — walk the pyinstrument call trees attached to phase-1
+1. **Curated list**: walk the pyinstrument call trees attached to phase-1
    actions, aggregate Python frames by dotted path, and return the top-N
    candidates with cumulative_ms + hit_count + app + framework-membership
    metadata. The form UI uses this for its multi-select.
 
-2. **Free-form resolution** — given a dotted path the customer typed
+2. **Free-form resolution**: given a dotted path the customer typed
    (``my_app.tasks.heavy_job``), import the module, walk attribute access,
    and validate eligibility for ``line_profiler``. C-extensions / builtins
    lack ``__code__`` and cannot be line-profiled; lambdas and Server
    Scripts (filename starts with ``<``) are similarly out-of-scope.
 
-This module is **pure** — no Frappe DB / Redis access. The API endpoint
+This module is **pure**: no Frappe DB / Redis access. The API endpoint
 (``api.py``) loads the parsed call trees from the Optimus Session and
 passes them to ``_build_candidates_from_trees``.
 """
@@ -29,11 +29,11 @@ from optimus.analyzers.call_tree import _is_pure_helper_frame, _top_level_app
 
 CANDIDATE_CAP = 30
 # v0.7.x (P2): non-framework frames at/above this cumulative-ms are "recommended"
-# — the picker pre-ticks them so the real hot paths are one click to line-profile.
+# the picker pre-ticks them so the real hot paths are one click to line-profile.
 # Matches the auto_expand_min_ms default so "worth expanding" == "worth ticking".
 RECOMMEND_MIN_MS = 50.0
 # v0.13: surface hot frames from the top-N hottest action trees, not just the
-# single hottest — a flow often has several slow actions worth line-profiling
+# single hottest a flow often has several slow actions worth line-profiling
 # (e.g. multiple slow background jobs). A per-tree budget keeps one giant tree
 # (a long bg job) from filling the whole list and starving the others.
 _MAX_TREES = 8
@@ -61,7 +61,7 @@ def _is_synthetic_frame(function: str) -> bool:
 def filter_out_ignored_apps(candidates, ignored_apps):
 	"""Drop candidates whose owning ``app`` is on the Ignored Apps list.
 
-	Returns ``(kept, dropped_count)``. Pure — the caller resolves the ignored
+	Returns ``(kept, dropped_count)``. Pure the caller resolves the ignored
 	set (``settings.get_ignored_apps``) and passes it in, so the manual picker
 	(``api.get_phase2_candidates``) and auto-arm (``analyze._auto_arm_phase2``)
 	share ONE matching rule and can't silently drift.
@@ -87,7 +87,7 @@ def _derive_module_path(filename: str) -> str:
 	stdlib paths, etc.).
 
 	The filename usually comes from pyinstrument's ``file_path_short``,
-	which is ``os.path.relpath(file, <a sys.path entry>)`` — on some
+	which is ``os.path.relpath(file, <a sys.path entry>)``: on some
 	benches that yields leading ``../`` segments. Those are relative-path
 	artifacts, NOT module components: left in, ``".".join`` turns ``..``
 	into a leading dot (``"...pkg"``), and the curated pick then tries to
@@ -103,7 +103,7 @@ def _derive_module_path(filename: str) -> str:
 	]
 	if not parts:
 		return ""
-	# Strip leading "apps" (or "/apps") — Frappe convention. Subsequent
+	# Strip leading "apps" (or "/apps") Frappe convention. Subsequent
 	# duplicate (`apps/<app>/<app>/`) is the package-name double we want
 	# to collapse.
 	if "apps" in parts:
@@ -171,7 +171,7 @@ def _walk_tree(node: dict, hits: dict) -> None:
 	if (
 		kind == "python"
 		and not _is_synthetic_frame(function)
-		# Drop framework plumbing/wrapper frames — every request goes
+		# Drop framework plumbing/wrapper frames every request goes
 		# through frappe.app.application, frappe.handler.handle,
 		# frappe.utils.typing_validations.wrapper, frappe.recorder.record_sql,
 		# frappe.model.document.save / fn / runner / composer, etc. These
@@ -214,7 +214,7 @@ def _build_tree_indented_candidates(trees: list[dict]) -> list[dict]:
 	DFS pre-order means a parent always lands in the list before its children;
 	children at each level are explored hottest-first.
 
-	Was: only the single hottest tree — which hid the hot frames of every other
+	Was: only the single hottest tree which hid the hot frames of every other
 	slow action (a flow with several slow bg jobs only surfaced one). Now the
 	top ``_MAX_TREES`` trees above ``_MIN_TREE_MS`` are each walked with a
 	per-tree budget (so one giant tree doesn't fill the list), capped overall at
@@ -242,12 +242,12 @@ def _build_tree_indented_candidates(trees: list[dict]) -> list[dict]:
 		kind = node.get("kind", "python")
 		# v0.13: bucket the frame by its owning app the SAME way the donut /
 		# leaderboard do (``_top_level_app``). Frames that bucket to
-		# ``[other]`` — Python stdlib (``importlib/__init__.py``), third-party
-		# site-packages, synthetic ``<...>`` frames — are NOT the customer's
+		# ``[other]``: Python stdlib (``importlib/__init__.py``), third-party
+		# site-packages, synthetic ``<...>`` frames are NOT the customer's
 		# code (nor a Frappe framework app) and can't be usefully
 		# line-profiled, so they must never appear in the picker. (The real
 		# cost of a hot ``importlib.import_module`` is module loading, fixed by
-		# lazy-importing in the user's own frame — which DOES surface.)
+		# lazy-importing in the user's own frame which DOES surface.)
 		bucket = _top_level_app(function, filename)
 		is_real = (
 			kind == "python"
@@ -262,7 +262,7 @@ def _build_tree_indented_candidates(trees: list[dict]) -> list[dict]:
 			dotted = _build_dotted_path(filename, function)
 			if dotted and dotted in seen:
 				# Same function already offered (a hot function often roots more
-				# than one action tree) — don't list it twice. Walk its children
+				# than one action tree) don't list it twice. Walk its children
 				# at THIS depth so unique descendants still surface, then stop.
 				for child in sorted(
 					node.get("children") or [],
@@ -287,7 +287,7 @@ def _build_tree_indented_candidates(trees: list[dict]) -> list[dict]:
 				"hit_count": int(node.get("hit_count") or 1),
 				"is_framework": is_framework,
 				"depth": my_depth,
-				# v0.7.x (P2): pre-tick the real hot paths — user code above the
+				# v0.7.x (P2): pre-tick the real hot paths user code above the
 				# time threshold (the frames that become self-time findings).
 				"recommended": (not is_framework) and cml >= RECOMMEND_MIN_MS,
 			})
@@ -334,7 +334,7 @@ def _build_candidates_from_trees(trees: list[dict], findings: list[dict]) -> lis
 
 	Each output candidate carries:
 	  - ``dotted_path`` derived from filename + function name (best effort
-	    — class methods may need a freeform correction at pick time)
+	    class methods may need a freeform correction at pick time)
 	  - ``qualname`` the bare function name as captured (e.g. ``validate``)
 	  - ``file`` / ``lineno`` the captured source location
 	  - ``app`` extracted from filename's ``apps/<app>/`` prefix
@@ -436,8 +436,8 @@ def expand_hot_chain(
 	  • there is no Python child remaining,
 	  • or the chain has reached ``max_depth`` (when > 0).
 
-	v0.13.x: ``max_depth = 0`` means unlimited — walks to the leaf in
-	the hot-chain direction. ``min_ms = 0`` means no minimum — every
+	v0.13.x: ``max_depth = 0`` means unlimited walks to the leaf in
+	the hot-chain direction. ``min_ms = 0`` means no minimum every
 	measurable child is eligible. The Strict Sensitivity Profile uses
 	both as 0 so the operator gets the deepest possible auto-expansion.
 
@@ -509,7 +509,7 @@ def deepest_instrumented_descendant(
 	instrumented functions: when auto_expand instrumented A and C but
 	NOT the intermediate B (B was below ``min_ms`` or out of
 	``max_depth``), regex on A's hot line content sees ``B(...)`` and
-	finds no match in the instrumented set — but the phase-1 call tree
+	finds no match in the instrumented set but the phase-1 call tree
 	records A → B → C, so this helper walks down from A and reports C
 	as the deepest instrumented descendant.
 	"""
@@ -580,8 +580,8 @@ def resolve_freeform(dotted_path: str) -> dict:
 	The picker derives the *collapsed* single-prefix form
 	(``apps/<app>/<app>/x.py`` → ``<app>.x``), which is correct for
 	editable-installed apps (``import erpnext`` is the inner package). But
-	some apps are importable only with the doubled prefix — ``<app>.<app>.x``
-	— e.g. where ``import <app>`` yields the OUTER ``apps/<app>/`` dir. Try
+	some apps are importable only with the doubled prefix ``<app>.<app>.x``
+	e.g. where ``import <app>`` yields the OUTER ``apps/<app>/`` dir. Try
 	the path as given, then retry once with the app name doubled, and only
 	then surface the original (single-prefix) error.
 	"""
@@ -613,7 +613,7 @@ def _resolve_freeform_exact(dotted_path: str) -> dict:
 	parts = dotted_path.split(".")
 	if len(parts) < 2:
 		raise PickerError(
-			f"'{dotted_path}' looks like a top-level module — need at least "
+			f"'{dotted_path}' looks like a top-level module need at least "
 			"module.function (e.g. 'my_app.tasks.heavy_job')"
 		)
 
@@ -630,10 +630,10 @@ def _resolve_freeform_exact(dotted_path: str) -> dict:
 		except (ImportError, TypeError, ValueError) as exc:
 			# A non-importable prefix just means "try a shorter one". Besides
 			# ImportError (module not found), importlib raises TypeError for a
-			# relative name — a stored/curated dotted_path with a leading
+			# relative name a stored/curated dotted_path with a leading
 			# "..." makes ".".join(parts[:i]) start with a dot ("...pkg"),
 			# which importlib treats as a relative import requiring a package
-			# — and ValueError for an empty name. Treat all three as "this
+			# and ValueError for an empty name. Treat all three as "this
 			# prefix doesn't import" so a malformed path degrades to the clean
 			# PickerError below (which the caller handles) rather than
 			# escaping as a 500.
@@ -648,7 +648,7 @@ def _resolve_freeform_exact(dotted_path: str) -> dict:
 
 	if module_parts == len(parts):
 		raise PickerError(
-			f"'{dotted_path}' resolved to a module, not a function — "
+			f"'{dotted_path}' resolved to a module, not a function "
 			"include the function name (e.g. 'json.dumps' rather than 'json')"
 		)
 
@@ -670,7 +670,7 @@ def _resolve_freeform_exact(dotted_path: str) -> dict:
 		except AttributeError:
 			# Try class-method search ONLY for the very next attribute on
 			# a fresh module, and only when there's exactly one matching
-			# class — anything else is too ambiguous to pick automatically
+			# class anything else is too ambiguous to pick automatically
 			# and the user should use the freeform textbox to disambiguate.
 			if idx == 0 and len(remaining) == 1:
 				import inspect as _inspect
