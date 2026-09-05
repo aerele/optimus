@@ -251,8 +251,8 @@ def _classify_column(
 	# Column doesn't exist on the table.
 	if types and column not in types:
 		return "unindexable", (
-			f"column `{column}` does not exist on table `{table}` "
-			f" the optimizer's suggestion is likely a parse error; "
+			f"column `{column}` does not exist on table `{table}`. "
+			f"The optimizer's suggestion is likely a parse error; "
 			f"verify the query and try again"
 		)
 

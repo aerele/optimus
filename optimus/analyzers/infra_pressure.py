@@ -191,7 +191,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                 f"The server's CPU was above {cpu_high}% during "
                 f"{len(cpu_breaches)} of {total_actions} steps in your flow "
                 f"(peak {max(cpu_values):.0f}%). This usually means the box is "
-                "overloaded either your own flow is CPU-bound, or another "
+                "overloaded. Either your own flow is CPU-bound, or another "
                 "process on the server is competing for CPU while you profile."
             ),
             "technical_detail_json": json.dumps({
@@ -204,7 +204,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                     "If your own code is hot (check the Call Tree / N+1 "
                     "findings), optimize there first. If the call tree looks "
                     "idle but CPU is still high, something else on the server "
-                    "is using CPU look at other workers, cron jobs, or a "
+                    "is using CPU. Look at other workers, cron jobs, or a "
                     "noisy neighbor."
                 ),
             }, default=str),
@@ -255,7 +255,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                 "fix_hint": (
                     "Investigate cache growth (frappe.cache, doc caches) and "
                     "long-lived object references. If swap is active, the box "
-                    "is undersized add RAM or move the profiled workload."
+                    "is undersized. Add RAM or move the profiled workload."
                 ),
             }, default=str),
             "estimated_impact_ms": 0,

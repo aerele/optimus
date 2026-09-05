@@ -1039,9 +1039,9 @@ def _build_index_messages(payload: dict) -> tuple[str, list[dict]]:
 	cands = payload.get("candidates") or []
 	if cands:
 		parts.append(
-			"Columns this session filtered / joined / ordered on (column clauses times):\n"
+			"Columns this session filtered / joined / ordered on (shown as column: clauses (count)):\n"
 			+ "\n".join(
-				f"  - {c.get('column')} {', '.join(c.get('sources') or [])} {int(c.get('hits') or 0)}×"
+				f"  - {c.get('column')}: {', '.join(c.get('sources') or [])} ({int(c.get('hits') or 0)}×)"
 				for c in cands
 			)
 		)
@@ -1122,7 +1122,7 @@ def _build_messages(finding: dict) -> tuple[str, list[dict]]:
 		share = ""
 		try:
 			if wall_ms:
-				share = f" {round(float(cum_ms) / float(wall_ms) * 100)}% of this action's {float(wall_ms):.0f}ms wall time"
+				share = f", {round(float(cum_ms) / float(wall_ms) * 100)}% of this action's {float(wall_ms):.0f}ms wall time"
 		except (TypeError, ValueError, ZeroDivisionError):
 			share = ""
 		parts.append(
@@ -1233,25 +1233,25 @@ def _http_post(url: str, headers: dict, body: dict, *, provider: str, where: str
 	status = resp.status_code
 	if status in (401, 403):
 		_log_http_error(provider, where, status)
-		raise AiFixError("The AI provider rejected the API key check it in Optimus Settings.")
+		raise AiFixError("The AI provider rejected the API key. Check it in Optimus Settings.")
 	if status == 404:
-		# Almost always a wrong Base URL the path segment is missing.
+		# Almost always a wrong Base URL: the path segment is missing.
 		# OpenAI-compatible servers (Ollama, LM Studio, vLLM, OpenRouter,
 		# Together, Groq) expose chat completions under `/v1`, so the Base
 		# URL has to include it.
 		_log_http_error(provider, where, status, f"url={url}")
 		hint = (
-			" OpenAI-compatible endpoints serve this under '/v1' set the Base URL to e.g. "
+			" OpenAI-compatible endpoints serve this under '/v1'. Set the Base URL to e.g. "
 			"http://localhost:11434/v1 (Ollama), http://localhost:1234/v1 (LM Studio)."
 			if provider == "openai" else ""
 		)
 		raise AiFixError(
-			f"The AI provider returned 404 (Not Found) for {url} the Base URL in "
+			f"The AI provider returned 404 (Not Found) for {url}. The Base URL in "
 			f"Optimus Settings is probably missing a path segment.{hint}"
 		)
 	if status == 429:
 		_log_http_error(provider, where, status)
-		raise AiFixError("The AI provider is rate-limiting requests try again shortly.")
+		raise AiFixError("The AI provider is rate-limiting requests. Try again shortly.")
 	if status >= 400:
 		_log_http_error(provider, where, status)
 		# Surface the response body's error text if the provider gave one

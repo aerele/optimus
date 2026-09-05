@@ -194,8 +194,8 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                 "fix_hint": (
                     "Look at TTFB: if it's large, the backend is slow "
                     "(see Slow Query / N+1 findings). If TTFB is small, "
-                    "the browser spent time downloading or rendering "
-                    "check response size and JavaScript execution."
+                    "the browser spent time downloading or rendering. "
+                    "Check response size and JavaScript execution."
                 ),
             }, default=str),
             "estimated_impact_ms": lcp,
@@ -225,7 +225,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                     "response_size_bytes": m["response_size_bytes"],
                     "url": m["url"],
                     "fix_hint": (
-                        "Large response sizes cause this check the "
+                        "Large response sizes cause this. Check the "
                         "Heavy Response finding. If response is small, "
                         "suspect network path: CDN, TLS handshake, proxy."
                     ),
