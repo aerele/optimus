@@ -583,6 +583,11 @@ class TestFrontendShape:
 		assert row["lcp_class"] == "vital-poor"
 		assert row["cls_class"] == "vital-meh"
 		assert row["ttfb_class"] == "vital-good"
+		# 1 second == 1000ms: a sub-second vital stays in ms, LCP at 5000ms
+		# rolls over to seconds so the reader isn't parsing a four-digit count.
+		assert row["fcp_display"] == "420 ms"
+		assert row["lcp_display"] == "5.00 s"
+		assert row["ttfb_display"] == "180 ms"
 
 	def test_partial_vitals_gets_none_class(self):
 		# Regression of the Phase I.5 production crash data shape.

@@ -70,6 +70,10 @@ def test_slow_frontend_render_fires_on_lcp():
     slow = [f for f in result.findings if f["finding_type"] == "Slow Frontend Render"]
     assert len(slow) == 1
     assert slow[0]["severity"] == "Medium"  # 2800ms is Medium (2500 < x < 4000)
+    # LCP is 2800ms → the title and description read in seconds (1s == 1000ms),
+    # so a reader sees "2.80s" rather than "2800ms".
+    assert slow[0]["title"] == "LCP 2.80s on /app/sales-invoice/SI-001"
+    assert "took 2.80s for its largest" in slow[0]["customer_description"]
 
 
 def test_network_overhead_fires_on_disproportion():

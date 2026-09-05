@@ -73,14 +73,29 @@ def _is_user_code(function_or_path, ignored_apps: tuple[str, ...] = ()) -> bool:
 	return True
 
 
-def _ms_display(ms) -> str:
+def _ms_display(ms, decimals: int = 0) -> str:
 	"""Format milliseconds for display per the contract's mixed-unit style:
-	below 1000ms → integer ms; at-or-above → seconds with 2 decimals."""
+	below 1000ms → millisecond value (``decimals`` places); at-or-above →
+	seconds with 2 decimals. One second is 1000ms, so a duration that reaches
+	a full second reads as seconds rather than a four-digit ms count. The
+	``decimals`` arg controls the millisecond branch only (so sub-ms line
+	timings keep their resolution); the seconds branch is always 2 decimals."""
 	if ms is None:
 		return ""
 	if ms < 1000:
-		return f"{ms:.0f} ms"
+		return f"{ms:.{decimals}f} ms"
 	return f"{ms / 1000:.2f} s"
+
+
+def _ms_value_unit(ms) -> tuple[str, str]:
+	"""Same 1-second rollover as :func:`_ms_display`, but returns the number
+	and its unit separately for KPI cards that render them in adjacent spans:
+	``2450 -> ("2.45", "s")``, ``820 -> ("820", "ms")``."""
+	if ms is None:
+		return "", ""
+	if ms < 1000:
+		return f"{ms:.0f}", "ms"
+	return f"{ms / 1000:.2f}", "s"
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +140,7 @@ def _build_kpis(session_doc, ctx) -> list[dict]:
 	severity breakdown comes from ``ctx.severity_counts`` (computed in
 	``renderer.render``) and the danger thresholds from ``render_config``.
 	"""
-	fmt_ms = ctx.get("fmt_ms") or (lambda v, **kw: f"{v:.0f}ms")
+	fmt_ms = ctx.get("fmt_ms") or (lambda v, **kw: _ms_display(v, **kw))
 	total_ms = getattr(session_doc, "total_duration_ms", 0) or 0
 	total_query_ms = getattr(session_doc, "total_query_time_ms", 0) or 0
 	total_queries = getattr(session_doc, "total_queries", 0) or 0
@@ -371,9 +386,9 @@ def _build_line_drilldown_runs(session_doc) -> list[dict]:
 				lines.append({
 					"lineno": line.get("lineno", 0),
 					"hits": line.get("hits", 0),
-					"total_display": f"{line.get('total_ms', 0):.2f} ms",
+					"total_display": _ms_display(line.get("total_ms", 0), decimals=2),
 					"per_hit_display": (
-						f"{per_hit_us / 1000:.4f} ms" if per_hit_us else "0.00 ms"
+						_ms_display(per_hit_us / 1000, decimals=4) if per_hit_us else "0.00 ms"
 					),
 					"source": line.get("content", ""),
 					"is_hot": i == hot_idx,
@@ -388,7 +403,7 @@ def _build_line_drilldown_runs(session_doc) -> list[dict]:
 		result.append({
 			"number": number,
 			"status": status,
-			"total_ms_display": f"{total_ms:.2f} ms",
+			"total_ms_display": _ms_display(total_ms, decimals=2),
 			"timestamp": str(getattr(run, "started_at", "") or ""),
 			"picks": [p.get("dotted_path", "") for p in picks_list],
 			"functions": functions,
@@ -404,7 +419,7 @@ def _build_action_plan(action_plan, fmt_ms=None) -> list[dict]:
 	render a one-line ``file:line`` anchor under each step; the contract
 	folds this into ``description_html`` but our markup keeps it separate.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
 	result = []
 	for step in action_plan or []:
 		gain_ms = step.get("gain_ms", 0) or 0
@@ -430,7 +445,7 @@ def _build_action_plan(action_plan, fmt_ms=None) -> list[dict]:
 
 def _build_waterfall(waterfall_rows, fmt_ms=None) -> list[dict]:
 	"""Contract ``waterfall`` = {name, width_pct, duration_display, kind, is_hot_text}."""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
 	result = []
 	for row in waterfall_rows or []:
 		is_hot = bool(row.get("hot", False))
@@ -456,7 +471,7 @@ def _build_actions(actions, findings, fmt_ms=None) -> list[dict]:
 	more) keeps working unchanged. Contract fields are added on top they
 	never collide with the legacy keys.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
 	findings_by_ref: dict[str, list] = {}
 	for f in findings or []:
 		ref = str(f.get("action_ref") or "")
@@ -514,7 +529,7 @@ def _build_background_jobs(jobs, fmt_ms=None) -> list[dict]:
 	``entry_callsite``, ``related_findings``, ``top_queries``, etc.) so the
 	existing ``bg_job_row`` macro reads from the same fields it used to.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
 	jobs = jobs or []
 	max_ms = max((j.get("duration_ms", 0) for j in jobs), default=1) or 1
 	result = []
@@ -561,7 +576,7 @@ def _build_doc_events(doc_event_breakdown, fmt_ms=None) -> list[dict]:
 	without going back to ``doc_event_breakdown``. ``summary`` stays
 	contract-conformant for tooling that reads it.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
 	result = []
 	for entry in (doc_event_breakdown or {}).get("doctypes", []) or []:
 		methods_out = []
@@ -708,15 +723,15 @@ def _build_frontend(ctx) -> dict | None:
 		dcl = v.get("dom_content_loaded_ms")
 		web_vitals.append({
 			"url": page,
-			"fcp_display": f"{fcp:.0f} ms" if fcp else "",
+			"fcp_display": _ms_display(fcp) if fcp else "",
 			"fcp_class": _web_vital_class(fcp, 1800, 3000),
-			"lcp_display": f"{lcp:.0f} ms" if lcp else "",
+			"lcp_display": _ms_display(lcp) if lcp else "",
 			"lcp_class": _web_vital_class(lcp, 2500, 4000),
 			"cls_display": f"{cls:.3f}" if cls is not None else "",
 			"cls_class": _web_vital_class(cls, 0.1, 0.25) if cls is not None else "vital-none",
-			"ttfb_display": f"{ttfb:.0f} ms" if ttfb else "",
+			"ttfb_display": _ms_display(ttfb) if ttfb else "",
 			"ttfb_class": _web_vital_class(ttfb, 800, 1800),
-			"dcl_display": f"{dcl:.0f} ms" if dcl else "",
+			"dcl_display": _ms_display(dcl) if dcl else "",
 			"dcl_class": _web_vital_class(dcl, 1500, 3000),
 		})
 
@@ -732,7 +747,7 @@ def _build_frontend(ctx) -> dict | None:
 			"meta": x.get("url", "") or "",
 			"backend_display": _ms_display(backend_ms),
 			"browser_display": _ms_display(xhr_ms),
-			"network_display": f"{network_ms:.0f} ms",
+			"network_display": _ms_display(network_ms),
 			"status": x.get("status", 0) or 0,
 			"size_display": (
 				f"{size_bytes / 1024:.1f} KB" if size_bytes >= 1024 else f"{size_bytes} B"
@@ -750,8 +765,11 @@ def _build_frontend(ctx) -> dict | None:
 		net_overhead = summary.get("network_overhead_ms", 0) or 0
 		slowest = summary.get("slowest_xhr") or {}
 		slowest_sub = (
-			f"slowest {slowest.get('duration_ms', 0) or 0:.0f} ms" if slowest else ""
+			f"slowest {_ms_display(slowest.get('duration_ms', 0) or 0)}" if slowest else ""
 		)
+		xhr_value, xhr_unit = _ms_value_unit(total_xhr_ms)
+		backend_value, backend_unit = _ms_value_unit(total_backend_ms)
+		net_value, net_unit = _ms_value_unit(net_overhead)
 		kpis = [
 			{
 				"label": "XHRs",
@@ -763,24 +781,24 @@ def _build_frontend(ctx) -> dict | None:
 			},
 			{
 				"label": "XHR total",
-				"value": f"{total_xhr_ms:.0f}",
-				"unit": "ms",
+				"value": xhr_value,
+				"unit": xhr_unit,
 				"sub_html": "",
 				"value_kind": "normal",
 				"sub_is_warn": False,
 			},
 			{
 				"label": "Backend total",
-				"value": f"{total_backend_ms:.0f}",
-				"unit": "ms",
+				"value": backend_value,
+				"unit": backend_unit,
 				"sub_html": "",
 				"value_kind": "normal",
 				"sub_is_warn": False,
 			},
 			{
 				"label": "Network overhead",
-				"value": f"{net_overhead:.0f}",
-				"unit": "ms",
+				"value": net_value,
+				"unit": net_unit,
 				"sub_html": slowest_sub,
 				"value_kind": "warn" if net_overhead > 500 else "normal",
 				"sub_is_warn": False,
@@ -807,7 +825,7 @@ def _build_hot_frames(hot_frames_rows, ignored_apps, fmt_ms=None) -> list[dict]:
 	J.2.5: spreads the original row dict so the existing ``hot_frame_row``
 	macro keeps reading ``display_name`` / ``total_ms`` / ``is_hot``.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
 	ignored = tuple(ignored_apps or ())
 	result = []
 	for row in hot_frames_rows or []:
@@ -835,7 +853,7 @@ def _build_slow_queries(top_queries, fmt_ms=None) -> list[dict]:
 	reading ``duration_ms`` / ``callsite`` / ``normalized_query``. Empty
 	list → contract template renders the empty-state card.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
 	result = []
 	for q in top_queries or []:
 		# v0.7.x M5 rename: accept the new ``query_duration_ms`` and the
@@ -854,7 +872,7 @@ def _build_slow_queries(top_queries, fmt_ms=None) -> list[dict]:
 			"sql_excerpt": q.get("normalized_query") or q.get("sql", "") or "",
 			"total_time_display": fmt(total_ms),
 			"call_count": count,
-			"avg_display": f"{avg:.2f} ms",
+			"avg_display": fmt(avg, decimals=2),
 			"callsite": q.get("callsite") or "",
 		})
 		result.append(entry)
@@ -874,7 +892,7 @@ def _build_db(table_breakdown, fmt_ms=None) -> dict | None:
 	``ai_index``, ``recommended_index``) keeps working without going
 	back to ``table_breakdown``.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
 	if not table_breakdown:
 		return None
 

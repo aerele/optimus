@@ -137,3 +137,48 @@ def test_floor_keeps_queries_at_or_above_threshold(empty_context):
 	top = result.aggregate["top_queries"]
 	assert len(top) == 1
 	assert top[0]["query_duration_ms"] == 10.0
+
+
+def test_slow_query_title_rolls_over_to_seconds(empty_context):
+	"""A query at or past 1000ms reads as seconds in its title and
+	description (1234ms → "1.23s"), so the report shows "Slow query: 1.23s"
+	rather than a hard-to-skim four-digit millisecond count."""
+	recording = {
+		"uuid": "r1",
+		"calls": [
+			{
+				"query": "SELECT * FROM `tabSales Invoice` WHERE customer = 'X'",
+				"normalized_query": "SELECT * FROM `tabSales Invoice` WHERE customer = ?",
+				"duration": 1234.0,
+				"stack": [{"filename": "acme_app/acme_app/api.py", "lineno": 12}],
+			},
+		],
+	}
+	slow = [
+		f for f in top_queries.analyze([recording], empty_context).findings
+		if f["finding_type"] == "Slow Query"
+	]
+	assert len(slow) == 1
+	assert slow[0]["title"] == "Slow query: 1.23s"
+	assert "took 1.23s to run" in slow[0]["customer_description"]
+
+
+def test_slow_query_title_stays_ms_below_one_second(empty_context):
+	"""A sub-second query keeps millisecond units (no space, integer ms)."""
+	recording = {
+		"uuid": "r1",
+		"calls": [
+			{
+				"query": "SELECT * FROM `tabItem` WHERE disabled = 0",
+				"normalized_query": "SELECT * FROM `tabItem` WHERE disabled = ?",
+				"duration": 850.0,
+				"stack": [{"filename": "acme_app/acme_app/api.py", "lineno": 20}],
+			},
+		],
+	}
+	slow = [
+		f for f in top_queries.analyze([recording], empty_context).findings
+		if f["finding_type"] == "Slow Query"
+	]
+	assert len(slow) == 1
+	assert slow[0]["title"] == "Slow query: 850ms"

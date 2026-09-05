@@ -25,6 +25,11 @@ from __future__ import annotations
 import json
 import re
 
+# ``analyzers.base`` is a dependency-free leaf (stdlib only), so importing the
+# shared duration formatter here does not create the ``_internal`` cycle the
+# local ``_e`` copy below guards against.
+from optimus.analyzers.base import humanize_duration_ms
+
 # Depth caps for the call-tree panel. The default cap is what the user
 # sees without clicking; the hard cap is the absolute runaway-protection
 # ceiling beyond which children are silently truncated.
@@ -124,14 +129,14 @@ def _render_call_tree_node(node, parent_ms, depth=0, unlimited=False, breadcrumb
 	pct_label = f" &middot; {pct:.0f}%" if parent_ms else ""
 	self_label = ""
 	if self_ms and cum_ms - self_ms > 1:
-		self_label = f" &middot; self {self_ms:.0f}ms"
+		self_label = f" &middot; self {humanize_duration_ms(self_ms)}"
 
 	out = [
 		f'<details class="{cls}"{open_attr}>',
 		'<summary>',
 		f'<span class="frame-name">{_e(fn)}</span>',
 		f'<span class="frame-meta">{_e(file)}{meta_lineno} &middot; '
-		f'{cum_ms:.0f}ms{pct_label}{self_label}</span>',
+		f'{humanize_duration_ms(cum_ms)}{pct_label}{self_label}</span>',
 		'</summary>',
 	]
 	if children:
@@ -300,7 +305,7 @@ def _render_call_tree_panel(actions):
 				'<div class="call-tree-action-head">'
 				f'<span class="call-tree-action-rank">#{rank}</span>'
 				f'<span class="call-tree-action-label">{_e(label)}</span>'
-				f'<span class="call-tree-action-meta">{total_ms:.0f}ms</span>'
+				f'<span class="call-tree-action-meta">{humanize_duration_ms(total_ms)}</span>'
 				'</div>'
 			)
 			parts.append(tree_html)

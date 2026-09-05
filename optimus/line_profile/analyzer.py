@@ -22,7 +22,7 @@ import re
 import traceback
 
 from optimus import safe_commit
-from optimus.analyzers.base import AnalyzerResult
+from optimus.analyzers.base import AnalyzerResult, humanize_duration_ms
 
 try:
 	import frappe  # type: ignore[import-not-found]
@@ -223,12 +223,12 @@ def _hot_line_finding(fn: dict, line: dict, severity: str) -> dict:
 		# module paths overflow Optimus Finding.title's Data(140) field. The full
 		# dotted_path stays in the description + technical_detail below.
 		"title": (
-			f"{_qualname_of(fn)}:{lineno} consumed {total_ms:.0f}ms "
+			f"{_qualname_of(fn)}:{lineno} consumed {humanize_duration_ms(total_ms)} "
 			f"({hits} hits) single hottest line"
 		),
 		"customer_description": (
 			f"The line **{dotted_path}:{lineno}** is the dominant time sink in "
-			f"this function ({total_ms:.0f}ms across {hits} executions). "
+			f"this function ({humanize_duration_ms(total_ms)} across {hits} executions). "
 			"Optimizing it directly will move the needle on the function's "
 			"total cost line-level timing makes the fix targetable."
 		),
@@ -373,7 +373,7 @@ def _attach_phase1_hint(finding: dict, hint: dict) -> None:
 
 	finding["customer_description"] = finding["customer_description"] + (
 		f"\n\nIn phase 1, this descendant **{hint['next_hot_callee']}** "
-		f"accumulated {hint['phase1_cumulative_ms']:.0f}ms across all calls "
+		f"accumulated {humanize_duration_ms(hint['phase1_cumulative_ms'])} across all calls "
 		f"of the parent function (not a single-action wall time). "
 		f"{hint['suggested_action']}"
 	)

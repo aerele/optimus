@@ -14,6 +14,7 @@ from optimus.analyzers.base import (
 	FRAMEWORK_PREFIXES,  # noqa: F401  (kept for any external importers)
 	SEVERITY_ORDER,
 	AnalyzerResult,
+	humanize_duration_ms,
 	installed_apps_allowlist,
 	is_framework_callsite,
 	percentile,
@@ -274,7 +275,7 @@ def _build_user_finding(
 	# the 20ms default) would render as a misleading "0ms" say "<1ms" instead.
 	# Guard on ``>= 1`` not ``>= 0.5``: f"{0.5:.0f}" is "0" (round-half-to-even),
 	# so 0.5 must take the "<1ms" branch too.
-	cost = f"{loop_time:.0f}ms" if loop_time >= 1 else "<1ms"
+	cost = humanize_duration_ms(loop_time) if loop_time >= 1 else "<1ms"
 	if run_count > 1:
 		# The loop spanned several requests; loop_count is the WORST request's
 		# count (the peak), not a uniform per-request figure "up to N" so it
@@ -417,7 +418,7 @@ def _build_framework_finding(
 		"customer_description": (
 			f"Frappe's own code at **{filename}:{lineno}** issued "
 			f"{total_count} queries in this session, totalling "
-			f"{total_time:.0f}ms. This is typically the framework "
+			f"{humanize_duration_ms(total_time)}. This is typically the framework "
 			"resolving metadata, permissions, or building queries for "
 			"different inputs it's rarely something you can change "
 			"in your application code. Listed here for transparency, "
