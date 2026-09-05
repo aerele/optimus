@@ -1,17 +1,14 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.7.x Aerele Lens companion-tool callout.
+"""Tests for the Aerele Lens companion-tool callout.
 
-A small one-line promo block sits right under the Jump-to nav in the
-report header area, pointing at lens.aerele.in. It's hardcoded in the
-template (no Optimus Settings toggle by design single focused
-mention, not a configurable list).
-
-These tests pin the block's presence, position relative to the Jump-to
-nav, link target / safety attributes, copy fragments and the
-self-contained-HTML guarantee (no remote assets fetched at render
-time)."""
+A one-line promo block sits under the Jump-to nav, pointing at
+lens.aerele.in; it is hardcoded in the template (no Settings toggle). These
+tests pin the block's presence, its position before the Jump-to nav, the link
+target and safety attributes, copy fragments and the self-contained-HTML
+guarantee (no remote assets fetched at render time).
+"""
 
 from types import SimpleNamespace
 
@@ -55,10 +52,9 @@ class TestLensPromoRendering:
 		assert html.count('class="section lens-promo"') == 1
 
 	def test_block_positioned_before_jump_to_nav(self):
-		"""The Lens block must sit BEFORE the Jump-to nav (sibling, above
-		it). v0.7.x Phase A: nav is `<nav class="nav-pills">`; anchor on
-		the opening tag's class attribute (the nav may also carry an
-		aria-label, so match the class prefix not the literal `>`)."""
+		"""The Lens block must sit BEFORE the Jump-to nav (`<nav
+		class="nav-pills">`); the check anchors on the class attribute since the
+		nav may also carry an aria-label."""
 		html = renderer.render_raw(_doc(), recordings=[])
 		jump_idx = html.find('<nav class="nav-pills"')
 		lens_idx = html.find('class="section lens-promo"')
@@ -90,9 +86,9 @@ class TestLensPromoRendering:
 		assert "Audit" in html
 
 	def test_block_is_self_contained(self):
-		"""The Lens block must be inert text + a single <a> tag. No
-		<img>, <link rel="...">, or <script> those would break the
-		saved-HTML offline guarantee on click-free render."""
+		"""The Lens block must be inert text plus a single <a> tag: no <img>,
+		<link> or <script>, which would break the saved-HTML offline guarantee.
+		"""
 		html = renderer.render_raw(_doc(), recordings=[])
 		start = html.find('<aside class="section lens-promo"')
 		assert start != -1, "Lens promo block opening tag not found"

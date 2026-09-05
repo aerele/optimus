@@ -1,32 +1,26 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Drift-protection audit for the v0.12.0 Redis-keys centralization
-contract.
+"""Drift-protection audit for the Redis-keys centralization contract.
 
-From v0.12.0 forward, every ``frappe.cache.*`` call site in
-``optimus/`` MUST use a builder from :mod:`optimus.redis_keys` for its
-key argument. Inline f-string keys (``f"profiler:..."`` /
-``f"optimus:..."``) inside a ``frappe.cache.X(...)`` call are orphans
-and fail this test. The audit also asserts the doc inventory
+Every ``frappe.cache.*`` call site in ``optimus/`` must use a builder from
+:mod:`optimus.redis_keys` for its key argument. Inline f-string keys
+(``f"profiler:..."`` / ``f"optimus:..."``) inside a ``frappe.cache.X(...)`` call
+are orphans and fail this test. The audit also asserts the doc inventory
 (``docs/REDIS-SCHEMA.md``) matches the canonical
-:data:`optimus.redis_keys.KEY_PATTERNS` tuple drift in either
-direction fails CI.
+:data:`optimus.redis_keys.KEY_PATTERNS`; drift either way fails CI.
 
 Excluded:
-  * ``optimus/tests/`` and ``optimus/tests_integration/``: test
-    fixtures legitimately stub Redis keys.
-  * ``optimus/patches/``: one-shot DocType migration scripts; their
-    literal-key uses are by design (cleaning up specific legacy keys
-    by name).
-  * ``optimus/redis_keys.py`` itself the f-string definitions inside
-    the builder bodies ARE the canonical strings.
+  * ``optimus/tests/`` and ``optimus/tests_integration/``: fixtures stub keys.
+  * ``optimus/patches/``: one-shot migration scripts; literal-key uses are by
+    design.
+  * ``optimus/redis_keys.py`` itself: its f-string builder bodies are the
+    canonical strings.
 
-The session.py and line_profile/capture.py modules carry their own
-pre-v0.12.0 centralized helpers (``_active_key``, ``_meta_key`` etc.)
-that internal callers use; the audit doesn't flag them because the
-helpers are function returns, NOT ``frappe.cache.X(...)`` calls. The
-audit only inspects key arguments at the call site.
+session.py and line_profile/capture.py have their own centralized helpers
+(``_active_key``, ``_meta_key`` etc.); the audit doesn't flag them because those
+are function returns, not ``frappe.cache.X(...)`` calls (it only inspects key
+arguments at the call site).
 """
 
 from __future__ import annotations
@@ -68,8 +62,8 @@ _INLINE_KEY_RE = re.compile(
 
 
 def _repo_root() -> Path:
-	"""Resolve the repository root (the ``apps/optimus`` checkout)
-	from this test file's location. Works regardless of cwd."""
+	"""Resolve the repository root (the ``apps/optimus`` checkout) from this test
+	file's location. Works regardless of cwd."""
 	return Path(__file__).resolve().parent.parent.parent
 
 
@@ -80,9 +74,8 @@ def _is_excluded(posix_path: str) -> bool:
 
 
 def _find_orphan_inline_keys() -> list[str]:
-	"""Walk every .py under optimus/ outside the exclusion list. For
-	each line containing a ``frappe.cache.X(`` call AND an inline
-	f-string key on the same line, record an orphan."""
+	"""Walk every .py under optimus/ outside the exclusion list; record an orphan
+	for each line with a ``frappe.cache.X(`` call and an inline f-string key."""
 	root = _repo_root()
 	orphans: list[str] = []
 	for path in sorted((root / "optimus").rglob("*.py")):
@@ -111,11 +104,8 @@ def _find_orphan_inline_keys() -> list[str]:
 
 
 def _parse_documented_patterns(doc_text: str) -> list[str]:
-	r"""Extract the key patterns from REDIS-SCHEMA.md's § 2 tables.
-	Patterns appear as table-cell entries wrapped in backticks at the
-	start of each data row. The regex captures everything between the
-	first ``\``` and the matching ``\``` on lines that look like markdown
-	table rows."""
+	r"""Extract the key patterns from REDIS-SCHEMA.md's § 2 tables: the first
+	backtick-wrapped token on each markdown table data row."""
 	# A table row looks like: ``| `profiler:active:<user>` | string | …``
 	# So the first backtick-wrapped token after the opening pipe is the key.
 	row_re = re.compile(r"^\|\s*`([^`]+)`\s*\|")
@@ -128,11 +118,9 @@ def _parse_documented_patterns(doc_text: str) -> list[str]:
 
 
 class TestEveryRedisCallUsesKeyBuilder:
-	"""Drift canary: no inline f-string keys inside ``frappe.cache.X(...)``
-	calls outside the exclusion list. If this fails, you wrote a
-	``frappe.cache.set_value(f"profiler:...", ...)`` call refactor it
-	to call ``optimus.redis_keys.<feature>(...)`` instead (add a builder
-	if one doesn't exist)."""
+	"""Drift canary: no inline f-string keys inside ``frappe.cache.X(...)`` calls
+	outside the exclusion list. On failure, refactor the call to use
+	``optimus.redis_keys.<feature>(...)`` (add a builder if none exists)."""
 
 	def test_no_orphan_inline_keys(self):
 		orphans = _find_orphan_inline_keys()
@@ -143,10 +131,9 @@ class TestEveryRedisCallUsesKeyBuilder:
 
 
 class TestKeyBuildersMatchDoc:
-	"""Drift canary: ``redis_keys.KEY_PATTERNS`` must equal the patterns
-	documented in ``docs/REDIS-SCHEMA.md``. Adding a key without
-	documenting it (or documenting a key without a builder) fails
-	here."""
+	"""Drift canary: ``redis_keys.KEY_PATTERNS`` must equal the patterns documented
+	in ``docs/REDIS-SCHEMA.md`` (adding a key without documenting it, or vice
+	versa, fails here)."""
 
 	def test_redis_keys_match_documented_schema(self):
 		root = _repo_root()
@@ -165,8 +152,8 @@ class TestKeyBuildersMatchDoc:
 
 
 class TestSchemaSentinel:
-	"""The sentinel write/read pair is idempotent and round-trips
-	cleanly through the Frappe-cache stub."""
+	"""The sentinel write/read pair is idempotent and round-trips through the
+	Frappe-cache stub."""
 
 	def test_write_sentinel_idempotent(self, monkeypatch):
 		# Install a tiny frappe.cache stub that stores set_value /
@@ -209,8 +196,7 @@ class TestWrapUnwrap:
 		assert version == redis_schema.SCHEMA_VERSION
 
 	def test_unwrap_legacy_returns_none_version(self):
-		"""A bare dict (pre-v0.12.0 shape) flows through as-is no
-		envelope, no drift."""
+		"""A bare dict (legacy shape) flows through as-is: no envelope, no drift."""
 		from optimus import redis_schema
 
 		legacy = {"some": "raw_payload"}
@@ -219,9 +205,8 @@ class TestWrapUnwrap:
 		assert version is None
 
 	def test_unwrap_unknown_version_returns_default(self):
-		"""A future schema version → caller's ``default`` so the host code
-		path degrades gracefully instead of crashing on a shape it can't
-		read."""
+		"""A future schema version returns the caller's ``default`` so the host
+		degrades gracefully instead of crashing on a shape it can't read."""
 		from optimus import redis_schema
 
 		future_value = {"_v": 99, "data": {"future_field": True}}

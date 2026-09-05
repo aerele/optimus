@@ -3,9 +3,8 @@
 
 """Install / uninstall hooks for optimus.
 
-Currently the only install-time action is creating the `Optimus User`
-role used by Phase 1's permission model. Customers grant this role to
-non-admin users who should be able to record their own profiling sessions.
+Creates the ``Optimus User`` role (granted to non-admin users so they can
+record their own profiling sessions) and seeds default Settings.
 """
 
 import frappe
@@ -16,11 +15,10 @@ PROFILER_USER_ROLE = "Optimus User"
 
 
 def _refuse_legacy_install():
-	"""Phase K hardening: refuse to install on top of the legacy
-	``frappe_profiler`` module. v0.7.0 is fresh-deploy-only per the
-	CHANGELOG; silently coexisting with the old module would leave
-	stale ``Profiler Session`` rows + duplicate DocType definitions
-	in an unpredictable hybrid state.
+	"""Refuse to install on top of the legacy ``frappe_profiler`` module.
+
+	Optimus is fresh-deploy-only; coexisting with the old module would leave
+	stale ``Profiler Session`` rows and duplicate DocTypes in a hybrid state.
 	"""
 	try:
 		has_module = bool(frappe.db.exists("Module Def", "Frappe Profiler"))
@@ -131,18 +129,10 @@ _DEFAULT_IGNORED_APPS = (
 
 
 def _seed_ignored_apps_with_framework_apps():
-	"""Populate Optimus Settings.ignored_apps with the subset of
-	``_DEFAULT_IGNORED_APPS`` that's actually installed on this bench.
-
-	An app that isn't installed can't produce findings, so seeding it is
-	pure UI clutter. The intersection with ``frappe.get_installed_apps()``
-	mirrors what ``_seed_tracked_apps_from_installed_apps`` does for the
-	tracked-apps table keep the seeded rows grounded in reality.
-
-	Idempotent: if ``ignored_apps`` already has any rows (either from a
-	previous install run on the same site, or from manual operator
-	configuration before re-running migrate), we do NOT touch it. The
-	seed is a fresh-install convenience, never a retroactive rewrite.
+	"""Populate Optimus Settings.ignored_apps with the installed subset of
+	``_DEFAULT_IGNORED_APPS`` (uninstalled apps can't produce findings, so
+	seeding them is clutter). Idempotent: never touches ``ignored_apps`` if it
+	already has rows, so operator config is preserved.
 	"""
 	if not frappe.db.exists("DocType", "Optimus Settings"):
 		# Migration hasn't created the Single yet skip silently
@@ -169,11 +159,9 @@ def _seed_ignored_apps_with_framework_apps():
 
 
 def _seed_tracked_apps_from_installed_apps():
-	"""Populate Optimus Settings.tracked_apps with every installed
-	app that's NOT in the built-in framework allowlist.
-
-	Idempotent: if tracked_apps is already populated (user configured
-	it manually before running migrate again), we do nothing.
+	"""Populate Optimus Settings.tracked_apps with every installed app not in
+	the built-in framework allowlist. Idempotent: does nothing if tracked_apps
+	is already populated.
 	"""
 	from optimus.analyzers.base import FRAMEWORK_APPS
 
@@ -198,17 +186,11 @@ def _seed_tracked_apps_from_installed_apps():
 
 
 def _assign_profiler_user_to_system_managers():
-	"""Add Optimus User role to every user who has System Manager.
+	"""Add the Optimus User role to every user who has System Manager.
 
-	Idempotent: existing Optimus Users are left untouched. Never removes
-	roles. Safe to call repeatedly.
-
-	v0.6.x: was an N+1 one ``get_doc("User", name)`` per user in the
-	system. Now uses a single ``Has Role`` query to find users with
-	System Manager (and read their existing roles in the same fetch), so
-	we only ``get_doc`` + ``save`` the subset that actually needs the new
-	role added. On a site with 500 users where 5 are System Managers,
-	this drops from 500 → ~5 doc loads.
+	Idempotent, never removes roles, safe to call repeatedly. Uses a single
+	``Has Role`` query to find System Managers and their existing roles, then
+	loads and saves only the users that actually need the role added.
 	"""
 	# Pull every user-role pair in one query, grouped by user. We only
 	# care about two roles, but fetching them both in one round-trip is
@@ -244,11 +226,9 @@ def _assign_profiler_user_to_system_managers():
 
 
 def on_user_role_change(doc, method=None):
-	"""validate hook on User: auto-add Optimus User when System Manager
-	is present.
-
-	Wired via hooks.py: doc_events["User"]["validate"]. Silent never
-	raises and never produces a user-facing message. Idempotent.
+	"""validate hook on User: append the Optimus User role when System Manager
+	is present. Wired via ``doc_events["User"]["validate"]``. Silent (never
+	raises) and idempotent.
 	"""
 	try:
 		role_names = {r.role for r in (doc.roles or [])}
@@ -267,18 +247,10 @@ def on_user_role_change(doc, method=None):
 def before_uninstall():
 	"""Best-effort cleanup on uninstall.
 
-	Clears any profiler:* keys from Redis so a reinstall starts with a
-	clean state. Also restores the v0.3.0 monkey-patched wraps on
-	frappe.get_doc / RedisWrapper.get_value / frappe.permissions.has_permission
-	so subsequent code on this worker uses the originals.
-
-	Does NOT delete:
-	- The `Optimus User` role (users may still be assigned to it; a
-	  re-install would lose those assignments).
-	- The `Optimus Session` MariaDB rows (frappe's uninstall flow
-	  drops the DocType tables naturally).
-	- The attached report files (same frappe's File doctype cleanup
-	  handles these).
+	Clears any ``profiler:*`` keys from Redis and restores the monkey-patched
+	wraps on frappe.get_doc / RedisWrapper.get_value / has_permission. Does NOT
+	delete the ``Optimus User`` role (users may still be assigned it), the
+	``Optimus Session`` rows (frappe drops the tables), or attached report files.
 	"""
 	# v0.3.0: restore the three monkey-patched functions on uninstall.
 	try:

@@ -1,19 +1,16 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Redis state for the profiler session lifecycle.
+"""Redis state for the profiler session lifecycle (pure state management: no
+business logic, DocType I/O or recorder coupling). Key shapes:
 
-This module is intentionally pure state-management no business logic, no
-DocType I/O, no recorder coupling. It owns three Redis key shapes:
-
-    profiler:active:<user_email>          → string, value=session_uuid, TTL
-    profiler:session:<uuid>:meta          → hash with {started_at, user, label}
+    profiler:active:<user_email>          → string session_uuid, with TTL
+    profiler:session:<uuid>:meta          → hash {started_at, user, label}
     profiler:session:<uuid>:recordings    → set of recording UUIDs
 
-The active key has a TTL that matches the recorder's auto-disable so a
-forgotten Stop button can never run forever. The meta and recordings keys
-have no TTL they live until the analyze pipeline finalizes the session
-into a `Optimus Session` DocType row and explicitly deletes them.
+The active key's TTL matches the recorder's auto-disable so a forgotten Stop
+can't record forever. The meta and recordings keys have no TTL; they live
+until the analyze pipeline finalizes the session and deletes them.
 """
 
 import hashlib
@@ -54,12 +51,11 @@ _HMAC_SCHEME_V1 = 0x01
 
 
 def _has_stable_hmac_secret() -> bool:
-	"""Phase K v0.7 GA: True only when ``frappe.conf.encryption_key``
-	is set. That's the only secret guaranteed to be the same across
-	HTTP / RQ / analyze workers on the same site. When False, callers
-	skip signing (and accept unsigned blobs on read) - signing with
-	the per-process random fallback produces blobs no other process
-	can verify, which breaks the recorder → analyze handoff silently.
+	"""True only when ``frappe.conf.encryption_key`` is set, the only secret
+	guaranteed identical across HTTP / RQ / analyze workers on a site. When
+	False, callers skip signing (and accept unsigned blobs on read): the
+	per-process random fallback would produce blobs no other process can verify,
+	silently breaking the recorder → analyze handoff.
 	"""
 	try:
 		return bool(frappe.conf and frappe.conf.get("encryption_key"))
@@ -68,14 +64,10 @@ def _has_stable_hmac_secret() -> bool:
 
 
 def _hmac_secret() -> bytes:
-	"""Site-local secret for blob signing. Uses ``encryption_key`` if
-	available (the same secret Frappe uses to encrypt password fields,
-	rotated only on conscious operator action). Falls back to a
-	process-local random key in test environments where
-	``frappe.conf`` isn't wired up - signed blobs are then valid only
-	within the current process, which matches the test isolation
-	model. Callers that need cross-process round-trip should check
-	``_has_stable_hmac_secret`` first."""
+	"""Site-local secret for blob signing: ``encryption_key`` if available, else
+	a process-local random key in test environments (signed blobs then valid
+	only within the current process). Callers needing a cross-process round-trip
+	should check ``_has_stable_hmac_secret`` first."""
 	try:
 		key = frappe.conf.get("encryption_key") if frappe.conf else None
 	except Exception:
@@ -94,22 +86,10 @@ def _hmac_secret() -> bytes:
 
 
 def sign_blob(blob: bytes) -> bytes:
-	"""Prepend an HMAC-SHA256 signature so ``unsign_blob`` can verify
-	integrity on read. Use for any opaque payload (pickle / msgpack /
-	binary) that we'll later trust enough to deserialize.
-
-	Phase K v0.7 GA: skip signing entirely when there's no stable
-	shared secret - returning the raw blob means the unsigned-blob
-	fallback path on read handles it cleanly. Signing with a
-	per-process random key would produce blobs that fail HMAC
-	verification in any other process and break the recorder →
-	analyze handoff.
-
-	v0.12.14: inserts a 1-byte scheme version (``_HMAC_SCHEME_V1``)
-	between the signature and the payload. The signature covers the
-	version-tagged body, so tampering with the version is detected.
-	Legacy pre-v0.12.14 blobs (no version byte) still verify on read
-	via the backward-compat branch in ``unsign_blob``.
+	"""Prepend an HMAC-SHA256 signature (plus a 1-byte scheme-version marker the
+	signature covers) so ``unsign_blob`` can verify integrity before
+	deserializing an opaque payload. When there's no stable shared secret, skip
+	signing and return the raw blob (read's unsigned-blob fallback handles it).
 	"""
 	if not isinstance(blob, (bytes, bytearray)):
 		raise TypeError(f"sign_blob expects bytes, got {type(blob).__name__}")
@@ -121,25 +101,11 @@ def sign_blob(blob: bytes) -> bytes:
 
 
 def unsign_blob(signed: bytes) -> bytes | None:
-	"""Verify the HMAC-SHA256 prefix and return the payload, or
-	``None`` if the signature is missing / mismatched. Constant-time
-	comparison via ``hmac.compare_digest`` so signature-stripping
-	attacks don't leak timing info.
-
-	v0.12.14: handles two body shapes after the 32-byte signature:
-
-	  * **v1 (current, v0.12.14+)**: body starts with
-	    ``_HMAC_SCHEME_V1``. The signature covers the version-tagged
-	    body. Returns ``body[1:]`` (the payload, with the version
-	    byte stripped).
-	  * **v0 (legacy, pre-v0.12.14)**: body is the raw payload. The
-	    signature covers the body directly. Returns ``body``.
-
-	The single HMAC verification step handles both cases for v1 the
-	HMAC was computed over ``\\x01 + payload`` AND that's exactly what
-	the body is; for v0 the HMAC was computed over the payload AND
-	the body is just the payload. The post-verify branch inspects the
-	body's first byte to disambiguate.
+	"""Verify the HMAC-SHA256 prefix and return the payload, or ``None`` if it's
+	missing / mismatched. Uses constant-time ``hmac.compare_digest`` so
+	signature-stripping attacks don't leak timing. Handles two body shapes after
+	the 32-byte signature: a versioned body starting with ``_HMAC_SCHEME_V1``
+	(marker stripped) and a legacy raw-payload body (returned as-is).
 	"""
 	if not isinstance(signed, (bytes, bytearray)) or len(signed) < _SIG_LEN:
 		return None
@@ -174,12 +140,11 @@ _jobs_key = _redis_keys.session_jobs
 
 
 def expire_key(key: str, ttl: int):
-	"""Refresh a key's TTL, whichever RedisWrapper this bench is running.
+	"""Refresh a key's TTL, whichever RedisWrapper this bench runs.
 
 	frappe v15's RedisWrapper has no ``expire_key``; it inherits redis-py's
-	``expire``, which is not one of the wrapped commands and so needs the
-	namespaced key ``make_key`` builds. Calling ``expire_key`` blind raises
-	AttributeError on every recorded request.
+	``expire``, which isn't wrapped and so needs the namespaced key ``make_key``
+	builds. Calling ``expire_key`` blind raises AttributeError.
 	"""
 	cache = frappe.cache
 	if hasattr(cache, "expire_key"):
@@ -225,24 +190,18 @@ def clear_active_session(user: str) -> None:
 
 
 def set_session_meta(session_uuid: str, meta: dict) -> None:
-	"""Store session metadata.
+	"""Store session metadata (wrapped in the versioned envelope so
+	``get_session_meta`` can detect schema drift; legacy bare-dict values still
+	read back).
 
-	Recognized keys (consumers may add more, but these are the canonical):
+	Recognized keys (consumers may add more):
 	  - session_uuid, docname, user, label, started_at  (set by api.start)
-	  - cap_warning                                     (set by register_recording)
-	  - capture_python_tree (bool)                      (v0.3.0+, set by api.start)
+	  - cap_warning                                      (set by register_recording)
+	  - capture_python_tree (bool)                       (set by api.start)
 
-	The v0.3.0 capture_python_tree flag is read by hooks_callbacks
-	before_request/before_job to decide whether to set
-	frappe.local._profiler_active_session_id. When False, the new
-	pyinstrument capture and sidecar wraps stay inert; SQL recording
-	via frappe.recorder proceeds as usual.
-
-	v0.12.21: the cached payload is wrapped in the v0.12.0 versioned
-	envelope so future schema bumps to the meta dict shape can be
-	detected via ``redis_schema.unwrap_value``'s drift branch.
-	Pre-v0.12.21 bare-dict values still resolve through ``unwrap_value``'s
-	legacy-detection branch in ``get_session_meta``.
+	``capture_python_tree`` is read by before_request / before_job to decide
+	whether to set ``frappe.local._profiler_active_session_id``. When False, the
+	pyinstrument capture and sidecar wraps stay inert; SQL recording proceeds.
 	"""
 	from optimus import redis_schema
 
@@ -250,9 +209,9 @@ def set_session_meta(session_uuid: str, meta: dict) -> None:
 
 
 def get_session_meta(session_uuid: str) -> dict | None:
-	"""v0.12.21: unwrap the envelope shape introduced by
-	``set_session_meta``. Handles new (wrapped) and legacy (bare dict)
-	shapes transparently. Returns ``None`` for missing keys."""
+	"""Return the session's metadata dict, unwrapping the envelope written by
+	``set_session_meta`` (wrapped and legacy bare-dict shapes both handled).
+	Returns ``None`` for missing keys."""
 	from optimus import redis_schema
 
 	raw = frappe.cache.get_value(_meta_key(session_uuid))
@@ -273,22 +232,12 @@ def register_recording(
 	recording_uuid: str,
 	user: str | None = None,
 ) -> bool:
-	"""Append a recording UUID to the session's set of recordings.
-
-	Atomic via Redis SADD. Safe to call from multiple workers concurrently.
-
-	Enforces MAX_RECORDINGS_PER_SESSION as a soft cap: if the cap is hit,
-	the new recording is dropped and a flag is set on the session meta so
-	the analyze pipeline can surface a warning to the customer. Returns
-	True if registered, False if capped.
-
-	Also refreshes the user's active-session TTL (see Round 2 fix #2):
-	without this refresh, a long flow (e.g. 45 minutes of profiling)
-	would silently stop at the 10-minute TTL boundary because the
-	profiler:active:<user> key expired. By bumping the TTL on every
-	register_recording, an actively-used session stays alive as long as
-	there's traffic. If the user stops making requests, the key expires
-	naturally 10 minutes later and the janitor cleans up.
+	"""Append a recording UUID to the session's recordings set (atomic SADD,
+	safe across workers). Returns True if registered, False if the soft cap
+	MAX_RECORDINGS_PER_SESSION is hit (the recording is dropped and a warning
+	flag set on the session meta). Also refreshes the user's active-session TTL
+	so a long flow doesn't expire mid-way; once traffic stops the key expires
+	and the janitor cleans up.
 	"""
 	import frappe
 
@@ -486,18 +435,12 @@ def _write_job(session_uuid: str, job_id: str, meta: dict) -> None:
 def _atomic_merge_job_meta(
 	session_uuid: str, job_id: str, fields: dict, *, setdefault: bool = False
 ) -> None:
-	"""Atomic Redis-side merge of fields onto the per-job meta hash field.
-	Closes the multi-worker read-modify-write race that drops fields when
-	two workers update the same job_id's meta concurrently.
-
-	``setdefault=True`` preserves any existing value for each field (used by
-	``record_job`` so before_job's later call doesn't clobber the original
-	enqueue timestamp).
-
-	Filters None values so callers can pass ``error=None`` without nuking a
-	real error already in meta. Falls back to the legacy non-atomic
-	read-modify-write on any backend that rejects ``.eval()`` (FakeCache in
-	tests, exotic Redis variants) best-effort, never raises."""
+	"""Atomic Redis-side merge of ``fields`` onto a per-job meta hash field,
+	closing the multi-worker read-modify-write race. ``setdefault=True``
+	preserves existing values (so a later call doesn't clobber the enqueue
+	timestamp). None values are filtered so ``error=None`` won't nuke a real
+	error already stored. Falls back to non-atomic read-modify-write on backends
+	without ``.eval()`` (FakeCache in tests); best-effort, never raises."""
 	if not session_uuid or not job_id:
 		return
 	fields = {k: v for k, v in fields.items() if v is not None}

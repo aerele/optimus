@@ -3,29 +3,14 @@
 
 """Analyzer: per-table time, query count, read/write split and index hints.
 
-Aggregates, per SQL table touched by the session:
-
-  - total time + query count (a multi-table JOIN is counted against each
-    table, so the rows sum to MORE than the session total the renderer
-    says so);
-  - reads (``SELECT``) vs writes (``INSERT`` / ``UPDATE`` / ``DELETE`` /
-    ``REPLACE``) count and ms each;
-  - **index candidates**: columns the session actually filtered, joined, or
-    ordered on while *reading* the table, ranked by how often they were
-    used. The renderer pairs this with the write count so it's clear that
-    every added index also costs write time on a write-heavy table. Frappe's
-    framework-managed metadata columns (``creation`` / ``modified`` / ``idx``
-    / ``parent`` / ``docstatus`` / …) are never offered as candidates they
-    go into ``framework_cols_filtered`` instead, which the renderer shows as
-    "also filtered on … (not suggested for indexing)". Frappe's framework
-    "meta" tables (``tabDocType`` / ``tabCustom Field`` / ``tabSingles`` / …)
-    get ``is_meta_table: True`` and no candidates at all ``bench migrate``
-    owns their indexes.
-
-Informational only no findings (``index_suggestions`` / ``explain_flags``
-emit the EXPLAIN-driven findings; this is the broad "what does this table
-look like" view). Uses ``sql_metadata.Parser`` (a frappe dependency) to
-extract tables, query type and per-clause columns.
+Aggregates per SQL table touched by the session: total time + query count
+(a multi-table JOIN counts against each table, so rows sum to more than the
+session total); read (SELECT) vs write (INSERT/UPDATE/DELETE/REPLACE) counts
+and ms; index candidates (columns filtered/joined/ordered on while reading,
+ranked by use). Frappe framework-managed metadata columns go into
+``framework_cols_filtered`` rather than being suggested; framework meta tables
+(``tabDocType`` etc.) get ``is_meta_table: True`` and no candidates. Uses
+``sql_metadata.Parser``. Informational only, emits no findings.
 """
 
 import re
@@ -168,12 +153,10 @@ def _build_recommended_index(table: str, s: dict) -> dict | None:
 	"""A concrete composite-index recommendation for ``table`` from this
 	session's read patterns, or ``None`` when there's nothing to suggest.
 
-	The pick = the most common set of (non-metadata) WHERE/JOIN columns that
-	read queries filtered on *together*, with columns ordered by overall
-	usage frequency (a rough selectivity proxy) and capped to a sane
-	composite width. Only for real Frappe doctype tables (``tab*``, not a
-	framework meta table) those are the ones a developer can actually
-	index via a patch.
+	The pick is the most common set of non-metadata WHERE/JOIN columns that
+	read queries filtered on together, ordered by usage frequency and capped
+	to a sane composite width. Only for real Frappe doctype tables (``tab*``,
+	not framework meta tables).
 	"""
 	t = str(table or "")
 	if not t.lower().startswith("tab") or is_frappe_meta_table(t):
@@ -233,9 +216,8 @@ def _parse_query(query: str) -> dict:
 	"""Parse a query once. Returns ``{tables: [...], verb: "SELECT"|...,
 	index_cols: {table: [(source_label, column), ...]}}``.
 
-	Best-effort: if ``sql_metadata`` can't parse it we return no tables, so
-	the query simply doesn't appear in the breakdown same as the
-	pre-existing behaviour.
+	Best-effort: if ``sql_metadata`` can't parse it, returns no tables so the
+	query simply doesn't appear in the breakdown.
 	"""
 	verb = _leading_verb(query)
 	try:
@@ -288,7 +270,7 @@ def _parse_query(query: str) -> dict:
 
 def _attribute_column(raw_col, tables: list[str], single_table):
 	"""Map a ``sql_metadata`` column reference (``"tabFoo.bar"`` or ``"bar"``)
-	to ``(table, column)``: or ``None`` when it can't be attributed
+	to ``(table, column)``, or ``None`` when it can't be attributed
 	confidently (an unresolved alias, an expression, or an ambiguous
 	unqualified column in a multi-table query)."""
 	if not isinstance(raw_col, str):

@@ -1,15 +1,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the redundant_calls analyzer.
-
-v0.5.2: the analyzer now requires a caller_stack on each sidecar
-entry and filters findings whose callsite is inside frappe/*
-framework code (user can't act on framework loops). The fixture
-builder in this file sets a DEFAULT user-code stack so existing
-tests keep verifying the core aggregation logic; two new tests
-exercise the framework-filter + no-stack fallback paths.
-"""
+"""Tests for the redundant_calls analyzer, which requires a caller_stack on each
+sidecar entry and filters findings whose callsite is framework code (users
+can't act on framework loops). The fixture builder defaults to a user-code
+stack so most tests exercise the core aggregation logic."""
 
 import json
 
@@ -35,8 +30,7 @@ _FRAMEWORK_CALLER_STACK = [
 
 
 def _sidecar_entry(fn_name, raw, safe, caller_stack=None):
-	"""Build a sidecar entry. ``caller_stack`` defaults to the user-
-	code stack so existing tests don't have to specify it."""
+	"""Build a sidecar entry; ``caller_stack`` defaults to the user-code stack."""
 	return {
 		"fn_name": fn_name,
 		"identifier_raw": raw,
@@ -125,15 +119,8 @@ def test_cache_get_threshold_separate_from_doc_threshold():
 
 
 def test_cache_threshold_suppresses_low_count_noise():
-	"""v0.5.2 round 4: cache threshold bumped from 10 → 50. A loop
-	running a cache lookup 30× from the same callsite was previously
-	a Medium finding at 0ms impact indistinguishable from framework
-	background noise. Now suppressed entirely.
-
-	Production report trigger: 6 'Redundant cache lookup: <hash> (19/21/25/26/31×)'
-	Medium findings cluttering the actionable list on a Sales Invoice
-	Submit session where the real fix was a 1078-query loop elsewhere.
-	"""
+	"""A 30x cache loop (under the 50 threshold) must be suppressed entirely:
+	small 0ms loops are noise, not actionable findings."""
 	recording = {
 		"uuid": "rec-1",
 		"calls": [],
@@ -153,8 +140,7 @@ def test_cache_threshold_suppresses_low_count_noise():
 
 
 def test_cache_high_count_still_fires():
-	"""Negative case for the above: a 60× loop (clearly above the
-	new 50-threshold) still emits a finding."""
+	"""A 60x loop (above the 50 threshold) still emits a finding."""
 	recording = {
 		"uuid": "rec-1",
 		"calls": [],
@@ -210,11 +196,8 @@ def test_identifier_safe_is_used_as_bucket_key():
 
 
 def test_framework_callsite_filters_finding():
-	"""Loop is inside frappe/model/document.py (framework) → user
-	can't act on it → finding must be suppressed. A real production
-	report had 'Redundant cache lookup: 93bf3d83c65a (174 times)'
-	firing because Frappe itself loops over cached role lookups.
-	Users can't fix that."""
+	"""A loop whose callsite is framework code (frappe/*) must be suppressed, with
+	a warning explaining why."""
 	recording = {
 		"uuid": "rec-1",
 		"calls": [],
@@ -249,9 +232,8 @@ def test_framework_callsite_filters_finding():
 
 
 def test_user_callsite_finding_is_kept():
-	"""Negative case: a genuine user-code loop (e.g. apps/myapp/…
-	iterating get_doc in bulk processing) must still produce a
-	finding, with the callsite visible in the detail."""
+	"""A genuine user-code loop still produces a finding, with the callsite
+	visible in the detail."""
 	recording = {
 		"uuid": "rec-1",
 		"calls": [],
@@ -274,14 +256,8 @@ def test_user_callsite_finding_is_kept():
 
 
 def test_erpnext_callsite_filters_finding():
-	"""v0.5.2: official Frappe-maintained apps (erpnext, hrms,
-	payments, lms, helpdesk, insights, crm, builder, wiki, drive) are
-	framework for the purposes of the Redundant Call filter the
-	application developer can't practically patch upstream. A raw
-	production session on Sales Invoice Save+Submit surfaced 10
-	'Redundant cache lookup' findings all landing in
-	apps/erpnext/.../sales_invoice.py:300 (ERPNext's own validation
-	loop). Users can't fix that without a patch to ERPNext."""
+	"""Official Frappe-maintained apps (erpnext, hrms, etc.) count as framework for
+	the Redundant Call filter, so a loop inside erpnext code is suppressed."""
 	erpnext_stack = [
 		{"filename": "frappe/app.py", "lineno": 120, "function": "application"},
 		{"filename": "frappe/desk/form/save.py", "lineno": 40, "function": "savedocs"},
@@ -324,11 +300,8 @@ def test_erpnext_callsite_filters_finding():
 
 
 def test_third_party_lib_callsite_filters_finding():
-	"""v0.5.2 round 2: werkzeug / site-packages / gunicorn / rq are
-	infrastructure users can't modify. Production report had 3
-	Redundant Cache Lookup findings in
-	env/lib/python3.14/site-packages/werkzeug/serving.py the user
-	can't patch werkzeug. Must filter."""
+	"""Third-party infrastructure callsites (werkzeug / site-packages / gunicorn /
+	rq) must be filtered: users can't modify them."""
 	werkzeug_stack = [
 		{"filename": "frappe/app.py", "lineno": 120, "function": "application"},
 		{
@@ -361,12 +334,8 @@ def test_third_party_lib_callsite_filters_finding():
 
 
 def test_cross_request_spread_does_not_count_as_redundant():
-	"""v0.5.2 round 2: a cache lookup called ONCE per request
-	across 25 requests isn't a loop it's framework code that
-	naturally fires once per request. Production report had
-	findings like 'Redundant cache lookup (25 times)' where each
-	of the 25 was a separate request, 1 call each. Filter these
-	with a per-action threshold check."""
+	"""A cache lookup called once per request across many requests isn't a loop
+	(per-action max = 1), so the per-action threshold check must suppress it."""
 	# 60 recordings, each with exactly ONE cache_get for the same key.
 	# Total = 60 (above threshold of 50, bumped in v0.5.2 round 4),
 	# but per-action max = 1 not a loop.
@@ -396,10 +365,8 @@ def test_cross_request_spread_does_not_count_as_redundant():
 
 
 def test_single_request_loop_still_fires():
-	"""Positive case: 60 calls from a SINGLE request still fires
-	(real loop in user code). The per-action threshold must not
-	over-filter. Count bumped from 15 to 60 in v0.5.2 round 4 to
-	clear the new 50× cache threshold."""
+	"""60 calls from a single request still fire (a real loop): the per-action
+	threshold must not over-filter."""
 	recording = {
 		"uuid": "rec-1",
 		"calls": [],
@@ -419,8 +386,7 @@ def test_single_request_loop_still_fires():
 
 
 def test_missing_caller_stack_is_dropped_with_warning():
-	"""v0.5.2 requires caller_stack. Sidecar entries without it
-	(recorded pre-v0.5.2 or capture-time error) are dropped rather
+	"""Sidecar entries without a caller_stack are dropped (with a warning) rather
 	than emitted as findings with no navigable callsite."""
 	recording = {
 		"uuid": "rec-1",

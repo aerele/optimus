@@ -3,13 +3,9 @@
 
 """Smoke tests for frontend assets (widget JS, form JS, CSS).
 
-Full browser integration tests would need cypress/playwright, which is
-heavy to set up. These cheap smoke tests just verify that the JS files
-parse, that the widget's state machine symbols are present and that the
-CSS selectors look sane. Good enough to catch regressions where someone
-accidentally breaks the syntax or deletes a critical hook.
-
-Run with `pytest optimus/tests/test_frontend_assets.py -v`.
+Cheap checks (no cypress/playwright): the JS files parse, the widget's state
+machine symbols are present and the CSS selectors look sane. Enough to catch
+a broken syntax or a deleted critical hook.
 """
 
 import os
@@ -31,10 +27,8 @@ LIST_JS = os.path.join(
 
 
 def _node_check(js_path: str) -> None:
-	"""Run `node --check` to validate JS syntax.
-
-	Skips if node isn't installed that's fine, frappe benches ship with
-	node so in practice this will run everywhere that matters.
+	"""Run `node --check` to validate JS syntax. Skips if node isn't installed
+	(frappe benches ship with node, so it runs everywhere that matters).
 	"""
 	if not shutil.which("node"):
 		pytest.skip("node not installed")
@@ -68,12 +62,9 @@ def test_widget_has_state_machine_constants():
 
 
 def test_widget_has_visibility_listener():
-	"""v0.5.1: polling is gone, but the visibilitychange handler
-	remains so the widget can issue a one-shot refreshStatus()
-	when the tab becomes visible again. This covers TTL-based
-	auto-stop (Redis expiry while the tab was hidden) and any
-	realtime events the Socket.IO client dropped during tab
-	sleep.
+	"""The visibilitychange handler issues a one-shot refreshStatus() when the
+	tab becomes visible again, covering TTL-based auto-stop and any realtime
+	events dropped while the tab was hidden.
 	"""
 	with open(WIDGET_JS) as f:
 		src = f.read()
@@ -104,13 +95,9 @@ def test_form_js_has_retry_button():
 
 
 def test_form_js_does_not_render_analyzer_warnings_intro():
-	"""v0.7.x: the analyzer_warnings orange intro banner was removed
-	from the Optimus Session form view. The warning text (about
-	suppressed framework callsites, skipped non-SELECT statements,
-	below-threshold suggestions, etc.) was diagnostic noise that the
-	developer doesn't need to act on it pushed the actionable
-	findings count below the fold. The data is still stored on the
-	hidden ``analyzer_warnings`` field for offline inspection."""
+	"""The analyzer_warnings intro banner is not rendered in the Optimus
+	Session form view (the data is still stored on the hidden
+	``analyzer_warnings`` field for offline inspection)."""
 	with open(FORM_JS) as f:
 		src = f.read()
 	# No render call, no helper definition, no set_intro of warnings.
@@ -119,17 +106,10 @@ def test_form_js_does_not_render_analyzer_warnings_intro():
 
 
 def test_form_js_has_report_buttons():
-	"""Form JS must wire up BOTH report buttons.
-
-	v0.6.0 Round 7: safe-mode reports were removed. v0.7.x: the
-	"Download Report (PDF)" button was dropped; "Download Report"
-	stays (programmatic anchor click → real download) and
-	"Open Report" was added (window.open → inline in new tab).
-
-	The role-based UX gate is still server-side (permissions.py
-	file_has_permission); the client just exposes the buttons
-	and lets Frappe's File permission hook deny access for
-	unauthorized users.
+	"""Form JS must wire up both report buttons: "Download Report" (anchor
+	click, real download) and "Open Report" (window.open, inline in a new tab),
+	with no stale PDF-report button. Access is gated server-side by the File
+	permission hook.
 	"""
 	with open(FORM_JS) as f:
 		src = f.read()
@@ -153,14 +133,9 @@ def test_list_js_severity_indicators():
 
 
 def test_widget_start_has_error_callback():
-	"""v0.5.1 regression guard: the Start dialog's frappe.call must
-	include an error callback. Without it, any server-side failure of
-	api.start (permission error, concurrent session, server exception)
-	silently closes the dialog with no feedback to the user the
-	exact 'widget not working as expected' failure mode reported by
-	users who lacked the Optimus User role. The stop API already had
-	an error callback added in an earlier fix; this test forces start
-	to stay symmetric.
+	"""The Start dialog's frappe.call(api.start) must include an error callback;
+	without it a server-side failure (permission error, concurrent session,
+	exception) closes the dialog silently with no feedback.
 	"""
 	with open(WIDGET_JS) as f:
 		src = f.read()
@@ -180,15 +155,9 @@ def test_widget_start_has_error_callback():
 
 
 def test_widget_stop_has_error_callback():
-	"""Companion to the start-error guard: the Stop call already had an
-	error handler added in an earlier fix. Make sure it stays.
-
-	We look at the entire confirmAndStop function body (finding it
-	from the 'function confirmAndStop' keyword to the closing brace)
-	rather than a fixed-size window after the stop call site the
-	callback body grew in v0.5.1 to handle the 'no active session'
-	reset path and a couple of console.log diagnostics and a fixed
-	window was both brittle and too narrow.
+	"""The Stop call must keep its error callback so a failed stop doesn't
+	strand the widget in 'Stopping...'. Scans the whole confirmAndStop function
+	body (brace-matched) rather than a fixed window.
 	"""
 	with open(WIDGET_JS) as f:
 		src = f.read()
@@ -222,12 +191,9 @@ def test_widget_stop_has_error_callback():
 
 
 def test_widget_stop_handles_no_active_session():
-	"""v0.5.1 regression guard: when the stop API returns
-	{stopped: false} (session already gone auto-stopped, janitor-
-	swept, or a retried click after a network blip on the first
-	stop), the widget must reset to inactive, NOT transition to
-	'Analyzing…' (which would hang forever because no session is
-	actually analyzing).
+	"""When the stop API returns {stopped: false} (session already gone), the
+	widget must reset to inactive, not transition to 'Analyzing...' (which would
+	hang forever).
 	"""
 	with open(WIDGET_JS) as f:
 		src = f.read()

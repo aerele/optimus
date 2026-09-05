@@ -3,15 +3,11 @@
 
 """Analyzer: detect redundant frappe.get_doc / cache.get_value / has_permission calls.
 
-Reads the per-recording sidecar argument log captured by the wraps in
-capture.py, buckets entries by (fn_name, identifier_safe) and emits
-one Redundant Call finding per bucket whose count exceeds a configurable
-threshold.
-
-Bucket key uses identifier_safe (sha256 hash) for redundancy
-detection so equivalent values cluster regardless of literal text.
-The finding's technical_detail_json carries BOTH identifier_safe AND
-identifier_raw the renderer uses identifier_raw.
+Reads the per-recording sidecar argument log, buckets entries by (fn_name,
+identifier_safe hash) so equivalent values cluster regardless of literal text,
+and emits one Redundant Call finding per bucket whose count exceeds a
+configurable threshold. technical_detail_json carries both identifier_safe and
+identifier_raw (the renderer uses identifier_raw).
 """
 
 import json
@@ -28,8 +24,8 @@ DEFAULT_REDUNDANT_HIGH_MULTIPLIER = 5
 
 
 def _conf_int(key: str, default: int) -> int:
-	"""site_config.json fallback for the non-threshold knob (high
-	multiplier) that isn't surfaced on the Settings DocType yet."""
+	"""Read an int knob from site_config.json (the high multiplier), returning
+	``default`` when unset."""
 	try:
 		import frappe
 
@@ -42,12 +38,8 @@ def _conf_int(key: str, default: int) -> int:
 
 
 def _threshold_for(fn_name: str, cfg) -> int:
-	"""Return the count threshold for a given sidecar fn_name.
-
-	Resolved from Optimus Settings (cached) with site_config.json
-	and hardcoded defaults as fallbacks see settings.get_config()
-	for the precedence chain.
-	"""
+	"""Return the count threshold for a sidecar fn_name, from Optimus Settings
+	(with site_config.json and hardcoded defaults as fallbacks)."""
 	if fn_name == "get_doc":
 		return cfg.redundant_doc_threshold
 	if fn_name == "cache_get":
@@ -70,10 +62,8 @@ def _title_for(fn_name: str, identifier_safe, count: int) -> str:
 
 
 def _customer_description_for(fn_name: str, count: int, callsite: dict | None = None) -> str:
-	"""Build the customer description, appending the callsite when
-	available. v0.5.2 requires the callsite (file:line) for the user
-	to actually navigate to the loop pre-v0.5.2 the description
-	said 'the same callsite' without revealing where."""
+	"""Build the customer description, appending the callsite (file:line) when
+	available so the user can navigate to the loop."""
 	site_hint = ""
 	if callsite:
 		fn_site = callsite.get("filename") or ""

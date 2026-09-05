@@ -1,14 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""End-to-end reproduction of Phase-2 line capture for a BACKGROUND-JOB
-function the path P2/P3 assumed works but was never tested.
+"""End-to-end reproduction of phase-2 line capture for a background-job
+function.
 
-Drives the real capture functions in-process (no bench/worker): arm a pass,
-run the picked function through the before/after_job hooks, aggregate and
-confirm the (basename, qualname) drilldown lookup the finding card uses returns
-the hot line. If this passes, capture+linking are sound and any field failure
-is environmental/lifecycle; if it fails, the bug is right here.
+Drives the real capture functions in-process (no bench/worker): arm a pass, run
+the picked function through the before/after_job hooks, aggregate and confirm
+the (basename, qualname) drilldown lookup the finding card uses returns the hot
+line.
 """
 
 import sys

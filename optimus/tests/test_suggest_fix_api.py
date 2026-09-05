@@ -1,13 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Surface tests for the v0.6.0 AI-fix API endpoints.
+"""Surface tests for the AI-fix API endpoints.
 
-``suggest_fix`` / ``test_ai_connection`` need a live bench for true
-integration tests, which the test harness doesn't provide so, matching
-the pattern of ``test_regenerate_reports_api.py``, we source-inspect the
-endpoint bodies to pin the contract: whitelisted, gated, AI-enabled
-guard, eligible-type guard, cache short-circuit and persistence shape.
+``suggest_fix`` / ``test_ai_connection`` need a live bench for true integration
+tests, so (like ``test_regenerate_reports_api.py``) we source-inspect the
+endpoint bodies to pin the contract: whitelisted, gated, AI-enabled guard,
+eligible-type guard, cache short-circuit and persistence shape.
 """
 
 import os

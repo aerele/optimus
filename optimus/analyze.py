@@ -3,19 +3,12 @@
 
 """Background-job entry point: analyze a finished session.
 
-Triggered by `api.stop()` via `frappe.enqueue("optimus.analyze.run", ...)`.
-Reads all recordings for the session from Redis, runs the six analyzers,
-persists the results into the Optimus Session DocType and publishes a
-realtime notification so the UI can navigate to the report.
-
-State transitions on the Optimus Session row:
-    Stopping  →  Analyzing  →  Ready    (happy path)
-    Stopping  →  Analyzing  →  Failed   (uncaught exception)
-
-The Redis state for the session is cleaned up at the end of a successful
-run the source recordings are deleted from RECORDER_REQUEST_HASH and the
-profiler:session:* keys are removed. Failed runs do NOT clean up, so a
-developer can manually retry the analyze.
+Triggered by api.stop() via frappe.enqueue("optimus.analyze.run", ...). Reads
+the session's recordings from Redis, runs the analyzers, persists results into
+the Optimus Session DocType and publishes a realtime notification for the UI.
+Status goes Stopping -> Analyzing -> Ready (or Failed on an uncaught
+exception). A successful run deletes the session's Redis state; a failed run
+leaves it so analyze can be retried.
 """
 
 import html
@@ -107,19 +100,11 @@ ANALYZERS = _BUILTIN_ANALYZERS
 
 
 def _get_analyzers() -> list:
-	"""Return the analyzer pipeline: builtins + custom hooks.
+	"""Return the analyzer pipeline: builtins plus custom hooks.
 
-	Round 2 fix #13. Third-party Frappe apps can add analyzers via:
-
-	    # hooks.py
-	    optimus_analyzers = [
-	        "my_app.analyzers.custom.analyze",
-	    ]
-
-	Custom analyzers run AFTER the builtins so they can read
-	context.actions / context.findings built by earlier analyzers.
-	A failing custom analyzer logs via the normal error path but
-	doesn't abort the pipeline (same as builtins).
+	Third-party apps add analyzers via the ``optimus_analyzers`` hook (a list of
+	dotted paths). Custom analyzers run AFTER the builtins so they can read
+	context.actions / context.findings. A failing one is logged, not fatal.
 	"""
 	analyzers = list(_BUILTIN_ANALYZERS)
 	try:
@@ -149,11 +134,8 @@ def _get_analyzers() -> list:
 
 
 def _publish_progress(percent: float, description: str, session_uuid: str):
-	"""Emit a progress update for the floating widget and form UI.
-
-	Best-effort never raises. Subscribed to in the floating widget JS
-	via frappe.realtime.on("optimus_progress"). Round 2 fix #17.
-	"""
+	"""Emit an optimus_progress update for the floating widget and form UI.
+	Best-effort, never raises."""
 	try:
 		frappe.publish_realtime(
 			"optimus_progress",
@@ -174,27 +156,12 @@ def _publish_session_event(
 	docname: str | None,
 	**extra,
 ) -> None:
-	"""Publish a session-state transition event to the session owner's
-	Desk tabs.
+	"""Publish a session-state transition event to the session owner's Desk tabs.
 
-	Called from the background analyze job, which runs without a
-	request-scoped user so we look the user up from the Profiler
-	Session row itself. Mirrors ``api._publish_session_event`` but
-	with doctype-driven user resolution.
-
-	v0.5.1: drives the floating widget state machine without HTTP
-	polling. Events emitted from analyze.run:
-
-	  optimus_session_analyzing right after status becomes Analyzing
-	  optimus_session_ready success; the widget navigates to the
-	                                 report (kept under its original name
-	                                 for backward compat with v0.3.0+
-	                                 subscribers)
-	  optimus_session_failed uncaught exception during analyze
-
-	Best-effort and isolated a publish failure cannot derail the
-	analyze pipeline. Realtime is a UX convenience; the state is always
-	durable on the Optimus Session row.
+	Runs in the background analyze job (no request-scoped user), so the user is
+	looked up from the Optimus Session row. Events: optimus_session_analyzing,
+	optimus_session_ready, optimus_session_failed. Best-effort and isolated: a
+	publish failure never derails analyze (the state is durable on the row).
 	"""
 	try:
 		user = None
@@ -242,14 +209,12 @@ _SINGLEFLIGHT_MAX_WAIT_SECONDS = 600
 
 
 def _apply_nice() -> None:
-	"""v0.7.x (M5): best-effort lower this process's CPU scheduling priority
-	so a heavy analyze yields the CPU to live web traffic. A *positive* nice
-	increment never requires privilege. No-op when configured to 0 or on a
-	platform without ``os.nice``. CPU-politeness only, not a memory lever.
+	"""Best-effort lower this process's CPU priority so a heavy analyze yields to
+	live web traffic. No-op when configured to 0 or without ``os.nice``.
 
-	Caller gates this to the async (RQ-worker) path: ``os.nice`` is sticky
-	per-process, so renicing the shared gunicorn worker on the inline path
-	would persist for unrelated later requests."""
+	Caller must gate this to the async (RQ-worker) path: ``os.nice`` is sticky
+	per-process, so renicing the shared gunicorn worker would persist for
+	unrelated later requests."""
 	try:
 		inc = int(frappe.conf.get("optimus_analyze_nice", 5) or 0)
 	except Exception:
@@ -263,7 +228,7 @@ def _apply_nice() -> None:
 
 def _touch_singleflight(session_uuid: str) -> None:
 	"""(Re)assert ownership of the single-flight flag and refresh its TTL.
-	Best-effort a cache hiccup must never fail analyze."""
+	Best-effort: a cache hiccup must never fail analyze."""
 	try:
 		frappe.cache.set_value(
 			_SINGLEFLIGHT_KEY, session_uuid, expires_in_sec=_SINGLEFLIGHT_TTL_SECONDS
@@ -274,10 +239,9 @@ def _touch_singleflight(session_uuid: str) -> None:
 
 def is_singleflight_holder(session_uuid: str) -> bool:
 	"""True iff ``session_uuid`` currently holds the single-flight flag. The flag
-	is heartbeated throughout analyze (the analyzer loop + AI phases), so its
-	presence is a reliable liveness signal. The janitor consults this before
-	failing a long-running Analyzing row the heartbeat is Redis-only (no DB
-	write mid-analyze), so the row's ``modified`` can't be used for liveness."""
+	is heartbeated throughout analyze, so its presence is a reliable liveness
+	signal (the janitor consults it before failing a long-running Analyzing row,
+	since no DB write happens mid-analyze)."""
 	try:
 		return frappe.cache.get_value(_SINGLEFLIGHT_KEY) == session_uuid
 	except Exception:
@@ -285,8 +249,8 @@ def is_singleflight_holder(session_uuid: str) -> bool:
 
 
 def _release_singleflight(session_uuid: str) -> None:
-	"""Release the flag, but only if we still hold it (compare-then-delete)
-	a TTL-expired-then-reacquired flag belonging to another session must not be
+	"""Release the flag, but only if we still hold it (compare-then-delete), so a
+	TTL-expired-then-reacquired flag belonging to another session isn't
 	clobbered. Best-effort."""
 	try:
 		if frappe.cache.get_value(_SINGLEFLIGHT_KEY) == session_uuid:
@@ -296,20 +260,14 @@ def _release_singleflight(session_uuid: str) -> None:
 
 
 def _acquire_singleflight(session_uuid: str, docname: str, deadline) -> bool:
-	"""Global single-flight gate for the heavy (memory-hungry) analyze phase.
+	"""Global single-flight gate for the heavy (memory-hungry) analyze phase, so
+	two sessions can't analyze at once and roughly double peak RAM.
 
-	Returns:
-	  * ``True`` proceed with analysis. Either we acquired the flag, or
-	    single-flight doesn't apply (inline path / disabled), or we waited past
-	    the deadline and degrade to the pre-M2 behavior rather than strand.
-	  * ``False``: another session holds the flag; we re-enqueued ourselves
-	    (anonymously, carrying ``_singleflight_deadline``) to yield the worker.
-	    The caller must ``return`` now.
-
-	Mirrors ``_bg_wait_for_pending_jobs``: re-enqueue + yield, never a held
-	lock. Skipped when the scheduler is disabled (analyze runs inline in a web
-	request there's no worker to run our re-enqueued self and inline peak is
-	already bounded by ``optimus_inline_analyze_limit``)."""
+	Returns True to proceed (flag acquired, single-flight not applicable, or the
+	wait deadline passed so we degrade rather than strand). Returns False when
+	another session holds the flag and we re-enqueued ourselves to yield the
+	worker: the caller must ``return`` now. Re-enqueue + yield, never a held
+	lock. Skipped when the scheduler is disabled (analyze runs inline)."""
 	# Inline path: no worker to yield to proceed.
 	try:
 		if is_scheduler_disabled():
@@ -363,10 +321,9 @@ def _acquire_singleflight(session_uuid: str, docname: str, deadline) -> bool:
 
 
 def _rq_job_active(job_id: str) -> bool:
-	"""True if RQ job ``job_id`` is still queued / started / deferred /
-	scheduled. False if it's terminal (finished / failed / stopped /
-	canceled) or no longer fetchable (expired / deleted). Any error → not
-	active (don't make analyze block on it)."""
+	"""True if RQ job ``job_id`` is still queued / started / deferred / scheduled.
+	False if terminal or no longer fetchable. Any error counts as not active (so
+	analyze never blocks on it)."""
 	try:
 		from frappe.utils.background_jobs import get_redis_conn
 		from rq.job import Job
@@ -378,8 +335,8 @@ def _rq_job_active(job_id: str) -> bool:
 
 
 def _short_exc(exc_info) -> str | None:
-	"""Last non-empty line of an RQ ``exc_info`` traceback, truncated the
-	one-liner that names the exception (e.g. ``ValueError: bad doc_name``)."""
+	"""Last non-empty line of an RQ ``exc_info`` traceback (the one that names the
+	exception, e.g. ``ValueError: bad doc_name``), truncated to 500 chars."""
 	if not exc_info:
 		return None
 	lines = [ln.strip() for ln in str(exc_info).splitlines() if ln.strip()]
@@ -387,12 +344,9 @@ def _short_exc(exc_info) -> str | None:
 
 
 def _rq_dt_to_db(dt):
-	"""RQ exposes ``started_at`` / ``ended_at`` as timezone-aware UTC datetimes;
-	``str()`` of one yields ``'...+00:00'`` and MariaDB's DATETIME column rejects
-	the tz offset (err 1292 it crashed the whole report persist). Convert to
-	the site's system timezone and format naive (matching ``session.record_job``'s
-	``enqueued_at``), so it stores cleanly and reads consistently. Falls back to a
-	tz-stripped string if the frappe context can't resolve the system timezone."""
+	"""Convert an RQ tz-aware UTC datetime to a naive system-timezone string that
+	MariaDB's DATETIME column accepts (a tz offset triggers err 1292). Falls back
+	to a tz-stripped string if the system timezone can't be resolved."""
 	if not dt:
 		return None
 	try:
@@ -411,13 +365,9 @@ _TZ_OFFSET_RE = re.compile(r"([+-]\d{2}:?\d{2}|Z)$")
 
 def _db_datetime_str(val):
 	"""Make a datetime *string* MariaDB-safe by stripping any trailing tz offset
-	(``+00:00`` / ``+0000`` / ``-05:30`` / ``Z``); MariaDB's DATETIME column
-	rejects an offset (err 1292). New captures are already clean via
-	``_rq_dt_to_db``; this guards the DB-write boundary against values stored in
-	Redis by an older build (``str()`` of a tz-aware datetime), so re-analyzing a
-	pre-fix session persists instead of crashing again. A naive string (the date
-	uses ``-`` only internally, never at the end) passes through unchanged.
-	Returns None for an empty value."""
+	(``+00:00`` / ``+0000`` / ``-05:30`` / ``Z``), which the DATETIME column
+	rejects (err 1292). A naive string passes through unchanged; an empty value
+	returns None."""
 	if not val:
 		return None
 	s = str(val).strip()
@@ -427,9 +377,9 @@ def _db_datetime_str(val):
 
 
 def _capture_job_terminal_status(session_uuid: str, job_id: str) -> None:
-	"""Read a now-inactive RQ job's terminal status + timing and record it on
-	the session's job-meta hash, so analyze can persist it (Completed / Failed /
-	Timeout / Stopped). Best-effort never blocks the wait."""
+	"""Read a now-inactive RQ job's terminal status + timing and record it on the
+	session's job-meta hash (Completed / Failed / Timeout / Stopped) so analyze
+	can persist it. Best-effort, never blocks the wait."""
 	try:
 		from frappe.utils.background_jobs import get_redis_conn
 		from rq.job import Job
@@ -469,9 +419,8 @@ def _capture_job_terminal_status(session_uuid: str, job_id: str) -> None:
 
 
 def _finalize_pending_statuses(session_uuid: str, job_ids) -> None:
-	"""At the wait ceiling: record a terminal status for jobs that finished,
-	and mark any still-active job ``Running`` (so it's reported, not vanished
-	the user re-runs Analyze once it finishes to capture its data)."""
+	"""At the wait ceiling: record a terminal status for finished jobs and mark
+	any still-active job ``Running`` so it's reported rather than vanishing."""
 	for jid in job_ids:
 		if _rq_job_active(jid):
 			session.set_job_status(session_uuid, jid, status="Running")
@@ -480,20 +429,14 @@ def _finalize_pending_statuses(session_uuid: str, job_ids) -> None:
 
 
 def _bg_wait_for_pending_jobs(session_uuid: str, docname: str, deadline):
-	"""Make sure the background jobs the profiled flow enqueued have finished
-	before we gather recordings.
+	"""Wait for the background jobs the profiled flow enqueued to finish before we
+	gather recordings.
 
-	Returns:
-	  * ``None``: there are still-running jobs and we re-enqueued
-	    ``analyze.run`` to yield the worker; the caller must ``return`` now.
-	  * ``0``: nothing to wait for / all jobs finished / the wait is disabled
-	    or can't run (scheduler off → analyze is inline): proceed with analysis.
-	  * ``N > 0``: the wait cap was hit with N jobs still running: proceed,
-	    but the caller should surface a warning.
-
-	Pure best-effort any failure returns 0 (proceed). Re-enqueuing (rather
-	than sleeping the whole window) lets a single worker actually run those
-	jobs while we wait.
+	Returns None when jobs are still running and we re-enqueued ``analyze.run``
+	to yield the worker (caller must ``return`` now); 0 when there's nothing to
+	wait for or the wait is disabled/inline (proceed); N > 0 when the wait cap
+	was hit with N jobs still running (proceed, but caller should warn).
+	Best-effort: any failure returns 0.
 	"""
 	try:
 		pending = session.get_pending_jobs(session_uuid)
@@ -582,15 +525,13 @@ def _bg_wait_for_pending_jobs(session_uuid: str, docname: str, deadline):
 
 
 def _auto_arm_phase2(docname: str, context) -> None:
-	"""v0.7.x (P3): when ``optimus_phase2_auto_arm`` is set in site_config, arm
-	a phase-2 line-profile pass on the recommended hot-path functions right
-	after analyze finishes so the user just re-runs the flow ONCE to get
-	line-level data, with no manual picking.
+	"""When ``optimus_phase2_auto_arm`` is set in site_config, arm a phase-2
+	line-profile pass on the recommended hot-path functions right after analyze
+	finishes, so the user just re-runs the flow once for line-level data.
 
-	Opt-in + admin-only (site_config, not a casual UI toggle): arming
-	instruments the user's NEXT execution of the flow, so it's only sensible
-	for replay-safe flows / non-production. Heavily guarded and fully
-	best-effort it must NEVER fail analyze (the report is already saved)."""
+	Opt-in and admin-only: arming instruments the user's NEXT run of the flow,
+	so it suits replay-safe / non-production flows only. Best-effort: never fails
+	analyze (the report is already saved)."""
 	try:
 		if not frappe.conf.get("optimus_phase2_auto_arm"):
 			return
@@ -710,9 +651,8 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 	_singleflight_deadline: float | None = None):
 	"""Background-job entry point. Called from api.stop() via frappe.enqueue.
 
-	``_bg_wait_until`` is set only when ``run`` re-enqueues itself while
-	waiting for the flow's background jobs to finish (see
-	``_bg_wait_for_pending_jobs``) external callers never pass it."""
+	``_bg_wait_until`` / ``_singleflight_deadline`` are set only when ``run``
+	re-enqueues itself while waiting; external callers never pass them."""
 	# Round 2 fix #6: mark this request-context as "analyzing" so our
 	# before_request / before_job hooks don't recursively activate the
 	# recorder on the DocType writes we're about to do. Without this,
@@ -1019,9 +959,8 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 
 def _mark_ai_spend_session(session_uuid) -> None:
 	"""Tag the worker-local "active session" so ai_fix's per-call spend recorder
-	(``ai_fix._record_session_spend``) charges this session's cumulative
-	``Optimus Session.ai_tokens_spent``. Best-effort + guarded so unit tests that
-	stub ``frappe`` (no ``frappe.local``) don't break."""
+	charges this session's cumulative ``Optimus Session.ai_tokens_spent``.
+	Best-effort and guarded so frappe-stubbing unit tests don't break."""
 	try:
 		frappe.local._optimus_spend_session = session_uuid
 	except Exception:
@@ -1029,21 +968,15 @@ def _mark_ai_spend_session(session_uuid) -> None:
 
 
 def _deserialize_tree(uuid: str, tree_blob):
-	"""Verify (HMAC) + unpickle a pyinstrument tree blob; returns the pyi
-	session object or None. Shared by the live-Redis and persisted-bundle
-	read paths in :func:`_fetch_recordings` so both reconstruct identically.
+	"""Verify (HMAC) and unpickle a pyinstrument tree blob; returns the pyi
+	session object or None. Shared by the live-Redis and persisted-bundle read
+	paths so both reconstruct identically.
 
-	Phase K hardening: every blob is HMAC-prefixed by
-	``hooks_callbacks._dump_capture_state_to_redis``; ``session.unsign_blob``
-	rejects any tree whose signature doesn't match the site's encryption_key,
-	so a Redis-poisoning attacker can't slip a malicious pickle in.
-
-	Transition fallback: blobs written by code predating the HMAC rollout lack
-	the signature (``unsign_blob`` returns ``None``). To avoid degrading every
-	in-flight session at deploy time, we fall back to raw ``pickle.loads`` on
-	unsigned blobs when ``optimus_allow_unsigned_pickles`` is truthy in
-	site_config.json (default True; admin flips it False once the keyspace has
-	rolled over post-deploy). See SECURITY.md.
+	SECURITY: ``session.unsign_blob`` rejects any tree whose HMAC signature
+	doesn't match the site's encryption_key, so a Redis-poisoning attacker can't
+	slip in a malicious pickle. Unsigned blobs fall back to raw ``pickle.loads``
+	only when ``optimus_allow_unsigned_pickles`` is truthy (default True; flip it
+	off once the keyspace has rolled over). See SECURITY.md.
 	"""
 	import pickle
 
@@ -1115,17 +1048,13 @@ def _deserialize_tree(uuid: str, tree_blob):
 
 def _rehydrate_from_bundle(recordings_bundle, uuid: str):
 	"""Rebuild a recording dict (rec + pyi_session + sidecar) from a persisted
-	bundle entry, mirroring the live-Redis read path. Returns the rec dict or
-	None when the bundle lacks this uuid. Tolerant of being handed either the
-	full bundle (``{"recordings": {...}}``) or the inner uuid→entry map directly.
+	bundle entry, mirroring the live-Redis read path. Returns the rec dict, or
+	None when the bundle lacks this uuid. Accepts either the full bundle
+	(``{"recordings": {...}}``) or the inner uuid->entry map.
 
-	The tree round-trips byte-identically (base64 of the same HMAC-signed
-	pickle), but ``rec``/``sidecar`` came back through JSON so tuples are now
-	lists and any exotic type was stringified. That's transparent to the
-	analyze/render consumers (string/number/dict fields), but is NOT the pickle
-	Redis stores. The persisted ``sparse``/``infra`` entries are intentionally
-	not re-attached here they aren't part of the live ``_fetch_recordings``
-	rec shape (see :func:`_persist_recordings_file`)."""
+	``rec``/``sidecar`` come back through JSON (tuples become lists), which is
+	transparent to consumers. ``sparse``/``infra`` are intentionally not
+	re-attached (not part of the live rec shape)."""
 	import base64
 
 	if not isinstance(recordings_bundle, dict):
@@ -1153,23 +1082,14 @@ def _rehydrate_from_bundle(recordings_bundle, uuid: str):
 
 
 def _fetch_recordings(recording_uuids: list[str], *, recordings_bundle=None):
-	"""Stream recording dicts from Redis, one at a time.
+	"""Stream recording dicts from Redis one at a time (a generator, so the
+	pipeline can free each pyi_session between recordings instead of holding all
+	in RAM).
 
-	v0.3.0 changes:
-	  - This is now a generator (was: list-returning) so the analyze
-	    pipeline can drop unpruned pyi_session blobs from memory between
-	    recordings rather than holding all 200 in RAM at once.
-	  - For each recording, also loads the per-recording pyi tree pickle
-	    from `profiler:tree:<uuid>` and the sidecar log from
-	    `profiler:sidecar:<uuid>`. Both are best-effort failures
-	    log a warning and yield None for the missing piece.
-
-	Yields recording dicts shaped like:
-	    {
-	      ...existing recorder fields (uuid, calls, etc.)...
-	      "pyi_session": <pyinstrument.session.Session or dict or None>,
-	      "sidecar": <list[dict]>,
-	    }
+	For each recording also loads the per-recording pyi tree pickle and sidecar
+	log (best-effort; a missing piece yields None). Falls back to
+	``recordings_bundle`` when Redis has been cleaned up post-analyze. Yields
+	recorder dicts with added ``pyi_session`` and ``sidecar`` keys.
 	"""
 	for uuid in recording_uuids:
 		rec = frappe.cache.hget(RECORDER_REQUEST_HASH, uuid)
@@ -1243,28 +1163,21 @@ _EXPLAIN_CACHE_MAX_PER_ANALYZE = 1000
 
 
 def _cap_explain_cache(cache: OrderedDict, key: str, value):
-	"""Insert into the ordered EXPLAIN cache; evict the oldest entry
-	once we cross the cap so a session with 10K+ unique queries doesn't
-	balloon memory."""
+	"""Insert into the ordered EXPLAIN cache, evicting the oldest entry (FIFO)
+	past the cap so a session with 10K+ unique queries doesn't balloon memory."""
 	cache[key] = value
 	if len(cache) > _EXPLAIN_CACHE_MAX_PER_ANALYZE:
 		cache.popitem(last=False)
 
 
 def _enrich_recordings(recordings: list[dict]) -> list[str]:
-	"""Mirror frappe.recorder.post_process for our recordings only.
+	"""Mirror frappe.recorder.post_process (sqlparse-format + EXPLAIN + mark
+	duplicates) for this session's recordings only.
 
-	The vanilla post_process operates on every recording in
-	RECORDER_REQUEST_HASH globally and starts a read-only DB transaction
-	that would block our subsequent DocType writes. This version is
-	scoped to our session's recordings and leaves the transaction state
-	alone.
-
-	Idempotent: safe to call on already-enriched recordings.
-
-	Returns a list of warning strings that should be surfaced in the
-	report things like "we truncated X queries because the session hit
-	the per-recording cap".
+	Unlike the vanilla version, it doesn't touch every recording in
+	RECORDER_REQUEST_HASH or start a read-only transaction that would block our
+	DocType writes. Idempotent. Returns warning strings to surface in the report
+	(e.g. queries truncated at the per-recording cap).
 	"""
 	# Flush any pending transaction state so EXPLAIN sees a consistent
 	# snapshot (Round 2 fix #4). The caller commits right before invoking
@@ -1450,13 +1363,9 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 
 
 def _shape_key(query: str) -> str:
-	"""Cheap query-shape key for EXPLAIN dedup.
-
-	Lower-cases, collapses whitespace and truncates. This is NOT the
-	proper sqlparse normalization we just need "are these two queries
-	shaped the same" for caching purposes. The REAL normalization happens
-	in mark_duplicates afterward.
-	"""
+	"""Cheap query-shape key for EXPLAIN dedup: lower-case, collapse whitespace,
+	truncate. Not proper normalization (mark_duplicates does that later); just
+	enough to tell whether two queries are shaped the same for caching."""
 	import re
 
 	return re.sub(r"\s+", " ", query.lower().strip())[:500]
@@ -1476,17 +1385,12 @@ def _apply_overflow_or_pass(
 	hard_max_bytes: int = CALL_TREE_HARD_MAX_BYTES,
 ) -> tuple[str, str | None]:
 	"""Decide whether to inline, overflow-to-file, or hard-truncate a tree blob.
+	Returns ``(json_to_persist, overflow_file_url_or_None)``.
 
-	Returns:
-	    (json_to_persist, overflow_file_url_or_None)
-
-	  - If `tree_json` is < CALL_TREE_OVERFLOW_THRESHOLD_BYTES → return as-is.
-	  - If `tree_json` is between the threshold and hard_max_bytes → call
-	    write_file(filename, content) to create a private File attachment;
-	    return a one-line marker JSON pointing at the URL. On write failure,
-	    fall back to a hard-truncated tree.
-	  - If `tree_json` is > hard_max_bytes → hard-truncate immediately
-	    without attempting an overflow file.
+	Below CALL_TREE_OVERFLOW_THRESHOLD_BYTES: returned as-is. Between the
+	threshold and hard_max_bytes: written via ``write_file`` to a private File,
+	returning a marker JSON with the URL (hard-truncated on write failure). Above
+	hard_max_bytes: hard-truncated immediately, no file.
 	"""
 	import json as _json
 
@@ -1797,23 +1701,14 @@ def _dedupe_findings_across_actions(
 ) -> None:
 	"""Collapse per-action duplicates of the same code path in place.
 
-	Groups findings by ``(finding_type, filename, lineno, function)``
-	for the types listed in ``_DEDUPE_FINDING_TYPES``. When a group has
-	2+ findings, the highest-impact one becomes the "dominant"; the
-	others are dropped after their action context is folded into the
-	dominant's ``technical_detail_json`` (under ``merged_action_refs``
-	and friends) and a one-sentence "Also affects …" note is appended
-	to the dominant's ``customer_description``.
-
-	The dominant's ``estimated_impact_ms`` becomes the SUM across the
-	group, ``affected_count`` becomes the number of merged findings.
-	Its severity / title / action_ref / drilldown_chain stay
-	unchanged so downstream renderers resolve the same way they did
-	before dedup.
-
-	Findings outside the dedup-eligible types pass through untouched
-	(N+1 / SQL red flags / Hot Line have their own dedup logic or
-	aren't per-action by construction).
+	Groups the ``_DEDUPE_FINDING_TYPES`` findings by ``(finding_type, filename,
+	lineno, function)``. In each group of 2+, the highest-impact finding becomes
+	dominant; the others are dropped after folding their action context into its
+	``technical_detail_json`` (``merged_action_refs`` etc.) and appending an
+	"Also affects ..." note. The dominant's ``estimated_impact_ms`` becomes the
+	group sum and ``affected_count`` the merged count; severity / title /
+	action_ref / drilldown_chain stay unchanged. Other finding types pass
+	through untouched.
 	"""
 	if not findings:
 		return
@@ -1941,15 +1836,10 @@ _FINDING_TITLE_ELLIPSIS = "..."
 
 
 def _truncate_finding_titles(findings: list[dict]) -> None:
-	"""Clamp every finding's title to <= _FINDING_TITLE_MAX_CHARS chars.
-
-	Mutates the findings list in place. Intended as a defense-in-depth
-	guard: analyzers should produce short titles to begin with (see
-	analyzers/base.short_filename), but pathological data can still
-	produce over-long titles on corner cases the analyzers didn't
-	anticipate. Rather than crash the whole persist, we clamp and
-	keep the full information in technical_detail_json.
-	"""
+	"""Clamp every finding's title to <= _FINDING_TITLE_MAX_CHARS chars, in place.
+	A defense-in-depth guard against an over-long title crashing the whole
+	persist (Data field is VARCHAR(140)); the full info stays in
+	technical_detail_json."""
 	for finding in findings:
 		title = finding.get("title") or ""
 		if len(title) > _FINDING_TITLE_MAX_CHARS:
@@ -1965,15 +1855,12 @@ _FINDING_SNIPPET_TRUNCATE_CHARS = 200
 
 
 def _enrich_findings_with_source_snippets(findings: list[dict]) -> None:
-	"""Mutate findings in-place: attach a ±2-line source snippet to each
-	finding whose technical_detail.callsite resolves to a readable file.
+	"""Mutate findings in place: attach a source snippet to each finding whose
+	technical_detail.callsite resolves to a readable file.
 
-	Best-effort: missing files, decoding errors, out-of-range linenos,
-	and malformed technical_detail_json all yield no snippet (and no
-	warning). The renderer just skips the snippet block when absent.
-
-	Files are cached per-call so a session with 30 N+1 findings clustered
-	in a handful of source files reads each file once.
+	Best-effort: missing files, decode errors, out-of-range linenos and
+	malformed JSON all yield no snippet (the renderer skips the block). Files are
+	cached per call so clustered findings read each file once.
 	"""
 	file_cache: dict[str, list[str] | None] = {}
 
@@ -2040,17 +1927,13 @@ def _enrich_findings_with_source_snippets(findings: list[dict]) -> None:
 
 def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = None) -> None:
 	"""Mutate ``context.findings`` in place: when Optimus Settings has
-	``ai_enabled`` AND ``ai_auto_suggest``, ask the configured LLM for a
-	fix for the top ``ai_auto_suggest_max`` eligible findings (0 = all),
-	highest-severity / highest-impact first and store the result on each
-	finding's ``llm_fix_json`` so it shows up in the report (and is what
-	the on-demand "Suggest a fix (AI)" button returns from cache).
+	``ai_enabled`` and ``ai_auto_suggest``, ask the LLM for a fix on the top
+	``ai_auto_suggest_max`` eligible findings (0 = all), highest severity/impact
+	first, storing each on ``llm_fix_json``.
 
-	Best-effort + bounded: a misconfigured / unreachable provider, an
-	individual finding that errors, or hitting ``AI_AUTO_SUGGEST_TIME_
-	BUDGET_SECONDS`` just means fewer (or no) suggestions never a failed
-	analyze. The network I/O lives here in the orchestrator, never in an
-	analyzer (the pure-analyzer contract is untouched).
+	Best-effort and bounded by ``AI_AUTO_SUGGEST_TIME_BUDGET_SECONDS``: a bad
+	provider or per-finding error just means fewer suggestions, never a failed
+	analyze. Network I/O lives here in the orchestrator, never in an analyzer.
 	"""
 	findings = context.findings or []
 	if not findings:
@@ -2168,29 +2051,17 @@ def _ai_payload_for_finding(
 	recordings_by_uuid: dict | None = None,
 	actions_by_idx: dict | None = None,
 ) -> dict:
-	"""Build the dict ``ai_fix.suggest_fix`` expects from a finding-like
-	object a ``Optimus Finding`` child row, or a ``SimpleNamespace``
-	shaped like one (``finding_type`` / ``severity`` / ``title`` /
-	``customer_description`` / ``estimated_impact_ms`` / ``affected_count`` /
-	``action_ref`` / ``technical_detail_json`` / ``llm_fix_json``). It's the
-	renderer's normalized finding dict plus a wider source-code window around
-	the callsite, plus when a Phase-2 line-profile pass instrumented this
-	finding's function the hottest line from it (number / content / ms /
-	hits). ``phase2_index`` is a
-	``renderer._build_line_drilldown_callsite_index`` result,
-	``{(basename, function): hotline}``.
+	"""Build the dict ``ai_fix.suggest_fix`` expects from a finding-like object
+	(an ``Optimus Finding`` child row or a ``SimpleNamespace`` shaped like one).
 
-	v0.6.x: when both ``recordings_by_uuid`` (``{recording_uuid: recording}``)
-	and ``actions_by_idx`` (``{idx: action_dict}``) are provided AND the
-	finding has an ``action_ref``, the top-N slowest queries from that
-	action's recording are attached to ``technical_detail.example_queries``.
-	This gives the AI **verbatim SQL evidence** for Slow-Hot-Path / N+1
-	findings whose hot function ran raw SQL without it the model has to
-	infer the query shape from the Python source, which is the leading
-	cause of nonsense substitutions (e.g. inventing ``filters={"name":
-	("in", [some_var] * N)}`` to fit an unrelated example pattern).
-	Already-set ``example_queries`` (e.g. from SQL red-flag analyzers) wins
-	this only fills the gap."""
+	It's the renderer's normalized finding dict plus a wider source-code window
+	around the callsite, plus (when a Phase-2 pass instrumented the finding's
+	function) its hottest line via ``phase2_index``
+	(``{(basename, function): hotline}``). When ``recordings_by_uuid`` +
+	``actions_by_idx`` are given and the finding has an ``action_ref``, the top-N
+	slowest queries from that action's recording are attached as
+	``technical_detail.example_queries`` (verbatim SQL evidence), unless already
+	set by a SQL red-flag analyzer."""
 	from optimus import ai_fix
 
 	payload = renderer._finding_to_dict(child, file_cache=file_cache)
@@ -2240,14 +2111,11 @@ def _maybe_attach_recorded_queries(
 	recordings_by_uuid: dict | None,
 	actions_by_idx: dict | None,
 ) -> None:
-	"""When recordings + actions are available AND the finding has an
+	"""When recordings + actions are available and the finding has an
 	``action_ref``, attach the top-N slowest SQL queries from that action's
 	recording to ``payload.technical_detail.example_queries`` (best-effort).
-
-	Skipped silently when any of the inputs is missing or the finding's
-	technical_detail already carries example_queries (a SQL red-flag analyzer
-	set them those are the most relevant queries by definition; don't
-	overwrite)."""
+	Skipped when inputs are missing or ``example_queries`` is already set by a
+	SQL red-flag analyzer (those are the most relevant; don't overwrite)."""
 	if not recordings_by_uuid or not actions_by_idx or action_ref in (None, ""):
 		return
 	try:
@@ -2287,10 +2155,8 @@ def _maybe_attach_recorded_queries(
 
 
 def _phase2_index_for(doc_or_docname) -> dict:
-	"""``renderer._build_line_drilldown_callsite_index`` for a session
-	doc / docname, or ``{}`` on any error (no phase-2 runs yet, doc
-	gone, etc.).
-	"""
+	"""``renderer._build_line_drilldown_callsite_index`` for a session doc or
+	docname, or ``{}`` on any error (no phase-2 runs yet, doc gone, etc.)."""
 	try:
 		doc = doc_or_docname
 		if isinstance(doc, str):
@@ -2303,37 +2169,19 @@ def _phase2_index_for(doc_or_docname) -> dict:
 def _run_ai_backfill(doc, *, cap: int | None = None,
                      time_budget: float = AI_BACKFILL_TIME_BUDGET_SECONDS,
                      regenerate_all: bool = False) -> dict:
-	"""Generate AI fix suggestions for eligible findings on a persisted
-	Optimus Session ``doc``, persist them (``frappe.db.set_value`` + update
-	the in-memory rows so a subsequent ``_render_and_attach_reports``
-	re-fetch sees them) and report counts.
+	"""Generate AI fix suggestions for eligible findings on a persisted Optimus
+	Session ``doc``, persist them (DB + in-memory rows) and report counts.
 
-	By default this only touches eligible findings that DON'T have a
-	suggestion yet the "fill the gaps" case (``api.backfill_ai_fixes``,
-	the auto-suggest backfill, the analyze pipeline). With
-	``regenerate_all=True`` it (re)generates the suggestion for EVERY
-	eligible finding, overwriting existing ones the "re-evaluate the whole
-	report" case (e.g. after changing the AI model/prompt). On a failure
-	mid-re-eval the OLD suggestion is left in place (we only write on
-	success), so there's no data loss.
+	By default only fills findings without a suggestion yet;
+	``regenerate_all=True`` (re)generates every eligible one, overwriting (old
+	suggestion kept on a mid-run failure, since writes happen only on success).
+	Requires ``ai_fix.is_available()`` (returns all-zeros otherwise).
 
-	The CALLER decides whether to invoke this the analyze pipeline / plain
-	``regenerate_reports`` only do so when Optimus Settings has
-	``ai_auto_suggest`` on (via ``_backfill_ai_suggestions``); the explicit
-	"Generate AI fixes" / "Re-evaluate AI fixes" buttons call it whenever the
-	provider is configured (via ``api.backfill_ai_fixes``). Requires
-	``ai_fix.is_available()``: returns all-zeros if not.
-
-	``cap``: max findings to do this run. ``None`` → use Optimus Settings'
-	``ai_auto_suggest_max``; ``0`` → no cap (do as many as fit in
-	``time_budget``). Best-effort + time-budgeted (the callers run inside a
-	web request, so this must stay well under the gunicorn worker timeout)
-	a provider error on one finding doesn't stop the rest.
-
-	Returns ``{"added": int, "failed": int, "skipped_time": int,
-	"total_pending": int}``: ``total_pending`` is the number of findings
-	this run targeted (before the cap): the missing ones, or with
-	``regenerate_all``: all eligible ones.
+	``cap``: max findings this run. None uses Optimus Settings'
+	``ai_auto_suggest_max``; 0 means no cap (as many as fit ``time_budget``).
+	Best-effort and time-budgeted (callers run in a web request). Returns
+	``{"added", "failed", "skipped_time", "total_pending"}``, where
+	``total_pending`` is the count targeted before the cap.
 	"""
 	out = {"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0}
 	_mark_ai_spend_session(getattr(doc, "session_uuid", None))
@@ -2393,17 +2241,10 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 
 
 def _backfill_ai_suggestions(doc) -> bool:
-	"""Auto-suggest-gated AI backfill: run ``_run_ai_backfill`` only when
-	Optimus Settings has ``ai_enabled`` AND ``ai_auto_suggest``. Used by
-	``analyze.run`` (to retry any auto-suggested finding that errored before
-	persistence) and by ``api.regenerate_reports`` (so flipping the
-	"Suggest AI fixes by default" switch and re-rendering an existing
-	session backfills it). Returns True if any suggestion was added.
-
-	The explicit "Generate AI fixes" button bypasses this gate it calls
-	``_run_ai_backfill`` directly via ``api.backfill_ai_fixes``, so it works
-	even when ``ai_auto_suggest`` is off.
-	"""
+	"""Auto-suggest-gated AI backfill: run ``_run_ai_backfill`` only when Optimus
+	Settings has ``ai_enabled`` and ``ai_auto_suggest``. Returns True if any
+	suggestion was added. The explicit "Generate AI fixes" button bypasses this
+	gate by calling ``_run_ai_backfill`` directly."""
 	try:
 		from optimus.settings import get_config
 		cfg = get_config()
@@ -2427,8 +2268,8 @@ def _backfill_ai_suggestions(doc) -> bool:
 
 
 def _table_index_sample_queries(recordings: list[dict], table: str, limit: int = 4) -> list[str]:
-	"""A few distinct normalized SELECT queries from the session that touched
-	``table``: best context for the LLM's index advice. Best-effort."""
+	"""Up to ``limit`` distinct normalized SELECT queries from the session that
+	touched ``table``, as context for the LLM's index advice. Best-effort."""
 	out: list[str] = []
 	seen: set[str] = set()
 	for recording in recordings or []:
@@ -2449,10 +2290,8 @@ def _table_index_sample_queries(recordings: list[dict], table: str, limit: int =
 
 
 def _table_existing_indexes(table: str) -> list[dict]:
-	"""``[{name, columns:[...by seq], unique}]`` for ``table`` (best-effort, []
-	on error). Delegates to the dialect adapter so it's portable across
-	MariaDB / Postgres; the MariaDB adapter is the verbatim lift of the old
-	``SHOW INDEX`` parsing this used to do inline."""
+	"""``[{name, columns, unique}]`` for ``table`` (best-effort, [] on error).
+	Delegates to the dialect adapter so it's portable across MariaDB / Postgres."""
 	from optimus.dbdialect import get_dialect
 
 	return [
@@ -2480,11 +2319,11 @@ def _ai_payload_for_table(t_entry: dict, recordings: list[dict]) -> dict:
 
 
 def _enrich_table_breakdown_with_ai_suggestions(context, recordings: list[dict]) -> None:
-	"""When Optimus Settings has ``ai_enabled`` AND ``ai_auto_suggest``, ask
-	the LLM for an index recommendation on the top ``AI_AUTO_INDEX_MAX_TABLES``
-	tables that have a heuristic ``recommended_index`` and stash it on the
-	breakdown entry's ``ai_index``. Best-effort + time-budgeted failures /
-	a slow provider just mean fewer (or no) AI blocks, never a failed analyze."""
+	"""When Optimus Settings has ``ai_enabled`` and ``ai_auto_suggest``, ask the
+	LLM for an index recommendation on the top ``AI_AUTO_INDEX_MAX_TABLES``
+	tables that have a heuristic ``recommended_index``, stashing it on each
+	breakdown entry's ``ai_index``. Best-effort and time-budgeted: never fails
+	analyze."""
 	breakdown = (context.aggregate or {}).get("table_breakdown") or []
 	eligible = [t for t in breakdown if isinstance(t, dict) and t.get("recommended_index")]
 	if not eligible:
@@ -2525,12 +2364,10 @@ def _enrich_table_breakdown_with_ai_suggestions(context, recordings: list[dict])
 
 
 def _run_table_index_ai_backfill(doc, *, table_name: str) -> dict:
-	"""Generate (or regenerate) the LLM index recommendation for one table on
-	a persisted Optimus Session ``doc`` and write it into
-	``table_breakdown_json``. Ungated (the "Suggest an index (AI)" button asks
-	for it explicitly) but ``ai_fix.suggest_index`` still needs a configured
-	provider. Returns ``{"ok": bool, "table": str, "reason"?: str}``; lets
-	``ai_fix.AiFixError`` propagate (the API turns it into ``frappe.throw``)."""
+	"""Generate (or regenerate) the LLM index recommendation for one table on a
+	persisted Optimus Session ``doc`` and write it into ``table_breakdown_json``.
+	Ungated but still needs a configured provider. Returns
+	``{"ok", "table", "reason"?}``; lets ``ai_fix.AiFixError`` propagate."""
 	_mark_ai_spend_session(getattr(doc, "session_uuid", None))
 	if not table_name:
 		return {"ok": False, "reason": "no table specified"}
@@ -2625,9 +2462,9 @@ _REPRODUCER_NOISE_PATH_PREFIXES = (
 
 
 def _is_reproducer_noise(rec: dict) -> bool:
-	"""Return True when a recording shouldn't appear in the auto-notes
-	reproducer list. Still appears in the per-action breakdown just
-	excluded from the high-level human-readable flow."""
+	"""True when a recording is background/polling noise that shouldn't appear in
+	the auto-notes reproducer list. It still appears in the per-action
+	breakdown."""
 	cmd = (rec.get("cmd") or "").strip()
 	if cmd:
 		for prefix in _REPRODUCER_NOISE_CMD_PREFIXES:
@@ -2642,20 +2479,16 @@ def _is_reproducer_noise(rec: dict) -> bool:
 
 
 def _recordings_for_reproducer(recordings: list[dict]) -> list[dict]:
-	"""The signal (non-noise) recordings, in order. Shared by the raw
-	auto-notes list and the AI humanizer see ``_is_reproducer_noise``."""
+	"""The signal (non-noise) recordings, in order. See
+	``_is_reproducer_noise``."""
 	return [r for r in (recordings or []) if not _is_reproducer_noise(r)]
 
 
 def _build_auto_notes_list_html(recordings: list[dict]) -> str:
-	"""The ordered-list body of the "Steps to Reproduce" note (no preamble)
-	``<ol><li><label> <ms></li>…</ol>`` plus a "N background requests
-	filtered" footer. Returns "" when there are no signal recordings.
-
-	Labels come from ``per_action.humanized_label`` (English: "Create Sales
-	Invoice", "Submit Delivery Note"); HTML-escaped before wrapping so a
-	cmd/path with <, >, or & can't corrupt the markup.
-	"""
+	"""The ordered-list body of the "Steps to Reproduce" note (no preamble): an
+	``<ol>`` of humanized action labels with timings, plus a "N background
+	requests filtered" footer. Returns "" when there are no signal recordings.
+	Labels come from ``per_action.humanized_label`` and are HTML-escaped."""
 	if not recordings:
 		return ""
 	signal_recordings = _recordings_for_reproducer(recordings)
@@ -2685,10 +2518,9 @@ def _build_auto_notes_list_html(recordings: list[dict]) -> str:
 
 
 def _build_auto_notes_html(recordings: list[dict]) -> str:
-	"""Auto-generated "Steps to Reproduce" preamble + the raw labelled
-	action list. The fallback when AI humanizing is off or fails. Returns ""
-	when there's nothing to list (no recordings, or all noise) so the caller
-	leaves ``doc.notes`` in its default empty state."""
+	"""Auto-generated "Steps to Reproduce" preamble + the raw labelled action
+	list. The fallback when AI humanizing is off or fails. Returns "" when
+	there's nothing to list, so the caller leaves ``doc.notes`` empty."""
 	body = _build_auto_notes_list_html(recordings)
 	if not body:
 		return ""
@@ -2707,8 +2539,8 @@ _HUMANIZED_NOTES_PREAMBLE = (
 
 def _actions_for_humanizer(recordings: list[dict]) -> list[dict]:
 	"""Compact per-action dicts (label / cmd / path / method / doctype /
-	duration_ms) for ``ai_fix.humanize_steps``: noise-filtered and capped
-	the same way the raw auto-notes list is."""
+	duration_ms) for ``ai_fix.humanize_steps``, noise-filtered and capped like
+	the raw auto-notes list."""
 	out: list[dict] = []
 	for rec in _recordings_for_reproducer(recordings)[:_AUTO_NOTES_MAX_ENTRIES]:
 		fd = rec.get("form_dict") or {}
@@ -2739,10 +2571,9 @@ def _actions_for_humanizer(recordings: list[dict]) -> list[dict]:
 
 
 def _assemble_humanized_notes(steps_markdown: str) -> str:
-	"""The HTML stored in ``doc.notes`` for an AI-humanized "Steps to
-	Reproduce": the preamble + the LLM's Markdown steps, rendered + sanitized.
-	No raw captured-actions appendix the per-action breakdown in the report
-	already lists every action with its technical label and timing."""
+	"""The HTML stored in ``doc.notes`` for an AI-humanized "Steps to Reproduce":
+	the preamble plus the LLM's Markdown steps, rendered and sanitized. No raw
+	captured-actions appendix (the per-action breakdown already lists them)."""
 	return _HUMANIZED_NOTES_PREAMBLE + renderer._markdown_to_safe_html(steps_markdown)
 
 
@@ -2751,9 +2582,9 @@ def _build_humanized_notes_html(
 	usage_out: dict | None = None,
 ) -> str:
 	"""LLM-humanized "Steps to Reproduce" HTML, or "" when AI isn't
-	enabled/available, there's nothing to summarise, or the LLM call fails
-	(the caller then falls back to ``_build_auto_notes_html``). Best-effort
-	never raises."""
+	enabled/available, there's nothing to summarise, or the LLM call fails (the
+	caller then falls back to ``_build_auto_notes_html``). Best-effort, never
+	raises."""
 	try:
 		from optimus.settings import get_config
 		cfg = get_config()
@@ -2781,11 +2612,9 @@ def _build_humanized_notes_html(
 
 
 def _compute_top_severity(findings: list[dict]) -> str:
-	"""Return the highest severity present in the findings list.
-
-	Populated on each session so the list view can show a color-coded
-	"Top Severity" column without loading the child rows.
-	"""
+	"""Highest severity present in the findings list ("High"/"Medium"/"Low", else
+	"None"). Populated per session so the list view can show a "Top Severity"
+	column without loading child rows."""
 	if not findings:
 		return "None"
 	severities = {f.get("severity") for f in findings}
@@ -2800,9 +2629,9 @@ _PRIORITY_WORD = {"High": "high", "Medium": "medium", "Low": "low"}
 
 def _humanize_action_label(action: dict, recordings: list[dict]) -> str:
 	"""Plain-English label for an action ("Submit Sales Invoice" rather than
-	"frappe.desk.form.save.savedocs:Submit"). Looks up the recording by uuid
-	and runs it through ``per_action.humanized_label``; falls back to the raw
-	``action_label`` when the recording isn't to hand (TTL'd out, etc.)."""
+	"frappe.desk.form.save.savedocs:Submit"), via ``per_action.humanized_label``
+	on the recording (looked up by uuid). Falls back to the raw ``action_label``
+	when the recording isn't available."""
 	raw = str(action.get("action_label") or "?")
 	uid = action.get("recording_uuid")
 	if uid:
@@ -2820,12 +2649,10 @@ def _humanize_action_label(action: dict, recordings: list[dict]) -> str:
 def _build_summary_html(
 	context: AnalyzeContext, total_queries: int, recordings: list[dict] | None = None
 ) -> str:
-	"""Plain-language customer summary, generated from the analyzer findings.
-
-	Written for a non-developer: "operations" not "actions", humanized action
-	names not raw cmds, "high priority" not "high-severity" and a finding's
-	raw ``cmd:action`` reference swapped for the humanized form.
-	"""
+	"""Plain-language customer summary (an HTML ``<ul>``) built from the analyzer
+	findings, written for a non-developer: humanized action names, "operations"
+	and "high priority" wording, raw ``cmd:action`` refs swapped for readable
+	forms."""
 	recordings = recordings or []
 	n_actions = len(context.actions)
 	findings = context.findings
@@ -2861,9 +2688,9 @@ def _build_summary_html(
 		}
 
 		def _finding_phrase(f: dict) -> str:
-			"""Finding title with any raw action references swapped for plain
-			labels (and a leading "In <slowest>, " trimmed since the sentence
-			already names it), + a plain-language impact/priority parenthetical."""
+			"""Finding title with raw action references swapped for plain labels (a
+			leading "In <slowest>, " trimmed since the sentence already names it),
+			plus a plain-language impact/priority parenthetical."""
 			title = (f.get("title") or "").strip()
 			for raw, human in label_map.items():
 				if raw and human and raw != human:
@@ -2977,15 +2804,10 @@ def _finalize_with_empty_session(docname: str) -> None:
 
 
 def _render_and_attach_reports(docname: str, recordings: list[dict]) -> None:
-	"""Render the HTML report and attach it to the DocType.
-
-	Stored as a PRIVATE attachment on the Optimus Session. Frappe
-	enforces "user must have read permission on attached_to_doctype"
-	for private files combined with the ``if_owner=1`` permission
-	rule on Optimus Session for the Optimus User role and the
-	additional gate in ``permissions.file_has_permission``, non-admin
-	users can only download reports for their own sessions.
-	"""
+	"""Render the HTML report and attach it as a PRIVATE File on the Optimus
+	Session. Private-file read permission plus the ``if_owner=1`` rule and
+	``permissions.file_has_permission`` gate mean non-admins can only download
+	reports for their own sessions."""
 	# Re-fetch the doc so child rows persisted by _persist are visible.
 	doc = frappe.get_doc("Optimus Session", docname)
 
@@ -3010,29 +2832,15 @@ def _render_and_attach_reports(docname: str, recordings: list[dict]) -> None:
 
 
 def _save_report_file(*, docname: str, filename: str, attached_to_field: str, content) -> str | None:
-	"""Insert a private File attached to the Optimus Session.
+	"""Insert a private File attached to the Optimus Session. Returns its
+	file_url, or None on failure.
 
-	Returns the file_url for the new file, or None on failure.
-
-	v0.5.2: wrapped in a narrow no-request context so Frappe's
-	``File.validate_file_extension`` uses its designed bypass for
-	code-generated files. The validator explicitly skips when
-	``frappe.request`` is falsy (intent comment in frappe source:
-	"Only validate uploaded files, not generated by code/
-	integrations."). That bypass works correctly when analyze
-	runs as a background RQ job (no request). But when the site
-	has the scheduler disabled, analyze runs INLINE inside
-	api.stop()'s HTTP handler frappe.request is set, the
-	bypass doesn't fire and File's before_insert throws
-	FileTypeNotAllowed when the site's allowed_file_extensions
-	list (System Settings → File Settings) doesn't include HTML.
-
-	Our report IS a code-generated file, not a user upload. The
-	no-request bypass is exactly the intended path. We temporarily
-	clear frappe.local.request around the insert to trigger it,
-	then restore the original value in a finally so downstream
-	request-handling code (e.g. response building in the caller)
-	sees the real request object unchanged.
+	Temporarily clears ``frappe.local.request`` around the insert so
+	``File.validate_file_extension`` takes its code-generated-file bypass (it
+	only fires when ``frappe.request`` is falsy). Needed on the inline path
+	(scheduler disabled), where a real request would otherwise make File reject
+	HTML via System Settings' allowed_file_extensions. The request is restored
+	in a ``finally`` so the caller's response building is unaffected.
 	"""
 	try:
 		file_doc = frappe.get_doc(
@@ -3075,32 +2883,21 @@ def _save_report_file(*, docname: str, filename: str, attached_to_field: str, co
 
 
 def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: list[str]) -> None:
-	"""v0.13: snapshot every per-session Redis artifact to a gzipped JSON File
-	on the session BEFORE :func:`_cleanup_redis` deletes them, so the steps
-	humanizer, AI-fix grounding and report drill-downs can re-run after the
-	live recording is gone (recordings are otherwise deleted the moment
-	analyze finishes).
+	"""Snapshot every per-session Redis artifact to a gzipped JSON File on the
+	session BEFORE :func:`_cleanup_redis` deletes them, so the steps humanizer,
+	AI-fix grounding and report drill-downs can re-run once the live recording
+	is gone.
 
 	Bundle shape::
 
 	    {"schema", "session_uuid", "session_state",
 	     "recordings": {uuid: {rec, sparse, tree_b64, sidecar, infra}}}
 
-	This is a COMPLETE snapshot: ``rec`` + ``tree`` + ``sidecar`` are what the
-	live read-fallback (:func:`_rehydrate_from_bundle`) reconstructs for AI
-	re-runs / drill-down regeneration; ``sparse`` + ``infra`` + ``session_state``
-	are captured for faithful regeneration + a possible future full
-	re-analyze-from-file and are NOT consumed by the current read path.
-
-	Every value is already capture-time redacted
-	(``optimus/__init__._patch_recorder``), so the file carries the same
-	redaction posture as the JSON blobs already on the row. The tree is kept as
-	the raw HMAC-signed pickle (base64) so it reloads through the same verified
-	path as Redis; ``rec``/``sidecar`` go through ``json.dumps(default=str)``
-	(tuples → lists). Memory note: this re-reads all recordings into a second
-	dict while the analyze ``recordings`` list is still alive, so RAM peaks
-	roughly 2× here acceptable since persistence runs once at finalize.
-	Best-effort: a failure here never aborts analyze.
+	``rec`` + ``tree`` + ``sidecar`` are what :func:`_rehydrate_from_bundle`
+	reconstructs; ``sparse`` + ``infra`` + ``session_state`` are captured for
+	future use and not read today. Values are already capture-time redacted; the
+	tree stays as the raw HMAC-signed pickle (base64) so it reloads through the
+	verified path. Best-effort: a failure never aborts analyze.
 	"""
 	import base64
 	import gzip
@@ -3156,13 +2953,9 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 
 
 def _load_recordings_bundle(session_doc):
-	"""Load the persisted recordings snapshot for a session, or None.
-
-	Returns the parsed bundle dict so post-analyze callers can pass it to
-	``_fetch_recordings(recordings_bundle=...)`` once Redis is cleaned up.
-	Returns None when the session has no snapshot or it can't be read callers
-	then behave exactly as before the snapshot existed.
-	"""
+	"""Load the persisted recordings snapshot for a session as a parsed bundle
+	dict, for passing to ``_fetch_recordings(recordings_bundle=...)`` once Redis
+	is cleaned up. None when there's no snapshot or it can't be read."""
 	import gzip
 
 	url = getattr(session_doc, "recordings_file", None)
@@ -3180,12 +2973,8 @@ def _load_recordings_bundle(session_doc):
 
 
 def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:
-	"""Delete Redis state for this finalized session.
-
-	The Optimus Session DocType row is now the durable record. Redis is
-	freed so subsequent sessions can use it. Best-effort: a failure here
-	does not abort the analyze.
-	"""
+	"""Delete Redis state for this finalized session (the Optimus Session row is
+	now the durable record). Best-effort: a failure does not abort analyze."""
 	try:
 		session.delete_session_state(session_uuid)
 	except Exception:

@@ -1,10 +1,8 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for renderer._render_phase2_panel exercises the phase-2 HTML
-without spinning up Frappe / Jinja. We feed a minimal session-doc-shaped
-object directly to the helper.
-"""
+"""Tests for renderer._render_phase2_panel, exercising the phase-2 HTML without
+Frappe / Jinja by feeding a minimal session-doc-shaped object to the helper."""
 
 import json
 import re
@@ -133,10 +131,9 @@ class TestRenderPhase2PanelDiff:
 
 
 class TestRenderPhase2PanelAutoExpandChain:
-	"""When a curated pick was auto-expanded into a chain, the run's
-	picks_json marks descendant functions with source='auto_expand'.
-	The renderer should indent those function headers and prefix with
-	an arrow so the chain reads top-down as a stack."""
+	"""When a curated pick was auto-expanded into a chain, descendants are marked
+	source='auto_expand' in picks_json; the renderer indents those function
+	headers and prefixes an arrow so the chain reads top-down as a stack."""
 
 	def _run_with_chain(self, root_path, descendant_path):
 		# picks_json captures the source of each pick.
@@ -234,12 +231,9 @@ class TestRenderPhase2PanelSelfContainment:
 
 
 class TestRenderPhase2PanelPosition:
-	"""v0.6.x: Line-Level Drilldown is hoisted above the Findings section
-	in the report. A render-level check that the rendered HTML places
-	the section anchor (``id="phase2"`` legacy alias or
-	``id="line-drilldown"`` canonical) before the
-	``<h2>Findings - what to fix</h2>`` heading.
-	"""
+	"""Render-level check that Line-Level Drilldown is hoisted above the Findings
+	section: its anchor (``id="phase2"`` or ``id="line-drilldown"``) must precede
+	the ``<h2>Findings - what to fix</h2>`` heading."""
 
 	def _session_doc(self, *, with_phase2=True):
 		"""Build a minimal SimpleNamespace doc that ``render_raw`` accepts."""
@@ -292,7 +286,7 @@ class TestRenderPhase2PanelPosition:
 
 
 class TestRenderPhase2PanelRefinements:
-	"""v0.7.x refinements: reworded intro, dimmed 0-hit lines, dropped Picks line."""
+	"""Refinements: reworded intro, dimmed 0-hit lines, dropped Picks line."""
 
 	def _panel(self, results, picks=None):
 		return renderer._render_phase2_panel(

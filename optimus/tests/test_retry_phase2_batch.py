@@ -1,9 +1,8 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.6.x: surface tests for ``api.retry_phase2_analyzes_batch``: the
-batched retry endpoint that replaces the per-run ``frappe.call(...)`` loop
-in ``optimus_session.js``. Pattern: source-inspect (mirrors
+"""Surface tests for ``api.retry_phase2_analyzes_batch``, the batched retry
+endpoint behind ``optimus_session.js``. Source-inspection (mirrors
 ``test_suggest_fix_api.py``)."""
 
 import os

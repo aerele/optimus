@@ -2,12 +2,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Analyzer: browser-side timing join + Web Vitals (v0.5.0).
+"""Browser-side timing join + Web Vitals analyzer.
 
-Reads ``context.frontend_data`` (populated by analyze.run from
-``profiler:frontend:<session_uuid>``). Joins XHR timings to Profiler
-Actions by recording_id. Dedupes multi-fire LCP per page. Emits three
-finding types:
+Reads ``context.frontend_data``, joins XHR timings to Profiler Actions by
+recording_id and dedupes multi-fire LCP per page. Emits three finding types:
 
 - Slow Frontend Render    (LCP > 2500ms on any page)
 - Network Overhead        (XHR - backend > 500ms AND > backend * 1.5)

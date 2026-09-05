@@ -3,31 +3,20 @@
 
 """Pytest fixtures for the real-bench integration suite.
 
-This module is **only imported under ``bench --site … run-tests``**: the
-pure-pytest workflow at ``.github/workflows/tests.yml`` invokes
-``pytest optimus/tests/`` and never traverses this directory, so the
-Frappe stub in ``optimus/tests/conftest.py`` doesn't apply here.
-
-The fixtures assume a live Frappe site is initialised (``frappe.init`` +
-``frappe.connect`` have already run Frappe's test runner does this
-before importing the test modules). Direct Frappe access (``frappe.db``,
-``frappe.cache``, ``frappe.get_doc`` etc.) is the whole point the unit
-suite stubs them, the integration suite uses them.
+Imported only under ``bench --site … run-tests`` (the pure-pytest workflow
+never traverses this directory), so these fixtures assume a live Frappe site
+is initialised and use ``frappe.db`` / ``frappe.cache`` / ``frappe.get_doc``
+directly.
 
 Fixtures:
 
-* :func:`test_site`: yields the site name. Tests rarely need it
-  explicitly (frappe.local already knows), but it's useful for assertions
-  and for shelling out to ``bench --site {test_site} …``.
-* :func:`cleanup_session` (autouse) defence-in-depth teardown that
-  hard-deletes any ``Optimus Session`` rows left behind plus their
-  ``profiler:*`` Redis keys. ``FrappeTestCase`` already rolls back the
-  per-test transaction, but the analyze pipeline writes through a
-  background-worker connection that escapes the transaction in production
-  flows and the Redis state isn't transactional either way.
-* :func:`seeded_session`: convenience wrapper that calls ``api.start``,
-  yields the session_uuid and on teardown calls ``api.stop`` and waits
-  for analyze to finalise. Used by the lifecycle test.
+* :func:`test_site`: yields the connected site name.
+* :func:`cleanup_session` (autouse): hard-deletes any leftover ``Optimus
+  Session`` rows and their ``profiler:*`` Redis keys, since the analyze
+  pipeline writes through a background connection that escapes FrappeTestCase's
+  per-test rollback (and Redis isn't transactional).
+* :func:`seeded_session`: calls ``api.start``, yields the session_uuid and on
+  teardown calls ``api.stop`` and waits for analyze to finalise.
 """
 
 from __future__ import annotations
@@ -40,28 +29,17 @@ import pytest
 
 @pytest.fixture(scope="session")
 def test_site() -> str:
-	"""The name of the Frappe site the test runner is connected to. Returns
-	``frappe.local.site`` so tests stay site-agnostic the helper script
-	creates ``test_site`` but a local developer running this suite against
-	their own bench site sees that site name."""
+	"""The Frappe site the test runner is connected to (``frappe.local.site``), so
+	tests stay site-agnostic."""
 	return frappe.local.site
 
 
 @pytest.fixture(autouse=True)
 def cleanup_session():
-	"""Defensive teardown that runs after every integration test.
-
-	FrappeTestCase wraps each test in a DB transaction that's rolled back
-	at teardown, but the analyze pipeline runs in a background worker via
-	RQ its writes are in a separate connection that escapes that
-	transaction in real flows. Same for Redis: the active-session pointer
-	and the per-session metadata hash aren't transactional either way.
-
-	This fixture is best-effort. A failed delete is logged and tolerated
-	(the next test will see the row, which is annoying but not a
-	correctness problem on the ephemeral CI runner). The cleanup runs in
-	a *new* transaction so it can commit even when the test transaction
-	already rolled back.
+	"""Defensive teardown after every integration test: purges leftover Optimus
+	Session rows and Redis state that escape FrappeTestCase's rollback (the
+	analyze pipeline writes through a separate background connection; Redis isn't
+	transactional either). Best-effort: a failed delete is logged and tolerated.
 	"""
 	yield
 	# Lazy imports analyze.py / session.py do their own frappe imports
@@ -77,10 +55,8 @@ def cleanup_session():
 
 
 def _purge_test_sessions() -> None:
-	"""Delete every ``Optimus Session`` row whose user is the current
-	session user, plus their associated Redis state. Safe to call on a
-	bench that holds OTHER sessions (different users) the user-scoped
-	filter prevents collateral damage."""
+	"""Delete every ``Optimus Session`` row for the current user plus its Redis
+	state. User-scoped, so it is safe on a bench holding other users' sessions."""
 	user = getattr(frappe.session, "user", None) or "Administrator"
 	rows = frappe.get_all(
 		"Optimus Session",
@@ -111,13 +87,10 @@ def _purge_test_sessions() -> None:
 
 @pytest.fixture
 def seeded_session(test_site):
-	"""Start an Optimus profiling session as Administrator, yield the
-	session_uuid and tear down by calling ``api.stop`` + waiting for the
-	analyze job to finish (capped at 60 s).
-
-	Tests that need a fully-finalized session use this fixture; tests
-	that need to assert the start-time state mid-flight ignore it and
-	call ``api.start`` directly so they can interleave assertions."""
+	"""Start a session as Administrator, yield the session_uuid, then on teardown
+	call ``api.stop`` and wait for analyze to finish (capped at 60 s). Use for a
+	fully-finalized session; tests asserting mid-flight state call ``api.start``
+	directly instead."""
 	frappe.set_user("Administrator")
 	from optimus import api
 
@@ -137,10 +110,8 @@ def seeded_session(test_site):
 
 
 def _wait_for_terminal_status(session_uuid: str, *, timeout_seconds: int = 60) -> str | None:
-	"""Poll the Optimus Session row's ``status`` field every 500 ms until
-	it lands on ``Ready`` or ``Failed`` (the terminal states), or until
-	``timeout_seconds`` elapses. Returns the final status, or ``None`` on
-	timeout."""
+	"""Poll the session's ``status`` every 500 ms until ``Ready`` / ``Failed`` or
+	``timeout_seconds`` elapses. Returns the final status, or ``None`` on timeout."""
 	deadline = time.monotonic() + timeout_seconds
 	while time.monotonic() < deadline:
 		try:

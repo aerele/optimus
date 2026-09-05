@@ -1,11 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.6.0 Round 6 Optimus Settings additions.
+"""Tests for the Optimus Settings additions.
 
-Pure-test path no live Frappe site needed. Verifies the new fields
-default correctly, the multi-line skip-list parser strips blanks +
-comments and each analyzer's resolver respects the configured value.
+Pure-test path (no live Frappe site). Covers field defaults, the multi-line
+skip-list parser (strips blanks and comments) and each analyzer's resolver
+honouring the configured value.
 """
 
 import json

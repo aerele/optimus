@@ -1,13 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Concurrency guards on analyze (v0.7.x).
+"""Concurrency guards on analyze.
 
-Two analyze jobs running at once roughly double peak RAM the OOM trigger on
-long flows. M2 adds a global single-flight (only one session does the heavy
-phase at a time) built on the existing re-enqueue/yield pattern, NOT a held
-lock, so it can't deadlock with run()'s self-re-enqueue and self-heals if a
-worker dies. M3 dedups duplicate analyze enqueues for the same session.
+Two analyze jobs at once roughly double peak RAM (the OOM trigger on long flows).
+A global single-flight (only one session does the heavy phase at a time), built
+on the re-enqueue/yield pattern rather than a held lock, can't deadlock with
+run()'s self-re-enqueue and self-heals if a worker dies. Duplicate analyze
+enqueues for the same session are deduped.
 """
 
 import inspect
@@ -144,11 +144,10 @@ def _stub_scheduler(monkeypatch, disabled):
 
 
 class TestEnqueueAnalyzeAsync:
-	"""The async enqueue must NOT use a stable job_id + is_job_enqueued dedup.
-	That guard stranded sessions at 'Stopping' when an OOM-killed worker left a
-	zombie STARTED job: the guard skipped the enqueue and nothing transitioned
-	the session. Concurrent-analyze RAM is bounded by analyze.run's
-	single-flight, so we always enqueue (anonymously)."""
+	"""The async enqueue must NOT use a stable job_id + is_job_enqueued dedup
+	(that guard stranded sessions when a zombie STARTED job blocked the enqueue).
+	Concurrent-analyze RAM is bounded by analyze.run's single-flight, so it always
+	enqueues anonymously."""
 
 	def test_async_enqueue_is_anonymous_and_always_fires(self, monkeypatch):
 		from optimus import api

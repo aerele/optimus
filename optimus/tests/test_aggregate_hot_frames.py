@@ -1,17 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""D.M-S2 hot-frames aggregation uses self_ms, not cumulative_ms.
+"""Hot-frames aggregation uses self_ms, not cumulative_ms.
 
 A recursive (or decorator-wrapped) function appears at multiple call-tree
-depths. Each node's ``cumulative_ms`` includes its descendants summing
-cumulative across sibling occurrences double-counts nested self-times.
-
-The fix switched the aggregator to ``self_ms`` (exclusive per-frame), so
-the cross-action leaderboard's ``total_ms`` is the true time spent in
-the function's own body.
-
-This test guards against the aggregator regressing to cumulative_ms.
+depths; each node's ``cumulative_ms`` includes its descendants, so summing
+cumulative across occurrences double-counts nested self-times. Summing
+``self_ms`` (exclusive per-frame) gives the true time in the function's own
+body. These tests guard against a regression back to cumulative_ms.
 """
 
 from optimus.analyzers import call_tree
@@ -141,10 +137,8 @@ def test_framework_variant_displays_cumulative_time():
 
 
 def test_user_app_variant_keeps_self_time_total():
-	"""``build_hot_frames_table(is_hot=True)``: the user-app
-	variant continues to display ``total_ms`` (self-sum) unchanged.
-	The A.AE1 correctness fix (immune to recursion double-count)
-	is preserved."""
+	"""``build_hot_frames_table(is_hot=True)``: the user-app variant displays
+	``total_ms`` (self-sum), immune to recursion double-count."""
 	raw = [{
 		"function": "my_app/work.py::do",
 		"total_ms": 450,             # self-sum (the A.AE1 invariant)

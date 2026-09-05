@@ -3,35 +3,23 @@
 
 """Real-bench integration test for ``janitor.sweep_old_sessions`` deletion.
 
-The janitor's ``sweep_old_sessions`` (``optimus/janitor.py:96-139``) is
-the daily cron that enforces the retention policy: Ready / Failed
-sessions older than ``DEFAULT_RETENTION_DAYS`` (90, configurable via
-``site_config.optimus_session_retention_days``) get hard-deleted. The
-hard cap of ``MAX_DELETIONS_PER_RUN`` (100) prevents a single sweep
-from locking up MariaDB on a large backlog.
+The daily cron enforces the retention policy: Ready / Failed sessions older
+than ``DEFAULT_RETENTION_DAYS`` (90, configurable via
+``site_config.optimus_session_retention_days``) are hard-deleted, capped at
+``MAX_DELETIONS_PER_RUN`` (100) per sweep so a large backlog can't lock up
+MariaDB.
 
-The unit suite covers individual sweep functions in isolation
-(`test_janitor.py`) but mocks the actual deletion. It cannot prove:
+The unit suite (`test_janitor.py`) mocks the actual deletion, so it can't
+prove what these tests do:
 
-  * That the cron does, in fact, delete the underlying DocType row
-    (not just mark or move it).
-  * That attached File rows (``raw_report_file``) get deleted along
-    with the session orphan File rows would inflate disk usage
-    forever, even though the parent session is gone.
-  * That the cutoff math is correct: a session 100 days old → deleted;
-    a session 30 days old → kept (with the default 90-day retention).
-  * That **active** sessions (Recording, Analyzing, Stopping, etc.)
-    are untouched regardless of age the daily sweep only prunes
-    terminal-state sessions; the 5-minute sweep handles the others.
-
-That gap is what this final integration test fills. Each test creates
-a synthetic Optimus Session with an explicit ``started_at`` /
-``status``, calls ``janitor.sweep_old_sessions()`` and asserts the
-post-sweep state.
-
-This is the **seventh and final** row of the v0.11.0 deferred-tests
-extraction roadmap. After this PR, the integration suite covers every
-high-impact scenario the v0.7.x architecture review identified.
+  * the cron deletes the underlying DocType row (not just marks/moves it);
+  * attached File rows (``raw_report_file``) are cascade-deleted (orphans
+    would inflate disk forever);
+  * the cutoff math: a 100-day-old session is deleted, a 30-day-old one kept
+    (default 90-day retention);
+  * active sessions (Recording, Analyzing, Stopping) are untouched regardless
+    of age (the daily sweep only prunes terminal-state sessions; the 5-minute
+    sweep handles the rest).
 """
 
 from __future__ import annotations
@@ -185,16 +173,14 @@ class TestJanitorSweepsActuallyDelete(FrappeTestCase):
 		)
 
 	def test_sweep_keeps_session_within_retention(self):
-		"""Negative control. A Ready session comfortably INSIDE the
-		configured retention window MUST be left alone by the sweep
-		without this guard the sweep could overzealously delete recent
-		sessions.
+		"""Negative control: a Ready session comfortably INSIDE the retention
+		window must be left alone.
 
 		Retention is ``Optimus Settings.session_retention_days`` (default 30,
-		config-profile dependent see settings.py), so the fixture age is
-		taken as HALF that window rather than a hard-coded 30 days. A
-		hard-coded 30 sat exactly on the default-30 boundary and lost the race
-		against the sweep's ``now()`` cutoff."""
+		config-profile dependent), so the fixture age is taken as HALF that
+		window rather than a hard-coded 30 days (which would sit on the boundary
+		and race the sweep's ``now()`` cutoff).
+		"""
 		from optimus.settings import get_config
 
 		retention = max(1, int(get_config().session_retention_days or 30))
@@ -210,12 +196,10 @@ class TestJanitorSweepsActuallyDelete(FrappeTestCase):
 		)
 
 	def test_sweep_keeps_active_sessions_regardless_of_age(self):
-		"""The terminal-state contract. Sessions in non-terminal
-		states (Recording, Analyzing, Stopping) MUST NOT be deleted
-		by the daily sweep even when they're ancient the 5-minute
-		``sweep_stale_sessions`` handles those by force-stopping or
-		marking failed. The daily sweep's filter pins to ``status IN
-		(Ready, Failed)`` exclusively."""
+		"""Terminal-state contract: non-terminal sessions (Recording, Analyzing,
+		Stopping) must NOT be deleted by the daily sweep even when ancient (the
+		5-minute ``sweep_stale_sessions`` handles those). The daily sweep's
+		filter pins to ``status IN (Ready, Failed)`` exclusively."""
 		# Create an OLD Analyzing session the kind that would be
 		# tempting to GC but is wrong to.
 		fixture = self._create_session(days_old=100, status="Analyzing")
@@ -231,11 +215,9 @@ class TestJanitorSweepsActuallyDelete(FrappeTestCase):
 		)
 
 	def test_sweep_cascades_attached_file_deletion(self):
-		"""Disk-hygiene contract. Deleting an Optimus Session must
-		cascade to its ``raw_report_file`` File row. Orphan File rows
-		left behind by row-only deletes would inflate disk usage
-		forever and the safe-report-on-disk is often the largest
-		artefact per session."""
+		"""Disk-hygiene contract: deleting an Optimus Session must cascade to its
+		``raw_report_file`` File row. Orphan File rows (the report is often the
+		largest per-session artefact) would inflate disk usage forever."""
 		fixture = self._create_session(days_old=120, status="Ready", with_attached_file=True)
 		assert self._session_exists(fixture["uuid"])
 		assert self._file_exists(fixture["file_url"]), "fixture File row didn't insert"

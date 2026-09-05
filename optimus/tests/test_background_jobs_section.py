@@ -1,12 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.6.0 "RQ Jobs" report section.
+"""Tests for the "RQ Jobs" report section.
 
-`renderer.build_background_jobs` is a pure function (unit-tested directly);
-the section rendering is exercised end-to-end via `renderer.render_raw` with
-a `SimpleNamespace` fake Optimus Session doc (same pattern as
-`test_table_breakdown.py::TestRenderedFrameworkColsNote`).
+``renderer.build_background_jobs`` is pure (unit-tested directly); the section
+rendering is exercised end-to-end via ``renderer.render_raw`` with a
+``SimpleNamespace`` fake Optimus Session doc.
 """
 
 import json
@@ -334,16 +333,10 @@ class TestRenderedBackgroundJobsSection:
 		assert "<th class=\"num\">Findings</th>" in html
 
 	def test_smoking_gun_block_not_duplicated_into_bg_job_embed(self):
-		"""v0.7.x: the styled smoking-gun panel (file:line header + source
-		snippet + drill-down callout) is hidden when ``finding_card`` is
-		embedded inside a BG-job row the row already shows the entry
-		callsite as a compact inline link under the method name, so the
-		full panel would just duplicate that anchor inside a blue-bordered
-		box. The canonical Findings section keeps it.
-
-		Pin: ``class="smoking"`` appears exactly once across the
-		whole report (the Findings-section card), never twice (Findings
-		card + BG-job embed)."""
+		"""The smoking-gun panel is hidden when a finding card is embedded inside a
+		BG-job row (the row already shows the entry callsite as a compact inline
+		link), so ``class="smoking"`` appears exactly once (the Findings-section
+		card), never twice."""
 		doc = _doc(
 			actions=[self._job_action(action_label="Job: a", path="a",
 			                          recording_uuid="r1", duration_ms=10)],
@@ -425,12 +418,9 @@ class TestEntryCallsiteInReport:
 	_DOTTED = "optimus.renderer.render"
 
 	def test_background_job_row_does_not_show_entry_callsite_snippet(self):
-		"""v0.7.x: the multi-line entry-callsite snippet PANEL is dropped
-		from BG job rows. A compact inline ``file:line (function)`` line
-		remains under the job method as a navigation affordance (added
-		in a later iteration). The snippet panel multi-line table,
-		the def line itself rendered as a yellow-highlighted row is
-		what's absent."""
+		"""The multi-line entry-callsite snippet PANEL is dropped from BG job rows;
+		a compact inline ``file:line`` link remains under the job method. The def
+		line rendered as a highlighted snippet row is what's absent."""
 		doc = _doc([
 			_action(action_label="Job: " + self._DOTTED, event_type="RQ Job",
 			        path=self._DOTTED, recording_uuid="r1", duration_ms=500, queries_count=2),
@@ -446,11 +436,9 @@ class TestEntryCallsiteInReport:
 		assert "Slowest queries for this job" in html
 
 	def test_http_api_action_renders_no_entry_callsite_snippet_in_per_action_table(self):
-		"""v0.7.x: the per-action table no longer renders the multi-line
-		entry-callsite snippet panel under action rows. A compact inline
-		file:line line remains under the action label as a navigation
-		anchor; the multi-line snippet itself (def body line, yellow-
-		highlighted snippet row) is absent."""
+		"""The per-action table no longer renders the multi-line entry-callsite
+		snippet panel under action rows; a compact inline file:line link remains,
+		but the multi-line snippet (def body line) is absent."""
 		doc = _doc([
 			_action(action_label=self._DOTTED, event_type="HTTP Request", http_method="POST",
 			        path="/api/method/" + self._DOTTED, recording_uuid="r0", duration_ms=900),
@@ -463,11 +451,9 @@ class TestEntryCallsiteInReport:
 		assert "def render(" not in html
 
 	def test_smoking_gun_block_not_duplicated_into_per_action_embed(self):
-		"""Mirror of the BG-job test above, scoped to the per-action
-		breakdown's HTTP API row. With a finding carrying ``action_ref``
-		pointing at the action's idx, the related finding card embeds
-		under the action row. The smoking-gun panel must NOT render
-		there only inside the Findings section."""
+		"""Per-action variant of the BG-job test: a finding card embeds under the
+		action row (via ``action_ref``), but the smoking-gun panel must NOT render
+		there, only in the Findings section."""
 		import json
 		doc = _doc(
 			actions=[_action(action_label=self._DOTTED, event_type="HTTP Request",
@@ -495,10 +481,9 @@ class TestEntryCallsiteInReport:
 		assert html.count("duplicated-anchor probe") >= 2
 
 	def test_per_action_banner_does_not_duplicate_finding_title(self):
-		"""The per-action 'finding linked' banner is a count-only header it
-		must NOT inline the finding title, because the finding card renders
-		immediately below it inside the same row. Previously the banner echoed
-		the title verbatim, so it appeared twice within one per-action row."""
+		"""The per-action 'finding linked' banner is a count-only header: it must
+		NOT inline the finding title, since the finding card renders immediately
+		below it in the same row."""
 		import json
 		import re
 		title = "recompute_aggregates is a self-time hot path probe"
@@ -720,16 +705,10 @@ class TestDocEventLifecycleSection:
 class TestBgJobActionLabelNormalisation:
 	"""``_action_to_dict`` rewrites stale BG-job labels at render time.
 
-	A recording captured before per_action._label learned the
-	``"RQ Job: <short>"`` form falls through to the HTTP path and ends
-	up with ``action_label = "GET <dotted.python.path>"``. The action's
-	``event_type`` is later normalised to ``"RQ Job"`` (so the row
-	appears in the RQ Jobs section), but the persisted label still
-	carries the HTTP-shaped string leaking "GET" into the METHOD
-	column AND into finding titles that read ``In {action_label}``.
-
-	``_action_to_dict`` is the single funnel every downstream
-	consumer reads from, so the fix lives there.
+	An old recording can end up with ``action_label = "GET <dotted.path>"`` while
+	``event_type`` is normalised to ``"RQ Job"``, leaking "GET" into the METHOD
+	column and finding titles. ``_action_to_dict`` is the single funnel every
+	downstream consumer reads from, so the fix lives there.
 	"""
 
 	def test_leaked_http_verb_label_gets_canonicalised(self):
@@ -749,8 +728,7 @@ class TestBgJobActionLabelNormalisation:
 		assert out["path"] == "ugly_code.python.common.bg_recheck_users"
 
 	def test_canonical_label_passes_through_untouched(self):
-		"""A label already prefixed ``"RQ Job: "`` is returned
-		unchanged no double-prefix, no path-derived rewrite."""
+		"""A label already prefixed ``"RQ Job: "`` is returned unchanged."""
 		child = _action(
 			action_label="RQ Job: sync_customer_data",
 			event_type="RQ Job",
@@ -760,8 +738,7 @@ class TestBgJobActionLabelNormalisation:
 		assert out["action_label"] == "RQ Job: sync_customer_data"
 
 	def test_legacy_job_prefix_still_promoted(self):
-		"""The existing J.12 ``"Job: …"`` → ``"RQ Job: …"`` rewrite
-		still works; the new conditional doesn't interfere with it."""
+		"""The ``"Job: …"`` → ``"RQ Job: …"`` rewrite still works."""
 		child = _action(
 			action_label="Job: legacy_payload",
 			event_type="RQ Job",
@@ -771,8 +748,8 @@ class TestBgJobActionLabelNormalisation:
 		assert out["action_label"] == "RQ Job: legacy_payload"
 
 	def test_non_bg_action_label_untouched(self):
-		"""HTTP requests (event_type != "RQ Job") keep their original
-		``"GET /api/…"`` label the rewrite only fires for jobs."""
+		"""HTTP requests (event_type != "RQ Job") keep their original label; the
+		rewrite only fires for jobs."""
 		child = _action(
 			action_label="POST /api/method/save",
 			event_type="HTTP Request",
@@ -783,10 +760,8 @@ class TestBgJobActionLabelNormalisation:
 		assert out["action_label"] == "POST /api/method/save"
 
 	def test_bg_job_with_no_path_falls_back_to_original_label(self):
-		"""When event_type is "RQ Job" but ``path`` is empty (degenerate
-		case), the rewrite has no source to derive the short name from
-		leave the label as-is rather than emitting "RQ Job: " with no
-		body."""
+		"""When event_type is "RQ Job" but ``path`` is empty, the rewrite has no
+		source for the short name, so the label is left as-is."""
 		child = _action(
 			action_label="GET something_weird",
 			event_type="RQ Job",

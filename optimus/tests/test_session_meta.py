@@ -88,13 +88,10 @@ def test_set_session_meta_default_when_not_specified(fake_cache):
 
 
 def test_register_recording_does_not_resurrect_cleared_active_pointer(fake_cache):
-	"""v0.7.x regression guard: a Stop call clears the active-session
-	Redis pointer. If an in-flight request's ``after_request`` then calls
-	``register_recording``, the TTL refresh must NOT re-create the
-	pointer otherwise subsequent HTTP requests get captured into the
-	already-stopped session and the widget flips back to Recording on
-	the user's next interaction. The fix replaced ``set_value`` (which
-	creates) with ``expire_key`` (Redis EXPIRE no-op on missing keys).
+	"""A Stop clears the active-session pointer; a subsequent
+	``register_recording`` from an in-flight request must NOT re-create it
+	(the TTL refresh uses ``expire_key``, a no-op on missing keys), or later
+	requests get captured into the stopped session.
 	"""
 	user = "alice@example.com"
 	session_uuid = "uuid-1"
@@ -116,10 +113,8 @@ def test_register_recording_does_not_resurrect_cleared_active_pointer(fake_cache
 
 
 def test_register_recording_refreshes_ttl_when_session_still_active(fake_cache):
-	"""Positive case: while a session is still active (pointer present),
-	each register_recording call refreshes the TTL so a long flow
-	doesn't silently expire at the 10-minute boundary. The
-	expire_key call returns 1 (refreshed) when the key exists."""
+	"""While a session is active (pointer present), each ``register_recording``
+	refreshes the TTL so a long flow doesn't expire at the 10-minute boundary."""
 	user = "alice@example.com"
 	session_uuid = "uuid-1"
 	session.set_active_session(user, session_uuid)

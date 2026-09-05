@@ -1,42 +1,25 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Sensitive-data redaction pure functions, no Frappe imports.
+"""Sensitive-data redaction: pure functions with no Frappe imports (so the
+recorder-patch path can call them at app-import, before Frappe is ready).
 
 Two responsibilities:
 
-  * :func:`redact_sensitive`: walks a dict / list and replaces values
-    under keys whose name contains a sensitive substring
-    (``password``, ``api_key``, ``token``, …) with ``"<REDACTED:keyname>"``.
-    Used for ``form_dict``, ``headers`` and any nested envelope.
-
+  * :func:`redact_sensitive`: walks a dict / list and replaces values under
+    keys whose name contains a sensitive substring (``password``, ``api_key``,
+    ``token``, ...) with ``"<REDACTED:keyname>"``. Used for ``form_dict``,
+    ``headers`` and any nested envelope.
   * :func:`redact_sql_literals`: replaces literal RHS values in
     ``<sensitive_column> = '...'`` SQL comparisons with ``'<REDACTED>'``.
-    Best-effort regex; misses UPDATE SET clauses and obscure shapes,
-    but covers the >95% case (``WHERE password = 'admin123'`` is the
-    canonical leak vector).
+    Best-effort regex; misses UPDATE SET clauses and obscure shapes but covers
+    the >95% case (``WHERE password = 'admin123'``).
 
-Pre-v0.7.x+ these helpers lived inside ``renderer.py`` and ran ONLY at
-render time, which meant raw values still landed in Redis + the
-persisted DocType JSON blobs (``top_queries_json``, ``technical_detail_json``,
-``Optimus Background Job.error``). Customers who shared their report or
-backed up their DB exfiltrated data they didn't realize they had.
-
-v0.7.x+ the recorder-patch path in ``optimus/__init__.py`` calls these
-at CAPTURE time so raw values never enter Redis. The renderer still
-calls them as defense-in-depth (catches anything the patch didn't
-e.g. older sessions written under the previous contract).
-
-Settings-driven extension: every function accepts an ``extra_keys`` /
-``extra_columns`` tuple so customers can add domain-specific patterns
-(``recovery_code``, ``otp_seed``, ``bank_account``, …) via Optimus
-Settings without forking. Extension is ADDITIVE there's no API to
-remove a default pattern; a config typo can't accidentally disable
-redaction of a known-sensitive key.
-
-This module imports nothing from Frappe so the recorder-patch path
-(which runs at app-import, before some Frappe internals are ready)
-can rely on it.
+Called at capture time so raw values never enter Redis; the renderer also calls
+them as defense-in-depth. Every function takes an ``extra_keys`` /
+``extra_columns`` tuple so operators can add patterns via Optimus Settings.
+Extension is additive: there is no way to remove a default pattern, so a config
+typo can't disable redaction of a known-sensitive key.
 """
 
 from __future__ import annotations
@@ -106,13 +89,10 @@ def redact_sensitive(payload, *, extra_keys: tuple[str, ...] = ()):
 
 @lru_cache(maxsize=16)
 def _sql_literal_regex(columns: tuple[str, ...]) -> re.Pattern:
-	"""Compile the SQL-literal regex for a given column tuple.
-
-	Caching keeps the patched-recorder hot path fast even when an
-	``extra_columns`` tuple is passed (each unique extras-tuple compiles
-	once per process). The cache size is intentionally small most
-	deployments have ONE extras list (from Optimus Settings) so the
-	cache holds the default pattern + at most one per setting variant.
+	"""Compile the SQL-literal regex for a given column tuple. Cached (small
+	maxsize) so the patched-recorder hot path stays fast: each unique
+	``extra_columns`` tuple compiles once per process, with most deployments
+	having a single extras list from Optimus Settings.
 	"""
 	# RHS literal alternatives, tried left-to-right: double-quoted, single-quoted,
 	# parenthesised IN-list, then a BARE token (unquoted number/hex/identifier)
@@ -126,19 +106,13 @@ def _sql_literal_regex(columns: tuple[str, ...]) -> re.Pattern:
 
 
 def redact_sql_literals(sql_str: str, *, extra_columns: tuple[str, ...] = ()) -> str:
-	"""Return ``sql_str`` with literal values in
-	``<sensitive_column> = '...'`` comparisons replaced by ``'<REDACTED>'``.
+	"""Return ``sql_str`` with literal values in ``<sensitive_column> = '...'``
+	comparisons replaced by ``'<REDACTED>'``.
 
-	Best-effort regex pass:
-
-	  * Quick exit when no sensitive substring appears (the 95% path
-	    avoids the regex cost on every benign query).
-	  * Regex replacement on ``column (=|LIKE|IN) literal`` where
-	    ``literal`` is single-quoted, double-quoted, or parenthesised.
-
-	Imperfect on ``UPDATE … SET password = 'x'`` (covered) but misses
-	multi-line CTEs and computed values; the recorder-time application
-	+ render-time backup mean a single miss doesn't leak.
+	Best-effort regex: quick-exits when no sensitive substring appears, then
+	replaces ``column (=|LIKE|IN) literal`` (quoted or parenthesised literals).
+	Misses multi-line CTEs and computed values; capture-time plus render-time
+	application means a single miss doesn't leak.
 	"""
 	if not sql_str or not isinstance(sql_str, str):
 		return sql_str or ""

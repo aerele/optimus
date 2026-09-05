@@ -3,10 +3,9 @@
 
 """Unit tests for optimus.analyzers.index_suggestions.
 
-This analyzer imports frappe.core.doctype.recorder.recorder._optimize_query
-inside the function. To test in isolation we monkeypatch that import
-using pytest's `monkeypatch` fixture, replacing _optimize_query with a
-stub that returns a canned DBIndex or None.
+The analyzer imports ``_optimize_query`` from Frappe's recorder inside the
+function; the tests monkeypatch that import with a stub returning a canned
+DBIndex or None.
 """
 
 import json
@@ -25,12 +24,9 @@ class _FakeDBIndex:
 
 
 def _install_fake_recorder_module(monkeypatch, optimize_query_impl):
-	"""Register a fake frappe.core.doctype.recorder.recorder module.
-
-	index_suggestions.analyze imports _optimize_query at call time via:
-	    from frappe.core.doctype.recorder.recorder import _optimize_query
-	We install a minimal fake module hierarchy in sys.modules so the
-	import succeeds without a real Frappe site.
+	"""Register a fake frappe.core.doctype.recorder.recorder module in
+	sys.modules so analyze's call-time ``import _optimize_query`` succeeds
+	without a real Frappe site.
 	"""
 	# Build the module chain only if not already present
 	for mod_name in (
@@ -88,15 +84,9 @@ def test_single_suggestion_per_table_column(monkeypatch, empty_context):
 
 def test_optimizer_skipped_when_dialect_unsupported(monkeypatch, empty_context):
 	"""On a dialect whose ``supports_query_optimizer`` is False (Postgres),
-	the analyzer must NOT invoke Frappe's DBOptimizer at all it returns a
-	single explanatory warning and no findings and never calls
-	``_optimize_query``.
-
-	Regression: on Postgres, ``_optimize_query`` runs DESCRIBE / SHOW INDEX
-	FROM (MariaDB-only), which raises a syntax error that aborts the whole
-	transaction. The analyzer's try/except swallowed that error but couldn't
-	un-abort the txn, so the entire analyze later crashed at _persist with
-	InFailedSqlTransaction. Gating on the dialect capability prevents the call."""
+	the analyzer must never call ``_optimize_query``: it returns a single
+	explanatory warning and no findings.
+	"""
 
 	def fake_optimize(query: str):
 		raise AssertionError("_optimize_query must not be called on an unsupported dialect")
@@ -130,11 +120,10 @@ def test_optimizer_skipped_when_dialect_unsupported(monkeypatch, empty_context):
 
 
 def test_parser_limitation_valueerror_gets_soft_warning(monkeypatch, empty_context):
-	"""v0.5.1: ValueError from sql_metadata is a parser limitation, not
-	a bug we should scream about. It must produce the soft "Skipped N
-	queries whose shape exceeds the parser" warning NOT the loud
-	"Could not analyze" warning that tells users to check Error Log.
-	And it must NOT write to frappe.log_error."""
+	"""ValueError from sql_metadata is a parser limitation: it must produce
+	the soft "shape exceeds the parser" warning, not the loud "Could not
+	analyze" one. It must NOT write to frappe.log_error.
+	"""
 
 	def fake_optimize(query: str):
 		raise ValueError("synthetic parse error")
@@ -193,9 +182,9 @@ def test_parser_limitation_valueerror_gets_soft_warning(monkeypatch, empty_conte
 
 
 def test_real_error_still_produces_loud_warning_and_logs(monkeypatch, empty_context):
-	"""Unexpected exception types (not ValueError/TypeError) may indicate
-	a profiler bug those still get the loud warning + Error Log entries
-	so the team can investigate."""
+	"""Unexpected exception types (not ValueError/TypeError) get the loud
+	warning plus an Error Log entry so the team can investigate.
+	"""
 
 	def fake_optimize(query: str):
 		raise RuntimeError("unexpected internal optimizer error")
@@ -263,12 +252,10 @@ def test_no_suggestion_when_optimizer_returns_none(monkeypatch, empty_context):
 
 
 def _install_fake_frappe_db(monkeypatch, indexed_columns_by_table, column_types_by_table):
-    """Install a fake frappe.db.sql that answers SHOW INDEX and
-    information_schema.columns lookups from the provided dicts.
-
-    Args:
-        indexed_columns_by_table: {"tabFoo": {"name", "parent", ...}}
-        column_types_by_table:    {"tabFoo": {"name": "varchar", "json_col": "json"}}
+    """Install a fake frappe.db.sql answering SHOW INDEX and
+    information_schema.columns lookups from the provided dicts:
+    indexed_columns_by_table {"tabFoo": {"name", ...}} and
+    column_types_by_table {"tabFoo": {"name": "varchar", ...}}.
     """
     import frappe
 
@@ -316,11 +303,10 @@ def _install_fake_frappe_db(monkeypatch, indexed_columns_by_table, column_types_
 
 
 def test_already_indexed_column_is_suppressed(monkeypatch, empty_context):
-    """v0.5.1 architect-review finding: Missing Index must check
-    existing indexes before suggesting one. A suggestion for a
-    column that's already the leftmost of an existing index is a
-    false positive the DB already has the index the user would
-    'add.' Suppress it and surface a warning."""
+    """Missing Index must check existing indexes first: a column already the
+    leftmost of an existing index is a false positive, so it is suppressed
+    with a warning.
+    """
 
     def fake_optimize(query):
         return _FakeDBIndex("tabCustomer", "customer_name")
@@ -393,10 +379,9 @@ def test_json_column_is_suppressed_as_unindexable(monkeypatch, empty_context):
 
 
 def test_text_column_gets_prefix_index_ddl(monkeypatch, empty_context):
-    """TEXT/BLOB columns require a prefix length on the index.
-    The plain DDL 'ADD INDEX idx_col (col)' fails with 'BLOB/TEXT
-    column used in key specification without a key length.' The
-    analyzer must emit a prefix-index DDL for these types."""
+    """TEXT/BLOB columns require a prefix length on the index, so the analyzer
+    must emit a prefix-index DDL for these types.
+    """
 
     def fake_optimize(query):
         return _FakeDBIndex("tabDoc", "body")
@@ -619,12 +604,9 @@ def test_severity_scales_with_savings(monkeypatch, empty_context):
 
 
 def test_non_select_statements_are_skipped_without_failures(monkeypatch, empty_context):
-	"""BEGIN/COMMIT/SAVEPOINT/SET/etc. must never reach _optimize_query.
-
-	Pre-v0.5.1, these were counted as 'parse failures' and polluted the
-	report with a warning saying 'Could not analyze 47% of your queries',
-	which was misleading the queries weren't optimization targets to
-	begin with.
+	"""BEGIN/COMMIT/SAVEPOINT/SET/etc. must never reach _optimize_query and
+	must not be reported as parse failures (they are not optimization
+	targets).
 	"""
 	optimize_call_count = {"n": 0}
 
@@ -732,10 +714,9 @@ def test_select_statements_still_analyzed_alongside_skips(monkeypatch, empty_con
 
 
 def test_select_with_leading_comment_is_still_recognised(monkeypatch, empty_context):
-	"""Frappe prepends `/* comment */` to some queries for tracing.
-	The query-type filter must see through comments and recognise the
-	underlying SELECT, otherwise we'd skip legitimate optimization
-	targets."""
+	"""The query-type filter must see through a leading ``/* comment */`` and
+	still recognise the underlying SELECT.
+	"""
 
 	def fake_optimize(query: str):
 		return _FakeDBIndex("tabCommented", "key_col")
@@ -813,15 +794,10 @@ LIMIT ?,
 
 
 def test_erpnext_item_search_valueerror_is_soft_skip(monkeypatch, empty_context):
-	"""Exact production payload: the ERPNext item-search query triggers
-	``ValueError: too many values to unpack (expected 2, got 4)`` inside
-	sql_metadata. The analyzer must:
-
-	  1. Not crash (continue processing other queries)
-	  2. Not write to frappe.log_error it's not a profiler bug
-	  3. Emit the soft 'Skipped N queries whose shape exceeds…' warning
-	  4. Still produce index suggestions for OTHER queries in the same
-	     session that DO parse cleanly
+	"""An ERPNext item-search query that raises ValueError inside sql_metadata
+	must not crash the pass, must not write to frappe.log_error, must emit the
+	soft "shape exceeds" warning and must still produce suggestions for other
+	cleanly-parsed queries in the session.
 	"""
 
 	def fake_optimize(query: str):
@@ -937,17 +913,11 @@ def test_typeerror_from_optimizer_is_also_a_soft_skip(monkeypatch, empty_context
 
 
 def test_modified_column_is_never_suggested(monkeypatch, empty_context):
-	"""'modified' is a Frappe metadata column updated on every save.
-	Indexing it causes write amplification that outweighs any read-side
-	gain. Must never be suggested, even when the DBOptimizer heuristic
-	points at it. (Origin: a production report surfaced 'Add index on
-	tabDocType(modified)' user feedback: 'Modified fields can't be
-	indexed as it would affect the system performance.' We use a non-meta
-	table here so it's the *column* blacklist being exercised, not the
-	separate meta-table rule that also covers tabDocType.)
-
-	Each query is slow enough (50 ms) to clear the per-query-savings
-	floor; the only thing that should suppress this is the column blacklist.
+	"""'modified' is a Frappe metadata column updated on every save; indexing
+	it causes write amplification, so it must never be suggested. Uses a
+	non-meta table so the column blacklist (not the meta-table rule) is
+	exercised, with queries above the per-query floor so only the blacklist
+	suppresses them.
 	"""
 
 	def fake_optimize(query):
@@ -1081,14 +1051,11 @@ def test_never_suggest_skips_schema_lookup(monkeypatch, empty_context):
 
 
 def test_frappe_metadata_columns_are_never_suggested(monkeypatch, empty_context):
-	"""v0.6.0: the blacklist now covers the WHOLE Frappe standard-metadata
-	column set `creation`, `owner`, `idx`, `parent`, `docstatus`, …
-	not just the per-save-mutated `modified`/`modified_by`. Even though
-	`creation`/`owner` are insert-only (no write amplification), surfacing
-	them nudges developers toward a class of change they should make
-	deliberately; the EXPLAIN row stays in the report for that. The
-	optimizer's suggestion is dropped and a single "metadata columns"
-	warning names the suppressed table.column pairs."""
+	"""The blacklist covers the whole Frappe standard-metadata column set
+	(creation, owner, idx, parent, docstatus, …), not just modified/modified_by:
+	suggestions on them are dropped and one "metadata columns" warning names the
+	suppressed table.column pairs.
+	"""
 
 	def fake_optimize(query):
 		if "creation" in query:
@@ -1138,11 +1105,10 @@ def test_frappe_metadata_columns_are_never_suggested(monkeypatch, empty_context)
 
 
 def test_frappe_meta_tables_are_never_suggested(monkeypatch, empty_context):
-	"""v0.6.0: no index suggestion is emitted on a Frappe framework "meta"
-	table (tabDocType / tabCustom Field / tabSingles / …) `bench migrate`
-	owns those tables' schema, so a hand-added index is pointless. The
-	suggestion is dropped before it's even bucketed (no schema lookup) and
-	a single warning names the tables."""
+	"""No index suggestion is emitted on a Frappe framework "meta" table
+	(tabDocType / tabCustom Field / tabSingles / …): the suggestion is dropped
+	before any schema lookup and one warning names the tables.
+	"""
 
 	def fake_optimize(query):
 		if "tabDocType" in query:
@@ -1192,11 +1158,10 @@ def test_frappe_meta_tables_are_never_suggested(monkeypatch, empty_context):
 
 
 def test_low_per_query_savings_suggestion_is_suppressed(monkeypatch, empty_context):
-	"""A business-column suggestion with 892ms cumulative across 1526
-	queries = 0.58ms/query, below the 2ms per-query floor. Must suppress
-	the finding entirely and surface a soft warning explaining why.
-	(Non-meta table + non-metadata column so it's the per-query *floor*
-	being exercised, not the meta-table or column blacklists.)"""
+	"""A suggestion whose per-query average is below the 2ms floor (892ms over
+	1526 queries) must be suppressed entirely with a soft warning. Uses a
+	non-meta table and business column so only the per-query floor applies.
+	"""
 
 	def fake_optimize(query: str):
 		return _FakeDBIndex("tabSales Invoice", "customer")
@@ -1393,9 +1358,10 @@ def test_get_query_type_helper_direct():
 
 
 def test_classify_column_blacklists_every_frappe_metadata_column():
-	"""v0.6.0: `_classify_column` returns `never_suggest` for every column in
-	the Frappe standard-metadata set checked before any DB lookup, so it
-	works in a no-site test env."""
+	"""`_classify_column` returns `never_suggest` for every column in the Frappe
+	standard-metadata set, checked before any DB lookup (works in a no-site
+	test env).
+	"""
 	from optimus.analyzers.base import FRAPPE_METADATA_COLUMNS
 	from optimus.analyzers.index_suggestions import _classify_column
 
@@ -1412,11 +1378,11 @@ def test_classify_column_blacklists_every_frappe_metadata_column():
 
 
 class TestIsSafeTableName:
-	"""v0.6.x: ``_is_safe_table_name`` whitelists the only two table-name
-	shapes ``_get_indexed_columns`` is allowed to interpolate into raw
-	``SHOW INDEX FROM`` SQL. Everything else routes to an empty-set
-	fallback before the DB is touched fixes the Lens audit's SQL-
-	injection finding at index_suggestions.py:198."""
+	"""``_is_safe_table_name`` whitelists the only two table-name shapes
+	``_get_indexed_columns`` may interpolate into raw ``SHOW INDEX FROM`` SQL;
+	everything else routes to an empty-set fallback before the DB is touched
+	(SQL-injection guard).
+	"""
 
 	def test_accepts_tab_doctype_names(self):
 		from optimus.analyzers.index_suggestions import _is_safe_table_name

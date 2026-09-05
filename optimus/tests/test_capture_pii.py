@@ -57,9 +57,9 @@ def test_identify_args_handles_missing_name():
 
 
 def test_identify_args_get_doc_with_dict_arg():
-	"""Regression: frappe.get_doc({"doctype": "X", "name": "Y", ...}) dict
-	form. Previously _identify_args returned the dict as-is, making the
-	bucket key unhashable and crashing the redundant_calls analyzer."""
+	"""frappe.get_doc({"doctype": "X", "name": "Y", ...}) dict form must yield a
+	hashable identifier (returning the dict as-is once made the bucket key
+	unhashable and crashed the redundant_calls analyzer)."""
 	doc_dict = {
 		"doctype": "Sales Invoice",
 		"name": "SI-2026-00042",
@@ -76,9 +76,8 @@ def test_identify_args_get_doc_with_dict_arg():
 
 
 def test_identify_args_get_doc_with_islocal_dict():
-	"""An unsaved doc from frappe.get_doc({...}) has __islocal=1 and no
-	final name yet; the identifier should reflect that the name is None
-	rather than capturing a transient temp name."""
+	"""An unsaved doc (``__islocal=1``, no final name) must report name=None rather
+	than capturing a transient temp name."""
 	doc_dict = {
 		"doctype": "Sales Invoice",
 		"name": "new-sales-invoice-fmoblfwoxh",  # transient temp name
@@ -92,13 +91,8 @@ def test_identify_args_get_doc_with_islocal_dict():
 
 
 def test_identify_args_has_permission_correct_signature():
-	"""Regression: has_permission(doctype, ptype="read", doc=None, ...)
-	Previously _identify_args treated args[1] as `name` and args[2] as
-	`ptype`, which produced garbage like ('DocType', 'read', 'read').
-
-	Frappe's actual signature is:
-	    has_permission(doctype, ptype="read", doc=None, ...)
-	So args[0]=doctype, args[1]=ptype, args[2]=doc.
+	"""Frappe's signature is has_permission(doctype, ptype="read", doc=None, ...),
+	so args[0]=doctype, args[1]=ptype, args[2]=doc (not name).
 	"""
 	# Positional with ptype only
 	raw, safe = capture._identify_args(
@@ -131,9 +125,8 @@ def test_identify_args_has_permission_correct_signature():
 
 
 def test_identify_args_cache_get_handles_bytes_key():
-	"""Regression: Frappe sometimes uses bytes for cache keys (with the
-	site prefix prepended). _identify_args must coerce to str so the
-	hash is deterministic and the result is hashable."""
+	"""Frappe sometimes uses bytes cache keys; _identify_args must coerce to str so
+	the hash is deterministic and the result hashable."""
 	fake_self = object()
 	bytes_key = b"_366a941cdecd5da0|table_columns::tabItem"
 	raw, safe = capture._identify_args("cache_get", (fake_self, bytes_key), {})
@@ -143,8 +136,8 @@ def test_identify_args_cache_get_handles_bytes_key():
 
 
 def test_identify_args_unknown_fn_returns_hashable():
-	"""Unknown fn_names must return hashable identifiers so the
-	redundant_calls bucketing doesn't crash."""
+	"""Unknown fn_names must return hashable identifiers so redundant_calls
+	bucketing doesn't crash."""
 	raw, safe = capture._identify_args("unknown_fn", ("a", "b"), {"k": "v"})
 	hash(raw)
 	hash(safe)

@@ -1,34 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Hook-time bg-job status tracking write Running/Completed + started_at /
-ended_at / duration_ms to the session's jobs hash from inside before_job /
-after_job, so analyze doesn't have to re-fetch the data from RQ (whose
-records may have been GC'd by the time analyze persists).
-
-Companion to ``test_bg_job_status.py`` (which covers the analyze-time
-``_capture_job_terminal_status`` fallback path). These tests cover the
+"""Hook-time bg-job status tracking: before_job / after_job write
+Running/Completed + started_at / ended_at / duration_ms to the session's jobs
+hash, so analyze doesn't have to re-fetch from RQ (whose records may be GC'd by
+the time analyze persists). Companion to ``test_bg_job_status.py`` (the
+analyze-time ``_capture_job_terminal_status`` fallback); these cover the
 authoritative hook-time path.
-
-Background: pre-fix, three failure modes left ``Optimus Background Job``
-child rows wrong:
-
-1. ``bg_recompute_aggregates`` (or any ``enqueue_after_commit=True`` job):
-   blank ``method`` because the enqueue patch skips ``record_job`` when
-   ``frappe.enqueue`` returns None for deferred dispatch
-   (``optimus/__init__.py:115`` guard fails). before_job now calls
-   ``record_job`` with the method it has access to from kwargs.
-
-2. ``bg_recheck_users`` / ``bg_chained_audit`` (first link): stuck at
-   ``status=Running`` with NULL times because the worker finished, RQ
-   eventually GC'd its job record and ``Job.fetch`` in
-   ``_capture_job_terminal_status`` raised ``NoSuchJobError`` (silently
-   swallowed). after_job now writes the terminal status + times while
-   the worker is still running, so analyze doesn't need RQ to be alive.
-
-3. Jobs whose recorder bailed out post-marker (orphan case): tracked
-   anyway via a separate ``frappe.local.optimus_bg_session_uuid`` stash
-   so the bg-jobs report still shows them.
 """
 
 import os
@@ -87,14 +65,10 @@ def captures(monkeypatch):
 @pytest.fixture
 def fake_local(monkeypatch):
 	"""Replace frappe.local with a clean namespace so the SUT can set
-	``optimus_bg_job_start_mono`` etc. without touching real state.
-
-	Also stubs ``frappe.utils.now_datetime`` to a fixed string because the
-	real implementation reads ``frappe.db`` for the site's system timezone
-	which isn't wired up in a plain-pytest context. The SUT's own
-	``try/except: pass`` would swallow the resulting AttributeError and
-	silently skip ``set_job_status``, masking the bug behind a green-ish
-	test. Stubbing here keeps the helpers exercisable end-to-end.
+	``optimus_bg_job_start_mono`` etc. without touching real state. Also stubs
+	``frappe.utils.now_datetime`` to a fixed string (the real one reads
+	``frappe.db`` for the timezone, which isn't wired up in plain pytest and
+	would make the SUT silently skip ``set_job_status``).
 	"""
 	import frappe
 	import frappe.utils
@@ -125,22 +99,18 @@ def fake_rq_job(monkeypatch):
 
 @pytest.fixture
 def fake_db(monkeypatch):
-	"""Stub ``frappe.db`` wholesale so the late-finish DocType-update fallback
-	in ``_track_bg_job_finished`` can be exercised without a real DB.
-
-	frappe.db is a Werkzeug Local proxy in production (per
-	[[feedback_frappe_db_local_proxy]]) patching its attributes is wrong;
-	always replace the whole proxy with a stand-in object.
+	"""Stub ``frappe.db`` wholesale (replace the whole proxy, never patch its
+	attributes) so the late-finish DocType-update fallback in
+	``_track_bg_job_finished`` can be exercised without a real DB.
 
 	The SUT calls ``frappe.db.get_value`` in a fixed sequence:
-	  1. ("Optimus Session", {"session_uuid": ...}, "name")     → session_name
-	  2. ("Optimus Session", session_name, "status")            → session_status
-	  3. ("Optimus Background Job", {"parent": ..., "job_id": ...}, "name")
-	                                                            → child_name
-	  4. ("Optimus Background Job", child_name, "status")       → child_status
+	  1. ("Optimus Session", {"session_uuid": ...}, "name")  → session_name
+	  2. ("Optimus Session", session_name, "status")         → session_status
+	  3. ("Optimus Background Job", {"parent", "job_id"}, "name") → child_name
+	  4. ("Optimus Background Job", child_name, "status")    → child_status
 
-	Tests tweak the four canned values via the returned ``state`` dict; the
-	fixture also captures ``set_value`` + ``commit`` calls for assertion.
+	Tests tweak the four canned values via the returned ``state`` dict, which
+	also captures ``set_value`` + ``commit`` calls.
 	"""
 	import frappe
 

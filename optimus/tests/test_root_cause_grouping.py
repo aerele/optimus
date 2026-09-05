@@ -1,16 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the renderer's root-cause grouping pass.
-
-A single get-doc-in-a-loop bug often produces 4-5 findings a Slow
-Hot Path on the wrapper, a Hot Line on the exact line, a Redundant
-Call for the fetched doc, a Redundant Permission Check downstream
-of it. The dev only has ONE fix to make; rendering 5 separate cards
-buries the signal. The grouping pass collapses findings whose
-deepest user-code anchor matches into ONE primary card with the
-others attached as ``sub_findings``.
-"""
+"""Tests for the renderer's root-cause grouping pass, which collapses findings
+whose deepest user-code anchor matches into one primary card with the others
+attached as ``sub_findings`` (so a single bug reads as one card, not five)."""
 
 from optimus.renderer import (
 	_group_findings_by_root_cause,
@@ -23,7 +16,7 @@ def _shp(*, function="looped_validate", filename="apps/myapp/common.py",
          title=None, drilldown_leaf_function=None,
          drilldown_leaf_filename=None):
 	"""Build a Slow Hot Path-shaped finding dict (post-_finding_to_dict
-	flattening) with optional drilldown_chain."""
+	flattening) with an optional drilldown_chain."""
 	detail = {
 		"function": function,
 		"filename": filename,
@@ -105,12 +98,9 @@ def _infra(*, severity="Low", impact_ms=0.0):
 
 class TestRootCauseKey:
 	def test_drilldown_leaf_wins_over_callsite(self):
-		"""When drilldown_chain is non-empty, the leaf's (file, function)
-		is used not the (retargeted or not) callsite. This is what
-		lets a Slow Hot Path on ``looped_validate`` (its retargeted
-		callsite says ``_run_validations`` but its chain ends at
-		``_check_user_exists``) group with a Hot Line that targets
-		``_check_user_exists`` directly."""
+		"""When drilldown_chain is non-empty, its leaf's (file, function) is the
+		key, not the callsite, so a Slow Hot Path groups with a Hot Line on the
+		chain's leaf function."""
 		shp = _shp(
 			function="_run_validations",  # retargeted callsite
 			lineno=13,
@@ -120,8 +110,7 @@ class TestRootCauseKey:
 		assert _root_cause_key(shp) == ("common.py", "_check_user_exists")
 
 	def test_falls_back_to_callsite_when_no_chain(self):
-		"""bg_recheck_users-style: drill-down empty (calls framework
-		directly). Use the callsite's own function as the key."""
+		"""With no drilldown_chain, the callsite's own function is the key."""
 		shp = _shp(function="bg_recheck_users")
 		# no drilldown_chain
 		assert _root_cause_key(shp) == ("common.py", "bg_recheck_users")
@@ -141,10 +130,8 @@ class TestRootCauseKey:
 
 class TestGrouping:
 	def test_four_findings_one_leaf_collapse_to_primary(self):
-		"""The user's pattern: Slow Hot Path (looped_validate chain),
-		Hot Line, Redundant Call, Redundant Permission Check all
-		resolve to _check_user_exists. They collapse into one primary
-		with three sub_findings."""
+		"""Four findings that all resolve to _check_user_exists collapse into one
+		primary with three sub_findings."""
 		shp = _shp(
 			function="looped_validate",
 			lineno=6,
@@ -189,17 +176,16 @@ class TestGrouping:
 			assert "sub_findings" not in f
 
 	def test_singleton_finding_unchanged(self):
-		"""A finding with a unique root cause passes through with no
-		sub_findings attached and no other mutation."""
+		"""A finding with a unique root cause passes through unchanged (no
+		sub_findings)."""
 		hl = _hot_line()
 		result = _group_findings_by_root_cause([hl])
 		assert len(result) == 1
 		assert "sub_findings" not in result[0]
 
 	def test_infra_findings_pass_through_ungrouped(self):
-		"""Findings with no resolvable root cause (no callsite) skip
-		the grouping and stream through as singletons. They appear
-		after the grouped findings in the output."""
+		"""Findings with no resolvable root cause (no callsite) skip grouping and
+		pass through as singletons, after the grouped findings."""
 		shp = _shp(impact_ms=500.0, severity="High",
 		           drilldown_leaf_function="_leaf")
 		infra = _infra()
@@ -209,8 +195,8 @@ class TestGrouping:
 		assert result[-1]["finding_type"] == "System CPU Hot"
 
 	def test_primary_pick_uses_severity_first(self):
-		"""Within a group, severity beats impact_ms a HIGH 100ms
-		finding beats a MEDIUM 1000ms finding for primary."""
+		"""Within a group, severity beats impact_ms when picking the primary (a
+		High 100ms finding beats a Medium 1000ms one)."""
 		low_impact_high_sev = _hot_line(severity="High", impact_ms=100.0)
 		high_impact_med_sev = _redundant_call(severity="Medium", impact_ms=1000.0,
 		                                       function="_check_user_exists")
@@ -230,9 +216,8 @@ class TestGrouping:
 		assert _group_findings_by_root_cause([]) == []
 
 	def test_subs_carry_compact_payload_only(self):
-		"""sub_findings entries are a compact dict they don't carry
-		the full technical_detail or llm_fix, just enough to render the
-		collapsed row (type, severity, title, description, impact, count)."""
+		"""sub_findings entries are a compact dict (type, severity, title,
+		description, impact, count), not the full technical_detail or llm_fix."""
 		shp = _shp(
 			drilldown_leaf_function="_check_user_exists",
 			impact_ms=500.0, severity="High",

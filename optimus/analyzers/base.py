@@ -3,26 +3,20 @@
 
 """Shared types for the analyzer pipeline.
 
-Every analyzer is a pure function with this signature:
+Every analyzer is a pure function:
 
     analyze(recordings: list[dict], context: AnalyzeContext) -> AnalyzerResult
 
-The analyzer reads the recording dicts (already enriched by analyze.py with
-sqlparse-formatted queries, EXPLAIN output, normalized queries and
-exact/normalized copy counts) and returns:
+It reads recording dicts (enriched by analyze.py with formatted queries,
+EXPLAIN output, normalized queries and copy counts) and returns an
+AnalyzerResult with:
+    actions: Optimus Action child rows (only per_action populates this)
+    findings: Optimus Finding child rows
+    aggregate: top-level dict data (e.g. top_queries, table_breakdown)
+    warnings: non-fatal issues to surface in the report
 
-    actions Optimus Action child rows (only per_action populates this)
-    findings Optimus Finding child rows (each analyzer may emit findings)
-    aggregate top-level dict-shaped data (e.g. top_queries, table_breakdown)
-    warnings non-fatal issues to surface in the report
-
-Pure means: no Frappe DB access, no Redis access, no I/O. Analyzers operate
-only on the data passed in. Side-effects are limited to the AnalyzerResult
-they return. The orchestrator (analyze.py) merges all results and persists
-them once.
-
-This makes analyzers trivially unit-testable from JSON fixtures and easy to
-reason about: each one is a pure data transformation.
+Pure means no Frappe DB access, no Redis access, no I/O: analyzers operate only
+on the data passed in. The orchestrator (analyze.py) merges and persists results.
 """
 
 from dataclasses import dataclass, field
@@ -170,9 +164,7 @@ _FRAPPE_META_TABLES_LOWER: frozenset[str] = frozenset(t.lower() for t in FRAPPE_
 
 
 def is_frappe_meta_table(name) -> bool:
-	"""Case-insensitive membership test for ``FRAPPE_META_TABLES`` (also
-	tolerates a backtick-quoted name, though ``sql_metadata`` returns the
-	bare name)."""
+	"""Case-insensitive membership test for ``FRAPPE_META_TABLES`` (backtick-tolerant)."""
 	return bool(name) and str(name).strip().strip("`").lower() in _FRAPPE_META_TABLES_LOWER
 
 
@@ -198,9 +190,9 @@ _FRAMEWORK_INTERNAL_TABLES_LOWER: frozenset[str] = frozenset(
 
 def is_framework_db_table(name) -> bool:
 	"""True for tables that are noise in the "Time spent per database table"
-	breakdown schema/meta (``FRAPPE_META_TABLES``), user/session bookkeeping
-	(``FRAMEWORK_INTERNAL_TABLES``), or MySQL system tables
-	(``information_schema.*``). Case-insensitive + backtick-tolerant."""
+	breakdown: schema/meta (``FRAPPE_META_TABLES``), user/session bookkeeping
+	(``FRAMEWORK_INTERNAL_TABLES``) or ``information_schema.*``.
+	Case-insensitive and backtick-tolerant."""
 	if not name:
 		return False
 	norm = str(name).strip().strip("`").lower()
@@ -241,18 +233,11 @@ def is_write_hot_table(name) -> bool:
 def _last_app_segment(norm: str) -> str | None:
 	"""The ``<app>`` in a real ``apps/<app>/`` segment, or None.
 
-	Boundary-anchored, so:
-	- a bench nested under a folder that is itself named ``apps``
-	  (``/opt/apps/frappe-bench/apps/erpnext/…``) resolves the REAL app
-	  (``erpnext``), not the bench dir the LAST ``/apps/`` on an ABSOLUTE path
-	  wins; and
-	- an app whose own name merely ends in ``apps`` (``webapps/module.py``) is
-	  NOT mistaken for the bench ``apps/`` dir.
-	A mid-path ``/apps/`` in a RELATIVE path is a user subpackage, not the bench
-	apps dir (the recorder strips the bench prefix, so bench code arrives as
-	``apps/<app>/…`` or ``<app>/<app>/…``: never ``<app>/apps/…``); so
-	``myapp/apps/foo.py`` resolves to None here, letting the caller fall back to the
-	top segment ``myapp``. Returns None when there's no ``apps/`` boundary at all.
+	Boundary-anchored: on an absolute path the LAST ``/apps/`` wins (so a bench
+	nested under a folder also named ``apps`` still resolves the real app); a
+	name merely ending in ``apps`` (``webapps/module.py``) is not the bench dir.
+	A mid-path ``/apps/`` in a RELATIVE path is a user subpackage, so
+	``myapp/apps/foo.py`` returns None (caller falls back to the top segment).
 	"""
 	if norm.startswith("apps/"):
 		tail = norm[len("apps/"):]
@@ -269,16 +254,10 @@ def _last_app_segment(norm: str) -> str | None:
 def _extract_app_segment(norm: str) -> str | None:
 	"""Return the app name from a normalized filename, or None.
 
-	Handles both path shapes we see in recorder stacks:
-	- ``apps/<app>/<app>/foo.py`` (bench-relative)
-	- ``<app>/foo.py`` (pyinstrument short form after path strip)
-	- ``/abs/path/to/apps/<app>/<app>/foo.py`` (absolute)
-	- ``/abs/path/<arbitrary>/foo.py`` (absolute without ``apps/``)
-
-	For the bench-relative / absolute forms we return the segment that follows
-	the real (boundary-anchored, last-wins) ``apps/``. For the short form we
-	treat the first path segment as the app. When neither ``apps/`` is found nor
-	the path has any non-slash segment, return ``None``.
+	Handles bench-relative (``apps/<app>/…``), pyinstrument short form
+	(``<app>/…``) and absolute paths with or without ``apps/``. Returns the
+	segment after the boundary-anchored ``apps/`` when present, else the first
+	path segment; None when the path has no non-slash segment.
 	"""
 	if not norm:
 		return None
@@ -299,14 +278,12 @@ def _extract_app_segment(norm: str) -> str | None:
 
 
 def installed_apps_allowlist() -> frozenset[str] | None:
-	"""The site's installed Frappe apps, as the ground-truth allowlist for
-	exclusion-mode classification or ``None`` when frappe isn't importable
-	(off-bench unit tests), in which case callers fall back to the hardcoded
-	third-party heuristic. Lazy frappe import mirrors ``call_tree._top_level_app``;
-	never raises. Analyzers resolve this ONCE and thread it in, so a real site
-	classifies application-vs-library from ground truth instead of guessing from a
-	name an installed app named like a library (``redis``) is the user's code,
-	and a real library that isn't an installed app is not."""
+	"""The site's installed Frappe apps as a ground-truth allowlist for
+	exclusion-mode classification, or None when frappe isn't importable (off-bench
+	unit tests), in which case callers fall back to the hardcoded third-party
+	heuristic. Never raises. Lets a real site classify application-vs-library from
+	ground truth (an installed app named like a library, e.g. ``redis``, is the
+	user's code; a real library that isn't installed is not)."""
 	try:
 		import frappe
 		apps = frappe.get_installed_apps()
@@ -323,31 +300,17 @@ def is_framework_callsite(
 	"""True if ``filename`` lives inside framework or third-party code
 	that the application developer can't practically patch.
 
-	Two modes, chosen by whether ``tracked_apps`` is provided:
+	Two modes:
+	- Inclusion (``tracked_apps`` non-empty): framework UNLESS the callsite's app
+	  is one of the tracked apps.
+	- Exclusion (default): uses ``installed_apps`` as ground truth (an installed,
+	  non-framework app is the developer's own code; everything else is
+	  library/framework). When ``installed_apps`` is None (off-bench), falls back
+	  to the built-in ``FRAMEWORK_APPS`` set plus a hardcoded third-party heuristic.
 
-	**Inclusion mode**: when ``tracked_apps`` is a non-empty tuple, the
-	classifier flips: a callsite is framework *unless* its app matches
-	one of the tracked apps. This is what ``Optimus Settings ▸ Tracked
-	Apps`` configures it lets the site admin say "I only care about
-	findings in myapp" and get everything else routed to Observations
-	without having to enumerate every framework app.
-
-	**Exclusion mode**: when ``tracked_apps`` is None or empty, the classifier
-	uses the site's installed-apps allowlist as ground truth: an app root that is
-	an installed Frappe app (and not a framework/stock app) is the developer's own
-	code; everything else is library/framework. When ``installed_apps`` is None
-	(off-bench unit tests), it falls back to the built-in ``FRAMEWORK_APPS`` set +
-	hardcoded third-party heuristic. This is the default for sites that haven't
-	configured the Single.
-
-	Matching is on the resolved app ROOT (the ``apps/<app>/`` segment or the top
-	path segment), never a mid-path substring so neither ``my_crm/`` nor a user
-	submodule named ``crm/`` deep in a path is misread as the framework app.
-
-	Used by redundant_calls, explain_flags, n_plus_one and top_queries to route
-	findings with framework-only callsites into the Observations bucket. Analyzers
-	resolve ``tracked_apps`` (from ``settings.get_tracked_apps()``) and
-	``installed_apps`` (from ``installed_apps_allowlist()``) ONCE and thread them in.
+	Matching is on the resolved app ROOT (the ``apps/<app>/`` segment or top path
+	segment), never a mid-path substring. Callers resolve ``tracked_apps`` and
+	``installed_apps`` once and thread them in.
 	"""
 	if not filename:
 		return False
@@ -411,13 +374,9 @@ def is_framework_callsite_str(
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
 ) -> bool:
-	"""``is_framework_callsite`` for the ``'filename:lineno'`` string form
-	that ``walk_callsite_str`` produces (and that the ``top_queries``
-	aggregate stores per row).
+	"""``is_framework_callsite`` for the ``'filename:lineno'`` string form.
 
-	A missing / empty callsite counts as framework: we can't attribute it
-	to the user's app, so it doesn't belong in a "your app" leaderboard
-	either.
+	A missing/empty callsite counts as framework (unattributable to the user's app).
 	"""
 	if not callsite:
 		return True
@@ -429,41 +388,14 @@ def is_framework_callsite_str(
 
 
 def is_profiler_own_query(stack: list | None) -> bool:
-	"""Return True if a SQL call's Python stack originates from the
-	profiler's own instrumentation.
+	"""True if a SQL call's Python stack originates from the profiler's own
+	instrumentation (e.g. the ``SHOW GLOBAL STATUS`` / ``SHOW VARIABLES`` snapshots
+	in ``optimus/infra_capture.py``). Filtering these keeps findings user-actionable.
 
-	Examples of queries that hit this path:
-
-	- ``optimus/infra_capture.py:176``: the ``SHOW GLOBAL
-	  STATUS`` snapshot run inside every ``before_request`` /
-	  ``after_request`` hook. Fired ~2× per captured request.
-	- ``optimus/infra_capture.py``: the one-shot ``SHOW
-	  VARIABLES`` for ``max_connections`` (cached after first call).
-	- Anything else the profiler queries as part of its own bookkeeping.
-
-	These queries are real SQL that MariaDB executed, so they show up
-	in the recorder's call list with stack traces. The user can't act
-	on them, though they're profiler overhead, not application work.
-	Before this helper, n_plus_one would surface them as:
-
-	    "Same query ran 22× at optimus/infra_capture.py:176"
-
-	and top_queries would include them in the slow-queries leaderboard,
-	both with the profiler's own internal file path as the "blame
-	frame." Filtering them out here keeps the findings user-actionable.
-
-	The rule (walk innermost → outermost):
-
-	- If we find a user frame (not in ``frappe/`` and not in
-	  ``optimus/``) → return False. The query came from user
-	  code routed through framework helpers keep it.
-	- If we exhaust the stack seeing only ``frappe/`` and
-	  ``optimus/`` frames AND at least one was
-	  ``optimus/`` → return True. The deepest non-frappe frame
-	  is inside the profiler, so the query originated there.
-	- If we exhaust with only ``frappe/`` frames → return False. This
-	  is a legitimate framework query (migration, fixture, internal
-	  bg task) the ``walk_callsite`` fallback still surfaces it.
+	Walk innermost to outermost:
+	- a user frame (not ``frappe/`` and not ``optimus/``) → False (keep the query).
+	- only ``frappe/`` + ``optimus/`` frames with at least one ``optimus/`` → True.
+	- only ``frappe/`` frames → False (legitimate framework query).
 	"""
 	if not stack:
 		return False
@@ -496,27 +428,12 @@ def is_profiler_own_query(stack: list | None) -> bool:
 def walk_callsite(stack: list | None) -> dict | None:
 	"""Return the deepest non-framework frame that issued a query, or None.
 
-	Shared implementation of the "skip frappe frames" callsite walker.
-	The recorder builds `stack` outermost-to-innermost (after stripping
-	its own frames), so the LAST entry is the closest /apps/ frame to
-	the SQL call but that's often a frappe framework helper. We walk
-	from innermost toward outermost and return the first frame whose
-	filename isn't inside a framework directory.
-
-	Returns a dict with keys `filename`, `lineno`, `function`: or None
-	if the stack is empty / malformed / belongs to profiler
-	instrumentation. Falls back to the innermost frame if every frame
-	is in ``frappe/`` (legitimate for queries issued from inside
-	frappe migrations, fixtures, etc.) so we never silently drop a
-	legitimate framework finding.
-
-	v0.5.1: stacks whose deepest non-frappe frame is inside
-	``optimus/`` (as detected by ``is_profiler_own_query``)
-	return None instead of falling back to the profiler frame. The
-	caller's ``if not callsite: continue`` guard then drops the query
-	otherwise the profiler's own ``SHOW GLOBAL STATUS`` snapshots
-	show up as "Same query ran 22× at optimus/infra_capture
-	.py:176" findings, which are noise the user can't act on.
+	The recorder builds ``stack`` outermost-to-innermost; we walk from innermost
+	outward and return the first frame not inside a framework directory
+	(``FRAMEWORK_PREFIXES``). Returns a dict with ``filename``, ``lineno``,
+	``function``. Falls back to the innermost frame when every frame is in
+	``frappe/`` (so legitimate framework queries still surface), but returns None
+	when the stack is profiler instrumentation (``is_profiler_own_query``).
 	"""
 	if not stack:
 		return None
@@ -626,12 +543,11 @@ def project_post_fix_ms(
 	current_avg_ms: float,
 	filtered_pct: float | None = None,
 ) -> float | None:
-	"""Return the projected per-query time after applying the finding's
-	suggested fix, or None if the finding type isn't one we project.
+	"""Return the projected per-query time after applying the finding's suggested
+	fix, or None if the finding type isn't one we project.
 
-	``filtered_pct`` is only used for "Low Filter Ratio" findings
-	(MariaDB's EXPLAIN ``filtered`` column, 0-100 representing what %
-	of examined rows survive the WHERE).
+	``filtered_pct`` is used only for "Low Filter Ratio" findings (EXPLAIN's
+	``filtered`` column, 0-100: the % of examined rows surviving the WHERE).
 	"""
 	if current_avg_ms <= 0:
 		return None
@@ -649,13 +565,8 @@ def project_post_fix_ms(
 
 
 def percentile(values: list[float], pct: int) -> float:
-	"""Linear-interpolated percentile of ``values``. Returns 0.0 for an
-	empty list. ``pct`` is in [0, 100]. Used by repetition-heavy
-	analyzers (N+1, redundant calls) to surface the tail of the per-hit
-	duration distribution alongside the consolidated total.
-
-	No numpy dependency Optimus already ships pure-Python analyzers,
-	and this is exact enough for finding-card P95 readouts.
+	"""Linear-interpolated percentile of ``values`` (``pct`` in [0, 100]).
+	Returns 0.0 for an empty list. No numpy dependency.
 	"""
 	if not values:
 		return 0.0
@@ -671,14 +582,9 @@ def short_filename(filename: str, keep_segments: int = 2) -> str:
 
 	Examples::
 
-	    short_filename("frappe/model/document.py")                    → "model/document.py"
-	    short_filename("a/b/c/d/e.py")                                → "d/e.py"
-	    short_filename("erpnext.py")                                  → "erpnext.py"
-	    short_filename("/Users/.../apps/frappe/frappe/handler.py")    → "frappe/handler.py"
-	    short_filename("")                                            → ""
-
-	The returned value is always <=  sum of the last N segment lengths
-	plus (N - 1) slashes, which for typical Python files is 40-60 chars.
+	    short_filename("frappe/model/document.py")        → "model/document.py"
+	    short_filename("/abs/apps/frappe/frappe/x.py")     → "frappe/x.py"
+	    short_filename("")                                 → ""
 	"""
 	if not filename:
 		return ""
@@ -703,11 +609,8 @@ class AnalyzerResult:
 
 @dataclass
 class AnalyzeContext:
-	"""Shared state across the analyzer pipeline.
-
-	Holds the accumulated outputs from each analyzer as the orchestrator
-	walks through them. The orchestrator calls `merge()` after each
-	analyzer to fold its result into the context.
+	"""Shared state across the analyzer pipeline. Accumulates each analyzer's
+	outputs; the orchestrator calls ``merge()`` after each analyzer.
 	"""
 
 	session_uuid: str

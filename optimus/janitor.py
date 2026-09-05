@@ -1,23 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Periodic cleanup of stale profiler sessions.
+"""Periodic cleanup of stale profiler sessions (scheduler_event, every 5 min).
 
-Wired into hooks.py as a scheduler_event running every 5 minutes. Catches
-two failure modes:
-
-  1. A user clicked Start, walked away and never clicked Stop. After 10
-     minutes the Redis active pointer auto-expires (TTL on the key) but
-     the Optimus Session DocType row is still in `Recording` state with
-     no path forward.
-
-  2. A worker crashed mid-analyze, leaving a row in `Analyzing` state with
-     no in-flight job. Without the janitor it would sit there forever.
-
-Both cases are handled by force-stopping the session: clear the Redis
-state, mark the row as Stopping and enqueue analyze.run. If the analyze
-itself was the failure cause, it will retry once and end up in `Failed`
-on the next attempt at least the row no longer pretends to be live.
+Catches two failure modes: a session left in ``Recording`` after the user
+walked away (Redis active pointer expired) and one stuck in ``Analyzing``
+after a worker crashed. Both are force-stopped: clear Redis state, mark the
+row ``Stopping`` and enqueue analyze.run (which retries once, then ``Failed``).
 """
 
 import frappe
@@ -74,17 +63,10 @@ def sweep_stale_sessions():
 
 
 def sweep_old_sessions():
-	"""Run from scheduler daily. Delete old Ready/Failed sessions per retention policy.
-
-	Only deletes sessions in terminal states (Ready or Failed) older than
-	the configured retention (default: 90 days). Active sessions are
-	never touched here the 5-minute janitor handles those.
-
-	Also cleans up:
-	- Attached report files so MariaDB and file storage shrink together
-	- Orphaned profiler:session:* Redis keys whose parent Profiler
-	  Session row no longer exists (e.g. from failed analyzes that
-	  never retried, or manual DocType deletions)
+	"""Run daily from scheduler. Delete terminal (Ready/Failed) sessions older
+	than the configured retention (default 90 days), their attached report
+	files and orphaned profiler:session:* Redis keys. Active sessions are left
+	to the 5-minute janitor.
 	"""
 	try:
 		_sweep_old_sessions()
@@ -98,16 +80,11 @@ def sweep_old_sessions():
 
 
 def _sweep_orphan_redis_state():
-	"""Delete profiler:session:*:* Redis keys with no matching DocType row.
+	"""Delete profiler:session:*:* Redis keys with no matching Optimus Session
+	row (leaked by analyzes that failed and never retried).
 
-	Round 2 fix #11. A failed analyze that never retries leaves its
-	meta and recordings sets in Redis forever. This daily sweep catches
-	those orphans scans for profiler:session:* keys, extracts the
-	uuid, checks if the Optimus Session row still exists and deletes
-	if not.
-
-	Safe to run repeatedly. Uses SCAN with small batches so large
-	keyspaces don't block Redis.
+	Safe to run repeatedly. Uses SCAN with small batches so large keyspaces
+	don't block Redis.
 	"""
 	from optimus import redis_keys
 
@@ -413,13 +390,10 @@ def _sweep_stale_recording():
 def _sweep_stuck_analyzing():
 	"""Find Analyzing rows older than STALE_ANALYZING_MINUTES and mark Failed.
 
-	A genuinely long analyze (heavy EXPLAIN burst + AI suggestions, up to ~25min)
-	can cross the threshold WITHOUT bumping ``modified``: the liveness heartbeat
-	is Redis-only (no risky mid-analyze DB commit). So before failing a row, skip
-	it if it still holds the live single-flight flag: that flag is heartbeated
-	throughout analyze, so its presence proves the run is progressing, not wedged.
-	Only the current holder is ever skipped (the flag is a global mutex), so a row
-	that actually crashed is still failed promptly."""
+	Rows still holding the heartbeated single-flight flag are skipped (a long
+	analyze that hasn't bumped ``modified`` is still progressing, not wedged);
+	only the mutex holder is skipped, so a crashed row is still failed promptly.
+	"""
 	from optimus.analyze import is_singleflight_holder
 
 	cutoff = add_to_date(now_datetime(), minutes=-STALE_ANALYZING_MINUTES)
@@ -447,18 +421,11 @@ def _sweep_stuck_analyzing():
 
 
 def _sweep_stale_stopping():
-	"""Find rows stuck in ``Stopping`` / ``Capturing Background Jobs`` longer than
-	STALE_RECORDING_MINUTES and re-enqueue analyze.
-
-	``Stopping`` is meant to last only the instant between ``api._mark_stopping``
-	and ``analyze.run`` setting ``Analyzing``. Lingering there means the analyze
-	job never ran no worker on the ``long`` queue, a queue backlog, or a
-	worker OOM-killed mid-analyze that left a zombie job. Re-enqueue so the
-	session self-heals once a worker is available (analyze is idempotent and
-	handles empty sessions). We bump ``modified`` (re-affirming the status) so a
-	still-stuck row backs off ~one window between retries instead of stacking a
-	job every sweep; if the re-enqueued analyze then wedges in ``Analyzing``,
-	``_sweep_stuck_analyzing`` is the next backstop."""
+	"""Find rows stuck in ``Stopping`` / ``Capturing Background Jobs`` longer
+	than STALE_RECORDING_MINUTES (the analyze job never ran) and re-enqueue
+	analyze, which is idempotent. Bumps ``modified`` so a still-stuck row backs
+	off ~one window between retries instead of stacking a job every sweep.
+	"""
 	cutoff = add_to_date(now_datetime(), minutes=-STALE_RECORDING_MINUTES)
 	stale = frappe.db.get_all(
 		"Optimus Session",
@@ -494,17 +461,9 @@ def _sweep_stale_stopping():
 
 
 def _sweep_stale_phase2_runs():
-	"""Force-stop Optimus Phase Two Run rows stuck in Recording (>11min) or
-	Analyzing (>30min). Mirrors the phase-1 sweep logic but operates on
-	the child rows.
-
-	Stale Recording rows: clear the per-user Redis active flag (so future
-	requests don't keep instrumenting), mark the row Failed with a note.
-	Stale Analyzing rows: mark Failed with the same retry-from-console
-	guidance the phase-1 sweep uses.
-
-	Both cases also cleanup the Redis picks/source/samples keys via
-	line_profile.capture.cleanup_run so storage doesn't drift.
+	"""Force-stop Optimus Phase Two Run child rows stuck in Recording (>11min)
+	or Analyzing (>30min): mark them Failed and clean up their Redis
+	picks/source/samples keys via line_profile.capture.cleanup_run.
 	"""
 	from optimus.line_profile import capture as _lp_capture
 

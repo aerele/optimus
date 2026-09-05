@@ -1,12 +1,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Runtime smoothing for analyze (v0.7.x).
-
-M5: lower the analyze worker's CPU priority (os.nice) so a heavy analyze
-doesn't starve live web traffic gated to the async path (sticky per-process).
-M6: optionally throttle the EXPLAIN/sqlparse burst in _enrich_recordings so the
-DB/CPU aren't hammered continuously. Both default to inert/near-zero and are
+"""Runtime smoothing for analyze: lowering the analyze worker's CPU priority
+(os.nice, gated to the async path, sticky per-process) so a heavy analyze
+doesn't starve live web traffic, plus optionally throttling the
+EXPLAIN/sqlparse burst in _enrich_recordings. Both default to inert and are
 result-invariant.
 """
 
@@ -150,10 +148,9 @@ class TestEnrichThrottle:
 
 
 class TestMaxQueriesPerRecordingZeroIsUnlimited:
-	"""v0.13.x: ``max_queries_per_recording = 0`` (Strict preset) means
-	no cap every query gets enriched. Pre-v0.13.x the ``if cap <= 0:
-	cap = DEFAULT`` reset silently re-applied the 2000 default, so the
-	operator's "I want full coverage" intent was clobbered."""
+	"""``max_queries_per_recording = 0`` (Strict preset) means no cap: every
+	query gets enriched, rather than silently falling back to the 2000
+	default."""
 
 	def test_zero_cap_does_not_truncate_large_recording(self, enrich_env, monkeypatch):
 		# Override the fixture's max_queries default.
@@ -180,9 +177,8 @@ class TestMaxQueriesPerRecordingZeroIsUnlimited:
 		)
 
 	def test_positive_cap_still_truncates(self, enrich_env, monkeypatch):
-		"""Sanity: a positive cap still truncates as before. Guards
-		against an over-eager rewrite that accidentally unbounded
-		every deployment."""
+		"""A positive cap still truncates, guarding against an over-eager
+		rewrite that accidentally unbounds every deployment."""
 		import optimus.settings as settings_mod
 		monkeypatch.setattr(
 			settings_mod, "get_config",

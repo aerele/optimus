@@ -3,18 +3,10 @@
 
 """Analyzer: parse EXPLAIN output for red flags.
 
-The recorder captures `EXPLAIN <query>` for every SELECT/UPDATE/DELETE but
-nobody reads the result. This analyzer walks every EXPLAIN row and surfaces
-the four most actionable red flags:
-
-    type == "ALL"          → full table scan (no index used)
-    Extra: "Using filesort"  → sorting on disk
-    Extra: "Using temporary" → temp table created
-    filtered < 10            → reading much more than returned
-
-Each match becomes a finding tagged by table. Findings are deduplicated by
-(finding_type, table) if 50 queries hit the same full-scan table, we
-report it once with the cumulative impact.
+Walks every captured EXPLAIN row and surfaces four actionable flags: full
+table scan (type ALL), filesort, temporary table and low filter ratio
+(filtered < 10). Each match becomes a finding tagged by table; findings are
+deduplicated by (finding_type, table) with cumulative impact.
 """
 
 import json
@@ -35,10 +27,8 @@ from optimus.dbdialect.mariadb import MariaDBDialect
 def _item_to_plan_table(item: dict) -> PlanTable:
 	"""Coerce one ``explain_result`` item to a normalized PlanTable.
 
-	The EXPLAIN runner now stores normalized PlanTable dicts, but older
-	persisted recordings / cache entries / fixtures hold raw MariaDB EXPLAIN
-	rows distinguish by the presence of the ``full_scan`` key and map a
-	legacy row through the MariaDB adapter so old data still analyzes."""
+	Items with a ``full_scan`` key are already normalized; legacy raw MariaDB
+	EXPLAIN rows are mapped through the MariaDB adapter."""
 	if "full_scan" in item:
 		return PlanTable(
 			table=item.get("table") or "?",
@@ -89,11 +79,8 @@ _framework_doctypes_cache: frozenset[str] | None = None
 
 
 def _get_framework_doctypes() -> frozenset[str]:
-	"""Return the set of DocType names owned by framework apps
-	(frappe, erpnext, hrms, etc.).
-
-	Cached per process. Fall back to empty set on any error the
-	noise-floor filter still runs, so we don't lose correctness.
+	"""Return the set of DocType names owned by framework apps (frappe,
+	erpnext, hrms, etc.). Cached per process; returns an empty set on any error.
 	"""
 	global _framework_doctypes_cache
 	if _framework_doctypes_cache is not None:
@@ -126,10 +113,8 @@ def _get_framework_doctypes() -> frozenset[str]:
 
 
 def _is_framework_doctype_table(table: str, framework_doctypes: frozenset[str]) -> bool:
-	"""True if `table` is a stock Frappe/ERPNext DocType the user
-	cannot add indexes to (would require an upstream patch).
-
-	Accepts both ``tab<Name>`` (Frappe convention) and bare names.
+	"""True if `table` is a stock Frappe/ERPNext DocType (user cannot add an
+	index without an upstream patch). Accepts both ``tab<Name>`` and bare names.
 	"""
 	if not table:
 		return False
@@ -384,25 +369,13 @@ def _is_framework_origin(
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
 ) -> bool:
-	"""Return True when the SQL call's blame frame is inside framework
-	code (frappe, erpnext, hrms, lms, …) or a pip-installed library.
+	"""Return True when the SQL call's blame frame is inside framework code
+	(frappe, erpnext, hrms, …) or a pip-installed library, so explain_flags can
+	skip findings the application developer can't fix.
 
-	Accepts ``tracked_apps`` for the inclusion-mode classification
-	(when the site admin has set Optimus Settings ▸ Tracked Apps).
-	Defaults to exclusion mode (built-in FRAMEWORK_APPS) when None.
-
-	Used by explain_flags to skip Full Scan / Filesort / Temporary
-	Table / Low Filter findings whose issuing code lives in the
-	framework. Same rationale as the Framework N+1 split: the
-	application developer can't add an index for a query that
-	Frappe/ERPNext issues they'd have to patch upstream.
-
-	walk_callsite walks innermost-to-outermost for a non-frappe-core
-	frame; its fallback returns the deepest frame if ALL frames are
-	framework-core. So a None return means "profiler-own stack"
-	(already filtered elsewhere). We additionally filter any blame
-	frame resolving to a framework app via is_framework_callsite()
-	so findings rooted in erpnext loops don't surface as actionable.
+	``tracked_apps`` selects inclusion-mode classification (Optimus Settings
+	Tracked Apps); None uses exclusion mode (built-in FRAMEWORK_APPS). An empty
+	stack returns False (older recordings without per-call stacks).
 	"""
 	if not stack:
 		# No stack captured. Don't filter fall through to the
@@ -439,37 +412,14 @@ _SYSTEM_METADATA_TABLES: frozenset[str] = frozenset({
 
 
 def _is_likely_alias(table: str) -> bool:
-	"""Return True when `table` looks like a SQL alias rather than a
-	real user-addressable table name.
+	"""Return True when `table` looks like a SQL alias or system table rather
+	than a real user-indexable table name.
 
-	Frappe DocType tables always start with ``tab`` (``tabItem``,
-	``tabSales Invoice``, ``tabCustom Field``, etc.), so anything
-	that starts with a letter and is short + lowercase-only is
-	almost certainly an alias:
-
-	  ``a`` alias
-	  ``c`` alias
-	  ``ap`` alias
-	  ``cd`` alias
-	  ``addr``: alias (common for Address)
-	  ``p`` alias
-	  ``d`` alias
-
-	These come from EXPLAIN rows for JOIN queries where MariaDB
-	uses the aliased name in the `table` column of its output.
-	A finding of "Full table scan on a" has no actionable signal
-	the user can't index "a", they'd need the real table name.
-
-	Also filters INFORMATION_SCHEMA pseudo-tables (``columns``,
-	``tables``, ``schemata``, etc.) these are real but not
-	user-indexable, same "no action available" property as a raw
-	alias.
-
-	False negatives are acceptable: a legitimate short table name
-	like a custom "log" table would be mis-classified as alias
-	and filtered. That's rare enough that the noise reduction
-	wins. True aliases (single/double letter) are MUCH more common
-	than short real table names in a Frappe codebase.
+	Flags short lowercase JOIN aliases (a, c, ap, addr), MariaDB
+	``<derivedN>``/``<subqueryN>`` markers and INFORMATION_SCHEMA metadata
+	views (columns, tables, …). Frappe ``tab`` tables and quoted/mixed-case
+	names are always kept. False negatives (a short real table name) are
+	accepted for the noise reduction.
 	"""
 	if not table:
 		return True
@@ -505,13 +455,12 @@ def _is_likely_alias(table: str) -> bool:
 
 
 def _inspect_table(pt, normalized_query, action_idx, query_duration, buckets):
-	"""Check one normalized PlanTable against four red-flag patterns.
+	"""Check one normalized PlanTable against four red-flag patterns, upserting
+	findings into ``buckets``.
 
-	Returns ``"alias"`` when the table is a SQL alias (skipped, caller counts
-	it for the warning), or ``None`` on normal processing. The plan fields are
-	dialect-blind the dialect adapter already mapped a MariaDB EXPLAIN row /
-	Postgres plan node onto them; ``pt.raw`` keeps the dialect blob for the
-	report + LLM (it's what ``explain_row`` in technical_detail holds).
+	Returns ``"alias"`` when the table is a SQL alias (skipped; caller counts it
+	for the warning), else ``None``. Plan fields are dialect-blind; ``pt.raw``
+	holds the dialect blob surfaced as ``explain_row`` in technical_detail.
 	"""
 	table = pt.table or "?"
 

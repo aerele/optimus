@@ -49,11 +49,10 @@ def test_empty_recordings(empty_context):
 
 
 def test_framework_callsite_queries_excluded_from_leaderboard(empty_context):
-	"""v0.6.0: the slowest-queries leaderboard is scoped to the user's
-	own app. A slow query whose blame frame is inside frappe/ or
-	erpnext/ must not appear in ``top_queries`` even though it's slower
-	than the user-app queries it's noise the developer can't act on.
-	The per-action breakdown still carries it."""
+	"""The slowest-queries leaderboard is scoped to the user's own app: a slow
+	query whose blame frame is inside frappe/ or erpnext/ must not appear in
+	``top_queries`` even though it's slower than the user-app queries. The
+	per-action breakdown still carries it."""
 	recording = {
 		"uuid": "r1",
 		"calls": [
@@ -88,8 +87,8 @@ def test_framework_callsite_queries_excluded_from_leaderboard(empty_context):
 
 
 def test_query_without_callsite_excluded_from_leaderboard(empty_context):
-	"""A query the recorder couldn't attribute to a frame (None callsite)
-	can't be tied to the user's app, so it's left out of the leaderboard."""
+	"""A query with no callsite (unattributed) can't be tied to the user's app, so
+	it's left out of the leaderboard."""
 	recording = {
 		"uuid": "r1",
 		"calls": [
@@ -106,9 +105,8 @@ def test_query_without_callsite_excluded_from_leaderboard(empty_context):
 
 
 def test_trivially_fast_queries_excluded_from_leaderboard(empty_context):
-	"""When every user-app query is sub-floor (a few ms each), the
-	leaderboard stays empty rather than padding itself with queries that
-	aren't worth singling out there's no "reasonable" slowest query."""
+	"""When every user-app query is sub-floor (a few ms each), the leaderboard stays
+	empty rather than padding itself with queries not worth singling out."""
 	recording = {
 		"uuid": "r1",
 		"calls": [

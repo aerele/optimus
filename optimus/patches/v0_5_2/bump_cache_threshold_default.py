@@ -1,24 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.5.2 round 4: Bump redundant_cache_threshold on the Profiler
-Settings Single from the old default of 10 to the new default of 50.
+"""Bump ``redundant_cache_threshold`` on Optimus Settings from 10 to 50.
 
-Rationale: cache lookups aren't individually timed (sidecar captures
-identifier + args, not wall time), so every Redundant Cache finding
-reports impact=0ms. At threshold=10, a 10-20× cache loop at 0ms
-impact was indistinguishable from framework background noise and
-flooded the actionable findings list on real sessions.
-
-This patch runs on migrate. It's conservative:
-
-1. Only runs if the Optimus Settings Single exists (fresh installs
-   pick up the new default from JSON; nothing to patch).
-2. Only bumps the value from **exactly 10**: the prior default.
-   Any other value (user-tuned 5, 20, 100, etc.) is left alone so we
-   never silently overwrite a deliberate configuration choice.
-3. Invalidates the settings cache so the next request sees the new
-   value without a bench restart.
+Cache lookups aren't individually timed, so Redundant Cache findings report
+0ms impact; at threshold 10 they flooded the findings list. Conservative:
+only when the Single exists, only when the value is still exactly the old
+default of 10 (never overwrites a tuned value), then invalidates the settings
+cache so the change takes effect without a restart.
 """
 
 import frappe

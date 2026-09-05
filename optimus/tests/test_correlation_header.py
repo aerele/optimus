@@ -1,13 +1,12 @@
 # optimus/tests/test_correlation_header.py
 # Copyright (c) 2026, Optimus contributors
 
-"""Tests for the X-Optimus-Recording-Id response header injection (v0.5.0).
+"""Tests for the X-Optimus-Recording-Id response header injection.
 
-The correlation header is read by the browser-side optimus_frontend.js
-shim to tie each XHR timing back to a specific server recording. The
-Access-Control-Expose-Headers entry is load-bearing: without it, browsers
-refuse to surface the custom header to JavaScript, even for same-origin
-requests. That's the #1 failure mode in frontend instrumentation.
+The correlation header is read by the browser-side optimus_frontend.js shim to
+tie each XHR timing back to a server recording. The Access-Control-Expose-Headers
+entry is load-bearing: without it browsers refuse to surface the custom header
+to JavaScript, even for same-origin requests.
 """
 
 import types
@@ -68,15 +67,10 @@ def test_inject_correlation_header_idempotent():
 
 
 def test_inject_correlation_header_tokenwise_match_not_substring():
-    """Pass-4 regression guard: the idempotency check must split on
-    commas and compare tokens, not do a substring `in` match.
-
-    If another app already set
-    Access-Control-Expose-Headers: X-Optimus-Recording-Id-Legacy
-    a substring `in` check falsely sees our header as present and
-    skips adding it. The REAL header is then never exposed and the
-    browser refuses to surface it to JavaScript, silently breaking
-    the entire frontend correlation feature.
+    """The idempotency check must split on commas and compare tokens, not do a
+    substring ``in`` match. Otherwise an existing
+    ``X-Optimus-Recording-Id-Legacy`` entry makes the substring check skip
+    adding the real header, which then never gets exposed to JavaScript.
     """
     from optimus.hooks_callbacks import _inject_correlation_header
 
@@ -94,16 +88,12 @@ def test_inject_correlation_header_tokenwise_match_not_substring():
 
 
 def test_correlation_header_gated_on_profiler_session_id():
-    """Pass-5 regression guard: the correlation header must only be
-    injected when an active profiler session is present not merely
-    when there's a recording UUID. The standalone Frappe Recorder UI
-    sets frappe.local._recorder for non-session traffic and leaking
-    X-Optimus-Recording-Id onto those responses would cause
-    optimus_frontend.js to buffer XHR timings tagged to a recording
-    UUID that has no session to flush them to.
-
-    Source-inspection check on the after_request hook's correlation
-    header block.
+    """The correlation header must be injected only when an active profiler
+    session is present, not merely when there's a recording UUID. The standalone
+    Frappe Recorder UI sets frappe.local._recorder for non-session traffic;
+    leaking X-Optimus-Recording-Id there would make optimus_frontend.js buffer
+    XHR timings against a recording UUID with no session to flush to.
+    Source-inspection check on the after_request hook.
     """
     import inspect
 
@@ -126,10 +116,9 @@ def test_correlation_header_gated_on_profiler_session_id():
     )
 
 def test_inject_correlation_header_case_insensitive_idempotency():
-    """HTTP header names are case-insensitive. The token check must
-    be too if another app set the expose header in lowercase, we
-    shouldn't add our (same) header with different casing and create
-    a duplicate."""
+    """HTTP header names are case-insensitive, so the token check must be too:
+    an existing lowercase expose entry shouldn't get a duplicate added in
+    different casing."""
     from optimus.hooks_callbacks import _inject_correlation_header
 
     headers = {"Access-Control-Expose-Headers": "x-profiler-recording-id"}
@@ -154,9 +143,8 @@ def test_inject_correlation_header_noop_without_response_headers():
 
 
 def test_hooks_callbacks_invokes_snapshot():
-    """Source-inspection regression guard: before/after hooks must call
-    infra_capture. Source inspection is an established pattern in this
-    codebase (see test_api_start_kwargs.py)."""
+    """Source-inspection guard: the before/after request and job hooks must
+    call infra_capture."""
     import inspect
 
     from optimus import hooks_callbacks

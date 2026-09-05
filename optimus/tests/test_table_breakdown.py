@@ -604,11 +604,10 @@ class TestHideFrameworkTablesToggle:
 
 
 class TestRenderConfigFooter:
-	"""v0.6.x: the report footer stamps the render-affecting settings that
-	were in effect at render time. Without this stamp, users who toggle a
-	Optimus Settings flag and re-open an existing (un-regenerated) HTML
-	file see no change and assume a bug when in fact the saved file is
-	frozen at its rendered-time settings."""
+	"""The report footer stamps the render-affecting settings in effect at render
+	time, so a user who toggles a flag and re-opens an old (un-regenerated) HTML
+	file understands why nothing changed: the file is frozen at its render-time
+	settings."""
 
 	def _doc(self):
 		import json

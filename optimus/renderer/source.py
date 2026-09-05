@@ -1,41 +1,25 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""On-disk source-file access + a bounded LRU cache for the renderer.
+"""On-disk source-file access plus a bounded LRU cache for the renderer.
 
-Every finding card that includes a source snippet, every AI-fix payload
-that includes a source window and every Phase-2 hot-line drilldown
-ultimately calls back here to read source lines from the bench's app
-files. Three responsibilities:
+Finding-card snippets, AI-fix source windows and Phase-2 drilldowns all read
+source lines through here. Three responsibilities:
 
-  * **Path resolution**: :func:`_resolve_source_path` turns the
-    app-relative paths recorded by the analyzer (``ugly_code/python/
-    common.py``) into real absolute paths via ``frappe.get_app_path`` /
-    bench fallback. Server Script callsites resolve to a tuple sentinel
-    that downstream branches load from the ``tabServer Script`` DocType
-    instead of disk.
+  * Path resolution (:func:`_resolve_source_path`): turn analyzer-recorded
+    app-relative paths into absolute paths via ``frappe.get_app_path`` / bench
+    fallback. Server Script callsites resolve to a tuple sentinel that
+    downstream branches load from the ``tabServer Script`` DocType, not disk.
+  * Bench-boundary check (:func:`_path_within_bench`): refuse a callsite that
+    resolves outside the bench (e.g. ``/etc/passwd`` via a tampered analyzer
+    dict). Bypassed under ``frappe.flags.in_test`` so /tmp fixtures work.
+  * Per-render file cache (:class:`_BoundedFileCache`): a 50-entry
+    move-to-end LRU dict passed as ``file_cache=`` to cap memory on big codebases.
 
-  * **Bench-boundary check**: :func:`_path_within_bench` is the Phase-K
-    hardening guard: a synthetic callsite that points at ``/etc/passwd``
-    (analyzer dict tampering, malformed pyinstrument frame) is refused.
-    Bypassed under ``frappe.flags.in_test`` so pytest fixtures pointing
-    at ``/tmp/...`` paths work.
-
-  * **Per-render file cache**: :class:`_BoundedFileCache` is the bounded
-    LRU dict the per-render call sites pass around as ``file_cache=``.
-    Caps memory growth on sessions that touch many unique source files
-    (the unbounded variant could hold ~50MB of file content on a
-    monolithic codebase). 50-entry cap, move-to-end LRU semantics.
-
-The two readers (:func:`_read_source_snippet`, :func:`_read_source_window`)
-share the per-line truncation constant (:data:`_SNIPPET_TRUNCATE_CHARS`,
-200 chars) so a minified single-line file doesn't blow up the LLM payload
-or the finding card. Both readers go through :func:`_resolve_source_path`
-so the boundary check and Server Script branching are uniform.
-
-This module imports nothing from ``optimus.renderer._internal``: the
-``_internal`` module is the consumer. ``frappe`` is lazy-imported inside
-the functions so the pure-pytest tests don't need a bench.
+Both readers (:func:`_read_source_snippet`, :func:`_read_source_window`) share
+the per-line truncation constant (:data:`_SNIPPET_TRUNCATE_CHARS`, 200 chars)
+and go through :func:`_resolve_source_path`. ``frappe`` is lazy-imported so the
+pure-pytest tests don't need a bench.
 """
 
 from __future__ import annotations
@@ -54,12 +38,10 @@ _FILE_CACHE_MAX_ENTRIES = 50
 
 
 class _BoundedFileCache:
-	"""Bounded LRU dict for ``_read_source_snippet``'s per-render file
-	cache. Caps memory growth on sessions that touch many unique
-	source files (the unbounded variant could hold ~50MB of file
-	content on a monolithic codebase). Supports the same dict-style
-	protocol the read site already uses: ``filename in cache``,
-	``cache[filename]``, ``cache[filename] = lines``.
+	"""Bounded LRU dict for the per-render file cache, capping memory on
+	sessions that touch many source files. Supports the dict-style protocol the
+	read sites use: ``filename in cache``, ``cache[filename]``,
+	``cache[filename] = lines``.
 	"""
 
 	__slots__ = ("_data", "_max")
@@ -88,16 +70,10 @@ class _BoundedFileCache:
 
 
 def _path_within_bench(path: str) -> bool:
-	"""Phase-K-hardening boundary check: return True only when the
-	absolute ``path`` lies inside the bench directory tree. Used by
-	``_resolve_source_path`` to refuse callsite filenames that resolve
-	to ``/etc/passwd`` or other locations outside the bench.
-
-	Returns ``True`` (bypass) when:
-	  - ``frappe.flags.in_test`` is set (pytest fixtures legitimately
-	    point at /tmp/... paths the boundary would otherwise reject);
-	  - ``frappe.utils.get_bench_path`` isn't importable / fails (the
-	    check is a defence-in-depth layer, not a hard requirement).
+	"""Boundary check: True only when absolute ``path`` lies inside the bench
+	tree, so ``_resolve_source_path`` can refuse callsites resolving outside it
+	(e.g. ``/etc/passwd``). Returns True (bypass) under ``frappe.flags.in_test``
+	(so /tmp fixtures work) or when ``get_bench_path`` isn't available.
 	"""
 	try:
 		import frappe
@@ -118,33 +94,21 @@ def _path_within_bench(path: str) -> bool:
 
 
 def _resolve_source_path(filename):
-	"""Map a finding's callsite ``filename`` to a real file on disk OR to a
+	"""Map a finding's callsite ``filename`` to a real on-disk file, or to a
 	Server Script sentinel for synthetic ``<serverscript>`` filenames.
 
 	Return shapes:
-	  - ``str``: a real on-disk path (for app code / framework code).
-	  - ``("server_script", scrubbed_name)``: Server Script tuple sentinel.
-	    Snippet readers branch on ``isinstance(resolved, tuple)`` and load
-	    the script body from the ``tabServer Script`` DocType via
-	    ``optimus.server_script_source.get_server_script_lines``. The
-	    template/callsite-builder side branches similarly to render a Desk
-	    link instead of a ``vscode://file`` editor link.
-	  - ``None``: unresolvable (truly synthetic frames like ``<string>`` /
-	    ``<frozen …>``, missing files, or paths that escape the bench).
+	  - ``str``: a real on-disk path.
+	  - ``("server_script", scrubbed_name)``: sentinel; readers load the body
+	    from the ``tabServer Script`` DocType and the callsite builder renders a
+	    Desk link instead of a ``vscode://file`` link.
+	  - ``None``: unresolvable (synthetic frames like ``<string>``, missing
+	    files, or paths outside the bench).
 
-	Call-tree / pyinstrument callsites are stored in app-relative form
-	(``<app>/<module-path-within-the-app-dir>``: e.g. ``ugly_code/python/
-	common.py`` for ``<bench>/apps/ugly_code/ugly_code/python/common.py``,
-	or ``frappe/handler.py``). A bare ``open()`` fails because the Frappe
-	process cwd is ``<bench>/sites``. Resolve via ``frappe.get_app_path``
-	(``frappe.get_app_path("ugly_code", "python", "common.py")`` →
-	``<bench>/apps/ugly_code/ugly_code/python/common.py``), with fallbacks
-	for absolute / cwd-relative / ``apps/…``-prefixed forms.
-
-	Phase K hardening: every resolved path is finally checked against
-	the bench-directory boundary (``_path_within_bench``). A filename
-	that points outside the bench (e.g. ``/etc/passwd`` via a
-	malicious analyzer dict) returns ``None``.
+	Callsites are stored app-relative (``ugly_code/python/common.py``); resolved
+	via ``frappe.get_app_path`` with fallbacks for absolute / cwd-relative /
+	``apps/…`` forms. Every resolved path is finally checked against the bench
+	boundary (``_path_within_bench``); one pointing outside returns ``None``.
 	"""
 	if not filename:
 		return None
@@ -240,12 +204,10 @@ def _read_source_snippet(
 	*,
 	cache: dict | None = None,
 ) -> list[dict] | None:
-	"""Return a ±1-line source snippet for ``(filename, lineno)``, or
-	``None`` when the file isn't readable / lineno is out of range. The
-	(possibly app-relative) ``filename`` is resolved via
-	``_resolve_source_path`` before opening. Server Script filenames
-	(``<serverscript>: name``) resolve to a tuple sentinel and are read
-	from the ``tabServer Script`` DocType instead of disk."""
+	"""Return a small source snippet around ``(filename, lineno)``, or ``None``
+	when the file isn't readable / lineno is out of range. ``filename`` is
+	resolved via ``_resolve_source_path`` (Server Script filenames read from the
+	``tabServer Script`` DocType)."""
 	try:
 		ln = int(lineno)
 	except (TypeError, ValueError):
@@ -284,14 +246,12 @@ def _read_source_window(
 	cache: dict | None = None,
 	max_line_chars: int | None = None,
 ) -> list[dict] | None:
-	"""Return a wider source window around ``(filename, lineno)`` for the
-	AI-fix prompt: a list of ``{lineno, content, is_target}`` covering
-	``lineno - before`` … ``lineno + after`` (clamped to the file). Same
-	per-line truncation as ``_read_source_snippet`` unless ``max_line_chars``
-	overrides it. Returns ``None`` when the file isn't readable / the lineno
-	is out of range. The (possibly app-relative) ``filename`` is resolved via
-	``_resolve_source_path`` before opening; Server Script sentinels are read
-	from the ``tabServer Script`` DocType (via the shared ``_source_lines``).
+	"""Return a wider source window around ``(filename, lineno)`` for the AI-fix
+	prompt: a list of ``{lineno, content, is_target}`` covering
+	``lineno - before`` … ``lineno + after`` (clamped). Per-line truncation
+	matches ``_read_source_snippet`` unless ``max_line_chars`` overrides it.
+	Returns ``None`` when unreadable / lineno out of range. ``filename`` is
+	resolved via ``_resolve_source_path`` (Server Script sentinels read from the DocType).
 	"""
 	try:
 		ln = int(lineno)

@@ -1,10 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.6.0 finding-card 'smoking gun' block exercises the
-new prominent callsite + source snippet + Phase 2 hot-line callout above
-the existing technical_detail rows. Uses renderer.render_raw end-to-end
-so we verify the macro within its real context.
+"""Tests for the finding-card 'smoking gun' block: the prominent callsite +
+source snippet + Phase 2 hot-line callout above the technical_detail rows. Uses
+renderer.render_raw end-to-end so the macro is verified in its real context.
 """
 
 import html as _html
@@ -17,10 +16,9 @@ from optimus import renderer
 
 
 def _plain(html_str: str) -> str:
-	"""Strip HTML tags + decode entities so substring assertions on
-	source-code content work after v0.7.x VSCode Dark+ syntax
-	highlighting wraps each token in its own ``<span class="tok-...">``
-	element (and Pygments escapes string quotes to ``&#39;`` etc.)."""
+	"""Strip HTML tags and decode entities so substring assertions on source-code
+	content work despite syntax-highlighting spans and Pygments entity-escaping
+	of quotes (``&#39;`` etc.)."""
 	return _html.unescape(re.sub(r"<[^>]+>", "", html_str))
 
 
@@ -265,18 +263,12 @@ class TestPhase2Crosslink:
 		assert "Phase 2: Line-Level Drilldown" not in html
 
 	def test_retarget_phase1_callsite_to_drilldown_leaf(self, tmp_path):
-		"""A Slow Hot Path finding whose drill-down chain walks down
-		from ``looped_validate`` to ``_check_user_exists`` (via the
-		intermediate ``_run_validations``) should re-anchor the
-		smoking-gun snippet on the **call site** of ``_check_user_exists``
-		inside its parent ``_run_validations``: that's the line in
-		``_run_validations``'s body that invokes the leaf (e.g.
-		``    _check_user_exists(doc)``), not the leaf's own ``def``.
-
-		The wrapper (``looped_validate``) is preserved as a breadcrumb
-		caption. Phase-2's actually-hot internal line (line 20) still
-		surfaces in the separate Phase 2 callout and the drill-down
-		narrative is rooted on ``looped_validate``."""
+		"""A Slow Hot Path finding whose drill-down chain walks from
+		``looped_validate`` down to ``_check_user_exists`` (via ``_run_validations``)
+		re-anchors the smoking-gun snippet on the call site of ``_check_user_exists``
+		inside ``_run_validations`` (``    _check_user_exists(doc)``), not the leaf's
+		own ``def``. The wrapper is kept as a breadcrumb caption; Phase-2's hot
+		internal line (20) still surfaces in the separate Phase 2 callout."""
 		src = tmp_path / "common.py"
 		src.write_text(
 			"line1\n"
@@ -422,10 +414,9 @@ class TestPhase2Crosslink:
 		assert "time inside <code>_check_user_exists</code> walked through" not in html
 
 	def test_retarget_falls_back_to_leaf_def_when_call_site_not_findable(self, tmp_path):
-		"""When the leaf's call can't be located in the parent's body
-		(unparseable source, leaf name not present, etc.), the retarget
-		falls back to the leaf's own def line the previous behavior.
-		Anchors are still better than the wrapper's def line."""
+		"""When the leaf's call can't be located in the parent's body (unparseable
+		source, leaf name absent, etc.), the retarget falls back to the leaf's own
+		def line, still better than the wrapper's def line."""
 		src = tmp_path / "common.py"
 		# Source where _run_validations doesn't actually contain a call
 		# to _check_user_exists (intentional mismatch to exercise the
@@ -874,10 +865,8 @@ class TestRenderTimeCallsiteResolution:
 		assert 'class="smoking"' in html
 
 	def test_repeated_hot_frame_unresolvable_is_filtered(self):
-		"""v0.7.x: a Repeated Hot Frame whose ``function`` key can't be
-		resolved to a real file:line is dropped entirely from rendering
-		it had no callsite to act on. Pre-v0.7 the card rendered
-		title-only; the user opted to suppress no-callsite findings."""
+		"""A Repeated Hot Frame whose ``function`` key can't be resolved to a real
+		file:line is dropped entirely from rendering (no callsite to act on)."""
 		doc = _fake_doc([_repeated_hot_frame("nope_xyzq/foo.py::bar")])
 		html = renderer.render_raw(doc, recordings=[])
 		# Filtered: title and smoking-gun both absent.
@@ -919,10 +908,9 @@ class TestRenderTimeCallsiteResolution:
 		assert "run_report" in html
 
 	def test_missing_index_without_matching_recording_is_filtered(self):
-		"""v0.7.x: a Missing Index without a representative callsite (no
-		recording matched the normalized query) has no actionable
-		file:line anchor it's dropped from the render entirely along
-		with the rest of the no-callsite suppression."""
+		"""A Missing Index without a representative callsite (no recording matched
+		the normalized query) has no actionable file:line anchor, so it's dropped
+		from the render entirely."""
 		doc = _fake_doc([_missing_index("tabUser", "SELECT ... FROM `tabUser`")])
 		# Recording has a different query → no representative callsite.
 		recs = [{"uuid": "r1", "calls": [
@@ -935,22 +923,16 @@ class TestRenderTimeCallsiteResolution:
 
 
 class TestDocEventHookInsideSmokingGun:
-	"""v0.6.x: the target-document + doc-event-hook breadcrumb is rendered
-	INSIDE the smoking-gun box (alongside the Phase 2 + Drill-down
-	callouts), not in a separate finding-detail box below. Keeps all
-	context cues in one visual block."""
+	"""The target-document + doc-event-hook breadcrumb is rendered inside the
+	smoking-gun box (alongside the Phase 2 + Drill-down callouts), not in a
+	separate finding-detail box below, keeping all context cues in one block."""
 
 	def test_hook_line_lives_inside_smoking_gun(self):
-		"""v0.6.x intent: the doc-event hook breadcrumb is rendered
-		inside the smoking-gun block (alongside Phase 2 + Drill-down
-		callouts), not in a separate finding-detail box below.
-
-		v0.7.x: the supporting-context box (``.finding-detail``) is
-		now suppressed entirely when no inner row applies so for
-		this finding (callsite + target_doc + hook_events, no other
-		detail fields) it shouldn't render at all. The hook breadcrumb
-		appearing inside the smoking-gun is verified by its presence
-		AFTER the smoking-gun's opening marker."""
+		"""The doc-event hook breadcrumb renders inside the smoking-gun block, not
+		in a separate finding-detail box. The ``.finding-detail`` box is suppressed
+		when no inner row applies, so for this finding (callsite + target_doc +
+		hook_events only) it shouldn't render; the hook breadcrumb is verified by
+		its presence after the smoking-gun's opening marker."""
 		finding = _finding_child(
 			filename="/apps/ugly_code/ugly_code/python/common.py",
 			lineno=6,
@@ -1003,12 +985,9 @@ class TestDocEventHookInsideSmokingGun:
 		assert "Sales Invoice &#9656; validate" in html
 
 	def test_finding_without_callsite_is_filtered(self):
-		"""v0.7.x: a finding without a callsite is suppressed from
-		rendering entirely. The hook-as-fallback rendering path no
-		longer triggers because no-callsite findings are dropped
-		before the template runs. (Pre-v0.7 the hook breadcrumb
-		rendered as a fallback inside .finding-detail; the user
-		opted out of that 'partial info' surface.)"""
+		"""A finding without a callsite is suppressed from rendering entirely: the
+		hook-as-fallback path no longer triggers because no-callsite findings are
+		dropped before the template runs."""
 		# Build a finding manually so callsite has no filename/lineno.
 		finding = SimpleNamespace(
 			finding_type="Slow Hot Path",
@@ -1031,13 +1010,11 @@ class TestDocEventHookInsideSmokingGun:
 
 
 class TestDrilldownPlaceholder:
-	"""v0.7.x: when a Slow Hot Path finding's drill-down chain is empty
-	(the origin's hottest child is framework code or below the signal
-	floor), the template renders a 'no deeper user-code frame'
-	placeholder instead of a silent gap. Findings without an
-	``action_ref`` / tree skip the attachment entirely and show
-	nothing the placeholder only appears when the walk was attempted
-	and produced no eligible descendants."""
+	"""When a Slow Hot Path finding's drill-down chain is empty (the origin's
+	hottest child is framework code or below the signal floor), the template
+	renders a 'no deeper user-code frame' placeholder instead of a silent gap.
+	Findings without an ``action_ref`` / tree skip attachment entirely: the
+	placeholder appears only when the walk ran and found no eligible descendants."""
 
 	def test_empty_chain_renders_placeholder(self, tmp_path):
 		"""bg_recheck_users-style: function loops over frappe.get_doc.
@@ -1252,7 +1229,7 @@ def test_phase2_callout_renders_for_empty_drilldown_self_time_finding():
 
 
 class TestFindingsRefinements:
-	"""v0.7.x Findings refinements: no generic fix fallback + single-app intro."""
+	"""Findings refinements: no generic fix fallback + single-app intro."""
 
 	def test_actionable_finding_without_fix_hint_has_no_fallback(self):
 		# Removed per user request: a Slow Hot Path with no fix_hint shows no

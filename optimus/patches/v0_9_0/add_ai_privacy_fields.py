@@ -1,20 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.9.0: register the AI privacy-hardening fields.
+"""Register the AI privacy-hardening fields on Optimus Settings.
 
-Additive only:
-  - Optimus Settings: ai_privacy_section + ai_excluded_finding_types
-    (Small Text, multi-line, # comments) + ai_request_timeout_seconds (Int)
-
-``bench migrate`` already auto-adds the new fields from the updated
-``optimus_settings.json``; this patch reloads the DocType deterministically
-during the patch run (matching the pattern of the other ``add_*_fields``
-patches in this app). Idempotent safe to re-run.
-
-Closes Critical Risk #2 of the v0.7.x architecture review (no per-type
-opt-out, no configurable timeout for local LLMs). See docs/AI-FIXING.md
-for the data-flow inventory and local-LLM recipes.
+Additive only: ai_privacy_section, ai_excluded_finding_types (Small Text) and
+ai_request_timeout_seconds (Int). Reloads the DocType deterministically during
+the patch run. Idempotent. See docs/AI-FIXING.md for the data-flow inventory.
 """
 
 import frappe

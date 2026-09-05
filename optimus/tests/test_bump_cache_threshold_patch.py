@@ -1,23 +1,17 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.5.2 round 4 bump_cache_threshold_default patch.
-
-The JSON default for Optimus Settings.redundant_cache_threshold
-changed from 10 → 50. Fresh installs get the new default
-automatically, but existing Single rows keep the stored value of
-10. This patch bumps existing 10 → 50 on migrate, while respecting
-any deliberate tuning (e.g., user set it to 20 or 100).
-"""
+"""Tests for the bump_cache_threshold_default patch, which bumps an existing
+Optimus Settings.redundant_cache_threshold of 10 to the new default of 50 on
+migrate while leaving any deliberately tuned value alone."""
 
 import sys
 import types
 
 
 def _install_frappe_stub(monkeypatch):
-	"""Install a minimal ``frappe`` stub via ``monkeypatch.setitem`` so
-	pytest restores the real ``frappe`` at teardown (preventing
-	cross-test pollution)."""
+	"""Install a minimal ``frappe`` stub via ``monkeypatch.setitem`` so pytest
+	restores the real one at teardown (no cross-test pollution)."""
 	stub = types.ModuleType("frappe")
 	stub._single_values = {}
 	stub._doctype_exists = True
@@ -51,10 +45,8 @@ def _install_frappe_stub(monkeypatch):
 
 
 def _import_patch():
-	"""Reload the patch module under the current ``sys.modules["frappe"]``
-	stub. ``importlib.reload`` re-runs top-level code (including the
-	``import frappe`` at the top of the patch), which rebinds the
-	module's local ``frappe`` to whatever's in sys.modules now."""
+	"""Reload the patch module so its top-level ``import frappe`` rebinds to the
+	current ``sys.modules["frappe"]`` stub."""
 	import importlib
 
 	import optimus.patches.v0_5_2.bump_cache_threshold_default as patch_mod
@@ -89,8 +81,8 @@ class TestBumpCacheThreshold:
 		assert stub._single_values["redundant_cache_threshold"] == 50
 
 	def test_no_op_when_doctype_missing(self, monkeypatch):
-		"""On a fresh install where the DocType isn't yet synced,
-		patch should be a no-op without raising."""
+		"""On a fresh install where the DocType isn't synced yet, the patch is a
+		no-op and doesn't raise."""
 		stub = _install_frappe_stub(monkeypatch)
 		stub._doctype_exists = False
 		patch = _import_patch()
@@ -99,8 +91,8 @@ class TestBumpCacheThreshold:
 		assert stub._single_values == {}
 
 	def test_no_op_when_value_is_none(self, monkeypatch):
-		"""Defensive: a DocType row that exists but has no value for
-		the field yet must not raise / crash migration."""
+		"""Defensive: a row that exists but has no value for the field must not
+		crash migration."""
 		stub = _install_frappe_stub(monkeypatch)
 		# Explicitly leave it missing from _single_values.
 		patch = _import_patch()
@@ -109,8 +101,8 @@ class TestBumpCacheThreshold:
 		assert "redundant_cache_threshold" not in stub._single_values
 
 	def test_handles_non_integer_stored_value(self, monkeypatch):
-		"""If somehow the stored value is a string (legacy data),
-		the patch must not crash."""
+		"""A non-integer stored value (legacy string data) must not crash the
+		patch."""
 		stub = _install_frappe_stub(monkeypatch)
 		stub._single_values["redundant_cache_threshold"] = "not-a-number"
 		patch = _import_patch()

@@ -1,11 +1,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Unit tests for the "Doc-event lifecycle" breakdown re-grouping the slow
-call-tree findings by DocType → lifecycle event (validate / on_submit / …),
-tagging each as a registered ``doc_events`` hook vs a controller method
-override and surfacing cascaded DocTypes. All pure functions in
-``renderer``: no running site needed.
+"""Unit tests for the "Doc-event lifecycle" breakdown: re-groups slow call-tree
+findings by DocType → lifecycle event (validate / on_submit / …), tags each as a
+``doc_events`` hook vs a controller method override and surfaces cascaded
+DocTypes. Pure ``renderer`` functions, no running site needed.
 """
 
 from optimus import renderer

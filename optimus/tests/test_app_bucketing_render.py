@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""End-to-end render tests for v0.5.2 per-app sub-grouping in the report."""
+"""End-to-end render tests for per-app sub-grouping in the report."""
 
 import json
 import types
@@ -287,13 +287,10 @@ class TestIgnoredAppsFilter:
 		assert "hidden from ignored apps" not in html
 
 	def test_findings_with_no_callsite_are_suppressed_in_render(self):
-		"""v0.7.x: findings whose blame app resolves to ``_OTHER_APP_LABEL``
-		(no resolvable callsite) are suppressed from the rendered Findings
-		section. The 'Other (no callsite)' bucket as a whole is dropped,
-		so even unfiltered no-callsite rows don't appear in the HTML.
-		Pre-v0.7 they survived as a tail bucket because the renderer
-		treated 'no callsite' as still-useful; the user feedback was
-		that those rows added noise without a file:line to act on."""
+		"""Findings whose blame app resolves to ``_OTHER_APP_LABEL`` (no resolvable
+		callsite) are suppressed from the rendered Findings section: the 'Other
+		(no callsite)' bucket is dropped entirely, so even unfiltered no-callsite
+		rows don't appear in the HTML."""
 		from optimus import renderer
 
 		uncallsite = types.SimpleNamespace()

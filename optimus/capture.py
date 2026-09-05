@@ -10,17 +10,14 @@ Owns:
      frappe.cache.get_value / frappe.permissions.has_permission for
      argument capture (with PII-safe hashing)
 
-Argument values that may contain user data are stored in two forms
-``identifier_raw`` (rendered in the report) and ``identifier_safe``
-(a sha256[:12] hash, used as the bucket key for redundant-call
-detection). Doctype names and ptypes are NOT hashed because they're
-schema-level identifiers, not data.
+Argument values that may contain user data are stored as ``identifier_raw``
+(rendered in the report) and ``identifier_safe`` (a sha256[:12] hash, the bucket
+key for redundant-call detection). Doctype names and ptypes are NOT hashed.
 
-Activation gate: the sidecar wraps and pyinstrument start are gated on
-the presence of `frappe.local._profiler_active_session_id`. That flag is
-set by hooks_callbacks.before_request / before_job only when the session
-meta has `capture_python_tree=True`. So the wraps' hot-path check is a
-single attribute lookup; they never read Redis.
+Activation gate: the wraps and pyinstrument start are gated on
+``frappe.local._profiler_active_session_id`` (set by before_request/before_job
+only when the session has ``capture_python_tree=True``), so the wraps' hot-path
+check is a single attribute lookup and never reads Redis.
 """
 
 import hashlib
@@ -44,28 +41,11 @@ _CALLER_STACK_MAX_DEPTH = 20
 
 
 def _capture_caller_stack() -> list:
-	"""Return a list of ``{"filename","lineno","function"}`` dicts for
-	the Python frames above this function, skipping the wrap and the
-	frames that led into the wrap itself.
-
-	Used ONLY by the sidecar-wrap entries (cache.get_value,
-	frappe.get_doc, has_permission) to enable:
-
-	  1. Filtering redundant-call findings whose callsite is inside
-	     framework code (users can't act on framework loops).
-	  2. Surfacing file:line in the finding detail so users CAN
-	     navigate to the loop when the callsite IS user code.
-
-	Implementation notes:
-
-	- Uses ``sys._getframe`` (CPython-specific but fast, ~1 µs per
-	  frame) instead of ``traceback.extract_stack`` which formats
-	  source-line context that we don't need.
-	- Depth-bounded at ``_CALLER_STACK_MAX_DEPTH`` so a runaway
-	  recursion doesn't build a huge sidecar entry.
-	- Returns [] on any failure (non-CPython interpreter, f_back
-	  unexpectedly None) rather than raising observability code
-	  never breaks the host call.
+	"""Return ``{"filename","lineno","function"}`` dicts for the Python frames
+	above this function (skipping the wrap itself), for redundant-call callsite
+	attribution. Uses ``sys._getframe`` (fast, CPython-specific), depth-bounded at
+	``_CALLER_STACK_MAX_DEPTH``. Returns [] on any failure rather than raising
+	(observability code never breaks the host call).
 	"""
 	try:
 		# Skip: _capture_caller_stack itself + the wrap function.
@@ -104,18 +84,14 @@ def _identify_args(fn_name: str, args: tuple, kwargs: dict):
 
 	Sub-shapes per wrapped function:
 	  - get_doc("DocType", "name")     → ((doctype, name), (doctype, hash(name)))
-	  - get_doc({"doctype": ..., ...}) → extract from dict; name may be missing
-	    on unsaved docs ("__islocal"=1), in which case identifier is just doctype
+	  - get_doc({"doctype": ..., ...}) → from dict; name may be missing on unsaved
+	    docs ("__islocal"=1), leaving just doctype
 	  - cache_get(self, key)           → (key, hash(key))
-	  - has_permission(doctype, ptype="read", doc=None, ...)
-	                                   → ((doctype, name, ptype),
-	                                      (doctype, hash(name), ptype))
-	    where `name` is extracted from `doc` (which may be a Document, dict,
-	    or string)
+	  - has_permission(doctype, ptype, doc) → ((doctype, name, ptype),
+	    (doctype, hash(name), ptype)), name extracted from doc
 
-	Both `identifier_raw` and `identifier_safe` are guaranteed to be
-	hashable (strings, Nones, or tuples of those) so they can be used as
-	dict keys in the redundant_calls bucketing logic.
+	Both returns are guaranteed hashable (strings, Nones or tuples of those) for
+	use as dict keys in redundant_calls bucketing.
 	"""
 	if fn_name == "get_doc":
 		first = args[0] if len(args) > 0 else kwargs.get("doctype")
@@ -185,23 +161,19 @@ SIDECAR_CAP_PER_RECORDING = 10_000
 
 
 def _make_wrap(orig, fn_name: str, local_proxy=None):
-	"""Build a sidecar-recording wrapper around `orig`.
+	"""Build a sidecar-recording wrapper around ``orig``.
 
-	`local_proxy` is the request-local namespace where we read the
-	activation flag and append entries. In production this is `frappe.local`;
-	tests pass a stand-in object so the wrap can be exercised without a
-	Frappe runtime.
+	``local_proxy`` is the request-local namespace holding the activation flag and
+	entries (``frappe.local`` in production; a stand-in in tests).
 
 	Properties:
 	  - Passthrough when no active session (single attribute lookup).
 	  - Records entries on success AND on exception (try/finally).
-	  - Re-entrant call into another wrap from inside one wrap is a
-	    passthrough (prevents double-counting `has_permission` → `get_doc`).
+	  - A re-entrant call from inside one wrap is a passthrough (prevents
+	    double-counting ``has_permission`` → ``get_doc``).
 	  - Drops entries past SIDECAR_CAP_PER_RECORDING and flags truncation.
-	  - Stores the original on `wrapped._profiler_original` so uninstall
-	    can restore it. If `orig` is itself an already-wrapped function
-	    (has `_profiler_original`), our wrap chains through `orig`:
-	    we never double-wrap.
+	  - Stores the original on ``wrapped._profiler_original`` for uninstall; never
+	    double-wraps an already-wrapped ``orig``.
 	"""
 	def wrapped(*args, **kwargs):
 		active = getattr(local_proxy, "_profiler_active_session_id", None)
@@ -263,14 +235,9 @@ DEFAULT_SAMPLER_INTERVAL_MS = 1
 def _start_pyi_session(local_proxy, interval_ms: float = DEFAULT_SAMPLER_INTERVAL_MS):
 	"""Start a pyinstrument profiler scoped to this request.
 
-	Stores the running profiler on `local_proxy.optimus_pyinstrument` so
-	`after_request`/`after_job` can stop and serialize it. Returns the
-	profiler instance, or None if pyinstrument is not available.
-
-	Note: pyinstrument is imported inside the try-except so a broken
-	install (rare, but possible in air-gapped environments) doesn't
-	break app load. The module-level _PYINSTRUMENT_AVAILABLE flag is the
-	authoritative check.
+	Stores it on ``local_proxy.optimus_pyinstrument`` so ``after_request`` /
+	``after_job`` can stop and serialize it. Returns the profiler, or None if
+	pyinstrument is unavailable.
 	"""
 	if not _PYINSTRUMENT_AVAILABLE:
 		return None
@@ -291,8 +258,7 @@ def _start_pyi_session(local_proxy, interval_ms: float = DEFAULT_SAMPLER_INTERVA
 def _force_stop_inflight_capture(local_proxy):
 	"""Stop any in-flight pyinstrument session and clear all capture state.
 
-	Called by api.start() (and the underlying _stop_session) before
-	flipping the active flag, so a previous in-flight capture from the
+	Called before flipping the active flag so a previous in-flight capture from the
 	same worker doesn't leak into the new session.
 	"""
 	prof = getattr(local_proxy, "optimus_pyinstrument", None)
@@ -327,19 +293,15 @@ def _force_stop_inflight_capture(local_proxy):
 
 
 def _wrap_targets():
-	"""Return the list of (module, attr_name, fn_name) tuples to wrap.
+	"""Return the (module, attr_name, fn_name) tuples to wrap.
 
-	Lazy so that importing capture.py does not import frappe.permissions
-	or frappe.utils.redis_wrapper (which would trigger circular imports
-	at app load on some sites).
+	Lazy so importing capture.py doesn't import frappe.permissions or
+	frappe.utils.redis_wrapper (circular-import risk at app load).
 
-	Note about the cache target: we wrap `RedisWrapper.get_value` (a class
-	method), NOT `frappe.cache.get_value`, because `frappe.cache` is None
-	at app-import time (the per-site cache instance is bound only after
-	`frappe.init(site)` runs). Wrapping the class method ensures every
-	cache instance created later uses the wrapped version. Because this
-	is a method wrap, the wrapper sees `self` as args[0] and the actual
-	key as args[1] handled in `_identify_args` for `cache_get`.
+	Wraps ``RedisWrapper.get_value`` (the class method), NOT ``frappe.cache
+	.get_value``, because ``frappe.cache`` is None at app-import time. Being a
+	method wrap, the wrapper sees ``self`` as args[0] and the key as args[1]
+	(handled in ``_identify_args`` for ``cache_get``).
 	"""
 	import frappe
 	import frappe.permissions

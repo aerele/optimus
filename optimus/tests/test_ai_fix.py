@@ -1,13 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for optimus.ai_fix the provider-agnostic LLM client
-behind the on-demand "Suggest a fix (AI)" action.
+"""Tests for optimus.ai_fix, the provider-agnostic LLM client behind the
+on-demand "Suggest a fix (AI)" action.
 
-Pure-test path: ``_build_messages`` is a pure function; the HTTP layer is
-exercised with ``requests.post`` monkeypatched, so no network and no live
-Frappe site. ``_resolve_provider`` / ``is_available`` are tested with
-``settings.get_config`` patched.
+``_build_messages`` is pure; the HTTP layer is exercised with ``requests.post``
+monkeypatched (no network, no live site); ``_resolve_provider`` / ``is_available``
+are tested with ``settings.get_config`` patched.
 """
 
 import json
@@ -113,14 +112,9 @@ class TestBuildMessages:
 			assert h in system
 
 	def test_system_prompt_forbids_raw_sql_in_fix(self):
-		"""Defense-in-depth for the raw-SQL guardrail: the system prompt
-		must carry an explicit, emphatic NO RAW SQL rule (not just the
-		soft "never hand-built SQL strings" mention buried in the WRITE
-		IDIOMATIC FRAPPE paragraph). The post-processing detector in
-		``_flag_raw_sql_in_fix`` backstops the prompt but cutting raw
-		SQL at the prompt layer is cheaper (the model never generates
-		it) and gives the reader a cleaner suggestion (no appended
-		profiler note to wade through).
+		"""The system prompt must carry an explicit, emphatic NO RAW SQL rule
+		(not just the soft mention in the WRITE IDIOMATIC FRAPPE paragraph),
+		backstopping the ``_flag_raw_sql_in_fix`` post-processing detector.
 		"""
 		system, _ = ai_fix._build_messages(self._finding())
 		# Loud header so the rule is unmissable in the prompt.
@@ -145,10 +139,9 @@ class TestBuildMessages:
 		assert "no before/after snippet" in low or "no fabricated code block" in low
 
 	def test_system_prompt_enforces_sql_semantic_equivalence(self):
-		"""v0.6.x: prompt forbids inventing WHERE / JOIN / LIMIT when
-		substituting raw SQL with frappe.get_all etc. Mitigates the
-		leading hallucination mode (model copies a variable from
-		elsewhere in the function into a bogus `filters=` clause)."""
+		"""The prompt forbids inventing WHERE / JOIN / LIMIT when substituting raw
+		SQL with frappe.get_all etc., mitigating the variable-copy hallucination
+		(a bogus `filters=` clause)."""
 		system, _ = ai_fix._build_messages(self._finding())
 		low = system.lower()
 		# The new rule names the exact hallucination shape we want

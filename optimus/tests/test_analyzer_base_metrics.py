@@ -1,15 +1,14 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""D.M-S6 / D.M-S7 sanity tests for analyzer-base metric helpers.
+"""Sanity tests for analyzer-base metric helpers.
 
-``percentile`` is used by repetition-heavy analyzers (N+1, redundant
-calls) to surface the tail of the per-hit duration distribution; a
-silent regression to "p95 < p50" (off-by-one in the interpolation, for
-example) would corrupt every finding card that reads from it.
+``percentile`` is used by repetition-heavy analyzers (N+1, redundant calls) to
+surface the tail of the per-hit duration distribution; a silent regression to
+"p95 < p50" would corrupt every finding card that reads from it.
 
-``fmt_ms`` is the report's single duration-formatter; its output is
-load-bearing across every finding card, KPI strip and stat label.
+``fmt_ms`` is the report's single duration-formatter; its output is load-bearing
+across every finding card, KPI strip and stat label.
 """
 
 import math

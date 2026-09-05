@@ -35,15 +35,11 @@ from optimus import __version__ as _frappe_profiler_version
 
 
 def _asset_version(relative_path: str) -> str:
-	"""Return ``<__version__>.<mtime>`` for a file under public/, or
-	just ``<__version__>`` if the file can't be stat'd (unlikely on a
-	healthy install defensive so the hooks file never fails to
-	load).
-
-	The mtime component means ANY edit to the JS/CSS auto-invalidates
-	the browser cache without a manual __version__ bump. Production
-	deploys stat the file at hooks.py import time, so bench restart
-	after a deploy captures the new mtime automatically.
+	"""Return ``<__version__>.<mtime>`` for a file under public/, or just
+	``<__version__>`` if the file can't be stat'd. The mtime component makes any
+	JS/CSS edit auto-invalidate the browser cache without a manual __version__
+	bump (stat'd at hooks.py import time, so a bench restart after a deploy
+	captures the new mtime).
 	"""
 	try:
 		full_path = _os.path.join(

@@ -1,12 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for `renderer._build_action_plan`: the v0.7.x redesign
-Phase C punch list.
+"""Tests for ``renderer._build_action_plan``.
 
-Top-N findings by severity → impact, each emitted as a step the
-template renders as a numbered `.action-step` row. Empty findings
-input returns `[]` and the template hides the section."""
+Top-N findings by severity then impact, each emitted as a step the template
+renders as a numbered ``.action-step`` row. Empty findings input returns ``[]``
+and the template hides the section."""
 
 from optimus import renderer
 

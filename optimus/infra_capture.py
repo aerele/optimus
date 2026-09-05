@@ -2,20 +2,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Server-side infra capture primitives (v0.5.0).
+"""Server-side infra capture primitives.
 
-Balanced-tier metric set (14 keys, ~0.8ms per snapshot). Called from
-hooks_callbacks.before_request/before_job/after_request/after_job to
-take snapshots before and after each recorded action. The diff is
-stored under ``profiler:infra:<recording_uuid>`` and consumed by the
-infra_pressure analyzer at analyze time.
-
-Design invariants:
-- Best-effort. A broken metric source must degrade to None, never raise.
-- No background threads. All work happens on the calling request path.
-- No capture state persists past force_stop. _force_stop_inflight clears
-  ``frappe.local.optimus_infra_start``, mirroring how
-  ``capture._force_stop_inflight_capture`` clears pyinstrument state.
+Balanced-tier metric set (~0.8ms per snapshot). Called from
+hooks_callbacks before/after each recorded request/job; the diff is stored
+under ``profiler:infra:<recording_uuid>`` and read by the infra_pressure
+analyzer. Best-effort (a broken source degrades to None, never raises); no
+background threads; no capture state persists past force_stop.
 """
 
 import os
@@ -53,12 +46,8 @@ _cpu_primed = False
 
 
 def snapshot() -> dict:
-    """Return a point-in-time dict of all Balanced-tier infra metrics.
-
-    ~0.8ms total cost on a typical Linux/Mac host. Every key in
-    ``_EXPECTED_KEYS`` is present in the returned dict; failed sources
-    yield None values.
-    """
+    """Point-in-time dict of all Balanced-tier infra metrics (~0.8ms). Every key
+    in ``_EXPECTED_KEYS`` is present; failed sources yield None."""
     out = {k: None for k in _EXPECTED_KEYS}
     try:
         _read_process(out)
@@ -88,13 +77,9 @@ def snapshot() -> dict:
 
 
 def diff(start: dict, end: dict) -> dict:
-    """Compute per-action metrics from two snapshots.
-
-    Counter-style metrics (see ``_COUNTER_KEYS``) are subtracted; everything
-    else passes through as the end value. Negative deltas (which should
-    never happen but can on counter rollover or a source going backwards)
-    clamp to 0.
-    """
+    """Compute per-action metrics from two snapshots. ``_COUNTER_KEYS`` are
+    subtracted (start from end); everything else passes through as the end
+    value. Negative deltas clamp to 0."""
     out = {}
     for key in _EXPECTED_KEYS:
         end_val = end.get(key) if end else None
@@ -111,9 +96,8 @@ def diff(start: dict, end: dict) -> dict:
 
 
 def _force_stop_inflight(local_proxy) -> None:
-    """Clear any ``frappe.local.optimus_infra_start`` so a killed session's
-    start snapshot can't leak into the next session on the same worker.
-    Idempotent. Called from api._stop_session (v0.5.0)."""
+    """Clear any ``frappe.local.optimus_infra_start`` so a killed session's start
+    snapshot can't leak into the next session on the same worker. Idempotent."""
     for attr in ("optimus_infra_start",):
         if hasattr(local_proxy, attr):
             try:
@@ -167,12 +151,8 @@ def _read_loadavg(out: dict) -> None:
 
 def _read_db(out: dict) -> None:
     """DB connection / load counters, via the dialect adapter (portable across
-    MariaDB / Postgres; the MariaDB adapter is the verbatim lift of the old
-    SHOW GLOBAL STATUS / SHOW VARIABLES logic + the max_connections cache).
-
-    The adapter still runs inside this ``optimus/`` call path, so the query it
-    issues keeps ``optimus/`` frames in its stack and ``is_profiler_own_query``
-    continues to filter it out of findings."""
+    MariaDB / Postgres). The adapter runs inside this ``optimus/`` call path so
+    ``is_profiler_own_query`` keeps its query out of findings."""
     from optimus.dbdialect import get_dialect
 
     snap = get_dialect().infra_snapshot()

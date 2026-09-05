@@ -1,14 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.6.x: tests for ``patches/v0_6_0/rename_phase_two_doctype.py``: the
-one-time DocType rename from ``Profiler Phase 2 Run`` →
-``Profiler Phase Two Run`` (audit item 2.6). The patch ran BEFORE the
-v0.7.0 app rename, so the DocType names here stay Profiler-prefixed;
-the v0.7.0 ``rename_doctypes_to_optimus`` patch renames them on top.
+"""Tests for ``patches/v0_6_0/rename_phase_two_doctype.py``: the one-time DocType
+rename ``Profiler Phase 2 Run`` → ``Profiler Phase Two Run``.
 
-Stubs ``frappe`` so we can drive the patch through every branch (old
-exists, both exist, neither exists, rename fails) without a real bench."""
+Stubs ``frappe`` so the patch can be driven through every branch (old exists, both
+exist, neither exists, rename fails) without a real bench.
+"""
 
 import sys
 import types
@@ -18,9 +16,8 @@ NEW = "Profiler Phase Two Run"
 
 
 def _install_frappe_stub(monkeypatch, *, old_exists=False, new_exists=False, rename_raises=False):
-	"""Install a minimal ``frappe`` stub via ``monkeypatch.setitem`` so
-	the real ``frappe`` is restored at teardown (preventing cross-test
-	pollution of subsequent tests in the same pytest session)."""
+	"""Install a minimal ``frappe`` stub via ``monkeypatch.setitem`` so the real
+	``frappe`` is restored at teardown (no cross-test pollution)."""
 	stub = types.ModuleType("frappe")
 	stub._rename_calls = []
 	stub._cleared = []
@@ -65,9 +62,8 @@ def _install_frappe_stub(monkeypatch, *, old_exists=False, new_exists=False, ren
 
 
 def _import_patch():
-	"""Reload the patch module under the current ``sys.modules["frappe"]``
-	stub. ``importlib.reload`` re-runs top-level code so the patch's
-	``import frappe`` binds to the stub, not whatever was cached before."""
+	"""Reload the patch module under the current ``sys.modules["frappe"]`` stub, so
+	its ``import frappe`` binds to the stub rather than a cached module."""
 	import importlib
 
 	import optimus.patches.v0_6_0.rename_phase_two_doctype as patch_mod
@@ -85,8 +81,8 @@ class TestRenamePhaseTwoDoctypePatch:
 		assert stub._committed is True
 
 	def test_no_op_when_neither_exists(self, monkeypatch):
-		"""Fresh install: the new DocType is synced from JSON directly.
-		Patch must not call rename_doc."""
+		"""Fresh install: the new DocType syncs from JSON directly, so the patch must
+		not call rename_doc."""
 		stub = _install_frappe_stub(monkeypatch, old_exists=False, new_exists=False)
 		patch = _import_patch()
 		patch.execute()
@@ -94,16 +90,16 @@ class TestRenamePhaseTwoDoctypePatch:
 		assert stub._committed is False
 
 	def test_no_op_when_new_already_exists_alone(self, monkeypatch):
-		"""Already migrated install: only the new DocType remains. Patch
-		runs but finds no old DocType → no-op."""
+		"""Already migrated: only the new DocType remains, so the patch finds no old
+		DocType and is a no-op."""
 		stub = _install_frappe_stub(monkeypatch, old_exists=False, new_exists=True)
 		patch = _import_patch()
 		patch.execute()
 		assert stub._rename_calls == []
 
 	def test_bails_when_both_exist(self, monkeypatch):
-		"""Conflict guard: both DocTypes present means a previous partial
-		migration. Logging a warning + bailing is safer than guessing."""
+		"""Conflict guard: both DocTypes present means a partial migration, so log a
+		warning and bail rather than guess."""
 		stub = _install_frappe_stub(monkeypatch, old_exists=True, new_exists=True)
 		patch = _import_patch()
 		patch.execute()
@@ -114,9 +110,8 @@ class TestRenamePhaseTwoDoctypePatch:
 		)
 
 	def test_rename_failure_logs_and_does_not_commit(self, monkeypatch):
-		"""If rename_doc raises (e.g. table-lock during migrate), the
-		patch must NOT commit and must NOT raise let the operator
-		retry migrate."""
+		"""If rename_doc raises (e.g. table-lock during migrate), the patch must not
+		commit and must not raise, so the operator can retry migrate."""
 		stub = _install_frappe_stub(monkeypatch, old_exists=True, rename_raises=True)
 		patch = _import_patch()
 		patch.execute()  # must not raise
@@ -126,8 +121,8 @@ class TestRenamePhaseTwoDoctypePatch:
 
 class TestPatchRegistered:
 	def test_patches_txt_lists_in_pre_model_sync(self):
-		"""The rename MUST run before model sync otherwise model sync
-		creates a fresh new-name DocType row alongside the old one."""
+		"""The rename must run before model sync, or model sync creates a fresh
+		new-name DocType row alongside the old one."""
 		import os
 		patches_txt = os.path.join(
 			os.path.dirname(__file__), "..", "patches.txt"

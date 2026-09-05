@@ -107,20 +107,12 @@ class OptimusSettings(Document):
 		self.tracked_apps = normalized
 
 	def _warn_on_framework_apps_in_tracked(self):
-		"""Flash a non-blocking warning when the admin adds a
-		known-framework app (frappe / erpnext / hrms / …) to Tracked
-		Apps.
+		"""Flash a non-blocking warning when the admin adds a known-framework app
+		(frappe / erpnext / hrms / ...) to Tracked Apps.
 
-		Most users misread "Tracked Apps" as "apps to monitor" and
-		add frappe + erpnext which has the OPPOSITE effect of what
-		they want: it flips the classifier into inclusion mode where
-		framework code becomes "user code" and their actionable
-		findings list gets flooded with framework noise.
-
-		We don't HARD-block the save (ERPNext contributors may
-		legitimately want framework findings as actionable) just
-		flash a clear warning so the common misconfiguration surfaces
-		itself.
+		Adding framework apps flips the classifier into inclusion mode (framework
+		code becomes "user code"), flooding the findings list with noise. The save
+		is not blocked (ERPNext contributors may want this); it just warns.
 		"""
 		if not self.tracked_apps:
 			return

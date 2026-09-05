@@ -1,18 +1,14 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""D.M-S8 severity-pill class mirrors finding severity.
+"""The severity-pill CSS class must mirror the finding severity.
 
-The finding card renders a colour-coded pill via:
+The finding card renders a colour-coded pill:
     <span class="severity-pill {{ f.severity | lower }}">{{ f.severity }}</span>
 
-CSS pairs the pill colour with .severity-pill.high / .medium / .low.
-A drift between the data severity and the CSS class would silently
-mis-colour findings, undermining the at-a-glance triage signal.
-
-This regression test scans rendered HTML and asserts the lower-case
-class matches the data severity text inside the pill, for each
-severity tier.
+CSS pairs the colour with .severity-pill.high / .medium / .low; a drift between
+the data severity and the class would silently mis-colour findings. This test
+asserts the lower-case class matches the severity text in each rendered pill.
 """
 
 import json

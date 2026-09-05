@@ -1,12 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""P3: opt-in auto-arm of a Phase-2 line-profile pass after analyze.
+"""Opt-in auto-arm of a Phase-2 line-profile pass after analyze.
 
-When ``optimus_phase2_auto_arm`` is set in site_config, analyze arms a pass on
-the recommended hot-path functions so the user just re-runs the flow once to
-get line data. Opt-in + admin-only (it instruments the next execution only
-for replay-safe flows). Heavily guarded and best-effort (never fails analyze).
+When ``optimus_phase2_auto_arm`` is set in site_config, analyze arms a pass
+on the recommended hot-path functions so the user re-runs the flow once to
+get line data. Opt-in, admin-only, best-effort (never fails analyze).
 """
 
 import inspect
@@ -144,11 +143,8 @@ class TestAutoArmPhase2:
 		assert arm_env.start_calls == []
 
 	def test_zero_cap_means_unlimited(self, arm_env, monkeypatch):
-		"""v0.13.x: ``phase2_max_runs_per_session = 0`` (Strict preset)
-		means no cap auto-arm fires even with many existing runs.
-		Pre-v0.13.x the ``or 10`` swallowed 0 and silently re-applied
-		the default cap, so a Strict-profile deployment got the same
-		behavior as Recommended."""
+		"""``phase2_max_runs_per_session = 0`` means no cap: auto-arm fires
+		even with many existing runs."""
 		import optimus.settings as settings_mod
 		monkeypatch.setattr(settings_mod, "get_config",
 			lambda: types.SimpleNamespace(phase2_max_runs_per_session=0))

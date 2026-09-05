@@ -1,12 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""B.M-S4 / D.M-S5 regression tests for production-readiness disclosures.
+"""Regression tests for production-readiness disclosures.
 
-The audit graded Optimus partially trustworthy on metric integrity because
-several caveats the data deserves were absent from the rendered report
-(wall-clock sampler discount, frame-count truncation, slow-query cap, etc).
-This file guards against those caveats silently disappearing again.
+Several caveats the data deserves (wall-clock sampler discount, frame-count
+truncation, slow-query cap, etc.) must stay present in the rendered report.
+This file guards against them silently disappearing again.
 """
 
 import json
@@ -47,9 +46,9 @@ def _fake_doc(**fields):
 
 
 def test_sampler_disclosure_phrase_in_rendered_html():
-	"""B.M-S4 the 'How to read this report' bullet that calls out the
-	wall-clock sampler must always be present so a reader knows
-	sub-interval functions can be under-counted."""
+	"""The 'How to read this report' bullet calling out the wall-clock sampler
+	must always be present, so a reader knows sub-interval functions can be
+	under-counted."""
 	doc = _fake_doc()
 	html = renderer.render_raw(doc, recordings=[])
 	assert "wall-clock sampler" in html
@@ -67,9 +66,9 @@ def test_self_time_wall_clock_disclosure_present():
 
 
 def test_frame_truncation_banner_renders_when_truncated():
-	"""D.M-S5 when ANY action's call_tree_json is _truncated with
-	captured/kept counts, the Hot Frames banner must surface those
-	numbers (else readers can't tell their picture is partial)."""
+	"""When any action's call_tree_json is _truncated with captured/kept counts,
+	the Hot Frames banner must surface those numbers (else readers can't tell
+	their picture is partial)."""
 	truncated_tree = json.dumps({
 		"_truncated": True,
 		"_captured_frames": 850,
@@ -125,9 +124,8 @@ def test_frame_truncation_banner_renders_when_truncated():
 
 
 def test_slow_query_cap_banner_when_more_than_max_findings():
-	"""B.DI4 when more than MAX_FINDINGS slow queries clear the
-	threshold, the Top Queries section must surface a 'N more
-	suppressed' note."""
+	"""When more than MAX_FINDINGS slow queries clear the threshold, the Top
+	Queries section must surface a 'N more suppressed' note."""
 	# 7 user-app queries above the 200ms default slow threshold;
 	# MAX_FINDINGS = 5 so 2 should be flagged as suppressed.
 	queries = []

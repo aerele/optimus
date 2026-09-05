@@ -1,17 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.6.0: add the AI "suggest a fix" fields.
+"""Add the AI "suggest a fix" fields (additive).
 
-Additive only:
-  - Optimus Settings: ai_section + ai_enabled / ai_provider / ai_base_url /
-    ai_model / ai_api_key (Password)
-  - Optimus Finding: llm_fix_json (Long Text)
-
-``bench migrate`` already auto-adds the columns from the updated .json files;
-this patch just reloads the two DocTypes so that happens deterministically
-during the patch run (matching the pattern of the other ``add_*_fields``
-patches in this app). Idempotent safe to re-run.
+Reloads Optimus Settings (ai_section + ai_enabled / ai_provider / ai_base_url /
+ai_model / ai_api_key) and Optimus Finding (llm_fix_json) so ``bench migrate``
+adds their columns deterministically during the patch run. Idempotent.
 """
 
 import frappe

@@ -1,39 +1,18 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Frappe lifecycle hook callbacks.
+"""Frappe lifecycle hook callbacks (before/after request and job).
 
-These functions are wired into `before_request` / `after_request` (and in
-Phase 2, `before_job` / `after_job`) via `hooks.py`. Their job is to:
+Wired via ``hooks.py``. They decide whether the current request/job belongs
+to an active profiler session and, if so, activate ``frappe.recorder`` for
+that request only (per-user isolation: other users' concurrent traffic is NOT
+recorded). After the request, the new recording UUID is registered with the
+session so the analyze pipeline can find every recording in a flow.
 
-1. Decide whether the current request belongs to an active profiler session.
-2. If yes, activate `frappe.recorder` for this request only (per-user
-   isolation other users' concurrent traffic is NOT recorded).
-3. After the request, register the new recording UUID with the session
-   so the analyze pipeline can find all recordings that belong to a flow.
-
-Activation strategy
--------------------
-We do NOT call `frappe.recorder.start()`, because that flips a global flag
-that records every request from every user. Instead, we directly invoke
-`frappe.recorder.record(force=True)` only when the current user has an
-active profiler session.
-
-Hook order
-----------
-Frappe loads `frappe`'s own hooks first, then app hooks. So on each request:
-
-  1. `frappe.recorder.record()` frappe's own (no-op without flag)
-  2. `optimus.hooks_callbacks.before_request()`: ours, may activate
-  3. <request handling>
-  4. `frappe.recorder.dump()` frappe's own, dumps the recorder
-                                          we activated
-  5. `optimus.hooks_callbacks.after_request()`: ours, registers
-                                          the new UUID with the session
-
-Step 4 happens before step 5 because frappe's `after_request` runs before
-ours (loaded first). That ordering is essential we need the recording
-to be dumped to Redis before we ask the analyze pipeline to fetch it later.
+Activation uses ``frappe.recorder.record(force=True)`` rather than
+``frappe.recorder.start()`` (which would record every request from every
+user). Frappe's own ``after_request`` runs before ours, so the recording is
+already dumped to Redis by the time we register its UUID.
 """
 
 import time
@@ -79,32 +58,13 @@ _IGNORED_CMD_PREFIXES = (
 
 
 def _extract_cmd_from_request() -> str:
-	"""Resolve the whitelisted-method name for the current HTTP request,
-	or "" if we can't determine one.
+	"""Resolve the whitelisted-method name for the current HTTP request, or "" if none.
 
-	Two sources, checked in order:
-
-	1. ``frappe.local.form_dict.cmd``: set by ``make_form_dict`` for
-	   legacy ``?cmd=foo.bar`` RPC calls. Available at before_request
-	   time because ``make_form_dict`` runs BEFORE the hook dispatcher.
-
-	2. ``frappe.local.request.path`` parsed for ``/method/<name>``: the
-	   only source for modern ``/api/method/foo.bar`` and
-	   ``/api/v2/method/foo.bar`` URLs, because Frappe's REST API routing
-	   (``handle_rpc_call`` in ``frappe/api/v1.py`` and ``v2.py``) only
-	   calls ``frappe.form_dict.cmd = method`` AFTER the before_request
-	   hooks have already fired. Before v0.5.1 the skip filter missed
-	   every modern REST call because it only checked form_dict.cmd,
-	   which was empty at hook time for these URLs.
-
-	Works for both v1 and v2 API paths because both route shapes use
-	``.../method/<name>``: we find the substring ``/method/`` and take
-	everything after it.
-
-	Returns "" when neither source produces a non-empty cmd the caller
-	treats that as "don't skip" so that request-path-less contexts
-	(OPTIONS preflights, health checks, pre-init edge cases) fall
-	through to the normal path rather than being filtered.
+	Checks ``frappe.local.form_dict.cmd`` (legacy ``?cmd=foo.bar`` RPC) first,
+	then parses ``/method/<name>`` out of ``frappe.local.request.path`` (modern
+	``/api/method/...`` and ``/api/v2/method/...`` URLs, whose cmd is not set at
+	before_request time). Returns "" when neither yields a cmd, which the caller
+	treats as "don't skip".
 	"""
 	# Source 1: form_dict.cmd (legacy ?cmd=foo.bar, always set if present)
 	try:
@@ -139,20 +99,12 @@ def _extract_cmd_from_request() -> str:
 
 def _should_skip_request() -> bool:
 	"""Return True if the current HTTP request is profiler / Frappe-recorder
-	instrumentation noise that should not be captured into the session.
+	instrumentation noise that should not be captured.
 
-	Delegates to ``_extract_cmd_from_request`` for the method-name
-	resolution (handles both legacy ``?cmd=foo`` and modern
-	``/api/method/foo`` URL shapes), then does a prefix match against
-	``_IGNORED_CMD_PREFIXES``. Non-method URLs (``/app/...``,
-	``/api/resource/...``, static files) resolve to "" and fall through
-	as 'not noise', which is the intended behavior we only skip
-	endpoints that the profiler / recorder EXPOSES via whitelisted
-	methods, not general page loads or REST resource access.
-
-	Defensive: any exception resolving the cmd falls through to False
-	rather than raising, because crashing here would take down every
-	request for every user with an active profiler session.
+	Prefix-matches the resolved cmd against ``_IGNORED_CMD_PREFIXES``, then
+	against user-configured ``skip_request_paths`` (matched on the full request
+	path). Non-method URLs resolve to "" and fall through as 'not noise'. Any
+	exception falls through to False so it can never break a request.
 	"""
 	cmd = _extract_cmd_from_request()
 	if cmd:
@@ -185,10 +137,8 @@ def _should_skip_request() -> bool:
 
 
 def _resolve_sampler_interval_ms() -> float:
-	"""Resolve the pyinstrument sampler interval from Optimus Settings,
-	falling back to the legacy site_config key, then to the hardcoded
-	default. Single function so before_request + before_job stay in
-	sync without duplicating the precedence rule.
+	"""Resolve the pyinstrument sampler interval (ms): Optimus Settings, then the
+	``optimus_sampler_interval_ms`` site_config key, then the hardcoded default.
 	"""
 	# Setting first (preferred path).
 	try:
@@ -210,9 +160,8 @@ def _resolve_sampler_interval_ms() -> float:
 
 
 def _should_skip_user(user: str | None) -> bool:
-	"""Return True if the current user is on the configured skip list.
-	Used to exclude system bot users (scheduler, healthchecks) from
-	instrumentation even when they have an active session.
+	"""Return True if the user is on the configured skip list (e.g. system bot
+	users), excluding them from instrumentation even with an active session.
 	"""
 	if not user:
 		return False
@@ -227,8 +176,8 @@ def _should_skip_user(user: str | None) -> bool:
 def before_request(*args, **kwargs):
 	"""Activate the recorder if the current user has an active profiler session.
 
-	Runs on every HTTP request. The hot path (no active session) is one
-	Redis GET `get_active_session_for(user)`: and an early return.
+	Runs on every HTTP request; the hot path (no active session) is a single
+	Redis GET plus an early return.
 	"""
 	try:
 		# v0.5.3: deferred sidecar-wrap install. The module-level
@@ -704,22 +653,14 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 	"""Serialize the in-flight pyinstrument session and sidecar list to Redis.
 
-	Called from after_request / after_job after the recorder has dumped
-	its own SQL recording. The two new Redis keys are:
+	Called from after_request / after_job after the recorder dumped its own SQL
+	recording. Writes ``profiler:tree:<uuid>`` (HMAC-signed pickle of
+	pyi.last_session) and ``profiler:sidecar:<uuid>`` (list[dict]), both with the
+	same TTL as RECORDER_REQUEST_HASH.
 
-	  profiler:tree:<recording_uuid>      → HMAC-signed pickle.dumps(pyi.last_session)
-	  profiler:sidecar:<recording_uuid>   → list[dict]
-
-	Both inherit the same TTL semantics as RECORDER_REQUEST_HASH (cleaned
-	up at the end of analyze, or expire naturally if analyze never runs).
-
-	Phase K hardening: the pickled tree carries a 32-byte HMAC-SHA256
-	prefix derived from the site's ``encryption_key``. ``analyze.py``
-	refuses to unpickle blobs whose signature doesn't match - this
-	stops a Redis-poisoning attacker from injecting a malicious pickle
-	to gain code execution in a worker process.
-
-	Best-effort: failures here log but never break the request.
+	SECURITY: the pickle is HMAC-SHA256 signed with the site's ``encryption_key``
+	so analyze refuses to unpickle a poisoned blob (Redis-poisoning RCE guard).
+	Best-effort: failures log but never break the request.
 	"""
 	import pickle
 
@@ -781,7 +722,7 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 
 
 def _clear_capture_locals() -> None:
-	"""Clear all v0.3.0 capture state from frappe.local. Idempotent."""
+	"""Clear all capture state from frappe.local. Idempotent."""
 	for attr in (
 		"optimus_pyinstrument",
 		"optimus_sidecar",
@@ -859,16 +800,13 @@ def _clear_capture_locals() -> None:
 
 
 def _track_bg_job_started(session_uuid: str, method) -> None:
-	"""Record this RQ job's method and mark it Running with started_at = now.
-	Stashes a monotonic baseline on ``frappe.local`` for the duration calc
-	in ``_track_bg_job_finished``.
+	"""Record this RQ job's method and mark it Running with started_at = now,
+	stashing a monotonic baseline on ``frappe.local`` for the duration calc in
+	``_track_bg_job_finished``.
 
-	Called from ``before_job`` once the marker is validated, BEFORE the
-	user/active-session gates so even orphan jobs (whose recorder we
-	won't activate) get their status reported in the session's bg-jobs
-	list. The ``record_job`` call is idempotent (uses ``setdefault`` for
-	method on the Redis hash) so it's safe even when the fast-path in the
-	enqueue patch already recorded the method.
+	Called from ``before_job`` before the user/active-session gates so even
+	orphan jobs get a status in the session's bg-jobs list. Idempotent (uses
+	``setdefault`` for method), so safe when the enqueue patch already recorded it.
 	"""
 	try:
 		from rq import get_current_job
@@ -898,30 +836,18 @@ def _track_bg_job_started(session_uuid: str, method) -> None:
 
 
 def _track_bg_job_finished(session_uuid: str, job_id: str) -> None:
-	"""Write the terminal status + ended_at + duration_ms while the RQ job
-	record is still alive in the worker. Two write paths, in order:
+	"""Write the terminal status + ended_at + duration_ms while the RQ job record
+	is still alive. Two write paths:
 
-	1. **Redis jobs hash**: primary. analyze's ``session.get_jobs(...)``
-	   reads from here at persist time. The in-flight case where analyze is
-	   still mid-wait gets the authoritative final state via this write.
+	1. Redis jobs hash (primary): analyze reads this at persist time.
+	2. Optimus Background Job DocType row (late-finish fallback): if analyze has
+	   already finalized the session and deleted the jobs hash, update the
+	   persisted row directly so a late completion still shows without re-analyze.
 
-	2. **Optimus Background Job DocType row**: late-finish fallback. If
-	   analyze has already finalized this session (status in {"Ready",
-	   "Failed"}) and ``_cleanup_redis`` has deleted the jobs hash, the
-	   Redis write above is an orphan; this path updates the persisted row
-	   directly so the report eventually reflects the late completion
-	   without needing a re-analyze (which isn't viable post-cleanup).
-
-	Failure detection: Frappe runs after_job hooks inside a ``try/finally``
-	wrapping the user's method, so an in-flight exception is visible via
-	``sys.exc_info()``. RQ's timeout-killer raises ``JobTimeoutException``
-	(its class name, regardless of import path) we map that distinctly so
-	the report can flag timeouts separately from generic user-code failures.
-
-	Each write path has its own ``try/except: pass`` so a Redis hiccup
-	doesn't suppress the DocType write and vice versa. The status / timing
-	computation has its own outer guard so an unexpected failure there exits
-	cleanly without raising back into Frappe's hook dispatcher.
+	Status comes from ``sys.exc_info()``: a ``JobTimeoutException`` class name maps
+	to "Timeout", any other exception to "Failed", none to "Completed". Each write
+	path has its own try/except so one failure never suppresses the other. The
+	whole thing is guarded so a tracking bug can't break the job.
 	"""
 	# Compute terminal status + timing once; both write paths reuse them.
 	try:
@@ -1022,24 +948,12 @@ _EXPOSE_HEADER_NAME = "Access-Control-Expose-Headers"
 
 
 def _inject_correlation_header(recording_uuid: str, response=None) -> None:
-	"""Attach X-Optimus-Recording-Id to the outgoing response + expose it
-	via Access-Control-Expose-Headers. Called from after_request during
-	an active profiler session. Idempotent and safe to call in non-HTTP
-	contexts (no-op when neither a response object nor
-	``frappe.local.response_headers`` is available).
-
-	v0.5.3: now supports Frappe v15. v15 does not stage custom headers
-	on ``frappe.local.response_headers`` (only v16 does that), so when
-	a response object is available we write the headers directly to
-	``response.headers``. The v16 staging path is tried first because
-	it predates v15 support and some deployments rely on downstream
-	hooks reading the staged dict; the v15 direct-write path is the
-	fallback.
-
-	Symptom that motivated this fix: on v15, "Per-XHR timings" in the
-	Frontend panel rendered empty because ``optimus_frontend.js``
-	couldn't read the recording-id header it was never set. Our
-	v16-only staging dict was silently dropped during response build.
+	"""Attach X-Optimus-Recording-Id to the response and expose it via
+	Access-Control-Expose-Headers (browsers hide custom headers from JS
+	otherwise, even same-origin). Called from after_request during an active
+	session. Idempotent and safe in non-HTTP contexts (no-op without a response
+	or ``frappe.local.response_headers``). Writes the v16 staged-headers dict when
+	present and, for v15, directly to ``response.headers``.
 	"""
 	# v16 path: write to the staged dict if Frappe exposes it.
 	headers = getattr(frappe.local, "response_headers", None)

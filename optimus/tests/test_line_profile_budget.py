@@ -90,14 +90,12 @@ def test_budget_flag_roundtrip(env):
 
 
 def test_disengage_stops_events_without_freeing_tool(env):
-	"""The watchdog disengages line tracing by zeroing events it must NOT
-	free_tool_id. Freeing the tool from the timer thread, mid-request, yanks it
-	out from under line_profiler's still-active manager; its own
-	``disable_by_count`` then fails ("tool 2 is not in use"), leaving an
-	orphaned profiler whose weakref finalizer fires ``handle_raise_event`` at
-	teardown with ``sys`` torn down → ``'NoneType' object has no attribute
-	'monitoring'``. Disengage = events 0, tool stays registered for
-	line_profiler's own disable to clean up."""
+	"""The watchdog disengages line tracing by zeroing events; it must NOT
+	free_tool_id. Freeing the tool from the timer thread mid-request yanks it
+	out from under line_profiler's still-active manager, so its
+	``disable_by_count`` fails ("tool 2 is not in use") and orphans a profiler
+	whose finalizer later crashes at teardown. Disengage = events 0, tool stays
+	registered for line_profiler's own disable to clean up."""
 	if HAS_MON:
 		sys.monitoring.use_tool_id(PID, "line_profiler")
 		sys.monitoring.set_events(PID, sys.monitoring.events.LINE)
@@ -115,9 +113,8 @@ def test_disengage_stops_events_without_freeing_tool(env):
 	reason="needs sys.monitoring + line_profiler",
 )
 def test_disengage_does_not_desync_real_line_profiler(env):
-	"""Regression: the watchdog firing mid-request must leave line_profiler's
-	own teardown working. With the old free_tool_id disengage, the line below
-	raised ``ValueError: tool 2 is not in use`` and orphaned the profiler."""
+	"""The watchdog firing mid-request must leave line_profiler's own teardown
+	working (no ``ValueError: tool 2 is not in use``, no orphaned profiler)."""
 	from line_profiler import LineProfiler
 
 	def hot():

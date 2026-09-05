@@ -1,10 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.7.x call-tree refinements (renderer._render_call_tree_node / _panel):
-hide [other: N frames] nodes, collapse the sub-1ms <sql> tail into one
-expandable summary, auto-open the hottest path down to the first user-app
-frame and the reworded intro.
+"""Call-tree rendering tests (renderer._render_call_tree_node / _panel):
+hide [other: N frames] nodes, drop <sql> leaves, auto-open the hottest path
+down to the first user-app frame and multi-action panel layout.
 """
 
 import json
@@ -35,8 +34,7 @@ def _tree():
 
 
 def _open_state(html, fn):
-	"""True/False whether the <details> for frame `fn` is rendered open;
-	None if the frame isn't present."""
+	"""True/False whether frame `fn`'s <details> renders open; None if the frame isn't present."""
 	m = re.search(
 		r'<details class="[^"]*?"( open)?><summary><span class="frame-name">'
 		+ re.escape(fn) + "<",

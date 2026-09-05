@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.4.0 auto-role-assignment on install."""
+"""Tests for auto-role-assignment on install."""
 
 import pytest
 
@@ -29,9 +29,8 @@ class FakeUser:
 
 
 def test_auto_assign_role_adds_to_system_managers(monkeypatch):
-	"""v0.6.x: the install hook fetches roles via a single ``Has Role``
-	query (was an N+1 over every user). Only users that ACTUALLY need
-	Optimus User added get loaded as full docs."""
+	"""The install hook fetches roles via a single ``Has Role`` query; only users
+	that actually need Optimus User get loaded as full docs."""
 	import frappe
 
 	users_in_db = {
@@ -109,8 +108,8 @@ def test_on_user_role_change_skips_already_has_profiler_user(monkeypatch):
 
 
 class _FakeSettings:
-	"""Minimal Optimus Settings Single stand-in. Tracks appends + save calls
-	so the seeder's idempotency contract is observable from the test."""
+	"""Minimal Optimus Settings Single stand-in that tracks appends + save calls
+	so the seeder's idempotency contract is observable."""
 
 	def __init__(self, ignored_apps_rows=None):
 		# ignored_apps mirrors how Frappe represents a child table on a
@@ -129,19 +128,12 @@ class _FakeSettings:
 
 
 def _stub_seeder_frappe(monkeypatch, *, settings, doctype_exists=True, installed_apps=None):
-	"""Wire just enough frappe surface for ``_seed_ignored_apps_with_framework_apps``
-	to run end-to-end without a real bench.
-
-	``frappe.db`` is a Werkzeug ``LocalProxy`` ([[feedback_frappe_db_local_proxy]])
-	patching attributes on it raises ``RuntimeError: object is not bound``
-	outside a request context. Replace it wholesale with a SimpleNamespace
-	carrying just the ``exists`` method the seeder calls.
-
-	``installed_apps`` defaults to the full ``_DEFAULT_IGNORED_APPS`` tuple
-	so the "all defaults installed" seeded-rows test stays meaningful
-	without spelling the list out twice. Pass an explicit list to exercise
-	the intersection filter introduced when the seeder stopped blindly
-	appending apps that aren't installed."""
+	"""Wire enough frappe surface for
+	``_seed_ignored_apps_with_framework_apps`` to run without a real bench.
+	``frappe.db`` is replaced wholesale with a SimpleNamespace (patching the real
+	Werkzeug LocalProxy raises outside a request). ``installed_apps`` defaults to
+	the full ``_DEFAULT_IGNORED_APPS`` tuple; pass an explicit list to exercise
+	the installed-apps intersection filter."""
 	import types
 
 	import frappe

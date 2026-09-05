@@ -3,11 +3,11 @@
 
 """Unit tests for the optimus.settings cached reader.
 
-The reader is the single place analyzers and hooks call to resolve
-configuration threshold values, the enabled toggle, the tracked-
-apps allowlist. Tests here pin the precedence (DocType > site_config
-> default), the soft-fail behavior (never crash a request) and the
-dataclass immutability that makes caching safe.
+The reader is the single place analyzers and hooks resolve configuration:
+threshold values, the enabled toggle, the tracked-apps allowlist. Tests pin
+the precedence (DocType > site_config > default), the soft-fail behavior
+(never crash a request) and the dataclass immutability that makes caching
+safe.
 """
 
 import sys
@@ -172,8 +172,8 @@ class TestTrackedApps:
 
 
 class TestIgnoredApps:
-	"""v0.6.x: 'Ignored Apps' exclusion list whose findings are dropped from
-	the report. Mirrors the tracked_apps wiring."""
+	"""'Ignored Apps' exclusion list whose findings are dropped from the
+	report. Mirrors the tracked_apps wiring."""
 
 	def test_default_seeds_framework_apps(self):
 		# v0.13.x: default seeded with every Frappe-organization-maintained
@@ -218,10 +218,9 @@ class TestIgnoredApps:
 
 
 class TestHideFrameworkTables:
-	"""v0.6.x: 'Hide framework / internal database tables' Check (default
-	True). When on, the renderer drops framework/internal tables from the
-	'Time spent per database table' section. Default-True Check pattern
-	mirrors ai_humanize_steps."""
+	"""'Hide framework / internal database tables' Check (default True). When
+	on, the renderer drops framework/internal tables from the 'Time spent per
+	database table' section."""
 
 	def test_default_is_true(self):
 		assert settings.OptimusConfig().hide_framework_tables is True

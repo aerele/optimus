@@ -1,16 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the Optimus Settings controller's warning-on-framework-
-apps-in-tracked-apps validation.
+"""Tests for the Optimus Settings controller's warning when framework apps
+are added to Tracked Apps.
 
-Production bug: user populated Tracked Apps with ``frappe`` and
-``erpnext``: misreading the field as "apps to monitor". Inclusion-
-mode semantics kicked in and flooded their actionable findings list
-with framework noise (a 1078-query query_builder N+1 that should
-have gone to Observations landed in Findings). The controller now
-flashes a clear warning when framework apps are added so the
-misconfiguration surfaces at save time instead of in a bad report.
+Users misread Tracked Apps as "apps to monitor" and added ``frappe`` /
+``erpnext``, flooding findings with framework noise. The controller now
+flashes a warning at save time when framework apps are added.
 """
 
 import sys
@@ -193,14 +189,8 @@ class TestNumericFloorClamp:
 		assert stub.msgprint_calls == []
 
 	def test_zero_session_retention_allowed(self, monkeypatch):
-		"""v0.13.x: ``session_retention_days = 0`` is the Strict-as-
-		unlimited sentinel it tells the janitor to never sweep. The
-		floor dropped from 1 → 0 to admit it; the janitor's
-		``_sweep_old_sessions`` early-returns on ``retention_days <=
-		0``. Pre-v0.13.x the test asserted clamp-to-1 because the
-		janitor's ``or DEFAULT_RETENTION_DAYS`` silently overrode 0 →
-		90, making the field description's 'Set to 0 to keep forever'
-		promise a lie."""
+		"""``session_retention_days = 0`` is the unlimited sentinel (tells the
+		janitor never to sweep), so it must not be clamped up to 1."""
 		OptimusSettings, _stub = _fresh_controller(monkeypatch)
 		doc = OptimusSettings()
 		doc.session_retention_days = 0
@@ -208,9 +198,8 @@ class TestNumericFloorClamp:
 		assert doc.session_retention_days == 0
 
 	def test_zero_max_queries_per_recording_allowed(self, monkeypatch):
-		"""v0.13.x: ``max_queries_per_recording = 0`` is the Strict-as-
-		unlimited sentinel analyze enriches every query (no
-		truncation). Floor lowered 1 → 0 to admit it."""
+		"""``max_queries_per_recording = 0`` is the unlimited sentinel (analyze
+		enriches every query, no truncation), so it must not be clamped."""
 		OptimusSettings, _stub = _fresh_controller(monkeypatch)
 		doc = OptimusSettings()
 		doc.max_queries_per_recording = 0

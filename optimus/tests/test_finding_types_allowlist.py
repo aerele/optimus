@@ -1,22 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Source-inspection guard: every finding_type string emitted by an
-analyzer must exist in the Optimus Finding DocType's Select allowlist.
+"""Source-inspection guard: every finding_type string emitted by an analyzer
+must exist in the Optimus Finding DocType's Select allowlist. Otherwise Frappe's
+Select validation raises ValidationError at doc.save() time, killing the analyze
+run.
 
-If an analyzer starts producing a new finding_type and the JSON isn't
-updated, Frappe's Select-field validation raises ValidationError at
-doc.save() time, destroying the whole analyze run.
-
-This caught v0.5.1's ``Framework N+1`` type after it had already
-shipped once a session produced a Framework N+1 finding, analyze
-crashed with:
-
-    frappe.exceptions.ValidationError: Row #1: Type cannot be
-    "Framework N+1". It should be one of "N+1 Query", ...
-
-The test walks analyzers/*.py for ``"finding_type": <str>`` literals
-and compares them against the options parsed from the DocType JSON.
+The test walks analyzers/*.py for ``"finding_type": <str>`` literals and compares
+them against the options parsed from the DocType JSON.
 """
 
 import json
@@ -84,8 +75,8 @@ def test_every_emitted_finding_type_is_in_doctype_options():
 
 
 def test_framework_n_plus_one_is_in_options():
-	"""Direct guard for the v0.5.1 regression that crashed analyze
-	with 'Type cannot be "Framework N+1"'."""
+	"""Direct guard: 'Framework N+1' must stay in the DocType options (analyze
+	crashes with 'Type cannot be "Framework N+1"' otherwise)."""
 	options = _load_doctype_options()
 	assert "Framework N+1" in options, (
 		"'Framework N+1' must be in Optimus Finding's select options "

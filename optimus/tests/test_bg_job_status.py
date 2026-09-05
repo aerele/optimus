@@ -1,9 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""analyze captures each enqueued RQ job's terminal status (Completed / Failed
-/ Timeout / Stopped) from RQ and marks jobs still active at the wait ceiling
-as Running so failed/timed-out jobs are reported instead of vanishing.
+"""analyze captures each enqueued RQ job's terminal status (Completed / Failed /
+Timeout / Stopped) from RQ and marks jobs still active at the wait ceiling as
+Running, so failed or timed-out jobs are reported instead of vanishing.
 """
 
 import datetime

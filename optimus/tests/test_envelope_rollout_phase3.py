@@ -1,30 +1,20 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.12.17: continues the v0.12.0 ``wrap_value`` / ``unwrap_value``
-envelope rollout to ``explain_cache`` (the cross-session EXPLAIN-
-result cache in ``analyze.py``).
-
-The previous phases shipped settings_cache (v0.12.11),
-retention_backlog + onboarding_seen (v0.12.13). This phase adds
-``explain_cache``, whose payload is a list of dicts (EXPLAIN row
-results) the most complex shape rolled out so far. Exercising the
-envelope on a non-primitive collection validates that ``unwrap_value``
-preserves nested structure cleanly.
-"""
+"""Tests the ``wrap_value`` / ``unwrap_value`` envelope on ``explain_cache``
+(the cross-session EXPLAIN-result cache in ``analyze.py``), whose payload is a
+list of dicts, to confirm ``unwrap_value`` preserves nested structure."""
 
 from __future__ import annotations
 
 
 class TestExplainCacheEnvelopeRoundTrip:
-	"""End-to-end on the envelope helpers alone the analyze.py call
-	site uses the same two-line pattern (wrap on write, unwrap on
-	read), so a unit test on the helpers + a source-grep canary
-	together cover the rollout."""
+	"""Round-trip tests on the envelope helpers alone (the analyze.py call site
+	uses the same wrap-on-write / unwrap-on-read pattern)."""
 
 	def test_list_of_dicts_roundtrip(self):
-		"""EXPLAIN results are list[dict] wrap + unwrap must preserve
-		the shape, including the inner dict's value types."""
+		"""wrap + unwrap must preserve a list[dict] EXPLAIN payload, including
+		inner value types."""
 		from optimus import redis_schema
 
 		payload = [
@@ -37,8 +27,7 @@ class TestExplainCacheEnvelopeRoundTrip:
 		assert version == redis_schema.SCHEMA_VERSION
 
 	def test_empty_list_roundtrip(self):
-		"""An EXPLAIN query against a query that fails returns []; the
-		empty-list shape must round-trip."""
+		"""A failed EXPLAIN returns []; the empty-list shape must round-trip."""
 		from optimus import redis_schema
 
 		wrapped = redis_schema.wrap_value([])
@@ -47,10 +36,8 @@ class TestExplainCacheEnvelopeRoundTrip:
 		assert version == redis_schema.SCHEMA_VERSION
 
 	def test_legacy_bare_list_passes_through(self):
-		"""Pre-v0.12.17 cached EXPLAIN results are stored as bare
-		list[dict] with no envelope. New readers must accept the
-		legacy shape unchanged via ``unwrap_value``'s legacy-detection
-		branch."""
+		"""A legacy bare list[dict] with no envelope must pass through
+		``unwrap_value`` unchanged (version None)."""
 		from optimus import redis_schema
 
 		legacy_payload = [
@@ -65,9 +52,8 @@ class TestExplainCacheEnvelopeRoundTrip:
 
 
 class TestAnalyzeSourceUsesEnvelope:
-	"""Source-grep canary: confirm analyze.py's explain_cache write +
-	read both use the envelope helpers. Catches a future refactor that
-	accidentally reverts the wrap / unwrap."""
+	"""Source-grep canary: confirm analyze.py's explain_cache write and read both
+	use the envelope helpers, catching a refactor that reverts wrap / unwrap."""
 
 	def test_explain_cache_write_wraps_via_redis_schema(self):
 		import os

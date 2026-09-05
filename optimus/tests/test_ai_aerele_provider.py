@@ -1,27 +1,17 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""``Aerele`` is the hosted/managed AI provider option (token packs bought at
-aerele.in instead of bringing your own Anthropic / OpenAI key). It is
-**TEMPORARILY DISABLED** until Aerele's billing + managed LLM gateway are
-production-ready removed from the ``ai_provider`` Select and commented out
-of ``_PROVIDER_DEFAULTS`` in ai_fix.py.
+"""``Aerele`` is the hosted/managed AI provider option (token packs from
+aerele.in instead of your own Anthropic / OpenAI key). It is TEMPORARILY
+DISABLED until Aerele's billing and managed LLM gateway are ready: removed
+from the ``ai_provider`` Select and commented out of ``_PROVIDER_DEFAULTS``
+in ai_fix.py.
 
-These tests now GUARD that disabled state so the option can't reappear by
-accident before the backend is ready. To RE-ENABLE Aerele, restore the
-provider entry + Select option (see the comment in ai_fix.py), then flip
-these assertions back to the originals:
-
-    entry = ai_fix._PROVIDER_DEFAULTS["Aerele"]
-    assert entry["protocol"] == "openai"
-    assert entry["needs_key"] is True
-    assert entry["base_url"].startswith("https://") and "aerele" in entry["base_url"]
-    assert entry["model"]
-    assert "Aerele" in options.split("\\n")
-
-The ``_aerele_call_metadata`` wiring is intentionally left intact in ai_fix.py
-(and still covered by test_ai_fix.py), ready for re-enable only the
-selectable provider is switched off.
+These tests guard that disabled state so the option can't reappear by
+accident. To re-enable, restore the provider entry + Select option (see the
+comment in ai_fix.py) and flip these assertions back. The
+``_aerele_call_metadata`` wiring stays intact (covered by test_ai_fix.py);
+only the selectable provider is switched off.
 """
 
 from __future__ import annotations

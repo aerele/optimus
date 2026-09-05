@@ -1,19 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.6.0: drop the session-comparison / baseline-pinning feature.
+"""Drop the session-comparison / baseline-pinning feature.
 
-Removes two fields from Optimus Session:
-  - compared_to_session
-  - is_baseline
-
-Frappe's auto-DDL drops the columns once optimus_session.json no longer
-declares them; reloading the DocType here makes that happen during
-migrate. We also clear any lingering ``profiler:baseline:<label>`` cache
-keys so they don't dangle pointing at deleted sessions.
-
-Idempotent: safe to re-run. Each step is wrapped in try/except so a
-partially-applied state doesn't break the migration.
+Removes ``compared_to_session`` and ``is_baseline`` from Optimus Session:
+reloading the DocType lets Frappe's auto-DDL drop the columns during
+migrate. Also clears lingering ``profiler:baseline:<label>`` cache keys.
+Idempotent: each step is wrapped in try/except.
 """
 
 import frappe

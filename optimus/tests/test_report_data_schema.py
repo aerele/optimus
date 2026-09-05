@@ -1,14 +1,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Validates the rendered ``report_data`` contract against the
-formal JSON-schema shipped in ``optimus/report_data_schema.json``.
-
-Phase K v0.7 GA polish: the contract has lived in code + docstrings
-since Phase J. The schema file is the machine-readable record of
-that contract; this test pins the renderer's output to it so a
-silent shape drift becomes a test failure rather than a third-party
-integration breakage."""
+"""Validates the rendered ``report_data`` contract against the formal
+JSON-schema in ``optimus/report_data_schema.json``, so a silent shape drift
+becomes a test failure rather than a third-party integration breakage.
+"""
 
 import json
 import os
@@ -87,8 +83,8 @@ def _ctx(**overrides):
 
 
 def test_report_data_schema_loads():
-	"""The schema file is well-formed JSON-schema and lists every
-	contract key the audit froze."""
+	"""The schema file is well-formed JSON-schema and lists every contract
+	key."""
 	schema = _schema()
 	required = set(schema.get("required") or [])
 	assert {
@@ -101,9 +97,8 @@ def test_report_data_schema_loads():
 
 
 def test_built_report_data_matches_schema():
-	"""``build_report_context(...)`` over an empty-but-valid fixture
-	produces a dict that validates against the schema. Pins the
-	contract shape against silent drift."""
+	"""``build_report_context(...)`` over an empty-but-valid fixture produces a
+	dict that validates against the schema."""
 	schema = _schema()
 	out = build_report_context(_doc(), _ctx())
 	# Validate raises ``jsonschema.ValidationError`` on mismatch.

@@ -1,18 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""D.M-S1 gating-clamp regression.
+"""Slow Hot Path gating-clamp regression.
 
-The Slow Hot Path finding's percentage is computed as
-``cumulative_ms / action_wall_time_ms``. Pyinstrument's aggregated tree
-can sum across actions, producing pct > 100% which would render as
-"150% of the action's wall time" a nonsensical reading.
-
-The fix clamps ``pct_of_action = min(1.0, raw_pct)`` before display and
-severity gating, AND clamps ``estimated_impact_ms`` to the action wall
-so cross-action sums never claim to consume more than the action took.
-
-This test guards against the clamp regressing.
+The finding's percentage is ``cumulative_ms / action_wall_time_ms``.
+Pyinstrument's aggregated tree can sum across actions, giving pct > 100%.
+The fix clamps ``pct_of_action`` to 1.0 for display and severity gating and
+clamps ``estimated_impact_ms`` to the action wall, so a finding never claims to
+consume more than the action took. This guards against that regressing.
 """
 
 import json
@@ -96,11 +91,9 @@ def test_within_action_severity_unchanged():
 
 
 def test_absolute_impact_promotes_to_high():
-	"""A subtree consuming >= 2× high_ms is High even when its
-	pct_of_action is just below the relative threshold. This is the
-	real bug the user reported: a 1.4s subtree at 49% of a 3s action
-	was landing as Medium and silently losing the TL;DR headline to
-	a smaller 75%-but-579ms High finding."""
+	"""A subtree consuming >= 2× high_ms is High even when its pct_of_action is
+	just below the relative threshold (e.g. a 1.4s subtree at 49% of a 3s action
+	would otherwise land Medium and lose the TL;DR headline)."""
 	# 49% × 3000ms = 1470ms. With high_pct=50% (default), pct fails
 	# the relative gate. But cumulative=1470 >= 2×high_ms=1000 → High.
 	tree = _node(
@@ -120,10 +113,9 @@ def test_absolute_impact_promotes_to_high():
 
 
 def test_below_absolute_threshold_stays_medium():
-	"""The escape hatch shouldn't promote borderline Medium findings.
-	A 600ms subtree at 45% pct (below 50% high_pct AND below 1000ms
-	absolute floor) stays Medium the new rule fires only on
-	overwhelming absolute impact."""
+	"""The absolute-impact escape hatch must not promote borderline findings: a
+	600ms subtree at 45% pct (below both 50% high_pct and the 1000ms floor)
+	stays Medium."""
 	# 45% × 1333ms ≈ 600ms cumulative. Neither rule fires:
 	#   - relative: 45% < 50% high_pct
 	#   - absolute: 600ms < 1000ms (2× high_ms)

@@ -3,8 +3,8 @@
 
 """Unit tests for optimus.analyzers.explain_flags.
 
-Exercises all four red-flag patterns: Full Table Scan, Filesort,
-Temporary Table and Low Filter Ratio (the one we just added in fix #2).
+Exercises all four red-flag patterns: Full Table Scan, Filesort, Temporary
+Table and Low Filter Ratio.
 """
 
 from optimus.analyzers import explain_flags
@@ -138,17 +138,9 @@ def test_empty_recordings(empty_context):
 
 
 def test_rows_as_string_does_not_crash_analyzer(empty_context):
-	"""v0.5.1 regression guard: production report showed
-	'Analyzer optimus.analyzers.explain_flags failed' because
-	some MariaDB drivers return `rows` as a string (Decimal-to-str
-	through certain adapter versions). The `rows_examined > N` int
-	comparison then crashed with TypeError in Python 3, taking out
-	the whole analyzer and dropping all Full Table Scan / Filesort
-	/ Temporary Table / Low Filter Ratio findings for the session.
-
-	_to_int coercion + per-row try/except means a string `rows` is
-	either coerced cleanly (if parseable) or treated as 0.
-	"""
+	"""A string ``rows`` value (some MariaDB drivers return it) must not crash
+	the analyzer: ``_to_int`` coercion + per-row try/except means it is coerced
+	if parseable, else treated as 0."""
 	recording = {
 		"uuid": "str-rows",
 		"path": "/", "cmd": None, "method": "GET",
@@ -181,9 +173,8 @@ def test_rows_as_string_does_not_crash_analyzer(empty_context):
 
 
 def test_rows_as_none_does_not_crash_analyzer(empty_context):
-	"""None is a valid value for EXPLAIN.rows in some edge cases
-	(subquery materialization, const access, etc.). Must coerce to
-	0 and continue, not crash."""
+	"""``None`` is a valid EXPLAIN.rows value (subquery materialization, const
+	access); must coerce to 0 and continue, not crash."""
 	recording = {
 		"uuid": "none-rows",
 		"path": "/", "cmd": None, "method": "GET",
@@ -209,11 +200,9 @@ def test_rows_as_none_does_not_crash_analyzer(empty_context):
 
 
 def test_malformed_row_is_isolated_not_crashing(empty_context):
-	"""A single unparseable row must not kill the whole session's
-	explain_flags output. The per-row try/except catches the error,
-	counts it, logs a sample to the warnings list and continues
-	with the remaining rows.
-	"""
+	"""A single unparseable row must not kill the session's explain_flags output:
+	the per-row try/except catches it, logs a sample to warnings and continues
+	with the remaining rows."""
 	import unittest.mock as mock
 
 	recording = {
@@ -270,9 +259,8 @@ def test_malformed_row_is_isolated_not_crashing(empty_context):
 
 
 def test_filesort_on_single_row_is_not_flagged(empty_context):
-	"""Regression guard exact payload from the production report:
-	a ref lookup on tabCustom DocPerm.parent with rows=1 that happens
-	to filesort the result. Must NOT emit a Filesort finding."""
+	"""A ref lookup with rows=1 that happens to filesort must NOT emit a Filesort
+	finding (sorting one row is free)."""
 	recording = {
 		"uuid": "filesort-tiny",
 		"path": "/", "cmd": None, "method": "GET",
@@ -332,9 +320,8 @@ def test_temporary_table_on_tiny_result_is_not_flagged(empty_context):
 
 
 def test_filesort_at_exactly_the_floor_is_flagged(empty_context):
-	"""Boundary: rows == MIN_ROWS_TO_FLAG_SORT (100) must still be
-	flagged. Sorting 100 rows without an index starts to matter.
-	The condition is `>= MIN_ROWS_TO_FLAG_SORT`, not strict >."""
+	"""Boundary: rows == MIN_ROWS_TO_FLAG_SORT (100) must still fire (the
+	condition is ``>=``, not strict ``>``)."""
 	from optimus.analyzers.explain_flags import MIN_ROWS_TO_FLAG_SORT
 	recording = {
 		"uuid": "filesort-floor",
@@ -363,9 +350,8 @@ def test_filesort_at_exactly_the_floor_is_flagged(empty_context):
 
 
 def test_filesort_above_floor_still_flagged(empty_context):
-	"""Positive case: a filesort on 5000 rows (well above the floor)
-	must still produce a finding, so the floor doesn't accidentally
-	suppress legitimate ones."""
+	"""A filesort on 5000 rows (well above the floor) must still produce a
+	finding, so the floor doesn't suppress legitimate ones."""
 	recording = {
 		"uuid": "filesort-real",
 		"path": "/", "cmd": None, "method": "GET",
@@ -400,9 +386,8 @@ def test_filesort_above_floor_still_flagged(empty_context):
 
 
 def test_full_scan_from_framework_callsite_is_suppressed(empty_context):
-	"""The query lives inside frappe/model/document.py user can't
-	add an index to fix a Frappe framework query. Skip the findings
-	for this call entirely (Full Scan + whatever else)."""
+	"""A full scan from a frappe/* callsite is suppressed (the user can't index a
+	framework query); the whole call's findings are skipped."""
 	recording = {
 		"uuid": "fw-scan",
 		"path": "/", "cmd": None, "method": "GET",
@@ -439,9 +424,8 @@ def test_full_scan_from_framework_callsite_is_suppressed(empty_context):
 
 
 def test_alias_table_name_is_suppressed(empty_context):
-	"""EXPLAIN rows for JOIN queries often have the table field as
-	a single-letter alias ('a', 'c', 'ap'). 'Full table scan on a'
-	isn't actionable the user can't index an alias."""
+	"""JOIN EXPLAIN rows often name the table as a single-letter alias ('a',
+	'c'); 'Full table scan on a' isn't actionable, so aliases are suppressed."""
 	recording = {
 		"uuid": "alias-scan",
 		"path": "/", "cmd": None, "method": "GET",
@@ -522,10 +506,8 @@ def test_alias_helper_distinguishes_real_tables_from_aliases():
 
 
 def test_user_code_callsite_still_emits_findings(empty_context):
-	"""Positive case: a Full Scan from genuine user-app code
-	(apps/myapp/...) must still produce a finding. The filter is
-	narrow it only removes framework + alias noise, not real
-	findings."""
+	"""A Full Scan from genuine user-app code (apps/myapp/...) must still produce
+	a finding; the filter removes only framework + alias noise."""
 	recording = {
 		"uuid": "user-scan",
 		"path": "/", "cmd": None, "method": "GET",
@@ -556,9 +538,8 @@ def test_user_code_callsite_still_emits_findings(empty_context):
 
 
 def test_no_stack_falls_through_to_legacy_behavior(empty_context):
-	"""Pre-v0.5.2 recordings might not have a `stack` on each call.
-	The framework-callsite filter must gracefully pass these
-	through (emit findings as before) rather than dropping them."""
+	"""A recording with no ``stack`` on a call must pass through the
+	framework-callsite filter (emit findings) rather than being dropped."""
 	recording = {
 		"uuid": "nostack",
 		"path": "/", "cmd": None, "method": "GET",

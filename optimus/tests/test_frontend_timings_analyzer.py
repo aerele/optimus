@@ -1,7 +1,7 @@
 # optimus/tests/test_frontend_timings_analyzer.py
 # Copyright (c) 2026, Optimus contributors
 
-"""Tests for v0.5.0 frontend_timings analyzer."""
+"""Tests for the frontend_timings analyzer."""
 
 import json
 import os
@@ -198,13 +198,10 @@ def _production_shape_recordings():
 
 
 def _context_with_per_action_output(recordings):
-	"""Simulate what context.actions looks like AFTER per_action.analyze
-	has run. v0.5.2: action_label on context.actions is the TECHNICAL
-	label (raw cmd with optional :Action suffix, or METHOD+path)
-	humanization moved to per_action.humanized_label() and is used
-	only by the Steps-to-Reproduce section. The frontend XHR panel
-	mirrors whatever context.actions holds, so these fixtures match
-	the current technical-label format.
+	"""Simulate context.actions after per_action.analyze has run: action_label
+	is the technical label (raw cmd with an optional :Action suffix, or
+	METHOD+path). The frontend XHR panel mirrors context.actions, so these
+	fixtures use that format.
 	"""
 	from optimus.analyzers.base import AnalyzeContext
 	ctx = AnalyzeContext(session_uuid="t", docname="t")
@@ -225,13 +222,8 @@ def _context_with_per_action_output(recordings):
 
 
 def test_action_label_comes_from_context_actions(monkeypatch):
-	"""v0.5.1 fix, still valid in v0.5.2: per-XHR rows read
-	action_label from context.actions rather than from the raw
-	recording dict (which never carries it in production). The
-	specific label format evolved across versions (v0.5.1
-	humanized, v0.5.2 technical with :Action suffix), but the
-	routing through context.actions is invariant that's what
-	this test guards.
+	"""Per-XHR rows read action_label from context.actions, not from the raw
+	recording dict (which never carries it in production).
 	"""
 	from optimus.analyzers import frontend_timings
 
@@ -275,11 +267,9 @@ def test_action_label_comes_from_context_actions(monkeypatch):
 
 
 def test_backend_ms_comes_from_context_actions():
-	"""v0.5.1 fix: backend_ms is context.actions[idx].duration_ms, not
-	recording.duration_ms (which doesn't exist). Pre-v0.5.1 this
-	field was always 0 in production, which made
-	network_delta_ms == xhr_ms and every XHR looked like it had
-	100% network overhead."""
+	"""backend_ms comes from context.actions[idx].duration_ms, not
+	recording.duration_ms (which doesn't exist), so it isn't always 0 (which
+	would make every XHR look like 100% network overhead)."""
 	from optimus.analyzers import frontend_timings
 
 	recordings = _production_shape_recordings()

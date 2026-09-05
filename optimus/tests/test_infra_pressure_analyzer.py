@@ -1,7 +1,7 @@
 # optimus/tests/test_infra_pressure_analyzer.py
 # Copyright (c) 2026, Optimus contributors
 
-"""Tests for v0.5.0 infra_pressure analyzer."""
+"""Tests for the infra_pressure analyzer."""
 
 import json
 import os
@@ -22,8 +22,8 @@ def _empty_context():
 
 
 def _synth_infra(**overrides):
-    """Return a minimal infra dict with every Balanced-tier key set to a
-    non-breaching value, then apply overrides."""
+    """Return a minimal infra dict with every key at a non-breaching value, then
+    apply overrides."""
     base = {
         "sys_cpu_percent": 20,
         "worker_rss_bytes": 500_000_000,
@@ -57,10 +57,9 @@ def test_resource_contention_fires_on_sustained_cpu():
 
 
 def test_memory_pressure_does_not_fire_on_small_delta():
-    """The fixture session has 520M→680M→520M RSS. End-start delta is 0
-    and the intermediate spike (160M) is below the 200MB threshold. Swap
-    peaks at 50MB which is below the 100MB warn threshold. So neither
-    arm of Memory Pressure should fire."""
+    """The fixture session's RSS (520M→680M→520M) has end-start delta 0 and an
+    intermediate spike (160M) below the 200MB threshold; swap peaks at 50MB, below
+    the 100MB warn threshold. So neither arm of Memory Pressure fires."""
     from optimus.analyzers import infra_pressure
 
     session = _load_session()
@@ -71,8 +70,7 @@ def test_memory_pressure_does_not_fire_on_small_delta():
 
 
 def test_memory_pressure_fires_on_large_rss_delta():
-    """Synthetic recordings where RSS grows by 300MB must fire Medium
-    (delta > 200MB threshold but < 500MB critical)."""
+    """RSS growing by 300MB fires Medium (> 200MB threshold, < 500MB critical)."""
     from optimus.analyzers import infra_pressure
 
     recordings = [
@@ -100,9 +98,9 @@ def test_memory_pressure_fires_high_on_swap():
 
 
 def test_db_pool_saturation_does_not_fire_below_threshold():
-    """The fixture recordings have no `db_max_connections` set, which
-    triggers the legacy fallback ratio (threads_running/threads_connected).
-    Max is 10/15 ≈ 0.67, below the 0.9 threshold, so no finding."""
+    """The fixture recordings have no ``db_max_connections`` set, so the fallback
+    ratio (threads_running/threads_connected) applies; max 10/15 ≈ 0.67 is below
+    the 0.9 threshold, so no finding."""
     from optimus.analyzers import infra_pressure
 
     session = _load_session()
@@ -113,8 +111,8 @@ def test_db_pool_saturation_does_not_fire_below_threshold():
 
 
 def test_db_pool_saturation_fires_on_pool_exhaustion():
-    """When db_max_connections is set and db_threads_connected is close
-    to it, the new (correct) ratio fires. 145/151 = 0.96 > 0.9."""
+    """When db_max_connections is set and db_threads_connected is close to it, the
+    connected/max ratio fires: 145/151 = 0.96 > 0.9."""
     from optimus.analyzers import infra_pressure
 
     recordings = [
@@ -144,10 +142,9 @@ def test_db_pool_saturation_fires_on_pool_exhaustion():
 
 
 def test_db_pool_saturation_healthy_pool_no_false_positive():
-    """5 connections open against a 500-slot pool is 1% usage. The
-    old proxy (threads_running/threads_connected) would misfire here
-    if all 5 were busy; the new proxy (connected/max) correctly ignores
-    it."""
+    """5 connections open against a 500-slot pool is 1% usage. The connected/max
+    proxy correctly ignores it, whereas threads_running/threads_connected would
+    misfire when all 5 are busy."""
     from optimus.analyzers import infra_pressure
 
     recordings = [
@@ -226,10 +223,9 @@ def test_empty_recordings_is_safe():
 
 
 def test_recordings_with_non_dict_infra_are_skipped():
-    """Pass-5 regression guard: a corrupt Redis blob or unexpected
-    data type that ends up as rec['infra'] as a list/string (instead
-    of dict) would pass the falsy check but then crash on .get(),
-    breaking analyze.run for the whole session.
+    """A non-dict ``rec['infra']`` (a corrupt Redis blob as a list/string) passes
+    the falsy check but must not crash on .get() and break analyze.run for the
+    whole session.
     """
     from optimus.analyzers import infra_pressure
 
@@ -250,9 +246,8 @@ def test_recordings_with_non_dict_infra_are_skipped():
 
 
 def test_recordings_without_infra_are_ignored():
-    """Not every recording has an infra dict (e.g. if the session was
-    started before v0.5.0 rolled out). The analyzer should skip them
-    cleanly rather than crashing."""
+    """Not every recording has an infra dict; the analyzer must skip those cleanly
+    rather than crashing."""
     from optimus.analyzers import infra_pressure
 
     recordings = [
@@ -279,8 +274,7 @@ def test_recordings_without_infra_are_ignored():
 
 
 def _production_shape_recording(idx, **overrides):
-    """Real recorder output shape: path/cmd/method, NO action_label
-    on the dict."""
+    """Real recorder output shape: path/cmd/method, no action_label on the dict."""
     base = {
         "uuid": f"rec-{idx}",
         "path": "/api/method/frappe.desk.form.save.savedocs",
@@ -296,9 +290,8 @@ def _production_shape_recording(idx, **overrides):
 
 
 def test_infra_timeline_uses_context_actions_for_labels():
-    """Exact production shape: recordings have no action_label, but
-    context.actions (populated by per_action.analyze upstream) does.
-    Timeline rows must pull from there."""
+    """Recordings have no action_label, but context.actions (populated by
+    per_action.analyze upstream) does; timeline rows must pull labels from there."""
     from optimus.analyzers import infra_pressure
     from optimus.analyzers.base import AnalyzeContext
 
@@ -325,10 +318,9 @@ def test_infra_timeline_uses_context_actions_for_labels():
 
 
 def test_infra_timeline_falls_back_to_method_path_without_context():
-    """If context.actions is empty (per_action didn't run first, or the
-    actions list is shorter than recordings), derive a readable label
-    from the recording's own method + path rather than emitting the
-    synthetic 'action_N' noise."""
+    """If context.actions is empty or shorter than recordings, derive a readable
+    label from the recording's own method + path rather than the synthetic
+    'action_N' noise."""
     from optimus.analyzers import infra_pressure
     from optimus.analyzers.base import AnalyzeContext
 
@@ -348,10 +340,8 @@ def test_infra_timeline_falls_back_to_method_path_without_context():
 
 
 def test_infra_timeline_synthetic_only_as_last_resort():
-    """If the recording truly has no method/path/cmd AND no matching
-    context.actions entry, fall back to synthetic 'action_N'. This
-    is the only path that should produce the old noise and only
-    when the analyzer has zero useful data to work with."""
+    """Only when a recording has no method/path/cmd and no matching
+    context.actions entry does the label fall back to synthetic 'action_N'."""
     from optimus.analyzers import infra_pressure
     from optimus.analyzers.base import AnalyzeContext
 

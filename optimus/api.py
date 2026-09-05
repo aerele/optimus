@@ -3,21 +3,8 @@
 
 """Whitelisted HTTP API for the profiler.
 
-These endpoints are how the floating widget (Phase 5) and any custom
-integrations talk to the profiler. They are decorated with
-`@frappe.whitelist()` so they are reachable as
-`/api/method/optimus.api.<name>`.
-
-Phase 1 surface:
-    start(label) begin a session for the calling user
-    stop() end the current user's session
-    status() is the calling user currently recording?
-    get_active_session() full metadata for the calling user's session
-
-The actual analyze pipeline (read recordings, run analyzers, render
-report, attach files) is added in Phase 3+. For now, `stop()` simply
-clears the active flag and marks the DocType as `Stopping`: a future
-phase will hook the analyze step in.
+Endpoints the floating widget and custom integrations call. Decorated with
+`@frappe.whitelist()`, reachable as `/api/method/optimus.api.<name>`.
 """
 
 import json
@@ -47,11 +34,9 @@ def _require_user() -> str:
 def _require_profiler_user() -> str:
 	"""Return the calling user, or throw if they lack the profiler role.
 
-	The HTTP-level enforcement that the floating widget's role check is
-	mirroring. Without this, any authenticated user could POST to
-	/api/method/optimus.api.start and start a session on
-	themselves the role check in the widget JS would be purely
-	cosmetic.
+	HTTP-level enforcement of the widget's role check: without it any
+	authenticated user could POST to start a session (the JS check is
+	cosmetic).
 	"""
 	user = _require_user()
 	if user == "Administrator":
@@ -66,22 +51,13 @@ def _require_profiler_user() -> str:
 
 
 def _require_session_permission(session_uuid: str, permission_type: str = "read") -> str:
-	"""Phase K hardening: per-doc permission gate on endpoints that
-	read or mutate a specific ``Optimus Session``. The role check in
-	``_require_profiler_user`` allows any Optimus User to call the
-	endpoint; this further check ensures the caller actually has
-	access to *this* session under Frappe's DocType permission model.
+	"""Per-doc permission gate for endpoints that read or mutate a specific
+	``Optimus Session`` (the role check alone lets any Optimus User in).
+	Returns the resolved docname; throws when the ``session_uuid`` is missing
+	or unknown, or when the caller lacks ``permission_type`` access.
 
-	Returns the resolved docname. Throws ``frappe.PermissionError``
-	when:
-	  - the ``session_uuid`` doesn't resolve to any row, OR
-	  - ``frappe.has_permission`` denies access for ``permission_type``, OR
-	  - ``frappe.has_permission`` itself raises.
-
-	SECURITY: this fails CLOSED. ``has_permission`` is a core Frappe call that
-	practically never raises; if it does, denying is the safe outcome a
-	permission check that errors must not silently downgrade to the role-only
-	gate (that would let any Optimus User reach another user's session).
+	SECURITY: fails CLOSED. If ``has_permission`` itself raises, access is
+	denied rather than downgraded to the role-only gate.
 	"""
 	if not session_uuid:
 		frappe.throw("session_uuid is required", frappe.ValidationError)
@@ -123,21 +99,18 @@ def start(
 ) -> dict:
 	"""Begin a profiling session for the calling user.
 
-	If the user already has an active session, that session is stopped
-	first (its DocType row is marked `Stopping` and its Redis pointer
-	cleared). This makes start() idempotent from the user's perspective:
-	clicking Start twice never produces two parallel sessions.
+	If the user already has an active session, it is stopped first (marked
+	`Stopping`, Redis pointer cleared), making start() idempotent: clicking
+	Start twice never produces two parallel sessions.
 
 	Args:
 	    label: Human-readable session label.
-	    capture_python_tree: v0.3.0+. When True (default), pyinstrument
-	        captures a Python call tree per recording and sidecar wraps
-	        capture frappe.get_doc / cache.get_value / has_permission
-	        argument identities. When False, only the existing SQL
-	        recorder runs same overhead profile as v0.2.0.
-	    notes: v0.5.0+. Free-form "steps to reproduce" / context text
-	        rendered at the top of the report. Can also be edited on
-	        the Optimus Session form after the session completes.
+	    capture_python_tree: When True (default), pyinstrument captures a
+	        Python call tree per recording and sidecar wraps capture
+	        frappe.get_doc / cache.get_value / has_permission argument
+	        identities. When False, only the SQL recorder runs.
+	    notes: Free-form "steps to reproduce" / context text rendered at the
+	        top of the report; also editable on the Optimus Session form.
 	"""
 	user = _require_profiler_user()
 
@@ -209,19 +182,14 @@ def start(
 def stop() -> dict:
 	"""End the calling user's active profiling session.
 
-	Clears the Redis active pointer, marks the Optimus Session row as
-	``Stopping`` and either enqueues the analyze job or runs it inline
-	(v0.5.0: scheduler-aware fallback see ``_enqueue_analyze``).
+	Clears the Redis active pointer, marks the row ``Stopping`` and either
+	enqueues the analyze job or runs it inline (scheduler-aware fallback, see
+	``_enqueue_analyze``).
 
-	Returns:
-	    dict with ``stopped``, ``session_uuid``, ``docname``,
-	    ``ran_inline`` and only when ran_inline is True the final
-	    ``status`` from the Optimus Session row (``Ready`` or ``Failed``).
-
-	    The widget uses both flags to decide its terminal state:
-	      ran_inline=False          → transition to "Analyzing…"
-	      ran_inline=True, Ready    → transition directly to "Report ready"
-	      ran_inline=True, Failed   → transition to "Analyze failed"
+	Returns a dict with ``stopped``, ``session_uuid``, ``docname``,
+	``ran_inline`` and, only when ran_inline is True, the final ``status``
+	(``Ready`` or ``Failed``). The widget uses ran_inline + status to pick its
+	terminal state (Analyzing / Report ready / Analyze failed).
 	"""
 	user = _require_profiler_user()
 	active = session.get_active_session_for(user)
@@ -254,15 +222,13 @@ def stop() -> dict:
 
 
 def _stop_session(user: str, session_uuid: str) -> tuple[str | None, bool]:
-	"""Internal: clear the active pointer, mark the DocType as Stopping,
-	and enqueue (or inline-run) the analyze job.
+	"""Clear the active pointer, mark the row Stopping and enqueue (or
+	inline-run) the analyze job.
 
-	Returns a tuple ``(docname, ran_inline)``:
-	    docname the Optimus Session docname, or None if not found
-	    ran_inline True if the session is already finalized by the time
-	                  we return (analyze ran synchronously or was rejected
-	                  by the inline cap and marked Failed). False means
-	                  analyze will run async.
+	Returns ``(docname, ran_inline)``: docname is None if no row matched;
+	ran_inline is True when the session is already finalized (analyze ran
+	synchronously or was rejected by the inline cap and marked Failed), False
+	when analyze will run async.
 	"""
 	# v0.3.0: stop any in-flight pyinstrument session and clear capture
 	# state on this worker before flipping the active flag, so a previous
@@ -337,25 +303,13 @@ def _publish_session_event(
 	user: str,
 	**extra,
 ) -> None:
-	"""Publish a session-state realtime event to ALL the user's Desk
-	tabs via Frappe's Socket.IO bridge.
-
-	Used to drive the floating widget state machine without HTTP
-	polling. The widget in floating_widget.js subscribes to these
-	event names via ``frappe.realtime.on(...)``:
-
-	  optimus_session_stopping user clicked Stop
-	  optimus_session_analyzing analyze.run starting (may be delayed)
-	  optimus_session_ready analyze finished successfully
-	  optimus_session_failed analyze crashed
+	"""Publish a session-state realtime event to all the user's Desk tabs via
+	Frappe's Socket.IO bridge, driving the floating widget without HTTP
+	polling. Event names: optimus_session_{stopping,analyzing,ready,failed}.
 
 	All events carry ``session_uuid`` and ``docname`` so a widget with
-	multiple open tabs can match on the session it's currently tracking.
-
-	Best-effort: publish failures log but never interrupt the caller's
-	business logic. Frappe's publish_realtime already swallows most
-	errors but we double-wrap in case the Socket.IO bridge is down
-	(dev environment without a running redis-socketio)."""
+	multiple open tabs can match the session it tracks. Best-effort: publish
+	failures are swallowed, never interrupting the caller."""
 	payload = {"session_uuid": session_uuid, "docname": docname}
 	payload.update(extra)
 	try:
@@ -398,50 +352,20 @@ def _mark_stopping(user: str, session_uuid: str) -> str | None:
 
 
 def _enqueue_analyze(session_uuid: str, docname: str | None = None) -> bool:
-	"""Enqueue analyze on the long queue, or run inline if no worker
-	will consume it.
-
-	When `bench disable-scheduler` is in effect (or the "Enable
-	Scheduler" toggle in System Settings is off), many deployments
-	don't have a `bench worker` processing the RQ queue either, so
-	an enqueued analyze job would sit forever and the session would
-	hang in the "Stopping" state. In that case we fall back to
-	``frappe.enqueue(now=True)`` which executes analyze synchronously
-	inside the current request. See v0.5.0 design spec §6.
+	"""Enqueue analyze on the long queue, or run it inline when no worker
+	will consume it (scheduler disabled).
 
 	Inline analyze has a recording-count safety cap
-	(``optimus_inline_analyze_limit``, default 50) to stay within
-	gunicorn's ~120s request timeout on heavy sessions. When the cap
-	is exceeded, the session is marked Failed with an actionable
-	error and analyze is NOT invoked the user sees the failure
-	immediately rather than having gunicorn kill the request
-	mid-analyze and strand the session half-analyzed.
+	(``optimus_inline_analyze_limit``, default 50) to stay within gunicorn's
+	request timeout. When the cap is exceeded and ``docname`` is given, the
+	session is marked Failed with an actionable message and analyze is NOT
+	run. Passing ``docname`` (all production callers do) enables that cap;
+	None skips it.
 
-	The cap lives here (not in ``_stop_session``) so every caller of
-	this function ``stop``, ``retry_analyze``, ``janitor._sweep_stale``
-	gets the same protection. Earlier versions only applied it in
-	``_stop_session``, which meant ``retry_analyze`` on a 200-recording
-	failed session on a scheduler-disabled site would hit the gunicorn
-	timeout.
-
-	Args:
-	    session_uuid: the session to analyze.
-	    docname: the Optimus Session docname for cap-exceeded failure
-	        handling. When provided, cap violations mark this doc Failed
-	        with a user-facing message. When None, the cap is skipped
-	        (internal callers only all production paths pass docname).
-
-	Returns True if the session is already finalized (Ready or Failed)
-	by the time this call returns that is, analyze ran synchronously
-	OR was rejected by the inline cap. Returns False when the job was
-	pushed to the async queue and the session is still Stopping.
-
-	Inline execution can fail analyze.run catches its own exceptions
-	and marks the session as Failed via frappe.db.set_value, then
-	re-raises. We catch the re-raise here so the caller's response
-	isn't a 500 error. Returning True with the session already
-	marked Failed lets the caller read the final status off the doc
-	and transition the widget to a correct terminal state.
+	Returns True if the session is already finalized (Ready or Failed) by
+	return: analyze ran synchronously or was rejected by the cap. Returns
+	False when the job was pushed to the async queue (session still Stopping).
+	Inline failures are caught here so the caller doesn't return a 500.
 	"""
 	from frappe.utils.scheduler import is_scheduler_disabled
 
@@ -625,27 +549,14 @@ def _frontend_vitals_key(session_uuid: str) -> str:
 
 @frappe.whitelist(methods=["POST"])
 def submit_frontend_metrics(payload: str) -> dict:
-	"""Receive a batch of frontend metrics (XHR timings + Web Vitals).
+	"""Receive a batch of frontend metrics (XHR timings + Web Vitals) as a
+	JSON string (sendBeacon sends a raw Blob, so parsing is explicit).
 
-	Called by optimus_frontend.js at stop time (via frappe.call) and
-	at beforeunload (via navigator.sendBeacon). Payload is a JSON
-	string because sendBeacon sends raw Blob Frappe's dict auto-
-	parsing doesn't kick in for sendBeacon, so we take a string and
-	parse explicitly.
+	Stored as two Redis lists per session, appended via atomic RPUSH + LTRIM
+	so concurrent submits (stop-time frappe.call vs a beforeunload beacon)
+	don't lose entries; LTRIM enforces the soft cap (newest survive).
 
-	**Storage: two Redis lists per session, written via atomic RPUSH
-	+ LTRIM.** Earlier versions of this endpoint used a GET-merge-SET
-	pattern over a single JSON dict, which had a read-modify-write race:
-	two concurrent submits (e.g. stop-time frappe.call colliding with a
-	beforeunload beacon) could both read the same existing blob, both
-	compute a merged result and both write losing one submission's
-	contents. RPUSH + LTRIM is atomic in Redis, so concurrent submits
-	just append their entries without data loss. LTRIM enforces the
-	soft cap (tail-preferring newest entries survive).
-
-	Redis keys:
-	  profiler:frontend:<uuid>:xhr     → list of JSON-encoded XHR entries
-	  profiler:frontend:<uuid>:vitals  → list of JSON-encoded Web Vitals entries
+	Redis keys: profiler:frontend:<uuid>:{xhr,vitals} (JSON-encoded entries).
 	"""
 	user = _require_profiler_user()
 
@@ -729,11 +640,9 @@ def submit_frontend_metrics(payload: str) -> dict:
 
 
 def _read_frontend_data(session_uuid: str) -> dict:
-	"""Read the submit_frontend_metrics Redis lists back into a dict
-	with the shape the frontend_timings analyzer expects.
-
-	Decodes each list entry from JSON. Bad entries are silently
-	skipped the analyzer can handle partial data.
+	"""Read the submit_frontend_metrics Redis lists back into the dict shape
+	the frontend_timings analyzer expects. Bad JSON entries are silently
+	skipped (the analyzer handles partial data).
 	"""
 	import json as _json
 
@@ -763,16 +672,9 @@ def _read_frontend_data(session_uuid: str) -> dict:
 
 @frappe.whitelist()
 def health() -> dict:
-	"""Lightweight health/metrics endpoint for ops scrapers.
-
-	Returns a small structured dict with counts by session status and
-	analyze-pipeline performance over the last 24 hours. Intended to be
-	polled from Prometheus/Grafana/Datadog via a custom scraper, or
-	called manually by an admin to sanity-check the profiler's health.
-
-	Permission: any role that can use the profiler (Optimus User or
-	System Manager). Doesn't expose session contents just aggregate
-	counts.
+	"""Health/metrics endpoint for ops scrapers: counts by session status and
+	analyze-pipeline performance over the last 24 hours. Aggregate counts
+	only, no session contents. Permission: any profiler user.
 	"""
 	_require_profiler_user()
 	return {
@@ -939,17 +841,12 @@ def download_pdf(session_uuid: str) -> dict:
 @frappe.whitelist()
 @rate_limit(key="optimus_export_session", limit=20, seconds=60)
 def export_session(session_uuid: str) -> dict:
-	"""Export a Optimus Session as a structured JSON blob.
+	"""Export an Optimus Session as a structured JSON blob for programmatic
+	consumption (no HTML parsing): the full session with all child rows, top
+	queries, table breakdown and finding technical details.
 
-	Lets dev shops (or automation) consume the profiler's output
-	programmatically without parsing the HTML report. Returns the full
-	session including all child rows, top queries, table breakdown and
-	finding technical details everything in the report, in a
-	machine-friendly shape.
-
-	Permission model: mirrors the report download gate only the
-	recording user or a System Manager can export. Other Optimus Users
-	get a permission error even if they somehow guessed the uuid.
+	Permission: recording user or System Manager only (mirrors the report
+	download gate); other users get a permission error.
 	"""
 	import json
 
@@ -1135,35 +1032,15 @@ def retry_analyze(session_uuid: str) -> dict:
 @frappe.whitelist()
 @rate_limit(key="optimus_regenerate_reports", limit=30, seconds=60)
 def regenerate_reports(session_uuid: str) -> dict:
-	"""Re-render the HTML report from stored session data.
+	"""Re-render the HTML report from stored session data without re-running
+	any analyzer (fast, idempotent). Use it when the template or renderer
+	changed and you want the new UI on an already-analyzed session.
 
-	Unlike ``retry_analyze``, this does NOT re-run any analyzer. It
-	only invokes ``renderer.render_raw`` on the existing Profiler
-	Session row. Typical use: the report template or renderer code
-	changed (e.g. upgrading optimus to a new version with an
-	improved layout) and you want the new UI applied to an already-
-	analyzed session without the cost of re-running the entire
-	analysis pipeline.
-
-	Characteristics:
-
-	  - **Fast**: milliseconds vs. minutes. No DB-heavy analyzer
-	    passes, no EXPLAIN calls. Just template rendering.
-	  - **Safe to run repeatedly**: idempotent. Each invocation
-	    replaces the existing report File attachment and clears
-	    the cached PDF.
-	  - **Best-effort recordings**: fetches the original recordings
-	    from Redis by UUID. If they've expired (TTL exceeded),
-	    per-query drill-down / Full recordings sections render empty
-	    but every other section (findings, stats, hot frames, exec
-	    summary, analyzer notes) stays intact because those are
-	    persisted on the Optimus Session row.
-	  - **Allowed on Ready OR Failed sessions**: re-rendering a
-	    Failed session whose analyze partially completed is often
-	    how this feature pays for itself (unblocks a demo when a
-	    render-time bug was fixed).
-
-	Permission: recording user OR System Manager.
+	Each call replaces the report File attachment and clears the cached PDF.
+	Recordings are best-effort: if they've expired from Redis the per-query
+	drill-down / Full recordings sections render empty, but every persisted
+	section stays intact. Allowed on Ready or Failed sessions.
+	Permission: recording user or System Manager.
 	"""
 	user = _require_profiler_user()
 	if not session_uuid:
@@ -1259,24 +1136,18 @@ def regenerate_reports(session_uuid: str) -> dict:
 @rate_limit(key="optimus_suggest_fix", limit=10, seconds=60)
 def suggest_fix(session_uuid: str, finding_ref: str, regenerate=0) -> dict:
 	"""Generate (or return the cached) AI-suggested fix for one finding.
-
-	On-demand only never called during analyze. The finding's context
-	(type, callsite, a window of surrounding source, normalized SQL +
-	EXPLAIN, the static fix hint) is sent to the LLM configured in
-	Optimus Settings ▸ AI Fix Suggestions; the result is stored on the
-	Optimus Finding row (``llm_fix_json``) so re-opening returns it
-	without another API call and so the regenerated HTML report carries
-	it.
+	On-demand only. The finding's context (type, callsite, source window,
+	normalized SQL + EXPLAIN, static hint) is sent to the configured LLM and
+	the result is cached on the Optimus Finding row (``llm_fix_json``).
 
 	Args:
 	    session_uuid: the Optimus Session.
-	    finding_ref:  the child-row ``name`` of the finding (the form's
-	        ``frm.doc.findings[i].name``). A bare integer is accepted as a
-	        0-based index fallback.
-	    regenerate:   truthy → ignore any cached suggestion and re-call.
+	    finding_ref: the finding child-row ``name``; a bare integer is
+	        accepted as a 0-based index fallback.
+	    regenerate: truthy ignores the cache and re-calls the LLM.
 
-	Permission: recording user / System Manager / Administrator (mirrors
-	``download_pdf``). The AI must be enabled and configured.
+	Permission: recording user / System Manager / Administrator. AI must be
+	enabled and configured.
 	"""
 	user = _require_profiler_user()
 	if not session_uuid:
@@ -1459,26 +1330,15 @@ def ai_capabilities() -> dict:
 
 @frappe.whitelist()
 def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
-	"""Generate AI fix suggestions for eligible findings on the session, then
-	re-render the report so they show up.
+	"""Generate AI fix suggestions for eligible findings, then re-render the
+	report.
 
-	- ``regenerate_all`` falsy (default) "Generate AI fixes": fill only the
-	  eligible findings that don't have a suggestion yet. Use this after the
-	  LLM was unavailable during analyze (with "Suggest AI fixes by default"
-	  on, the analyze still completes the AI part is just skipped), or to
-	  populate suggestions on demand without turning auto-suggest on.
-	- ``regenerate_all`` truthy "Re-evaluate AI fixes": (re)generate the
-	  suggestion for EVERY eligible finding, overwriting the existing ones.
-	  Use this after changing the AI model or prompt. A failure mid-re-eval
-	  leaves the old suggestion in place (only successful runs overwrite).
-
-	Either way it bypasses the ``ai_auto_suggest`` toggle (you're asking for
-	it explicitly) but still requires the provider to be configured and is
-	bounded by the same per-call time budget if it reports findings skipped
-	for time, just run it again.
-
-	Permission: recording user / System Manager / Administrator (mirrors
-	``regenerate_reports`` / ``download_pdf``).
+	``regenerate_all`` falsy (default) fills only findings without a
+	suggestion yet; truthy (re)generates every eligible finding, overwriting
+	existing ones (a mid-run failure leaves the old suggestion in place).
+	Bypasses the auto-suggest toggle but still needs the provider configured
+	and is bounded by a per-call time budget (re-run if findings are skipped
+	for time). Permission: recording user / System Manager / Administrator.
 	"""
 	user = _require_profiler_user()
 	if not session_uuid:
@@ -1551,13 +1411,11 @@ def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
 
 @frappe.whitelist()
 def humanize_steps(session_uuid: str) -> dict:
-	"""(Re)generate the "Steps to Reproduce" note on a Ready session using the
-	configured LLM, overwriting whatever is there, then re-render the report.
-
-	Use this on a session whose steps read as a raw list of HTTP calls (e.g.
-	one analyzed before AI was enabled, or with humanizing turned off), or to
-	redo it after editing/clearing the note. Permission: recording user /
-	System Manager / Administrator (mirrors ``download_pdf``).
+	"""(Re)generate the "Steps to Reproduce" note on a Ready session via the
+	configured LLM (overwriting what's there), then re-render the report. Use
+	it when the steps read as a raw list of HTTP calls, or to redo it after
+	editing the note. Permission: recording user / System Manager /
+	Administrator.
 	"""
 	user = _require_profiler_user()
 	if not session_uuid:
@@ -1673,15 +1531,12 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 @frappe.whitelist()
 def suggest_index(session_uuid: str, table_name: str) -> dict:
 	"""Generate (or regenerate) the LLM-vetted index recommendation for one
-	table in the session's "Time spent per database table" breakdown, then
-	re-render the report so it shows up there.
+	table in the session's DB-table breakdown, then re-render the report.
 
-	The deterministic "index candidate" (most-used filter combination +
-	`frappe.db.add_index` patch) is always in the report; this adds the AI's
-	take on top which composite, whether your existing indexes already
-	cover it and the write-cost call. Requires AI to be configured.
-	Permission: recording user / System Manager / Administrator (mirrors
-	``download_pdf``).
+	The deterministic index candidate is always in the report; this adds the
+	AI's take on top (which composite, whether existing indexes cover it, the
+	write-cost call). Requires AI configured. Permission: recording user /
+	System Manager / Administrator.
 	"""
 	user = _require_profiler_user()
 	if not session_uuid or not table_name:
@@ -1790,21 +1645,13 @@ def _refill_indexes_for_doc(doc) -> dict:
 
 @frappe.whitelist()
 def refill_ai_suggestions(session_uuid: str) -> dict:
-	"""Single-button entry point. Re-fills every AI-generated section of the
-	report in one round-trip:
+	"""Single-button entry point: re-fills every AI-generated report section
+	in one round-trip: (1) overwrite every eligible finding's fix suggestion,
+	(2) rewrite Steps to Reproduce, (3) run the per-table index helper for
+	tables with a candidate but no AI advice, (4) one final re-render.
 
-	1. ``_run_ai_backfill(doc, cap=0, regenerate_all=True)``: overwrites
-	   every eligible finding's fix suggestion.
-	2. ``_humanize_steps_core(doc)``: rewrites Steps to Reproduce.
-	3. ``_refill_indexes_for_doc(doc)``: runs the per-table index helper
-	   for tables with a candidate but no AI advice yet.
-	4. ``regenerate_reports(session_uuid)``: one final re-render.
-
-	Each step is gated by its per-section toggle (``ai_suggest_findings``,
-	``ai_humanize_steps``, ``ai_suggest_indexes``); a toggle-off step is
-	skipped, not errored, so the user gets a single button that does
-	whatever's currently enabled. Permission and provider-availability
-	gates run once at the top.
+	Each step is gated by its per-section toggle; a toggle-off step is
+	skipped, not errored. Permission and provider gates run once at the top.
 	"""
 	user = _require_profiler_user()
 	if not session_uuid:
@@ -1901,14 +1748,8 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 
 @frappe.whitelist()
 def get_installed_apps_for_tracking() -> list[str]:
-	"""Return the bench's installed apps for the Optimus Settings
-	▸ Tracked Apps Autocomplete field.
-
-	Excludes ``optimus`` (the profiler's own callsites are
-	already filtered regardless of user config and listing it here
-	would suggest tracking the tool that's doing the tracking).
-
-	Restricted to System Manager since Optimus Settings itself is.
+	"""Return the bench's installed apps for the Optimus Settings ▸ Tracked
+	Apps autocomplete, excluding ``optimus`` itself. System-Manager-only.
 	"""
 	if "System Manager" not in (frappe.get_roles() or []):
 		frappe.throw(
@@ -1921,12 +1762,9 @@ def get_installed_apps_for_tracking() -> list[str]:
 
 @frappe.whitelist()
 def get_config_profiles() -> dict:
-	"""Return the named Sensitivity Profile presets for the Optimus Settings
-	form. The ``config_profile`` change handler reads this so the threshold
-	field values it fills come from the single source of truth in
-	``optimus.settings._PROFILES`` (never hardcoded in JS).
-
-	Restricted to System Manager since Optimus Settings itself is.
+	"""Return the named Sensitivity Profile presets (from
+	``optimus.settings._PROFILES``) for the Optimus Settings form's
+	``config_profile`` handler to fill threshold fields. System-Manager-only.
 	"""
 	if "System Manager" not in (frappe.get_roles() or []):
 		frappe.throw(
@@ -1952,11 +1790,9 @@ def get_config_profiles() -> dict:
 
 
 def _picker_empty_hint(action_count, with_tree, parsed_ok, candidate_count, ignored_apps_filtered=0):
-	"""Phase K diagnostic: map the picker's empty-state counter triple
-	to a human-readable reason. Surfaced in the dialog when the
-	curated list is empty so the operator can self-diagnose
-	('did the session capture any call trees?' / 'should I bench
-	restart?')."""
+	"""Map the picker's empty-state counter triple to a human-readable reason,
+	shown in the dialog when the curated list is empty so the operator can
+	self-diagnose."""
 	if action_count == 0:
 		return (
 			"This session has no recorded actions. Nothing to "
@@ -2000,15 +1836,10 @@ def _picker_empty_hint(action_count, with_tree, parsed_ok, candidate_count, igno
 def get_phase2_candidates(session_uuid: str) -> dict:
 	"""Return the curated candidate list for the phase-2 picker UI.
 
-	Reads the parent Optimus Session's actions, parses each action's
-	``call_tree_json`` and builds a top-30 list of frames from user-app
-	code (with framework apps surfaced separately under "observations").
-
-	Phase K v0.7 GA: the response also carries a ``diagnostic`` dict
-	the picker dialog renders as a yellow callout when both
-	``candidates`` and ``observations`` are empty - so the operator
-	sees WHY (no actions / no call trees / all filtered) instead of
-	a silently empty dialog.
+	Parses each action's ``call_tree_json`` and builds a top-30 list of
+	user-app frames (framework apps surfaced separately as "observations").
+	The response also carries a ``diagnostic`` dict the dialog renders as a
+	callout when both lists are empty, explaining why.
 	"""
 	import json as _json
 
@@ -2099,14 +1930,10 @@ def get_phase2_candidates(session_uuid: str) -> dict:
 def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 	"""Begin a phase-2 line-profile run on a finished session.
 
-	``picks`` is a JSON-encoded (or already-parsed) list of
-	``{dotted_path, source}`` entries the customer ticked / typed.
-
-	When ``auto_expand`` is true (the default), each curated pick is
-	walked down phase-1's call tree via ``picker.expand_hot_chain`` so
-	the run instruments the full hot chain in one shot the developer
-	doesn't have to re-pick descendants. Free-form picks pass through
-	unchanged (we have no chain to walk for them).
+	``picks`` is a JSON-encoded (or parsed) list of ``{dotted_path, source}``
+	entries. When ``auto_expand`` is true (default), each curated pick is
+	walked down phase-1's call tree (``picker.expand_hot_chain``) so the run
+	instruments the full hot chain; free-form picks pass through unchanged.
 	"""
 	import json as _json
 	import uuid as _uuid
@@ -2539,18 +2366,11 @@ def retry_phase2_analyze(run_uuid: str) -> dict:
 
 @frappe.whitelist()
 def retry_phase2_analyzes_batch(run_uuids) -> dict:
-	"""Batch variant of ``retry_phase2_analyze``: accepts a list of
-	``run_uuid``s and retries each in a single server round-trip.
+	"""Batch variant of ``retry_phase2_analyze``: retries a list of
+	``run_uuid``s in a single server round-trip instead of N client calls.
 
-	v0.6.x: addresses the Lens-audit *"frappe.call(...) inside a loop"*
-	finding on the form's "Retry Phase 2" affordance instead of N
-	client→server round-trips (one per stuck run, which is the common
-	case when a worker died and every Analyzing row needs a kick), the
-	UI fires ONE call and the loop runs server-side.
-
-	Per-run failures are isolated: one bad retry doesn't abort the
-	rest. The response carries a per-run status list so the UI can
-	report a useful aggregate (``"3 of 5 ran Ready, 2 Failed"``)."""
+	Per-run failures are isolated (one bad retry doesn't abort the rest).
+	The response carries a per-run status list plus an aggregate tally."""
 	import json as _json
 
 	_require_profiler_user()

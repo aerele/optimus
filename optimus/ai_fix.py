@@ -3,26 +3,17 @@
 
 """On-demand LLM-suggested fixes for Optimus Findings.
 
-The profiler already pins each finding to a callsite, a source snippet and
-(for query findings) normalized SQL + EXPLAIN. This module turns that
-context into a concrete fix by asking a configured LLM. It is invoked only
-from the ``optimus.api.suggest_fix`` whitelisted endpoint (request
-context) never from an analyzer or from ``analyze.py``, so the
-pure-analyzer / frozen-capture invariants are untouched.
+Turns a finding's callsite / source snippet / normalized SQL + EXPLAIN into a
+concrete fix by asking a configured LLM. Invoked only from the
+``optimus.api.suggest_fix`` whitelisted endpoint, never from an analyzer, so
+the pure-analyzer / frozen-capture invariants are untouched.
 
-Provider-agnostic by design (self-hosted thesis): two wire formats
-Anthropic Messages (``/v1/messages``) and OpenAI Chat Completions
-(``/chat/completions``) with a ``ai_provider`` Select that picks the
-protocol plus a sensible default endpoint/model. ``ai_base_url`` /
-``ai_model`` / ``ai_api_key`` are all overridable in Optimus Settings, so a
-local model (Ollama / LM Studio / vLLM) can be used and nothing has to leave
-the box.
-
-``frappe`` is imported lazily inside each function (mirrors ``settings.py``)
-so the pure helpers ``_build_messages`` and the ``_call_*`` /
-``_http_post`` HTTP layer with ``requests`` mocked are unit-testable
-without a bench. ``requests`` is bundled by Frappe; it's declared explicitly
-in ``pyproject.toml`` since this module imports it directly.
+Provider-agnostic: two wire formats (Anthropic Messages, OpenAI Chat
+Completions) chosen by the ``ai_provider`` Select; ``ai_base_url`` /
+``ai_model`` / ``ai_api_key`` are overridable in Optimus Settings so a local
+model (Ollama / LM Studio / vLLM) can be used with nothing leaving the box.
+``frappe`` is lazy-imported inside each function so the pure prompt / HTTP
+helpers are unit-testable without a bench.
 """
 
 from __future__ import annotations
@@ -167,10 +158,9 @@ _POSTGRES_EXPLAIN_HINTS = {
 
 
 def _finding_type_hint(ftype):
-	"""Per-finding-type hint for the LLM prompt. The four EXPLAIN-based hints
-	are phrased for the active dialect (MariaDB EXPLAIN columns vs Postgres plan
-	nodes); the rest are dialect-neutral. MariaDB returns the verbatim
-	_FINDING_TYPE_HINTS text (byte-identical)."""
+	"""Per-finding-type hint for the LLM prompt. The four EXPLAIN-based hints are
+	phrased for the active dialect (MariaDB EXPLAIN columns vs Postgres plan
+	nodes); the rest are dialect-neutral."""
 	if ftype in _POSTGRES_EXPLAIN_HINTS:
 		try:
 			from optimus.dbdialect import active_db_type
@@ -462,18 +452,9 @@ _AI_SECTION_FLAGS = {
 def is_finding_type_excluded(finding_type: str | None) -> bool:
 	"""Return True when ``finding_type`` is in ``cfg.ai_excluded_finding_types``.
 
-	v0.9.0 per-type opt-out (Critical Risk #2 of the architecture review).
-	Pure-function read of the configured exclusion list, exact case-sensitive
-	match. Empty / unknown / non-eligible type → False (an inert exclude is
-	safer than a partial-match exclude that would let data through when the
-	operator intended to block it).
-
-	Reads settings via the cached ``get_config()`` reader adds at most one
-	Redis lookup per call and that's a single cached hit. Returning False on
-	any read error (no bench, settings cache wedged) is the safe direction:
-	if the operator's intent is to block, the master gates (``ai_enabled``,
-	``ai_auto_suggest``) already give them coarser control; if the operator
-	hasn't configured an exclusion list at all, returning False is correct.
+	Exact case-sensitive match. Empty / unknown type, or any read error (no
+	bench, settings cache wedged), returns False so an inert exclude never
+	blocks by accident.
 	"""
 	if not finding_type or not isinstance(finding_type, str):
 		return False
@@ -486,14 +467,9 @@ def is_finding_type_excluded(finding_type: str | None) -> bool:
 
 
 def _resolve_timeout_seconds() -> int:
-	"""Return the configured HTTP timeout for outbound LLM calls, falling
-	back to :data:`_HTTP_TIMEOUT` when settings can't be read.
-
-	v0.9.0 (Critical Risk #2): hosted providers answer in seconds, but a
-	cold-start local LLM (ollama / vLLM / LM Studio) routinely exceeds 60s
-	on first call. The clamp to ``[10, 600]`` is applied in
-	``settings._resolve``; this helper is defensive against a settings cache
-	miss during bootstrap or a pure-pytest call path with no Frappe.
+	"""Return the configured HTTP timeout (seconds) for outbound LLM calls,
+	clamped to ``[10, 600]`` and falling back to :data:`_HTTP_TIMEOUT` when
+	settings can't be read.
 	"""
 	try:
 		from optimus.settings import get_config
@@ -504,16 +480,13 @@ def _resolve_timeout_seconds() -> int:
 
 
 def is_available(section: str | None = None) -> bool:
-	"""True when AI fix suggestions are turned on and minimally configured:
-	``ai_enabled`` set, a model resolvable for the chosen provider and an
-	API key present unless the provider needs none (local endpoints).
+	"""True when AI fix suggestions are on and minimally configured:
+	``ai_enabled`` set, a model resolvable for the chosen provider and an API
+	key present unless the provider needs none (local endpoints).
 
-	When ``section`` is one of ``"findings"`` / ``"indexes"`` / ``"humanize"``,
-	additionally require the matching per-section toggle (``ai_suggest_findings``
-	/ ``ai_suggest_indexes`` / ``ai_humanize_steps``) turning a section off in
-	Optimus Settings is a hard disable. Fails soft: an unknown ``section`` (or
-	a config attr we couldn't read) doesn't block here the master
-	``ai_enabled`` check has already passed."""
+	When ``section`` is ``"findings"`` / ``"indexes"`` / ``"humanize"``, also
+	requires the matching per-section toggle. Fails soft: an unknown ``section``
+	or an unreadable config attr does not block once ``ai_enabled`` has passed."""
 	try:
 		from optimus.settings import get_config
 		cfg = get_config()
@@ -539,22 +512,17 @@ def is_available(section: str | None = None) -> bool:
 def suggest_fix(finding: dict) -> dict:
 	"""Ask the configured LLM for a fix for ``finding``.
 
-	``finding`` is the shape produced by ``renderer._finding_to_dict`` plus
-	an optional ``source_window`` (list of ``{lineno, content, is_target}``)
-	that the caller gathered around the callsite.
+	``finding`` is the shape produced by ``renderer._finding_to_dict`` plus an
+	optional ``source_window`` (``[{lineno, content, is_target}]``) the caller
+	gathered around the callsite.
 
-	Returns ``{"suggestion": <markdown>, "model": str, "provider": str,
-	"generated_at": <iso>, "source_available": bool}``: ``source_available``
-	is ``False`` when the LLM got neither a source window nor a SQL statement
-	(only the finding's title + numbers), so the UI can mark the result as
-	directional rather than a verified code fix. Raises ``AiFixError``
-	(user-facing) on a configuration problem, a network / auth / rate-limit
-	error, or an empty response.
-
-	v0.9.0: ``ai_excluded_finding_types`` is consulted first. When the
-	finding's type is on the operator's exclusion list, this returns
-	immediately with ``AiFixError("excluded by ai_excluded_finding_types")``
-	the payload is never built and no request leaves the host.
+	Returns ``{"suggestion": <markdown>, "model", "provider", "generated_at",
+	"source_available"}`` (plus ``tokens`` when the provider reports usage).
+	``source_available`` is False when the LLM got neither a source window nor a
+	SQL statement, so the UI can mark the result directional. Raises
+	``AiFixError`` on a config / network / auth / rate-limit problem or an empty
+	response; when the finding's type is in ``ai_excluded_finding_types`` it
+	raises immediately, before any request leaves the host.
 	"""
 	if is_finding_type_excluded(finding.get("finding_type")):
 		raise AiFixError("excluded by ai_excluded_finding_types")
@@ -896,36 +864,14 @@ _CODE_FENCE_RE = re.compile(r'^```(\w*)\s*$')
 
 
 def _flag_raw_sql_in_fix(text: str) -> str:
-	"""If the model's proposed fix contains a raw ``frappe.db.sql(...)`` call
-	with a SELECT / INSERT / UPDATE / DELETE / REPLACE literal, append a
-	correction note. Same contract as ``_flag_metadata_column_index_advice``
-	returns the text unchanged when the fix is clean, otherwise with the
-	profiler note appended.
+	"""If the model's proposed fix contains a raw ``frappe.db.sql(...)`` with a
+	SELECT / INSERT / UPDATE / DELETE / REPLACE literal, append a correction
+	note (never rewrites); returns the text unchanged when clean.
 
-	Detection scope:
-
-	* Only matches inside markdown code-fenced blocks (``\\`\\`\\`diff`` /
-	  ``\\`\\`\\`python`` / ``\\`\\`\\`py`` / un-tagged fences). Prose
-	  mentions like "instead of ``frappe.db.sql`` use ..." are
-	  intentionally EXCLUDED the guardrail must not fire on the LLM's
-	  own commentary.
-	* Inside a ``diff`` block, only ADDITION lines (starting with ``+``
-	  but not ``+++``: the diff file-header) count as "the proposed
-	  fix". REMOVAL lines (``-``) are the BEFORE code being replaced;
-	  flagging them would invert the guardrail (the model is rightly
-	  showing the bad pattern being removed).
-	* Inside non-diff code blocks, every line counts (the whole block
-	  is the proposal).
-
-	Known scope limits:
-
-	* Only detects ``frappe.db.sql``. Other invocations
-	  (``frappe.db.multisql``, future Frappe SQL helpers) are not
-	  detected widen the pattern in a follow-up if production
-	  surfaces them.
-	* DDL verbs (CREATE / ALTER / DROP) are excluded DDL via raw SQL
-	  is sometimes the right answer (e.g. ``ADD INDEX`` when the
-	  Customize-Form route isn't an option).
+	Scope: only inside markdown code fences (prose mentions are ignored); inside
+	a ``diff`` block only addition (``+``) lines count (removal lines are the
+	before-code). Only ``frappe.db.sql`` is detected; DDL verbs (CREATE / ALTER /
+	DROP) are excluded since raw DDL is sometimes the right answer.
 	"""
 	if not text:
 		return text
@@ -1258,7 +1204,7 @@ def _is_reasoning_model(model: str) -> bool:
 
 def _log_http_error(provider: str, where: str, status: int | None, detail: str = "") -> None:
 	"""Best-effort error log. NEVER includes the prompt, the source code, or
-	the API key only the provider name, the call site and the HTTP
+	the API key: only the provider name, the call site and the HTTP
 	status."""
 	try:
 		import frappe
@@ -1347,12 +1293,10 @@ def _usage_from_anthropic(data: dict | None) -> dict:
 
 
 def _record_session_spend(total_tokens) -> None:
-	"""Best-effort: add this LLM call's tokens to the active session's cumulative
-	``Optimus Session.ai_tokens_spent``. The active session uuid is set by the
-	caller (analyze / api) on ``frappe.local._optimus_spend_session`` before any
-	AI call; left ``None`` (e.g. the settings probe) → no-op. Every token-bearing
-	call funnels through ``_call_openai_chat`` / ``_call_anthropic``, so this is
-	the single point that makes the per-session spend complete + cumulative."""
+	"""Best-effort: add this call's tokens to the active session's cumulative
+	``Optimus Session.ai_tokens_spent``. The session uuid comes from
+	``frappe.local._optimus_spend_session`` (set by the caller before any AI
+	call); ``None`` (e.g. the settings probe) is a no-op."""
 	try:
 		import frappe
 
@@ -1370,17 +1314,13 @@ def _record_session_spend(total_tokens) -> None:
 
 
 def _aerele_call_metadata(provider, finding_type=None) -> dict | None:
-	"""Metadata to attach to the Aerele managed-proxy request so the Aerele
-	billing portal can attribute each AI call to the originating Optimus
-	Session (for its per-call usage ledger + a per-session spend breakdown).
+	"""Metadata attaching an Aerele managed-proxy request to the originating
+	Optimus Session, so the Aerele billing portal can attribute each AI call.
 
-	Only the **Aerele** provider consumes this other providers (OpenAI,
-	Anthropic) get ``None`` so we never send unknown body fields that they
-	might reject. The active session uuid is the one the caller marked on
-	``frappe.local._optimus_spend_session`` (the same hook that powers
-	``ai_tokens_spent``); the human docname is resolved from it so the portal
-	can show the same reference the customer sees in their bench. Best-effort:
-	any failure returns ``None`` and the call proceeds unattributed."""
+	Returns ``None`` for every non-Aerele provider (so no unknown body fields
+	reach OpenAI / Anthropic) and on any failure (the call then proceeds
+	unattributed). The session uuid comes from
+	``frappe.local._optimus_spend_session``; the docname is resolved from it."""
 	if not provider or provider.get("name") != "Aerele":
 		return None
 	try:

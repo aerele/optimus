@@ -3,18 +3,11 @@
 
 """Unit tests for the shared is_framework_callsite() classifier.
 
-v0.5.2: extended the framework-app filter to cover every official
-Frappe-maintained app (erpnext, hrms, payments, lms, helpdesk,
-insights, crm, builder, wiki, drive) so findings rooted inside those
-apps route into the collapsed Observations subsection instead of the
-actionable Findings list. Triggered by a production Sales Invoice
-Save+Submit session that surfaced 10 'Redundant cache lookup'
-findings landing in apps/erpnext/.../sales_invoice.py:300 the
-application developer can't patch ERPNext from their bench.
-
-These tests pin the classifier's behavior so regressions (e.g. an
-unrelated refactor removing an app from FRAMEWORK_APPS) surface
-immediately.
+The filter covers every official Frappe-maintained app (erpnext, hrms,
+payments, lms, helpdesk, insights, crm, builder, wiki, drive) so findings
+rooted in those apps route into the collapsed Observations subsection (the
+developer can't patch them). These tests pin the behavior so regressions (e.g.
+dropping an app from FRAMEWORK_APPS) surface immediately.
 """
 
 import pytest
@@ -108,10 +101,10 @@ class TestThirdPartyLibraryDetection:
 
 
 class TestWidenedLibraryCoverage:
-	"""The library list was widened beyond main's original 8 fragments so a
-	query looping inside a common third-party lib (pandas, redis, requests, …) is
-	routed to Observations instead of blamed on the developer as an actionable
-	N+1. Kept in sync with call_tree's hot-frames set so both surfaces agree."""
+	"""A query looping inside a common third-party lib (pandas, redis, requests,
+	…) is routed to Observations instead of blamed on the developer as an
+	actionable N+1. Kept in sync with call_tree's hot-frames set so both
+	surfaces agree."""
 
 	@pytest.mark.parametrize("path", [
 		"pandas/core/frame.py", "numpy/core/fromnumeric.py",
@@ -271,9 +264,9 @@ class TestInclusionMode:
 
 
 class TestInclusionModeUnderAppsAncestor:
-	"""Issue C: Tracked Apps (inclusion mode) must resolve the real app even when
-	the bench is nested under a folder named 'apps' (/opt/apps/…, multi-bench
-	servers) else a tracked app's own findings get hidden as framework."""
+	"""Tracked Apps (inclusion mode) must resolve the real app even when the
+	bench is nested under a folder named 'apps' (/opt/apps/…, multi-bench
+	servers), else a tracked app's own findings get hidden as framework."""
 
 	def test_tracked_app_matches_under_apps_ancestor(self):
 		tracked = ("erpnext",)
@@ -289,10 +282,9 @@ class TestInclusionModeUnderAppsAncestor:
 
 class TestFrameworkNameMatchedOnAppRootNotMidPath:
 	"""A framework/lib name counts only as the resolved app ROOT, not a folder
-	deeper in the path so a user app's submodule named like a framework app, the
-	standard /home/frappe/ server home and a vendored lib under a user app all stay
-	the user's own code. Regression for the mid-path substring false-positive (which
-	main and this branch before the fix got wrong)."""
+	deeper in the path, so a user app's submodule named like a framework app,
+	the standard /home/frappe/ server home and a vendored lib under a user app
+	all stay the user's own code."""
 
 	@pytest.mark.parametrize("path", [
 		"mybiz/mybiz/crm/lead_utils.py",       # submodule named like a framework app
@@ -360,10 +352,10 @@ class TestUserAppWithAppsSubpackage:
 
 
 class TestThirdPartyLibSetsUnified:
-	"""The SQL-findings classifier (base._THIRD_PARTY_LIB_NAMES) and the hot-frame
-	classifier (call_tree._THIRD_PARTY_LIB_SEGMENTS) must be the SAME app-root set,
-	so the two surfaces can never disagree on whether a library is user code. They
-	drifted apart once (call_tree was missing 6 names); this pins them together."""
+	"""The SQL-findings classifier (base._THIRD_PARTY_LIB_NAMES) and the
+	hot-frame classifier (call_tree._THIRD_PARTY_LIB_SEGMENTS) must be the SAME
+	app-root set, so the two surfaces can never disagree on whether a library is
+	user code."""
 
 	def test_call_tree_reuses_base_lib_set(self):
 		from optimus.analyzers import base, call_tree
@@ -372,10 +364,9 @@ class TestThirdPartyLibSetsUnified:
 
 class TestInstalledAppsAllowlist:
 	"""Exclusion mode with the ground-truth installed-apps allowlist (what a real
-	site passes). This is the fix that ends the denylist churn: application-vs-
-	library is decided by 'is it an installed Frappe app', not by guessing from a
-	name. Off-bench (installed_apps=None) the hardcoded heuristic still applies
-	the rest of this file exercises that path."""
+	site passes): application-vs-library is decided by 'is it an installed Frappe
+	app', not by guessing from a name. Off-bench (installed_apps=None) the
+	hardcoded heuristic still applies (exercised by the rest of this file)."""
 
 	INSTALLED = frozenset({"frappe", "erpnext", "myapp", "redis", "requests"})
 
@@ -435,10 +426,9 @@ class TestInstalledAppsAllowlist:
 
 class TestPureHelperFrameAllowlistOnBench:
 	"""_is_pure_helper_frame (hot-frame leaderboard + Slow Hot Path walker) with a
-	populated installed-apps set the ON-BENCH path the pure-Python suite otherwise
-	never hits (every other test passes installed_apps=None). Regression guard for
-	the drop-user-frames bug: the allowlist must key on the RESOLVED app root, not
-	the raw first path segment ('apps'/'home') and must not fire in inclusion mode."""
+	populated installed-apps set: the ON-BENCH path the pure-Python suite
+	otherwise never hits. The allowlist must key on the RESOLVED app root (not
+	the raw first path segment 'apps'/'home') and must not fire in inclusion mode."""
 
 	INSTALLED = frozenset({"frappe", "erpnext", "myapp", "redis"})
 

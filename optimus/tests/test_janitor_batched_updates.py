@@ -1,17 +1,14 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.6.x: tests for the janitor sweeps after the Lens-audit performance
-fixes. Every sweep that previously called ``frappe.db.set_value`` inside
-a loop now calls it ONCE with a ``{"name": ("in", [...])}`` filter and
-``_sweep_old_sessions`` preloads every File-doc name in a single
-``frappe.get_all`` instead of looking each up per row.
+"""Tests for the janitor sweeps' batched updates.
 
-We stub ``frappe`` so these tests run pure (no bench / no MariaDB) via
-``monkeypatch.setitem(sys.modules, ...)`` so the real ``frappe`` (plus
-the lazy submodules) is restored at teardown. Without that, every test
-running AFTER one of these in the same pytest session inherits our
-minimal stub and crashes on missing attributes."""
+Every sweep calls ``frappe.db.set_value`` ONCE with a ``{"name": ("in",
+[...])}`` filter; ``_sweep_old_sessions`` preloads every File-doc name in a
+single ``frappe.get_all``. ``frappe`` is stubbed via
+``monkeypatch.setitem(sys.modules, ...)`` so these run pure (no bench / no
+MariaDB) and the real module is restored at teardown.
+"""
 
 import importlib
 import sys
@@ -19,11 +16,10 @@ import types
 
 
 def _install_frappe_stub(monkeypatch):
-	"""Build a minimal ``frappe`` stub the janitor module can import.
-
-	All ``sys.modules`` mutations go through ``monkeypatch.setitem`` so
-	pytest restores the originals at teardown that's the entire point
-	of routing through this helper instead of bare assignments."""
+	"""Build a minimal ``frappe`` stub the janitor module can import. All
+	``sys.modules`` mutations go through ``monkeypatch.setitem`` so pytest
+	restores the originals at teardown.
+	"""
 	stub = types.ModuleType("frappe")
 	stub._set_value_calls = []
 	stub._get_all_calls = []
@@ -107,14 +103,10 @@ def _install_frappe_stub(monkeypatch):
 
 
 def _reload_janitor(monkeypatch):
-	"""Re-import janitor.py under the fresh frappe stub. We rely on
-	``importlib.reload`` rather than ``monkeypatch.delitem`` because
-	the delitem-then-import dance interacted badly with monkeypatch's
-	teardown ordering (surfaced as ``ImportError: module not in
-	sys.modules`` mid-suite). Plain reload re-runs the top-level code
-	cleanly under the current stub. ``monkeypatch`` is kept in the
-	signature for parity with ``_install_frappe_stub`` and so future
-	additions have it on hand."""
+	"""Re-import janitor.py under the fresh frappe stub via
+	``importlib.reload`` so its top-level code re-runs against the current
+	stub.
+	"""
 	import optimus.janitor as janitor
 	return importlib.reload(janitor)
 
@@ -153,9 +145,9 @@ class TestSweepStaleRecording:
 		assert stub._set_value_calls == []
 
 	def test_live_recording_with_active_pointer_is_not_stopped(self, monkeypatch):
-		"""A long but LIVE recording (its Redis active pointer still points to it)
-		must not be force-stopped just because started_at crossed the cutoff
-		only rows whose pointer expired / moved are stopped."""
+		"""A long but LIVE recording (Redis active pointer still points to it)
+		must not be force-stopped; only rows whose pointer expired or moved are
+		stopped."""
 		stub = _install_frappe_stub(monkeypatch)
 		stub._get_all_return["Optimus Session"] = [
 			{"name": "PS-LIVE", "session_uuid": "u-live", "user": "live@x.com"},
@@ -201,8 +193,7 @@ class TestSweepStuckAnalyzing:
 
 	def test_live_singleflight_holder_is_not_failed(self, monkeypatch):
 		"""A long-but-live analyze (still heartbeating the single-flight flag)
-		must NOT be force-failed even though its row crossed the staleness
-		threshold only the genuinely-wedged row is failed."""
+		must NOT be force-failed; only the genuinely-wedged row is failed."""
 		stub = _install_frappe_stub(monkeypatch)
 		stub._get_all_return["Optimus Session"] = [
 			{"name": "PS-LIVE", "session_uuid": "u-live"},   # still heartbeating
@@ -372,12 +363,10 @@ class TestSweepOldSessionsBulkFileFetch:
 
 class TestSweepOldSessionsForeverRetention:
 	def _stub_get_config(self, monkeypatch, retention_days):
-		"""Install a fake ``optimus.settings`` whose ``get_config()``
-		returns an object with the chosen ``session_retention_days``.
-		Wholesale-replaces the module so the janitor's lazy import
-		picks up the fake rather than the real settings reader (which
-		needs frappe.cache + DocType wiring this test deliberately
-		doesn't provide)."""
+		"""Install a fake ``optimus.settings`` whose ``get_config()`` returns
+		the chosen ``session_retention_days``, so the janitor's lazy import
+		picks up the fake instead of the real settings reader.
+		"""
 		fake = types.ModuleType("optimus.settings")
 		fake.get_config = lambda: types.SimpleNamespace(
 			session_retention_days=retention_days,

@@ -1,19 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for ``optimus.api.refill_ai_suggestions``: the single-button
-entry point that replaces the five legacy AI buttons.
+"""Tests for ``optimus.api.refill_ai_suggestions``.
 
-The endpoint chains three core helpers (``_run_ai_backfill``,
-``_humanize_steps_core``, ``_refill_indexes_for_doc``) and re-renders
-the report once at the end. The tests verify:
-
-- happy path: each step is called once, the per-step status dict is
-  surfaced, the final re-render runs
-- toggle-off path: a section whose feature toggle is off is silently
-  skipped (no helper call, ``skipped`` key set)
-- gate failures: missing provider / non-Ready / non-owning user all
-  raise before any work runs
+The endpoint chains three helpers (``_run_ai_backfill``,
+``_humanize_steps_core``, ``_refill_indexes_for_doc``) and re-renders once at
+the end. Covers the happy path (each step runs once, status dict surfaced),
+toggle-off sections (skipped, no helper call) and gate failures (missing
+provider / non-Ready / non-owning user all raise before any work).
 """
 
 from types import SimpleNamespace
@@ -41,9 +35,8 @@ def _row(name="opt-xxx", user="user@example.com", status="Ready", title="t"):
 
 
 def _fake_doc():
-	"""Minimal Optimus Session doc only `name` is touched by the
-	endpoint's orchestration; the helpers are mocked, so the doc body
-	doesn't matter."""
+	"""Minimal Optimus Session doc: only ``name`` is touched (helpers are
+	mocked)."""
 	return SimpleNamespace(name="opt-xxx", actions=[], findings=[], table_breakdown_json="[]")
 
 

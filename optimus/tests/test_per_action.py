@@ -7,11 +7,9 @@ from optimus.analyzers import per_action
 
 
 def test_save_sales_invoice_action_label(n_plus_one_recording, empty_context):
-	"""v0.5.1: the per-action table shows the TECHNICAL label (raw
-	cmd), not the humanized Steps-to-Reproduce form. A developer
-	reading the technical report wants to see 'frappe.client.save'
-	the actual whitelisted method not a prose summary.
-	The Steps-to-Reproduce section uses `humanized_label` instead.
+	"""The per-action table shows the TECHNICAL label (raw cmd, e.g.
+	'frappe.client.save'), not the humanized Steps-to-Reproduce form (which
+	uses `humanized_label`).
 	"""
 	result = per_action.analyze([n_plus_one_recording], empty_context)
 	assert len(result.actions) == 1

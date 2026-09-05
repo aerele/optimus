@@ -1,16 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""HTML report renderer for a Optimus Session.
+"""HTML report renderer for an Optimus Session.
 
-Renders a single admin-scoped report: full data including raw SQL with
-literal values, request headers, form data and complete stack traces.
-Gated to System Manager + the recording user via Frappe's File
-permission hook (see permissions.py:file_has_permission).
-
-The template is loaded directly from the file system (not via Frappe's
-Jinja environment) so the renderer is unit-testable in isolation and
-doesn't depend on a running site.
+Renders one admin-scoped report with full data (raw SQL literals, request
+headers, form data, full stack traces), gated to System Manager plus the
+recording user via the File permission hook (permissions.py:file_has_permission).
+The template is loaded straight from disk (not Frappe's Jinja env) so the
+renderer is unit-testable without a running site.
 """
 
 import functools
@@ -51,10 +48,9 @@ from optimus.renderer.syntax import (
 
 
 def _settings_extras() -> tuple[tuple[str, ...], tuple[str, ...]]:
-	"""Read the live ``sensitive_form_keys`` / ``sensitive_sql_columns``
-	extras from Optimus Settings. Best-effort falls back to empty
-	tuples on any error so a settings hiccup never breaks rendering
-	(the defaults inside ``optimus.redaction`` still apply)."""
+	"""Read the live ``sensitive_form_keys`` / ``sensitive_sql_columns`` extras
+	from Optimus Settings. Falls back to empty tuples on any error (the
+	``optimus.redaction`` defaults still apply)."""
 	try:
 		from optimus.settings import get_config
 
@@ -68,23 +64,24 @@ def _settings_extras() -> tuple[tuple[str, ...], tuple[str, ...]]:
 
 
 def _redact_sensitive(payload):
-	"""Backward-compatible wrapper kept for any internal callers that
-	don't have direct settings access. Reads the live extras list and
-	delegates to ``optimus.redaction.redact_sensitive``."""
+	"""Redact sensitive keys from ``payload`` via
+	``optimus.redaction.redact_sensitive``, reading the live extra-keys
+	list from settings."""
 	extra_keys, _ = _settings_extras()
 	return _redact_sensitive_base(payload, extra_keys=extra_keys)
 
 
 def _redact_sql_literals(sql_str: str) -> str:
-	"""Backward-compatible wrapper. Same as ``_redact_sensitive``:
-	reads settings + delegates."""
+	"""Redact SQL literals in ``sql_str`` via
+	``optimus.redaction.redact_sql_literals``, reading the live
+	extra-columns list from settings."""
 	_, extra_cols = _settings_extras()
 	return _redact_sql_literals_base(sql_str, extra_columns=extra_cols)
 
 
 def _redact_call_queries(calls) -> None:
-	"""Backward-compatible wrapper. Mutates ``calls`` in place via
-	``optimus.redaction.redact_call_queries`` with the live extras."""
+	"""Mutate ``calls`` in place, redacting each query's SQL literals via
+	``optimus.redaction.redact_call_queries`` with the live extra columns."""
 	_, extra_cols = _settings_extras()
 	_redact_call_queries_base(calls, extra_columns=extra_cols)
 
@@ -227,11 +224,8 @@ _TEMPLATES_DIR = os.path.join(
 
 @functools.lru_cache(maxsize=1)
 def _get_jinja_env() -> Environment:
-	"""Build and cache the Jinja environment.
-
-	Autoescape is on for HTML so user-provided strings (action labels,
-	finding titles, etc.) can never inject markup into the report.
-	"""
+	"""Build and cache the Jinja environment. Autoescape is on for HTML so
+	user-provided strings (action labels, finding titles) can't inject markup."""
 	return Environment(
 		loader=FileSystemLoader(_TEMPLATES_DIR),
 		autoescape=select_autoescape(["html"]),
@@ -246,25 +240,17 @@ def render(
 	*,
 	generated_at: str | None = None,
 ) -> str:
-	"""Render a Optimus Session to standalone HTML.
-
-	v0.6.0 Round 7: collapsed from a two-mode (safe/raw) renderer to a
-	single admin-scoped report. Permission gating is the responsibility
-	of the caller (download_pdf, file permission hooks).
+	"""Render an Optimus Session to standalone HTML (inline CSS, no external
+	assets or JavaScript). Permission gating is the caller's responsibility.
 
 	Args:
-	    session_doc: The Optimus Session DocType row (loaded via
-	        frappe.get_doc). Provides totals, summary_html and the
-	        actions/findings child rows.
-	    recordings: The in-memory recordings list. Required provides
-	        raw SQL, headers, form_dict and full stack traces for the
-	        per-action drill-down.
-	    generated_at: ISO timestamp of when this report was generated;
-	        defaults to now() if not provided.
+	    session_doc: the Optimus Session DocType row; provides totals,
+	        summary_html and the actions/findings child rows.
+	    recordings: the in-memory recordings list (required); provides raw
+	        SQL, headers, form_dict and full stack traces for the drill-down.
+	    generated_at: ISO timestamp; defaults to now().
 
-	Returns:
-	    Standalone HTML as a string. Inline CSS, no external assets, no
-	    JavaScript. Self-contained for emailing or attaching to a ticket.
+	Returns the self-contained HTML string.
 	"""
 	if recordings is None:
 		raise ValueError("recordings list is required")
@@ -1085,12 +1071,9 @@ def _e(text: object) -> str:
 # Re-imported at the top of this module.
 
 def render_raw(session_doc: Any, recordings: list[dict]) -> str:
-	"""Render the admin-scoped report.
-
-	v0.6.0 Round 7: name kept as ``render_raw`` for back-compat but
-	there's no longer a ``render_safe`` counterpart single rendering
-	path. Requires the in-memory recordings list (raw SQL, headers,
-	form_dict and full stack traces are NOT stored on the DocType).
+	"""Render the admin-scoped report. Requires the in-memory recordings list
+	(raw SQL, headers, form_dict and full stack traces are not stored on the
+	DocType).
 	"""
 	return render(session_doc, recordings)
 
@@ -1101,12 +1084,9 @@ def render_raw(session_doc: Any, recordings: list[dict]) -> str:
 
 
 def _action_to_dict(child: Any) -> dict:
-	"""Flatten a Optimus Action child row to a plain dict.
-
-	v0.7.x J.12.1: normalise legacy ``event_type = "Background Job"`` to
-	the new ``"RQ Job"`` label at read time so reports rendered from
-	sessions captured before the J.12 rename still surface the RQ-Jobs
-	section. New recordings already carry the new label.
+	"""Flatten an Optimus Action child row to a plain dict. Normalises legacy
+	``event_type = "Background Job"`` to ``"RQ Job"`` at read time so older
+	sessions still surface the RQ-Jobs section.
 	"""
 	_event_type = child.event_type or ""
 	if _event_type == "Background Job":
@@ -1155,11 +1135,9 @@ _BG_JOB_TOP_QUERIES = 5
 
 
 def _clean_job_method(action_label, path, recording) -> str:
-	"""The most human-readable name for a background-job action.
-
-	``per_action._label`` writes job labels as ``"Job: <method>"``: strip
-	that prefix. Fall back to the job method path, then the recording's
-	``cmd``, then a generic placeholder."""
+	"""The most human-readable name for a background-job action. Strips the
+	``"RQ Job: "`` / ``"Job: "`` label prefix, else falls back to the job
+	method path, then the recording's ``cmd``, then a generic placeholder."""
 	label = (action_label or "").strip()
 	if label:
 		# Accept both the new ``"RQ Job: <method>"`` prefix and the legacy
@@ -1187,25 +1165,17 @@ def _tracked_row_get(row, key, default=None):
 
 
 def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jobs=None) -> dict:
-	"""Build the "RQ Jobs" section payload from the (already
-	min-duration-filtered) action dicts, merged with the persisted per-job
-	terminal-status rows so failed / timed-out / still-running jobs are
-	reported instead of silently vanishing.
+	"""Build the "RQ Jobs" section payload from the action dicts, merged with
+	the persisted per-job terminal-status rows so failed / timed-out /
+	still-running jobs are reported instead of vanishing.
 
-	``actions`` items are ``_action_to_dict`` output plus an ``idx`` key
-	holding the action's original position (so findings whose ``action_ref``
-	is that index as a string can be tallied per job). ``recordings_by_uuid``
-	enriches each job with its slowest queries when the recording is still in
-	Redis (TTL ~10 min; a re-render long after analyze has none → the section
-	still renders from the persisted action rows alone). ``tracked_jobs`` are
-	the ``Optimus Background Job`` child rows analyze persisted (one per RQ job
-	the flow enqueued, carrying ``status`` / ``error`` / timing); they link to a
-	captured action by ``recording_uuid``. A job that ran with profiling has
-	both an action (rich query data) and a tracked row (status); a job that
-	failed / timed out / ran past the wait has only a tracked row and still
-	appears, with its status + error but no query data. Pure no I/O (the
-	``entry_callsite`` on each job is pre-computed by ``render()`` and copied
-	through here).
+	``actions`` are ``_action_to_dict`` output plus an ``idx`` key.
+	``recordings_by_uuid`` enriches each job with its slowest queries while the
+	recording is still in Redis (~10 min TTL; otherwise the section renders from
+	the action rows alone). ``tracked_jobs`` are the persisted ``Optimus
+	Background Job`` rows, linked by ``recording_uuid``; a job with only a
+	tracked row (no captured action) still appears with its status and error but
+	no query data. Pure, no I/O.
 
 	Returns ``{jobs, count, total_ms, total_queries, any_findings_counted,
 	status_counts}``.
@@ -1409,9 +1379,8 @@ _ACTION_VERB_FOR_FINDING_TYPE: dict[str, str] = {
 
 
 def _action_verb_for(finding_type: str | None) -> str | None:
-	"""Return a short verb-led action title for a finding_type, or
-	None when the verb isn't known (callers fall back to the finding's
-	own title)."""
+	"""Return a short verb-led action title for a finding_type, or None when
+	unknown (callers fall back to the finding's own title)."""
 	return _ACTION_VERB_FOR_FINDING_TYPE.get(finding_type or "")
 
 
@@ -1422,19 +1391,12 @@ def _build_action_plan(
 ) -> list[dict]:
 	"""Top-N action plan steps from the highest-impact findings.
 
-	Returns a list of dicts shaped for the template's
-	`.action-step` row::
+	Sort: severity DESC, then estimated_impact_ms DESC; zero-impact findings
+	stay eligible. Empty input gives an empty list. Returns dicts shaped for
+	the template's `.action-step` row::
 
 	    {"n": int, "title": str, "desc": str, "gain_ms": float,
 	     "gain_label": str, "callsite": "file:lineno" or None}
-
-	Sort: severity DESC, then estimated_impact_ms DESC. Findings with
-	zero impact are still eligible (they may not have a measurable
-	cost but still warrant attention). Empty input → empty list and
-	the template hides the section.
-
-	The Action plan is conceptually the same top-3 as the old exec-
-	summary bullets; this function replaces that data layer.
 	"""
 	if not findings:
 		return []
@@ -1493,25 +1455,16 @@ def _build_waterfall(
 	large_duration_threshold_ms: float = 1000.0,
 	max_rows: int = 8,
 ) -> list[dict]:
-	"""Top-N actions by duration, formatted as a horizontal-bar
-	waterfall.
-
-	Returns a list of dicts::
+	"""Top-N actions by duration as a horizontal-bar waterfall. Empty input
+	gives an empty list. Returns dicts::
 
 	    {"name": str, "duration_ms": float, "pct": float,
 	     "hot": bool, "bg": bool}
 
-	`pct` is scaled to the displayed slice's max duration so the
-	longest row always renders at 100% and shorter rows are visible.
-	Scaling to the session total would make sub-second actions
-	invisible.
-
-	`hot` = the action has any High-severity linked finding (via
-	`action_ref`). `bg` = the action is a background job (event_type
-	== "RQ Job").
-
-	When ``actions`` is empty, returns an empty list and the template
-	hides the section.
+	`pct` is scaled to the displayed slice's max duration (not the session
+	total, which would make sub-second actions invisible). `hot` = the action
+	has a High-severity linked finding (via `action_ref`); `bg` = it is a
+	background job (event_type == "RQ Job").
 	"""
 	if not actions:
 		return []
@@ -1568,11 +1521,9 @@ _ORM_DOCTYPE_PATTERNS = [
 
 
 def _doctype_from_orm_call(src_line: str | None) -> str | None:
-	"""Pull a DocType name out of common Frappe ORM call literals.
-
-	``frappe.get_doc("User", ...)`` -> ``"User"``. Returns None when the
-	line isn't a recognised ORM call. Used by ``_compose_tldr`` to write
-	"a User document fetched 100 times" instead of a generic "a document".
+	"""Pull a DocType name out of common Frappe ORM call literals:
+	``frappe.get_doc("User", ...)`` -> ``"User"``. None when the line isn't a
+	recognised ORM call.
 	"""
 	if not src_line:
 		return None
@@ -1585,10 +1536,8 @@ def _doctype_from_orm_call(src_line: str | None) -> str | None:
 
 
 def _action_verb_from_label(action_label: str | None) -> str | None:
-	"""``"frappe.desk.form.save.savedocs:Submit"`` -> ``"Submit"``.
-
-	Returns the part after the final colon when present; ``None`` otherwise.
-	Used by ``_compose_tldr`` to write "Sales Invoice Submit" naturally.
+	"""``"frappe.desk.form.save.savedocs:Submit"`` -> ``"Submit"``: the part
+	after the final colon (any doctype suffix stripped), or ``None``.
 	"""
 	if not action_label or ":" not in action_label:
 		return None
@@ -1600,12 +1549,9 @@ def _action_verb_from_label(action_label: str | None) -> str | None:
 
 
 def _savings_phrase(pct: float) -> str:
-	"""Fuzzy round of an impact percentage into a human phrase.
-
-	``pct`` is impact_ms / action_duration_ms (range 0..1). Returns
-	"by roughly half" / "by roughly two-thirds" / "by roughly a third"
-	near common fractions; falls back to "by roughly N%" outside those
-	bands so the prose stays accurate for awkward ratios.
+	"""Fuzzy-round an impact fraction (``pct`` = impact_ms / action_duration_ms,
+	0..1) into a human phrase: "by roughly half" / "two-thirds" / "a third"
+	near common fractions, else "by roughly N%".
 	"""
 	if pct is None or pct <= 0:
 		return ""
@@ -1625,8 +1571,7 @@ def _savings_phrase(pct: float) -> str:
 
 
 def _aggregate_frame_truncation(actions: list[dict]) -> dict:
-	"""B.DI2 sum captured / kept frames across actions whose call-tree
-	hit ``CALL_TREE_HARD_TRUNCATE_KEEP_FRAMES``.
+	"""Sum captured / kept frames across actions whose call-tree was truncated.
 
 	Returns ``{"captured": int, "kept": int, "actions_affected": int,
 	"keep_limit": int}``; ``actions_affected == 0`` means no truncation
@@ -1669,24 +1614,13 @@ def _compose_tldr(
 	large_duration_threshold_ms: float = 1000.0,
 	actions: list[dict] | None = None,
 ) -> dict:
-	"""Compose the TL;DR hero block.
+	"""Compose the TL;DR hero block from the single highest-impact finding
+	(severity desc, then impact desc), with impact / loop-count / hook-name
+	highlighted via ``<span class="hot">``. Empty ``findings`` gives the
+	clean-session branch. Uses ``Markup.format`` (not f-strings) so the spans
+	survive Jinja autoescape.
 
-	Picks the single highest-impact finding (severity desc, then impact
-	desc), looks up its category and builds a one-sentence headline
-	with the impact / loop-count / hook-name highlighted via
-	``<span class="hot">…</span>``. The sub-line is session totals.
-
-	Returns a dict the template renders verbatim:
-	``{"label": str, "headline_markup": Markup, "sub_markup": Markup}``.
-
-	When ``findings`` is empty, returns the clean-session branch
-	(no <span class="hot"> nothing's wrong, no signal red needed).
-
-	The Markup-aware composition mirrors the recently-fixed
-	executive-summary headline: f-strings would flatten Markup back
-	to str and Jinja would HTML-escape the spans, so we use
-	``Markup.format(...)``: it escapes plain-string args and passes
-	Markup args through untouched.
+	Returns ``{"label": str, "headline_markup": Markup, "sub_markup": Markup}``.
 	"""
 	def _fmt(v):
 		return _format_duration_ms(v, large_duration_threshold_ms)
@@ -1909,13 +1843,9 @@ def _build_executive_summary(
 	v5: dict,
 	large_duration_threshold_ms: float = 1000.0,
 ) -> dict:
-	"""Return a dict shaped for the template's exec-summary card.
-
-	Shape: ``{"headline": Markup, "bullets": list[str], "show": bool}``
-
-	``show`` is False when there's nothing meaningful to summarize
-	e.g. a clean session with no findings. The template renders the
-	card only when ``show`` is True.
+	"""Return a dict shaped for the template's exec-summary card:
+	``{"headline": Markup, "bullets": list[str], "show": bool}``. ``show`` is
+	False (card hidden) when there's nothing to summarize, e.g. a clean session.
 	"""
 	total_ms = getattr(session_doc, "total_duration_ms", 0) or 0
 	total_queries = getattr(session_doc, "total_queries", 0) or 0
@@ -2038,15 +1968,10 @@ _HOTPATH_BUCKET_LABEL = "Request hotspots"
 
 
 def _filter_top_queries_for_display(queries: list) -> list:
-	"""Trim the slowest-queries leaderboard to what's worth showing:
-	user-app callsites only and only queries that cleared the
-	"actually did some work" floor (``TOP_QUERY_FLOOR_MS``).
-
-	Mirrors what ``analyzers.top_queries`` does at analyze time so that
-	re-rendering a session captured before this filter shipped (via
-	``regenerate_reports``, which re-renders but doesn't re-analyze)
-	gets the same scoping. The per-action breakdown still shows every
-	query, fast and framework ones included.
+	"""Trim the slowest-queries leaderboard to user-app callsites that cleared
+	the ``TOP_QUERY_FLOOR_MS`` floor, mirroring ``analyzers.top_queries`` so a
+	re-rendered old session gets the same scoping. The per-action breakdown
+	still shows every query.
 	"""
 	from optimus.analyzers.base import is_framework_callsite_str
 	from optimus.analyzers.top_queries import TOP_QUERY_FLOOR_MS
@@ -2073,18 +1998,12 @@ def _filter_top_queries_for_display(queries: list) -> list:
 
 
 def _is_framework_app(filename_or_app, tracked_apps: tuple[str, ...] = ()) -> bool:
-	"""Tiny adapter around ``analyzers.base.is_framework_callsite`` that accepts
-	any of: (a) a callsite filename (passed through), (b) a bare app name like
-	``"frappe"``, or (c) a dotted Python module/method like
-	``"frappe.desk.form.save.savedocs"``: both (b) and (c) are normalised to
-	``"<app>/x.py"`` so the boundary-sensitive substring checks in
-	``is_framework_callsite`` fire. Falsy/missing input → ``False`` (treat as
-	user code so unattributable rows aren't penalised).
-
-	Used by the four "Split: custom apps prominent, framework collapsed"
-	sections (per-action, top-queries, background-jobs, hot-frames) to route
-	rows. ``tracked_apps`` flips the classifier to inclusion mode (framework
-	= anything NOT in the allowlist) when populated."""
+	"""Adapter around ``analyzers.base.is_framework_callsite`` accepting a
+	callsite filename, a bare app name (``"frappe"``), or a dotted module path
+	(``"frappe.desk.form.save.savedocs"``); the latter two are normalised to
+	``"<app>/x.py"`` first. Falsy input returns ``False`` (treated as user
+	code). ``tracked_apps``, when populated, flips the classifier to inclusion
+	mode (framework = anything not in the allowlist)."""
 	if not filename_or_app:
 		return False
 	val = str(filename_or_app).strip()
@@ -2117,17 +2036,10 @@ def _split_by_framework_app(rows, app_key, tracked_apps: tuple[str, ...] = ()):
 
 def _app_from_finding(finding: dict) -> str:
 	"""Return the top-level app name for a finding, or ``_OTHER_APP_LABEL``.
-
-	Inspects ``technical_detail.callsite.filename`` using the same
-	boundary-sensitive split as the framework classifier the goal is
-	that the app name shown in the sub-section header matches what
-	``is_framework_callsite`` would see.
-
-	Defensive: accepts both the dict form (n_plus_one/redundant_calls/
-	explain_flags) and the legacy string form (top_queries Slow Query
-	findings). _finding_to_dict already normalizes these at load time,
-	but we double-check here so direct callers (tests, retry paths)
-	don't crash on an un-normalized finding.
+	Inspects ``technical_detail.callsite.filename`` with the same
+	boundary-sensitive split as the framework classifier. Normalises both the
+	dict and legacy string callsite forms so an un-normalized finding won't
+	crash direct callers.
 	"""
 	from optimus.analyzers.base import _extract_app_segment
 
@@ -2143,17 +2055,12 @@ def _bucket_findings_by_app(
 	findings: list[dict],
 	tracked_apps: tuple[str, ...] = (),
 ) -> list[dict]:
-	"""Group findings by app and return an ordered list of buckets.
+	"""Group findings by app into ordered buckets, each
+	``{"app": str, "findings": list, "count": int, "total_impact_ms": float}``.
 
-	Each bucket is a dict:
-	``{"app": str, "findings": list, "count": int, "total_impact_ms": float}``
-
-	Ordering rules:
-	1. Tracked apps first, in the order the admin listed them in
-	   Optimus Settings (user's mental model: "my apps first").
-	2. Any other apps next, sorted by total estimated impact desc.
-	3. ``_OTHER_APP_LABEL`` (no resolvable callsite) last always the
-	   tail bucket because its contents are less actionable.
+	Order: tracked apps first (in the admin's configured order), then other
+	apps by total estimated impact desc, then ``_OTHER_APP_LABEL`` (no
+	resolvable callsite) as the tail bucket.
 	"""
 	if not findings:
 		return []

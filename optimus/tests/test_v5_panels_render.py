@@ -1,10 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""End-to-end smoke test: seed the v0.5.0 aggregate into a fake session
-doc and render the full template. Verifies the Server Resource and
-Frontend panels actually render without template errors and contain
-the expected content.
+"""End-to-end smoke test: seed the aggregate into a fake session doc and render
+the full template, verifying the Server Resource and Frontend panels render
+without template errors and contain the expected content.
 """
 
 import json
@@ -190,9 +189,8 @@ def test_raw_mode_keeps_docname_in_urls():
 
 
 def test_missing_v5_aggregate_degrades_cleanly():
-	"""Sessions recorded before v0.5.0 have v5_aggregate_json unset.
-	The renderer must fall back to empty values and skip the new panels
-	without raising."""
+	"""When v5_aggregate_json is unset, the renderer must fall back to empty
+	values and skip the panels without raising."""
 	from optimus import renderer
 
 	doc = _fake_session_doc({})

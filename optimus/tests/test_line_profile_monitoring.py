@@ -4,11 +4,9 @@
 """Phase-2 must never leak the process-global ``sys.monitoring`` profiler tool.
 
 On Python 3.12+ line_profiler drives ``sys.monitoring`` tool id 2 (PROFILER_ID).
-A botched per-request teardown (the old code paired ``enable_by_count()`` with
-``disable()`` and raised ``ValueError: tool 2 is not in use``) left tool 2's
-line-trace events registered process-wide, so every subsequent request in that
-worker was line-traced → CPU saturation + frozen UI. These tests pin that the
-teardown always releases tool 2.
+A botched teardown can leave its line-trace events registered process-wide, so
+every subsequent request in the worker is line-traced (CPU saturation, frozen
+UI). These tests pin that the teardown always releases tool 2.
 """
 
 import sys
@@ -242,9 +240,8 @@ def test_startup_probe_silent_on_python_without_sys_monitoring(monkeypatch):
 
 
 def test_per_request_pre_arm_logs_when_reclaiming_orphan(monkeypatch):
-	"""The per-request self-heal in line_profile.hooks must log a WARN
-	when it actually reclaims an orphan silent reclaim hid the leak
-	class in production for months."""
+	"""The per-request self-heal in line_profile.hooks must log a WARN when it
+	reclaims an orphan (a silent reclaim would hide the leak)."""
 	cap = _patch_logger(monkeypatch)
 
 	# Simulate the worker-respawn state: tool 2 owned by line_profiler,
@@ -269,9 +266,9 @@ def test_per_request_pre_arm_logs_when_reclaiming_orphan(monkeypatch):
 
 
 def test_pyproject_pins_line_profiler_5_x():
-	"""pyproject.toml must require line_profiler >= 5.x. The 4.x line
-	uses the legacy sys.settrace path which doesn't go through tool 2
-	the leak fix in 6f66a43 only protects the 5.x sys.monitoring path."""
+	"""pyproject.toml must require line_profiler >= 5.x. The 4.x line uses the
+	legacy sys.settrace path, which doesn't go through tool 2 and isn't covered
+	by the tool-2 leak fix."""
 	import os
 	import re
 

@@ -44,9 +44,9 @@ def test_denies_when_not_permitted(monkeypatch):
 
 
 def test_fails_closed_when_has_permission_raises(monkeypatch):
-	"""Regression: previously this branch returned the docname (fail-OPEN),
-	letting any Optimus User reach another user's session if has_permission
-	hit a transient error. It must now raise PermissionError."""
+	"""If has_permission raises (transient error), the gate must fail CLOSED
+	and raise PermissionError, not fall back to the role-only gate (which would
+	let any Optimus User reach another user's session)."""
 	def boom(*a, **k):
 		raise RuntimeError("permission engine hiccup")
 

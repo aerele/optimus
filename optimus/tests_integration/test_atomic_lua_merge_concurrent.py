@@ -1,41 +1,23 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Real-bench integration test for the v0.7.x atomic-Lua merge contract
-on ``profiler:session:<uuid>:jobs``.
+"""Real-bench integration test for the atomic-Lua merge contract on
+``profiler:session:<uuid>:jobs``.
 
-The v0.7.x bg-tracking trilogy (``a356f64`` → ``0e4a270`` → ``f30f44e``)
-closed a multi-worker field-loss race. Pre-trilogy, two workers writing
-to the same job_id's per-field dict could lose fields under a
-read-modify-write race: Worker A reads meta, modifies, writes; Worker B
-in the interleave reads the pre-A meta, modifies, writes and Worker A's
-change is gone.
+The merge runs server-side via :data:`_MERGE_JOB_META_LUA` (and its setdefault
+sibling), atomic in Redis, to close a multi-worker field-loss race where two
+workers' read-modify-write on the same job_id could drop each other's fields.
+This test proves the invariant under genuine concurrent thread contention
+against real Redis + real Lua (the unit-suite equivalent skips whenever Redis
+or Lua isn't reachable).
 
-The fix moves the merge SERVER-SIDE via :data:`_MERGE_JOB_META_LUA` (and
-its setdefault sibling), atomic in Redis. This test proves the
-invariant under genuine concurrent thread contention against real Redis +
-real Lua.
-
-A unit-suite test exists for this in ``optimus/tests/test_session_jobs.py``
-but it ``pytest.skip``s when Redis or Lua isn't reachable under the
-pure-pytest workflow, that's every run. The integration version is the
-first-class CI gate: real Redis + real Lua, always runs, richer
-scenarios.
-
-**The thread-vs-process caveat (same as the unit version):** an RQ
-worker is a separate PROCESS with its own ``frappe.local`` set up by
-the bench. Threads in this test can't replicate that because
-``frappe.local.conf`` is per-thread/process and isn't initialised in
-non-main Python threads. The mitigation (mirroring the unit test): pre-
-compute the prefixed Redis key in the main thread, then have worker
-threads call ``frappe.cache.eval(_MERGE_JOB_META_LUA, …)`` directly.
-That preserves the load-bearing invariant Redis Lua serialisation
-of HGET + JSON-merge + HSET which is exactly what the trilogy
-protects.
-
-For the fallback path (Python read-modify-write when Lua isn't
-available), one test runs entirely in the main thread so the full
-``_atomic_merge_job_meta`` wrapper code path is exercised end-to-end.
+Thread-vs-process caveat: an RQ worker is a separate process with its own
+``frappe.local``, which non-main Python threads can't replicate. So the key is
+pre-computed in the main thread and worker threads call
+``frappe.cache.eval(_MERGE_JOB_META_LUA, ...)`` directly, preserving the
+load-bearing invariant (Redis-Lua serialisation of HGET + JSON-merge + HSET).
+One fallback-path test runs single-threaded so the full
+``_atomic_merge_job_meta`` wrapper is exercised when Lua is unavailable.
 """
 
 from __future__ import annotations
@@ -67,11 +49,9 @@ def _require_redis_and_lua():
 
 
 def _purge_jobs_key(session_uuid: str) -> None:
-	"""Delete the test's session jobs hash; tolerate the key not
-	existing. Called from setUp + tearDown for belt-and-suspenders
-	cleanup (the autouse ``cleanup_session`` fixture handles Optimus
-	Session DocType rows; the jobs hash lives in Redis under a
-	test-only fixture UUID that the autouse fixture won't touch)."""
+	"""Delete the test's session jobs hash (tolerating a missing key). Called
+	from setUp/tearDown, since the jobs hash lives in Redis under a test-only
+	UUID the autouse ``cleanup_session`` fixture won't touch."""
 	try:
 		frappe.cache.delete_value(redis_keys.session_jobs(session_uuid))
 	except Exception:
@@ -79,10 +59,9 @@ def _purge_jobs_key(session_uuid: str) -> None:
 
 
 class TestAtomicLuaMergeConcurrent(FrappeTestCase):
-	"""Five tests covering the v0.7.x trilogy's invariants under real
-	Redis + Lua + threading. Each test owns its own ``session_uuid``
-	to avoid cross-test pollution; the jobs hash is purged in
-	setUp/tearDown."""
+	"""Tests covering the atomic-merge invariants under real Redis + Lua +
+	threading. Each test owns its own ``session_uuid`` to avoid cross-test
+	pollution; the jobs hash is purged in setUp/tearDown."""
 
 	@classmethod
 	def setUpClass(cls):

@@ -2,19 +2,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Analyzer: server infrastructure pressure (v0.5.0).
+"""Analyzer: server infrastructure pressure.
 
-Reads per-recording infra snapshots written by
-hooks_callbacks.after_request/after_job (stored under
-profiler:infra:<recording_uuid>). analyze.run injects each recording's
-infra dict as recording["infra"] before calling this analyzer, so the
-analyzer itself is pure.
-
-Emits four finding types:
-  - Resource Contention        (system CPU sustained > CPU_HIGH_PCT)
-  - Memory Pressure            (worker RSS growth or swap active)
-  - DB Pool Saturation         (threads_running / threads_connected > 0.9)
-  - Background Queue Backlog   (any RQ queue depth > RQ_BACKLOG_WARN)
+Reads the per-recording infra snapshot that analyze.run injects as
+recording["infra"] (so the analyzer is pure). Emits four finding types:
+Resource Contention (sustained high CPU), Memory Pressure (RSS growth or swap),
+DB Pool Saturation (connections near max) and Background Queue Backlog (RQ
+queue depth over threshold).
 """
 
 import json

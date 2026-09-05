@@ -3,46 +3,24 @@
 
 """Single source of truth for every Redis key Optimus writes.
 
-Pre-v0.12.0 the keys were partially centralized :mod:`optimus.session`
-and :mod:`optimus.line_profile.capture` already had private helpers
-(``_active_key``, ``_meta_key``, etc.) but five other modules
-(:mod:`optimus.api`, :mod:`optimus.hooks_callbacks`, :mod:`optimus.analyze`,
-:mod:`optimus.settings`, :mod:`optimus.janitor`) built keys via inline
-f-strings, scattering the schema across the codebase and making future
-renames risky.
+Every key pattern has a public builder function here; the audit test in
+:mod:`optimus.tests.test_redis_audit` asserts every ``frappe.cache.*`` call
+resolves through this module (or the small allowlist of pre-existing helpers in
+session.py / line_profile/capture.py). The strings returned are identical to
+the f-strings they replaced, so no deployed Redis state shifts.
 
-This module is the canonical inventory. Every key pattern Optimus
-writes has a public builder function here; the f-string call sites
-have been migrated to call them; the audit test in
-:mod:`optimus.tests.test_redis_audit` walks every ``frappe.cache.*``
-call and asserts the key argument resolves through this module (or
-through the small explicit allowlist of pre-existing centralized
-helpers).
+:data:`SCHEMA_VERSION` mirrors the ``optimus:schema_version`` sentinel key;
+bump both together on any value-shape change the read side must detect.
 
-**Backward-compatibility:** the strings these builders return are
-**identical** to the f-strings they replace. No deployed Redis state
-shifts. The migration is purely organisational.
+Namespace conventions:
 
-**Schema versioning:** :data:`SCHEMA_VERSION` mirrors the version
-stamped on the ``optimus:schema_version`` sentinel key written at app
-import (see :mod:`optimus.redis_schema`). Bump it together with the
-sentinel whenever a value-shape change ships that the read side needs
-to detect. The v0.12.0 baseline is ``1``.
+* ``profiler:`` per-session / per-user / per-recording keys.
+* ``optimus:`` app-level state not bound to a session.
+* ``optimus_settings_cached``: legacy single key (no prefix) for the cached
+  :class:`OptimusConfig` snapshot.
 
-**Namespace conventions:**
-
-* ``profiler:`` prefix every per-session / per-user / per-recording
-  key. Predates the v0.7.0 rename from ``frappe_profiler``; kept for
-  backward compatibility with in-flight benches.
-* ``optimus:`` prefix app-level state that's not bound to a session
-  (``schema_version``, ``analyze:inflight``, ``retention_backlog``).
-* ``optimus_settings_cached``: legacy single key (no prefix) for the
-  cached :class:`OptimusConfig` snapshot. Pre-dates the prefix
-  convention; the cost of renaming would be a one-shot cache miss for
-  every running bench, so we leave it.
-
-This module imports nothing from Frappe every function is a pure
-string-building helper. Safe to call from any code path Optimus runs.
+Imports nothing from Frappe: every function is a pure string builder, safe to
+call from any code path.
 """
 
 from __future__ import annotations
@@ -102,11 +80,10 @@ def session_pending_jobs(session_uuid: str) -> str:
 
 
 def session_jobs(session_uuid: str) -> str:
-	"""Per-job tracking hash (the v0.7.x atomic-Lua-merged structure).
-	Fields are job IDs; values are JSON-encoded dicts written by the
-	``_MERGE_JOB_META_LUA`` Lua script via :func:`_raw_redis` (NOT
-	Frappe's pickle-wrapped ``hset``). See REDIS-SCHEMA.md "Dual-encoding
-	hazard" for details. No TTL deleted by ``delete_session_state``."""
+	"""Per-job tracking hash. Fields are job IDs; values are JSON-encoded dicts
+	written by the ``_MERGE_JOB_META_LUA`` Lua script via :func:`_raw_redis`, NOT
+	Frappe's pickle-wrapped ``hset`` (see REDIS-SCHEMA.md "Dual-encoding hazard").
+	No TTL: deleted by ``delete_session_state``."""
 	return f"profiler:session:{session_uuid}:jobs"
 
 
@@ -163,12 +140,10 @@ def frontend_vitals(session_uuid: str) -> str:
 
 
 def frontend_legacy(session_uuid: str) -> str:
-	"""Pre-v0.5.1 combined frontend dict a single key holding both XHR
-	and vitals data merged via GET-modify-SET. No code path writes this
-	any more; only :func:`optimus.session.delete_session_state` reads it
-	(as a defensive cleanup target for in-flight benches that still
-	carry the legacy shape). No TTL on legacy writes that's exactly
-	the upgrade-leak this PR documents."""
+	"""Legacy combined frontend dict (XHR + vitals in one key). No code path
+	writes it any more; only :func:`optimus.session.delete_session_state` reads
+	it, as a cleanup target for in-flight benches still carrying the legacy shape.
+	Legacy writes had no TTL."""
 	return f"profiler:frontend:{session_uuid}"
 
 
@@ -178,10 +153,9 @@ def frontend_legacy(session_uuid: str) -> str:
 
 
 def lp_active(user: str) -> str:
-	"""Phase-2 active-run pointer per user. Value: the run UUID. TTL:
-	``SESSION_TTL_SECONDS``. Mutually exclusive with
-	:func:`session_active` at the API level (the start endpoint refuses
-	one while the other is active)."""
+	"""Active line-profile run pointer per user. Value: the run UUID. TTL:
+	``SESSION_TTL_SECONDS``. Mutually exclusive with :func:`session_active` at the
+	API level (start refuses one while the other is active)."""
 	return f"profiler:lp:active:{user}"
 
 
@@ -221,11 +195,8 @@ def lp_budget_hit(run_uuid: str) -> str:
 
 
 def onboarding_seen(user: str) -> str:
-	"""Per-user "dismissed the onboarding toast" marker. Value: any
-	truthy string. TTL: 90 days (matches the
-	``session_retention_days`` default; documented in REDIS-SCHEMA.md
-	§ "TTL discipline"). Pre-v0.12.0 had NO TTL keys accumulated
-	indefinitely; this release fixes the leak."""
+	"""Per-user "dismissed the onboarding toast" marker. Value: any truthy string.
+	TTL: 90 days (matches the ``session_retention_days`` default)."""
 	return f"profiler:onboarding_seen:{user}"
 
 
@@ -238,9 +209,8 @@ def explain_cache(cache_key: str) -> str:
 
 
 def analyze_inflight() -> str:
-	"""Single-flight guard for ``analyze.run``. Set by the first runner;
-	cleared on completion. Prevents two RQ workers from analyzing the
-	same session concurrently (the v0.7.x M2 fix)."""
+	"""Single-flight guard for ``analyze.run``: set by the first runner, cleared
+	on completion, so two RQ workers never analyze the same session concurrently."""
 	return "optimus:analyze:inflight"
 
 
@@ -253,21 +223,18 @@ def retention_backlog() -> str:
 
 
 def settings_cache() -> str:
-	"""Cached :class:`OptimusConfig` snapshot. Invalidated by the
-	Optimus Settings DocType's ``on_update`` hook. Pre-dates the
-	``optimus:`` prefix convention renaming would force a one-shot
-	cache miss for every running bench on upgrade, so the legacy name
-	stays."""
+	"""Cached :class:`OptimusConfig` snapshot, invalidated by the Optimus Settings
+	DocType's ``on_update`` hook. (Legacy unprefixed name kept to avoid a one-shot
+	cache miss on every bench at upgrade.)"""
 	return "optimus_settings_cached"
 
 
 def schema_version() -> str:
-	"""v0.12.0+ schema-version sentinel. Value: an integer literal (the
-	current :data:`SCHEMA_VERSION`). Written at app import by
-	:func:`optimus.redis_schema.write_schema_sentinel`; read by
-	:func:`optimus.redis_schema.read_schema_sentinel`. A version mismatch
-	at boot signals an upgrade a future PR can drive proactive
-	migration off this signal."""
+	"""Schema-version sentinel. Value: an integer literal (the current
+	:data:`SCHEMA_VERSION`). Written at app import by
+	:func:`optimus.redis_schema.write_schema_sentinel`, read by
+	:func:`optimus.redis_schema.read_schema_sentinel`; a mismatch at boot signals
+	an upgrade."""
 	return "optimus:schema_version"
 
 

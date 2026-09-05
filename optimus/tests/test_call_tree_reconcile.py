@@ -70,11 +70,9 @@ def test_make_sql_leaf_carries_partial_match_flag():
 
 
 def test_summarize_explain_reads_normalized_plantable_shape():
-	"""Regression: the live pipeline stores explain_result as normalized
-	PlanTable dicts (full_scan / sort_without_index / temp_used /
-	selectivity_pct), not raw MariaDB rows. _summarize_explain must read that
-	shape it previously only knew the legacy type/Extra/filtered keys and so
-	returned {} for every current session."""
+	"""_summarize_explain must read the normalized PlanTable dict shape
+	(full_scan / sort_without_index / temp_used / selectivity_pct) that the live
+	pipeline stores, not just the legacy type/Extra/filtered keys."""
 	normalized = [{
 		"table": "tabGL Entry", "full_scan": True, "sort_without_index": True,
 		"temp_used": False, "selectivity_pct": 4.0, "rows_examined": 12000,
@@ -227,12 +225,11 @@ def test_reconcile_with_no_calls_returns_tree_unchanged():
 
 
 def test_reconcile_invariant_no_python_node_exceeds_parent():
-	"""Property: cumulative_ms of any python node ≤ cumulative_ms of its parent.
+	"""Property: a python node's cumulative_ms ≤ its parent's.
 
-	SQL leaves are excluded from the invariant their grafted self_ms is
-	informational and may push a parent's *summed* children above the parent.
-	The renderer never sums children it always uses the parent's own
-	cumulative_ms.
+	SQL leaves are excluded: their grafted self_ms is informational and may push
+	a parent's summed children above it, but the renderer uses the parent's own
+	cumulative_ms, never the sum.
 	"""
 	tree_dict = _make_node("<root>", "", 100, [
 		_make_node("user", "u.py", 80, [

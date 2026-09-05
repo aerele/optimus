@@ -1,19 +1,14 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Surface tests for the v0.6.0 ``humanize_steps`` API endpoint the manual
-"rewrite the Steps to Reproduce with the LLM" action on a Optimus Session.
+"""Surface tests for the ``humanize_steps`` API endpoint (the "rewrite Steps
+to Reproduce with the LLM" action on an Optimus Session).
 
-Like ``test_backfill_ai_fixes_api.py`` this is a source-inspection test (the
-endpoint needs a live bench for a true integration run): we pin the contract
-whitelisted, permission-gated, Ready-only, AI-enabled guard, re-fetches the
-recordings, calls ``ai_fix.humanize_steps``, persists ``notes``, re-renders.
-
-The internal mechanics (recording fetch, action build, LLM call, notes
-persist) were extracted into ``_humanize_steps_core`` so the new
-``refill_ai_suggestions`` endpoint can re-use them; the endpoint-level
-checks still cover the validation envelope and the helper-level checks
-pin the mechanical moves.
+Source-inspection tests (a true run needs a live bench): they pin the
+contract (whitelisted, permission-gated, Ready-only, AI-enabled guard,
+re-fetch recordings, call ``ai_fix.humanize_steps``, persist ``notes``,
+re-render). The mechanics live in ``_humanize_steps_core``; endpoint checks
+cover the validation envelope, helper checks the mechanical moves.
 """
 
 import os

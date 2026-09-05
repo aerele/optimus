@@ -3,18 +3,14 @@
 
 """PostgreSQL dialect adapter.
 
-Maps Postgres plan/catalog output onto the same normalized shapes the analyzers
+Maps Postgres plan/catalog output onto the normalized shapes the analyzers
 consume, so the analysis engine is dialect-blind. Plan analysis uses
-``EXPLAIN (FORMAT JSON)`` (plan-only NEVER ``EXPLAIN ANALYZE``, which would
-execute the user's statement). The Sort / temp-table flags are plan-only
-heuristics: exact spill detection needs ANALYZE, so a ``Sort`` node over a
-relation is treated as the filesort analog and ``HashAggregate`` / ``Materialize``
-as the temporary-table analog. ``selectivity_pct`` has no plan-only Postgres
-equivalent (it needs ANALYZE row counts), so it's left None the Low Filter
-Ratio finding simply doesn't fire rather than mis-fire.
-
-The raw introspection SQL here is validated against a real ``--db-type postgres``
-bench in phase 5; the parsing/mapping logic is unit-tested with fixtures.
+``EXPLAIN (FORMAT JSON)`` (plan-only, NEVER ``EXPLAIN ANALYZE``, which would
+execute the user's statement). Sort / temp-table flags are plan-only
+heuristics: a ``Sort`` node is the filesort analog, ``HashAggregate`` /
+``Materialize`` the temporary-table analog. ``selectivity_pct`` has no
+plan-only equivalent (it needs ANALYZE row counts), so it's left None and the
+Low Filter Ratio finding simply doesn't fire.
 """
 
 from __future__ import annotations
@@ -77,14 +73,12 @@ def _walk_plan(root: dict) -> list:
 	"""Walk the EXPLAIN plan tree, one PlanTable per scanned relation. Sort /
 	temp flags from ancestor nodes propagate down to the scans they cover.
 
-	BY DESIGN, an ancestor Sort/temp flag attaches to EVERY scan beneath it. In a
-	``Sort → Join → (Scan A, Scan B)`` plan the sort applies to the joined output,
-	but both A and B are tagged ``sort_without_index``: Postgres's plan-tree model
-	doesn't decompose a sort back to a single relation the way MariaDB's row-per-
-	table EXPLAIN does. The over-attribution is bounded: ``selectivity_pct`` is None
-	on PG so Low Filter Ratio never fires and the Filesort finding still needs a
-	large ``rows_examined``. (Phase-5 follow-up: measure finding noise on real join
-	plans and tighten if needed.)"""
+	BY DESIGN an ancestor Sort/temp flag attaches to EVERY scan beneath it (in
+	``Sort → Join → (Scan A, Scan B)`` both A and B are tagged
+	``sort_without_index``): Postgres's plan tree doesn't decompose a sort back
+	to a single relation. The over-attribution is bounded: ``selectivity_pct``
+	is None on PG so Low Filter Ratio never fires and the Filesort finding still
+	needs a large ``rows_examined``."""
 	tables: list = []
 
 	def visit(node, sort_above, temp_above):
@@ -129,13 +123,11 @@ class PostgresDialect(Dialect):
 	def _safe_sql(*args, **kwargs):
 		"""Run a query under a savepoint and roll back to it on failure.
 
-		CRITICAL on Postgres: a failed query aborts the WHOLE transaction
-		(InFailedSqlTransaction) every later query then fails until a
-		rollback. Catching the Python exception is NOT enough; the savepoint
-		rollback is what restores the transaction so analyze (EXPLAIN on each
-		captured query + introspection) and the request (the infra snapshot)
-		survive a query the database rejects. Re-raises so the caller's own
-		try/except still returns its safe default."""
+		CRITICAL on Postgres: a failed query aborts the WHOLE transaction, so
+		catching the Python exception is not enough. The savepoint rollback
+		restores the transaction so analyze and the request survive a query the
+		database rejects. Re-raises so the caller's try/except still returns its
+		safe default."""
 		import frappe
 
 		# Unique savepoint name per call: no two _safe_sql invocations share a

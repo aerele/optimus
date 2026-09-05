@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.3.0 api.start kwargs (capture_python_tree)."""
+"""Tests for the api.start kwargs (capture_python_tree)."""
 
 import inspect
 
@@ -39,12 +39,8 @@ def test_start_persists_capture_python_tree_in_meta():
 
 
 def test_require_profiler_user_does_not_recurse(monkeypatch):
-	"""Regression: _require_profiler_user used to call itself instead of
-	_require_user() (pre-existing v0.2.0 typo at line 52). The infinite
-	recursion only fired in production when the widget actually called
-	api.status never caught by tests because nothing invoked the
-	function. This test calls it directly and asserts it returns within
-	one stack frame."""
+	"""Regression: _require_profiler_user must not recurse into itself. Calls it
+	directly and asserts it returns (within one stack frame)."""
 	import frappe
 
 	# Stand-in frappe.session and get_roles so we don't need a real site

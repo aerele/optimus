@@ -1,11 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""End-to-end: the v0.5.0 analyzer chain on realistic fixtures.
-
-Runs infra_pressure + frontend_timings against merged recording +
-frontend data without touching Frappe or Redis. This is the
-Frappe-decoupled analyzer pattern extended to the v0.5.0 analyzers.
+"""End-to-end: the infra_pressure + frontend_timings analyzer chain on
+realistic fixtures, run against merged recording + frontend data without
+touching Frappe or Redis.
 """
 
 import json
@@ -80,8 +78,8 @@ def test_full_v5_analyzer_chain_produces_findings_and_aggregates():
 
 
 def test_analyzer_chain_with_missing_frontend_data():
-	"""Sessions captured before v0.5.0 deployed have no frontend_data.
-	The analyzers must run cleanly and not emit any frontend findings."""
+	"""Sessions with no frontend_data must run cleanly and emit no frontend
+	findings."""
 	from optimus.analyzers import frontend_timings, infra_pressure
 	from optimus.analyzers.base import AnalyzeContext
 

@@ -5,32 +5,15 @@
 
 Two responsibilities:
 
-  * **Source-snippet highlighting** for findings + actions. Walks the
-    finding / action tree and adds a ``content_html`` field to every
-    ``{lineno, content}`` row, carrying Pygments-tokenised span markup.
-    The template's CSS (GitHub Light palette via classprefix ``tok-``)
-    styles the spans without an external stylesheet.
+  * Source-snippet highlighting for findings + actions: adds a ``content_html``
+    field to every ``{lineno, content}`` row, styled by the template's CSS
+    (classprefix ``tok-``).
+  * Diff-block highlighting for the AI fix card: wraps ``+`` / ``-`` / ``@@``
+    lines in ```diff fenced blocks in classed spans.
 
-  * **Diff-block highlighting** for the AI fix card. Walks the rendered
-    Markdown output, finds ```diff fenced blocks (with or without an
-    explicit language hint) and wraps each ``+`` / ``-`` / ``@@`` line
-    in a classed span so the template's CSS can colour the diff.
-
-Pygments is loaded lazily inside :func:`_ensure_pygments`: paths that
-never highlight code (DocType save callbacks, janitor sweeps, the bulk
-of the regenerate path) don't pay the ~30-50ms import cost at app load.
-Module-level slots are populated on first use and cached for the worker
-process's lifetime.
-
-The :func:`_highlight_python_block_cached` LRU has ``maxsize=512``: large
-enough that overlapping snippets across N findings tokenise the same
-underlying source exactly once, small enough that the cache fits in the
-worker's heap on extreme-session sizes.
-
-Failures degrade silently: when Pygments is unavailable or tokenisation
-raises (rare malformed source), the row's ``content_html`` is set to
-``None`` and the template falls back to the plain-text ``content``. The
-report stays readable; only the colour goes away.
+Pygments is imported lazily (:func:`_ensure_pygments`) so paths that never
+highlight code don't pay the import cost. Failures degrade silently: the row's
+``content_html`` becomes ``None`` and the template falls back to plain ``content``.
 """
 
 from __future__ import annotations
@@ -69,27 +52,20 @@ def _ensure_pygments() -> bool:
 
 @functools.lru_cache(maxsize=512)
 def _highlight_python_block_cached(joined: str) -> str:
-	"""Pygments tokenise + format a multi-line Python source block.
-	Cached across all calls within the same worker process so N
-	overlapping snippets from N findings tokenise the underlying source
-	exactly once. ``maxsize=512`` covers reasonable session sizes; LRU
-	eviction handles the long-tail.
+	"""Pygments tokenise + format a multi-line Python source block. Cached
+	(``maxsize=512``) so overlapping snippets tokenise the same source once.
 	"""
 	return _pyg_highlight(joined, _PY_LEXER, _PY_HTML_FMT).rstrip("\n")
 
 
 def _highlight_python_snippet(lines):
 	"""Mutate each ``{"lineno", "content"}`` dict in ``lines`` to add a
-	``content_html`` field carrying Pygments-highlighted span markup
-	(GitHub Light palette via CSS in the template).
+	``content_html`` field of Pygments-highlighted span markup.
 
-	The lines are joined into one source block before highlighting so
-	multi-line strings, decorators and other multi-line constructs
-	keep correct tokenisation; the resulting HTML is then split per
-	``\\n`` and each chunk assigned back to its source line. Idempotent
-	on lines that already carry ``content_html``. Falls back to
-	``content_html = None`` (template uses plain ``content``) on any
-	Pygments failure or when Pygments isn't available.
+	The lines are joined into one block before highlighting so multi-line
+	constructs tokenise correctly, then split back per line. Idempotent on lines
+	that already carry ``content_html``. Falls back to ``content_html = None`` on
+	any Pygments failure or when Pygments isn't available.
 	"""
 	if not lines:
 		return
@@ -119,9 +95,8 @@ def _highlight_python_snippet(lines):
 
 
 def _highlight_all_snippets(actions, all_findings):
-	"""Walk findings + actions and apply VSCode Dark+ syntax highlighting
-	to every ``source_snippet`` list reachable from the data shapes the
-	template + line-prof builder iterate. Mutates in place.
+	"""Walk findings + actions and syntax-highlight every reachable
+	``source_snippet`` list. Mutates in place.
 	"""
 	for f in all_findings or []:
 		if not isinstance(f, dict):

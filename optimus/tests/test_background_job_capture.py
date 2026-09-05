@@ -1,16 +1,15 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.6.0 background-job capture path the bits that make the
-profiler track the jobs a profiled flow enqueued and wait for them to finish
-before analyzing:
+"""Tests for the background-job capture path: track the jobs a profiled flow
+enqueued and wait for them to finish before analyzing.
 
   * `frappe.enqueue` monkey-patch registers the RQ job id with the session
   * `session.py` pending-jobs set + post-Stop "draining" window helpers
   * `analyze._bg_wait_for_pending_jobs` (re-enqueue-poll wait, capped, no-op
     when nothing's pending / the wait is disabled / no async worker)
   * `_stop_session` arms the draining window; `before_job` honours it
-    (source-inspection those run a lot and need a live bench for a true run)
+    (source-inspection: those need a live bench for a true run)
   * the `background_job_wait_seconds` setting (default + clamp)
 """
 

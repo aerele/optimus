@@ -1,23 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.6.0 Round 7: drop safe-mode reporting.
+"""Drop safe-mode reporting fields.
 
-Removes three fields:
-  - Optimus Session.safe_report_file
-  - Optimus Session.safe_report_pdf_file
-  - Optimus Settings.safe_report_include_source_lines
-
-Frappe's auto-DDL handles dropping the columns when the .json no longer
-declares them, but we explicitly nuke any attached File rows pointing at
-the old fields so they don't dangle as orphaned private files. The
-File records are only deleted after the session row's column is gone,
-because deleting the File first would still leave the session row
-pointing at a missing URL.
-
-Idempotent: safe to re-run. Each step is wrapped in a try/except so a
-partially-applied state (e.g. column already dropped, file already
-gone) doesn't break the migration.
+Removes Optimus Session.safe_report_file, Optimus Session.safe_report_pdf_file
+and Optimus Settings.safe_report_include_source_lines. Frappe's auto-DDL drops
+the columns; this patch also deletes any orphaned File rows that pointed at the
+old fields (after the column is gone, so the session row never points at a
+missing URL). Idempotent: each step is wrapped in try/except.
 """
 
 import frappe

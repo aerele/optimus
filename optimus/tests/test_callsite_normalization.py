@@ -1,25 +1,18 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.5.3 callsite-shape normalizer.
+"""Tests for the callsite-shape normalizer.
 
-Two analyzers produce two different callsite shapes:
+Two analyzers produce two callsite shapes:
 
   n_plus_one / redundant_calls / explain_flags:
       callsite = {"filename": "...", "lineno": 456, "function": "..."}
-
   top_queries (Slow Query findings):
       callsite = "apps/myapp/foo.py:456"   # pre-formatted string
 
-Before the normalizer, ``_app_from_finding`` crashed on the string
-shape with ``AttributeError: 'str' object has no attribute 'get'``
-on any session containing Slow Query findings. Production trigger:
-a Purchase Order Approve session on bluspring_customization hit
-this and failed to generate any report at all.
-
-_finding_to_dict now normalizes at load time; _app_from_finding
-double-checks so direct callers (tests, retry paths, future direct
-consumers of _bucket_findings_by_app) can't crash on un-normalized
+The string shape once crashed ``_app_from_finding`` with ``AttributeError: 'str'
+object has no attribute 'get'``. _finding_to_dict now normalizes at load time and
+_app_from_finding double-checks so direct callers can't crash on un-normalized
 data either.
 """
 
@@ -64,8 +57,8 @@ class TestNormalizeCallsite:
 		assert cs["lineno"] == 10
 
 	def test_string_with_windows_drive_letter_keeps_path(self):
-		"""Partitioning from the RIGHT means a drive letter path like
-		'C:\\x\\foo.py:12' keeps the 'C:' intact."""
+		"""Partitioning from the right keeps a drive-letter path like
+		'C:\\x\\foo.py:12' intact (the 'C:' survives)."""
 		cs = _normalize_callsite("C:\\apps\\myapp\\foo.py:12")
 		assert cs["filename"] == "C:\\apps\\myapp\\foo.py"
 		assert cs["lineno"] == 12
@@ -81,8 +74,8 @@ class TestNormalizeCallsite:
 		assert _normalize_callsite(12345) is None
 
 	def test_non_numeric_suffix_not_treated_as_lineno(self):
-		"""'foo.py:bar' keeps the filename intact and sets lineno=None
-		(don't try to parse 'bar' as an int)."""
+		"""'foo.py:bar' keeps the filename intact and sets lineno=None ('bar' isn't
+		parsed as an int)."""
 		cs = _normalize_callsite("foo.py:bar")
 		assert cs["filename"] == "foo.py:bar"
 		assert cs["lineno"] is None
@@ -92,9 +85,9 @@ class TestAppFromFindingRegression:
 	"""Regression: the exact production crash that motivated this fix."""
 
 	def test_slow_query_with_string_callsite_does_not_crash(self):
-		"""Production crash: top_queries emits a Slow Query finding with
-		callsite as a string. _app_from_finding crashed with
-		AttributeError: 'str' object has no attribute 'get'."""
+		"""A Slow Query finding from top_queries carries a string callsite;
+		_app_from_finding must not crash on it (it once raised AttributeError:
+		'str' object has no attribute 'get')."""
 		finding = {
 			"finding_type": "Slow Query",
 			"severity": "High",
@@ -145,8 +138,8 @@ class TestAppFromFindingRegression:
 
 
 class TestFindingToDictNormalizes:
-	"""When loading findings from DB, _finding_to_dict must convert
-	the string callsite to dict shape before handing downstream."""
+	"""When loading findings from DB, _finding_to_dict converts a string callsite
+	to dict shape before handing it downstream."""
 
 	def _row(self, detail):
 		row = types.SimpleNamespace()
@@ -191,8 +184,8 @@ class TestFindingToDictNormalizes:
 class TestImpactScopeLabelBackfill:
 	"""Legacy user N+1 findings (analyzed before impact_scope_label shipped) get
 	the label backfilled from the stable finding_type so the report card's scope
-	tag agrees with the TL;DR hero on re-render but only when the finding
-	actually carries a loop-scoped magnitude (finding ⑦)."""
+	tag agrees with the TL;DR hero on re-render, but only when the finding actually
+	carries a loop-scoped magnitude."""
 
 	def _row(self, finding_type, detail):
 		row = types.SimpleNamespace()
@@ -216,10 +209,10 @@ class TestImpactScopeLabelBackfill:
 		assert finding["technical_detail"]["impact_scope_label"] == "recoverable"
 
 	def test_legacy_cumulative_only_n_plus_one_not_mislabelled(self):
-		"""Finding ⑦: a pre-loop-scoping finding stored estimated_impact_ms as the
-		cross-request CUMULATIVE total and has no loop_count/run_count. Tagging it
-		'recoverable' (a loop-scoped claim) would misdescribe the number, so the
-		backfill must leave it unlabelled."""
+		"""A pre-loop-scoping finding stored estimated_impact_ms as the cross-request
+		cumulative total and has no loop_count/run_count. Tagging it 'recoverable' (a
+		loop-scoped claim) would misdescribe the number, so the backfill leaves it
+		unlabelled."""
 		row = self._row("N+1 Query", {"normalized_query": "SELECT 1"})
 		finding = _finding_to_dict(row)
 		assert "impact_scope_label" not in finding["technical_detail"]
@@ -247,9 +240,8 @@ class TestImpactScopeLabelBackfill:
 
 
 class TestEndToEndRender:
-	"""The real scenario: a session with a Slow Query finding (string
-	callsite) + an N+1 finding (dict callsite) must render without
-	crashing and both must land in correct app buckets."""
+	"""A session with a Slow Query finding (string callsite) + an N+1 finding (dict
+	callsite) must render without crashing, with both in the correct app buckets."""
 
 	def test_mixed_callsite_shapes_render_without_error(self):
 		from optimus import renderer

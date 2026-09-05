@@ -1,13 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""D.M-S3 finding impact cannot exceed parent action wall.
+"""Finding impact cannot exceed the parent action wall.
 
 Every Slow Hot Path / Hook Bottleneck finding rooted in an action carries
-``action_ref`` (the action_idx as a string) and ``estimated_impact_ms``.
-The latter must be ≤ that action's ``duration_ms``; a finding claiming
-to consume more than the action took is nonsensical and would mislead
-both the human reader and the action-plan ranking.
+``action_ref`` (the action_idx as a string) and ``estimated_impact_ms``; the
+latter must be ≤ that action's ``duration_ms`` (a finding claiming more than the
+action took would mislead both the reader and the action-plan ranking).
 """
 
 import json
@@ -29,9 +28,9 @@ def _node(function, filename, cumulative, self_ms, children):
 
 
 def test_slow_hot_path_estimated_impact_bounded_by_action_wall():
-	"""Use a synthetic tree where the hot subtree's cumulative_ms
-	exceeds the action wall (cross-action inflation) the emitted
-	finding's estimated_impact_ms must still be clamped."""
+	"""A synthetic tree whose hot subtree cumulative_ms exceeds the action wall
+	(cross-action inflation): the emitted finding's estimated_impact_ms must still
+	be clamped."""
 	tree = _node(
 		"my_app.work.do",
 		"apps/my_app/work.py",
@@ -57,9 +56,9 @@ def test_slow_hot_path_estimated_impact_bounded_by_action_wall():
 
 
 def test_findings_with_action_ref_respect_action_wall():
-	"""Cross-check: for every finding produced by walking a tree, the
-	finding's estimated_impact_ms must not exceed the action wall it
-	was rooted in regardless of how the subtree's cumulative scales."""
+	"""For every finding produced by walking a tree, estimated_impact_ms must not
+	exceed the action wall it was rooted in, regardless of how the subtree's
+	cumulative scales."""
 	# Realistic-ish tree: top-level user code with two slow children.
 	tree = _node(
 		"my_app.views.handler",

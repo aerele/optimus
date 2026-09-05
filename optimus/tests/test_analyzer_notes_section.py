@@ -3,19 +3,10 @@
 
 """Pins the removal of the 'Analyzer notes' section from the report.
 
-History: pre-v0.5.2 the analyzer suppression warnings ("Suppressed N SQL
-findings from framework code", "Skipped M non-SELECT statements", …) were
-concatenated into a single <p> in the header a wall of text. v0.5.2 moved
-them to a collapsed-by-default section at the bottom with a short header
-pointer. v0.6.x dropped the header pointer; then the section itself was
-removed entirely (the suppression bookkeeping is debug noise the report
-doesn't need to surface). ``session_doc.analyzer_warnings`` is still computed
-and stored on the DocType it's just no longer rendered. Truncation, the one
-warning users *do* need to see, has its own prominent banner at the top
-(``truncation_banner``) independent of this.
-
-This test makes sure a future edit can't accidentally re-introduce the
-section, the header pointer, or the "Notes" link in the "Jump to:" nav.
+``session_doc.analyzer_warnings`` is still computed and stored but no longer
+rendered; truncation (the one warning users need) has its own banner. These
+tests ensure a future edit can't re-introduce the section, its header pointer
+or the "Notes" nav link.
 """
 
 import types
