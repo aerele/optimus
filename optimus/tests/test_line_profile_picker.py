@@ -205,14 +205,11 @@ class TestBuildCandidatesFromTrees:
 
 
 class TestPureHelperFiltering:
-	"""Plumbing / wrapper / dispatch frames that every request passes
-	through (frappe.app.application, frappe.handler.handle, recorder,
-	typing_validations wrapper, document.save's decorator chain, etc.)
-	dominate the leaderboard but aren't actionable to line-profile.
-
-	Reuses the same filter the call_tree analyzer applies to Repeated
-	Hot Frame so the picker surfaces the same shape of "real logic" the
-	user can actually optimize.
+	"""Plumbing / wrapper / dispatch frames every request passes through
+	(frappe.app.application, frappe.handler.handle, recorder, typing_validations
+	wrapper, document.save's decorator chain, etc.) dominate the leaderboard but
+	aren't actionable to line-profile, so the picker drops them (reusing the
+	call_tree analyzer's Repeated Hot Frame filter).
 	"""
 
 	def test_frappe_app_application_dropped(self):
@@ -522,11 +519,9 @@ class TestExpandHotChain:
 		assert [c["depth"] for c in chain] == [0, 1, 2]
 
 	def test_max_depth_zero_walks_to_leaf(self):
-		"""v0.13.x: ``max_depth = 0`` means unbounded walk to the leaf
-		instead of the legacy "0 = no descent" sentinel that the pre-
-		v0.13.x ``while depth < max_depth`` loop accidentally
-		implemented. The Strict Sensitivity Profile uses 0 here so
-		auto-expand follows the entire hot chain in one shot."""
+		"""``max_depth = 0`` means an unbounded walk to the leaf (not "no
+		descent"). The Strict Sensitivity Profile uses 0 so auto-expand follows
+		the entire hot chain in one shot."""
 		# Same 5-deep linear chain as the cap test above.
 		leaf = _frame("level5", "apps/my_app/my_app/x.py", 5, 100.0)
 		l4 = _frame("level4", "apps/my_app/my_app/x.py", 4, 110.0, children=[leaf])
@@ -544,11 +539,8 @@ class TestExpandHotChain:
 		assert [c["depth"] for c in chain] == [0, 1, 2, 3, 4]
 
 	def test_min_ms_zero_includes_every_measurable_child(self):
-		"""v0.13.x: ``min_ms = 0`` means no minimum every measurable
-		child is eligible. Closes the gap where pre-v0.13.x the
-		``or 50.0`` fallback in api.py silently re-applied the default
-		floor and skipped any child < 50ms even when the operator
-		wanted the deepest possible coverage."""
+		"""``min_ms = 0`` means no minimum: every measurable child is eligible,
+		including one below the legacy 50ms floor."""
 		# Two-step chain where the second hop is below the legacy 50ms
 		# floor but still measurable. Under ``min_ms = 0`` it MUST be
 		# included.
@@ -694,9 +686,8 @@ class TestResolveFreeformClassMethodFallback:
 
 
 class TestRecommendedFlag:
-	"""v0.7.x (P2): candidates carry a ``recommended`` flag so the picker can
-	pre-tick the real hot paths (non-framework user code above a time
-	threshold) one click to line-profile them, no manual hunting."""
+	"""Candidates carry a ``recommended`` flag so the picker can pre-tick the
+	real hot paths (non-framework user code above a time threshold)."""
 
 	def test_user_hot_frame_recommended(self):
 		tree = _root(
@@ -720,9 +711,8 @@ class TestRecommendedFlag:
 
 
 class TestMultiTreePicker:
-	"""v0.13: the picker walks the top-N hottest action trees, not just the
-	single hottest so a flow with several slow actions surfaces them all
-	(previously only the one dominant tree's frames appeared)."""
+	"""The picker walks the top-N hottest action trees, not just the single
+	hottest, so a flow with several slow actions surfaces them all."""
 
 	def test_surfaces_frames_from_multiple_trees(self):
 		hot = _root(
@@ -823,20 +813,11 @@ class TestPickerDialogIndent:
 	"""Regression guard for the phase-2 picker dialog's tree rendering
 	(``build_tree_html`` in optimus_session.js).
 
-	The "indent is wrong" report: a top-level (depth-0) LEAF candidate
-	(e.g. ``bg_recheck_users``: a hot frame with no surfaced children) was
-	rendered with a hard-coded ``padding:2px 0 2px 22px`` left pad. When it
-	followed a sibling root rendered as a collapsed ``<details>`` (e.g.
-	``_maybe_log_user``), the 22px pad made the leaf look NESTED under that
-	<details>, even though the picker correctly assigns it ``depth == 0``.
-
-	The Python side is right (verified by the depth/dedup tests above); the
-	defect was purely in the dialog's HTML. The fix gives every row a
-	fixed-width ``.fp-toggle`` cell (a chevron for expandable rows, an
-	invisible spacer for leaves) so a depth-0 leaf's checkbox aligns flush
-	with depth-0 parents, and conveys depth ONLY through ``.fp-children``
-	DOM nesting. These guards keep the old per-row leaf indent from
-	creeping back.
+	A hard-coded ``padding:2px 0 2px 22px`` left pad made a depth-0 leaf look
+	nested under a preceding collapsed ``<details>`` sibling. The fix gives
+	every row a fixed-width ``.fp-toggle`` cell (chevron or spacer) so
+	checkboxes align by depth, conveying depth only through ``.fp-children`` DOM
+	nesting. These guards keep the per-row leaf indent from creeping back.
 	"""
 
 	def _js_source(self) -> str:

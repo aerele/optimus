@@ -519,7 +519,7 @@ class TestHideFrameworkTablesToggle:
 
 	def _four_tables(self):
 		# One user-app table + three framework/internal ones (a schema-meta,
-		# a framework-internal session table, and information_schema.*).
+		# a framework-internal session table and information_schema.*).
 		return [
 			{"table": "tabSales Invoice", "duration_ms": 140.0, "queries": 840,
 			 "read_count": 4, "write_count": 836, "read_time_ms": 2.0, "write_time_ms": 138.0,
@@ -604,11 +604,10 @@ class TestHideFrameworkTablesToggle:
 
 
 class TestRenderConfigFooter:
-	"""v0.6.x: the report footer stamps the render-affecting settings that
-	were in effect at render time. Without this stamp, users who toggle a
-	Optimus Settings flag and re-open an existing (un-regenerated) HTML
-	file see no change and assume a bug when in fact the saved file is
-	frozen at its rendered-time settings."""
+	"""The report footer stamps the render-affecting settings in effect at render
+	time, so a user who toggles a flag and re-opens an old (un-regenerated) HTML
+	file understands why nothing changed: the file is frozen at its render-time
+	settings."""
 
 	def _doc(self):
 		import json

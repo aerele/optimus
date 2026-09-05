@@ -1,19 +1,15 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Server Script render-pipeline integration (display label + Desk link +
-DB-read source snippet + own app bucket).
+"""Server Script render-pipeline integration (display label + Desk link + DB-read
+source snippet + own app bucket).
 
-Frappe's ``safe_exec`` (apps/frappe/frappe/utils/safe_exec.py:49,118) compiles
-Server Scripts with a synthetic filename ``<serverscript>: <scrubbed-name>``.
-The capture + analyze halves of Optimus already treat these as user code
-(call_tree.py:475-495 explicitly carves Server Scripts out of the plumbing
-filter). The renderer is what was lacking labels collapsed to a generic
-``<server-script body>``, app bucketing went to ``[other]``, no source
-snippet, no editor link.
-
-This file covers the new ``optimus/server_script_source.py`` helper + the
-wired-in label / bucketing / snippet / link behavior.
+Frappe's ``safe_exec`` compiles Server Scripts with a synthetic filename
+``<serverscript>: <scrubbed-name>``. Optimus's capture + analyze halves already
+treat these as user code; the renderer previously did not (labels collapsed to
+``<server-script body>``, bucketing went to ``[other]``, no snippet, no link).
+Covers the ``optimus/server_script_source.py`` helper and the wired-in label /
+bucketing / snippet / link behavior.
 """
 
 import re
@@ -28,9 +24,8 @@ from optimus.analyzers import call_tree
 @pytest.fixture
 def fake_frappe_db(monkeypatch):
 	"""Stub ``frappe.get_all`` so ``get_server_script_record`` can be exercised
-	without a real Frappe site. The function now scans Server Scripts via the
-	portable ORM (frappe.get_all) and matches with frappe.scrub. Returns a
-	mutable ``{rows: ...}`` dict the test sets to drive the candidate list."""
+	without a real Frappe site. Returns a mutable ``{rows: ...}`` dict the test
+	sets to drive the candidate list."""
 	import frappe
 
 	state = {"rows": []}
@@ -152,9 +147,8 @@ class TestDeskUrl:
 
 class TestCallTreeDisplay:
 	def test_display_label_includes_script_name_and_lineno(self):
-		"""Named Server Script frames must surface their name + lineno in the
-		call-tree display label, replacing the old opaque ``<server-script
-		body>`` blob."""
+		"""Named Server Script frames surface their name + lineno in the call-tree
+		display label instead of the opaque ``<server-script body>`` blob."""
 		node = {
 			"filename": "<serverscript>: my_script",
 			"function": "",
@@ -167,8 +161,8 @@ class TestCallTreeDisplay:
 		assert label != "<server-script body>"
 
 	def test_display_label_for_bare_server_script_keeps_fallback(self):
-		"""Bare ``<serverscript>`` (no name) has nothing better to show keep
-		a generic label (no crash, no name confusion)."""
+		"""Bare ``<serverscript>`` (no name) keeps a generic label (no crash, no name
+		confusion)."""
 		node = {"filename": "<serverscript>", "function": "", "lineno": None}
 		label = call_tree._display_name_for_node(node)
 		# Tolerant assertion: anything that's not blank + identifies it as a
@@ -188,8 +182,8 @@ class TestAppBucketing:
 		assert call_tree._top_level_app("", "<serverscript>") == "Server Scripts"
 
 	def test_other_angle_bracket_filenames_still_route_to_other(self):
-		"""Regression guard: don't widen the carve-out beyond Server Scripts
-		``<string>`` / ``<frozen …>`` etc. must still go to ``[other]``."""
+		"""The carve-out must not widen beyond Server Scripts: ``<string>`` /
+		``<frozen …>`` etc. must still go to ``[other]``."""
 		assert call_tree._top_level_app("", "<string>") == "[other]"
 		assert call_tree._top_level_app("", "<frozen importlib._bootstrap>") == "[other]"
 
@@ -201,8 +195,8 @@ class TestAppBucketing:
 
 class TestRendererSnippetAndLink:
 	def test_resolve_source_path_returns_server_script_sentinel(self, fake_frappe_db):
-		"""``_resolve_source_path`` must distinguish Server Scripts from
-		``None`` so downstream snippet readers + link builders can branch."""
+		"""``_resolve_source_path`` must distinguish Server Scripts from ``None`` so
+		downstream snippet readers + link builders can branch."""
 		from optimus import renderer
 
 		fake_frappe_db["rows"] = [{"name": "Foo", "script": "a\nb"}]
@@ -234,10 +228,9 @@ class TestRendererSnippetAndLink:
 
 class TestEndToEndServerScriptFinding:
 	def test_finding_card_shows_snippet_and_desk_link(self, fake_frappe_db):
-		"""Render a session with one finding whose callsite is a Server Script.
-		The card must (a) link to the Desk Server Script form, (b) inline the
-		Server Script's source body not a vscode:// link, not a bare
-		``<server-script body>`` blob."""
+		"""A finding whose callsite is a Server Script must render a card that (a)
+		links to the Desk Server Script form and (b) inlines the script's source
+		body (not a vscode:// link, not a ``<server-script body>`` blob)."""
 		from optimus import renderer
 
 		fake_frappe_db["rows"] = [

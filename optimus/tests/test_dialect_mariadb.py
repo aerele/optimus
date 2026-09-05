@@ -1,10 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""MariaDBDialect adapter the verbatim-lifted EXPLAIN / index / infra logic,
+"""Tests for the MariaDBDialect adapter's EXPLAIN / index / infra logic,
 exercised with a fake ``frappe.db`` (no real site). Asserts the normalized
-mappings match what the analyzers used to read off raw rows.
-"""
+mappings match the raw rows the analyzers read."""
 
 from __future__ import annotations
 

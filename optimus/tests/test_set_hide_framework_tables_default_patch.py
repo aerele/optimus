@@ -1,12 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.6.x ``set_hide_framework_tables_default`` patch.
+"""Tests for the ``set_hide_framework_tables_default`` patch.
 
-The JSON now ships ``"default": "1"`` for the ``hide_framework_tables``
-Check field, but existing Single rows persisted a 0 before the default
-was added so a one-time patch flips 0/None → 1. Truthy values are
-left alone (idempotent + respects any deliberate ``"1"`` already set).
+The JSON ships ``"default": "1"`` for the ``hide_framework_tables`` Check
+field, but Single rows persisted before the default was added hold 0, so the
+patch flips 0/None to 1. Truthy values are left alone (idempotent).
 """
 
 import sys
@@ -50,21 +49,10 @@ def _install_frappe_stub(monkeypatch):
 
 
 def _import_patch(monkeypatch):
-	"""Return the patch module, re-resolved against the CURRENT
-	``sys.modules["frappe"]`` stub.
-
-	Why a reload (and not a delitem): ``from ... import`` doesn't
-	re-execute a module that's still cached in ``sys.modules`` or
-	referenced via the parent package's ``__dict__``. If we delete it
-	first, the next ``from`` lookup either fetches a stale parent-attr
-	or re-imports cleanly but mixing with ``monkeypatch.delitem`` got
-	tangled with pytest's teardown ordering and surfaced an
-	``ImportError: module not in sys.modules`` mid-suite. The reliable
-	path is: ensure the module is in ``sys.modules`` (via plain import,
-	which is cached fast), then ``importlib.reload`` to re-run the
-	top-level code under the current stub. ``monkeypatch`` (unused
-	below kept in the signature for symmetry / future use) doesn't
-	need to touch the patch module only the frappe stub.
+	"""Return the patch module, re-resolved against the current
+	``sys.modules["frappe"]`` stub via ``importlib.reload`` (a plain ``from
+	import`` won't re-execute a cached module; ``delitem`` tangles with pytest
+	teardown ordering). ``monkeypatch`` is unused (kept for symmetry).
 	"""
 	import importlib
 

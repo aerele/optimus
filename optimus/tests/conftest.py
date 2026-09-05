@@ -252,9 +252,9 @@ def _sys_modules_fence():
 
 @pytest.fixture(autouse=True)
 def _reset_dbdialect_cache():
-	"""Each test gets a fresh dialect adapter prevents the cached
-	MariaDBDialect (and its max_connections cache) leaking across tests, and
-	lets the dialect-factory tests flip db_type freely."""
+	"""Give each test a fresh dialect adapter so the cached MariaDBDialect (and
+	its max_connections cache) can't leak across tests and the dialect-factory
+	tests can flip db_type freely."""
 	try:
 		from optimus import dbdialect
 		dbdialect._cache.clear()

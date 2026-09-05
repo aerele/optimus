@@ -292,7 +292,7 @@ class TestAttachActionContext:
 
 
 class TestResolvedDocSidecarWiring:
-	"""v0.12.39 regression guards: the resolved-doc write must ride the Optimus sidecar (never the recorder-hash RMW, dead for HTTP) and analyze must merge + clean it up."""
+	"""Regression guards: the resolved-doc write must ride the Optimus sidecar (never the recorder-hash RMW, dead for HTTP) and analyze must merge + clean it up."""
 
 	def test_after_request_writes_resolved_doc_to_sidecar(self):
 		import inspect

@@ -3,16 +3,12 @@
 
 """Unit tests for the Sensitivity Profile presets in optimus.settings.
 
-A ``config_profile`` Select (Strict / Recommended / Relaxed / Custom) drives
-the detection-sensitivity thresholds. Storage strategy is *resolve at read
-time*: only the profile name is stored; ``_resolve()`` maps profile →
-thresholds for the named presets, so ``Recommended`` always tracks the current
-shipped defaults. Only ``Custom`` reads the per-field stored values (preserving
-the pre-profile precedence: DocType row > site_config > default).
-
-Back-compat: an existing Single predating the field has no ``config_profile``
-key, which must resolve as ``Custom`` so a previously-tuned threshold keeps
-driving analysis (no silent reset to Recommended, no migration patch).
+A ``config_profile`` Select (Strict / Recommended / Relaxed / Custom) drives the
+detection-sensitivity thresholds, resolved at read time: only the profile name is
+stored and ``_resolve()`` maps it to thresholds, so ``Recommended`` tracks the
+shipped defaults. Only ``Custom`` reads the per-field stored values (DocType row >
+site_config > default). A Single with no ``config_profile`` key resolves as
+``Custom`` so a previously-tuned threshold keeps driving analysis.
 """
 
 import json
@@ -47,7 +43,7 @@ _REFVAL_RE = re.compile(
 # Kept here (not imported) so the test pins the contract independently
 # of the implementation's own tuple. v0.13.x expanded the set from 9
 # detection-sensitivity knobs to 19 including capture caps,
-# retention, display filters, Phase-2 UI knobs, and the AI auto-suggest
+# retention, display filters, Phase-2 UI knobs and the AI auto-suggest
 # cap so the UI's "Reference values" promise is honored everywhere
 # it's advertised.
 SENSITIVITY_KEYS = (
@@ -81,9 +77,8 @@ SENSITIVITY_KEYS = (
 
 @pytest.fixture(autouse=True)
 def _frappe_stub(monkeypatch):
-	"""Minimal frappe stub, mirroring test_settings.py settings.py
-	imports frappe lazily, but get_config's cache path touches
-	frappe.cache, so give it harmless no-ops."""
+	"""Minimal frappe stub: settings.py imports frappe lazily, but get_config's
+	cache path touches frappe.cache, so give it harmless no-ops."""
 	stub = types.ModuleType("frappe")
 	stub.cache = types.SimpleNamespace(
 		get_value=lambda k: None,
@@ -188,11 +183,9 @@ class TestProfileTable:
 			assert settings._PROFILES["Strict"][key] >= settings._PROFILES["Relaxed"][key], key
 
 	def test_strict_uses_unlimited_sentinel_on_capped_knobs(self):
-		"""v0.13.x: every cap that honors 0-as-unlimited at its read site
-		uses 0 under Strict (the strictest posture). Relaxed always uses
-		a positive literal the read site code that branches on ``cap
-		> 0`` would otherwise act unbounded under Relaxed too, defeating
-		the point of the preset."""
+		"""Every cap that honors 0-as-unlimited at its read site uses 0 under Strict
+		(strictest posture) and a positive literal under Relaxed (else the ``cap >
+		0`` read-site branch would act unbounded under Relaxed too)."""
 		for key in self._STRICT_UNBOUNDED_KEYS:
 			assert settings._PROFILES["Strict"][key] == 0, f"{key} Strict must be 0"
 			assert settings._PROFILES["Relaxed"][key] > 0, f"{key} Relaxed must be > 0"

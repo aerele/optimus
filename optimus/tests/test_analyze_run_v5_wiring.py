@@ -1,13 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Source-inspection regression guards for analyze.py's v0.5.0 wiring.
+"""Source-inspection regression guards for analyze.py's analyzer wiring.
 
-These protect against silent removal/renaming of the v0.5.0 integration
-points. Since analyze.run is a large orchestrator that's hard to
-exercise end-to-end without a running Frappe site, the cheapest
-regression guard is to check that the wiring symbols literally appear
-in the source.
+analyze.run is a large orchestrator that's hard to exercise end-to-end without
+a running Frappe site, so these guard against silent removal or renaming of the
+integration points by checking the wiring symbols literally appear in the source.
 """
 
 import inspect
@@ -69,12 +67,9 @@ def test_persist_writes_v5_aggregate_json():
 
 
 def test_truncate_finding_titles_clamps_overlong():
-	"""Safety net: _persist clamps any finding.title that exceeds the
-	140-char Optimus Finding.title limit. Analyzers are supposed to
-	produce short titles (via base.short_filename), but pathological
-	inputs from future analyzers or unexpected data shapes could still
-	push past the limit. Clamping prevents CharacterLengthExceededError
-	from destroying the whole analyze pipeline."""
+	"""_persist clamps any finding.title over the 140-char Optimus Finding.title
+	limit, preventing CharacterLengthExceededError from breaking the analyze
+	pipeline on a pathological title."""
 	findings = [
 		# Under the limit untouched.
 		{"title": "Short title"},

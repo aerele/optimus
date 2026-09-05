@@ -1,16 +1,14 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Pure-Python unit tests for the v0.6.x call-tree drill-down walker.
+"""Pure-Python unit tests for the call-tree drill-down walker.
 
-The walker locates a finding's origin frame in the action's pyinstrument
-tree and follows hottest-child links down to (a) a framework frame, (b)
-``max_depth``, (c) the signal floor (10% of origin's cumulative_ms), or
-(d) a leaf.
+The walker locates a finding's origin frame in the action's pyinstrument tree and
+follows hottest-child links down to (a) a framework frame, (b) ``max_depth``,
+(c) the signal floor (10% of origin's cumulative_ms), or (d) a leaf.
 
-Each node in the tree is a dict with the shape produced by
-``analyzers/call_tree._walk_pyi_frame``: function / filename / lineno /
-self_ms / cumulative_ms / children."""
+Each tree node is a dict shaped like ``analyzers/call_tree._walk_pyi_frame``:
+function / filename / lineno / self_ms / cumulative_ms / children."""
 
 from optimus.renderer import _find_node_in_tree, _walk_drilldown_chain
 
@@ -178,8 +176,8 @@ class TestWalkDrilldownChain:
 		assert _walk_drilldown_chain(tree, callsite) == []
 
 	def test_tracked_apps_inclusion_mode_still_stops_at_frappe(self):
-		"""With tracked_apps=("ugly_code",), the frappe frame is framework
-		via inclusion mode same stop."""
+		"""With tracked_apps=("ugly_code",), the frappe frame is framework via
+		inclusion mode, so the walker still stops there."""
 		tree = _screenshot_tree()
 		callsite = {
 			"filename": "apps/ugly_code/ugly_code/python/common.py",

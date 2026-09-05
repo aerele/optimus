@@ -2,19 +2,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Analyzer: server infrastructure pressure (v0.5.0).
+"""Analyzer: server infrastructure pressure.
 
-Reads per-recording infra snapshots written by
-hooks_callbacks.after_request/after_job (stored under
-profiler:infra:<recording_uuid>). analyze.run injects each recording's
-infra dict as recording["infra"] before calling this analyzer, so the
-analyzer itself is pure.
-
-Emits four finding types:
-  - Resource Contention        (system CPU sustained > CPU_HIGH_PCT)
-  - Memory Pressure            (worker RSS growth or swap active)
-  - DB Pool Saturation         (threads_running / threads_connected > 0.9)
-  - Background Queue Backlog   (any RQ queue depth > RQ_BACKLOG_WARN)
+Reads the per-recording infra snapshot that analyze.run injects as
+recording["infra"] (so the analyzer is pure). Emits four finding types:
+Resource Contention (sustained high CPU), Memory Pressure (RSS growth or swap),
+DB Pool Saturation (connections near max) and Background Queue Backlog (RQ
+queue depth over threshold).
 """
 
 import json
@@ -197,7 +191,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                 f"The server's CPU was above {cpu_high}% during "
                 f"{len(cpu_breaches)} of {total_actions} steps in your flow "
                 f"(peak {max(cpu_values):.0f}%). This usually means the box is "
-                "overloaded either your own flow is CPU-bound, or another "
+                "overloaded. Either your own flow is CPU-bound, or another "
                 "process on the server is competing for CPU while you profile."
             ),
             "technical_detail_json": json.dumps({
@@ -210,7 +204,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                     "If your own code is hot (check the Call Tree / N+1 "
                     "findings), optimize there first. If the call tree looks "
                     "idle but CPU is still high, something else on the server "
-                    "is using CPU look at other workers, cron jobs, or a "
+                    "is using CPU. Look at other workers, cron jobs, or a "
                     "noisy neighbor."
                 ),
             }, default=str),
@@ -261,7 +255,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                 "fix_hint": (
                     "Investigate cache growth (frappe.cache, doc caches) and "
                     "long-lived object references. If swap is active, the box "
-                    "is undersized add RAM or move the profiled workload."
+                    "is undersized. Add RAM or move the profiled workload."
                 ),
             }, default=str),
             "estimated_impact_ms": 0,

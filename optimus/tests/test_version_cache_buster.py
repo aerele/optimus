@@ -1,10 +1,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Test that hooks.py uses a cache-busting version suffix for static
-assets. v0.5.2: the suffix is ``<__version__>.<mtime>`` so file edits
-auto-invalidate the browser cache even between releases. See
-hooks._asset_version for the rationale."""
+"""Test that hooks.py uses a cache-busting version suffix for static assets.
+The suffix is ``<__version__>.<mtime>`` so file edits auto-invalidate the
+browser cache even between releases. See hooks._asset_version for the
+rationale."""
 
 import re
 
@@ -56,11 +56,8 @@ def test_app_include_paths_are_correct():
 
 
 def test_mtime_component_auto_invalidates_on_file_edit(tmp_path, monkeypatch):
-	"""v0.5.2: the ?v= suffix includes the file's mtime so ANY edit to
-	the JS/CSS auto-busts the browser cache even when __version__
-	hasn't been bumped. Pre-v0.5.2 was a real user incident: v0.5.2's
-	realtime code shipped while the browser kept serving v0.5.1's
-	polling code because the query string was unchanged.
+	"""The ?v= suffix includes the file's mtime so any edit to the JS/CSS
+	auto-busts the browser cache even when __version__ hasn't been bumped.
 	"""
 	from optimus.hooks import _asset_version
 

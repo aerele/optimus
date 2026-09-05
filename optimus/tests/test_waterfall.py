@@ -1,11 +1,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for `renderer._build_waterfall`: the v0.7.x redesign Phase
-C horizontal-bar action timeline.
+"""Tests for ``renderer._build_waterfall``: the horizontal-bar action timeline.
 
-Top-N actions by duration, scaled to the displayed slice's max so
-short actions stay visible. Bar colour:
+Top-N actions by duration, scaled to the displayed slice's max so short actions
+stay visible. Bar colour:
 - `hot` when a High-severity finding points at this action.
 - `bg` when the action is a background job.
 - otherwise: default (info blue).

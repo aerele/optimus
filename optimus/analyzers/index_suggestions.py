@@ -1,20 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Analyzer: aggregated index suggestions across the session.
+"""Aggregated missing-index suggestions across the whole session.
 
-Wraps the existing
-`frappe.core.doctype.recorder.recorder._optimize_query` (which uses the
-`DBOptimizer` heuristic) to identify a single best missing index per query.
-We run it across the union of unique normalized queries in the session,
-then dedupe and aggregate suggestions by (table, column) so a customer
-sees one suggestion per missing index with the cumulative time it would
-save and the queries that would benefit.
-
-This is the per-session aggregation that the existing per-request
-optimizer doesn't do. Per-request, you only see the index for THAT
-request's queries; per-session, you see the index that would help across
-the whole flow.
+Runs frappe's recorder ``_optimize_query`` (DBOptimizer heuristic) over the
+union of unique normalized queries, then dedupes and aggregates by
+(table, column) so each missing index is reported once with the cumulative
+time it would save and the queries that benefit. This is the per-session view
+the per-request optimizer doesn't provide.
 """
 
 import json
@@ -33,16 +26,9 @@ from optimus.dbdialect import get_dialect
 def _scrub_literals(text: str) -> str:
 	"""Best-effort removal of SQL literals from a query before logging.
 
-	The error log is typically admin-only but can sometimes be exposed
-	to non-admins via permission misconfig or support workflows. Since
-	this query string is going into a log that might be shared, we
-	replace obvious string literals and long numeric sequences with ?
-	placeholders.
-
-	This is paranoid belt-and-suspenders the upstream query should
-	already be normalized by mark_duplicates by the time we see it, but
-	if normalization was skipped or the query contained an unusual
-	pattern, we scrub here too.
+	Replaces obvious string literals and long numeric sequences with ?
+	placeholders, in case the query lands in a log that gets shared. The
+	query should already be normalized upstream; this is defence in depth.
 	"""
 	if not text:
 		return text
@@ -66,7 +52,7 @@ MAX_EXAMPLE_QUERIES = 3
 #
 # 892 / 1526 = 0.58ms per query below MariaDB's per-query overhead.
 # On a small framework table (tabDocType is typically ~800 rows) the
-# table already fits in memory, the scan is effectively free, and
+# table already fits in memory, the scan is effectively free and
 # adding a btree index yields no measurable improvement. The user
 # spends time on an index migration that saves nothing.
 #
@@ -88,12 +74,12 @@ MAX_LOGGED_FAILURES = 3
 #
 # sql_metadata is a third-party SQL parser with well-known limitations: it
 # trips on correlated subqueries, complex ORDER BY expressions containing
-# functions (if/locate/coalesce), window functions, CTEs, and a few other
+# functions (if/locate/coalesce), window functions, CTEs and a few other
 # shapes Frappe apps legitimately emit. When it can't parse a query, it
 # raises either ``ValueError: too many values to unpack`` (from an internal
 # tuple unpacking) or ``TypeError`` (from an unexpected None in its
 # token stream). These are PARSER LIMITATIONS the user cannot rewrite
-# their query to make sql_metadata happy, and they cannot add an index to
+# their query to make sql_metadata happy and they cannot add an index to
 # fix a parse failure anyway.
 #
 # Pre-v0.5.1 the analyzer logged every parse failure to Frappe's Error
@@ -105,7 +91,7 @@ MAX_LOGGED_FAILURES = 3
 # opportunities they could act on.
 #
 # v0.5.1: parser-limitation exceptions are counted but NOT logged to
-# the Error Log, and the user-facing warning is softer it explains
+# the Error Log and the user-facing warning is softer it explains
 # that sql_metadata can't parse these shapes and there's nothing to fix.
 # Real errors (AttributeError, ProgrammingError, RuntimeError, etc.)
 # still go to the Error Log and still produce the loud warning, because
@@ -186,12 +172,10 @@ _SAFE_INFOSCHEMA_RE = re.compile(r"^information_schema\.[A-Za-z0-9_]+$")
 
 
 def _is_safe_table_name(name) -> bool:
-	"""True iff ``name`` is one of the table-name shapes the indexer is
-	allowed to inspect via raw SQL. See ``_SAFE_TAB_TABLE_RE`` /
-	``_SAFE_INFOSCHEMA_RE`` for the exact grammar. Any other shape (an
-	attempt at SQL injection via crafted DocType names, a stray space,
-	a backtick, a semicolon, …) returns False and short-circuits the
-	caller back to its empty-set fallback."""
+	"""True iff ``name`` is a table-name shape the indexer may inspect via raw
+	SQL (see ``_SAFE_TAB_TABLE_RE`` / ``_SAFE_INFOSCHEMA_RE``). Any other shape
+	(SQL-injection attempt, stray space, backtick, semicolon, …) returns False
+	so the caller falls back to its empty set."""
 	if not isinstance(name, str) or not name:
 		return False
 	# Defence in depth: reject backticks, quotes, semicolons even though
@@ -202,19 +186,10 @@ def _is_safe_table_name(name) -> bool:
 
 
 def _get_indexed_columns(table: str) -> set[str]:
-	"""Return the set of columns on ``table`` that already have at
-	least one index WHERE this column is the leftmost of the index key.
-
-	Non-leftmost composite columns are NOT counted MariaDB's btree
-	can't use the index when a query filters on just that column, so
-	a Missing Index suggestion is still actionable.
-
-	Returns an empty set on any DB error (table missing, access denied,
-	no real Frappe site), which conservatively keeps all suggestions.
-
-	Index introspection (and the table-name safety guard for the raw
-	``SHOW INDEX`` it issues) now lives in the dialect adapter
-	(``optimus.dbdialect``), so this works on MariaDB and Postgres alike.
+	"""Return the columns on ``table`` that are the leftmost of at least one
+	index. Non-leftmost composite columns are excluded (a btree can't serve a
+	filter on just that column, so a Missing Index suggestion stays actionable).
+	Returns an empty set on any DB error, conservatively keeping all suggestions.
 	"""
 	return {ix.leftmost for ix in get_dialect().existing_indexes(table) if ix.leftmost}
 
@@ -235,25 +210,14 @@ def _classify_column(
 	"""Classify a suggested (table, column) pair.
 
 	Returns ``(status, ddl_or_reason)`` where status is one of:
-
-	  - ``"actionable"`` column exists, is not indexed, can be
-	                         indexed; second element is the DDL string
-	  - ``"already_indexed"``: column exists and is already the
-	                         leftmost of at least one index; drop the
-	                         suggestion, second element explains
-	  - ``"unindexable"`` column is JSON / geometry or doesn't exist
-	                         on the table; drop the suggestion, second
-	                         element explains
-	  - ``"never_suggest"``: column is one of Frappe's standard metadata
-	                         columns (``modified``, ``idx``, ``parent``,
-	                         ``creation``, ``docstatus``, …) written on
-	                         every save / submit, or already auto-indexed;
-	                         drop the suggestion, second element explains
-	  - ``"unknown"`` information_schema lookup failed (likely
-	                         no real DB, dev environment); KEEP the
-	                         suggestion with a plain DDL (legacy
-	                         behavior) so we don't silently suppress
-	                         the old pipeline
+	  - ``"actionable"``: not indexed and indexable; second element is the DDL.
+	  - ``"already_indexed"``: already leftmost of an index; drop it.
+	  - ``"unindexable"``: JSON / geometry or column missing; drop it.
+	  - ``"never_suggest"``: a Frappe metadata column (modified, idx, parent,
+	    creation, docstatus, …) written on every save/submit or auto-indexed; drop it.
+	  - ``"unknown"``: information_schema lookup failed (no real DB); keep the
+	    suggestion with a plain DDL.
+	The second element is the DDL for actionable/unknown, else a reason string.
 	"""
 	# v0.5.1 → v0.6.0: hard blacklist Frappe's standard metadata columns
 	# should never be suggested, regardless of read-side heuristics. Checked
@@ -287,8 +251,8 @@ def _classify_column(
 	# Column doesn't exist on the table.
 	if types and column not in types:
 		return "unindexable", (
-			f"column `{column}` does not exist on table `{table}` "
-			f" the optimizer's suggestion is likely a parse error; "
+			f"column `{column}` does not exist on table `{table}`. "
+			f"The optimizer's suggestion is likely a parse error; "
 			f"verify the query and try again"
 		)
 
@@ -406,7 +370,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		except Exception as e:
 			# Unexpected path this might indicate a real profiler bug.
 			# Count, log the first few to Error Log (so they're discoverable
-			# for investigation), and continue.
+			# for investigation) and continue.
 			real_failures[type(e).__name__] += 1
 			if logged_real < MAX_LOGGED_FAILURES:
 				try:
@@ -441,7 +405,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# analyzer blindly trusted the DBOptimizer heuristic and produced
 	# false-positive findings for:
 	#   1. columns already indexed (primary keys like `name`, framework
-	#      columns `parent`/`owner`/`modified`/`creation`, and every
+	#      columns `parent`/`owner`/`modified`/`creation` and every
 	#      Link / Data field with search_index: 1)
 	#   2. columns with types that can't be btree-indexed (JSON, geometry)
 	#   3. TEXT/BLOB columns where plain `ADD INDEX (col)` fails in
@@ -555,7 +519,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		)
 
 	# v0.5.1: Parser limitations (sql_metadata can't parse this shape) get
-	# a soft informational line, no Error Log noise, and explicit language
+	# a soft informational line, no Error Log noise and explicit language
 	# telling the user there's nothing to fix. Production sessions on
 	# ERPNext frequently hit this for the item search dialog's complex
 	# query (correlated subquery + ORDER BY if/locate/coalesce expression)

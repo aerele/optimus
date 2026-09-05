@@ -1,23 +1,11 @@
-__version__ = "0.12.42"
+__version__ = "0.12.44"
 
 
 def safe_commit() -> None:
-	"""Commit pending changes with an explicit rollback-on-error guard.
-
-	Frappe's ``frappe.db.commit()`` does NOT auto-rollback when the SQL
-	COMMIT itself fails (rare but possible replica lag, write timeout,
-	deadlock retry exhausted). Without an explicit rollback, the
-	connection is left in a tainted state that breaks the next statement
-	with a confusing error far from the original cause. This helper is
-	the Frappe-idiomatic guard the Lens audit recommends wraps the
-	commit, rolls back on exception, re-raises so the caller sees the
-	failure.
-
-	For best-effort callers (the janitor sweeps, etc.) the outer
-	exception handler in the entry function absorbs the re-raise and
-	moves on no behavioural change. For must-succeed callers (analyze
-	pipeline, install hook, PDF attachment), the exception now properly
-	surfaces and the connection stays clean.
+	"""Commit pending changes, rolling back and re-raising if the SQL COMMIT
+	itself fails (which ``frappe.db.commit()`` does not do on its own). Leaves
+	the connection clean so the next statement doesn't fail with a confusing
+	error far from the original cause.
 	"""
 	import frappe
 	try:
@@ -54,9 +42,8 @@ def safe_commit() -> None:
 
 
 def _patch_enqueue():
-	"""Install the enqueue wrapper. Safe to call in environments without
-	frappe installed will silently no-op (useful for running analyzer
-	unit tests from a plain Python interpreter)."""
+	"""Install the enqueue wrapper. No-ops when frappe isn't installed (e.g.
+	running analyzer unit tests from a plain Python interpreter)."""
 	try:
 		import frappe
 		import frappe.utils.background_jobs as _bg
@@ -178,13 +165,10 @@ _patch_enqueue()
 
 
 def _patch_recorder():
-	"""Install capture-time redaction on Frappe's recorder. Mirrors
-	``_patch_enqueue``: monkey-patch at app-import, idempotent via the
-	``_profiler_patched`` marker, best-effort ``try/except`` so a patch
-	failure never breaks the request.
-
-	Settings are read INSIDE each wrap (not at install time) so changes to
-	``sensitive_sql_columns`` / ``sensitive_form_keys`` take effect on the
+	"""Install capture-time redaction on Frappe's recorder. Idempotent via the
+	``_profiler_patched`` marker; best-effort so a patch failure never breaks
+	the request. Sensitive-list settings are read inside each wrap so changes
+	to ``sensitive_sql_columns`` / ``sensitive_form_keys`` take effect on the
 	next request without a bench restart.
 	"""
 	try:
@@ -208,9 +192,8 @@ def _patch_recorder():
 	_original_register = Recorder.register
 
 	def _read_extras():
-		"""Read the live sensitive-list settings. Best-effort falls back
-		to empty extras (defaults still apply) if settings can't be loaded
-		(early-boot, no DB connection, etc.)."""
+		"""Read the live sensitive-list settings. Falls back to empty extras
+		(defaults still apply) if settings can't be loaded."""
 		try:
 			from optimus.settings import get_config
 
@@ -289,9 +272,9 @@ _patch_recorder()
 
 
 def _startup_probe_tool2() -> None:
-	"""Detect a leaked sys.monitoring tool 2 at app-import. See the
-	rationale comment above. Best-effort; mirrors the discipline of
-	_patch_enqueue / _patch_recorder."""
+	"""Detect a leaked sys.monitoring tool 2 at app-import: reclaim it when
+	line_profiler owns it (worker crashed mid-run), log loudly when an unknown
+	component does. Best-effort; never raises out of the import path."""
 	try:
 		import sys
 
@@ -370,9 +353,9 @@ _startup_probe_tool2()
 
 
 def _try_install_capture_wraps() -> bool:
-	"""Attempt to install the sidecar wraps. Returns True if actually
-	installed, False if deferred or errored. Idempotent the
-	capture module itself guards against double-wrap.
+	"""Install the sidecar wraps. Returns True if installed, False if deferred
+	(frappe still bootstrapping) or errored. Idempotent (the capture module
+	guards against double-wrap).
 	"""
 	try:
 		import frappe

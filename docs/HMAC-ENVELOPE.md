@@ -9,7 +9,7 @@ RCE.
 v0.12.14 added a 1-byte **scheme version** marker between the signature
 and the payload as the extension point for future signing-scheme bumps.
 This document is the design specification for future schemes, the
-compatibility matrix between them, and the canary tests that lock the
+compatibility matrix between them and the canary tests that lock the
 contract.
 
 ## Current shape (scheme v1, v0.12.14+)

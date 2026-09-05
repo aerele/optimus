@@ -1,26 +1,19 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Source-inspection guards for the v0.5.1 realtime session-event
-contract.
+"""Source-inspection guards for the realtime session-event contract.
 
-v0.5.1 replaces the widget's per-5-second HTTP polling of
-``/api/method/optimus.api.status`` with Socket.IO push
-events. The contract is:
+The widget uses Socket.IO push events instead of HTTP polling. Contract:
 
   Server publishes:
     - optimus_session_stopping    (from api._stop_session)
     - optimus_session_analyzing   (from analyze.run, at the top)
     - optimus_session_ready       (from analyze.run, at success)
     - optimus_session_failed      (from analyze.run, on exception)
-    - optimus_progress            (existing multiple points in analyze.run)
+    - optimus_progress            (multiple points in analyze.run)
 
-  Client subscribes to all five and also calls status() once at
-  page-load + on visibility-change (no setInterval).
-
-Breaking any part of this silently reverts the widget to polling-
-timeout lag or leaves state transitions invisible to other tabs.
-These source-inspection tests catch regressions at CI time.
+  Client subscribes to all five and calls status() once at page-load and on
+  visibility-change (no setInterval).
 """
 
 import inspect
@@ -69,9 +62,8 @@ def test_analyze_run_publishes_failed_event():
 
 
 def test_analyze_run_publishes_ready_event():
-	"""Backward-compat guard: the existing optimus_session_ready
-	emission must remain this is how the widget navigates the user
-	to the report on success."""
+	"""The optimus_session_ready emission must remain: it is how the widget
+	navigates the user to the report on success."""
 	from optimus import analyze
 
 	src = inspect.getsource(analyze.run)
@@ -126,9 +118,9 @@ def _read_widget_source() -> str:
 
 
 def test_widget_no_longer_polls_status_on_interval():
-	"""v0.5.1: the widget must NOT use setInterval to poll status().
-	All state transitions come from realtime events + one-shot
-	rehydrates on page load / visibility change."""
+	"""The widget must NOT use setInterval to poll status(); all state
+	transitions come from realtime events plus one-shot rehydrates on page load
+	or visibility change."""
 	src = _read_widget_source()
 	# setInterval is used ONCE legitimately for the local elapsed
 	# timer (updating the displayed "M:SS" label once a second).
@@ -153,9 +145,8 @@ def test_widget_no_longer_polls_status_on_interval():
 
 
 def test_widget_has_no_polling_helpers():
-	"""startPolling / stopPolling / pollHandle were removed in
-	v0.5.1. If someone ports them back, the continuous
-	/api/method/optimus.api.status traffic returns."""
+	"""startPolling / stopPolling / pollHandle must not exist; porting them
+	back returns the continuous /api/method/optimus.api.status polling."""
 	src = _read_widget_source()
 	assert "startPolling" not in src, (
 		"startPolling() helper must not exist v0.5.1 removed "

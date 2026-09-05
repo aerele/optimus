@@ -1,44 +1,27 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Source-resolution helpers dotted-path → ``(abs_file, lineno,
-func_name)`` and adjacent display helpers.
+"""Source-resolution helpers: dotted-path → ``(abs_file, lineno, func_name)`` and
+adjacent display helpers.
 
-Used by the renderer to resolve action entry-points (the ``def`` line
-of a Frappe API method or RQ job target) and repeated-hot-frame keys
-(the ``short_path::func`` shape that ``call_tree._redacted_module_key``
-emits) to a concrete source location + a ±1-line snippet for the
-report's "Where this fired" callsite blocks.
+Used by the renderer to resolve action entry-points (the ``def`` line of a Frappe
+API method or RQ job target) and repeated-hot-frame keys (the ``short_path::func``
+shape ``call_tree._redacted_module_key`` emits) to a source location + a ±1-line
+snippet for the report's "Where this fired" callsite blocks.
 
-Extracted from ``_internal.py`` in v0.12.23 as **prep work for
-finding_enrichment phase 3**: the HIGH-coupling finding-enrichment
-subset (`_finding_to_dict`, `_attach_representative_callsites`, etc.)
-depends on the 6 helpers in this module. With them lifted to a sibling
-submodule, the next renderer extraction PR can move that subset cleanly
-without dragging in a sprawling helper family.
+Public surface (underscore-prefixed but exposed via the package ``__init__.py``
+dir-walk so ``renderer.X`` resolves):
 
-The 6 functions move as a tight cluster they only call each other
-plus stdlib (`importlib`, `inspect`, `os`, `re`) and lazy imports of
-sibling renderer submodules (`source.py`'s `_read_source_snippet` /
-`_resolve_source_path`) and `frappe.utils.get_bench_path`. No back-
-reference into `_internal.py`.
-
-Public surface (all underscore-prefixed but exposed via the package
-``__init__.py`` dir-walk so legacy `renderer.X` resolves):
-
-* ``_action_dotted_entry(action)``: derive an action's dotted entry-
-  point path, or ``None``.
-* ``_skip_decorators_to_def(abs_filename, start_lineno, fn_name)``:
-  walk past `@decorator` lines to land on `def <fn_name>`.
-* ``_resolve_dotted_to_code(dotted)``:
-  ``(abs_filename, lineno, func_name)`` from a dotted module path.
-* ``_bench_relative_display(abs_path)``: display form
-  (``apps/<app>/...``).
-* ``_action_entry_callsite(action, *, cache)``: full resolution:
-  action → dotted → code → ``{filename, _abs, lineno, function,
-  source_snippet}``.
-* ``_resolve_frame_key_to_callsite(function_key, *, cache)``: same
-  but starting from a repeated-hot-frame key (``short_path::func``).
+* ``_action_dotted_entry(action)``: an action's dotted entry-point path, or ``None``.
+* ``_skip_decorators_to_def(abs_filename, start_lineno, fn_name)``: walk past
+  ``@decorator`` lines to land on ``def <fn_name>``.
+* ``_resolve_dotted_to_code(dotted)``: ``(abs_filename, lineno, func_name)`` from a
+  dotted module path.
+* ``_bench_relative_display(abs_path)``: display form (``apps/<app>/...``).
+* ``_action_entry_callsite(action, *, cache)``: action → dotted → code →
+  ``{filename, _abs, lineno, function, source_snippet}``.
+* ``_resolve_frame_key_to_callsite(function_key, *, cache)``: same, from a
+  repeated-hot-frame key (``short_path::func``).
 """
 
 from __future__ import annotations
@@ -82,21 +65,14 @@ def _skip_decorators_to_def(
 	*,
 	cache: dict | None = None,
 ) -> int:
-	"""Return the lineno of ``def <fn_name>`` / ``async def <fn_name>``
-	at or after ``start_lineno`` in ``abs_filename``. Returns
-	``start_lineno`` unchanged when the line at ``start_lineno`` isn't
-	a decorator OR no matching def is found within 30 lines.
+	"""Return the lineno of ``def <fn_name>`` / ``async def <fn_name>`` at or
+	after ``start_lineno`` in ``abs_filename``. Returns ``start_lineno`` unchanged
+	when that line isn't a decorator or no matching def is found within 30 lines.
 
-	On CPython 3.11+, ``code.co_firstlineno`` for a decorated function
-	points at the first **decorator** line rather than the ``def``
-	line. Every Frappe API endpoint is ``@frappe.whitelist``-decorated,
-	so without this skip the Per-Action breakdown's entry-callsite
-	snippets all highlight ``@frappe.whitelist(...)`` instead of the
-	actual signature below it.
-
-	Reads through ``cache`` (the shared per-render file_cache) when
-	available so multiple decorated functions in the same file don't
-	each re-read the source.
+	On CPython 3.11+ ``code.co_firstlineno`` for a decorated function points at
+	the first decorator line, not the ``def``; this skip lands the callsite
+	snippet on the signature rather than ``@frappe.whitelist(...)``. Reads through
+	``cache`` (the shared per-render file cache) when available.
 	"""
 	if not abs_filename or start_lineno <= 0 or not fn_name:
 		return start_lineno
@@ -140,21 +116,14 @@ def _resolve_dotted_to_code(
 	*,
 	file_cache: dict | None = None,
 ) -> tuple[str, int, str] | None:
-	"""Resolve a dotted module path to ``(abs_filename, lineno, func_name)``.
+	"""Resolve a dotted module path to ``(abs_filename, lineno, func_name)``, or
+	``None`` on any failure (never raises).
 
-	Uses ``importlib`` directly NOT ``frappe.get_attr``: because the
-	latter needs a running site (it touches ``frappe.local``), which the unit
-	tests don't have. Mirrors ``line_profile.picker.resolve_freeform``'s
-	import strategy (longest importable leading prefix, then ``getattr`` the
-	rest), minus its eligibility checks. ``inspect.unwrap`` sees through
-	``functools.wraps`` decorators (e.g. ``@frappe.whitelist``). Returns
-	``None`` on any failure never raises.
-
-	v0.7.x: when ``code.co_firstlineno`` points at a decorator line
-	(CPython 3.11+ behavior for decorated functions), the lineno is
-	advanced to the ``def`` line via ``_skip_decorators_to_def`` so
-	the callsite snippet anchors on the function signature rather
-	than ``@frappe.whitelist(...)``.
+	Uses ``importlib`` directly (not ``frappe.get_attr``, which needs a running
+	site) via the longest importable leading prefix then ``getattr`` for the rest.
+	``inspect.unwrap`` sees through ``functools.wraps`` decorators. When the
+	resolved lineno points at a decorator line, it is advanced to the ``def`` line
+	so the callsite snippet anchors on the signature.
 	"""
 	if not dotted or "." not in str(dotted):
 		return None
@@ -213,16 +182,11 @@ def _bench_relative_display(abs_path: str) -> str:
 def _action_entry_callsite(action, *, cache: dict | None = None) -> dict | None:
 	"""Resolve an action's entry-point source location + a ±1-line snippet.
 
-	Returns ``{"filename": <bench-relative display path>, "_abs": <absolute>,
-	"lineno": <def line>, "function": <name>, "source_snippet": [...] | None}``
-	or ``None`` when there's no clean dotted entry point / it can't be
-	resolved / the callable has no real source. ``source_snippet`` may itself
-	be ``None`` if the file can't be read (the template guards on it).
-
-	``cache`` (shared across all actions in one render) is forwarded to
-	``_read_source_snippet`` so a cluster of actions in one source file reads
-	it once. Resolution itself isn't memoized it's cheap (``importlib`` on
-	already-imported modules) and reports have only tens of actions.
+	Returns ``{"filename", "_abs", "lineno", "function", "source_snippet"}`` or
+	``None`` when there's no clean dotted entry point, it can't be resolved or the
+	callable has no real source. ``source_snippet`` may itself be ``None`` if the
+	file can't be read. ``cache`` (shared across a render) is forwarded to
+	``_read_source_snippet`` so a cluster of actions in one file reads it once.
 	"""
 	dotted = _action_dotted_entry(action)
 	if not dotted:
@@ -244,21 +208,14 @@ def _resolve_frame_key_to_callsite(function_key, *, cache: dict | None = None) -
 	"""Resolve a Repeated Hot Frame's ``function`` value to a callsite + a
 	±1-line snippet, or ``None``.
 
-	The key is ``call_tree._redacted_module_key``'s output:
-	``f"{short_path}::{func}"`` where ``short_path`` is the last ≤2 path
-	segments of the original file (e.g. ``ugly_code/python/common.py``) and
-	``func`` is the bare frame name (occasionally ``Class.method``); or just
-	``func`` when there was no filename. Best-effort, render-time:
-
-	  1. ``short_path`` → dotted module + ``.func`` → ``_resolve_dotted_to_code``
-	     (works for shallow user-app paths; deep paths where 2 segments can't
-	     rebuild the real module just fall through).
-	  2. fallback: resolve ``short_path`` to a real file and grep for the first
-	     ``def <func>`` line.
-
-	A bare ``func`` (no ``::``) can't be resolved without a module → ``None``.
-	Returns ``{"filename","_abs","lineno","function","source_snippet"}`` or
-	``None``. Wrapped in try/except never raises.
+	The key is ``call_tree._redacted_module_key`` output ``f"{short_path}::{func}"``
+	(``short_path`` = last ≤2 path segments of the file; ``func`` = bare frame name,
+	occasionally ``Class.method``), or just ``func`` when there was no filename.
+	Two best-effort strategies: (1) rebuild ``short_path`` into a dotted module and
+	resolve ``.func`` via ``_resolve_dotted_to_code``; (2) resolve ``short_path`` to
+	a file and grep for ``def <func>``. A bare ``func`` (no ``::``) → ``None``.
+	Returns ``{"filename", "_abs", "lineno", "function", "source_snippet"}`` or
+	``None``. Never raises.
 	"""
 	if not function_key:
 		return None

@@ -159,7 +159,7 @@ else:
 ### What the unwrap helper does NOT do
 
 * It doesn't migrate the value inline each value's shape has its
-  own migration rules, and coupling that into one helper would create
+  own migration rules and coupling that into one helper would create
   a god-function. The contract is: when drift is detected, the helper
   emits telemetry + returns the default. Future code can read the
   legacy form via a per-key migrator.
@@ -208,7 +208,7 @@ The `profiler:onboarding_seen:<user>` 1-year TTL is the policy lever; bump or sh
 
 `profiler:session:<uuid>:jobs` is the one hash where the encoding is **deliberately raw JSON**, not Frappe's pickle wrapping. The v0.7.x trilogy (`a356f64` → `0e4a270` → `f30f44e`) shipped an atomic Lua script `_MERGE_JOB_META_LUA` that does HGET → cjson.decode → merge → cjson.encode → HSET in a single server-side step. Lua can't replicate Python's pickle, so the values are JSON bytes and they're read/written through `_raw_redis()` in `session.py`, which bypasses Frappe's pickle wrapper.
 
-**The hazard**: if any future code does `frappe.cache.hset(jobs_key, job_id, …)` directly, Frappe's `RedisWrapper.hset` pickles the value. The hash becomes heterogeneous (some JSON-encoded, some pickled), and `hgetall` returns garbage on the next read.
+**The hazard**: if any future code does `frappe.cache.hset(jobs_key, job_id, …)` directly, Frappe's `RedisWrapper.hset` pickles the value. The hash becomes heterogeneous (some JSON-encoded, some pickled) and `hgetall` returns garbage on the next read.
 
 **The rule**: every read/write to `profiler:session:<uuid>:jobs` MUST go through `session._raw_redis()` (or the Lua script). The `_atomic_merge_job_meta` / `_read_job` / `_write_job` helpers already do this. Don't add a new write path.
 

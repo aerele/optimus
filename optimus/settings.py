@@ -3,16 +3,11 @@
 
 """Cached reader for Optimus Settings.
 
-Every request goes through ``hooks_callbacks.before_request`` which
-checks ``is_enabled()``: reading the Single doc directly on every
-request would be a DB hit per request. We cache the resolved config
-in Redis with a version key; the DocType controller bumps the key
-on save.
-
-Falls back to ``frappe.conf`` for thresholds when the setting is
-unset or the DocType row doesn't exist yet (fresh install, pre-
-migration). That preserves the pre-v0.5.2 behavior where thresholds
-lived in ``site_config.json``.
+``is_enabled()`` runs on every request, so the resolved config is cached in
+Redis with a version key (the DocType controller bumps it on save) rather than
+reading the Single doc each time. Falls back to ``frappe.conf`` for thresholds
+when the setting is unset or the DocType row doesn't exist yet (fresh install,
+pre-migration).
 """
 
 from dataclasses import dataclass, field
@@ -67,7 +62,7 @@ _DEFAULTS = {
 	),
 	# v0.6.x: when True, the "Time spent per database table" section drops
 	# Frappe schema/meta tables, framework-internal tables (User, Has Role,
-	# DefaultValue, …), and information_schema.* framework noise the app
+	# DefaultValue, …) and information_schema.* framework noise the app
 	# developer can't act on. Default on; admins can uncheck.
 	"hide_framework_tables": True,
 	# v0.5.3: per-recording EXPLAIN / enrichment cap. Long flows (bulk
@@ -115,7 +110,7 @@ _DEFAULTS = {
 	"sensitive_sql_columns": (),
 	"sensitive_form_keys": (),
 	# v0.6.0: opt-in LLM "suggest a fix" feature. The API key is NOT here
-	# it's secret, stored in a Password field, and read on demand by
+	# it's secret, stored in a Password field and read on demand by
 	# ai_fix.py via frappe.utils.password.get_decrypted_password.
 	"ai_enabled": False,
 	"ai_provider": "Anthropic",
@@ -393,12 +388,8 @@ _CACHE_KEY = _settings_cache_key()
 
 
 def _read_doctype_row() -> dict | None:
-	"""Load the Single doc's field dict, or None if the DocType doesn't
-	exist yet (fresh install / pre-migration).
-
-	We use ``get_single_value`` per-field instead of ``get_single`` so
-	we can degrade cleanly when ``Optimus Settings`` isn't yet in the
-	schema some deployments install the app but haven't migrated.
+	"""Load the Single doc's field dict, or None if the DocType doesn't exist yet
+	(fresh install / pre-migration), so callers degrade cleanly to defaults.
 	"""
 	import frappe
 	try:
@@ -733,13 +724,10 @@ def _resolve() -> OptimusConfig:
 
 
 def get_config() -> OptimusConfig:
-	"""Return the resolved config, cached in Redis until the Single is
-	saved (controller's on_update deletes the cache key).
+	"""Return the resolved config, cached in Redis until the Single is saved.
 
-	Fails soft on ANY exception during lookup (including Frappe not
-	being importable in unit-test contexts), returns the hardcoded
-	defaults. The profiler must never crash a request because of a
-	settings read, especially on bench startup before Redis is warm.
+	Fails soft on ANY exception (including Frappe not importable in unit tests),
+	returning the hardcoded defaults: a settings read must never crash a request.
 	"""
 	try:
 		import frappe
@@ -796,11 +784,8 @@ def is_enabled() -> bool:
 
 
 def get_tracked_apps() -> tuple[str, ...]:
-	"""Allowlist of user apps. Empty tuple → no override (use the
-	built-in FRAMEWORK_APPS exclusion list).
-
-	Called by ``is_framework_callsite`` to flip the classifier from
-	exclusion-mode (framework = frappe/erpnext/…) to inclusion-mode
+	"""Allowlist of user apps; empty tuple means no override. Passed to
+	``is_framework_callsite`` to flip it from exclusion mode to inclusion mode
 	(user code = exactly the tracked apps).
 	"""
 	try:
@@ -810,9 +795,8 @@ def get_tracked_apps() -> tuple[str, ...]:
 
 
 def get_ignored_apps() -> tuple[str, ...]:
-	"""v0.6.x: exclusion list apps whose findings are dropped from the
-	report entirely (both ``Findings what to fix`` and ``Framework-level
-	observations``). Empty tuple → no findings dropped."""
+	"""Exclusion list: apps whose findings are dropped from the report entirely
+	(both Findings and Observations sections). Empty tuple means none dropped."""
 	try:
 		return get_config().ignored_apps
 	except Exception:

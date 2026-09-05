@@ -1,16 +1,14 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.6.0 "Suggested fix (AI)" block in the finding card.
+"""Tests for the "Suggested fix (AI)" block in the finding card.
 
-Exercises renderer.render_raw end to end so the macro runs in its real
-context: when a Optimus Finding row carries an ``llm_fix_json``, the card
-renders the Markdown suggestion (sanitized) under a distinct header with a
-"review before applying" footer; when it doesn't, no AI block appears.
-
-The fixture supplies a ``source_snippet`` on the callsite so the renderer
-never takes the lazy file-read path (which imports ``optimus.analyze``
-and would be flaky under the test-suite's known module-reload pollution).
+Exercises renderer.render_raw end to end: when a Optimus Finding row carries an
+``llm_fix_json``, the card renders the sanitized Markdown suggestion under a
+distinct header with a "review before applying" footer; when it doesn't, no AI
+block appears. The fixture supplies a ``source_snippet`` on the callsite so the
+renderer never takes the lazy file-read path (flaky under the suite's
+module-reload pollution).
 """
 
 import json
@@ -256,7 +254,7 @@ class TestAiFixBlockRendering:
 
 	def test_canned_fix_hint_hidden_when_ai_fix_present(self):
 		"""When an AI 'Suggested fix' renders, the canned 'How to fix' hint is
-		redundant and suppressed (user request) the AI box stands alone."""
+		redundant and suppressed so the AI box stands alone."""
 		doc = _doc([_finding(
 			fix_hint=self._CANNED_HINT,
 			llm_fix={"suggestion": _GOOD_SUGGESTION, "model": "m",

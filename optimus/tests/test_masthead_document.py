@@ -1,8 +1,8 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Masthead top-right shows the session title. (The touched-document doctype/name
-display was reverted these tests guard that it doesn't creep back.)"""
+"""Masthead top-right shows the session title, not the touched document's
+doctype/name. These tests guard that the doctype/name display stays out."""
 
 import types
 
@@ -32,7 +32,7 @@ def _action():
 
 def test_masthead_shows_session_title_even_with_a_document():
 	"""Even when the session touched a document, the top-right shows the session
-	title the doctype/name display was reverted."""
+	title, not the doctype/name."""
 	rec = {"uuid": "u1", "form_dict": {"doctype": "Sales Order", "name": "SAL-ORD-2026-00042"}, "calls": []}
 	html = renderer.render(_doc([_action()]), recordings=[rec])
 	assert "Sales Order · 2026-08-27 21:55" in html  # composed session title

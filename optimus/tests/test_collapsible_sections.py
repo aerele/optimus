@@ -3,22 +3,13 @@
 
 """Tests for the report's section structure.
 
-Top-level sections (``<section class="section">``) always render
-expanded and non-collapsible user direction from the redesign:
-"make all section expanded by default not collapsible".
-
-Framework subsections (the four ``actions_framework`` /
-``background_jobs_framework`` / ``hot_frames_framework`` /
-``slow_queries_framework`` blocks) are an explicit exception: they
-hold data the developer can't act on (frappe/erpnext entry points),
-so they wrap their tables in ``<details class="subsection">`` and
-are collapsed by default. Per-app finding buckets and similar
-non-framework subsections remain plain ``<section class="subsection">``.
-
-Inline ``<details>`` elements elsewhere (call-tree drill-downs,
-per-row sub-finding expanders, "Slowest queries for this job"
-lookups) stay collapsible those are row-level affordances, not
-sections.
+Top-level sections (``<section class="section">``) always render expanded and
+non-collapsible. The four framework subsections (actions / background-jobs /
+hot-frames / slow-queries) are the exception: they hold data the developer
+can't act on, so they wrap their tables in ``<details class="subsection">``
+collapsed by default. Inline ``<details>`` elsewhere (call-tree drill-downs,
+sub-finding expanders, per-job query lookups) stay collapsible as row-level
+affordances.
 """
 
 import os
@@ -33,9 +24,8 @@ def _read_template():
 
 
 def test_top_level_sections_are_non_collapsible():
-	"""Top-level sections always render expanded no ``<details
-	class="section">`` allowed. The user explicitly requested
-	primary report sections render without a toggle."""
+	"""Top-level sections always render expanded: no ``<details
+	class="section">`` allowed."""
 	template = _read_template()
 	assert '<details class="section"' not in template, (
 		"Top-level sections must be plain <section class='section'> "
@@ -45,12 +35,9 @@ def test_top_level_sections_are_non_collapsible():
 
 
 def test_framework_subsections_are_collapsible():
-	"""The four framework subsections (actions / background-jobs /
-	hot-frames / slow-queries) wrap their tables in ``<details
-	class="subsection">`` so the reader can collapse framework noise
-	out of the way. Each one carries a ``framework`` data variable
-	in its surrounding markup. None should have an ``open`` attribute
-	collapsed by default is the whole point."""
+	"""The four framework subsections wrap their tables in ``<details
+	class="subsection">`` (collapsed by default: none carry an ``open``
+	attribute) so the reader can collapse framework noise away."""
 	template = _read_template()
 	# Expect at least 4 <details class="subsection"> opens one per
 	# framework block. If a new framework subsection is added in the
@@ -74,12 +61,9 @@ def test_framework_subsections_are_collapsible():
 
 
 def test_details_tags_are_balanced():
-	"""Every <details> must have a matching </details>. Inline drill-
-	downs (call-tree, sub-finding rows, slowest-queries lookups)
-	still use ``<details>``; an unbalanced count means a stray tag.
-
-	Strips HTML and CSS comments before counting so prose mentions
-	of the tag inside a comment block don't inflate the open count.
+	"""Every <details> must have a matching </details>. Strips HTML and CSS
+	comments before counting so prose mentions inside a comment don't inflate
+	the open count.
 	"""
 	template = _read_template()
 	# Drop HTML comments (<!-- ... -->) and CSS block comments
@@ -97,9 +81,8 @@ def test_details_tags_are_balanced():
 
 
 def test_primary_actionable_sections_render():
-	"""Spot-check each named primary section heading is still present
-	in the template. The collapse-by-default mechanism is gone, so
-	this is purely a presence check now."""
+	"""Spot-check that each named primary section heading is still present in
+	the template."""
 	template = _read_template()
 	for section_heading in (
 		"Summary",
@@ -123,8 +106,8 @@ def test_primary_actionable_sections_render():
 
 
 def test_report_has_navigation_aids():
-	"""v0.6.0: a 'How to read this report' orientation block and a compact
-	in-page 'Jump to:' nav near the top."""
+	"""A 'How to read this report' orientation block and a compact in-page
+	'Jump to:' nav near the top."""
 	template = _read_template()
 	assert "How to read this report" in template
 	assert "Jump to" in template
@@ -135,14 +118,9 @@ def test_report_has_navigation_aids():
 
 
 def test_section_id_aliases_for_mock_spec_names():
-	"""v0.7.x Phase G: the mock spec uses shorter section IDs (#actions,
-	#jobs, #resource, #queries, #db, #doc-events) alongside the original
-	long-form names. The template carries both original ID on the
-	section tag so the Jump-to nav keeps working; alias as an empty
-	<a id="..."></a> anchor inside each section so external links /
-	docs that reference the mock names still scroll-to-anchor.
-
-	Pin both forms exist."""
+	"""Each section carries both its long-form ID (on the section tag, for the
+	Jump-to nav) and a shorter alias ID (as an empty ``<a>`` anchor inside it,
+	for external links). Pin that both forms exist."""
 	template = _read_template()
 	for original, alias in (
 		("per-action", "actions"),
@@ -163,14 +141,8 @@ def test_section_id_aliases_for_mock_spec_names():
 
 
 def test_net_new_section_ids_from_mock_spec():
-	"""v0.7.x Phase I.1: the redesign mock spec introduced three
-	anchors that don't have a long-form original they're net-new
-	IDs (not aliases). Pin their presence so a future template
-	refactor doesn't quietly drop them.
-
-	#repro Steps to Reproduce section
-	#summary Summary section (bulleted recap)
-	#hot-frames Hot frames leaderboard section
+	"""Pin the presence of three net-new section anchors (no long-form
+	original): #repro, #summary and #hot-frames.
 	"""
 	template = _read_template()
 	for net_new in ("repro", "summary", "hot-frames"):
@@ -180,15 +152,9 @@ def test_net_new_section_ids_from_mock_spec():
 
 
 def test_phase2_id_is_unique():
-	"""v0.7.x Phase I.1: the phase2 anchor must appear at most once
-	in the static template. Pre-Phase-I.1, the imperative-rendered
-	Phase 2 panel emitted a details element carrying the phase2
-	anchor while the surrounding template wrapped it in a redundant
-	`<div id="phase2">` - duplicate IDs are invalid HTML. The
-	wrapper was removed; this test pins that the duplicate doesn't
-	come back. (v0.7.x Phase J.16: the renderer-emitted inner anchor
-	is now ``id="line-drilldown"``; the template carries a single
-	legacy ``<a id="phase2"></a>`` so external links resolve.)"""
+	"""The ``phase2`` anchor must appear at most once in the static template
+	(duplicate IDs are invalid HTML). The template carries a single legacy
+	``<a id="phase2"></a>`` so external links resolve."""
 	template = _read_template()
 	count = template.count('<a id="phase2"')
 	assert count <= 1, (
@@ -198,11 +164,9 @@ def test_phase2_id_is_unique():
 
 
 def test_observations_subsection_exists():
-	"""Framework-level observations live as a structurally-distinct
-	``<section class="subsection">`` inside the Findings section.
-	User direction kept the "subsection" container even after dropping
-	collapsibility, because the visual separation (dashed border,
-	muted <h3>) still serves the "actionable vs context" split."""
+	"""Framework-level observations live in a distinct ``<section
+	class="subsection">`` inside the Findings section, whose visual
+	separation still serves the actionable-vs-context split."""
 	template = _read_template()
 	assert '<section class="subsection">' in template, (
 		"Framework-level observations must live in a "
@@ -216,10 +180,8 @@ def test_observations_subsection_exists():
 
 
 def test_observations_is_nested_inside_findings():
-	"""The Observations ``<section class='subsection'>`` must appear
-	between the Findings ``<h2>`` and its closing ``</section>``.
-	Otherwise the 'move a sub-section' part of the original user
-	request isn't satisfied."""
+	"""The Observations ``<section class='subsection'>`` must be nested inside
+	the Findings section (between its ``<h2>`` and closing ``</section>``)."""
 	template = _read_template()
 	findings_heading_idx = template.find("<h2>Findings - what to fix</h2>")
 	observations_heading_idx = template.find(
@@ -248,14 +210,9 @@ def test_observations_is_nested_inside_findings():
 
 
 def test_phase2_section_appears_before_findings():
-	"""v0.6.x: the Line-Level Drilldown is the report's most distinctive
-	section - it must be hoisted above the actionable Findings list so
-	readers see it immediately after the Summary.
-
-	v0.7.x Phase J.16: anchor on the
-	``report_data.line_drilldown_html | safe`` Jinja injection point
-	(renamed from ``report_data.phase2_html | safe`` in J.2.6, itself
-	renamed from the legacy top-level ``phase2_html``)."""
+	"""The Line-Level Drilldown (the ``report_data.line_drilldown_html | safe``
+	injection point) must render above the Findings list, so readers see it
+	right after the Summary."""
 	template = _read_template()
 	panel_injection = template.find("report_data.line_drilldown_html | safe")
 	findings_anchor = template.find('id="findings"')
@@ -290,12 +247,9 @@ def test_phase2_jump_nav_link_present():
 
 
 def test_tldr_hero_renders_before_kpi_strip_and_summary():
-	"""v0.7.x redesign Phase B: the 'At a glance' exec-summary card
-	was replaced by the TL;DR hero (one composed headline keyed on
-	the highest-impact finding). The hero lives RIGHT AFTER the
-	masthead first prominent block on the page. Pin: TL;DR comes
-	before the KPI strip, and the KPI strip comes before the
-	Summary section."""
+	"""Pin the header-zone order: the TL;DR hero renders before the KPI strip,
+	which renders before the Summary section (and the old 'At a glance'
+	exec-summary card is gone)."""
 	template = _read_template()
 	tldr_idx = template.find('<div class="tldr">')
 	stats_idx = template.find('<div class="kpis">')
@@ -318,9 +272,8 @@ def test_tldr_hero_renders_before_kpi_strip_and_summary():
 
 
 def test_how_to_read_section_appears_after_main_content():
-	"""v0.7.x: 'How to read this report' was moved from above the
-	executive summary to the bottom of the report (just before the
-	footer)."""
+	"""'How to read this report' renders at the bottom of the report, after the
+	main content and just before the footer."""
 	template = _read_template()
 	how_to_read_idx = template.find("<h2>How to read this report</h2>")
 	db_tables_idx = template.find("<h2>Time spent per database table</h2>")
@@ -339,11 +292,9 @@ def test_how_to_read_section_appears_after_main_content():
 
 
 def test_tbl_clip_word_break_rules_present():
-	"""v0.7.x: tables that hold long unbreakable strings (dotted module
-	paths, /api/method/... URLs, filesystem paths) opt into a shared
-	``.tbl-clip`` class that fixes their layout and wraps cell content.
-	Pin the load-bearing CSS rules so a future refactor doesn't quietly
-	drop the wrapping guarantee."""
+	"""Tables with long unbreakable strings opt into a shared ``.tbl-clip``
+	class that fixes their layout and wraps cell content. Pin the load-bearing
+	CSS rules so a refactor can't drop the wrapping guarantee."""
 	template = _read_template()
 	assert "table.tbl-clip { table-layout: fixed; }" in template, (
 		".tbl-clip class must set table-layout: fixed so columns don't "
@@ -360,10 +311,9 @@ def test_tbl_clip_word_break_rules_present():
 
 
 def test_per_action_table_has_fixed_layout_class():
-	"""v0.7.x: the Per-action breakdown table must carry the shared
-	``tbl-clip per-action-table`` class + a <colgroup> so long action
-	labels and URL paths in the Action cell wrap instead of pushing
-	the numeric columns off the right edge of the page."""
+	"""The Per-action breakdown table must carry the ``tbl-clip
+	per-action-table`` class plus a <colgroup> so long action labels and URLs
+	wrap instead of pushing the numeric columns off the page."""
 	template = _read_template()
 	heading_idx = template.find("<h2>Per-action breakdown</h2>")
 	assert heading_idx > 0, "Per-action breakdown heading missing"
@@ -384,10 +334,9 @@ def test_per_action_table_has_fixed_layout_class():
 
 
 def test_xhr_timing_table_has_fixed_layout_class():
-	"""v0.7.x: the Per-action XHR timing table must carry
-	``tbl-clip xhr-timing-table`` + a <colgroup> so /api/method/...
-	URL strings wrap inside their cell instead of bleeding off the
-	right edge of the page."""
+	"""The Per-action XHR timing table must carry ``tbl-clip xhr-timing-table``
+	plus a <colgroup> so /api/method/... URLs wrap inside their cell instead of
+	bleeding off the page."""
 	template = _read_template()
 	heading_idx = template.find(
 		'<h3 style="margin-bottom: 8px;">Per-action XHR timing</h3>'
@@ -410,9 +359,8 @@ def test_xhr_timing_table_has_fixed_layout_class():
 
 
 def test_how_to_read_fixes_stale_refs_and_verbs():
-	"""v0.7.x: How-to-read fixed 'Click' (not 'Hover') to open callsites, and
-	no references to sections that don't exist by those names / a non-existent
-	'index candidate per table'."""
+	"""How-to-read says 'Click' (not 'Hover') to open callsites, with no
+	references to non-existent sections or an 'index candidate per table'."""
 	template = _read_template()
 	hr = template[template.find("<h2>How to read this report</h2>"):]
 	hr = hr[:hr.find("</section>")]

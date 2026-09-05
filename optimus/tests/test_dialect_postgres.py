@@ -3,10 +3,9 @@
 
 """PostgresDialect adapter + the dialect-blind proof.
 
-The plan-tree walk and catalog-row mapping are unit-tested here with fixtures
-(the raw introspection SQL is validated on a real --db-type postgres bench in
-phase 5). The final test feeds a Postgres-derived plan through explain_flags and
-asserts the SAME finding types come out i.e. the analyzer is dialect-blind.
+The plan-tree walk and catalog-row mapping are unit-tested here with fixtures. The
+final test feeds a Postgres-derived plan through explain_flags and asserts the same
+finding types come out (i.e. the analyzer is dialect-blind).
 """
 
 from __future__ import annotations
@@ -137,8 +136,8 @@ class TestIntrospection:
 # --- dialect-blind: a Postgres plan yields the same finding types -----------
 
 def test_explain_flags_derives_findings_from_postgres_plan(monkeypatch, empty_context):
-	"""A PG Seq Scan over 12k rows must surface a Full Table Scan finding
-	proving explain_flags reads the normalized fields, not raw EXPLAIN rows."""
+	"""A PG Seq Scan over 12k rows must surface a Full Table Scan finding, proving
+	explain_flags reads the normalized fields, not raw EXPLAIN rows."""
 	from optimus.analyzers import explain_flags
 
 	pt = PlanTable(table="tabGL Entry", full_scan=True, rows_examined=12000,
@@ -160,9 +159,8 @@ def test_explain_flags_derives_findings_from_postgres_plan(monkeypatch, empty_co
 
 
 def test_ai_finding_hint_is_dialect_aware(monkeypatch):
-	"""The four EXPLAIN-based AI hints use MariaDB EXPLAIN-column wording on
-	MariaDB and Postgres plan-node wording on Postgres; neutral types are the
-	same on both."""
+	"""The four EXPLAIN-based AI hints use MariaDB EXPLAIN-column wording on MariaDB
+	and Postgres plan-node wording on Postgres; neutral types are the same on both."""
 	import frappe
 
 	from optimus import ai_fix
@@ -183,9 +181,9 @@ def test_ai_finding_hint_is_dialect_aware(monkeypatch):
 
 class TestSafeSql:
 	def test_original_error_survives_a_failing_rollback(self, monkeypatch):
-		"""If the savepoint rollback itself raises, the ORIGINAL query error must
-		still propagate (not be masked by the rollback error) the caller's
-		try/except turns the original into its safe default."""
+		"""If the savepoint rollback itself raises, the original query error must
+		still propagate (not be masked by the rollback error), so the caller's
+		try/except can turn it into a safe default."""
 		import frappe
 
 		def sql_fn(*a, **k):
@@ -204,8 +202,8 @@ class TestSafeSql:
 			PostgresDialect._safe_sql("EXPLAIN (FORMAT JSON) SELECT 1")
 
 	def test_savepoint_names_are_unique_per_call(self, monkeypatch):
-		"""Each _safe_sql call uses a distinct savepoint name, so a future nested
-		caller can't RELEASE/ROLLBACK the wrong savepoint."""
+		"""Each _safe_sql call uses a distinct savepoint name, so a nested caller
+		can't RELEASE/ROLLBACK the wrong savepoint."""
 		import frappe
 
 		names: list[str] = []

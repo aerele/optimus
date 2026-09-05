@@ -1,15 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.5.2 split of findings into
-"Findings what to fix" (actionable, concrete fixes) vs
-"Observations" (framework/system/informational no direct fix).
-
-Per user feedback: "In Findings what to fix, Show only the valid
-fixes." The split keeps the main action-list tight and reads as a
-punchlist while the Observations section preserves full-picture
-transparency.
-"""
+"""Tests for the split of findings into "Findings - what to fix" (actionable,
+concrete fixes) vs "Observations" (framework/system/informational, no direct
+fix)."""
 
 import inspect
 
@@ -17,11 +11,9 @@ from optimus import renderer
 
 
 def test_actionable_finding_types_has_concrete_fixes_only():
-	"""_ACTIONABLE_FINDING_TYPES must include the finding types where
-	the customer_description ends with a concrete, shippable fix
-	(add THIS index, refactor THIS loop, trim THIS response).
-	Informational / framework / system finding types must NOT be in
-	the set."""
+	"""_ACTIONABLE_FINDING_TYPES must contain exactly the finding types whose
+	customer_description ends with a concrete, shippable fix; informational /
+	framework / system types must be excluded."""
 	expected_actionable = {
 		"N+1 Query",
 		"Missing Index",
@@ -69,11 +61,9 @@ def test_actionable_finding_types_has_concrete_fixes_only():
 
 
 def test_render_splits_findings_into_actionable_and_observational():
-	"""Source-inspection guard: renderer.render must partition
-	session_doc.findings into `findings` (actionable) and
-	`observational_findings` (everything else) via the allowlist.
-	Without this split, observational noise re-pollutes the main
-	'Findings what to fix' section."""
+	"""Source-inspection guard: renderer.render must partition findings into
+	actionable vs observational_findings via _ACTIONABLE_FINDING_TYPES and expose
+	observational_findings separately in the template context."""
 	src = inspect.getsource(renderer.render)
 
 	# The partition must use _ACTIONABLE_FINDING_TYPES.
@@ -95,10 +85,9 @@ def test_render_splits_findings_into_actionable_and_observational():
 
 
 def test_template_has_observations_subsection_inside_findings():
-	"""The report template must include the Observations as a nested
-	subsection INSIDE the Findings section (v0.5.2 restructure user
-	asked: 'If its a framework related issue then move a sub-section').
-	Without it the information disappears from the report entirely."""
+	"""The report template must render Observations as a non-collapsible
+	<section class="subsection"> nested inside the Findings section, looping over
+	observational_findings."""
 	import os
 	here = os.path.dirname(__file__)
 	tpath = os.path.join(here, "..", "templates", "report.html")
@@ -130,12 +119,10 @@ def test_template_has_observations_subsection_inside_findings():
 
 
 def test_render_drops_function_not_invoked_findings():
-	"""'Function Not Invoked' ("X was picked but never invoked during phase 2")
-	is non-actionable noise the pick simply didn't run in the replay. render()
-	must filter it from ``all_findings`` (not merely re-bucket it) so it leaves
-	the Findings list, the Observations subsection, AND the severity counts with
-	no phantom rows. The Line-Level Drilldown notes uninvoked picks concisely
-	instead. Done at render so existing reports declutter on regenerate too."""
+	"""render() must filter "Function Not Invoked" out of ``all_findings`` (not
+	merely re-bucket it), doing so BEFORE the severity-count and actionable-split
+	derivations so it leaves the Findings list, Observations and the counts with
+	no phantom rows."""
 	src = inspect.getsource(renderer.render)
 	assert '"Function Not Invoked"' in src
 	assert 'f.get("finding_type") != "Function Not Invoked"' in src
@@ -149,18 +136,10 @@ def test_render_drops_function_not_invoked_findings():
 
 
 def test_action_plan_is_built_from_actionable_findings_only():
-	"""The "Fix these first" action plan must be built from the
-	pre-split ``actionable_findings`` list, NOT ``all_findings``.
-
-	``_build_action_plan`` is a generic top-N-by-severity/impact
-	renderer with no finding_type guard (it renders whatever it is
-	handed see test_action_plan.py's unknown-type case). If render()
-	feeds it ``all_findings``, an observation-only finding (Framework
-	N+1, which _action_verb_for maps to "Eliminate the N+1 query
-	(framework code)") can rank into the top-3 and print under "Fix
-	these first" with an ``est. saving``: contradicting its own
-	Observations card and TL;DR hero ("not something you can change").
-	Guard the callsite at the source level so the leak can't return."""
+	"""The "Fix these first" action plan must be built from ``actionable_findings``,
+	not ``all_findings``. ``_build_action_plan`` has no finding_type guard, so
+	feeding it all_findings would let an observation-only finding rank into the
+	top-3 and print with an est. saving. Guarded at the source level."""
 	src = inspect.getsource(renderer.render)
 
 	call_idx = src.find("_build_action_plan(")
@@ -179,11 +158,9 @@ def test_action_plan_is_built_from_actionable_findings_only():
 
 
 def test_severity_counts_cover_all_findings():
-	"""v0.6.0: `severity_counts` (the "Issues found" stat card's sub-line)
-	must count ALL findings actionable + observational so the card's
-	big number (total), its sub-line, and the Summary prose's count all
-	agree. (Previously it counted actionable-only, which made the big
-	number and the breakdown disagree.)"""
+	"""`severity_counts` (the "Issues found" card sub-line) must count ALL findings
+	(actionable + observational, i.e. iterate ``all_findings``) so the card's
+	total, its sub-line and the Summary prose agree."""
 	src = inspect.getsource(renderer.render)
 	assert "severity_counts" in src
 	sc_idx = src.find('"severity_counts"')

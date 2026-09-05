@@ -1,12 +1,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.5.2 round 4 boot_session hook.
+"""Tests for the boot_session hook.
 
-Attaches ``optimus_enabled`` to ``frappe.boot`` so the floating
-widget can hide itself when the master kill-switch is off. Prevents
-the confusing UX of a disabled-but-visible widget (clicking Start
-does nothing because before_request short-circuits).
+Attaches ``optimus_enabled`` to ``frappe.boot`` so the floating widget can
+hide itself when the master kill-switch is off.
 """
 
 import sys
@@ -21,9 +19,8 @@ def _fresh_bootinfo():
 
 @pytest.fixture(autouse=True)
 def _frappe_stub(monkeypatch):
-	"""Install a minimal frappe stub via monkeypatch.setitem so the
-	stub is restored at teardown (vs. the leak-via-bare-assignment
-	pattern this file used to use)."""
+	"""Install a minimal frappe stub via monkeypatch.setitem so it is restored
+	at teardown."""
 	if "frappe" not in sys.modules:
 		monkeypatch.setitem(sys.modules, "frappe", types.ModuleType("frappe"))
 
@@ -46,9 +43,8 @@ class TestBootSession:
 		assert bootinfo.optimus_enabled is False
 
 	def test_fails_open_on_settings_read_error(self, monkeypatch):
-		"""If settings.is_enabled raises, default to True. Hiding the
-		widget due to a settings-read error would be a very confusing
-		support issue ('why can't I see the profiler button?')."""
+		"""If settings.is_enabled raises, default to True (fail open) rather
+		than hide the widget on a settings-read error."""
 		from optimus import boot, settings
 
 		def boom():
@@ -65,9 +61,8 @@ class TestBootSession:
 		)
 
 	def test_returns_bool_not_truthy_value(self, monkeypatch):
-		"""The JS guard does strict `=== false` comparison so this
-		must always be a Python bool, not a truthy/falsy value that
-		would serialize oddly (e.g. 0, 1, None)."""
+		"""The JS guard does a strict `=== false` comparison, so this must
+		always be a Python bool, not a truthy/falsy value."""
 		from optimus import boot, settings
 
 		# settings returns 1 (truthy int, but not bool).

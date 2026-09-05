@@ -1,13 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Memory-bounding behavior of the analyze pipeline (v0.7.x).
+"""Memory-bounding behavior of the analyze pipeline.
 
 Long recorded flows OOM-killed the box because every recording's raw
-pyinstrument tree pickle stayed in RAM through persist + render. These tests
-pin the fixes: call_tree frees each ``pyi_session`` once consumed (M1), no
-later analyzer depends on it, run() drops references + GCs, and the optional
-session-wide recording cap (M4) bounds peak by keeping the heaviest recordings.
+pyinstrument tree stayed in RAM through persist and render. These tests pin
+the fixes: call_tree frees each ``pyi_session`` once consumed (no later
+analyzer depends on it) and run() drops references and GCs afterward.
 """
 
 import inspect
@@ -40,7 +39,7 @@ def _tree_recording(uuid="r1"):
 
 
 class TestPyiSessionFreed:
-	"""M1: the raw pyinstrument Session must not survive call_tree."""
+	"""The raw pyinstrument Session must not survive call_tree."""
 
 	def test_freed_for_recording_with_tree(self):
 		rec = _tree_recording()
@@ -72,8 +71,8 @@ class TestPyiSessionFreed:
 
 
 class TestRunGcCollect:
-	"""M1: run() drops the recordings reference and GCs after the analyzer
-	loop so freed Session objects are returned to the allocator promptly."""
+	"""run() drops the recordings reference and GCs after the analyzer loop so
+	freed Session objects return to the allocator promptly."""
 
 	def test_run_gc_collect_after_analyzers(self):
 		src = inspect.getsource(analyze.run)
@@ -82,14 +81,13 @@ class TestRunGcCollect:
 
 
 class TestNoRecordingDroppedForPerformance:
-	"""HARD INVARIANT (user requirement): analyze must NEVER drop a captured
-	recording and therefore never a captured background job for performance
-	reasons. If a flow captured 10 RQ jobs, all 10 must reach the report.
+	"""HARD INVARIANT: analyze must NEVER drop a captured recording (and so
+	never a captured background job) for performance reasons. If a flow
+	captured 10 RQ jobs, all 10 must reach the report.
 
-	A v0.7.x change once added a session-wide recording cap (M4) that dropped
-	the lightest recordings; since background jobs ARE recordings, that could
-	silently remove jobs from the report's RQ Jobs section. It was removed.
-	These guards stop it (or anything like it) coming back.
+	A session-wide recording cap that dropped the lightest recordings could
+	silently remove jobs (jobs ARE recordings), so it was removed. These guards
+	stop it coming back.
 	"""
 
 	def test_analyze_has_no_recording_cap(self):

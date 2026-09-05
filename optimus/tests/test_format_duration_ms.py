@@ -2,15 +2,12 @@
 # For license information, please see license.txt
 
 """Pure-Python unit tests for ``_format_duration_ms``: the threshold-aware
-duration formatter that powers the ``fmt_ms`` Jinja-callable. Below the
-threshold, render as ms (with caller-controlled decimals); at or above,
-render as seconds with 2 decimals.
+duration formatter behind the ``fmt_ms`` Jinja-callable. Below the threshold it
+renders ms (caller-controlled decimals); at or above, seconds with 2 decimals.
 
-v0.7.x: the formatter returns ``markupsafe.Markup`` so the seconds
-branch can wrap the output in a ``<span class="time-high">`` for visual
-emphasis when rendered by Jinja. ``Markup`` subclasses ``str`` so
-equality comparisons against plain strings still work we just have
-to match against the wrapped form when ≥1000ms."""
+The formatter returns ``markupsafe.Markup`` so the seconds branch can wrap the
+output in a ``<span class="time-high">``. ``Markup`` subclasses ``str`` so string
+equality still works, but tests must match the wrapped form when ≥1000ms."""
 
 from optimus.renderer import _format_duration_ms
 

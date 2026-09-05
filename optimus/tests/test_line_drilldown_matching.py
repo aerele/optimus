@@ -3,12 +3,10 @@
 
 """The finding-card "Line-Level Drilldown" callout links a finding to its
 phase-2 hot line via (file-basename, function-name). The index is keyed on the
-phase-2 result's ``qualname``; the lookup uses the finding's callsite
-``function``. These can disagree on the prefix ``resolve_freeform`` may emit
-``common.bg_recheck_users`` (module/class walked) while call_tree stores the
-bare ``bg_recheck_users``: which silently breaks the callout even though the
-function WAS profiled (and shows in the panel). Matching must be robust to that
-on both sides; this pins it.
+phase-2 result's ``qualname`` while the lookup uses the callsite ``function``,
+and the two can disagree on the module/class prefix (``common.bg_recheck_users``
+vs bare ``bg_recheck_users``). These tests pin that matching stays robust to the
+prefix on both sides.
 """
 
 import json

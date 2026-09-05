@@ -1,15 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.5.2 round 4 PDF preprocess that force-opens every
-<details> block before handing HTML to wkhtmltopdf.
+"""Tests for the PDF preprocess that force-opens every <details> block before
+handing HTML to wkhtmltopdf.
 
-Background: wkhtmltopdf's old QtWebKit engine doesn't reliably honor
-@media print overrides on the <details> disclosure element, so the
-Observations subsection, Analyzer notes section, and any collapsed
-app buckets would silently disappear from the generated PDF. We add
-the ``open`` attribute to every <details> before rendering so the PDF
-matches the browser's expanded state.
+wkhtmltopdf's old QtWebKit engine doesn't reliably honor @media print on
+<details>, so collapsed sections would disappear from the PDF; adding the
+``open`` attribute to every <details> makes the PDF match the browser's
+expanded state.
 """
 
 import sys

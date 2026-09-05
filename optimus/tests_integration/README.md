@@ -128,7 +128,7 @@ work.
 
 Integration tests cost ~5 seconds of CI wall time each (cheap compared
 to the bench bootstrap) but they're harder to debug than unit tests,
-they're harder to keep deterministic, and they raise the bar to
+they're harder to keep deterministic and they raise the bar to
 contributing.
 
 **Before adding an integration test, ask: could a unit test have

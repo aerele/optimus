@@ -1,29 +1,19 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.12.14: ``sign_blob`` / ``unsign_blob`` now embed a 1-byte scheme
-version (``_HMAC_SCHEME_V1``) between the HMAC signature and the
-payload. The signature covers the version-tagged body so tampering
-with the marker is detected; legacy pre-v0.12.14 blobs (no marker)
-still verify on read via the backward-compat branch.
-
-The redis_schema.wrap_value envelope (v0.12.0) lives one layer up at
-the cache-value boundary. This module is the equivalent migration-
-safety net at the bytes-on-the-wire boundary the layer where
-``unsign_blob`` produces the payload that gets pickle.loads'd or
-JSON.loads'd downstream.
+"""``sign_blob`` / ``unsign_blob`` embed a 1-byte scheme version
+(``_HMAC_SCHEME_V1``) between the HMAC signature and the payload. The signature
+covers the version-tagged body, so tampering with the marker is detected; legacy
+blobs (no marker) still verify via the backward-compat branch.
 
 Each test verifies one piece of the contract:
-
-  1. New-shape round-trip works (sign → unsign returns original).
-  2. Legacy-shape (pre-v0.12.14) round-trip works (a hand-crafted
-     v0 blob still verifies cleanly).
-  3. New-shape blob has the expected byte layout
-     (``[32-byte HMAC] + \\x01 + payload``).
-  4. Tampered signature → None.
-  5. Tampered version byte → None (HMAC covers it).
-  6. Tampered payload → None.
-  7. Truncated (< 32 bytes) → None.
+  1. New-shape round-trip (sign then unsign returns the original).
+  2. Legacy-shape round-trip (a hand-crafted v0 blob verifies cleanly).
+  3. New-shape byte layout is ``[32-byte HMAC] + \\x01 + payload``.
+  4. Tampered signature returns None.
+  5. Tampered version byte returns None (HMAC covers it).
+  6. Tampered payload returns None.
+  7. Truncated (< 32 bytes) returns None.
 """
 
 from __future__ import annotations
@@ -89,9 +79,9 @@ class TestSignUnsignRoundTrip:
 
 
 class TestLegacyShapeBackwardCompat:
-	"""Pre-v0.12.14 blobs were ``[32-byte HMAC of payload] + payload``
-	with NO version marker between. New ``unsign_blob`` must still
-	verify those blobs and return the original payload."""
+	"""Legacy blobs were ``[32-byte HMAC of payload] + payload`` with no version
+	marker. ``unsign_blob`` must still verify them and return the original
+	payload."""
 
 	def test_legacy_v0_blob_verifies_and_returns_payload(self, monkeypatch):
 		"""Hand-craft a v0 blob (no version marker) and verify the
@@ -192,9 +182,8 @@ class TestEdgeCases:
 			session.sign_blob("not bytes")
 
 	def test_no_secret_path_passes_through_unsigned(self, monkeypatch):
-		"""When _has_stable_hmac_secret returns False (no encryption_key
-		in frappe.conf), sign_blob returns the raw blob unchanged
-		preserves the existing Phase K behaviour."""
+		"""When _has_stable_hmac_secret returns False (no encryption_key in
+		frappe.conf), sign_blob returns the raw blob unchanged."""
 		monkeypatch.setattr(session, "_has_stable_hmac_secret", lambda: False)
 		payload = b"raw unsigned"
 		assert session.sign_blob(payload) == payload

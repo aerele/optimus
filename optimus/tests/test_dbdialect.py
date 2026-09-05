@@ -1,12 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Phase 2 foundation: the dialect contract + factory.
+"""Tests for the dialect contract plus factory.
 
-Covers the dialect-neutral pieces coercion helpers, normalized dataclass
-defaults, db_type detection, factory dispatch + memoization, and the
-type-classification each adapter ships with. The EXPLAIN/index/infra method
-bodies are exercised by dialect-specific tests once they're filled.
+Covers the dialect-neutral pieces: coercion helpers, normalized dataclass
+defaults, db_type detection, factory dispatch and memoization, plus the
+type-classification each adapter ships. The EXPLAIN / index / infra method
+bodies are exercised by dialect-specific tests.
 """
 
 from __future__ import annotations

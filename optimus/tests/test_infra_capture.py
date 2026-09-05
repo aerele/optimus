@@ -1,23 +1,18 @@
 # optimus/tests/test_infra_capture.py
 # Copyright (c) 2026, Optimus contributors
 
-"""Tests for v0.5.0 server infra capture primitives."""
+"""Tests for server infra capture primitives."""
 
 import sys
 import types
 
 
 def test_redis_source_uses_frappe_cache_directly(monkeypatch):
-	"""Regression guard (v0.5.1 architect review): frappe.cache IS a
-	redis.Redis subclass (RedisWrapper), not a wrapper with a .redis
-	child attribute. An earlier version of _read_redis used
-	getattr(frappe.cache, 'redis', None) which silently returned None
-	in production, disabling Redis metrics entirely. The production
-	code must call .info() directly on frappe.cache.
-
-	We check by actually running _read_redis against a stub that
-	rejects the broken access pattern more robust than source-string
-	matching which can match explanatory comments.
+	"""Regression guard: frappe.cache IS a redis.Redis subclass (RedisWrapper),
+	not a wrapper with a ``.redis`` child, so ``_read_redis`` must call
+	``.info()`` directly on frappe.cache (``getattr(frappe.cache, 'redis', None)``
+	silently returns None in production, disabling Redis metrics). Verified by
+	running ``_read_redis`` against a stub that rejects the broken access pattern.
 	"""
 	import frappe
 

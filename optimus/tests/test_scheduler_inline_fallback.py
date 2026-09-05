@@ -1,13 +1,12 @@
 # optimus/tests/test_scheduler_inline_fallback.py
 # Copyright (c) 2026, Optimus contributors
 
-"""Tests for v0.5.0 scheduler-aware analyze enqueue.
+"""Tests for scheduler-aware analyze enqueue.
 
-When bench disable-scheduler is in effect (is_scheduler_disabled() returns
-True), _enqueue_analyze must pass now=True to frappe.enqueue so analyze
-runs synchronously instead of being pushed to a queue no worker will
-consume. Also verifies the recording-count safety cap prevents inline
-analyze from exceeding the gunicorn request timeout on huge sessions.
+When the scheduler is disabled (``is_scheduler_disabled()`` is True),
+_enqueue_analyze must pass ``now=True`` to frappe.enqueue so analyze runs
+synchronously instead of queueing for a worker that never runs. Also checks the
+recording-count safety cap that keeps inline analyze under the gunicorn timeout.
 """
 
 import inspect
@@ -41,14 +40,12 @@ def test_enqueue_analyze_honors_inline_analyze_limit():
 
 
 def test_enqueue_analyze_passes_now_when_scheduler_disabled(monkeypatch):
-    """Full-stack check: when is_scheduler_disabled() is True, frappe.enqueue
-    should be called with now=True.
+    """When is_scheduler_disabled() is True, frappe.enqueue is called with
+    now=True.
 
-    Assumes _enqueue_analyze does NOT import `is_scheduler_disabled` at
-    module-level in api.py. The sys.modules monkeypatch below is applied
-    inside the test body, so a name bound at api.py import time would
-    bypass it. If that pattern changes, update this test to use
-    monkeypatch.setattr on the bound symbol instead.
+    Assumes _enqueue_analyze does not import ``is_scheduler_disabled`` at module
+    level (the sys.modules monkeypatch is applied inside the test body, so a name
+    bound at import time would bypass it).
     """
     import sys
     import types
@@ -97,14 +94,9 @@ def test_enqueue_analyze_passes_now_when_scheduler_disabled(monkeypatch):
 
 
 def test_retry_analyze_uses_scheduler_aware_enqueue():
-	"""Pass-5 regression guard: retry_analyze used to call
-	frappe.enqueue directly, bypassing the v0.5.0 scheduler-aware
-	fallback. On sites with bench disable-scheduler, clicking 'Retry
-	Analyze' on a Failed session would re-hit the exact hung-forever
-	bug the v0.5.0 fix was designed to prevent.
-
-	Source-inspection check: retry_analyze must use _enqueue_analyze,
-	not a bare frappe.enqueue call with the analyze.run method string.
+	"""retry_analyze must use _enqueue_analyze, not a bare frappe.enqueue call, or
+	on scheduler-disabled sites 'Retry Analyze' on a Failed session hangs forever.
+	Source-inspection check.
 	"""
 	import inspect
 
@@ -119,15 +111,10 @@ def test_retry_analyze_uses_scheduler_aware_enqueue():
 
 
 def test_enqueue_analyze_swallows_inline_failure(monkeypatch):
-	"""Regression guard (v0.5.1 architect review pass 3): when analyze
-	runs inline and raises (analyze.run catches its own exception, marks
-	the session Failed, and re-raises), _enqueue_analyze must catch the
-	re-raise and return True.
-
-	If we let the exception propagate up to stop(), the stop API
-	returns a 500 and the widget shows "Failed to stop profiler
-	try again" which is wrong, because the stop DID work; only
-	analyze failed. The session is already marked Failed in the DB.
+	"""When inline analyze raises (analyze.run marks the session Failed and
+	re-raises), _enqueue_analyze must catch it and return True. Letting it
+	propagate to stop() would return a 500 and show "Failed to stop profiler",
+	which is wrong: the stop worked, only analyze failed (session already Failed).
 	"""
 	import sys
 	import types
@@ -169,9 +156,9 @@ def test_enqueue_analyze_swallows_inline_failure(monkeypatch):
 
 
 def test_stop_returns_final_status_when_inline(monkeypatch):
-	"""Source-inspection guard: stop() must read the final status off
-	the Optimus Session doc after inline analyze runs, so a failed
-	inline analyze doesn't report Ready to the widget."""
+	"""Source-inspection guard: stop() must read the final status off the Optimus
+	Session doc after inline analyze runs, so a failed inline analyze doesn't
+	report Ready to the widget."""
 	import inspect
 
 	from optimus import api
@@ -188,21 +175,17 @@ def test_stop_returns_final_status_when_inline(monkeypatch):
 def test_enqueue_analyze_blocks_huge_inline_session(monkeypatch):
     """Behavioral test for the inline-analyze recording cap.
 
-    When scheduler is disabled AND recording_count > optimus_inline_analyze_limit,
+    When the scheduler is disabled and recording_count > optimus_inline_analyze_limit,
     _enqueue_analyze must:
       1. Mark the Optimus Session as Failed
-      2. Write an actionable message to analyzer_warnings
-         (NOT 'analyze_error' that field doesn't exist on the doctype,
-         writing to it would crash with MariaDB 'Unknown column')
-      3. NOT invoke frappe.enqueue
-      4. Return True so the caller treats it like any other inline
-         result and reads the final status off the doc
+      2. Write an actionable message to analyzer_warnings (NOT 'analyze_error',
+         which is not a field on the doctype: writing it crashes with MariaDB
+         'Unknown column')
+      3. not invoke frappe.enqueue
+      4. return True so the caller reads the final status off the doc
 
-    v0.5.1: the cap check moved from _stop_session into _enqueue_analyze
-    so ALL inline callers (stop, retry_analyze, janitor) get the same
-    protection uniformly. Earlier versions only applied the cap in
-    _stop_session, leaving retry_analyze vulnerable to the gunicorn
-    timeout on re-runs of large failed sessions.
+    The cap check lives in _enqueue_analyze so all inline callers (stop,
+    retry_analyze, janitor) get it uniformly.
     """
     import sys
     import types
@@ -298,11 +281,8 @@ def test_enqueue_analyze_blocks_huge_inline_session(monkeypatch):
 
 
 def test_enqueue_analyze_cap_is_called_by_stop_session():
-    """Source-inspection regression guard: _stop_session must pass
-    docname to _enqueue_analyze so the cap check has the doc to
-    update. Earlier versions had the cap check inline in
-    _stop_session the refactor moved it to _enqueue_analyze, and
-    if _stop_session forgets to pass docname, the cap silently
+    """Source-inspection guard: _stop_session must pass docname to
+    _enqueue_analyze, or the cap check has no doc to mark Failed and silently
     skips.
     """
     import inspect
@@ -319,9 +299,8 @@ def test_enqueue_analyze_cap_is_called_by_stop_session():
 
 
 def test_enqueue_analyze_cap_is_called_by_retry_analyze():
-    """Same guard for retry_analyze. v0.5.1 fix ensures retry
-    applies the same inline cap as stop() a 200-recording Failed
-    session on a scheduler-disabled site must not run inline
+    """Same guard for retry_analyze: it must apply the same inline cap as stop(),
+    so a large Failed session on a scheduler-disabled site can't run inline
     without the cap check.
     """
     import inspect

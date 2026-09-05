@@ -3,11 +3,10 @@
 
 """Accessibility / UX render-time guarantees for the report template.
 
-Renders end-to-end via ``renderer.render_raw`` and asserts the a11y pass holds:
-darkened mute token, severity text labels on the waterfall (not colour-only),
-the AI-fix "unverified" badge, back-to-top anchors, and the self-contained /
-offline-safe invariant (no scripts, no external resource loads aerele.in
-*anchor* links are allowed).
+Renders end-to-end via ``renderer.render_raw`` and asserts: the darkened mute
+token, waterfall severity text labels (not colour-only), the AI-fix
+"unverified" badge and the self-contained / offline-safe invariant (no scripts
+or external resource loads; ``aerele.in`` anchor links are allowed).
 """
 
 import json

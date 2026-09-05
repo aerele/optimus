@@ -1,20 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Integration test for the frappe.enqueue monkey-patch.
-
-The patch lives in optimus/__init__.py and wraps
-frappe.utils.background_jobs.enqueue so that when a user with an active
-profiler session enqueues a background job, `_profiler_session_id` is
-injected into the job's kwargs. This test verifies the wrapper fires
-correctly and injects the marker.
-
-It also verifies the critical property that `frappe.enqueue_doc` (which
-internally calls module-level `enqueue`) also inherits the patch.
-
-To run this test without a real frappe site, we stub out the minimum
-surface of `frappe` and `frappe.utils.background_jobs` that the patch
-references. This keeps the test fast and deterministic.
+"""Integration test for the frappe.enqueue monkey-patch (in
+optimus/__init__.py), which injects ``_profiler_session_id`` into a job's
+kwargs when a user with an active profiler session enqueues it. Verifies the
+wrapper fires and injects the marker (including via ``frappe.enqueue_doc``,
+which calls module-level ``enqueue``). Frappe and frappe.utils.background_jobs
+are stubbed so the test needs no real site.
 """
 
 import sys

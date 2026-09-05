@@ -1,10 +1,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Performance regression gates (Spec §11.6).
+"""Performance regression gates.
 
-Threshold constants are intentionally module-level so a future PR can
-relax them with explicit signoff. Failure blocks merge.
+Threshold constants are intentionally module-level so a future PR can relax
+them with explicit signoff. Failure blocks merge.
 """
 
 import time

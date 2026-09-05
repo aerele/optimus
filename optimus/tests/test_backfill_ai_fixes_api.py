@@ -1,14 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Surface tests for the v0.6.0 ``backfill_ai_fixes`` API endpoint the
-manual "retry the LLM" action that fills AI fix suggestions on every
-eligible finding that doesn't have one yet, then re-renders the report.
-
-Like ``test_regenerate_reports_api.py`` / ``test_suggest_fix_api.py`` this
-is a source-inspection test (the endpoint needs a live bench for a true
-integration run): we pin the contract whitelisted, gated, AI-enabled
-guard, ungated backfill core, re-render via ``regenerate_reports``.
+"""Surface tests for the ``backfill_ai_fixes`` API endpoint: the manual
+"retry the LLM" action that fills an AI fix suggestion on every eligible
+finding without one, then re-renders the report. Source-inspection tests (the
+endpoint needs a live bench for a real run) pinning the contract: whitelisted,
+gated, AI-enabled guard, ungated backfill core, re-render via ``regenerate_reports``.
 """
 
 import os
@@ -69,7 +66,7 @@ def test_calls_ungated_backfill_core_with_no_cap():
 
 def test_supports_regenerate_all_passthrough():
 	src = _read_api_source()
-	# The `regenerate_all` flag is part of the signature, coerced, and
+	# The `regenerate_all` flag is part of the signature, coerced and
 	# plumbed straight through to _run_ai_backfill.
 	assert "def backfill_ai_fixes(session_uuid: str, regenerate_all=0)" in src
 	body = _fn_body("backfill_ai_fixes")

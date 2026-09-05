@@ -4,12 +4,10 @@
 """Unit tests for ``renderer._action_entry_callsite`` and the dotted-entry
 derivation that feeds it.
 
-The per-action breakdown and the RQ Jobs section identify an action
-only by a dotted module path (``ugly_code.python.common.bg_recheck_users``)
-or a URL. This resolves that entry point to ``file:line`` + a ±1-line source
-snippet. The tests resolve a real function in *this* app
-(``optimus.renderer.render``) so they're hermetic no running site,
-no dependence on frappe core's layout.
+An action is identified only by a dotted module path or URL; this resolves that
+entry point to ``file:line`` plus a source snippet. The tests resolve a real
+function in this app (``optimus.renderer.render``) so they're hermetic (no
+running site, no dependence on frappe core's layout).
 """
 
 import inspect
@@ -352,10 +350,9 @@ class TestAttachRepresentativeCallsites:
 
 
 class TestSkipDecoratorsToDef:
-	"""v0.7.x: on CPython 3.11+ ``code.co_firstlineno`` for a decorated
-	function points at the first decorator line. The renderer advances
-	to the ``def`` line so the per-action entry-callsite snippet lands
-	on the signature rather than ``@frappe.whitelist(...)``."""
+	"""On CPython 3.11+ ``code.co_firstlineno`` for a decorated function points at
+	the first decorator line; the renderer advances to the ``def`` line so the
+	snippet lands on the signature rather than the decorator."""
 
 	def test_single_decorator_is_skipped_to_def(self, tmp_path):
 		src = tmp_path / "fake_module.py"
@@ -414,8 +411,7 @@ class TestSkipDecoratorsToDef:
 		assert new_lineno == 2
 
 	def test_non_decorated_lineno_unchanged(self, tmp_path):
-		"""When the line at start_lineno doesn't start with ``@``, the
-		early exit returns it unchanged no scan, no false advance."""
+		"""A start line not beginning with ``@`` is returned unchanged (no scan)."""
 		src = tmp_path / "fake_module.py"
 		src.write_text(
 			"line1\n"
@@ -427,9 +423,8 @@ class TestSkipDecoratorsToDef:
 		) == 2
 
 	def test_no_def_found_falls_back_to_start_lineno(self, tmp_path):
-		"""When the start line IS a decorator but no matching def is
-		found within the scan window (mangled source, generated code),
-		fall back to the original lineno."""
+		"""A decorator start line with no matching def in the scan window falls
+		back to the original lineno."""
 		src = tmp_path / "fake_module.py"
 		src.write_text(
 			"@my_decorator\n"  # 1

@@ -1,15 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for `analyze._build_summary_html`: the plain-language "Summary"
-prose at the top of the report.
-
-It must read for a non-developer: "operations" not "actions", humanized
-action names ("Submit Sales Invoice") not raw `cmd:action` strings,
-"high priority" not "high-severity", and a finding's raw `cmd:action`
-reference swapped for the humanized form. The issue count must equal the
-sum of the high/medium/low breakdown.
-"""
+"""Tests for `analyze._build_summary_html`, the plain-language "Summary" prose at
+the top of the report. It must read for a non-developer ("operations" not
+"actions", humanized action names not raw `cmd:action` strings, "high priority"
+not "high-severity"), with the issue count equal to the high/medium/low
+breakdown."""
 
 import json
 import re
@@ -124,14 +120,12 @@ class TestSummaryProse:
 
 
 class TestSummaryBulletShape:
-	"""v0.7.x: Summary section renders as a <ul>/<li> list (was a stack
-	of <p> paragraphs). The TestSummaryProse class above pins the text
-	content via _strip; these tests pin the structural shape so a
-	future refactor doesn't quietly regress back to paragraphs."""
+	"""The Summary section must render as a <ul>/<li> list, not <p> paragraphs.
+	These tests pin the structural shape (TestSummaryProse pins the text)."""
 
 	def test_summary_wraps_in_ul(self):
-		"""Both the bullet wrapper AND at least one bullet item must be
-		present in the rendered HTML."""
+		"""Both the <ul> wrapper and at least one <li> item must be present (and no
+		<p>)."""
 		ctx = _ctx(
 			actions=[{"action_label": "x", "recording_uuid": "r0", "duration_ms": 10}],
 			findings=[{"severity": "High", "title": "a", "estimated_impact_ms": 5}],
@@ -146,8 +140,8 @@ class TestSummaryBulletShape:
 		assert "<p>" not in html
 
 	def test_bullet_count_happy_path(self):
-		"""Standard fixture: actions + findings → exactly 3 bullets
-		(scope, slowest, findings-count)."""
+		"""Actions + findings produce exactly 3 bullets (scope, slowest,
+		findings-count)."""
 		ctx = _ctx(
 			actions=[{"action_label": "x", "recording_uuid": "r0", "duration_ms": 10}],
 			findings=[{"severity": "High", "title": "a", "estimated_impact_ms": 5}],
@@ -156,7 +150,7 @@ class TestSummaryBulletShape:
 		assert html.count("<li>") == 3
 
 	def test_bullet_count_no_findings_with_actions(self):
-		"""Actions + no findings → 4 bullets (scope + slowest + the
+		"""Actions with no findings produce 4 bullets (scope + slowest + the
 		two-bullet reassurance)."""
 		ctx = _ctx(
 			actions=[{"action_label": "GET /app", "recording_uuid": "r0", "duration_ms": 50}],

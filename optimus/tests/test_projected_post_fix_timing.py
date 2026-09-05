@@ -1,22 +1,20 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.5.3 projected-after-fix timing.
+"""Tests for projected-after-fix timing.
 
-Each query-oriented finding now carries a projected per-query time
-estimating what the same query would cost AFTER the suggested fix.
-Lets the developer prioritize by ceiling-of-value: a 20× speedup is
-worth an afternoon, a 1.2× speedup probably isn't. Projections are
-heuristic ceilings, not guarantees see ``base.project_post_fix_ms``
-for the per-finding-type factors.
+Each query-oriented finding carries a projected per-query time estimating what
+the query would cost after the suggested fix, so a developer can prioritize by
+ceiling-of-value. Projections are heuristic ceilings, not guarantees (see
+``base.project_post_fix_ms`` for the per-finding-type factors).
 
-Shape (added to ``technical_detail_json``):
+Shape (added to ``technical_detail_json``)::
 
   {
-    "average_time_ms": 2.7,            # existing
-    "projected_avg_time_ms": 0.5,      # NEW v0.5.3
-    "projected_total_ms": 24.0,        # NEW
-    "projected_speedup_label": "~5× faster",  # NEW (optional)
+    "average_time_ms": 2.7,
+    "projected_avg_time_ms": 0.5,
+    "projected_total_ms": 24.0,
+    "projected_speedup_label": "~5× faster",
   }
 """
 
@@ -195,10 +193,10 @@ class TestNplusOneProjection:
 
 class TestRendering:
 	def test_projection_not_rendered_even_when_present(self):
-		"""Removed per user request: the projected-after-fix estimate read as
-		misleading (per-call could rise while the total rounded to ~0ms). The
-		analyzer still computes projected_* into technical_detail_json (tested
-		above), but the finding card no longer renders it."""
+		"""The finding card no longer renders the projected-after-fix estimate (it
+		read as misleading: per-call could rise while the total rounded to ~0ms).
+		The analyzer still computes projected_* into technical_detail_json (tested
+		above)."""
 		import types
 
 		doc = types.SimpleNamespace()

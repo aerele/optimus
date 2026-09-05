@@ -88,7 +88,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	callsite_groups: dict[tuple, dict] = defaultdict(
 		lambda: {"variants": defaultdict(list), "function_name": ""}
 	)
-	# Clamp to >= 2: a "loop" needs at least two repeats, and loop_count is
+	# Clamp to >= 2: a "loop" needs at least two repeats and loop_count is
 	# always >= 1, so a misconfigured 0/1 would defeat the within-request gate
 	# (line ``loop_count < min_occurrences``) and re-admit the cross-request
 	# false positive the analyzer exists to prevent.
@@ -115,11 +115,11 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		variants: dict = bucket["variants"]
 		# v0.7.x: multi-variant N+1 ("Callsite ran X queries (N variants) at …")
 		# is suppressed the wording reads as jargon (developers don't think in
-		# "variants"), the fix hint is generic, and the dominant variant is already
+		# "variants"), the fix hint is generic and the dominant variant is already
 		# surfaced elsewhere (top queries, table breakdown). Only single-variant
 		# "Same query ran N× at …" is actionable, so bail before any per-variant
 		# work when this callsite has more than one query shape. (A fan-out call
-		# site 10 different queries each run once is multi-variant too, and is
+		# site 10 different queries each run once is multi-variant too and is
 		# excluded here rather than by a separate per-variant max.)
 		if len(variants) > 1:
 			continue
@@ -370,7 +370,7 @@ def _build_user_finding(
 			default=str,
 		),
 		# Headline economics read by the TL;DR hero (renderer/_internal.py),
-		# the card impact box (report.html), the report-wide sort, and the AI-fix
+		# the card impact box (report.html), the report-wide sort and the AI-fix
 		# prompt (ai_fix.py). Both are scoped to the SAME occurrence set the loop's
 		# own hits (loop_durations) so the generic `per_hit = impact / count`
 		# consumers compute the loop's real per-query cost. estimated_impact_ms is the

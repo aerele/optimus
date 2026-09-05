@@ -1,17 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Analyzer: top N slowest queries across the session + slow-query findings.
+"""Top N slowest queries across the session, plus slow-query findings.
 
-Builds the `top_queries` aggregate (used by the report renderer to draw
-the slowest-queries leaderboard) and emits a `Slow Query` finding for a
-slow single query in that leaderboard (> 200ms by default).
-
-The leaderboard is scoped to the user's *own* app code: queries whose
-blame callsite resolves to framework / third-party code are dropped
-before truncating to top N they're noise the developer can't act on
-and they crowd real application queries out of the list. The complete,
-unfiltered per-query list is still available in the per-action breakdown.
+Builds the ``top_queries`` aggregate (the report's slowest-queries leaderboard)
+and emits a ``Slow Query`` finding per slow query in it (> 200ms by default).
+The leaderboard is scoped to the user's own app code: framework / third-party
+callsites are dropped before truncating to top N. The full unfiltered per-query
+list stays in the per-action breakdown.
 """
 
 import json
@@ -42,9 +38,9 @@ TOP_QUERY_FLOOR_MS = 10.0
 
 
 def _resolve_slow_query_threshold() -> tuple[float, float]:
-	"""Return (slow_threshold_ms, high_severity_threshold_ms). Reads
-	Optimus Settings via the cached config; falls back to the legacy
-	constants when settings aren't reachable (pure-test path)."""
+	"""Return (slow_threshold_ms, high_severity_threshold_ms). Reads Optimus
+	Settings via the cached config; falls back to the module constants when
+	settings aren't reachable (pure-test path)."""
 	try:
 		from optimus.settings import get_config
 		cfg = get_config()
@@ -149,12 +145,10 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 
 def count_suppressed_findings(top_queries: list[dict], slow_threshold_ms: float) -> int:
-	"""B.DI4 how many user-app slow queries the findings cap dropped.
+	"""How many user-app slow queries the findings cap dropped.
 
-	Computed at render time (not at analyze time) so adding a new
-	disclosure doesn't require a DocType migration: ``top_queries_json``
-	persists the full top-N list, and any change to the slow threshold
-	(Optimus Settings) re-applies on the next render.
+	Computed at render time from the persisted ``top_queries_json`` full list,
+	so a changed slow threshold re-applies on the next render.
 	"""
 	if not top_queries or not slow_threshold_ms:
 		return 0

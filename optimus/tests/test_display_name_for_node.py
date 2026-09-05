@@ -1,18 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.5.3 _display_name_for_node fallback.
+"""Tests for the ``_display_name_for_node`` fallback.
 
-Production trigger: a Server Script with a 5M-iteration CPU loop
-produced a Slow Hot Path finding titled "In savedocs:Save, 86% of
-the time was spent in " trailing blank because pyinstrument
-returns ``function=""`` for Python code executed via ``exec()``.
-
-The analyzer now walks a preference chain:
-  1. Real function name (not in _UNINFORMATIVE_FUNCTION_NAMES)
-  2. Type-aware label (Server Script body, exec'd code)
-  3. short_filename:lineno
-  4. "<unnamed code>"
+pyinstrument returns ``function=""`` for code run via ``exec()`` (e.g. a
+Server Script body), which produced blank finding titles. The analyzer now
+walks a preference chain: real function name, then a type-aware label
+(Server Script body, exec'd code), then short_filename:lineno, then
+"<unnamed code>".
 """
 
 from optimus.analyzers.call_tree import _display_name_for_node

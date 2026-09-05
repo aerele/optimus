@@ -1,23 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Optimus renderer turns a fully-analyzed ``Optimus Session`` row into
-the self-contained safe-report HTML.
+"""Optimus renderer: turns a fully-analyzed ``Optimus Session`` row into
+the self-contained report HTML.
 
-v0.10.0+ this module is a **package** that aggregates per-concern
-submodules. Pre-v0.10.0 it was a single 4,958-line file; the file → package
-conversion is the foundation for incremental section-by-section
-extraction. See ``optimus/renderer/README.md`` for the extraction recipe,
-the remaining cluster roadmap, and the structural-snapshot canary that
-protects the template contract across follow-up PRs.
-
-The public API (what ``analyze.py`` / ``api.py`` / the test suite import)
-stays exactly as it was every existing ``from optimus.renderer import X``
-and ``optimus.renderer.X`` resolution continues to work. The wildcard
-re-export from ``_internal`` covers names this module hasn't started
-tracking explicitly; the explicit re-exports below are the names that
-matter enough to lock with a unit test
-(``test_renderer_structure_snapshot.py::TestPublicAPIPreserved``).
+This package aggregates per-concern submodules while preserving the public
+API: every ``from optimus.renderer import X`` and ``optimus.renderer.X``
+still resolves, via the wildcard re-export from ``_internal`` below. See
+``optimus/renderer/README.md`` for the extraction recipe.
 """
 
 from __future__ import annotations

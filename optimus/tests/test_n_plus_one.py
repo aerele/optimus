@@ -36,16 +36,9 @@ def test_n_plus_one_detected_from_n_plus_one_fixture(n_plus_one_recording, empty
 
 def test_n_plus_one_callsite_attributes_to_business_code(n_plus_one_recording, empty_context):
 	"""The N+1 finding must point at the custom-app business frame
-	(acme_sales/.../custom_invoice.py:212), NOT frappe/database/database.py.
-
-	This is the fix for review issue #1. The stack has frappe framework
-	frames AFTER the business-logic frame, so without the fix we'd blame
-	database.py:742 for the N+1 instead of the business-code frame.
-
-	v0.5.2: fixture renamed from erpnext/… to acme_sales/… because
-	erpnext is now classified as framework this test is checking
-	the 'blame user code, not framework helpers' behavior, which
-	requires the blame frame to be in a non-framework app.
+	(custom_invoice.py:212), not frappe/database/database.py. The stack has
+	framework frames after the business-logic frame, so the callsite walk must
+	skip them rather than blaming database.py:742.
 	"""
 	result = n_plus_one.analyze([n_plus_one_recording], empty_context)
 	assert len(result.findings) == 1
@@ -90,11 +83,9 @@ def test_threshold_respected(empty_context):
 
 
 def test_one_query_per_request_across_many_requests_is_not_n_plus_one(empty_context):
-	"""Regression: the same query run ONCE per request across 50 separate
-	requests is NOT an N+1 (no loop) and must not be flagged. The old code
-	counted occurrences across all recordings, so 50 requests × 1 query =
-	"Same query ran 50× usually a Python loop", a confident false positive.
-	N+1 must require the loop to be WITHIN a single action."""
+	"""Regression: the same query run once per request across 50 separate
+	requests is not an N+1 (no loop within a single action) and must not be
+	flagged."""
 	recordings = [
 		{
 			"uuid": f"req-{i}",
@@ -121,17 +112,10 @@ def test_one_query_per_request_across_many_requests_is_not_n_plus_one(empty_cont
 
 
 def test_misconfigured_min_occurrences_below_two_cannot_readmit_false_positive(empty_context, monkeypatch):
-	"""The ``max(2, …)`` clamp on ``n_plus_one_min_occurrences`` must hold
-	even when the setting is misconfigured to 0 or 1.
-
-	``loop_count`` (peak repeats within one request) is always ≥ 1, and the
-	within-request gate is ``loop_count < min_occurrences``. If the setting
-	reached the gate as 1, a query that runs exactly ONCE per request would
-	satisfy ``1 < 1 == False`` and be flagged the very cross-request false
-	positive the analyzer exists to prevent (see
-	test_one_query_per_request_across_many_requests_is_not_n_plus_one). The
-	clamp floors the effective threshold at 2 so a single occurrence can never
-	qualify. This test fails the instant the clamp is dropped from line ~93."""
+	"""The ``max(2, …)`` clamp on ``n_plus_one_min_occurrences`` must hold even
+	when the setting is misconfigured to 0 or 1, so a query that runs exactly
+	once per request (across many requests) can never satisfy the within-request
+	gate and be flagged."""
 	from optimus.settings import OptimusConfig
 
 	# Misconfigure the setting to 1 the value that would defeat the gate.
@@ -263,8 +247,8 @@ def test_severity_scales_with_count_and_time(empty_context):
 
 
 def test_loop_across_many_requests_reports_per_request_count_not_total(empty_context):
-	"""Audit #1: a 12× loop across 10 requests is "12× in a row", not "120×".
-	Time is kept low (120ms) to isolate the count inflation from severity-by-time."""
+	"""A 12× loop across 10 requests reads as "12× in a row", not "120×". Time is
+	kept low (120ms) to isolate the count from severity-by-time."""
 	recordings = [
 		{
 			"uuid": f"req-{r}",
@@ -290,7 +274,7 @@ def test_loop_across_many_requests_reports_per_request_count_not_total(empty_con
 	assert len(result.findings) == 1
 	f = result.findings[0]
 
-	# Title reports the per-request loop size, not the cross-request total, and
+	# Title reports the per-request loop size, not the cross-request total and
 	# hedges with "up to" because loop_count (12) is the busiest request's peak,
 	# not a uniform per-request figure (run_count=10, so 12×10≠affected_count).
 	assert "up to 12×" in f["title"]
@@ -329,7 +313,7 @@ def test_loop_across_many_requests_reports_per_request_count_not_total(empty_con
 
 def test_loop_across_requests_stays_high_when_cumulative_time_is_large(empty_context):
 	"""Companion guard: the loop stays High when cumulative time warrants it
-	(60 × 5ms = 300ms > 200ms) severity-by-time is honest, by-count was not."""
+	(60 × 5ms = 300ms > 200ms)."""
 	recordings = [
 		{
 			"uuid": f"req-{r}",
@@ -453,13 +437,10 @@ def test_run_count_excludes_sub_threshold_repeats(empty_context):
 
 
 def test_framework_n_plus_one_query_builder_utils(empty_context):
-	"""Exact production payload: Frappe's query builder utility
-	issues the same normalized query 138 times while building
-	SELECTs for different inputs. Pre-v0.5.1 this emitted as
-	'N+1 Query' with an actionable fix hint, misleading the user
-	into thinking they should refactor their code but the
-	blamed file is frappe/query_builder/utils.py which the user
-	doesn't own. v0.5.1 routes it to 'Framework N+1' instead."""
+	"""Frappe's query builder utility issues the same normalized query 138 times
+	while building SELECTs for different inputs. Because the blamed file is
+	frappe/query_builder/utils.py (not user code), it must route to
+	'Framework N+1', not the actionable 'N+1 Query'."""
 	recording = {
 		"uuid": "framework-qb",
 		"path": "/",
@@ -483,7 +464,7 @@ def test_framework_n_plus_one_query_builder_utils(empty_context):
 		] * 138,  # matches the production count
 	}
 	result = n_plus_one.analyze([recording], empty_context)
-	# Exactly one finding, and it must be Framework N+1.
+	# Exactly one finding and it must be Framework N+1.
 	assert len(result.findings) == 1
 	f = result.findings[0]
 	assert f["finding_type"] == "Framework N+1", (
@@ -503,8 +484,8 @@ def test_framework_n_plus_one_query_builder_utils(empty_context):
 
 
 def test_framework_finding_gates_on_cumulative_not_loop_time(empty_context):
-	"""#1: framework loop is 10ms (< 20ms floor) but cumulative 25ms framework
-	findings gate on total_time, so this survives (the loop_time gate dropped it)."""
+	"""Framework loop is 10ms (< 20ms floor) but cumulative is 25ms: framework
+	findings gate on total_time, so this survives."""
 	fw_call = lambda dur: {  # noqa: E731
 		"query": "SELECT ? FROM information_schema.GLOBAL_VARIABLES",
 		"normalized_query": "SELECT ? FROM information_schema.GLOBAL_VARIABLES",
@@ -578,14 +559,10 @@ def test_user_code_n_plus_one_still_emits_as_actionable(empty_context):
 
 
 def test_title_fits_in_140_chars_for_deeply_nested_module_paths(empty_context):
-	"""Optimus Finding.title is VARCHAR(140). Apps with deeply-nested
-	module paths (jewellery_erpnext has /doctype/<name>/<name>.py with
-	three 'jewellery_erpnext' segments in the path) produce N+1 titles
-	that overflow the limit and crash the analyze pipeline with
-	CharacterLengthExceededError.
-
-	v0.5.1 shortens the filename in the TITLE to the last two path
-	segments; the full path is still in customer_description and
+	"""Optimus Finding.title is VARCHAR(140). Deeply-nested module paths produce
+	N+1 titles that overflow the limit and crash the pipeline with
+	CharacterLengthExceededError. The title shortens the filename to its last two
+	path segments; the full path stays in customer_description and
 	technical_detail_json for navigation.
 	"""
 	long_filename = (
@@ -769,11 +746,9 @@ def test_user_code_routed_through_profiler_wrap_still_attributed(empty_context):
 
 
 def test_is_profiler_own_query_matches_bench_relative_paths():
-	"""v0.5.1 bug: is_profiler_own_query used startswith() and missed
-	the bench-layout path format ``apps/optimus/optimus
-	/capture.py`` that pyinstrument produces on some sites. Fixed by
-	switching to substring match. Regression test uses the exact
-	shapes that were leaking through.
+	"""is_profiler_own_query must match the bench-layout path format
+	``apps/optimus/optimus/...`` (substring match, not startswith), the shape
+	pyinstrument produces on some sites.
 	"""
 	from optimus.analyzers.base import is_profiler_own_query
 
@@ -829,13 +804,10 @@ def test_is_profiler_own_query_matches_bench_relative_paths():
 
 
 def test_walk_callsite_bench_path_profiler_stack_returns_none():
-	"""End-to-end guard: a stack of apps/frappe/... + apps/optimus/...
-	frames must route through walk_callsite's fallback and return None
-	(not return a profiler frame as the blame callsite). Pre-v0.5.1
-	this was the leak that caused 'Framework N+1 at
-	apps/optimus/optimus/infra_capture.py:176' to
-	still appear in production reports even after the previous
-	fixes."""
+	"""A stack of apps/frappe/... + apps/optimus/... frames must route through
+	walk_callsite's fallback and return None, not a profiler frame as the blame
+	callsite (which would emit a Framework N+1 blaming the profiler's own
+	code)."""
 	from optimus.analyzers.base import walk_callsite
 
 	stack = [
@@ -861,10 +833,8 @@ def test_walk_callsite_bench_path_profiler_stack_returns_none():
 
 
 def test_n_plus_one_bench_relative_profiler_stack_produces_no_finding(empty_context):
-	"""Regression guard: the exact call shape from the user's
-	production report ``apps/optimus/optimus/
-	infra_capture.py`` stacks must produce zero findings (neither
-	normal N+1 Query nor Framework N+1)."""
+	"""Bench-relative ``apps/optimus/optimus/infra_capture.py`` profiler stacks
+	must produce zero findings (neither N+1 Query nor Framework N+1)."""
 	recording = {
 		"uuid": "bench-profiler-leak",
 		"path": "/",
@@ -950,11 +920,9 @@ def test_is_profiler_own_query_unit():
 
 
 def test_walk_callsite_returns_none_for_profiler_only_stack():
-	"""walk_callsite's fallback used to return the innermost frame
-	for 100%-framework stacks. Now it checks is_profiler_own_query and
-	returns None when the stack is profiler instrumentation, so
-	analyzers drop the query via their `if not callsite: continue`
-	guard."""
+	"""walk_callsite returns None when the stack is profiler instrumentation
+	(via is_profiler_own_query), so analyzers drop the query through their
+	`if not callsite: continue` guard."""
 	from optimus.analyzers.base import walk_callsite
 
 	stack = [
@@ -966,9 +934,8 @@ def test_walk_callsite_returns_none_for_profiler_only_stack():
 
 
 def test_walk_callsite_still_falls_back_for_pure_frappe_stack():
-	"""Legacy behavior preserved: a 100% frappe/ stack (no
-	optimus) still falls back to the innermost frame, so
-	legitimate framework queries aren't silently dropped."""
+	"""A 100% frappe/ stack (no optimus) still falls back to the innermost frame,
+	so legitimate framework queries aren't silently dropped."""
 	from optimus.analyzers.base import walk_callsite
 
 	stack = [
@@ -1033,7 +1000,7 @@ def test_top_queries_filters_profiler_instrumentation(empty_context):
 
 
 def test_action_ref_points_to_the_looping_request_not_first_appearance(empty_context):
-	"""#1: action_ref must name the dominant (looping) request, not the first the
+	"""action_ref must name the dominant (looping) request, not the first the
 	query appeared in. Runs once in req 0, loops 15× in req 1 → ref == "1"."""
 	recordings = [
 		{  # request 0 the query appears exactly once (NOT a loop)
@@ -1110,8 +1077,8 @@ def _mixed_loop_and_singles(loop_hits, loop_ms, single_count, single_ms):
 
 
 def test_small_loop_low_severity_and_loop_scoped_cost(empty_context):
-	"""#2/#1: severity AND the description cost use the loop's own time (30ms),
-	not the 280ms cumulative so Low, and the description quotes 30ms not 280ms."""
+	"""Severity and the description cost use the loop's own time (30ms), not the
+	280ms cumulative: so Low; the description quotes 30ms not 280ms."""
 	recordings = _mixed_loop_and_singles(loop_hits=10, loop_ms=3.0, single_count=50, single_ms=5.0)
 	result = n_plus_one.analyze(recordings, empty_context)
 	assert len(result.findings) == 1
@@ -1145,8 +1112,8 @@ def test_small_loop_low_severity_and_loop_scoped_cost(empty_context):
 
 
 def test_trivial_loop_suppressed_when_only_noise_lifts_it_over_gate(empty_context):
-	"""#2 (gate): a trivial loop (loop_time 5ms < 20ms floor) is suppressed even
-	when the same query, run once across 100 requests, lifts the session total."""
+	"""A trivial loop (loop_time 5ms < 20ms floor) is suppressed even when the
+	same query, run once across 100 requests, lifts the session total."""
 	recordings = _mixed_loop_and_singles(loop_hits=10, loop_ms=0.5, single_count=100, single_ms=5.0)
 	result = n_plus_one.analyze(recordings, empty_context)
 	assert result.findings == []  # loop_time 5ms < 20ms floor → suppressed
@@ -1156,7 +1123,7 @@ def test_sub_millisecond_loop_cost_reads_less_than_1ms_not_0ms(empty_context, mo
 	"""A sub-1ms loop must read "<1ms", not a misleading "0ms" (0.5ms rounds to "0")."""
 	from optimus.settings import OptimusConfig
 
-	# Floor the occurrence gate at 2 so a 2× loop qualifies, and drop the min-time
+	# Floor the occurrence gate at 2 so a 2× loop qualifies and drop the min-time
 	# gate below the loop's 0.5ms so the finding reaches the cost-render branch.
 	monkeypatch.setattr(
 		"optimus.settings.get_config",

@@ -1,14 +1,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for analyze._enrich_findings_with_ai_suggestions the optional
-"bake AI fixes into the report" step (Optimus Settings ▸ AI Fix
-Suggestions ▸ "Suggest AI fixes by default").
-
-Pure-test path: ``settings.get_config`` / ``ai_fix.is_available`` /
-``ai_fix.suggest_fix`` are patched, so no network and no live site. The
-function is best-effort and time-budgeted; here we pin the gating,
-ordering, capping, and warning behaviour.
+"""Tests for analyze._enrich_findings_with_ai_suggestions, the optional
+"bake AI fixes into the report" step. ``settings.get_config`` /
+``ai_fix.is_available`` / ``ai_fix.suggest_fix`` are patched (no network, no
+live site); these pin the gating, ordering, capping and warning behaviour.
 """
 
 import json

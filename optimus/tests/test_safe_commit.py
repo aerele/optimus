@@ -1,15 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.6.x: tests for ``optimus.safe_commit``: the rollback-on-error
-wrapper that every explicit commit in this codebase now routes through.
+"""Tests for ``optimus.safe_commit``, the rollback-on-error wrapper that every
+explicit commit routes through.
 
-Addresses Lens audit finding *"frappe.db.commit() without try/except"*.
-
-Uses pytest's ``monkeypatch.setitem(sys.modules, ...)`` so the stubbed
-``frappe`` is auto-restored at test teardown without that, every test
-running AFTER one of these in the same pytest session would inherit our
-minimal stub and crash on missing recorder / realtime / local symbols.
+Uses ``monkeypatch.setitem(sys.modules, ...)`` so the stubbed ``frappe`` is
+auto-restored at teardown; otherwise later tests in the same session would
+inherit the minimal stub and crash on missing symbols.
 """
 
 import sys
@@ -42,12 +39,9 @@ def _build_frappe_stub(*, commit_raises=False, rollback_raises=False):
 
 
 def _import_safe_commit(monkeypatch):
-	"""Return ``optimus.safe_commit`` re-resolved against the
-	current ``sys.modules["frappe"]`` stub. The function captures
-	``frappe`` per-call via a lazy import no module-level binding to
-	worry about but we still defensively delete any cached
-	``optimus`` package reference so a fresh import isn't a
-	subtle no-op."""
+	"""Return ``optimus.safe_commit`` resolved against the current
+	``sys.modules["frappe"]`` stub. safe_commit lazy-imports ``frappe`` per call,
+	so the stub in place at call time is what it picks up."""
 	# safe_commit lives at package top-level (optimus/__init__.py).
 	# Its body imports frappe AT CALL TIME (`import frappe` inside the
 	# function), so the stub at sys.modules["frappe"] is what it picks up.

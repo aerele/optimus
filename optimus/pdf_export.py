@@ -3,10 +3,9 @@
 
 """Lazy PDF generation for the report.
 
-Generated on first request via frappe.utils.pdf.get_pdf (wkhtmltopdf),
-cached to a private File attachment on the Optimus Session. Subsequent
-requests serve from cache. Analyze pipeline is never touched keeping
-PDF generation outside the analyze budget.
+Generated on first request via frappe.utils.pdf.get_pdf (wkhtmltopdf) and cached
+to a private File attachment on the Optimus Session; later requests serve from
+cache. The analyze pipeline is never touched.
 """
 
 import re
@@ -121,14 +120,9 @@ def _expand_collapsible_sections(html: str) -> str:
 def _html_to_pdf(html: str) -> bytes:
 	"""Run HTML through wkhtmltopdf via frappe.utils.pdf.get_pdf.
 
-	Options tuned for the report's CSS A4, conservative margins,
-	UTF-8, print-media-type so any @media print rules in the report are
-	honored (e.g. the SVG donut fallback).
-
-	Pre-processes the HTML to force-open all <details> blocks so the
-	Observations subsection and Analyzer notes render in the PDF
-	wkhtmltopdf's QtWebKit doesn't reliably expand collapsed <details>
-	via @media print alone.
+	Options tuned for the report (A4, conservative margins, UTF-8, print-media-type
+	so @media print rules are honored). Force-opens all <details> blocks first,
+	since wkhtmltopdf's QtWebKit doesn't reliably expand collapsed <details>.
 	"""
 	import frappe.utils.pdf
 

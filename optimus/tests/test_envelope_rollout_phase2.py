@@ -1,22 +1,16 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.12.13: continues the v0.12.0 ``wrap_value`` / ``unwrap_value``
-envelope rollout to two more values:
+"""``wrap_value`` / ``unwrap_value`` envelope rollout for two values:
 
-  * ``retention_backlog`` (janitor.py) write-only int. The janitor
-    writes 0 (or the backlog count) once per daily sweep; there's no
-    in-app reader, but operator-facing tooling could read the value
-    directly from Redis, so we wrap on write to make the shape future-
-    safe.
-  * ``onboarding_seen`` (api.py) write/read pair. The dismiss
-    endpoint writes the string ``"1"``; the check endpoint reads
-    and coerces to ``bool``. Both sides migrated.
+  * ``retention_backlog`` (janitor.py): write-only int. No in-app reader, but
+    operator tooling could read it from Redis, so wrap on write to keep the
+    shape future-safe.
+  * ``onboarding_seen`` (api.py): write/read pair. The dismiss endpoint writes
+    ``"1"``; the check endpoint reads and coerces to ``bool``.
 
-The unit suite already has ``test_settings_envelope_rollout.py`` from
-the v0.12.11 settings_cache migration; this module is the same shape
-for these two follow-up values. Each test runs against a dict-backed
-fake cache so we can introspect the exact shape that's stored.
+Each test runs against a dict-backed fake cache to introspect the exact
+stored shape.
 """
 
 from __future__ import annotations
@@ -27,9 +21,8 @@ from unittest import mock
 
 
 class _FakeCache:
-	"""Dict-backed ``frappe.cache`` substitute same as the one used
-	in ``test_settings_envelope_rollout.py``; copied here so each
-	rollout test module is self-contained."""
+	"""Dict-backed ``frappe.cache`` substitute; copied per module so each
+	rollout test is self-contained."""
 
 	def __init__(self) -> None:
 		self.store: dict = {}
@@ -50,11 +43,9 @@ class _FakeCache:
 
 
 class TestRetentionBacklogEnvelope:
-	"""The daily janitor's two write sites for ``retention_backlog`` both
-	wrap the int value in the v0.12.0 envelope. No in-app reader exists
-	(the value is operator-visible monitoring metric only), so the
-	contract under test is write-shape the future-proofing that lets
-	operator dashboards / migration paths read the envelope cleanly."""
+	"""The daily janitor's two ``retention_backlog`` write sites both wrap the
+	int value in the envelope. No in-app reader exists (operator-visible
+	monitoring metric only), so the contract under test is the write shape."""
 
 	def test_janitor_writes_envelope_when_setting_backlog(self):
 		import optimus.janitor as janitor
@@ -120,14 +111,9 @@ class TestRetentionBacklogEnvelope:
 
 
 class TestOnboardingSeenEnvelopeReadCompat:
-	"""``check_onboarding_seen`` reads via ``unwrap_value`` so both new-
-	shape envelopes AND legacy bare ``"1"`` strings (left behind by
-	pre-v0.12.13 writers) resolve to the same truthy result.
-
-	Catches a regression where the read path drops the unwrap call
-	an OLD reader of a NEW envelope would see the dict as truthy and
-	keep returning ``seen: True``, but a NEW reader of an OLD bare
-	string MUST also return truthy."""
+	"""``check_onboarding_seen`` reads via ``unwrap_value`` so both new-shape
+	envelopes and legacy bare ``"1"`` strings resolve to the same truthy
+	result. Guards against the read path dropping the unwrap call."""
 
 	def test_unwrap_of_new_envelope_returns_truthy(self):
 		from optimus import redis_schema
@@ -139,9 +125,8 @@ class TestOnboardingSeenEnvelopeReadCompat:
 		)
 
 	def test_unwrap_of_legacy_bare_string_returns_truthy(self):
-		"""The migration-safety contract: pre-v0.12.13 writers stored
-		the bare string ``"1"``. New readers must NOT crash; they
-		must treat it as the original payload via the legacy-detection
+		"""Migration-safety contract: a legacy bare string ``"1"`` must not crash
+		new readers; it resolves to the original payload via the legacy-detection
 		branch."""
 		from optimus import redis_schema
 

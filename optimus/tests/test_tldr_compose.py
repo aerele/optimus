@@ -1,14 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for `renderer._compose_tldr`: the v0.7.x redesign Phase B
-TL;DR hero composer.
+"""Tests for ``renderer._compose_tldr``, the TL;DR hero composer.
 
-The hero picks the single highest-impact finding (severity desc, then
-impact desc) and emits a one-sentence headline keyed on the finding's
-category. Key phrases are wrapped in `<span class="hot">` via
-markupsafe.Markup so the inline red-italic survives Jinja autoescape
-when the template renders `{{ tldr.headline_markup }}`.
+The hero picks the highest-impact finding (severity desc, then impact desc)
+and emits a one-sentence headline keyed on the finding's category. Key phrases
+are wrapped in ``<span class="hot">`` via markupsafe.Markup so they survive
+Jinja autoescape.
 """
 
 from types import SimpleNamespace
@@ -232,10 +230,8 @@ class TestMarkupSafety:
 		assert isinstance(tldr["sub_markup"], Markup)
 
 	def test_user_supplied_title_is_html_escaped(self):
-		"""Finding titles come from analyzer output but can carry
-		user-controlled content (e.g. DocType names, action labels).
-		Markup.format() escapes plain-string args confirm a stray
-		<script> in the title is escaped, not interpolated raw."""
+		"""Finding titles can carry user-controlled content, so ``Markup.format``
+		must escape a stray ``<script>`` in the title rather than interpolate it raw."""
 		f = _finding(
 			finding_type="Hook Bottleneck",
 			title="<script>alert('xss')</script>",

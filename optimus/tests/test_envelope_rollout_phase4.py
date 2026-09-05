@@ -1,26 +1,16 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.12.21: continues the v0.12.0 ``wrap_value`` / ``unwrap_value``
-envelope rollout to ``session_meta`` (the per-session metadata dict
-in ``optimus.session``).
+"""Tests the ``wrap_value`` / ``unwrap_value`` envelope for ``session_meta``
+(the per-session metadata dict in ``optimus.session``).
 
-The previous phases covered settings_cache (v0.12.11),
-retention_backlog + onboarding_seen (v0.12.13), and explain_cache
-(v0.12.17). This phase adds ``session_meta``: the session-scoped
-context dict written by ``api.start`` (and updated throughout the
-session's life) and read on every recording's before_request /
-before_job hook.
+Contract under test:
 
-The contract under test:
-
-  1. **Write path**: ``set_session_meta`` wraps via ``wrap_value``.
-  2. **Read path**: ``get_session_meta`` unwraps via ``unwrap_value``.
-  3. **Legacy compat**: pre-v0.12.21 cached values (bare dict) still
-     return cleanly through the legacy-detection branch.
-  4. **Defensive non-dict guard**: if a future-version envelope or
-     a corrupt write returns a non-dict payload, ``get_session_meta``
-     returns ``None`` rather than crashing downstream callers.
+  1. Write: ``set_session_meta`` wraps via ``wrap_value``.
+  2. Read: ``get_session_meta`` unwraps via ``unwrap_value``.
+  3. Legacy compat: a bare-dict cached value still returns cleanly.
+  4. Defensive guard: a non-dict / corrupt payload returns ``None`` rather
+     than crashing downstream callers.
 """
 
 from __future__ import annotations
@@ -31,8 +21,7 @@ from unittest import mock
 
 
 class _FakeCache:
-	"""Dict-backed ``frappe.cache`` substitute same shape as the
-	other envelope-rollout test modules use."""
+	"""Dict-backed ``frappe.cache`` substitute."""
 
 	def __init__(self) -> None:
 		self.store: dict = {}
@@ -101,9 +90,8 @@ class TestSessionMetaEnvelopeRead:
 		assert result == payload
 
 	def test_get_session_meta_handles_legacy_bare_dict(self):
-		"""Cache contains a pre-v0.12.21 bare dict → returns the dict
-		via unwrap_value's legacy-detection branch. This is the
-		migration-safety contract that makes new readers safe against
+		"""A bare-dict cache value (pre-envelope) returns unchanged via
+		unwrap_value's legacy-detection branch, so new readers stay safe against
 		stale values from old writers."""
 		from optimus import session
 

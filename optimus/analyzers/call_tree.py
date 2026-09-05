@@ -1,13 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Analyzer: reconcile pyinstrument call tree with SQL recordings.
+"""Analyzer: reconcile the pyinstrument call tree with SQL recordings.
 
-The single highest-value analyzer added in v0.3.0. Walks a per-recording
-pyinstrument frame tree, grafts each captured SQL call onto the deepest
-matching user-code frame, and produces a unified tree where every node
-knows both its Python self-time AND the SQL queries that fired underneath
-it.
+Walks a per-recording pyinstrument frame tree, grafts each captured SQL call
+onto the deepest matching user-code frame and produces a unified tree where
+every node knows both its Python self-time and the SQL queries that fired
+underneath it.
 
 Findings emitted:
   - Slow Hot Path (F1): subtree consumes >25% of action wall time AND >200ms
@@ -18,11 +17,10 @@ Aggregates:
   - hot_frames_json: top-20 leaderboard of hottest frames in the session
   - session_time_breakdown_json: SQL ms + per-app Python ms for the donut
 
-Terminology note (U1): internal field names use ``cumulative_ms``
-(pyinstrument's term self_time + descendant time). The
-user-facing report tags the same value as ``consolidated``. This
-split is intentional don't rename one to match the other without
-a project-owner sign-off.
+Terminology gotcha: internal field names use ``cumulative_ms`` (pyinstrument's
+self_time + descendant time); the user-facing report tags the same value as
+``consolidated``. The split is intentional: do not rename one to match the
+other without a project-owner sign-off.
 """
 
 import json
@@ -46,15 +44,12 @@ from optimus.analyzers.base import (
 def _summarize_explain(explain_result):
 	"""Extract the four red-flag fields from an EXPLAIN result list.
 
-	Handles BOTH shapes:
-	  - the normalized ``PlanTable`` dict the live pipeline stores
-	    (``full_scan`` / ``sort_without_index`` / ``temp_used`` /
-	    ``selectivity_pct``), dialect-blind across MariaDB + Postgres; and
-	  - the legacy raw-MariaDB-row shape (``type`` / ``Extra`` / ``filtered``)
-	    still found in old persisted recordings and cache entries.
-	Same dual-shape bridge as ``explain_flags._item_to_plan_table``. Without the
-	normalized branch this returned ``{}`` for every current session (the row
-	keys it looked for no longer exist post dialect-abstraction)."""
+	Handles both shapes: the normalized ``PlanTable`` dict the live pipeline
+	stores (``full_scan`` / ``sort_without_index`` / ``temp_used`` /
+	``selectivity_pct``, dialect-blind across MariaDB and Postgres) and the
+	legacy raw-MariaDB-row shape (``type`` / ``Extra`` / ``filtered``) found in
+	old persisted recordings and cache entries.
+	"""
 	if not explain_result or not isinstance(explain_result, list):
 		return {}
 	flags = {}
@@ -167,14 +162,10 @@ def _walk_pyi_frame(frame) -> dict:
 
 
 def _pyi_to_dict_tree(pyi_session_or_dict) -> dict:
-	"""Convert a pyinstrument Session to our dict-tree shape.
-
-	If the input is already a dict (from a JSON fixture), it's returned
-	with normalized field names. If it's a pyinstrument Session, we walk
-	its `root_frame()` and build the dict tree.
-
-	The returned tree has a single root node with `function="<root>"`
-	whose children are the actual top-level frames.
+	"""Convert a pyinstrument Session (or an already-dict JSON fixture) to our
+	dict-tree shape. A dict input is returned with normalized field names; a
+	Session has its ``root_frame()`` walked. The returned tree has a single
+	root node (``function="<root>"``) whose children are the top-level frames.
 	"""
 	# Test fixture path: input is already a dict
 	if isinstance(pyi_session_or_dict, dict):
@@ -213,26 +204,21 @@ def _pyi_to_dict_tree(pyi_session_or_dict) -> dict:
 # instead of descending past the framework frame to the user code
 # below. Dropping the leading slashes makes the filter work against
 # both relative and absolute filenames a relative filename like
-# "frappe/handler.py" contains "frappe/", and an absolute filename
+# "frappe/handler.py" contains "frappe/" and an absolute filename
 # like "/Users/.../frappe/handler.py" also contains "frappe/".
 _FRAMEWORK_PATH_FRAGMENTS = ("frappe/", "optimus/")
 _FRAMEWORK_FUNCTION_PREFIXES = ("frappe.", "optimus.")
 
 
 def _is_framework_frame(node_or_frame: dict) -> bool:
-	"""True if a tree node or stack frame looks like framework code.
+	"""True if a tree node or stack frame looks like framework code (anything in
+	frappe/* or optimus/*).
 
-	Used by SQL-to-Python reconciliation and Slow Hot Path findings,
-	which want to blame user code ABOVE the framework boundary and
-	therefore skip aggressively everything in frappe/* and
-	optimus/*.
-
-	For Repeated Hot Frame + hot-frames leaderboard aggregation, use
-	the NARROWER ``_is_pure_helper_frame`` instead. That function keeps
-	application-layer Frappe code (Document lifecycle, permissions,
-	hooks, naming) visible so users can see legitimate optimization
-	targets inside frappe/* which is a different question than
-	'whose SQL is this.'
+	Used by SQL-to-Python reconciliation and Slow Hot Path findings, which blame
+	user code above the framework boundary. For Repeated Hot Frame and hot-frames
+	leaderboard aggregation use the narrower ``_is_pure_helper_frame``, which
+	keeps application-layer Frappe code (Document lifecycle, permissions, hooks,
+	naming) visible as legitimate optimization targets.
 	"""
 	fn = node_or_frame.get("function") or ""
 	for prefix in _FRAMEWORK_FUNCTION_PREFIXES:
@@ -255,7 +241,7 @@ def _is_framework_frame(node_or_frame: dict) -> bool:
 # For SQL N+1 / Slow Hot Path, the answer is "walk past frappe/* to blame
 # user code." Repeated Hot Frame is different: it asks "is this function
 # itself worth optimizing?" Document.run_method, permissions.has_permission,
-# naming.make_autoname, and most of frappe/core/* and frappe/model/* are
+# naming.make_autoname and most of frappe/core/* and frappe/model/* are
 # INSIDE frappe/* yet legitimately slow optimization targets they run
 # the user's hooks, their permission rules, or their custom naming
 # configuration. Surfacing them in the leaderboard is correct.
@@ -267,7 +253,7 @@ def _is_framework_frame(node_or_frame: dict) -> bool:
 #   4. Infrastructure libraries werkzeug, gunicorn, rq, redis
 #                                          client, pyinstrument, pytz, dateutil
 #
-# Everything else including most of frappe/*, all of erpnext/*, and
+# Everything else including most of frappe/*, all of erpnext/* and
 # all user apps is KEPT so users see legitimate optimization targets
 # like "Document.run_method consumed 2.4s across 12 actions."
 
@@ -346,7 +332,7 @@ _PURE_HELPER_PATH_SUFFIXES = (
 # v0.5.1: substring matches (via `in`). Whole directories of framework
 # helpers / infrastructure libraries. Fragment values MUST NOT have
 # leading slashes the stored filenames are typically relative
-# (`frappe/utils/foo.py`), and `/frappe/utils/` does not occur as a
+# (`frappe/utils/foo.py`) and `/frappe/utils/` does not occur as a
 # substring of `frappe/utils/foo.py`. See the comment on
 # _FRAMEWORK_PATH_FRAGMENTS for the full history of this bug.
 _PURE_HELPER_PATH_SUBSTRINGS = (
@@ -423,18 +409,14 @@ def _is_pure_helper_frame(
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
 ) -> bool:
-	"""Narrower than ``_is_framework_frame``. Returns True only for pure
-	plumbing helpers that users can't optimize. Keeps most of frappe/*
-	so hot-frame findings remain useful when application-layer Frappe
-	code (Document lifecycle, permissions, hooks, naming) is the actual
-	bottleneck and users who ARE Frappe contributors can see those as
-	legitimate targets too.
+	"""Narrower than ``_is_framework_frame``: True only for pure plumbing helpers
+	users can't optimize. Keeps most of frappe/* so hot-frame findings stay
+	useful when application-layer Frappe code is the real bottleneck.
 
-	Called by the Repeated Hot Frame aggregator AND by
-	``_is_walker_plumbing_frame`` (the Slow Hot Path / Hook / BG-job walker) so
-	both surfaces share this predicate. NOT for SQL-to-Python reconciliation, which
-	wants the broader ``_is_framework_frame`` so SQL attributes blame to user code
-	above the framework boundary.
+	Called by the Repeated Hot Frame aggregator and by
+	``_is_walker_plumbing_frame`` (the Slow Hot Path / Hook / BG-job walker). Not
+	for SQL-to-Python reconciliation, which wants the broader
+	``_is_framework_frame``.
 	"""
 	fn = node.get("function") or ""
 
@@ -532,20 +514,15 @@ def _is_walker_plumbing_frame(
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
 ) -> bool:
-	"""Walker-specific plumbing predicate. ``True`` when ``_walk_for_findings``
+	"""Walker-specific plumbing predicate: ``True`` when ``_walk_for_findings``
 	should descend past this node without emitting a finding on it.
 
-	Union of ``_is_framework_frame`` (frappe/*, optimus/*) and
-	``_is_pure_helper_frame`` (RQ wrappers, werkzeug/gunicorn, decorator
-	shims, stdlib singletons), with one carve-out: **Server Script bodies
-	are not plumbing**. Server Scripts get exec'd through pyinstrument with
-	``function=""`` and a synthetic ``<serverscript-N>`` filename, which
-	``_is_pure_helper_frame``'s angle-bracket-filename rule classifies as
-	plumbing for the Repeated Hot Frame aggregator (one-off scripts don't
-	aggregate). For the Slow Hot Path walker, they are legitimate
-	user-actionable hot frames and they stay actionable even when Tracked Apps
-	is configured, because a Server Script is the developer's own optimizable code
-	(it lives in the database, not in any app), so it is never "out of scope".
+	Union of ``_is_framework_frame`` and ``_is_pure_helper_frame``, with one
+	carve-out: Server Script bodies are not plumbing. They get exec'd with a
+	synthetic ``<serverscript>`` filename that ``_is_pure_helper_frame`` would
+	treat as plumbing, but for the walker they are user-actionable hot frames,
+	and stay so even under Tracked Apps (a Server Script lives in the database,
+	never "out of scope").
 	"""
 	if _is_framework_frame(node):
 		return True
@@ -644,17 +621,17 @@ def _coalesce_sql_siblings(node: dict) -> None:
 
 
 def reconcile(pyi_session_or_dict, sql_calls: list, action_wall_time_ms: float) -> dict:
-	"""Build a unified call tree from a pyinstrument session + SQL calls.
+	"""Build a unified call tree from a pyinstrument session and SQL calls.
 
-	This is the main reconciliation entry point. Returns a dict tree with
-	SQL leaves grafted at the deepest user-code ancestor of each call's
-	stack, identical SQL siblings coalesced, and partial-match flags set
-	where the recorder stack ran past the pyi tree's visible depth.
+	Returns a dict tree with SQL leaves grafted at the deepest user-code
+	ancestor of each call's stack, identical SQL siblings coalesced and
+	partial-match flags set where the recorder stack ran past the tree's visible
+	depth.
 
-	Time-accounting invariant: pyinstrument has already counted SQL time
-	in every Python ancestor's cumulative_ms. We DO NOT subtract the
-	leaf's self_ms is informational only. The renderer always reads
-	cumulative_ms from the node itself, never sums children.
+	Time-accounting invariant: pyinstrument already counts SQL time in every
+	Python ancestor's cumulative_ms, so the leaf's self_ms is informational only
+	(not subtracted). The renderer always reads cumulative_ms from the node
+	itself, never sums children.
 	"""
 	tree = _pyi_to_dict_tree(pyi_session_or_dict)
 
@@ -841,23 +818,12 @@ def _display_name_for_node(node: dict) -> str:
 	"""Return a human-readable name for a call-tree node's frame.
 
 	Preference order:
-
-	  1. ``node["function"]`` if it's a real name (not in the
-	     uninformative list).
-	  2. ``short_filename(filename):lineno`` when we can derive a
-	     file location useful for module-scope or ``<module>``
-	     frames so the title reads "spent in myapp/foo.py:42".
-	  3. A type-aware label based on what the synthetic name
-	     suggests e.g. a Server Script body becomes
-	     "<server-script body>". Better than pass-through because
-	     the report reader immediately understands what's slow.
+	  1. ``node["function"]`` if it's a real name (not uninformative).
+	  2. ``short_filename(filename):lineno`` for module-scope / ``<module>``
+	     frames, so the title reads "spent in myapp/foo.py:42".
+	  3. A type-aware label for synthetic names (a Server Script body becomes
+	     "<server-script body>").
 	  4. "<unnamed code>" as last resort.
-
-	Production trigger: a user put a 5M-iteration CPU loop inside a
-	Frappe Server Script. pyinstrument recorded the exec()'d body
-	with function="" and filename="<serverscript-N>", so the
-	finding title rendered as "spent in " (trailing blank). Now it
-	renders "spent in <server-script body>".
 	"""
 	raw_fn = (node.get("function") or "").strip()
 	if raw_fn and raw_fn not in _UNINFORMATIVE_FUNCTION_NAMES:
@@ -1180,7 +1146,7 @@ def _walk_for_findings(
 						"run a **Line-Level Drilldown** (the *Run Line-Profile "
 						"Pass* button on the session) and pick this function "
 						"from the candidates that profiles tight loops, "
-						"expensive computations, and string/regex work at the "
+						"expensive computations and string/regex work at the "
 						"statement level so you can optimize or cache them."
 						"\n\nNote: self-time here is wall-clock (the sampler "
 						"measures elapsed time, not CPU). If this function "
@@ -1221,7 +1187,7 @@ def _walk_for_findings(
 				})
 			# When we emit a finding for this node, do NOT recurse into
 			# its children children are already represented in the
-			# subtree's cumulative_ms, and recursing would create
+			# subtree's cumulative_ms and recursing would create
 			# overlapping nested findings.
 			return
 
@@ -1250,16 +1216,9 @@ HOT_FRAMES_INTERMEDIATE_CAP = 1000
 def _redacted_module_key(function: str, filename: str = "") -> str | None:
 	"""Build the dedup key for cross-action aggregation.
 
-	v0.5.1: includes the filename so different functions that share a
-	name (e.g. 35 different ``wrapper`` decorators across unrelated
-	modules, or 20 different ``handle`` methods) don't all collapse
-	into one bucket. Pre-v0.5.1 used the bare function name, which
-	produced misleading 'Repeated Hot Frame' findings blaming generic
-	decorator wrappers that the user cannot optimize every functools
-	wrapper, werkzeug wrapper, and frappe.whitelist wrapper in the
-	session would roll up under a single 'wrapper' key.
-
-	Returns None for synthetic / skipped nodes.
+	Includes the filename so different functions that share a name (e.g. many
+	distinct ``wrapper`` decorators across unrelated modules) don't collapse into
+	one bucket. Returns None for synthetic / skipped nodes.
 	"""
 	if not function or function.startswith("[") or function == "<root>" or function == "<sql>":
 		return None
@@ -1371,11 +1330,11 @@ def _walk_for_aggregation(
 	if node.get("kind") == "python":
 		# v0.5.1: skip PURE HELPER frames only, not all framework code.
 		# This is the narrower _is_pure_helper_frame check we want to
-		# keep Document.run_method, permission checks, naming, and other
+		# keep Document.run_method, permission checks, naming and other
 		# application-layer Frappe code in the leaderboard because they
 		# can be legitimate optimization targets (e.g. a slow doc-event
 		# hook bubbles up as Document.run_method). Only frappe/utils/*,
-		# frappe/handler.py, frappe/app.py, and infrastructure libs
+		# frappe/handler.py, frappe/app.py and infrastructure libs
 		# (werkzeug, rq, etc.) are suppressed.
 		#
 		# An earlier v0.5.1 draft used the broader _is_framework_frame
@@ -1418,37 +1377,12 @@ def _walk_for_aggregation(
 def _strip_profiler_frames(node: dict) -> dict:
 	"""Recursively remove optimus/* frames from the tree.
 
-	When a profiler frame is found, its CHILDREN are grafted up to the
-	parent in place of the profiler frame itself. This preserves any
-	user-code subtree that happens to be under a profiler frame
-	(pathological but theoretically possible) while removing the
-	profiler frame from view.
-
-	Context: a production report on a fast request
-	(GET /api/method/frappe.realtime.can_subscribe_doctype, 47 ms)
-	showed its call tree as
-
-	    application  (47 ms)
-	     └─ init_request  (31 ms)
-	         └─ call  (31 ms)
-	             └─ before_request  (31 ms)   ← optimus
-	                 └─ snapshot  (31 ms)     ← optimus
-	                     └─ _read_db  (13 ms) ← optimus
-
-	67% of the action's time was attributed to the profiler's own
-	infra snapshot. The root cause was _start_pyi_session being
-	called BEFORE infra_capture.snapshot() in before_request the
-	snapshot was still on the call stack when pyinstrument began
-	sampling. The primary fix (v0.5.1) reorders the hook so the
-	snapshot happens first. This tree-strip pass is belt-and-
-	suspenders: even with the correct ordering, pyi can still catch
-	a single sample of ``before_request`` returning or a capture
-	wrap frame during the action, and the stored tree should never
-	show profiler frames regardless.
-
-	Modifies the tree in place for performance (per-action trees
-	can be hundreds of kilobytes) and returns the same node for
-	chaining in the analyze pipeline.
+	When a profiler frame is found, its children are grafted up to the parent in
+	place of it, so any user-code subtree beneath a profiler frame survives while
+	the profiler frame itself disappears. Belt-and-suspenders so the stored tree
+	never shows profiler frames even if pyinstrument samples one. Modifies the
+	tree in place (per-action trees can be hundreds of kilobytes) and returns the
+	same node for chaining.
 	"""
 	children = node.get("children") or []
 	new_children: list = []
@@ -1469,47 +1403,19 @@ def _strip_profiler_frames(node: dict) -> dict:
 
 
 def _top_level_app(function: str, filename: str) -> str:
-	"""Return the top-level app name for bucketing the donut.
+	"""Return the top-level app name for bucketing the donut, derived from the
+	filename's path (not the function name).
 
-	v0.5.1: derived from the FILENAME's first path segment (not the
-	function name), with additional filters to keep Python stdlib /
-	synthetic / third-party frames from polluting the bucket list.
+	Routing rules:
+	  1. Synthetic function names (``<root>``, ``<sql>``, angle-bracketed) → [other]
+	  2. Angle-bracketed synthetic filenames → [other]
+	  3. Filenames under ``site-packages/`` or ``dist-packages/`` (third-party) → [other]
+	  4. Single-segment filenames (``inspect.py``) are stdlib / loose scripts → [other]
+	  5. An ``apps/<name>/`` marker → ``<name>``
+	  6. Otherwise the first path segment, accepted only if it is an installed
+	     Frappe app (``frappe.get_installed_apps()``); off-bench, any first segment.
 
-	A real production donut showed these noise buckets all 0ms each:
-
-	    Python (inspect.py) Python stdlib (single-segment filename)
-	    Python (functools.py) Python stdlib
-	    Python (MySQLdb) third-party, pyinstrument stripped
-	                             "site-packages/" so the substring
-	                             filter missed it
-	    Python (<built-in>) pyinstrument synthetic for C builtins
-
-	All four should collapse to the ``[other]`` catch-all. The rules
-	that route them correctly:
-
-	  1. Synthetic function names (``<root>``, ``<sql>``, ``<built-in>``,
-	     ``<string>``, anything wrapped in angle brackets) → [other]
-	  2. Synthetic filenames wrapped in angle brackets → [other]
-	  3. Filenames containing ``site-packages/`` or ``dist-packages/``
-	     (third-party libs) → [other]
-	  4. Single-segment filenames (``inspect.py``, ``functools.py``)
-	     these are stdlib or loose scripts, not Frappe apps → [other]
-	  5. ``apps/<name>/`` marker → ``<name>``
-	  6. First path segment of a multi-segment filename, filtered to
-	     actual installed Frappe apps via ``frappe.get_installed_apps()``
-	     when available otherwise accept the first segment (legacy
-	     behavior, used by unit tests that can't import frappe)
-
-	Handles the common pyinstrument path shapes:
-	  - ``frappe/handler.py``                        → "frappe"
-	  - ``optimus/capture.py``               → "optimus"
-	  - ``erpnext/accounts/tax.py``                  → "erpnext"
-	  - ``apps/erpnext/erpnext/foo.py``             → "erpnext"
-	  - ``/Users/.../apps/frappe/frappe/handler.py`` → "frappe"
-	  - ``env/lib/python3.14/site-packages/werkzeug/wsgi.py`` → "[other]"
-	  - ``MySQLdb/connections.py``                   → "[other]"
-	  - ``inspect.py``                               → "[other]"
-	  - ``<built-in>``                               → "[other]"
+	Server Script callsites bucket under "Server Scripts".
 	"""
 	# Server Scripts: filename identifies the bucket even when the
 	# function name is empty (``safe_exec`` compiles with function="").
@@ -1553,7 +1459,7 @@ def _top_level_app(function: str, filename: str) -> str:
 	# Bench layout: resolve the REAL apps/<name>/ segment (boundary-anchored,
 	# last-``apps/``-wins) so a bench nested under a folder named ``apps``
 	# (``/opt/apps/frappe-bench/apps/erpnext/…``) buckets under "erpnext", not the
-	# bogus "frappe-bench" prefix, and an app whose name ends in ``apps``
+	# bogus "frappe-bench" prefix and an app whose name ends in ``apps``
 	# (``webapps/…``) isn't misparsed.
 	app = _last_app_segment(norm)
 	if app:
@@ -1646,7 +1552,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 	"""call_tree analyzer entry point.
 
 	For each recording with a pyi_session, reconcile + prune + cap the tree,
-	emit per-action findings, and record the unified tree on the action.
+	emit per-action findings and record the unified tree on the action.
 	After all recordings are processed, emit cross-action Repeated Hot
 	Frame findings and build the session-wide donut + leaderboard.
 	"""
@@ -1674,7 +1580,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 
 	for action_idx, recording in enumerate(recordings):
 		# v0.7.x (M1): pop, don't get call_tree is the ONLY consumer of the
-		# raw pyinstrument Session, and holding all recordings' trees in RAM at
+		# raw pyinstrument Session and holding all recordings' trees in RAM at
 		# once was the dominant analyze-time memory spike (OOM on long flows).
 		# Popping frees each tree as soon as it's reconciled, so peak drops from
 		# "all trees at once" to "one at a time". Covers the pyi-is-None branch

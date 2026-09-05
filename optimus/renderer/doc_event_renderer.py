@@ -1,33 +1,24 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Doc-event lifecycle binding + per-DocType breakdown.
+"""Doc-event lifecycle binding + per-DocType breakdown (render-time enrichment).
 
-v0.6.x render-time enrichment that ties each action to the document it
-touched (from ``form_dict``) and each finding to the doc-event lifecycle
-hook (``validate`` / ``on_submit`` / etc.) the function was registered
-under. Used downstream by the call-tree, finding-card, and "Doc-event
-lifecycle" report sections.
+Ties each action to the document it touched (from ``form_dict``) and each
+finding to the doc-event lifecycle hook (``validate`` / ``on_submit`` / etc.)
+the function was registered under.
 
-Two public surfaces (both called from the render orchestrator in
-``_internal.py``):
+Two public surfaces, both called from the render orchestrator in ``_internal.py``:
 
-* ``_attach_action_context(actions, findings, recordings_by_uuid)``:
-  in-place enrichment of ``action["target_doc"]``,
-  ``finding["technical_detail"]["target_doc"]``, and
-  ``finding["technical_detail"]["hook_events"]``. Also rewrites
-  ``action["action_label"]`` / ``action["path"]`` /
-  ``action["entry_callsite"]["function"]`` / the matching
-  ``finding["customer_description"]`` italicised phrase to carry the
-  DocType suffix.
-* ``_build_doc_event_breakdown(findings)``: pure-function transform
-  that groups findings by DocType → lifecycle event for the
-  "Doc-event lifecycle" report section.
+* ``_attach_action_context(actions, findings, recordings_by_uuid)``: in-place
+  enrichment of the ``target_doc`` / ``hook_events`` keys, also rewriting the
+  action label / path / entry-callsite function and the finding's italicised
+  phrase to carry the DocType suffix.
+* ``_build_doc_event_breakdown(findings)``: pure transform grouping findings by
+  DocType then lifecycle event.
 
-Extracted from ``_internal.py`` in v0.12.10 per the v0.10.0 renderer-
-package roadmap. Self-contained: only external dependency is a lazy
-``frappe.get_hooks`` lookup inside ``_doc_event_hook_index``; safe to
-import without a running site (returns ``{}``).
+Self-contained: the only external dependency is a lazy ``frappe.get_hooks``
+lookup in ``_doc_event_hook_index``; safe to import without a running site
+(returns ``{}``).
 """
 
 from __future__ import annotations
@@ -78,11 +69,11 @@ def _module_from_filename(filename) -> str:
 
 
 def _doctype_from_controller_path(filename) -> str | None:
-	"""``erpnext/accounts/doctype/sales_invoice/sales_invoice.py`` → ``"Sales Invoice"``
-	(the segment right after ``doctype/``, un-scrubbed). Works on app-relative,
-	bench-relative, and absolute paths. ``None`` for non-controller paths. NB:
-	``.title()`` mangles multi-cap names ("gl_entry" → "Gl Entry") same as
-	``frappe.unscrub``; accepted."""
+	"""``.../doctype/sales_invoice/sales_invoice.py`` -> ``"Sales Invoice"`` (the
+	segment right after ``doctype/``). Works on app-relative, bench-relative
+	and absolute paths; ``None`` for non-controller paths. NB: ``.title()``
+	mangles multi-cap names ("gl_entry" -> "Gl Entry"), as ``frappe.unscrub``
+	does."""
 	if not filename:
 		return None
 	parts = [p for p in str(filename).replace("\\", "/").strip("/").split("/") if p]
@@ -383,7 +374,7 @@ def _attach_action_context(actions, findings, recordings_by_uuid) -> None:
 # ---------------------------------------------------------------------------
 # v0.6.x: "Doc-event lifecycle" section re-group the slow call-tree findings
 # by DocType → lifecycle event (validate / on_submit / …), tagging each as a
-# registered ``doc_events`` hook vs a controller method override, and surfacing
+# registered ``doc_events`` hook vs a controller method override and surfacing
 # cascaded DocTypes (e.g. GL Entry touched during a Sales Invoice submit).
 # Pure, render-time, derived from the findings already enriched by
 # _attach_action_context.

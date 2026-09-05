@@ -1,20 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.5.3 adaptive truncation cap + prominent banner.
+"""Tests for the adaptive truncation cap + prominent banner.
 
-Two related changes:
-
-  1. ``max_queries_per_recording`` is now admin-configurable via
-     Optimus Settings (default 2000). Long flows (Manufacturing
-     Plan Submit with 3000+ queries/recording) can raise it to
-     5000 or 10000 to get full-coverage analysis.
-
-  2. When truncation happens, a prominent red banner renders at the
-     TOP of the report above the exec-summary card. Previously
-     the warning was buried in the collapsed Analyzer Notes at the
-     bottom, and developers read incomplete reports without
-     noticing.
+``max_queries_per_recording`` is admin-configurable via Optimus Settings
+(default 2000); long flows can raise it for full-coverage analysis. When
+truncation happens, a prominent red banner renders at the top of the report.
 """
 
 import json
@@ -81,13 +72,9 @@ class TestTruncationBannerRenders:
 		assert "Max Queries per Recording" in html
 
 	def test_banner_renders_above_tldr_hero(self):
-		"""Structural: the truncation banner must appear BEFORE the
-		TL;DR hero in document order. Otherwise readers who stop
-		scrolling at the headline won't see the warning.
-		v0.7.x redesign: the exec-summary card was replaced by the
-		TL;DR hero (mock spec). The banner-must-come-before-the-most-
-		prominent-content rule still applies the prominent block
-		just changed identity."""
+		"""Structural: the truncation banner must appear BEFORE the TL;DR hero
+		in document order, or readers who stop at the headline won't see the
+		warning."""
 		from optimus import renderer
 
 		warning = "⚠ TRUNCATED: 100 queries (5% of the flow) exceeded ..."

@@ -1,12 +1,11 @@
 # optimus/tests/test_steps_to_reproduce.py
 # Copyright (c) 2026, Optimus contributors
 
-"""Tests for v0.5.0 Steps-to-Reproduce / Notes field.
+"""Tests for the Steps-to-Reproduce / Notes field.
 
-The v0.5.0 design upgrades the existing `notes` field on Profiler
-Session from plain Text to Text Editor so users can include rich
-"what did you do during this session" context, and renders it at
-the top of the report above findings.
+The `notes` field on Optimus Session is a Text Editor so users can include rich
+"what did you do during this session" context, rendered at the top of the
+report above findings.
 """
 
 import inspect
@@ -80,11 +79,9 @@ def test_api_start_writes_notes_to_doc():
 
 
 def test_report_template_renders_notes():
-	"""The report template must render the notes section using a
-	pre-sanitized variable. Post-J.2.1 the template reads
-	``report_data.repro.raw_html`` (sourced from the same sanitized
-	``notes_html`` that ``renderer.render`` builds via
-	``sanitize_html(always_sanitize=True)``)."""
+	"""The report template must render the notes section from a pre-sanitized
+	variable: ``report_data.repro.raw_html``, sourced from the ``notes_html``
+	that ``renderer.render`` builds via ``sanitize_html(always_sanitize=True)``."""
 	tpath = os.path.join(HERE, "..", "templates", "report.html")
 	with open(tpath) as f:
 		template = f.read()
@@ -134,13 +131,10 @@ def test_notes_are_bleach_sanitized_before_render():
 
 
 def test_json_shaped_xss_payload_is_sanitized():
-	"""Architect-review finding: sanitize_html has a fast-path that
-	skips bleach for input detected as valid JSON. An attacker could
-	set notes = '{"x": "<script>alert(1)</script>"}' which IS valid
-	JSON (a JSON dict literal with a string value containing the
-	script) and sanitize_html without always_sanitize=True returns
-	it unchanged. The template's |safe then renders the script as
-	a live <script> tag. always_sanitize=True closes this bypass.
+	"""sanitize_html has a fast-path that skips bleach for input detected as
+	valid JSON, so ``notes = '{"x": "<script>...</script>"}'`` (valid JSON) would
+	pass through unchanged and the template's |safe would render a live <script>.
+	``always_sanitize=True`` closes this bypass.
 	"""
 	try:
 		from frappe.utils.html_utils import sanitize_html
@@ -323,16 +317,9 @@ def test_persist_auto_fills_notes_when_field_is_empty():
 
 
 def test_auto_notes_filters_realtime_polling_noise():
-	"""v0.5.1: real production reproducer read:
-
-	    GET /api/method/frappe.realtime.has_permission 25ms
-	    POST /api/method/frappe.desk.form.save.savedocs 775ms
-	    GET /api/method/frappe.realtime.has_permission 6ms
-
-	Of those three, only the savedocs is a user action. The two
-	has_permission entries are the Desk polling for realtime
-	subscription permission and should be filtered out of the
-	reproducer (still visible in the per-action table)."""
+	"""Only genuine user actions belong in the reproducer: given savedocs plus
+	two ``frappe.realtime.has_permission`` polls, only the savedocs survives (the
+	polls stay visible in the per-action table)."""
 	import json as _json
 
 	from optimus.analyze import _build_auto_notes_html
@@ -502,7 +489,7 @@ def test_auto_notes_real_user_sequence_reads_naturally():
 	]
 	html_out = _build_auto_notes_html(recordings)
 
-	# The whole story shows up in order, and reads like English.
+	# The whole story shows up in order and reads like English.
 	for expected in (
 		"Search Item",
 		"Open Customer CUST-001",
@@ -548,7 +535,7 @@ def test_start_dialog_no_longer_asks_for_notes():
 # --------------------------------------------------------------------------
 
 def test_actions_for_humanizer_compacts_recordings():
-	"""_actions_for_humanizer should drop noise, cap, and emit the
+	"""_actions_for_humanizer should drop noise, cap and emit the
 	compact {label, cmd, path, method, doctype, duration_ms} dicts the
 	humanizer prompt expects."""
 	from optimus.analyze import _actions_for_humanizer

@@ -1,9 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for analyze._enrich_findings_with_source_snippets runs without
-Frappe; takes a list of finding dicts (with technical_detail_json) and a
-real file on disk, then asserts the source_snippet shape after enrichment."""
+"""Tests for analyze._enrich_findings_with_source_snippets (runs without Frappe):
+asserts the source_snippet shape after enriching finding dicts against a real file.
+"""
 
 import json
 import os

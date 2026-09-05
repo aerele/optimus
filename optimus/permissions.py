@@ -3,15 +3,10 @@
 
 """Server-side permission gates for profiler artifacts.
 
-Currently exposes one gate: a `has_permission` for the File DocType that
-double-checks downloads of the profiler report. The UI hides the
-"Download Report" button from non-admin/non-owner users, but a malicious
-user who guessed the file URL could try to fetch it directly this
-gate makes that fail.
-
-v0.6.0 Round 7: safe-mode reports were removed. The single remaining
-report (raw_report_file + raw_report_pdf_file) is admin-scoped via
-this gate.
+Exposes one gate: a ``has_permission`` for the File DocType that
+double-checks downloads of the profiler report (raw_report_file +
+raw_report_pdf_file), so a user who guesses the file URL can't fetch it
+directly. Admin/owner-scoped.
 """
 
 import frappe
@@ -23,15 +18,9 @@ _GATED_FIELDS = frozenset({"raw_report_file", "raw_report_pdf_file"})
 def file_has_permission(doc, ptype=None, user=None):
 	"""Gate downloads of the profiler report (HTML + PDF).
 
-	Allows access to:
-	  - Anyone who passes the underlying parent permission check (handled
-	    by Frappe's built-in private file logic Optimus User with
-	    if_owner=1, System Manager always)
-	  - Plus an additional check for the report files specifically: only
-	    System Manager OR the recording user, even if some other role
-	    accidentally got read access to the parent.
-
-	Return None to defer to Frappe's standard permission logic; return
+	On top of Frappe's standard parent permission check, restricts the report
+	files to the System Manager or the recording user (even if another role
+	got read access to the parent). Returns None to defer to standard checks,
 	False to deny.
 	"""
 	if not doc:

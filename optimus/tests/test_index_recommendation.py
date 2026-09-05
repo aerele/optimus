@@ -1,9 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.6.0 concrete index recommendation:
+"""Tests for the concrete index recommendation:
 
-  * `table_breakdown` co-occurrence → `recommended_index` (a composite, ordered
+  * `table_breakdown` co-occurrence -> `recommended_index` (a composite, ordered
     by usage frequency, capped, with the doctype derived) + `is_write_hot`;
   * the report's "Index candidate" panel rendering (recommendation + the
     `frappe.db.add_index` patch + caveats + the AI block);

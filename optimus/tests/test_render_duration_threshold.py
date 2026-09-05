@@ -1,11 +1,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Render-level tests for the v0.6.x ``large_duration_threshold_ms`` setting.
+"""Render-level tests for the ``large_duration_threshold_ms`` setting.
 
-The threshold controls how durations render in the report HTML: values at
-or above the threshold display as seconds (e.g. ``5.23s``); below it, they
-stay as milliseconds (``800ms``)."""
+The threshold controls how durations render: values at or above it display as
+seconds (e.g. ``5.23s``); below it, they stay as milliseconds (``800ms``)."""
 
 import types
 from unittest.mock import patch

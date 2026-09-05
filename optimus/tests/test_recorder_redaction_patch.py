@@ -1,19 +1,17 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Capture-time redaction patch on ``frappe.recorder.Recorder``.
-
-These tests verify the patch installed at ``optimus/__init__.py:_patch_recorder``:
+"""Capture-time redaction patch on ``frappe.recorder.Recorder`` (installed at
+``optimus/__init__.py:_patch_recorder``).
 
   * ``Recorder.__init__``: after the original runs, ``self.form_dict`` and
-    ``self.headers`` are walked through ``redaction.redact_sensitive`` so
-    raw passwords / cookies never reach ``dump()`` → ``RECORDER_REQUEST_HASH``.
-  * ``Recorder.register``: ``data["query"]`` is run through
-    ``redaction.redact_sql_literals`` before the original appends it to
-    ``self.calls``. The renderer-time scrubber stays as defense-in-depth.
+    ``self.headers`` are walked through ``redaction.redact_sensitive`` so raw
+    passwords / cookies never reach ``dump()``.
+  * ``Recorder.register``: ``data["query"]`` runs through
+    ``redaction.redact_sql_literals`` before being appended to ``self.calls``.
 
-The patch is idempotent (re-imports during ``bench update`` don't double-
-wrap) and respects ``optimus.settings``'s ``sensitive_sql_columns`` /
+The patch is idempotent (re-imports during ``bench update`` don't double-wrap)
+and respects ``optimus.settings``'s ``sensitive_sql_columns`` /
 ``sensitive_form_keys`` extras.
 """
 

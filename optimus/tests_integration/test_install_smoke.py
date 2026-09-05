@@ -1,21 +1,15 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Real-bench install-time invariants.
-
-Verifies the after-effects of ``bench install-app optimus`` actually
-land in MariaDB:
+"""Real-bench install-time invariants: verify the after-effects of
+``bench install-app optimus`` actually land in MariaDB.
 
   * The ``Optimus User`` role is created.
   * Every Optimus DocType is registered in ``tabDocType``.
-  * The ``Optimus Settings`` Single doc is creatable + readable.
-  * ``bench migrate`` is idempotent re-running it leaves the schema
-    untouched and never raises.
+  * The ``Optimus Settings`` Single doc is creatable and readable.
+  * ``bench migrate`` is idempotent (re-running leaves the schema untouched).
 
-Pure-pytest's Frappe stub can mock individual install-time calls in
-isolation, but only a real bench can verify that the rows actually
-persist + survive a second migrate. This file is the canonical
-"install didn't silently break" smoke.
+Only a real bench can verify the rows persist and survive a second migrate.
 """
 
 from __future__ import annotations

@@ -1,30 +1,18 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.12.11: ``settings.get_config()`` is the first cache value to migrate
-to the v0.12.0 ``wrap_value`` / ``unwrap_value`` envelope.
+"""``settings.get_config()`` stores its cached value inside the ``wrap_value``
+/ ``unwrap_value`` envelope. Three contract pieces under test:
 
-The rollout has three contract pieces under test:
+  1. Write path: a cache miss re-resolves and stores the OptimusConfig field
+     dict inside the envelope (``{"_v": 1, "data": {...}}``), not bare.
+  2. New-shape read path: a cache holding an enveloped value unwraps cleanly.
+  3. Legacy-compat read path: a cache holding a bare-dict value (no ``_v``)
+     ALSO unwraps cleanly, so new readers don't crash on stale values left by
+     old writers.
 
-  1. **Write path**: a fresh ``get_config`` call that misses the cache
-     re-resolves via ``_resolve`` and stores the OptimusConfig field dict
-     INSIDE the envelope (``{"_v": 1, "data": {...}}``), not as a bare
-     dict.
-  2. **New-shape read path**: a ``get_config`` call against a cache that
-     already holds an enveloped value unwraps cleanly and returns a
-     valid OptimusConfig.
-  3. **Legacy-compat read path**: a ``get_config`` call against a cache
-     that holds a PRE-v0.12.11 bare-dict value (no ``_v`` key) ALSO
-     unwraps cleanly. This is the migration-safety guarantee readers
-     that get rolled out before writers (e.g. a worker on the new code
-     hits a Redis value left over from a worker on the old code) must
-     NOT crash.
-
-Each test injects a tiny fake ``frappe.cache`` whose ``get_value`` /
-``set_value`` are dict-backed so we can introspect the exact shape that
-the rollout writes / reads. Per the standing
-``[[feedback_frappe_db_local_proxy]]`` advice the same pattern applies
-to ``frappe.cache`` (replace wholesale, don't patch attributes).
+Each test injects a dict-backed fake ``frappe.cache`` (replaced wholesale, not
+patched) to introspect the exact shape written / read.
 """
 
 from __future__ import annotations
@@ -85,10 +73,9 @@ def _stub_frappe(cache: _FakeCache, *, has_doctype: bool = False):
 
 
 class TestSettingsEnvelopeWrite:
-	"""On a cache miss, ``get_config`` re-resolves and stores the result
-	INSIDE the v0.12.0 envelope. Catches a regression where a future
-	refactor accidentally reverts the wrap_value call to bare-dict
-	writes."""
+	"""On a cache miss, ``get_config`` re-resolves and stores the result inside
+	the envelope. Catches a regression that reverts the wrap_value call to
+	bare-dict writes."""
 
 	def test_fresh_write_stores_envelope_not_bare_dict(self):
 		fresh = _fresh_settings_module()
@@ -146,10 +133,9 @@ class TestSettingsEnvelopeReadHappyPath:
 
 
 class TestSettingsEnvelopeLegacyCompat:
-	"""A cache HIT against a PRE-v0.12.11 bare-dict value (no envelope)
-	STILL returns a valid OptimusConfig. This is the migration-safety
-	contract that lets new readers handle stale legacy values left
-	behind by old writers."""
+	"""A cache HIT against a bare-dict value (no envelope) STILL returns a valid
+	OptimusConfig, so new readers handle stale legacy values left by old
+	writers."""
 
 	def test_hit_on_legacy_bare_dict_returns_config(self):
 		fresh = _fresh_settings_module()

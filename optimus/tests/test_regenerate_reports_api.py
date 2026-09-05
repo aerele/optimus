@@ -1,23 +1,14 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.5.3 regenerate_reports API.
+"""Tests for the regenerate_reports API.
 
-The endpoint re-invokes renderer.render_raw against an existing
-Optimus Session WITHOUT re-running the analyzer pipeline.
-Use cases:
+The endpoint re-invokes renderer.render_raw against an existing Optimus Session
+without re-running the analyzer pipeline (e.g. to apply an upgraded template, or
+recover from a render crash that was later fixed).
 
-  - Report template was upgraded; existing sessions should reflect
-    the new layout without paying the analyze cost again.
-  - The original render crashed (bug in renderer) and a fix was
-    deployed. regenerate_reports re-runs the render on the fixed
-    code.
-  - An admin wants to re-render after manually editing an analyzer-
-    derived field (rare, but possible).
-
-Contract checked here via source-inspection + behavior under
-stubbed frappe (the endpoint itself needs a live bench for
-integration tests, which the harness doesn't provide).
+Contract checked via source-inspection plus behavior under stubbed frappe (the
+endpoint itself needs a live bench for integration tests).
 """
 
 import os
@@ -114,13 +105,10 @@ class TestSurface:
 		)
 
 	def test_status_gate_rejects_non_terminal_sessions(self):
-		"""v0.12.9: regenerate_reports must refuse Recording / Stopping
-		/ Analyzing sessions. Pre-v0.12.9 the code had no status check
-		despite the docstring claiming "Allowed on Ready OR Failed
-		sessions" a re-render on an in-flight session would attach
-		an incomplete report to a still-running analyze that the
-		pipeline would then overwrite. The gate enforces the
-		docstring's contract."""
+		"""regenerate_reports must refuse Recording / Stopping / Analyzing
+		sessions: re-rendering an in-flight session would attach an incomplete
+		report that the running analyze pipeline then overwrites. Only Ready or
+		Failed sessions are allowed."""
 		body = _regenerate_reports_body()
 		# Match the actual code, allowing any quote style and
 		# whitespace inside the membership tuple.

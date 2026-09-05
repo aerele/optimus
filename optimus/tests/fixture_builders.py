@@ -3,10 +3,6 @@
 
 """Fluent helpers for constructing test recordings without huge JSON files.
 
-Before these helpers existed, each new analyzer test needed a hand-
-written 100+ line JSON fixture copied from an existing one. These
-builders reduce that to ~10 lines of Python:
-
     recording = build_recording(
         calls=[
             build_call(
@@ -17,10 +13,8 @@ builders reduce that to ~10 lines of Python:
         ] * 15
     )
 
-Keep the hand-written JSON fixtures in tests/fixtures/ for integration-
-style tests they exercise the full recording shape. Use these builders
-for narrow unit tests that care only about one aspect (e.g. "does the
-N+1 analyzer handle this stack?").
+Use these for narrow unit tests; keep the hand-written JSON fixtures in
+tests/fixtures/ for integration-style tests that exercise the full shape.
 """
 
 from typing import Any

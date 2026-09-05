@@ -1,13 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for ``optimus.report_context.build_report_context``: the Phase J.1
-adapter that turns our flat 45-key render-context into the 19-key contract
-shape per ``template_variable_contract.md`` (reference design package).
+"""Tests for ``optimus.report_context.build_report_context``: the adapter that
+turns the flat render-context into the 19-key contract shape per
+``template_variable_contract.md``.
 
-Phase J.1 verification: presence of all 19 top-level keys + minimal per-key
-shape conformance. Deep correctness (display strings, edge cases) is verified
-in Phase J.2 when the template starts consuming the new shape.
+Verifies presence of all 19 top-level keys plus minimal per-key shape
+conformance.
 """
 
 import json
@@ -494,15 +493,10 @@ class TestBackgroundJobsShape:
 		assert j["bar_kind"] == "warn"  # 799ms in [300, 1000)
 
 	def test_findings_count_none_coerced_to_zero(self):
-		"""Regression: Failed jobs that didn't produce findings carry
-		``findings_count: None`` from analyze. The bg-jobs section
-		template sums ``findings_count`` via Jinja's ``map | sum``, and
-		Jinja's ``map('default', 0)`` filter only handles Undefined (NOT
-		None) so an uncoerced None used to crash the whole render with
-		``unsupported operand type(s) for +: 'int' and 'NoneType'``.
-		``_build_background_jobs`` now coerces the original
-		``findings_count`` key to ``int(... or 0)`` alongside the contract
-		``finding_count`` key, so the sum filter receives only ints."""
+		"""Failed jobs carry ``findings_count: None``, which used to crash the
+		bg-jobs template's ``map | sum``. ``_build_background_jobs`` now
+		coerces both the ``findings_count`` and contract ``finding_count`` keys
+		to ints."""
 		jobs = {"jobs": [
 			{
 				"method": "bg_recheck_users",
@@ -671,8 +665,8 @@ class TestFooterShape:
 		assert out["footer"]["framework"] == "Frappe v16"
 
 	def test_footer_records_config_profile(self):
-		"""v0.7.x: the footer stamps which Sensitivity Profile was in effect,
-		so a saved report records the thresholds it was rendered under."""
+		"""The footer stamps which Sensitivity Profile was in effect, so a saved
+		report records the thresholds it was rendered under."""
 		rc = {"config_profile": "Strict"}
 		out = build_report_context(_doc(), _ctx(render_config=rc))
 		assert "config_profile=Strict" in out["footer"]["settings"]

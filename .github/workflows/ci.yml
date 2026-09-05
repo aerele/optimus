@@ -15,7 +15,7 @@ name: CI
 # A given commit therefore runs each check exactly once.
 #
 # NB: intentionally NO ``paths-ignore``. These checks are required by the
-# main branch protection rule, and a required check that never reports (e.g.
+# main branch protection rule and a required check that never reports (e.g.
 # skipped on a docs-only PR) blocks the PR forever. Always-run keeps the gate
 # honest; the jobs are fast enough that the cost is negligible.
 #

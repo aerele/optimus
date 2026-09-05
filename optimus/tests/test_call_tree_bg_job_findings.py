@@ -1,22 +1,14 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""BG-job profiling regression: findings surface the real hotspot,
-not the RQ wrapper.
+"""BG-job profiling regression: findings surface the real hotspot, not the RQ
+wrapper.
 
-The Slow Hot Path walker used to blame `rq.worker.execute_job` /
-`worker_main` / `run_job` for every slow job, because those wrapper
-frames carry 100% of the job's wall time as cumulative_ms and the
-walker's framework-skip predicate (``_is_framework_frame``) only
-covered ``frappe/*`` and ``optimus/*``. Wrapper frames in
-``site-packages/rq/`` leaked through, qualified as hot subtrees, and
-the walker emitted on the wrapper instead of descending to the user-
-code line that's actually expensive.
-
-These tests guard the fix: the walker now also consults the
-narrower ``_is_pure_helper_frame`` predicate, which covers ``/rq/``
-paths AND wrapper function names like ``execute_job`` /
-``worker_main`` regardless of file.
+The Slow Hot Path walker used to blame ``rq.worker.execute_job`` /
+``worker_main`` / ``run_job`` for every slow job, because those wrapper frames
+carry 100% of the wall time. These tests guard the fix: the walker consults
+``_is_pure_helper_frame``, which covers ``/rq/`` paths and wrapper function
+names like ``execute_job`` / ``worker_main`` regardless of file.
 """
 
 import json
@@ -46,10 +38,8 @@ def test_walker_descends_past_rq_wrappers():
 	                └── sync_customer_data  (apps/my_app/jobs.py)
 	                    └── process_invoice_line  (apps/my_app/invoice.py)
 
-	Pre-fix, the finding emitted on worker_main / execute_job because
-	those wrappers carried the full 5000ms wall. Post-fix, the walker
-	descends through every wrapper layer and emits on the user-code
-	hot frame (process_invoice_line)."""
+	The walker must descend through every wrapper layer and emit on the
+	user-code hot frame (process_invoice_line), not the wrappers."""
 	user_hot = _node(
 		"process_invoice_line",
 		"apps/my_app/invoice.py",
@@ -114,13 +104,10 @@ def test_walker_descends_past_rq_wrappers():
 
 
 def test_walker_skips_wrapper_function_names_regardless_of_file():
-	"""``execute_job`` in a user-app file is still skipped the bare
-	function name is itself a marker of plumbing per
-	``_PURE_HELPER_FUNCTION_NAMES`` (RQ versions emit the frame under
-	various qualified / bare forms). Without this, a user happening
-	to name a method ``execute_job`` would be perma-hidden from the
-	walker, but we'd rather miss the rare collision than re-blame the
-	wrapper on every BG job."""
+	"""``execute_job`` in a user-app file is still skipped: the bare function
+	name marks plumbing per ``_PURE_HELPER_FUNCTION_NAMES``. This risks hiding a
+	rare user method named ``execute_job``, preferable to re-blaming the wrapper
+	on every BG job."""
 	# A user-app file that defines a function happening to be named
 	# `execute_job`. Even though the filename is in an app path, the
 	# bare name match takes precedence.
@@ -197,11 +184,9 @@ def test_bg_job_finding_title_uses_short_job_name():
 
 
 def test_slow_background_job_fallback_emits_on_deepest_user_frame():
-	"""Pathological case: a 12s job whose user-code frame consumed
-	only 20% (below the 25% Slow-Hot-Path threshold) but is the
-	deepest non-plumbing frame. The regular walker would emit
-	nothing; the BG-job fallback fires so the reader still gets an
-	actionable callsite instead of an unexplained 12s job."""
+	"""A 12s job whose user-code frame is only 20% (below the 25% Slow-Hot-Path
+	threshold) but is the deepest non-plumbing frame. The walker emits nothing,
+	so the BG-job fallback fires and still surfaces an actionable callsite."""
 	# 20% of 12s = 2400ms below default 25% threshold but well
 	# above the absolute 200ms floor. Walker won't emit; fallback
 	# should.

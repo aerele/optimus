@@ -1,10 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.3.0 renderer output: donut + hot frames sections.
-
-Also covers the backward-compat path: a v0.2.0-shaped session row
-(no new fields) must still render without errors.
+"""Tests for renderer output: donut + hot frames sections, plus the
+backward-compat path where an older session row (no new fields) must still
+render without errors.
 """
 
 import json
@@ -95,7 +94,7 @@ def test_render_raw_shows_full_app_names():
 
 
 def test_render_raw_old_session_no_v3_fields():
-	"""A v0.2.0 session without donut/hot-frames data must still render."""
+	"""An older session without donut/hot-frames data must still render."""
 	doc = _fake_doc()  # all v0.3.0 fields are None
 	html = renderer.render_raw(doc, recordings=[])
 	# Hot frames section skipped when no data; donut was removed entirely.

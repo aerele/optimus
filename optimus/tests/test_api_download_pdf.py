@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.4.0 download_pdf API endpoint."""
+"""Tests for the download_pdf API endpoint."""
 
 import pytest
 

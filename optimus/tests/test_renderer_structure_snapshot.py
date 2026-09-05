@@ -2,41 +2,20 @@
 # For license information, please see license.txt
 
 """Structural DOM snapshot of ``renderer.render_raw`` against a synthetic
-fixture session the canary that protects the template contract during
-the v0.10.0+ renderer split.
+fixture session: a canary that protects the template contract during renderer
+refactors.
 
-The existing renderer-touching tests (46 files) all assert *content*
-"the string '50× hits' appears in the HTML" but none of them lock the
-*structure* (tag nesting, CSS class names, section IDs, data attributes).
-A refactor that quietly renamed ``<div class="finding-card">`` to
-``<section class="finding">`` would pass every existing test and break
-the (frozen) template's CSS. This file closes that gap.
+The existing renderer tests assert content; this one locks structure. The
+fingerprint is structural, not byte-for-byte:
 
-The fingerprint is structural, not byte-for-byte:
+  * ``section_ids``: sorted list of every ``id="..."`` value.
+  * ``class_names``: sorted multiset of every distinct ``class`` token.
+  * ``tag_counts``: total count per tag name (coarse DOM-shape sanity).
 
-  * ``section_ids``: sorted list of every ``id="..."`` attribute value
-    that appears in the document. Catches a section being silently
-    dropped or renamed.
-
-  * ``class_names``: sorted multiset of every distinct ``class="..."``
-    token (split on whitespace). Catches a CSS class being renamed,
-    added, or removed.
-
-  * ``tag_counts``: total count per tag name across the whole
-    document. Coarse DOM-shape sanity; catches gross structural drift
-    (e.g. ``<div>`` → ``<section>`` mass rename).
-
-Byte-for-byte would be too brittle (Pygments token ordering across
-versions, dict iteration in JSON, etc.). The structural shape drifts
-slowly and intentionally when a legitimate template change lands,
-the test fails with a focused diff and the contributor regenerates the
-snapshot via ``REGENERATE_RENDERER_SNAPSHOT=1 pytest``.
-
-This file also enumerates the renderer package's public API and asserts
-each name still resolves after the split. The five 'public + semi-public'
-symbols (``render_raw``, ``_finding_to_dict``, ``build_donut_svg``,
-``build_hot_frames_table``, ``_BoundedFileCache``) are the contract
-``analyze.py`` and external callers rely on.
+On a legitimate template change, regenerate the golden snapshot via
+``REGENERATE_RENDERER_SNAPSHOT=1 pytest``. This file also enumerates the
+renderer package's public API and asserts each name still resolves after the
+file to package split.
 """
 
 from __future__ import annotations
@@ -113,8 +92,8 @@ def _action(idx: int, **kw) -> SimpleNamespace:
 
 
 def _v5_aggregate() -> dict:
-	"""v5_aggregate_json shape that triggers server-resource + frontend
-	panels. Numbers picked to look plausible (matches v0.5.0 test fixtures)."""
+	"""v5_aggregate_json shape that triggers the server-resource + frontend
+	panels, with plausible numbers."""
 	return {
 		"infra_timeline": [
 			{
@@ -395,9 +374,9 @@ class TestStructureSnapshot:
 
 
 class TestPublicAPIPreserved:
-	"""The names ``analyze.py``, ``api.py``, and the existing tests rely on
-	MUST keep resolving after the file → package split. Re-export shim
-	regressions surface here."""
+	"""Names that ``analyze.py``, ``api.py`` and the existing tests rely on must
+	keep resolving after the file to package split. Re-export shim regressions
+	surface here."""
 
 	def test_render_raw_resolves(self):
 		assert callable(getattr(renderer, "render_raw", None))

@@ -1,12 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.5.2 round 3 executive summary card.
-
-Goal: a non-developer reading the first screen of the report must be
-able to decide "do we have a problem" in 30 seconds, pointing at (1)
-session pace, (2) top impactful findings, (3) infra state (swap /
-memory growth).
+"""Tests for the executive summary card: a non-developer reading the first
+screen should be able to decide "do we have a problem" in 30 seconds, from
+session pace, top impactful findings and infra state (swap / memory growth).
 """
 
 import json

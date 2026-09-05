@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.3.0 fields in api.export_session output shape."""
+"""Tests for the fields in api.export_session output shape."""
 
 import inspect
 

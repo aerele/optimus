@@ -1,49 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Finding enrichment helpers extracted from ``_internal.py``
-incrementally to keep the renderer-package boundary clean.
-
-Two phases shipped so far:
-
-  * **Phase 1 (v0.12.16)**: three pure-function helpers with
-    minimal back-coupling to ``_internal.py``:
-    - ``_root_cause_key(finding)``: ``(basename, function)``
-      deepest-user-code anchor for finding grouping.
-    - ``_group_findings_by_root_cause(findings)``: collapse
-      same-root-cause findings into one primary +
-      ``sub_findings`` list.
-    - ``_normalize_callsite(callsite)``: dict-or-string callsite
-      shape normalization.
-
-  * **Phase 2 (v0.12.19)**: the drill-down chain attachers (a
-    self-contained sub-cluster of the larger finding-enrichment
-    family that depends only on stdlib + ``call_tree_renderer.
-    _ct_is_other_frame`` + a lazy ``optimus.analyzers.base.
-    is_framework_callsite`` import):
-    - ``_find_node_in_tree(tree, basename, function)``: DFS for
-      a node by (basename, function).
-    - ``_walk_drilldown_chain(tree, callsite, ...)``: hottest-
-      child traversal below a finding's origin frame.
-    - ``_attach_drilldown_chains(findings, actions, ...)``:
-      in-place attachment of the chain onto each finding's
-      ``technical_detail``.
-
-Plus the ``_GROUPING_SEVERITY_RANK`` constant phase 1 shares.
-
-Still in ``_internal.py`` (the HIGH-coupling subset that needs the
-larger source-resolution helper family to move with it, or an
-expanded back-import design):
-
-  * ``_finding_to_dict`` (~200 LOC, the main render-dict builder).
-  * ``_attach_representative_callsites`` (calls
-    ``_action_dotted_entry``, ``_skip_decorators_to_def``,
-    ``_resolve_dotted_to_code``, ``_action_entry_callsite``,
-    ``_resolve_frame_key_to_callsite``, ``_bench_relative_display``).
-  * ``_expand_self_time_snippets`` (calls ``_decorator_through_def_rows`` →
-    ``_find_header_def_line`` / ``_source_lines``).
-  * ``_retarget_phase1_callsites_to_drilldown_leaf`` + its AST
-    helper ``_find_call_line_in_function_body``.
+"""Finding-enrichment helpers for the report renderer (extracted from
+``_internal.py``): group findings by root cause, normalize callsite shapes,
+walk pyinstrument trees to attach drill-down chains, build the per-finding
+render dict and resolve or expand source snippets. Sibling modules are
+imported lazily to avoid renderer import cycles.
 """
 
 from __future__ import annotations
@@ -59,26 +21,14 @@ _GROUPING_SEVERITY_RANK = {"High": 0, "Medium": 1, "Low": 2}
 
 
 def _root_cause_key(finding: dict) -> tuple | None:
-	"""Return a ``(filename_basename, function)`` tuple identifying the
-	deepest user-code anchor for this finding, or ``None`` if there's
-	nothing we can group on.
+	"""Return a ``(basename, function)`` tuple for the finding's deepest
+	user-code anchor, or ``None`` if there's nothing to group on.
 
-	Resolution order:
-
-	1. If the finding has a non-empty ``drilldown_chain``, use the
-	   chain's last entry that's the deepest user-code frame the
-	   drill-down walker found. Stable across all per-action analyzer
-	   findings (Slow Hot Path, Hook Bottleneck, ...).
-
-	2. Else use the callsite's own ``(filename, function)``. This is
-	   the path most analyzer findings (Hot Line, Redundant Call,
-	   N+1, etc.) take their callsite already names the leaf.
-
-	Returns ``None`` only when the finding has no usable callsite at
-	all (e.g. infra/system observations) those don't group.
-
-	Match is by ``(os.path.basename(filename), function)`` so
-	dev-vs-deploy absolute path differences don't fragment groups.
+	Uses the ``drilldown_chain``'s last entry (deepest frame) when present,
+	else the callsite's own ``(filename, function)``. Matched on the basename
+	so dev-vs-deploy path differences don't fragment groups. ``None`` for
+	findings with no usable callsite (e.g. infra observations), which don't
+	group.
 	"""
 	import os as _os
 
@@ -106,26 +56,13 @@ def _root_cause_key(finding: dict) -> tuple | None:
 
 
 def _group_findings_by_root_cause(findings: list[dict]) -> list[dict]:
-	"""Collapse findings that share a ``(file, function)`` deepest-user-
-	code anchor into ONE primary card with the others attached as
-	``sub_findings``.
+	"""Collapse findings sharing a ``(file, function)`` root-cause anchor into
+	one primary card, the rest attached as ``sub_findings``.
 
-	One root cause (e.g. a hot get_doc call inside ``_check_user_exists``)
-	commonly triggers several different finding types a Slow Hot Path
-	at the wrapper, a Hot Line on the exact line, a Redundant Call for
-	the doc, a Redundant Permission Check for its read perm. Today each
-	renders as its own card; the dev only has ONE fix to make and the
-	five cards crowd the report. After grouping, the highest-severity /
-	highest-impact finding becomes the visible card; the others appear
-	as collapsible sub-rows beneath it.
-
-	Returns a NEW list primaries kept (with ``sub_findings`` attached
-	when applicable), grouped non-primaries dropped, ungrouped findings
-	(no resolvable root cause) passed through as-is.
-
-	Within each group the primary is chosen by severity then by
-	``estimated_impact_ms`` (higher wins). Sub-findings are sorted the
-	same way so the most informative is first in the collapsed list.
+	Returns a NEW list: the primary per group (chosen by severity then
+	``estimated_impact_ms``, higher wins) with sorted ``sub_findings``
+	attached, grouped non-primaries dropped, ungrouped findings passed through
+	as-is.
 	"""
 	if not findings:
 		return findings
@@ -187,23 +124,11 @@ def _group_findings_by_root_cause(findings: list[dict]) -> list[dict]:
 
 
 def _normalize_callsite(callsite) -> dict | None:
-	"""Normalize the two callsite shapes the analyzers produce into a
-	single dict: ``{"filename": str, "lineno": int|None, "function": str}``.
-
-	Historical context: ``n_plus_one`` / ``redundant_calls`` /
-	``explain_flags`` emit a dict ``{filename, lineno, function}``,
-	while ``top_queries`` emits a pre-formatted string like
-	``"apps/myapp/foo.py:456"`` (via ``walk_callsite_str``). Before
-	this normalizer, ``_app_from_finding`` crashed on Slow Query
-	findings with ``AttributeError: 'str' object has no attribute
-	'get'`` because it assumed dict-only.
-
-	Normalizing here means the template and app-bucketing see a
-	consistent shape regardless of which analyzer produced the
-	finding, without needing to rewrite the analyzers.
-
-	Returns ``None`` when the input is falsy/unrecognized so callers
-	can short-circuit with ``if not callsite: ...``.
+	"""Normalize a callsite (a dict, or a ``"file.py:lineno"`` string from
+	``top_queries``) into ``{"filename": str, "lineno": int|None,
+	"function": str}``. Returns ``None`` for falsy/unrecognized input so
+	callers can short-circuit. The string form is split from the right so
+	Windows drive letters survive.
 	"""
 	if not callsite:
 		return None
@@ -234,13 +159,9 @@ def _normalize_callsite(callsite) -> dict | None:
 
 
 def _find_node_in_tree(tree: dict, basename: str, function: str) -> dict | None:
-	"""Depth-first walk a pyinstrument call tree looking for a node that matches
-	``(basename(filename), function)``. Returns the first hit, or ``None``.
-
-	The basename match (rather than full path) survives bench-relative vs
-	absolute path differences between where the analyzer ran and where the
-	render is happening - same trick ``_build_line_drilldown_callsite_index``
-	uses.
+	"""Depth-first walk a pyinstrument call tree for the first node matching
+	``(basename(filename), function)``. Returns the node or ``None``. Matches
+	on basename so bench-relative vs absolute path differences don't matter.
 	"""
 	if not isinstance(tree, dict):
 		return None
@@ -270,24 +191,16 @@ def _walk_drilldown_chain(
 	max_depth: int = 4,
 	signal_floor_pct: float = 10.0,
 ) -> list[dict]:
-	"""Build a *Drill-down* chain below the finding's origin frame.
+	"""Build a drill-down chain below the finding's origin frame: locate the
+	origin node in the pyinstrument ``tree`` from the ``callsite``, then follow
+	hottest-child links downward.
 
-	Given a per-action pyinstrument tree (dict form from
-	``analyzers/call_tree._walk_pyi_frame``) and a finding's callsite
-	(``{"filename": ..., "function": ...}``), locate the origin node then walk
-	hottest-child links downward until one of:
+	Stops when a child is framework code, depth reaches ``max_depth``, no
+	children remain, or a child's ``cumulative_ms`` falls below
+	``signal_floor_pct`` % of the origin's (drops noisy near-leaf frames).
 
-	- the next child's filename is in framework code, OR
-	- depth reaches ``max_depth``, OR
-	- no children remain, OR
-	- the next child's ``cumulative_ms`` is below ``signal_floor_pct`` % of the
-	  origin's ``cumulative_ms`` (drops noisy near-leaf frames).
-
-	Returns a list of ``{filename, lineno, function, cumulative_ms,
-	pct_of_origin}`` dicts one per level *below* the origin. The origin
-	itself is omitted (already rendered in the smoking-gun block).
-
-	Defensive: any malformed input → ``[]``.
+	Returns one ``{filename, lineno, function, cumulative_ms, pct_of_origin}``
+	dict per level below the origin (origin omitted). Malformed input gives ``[]``.
 	"""
 	# Lazy imports these belong to sibling modules; importing at
 	# module-top would create a circular if call_tree_renderer ever
@@ -352,12 +265,9 @@ def _walk_drilldown_chain(
 
 
 def _attach_drilldown_chains(findings, actions, tracked_apps: tuple[str, ...] = ()) -> None:
-	"""Walk each finding's representative call tree and attach a
-	``drilldown_chain`` to its ``technical_detail`` dict. Mutates findings in
-	place same pattern as ``_attach_representative_callsites``.
-
-	Tree JSON parses are cached per ``action_idx`` so a session with several
-	findings on the same slow action only deserialises the tree once.
+	"""Attach a ``drilldown_chain`` to each finding's ``technical_detail``,
+	mutating findings in place. Tree JSON is parsed once per ``action_idx``
+	(cached) so several findings on the same action share one deserialise.
 	"""
 	if not findings or not actions:
 		return
@@ -434,24 +344,15 @@ def _find_call_line_in_function_body(
 	*,
 	file_cache: dict | None = None,
 ) -> int | None:
-	"""Return the lineno of the first call to ``callee_function`` inside
-	the function whose ``def`` begins at ``parent_def_lineno`` in
-	``parent_filename``. ``None`` if the source can't be read or no call
-	is found.
+	"""Return the lineno of the first call to ``callee_function`` inside the
+	function whose ``def`` starts at ``parent_def_lineno`` in
+	``parent_filename``. ``None`` if the source can't be read or no call is
+	found.
 
-	AST primary locates the matching ``FunctionDef`` / ``AsyncFunctionDef``
-	node by name/lineno, then walks its body for ``Call`` expressions
-	whose target resolves to ``callee_function`` (matches both bare
-	``callee_function(...)`` via ``Name`` and ``obj.callee_function(...)``
-	via ``Attribute``).
-
-	Regex fallback when AST parse fails (truncated file, syntax error
-	elsewhere) scans lines below the def for ``\\b<callee>\\s*\\(``
-	stopping at a same-or-lower indented ``def `` / ``class `` /
-	``async def `` or after 200 lines.
-
-	Reused across multiple findings in the same file via ``file_cache``
-	(the same per-render cache passed to ``_read_source_snippet``).
+	Primary path parses the AST and matches the ``Call`` target against both
+	``callee(...)`` and ``obj.callee(...)``; on parse failure it falls back to
+	a regex scan of the function body. ``file_cache`` shares reads across
+	findings in the same render.
 	"""
 	# Lazy import to avoid the circular: _internal re-imports from this
 	# submodule; importing source.py here is fine (it has no back-ref
@@ -552,24 +453,14 @@ def _retarget_phase1_callsites_to_drilldown_leaf(
 	findings: list[dict],
 	file_cache: dict | None = None,
 ) -> None:
-	"""Re-aim phase-1 finding callsites at the **call site** of the
-	deepest user-code frame in their drill-down chain, in place.
+	"""Re-aim finding callsites at the call expression that invokes the deepest
+	user-code frame in their drill-down chain, mutating findings in place. This
+	points the snippet at the actionable call line rather than the wrapper's
+	entry or the leaf's ``def`` header.
 
-	A Slow Hot Path / Hook Bottleneck / Repeated Hot Frame finding's
-	default callsite is its **wrapper's** entry frame. The drill-down
-	chain already walks down to the deepest user-code frame, but
-	even that frame's ``def`` line is a function header rather than the
-	expensive call. The reader's eye lands on the most actionable info
-	when the snippet shows the **call expression** for the deepest
-	leaf typically the line inside the **parent** of the deepest
-	frame that invokes it.
-
-	Phase-1 only no phase-2 dependency. Hot Line / Function Not
-	Invoked findings (phase-2 native) are skipped. SQL "red flag"
-	findings whose callsite is a representative one are skipped too.
-
-	Falls back through: (1) AST parse of parent body for matching
-	Call → call lineno; (2) regex scan; (3) leaf's own def lineno.
+	Skips Hot Line / Function Not Invoked findings and SQL red-flag findings
+	with a representative callsite. Resolves the call line via AST, then regex,
+	then the leaf's own def lineno.
 	"""
 	from optimus.renderer.source import _read_source_snippet
 	from optimus.renderer.source_resolution import _bench_relative_display
@@ -670,18 +561,12 @@ def _retarget_phase1_callsites_to_drilldown_leaf(
 
 
 def _markdown_to_safe_html(text) -> str:
-	"""Render Markdown → sanitized HTML for embedding in the report.
-
-	Mirrors the notes sanitization path (``frappe.utils.markdown`` +
-	``sanitize_html(..., always_sanitize=True)``). On ANY failure Frappe
-	not importable, markdown/bleach hiccup falls back to an HTML-escaped
-	``<pre>`` block so the report NEVER renders un-sanitized model output.
-
-	After sanitizing, fenced ``diff`` code blocks (which the AI-fix prompt
-	asks the model to use for before/after) get per-line ``dh-add`` /
-	``dh-del`` / ``dh-meta`` span wrappers so the report CSS can colour them
-	like a real diff. We only add ``<span>`` wrappers around already-escaped
-	text nothing that could re-introduce unsafe markup.
+	"""Render Markdown to sanitized HTML for the report (``frappe.utils.markdown``
+	+ ``sanitize_html(always_sanitize=True)``). On any failure, falls back to an
+	HTML-escaped ``<pre>`` block so the report never renders un-sanitized model
+	output. Fenced ``diff`` blocks then get per-line ``dh-add`` / ``dh-del`` /
+	``dh-meta`` span wrappers (added only around already-escaped text) for diff
+	colouring.
 	"""
 	from optimus.renderer.syntax import _highlight_diff_html
 
@@ -698,15 +583,10 @@ def _markdown_to_safe_html(text) -> str:
 
 
 def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
-	"""Flatten a Optimus Finding child row, parsing the JSON detail blob.
-
-	v0.6.0 Round 2: synthesize a unified ``callsite`` shape for findings
-	that store their location at the top level. Lazily attach a ±1 source
-	snippet to the callsite when one isn't already persisted covers
-	(a) sessions analyzed before the analyze-time enrichment shipped,
-	(b) the synthesized callsites. The optional ``file_cache`` is shared
-	across all findings in the same render so a cluster of findings in
-	one source file reads the file once.
+	"""Flatten an Optimus Finding child row (parsing its JSON detail blob) into
+	the render dict, synthesizing a unified ``callsite`` shape and lazily
+	attaching a source snippet when none was persisted. ``file_cache`` is
+	shared across findings in a render so one source file is read once.
 	"""
 	from optimus.renderer.source import _read_source_snippet
 	from optimus.renderer.source_resolution import (
@@ -861,12 +741,10 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 
 
 def _attach_representative_callsites(findings, recordings, *, file_cache: dict | None = None) -> None:
-	"""Attach a representative ``callsite`` (+ ``is_representative``) to SQL
+	"""Attach a representative ``callsite`` (with ``is_representative``) to SQL
 	red-flag findings by matching their normalized query against the recording
-	calls and picking the hottest user-app frame. Mutates ``findings`` (the
-	``_finding_to_dict`` output dicts) in place. No-op when there are no such
-	findings, no recordings, or nothing matches those cards just render
-	without the block.
+	calls and picking the hottest user-app frame. Mutates ``findings`` in
+	place; no-op when there are no such findings, no recordings, or no match.
 	"""
 	from optimus.renderer.source import _read_source_snippet, _resolve_source_path
 	from optimus.renderer.source_resolution import _bench_relative_display
@@ -1005,18 +883,13 @@ def _decorator_through_def_rows(
 
 
 def _expand_self_time_snippets(findings, *, file_cache: dict | None = None) -> None:
-	"""v0.7.x: for self-time hot-path findings with no deeper user-code frame
-	(empty ``drilldown_chain``), narrow the smoking-gun snippet to the function's
-	signature line and flag it ``self_time_no_pinpoint``. Phase-1 sampling can't
-	pinpoint a single hot line inside the function, so dumping the whole body
-	(highlighting only the def) was a misleading wall of code the card now
-	shows just the def + a note pointing the developer at a Line-Level Drilldown
-	on the function (which CAN give per-line timing).
+	"""For self-time Slow Hot Path findings with no deeper user-code frame (empty
+	``drilldown_chain``), narrow the snippet to the function's signature line and
+	flag it ``self_time_no_pinpoint`` (sampling can't pinpoint a single hot line,
+	so the card shows just the ``def`` plus a note to run a Line-Level Drilldown).
 
-	Runs AFTER ``_attach_drilldown_chains`` (which populates ``drilldown_chain``)
-	and mutates findings in place. Best-effort: only the empty-list case (a
-	deeper chain means the ±2 window + chain is enough; a missing key means the
-	chain was never computed)."""
+	Runs after ``_attach_drilldown_chains`` and mutates findings in place; acts
+	only on the empty-``drilldown_chain`` case."""
 	for finding in findings or []:
 		if (finding.get("finding_type") or "") != "Slow Hot Path":
 			continue

@@ -1,15 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.5.2 round 4 clickable callsite → editor deep-link.
+"""Tests for the clickable callsite -> editor deep-link.
 
-A finding's absolute-path callsite renders as a clickable anchor using
-the ``vscode://file`` URL scheme VS Code, VS Code Insiders, and
-Cursor all register this handler on install, so the link jumps the
-developer straight to the file:line in their editor with one click.
-
-Bench-relative (non-absolute) paths render as plain text since the
-``vscode://file`` URL scheme requires an absolute filesystem path.
+A finding's absolute-path callsite renders as a ``vscode://file`` anchor
+(honoured by VS Code, VS Code Insiders and Cursor). Bench-relative paths
+render as plain text, since the scheme requires an absolute path.
 """
 
 import json
@@ -62,13 +58,9 @@ def _fake_session_doc(callsite_filename="/abs/path/apps/myapp/foo.py",
 
 
 def test_raw_mode_wraps_callsite_in_vscode_link():
-	"""Raw mode + absolute path → clickable ``vscode://file`` anchor.
-
-	URL shape: ``vscode://file{absolute_path}:{lineno}``: two slashes
-	after ``vscode:``, the authority ``file``, then the absolute path
-	(which itself starts with ``/``). Matches VS Code's documented
-	URL-handler scheme; Cursor + VS Code Insiders honor the same
-	scheme.
+	"""Absolute path -> clickable ``vscode://file`` anchor, shaped
+	``vscode://file{absolute_path}:{lineno}`` (the absolute path itself starts
+	with ``/``).
 	"""
 	from optimus import renderer
 
@@ -87,10 +79,8 @@ def test_raw_mode_wraps_callsite_in_vscode_link():
 
 
 def test_bench_relative_path_does_not_emit_link():
-	"""Bench-relative (non-absolute) callsites e.g. 'frappe/handler.py'
-	from pyinstrument's short form can't be made into a working
-	vscode:// URL without an abs path. Render as plain code instead
-	of emitting a broken link."""
+	"""A bench-relative (non-absolute) callsite can't form a working vscode://
+	URL, so it renders as plain code instead of a broken link."""
 	from unittest.mock import patch as _patch
 
 	from optimus import renderer

@@ -1,13 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Render-level test for the v0.6.x call-tree drill-down on finding cards.
+"""Render-level test for the call-tree drill-down on finding cards.
 
-Builds a SimpleNamespace doc with one slow action carrying a hand-crafted
-``call_tree_json`` and a Slow-Hot-Path finding whose callsite is the
-``looped_validate`` frame. Rendered HTML must contain a *Drill-down:*
-block that walks one or two user-code frames below and STOPS at the
-framework boundary."""
+Builds a doc with one slow action carrying a hand-crafted ``call_tree_json``
+and a Slow-Hot-Path finding whose callsite is the ``looped_validate`` frame.
+The rendered HTML must contain a Drill-down block that walks one or two
+user-code frames below and stops at the framework boundary.
+"""
 
 import json
 import types
@@ -144,18 +144,9 @@ class TestDrilldownRender:
 		# consumers).
 
 	def test_finding_without_matching_tree_node_renders_placeholder(self):
-		"""v0.7.x: a finding whose callsite doesn't match any node in
-		the tree (origin lookup fails) is now treated the same as
-		'chain attempted but empty' the Drill-down placeholder
-		renders ('no deeper user-code frame'). The attachment runs
-		because the finding has a callsite + action_ref + tree; the
-		walker returns [] because it couldn't locate the origin, and
-		the template's placeholder branch fires.
-
-		Pre-v0.7 this case rendered nothing at all. The placeholder is
-		slightly less accurate here ('we couldn't find the origin'
-		isn't quite 'no deeper code'), but it's still defensible the
-		user sees that drill-down was tried and produced no chain."""
+		"""A finding whose callsite matches no tree node (origin lookup fails)
+		still renders the Drill-down placeholder ('no deeper user-code frame'):
+		the walker returns [] and the template's placeholder branch fires."""
 		from optimus import renderer
 
 		doc = _doc(

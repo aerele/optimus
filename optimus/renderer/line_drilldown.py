@@ -1,38 +1,24 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Line-Level Drilldown panel the Phase-2 per-line profiling section.
+"""Line-Level Drilldown panel: the phase-2 per-line profiling section.
 
 Sourced from the session's ``phase_2_runs`` child table (one row per
-line-profile pass); each row carries a ``results_json`` blob shaped as
+line-profile pass); each row carries a ``results_json`` blob
 ``[{file, dotted_path, lines: [{lineno, hits, total_ms, ...}]}]`` and a
 ``picks_json`` blob with the user's pick list + auto-expand flags.
 
-Two public surfaces (called from the render orchestrator in
-``_internal.py``):
+Two public surfaces (called from the render orchestrator in ``_internal.py``):
+* ``_build_line_drilldown_callsite_index(session_doc)``: also called by
+  ``optimus.analyze`` (via the renderer-package shim) for the finding-card
+  "Line-Level Drilldown hot line: ..." callout. Returns a
+  ``(basename, function_name) → hottest-line`` dict.
+* ``_render_line_drilldown_panel(session_doc)``: the section HTML, or "" when
+  the session has no phase-2 runs.
 
-* ``_build_line_drilldown_callsite_index(session_doc)``: semi-public:
-  ``optimus.analyze`` also calls it (via the renderer-package shim) to
-  power the finding-card "Line-Level Drilldown hot line: ..." callout.
-  Returns a ``(basename, function_name) → hottest-line`` dict.
-* ``_render_line_drilldown_panel(session_doc)``: the section HTML.
-  Empty string when the session has no phase-2 runs.
-
-Plus four internal helpers ``_make_line_drilldown_lookup`` (Jinja
-adapter for tuple-keyed lookups), ``_phase2_invoked`` (per-function
-"did it run?" check), ``_render_phase2_function_table``,
-``_render_phase2_diff_table`` (per-function HTML pieces) and two
-back-compat aliases (``_build_phase2_callsite_index``,
-``_make_phase2_lookup``, ``_render_phase2_panel``) that pre-v0.7.x
-renames left behind.
-
-Extracted from ``_internal.py`` in v0.12.12 per the v0.10.0 renderer-
-package roadmap. The 840-LOC line_drilldown cluster was the README's
-"single biggest remaining chunk." NB: ``_find_call_line_in_function_body``
-(an AST-walking helper used by ``_retarget_phase1_callsites_to_drilldown_leaf``
-which is part of the still-pending finding_enrichment cluster) stays
-in ``_internal.py`` for now it'll move with that cluster, not this
-one. Same for ``_root_cause_key`` / ``_group_findings_by_root_cause``.
+Internal helpers: ``_make_line_drilldown_lookup`` (Jinja tuple-key adapter),
+``_phase2_invoked`` (did-it-run check), ``_render_phase2_function_table`` and
+``_render_phase2_diff_table`` (per-function HTML), plus back-compat aliases.
 """
 
 from __future__ import annotations
@@ -46,10 +32,8 @@ from optimus.renderer.time_format import _format_duration_ms
 
 
 def _e(text: object) -> str:
-	"""HTML-escape. Local copy of ``_internal._e`` (same pattern as
-	``call_tree_renderer.py`` / ``doc_event_renderer.py``) keeps this
-	submodule free of a back-reference into ``_internal.py`` that would
-	create a circular import once ``_internal`` re-imports from here."""
+	"""HTML-escape. Local copy of ``_internal._e`` to avoid a back-reference
+	into ``_internal.py`` that would create a circular import."""
 	import html as _html
 
 	return _html.escape("" if text is None else str(text))
@@ -62,26 +46,14 @@ def _e(text: object) -> str:
 
 def _build_line_drilldown_callsite_index(session_doc: Any) -> dict:
 	"""Build a (basename, function_name) → hottest-line lookup from the
-	session's phase-2 runs. Used by ``finding_card`` to inject a
-	"Line-Level Drilldown hot line: ..." callout whenever a finding's
-	callsite resolves to a function that was line-profiled.
+	session's phase-2 runs, for ``finding_card``'s "Line-Level Drilldown hot
+	line: ..." callout.
 
-	Keyed by file basename (not absolute path) so the lookup survives
-	dev-vs-deploy path differences. When the same function appears in
-	multiple runs, the entry with the largest single-line ``total_ms``
-	wins that's the most informative callout for the developer.
-
-	Per-function, own hottest line no cross-function redirection.
-	The cross-link's job is "this function's hottest internal line";
-	the smoking-gun snippet's job (handled by
-	``_retarget_phase1_callsites_to_drilldown_leaf``) is "land the
-	reader on the deepest user-code frame". Keeping them separate
-	avoids the cross-link silently re-aiming the user at a different
-	function's data, which was confusing.
-
-	Returns an empty dict when the session has no phase-2 runs or the
-	results blobs are empty / malformed; the macro then renders no
-	callout.
+	Keyed by file basename (not absolute path) so it survives dev-vs-deploy
+	path differences. When a function appears in multiple runs, the entry with
+	the largest single-line ``total_ms`` wins. Per-function only: reports the
+	function's own hottest line, never a cross-function redirect. Returns an
+	empty dict when there are no phase-2 runs or the blobs are empty/malformed.
 	"""
 	runs = list(getattr(session_doc, "phase_2_runs", None) or [])
 	index: dict[tuple, dict] = {}
@@ -172,17 +144,10 @@ def _phase2_invoked(fn: dict) -> bool:
 def _render_phase2_function_table(fn: dict) -> str:
 	"""Per-function line table inside one phase-2 run.
 
-	Columns: line number, hit count, total ms, per-hit µs, source.
-
-	v0.6.0 Round 7: previously took ``show_source`` + ``mode`` to gate
-	the source-line column. With safe mode removed, source is always
-	rendered.
-
-	When ``fn`` carries a ``source == "auto_expand"`` marker (set by the
-	renderer from the run's picks_json), the function header is indented
-	and prefixed with ``↳`` so the chain reads visually as a stack: the
-	user's pick appears flush-left, each auto-expanded descendant a
-	level deeper.
+	Columns: line number, hit count, total ms, per-hit µs, source. When ``fn``
+	carries a ``source == "auto_expand"`` marker, the function header is
+	indented and prefixed with ``↳`` so the chain reads as a stack (the user's
+	pick flush-left, each auto-expanded descendant a level deeper).
 	"""
 	# v0.7.x Phase F: editorial styling. Replaces inline-styled divs +
 	# table with `.phase2-func` + `.line-prof` classes. Auto-expanded
@@ -262,12 +227,8 @@ def _render_phase2_function_table(fn: dict) -> str:
 
 
 def _render_phase2_diff_table(diff_rows: list[dict]) -> str:
-	"""Render the cross-run delta table for one function profiled in 2+
-	runs the verify-the-fix view.
-
-	v0.6.0 Round 7: source column always shows full code (was previously
-	gated by ``mode == "safe"`` + the safe-source toggle).
-	"""
+	"""Render the cross-run delta table for one function profiled in 2+ runs
+	(the verify-the-fix view)."""
 	# v0.7.x Phase F: cross-run diff uses the same `.line-prof` base
 	# class as the per-function table, with extra `.added` / `.removed`
 	# row tints for matched-faster / matched-slower / added / removed
@@ -338,16 +299,9 @@ def _render_phase2_diff_table(diff_rows: list[dict]) -> str:
 
 
 def _render_line_drilldown_panel(session_doc: Any) -> str:
-	"""Build the Line-Level Drilldown section HTML. Returns an empty
-	string when the session has no phase-2 runs (the template's
-	``{% if line_drilldown_html %}`` guard then skips the section
-	entirely).
-
-	v0.6.0 Round 7: source-line text is always rendered (was previously
-	gated by the ``safe_report_include_source_lines`` setting in safe
-	mode). With safe mode removed the toggle is gone and the report
-	always shows full code.
-	"""
+	"""Build the Line-Level Drilldown section HTML, or "" when the session has
+	no phase-2 runs (the template's ``{% if line_drilldown_html %}`` guard then
+	skips the section)."""
 	from optimus.line_profile import diff as _lp_diff
 
 	runs = list(getattr(session_doc, "phase_2_runs", None) or [])
@@ -434,7 +388,7 @@ def _render_line_drilldown_panel(session_doc: Any) -> str:
 		status = _e(run.get("status", ""))
 		total_ms = run.get("total_ms", 0)
 		# v0.7.x: the "Picks:" line is dropped the per-function tables below
-		# enumerate the picks that ran, and the "Not exercised in this pass" note
+		# enumerate the picks that ran and the "Not exercised in this pass" note
 		# lists the rest, so listing all picks again here is redundant.
 		html.append(
 			'<div class="phase2-run">'

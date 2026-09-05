@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.3.0 streaming _fetch_recordings + tree/sidecar load."""
+"""Tests for the streaming _fetch_recordings + tree/sidecar load."""
 
 import base64
 import gzip
@@ -73,13 +73,10 @@ def test_fetch_recordings_yields_tree_and_sidecar(monkeypatch):
 
 
 def test_fetch_recordings_loads_drifted_signed_tree(monkeypatch):
-	"""Phase K v0.7 GA: when the HMAC secret drifts across processes
-	(e.g., recorder + analyze workers fell back to per-process random
-	keys because ``encryption_key`` wasn't in site_config), the
-	stored blob is ``32-byte sig + pickle.dumps(...)`` but unsign
-	fails because the sig was computed with a different secret.
-	The read-side dual-attempt fallback strips the first 32 bytes
-	and loads the rest as pickle.
+	"""When the HMAC secret drifts across processes (workers fell back to
+	per-process random keys), the stored blob is ``32-byte sig + pickle`` but
+	unsign fails. The read-side fallback strips the first 32 bytes and loads
+	the rest as pickle.
 	"""
 	import frappe
 	from frappe.recorder import RECORDER_REQUEST_HASH
@@ -103,12 +100,10 @@ def test_fetch_recordings_loads_drifted_signed_tree(monkeypatch):
 
 
 def test_fetch_recordings_loads_legacy_unsigned_tree(monkeypatch):
-	"""Phase K transition fallback: blobs written before the HMAC
-	rollout lack the 32-byte signature prefix. The analyze fetch
-	should still load them (with a warning log) when
-	``optimus_allow_unsigned_pickles`` defaults to True - otherwise
-	every session in flight at deploy time would silently lose its
-	pyi tree (and the Phase-2 picker would render no candidates).
+	"""Blobs written before the HMAC rollout lack the 32-byte signature prefix.
+	The analyze fetch should still load them (with a warning log) when
+	``optimus_allow_unsigned_pickles`` defaults to True, else sessions in
+	flight at deploy time would silently lose their pyi tree.
 	"""
 	import frappe
 	from frappe.recorder import RECORDER_REQUEST_HASH
@@ -352,8 +347,8 @@ def test_load_recordings_bundle_none_without_file():
 
 
 def test_mark_ai_spend_session_sets_and_is_guarded(monkeypatch):
-	"""The marker is set on frappe.local for the spend recorder, and a stubbed
-	frappe (no .local) must not raise unit tests rely on this no-op."""
+	"""The marker is set on frappe.local for the spend recorder; a stubbed
+	frappe (no .local) must not raise, since unit tests rely on this no-op."""
 	from types import SimpleNamespace
 
 	import frappe

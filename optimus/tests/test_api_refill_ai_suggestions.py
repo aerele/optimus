@@ -1,19 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for ``optimus.api.refill_ai_suggestions``: the single-button
-entry point that replaces the five legacy AI buttons.
+"""Tests for ``optimus.api.refill_ai_suggestions``.
 
-The endpoint chains three core helpers (``_run_ai_backfill``,
-``_humanize_steps_core``, ``_refill_indexes_for_doc``) and re-renders
-the report once at the end. The tests verify:
-
-- happy path: each step is called once, the per-step status dict is
-  surfaced, the final re-render runs
-- toggle-off path: a section whose feature toggle is off is silently
-  skipped (no helper call, ``skipped`` key set)
-- gate failures: missing provider / non-Ready / non-owning user all
-  raise before any work runs
+The endpoint chains three helpers (``_run_ai_backfill``,
+``_humanize_steps_core``, ``_refill_indexes_for_doc``) and re-renders once at
+the end. Covers the happy path (each step runs once, status dict surfaced),
+toggle-off sections (skipped, no helper call) and gate failures (missing
+provider / non-Ready / non-owning user all raise before any work).
 """
 
 from types import SimpleNamespace
@@ -41,9 +35,8 @@ def _row(name="opt-xxx", user="user@example.com", status="Ready", title="t"):
 
 
 def _fake_doc():
-	"""Minimal Optimus Session doc only `name` is touched by the
-	endpoint's orchestration; the helpers are mocked, so the doc body
-	doesn't matter."""
+	"""Minimal Optimus Session doc: only ``name`` is touched (helpers are
+	mocked)."""
 	return SimpleNamespace(name="opt-xxx", actions=[], findings=[], table_breakdown_json="[]")
 
 
@@ -70,7 +63,7 @@ def mock_session_environment(monkeypatch):
 
 
 def test_refill_runs_all_three_steps(mock_session_environment, monkeypatch):
-	"""Happy path: every toggle is on, every helper runs once, and the
+	"""Happy path: every toggle is on, every helper runs once and the
 	per-step status dict surfaces the counts."""
 	from optimus import ai_fix
 	from optimus.settings import get_config  # noqa: F401 we patch this below
@@ -106,7 +99,7 @@ def test_refill_runs_all_three_steps(mock_session_environment, monkeypatch):
 
 def test_refill_skips_sections_whose_toggle_is_off(mock_session_environment, monkeypatch):
 	"""Per-section toggles gate each step: a toggle-off section reports
-	``skipped`` instead of erroring, and the helper isn't called."""
+	``skipped`` instead of erroring and the helper isn't called."""
 	from optimus import ai_fix
 
 	monkeypatch.setattr(ai_fix, "is_available", lambda: True)

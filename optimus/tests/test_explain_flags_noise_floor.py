@@ -1,17 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.5.2 round 3 noise-floor + framework-DocType filters
-in explain_flags.
+"""Tests for the noise-floor + framework-DocType filters in explain_flags.
 
-Production report had ~85 'Full table scan on tab<DocType>' findings
-at 0-1ms impact, most on stock Frappe DocTypes (tabDocField,
-tabWorkspace, tabCustom Field, ...). App developers can't add an
-index to those, and the ~0ms impact means even if they could the
-cost wouldn't be measurable. Two filters now suppress these:
+Two filters suppress Full Table Scan findings that a developer can't act on:
 
-1. Noise floor findings with impact < 5ms AND count < 5 drop
-2. Framework DocType filter scans on stock DocTypes drop
+1. Noise floor: impact < 5ms AND count < 5 are dropped.
+2. Framework DocType: scans on stock Frappe DocTypes are dropped (no app-side
+   index is possible).
 """
 
 from optimus.analyzers import explain_flags

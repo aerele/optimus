@@ -1,13 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.5.2 per-app sub-grouping inside Findings and Observations.
+"""Tests for per-app sub-grouping inside Findings and Observations.
 
-User request: "the framework and other 1 party app's scripts can be
-easy avoided and focus on their custom app". The renderer buckets
-findings by their callsite's top-level app (apps/myapp/... → myapp),
-puts tracked apps first, then remaining apps by total impact, and
-falls "Other (no callsite)" into a tail bucket.
+The renderer buckets findings by their callsite's top-level app
+(apps/myapp/... -> myapp), puts tracked apps first, then remaining apps by
+total impact, with "Other (no callsite)" as a tail bucket.
 """
 
 from optimus.renderer import (
@@ -99,9 +97,8 @@ class TestBucketing:
 
 class TestTrackedAppsOrdering:
 	def test_tracked_apps_come_first_in_admin_order(self):
-		"""Admin listed ['my_primary', 'my_secondary'] those must be
-		the first two buckets regardless of their impact. The remaining
-		apps follow in impact-desc order."""
+		"""Tracked apps listed by the admin become the first buckets regardless
+		of impact; the remaining apps follow in impact-desc order."""
 		findings = [
 			_finding("apps/third_party/foo.py", impact=1000.0),  # huge impact
 			_finding("apps/my_secondary/foo.py", impact=5.0),
@@ -126,14 +123,9 @@ class TestTrackedAppsOrdering:
 
 
 class TestHotPathBucketRename:
-	"""v0.5.2 round 4: when every finding in the no-callsite bucket is
-	a hot-path / hook / frontend-render type (these finding types
-	legitimately have no code-location callsite they describe where
-	time went within a request scope), rename the bucket from
-	"Other (no callsite)" → "Request hotspots". The word "Other"
-	undersells findings that are often the MOST valuable in the
-	report (savedocs:Submit 57% in on_submit, apply_pricing_rule
-	97% in its own body, etc.)."""
+	"""When every finding in the no-callsite bucket is a hot-path / hook /
+	frontend-render type (which legitimately have no code-location callsite),
+	the bucket is renamed from "Other (no callsite)" to "Request hotspots"."""
 
 	def _hotpath(self, title, impact=400.0):
 		return {
@@ -175,12 +167,9 @@ class TestHotPathBucketRename:
 		)
 
 	def test_mixed_bucket_is_suppressed(self):
-		"""v0.7.x: a no-callsite bucket containing mixed finding types
-		(hot-path + non-hot-path) is dropped entirely from the rendered
-		Findings section. The all-hotpath case still renames to
-		'Request hotspots' and survives; only the mixed/generic 'Other
-		(no callsite)' label is suppressed because the findings binned
-		there had no actionable file:line for the reader."""
+		"""A no-callsite bucket with mixed finding types (hot-path plus
+		non-hot-path) is dropped entirely; only the all-hotpath case survives
+		(renamed to 'Request hotspots')."""
 		buckets = _bucket_findings_by_app([
 			self._hotpath("In savedocs:Save, 66% in validate"),
 			{
@@ -201,10 +190,8 @@ class TestHotPathBucketRename:
 		)
 
 	def test_hotpath_bucket_ordered_last(self):
-		"""Like the Other bucket, 'Request hotspots' stays at the
-		bottom it's secondary to user-app findings (even though
-		the contents are valuable) because the user can't directly
-		jump to a line of code from them."""
+		"""'Request hotspots' is ordered last (secondary to user-app findings)
+		since the reader can't jump straight to a line of code from it."""
 		buckets = _bucket_findings_by_app([
 			{"finding_type": "N+1 Query", "severity": "High",
 			 "title": "myapp N+1", "customer_description": "",
@@ -221,11 +208,9 @@ class TestHotPathBucketRename:
 
 class TestOtherBucketSuppressed:
 	def test_other_bucket_not_rendered(self):
-		"""v0.7.x: even when there are no-callsite findings, the
-		'Other (no callsite)' bucket is suppressed from the render
-		output. Findings still exist in the underlying list and still
-		count toward severity totals only the per-app bucket display
-		drops them. Named-app buckets render unchanged."""
+		"""The 'Other (no callsite)' bucket is suppressed from the render output
+		even when no-callsite findings exist; they still count toward severity
+		totals. Named-app buckets render unchanged."""
 		findings = [
 			_finding(app_filename=None, impact=9999.0),  # no callsite
 			_finding("apps/myapp/foo.py", impact=10.0),
@@ -243,9 +228,8 @@ class TestOtherBucketSuppressed:
 
 class TestBucketContents:
 	def test_bucket_preserves_input_order_within_app(self):
-		"""The caller sorts globally by severity+impact. Within each
-		app, the bucketer must preserve that order it must not
-		re-sort (that would undo the global severity ordering)."""
+		"""Within each app the bucketer preserves the caller's global
+		severity+impact order (it must not re-sort)."""
 		findings = [
 			_finding("apps/myapp/a.py", impact=100.0, severity="High"),
 			_finding("apps/myapp/b.py", impact=10.0, severity="High"),

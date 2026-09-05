@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Per-job terminal-status tracking (v0.7.x).
+"""Per-job terminal-status tracking.
 
 A flow's enqueued RQ jobs are recorded in a never-pruned hash so analyze can
 report each one's terminal status (completed / failed / timeout / running)
@@ -203,15 +203,12 @@ class TestAtomicMergeJobMeta:
 
 
 class TestAtomicMergeJobMetaConcurrent:
-	"""Stand-in for the production multi-worker race using threads. In real
-	RQ deployments each worker is a SEPARATE PROCESS with its own
-	``frappe.local`` (Werkzeug Local is per-thread/process), so the full
-	``_atomic_merge_job_meta`` wrapper including ``make_key``: works
-	end-to-end in each worker. Threads can't replay that exactly because
-	``frappe.local.conf`` isn't set in non-main threads; the test pre-computes
-	the prefixed key in the main thread and calls the Lua script directly
-	from each thread. That still proves the load-bearing invariant: Lua
-	serialises HGET+HSET on Redis, so concurrent merges can't drop fields."""
+	"""Stand-in for the production multi-worker race using threads. Threads
+	pre-compute the prefixed key in the main thread and call the Lua script
+	directly (``frappe.local.conf`` needed by ``make_key`` isn't set in
+	non-main threads), proving the invariant: Lua serialises HGET+HSET on
+	Redis, so concurrent merges can't drop fields.
+	"""
 
 	def test_concurrent_threaded_lua_merges_are_lossless(self):
 		import json

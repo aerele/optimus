@@ -1,17 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Phase J adapter transform our flat render-context into the 19-key
-contract shape per ``template_variable_contract.md`` (in the reference
-design package).
+"""Adapter: transform the renderer's flat context into the nested contract
+shape per ``template_variable_contract.md``.
 
-This module is the adapter half of the reference architecture: ``renderer.py``
-keeps producing its existing 45-key flat context, and ``build_report_context``
-turns that into the canonical nested-dict shape the reference template
-expects. Phase J.1 (this module) exposes the contract data under a
-``report_data`` namespace so template references can migrate section-by-
-section in Phase J.2 without breaking. Phase J.3 will unpack the namespace
-and drop the legacy duplicates.
+``build_report_context`` turns the renderer's flat context into the canonical
+nested-dict shape the template expects, exposed under a ``report_data``
+namespace.
 """
 
 from __future__ import annotations
@@ -74,8 +69,8 @@ def _is_user_code(function_or_path, ignored_apps: tuple[str, ...] = ()) -> bool:
 
 
 def _ms_display(ms) -> str:
-	"""Format milliseconds for display per the contract's mixed-unit style:
-	below 1000ms → integer ms; at-or-above → seconds with 2 decimals."""
+	"""Format milliseconds: below 1000ms as integer ms; at-or-above as seconds
+	with 2 decimals."""
 	if ms is None:
 		return ""
 	if ms < 1000:
@@ -104,10 +99,8 @@ def _build_session(session_doc, ctx) -> dict:
 
 
 def _build_tldr(tldr) -> dict:
-	"""Contract ``tldr`` = {headline_html, subline_html}.
-
-	Our internal tldr has ``headline_markup`` / ``sub_markup`` (Markup
-	objects). Stringify and rename.
+	"""Contract ``tldr`` = {headline_html, subline_html}, stringified and
+	renamed from the internal ``headline_markup`` / ``sub_markup``.
 	"""
 	if not tldr:
 		return {"headline_html": "", "subline_html": ""}
@@ -120,10 +113,8 @@ def _build_tldr(tldr) -> dict:
 def _build_kpis(session_doc, ctx) -> list[dict]:
 	"""Contract ``kpis`` = exactly 4 items: total time, queries, ops, findings.
 
-	Labels and sub-line wording mirror the pre-J.2 template literally so the
-	migration is a binding-only change (no tested-text surface moves). The
-	severity breakdown comes from ``ctx.severity_counts`` (computed in
-	``renderer.render``) and the danger thresholds from ``render_config``.
+	Severity breakdown comes from ``ctx.severity_counts`` and the danger
+	thresholds from ``render_config``.
 	"""
 	fmt_ms = ctx.get("fmt_ms") or (lambda v, **kw: f"{v:.0f}ms")
 	total_ms = getattr(session_doc, "total_duration_ms", 0) or 0
@@ -209,12 +200,9 @@ def _build_kpis(session_doc, ctx) -> list[dict]:
 
 
 def _build_repro(notes_html) -> dict | None:
-	"""Contract ``repro`` = {title, steps}. Defer parsing to J.2.
-
-	For J.1 we expose the sanitized markup as ``raw_html`` plus empty
-	``title``/``steps``. The template migration in J.2 will decide whether
-	to parse the ``<ol><li>`` into the structured fields or render the
-	raw markup; the contract permits either.
+	"""Contract ``repro`` = {title, steps}. Exposes the sanitized markup as
+	``raw_html`` with empty ``title`` / ``steps``. Returns None when there is
+	no notes markup.
 	"""
 	if not notes_html:
 		return None
@@ -222,10 +210,8 @@ def _build_repro(notes_html) -> dict | None:
 
 
 def _build_summary(summary_html) -> dict | None:
-	"""Contract ``summary`` = {paragraphs_html: [...]}.
-
-	Our existing summary is one HTML chunk (``<ul>`` of bullets). Wrap in
-	a single-paragraph list the contract permits HTML inside each entry.
+	"""Contract ``summary`` = {paragraphs_html: [...]}. Wraps the single HTML
+	summary chunk in a one-entry list. Returns None when empty.
 	"""
 	if not summary_html:
 		return None
@@ -233,11 +219,9 @@ def _build_summary(summary_html) -> dict | None:
 
 
 def _build_smoking_code_html(snippet, target_lineno) -> str:
-	"""Wrap a ``source_snippet`` list in contract-shaped HTML.
-
-	Skips blank context lines (PEP-8 spacers); the target line is always
-	rendered, wrapped in ``<span class="hot-line">``. Matches the Phase
-	I.5 contract from the smoking-gun panel.
+	"""Wrap a ``source_snippet`` list in contract-shaped HTML. Blank context
+	lines are skipped; the target line is always rendered, wrapped in
+	``<span class="hot-line">``.
 	"""
 	if not snippet:
 		return ""
@@ -326,9 +310,8 @@ def _build_findings(findings, ctx) -> list[dict]:
 
 
 def _build_line_drilldown_runs(session_doc) -> list[dict]:
-	"""Contract ``line_drilldown_runs`` (J.16 renamed from
-	``phase2_runs``) = list of {number, status, total_ms_display,
-	timestamp, picks, functions}.
+	"""Contract ``line_drilldown_runs`` = list of {number, status,
+	total_ms_display, timestamp, picks, functions}.
 	"""
 	runs = getattr(session_doc, "phase_2_runs", None) or []
 	result = []
@@ -398,11 +381,8 @@ def _build_line_drilldown_runs(session_doc) -> list[dict]:
 
 def _build_action_plan(action_plan, fmt_ms=None) -> list[dict]:
 	"""Contract ``action_plan`` = {number, title_html, description_html,
-	savings_display, savings_label}.
-
-	We also expose ``callsite`` (a non-contract field) so the template can
-	render a one-line ``file:line`` anchor under each step; the contract
-	folds this into ``description_html`` but our markup keeps it separate.
+	savings_display, savings_label}, plus a non-contract ``callsite``
+	(``file:line``) rendered as an anchor under each step.
 	"""
 	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
 	result = []
@@ -450,11 +430,9 @@ def _build_actions(actions, findings, fmt_ms=None) -> list[dict]:
 	duration_pct, duration_is_hot, bar_kind, queries, db_time_display,
 	finding_inline_html}.
 
-	J.2.3: We *spread the original action dict* so the existing
-	``action_row`` macro (which reads ``action_label``, ``http_method``,
-	``path``, ``entry_callsite``, ``target_doc``, ``related_findings`` and
-	more) keeps working unchanged. Contract fields are added on top they
-	never collide with the legacy keys.
+	The original action dict is spread through (so the ``action_row`` macro
+	still reads ``action_label``, ``http_method``, ``path`` etc.); contract
+	fields are added on top and never collide with the legacy keys.
 	"""
 	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
 	findings_by_ref: dict[str, list] = {}
@@ -510,9 +488,9 @@ def _build_background_jobs(jobs, fmt_ms=None) -> list[dict]:
 	duration_display, duration_pct, duration_is_hot, bar_kind, queries,
 	db_time_display, finding_count}.
 
-	J.2.3: spreads the original job dict (preserves ``method``,
-	``entry_callsite``, ``related_findings``, ``top_queries``, etc.) so the
-	existing ``bg_job_row`` macro reads from the same fields it used to.
+	Spreads the original job dict (``method``, ``entry_callsite``,
+	``related_findings``, ``top_queries``, etc.) so the ``bg_job_row`` macro
+	reads the same fields.
 	"""
 	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
 	jobs = jobs or []
@@ -553,13 +531,9 @@ def _build_background_jobs(jobs, fmt_ms=None) -> list[dict]:
 
 
 def _build_doc_events(doc_event_breakdown, fmt_ms=None) -> list[dict]:
-	"""Contract ``doc_events`` = list of {name, summary, methods}.
-
-	We extend the contract with ``is_save_target`` / ``touched_during`` on
-	each doctype and ``vscode_link`` / ``count`` on each hook so our
-	existing markup (which surfaces those distinctions) keeps working
-	without going back to ``doc_event_breakdown``. ``summary`` stays
-	contract-conformant for tooling that reads it.
+	"""Contract ``doc_events`` = list of {name, summary, methods}, extended
+	with ``is_save_target`` / ``touched_during`` per doctype and
+	``vscode_link`` / ``count`` per hook. ``summary`` stays contract-conformant.
 	"""
 	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
 	result = []
@@ -789,7 +763,7 @@ def _build_frontend(ctx) -> dict | None:
 
 	# J.2.4 non-contract additions: pass-through the raw summary +
 	# xhr_matched + orphans so the existing rc-card markup, XHR-table
-	# columns, and orphans details-block migrate as a straight key rename.
+	# columns and orphans details-block migrate as a straight key rename.
 	return {
 		"kpis": kpis,
 		"xhrs": xhrs_out,
@@ -804,8 +778,8 @@ def _build_hot_frames(hot_frames_rows, ignored_apps, fmt_ms=None) -> list[dict]:
 	"""Contract ``hot_frames`` = list of {name, total_time_display,
 	is_hot_time, occurrences, distinct_actions, is_user_code}.
 
-	J.2.5: spreads the original row dict so the existing ``hot_frame_row``
-	macro keeps reading ``display_name`` / ``total_ms`` / ``is_hot``.
+	Spreads the original row dict so ``hot_frame_row`` still reads
+	``display_name`` / ``total_ms`` / ``is_hot``.
 	"""
 	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
 	ignored = tuple(ignored_apps or ())
@@ -831,9 +805,8 @@ def _build_slow_queries(top_queries, fmt_ms=None) -> list[dict]:
 	"""Contract ``slow_queries`` = list of {sql_excerpt, total_time_display,
 	call_count, avg_display, callsite}.
 
-	J.2.5: spreads the original query dict so ``top_query_row`` keeps
-	reading ``duration_ms`` / ``callsite`` / ``normalized_query``. Empty
-	list → contract template renders the empty-state card.
+	Spreads the original query dict so ``top_query_row`` keeps reading
+	``duration_ms`` / ``callsite`` / ``normalized_query``.
 	"""
 	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
 	result = []
@@ -866,13 +839,9 @@ def _build_db(table_breakdown, fmt_ms=None) -> dict | None:
 
 	``tables`` per-entry {name, time_display, queries, reads, writes,
 	is_hot, note_html}; ``index_recommendations`` per-entry {table_name,
-	stats, recommendation_html, sql, has_writes, verdict_text}.
-
-	J.2.5: spreads each table dict so the existing index-recommendation
-	block (which reads ``read_time_ms``, ``write_time_ms``,
-	``index_candidates``, ``is_meta_table``, ``framework_cols_filtered``,
-	``ai_index``, ``recommended_index``) keeps working without going
-	back to ``table_breakdown``.
+	stats, recommendation_html, sql, has_writes, verdict_text}. Each table
+	dict is spread through so the index-recommendation block keeps reading
+	``read_time_ms``, ``recommended_index`` etc.
 	"""
 	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
 	if not table_breakdown:
@@ -926,11 +895,8 @@ def _build_db(table_breakdown, fmt_ms=None) -> dict | None:
 
 
 def _build_footer(render_config) -> dict:
-	"""Contract ``footer`` = {framework, settings}.
-
-	``settings`` lists every render-time toggle that affects the report. The
-	contract example shows 3 toggles; our config has 6 we include all of
-	them so the legacy footer's full disclosure carries over post-migration.
+	"""Contract ``footer`` = {framework, settings}. ``settings`` lists every
+	render-time toggle that affects the report.
 	"""
 	rc = render_config or {}
 	tracked = rc.get("tracked_apps") or ()
@@ -960,15 +926,9 @@ def _build_footer(render_config) -> dict:
 def build_report_context(session_doc: Any, ctx: dict) -> dict:
 	"""Return the contract-shaped context dict per template_variable_contract.md.
 
-	Reads from ``ctx`` (the already-built render context dict) so the
-	adapter is a pure transformation and does not duplicate analysis work.
-	``session_doc`` is the OptimusSession document used for fields not
-	carried in ``ctx`` (phase-2 child table, user, etc.).
-
-	Phase J.1: this function's output is exposed under a ``report_data``
-	namespace key in the render context so template references can migrate
-	section-by-section in J.2 without breaking. J.3 will unpack the
-	namespace and drop legacy keys.
+	Pure transformation of ``ctx`` (the already-built render context) plus
+	``session_doc`` for fields not carried in ``ctx`` (phase-2 child table,
+	user, etc.); the output is exposed under a ``report_data`` namespace key.
 	"""
 	# v0.7.x B.DI1: surface the sampler interval onto report_data so
 	# every disclosure (KPI caveat, "How to read", finding desc) reads
@@ -1083,14 +1043,9 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 
 
 def _build_background_jobs_summary(background_jobs) -> dict:
-	"""Aggregate fields the BG-jobs section heading + bg_job_row macro need.
-
-	The legacy ``background_jobs`` dict carries ``count`` / ``total_ms`` /
-	``total_queries`` / ``any_findings_counted`` / ``framework_count``
-	alongside the ``jobs`` / ``jobs_framework`` lists. After J.3 these
-	aggregates are the only legacy-dict-shaped data the template still
-	reads; expose them under a dedicated namespace so the rest of the
-	dict can be dropped.
+	"""Aggregate the BG-jobs fields the section heading and bg_job_row macro
+	need (``count``, ``total_ms``, ``total_queries``, ``framework_count``,
+	per-status breakdown, ``has_failures``).
 	"""
 	bj = background_jobs or {}
 	# v0.7.x: per-status tally so the section heading can break down "N jobs

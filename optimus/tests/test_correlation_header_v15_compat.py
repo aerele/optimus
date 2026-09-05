@@ -1,27 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.5.3 X-Optimus-Recording-Id header injection across
-Frappe v15 and v16.
+"""Tests for X-Optimus-Recording-Id header injection across Frappe v15 and v16.
 
-Why this exists: the Per-XHR timings section of the Frontend panel
-was empty on v15 deployments. Root cause ``frappe.local.response_
-headers`` (the staging dict our injector wrote to) does not exist
-on v15. Only v16's ``frappe/app.py`` has
-``response.headers.update(frappe.local.response_headers)`` at
-response-build time. On v15 that line is absent, so the staged
-value silently vanished.
-
-Both versions do pass the ``response`` object into
-``after_request`` hooks via ``run_after_request_hooks(request,
-response)`` → ``frappe.call(after_request_task, response=response,
-request=request)``. So the portable fix is to accept the response
-object and write to ``response.headers`` directly when available,
-keeping the staging-dict path as a belt-and-braces fallback.
-
-These tests exercise both code paths and pin the invariant that
-both the recording-id header AND Access-Control-Expose-Headers
-land on whichever object is the authoritative sink.
+On v15 ``frappe.local.response_headers`` (the staging dict) does not exist, so
+the injector must also write to ``response.headers`` directly when the response
+object is available, keeping the staging dict as a fallback. These tests pin
+that both the recording-id header and Access-Control-Expose-Headers land on
+whichever object is the authoritative sink on each version.
 """
 
 import sys
@@ -31,20 +17,11 @@ import pytest
 
 
 def _install_frappe_stub_with_local(monkeypatch):
-	"""Install a minimal frappe stub with frappe.local configurable
-	per test. Tests can then monkey-patch
-	``sys.modules['frappe'].local.response_headers`` to simulate v16
-	presence or v15 absence.
-
-	Also stubs ``frappe.recorder`` and the ``optimus.session``
-	/ ``.capture`` submodules because ``hooks_callbacks.py`` imports
-	them at module top those imports would fail when
-	``_fresh_module`` re-imports ``hooks_callbacks``.
-
-	All sys.modules mutations go through ``monkeypatch.setitem`` so the
-	real ``frappe`` (and related submodules) is restored at test
-	teardown preventing the stub from polluting subsequent test files
-	in the same pytest session.
+	"""Install a minimal frappe stub with a configurable ``frappe.local`` so
+	tests can set / omit ``response_headers`` to simulate v16 / v15. Also stubs
+	``frappe.recorder`` and the ``optimus.session`` / ``.capture`` submodules
+	that ``hooks_callbacks`` imports at module top. All mutations go through
+	``monkeypatch.setitem`` so the real modules are restored at teardown.
 	"""
 	frappe = types.ModuleType("frappe")
 	frappe.local = types.SimpleNamespace()
@@ -78,10 +55,9 @@ def _install_frappe_stub_with_local(monkeypatch):
 
 
 def _fresh_module(monkeypatch):
-	"""Re-import hooks_callbacks under the current frappe stub.
-	``monkeypatch.delitem`` evicts cached modules pytest restores them
-	at teardown so subsequent files see the originals (or the conftest
-	fence's re-imports)."""
+	"""Re-import hooks_callbacks under the current frappe stub, evicting cached
+	optimus modules via ``monkeypatch.delitem`` so teardown restores the
+	originals."""
 	for mod in list(sys.modules.keys()):
 		if mod.startswith("optimus.hooks") or mod == "optimus":
 			monkeypatch.delitem(sys.modules, mod, raising=False)

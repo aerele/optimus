@@ -3,14 +3,11 @@
 
 """Database-dialect abstraction for the Optimus analysis engine.
 
-A profiler's value slow-query / index / plan findings comes from running
-EXPLAIN and inspecting the database's plan output, which is MariaDB-specific.
-To support PostgreSQL too, every dialect-specific operation lives behind the
-``Dialect`` interface, and the analyzers consume the *normalized* dataclasses
-below instead of touching raw EXPLAIN rows. ``optimus.dbdialect.get_dialect()``
-returns the right adapter for the active ``frappe.db.db_type``.
-
-This module is dialect-NEUTRAL no SQL here. The MariaDB / Postgres SQL lives
+Every dialect-specific EXPLAIN / index / plan operation lives behind the
+``Dialect`` interface; analyzers consume the normalized dataclasses below
+instead of raw EXPLAIN rows, so MariaDB and PostgreSQL are both supported.
+``optimus.dbdialect.get_dialect()`` returns the adapter for the active
+``frappe.db.db_type``. This module is dialect-neutral (no SQL); the SQL lives
 in ``mariadb.py`` / ``postgres.py``.
 """
 
@@ -23,7 +20,7 @@ from dataclasses import dataclass, field
 # Coercion helpers (shared by the adapters). Lifted from explain_flags so the
 # adapters and the analyzer agree on how to read driver-variant numerics:
 # certain drivers / EXPLAIN FORMAT variants return Decimal/str/None where an
-# int/float is expected, and a bare `>` comparison would crash.
+# int/float is expected and a bare `>` comparison would crash.
 # ---------------------------------------------------------------------------
 
 def to_int(val) -> int:
