@@ -49,7 +49,7 @@ from optimus.analyzers import (
 	table_breakdown,
 	top_queries,
 )
-from optimus.analyzers.base import SEVERITY_ORDER, AnalyzeContext
+from optimus.analyzers.base import SEVERITY_ORDER, AnalyzeContext, humanize_duration_ms
 from optimus.dbdialect import get_dialect
 
 # v0.3.0: per-analyzer wall-clock budget. If the cumulative analyze
@@ -1908,7 +1908,7 @@ def _dedupe_findings_across_actions(
 		if other_entries:
 			if all(e.get("label") for e in other_entries):
 				bits = ", ".join(
-					f"**{e['label']}** ({e['ms']:.0f}ms)" for e in other_entries
+					f"**{e['label']}** ({humanize_duration_ms(e['ms'])})" for e in other_entries
 				)
 				suffix = (
 					f" Also affects {len(other_entries)} other "
@@ -2873,7 +2873,7 @@ def _build_summary_html(
 				title = title[len(prefix):]
 			pri = _PRIORITY_WORD.get(f.get("severity") or "", "")
 			impact = f.get("estimated_impact_ms") or 0
-			tail = f" (~{impact:.0f}ms" + (f" - {pri} priority" if pri else "") + ")"
+			tail = f" (~{humanize_duration_ms(impact)}" + (f" - {pri} priority" if pri else "") + ")"
 			return f"<strong>{html.escape(title)}</strong>{tail}"
 
 		# Prefer a finding tied to this specific action (via action_ref);
@@ -2896,19 +2896,19 @@ def _build_summary_html(
 			# on the issue-count sentence below don't repeat it here.
 			parts.append(
 				f"The slowest one was <strong>{slowest_label_esc}</strong> at "
-				f"{slowest_ms:.0f}ms - and most of its time went into "
+				f"{humanize_duration_ms(slowest_ms)} - and most of its time went into "
 				f"{_finding_phrase(tied_finding)}."
 			)
 		elif overall_finding:
 			parts.append(
 				f"The slowest one was <strong>{slowest_label_esc}</strong> at "
-				f"{slowest_ms:.0f}ms. The biggest issue this session "
+				f"{humanize_duration_ms(slowest_ms)}. The biggest issue this session "
 				f"(it affects several operations) was {_finding_phrase(overall_finding)}."
 			)
 		else:
 			parts.append(
 				f"The slowest one was <strong>{slowest_label_esc}</strong> at "
-				f"{slowest_ms:.0f}ms."
+				f"{humanize_duration_ms(slowest_ms)}."
 			)
 
 	if not findings:

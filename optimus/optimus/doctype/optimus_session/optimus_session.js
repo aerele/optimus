@@ -24,6 +24,17 @@ frappe.ui.form.on("Optimus Session", {
 	},
 });
 
+// Duration formatter matching the server-side rule (optimus.analyzers.base
+// humanize_duration_ms): one second is 1000ms, so a value that reaches a full
+// second reads as "1.50s" instead of a four-digit millisecond count. Values
+// below a second stay in ms (with optional decimals). Keeps the Session page
+// consistent with the report the same durations appear in.
+function optimus_fmt_ms(ms, decimals) {
+	var v = Number(ms) || 0;
+	if (Math.abs(v) >= 1000) return (v / 1000).toFixed(2) + "s";
+	return v.toFixed(decimals == null ? 0 : decimals) + "ms";
+}
+
 // Single AI button: "Refresh AI suggestions". Replaces five legacy
 // buttons (Suggest a fix / Generate AI fixes / Re-evaluate AI fixes /
 // Humanize Steps / Suggest an index). One server endpoint
@@ -402,7 +413,7 @@ function show_phase2_dialog(frm, data) {
 		function meta(c) {
 			return (
 				" <span style='color:#6b7280;font-size:0.85em;'>(" +
-				(c.cumulative_ms || 0).toFixed(1) + "ms &middot; " +
+				optimus_fmt_ms(c.cumulative_ms || 0, 1) + " &middot; " +
 				(c.hit_count || 0) + "&times; hits &middot; " +
 				esc(c.app) +
 				")</span>"

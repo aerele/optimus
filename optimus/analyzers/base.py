@@ -36,6 +36,29 @@ from typing import Any
 # copies to keep the ordering consistent across the pipeline.
 SEVERITY_ORDER: dict[str, int] = {"High": 0, "Medium": 1, "Low": 2}
 
+
+def humanize_duration_ms(ms, decimals: int = 0, threshold_ms: float = 1000.0) -> str:
+	"""Format a duration for prose: ``"<n>ms"`` below ``threshold_ms``,
+	``"<n.nn>s"`` at or above it. One second is 1000ms, so a duration that
+	reaches a full second reads as seconds instead of a four-digit
+	millisecond count (better to skim "1.50s" than "1500ms").
+
+	Shared by every analyzer and by analyze.py so a duration reads the same
+	way wherever it lands in a finding title or description. Plain text, no
+	markup, no space before the unit so it drops into a sentence cleanly
+	("took 1.23s"). ``decimals`` sets the millisecond precision only; the
+	seconds branch always keeps two decimals. Defensive: ``None`` or a
+	non-numeric value formats as zero.
+	"""
+	try:
+		v = float(ms) if ms is not None else 0.0
+	except (TypeError, ValueError):
+		v = 0.0
+	if threshold_ms and abs(v) >= threshold_ms:
+		return f"{v / 1000:.2f}s"
+	return f"{v:.{decimals}f}ms"
+
+
 # Path prefixes we treat as "framework" when picking a representative
 # callsite for a query. The goal is to blame the user's business logic,
 # not the frappe helper the query was routed through (get_value,

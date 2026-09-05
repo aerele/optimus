@@ -18,6 +18,7 @@ import json
 
 from optimus.analyzers.base import (
 	AnalyzerResult,
+	humanize_duration_ms,
 	installed_apps_allowlist,
 	is_framework_callsite_str,
 	is_profiler_own_query,
@@ -119,9 +120,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			{
 				"finding_type": "Slow Query",
 				"severity": "High" if q["query_duration_ms"] > high_threshold else "Medium",
-				"title": f"Slow query: {q['query_duration_ms']:.0f}ms",
+				"title": f"Slow query: {humanize_duration_ms(q['query_duration_ms'])}",
 				"customer_description": (
-					f"A single query took {q['query_duration_ms']:.0f}ms to run. "
+					f"A single query took {humanize_duration_ms(q['query_duration_ms'])} to run. "
 					"This is one of the slowest queries in the session and is "
 					"a likely candidate for optimization."
 				),

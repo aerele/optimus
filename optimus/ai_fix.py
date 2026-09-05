@@ -34,6 +34,8 @@ from typing import Any
 
 import requests
 
+from optimus.analyzers.base import humanize_duration_ms
+
 
 class AiFixError(Exception):
 	"""User-facing error from the AI-fix path. The API endpoint converts
@@ -1055,7 +1057,7 @@ def _build_steps_messages(
 		dur = a.get("duration_ms")
 		if dur:
 			try:
-				bits.append(f"{float(dur):.0f}ms")
+				bits.append(humanize_duration_ms(float(dur)))
 			except (TypeError, ValueError):
 				pass
 		suffix = f"  ({'; '.join(bits)})" if bits else ""
@@ -1153,7 +1155,7 @@ def _build_messages(finding: dict) -> tuple[str, list[dict]]:
 		parts.append(f"Description: {finding['customer_description']}")
 	impact = finding.get("estimated_impact_ms")
 	if impact:
-		parts.append(f"Estimated impact: ~{float(impact):.0f}ms")
+		parts.append(f"Estimated impact: ~{humanize_duration_ms(float(impact))}")
 	if finding.get("affected_count"):
 		parts.append(f"Affected occurrences: {finding['affected_count']}")
 
@@ -1176,12 +1178,12 @@ def _build_messages(finding: dict) -> tuple[str, list[dict]]:
 		share = ""
 		try:
 			if wall_ms:
-				share = f" {round(float(cum_ms) / float(wall_ms) * 100)}% of this action's {float(wall_ms):.0f}ms wall time"
+				share = f" {round(float(cum_ms) / float(wall_ms) * 100)}% of this action's {humanize_duration_ms(float(wall_ms))} wall time"
 		except (TypeError, ValueError, ZeroDivisionError):
 			share = ""
 		parts.append(
 			f"Hot function (the call-tree subtree that dominates this action): "
-			f"`{hot_fn}`: ~{float(cum_ms):.0f}ms{share}. Its source is below; "
+			f"`{hot_fn}`: ~{humanize_duration_ms(float(cum_ms))}{share}. Its source is below; "
 			"point at the specific lines/loop/call inside it that cost the time."
 		)
 
@@ -1218,7 +1220,7 @@ def _build_messages(finding: dict) -> tuple[str, list[dict]]:
 			f"Line-profile (Phase 2) over this function found its hottest line is "
 			f"line {hot['lineno']}"
 			+ (f" `{hl_content}`" if hl_content else "")
-			+ (f" ({float(hl_ms):.0f}ms" + (f" over {int(hl_hits)} call(s)" if hl_hits else "") + ")"
+			+ (f" ({humanize_duration_ms(float(hl_ms))}" + (f" over {int(hl_hits)} call(s)" if hl_hits else "") + ")"
 			   if hl_ms else "")
 			+ ". Start your fix there."
 		)

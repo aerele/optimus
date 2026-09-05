@@ -8,6 +8,26 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.43] - 2026-09-05
+
+### Changed
+
+- **Durations of a second or more now read in seconds, everywhere they appear.** One
+  second is 1000ms, so a value that reaches a full second reads as "1.50s" instead of
+  a hard-to-skim four-digit "1500ms". The main report tables already did this; this
+  extends the same rule to every other place a duration shows up: the Web Vitals table,
+  the per-page XHR and network figures, the call-tree panel, the line-level phase-2
+  timings, the session summary, the hot-path picker on the Optimus Session page and the
+  wording of the findings themselves (slow query, N+1, slow hot path, hook bottleneck,
+  slow background job, slow frontend render, network overhead and missing-index
+  suggestions). Anything under a second still reads
+  in milliseconds. A single shared helper (`humanize_duration_ms`) backs the finding
+  and summary text so the wording stays consistent. The same rollover is applied to
+  the context Optimus sends the AI when it drafts a fix so the model sees the numbers
+  the way the report does.
+
+---
+
 ## [0.12.42] - 2026-09-04
 
 ### Changed
