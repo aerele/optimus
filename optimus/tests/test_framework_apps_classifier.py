@@ -290,7 +290,7 @@ class TestInclusionModeUnderAppsAncestor:
 class TestFrameworkNameMatchedOnAppRootNotMidPath:
 	"""A framework/lib name counts only as the resolved app ROOT, not a folder
 	deeper in the path so a user app's submodule named like a framework app, the
-	standard /home/frappe/ server home, and a vendored lib under a user app all stay
+	standard /home/frappe/ server home and a vendored lib under a user app all stay
 	the user's own code. Regression for the mid-path substring false-positive (which
 	main and this branch before the fix got wrong)."""
 
@@ -438,7 +438,7 @@ class TestPureHelperFrameAllowlistOnBench:
 	populated installed-apps set the ON-BENCH path the pure-Python suite otherwise
 	never hits (every other test passes installed_apps=None). Regression guard for
 	the drop-user-frames bug: the allowlist must key on the RESOLVED app root, not
-	the raw first path segment ('apps'/'home'), and must not fire in inclusion mode."""
+	the raw first path segment ('apps'/'home') and must not fire in inclusion mode."""
 
 	INSTALLED = frozenset({"frappe", "erpnext", "myapp", "redis"})
 

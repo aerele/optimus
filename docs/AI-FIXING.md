@@ -1,6 +1,6 @@
 # AI Fix Suggestions: data flow & privacy
 
-This document inventories **exactly** what data leaves your host when Optimus's AI fix suggestion feature is enabled, where it goes, and how to keep everything on-box with a local LLM. It's written for operators making the consent decision and for reviewers (compliance / security / a dev shop receiving a profile) who need to audit the wire.
+This document inventories **exactly** what data leaves your host when Optimus's AI fix suggestion feature is enabled, where it goes and how to keep everything on-box with a local LLM. It's written for operators making the consent decision and for reviewers (compliance / security / a dev shop receiving a profile) who need to audit the wire.
 
 If you're picking up Optimus for the first time: every AI feature here is **off by default**. The rest of this doc only matters once an operator explicitly turns one on.
 
@@ -22,13 +22,13 @@ When AI is enabled, three knobs gate every outbound call:
 | `ai_auto_suggest` | OFF | Batch mode. OFF → AI runs only when the operator clicks **Suggest a fix (AI)** on one finding. ON → analyze.run sends the top-N eligible findings during the background analyze pass. |
 | `ai_excluded_finding_types` | empty | One finding type per line (v0.9.0+). Listed types are skipped in **both** auto-suggest and on-demand the request body is never built and never sent. |
 
-The combination of `ai_enabled=OFF`, on-demand-only (`ai_auto_suggest=OFF`), and the exclusion list gives the operator three independent axes of consent: feature-level (the master), event-level (the click), and type-level (the exclusion).
+The combination of `ai_enabled=OFF`, on-demand-only (`ai_auto_suggest=OFF`) and the exclusion list gives the operator three independent axes of consent: feature-level (the master), event-level (the click) and type-level (the exclusion).
 
 ---
 
 ## 2. What data leaves the host
 
-There are four outbound request shapes. Each table lists every distinct field that crosses the network boundary, the typical size, and the source.
+There are four outbound request shapes. Each table lists every distinct field that crosses the network boundary, the typical size and the source.
 
 ### 2.1 Finding fix suggestion (`/v1/messages` or `/chat/completions`)
 
@@ -80,7 +80,7 @@ Triggered by `ai_humanize_steps`. Built by `_build_steps_messages` in `optimus/a
 | `doctype` | extracted from form_dict | 20–60 chars | E.g. "Sales Invoice". |
 | `duration_ms` | recording.duration | ~5 chars | Wall time. |
 
-Up to `_MAX_STEPS_ACTIONS = 60` actions; total truncated to `_MAX_STEPS_USER_CHARS = 8000` chars. `_is_reproducer_noise` pre-filters polling, form-load, and asset requests.
+Up to `_MAX_STEPS_ACTIONS = 60` actions; total truncated to `_MAX_STEPS_USER_CHARS = 8000` chars. `_is_reproducer_noise` pre-filters polling, form-load and asset requests.
 
 ### 2.3 Index suggestion (`/v1/messages` or `/chat/completions`)
 
@@ -112,8 +112,8 @@ Smallest payload (`ai_fix.test_connection`). System: ~80 chars. User content: ~4
 
 These items are **never** sent in any AI request body:
 
-- **Sensitive SQL literals.** `password = '...'`, `api_key = '...'`, `token = '...'`, and the 12 other patterns in `optimus.redaction.DEFAULT_SENSITIVE_SQL_COLUMNS` are replaced with `<REDACTED>` at capture time, so even the `example_queries` field sees the redacted form. Operators can extend this list via `sensitive_sql_columns` in Optimus Settings.
-- **HTTP form bodies.** `form_dict` keys matching `password` / `api_key` / `token` / etc. are redacted at capture (`optimus.redaction.DEFAULT_SENSITIVE_KEYS`), and form bodies themselves are never included in AI payloads only summary fields like `cmd` / `doctype` reach the humanize-steps path.
+- **Sensitive SQL literals.** `password = '...'`, `api_key = '...'`, `token = '...'` and the 12 other patterns in `optimus.redaction.DEFAULT_SENSITIVE_SQL_COLUMNS` are replaced with `<REDACTED>` at capture time, so even the `example_queries` field sees the redacted form. Operators can extend this list via `sensitive_sql_columns` in Optimus Settings.
+- **HTTP form bodies.** `form_dict` keys matching `password` / `api_key` / `token` / etc. are redacted at capture (`optimus.redaction.DEFAULT_SENSITIVE_KEYS`) and form bodies themselves are never included in AI payloads only summary fields like `cmd` / `doctype` reach the humanize-steps path.
 - **Your API keys.** The provider API key is read from a Password field decrypted on demand (`frappe.utils.password.get_decrypted_password`). It is sent **only** in HTTP headers (`x-api-key` or `Authorization: Bearer …`), never echoed in the prompt, never logged, never returned to the client. The OpenAI-compatible provider with `needs_key=False` (local endpoints) omits the header entirely.
 - **Recording UUIDs.** Internal Redis keys.
 - **Your full DB schema.** Only tables observed in this profile's recordings are mentioned by name.
@@ -134,7 +134,7 @@ These items are **never** sent in any AI request body:
 | `Aerele` | Chat completions | `https://api.aerele.in/optimus/v1` | Yes | Managed service buy a fixed token pack up front. See § 10. |
 | `OpenAI-compatible` | Chat completions | (you set it) | No (configurable) | Use this for local LLMs and any other OpenAI-shaped server. |
 
-`ai_base_url`, `ai_model`, and `ai_api_key` (Password) all override the provider defaults. The HTTP timeout is `ai_request_timeout_seconds` (v0.9.0+, default 60s, clamped 10–600s).
+`ai_base_url`, `ai_model` and `ai_api_key` (Password) all override the provider defaults. The HTTP timeout is `ai_request_timeout_seconds` (v0.9.0+, default 60s, clamped 10–600s).
 
 For an explicit data-residency choice, use `OpenAI-compatible` pointed at a process you run yourself see § 6.
 
@@ -249,7 +249,7 @@ What this design protects against:
 
 What this design does **not** protect against:
 
-- **A compromised LLM provider.** If you're using Anthropic / OpenAI / a third-party, your finding context is at the mercy of their logging, retention, and abuse-monitoring policies. Read each provider's data-use policy.
+- **A compromised LLM provider.** If you're using Anthropic / OpenAI / a third-party, your finding context is at the mercy of their logging, retention and abuse-monitoring policies. Read each provider's data-use policy.
 - **On-disk caching by the LLM client.** Local servers (Ollama, LM Studio, vLLM) may log requests to disk depending on their flags. Check their docs and configure logging off if you're paranoid.
 - **Backups and audit logs.** The AI suggestion (the response text) is persisted to `Optimus Finding.llm_fix_json`. Your DB backups include it. If a fix suggestion contains a paraphrase of sensitive code/SQL, it'll be in those backups.
 - **The Optimus Telemetry Event DocType** (v0.8.0+). When telemetry is enabled, Optimus's own failures (including AI HTTP errors) are recorded with the provider name + endpoint label + status code but never with the prompt or the payload. See `optimus/telemetry.py`.
@@ -285,9 +285,9 @@ This means: if you're worried about a profile shared with a third party leaking 
 
 ## 10. Aerele Managed Provider (v0.14.x+)
 
-`Aerele` is a hosted option for customers who don't want to bring their own Anthropic / OpenAI key. The customer purchases a **fixed token pack** (e.g. "10,000 tokens for ₹X") up front; AI fix calls draw from that pack until it's exhausted, at which point the customer buys another pack. There is no subscription, no monthly reset, and no overage when the pack runs out, calls are refused until a new pack is purchased.
+`Aerele` is a hosted option for customers who don't want to bring their own Anthropic / OpenAI key. The customer purchases a **fixed token pack** (e.g. "10,000 tokens for ₹X") up front; AI fix calls draw from that pack until it's exhausted, at which point the customer buys another pack. There is no subscription, no monthly reset and no overage when the pack runs out, calls are refused until a new pack is purchased.
 
-**Architecturally the Optimus side is identical to the Anthropic / OpenAI / Kimi entries:** the operator picks `Aerele` as the provider, pastes the key Aerele issued into **API Key**, and every call hits Aerele's URL. There is no Optimus-side bookkeeping no balance cache, no pre-call gate, no Refresh button, no daily sync. **All token accounting and pack validation happens on Aerele's separate Frappe site** (the URL in the provider matrix above). The bench is a dumb client.
+**Architecturally the Optimus side is identical to the Anthropic / OpenAI / Kimi entries:** the operator picks `Aerele` as the provider, pastes the key Aerele issued into **API Key** and every call hits Aerele's URL. There is no Optimus-side bookkeeping no balance cache, no pre-call gate, no Refresh button, no daily sync. **All token accounting and pack validation happens on Aerele's separate Frappe site** (the URL in the provider matrix above). The bench is a dumb client.
 
 ### 10.1 Onboarding
 
@@ -303,7 +303,7 @@ That is the entire integration. `ai_base_url` and `ai_model` use Aerele's defaul
 
 The customer manages their pack entirely on `aerele.in`: sign-ups, purchases, remaining-balance display, usage history. Optimus never sees, displays, or caches the remaining balance. Each AI call is validated server-side on every request by Aerele's Frappe site; pack-exhausted and rate-limit refusals surface through `_http_post`'s existing 4xx handling with the response body's error text.
 
-When a pack runs out, the next AI fix attempt from Optimus surfaces Aerele's "pack exhausted purchase a new one" message as an inline `AiFixError` alert. The operator then visits aerele.in, buys another pack, and the existing API key automatically draws from the new pack no Optimus re-configuration needed.
+When a pack runs out, the next AI fix attempt from Optimus surfaces Aerele's "pack exhausted purchase a new one" message as an inline `AiFixError` alert. The operator then visits aerele.in, buys another pack and the existing API key automatically draws from the new pack no Optimus re-configuration needed.
 
 ### 10.3 What additionally leaves the host
 

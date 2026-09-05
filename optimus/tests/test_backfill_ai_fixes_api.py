@@ -69,7 +69,7 @@ def test_calls_ungated_backfill_core_with_no_cap():
 
 def test_supports_regenerate_all_passthrough():
 	src = _read_api_source()
-	# The `regenerate_all` flag is part of the signature, coerced, and
+	# The `regenerate_all` flag is part of the signature, coerced and
 	# plumbed straight through to _run_ai_backfill.
 	assert "def backfill_ai_fixes(session_uuid: str, regenerate_all=0)" in src
 	body = _fn_body("backfill_ai_fixes")

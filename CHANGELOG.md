@@ -8,15 +8,28 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.43] - 2026-09-05
+
+### Changed
+
+- **Remove the comma before "and" across the app.** Comments, docstrings, settings
+  help text, the report template, user-facing strings and Markdown docs now follow the
+  house style of no comma before "and": a list of three or more reads "a, b and c" and
+  a clause is no longer preceded by a comma before "and" where the sentence reads on
+  naturally. This is a pure style pass with no behaviour change; the MIT `license.txt`
+  is left untouched.
+
+---
+
 ## [0.12.42] - 2026-09-04
 
 ### Changed
 
 - **Remove em dashes across the app.** Comments, docstrings, settings help text, the
-  report template, and user-facing strings now use standard punctuation (a colon for
+  report template and user-facing strings now use standard punctuation (a colon for
   labels, headings and definitions; parentheses for a bracketed list) or simply drop
   the dash where the sentence reads on naturally. Cells that mean "no value" render
-  blank instead of a dash, and CHANGELOG release headers use the standard
+  blank instead of a dash and CHANGELOG release headers use the standard
   `## [x.y.z] - date` form. The renderer's own `_strip_em` routine, which strips em
   dashes from user-entered notes at render time, is unchanged.
 
@@ -29,7 +42,7 @@ versions may contain breaking changes see migration notes below).
 - **Exclusion-mode classification now uses the installed-apps allowlist as ground
   truth instead of guessing from a name.** For six review rounds the
   application-vs-library decision swung between an installed-apps *backstop* and a
-  pure hardcoded *denylist*, and each denylist tweak just relocated the bug: an app
+  pure hardcoded *denylist* and each denylist tweak just relocated the bug: an app
   literally named like a bundled library (`redis`, `requests`, `pandas`) was hidden
   as framework; an out-of-bench checkout or a library not on the list was
   misclassified; and the PR's own promise ("only installed apps are treated as
@@ -40,9 +53,9 @@ versions may contain breaking changes see migration notes below).
   call_tree's hot-frame leaderboard): a callsite whose app root is an installed
   Frappe app (and not a framework/stock app) is the developer's code; everything
   else the developer can't patch. This makes an installed app named `redis`
-  actionable, a real `redis` library non-actionable, and an *unknown* library
+  actionable, a real `redis` library non-actionable and an *unknown* library
   correctly non-actionable with no denylist to maintain. Framework apps
-  (`frappe`/`erpnext`/…) are still checked first, and Server Scripts stay
+  (`frappe`/`erpnext`/…) are still checked first and Server Scripts stay
   actionable via an explicit carve-out (so the allowlist can't demote them
   the regression that started this). Off-bench (frappe unavailable, e.g. the
   pure-Python unit suite) it falls back to the previous hardcoded heuristic, so
@@ -98,7 +111,7 @@ versions may contain breaking changes see migration notes below).
   `finally` **before** `frappe.recorder.dump()` (which runs later in the WSGI
   `ClosingIterator`, after the response), so the recorder hash wasn't written yet:
   the `hget` returned `None` and the resolved name was silently dropped (the
-  `isinstance` guard hid it, and the tests inject the field directly so CI stayed
+  `isinstance` guard hid it and the tests inject the field directly so CI stayed
   green). A stale code comment even asserted the opposite ordering. Rewrote it to
   write the resolved `{doctype, name}` to an **Optimus-owned sidecar key**
   (`redis_keys.resolved_doc`, mirroring the `infra` sidecar) and **merge it at
@@ -107,7 +120,7 @@ versions may contain breaking changes see migration notes below).
   comment. Added source-inspection regression guards
   (`TestResolvedDocSidecarWiring`) that close the coverage gap that let this ship
   green: the write must ride the sidecar and never re-introduce the recorder-hash
-  `hset`, and analyze must merge + clean it up.
+  `hset` and analyze must merge + clean it up.
 
 ---
 
@@ -166,7 +179,7 @@ versions may contain breaking changes see migration notes below).
   carve-out, an out-of-bench lib fallback, a shared `_is_third_party_path`), we
   restored `base.is_framework_callsite` and `call_tree._is_pure_helper_frame` /
   `_top_level_app` to `main`'s simpler substring-based classification: match
-  framework app names, `site-packages`, and a known-library list, else treat the
+  framework app names, `site-packages` and a known-library list, else treat the
   frame as the user's own code. Server Scripts are correctly actionable again by
   falling through to that default.
 
@@ -176,12 +189,12 @@ versions may contain breaking changes see migration notes below).
   too).** `is_framework_callsite` matched a `FRAMEWORK_APPS` name as a substring
   anywhere (`norm.startswith("crm/") or "/crm/" in norm`), so a user app's
   submodule named like a framework app (`mybiz/mybiz/crm/lead_utils.py`), the
-  standard `/home/frappe/…` server home, and `acme/acme/payments/…` were all
+  standard `/home/frappe/…` server home and `acme/acme/payments/…` were all
   demoted to non-actionable Observations. Now framework apps match on the
   **resolved app root** only (the boundary-anchored `apps/<app>/` segment via
   `_last_app_segment`, else the top segment) never mid-path plus a user-app
   guard so a vendored lib under `apps/<app>/…/requests/…` stays the user's code.
-  Real framework roots, `site-packages`, pyinstrument-stripped libs, and
+  Real framework roots, `site-packages`, pyinstrument-stripped libs and
   out-of-bench absolute lib paths still classify correctly. (One narrow residual:
   a lib vendored under a *pyinstrument-stripped* user path no `apps/` prefix
   is still substring-matched; rare and ambiguous.)
@@ -199,7 +212,7 @@ versions may contain breaking changes see migration notes below).
   (`_is_walker_plumbing_frame`) matched `<serverscript-` (trailing hyphen), but
   Frappe's `safe_exec` emits `<serverscript>` (bare) or `<serverscript>: <name>`:
   never the hyphenated form. So on live sites the carve-out never fired, Server
-  Script frames were treated as plumbing, and no Slow Hot Path / Hook Bottleneck /
+  Script frames were treated as plumbing and no Slow Hot Path / Hook Bottleneck /
   Slow Background Job finding ever surfaced inside a Server Script body (a
   long-standing bug; the Tracked-Apps work touched this line and a test using the
   obsolete `<serverscript-N>` shape masked it). Now matches the `<serverscript`
@@ -220,7 +233,7 @@ versions may contain breaking changes see migration notes below).
 
 - **Widened the third-party library list so N+1s inside common libraries are not
   blamed on the developer.** `main`'s classifier only shows a library frame as a
-  (non-actionable) Observation if the library is on a hardcoded list, and that
+  (non-actionable) Observation if the library is on a hardcoded list and that
   list was short so a query looping inside `pandas`, `redis`, `requests`,
   `numpy`, `jinja2`, `cryptography`, `psycopg2`, `boto3`, … was reported as an
   actionable user N+1 the developer can't fix. Expanded the library list
@@ -233,7 +246,7 @@ versions may contain breaking changes see migration notes below).
   framework and hide a real, fixable N+1. Out-of-bench absolute paths keep a
   segment-anywhere fallback (`/opt/pkgs/rq/…`). No backstop, no installed-apps
   lookup. Verified end-to-end: a `pandas`/`redis` loop renders as "Framework N+1 ·
-  Observation" while a Server Script, the user's own app, and a user module named
+  Observation" while a Server Script, the user's own app and a user module named
   like a library all stay actionable.
 
 - **Legacy N+1 backfill no longer mislabels a cumulative number as loop-scoped.**
@@ -255,9 +268,9 @@ versions may contain breaking changes see migration notes below).
   by one path while the same frame was dropped as framework plumbing by the other.
   The two hand-maintained denylists are now **one canonical
   `base.THIRD_PARTY_LIB_SEGMENTS`** (the union of both, matched identically on the
-  exact top path segment), and `is_framework_callsite` gained the same
+  exact top path segment) and `is_framework_callsite` gained the same
   installed-apps rescue call_tree has ordered after the framework-app check so
-  `frappe`/`erpnext` stay framework, and a no-op off-bench. An installed app named
+  `frappe`/`erpnext` stay framework and a no-op off-bench. An installed app named
   like a library (`babel`, `redis`) is still correctly treated as user code on
   both surfaces. Also corrects now-stale comments that described substring
   matching (the lists have matched exact top segments since 0.12.x).
@@ -314,7 +327,7 @@ versions may contain breaking changes see migration notes below).
   name the save assigned (from the response) and stashes it on the recording
   (`resolved_target_doc`); the renderer replaces the placeholder with it. Only
   new-doc saves in an active session write it, it rides on the recording (no new
-  Redis key), and old sessions gracefully fall back to the placeholder. Note:
+  Redis key) and old sessions gracefully fall back to the placeholder. Note:
   this real name shows in **both** reports consistent with submit/cancel, which
   already did; ask if you want document names redacted from the Safe report.
 
@@ -361,13 +374,13 @@ versions may contain breaking changes see migration notes below).
   code.** 0.12.30 routed the TL;DR hero on `impact_scope_label`, a field absent
   from sessions analyzed before it shipped so a legacy user N+1 fell into the
   framework branch on **Regenerate reports**. The hero now routes on the stable
-  `finding_type` (present on every finding), and the card backfills
+  `finding_type` (present on every finding) and the card backfills
   `impact_scope_label` from it, so hero and card agree on legacy re-renders.
 - **App-path classification misread several bench layouts.** The `apps/` marker
   is now matched only at a path boundary and on the **last** `apps/` segment, so
   a bench installed under an `apps`-containing directory (`/opt/apps/…`) still
   resolves the real app (core framework code is no longer flagged as user code),
-  an app whose name ends in `apps` (`webapps`) isn't dropped, and a tracked app
+  an app whose name ends in `apps` (`webapps`) isn't dropped and a tracked app
   with such a name is still recognised. A third-party lib in an app-local venv
   (`apps/<app>/.venv/…/site-packages/…`) is classified before the user-app check
   so it stays library code, while a directory vendored under a user app and named
@@ -576,7 +589,7 @@ plan cleanup vs. let-them-age-out without waiting for per-read
 The sweep depends on a live `frappe.cache.get_redis_connection` +
 `frappe.cache.scan` + per-key `frappe.cache.get_value` pipeline.
 Mocking that pipeline in pure-pytest is fragile (the conftest's
-`SimpleNamespace` stub lacks `get_redis_connection`, and
+`SimpleNamespace` stub lacks `get_redis_connection` and
 `mock.patch.object` replacements don't survive cross-test isolation
 in the full suite when other tests have left state behind). The
 integration suite (`tests_integration/`) is the right place for the
@@ -1050,7 +1063,7 @@ shape would need per-value migrators).
 
 - **NEW `janitor._sweep_schema_drift()`**: pure-function sweep that
   reads the sentinel via `read_schema_sentinel`, compares against
-  `SCHEMA_VERSION`, and on real drift:
+  `SCHEMA_VERSION` and on real drift:
   - Writes the current sentinel via `write_schema_sentinel` so the
     NEXT sweep sees the new value (single emit per drift).
   - Emits one `janitor.schema_sentinel_drift` telemetry event with
@@ -1815,7 +1828,7 @@ self-contained cluster as flagged in the README's coupling table.
 - The new submodule carries a local copy of the tiny `_e` HTML-escape
   helper (4 lines) rather than importing `_internal._e`. Avoids a
   circular import: `_internal.py` re-imports the call-tree names so
-  call sites resolve unchanged, and importing back from `_internal`
+  call sites resolve unchanged and importing back from `_internal`
   would close the cycle.
 - The standard `from optimus.renderer.call_tree_renderer import …`
   block lives at the top of `_internal.py` (right after the
@@ -1872,7 +1885,7 @@ terminal-state filter is correct.
 - **NEW `optimus/tests_integration/test_janitor_sweeps_actually_delete.py`**
   (~250 LOC, 4 tests). Each test seeds an Optimus Session with a
   controlled `started_at` + status, calls
-  `janitor.sweep_old_sessions()`, and asserts the post-sweep state.
+  `janitor.sweep_old_sessions()` and asserts the post-sweep state.
   `tearDown` tracks every UUID created so anything the sweep DIDN'T
   delete (negative controls) gets wiped:
   - `test_sweep_deletes_session_older_than_retention`: the canary.
@@ -1955,7 +1968,7 @@ file after Frappe's `file_manager` writes it.
 - **NEW `optimus/tests_integration/test_safe_report_self_contained_on_real_bench.py`**
   (~200 LOC, 3 tests). Each test creates a minimal synthetic Optimus
   Session, calls `api.regenerate_reports(uuid)`, reads
-  `raw_report_file` via the File doc, and asserts:
+  `raw_report_file` via the File doc and asserts:
   - `test_on_disk_report_has_no_remote_resource_urls`: mirrors the
     unit-suite canary at the integration boundary: no `src=https?:`,
     no `<link href=https?:`, no `@import`, no `url(http`. Includes
@@ -2025,7 +2038,7 @@ path live.
 - **NEW `optimus/tests_integration/test_phase2_tool_orphan_recovery.py`**
   (~210 LOC, 4 tests). Each test manipulates `sys.monitoring` tool 2
   state directly (via `use_tool_id` / `set_events` / `free_tool_id`),
-  invokes `optimus._startup_probe_tool2()`, and asserts the
+  invokes `optimus._startup_probe_tool2()` and asserts the
   post-probe state. `setUp` + `tearDown` hard-reset tool 2 to free
   so a leak from one test cannot poison the rest of the suite.
   - `test_probe_reclaims_leaked_line_profiler_tool_2_on_simulated_worker_respawn`
@@ -2143,7 +2156,7 @@ This integration test fills that gap.
   - `test_regenerate_byte_diff_when_session_field_changes`: the
     canary's complement. Render once, snapshot. Mutate `title` via
     `frappe.db.set_value`. Render again, snapshot. The two HTMLs
-    must DIFFER, and the new title must appear in HTML 2 but not
+    must DIFFER and the new title must appear in HTML 2 but not
     HTML 1. Catches silent caching.
   - `test_regenerate_works_on_failed_status_session`: sets
     `status="Failed"`, calls regenerate, asserts it succeeds +
@@ -2243,7 +2256,7 @@ That gap is what this integration test fills.
     after the refusal raises, `telemetry.flush()` lands exactly one
     row in `Optimus Telemetry Event` with
     `event_name="ai.fix_call_refused_by_exclusion"`,
-    `severity="warning"`, and `last_context` mentioning the
+    `severity="warning"` and `last_context` mentioning the
     refused finding type.
   - `test_exclusion_is_case_sensitive_at_api_boundary`: exclusion
     = "slow query" (lowercase), finding type = "Slow Query"
@@ -2333,15 +2346,15 @@ ticked.**
 
 The v0.8.0 release (`5529cde`) shipped opt-in failure telemetry: a
 bounded in-process deque, a scheduled `flush()`, the `Optimus Telemetry
-Event` DocType, a JSONL sink, and signature-based dedup. The
+Event` DocType, a JSONL sink and signature-based dedup. The
 unit-suite tests (`optimus/tests/test_telemetry.py`) cover the emit
 hot path, the bounded deque, signature dedup, path/context scrub,
-settings clamps, and `flush()` against a **mocked** `frappe.db.sql`.
+settings clamps and `flush()` against a **mocked** `frappe.db.sql`.
 What they can't prove: that `flush()` actually writes a row that lands
 in `tabOptimus Telemetry Event` with the right shape, that the
 DocType's deterministic `name` (sha1 of `event_name|signature`) enforces
 the upsert correctly, that toggling `telemetry_enabled` via the live
-Settings doc invalidates the cached config, and that the PII-scrubbed
+Settings doc invalidates the cached config and that the PII-scrubbed
 traceback round-trips through MariaDB unchanged. That gap is what this
 integration test fills.
 
@@ -2618,7 +2631,7 @@ lines.
   asserts every `frappe.log_error(` line has a `telemetry.emit_failure(`
   call within 16 lines after. Excludes `tests/`, `tests_integration/`,
   `patches/`, `renderer/_internal.py` (deferred per the renderer-split
-  roadmap), and `telemetry.py` itself (its sink-failure handler can't
+  roadmap) and `telemetry.py` itself (its sink-failure handler can't
   recurse into emit). Lists orphans with file:line on failure so a new
   contributor knows exactly where to add the emit. The audit is the
   v0.11.1 contract from this PR forward, drift is mechanically caught.
@@ -2737,7 +2750,7 @@ each become a small follow-up PR using this harness.
   bench against MariaDB 10.6 + two Redis service containers; runs the
   integration suite via `bench run-tests --app optimus --module …`.
   Triggers on PRs to `main`, push to `main`, scheduled daily at 04:00
-  UTC, and manual dispatch. Job timeout 25 minutes (expected wall-clock
+  UTC and manual dispatch. Job timeout 25 minutes (expected wall-clock
   ~10-15 minutes cold, ~6-8 minutes with pip + yarn caches warm). Logs
   for both the test runs + the bench's own logs are uploaded as the
   `integration-logs` artifact on failure (14-day retention). No secrets
@@ -2771,7 +2784,7 @@ each become a small follow-up PR using this harness.
   populated post-analyze. This is the canonical regression canary for
   the integration layer.
 - **NEW `tests_integration/README.md`**: harness documentation, the
-  "no flakiness" rule (quarantine in 24 h, never retry-on-failure), and
+  "no flakiness" rule (quarantine in 24 h, never retry-on-failure) and
   the seven-row extraction roadmap for follow-up PRs.
 
 ### Modified
@@ -2847,7 +2860,7 @@ shim in `__init__.py` walks `dir(_internal)` and re-exports every
 non-dunder name (including underscore-prefixed internals), so every
 existing `from optimus.renderer import X` and `optimus.renderer.X` call
 site continues to work unchanged `analyze.py`, `api.py`, the test
-suite, and any third-party fork stay on the contract.
+suite and any third-party fork stay on the contract.
 
 ### Extracted modules (~538 LOC moved)
 
@@ -2877,14 +2890,14 @@ suite, and any third-party fork stay on the contract.
   have passed every existing test and quietly broken the (frozen)
   template's CSS. The new test renders a synthetic fixture through
   `render_raw()`, computes a structural fingerprint (section IDs + CSS
-  class multiset + per-tag count), and compares against
+  class multiset + per-tag count) and compares against
   `optimus/tests/fixtures/renderer_structure.json`. Regenerate via
   `REGENERATE_RENDERER_SNAPSHOT=1 pytest`. 14 tests total, including
   enumerated public-API resolution checks for the 10 named symbols that
   matter to external callers.
 - **NEW `optimus/renderer/README.md`**: the future-author roadmap: why
   the package exists, the 5-step extraction recipe, the structural
-  snapshot's role, the public-API stability promise, and the 5-cluster
+  snapshot's role, the public-API stability promise and the 5-cluster
   follow-up table with coupling estimates.
 
 ### Code
@@ -2918,7 +2931,7 @@ suite, and any third-party fork stay on the contract.
 
 - 14 new pure-pytest tests in `test_renderer_structure_snapshot.py`:
   fingerprint match, self-containment invariant, section minimum,
-  public-API resolution (10 named symbols), and a circular-import
+  public-API resolution (10 named symbols) and a circular-import
   defense. Full suite **1810 passing + 1 skipped** (1796 → 1810).
 
 ---
@@ -2928,9 +2941,9 @@ suite, and any third-party fork stay on the contract.
 **AI privacy hardening Critical Risk #2 of the architecture review.**
 
 When AI fix suggestions are enabled, Optimus sends source code, normalized
-and raw SQL (including table/column names and EXPLAIN output), and action
+and raw SQL (including table/column names and EXPLAIN output) and action
 labels to the configured LLM provider. The pre-v0.9.0 controls were the
-master switch (`ai_enabled`), the batch toggle (`ai_auto_suggest`), and the
+master switch (`ai_enabled`), the batch toggle (`ai_auto_suggest`) and the
 per-pathway hard-off toggles fine-grained enough to disable AI entirely
 but with no opt-out short of that for an operator who wanted to keep
 specific *categories* of finding off the wire.
@@ -2991,7 +3004,7 @@ This release adds three pieces, all additive:
 
 - 12 new pure-pytest tests in `test_ai_privacy.py`: exclusion parsing,
   exclusion application, on-demand refusal, timeout resolution + clamp,
-  settings floor, and a doc-staleness check that compares the doc's
+  settings floor and a doc-staleness check that compares the doc's
   eligible-types list against `AI_ELIGIBLE_FINDING_TYPES` byte-for-line.
 
 ### Deferred
@@ -3038,7 +3051,7 @@ a follow-up release.
   via deterministic row name from `(event_name, signature)` enables atomic
   `INSERT … ON DUPLICATE KEY UPDATE` so multi-worker flushes converge.
 - 15 high-leverage migration sites in `__init__.py`, `hooks_callbacks.py`,
-  `line_profile/hooks.py`, `analyze.py`, and `ai_fix.py`. Telemetry is
+  `line_profile/hooks.py`, `analyze.py` and `ai_fix.py`. Telemetry is
   **additive** to the existing `frappe.log_error` calls Error Log
   visibility is unchanged; misconfigured telemetry cannot regress it.
 - Optimus Settings: new Telemetry tab with five additive fields
@@ -3064,7 +3077,7 @@ a follow-up release.
 ### Engineering
 
 - 33 new pure-pytest tests covering emit hot path, signature dedup, path
-  scrub, context cap, flush sink wiring, settings clamp, and janitor
+  scrub, context cap, flush sink wiring, settings clamp and janitor
   retention. Suite total now 1777 passing + 1 skipped.
 
 ---
@@ -3074,14 +3087,14 @@ a follow-up release.
 **The rename release.** The app rebrands from `frappe_profiler` →
 `optimus`, end-to-end: the Python package, the GitHub repo, every
 DocType, the auto-installed Role, the realtime channels, the
-`X-Profiler-Recording-Id` HTTP correlation header, and every
+`X-Profiler-Recording-Id` HTTP correlation header and every
 user-facing string in the report HTML and floating widget.
 
 Also bundles the v0.6.x development cycle that shipped to the main
 branch since v0.5.2: line-profile Phase 2 drilldown, the audit-response
 patches (DocType title-case, redundant-cache threshold bump, hidden
 framework-tables default, safe-mode field deletions, AI fix fields
-revamp), and the per-finding drill-down chain that walks pyinstrument
+revamp) and the per-finding drill-down chain that walks pyinstrument
 trees down to the first signal-floor leaf.
 
 ### Install
@@ -3090,7 +3103,7 @@ trees down to the first signal-floor leaf.
 `frappe_profiler` install is supported. The 0.7.0 rename moves the
 package directory, renames every DocType / Role / realtime channel /
 HTTP header / `frappe.local.profiler_*` attribute / `frappe.conf
-.get("profiler_*")` key, and changes the `tabModule Def` row name
+.get("profiler_*")` key and changes the `tabModule Def` row name
 an in-place upgrade would need a substantial migration patch set,
 which is intentionally out of scope for the 0.7.0 release.
 
@@ -3157,10 +3170,10 @@ bench --site <yoursite> install-app optimus
 
 The "architect review" release. After v0.5.0 landed on the branch, we
 did seven back-to-back architect-review passes over the entire diff
-looking for production bugs, false positives, and bad UX. Each pass
+looking for production bugs, false positives and bad UX. Each pass
 found 2–3 real issues of a different class surface bugs, tests
 mirroring broken production code, end-to-end error path regressions,
-HTTP-layer integration gaps, inconsistent helper adoption, and
+HTTP-layer integration gaps, inconsistent helper adoption and
 schema-field typos. This release bundles all of those fixes plus the
 user-reported widget bugs that surfaced during manual smoke testing
 against a real site. Zero new features entirely product quality
@@ -3190,7 +3203,7 @@ and correctness work.
   through everything else. A custom filter key added by a third-party
   app would silently leak PII in Safe mode. v0.5.1 redacts every
   query-string value by default and whitelists only schema refs,
-  pagination, sort flags, and format hints (`doctype`, `limit`,
+  pagination, sort flags and format hints (`doctype`, `limit`,
   `order_by`, `as_dict`, etc.). Unknown keys now redact, which is
   the safe direction.
 
@@ -3217,7 +3230,7 @@ and correctness work.
   `X-Optimus-Recording-Id` whenever `frappe.local._recorder` had a
   `.uuid`: which is true any time the standalone Frappe Recorder UI
   is running, even for users who have no profiler session. The header
-  was leaking onto every recorded response site-wide, and
+  was leaking onto every recorded response site-wide and
   `optimus_frontend.js` was buffering XHRs tagged to a recording
   that no session could claim. Now gated on
   `frappe.local.optimus_session_id` which is only set by our own
@@ -3252,13 +3265,13 @@ matching.
   doctype. The real field is `analyzer_warnings` (plural). On
   scheduler-disabled sites with ≥51 recordings, clicking Stop
   crashed with MariaDB `Unknown column 'analyze_error' in 'field
-  list'`, the stop API returned 500, and the widget stranded the
+  list'`, the stop API returned 500 and the widget stranded the
   user on Stopping→Analyzing→hang-forever. Fixed by writing to the
   real field, with a test that explicitly asserts the payload dict
   contains `analyzer_warnings` AND does NOT contain `analyze_error`.
 
 - **Inline analyze failure path stranded the widget.** `analyze.run`
-  catches its own exceptions, marks the session Failed, and
+  catches its own exceptions, marks the session Failed and
   re-raises. When analyze ran inline via `frappe.enqueue(now=True)`,
   the re-raise propagated all the way up through `_enqueue_analyze`
   → `_stop_session` → `stop()` → the client. The widget's error
@@ -3275,7 +3288,7 @@ matching.
 - **`submit_frontend_metrics` had a GET-merge-SET race.** Two
   concurrent submits (stop-time `frappe.call` racing a `beforeunload`
   sendBeacon) could both read the same existing blob, both compute
-  a merged result, and both write losing one submission's data.
+  a merged result and both write losing one submission's data.
   v0.5.1 switched to two atomic Redis lists per session
   (`profiler:frontend:<uuid>:xhr` and `:vitals`) written via RPUSH +
   LTRIM. Each submit appends its entries atomically; LTRIM enforces
@@ -3289,7 +3302,7 @@ matching.
   signature is `submit_frontend_metrics(payload: str)`, which works
   fine for the stop-time `frappe.call` path (sends `args:{payload: body}`
   via form encoding). But sendBeacon sends the raw JSON body as
-  `application/json`, and Frappe's request handler parses JSON
+  `application/json` and Frappe's request handler parses JSON
   bodies and flattens their top-level keys into `form_dict` as
   kwargs. So the server was being called with
   `submit_frontend_metrics(session_uuid=..., xhr=..., vitals=...)`:
@@ -3310,7 +3323,7 @@ matching.
   does NOT check whether an index already exists. Every Frappe
   session would likely produce false positives for pre-indexed
   columns: primary keys (`name`), framework columns (`parent`,
-  `owner`, `modified`, `creation`), and any Link/Data field with
+  `owner`, `modified`, `creation`) and any Link/Data field with
   `search_index: 1`. v0.5.1 verifies each suggestion against
   `information_schema` before emitting:
 
@@ -3393,7 +3406,7 @@ matching.
   compounding causes:
 
   1. **Cache buster inertia.** The `app_include_js` cache-buster
-     uses `?v={__version__}`, and `__version__` stayed at `0.5.0`
+     uses `?v={__version__}` and `__version__` stayed at `0.5.0`
      through a lot of JS edits. Browsers that loaded Desk once
      early in testing served cached JS from that first visit,
      invisible to every subsequent fix. v0.5.1 bumps to `0.5.1`
@@ -3435,12 +3448,12 @@ matching.
   conflict, server exception made `frappe.call` silently skip
   the success callback and do nothing. Dialog closed, widget
   stayed inactive, no feedback. v0.5.1 adds an error handler that
-  surfaces a red toast with actionable text, and the success path
+  surfaces a red toast with actionable text and the success path
   also surfaces an orange toast if the response came back without
   a `session_uuid` (unexpected 200).
 
 - **Diagnostic logging added.** `confirmAndStop` now logs at entry,
-  in the success callback (with the full response dict), and in
+  in the success callback (with the full response dict) and in
   the error callback (with the full error object). Log lines use
   the `[optimus]` prefix so they're easy to filter in
   devtools. Makes future "widget doesn't work" reports debuggable
@@ -3465,7 +3478,7 @@ matching.
   `_stop_session`, so `retry_analyze` (and, in theory, the janitor
   auto-stop path) didn't get the protection. v0.5.1 moves the cap
   check inside `_enqueue_analyze` so every caller gets it
-  uniformly, and consolidates what was a duplicate
+  uniformly and consolidates what was a duplicate
   `is_scheduler_disabled()` call in `_stop_session` + `_enqueue_analyze`
   into a single call path.
 
@@ -3510,7 +3523,7 @@ matching.
   `context.frontend_data` load would be caught. Added
   `test_analyze_run_v5_wiring.py` with 5 source-inspection
   guards covering imports, analyzer list membership, context
-  loading, per-recording infra attachment, and `_persist`
+  loading, per-recording infra attachment and `_persist`
   aggregate serialization.
 
 ### Changed
@@ -3581,10 +3594,10 @@ is needed.
 
 The "Is it my code or my server?" release. Closes two competitive gaps
 with other profilers: there's no way to tell *code-slow* from
-*server-slow*, and there's no way to tell *backend-slow* from
+*server-slow* and there's no way to tell *backend-slow* from
 *network-slow* or *page-paint-slow*. v0.5.0 captures the server-side
 resource state at every action boundary and the browser-side transport
-timing for every XHR, joins them to the matching recording, and
+timing for every XHR, joins them to the matching recording and
 renders them as two new report panels alongside the existing findings.
 Also bundles a scheduler-disabled safety fix that affected v0.4.0 and
 earlier.
@@ -3593,7 +3606,7 @@ earlier.
 
 - **Server infrastructure capture**: new `infra_capture.py` module
   snapshots CPU, worker RSS, system memory, swap, load average, MariaDB
-  thread counts and slow-query counter, Redis ops/sec, and RQ queue
+  thread counts and slow-query counter, Redis ops/sec and RQ queue
   depths at the start and end of every recorded action. Balanced tier
   (14 metrics, ~0.8ms per snapshot). Runs in-line on the request path
   no background sampler thread. Every source is wrapped in its own
@@ -3641,7 +3654,7 @@ earlier.
 - **`frontend_timings` analyzer**: joins XHR timings to Profiler
   Actions by recording UUID, dedupes multi-fire LCP per page (last
   value before next navigation, matching the Web Vitals library
-  convention), and emits three finding types:
+  convention) and emits three finding types:
   - **Slow Frontend Render**: LCP > 2500ms → Medium, > 4000ms → High.
   - **Network Overhead**: `xhr_duration - backend_duration > 500ms`
     AND `> backend * 1.5`. The multiplier is the key insight: a 500ms
@@ -3657,7 +3670,7 @@ earlier.
   `frontend_xhr_matched`, `frontend_vitals_by_page`, `frontend_orphans`,
   and `frontend_summary` aggregates from `frontend_timings`. Per-action
   XHR table with backend/browser/network-delta/status/size columns,
-  Web Vitals table by page (FCP, LCP, CLS, TTFB, DCL), and a
+  Web Vitals table by page (FCP, LCP, CLS, TTFB, DCL) and a
   collapsed orphans section for diagnostic use (hidden entirely in
   Safe mode).
 - **`_safe_url` helper in `renderer.py`**: strips docname segments
@@ -3712,7 +3725,7 @@ earlier.
 
 - **Scheduler-aware `_enqueue_analyze` fallback (also fixes a latent
   v0.4.x bug).** When `bench disable-scheduler` is in effect
-  common on dev, demo, and Frappe Cloud trial instances no
+  common on dev, demo and Frappe Cloud trial instances no
   `bench worker` process consumes the RQ queue on many deployments,
   so an enqueued analyze job would sit forever and the session would
   hang in the **"Stopping"** state. v0.5.0 detects
@@ -3849,7 +3862,7 @@ handoff workflow is faster and the report is more actionable.
 - **Session comparison / baseline pinning**: pin any Ready session as
   the baseline for its label. Subsequent recordings with the same label
   auto-render three comparison sections in the safe + raw reports:
-  session-level delta, per-action diff, and finding-level diff
+  session-level delta, per-action diff and finding-level diff
   (fixed / new / unchanged buckets). Lets the dev shop prove "the fix
   worked" by recording a before/after.
 - **`Pin as baseline` and `Compare with...` buttons** on the Profiler
@@ -3901,7 +3914,7 @@ handoff workflow is faster and the report is more actionable.
 ### Changed
 
 - **No changes to the v0.3.0 capture or analyze pipelines.**
-  `capture.py`, `hooks_callbacks.py`, `analyze.py`, and the analyzer
+  `capture.py`, `hooks_callbacks.py`, `analyze.py` and the analyzer
   modules are frozen for this release.
 - **`api.start(label, ...)` accepts the same kwargs as v0.3.0**:
   `capture_python_tree` is unchanged. The new auto-inheritance of
@@ -3936,7 +3949,7 @@ comparison sections in their safe + raw reports.
 Adds a Python call tree capture and analysis layer on top of the existing
 SQL-only profiler. Customers reading a safe report now see where their
 flow spent time across SQL **and** Python, with hot-path detection,
-hook bottleneck findings, and redundant-call detection. See
+hook bottleneck findings and redundant-call detection. See
 `apps/frappe_profiler_design/specs/2026-04-13-call-tree-and-redundant-calls-design.md`
 for the full design spec.
 
@@ -4007,7 +4020,7 @@ for the full design spec.
 - **Per-flow recording overhead** climbs from "10–30% per query" to
   roughly "1.5–2× wall clock during recording" when `capture_python_tree=True`.
   Non-recording users on the same site are still unaffected the
-  activation gate is per-user, and the wraps' hot-path check is a single
+  activation gate is per-user and the wraps' hot-path check is a single
   attribute lookup with **<100ns overhead** measured against an unwrapped
   baseline.
 - **`health()` `last_24h.analyze_avg_ms`** will rise after this ships.
@@ -4064,7 +4077,7 @@ To opt out of the new pyinstrument capture per-session, uncheck
 ## [0.2.0] - 2026-04-09
 
 Round 2 improvements. 28 items across correctness, operations, UX,
-extensibility, and housekeeping. See
+extensibility and housekeeping. See
 `apps/frappe_profiler_design/ARCHITECTURE.md` for the full design rationale.
 
 ### Added
@@ -4099,7 +4112,7 @@ extensibility, and housekeeping. See
 - **Sensitive-field redactor**: raw report now redacts known-sensitive
   fields from headers and form_dict before rendering. Redacts: password,
   secret, token, api_key, authorization, cookie, csrf, otp, card_number,
-  cvv, ssn, aadhar, pan_number, and similar. Defense-in-depth against
+  cvv, ssn, aadhar, pan_number and similar. Defense-in-depth against
   download-and-share leaks.
 - **Session TTL refresh on activity**: long flows (45+ minutes) no
   longer silently stop at the 10-minute TTL. Every
@@ -4181,7 +4194,7 @@ extensibility, and housekeeping. See
   n_plus_one (with callsite attribution assertions), explain_flags (all
   4 red flags including the new filtered check), index_suggestions (with
   `monkeypatch` for `_optimize_query`), table_breakdown, the enqueue
-  patch (idempotency + session id injection), and frontend asset smoke
+  patch (idempotency + session id injection) and frontend asset smoke
   tests (JS syntax + content assertions). All 67 tests pass in < 1s.
 - **Shared `SEVERITY_ORDER` and `walk_callsite`**: moved from
   per-module copies to `analyzers/base.py`.

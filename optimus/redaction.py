@@ -8,7 +8,7 @@ Two responsibilities:
   * :func:`redact_sensitive`: walks a dict / list and replaces values
     under keys whose name contains a sensitive substring
     (``password``, ``api_key``, ``token``, …) with ``"<REDACTED:keyname>"``.
-    Used for ``form_dict``, ``headers``, and any nested envelope.
+    Used for ``form_dict``, ``headers`` and any nested envelope.
 
   * :func:`redact_sql_literals`: replaces literal RHS values in
     ``<sensitive_column> = '...'`` SQL comparisons with ``'<REDACTED>'``.

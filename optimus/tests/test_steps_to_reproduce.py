@@ -5,7 +5,7 @@
 
 The v0.5.0 design upgrades the existing `notes` field on Profiler
 Session from plain Text to Text Editor so users can include rich
-"what did you do during this session" context, and renders it at
+"what did you do during this session" context and renders it at
 the top of the report above findings.
 """
 
@@ -502,7 +502,7 @@ def test_auto_notes_real_user_sequence_reads_naturally():
 	]
 	html_out = _build_auto_notes_html(recordings)
 
-	# The whole story shows up in order, and reads like English.
+	# The whole story shows up in order and reads like English.
 	for expected in (
 		"Search Item",
 		"Open Customer CUST-001",
@@ -548,7 +548,7 @@ def test_start_dialog_no_longer_asks_for_notes():
 # --------------------------------------------------------------------------
 
 def test_actions_for_humanizer_compacts_recordings():
-	"""_actions_for_humanizer should drop noise, cap, and emit the
+	"""_actions_for_humanizer should drop noise, cap and emit the
 	compact {label, cmd, path, method, doctype, duration_ms} dicts the
 	humanizer prompt expects."""
 	from optimus.analyze import _actions_for_humanizer

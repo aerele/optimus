@@ -7,7 +7,7 @@ resolve free-form dotted paths typed by the customer.
 The picker has two responsibilities:
 
 1. **Curated list**: walk the pyinstrument call trees attached to phase-1
-   actions, aggregate Python frames by dotted path, and return the top-N
+   actions, aggregate Python frames by dotted path and return the top-N
    candidates with cumulative_ms + hit_count + app + framework-membership
    metadata. The form UI uses this for its multi-select.
 
@@ -50,7 +50,7 @@ class PickerError(Exception):
 
 
 def _is_synthetic_frame(function: str) -> bool:
-	"""pyinstrument synthesizes nodes for ``<root>``, ``<sql>``, and
+	"""pyinstrument synthesizes nodes for ``<root>``, ``<sql>`` and
 	bracketed pseudo-frames like ``[finalize]``. None of these are real
 	Python functions and they cannot be line-profiled."""
 	if not function:
@@ -90,7 +90,7 @@ def _derive_module_path(filename: str) -> str:
 	which is ``os.path.relpath(file, <a sys.path entry>)``: on some
 	benches that yields leading ``../`` segments. Those are relative-path
 	artifacts, NOT module components: left in, ``".".join`` turns ``..``
-	into a leading dot (``"...pkg"``), and the curated pick then tries to
+	into a leading dot (``"...pkg"``) and the curated pick then tries to
 	resolve as a broken relative import. So drop ``.`` / ``..`` segments
 	(and empties) up front.
 	"""
@@ -399,7 +399,7 @@ def _find_hottest_match(call_trees: list[dict], target_dotted_path: str) -> dict
 def _eligible_descent_children(node: dict, min_ms: float) -> list[dict]:
 	"""Filter a node's children to those eligible for hot-chain descent.
 	Drops synthetic frames, non-Python frames, pure-helper / ORM /
-	wrapper boundaries (so the chain ends at framework code), and frames
+	wrapper boundaries (so the chain ends at framework code) and frames
 	below the ms floor.
 	"""
 	out = []
@@ -582,7 +582,7 @@ def resolve_freeform(dotted_path: str) -> dict:
 	editable-installed apps (``import erpnext`` is the inner package). But
 	some apps are importable only with the doubled prefix ``<app>.<app>.x``
 	e.g. where ``import <app>`` yields the OUTER ``apps/<app>/`` dir. Try
-	the path as given, then retry once with the app name doubled, and only
+	the path as given, then retry once with the app name doubled and only
 	then surface the original (single-prefix) error.
 	"""
 	try:
@@ -669,7 +669,7 @@ def _resolve_freeform_exact(dotted_path: str) -> dict:
 			resolved_qualname_parts.append(attr)
 		except AttributeError:
 			# Try class-method search ONLY for the very next attribute on
-			# a fresh module, and only when there's exactly one matching
+			# a fresh module and only when there's exactly one matching
 			# class anything else is too ambiguous to pick automatically
 			# and the user should use the freeform textbox to disambiguate.
 			if idx == 0 and len(remaining) == 1:

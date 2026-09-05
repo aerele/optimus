@@ -185,7 +185,7 @@
   {
    "fieldname": "redaction_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Optimus redacts <b>sensitive values at capture time</b> passwords, API keys, tokens, CSRF, cookies, and authorization headers never reach Redis or the persisted report. Defaults cover 12 canonical patterns. Add domain-specific names below (one per line) to extend redaction; defaults are <b>never removed</b>. Substring match, case-insensitive. Lines starting with <code>#</code> are comments.</p>"
+   "options": "<p class=\"text-muted small\">Optimus redacts <b>sensitive values at capture time</b> passwords, API keys, tokens, CSRF, cookies and authorization headers never reach Redis or the persisted report. Defaults cover 12 canonical patterns. Add domain-specific names below (one per line) to extend redaction; defaults are <b>never removed</b>. Substring match, case-insensitive. Lines starting with <code>#</code> are comments.</p>"
   },
   {
    "fieldname": "sensitive_sql_columns",
@@ -237,7 +237,7 @@
   },
   {
    "default": "1",
-   "description": "When checked, the \"Time spent per database table\" section in the report drops Frappe schema/meta tables (tabDocType, tabDocField, tabSingles, tabPatch Log, tabWorkspace, tabRole, tabDocType Link/Action/State, …), framework-internal tables (tabHas Role, tabDefaultValue, tabUser Social Login, tabUser Role Profile, tabBlock Module, tabUser Email), and information_schema.* touched by every request via framework machinery, not user-actionable. A small \"(N tables hidden)\" note replaces them. Other sections (top-queries leaderboard, per-action drill-down, full recordings) are unaffected. Uncheck to see them all.",
+   "description": "When checked, the \"Time spent per database table\" section in the report drops Frappe schema/meta tables (tabDocType, tabDocField, tabSingles, tabPatch Log, tabWorkspace, tabRole, tabDocType Link/Action/State, …), framework-internal tables (tabHas Role, tabDefaultValue, tabUser Social Login, tabUser Role Profile, tabBlock Module, tabUser Email) and information_schema.* touched by every request via framework machinery, not user-actionable. A small \"(N tables hidden)\" note replaces them. Other sections (top-queries leaderboard, per-action drill-down, full recordings) are unaffected. Uncheck to see them all.",
    "fieldname": "hide_framework_tables",
    "fieldtype": "Check",
    "label": "Hide framework / internal database tables in the breakdown"
@@ -296,7 +296,7 @@
   {
    "fieldname": "sensitivity_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Pick a preset to set every tunable threshold across Optimus in one move analyzer thresholds (the original nine), capture knobs (max queries / sampler interval / background-job wait), retention, display filters, Phase-2 defaults, and the AI auto-suggest cap. <b>Strict</b> catches more (more findings, more noise) and keeps data longer; <b>Relaxed</b> catches less and prunes faster; <b>Recommended</b> is the shipped default and automatically tracks future tuning. Choose <b>Custom</b> to edit the individual fields yourself they stay locked under the named presets.</p>"
+   "options": "<p class=\"text-muted small\">Pick a preset to set every tunable threshold across Optimus in one move analyzer thresholds (the original nine), capture knobs (max queries / sampler interval / background-job wait), retention, display filters, Phase-2 defaults and the AI auto-suggest cap. <b>Strict</b> catches more (more findings, more noise) and keeps data longer; <b>Relaxed</b> catches less and prunes faster; <b>Recommended</b> is the shipped default and automatically tracks future tuning. Choose <b>Custom</b> to edit the individual fields yourself they stay locked under the named presets.</p>"
   },
   {
    "default": "Recommended",
@@ -314,7 +314,7 @@
   {
    "fieldname": "thresholds_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">How many identical calls from the same callsite qualify as a <b>Redundant Call</b> finding, and how many identical queries from the same callsite qualify as an <b>N+1</b> finding. Lower = more sensitive = more findings; higher = fewer findings but less noise.</p>"
+   "options": "<p class=\"text-muted small\">How many identical calls from the same callsite qualify as a <b>Redundant Call</b> finding and how many identical queries from the same callsite qualify as an <b>N+1</b> finding. Lower = more sensitive = more findings; higher = fewer findings but less noise.</p>"
   },
   {
    "default": "5",
@@ -476,7 +476,7 @@
   {
    "fieldname": "ai_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">When enabled, a <b>Suggest a fix (AI)</b> button appears on the Optimus Session form. Clicking it sends the selected finding's context finding type, callsite, a window of surrounding <b>source code</b>, the normalized SQL and EXPLAIN row to the configured LLM and stores the returned fix on the finding (it also shows up in the regenerated HTML report). <b>This sends code and queries to your chosen provider.</b> Point <code>Base URL</code> at a local model (Ollama / LM Studio / vLLM) to keep everything on-box. <a href=\"https://github.com/Aerele-RnD/optimus/blob/main/docs/AI-FIXING.md\" target=\"_blank\">Read the full data-flow documentation</a> what's sent, what isn't, and step-by-step local-LLM recipes.</p>"
+   "options": "<p class=\"text-muted small\">When enabled, a <b>Suggest a fix (AI)</b> button appears on the Optimus Session form. Clicking it sends the selected finding's context finding type, callsite, a window of surrounding <b>source code</b>, the normalized SQL and EXPLAIN row to the configured LLM and stores the returned fix on the finding (it also shows up in the regenerated HTML report). <b>This sends code and queries to your chosen provider.</b> Point <code>Base URL</code> at a local model (Ollama / LM Studio / vLLM) to keep everything on-box. <a href=\"https://github.com/Aerele-RnD/optimus/blob/main/docs/AI-FIXING.md\" target=\"_blank\">Read the full data-flow documentation</a> what's sent, what isn't and step-by-step local-LLM recipes.</p>"
   },
   {
    "default": "0",
@@ -521,7 +521,7 @@
   },
   {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "Pick which sections of the report may use the LLM. Turning one off is a hard disable that section is never auto-generated, its buttons on the Optimus Session form are hidden, the API refuses, and re-rendered reports omit it.",
+   "description": "Pick which sections of the report may use the LLM. Turning one off is a hard disable that section is never auto-generated, its buttons on the Optimus Session form are hidden, the API refuses and re-rendered reports omit it.",
    "fieldname": "ai_sections_break",
    "fieldtype": "Section Break",
    "label": "Use the LLM for"
@@ -529,7 +529,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When off: no AI-suggested fix on findings not auto-generated during analyze, the \"Suggest a fix (AI)\" / \"Generate AI fixes\" / \"Re-evaluate AI fixes\" buttons are hidden, the API refuses, and re-rendered reports omit the AI-fix block.",
+   "description": "When off: no AI-suggested fix on findings not auto-generated during analyze, the \"Suggest a fix (AI)\" / \"Generate AI fixes\" / \"Re-evaluate AI fixes\" buttons are hidden, the API refuses and re-rendered reports omit the AI-fix block.",
    "fieldname": "ai_suggest_findings",
    "fieldtype": "Check",
    "label": "Fix suggestions on findings"
@@ -537,7 +537,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When off: no \"Index advice (AI)\" block in the \"Time spent per database table\" section not auto-generated, the \"Suggest an index (AI)\" button is hidden, the API refuses, and re-rendered reports omit it.",
+   "description": "When off: no \"Index advice (AI)\" block in the \"Time spent per database table\" section not auto-generated, the \"Suggest an index (AI)\" button is hidden, the API refuses and re-rendered reports omit it.",
    "fieldname": "ai_suggest_indexes",
    "fieldtype": "Check",
    "label": "Index recommendations (DB-tables breakdown)"
@@ -550,7 +550,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When checked, the auto-generated \"Steps to Reproduce\" note on each session is rewritten by the LLM into a friendly, human-readable flow (the raw captured-actions list is kept below it; falls back to it if the LLM call fails). When off: the note stays the plain action list, the \"Humanize Steps (AI)\" button is hidden, and the API refuses. (An already-humanized older session keeps its note until re-analyzed.)",
+   "description": "When checked, the auto-generated \"Steps to Reproduce\" note on each session is rewritten by the LLM into a friendly, human-readable flow (the raw captured-actions list is kept below it; falls back to it if the LLM call fails). When off: the note stays the plain action list, the \"Humanize Steps (AI)\" button is hidden and the API refuses. (An already-humanized older session keeps its note until re-analyzed.)",
    "fieldname": "ai_humanize_steps",
    "fieldtype": "Check",
    "label": "Humanized \"Steps to Reproduce\""

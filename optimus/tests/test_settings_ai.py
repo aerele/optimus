@@ -4,7 +4,7 @@
 """Tests for the v0.6.0 AI-fix config fields on Optimus Settings.
 
 Pure-test path. Verifies the new fields default sensibly, resolve from a
-DocType row, and importantly that the secret API key is NOT part of
+DocType row and importantly that the secret API key is NOT part of
 the cached ``OptimusConfig`` (it's read on demand by ai_fix.py via
 Frappe's encrypted-password store).
 """

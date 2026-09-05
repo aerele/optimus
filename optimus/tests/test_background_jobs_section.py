@@ -364,7 +364,7 @@ class TestRenderedBackgroundJobsSection:
 		html = renderer.render_raw(doc, recordings=[])
 		# Exactly one smoking-gun panel the one in the Findings section.
 		assert html.count('class="smoking"') == 1
-		# Sanity: the BG-jobs section is rendered, and the related-finding
+		# Sanity: the BG-jobs section is rendered and the related-finding
 		# card was embedded under the job (title travels with the card).
 		assert "<h2>RQ Jobs</h2>" in html
 		# Two card-titles for "x": one in Findings section, one in BG embed.
@@ -569,7 +569,7 @@ class TestEntryCallsiteInReport:
 
 # --------------------------------------------------------------------------
 # v0.6.x: action/finding context target document (from form_dict) shown in
-# the per-action table, on the finding card, and appended to exec-summary bullets
+# the per-action table, on the finding card and appended to exec-summary bullets
 # --------------------------------------------------------------------------
 
 class TestActionContextInReport:

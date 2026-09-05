@@ -181,7 +181,7 @@ def test_action_plan_is_built_from_actionable_findings_only():
 def test_severity_counts_cover_all_findings():
 	"""v0.6.0: `severity_counts` (the "Issues found" stat card's sub-line)
 	must count ALL findings actionable + observational so the card's
-	big number (total), its sub-line, and the Summary prose's count all
+	big number (total), its sub-line and the Summary prose's count all
 	agree. (Previously it counted actionable-only, which made the big
 	number and the breakdown disagree.)"""
 	src = inspect.getsource(renderer.render)

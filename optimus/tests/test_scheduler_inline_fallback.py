@@ -121,7 +121,7 @@ def test_retry_analyze_uses_scheduler_aware_enqueue():
 def test_enqueue_analyze_swallows_inline_failure(monkeypatch):
 	"""Regression guard (v0.5.1 architect review pass 3): when analyze
 	runs inline and raises (analyze.run catches its own exception, marks
-	the session Failed, and re-raises), _enqueue_analyze must catch the
+	the session Failed and re-raises), _enqueue_analyze must catch the
 	re-raise and return True.
 
 	If we let the exception propagate up to stop(), the stop API
@@ -301,7 +301,7 @@ def test_enqueue_analyze_cap_is_called_by_stop_session():
     """Source-inspection regression guard: _stop_session must pass
     docname to _enqueue_analyze so the cap check has the doc to
     update. Earlier versions had the cap check inline in
-    _stop_session the refactor moved it to _enqueue_analyze, and
+    _stop_session the refactor moved it to _enqueue_analyze and
     if _stop_session forgets to pass docname, the cap silently
     skips.
     """

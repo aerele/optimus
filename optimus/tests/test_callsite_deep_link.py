@@ -4,7 +4,7 @@
 """Tests for v0.5.2 round 4 clickable callsite → editor deep-link.
 
 A finding's absolute-path callsite renders as a clickable anchor using
-the ``vscode://file`` URL scheme VS Code, VS Code Insiders, and
+the ``vscode://file`` URL scheme VS Code, VS Code Insiders and
 Cursor all register this handler on install, so the link jumps the
 developer straight to the file:line in their editor with one click.
 

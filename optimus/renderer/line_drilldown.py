@@ -434,7 +434,7 @@ def _render_line_drilldown_panel(session_doc: Any) -> str:
 		status = _e(run.get("status", ""))
 		total_ms = run.get("total_ms", 0)
 		# v0.7.x: the "Picks:" line is dropped the per-function tables below
-		# enumerate the picks that ran, and the "Not exercised in this pass" note
+		# enumerate the picks that ran and the "Not exercised in this pass" note
 		# lists the rest, so listing all picks again here is redundant.
 		html.append(
 			'<div class="phase2-run">'

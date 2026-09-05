@@ -61,7 +61,7 @@ def test_full_v5_analyzer_chain_produces_findings_and_aggregates():
 	assert len(infra_findings) == 1
 
 	# Frontend findings: Slow Frontend Render on the LCP 2800ms page,
-	# Network Overhead on the submit XHR (1900 vs 180 backend), and
+	# Network Overhead on the submit XHR (1900 vs 180 backend) and
 	# Heavy Response on the 512000-byte submit response.
 	ft_types = {f["finding_type"] for f in ctx.findings}
 	assert "Slow Frontend Render" in ft_types

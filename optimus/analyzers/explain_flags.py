@@ -63,7 +63,7 @@ LOW_FILTERED_MIN_ROWS = 100
 
 # Filesort / Temporary Table findings need a row floor for the same
 # reason Low Filter Ratio does: sorting 1 row or materializing a 5-row
-# intermediate is free, and flagging those fills the report with noise.
+# intermediate is free and flagging those fills the report with noise.
 # A real production run surfaced "Filesort on tabCustom DocPerm" from a
 # SELECT * FROM tabCustom DocPerm WHERE parent=? ORDER BY creation ASC
 # query where EXPLAIN reported rows=1 (a single-parent lookup with the
@@ -585,7 +585,7 @@ def _inspect_table(pt, normalized_query, action_idx, query_duration, buckets):
 			customer_description=(
 				f"A query against **{table}** had to materialize a temporary "
 				"table to compute its results. This usually indicates a "
-				"GROUP BY or DISTINCT without a covering index, and gets "
+				"GROUP BY or DISTINCT without a covering index and gets "
 				"more expensive as the data grows."
 			),
 			fix_hint="Add a covering index for the GROUP BY/DISTINCT columns.",

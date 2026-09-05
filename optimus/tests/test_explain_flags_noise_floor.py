@@ -7,7 +7,7 @@ in explain_flags.
 Production report had ~85 'Full table scan on tab<DocType>' findings
 at 0-1ms impact, most on stock Frappe DocTypes (tabDocField,
 tabWorkspace, tabCustom Field, ...). App developers can't add an
-index to those, and the ~0ms impact means even if they could the
+index to those and the ~0ms impact means even if they could the
 cost wouldn't be measurable. Two filters now suppress these:
 
 1. Noise floor findings with impact < 5ms AND count < 5 drop

@@ -153,7 +153,7 @@ def count_suppressed_findings(top_queries: list[dict], slow_threshold_ms: float)
 
 	Computed at render time (not at analyze time) so adding a new
 	disclosure doesn't require a DocType migration: ``top_queries_json``
-	persists the full top-N list, and any change to the slow threshold
+	persists the full top-N list and any change to the slow threshold
 	(Optimus Settings) re-applies on the next render.
 	"""
 	if not top_queries or not slow_threshold_ms:

@@ -13,7 +13,7 @@ Two related changes:
   2. When truncation happens, a prominent red banner renders at the
      TOP of the report above the exec-summary card. Previously
      the warning was buried in the collapsed Analyzer Notes at the
-     bottom, and developers read incomplete reports without
+     bottom and developers read incomplete reports without
      noticing.
 """
 

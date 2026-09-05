@@ -5,7 +5,7 @@
 
 The single highest-value analyzer added in v0.3.0. Walks a per-recording
 pyinstrument frame tree, grafts each captured SQL call onto the deepest
-matching user-code frame, and produces a unified tree where every node
+matching user-code frame and produces a unified tree where every node
 knows both its Python self-time AND the SQL queries that fired underneath
 it.
 
@@ -213,7 +213,7 @@ def _pyi_to_dict_tree(pyi_session_or_dict) -> dict:
 # instead of descending past the framework frame to the user code
 # below. Dropping the leading slashes makes the filter work against
 # both relative and absolute filenames a relative filename like
-# "frappe/handler.py" contains "frappe/", and an absolute filename
+# "frappe/handler.py" contains "frappe/" and an absolute filename
 # like "/Users/.../frappe/handler.py" also contains "frappe/".
 _FRAMEWORK_PATH_FRAGMENTS = ("frappe/", "optimus/")
 _FRAMEWORK_FUNCTION_PREFIXES = ("frappe.", "optimus.")
@@ -255,7 +255,7 @@ def _is_framework_frame(node_or_frame: dict) -> bool:
 # For SQL N+1 / Slow Hot Path, the answer is "walk past frappe/* to blame
 # user code." Repeated Hot Frame is different: it asks "is this function
 # itself worth optimizing?" Document.run_method, permissions.has_permission,
-# naming.make_autoname, and most of frappe/core/* and frappe/model/* are
+# naming.make_autoname and most of frappe/core/* and frappe/model/* are
 # INSIDE frappe/* yet legitimately slow optimization targets they run
 # the user's hooks, their permission rules, or their custom naming
 # configuration. Surfacing them in the leaderboard is correct.
@@ -267,7 +267,7 @@ def _is_framework_frame(node_or_frame: dict) -> bool:
 #   4. Infrastructure libraries werkzeug, gunicorn, rq, redis
 #                                          client, pyinstrument, pytz, dateutil
 #
-# Everything else including most of frappe/*, all of erpnext/*, and
+# Everything else including most of frappe/*, all of erpnext/* and
 # all user apps is KEPT so users see legitimate optimization targets
 # like "Document.run_method consumed 2.4s across 12 actions."
 
@@ -346,7 +346,7 @@ _PURE_HELPER_PATH_SUFFIXES = (
 # v0.5.1: substring matches (via `in`). Whole directories of framework
 # helpers / infrastructure libraries. Fragment values MUST NOT have
 # leading slashes the stored filenames are typically relative
-# (`frappe/utils/foo.py`), and `/frappe/utils/` does not occur as a
+# (`frappe/utils/foo.py`) and `/frappe/utils/` does not occur as a
 # substring of `frappe/utils/foo.py`. See the comment on
 # _FRAMEWORK_PATH_FRAGMENTS for the full history of this bug.
 _PURE_HELPER_PATH_SUBSTRINGS = (
@@ -648,7 +648,7 @@ def reconcile(pyi_session_or_dict, sql_calls: list, action_wall_time_ms: float) 
 
 	This is the main reconciliation entry point. Returns a dict tree with
 	SQL leaves grafted at the deepest user-code ancestor of each call's
-	stack, identical SQL siblings coalesced, and partial-match flags set
+	stack, identical SQL siblings coalesced and partial-match flags set
 	where the recorder stack ran past the pyi tree's visible depth.
 
 	Time-accounting invariant: pyinstrument has already counted SQL time
@@ -1180,7 +1180,7 @@ def _walk_for_findings(
 						"run a **Line-Level Drilldown** (the *Run Line-Profile "
 						"Pass* button on the session) and pick this function "
 						"from the candidates that profiles tight loops, "
-						"expensive computations, and string/regex work at the "
+						"expensive computations and string/regex work at the "
 						"statement level so you can optimize or cache them."
 						"\n\nNote: self-time here is wall-clock (the sampler "
 						"measures elapsed time, not CPU). If this function "
@@ -1221,7 +1221,7 @@ def _walk_for_findings(
 				})
 			# When we emit a finding for this node, do NOT recurse into
 			# its children children are already represented in the
-			# subtree's cumulative_ms, and recursing would create
+			# subtree's cumulative_ms and recursing would create
 			# overlapping nested findings.
 			return
 
@@ -1256,7 +1256,7 @@ def _redacted_module_key(function: str, filename: str = "") -> str | None:
 	into one bucket. Pre-v0.5.1 used the bare function name, which
 	produced misleading 'Repeated Hot Frame' findings blaming generic
 	decorator wrappers that the user cannot optimize every functools
-	wrapper, werkzeug wrapper, and frappe.whitelist wrapper in the
+	wrapper, werkzeug wrapper and frappe.whitelist wrapper in the
 	session would roll up under a single 'wrapper' key.
 
 	Returns None for synthetic / skipped nodes.
@@ -1371,11 +1371,11 @@ def _walk_for_aggregation(
 	if node.get("kind") == "python":
 		# v0.5.1: skip PURE HELPER frames only, not all framework code.
 		# This is the narrower _is_pure_helper_frame check we want to
-		# keep Document.run_method, permission checks, naming, and other
+		# keep Document.run_method, permission checks, naming and other
 		# application-layer Frappe code in the leaderboard because they
 		# can be legitimate optimization targets (e.g. a slow doc-event
 		# hook bubbles up as Document.run_method). Only frappe/utils/*,
-		# frappe/handler.py, frappe/app.py, and infrastructure libs
+		# frappe/handler.py, frappe/app.py and infrastructure libs
 		# (werkzeug, rq, etc.) are suppressed.
 		#
 		# An earlier v0.5.1 draft used the broader _is_framework_frame
@@ -1443,7 +1443,7 @@ def _strip_profiler_frames(node: dict) -> dict:
 	snapshot happens first. This tree-strip pass is belt-and-
 	suspenders: even with the correct ordering, pyi can still catch
 	a single sample of ``before_request`` returning or a capture
-	wrap frame during the action, and the stored tree should never
+	wrap frame during the action and the stored tree should never
 	show profiler frames regardless.
 
 	Modifies the tree in place for performance (per-action trees
@@ -1553,7 +1553,7 @@ def _top_level_app(function: str, filename: str) -> str:
 	# Bench layout: resolve the REAL apps/<name>/ segment (boundary-anchored,
 	# last-``apps/``-wins) so a bench nested under a folder named ``apps``
 	# (``/opt/apps/frappe-bench/apps/erpnext/…``) buckets under "erpnext", not the
-	# bogus "frappe-bench" prefix, and an app whose name ends in ``apps``
+	# bogus "frappe-bench" prefix and an app whose name ends in ``apps``
 	# (``webapps/…``) isn't misparsed.
 	app = _last_app_segment(norm)
 	if app:
@@ -1646,7 +1646,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 	"""call_tree analyzer entry point.
 
 	For each recording with a pyi_session, reconcile + prune + cap the tree,
-	emit per-action findings, and record the unified tree on the action.
+	emit per-action findings and record the unified tree on the action.
 	After all recordings are processed, emit cross-action Repeated Hot
 	Frame findings and build the session-wide donut + leaderboard.
 	"""
@@ -1674,7 +1674,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 
 	for action_idx, recording in enumerate(recordings):
 		# v0.7.x (M1): pop, don't get call_tree is the ONLY consumer of the
-		# raw pyinstrument Session, and holding all recordings' trees in RAM at
+		# raw pyinstrument Session and holding all recordings' trees in RAM at
 		# once was the dominant analyze-time memory spike (OOM on long flows).
 		# Popping frees each tree as soon as it's reconciled, so peak drops from
 		# "all trees at once" to "one at a time". Covers the pyi-is-None branch

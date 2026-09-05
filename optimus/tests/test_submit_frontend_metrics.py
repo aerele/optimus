@@ -5,7 +5,7 @@
 
 The endpoint accepts a JSON string payload (because sendBeacon sends
 raw Blob, not form-encoded), validates session ownership, merges
-against any existing Redis blob, and enforces soft caps server-side.
+against any existing Redis blob and enforces soft caps server-side.
 """
 
 import json

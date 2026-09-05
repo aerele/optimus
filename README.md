@@ -1,6 +1,6 @@
 # Optimus
 
-**A flow-aware performance profiler for Frappe and ERPNext.** Records a real business workflow (Sales Invoice save → submit → Delivery Note → submit → …), joins it with server resource state and browser-side timings, and produces two downloadable HTML reports you can actually act on: a **Safe Report** to share with a third-party dev shop without leaking customer data, and a **Raw Report** for internal debugging with full stack traces and SQL literals.
+**A flow-aware performance profiler for Frappe and ERPNext.** Records a real business workflow (Sales Invoice save → submit → Delivery Note → submit → …), joins it with server resource state and browser-side timings and produces two downloadable HTML reports you can actually act on: a **Safe Report** to share with a third-party dev shop without leaking customer data and a **Raw Report** for internal debugging with full stack traces and SQL literals.
 
 > **Status:** `v0.12.26`: production-ready. MIT-licensed. 1820 unit tests + 39 integration tests in CI on every pull request and on merge to `main` (ruff + pytest on Python 3.14; bench-driven integration suite on Frappe v16). See the [CHANGELOG](./CHANGELOG.md) for the full feature history, including the v0.7.0 rename from `frappe_profiler` → `optimus`.
 
@@ -37,17 +37,17 @@
 
 ## What it is
 
-- **On-demand profiler for specific slow flows.** You press Start, run your slow flow, press Stop, and get a report. No always-on overhead. No data egress. No external service.
-- **Flow-aware.** Automatically captures the entire chain of HTTP requests **and** background jobs triggered by one business operation e.g. a single Sales Invoice `submit` that enqueues GL posting, stock updates, and GST calculation shows up as one session, not four disconnected transactions. The only profiler that does this for Frappe.
-- **Customer-safe report.** Safe mode replaces SQL literals with `?`, strips docnames and filters from URLs, redacts headers and form data, and bleach-sanitizes any user-typed notes. Shareable with a third-party dev shop over email without leaking PII.
-- **ERPNext-native findings.** N+1 detection blames `erpnext/accounts/gl_entry.py:211` instead of `frappe/database/database.py:sql`. Findings know about Document hooks, permission queries, naming series, and child table patterns.
-- **Server + browser + infra in one report.** v0.5.0 adds per-action CPU/RSS/DB pool/RQ queue snapshots and per-XHR timings with Web Vitals, joined to the matching recording by correlation header. You can tell *code-slow* from *server-slow*, and *backend-slow* from *network-slow*.
+- **On-demand profiler for specific slow flows.** You press Start, run your slow flow, press Stop and get a report. No always-on overhead. No data egress. No external service.
+- **Flow-aware.** Automatically captures the entire chain of HTTP requests **and** background jobs triggered by one business operation e.g. a single Sales Invoice `submit` that enqueues GL posting, stock updates and GST calculation shows up as one session, not four disconnected transactions. The only profiler that does this for Frappe.
+- **Customer-safe report.** Safe mode replaces SQL literals with `?`, strips docnames and filters from URLs, redacts headers and form data and bleach-sanitizes any user-typed notes. Shareable with a third-party dev shop over email without leaking PII.
+- **ERPNext-native findings.** N+1 detection blames `erpnext/accounts/gl_entry.py:211` instead of `frappe/database/database.py:sql`. Findings know about Document hooks, permission queries, naming series and child table patterns.
+- **Server + browser + infra in one report.** v0.5.0 adds per-action CPU/RSS/DB pool/RQ queue snapshots and per-XHR timings with Web Vitals, joined to the matching recording by correlation header. You can tell *code-slow* from *server-slow* and *backend-slow* from *network-slow*.
 
 ## What it isn't
 
 - **Not always-on monitoring.** If you need *"alert me when production p95 regresses,"* use New Relic / Datadog / Sentry. We're opt-in and session-scoped by design.
 - **Not distributed tracing.** We only see Frappe. A microservices architecture spanning Python + Go + Node needs OpenTelemetry.
-- **Not a replacement for `frappe.recorder`.** We *extend* it we reuse its SQL capture and stack walker unchanged, and add session tracking, multi-request joining, resource/frontend capture, and the analyze pipeline on top.
+- **Not a replacement for `frappe.recorder`.** We *extend* it we reuse its SQL capture and stack walker unchanged and add session tracking, multi-request joining, resource/frontend capture and the analyze pipeline on top.
 
 ---
 
@@ -60,9 +60,9 @@ bench --site <your-site> install-app optimus
 bench restart
 ```
 
-Tested on **Frappe v16** with MariaDB and Redis. The app declares `required_apps = ["frappe"]`. Runtime dependencies (installed automatically by `bench get-app`) are listed in [`pyproject.toml`](./pyproject.toml) currently `pyinstrument`, `line_profiler`, `requests`, `sqlparse`, and `Jinja2`, all pure-Python with no compiled extensions (`line_profiler` ships a small C extension; pre-built wheels exist for cpython 3.10–3.14).
+Tested on **Frappe v16** with MariaDB and Redis. The app declares `required_apps = ["frappe"]`. Runtime dependencies (installed automatically by `bench get-app`) are listed in [`pyproject.toml`](./pyproject.toml) currently `pyinstrument`, `line_profiler`, `requests`, `sqlparse` and `Jinja2`, all pure-Python with no compiled extensions (`line_profiler` ships a small C extension; pre-built wheels exist for cpython 3.10–3.14).
 
-After install, an **Optimus User** role is created automatically. All existing System Managers are granted this role, and new System Managers get it automatically via a `User.validate` hook.
+After install, an **Optimus User** role is created automatically. All existing System Managers are granted this role and new System Managers get it automatically via a `User.validate` hook.
 
 > **After every upgrade:** run `bench restart` so the new sign / verify code loads. Sessions captured **before** the restart have null call trees on their actions their Phase-2 picker dialog opens with a yellow "No curated functions available" callout pointing this out. Capture a fresh session after the restart for a working picker.
 
@@ -71,7 +71,7 @@ After install, an **Optimus User** role is created automatically. All existing S
 ## 60-second quickstart
 
 1. Open Desk. A bright red **Optimus** pill appears in the bottom-right corner.
-2. Click it. A dialog asks for a label, an optional "Steps to Reproduce" note, and a `Capture Python call tree` toggle (leave on).
+2. Click it. A dialog asks for a label, an optional "Steps to Reproduce" note and a `Capture Python call tree` toggle (leave on).
 3. Click **Start**. The pill turns green and shows an elapsed timer.
 4. Run your flow save a Sales Invoice, submit it, wait for background jobs, whatever you want profiled.
 5. Click the pill again to **Stop**. The pill turns orange ("Analyzing…") while the analyze pipeline runs (typically 2–15 seconds).
@@ -183,7 +183,7 @@ Workflow:
 Phase 2 has a per-request overhead budget (default 10s; tunable via
 `optimus_phase2_overhead_budget_seconds` in site_config). If the budget
 expires mid-request, line profiling disengages so the request finishes
-at natural speed, and the run is flagged "partial data". This stops a
+at natural speed and the run is flagged "partial data". This stops a
 hot-loop pick from freezing the UI.
 
 ### AI fix suggestions (optional)
@@ -206,7 +206,7 @@ Suggestions → Use the LLM for**:
   New, …").
 
 Turning any one of these off is a hard disable the button is hidden,
-the API refuses, and re-rendered reports omit the AI block. See
+the API refuses and re-rendered reports omit the AI block. See
 [`docs/AI-FIXING.md`](./docs/AI-FIXING.md) for the per-pathway data
 inventory and local-LLM recipes.
 
@@ -258,7 +258,7 @@ This is the primary use case and the feature set is built around it.
    - SQL identifiers (table/column/function names) are NOT redacted they're code, not customer data
 3. **Customer emails the .html or .pdf** to the partner. No VPN, no SSH, no shared credentials.
 4. **Partner opens the file on their laptop offline.** The report is fully self-contained no CDN fonts, no external scripts, no `@import`. Tested in CI via `test_safe_report_self_contained.py`.
-5. **Partner diagnoses and fixes.** Every finding has a plain-language `customer_description`, a technical detail with callsite + query + suggested DDL, and an estimated impact in ms.
+5. **Partner diagnoses and fixes.** Every finding has a plain-language `customer_description`, a technical detail with callsite + query + suggested DDL and an estimated impact in ms.
 6. **Partner re-records** the fixed flow and pins the original slow session as a baseline. The new report auto-renders three comparison sections:
    - **Session-level delta**: total wall time, query count, SQL/Python ms (old vs new)
    - **Per-action comparison**: matched actions (by label, fallback to path) with before/after stats
@@ -275,7 +275,7 @@ v0.5.1 emits 18 finding types across 10 analyzers. Every finding has a severity 
 
 | Type | Trigger | Actionable detail |
 |---|---|---|
-| **N+1 Query** | Same normalized query fired from the same Python callsite ≥10 times, ≥20 ms total | Filename:line, the query, and *"refactor to `frappe.get_all` with a name-IN filter or a JOIN"* |
+| **N+1 Query** | Same normalized query fired from the same Python callsite ≥10 times, ≥20 ms total | Filename:line, the query and *"refactor to `frappe.get_all` with a name-IN filter or a JOIN"* |
 | **Slow Query** | Single query > 200 ms | Normalized query + callsite + *"run EXPLAIN ANALYZE for actual cost"* |
 | **Full Table Scan** | `EXPLAIN.type = ALL` | Row count scanned + suggested index |
 | **Filesort** | `EXPLAIN.Extra` contains "Using filesort" | Query + ORDER BY column |
@@ -315,7 +315,7 @@ v0.5.1 emits 18 finding types across 10 analyzers. Every finding has a severity 
 
 Five sentences:
 
-1. **Don't fork the recorder.** We reuse `frappe.recorder.Recorder`, `record(force=True)`, and `dump()` for SQL capture. Our app adds session tracking, per-user activation, background-job inheritance, resource/frontend capture, and the analyze pipeline on top.
+1. **Don't fork the recorder.** We reuse `frappe.recorder.Recorder`, `record(force=True)` and `dump()` for SQL capture. Our app adds session tracking, per-user activation, background-job inheritance, resource/frontend capture and the analyze pipeline on top.
 2. **Per-user activation via hook ordering.** Frappe's `before_request` runs `frappe.recorder.record()` first (no-op without a global flag); our `before_request` runs second and calls `record(force=True)` only if the current user has an active session in our Redis pointer.
 3. **Background-job session inheritance via a `frappe.enqueue` patch.** We wrap the canonical `enqueue` to inject `_profiler_session_id` into job kwargs whenever the calling user has an active session; the worker's `before_job` hook pops the marker (so the user's method never sees it) and activates recording for the job.
 4. **Frontend capture wraps WHATWG primitives, not Frappe APIs.** `optimus_frontend.js` hooks `window.fetch` and `XMLHttpRequest.prototype.open/send` directly the same approach every production APM library uses. Survives future Frappe upgrades because `fetch` and `XHR` are stable web platform standards, while jQuery `ajaxComplete` hooks would break when Frappe drops jQuery.
@@ -333,7 +333,7 @@ Deliberately minimal. **Only one non-Frappe dependency is declared** in `pyproje
 
 | Package | Version | What it powers |
 |---|---|---|
-| **[`pyinstrument`](https://pypi.org/project/pyinstrument/)** | `>=4.6,<6` | Statistical Python call-tree sampler. Produces the per-recording call tree that drives the **Hot Frames** leaderboard, **Slow Hot Path** findings, **Hook Bottleneck** detection, the **Time Breakdown** donut, and the self-referential hot-path phrasing. Without this, the profiler would only see SQL no Python context. |
+| **[`pyinstrument`](https://pypi.org/project/pyinstrument/)** | `>=4.6,<6` | Statistical Python call-tree sampler. Produces the per-recording call tree that drives the **Hot Frames** leaderboard, **Slow Hot Path** findings, **Hook Bottleneck** detection, the **Time Breakdown** donut and the self-referential hot-path phrasing. Without this, the profiler would only see SQL no Python context. |
 
 ### Inherited from Frappe (no extra install)
 
@@ -395,7 +395,7 @@ These do real analytical work without pulling a dependency:
 
 **Positioning:** commercial APMs are always-on monitoring for *"something regressed, find it."* optimus is on-demand debugging for *"this specific customer flow is slow, what should my dev shop fix."* They're complementary, not competitive. Most ERPNext shops run only optimus because Datadog is expensive and leaks customer data off-site.
 
-For the specific job of *"debug a slow ERPNext workflow and hand the report to a partner shop,"* optimus produces a better report than any commercial APM because of callsite-grouped N+1, framework-native findings, flow-aware session, and customer-safe export. None of those exist anywhere else at any price.
+For the specific job of *"debug a slow ERPNext workflow and hand the report to a partner shop,"* optimus produces a better report than any commercial APM because of callsite-grouped N+1, framework-native findings, flow-aware session and customer-safe export. None of those exist anywhere else at any price.
 
 ---
 
@@ -445,7 +445,7 @@ If a session hits the recordings cap, the analyze report shows a warning under `
 
 ### Memory cleanup
 
-When a session moves to `Ready`, the source recordings in Redis (`RECORDER_REQUEST_HASH`, `RECORDER_REQUEST_SPARSE_HASH`), the per-session keys (`profiler:session:*`, `profiler:infra:*`, `profiler:frontend:*`), and the pyinstrument tree blobs are deleted. Redis returns to baseline. The `Optimus Session` DocType row and the attached HTML report files are the durable record.
+When a session moves to `Ready`, the source recordings in Redis (`RECORDER_REQUEST_HASH`, `RECORDER_REQUEST_SPARSE_HASH`), the per-session keys (`profiler:session:*`, `profiler:infra:*`, `profiler:frontend:*`) and the pyinstrument tree blobs are deleted. Redis returns to baseline. The `Optimus Session` DocType row and the attached HTML report files are the durable record.
 
 ### Two report modes
 
@@ -458,7 +458,7 @@ When a session moves to `Ready`, the source recordings in Redis (`RECORDER_REQUE
 
 ## Scheduler-disabled sites
 
-On sites where `bench disable-scheduler` is in effect common on dev, demo, and Frappe Cloud trial instances the analyze RQ queue has no worker consuming it. v0.5.0+ detects this via `frappe.utils.scheduler.is_scheduler_disabled()` and falls back to `frappe.enqueue(now=True)`, which runs analyze **synchronously inside the stop request**.
+On sites where `bench disable-scheduler` is in effect common on dev, demo and Frappe Cloud trial instances the analyze RQ queue has no worker consuming it. v0.5.0+ detects this via `frappe.utils.scheduler.is_scheduler_disabled()` and falls back to `frappe.enqueue(now=True)`, which runs analyze **synchronously inside the stop request**.
 
 Consequences:
 
@@ -530,7 +530,7 @@ case-insensitive.
 |---|---|---|
 | **Max Queries per Recording** | `2000` | Per-recording cap on queries enriched (`sqlparse` + `EXPLAIN` + normalization) by analyze. Anything beyond is truncated with a banner at the top of the report. Each query costs one `EXPLAIN` round-trip raising the cap scales analyze time roughly linearly. Raise to `5000` / `10000` for legitimately heavy flows (e.g. Manufacturing Plan Submit creating 100+ child orders). _Reference: Strict 5000 · Recommended 2000 · Relaxed 1000._ |
 | **Sampler Interval (ms)** | `1.0` | pyinstrument statistical-sampler interval. Lower = finer call-tree resolution but higher overhead. `1ms` is recommended; raise to `5–10ms` for prod-like profiling. Floor: `0.1`. _Reference: Strict 0.5 · Recommended 1.0 · Relaxed 5.0._ |
-| **Hide framework / internal database tables** | ✓ on | When on, the "Time spent per database table" section drops Frappe schema/meta tables (`tabDocType`, `tabSingles`, `tabPatch Log`, etc.), framework-internal tables, and `information_schema.*`. Touched by every request via framework machinery not user-actionable. Other sections (top-queries leaderboard, per-action drill-down, recordings) are unaffected. Uncheck to see them all. |
+| **Hide framework / internal database tables** | ✓ on | When on, the "Time spent per database table" section drops Frappe schema/meta tables (`tabDocType`, `tabSingles`, `tabPatch Log`, etc.), framework-internal tables and `information_schema.*`. Touched by every request via framework machinery not user-actionable. Other sections (top-queries leaderboard, per-action drill-down, recordings) are unaffected. Uncheck to see them all. |
 | **Wait for Background Jobs (seconds)** | `300` | How long the analyze job watches the bg jobs the profiled flow enqueued, waiting for each to reach a terminal state (Completed / Failed / Timeout). Hard-capped at `300`. `0` = don't wait. On a single-worker bench the analyze job yields the worker between checks so those jobs can run; if the scheduler is disabled, the wait is skipped. Jobs still running at the ceiling appear as `Running` in the report click _Retry Analyze_ once they finish to capture their data. _Reference: Strict 300 · Recommended 300 · Relaxed 60._ |
 
 #### Display Filters section
@@ -551,7 +551,7 @@ or analyzed.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Sensitivity Profile** | `Recommended` | One-knob preset for the 9 detection thresholds below. **Strict** catches more (lower thresholds, more findings, more noise). **Relaxed** catches less. **Recommended** is the shipped default and automatically tracks future tuning across upgrades. **Custom** lets you hand-tune the individual fields they stay locked under the named presets. Display filters, Phase-2, capture, retention, and AI settings are **not** affected by the profile. |
+| **Sensitivity Profile** | `Recommended` | One-knob preset for the 9 detection thresholds below. **Strict** catches more (lower thresholds, more findings, more noise). **Relaxed** catches less. **Recommended** is the shipped default and automatically tracks future tuning across upgrades. **Custom** lets you hand-tune the individual fields they stay locked under the named presets. Display filters, Phase-2, capture, retention and AI settings are **not** affected by the profile. |
 
 #### Analyzer Thresholds section
 
@@ -602,7 +602,7 @@ Off by default no traffic leaves your bench until you turn it on.
 | Field | Default | Purpose |
 |---|---|---|
 | **Enable AI Fix Suggestions** | ✗ off | Master switch for the entire AI feature. When off, every AI button on the Session form is hidden and the API refuses. |
-| **Provider** | `Anthropic` | Wire format. `Anthropic`, `OpenAI`, `Kimi`, and `OpenAI-compatible` (which requires Base URL + Model covers Ollama, LM Studio, vLLM, OpenRouter, Together, Groq). |
+| **Provider** | `Anthropic` | Wire format. `Anthropic`, `OpenAI`, `Kimi` and `OpenAI-compatible` (which requires Base URL + Model covers Ollama, LM Studio, vLLM, OpenRouter, Together, Groq). |
 | **Base URL** | _empty_ | Leave blank to use the hosted default. Required for `OpenAI-compatible`: e.g. `http://localhost:11434/v1` (Ollama), `http://localhost:1234/v1` (LM Studio). |
 | **Model** | _empty_ | Leave blank for the provider default. Examples: `claude-sonnet-4-6` (Anthropic), `gpt-4.1-mini` (OpenAI), `kimi-k2-0905-preview` (Kimi), or your local model name. |
 | **API Key** | _empty_ | Per-site, stored encrypted (Frappe `Password` field). Most local OpenAI-compatible endpoints don't need one; hosted ones do. |
@@ -611,7 +611,7 @@ Off by default no traffic leaves your bench until you turn it on.
 
 Three independent on/off switches. Turning any one off is a **hard
 disable**: the section is never auto-generated, the matching button is
-hidden, the API refuses, and re-rendered reports omit the block.
+hidden, the API refuses and re-rendered reports omit the block.
 
 | Field | Default | Purpose |
 |---|---|---|
@@ -764,10 +764,10 @@ def analyze(
 Contract:
 - **No Frappe DB access** inside the function analyzers are pure transformations over the recording data. This makes them unit-testable from JSON fixtures with no running site.
 - Exceptions are caught by `analyze.run` and logged; a failing custom analyzer never halts the pipeline, but any findings it would have emitted are lost for that session.
-- Custom analyzers can read earlier analyzers' output from `context.actions`, `context.findings`, and `context.aggregate`.
+- Custom analyzers can read earlier analyzers' output from `context.actions`, `context.findings` and `context.aggregate`.
 - A 60-second soft cap per analyzer logs a warning; the 20-minute total budget aborts remaining analyzers with a partial-completion warning.
 
-See [`optimus/analyzers/base.py`](./optimus/analyzers/base.py) for the full type contract and the analyzers under [`optimus/analyzers/`](./optimus/analyzers/) for working examples (each is a self-contained module `n_plus_one.py`, `call_tree.py`, `redundant_calls.py`, and `infra_pressure.py` are good starting points).
+See [`optimus/analyzers/base.py`](./optimus/analyzers/base.py) for the full type contract and the analyzers under [`optimus/analyzers/`](./optimus/analyzers/) for working examples (each is a self-contained module `n_plus_one.py`, `call_tree.py`, `redundant_calls.py` and `infra_pressure.py` are good starting points).
 
 ---
 
@@ -829,14 +829,14 @@ After `bench migrate`, verify in this order:
 
 ### The widget is still showing "Recording" after I clicked Stop
 
-**Most likely cause:** browser is serving cached JS. The `app_include_js` cache-buster rotates on `__version__` bumps, and if you've been testing across dev iterations without a full restart, the browser is still running the first version it loaded.
+**Most likely cause:** browser is serving cached JS. The `app_include_js` cache-buster rotates on `__version__` bumps and if you've been testing across dev iterations without a full restart, the browser is still running the first version it loaded.
 
 **Fix (in order):**
 
 1. `bench restart`: reloads the Python workers so they see the updated `__version__`.
 2. Hard-refresh Desk in the browser: `Cmd+Shift+R` (Mac) / `Ctrl+Shift+R` (Windows/Linux).
 3. Verify in devtools → Console: you should see `[optimus] floating_widget.js LOADED build=<current build> at ...`. Hover the widget pill the tooltip should show the same build ID.
-4. If the build ID matches and the bug still reproduces, open devtools → Console, click Stop, and check the `[optimus] stop callback: {...}` log. Paste it with a bug report.
+4. If the build ID matches and the bug still reproduces, open devtools → Console, click Stop and check the `[optimus] stop callback: {...}` log. Paste it with a bug report.
 
 ### Stop button is silently doing nothing
 
@@ -856,7 +856,7 @@ The session was already cleared server-side usually because the auto-stop TTL ex
 
 ### Repeated Hot Frame shows generic names like `wrapper` or `handle`
 
-**Shouldn't happen** in v0.5.1 the aggregator now groups by `file::function` instead of the bare function name, and skips pure plumbing (werkzeug, `frappe.handler`, `frappe.utils`). If you still see this, verify the widget build ID is `2026-04-15-stop-fix-v3` or later.
+**Shouldn't happen** in v0.5.1 the aggregator now groups by `file::function` instead of the bare function name and skips pure plumbing (werkzeug, `frappe.handler`, `frappe.utils`). If you still see this, verify the widget build ID is `2026-04-15-stop-fix-v3` or later.
 
 ### Scheduler is disabled and stop is taking forever
 
@@ -879,7 +879,7 @@ python -m pytest optimus/tests/ -v
 
 1820+ unit tests run in ~7 seconds on a laptop. The suite is **decoupled from Frappe**: most tests use JSON fixtures and mocked `frappe.cache` / `frappe.db`, so you can run them without a site. Tests that do need Frappe import guards are gated via `pytest.importorskip` or stubbed at module level.
 
-A second tier of 39 **integration tests** under `optimus/tests_integration/` exercises a real Frappe v16 bench provisioned by `.github/helper/install.sh` and runs via `bench --site <site> run-tests --app optimus`. These cover install-time invariants, scheduler/cron paths, the atomic Lua merge under multi-worker load, and other behaviors that can't be proven from pure-pytest stubs. See `optimus/tests_integration/README.md` for the local-run recipe.
+A second tier of 39 **integration tests** under `optimus/tests_integration/` exercises a real Frappe v16 bench provisioned by `.github/helper/install.sh` and runs via `bench --site <site> run-tests --app optimus`. These cover install-time invariants, scheduler/cron paths, the atomic Lua merge under multi-worker load and other behaviors that can't be proven from pure-pytest stubs. See `optimus/tests_integration/README.md` for the local-run recipe.
 
 ### Test organization
 

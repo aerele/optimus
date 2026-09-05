@@ -47,7 +47,7 @@ _REFVAL_RE = re.compile(
 # Kept here (not imported) so the test pins the contract independently
 # of the implementation's own tuple. v0.13.x expanded the set from 9
 # detection-sensitivity knobs to 19 including capture caps,
-# retention, display filters, Phase-2 UI knobs, and the AI auto-suggest
+# retention, display filters, Phase-2 UI knobs and the AI auto-suggest
 # cap so the UI's "Reference values" promise is honored everywhere
 # it's advertised.
 SENSITIVITY_KEYS = (

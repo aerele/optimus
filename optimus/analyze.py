@@ -5,7 +5,7 @@
 
 Triggered by `api.stop()` via `frappe.enqueue("optimus.analyze.run", ...)`.
 Reads all recordings for the session from Redis, runs the six analyzers,
-persists the results into the Optimus Session DocType, and publishes a
+persists the results into the Optimus Session DocType and publishes a
 realtime notification so the UI can navigate to the report.
 
 State transitions on the Optimus Session row:
@@ -308,7 +308,7 @@ def _acquire_singleflight(session_uuid: str, docname: str, deadline) -> bool:
 
 	Mirrors ``_bg_wait_for_pending_jobs``: re-enqueue + yield, never a held
 	lock. Skipped when the scheduler is disabled (analyze runs inline in a web
-	request there's no worker to run our re-enqueued self, and inline peak is
+	request there's no worker to run our re-enqueued self and inline peak is
 	already bounded by ``optimus_inline_analyze_limit``)."""
 	# Inline path: no worker to yield to proceed.
 	try:
@@ -341,7 +341,7 @@ def _acquire_singleflight(session_uuid: str, docname: str, deadline) -> bool:
 	if time.time() >= deadline:
 		return True  # waited long enough proceed rather than strand
 
-	# Keep the UI honest, throttle, and re-enqueue ourselves to yield the worker.
+	# Keep the UI honest, throttle and re-enqueue ourselves to yield the worker.
 	try:
 		frappe.db.set_value("Optimus Session", docname, "status", "Analyzing")
 		safe_commit()
@@ -867,7 +867,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 			# M2: heartbeat the single-flight flag each iteration. The analyzer
 			# loop can run up to ANALYZE_TOTAL_BUDGET_SECONDS (1200s) well past
 			# the flag's 300s TTL. Without this, the flag would lapse mid-analyze,
-			# a second queued session could acquire it, and two heavy analyzes
+			# a second queued session could acquire it and two heavy analyzes
 			# would run concurrently at ~2× peak RAM exactly the OOM the
 			# single-flight guard exists to prevent. Redis-only, so it also keeps
 			# is_singleflight_holder() truthy for the janitor's liveness check.
@@ -950,7 +950,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		_publish_progress(90, "Rendering reports", session_uuid)
 		# Render and attach the HTML report to the DocType.
 		# IMPORTANT: this must run BEFORE _cleanup_redis, because raw mode
-		# reads raw SQL, headers, form_dict, and full stack traces from the
+		# reads raw SQL, headers, form_dict and full stack traces from the
 		# in-memory recordings list (not from the DocType, which only has
 		# normalized data).
 		_render_and_attach_reports(docname, recordings)
@@ -1452,7 +1452,7 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 def _shape_key(query: str) -> str:
 	"""Cheap query-shape key for EXPLAIN dedup.
 
-	Lower-cases, collapses whitespace, and truncates. This is NOT the
+	Lower-cases, collapses whitespace and truncates. This is NOT the
 	proper sqlparse normalization we just need "are these two queries
 	shaped the same" for caching purposes. The REAL normalization happens
 	in mark_duplicates afterward.
@@ -1934,7 +1934,7 @@ def _dedupe_findings_across_actions(
 # that exceed this length raise CharacterLengthExceededError at save
 # time, taking down the whole analyze pipeline. We clamp in-place as a
 # safety net: 137 visible chars + the "..." ellipsis marker fits the
-# limit exactly, and the full information remains in the finding's
+# limit exactly and the full information remains in the finding's
 # technical_detail_json for navigation.
 _FINDING_TITLE_MAX_CHARS = 140
 _FINDING_TITLE_ELLIPSIS = "..."
@@ -2042,7 +2042,7 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 	"""Mutate ``context.findings`` in place: when Optimus Settings has
 	``ai_enabled`` AND ``ai_auto_suggest``, ask the configured LLM for a
 	fix for the top ``ai_auto_suggest_max`` eligible findings (0 = all),
-	highest-severity / highest-impact first, and store the result on each
+	highest-severity / highest-impact first and store the result on each
 	finding's ``llm_fix_json`` so it shows up in the report (and is what
 	the on-demand "Suggest a fix (AI)" button returns from cache).
 
@@ -2306,7 +2306,7 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	"""Generate AI fix suggestions for eligible findings on a persisted
 	Optimus Session ``doc``, persist them (``frappe.db.set_value`` + update
 	the in-memory rows so a subsequent ``_render_and_attach_reports``
-	re-fetch sees them), and report counts.
+	re-fetch sees them) and report counts.
 
 	By default this only touches eligible findings that DON'T have a
 	suggestion yet the "fill the gaps" case (``api.backfill_ai_fixes``,
@@ -2482,7 +2482,7 @@ def _ai_payload_for_table(t_entry: dict, recordings: list[dict]) -> dict:
 def _enrich_table_breakdown_with_ai_suggestions(context, recordings: list[dict]) -> None:
 	"""When Optimus Settings has ``ai_enabled`` AND ``ai_auto_suggest``, ask
 	the LLM for an index recommendation on the top ``AI_AUTO_INDEX_MAX_TABLES``
-	tables that have a heuristic ``recommended_index``, and stash it on the
+	tables that have a heuristic ``recommended_index`` and stash it on the
 	breakdown entry's ``ai_index``. Best-effort + time-budgeted failures /
 	a slow provider just mean fewer (or no) AI blocks, never a failed analyze."""
 	breakdown = (context.aggregate or {}).get("table_breakdown") or []
@@ -2567,7 +2567,7 @@ def _run_table_index_ai_backfill(doc, *, table_name: str) -> dict:
 
 # v0.5.1: auto-generated "Steps to Reproduce" from captured actions. The
 # dialog no longer asks the user to type notes at start time because (a) it
-# added friction to the one-click "start profiling" flow, and (b) the user
+# added friction to the one-click "start profiling" flow and (b) the user
 # already performed the steps the profiler captured them. We synthesize
 # a bullet list from the recordings and write it to the `notes` field ONLY
 # when the user hasn't already provided their own text via the DocType
@@ -2823,7 +2823,7 @@ def _build_summary_html(
 	"""Plain-language customer summary, generated from the analyzer findings.
 
 	Written for a non-developer: "operations" not "actions", humanized action
-	names not raw cmds, "high priority" not "high-severity", and a finding's
+	names not raw cmds, "high priority" not "high-severity" and a finding's
 	raw ``cmd:action`` reference swapped for the humanized form.
 	"""
 	recordings = recordings or []
@@ -2920,7 +2920,7 @@ def _build_summary_html(
 			"<strong>filesort operations</strong>, "
 			"<strong>temporary table creation</strong>, "
 			"<strong>low filter ratios</strong>, "
-			"<strong>missing indexes</strong>, and "
+			"<strong>missing indexes</strong> and "
 			"<strong>individually slow queries</strong> (&gt;200ms) - "
 			"and nothing significant turned up."
 		)
@@ -3023,7 +3023,7 @@ def _save_report_file(*, docname: str, filename: str, attached_to_field: str, co
 	runs as a background RQ job (no request). But when the site
 	has the scheduler disabled, analyze runs INLINE inside
 	api.stop()'s HTTP handler frappe.request is set, the
-	bypass doesn't fire, and File's before_insert throws
+	bypass doesn't fire and File's before_insert throws
 	FileTypeNotAllowed when the site's allowed_file_extensions
 	list (System Settings → File Settings) doesn't include HTML.
 
@@ -3090,7 +3090,7 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 	live read-fallback (:func:`_rehydrate_from_bundle`) reconstructs for AI
 	re-runs / drill-down regeneration; ``sparse`` + ``infra`` + ``session_state``
 	are captured for faithful regeneration + a possible future full
-	re-analyze-from-file, and are NOT consumed by the current read path.
+	re-analyze-from-file and are NOT consumed by the current read path.
 
 	Every value is already capture-time redacted
 	(``optimus/__init__._patch_recorder``), so the file carries the same

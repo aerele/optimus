@@ -66,7 +66,7 @@ MAX_EXAMPLE_QUERIES = 3
 #
 # 892 / 1526 = 0.58ms per query below MariaDB's per-query overhead.
 # On a small framework table (tabDocType is typically ~800 rows) the
-# table already fits in memory, the scan is effectively free, and
+# table already fits in memory, the scan is effectively free and
 # adding a btree index yields no measurable improvement. The user
 # spends time on an index migration that saves nothing.
 #
@@ -88,12 +88,12 @@ MAX_LOGGED_FAILURES = 3
 #
 # sql_metadata is a third-party SQL parser with well-known limitations: it
 # trips on correlated subqueries, complex ORDER BY expressions containing
-# functions (if/locate/coalesce), window functions, CTEs, and a few other
+# functions (if/locate/coalesce), window functions, CTEs and a few other
 # shapes Frappe apps legitimately emit. When it can't parse a query, it
 # raises either ``ValueError: too many values to unpack`` (from an internal
 # tuple unpacking) or ``TypeError`` (from an unexpected None in its
 # token stream). These are PARSER LIMITATIONS the user cannot rewrite
-# their query to make sql_metadata happy, and they cannot add an index to
+# their query to make sql_metadata happy and they cannot add an index to
 # fix a parse failure anyway.
 #
 # Pre-v0.5.1 the analyzer logged every parse failure to Frappe's Error
@@ -105,7 +105,7 @@ MAX_LOGGED_FAILURES = 3
 # opportunities they could act on.
 #
 # v0.5.1: parser-limitation exceptions are counted but NOT logged to
-# the Error Log, and the user-facing warning is softer it explains
+# the Error Log and the user-facing warning is softer it explains
 # that sql_metadata can't parse these shapes and there's nothing to fix.
 # Real errors (AttributeError, ProgrammingError, RuntimeError, etc.)
 # still go to the Error Log and still produce the loud warning, because
@@ -406,7 +406,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		except Exception as e:
 			# Unexpected path this might indicate a real profiler bug.
 			# Count, log the first few to Error Log (so they're discoverable
-			# for investigation), and continue.
+			# for investigation) and continue.
 			real_failures[type(e).__name__] += 1
 			if logged_real < MAX_LOGGED_FAILURES:
 				try:
@@ -441,7 +441,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# analyzer blindly trusted the DBOptimizer heuristic and produced
 	# false-positive findings for:
 	#   1. columns already indexed (primary keys like `name`, framework
-	#      columns `parent`/`owner`/`modified`/`creation`, and every
+	#      columns `parent`/`owner`/`modified`/`creation` and every
 	#      Link / Data field with search_index: 1)
 	#   2. columns with types that can't be btree-indexed (JSON, geometry)
 	#   3. TEXT/BLOB columns where plain `ADD INDEX (col)` fails in
@@ -555,7 +555,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		)
 
 	# v0.5.1: Parser limitations (sql_metadata can't parse this shape) get
-	# a soft informational line, no Error Log noise, and explicit language
+	# a soft informational line, no Error Log noise and explicit language
 	# telling the user there's nothing to fix. Production sessions on
 	# ERPNext frequently hit this for the item search dialog's complex
 	# query (correlated subquery + ORDER BY if/locate/coalesce expression)

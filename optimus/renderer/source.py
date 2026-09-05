@@ -4,7 +4,7 @@
 """On-disk source-file access + a bounded LRU cache for the renderer.
 
 Every finding card that includes a source snippet, every AI-fix payload
-that includes a source window, and every Phase-2 hot-line drilldown
+that includes a source window and every Phase-2 hot-line drilldown
 ultimately calls back here to read source lines from the bench's app
 files. Three responsibilities:
 

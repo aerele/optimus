@@ -6,7 +6,7 @@
 
 Background: wkhtmltopdf's old QtWebKit engine doesn't reliably honor
 @media print overrides on the <details> disclosure element, so the
-Observations subsection, Analyzer notes section, and any collapsed
+Observations subsection, Analyzer notes section and any collapsed
 app buckets would silently disappear from the generated PDF. We add
 the ``open`` attribute to every <details> before rendering so the PDF
 matches the browser's expanded state.

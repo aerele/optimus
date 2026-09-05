@@ -6,7 +6,7 @@
 v0.6.x render-time enrichment that ties each action to the document it
 touched (from ``form_dict``) and each finding to the doc-event lifecycle
 hook (``validate`` / ``on_submit`` / etc.) the function was registered
-under. Used downstream by the call-tree, finding-card, and "Doc-event
+under. Used downstream by the call-tree, finding-card and "Doc-event
 lifecycle" report sections.
 
 Two public surfaces (both called from the render orchestrator in
@@ -14,7 +14,7 @@ Two public surfaces (both called from the render orchestrator in
 
 * ``_attach_action_context(actions, findings, recordings_by_uuid)``:
   in-place enrichment of ``action["target_doc"]``,
-  ``finding["technical_detail"]["target_doc"]``, and
+  ``finding["technical_detail"]["target_doc"]`` and
   ``finding["technical_detail"]["hook_events"]``. Also rewrites
   ``action["action_label"]`` / ``action["path"]`` /
   ``action["entry_callsite"]["function"]`` / the matching
@@ -80,7 +80,7 @@ def _module_from_filename(filename) -> str:
 def _doctype_from_controller_path(filename) -> str | None:
 	"""``erpnext/accounts/doctype/sales_invoice/sales_invoice.py`` → ``"Sales Invoice"``
 	(the segment right after ``doctype/``, un-scrubbed). Works on app-relative,
-	bench-relative, and absolute paths. ``None`` for non-controller paths. NB:
+	bench-relative and absolute paths. ``None`` for non-controller paths. NB:
 	``.title()`` mangles multi-cap names ("gl_entry" → "Gl Entry") same as
 	``frappe.unscrub``; accepted."""
 	if not filename:
@@ -383,7 +383,7 @@ def _attach_action_context(actions, findings, recordings_by_uuid) -> None:
 # ---------------------------------------------------------------------------
 # v0.6.x: "Doc-event lifecycle" section re-group the slow call-tree findings
 # by DocType → lifecycle event (validate / on_submit / …), tagging each as a
-# registered ``doc_events`` hook vs a controller method override, and surfacing
+# registered ``doc_events`` hook vs a controller method override and surfacing
 # cascaded DocTypes (e.g. GL Entry touched during a Sales Invoice submit).
 # Pure, render-time, derived from the findings already enriched by
 # _attach_action_context.

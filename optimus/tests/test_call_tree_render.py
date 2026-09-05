@@ -4,7 +4,7 @@
 """v0.7.x call-tree refinements (renderer._render_call_tree_node / _panel):
 hide [other: N frames] nodes, collapse the sub-1ms <sql> tail into one
 expandable summary, auto-open the hottest path down to the first user-app
-frame, and the reworded intro.
+frame and the reworded intro.
 """
 
 import json
@@ -124,7 +124,7 @@ def _act(label, dur, tree=None):
 
 
 def test_panel_single_action_keeps_legacy_layout():
-	# One action → unchanged singular heading, label in the section-tag, and
+	# One action → unchanged singular heading, label in the section-tag and
 	# no per-action header (byte-compatible with the pre-v0.13 panel).
 	panel = renderer._render_call_tree_panel([_act("solo", 900)])
 	assert "Call tree (top action)" in panel

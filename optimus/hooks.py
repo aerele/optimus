@@ -26,7 +26,7 @@ required_apps = ["frappe"]
 # HTTP-polling code in the browser because the cache-buster URL
 # /assets/.../floating_widget.js?v=0.5.1 was unchanged the version
 # wasn't bumped when JS was edited. Using mtime auto-invalidates on
-# every file edit during development, and still includes __version__
+# every file edit during development and still includes __version__
 # so release-to-release upgrades invalidate cleanly on production
 # (where mtimes are stable but version differs).
 import os as _os
@@ -106,7 +106,7 @@ after_request = [
 # ----------------------------------
 # These mirror the request hooks. The frappe.enqueue monkey-patch in
 # optimus/__init__.py injects `_profiler_session_id` into job
-# kwargs at enqueue time, and `before_job` reads (and pops) it to decide
+# kwargs at enqueue time and `before_job` reads (and pops) it to decide
 # whether to activate recording for this job.
 #
 # This is how a customer's "save Sales Invoice → submit" flow captures

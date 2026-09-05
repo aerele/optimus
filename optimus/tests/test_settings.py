@@ -6,7 +6,7 @@
 The reader is the single place analyzers and hooks call to resolve
 configuration threshold values, the enabled toggle, the tracked-
 apps allowlist. Tests here pin the precedence (DocType > site_config
-> default), the soft-fail behavior (never crash a request), and the
+> default), the soft-fail behavior (never crash a request) and the
 dataclass immutability that makes caching safe.
 """
 

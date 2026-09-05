@@ -82,7 +82,7 @@ def _walk_plan(root: dict) -> list:
 	but both A and B are tagged ``sort_without_index``: Postgres's plan-tree model
 	doesn't decompose a sort back to a single relation the way MariaDB's row-per-
 	table EXPLAIN does. The over-attribution is bounded: ``selectivity_pct`` is None
-	on PG so Low Filter Ratio never fires, and the Filesort finding still needs a
+	on PG so Low Filter Ratio never fires and the Filesort finding still needs a
 	large ``rows_examined``. (Phase-5 follow-up: measure finding noise on real join
 	plans and tighten if needed.)"""
 	tables: list = []

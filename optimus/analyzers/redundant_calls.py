@@ -4,7 +4,7 @@
 """Analyzer: detect redundant frappe.get_doc / cache.get_value / has_permission calls.
 
 Reads the per-recording sidecar argument log captured by the wraps in
-capture.py, buckets entries by (fn_name, identifier_safe), and emits
+capture.py, buckets entries by (fn_name, identifier_safe) and emits
 one Redundant Call finding per bucket whose count exceeds a configurable
 threshold.
 
@@ -200,7 +200,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 		# v0.5.2: callsite-based filtering. Use the first occurrence's
 		# stack as the representative (all occurrences of the same
 		# (fn_name, identifier) are by definition from the same cache
-		# key, and we flag them BECAUSE they all fire from the same
+		# key and we flag them BECAUSE they all fire from the same
 		# repeated loop so first-occurrence stack is canonical).
 		first_stack = occurrences[0][2]
 		if not first_stack:
@@ -257,7 +257,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			"finding_type": "Redundant Call",
 			# Title/description report the per-action LOOP magnitude
 			# (max_in_any_action), not the cross-action total (count) the
-			# loop ran max_in_any_action times in its hottest request, and
+			# loop ran max_in_any_action times in its hottest request and
 			# saying "(50 times)" when 50 = 10×5 requests overstates the loop
 			# ("almost always a loop" reads as 50-in-a-row). Severity already
 			# uses max_in_any_action; the total + distinct_actions stay in

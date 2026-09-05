@@ -26,7 +26,7 @@ Fixtures:
   background-worker connection that escapes the transaction in production
   flows and the Redis state isn't transactional either way.
 * :func:`seeded_session`: convenience wrapper that calls ``api.start``,
-  yields the session_uuid, and on teardown calls ``api.stop`` and waits
+  yields the session_uuid and on teardown calls ``api.stop`` and waits
   for analyze to finalise. Used by the lifecycle test.
 """
 
@@ -112,7 +112,7 @@ def _purge_test_sessions() -> None:
 @pytest.fixture
 def seeded_session(test_site):
 	"""Start an Optimus profiling session as Administrator, yield the
-	session_uuid, and tear down by calling ``api.stop`` + waiting for the
+	session_uuid and tear down by calling ``api.stop`` + waiting for the
 	analyze job to finish (capped at 60 s).
 
 	Tests that need a fully-finalized session use this fixture; tests

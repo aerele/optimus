@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Analyzer: per-table time, query count, read/write split, and index hints.
+"""Analyzer: per-table time, query count, read/write split and index hints.
 
 Aggregates, per SQL table touched by the session:
 
@@ -25,7 +25,7 @@ Aggregates, per SQL table touched by the session:
 Informational only no findings (``index_suggestions`` / ``explain_flags``
 emit the EXPLAIN-driven findings; this is the broad "what does this table
 look like" view). Uses ``sql_metadata.Parser`` (a frappe dependency) to
-extract tables, query type, and per-clause columns.
+extract tables, query type and per-clause columns.
 """
 
 import re

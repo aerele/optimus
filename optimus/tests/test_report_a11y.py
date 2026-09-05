@@ -5,7 +5,7 @@
 
 Renders end-to-end via ``renderer.render_raw`` and asserts the a11y pass holds:
 darkened mute token, severity text labels on the waterfall (not colour-only),
-the AI-fix "unverified" badge, back-to-top anchors, and the self-contained /
+the AI-fix "unverified" badge, back-to-top anchors and the self-contained /
 offline-safe invariant (no scripts, no external resource loads aerele.in
 *anchor* links are allowed).
 """

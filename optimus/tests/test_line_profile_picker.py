@@ -834,7 +834,7 @@ class TestPickerDialogIndent:
 	defect was purely in the dialog's HTML. The fix gives every row a
 	fixed-width ``.fp-toggle`` cell (a chevron for expandable rows, an
 	invisible spacer for leaves) so a depth-0 leaf's checkbox aligns flush
-	with depth-0 parents, and conveys depth ONLY through ``.fp-children``
+	with depth-0 parents and conveys depth ONLY through ``.fp-children``
 	DOM nesting. These guards keep the old per-row leaf indent from
 	creeping back.
 	"""

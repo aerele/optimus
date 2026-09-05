@@ -107,7 +107,7 @@
 
   /* v0.5.2 round 4: clickable callsite → editor. Subtle style - looks
      like the plain <code> block but with a dotted underline that
-     signals interactivity, and a hover color lift. We don't use the
+     signals interactivity and a hover color lift. We don't use the
      default-link blue because the callsite is already inline code
      and shouldn't compete for attention with surrounding text. */
   a.callsite-link {
@@ -528,7 +528,7 @@
     --ink: #1a1a1a;
     --ink-soft: #4a4a4a;
     /* a11y: darkened from #8a8580 (~3:1) to meet WCAG AA 4.5:1 on white,
-       --bg, --bg-tint, and --hot; stays lighter than --ink-soft for hierarchy. */
+       --bg, --bg-tint and --hot; stays lighter than --ink-soft for hierarchy. */
     --ink-mute: #5f6670;
     --rule: #e8e3d8;
     --rule-strong: #d8d2c2;
@@ -704,7 +704,7 @@
   /* Timing scope-tag: a small muted suffix next to every ms / second
      reading, naming the scope as "per hit" (single occurrence) or
      "consolidated" (sum across all hits in this session). Same rule
-     applies to inline prose, table headers, and KPI sub-lines.
+     applies to inline prose, table headers and KPI sub-lines.
      -----
      Terminology decision (U1, intentional split):
      - Data-layer field names use ``cumulative_ms`` (pyinstrument's
@@ -1307,9 +1307,9 @@
 
   /* DATA TABLES - Phase E.
      Editorial table style applied to per-action breakdown, background
-     jobs, hot frames, top queries, and XHR timing. The existing
+     jobs, hot frames, top queries and XHR timing. The existing
      `.tbl-clip` overflow class keeps long URLs/paths wrapping inside
-     cells; `.data` adds typography, dividers, and the inline-bar +
+     cells; `.data` adds typography, dividers and the inline-bar +
      row-finding patterns. */
   table.data {
     width: 100%; border-collapse: collapse;
@@ -1950,7 +1950,7 @@
       {% endif %}
 
       {# v0.7.x: the "Query (normalized)" block was dropped from finding cards
-         per user request - the callsite + fix already say what to change, and
+         per user request - the callsite + fix already say what to change and
          the normalized SQL still lives in the Slowest-queries / per-action
          tables. #}
 
@@ -2344,7 +2344,7 @@
 
   {# v0.7.x J.14: companion-tool promotional banner. Featured-card
      treatment with light-blue gradient background, serif product name,
-     bulleted value props, and a solid-blue CTA button. Inert anchor
+     bulleted value props and a solid-blue CTA button. Inert anchor
      only, no remote assets, no external CSS - the self-contained-HTML
      guarantee stays intact. #}
   <aside class="section lens-promo" style="
@@ -2366,7 +2366,7 @@
       Audit your Frappe ERPNext custom apps <strong>before they break in production</strong>.
     </p>
     <ul style="margin:0 0 14px; padding-left:20px; color:#1f2937; font-size:0.88rem; line-height:1.7;">
-      <li>Static checks for <strong>performance regressions</strong>, <strong>security gaps</strong>, and framework mis-use.</li>
+      <li>Static checks for <strong>performance regressions</strong>, <strong>security gaps</strong> and framework mis-use.</li>
       <li><strong>ERPNext convention drift</strong> detection.</li>
       <li><strong>Version-compatibility scans</strong> for Frappe v14&nbsp;/&nbsp;v15&nbsp;/&nbsp;v16 migrations.</li>
     </ul>
@@ -2422,7 +2422,7 @@
      via `.kpi-value.danger`. The old `.stats` + `.stat` markup
      pre-dates the variable system and is no longer referenced. #}
   {# v0.7.x Phase J.2.2: iterate the contract's 4-item kpis list.
-     Labels, values, and sub-lines are all composed in build_report_context. #}
+     Labels, values and sub-lines are all composed in build_report_context. #}
   <div class="kpis">
     {% for k in report_data.kpis %}
     <div class="kpi">
@@ -2557,7 +2557,7 @@
     {% endif %}
 
     {# Framework-level / observational findings live INSIDE Findings
-       as a collapsed subsection, and within THAT, bucket by app so a
+       as a collapsed subsection and within THAT, bucket by app so a
        site with 50 framework observations spread across frappe +
        erpnext + werkzeug doesn't read as one giant blob. User's
        rationale: "the framework and other 1 party app's scripts can
@@ -2567,7 +2567,7 @@
       <h3>Framework-level observations (not user-actionable)</h3>
       <p class="small muted">
         Informational signals without a concrete fix in your application code -
-        framework-level activity, infrastructure pressure, and hot-frame
+        framework-level activity, infrastructure pressure and hot-frame
         observations. Listed for transparency; investigate if something here surprises you.
       </p>
 
@@ -2717,7 +2717,7 @@
       {% if report_data.actions_framework %}
       {% set _max_fw_ms = (report_data.actions_framework | map(attribute='duration_ms') | map('default', 0) | list | max) or 1 %}
       <details class="subsection">
-        <summary class="small muted"><strong>{{ report_data.actions_framework | length }}</strong> framework action{{ "s" if report_data.actions_framework | length != 1 else "" }} (click to expand) - entry points in <code>frappe</code>, <code>erpnext</code>, and friends; the developer can't easily patch these</summary>
+        <summary class="small muted"><strong>{{ report_data.actions_framework | length }}</strong> framework action{{ "s" if report_data.actions_framework | length != 1 else "" }} (click to expand) - entry points in <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
         <table class="tbl-clip per-action-table data">
           <colgroup>
             <col class="col-idx">
@@ -2844,7 +2844,7 @@
     {% if report_data.background_jobs_framework %}
     {% set _max_fw_job_ms = (report_data.background_jobs_framework | map(attribute='duration_ms') | map('default', 0) | list | max) or 1 %}
     <details class="subsection">
-      <summary class="small muted"><strong>{{ report_data.background_jobs_summary.framework_count }}</strong> framework job{{ "s" if report_data.background_jobs_summary.framework_count != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code>, and friends; the developer can't easily patch these</summary>
+      <summary class="small muted"><strong>{{ report_data.background_jobs_summary.framework_count }}</strong> framework job{{ "s" if report_data.background_jobs_summary.framework_count != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
       <table class="data bg-jobs-table">
         <colgroup>
           <col class="bgcol-idx"><col class="bgcol-method"><col class="bgcol-status">
@@ -2877,7 +2877,7 @@
   {# --------------- v0.6.x: DOC-EVENT LIFECYCLE --------------- #}
   {# The slow call-tree findings re-grouped by DocType → lifecycle event
      (validate / on_submit / …), tagging each as a registered doc_events hook
-     or a controller method override, and surfacing cascaded DocTypes (e.g. a
+     or a controller method override and surfacing cascaded DocTypes (e.g. a
      GL Entry created during a Sales Invoice submit). Omitted when no save/
      submit action had a slow lifecycle method. #}
   {# v0.7.x Phase J.2.2: iterate report_data.doc_events (contract shape).
@@ -2938,7 +2938,7 @@
     <a id="resource"></a>{# v0.7.x Phase G: mock-spec ID alias #}
     <h2>Server Resource</h2>
     <p class="small muted">
-      CPU, memory, load average, DB and Redis pressure, and background
+      CPU, memory, load average, DB and Redis pressure and background
       queue depth sampled at each action boundary. Use this to tell code-slow
       from server-slow.
     </p>
@@ -3189,7 +3189,7 @@
     {% endif %}
     {% if report_data.hot_frames_framework %}
     <details class="subsection">
-      <summary class="small muted"><strong>{{ report_data.hot_frames_framework | length }}</strong> framework frame{{ "s" if report_data.hot_frames_framework | length != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code>, and friends; the developer can't easily patch these</summary>
+      <summary class="small muted"><strong>{{ report_data.hot_frames_framework | length }}</strong> framework frame{{ "s" if report_data.hot_frames_framework | length != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
       <p class="small muted" style="margin: 6px 0 8px; font-style: italic;">
         Framework rows show <em>cumulative</em> time (includes nested
         calls) wrapper self-time is sub-sampler-interval and
@@ -3262,7 +3262,7 @@
     {% endif %}
     {% if report_data.slow_queries_framework %}
     <details class="subsection">
-      <summary class="small muted"><strong>{{ report_data.slow_queries_framework | length }}</strong> framework quer{{ "ies" if report_data.slow_queries_framework | length != 1 else "y" }} (click to expand) - <code>frappe</code>, <code>erpnext</code>, and friends; the developer can't easily patch these</summary>
+      <summary class="small muted"><strong>{{ report_data.slow_queries_framework | length }}</strong> framework quer{{ "ies" if report_data.slow_queries_framework | length != 1 else "y" }} (click to expand) - <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
       <table class="query-table data">
         <colgroup>
           <col class="col-index">
@@ -3374,7 +3374,7 @@
         <br>Writes are usually cheap (a handful of sub-millisecond <code>INSERT</code>&nbsp;/&nbsp;<code>UPDATE</code> rows), so a write-heavy table normally won't be near the top of the time-sorted list below - that's why a document save doesn't dominate this section. Drill into the <a href="#per-action">per-action breakdown</a> to see exactly what each save / submit wrote.
       </p>
       {% endif %}
-      <p class="small muted">Where the time goes, and how each table was used. A query touching multiple tables is counted against each, so the rows sum to more than the session total. <strong>Reads</strong> = <code>SELECT</code>; <strong>Writes</strong> = <code>INSERT</code> / <code>UPDATE</code> / <code>DELETE</code>. Sorted by time desc.</p>
+      <p class="small muted">Where the time goes and how each table was used. A query touching multiple tables is counted against each, so the rows sum to more than the session total. <strong>Reads</strong> = <code>SELECT</code>; <strong>Writes</strong> = <code>INSERT</code> / <code>UPDATE</code> / <code>DELETE</code>. Sorted by time desc.</p>
       <table class="data db-tables-table">
         <colgroup>
           <col class="col-tname">
@@ -3412,7 +3412,7 @@
          cards BELOW the data table (lifted out of the colspan sub-rows
          the older markup used). Each card carries the table name, the
          read/write summary in mono, the recommendation prose, the
-         dark SQL snippet for any composite DDL, and an amber
+         dark SQL snippet for any composite DDL and an amber
          warn-line when writes are present. Only ACTIONABLE tables
          get cards: a concrete `recommended_index` (LLM-vetted) or
          at least one heuristic `index_candidates` column. The
@@ -3486,7 +3486,7 @@
         {% endfor %}
       </div>
       {% endif %}
-      <p class="small muted" style="margin-top:8px;">The <strong>index candidate</strong> for each table is the set of <code>WHERE</code> / <code>JOIN&nbsp;ON</code> columns this session filtered on <em>together</em> most often - a heuristic, not a verdict. Always confirm with the query's <code>EXPLAIN</code> (and a <code>SHOW INDEX FROM …</code>) before adding anything; every index also carries a write cost, and the column order in a composite matters (most-selective / equality columns first). Never suggested: Frappe's standard metadata columns (<code>name</code>, <code>creation</code>, <code>modified</code>, <code>parent</code>, <code>idx</code>, <code>docstatus</code>, …) - written on every save / already indexed; and Frappe's framework meta tables (<code>tabDocType</code>, <code>tabCustom Field</code>, <code>tabSingles</code>, …) - <code>bench&nbsp;migrate</code> owns their schema. ("-" in Reads/Writes means this session was analyzed before this breakdown was added - re-run <em>Retry Analyze</em> to populate.)</p>
+      <p class="small muted" style="margin-top:8px;">The <strong>index candidate</strong> for each table is the set of <code>WHERE</code> / <code>JOIN&nbsp;ON</code> columns this session filtered on <em>together</em> most often - a heuristic, not a verdict. Always confirm with the query's <code>EXPLAIN</code> (and a <code>SHOW INDEX FROM …</code>) before adding anything; every index also carries a write cost and the column order in a composite matters (most-selective / equality columns first). Never suggested: Frappe's standard metadata columns (<code>name</code>, <code>creation</code>, <code>modified</code>, <code>parent</code>, <code>idx</code>, <code>docstatus</code>, …) - written on every save / already indexed; and Frappe's framework meta tables (<code>tabDocType</code>, <code>tabCustom Field</code>, <code>tabSingles</code>, …) - <code>bench&nbsp;migrate</code> owns their schema. ("-" in Reads/Writes means this session was analyzed before this breakdown was added - re-run <em>Retry Analyze</em> to populate.)</p>
     {% else %}
       <p class="empty">No table breakdown available.</p>
     {% endif %}
@@ -3524,7 +3524,7 @@
     </p>
     <p class="small" style="margin-top: 8px; color: var(--ink-mute);">
       Do NOT email, upload, or share this file externally without redacting
-      it yourself. Query literals, request headers, form data, and full
+      it yourself. Query literals, request headers, form data and full
       stack traces are all included verbatim.
     </p>
     {# v0.7.x Phase J.2.1: reads report_data.footer.settings (a pre-

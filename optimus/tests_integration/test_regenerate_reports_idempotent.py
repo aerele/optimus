@@ -26,7 +26,7 @@ What that unit suite can't prove:
     into the renderer (a fresh UUID, a dict-iteration order change, a
     ``time.time()`` snapshot in a stamp), the upgrade path silently
     starts producing diff'd HTML which breaks ``regenerate`` as a
-    way to roll forward, and breaks any safe-report diffing workflow
+    way to roll forward and breaks any safe-report diffing workflow
     a dev-shop might rely on.
   * That the endpoint actually attaches the rendered HTML to
     ``Optimus Session.raw_report_file`` (Attach field) and the

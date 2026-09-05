@@ -249,7 +249,7 @@ class TestImpactScopeLabelBackfill:
 class TestEndToEndRender:
 	"""The real scenario: a session with a Slow Query finding (string
 	callsite) + an N+1 finding (dict callsite) must render without
-	crashing, and both must land in correct app buckets."""
+	crashing and both must land in correct app buckets."""
 
 	def test_mixed_callsite_shapes_render_without_error(self):
 		from optimus import renderer

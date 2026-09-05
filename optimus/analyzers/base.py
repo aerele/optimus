@@ -8,7 +8,7 @@ Every analyzer is a pure function with this signature:
     analyze(recordings: list[dict], context: AnalyzeContext) -> AnalyzerResult
 
 The analyzer reads the recording dicts (already enriched by analyze.py with
-sqlparse-formatted queries, EXPLAIN output, normalized queries, and
+sqlparse-formatted queries, EXPLAIN output, normalized queries and
 exact/normalized copy counts) and returns:
 
     actions Optimus Action child rows (only per_action populates this)
@@ -86,7 +86,7 @@ FRAMEWORK_APPS: frozenset[str] = frozenset({
 # resolved app ROOT (first segment) NOT a substring anywhere because frappe's
 # recorder strips the ``apps/`` prefix, so a user callsite is ``<app>/<app>/…`` and
 # a stripped lib is ``<lib>/…``; a lib name DEEPER in a relative path is therefore
-# the user's own submodule (``myapp/myapp/requests/…``), not the library, and must
+# the user's own submodule (``myapp/myapp/requests/…``), not the library and must
 # stay actionable. (Bare names, matched like call_tree's _THIRD_PARTY_LIB_SEGMENTS,
 # so the two surfaces agree. Out-of-bench absolute paths get a segment-anywhere
 # fallback in is_framework_callsite for the top-segment-is-a-filesystem-prefix case.)
@@ -108,7 +108,7 @@ _THIRD_PARTY_LIB_NAMES: frozenset[str] = frozenset({
 # they're already auto-indexed (`name` is the PK; `parent` is auto-indexed on
 # child tables). Suggesting an index on any of them is a write-cost trap the
 # developer shouldn't be nudged into so every index-suggestion path
-# (index_suggestions.py, table_breakdown.py's per-table candidates, and the
+# (index_suggestions.py, table_breakdown.py's per-table candidates and the
 # AI "suggest a fix" prompt) skips them.
 #
 # Mirrors `frappe.model.default_fields` + `frappe.model.optional_fields`.
@@ -131,9 +131,9 @@ def is_frappe_metadata_column(name) -> bool:
 # v0.6.0: Frappe's framework "meta" tables the ones that store the schema
 # itself (DocType / DocField / Custom Field / Property Setter), the Single-
 # doctype value store, the naming-series counters, the global-search index,
-# the migration log, and UI/dashboard/print configuration. `bench migrate`
+# the migration log and UI/dashboard/print configuration. `bench migrate`
 # owns these tables' structure (including their indexes), they're tiny or
-# write-on-every-customization, and indexing them by hand via raw SQL is
+# write-on-every-customization and indexing them by hand via raw SQL is
 # pointless (and would be clobbered on the next migrate). So no index-
 # suggestion path proposes an index on a table in this set; the table
 # breakdown still lists it (you may still want to know "30ms in tabSingles"),
@@ -344,7 +344,7 @@ def is_framework_callsite(
 	path segment), never a mid-path substring so neither ``my_crm/`` nor a user
 	submodule named ``crm/`` deep in a path is misread as the framework app.
 
-	Used by redundant_calls, explain_flags, n_plus_one, and top_queries to route
+	Used by redundant_calls, explain_flags, n_plus_one and top_queries to route
 	findings with framework-only callsites into the Observations bucket. Analyzers
 	resolve ``tracked_apps`` (from ``settings.get_tracked_apps()``) and
 	``installed_apps`` (from ``installed_apps_allowlist()``) ONCE and thread them in.

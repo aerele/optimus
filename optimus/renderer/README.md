@@ -7,7 +7,7 @@ aggregates per-concern submodules; pre-v0.10.0 it was a single 4,958-line
 
 This README is the future-author roadmap: why the package exists, the
 recipe to extract more clusters, the structural-snapshot canary that
-protects the template contract, and what's still in `_internal.py`
+protects the template contract and what's still in `_internal.py`
 waiting for a follow-up PR.
 
 ## Why a package
@@ -16,7 +16,7 @@ The monolith was the app's biggest maintainability hazard. Touching one
 helper rippled across 15+ callers spread over 3,000+ lines of context;
 code review became "find the section" before it became "review the
 change"; new contributors faced a steep on-ramp; the safe-report layer
-is exactly where a dev shop using Optimus would want to extend, and it
+is exactly where a dev shop using Optimus would want to extend and it
 was the hardest place to extend safely.
 
 The package split does **not** rewrite logic it relocates self-contained

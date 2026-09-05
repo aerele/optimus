@@ -343,7 +343,7 @@ def recording_count(session_uuid: str) -> int:
 # ----- background jobs the flow enqueued (v0.6.0) --------------------------
 # When a profiled flow calls frappe.enqueue, the __init__.py monkey-patch
 # registers the returned RQ job id here. analyze.run waits (capped) for these
-# to finish before gathering recordings, and before_job keeps recording them
+# to finish before gathering recordings and before_job keeps recording them
 # even after Stop (see `draining_until` below) so they aren't lost.
 
 

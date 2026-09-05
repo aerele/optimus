@@ -639,7 +639,7 @@ def after_job(method=None, kwargs=None, result=None, **rest):
 
 		# v0.5.0: write the infra diff to Redis for this job's recording.
 		# No correlation header to inject background jobs have no HTTP
-		# response, and no browser to correlate with.
+		# response and no browser to correlate with.
 		try:
 			start_snap = getattr(frappe.local, "optimus_infra_start", None)
 			if start_snap and recording_uuid_for_dump:
@@ -838,7 +838,7 @@ def _clear_capture_locals() -> None:
 # than 5 min ALWAYS exceeds the cap; at the cap, ``_finalize_pending_statuses``
 # marks the still-active job as ``status="Running"`` (no end times analyze
 # can't predict when it'll finish), ``_persist`` writes the Optimus
-# Background Job child row from that snapshot, and ``_cleanup_redis`` then
+# Background Job child row from that snapshot and ``_cleanup_redis`` then
 # DELETES the jobs hash. When the long job actually finishes minutes later,
 # the worker's ``_track_bg_job_finished`` writes to a deleted Redis key
 # (orphan) and the persisted row stays ``Running`` forever there's no
@@ -1001,7 +1001,7 @@ def _track_bg_job_finished(session_uuid: str, job_id: str) -> None:
 		)
 		frappe.db.commit()
 	except Exception:
-		# DocType update failure must NOT break the worker, and must NOT
+		# DocType update failure must NOT break the worker and must NOT
 		# suppress the Redis write (which is in a separate try above).
 		pass
 
@@ -1053,7 +1053,7 @@ def _inject_correlation_header(recording_uuid: str, response=None) -> None:
 		# ``in`` would falsely match when another app has already
 		# added "X-Optimus-Recording-Id-Legacy" or similar our real
 		# header would then NOT be appended, the browser would refuse
-		# to surface it to JavaScript, and the entire frontend
+		# to surface it to JavaScript and the entire frontend
 		# correlation feature would silently break. Split on commas
 		# and compare case-insensitively.
 		tokens = {t.strip().lower() for t in existing.split(",") if t.strip()}
@@ -1067,7 +1067,7 @@ def _inject_correlation_header(recording_uuid: str, response=None) -> None:
 
 	# v15 path (AND harmless belt-and-braces on v16): write directly
 	# to response.headers when the Response object is available. This
-	# covers v15 where the staging dict does not exist, and doesn't
+	# covers v15 where the staging dict does not exist and doesn't
 	# hurt v16 where the staged values will be ``update()``'d onto
 	# the same response.headers later anyway (setting twice is a
 	# no-op for the same key).

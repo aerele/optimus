@@ -6,7 +6,7 @@ prose at the top of the report.
 
 It must read for a non-developer: "operations" not "actions", humanized
 action names ("Submit Sales Invoice") not raw `cmd:action` strings,
-"high priority" not "high-severity", and a finding's raw `cmd:action`
+"high priority" not "high-severity" and a finding's raw `cmd:action`
 reference swapped for the humanized form. The issue count must equal the
 sum of the high/medium/low breakdown.
 """

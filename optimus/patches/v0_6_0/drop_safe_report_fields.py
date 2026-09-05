@@ -27,7 +27,7 @@ def execute():
 	# Reload the DocType so Frappe's column-drop migration picks up the
 	# field removal from optimus_session.json / optimus_settings.json.
 	# After this call, the underlying tabOptimus Session table no longer
-	# has safe_report_file / safe_report_pdf_file columns, and
+	# has safe_report_file / safe_report_pdf_file columns and
 	# tabOptimus Settings no longer has safe_report_include_source_lines.
 	try:
 		frappe.reload_doc("optimus", "doctype", "optimus_session")

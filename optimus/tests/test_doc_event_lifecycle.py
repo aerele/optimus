@@ -4,7 +4,7 @@
 """Unit tests for the "Doc-event lifecycle" breakdown re-grouping the slow
 call-tree findings by DocType → lifecycle event (validate / on_submit / …),
 tagging each as a registered ``doc_events`` hook vs a controller method
-override, and surfacing cascaded DocTypes. All pure functions in
+override and surfacing cascaded DocTypes. All pure functions in
 ``renderer``: no running site needed.
 """
 

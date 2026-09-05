@@ -6,7 +6,7 @@ contract shape per ``template_variable_contract.md`` (in the reference
 design package).
 
 This module is the adapter half of the reference architecture: ``renderer.py``
-keeps producing its existing 45-key flat context, and ``build_report_context``
+keeps producing its existing 45-key flat context and ``build_report_context``
 turns that into the canonical nested-dict shape the reference template
 expects. Phase J.1 (this module) exposes the contract data under a
 ``report_data`` namespace so template references can migrate section-by-
@@ -789,7 +789,7 @@ def _build_frontend(ctx) -> dict | None:
 
 	# J.2.4 non-contract additions: pass-through the raw summary +
 	# xhr_matched + orphans so the existing rc-card markup, XHR-table
-	# columns, and orphans details-block migrate as a straight key rename.
+	# columns and orphans details-block migrate as a straight key rename.
 	return {
 		"kpis": kpis,
 		"xhrs": xhrs_out,

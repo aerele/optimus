@@ -5,7 +5,7 @@
 //
 // Customizes the detail view to feel like a "report" rather than a raw
 // data form. The customer-facing summary HTML is rendered prominently at
-// the top, the analyzer findings are listed in a friendly format, and the
+// the top, the analyzer findings are listed in a friendly format and the
 // two report files get prominent download buttons (raw is gated to admins).
 
 frappe.ui.form.on("Optimus Session", {
@@ -117,7 +117,7 @@ function render_ai_refill_button(frm) {
 				__(
 					"Refresh every AI-generated section of the report? " +
 						"This re-runs fix suggestions on findings, the " +
-						"humanized Steps to Reproduce, and index advice " +
+						"humanized Steps to Reproduce and index advice " +
 						"for tables with a candidate then re-renders " +
 						"the report once. Calls the configured LLM for " +
 						"each, so it can take a bit. If it doesn't " +
@@ -630,7 +630,7 @@ function show_phase2_dialog(frm, data) {
 			// custom HTML trees (curated + framework). The legacy
 			// MultiCheck arrays (values.curated / values.framework_picks)
 			// no longer exist - the dialog now uses an HTML field
-			// per section, and selected state lives on the DOM.
+			// per section and selected state lives on the DOM.
 			d.$wrapper.find(".fp-tree input.fp-pick:checked").each(function () {
 				var path = $(this).data("pick");
 				if (path) picks.push({ dotted_path: String(path), source: "curated" });
@@ -831,7 +831,7 @@ function render_regenerate_report_button(frm) {
 
 // Parent-level, NON-status hint that an additive phase-2 line-profile drill-down
 // is still computing. The session's own `status` intentionally stays "Ready" (the
-// phase-1 report is rendered and available, and a session can have many phase-2
+// phase-1 report is rendered and available and a session can have many phase-2
 // passes) this just resolves the "parent Ready but a Phase 2 run says Analyzing"
 // confusion without flapping the real status. Driven by the already-loaded child
 // rows, so no extra round-trip; cleared automatically on the next refresh once the
@@ -979,7 +979,7 @@ function render_download_buttons(frm) {
 			() => {
 				frappe.confirm(
 					__(
-						"The report will be saved to your downloads folder and contains literal SQL values, request headers, and stack traces. Do not share it externally without redacting it yourself. Continue?",
+						"The report will be saved to your downloads folder and contains literal SQL values, request headers and stack traces. Do not share it externally without redacting it yourself. Continue?",
 					),
 					() => {
 						// Programmatic <a download="..."> click forces
@@ -1005,14 +1005,14 @@ function render_download_buttons(frm) {
 			() => {
 				frappe.confirm(
 					__(
-						"The report opens in a new tab and contains literal SQL values, request headers, and stack traces. Do not share it externally without redacting it yourself. Continue?",
+						"The report opens in a new tab and contains literal SQL values, request headers and stack traces. Do not share it externally without redacting it yourself. Continue?",
 					),
 					() => {
 						// Frappe serves /private/files/*.html with
 						// Content-Disposition: attachment, which triggers a
 						// download dialog instead of rendering inline. Fetch
 						// the content, wrap it in a blob URL with the right
-						// MIME type, and window.open that blob URLs are
+						// MIME type and window.open that blob URLs are
 						// not governed by the original response's
 						// Content-Disposition, so the browser renders the
 						// HTML inline. Works because the report HTML is

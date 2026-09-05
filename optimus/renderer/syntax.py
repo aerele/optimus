@@ -13,7 +13,7 @@ Two responsibilities:
 
   * **Diff-block highlighting** for the AI fix card. Walks the rendered
     Markdown output, finds ```diff fenced blocks (with or without an
-    explicit language hint), and wraps each ``+`` / ``-`` / ``@@`` line
+    explicit language hint) and wraps each ``+`` / ``-`` / ``@@`` line
     in a classed span so the template's CSS can colour the diff.
 
 Pygments is loaded lazily inside :func:`_ensure_pygments`: paths that
@@ -84,7 +84,7 @@ def _highlight_python_snippet(lines):
 	(GitHub Light palette via CSS in the template).
 
 	The lines are joined into one source block before highlighting so
-	multi-line strings, decorators, and other multi-line constructs
+	multi-line strings, decorators and other multi-line constructs
 	keep correct tokenisation; the resulting HTML is then split per
 	``\\n`` and each chunk assigned back to its source line. Idempotent
 	on lines that already carry ``content_html``. Falls back to

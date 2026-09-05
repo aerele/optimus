@@ -9,7 +9,7 @@ silent regression to "p95 < p50" (off-by-one in the interpolation, for
 example) would corrupt every finding card that reads from it.
 
 ``fmt_ms`` is the report's single duration-formatter; its output is
-load-bearing across every finding card, KPI strip, and stat label.
+load-bearing across every finding card, KPI strip and stat label.
 """
 
 import math

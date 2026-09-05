@@ -496,7 +496,7 @@ class TestBackgroundJobsShape:
 	def test_findings_count_none_coerced_to_zero(self):
 		"""Regression: Failed jobs that didn't produce findings carry
 		``findings_count: None`` from analyze. The bg-jobs section
-		template sums ``findings_count`` via Jinja's ``map | sum``, and
+		template sums ``findings_count`` via Jinja's ``map | sum`` and
 		Jinja's ``map('default', 0)`` filter only handles Undefined (NOT
 		None) so an uncoerced None used to crash the whole render with
 		``unsupported operand type(s) for +: 'int' and 'NoneType'``.

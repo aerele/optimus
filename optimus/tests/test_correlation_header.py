@@ -97,7 +97,7 @@ def test_correlation_header_gated_on_profiler_session_id():
     """Pass-5 regression guard: the correlation header must only be
     injected when an active profiler session is present not merely
     when there's a recording UUID. The standalone Frappe Recorder UI
-    sets frappe.local._recorder for non-session traffic, and leaking
+    sets frappe.local._recorder for non-session traffic and leaking
     X-Optimus-Recording-Id onto those responses would cause
     optimus_frontend.js to buffer XHR timings tagged to a recording
     UUID that has no session to flush them to.

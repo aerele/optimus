@@ -4,7 +4,7 @@
 """Unit tests for optimus.analyzers.explain_flags.
 
 Exercises all four red-flag patterns: Full Table Scan, Filesort,
-Temporary Table, and Low Filter Ratio (the one we just added in fix #2).
+Temporary Table and Low Filter Ratio (the one we just added in fix #2).
 """
 
 from optimus.analyzers import explain_flags
@@ -211,7 +211,7 @@ def test_rows_as_none_does_not_crash_analyzer(empty_context):
 def test_malformed_row_is_isolated_not_crashing(empty_context):
 	"""A single unparseable row must not kill the whole session's
 	explain_flags output. The per-row try/except catches the error,
-	counts it, logs a sample to the warnings list, and continues
+	counts it, logs a sample to the warnings list and continues
 	with the remaining rows.
 	"""
 	import unittest.mock as mock
@@ -264,7 +264,7 @@ def test_malformed_row_is_isolated_not_crashing(empty_context):
 # single-row parent lookup:
 #   SELECT * FROM `tabCustom DocPerm` WHERE `parent`=? ORDER BY `creation` ASC
 # with explain rows=1, type=ref, key=parent. The filesort is on ONE row
-# free in practice, and the user can't act on it anyway because `parent` is
+# free in practice and the user can't act on it anyway because `parent` is
 # already the ref key. Flagging it was pure noise. These tests cover the
 # MIN_ROWS_TO_FLAG_SORT row floor that suppresses the false positive.
 

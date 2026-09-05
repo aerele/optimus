@@ -5,7 +5,7 @@
 
 Full browser integration tests would need cypress/playwright, which is
 heavy to set up. These cheap smoke tests just verify that the JS files
-parse, that the widget's state machine symbols are present, and that the
+parse, that the widget's state machine symbols are present and that the
 CSS selectors look sane. Good enough to catch regressions where someone
 accidentally breaks the syntax or deletes a critical hook.
 
@@ -187,7 +187,7 @@ def test_widget_stop_has_error_callback():
 	from the 'function confirmAndStop' keyword to the closing brace)
 	rather than a fixed-size window after the stop call site the
 	callback body grew in v0.5.1 to handle the 'no active session'
-	reset path and a couple of console.log diagnostics, and a fixed
+	reset path and a couple of console.log diagnostics and a fixed
 	window was both brittle and too narrow.
 	"""
 	with open(WIDGET_JS) as f:

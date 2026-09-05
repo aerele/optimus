@@ -6,7 +6,7 @@
 A profiler's value slow-query / index / plan findings comes from running
 EXPLAIN and inspecting the database's plan output, which is MariaDB-specific.
 To support PostgreSQL too, every dialect-specific operation lives behind the
-``Dialect`` interface, and the analyzers consume the *normalized* dataclasses
+``Dialect`` interface and the analyzers consume the *normalized* dataclasses
 below instead of touching raw EXPLAIN rows. ``optimus.dbdialect.get_dialect()``
 returns the right adapter for the active ``frappe.db.db_type``.
 
@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 # Coercion helpers (shared by the adapters). Lifted from explain_flags so the
 # adapters and the analyzer agree on how to read driver-variant numerics:
 # certain drivers / EXPLAIN FORMAT variants return Decimal/str/None where an
-# int/float is expected, and a bare `>` comparison would crash.
+# int/float is expected and a bare `>` comparison would crash.
 # ---------------------------------------------------------------------------
 
 def to_int(val) -> int:

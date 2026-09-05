@@ -9,7 +9,7 @@ template (no Optimus Settings toggle by design single focused
 mention, not a configurable list).
 
 These tests pin the block's presence, position relative to the Jump-to
-nav, link target / safety attributes, copy fragments, and the
+nav, link target / safety attributes, copy fragments and the
 self-contained-HTML guarantee (no remote assets fetched at render
 time)."""
 

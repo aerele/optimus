@@ -160,7 +160,7 @@ def aggregate_samples(samples: list[list[dict]], picks: list[dict]) -> list[dict
 	            ``{dotted_path, qualname, file, first_lineno, source_lines: [{lineno, content}]}``.
 
 	Output: the analyzer's ``results_json`` shape (one entry per pick) with
-	per-line ``hits``, ``total_ms``, ``per_hit_us``, and ``content_hash``
+	per-line ``hits``, ``total_ms``, ``per_hit_us`` and ``content_hash``
 	merged in.
 
 	Samples that don't match any pick (stale code, renamed function, hot-
@@ -230,7 +230,7 @@ def start_line_profile_pass(
 	picks: list[dict],
 ) -> list[dict]:
 	"""Begin a phase-2 run. Resolves picks, captures source snapshots, persists
-	to Redis, and sets the per-user active flag.
+	to Redis and sets the per-user active flag.
 
 	Returns the resolved-picks-meta list (with eligibility) so the API can
 	echo it back to the client. Raises ``CaptureError`` if no picks are
@@ -498,7 +498,7 @@ def clear_budget_hit(run_uuid: str) -> None:
 
 def _disengage_run(run_uuid: str) -> None:
 	"""Watchdog callback: stop line tracing so the request finishes at its
-	natural speed, and flag the run as budget-truncated. Runs on a timer thread,
+	natural speed and flag the run as budget-truncated. Runs on a timer thread,
 	so it uses ``disengage_monitoring`` (zero events) NOT ``release_monitoring_tool``
 	(free the tool): freeing tool 2 out from under the request thread's still-active
 	profiler desyncs line_profiler's manager and orphans it (see

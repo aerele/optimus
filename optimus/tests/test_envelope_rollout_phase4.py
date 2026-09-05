@@ -6,7 +6,7 @@ envelope rollout to ``session_meta`` (the per-session metadata dict
 in ``optimus.session``).
 
 The previous phases covered settings_cache (v0.12.11),
-retention_backlog + onboarding_seen (v0.12.13), and explain_cache
+retention_backlog + onboarding_seen (v0.12.13) and explain_cache
 (v0.12.17). This phase adds ``session_meta``: the session-scoped
 context dict written by ``api.start`` (and updated throughout the
 session's life) and read on every recording's before_request /

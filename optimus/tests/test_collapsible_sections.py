@@ -294,7 +294,7 @@ def test_tldr_hero_renders_before_kpi_strip_and_summary():
 	was replaced by the TL;DR hero (one composed headline keyed on
 	the highest-impact finding). The hero lives RIGHT AFTER the
 	masthead first prominent block on the page. Pin: TL;DR comes
-	before the KPI strip, and the KPI strip comes before the
+	before the KPI strip and the KPI strip comes before the
 	Summary section."""
 	template = _read_template()
 	tldr_idx = template.find('<div class="tldr">')
@@ -410,7 +410,7 @@ def test_xhr_timing_table_has_fixed_layout_class():
 
 
 def test_how_to_read_fixes_stale_refs_and_verbs():
-	"""v0.7.x: How-to-read fixed 'Click' (not 'Hover') to open callsites, and
+	"""v0.7.x: How-to-read fixed 'Click' (not 'Hover') to open callsites and
 	no references to sections that don't exist by those names / a non-existent
 	'index candidate per table'."""
 	template = _read_template()

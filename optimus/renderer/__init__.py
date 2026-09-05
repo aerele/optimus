@@ -8,7 +8,7 @@ v0.10.0+ this module is a **package** that aggregates per-concern
 submodules. Pre-v0.10.0 it was a single 4,958-line file; the file → package
 conversion is the foundation for incremental section-by-section
 extraction. See ``optimus/renderer/README.md`` for the extraction recipe,
-the remaining cluster roadmap, and the structural-snapshot canary that
+the remaining cluster roadmap and the structural-snapshot canary that
 protects the template contract across follow-up PRs.
 
 The public API (what ``analyze.py`` / ``api.py`` / the test suite import)

@@ -6,7 +6,7 @@
 Wired into hooks.py as a scheduler_event running every 5 minutes. Catches
 two failure modes:
 
-  1. A user clicked Start, walked away, and never clicked Stop. After 10
+  1. A user clicked Start, walked away and never clicked Stop. After 10
      minutes the Redis active pointer auto-expires (TTL on the key) but
      the Optimus Session DocType row is still in `Recording` state with
      no path forward.
@@ -15,7 +15,7 @@ two failure modes:
      no in-flight job. Without the janitor it would sit there forever.
 
 Both cases are handled by force-stopping the session: clear the Redis
-state, mark the row as Stopping, and enqueue analyze.run. If the analyze
+state, mark the row as Stopping and enqueue analyze.run. If the analyze
 itself was the failure cause, it will retry once and end up in `Failed`
 on the next attempt at least the row no longer pretends to be live.
 """
@@ -103,7 +103,7 @@ def _sweep_orphan_redis_state():
 	Round 2 fix #11. A failed analyze that never retries leaves its
 	meta and recordings sets in Redis forever. This daily sweep catches
 	those orphans scans for profiler:session:* keys, extracts the
-	uuid, checks if the Optimus Session row still exists, and deletes
+	uuid, checks if the Optimus Session row still exists and deletes
 	if not.
 
 	Safe to run repeatedly. Uses SCAN with small batches so large
@@ -174,7 +174,7 @@ def _sweep_orphan_redis_state():
 
 	# Delete ALL per-session keys for each orphan (redis_keys is the inventory).
 	# The earlier sweep deleted only :meta + :recordings, leaving :pending_jobs,
-	# :jobs, and the three frontend keys to leak forever.
+	# :jobs and the three frontend keys to leak forever.
 	deleted = 0
 	for uuid in orphan_uuids:
 		for builder in (

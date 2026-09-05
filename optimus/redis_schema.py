@@ -6,7 +6,7 @@ Redis state.
 
 The v0.12.0 release establishes the foundation: a single source-of-truth
 for the schema version (:data:`SCHEMA_VERSION`), a sentinel key written at
-app import (:func:`write_schema_sentinel`), and a pair of opt-in
+app import (:func:`write_schema_sentinel`) and a pair of opt-in
 envelope helpers (:func:`wrap_value`, :func:`unwrap_value`) that future
 schema changes can use to keep new code safe against in-flight Redis
 values from older releases.
@@ -164,7 +164,7 @@ def read_schema_sentinel() -> int | None:
 	flush). Best-effort; any read failure returns ``None``.
 
 	Future PRs that drive proactive migration off the sentinel call this
-	at startup, compare against :data:`SCHEMA_VERSION`, and dispatch
+	at startup, compare against :data:`SCHEMA_VERSION` and dispatch
 	per-version migrators. The foundation release only writes the
 	sentinel; nothing reads it yet (except the test).
 	"""

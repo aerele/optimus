@@ -4,7 +4,7 @@
 """HTML report renderer for a Optimus Session.
 
 Renders a single admin-scoped report: full data including raw SQL with
-literal values, request headers, form data, and complete stack traces.
+literal values, request headers, form data and complete stack traces.
 Gated to System Manager + the recording user via Frappe's File
 permission hook (see permissions.py:file_has_permission).
 
@@ -219,7 +219,7 @@ _TEMPLATES_DIR = os.path.join(
 
 
 # v0.6.0 Round 7: safe-mode redaction removed. _safe_url, redact_sensitive,
-# _SENSITIVE_FIELD_PATTERNS, and the URL-docname/QS denylist all lived
+# _SENSITIVE_FIELD_PATTERNS and the URL-docname/QS denylist all lived
 # here. The product now ships one admin-scoped report, so the
 # defense-in-depth redaction layer is gone. See product_thesis_self_hosted.md
 # memory for the rationale.
@@ -254,10 +254,10 @@ def render(
 
 	Args:
 	    session_doc: The Optimus Session DocType row (loaded via
-	        frappe.get_doc). Provides totals, summary_html, and the
+	        frappe.get_doc). Provides totals, summary_html and the
 	        actions/findings child rows.
 	    recordings: The in-memory recordings list. Required provides
-	        raw SQL, headers, form_dict, and full stack traces for the
+	        raw SQL, headers, form_dict and full stack traces for the
 	        per-action drill-down.
 	    generated_at: ISO timestamp of when this report was generated;
 	        defaults to now() if not provided.
@@ -349,7 +349,7 @@ def render(
 	# that bucket. Filtered AFTER ``_attach_representative_callsites``
 	# so SQL red-flag findings that DID get a representative callsite
 	# survive. The filter is global these findings also disappear
-	# from the Executive Summary, severity counts, and observations
+	# from the Executive Summary, severity counts and observations
 	# so there's no phantom-row inconsistency between sections.
 	def _has_renderable_callsite(f):
 		detail = f.get("technical_detail") or {}
@@ -371,7 +371,7 @@ def render(
 	# wired in after _attach_drilldown_chains populates them on the
 	# findings.
 	_line_drilldown_index = _build_line_drilldown_callsite_index(session_doc)
-	# v0.6.x: which document each save/submit action touched, and which
+	# v0.6.x: which document each save/submit action touched and which
 	# doc-event lifecycle hook each slow function fired in.
 	_attach_action_context(actions, all_findings, recordings_by_uuid)
 	# v0.7.x: VSCode Dark+ syntax highlighting for every source_snippet
@@ -382,7 +382,7 @@ def render(
 	_highlight_all_snippets(actions, all_findings)
 	# v0.7.x J.13: render-time em-dash sweep over analyzer-baked prose.
 	# The analyzer wrote em dashes into customer_description, llm_fix HTML,
-	# session.notes_html, and summary_html during analyse-time (pre-J.12).
+	# session.notes_html and summary_html during analyse-time (pre-J.12).
 	# Replace at render time so existing reports get the hyphen treatment
 	# without requiring a Retry Analyze.
 	def _strip_em(s):
@@ -562,7 +562,7 @@ def render(
 
 	# v0.6.x: drop framework/internal db tables from the "Time spent per
 	# database table" section schema/meta (DocType/DocField/…), user-
-	# session bookkeeping (User/Has Role/DefaultValue/…), and information_
+	# session bookkeeping (User/Has Role/DefaultValue/…) and information_
 	# schema.*. The note under the section's intro reports the count so the
 	# total stays honest. Scope is intentional: top-queries leaderboard /
 	# per-action drill-down / full recordings keep their raw data.
@@ -920,7 +920,7 @@ def render(
 		# "Findings what to fix"); "observational_findings" the rest.
 		# "all_findings" is the full list the "Issues found" stat card
 		# shows that total and a severity breakdown of it, so its big
-		# number, its sub-line, and the Summary prose all agree.
+		# number, its sub-line and the Summary prose all agree.
 		"findings": findings,
 		"observational_findings": observational_findings,
 		"all_findings": all_findings,
@@ -1090,7 +1090,7 @@ def render_raw(session_doc: Any, recordings: list[dict]) -> str:
 	v0.6.0 Round 7: name kept as ``render_raw`` for back-compat but
 	there's no longer a ``render_safe`` counterpart single rendering
 	path. Requires the in-memory recordings list (raw SQL, headers,
-	form_dict, and full stack traces are NOT stored on the DocType).
+	form_dict and full stack traces are NOT stored on the DocType).
 	"""
 	return render(session_doc, recordings)
 
@@ -1430,7 +1430,7 @@ def _build_action_plan(
 
 	Sort: severity DESC, then estimated_impact_ms DESC. Findings with
 	zero impact are still eligible (they may not have a measurable
-	cost but still warrant attention). Empty input → empty list, and
+	cost but still warrant attention). Empty input → empty list and
 	the template hides the section.
 
 	The Action plan is conceptually the same top-3 as the old exec-
@@ -1672,7 +1672,7 @@ def _compose_tldr(
 	"""Compose the TL;DR hero block.
 
 	Picks the single highest-impact finding (severity desc, then impact
-	desc), looks up its category, and builds a one-sentence headline
+	desc), looks up its category and builds a one-sentence headline
 	with the impact / loop-count / hook-name highlighted via
 	``<span class="hot">…</span>``. The sub-line is session totals.
 
@@ -1738,7 +1738,7 @@ def _compose_tldr(
 
 	# v0.7.x J.15: rich Hot Line branch narrative two-sentence
 	# headline that names the target DocType being fetched, the loop
-	# count, the action it's slowing, and the expected savings.
+	# count, the action it's slowing and the expected savings.
 	# Falls through to a slimmer sentence when any of those are missing.
 	if category == "hot_line" and affected:
 		_detail = (top.get("technical_detail") or {})
@@ -2039,7 +2039,7 @@ _HOTPATH_BUCKET_LABEL = "Request hotspots"
 
 def _filter_top_queries_for_display(queries: list) -> list:
 	"""Trim the slowest-queries leaderboard to what's worth showing:
-	user-app callsites only, and only queries that cleared the
+	user-app callsites only and only queries that cleared the
 	"actually did some work" floor (``TOP_QUERY_FLOOR_MS``).
 
 	Mirrors what ``analyzers.top_queries`` does at analyze time so that
@@ -2234,7 +2234,7 @@ def _now_iso() -> str:
 
 
 # ---------------------------------------------------------------------------
-# v0.3.0: call tree, donut, and hot frames helpers
+# v0.3.0: call tree, donut and hot frames helpers
 # ---------------------------------------------------------------------------
 
 HARDCODED_ALLOWED_PREFIXES = ("frappe.", "erpnext.", "payments.", "hrms.")

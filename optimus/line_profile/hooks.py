@@ -81,7 +81,7 @@ def before_request_line_profile(*args, **kwargs) -> None:
 		# after_request teardown) and left tool 2 registered, clear the orphan
 		# before enabling so the worker recovers without a bench restart. Gated on
 		# the PROCESS-WIDE active count, not this thread's local: under a gthread
-		# worker a sibling thread mid-profile legitimately owns tool 2, and
+		# worker a sibling thread mid-profile legitimately owns tool 2 and
 		# reclaiming it would desync that thread (the tool-2 leak class). The
 		# thread-local check stays as a cheap first gate. Log when the reclaim
 		# actually fires silent reclaim masked the leak class in production.
@@ -121,7 +121,7 @@ def before_request_line_profile(*args, **kwargs) -> None:
 
 
 def after_request_line_profile(*args, **kwargs) -> None:
-	"""Disable the per-request profiler, serialize per-line stats, and
+	"""Disable the per-request profiler, serialize per-line stats and
 	push the batch to Redis. Cleared even if profiler was never enabled,
 	to keep frappe.local clean."""
 	profiler = getattr(frappe.local, "_lp_profiler", None)

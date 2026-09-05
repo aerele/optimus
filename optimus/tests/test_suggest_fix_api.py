@@ -7,7 +7,7 @@
 integration tests, which the test harness doesn't provide so, matching
 the pattern of ``test_regenerate_reports_api.py``, we source-inspect the
 endpoint bodies to pin the contract: whitelisted, gated, AI-enabled
-guard, eligible-type guard, cache short-circuit, and persistence shape.
+guard, eligible-type guard, cache short-circuit and persistence shape.
 """
 
 import os

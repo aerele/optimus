@@ -26,7 +26,7 @@ The unit suite covers individual sweep functions in isolation
 
 That gap is what this final integration test fills. Each test creates
 a synthetic Optimus Session with an explicit ``started_at`` /
-``status``, calls ``janitor.sweep_old_sessions()``, and asserts the
+``status``, calls ``janitor.sweep_old_sessions()`` and asserts the
 post-sweep state.
 
 This is the **seventh and final** row of the v0.11.0 deferred-tests

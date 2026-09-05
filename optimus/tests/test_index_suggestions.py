@@ -89,7 +89,7 @@ def test_single_suggestion_per_table_column(monkeypatch, empty_context):
 def test_optimizer_skipped_when_dialect_unsupported(monkeypatch, empty_context):
 	"""On a dialect whose ``supports_query_optimizer`` is False (Postgres),
 	the analyzer must NOT invoke Frappe's DBOptimizer at all it returns a
-	single explanatory warning and no findings, and never calls
+	single explanatory warning and no findings and never calls
 	``_optimize_query``.
 
 	Regression: on Postgres, ``_optimize_query`` runs DESCRIBE / SHOW INDEX
@@ -613,7 +613,7 @@ def test_severity_scales_with_savings(monkeypatch, empty_context):
 # v0.5.1 regression guards: filter non-SELECT statements BEFORE the optimizer.
 # A real production session showed 47% "parse failures" (334 of 705) because
 # transaction markers (BEGIN/COMMIT/SAVEPOINT/SET) were being fed to sql_metadata.
-# None of those benefit from an index suggestion, and most raise ValueError.
+# None of those benefit from an index suggestion and most raise ValueError.
 # The fix: filter by leading keyword before ever calling _optimize_query.
 # ---------------------------------------------------------------------------
 
@@ -1141,7 +1141,7 @@ def test_frappe_meta_tables_are_never_suggested(monkeypatch, empty_context):
 	"""v0.6.0: no index suggestion is emitted on a Frappe framework "meta"
 	table (tabDocType / tabCustom Field / tabSingles / …) `bench migrate`
 	owns those tables' schema, so a hand-added index is pointless. The
-	suggestion is dropped before it's even bucketed (no schema lookup), and
+	suggestion is dropped before it's even bucketed (no schema lookup) and
 	a single warning names the tables."""
 
 	def fake_optimize(query):
@@ -1277,7 +1277,7 @@ def test_low_per_query_skips_classify_lookup(monkeypatch, empty_context):
 		"calls": calls,
 	}
 	result = index_suggestions.analyze([recording], empty_context)
-	# No findings, and no SHOW INDEX / information_schema call was made.
+	# No findings and no SHOW INDEX / information_schema call was made.
 	assert result.findings == []
 	for sql in sql_calls:
 		assert "SHOW INDEX" not in sql, (

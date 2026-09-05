@@ -149,7 +149,7 @@ class TestDrilldownRender:
 		'chain attempted but empty' the Drill-down placeholder
 		renders ('no deeper user-code frame'). The attachment runs
 		because the finding has a callsite + action_ref + tree; the
-		walker returns [] because it couldn't locate the origin, and
+		walker returns [] because it couldn't locate the origin and
 		the template's placeholder branch fires.
 
 		Pre-v0.7 this case rendered nothing at all. The placeholder is

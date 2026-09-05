@@ -6,7 +6,7 @@
 User request: "the framework and other 1 party app's scripts can be
 easy avoided and focus on their custom app". The renderer buckets
 findings by their callsite's top-level app (apps/myapp/... → myapp),
-puts tracked apps first, then remaining apps by total impact, and
+puts tracked apps first, then remaining apps by total impact and
 falls "Other (no callsite)" into a tail bucket.
 """
 

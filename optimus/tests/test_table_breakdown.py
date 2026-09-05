@@ -519,7 +519,7 @@ class TestHideFrameworkTablesToggle:
 
 	def _four_tables(self):
 		# One user-app table + three framework/internal ones (a schema-meta,
-		# a framework-internal session table, and information_schema.*).
+		# a framework-internal session table and information_schema.*).
 		return [
 			{"table": "tabSales Invoice", "duration_ms": 140.0, "queries": 840,
 			 "read_count": 4, "write_count": 836, "read_time_ms": 2.0, "write_time_ms": 138.0,

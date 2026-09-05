@@ -13,7 +13,7 @@ emitted ONE collapsed finding titled "Callsite ran X queries (N
 variants) at file:line".
 
 v0.7.x: the multi-variant "Callsite ran …" finding type is dropped
-the wording reads as jargon, the fix hint is generic, and the
+the wording reads as jargon, the fix hint is generic and the
 dominant variant is already surfaced elsewhere. Only the
 single-variant classic "Same query ran N× at …" remains.
 """

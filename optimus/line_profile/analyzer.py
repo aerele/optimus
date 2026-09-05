@@ -286,7 +286,7 @@ def _build_call_chain(
 	``{dotted_path, qualname, file, lineno, content, total_ms, hits}``.
 	Each step is the *hottest line* of the function at that level of
 	the chain (which is the call into the next-deeper instrumented
-	function for every non-leaf step, and the actual leaf hot line at
+	function for every non-leaf step and the actual leaf hot line at
 	the end).
 
 	Empty chain (length 0) is returned when the leaf has no upstream
@@ -530,7 +530,7 @@ def _publish(event: str, payload: dict) -> None:
 def run_analyze(session_uuid: str, run_uuid: str) -> None:
 	"""RQ entry point. Reads phase-2 samples from Redis, builds the
 	results_json, persists findings to the parent Optimus Session, marks
-	the Phase 2 Run as Ready (or Failed), and triggers re-render.
+	the Phase 2 Run as Ready (or Failed) and triggers re-render.
 
 	On any uncaught exception: rollback, mark Failed, publish failed event,
 	re-raise so RQ logs it.

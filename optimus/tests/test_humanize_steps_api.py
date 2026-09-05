@@ -12,7 +12,7 @@ recordings, calls ``ai_fix.humanize_steps``, persists ``notes``, re-renders.
 The internal mechanics (recording fetch, action build, LLM call, notes
 persist) were extracted into ``_humanize_steps_core`` so the new
 ``refill_ai_suggestions`` endpoint can re-use them; the endpoint-level
-checks still cover the validation envelope, and the helper-level checks
+checks still cover the validation envelope and the helper-level checks
 pin the mechanical moves.
 """
 

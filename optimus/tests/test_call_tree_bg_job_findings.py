@@ -9,7 +9,7 @@ The Slow Hot Path walker used to blame `rq.worker.execute_job` /
 frames carry 100% of the job's wall time as cumulative_ms and the
 walker's framework-skip predicate (``_is_framework_frame``) only
 covered ``frappe/*`` and ``optimus/*``. Wrapper frames in
-``site-packages/rq/`` leaked through, qualified as hot subtrees, and
+``site-packages/rq/`` leaked through, qualified as hot subtrees and
 the walker emitted on the wrapper instead of descending to the user-
 code line that's actually expensive.
 

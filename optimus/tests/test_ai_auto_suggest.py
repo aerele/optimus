@@ -8,7 +8,7 @@ Suggestions ▸ "Suggest AI fixes by default").
 Pure-test path: ``settings.get_config`` / ``ai_fix.is_available`` /
 ``ai_fix.suggest_fix`` are patched, so no network and no live site. The
 function is best-effort and time-budgeted; here we pin the gating,
-ordering, capping, and warning behaviour.
+ordering, capping and warning behaviour.
 """
 
 import json

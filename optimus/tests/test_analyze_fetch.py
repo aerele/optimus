@@ -352,7 +352,7 @@ def test_load_recordings_bundle_none_without_file():
 
 
 def test_mark_ai_spend_session_sets_and_is_guarded(monkeypatch):
-	"""The marker is set on frappe.local for the spend recorder, and a stubbed
+	"""The marker is set on frappe.local for the spend recorder and a stubbed
 	frappe (no .local) must not raise unit tests rely on this no-op."""
 	from types import SimpleNamespace
 

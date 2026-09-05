@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for findings, aggregation, and analyzer entry point of call_tree."""
+"""Tests for findings, aggregation and analyzer entry point of call_tree."""
 
 from optimus.analyzers import call_tree
 from optimus.analyzers.base import AnalyzeContext
@@ -199,7 +199,7 @@ def test_hook_bottleneck_emitted_instead_of_slow_hot_path():
 	# Should emit F3 (Hook Bottleneck), NOT F1 (Slow Hot Path)
 	# Note: the run_method node itself starts with "frappe." so it matches
 	# the "framework" prefix check in _walk_for_findings. The ACTUAL hook
-	# (validate) is its child, and validate's ancestor chain contains
+	# (validate) is its child and validate's ancestor chain contains
 	# Document.run_method, so validate gets the Hook Bottleneck label.
 	assert any(f["finding_type"] == "Hook Bottleneck" for f in findings)
 	assert not any(f["finding_type"] == "Slow Hot Path" for f in findings)
@@ -499,7 +499,7 @@ def test_pure_helper_filters_form_load_and_meta_bundle():
 
 
 def test_pure_helper_filters_query_builder_and_database():
-	"""query_builder/utils.py, model/qb_query.py, and the
+	"""query_builder/utils.py, model/qb_query.py and the
 	database/mariadb/postgres layer are "every query passes through
 	here" plumbing. The top_queries / index_suggestions analyzers
 	surface SQL issues more actionably; the hot-frame entries are
@@ -883,7 +883,7 @@ def test_strip_profiler_frames_removes_snapshot_subtree():
 	part of the user's action.
 
 	After _strip_profiler_frames, the tree must contain zero nodes
-	from optimus/*, and the user-visible chain (application →
+	from optimus/* and the user-visible chain (application →
 	init_request → call) must remain intact."""
 	tree = _node("application", "frappe/app.py", 47.15, [
 		_node("init_request", "frappe/app.py", 31.56, [
@@ -1173,7 +1173,7 @@ def test_top_level_app_rejects_stdlib_and_third_party(monkeypatch):
 	"""v0.5.1: production donut showed Python(inspect.py),
 	Python(functools.py), Python(MySQLdb), Python(<built-in>) as
 	separate buckets all noise. Single-segment filenames (stdlib),
-	site-packages paths, and angle-bracketed synthetic markers must
+	site-packages paths and angle-bracketed synthetic markers must
 	all collapse to [other]. First-segment paths that AREN'T a
 	known installed Frappe app (MySQLdb etc.) also collapse to
 	[other] once frappe.get_installed_apps is consulted.

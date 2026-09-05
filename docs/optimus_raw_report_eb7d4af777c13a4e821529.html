@@ -118,7 +118,7 @@
 
   /* v0.5.2 round 4: clickable callsite → editor. Subtle style - looks
      like the plain <code> block but with a dotted underline that
-     signals interactivity, and a hover color lift. We don't use the
+     signals interactivity and a hover color lift. We don't use the
      default-link blue because the callsite is already inline code
      and shouldn't compete for attention with surrounding text. */
   a.callsite-link {
@@ -637,7 +637,7 @@
   /* Timing scope-tag: a small muted suffix next to every ms / second
      reading, naming the scope as "per hit" (single occurrence) or
      "consolidated" (sum across all hits in this session). Same rule
-     applies to inline prose, table headers, and KPI sub-lines.
+     applies to inline prose, table headers and KPI sub-lines.
      -----
      Terminology decision (U1, intentional split):
      - Data-layer field names use ``cumulative_ms`` (pyinstrument's
@@ -1180,9 +1180,9 @@
 
   /* DATA TABLES - Phase E.
      Editorial table style applied to per-action breakdown, background
-     jobs, hot frames, top queries, and XHR timing. The existing
+     jobs, hot frames, top queries and XHR timing. The existing
      `.tbl-clip` overflow class keeps long URLs/paths wrapping inside
-     cells; `.data` adds typography, dividers, and the inline-bar +
+     cells; `.data` adds typography, dividers and the inline-bar +
      row-finding patterns. */
   table.data {
     width: 100%; border-collapse: collapse;
@@ -1649,7 +1649,7 @@
       Audit your Frappe ERPNext custom apps <strong>before they break in production</strong>.
     </p>
     <ul style="margin:0 0 14px; padding-left:20px; color:#1f2937; font-size:0.88rem; line-height:1.7;">
-      <li>Static checks for <strong>performance regressions</strong>, <strong>security gaps</strong>, and framework mis-use.</li>
+      <li>Static checks for <strong>performance regressions</strong>, <strong>security gaps</strong> and framework mis-use.</li>
       <li><strong>ERPNext convention drift</strong> detection.</li>
       <li><strong>Version-compatibility scans</strong> for Frappe v14&nbsp;/&nbsp;v15&nbsp;/&nbsp;v16 migrations.</li>
     </ul>
@@ -1918,7 +1918,7 @@
         <div class="num">1</div>
         <div>
           <p class="title">Optimise the hot call path</p>
-          <p class="desc">The body of **bg_recheck_users** itself consumed 75% of the action time (579ms). This isn't a slow subcall - the function's own logic is the bottleneck. To pinpoint the exact hot line, run a **Line-Level Drilldown** (the *Run Line-Profile Pass* button on the session) and pick this function from the candidates - that profiles tight loops, expensive computations, and string/regex work at the statement level so you can optimize or cache them.
+          <p class="desc">The body of **bg_recheck_users** itself consumed 75% of the action time (579ms). This isn't a slow subcall - the function's own logic is the bottleneck. To pinpoint the exact hot line, run a **Line-Level Drilldown** (the *Run Line-Profile Pass* button on the session) and pick this function from the candidates - that profiles tight loops, expensive computations and string/regex work at the statement level so you can optimize or cache them.
 
 Note: self-time here is wall-clock (the sampler measures elapsed time, not CPU). If this function blocks on I/O - `requests.get`, sync DB calls outside the recorder, `time.sleep` - that wait counts as self-time. Check the call tree for hidden I/O before optimising compute.</p>
 <div class="callsite"><code>ugly_code/python/common.py:199</code></div>        </div>
@@ -2207,7 +2207,7 @@ Also affects 1 other action.</p>
         Use the <em>DB time</em> column when you want a column total.
       </p>
       <section class="subsection">
-        <summary class="small muted"><strong>16</strong> framework actions (click to expand) - entry points in <code>frappe</code>, <code>erpnext</code>, and friends; the developer can't easily patch these</summary>
+        <summary class="small muted"><strong>16</strong> framework actions (click to expand) - entry points in <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
         <table class="tbl-clip per-action-table data">
           <colgroup>
             <col class="col-idx">
@@ -2834,7 +2834,7 @@ looped_validate            </span>
   <section class="section" id="server-resource">
     <a id="resource"></a>    <h2>Server Resource</h2>
     <p class="small muted">
-      CPU, memory, load average, DB and Redis pressure, and background
+      CPU, memory, load average, DB and Redis pressure and background
       queue depth sampled at each action boundary. Use this to tell code-slow
       from server-slow.
     </p>
@@ -3271,7 +3271,7 @@ looped_validate            </span>
     <a id="hot-frames"></a>    <h2>Hot frames (top 20)</h2>
       <p class="small muted">No hot frames in your own app's code - all frames ran in framework code. Expand the block below to see what.</p>
     <section class="subsection">
-      <summary class="small muted"><strong>20</strong> framework frames (click to expand) - <code>frappe</code>, <code>erpnext</code>, and friends; the developer can't easily patch these</summary>
+      <summary class="small muted"><strong>20</strong> framework frames (click to expand) - <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
       <table class="data hot-frames-table">
         <thead>
           <tr>
@@ -3444,7 +3444,7 @@ looped_validate            </span>
 <code title="5 write(s), 3ms">tabSales Invoice</code>&nbsp;(5), <code title="3 write(s), 2ms">tabSales Invoice Item</code>&nbsp;(3), <code title="3 write(s), 1ms">tabPayment Schedule</code>&nbsp;(3), <code title="3 write(s), 1ms">tabSales Invoice Advance</code>&nbsp;(3), <code title="2 write(s), 1ms">tabGL Entry</code>&nbsp;(2), <code title="2 write(s), 0ms">tabSales Invoice Payment</code>&nbsp;(2), <code title="1 write(s), 1ms">tabPayment Ledger Entry</code>&nbsp;(1), <code title="1 write(s), 0ms">tabVersion</code>&nbsp;(1), <code title="1 write(s), 0ms">tabFile</code>&nbsp;(1).
         <br>Writes are usually cheap (a handful of sub-millisecond <code>INSERT</code>&nbsp;/&nbsp;<code>UPDATE</code> rows), so a write-heavy table normally won't be near the top of the time-sorted list below - that's why a document save doesn't dominate this section. Drill into the <a href="#per-action">per-action breakdown</a> to see exactly what each save / submit wrote.
       </p>
-      <p class="small muted">Where the time goes, and how each table was used. A query touching multiple tables is counted against each, so the rows sum to more than the session total. <strong>Reads</strong> = <code>SELECT</code>; <strong>Writes</strong> = <code>INSERT</code> / <code>UPDATE</code> / <code>DELETE</code>. Sorted by time desc.</p>
+      <p class="small muted">Where the time goes and how each table was used. A query touching multiple tables is counted against each, so the rows sum to more than the session total. <strong>Reads</strong> = <code>SELECT</code>; <strong>Writes</strong> = <code>INSERT</code> / <code>UPDATE</code> / <code>DELETE</code>. Sorted by time desc.</p>
       <table class="data">
         <thead>
           <tr>
@@ -3566,7 +3566,7 @@ looped_validate            </span>
                 </div>
                 <div class="fix-body"><p><strong>Recommendation</strong> <code>(communication_type, reference_doctype, reference_name, communication_date)</code> on <code>tabCommunication</code></p>
 
-<p><strong>Why</strong> This composite index covers the most frequent filter pattern <code>(communication_type, reference_doctype, reference_name)</code> and the <code>ORDER BY communication_date</code> clause. It's optimal for the query's WHERE and ORDER BY usage, and the leftmost columns are highly selective.</p>
+<p><strong>Why</strong> This composite index covers the most frequent filter pattern <code>(communication_type, reference_doctype, reference_name)</code> and the <code>ORDER BY communication_date</code> clause. It's optimal for the query's WHERE and ORDER BY usage and the leftmost columns are highly selective.</p>
 
 <p><strong>How to add</strong> <code>frappe.db.add_index("Communication", ["communication_type", "reference_doctype", "reference_name", "communication_date"])</code></p>
 
@@ -3709,7 +3709,7 @@ looped_validate            </span>
 
         </div>
       </div>
-      <p class="small muted" style="margin-top:8px;">The <strong>index candidate</strong> for each table is the set of <code>WHERE</code> / <code>JOIN&nbsp;ON</code> columns this session filtered on <em>together</em> most often - a heuristic, not a verdict. Always confirm with the query's <code>EXPLAIN</code> (and a <code>SHOW INDEX FROM …</code>) before adding anything; every index also carries a write cost, and the column order in a composite matters (most-selective / equality columns first). Never suggested: Frappe's standard metadata columns (<code>name</code>, <code>creation</code>, <code>modified</code>, <code>parent</code>, <code>idx</code>, <code>docstatus</code>, …) - written on every save / already indexed; and Frappe's framework meta tables (<code>tabDocType</code>, <code>tabCustom Field</code>, <code>tabSingles</code>, …) - <code>bench&nbsp;migrate</code> owns their schema. ("-" in Reads/Writes means this session was analyzed before this breakdown was added - re-run <em>Retry Analyze</em> to populate.)</p>
+      <p class="small muted" style="margin-top:8px;">The <strong>index candidate</strong> for each table is the set of <code>WHERE</code> / <code>JOIN&nbsp;ON</code> columns this session filtered on <em>together</em> most often - a heuristic, not a verdict. Always confirm with the query's <code>EXPLAIN</code> (and a <code>SHOW INDEX FROM …</code>) before adding anything; every index also carries a write cost and the column order in a composite matters (most-selective / equality columns first). Never suggested: Frappe's standard metadata columns (<code>name</code>, <code>creation</code>, <code>modified</code>, <code>parent</code>, <code>idx</code>, <code>docstatus</code>, …) - written on every save / already indexed; and Frappe's framework meta tables (<code>tabDocType</code>, <code>tabCustom Field</code>, <code>tabSingles</code>, …) - <code>bench&nbsp;migrate</code> owns their schema. ("-" in Reads/Writes means this session was analyzed before this breakdown was added - re-run <em>Retry Analyze</em> to populate.)</p>
   </section>
 
 
@@ -3735,7 +3735,7 @@ looped_validate            </span>
     </p>
     <p class="small" style="margin-top: 8px; color: #9ca3af;">
       Do NOT email, upload, or share this file externally without redacting
-      it yourself. Query literals, request headers, form data, and full
+      it yourself. Query literals, request headers, form data and full
       stack traces are all included verbatim.
     </p>
     <p class="small" style="margin-top: 10px; color: #9ca3af;">

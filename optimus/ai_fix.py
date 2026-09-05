@@ -3,7 +3,7 @@
 
 """On-demand LLM-suggested fixes for Optimus Findings.
 
-The profiler already pins each finding to a callsite, a source snippet, and
+The profiler already pins each finding to a callsite, a source snippet and
 (for query findings) normalized SQL + EXPLAIN. This module turns that
 context into a concrete fix by asking a configured LLM. It is invoked only
 from the ``optimus.api.suggest_fix`` whitelisted endpoint (request
@@ -97,7 +97,7 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 	# v0.14.x: Aerele-managed AI provider. Architecturally identical to
 	# the Anthropic / OpenAI entries just a hosted endpoint + an API
 	# key the customer pastes into ``ai_api_key``. The token balance,
-	# pre-call validation, and metering all live on Aerele's separate
+	# pre-call validation and metering all live on Aerele's separate
 	# Frappe site (the URL below); Optimus is a dumb client. Aerele's
 	# proxy fronts an OpenAI-shaped wire so ``_call_openai_chat`` routes
 	# correctly without a new protocol handler. See
@@ -195,7 +195,7 @@ _SYSTEM_PROMPT = (
 	"block the response goes through `frappe.enqueue(...)`. Adding an index "
 	"means: Customize Form → the field → tick **Search Index** (which `bench "
 	"migrate` then creates) only fall back to a raw `ALTER TABLE ... ADD "
-	"INDEX (...)` when customization genuinely isn't an option, and prefer a "
+	"INDEX (...)` when customization genuinely isn't an option and prefer a "
 	"single composite index over several single-column ones when the same "
 	"columns are filtered together.\n\n"
 
@@ -220,7 +220,7 @@ _SYSTEM_PROMPT = (
 	"line of code as unknown to you. Hard rules:\n"
 	"  • If your **Fix** shows a \"before\" snippet or `-` lines in a "
 	"```diff``` block every one of those lines MUST be copied VERBATIM from "
-	"the shown source: identical text, and keep its line number. Do NOT "
+	"the shown source: identical text and keep its line number. Do NOT "
 	"reconstruct, paraphrase, summarise, or imagine what the code \"probably\" "
 	"looks like. A `for … in …:` loop, a `frappe.get_doc(...)` call, a "
 	"variable name if you weren't shown it, you don't get to write it as if "
@@ -229,7 +229,7 @@ _SYSTEM_PROMPT = (
 	"NOT visible in the shown source (or no source was shown at all), then you "
 	"do NOT have the offending code. In that case: in **Diagnosis** say so "
 	"plainly (\"the offending code isn't in the window I was shown it's "
-	"likely in `<name>`\"), and in **Fix** give ONLY a short directional "
+	"likely in `<name>`\") and in **Fix** give ONLY a short directional "
 	"recommendation, explicitly framed as \"without seeing the code, the likely "
 	"fix is …\". NO before/after snippet, NO diff, NO fabricated code block.\n"
 	"  • Never present a guess as a verified fix. If you're not certain a "
@@ -242,7 +242,7 @@ _SYSTEM_PROMPT = (
 	"had no WHERE clause, the replacement gets no `filters=`. If the SQL had "
 	"`LIMIT N`, the replacement gets `limit=N`. Do NOT invent filters by "
 	"copying a variable that appears elsewhere in the function "
-	"(e.g. `frappe.session.user`), and NEVER synthesise list shapes like "
+	"(e.g. `frappe.session.user`) and NEVER synthesise list shapes like "
 	"`[some_var] * N` to fit an `('in', ...)` filter that is hallucination, "
 	"not refactoring. If you cannot preserve semantics, say so plainly in "
 	"**Diagnosis** and leave the SQL as-is (recommend caching / hoisting / "
@@ -282,7 +282,7 @@ _SYSTEM_PROMPT = (
 
 	"EXAMPLE this is ONLY to show the heading shape and the verbatim-before "
 	"discipline. It happens to be an N+1; that does NOT mean your finding is an "
-	"N+1 most aren't. Match YOUR finding type and YOUR shown code, and if "
+	"N+1 most aren't. Match YOUR finding type and YOUR shown code and if "
 	"your source window doesn't contain a loop like this one, do NOT produce a "
 	"diff like this one:\n"
 	"**Diagnosis**: `frappe.db.get_value('Item', d.item_code, 'stock_uom')` "
@@ -307,7 +307,7 @@ _SYSTEM_PROMPT = (
 	"SECOND EXAMPLE same heading shape, this time showing the "
 	"SQL-equivalence rule: a raw SQL with NO WHERE clause maps to a "
 	"`frappe.get_all` with NO `filters=`. Notice the replacement preserves "
-	"exactly the original table, fields, and LIMIT nothing is invented:\n"
+	"exactly the original table, fields and LIMIT nothing is invented:\n"
 	"**Diagnosis**: line 207 runs a raw `SELECT name, email FROM `tabUser` "
 	"LIMIT 50` which can be replaced with the framework-idiomatic call.\n"
 	"**Fix**\n"
@@ -328,7 +328,7 @@ _STEPS_SYSTEM_PROMPT = (
 	"which Desk UI gesture produces which HTTP call. Your job: write the "
 	"\"Steps to Reproduce\" section of a performance report. You're given the "
 	"ordered list of HTTP actions a user performed during a profiling session "
-	"(a humanized label, the raw `cmd`/path, the DocType when known, and how "
+	"(a humanized label, the raw `cmd`/path, the DocType when known and how "
 	"long each took). Infer what the user was actually DOING and rewrite it as "
 	"clear, friendly steps a developer or QA could follow to reproduce the "
 	"same flow in the Desk UI.\n\n"
@@ -406,7 +406,7 @@ _INDEX_SYSTEM_PROMPT = (
 	"You are a senior Frappe Framework / ERPNext DBA reviewing index candidates "
 	"for ONE database table flagged by a performance profiler. You're given the "
 	"table, the columns the profiled session filtered / joined / ordered on (how "
-	"often, and which appeared together), a few of the actual queries, and the "
+	"often and which appeared together), a few of the actual queries and the "
 	"table's CURRENT indexes (`SHOW INDEX` output). Recommend the SMALLEST set of "
 	"indexes that actually helps almost always ONE composite, columns ordered "
 	"equality-then-range-then-ORDER-BY, leftmost = the most selective / always-"
@@ -421,7 +421,7 @@ _INDEX_SYSTEM_PROMPT = (
 	"  • Adding an index to a write-hot table (GL Entry, Stock Ledger Entry, Bin, "
 	"Payment Ledger Entry, Serial and Batch Bundle, …) slows every submitted "
 	"document in production only recommend it if a query that filters this way "
-	"is genuinely slow, and say so.\n"
+	"is genuinely slow and say so.\n"
 	"  • Customize Form ▸ field ▸ Search Index makes only SINGLE-column indexes; a "
 	"composite needs a patch with `frappe.db.add_index('<DocType>', "
 	"['col_a', 'col_b'])`.\n\n"
@@ -469,7 +469,7 @@ def is_finding_type_excluded(finding_type: str | None) -> bool:
 	operator intended to block it).
 
 	Reads settings via the cached ``get_config()`` reader adds at most one
-	Redis lookup per call, and that's a single cached hit. Returning False on
+	Redis lookup per call and that's a single cached hit. Returning False on
 	any read error (no bench, settings cache wedged) is the safe direction:
 	if the operator's intent is to block, the master gates (``ai_enabled``,
 	``ai_auto_suggest``) already give them coarser control; if the operator
@@ -505,7 +505,7 @@ def _resolve_timeout_seconds() -> int:
 
 def is_available(section: str | None = None) -> bool:
 	"""True when AI fix suggestions are turned on and minimally configured:
-	``ai_enabled`` set, a model resolvable for the chosen provider, and an
+	``ai_enabled`` set, a model resolvable for the chosen provider and an
 	API key present unless the provider needs none (local endpoints).
 
 	When ``section`` is one of ``"findings"`` / ``"indexes"`` / ``"humanize"``,
@@ -769,7 +769,7 @@ def test_connection() -> dict:
 
 def _resolve_provider() -> dict:
 	"""Resolve the active provider config: protocol, base_url, model,
-	needs_key, api_key (decrypted), and the provider display name. Raises
+	needs_key, api_key (decrypted) and the provider display name. Raises
 	``AiFixError`` on an unknown provider or a custom provider missing its
 	required base_url/model.
 
@@ -1258,7 +1258,7 @@ def _is_reasoning_model(model: str) -> bool:
 
 def _log_http_error(provider: str, where: str, status: int | None, detail: str = "") -> None:
 	"""Best-effort error log. NEVER includes the prompt, the source code, or
-	the API key only the provider name, the call site, and the HTTP
+	the API key only the provider name, the call site and the HTTP
 	status."""
 	try:
 		import frappe

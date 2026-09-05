@@ -3,7 +3,7 @@
 
 """v0.6.x: tests for the janitor sweeps after the Lens-audit performance
 fixes. Every sweep that previously called ``frappe.db.set_value`` inside
-a loop now calls it ONCE with a ``{"name": ("in", [...])}`` filter, and
+a loop now calls it ONCE with a ``{"name": ("in", [...])}`` filter and
 ``_sweep_old_sessions`` preloads every File-doc name in a single
 ``frappe.get_all`` instead of looking each up per row.
 

@@ -124,7 +124,7 @@ def test_misconfigured_min_occurrences_below_two_cannot_readmit_false_positive(e
 	"""The ``max(2, …)`` clamp on ``n_plus_one_min_occurrences`` must hold
 	even when the setting is misconfigured to 0 or 1.
 
-	``loop_count`` (peak repeats within one request) is always ≥ 1, and the
+	``loop_count`` (peak repeats within one request) is always ≥ 1 and the
 	within-request gate is ``loop_count < min_occurrences``. If the setting
 	reached the gate as 1, a query that runs exactly ONCE per request would
 	satisfy ``1 < 1 == False`` and be flagged the very cross-request false
@@ -290,7 +290,7 @@ def test_loop_across_many_requests_reports_per_request_count_not_total(empty_con
 	assert len(result.findings) == 1
 	f = result.findings[0]
 
-	# Title reports the per-request loop size, not the cross-request total, and
+	# Title reports the per-request loop size, not the cross-request total and
 	# hedges with "up to" because loop_count (12) is the busiest request's peak,
 	# not a uniform per-request figure (run_count=10, so 12×10≠affected_count).
 	assert "up to 12×" in f["title"]
@@ -483,7 +483,7 @@ def test_framework_n_plus_one_query_builder_utils(empty_context):
 		] * 138,  # matches the production count
 	}
 	result = n_plus_one.analyze([recording], empty_context)
-	# Exactly one finding, and it must be Framework N+1.
+	# Exactly one finding and it must be Framework N+1.
 	assert len(result.findings) == 1
 	f = result.findings[0]
 	assert f["finding_type"] == "Framework N+1", (
@@ -1111,7 +1111,7 @@ def _mixed_loop_and_singles(loop_hits, loop_ms, single_count, single_ms):
 
 def test_small_loop_low_severity_and_loop_scoped_cost(empty_context):
 	"""#2/#1: severity AND the description cost use the loop's own time (30ms),
-	not the 280ms cumulative so Low, and the description quotes 30ms not 280ms."""
+	not the 280ms cumulative so Low and the description quotes 30ms not 280ms."""
 	recordings = _mixed_loop_and_singles(loop_hits=10, loop_ms=3.0, single_count=50, single_ms=5.0)
 	result = n_plus_one.analyze(recordings, empty_context)
 	assert len(result.findings) == 1
@@ -1156,7 +1156,7 @@ def test_sub_millisecond_loop_cost_reads_less_than_1ms_not_0ms(empty_context, mo
 	"""A sub-1ms loop must read "<1ms", not a misleading "0ms" (0.5ms rounds to "0")."""
 	from optimus.settings import OptimusConfig
 
-	# Floor the occurrence gate at 2 so a 2× loop qualifies, and drop the min-time
+	# Floor the occurrence gate at 2 so a 2× loop qualifies and drop the min-time
 	# gate below the loop's 0.5ms so the finding reaches the cost-render branch.
 	monkeypatch.setattr(
 		"optimus.settings.get_config",

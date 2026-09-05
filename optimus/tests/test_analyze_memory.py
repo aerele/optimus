@@ -6,7 +6,7 @@
 Long recorded flows OOM-killed the box because every recording's raw
 pyinstrument tree pickle stayed in RAM through persist + render. These tests
 pin the fixes: call_tree frees each ``pyi_session`` once consumed (M1), no
-later analyzer depends on it, run() drops references + GCs, and the optional
+later analyzer depends on it, run() drops references + GCs and the optional
 session-wide recording cap (M4) bounds peak by keeping the heaviest recordings.
 """
 

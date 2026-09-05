@@ -128,7 +128,7 @@ def _multiplex_suffix(cmd: str, form_dict: dict) -> str:
 	"""Return the disambiguating suffix for a multiplexed cmd, or "".
 
 	Looks up the right form_dict key per cmd, validates the value
-	against ``_SAFE_SUFFIX_RE``, and returns it. Unknown / malformed
+	against ``_SAFE_SUFFIX_RE`` and returns it. Unknown / malformed
 	values return "" so the caller falls back to the bare cmd
 	keeps grouping-by-label stable when payloads are weird.
 	"""

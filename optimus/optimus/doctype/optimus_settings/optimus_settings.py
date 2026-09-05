@@ -114,7 +114,7 @@ class OptimusSettings(Document):
 		Most users misread "Tracked Apps" as "apps to monitor" and
 		add frappe + erpnext which has the OPPOSITE effect of what
 		they want: it flips the classifier into inclusion mode where
-		framework code becomes "user code", and their actionable
+		framework code becomes "user code" and their actionable
 		findings list gets flooded with framework noise.
 
 		We don't HARD-block the save (ERPNext contributors may

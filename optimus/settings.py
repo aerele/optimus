@@ -67,7 +67,7 @@ _DEFAULTS = {
 	),
 	# v0.6.x: when True, the "Time spent per database table" section drops
 	# Frappe schema/meta tables, framework-internal tables (User, Has Role,
-	# DefaultValue, …), and information_schema.* framework noise the app
+	# DefaultValue, …) and information_schema.* framework noise the app
 	# developer can't act on. Default on; admins can uncheck.
 	"hide_framework_tables": True,
 	# v0.5.3: per-recording EXPLAIN / enrichment cap. Long flows (bulk
@@ -115,7 +115,7 @@ _DEFAULTS = {
 	"sensitive_sql_columns": (),
 	"sensitive_form_keys": (),
 	# v0.6.0: opt-in LLM "suggest a fix" feature. The API key is NOT here
-	# it's secret, stored in a Password field, and read on demand by
+	# it's secret, stored in a Password field and read on demand by
 	# ai_fix.py via frappe.utils.password.get_decrypted_password.
 	"ai_enabled": False,
 	"ai_provider": "Anthropic",

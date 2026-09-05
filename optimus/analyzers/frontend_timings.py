@@ -46,7 +46,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
     # returned None and every XHR row showed up as "action_0",
     # "action_1", etc. in the report. Pull the label from
     # context.actions instead, fall back through the recording's
-    # raw method+path, and only then to the synthetic "action_N".
+    # raw method+path and only then to the synthetic "action_N".
     ctx_actions = getattr(context, "actions", None) or []
 
     def _label_for(idx: int) -> str:

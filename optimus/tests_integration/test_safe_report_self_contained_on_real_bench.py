@@ -30,7 +30,7 @@ It cannot prove:
 
 That gap is what this integration test fills. The 3 tests render a
 minimal Optimus Session via the live ``api.regenerate_reports``
-endpoint, read the on-disk attached HTML file, and grep for
+endpoint, read the on-disk attached HTML file and grep for
 remote-fetch patterns + Frappe asset URLs + inline `<script>` tags.
 
 The regex patterns mirror those in

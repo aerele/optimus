@@ -395,7 +395,7 @@ class TestStructureSnapshot:
 
 
 class TestPublicAPIPreserved:
-	"""The names ``analyze.py``, ``api.py``, and the existing tests rely on
+	"""The names ``analyze.py``, ``api.py`` and the existing tests rely on
 	MUST keep resolving after the file → package split. Re-export shim
 	regressions surface here."""
 

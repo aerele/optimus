@@ -63,7 +63,7 @@ class TestTemplateStructure:
 
 	def test_queries_per_action_is_flat_table_without_sql(self):
 		"""v0.7.x: Queries-per-action is now one flat data table (Server-Resource
-		style), not per-action expanders, and the normalized-query column is gone."""
+		style), not per-action expanders and the normalized-query column is gone."""
 		tpl = _read_template()
 		m = re.search(r"Queries per action.*?</section>", tpl, re.DOTALL)
 		assert m is not None, "Queries per action section not found"

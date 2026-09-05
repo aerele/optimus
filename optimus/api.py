@@ -210,12 +210,12 @@ def stop() -> dict:
 	"""End the calling user's active profiling session.
 
 	Clears the Redis active pointer, marks the Optimus Session row as
-	``Stopping``, and either enqueues the analyze job or runs it inline
+	``Stopping`` and either enqueues the analyze job or runs it inline
 	(v0.5.0: scheduler-aware fallback see ``_enqueue_analyze``).
 
 	Returns:
 	    dict with ``stopped``, ``session_uuid``, ``docname``,
-	    ``ran_inline``, and only when ran_inline is True the final
+	    ``ran_inline`` and only when ran_inline is True the final
 	    ``status`` from the Optimus Session row (``Ready`` or ``Failed``).
 
 	    The widget uses both flags to decide its terminal state:
@@ -520,7 +520,7 @@ def _enqueue_analyze(session_uuid: str, docname: str | None = None) -> bool:
 	# do NOT dedup with a stable job_id + is_job_enqueued guard. That guard
 	# stranded sessions at "Stopping": a worker OOM-killed mid-analyze leaves a
 	# zombie STARTED job, is_job_enqueued then returns True, the enqueue is
-	# skipped, and nothing transitions the session out of "Stopping" (retry hits
+	# skipped and nothing transitions the session out of "Stopping" (retry hits
 	# the same guard; no janitor sweep covered it). Concurrent-analyze RAM is
 	# already bounded by analyze.run's single-flight, so a rare duplicate from a
 	# double-Stop is harmless; a permanent strand is not. The janitor's
@@ -638,7 +638,7 @@ def submit_frontend_metrics(payload: str) -> dict:
 	pattern over a single JSON dict, which had a read-modify-write race:
 	two concurrent submits (e.g. stop-time frappe.call colliding with a
 	beforeunload beacon) could both read the same existing blob, both
-	compute a merged result, and both write losing one submission's
+	compute a merged result and both write losing one submission's
 	contents. RPUSH + LTRIM is atomic in Redis, so concurrent submits
 	just append their entries without data loss. LTRIM enforces the
 	soft cap (tail-preferring newest entries survive).
@@ -784,7 +784,7 @@ def health() -> dict:
 
 # The health aggregates go through frappe.qb (the query builder), not raw SQL
 # and not get_all aggregate-strings: Frappe v16 rejects "count(name) as x" as a
-# field string, and the get_all ``{'COUNT': 'name'}`` dict form returns a
+# field string and the get_all ``{'COUNT': 'name'}`` dict form returns a
 # dialect-specific key (``COUNT(`name`)``). qb with explicit ``.as_()`` aliases
 # is the one portable form (MariaDB + Postgres). Imports are local so api.py
 # still imports under the unit-test frappe stub (which has no query builder);
@@ -943,7 +943,7 @@ def export_session(session_uuid: str) -> dict:
 
 	Lets dev shops (or automation) consume the profiler's output
 	programmatically without parsing the HTML report. Returns the full
-	session including all child rows, top queries, table breakdown, and
+	session including all child rows, top queries, table breakdown and
 	finding technical details everything in the report, in a
 	machine-friendly shape.
 
@@ -1183,7 +1183,7 @@ def regenerate_reports(session_uuid: str) -> dict:
 	# sessions" contract. The pre-v0.12.9 code accepted any status,
 	# which would attach an incomplete report to a still-running
 	# analyze (Recording / Stopping / Analyzing) that the pipeline
-	# would then overwrite confusing for operators, and surfaced
+	# would then overwrite confusing for operators and surfaced
 	# in v0.12.4 by the integration test that exercised this gap.
 	if row["status"] not in ("Ready", "Failed"):
 		frappe.throw(
@@ -1265,7 +1265,7 @@ def suggest_fix(session_uuid: str, finding_ref: str, regenerate=0) -> dict:
 	EXPLAIN, the static fix hint) is sent to the LLM configured in
 	Optimus Settings ▸ AI Fix Suggestions; the result is stored on the
 	Optimus Finding row (``llm_fix_json``) so re-opening returns it
-	without another API call, and so the regenerated HTML report carries
+	without another API call and so the regenerated HTML report carries
 	it.
 
 	Args:
@@ -1316,7 +1316,7 @@ def suggest_fix(session_uuid: str, finding_ref: str, regenerate=0) -> dict:
 	if not ai_fix.is_available():
 		frappe.throw(
 			"AI fix suggestions aren't configured enable them in Profiler "
-			"Settings ▸ AI Fix Suggestions and set a provider, model, and API key."
+			"Settings ▸ AI Fix Suggestions and set a provider, model and API key."
 		)
 	from optimus.settings import get_config
 	if not get_config().ai_suggest_findings:
@@ -1473,7 +1473,7 @@ def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
 	  leaves the old suggestion in place (only successful runs overwrite).
 
 	Either way it bypasses the ``ai_auto_suggest`` toggle (you're asking for
-	it explicitly) but still requires the provider to be configured, and is
+	it explicitly) but still requires the provider to be configured and is
 	bounded by the same per-call time budget if it reports findings skipped
 	for time, just run it again.
 
@@ -1515,7 +1515,7 @@ def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
 	if not ai_fix.is_available():
 		frappe.throw(
 			"AI fix suggestions aren't configured enable them in Profiler "
-			"Settings ▸ AI Fix Suggestions and set a provider, model, and API key."
+			"Settings ▸ AI Fix Suggestions and set a provider, model and API key."
 		)
 	from optimus.settings import get_config
 	if not get_config().ai_suggest_findings:
@@ -1533,7 +1533,7 @@ def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
 
 	# Re-render so the new/updated suggestions land in the HTML report.
 	# regenerate_reports re-fetches the doc (seeing the just-committed
-	# llm_fix_json), clears the cached PDF, and re-renders; its own
+	# llm_fix_json), clears the cached PDF and re-renders; its own
 	# auto-suggest-gated backfill is then a no-op.
 	regen = regenerate_reports(session_uuid)
 
@@ -1593,7 +1593,7 @@ def humanize_steps(session_uuid: str) -> dict:
 	if not ai_fix.is_available():
 		frappe.throw(
 			"AI isn't configured enable it under Optimus Settings ▸ "
-			"AI Fix Suggestions and set a provider, model, and API key."
+			"AI Fix Suggestions and set a provider, model and API key."
 		)
 	from optimus.settings import get_config
 	if not get_config().ai_humanize_steps:
@@ -1679,7 +1679,7 @@ def suggest_index(session_uuid: str, table_name: str) -> dict:
 	The deterministic "index candidate" (most-used filter combination +
 	`frappe.db.add_index` patch) is always in the report; this adds the AI's
 	take on top which composite, whether your existing indexes already
-	cover it, and the write-cost call. Requires AI to be configured.
+	cover it and the write-cost call. Requires AI to be configured.
 	Permission: recording user / System Manager / Administrator (mirrors
 	``download_pdf``).
 	"""
@@ -1717,7 +1717,7 @@ def suggest_index(session_uuid: str, table_name: str) -> dict:
 	if not ai_fix.is_available():
 		frappe.throw(
 			"AI isn't configured enable it under Optimus Settings ▸ "
-			"AI Fix Suggestions and set a provider, model, and API key."
+			"AI Fix Suggestions and set a provider, model and API key."
 		)
 	from optimus.settings import get_config
 	if not get_config().ai_suggest_indexes:
@@ -1840,7 +1840,7 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 	if not ai_fix.is_available():
 		frappe.throw(
 			"AI isn't configured enable it under Optimus Settings ▸ "
-			"AI Fix Suggestions and set a provider, model, and API key."
+			"AI Fix Suggestions and set a provider, model and API key."
 		)
 
 	from optimus import analyze as _analyze_mod
@@ -1905,7 +1905,7 @@ def get_installed_apps_for_tracking() -> list[str]:
 	▸ Tracked Apps Autocomplete field.
 
 	Excludes ``optimus`` (the profiler's own callsites are
-	already filtered regardless of user config, and listing it here
+	already filtered regardless of user config and listing it here
 	would suggest tracking the tool that's doing the tracking).
 
 	Restricted to System Manager since Optimus Settings itself is.
@@ -2001,7 +2001,7 @@ def get_phase2_candidates(session_uuid: str) -> dict:
 	"""Return the curated candidate list for the phase-2 picker UI.
 
 	Reads the parent Optimus Session's actions, parses each action's
-	``call_tree_json``, and builds a top-30 list of frames from user-app
+	``call_tree_json`` and builds a top-30 list of frames from user-app
 	code (with framework apps surfaced separately under "observations").
 
 	Phase K v0.7 GA: the response also carries a ``diagnostic`` dict

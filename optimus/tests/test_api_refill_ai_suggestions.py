@@ -70,7 +70,7 @@ def mock_session_environment(monkeypatch):
 
 
 def test_refill_runs_all_three_steps(mock_session_environment, monkeypatch):
-	"""Happy path: every toggle is on, every helper runs once, and the
+	"""Happy path: every toggle is on, every helper runs once and the
 	per-step status dict surfaces the counts."""
 	from optimus import ai_fix
 	from optimus.settings import get_config  # noqa: F401 we patch this below
@@ -106,7 +106,7 @@ def test_refill_runs_all_three_steps(mock_session_environment, monkeypatch):
 
 def test_refill_skips_sections_whose_toggle_is_off(mock_session_environment, monkeypatch):
 	"""Per-section toggles gate each step: a toggle-off section reports
-	``skipped`` instead of erroring, and the helper isn't called."""
+	``skipped`` instead of erroring and the helper isn't called."""
 	from optimus import ai_fix
 
 	monkeypatch.setattr(ai_fix, "is_available", lambda: True)

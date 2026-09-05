@@ -5,7 +5,7 @@
 function the path P2/P3 assumed works but was never tested.
 
 Drives the real capture functions in-process (no bench/worker): arm a pass,
-run the picked function through the before/after_job hooks, aggregate, and
+run the picked function through the before/after_job hooks, aggregate and
 confirm the (basename, qualname) drilldown lookup the finding card uses returns
 the hot line. If this passes, capture+linking are sound and any field failure
 is environmental/lifecycle; if it fails, the bug is right here.

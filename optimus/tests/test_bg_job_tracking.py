@@ -21,7 +21,7 @@ child rows wrong:
 
 2. ``bg_recheck_users`` / ``bg_chained_audit`` (first link): stuck at
    ``status=Running`` with NULL times because the worker finished, RQ
-   eventually GC'd its job record, and ``Job.fetch`` in
+   eventually GC'd its job record and ``Job.fetch`` in
    ``_capture_job_terminal_status`` raised ``NoSuchJobError`` (silently
    swallowed). after_job now writes the terminal status + times while
    the worker is still running, so analyze doesn't need RQ to be alive.

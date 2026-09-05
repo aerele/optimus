@@ -808,7 +808,7 @@ class TestLazySnippetRead:
 # ---------------------------------------------------------------------------
 # v0.6.x: findings that carry no callsite get one resolved at render time
 # Repeated Hot Frame (from its "path::func" key), Function Not Invoked (from
-# its dotted_path), and SQL red-flag findings (a representative callsite from
+# its dotted_path) and SQL red-flag findings (a representative callsite from
 # the recordings).
 # ---------------------------------------------------------------------------
 
@@ -1257,7 +1257,7 @@ class TestFindingsRefinements:
 	def test_actionable_finding_without_fix_hint_has_no_fallback(self):
 		# Removed per user request: a Slow Hot Path with no fix_hint shows no
 		# generic "Where to start" box the smoking-gun block already says
-		# where the time went, and a boilerplate next-step only added noise.
+		# where the time went and a boilerplate next-step only added noise.
 		doc = _fake_doc([_finding_child(finding_type="Slow Hot Path")])
 		html = renderer.render_raw(doc, recordings=[])
 		assert "Where to start" not in html
