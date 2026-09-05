@@ -8,6 +8,20 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.44] - 2026-09-05
+
+### Fixed
+
+- **Report text broken by the em-dash sweep.** Removing every em dash in v0.12.42 blanked
+  or fused several user-visible strings in the HTML report. Restored them without em dashes.
+  The per-action and background-jobs totals rows now show "-" in the intentionally-suppressed
+  column instead of an empty cell that read as missing data. The AI fix badge reads
+  "Unverified: review before applying" again. The Slow-Queries empty state is two sentences
+  instead of a run-on. The "How to read this report" list uses colons and parentheses to set
+  off its inline examples. The shipped sample report under `docs/` got the same fixes.
+
+---
+
 ## [0.12.43] - 2026-09-05
 
 ### Changed

@@ -2198,7 +2198,7 @@ Also affects 1 other action.</p>
             <td class="num"><strong><span class="time-high">1.34s</span></strong></td>
             <td class="num"><strong>140</strong></td>
             <td class="num"><strong>69ms</strong></td>
-            <td class="num muted" title="Per-row maxes are not additive, so the column total is intentionally suppressed"></td>
+            <td class="num muted" title="Per-row maxes are not additive, so the column total is intentionally suppressed">-</td>
           </tr>
         </tfoot>
       </table>
@@ -2789,7 +2789,7 @@ Also affects 1 other action.</p>
           <td class="num"><strong><span class="time-high">1.34s</span></strong></td>
           <td class="num"><strong>140</strong></td>
           <td class="num"><strong>69ms</strong></td>
-          <td class="num muted" title="Per-row maxes are not additive, so the column total is intentionally suppressed"></td>
+          <td class="num muted" title="Per-row maxes are not additive, so the column total is intentionally suppressed">-</td>
 <td class="num"><strong>2</strong></td>        </tr>
       </tfoot>
     </table>
@@ -3431,7 +3431,7 @@ looped_validate            </span>
     <a id="queries"></a>    <h2>Slowest queries - your app</h2>
       <div class="empty-state">
         <div class="empty-icon">&check; Clear</div>
-        <p>No queries cleared the 10ms display floor this session sub-10ms queries are hidden by default to avoid noise. The per-action breakdown below lists every query, fast and framework ones included.</p>
+        <p>No queries cleared the 10ms display floor this session. Sub-10ms queries are hidden by default to avoid noise. The per-action breakdown below lists every query, fast and framework ones included.</p>
       </div>
   </section>
 
@@ -3722,9 +3722,9 @@ looped_validate            </span>
       <li>The server-resource and frontend panels show CPU / memory / queue pressure and browser timings - only when captured.</li>
       <li>The full-recordings and queries-per-action sections hold the raw SQL, headers, form data and stack traces - for deep dives.</li>
       <li>Hover any <code>file.py:123</code> callsite to open it in VS&nbsp;Code. Anything starting with <code>tab</code> is a database table; the DocType is the part after <code>tab</code>.</li>
-      <li>Every duration carries a small grey scope tag: <strong>per hit</strong> (one occurrence a single request, one query execution) or <strong>consolidated</strong> (sum across all hits in this session total time in a table, full impact of a finding's pattern, etc.).</li>
-      <li>Call-tree and Hot-frame timings come from a wall-clock sampler at ≈1.0ms intervals. Functions whose execution is shorter than the interval can be under-sampled or invisible for exact per-line timings, use the <strong>Line-Level Drilldown</strong>.</li>
-      <li><strong>Self-time</strong> is wall-clock self-time (the sampler measures elapsed time, not CPU). A function that blocks on I/O <code>requests.get</code>, sync DB calls outside the recorder, <code>time.sleep</code> counts that wait as self-time. Check the call tree for hidden I/O before optimising compute.</li>
+      <li>Every duration carries a small grey scope tag: <strong>per hit</strong> (one occurrence: a single request, one query execution) or <strong>consolidated</strong> (sum across all hits in this session: total time in a table, full impact of a finding's pattern, etc.).</li>
+      <li>Call-tree and Hot-frame timings come from a wall-clock sampler at ≈1.0ms intervals. Functions whose execution is shorter than the interval can be under-sampled or invisible. For exact per-line timings, use the <strong>Line-Level Drilldown</strong>.</li>
+      <li><strong>Self-time</strong> is wall-clock self-time (the sampler measures elapsed time, not CPU). A function that blocks on I/O (<code>requests.get</code>, sync DB calls outside the recorder, <code>time.sleep</code>) counts that wait as self-time. Check the call tree for hidden I/O before optimising compute.</li>
     </ul>
   </section>
 
