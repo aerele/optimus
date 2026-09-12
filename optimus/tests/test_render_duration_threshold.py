@@ -187,6 +187,36 @@ class TestUrlsAreNotMangled:
 		assert _reformat_durations_in_text("odd 1 23 456ms", 500.0) == "odd 1 23 456ms"
 
 
+class TestReformatterRobustness:
+	"""Guards for the render-time reformatter against pathological / large input."""
+
+	def test_dense_bare_lt_does_not_hang(self):
+		# _TAG_SPLIT_RE was O(n^2) on dense bare "<" (no ">"), which silently hung
+		# the render worker (a slow loop the broad try/except can't catch). The
+		# linear split handles 60k "<" in milliseconds; assert it finishes well
+		# under a generous budget and still converts the trailing real token.
+		import time
+		evil = "<" * 60000 + " 5234ms"
+		start = time.perf_counter()
+		out = _reformat_durations_in_text(evil, 1000.0)
+		assert time.perf_counter() - start < 2.0
+		assert out.endswith(" 5.23s")
+
+	def test_large_plain_duration_rolls_over(self):
+		# A >=1e6 ms step is baked as plain digits (not "5e+06"), so it must roll
+		# over to seconds rather than being mangled.
+		assert _reformat_durations_in_text("Step: 5000000 ms", 1000.0) == "Step: 5000.00s"
+
+	def test_reproducer_note_bakes_large_duration_without_sci_notation(self):
+		# analyze.py bakes reproducer-step durations as plain digits (was ":g",
+		# which flips to "5e+06" at >=1e6 ms and the reformatter then mangles it).
+		from optimus.analyze import _build_auto_notes_list_html
+		html = _build_auto_notes_list_html([{"cmd": "x", "duration": 5000000}])
+		assert "e+" not in html
+		assert "5000000 ms" in html
+		assert "5000.00s" in _reformat_durations_in_text(html, 1000.0)
+
+
 class TestRowDangerNotTiedToDisplay:
 	"""Per-row hot/red styling fires at a FIXED slowness threshold (1000ms), not
 	the display threshold, so Strict (500) doesn't paint every 500ms row red while

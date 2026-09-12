@@ -698,9 +698,11 @@ def _build_resource(infra_summary, infra_timeline) -> dict | None:
 
 
 def _build_frontend(ctx) -> dict | None:
-	"""Contract ``frontend`` = {kpis, xhrs, web_vitals}.
+	"""Contract ``frontend`` = {xhrs, web_vitals, summary, xhr_matched, orphans}.
 
-	Bundles the four flat ``frontend_*`` keys in our existing context.
+	Bundles the flat ``frontend_*`` keys in our existing context. (A separate
+	``kpis`` tile set was dropped: the template never rendered it and the XHR /
+	web-vitals cells already roll over to seconds via ``_ms_display``.)
 	"""
 	vitals_by_page = ctx.get("frontend_vitals_by_page") or {}
 	xhrs = ctx.get("frontend_xhr_matched") or []
@@ -752,8 +754,8 @@ def _build_frontend(ctx) -> dict | None:
 			"size_display": (
 				f"{size_bytes / 1024:.1f} KB" if size_bytes >= 1024 else f"{size_bytes} B"
 			),
-			"backend_is_hot": backend_ms >= 1000,
-			"browser_is_hot": xhr_ms >= 1000,
+			"backend_is_hot": backend_ms >= _HOT_ACTION_MS,
+			"browser_is_hot": xhr_ms >= _HOT_ACTION_MS,
 		})
 
 	# J.2.4 non-contract additions: pass-through the raw summary +
@@ -789,7 +791,7 @@ def _build_hot_frames(hot_frames_rows, ignored_apps, fmt_ms=None) -> list[dict]:
 		entry.update({
 			"name": name,
 			"total_time_display": fmt(total_ms),
-			"is_hot_time": bool(row.get("is_hot", False)) or total_ms >= 1000,
+			"is_hot_time": bool(row.get("is_hot", False)) or total_ms >= _HOT_ACTION_MS,
 			"occurrences": row.get("occurrences", 0) or 0,
 			"distinct_actions": row.get("distinct_actions", 0) or 0,
 			"is_user_code": _is_user_code(path_part, ignored),

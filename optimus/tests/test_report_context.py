@@ -743,3 +743,15 @@ class TestRowDangerThreshold:
 		assert _bar_kind_for(1500) is None   # >= 1000 -> red
 		assert _bar_kind_for(600) == "warn"  # 300..1000 -> amber, NOT red
 		assert _bar_kind_for(200) == "ok"
+
+	def test_frontend_hot_flags_follow_the_constant(self, monkeypatch):
+		# backend_is_hot / browser_is_hot use _HOT_ACTION_MS, not a hardcoded 1000,
+		# so retuning the constant moves them together with the row colouring.
+		monkeypatch.setattr(report_context, "_HOT_ACTION_MS", 2000.0)
+		ctx = _ctx(frontend_xhr_matched=[{
+			"action_label": "a", "url": "/a", "backend_ms": 1500, "xhr_ms": 2500,
+			"network_delta_ms": 0, "response_size_bytes": 0, "status": 200,
+		}])
+		xhr = report_context._build_frontend(ctx)["xhrs"][0]
+		assert xhr["backend_is_hot"] is False  # 1500 < 2000 (retuned)
+		assert xhr["browser_is_hot"] is True   # 2500 >= 2000

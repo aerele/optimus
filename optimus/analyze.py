@@ -2499,7 +2499,12 @@ def _build_auto_notes_list_html(recordings: list[dict]) -> str:
 	for rec in signal_recordings[:_AUTO_NOTES_MAX_ENTRIES]:
 		label = per_action.humanized_label(rec) or "(unnamed action)"
 		duration_ms = round(rec.get("duration") or 0, 1)
-		items.append(f"<li>{html.escape(label)}: {duration_ms:g} ms</li>")
+		# Plain digits, never scientific notation: ``:g`` renders a >=1e6 ms step
+		# as "5e+06", which the render-time reformatter can't roll over (it would
+		# mangle it), so a >16-minute step would fail to convert. Trim trailing
+		# zeros so short values still read "800 ms", not "800.0 ms".
+		dur_text = f"{duration_ms:.1f}".rstrip("0").rstrip(".")
+		items.append(f"<li>{html.escape(label)}: {dur_text} ms</li>")
 
 	overflow = len(signal_recordings) - _AUTO_NOTES_MAX_ENTRIES
 	if overflow > 0:

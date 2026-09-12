@@ -119,7 +119,15 @@ _MS_TOKEN_RE = re.compile(
 # already-rendered HTML (notes / summary), and a duration-like token can sit in
 # an attribute (style="transition:2000ms"); rewriting it there would corrupt the
 # markup. re.split with this capturing group returns [text, tag, text, tag, ...].
-_TAG_SPLIT_RE = re.compile(r"(<[^>]*>)")
+#
+# The tag body is [^<>]* (NOT [^>]*): excluding "<" stops the scan at the next
+# "<", so a run of bare "<" (dense text with no closing ">", e.g. a pasted SQL
+# WHERE clause in an AI note) matches/fails each "<" in O(1) instead of scanning
+# to end-of-string per "<". Without this the split is O(n^2) and a large enough
+# input silently HANGS the render worker (a slow loop, not an exception, so the
+# renderer's try/except can't catch it). Real tags carry no unescaped "<", so
+# behaviour on well-formed HTML is unchanged.
+_TAG_SPLIT_RE = re.compile(r"(<[^<>]*>)")
 
 
 def _reformat_durations_in_text(text: str, threshold_ms: float) -> str:
