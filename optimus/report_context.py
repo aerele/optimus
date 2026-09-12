@@ -25,12 +25,11 @@ from optimus.analyzers.base import humanize_duration_ms
 # never moves the alarm. Tunable; not currently a settings field.
 _TOTAL_TIME_DANGER_MS = 3000.0
 
-# A single action / background job slower than this reads as "hot" (red bar + red
-# value) in the per-row tables. Like _TOTAL_TIME_DANGER_MS this is a real
-# performance threshold, deliberately NOT large_duration_threshold_ms: the row
-# danger colour must not follow the display preference / Sensitivity Profile
-# (which would turn every row red at 500ms on Strict while the Total-time KPI
-# stays calm). One source for the bar colour, the value colour and duration_is_hot.
+# A single action / background job slower than this reads as "hot" (red bar +
+# value) in the per-row tables. A real performance threshold, deliberately NOT
+# large_duration_threshold_ms, so row danger doesn't follow the display preference
+# / Sensitivity Profile. One source for bar colour, value colour, duration_is_hot
+# and the XHR/hot-frame flags.
 _HOT_ACTION_MS = 1000.0
 
 # ---------------------------------------------------------------------------

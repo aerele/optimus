@@ -13,14 +13,10 @@ def boot_session(bootinfo):
 	error reading settings, so a misconfigured read never hides the widget
 	entirely; the admin can still disable it via the DocType.
 	"""
-	# The two values are read independently so a failure resolving one never
-	# corrupts the other. In particular the enabled flag must not depend on the
-	# threshold read: sharing one try/except let a threshold-conversion error flip
-	# a deliberately DISABLED Optimus back on. The "render durations in seconds
-	# above (ms)" threshold lets Desk form scripts (the Optimus Session hot-path
-	# picker) roll durations over at the same point the report does; it comes from
-	# the single ``display_threshold_ms`` resolver (explicit 0 preserved, missing
-	# → 1000, soft-fails to 1000). Both fail open (widget visible, default).
+	# Read the two values independently: a shared try/except let a threshold error
+	# flip a deliberately DISABLED Optimus back on. The threshold (for the Desk
+	# hot-path picker) comes from the single display_threshold_ms resolver. Both
+	# fail open (widget visible, default 1000).
 	try:
 		from optimus.settings import get_config
 		bootinfo.optimus_enabled = bool(get_config().enabled)
