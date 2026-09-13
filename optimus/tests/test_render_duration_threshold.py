@@ -11,7 +11,12 @@ import types
 from unittest.mock import patch
 
 from optimus import renderer
-from optimus.renderer._internal import _reformat_durations_in_text
+from optimus.analyzers.base import (
+	_DUR_SEP,
+	_reformat_durations_in_text,
+	dur,
+	format_durations,
+)
 from optimus.settings import OptimusConfig
 
 
@@ -187,6 +192,69 @@ class TestUrlsAreNotMangled:
 		assert _reformat_durations_in_text("odd 1 23 456ms", 500.0) == "odd 1 23 456ms"
 
 
+class TestDurationMarkers:
+	"""The structured path: analyzers tag durations with dur(); render formats the
+	marker exactly, so prose around it is never misread."""
+
+	def test_marker_formats_at_render(self):
+		t = f"Slow query: {dur(5234)}"
+		assert format_durations(t, 1000.0) == "Slow query: 5.23s"
+		assert format_durations(t, 0) == "Slow query: 5234ms"  # disabled
+
+	def test_marker_is_exact_prose_and_urls_untouched(self):
+		# A marker converts; a bare "2000ms" in a URL (no marker) does not.
+		t = f"{dur(1600)} on /app/report/query-2000ms-test"
+		assert format_durations(t, 1000.0) == "1.60s on /app/report/query-2000ms-test"
+
+	def test_marker_title_formats_through_render(self):
+		# End-to-end: a dur() marker in a finding title is formatted by render_raw.
+		doc = _doc([], findings=[_finding(f"Slow query: {dur(5234)}", 5234.0)])
+		html = renderer.render_raw(doc, recordings=[])
+		assert "Slow query: 5.23s" in html
+		assert "5234ms" not in html
+
+	def test_marker_degrades_to_plain_ms(self):
+		# An unformatted marker still reads as plain "5234ms" (separator invisible).
+		assert dur(5234).replace(_DUR_SEP, "") == "5234ms"
+
+	def test_marker_preserves_decimals(self):
+		assert format_durations(f"line {dur(12.5, 1)}", 1000.0) == "line 12.5ms"
+
+	def test_marker_strips_trailing_fractional_zeros(self):
+		# A whole-ms value tagged with decimals reads "800ms", never "800.0ms",
+		# so the reproducer notes match the pre-marker rendering exactly.
+		assert format_durations(f"step {dur(800.0, 1)}", 1000.0) == "step 800ms"
+		assert format_durations(f"step {dur(842.3, 1)}", 1000.0) == "step 842.3ms"
+		# A whole-ms value that rolls over is unaffected (seconds are always .2f).
+		assert format_durations(f"step {dur(5000000.0, 1)}", 1000.0) == "step 5000.00s"
+
+	def test_marker_negative_input_is_clamped(self):
+		# A duration is never negative; a stray negative collapses to "0ms" rather
+		# than baking a "-500ms" marker the sign-free marker regex can't own.
+		assert format_durations(f"x {dur(-500)}", 1000.0) == "x 0ms"
+		assert format_durations(f"x {dur(-5000)}", 1000.0) == "x 0ms"
+
+	def test_format_durations_also_handles_free_prose(self):
+		# The prose fallback still rolls a raw "5234ms" in AI-written free text.
+		assert format_durations("took 5234ms", 1000.0) == "took 5.23s"
+
+	def test_multiple_markers_in_one_string(self):
+		t = f"{dur(1600)} of {dur(1095)} wall time"
+		assert format_durations(t, 1000.0) == "1.60s of 1.09s wall time"
+
+	def test_marker_never_carries_a_separator_or_sci_notation(self):
+		# The analyzer controls the number, so a marker can't contain a comma,
+		# space or "e+" (the edge cases that plagued the prose approach).
+		for ms in (2000, 2000.5, 5_000_000, 1_234_567):
+			m = dur(ms)
+			assert "," not in m and " " not in m and "e+" not in m
+
+	def test_marker_non_finite_input_is_safe(self):
+		# dur(inf/nan) must still yield a formattable marker, not "infms".
+		for bad in (float("inf"), float("nan"), float("-inf")):
+			assert format_durations(f"x {dur(bad)}", 1000.0) == "x 0ms"
+
+
 class TestReformatterRobustness:
 	"""Guards for the render-time reformatter against pathological / large input."""
 
@@ -208,13 +276,13 @@ class TestReformatterRobustness:
 		assert _reformat_durations_in_text("Step: 5000000 ms", 1000.0) == "Step: 5000.00s"
 
 	def test_reproducer_note_bakes_large_duration_without_sci_notation(self):
-		# analyze.py bakes reproducer-step durations as plain digits (was ":g",
-		# which flips to "5e+06" at >=1e6 ms and the reformatter then mangles it).
+		# analyze.py tags reproducer-step durations with dur() (plain digits, so a
+		# >=1e6 ms step never bakes as "5e+06") and render formats the marker.
 		from optimus.analyze import _build_auto_notes_list_html
 		html = _build_auto_notes_list_html([{"cmd": "x", "duration": 5000000}])
 		assert "e+" not in html
-		assert "5000000 ms" in html
-		assert "5000.00s" in _reformat_durations_in_text(html, 1000.0)
+		assert "5000000ms" in html  # marker carries plain digits, trailing .0 stripped
+		assert "5000.00s" in format_durations(html, 1000.0)
 
 
 class TestRowDangerNotTiedToDisplay:

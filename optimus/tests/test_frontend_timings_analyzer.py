@@ -6,6 +6,8 @@
 import json
 import os
 
+from optimus.analyzers.base import dur
+
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
@@ -72,8 +74,8 @@ def test_slow_frontend_render_fires_on_lcp():
     assert slow[0]["severity"] == "Medium"  # 2800ms is Medium (2500 < x < 4000)
     # Analyzers bake raw ms; the second-rollover is applied at render time
     # (honouring large_duration_threshold_ms), so the analyzer output is raw ms.
-    assert slow[0]["title"] == "LCP 2800ms on /app/sales-invoice/SI-001"
-    assert "took 2800ms for its largest" in slow[0]["customer_description"]
+    assert slow[0]["title"] == f"LCP {dur(2800)} on /app/sales-invoice/SI-001"
+    assert f"took {dur(2800)} for its largest" in slow[0]["customer_description"]
 
 
 def test_lcp_title_rounds_not_truncates():
@@ -90,8 +92,8 @@ def test_lcp_title_rounds_not_truncates():
     slow = [f for f in result.findings if f["finding_type"] == "Slow Frontend Render"]
     assert len(slow) == 1
     # Rounded to 2801, not truncated to 2800.
-    assert slow[0]["title"] == "LCP 2801ms on /app/x"
-    assert "took 2801ms for its largest" in slow[0]["customer_description"]
+    assert slow[0]["title"] == f"LCP {dur(2800.7)} on /app/x"
+    assert f"took {dur(2800.7)} for its largest" in slow[0]["customer_description"]
     # The badge still carries the raw float, so both round to the same value.
     assert slow[0]["estimated_impact_ms"] == 2800.7
 

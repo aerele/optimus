@@ -21,7 +21,7 @@ from markupsafe import Markup
 
 from optimus.analyzers.base import (
 	SEVERITY_ORDER,
-	_reformat_durations_in_text,
+	format_durations,
 	humanize_duration_ms,
 )
 
@@ -238,9 +238,9 @@ def _get_jinja_env() -> Environment:
 	)
 
 
-# _reformat_durations_in_text (+ its regex machinery) lives in
-# analyzers/base.py now (the pure leaf beside humanize_duration_ms); it is
-# imported at the top of this module and re-exported for existing importers.
+# Duration formatting lives in analyzers/base.py: analyzers tag durations with
+# dur(); format_durations() (imported above) formats the markers + any prose
+# fallback, once, at render.
 
 
 def render(
@@ -558,9 +558,9 @@ def render(
 	# without re-analyzing after the setting changed.
 	for _f in all_findings:
 		if _f.get("title"):
-			_f["title"] = _reformat_durations_in_text(_f["title"], _large_duration_threshold_ms)
+			_f["title"] = format_durations(_f["title"], _large_duration_threshold_ms)
 		if _f.get("customer_description"):
-			_f["customer_description"] = _reformat_durations_in_text(
+			_f["customer_description"] = format_durations(
 				_f["customer_description"], _large_duration_threshold_ms
 			)
 	if not _ai_findings_on:
@@ -687,7 +687,7 @@ def render(
 		# The Steps-to-Reproduce list bakes raw-ms durations at analyze time
 		# (e.g. "Submit Delivery Note: 12418.3 ms"); reformat them at render so
 		# they honour the threshold like every other duration.
-		notes_html = _reformat_durations_in_text(notes_html, _large_duration_threshold_ms)
+		notes_html = format_durations(notes_html, _large_duration_threshold_ms)
 
 	# v0.5.2: Analyzer warnings are stored as a newline-joined string
 	# (see analyze.py). Split into a list of non-empty bullets for the
@@ -915,7 +915,7 @@ def render(
 	# (analyze.py's prose composer may still produce them on cached doc rows).
 	if summary_html_rendered:
 		summary_html_rendered = summary_html_rendered.replace("—", "-")
-		summary_html_rendered = _reformat_durations_in_text(
+		summary_html_rendered = format_durations(
 			summary_html_rendered, _large_duration_threshold_ms
 		)
 

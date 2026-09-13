@@ -59,6 +59,67 @@ def humanize_duration_ms(ms, threshold_ms: float = 1000.0, decimals: int = 0) ->
 	return text
 
 
+# ---------------------------------------------------------------------------
+# Structured durations: mark at analyze time, format once at render.
+# ---------------------------------------------------------------------------
+# The old approach baked a duration as plain text ("5234ms") and the renderer
+# then fuzzily searched prose to convert it (the source of every comma / space /
+# URL / HTML / hang edge). Instead, analyzers tag a duration with an invisible
+# separator (U+2063) via ``dur()``; the report finds that exact marker and formats
+# it once with ``humanize_duration_ms``. Exact-match, so nothing in the
+# surrounding prose can be misread; and an un-replaced marker still reads as plain
+# "5234ms" (the separator is invisible), so a stored title degrades gracefully.
+#
+# The marker is persisted into Optimus Finding.title / customer_description (that is
+# what render reads back), so a row opened directly in the Frappe Desk shows the raw
+# "5234ms" with a trailing invisible char rather than the rolled-over "5.23s"; only
+# the rendered HTML report rolls it over. That is an accepted trade for keeping the
+# analyzers pure and the rollover a pure render-time decision. Written as the \u2063
+# escape (not the literal char) so the source carries no invisible whitespace: an
+# editor that silently stripped a literal char would empty _DUR_SEP and turn the
+# marker match into an unguarded "<n>ms" prose match, the exact bug this replaces.
+_DUR_SEP = "\u2063"
+
+
+def dur(ms, decimals: int = 0) -> str:
+	"""Tag a duration for render-time formatting: ``dur(5234)`` -> ``"5234ms\u2063"``.
+	Analyzers use this in place of ``f"{ms}ms"`` so the report is the only place a
+	duration is turned into "5.23s" / "800ms" (see ``format_duration_markers``).
+	The separator sits after "ms" so the marker still reads (and substring-matches)
+	as plain "5234ms" if it is ever displayed unformatted. Trailing fractional zeros
+	are dropped so a whole-ms value reads "800ms", not "800.0ms". Non-numeric /
+	non-finite / negative input is emitted as "0ms" so the marker always carries a
+	well-formed, non-negative, formattable number."""
+	try:
+		v = float(ms)
+	except (TypeError, ValueError, OverflowError):
+		v = 0.0
+	if not math.isfinite(v) or v < 0:
+		v = 0.0
+	text = f"{v:.{decimals}f}"
+	if "." in text:
+		text = text.rstrip("0").rstrip(".")
+	return f"{text}ms{_DUR_SEP}"
+
+
+_DUR_MARKER_RE = re.compile(r"(\d+(?:\.\d+)?)ms" + _DUR_SEP)
+
+
+def format_duration_markers(text: str, threshold_ms: float) -> str:
+	"""Replace every ``dur()`` marker in ``text`` with its formatted duration,
+	using ``threshold_ms``. Exact-match on the invisible marker, so (unlike the
+	prose reformatter) it can't be fooled by commas, URLs, HTML or huge input."""
+	if not text or _DUR_SEP not in text:
+		return text
+
+	def _sub(m):
+		num = m.group(1)
+		dec = len(num.split(".")[1]) if "." in num else 0
+		return humanize_duration_ms(float(num), threshold_ms, dec)
+
+	return _DUR_MARKER_RE.sub(_sub, text)
+
+
 # Match a raw-ms token ("<n>ms") baked into finding prose, reformatted at render
 # (the threshold is a render-time setting). Guards keep it off non-durations: the
 # look-behind/ahead reject URL chars (/ - = ? & #) so "?t=1500ms" and
@@ -105,6 +166,19 @@ def _reformat_durations_in_text(text: str, threshold_ms: float) -> str:
 		if "ms" in parts[i]:
 			parts[i] = _MS_TOKEN_RE.sub(_sub, parts[i])
 	return "".join(parts)
+
+
+def format_durations(text: str, threshold_ms: float) -> str:
+	"""Format every duration in ``text`` for display, once, at render. Two passes:
+	exact ``dur()`` markers first (the structured path all analyzers use), then the
+	fuzzy prose scanner over the same text. The prose pass is not only for
+	marker-free free text (an AI humanizer's notes) it is also the backstop for a
+	finding whose stored title was truncated at Data(140) and lost its trailing
+	marker, so it stays load-bearing even for analyzer findings and must not be
+	dropped on the assumption markers cover them."""
+	return _reformat_durations_in_text(
+		format_duration_markers(text, threshold_ms), threshold_ms
+	)
 
 
 # Path prefixes we treat as "framework" when picking a representative

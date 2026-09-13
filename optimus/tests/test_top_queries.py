@@ -4,6 +4,7 @@
 """Unit tests for optimus.analyzers.top_queries."""
 
 from optimus.analyzers import top_queries
+from optimus.analyzers.base import dur
 
 
 def test_top_queries_sorted_by_duration_desc(full_scan_recording, empty_context):
@@ -159,8 +160,8 @@ def test_slow_query_title_is_raw_ms_rollover_deferred_to_render(empty_context):
 		if f["finding_type"] == "Slow Query"
 	]
 	assert len(slow) == 1
-	assert slow[0]["title"] == "Slow query: 1234ms"
-	assert "took 1234ms to run" in slow[0]["customer_description"]
+	assert slow[0]["title"] == f"Slow query: {dur(1234)}"
+	assert f"took {dur(1234)} to run" in slow[0]["customer_description"]
 
 
 def test_slow_query_title_stays_ms_below_one_second(empty_context):
@@ -181,4 +182,4 @@ def test_slow_query_title_stays_ms_below_one_second(empty_context):
 		if f["finding_type"] == "Slow Query"
 	]
 	assert len(slow) == 1
-	assert slow[0]["title"] == "Slow query: 850ms"
+	assert slow[0]["title"] == f"Slow query: {dur(850)}"

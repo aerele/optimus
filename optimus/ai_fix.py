@@ -1113,12 +1113,12 @@ def _build_messages(finding: dict, *, threshold_ms: float = 1000.0) -> tuple[str
 	# through the same render-time helper (and threshold) the report uses, so the
 	# model reads "5.23s" here just like the report shows, not "5234ms" beside a
 	# humanized "~5.23s" impact. Lazy import keeps this module frappe-free.
-	from optimus.analyzers.base import _reformat_durations_in_text
+	from optimus.analyzers.base import format_durations
 	if finding.get("title"):
-		parts.append(f"Title: {_reformat_durations_in_text(finding['title'], threshold_ms)}")
+		parts.append(f"Title: {format_durations(finding['title'], threshold_ms)}")
 	if finding.get("customer_description"):
 		parts.append(
-			f"Description: {_reformat_durations_in_text(finding['customer_description'], threshold_ms)}"
+			f"Description: {format_durations(finding['customer_description'], threshold_ms)}"
 		)
 	impact = finding.get("estimated_impact_ms")
 	if impact:

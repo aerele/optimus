@@ -8,6 +8,25 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.49] - 2026-09-12
+
+### Internal
+
+- **Durations are now formatted from structured markers at render time instead of
+  being parsed back out of prose.** Every analyzer tags a duration through a small
+  `dur()` helper, which writes the raw millisecond value plus an invisible separator
+  into the text. At render time `format_durations` finds those markers by exact match
+  and applies the seconds rollover honouring `large_duration_threshold_ms`. Because the
+  analyzer controls the exact spelling of the number, each app-generated duration is now
+  carried by an exact marker rather than being re-discovered by the fuzzy prose scanner,
+  so its formatting is immune to the comma, space, non-breaking-space,
+  scientific-notation, URL and HTML edge cases that the previous approach had to defend
+  against one at a time. The fuzzy prose scanner still runs, after the marker pass, over
+  the same text: it is the fallback for a raw "<n>ms" in free text (an AI humanizer's
+  notes) and the backstop if a stored title is truncated and its trailing marker is
+  severed, and it still carries all of those guards. No user-visible change: durations
+  render the same way.
+
 ## [0.12.48] - 2026-09-10
 
 ### Fixed

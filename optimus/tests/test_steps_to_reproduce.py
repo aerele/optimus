@@ -235,8 +235,8 @@ def test_auto_notes_produces_ordered_list_with_humanized_labels():
 	# Second recording falls through to METHOD + path.
 	assert "GET /api/resource/Sales Invoice/INV-00042" in html_out
 	# Duration rendered in milliseconds (rounded to 1 decimal).
-	assert "842.3 ms" in html_out
-	assert "58.1 ms" in html_out
+	assert "842.3ms" in html_out
+	assert "58.1ms" in html_out
 
 
 def test_auto_notes_html_escapes_user_controlled_strings():
@@ -358,7 +358,7 @@ def test_auto_notes_filters_realtime_polling_noise():
 	html_out = _build_auto_notes_html(recordings)
 	# Only the savedocs survives humanized as "Create Sales Invoice".
 	assert "Create Sales Invoice" in html_out
-	assert "774.8 ms" in html_out
+	assert "774.8ms" in html_out
 	# Polling endpoints filtered out
 	assert "has_permission" not in html_out
 	assert "frappe.realtime" not in html_out

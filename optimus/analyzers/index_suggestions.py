@@ -18,6 +18,7 @@ from optimus.analyzers.base import (
 	FRAPPE_METADATA_COLUMNS,
 	SEVERITY_ORDER,
 	AnalyzerResult,
+	dur,
 	is_frappe_meta_table,
 )
 from optimus.dbdialect import get_dialect
@@ -472,7 +473,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 					f"Adding an index to the **{column}** column of the "
 					f"**{table}** table would speed up {bucket['count']} "
 					f"queries in this session, saving roughly "
-					f"{impact_ms:.0f}ms total. Ask your developer to add this "
+					f"{dur(impact_ms)} total. Ask your developer to add this "
 					"index in a database migration."
 				),
 				"technical_detail_json": json.dumps(
