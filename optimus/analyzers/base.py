@@ -33,6 +33,22 @@ from typing import Any
 SEVERITY_ORDER: dict[str, int] = {"High": 0, "Medium": 1, "Low": 2}
 
 
+def _rolls_over_to_seconds(ms, threshold_ms: float) -> bool:
+	"""Whether ``ms`` renders as seconds (not milliseconds) at ``threshold_ms``.
+	The single source of the ms-vs-seconds decision: ``humanize_duration_ms`` uses
+	it to pick the unit and the renderer uses it to decide the ``.time-high``
+	highlight, instead of string-sniffing the formatted output (which would break
+	silently if the unit spelling ever changed). ``0`` threshold disables rollover;
+	None / non-numeric / non-finite count as zero (stays ms)."""
+	try:
+		v = float(ms) if ms is not None else 0.0
+	except (TypeError, ValueError, OverflowError):
+		v = 0.0
+	if not math.isfinite(v):
+		v = 0.0
+	return bool(threshold_ms and round(abs(v)) >= threshold_ms)
+
+
 def humanize_duration_ms(ms, threshold_ms: float = 1000.0, decimals: int = 0) -> str:
 	"""Plain-text duration: "<n>ms" below ``threshold_ms``, "<n.nn>s" at or above
 	(``0`` disables). The unit is decided from the whole-ms value so the same
@@ -46,7 +62,7 @@ def humanize_duration_ms(ms, threshold_ms: float = 1000.0, decimals: int = 0) ->
 		v = 0.0
 	if not math.isfinite(v):  # inf/nan would blow up round(); format as zero
 		v = 0.0
-	if threshold_ms and round(abs(v)) >= threshold_ms:
+	if _rolls_over_to_seconds(v, threshold_ms):
 		# Whole-ms divide (matching the decision) so a raw float and the same value
 		# re-parsed from "1235ms" text agree at rounding boundaries.
 		text = f"{round(v) / 1000:.2f}s"
@@ -105,19 +121,21 @@ def dur(ms, decimals: int = 0) -> str:
 _DUR_MARKER_RE = re.compile(r"(\d+(?:\.\d+)?)ms" + _DUR_SEP)
 
 
+def _humanize_token(num_str: str, threshold_ms: float) -> str:
+	"""Format a bare duration number ("1234" / "12.5", no unit, no thousands
+	separators) at ``threshold_ms``, keeping the token's own decimal precision.
+	Shared by the marker pass and the prose pass so both round identically."""
+	dec = len(num_str.split(".")[1]) if "." in num_str else 0
+	return humanize_duration_ms(float(num_str), threshold_ms, dec)
+
+
 def format_duration_markers(text: str, threshold_ms: float) -> str:
 	"""Replace every ``dur()`` marker in ``text`` with its formatted duration,
 	using ``threshold_ms``. Exact-match on the invisible marker, so (unlike the
 	prose reformatter) it can't be fooled by commas, URLs, HTML or huge input."""
 	if not text or _DUR_SEP not in text:
 		return text
-
-	def _sub(m):
-		num = m.group(1)
-		dec = len(num.split(".")[1]) if "." in num else 0
-		return humanize_duration_ms(float(num), threshold_ms, dec)
-
-	return _DUR_MARKER_RE.sub(_sub, text)
+	return _DUR_MARKER_RE.sub(lambda m: _humanize_token(m.group(1), threshold_ms), text)
 
 
 # Match a raw-ms token ("<n>ms") baked into finding prose, reformatted at render
@@ -156,9 +174,8 @@ def _reformat_durations_in_text(text: str, threshold_ms: float) -> str:
 		return text
 
 	def _sub(m):
-		num = _SEP_STRIP_RE.sub("", m.group(1))  # drop thousands separators
-		dec = len(num.split(".")[1]) if "." in num else 0
-		return humanize_duration_ms(float(num), threshold_ms, dec)
+		# Drop thousands separators, then share the marker pass's formatter.
+		return _humanize_token(_SEP_STRIP_RE.sub("", m.group(1)), threshold_ms)
 
 	# Even indices are the text runs between tags; odd indices are the tags.
 	parts = _TAG_SPLIT_RE.split(text)

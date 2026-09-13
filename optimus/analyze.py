@@ -1833,6 +1833,9 @@ def _dedupe_findings_across_actions(
 # technical_detail_json for navigation.
 _FINDING_TITLE_MAX_CHARS = 140
 _FINDING_TITLE_ELLIPSIS = "..."
+# A baked duration token ("5234ms", with or without the trailing dur() marker).
+# Used only to keep title truncation from slicing through one.
+_DUR_IN_TITLE_RE = re.compile(r"\d+(?:\.\d+)?ms")
 
 
 def _truncate_finding_titles(findings: list[dict]) -> None:
@@ -1844,7 +1847,17 @@ def _truncate_finding_titles(findings: list[dict]) -> None:
 		title = finding.get("title") or ""
 		if len(title) > _FINDING_TITLE_MAX_CHARS:
 			keep = _FINDING_TITLE_MAX_CHARS - len(_FINDING_TITLE_ELLIPSIS)
-			finding["title"] = title[:keep].rstrip() + _FINDING_TITLE_ELLIPSIS
+			# Never slice through a duration token: a mid-number cut ("...523") or a
+			# unit-less remnant ("...5234m") can't be rolled over at render (the
+			# marker pass needs the whole token and the prose backstop needs the
+			# "<n>ms" intact). If a "<n>ms" straddles the cut, drop it whole instead
+			# (the badge and description still carry the number).
+			cut = keep
+			for _m in _DUR_IN_TITLE_RE.finditer(title):
+				if _m.start() < keep < _m.end():
+					cut = _m.start()
+					break
+			finding["title"] = title[:cut].rstrip() + _FINDING_TITLE_ELLIPSIS
 
 
 # v0.6.0: ±1-line source snippet attached to each finding's callsite so
@@ -2140,8 +2153,8 @@ def _maybe_attach_recorded_queries(
 		return
 	top = []
 	for c in sorted(calls, key=lambda c: -(c.get("duration") or c.get("duration_ms") or 0)):
-		dur = c.get("duration") or c.get("duration_ms") or 0
-		if dur < _AI_EXAMPLE_QUERY_MIN_MS:
+		dur_ms = c.get("duration") or c.get("duration_ms") or 0
+		if dur_ms < _AI_EXAMPLE_QUERY_MIN_MS:
 			continue
 		q = (c.get("query") or "").strip()
 		if not q:

@@ -32,6 +32,11 @@ _TOTAL_TIME_DANGER_MS = 3000.0
 # and the XHR/hot-frame flags.
 _HOT_ACTION_MS = 1000.0
 
+# The amber ("warn") boundary for the per-row duration bars: a row at or above
+# this but below _HOT_ACTION_MS is tinted amber, below it green. One source for
+# _bar_kind_for and the two report.html bar-fill blocks (exposed as bar_warn_ms).
+_BAR_WARN_MS = 300.0
+
 # ---------------------------------------------------------------------------
 # Helpers small pure functions called by sub-builders below
 # ---------------------------------------------------------------------------
@@ -65,14 +70,14 @@ def _bar_kind_for(duration_ms) -> str | None:
 	"""Per-action / per-job bar colour key.
 
 	``duration ≥ _HOT_ACTION_MS`` → ``None`` (red, contract's default).
-	``300 ≤ duration < _HOT_ACTION_MS`` → ``"warn"`` (amber).
-	``duration < 300`` → ``"ok"`` (green).
+	``_BAR_WARN_MS ≤ duration < _HOT_ACTION_MS`` → ``"warn"`` (amber).
+	``duration < _BAR_WARN_MS`` → ``"ok"`` (green).
 	"""
 	if duration_ms is None:
 		return "ok"
 	if duration_ms >= _HOT_ACTION_MS:
 		return None
-	if duration_ms >= 300:
+	if duration_ms >= _BAR_WARN_MS:
 		return "warn"
 	return "ok"
 
@@ -151,7 +156,9 @@ def _build_kpis(session_doc, ctx) -> list[dict]:
 	display-rollover setting); Issues-found is danger when any High finding
 	exists.
 	"""
-	fmt_ms = ctx.get("fmt_ms") or (lambda v, **kw: _ms_display(v, **kw))
+	fmt_ms = ctx.get("fmt_ms") or (
+		lambda v, **kw: _ms_display(v, _resolve_threshold_ms(ctx.get("render_config")), **kw)
+	)
 	total_ms = getattr(session_doc, "total_duration_ms", 0) or 0
 	total_query_ms = getattr(session_doc, "total_query_time_ms", 0) or 0
 	total_queries = getattr(session_doc, "total_queries", 0) or 0
@@ -420,7 +427,7 @@ def _build_action_plan(action_plan, fmt_ms=None) -> list[dict]:
 	savings_display, savings_label}, plus a non-contract ``callsite``
 	(``file:line``) rendered as an anchor under each step.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
+	fmt = fmt_ms or _ms_display
 	result = []
 	for step in action_plan or []:
 		gain_ms = step.get("gain_ms", 0) or 0
@@ -446,7 +453,7 @@ def _build_action_plan(action_plan, fmt_ms=None) -> list[dict]:
 
 def _build_waterfall(waterfall_rows, fmt_ms=None) -> list[dict]:
 	"""Contract ``waterfall`` = {name, width_pct, duration_display, kind, is_hot_text}."""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
+	fmt = fmt_ms or _ms_display
 	result = []
 	for row in waterfall_rows or []:
 		is_hot = bool(row.get("hot", False))
@@ -470,7 +477,7 @@ def _build_actions(actions, findings, fmt_ms=None) -> list[dict]:
 	still reads ``action_label``, ``http_method``, ``path`` etc.); contract
 	fields are added on top and never collide with the legacy keys.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
+	fmt = fmt_ms or _ms_display
 	findings_by_ref: dict[str, list] = {}
 	for f in findings or []:
 		ref = str(f.get("action_ref") or "")
@@ -528,7 +535,7 @@ def _build_background_jobs(jobs, fmt_ms=None) -> list[dict]:
 	``related_findings``, ``top_queries``, etc.) so the ``bg_job_row`` macro
 	reads the same fields.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
+	fmt = fmt_ms or _ms_display
 	jobs = jobs or []
 	max_ms = max((j.get("duration_ms", 0) for j in jobs), default=1) or 1
 	result = []
@@ -571,7 +578,7 @@ def _build_doc_events(doc_event_breakdown, fmt_ms=None) -> list[dict]:
 	with ``is_save_target`` / ``touched_during`` per doctype and
 	``vscode_link`` / ``count`` per hook. ``summary`` stays contract-conformant.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
+	fmt = fmt_ms or _ms_display
 	result = []
 	for entry in (doc_event_breakdown or {}).get("doctypes", []) or []:
 		methods_out = []
@@ -779,7 +786,7 @@ def _build_hot_frames(hot_frames_rows, ignored_apps, fmt_ms=None) -> list[dict]:
 	Spreads the original row dict so ``hot_frame_row`` still reads
 	``display_name`` / ``total_ms`` / ``is_hot``.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
+	fmt = fmt_ms or _ms_display
 	ignored = tuple(ignored_apps or ())
 	result = []
 	for row in hot_frames_rows or []:
@@ -806,7 +813,7 @@ def _build_slow_queries(top_queries, fmt_ms=None) -> list[dict]:
 	Spreads the original query dict so ``top_query_row`` keeps reading
 	``duration_ms`` / ``callsite`` / ``normalized_query``.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
+	fmt = fmt_ms or _ms_display
 	result = []
 	for q in top_queries or []:
 		# v0.7.x M5 rename: accept the new ``query_duration_ms`` and the
@@ -841,7 +848,7 @@ def _build_db(table_breakdown, fmt_ms=None, threshold_ms: float = 1000.0) -> dic
 	dict is spread through so the index-recommendation block keeps reading
 	``read_time_ms``, ``recommended_index`` etc.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v, **kw))
+	fmt = fmt_ms or _ms_display
 	if not table_breakdown:
 		return None
 
@@ -939,6 +946,11 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		_sampler_ms = 1.0
 	# "Render durations in seconds above (ms)" setting, shared with the tables.
 	_threshold_ms = _resolve_threshold_ms(ctx.get("render_config"))
+	# One duration formatter shared by every sub-builder: the render context's
+	# threshold-aware fmt_ms when present, else a default that still honours the
+	# resolved threshold (not a hardcoded 1000), so a caller omitting fmt_ms on a
+	# non-default profile can't split the report into ms-here / seconds-there.
+	_fmt_ms = ctx.get("fmt_ms") or (lambda v, **kw: _ms_display(v, _threshold_ms, **kw))
 	# AI token-usage transparency: total tokens every AI feature consumed this
 	# session fix suggestions (per finding), index suggestions (per table),
 	# and the Steps-to-Reproduce humanization (one per session). Derived at
@@ -987,39 +999,39 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		# it by iterating ``line_drilldown_runs`` and a structured diff
 		# representation.
 		"line_drilldown_html": ctx.get("line_drilldown_html") or "",
-		"action_plan": _build_action_plan(ctx.get("action_plan", []), ctx.get("fmt_ms")),
-		"waterfall": _build_waterfall(ctx.get("waterfall_rows", []), ctx.get("fmt_ms")),
+		"action_plan": _build_action_plan(ctx.get("action_plan", []), _fmt_ms),
+		"waterfall": _build_waterfall(ctx.get("waterfall_rows", []), _fmt_ms),
 		"actions": _build_actions(
-			ctx.get("actions", []), ctx.get("findings", []), ctx.get("fmt_ms")
+			ctx.get("actions", []), ctx.get("findings", []), _fmt_ms
 		),
 		# J.2.3 non-contract addition pragmatic extension so the framework
 		# sub-block keeps rendering. May be folded into ``actions`` with an
 		# ``is_framework`` flag in J.3.
 		"actions_framework": _build_actions(
-			ctx.get("actions_framework", []), ctx.get("findings", []), ctx.get("fmt_ms")
+			ctx.get("actions_framework", []), ctx.get("findings", []), _fmt_ms
 		),
 		"background_jobs": _build_background_jobs(
-			(ctx.get("background_jobs") or {}).get("jobs", []) or [], ctx.get("fmt_ms")
+			(ctx.get("background_jobs") or {}).get("jobs", []) or [], _fmt_ms
 		),
 		# J.2.3 non-contract addition see actions_framework note above.
 		"background_jobs_framework": _build_background_jobs(
-			(ctx.get("background_jobs") or {}).get("jobs_framework", []) or [], ctx.get("fmt_ms")
+			(ctx.get("background_jobs") or {}).get("jobs_framework", []) or [], _fmt_ms
 		),
-		"doc_events": _build_doc_events(ctx.get("doc_event_breakdown") or {}, ctx.get("fmt_ms")),
+		"doc_events": _build_doc_events(ctx.get("doc_event_breakdown") or {}, _fmt_ms),
 		"resource": _build_resource(
 			ctx.get("infra_summary") or {}, ctx.get("infra_timeline") or []
 		),
 		"frontend": _build_frontend(ctx),
 		"hot_frames": _build_hot_frames(
-			ctx.get("hot_frames_rows", []), ctx.get("ignored_apps") or (), ctx.get("fmt_ms")
+			ctx.get("hot_frames_rows", []), ctx.get("ignored_apps") or (), _fmt_ms
 		),
 		# J.2.5 non-contract addition for framework split.
 		"hot_frames_framework": _build_hot_frames(
-			ctx.get("hot_frames_rows_framework", []), ctx.get("ignored_apps") or (), ctx.get("fmt_ms")
+			ctx.get("hot_frames_rows_framework", []), ctx.get("ignored_apps") or (), _fmt_ms
 		),
-		"slow_queries": _build_slow_queries(ctx.get("top_queries", []), ctx.get("fmt_ms")),
+		"slow_queries": _build_slow_queries(ctx.get("top_queries", []), _fmt_ms),
 		# J.2.5 non-contract addition for framework split.
-		"slow_queries_framework": _build_slow_queries(ctx.get("top_queries_framework", []), ctx.get("fmt_ms")),
+		"slow_queries_framework": _build_slow_queries(ctx.get("top_queries_framework", []), _fmt_ms),
 		# B.DI4 how many user-app slow queries the analyzer truncated
 		# out of the findings list (5-cap). 0 when nothing was suppressed.
 		"top_queries_suppressed_count": int(ctx.get("top_queries_suppressed_count") or 0),
@@ -1029,16 +1041,19 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		"frame_truncation": ctx.get("frame_truncation") or {
 			"captured": 0, "kept": 0, "actions_affected": 0, "keep_limit": 0,
 		},
-		"db": _build_db(ctx.get("table_breakdown", []), ctx.get("fmt_ms"), threshold_ms=_threshold_ms),
+		"db": _build_db(ctx.get("table_breakdown", []), _fmt_ms, threshold_ms=_threshold_ms),
 		"how_to_read_items": None,
 		"footer": _build_footer(ctx.get("render_config")),
 		# J.3.1 non-contract additions the remaining two passthroughs
 		# the template needs before the legacy top-level keys can be
 		# dropped from renderer.py's context dict.
-		"large_duration_threshold_ms": _resolve_threshold_ms(ctx.get("render_config")),
+		"large_duration_threshold_ms": _threshold_ms,
 		# Fixed per-row "hot" threshold (red bar/value), independent of the display
 		# preference above so row danger doesn't follow the Sensitivity Profile.
 		"hot_action_ms": _HOT_ACTION_MS,
+		# Amber boundary for the per-row bars (below hot_action_ms), single-sourced
+		# with _bar_kind_for so the template stops hardcoding 300.
+		"bar_warn_ms": _BAR_WARN_MS,
 		"background_jobs_summary": _build_background_jobs_summary(ctx.get("background_jobs") or {}),
 	}
 

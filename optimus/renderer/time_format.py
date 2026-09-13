@@ -15,7 +15,7 @@ import re
 
 from markupsafe import Markup
 
-from optimus.analyzers.base import humanize_duration_ms
+from optimus.analyzers.base import _rolls_over_to_seconds, humanize_duration_ms
 
 
 def _format_duration_ms(ms, threshold_ms: float = 1000.0, decimals: int = 0):
@@ -31,8 +31,10 @@ def _format_duration_ms(ms, threshold_ms: float = 1000.0, decimals: int = 0):
 	still compare / concat the result.
 	"""
 	text = humanize_duration_ms(ms, threshold_ms, decimals)
-	# Seconds branch (ends in "s" but not "ms") gets the eye-catch wrapper.
-	if text.endswith("s") and not text.endswith("ms"):
+	# The seconds branch gets the eye-catch wrapper. Ask the shared decision helper
+	# rather than sniff the formatted text, so a future unit spelling (e.g. "5.23 s")
+	# can't silently drop the highlight.
+	if _rolls_over_to_seconds(ms, threshold_ms):
 		return Markup(f'<span class="time-high">{text}</span>')
 	return Markup(text)
 

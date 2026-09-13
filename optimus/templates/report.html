@@ -2089,7 +2089,7 @@
    rows in its primary table and framework-app rows in a collapsed
    "subsection" details sub-block below; both call the same macro so the
    row markup lives in one place. #}
-{% macro action_row(action, idx, max_ms=1.0, hot_ms=1000) %}
+{% macro action_row(action, idx, max_ms=1.0, hot_ms=1000, warn_ms=300) %}
   {# v0.7.x redesign Phase E: editorial per-action row.
 
      - Action cell: `.action-name` (bold mono) + `.action-meta` (HTTP
@@ -2122,7 +2122,7 @@
     <td class="num bar-cell">
       <span{% if _ms >= hot_ms %} class="hot-value"{% endif %}>{{ fmt_ms(_ms) }}</span>
       <div class="bar-track">
-        <div class="bar-fill{% if _ms >= hot_ms %}{% elif _ms >= 300 %} warn{% else %} ok{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
+        <div class="bar-fill{% if _ms >= hot_ms %}{% elif _ms >= warn_ms %} warn{% else %} ok{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
       </div>
     </td>
     <td class="num">{{ action.queries_count }}</td>
@@ -2154,7 +2154,7 @@
   <span class="job-status job-status-{{ _cls }}">{{ _s }}</span>
 {%- endmacro %}
 
-{% macro bg_job_row(job, idx, cols, any_findings_counted, max_ms=1.0, hot_ms=1000) %}
+{% macro bg_job_row(job, idx, cols, any_findings_counted, max_ms=1.0, hot_ms=1000, warn_ms=300) %}
   {# v0.7.x redesign Phase E: mirror of action_row for background
      jobs - `.action-name` for the dotted method, `.bar-cell` for the
      duration, `.type-tag.bg` would be redundant (every row in this
@@ -2176,7 +2176,7 @@
     <td class="num bar-cell">
       <span{% if _ms >= hot_ms %} class="hot-value"{% endif %}>{{ fmt_ms(_ms) }}</span>
       <div class="bar-track">
-        <div class="bar-fill{% if _ms >= hot_ms %}{% elif _ms >= 300 %} warn{% else %} ok{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
+        <div class="bar-fill{% if _ms >= hot_ms %}{% elif _ms >= warn_ms %} warn{% else %} ok{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
       </div>
     </td>
     <td class="num">{{ job.queries_count }}</td>
@@ -2505,8 +2505,8 @@
        loop emits one chunk - the legacy behaviour. #}
     {% if report_data.summary and report_data.summary.paragraphs_html %}
       {% for p in report_data.summary.paragraphs_html %}{{ p | safe }}{% endfor %}
-    {% elif session.summary_html %}
-      {{ session.summary_html | safe }}
+    {% elif stored_summary_html %}
+      {{ stored_summary_html | safe }}
     {% else %}
       <p class="empty">No summary available.</p>
     {% endif %}
@@ -2700,6 +2700,7 @@
          the max to the table's own slice, not the combined set -
          keeps the framework subsection's bars usable too. #}
       {% set _hot_ms = (report_data.hot_action_ms or 1000) | float %}
+      {% set _warn_ms = (report_data.bar_warn_ms or 300) | float %}
       {% if report_data.actions %}
       {# v0.7.x Phase J.2.3: iterate report_data.actions; the contract-shaped
          entries preserve the legacy action keys so action_row reads
@@ -2728,7 +2729,7 @@
         </thead>
         <tbody>
         {% for action in report_data.actions %}
-          {{ action_row(action, loop.index, max_ms=_max_action_ms, hot_ms=_hot_ms) }}
+          {{ action_row(action, loop.index, max_ms=_max_action_ms, hot_ms=_hot_ms, warn_ms=_warn_ms) }}
         {% endfor %}
         </tbody>
         <tfoot>
@@ -2775,7 +2776,7 @@
           </thead>
           <tbody>
           {% for action in report_data.actions_framework %}
-            {{ action_row(action, loop.index, max_ms=_max_fw_ms, hot_ms=_hot_ms) }}
+            {{ action_row(action, loop.index, max_ms=_max_fw_ms, hot_ms=_hot_ms, warn_ms=_warn_ms) }}
           {% endfor %}
           </tbody>
         </table>
@@ -2826,6 +2827,7 @@
     </p>
     {% set cols = 8 if report_data.background_jobs_summary.any_findings_counted else 7 %}
     {% set _hot_ms = (report_data.hot_action_ms or 1000) | float %}
+    {% set _warn_ms = (report_data.bar_warn_ms or 300) | float %}
     {# v0.7.x Phase J.2.3: iterate report_data.background_jobs; entries
        preserve the legacy job keys so bg_job_row reads job.method /
        entry_callsite / etc. unchanged. The section heading still pulls
@@ -2853,7 +2855,7 @@
       </thead>
       <tbody>
       {% for job in report_data.background_jobs %}
-        {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_job_ms, hot_ms=_hot_ms) }}
+        {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_job_ms, hot_ms=_hot_ms, warn_ms=_warn_ms) }}
       {% endfor %}
       </tbody>
       <tfoot>
@@ -2899,7 +2901,7 @@
         </thead>
         <tbody>
         {% for job in report_data.background_jobs_framework %}
-          {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_fw_job_ms, hot_ms=_hot_ms) }}
+          {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_fw_job_ms, hot_ms=_hot_ms, warn_ms=_warn_ms) }}
         {% endfor %}
         </tbody>
       </table>

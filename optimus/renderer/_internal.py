@@ -681,13 +681,16 @@ def render(
 			# user input - safe by default.
 			import html as html_mod
 			notes_html = html_mod.escape(notes_html)
+		# The Steps-to-Reproduce list bakes raw-ms durations at analyze time
+		# (e.g. "Submit Delivery Note: 12418.3 ms"); reformat them at render so
+		# they honour the threshold like every other duration. Do this BEFORE the
+		# em-dash sweep: a raw "5234ms—slow step" must roll over first, because the
+		# sweep turns the em dash into a hyphen and the prose reformatter then skips
+		# a "ms" glued to a hyphen (its URL guard), leaving the value in ms.
+		notes_html = format_durations(notes_html, _large_duration_threshold_ms)
 		# v0.7.x J.13: strip em dashes the analyzer wrote into auto-notes
 		# / humanized-notes prose at analyse-time.
 		notes_html = notes_html.replace("—", "-")
-		# The Steps-to-Reproduce list bakes raw-ms durations at analyze time
-		# (e.g. "Submit Delivery Note: 12418.3 ms"); reformat them at render so
-		# they honour the threshold like every other duration.
-		notes_html = format_durations(notes_html, _large_duration_threshold_ms)
 
 	# v0.5.2: Analyzer warnings are stored as a newline-joined string
 	# (see analyze.py). Split into a list of non-empty bullets for the
@@ -914,13 +917,27 @@ def render(
 	# v0.7.x J.13: strip em dashes from the render-time summary HTML
 	# (analyze.py's prose composer may still produce them on cached doc rows).
 	if summary_html_rendered:
-		summary_html_rendered = summary_html_rendered.replace("—", "-")
+		# Reformat durations BEFORE the em-dash sweep so a raw "5234ms..." rolls
+		# over first (the sweep leaves a hyphen the reformatter's URL guard skips).
 		summary_html_rendered = format_durations(
 			summary_html_rendered, _large_duration_threshold_ms
 		)
+		summary_html_rendered = summary_html_rendered.replace("—", "-")
+
+	# The template falls back to the STORED session.summary_html when the
+	# render-time summary is empty (legacy / edge sessions). That stored value
+	# also carries dur() markers and em dashes, so format it the same way rather
+	# than let the fallback emit a raw "<n>ms" + invisible marker.
+	stored_summary_html = getattr(session_doc, "summary_html", None) or ""
+	if stored_summary_html:
+		stored_summary_html = format_durations(
+			stored_summary_html, _large_duration_threshold_ms
+		)
+		stored_summary_html = stored_summary_html.replace("—", "-")
 
 	context = {
 		"session": session_doc,
+		"stored_summary_html": stored_summary_html,
 		"actions": actions,
 		# v0.6.x: framework-app actions, rendered in a collapsed sub-block
 		# below the primary per-action table. Empty → no sub-block.

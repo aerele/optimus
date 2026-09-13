@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.49] - 2026-09-12
+## [0.12.49] - 2026-09-13
 
 ### Internal
 
@@ -26,6 +26,17 @@ versions may contain breaking changes see migration notes below).
   notes) and the backstop if a stored title is truncated and its trailing marker is
   severed, and it still carries all of those guards. No user-visible change: durations
   render the same way.
+- **Edge-case hardening from a follow-up review.** A raw duration written immediately
+  before an em dash in a note or the summary now rolls over correctly (durations are
+  formatted before the em-dash sweep, not after). A finding title that must be truncated
+  at its 140-char limit is never cut through a duration token, so it can't leave a
+  unit-less "5234m" or a bare number. The stored-summary fallback (used when the
+  render-time summary is empty) is now formatted like every other duration. The
+  report-context duration formatter honours the configured threshold even when a caller
+  omits the injected formatter, so a non-default profile can't split the report into
+  seconds-here / milliseconds-there. The ms-vs-seconds highlight decision is
+  single-sourced instead of sniffing the formatted string, and the per-row amber bar
+  boundary is single-sourced instead of hardcoded in three places.
 
 ## [0.12.48] - 2026-09-10
 

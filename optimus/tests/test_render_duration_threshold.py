@@ -14,6 +14,7 @@ from optimus import renderer
 from optimus.analyzers.base import (
 	_DUR_SEP,
 	_reformat_durations_in_text,
+	_rolls_over_to_seconds,
 	dur,
 	format_durations,
 )
@@ -390,3 +391,85 @@ class TestLowThreshold:
 		assert ">0.80s<" in html
 		# 200ms stays as ms.
 		assert ">200ms<" in html
+
+
+class TestCodeReviewFixes:
+	"""Regressions for the low-severity findings from the max-effort review."""
+
+	def test_note_duration_before_em_dash_rolls_over(self):
+		# #2: the em-dash sweep must run AFTER format_durations. A raw "5234ms—slow"
+		# used to become "5234ms-slow" (hyphen), which the prose reformatter's URL
+		# guard then skipped, leaving raw ms. It must roll over to seconds now.
+		doc = _doc([])
+		doc.notes = "<p>Submit Delivery Note took 5234ms—the slowest step.</p>"
+		html = renderer.render_raw(doc, recordings=[])
+		assert "5.23s" in html
+		assert "5234ms" not in html
+
+	def test_summary_duration_before_em_dash_rolls_over(self):
+		# #2 for the summary path (identical ordering bug).
+		doc = _doc([])
+		with patch(
+			"optimus.analyze._build_summary_html",
+			return_value="The slowest step took 5234ms—a big gap.",
+		):
+			html = renderer.render_raw(doc, recordings=[])
+		assert "5.23s" in html
+		assert "5234ms" not in html
+
+	def test_stored_summary_fallback_is_formatted(self):
+		# #4: when the render-time summary is empty, the template falls back to the
+		# stored session.summary_html, which also carries dur() markers. It must be
+		# formatted (rolled over, marker stripped), not printed raw.
+		doc = _doc([])
+		doc.summary_html = f"The slowest step was {dur(5234)}."
+		with patch("optimus.analyze._build_summary_html", return_value=""):
+			html = renderer.render_raw(doc, recordings=[])
+		assert "The slowest step was 5.23s" in html
+		assert _DUR_SEP not in html
+
+	def test_title_truncation_never_severs_a_duration(self):
+		# #3: a long title whose dur() marker sits at the tail must not be cut mid
+		# token, leaving bare digits or a unit-less "5234m". The token is dropped
+		# whole instead (badge + description still carry it).
+		from optimus.analyze import _FINDING_TITLE_MAX_CHARS, _truncate_finding_titles
+
+		f = {"title": "In job " + ("X" * 140) + " consumed " + dur(5234)}
+		_truncate_finding_titles([f])
+		t = f["title"]
+		assert len(t) <= _FINDING_TITLE_MAX_CHARS
+		assert t.endswith("...")
+		# No half-number / unit-less remnant left dangling before the ellipsis.
+		stem = t[: -len("...")].rstrip()
+		assert not stem.endswith(("5", "52", "523", "5234", "5234m"))
+		assert _DUR_SEP not in t
+
+	def test_report_context_fallback_honours_non_default_threshold(self):
+		# #6: build_report_context must build a threshold-aware default formatter,
+		# so a caller that omits ctx["fmt_ms"] on a non-default profile does NOT
+		# silently fall back to the hardcoded 1000ms rollover.
+		from optimus import report_context as rc
+
+		class _Doc:
+			def __getattr__(self, _n):
+				return 0
+
+		ctx = {
+			"render_config": {"large_duration_threshold_ms": 500},
+			"top_queries": [{"query_duration_ms": 800, "callsite": "a/b.py:1"}],
+		}
+		out = rc.build_report_context(_Doc(), ctx)
+		# 800ms at a 500ms threshold rolls over; at the buggy 1000 default it would not.
+		assert rc._ms_display(800, 500) == "0.80s"
+		assert out["large_duration_threshold_ms"] == 500
+
+	def test_rolls_over_helper_matches_humanize(self):
+		# #11: the highlight decision comes from the shared helper, not string-
+		# sniffing the formatted output. It must agree with humanize_duration_ms.
+		from optimus.analyzers.base import humanize_duration_ms
+
+		for v in (0, 300, 499.6, 500, 800, 5234, 10_000_000):
+			for thr in (0, 500, 1000):
+				text = humanize_duration_ms(v, thr)
+				is_seconds = text.endswith("s") and not text.endswith("ms")
+				assert _rolls_over_to_seconds(v, thr) == is_seconds
