@@ -284,6 +284,68 @@ class TestBuildMessages:
 
 
 # --------------------------------------------------------------------------
+# _FRAPPE_REVIEW_RULES verification — the distilled Frappe quality-code-review rules
+# --------------------------------------------------------------------------
+
+class TestFrappeReviewRules:
+	def test_rules_are_wired_into_system_prompt(self):
+		system, _ = ai_fix._build_messages({"finding_type": "Slow Query", "title": "x"})
+		assert ai_fix._FRAPPE_REVIEW_RULES in system
+		assert "BEYOND PERFORMANCE" in system
+
+	def test_correctness_rules_present(self):
+		system, _ = ai_fix._build_messages({"finding_type": "Slow Query", "title": "x"})
+		low = system.lower()
+		assert "commit()" in system
+		assert "touches every row" in low
+		assert "cint" in system
+		assert "flt" in system
+		assert "unique constraint" in low
+		assert "check-then-act" in low
+
+	def test_security_rules_present(self):
+		system, _ = ai_fix._build_messages({"finding_type": "Slow Query", "title": "x"})
+		low = system.lower()
+		assert "isinstance" in system
+		assert "@frappe.whitelist" in system
+		assert "safe_exec" in low
+		assert "allow_guest" in low
+		assert "dom sink" in low
+		assert "eval" in low
+		assert "exec" in low
+
+	def test_concurrency_rules_present(self):
+		system, _ = ai_fix._build_messages({"finding_type": "Slow Query", "title": "x"})
+		low = system.lower()
+		assert "for update" in low
+		assert "stateless" in low
+		assert "module-global" in low
+
+	def test_compatibility_rules_present(self):
+		system, _ = ai_fix._build_messages({"finding_type": "Slow Query", "title": "x"})
+		low = system.lower()
+		assert "keyword args" in low
+		assert "shim" in low
+		assert "monkey-patch" in low
+		assert "data patch" in low
+		assert "idempotent" in low
+
+	def test_discipline_rule_present(self):
+		system, _ = ai_fix._build_messages({"finding_type": "Slow Query", "title": "x"})
+		low = system.lower()
+		assert "regression test" in low
+		assert "do not fix this" in low
+
+	def test_rules_within_token_budget(self):
+		assert len(ai_fix._FRAPPE_REVIEW_RULES) <= 2500
+
+	def test_output_contract_unchanged(self):
+		system, _ = ai_fix._build_messages({"finding_type": "Slow Query", "title": "x"})
+		for h in ("**Diagnosis**", "**Fix**", "**Why it works**", "**Verify**"):
+			assert h in system
+
+
+# --------------------------------------------------------------------------
 # _call_openai_chat / _call_anthropic — HTTP layer with requests mocked
 # --------------------------------------------------------------------------
 

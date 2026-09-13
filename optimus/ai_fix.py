@@ -180,6 +180,42 @@ def _finding_type_hint(ftype):
 			pass
 	return _FINDING_TYPE_HINTS.get(ftype)
 
+# Standard Frappe framework rules the AI fix must obey, on top of the
+# performance rules already in _SYSTEM_PROMPT. Distilled from Frappe's published
+# "quality-code-review" skill; the full checklist is kept at
+# docs/frappe-quality-review.md (re-sync it there, then update this constant to
+# match). Composed into _SYSTEM_PROMPT below.
+_FRAPPE_REVIEW_RULES = (
+	"BEYOND PERFORMANCE: your fix MUST also obey these standard Frappe framework "
+	"rules. A fast fix that breaks one of these is wrong.\n"
+	"Correctness: never emit a mid-transaction `frappe.db.commit()` or "
+	"`frappe.db.rollback()` (it ends the request transaction and exposes partial "
+	"state). Never call `frappe.db.set_value` / `frappe.db.delete` / "
+	"`frappe.db.get_value` with a None, empty, or attacker-controlled name or filter "
+	"(it touches every row) without guarding the name first. Cast at boundaries with "
+	"`cint`/`flt` instead of comparing a string to an int or datetime. Prefer a DB "
+	"unique constraint over check-then-act (`if not exists: insert` is a race).\n"
+	"Security: validate parameter TYPES at every `@frappe.whitelist` boundary with "
+	"`isinstance(x, str)`; Frappe accepts filter-lists, so a string param can arrive "
+	"as `['!=', '']` and bypass a check even through the ORM. Never `eval`/`exec`; use "
+	"`safe_exec` only. Do not reach for `allow_guest=True`. Escape at the DOM sink; do "
+	"not sanitize by stripping characters.\n"
+	"Concurrency: `SELECT ... FOR UPDATE` must filter an indexed column or it locks "
+	"the whole table. Keep query-building stateless: no module-global or class-level "
+	"mutable state shared across requests (request-scoped `frappe.local` memoization "
+	"is fine; static query state is not).\n"
+	"Compatibility: add new parameters LAST as keyword args with safe defaults "
+	"(default `None`, not an empty string); when renaming, keep the old name as a "
+	"shim that forwards. Never monkey-patch core or copy a core file to change a few "
+	"lines. A schema or field-type change needs an idempotent, correctly-ordered data "
+	"patch in the right app, not a silent migration.\n"
+	"Discipline: pair the fix with a regression test that would have caught the bug. "
+	"Sometimes the right answer is do not fix this, add a data patch, or add a "
+	"regression test instead of changing code; if so, say that in **Diagnosis** "
+	"rather than forcing a diff.\n\n"
+)
+
+
 _SYSTEM_PROMPT = (
 	"You are a senior Frappe Framework / ERPNext engineer doing a precise code "
 	"review of one finding from a performance profiler. Propose the smallest "
@@ -258,8 +294,8 @@ _SYSTEM_PROMPT = (
 	"save (or they're already indexed); `bench migrate` owns the latter's "
 	"schema. If the only index you can think of targets one of those, say "
 	"there's no good index-side fix and propose a query-shape change instead.\n\n"
-
-	"OUTPUT — Markdown, exactly these four headings, nothing before or after:\n"
+	+ _FRAPPE_REVIEW_RULES
+	+ "OUTPUT — Markdown, exactly these four headings, nothing before or after:\n"
 	"**Diagnosis** — 1-2 sentences: the actual cause, referring to the shown "
 	"source by line number when you can (e.g. \"the `frappe.get_doc(...)` on "
 	"line 14 runs once per item — N round-trips\"). If the offending code "
