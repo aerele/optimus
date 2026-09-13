@@ -19,6 +19,8 @@ Pure means no Frappe DB access, no Redis access, no I/O: analyzers operate only
 on the data passed in. The orchestrator (analyze.py) merges and persists results.
 """
 
+import math
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,6 +31,155 @@ from typing import Any
 # analyzer when sorting its findings list. Moved here from per-module
 # copies to keep the ordering consistent across the pipeline.
 SEVERITY_ORDER: dict[str, int] = {"High": 0, "Medium": 1, "Low": 2}
+
+
+def humanize_duration_ms(ms, threshold_ms: float = 1000.0, decimals: int = 0) -> str:
+	"""Plain-text duration: "<n>ms" below ``threshold_ms``, "<n.nn>s" at or above
+	(``0`` disables). The unit is decided from the whole-ms value so the same
+	duration can't roll over in one place and stay ms in another at a different
+	precision; ``decimals`` sets ms precision only. Arg order matches
+	``time_format._format_duration_ms`` / ``report_context._ms_display``.
+	``None`` / non-numeric / non-finite (inf, nan, overflow) format as zero."""
+	try:
+		v = float(ms) if ms is not None else 0.0
+	except (TypeError, ValueError, OverflowError):  # OverflowError: float(10**400)
+		v = 0.0
+	if not math.isfinite(v):  # inf/nan would blow up round(); format as zero
+		v = 0.0
+	if threshold_ms and round(abs(v)) >= threshold_ms:
+		# Whole-ms divide (matching the decision) so a raw float and the same value
+		# re-parsed from "1235ms" text agree at rounding boundaries.
+		text = f"{round(v) / 1000:.2f}s"
+	else:
+		text = f"{v:.{decimals}f}ms"
+	# A value that rounds to zero keeps no sign: "0ms" / "0.00s", never "-0.00ms".
+	unit = "ms" if text.endswith("ms") else "s"
+	if text.startswith("-") and float(text[: -len(unit)]) == 0.0:
+		text = text[1:]
+	return text
+
+
+# ---------------------------------------------------------------------------
+# Structured durations: mark at analyze time, format once at render.
+# ---------------------------------------------------------------------------
+# The old approach baked a duration as plain text ("5234ms") and the renderer
+# then fuzzily searched prose to convert it (the source of every comma / space /
+# URL / HTML / hang edge). Instead, analyzers tag a duration with an invisible
+# separator (U+2063) via ``dur()``; the report finds that exact marker and formats
+# it once with ``humanize_duration_ms``. Exact-match, so nothing in the
+# surrounding prose can be misread; and an un-replaced marker still reads as plain
+# "5234ms" (the separator is invisible), so a stored title degrades gracefully.
+#
+# The marker is persisted into Optimus Finding.title / customer_description (that is
+# what render reads back), so a row opened directly in the Frappe Desk shows the raw
+# "5234ms" with a trailing invisible char rather than the rolled-over "5.23s"; only
+# the rendered HTML report rolls it over. That is an accepted trade for keeping the
+# analyzers pure and the rollover a pure render-time decision. Written as the \u2063
+# escape (not the literal char) so the source carries no invisible whitespace: an
+# editor that silently stripped a literal char would empty _DUR_SEP and turn the
+# marker match into an unguarded "<n>ms" prose match, the exact bug this replaces.
+_DUR_SEP = "\u2063"
+
+
+def dur(ms, decimals: int = 0) -> str:
+	"""Tag a duration for render-time formatting: ``dur(5234)`` -> ``"5234ms\u2063"``.
+	Analyzers use this in place of ``f"{ms}ms"`` so the report is the only place a
+	duration is turned into "5.23s" / "800ms" (see ``format_duration_markers``).
+	The separator sits after "ms" so the marker still reads (and substring-matches)
+	as plain "5234ms" if it is ever displayed unformatted. Trailing fractional zeros
+	are dropped so a whole-ms value reads "800ms", not "800.0ms". Non-numeric /
+	non-finite / negative input is emitted as "0ms" so the marker always carries a
+	well-formed, non-negative, formattable number."""
+	try:
+		v = float(ms)
+	except (TypeError, ValueError, OverflowError):
+		v = 0.0
+	if not math.isfinite(v) or v < 0:
+		v = 0.0
+	text = f"{v:.{decimals}f}"
+	if "." in text:
+		text = text.rstrip("0").rstrip(".")
+	return f"{text}ms{_DUR_SEP}"
+
+
+_DUR_MARKER_RE = re.compile(r"(\d+(?:\.\d+)?)ms" + _DUR_SEP)
+
+
+def format_duration_markers(text: str, threshold_ms: float) -> str:
+	"""Replace every ``dur()`` marker in ``text`` with its formatted duration,
+	using ``threshold_ms``. Exact-match on the invisible marker, so (unlike the
+	prose reformatter) it can't be fooled by commas, URLs, HTML or huge input."""
+	if not text or _DUR_SEP not in text:
+		return text
+
+	def _sub(m):
+		num = m.group(1)
+		dec = len(num.split(".")[1]) if "." in num else 0
+		return humanize_duration_ms(float(num), threshold_ms, dec)
+
+	return _DUR_MARKER_RE.sub(_sub, text)
+
+
+# Match a raw-ms token ("<n>ms") baked into finding prose, reformatted at render
+# (the threshold is a render-time setting). Guards keep it off non-durations: the
+# look-behind/ahead reject URL chars (/ - = ? & #) so "?t=1500ms" and
+# "query-2000ms-test" stay intact; "&" is NOT in the trailing set so an escaped
+# "12418.3 ms&lt;/li&gt;" (no-frappe notes) still converts; "~"/":" are allowed
+# ("~1500ms", "latency:1500ms"); trailing "." only when not "ms.<word>".
+_URL_CHARS = r"\w.,/=?&#-"
+# A thousands separator: comma, regular space, NBSP, narrow NBSP. Written with
+# \u escapes (Python resolves them to the real characters) so the source carries
+# no invisible whitespace.
+_THOUSANDS_SEP = "[,\u00a0\u202f ]"
+_SEP_STRIP_RE = re.compile(_THOUSANDS_SEP)
+# Plain or thousands-grouped ("2,000", "2 000"): a grouped number matches WHOLE
+# and its separators are stripped in _reformat, so it rolls over like "2000ms".
+# "," in _URL_CHARS and (?<!\d\s) block a leftover group of a non-Western
+# grouping ("1,23,456ms") so it is never corrupted.
+_NUM = r"(?:\d{1,3}(?:" + _THOUSANDS_SEP + r"\d{3})+|\d+)(?:\.\d+)?"
+_MS_TOKEN_RE = re.compile(
+	r"(?<![" + _URL_CHARS + r"])(?<!\d\s)(" + _NUM + r")\s?ms(?![\w/=?#-])(?!\.\w)"
+)
+# Split HTML into text runs and whole tags so the rewrite never touches a tag's
+# own contents (a "<n>ms" in an attribute would corrupt the markup). The body is
+# [^<>]* (not [^>]*): excluding "<" keeps the split LINEAR on dense bare "<" (a
+# pasted SQL WHERE clause); [^>]* was O(n^2) and silently hung the render worker.
+_TAG_SPLIT_RE = re.compile(r"(<[^<>]*>)")
+
+
+def _reformat_durations_in_text(text: str, threshold_ms: float) -> str:
+	"""Reformat each "<n>ms" token in ``text`` at ``threshold_ms``, preserving the
+	token's own decimal precision. Only text between HTML tags is rewritten (never
+	a tag's contents), so it is safe over both plain finding titles and rendered
+	notes/summary; already-seconds values and non-durations are left untouched."""
+	if not text or "ms" not in text:
+		return text
+
+	def _sub(m):
+		num = _SEP_STRIP_RE.sub("", m.group(1))  # drop thousands separators
+		dec = len(num.split(".")[1]) if "." in num else 0
+		return humanize_duration_ms(float(num), threshold_ms, dec)
+
+	# Even indices are the text runs between tags; odd indices are the tags.
+	parts = _TAG_SPLIT_RE.split(text)
+	for i in range(0, len(parts), 2):
+		if "ms" in parts[i]:
+			parts[i] = _MS_TOKEN_RE.sub(_sub, parts[i])
+	return "".join(parts)
+
+
+def format_durations(text: str, threshold_ms: float) -> str:
+	"""Format every duration in ``text`` for display, once, at render. Two passes:
+	exact ``dur()`` markers first (the structured path all analyzers use), then the
+	fuzzy prose scanner over the same text. The prose pass is not only for
+	marker-free free text (an AI humanizer's notes) it is also the backstop for a
+	finding whose stored title was truncated at Data(140) and lost its trailing
+	marker, so it stays load-bearing even for analyzer findings and must not be
+	dropped on the assumption markers cover them."""
+	return _reformat_durations_in_text(
+		format_duration_markers(text, threshold_ms), threshold_ms
+	)
+
 
 # Path prefixes we treat as "framework" when picking a representative
 # callsite for a query. The goal is to blame the user's business logic,

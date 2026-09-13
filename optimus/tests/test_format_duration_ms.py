@@ -25,8 +25,10 @@ class TestBelowThreshold:
 		assert _format_duration_ms(800) == "800ms"
 
 	def test_just_under_threshold(self):
-		assert _format_duration_ms(999.4) == "999ms"  # %.0f rounds
-		assert _format_duration_ms(999.9) == "1000ms"  # rounds up but threshold check used the raw value (999.9 < 1000)
+		assert _format_duration_ms(999.4) == "999ms"  # rounds down, stays ms
+		# 999.9 rounds up to a full second at display precision, so it rolls over
+		# to seconds rather than showing the four-digit "1000ms" the rule avoids.
+		assert _format_duration_ms(999.9) == _seconds("1.00s")
 
 	def test_decimals_one(self):
 		assert _format_duration_ms(12.5, decimals=1) == "12.5ms"

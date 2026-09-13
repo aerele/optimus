@@ -96,7 +96,7 @@
     },
     "frontend": {
       "type": ["object", "null"],
-      "description": "Frontend timings. {kpis, xhrs, web_vitals}."
+      "description": "Frontend timings. {xhrs, web_vitals, summary, xhr_matched, orphans}."
     },
     "hot_frames": {
       "type": ["array", "null"],

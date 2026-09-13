@@ -276,7 +276,7 @@
   },
   {
    "default": "1000",
-   "description": "Render any duration above this threshold (in milliseconds) as seconds e.g. with the default of 1000, 5234ms displays as 5.23s but 800ms stays as 800ms. Set to a very large value (e.g. 99999999) to effectively disable. Reference values: Strict: 500  ·  Recommended: 1000  ·  Relaxed: 99999999.",
+   "description": "Render any duration above this threshold (in milliseconds) as seconds e.g. with the default of 1000, 5234ms displays as 5.23s but 800ms stays as 800ms. Set to 0 to disable the rollover and keep every duration in milliseconds. Reference values: Strict: 500  ·  Recommended: 1000  ·  Relaxed: 99999999.",
    "fieldname": "large_duration_threshold_ms",
    "fieldtype": "Float",
    "label": "Render durations in seconds above (ms)",

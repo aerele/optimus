@@ -8,6 +8,122 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.49] - 2026-09-12
+
+### Internal
+
+- **Durations are now formatted from structured markers at render time instead of
+  being parsed back out of prose.** Every analyzer tags a duration through a small
+  `dur()` helper, which writes the raw millisecond value plus an invisible separator
+  into the text. At render time `format_durations` finds those markers by exact match
+  and applies the seconds rollover honouring `large_duration_threshold_ms`. Because the
+  analyzer controls the exact spelling of the number, each app-generated duration is now
+  carried by an exact marker rather than being re-discovered by the fuzzy prose scanner,
+  so its formatting is immune to the comma, space, non-breaking-space,
+  scientific-notation, URL and HTML edge cases that the previous approach had to defend
+  against one at a time. The fuzzy prose scanner still runs, after the marker pass, over
+  the same text: it is the fallback for a raw "<n>ms" in free text (an AI humanizer's
+  notes) and the backstop if a stored title is truncated and its trailing marker is
+  severed, and it still carries all of those guards. No user-visible change: durations
+  render the same way.
+
+## [0.12.48] - 2026-09-10
+
+### Fixed
+
+- **"Keep every duration in milliseconds" now actually works from Optimus Settings.**
+  Setting "Render durations in seconds above (ms)" to 0 is meant to switch the seconds
+  rollover off, but a stored 0 was being turned back into the 1000 default before any
+  report saw it, so the switch did nothing. A 0 saved in the settings is now preserved
+  all the way through, exactly like the sibling "minimum action duration" field already
+  was, so the whole report stays in milliseconds when you ask it to.
+- **URLs inside a finding no longer get mangled.** The step that rewrites a duration like
+  "1500ms" into "1.50s" was also rewriting the same pattern where it appears inside a
+  browser-reported web address (for example a link ending in "query-2000ms-test" or a
+  "?t=1500ms" query string), which quietly broke the link. It now leaves web addresses
+  alone while still converting real durations in the surrounding text.
+- **The AI fix suggestion sees durations in the same unit as the report.** The context
+  Optimus sends the model was always formatted with the default 1000ms rollover, so on a
+  Strict, Relaxed or "off" profile the model read different numbers than the ones on
+  screen. It now uses the configured threshold.
+- **A cross-run speed improvement is no longer coloured like a warning.** In the line by
+  line comparison between two runs, the change column highlighted every difference of a
+  second or more in the same amber "slow" style, so a 1.6s improvement looked identical to
+  a 1.6s regression. The row already shows green for faster and red for slower, so the
+  change value now stays plain.
+- **A finding's title and its impact badge always agree.** The two were rounded from the
+  duration in slightly different ways, so right on a rounding boundary the title could read
+  "1.24s" while the badge beside it read "1.23s". Both now round the same way, and a
+  sub-millisecond improvement no longer shows as "-0.00ms". The frontend findings (slow
+  render, network overhead) were the worst case here, baking their title with truncation
+  while the badge rounded; they now round like everything else.
+- **The Optimus Session hot-path picker matches the report.** The Desk-side duration
+  formatter rounded to seconds from the raw value while the report now rounds from the whole
+  millisecond, so the picker and the report could show the same duration as "1.23s" in one
+  place and "1.24s" in the other. The picker now rounds the same way.
+- **Duration reformatting no longer reaches inside HTML attributes.** The render step that
+  rewrites "1500ms" into "1.50s" runs over the notes and summary HTML too; it now rewrites
+  only the visible text between tags, so a duration-like value inside an attribute (an inline
+  style, say) can't corrupt the markup.
+- **The hot-path picker strips a negative zero like the report.** A value that rounds to zero
+  now reads "0ms" on the Optimus Session form too, not "-0ms", matching the server formatter
+  it mirrors.
+
+### Internal
+
+- **The seconds-rollover threshold resolves in one place.** The boot payload and the AI fix
+  context each re-implemented the "missing value falls back to 1000" logic; that is now a
+  single accessor (`settings.display_threshold_ms`). The "0 disables it" rule lives once in
+  the settings resolver, and the boot payload and renderer read the already-resolved value
+  straight off the config rather than re-deriving it. (The renderer and the render-config
+  reader still carry a defensive 1000 fallback for a malformed/absent value, so the literal
+  default is not strictly single-sourced.)
+
+---
+
+## [0.12.47] - 2026-09-10
+
+### Changed
+
+- **Durations of a second or more now read in seconds, everywhere they appear.** One
+  second is 1000ms, so a value that reaches a full second reads as "1.50s" instead of
+  a hard-to-skim four-digit "1500ms". The main report tables already did this; this
+  extends the same rule to every other place a duration shows up: the Web Vitals table,
+  the per-page XHR and network figures, the call-tree panel, the line-level phase-2
+  timings, the session summary, the hot-path picker on the Optimus Session page and the
+  wording of the findings themselves (slow query, N+1, slow hot path, hook bottleneck,
+  slow background job, slow frontend render, network overhead and missing-index
+  suggestions). Anything under a second still reads in milliseconds. A single shared
+  helper (`humanize_duration_ms`) backs the finding and summary text so the wording
+  stays consistent. The same rollover is applied to the context Optimus sends the AI
+  when it drafts a fix so the model sees the numbers the way the report does.
+
+### Fixed
+
+- **More run-on sentences left by the em-dash sweep.** The v0.12.44 pass mended the
+  report template; this extends the same repair to the strings the em-dash removal
+  fused elsewhere: the floating widget, the analyzer descriptions (index suggestions,
+  EXPLAIN flags, call tree, redundant calls, top queries, N+1), the Optimus Settings
+  dialogs, the line-profile messages, the DB-dialect notice and the AI fix errors.
+- **One consistent way of writing a duration.** The report had drifted into three
+  slightly different duration styles; a value like 5.23 seconds could appear with or
+  without a space before the unit depending on where you looked, and a value sitting
+  right on the one-second line could round to seconds in one spot and stay in
+  milliseconds right beside it. All duration text now goes through one helper, so the
+  spacing, the rounding and the rollover point match everywhere in the report.
+- **"Turn the rollover off" now applies to the whole report.** Setting the threshold to
+  0 (keep everything in milliseconds) was honoured by the main tables but ignored by the
+  findings, KPIs, database tables and line-level timings, which fell back to the default.
+  A 0 is now respected on every surface, so the report can no longer show milliseconds in
+  one half and seconds in the other.
+- **The "Total time" danger colour no longer follows the display setting.** The headline
+  Total-time figure turned red based on the same "show durations in seconds above" knob,
+  so changing the display unit accidentally moved the alarm (nearly always red on the
+  default, never red on Relaxed). Danger now uses a real performance threshold that is
+  independent of how durations are displayed.
+
+---
+
 ## [0.12.46] - 2026-09-09
 
 ### Fixed

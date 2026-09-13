@@ -42,7 +42,7 @@ from optimus.analyzers import (
 	table_breakdown,
 	top_queries,
 )
-from optimus.analyzers.base import SEVERITY_ORDER, AnalyzeContext
+from optimus.analyzers.base import SEVERITY_ORDER, AnalyzeContext, dur
 from optimus.dbdialect import get_dialect
 
 # v0.3.0: per-analyzer wall-clock budget. If the cumulative analyze
@@ -1803,7 +1803,7 @@ def _dedupe_findings_across_actions(
 		if other_entries:
 			if all(e.get("label") for e in other_entries):
 				bits = ", ".join(
-					f"**{e['label']}** ({e['ms']:.0f}ms)" for e in other_entries
+					f"**{e['label']}** ({dur(e['ms'])})" for e in other_entries
 				)
 				suffix = (
 					f" Also affects {len(other_entries)} other "
@@ -2499,7 +2499,9 @@ def _build_auto_notes_list_html(recordings: list[dict]) -> str:
 	for rec in signal_recordings[:_AUTO_NOTES_MAX_ENTRIES]:
 		label = per_action.humanized_label(rec) or "(unnamed action)"
 		duration_ms = round(rec.get("duration") or 0, 1)
-		items.append(f"<li>{html.escape(label)}: {duration_ms:g} ms</li>")
+		# dur() marks the timing for render-time formatting (plain digits, so a
+		# >=1e6 ms step never bakes as "5e+06").
+		items.append(f"<li>{html.escape(label)}: {dur(duration_ms, 1)}</li>")
 
 	overflow = len(signal_recordings) - _AUTO_NOTES_MAX_ENTRIES
 	if overflow > 0:
@@ -2700,7 +2702,7 @@ def _build_summary_html(
 				title = title[len(prefix):]
 			pri = _PRIORITY_WORD.get(f.get("severity") or "", "")
 			impact = f.get("estimated_impact_ms") or 0
-			tail = f" (~{impact:.0f}ms" + (f" - {pri} priority" if pri else "") + ")"
+			tail = f" (~{dur(impact)}" + (f" - {pri} priority" if pri else "") + ")"
 			return f"<strong>{html.escape(title)}</strong>{tail}"
 
 		# Prefer a finding tied to this specific action (via action_ref);
@@ -2723,19 +2725,19 @@ def _build_summary_html(
 			# on the issue-count sentence below don't repeat it here.
 			parts.append(
 				f"The slowest one was <strong>{slowest_label_esc}</strong> at "
-				f"{slowest_ms:.0f}ms - and most of its time went into "
+				f"{dur(slowest_ms)} - and most of its time went into "
 				f"{_finding_phrase(tied_finding)}."
 			)
 		elif overall_finding:
 			parts.append(
 				f"The slowest one was <strong>{slowest_label_esc}</strong> at "
-				f"{slowest_ms:.0f}ms. The biggest issue this session "
+				f"{dur(slowest_ms)}. The biggest issue this session "
 				f"(it affects several operations) was {_finding_phrase(overall_finding)}."
 			)
 		else:
 			parts.append(
 				f"The slowest one was <strong>{slowest_label_esc}</strong> at "
-				f"{slowest_ms:.0f}ms."
+				f"{dur(slowest_ms)}."
 			)
 
 	if not findings:

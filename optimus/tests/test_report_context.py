@@ -264,6 +264,26 @@ class TestKpisShape:
 		assert out["kpis"][3]["sub"] == "none detected"
 		assert not out["kpis"][3]["is_danger"]
 
+	def test_total_time_danger_is_not_the_display_threshold(self):
+		# 1500ms is over the 1000ms seconds-rollover display setting but under
+		# the performance alarm, so it must NOT be flagged danger: the display
+		# unit preference does not drive the alarm colour.
+		out = build_report_context(
+			_doc(total_duration_ms=1500),
+			_ctx(render_config={"large_duration_threshold_ms": 1000}),
+		)
+		assert out["kpis"][0]["label"] == "Total time"
+		assert out["kpis"][0]["is_danger"] is False
+
+	def test_total_time_danger_fires_regardless_of_display_threshold(self):
+		# A genuinely slow flow (3500ms) crosses the performance alarm even
+		# under the Relaxed display profile (effectively-infinite threshold).
+		out = build_report_context(
+			_doc(total_duration_ms=3500),
+			_ctx(render_config={"large_duration_threshold_ms": 99999999}),
+		)
+		assert out["kpis"][0]["is_danger"] is True
+
 
 class TestReproShape:
 	def test_none_when_no_notes(self):
@@ -389,6 +409,24 @@ class TestPhase2RunsShape:
 		assert fn["qualified_name"] == "x.y.fn"
 		assert fn["indent"] == 0
 		assert len(fn["lines"]) == 1
+
+	def test_zero_per_hit_display_matches_populated_spacing(self):
+		# A per_hit=0 line must format through _ms_display like a populated one
+		# ("0.0000ms"), not a hard-coded "0.00 ms" with a stray space and coarser
+		# precision.
+		results = [{
+			"dotted_path": "x.y.fn", "qualname": "fn", "file": "/abs/x.py",
+			"lines": [
+				{"lineno": 1, "content": "def fn():", "hits": 0, "total_ms": 0.0, "per_hit_us": 0},
+				{"lineno": 2, "content": "    work()", "hits": 1, "total_ms": 1.234, "per_hit_us": 1234},
+			],
+		}]
+		out = build_report_context(
+			_doc(phase_2_runs=[self._phase2_run(results=results)]), _ctx()
+		)
+		lines = out["line_drilldown_runs"][0]["functions"][0]["lines"]
+		assert lines[0]["per_hit_display"] == "0.0000ms"
+		assert " ms" not in lines[0]["per_hit_display"]  # no stray space
 
 
 class TestActionPlanShape:
@@ -577,6 +615,11 @@ class TestFrontendShape:
 		assert row["lcp_class"] == "vital-poor"
 		assert row["cls_class"] == "vital-meh"
 		assert row["ttfb_class"] == "vital-good"
+		# 1 second == 1000ms: a sub-second vital stays in ms, LCP at 5000ms
+		# rolls over to seconds so the reader isn't parsing a four-digit count.
+		assert row["fcp_display"] == "420ms"
+		assert row["lcp_display"] == "5.00s"
+		assert row["ttfb_display"] == "180ms"
 
 	def test_partial_vitals_gets_none_class(self):
 		# Regression of the Phase I.5 production crash data shape.
@@ -682,3 +725,33 @@ class TestHowToReadItems:
 		# J.1 leaves how_to_read_items=None; template falls back to default.
 		out = build_report_context(_doc(), _ctx())
 		assert out["how_to_read_items"] is None
+
+
+class TestRowDangerThreshold:
+	"""Per-row 'hot' (red) styling uses a fixed slowness threshold, decoupled from
+	the display / rollover setting, so row danger never follows the Sensitivity
+	Profile (matching the Total-time KPI's own decoupling)."""
+
+	def test_hot_action_ms_is_fixed_regardless_of_display(self):
+		for disp in (500, 1000, 99999999, 0):
+			out = build_report_context(
+				_doc(), _ctx(render_config={"large_duration_threshold_ms": disp})
+			)
+			assert out["hot_action_ms"] == 1000.0
+
+	def test_bar_kind_uses_the_fixed_threshold(self):
+		assert _bar_kind_for(1500) is None   # >= 1000 -> red
+		assert _bar_kind_for(600) == "warn"  # 300..1000 -> amber, NOT red
+		assert _bar_kind_for(200) == "ok"
+
+	def test_frontend_hot_flags_follow_the_constant(self, monkeypatch):
+		# backend_is_hot / browser_is_hot use _HOT_ACTION_MS, not a hardcoded 1000,
+		# so retuning the constant moves them together with the row colouring.
+		monkeypatch.setattr(report_context, "_HOT_ACTION_MS", 2000.0)
+		ctx = _ctx(frontend_xhr_matched=[{
+			"action_label": "a", "url": "/a", "backend_ms": 1500, "xhr_ms": 2500,
+			"network_delta_ms": 0, "response_size_bytes": 0, "status": 200,
+		}])
+		xhr = report_context._build_frontend(ctx)["xhrs"][0]
+		assert xhr["backend_is_hot"] is False  # 1500 < 2000 (retuned)
+		assert xhr["browser_is_hot"] is True   # 2500 >= 2000

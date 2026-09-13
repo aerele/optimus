@@ -19,7 +19,11 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
 
-from optimus.analyzers.base import SEVERITY_ORDER
+from optimus.analyzers.base import (
+	SEVERITY_ORDER,
+	format_durations,
+	humanize_duration_ms,
+)
 
 # Sensitive-data redaction lives in ``optimus/redaction.py`` (pure
 # functions, no Frappe imports) so the recorder-patch path in
@@ -232,6 +236,11 @@ def _get_jinja_env() -> Environment:
 		trim_blocks=True,
 		lstrip_blocks=True,
 	)
+
+
+# Duration formatting lives in analyzers/base.py: analyzers tag durations with
+# dur(); format_durations() (imported above) formats the markers + any prose
+# fallback, once, at render.
 
 
 def render(
@@ -503,9 +512,14 @@ def render(
 		# only re-renders on Regenerate Reports / Retry Analyze the stamp
 		# means a user opening an old file can immediately tell whether the
 		# settings they expect are actually baked in.
-		_large_duration_threshold_ms = float(
-			getattr(_cfg, "large_duration_threshold_ms", 1000.0) or 0.0
-		)
+		# Already resolved on the config (explicit 0 preserved, missing → 1000),
+		# so read it straight. Guard a present-but-None value too: float(None)
+		# would raise inside this broad try/except and silently reset the ENTIRE
+		# render_config (AI toggles, hide-framework, tracked/ignored apps, profile)
+		# to defaults for this render, not just the threshold. Snapshotted below as
+		# the single threshold the whole render uses.
+		_t = getattr(_cfg, "large_duration_threshold_ms", 1000.0)
+		_large_duration_threshold_ms = 1000.0 if _t is None else float(_t)
 		render_config = {
 			"hide_framework_tables": _hide_framework_tables,
 			"tracked_apps": tuple(getattr(_cfg, "tracked_apps", ()) or ()),
@@ -538,6 +552,17 @@ def render(
 	# write {{ fmt_ms(action.duration_ms) }} (no threshold arg needed).
 	def _fmt_ms(v, decimals: int = 0) -> str:
 		return _format_duration_ms(v, _large_duration_threshold_ms, decimals)
+	# Reformat the raw-ms durations the analyzers baked into finding titles and
+	# descriptions so they honour large_duration_threshold_ms and match the
+	# impact badge (also rendered from raw ms), even on reports regenerated
+	# without re-analyzing after the setting changed.
+	for _f in all_findings:
+		if _f.get("title"):
+			_f["title"] = format_durations(_f["title"], _large_duration_threshold_ms)
+		if _f.get("customer_description"):
+			_f["customer_description"] = format_durations(
+				_f["customer_description"], _large_duration_threshold_ms
+			)
 	if not _ai_findings_on:
 		for _f in all_findings:
 			_f["llm_fix"] = None
@@ -659,6 +684,10 @@ def render(
 		# v0.7.x J.13: strip em dashes the analyzer wrote into auto-notes
 		# / humanized-notes prose at analyse-time.
 		notes_html = notes_html.replace("—", "-")
+		# The Steps-to-Reproduce list bakes raw-ms durations at analyze time
+		# (e.g. "Submit Delivery Note: 12418.3 ms"); reformat them at render so
+		# they honour the threshold like every other duration.
+		notes_html = format_durations(notes_html, _large_duration_threshold_ms)
 
 	# v0.5.2: Analyzer warnings are stored as a newline-joined string
 	# (see analyze.py). Split into a list of non-empty bullets for the
@@ -827,7 +856,10 @@ def render(
 	)
 	# Phase K.5: nested-<details> call-tree panel for the slowest
 	# action. Empty string when no action carries a call_tree_json.
-	call_tree_html = _render_call_tree_panel(list(actions) + list(actions_framework))
+	call_tree_html = _render_call_tree_panel(
+		list(actions) + list(actions_framework),
+		threshold_ms=_large_duration_threshold_ms,
+	)
 	# B.DI2 aggregate frame-truncation across actions so the Hot Frames
 	# banner can show "captured X frames, only top N shown" without making
 	# the reader hunt through analyzer_warnings.
@@ -883,6 +915,9 @@ def render(
 	# (analyze.py's prose composer may still produce them on cached doc rows).
 	if summary_html_rendered:
 		summary_html_rendered = summary_html_rendered.replace("—", "-")
+		summary_html_rendered = format_durations(
+			summary_html_rendered, _large_duration_threshold_ms
+		)
 
 	context = {
 		"session": session_doc,
@@ -970,7 +1005,9 @@ def render(
 		# panel pre-rendered server-side so the template only needs a
 		# single ``{{ line_drilldown_html | safe }}`` include instead of
 		# growing by 100+ lines of new markup.
-		"line_drilldown_html": _render_line_drilldown_panel(session_doc),
+		"line_drilldown_html": _render_line_drilldown_panel(
+			session_doc, threshold_ms=_large_duration_threshold_ms
+		),
 		# v0.7.x J.16 (renamed from phase2_for_callsite): cross-link a
 		# finding's callsite to its hottest line-drilldown line when the
 		# same function was instrumented. Helper rather than raw dict

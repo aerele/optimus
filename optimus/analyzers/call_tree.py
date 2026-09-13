@@ -31,6 +31,7 @@ from optimus.analyzers.base import (
 	SEVERITY_ORDER,
 	AnalyzerResult,
 	_last_app_segment,
+	dur,
 	installed_apps_allowlist,
 	is_framework_callsite,
 	short_filename,
@@ -958,14 +959,14 @@ def _emit_per_action_findings(
 					"severity": severity,
 					"title": (
 						f"In job {short_label}, {fn_name} is the deepest "
-						f"hot frame ({impact_ms:.0f}ms, {pct_str} of the job)"
+						f"hot frame ({dur(impact_ms)}, {pct_str} of the job)"
 					),
 					"customer_description": (
 						f"The background job *{short_label}* ran for "
-						f"{action_wall_time_ms:.0f}ms but no single subtree "
+						f"{dur(action_wall_time_ms)} but no single subtree "
 						f"crossed the Slow Hot Path threshold. **{fn_name}** "
 						f"is the deepest user-code frame and accounts for "
-						f"{impact_ms:.0f}ms ({pct_str} of the job). Start "
+						f"{dur(impact_ms)} ({pct_str} of the job). Start "
 						"there open the Line-Level Drilldown for a "
 						"statement-level breakdown of where the time goes."
 					),
@@ -1098,10 +1099,10 @@ def _walk_for_findings(
 				findings.append({
 					"finding_type": "Hook Bottleneck",
 					"severity": severity,
-					"title": f"In {_label_for_title}, the {fn_name} hook consumed {impact_ms:.0f}ms",
+					"title": f"In {_label_for_title}, the {fn_name} hook consumed {dur(impact_ms)}",
 					"customer_description": (
 						f"During *{_label_for_title}*, the **{fn_name}** doc-event hook "
-						f"consumed {pct_str} of its wall time ({impact_ms:.0f}ms). "
+						f"consumed {pct_str} of its wall time ({dur(impact_ms)}). "
 						"Hook functions run on every save/submit optimizing this "
 						"would speed up every similar action across your site."
 					),
@@ -1136,12 +1137,12 @@ def _walk_for_findings(
 				if self_referential:
 					title = (
 						f"{fn_name} is a self-time hot path "
-						f"({pct_str} of the action, {impact_ms:.0f}ms)"
+						f"({pct_str} of the action, {dur(impact_ms)})"
 					)
 					desc = (
 						f"The body of **{fn_name}** itself consumed "
-						f"{pct_str} of the action time ({impact_ms:.0f}ms). "
-						"This isn't a slow subcall the function's own logic "
+						f"{pct_str} of the action time ({dur(impact_ms)}). "
+						"This isn't a slow subcall. The function's own logic "
 						"is the bottleneck. To pinpoint the exact hot line, "
 						"run a **Line-Level Drilldown** (the *Run Line-Profile "
 						"Pass* button on the session) and pick this function "
@@ -1163,7 +1164,7 @@ def _walk_for_findings(
 					desc = (
 						f"During *{_label_for_title}*, **{fn_name}** and its "
 						f"callees consumed {pct_str} of the action's wall "
-						f"time ({impact_ms:.0f}ms). This is the highest-impact "
+						f"time ({dur(impact_ms)}). This is the highest-impact "
 						"code path for this action."
 					)
 				findings.append({
@@ -1298,11 +1299,11 @@ def _aggregate_hot_frames(
 				"severity": severity,
 				"title": (
 					f"{key} appeared in {len(distinct_actions)} actions "
-					f"and consumed {total_ms:.0f}ms total"
+					f"and consumed {dur(total_ms)} total"
 				),
 				"customer_description": (
 					f"The function **{key}** ran across {len(distinct_actions)} "
-					f"different actions in this session, consuming {total_ms:.0f}ms "
+					f"different actions in this session, consuming {dur(total_ms)} "
 					"in total. Optimizing it would help every flow that touches it."
 				),
 				"technical_detail_json": json.dumps({

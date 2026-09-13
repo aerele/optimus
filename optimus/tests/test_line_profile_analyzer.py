@@ -7,6 +7,7 @@ function aggregate."""
 
 import json as _json
 
+from optimus.analyzers.base import dur
 from optimus.line_profile import analyzer
 
 
@@ -59,7 +60,7 @@ class TestHotLineFinding:
 		assert len(title) <= 140
 		assert long_path not in title                       # full path dropped
 		assert "send_sr_sales_manager_alerts" in title      # short qualname kept
-		assert "consumed 251ms (13 hits)" in title
+		assert f"consumed {dur(251)} (13 hits)" in title
 		# the full path still travels in technical_detail for navigation
 		import json
 		assert json.loads(hot[0]["technical_detail_json"])["dotted_path"] == long_path

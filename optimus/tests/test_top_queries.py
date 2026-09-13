@@ -4,6 +4,7 @@
 """Unit tests for optimus.analyzers.top_queries."""
 
 from optimus.analyzers import top_queries
+from optimus.analyzers.base import dur
 
 
 def test_top_queries_sorted_by_duration_desc(full_scan_recording, empty_context):
@@ -135,3 +136,50 @@ def test_floor_keeps_queries_at_or_above_threshold(empty_context):
 	top = result.aggregate["top_queries"]
 	assert len(top) == 1
 	assert top[0]["query_duration_ms"] == 10.0
+
+
+def test_slow_query_title_is_raw_ms_rollover_deferred_to_render(empty_context):
+	"""Analyzers bake RAW milliseconds into titles/descriptions. The
+	second-rollover (honouring large_duration_threshold_ms) is applied at
+	render time, not here, so nothing is baked that could drift from the
+	render-time impact badge. A 1234ms query reads "Slow query: 1234ms" at
+	the analyzer boundary."""
+	recording = {
+		"uuid": "r1",
+		"calls": [
+			{
+				"query": "SELECT * FROM `tabSales Invoice` WHERE customer = 'X'",
+				"normalized_query": "SELECT * FROM `tabSales Invoice` WHERE customer = ?",
+				"duration": 1234.0,
+				"stack": [{"filename": "acme_app/acme_app/api.py", "lineno": 12}],
+			},
+		],
+	}
+	slow = [
+		f for f in top_queries.analyze([recording], empty_context).findings
+		if f["finding_type"] == "Slow Query"
+	]
+	assert len(slow) == 1
+	assert slow[0]["title"] == f"Slow query: {dur(1234)}"
+	assert f"took {dur(1234)} to run" in slow[0]["customer_description"]
+
+
+def test_slow_query_title_stays_ms_below_one_second(empty_context):
+	"""A sub-second query keeps millisecond units (no space, integer ms)."""
+	recording = {
+		"uuid": "r1",
+		"calls": [
+			{
+				"query": "SELECT * FROM `tabItem` WHERE disabled = 0",
+				"normalized_query": "SELECT * FROM `tabItem` WHERE disabled = ?",
+				"duration": 850.0,
+				"stack": [{"filename": "acme_app/acme_app/api.py", "lineno": 20}],
+			},
+		],
+	}
+	slow = [
+		f for f in top_queries.analyze([recording], empty_context).findings
+		if f["finding_type"] == "Slow Query"
+	]
+	assert len(slow) == 1
+	assert slow[0]["title"] == f"Slow query: {dur(850)}"

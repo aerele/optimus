@@ -2089,7 +2089,7 @@
    rows in its primary table and framework-app rows in a collapsed
    "subsection" details sub-block below; both call the same macro so the
    row markup lives in one place. #}
-{% macro action_row(action, idx, max_ms=1.0, large_duration_threshold_ms=1000) %}
+{% macro action_row(action, idx, max_ms=1.0, hot_ms=1000) %}
   {# v0.7.x redesign Phase E: editorial per-action row.
 
      - Action cell: `.action-name` (bold mono) + `.action-meta` (HTTP
@@ -2120,9 +2120,9 @@
     {% set _ms = action.duration_ms or 0 %}
     {% set _pct = (_ms / max_ms * 100) if max_ms else 0 %}
     <td class="num bar-cell">
-      <span{% if _ms >= large_duration_threshold_ms %} class="hot-value"{% endif %}>{{ fmt_ms(_ms) }}</span>
+      <span{% if _ms >= hot_ms %} class="hot-value"{% endif %}>{{ fmt_ms(_ms) }}</span>
       <div class="bar-track">
-        <div class="bar-fill{% if _ms >= large_duration_threshold_ms %}{% elif _ms >= 300 %} warn{% else %} ok{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
+        <div class="bar-fill{% if _ms >= hot_ms %}{% elif _ms >= 300 %} warn{% else %} ok{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
       </div>
     </td>
     <td class="num">{{ action.queries_count }}</td>
@@ -2154,7 +2154,7 @@
   <span class="job-status job-status-{{ _cls }}">{{ _s }}</span>
 {%- endmacro %}
 
-{% macro bg_job_row(job, idx, cols, any_findings_counted, max_ms=1.0, large_duration_threshold_ms=1000) %}
+{% macro bg_job_row(job, idx, cols, any_findings_counted, max_ms=1.0, hot_ms=1000) %}
   {# v0.7.x redesign Phase E: mirror of action_row for background
      jobs - `.action-name` for the dotted method, `.bar-cell` for the
      duration, `.type-tag.bg` would be redundant (every row in this
@@ -2174,9 +2174,9 @@
     {% set _ms = job.duration_ms or 0 %}
     {% set _pct = (_ms / max_ms * 100) if max_ms else 0 %}
     <td class="num bar-cell">
-      <span{% if _ms >= large_duration_threshold_ms %} class="hot-value"{% endif %}>{{ fmt_ms(_ms) }}</span>
+      <span{% if _ms >= hot_ms %} class="hot-value"{% endif %}>{{ fmt_ms(_ms) }}</span>
       <div class="bar-track">
-        <div class="bar-fill{% if _ms >= large_duration_threshold_ms %}{% elif _ms >= 300 %} warn{% else %} ok{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
+        <div class="bar-fill{% if _ms >= hot_ms %}{% elif _ms >= 300 %} warn{% else %} ok{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
       </div>
     </td>
     <td class="num">{{ job.queries_count }}</td>
@@ -2699,7 +2699,7 @@
          so the row macro can scale its inline bar correctly. Scope
          the max to the table's own slice, not the combined set -
          keeps the framework subsection's bars usable too. #}
-      {% set _threshold_ms = (report_data.large_duration_threshold_ms or 1000) | float %}
+      {% set _hot_ms = (report_data.hot_action_ms or 1000) | float %}
       {% if report_data.actions %}
       {# v0.7.x Phase J.2.3: iterate report_data.actions; the contract-shaped
          entries preserve the legacy action keys so action_row reads
@@ -2728,7 +2728,7 @@
         </thead>
         <tbody>
         {% for action in report_data.actions %}
-          {{ action_row(action, loop.index, max_ms=_max_action_ms, large_duration_threshold_ms=_threshold_ms) }}
+          {{ action_row(action, loop.index, max_ms=_max_action_ms, hot_ms=_hot_ms) }}
         {% endfor %}
         </tbody>
         <tfoot>
@@ -2775,7 +2775,7 @@
           </thead>
           <tbody>
           {% for action in report_data.actions_framework %}
-            {{ action_row(action, loop.index, max_ms=_max_fw_ms, large_duration_threshold_ms=_threshold_ms) }}
+            {{ action_row(action, loop.index, max_ms=_max_fw_ms, hot_ms=_hot_ms) }}
           {% endfor %}
           </tbody>
         </table>
@@ -2825,7 +2825,7 @@
       click <em>Retry Analyze</em> once it's done to pick it up.
     </p>
     {% set cols = 8 if report_data.background_jobs_summary.any_findings_counted else 7 %}
-    {% set _threshold_ms = (report_data.large_duration_threshold_ms or 1000) | float %}
+    {% set _hot_ms = (report_data.hot_action_ms or 1000) | float %}
     {# v0.7.x Phase J.2.3: iterate report_data.background_jobs; entries
        preserve the legacy job keys so bg_job_row reads job.method /
        entry_callsite / etc. unchanged. The section heading still pulls
@@ -2853,7 +2853,7 @@
       </thead>
       <tbody>
       {% for job in report_data.background_jobs %}
-        {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_job_ms, large_duration_threshold_ms=_threshold_ms) }}
+        {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_job_ms, hot_ms=_hot_ms) }}
       {% endfor %}
       </tbody>
       <tfoot>
@@ -2899,7 +2899,7 @@
         </thead>
         <tbody>
         {% for job in report_data.background_jobs_framework %}
-          {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_fw_job_ms, large_duration_threshold_ms=_threshold_ms) }}
+          {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_fw_job_ms, hot_ms=_hot_ms) }}
         {% endfor %}
         </tbody>
       </table>
@@ -3208,7 +3208,7 @@
         <tr>
           <th>Function</th>
           <th class="num">Total time <small class="scope-tag">consolidated</small></th>
-          <th class="num" title="Sampler hits proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
+          <th class="num" title="Sampler hits: proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
           <th class="num">Distinct actions</th>
         </tr>
       </thead>
@@ -3234,7 +3234,7 @@
           <tr>
             <th>Function</th>
             <th class="num">Total time <small class="scope-tag">consolidated</small></th>
-            <th class="num" title="Sampler hits proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
+            <th class="num" title="Sampler hits: proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
             <th class="num">Distinct actions</th>
           </tr>
         </thead>
@@ -3544,7 +3544,7 @@
       <li>Every duration carries a small grey scope tag: <strong>per hit</strong> (one occurrence: a single request, one query execution) or <strong>consolidated</strong> (sum across all hits in this session: total time in a table, full impact of a finding's pattern, etc.).</li>
       <li>Call-tree and Hot-frame timings come from a wall-clock sampler at ≈{{ report_data.sampler_interval_ms }}ms intervals. Functions whose execution is shorter than the interval can be under-sampled or invisible. For exact per-line timings, use the <strong>Line-Level Drilldown</strong>.</li>
       <li><strong>Self-time</strong> is wall-clock self-time (the sampler measures elapsed time, not CPU). A function that blocks on I/O (<code>requests.get</code>, sync DB calls outside the recorder, <code>time.sleep</code>) counts that wait as self-time. Check the call tree for hidden I/O before optimising compute.</li>
-      <li><strong>Searching with browser find (Ctrl/Cmd-F)?</strong> Text inside collapsed drilldowns and call-tree branches may not be matched expand the sections you want to search first.</li>
+      <li><strong>Searching with browser find (Ctrl/Cmd-F)?</strong> Text inside collapsed drilldowns and call-tree branches may not be matched. Expand the sections you want to search first.</li>
     </ul>
   </section>
 

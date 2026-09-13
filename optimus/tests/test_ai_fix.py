@@ -221,6 +221,32 @@ class TestBuildMessages:
 		})
 		assert "Hot Line" in messages[0]["content"]
 
+	def test_durations_honour_the_configured_threshold(self):
+		# The model must see durations in the same unit as the report, so the
+		# rollover threshold is threaded in (not hard-coded to 1000).
+		finding = {"finding_type": "Slow Query", "title": "t", "estimated_impact_ms": 5234.0}
+		_, at_default = ai_fix._build_messages(finding, threshold_ms=1000.0)
+		assert "5.23s" in at_default[0]["content"]
+		_, disabled = ai_fix._build_messages(finding, threshold_ms=0)
+		assert "5234ms" in disabled[0]["content"]
+		assert "5.23s" not in disabled[0]["content"]
+
+	def test_title_and_description_durations_are_humanized(self):
+		# The baked title / description carry raw ms; they must be reformatted with
+		# the threshold so the model reads them in the same unit as the report,
+		# not "5234ms" beside a humanized "~5.23s" impact.
+		finding = {
+			"finding_type": "Slow Query",
+			"title": "Slow query: 5234ms",
+			"customer_description": "One query took 5234ms.",
+			"estimated_impact_ms": 5234.0,
+		}
+		_, msgs = ai_fix._build_messages(finding, threshold_ms=1000.0)
+		content = msgs[0]["content"]
+		assert "Slow query: 5.23s" in content
+		assert "One query took 5.23s." in content
+		assert "5234ms" not in content  # no raw ms leaks to the model
+
 	def test_source_window_lead_in_demands_verbatim(self):
 		# When code IS shown, the user message must spell out that any
 		# "before" snippet has to be a verbatim copy of those lines.
@@ -274,6 +300,29 @@ class TestBuildMessages:
 		assert "hottest line is line 7" in c
 		assert "_run_validations(doc)" in c
 		assert "387ms" in c and "2 call" in c
+
+
+class TestBuildStepsMessagesThreshold:
+	"""The Steps-to-Reproduce humanizer feeds per-action durations to the model;
+	they must use the configured rollover threshold too, so the narrative reads
+	in the same unit as the report."""
+
+	def test_steps_durations_honour_the_threshold(self):
+		actions = [{"label": "Submit Delivery Note", "duration_ms": 5234.0}]
+		_, at_default = ai_fix._build_steps_messages(actions, None, threshold_ms=1000.0)
+		assert "5.23s" in at_default[0]["content"]
+		_, disabled = ai_fix._build_steps_messages(actions, None, threshold_ms=0)
+		assert "5234ms" in disabled[0]["content"]
+
+
+class TestResolveDisplayThreshold:
+	"""The AI-fix threshold resolver delegates to the single settings accessor
+	rather than re-implementing the "unreadable → 1000" fallback."""
+
+	def test_delegates_to_settings(self, monkeypatch):
+		from optimus import settings
+		monkeypatch.setattr(settings, "display_threshold_ms", lambda: 500.0)
+		assert ai_fix._resolve_display_threshold_ms() == 500.0
 
 
 # --------------------------------------------------------------------------
