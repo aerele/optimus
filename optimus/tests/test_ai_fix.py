@@ -232,9 +232,10 @@ class TestBuildMessages:
 		assert "5.23s" not in disabled[0]["content"]
 
 	def test_title_and_description_durations_are_humanized(self):
-		# The baked title / description carry raw ms; they must be reformatted with
-		# the threshold so the model reads them in the same unit as the report,
-		# not "5234ms" beside a humanized "~5.23s" impact.
+		# The title / description are read from stored finding rows and may carry a
+		# raw-ms (legacy) duration; they must be formatted with the threshold so the
+		# model reads them in the same unit as the report, not "5234ms" beside a
+		# humanized "~5.23s" impact.
 		finding = {
 			"finding_type": "Slow Query",
 			"title": "Slow query: 5234ms",

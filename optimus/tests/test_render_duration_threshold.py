@@ -54,8 +54,9 @@ def _doc(actions, findings=None):
 
 
 def _finding(title, impact_ms):
-	"""A Slow Query finding whose title carries a RAW-ms duration, as the
-	analyzer bakes it. Render reformats that duration; nothing is pre-formatted."""
+	"""A Slow Query finding whose title carries a raw-ms duration as a legacy
+	(pre-marker) analyzer baked it. Render reformats that duration via the prose
+	fallback so a stored title still agrees with its impact badge."""
 	return types.SimpleNamespace(
 		finding_type="Slow Query", severity="High",
 		title=title, customer_description="A single query was slow.",
@@ -181,14 +182,18 @@ class TestUrlsAreNotMangled:
 		# A non-Western grouping the pattern can't consume is left intact, never corrupted.
 		assert _reformat_durations_in_text("odd 1,23,456ms", 500.0) == "odd 1,23,456ms"
 
-	def test_space_grouped_duration_converts(self):
-		# Same as the comma but SPACE- / NBSP- / narrow-NBSP-grouped ("2 000ms"):
-		# matched whole and rolled over, not collapsed to "2 0ms". A plain
-		# " 5234ms" (the space follows a non-digit) also converts.
-		for sep in (" ", "\u00a0", "\u202f"):  # space, NBSP, narrow NBSP
+	def test_nbsp_grouped_duration_converts(self):
+		# NBSP- / narrow-NBSP-grouped ("2 000ms", the locale thousands separators):
+		# matched whole and rolled over, not collapsed to "2 0ms".
+		for sep in ("\u00a0", "\u202f"):  # NBSP, narrow NBSP
 			text = f"waited 2{sep}000ms total"
 			assert _reformat_durations_in_text(text, 1000.0) == "waited 2.00s total"
 		assert _reformat_durations_in_text("done in 5234ms", 1000.0) == "done in 5.23s"
+
+	def test_plain_space_is_not_a_thousands_separator(self):
+		# A plain ASCII space is ambiguous ("12 500ms" is a count then a duration,
+		# not 12,500ms), so it must NOT group: the count and the duration stay apart.
+		assert _reformat_durations_in_text("ran 12 500ms total", 1000.0) == "ran 12 500ms total"
 		# A stray non-thousands grouping is left intact, never corrupted.
 		assert _reformat_durations_in_text("odd 1 23 456ms", 500.0) == "odd 1 23 456ms"
 
@@ -209,7 +214,7 @@ class TestDurationMarkers:
 
 	def test_marker_title_formats_through_render(self):
 		# End-to-end: a dur() marker in a finding title is formatted by render_raw.
-		doc = _doc([], findings=[_finding(f"Slow query: {dur(5234)}", 5234.0)])
+		doc = _doc([], findings=[_finding("Slow query: 5234ms", 5234.0)])
 		html = renderer.render_raw(doc, recordings=[])
 		assert "Slow query: 5.23s" in html
 		assert "5234ms" not in html
@@ -406,12 +411,35 @@ class TestCodeReviewFixes:
 		assert "5.23s" in html
 		assert "5234ms" not in html
 
-	def test_summary_duration_before_em_dash_rolls_over(self):
-		# #2 for the summary path (identical ordering bug).
+	def test_finding_title_raw_duration_before_em_dash_rolls_over(self):
+		# A stored finding title can hold a raw "<n>ms" (legacy, or a marker-less
+		# analyzer) right before an em dash. format_durations must roll it over
+		# BEFORE the em-dash sweep, else the sweep leaves a hyphen the prose URL
+		# guard would skip, stranding the value in ms while the badge shows seconds.
+		doc = _doc([], findings=[_finding("Slow query 5234ms—the worst one", 5234.0)])
+		doc.findings[0].customer_description = "It took 5234ms—over budget."
+		html = renderer.render_raw(doc, recordings=[])
+		assert "5.23s" in html
+		assert "5234ms" not in html
+		assert "—" not in html
+
+	def test_legacy_raw_ms_title_agrees_with_badge(self):
+		# Regression for the review finding: a session analyzed before dur() markers
+		# stores a marker-less "1374ms" title. On re-render (no re-analyze) the title
+		# must roll over to match the impact badge, not stay in ms beside a seconds
+		# badge. The prose fallback in format_durations is what keeps them in step.
+		doc = _doc([], findings=[_finding("Slow query: 1374ms", 1374.0)])
+		html = renderer.render_raw(doc, recordings=[])
+		assert "Slow query: 1.37s" in html
+		assert "Slow query: 1374ms" not in html
+
+	def test_summary_tagged_duration_rolls_over(self):
+		# The render-time summary is rebuilt fresh (always tagged); render formats the
+		# markers (marker-only, so a threshold-literal like ">200ms" is left alone).
 		doc = _doc([])
 		with patch(
 			"optimus.analyze._build_summary_html",
-			return_value="The slowest step took 5234ms—a big gap.",
+			return_value=f"The slowest step took {dur(5234)}—a big gap.",
 		):
 			html = renderer.render_raw(doc, recordings=[])
 		assert "5.23s" in html

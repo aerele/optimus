@@ -42,7 +42,7 @@ from optimus.analyzers import (
 	table_breakdown,
 	top_queries,
 )
-from optimus.analyzers.base import SEVERITY_ORDER, AnalyzeContext, dur
+from optimus.analyzers.base import _DUR_SEP, SEVERITY_ORDER, AnalyzeContext, dur
 from optimus.dbdialect import get_dialect
 
 # v0.3.0: per-analyzer wall-clock budget. If the cumulative analyze
@@ -1833,9 +1833,11 @@ def _dedupe_findings_across_actions(
 # technical_detail_json for navigation.
 _FINDING_TITLE_MAX_CHARS = 140
 _FINDING_TITLE_ELLIPSIS = "..."
-# A baked duration token ("5234ms", with or without the trailing dur() marker).
-# Used only to keep title truncation from slicing through one.
-_DUR_IN_TITLE_RE = re.compile(r"\d+(?:\.\d+)?ms")
+# A duration token in a title ("5234ms", with the dur() marker or, for a legacy
+# pre-marker title, without it). Used only to keep title truncation from slicing
+# through one: a cut anywhere in the token drops it whole rather than leaving a
+# bare "…523" or a unit-less "…5234m" that can't be rolled over at render.
+_DUR_IN_TITLE_RE = re.compile(r"\d+(?:\.\d+)?ms" + _DUR_SEP + "?")
 
 
 def _truncate_finding_titles(findings: list[dict]) -> None:

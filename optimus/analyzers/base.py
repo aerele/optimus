@@ -32,6 +32,27 @@ from typing import Any
 # copies to keep the ordering consistent across the pipeline.
 SEVERITY_ORDER: dict[str, int] = {"High": 0, "Medium": 1, "Low": 2}
 
+# The default "render durations in seconds above (ms)" threshold, used when the
+# Optimus Settings / site-config value is unset. Single source for every Python
+# resolver and formatter default below (the client-side picker in
+# optimus_session.js keeps its own copy, being a different language).
+DEFAULT_DISPLAY_THRESHOLD_MS = 1000.0
+
+
+def _coerce_ms(ms) -> float:
+	"""Coerce a duration input to a finite float of milliseconds. ``None`` /
+	non-numeric / non-finite (inf, nan, overflow) all become ``0.0``. The single
+	home of the ``float()`` + ``isfinite`` guard, shared by ``dur``,
+	``humanize_duration_ms`` and ``_rolls_over_to_seconds`` (sign is preserved;
+	callers that need a non-negative value clamp it themselves)."""
+	try:
+		v = float(ms) if ms is not None else 0.0
+	except (TypeError, ValueError, OverflowError):  # OverflowError: float(10**400)
+		v = 0.0
+	if not math.isfinite(v):  # inf/nan would blow up round(); count as zero
+		v = 0.0
+	return v
+
 
 def _rolls_over_to_seconds(ms, threshold_ms: float) -> bool:
 	"""Whether ``ms`` renders as seconds (not milliseconds) at ``threshold_ms``.
@@ -40,28 +61,17 @@ def _rolls_over_to_seconds(ms, threshold_ms: float) -> bool:
 	highlight, instead of string-sniffing the formatted output (which would break
 	silently if the unit spelling ever changed). ``0`` threshold disables rollover;
 	None / non-numeric / non-finite count as zero (stays ms)."""
-	try:
-		v = float(ms) if ms is not None else 0.0
-	except (TypeError, ValueError, OverflowError):
-		v = 0.0
-	if not math.isfinite(v):
-		v = 0.0
-	return bool(threshold_ms and round(abs(v)) >= threshold_ms)
+	return bool(threshold_ms and round(abs(_coerce_ms(ms))) >= threshold_ms)
 
 
-def humanize_duration_ms(ms, threshold_ms: float = 1000.0, decimals: int = 0) -> str:
+def humanize_duration_ms(ms, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS, decimals: int = 0) -> str:
 	"""Plain-text duration: "<n>ms" below ``threshold_ms``, "<n.nn>s" at or above
 	(``0`` disables). The unit is decided from the whole-ms value so the same
 	duration can't roll over in one place and stay ms in another at a different
 	precision; ``decimals`` sets ms precision only. Arg order matches
 	``time_format._format_duration_ms`` / ``report_context._ms_display``.
 	``None`` / non-numeric / non-finite (inf, nan, overflow) format as zero."""
-	try:
-		v = float(ms) if ms is not None else 0.0
-	except (TypeError, ValueError, OverflowError):  # OverflowError: float(10**400)
-		v = 0.0
-	if not math.isfinite(v):  # inf/nan would blow up round(); format as zero
-		v = 0.0
+	v = _coerce_ms(ms)
 	if _rolls_over_to_seconds(v, threshold_ms):
 		# Whole-ms divide (matching the decision) so a raw float and the same value
 		# re-parsed from "1235ms" text agree at rounding boundaries.
@@ -106,11 +116,8 @@ def dur(ms, decimals: int = 0) -> str:
 	are dropped so a whole-ms value reads "800ms", not "800.0ms". Non-numeric /
 	non-finite / negative input is emitted as "0ms" so the marker always carries a
 	well-formed, non-negative, formattable number."""
-	try:
-		v = float(ms)
-	except (TypeError, ValueError, OverflowError):
-		v = 0.0
-	if not math.isfinite(v) or v < 0:
+	v = _coerce_ms(ms)
+	if v < 0:  # a duration is never negative; keep the marker well-formed
 		v = 0.0
 	text = f"{v:.{decimals}f}"
 	if "." in text:
@@ -145,14 +152,17 @@ def format_duration_markers(text: str, threshold_ms: float) -> str:
 # "12418.3 ms&lt;/li&gt;" (no-frappe notes) still converts; "~"/":" are allowed
 # ("~1500ms", "latency:1500ms"); trailing "." only when not "ms.<word>".
 _URL_CHARS = r"\w.,/=?&#-"
-# A thousands separator: comma, regular space, NBSP, narrow NBSP. Written with
-# \u escapes (Python resolves them to the real characters) so the source carries
-# no invisible whitespace.
-_THOUSANDS_SEP = "[,\u00a0\u202f ]"
+# A thousands separator: comma, NBSP, narrow NBSP. Written with \u escapes
+# (Python resolves them to the real characters) so the source carries no invisible
+# whitespace. A plain ASCII space is deliberately NOT included: locale grouping
+# uses NBSP / narrow NBSP, and a plain space is ambiguous in prose ("12 500ms" is
+# usually a count followed by a duration, not 12,500ms), so grouping on it would
+# mis-merge the two.
+_THOUSANDS_SEP = "[,\u00a0\u202f]"
 _SEP_STRIP_RE = re.compile(_THOUSANDS_SEP)
-# Plain or thousands-grouped ("2,000", "2 000"): a grouped number matches WHOLE
-# and its separators are stripped in _reformat, so it rolls over like "2000ms".
-# "," in _URL_CHARS and (?<!\d\s) block a leftover group of a non-Western
+# Plain or thousands-grouped ("2,000", NBSP "2 000"): a grouped number matches
+# WHOLE and its separators are stripped in _reformat, so it rolls over like
+# "2000ms". "," in _URL_CHARS and (?<!\d\s) block a leftover group of a non-Western
 # grouping ("1,23,456ms") so it is never corrupted.
 _NUM = r"(?:\d{1,3}(?:" + _THOUSANDS_SEP + r"\d{3})+|\d+)(?:\.\d+)?"
 _MS_TOKEN_RE = re.compile(
@@ -187,12 +197,13 @@ def _reformat_durations_in_text(text: str, threshold_ms: float) -> str:
 
 def format_durations(text: str, threshold_ms: float) -> str:
 	"""Format every duration in ``text`` for display, once, at render. Two passes:
-	exact ``dur()`` markers first (the structured path all analyzers use), then the
-	fuzzy prose scanner over the same text. The prose pass is not only for
-	marker-free free text (an AI humanizer's notes) it is also the backstop for a
-	finding whose stored title was truncated at Data(140) and lost its trailing
-	marker, so it stays load-bearing even for analyzer findings and must not be
-	dropped on the assumption markers cover them."""
+	exact ``dur()`` markers first, then the fuzzy prose scanner over the same text.
+	The prose pass covers durations with no marker: a raw "<n>ms" the AI humanizer
+	wrote into the "Steps to Reproduce" notes, or one stored in a finding title
+	analyzed before dur() markers existed (so the title still agrees with its impact
+	badge). Use it wherever the text is read from storage or is free prose. Text
+	built fresh at render and known to be fully tagged (the render-time summary) can
+	use ``format_duration_markers`` instead to skip the scanner."""
 	return _reformat_durations_in_text(
 		format_duration_markers(text, threshold_ms), threshold_ms
 	)

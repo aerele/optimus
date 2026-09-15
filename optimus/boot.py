@@ -26,4 +26,5 @@ def boot_session(bootinfo):
 		from optimus.settings import display_threshold_ms
 		bootinfo.optimus_large_duration_threshold_ms = display_threshold_ms()
 	except Exception:
-		bootinfo.optimus_large_duration_threshold_ms = 1000.0
+		from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS
+		bootinfo.optimus_large_duration_threshold_ms = DEFAULT_DISPLAY_THRESHOLD_MS

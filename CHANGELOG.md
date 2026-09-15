@@ -37,6 +37,29 @@ versions may contain breaking changes see migration notes below).
   seconds-here / milliseconds-there. The ms-vs-seconds highlight decision is
   single-sourced instead of sniffing the formatted string, and the per-row amber bar
   boundary is single-sourced instead of hardcoded in three places.
+- **A second review pass caught the same em-dash ordering on the findings path.** The
+  first pass fixed the notes and summary; a separate sweep over finding titles and
+  descriptions still ran before their durations were formatted, so a raw "5234ms" glued
+  to an em dash in a title stayed in milliseconds while the badge showed seconds. Those
+  fields are now formatted before the em-dash sweep too. The default display threshold
+  (1000ms) is now a single `DEFAULT_DISPLAY_THRESHOLD_MS` constant read by every Python
+  resolver and formatter default instead of being retyped in a dozen places, and the
+  repeated "coerce to a finite number of milliseconds" guard is one shared `_coerce_ms`
+  helper used by the formatter, the rollover decision and `dur()`.
+- **The render-time summary formats from its tags only; stored text keeps the prose
+  fallback.** The summary is rebuilt fresh on every render (always tagged), so it uses
+  the exact-tag path and a threshold literal like ">200ms" is left alone. Finding
+  titles and descriptions are read back from stored rows that can predate the tags (a
+  session analyzed on an older Optimus), so they keep the full formatter (tags first,
+  then the prose fallback): this is what lets a legacy "1374ms" title still roll over to
+  match its "1.37s" impact badge on re-render. A stray "<n>ms" inside a real analyzer
+  label does not occur in practice, and URLs are already guarded, so the fallback stays.
+  A follow-up review also fixed: title truncation now drops a whole duration token
+  (tagged or legacy) rather than severing it; a plain ASCII space is no longer treated
+  as a thousands separator (so "12 500ms", a count then a duration, is not merged into
+  "12.50s" — NBSP and narrow-NBSP locale grouping still work); `_resolve_threshold_ms`
+  coerces its value to float so a stringy config value can't reach the numeric
+  comparison; and some duration formatting that no template rendered was removed.
 
 ## [0.12.48] - 2026-09-10
 

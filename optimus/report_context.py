@@ -17,7 +17,7 @@ from typing import Any
 
 from markupsafe import Markup
 
-from optimus.analyzers.base import humanize_duration_ms
+from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS, humanize_duration_ms
 
 # A whole captured flow slower than this reads as "danger" on the Total-time
 # KPI. Deliberately separate from large_duration_threshold_ms (which is only a
@@ -46,9 +46,11 @@ def _resolve_threshold_ms(render_config) -> float:
 	"""The large_duration_threshold_ms in effect, defaulting to 1000 only when
 	the value is unset. An explicit 0 (disable the seconds rollover) is
 	preserved, matching the shared formatters and renderer._internal, so the
-	whole report agrees on when to roll durations over to seconds."""
+	whole report agrees on when to roll durations over to seconds. Coerced to
+	float (like renderer._internal) so a stringy config value can't reach the
+	numeric comparison in _rolls_over_to_seconds as a str."""
 	t = (render_config or {}).get("large_duration_threshold_ms")
-	return 1000 if t is None else t
+	return DEFAULT_DISPLAY_THRESHOLD_MS if t is None else float(t)
 
 
 def _web_vital_class(value, good_threshold, poor_threshold) -> str:
@@ -97,7 +99,7 @@ def _is_user_code(function_or_path, ignored_apps: tuple[str, ...] = ()) -> bool:
 	return True
 
 
-def _ms_display(ms, threshold_ms: float = 1000.0, decimals: int = 0) -> str:
+def _ms_display(ms, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS, decimals: int = 0) -> str:
 	"""Format milliseconds in the report's compact style ("420ms" / "5.00s"):
 	ms (``decimals`` places) below ``threshold_ms``, seconds (2 decimals) at or
 	above. ``threshold_ms`` is the "render durations in seconds above (ms)"
@@ -349,7 +351,7 @@ def _build_findings(findings, ctx) -> list[dict]:
 	return result
 
 
-def _build_line_drilldown_runs(session_doc, threshold_ms: float = 1000.0) -> list[dict]:
+def _build_line_drilldown_runs(session_doc, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS) -> list[dict]:
 	"""Contract ``line_drilldown_runs`` = list of {number, status,
 	total_ms_display, timestamp, picks, functions}.
 	"""
@@ -743,19 +745,18 @@ def _build_frontend(ctx) -> dict | None:
 			"dcl_class": _web_vital_class(dcl, 1500, 3000),
 		})
 
-	# xhrs display-formatted
+	# xhrs: the template renders the raw ``xhr_matched`` list (formatting each cell
+	# with fmt_ms), so this list exists only for its per-row hot flags. The old
+	# backend/browser/network *_display fields were never read by any template and
+	# are dropped rather than formatted for nothing.
 	xhrs_out = []
 	for x in xhrs:
 		backend_ms = x.get("backend_ms", 0) or 0
 		xhr_ms = x.get("xhr_ms", 0) or 0
-		network_ms = x.get("network_delta_ms", 0) or 0
 		size_bytes = x.get("response_size_bytes", 0) or 0
 		xhrs_out.append({
 			"name": x.get("action_label", "") or "",
 			"meta": x.get("url", "") or "",
-			"backend_display": _ms_display(backend_ms, threshold_ms=threshold_ms),
-			"browser_display": _ms_display(xhr_ms, threshold_ms=threshold_ms),
-			"network_display": _ms_display(network_ms, threshold_ms=threshold_ms),
 			"status": x.get("status", 0) or 0,
 			"size_display": (
 				f"{size_bytes / 1024:.1f} KB" if size_bytes >= 1024 else f"{size_bytes} B"
@@ -839,7 +840,7 @@ def _build_slow_queries(top_queries, fmt_ms=None) -> list[dict]:
 	return result
 
 
-def _build_db(table_breakdown, fmt_ms=None, threshold_ms: float = 1000.0) -> dict | None:
+def _build_db(table_breakdown, fmt_ms=None, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS) -> dict | None:
 	"""Contract ``db`` = {tables, index_recommendations}.
 
 	``tables`` per-entry {name, time_display, queries, reads, writes,

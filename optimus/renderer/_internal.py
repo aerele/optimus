@@ -20,7 +20,9 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
 
 from optimus.analyzers.base import (
+	DEFAULT_DISPLAY_THRESHOLD_MS,
 	SEVERITY_ORDER,
+	format_duration_markers,
 	format_durations,
 	humanize_duration_ms,
 )
@@ -239,8 +241,11 @@ def _get_jinja_env() -> Environment:
 
 
 # Duration formatting lives in analyzers/base.py: analyzers tag durations with
-# dur(); format_durations() (imported above) formats the markers + any prose
-# fallback, once, at render.
+# dur(). Stored text that can predate markers or be free prose (finding
+# titles/descriptions read from the DB, the notes, the legacy stored summary) uses
+# format_durations() (exact tags first, then a prose fallback for marker-less
+# durations). The render-time summary is rebuilt fresh every render (always
+# tagged), so it uses format_duration_markers() (exact tags only). Both run once.
 
 
 def render(
@@ -384,11 +389,15 @@ def render(
 		if isinstance(s, str) and "—" in s:
 			return s.replace("—", "-")
 		return s
+	# NOTE: finding title / customer_description are em-dash-swept AFTER their
+	# durations are formatted (see the format_durations loop below), not here: a
+	# raw "5234ms—" must roll over first, because the sweep turns the em dash into
+	# a hyphen and the prose reformatter then skips a "ms" glued to a hyphen (its
+	# URL guard). Only the llm_fix HTML blocks (never duration-formatted) are swept
+	# here.
 	for _f in (all_findings or []):
 		if not isinstance(_f, dict):
 			continue
-		_f["customer_description"] = _strip_em(_f.get("customer_description"))
-		_f["title"] = _strip_em(_f.get("title"))
 		_lf = _f.get("llm_fix")
 		if isinstance(_lf, dict):
 			for _k in ("diagnosis_html", "patch_html", "rationale_html", "verify_html", "description_html", "code_html", "why_html"):
@@ -519,7 +528,7 @@ def render(
 		# to defaults for this render, not just the threshold. Snapshotted below as
 		# the single threshold the whole render uses.
 		_t = getattr(_cfg, "large_duration_threshold_ms", 1000.0)
-		_large_duration_threshold_ms = 1000.0 if _t is None else float(_t)
+		_large_duration_threshold_ms = DEFAULT_DISPLAY_THRESHOLD_MS if _t is None else float(_t)
 		render_config = {
 			"hide_framework_tables": _hide_framework_tables,
 			"tracked_apps": tuple(getattr(_cfg, "tracked_apps", ()) or ()),
@@ -536,7 +545,7 @@ def render(
 	except Exception:
 		_ai_findings_on = _ai_indexes_on = True
 		_hide_framework_tables = True
-		_large_duration_threshold_ms = 1000.0
+		_large_duration_threshold_ms = DEFAULT_DISPLAY_THRESHOLD_MS
 		render_config = {
 			"hide_framework_tables": True,
 			"tracked_apps": (),
@@ -544,7 +553,7 @@ def render(
 			"ai_suggest_findings": True,
 			"ai_suggest_indexes": True,
 			"min_action_duration_ms": 0.0,
-			"large_duration_threshold_ms": 1000.0,
+			"large_duration_threshold_ms": DEFAULT_DISPLAY_THRESHOLD_MS,
 			"config_profile": "Custom",
 		}
 	# v0.6.x: Jinja-callable that formats a duration with the configured
@@ -557,11 +566,20 @@ def render(
 	# impact badge (also rendered from raw ms), even on reports regenerated
 	# without re-analyzing after the setting changed.
 	for _f in all_findings:
+		# Titles / descriptions are read back from STORED finding rows, which may
+		# have been analyzed before dur() markers existed (raw "<n>ms" text). Use
+		# format_durations: exact dur() markers first, then the prose fallback that
+		# also rolls over a marker-less legacy duration so the title agrees with the
+		# impact badge (_build_findings computes that from the raw number). Format
+		# BEFORE the em-dash sweep: a raw "5234ms—" must roll over first, else the
+		# sweep leaves a hyphen the prose URL guard skips.
 		if _f.get("title"):
-			_f["title"] = format_durations(_f["title"], _large_duration_threshold_ms)
+			_f["title"] = _strip_em(
+				format_durations(_f["title"], _large_duration_threshold_ms)
+			)
 		if _f.get("customer_description"):
-			_f["customer_description"] = format_durations(
-				_f["customer_description"], _large_duration_threshold_ms
+			_f["customer_description"] = _strip_em(
+				format_durations(_f["customer_description"], _large_duration_threshold_ms)
 			)
 	if not _ai_findings_on:
 		for _f in all_findings:
@@ -916,18 +934,20 @@ def render(
 	)
 	# v0.7.x J.13: strip em dashes from the render-time summary HTML
 	# (analyze.py's prose composer may still produce them on cached doc rows).
+	# The composer tags every duration with dur(), so format the exact markers
+	# only (no fuzzy scanner): a literal like "&gt;200ms" that describes a
+	# threshold is left untouched, and marker substitution is immune to the sweep.
 	if summary_html_rendered:
-		# Reformat durations BEFORE the em-dash sweep so a raw "5234ms..." rolls
-		# over first (the sweep leaves a hyphen the reformatter's URL guard skips).
-		summary_html_rendered = format_durations(
+		summary_html_rendered = format_duration_markers(
 			summary_html_rendered, _large_duration_threshold_ms
 		)
 		summary_html_rendered = summary_html_rendered.replace("—", "-")
 
 	# The template falls back to the STORED session.summary_html when the
-	# render-time summary is empty (legacy / edge sessions). That stored value
-	# also carries dur() markers and em dashes, so format it the same way rather
-	# than let the fallback emit a raw "<n>ms" + invisible marker.
+	# render-time summary is empty (legacy / edge sessions). A stored summary can be
+	# old free-text prose OR carry dur() markers, so use the full format_durations
+	# (markers + prose scanner) here rather than let the fallback emit a raw "<n>ms"
+	# or an invisible marker.
 	stored_summary_html = getattr(session_doc, "summary_html", None) or ""
 	if stored_summary_html:
 		stored_summary_html = format_durations(
@@ -1440,7 +1460,7 @@ def _action_verb_for(finding_type: str | None) -> str | None:
 
 def _build_action_plan(
 	findings: list[dict],
-	large_duration_threshold_ms: float = 1000.0,
+	large_duration_threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS,
 	max_steps: int = 3,
 ) -> list[dict]:
 	"""Top-N action plan steps from the highest-impact findings.
@@ -1506,7 +1526,7 @@ def _build_action_plan(
 def _build_waterfall(
 	actions: list[dict],
 	findings: list[dict],
-	large_duration_threshold_ms: float = 1000.0,
+	large_duration_threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS,
 	max_rows: int = 8,
 ) -> list[dict]:
 	"""Top-N actions by duration as a horizontal-bar waterfall. Empty input
@@ -1665,7 +1685,7 @@ def _aggregate_frame_truncation(actions: list[dict]) -> dict:
 def _compose_tldr(
 	findings: list[dict],
 	session_doc: Any,
-	large_duration_threshold_ms: float = 1000.0,
+	large_duration_threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS,
 	actions: list[dict] | None = None,
 ) -> dict:
 	"""Compose the TL;DR hero block from the single highest-impact finding
@@ -1895,7 +1915,7 @@ def _build_executive_summary(
 	findings: list[dict],
 	session_doc: Any,
 	v5: dict,
-	large_duration_threshold_ms: float = 1000.0,
+	large_duration_threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS,
 ) -> dict:
 	"""Return a dict shaped for the template's exec-summary card:
 	``{"headline": Markup, "bullets": list[str], "show": bool}``. ``show`` is

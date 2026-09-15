@@ -15,10 +15,14 @@ import re
 
 from markupsafe import Markup
 
-from optimus.analyzers.base import _rolls_over_to_seconds, humanize_duration_ms
+from optimus.analyzers.base import (
+	DEFAULT_DISPLAY_THRESHOLD_MS,
+	_rolls_over_to_seconds,
+	humanize_duration_ms,
+)
 
 
-def _format_duration_ms(ms, threshold_ms: float = 1000.0, decimals: int = 0):
+def _format_duration_ms(ms, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS, decimals: int = 0):
 	"""Render a duration as ``"<n>ms"`` (with ``decimals`` digits) or, if it
 	crosses ``threshold_ms``, as ``"<n.nn>s"`` (always 2 decimals). ``decimals``
 	controls only the ms branch; ``threshold_ms = 0`` disables the conversion.

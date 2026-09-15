@@ -12,6 +12,8 @@ pre-migration).
 
 from dataclasses import dataclass, field
 
+from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS
+
 # NOTE: frappe is imported lazily inside each function rather than at
 # module top. Importing at top forces every unit test that touches
 # ``from optimus import settings`` to run under bench, which
@@ -86,7 +88,7 @@ _DEFAULTS = {
 	# v0.6.x: durations above this threshold (in ms) are rendered as seconds
 	# in the report (e.g. 5234ms → 5.23s). Below it, ms is preserved. Set to
 	# a very large value to effectively disable the conversion.
-	"large_duration_threshold_ms": 1000.0,
+	"large_duration_threshold_ms": DEFAULT_DISPLAY_THRESHOLD_MS,
 	"phase2_max_runs_per_session": 10,
 	"phase2_default_auto_expand": True,
 	# v0.6.0: how long the analyze job waits (seconds, capped at 300) for the
@@ -334,7 +336,7 @@ class OptimusConfig:
 	min_action_duration_ms: float = 0.0
 	# v0.6.x: durations >= this threshold render as seconds in the report;
 	# below the threshold, render as ms. Falsy → use _DEFAULTS via _float.
-	large_duration_threshold_ms: float = 1000.0
+	large_duration_threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS
 	phase2_max_runs_per_session: int = 10
 	phase2_default_auto_expand: bool = True
 	background_job_wait_seconds: int = 300
@@ -802,7 +804,7 @@ def display_threshold_ms() -> float:
 	try:
 		return float(get_config().large_duration_threshold_ms)
 	except Exception:
-		return 1000.0
+		return DEFAULT_DISPLAY_THRESHOLD_MS
 
 
 def get_tracked_apps() -> tuple[str, ...]:
