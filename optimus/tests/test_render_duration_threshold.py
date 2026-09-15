@@ -16,6 +16,7 @@ from optimus.analyzers.base import (
 	_reformat_durations_in_text,
 	_rolls_over_to_seconds,
 	dur,
+	format_duration_markers,
 	format_durations,
 )
 from optimus.settings import OptimusConfig
@@ -501,3 +502,52 @@ class TestCodeReviewFixes:
 				text = humanize_duration_ms(v, thr)
 				is_seconds = text.endswith("s") and not text.endswith("ms")
 				assert _rolls_over_to_seconds(v, thr) == is_seconds
+
+
+class TestReviewRound4Fixes:
+	"""Regressions for the 4th review pass."""
+
+	def test_count_then_duration_still_converts(self):
+		# #3: a real duration after a count ("top 3 2400ms") must convert; the old
+		# digit+space look-behind (a leftover of the removed plain-space grouping)
+		# wrongly skipped it.
+		assert _reformat_durations_in_text("top 3 2400ms queries", 1000.0) == "top 3 2.40s queries"
+		assert _reformat_durations_in_text("after 2 retries 5234ms", 1000.0) == "after 2 retries 5.23s"
+
+	def test_title_and_badge_agree_at_rounding_boundary(self):
+		# #4: dur() rounds to 0.01ms so a title decides the ms/seconds rollover from
+		# the same value as the badge (estimated_impact_ms = round(x, 2)). 999.495ms
+		# rolled title 999ms vs badge 1.00s before; both roll to 1.00s now.
+		from optimus.report_context import _ms_display
+
+		imp = 999.495
+		title = format_duration_markers(f"x {dur(imp)}", 1000.0)
+		badge = _ms_display(round(imp, 2), threshold_ms=1000.0)
+		assert title == "x 1.00s"
+		assert badge == "1.00s"
+
+	def test_resolve_threshold_ms_tolerates_bad_value(self):
+		# #7: a non-numeric config value falls back to the default instead of raising
+		# at the top of build_report_context.
+		from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS
+		from optimus.report_context import _resolve_threshold_ms
+
+		assert _resolve_threshold_ms({"large_duration_threshold_ms": "abc"}) == DEFAULT_DISPLAY_THRESHOLD_MS
+		assert _resolve_threshold_ms({"large_duration_threshold_ms": "500"}) == 500.0
+		assert _resolve_threshold_ms({"large_duration_threshold_ms": 0}) == 0.0
+
+
+class TestFinalizeProse:
+	"""_finalize_prose is the single home of the format-before-em-dash order."""
+
+	def test_scan_true_rolls_raw_ms_before_em_dash_sweep(self):
+		from optimus.renderer._internal import _finalize_prose
+
+		assert _finalize_prose("took 5234ms—slow", 1000.0) == "took 5.23s-slow"
+
+	def test_scan_false_is_marker_only(self):
+		from optimus.renderer._internal import _finalize_prose
+
+		# A threshold literal (no dur() marker) is left alone under scan=False.
+		assert _finalize_prose("queries &gt;200ms slow", 1000.0, scan=False) == "queries &gt;200ms slow"
+		assert _finalize_prose(f"took {dur(5234)}", 1000.0, scan=False) == "took 5.23s"

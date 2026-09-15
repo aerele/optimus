@@ -20,7 +20,7 @@ import re
 # ``analyzers.base`` is a dependency-free leaf (stdlib only), so importing the
 # shared duration formatter here does not create the ``_internal`` cycle the
 # local ``_e`` copy below guards against.
-from optimus.analyzers.base import humanize_duration_ms
+from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS, humanize_duration_ms
 
 # Depth caps for the call-tree panel. The default cap is what the user
 # sees without clicking; the hard cap is the absolute runaway-protection
@@ -76,7 +76,7 @@ def _ct_is_user_frame(node) -> bool:
 	return app not in FRAMEWORK_APPS
 
 
-def _render_call_tree_node(node, parent_ms, depth=0, unlimited=False, breadcrumb=True, threshold_ms=1000.0):
+def _render_call_tree_node(node, parent_ms, depth=0, unlimited=False, breadcrumb=True, threshold_ms=DEFAULT_DISPLAY_THRESHOLD_MS):
 	"""Recursively emit nested ``<details>`` for a single call_tree node.
 
 	Auto-opens the hottest path down to the first user-app frame (``breadcrumb``);
@@ -181,7 +181,7 @@ def _render_call_tree_node(node, parent_ms, depth=0, unlimited=False, breadcrumb
 	return "".join(out)
 
 
-def _render_one_call_tree(top, threshold_ms=1000.0):
+def _render_one_call_tree(top, threshold_ms=DEFAULT_DISPLAY_THRESHOLD_MS):
 	"""Render the ``<div class="call-tree">`` block for a single action dict
 	(``call_tree_json`` + ``duration_ms`` + ``action_label``). Returns the
 	tree HTML, or "" when the action has no renderable Python frames (empty
@@ -217,7 +217,7 @@ def _render_one_call_tree(top, threshold_ms=1000.0):
 	return '<div class="call-tree">' + "".join(nodes) + '</div>'
 
 
-def _render_call_tree_panel(actions, threshold_ms=1000.0):
+def _render_call_tree_panel(actions, threshold_ms=DEFAULT_DISPLAY_THRESHOLD_MS):
 	"""Render the call-tree panel for the top-N slowest actions (up to
 	``_CALL_TREE_MAX_ACTIONS``) that carry a ``call_tree_json``, each as its own
 	labeled sub-tree. Empty string when no action carries a renderable tree.

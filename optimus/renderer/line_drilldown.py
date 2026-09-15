@@ -27,7 +27,7 @@ import json
 import os
 from typing import Any
 
-from optimus.analyzers.base import humanize_duration_ms
+from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS, humanize_duration_ms
 from optimus.renderer.syntax import _highlight_python_snippet
 from optimus.renderer.time_format import _format_duration_ms
 
@@ -142,7 +142,7 @@ def _phase2_invoked(fn: dict) -> bool:
 	return _function_invoked(fn)
 
 
-def _render_phase2_function_table(fn: dict, threshold_ms: float = 1000.0) -> str:
+def _render_phase2_function_table(fn: dict, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS) -> str:
 	"""Per-function line table inside one phase-2 run.
 
 	Columns: line number, hit count, total ms, per-hit µs, source. When ``fn``
@@ -227,7 +227,7 @@ def _render_phase2_function_table(fn: dict, threshold_ms: float = 1000.0) -> str
 	return "".join(html)
 
 
-def _render_phase2_diff_table(diff_rows: list[dict], threshold_ms: float = 1000.0) -> str:
+def _render_phase2_diff_table(diff_rows: list[dict], threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS) -> str:
 	"""Render the cross-run delta table for one function profiled in 2+ runs
 	(the verify-the-fix view)."""
 	# v0.7.x Phase F: cross-run diff uses the same `.line-prof` base
@@ -243,9 +243,9 @@ def _render_phase2_diff_table(diff_rows: list[dict], threshold_ms: float = 1000.
 		"<th>status</th>"
 		'<th class="num">prev #</th>'
 		'<th class="num">curr #</th>'
-		'<th class="num">prev ms</th>'
-		'<th class="num">curr ms</th>'
-		'<th class="num">&Delta; ms</th>'
+		'<th class="num">prev</th>'
+		'<th class="num">curr</th>'
+		'<th class="num">&Delta;</th>'
 		"<th>source</th>"
 		"</tr></thead><tbody>",
 	]
@@ -311,7 +311,7 @@ def _render_phase2_diff_table(diff_rows: list[dict], threshold_ms: float = 1000.
 # ---------------------------------------------------------------------------
 
 
-def _render_line_drilldown_panel(session_doc: Any, threshold_ms: float = 1000.0) -> str:
+def _render_line_drilldown_panel(session_doc: Any, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS) -> str:
 	"""Build the Line-Level Drilldown section HTML, or "" when the session has
 	no phase-2 runs (the template's ``{% if line_drilldown_html %}`` guard then
 	skips the section)."""

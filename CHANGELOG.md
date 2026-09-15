@@ -60,6 +60,23 @@ versions may contain breaking changes see migration notes below).
   "12.50s" — NBSP and narrow-NBSP locale grouping still work); `_resolve_threshold_ms`
   coerces its value to float so a stringy config value can't reach the numeric
   comparison; and some duration formatting that no template rendered was removed.
+- **A further review pass.** The cross-run diff table's headers said "ms" while its
+  cells had started rendering seconds (a 1000x misread) — they are now unit-less like
+  the sibling table. A finding title and its impact badge could disagree at a rounding
+  boundary (999.495ms read "999ms" beside a "1.00s" badge) because the title rounded the
+  raw value while the badge used `round(x, 2)`; `dur()` now rounds to 0.01ms so both
+  decide the rollover from the same number. A blank (`""`) duration threshold stored on
+  Optimus Settings no longer makes `float("")` raise and silently reset the whole config
+  to defaults, and `_resolve_threshold_ms` falls back to the default on any non-numeric
+  value instead of raising. The prose fallback no longer skips a real duration written
+  after a count ("top 3 2400ms" now rolls over). Plus cleanup: a dead import removed, and
+  the remaining render helpers read the single `DEFAULT_DISPLAY_THRESHOLD_MS` default. The
+  Desk duration picker's comment is corrected: it matches the report's unit decision but
+  its seconds can differ by 0.01s on a whole-ms value ending in 5 (the report is the
+  source of truth). The per-row hot / total-time danger flags now use the same
+  round-based decision as the display (via the shared `_rolls_over_to_seconds`), so a row
+  that displays "1.00s" can't be left un-flagged, and the format-before-em-dash order is
+  enforced in one `_finalize_prose` helper instead of four hand-ordered copies.
 
 ## [0.12.48] - 2026-09-10
 

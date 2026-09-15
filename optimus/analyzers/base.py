@@ -115,10 +115,15 @@ def dur(ms, decimals: int = 0) -> str:
 	as plain "5234ms" if it is ever displayed unformatted. Trailing fractional zeros
 	are dropped so a whole-ms value reads "800ms", not "800.0ms". Non-numeric /
 	non-finite / negative input is emitted as "0ms" so the marker always carries a
-	well-formed, non-negative, formattable number."""
+	well-formed, non-negative, formattable number. The value is rounded to 0.01ms
+	first so a title's dur(x) and its impact badge (built from
+	estimated_impact_ms = round(x, 2)) decide the ms-vs-seconds rollover from the
+	SAME number and can't disagree at a boundary (e.g. 999.495 -> both roll to
+	1.00s, never title 999ms beside a 1.00s badge)."""
 	v = _coerce_ms(ms)
 	if v < 0:  # a duration is never negative; keep the marker well-formed
 		v = 0.0
+	v = round(v, 2)  # align with estimated_impact_ms = round(x, 2); see docstring
 	text = f"{v:.{decimals}f}"
 	if "." in text:
 		text = text.rstrip("0").rstrip(".")
@@ -162,11 +167,13 @@ _THOUSANDS_SEP = "[,\u00a0\u202f]"
 _SEP_STRIP_RE = re.compile(_THOUSANDS_SEP)
 # Plain or thousands-grouped ("2,000", NBSP "2 000"): a grouped number matches
 # WHOLE and its separators are stripped in _reformat, so it rolls over like
-# "2000ms". "," in _URL_CHARS and (?<!\d\s) block a leftover group of a non-Western
-# grouping ("1,23,456ms") so it is never corrupted.
+# "2000ms". "," / NBSP in _URL_CHARS-or-_THOUSANDS_SEP handle a leftover group of a
+# non-Western grouping ("1,23,456ms"). A plain ASCII space is not a separator (see
+# _THOUSANDS_SEP), so no digit+space look-behind is needed and, crucially, must not
+# be used: it would wrongly skip a real duration after a count ("top 3 2400ms").
 _NUM = r"(?:\d{1,3}(?:" + _THOUSANDS_SEP + r"\d{3})+|\d+)(?:\.\d+)?"
 _MS_TOKEN_RE = re.compile(
-	r"(?<![" + _URL_CHARS + r"])(?<!\d\s)(" + _NUM + r")\s?ms(?![\w/=?#-])(?!\.\w)"
+	r"(?<![" + _URL_CHARS + r"])(" + _NUM + r")\s?ms(?![\w/=?#-])(?!\.\w)"
 )
 # Split HTML into text runs and whole tags so the rewrite never touches a tag's
 # own contents (a "<n>ms" in an attribute would corrupt the markup). The body is

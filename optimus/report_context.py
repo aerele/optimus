@@ -17,7 +17,11 @@ from typing import Any
 
 from markupsafe import Markup
 
-from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS, humanize_duration_ms
+from optimus.analyzers.base import (
+	DEFAULT_DISPLAY_THRESHOLD_MS,
+	_rolls_over_to_seconds,
+	humanize_duration_ms,
+)
 
 # A whole captured flow slower than this reads as "danger" on the Total-time
 # KPI. Deliberately separate from large_duration_threshold_ms (which is only a
@@ -47,10 +51,16 @@ def _resolve_threshold_ms(render_config) -> float:
 	the value is unset. An explicit 0 (disable the seconds rollover) is
 	preserved, matching the shared formatters and renderer._internal, so the
 	whole report agrees on when to roll durations over to seconds. Coerced to
-	float (like renderer._internal) so a stringy config value can't reach the
-	numeric comparison in _rolls_over_to_seconds as a str."""
+	float so a stringy config value can't reach the numeric comparison in
+	_rolls_over_to_seconds as a str; a non-numeric value falls back to the default
+	rather than raising at the top of build_report_context."""
 	t = (render_config or {}).get("large_duration_threshold_ms")
-	return DEFAULT_DISPLAY_THRESHOLD_MS if t is None else float(t)
+	if t is None:
+		return DEFAULT_DISPLAY_THRESHOLD_MS
+	try:
+		return float(t)
+	except (TypeError, ValueError):
+		return DEFAULT_DISPLAY_THRESHOLD_MS
 
 
 def _web_vital_class(value, good_threshold, poor_threshold) -> str:
@@ -77,7 +87,7 @@ def _bar_kind_for(duration_ms) -> str | None:
 	"""
 	if duration_ms is None:
 		return "ok"
-	if duration_ms >= _HOT_ACTION_MS:
+	if _rolls_over_to_seconds(duration_ms, _HOT_ACTION_MS):
 		return None
 	if duration_ms >= _BAR_WARN_MS:
 		return "warn"
@@ -211,7 +221,7 @@ def _build_kpis(session_doc, ctx) -> list[dict]:
 				f"Call-tree timings sampled at ~{_sampler_ms:g}ms intervals; "
 				"sub-interval functions can be under-counted."
 			),
-			"is_danger": total_ms >= _TOTAL_TIME_DANGER_MS,
+			"is_danger": _rolls_over_to_seconds(total_ms, _TOTAL_TIME_DANGER_MS),
 		},
 		{
 			"label": "Database queries",
@@ -518,7 +528,7 @@ def _build_actions(actions, findings, fmt_ms=None) -> list[dict]:
 			"kind": kind,
 			"duration_display": fmt(duration_ms),
 			"duration_pct": (duration_ms / max_ms) * 100 if max_ms else 0,
-			"duration_is_hot": duration_ms >= _HOT_ACTION_MS,
+			"duration_is_hot": _rolls_over_to_seconds(duration_ms, _HOT_ACTION_MS),
 			"bar_kind": _bar_kind_for(duration_ms),
 			"queries": action.get("queries_count", 0) or 0,
 			"db_time_display": fmt(action.get("query_time_ms", 0) or 0),
@@ -554,7 +564,7 @@ def _build_background_jobs(jobs, fmt_ms=None) -> list[dict]:
 			"meta": meta,
 			"duration_display": fmt(duration_ms),
 			"duration_pct": (duration_ms / max_ms) * 100 if max_ms else 0,
-			"duration_is_hot": duration_ms >= _HOT_ACTION_MS,
+			"duration_is_hot": _rolls_over_to_seconds(duration_ms, _HOT_ACTION_MS),
 			"bar_kind": _bar_kind_for(duration_ms),
 			"queries": job.get("queries_count", 0) or 0,
 			"db_time_display": fmt(job.get("query_time_ms", 0) or 0),
@@ -761,8 +771,8 @@ def _build_frontend(ctx) -> dict | None:
 			"size_display": (
 				f"{size_bytes / 1024:.1f} KB" if size_bytes >= 1024 else f"{size_bytes} B"
 			),
-			"backend_is_hot": backend_ms >= _HOT_ACTION_MS,
-			"browser_is_hot": xhr_ms >= _HOT_ACTION_MS,
+			"backend_is_hot": _rolls_over_to_seconds(backend_ms, _HOT_ACTION_MS),
+			"browser_is_hot": _rolls_over_to_seconds(xhr_ms, _HOT_ACTION_MS),
 		})
 
 	# J.2.4 non-contract additions: pass-through the raw summary +
@@ -798,7 +808,7 @@ def _build_hot_frames(hot_frames_rows, ignored_apps, fmt_ms=None) -> list[dict]:
 		entry.update({
 			"name": name,
 			"total_time_display": fmt(total_ms),
-			"is_hot_time": bool(row.get("is_hot", False)) or total_ms >= _HOT_ACTION_MS,
+			"is_hot_time": bool(row.get("is_hot", False)) or _rolls_over_to_seconds(total_ms, _HOT_ACTION_MS),
 			"occurrences": row.get("occurrences", 0) or 0,
 			"distinct_actions": row.get("distinct_actions", 0) or 0,
 			"is_user_code": _is_user_code(path_part, ignored),

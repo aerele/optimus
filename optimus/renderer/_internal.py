@@ -24,7 +24,6 @@ from optimus.analyzers.base import (
 	SEVERITY_ORDER,
 	format_duration_markers,
 	format_durations,
-	humanize_duration_ms,
 )
 
 # Sensitive-data redaction lives in ``optimus/redaction.py`` (pure
@@ -246,6 +245,21 @@ def _get_jinja_env() -> Environment:
 # format_durations() (exact tags first, then a prose fallback for marker-less
 # durations). The render-time summary is rebuilt fresh every render (always
 # tagged), so it uses format_duration_markers() (exact tags only). Both run once.
+
+
+def _finalize_prose(text: str, threshold_ms: float, *, scan: bool = True) -> str:
+	"""Format durations, THEN sweep em dashes - always in that order. The reverse
+	leaves a hyphen the prose scanner's URL guard skips, stranding a raw "<n>ms"
+	while its badge shows seconds. ``scan=True`` also runs the fuzzy prose scanner,
+	for stored / free-text that may hold un-tagged durations (finding titles read
+	from the DB, notes, the legacy stored summary); ``scan=False`` formats only exact
+	dur() markers, for freshly built fully-tagged text (the render-time summary), so a
+	threshold literal like "&gt;200ms" is left alone. One home for the
+	format-before-em-dash invariant so the four call sites can't drift out of order."""
+	if not text:
+		return text
+	fmt = format_durations if scan else format_duration_markers
+	return fmt(text, threshold_ms).replace("—", "-")
 
 
 def render(
@@ -567,19 +581,16 @@ def render(
 	# without re-analyzing after the setting changed.
 	for _f in all_findings:
 		# Titles / descriptions are read back from STORED finding rows, which may
-		# have been analyzed before dur() markers existed (raw "<n>ms" text). Use
-		# format_durations: exact dur() markers first, then the prose fallback that
-		# also rolls over a marker-less legacy duration so the title agrees with the
-		# impact badge (_build_findings computes that from the raw number). Format
-		# BEFORE the em-dash sweep: a raw "5234ms—" must roll over first, else the
-		# sweep leaves a hyphen the prose URL guard skips.
+		# have been analyzed before dur() markers existed (raw "<n>ms" text), so
+		# _finalize_prose runs the prose fallback (scan=True) too. It also enforces
+		# the format-before-em-dash order so a marker-less legacy duration still rolls
+		# over to match the impact badge (_build_findings computes that from the raw
+		# number).
 		if _f.get("title"):
-			_f["title"] = _strip_em(
-				format_durations(_f["title"], _large_duration_threshold_ms)
-			)
+			_f["title"] = _finalize_prose(_f["title"], _large_duration_threshold_ms)
 		if _f.get("customer_description"):
-			_f["customer_description"] = _strip_em(
-				format_durations(_f["customer_description"], _large_duration_threshold_ms)
+			_f["customer_description"] = _finalize_prose(
+				_f["customer_description"], _large_duration_threshold_ms
 			)
 	if not _ai_findings_on:
 		for _f in all_findings:
@@ -699,16 +710,11 @@ def render(
 			# user input - safe by default.
 			import html as html_mod
 			notes_html = html_mod.escape(notes_html)
-		# The Steps-to-Reproduce list bakes raw-ms durations at analyze time
-		# (e.g. "Submit Delivery Note: 12418.3 ms"); reformat them at render so
-		# they honour the threshold like every other duration. Do this BEFORE the
-		# em-dash sweep: a raw "5234ms—slow step" must roll over first, because the
-		# sweep turns the em dash into a hyphen and the prose reformatter then skips
-		# a "ms" glued to a hyphen (its URL guard), leaving the value in ms.
-		notes_html = format_durations(notes_html, _large_duration_threshold_ms)
-		# v0.7.x J.13: strip em dashes the analyzer wrote into auto-notes
-		# / humanized-notes prose at analyse-time.
-		notes_html = notes_html.replace("—", "-")
+		# The Steps-to-Reproduce list bakes raw-ms durations at analyze time (e.g.
+		# "Submit Delivery Note: 12418.3 ms") and the AI humanizer writes free-text
+		# durations, so reformat with the prose fallback and strip em dashes. Order
+		# (format then sweep) is enforced by _finalize_prose.
+		notes_html = _finalize_prose(notes_html, _large_duration_threshold_ms)
 
 	# v0.5.2: Analyzer warnings are stored as a newline-joined string
 	# (see analyze.py). Split into a list of non-empty bullets for the
@@ -932,28 +938,23 @@ def render(
 		int(getattr(session_doc, "total_queries", 0) or 0),
 		recordings,
 	)
-	# v0.7.x J.13: strip em dashes from the render-time summary HTML
-	# (analyze.py's prose composer may still produce them on cached doc rows).
-	# The composer tags every duration with dur(), so format the exact markers
-	# only (no fuzzy scanner): a literal like "&gt;200ms" that describes a
-	# threshold is left untouched, and marker substitution is immune to the sweep.
+	# The render-time summary is freshly composed and fully dur()-tagged, so format
+	# the exact markers only (scan=False): a threshold literal like "&gt;200ms" is
+	# left untouched by the scanner.
 	if summary_html_rendered:
-		summary_html_rendered = format_duration_markers(
-			summary_html_rendered, _large_duration_threshold_ms
+		summary_html_rendered = _finalize_prose(
+			summary_html_rendered, _large_duration_threshold_ms, scan=False
 		)
-		summary_html_rendered = summary_html_rendered.replace("—", "-")
 
-	# The template falls back to the STORED session.summary_html when the
-	# render-time summary is empty (legacy / edge sessions). A stored summary can be
-	# old free-text prose OR carry dur() markers, so use the full format_durations
-	# (markers + prose scanner) here rather than let the fallback emit a raw "<n>ms"
-	# or an invisible marker.
+	# The template falls back to the STORED session.summary_html when the render-time
+	# summary is empty (legacy / edge sessions). A stored summary can be old free-text
+	# prose OR carry dur() markers, so run the full prose fallback (scan=True) rather
+	# than let it emit a raw "<n>ms" or an invisible marker.
 	stored_summary_html = getattr(session_doc, "summary_html", None) or ""
 	if stored_summary_html:
-		stored_summary_html = format_durations(
+		stored_summary_html = _finalize_prose(
 			stored_summary_html, _large_duration_threshold_ms
 		)
-		stored_summary_html = stored_summary_html.replace("—", "-")
 
 	context = {
 		"session": session_doc,

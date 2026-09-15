@@ -455,12 +455,15 @@ def _read_doctype_row() -> dict | None:
 		# actions, the default). Coerce, don't fall through.
 		"min_action_duration_ms": float(doc.get("min_action_duration_ms") or 0),
 		# An explicit 0 disables the seconds rollover, so it must be preserved,
-		# not treated as falsy. Only a genuinely missing value (None) falls
-		# through to _DEFAULTS["large_duration_threshold_ms"] = 1000 via the
-		# zero-OK resolver below. (min_action_duration_ms handles 0 the same way.)
+		# not treated as falsy. Only a genuinely missing/blank value falls through
+		# to _DEFAULTS["large_duration_threshold_ms"] = 1000 via the zero-OK resolver
+		# below. Guard "" as well as None: a stored blank would make float("") raise,
+		# and that escapes get_config()'s try and silently resets the WHOLE config to
+		# defaults for that read (min_action_duration_ms is safe via its "or 0").
 		"large_duration_threshold_ms": (
-			float(doc.get("large_duration_threshold_ms"))
-			if doc.get("large_duration_threshold_ms") is not None else None
+			float(_ldt)
+			if (_ldt := doc.get("large_duration_threshold_ms")) not in (None, "")
+			else None
 		),
 		# v0.13.x: 0 is legitimate (= no cap on retained runs). Coerce,
 		# preserve 0.

@@ -41,11 +41,11 @@ function optimus_fmt_ms(ms, decimals) {
 	// second reads as "1.00s", never "1000ms".
 	var rounded = Math.round(Math.abs(v));
 	// Convert from the whole-millisecond value (Math.round(v)/1000), matching the
-	// server's humanize_duration_ms, so the picker and the report agree for real
-	// timings. (JS rounds a .5ms half-up while Python rounds half-to-even, so a
-	// value landing exactly on a half-millisecond could still differ by 0.01s;
-	// measured durations don't hit that, and the common raw-vs-rounded mismatch
-	// this replaced is gone.)
+	// server's UNIT decision. The final 2-decimal seconds can still differ from the
+	// report by 0.01s on a whole-ms value ending in 5 (e.g. 1125ms -> 1.125s: this
+	// picker's toFixed rounds half-away to "1.13s" while the report's Python %.2f
+	// rounds half-to-even to "1.12s"). The picker is a live convenience; the report
+	// HTML is the source of truth. Exact rounding parity isn't worth the FP fiddle.
 	if (threshold && rounded >= threshold) return (Math.round(v) / 1000).toFixed(2) + "s";
 	var text = v.toFixed(dec);
 	// Match the server: a value that rounds to zero must not keep a sign
