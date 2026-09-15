@@ -25,7 +25,7 @@
    "read_only": 1
   },
   {
-   "description": "Terminal RQ status. 'Running' = still active when the analyze wait ceiling elapsed (re-run Analyze once it finishes to capture it).",
+   "description": "The job's last-known status. 'Running' means it was still going when Optimus stopped waiting for it, so re-run Analyze once it finishes to pull in its data.",
    "fieldname": "status",
    "fieldtype": "Select",
    "in_list_view": 1,
@@ -66,14 +66,14 @@
    "read_only": 1
   },
   {
-   "description": "UUID of the captured recording for this job (when it ran with profiling), linking it to the per-action breakdown.",
+   "description": "Identifier of the profiling recording captured for this job (when it was profiled). It links the job to its own entry in the per-action breakdown.",
    "fieldname": "recording_uuid",
    "fieldtype": "Data",
    "label": "Recording UUID",
    "read_only": 1
   },
   {
-   "description": "Exception summary for Failed / Timeout jobs.",
+   "description": "A short summary of the error, for jobs that failed or timed out.",
    "fieldname": "error",
    "fieldtype": "Small Text",
    "label": "Error",
