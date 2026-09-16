@@ -315,6 +315,17 @@ class TestRowDangerNotTiedToDisplay:
 		html = renderer.render_raw(doc, recordings=[])
 		assert 'class="hot-value"' in html  # 1500 >= 1000 fixed threshold
 
+	def test_action_that_displays_a_full_second_is_flagged_hot(self):
+		# A value in [999.5, 1000) rounds up to "1.00s" for display, so the red hot
+		# flag must fire too. The template now reads the round-based duration_is_hot /
+		# bar_kind from report_context; the old bug compared the raw ms in Jinja
+		# (999.6 >= 1000 -> False), showing "1.00s" with only an amber accent.
+		doc = _doc([_action(action_label="POST /c", http_method="POST", path="/c",
+		                    recording_uuid="r2", duration_ms=999.6)])
+		html = renderer.render_raw(doc, recordings=[])
+		assert "1.00s" in html              # displayed value rounded up to a second
+		assert 'class="hot-value"' in html  # ... so the row is flagged red, not amber
+
 
 class TestDefaultThreshold:
 	def test_slow_row_renders_in_seconds(self):
@@ -457,19 +468,52 @@ class TestCodeReviewFixes:
 		assert "The slowest step was 5.23s" in html
 		assert _DUR_SEP not in html
 
-	def test_title_truncation_never_severs_a_duration(self):
-		# #3: a long title whose dur() marker sits at the tail must not be cut mid
-		# token, leaving bare digits or a unit-less "5234m". The token is dropped
-		# whole instead (badge + description still carry it).
-		from optimus.analyze import _FINDING_TITLE_MAX_CHARS, _truncate_finding_titles
+	def test_stored_summary_fallback_preserves_threshold_caption(self):
+		# The stored-summary fallback formats markers only (scan=False), like the
+		# render-time path, so the FIXED "(>200ms)" caption is not rewritten to
+		# "(>0.20s)" under a custom threshold <= 200 (where the prose scanner would
+		# otherwise match the "200ms" after the "&gt;" entity).
+		doc = _doc([])
+		doc.summary_html = (
+			"Found <strong>slow queries</strong> (&gt;200ms) - slowest " + dur(5234) + "."
+		)
+		with patch("optimus.analyze._build_summary_html", return_value=""):
+			with patch(
+				"optimus.settings.get_config",
+				return_value=OptimusConfig(large_duration_threshold_ms=100),
+			):
+				html = renderer.render_raw(doc, recordings=[])
+		assert "(&gt;200ms)" in html      # fixed caption preserved
+		assert "&gt;0.20s" not in html    # NOT rewritten by the prose scanner
+		assert "slowest 5.23s" in html    # the real dur() marker still formats
+		assert _DUR_SEP not in html
 
-		f = {"title": "In job " + ("X" * 140) + " consumed " + dur(5234)}
+	def test_title_truncation_never_severs_a_duration(self):
+		# A long title whose dur() marker STRADDLES the truncation boundary must not
+		# be cut mid token, leaving bare digits or a unit-less "5234m". The token is
+		# dropped whole instead (badge + description still carry it). The marker is
+		# positioned so the keep boundary falls inside it, exercising the straddle
+		# branch: if that branch is deleted the cut lands at "...5234" and the
+		# stem.endswith assertion below fails.
+		from optimus.analyze import (
+			_FINDING_TITLE_ELLIPSIS,
+			_FINDING_TITLE_MAX_CHARS,
+			_truncate_finding_titles,
+		)
+
+		keep = _FINDING_TITLE_MAX_CHARS - len(_FINDING_TITLE_ELLIPSIS)
+		# Place the marker so it starts a few chars before `keep` and ends after it.
+		marker = dur(5234)  # "5234ms" + separator
+		prefix = "x" * (keep - 4)  # marker starts at keep-4, spans across keep
+		f = {"title": prefix + marker + (" tail" * 8)}  # total well over the max
+		# Sanity: the boundary really lands inside the marker (else the test is moot).
+		assert len(prefix) < keep < len(prefix) + len("5234ms")
 		_truncate_finding_titles([f])
 		t = f["title"]
 		assert len(t) <= _FINDING_TITLE_MAX_CHARS
 		assert t.endswith("...")
 		# No half-number / unit-less remnant left dangling before the ellipsis.
-		stem = t[: -len("...")].rstrip()
+		stem = t[: -len(_FINDING_TITLE_ELLIPSIS)].rstrip()
 		assert not stem.endswith(("5", "52", "523", "5234", "5234m"))
 		assert _DUR_SEP not in t
 
@@ -488,8 +532,10 @@ class TestCodeReviewFixes:
 			"top_queries": [{"query_duration_ms": 800, "callsite": "a/b.py:1"}],
 		}
 		out = rc.build_report_context(_Doc(), ctx)
-		# 800ms at a 500ms threshold rolls over; at the buggy 1000 default it would not.
-		assert rc._ms_display(800, 500) == "0.80s"
+		# Inspect the BUILT output, which is formatted by the default _fmt_ms the
+		# context builds when ctx omits "fmt_ms". 800ms at a 500ms threshold rolls
+		# over; if that fallback regressed to a hardcoded 1000 it would read "800ms".
+		assert out["slow_queries"][0]["total_time_display"] == "0.80s"
 		assert out["large_duration_threshold_ms"] == 500
 
 	def test_rolls_over_helper_matches_humanize(self):

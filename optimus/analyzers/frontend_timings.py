@@ -198,7 +198,10 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                     "Check response size and JavaScript execution."
                 ),
             }, default=str),
-            "estimated_impact_ms": lcp,
+            # Round to 0.01ms so the badge (fmt_ms of this value) and the title
+            # (dur(lcp), which rounds to 0.01ms internally) decide the ms-vs-seconds
+            # rollover from the SAME number and can't disagree at a boundary.
+            "estimated_impact_ms": round(lcp, 2),
             "affected_count": 1,
             "action_ref": "0",
         })
@@ -230,7 +233,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                         "suspect network path: CDN, TLS handshake, proxy."
                     ),
                 }, default=str),
-                "estimated_impact_ms": delta,
+                # Round to 0.01ms so the badge and the dur(delta) title roll over
+                # from the same number (see the LCP note above).
+                "estimated_impact_ms": round(delta, 2),
                 "affected_count": 1,
                 "action_ref": str(m["action_idx"]),
             })

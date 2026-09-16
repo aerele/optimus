@@ -8,6 +8,48 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.50] - 2026-09-16
+
+### Fixed
+
+- **A per-action or background-job row that displays "1.00s" is now flagged red.**
+  The per-action and RQ-jobs tables decided the red "hot" text and the red/amber bar
+  from the raw millisecond value while the value cell rolled a value in [999.5, 1000)
+  up to "1.00s" by rounding, so such a row showed a full second but got only an amber
+  accent. The tables now read the round-based `duration_is_hot` / `bar_kind` computed
+  in `report_context` (the same rollover the display uses), instead of re-deciding from
+  the raw ms in the template.
+- **A Slow Query, Slow Frontend Render or Network Overhead finding's title and its
+  impact badge always agree.** These three analyzers stored the raw duration as
+  `estimated_impact_ms` (which drives the badge) while the title baked `dur()` (which
+  rounds to 0.01ms), so at a rounding boundary the title could read "624ms" beside a
+  "623ms" badge (or flip ms↔seconds). They now store `round(x, 2)`, matching the other
+  analyzers, so the title and badge roll over from the same number.
+- **A blank or non-numeric large-duration threshold can no longer reset the whole
+  config.** `_read_doctype_row` coerced the stored threshold with a bare `float()`
+  guarded only against `None`/`""`, so a whitespace-only or non-numeric value raised
+  `ValueError`, which escaped `get_config()`'s blanket `except` and silently reset the
+  entire config (tracked/ignored apps, AI settings, profile, retention) to defaults on
+  every read. A shared `_opt_float` helper now coerces it, preserving an explicit 0 but
+  turning any unparseable value into "fall through to the default".
+- **The stored-summary fallback no longer corrupts the "(&gt;200ms)" caption.** When the
+  render-time summary is empty and the template falls back to the stored summary, it is
+  now formatted markers-only (like the render-time path) and only when it will actually
+  be shown, so a custom display threshold ≤ 200 can't rewrite the fixed "(&gt;200ms)"
+  slow-query caption to "(&gt;0.20s)".
+
+### Internal
+
+- The hot-path picker (`optimus_fmt_ms`) now strips a negative zero in the seconds
+  branch too, matching the millisecond branch and the server formatter.
+- `boot_session` resolves the (Redis-cached) config once instead of twice, keeping the
+  two-try split so a threshold read error can't flip a disabled Optimus back on.
+- Two duration tests were sharpened so they actually exercise what they name. The title
+  truncation test now positions the duration marker so it straddles the cut boundary,
+  really exercising the straddle guard. The report-context fallback test now asserts on
+  the built `slow_queries` output, so a regression to a hardcoded 1000ms rollover would
+  fail it.
+
 ## [0.12.49] - 2026-09-13
 
 ### Internal
@@ -111,7 +153,10 @@ versions may contain breaking changes see migration notes below).
 - **The Optimus Session hot-path picker matches the report.** The Desk-side duration
   formatter rounded to seconds from the raw value while the report now rounds from the whole
   millisecond, so the picker and the report could show the same duration as "1.23s" in one
-  place and "1.24s" in the other. The picker now rounds the same way.
+  place and "1.24s" in the other. The picker now decides the unit the same way (rounding
+  from the whole millisecond); the final two-decimal seconds can still differ by 0.01s on
+  a whole-ms value ending in 5 (`toFixed` rounds half away, Python `%.2f` half to even),
+  and the report HTML remains the source of truth.
 - **Duration reformatting no longer reaches inside HTML attributes.** The render step that
   rewrites "1500ms" into "1.50s" runs over the notes and summary HTML too; it now rewrites
   only the visible text between tags, so a duration-like value inside an attribute (an inline

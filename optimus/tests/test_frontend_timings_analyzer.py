@@ -94,8 +94,24 @@ def test_lcp_title_rounds_not_truncates():
     # Rounded to 2801, not truncated to 2800.
     assert slow[0]["title"] == f"LCP {dur(2800.7)} on /app/x"
     assert f"took {dur(2800.7)} for its largest" in slow[0]["customer_description"]
-    # The badge still carries the raw float, so both round to the same value.
-    assert slow[0]["estimated_impact_ms"] == 2800.7
+    # The badge stores round(lcp, 2); for a value already at <=2 decimals that is
+    # the same number, so title and badge agree.
+    assert slow[0]["estimated_impact_ms"] == round(2800.7, 2)
+
+
+def test_lcp_impact_rounds_to_two_decimals_for_badge_agreement():
+    """A raw LCP with sub-0.01ms precision must be stored as round(lcp, 2), so the
+    badge (fmt_ms of the stored impact) and the dur(lcp) title roll over from the
+    SAME number. Storing the raw float made them disagree at a boundary."""
+    from optimus.analyzers import frontend_timings
+
+    fd = {"xhr": [], "vitals": [
+        {"name": "lcp", "page_url": "/app/x", "timestamp": 1, "value_ms": 2801.126},
+    ]}
+    result = frontend_timings.analyze([], _make_context(fd))
+    slow = [f for f in result.findings if f["finding_type"] == "Slow Frontend Render"]
+    assert len(slow) == 1
+    assert slow[0]["estimated_impact_ms"] == round(2801.126, 2)  # 2801.13, not raw
 
 
 def test_network_overhead_fires_on_disproportion():

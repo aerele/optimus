@@ -2089,7 +2089,7 @@
    rows in its primary table and framework-app rows in a collapsed
    "subsection" details sub-block below; both call the same macro so the
    row markup lives in one place. #}
-{% macro action_row(action, idx, max_ms=1.0, hot_ms=1000, warn_ms=300) %}
+{% macro action_row(action, idx, max_ms=1.0) %}
   {# v0.7.x redesign Phase E: editorial per-action row.
 
      - Action cell: `.action-name` (bold mono) + `.action-meta` (HTTP
@@ -2120,9 +2120,12 @@
     {% set _ms = action.duration_ms or 0 %}
     {% set _pct = (_ms / max_ms * 100) if max_ms else 0 %}
     <td class="num bar-cell">
-      <span{% if _ms >= hot_ms %} class="hot-value"{% endif %}>{{ fmt_ms(_ms) }}</span>
+      {# Colour from the round-based flags computed in report_context (duration_is_hot
+         / bar_kind), so a value that fmt_ms rolls up to "1.00s" is flagged red too,
+         instead of re-deciding here from the raw ms (which left [999.5, 1000) amber). #}
+      <span{% if action.duration_is_hot %} class="hot-value"{% endif %}>{{ fmt_ms(_ms) }}</span>
       <div class="bar-track">
-        <div class="bar-fill{% if _ms >= hot_ms %}{% elif _ms >= warn_ms %} warn{% else %} ok{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
+        <div class="bar-fill{% if action.bar_kind %} {{ action.bar_kind }}{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
       </div>
     </td>
     <td class="num">{{ action.queries_count }}</td>
@@ -2154,7 +2157,7 @@
   <span class="job-status job-status-{{ _cls }}">{{ _s }}</span>
 {%- endmacro %}
 
-{% macro bg_job_row(job, idx, cols, any_findings_counted, max_ms=1.0, hot_ms=1000, warn_ms=300) %}
+{% macro bg_job_row(job, idx, cols, any_findings_counted, max_ms=1.0) %}
   {# v0.7.x redesign Phase E: mirror of action_row for background
      jobs - `.action-name` for the dotted method, `.bar-cell` for the
      duration, `.type-tag.bg` would be redundant (every row in this
@@ -2174,9 +2177,11 @@
     {% set _ms = job.duration_ms or 0 %}
     {% set _pct = (_ms / max_ms * 100) if max_ms else 0 %}
     <td class="num bar-cell">
-      <span{% if _ms >= hot_ms %} class="hot-value"{% endif %}>{{ fmt_ms(_ms) }}</span>
+      {# Round-based flags from report_context (see action_row), so a job that
+         displays "1.00s" is flagged red rather than left amber. #}
+      <span{% if job.duration_is_hot %} class="hot-value"{% endif %}>{{ fmt_ms(_ms) }}</span>
       <div class="bar-track">
-        <div class="bar-fill{% if _ms >= hot_ms %}{% elif _ms >= warn_ms %} warn{% else %} ok{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
+        <div class="bar-fill{% if job.bar_kind %} {{ job.bar_kind }}{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
       </div>
     </td>
     <td class="num">{{ job.queries_count }}</td>
@@ -2699,8 +2704,6 @@
          so the row macro can scale its inline bar correctly. Scope
          the max to the table's own slice, not the combined set -
          keeps the framework subsection's bars usable too. #}
-      {% set _hot_ms = (report_data.hot_action_ms or 1000) | float %}
-      {% set _warn_ms = (report_data.bar_warn_ms or 300) | float %}
       {% if report_data.actions %}
       {# v0.7.x Phase J.2.3: iterate report_data.actions; the contract-shaped
          entries preserve the legacy action keys so action_row reads
@@ -2729,7 +2732,7 @@
         </thead>
         <tbody>
         {% for action in report_data.actions %}
-          {{ action_row(action, loop.index, max_ms=_max_action_ms, hot_ms=_hot_ms, warn_ms=_warn_ms) }}
+          {{ action_row(action, loop.index, max_ms=_max_action_ms) }}
         {% endfor %}
         </tbody>
         <tfoot>
@@ -2776,7 +2779,7 @@
           </thead>
           <tbody>
           {% for action in report_data.actions_framework %}
-            {{ action_row(action, loop.index, max_ms=_max_fw_ms, hot_ms=_hot_ms, warn_ms=_warn_ms) }}
+            {{ action_row(action, loop.index, max_ms=_max_fw_ms) }}
           {% endfor %}
           </tbody>
         </table>
@@ -2826,8 +2829,6 @@
       click <em>Retry Analyze</em> once it's done to pick it up.
     </p>
     {% set cols = 8 if report_data.background_jobs_summary.any_findings_counted else 7 %}
-    {% set _hot_ms = (report_data.hot_action_ms or 1000) | float %}
-    {% set _warn_ms = (report_data.bar_warn_ms or 300) | float %}
     {# v0.7.x Phase J.2.3: iterate report_data.background_jobs; entries
        preserve the legacy job keys so bg_job_row reads job.method /
        entry_callsite / etc. unchanged. The section heading still pulls
@@ -2855,7 +2856,7 @@
       </thead>
       <tbody>
       {% for job in report_data.background_jobs %}
-        {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_job_ms, hot_ms=_hot_ms, warn_ms=_warn_ms) }}
+        {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_job_ms) }}
       {% endfor %}
       </tbody>
       <tfoot>
@@ -2901,7 +2902,7 @@
         </thead>
         <tbody>
         {% for job in report_data.background_jobs_framework %}
-          {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_fw_job_ms, hot_ms=_hot_ms, warn_ms=_warn_ms) }}
+          {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_fw_job_ms) }}
         {% endfor %}
         </tbody>
       </table>

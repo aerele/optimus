@@ -87,6 +87,26 @@ def test_framework_callsite_queries_excluded_from_leaderboard(empty_context):
 	assert [f for f in result.findings if f["finding_type"] == "Slow Query"] == []
 
 
+def test_slow_query_impact_rounds_to_match_title(empty_context):
+	"""The title bakes dur(query_duration_ms) (rounds to 0.01ms internally), so the
+	stored estimated_impact_ms that drives the badge must be round(x, 2) too. Storing
+	the raw float made the title and badge disagree at a boundary (623.495 -> title
+	624ms beside a 623ms badge)."""
+	recording = {
+		"uuid": "r1",
+		"calls": [
+			{"query": "SELECT * FROM `tabSales Invoice`",
+			 "normalized_query": "SELECT * FROM `tabSales Invoice`",
+			 "duration": 850.126,
+			 "stack": [{"filename": "acme_app/acme_app/api.py", "lineno": 12}]},
+		],
+	}
+	result = top_queries.analyze([recording], empty_context)
+	slow = [f for f in result.findings if f["finding_type"] == "Slow Query"]
+	assert len(slow) == 1
+	assert slow[0]["estimated_impact_ms"] == round(850.126, 2)  # 850.13, not raw
+
+
 def test_query_without_callsite_excluded_from_leaderboard(empty_context):
 	"""A query with no callsite (unattributed) can't be tied to the user's app, so
 	it's left out of the leaderboard."""

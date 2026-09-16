@@ -46,7 +46,14 @@ function optimus_fmt_ms(ms, decimals) {
 	// picker's toFixed rounds half-away to "1.13s" while the report's Python %.2f
 	// rounds half-to-even to "1.12s"). The picker is a live convenience; the report
 	// HTML is the source of truth. Exact rounding parity isn't worth the FP fiddle.
-	if (threshold && rounded >= threshold) return (Math.round(v) / 1000).toFixed(2) + "s";
+	if (threshold && rounded >= threshold) {
+		var secs = (Math.round(v) / 1000).toFixed(2);
+		// Match the server + the ms branch below: a value that rounds to zero must
+		// not keep a sign ("-0.00s" -> "0.00s"). Reachable only if the helper is
+		// reused for a signed value with a threshold <= 1.
+		if (secs.charAt(0) === "-" && Number(secs) === 0) secs = secs.slice(1);
+		return secs + "s";
+	}
 	var text = v.toFixed(dec);
 	// Match the server: a value that rounds to zero must not keep a sign
 	// ("-0ms" -> "0ms"). Reachable only if the helper is reused for a signed value.

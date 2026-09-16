@@ -316,3 +316,29 @@ class TestDisplayThresholdMs:
 
 		monkeypatch.setattr(settings, "get_config", boom)
 		assert settings.display_threshold_ms() == 1000.0
+
+
+class TestOptFloatCoercion:
+	"""_opt_float coerces the stored large_duration_threshold_ms without ever
+	raising, so a blank/whitespace/non-numeric value falls through to the default
+	instead of throwing ValueError out of _read_doctype_row and crash-resetting the
+	WHOLE config (tracked apps, AI settings, profile, retention) on every read."""
+
+	def test_missing_and_blank_become_none(self):
+		assert settings._opt_float(None) is None
+		assert settings._opt_float("") is None
+
+	def test_whitespace_and_non_numeric_become_none_not_raise(self):
+		# These are the cases the old ``not in (None, "")`` guard let through to a
+		# bare float(), which raised and reset the config.
+		assert settings._opt_float(" ") is None
+		assert settings._opt_float("abc") is None
+
+	def test_explicit_zero_is_preserved(self):
+		# 0 disables the seconds rollover, so it must survive as 0.0, not None.
+		assert settings._opt_float("0") == 0.0
+		assert settings._opt_float(0) == 0.0
+
+	def test_numeric_values_coerce_to_float(self):
+		assert settings._opt_float("500") == 500.0
+		assert settings._opt_float(1000.0) == 1000.0

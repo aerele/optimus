@@ -946,14 +946,17 @@ def render(
 			summary_html_rendered, _large_duration_threshold_ms, scan=False
 		)
 
-	# The template falls back to the STORED session.summary_html when the render-time
-	# summary is empty (legacy / edge sessions). A stored summary can be old free-text
-	# prose OR carry dur() markers, so run the full prose fallback (scan=True) rather
-	# than let it emit a raw "<n>ms" or an invisible marker.
+	# The template falls back to the STORED session.summary_html only when the
+	# render-time summary is empty (legacy / edge sessions), so only finalize it when
+	# it will actually be shown, not on every normal render. Like the render-time
+	# summary it is _build_summary_html output (dur()-tagged), so format the exact
+	# markers only (scan=False): scanning it would rewrite the fixed "(&gt;200ms)"
+	# threshold caption to "(&gt;0.20s)" under a custom threshold <= 200 (the ";" in
+	# "&gt;" is not a URL-guard char), the very corruption the render-time path avoids.
 	stored_summary_html = getattr(session_doc, "summary_html", None) or ""
-	if stored_summary_html:
+	if not summary_html_rendered and stored_summary_html:
 		stored_summary_html = _finalize_prose(
-			stored_summary_html, _large_duration_threshold_ms
+			stored_summary_html, _large_duration_threshold_ms, scan=False
 		)
 
 	context = {

@@ -389,6 +389,24 @@ def _settings_cache_key() -> str:
 _CACHE_KEY = _settings_cache_key()
 
 
+def _opt_float(value) -> float | None:
+	"""Coerce a stored field to float, or None when it is missing/blank/non-numeric.
+
+	A None result means "fall through to the default" for the zero-OK resolver, so
+	an explicit 0 is preserved but a blank ``""``, whitespace ``" "`` or a stray
+	non-numeric string can't raise ``ValueError`` out of ``_read_doctype_row``. That
+	exception would escape ``get_config()``'s blanket ``except`` and silently reset
+	the WHOLE config (tracked/ignored apps, AI settings, profile, retention) to
+	defaults on every read, and never recover because the failing read isn't cached.
+	"""
+	if value is None or value == "":
+		return None
+	try:
+		return float(value)
+	except (TypeError, ValueError):
+		return None
+
+
 def _read_doctype_row() -> dict | None:
 	"""Load the Single doc's field dict, or None if the DocType doesn't exist yet
 	(fresh install / pre-migration), so callers degrade cleanly to defaults.
@@ -457,14 +475,10 @@ def _read_doctype_row() -> dict | None:
 		# An explicit 0 disables the seconds rollover, so it must be preserved,
 		# not treated as falsy. Only a genuinely missing/blank value falls through
 		# to _DEFAULTS["large_duration_threshold_ms"] = 1000 via the zero-OK resolver
-		# below. Guard "" as well as None: a stored blank would make float("") raise,
-		# and that escapes get_config()'s try and silently resets the WHOLE config to
-		# defaults for that read (min_action_duration_ms is safe via its "or 0").
-		"large_duration_threshold_ms": (
-			float(_ldt)
-			if (_ldt := doc.get("large_duration_threshold_ms")) not in (None, "")
-			else None
-		),
+		# below. _opt_float coerces to float, preserving an explicit 0 but turning a
+		# blank/whitespace/non-numeric value into None (fall through) instead of
+		# raising ValueError out of this read and crash-resetting the WHOLE config.
+		"large_duration_threshold_ms": _opt_float(doc.get("large_duration_threshold_ms")),
 		# v0.13.x: 0 is legitimate (= no cap on retained runs). Coerce,
 		# preserve 0.
 		"phase2_max_runs_per_session": (

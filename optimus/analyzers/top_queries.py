@@ -136,7 +136,11 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 					},
 					default=str,
 				),
-				"estimated_impact_ms": q["query_duration_ms"],
+				# Round to 0.01ms so the badge (fmt_ms of this value) and the title
+				# (dur(query_duration_ms), which rounds to 0.01ms internally) decide
+				# the ms-vs-seconds rollover from the SAME number and can't disagree
+				# at a boundary (e.g. 623.495 -> title 624ms beside a 623ms badge).
+				"estimated_impact_ms": round(q["query_duration_ms"], 2),
 				"affected_count": 1,
 				"action_ref": str(q["action_idx"]),
 			}
