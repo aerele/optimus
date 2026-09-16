@@ -12,6 +12,8 @@ pre-migration).
 
 from dataclasses import dataclass, field
 
+from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS
+
 # NOTE: frappe is imported lazily inside each function rather than at
 # module top. Importing at top forces every unit test that touches
 # ``from optimus import settings`` to run under bench, which
@@ -86,7 +88,7 @@ _DEFAULTS = {
 	# v0.6.x: durations above this threshold (in ms) are rendered as seconds
 	# in the report (e.g. 5234ms → 5.23s). Below it, ms is preserved. Set to
 	# a very large value to effectively disable the conversion.
-	"large_duration_threshold_ms": 1000.0,
+	"large_duration_threshold_ms": DEFAULT_DISPLAY_THRESHOLD_MS,
 	"phase2_max_runs_per_session": 10,
 	"phase2_default_auto_expand": True,
 	# v0.6.0: how long the analyze job waits (seconds, capped at 300) for the
@@ -334,7 +336,7 @@ class OptimusConfig:
 	min_action_duration_ms: float = 0.0
 	# v0.6.x: durations >= this threshold render as seconds in the report;
 	# below the threshold, render as ms. Falsy → use _DEFAULTS via _float.
-	large_duration_threshold_ms: float = 1000.0
+	large_duration_threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS
 	phase2_max_runs_per_session: int = 10
 	phase2_default_auto_expand: bool = True
 	background_job_wait_seconds: int = 300
@@ -385,6 +387,24 @@ def _settings_cache_key() -> str:
 
 
 _CACHE_KEY = _settings_cache_key()
+
+
+def _opt_float(value) -> float | None:
+	"""Coerce a stored field to float, or None when it is missing/blank/non-numeric.
+
+	A None result means "fall through to the default" for the zero-OK resolver, so
+	an explicit 0 is preserved but a blank ``""``, whitespace ``" "`` or a stray
+	non-numeric string can't raise ``ValueError`` out of ``_read_doctype_row``. That
+	exception would escape ``get_config()``'s blanket ``except`` and silently reset
+	the WHOLE config (tracked/ignored apps, AI settings, profile, retention) to
+	defaults on every read, and never recover because the failing read isn't cached.
+	"""
+	if value is None or value == "":
+		return None
+	try:
+		return float(value)
+	except (TypeError, ValueError):
+		return None
 
 
 def _read_doctype_row() -> dict | None:
@@ -452,12 +472,13 @@ def _read_doctype_row() -> dict | None:
 		# min_action_duration_ms intentionally allows 0 (= show all
 		# actions, the default). Coerce, don't fall through.
 		"min_action_duration_ms": float(doc.get("min_action_duration_ms") or 0),
-		# Falsy (0/None/missing) → None so _float falls through to
-		# _DEFAULTS["large_duration_threshold_ms"] = 1000.
-		"large_duration_threshold_ms": (
-			float(doc.get("large_duration_threshold_ms"))
-			if doc.get("large_duration_threshold_ms") else None
-		),
+		# An explicit 0 disables the seconds rollover, so it must be preserved,
+		# not treated as falsy. Only a genuinely missing/blank value falls through
+		# to _DEFAULTS["large_duration_threshold_ms"] = 1000 via the zero-OK resolver
+		# below. _opt_float coerces to float, preserving an explicit 0 but turning a
+		# blank/whitespace/non-numeric value into None (fall through) instead of
+		# raising ValueError out of this read and crash-resetting the WHOLE config.
+		"large_duration_threshold_ms": _opt_float(doc.get("large_duration_threshold_ms")),
 		# v0.13.x: 0 is legitimate (= no cap on retained runs). Coerce,
 		# preserve 0.
 		"phase2_max_runs_per_session": (
@@ -657,8 +678,11 @@ def _resolve() -> OptimusConfig:
 		# zero-OK variant under Custom, a stored 0 doesn't fall
 		# through to the default.
 		min_action_duration_ms=_sens_float_zero_ok("min_action_duration_ms"),
-		# v0.13.x: profile-aware (was ``_float``).
-		large_duration_threshold_ms=_sens_float("large_duration_threshold_ms"),
+		# v0.13.x: profile-aware. An explicit 0 (= keep every duration in ms,
+		# the feature's advertised "off" switch) is a legitimate value, so use
+		# the zero-OK variant a stored 0 is preserved instead of falling
+		# through to the 1000 default the truthy check in ``_float`` would hit.
+		large_duration_threshold_ms=_sens_float_zero_ok("large_duration_threshold_ms"),
 		# v0.13.x: profile-aware. 0 is legitimate (= no cap on retained
 		# runs); zero-OK variant preserves it.
 		phase2_max_runs_per_session=_sens_int_zero_ok("phase2_max_runs_per_session"),
@@ -781,6 +805,23 @@ def is_enabled() -> bool:
 		# support issue ("why isn't recording working"). Default to
 		# on, matching the DocType default.
 		return True
+
+
+def display_threshold_ms() -> float:
+	"""The resolved "render durations in seconds above (ms)" threshold, as a
+	float. This is the single accessor for callers that read the threshold from
+	config (boot, AI-fix context): ``_resolve`` already preserves an explicit 0
+	and falls back to the 1000 default, so nothing downstream re-applies that
+	logic. Fails open to 1000 (rollover on) if settings can't be read.
+
+	(The report renderer resolves the same value once into its render-config
+	snapshot; ``report_context._resolve_threshold_ms`` reads it back from that
+	snapshot dict, which is why that one lives there and not here.)
+	"""
+	try:
+		return float(get_config().large_duration_threshold_ms)
+	except Exception:
+		return DEFAULT_DISPLAY_THRESHOLD_MS
 
 
 def get_tracked_apps() -> tuple[str, ...]:

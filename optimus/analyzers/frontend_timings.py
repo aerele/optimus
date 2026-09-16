@@ -14,7 +14,7 @@ recording_id and dedupes multi-fire LCP per page. Emits three finding types:
 
 import json
 
-from optimus.analyzers.base import SEVERITY_ORDER, AnalyzerResult
+from optimus.analyzers.base import SEVERITY_ORDER, AnalyzerResult, dur
 
 LCP_MEDIUM_MS = 2500
 LCP_HIGH_MS = 4000
@@ -179,9 +179,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
         findings.append({
             "finding_type": "Slow Frontend Render",
             "severity": severity,
-            "title": f"LCP {int(lcp)}ms on {page}",
+            "title": f"LCP {dur(lcp)} on {page}",
             "customer_description": (
-                f"The page '{page}' took {int(lcp)}ms for its largest "
+                f"The page '{page}' took {dur(lcp)} for its largest "
                 "content element to paint. Users typically perceive pages "
                 "as slow beyond 2.5 seconds."
             ),
@@ -198,7 +198,10 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                     "Check response size and JavaScript execution."
                 ),
             }, default=str),
-            "estimated_impact_ms": lcp,
+            # Round to 0.01ms so the badge (fmt_ms of this value) and the title
+            # (dur(lcp), which rounds to 0.01ms internally) decide the ms-vs-seconds
+            # rollover from the SAME number and can't disagree at a boundary.
+            "estimated_impact_ms": round(lcp, 2),
             "affected_count": 1,
             "action_ref": "0",
         })
@@ -212,9 +215,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
             findings.append({
                 "finding_type": "Network Overhead",
                 "severity": severity,
-                "title": f"{int(delta)}ms network overhead on {m['action_label']}",
+                "title": f"{dur(delta)} network overhead on {m['action_label']}",
                 "customer_description": (
-                    f"The browser waited {int(delta)}ms longer than the "
+                    f"The browser waited {dur(delta)} longer than the "
                     "server spent processing this request. That extra time "
                     "is network, TLS, serialization, or response download."
                 ),
@@ -230,7 +233,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                         "suspect network path: CDN, TLS handshake, proxy."
                     ),
                 }, default=str),
-                "estimated_impact_ms": delta,
+                # Round to 0.01ms so the badge and the dur(delta) title roll over
+                # from the same number (see the LCP note above).
+                "estimated_impact_ms": round(delta, 2),
                 "affected_count": 1,
                 "action_ref": str(m["action_idx"]),
             })

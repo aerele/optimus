@@ -14,6 +14,7 @@ from optimus.analyzers.base import (
 	FRAMEWORK_PREFIXES,  # noqa: F401  (kept for any external importers)
 	SEVERITY_ORDER,
 	AnalyzerResult,
+	dur,
 	installed_apps_allowlist,
 	is_framework_callsite,
 	percentile,
@@ -274,7 +275,7 @@ def _build_user_finding(
 	# the 20ms default) would render as a misleading "0ms" say "<1ms" instead.
 	# Guard on ``>= 1`` not ``>= 0.5``: f"{0.5:.0f}" is "0" (round-half-to-even),
 	# so 0.5 must take the "<1ms" branch too.
-	cost = f"{loop_time:.0f}ms" if loop_time >= 1 else "<1ms"
+	cost = dur(loop_time) if loop_time >= 1 else "<1ms"
 	if run_count > 1:
 		# The loop spanned several requests; loop_count is the WORST request's
 		# count (the peak), not a uniform per-request figure "up to N" so it
@@ -361,9 +362,9 @@ def _build_user_finding(
 				"fix_hint": (
 					"This is a classic N+1 pattern. The Python code at "
 					f"{filename}:{lineno} is running the same query in a loop. "
-					"Refactor to fetch all needed data in a single query for "
+					"Refactor to fetch all needed data in a single query. For "
 					"Frappe specifically, that's usually frappe.get_all() with a "
-					"name-IN filter, or a JOIN against the source table instead "
+					"name-IN filter, or a JOIN against the source table, instead "
 					"of one row at a time."
 				),
 			},
@@ -417,9 +418,9 @@ def _build_framework_finding(
 		"customer_description": (
 			f"Frappe's own code at **{filename}:{lineno}** issued "
 			f"{total_count} queries in this session, totalling "
-			f"{total_time:.0f}ms. This is typically the framework "
+			f"{dur(total_time)}. This is typically the framework "
 			"resolving metadata, permissions, or building queries for "
-			"different inputs it's rarely something you can change "
+			"different inputs. It's rarely something you can change "
 			"in your application code. Listed here for transparency, "
 			"not as an action item. If the cumulative cost is high, "
 			"the fix usually lives in the Frappe codebase itself."

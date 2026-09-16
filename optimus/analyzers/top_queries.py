@@ -14,6 +14,7 @@ import json
 
 from optimus.analyzers.base import (
 	AnalyzerResult,
+	dur,
 	installed_apps_allowlist,
 	is_framework_callsite_str,
 	is_profiler_own_query,
@@ -115,9 +116,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			{
 				"finding_type": "Slow Query",
 				"severity": "High" if q["query_duration_ms"] > high_threshold else "Medium",
-				"title": f"Slow query: {q['query_duration_ms']:.0f}ms",
+				"title": f"Slow query: {dur(q['query_duration_ms'])}",
 				"customer_description": (
-					f"A single query took {q['query_duration_ms']:.0f}ms to run. "
+					f"A single query took {dur(q['query_duration_ms'])} to run. "
 					"This is one of the slowest queries in the session and is "
 					"a likely candidate for optimization."
 				),
@@ -127,7 +128,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 						"callsite": q["callsite"],
 						"recording_uuid": q["recording_uuid"],
 						"fix_hint": (
-							"Investigate this query it may need an index, a "
+							"Investigate this query. It may need an index, a "
 							"refactored WHERE clause, or a different access pattern. "
 							"Run EXPLAIN ANALYZE on a representative production query "
 							"to see the actual cost."
@@ -135,7 +136,11 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 					},
 					default=str,
 				),
-				"estimated_impact_ms": q["query_duration_ms"],
+				# Round to 0.01ms so the badge (fmt_ms of this value) and the title
+				# (dur(query_duration_ms), which rounds to 0.01ms internally) decide
+				# the ms-vs-seconds rollover from the SAME number and can't disagree
+				# at a boundary (e.g. 623.495 -> title 624ms beside a 623ms badge).
+				"estimated_impact_ms": round(q["query_duration_ms"], 2),
 				"affected_count": 1,
 				"action_ref": str(q["action_idx"]),
 			}

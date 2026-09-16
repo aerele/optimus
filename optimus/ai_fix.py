@@ -25,6 +25,8 @@ from typing import Any
 
 import requests
 
+from optimus.analyzers.base import humanize_duration_ms
+
 
 class AiFixError(Exception):
 	"""User-facing error from the AI-fix path. The API endpoint converts
@@ -509,6 +511,15 @@ def is_available(section: str | None = None) -> bool:
 	return True
 
 
+def _resolve_display_threshold_ms() -> float:
+	"""The configured "render durations in seconds above (ms)" threshold, so the
+	durations in AI-fix context read in the same unit as the report. Delegates to
+	the single resolver in settings (lazy import keeps this module's pure prompt /
+	HTTP layer importable without frappe)."""
+	from optimus.settings import display_threshold_ms
+	return display_threshold_ms()
+
+
 def suggest_fix(finding: dict) -> dict:
 	"""Ask the configured LLM for a fix for ``finding``.
 
@@ -542,7 +553,7 @@ def suggest_fix(finding: dict) -> dict:
 			"No API key is configured for this AI provider set it under "
 			"Optimus Settings ▸ AI Fix Suggestions."
 		)
-	system, messages = _build_messages(finding)
+	system, messages = _build_messages(finding, threshold_ms=_resolve_display_threshold_ms())
 
 	usage: dict = {}
 	if provider["protocol"] == "anthropic":
@@ -596,7 +607,9 @@ def humanize_steps(
 		)
 	if provider.get("needs_key") and not provider.get("api_key"):
 		raise AiFixError("No API key is configured for this AI provider.")
-	system, messages = _build_steps_messages(actions, session_title)
+	system, messages = _build_steps_messages(
+		actions, session_title, threshold_ms=_resolve_display_threshold_ms()
+	)
 	if provider["protocol"] == "anthropic":
 		text = _call_anthropic(
 			provider["base_url"], provider.get("api_key") or "",
@@ -971,12 +984,13 @@ def _truncate(text: Any, limit: int) -> str:
 
 
 def _build_steps_messages(
-	actions: list[dict], session_title: str | None
+	actions: list[dict], session_title: str | None, *, threshold_ms: float = 1000.0
 ) -> tuple[str, list[dict]]:
 	"""Build ``(system_prompt, [user_message])`` for the Steps-to-Reproduce
 	humanizer. Pure no Frappe, no I/O. ``actions`` items use the keys
 	``label`` / ``cmd`` / ``path`` / ``method`` / ``doctype`` /
-	``duration_ms`` (all optional)."""
+	``duration_ms`` (all optional). ``threshold_ms`` is the report's
+	seconds-rollover threshold so the model sees durations in the report's unit."""
 	lines: list[str] = []
 	title = (str(session_title).strip() if session_title else "")
 	if title:
@@ -1001,7 +1015,7 @@ def _build_steps_messages(
 		dur = a.get("duration_ms")
 		if dur:
 			try:
-				bits.append(f"{float(dur):.0f}ms")
+				bits.append(humanize_duration_ms(float(dur), threshold_ms=threshold_ms))
 			except (TypeError, ValueError):
 				pass
 		suffix = f"  ({'; '.join(bits)})" if bits else ""
@@ -1071,10 +1085,12 @@ def _build_index_messages(payload: dict) -> tuple[str, list[dict]]:
 	return _INDEX_SYSTEM_PROMPT, [{"role": "user", "content": content}]
 
 
-def _build_messages(finding: dict) -> tuple[str, list[dict]]:
+def _build_messages(finding: dict, *, threshold_ms: float = 1000.0) -> tuple[str, list[dict]]:
 	"""Build ``(system_prompt, [user_message])`` from a finding dict.
 
-	Pure no Frappe, no I/O. ``finding`` keys used: ``finding_type``,
+	Pure no Frappe, no I/O. ``threshold_ms`` is the report's seconds-rollover
+	threshold, so every duration handed to the model reads in the same unit as
+	the report the operator is looking at. ``finding`` keys used: ``finding_type``,
 	``severity``, ``title``, ``customer_description``, ``estimated_impact_ms``,
 	``affected_count``, ``technical_detail`` (``callsite``, ``function``,
 	``cumulative_ms``, ``action_wall_time_ms``, ``normalized_query``,
@@ -1093,13 +1109,20 @@ def _build_messages(finding: dict) -> tuple[str, list[dict]]:
 	if type_hint:
 		parts.append(f"What this finding type means / how it's usually fixed in Frappe: {type_hint}")
 	parts.append(f"Severity: {finding.get('severity') or 'Unknown'}")
+	# The title / description are read from stored finding rows (may predate dur()
+	# markers), so format them through format_durations (markers + prose fallback)
+	# with the report's threshold, matching the report's findings path, so the model
+	# reads "5.23s" just like the report shows. Lazy import keeps this frappe-free.
+	from optimus.analyzers.base import format_durations
 	if finding.get("title"):
-		parts.append(f"Title: {finding['title']}")
+		parts.append(f"Title: {format_durations(finding['title'], threshold_ms)}")
 	if finding.get("customer_description"):
-		parts.append(f"Description: {finding['customer_description']}")
+		parts.append(
+			f"Description: {format_durations(finding['customer_description'], threshold_ms)}"
+		)
 	impact = finding.get("estimated_impact_ms")
 	if impact:
-		parts.append(f"Estimated impact: ~{float(impact):.0f}ms")
+		parts.append(f"Estimated impact: ~{humanize_duration_ms(float(impact), threshold_ms=threshold_ms)}")
 	if finding.get("affected_count"):
 		parts.append(f"Affected occurrences: {finding['affected_count']}")
 
@@ -1122,12 +1145,12 @@ def _build_messages(finding: dict) -> tuple[str, list[dict]]:
 		share = ""
 		try:
 			if wall_ms:
-				share = f", {round(float(cum_ms) / float(wall_ms) * 100)}% of this action's {float(wall_ms):.0f}ms wall time"
+				share = f", {round(float(cum_ms) / float(wall_ms) * 100)}% of this action's {humanize_duration_ms(float(wall_ms), threshold_ms=threshold_ms)} wall time"
 		except (TypeError, ValueError, ZeroDivisionError):
 			share = ""
 		parts.append(
 			f"Hot function (the call-tree subtree that dominates this action): "
-			f"`{hot_fn}`: ~{float(cum_ms):.0f}ms{share}. Its source is below; "
+			f"`{hot_fn}`: ~{humanize_duration_ms(float(cum_ms), threshold_ms=threshold_ms)}{share}. Its source is below; "
 			"point at the specific lines/loop/call inside it that cost the time."
 		)
 
@@ -1164,7 +1187,7 @@ def _build_messages(finding: dict) -> tuple[str, list[dict]]:
 			f"Line-profile (Phase 2) over this function found its hottest line is "
 			f"line {hot['lineno']}"
 			+ (f" `{hl_content}`" if hl_content else "")
-			+ (f" ({float(hl_ms):.0f}ms" + (f" over {int(hl_hits)} call(s)" if hl_hits else "") + ")"
+			+ (f" ({humanize_duration_ms(float(hl_ms), threshold_ms=threshold_ms)}" + (f" over {int(hl_hits)} call(s)" if hl_hits else "") + ")"
 			   if hl_ms else "")
 			+ ". Start your fix there."
 		)

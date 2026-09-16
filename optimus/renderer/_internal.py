@@ -19,7 +19,12 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
 
-from optimus.analyzers.base import SEVERITY_ORDER
+from optimus.analyzers.base import (
+	DEFAULT_DISPLAY_THRESHOLD_MS,
+	SEVERITY_ORDER,
+	format_duration_markers,
+	format_durations,
+)
 
 # Sensitive-data redaction lives in ``optimus/redaction.py`` (pure
 # functions, no Frappe imports) so the recorder-patch path in
@@ -234,6 +239,29 @@ def _get_jinja_env() -> Environment:
 	)
 
 
+# Duration formatting lives in analyzers/base.py: analyzers tag durations with
+# dur(). Stored text that can predate markers or be free prose (finding
+# titles/descriptions read from the DB, the notes, the legacy stored summary) uses
+# format_durations() (exact tags first, then a prose fallback for marker-less
+# durations). The render-time summary is rebuilt fresh every render (always
+# tagged), so it uses format_duration_markers() (exact tags only). Both run once.
+
+
+def _finalize_prose(text: str, threshold_ms: float, *, scan: bool = True) -> str:
+	"""Format durations, THEN sweep em dashes - always in that order. The reverse
+	leaves a hyphen the prose scanner's URL guard skips, stranding a raw "<n>ms"
+	while its badge shows seconds. ``scan=True`` also runs the fuzzy prose scanner,
+	for stored / free-text that may hold un-tagged durations (finding titles read
+	from the DB, notes, the legacy stored summary); ``scan=False`` formats only exact
+	dur() markers, for freshly built fully-tagged text (the render-time summary), so a
+	threshold literal like "&gt;200ms" is left alone. One home for the
+	format-before-em-dash invariant so the four call sites can't drift out of order."""
+	if not text:
+		return text
+	fmt = format_durations if scan else format_duration_markers
+	return fmt(text, threshold_ms).replace("—", "-")
+
+
 def render(
 	session_doc: Any,
 	recordings: list[dict] | None = None,
@@ -375,11 +403,15 @@ def render(
 		if isinstance(s, str) and "—" in s:
 			return s.replace("—", "-")
 		return s
+	# NOTE: finding title / customer_description are em-dash-swept AFTER their
+	# durations are formatted (see the format_durations loop below), not here: a
+	# raw "5234ms—" must roll over first, because the sweep turns the em dash into
+	# a hyphen and the prose reformatter then skips a "ms" glued to a hyphen (its
+	# URL guard). Only the llm_fix HTML blocks (never duration-formatted) are swept
+	# here.
 	for _f in (all_findings or []):
 		if not isinstance(_f, dict):
 			continue
-		_f["customer_description"] = _strip_em(_f.get("customer_description"))
-		_f["title"] = _strip_em(_f.get("title"))
 		_lf = _f.get("llm_fix")
 		if isinstance(_lf, dict):
 			for _k in ("diagnosis_html", "patch_html", "rationale_html", "verify_html", "description_html", "code_html", "why_html"):
@@ -503,9 +535,14 @@ def render(
 		# only re-renders on Regenerate Reports / Retry Analyze the stamp
 		# means a user opening an old file can immediately tell whether the
 		# settings they expect are actually baked in.
-		_large_duration_threshold_ms = float(
-			getattr(_cfg, "large_duration_threshold_ms", 1000.0) or 0.0
-		)
+		# Already resolved on the config (explicit 0 preserved, missing → 1000),
+		# so read it straight. Guard a present-but-None value too: float(None)
+		# would raise inside this broad try/except and silently reset the ENTIRE
+		# render_config (AI toggles, hide-framework, tracked/ignored apps, profile)
+		# to defaults for this render, not just the threshold. Snapshotted below as
+		# the single threshold the whole render uses.
+		_t = getattr(_cfg, "large_duration_threshold_ms", 1000.0)
+		_large_duration_threshold_ms = DEFAULT_DISPLAY_THRESHOLD_MS if _t is None else float(_t)
 		render_config = {
 			"hide_framework_tables": _hide_framework_tables,
 			"tracked_apps": tuple(getattr(_cfg, "tracked_apps", ()) or ()),
@@ -522,7 +559,7 @@ def render(
 	except Exception:
 		_ai_findings_on = _ai_indexes_on = True
 		_hide_framework_tables = True
-		_large_duration_threshold_ms = 1000.0
+		_large_duration_threshold_ms = DEFAULT_DISPLAY_THRESHOLD_MS
 		render_config = {
 			"hide_framework_tables": True,
 			"tracked_apps": (),
@@ -530,7 +567,7 @@ def render(
 			"ai_suggest_findings": True,
 			"ai_suggest_indexes": True,
 			"min_action_duration_ms": 0.0,
-			"large_duration_threshold_ms": 1000.0,
+			"large_duration_threshold_ms": DEFAULT_DISPLAY_THRESHOLD_MS,
 			"config_profile": "Custom",
 		}
 	# v0.6.x: Jinja-callable that formats a duration with the configured
@@ -538,6 +575,23 @@ def render(
 	# write {{ fmt_ms(action.duration_ms) }} (no threshold arg needed).
 	def _fmt_ms(v, decimals: int = 0) -> str:
 		return _format_duration_ms(v, _large_duration_threshold_ms, decimals)
+	# Reformat the raw-ms durations the analyzers baked into finding titles and
+	# descriptions so they honour large_duration_threshold_ms and match the
+	# impact badge (also rendered from raw ms), even on reports regenerated
+	# without re-analyzing after the setting changed.
+	for _f in all_findings:
+		# Titles / descriptions are read back from STORED finding rows, which may
+		# have been analyzed before dur() markers existed (raw "<n>ms" text), so
+		# _finalize_prose runs the prose fallback (scan=True) too. It also enforces
+		# the format-before-em-dash order so a marker-less legacy duration still rolls
+		# over to match the impact badge (_build_findings computes that from the raw
+		# number).
+		if _f.get("title"):
+			_f["title"] = _finalize_prose(_f["title"], _large_duration_threshold_ms)
+		if _f.get("customer_description"):
+			_f["customer_description"] = _finalize_prose(
+				_f["customer_description"], _large_duration_threshold_ms
+			)
 	if not _ai_findings_on:
 		for _f in all_findings:
 			_f["llm_fix"] = None
@@ -656,9 +710,11 @@ def render(
 			# user input - safe by default.
 			import html as html_mod
 			notes_html = html_mod.escape(notes_html)
-		# v0.7.x J.13: strip em dashes the analyzer wrote into auto-notes
-		# / humanized-notes prose at analyse-time.
-		notes_html = notes_html.replace("—", "-")
+		# The Steps-to-Reproduce list bakes raw-ms durations at analyze time (e.g.
+		# "Submit Delivery Note: 12418.3 ms") and the AI humanizer writes free-text
+		# durations, so reformat with the prose fallback and strip em dashes. Order
+		# (format then sweep) is enforced by _finalize_prose.
+		notes_html = _finalize_prose(notes_html, _large_duration_threshold_ms)
 
 	# v0.5.2: Analyzer warnings are stored as a newline-joined string
 	# (see analyze.py). Split into a list of non-empty bullets for the
@@ -827,7 +883,10 @@ def render(
 	)
 	# Phase K.5: nested-<details> call-tree panel for the slowest
 	# action. Empty string when no action carries a call_tree_json.
-	call_tree_html = _render_call_tree_panel(list(actions) + list(actions_framework))
+	call_tree_html = _render_call_tree_panel(
+		list(actions) + list(actions_framework),
+		threshold_ms=_large_duration_threshold_ms,
+	)
 	# B.DI2 aggregate frame-truncation across actions so the Hot Frames
 	# banner can show "captured X frames, only top N shown" without making
 	# the reader hunt through analyzer_warnings.
@@ -879,13 +938,30 @@ def render(
 		int(getattr(session_doc, "total_queries", 0) or 0),
 		recordings,
 	)
-	# v0.7.x J.13: strip em dashes from the render-time summary HTML
-	# (analyze.py's prose composer may still produce them on cached doc rows).
+	# The render-time summary is freshly composed and fully dur()-tagged, so format
+	# the exact markers only (scan=False): a threshold literal like "&gt;200ms" is
+	# left untouched by the scanner.
 	if summary_html_rendered:
-		summary_html_rendered = summary_html_rendered.replace("—", "-")
+		summary_html_rendered = _finalize_prose(
+			summary_html_rendered, _large_duration_threshold_ms, scan=False
+		)
+
+	# The template falls back to the STORED session.summary_html only when the
+	# render-time summary is empty (legacy / edge sessions), so only finalize it when
+	# it will actually be shown, not on every normal render. Like the render-time
+	# summary it is _build_summary_html output (dur()-tagged), so format the exact
+	# markers only (scan=False): scanning it would rewrite the fixed "(&gt;200ms)"
+	# threshold caption to "(&gt;0.20s)" under a custom threshold <= 200 (the ";" in
+	# "&gt;" is not a URL-guard char), the very corruption the render-time path avoids.
+	stored_summary_html = getattr(session_doc, "summary_html", None) or ""
+	if not summary_html_rendered and stored_summary_html:
+		stored_summary_html = _finalize_prose(
+			stored_summary_html, _large_duration_threshold_ms, scan=False
+		)
 
 	context = {
 		"session": session_doc,
+		"stored_summary_html": stored_summary_html,
 		"actions": actions,
 		# v0.6.x: framework-app actions, rendered in a collapsed sub-block
 		# below the primary per-action table. Empty → no sub-block.
@@ -970,7 +1046,9 @@ def render(
 		# panel pre-rendered server-side so the template only needs a
 		# single ``{{ line_drilldown_html | safe }}`` include instead of
 		# growing by 100+ lines of new markup.
-		"line_drilldown_html": _render_line_drilldown_panel(session_doc),
+		"line_drilldown_html": _render_line_drilldown_panel(
+			session_doc, threshold_ms=_large_duration_threshold_ms
+		),
 		# v0.7.x J.16 (renamed from phase2_for_callsite): cross-link a
 		# finding's callsite to its hottest line-drilldown line when the
 		# same function was instrumented. Helper rather than raw dict
@@ -1386,7 +1464,7 @@ def _action_verb_for(finding_type: str | None) -> str | None:
 
 def _build_action_plan(
 	findings: list[dict],
-	large_duration_threshold_ms: float = 1000.0,
+	large_duration_threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS,
 	max_steps: int = 3,
 ) -> list[dict]:
 	"""Top-N action plan steps from the highest-impact findings.
@@ -1452,7 +1530,7 @@ def _build_action_plan(
 def _build_waterfall(
 	actions: list[dict],
 	findings: list[dict],
-	large_duration_threshold_ms: float = 1000.0,
+	large_duration_threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS,
 	max_rows: int = 8,
 ) -> list[dict]:
 	"""Top-N actions by duration as a horizontal-bar waterfall. Empty input
@@ -1611,7 +1689,7 @@ def _aggregate_frame_truncation(actions: list[dict]) -> dict:
 def _compose_tldr(
 	findings: list[dict],
 	session_doc: Any,
-	large_duration_threshold_ms: float = 1000.0,
+	large_duration_threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS,
 	actions: list[dict] | None = None,
 ) -> dict:
 	"""Compose the TL;DR hero block from the single highest-impact finding
@@ -1841,7 +1919,7 @@ def _build_executive_summary(
 	findings: list[dict],
 	session_doc: Any,
 	v5: dict,
-	large_duration_threshold_ms: float = 1000.0,
+	large_duration_threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS,
 ) -> dict:
 	"""Return a dict shaped for the template's exec-summary card:
 	``{"headline": Markup, "bullets": list[str], "show": bool}``. ``show`` is

@@ -17,9 +17,50 @@ from typing import Any
 
 from markupsafe import Markup
 
+from optimus.analyzers.base import (
+	DEFAULT_DISPLAY_THRESHOLD_MS,
+	_rolls_over_to_seconds,
+	humanize_duration_ms,
+)
+
+# A whole captured flow slower than this reads as "danger" on the Total-time
+# KPI. Deliberately separate from large_duration_threshold_ms (which is only a
+# display preference for when to render seconds), so changing the display unit
+# never moves the alarm. Tunable; not currently a settings field.
+_TOTAL_TIME_DANGER_MS = 3000.0
+
+# A single action / background job slower than this reads as "hot" (red bar +
+# value) in the per-row tables. A real performance threshold, deliberately NOT
+# large_duration_threshold_ms, so row danger doesn't follow the display preference
+# / Sensitivity Profile. One source for bar colour, value colour, duration_is_hot
+# and the XHR/hot-frame flags.
+_HOT_ACTION_MS = 1000.0
+
+# The amber ("warn") boundary for the per-row duration bars: a row at or above
+# this but below _HOT_ACTION_MS is tinted amber, below it green. One source for
+# _bar_kind_for and the two report.html bar-fill blocks (exposed as bar_warn_ms).
+_BAR_WARN_MS = 300.0
+
 # ---------------------------------------------------------------------------
 # Helpers small pure functions called by sub-builders below
 # ---------------------------------------------------------------------------
+
+
+def _resolve_threshold_ms(render_config) -> float:
+	"""The large_duration_threshold_ms in effect, defaulting to 1000 only when
+	the value is unset. An explicit 0 (disable the seconds rollover) is
+	preserved, matching the shared formatters and renderer._internal, so the
+	whole report agrees on when to roll durations over to seconds. Coerced to
+	float so a stringy config value can't reach the numeric comparison in
+	_rolls_over_to_seconds as a str; a non-numeric value falls back to the default
+	rather than raising at the top of build_report_context."""
+	t = (render_config or {}).get("large_duration_threshold_ms")
+	if t is None:
+		return DEFAULT_DISPLAY_THRESHOLD_MS
+	try:
+		return float(t)
+	except (TypeError, ValueError):
+		return DEFAULT_DISPLAY_THRESHOLD_MS
 
 
 def _web_vital_class(value, good_threshold, poor_threshold) -> str:
@@ -40,15 +81,15 @@ def _web_vital_class(value, good_threshold, poor_threshold) -> str:
 def _bar_kind_for(duration_ms) -> str | None:
 	"""Per-action / per-job bar colour key.
 
-	``duration ≥ 1000ms`` → ``None`` (red, contract's default).
-	``300 ≤ duration < 1000`` → ``"warn"`` (amber).
-	``duration < 300`` → ``"ok"`` (green).
+	``duration ≥ _HOT_ACTION_MS`` → ``None`` (red, contract's default).
+	``_BAR_WARN_MS ≤ duration < _HOT_ACTION_MS`` → ``"warn"`` (amber).
+	``duration < _BAR_WARN_MS`` → ``"ok"`` (green).
 	"""
 	if duration_ms is None:
 		return "ok"
-	if duration_ms >= 1000:
+	if _rolls_over_to_seconds(duration_ms, _HOT_ACTION_MS):
 		return None
-	if duration_ms >= 300:
+	if duration_ms >= _BAR_WARN_MS:
 		return "warn"
 	return "ok"
 
@@ -68,14 +109,23 @@ def _is_user_code(function_or_path, ignored_apps: tuple[str, ...] = ()) -> bool:
 	return True
 
 
-def _ms_display(ms) -> str:
-	"""Format milliseconds: below 1000ms as integer ms; at-or-above as seconds
-	with 2 decimals."""
+def _ms_display(ms, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS, decimals: int = 0) -> str:
+	"""Format milliseconds in the report's compact style ("420ms" / "5.00s"):
+	ms (``decimals`` places) below ``threshold_ms``, seconds (2 decimals) at or
+	above. ``threshold_ms`` is the "render durations in seconds above (ms)"
+	setting; ``0`` disables conversion. Returns "" for a ``None`` input.
+
+	Argument order matches ``humanize_duration_ms`` and
+	``time_format._format_duration_ms`` (ms, threshold_ms, decimals) so the three
+	formatters can't be confused for one another; call sites pass both as
+	keywords regardless.
+
+	Delegates the unit decision to ``humanize_duration_ms`` so every duration in
+	the report rolls over at the same point, rounds the same way and reads in the
+	same style (no space before the unit, no highlight span)."""
 	if ms is None:
 		return ""
-	if ms < 1000:
-		return f"{ms:.0f} ms"
-	return f"{ms / 1000:.2f} s"
+	return humanize_duration_ms(ms, threshold_ms, decimals)
 
 
 # ---------------------------------------------------------------------------
@@ -113,17 +163,18 @@ def _build_tldr(tldr) -> dict:
 def _build_kpis(session_doc, ctx) -> list[dict]:
 	"""Contract ``kpis`` = exactly 4 items: total time, queries, ops, findings.
 
-	Severity breakdown comes from ``ctx.severity_counts`` and the danger
-	thresholds from ``render_config``.
+	Severity breakdown comes from ``ctx.severity_counts``. The Total-time danger
+	flag uses ``_TOTAL_TIME_DANGER_MS`` (a real performance threshold, not the
+	display-rollover setting); Issues-found is danger when any High finding
+	exists.
 	"""
-	fmt_ms = ctx.get("fmt_ms") or (lambda v, **kw: f"{v:.0f}ms")
+	fmt_ms = ctx.get("fmt_ms") or (
+		lambda v, **kw: _ms_display(v, _resolve_threshold_ms(ctx.get("render_config")), **kw)
+	)
 	total_ms = getattr(session_doc, "total_duration_ms", 0) or 0
 	total_query_ms = getattr(session_doc, "total_query_time_ms", 0) or 0
 	total_queries = getattr(session_doc, "total_queries", 0) or 0
 	total_requests = getattr(session_doc, "total_requests", 0) or 0
-
-	render_config = ctx.get("render_config") or {}
-	threshold_ms = render_config.get("large_duration_threshold_ms") or 1000
 
 	all_findings = ctx.get("all_findings") or ctx.get("findings") or []
 	total_findings = len(all_findings)
@@ -170,7 +221,7 @@ def _build_kpis(session_doc, ctx) -> list[dict]:
 				f"Call-tree timings sampled at ~{_sampler_ms:g}ms intervals; "
 				"sub-interval functions can be under-counted."
 			),
-			"is_danger": total_ms >= threshold_ms,
+			"is_danger": _rolls_over_to_seconds(total_ms, _TOTAL_TIME_DANGER_MS),
 		},
 		{
 			"label": "Database queries",
@@ -245,6 +296,7 @@ def _build_findings(findings, ctx) -> list[dict]:
 	smoking_footnote_html, chain, ai_fix}.
 	"""
 	severity_map = {"high": "high", "medium": "med", "low": "low"}
+	threshold_ms = _resolve_threshold_ms(ctx.get("render_config"))
 	result = []
 	for f in findings or []:
 		detail = f.get("technical_detail") or {}
@@ -295,7 +347,7 @@ def _build_findings(findings, ctx) -> list[dict]:
 			"severity": severity,
 			"title_html": f.get("title", "") or "",
 			"file_line": file_line,
-			"impact_display": _ms_display(impact_ms) if impact_ms else "",
+			"impact_display": _ms_display(impact_ms, threshold_ms=threshold_ms) if impact_ms else "",
 			"impact_sub": impact_sub,
 			"smoking_label": "The hot line",
 			"smoking_code_html": _build_smoking_code_html(
@@ -309,7 +361,7 @@ def _build_findings(findings, ctx) -> list[dict]:
 	return result
 
 
-def _build_line_drilldown_runs(session_doc) -> list[dict]:
+def _build_line_drilldown_runs(session_doc, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS) -> list[dict]:
 	"""Contract ``line_drilldown_runs`` = list of {number, status,
 	total_ms_display, timestamp, picks, functions}.
 	"""
@@ -354,9 +406,12 @@ def _build_line_drilldown_runs(session_doc) -> list[dict]:
 				lines.append({
 					"lineno": line.get("lineno", 0),
 					"hits": line.get("hits", 0),
-					"total_display": f"{line.get('total_ms', 0):.2f} ms",
-					"per_hit_display": (
-						f"{per_hit_us / 1000:.4f} ms" if per_hit_us else "0.00 ms"
+					"total_display": _ms_display(line.get("total_ms", 0), decimals=2, threshold_ms=threshold_ms),
+					# per_hit_us is always a number (0 when missing), so the empty
+					# case formats through _ms_display too ("0.0000ms"), matching the
+					# populated rows' spacing/precision instead of a "0.00 ms" literal.
+					"per_hit_display": _ms_display(
+						per_hit_us / 1000, decimals=4, threshold_ms=threshold_ms
 					),
 					"source": line.get("content", ""),
 					"is_hot": i == hot_idx,
@@ -371,7 +426,7 @@ def _build_line_drilldown_runs(session_doc) -> list[dict]:
 		result.append({
 			"number": number,
 			"status": status,
-			"total_ms_display": f"{total_ms:.2f} ms",
+			"total_ms_display": _ms_display(total_ms, decimals=2, threshold_ms=threshold_ms),
 			"timestamp": str(getattr(run, "started_at", "") or ""),
 			"picks": [p.get("dotted_path", "") for p in picks_list],
 			"functions": functions,
@@ -384,7 +439,7 @@ def _build_action_plan(action_plan, fmt_ms=None) -> list[dict]:
 	savings_display, savings_label}, plus a non-contract ``callsite``
 	(``file:line``) rendered as an anchor under each step.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or _ms_display
 	result = []
 	for step in action_plan or []:
 		gain_ms = step.get("gain_ms", 0) or 0
@@ -410,7 +465,7 @@ def _build_action_plan(action_plan, fmt_ms=None) -> list[dict]:
 
 def _build_waterfall(waterfall_rows, fmt_ms=None) -> list[dict]:
 	"""Contract ``waterfall`` = {name, width_pct, duration_display, kind, is_hot_text}."""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or _ms_display
 	result = []
 	for row in waterfall_rows or []:
 		is_hot = bool(row.get("hot", False))
@@ -434,7 +489,7 @@ def _build_actions(actions, findings, fmt_ms=None) -> list[dict]:
 	still reads ``action_label``, ``http_method``, ``path`` etc.); contract
 	fields are added on top and never collide with the legacy keys.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or _ms_display
 	findings_by_ref: dict[str, list] = {}
 	for f in findings or []:
 		ref = str(f.get("action_ref") or "")
@@ -473,7 +528,7 @@ def _build_actions(actions, findings, fmt_ms=None) -> list[dict]:
 			"kind": kind,
 			"duration_display": fmt(duration_ms),
 			"duration_pct": (duration_ms / max_ms) * 100 if max_ms else 0,
-			"duration_is_hot": duration_ms >= 1000,
+			"duration_is_hot": _rolls_over_to_seconds(duration_ms, _HOT_ACTION_MS),
 			"bar_kind": _bar_kind_for(duration_ms),
 			"queries": action.get("queries_count", 0) or 0,
 			"db_time_display": fmt(action.get("query_time_ms", 0) or 0),
@@ -492,7 +547,7 @@ def _build_background_jobs(jobs, fmt_ms=None) -> list[dict]:
 	``related_findings``, ``top_queries``, etc.) so the ``bg_job_row`` macro
 	reads the same fields.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or _ms_display
 	jobs = jobs or []
 	max_ms = max((j.get("duration_ms", 0) for j in jobs), default=1) or 1
 	result = []
@@ -509,7 +564,7 @@ def _build_background_jobs(jobs, fmt_ms=None) -> list[dict]:
 			"meta": meta,
 			"duration_display": fmt(duration_ms),
 			"duration_pct": (duration_ms / max_ms) * 100 if max_ms else 0,
-			"duration_is_hot": duration_ms >= 1000,
+			"duration_is_hot": _rolls_over_to_seconds(duration_ms, _HOT_ACTION_MS),
 			"bar_kind": _bar_kind_for(duration_ms),
 			"queries": job.get("queries_count", 0) or 0,
 			"db_time_display": fmt(job.get("query_time_ms", 0) or 0),
@@ -535,7 +590,7 @@ def _build_doc_events(doc_event_breakdown, fmt_ms=None) -> list[dict]:
 	with ``is_save_target`` / ``touched_during`` per doctype and
 	``vscode_link`` / ``count`` per hook. ``summary`` stays contract-conformant.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or _ms_display
 	result = []
 	for entry in (doc_event_breakdown or {}).get("doctypes", []) or []:
 		methods_out = []
@@ -661,9 +716,11 @@ def _build_resource(infra_summary, infra_timeline) -> dict | None:
 
 
 def _build_frontend(ctx) -> dict | None:
-	"""Contract ``frontend`` = {kpis, xhrs, web_vitals}.
+	"""Contract ``frontend`` = {xhrs, web_vitals, summary, xhr_matched, orphans}.
 
-	Bundles the four flat ``frontend_*`` keys in our existing context.
+	Bundles the flat ``frontend_*`` keys in our existing context. (A separate
+	``kpis`` tile set was dropped: the template never rendered it and the XHR /
+	web-vitals cells already roll over to seconds via ``_ms_display``.)
 	"""
 	vitals_by_page = ctx.get("frontend_vitals_by_page") or {}
 	xhrs = ctx.get("frontend_xhr_matched") or []
@@ -671,6 +728,10 @@ def _build_frontend(ctx) -> dict | None:
 
 	if not vitals_by_page and not xhrs and not summary:
 		return None
+
+	# "Render durations in seconds above (ms)" setting: the second-rollover
+	# threshold, shared with the report's tables so the frontend cells agree.
+	threshold_ms = _resolve_threshold_ms(ctx.get("render_config"))
 
 	# web_vitals per-page row with computed *_class fields
 	web_vitals = []
@@ -682,90 +743,45 @@ def _build_frontend(ctx) -> dict | None:
 		dcl = v.get("dom_content_loaded_ms")
 		web_vitals.append({
 			"url": page,
-			"fcp_display": f"{fcp:.0f} ms" if fcp else "",
+			"fcp_display": _ms_display(fcp, threshold_ms=threshold_ms) if fcp else "",
 			"fcp_class": _web_vital_class(fcp, 1800, 3000),
-			"lcp_display": f"{lcp:.0f} ms" if lcp else "",
+			"lcp_display": _ms_display(lcp, threshold_ms=threshold_ms) if lcp else "",
 			"lcp_class": _web_vital_class(lcp, 2500, 4000),
 			"cls_display": f"{cls:.3f}" if cls is not None else "",
 			"cls_class": _web_vital_class(cls, 0.1, 0.25) if cls is not None else "vital-none",
-			"ttfb_display": f"{ttfb:.0f} ms" if ttfb else "",
+			"ttfb_display": _ms_display(ttfb, threshold_ms=threshold_ms) if ttfb else "",
 			"ttfb_class": _web_vital_class(ttfb, 800, 1800),
-			"dcl_display": f"{dcl:.0f} ms" if dcl else "",
+			"dcl_display": _ms_display(dcl, threshold_ms=threshold_ms) if dcl else "",
 			"dcl_class": _web_vital_class(dcl, 1500, 3000),
 		})
 
-	# xhrs display-formatted
+	# xhrs: the template renders the raw ``xhr_matched`` list (formatting each cell
+	# with fmt_ms), so this list exists only for its per-row hot flags. The old
+	# backend/browser/network *_display fields were never read by any template and
+	# are dropped rather than formatted for nothing.
 	xhrs_out = []
 	for x in xhrs:
 		backend_ms = x.get("backend_ms", 0) or 0
 		xhr_ms = x.get("xhr_ms", 0) or 0
-		network_ms = x.get("network_delta_ms", 0) or 0
 		size_bytes = x.get("response_size_bytes", 0) or 0
 		xhrs_out.append({
 			"name": x.get("action_label", "") or "",
 			"meta": x.get("url", "") or "",
-			"backend_display": _ms_display(backend_ms),
-			"browser_display": _ms_display(xhr_ms),
-			"network_display": f"{network_ms:.0f} ms",
 			"status": x.get("status", 0) or 0,
 			"size_display": (
 				f"{size_bytes / 1024:.1f} KB" if size_bytes >= 1024 else f"{size_bytes} B"
 			),
-			"backend_is_hot": backend_ms >= 1000,
-			"browser_is_hot": xhr_ms >= 1000,
+			"backend_is_hot": _rolls_over_to_seconds(backend_ms, _HOT_ACTION_MS),
+			"browser_is_hot": _rolls_over_to_seconds(xhr_ms, _HOT_ACTION_MS),
 		})
-
-	# kpis 4-item summary
-	kpis = []
-	if summary:
-		total_xhrs = summary.get("total_xhrs", 0) or 0
-		total_xhr_ms = summary.get("total_xhr_ms", 0) or 0
-		total_backend_ms = summary.get("total_backend_ms", 0) or 0
-		net_overhead = summary.get("network_overhead_ms", 0) or 0
-		slowest = summary.get("slowest_xhr") or {}
-		slowest_sub = (
-			f"slowest {slowest.get('duration_ms', 0) or 0:.0f} ms" if slowest else ""
-		)
-		kpis = [
-			{
-				"label": "XHRs",
-				"value": str(total_xhrs),
-				"unit": "",
-				"sub_html": "",
-				"value_kind": "normal",
-				"sub_is_warn": False,
-			},
-			{
-				"label": "XHR total",
-				"value": f"{total_xhr_ms:.0f}",
-				"unit": "ms",
-				"sub_html": "",
-				"value_kind": "normal",
-				"sub_is_warn": False,
-			},
-			{
-				"label": "Backend total",
-				"value": f"{total_backend_ms:.0f}",
-				"unit": "ms",
-				"sub_html": "",
-				"value_kind": "normal",
-				"sub_is_warn": False,
-			},
-			{
-				"label": "Network overhead",
-				"value": f"{net_overhead:.0f}",
-				"unit": "ms",
-				"sub_html": slowest_sub,
-				"value_kind": "warn" if net_overhead > 500 else "normal",
-				"sub_is_warn": False,
-			},
-		]
 
 	# J.2.4 non-contract additions: pass-through the raw summary +
 	# xhr_matched + orphans so the existing rc-card markup, XHR-table
 	# columns and orphans details-block migrate as a straight key rename.
+	# (A separate frontend "kpis" tile set was built here once but the template
+	# never rendered it; the XHR/web-vitals cells below already roll over to
+	# seconds via _ms_display, so it was dead and is gone.)
 	return {
-		"kpis": kpis,
 		"xhrs": xhrs_out,
 		"web_vitals": web_vitals,
 		"summary": summary or {},
@@ -781,7 +797,7 @@ def _build_hot_frames(hot_frames_rows, ignored_apps, fmt_ms=None) -> list[dict]:
 	Spreads the original row dict so ``hot_frame_row`` still reads
 	``display_name`` / ``total_ms`` / ``is_hot``.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or _ms_display
 	ignored = tuple(ignored_apps or ())
 	result = []
 	for row in hot_frames_rows or []:
@@ -792,7 +808,7 @@ def _build_hot_frames(hot_frames_rows, ignored_apps, fmt_ms=None) -> list[dict]:
 		entry.update({
 			"name": name,
 			"total_time_display": fmt(total_ms),
-			"is_hot_time": bool(row.get("is_hot", False)) or total_ms >= 1000,
+			"is_hot_time": bool(row.get("is_hot", False)) or _rolls_over_to_seconds(total_ms, _HOT_ACTION_MS),
 			"occurrences": row.get("occurrences", 0) or 0,
 			"distinct_actions": row.get("distinct_actions", 0) or 0,
 			"is_user_code": _is_user_code(path_part, ignored),
@@ -808,7 +824,7 @@ def _build_slow_queries(top_queries, fmt_ms=None) -> list[dict]:
 	Spreads the original query dict so ``top_query_row`` keeps reading
 	``duration_ms`` / ``callsite`` / ``normalized_query``.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or _ms_display
 	result = []
 	for q in top_queries or []:
 		# v0.7.x M5 rename: accept the new ``query_duration_ms`` and the
@@ -827,14 +843,14 @@ def _build_slow_queries(top_queries, fmt_ms=None) -> list[dict]:
 			"sql_excerpt": q.get("normalized_query") or q.get("sql", "") or "",
 			"total_time_display": fmt(total_ms),
 			"call_count": count,
-			"avg_display": f"{avg:.2f} ms",
+			"avg_display": fmt(avg, decimals=2),
 			"callsite": q.get("callsite") or "",
 		})
 		result.append(entry)
 	return result
 
 
-def _build_db(table_breakdown, fmt_ms=None) -> dict | None:
+def _build_db(table_breakdown, fmt_ms=None, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS) -> dict | None:
 	"""Contract ``db`` = {tables, index_recommendations}.
 
 	``tables`` per-entry {name, time_display, queries, reads, writes,
@@ -843,7 +859,7 @@ def _build_db(table_breakdown, fmt_ms=None) -> dict | None:
 	dict is spread through so the index-recommendation block keeps reading
 	``read_time_ms``, ``recommended_index`` etc.
 	"""
-	fmt = fmt_ms or (lambda v, **kw: _ms_display(v))
+	fmt = fmt_ms or _ms_display
 	if not table_breakdown:
 		return None
 
@@ -880,7 +896,7 @@ def _build_db(table_breakdown, fmt_ms=None) -> dict | None:
 			stats = (
 				f"{t.get('read_count', 0) or 0} reads · "
 				f"{t.get('write_count', 0) or 0} writes · "
-				f"{_t_ms:.0f} ms"
+				f"{_ms_display(_t_ms, threshold_ms=threshold_ms)}"
 			)
 			index_recs.append({
 				"table_name": t.get("table", "") or "",
@@ -939,6 +955,13 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		_sampler_ms = float(get_config().pyinstrument_sampler_interval_ms or 1.0)
 	except Exception:
 		_sampler_ms = 1.0
+	# "Render durations in seconds above (ms)" setting, shared with the tables.
+	_threshold_ms = _resolve_threshold_ms(ctx.get("render_config"))
+	# One duration formatter shared by every sub-builder: the render context's
+	# threshold-aware fmt_ms when present, else a default that still honours the
+	# resolved threshold (not a hardcoded 1000), so a caller omitting fmt_ms on a
+	# non-default profile can't split the report into ms-here / seconds-there.
+	_fmt_ms = ctx.get("fmt_ms") or (lambda v, **kw: _ms_display(v, _threshold_ms, **kw))
 	# AI token-usage transparency: total tokens every AI feature consumed this
 	# session fix suggestions (per finding), index suggestions (per table),
 	# and the Steps-to-Reproduce humanization (one per session). Derived at
@@ -978,7 +1001,7 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		# uses the new shape and is available for a future macro rewrite.
 		"findings_by_app": ctx.get("findings_by_app") or [],
 		"observational_findings_by_app": ctx.get("observational_findings_by_app") or [],
-		"line_drilldown_runs": _build_line_drilldown_runs(session_doc),
+		"line_drilldown_runs": _build_line_drilldown_runs(session_doc, threshold_ms=_threshold_ms),
 		# J.2.6 pragmatic addition (renamed in J.16): the server-side
 		# _render_line_drilldown_panel produces ~100 lines of editorial
 		# markup including the cross-run diff that the structured
@@ -987,39 +1010,39 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		# it by iterating ``line_drilldown_runs`` and a structured diff
 		# representation.
 		"line_drilldown_html": ctx.get("line_drilldown_html") or "",
-		"action_plan": _build_action_plan(ctx.get("action_plan", []), ctx.get("fmt_ms")),
-		"waterfall": _build_waterfall(ctx.get("waterfall_rows", []), ctx.get("fmt_ms")),
+		"action_plan": _build_action_plan(ctx.get("action_plan", []), _fmt_ms),
+		"waterfall": _build_waterfall(ctx.get("waterfall_rows", []), _fmt_ms),
 		"actions": _build_actions(
-			ctx.get("actions", []), ctx.get("findings", []), ctx.get("fmt_ms")
+			ctx.get("actions", []), ctx.get("findings", []), _fmt_ms
 		),
 		# J.2.3 non-contract addition pragmatic extension so the framework
 		# sub-block keeps rendering. May be folded into ``actions`` with an
 		# ``is_framework`` flag in J.3.
 		"actions_framework": _build_actions(
-			ctx.get("actions_framework", []), ctx.get("findings", []), ctx.get("fmt_ms")
+			ctx.get("actions_framework", []), ctx.get("findings", []), _fmt_ms
 		),
 		"background_jobs": _build_background_jobs(
-			(ctx.get("background_jobs") or {}).get("jobs", []) or [], ctx.get("fmt_ms")
+			(ctx.get("background_jobs") or {}).get("jobs", []) or [], _fmt_ms
 		),
 		# J.2.3 non-contract addition see actions_framework note above.
 		"background_jobs_framework": _build_background_jobs(
-			(ctx.get("background_jobs") or {}).get("jobs_framework", []) or [], ctx.get("fmt_ms")
+			(ctx.get("background_jobs") or {}).get("jobs_framework", []) or [], _fmt_ms
 		),
-		"doc_events": _build_doc_events(ctx.get("doc_event_breakdown") or {}, ctx.get("fmt_ms")),
+		"doc_events": _build_doc_events(ctx.get("doc_event_breakdown") or {}, _fmt_ms),
 		"resource": _build_resource(
 			ctx.get("infra_summary") or {}, ctx.get("infra_timeline") or []
 		),
 		"frontend": _build_frontend(ctx),
 		"hot_frames": _build_hot_frames(
-			ctx.get("hot_frames_rows", []), ctx.get("ignored_apps") or (), ctx.get("fmt_ms")
+			ctx.get("hot_frames_rows", []), ctx.get("ignored_apps") or (), _fmt_ms
 		),
 		# J.2.5 non-contract addition for framework split.
 		"hot_frames_framework": _build_hot_frames(
-			ctx.get("hot_frames_rows_framework", []), ctx.get("ignored_apps") or (), ctx.get("fmt_ms")
+			ctx.get("hot_frames_rows_framework", []), ctx.get("ignored_apps") or (), _fmt_ms
 		),
-		"slow_queries": _build_slow_queries(ctx.get("top_queries", []), ctx.get("fmt_ms")),
+		"slow_queries": _build_slow_queries(ctx.get("top_queries", []), _fmt_ms),
 		# J.2.5 non-contract addition for framework split.
-		"slow_queries_framework": _build_slow_queries(ctx.get("top_queries_framework", []), ctx.get("fmt_ms")),
+		"slow_queries_framework": _build_slow_queries(ctx.get("top_queries_framework", []), _fmt_ms),
 		# B.DI4 how many user-app slow queries the analyzer truncated
 		# out of the findings list (5-cap). 0 when nothing was suppressed.
 		"top_queries_suppressed_count": int(ctx.get("top_queries_suppressed_count") or 0),
@@ -1029,15 +1052,19 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		"frame_truncation": ctx.get("frame_truncation") or {
 			"captured": 0, "kept": 0, "actions_affected": 0, "keep_limit": 0,
 		},
-		"db": _build_db(ctx.get("table_breakdown", []), ctx.get("fmt_ms")),
+		"db": _build_db(ctx.get("table_breakdown", []), _fmt_ms, threshold_ms=_threshold_ms),
 		"how_to_read_items": None,
 		"footer": _build_footer(ctx.get("render_config")),
 		# J.3.1 non-contract additions the remaining two passthroughs
 		# the template needs before the legacy top-level keys can be
 		# dropped from renderer.py's context dict.
-		"large_duration_threshold_ms": (
-			(ctx.get("render_config") or {}).get("large_duration_threshold_ms") or 1000
-		),
+		"large_duration_threshold_ms": _threshold_ms,
+		# Fixed per-row "hot" threshold (red bar/value), independent of the display
+		# preference above so row danger doesn't follow the Sensitivity Profile.
+		"hot_action_ms": _HOT_ACTION_MS,
+		# Amber boundary for the per-row bars (below hot_action_ms), single-sourced
+		# with _bar_kind_for so the template stops hardcoding 300.
+		"bar_warn_ms": _BAR_WARN_MS,
 		"background_jobs_summary": _build_background_jobs_summary(ctx.get("background_jobs") or {}),
 	}
 

@@ -310,8 +310,9 @@ class TestEndToEndRender:
 		#   AttributeError: 'str' object has no attribute 'get'
 		html = renderer.render(doc, recordings=[])
 
-		# Both findings rendered titles present.
-		assert "Slow query: 1374ms" in html
+		# Both findings rendered titles present. The analyzer baked "1374ms";
+		# render reformats it to seconds (honouring the 1000ms default threshold).
+		assert "Slow query: 1.37s" in html
 		assert "Same query ran 15× at myapp/foo.py:10" in html
 		# Both attributed to myapp since they're the only app, the
 		# bucket-wrapper short-circuits (single-app flat rendering),

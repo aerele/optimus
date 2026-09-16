@@ -13,8 +13,24 @@ def boot_session(bootinfo):
 	error reading settings, so a misconfigured read never hides the widget
 	entirely; the admin can still disable it via the DocType.
 	"""
+	# Resolve the (Redis-cached) config once, but keep the two values in separate
+	# try/excepts: a shared one would let a threshold error flip a deliberately
+	# DISABLED Optimus back on. The threshold (for the Desk hot-path picker) is
+	# cfg.large_duration_threshold_ms, already resolved by get_config the same way
+	# display_threshold_ms() returns it. Both fail open (widget visible, default 1000).
+	cfg = None
 	try:
-		from optimus.settings import is_enabled
-		bootinfo.optimus_enabled = bool(is_enabled())
+		from optimus.settings import get_config
+		cfg = get_config()
+		bootinfo.optimus_enabled = bool(cfg.enabled)
 	except Exception:
 		bootinfo.optimus_enabled = True
+	try:
+		from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS
+		bootinfo.optimus_large_duration_threshold_ms = (
+			float(cfg.large_duration_threshold_ms) if cfg is not None
+			else DEFAULT_DISPLAY_THRESHOLD_MS
+		)
+	except Exception:
+		from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS
+		bootinfo.optimus_large_duration_threshold_ms = DEFAULT_DISPLAY_THRESHOLD_MS

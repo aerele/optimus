@@ -25,6 +25,42 @@ frappe.ui.form.on("Optimus Session", {
 	},
 });
 
+// Duration formatter matching the server-side rule (optimus.analyzers.base
+// humanize_duration_ms): a value at or above the "render durations in seconds
+// above (ms)" threshold reads as "1.50s", below it stays in ms. The threshold
+// comes from frappe.boot (optimus.boot.boot_session) so the picker rolls over
+// at the same point the report does. Defaults to 1000ms.
+function optimus_fmt_ms(ms, decimals) {
+	var v = Number(ms) || 0;
+	var dec = decimals == null ? 0 : decimals;
+	var t = frappe.boot && frappe.boot.optimus_large_duration_threshold_ms;
+	// Only a missing value falls back to 1000; an explicit 0 disables the rollover.
+	var threshold = t === undefined || t === null ? 1000 : t;
+	// Decide the unit from the value rounded to whole milliseconds (matches the
+	// server, independent of decimals), so a value that rounds up to a full
+	// second reads as "1.00s", never "1000ms".
+	var rounded = Math.round(Math.abs(v));
+	// Convert from the whole-millisecond value (Math.round(v)/1000), matching the
+	// server's UNIT decision. The final 2-decimal seconds can still differ from the
+	// report by 0.01s on a whole-ms value ending in 5 (e.g. 1125ms -> 1.125s: this
+	// picker's toFixed rounds half-away to "1.13s" while the report's Python %.2f
+	// rounds half-to-even to "1.12s"). The picker is a live convenience; the report
+	// HTML is the source of truth. Exact rounding parity isn't worth the FP fiddle.
+	if (threshold && rounded >= threshold) {
+		var secs = (Math.round(v) / 1000).toFixed(2);
+		// Match the server + the ms branch below: a value that rounds to zero must
+		// not keep a sign ("-0.00s" -> "0.00s"). Reachable only if the helper is
+		// reused for a signed value with a threshold <= 1.
+		if (secs.charAt(0) === "-" && Number(secs) === 0) secs = secs.slice(1);
+		return secs + "s";
+	}
+	var text = v.toFixed(dec);
+	// Match the server: a value that rounds to zero must not keep a sign
+	// ("-0ms" -> "0ms"). Reachable only if the helper is reused for a signed value.
+	if (text.charAt(0) === "-" && Number(text) === 0) text = text.slice(1);
+	return text + "ms";
+}
+
 // Single AI button: "Refresh AI suggestions". Replaces five legacy
 // buttons (Suggest a fix / Generate AI fixes / Re-evaluate AI fixes /
 // Humanize Steps / Suggest an index). One server endpoint
@@ -487,7 +523,7 @@ function show_phase2_dialog(frm, data) {
 		function meta(c) {
 			return (
 				" <span style='color:#6b7280;font-size:0.85em;'>(" +
-				(c.cumulative_ms || 0).toFixed(1) + "ms &middot; " +
+				optimus_fmt_ms(c.cumulative_ms || 0, 1) + " &middot; " +
 				(c.hit_count || 0) + "&times; hits &middot; " +
 				esc(c.app) +
 				")</span>"

@@ -42,7 +42,7 @@ from optimus.analyzers import (
 	table_breakdown,
 	top_queries,
 )
-from optimus.analyzers.base import SEVERITY_ORDER, AnalyzeContext
+from optimus.analyzers.base import _DUR_SEP, SEVERITY_ORDER, AnalyzeContext, dur
 from optimus.dbdialect import get_dialect
 
 # v0.3.0: per-analyzer wall-clock budget. If the cumulative analyze
@@ -1803,7 +1803,7 @@ def _dedupe_findings_across_actions(
 		if other_entries:
 			if all(e.get("label") for e in other_entries):
 				bits = ", ".join(
-					f"**{e['label']}** ({e['ms']:.0f}ms)" for e in other_entries
+					f"**{e['label']}** ({dur(e['ms'])})" for e in other_entries
 				)
 				suffix = (
 					f" Also affects {len(other_entries)} other "
@@ -1833,6 +1833,11 @@ def _dedupe_findings_across_actions(
 # technical_detail_json for navigation.
 _FINDING_TITLE_MAX_CHARS = 140
 _FINDING_TITLE_ELLIPSIS = "..."
+# A duration token in a title ("5234ms", with the dur() marker or, for a legacy
+# pre-marker title, without it). Used only to keep title truncation from slicing
+# through one: a cut anywhere in the token drops it whole rather than leaving a
+# bare "…523" or a unit-less "…5234m" that can't be rolled over at render.
+_DUR_IN_TITLE_RE = re.compile(r"\d+(?:\.\d+)?ms" + _DUR_SEP + "?")
 
 
 def _truncate_finding_titles(findings: list[dict]) -> None:
@@ -1844,7 +1849,17 @@ def _truncate_finding_titles(findings: list[dict]) -> None:
 		title = finding.get("title") or ""
 		if len(title) > _FINDING_TITLE_MAX_CHARS:
 			keep = _FINDING_TITLE_MAX_CHARS - len(_FINDING_TITLE_ELLIPSIS)
-			finding["title"] = title[:keep].rstrip() + _FINDING_TITLE_ELLIPSIS
+			# Never slice through a duration token: a mid-number cut ("...523") or a
+			# unit-less remnant ("...5234m") can't be rolled over at render (the
+			# marker pass needs the whole token and the prose backstop needs the
+			# "<n>ms" intact). If a "<n>ms" straddles the cut, drop it whole instead
+			# (the badge and description still carry the number).
+			cut = keep
+			for _m in _DUR_IN_TITLE_RE.finditer(title):
+				if _m.start() < keep < _m.end():
+					cut = _m.start()
+					break
+			finding["title"] = title[:cut].rstrip() + _FINDING_TITLE_ELLIPSIS
 
 
 # v0.6.0: ±1-line source snippet attached to each finding's callsite so
@@ -2140,8 +2155,8 @@ def _maybe_attach_recorded_queries(
 		return
 	top = []
 	for c in sorted(calls, key=lambda c: -(c.get("duration") or c.get("duration_ms") or 0)):
-		dur = c.get("duration") or c.get("duration_ms") or 0
-		if dur < _AI_EXAMPLE_QUERY_MIN_MS:
+		dur_ms = c.get("duration") or c.get("duration_ms") or 0
+		if dur_ms < _AI_EXAMPLE_QUERY_MIN_MS:
 			continue
 		q = (c.get("query") or "").strip()
 		if not q:
@@ -2499,7 +2514,9 @@ def _build_auto_notes_list_html(recordings: list[dict]) -> str:
 	for rec in signal_recordings[:_AUTO_NOTES_MAX_ENTRIES]:
 		label = per_action.humanized_label(rec) or "(unnamed action)"
 		duration_ms = round(rec.get("duration") or 0, 1)
-		items.append(f"<li>{html.escape(label)}: {duration_ms:g} ms</li>")
+		# dur() marks the timing for render-time formatting (plain digits, so a
+		# >=1e6 ms step never bakes as "5e+06").
+		items.append(f"<li>{html.escape(label)}: {dur(duration_ms, 1)}</li>")
 
 	overflow = len(signal_recordings) - _AUTO_NOTES_MAX_ENTRIES
 	if overflow > 0:
@@ -2700,7 +2717,7 @@ def _build_summary_html(
 				title = title[len(prefix):]
 			pri = _PRIORITY_WORD.get(f.get("severity") or "", "")
 			impact = f.get("estimated_impact_ms") or 0
-			tail = f" (~{impact:.0f}ms" + (f" - {pri} priority" if pri else "") + ")"
+			tail = f" (~{dur(impact)}" + (f" - {pri} priority" if pri else "") + ")"
 			return f"<strong>{html.escape(title)}</strong>{tail}"
 
 		# Prefer a finding tied to this specific action (via action_ref);
@@ -2723,19 +2740,19 @@ def _build_summary_html(
 			# on the issue-count sentence below don't repeat it here.
 			parts.append(
 				f"The slowest one was <strong>{slowest_label_esc}</strong> at "
-				f"{slowest_ms:.0f}ms - and most of its time went into "
+				f"{dur(slowest_ms)} - and most of its time went into "
 				f"{_finding_phrase(tied_finding)}."
 			)
 		elif overall_finding:
 			parts.append(
 				f"The slowest one was <strong>{slowest_label_esc}</strong> at "
-				f"{slowest_ms:.0f}ms. The biggest issue this session "
+				f"{dur(slowest_ms)}. The biggest issue this session "
 				f"(it affects several operations) was {_finding_phrase(overall_finding)}."
 			)
 		else:
 			parts.append(
 				f"The slowest one was <strong>{slowest_label_esc}</strong> at "
-				f"{slowest_ms:.0f}ms."
+				f"{dur(slowest_ms)}."
 			)
 
 	if not findings:

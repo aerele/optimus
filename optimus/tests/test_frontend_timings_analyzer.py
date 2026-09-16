@@ -6,6 +6,8 @@
 import json
 import os
 
+from optimus.analyzers.base import dur
+
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
@@ -70,6 +72,46 @@ def test_slow_frontend_render_fires_on_lcp():
     slow = [f for f in result.findings if f["finding_type"] == "Slow Frontend Render"]
     assert len(slow) == 1
     assert slow[0]["severity"] == "Medium"  # 2800ms is Medium (2500 < x < 4000)
+    # Analyzers bake raw ms; the second-rollover is applied at render time
+    # (honouring large_duration_threshold_ms), so the analyzer output is raw ms.
+    assert slow[0]["title"] == f"LCP {dur(2800)} on /app/sales-invoice/SI-001"
+    assert f"took {dur(2800)} for its largest" in slow[0]["customer_description"]
+
+
+def test_lcp_title_rounds_not_truncates():
+    """The baked title must ROUND the duration (like :.0f everywhere else), not
+    truncate with int(). The impact badge renders the raw float via humanize
+    (which rounds), so a truncating title would disagree with the badge by up to
+    1ms / 0.01s once render rolls both over to seconds."""
+    from optimus.analyzers import frontend_timings
+
+    fd = {"xhr": [], "vitals": [
+        {"name": "lcp", "page_url": "/app/x", "timestamp": 1, "value_ms": 2800.7},
+    ]}
+    result = frontend_timings.analyze([], _make_context(fd))
+    slow = [f for f in result.findings if f["finding_type"] == "Slow Frontend Render"]
+    assert len(slow) == 1
+    # Rounded to 2801, not truncated to 2800.
+    assert slow[0]["title"] == f"LCP {dur(2800.7)} on /app/x"
+    assert f"took {dur(2800.7)} for its largest" in slow[0]["customer_description"]
+    # The badge stores round(lcp, 2); for a value already at <=2 decimals that is
+    # the same number, so title and badge agree.
+    assert slow[0]["estimated_impact_ms"] == round(2800.7, 2)
+
+
+def test_lcp_impact_rounds_to_two_decimals_for_badge_agreement():
+    """A raw LCP with sub-0.01ms precision must be stored as round(lcp, 2), so the
+    badge (fmt_ms of the stored impact) and the dur(lcp) title roll over from the
+    SAME number. Storing the raw float made them disagree at a boundary."""
+    from optimus.analyzers import frontend_timings
+
+    fd = {"xhr": [], "vitals": [
+        {"name": "lcp", "page_url": "/app/x", "timestamp": 1, "value_ms": 2801.126},
+    ]}
+    result = frontend_timings.analyze([], _make_context(fd))
+    slow = [f for f in result.findings if f["finding_type"] == "Slow Frontend Render"]
+    assert len(slow) == 1
+    assert slow[0]["estimated_impact_ms"] == round(2801.126, 2)  # 2801.13, not raw
 
 
 def test_network_overhead_fires_on_disproportion():

@@ -239,3 +239,106 @@ class TestHideFrameworkTables:
 		monkeypatch.setattr(settings, "_read_doctype_row", lambda: {"enabled": True})
 		monkeypatch.setattr(settings, "_site_conf_fallback", lambda k: None)
 		assert settings._resolve().hide_framework_tables is True
+
+
+class TestLargeDurationThresholdResolution:
+	"""The "Render durations in seconds above (ms)" field, resolved end-to-end.
+
+	These drive the REAL ``_read_doctype_row`` coercion + ``_resolve`` (via a
+	stubbed Single doc), not a hand-built OptimusConfig. That is the path a stored
+	0 used to be silently coerced to 1000 on: ``_read_doctype_row`` mapped 0 → None
+	and ``_float`` then returned the default, so the feature's advertised "set it
+	to 0 to keep milliseconds" switch did nothing. Tests that build the config
+	directly can't see that, which is why it slipped through.
+	"""
+
+	def _use_single(self, stub, fields):
+		"""Point the frappe stub at a Single doc carrying ``fields``."""
+		stub.db = types.SimpleNamespace(exists=lambda *a, **kw: True)
+		stub.get_cached_doc = lambda *a, **kw: dict(fields)
+
+	def test_stored_zero_disables_rollover_end_to_end(self, _frappe_stub, monkeypatch):
+		self._use_single(
+			_frappe_stub,
+			{"config_profile": "Custom", "large_duration_threshold_ms": 0},
+		)
+		monkeypatch.setattr(settings, "_site_conf_fallback", lambda k: None)
+		assert settings._resolve().large_duration_threshold_ms == 0.0
+
+	def test_stored_value_is_honoured(self, _frappe_stub, monkeypatch):
+		self._use_single(
+			_frappe_stub,
+			{"config_profile": "Custom", "large_duration_threshold_ms": 500},
+		)
+		monkeypatch.setattr(settings, "_site_conf_fallback", lambda k: None)
+		assert settings._resolve().large_duration_threshold_ms == 500.0
+
+	def test_missing_value_falls_through_to_default(self, _frappe_stub, monkeypatch):
+		# Field genuinely absent (fresh Single) → 1000 default, rollover on.
+		self._use_single(_frappe_stub, {"config_profile": "Custom"})
+		monkeypatch.setattr(settings, "_site_conf_fallback", lambda k: None)
+		assert settings._resolve().large_duration_threshold_ms == 1000.0
+
+	def test_named_profile_overrides_stored_zero(self, _frappe_stub, monkeypatch):
+		# Under a named profile the preset wins, so a stray 0 in the field is
+		# ignored (Recommended → 1000). Only "Custom" reads the stored field.
+		self._use_single(
+			_frappe_stub,
+			{"config_profile": "Recommended", "large_duration_threshold_ms": 0},
+		)
+		monkeypatch.setattr(settings, "_site_conf_fallback", lambda k: None)
+		assert settings._resolve().large_duration_threshold_ms == 1000.0
+
+
+class TestDisplayThresholdMs:
+	"""``display_threshold_ms`` is the single accessor boot and the AI-fix context
+	read the seconds-rollover threshold through, so the "unreadable → 1000"
+	fallback lives in exactly one place instead of being re-implemented per caller.
+	"""
+
+	def test_returns_resolved_value(self, monkeypatch):
+		monkeypatch.setattr(
+			settings, "get_config",
+			lambda: types.SimpleNamespace(large_duration_threshold_ms=500.0),
+		)
+		assert settings.display_threshold_ms() == 500.0
+
+	def test_preserves_zero(self, monkeypatch):
+		monkeypatch.setattr(
+			settings, "get_config",
+			lambda: types.SimpleNamespace(large_duration_threshold_ms=0.0),
+		)
+		assert settings.display_threshold_ms() == 0.0
+
+	def test_fails_open_to_default_on_read_error(self, monkeypatch):
+		def boom():
+			raise RuntimeError("cache down")
+
+		monkeypatch.setattr(settings, "get_config", boom)
+		assert settings.display_threshold_ms() == 1000.0
+
+
+class TestOptFloatCoercion:
+	"""_opt_float coerces the stored large_duration_threshold_ms without ever
+	raising, so a blank/whitespace/non-numeric value falls through to the default
+	instead of throwing ValueError out of _read_doctype_row and crash-resetting the
+	WHOLE config (tracked apps, AI settings, profile, retention) on every read."""
+
+	def test_missing_and_blank_become_none(self):
+		assert settings._opt_float(None) is None
+		assert settings._opt_float("") is None
+
+	def test_whitespace_and_non_numeric_become_none_not_raise(self):
+		# These are the cases the old ``not in (None, "")`` guard let through to a
+		# bare float(), which raised and reset the config.
+		assert settings._opt_float(" ") is None
+		assert settings._opt_float("abc") is None
+
+	def test_explicit_zero_is_preserved(self):
+		# 0 disables the seconds rollover, so it must survive as 0.0, not None.
+		assert settings._opt_float("0") == 0.0
+		assert settings._opt_float(0) == 0.0
+
+	def test_numeric_values_coerce_to_float(self):
+		assert settings._opt_float("500") == 500.0
+		assert settings._opt_float(1000.0) == 1000.0
