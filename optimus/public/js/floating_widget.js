@@ -1,4 +1,4 @@
-// Optimus — Floating start/stop widget
+// Optimus Floating start/stop widget
 //
 // Injected into every Desk page via app_include_js in hooks.py.
 // Renders a small floating button bottom-right that lets a user with the
@@ -103,14 +103,14 @@
 		// (before_request / before_job short-circuit), so showing it
 		// misleads the user into thinking they can still record.
 		// `frappe.boot.optimus_enabled` is populated by boot_session
-		// and defaults to True on error — matching the settings
+		// and defaults to True on error matching the settings
 		// module's fail-open posture.
 		const bootEnabled = (
 			frappe.boot && frappe.boot.optimus_enabled
 		);
 		if (bootEnabled === false) {
 			_diag(
-				"[optimus] profiler is disabled in settings — "
+				"[optimus] profiler is disabled in settings "
 				+ "widget will not mount"
 			);
 			return;
@@ -120,7 +120,7 @@
 		// server-side `_require_profiler_user()` check in api.py is the
 		// real permission gate; this client-side check is just a hint
 		// and was causing race-condition bugs because `frappe.user_roles`
-		// may not be populated when this script runs (see desk.js:329 —
+		// may not be populated when this script runs (see desk.js:329
 		// set_globals runs after Desk class construction). We err on the
 		// side of always mounting; users without the role will see a
 		// permission error if they actually click Start.
@@ -202,7 +202,7 @@
 	}
 
 	function subscribeVisibility() {
-		// v0.5.1: no more polling — but we still want to refresh state
+		// v0.5.1: no more polling but we still want to refresh state
 		// ONCE when the tab becomes visible again, to catch TTL-based
 		// auto-stop that happens silently (Redis active-pointer expired
 		// while the tab was hidden) and any realtime events the Socket
@@ -231,7 +231,7 @@
 		// Expose the build ID so a hovering user / dev-tools inspector
 		// can confirm which JS is actually running without opening
 		// the console.
-		widget.title = "Optimus — build " + WIDGET_BUILD_ID;
+		widget.title = "Optimus build " + WIDGET_BUILD_ID;
 		widget.setAttribute("data-build-id", WIDGET_BUILD_ID);
 		widget.innerHTML = `
 			<span class="fp-dot"></span>
@@ -247,7 +247,7 @@
 			"position: fixed",
 			"right: 20px",
 			"bottom: 20px",
-			"z-index: 2147483647",  /* max int32 — above everything */
+			"z-index: 2147483647",  /* max int32 above everything */
 			"display: block !important",
 			"visibility: visible !important",
 			"opacity: 1 !important",
@@ -275,7 +275,7 @@
 
 	function refreshStatus() {
 		// If we're locally in a transient state (stopping/analyzing/ready),
-		// don't override it with status() — server may not have reflected
+		// don't override it with status() server may not have reflected
 		// our local action yet.
 		if (currentState.display === "stopping" || currentState.display === "analyzing") {
 			return;
@@ -286,7 +286,7 @@
 				// v0.5.0 pass-4 fix: re-check the display state inside
 				// the callback. The guard at the top of refreshStatus
 				// only prevents NEW polls from firing during transient
-				// states — it doesn't help an in-flight poll whose
+				// states it doesn't help an in-flight poll whose
 				// frappe.call was already dispatched before the user
 				// clicked Stop. Without this check, a late-arriving
 				// status response would overwrite the "stopping"
@@ -318,7 +318,7 @@
 					}
 				} else {
 					if (currentState.display === "recording") {
-						// We thought we were recording but server says no — auto-stop
+						// We thought we were recording but server says no auto-stop
 						// fired or someone called stop from elsewhere. Reset.
 						currentState.display = "inactive";
 						currentState.active = false;
@@ -341,7 +341,7 @@
 		} else if (currentState.display === "recording") {
 			// v0.6.0: phase-2 recording uses a different stop API and a
 			// different active-flag in Redis. Route the click accordingly
-			// — confirmAndStop calls api.stop which only knows about
+			// confirmAndStop calls api.stop which only knows about
 			// phase-1's flag and would no-op silently for phase 2.
 			if (currentState.phase2 && currentState.run_uuid) {
 				stopPhase2();
@@ -371,7 +371,7 @@
 			callback: () => {
 				frappe.show_alert({
 					message: __(
-						"Phase 2 stopped — analyzing now. Open the session " +
+						"Phase 2 stopped analyzing now. Open the session " +
 						"to see the line-level report when it's ready."
 					),
 					indicator: "blue",
@@ -387,7 +387,7 @@
 	/**
 	 * Derive a contextual default for the Session label field from
 	 * the current Frappe Desk route. Used by openStartDialog() so the
-	 * user can click Start without typing — the most common "what am
+	 * user can click Start without typing the most common "what am
 	 * I profiling" answer is already on screen.
 	 *
 	 * Route shapes handled (Frappe v16):
@@ -419,13 +419,13 @@
 				switch (head) {
 					case "Form":
 						return doctype && leaf
-							? `${doctype} — ${leaf}`
+							? `${doctype} ${leaf}`
 							: doctype || "Form";
 					case "List":
 						if (!doctype) return "List";
 						if (sub === "Kanban") {
 							return leaf
-								? `${doctype} kanban — ${leaf}`
+								? `${doctype} kanban ${leaf}`
 								: `${doctype} kanban`;
 						}
 						if (sub === "Report") return `${doctype} report`;
@@ -436,15 +436,15 @@
 					case "Tree":
 						return doctype ? `${doctype} tree` : "Tree";
 					case "query-report":
-						return doctype ? `Report — ${doctype}` : "Report";
+						return doctype ? `Report ${doctype}` : "Report";
 					case "dashboard-view":
-						return doctype ? `Dashboard — ${doctype}` : "Dashboard";
+						return doctype ? `Dashboard ${doctype}` : "Dashboard";
 					case "modules":
 					case "desk":
 					case "app":
 						return "Profiling session";
 					default:
-						if (head && doctype) return `${head} — ${doctype}`;
+						if (head && doctype) return `${head} ${doctype}`;
 						if (head) return String(head);
 						return "Profiling session";
 				}
@@ -484,7 +484,7 @@
 					length: 140,
 					default: getDefaultSessionLabel(),
 					description:
-						"Give this session a name you'll recognize later — e.g. 'Sales Invoice flow with 50 items'. (up to 140 characters)",
+						"Give this session a name you'll recognize later e.g. 'Sales Invoice flow with 50 items'. (up to 140 characters)",
 				},
 				{
 					fieldname: "warning_html",
@@ -492,7 +492,7 @@
 					options: `
 						<div style="background: #fffbeb; border: 1px solid #fbbf24; border-radius: 4px; padding: 10px 12px; margin-top: 10px; font-size: 0.85rem; color: #92400e;">
 							<strong>Note:</strong> Recording adds ~1.5–2× wall-clock overhead per request while it's running.
-							Only your traffic will be captured — other users on this site are not affected.
+							Only your traffic will be captured other users on this site are not affected.
 							The session auto-stops after 10 minutes.
 						</div>
 					`,
@@ -533,10 +533,10 @@
 							});
 						} else {
 							// Server returned 200 but no session_uuid in the
-							// response — unexpected. Surface something so
+							// response unexpected. Surface something so
 							// the user knows the click didn't land.
 							frappe.show_alert({
-								message: __("Profiler start returned no session — check Error Log"),
+								message: __("Profiler start returned no session check Error Log"),
 								indicator: "orange",
 							});
 						}
@@ -547,7 +547,7 @@
 						// this error branch, a failed start (permission
 						// denied, server exception, concurrent session,
 						// etc.) would leave the user staring at a
-						// silent inactive pill after the dialog closes —
+						// silent inactive pill after the dialog closes
 						// the exact 'widget not working as expected'
 						// failure mode they'd see if their account
 						// lacked the Optimus User role.
@@ -559,8 +559,8 @@
 						// already been hidden at this point so we can't
 						// keep the user on it for another try.
 						const msg = (r && r._server_messages)
-							? "Profiler start failed — see the Frappe error alert above"
-							: "Profiler start failed — check your role and try again";
+							? "Profiler start failed see the Frappe error alert above"
+							: "Profiler start failed check your role and try again";
 						frappe.show_alert({
 							message: __(msg),
 							indicator: "red",
@@ -573,13 +573,13 @@
 	}
 
 	function confirmAndStop() {
-		// No confirmation modal — keep it one-click. Just fire stop().
+		// No confirmation modal keep it one-click. Just fire stop().
 		// Update currentState.display BEFORE the API call so refreshStatus()'s
-		// transient-state guard (line ~241) kicks in — otherwise the 5s poll
+		// transient-state guard (line ~241) kicks in otherwise the 5s poll
 		// can race the stop API and flip the widget back to "Recording".
 		//
 		// v0.5.0: also flush any buffered frontend metrics before the stop
-		// API fires, so analyze can join them to recordings. Best-effort —
+		// API fires, so analyze can join them to recordings. Best-effort
 		// a failed flush never blocks stop.
 		_diag("[optimus] confirmAndStop: click received");
 		setDisplay("stopping", "Stopping…", "");
@@ -590,7 +590,7 @@
 			if (window.optimus_frontend && window.optimus_frontend.flush) {
 				window.optimus_frontend.flush({ sync: false });
 			}
-		} catch (e) { /* noop — frontend module missing or flush failed */ }
+		} catch (e) { /* noop frontend module missing or flush failed */ }
 
 		frappe.call({
 			method: "optimus.api.stop",
@@ -603,7 +603,7 @@
 				// when the session has already been cleared (auto-stop,
 				// janitor sweep, or a retried click after a network blip
 				// on the first stop). Previously we fell into the else
-				// branch and transitioned to "Analyzing…" — wrong, because
+				// branch and transitioned to "Analyzing…" wrong, because
 				// there's nothing analyzing. The widget would hang on
 				// Analyzing… forever because no realtime event would ever
 				// fire for a session that no longer exists server-side.
@@ -616,7 +616,7 @@
 					}
 					setDisplay("inactive", "Profiler", "");
 					frappe.show_alert({
-						message: __("No active session — widget reset"),
+						message: __("No active session widget reset"),
 						indicator: "gray",
 					});
 					return;
@@ -626,7 +626,7 @@
 					// v0.5.0: scheduler was disabled and analyze ran
 					// synchronously inside the stop request. The session
 					// is already finalized (Ready or Failed) by the time
-					// we get here — branch on data.status so a failed
+					// we get here branch on data.status so a failed
 					// inline analyze doesn't show "Report ready" to the
 					// user. In both branches we transition to "ready"
 					// state so the user can click the pill and land on
@@ -636,7 +636,7 @@
 					if (data.status === "Failed") {
 						setDisplay("ready", "Analyze failed", "click to view");
 						frappe.show_alert({
-							message: __("Profiler analyze failed — click the pill to see details"),
+							message: __("Profiler analyze failed click the pill to see details"),
 							indicator: "red",
 						});
 					} else {
@@ -650,14 +650,14 @@
 					setDisplay("analyzing", "Analyzing…", "");
 					currentState.display = "analyzing";
 					frappe.show_alert({
-						message: __("Profiler stopped — analyzing session…"),
+						message: __("Profiler stopped analyzing session…"),
 						indicator: "orange",
 					});
 				}
 			},
 			error: (r) => {
 				// Stop failed at the network or server level. Don't
-				// unconditionally revert to Recording — we don't actually
+				// unconditionally revert to Recording we don't actually
 				// know whether the stop succeeded on the server. It's
 				// possible the session was already cleared (auto-stop,
 				// janitor sweep) and the 'error' is a 400 / 500 we
@@ -672,13 +672,13 @@
 					callback: (sr) => {
 						const sdata = (sr && sr.message) || {};
 						if (sdata.active) {
-							// Session is still live server-side — retry is
+							// Session is still live server-side retry is
 							// meaningful.
 							currentState.display = "recording";
 							setDisplay("recording", "Recording", computeElapsed());
 							startElapsedTimer();
 							frappe.show_alert({
-								message: __("Failed to stop profiler — try again"),
+								message: __("Failed to stop profiler try again"),
 								indicator: "red",
 							});
 						} else {
@@ -706,7 +706,7 @@
 						setDisplay("recording", "Recording", computeElapsed());
 						startElapsedTimer();
 						frappe.show_alert({
-							message: __("Network error — please retry"),
+							message: __("Network error please retry"),
 							indicator: "red",
 						});
 					},
@@ -719,11 +719,11 @@
 		// v0.5.1: realtime is now the PRIMARY state-transition channel
 		// (polling is gone). Server emits:
 		//
-		//   optimus_session_stopping   — user clicked Stop on another tab
-		//   optimus_session_analyzing  — analyze.run started
-		//   optimus_progress           — percent + description during analyze
-		//   optimus_session_ready      — analyze finished, report available
-		//   optimus_session_failed     — analyze crashed
+		//   optimus_session_stopping user clicked Stop on another tab
+		//   optimus_session_analyzing analyze.run started
+		//   optimus_progress percent + description during analyze
+		//   optimus_session_ready analyze finished, report available
+		//   optimus_session_failed analyze crashed
 		//
 		// The widget rehydrates state from these events so a session
 		// driven from tab A is visible in tabs B, C, D without any tab
@@ -768,7 +768,7 @@
 			currentState.docname = data.docname || currentState.docname;
 			setDisplay("ready", "Analyze failed", "click to view");
 			frappe.show_alert({
-				message: __("Profiler analyze failed — check Error Log"),
+				message: __("Profiler analyze failed check Error Log"),
 				indicator: "red",
 			});
 		});
@@ -796,7 +796,7 @@
 		// state-machine slots as phase-1 (recording → analyzing → ready),
 		// but the labels are prefixed with "Phase 2" so the user knows
 		// which mode is running. Phase 2 is started/stopped from the
-		// Optimus Session form, not the floating widget — clicking the
+		// Optimus Session form, not the floating widget clicking the
 		// widget while Phase 2 is recording still means "stop" via the
 		// existing Stop API path (api.stop_line_profile_pass), which the
 		// form's history list reflects after refresh.

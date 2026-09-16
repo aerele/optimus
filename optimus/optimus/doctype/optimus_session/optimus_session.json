@@ -117,7 +117,7 @@
   },
   {
    "default": "0",
-   "description": "Cumulative LLM tokens billed for this session — analyze auto-suggest plus every Refresh / on-demand AI run. Matches the Aerele usage ledger; only ever increases.",
+   "description": "Cumulative LLM tokens billed for this session analyze auto-suggest plus every Refresh / on-demand AI run. Matches the Aerele usage ledger; only ever increases.",
    "fieldname": "ai_tokens_spent",
    "fieldtype": "Long Int",
    "label": "AI Tokens Spent",
@@ -191,7 +191,7 @@
    "label": "Analyze Duration (ms)",
    "precision": "2",
    "read_only": 1,
-   "description": "How long the analyze pipeline took — useful for tracking profiler health."
+   "description": "How long the analyze pipeline took useful for tracking profiler health."
   },
   {
    "fieldname": "summary_section",
@@ -245,7 +245,7 @@
    "label": "Reports"
   },
   {
-   "description": "Full data — admin-scoped via Frappe File permissions.",
+   "description": "Full data admin-scoped via Frappe File permissions.",
    "fieldname": "raw_report_file",
    "fieldtype": "Attach",
    "label": "Report",
@@ -319,7 +319,7 @@
    "hidden": 1,
    "label": "v0.5.0 Aggregates (JSON)",
    "read_only": 1,
-   "description": "v0.5.0+: JSON dict holding infra_pressure and frontend_timings aggregates — infra_timeline, infra_summary, frontend_xhr_matched, frontend_vitals_by_page, frontend_orphans, frontend_summary. Consumed by the Server Resource and Frontend panels in the report template."
+   "description": "v0.5.0+: JSON dict holding infra_pressure and frontend_timings aggregates infra_timeline, infra_summary, frontend_xhr_matched, frontend_vitals_by_page, frontend_orphans, frontend_summary. Consumed by the Server Resource and Frontend panels in the report template."
   },
   {
    "fieldname": "analyzer_warnings",

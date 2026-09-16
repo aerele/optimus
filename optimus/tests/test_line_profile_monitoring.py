@@ -4,11 +4,9 @@
 """Phase-2 must never leak the process-global ``sys.monitoring`` profiler tool.
 
 On Python 3.12+ line_profiler drives ``sys.monitoring`` tool id 2 (PROFILER_ID).
-A botched per-request teardown (the old code paired ``enable_by_count()`` with
-``disable()`` and raised ``ValueError: tool 2 is not in use``) left tool 2's
-line-trace events registered process-wide, so every subsequent request in that
-worker was line-traced → CPU saturation + frozen UI. These tests pin that the
-teardown always releases tool 2.
+A botched teardown can leave its line-trace events registered process-wide, so
+every subsequent request in the worker is line-traced (CPU saturation, frozen
+UI). These tests pin that the teardown always releases tool 2.
 """
 
 import sys
@@ -37,7 +35,7 @@ def _hot():
 
 
 def _leak_tool():
-	"""Register tool 2 as ``line_profiler`` with line events on — exactly the
+	"""Register tool 2 as ``line_profiler`` with line events on exactly the
 	state a botched line_profiler teardown leaves behind. Done via raw
 	``sys.monitoring`` (not ``LineProfiler.enable_by_count``) so it can't desync
 	line_profiler's process-global manager across tests."""
@@ -116,7 +114,7 @@ def test_after_request_releases_tool_even_when_disable_fails(monkeypatch):
 	# and left tool 2 registered → process-wide tracing leak. Simulate that
 	# leaked state, then drive after_request with a profiler whose disable
 	# raises; the hook's finally-release must STILL clear tool 2.
-	# (Pre-fix this assertion fails — the leak survives.)
+	# (Pre-fix this assertion fails the leak survives.)
 	_leak_tool()
 	assert sys.monitoring.get_tool(PID) == "line_profiler"
 
@@ -137,7 +135,7 @@ def test_after_request_releases_tool_even_when_disable_fails(monkeypatch):
 # A worker that died mid-Phase-2 leaves tool 2 owned by ``line_profiler``;
 # on respawn, the next request inherits the orphan AND immediately gets
 # line-traced. The per-arm self-heal in line_profile/hooks.py catches it,
-# but ONLY when the next Phase 2 request fires — every interim request
+# but ONLY when the next Phase 2 request fires every interim request
 # pays the trace tax. The startup probe in optimus/__init__.py runs at
 # app-import and reclaims the orphan immediately. The pre-arm self-heal
 # stays as a per-request safety net, now with a LOUD log so the operator
@@ -195,7 +193,7 @@ def test_startup_probe_warns_about_unknown_owner_without_reclaiming(monkeypatch)
 
 	try:
 		optimus._startup_probe_tool2()
-		# Still owned — the probe must NOT touch a non-line_profiler tool.
+		# Still owned the probe must NOT touch a non-line_profiler tool.
 		assert sys.monitoring.get_tool(PID) == "some_other_profiler"
 		# Warning logged.
 		assert any(
@@ -228,7 +226,7 @@ def test_startup_probe_silent_when_no_owner(monkeypatch):
 
 
 def test_startup_probe_silent_on_python_without_sys_monitoring(monkeypatch):
-	"""Python 3.11 and earlier have no sys.monitoring — the probe must
+	"""Python 3.11 and earlier have no sys.monitoring the probe must
 	be a clean no-op (no exception, no warning)."""
 	import optimus
 
@@ -242,16 +240,15 @@ def test_startup_probe_silent_on_python_without_sys_monitoring(monkeypatch):
 
 
 def test_per_request_pre_arm_logs_when_reclaiming_orphan(monkeypatch):
-	"""The per-request self-heal in line_profile.hooks must log a WARN
-	when it actually reclaims an orphan — silent reclaim hid the leak
-	class in production for months."""
+	"""The per-request self-heal in line_profile.hooks must log a WARN when it
+	reclaims an orphan (a silent reclaim would hide the leak)."""
 	cap = _patch_logger(monkeypatch)
 
 	# Simulate the worker-respawn state: tool 2 owned by line_profiler,
 	# no profiler on frappe.local.
 	_leak_tool()
 	# Drive just the self-heal block. We don't need a full before_request
-	# call (which would also need an active session) — exercising the
+	# call (which would also need an active session) exercising the
 	# inline check + log is sufficient for the regression invariant.
 	mon = sys.monitoring
 	if mon is not None and mon.get_tool(mon.PROFILER_ID) == "line_profiler":
@@ -269,9 +266,9 @@ def test_per_request_pre_arm_logs_when_reclaiming_orphan(monkeypatch):
 
 
 def test_pyproject_pins_line_profiler_5_x():
-	"""pyproject.toml must require line_profiler >= 5.x. The 4.x line
-	uses the legacy sys.settrace path which doesn't go through tool 2 —
-	the leak fix in 6f66a43 only protects the 5.x sys.monitoring path."""
+	"""pyproject.toml must require line_profiler >= 5.x. The 4.x line uses the
+	legacy sys.settrace path, which doesn't go through tool 2 and isn't covered
+	by the tool-2 leak fix."""
 	import os
 	import re
 
@@ -283,7 +280,7 @@ def test_pyproject_pins_line_profiler_5_x():
 	m = re.search(r'"line_profiler\s*(?P<spec>[^"]*)"', text)
 	assert m, "line_profiler dependency line not found in pyproject.toml"
 	spec = m.group("spec")
-	# Accept >=5.0, >=5.1, ==5.x, ~=5.0, etc. — anything that doesn't
+	# Accept >=5.0, >=5.1, ==5.x, ~=5.0, etc. anything that doesn't
 	# permit 4.x. The bare ">=4.0" historical value should fail here.
 	assert ">=5" in spec or "==5" in spec or "~=5" in spec, (
 		f"line_profiler must be pinned to >=5.x; pyproject has: {spec!r}"
@@ -312,7 +309,7 @@ class TestActiveProfilerCountGate:
 
 	def test_after_request_keeps_tool_while_sibling_active(self, monkeypatch):
 		"""Two concurrent profilers (count==2). When the first finishes, tool 2
-		must NOT be freed — the sibling is still tracing. Only the last one out
+		must NOT be freed the sibling is still tracing. Only the last one out
 		frees it."""
 		cap._active_profiler_count = 2  # two gthread requests profiling at once
 		_leak_tool()                    # tool 2 registered (a profiler is active)

@@ -34,7 +34,7 @@ filesystem access via the Frappe stack. The following surfaces are
 the highest-value security considerations:
 
 1. **Recordings persist sensitive data.** Captured HTTP recordings
-   include raw SQL with parameter values, request form_dict, and
+   include raw SQL with parameter values, request form_dict and
    request headers. v0.7.x redacts known-sensitive keys
    (`password`, `api_key`, `token`, `secret`, `csrf`, `cookie`,
    `authorization`) at render and export time. Custom-named
@@ -91,7 +91,7 @@ path falls back to raw `pickle.loads` on unsigned blobs when
 The default is `true`. **Operators should flip it to `false` after
 the deploy has been live longer than the Redis blob TTL (10 minutes)
 - at that point every blob in Redis was written by the new signing
-code, and the fallback only weakens the RCE protection.**
+code and the fallback only weakens the RCE protection.**
 
 ```json
 // sites/<site>/site_config.json

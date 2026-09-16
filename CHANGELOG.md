@@ -4,39 +4,343 @@ All notable changes to the Optimus app.
 
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/),
 and this project follows [SemVer](https://semver.org/) (pre-1.0, so minor
-versions may contain breaking changes — see migration notes below).
+versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.41] — 2026-08-31
+## [0.12.50] - 2026-09-16
+
+### Fixed
+
+- **A per-action or background-job row that displays "1.00s" is now flagged red.**
+  The per-action and RQ-jobs tables decided the red "hot" text and the red/amber bar
+  from the raw millisecond value while the value cell rolled a value in [999.5, 1000)
+  up to "1.00s" by rounding, so such a row showed a full second but got only an amber
+  accent. The tables now read the round-based `duration_is_hot` / `bar_kind` computed
+  in `report_context` (the same rollover the display uses), instead of re-deciding from
+  the raw ms in the template.
+- **A Slow Query, Slow Frontend Render or Network Overhead finding's title and its
+  impact badge always agree.** These three analyzers stored the raw duration as
+  `estimated_impact_ms` (which drives the badge) while the title baked `dur()` (which
+  rounds to 0.01ms), so at a rounding boundary the title could read "624ms" beside a
+  "623ms" badge (or flip ms↔seconds). They now store `round(x, 2)`, matching the other
+  analyzers, so the title and badge roll over from the same number.
+- **A blank or non-numeric large-duration threshold can no longer reset the whole
+  config.** `_read_doctype_row` coerced the stored threshold with a bare `float()`
+  guarded only against `None`/`""`, so a whitespace-only or non-numeric value raised
+  `ValueError`, which escaped `get_config()`'s blanket `except` and silently reset the
+  entire config (tracked/ignored apps, AI settings, profile, retention) to defaults on
+  every read. A shared `_opt_float` helper now coerces it, preserving an explicit 0 but
+  turning any unparseable value into "fall through to the default".
+- **The stored-summary fallback no longer corrupts the "(&gt;200ms)" caption.** When the
+  render-time summary is empty and the template falls back to the stored summary, it is
+  now formatted markers-only (like the render-time path) and only when it will actually
+  be shown, so a custom display threshold ≤ 200 can't rewrite the fixed "(&gt;200ms)"
+  slow-query caption to "(&gt;0.20s)".
+
+### Internal
+
+- The hot-path picker (`optimus_fmt_ms`) now strips a negative zero in the seconds
+  branch too, matching the millisecond branch and the server formatter.
+- `boot_session` resolves the (Redis-cached) config once instead of twice, keeping the
+  two-try split so a threshold read error can't flip a disabled Optimus back on.
+- Two duration tests were sharpened so they actually exercise what they name. The title
+  truncation test now positions the duration marker so it straddles the cut boundary,
+  really exercising the straddle guard. The report-context fallback test now asserts on
+  the built `slow_queries` output, so a regression to a hardcoded 1000ms rollover would
+  fail it.
+
+## [0.12.49] - 2026-09-13
+
+### Internal
+
+- **Durations are now formatted from structured markers at render time instead of
+  being parsed back out of prose.** Every analyzer tags a duration through a small
+  `dur()` helper, which writes the raw millisecond value plus an invisible separator
+  into the text. At render time `format_durations` finds those markers by exact match
+  and applies the seconds rollover honouring `large_duration_threshold_ms`. Because the
+  analyzer controls the exact spelling of the number, each app-generated duration is now
+  carried by an exact marker rather than being re-discovered by the fuzzy prose scanner,
+  so its formatting is immune to the comma, space, non-breaking-space,
+  scientific-notation, URL and HTML edge cases that the previous approach had to defend
+  against one at a time. The fuzzy prose scanner still runs, after the marker pass, over
+  the same text: it is the fallback for a raw "<n>ms" in free text (an AI humanizer's
+  notes) and the backstop if a stored title is truncated and its trailing marker is
+  severed, and it still carries all of those guards. No user-visible change: durations
+  render the same way.
+- **Edge-case hardening from a follow-up review.** A raw duration written immediately
+  before an em dash in a note or the summary now rolls over correctly (durations are
+  formatted before the em-dash sweep, not after). A finding title that must be truncated
+  at its 140-char limit is never cut through a duration token, so it can't leave a
+  unit-less "5234m" or a bare number. The stored-summary fallback (used when the
+  render-time summary is empty) is now formatted like every other duration. The
+  report-context duration formatter honours the configured threshold even when a caller
+  omits the injected formatter, so a non-default profile can't split the report into
+  seconds-here / milliseconds-there. The ms-vs-seconds highlight decision is
+  single-sourced instead of sniffing the formatted string, and the per-row amber bar
+  boundary is single-sourced instead of hardcoded in three places.
+- **A second review pass caught the same em-dash ordering on the findings path.** The
+  first pass fixed the notes and summary; a separate sweep over finding titles and
+  descriptions still ran before their durations were formatted, so a raw "5234ms" glued
+  to an em dash in a title stayed in milliseconds while the badge showed seconds. Those
+  fields are now formatted before the em-dash sweep too. The default display threshold
+  (1000ms) is now a single `DEFAULT_DISPLAY_THRESHOLD_MS` constant read by every Python
+  resolver and formatter default instead of being retyped in a dozen places, and the
+  repeated "coerce to a finite number of milliseconds" guard is one shared `_coerce_ms`
+  helper used by the formatter, the rollover decision and `dur()`.
+- **The render-time summary formats from its tags only; stored text keeps the prose
+  fallback.** The summary is rebuilt fresh on every render (always tagged), so it uses
+  the exact-tag path and a threshold literal like ">200ms" is left alone. Finding
+  titles and descriptions are read back from stored rows that can predate the tags (a
+  session analyzed on an older Optimus), so they keep the full formatter (tags first,
+  then the prose fallback): this is what lets a legacy "1374ms" title still roll over to
+  match its "1.37s" impact badge on re-render. A stray "<n>ms" inside a real analyzer
+  label does not occur in practice, and URLs are already guarded, so the fallback stays.
+  A follow-up review also fixed: title truncation now drops a whole duration token
+  (tagged or legacy) rather than severing it; a plain ASCII space is no longer treated
+  as a thousands separator (so "12 500ms", a count then a duration, is not merged into
+  "12.50s" — NBSP and narrow-NBSP locale grouping still work); `_resolve_threshold_ms`
+  coerces its value to float so a stringy config value can't reach the numeric
+  comparison; and some duration formatting that no template rendered was removed.
+- **A further review pass.** The cross-run diff table's headers said "ms" while its
+  cells had started rendering seconds (a 1000x misread) — they are now unit-less like
+  the sibling table. A finding title and its impact badge could disagree at a rounding
+  boundary (999.495ms read "999ms" beside a "1.00s" badge) because the title rounded the
+  raw value while the badge used `round(x, 2)`; `dur()` now rounds to 0.01ms so both
+  decide the rollover from the same number. A blank (`""`) duration threshold stored on
+  Optimus Settings no longer makes `float("")` raise and silently reset the whole config
+  to defaults, and `_resolve_threshold_ms` falls back to the default on any non-numeric
+  value instead of raising. The prose fallback no longer skips a real duration written
+  after a count ("top 3 2400ms" now rolls over). Plus cleanup: a dead import removed, and
+  the remaining render helpers read the single `DEFAULT_DISPLAY_THRESHOLD_MS` default. The
+  Desk duration picker's comment is corrected: it matches the report's unit decision but
+  its seconds can differ by 0.01s on a whole-ms value ending in 5 (the report is the
+  source of truth). The per-row hot / total-time danger flags now use the same
+  round-based decision as the display (via the shared `_rolls_over_to_seconds`), so a row
+  that displays "1.00s" can't be left un-flagged, and the format-before-em-dash order is
+  enforced in one `_finalize_prose` helper instead of four hand-ordered copies.
+
+## [0.12.48] - 2026-09-10
+
+### Fixed
+
+- **"Keep every duration in milliseconds" now actually works from Optimus Settings.**
+  Setting "Render durations in seconds above (ms)" to 0 is meant to switch the seconds
+  rollover off, but a stored 0 was being turned back into the 1000 default before any
+  report saw it, so the switch did nothing. A 0 saved in the settings is now preserved
+  all the way through, exactly like the sibling "minimum action duration" field already
+  was, so the whole report stays in milliseconds when you ask it to.
+- **URLs inside a finding no longer get mangled.** The step that rewrites a duration like
+  "1500ms" into "1.50s" was also rewriting the same pattern where it appears inside a
+  browser-reported web address (for example a link ending in "query-2000ms-test" or a
+  "?t=1500ms" query string), which quietly broke the link. It now leaves web addresses
+  alone while still converting real durations in the surrounding text.
+- **The AI fix suggestion sees durations in the same unit as the report.** The context
+  Optimus sends the model was always formatted with the default 1000ms rollover, so on a
+  Strict, Relaxed or "off" profile the model read different numbers than the ones on
+  screen. It now uses the configured threshold.
+- **A cross-run speed improvement is no longer coloured like a warning.** In the line by
+  line comparison between two runs, the change column highlighted every difference of a
+  second or more in the same amber "slow" style, so a 1.6s improvement looked identical to
+  a 1.6s regression. The row already shows green for faster and red for slower, so the
+  change value now stays plain.
+- **A finding's title and its impact badge always agree.** The two were rounded from the
+  duration in slightly different ways, so right on a rounding boundary the title could read
+  "1.24s" while the badge beside it read "1.23s". Both now round the same way, and a
+  sub-millisecond improvement no longer shows as "-0.00ms". The frontend findings (slow
+  render, network overhead) were the worst case here, baking their title with truncation
+  while the badge rounded; they now round like everything else.
+- **The Optimus Session hot-path picker matches the report.** The Desk-side duration
+  formatter rounded to seconds from the raw value while the report now rounds from the whole
+  millisecond, so the picker and the report could show the same duration as "1.23s" in one
+  place and "1.24s" in the other. The picker now decides the unit the same way (rounding
+  from the whole millisecond); the final two-decimal seconds can still differ by 0.01s on
+  a whole-ms value ending in 5 (`toFixed` rounds half away, Python `%.2f` half to even),
+  and the report HTML remains the source of truth.
+- **Duration reformatting no longer reaches inside HTML attributes.** The render step that
+  rewrites "1500ms" into "1.50s" runs over the notes and summary HTML too; it now rewrites
+  only the visible text between tags, so a duration-like value inside an attribute (an inline
+  style, say) can't corrupt the markup.
+- **The hot-path picker strips a negative zero like the report.** A value that rounds to zero
+  now reads "0ms" on the Optimus Session form too, not "-0ms", matching the server formatter
+  it mirrors.
+
+### Internal
+
+- **The seconds-rollover threshold resolves in one place.** The boot payload and the AI fix
+  context each re-implemented the "missing value falls back to 1000" logic; that is now a
+  single accessor (`settings.display_threshold_ms`). The "0 disables it" rule lives once in
+  the settings resolver, and the boot payload and renderer read the already-resolved value
+  straight off the config rather than re-deriving it. (The renderer and the render-config
+  reader still carry a defensive 1000 fallback for a malformed/absent value, so the literal
+  default is not strictly single-sourced.)
+
+---
+
+## [0.12.47] - 2026-09-10
+
+### Changed
+
+- **Durations of a second or more now read in seconds, everywhere they appear.** One
+  second is 1000ms, so a value that reaches a full second reads as "1.50s" instead of
+  a hard-to-skim four-digit "1500ms". The main report tables already did this; this
+  extends the same rule to every other place a duration shows up: the Web Vitals table,
+  the per-page XHR and network figures, the call-tree panel, the line-level phase-2
+  timings, the session summary, the hot-path picker on the Optimus Session page and the
+  wording of the findings themselves (slow query, N+1, slow hot path, hook bottleneck,
+  slow background job, slow frontend render, network overhead and missing-index
+  suggestions). Anything under a second still reads in milliseconds. A single shared
+  helper (`humanize_duration_ms`) backs the finding and summary text so the wording
+  stays consistent. The same rollover is applied to the context Optimus sends the AI
+  when it drafts a fix so the model sees the numbers the way the report does.
+
+### Fixed
+
+- **More run-on sentences left by the em-dash sweep.** The v0.12.44 pass mended the
+  report template; this extends the same repair to the strings the em-dash removal
+  fused elsewhere: the floating widget, the analyzer descriptions (index suggestions,
+  EXPLAIN flags, call tree, redundant calls, top queries, N+1), the Optimus Settings
+  dialogs, the line-profile messages, the DB-dialect notice and the AI fix errors.
+- **One consistent way of writing a duration.** The report had drifted into three
+  slightly different duration styles; a value like 5.23 seconds could appear with or
+  without a space before the unit depending on where you looked, and a value sitting
+  right on the one-second line could round to seconds in one spot and stay in
+  milliseconds right beside it. All duration text now goes through one helper, so the
+  spacing, the rounding and the rollover point match everywhere in the report.
+- **"Turn the rollover off" now applies to the whole report.** Setting the threshold to
+  0 (keep everything in milliseconds) was honoured by the main tables but ignored by the
+  findings, KPIs, database tables and line-level timings, which fell back to the default.
+  A 0 is now respected on every surface, so the report can no longer show milliseconds in
+  one half and seconds in the other.
+- **The "Total time" danger colour no longer follows the display setting.** The headline
+  Total-time figure turned red based on the same "show durations in seconds above" knob,
+  so changing the display unit accidentally moved the alarm (nearly always red on the
+  default, never red on Relaxed). Danger now uses a real performance threshold that is
+  independent of how durations are displayed.
+
+---
+
+## [0.12.46] - 2026-09-09
+
+### Fixed
+
+- **The "Preparing report" progress bar no longer stacks on the Optimus Session
+  form.** Analyze publishes `optimus_progress` many times per run (fetch, EXPLAIN,
+  one per analyzer, render, complete) and the form's handler drove
+  `frm.dashboard.set_headline` on every tick. In this Frappe version `set_headline`
+  appends a new `.form-message` each call rather than replacing it, so the form
+  filled with a stack of "Preparing report N% ..." bars. The handler now updates a
+  single self-managed banner element in place (the same pattern already used for the
+  background-jobs drain banner), styled with Frappe's native `.form-message.blue`
+  theme classes so it fits the desk UI in light and dark mode. It is removed when
+  the session reaches Ready or Failed and on any refresh that shows a different or
+  a new session (it is tagged with its owning session), so a stale bar cannot
+  linger when you navigate away, while the banner for the session you are watching
+  keeps updating in place.
+- **The Phase 2 "Line profiling is armed" notice no longer stacks either.** It was
+  painted with `frm.set_intro`, which routes to the same `show_message` that appends
+  rather than replaces, so refreshing while a pass was Recording piled up duplicate
+  orange notices. It now uses the same single in-place banner helper and Frappe's
+  native orange theme.
+
+---
+
+## [0.12.45] - 2026-09-09
+
+### Added
+
+- **"Try our other AI tools" section, pairing Jarvis with Aerele Lens.** The report now shows
+  both tools as a matched side-by-side pair under the Jump-to nav. Jarvis (jarvis.aerele.in)
+  is introduced as an AI teammate for your business that connects your chat subscriptions,
+  API keys or local AI models and answers questions from your ERPNext data, so you make the
+  call and Jarvis does the work.
+- **Product logo on each companion card.** The Jarvis spark mark and the Aerele Lens
+  magnifier mark are both drawn inline as SVG, so the marks ship inside the report with no
+  remote assets and the saved-HTML offline guarantee is untouched.
+
+### Changed
+
+- **Companion cards now use the Jarvis brand colour.** Both the Jarvis and Aerele Lens cards
+  use the violet from jarvis.aerele.in (a light violet tint background with a violet rail and
+  call-to-action), so they read as one matched pair. Each card keeps the report's Fraunces
+  display serif and hairline rules and wraps to a stack on narrow widths and in print.
+- **Companion links open in a new tab.** Each call-to-action now carries
+  `target="_blank"` (with `rel="noopener"`), so a click opens the product site in a new tab
+  instead of navigating away from the report. Each link is labelled so screen readers
+  announce that it opens in a new tab.
+
+---
+
+## [0.12.44] - 2026-09-05
+
+### Fixed
+
+- **Report text broken by the em-dash sweep.** Removing every em dash in v0.12.42 blanked
+  or fused several user-visible strings in the HTML report. Restored them without em dashes.
+  The per-action and background-jobs totals rows now show "-" in the intentionally-suppressed
+  column instead of an empty cell that read as missing data. The AI fix badge reads
+  "Unverified: review before applying" again. The Slow-Queries empty state is two sentences
+  instead of a run-on. The "How to read this report" list uses colons and parentheses to set
+  off its inline examples. The shipped sample report under `docs/` got the same fixes.
+
+---
+
+## [0.12.43] - 2026-09-05
+
+### Changed
+
+- **Remove the comma before "and" across the app.** Comments, docstrings, settings
+  help text, the report template, user-facing strings and Markdown docs now follow the
+  house style of no comma before "and": a list of three or more reads "a, b and c" and
+  a clause is no longer preceded by a comma before "and" where the sentence reads on
+  naturally. This is a pure style pass with no behaviour change; the MIT `license.txt`
+  is left untouched.
+
+---
+
+## [0.12.42] - 2026-09-04
+
+### Changed
+
+- **Remove em dashes across the app.** Comments, docstrings, settings help text, the
+  report template and user-facing strings now use standard punctuation (a colon for
+  labels, headings and definitions; parentheses for a bracketed list) or simply drop
+  the dash where the sentence reads on naturally. Cells that mean "no value" render
+  blank instead of a dash and CHANGELOG release headers use the standard
+  `## [x.y.z] - date` form. The renderer's own `_strip_em` routine, which strips em
+  dashes from user-entered notes at render time, is unchanged.
+
+---
+
+## [0.12.41] - 2026-08-31
 
 ### Fixed
 
 - **Exclusion-mode classification now uses the installed-apps allowlist as ground
   truth instead of guessing from a name.** For six review rounds the
   application-vs-library decision swung between an installed-apps *backstop* and a
-  pure hardcoded *denylist*, and each denylist tweak just relocated the bug: an app
+  pure hardcoded *denylist* and each denylist tweak just relocated the bug: an app
   literally named like a bundled library (`redis`, `requests`, `pandas`) was hidden
   as framework; an out-of-bench checkout or a library not on the list was
   misclassified; and the PR's own promise ("only installed apps are treated as
   application code") wasn't actually implemented. Rewrote `is_framework_callsite`'s
   exclusion mode to consult `frappe.get_installed_apps()` (resolved ONCE per
   analyze via `base.installed_apps_allowlist()` and threaded into every classifying
-  analyzer — n_plus_one, redundant_calls, explain_flags, top_queries — and into
+  analyzer n_plus_one, redundant_calls, explain_flags, top_queries and into
   call_tree's hot-frame leaderboard): a callsite whose app root is an installed
   Frappe app (and not a framework/stock app) is the developer's code; everything
   else the developer can't patch. This makes an installed app named `redis`
-  actionable, a real `redis` library non-actionable, and an *unknown* library
+  actionable, a real `redis` library non-actionable and an *unknown* library
   correctly non-actionable with no denylist to maintain. Framework apps
-  (`frappe`/`erpnext`/…) are still checked first, and Server Scripts stay
-  actionable via an explicit carve-out (so the allowlist can't demote them —
+  (`frappe`/`erpnext`/…) are still checked first and Server Scripts stay
+  actionable via an explicit carve-out (so the allowlist can't demote them
   the regression that started this). Off-bench (frappe unavailable, e.g. the
   pure-Python unit suite) it falls back to the previous hardcoded heuristic, so
   existing tests are unchanged. Verified on `dev.local`. **The hot-frame side keys
   the allowlist on the RESOLVED app root** (`_last_app_segment`, the same
-  resolution the SQL side and the donut use) — not the raw first path segment,
+  resolution the SQL side and the donut use) not the raw first path segment,
   which would read `apps`/`home` for an `apps/`-prefixed or absolute path and
-  silently drop the user's own frames from the leaderboard / Slow Hot Path — and
+  silently drop the user's own frames from the leaderboard / Slow Hot Path and
   only fires in exclusion mode (a free-text tracked app that isn't installed is
   kept), with a truthy guard so an empty set falls back to the heuristic. Regression
   tests exercise the on-bench (`installed_apps` populated) path the pure-Python
@@ -57,14 +361,14 @@ versions may contain breaking changes — see migration notes below).
 
 ---
 
-## [0.12.40] — 2026-08-31
+## [0.12.40] - 2026-08-31
 
 ### Changed
 
 - **The SQL and hot-frame classifiers now share one third-party library list.**
   `call_tree._THIRD_PARTY_LIB_SEGMENTS` had drifted to a subset of
   `base._THIRD_PARTY_LIB_NAMES` (missing `rq`, `werkzeug`, `gunicorn`, `pytz`,
-  `dateutil`, `pyinstrument`) even though a comment claimed they mirrored — a
+  `dateutil`, `pyinstrument`) even though a comment claimed they mirrored a
   maintenance hazard that already bit once. Pointed `call_tree` at
   `base._THIRD_PARTY_LIB_NAMES` directly so the two surfaces can never disagree on
   whether a library is user code. Behavior-neutral: the six names were already
@@ -73,31 +377,31 @@ versions may contain breaking changes — see migration notes below).
 
 ---
 
-## [0.12.39] — 2026-08-31
+## [0.12.39] - 2026-08-31
 
 ### Fixed
 
 - **New-doc name resolution was dead for HTTP/Desk saves.** The feature that shows
   a doc's real save-assigned name (instead of the browser's `new-…` placeholder)
   did a read-modify-write of frappe's own `RECORDER_REQUEST_HASH` in
-  `after_request` — but for HTTP, `after_request` runs in `application()`'s
+  `after_request`: but for HTTP, `after_request` runs in `application()`'s
   `finally` **before** `frappe.recorder.dump()` (which runs later in the WSGI
   `ClosingIterator`, after the response), so the recorder hash wasn't written yet:
   the `hget` returned `None` and the resolved name was silently dropped (the
-  `isinstance` guard hid it, and the tests inject the field directly so CI stayed
+  `isinstance` guard hid it and the tests inject the field directly so CI stayed
   green). A stale code comment even asserted the opposite ordering. Rewrote it to
   write the resolved `{doctype, name}` to an **Optimus-owned sidecar key**
   (`redis_keys.resolved_doc`, mirroring the `infra` sidecar) and **merge it at
-  analyze time** — which removes the ordering dependency entirely and takes the
+  analyze time**: which removes the ordering dependency entirely and takes the
   read-modify-write off the request hot path. Corrected the `hooks.py` ordering
   comment. Added source-inspection regression guards
   (`TestResolvedDocSidecarWiring`) that close the coverage gap that let this ship
   green: the write must ride the sidecar and never re-introduce the recorder-hash
-  `hset`, and analyze must merge + clean it up.
+  `hset` and analyze must merge + clean it up.
 
 ---
 
-## [0.12.38] — 2026-08-28
+## [0.12.38] - 2026-08-28
 
 ### Added
 
@@ -110,21 +414,21 @@ versions may contain breaking changes — see migration notes below).
 - **Tracked Apps now scopes the call_tree findings, not just the SQL findings.**
   When *Optimus Settings ▸ Tracked Apps* is set, the inclusion-mode classifier
   already restricted the N+1 / redundant-call / EXPLAIN / top-query findings to
-  those apps — but the call_tree findings (Repeated Hot Frame, Slow Hot Path, Hook
+  those apps but the call_tree findings (Repeated Hot Frame, Slow Hot Path, Hook
   Bottleneck, Slow Background Job) and the hot-frames leaderboard ignored it and
   still surfaced frames from every app. Plumbed the tracked-apps set into
   call_tree's two frame gatekeepers (`_is_pure_helper_frame` /
   `_is_walker_plumbing_frame`) so a frame outside the tracked apps is treated as
-  out-of-scope plumbing — the walker descends past it to your code, exactly as it
+  out-of-scope plumbing the walker descends past it to your code, exactly as it
   already does for framework frames. Reuses the same `is_framework_callsite`
   inclusion decision the SQL side uses, so both surfaces agree. Empty Tracked
   Apps → profile everything (unchanged default). Verified end-to-end: with
   `Tracked Apps = ["myapp"]`, only `myapp` frames appear as findings and in the
-  hot-frames leaderboard. **Server Scripts are exempt** — they're the developer's
+  hot-frames leaderboard. **Server Scripts are exempt**: they're the developer's
   own optimizable code and live in the database, not in any app, so their findings
   stay actionable on both surfaces even when Tracked Apps is set. **Not yet
   scoped:** the Phase-2 line-profile candidate picker still offers hot frames from
-  any app — a follow-up.
+  any app a follow-up.
 
 ### Changed
 
@@ -138,7 +442,7 @@ versions may contain breaking changes — see migration notes below).
 
 - **Reverted the report masthead's top-right document name.** The header's
   top-right corner showed the touched document (doctype as the heading + document
-  name below it); reverted to the previous behaviour — it now shows the session
+  name below it); reverted to the previous behaviour it now shows the session
   title. The per-action "Document:" breadcrumb further down the report is
   unchanged. (Removed the `primary_doc` computation and the `.masthead-docname`
   markup/CSS.)
@@ -146,13 +450,13 @@ versions may contain breaking changes — see migration notes below).
 - **Reverted the callsite classifier to the proven `main` approach.** The
   in-progress rewrite on this branch (the 0.12.37 classifier unification plus the
   bench-apps backstop / installed-apps rescue) traded simplicity for edge-case
-  handling and, under review, introduced regressions of its own — most notably
+  handling and, under review, introduced regressions of its own most notably
   demoting real Server Script N+1s to non-actionable Observations on live sites.
   Rather than layer more special-casing on top (an angle-bracket sentinel
   carve-out, an out-of-bench lib fallback, a shared `_is_third_party_path`), we
   restored `base.is_framework_callsite` and `call_tree._is_pure_helper_frame` /
   `_top_level_app` to `main`'s simpler substring-based classification: match
-  framework app names, `site-packages`, and a known-library list, else treat the
+  framework app names, `site-packages` and a known-library list, else treat the
   frame as the user's own code. Server Scripts are correctly actionable again by
   falling through to that default.
 
@@ -162,14 +466,14 @@ versions may contain breaking changes — see migration notes below).
   too).** `is_framework_callsite` matched a `FRAMEWORK_APPS` name as a substring
   anywhere (`norm.startswith("crm/") or "/crm/" in norm`), so a user app's
   submodule named like a framework app (`mybiz/mybiz/crm/lead_utils.py`), the
-  standard `/home/frappe/…` server home, and `acme/acme/payments/…` were all
+  standard `/home/frappe/…` server home and `acme/acme/payments/…` were all
   demoted to non-actionable Observations. Now framework apps match on the
   **resolved app root** only (the boundary-anchored `apps/<app>/` segment via
-  `_last_app_segment`, else the top segment) — never mid-path — plus a user-app
+  `_last_app_segment`, else the top segment) never mid-path plus a user-app
   guard so a vendored lib under `apps/<app>/…/requests/…` stays the user's code.
-  Real framework roots, `site-packages`, pyinstrument-stripped libs, and
+  Real framework roots, `site-packages`, pyinstrument-stripped libs and
   out-of-bench absolute lib paths still classify correctly. (One narrow residual:
-  a lib vendored under a *pyinstrument-stripped* user path — no `apps/` prefix —
+  a lib vendored under a *pyinstrument-stripped* user path no `apps/` prefix
   is still substring-matched; rare and ambiguous.)
 
 - **Third-party libraries could leak into the hot-frame leaderboard.** In default
@@ -183,9 +487,9 @@ versions may contain breaking changes — see migration notes below).
 - **Slow-path / hook / background-job findings inside Server Scripts were silently
   dropped on real sites.** The Slow-Hot-Path walker's Server Script carve-out
   (`_is_walker_plumbing_frame`) matched `<serverscript-` (trailing hyphen), but
-  Frappe's `safe_exec` emits `<serverscript>` (bare) or `<serverscript>: <name>` —
+  Frappe's `safe_exec` emits `<serverscript>` (bare) or `<serverscript>: <name>`:
   never the hyphenated form. So on live sites the carve-out never fired, Server
-  Script frames were treated as plumbing, and no Slow Hot Path / Hook Bottleneck /
+  Script frames were treated as plumbing and no Slow Hot Path / Hook Bottleneck /
   Slow Background Job finding ever surfaced inside a Server Script body (a
   long-standing bug; the Tracked-Apps work touched this line and a test using the
   obsolete `<serverscript-N>` shape masked it). Now matches the `<serverscript`
@@ -197,7 +501,7 @@ versions may contain breaking changes — see migration notes below).
   powers Tracked Apps inclusion mode) resolved the app with a first-match
   `.find("apps/")`, so a bench installed under `/opt/apps/frappe-bench/apps/<app>/`
   (or a multi-bench server holding several benches under one `apps/` dir) bucketed
-  frames under the bogus `frappe-bench` prefix — and, worse, Tracked Apps failed
+  frames under the bogus `frappe-bench` prefix and, worse, Tracked Apps failed
   to match a tracked app on such a bench (its findings were hidden as framework).
   Both now go through one boundary-anchored, last-`apps/`-wins parser
   (`_last_app_segment`), so the real app resolves and an app whose own name ends
@@ -206,20 +510,20 @@ versions may contain breaking changes — see migration notes below).
 
 - **Widened the third-party library list so N+1s inside common libraries are not
   blamed on the developer.** `main`'s classifier only shows a library frame as a
-  (non-actionable) Observation if the library is on a hardcoded list, and that
-  list was short — so a query looping inside `pandas`, `redis`, `requests`,
+  (non-actionable) Observation if the library is on a hardcoded list and that
+  list was short so a query looping inside `pandas`, `redis`, `requests`,
   `numpy`, `jinja2`, `cryptography`, `psycopg2`, `boto3`, … was reported as an
   actionable user N+1 the developer can't fix. Expanded the library list
   (`base._THIRD_PARTY_LIB_NAMES`) to cover the common
   data/DB/cache/HTTP/serialization/crypto libraries, matched on the **resolved
-  app root** (first segment) like `call_tree._THIRD_PARTY_LIB_SEGMENTS` — **not**
+  app root** (first segment) like `call_tree._THIRD_PARTY_LIB_SEGMENTS`: **not**
   a substring anywhere. This matters because frappe's recorder strips the `apps/`
   prefix, so a SQL callsite is `<app>/<app>/…`; a substring match would blame a
   user module merely *named* like a library (`myapp/myapp/requests/api.py`) as
   framework and hide a real, fixable N+1. Out-of-bench absolute paths keep a
   segment-anywhere fallback (`/opt/pkgs/rq/…`). No backstop, no installed-apps
   lookup. Verified end-to-end: a `pandas`/`redis` loop renders as "Framework N+1 ·
-  Observation" while a Server Script, the user's own app, and a user module named
+  Observation" while a Server Script, the user's own app and a user module named
   like a library all stay actionable.
 
 - **Legacy N+1 backfill no longer mislabels a cumulative number as loop-scoped.**
@@ -228,7 +532,7 @@ versions may contain breaking changes — see migration notes below).
   `run_count`); a pre-loop-scoping finding whose `estimated_impact_ms` is the
   cross-request cumulative total is left unlabelled rather than misdescribed.
 
-## [0.12.37] — 2026-08-26
+## [0.12.37] - 2026-08-26
 
 ### Fixed
 
@@ -236,19 +540,19 @@ versions may contain breaking changes — see migration notes below).
   is user code.** `call_tree._is_pure_helper_frame` (hot-frame findings) gained an
   installed-apps backstop and a larger third-party denylist, but
   `base.is_framework_callsite` (N+1 / redundant-call / EXPLAIN findings) kept a
-  smaller, separate list and no backstop — so an N+1 inside a lib like `requests`,
+  smaller, separate list and no backstop so an N+1 inside a lib like `requests`,
   `numpy`, `redis`, `jinja2`, or `click` was reported as an actionable *user* N+1
   by one path while the same frame was dropped as framework plumbing by the other.
   The two hand-maintained denylists are now **one canonical
   `base.THIRD_PARTY_LIB_SEGMENTS`** (the union of both, matched identically on the
-  exact top path segment), and `is_framework_callsite` gained the same
-  installed-apps rescue call_tree has — ordered after the framework-app check so
-  `frappe`/`erpnext` stay framework, and a no-op off-bench. An installed app named
+  exact top path segment) and `is_framework_callsite` gained the same
+  installed-apps rescue call_tree has ordered after the framework-app check so
+  `frappe`/`erpnext` stay framework and a no-op off-bench. An installed app named
   like a library (`babel`, `redis`) is still correctly treated as user code on
   both surfaces. Also corrects now-stale comments that described substring
   matching (the lists have matched exact top segments since 0.12.x).
 
-## [0.12.36] — 2026-08-26
+## [0.12.36] - 2026-08-26
 
 ### Fixed
 
@@ -258,7 +562,7 @@ versions may contain breaking changes — see migration notes below).
   impact renderer with no finding-type guard. So an observation-only finding
   (e.g. **Framework N+1**, which the verb map even labels "Eliminate the N+1
   query (framework code)") could sort into the top-3 and render under "Fix these
-  first" with `est. saving` = its cumulative time — directly contradicting its
+  first" with `est. saving` = its cumulative time directly contradicting its
   own TL;DR hero ("usually not something you can change") and Observations card.
   The same list is also the *ungrouped* one, so two findings that root-cause-group
   into a single card (an N+1 and a Slow Query at the same callsite) double-listed
@@ -275,7 +579,7 @@ versions may contain breaking changes — see migration notes below).
   regression test now misconfigures the setting to 1 and asserts a
   once-per-request query across 50 requests still produces no finding.
 
-## [0.12.35] — 2026-08-25
+## [0.12.35] - 2026-08-25
 
 ### Fixed
 
@@ -285,26 +589,26 @@ versions may contain breaking changes — see migration notes below).
   `babel`, `markdown`, `click`, `redis`) *before* the installed-apps backstop, so
   a site with an app literally named `babel`/`markdown` had its pyinstrument-
   stripped frames dropped as plumbing. The installed-apps set is now consulted
-  first as a positive rescue — an installed app is the user's own code and always
+  first as a positive rescue an installed app is the user's own code and always
   wins over the heuristic lib match.
 
-## [0.12.34] — 2026-08-25
+## [0.12.34] - 2026-08-25
 
 ### Added
 
 - **The "Document:" breadcrumb resolves a new doc's real name.** When a flow
   creates a document, the insert request only knows Frappe's throwaway
   `new-<doctype>-<random>` placeholder, while the later submit/cancel already
-  carry the permanent name (e.g. `SAL-ORD-2026-00042`) — so the same document
+  carry the permanent name (e.g. `SAL-ORD-2026-00042`) so the same document
   read inconsistently across a session. `after_request` now captures the real
   name the save assigned (from the response) and stashes it on the recording
   (`resolved_target_doc`); the renderer replaces the placeholder with it. Only
   new-doc saves in an active session write it, it rides on the recording (no new
-  Redis key), and old sessions gracefully fall back to the placeholder. Note:
-  this real name shows in **both** reports — consistent with submit/cancel, which
+  Redis key) and old sessions gracefully fall back to the placeholder. Note:
+  this real name shows in **both** reports consistent with submit/cancel, which
   already did; ask if you want document names redacted from the Safe report.
 
-## [0.12.33] — 2026-08-25
+## [0.12.33] - 2026-08-25
 
 ### Fixed
 
@@ -326,7 +630,7 @@ versions may contain breaking changes — see migration notes below).
   - `_finding_to_dict` normalizes a non-object `technical_detail_json` (a stray
     `null`/list) to an empty dict, so one malformed finding can't crash the render.
 
-## [0.12.32] — 2026-08-25
+## [0.12.32] - 2026-08-25
 
 ### Fixed
 
@@ -335,25 +639,25 @@ versions may contain breaking changes — see migration notes below).
   `table.data td code` guard now bounds every code cell to its column and wraps
   it at any character across *all* data tables (XHR timing, Web Vitals, orphaned
   XHRs, DB tables, flat queries, …). The load-bearing bit is `display:
-  inline-block` — `max-width` is inert on a bare inline `<code>`, which is why the
+  inline-block`: `max-width` is inert on a bare inline `<code>`, which is why the
   bug kept recurring when patched one table at a time. The XHR-timing table also
   gets an explicit URL-column width so it can't be squeezed to a sliver.
 
-## [0.12.31] — 2026-08-25
+## [0.12.31] - 2026-08-25
 
 ### Fixed
 
 - **Re-rendering an old report could mislabel a user N+1 as unfixable framework
   code.** 0.12.30 routed the TL;DR hero on `impact_scope_label`, a field absent
-  from sessions analyzed before it shipped — so a legacy user N+1 fell into the
+  from sessions analyzed before it shipped so a legacy user N+1 fell into the
   framework branch on **Regenerate reports**. The hero now routes on the stable
-  `finding_type` (present on every finding), and the card backfills
+  `finding_type` (present on every finding) and the card backfills
   `impact_scope_label` from it, so hero and card agree on legacy re-renders.
 - **App-path classification misread several bench layouts.** The `apps/` marker
   is now matched only at a path boundary and on the **last** `apps/` segment, so
   a bench installed under an `apps`-containing directory (`/opt/apps/…`) still
   resolves the real app (core framework code is no longer flagged as user code),
-  an app whose name ends in `apps` (`webapps`) isn't dropped, and a tracked app
+  an app whose name ends in `apps` (`webapps`) isn't dropped and a tracked app
   with such a name is still recognised. A third-party lib in an app-local venv
   (`apps/<app>/.venv/…/site-packages/…`) is classified before the user-app check
   so it stays library code, while a directory vendored under a user app and named
@@ -367,7 +671,7 @@ versions may contain breaking changes — see migration notes below).
   (per request/job) instead of the process lifetime, so a worker picks up an
   install/uninstall on its next job.
 
-## [0.12.30] — 2026-08-24
+## [0.12.30] - 2026-08-24
 
 ### Fixed
 
@@ -376,7 +680,7 @@ versions may contain breaking changes — see migration notes below).
   decorator line (CPython 3.11+), so the narrowed self-time snippet rendered the
   decorator rather than the signature. The card now shows the decorator line(s)
   *through* the `def` and moves the highlight + `file:line` onto the `def`
-  (e.g. `sales_order.py:795 · calculate_discount`). Render-only — re-run the
+  (e.g. `sales_order.py:795 · calculate_discount`). Render-only re-run the
   flow or use **Regenerate reports** to see it on existing sessions.
 - **Framework N+1 could hijack the TL;DR hero with actionable wording.** A Low
   Framework N+1 (Frappe's own code, not user-fixable) could sort into the hero
@@ -403,9 +707,9 @@ versions may contain breaking changes — see migration notes below).
   `>= 2`; `<1ms` instead of a misleading `0ms`; dead `avg_ms` / `variant_count` /
   `all_variants` removed; shared `_p95`. Behaviour-preserving.
 
-## [0.12.26] — 2026-05-25
+## [0.12.26] - 2026-05-25
 
-**Renderer extraction COMPLETE — `finding_enrichment` phase 3 is the
+**Renderer extraction COMPLETE `finding_enrichment` phase 3 is the
 final extraction. The renderer-package roadmap is fully closed.**
 
 The HIGH-coupling subset that v0.12.16 documented as "deferred until
@@ -428,36 +732,36 @@ a clean independent extraction; today's PR moves the remaining 5 +
 8 functions + 1 constant from `_internal.py` →
 `optimus/renderer/finding_enrichment.py`:
 
-- `_find_call_line_in_function_body` — AST-walker for finding a
+- `_find_call_line_in_function_body`: AST-walker for finding a
   callee's call line inside a parent function. Uses `_resolve_source_path`
   (lazy from `source.py`).
-- `_retarget_phase1_callsites_to_drilldown_leaf` — re-aim phase-1
+- `_retarget_phase1_callsites_to_drilldown_leaf`: re-aim phase-1
   finding callsites at the call site of the deepest user-code frame
   in their drill-down chain. Uses `_find_call_line_in_function_body`
   + `_read_source_snippet` + `_bench_relative_display`.
-- `_finding_to_dict` (~200 LOC) — the main render-dict builder.
+- `_finding_to_dict` (~200 LOC) the main render-dict builder.
   Flattens a `Optimus Finding` child row, parses the JSON detail
   blob, synthesises a unified `callsite` shape, lazily attaches
   source snippets, handles Server Script Desk-link rewriting,
   builds the LLM-fix block.
-- `_attach_representative_callsites` — attach a representative
+- `_attach_representative_callsites`: attach a representative
   callsite (+ `is_representative` flag) to SQL red-flag findings
   by matching their normalized query against the recording calls.
   Uses `walk_callsite` (lazy from `optimus.analyzers.base`),
   `_resolve_source_path`, `_bench_relative_display`,
   `_read_source_snippet`.
-- `_markdown_to_safe_html` — render Markdown → sanitised HTML for
+- `_markdown_to_safe_html`: render Markdown → sanitised HTML for
   embedding in the report. Lazy `frappe.utils.markdown` /
   `sanitize_html` + `_highlight_diff_html` (from `syntax.py`).
-- `_read_function_body_snippet` — read a whole function body
+- `_read_function_body_snippet`: read a whole function body
   starting from its `def` line. Used for self-time hot-path
   findings. Lazy `_resolve_source_path` + `_SNIPPET_TRUNCATE_CHARS`
   (from `source.py`) + `optimus.server_script_source` lazy import.
-- `_expand_self_time_snippets` — for Slow Hot Path findings with
+- `_expand_self_time_snippets`: for Slow Hot Path findings with
   empty `drilldown_chain`, narrow the smoking-gun snippet to the
   function's signature line and flag `self_time_no_pinpoint`.
   Uses `_read_function_body_snippet`.
-- `_SQL_REDFLAG_FINDING_TYPES` constant — used by
+- `_SQL_REDFLAG_FINDING_TYPES` constant used by
   `_attach_representative_callsites`.
 
 Out of `optimus/renderer/_internal.py` (now ~2,265 LOC; was ~2,928),
@@ -467,17 +771,17 @@ from ~375 LOC → ~995 LOC).
 ### Implementation
 
 - **Lazy imports of sibling submodules** inside each function body
-  rather than at module-top. Same pattern as phase 2 — keeps the
+  rather than at module-top. Same pattern as phase 2 keeps the
   submodule free of circular import risk (`_internal.py` re-imports
   ALL phase-1/2/3 names from `finding_enrichment.py`).
 - **Standard back-import block** at the top of `_internal.py`
   re-imports all 8 new names + the constant so call sites
   (including `analyze.py:_finding_to_dict` + `:_markdown_to_safe_html`
   via `renderer.X` package shim) resolve unchanged.
-- **Structural-snapshot canary stays byte-identical** — no fixture
+- **Structural-snapshot canary stays byte-identical**: no fixture
   regeneration needed. Confirmed by 14 tests in
   `test_renderer_structure_snapshot.py`.
-- **Public-API contract preserved** — the
+- **Public-API contract preserved**: the
   `test_renderer_structure_snapshot.py:TestPublicAPIPreserved` block
   tests `_finding_to_dict`, `_markdown_to_safe_html`,
   `_read_function_body_snippet`, all still resolve via `renderer.X`
@@ -499,12 +803,12 @@ from ~375 LOC → ~995 LOC).
 
 The only thing left in `_internal.py` is the `render()` orchestrator
 itself + its immediate inline helpers. The README's "keep integrated"
-guidance for that final 800-LOC function still holds — splitting
+guidance for that final 800-LOC function still holds splitting
 it across submodules would create circular dependencies.
 
 ### Unchanged
 
-- Behaviour identical — every call site resolves the same function
+- Behaviour identical every call site resolves the same function
   through the back-import shim.
 - `analyze.py` callers of `renderer._finding_to_dict` and
   `renderer._markdown_to_safe_html` stay green without changes.
@@ -515,22 +819,22 @@ No behaviour change. Pure refactor. Unit suite stays at 1870.
 
 ---
 
-## [0.12.25] — 2026-05-25
+## [0.12.25] - 2026-05-25
 
-**Janitor proactive envelope-version census — per-key visibility
+**Janitor proactive envelope-version census per-key visibility
 complement to v0.12.18's sentinel sweep.**
 
 The v0.12.18 release shipped `_sweep_schema_drift` (sentinel-level
 signal: "schema version on disk differs from the code's"). This
 release adds the follow-up signal: "OK how many cached values are
-actually stale?". Useful immediately after a schema bump — operators
+actually stale?". Useful immediately after a schema bump operators
 see "5 of 12 session_meta values are still at envelope v0" and can
 plan cleanup vs. let-them-age-out without waiting for per-read
 `redis.schema_drift` events to accumulate one-by-one.
 
 ### Added
 
-- **NEW `janitor._sweep_envelope_versions()`** — per-key census
+- **NEW `janitor._sweep_envelope_versions()`**: per-key census
   across the `session_meta` cache (the v0.12.21 rollout target).
   Scans `profiler:session:*:meta`, reads each value via
   `frappe.cache.get_value`, unwraps via `redis_schema.unwrap_value`,
@@ -548,13 +852,13 @@ plan cleanup vs. let-them-age-out without waiting for per-read
   the sibling-sweep pattern).
 - **NEW `optimus/tests/test_janitor_envelope_census.py`** (~150
   LOC, 11 tests across 3 classes):
-  - `TestEmitDecisionMatrix` (6 tests) — the emit-or-skip decision
+  - `TestEmitDecisionMatrix` (6 tests) the emit-or-skip decision
     distilled to a pure function (`_emit_decision`). Empty bench,
     all-current, legacy-only, drift-only, mixed, only-legacy.
-  - `TestSweepSourceMatchesDecisionMatrix` (3 tests) — source-grep
+  - `TestSweepSourceMatchesDecisionMatrix` (3 tests) source-grep
     canaries: `total == 0` guard present, `(legacy + drift) == 0`
     gate present, event name is `janitor.envelope_version_census`.
-  - `TestSweepWiringInDailyCron` (2 tests) — source-grep canaries
+  - `TestSweepWiringInDailyCron` (2 tests) source-grep canaries
     on the wiring and the scan pattern.
 
 ### Why source-inspection tests (no in-process mocking)
@@ -562,11 +866,11 @@ plan cleanup vs. let-them-age-out without waiting for per-read
 The sweep depends on a live `frappe.cache.get_redis_connection` +
 `frappe.cache.scan` + per-key `frappe.cache.get_value` pipeline.
 Mocking that pipeline in pure-pytest is fragile (the conftest's
-`SimpleNamespace` stub lacks `get_redis_connection`, and
+`SimpleNamespace` stub lacks `get_redis_connection` and
 `mock.patch.object` replacements don't survive cross-test isolation
 in the full suite when other tests have left state behind). The
 integration suite (`tests_integration/`) is the right place for the
-end-to-end execution test against real Redis — out of scope today.
+end-to-end execution test against real Redis out of scope today.
 
 The pure-function `_emit_decision` covers the logic-level contract;
 the source-grep canaries cover the wiring contract. Together they
@@ -579,7 +883,7 @@ adds a new daily-cron pass. Unit suite stays at 1859 + 11 new = 1870.
 
 ---
 
-## [0.12.24] — 2026-05-25
+## [0.12.24] - 2026-05-25
 
 **`session.py` local key helpers retired in favour of
 `optimus.redis_keys.session_*` aliases.**
@@ -594,7 +898,7 @@ LP capture.
 
 ### Changed
 
-- **`optimus/session.py`** — 5 local key helpers (`_active_key`,
+- **`optimus/session.py`**: 5 local key helpers (`_active_key`,
   `_meta_key`, `_recordings_key`, `_pending_jobs_key`, `_jobs_key`)
   replaced with module-level aliases to the v0.12.0 redis_keys
   equivalents:
@@ -630,10 +934,10 @@ On-disk Redis values from pre-v0.12.24 benches resolve unchanged.
 
 ### Unchanged
 
-- The v0.12.0 `test_redis_audit.py` drift checker — keys built via
+- The v0.12.0 `test_redis_audit.py` drift checker keys built via
   the alias are reached through `redis_keys.session_*`, which the
   audit's allow-list already covers.
-- Behaviour identical — every cache write/read produces the same
+- Behaviour identical every cache write/read produces the same
   key, just resolved through the centralized module.
 
 ### Compatibility
@@ -642,9 +946,9 @@ Pure cleanup. No behaviour change. Unit suite stays at 1859.
 
 ---
 
-## [0.12.23] — 2026-05-25
+## [0.12.23] - 2026-05-25
 
-**Renderer extraction — NEW `source_resolution.py` submodule. Prep work
+**Renderer extraction NEW `source_resolution.py` submodule. Prep work
 for finding_enrichment phase 3.**
 
 The HIGH-coupling finding-enrichment subset (`_finding_to_dict`,
@@ -659,20 +963,20 @@ family.
 
 Six functions from `_internal.py` → `optimus/renderer/source_resolution.py`:
 
-- `_action_dotted_entry(action)` — derive an action's dotted entry-
+- `_action_dotted_entry(action)`: derive an action's dotted entry-
   point path (RQ Job: method; HTTP `/api/method/<dotted>`: dotted).
-- `_skip_decorators_to_def(abs_filename, start_lineno, fn_name)` —
+- `_skip_decorators_to_def(abs_filename, start_lineno, fn_name)`:
   walk past `@decorator` lines to land on `def <fn_name>` (Python
   3.11+ `co_firstlineno` points at the first decorator, not the def).
-- `_resolve_dotted_to_code(dotted)` — `(abs_filename, lineno,
+- `_resolve_dotted_to_code(dotted)`: `(abs_filename, lineno,
   func_name)` from a dotted module path. Uses `importlib` (NOT
-  `frappe.get_attr` — no live-site dependency).
-- `_bench_relative_display(abs_path)` — `apps/<app>/...` display form
+  `frappe.get_attr`: no live-site dependency).
+- `_bench_relative_display(abs_path)`: `apps/<app>/...` display form
   via `frappe.utils.get_bench_path`. Falls back to absolute.
-- `_action_entry_callsite(action, *, cache)` — full resolution:
+- `_action_entry_callsite(action, *, cache)`: full resolution:
   action → dotted → code → `{filename, _abs, lineno, function,
   source_snippet}`.
-- `_resolve_frame_key_to_callsite(function_key, *, cache)` — same
+- `_resolve_frame_key_to_callsite(function_key, *, cache)`: same
   but starting from a repeated-hot-frame key (`short_path::func`).
 
 Out of `optimus/renderer/_internal.py` (now ~2,919 LOC; was ~3,170),
@@ -684,7 +988,7 @@ into NEW `optimus/renderer/source_resolution.py` (~260 LOC).
   stdlib + sibling renderer submodules' `_read_source_snippet` /
   `_resolve_source_path` from `source.py`).
 - Lazy import of `frappe.utils.get_bench_path` inside
-  `_bench_relative_display` preserved — keeps the module importable
+  `_bench_relative_display` preserved keeps the module importable
   in non-bench contexts (pure-pytest).
 - Standard back-import block at the top of `_internal.py` re-imports
   all 6 names so call sites (including ~6 in-`_internal.py` callers
@@ -697,9 +1001,9 @@ into NEW `optimus/renderer/source_resolution.py` (~260 LOC).
 `finding_enrichment` phase 3 needs these helpers as a stable
 dependency. Two paths were possible:
 
-1. **Move them with phase 3** — would put 6 helpers + 5 finding-
+1. **Move them with phase 3**: would put 6 helpers + 5 finding-
    enrichment functions in the same PR, 11 moves at once.
-2. **Move them first** (this PR) — clean 6-function extraction
+2. **Move them first** (this PR) clean 6-function extraction
    today; phase 3 becomes a clean 5-function extraction tomorrow.
 
 Option 2 wins on reviewability and on testability (any regression in
@@ -708,13 +1012,13 @@ independently validated).
 
 ### Docs
 
-- `optimus/renderer/README.md` — current-layout block bumped to 9
+- `optimus/renderer/README.md`: current-layout block bumped to 9
   submodules; new `source_resolution.py` row added with the 6-
   function inventory.
 
 ### Unchanged
 
-- Behaviour identical — every call site resolves the same function
+- Behaviour identical every call site resolves the same function
   through the back-import shim.
 - 59 unit tests across `test_action_entry_callsite.py` (which
   exercises 5 of the 6 moved helpers via `renderer.X`) stay green
@@ -728,14 +1032,14 @@ No behaviour change. Pure refactor. Unit suite stays at 1859.
 
 ---
 
-## [0.12.22] — 2026-05-25
+## [0.12.22] - 2026-05-25
 
-**Docs — `docs/HMAC-ENVELOPE.md` specifies the future-scheme design
+**Docs `docs/HMAC-ENVELOPE.md` specifies the future-scheme design
 (v2 HMAC-SHA512, v3 AES-SIV, v4+ key rotation) using v0.12.14's
 1-byte version marker as the extension point.**
 
 The v0.12.14 release shipped the 1-byte HMAC scheme marker without
-specifying what future schemes look like — the marker was an extension
+specifying what future schemes look like the marker was an extension
 point but the extension semantics weren't documented. A future
 operator who needs SHA-512 (FIPS 140-3 compliance) or AES-SIV
 (encryption at rest in Redis) would have had to re-derive the design
@@ -743,21 +1047,21 @@ from scratch. This release pre-designs those paths.
 
 ### Added
 
-- **NEW `docs/HMAC-ENVELOPE.md`** — documents:
+- **NEW `docs/HMAC-ENVELOPE.md`**: documents:
   - The v0 (legacy, pre-v0.12.14) + v1 (current) byte layouts.
   - The backward-compat read path's single-HMAC-step + first-byte
     disambiguation, with the rationale for `\x01` as the marker
     (pickle never emits it; producer-compat table for msgpack /
     JSON / raw bytes).
-  - **Scheme v2 (HMAC-SHA512) implementation sketch** — handles
+  - **Scheme v2 (HMAC-SHA512) implementation sketch**: handles
     the 32 → 64 byte signature length change via two-attempt
     verify, preserves v0/v1 compat. Includes a defence-in-depth
     guard against attacker-crafted v0 blobs whose body starts with
     a future scheme marker.
-  - **Scheme v3 (AES-SIV authenticated encryption) sketch** — same
+  - **Scheme v3 (AES-SIV authenticated encryption) sketch**: same
     envelope shape as v1; SIV tag replaces HMAC; deterministic-
     encryption fits the multi-read Redis pattern.
-  - **Scheme v4+ (key rotation)** — marker low-bits carry a
+  - **Scheme v4+ (key rotation)**: marker low-bits carry a
     key-id; operator-driven extension requiring per-key-id secret
     resolution in `_hmac_secret`.
   - The existing v0.12.14 canary-test suite (~13 tests) + the
@@ -769,7 +1073,7 @@ from scratch. This release pre-designs those paths.
     could automate the re-sign post-bump.
   - **Out-of-scope deferrals**: nonce-based AEAD (AES-GCM /
     ChaCha20-Poly1305 don't fit the deterministic-retrieval
-    pattern); asymmetric signatures (Ed25519 — overkill for the
+    pattern); asymmetric signatures (Ed25519 overkill for the
     intra-bench trust model).
 
 ### Why pre-design
@@ -794,9 +1098,9 @@ No code change. Documentation-only PR. Unit suite stays at 1859.
 
 ---
 
-## [0.12.21] — 2026-05-25
+## [0.12.21] - 2026-05-25
 
-**Redis-schema rollout continues — `session_meta` is the fifth value
+**Redis-schema rollout continues `session_meta` is the fifth value
 migrated to the v0.12.0 `wrap_value` / `unwrap_value` envelope.**
 
 The session metadata dict (set by `api.start`, updated through the
@@ -820,31 +1124,31 @@ Previous phases: `settings_cache` (v0.12.11), `retention_backlog` +
 
 ### Why session_meta
 
-- **Hot path** — read on every recording's request/job hook;
+- **Hot path**: read on every recording's request/job hook;
   envelope overhead must be invisible. Single Redis GET +
   isinstance check.
-- **Stable dict shape** — fields documented in the docstring; the
+- **Stable dict shape**: fields documented in the docstring; the
   shape is the same v0.3.0+ contract, perfect for envelope.
-- **Single writer / single reader pair** — both inside `session.py`,
+- **Single writer / single reader pair**: both inside `session.py`,
   no cross-module coordination needed.
 
 ### Added
 
 - **NEW `optimus/tests/test_envelope_rollout_phase4.py`** (~155
   LOC, 5 tests):
-  - `test_set_session_meta_stores_envelope` — write-path canary.
-  - `test_get_session_meta_unwraps_new_envelope` — happy path.
-  - `test_get_session_meta_handles_legacy_bare_dict` — the
+  - `test_set_session_meta_stores_envelope`: write-path canary.
+  - `test_get_session_meta_unwraps_new_envelope`: happy path.
+  - `test_get_session_meta_handles_legacy_bare_dict`: the
     migration-safety contract: pre-v0.12.21 bare dicts resolve
     unchanged.
-  - `test_get_session_meta_returns_none_for_missing_key` — cache
+  - `test_get_session_meta_returns_none_for_missing_key`: cache
     miss case.
-  - `test_get_session_meta_returns_none_for_corrupt_non_dict` —
+  - `test_get_session_meta_returns_none_for_corrupt_non_dict`:
     defensive non-dict normalisation.
 
 ### Docs
 
-- `docs/REDIS-SCHEMA.md` — `profiler:session:<uuid>:meta` row
+- `docs/REDIS-SCHEMA.md`: `profiler:session:<uuid>:meta` row
   updated to reflect the envelope shape + the defensive
   normalisation note.
 
@@ -852,7 +1156,7 @@ Previous phases: `settings_cache` (v0.12.11), `retention_backlog` +
 
 - **Forward** (new readers, old writers): supported via
   `unwrap_value`'s legacy-detection branch.
-- **Backward** (old readers, new writers): NOT supported — an old
+- **Backward** (old readers, new writers): NOT supported an old
   reader would call `.get("session_uuid")` on the envelope dict and
   get `None` (the envelope dict has `_v` + `data`, not the meta
   fields), then treat the session as inactive. The session's
@@ -863,8 +1167,8 @@ Previous phases: `settings_cache` (v0.12.11), `retention_backlog` +
 
 ### Unchanged
 
-- `optimus/redis_schema.py` — envelope helpers ship as-is.
-- `session_recordings` (the per-session set of recording UUIDs) —
+- `optimus/redis_schema.py`: envelope helpers ship as-is.
+- `session_recordings` (the per-session set of recording UUIDs)
   stays unmigrated. Sets aren't a natural fit for the value envelope
   (the envelope wraps a single value; sets are member collections).
   Per-member wrapping would add overhead per recording without
@@ -875,21 +1179,21 @@ Integration suite unchanged at 39.
 
 ---
 
-## [0.12.20] — 2026-05-25
+## [0.12.20] - 2026-05-25
 
-**LP key-helper unification — Phase-2 line_profile capture now uses
+**LP key-helper unification Phase-2 line_profile capture now uses
 `optimus.redis_keys.lp_*` instead of its local key helpers.**
 
 The v0.12.0 release centralised every Redis key pattern in
 `optimus/redis_keys.py` and added drift-detection (`test_redis_audit.py`),
 but `optimus/line_profile/capture.py` kept its own `_active_key` /
 `_picks_key` / `_source_key` / `_samples_key` / `_budget_hit_key`
-helpers — deferred from v0.12.0 as cleanup. This release closes that
+helpers deferred from v0.12.0 as cleanup. This release closes that
 gap. Pure cleanup; zero behaviour change.
 
 ### Changed
 
-- **`optimus/line_profile/capture.py`** — top-of-module
+- **`optimus/line_profile/capture.py`**: top-of-module
   `from optimus import redis_keys as _redis_keys` added; the 5 local
   key helpers retired; ~16 call sites migrated to
   `_redis_keys.lp_active(user)` / `_redis_keys.lp_picks(run_uuid)` /
@@ -899,26 +1203,26 @@ gap. Pure cleanup; zero behaviour change.
 
 ### Why this matters
 
-- **Single source of truth** — `optimus/redis_keys.py` is the
+- **Single source of truth**: `optimus/redis_keys.py` is the
   documented "every key built here, every key found via
   `test_redis_audit.py`" location. The LP local helpers were the
   last surviving exception (per `[[reference_optimus_redis_schema]]`).
-- **Drift protection** — the v0.12.0 audit test's inline-key regex
+- **Drift protection**: the v0.12.0 audit test's inline-key regex
   scanned for f-string `profiler:*` patterns; the LP local helpers
   were f-strings, which is why they tripped the audit and got
   flagged on the deferred-work list.
-- **Byte-identical keys** — `_redis_keys.lp_active(user)` produces
+- **Byte-identical keys**: `_redis_keys.lp_active(user)` produces
   the EXACT same string (`profiler:lp:active:<user>`) the local
   helper did. On-disk Redis values from pre-v0.12.20 benches resolve
   unchanged.
 
 ### Unchanged
 
-- All v0.12.0 unit tests (`test_redis_audit.py` etc.) — they didn't
+- All v0.12.0 unit tests (`test_redis_audit.py` etc.) they didn't
   need to change because the key strings stayed identical.
-- `redis_keys.lp_*` functions in `optimus/redis_keys.py` — the
+- `redis_keys.lp_*` functions in `optimus/redis_keys.py`: the
   receiving side stays as the v0.12.0 documented shape.
-- Behaviour identical — every cache write/read produces the same
+- Behaviour identical every cache write/read produces the same
   key, just resolved through the centralized module.
 
 ### Compatibility
@@ -927,13 +1231,13 @@ Pure cleanup. No behaviour change. Unit suite stays at 1854.
 
 ---
 
-## [0.12.19] — 2026-05-25
+## [0.12.19] - 2026-05-25
 
-**Renderer extraction — `finding_enrichment` phase 2 (drill-down chain
+**Renderer extraction `finding_enrichment` phase 2 (drill-down chain
 attachers) ships alongside the existing phase 1. Same submodule.**
 
-The drill-down chain cluster — `_find_node_in_tree`,
-`_walk_drilldown_chain`, `_attach_drilldown_chains` — is a self-
+The drill-down chain cluster `_find_node_in_tree`,
+`_walk_drilldown_chain`, `_attach_drilldown_chains`: is a self-
 contained sub-cluster of the larger finding_enrichment family that
 the v0.12.16 docstring documented as "still in `_internal.py`". Today
 it moves into `finding_enrichment.py` alongside the phase 1 helpers.
@@ -942,15 +1246,15 @@ Same submodule because their architectural identity matches; the
 
 ### Moved
 
-- **`_find_node_in_tree(tree, basename, function)`** — depth-first
+- **`_find_node_in_tree(tree, basename, function)`**: depth-first
   walk a pyinstrument call tree for a `(basename, function)` match.
   Stdlib-only.
-- **`_walk_drilldown_chain(tree, callsite, ...)`** — hottest-child
+- **`_walk_drilldown_chain(tree, callsite, ...)`**: hottest-child
   traversal below a finding's origin frame. Uses
   `_find_node_in_tree` + lazy imports of
   `optimus.renderer.call_tree_renderer._ct_is_other_frame` and
   `optimus.analyzers.base.is_framework_callsite`.
-- **`_attach_drilldown_chains(findings, actions, tracked_apps)`** —
+- **`_attach_drilldown_chains(findings, actions, tracked_apps)`**:
   in-place attachment of the chain onto each finding's
   `technical_detail`. Uses `_walk_drilldown_chain` + `json.loads` for
   tree deserialisation.
@@ -966,7 +1270,7 @@ into existing `optimus/renderer/finding_enrichment.py` (extended from
   theoretically grow a dependency on finding_enrichment in the
   future; the lazy form makes that direction safe.
 - `is_framework_callsite` already lazy-loaded inside the original
-  function body — preserved.
+  function body preserved.
 - The standard back-import block at the top of `_internal.py`
   re-imports `_find_node_in_tree`, `_walk_drilldown_chain`,
   `_attach_drilldown_chains` so call sites in `render()` resolve
@@ -994,21 +1298,21 @@ Still in `_internal.py` pending phase 3:
 
 ### Docs
 
-- `optimus/renderer/README.md` — current-layout block updated
+- `optimus/renderer/README.md`: current-layout block updated
   (`finding_enrichment.py` now lists phase 1+2 contents); roadmap
   table marks `finding_enrichment` as ◐ phase 1+2 done, ~365 LOC
   remaining.
 
 ### Unchanged
 
-- Behaviour identical — every call site through `_internal.py`'s
+- Behaviour identical every call site through `_internal.py`'s
   shim resolves the function the same way.
 - All 62 unit tests across `test_drilldown_chain.py` +
   `test_finding_card_smoking_gun.py` (which exercise the moved
   functions via the `renderer.X` package surface) stay green without
   modification.
 - `test_renderer_structure_snapshot.py` (14 tests) stays green
-  without fixture regeneration — output HTML is byte-equivalent.
+  without fixture regeneration output HTML is byte-equivalent.
 
 ### Compatibility
 
@@ -1016,15 +1320,15 @@ No behaviour change. Pure refactor. Unit suite stays at 1854.
 
 ---
 
-## [0.12.18] — 2026-05-25
+## [0.12.18] - 2026-05-25
 
-**Janitor proactive schema-drift sweep — the daily cron now compares
+**Janitor proactive schema-drift sweep the daily cron now compares
 the persisted `optimus:schema_version` sentinel against the current
 `SCHEMA_VERSION` and emits one telemetry event per drift detection.**
 
 The v0.12.0 release introduced the `optimus:schema_version` sentinel
 written at app-import as the foundation for future migration paths.
-The sentinel was deliberately not READ by anything except the test —
+The sentinel was deliberately not READ by anything except the test
 "reactive cleanup-on-read is sufficient for the foundation. A future
 release can add a janitor pass that enumerates `profiler:*` keys and
 migrates / purges those with mismatched versions" (v0.12.0 docstring
@@ -1034,9 +1338,9 @@ shape would need per-value migrators).
 
 ### Added
 
-- **NEW `janitor._sweep_schema_drift()`** — pure-function sweep that
+- **NEW `janitor._sweep_schema_drift()`**: pure-function sweep that
   reads the sentinel via `read_schema_sentinel`, compares against
-  `SCHEMA_VERSION`, and on real drift:
+  `SCHEMA_VERSION` and on real drift:
   - Writes the current sentinel via `write_schema_sentinel` so the
     NEXT sweep sees the new value (single emit per drift).
   - Emits one `janitor.schema_sentinel_drift` telemetry event with
@@ -1044,7 +1348,7 @@ shape would need per-value migrators).
     current_version}`.
   - No-ops on the happy path (sentinel == current).
   - No-ops with sentinel-write only (no telemetry) on the fresh-
-    install path (sentinel is None) — that's the normal startup
+    install path (sentinel is None) that's the normal startup
     transition, not interesting enough to alert on.
 - **`sweep_old_sessions` wired** to call `_sweep_schema_drift` after
   the existing `_sweep_old_telemetry`. Wrapped in its own try/except
@@ -1052,16 +1356,16 @@ shape would need per-value migrators).
   (matching the sibling-sweep pattern).
 - **NEW `optimus/tests/test_janitor_schema_drift.py`** (~200 LOC,
   6 tests):
-  - `test_no_op_when_sentinel_matches_current` — happy path.
-  - `test_fresh_install_writes_sentinel_no_telemetry` — fresh
+  - `test_no_op_when_sentinel_matches_current`: happy path.
+  - `test_fresh_install_writes_sentinel_no_telemetry`: fresh
     install transition silently writes the sentinel.
-  - `test_post_upgrade_drift_emits_telemetry` — sentinel < current
+  - `test_post_upgrade_drift_emits_telemetry`: sentinel < current
     fires the telemetry warning.
-  - `test_post_downgrade_drift_emits_telemetry` — sentinel >
+  - `test_post_downgrade_drift_emits_telemetry`: sentinel >
     current fires symmetrically (catches operator downgrade).
-  - `test_sentinel_write_failure_swallowed` — Redis hiccup during
+  - `test_sentinel_write_failure_swallowed`: Redis hiccup during
     sentinel write doesn't propagate; telemetry still fires.
-  - `test_sweep_old_sessions_calls_sweep_schema_drift` — wiring
+  - `test_sweep_old_sessions_calls_sweep_schema_drift`: wiring
     canary on the cron entry point.
 
 ### Why visibility (not migration)
@@ -1077,10 +1381,10 @@ events flood the telemetry table.
 
 ### Unchanged
 
-- `optimus/redis_schema.py` — `read_schema_sentinel` /
+- `optimus/redis_schema.py`: `read_schema_sentinel` /
   `write_schema_sentinel` / `SCHEMA_VERSION` / `wrap_value` /
   `unwrap_value` all ship as-is.
-- `_sweep_orphan_redis_state`, `_sweep_old_telemetry` — the existing
+- `_sweep_orphan_redis_state`, `_sweep_old_telemetry`: the existing
   daily sweeps stay unchanged.
 
 ### Compatibility
@@ -1096,19 +1400,19 @@ Integration suite unchanged at 39.
 
 ---
 
-## [0.12.17] — 2026-05-25
+## [0.12.17] - 2026-05-25
 
-**Redis-schema rollout continues — `explain_cache` is the fourth
+**Redis-schema rollout continues `explain_cache` is the fourth
 value migrated to the v0.12.0 `wrap_value` / `unwrap_value` envelope.**
 
 Previous phases covered `settings_cache` (v0.12.11),
 `retention_backlog` + `onboarding_seen` (v0.12.13). This release adds
-`explain_cache` — the cross-session cache of EXPLAIN query results
+`explain_cache`: the cross-session cache of EXPLAIN query results
 that powers the analyzer's slow-query / missing-index detection.
 
 ### Changed
 
-- **`optimus/analyze.py`** — the EXPLAIN cache write/read pair around
+- **`optimus/analyze.py`**: the EXPLAIN cache write/read pair around
   line 1352-1380 now uses the envelope:
   - WRITE: `frappe.cache.set_value(shared_key,
     _redis_schema.wrap_value(result), expires_in_sec=cache_ttl)`.
@@ -1120,13 +1424,13 @@ that powers the analyzer's slow-query / missing-index detection.
 
 ### Why explain_cache
 
-- **Highest-frequency cache by call count** — every analyze run that
+- **Highest-frequency cache by call count**: every analyze run that
   touches a slow query checks here; the hit rate determines whether
   re-analyze is fast (~5s) or slow (~30s, runs EXPLAIN again).
-- **Most complex shape rolled out so far** — payload is
+- **Most complex shape rolled out so far**: payload is
   `list[dict]` (EXPLAIN row results from MariaDB); validates that
   the envelope preserves nested structure cleanly.
-- **TTL-bounded** — pre-v0.12.17 cached entries fall off the cache
+- **TTL-bounded**: pre-v0.12.17 cached entries fall off the cache
   naturally within `optimus_explain_cache_ttl_seconds` (default
   3600s); the legacy-shape backward-compat branch covers the brief
   window after deploy.
@@ -1135,15 +1439,15 @@ that powers the analyzer's slow-query / missing-index detection.
 
 - **NEW `optimus/tests/test_envelope_rollout_phase3.py`** (~110
   LOC, 5 tests):
-  - `TestExplainCacheEnvelopeRoundTrip` (3 tests) —
+  - `TestExplainCacheEnvelopeRoundTrip` (3 tests)
     list-of-dicts round-trip, empty-list round-trip, legacy
     bare-list pass-through (the migration-safety contract).
-  - `TestAnalyzeSourceUsesEnvelope` (2 tests) — source-grep canaries
+  - `TestAnalyzeSourceUsesEnvelope` (2 tests) source-grep canaries
     on the write + read sites.
 
 ### Docs
 
-- `docs/REDIS-SCHEMA.md` — `profiler:explain:<cache_key>` row updated
+- `docs/REDIS-SCHEMA.md`: `profiler:explain:<cache_key>` row updated
   to reflect the new envelope shape + legacy-compat note.
 
 ### Compatibility
@@ -1160,40 +1464,40 @@ that powers the analyzer's slow-query / missing-index detection.
 
 ### Unchanged
 
-- `optimus/redis_schema.py` — envelope helpers ship as-is.
+- `optimus/redis_schema.py`: envelope helpers ship as-is.
 - The remaining bare-shaped values (`analyze_inflight`, LP
   `picks`/`source`/`samples`/`active`, the session hash family, the
-  Frontend buckets) — future PRs roll out one at a time.
+  Frontend buckets) future PRs roll out one at a time.
 
 Unit suite: 1843 → 1848 (+5 from the new phase-3 test module).
 Integration suite unchanged at 39.
 
 ---
 
-## [0.12.16] — 2026-05-25
+## [0.12.16] - 2026-05-25
 
-**Renderer extraction — `finding_enrichment` phase 1 (the low-coupling
+**Renderer extraction `finding_enrichment` phase 1 (the low-coupling
 subset) is the eighth submodule out of `_internal.py`.**
 
 The full `finding_enrichment` cluster spans ~11 functions
 non-contiguously across ~1500 LOC of `_internal.py`. The previous
 batch documented this as a "defer to focused PR" item because of the
-high coupling. This release ships the **tight subset** — the 3 pure-
-function helpers that have minimal back-coupling — leaving the
+high coupling. This release ships the **tight subset**: the 3 pure-
+function helpers that have minimal back-coupling leaving the
 HIGH-coupling subset (`_finding_to_dict` family + AST walker + chain
 attachers) for a future PR.
 
 ### Moved
 
-- **`_root_cause_key(finding)`** — `(basename, function)` deepest-
+- **`_root_cause_key(finding)`**: `(basename, function)` deepest-
   user-code anchor for a finding. Stdlib-only.
-- **`_group_findings_by_root_cause(findings)`** — collapse findings
+- **`_group_findings_by_root_cause(findings)`**: collapse findings
   sharing a root cause into one primary + `sub_findings` list. Uses
   `_root_cause_key` + `_GROUPING_SEVERITY_RANK`.
-- **`_normalize_callsite(callsite)`** — normalize dict-or-string
+- **`_normalize_callsite(callsite)`**: normalize dict-or-string
   callsite shapes to a single `{filename, lineno, function}` dict.
   Stdlib-only.
-- **Constant `_GROUPING_SEVERITY_RANK`** — severity-rank lookup
+- **Constant `_GROUPING_SEVERITY_RANK`**: severity-rank lookup
   (different from `doc_event_renderer._SEVERITY_RANK`; different
   values + use).
 
@@ -1214,7 +1518,7 @@ The following stay in `_internal.py` pending a focused future PR with
 proper coupling-graph design:
 
 - `_finding_to_dict` (~200 LOC, the renderer's main finding-to-dict
-  builder — calls many internal helpers).
+  builder calls many internal helpers).
 - `_walk_drilldown_chain` + `_attach_drilldown_chains`.
 - `_attach_representative_callsites` (calls source-resolution
   helpers `_action_dotted_entry`, `_skip_decorators_to_def`,
@@ -1234,13 +1538,13 @@ for. Neither is a one-batch task.
 
 ### Docs
 
-- `optimus/renderer/README.md` — current-layout block bumped to 8
+- `optimus/renderer/README.md`: current-layout block bumped to 8
   submodules; roadmap table marks `finding_enrichment` as ◐ (phase 1
   done; rest deferred). Updated cluster-size estimate.
 
 ### Unchanged
 
-- Behaviour identical — every call site through `_internal.py`'s
+- Behaviour identical every call site through `_internal.py`'s
   shim resolves the function the same way.
 - All unit tests pass without modification (the 3 moved functions
   weren't directly imported by name in any test file outside
@@ -1252,9 +1556,9 @@ No behaviour change. Pure refactor. Unit suite stays at 1843.
 
 ---
 
-## [0.12.15] — 2026-05-25
+## [0.12.15] - 2026-05-25
 
-**Workflow cleanup — `.github/workflows/integration.yml`'s 9 hard-coded
+**Workflow cleanup `.github/workflows/integration.yml`'s 9 hard-coded
 `bench run-tests --module` invocations replaced with a single shell
 loop driven by an `INTEGRATION_MODULES` env list.**
 
@@ -1266,7 +1570,7 @@ shape stayed consistent.
 
 ### Changed
 
-- **`.github/workflows/integration.yml`** — the `Run the integration
+- **`.github/workflows/integration.yml`**: the `Run the integration
   suite` step now declares its modules in one place:
   ```yaml
   env:
@@ -1284,10 +1588,10 @@ shape stayed consistent.
   A shell `while read` loop iterates the list and invokes `bench
   run-tests` per module. Adding a future module is a one-line edit
   to the env list.
-- **Failure accumulation** — the pre-v0.12.15 implementation used
+- **Failure accumulation**: the pre-v0.12.15 implementation used
   `set -e`, which made the FIRST failing module abort all siblings
   (despite the YAML comment claiming otherwise). The new accumulator
-  pattern runs EVERY module then fails the workflow if any failed —
+  pattern runs EVERY module then fails the workflow if any failed
   a single push surfaces every failure at once. **Behaviour
   improvement**: more signal per CI run when a refactor breaks two
   unrelated test modules.
@@ -1297,10 +1601,10 @@ shape stayed consistent.
 - Per-module log artifacts (`integration-<module>.log`) still upload
   on failure via the existing artifact-upload step. No log path
   changes.
-- The 9 module names — same set, same order, exact same module paths.
+- The 9 module names same set, same order, exact same module paths.
 - All other workflow steps (services, caches, install, summary,
-  artifact upload) — untouched.
-- Frappe v16 bench bootstrap path via `.github/helper/install.sh` —
+  artifact upload) untouched.
+- Frappe v16 bench bootstrap path via `.github/helper/install.sh`:
   unchanged.
 
 ### Compatibility
@@ -1312,9 +1616,9 @@ Unit suite unchanged at 1843. Integration suite unchanged at 39.
 
 ---
 
-## [0.12.14] — 2026-05-25
+## [0.12.14] - 2026-05-25
 
-**HMAC envelope versioning — `sign_blob` / `unsign_blob` now embed a
+**HMAC envelope versioning `sign_blob` / `unsign_blob` now embed a
 1-byte scheme version between the signature and the payload.**
 
 The v0.12.0 `wrap_value` rollout addressed value-shape versioning at
@@ -1334,12 +1638,12 @@ release adds the extension point so future bumps land cleanly.
   on read.
 - **`optimus/session.py:unsign_blob`** handles two body shapes after
   the 32-byte signature:
-  - **v1 (current, v0.12.14+)** — body starts with
+  - **v1 (current, v0.12.14+)**: body starts with
     `_HMAC_SCHEME_V1`; strip the marker, return `body[1:]`.
-  - **v0 (legacy, pre-v0.12.14)** — body is the raw payload; return
+  - **v0 (legacy, pre-v0.12.14)**: body is the raw payload; return
     `body` as-is.
 
-  The single HMAC verification step handles both cases — for v1 the
+  The single HMAC verification step handles both cases for v1 the
   HMAC was computed over `\\x01 + payload` AND that's exactly what the
   body is; for v0 the HMAC was computed over the payload AND the body
   is just the payload. Post-verify, the body's first byte
@@ -1357,7 +1661,7 @@ uses `\x01` as a leading opcode:
 So a legacy pre-v0.12.14 pickle payload's first byte can never
 accidentally trigger the v1 strip branch in `unsign_blob`. Future
 producers (msgpack, JSON, raw binary) just need to avoid `\x01` as a
-leading byte — or write through the v1 path so the marker is
+leading byte or write through the v1 path so the marker is
 explicit.
 
 ### Added
@@ -1371,7 +1675,7 @@ explicit.
     return the original payload; pickle-shaped legacy blobs work
     too (the `\x80` first byte stays as-is, no incorrect strip).
   - **`TestNewShapeByteLayout`** (1 test): canary on the byte
-    layout — `[32-byte HMAC] + \\x01 + payload`, length =
+    layout `[32-byte HMAC] + \\x01 + payload`, length =
     `32 + 1 + len(payload)`.
   - **`TestTamperingDetection`** (3 tests): tampered signature →
     None; tampered version byte → None (HMAC covers it); tampered
@@ -1397,11 +1701,11 @@ explicit.
 
 ### Unchanged
 
-- `_has_stable_hmac_secret()` and `_hmac_secret()` — secret
+- `_has_stable_hmac_secret()` and `_hmac_secret()`: secret
   resolution unchanged.
-- `_SIG_LEN = 32` — signature length unchanged (still SHA-256).
+- `_SIG_LEN = 32`: signature length unchanged (still SHA-256).
 - The Phase K no-secret pass-through path (returns raw blob when
-  `frappe.conf.encryption_key` is absent) — unchanged. The version
+  `frappe.conf.encryption_key` is absent) unchanged. The version
   marker is only inserted when the HMAC actually fires.
 
 Unit suite: 1830 → 1843 (+13 from the new envelope-versioning test
@@ -1409,27 +1713,27 @@ module). Integration suite unchanged at 39.
 
 ---
 
-## [0.12.13] — 2026-05-25
+## [0.12.13] - 2026-05-25
 
-**Redis-schema rollout continues — `retention_backlog` and
+**Redis-schema rollout continues `retention_backlog` and
 `onboarding_seen` are the second and third values migrated to the
 v0.12.0 `wrap_value` / `unwrap_value` envelope.**
 
 v0.12.11 shipped the first migration (`settings_cache`). This release
 continues the rollout to two more values, both simple-shape (int +
-string) — which exercises the legacy-detection branch in
+string) which exercises the legacy-detection branch in
 `unwrap_value` more thoroughly than the dict-shaped `settings_cache`
 did.
 
 ### Changed
 
-- **`optimus/janitor.py`** — both `retention_backlog` write sites
+- **`optimus/janitor.py`**: both `retention_backlog` write sites
   (after-cap + after-clear) now wrap their int payload via
   `redis_schema.wrap_value(backlog)` / `redis_schema.wrap_value(0)`.
   No in-app reader exists yet (operator-facing metric only), so the
   rollout is write-only for now; the future-safety value is that any
   consumer reading directly from Redis gets the envelope shape.
-- **`optimus/api.py`** — `mark_onboarding_seen` writes via
+- **`optimus/api.py`**: `mark_onboarding_seen` writes via
   `wrap_value("1")` and `check_onboarding_seen` reads via
   `unwrap_value(...)`. Both shapes (new envelope + legacy bare string)
   resolve to a truthy `bool(payload)` so the toast-dismissed semantics
@@ -1450,7 +1754,7 @@ did.
 
 ### Docs
 
-- `docs/REDIS-SCHEMA.md` — `optimus:retention_backlog` and
+- `docs/REDIS-SCHEMA.md`: `optimus:retention_backlog` and
   `profiler:onboarding_seen:<user>` rows updated to reflect the new
   envelope shape + legacy-compat note.
 
@@ -1460,19 +1764,19 @@ did.
   `onboarding_seen` via `unwrap_value`'s legacy-detection branch.
   Not relevant for `retention_backlog` (write-only).
 - **Backward** (old readers, new writers): NOT supported for
-  `onboarding_seen` — an old reader would do `bool(envelope_dict)`
+  `onboarding_seen`: an old reader would do `bool(envelope_dict)`
   which is always truthy (dicts are truthy in Python). The
   practical effect on a mid-deploy bench is that some users might
   see "onboarding already dismissed" even when the underlying value
   was just set; the toast stays hidden either way, so no user
   visible issue. For `retention_backlog`, old code reading via
-  `int(envelope_dict)` would crash — but there's no in-app reader.
+  `int(envelope_dict)` would crash but there's no in-app reader.
 
 ### Unchanged
 
-- `optimus/redis_schema.py` — envelope helpers ship as-is.
-- All other Redis values — the session hash family, the LP pick
-  keys, `explain_cache`, `analyze_inflight` — all still bare-shaped.
+- `optimus/redis_schema.py`: envelope helpers ship as-is.
+- All other Redis values the session hash family, the LP pick
+  keys, `explain_cache`, `analyze_inflight`: all still bare-shaped.
   Future PRs roll out one at a time as the cost/benefit warrants.
 
 Unit suite: 1823 → 1830 (+7 from the new envelope-rollout-phase-2
@@ -1480,9 +1784,9 @@ test module). Integration suite unchanged at 39.
 
 ---
 
-## [0.12.12] — 2026-05-25
+## [0.12.12] - 2026-05-25
 
-**Renderer extraction — `line_drilldown` is the seventh submodule out
+**Renderer extraction `line_drilldown` is the seventh submodule out
 of `_internal.py`. Structural snapshot stays byte-identical.**
 
 The line_drilldown cluster was the README's "single biggest remaining
@@ -1497,19 +1801,19 @@ finding-enrichment helpers it serves (`_retarget_phase1_callsites_to_drilldown_l
 
 - **Semi-public surface** (called by `analyze.py` via the
   package shim):
-  - `_build_line_drilldown_callsite_index(session_doc)` — builds
+  - `_build_line_drilldown_callsite_index(session_doc)`: builds
     the `(basename, function_name) → hottest-line` lookup powering
     the finding-card "Line-Level Drilldown hot line: …" callout.
 - **Public render entry-point**:
-  - `_render_line_drilldown_panel(session_doc)` — the section HTML
+  - `_render_line_drilldown_panel(session_doc)`: the section HTML
     builder. Empty string when the session has no phase-2 runs.
 - **Internal helpers**:
-  - `_make_line_drilldown_lookup` — Jinja adapter for tuple-keyed
+  - `_make_line_drilldown_lookup`: Jinja adapter for tuple-keyed
     lookups.
-  - `_phase2_invoked` — per-function "did it run?" check (delegates
+  - `_phase2_invoked`: per-function "did it run?" check (delegates
     to `optimus.line_profile.analyzer._function_invoked`).
-  - `_render_phase2_function_table` — per-function HTML table.
-  - `_render_phase2_diff_table` — cross-run delta HTML table.
+  - `_render_phase2_function_table`: per-function HTML table.
+  - `_render_phase2_diff_table`: cross-run delta HTML table.
 - **Back-compat aliases** (pre-v0.7.x renames):
   - `_build_phase2_callsite_index = _build_line_drilldown_callsite_index`
   - `_make_phase2_lookup = _make_line_drilldown_lookup`
@@ -1540,12 +1844,12 @@ The README's 840-LOC estimate bundled `_find_call_line_in_function_body`
 practice, both are called by code that stays in `_internal.py` (the
 `render()` orchestrator's finding-enrichment phase). Moving them now
 would require a back-import that's then immediately re-imported into
-the orchestrator — defeating the goal of a clean cluster boundary.
+the orchestrator defeating the goal of a clean cluster boundary.
 The finding_enrichment extraction will own those helpers.
 
 ### Docs
 
-- `optimus/renderer/README.md` — current-layout block bumped to 7
+- `optimus/renderer/README.md`: current-layout block bumped to 7
   submodules; roadmap table marks `line_drilldown` as ✓ done.
   Updated `finding_enrichment` row to note the additional helpers it
   now owns. 1 cluster remains (plus `render()` orchestrator which is
@@ -1553,7 +1857,7 @@ The finding_enrichment extraction will own those helpers.
 
 ### Unchanged
 
-- Behaviour identical — every call site through `_internal.py`'s
+- Behaviour identical every call site through `_internal.py`'s
   shim resolves the function the same way.
 - `analyze.py` still calls `renderer._build_line_drilldown_callsite_index`
   unchanged via the package re-export.
@@ -1568,9 +1872,9 @@ No behaviour change. Pure refactor. Unit suite stays at 1823.
 
 ---
 
-## [0.12.11] — 2026-05-25
+## [0.12.11] - 2026-05-25
 
-**Redis-schema versioning — first value migrated to the `wrap_value`
+**Redis-schema versioning first value migrated to the `wrap_value`
 / `unwrap_value` envelope.**
 
 The v0.12.0 release shipped the versioning foundation
@@ -1581,14 +1885,14 @@ not wrap any existing value. This release starts the rollout:
 
 ### Why settings_cache first
 
-* **Hot path** — `get_config()` is called from every request hook;
+* **Hot path**: `get_config()` is called from every request hook;
   the envelope overhead has to be invisible.
-* **Single writer + single reader** — both inside
+* **Single writer + single reader**: both inside
   `optimus/settings.py`, no cross-module coordination.
-* **Stable dict shape** — `OptimusConfig.__dict__` is well-defined.
+* **Stable dict shape**: `OptimusConfig.__dict__` is well-defined.
   Future schema bumps would touch the dataclass fields, which is
   exactly the situation the envelope was designed for.
-* **Cache invalidation already in place** — the Optimus Settings
+* **Cache invalidation already in place**: the Optimus Settings
   DocType controller's `on_update` deletes the key, so the next
   request rebuilds the value with the new envelope shape
   automatically. Rollout proves itself live on the first save after
@@ -1609,23 +1913,23 @@ not wrap any existing value. This release starts the rollout:
 
 - **NEW `optimus/tests/test_settings_envelope_rollout.py`** (~200 LOC,
   4 tests, all pure-pytest with a dict-backed `_FakeCache`):
-  - `test_fresh_write_stores_envelope_not_bare_dict` — write-path
+  - `test_fresh_write_stores_envelope_not_bare_dict`: write-path
     canary; asserts the post-write cache value is shaped
     `{"_v": SCHEMA_VERSION, "data": {...}}`.
-  - `test_hit_on_enveloped_value_returns_config` — new-shape read
+  - `test_hit_on_enveloped_value_returns_config`: new-shape read
     path; cache HIT reconstructs OptimusConfig without re-resolving.
-  - `test_hit_on_legacy_bare_dict_returns_config` — **the
+  - `test_hit_on_legacy_bare_dict_returns_config`: **the
     migration-safety contract**. Pre-v0.12.11 writers stored bare
     dicts; new readers must NOT crash. Catches a regression where
     `unwrap_value`'s legacy-detection branch goes away.
-  - `test_drift_falls_through_to_resolve` — a future-schema
+  - `test_drift_falls_through_to_resolve`: a future-schema
     envelope (`_v=999`) triggers fall-through to `_resolve` AND a
     `redis.schema_drift` telemetry event; the next write produces a
     fresh current-version envelope so the cache doesn't stay broken.
 
 ### Docs
 
-- `docs/REDIS-SCHEMA.md` — `optimus_settings_cached` row updated to
+- `docs/REDIS-SCHEMA.md`: `optimus_settings_cached` row updated to
   reflect the new envelope shape; legacy-compat note added.
 
 ### Compatibility
@@ -1645,10 +1949,10 @@ not wrap any existing value. This release starts the rollout:
 
 ### Unchanged
 
-- `optimus/redis_schema.py` — the envelope helpers ship as-is; no
+- `optimus/redis_schema.py`: the envelope helpers ship as-is; no
   edits to the wrap/unwrap logic. Only the call-site code changed.
-- All other Redis values — `retention_backlog`, `analyze_inflight`,
-  `onboarding_seen`, `explain_cache`, the session hash, etc. — all
+- All other Redis values `retention_backlog`, `analyze_inflight`,
+  `onboarding_seen`, `explain_cache`, the session hash, etc. all
   still bare-shaped. Future PRs roll out one at a time.
 
 Unit suite: 1819 → 1823 (+4 from the new envelope-rollout test
@@ -1656,13 +1960,13 @@ module). Integration suite unchanged at 39.
 
 ---
 
-## [0.12.10] — 2026-05-25
+## [0.12.10] - 2026-05-25
 
-**Renderer extraction — `doc_event_renderer` is the sixth submodule
+**Renderer extraction `doc_event_renderer` is the sixth submodule
 out of `_internal.py`. Structural snapshot stays byte-identical.**
 
 Per the v0.10.0 renderer-package roadmap, the doc-event lifecycle
-cluster was the next target — Moderate coupling per the README
+cluster was the next target Moderate coupling per the README
 (touches lifecycle-binding logic) but cleanly module-import-time
 self-contained.
 
@@ -1670,11 +1974,11 @@ self-contained.
 
 - **Public surfaces** (called from the render orchestrator in
   `_internal.py`):
-  - `_extract_target_doc(form_dict)` — best-effort pull of
+  - `_extract_target_doc(form_dict)`: best-effort pull of
     `{doctype, name}` from a request's form_dict.
   - `_attach_action_context(actions, findings, recordings_by_uuid)`
-    — in-place enrichment of `target_doc` + `hook_events`.
-  - `_build_doc_event_breakdown(findings)` — pure-function transform
+    in-place enrichment of `target_doc` + `hook_events`.
+  - `_build_doc_event_breakdown(findings)`: pure-function transform
     that groups findings by DocType → lifecycle event.
 - **Internal helpers** (only called within the cluster):
   - `_module_from_filename`, `_doctype_from_controller_path`,
@@ -1690,7 +1994,7 @@ into NEW `optimus/renderer/doc_event_renderer.py` (~423 LOC).
 
 - `_SEVERITY_RANK` is a local constant in the new submodule (the
   same name exists in `_internal.py` as `_GROUPING_SEVERITY_RANK`
-  with different values — unrelated; renamed-in-original avoided
+  with different values unrelated; renamed-in-original avoided
   collision). The new submodule's `_SEVERITY_RANK` matches the
   pre-extraction local-scope name + values.
 - Standard `from optimus.renderer.doc_event_renderer import …`
@@ -1702,14 +2006,14 @@ into NEW `optimus/renderer/doc_event_renderer.py` (~423 LOC).
 
 ### Docs
 
-- `optimus/renderer/README.md` — current-layout block bumped to 6
+- `optimus/renderer/README.md`: current-layout block bumped to 6
   submodules; follow-up roadmap table marks `doc_event_renderer` as
   ✓ done. 3 clusters remain (`line_drilldown`, `finding_enrichment`,
   `render()` orchestrator).
 
 ### Unchanged
 
-- Behaviour identical — every call site through `_internal.py`'s
+- Behaviour identical every call site through `_internal.py`'s
   shim resolves the function the same way.
 - All 57 unit tests across `test_doc_event_lifecycle.py` +
   `test_action_context.py` (which resolve via `renderer.X`) stay
@@ -1721,15 +2025,15 @@ No behaviour change. Pure refactor. Unit suite stays at 1819.
 
 ---
 
-## [0.12.9] — 2026-05-25
+## [0.12.9] - 2026-05-25
 
-**Bug fix — `api.regenerate_reports` now enforces its documented
+**Bug fix `api.regenerate_reports` now enforces its documented
 "Ready or Failed sessions only" contract.**
 
 v0.12.4 surfaced (via the new integration test) that
 `api.regenerate_reports` had **no `status` gate** in its
 implementation. The docstring claimed "Allowed on Ready OR Failed
-sessions" but the code accepted any status — Recording, Stopping,
+sessions" but the code accepted any status Recording, Stopping,
 Analyzing all re-rendered. Re-rendering an in-flight session would
 attach an incomplete report to a still-running analyze, which the
 pipeline would then overwrite on completion. Confusing for
@@ -1748,10 +2052,10 @@ they wanted to re-render after a renderer fix.
 ### Added
 
 - **`optimus/tests/test_regenerate_reports_api.py::test_status_gate_rejects_non_terminal_sessions`**
-  — pure-pytest source-inspection test that confirms the gate is
+  pure-pytest source-inspection test that confirms the gate is
   present and the error message points at `retry_analyze`.
 - **`optimus/tests_integration/test_regenerate_reports_idempotent.py::test_regenerate_refuses_non_terminal_status`**
-  — integration test that demotes a session to `Analyzing` and
+  integration test that demotes a session to `Analyzing` and
   asserts the endpoint raises with an operator-friendly message.
 
 ### Compatibility
@@ -1759,7 +2063,7 @@ they wanted to re-render after a renderer fix.
 Soft breaking. Any external automation that called
 `regenerate_reports` against an Analyzing / Recording / Stopping
 session would now see a `ValidationError`. In practice no operator
-flow does this — the UI button is only visible on Ready / Failed
+flow does this the UI button is only visible on Ready / Failed
 sessions per the existing `test_button_visible_on_ready_and_failed`
 test. Anyone shelling out to the endpoint directly (rare) would have
 been getting incomplete / overwritten reports before this fix.
@@ -1774,40 +2078,40 @@ suite: 39 (38 + 1 new test in the existing module).
 
 ---
 
-## [0.12.8] — 2026-05-25
+## [0.12.8] - 2026-05-25
 
-**Renderer extraction — `call_tree_renderer` is the fifth submodule
+**Renderer extraction `call_tree_renderer` is the fifth submodule
 out of `_internal.py`. Structural snapshot stays byte-identical.**
 
 Per the v0.10.0 renderer-package roadmap
 (`optimus/renderer/README.md`), the call-tree panel cluster was the
 next lowest-coupling target. Moves:
 
-* `_CALL_TREE_MAX_DEPTH`, `_CALL_TREE_HARD_CAP` — depth constants.
-* `_CT_OTHER_RE` — synthetic-placeholder regex.
-* `_ct_is_other_frame`, `_ct_is_sql_leaf`, `_ct_is_user_frame` — node
+* `_CALL_TREE_MAX_DEPTH`, `_CALL_TREE_HARD_CAP`: depth constants.
+* `_CT_OTHER_RE`: synthetic-placeholder regex.
+* `_ct_is_other_frame`, `_ct_is_sql_leaf`, `_ct_is_user_frame`: node
   classifiers.
-* `_render_call_tree_node`, `_render_call_tree_panel` — the rendering
+* `_render_call_tree_node`, `_render_call_tree_panel`: the rendering
   pair.
 
 Out of `optimus/renderer/_internal.py` (now ~4,213 LOC; was ~4,420),
 into NEW `optimus/renderer/call_tree_renderer.py` (~225 LOC). The 4
 extracted functions only call each other plus a lazy
 `optimus.analyzers.base.FRAMEWORK_APPS` import inside `_ct_is_user_frame`
-— self-contained cluster as flagged in the README's coupling table.
+self-contained cluster as flagged in the README's coupling table.
 
 ### Implementation
 
 - The new submodule carries a local copy of the tiny `_e` HTML-escape
   helper (4 lines) rather than importing `_internal._e`. Avoids a
   circular import: `_internal.py` re-imports the call-tree names so
-  call sites resolve unchanged, and importing back from `_internal`
+  call sites resolve unchanged and importing back from `_internal`
   would close the cycle.
 - The standard `from optimus.renderer.call_tree_renderer import …`
   block lives at the top of `_internal.py` (right after the
   v0.10.0 visualization-module import block). Every name in the
-  extracted cluster is re-imported — including the constants and
-  the regex — so package-level `__init__.py`'s dir-walk re-export
+  extracted cluster is re-imported including the constants and
+  the regex so package-level `__init__.py`'s dir-walk re-export
   still surfaces them under the legacy `optimus.renderer.X` paths
   the unit suite uses (`test_call_tree_render.py`).
 - Output HTML is byte-equivalent: the structural-snapshot canary
@@ -1816,18 +2120,18 @@ extracted functions only call each other plus a lazy
 
 ### Docs
 
-- `optimus/renderer/README.md` — current-layout block updated;
+- `optimus/renderer/README.md`: current-layout block updated;
   follow-up roadmap table marks `call_tree_renderer` as ✓ done in
   v0.12.8; 4 clusters remain (`line_drilldown`, `doc_event_renderer`,
   `finding_enrichment`, `render()` orchestrator).
 
 ### Unchanged
 
-- The render path itself — every caller of `_render_call_tree_panel`
+- The render path itself every caller of `_render_call_tree_panel`
   / `_render_call_tree_node` (test code + the one call site in
   `_internal.py`'s `render` function) keeps working through the
   re-import shim.
-- `optimus/tests/test_call_tree_render.py` — pure-pytest unit tests
+- `optimus/tests/test_call_tree_render.py`: pure-pytest unit tests
   resolve the names via `renderer._render_call_tree_panel` etc.
   through the package `__init__.py` re-export; no change needed.
 
@@ -1838,9 +2142,9 @@ Structural snapshot stays byte-identical (no fixture update).
 
 ---
 
-## [0.12.7] — 2026-05-25
+## [0.12.7] - 2026-05-25
 
-**Integration test — `janitor.sweep_old_sessions` actually deletes.
+**Integration test `janitor.sweep_old_sessions` actually deletes.
 Seventh and final row of the v0.11.0 deferred-tests table is now
 ticked. The integration extraction roadmap is complete.**
 
@@ -1858,21 +2162,21 @@ terminal-state filter is correct.
 - **NEW `optimus/tests_integration/test_janitor_sweeps_actually_delete.py`**
   (~250 LOC, 4 tests). Each test seeds an Optimus Session with a
   controlled `started_at` + status, calls
-  `janitor.sweep_old_sessions()`, and asserts the post-sweep state.
+  `janitor.sweep_old_sessions()` and asserts the post-sweep state.
   `tearDown` tracks every UUID created so anything the sweep DIDN'T
   delete (negative controls) gets wiped:
-  - `test_sweep_deletes_session_older_than_retention` — the canary.
+  - `test_sweep_deletes_session_older_than_retention`: the canary.
     100-day-old Ready session → deleted. Without this, the Optimus
     Session table grows unbounded.
-  - `test_sweep_keeps_session_within_retention` — negative control.
+  - `test_sweep_keeps_session_within_retention`: negative control.
     30-day-old Ready session → kept. Catches over-aggressive
     deletion.
-  - `test_sweep_keeps_active_sessions_regardless_of_age` —
+  - `test_sweep_keeps_active_sessions_regardless_of_age`:
     terminal-state contract. 100-day-old Analyzing session → kept.
     The daily sweep filters `status IN (Ready, Failed)` exclusively;
     non-terminal states are the 5-minute `sweep_stale_sessions`'s
     job.
-  - `test_sweep_cascades_attached_file_deletion` — disk-hygiene
+  - `test_sweep_cascades_attached_file_deletion`: disk-hygiene
     contract. Deletes the session AND its `raw_report_file` File
     row. Orphan File rows would inflate disk usage forever even
     though the parent session is gone.
@@ -1885,19 +2189,19 @@ terminal-state filter is correct.
   rows) plus their attached File rows.
 - The synthetic File-row insertion clears `frappe.local.request`
   before insert so Frappe's `validate_file_extension` hits its
-  no-request bypass — same pattern `analyze._save_report_file`
+  no-request bypass same pattern `analyze._save_report_file`
   uses for the same reason.
 
 ### Docs
 
-- `optimus/tests_integration/README.md` — row 7 of the extraction
+- `optimus/tests_integration/README.md`: row 7 of the extraction
   roadmap ticked. **All 7 deferred-tests rows now complete.**
 
 ### Unchanged
 
-- `optimus/janitor.py` — function under test stays as-is.
+- `optimus/janitor.py`: function under test stays as-is.
 - All unit-suite janitor tests (`test_janitor.py`,
-  `test_janitor_telemetry.py`, etc.) — they stay as the pure-pytest
+  `test_janitor_telemetry.py`, etc.) they stay as the pure-pytest
   backstop.
 
 ### Compatibility
@@ -1909,22 +2213,22 @@ No behaviour change. Pure test addition. Integration-suite total:
 
 The v0.11.0 deferred-tests roadmap is now fully complete:
 
-1. ✓ v0.12.1 — `test_atomic_lua_merge_concurrent.py`
-2. ✓ v0.12.2 — `test_telemetry_flush_doctype_sink.py`
-3. ✓ v0.12.3 — `test_ai_privacy_exclusion_on_api.py`
-4. ✓ v0.12.4 — `test_regenerate_reports_idempotent.py`
-5. ✓ v0.12.5 — `test_phase2_tool_orphan_recovery.py`
-6. ✓ v0.12.6 — `test_safe_report_self_contained_on_real_bench.py`
-7. ✓ v0.12.7 — `test_janitor_sweeps_actually_delete.py`
+1. ✓ v0.12.1 `test_atomic_lua_merge_concurrent.py`
+2. ✓ v0.12.2 `test_telemetry_flush_doctype_sink.py`
+3. ✓ v0.12.3 `test_ai_privacy_exclusion_on_api.py`
+4. ✓ v0.12.4 `test_regenerate_reports_idempotent.py`
+5. ✓ v0.12.5 `test_phase2_tool_orphan_recovery.py`
+6. ✓ v0.12.6 `test_safe_report_self_contained_on_real_bench.py`
+7. ✓ v0.12.7 `test_janitor_sweeps_actually_delete.py`
 
 Every high-impact integration scenario the v0.7.x architecture
 review identified now has a real-bench canary.
 
 ---
 
-## [0.12.6] — 2026-05-25
+## [0.12.6] - 2026-05-25
 
-**Integration test — safe-report self-containment on the real bench.
+**Integration test safe-report self-containment on the real bench.
 Sixth row of the v0.11.0 deferred-tests table is now ticked.**
 
 The safe-report HTML is the **dev-shop interchange format**: a
@@ -1941,18 +2245,18 @@ file after Frappe's `file_manager` writes it.
 - **NEW `optimus/tests_integration/test_safe_report_self_contained_on_real_bench.py`**
   (~200 LOC, 3 tests). Each test creates a minimal synthetic Optimus
   Session, calls `api.regenerate_reports(uuid)`, reads
-  `raw_report_file` via the File doc, and asserts:
-  - `test_on_disk_report_has_no_remote_resource_urls` — mirrors the
+  `raw_report_file` via the File doc and asserts:
+  - `test_on_disk_report_has_no_remote_resource_urls`: mirrors the
     unit-suite canary at the integration boundary: no `src=https?:`,
     no `<link href=https?:`, no `@import`, no `url(http`. Includes
     a positive sanity check (at least one human-facing anchor link
     exists) so the negative checks don't trivially pass on an empty
     page.
-  - `test_on_disk_report_has_no_inline_or_external_javascript` —
+  - `test_on_disk_report_has_no_inline_or_external_javascript`:
     no `<script` tag in any form (the safe report is JS-free, which
     is part of why it's safe to open in an arbitrary browser).
   - `test_on_disk_report_does_not_reference_live_bench_asset_urls`
-    — no `/assets/`, no `/files/`, no `/api/method/` in
+    no `/assets/`, no `/files/`, no `/api/method/` in
     `src`/`href` positions. Bench-local asset references would
     render in a live-bench browser but break the moment the file is
     moved off-bench.
@@ -1967,15 +2271,15 @@ file after Frappe's `file_manager` writes it.
 
 ### Docs
 
-- `optimus/tests_integration/README.md` — row 6 of the extraction
+- `optimus/tests_integration/README.md`: row 6 of the extraction
   roadmap ticked. 1 row remains
   (`test_janitor_sweeps_actually_delete.py`).
 
 ### Unchanged
 
-- `optimus/api.py` `regenerate_reports` — endpoint under test stays
+- `optimus/api.py` `regenerate_reports`: endpoint under test stays
   as-is.
-- `optimus/analyze.py` `_save_report_file` — file-write path
+- `optimus/analyze.py` `_save_report_file`: file-write path
   unchanged.
 - Unit-suite self-containment canaries
   (`test_report_a11y.py`, `test_lens_promo.py`, etc.) stay as the
@@ -1988,9 +2292,9 @@ No behaviour change. Pure test addition. Integration-suite total:
 
 ---
 
-## [0.12.5] — 2026-05-25
+## [0.12.5] - 2026-05-25
 
-**Integration test — Phase-2 tool-2 orphan recovery. Fifth row of the
+**Integration test Phase-2 tool-2 orphan recovery. Fifth row of the
 v0.11.0 deferred-tests table is now ticked.**
 
 On Python 3.12+ line_profiler drives the process-global
@@ -2011,23 +2315,23 @@ path live.
 - **NEW `optimus/tests_integration/test_phase2_tool_orphan_recovery.py`**
   (~210 LOC, 4 tests). Each test manipulates `sys.monitoring` tool 2
   state directly (via `use_tool_id` / `set_events` / `free_tool_id`),
-  invokes `optimus._startup_probe_tool2()`, and asserts the
+  invokes `optimus._startup_probe_tool2()` and asserts the
   post-probe state. `setUp` + `tearDown` hard-reset tool 2 to free
   so a leak from one test cannot poison the rest of the suite.
   - `test_probe_reclaims_leaked_line_profiler_tool_2_on_simulated_worker_respawn`
-    — the canary. Register tool 2 as `"line_profiler"` with LINE
+    the canary. Register tool 2 as `"line_profiler"` with LINE
     events on, call probe, assert tool 2 is now unowned + events
     cleared. Without the probe, this leak would line-trace every
     later request → CPU peg + freeze.
-  - `test_probe_is_noop_when_tool_2_is_already_free` — happy path.
+  - `test_probe_is_noop_when_tool_2_is_already_free`: happy path.
     Probe does NOT grab the tool slot itself (catches a regression
     where the probe might accidentally register as owner).
   - `test_probe_warns_but_does_not_reclaim_non_line_profiler_owner`
-    — boundary contract. Register tool 2 as
+    boundary contract. Register tool 2 as
     `"third-party-debugger"`, call probe, assert ownership is
     PRESERVED. Without this constraint, the probe would silently
     break a third-party profiler / IDE debugger.
-  - `test_probe_emits_no_telemetry_on_happy_path` — quiet-on-success
+  - `test_probe_emits_no_telemetry_on_happy_path`: quiet-on-success
     contract. The probe runs at every worker import; emitting
     telemetry on the no-op path would flood
     `Optimus Telemetry Event` with worker-restart noise. Confirms
@@ -2038,7 +2342,7 @@ path live.
 ### Per-test isolation
 
 - **`setUp` + `tearDown` hard-reset tool 2** via
-  `sys.monitoring.set_events(PID, 0)` + `free_tool_id(PID)` — same
+  `sys.monitoring.set_events(PID, 0)` + `free_tool_id(PID)`: same
   pattern as the unit suite's `_guarantee_no_leak_escapes` autouse
   fixture. A leaked tool from one test silently slows every later
   test in the suite, so this guard is non-negotiable.
@@ -2046,24 +2350,24 @@ path live.
   `event_name="startup_probe_tool2"`** so the no-telemetry happy-path
   assertion is tight.
 - **Skips on Python < 3.12** via `pytest.mark.skipif(not _HAS_MON)`
-  — `sys.monitoring` is the 3.12+ entry point that drives the whole
+  `sys.monitoring` is the 3.12+ entry point that drives the whole
   pathway under test.
 
 ### Docs
 
-- `optimus/tests_integration/README.md` — row 5 of the extraction
+- `optimus/tests_integration/README.md`: row 5 of the extraction
   roadmap ticked. 2 rows remain
   (`test_safe_report_self_contained_on_real_bench.py`,
   `test_janitor_sweeps_actually_delete.py`).
 
 ### Unchanged
 
-- `optimus/__init__.py` `_startup_probe_tool2` — the function under
+- `optimus/__init__.py` `_startup_probe_tool2`: the function under
   test stays as-is.
-- `optimus/line_profile/capture.py` `release_monitoring_tool` —
+- `optimus/line_profile/capture.py` `release_monitoring_tool`:
   unchanged.
 - All v0.7.x unit-suite tool-2 tests
-  (`optimus/tests/test_line_profile_monitoring.py`) — they stay as
+  (`optimus/tests/test_line_profile_monitoring.py`) they stay as
   the pure-pytest backstop.
 
 ### Compatibility
@@ -2073,9 +2377,9 @@ No behaviour change. Pure test addition. Integration-suite total:
 
 ---
 
-## [0.12.4] — 2026-05-25
+## [0.12.4] - 2026-05-25
 
-**Integration test — `api.regenerate_reports` is byte-stable across
+**Integration test `api.regenerate_reports` is byte-stable across
 consecutive calls. Fourth row of the v0.11.0 deferred-tests table is
 now ticked.**
 
@@ -2085,7 +2389,7 @@ re-running the analyze pipeline. Its purpose is to let an operator
 pick up a renderer / template upgrade on a historical session without
 the cost of re-analysis. That makes it **load-bearing for upgrades**:
 v0.7.0 template polish, v0.10.0 renderer split, every later round of
-finding-card refinement — all shipped on the assumption that
+finding-card refinement all shipped on the assumption that
 operators could regenerate old sessions and see the new UI.
 
 The pure-pytest unit test
@@ -2097,7 +2401,7 @@ nothing about the output. What it can't prove:
 * That two consecutive `regenerate_reports` calls produce
   **byte-identical** HTML. Future non-determinism (a fresh UUID, a
   dict-iteration order change, a `time.time()` snapshot) would
-  silently start producing diff'd HTML — breaking `regenerate` as a
+  silently start producing diff'd HTML breaking `regenerate` as a
   way to roll forward and breaking any safe-report diffing workflow.
 * That the endpoint actually attaches HTML to
   `Optimus Session.raw_report_file` and the URL resolves.
@@ -2119,23 +2423,23 @@ This integration test fills that gap.
   minimal synthetic Optimus Session (reqd fields only) + explicit
   cleanup of attached File rows in tearDown.
   - `test_two_consecutive_regenerates_produce_byte_identical_html`
-    — the canary. `api.regenerate_reports(uuid)` twice, no changes
+    the canary. `api.regenerate_reports(uuid)` twice, no changes
     in between; the two `file_doc.get_content()` results must be
     byte-identical. Catches future non-determinism in the renderer.
   - `test_regenerate_attaches_html_to_raw_report_file_and_url_resolves`
-    — the side-effect contract: `raw_report_file` URL set,
+    the side-effect contract: `raw_report_file` URL set,
     File row is private + attached_to_doctype="Optimus Session" +
     content starts with `<!DOCTYPE` or `<html`.
-  - `test_regenerate_byte_diff_when_session_field_changes` — the
+  - `test_regenerate_byte_diff_when_session_field_changes`: the
     canary's complement. Render once, snapshot. Mutate `title` via
     `frappe.db.set_value`. Render again, snapshot. The two HTMLs
-    must DIFFER, and the new title must appear in HTML 2 but not
+    must DIFFER and the new title must appear in HTML 2 but not
     HTML 1. Catches silent caching.
-  - `test_regenerate_works_on_failed_status_session` — sets
+  - `test_regenerate_works_on_failed_status_session`: sets
     `status="Failed"`, calls regenerate, asserts it succeeds +
     attaches a fresh file. Validates the docstring claim that
     Failed sessions are explicitly allowed ("unblocks a demo when
-    a render-time bug was fixed" — api.py:1147-1150).
+    a render-time bug was fixed" api.py:1147-1150).
 - Workflow line in `.github/workflows/integration.yml` to run the new
   module against the bench-bootstrapped `test_site`.
 
@@ -2147,14 +2451,14 @@ This integration test fills that gap.
   a fixed timestamp via `mock.patch`. Module-attribute lookup at
   render time means the patch takes effect immediately for every
   render through the API endpoint.
-- **`tearDown` explicit cleanup** — `frappe.db.delete("File",
+- **`tearDown` explicit cleanup**: `frappe.db.delete("File",
   {attached_to_doctype: "Optimus Session", attached_to_name: name})`
   to wipe every File row regenerate created (one per call), then
   `frappe.delete_doc("Optimus Session", name, force=1)`.
 
 ### Discovery
 
-- `api.regenerate_reports` has **no `status` gate** — any session
+- `api.regenerate_reports` has **no `status` gate**: any session
   status (Ready, Failed, Analyzing, etc.) re-renders. The docstring
   says "Allowed on Ready OR Failed" but the code doesn't enforce it.
   Out of scope for this PR; documented in the test that exercises
@@ -2162,7 +2466,7 @@ This integration test fills that gap.
 
 ### Docs
 
-- `optimus/tests_integration/README.md` — row 4 of the extraction
+- `optimus/tests_integration/README.md`: row 4 of the extraction
   roadmap ticked. 3 rows remain
   (`test_phase2_tool_orphan_recovery.py`,
   `test_safe_report_self_contained_on_real_bench.py`,
@@ -2170,14 +2474,14 @@ This integration test fills that gap.
 
 ### Unchanged
 
-- `optimus/api.py` — the endpoint under test stays as-is.
-- `optimus/renderer/_internal.py` — `_now_iso` is patched per-test;
+- `optimus/api.py`: the endpoint under test stays as-is.
+- `optimus/renderer/_internal.py`: `_now_iso` is patched per-test;
   production behaviour unchanged.
-- `optimus/analyze.py` — `_render_and_attach_reports` /
+- `optimus/analyze.py`: `_render_and_attach_reports` /
   `_save_report_file` stay as-is.
-- `optimus/report_context.py` — `build_report_context` stays as-is.
+- `optimus/report_context.py`: `build_report_context` stays as-is.
 - All v0.7.0 unit-suite regenerate tests
-  (`optimus/tests/test_regenerate_reports_api.py`) — they stay as
+  (`optimus/tests/test_regenerate_reports_api.py`) they stay as
   the pure-pytest source-inspection backstop.
 
 ### Compatibility
@@ -2187,9 +2491,9 @@ No behaviour change. Pure test addition. Integration-suite total:
 
 ---
 
-## [0.12.3] — 2026-05-25
+## [0.12.3] - 2026-05-25
 
-**Integration test — `api.suggest_fix` honours
+**Integration test `api.suggest_fix` honours
 `ai_excluded_finding_types`. Third row of the v0.11.0 deferred-tests
 table is now ticked.**
 
@@ -2202,7 +2506,7 @@ and a `requests.post`-never-called spy. They can't prove:
 
 * That the **whitelisted endpoint** `api.suggest_fix(session_uuid,
   finding_ref, regenerate)` actually honours the exclusion before any
-  AI dispatch — there's a separate refusal site at `api.py:1333-1347`
+  AI dispatch there's a separate refusal site at `api.py:1333-1347`
   with its own user-readable error message.
 * That the live Optimus Settings cache invalidation (the doc's
   `on_update` deletes `redis_keys.settings_cache()`) propagates so the
@@ -2217,31 +2521,31 @@ That gap is what this integration test fills.
 ### Added
 
 - **NEW `optimus/tests_integration/test_ai_privacy_exclusion_on_api.py`**
-  — 5 tests covering the v0.9.0 exclusion gate at the live API
+  5 tests covering the v0.9.0 exclusion gate at the live API
   boundary against real MariaDB + the live Optimus Settings cache:
-  - `test_excluded_finding_type_throws_with_clear_error_message` —
+  - `test_excluded_finding_type_throws_with_clear_error_message`:
     `api.suggest_fix(session_uuid, "0")` on a "Slow Query" finding
     while "Slow Query" is in the exclusion list → raises
     `frappe.ValidationError` with a message that contains both
     "exclusion list" and "Optimus Settings" (verbatim substrings
     from the user-facing message at api.py:1343-1346).
-  - `test_excluded_finding_type_emits_telemetry_refusal_event` —
+  - `test_excluded_finding_type_emits_telemetry_refusal_event`:
     after the refusal raises, `telemetry.flush()` lands exactly one
     row in `Optimus Telemetry Event` with
     `event_name="ai.fix_call_refused_by_exclusion"`,
-    `severity="warning"`, and `last_context` mentioning the
+    `severity="warning"` and `last_context` mentioning the
     refused finding type.
-  - `test_exclusion_is_case_sensitive_at_api_boundary` — exclusion
+  - `test_exclusion_is_case_sensitive_at_api_boundary`: exclusion
     = "slow query" (lowercase), finding type = "Slow Query"
     (capitalised). With `ai_fix.suggest_fix` patched to a benign
     stub, the endpoint reaches the stub (gate doesn't fire on case
     mismatch) and returns its payload. Zero refusal telemetry rows
     afterwards.
-  - `test_empty_exclusion_list_does_not_refuse` — exclusion = ""
+  - `test_empty_exclusion_list_does_not_refuse`: exclusion = ""
     (empty Small Text). Endpoint reaches the stubbed AI dispatch
     and returns its payload. Zero refusal telemetry rows.
   - `test_settings_save_invalidates_cache_so_api_picks_up_new_exclusion`
-    — start with exclusion = ""; first call succeeds (stub
+    start with exclusion = ""; first call succeeds (stub
     invoked). Save Optimus Settings with exclusion = "Slow Query"
     → the doc's `on_update` deletes `redis_keys.settings_cache()`.
     Second call → raises the exclusion error WITHOUT invoking
@@ -2257,7 +2561,7 @@ That gap is what this integration test fills.
   with sibling tests in the same process.
 - **`setUpClass` patches `ai_fix.is_available` to True** so the
   endpoint's early "AI fix suggestions aren't configured" guard
-  doesn't preempt the exclusion gate. Production is unaffected — the
+  doesn't preempt the exclusion gate. Production is unaffected the
   patch is scoped to this TestCase only.
 - **`setUp` snapshots `telemetry_enabled`, `telemetry_sink_doctype`,
   `ai_enabled`, `ai_suggest_findings`, `ai_excluded_finding_types`**
@@ -2285,7 +2589,7 @@ That gap is what this integration test fills.
 
 ### Docs
 
-- `optimus/tests_integration/README.md` — row 3 of the extraction
+- `optimus/tests_integration/README.md`: row 3 of the extraction
   roadmap ticked. 4 rows remain
   (`test_regenerate_reports_idempotent.py`,
   `test_phase2_tool_orphan_recovery.py`,
@@ -2294,14 +2598,14 @@ That gap is what this integration test fills.
 
 ### Unchanged
 
-- `optimus/api.py` — the endpoint under test stays exactly as-is.
-- `optimus/ai_fix.py` — the helpers under test (`is_finding_type_excluded`,
+- `optimus/api.py`: the endpoint under test stays exactly as-is.
+- `optimus/ai_fix.py`: the helpers under test (`is_finding_type_excluded`,
   `is_available`, `AI_ELIGIBLE_FINDING_TYPES`) stay as-is.
-- `optimus/settings.py` — resolve / cache logic unchanged.
+- `optimus/settings.py`: resolve / cache logic unchanged.
 - `Optimus Settings` / `Optimus Session` / `Optimus Finding` DocType
-  JSONs — schemas are the v0.9.0 / pre-existing shapes.
+  JSONs schemas are the v0.9.0 / pre-existing shapes.
 - All v0.9.0 unit-suite ai-privacy tests
-  (`optimus/tests/test_ai_privacy.py`) — they stay as the pure-pytest
+  (`optimus/tests/test_ai_privacy.py`) they stay as the pure-pytest
   backstop.
 
 ### Compatibility
@@ -2311,53 +2615,53 @@ No behaviour change. Pure test addition. Integration-suite total:
 
 ---
 
-## [0.12.2] — 2026-05-25
+## [0.12.2] - 2026-05-25
 
-**Integration test — telemetry flush → Optimus Telemetry Event DocType
+**Integration test telemetry flush → Optimus Telemetry Event DocType
 end-to-end. Second row of the v0.11.0 deferred-tests table is now
 ticked.**
 
 The v0.8.0 release (`5529cde`) shipped opt-in failure telemetry: a
 bounded in-process deque, a scheduled `flush()`, the `Optimus Telemetry
-Event` DocType, a JSONL sink, and signature-based dedup. The
+Event` DocType, a JSONL sink and signature-based dedup. The
 unit-suite tests (`optimus/tests/test_telemetry.py`) cover the emit
 hot path, the bounded deque, signature dedup, path/context scrub,
-settings clamps, and `flush()` against a **mocked** `frappe.db.sql`.
+settings clamps and `flush()` against a **mocked** `frappe.db.sql`.
 What they can't prove: that `flush()` actually writes a row that lands
 in `tabOptimus Telemetry Event` with the right shape, that the
 DocType's deterministic `name` (sha1 of `event_name|signature`) enforces
 the upsert correctly, that toggling `telemetry_enabled` via the live
-Settings doc invalidates the cached config, and that the PII-scrubbed
+Settings doc invalidates the cached config and that the PII-scrubbed
 traceback round-trips through MariaDB unchanged. That gap is what this
 integration test fills.
 
 ### Added
 
 - **NEW `optimus/tests_integration/test_telemetry_flush_doctype_sink.py`**
-  — 5 tests covering the v0.8.0 telemetry pipeline against real
+  5 tests covering the v0.8.0 telemetry pipeline against real
   MariaDB + the live Optimus Settings cache invalidation:
-  - `test_emit_then_flush_persists_doctype_row` — canonical
+  - `test_emit_then_flush_persists_doctype_row`: canonical
     round-trip. Emit once, flush, assert one row exists with the right
     `event_name`, `severity`, `count=1`, populated `first_seen` /
     `last_seen` / `optimus_version` / `python_version` /
     `frappe_version`.
-  - `test_repeated_emits_dedup_to_single_row_with_count` — 5 emits
+  - `test_repeated_emits_dedup_to_single_row_with_count`: 5 emits
     with the same `event_name` + `exc=None` (deterministic signature)
     → one DocType row with `count=5`. Validates the signature-dedup
     grouping at flush time.
-  - `test_flush_no_op_when_master_disabled` — toggle
+  - `test_flush_no_op_when_master_disabled`: toggle
     `telemetry_enabled` OFF via `frappe.get_single('Optimus Settings')
     → save`, emit, flush. Returns 0; no DocType row created. Confirms
     the master gate is honoured at flush time AND that the
     `on_update` cache-invalidation hook fires so `flush()` sees the
     new value.
-  - `test_persisted_row_has_scrubbed_traceback` — raise a real
+  - `test_persisted_row_has_scrubbed_traceback`: raise a real
     `ValueError`, emit with that exception, flush. The persisted
     `last_traceback` must contain `<bench>/apps/optimus/` (the
     scrubbed marker for the optimus frame) AND must NOT contain
     `/Users/` / `/home/` / `/private/` raw absolute prefixes.
     Locks in the PII-scrub round-trip through MariaDB.
-  - `test_second_flush_increments_count_via_upsert` — emit 3 + flush,
+  - `test_second_flush_increments_count_via_upsert`: emit 3 + flush,
     emit 4 + flush; assert one row with `count=7`. Confirms the
     v0.8.0 `INSERT … ON DUPLICATE KEY UPDATE count = count +
     VALUES(count)` SQL path executes (not a duplicate-key error or a
@@ -2372,7 +2676,7 @@ integration test fills.
   the shared `Optimus Telemetry Event` table.
 - **`setUp` snapshots `telemetry_enabled` + `telemetry_sink_doctype`**
   from the live Settings doc, then forces both ON. `tearDown`
-  restores whatever the original values were — the bench is left in
+  restores whatever the original values were the bench is left in
   the same state it was found in.
 - **`tearDown` does `frappe.db.delete('Optimus Telemetry Event',
   {event_name: like prefix%})`** because `_write_doctype` uses direct
@@ -2384,7 +2688,7 @@ integration test fills.
 
 ### Docs
 
-- `optimus/tests_integration/README.md` — row 2 of the extraction
+- `optimus/tests_integration/README.md`: row 2 of the extraction
   roadmap ticked. 5 rows remain
   (`test_ai_privacy_exclusion_on_api.py`,
   `test_regenerate_reports_idempotent.py`,
@@ -2394,12 +2698,12 @@ integration test fills.
 
 ### Unchanged
 
-- `optimus/telemetry.py` — the function under test. The integration
-  test is exactly that — testing, not editing.
-- `Optimus Telemetry Event` DocType JSON — schema is the same v0.8.0
+- `optimus/telemetry.py`: the function under test. The integration
+  test is exactly that testing, not editing.
+- `Optimus Telemetry Event` DocType JSON schema is the same v0.8.0
   shape; the test asserts the columns that release defined.
 - All v0.8.0 unit-suite telemetry tests
-  (`optimus/tests/test_telemetry.py`) — they stay as the pure-pytest
+  (`optimus/tests/test_telemetry.py`) they stay as the pure-pytest
   backstop that runs on every PR.
 
 ### Compatibility
@@ -2410,9 +2714,9 @@ No behaviour change. Pure test addition. Integration-suite total: 13 →
 
 ---
 
-## [0.12.1] — 2026-05-25
+## [0.12.1] - 2026-05-25
 
-**Integration test — atomic Lua merge under multi-worker contention.
+**Integration test atomic Lua merge under multi-worker contention.
 First row of the v0.11.0 deferred-tests table is now ticked.**
 
 The v0.11.0 release shipped the real-bench integration harness with two
@@ -2422,30 +2726,30 @@ deferred follow-ups. This is the first of those: a real-Redis + real-Lua
 (`a356f64` → `0e4a270` → `f30f44e`) is lossless under genuine
 multi-worker contention. The unit-suite version
 (`test_session_jobs.py::TestAtomicMergeJobMetaConcurrent`) silently
-`pytest.skip`s when Redis/Lua aren't available — under pure pytest,
+`pytest.skip`s when Redis/Lua aren't available under pure pytest,
 that's every run. The integration version is the first-class CI gate.
 
 ### Added
 
 - **NEW `optimus/tests_integration/test_atomic_lua_merge_concurrent.py`**
-  — 5 tests covering the v0.7.x trilogy's invariants under real Redis
+  5 tests covering the v0.7.x trilogy's invariants under real Redis
   + Lua:
-  - `test_recording_uuid_and_status_race_is_lossless` — the canonical
+  - `test_recording_uuid_and_status_race_is_lossless`: the canonical
     regression test. 50 distinct job_ids × 2 racing threads per job
     (one writes `recording_uuid`, one writes `status`), released
     simultaneously via `threading.Barrier`. Asserts every job has
     BOTH fields after the dust settles.
-  - `test_concurrent_distinct_job_ids_dont_clobber` — 20 threads
+  - `test_concurrent_distinct_job_ids_dont_clobber`: 20 threads
     write to 20 distinct hash fields simultaneously; validates the
     per-field cjson isolation inside the Lua script.
-  - `test_setdefault_first_writer_wins` — 20 threads race
+  - `test_setdefault_first_writer_wins`: 20 threads race
     `_SETDEFAULT_JOB_META_LUA` after a known first-writer's seed; the
     first value must survive.
-  - `test_fallback_path_writes_when_lua_unavailable` — single-thread
+  - `test_fallback_path_writes_when_lua_unavailable`: single-thread
     test (`frappe.local` is main-thread only). Monkey-patches
     `frappe.cache.eval` to raise; asserts `_atomic_merge_job_meta`
     still writes via the Python read-modify-write fallback.
-  - `test_atomic_merge_does_not_raise_when_lua_unavailable` —
+  - `test_atomic_merge_does_not_raise_when_lua_unavailable`:
     defensive lock-in: the wrapper catches eval failures silently and
     the host code never sees the underlying error.
 - Workflow line in `.github/workflows/integration.yml` to run the new
@@ -2460,7 +2764,7 @@ that's every run. The integration version is the first-class CI gate.
   `test_session_jobs.py::TestAtomicMergeJobMetaConcurrent` continues
   to skip under pure pytest).
 - Each test owns a per-test fixture session_uuid + purges the jobs
-  hash in setUp/tearDown — independent of the autouse
+  hash in setUp/tearDown independent of the autouse
   `cleanup_session` fixture (which handles Optimus Session DocType
   rows but not arbitrary Redis hashes the test creates directly).
 - The 4 race-test methods pre-compute the prefixed Redis key in the
@@ -2470,7 +2774,7 @@ that's every run. The integration version is the first-class CI gate.
 ### Deferred
 
 The remaining 6 rows of the integration-test extraction roadmap stay
-deferred — `test_telemetry_flush_doctype_sink`,
+deferred `test_telemetry_flush_doctype_sink`,
 `test_ai_privacy_exclusion_on_api`,
 `test_regenerate_reports_idempotent`,
 `test_phase2_tool_orphan_recovery`,
@@ -2482,16 +2786,16 @@ Version: 0.12.0 → 0.12.1.
 
 ---
 
-## [0.12.0] — 2026-05-24
+## [0.12.0] - 2026-05-24
 
-**Redis schema versioning foundation — closes the architecture review's
+**Redis schema versioning foundation closes the architecture review's
 mid-term refactor list.**
 
 Pre-v0.12.0, every Redis key Optimus writes had been evolving across
 the v0.5 → v0.11 sweep (the v0.7.x bg-tracking trilogy added per-job
 hashes; v0.8.0 added the telemetry buffer; v0.5.1 split combined
 frontend metrics into separate XHR/vitals lists) and **nothing in the
-codebase carried a version tag** — not the key names, not the value
+codebase carried a version tag**: not the key names, not the value
 envelopes, not a startup sentinel. The HMAC envelope used for
 ``profiler:tree:*`` was bare ``sig | pickle``; a future change to the
 pyinstrument tree shape would silently corrupt reads with no detection
@@ -2505,11 +2809,11 @@ construction.
 
 ### Added
 
-- **NEW `optimus/redis_keys.py`** — single source of truth for every
+- **NEW `optimus/redis_keys.py`**: single source of truth for every
   Redis key Optimus writes. ~22 public builder functions, one per key
   pattern. ``SCHEMA_VERSION = 1`` constant + a ``KEY_PATTERNS`` tuple
   the audit test cross-references against the doc.
-- **NEW `optimus/redis_schema.py`** — versioned-value envelope helpers
+- **NEW `optimus/redis_schema.py`**: versioned-value envelope helpers
   (``wrap_value`` / ``unwrap_value``) + schema-version sentinel write/
   read (``write_schema_sentinel`` / ``read_schema_sentinel``). The
   helpers are opt-in for new code; legacy un-wrapped values continue
@@ -2517,11 +2821,11 @@ construction.
   emits a ``redis.schema_drift`` telemetry event (via the v0.8.0
   pipeline) so operators see the mismatch in
   ``Optimus Telemetry Event``.
-- **NEW `docs/REDIS-SCHEMA.md`** — full schema documentation. Every
+- **NEW `docs/REDIS-SCHEMA.md`**: full schema documentation. Every
   key pattern × value shape × encoding × TTL × lifecycle, with a
   versioning contract section + a contributor checklist. The audit
   asserts this doc stays in lock-step with ``KEY_PATTERNS``.
-- **NEW `optimus/tests/test_redis_audit.py`** — drift-protection
+- **NEW `optimus/tests/test_redis_audit.py`**: drift-protection
   canary in the v0.11.1 audit-test style. Two assertions: no inline
   f-string keys inside ``frappe.cache.*`` calls (orphans are listed
   with file:line on failure); ``redis_keys.KEY_PATTERNS`` equals the
@@ -2541,19 +2845,19 @@ now resolve through ``redis_keys.*`` builders:
 ``optimus/settings.py`` (1), ``optimus/janitor.py`` (1),
 ``optimus/session.py`` (3 ``delete_session_state`` cleanup lines),
 ``optimus/optimus/doctype/optimus_settings/optimus_settings.py`` (1).
-Behaviour-preserving — the strings the builders return are identical
+Behaviour-preserving the strings the builders return are identical
 to the f-strings they replace; no deployed Redis state shifts.
 
 ### Untouched
 
-- The HMAC ``sign_blob`` / ``unsign_blob`` envelope — adding a version
+- The HMAC ``sign_blob`` / ``unsign_blob`` envelope adding a version
   tag inside the signed envelope is a follow-up with its own
   migration story.
 - ``session.py`` / ``line_profile/capture.py``'s pre-v0.12.0 internal
-  helpers (``_active_key``, ``_meta_key``, etc.) — those callers don't
+  helpers (``_active_key``, ``_meta_key``, etc.) those callers don't
   go through ``frappe.cache.X(literal_key, ...)``; they pass the
   helper's return value, which is invisible to the audit.
-- Every existing Redis value envelope — no wrapping in this PR. The
+- Every existing Redis value envelope no wrapping in this PR. The
   ``wrap_value`` / ``unwrap_value`` helpers are reserved for the next
   schema-version bump.
 
@@ -2565,10 +2869,10 @@ to the f-strings they replace; no deployed Redis state shifts.
   with a migration path for in-flight signed blobs).
 - **Migrate the jobs hash to JSON-only encoding** to drop the dual-
   encoding hazard documented in REDIS-SCHEMA.md § 5.
-- **Janitor proactive purge on schema-version mismatch** — reactive
+- **Janitor proactive purge on schema-version mismatch**: reactive
   cleanup-on-read is sufficient for the foundation.
 - **Unify the legacy ``session._meta_key`` etc. into ``redis_keys``**
-  — could be done now but doubles the diff size; cleaner as its own
+  could be done now but doubles the diff size; cleaner as its own
   follow-up.
 
 ### Engineering
@@ -2584,13 +2888,13 @@ Version: 0.11.1 → 0.12.0.
 
 ---
 
-## [0.11.1] — 2026-05-24
+## [0.11.1] - 2026-05-24
 
-**Telemetry instrumentation sweep — closes the v0.8.0 deferral.**
+**Telemetry instrumentation sweep closes the v0.8.0 deferral.**
 
 v0.8.0 (`5529cde`) shipped opt-in failure telemetry with 15 hand-picked
 top-of-stack migration sites and an explicit deferral: *"migration of
-remaining ~65 log_error sites — picked once we see the v0.8.0 signal
+remaining ~65 log_error sites picked once we see the v0.8.0 signal
 shape."* This release closes that deferral with a sweep of **72 additional
 sites** across 8 files, plus a **drift-protection audit test** that
 forever-after fails CI if a new `frappe.log_error(...)` call lands
@@ -2599,25 +2903,25 @@ lines.
 
 ### Added
 
-- **NEW `optimus/tests/test_telemetry_audit.py`** — the forever-after
+- **NEW `optimus/tests/test_telemetry_audit.py`**: the forever-after
   drift-protection canary. Walks every `.py` file under `optimus/`,
   asserts every `frappe.log_error(` line has a `telemetry.emit_failure(`
   call within 16 lines after. Excludes `tests/`, `tests_integration/`,
   `patches/`, `renderer/_internal.py` (deferred per the renderer-split
-  roadmap), and `telemetry.py` itself (its sink-failure handler can't
+  roadmap) and `telemetry.py` itself (its sink-failure handler can't
   recurse into emit). Lists orphans with file:line on failure so a new
   contributor knows exactly where to add the emit. The audit is the
-  v0.11.1 contract — from this PR forward, drift is mechanically caught.
+  v0.11.1 contract from this PR forward, drift is mechanically caught.
 
 ### Code
 
-- `optimus/api.py` — 16 new emit sites (`api.set_draining_window`,
+- `optimus/api.py`: 16 new emit sites (`api.set_draining_window`,
   `api.scheduler_check`, `api.inline_analyze.mark_failed`,
   `api.inline_analyze.run`, `api.frontend_metrics.{xhr,vitals}_{rpush,ltrim}`,
   `api.regenerate_reports.{fetch,ai_backfill}`, `api.suggest_fix.persist`,
   `api.humanize_steps.fetch`, `api.refill_indexes.per_table`,
   `api.phase2.{force_stop_redis_cleanup,force_stop_parent_save,scheduler_check}`).
-- `optimus/analyze.py` — 22 new emit sites
+- `optimus/analyze.py`: 22 new emit sites
   (`analyze.{custom_hook.{not_callable,load_failed},singleflight_reenqueue,
   bg_job_wait_reenqueue,auto_arm_phase2,missing_session,analyzer_failed,
   ai_auto_suggest_outer,ai_index_suggest_outer,pyi_tree.{load_failed_both_paths,
@@ -2627,29 +2931,29 @@ lines.
   identifiers (analyzer_name, recording_uuid, filename, table) go into
   `context=`, not the event_name, so the DocType-level dedup groups all
   failures of the same class under one row.
-- `optimus/janitor.py` — 14 new emit sites covering the 7 outer
+- `optimus/janitor.py`: 14 new emit sites covering the 7 outer
   sweep wrappers + the 7 inner-loop sites (per-old-session deletes,
   enqueue_failed, stopping re-enqueue, phase-2 cleanup ×2, stuck phase-2
   ×2).
-- `optimus/infra_capture.py` — 6 new emit sites
+- `optimus/infra_capture.py`: 6 new emit sites
   (`infra_capture.{process_metrics,system_metrics,loadavg,db_metrics,
   redis_metrics,rq_metrics}`).
-- `optimus/install.py` — 5 new emit sites
+- `optimus/install.py`: 5 new emit sites
   (`install.after_install.{auto_role,tracked_apps_seed}`,
   `install.on_user_role_change`, `install.before_uninstall.capture`,
   `install.uninstall.cleanup`).
-- `optimus/hooks_callbacks.py` — 5 sites missed by the v0.8.0 sweep
+- `optimus/hooks_callbacks.py`: 5 sites missed by the v0.8.0 sweep
   (`after_request.{infra_end,header_injection,pyi_dump,sidecar_dump}`,
   `after_job.infra_end`).
-- `optimus/analyzers/explain_flags.py` — 1 new emit site
+- `optimus/analyzers/explain_flags.py`: 1 new emit site
   (`analyzers.explain_flags.row_parse`).
-- `optimus/analyzers/index_suggestions.py` — 2 new emit sites
+- `optimus/analyzers/index_suggestions.py`: 2 new emit sites
   (`analyzers.index_suggestions.{optimizer_failure,dropped}`).
-- `optimus/line_profile/analyzer.py` — 1 new emit site
+- `optimus/line_profile/analyzer.py`: 1 new emit site
   (`phase2.rerender_failed`).
 
 Every migrated site keeps its existing `frappe.log_error(...)` call
-unchanged — the emit is **additive**, never a replacement. Bare
+unchanged the emit is **additive**, never a replacement. Bare
 `except Exception:` blocks were converted to `except Exception as exc:`
 to feed the exception into `emit_failure`.
 
@@ -2659,33 +2963,33 @@ to feed the exception into `emit_failure`.
   `install.`, `analyzers.`, `phase2.`, `after_request.`, `after_job.`
 - **Phase suffix** where the failure has a natural inner identity
   (e.g. `analyze.pyi_tree.deserialize`).
-- **Dynamic identity in context, not event_name** — the per-analyzer
+- **Dynamic identity in context, not event_name**: the per-analyzer
   failures all share `event_name="analyze.analyzer_failed"` with the
   analyzer name in `context["analyzer"]`. Keeps the operator-facing
   Optimus Telemetry Event list view scannable as instrumentation grows.
 
 ### Operator notes
 
-- Defaults preserve existing behavior — telemetry stays opt-in
+- Defaults preserve existing behavior telemetry stays opt-in
   (`telemetry_enabled` default OFF). This release adds instrumentation,
   not surveillance.
 - High-rate loops (frontend XHR/vitals rpush, per-finding AI auto-
   suggest, per-pyi-tree deserialize, per-analyzer, per-bg-job, per-table
   index, janitor per-old-session deletes) compress to a handful of
-  unique signatures at flush time via the v0.8.0 signature dedup — one
+  unique signatures at flush time via the v0.8.0 signature dedup one
   DocType row per `(event_name, signature)` with `count=N`. The deque's
   `maxlen=500` provides backpressure if a single 10-minute window
   somehow produces > 500 distinct signatures.
 
 ### Deferred
 
-- `optimus/renderer/_internal.py` — graceful-degradation paths inside
+- `optimus/renderer/_internal.py`: graceful-degradation paths inside
   the 60+ silent excepts. Picked up in a follow-up PR using the
   renderer-split extraction recipe in `optimus/renderer/README.md`. The
   allowlist entry in `test_telemetry_audit.py` documents the deferral.
-- Event-name standardization for the v0.8.0-migrated sites — they're
+- Event-name standardization for the v0.8.0-migrated sites they're
   shipped + stable; no reason to churn.
-- A Frappe report ranking telemetry events by recent count — operator UX,
+- A Frappe report ranking telemetry events by recent count operator UX,
   not blocked by this PR.
 
 ### Engineering
@@ -2696,14 +3000,14 @@ to feed the exception into `emit_failure`.
 
 ---
 
-## [0.11.0] — 2026-05-24
+## [0.11.0] - 2026-05-24
 
-**Real-bench integration-test foundation — CI workflow + harness + two
+**Real-bench integration-test foundation CI workflow + harness + two
 pilot tests.**
 
 The pre-v0.11.0 CI (`.github/workflows/tests.yml`) is a fast (~6 s)
 pure-pytest pipeline using the Frappe stub in `optimus/tests/conftest.py`
-— great for logic regressions, blind to the integration layer:
+great for logic regressions, blind to the integration layer:
 `before_request` / `after_request` / `before_job` / `after_job` hooks,
 `scheduler_events`, the atomic Lua merge for bg-job tracking (the v0.7.x
 trilogy's `TestAtomicMergeJobMetaConcurrent` test is explicitly skipped
@@ -2719,66 +3023,66 @@ each become a small follow-up PR using this harness.
 
 ### Added
 
-- **NEW `.github/workflows/integration.yml`** — provisions a Frappe v16
+- **NEW `.github/workflows/integration.yml`**: provisions a Frappe v16
   bench against MariaDB 10.6 + two Redis service containers; runs the
   integration suite via `bench run-tests --app optimus --module …`.
   Triggers on PRs to `main`, push to `main`, scheduled daily at 04:00
-  UTC, and manual dispatch. Job timeout 25 minutes (expected wall-clock
+  UTC and manual dispatch. Job timeout 25 minutes (expected wall-clock
   ~10-15 minutes cold, ~6-8 minutes with pip + yarn caches warm). Logs
   for both the test runs + the bench's own logs are uploaded as the
   `integration-logs` artifact on failure (14-day retention). No secrets
-  required — a fork's CI runs identically.
-- **NEW `.github/helper/install.sh`** — ~50-line bash script following
+  required a fork's CI runs identically.
+- **NEW `.github/helper/install.sh`**: ~50-line bash script following
   the established Frappe / ERPNext community pattern. Runs `bench init
   --frappe-branch version-16`, points it at the runner's service
   containers, symlinks the optimus checkout as `apps/optimus`, creates
   a `test_site`, installs optimus, runs `bench migrate`. Idempotent +
   reusable locally for spinning up a clean test bench.
-- **NEW `optimus/tests_integration/`** — sibling directory to
+- **NEW `optimus/tests_integration/`**: sibling directory to
   `optimus/tests/`. Tests subclass `frappe.tests.utils.FrappeTestCase`
   and use real `frappe.db` / `frappe.cache` / `frappe.get_doc` calls.
   The pure-pytest workflow never traverses this directory; the Frappe
   test runner never traverses `optimus/tests/`. Clean separation.
-- **NEW `tests_integration/conftest.py`** — bench-aware fixtures:
-  `test_site` (current site name), `cleanup_session` (autouse —
+- **NEW `tests_integration/conftest.py`**: bench-aware fixtures:
+  `test_site` (current site name), `cleanup_session` (autouse
   hard-deletes leftover Optimus Session rows + clears the per-user
   Redis active-session pointer; defence-in-depth on top of the per-test
   transaction rollback), `seeded_session` (start → yield uuid → stop +
   wait for terminal status).
-- **NEW `test_install_smoke.py`** — 4 tests: `Optimus User` role
+- **NEW `test_install_smoke.py`**: 4 tests: `Optimus User` role
   exists, all 8 Optimus DocTypes registered, Optimus Settings Single
   doc readable, `bench migrate` idempotent (re-runs without raising +
   no schema drift).
-- **NEW `test_recording_lifecycle_e2e.py`** — 4 tests covering the
+- **NEW `test_recording_lifecycle_e2e.py`**: 4 tests covering the
   canonical capture → analyze → render pipeline: `api.start` creates
   the DocType row + Redis pointer; `api.stop` clears the pointer +
   marks the session for analyze; the full lifecycle reaches a terminal
   state within 60 s + the report file is attached; session totals are
   populated post-analyze. This is the canonical regression canary for
   the integration layer.
-- **NEW `tests_integration/README.md`** — harness documentation, the
-  "no flakiness" rule (quarantine in 24 h, never retry-on-failure), and
+- **NEW `tests_integration/README.md`**: harness documentation, the
+  "no flakiness" rule (quarantine in 24 h, never retry-on-failure) and
   the seven-row extraction roadmap for follow-up PRs.
 
 ### Modified
 
-- **`CONTRIBUTING.md`** — added an "Integration tests (real bench)"
+- **`CONTRIBUTING.md`**: added an "Integration tests (real bench)"
   section with the local + CI commands and a pointer at the
   tests_integration README.
 
 ### Untouched (the point of the two-track design)
 
-- `.github/workflows/tests.yml` — the pure-pytest workflow stays the
+- `.github/workflows/tests.yml`: the pure-pytest workflow stays the
   fast-feedback loop. Both workflows run in parallel on PRs; branch
   protection gates merge on both.
-- `optimus/tests/` — the 1810-test pure-pytest suite continues
+- `optimus/tests/`: the 1810-test pure-pytest suite continues
   unchanged. The Frappe stub in its `conftest.py` doesn't apply to
   `tests_integration/` (sibling directory, never imported under
   `pytest optimus/tests/`).
-- `pyproject.toml` — no new pip dependencies. `frappe-bench` is
+- `pyproject.toml`: no new pip dependencies. `frappe-bench` is
   installed inside the bench helper script, not declared as a
   project dep.
-- The renderer package, the telemetry module, the AI fix path — every
+- The renderer package, the telemetry module, the AI fix path every
   v0.7.x → v0.10.0 piece stays exactly as-is. Integration tests
   exercise them via the live bench, but the code under test doesn't
   change.
@@ -2791,27 +3095,27 @@ each become a small follow-up PR using this harness.
 
 ### Deferred (each is a follow-up PR using this harness)
 
-- `test_atomic_lua_merge_concurrent.py` — un-skip the v0.7.x trilogy's
+- `test_atomic_lua_merge_concurrent.py`: un-skip the v0.7.x trilogy's
   concurrent Redis test.
-- `test_telemetry_flush_doctype_sink.py` — emit → flush → assert
+- `test_telemetry_flush_doctype_sink.py`: emit → flush → assert
   DocType row.
-- `test_ai_privacy_exclusion_on_api.py` — live `api.suggest_fix` with
+- `test_ai_privacy_exclusion_on_api.py`: live `api.suggest_fix` with
   an excluded type.
-- `test_regenerate_reports_idempotent.py` — render → regenerate → diff.
-- `test_phase2_tool_orphan_recovery.py` — leak `sys.monitoring` tool 2
+- `test_regenerate_reports_idempotent.py`: render → regenerate → diff.
+- `test_phase2_tool_orphan_recovery.py`: leak `sys.monitoring` tool 2
   + verify the startup probe reclaims.
-- `test_safe_report_self_contained_on_real_bench.py` — the canary on a
+- `test_safe_report_self_contained_on_real_bench.py`: the canary on a
   real bench's File-served HTML.
-- `test_janitor_sweeps_actually_delete.py` — janitor cron + retention.
+- `test_janitor_sweeps_actually_delete.py`: janitor cron + retention.
 - Cross-version matrix (Frappe v15 + v16), coverage reporting from the
-  integration suite, parallel test sharding — all out of scope for the
+  integration suite, parallel test sharding all out of scope for the
   foundation.
 
 ---
 
-## [0.10.0] — 2026-05-24
+## [0.10.0] - 2026-05-24
 
-**Renderer refactor — foundation PR splitting the 4,958-line monolith
+**Renderer refactor foundation PR splitting the 4,958-line monolith
 into a package, with a structural-snapshot canary.**
 
 `optimus/renderer.py` (4,958 lines, 86 top-level defs, one 812-line
@@ -2823,7 +3127,7 @@ hazard. Touching one helper rippled through 15+ callers spread over
 This release converts the file into a package and extracts the four
 lowest-coupling clusters as a proof-of-concept of the extraction
 recipe. The remaining five clusters stay in `_internal.py` and are
-staged for follow-up PRs — see `optimus/renderer/README.md` for the
+staged for follow-up PRs see `optimus/renderer/README.md` for the
 roadmap.
 
 ### Architecture
@@ -2832,45 +3136,45 @@ roadmap.
 shim in `__init__.py` walks `dir(_internal)` and re-exports every
 non-dunder name (including underscore-prefixed internals), so every
 existing `from optimus.renderer import X` and `optimus.renderer.X` call
-site continues to work unchanged — `analyze.py`, `api.py`, the test
-suite, and any third-party fork stay on the contract.
+site continues to work unchanged `analyze.py`, `api.py`, the test
+suite and any third-party fork stay on the contract.
 
 ### Extracted modules (~538 LOC moved)
 
-- `optimus/renderer/syntax.py` — Pygments highlighting + diff-block
+- `optimus/renderer/syntax.py`: Pygments highlighting + diff-block
   wrapper. `_ensure_pygments`, `_highlight_python_block_cached`,
   `_highlight_python_snippet`, `_highlight_all_snippets`,
   `_highlight_diff_html`, plus the `_PRE_BLOCK_RE` / `_diff_line_class`
   / `_looks_like_diff` internals.
-- `optimus/renderer/source.py` — source-file I/O + bounded LRU cache.
+- `optimus/renderer/source.py`: source-file I/O + bounded LRU cache.
   `_BoundedFileCache`, `_path_within_bench`, `_resolve_source_path`,
   `_read_source_snippet`, `_read_source_window`,
   `_SNIPPET_TRUNCATE_CHARS`, `_FILE_CACHE_MAX_ENTRIES`.
-- `optimus/renderer/visualization.py` — donut chart + hot-frames table +
+- `optimus/renderer/visualization.py`: donut chart + hot-frames table +
   frame-name redaction. `build_donut_data`, `build_donut_svg`,
   `build_hot_frames_table`, `redact_frame_name`, plus the
   `_DONUT_COLORS` palette.
-- `optimus/renderer/time_format.py` — duration + datetime formatting.
+- `optimus/renderer/time_format.py`: duration + datetime formatting.
   `_format_duration_ms`, `_format_datetime_display`,
   `_get_server_timezone`.
 
 ### Added
 
-- **NEW `test_renderer_structure_snapshot.py`** — the structural canary.
+- **NEW `test_renderer_structure_snapshot.py`**: the structural canary.
   Pre-v0.10.0 tests asserted *content* ("the string '50× hits' appears
   in the HTML") but never *structure*. A refactor that renamed
   `<div class="finding-card">` to `<section class="finding">` would
   have passed every existing test and quietly broken the (frozen)
   template's CSS. The new test renders a synthetic fixture through
   `render_raw()`, computes a structural fingerprint (section IDs + CSS
-  class multiset + per-tag count), and compares against
+  class multiset + per-tag count) and compares against
   `optimus/tests/fixtures/renderer_structure.json`. Regenerate via
   `REGENERATE_RENDERER_SNAPSHOT=1 pytest`. 14 tests total, including
   enumerated public-API resolution checks for the 10 named symbols that
   matter to external callers.
-- **NEW `optimus/renderer/README.md`** — the future-author roadmap: why
+- **NEW `optimus/renderer/README.md`**: the future-author roadmap: why
   the package exists, the 5-step extraction recipe, the structural
-  snapshot's role, the public-API stability promise, and the 5-cluster
+  snapshot's role, the public-API stability promise and the 5-cluster
   follow-up table with coupling estimates.
 
 ### Code
@@ -2884,7 +3188,7 @@ suite, and any third-party fork stay on the contract.
 - Updated tests that referenced `optimus/renderer.py` as a known file
   path (5 test files, ~14 sites) to point at the new
   `optimus/renderer/_internal.py`.
-- `test_app_priority_split.py` — one `patch.object(renderer, X)` call
+- `test_app_priority_split.py`: one `patch.object(renderer, X)` call
   rewritten to `patch.object(_renderer_internal, X)` because the
   package re-export trick doesn't apply when `_internal.py`'s own call
   sites resolve names through its own globals.
@@ -2892,32 +3196,32 @@ suite, and any third-party fork stay on the contract.
 ### Deferred (follow-up PRs)
 
 - `call_tree_renderer` (~240 LOC, weak coupling).
-- `line_drilldown` (~840 LOC, internal coupling) — single biggest
+- `line_drilldown` (~840 LOC, internal coupling) single biggest
   remaining chunk.
 - `doc_event_renderer` (~300 LOC, moderate coupling).
-- `finding_enrichment` (~380 LOC, HIGH coupling) — tightly coupled to
+- `finding_enrichment` (~380 LOC, HIGH coupling) tightly coupled to
   `analyze.py`; defer until the surrounding modules are extracted.
-- `render()` orchestrator (~812 LOC, core) — keep integrated; an
+- `render()` orchestrator (~812 LOC, core) keep integrated; an
   orchestrator isn't a section.
 
 ### Engineering
 
 - 14 new pure-pytest tests in `test_renderer_structure_snapshot.py`:
   fingerprint match, self-containment invariant, section minimum,
-  public-API resolution (10 named symbols), and a circular-import
+  public-API resolution (10 named symbols) and a circular-import
   defense. Full suite **1810 passing + 1 skipped** (1796 → 1810).
 
 ---
 
-## [0.9.0] — 2026-05-24
+## [0.9.0] - 2026-05-24
 
-**AI privacy hardening — Critical Risk #2 of the architecture review.**
+**AI privacy hardening Critical Risk #2 of the architecture review.**
 
 When AI fix suggestions are enabled, Optimus sends source code, normalized
-and raw SQL (including table/column names and EXPLAIN output), and action
+and raw SQL (including table/column names and EXPLAIN output) and action
 labels to the configured LLM provider. The pre-v0.9.0 controls were the
-master switch (`ai_enabled`), the batch toggle (`ai_auto_suggest`), and the
-per-pathway hard-off toggles — fine-grained enough to disable AI entirely
+master switch (`ai_enabled`), the batch toggle (`ai_auto_suggest`) and the
+per-pathway hard-off toggles fine-grained enough to disable AI entirely
 but with no opt-out short of that for an operator who wanted to keep
 specific *categories* of finding off the wire.
 
@@ -2925,20 +3229,20 @@ This release adds three pieces, all additive:
 
 ### Added
 
-- **NEW `docs/AI-FIXING.md`** — definitive data-flow documentation. Per-
+- **NEW `docs/AI-FIXING.md`**: definitive data-flow documentation. Per-
   pathway inventory tables (finding-fix, humanize-steps, index-suggestion,
   connectivity probe) listing every field that crosses the wire with
   typical and maximum sizes. What does *not* leave the host. Provider
   matrix. Three local-LLM recipes (ollama, LM Studio, vLLM) with starting
   timeout recommendations and first-token latency expectations. Threat
   model + note for dev shops receiving a profile.
-- **`ai_excluded_finding_types`** — new field in `Optimus Settings → AI →
+- **`ai_excluded_finding_types`**: new field in `Optimus Settings → AI →
   Privacy & Operations`. Multi-line, `#` comments, exact-match
   case-sensitive. Listed types are skipped in both auto-suggest and
-  on-demand calls — the payload is never built and no request leaves the
+  on-demand calls the payload is never built and no request leaves the
   host. Mirrors the parsing pattern of the existing `skip_request_paths` /
   `sensitive_sql_columns` skip-lists.
-- **`ai_request_timeout_seconds`** — new field with default 60, clamped
+- **`ai_request_timeout_seconds`**: new field with default 60, clamped
   10–600. Replaces the hardcoded 60-second `_HTTP_TIMEOUT` (which was
   fatal for local-LLM cold starts: ollama / vLLM first-token latency on a
   CPU-only host or first model load routinely exceeds 60s). Hosted
@@ -2962,7 +3266,7 @@ This release adds three pieces, all additive:
 
 ### Operator notes
 
-- Defaults preserve existing behavior — every operator who isn't on the
+- Defaults preserve existing behavior every operator who isn't on the
   exclusion list path or doesn't need a longer timeout gets the same
   outcome as v0.8.0.
 - `bench migrate` applies the v0_9_0 patch automatically.
@@ -2977,7 +3281,7 @@ This release adds three pieces, all additive:
 
 - 12 new pure-pytest tests in `test_ai_privacy.py`: exclusion parsing,
   exclusion application, on-demand refusal, timeout resolution + clamp,
-  settings floor, and a doc-staleness check that compares the doc's
+  settings floor and a doc-staleness check that compares the doc's
   eligible-types list against `AI_ELIGIBLE_FINDING_TYPES` byte-for-line.
 
 ### Deferred
@@ -2993,9 +3297,9 @@ This release adds three pieces, all additive:
 
 ---
 
-## [0.8.0] — 2026-05-24
+## [0.8.0] - 2026-05-24
 
-**Opt-in failure telemetry — Critical Risk #4 of the architecture review.**
+**Opt-in failure telemetry Critical Risk #4 of the architecture review.**
 
 The app previously had ~79 `frappe.log_error` call sites and ~200+ silent
 `try/except` blocks but no aggregation: every failure landed in Frappe's
@@ -3004,7 +3308,7 @@ global `Error Log` as a one-off row, so an operator couldn't tell
 again"*.
 
 This release adds an opt-in counter that aggregates failures by signature
-(event name + last 5 traceback frames). Default **OFF** — per the
+(event name + last 5 traceback frames). Default **OFF**: per the
 self-hosted product thesis, telemetry never phones home. When enabled the
 default sink is a local `Optimus Telemetry Event` DocType the operator
 inspects in their own Desk; a JSONL file sink (`<bench>/logs/optimus_telemetry.jsonl`)
@@ -3014,7 +3318,7 @@ a follow-up release.
 
 ### Added
 
-- `optimus/telemetry.py` — bounded in-process buffer (`maxlen=500`) +
+- `optimus/telemetry.py`: bounded in-process buffer (`maxlen=500`) +
   lock-free `emit_failure()` hot path + scheduled `flush()` every 10 minutes.
   PII scrub: file paths under bench rewrite to `<bench>/apps/<app>/file.py:LINE`,
   frames outside `optimus/` collapse to `<user_code>:LINE`, context dicts
@@ -3024,8 +3328,8 @@ a follow-up release.
   via deterministic row name from `(event_name, signature)` enables atomic
   `INSERT … ON DUPLICATE KEY UPDATE` so multi-worker flushes converge.
 - 15 high-leverage migration sites in `__init__.py`, `hooks_callbacks.py`,
-  `line_profile/hooks.py`, `analyze.py`, and `ai_fix.py`. Telemetry is
-  **additive** to the existing `frappe.log_error` calls — Error Log
+  `line_profile/hooks.py`, `analyze.py` and `ai_fix.py`. Telemetry is
+  **additive** to the existing `frappe.log_error` calls Error Log
   visibility is unchanged; misconfigured telemetry cannot regress it.
 - Optimus Settings: new Telemetry tab with five additive fields
   (master toggle, DocType sink, JSONL sink, endpoint URL, retention days).
@@ -3041,42 +3345,42 @@ a follow-up release.
 - Master toggle defaults OFF; the feature is invisible until enabled.
 - When enabled, the first rows appear within one 10-minute flush window.
 - Inspect via `Desk → Optimus Telemetry Event` (System Manager only;
-  read+delete permissions, no create/write — writes happen exclusively
+  read+delete permissions, no create/write writes happen exclusively
   via the flush worker).
-- The HTTPS endpoint field accepts a URL today but does nothing — the
+- The HTTPS endpoint field accepts a URL today but does nothing the
   transport will ship in a follow-up release without requiring a schema
   change.
 
 ### Engineering
 
 - 33 new pure-pytest tests covering emit hot path, signature dedup, path
-  scrub, context cap, flush sink wiring, settings clamp, and janitor
+  scrub, context cap, flush sink wiring, settings clamp and janitor
   retention. Suite total now 1777 passing + 1 skipped.
 
 ---
 
-## [0.7.0] — 2026-05-13
+## [0.7.0] - 2026-05-13
 
 **The rename release.** The app rebrands from `frappe_profiler` →
 `optimus`, end-to-end: the Python package, the GitHub repo, every
 DocType, the auto-installed Role, the realtime channels, the
-`X-Profiler-Recording-Id` HTTP correlation header, and every
+`X-Profiler-Recording-Id` HTTP correlation header and every
 user-facing string in the report HTML and floating widget.
 
 Also bundles the v0.6.x development cycle that shipped to the main
 branch since v0.5.2: line-profile Phase 2 drilldown, the audit-response
 patches (DocType title-case, redundant-cache threshold bump, hidden
 framework-tables default, safe-mode field deletions, AI fix fields
-revamp), and the per-finding drill-down chain that walks pyinstrument
+revamp) and the per-finding drill-down chain that walks pyinstrument
 trees down to the first signal-floor leaf.
 
 ### Install
 
-**Fresh deploy only** — no upgrade path from a pre-v0.7.0
+**Fresh deploy only**: no upgrade path from a pre-v0.7.0
 `frappe_profiler` install is supported. The 0.7.0 rename moves the
 package directory, renames every DocType / Role / realtime channel /
 HTTP header / `frappe.local.profiler_*` attribute / `frappe.conf
-.get("profiler_*")` key, and changes the `tabModule Def` row name —
+.get("profiler_*")` key and changes the `tabModule Def` row name
 an in-place upgrade would need a substantial migration patch set,
 which is intentionally out of scope for the 0.7.0 release.
 
@@ -3103,14 +3407,14 @@ bench --site <yoursite> install-app optimus
 
 ### Added (rolled in from v0.6.x development)
 
-  - Line-profile Phase 2 drilldown — pick a hot function, profile it
+  - Line-profile Phase 2 drilldown pick a hot function, profile it
     line-by-line on a second recording, render hit/per-hit timing
     next to the source.
-  - Per-finding drill-down chain — walks the pyinstrument tree from
+  - Per-finding drill-down chain walks the pyinstrument tree from
     a finding's origin frame down to the first leaf below the
     signal floor (10% of origin cumulative_ms), rendered as a chain
     of indented call-site links.
-  - AI fix suggestions — `Suggest a fix (AI)` action on every finding
+  - AI fix suggestions `Suggest a fix (AI)` action on every finding
     sends the smoking-gun source window + recorded SQL evidence to
     the configured LLM endpoint and renders the response inline.
 
@@ -3126,7 +3430,7 @@ bench --site <yoursite> install-app optimus
   - Suite isolation: per-test `sys.modules` fence in `conftest.py`
     snapshots and restores per test, so stub-installer tests don't
     pollute downstream tests in the same pytest session.
-  - `frappe.db` is a Werkzeug Local proxy — tests now replace it
+  - `frappe.db` is a Werkzeug Local proxy tests now replace it
     wholesale via `monkeypatch.setattr` instead of patching its
     attributes (which the proxy intercepts inconsistently).
 
@@ -3139,27 +3443,27 @@ bench --site <yoursite> install-app optimus
 
 ---
 
-## [0.5.1] — 2026-04-15
+## [0.5.1] - 2026-04-15
 
 The "architect review" release. After v0.5.0 landed on the branch, we
 did seven back-to-back architect-review passes over the entire diff
-looking for production bugs, false positives, and bad UX. Each pass
-found 2–3 real issues of a different class — surface bugs, tests
+looking for production bugs, false positives and bad UX. Each pass
+found 2–3 real issues of a different class surface bugs, tests
 mirroring broken production code, end-to-end error path regressions,
-HTTP-layer integration gaps, inconsistent helper adoption, and
+HTTP-layer integration gaps, inconsistent helper adoption and
 schema-field typos. This release bundles all of those fixes plus the
 user-reported widget bugs that surfaced during manual smoke testing
-against a real site. Zero new features — entirely product quality
+against a real site. Zero new features entirely product quality
 and correctness work.
 
 **No DocType schema changes.** No migration needed beyond
 `bench restart` + hard browser refresh.
 
-### Fixed — security
+### Fixed: security
 
 - **Stored XSS bypass via `sanitize_html` JSON fast-path.** The
   v0.5.0 renderer called Frappe's `sanitize_html` on the `notes`
-  field before passing to the template's `|safe` filter — but
+  field before passing to the template's `|safe` filter but
   without `always_sanitize=True`, sanitize_html has a JSON fast-path
   that returns the input unchanged when it parses as valid JSON.
   An attacker could set `notes` to `'{"x":"<script>alert(1)</script>"}'`
@@ -3176,7 +3480,7 @@ and correctness work.
   through everything else. A custom filter key added by a third-party
   app would silently leak PII in Safe mode. v0.5.1 redacts every
   query-string value by default and whitelists only schema refs,
-  pagination, sort flags, and format hints (`doctype`, `limit`,
+  pagination, sort flags and format hints (`doctype`, `limit`,
   `order_by`, `as_dict`, etc.). Unknown keys now redact, which is
   the safe direction.
 
@@ -3193,7 +3497,7 @@ and correctness work.
   in existing` check was a substring compare. If another app had
   already set `Access-Control-Expose-Headers: X-Optimus-Recording-Id-Legacy`
   (or similar), the substring match would falsely think our header
-  was already present and skip appending it — silently breaking
+  was already present and skip appending it silently breaking
   the entire frontend correlation feature because the browser would
   refuse to surface the real header to JavaScript. Fixed with a
   proper comma-split case-insensitive token comparison.
@@ -3201,15 +3505,15 @@ and correctness work.
 - **Correlation header gated on active profiler session, not just
   recorder presence.** The `after_request` hook previously injected
   `X-Optimus-Recording-Id` whenever `frappe.local._recorder` had a
-  `.uuid` — which is true any time the standalone Frappe Recorder UI
+  `.uuid`: which is true any time the standalone Frappe Recorder UI
   is running, even for users who have no profiler session. The header
-  was leaking onto every recorded response site-wide, and
+  was leaking onto every recorded response site-wide and
   `optimus_frontend.js` was buffering XHRs tagged to a recording
   that no session could claim. Now gated on
   `frappe.local.optimus_session_id` which is only set by our own
   `before_request` hook.
 
-### Fixed — production bugs that tests were covering for
+### Fixed: production bugs that tests were covering for
 
 These bugs shipped with v0.5.0 because my tests mocked the same
 broken pattern the production code used, so the test suite rubber-
@@ -3229,27 +3533,27 @@ matching.
   Fixed by calling `frappe.cache.info("stats")` directly and
   passing `frappe.cache` as the RQ connection. New `Tripwire` test
   stub raises on `.redis` access and asserts `info()` is called on
-  the root object — behavioral catch instead of string matching.
+  the root object behavioral catch instead of string matching.
 
 - **Cap-exceeded failure path wrote to phantom `analyze_error`
   field.** v0.5.0's inline-analyze safety cap (default 50 recordings)
   called `frappe.db.set_value("Optimus Session", docname,
-  {"analyze_error": "..."})` — but that field does NOT exist on the
+  {"analyze_error": "..."})`: but that field does NOT exist on the
   doctype. The real field is `analyzer_warnings` (plural). On
   scheduler-disabled sites with ≥51 recordings, clicking Stop
   crashed with MariaDB `Unknown column 'analyze_error' in 'field
-  list'`, the stop API returned 500, and the widget stranded the
+  list'`, the stop API returned 500 and the widget stranded the
   user on Stopping→Analyzing→hang-forever. Fixed by writing to the
   real field, with a test that explicitly asserts the payload dict
   contains `analyzer_warnings` AND does NOT contain `analyze_error`.
 
 - **Inline analyze failure path stranded the widget.** `analyze.run`
-  catches its own exceptions, marks the session Failed, and
+  catches its own exceptions, marks the session Failed and
   re-raises. When analyze ran inline via `frappe.enqueue(now=True)`,
   the re-raise propagated all the way up through `_enqueue_analyze`
   → `_stop_session` → `stop()` → the client. The widget's error
-  callback fired, showed "Failed to stop profiler — try again,"
-  and reset the widget to Recording — but the session was actually
+  callback fired, showed "Failed to stop profiler try again,"
+  and reset the widget to Recording but the session was actually
   Failed server-side. User clicks again, `status()` says no active
   session, widget falls into "Analyzing…" and hangs forever. Fixed
   by catching the inline-analyze re-raise in `_enqueue_analyze` and
@@ -3261,7 +3565,7 @@ matching.
 - **`submit_frontend_metrics` had a GET-merge-SET race.** Two
   concurrent submits (stop-time `frappe.call` racing a `beforeunload`
   sendBeacon) could both read the same existing blob, both compute
-  a merged result, and both write — losing one submission's data.
+  a merged result and both write losing one submission's data.
   v0.5.1 switched to two atomic Redis lists per session
   (`profiler:frontend:<uuid>:xhr` and `:vitals`) written via RPUSH +
   LTRIM. Each submit appends its entries atomically; LTRIM enforces
@@ -3275,10 +3579,10 @@ matching.
   signature is `submit_frontend_metrics(payload: str)`, which works
   fine for the stop-time `frappe.call` path (sends `args:{payload: body}`
   via form encoding). But sendBeacon sends the raw JSON body as
-  `application/json`, and Frappe's request handler parses JSON
+  `application/json` and Frappe's request handler parses JSON
   bodies and flattens their top-level keys into `form_dict` as
   kwargs. So the server was being called with
-  `submit_frontend_metrics(session_uuid=..., xhr=..., vitals=...)` —
+  `submit_frontend_metrics(session_uuid=..., xhr=..., vitals=...)`:
   mismatching the `payload` signature and failing with `TypeError`
   deep in the request router, logged into Frappe's internal error
   log and never reaching our own. Every `beforeunload` beacon was
@@ -3287,16 +3591,16 @@ matching.
   Frappe's flattening produces `{"payload": "..."}` which matches
   the endpoint signature.
 
-### Fixed — false positives in findings
+### Fixed: false positives in findings
 
 - **Missing Index now verifies the column is actually not indexed.**
   v0.5.0 trusted `frappe.core.doctype.recorder.recorder._optimize_query`
   and emitted a finding for whatever column it suggested. But
-  `DBOptimizer` is a heuristic that analyzes WHERE clauses — it
+  `DBOptimizer` is a heuristic that analyzes WHERE clauses it
   does NOT check whether an index already exists. Every Frappe
   session would likely produce false positives for pre-indexed
   columns: primary keys (`name`), framework columns (`parent`,
-  `owner`, `modified`, `creation`), and any Link/Data field with
+  `owner`, `modified`, `creation`) and any Link/Data field with
   `search_index: 1`. v0.5.1 verifies each suggestion against
   `information_schema` before emitting:
 
@@ -3309,7 +3613,7 @@ matching.
     - Column already indexed → suppressed, warning added to report
     - Column type is JSON / geometry → suppressed (not btree-indexable)
     - Column type is TEXT / BLOB → kept, but DDL rewritten to include
-      a prefix length: `ADD INDEX \`idx_col\` (\`col\`(255))` — the
+      a prefix length: `ADD INDEX \`idx_col\` (\`col\`(255))`: the
       plain DDL fails on TEXT with "BLOB/TEXT column used in key
       specification without a key length"
     - Column doesn't exist on table → suppressed (sql_metadata parse
@@ -3330,12 +3634,12 @@ matching.
   `RedisWrapper` methods, gunicorn worker wrappers, `cached_property`,
   etc.) all collapsed into a single `wrapper` bucket. The finding's
   customer description read *"optimizing it would help every flow
-  that touches it"* — which is useless because there is no single
+  that touches it"* which is useless because there is no single
   function called `wrapper` the user can optimize; it's a name
   shared across dozens of unrelated implementations. v0.5.1 fixes
   by including the filename in the dedup key. Key format is
   `"short/path.py::function"` where `short` is the last two path
-  segments — readable without leaking absolute paths.
+  segments readable without leaking absolute paths.
 
 - **Repeated Hot Frame was also suppressing legitimate Frappe
   application-layer targets.** The first fix of the above used the
@@ -3344,7 +3648,7 @@ matching.
   `Document.run_method` runs the user's own doc-event hooks,
   `has_permission` evaluates user-defined permission rules (including
   custom Permission Query Conditions), `make_autoname` runs the user's
-  chosen naming series — all legitimate optimization targets inside
+  chosen naming series all legitimate optimization targets inside
   `frappe/*`. v0.5.1 introduces a narrower `_is_pure_helper_frame`
   filter that only skips pure plumbing (`frappe/utils/`, `frappe/handler.py`,
   `frappe/app.py`, werkzeug, gunicorn, rq, pyinstrument itself,
@@ -3355,8 +3659,8 @@ matching.
   skip is correct.
 
 - **DB Pool Saturation used the wrong ratio.** v0.5.0 computed
-  `threads_running / threads_connected` — which measures *"of the
-  currently open connections, what % are executing queries"* —
+  `threads_running / threads_connected`: which measures *"of the
+  currently open connections, what % are executing queries"*
   and fired when that ratio exceeded 0.9. On a dev box with 5
   connections and 5 of them busy, that's 1.0 → fires the finding,
   even though MariaDB has 495 pool slots unused. The correct
@@ -3367,19 +3671,19 @@ matching.
 
 - **`infra_pressure` crashed on non-dict `infra` value.** The
   guard was `infra = rec.get("infra") or {}; if not infra: continue`
-  — which handles None and empty-dict but not a truthy non-dict
+  which handles None and empty-dict but not a truthy non-dict
   (list, string) that could come from corrupt Redis data. Any
   such value would pass the falsy check and then crash on
   `infra.get(...)`, killing analyze.run for the entire session.
   Added `isinstance(infra, dict)` guard.
 
-### Fixed — user-reported widget bugs
+### Fixed: user-reported widget bugs
 
 - **Widget stuck on "Recording" after clicking Stop.** Two
   compounding causes:
 
   1. **Cache buster inertia.** The `app_include_js` cache-buster
-     uses `?v={__version__}`, and `__version__` stayed at `0.5.0`
+     uses `?v={__version__}` and `__version__` stayed at `0.5.0`
      through a lot of JS edits. Browsers that loaded Desk once
      early in testing served cached JS from that first visit,
      invisible to every subsequent fix. v0.5.1 bumps to `0.5.1`
@@ -3393,8 +3697,8 @@ matching.
 
   2. **Stop callback didn't handle `{stopped: false}` response.**
      When the stop API returns `{stopped: false, reason: "no active
-     session"}` — which happens on auto-stop, janitor sweep, or a
-     retried click after a network blip on the first stop — the
+     session"}`: which happens on auto-stop, janitor sweep, or a
+     retried click after a network blip on the first stop the
      callback fell into the else branch and transitioned the
      widget to "Analyzing…" despite nothing being analyzed
      server-side. No `optimus_session_ready` realtime event would
@@ -3408,7 +3712,7 @@ matching.
   unconditionally reverted the widget to Recording and restarted
   the elapsed timer. But that's wrong when the stop actually
   succeeded server-side and the client only got a network error
-  — the widget would show Recording despite the session being
+  the widget would show Recording despite the session being
   gone. v0.5.1 error handler calls `status()` to ask the server
   what actually happened: if active → revert to Recording, if
   inactive → reset to inactive with a "Session already stopped"
@@ -3417,22 +3721,22 @@ matching.
 
 - **Start dialog silently failed on server error.** The
   `openStartDialog` `frappe.call(api.start)` had no error callback.
-  Any server-side failure — permission denied, concurrent session
-  conflict, server exception — made `frappe.call` silently skip
+  Any server-side failure permission denied, concurrent session
+  conflict, server exception made `frappe.call` silently skip
   the success callback and do nothing. Dialog closed, widget
   stayed inactive, no feedback. v0.5.1 adds an error handler that
-  surfaces a red toast with actionable text, and the success path
+  surfaces a red toast with actionable text and the success path
   also surfaces an orange toast if the response came back without
   a `session_uuid` (unexpected 200).
 
 - **Diagnostic logging added.** `confirmAndStop` now logs at entry,
-  in the success callback (with the full response dict), and in
+  in the success callback (with the full response dict) and in
   the error callback (with the full error object). Log lines use
   the `[optimus]` prefix so they're easy to filter in
   devtools. Makes future "widget doesn't work" reports debuggable
   without adding ad-hoc logging after the fact.
 
-### Fixed — inconsistent helper adoption
+### Fixed: inconsistent helper adoption
 
 - **`retry_analyze` now uses `_enqueue_analyze` for the scheduler-
   aware fallback.** v0.5.0 added the scheduler fallback to
@@ -3451,11 +3755,11 @@ matching.
   `_stop_session`, so `retry_analyze` (and, in theory, the janitor
   auto-stop path) didn't get the protection. v0.5.1 moves the cap
   check inside `_enqueue_analyze` so every caller gets it
-  uniformly, and consolidates what was a duplicate
+  uniformly and consolidates what was a duplicate
   `is_scheduler_disabled()` call in `_stop_session` + `_enqueue_analyze`
   into a single call path.
 
-### Fixed — miscellaneous correctness and polish
+### Fixed: miscellaneous correctness and polish
 
 - **Widget poll-callback race.** The pass-1 fix added a guard at
   the top of `refreshStatus` to skip polling during `stopping`/
@@ -3486,7 +3790,7 @@ matching.
 - **`response_size_bytes` uses TextEncoder for accurate byte
   count.** The XHR fallback path was using
   `xhr.responseText.length` which is a UTF-16 code-unit count
-  — undercounts multi-byte characters (emoji, non-ASCII).
+  undercounts multi-byte characters (emoji, non-ASCII).
   v0.5.1 uses `new TextEncoder().encode(str).length` with a Blob
   fallback and a char-count fallback for legacy browsers.
 
@@ -3496,7 +3800,7 @@ matching.
   `context.frontend_data` load would be caught. Added
   `test_analyze_run_v5_wiring.py` with 5 source-inspection
   guards covering imports, analyzer list membership, context
-  loading, per-recording infra attachment, and `_persist`
+  loading, per-recording infra attachment and `_persist`
   aggregate serialization.
 
 ### Changed
@@ -3510,7 +3814,7 @@ matching.
   confirm which JS is running from devtools.
 - README.md rewritten top-to-bottom. Previously stuck at v0.1.0
   status with outdated runtime flag docs (`capture_stack`,
-  `explain` — neither exists; real flags are `capture_python_tree`
+  `explain`: neither exists; real flags are `capture_python_tree`
   and `notes`). The new README covers all 18 finding types, the
   full configuration surface, scheduler-disabled operation, a
   troubleshooting section with every v0.5.1-era failure mode,
@@ -3518,7 +3822,7 @@ matching.
   Relic / Scout / Bullet.
 - Custom `_is_pure_helper_frame` helper in `call_tree.py` for
   Repeated Hot Frame aggregation. Narrower than the pre-existing
-  `_is_framework_frame`. Both helpers are live — the broad
+  `_is_framework_frame`. Both helpers are live the broad
   filter is used for SQL-to-Python reconciliation and Slow Hot
   Path findings (where it's correct), the narrow filter is used
   for hot-frame aggregation (where the broad filter was too
@@ -3529,7 +3833,7 @@ matching.
 No DocType schema changes. No patches. Running
 `bench --site <site> migrate` is a no-op for v0.5.1 specifically,
 but `bench restart` is REQUIRED so the Python workers reload
-`hooks.py` with the new `__version__` cache-buster — otherwise
+`hooks.py` with the new `__version__` cache-buster otherwise
 browsers continue serving cached JS and none of the widget /
 frontend_frontend fixes take effect.
 
@@ -3550,7 +3854,7 @@ is needed.
   middleware accepting cookie-authenticated POSTs without a
   custom `X-Frappe-CSRF-Token` header. The SameSite cookie
   strategy is expected to work, but only the `beforeunload` path
-  is affected — the stop-time `frappe.call` flush (the primary
+  is affected the stop-time `frappe.call` flush (the primary
   delivery mechanism) is unchanged.
 - Inline analyze pollutes `RECORDER_REQUEST_HASH` with an orphan
   recording containing analyze's own query activity. Operational
@@ -3563,94 +3867,94 @@ is needed.
 
 ---
 
-## [0.5.0] — 2026-04-14
+## [0.5.0] - 2026-04-14
 
 The "Is it my code or my server?" release. Closes two competitive gaps
 with other profilers: there's no way to tell *code-slow* from
-*server-slow*, and there's no way to tell *backend-slow* from
+*server-slow* and there's no way to tell *backend-slow* from
 *network-slow* or *page-paint-slow*. v0.5.0 captures the server-side
 resource state at every action boundary and the browser-side transport
-timing for every XHR, joins them to the matching recording, and
+timing for every XHR, joins them to the matching recording and
 renders them as two new report panels alongside the existing findings.
 Also bundles a scheduler-disabled safety fix that affected v0.4.0 and
 earlier.
 
 ### Added
 
-- **Server infrastructure capture** — new `infra_capture.py` module
+- **Server infrastructure capture**: new `infra_capture.py` module
   snapshots CPU, worker RSS, system memory, swap, load average, MariaDB
-  thread counts and slow-query counter, Redis ops/sec, and RQ queue
+  thread counts and slow-query counter, Redis ops/sec and RQ queue
   depths at the start and end of every recorded action. Balanced tier
   (14 metrics, ~0.8ms per snapshot). Runs in-line on the request path
-  — no background sampler thread. Every source is wrapped in its own
+  no background sampler thread. Every source is wrapped in its own
   try/except so a broken source degrades to `None` rather than
   breaking recording.
-- **`infra_pressure` analyzer** — emits four new finding types:
-  - **Resource Contention** — sustained system CPU > 85% across ≥2
+- **`infra_pressure` analyzer**: emits four new finding types:
+  - **Resource Contention**: sustained system CPU > 85% across ≥2
     actions. Severity escalates to High if any sample hits 95% or if
     >50% of actions are affected. Distinguishes "your own flow is
     CPU-bound" from "something else on the box is hogging CPU."
-  - **Memory Pressure** — worker RSS grew by > 200MB during the
+  - **Memory Pressure**: worker RSS grew by > 200MB during the
     session OR swap > 100MB during any action. High severity if
     delta > 500MB or swap is active.
-  - **DB Pool Saturation** — `threads_running / threads_connected`
+  - **DB Pool Saturation**: `threads_running / threads_connected`
     > 0.9 across ≥2 actions. Points at gunicorn worker count vs.
     MariaDB `max_connections` mismatch.
-  - **Background Queue Backlog** — any RQ queue (`default`, `short`,
+  - **Background Queue Backlog**: any RQ queue (`default`, `short`,
     `long`) peaked above 50 during the session. Signals that the
     flow enqueued work that's waiting behind other jobs.
-- **Browser-side metrics shim** — new `optimus_frontend.js` wraps
+- **Browser-side metrics shim**: new `optimus_frontend.js` wraps
   `window.fetch` and `XMLHttpRequest.prototype.open/send` to capture
   per-XHR timings (URL, method, duration, status, response size)
   whenever the server returns an `X-Optimus-Recording-Id` response
   header. Uses `PerformanceObserver` with `buffered: true` to capture
   Web Vitals (FCP, LCP, CLS, navigation timing). Wraps WHATWG
   primitives instead of application-level APIs so instrumentation
-  survives future Frappe upgrades — jQuery `$.ajax` is caught via XHR
+  survives future Frappe upgrades jQuery `$.ajax` is caught via XHR
   automatically. This is the approach every production APM library
   uses (OpenTelemetry JS, Sentry Browser, Datadog RUM).
-- **`X-Optimus-Recording-Id` correlation header** — `after_request`
+- **`X-Optimus-Recording-Id` correlation header**: `after_request`
   injects the recording UUID as a custom response header AND appends
   it to `Access-Control-Expose-Headers` so browsers actually surface
   it to JavaScript. The expose header is load-bearing: without it,
   `xhr.getResponseHeader("X-Optimus-Recording-Id")` returns `null`
   even for same-origin requests.
-- **`optimus.api.submit_frontend_metrics` endpoint** —
+- **`optimus.api.submit_frontend_metrics` endpoint**:
   receives batched XHR + Web Vitals payloads from the browser shim
   at stop time (via `frappe.call`) or at `beforeunload` (via
   `navigator.sendBeacon`). Accepts a JSON string payload because
   sendBeacon sends raw `Blob`, not form-encoded. Validates session
   ownership so a cross-user write is rejected. Soft caps (1000 XHRs,
   200 vitals) with tail-preferring truncation so end-of-flow data
-  wins on overflow. Idempotent — multiple submits merge into one
+  wins on overflow. Idempotent multiple submits merge into one
   Redis blob.
-- **`frontend_timings` analyzer** — joins XHR timings to Profiler
+- **`frontend_timings` analyzer**: joins XHR timings to Profiler
   Actions by recording UUID, dedupes multi-fire LCP per page (last
   value before next navigation, matching the Web Vitals library
-  convention), and emits three finding types:
-  - **Slow Frontend Render** — LCP > 2500ms → Medium, > 4000ms → High.
-  - **Network Overhead** — `xhr_duration - backend_duration > 500ms`
+  convention) and emits three finding types:
+  - **Slow Frontend Render**: LCP > 2500ms → Medium, > 4000ms → High.
+  - **Network Overhead**: `xhr_duration - backend_duration > 500ms`
     AND `> backend * 1.5`. The multiplier is the key insight: a 500ms
     delta is disproportionate on a 1ms backend call but proportional
     on a 5s one. Only the disproportionate case flags.
-  - **Heavy Response** — single response > 500KB (Low, informational).
-- **Server Resource panel in the report template** — renders the
+  - **Heavy Response**: single response > 500KB (Low, informational).
+- **Server Resource panel in the report template**: renders the
   `infra_timeline` + `infra_summary` aggregates from `infra_pressure`
   as stat cards (CPU avg/peak, RSS delta, load peak, swap peak) and
   a per-action timeline table (CPU, RSS, load, DB pool ratio, RQ
   queue depths).
-- **Frontend panel in the report template** — renders the
+- **Frontend panel in the report template**: renders the
   `frontend_xhr_matched`, `frontend_vitals_by_page`, `frontend_orphans`,
   and `frontend_summary` aggregates from `frontend_timings`. Per-action
   XHR table with backend/browser/network-delta/status/size columns,
-  Web Vitals table by page (FCP, LCP, CLS, TTFB, DCL), and a
+  Web Vitals table by page (FCP, LCP, CLS, TTFB, DCL) and a
   collapsed orphans section for diagnostic use (hidden entirely in
   Safe mode).
-- **`_safe_url` helper in `renderer.py`** — strips docname segments
+- **`_safe_url` helper in `renderer.py`**: strips docname segments
   from `/app/<doctype>/<name>/...` paths and redacts PII query string
   keys (`source_name`, `filters`, `name`, `doctype`, `reference_name`,
   `parent`, `customer`, `supplier`) to `?`. Method URLs
-  (`/api/method/frappe.client.save`) pass through — method names are
+  (`/api/method/frappe.client.save`) pass through method names are
   code identifiers, not PII. Applied to every URL rendered in the
   Frontend panel when `mode == "safe"`. Mirrors SQL normalization:
   full text stored, redacted form emitted.
@@ -3669,27 +3973,27 @@ earlier.
   steps"); v0.5.0 upgrades it in place rather than adding a duplicate
   `steps_to_reproduce` field, avoiding DB schema bloat and data
   migration.
-- **`v5_aggregate_json` field on Optimus Session** — hidden Long
+- **`v5_aggregate_json` field on Optimus Session**: hidden Long
   Text field that serializes the v0.5.0 `infra_pressure` and
   `frontend_timings` aggregates as a single JSON dict. Persisted by
   `_persist` alongside the existing `top_queries_json` and
   `table_breakdown_json`, read by `renderer.render()`.
 - **`data-session-uuid` attribute on the floating widget DOM element**
-  — set when a session is active, cleared when it ends. Read by
+  set when a session is active, cleared when it ends. Read by
   `optimus_frontend.js` to tag its flush payloads, keeping the two
   modules loosely coupled without a shared global.
 - **Test coverage:** 65+ new tests across:
-  - `test_scheduler_inline_fallback.py` — 5 tests
-  - `test_infra_capture.py` — 6 tests (snapshot, diff, force_stop,
+  - `test_scheduler_inline_fallback.py`: 5 tests
+  - `test_infra_capture.py`: 6 tests (snapshot, diff, force_stop,
     psutil defensive behavior, getloadavg fallback, idempotency)
-  - `test_correlation_header.py` — 7 tests
-  - `test_submit_frontend_metrics.py` — 7 tests
-  - `test_infra_pressure_analyzer.py` — 10 tests
-  - `test_frontend_timings_analyzer.py` — 11 tests
-  - `test_safe_url.py` — 9 tests
-  - `test_steps_to_reproduce.py` — 5 tests
-  - `test_v5_panels_render.py` — 5 end-to-end panel render tests
-  - `test_end_to_end_metrics.py` — 2 full-chain integration tests
+  - `test_correlation_header.py`: 7 tests
+  - `test_submit_frontend_metrics.py`: 7 tests
+  - `test_infra_pressure_analyzer.py`: 10 tests
+  - `test_frontend_timings_analyzer.py`: 11 tests
+  - `test_safe_url.py`: 9 tests
+  - `test_steps_to_reproduce.py`: 5 tests
+  - `test_v5_panels_render.py`: 5 end-to-end panel render tests
+  - `test_end_to_end_metrics.py`: 2 full-chain integration tests
   - Two new fixture files (`infra_pressure_session.json`,
     `frontend_metrics_session.json`)
   - Full suite: **277 tests passing**, zero regressions against v0.4.0.
@@ -3697,20 +4001,20 @@ earlier.
 ### Changed
 
 - **Scheduler-aware `_enqueue_analyze` fallback (also fixes a latent
-  v0.4.x bug).** When `bench disable-scheduler` is in effect —
-  common on dev, demo, and Frappe Cloud trial instances — no
+  v0.4.x bug).** When `bench disable-scheduler` is in effect
+  common on dev, demo and Frappe Cloud trial instances no
   `bench worker` process consumes the RQ queue on many deployments,
   so an enqueued analyze job would sit forever and the session would
   hang in the **"Stopping"** state. v0.5.0 detects
   `is_scheduler_disabled()` and passes `now=True` to `frappe.enqueue`
   so analyze runs synchronously inside the stop request. A new
   `optimus_inline_analyze_limit` site config (default 50) hard-caps
-  the recording count for inline analyze — sessions above the cap
+  the recording count for inline analyze sessions above the cap
   are marked Failed with an actionable error directing the user to
   `bench enable-scheduler` and the **Retry Analyze** button. Prevents
   gunicorn's 120s worker timeout from killing a 200-recording inline
   analyze mid-flight.
-- **`api.stop()` response now includes `ran_inline: bool`** — the
+- **`api.stop()` response now includes `ran_inline: bool`**: the
   floating widget reads this to decide whether to transition through
   the "Analyzing…" state or jump straight to "Ready" (when analyze
   already completed inline, the report is attached by the time stop
@@ -3721,7 +4025,7 @@ earlier.
 - **`floating_widget.js:confirmAndStop`** now calls
   `window.optimus_frontend.flush()` before firing the stop
   API so buffered browser metrics land in Redis before analyze runs.
-  Best-effort — a failed flush never blocks stop.
+  Best-effort a failed flush never blocks stop.
 - **`_stop_session` signature changed** from `(user, session_uuid) -> str | None`
   to `(user, session_uuid) -> tuple[str | None, bool]`. Callers
   that discarded the return value still work; the only other
@@ -3733,7 +4037,7 @@ earlier.
   diff it against an end snapshot in the `finally` block, writing
   the result under `profiler:infra:<recording_uuid>` with the same
   TTL as other session keys. All work happens inside the existing
-  try/except blocks — a broken snapshot logs and falls through but
+  try/except blocks a broken snapshot logs and falls through but
   never breaks the customer's request.
 - **`capture._force_stop_inflight_capture`** is now accompanied by
   `infra_capture._force_stop_inflight` in both `api.start()` and
@@ -3752,7 +4056,7 @@ earlier.
   dicts as `rec["infra"]` before the analyzer loop runs, so
   `infra_pressure` and `frontend_timings` can read them inline
   without a Redis hop inside each analyzer. Also appends the two
-  new analyzers to `_BUILTIN_ANALYZERS`. Order is irrelevant — both
+  new analyzers to `_BUILTIN_ANALYZERS`. Order is irrelevant both
   are independent of every existing analyzer.
 
 ### Fixed
@@ -3761,7 +4065,7 @@ earlier.
   `handoff-ux` branch as `e620a57`). `confirmAndStop()` set the DOM
   display to "Stopping…" but left `currentState.display` as
   `"recording"`, so the 5-second polling guard in `refreshStatus()`
-  — which checks `currentState.display` — never tripped. If polling
+  which checks `currentState.display`: never tripped. If polling
   raced the stop API and the status call returned `active=true`
   (because the server hadn't processed stop yet), the widget would
   flip back to "Recording" mid-stop. Also added an `error` callback
@@ -3781,7 +4085,7 @@ Running `bench --site <site> migrate` will:
    upgraded `notes` field (now Text Editor) and the new
    `v5_aggregate_json` Long Text field. Existing `notes` values
    carry over unchanged because plain-text content is valid Text
-   Editor input — no data migration needed, only the metadata
+   Editor input no data migration needed, only the metadata
    changes.
 
 No breaking API changes:
@@ -3817,13 +4121,13 @@ are empty.
 
 To disable the new pyinstrument + infra capture for a specific
 session, uncheck **"Capture Python call tree"** in the start
-dialog as before — the v0.3.0 flag continues to gate the heaviest
+dialog as before the v0.3.0 flag continues to gate the heaviest
 capture paths. Infra capture is unconditional because it costs
 ~0.8ms per action and runs only while the user's session is active.
 
 ---
 
-## [0.4.0] — 2026-04-14
+## [0.4.0] - 2026-04-14
 
 The "Make it usable" release. Sands down the rough edges between
 "customer installs the app" and "customer hands a useful report to
@@ -3832,26 +4136,26 @@ handoff workflow is faster and the report is more actionable.
 
 ### Added
 
-- **Session comparison / baseline pinning** — pin any Ready session as
+- **Session comparison / baseline pinning**: pin any Ready session as
   the baseline for its label. Subsequent recordings with the same label
   auto-render three comparison sections in the safe + raw reports:
-  session-level delta, per-action diff, and finding-level diff
+  session-level delta, per-action diff and finding-level diff
   (fixed / new / unchanged buckets). Lets the dev shop prove "the fix
   worked" by recording a before/after.
 - **`Pin as baseline` and `Compare with...` buttons** on the Profiler
   Session form view. Pinning is per-session-label and persists in
   Redis under `profiler:baseline:<label>`.
-- **Auto-inheritance of baseline** at recording start — `api.start`
+- **Auto-inheritance of baseline** at recording start `api.start`
   checks the baseline cache for the label and pre-populates
   `compared_to_session` on the new session.
-- **`comparison.py` module** — pure-function action and finding
+- **`comparison.py` module**: pure-function action and finding
   matchers, fixture-testable, no Frappe DB access.
-- **PDF export of the safe report** — lazy-generated on first
+- **PDF export of the safe report**: lazy-generated on first
   download click via `frappe.utils.pdf.get_pdf` (wkhtmltopdf), cached
   to a private File attachment on the Optimus Session. Subsequent
   downloads serve from cache. Generation cost is kept out of the
   analyze pipeline.
-- **`pdf_export.py` module** — `get_or_generate_pdf` and
+- **`pdf_export.py` module**: `get_or_generate_pdf` and
   `clear_cached_pdf` helpers.
 - **PDF download button** on the Optimus Session form (lazy generation
   with progress alert).
@@ -3862,24 +4166,24 @@ handoff workflow is faster and the report is more actionable.
   pointing the user at the floating Profiler pill. Suppressed for
   experienced users (anyone with a Ready Optimus Session row).
   Tracked via `profiler:onboarding_seen:<user>` in Redis.
-- **Version-driven asset cache buster** — `app_include_js` and
+- **Version-driven asset cache buster**: `app_include_js` and
   `app_include_css` now read `?v={__version__}` so every release
   automatically invalidates browser caches.
-- **6 new whitelisted API endpoints** —
+- **6 new whitelisted API endpoints**:
   `check_onboarding_seen`, `mark_onboarding_seen`, `pin_baseline`,
   `unpin_baseline`, `set_comparison`, `download_pdf`.
-- **3 new fields on Optimus Session** — `compared_to_session`
+- **3 new fields on Optimus Session**: `compared_to_session`
   (Link), `is_baseline` (Check), `safe_report_pdf_file` (Attach).
-- **SVG donut fallback for PDF mode** — wkhtmltopdf doesn't handle
+- **SVG donut fallback for PDF mode**: wkhtmltopdf doesn't handle
   `conic-gradient` reliably; the renderer now produces an inline SVG
   pie chart that's hidden in HTML mode (via `@media print` CSS) and
   shown in PDF rendering.
-- **Janitor cascade** — `sweep_old_sessions` clears the baseline
+- **Janitor cascade**: `sweep_old_sessions` clears the baseline
   cache key before deleting a baseline session and cascades the
   v0.4.0 `safe_report_pdf_file` attachment.
 - **`retry_analyze` clears the cached PDF** so the next download
   regenerates from the freshly-analyzed report.
-- **Self-contained safe report regression gate** — new test
+- **Self-contained safe report regression gate**: new test
   `test_safe_report_self_contained.py` asserts the rendered HTML
   contains no external URL fetches. Catches accidental introductions
   of CDN references at CI time.
@@ -3887,9 +4191,9 @@ handoff workflow is faster and the report is more actionable.
 ### Changed
 
 - **No changes to the v0.3.0 capture or analyze pipelines.**
-  `capture.py`, `hooks_callbacks.py`, `analyze.py`, and the analyzer
+  `capture.py`, `hooks_callbacks.py`, `analyze.py` and the analyzer
   modules are frozen for this release.
-- **`api.start(label, ...)` accepts the same kwargs as v0.3.0** —
+- **`api.start(label, ...)` accepts the same kwargs as v0.3.0**:
   `capture_python_tree` is unchanged. The new auto-inheritance of
   `compared_to_session` is transparent to callers.
 - **Renderer adds a comparison computation block** when
@@ -3917,12 +4221,12 @@ comparison sections in their safe + raw reports.
 
 ---
 
-## [0.3.0] — 2026-04-13
+## [0.3.0] - 2026-04-13
 
 Adds a Python call tree capture and analysis layer on top of the existing
 SQL-only profiler. Customers reading a safe report now see where their
 flow spent time across SQL **and** Python, with hot-path detection,
-hook bottleneck findings, and redundant-call detection. See
+hook bottleneck findings and redundant-call detection. See
 `apps/frappe_profiler_design/specs/2026-04-13-call-tree-and-redundant-calls-design.md`
 for the full design spec.
 
@@ -3932,25 +4236,25 @@ for the full design spec.
   at 1ms intervals (configurable via
   `site_config.json: optimus_sampler_interval_ms`). Scoped per request
   so non-recording users are unaffected.
-- **Reconciled unified call tree** — each captured SQL call is grafted
+- **Reconciled unified call tree**: each captured SQL call is grafted
   onto the deepest user-code frame in the pyinstrument tree, so the
-  customer sees "your `discounts.calculate` function spent 320ms — 280ms
+  customer sees "your `discounts.calculate` function spent 320ms 280ms
   of that in 14 SQL queries (children below)".
 - **Four new finding types:**
-  - `Slow Hot Path` — a Python subtree consumes >25% of an action AND >200ms.
-  - `Hook Bottleneck` — same shape, but the subtree is a doc-event hook
+  - `Slow Hot Path`: a Python subtree consumes >25% of an action AND >200ms.
+  - `Hook Bottleneck`: same shape, but the subtree is a doc-event hook
     (called via `Document.run_method`); the finding names the hook function.
-  - `Repeated Hot Frame` — the same frame appears in ≥3 actions and
+  - `Repeated Hot Frame`: the same frame appears in ≥3 actions and
     consumes ≥500ms total across the session.
-  - `Redundant Call` — the same `frappe.get_doc(doctype, name)` /
+  - `Redundant Call`: the same `frappe.get_doc(doctype, name)` /
     `frappe.cache.get_value(key)` / `frappe.permissions.has_permission(...)`
     fired N times from the same callsite (thresholds: 5/10/10 by default,
     all configurable).
-- **Session-wide time-attribution donut** in the safe report — at-a-glance
+- **Session-wide time-attribution donut** in the safe report at-a-glance
   "this session was 38% SQL, 22% erpnext, 18% your custom code, …".
-- **Hot frames leaderboard** in the safe report — top 20 hottest function
+- **Hot frames leaderboard** in the safe report top 20 hottest function
   paths across the whole session, sortable.
-- **`api.start(label, capture_python_tree=True)`** — new kwarg lets
+- **`api.start(label, capture_python_tree=True)`**: new kwarg lets
   customers opt out per session (falls back to v0.2.0 SQL-only capture).
   Surfaced in the floating widget's start dialog as a checkbox.
 - **Auto-promote of large per-action call trees** to private File
@@ -3968,32 +4272,32 @@ for the full design spec.
   not data).
 - **`pyinstrument >= 4.6, < 6` dependency** added to `pyproject.toml`.
   Pure-Python, MIT, no compiled extensions.
-- **Streaming `_fetch_recordings`** — converted from list-returning to
+- **Streaming `_fetch_recordings`**: converted from list-returning to
   generator so the analyze pipeline holds bounded memory across large
   sessions.
-- **Per-analyzer wall-clock budget tracker** — analyzers exceeding 60s
+- **Per-analyzer wall-clock budget tracker**: analyzers exceeding 60s
   are flagged; total analyze budgeted at 20 min (5-min headroom under
   RQ long-queue timeout). Past the cap, remaining analyzers are skipped
   with a partial-completion warning.
-- **`api.export_session()` v0.3.0 fields** — JSON output now includes
+- **`api.export_session()` v0.3.0 fields**: JSON output now includes
   `call_tree`, `hot_frames`, `session_time_breakdown`, `total_python_ms`,
   `total_sql_ms`.
 - **New site config keys:**
-  - `optimus_sampler_interval_ms` — pyinstrument sample interval (default 1).
-  - `optimus_tree_prune_threshold_pct` — drop frames below N% of action time (default 0.005).
-  - `optimus_tree_node_cap` — max nodes per persisted tree (default 500, hot path always preserved).
+  - `optimus_sampler_interval_ms`: pyinstrument sample interval (default 1).
+  - `optimus_tree_prune_threshold_pct`: drop frames below N% of action time (default 0.005).
+  - `optimus_tree_node_cap`: max nodes per persisted tree (default 500, hot path always preserved).
   - `optimus_redundant_doc_threshold` (default 5).
   - `optimus_redundant_cache_threshold` (default 10).
   - `optimus_redundant_perm_threshold` (default 10).
   - `optimus_redundant_high_multiplier` (default 5).
-  - `optimus_safe_extra_allowed_apps` — extra app prefixes whose function names are kept un-redacted in safe mode.
+  - `optimus_safe_extra_allowed_apps`: extra app prefixes whose function names are kept un-redacted in safe mode.
 
 ### Changed
 
 - **Per-flow recording overhead** climbs from "10–30% per query" to
   roughly "1.5–2× wall clock during recording" when `capture_python_tree=True`.
-  Non-recording users on the same site are still unaffected — the
-  activation gate is per-user, and the wraps' hot-path check is a single
+  Non-recording users on the same site are still unaffected the
+  activation gate is per-user and the wraps' hot-path check is a single
   attribute lookup with **<100ns overhead** measured against an unwrapped
   baseline.
 - **`health()` `last_24h.analyze_avg_ms`** will rise after this ships.
@@ -4001,7 +4305,7 @@ for the full design spec.
 - **Renderer adds donut + hot frames sections** to both safe and raw
   reports. Old v0.2.0 sessions render with the old layout (no v0.3.0
   fields → sections skipped).
-- **R2 redaction policy** — function names in safe-mode reports collapse
+- **R2 redaction policy**: function names in safe-mode reports collapse
   custom-app frames to `<app>:<top-level-module>` (e.g.
   `my_acme_app.discounts.pricing.calc_secret` → `my_acme_app:discounts`).
   Frappe / ERPNext / payments / hrms keep full names.
@@ -4015,7 +4319,7 @@ for the full design spec.
   `capture.install_wraps` except handler crashed when test code stubs
   `frappe` with a minimal fake module that lacks `log_error`. Now
   bulletproofed with a nested try/except.
-- **Best-effort sidecar entry build** — a failure inside `_identify_args`
+- **Best-effort sidecar entry build**: a failure inside `_identify_args`
   (e.g. an arg with a broken `__str__`) used to propagate out and break
   the user's `frappe.get_doc` call. Now caught locally; the wrap skips
   the entry but always calls `orig`.
@@ -4032,7 +4336,7 @@ Running `bench --site <site> migrate` will:
 3. Add 4 new fields to `tabOptimus Session`: `total_python_ms`,
    `total_sql_ms`, `hot_frames_json`, `session_time_breakdown_json`.
 
-No breaking API changes — `start`, `stop`, `status`, `get_active_session`,
+No breaking API changes `start`, `stop`, `status`, `get_active_session`,
 `health`, `export_session`, `retry_analyze` all keep their existing
 signatures (`start` accepts a new optional kwarg with backward-compatible
 default).
@@ -4047,133 +4351,133 @@ To opt out of the new pyinstrument capture per-session, uncheck
 
 ---
 
-## [0.2.0] — 2026-04-09
+## [0.2.0] - 2026-04-09
 
 Round 2 improvements. 28 items across correctness, operations, UX,
-extensibility, and housekeeping. See
+extensibility and housekeeping. See
 `apps/frappe_profiler_design/ARCHITECTURE.md` for the full design rationale.
 
 ### Added
 
-- **JSON export endpoint** — `optimus.api.export_session(uuid)`
+- **JSON export endpoint**: `optimus.api.export_session(uuid)`
   returns a structured blob (session + actions + findings + top queries +
   table breakdown) for programmatic consumption by dev-shop tools.
-- **Health / metrics endpoint** — `optimus.api.health()` returns
+- **Health / metrics endpoint**: `optimus.api.health()` returns
   counts by status and analyze-pipeline performance over the last 24 hours.
   Intended for Prometheus/Grafana/Datadog scrapers.
-- **Custom analyzer hook** — third-party Frappe apps can contribute
+- **Custom analyzer hook**: third-party Frappe apps can contribute
   analyzers via `hooks.py: optimus_analyzers = ["my_app.analyzers.custom.analyze"]`.
   Hooks run after the builtins and share the same `AnalyzeContext`.
-- **Cross-session EXPLAIN cache** — EXPLAIN results are now cached in
+- **Cross-session EXPLAIN cache**: EXPLAIN results are now cached in
   Redis with a 1-hour TTL (configurable via
   `site_config.json: optimus_explain_cache_ttl_seconds`). Two consecutive
   analyze runs on a stable schema skip the DB roundtrip entirely.
-- **Notes field on Optimus Session** — customers can annotate sessions
+- **Notes field on Optimus Session**: customers can annotate sessions
   with reproduction steps, ticket refs, context. Editable even on Ready
   sessions. Rendered in the HTML report header.
-- **Progress updates during analyze** — the analyze pipeline emits
+- **Progress updates during analyze**: the analyze pipeline emits
   `frappe.publish_realtime("optimus_progress", ...)` events at each
   phase (5% fetching, 20% EXPLAIN, 50% analyzers, 80% persist, 90%
   render, 100% done). The floating widget subscribes and displays a live
   percentage instead of a bare "Analyzing…".
-- **Retention-policy cleanup** — daily janitor deletes Ready/Failed
+- **Retention-policy cleanup**: daily janitor deletes Ready/Failed
   sessions older than 90 days (configurable via
   `site_config.json: optimus_session_retention_days`).
-- **Orphan Redis cleanup** — the daily janitor also sweeps
+- **Orphan Redis cleanup**: the daily janitor also sweeps
   `profiler:session:*` Redis keys whose parent Optimus Session row no
   longer exists (e.g. failed analyzes that never retried).
-- **Sensitive-field redactor** — raw report now redacts known-sensitive
+- **Sensitive-field redactor**: raw report now redacts known-sensitive
   fields from headers and form_dict before rendering. Redacts: password,
   secret, token, api_key, authorization, cookie, csrf, otp, card_number,
-  cvv, ssn, aadhar, pan_number, and similar. Defense-in-depth against
+  cvv, ssn, aadhar, pan_number and similar. Defense-in-depth against
   download-and-share leaks.
-- **Session TTL refresh on activity** — long flows (45+ minutes) no
+- **Session TTL refresh on activity**: long flows (45+ minutes) no
   longer silently stop at the 10-minute TTL. Every
   `register_recording` call refreshes the user's active-session key so
   an actively-used session stays alive as long as there's traffic.
-- **Server timezone in report header** — the report now labels times
+- **Server timezone in report header**: the report now labels times
   with an explicit server timezone so distributed teams don't get
   confused about UTC vs. local.
-- **Retry Analyze button** — Failed sessions now have a "Retry Analyze"
+- **Retry Analyze button**: Failed sessions now have a "Retry Analyze"
   custom button in the form view that re-enqueues the analyze job. New
   `optimus.api.retry_analyze(session_uuid)` whitelisted endpoint.
-- **Fixture builder helpers** — `optimus.tests.fixture_builders`
+- **Fixture builder helpers**: `optimus.tests.fixture_builders`
   provides `build_call`, `build_recording`, `build_explain_row` to
   reduce boilerplate in analyzer tests.
 
 ### Fixed
 
-- **N+1 attribution blamed frappe framework code** — `_callsite()` now
+- **N+1 attribution blamed frappe framework code**: `_callsite()` now
   walks the stack skipping `frappe/` and `optimus/` prefixes so
   N+1 findings point at customer business logic (e.g.
   `erpnext/accounts/sales_invoice.py:212`) instead of framework helpers
   (`frappe/database/database.py:742`). Single most impactful fix in
   the round-1 review.
 - **`explain_flags` documented a `filtered < 10` check that wasn't
-  implemented** — the new check fires on queries where MariaDB's
+  implemented**: the new check fires on queries where MariaDB's
   `filtered` column < 10 AND rows_examined > 100, emitting a new
   `Low Filter Ratio` finding type.
-- **`before_request`/`before_job` could clobber an existing recorder** —
+- **`before_request`/`before_job` could clobber an existing recorder**:
   if the standalone Recorder UI is active globally, frappe's own hook
   creates a Recorder first; our hook now checks
   `frappe.local._recorder` and piggybacks instead of overwriting it.
-- **`api.start()` had no role check** — any authenticated user could
+- **`api.start()` had no role check**: any authenticated user could
   POST to the endpoint and start a session on themselves. Now requires
   `Optimus User` or `System Manager` role (enforced at the HTTP level,
   not just the UI).
-- **N+1 threshold of 5 was too low** — raised default to 10 with a
+- **N+1 threshold of 5 was too low**: raised default to 10 with a
   `optimus_n_plus_one_threshold` site config override. Also requires
   minimum total time (default 20ms) so 10×0.1ms queries no longer
   trigger false positives.
-- **`_enrich_recordings` had no EXPLAIN cap** — now caps at 2000
+- **`_enrich_recordings` had no EXPLAIN cap**: now caps at 2000
   queries per recording and dedupes EXPLAIN by query shape. Prevents
   the analyze job from running millions of EXPLAINs on pathological
   sessions.
-- **DB indexes missing on `status` and `started_at`** — the janitor
+- **DB indexes missing on `status` and `started_at`**: the janitor
   query was a table scan at scale. Added `search_index: 1` on both.
-- **`index_suggestions` silently swallowed errors** — now logs the
+- **`index_suggestions` silently swallowed errors**: now logs the
   first 3 per-query failures and surfaces a `"Could not analyze X queries"`
   warning in the report.
-- **Multi-line SQL rendered as single line in top-N table** — switched
+- **Multi-line SQL rendered as single line in top-N table**: switched
   from `<code>` to `<pre class="sql-inline">` with bounded height.
 - **`before_job` left `_profiler_session_id` in kwargs on malformed
-  kwargs** — defensive type check + error log.
-- **Widget polled forever in hidden tabs** — now pauses polling on
+  kwargs**: defensive type check + error log.
+- **Widget polled forever in hidden tabs**: now pauses polling on
   `visibilitychange` and resumes when the tab becomes visible again.
-- **Cap warning not surfaced in UI** — `analyzer_warnings` now renders
+- **Cap warning not surfaced in UI**: `analyzer_warnings` now renders
   as an orange `frm.set_intro` banner at the top of the form.
-- **"Top contributor" summary missed session-wide findings** — the
+- **"Top contributor" summary missed session-wide findings**: the
   two-step fallback now picks the highest-impact finding overall when
   there's no action-specific match.
-- **Session list view had no severity indicator** — new `top_severity`
+- **Session list view had no severity indicator**: new `top_severity`
   field populated by analyze, color-coded in the list view via a custom
   `listview_settings.get_indicator`.
-- **`track_changes=1` on Optimus Session caused storage bloat** —
+- **`track_changes=1` on Optimus Session caused storage bloat**:
   every analyze created 10+ tabVersion rows. Disabled track_changes;
   patch `v0_2_0.remove_version_tracking` cleans up existing rows on
   `bench migrate`.
-- **Potential recursive analyze** — `analyze.run()` now sets
+- **Potential recursive analyze**: `analyze.run()` now sets
   `frappe.local.optimus_analyzing = True` so hooks skip activation on
   the analyze pipeline's own DocType writes.
 - **`_optimize_query` errors could leak query literals in the error
-  log** — added a paranoia scrub (`'foo'` → `'?'`, long numbers → `?`)
+  log**: added a paranoia scrub (`'foo'` → `'?'`, long numbers → `?`)
   before logging.
-- **Uninstall didn't clean Redis state** — `before_uninstall` now
+- **Uninstall didn't clean Redis state**: `before_uninstall` now
   SCAN+DELETEs all `profiler:*` keys for the site.
 
 ### Changed
 
-- **Analyzer unit tests** — 50+ new tests covering per_action, top_queries,
+- **Analyzer unit tests**: 50+ new tests covering per_action, top_queries,
   n_plus_one (with callsite attribution assertions), explain_flags (all
   4 red flags including the new filtered check), index_suggestions (with
   `monkeypatch` for `_optimize_query`), table_breakdown, the enqueue
-  patch (idempotency + session id injection), and frontend asset smoke
+  patch (idempotency + session id injection) and frontend asset smoke
   tests (JS syntax + content assertions). All 67 tests pass in < 1s.
-- **Shared `SEVERITY_ORDER` and `walk_callsite`** — moved from
+- **Shared `SEVERITY_ORDER` and `walk_callsite`**: moved from
   per-module copies to `analyzers/base.py`.
-- **Refactored `_stop_session`** — split into `_clear_active`,
+- **Refactored `_stop_session`**: split into `_clear_active`,
   `_mark_stopping`, `_enqueue_analyze` for clarity.
-- **README overhauled** — operational caveats, hard-cap table, config
+- **README overhauled**: operational caveats, hard-cap table, config
   knobs, verification checklist.
 - **Version bumped** from 0.0.1 to 0.2.0.
 
@@ -4191,12 +4495,12 @@ Running `bench --site <site> migrate` will:
 4. Add the new `Low Filter Ratio` value to the `Optimus Finding.finding_type`
    select.
 
-No breaking API changes — existing calls to `start`, `stop`, `status`,
+No breaking API changes existing calls to `start`, `stop`, `status`,
 `get_active_session`, `retry_analyze` are unchanged.
 
 ---
 
-## [0.1.0] — 2026-04-08
+## [0.1.0] - 2026-04-08
 
 Initial feature-complete v1. All 8 phases from the design doc plus 21
 fixes from the first-review pass. See `ARCHITECTURE.md` for the design
@@ -4227,6 +4531,6 @@ rationale.
 
 ---
 
-## [0.0.1] — 2026-04-08
+## [0.0.1] - 2026-04-08
 
-Initial scaffold. Empty app with no logic — just the DocType structure.
+Initial scaffold. Empty app with no logic just the DocType structure.

@@ -4,29 +4,14 @@
 """End-to-end recording lifecycle against a real Frappe bench.
 
 The canonical smoke test for the whole capture → analyze → render pipeline:
+``api.start`` creates an Optimus Session row + a ``profiler:active:<user>``
+Redis pointer; the session is Recording; ``api.stop`` clears the pointer,
+marks Stopping and enqueues (or inline-runs) analyze; the session then reaches
+a terminal state (Ready on success, Failed if analyze raised); on Ready the
+report HTML is attached and totals are populated.
 
-  1. ``api.start`` creates an ``Optimus Session`` DocType row AND a
-     ``profiler:active:<user>`` Redis pointer.
-  2. The session is in ``Recording`` state, addressable by uuid.
-  3. ``api.stop`` clears the active pointer + marks status ``Stopping``
-     + enqueues (or inline-runs) the analyze job.
-  4. Within the polling window, the session lands on a terminal state
-     (``Ready`` on success, ``Failed`` if the analyze raised).
-  5. On Ready, the report HTML file is attached + the session carries
-     plausible totals.
-
-This single test exercises:
-
-  * the recorder monkey-patch installed at app-import time
-    (``optimus/__init__.py::_patch_recorder``)
-  * the v0.7.x bg-tracking trilogy's per-job meta writes (no bg jobs
-    triggered here, but the path stays open)
-  * the analyze enqueue + RQ job + the full renderer pipeline
-  * the File-attach step that persists the report next to the session
-
-Failure here means the integration layer broke. Pure-pytest can verify
-every component in isolation but cannot catch a regression in the
-inter-component handoff — that's what this test is for.
+A failure here means the inter-component handoff broke where the unit suite,
+which tests components in isolation, cannot catch it.
 """
 
 from __future__ import annotations
@@ -41,9 +26,9 @@ _TERMINAL_STATUSES = ("Ready", "Failed")
 
 
 def _wait_for_terminal(session_uuid: str, *, timeout_seconds: int = 60) -> str | None:
-	"""Poll the session's ``status`` field every 500 ms until terminal
-	(``Ready`` / ``Failed``) or until ``timeout_seconds`` elapses.
-	Returns the final status, or ``None`` on timeout."""
+	"""Poll the session's ``status`` every 500 ms until terminal (``Ready`` /
+	``Failed``) or ``timeout_seconds`` elapses. Returns the final status or
+	``None`` on timeout."""
 	deadline = time.monotonic() + timeout_seconds
 	while time.monotonic() < deadline:
 		status = frappe.db.get_value(
@@ -62,7 +47,7 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 	def setUpClass(cls):
 		super().setUpClass()
 		# Run as Administrator so the user-permission gates in api.start
-		# / api.stop don't refuse — the test is exercising the capture
+		# / api.stop don't refuse the test is exercising the capture
 		# pipeline, not the auth surface (that's covered by other tests).
 		frappe.set_user("Administrator")
 
@@ -97,7 +82,7 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 				f"{session_uuid!r}"
 			)
 		finally:
-			# Clean up so the next test starts from a known state — the
+			# Clean up so the next test starts from a known state the
 			# autouse cleanup_session fixture handles this too, but
 			# defence-in-depth keeps the test self-contained.
 			try:
@@ -140,12 +125,9 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 	# --- 3 + 4: analyze completes; report is attached ----------------------
 
 	def test_full_lifecycle_reaches_ready_and_attaches_report(self):
-		"""The big-picture smoke: start → stop → wait → Ready + report.
-
-		This is the canonical regression canary. A failure here means
-		some part of the capture / analyze / render pipeline broke and
-		the unit suite missed it. Read the failure message + the bench
-		logs (CI uploads them as ``integration-logs``) to localise.
+		"""The big-picture smoke: start → stop → wait → Ready + report. A failure
+		here means some part of the capture / analyze / render pipeline broke; read
+		the bench logs (CI uploads them as ``integration-logs``) to localise.
 		"""
 		from optimus import api
 
@@ -153,7 +135,7 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 		session_uuid = start_result["session_uuid"]
 		docname = start_result["docname"]
 
-		# No HTTP traffic in between — a stop() immediately after start()
+		# No HTTP traffic in between a stop() immediately after start()
 		# produces a session with zero recordings. analyze.run handles
 		# that gracefully (renders a "no recordings" report) so this is
 		# still a valid smoke. A future PR can add an actual recorded
@@ -173,7 +155,7 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 		# a code path in ``analyze.run`` that DOESN'T attach a report
 		# (the empty-recordings session reaches Ready via early-
 		# return paths inside analyze, leaving ``raw_report_file``
-		# unset — observed in CI runs of this test). The production
+		# unset observed in CI runs of this test). The production
 		# answer for that case is exactly what ``regenerate_reports``
 		# does: re-render from persisted DocType fields without
 		# requiring recordings. v0.12.4's regenerate-tests prove this
@@ -184,7 +166,7 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 		api.regenerate_reports(session_uuid)
 
 		# Report URL is persisted on the session's ``raw_report_file``
-		# field — that's the authoritative side-effect contract
+		# field that's the authoritative side-effect contract
 		# (same one the v0.12.4 regenerate-tests assert against).
 		# ``analyze._render_and_attach_reports`` sets ``raw_report_file``
 		# via ``frappe.db.set_value`` as its last step; same field is
@@ -195,20 +177,18 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 		)
 		assert raw_report_file, (
 			f"no Optimus report HTML attached to session {docname!r} "
-			f"after regenerate_reports — ``raw_report_file`` field is "
+			f"after regenerate_reports ``raw_report_file`` field is "
 			f"empty, meaning the render or the attach step failed "
 			f"silently inside ``analyze._render_and_attach_reports``. "
 			f"Bench logs may show why (uploaded as integration-logs "
 			f"artifact on failure)."
 		)
 
-	# --- 5: sanity-floor — totals are populated ---------------------------
+	# --- 5: sanity-floor totals are populated ---------------------------
 
 	def test_session_totals_populated_after_analyze(self):
-		"""After a successful analyze, the session's persisted totals are
-		set to *something* (zero is fine on an empty-recording session).
-		This is the floor — if totals are None / missing, a write step
-		in analyze got skipped."""
+		"""After analyze, the session's persisted totals are set to something (zero
+		is fine on an empty session). None/missing means a totals write was skipped."""
 		from optimus import api
 
 		start_result = api.start(label="integration: totals populated")
@@ -226,6 +206,6 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 		# Each field must be a number (int/float), not None.
 		for field in ("total_duration_ms", "total_query_time_ms", "total_queries", "total_requests"):
 			assert row[field] is not None, (
-				f"{field} is None after analyze — analyze.run skipped the totals write"
+				f"{field} is None after analyze analyze.run skipped the totals write"
 			)
 			assert row[field] >= 0, f"{field} should be non-negative, got {row[field]!r}"

@@ -4,6 +4,7 @@
 """Unit tests for optimus.analyzers.top_queries."""
 
 from optimus.analyzers import top_queries
+from optimus.analyzers.base import dur
 
 
 def test_top_queries_sorted_by_duration_desc(full_scan_recording, empty_context):
@@ -28,7 +29,7 @@ def test_top_callsite_from_business_code(full_scan_recording, empty_context):
 	"""Top queries should report the business-logic callsite, not frappe internals."""
 	result = top_queries.analyze([full_scan_recording], empty_context)
 	top = result.aggregate["top_queries"]
-	# All fixture frames are in acme_reports (custom app) — should see
+	# All fixture frames are in acme_reports (custom app) should see
 	# those paths, not frappe. v0.5.2: renamed from erpnext because
 	# erpnext is now classified as framework.
 	for q in top:
@@ -49,11 +50,10 @@ def test_empty_recordings(empty_context):
 
 
 def test_framework_callsite_queries_excluded_from_leaderboard(empty_context):
-	"""v0.6.0: the slowest-queries leaderboard is scoped to the user's
-	own app. A slow query whose blame frame is inside frappe/ or
-	erpnext/ must not appear in ``top_queries`` even though it's slower
-	than the user-app queries — it's noise the developer can't act on.
-	The per-action breakdown still carries it."""
+	"""The slowest-queries leaderboard is scoped to the user's own app: a slow
+	query whose blame frame is inside frappe/ or erpnext/ must not appear in
+	``top_queries`` even though it's slower than the user-app queries. The
+	per-action breakdown still carries it."""
 	recording = {
 		"uuid": "r1",
 		"calls": [
@@ -87,9 +87,29 @@ def test_framework_callsite_queries_excluded_from_leaderboard(empty_context):
 	assert [f for f in result.findings if f["finding_type"] == "Slow Query"] == []
 
 
+def test_slow_query_impact_rounds_to_match_title(empty_context):
+	"""The title bakes dur(query_duration_ms) (rounds to 0.01ms internally), so the
+	stored estimated_impact_ms that drives the badge must be round(x, 2) too. Storing
+	the raw float made the title and badge disagree at a boundary (623.495 -> title
+	624ms beside a 623ms badge)."""
+	recording = {
+		"uuid": "r1",
+		"calls": [
+			{"query": "SELECT * FROM `tabSales Invoice`",
+			 "normalized_query": "SELECT * FROM `tabSales Invoice`",
+			 "duration": 850.126,
+			 "stack": [{"filename": "acme_app/acme_app/api.py", "lineno": 12}]},
+		],
+	}
+	result = top_queries.analyze([recording], empty_context)
+	slow = [f for f in result.findings if f["finding_type"] == "Slow Query"]
+	assert len(slow) == 1
+	assert slow[0]["estimated_impact_ms"] == round(850.126, 2)  # 850.13, not raw
+
+
 def test_query_without_callsite_excluded_from_leaderboard(empty_context):
-	"""A query the recorder couldn't attribute to a frame (None callsite)
-	can't be tied to the user's app, so it's left out of the leaderboard."""
+	"""A query with no callsite (unattributed) can't be tied to the user's app, so
+	it's left out of the leaderboard."""
 	recording = {
 		"uuid": "r1",
 		"calls": [
@@ -106,9 +126,8 @@ def test_query_without_callsite_excluded_from_leaderboard(empty_context):
 
 
 def test_trivially_fast_queries_excluded_from_leaderboard(empty_context):
-	"""When every user-app query is sub-floor (a few ms each), the
-	leaderboard stays empty rather than padding itself with queries that
-	aren't worth singling out — there's no "reasonable" slowest query."""
+	"""When every user-app query is sub-floor (a few ms each), the leaderboard stays
+	empty rather than padding itself with queries not worth singling out."""
 	recording = {
 		"uuid": "r1",
 		"calls": [
@@ -137,3 +156,50 @@ def test_floor_keeps_queries_at_or_above_threshold(empty_context):
 	top = result.aggregate["top_queries"]
 	assert len(top) == 1
 	assert top[0]["query_duration_ms"] == 10.0
+
+
+def test_slow_query_title_is_raw_ms_rollover_deferred_to_render(empty_context):
+	"""Analyzers bake RAW milliseconds into titles/descriptions. The
+	second-rollover (honouring large_duration_threshold_ms) is applied at
+	render time, not here, so nothing is baked that could drift from the
+	render-time impact badge. A 1234ms query reads "Slow query: 1234ms" at
+	the analyzer boundary."""
+	recording = {
+		"uuid": "r1",
+		"calls": [
+			{
+				"query": "SELECT * FROM `tabSales Invoice` WHERE customer = 'X'",
+				"normalized_query": "SELECT * FROM `tabSales Invoice` WHERE customer = ?",
+				"duration": 1234.0,
+				"stack": [{"filename": "acme_app/acme_app/api.py", "lineno": 12}],
+			},
+		],
+	}
+	slow = [
+		f for f in top_queries.analyze([recording], empty_context).findings
+		if f["finding_type"] == "Slow Query"
+	]
+	assert len(slow) == 1
+	assert slow[0]["title"] == f"Slow query: {dur(1234)}"
+	assert f"took {dur(1234)} to run" in slow[0]["customer_description"]
+
+
+def test_slow_query_title_stays_ms_below_one_second(empty_context):
+	"""A sub-second query keeps millisecond units (no space, integer ms)."""
+	recording = {
+		"uuid": "r1",
+		"calls": [
+			{
+				"query": "SELECT * FROM `tabItem` WHERE disabled = 0",
+				"normalized_query": "SELECT * FROM `tabItem` WHERE disabled = ?",
+				"duration": 850.0,
+				"stack": [{"filename": "acme_app/acme_app/api.py", "lineno": 20}],
+			},
+		],
+	}
+	slow = [
+		f for f in top_queries.analyze([recording], empty_context).findings
+		if f["finding_type"] == "Slow Query"
+	]
+	assert len(slow) == 1
+	assert slow[0]["title"] == f"Slow query: {dur(850)}"

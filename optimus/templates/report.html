@@ -107,7 +107,7 @@
 
   /* v0.5.2 round 4: clickable callsite → editor. Subtle style - looks
      like the plain <code> block but with a dotted underline that
-     signals interactivity, and a hover color lift. We don't use the
+     signals interactivity and a hover color lift. We don't use the
      default-link blue because the callsite is already inline code
      and shouldn't compete for attention with surrounding text. */
   a.callsite-link {
@@ -296,7 +296,7 @@
   /* Explicit URL-column width so it isn't squeezed to a sliver on narrow viewports. */
   table.xhr-timing-table col.col-url    { width: 34%; }
 
-  /* Frontend disclosure table — URL takes the bulk, Duration stays
+  /* Frontend disclosure table URL takes the bulk, Duration stays
      narrow, Reason wraps in whatever's left. */
   table.orphaned-xhrs-table { table-layout: fixed; }
   table.orphaned-xhrs-table col.col-url { width: 60%; }
@@ -314,7 +314,7 @@
   table.db-tables-table tbody td:first-child { overflow-wrap: anywhere; }
   /* col.col-url uses the remaining width implicitly (auto) */
 
-  /* resource-table column widths — pairs with the tbl-clip class
+  /* resource-table column widths pairs with the tbl-clip class
      on the same table. Without these the fixed-layout distributes
      width equally and the `#` column gets ~14% of the table while
      the Action column gets crammed. */
@@ -323,7 +323,7 @@
   table.resource-table col.col-num-wide { width: 110px; }
   /* col.col-action gets the remaining width implicitly (auto). */
 
-  /* Queries-per-action flat table — same fixed-column scheme as the resource
+  /* Queries-per-action flat table same fixed-column scheme as the resource
      table so long action labels / callsite paths wrap inside their columns
      and the numeric columns stay aligned (instead of the auto-layout ragged
      widths). col.col-action takes the remaining width. */
@@ -339,7 +339,7 @@
      indexes fit inside the narrow col-idx without wrapping. The
      default table.data td padding (14px each side) eats 28px of
      column width before content; with col-idx at 32-40px, that
-     leaves 4-12px of content area — not enough for "10" or
+     leaves 4-12px of content area not enough for "10" or
      "999". This override gives ~28px of content room at 40px
      total width (40 − 12 = 28). */
   table.per-action-table tbody td:first-child,
@@ -528,7 +528,7 @@
     --ink: #1a1a1a;
     --ink-soft: #4a4a4a;
     /* a11y: darkened from #8a8580 (~3:1) to meet WCAG AA 4.5:1 on white,
-       --bg, --bg-tint, and --hot; stays lighter than --ink-soft for hierarchy. */
+       --bg, --bg-tint and --hot; stays lighter than --ink-soft for hierarchy. */
     --ink-mute: #5f6670;
     --rule: #e8e3d8;
     --rule-strong: #d8d2c2;
@@ -691,7 +691,7 @@
   .kpi-value.danger { color: var(--accent); }
   .kpi-unit { font-size: 14px; color: var(--ink-mute); font-weight: 400; margin-left: 2px; }
   .kpi-sub { font-size: 12px; color: var(--ink-soft); margin-top: 6px; line-height: 1.45; }
-  /* C.UT2: tiny caveat line under a KPI's sub-text — explains a known
+  /* C.UT2: tiny caveat line under a KPI's sub-text explains a known
      limitation of the metric (e.g. sampler interval for Total time). */
   .kpi-caveat {
     font-size: 11px;
@@ -704,11 +704,11 @@
   /* Timing scope-tag: a small muted suffix next to every ms / second
      reading, naming the scope as "per hit" (single occurrence) or
      "consolidated" (sum across all hits in this session). Same rule
-     applies to inline prose, table headers, and KPI sub-lines.
+     applies to inline prose, table headers and KPI sub-lines.
      -----
      Terminology decision (U1, intentional split):
      - Data-layer field names use ``cumulative_ms`` (pyinstrument's
-       term — sum of self_time + descendant time).
+       term sum of self_time + descendant time).
      - UI text uses ``consolidated`` (the user-facing word, picked
        by the project owner for the scope-tag vocabulary).
      This split is intentional. Keep cumulative_ms in fixtures /
@@ -725,7 +725,7 @@
        quietly clipping mid-word. */
     white-space: nowrap;
   }
-  /* Stack scope-tag sub-labels BELOW the main header text — keeps tight
+  /* Stack scope-tag sub-labels BELOW the main header text keeps tight
      numeric columns from having their sub-labels (e.g. "per hit", "per req
      · all queries") overflow into the next column's header. The
      vitals-table used to override this case-by-case; now it's the default
@@ -879,7 +879,7 @@
     color: var(--ink-soft); font-variant-numeric: tabular-nums;
   }
   .waterfall-time.hot { color: var(--accent); font-weight: 600; }
-  /* a11y: per-bar text label (redundant with bar colour). Mini severity pill —
+  /* a11y: per-bar text label (redundant with bar colour). Mini severity pill
      reuses the --X-soft bg + --X text pairing so it's legible over any bar and
      passes AA in light + dark. */
   .bar-label {
@@ -1004,7 +1004,7 @@
   .code-block .added { color: #6A9955; }
   .code-block .removed { color: #F48771; text-decoration: line-through; opacity: 0.85; }
 
-  /* VS Code Dark Modern token palette — smoking-gun .code-block
+  /* VS Code Dark Modern token palette smoking-gun .code-block
      snippet only. The hot-line amber wrapper sits OUTSIDE these
      per-token spans so the highlight composes correctly. */
   .code-block .tok-k, .code-block .tok-kn        { color: #C586C0; }
@@ -1027,7 +1027,7 @@
   .code-block .tok-cm                            { color: #6A9955; font-style: italic; }
   .code-block .tok-o, .code-block .tok-p         { color: #D4D4D4; }
 
-  /* VS Code Light Modern token palette — Line-Level Drilldown
+  /* VS Code Light Modern token palette Line-Level Drilldown
      .line-prof table only (light to match the editorial report
      page). */
   .line-prof .tok-k, .line-prof .tok-kn, .line-prof .tok-kc,
@@ -1307,9 +1307,9 @@
 
   /* DATA TABLES - Phase E.
      Editorial table style applied to per-action breakdown, background
-     jobs, hot frames, top queries, and XHR timing. The existing
+     jobs, hot frames, top queries and XHR timing. The existing
      `.tbl-clip` overflow class keeps long URLs/paths wrapping inside
-     cells; `.data` adds typography, dividers, and the inline-bar +
+     cells; `.data` adds typography, dividers and the inline-bar +
      row-finding patterns. */
   table.data {
     width: 100%; border-collapse: collapse;
@@ -1472,7 +1472,7 @@
   .job-status-warn { background: var(--warn-soft); color: var(--warn); }
   .job-status-info { background: var(--info-soft); color: var(--info); }
   .job-status-mute { background: var(--rule); color: var(--ink-mute); }
-  /* v0.7.x: RQ Jobs table was cramped across 8 columns — give Method room and
+  /* v0.7.x: RQ Jobs table was cramped across 8 columns give Method room and
      keep the numeric columns tight (fixed layout so the colgroup widths hold). */
   table.bg-jobs-table { table-layout: fixed; }
   table.bg-jobs-table .bgcol-idx { width: 30px; }
@@ -1538,7 +1538,7 @@
   table.line-prof tbody tr.hot td.num { color: var(--accent); font-weight: 600; }
   /* v0.7.x: dim lines that never executed (0 hits / 0ms) - def, comments,
      blank, closing parens - so the lines that actually ran stand out. */
-  /* a11y: dim 0-hit lines via the (now AA-compliant) mute token, not opacity —
+  /* a11y: dim 0-hit lines via the (now AA-compliant) mute token, not opacity
      opacity dropped them back under 4.5:1. Still reads dimmer than the near-black hot lines. */
   table.line-prof tbody tr.zero td { color: var(--ink-mute); }
   table.line-prof tbody tr.added td { background: rgba(45, 106, 60, 0.12); }
@@ -1950,7 +1950,7 @@
       {% endif %}
 
       {# v0.7.x: the "Query (normalized)" block was dropped from finding cards
-         per user request - the callsite + fix already say what to change, and
+         per user request - the callsite + fix already say what to change and
          the normalized SQL still lives in the Slowest-queries / per-action
          tables. #}
 
@@ -1998,7 +1998,7 @@
     {% if f.llm_fix and f.llm_fix.suggestion_html and not hide_ai_fix %}
     <div class="fix-box">
       <div class="fix-head">
-        <span>Suggested fix <span class="fix-badge">Unverified &mdash; review before applying</span></span>
+        <span>Suggested fix <span class="fix-badge">Unverified: review before applying</span></span>
         <span class="ai-tag">AI{% if f.llm_fix.model %} &middot; {{ f.llm_fix.model }}{% endif %}{% if f.llm_fix.tokens and f.llm_fix.tokens.total_tokens %} &middot; {{ f.llm_fix.tokens.total_tokens }} tokens{% endif %}</span>
       </div>
       {% if not f.llm_fix.source_available %}
@@ -2089,7 +2089,7 @@
    rows in its primary table and framework-app rows in a collapsed
    "subsection" details sub-block below; both call the same macro so the
    row markup lives in one place. #}
-{% macro action_row(action, idx, max_ms=1.0, large_duration_threshold_ms=1000) %}
+{% macro action_row(action, idx, max_ms=1.0) %}
   {# v0.7.x redesign Phase E: editorial per-action row.
 
      - Action cell: `.action-name` (bold mono) + `.action-meta` (HTTP
@@ -2120,9 +2120,12 @@
     {% set _ms = action.duration_ms or 0 %}
     {% set _pct = (_ms / max_ms * 100) if max_ms else 0 %}
     <td class="num bar-cell">
-      <span{% if _ms >= large_duration_threshold_ms %} class="hot-value"{% endif %}>{{ fmt_ms(_ms) }}</span>
+      {# Colour from the round-based flags computed in report_context (duration_is_hot
+         / bar_kind), so a value that fmt_ms rolls up to "1.00s" is flagged red too,
+         instead of re-deciding here from the raw ms (which left [999.5, 1000) amber). #}
+      <span{% if action.duration_is_hot %} class="hot-value"{% endif %}>{{ fmt_ms(_ms) }}</span>
       <div class="bar-track">
-        <div class="bar-fill{% if _ms >= large_duration_threshold_ms %}{% elif _ms >= 300 %} warn{% else %} ok{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
+        <div class="bar-fill{% if action.bar_kind %} {{ action.bar_kind }}{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
       </div>
     </td>
     <td class="num">{{ action.queries_count }}</td>
@@ -2132,7 +2135,7 @@
   {% if action.related_findings %}
   <tr>
     <td colspan="7" class="row-finding">
-      {# Count-only header — the finding card(s) render right below and carry the
+      {# Count-only header the finding card(s) render right below and carry the
          title + impact + detail, so echoing the title here just duplicated it
          (mirrors the clean bg_job_row header). #}
       &#9888; <strong>{{ action.related_findings | length }} finding{{ "s" if action.related_findings | length != 1 else "" }} linked to this action</strong>
@@ -2154,7 +2157,7 @@
   <span class="job-status job-status-{{ _cls }}">{{ _s }}</span>
 {%- endmacro %}
 
-{% macro bg_job_row(job, idx, cols, any_findings_counted, max_ms=1.0, large_duration_threshold_ms=1000) %}
+{% macro bg_job_row(job, idx, cols, any_findings_counted, max_ms=1.0) %}
   {# v0.7.x redesign Phase E: mirror of action_row for background
      jobs - `.action-name` for the dotted method, `.bar-cell` for the
      duration, `.type-tag.bg` would be redundant (every row in this
@@ -2174,9 +2177,11 @@
     {% set _ms = job.duration_ms or 0 %}
     {% set _pct = (_ms / max_ms * 100) if max_ms else 0 %}
     <td class="num bar-cell">
-      <span{% if _ms >= large_duration_threshold_ms %} class="hot-value"{% endif %}>{{ fmt_ms(_ms) }}</span>
+      {# Round-based flags from report_context (see action_row), so a job that
+         displays "1.00s" is flagged red rather than left amber. #}
+      <span{% if job.duration_is_hot %} class="hot-value"{% endif %}>{{ fmt_ms(_ms) }}</span>
       <div class="bar-track">
-        <div class="bar-fill{% if _ms >= large_duration_threshold_ms %}{% elif _ms >= 300 %} warn{% else %} ok{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
+        <div class="bar-fill{% if job.bar_kind %} {{ job.bar_kind }}{% endif %}" style="width: {{ _pct | round(1) }}%;"></div>
       </div>
     </td>
     <td class="num">{{ job.queries_count }}</td>
@@ -2342,46 +2347,80 @@
   </div>
   {% endif %}
 
-  {# v0.7.x J.14: companion-tool promotional banner. Featured-card
-     treatment with light-blue gradient background, serif product name,
-     bulleted value props, and a solid-blue CTA button. Inert anchor
-     only, no remote assets, no external CSS - the self-contained-HTML
-     guarantee stays intact. #}
-  <aside class="section lens-promo" style="
-      margin: 16px 0 24px;
-      padding: 20px 24px;
-      background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
-      border: 1px solid #bfdbfe;
-      border-left: 4px solid #2563eb;
-      border-radius: 4px;
-  ">
-    <div style="display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:10px;">
-      <div style="display:flex; align-items:center; gap:12px;">
-        <span style="font-family: var(--serif, Georgia, serif); font-size:1.45rem; font-weight:600; color:#1e3a8a; letter-spacing:-0.01em;">Aerele Lens</span>
-        <span style="font-size:0.65rem; text-transform:uppercase; letter-spacing:0.14em; font-weight:700; color:#1e40af; padding:3px 8px; background:#dbeafe; border-radius:3px;">Companion tool</span>
+  {# "Try our other AI tools": a matched pair of promo cards (Jarvis + Lens)
+     rendered side by side from the companion_tools list below, so one source
+     drives both cards and they cannot drift. Wraps to a stack on narrow widths
+     and in print. Both cards use the Jarvis brand violet, hardcoded here as
+     jv_* because the report ships a single light theme and these are not
+     :root tokens; the report's own --display serif and --ink / --ink-soft /
+     --ink-mute / --mono text tokens are reused. Inert anchors only, no remote
+     assets, no external CSS - the self-contained-HTML guarantee stays intact.
+     Distinct jarvis-promo / lens-promo classes keep each card's "exactly once"
+     + self-containment tests independent. #}
+  {%- set jv_violet = "#6e56e6" -%}
+  {%- set jv_bg = "#efebf9" -%}
+  {%- set jv_border = "#dad2f0" -%}
+  {%- set companion_tools = [
+    {
+      "cls": "jarvis-promo",
+      "name": "Jarvis",
+      "url": "jarvis.aerele.in",
+      "href": "https://jarvis.aerele.in/",
+      "cta": "Try Jarvis",
+      "logo": '<span aria-hidden="true" style="display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:8px; background:linear-gradient(135deg,#6e8bff,#8b5cf6); flex:0 0 auto;"><svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z" fill="#ffffff"/></svg></span>',
+      "tagline": "Give your business an <strong>AI teammate</strong>.",
+      "bullets": [
+        "Connect your <strong>chat subscriptions</strong>, <strong>API keys</strong> or <strong>local AI models</strong>.",
+        "<strong>Ask questions</strong> and get answers directly from your ERPNext data.",
+        "You make the call. <strong>Jarvis does the work</strong>.",
+      ],
+    },
+    {
+      "cls": "lens-promo",
+      "name": "Lens",
+      "url": "lens.aerele.in",
+      "href": "https://lens.aerele.in/",
+      "cta": "Try Lens",
+      "logo": '<span aria-hidden="true" style="display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; flex:0 0 auto;"><svg viewBox="2 4 54 54" width="26" height="26" fill="none" aria-hidden="true"><g stroke="#0a1a3f" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"><path d="M 12 24 L 38 24 A 14 14 0 1 0 35.5 32 L 51 47.5"></path></g></svg></span>',
+      "tagline": "Audit your Frappe ERPNext custom apps <strong>before production</strong>.",
+      "bullets": [
+        "Static checks for <strong>performance regressions</strong>, <strong>security gaps</strong> and framework mis-use.",
+        "<strong>ERPNext convention drift</strong> detection.",
+        "<strong>Version-compatibility scans</strong> for Frappe v14&nbsp;/&nbsp;v15&nbsp;/&nbsp;v16 migrations.",
+      ],
+    },
+  ] -%}
+  <div style="font-size:11px; letter-spacing:0.2em; text-transform:uppercase; color:var(--ink-mute); font-weight:600; margin:16px 0 10px;">Try our other AI tools</div>
+  <div class="companion-tools" style="display:flex; flex-wrap:wrap; gap:16px; margin:0 0 24px; align-items:stretch;">
+    {%- for tool in companion_tools %}
+    <aside class="section {{ tool.cls }}" style="flex:1 1 320px; margin:0; padding:20px 22px; background:{{ jv_bg }}; border:1px solid {{ jv_border }}; border-left:3px solid {{ jv_violet }}; border-radius:4px; box-shadow:none; display:flex; flex-direction:column;">
+      <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:10px;">
+        <span style="display:flex; align-items:center; gap:11px; min-width:0;">
+          {{ tool.logo | safe }}
+          <span style="font-family:var(--display); font-size:1.35rem; font-weight:600; color:var(--ink); letter-spacing:-0.01em;">{{ tool.name }}</span>
+        </span>
+        <span style="font-size:0.75rem; color:var(--ink-mute); font-family:var(--mono);">{{ tool.url }}</span>
       </div>
-      <span style="font-size:0.78rem; color:#475569; font-family:var(--mono, monospace);">lens.aerele.in</span>
-    </div>
-    <p style="margin:0 0 12px; font-size:1rem; color:#0f172a; line-height:1.5;">
-      Audit your Frappe ERPNext custom apps <strong>before they break in production</strong>.
-    </p>
-    <ul style="margin:0 0 14px; padding-left:20px; color:#1f2937; font-size:0.88rem; line-height:1.7;">
-      <li>Static checks for <strong>performance regressions</strong>, <strong>security gaps</strong>, and framework mis-use.</li>
-      <li><strong>ERPNext convention drift</strong> detection.</li>
-      <li><strong>Version-compatibility scans</strong> for Frappe v14&nbsp;/&nbsp;v15&nbsp;/&nbsp;v16 migrations.</li>
-    </ul>
-    <a href="https://lens.aerele.in/" rel="noopener"
-       style="display:inline-block; padding:9px 18px; background:#2563eb; color:#ffffff !important; text-decoration:none; font-weight:600; font-size:0.88rem; border-radius:4px; letter-spacing:0.02em;">
-      Try Aerele Lens &rarr;
-    </a>
-  </aside>
+      <p style="margin:0 0 12px; font-size:0.95rem; color:var(--ink); line-height:1.5;">{{ tool.tagline | safe }}</p>
+      <ul style="margin:0 0 16px; padding-left:20px; color:var(--ink-soft); font-size:0.85rem; line-height:1.65;">
+        {%- for bullet in tool.bullets %}
+        <li>{{ bullet | safe }}</li>
+        {%- endfor %}
+      </ul>
+      <a href="{{ tool.href }}" target="_blank" rel="noopener" aria-label="{{ tool.cta }}, opens in a new tab"
+         style="margin-top:auto; align-self:flex-start; padding:8px 16px; background:{{ jv_violet }}; color:#ffffff !important; text-decoration:none; font-weight:600; font-size:0.85rem; border-radius:4px; letter-spacing:0.02em;">
+        {{ tool.cta }} &rarr;
+      </a>
+    </aside>
+    {%- endfor %}
+  </div>
 
   {# v0.6.0: compact in-page navigation. Conditional sections (Background
      jobs / Server Resource / Frontend) link only when they'll render.
      v0.7.x Phase A: restyled as nav pills (editorial design tokens).
      Anchors unchanged so external links / docs still resolve. The
      "Jump to" navigational cue lives in aria-label on the <nav>
-     itself — visually clean, still announced by screen readers. #}
+     itself visually clean, still announced by screen readers. #}
   <nav class="nav-pills" aria-label="Jump to">
     {% if report_data.line_drilldown_html %}<a href="#line-drilldown">Line-Level Drilldown</a>{% endif %}
     <a href="#findings">Findings</a>
@@ -2422,7 +2461,7 @@
      via `.kpi-value.danger`. The old `.stats` + `.stat` markup
      pre-dates the variable system and is no longer referenced. #}
   {# v0.7.x Phase J.2.2: iterate the contract's 4-item kpis list.
-     Labels, values, and sub-lines are all composed in build_report_context. #}
+     Labels, values and sub-lines are all composed in build_report_context. #}
   <div class="kpis">
     {% for k in report_data.kpis %}
     <div class="kpi">
@@ -2471,8 +2510,8 @@
        loop emits one chunk - the legacy behaviour. #}
     {% if report_data.summary and report_data.summary.paragraphs_html %}
       {% for p in report_data.summary.paragraphs_html %}{{ p | safe }}{% endfor %}
-    {% elif session.summary_html %}
-      {{ session.summary_html | safe }}
+    {% elif stored_summary_html %}
+      {{ stored_summary_html | safe }}
     {% else %}
       <p class="empty">No summary available.</p>
     {% endif %}
@@ -2533,7 +2572,7 @@
       <p class="small muted" style="font-style: italic;">
         Note: finding impacts may overlap when several findings cover the
         same code path (e.g. a Slow Hot Path and an N+1 inside the same
-        function) &mdash; don't sum <em>estimated_impact_ms</em> across findings.
+        function) don't sum <em>estimated_impact_ms</em> across findings.
       </p>
 
       {% if report_data.findings_by_app | length == 1 %}
@@ -2557,7 +2596,7 @@
     {% endif %}
 
     {# Framework-level / observational findings live INSIDE Findings
-       as a collapsed subsection, and within THAT, bucket by app so a
+       as a collapsed subsection and within THAT, bucket by app so a
        site with 50 framework observations spread across frappe +
        erpnext + werkzeug doesn't read as one giant blob. User's
        rationale: "the framework and other 1 party app's scripts can
@@ -2567,7 +2606,7 @@
       <h3>Framework-level observations (not user-actionable)</h3>
       <p class="small muted">
         Informational signals without a concrete fix in your application code -
-        framework-level activity, infrastructure pressure, and hot-frame
+        framework-level activity, infrastructure pressure and hot-frame
         observations. Listed for transparency; investigate if something here surprises you.
       </p>
 
@@ -2665,7 +2704,6 @@
          so the row macro can scale its inline bar correctly. Scope
          the max to the table's own slice, not the combined set -
          keeps the framework subsection's bars usable too. #}
-      {% set _threshold_ms = (report_data.large_duration_threshold_ms or 1000) | float %}
       {% if report_data.actions %}
       {# v0.7.x Phase J.2.3: iterate report_data.actions; the contract-shaped
          entries preserve the legacy action keys so action_row reads
@@ -2694,7 +2732,7 @@
         </thead>
         <tbody>
         {% for action in report_data.actions %}
-          {{ action_row(action, loop.index, max_ms=_max_action_ms, large_duration_threshold_ms=_threshold_ms) }}
+          {{ action_row(action, loop.index, max_ms=_max_action_ms) }}
         {% endfor %}
         </tbody>
         <tfoot>
@@ -2703,12 +2741,12 @@
             <td class="num"><strong>{{ fmt_ms(report_data.actions | map(attribute='duration_ms') | map('default', 0) | sum) }}</strong></td>
             <td class="num"><strong>{{ report_data.actions | map(attribute='queries_count') | map('default', 0) | sum }}</strong></td>
             <td class="num"><strong>{{ fmt_ms(report_data.actions | map(attribute='query_time_ms') | map('default', 0) | sum) }}</strong></td>
-            <td class="num muted" title="Per-row maxes are not additive — column total intentionally suppressed">&mdash;</td>
+            <td class="num muted" title="Per-row maxes are not additive, so the column total is intentionally suppressed">-</td>
           </tr>
         </tfoot>
       </table>
       <p class="small muted" style="font-style: italic; margin-top: 6px;">
-        Note: <em>Slowest query</em> values are per-row maxes &mdash; don't sum them.
+        Note: <em>Slowest query</em> values are per-row maxes don't sum them.
         Use the <em>DB time</em> column when you want a column total.
       </p>
       {% else %}
@@ -2717,7 +2755,7 @@
       {% if report_data.actions_framework %}
       {% set _max_fw_ms = (report_data.actions_framework | map(attribute='duration_ms') | map('default', 0) | list | max) or 1 %}
       <details class="subsection">
-        <summary class="small muted"><strong>{{ report_data.actions_framework | length }}</strong> framework action{{ "s" if report_data.actions_framework | length != 1 else "" }} (click to expand) - entry points in <code>frappe</code>, <code>erpnext</code>, and friends; the developer can't easily patch these</summary>
+        <summary class="small muted"><strong>{{ report_data.actions_framework | length }}</strong> framework action{{ "s" if report_data.actions_framework | length != 1 else "" }} (click to expand) - entry points in <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
         <table class="tbl-clip per-action-table data">
           <colgroup>
             <col class="col-idx">
@@ -2741,7 +2779,7 @@
           </thead>
           <tbody>
           {% for action in report_data.actions_framework %}
-            {{ action_row(action, loop.index, max_ms=_max_fw_ms, large_duration_threshold_ms=_threshold_ms) }}
+            {{ action_row(action, loop.index, max_ms=_max_fw_ms) }}
           {% endfor %}
           </tbody>
         </table>
@@ -2782,7 +2820,7 @@
     <p class="small muted" style="font-style: italic;">
       Note: the consolidated total sums each job's wall time. If your
       bench runs multiple RQ workers in parallel, the actual elapsed
-      pool time may be less than this sum &mdash; the per-job Duration
+      pool time may be less than this sum the per-job Duration
       column shows each job's true wall.
     </p>
     <p class="small muted">
@@ -2791,7 +2829,6 @@
       click <em>Retry Analyze</em> once it's done to pick it up.
     </p>
     {% set cols = 8 if report_data.background_jobs_summary.any_findings_counted else 7 %}
-    {% set _threshold_ms = (report_data.large_duration_threshold_ms or 1000) | float %}
     {# v0.7.x Phase J.2.3: iterate report_data.background_jobs; entries
        preserve the legacy job keys so bg_job_row reads job.method /
        entry_callsite / etc. unchanged. The section heading still pulls
@@ -2819,23 +2856,23 @@
       </thead>
       <tbody>
       {% for job in report_data.background_jobs %}
-        {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_job_ms, large_duration_threshold_ms=_threshold_ms) }}
+        {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_job_ms) }}
       {% endfor %}
       </tbody>
       <tfoot>
         <tr class="totals-row">
           <td colspan="2"><strong>Total / {{ report_data.background_jobs | length }} job{{ 's' if report_data.background_jobs | length != 1 else '' }}</strong></td>
-          <td class="muted">&mdash;</td>
+          <td class="muted"></td>
           <td class="num"><strong>{{ fmt_ms(report_data.background_jobs | map(attribute='duration_ms') | map('default', 0) | sum) }}</strong></td>
           <td class="num"><strong>{{ report_data.background_jobs | map(attribute='queries_count') | map('default', 0) | sum }}</strong></td>
           <td class="num"><strong>{{ fmt_ms(report_data.background_jobs | map(attribute='query_time_ms') | map('default', 0) | sum) }}</strong></td>
-          <td class="num muted" title="Per-row maxes are not additive — column total intentionally suppressed">&mdash;</td>
+          <td class="num muted" title="Per-row maxes are not additive, so the column total is intentionally suppressed">-</td>
           {% if report_data.background_jobs_summary.any_findings_counted %}<td class="num"><strong>{{ report_data.background_jobs | map(attribute='findings_count') | map('default', 0) | sum }}</strong></td>{% endif %}
         </tr>
       </tfoot>
     </table>
     <p class="small muted" style="font-style: italic; margin-top: 6px;">
-      Note: <em>Slowest query</em> values are per-row maxes &mdash; don't sum them.
+      Note: <em>Slowest query</em> values are per-row maxes don't sum them.
       Use the <em>DB time</em> column when you want a column total.
     </p>
     {% else %}
@@ -2844,7 +2881,7 @@
     {% if report_data.background_jobs_framework %}
     {% set _max_fw_job_ms = (report_data.background_jobs_framework | map(attribute='duration_ms') | map('default', 0) | list | max) or 1 %}
     <details class="subsection">
-      <summary class="small muted"><strong>{{ report_data.background_jobs_summary.framework_count }}</strong> framework job{{ "s" if report_data.background_jobs_summary.framework_count != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code>, and friends; the developer can't easily patch these</summary>
+      <summary class="small muted"><strong>{{ report_data.background_jobs_summary.framework_count }}</strong> framework job{{ "s" if report_data.background_jobs_summary.framework_count != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
       <table class="data bg-jobs-table">
         <colgroup>
           <col class="bgcol-idx"><col class="bgcol-method"><col class="bgcol-status">
@@ -2865,7 +2902,7 @@
         </thead>
         <tbody>
         {% for job in report_data.background_jobs_framework %}
-          {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_fw_job_ms, large_duration_threshold_ms=_threshold_ms) }}
+          {{ bg_job_row(job, loop.index, cols, report_data.background_jobs_summary.any_findings_counted, max_ms=_max_fw_job_ms) }}
         {% endfor %}
         </tbody>
       </table>
@@ -2877,7 +2914,7 @@
   {# --------------- v0.6.x: DOC-EVENT LIFECYCLE --------------- #}
   {# The slow call-tree findings re-grouped by DocType → lifecycle event
      (validate / on_submit / …), tagging each as a registered doc_events hook
-     or a controller method override, and surfacing cascaded DocTypes (e.g. a
+     or a controller method override and surfacing cascaded DocTypes (e.g. a
      GL Entry created during a Sales Invoice submit). Omitted when no save/
      submit action had a slow lifecycle method. #}
   {# v0.7.x Phase J.2.2: iterate report_data.doc_events (contract shape).
@@ -2938,7 +2975,7 @@
     <a id="resource"></a>{# v0.7.x Phase G: mock-spec ID alias #}
     <h2>Server Resource</h2>
     <p class="small muted">
-      CPU, memory, load average, DB and Redis pressure, and background
+      CPU, memory, load average, DB and Redis pressure and background
       queue depth sampled at each action boundary. Use this to tell code-slow
       from server-slow.
     </p>
@@ -3174,7 +3211,7 @@
         <tr>
           <th>Function</th>
           <th class="num">Total time <small class="scope-tag">consolidated</small></th>
-          <th class="num" title="Sampler hits — proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
+          <th class="num" title="Sampler hits: proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
           <th class="num">Distinct actions</th>
         </tr>
       </thead>
@@ -3189,10 +3226,10 @@
     {% endif %}
     {% if report_data.hot_frames_framework %}
     <details class="subsection">
-      <summary class="small muted"><strong>{{ report_data.hot_frames_framework | length }}</strong> framework frame{{ "s" if report_data.hot_frames_framework | length != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code>, and friends; the developer can't easily patch these</summary>
+      <summary class="small muted"><strong>{{ report_data.hot_frames_framework | length }}</strong> framework frame{{ "s" if report_data.hot_frames_framework | length != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
       <p class="small muted" style="margin: 6px 0 8px; font-style: italic;">
         Framework rows show <em>cumulative</em> time (includes nested
-        calls) &mdash; wrapper self-time is sub-sampler-interval and
+        calls) wrapper self-time is sub-sampler-interval and
         would round to 0ms otherwise.
       </p>
       <table class="data hot-frames-table">
@@ -3200,7 +3237,7 @@
           <tr>
             <th>Function</th>
             <th class="num">Total time <small class="scope-tag">consolidated</small></th>
-            <th class="num" title="Sampler hits — proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
+            <th class="num" title="Sampler hits: proportional to call count but not exact. Use Line-Level Drilldown for a true call count.">Samples</th>
             <th class="num">Distinct actions</th>
           </tr>
         </thead>
@@ -3229,7 +3266,7 @@
         additional quer{{ "ies" if report_data.top_queries_suppressed_count != 1 else "y" }}
         cleared the {{ '%.0f'|format(report_data.top_queries_slow_threshold_ms) }}ms slow threshold but
         {{ "were" if report_data.top_queries_suppressed_count != 1 else "was" }} suppressed from the
-        Findings list to avoid noise &mdash; the full leaderboard above shows
+        Findings list to avoid noise the full leaderboard above shows
         every query above the 10ms display floor.
       </p>
       {% endif %}
@@ -3257,12 +3294,12 @@
     {% else %}
       <div class="empty-state">
         <div class="empty-icon">&check; Clear</div>
-        <p>No queries cleared the 10ms display floor this session &mdash; sub-10ms queries are hidden by default to avoid noise. The per-action breakdown below lists every query, fast and framework ones included.</p>
+        <p>No queries cleared the 10ms display floor this session. Sub-10ms queries are hidden by default to avoid noise. The per-action breakdown below lists every query, fast and framework ones included.</p>
       </div>
     {% endif %}
     {% if report_data.slow_queries_framework %}
     <details class="subsection">
-      <summary class="small muted"><strong>{{ report_data.slow_queries_framework | length }}</strong> framework quer{{ "ies" if report_data.slow_queries_framework | length != 1 else "y" }} (click to expand) - <code>frappe</code>, <code>erpnext</code>, and friends; the developer can't easily patch these</summary>
+      <summary class="small muted"><strong>{{ report_data.slow_queries_framework | length }}</strong> framework quer{{ "ies" if report_data.slow_queries_framework | length != 1 else "y" }} (click to expand) - <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
       <table class="query-table data">
         <colgroup>
           <col class="col-index">
@@ -3299,7 +3336,7 @@
 
     {# Flatten each action's queries into one list, then show the global slowest
        in a single flat table (like Server Resource). Collecting each action's
-       top-20 bounds the work and still captures the overall top-N — a query
+       top-20 bounds the work and still captures the overall top-N a query
        outside its own action's top-20 can't be in the global top-N. #}
     {% set ns = namespace(rows=[]) %}
     {% for action in (report_data.actions + (report_data.actions_framework or [])) %}
@@ -3374,7 +3411,7 @@
         <br>Writes are usually cheap (a handful of sub-millisecond <code>INSERT</code>&nbsp;/&nbsp;<code>UPDATE</code> rows), so a write-heavy table normally won't be near the top of the time-sorted list below - that's why a document save doesn't dominate this section. Drill into the <a href="#per-action">per-action breakdown</a> to see exactly what each save / submit wrote.
       </p>
       {% endif %}
-      <p class="small muted">Where the time goes, and how each table was used. A query touching multiple tables is counted against each, so the rows sum to more than the session total. <strong>Reads</strong> = <code>SELECT</code>; <strong>Writes</strong> = <code>INSERT</code> / <code>UPDATE</code> / <code>DELETE</code>. Sorted by time desc.</p>
+      <p class="small muted">Where the time goes and how each table was used. A query touching multiple tables is counted against each, so the rows sum to more than the session total. <strong>Reads</strong> = <code>SELECT</code>; <strong>Writes</strong> = <code>INSERT</code> / <code>UPDATE</code> / <code>DELETE</code>. Sorted by time desc.</p>
       <table class="data db-tables-table">
         <colgroup>
           <col class="col-tname">
@@ -3412,12 +3449,12 @@
          cards BELOW the data table (lifted out of the colspan sub-rows
          the older markup used). Each card carries the table name, the
          read/write summary in mono, the recommendation prose, the
-         dark SQL snippet for any composite DDL, and an amber
+         dark SQL snippet for any composite DDL and an amber
          warn-line when writes are present. Only ACTIONABLE tables
          get cards: a concrete `recommended_index` (LLM-vetted) or
          at least one heuristic `index_candidates` column. The
          "nothing to suggest" branches (Frappe meta tables, framework-
-         only filters, full-scan reads) are skipped — they took space
+         only filters, full-scan reads) are skipped they took space
          without telling the reader anything actionable. #}
       {% set _rec_tables = [] %}
       {% for t in report_data.db.tables %}
@@ -3486,7 +3523,7 @@
         {% endfor %}
       </div>
       {% endif %}
-      <p class="small muted" style="margin-top:8px;">The <strong>index candidate</strong> for each table is the set of <code>WHERE</code> / <code>JOIN&nbsp;ON</code> columns this session filtered on <em>together</em> most often - a heuristic, not a verdict. Always confirm with the query's <code>EXPLAIN</code> (and a <code>SHOW INDEX FROM …</code>) before adding anything; every index also carries a write cost, and the column order in a composite matters (most-selective / equality columns first). Never suggested: Frappe's standard metadata columns (<code>name</code>, <code>creation</code>, <code>modified</code>, <code>parent</code>, <code>idx</code>, <code>docstatus</code>, …) - written on every save / already indexed; and Frappe's framework meta tables (<code>tabDocType</code>, <code>tabCustom Field</code>, <code>tabSingles</code>, …) - <code>bench&nbsp;migrate</code> owns their schema. ("-" in Reads/Writes means this session was analyzed before this breakdown was added - re-run <em>Retry Analyze</em> to populate.)</p>
+      <p class="small muted" style="margin-top:8px;">The <strong>index candidate</strong> for each table is the set of <code>WHERE</code> / <code>JOIN&nbsp;ON</code> columns this session filtered on <em>together</em> most often - a heuristic, not a verdict. Always confirm with the query's <code>EXPLAIN</code> (and a <code>SHOW INDEX FROM …</code>) before adding anything; every index also carries a write cost and the column order in a composite matters (most-selective / equality columns first). Never suggested: Frappe's standard metadata columns (<code>name</code>, <code>creation</code>, <code>modified</code>, <code>parent</code>, <code>idx</code>, <code>docstatus</code>, …) - written on every save / already indexed; and Frappe's framework meta tables (<code>tabDocType</code>, <code>tabCustom Field</code>, <code>tabSingles</code>, …) - <code>bench&nbsp;migrate</code> owns their schema. ("-" in Reads/Writes means this session was analyzed before this breakdown was added - re-run <em>Retry Analyze</em> to populate.)</p>
     {% else %}
       <p class="empty">No table breakdown available.</p>
     {% endif %}
@@ -3507,10 +3544,10 @@
       <li>The server-resource and frontend panels show CPU / memory / queue pressure and browser timings - only when captured.</li>
       <li>Expand any row of the per-action breakdown for that action's queries and timings - the deep-dive detail.</li>
       <li>Click any <code>file.py:123</code> callsite to open it in VS&nbsp;Code. Anything starting with <code>tab</code> is a database table; the DocType is the part after <code>tab</code>.</li>
-      <li>Every duration carries a small grey scope tag: <strong>per hit</strong> (one occurrence — a single request, one query execution) or <strong>consolidated</strong> (sum across all hits in this session — total time in a table, full impact of a finding's pattern, etc.).</li>
-      <li>Call-tree and Hot-frame timings come from a wall-clock sampler at ≈{{ report_data.sampler_interval_ms }}ms intervals. Functions whose execution is shorter than the interval can be under-sampled or invisible — for exact per-line timings, use the <strong>Line-Level Drilldown</strong>.</li>
-      <li><strong>Self-time</strong> is wall-clock self-time (the sampler measures elapsed time, not CPU). A function that blocks on I/O — <code>requests.get</code>, sync DB calls outside the recorder, <code>time.sleep</code> — counts that wait as self-time. Check the call tree for hidden I/O before optimising compute.</li>
-      <li><strong>Searching with browser find (Ctrl/Cmd-F)?</strong> Text inside collapsed drilldowns and call-tree branches may not be matched — expand the sections you want to search first.</li>
+      <li>Every duration carries a small grey scope tag: <strong>per hit</strong> (one occurrence: a single request, one query execution) or <strong>consolidated</strong> (sum across all hits in this session: total time in a table, full impact of a finding's pattern, etc.).</li>
+      <li>Call-tree and Hot-frame timings come from a wall-clock sampler at ≈{{ report_data.sampler_interval_ms }}ms intervals. Functions whose execution is shorter than the interval can be under-sampled or invisible. For exact per-line timings, use the <strong>Line-Level Drilldown</strong>.</li>
+      <li><strong>Self-time</strong> is wall-clock self-time (the sampler measures elapsed time, not CPU). A function that blocks on I/O (<code>requests.get</code>, sync DB calls outside the recorder, <code>time.sleep</code>) counts that wait as self-time. Check the call tree for hidden I/O before optimising compute.</li>
+      <li><strong>Searching with browser find (Ctrl/Cmd-F)?</strong> Text inside collapsed drilldowns and call-tree branches may not be matched. Expand the sections you want to search first.</li>
     </ul>
   </section>
 
@@ -3524,7 +3561,7 @@
     </p>
     <p class="small" style="margin-top: 8px; color: var(--ink-mute);">
       Do NOT email, upload, or share this file externally without redacting
-      it yourself. Query literals, request headers, form data, and full
+      it yourself. Query literals, request headers, form data and full
       stack traces are all included verbatim.
     </p>
     {# v0.7.x Phase J.2.1: reads report_data.footer.settings (a pre-

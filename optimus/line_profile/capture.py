@@ -3,23 +3,18 @@
 
 """Phase-2 line-profiler capture core.
 
-Two layers, both in this module:
+Two layers:
+  * Pure: ``aggregate_samples(samples, picks)`` merges per-request
+    line_profiler stats into the analyzer's input shape.
+  * Impure: ``start_line_profile_pass`` / ``stop_line_profile_pass`` own the
+    Redis-backed run lifecycle; ``is_active`` is the hot-path predicate for
+    hooks; ``make_profiler`` / ``serialize_stats`` / ``flush_samples`` form
+    the per-request enable/disable cycle; ``_get_or_resolve_picks`` caches
+    resolved function objects per worker.
 
-1. **Pure** — ``aggregate_samples(samples, picks)`` merges per-request
-   line_profiler stats into the analyzer's input shape. Tested in
-   isolation.
-
-2. **Impure** — ``start_line_profile_pass`` / ``stop_line_profile_pass``
-   own the Redis-backed run lifecycle; ``is_active`` is the hot-path
-   predicate for hooks; ``make_profiler``, ``serialize_stats`` and
-   ``flush_samples`` form the per-request enable/disable cycle;
-   ``_get_or_resolve_picks`` is the worker-resident cache of resolved
-   function objects so we don't pay ``importlib`` overhead every request.
-
-The ``frappe`` and ``line_profiler`` imports are both guarded so the
-module loads cleanly under standalone pytest (where the pure layer can be
-exercised) even when neither is installed. Calling an impure function
-without its dependency raises ``RuntimeError``.
+The ``frappe`` and ``line_profiler`` imports are guarded so the module loads
+under standalone pytest even when neither is installed; calling an impure
+function without its dependency raises ``RuntimeError``.
 """
 
 import importlib
@@ -32,7 +27,7 @@ from optimus import redis_keys as _redis_keys
 from optimus.line_profile import diff
 
 # ---------------------------------------------------------------------------
-# Optional dependencies — guarded so the pure layer loads everywhere
+# Optional dependencies guarded so the pure layer loads everywhere
 # ---------------------------------------------------------------------------
 
 try:
@@ -58,14 +53,14 @@ def is_line_profiler_available() -> bool:
 def _require_frappe() -> None:
 	if not _FRAPPE_AVAILABLE:
 		raise RuntimeError(
-			"frappe must be importable for this operation — run under bench."
+			"frappe must be importable for this operation run under bench."
 		)
 
 
 def _require_line_profiler() -> None:
 	if not _LP_AVAILABLE:
 		raise RuntimeError(
-			"line_profiler is not installed — run "
+			"line_profiler is not installed run "
 			"`bench pip install line_profiler` to enable phase 2."
 		)
 
@@ -78,7 +73,7 @@ def _require_line_profiler() -> None:
 # budget_hit keys are now built via ``optimus.redis_keys`` (the v0.12.0
 # centralized source-of-truth). The local ``_active_key`` /
 # ``_picks_key`` / ``_source_key`` / ``_samples_key`` /
-# ``_budget_hit_key`` helpers below have been retired — call sites use
+# ``_budget_hit_key`` helpers below have been retired call sites use
 # ``_redis_keys.lp_active(user)`` etc. directly. Key strings are
 # byte-identical to the pre-v0.12.20 local helpers, so on-disk Redis
 # values from older bench versions resolve unchanged.
@@ -96,7 +91,7 @@ _resolved_fns_by_run: dict[str, list] = {}
 
 
 # ---------------------------------------------------------------------------
-# Pick resolution helper (lighter than picker.resolve_freeform — just
+# Pick resolution helper (lighter than picker.resolve_freeform just
 # returns the function object, used by the worker cache)
 # ---------------------------------------------------------------------------
 
@@ -105,7 +100,7 @@ def _resolve_attr(dotted_path: str):
 	"""Resolve a dotted path to its underlying function object.
 
 	Mirrors ``picker.resolve_freeform`` but returns just the callable. None
-	on any resolution failure — caller decides the surfacing.
+	on any resolution failure caller decides the surfacing.
 	"""
 	parts = dotted_path.split(".")
 	module = None
@@ -116,9 +111,9 @@ def _resolve_attr(dotted_path: str):
 			module_parts = i
 			break
 		except (ImportError, TypeError, ValueError):
-			# Mirror picker._resolve_freeform_exact: a malformed prefix —
+			# Mirror picker._resolve_freeform_exact: a malformed prefix
 			# a relative "...pkg" name (TypeError) or an empty name
-			# (ValueError) — is just "not importable". Honour this
+			# (ValueError) is just "not importable". Honour this
 			# function's documented "None on any resolution failure"
 			# contract instead of letting it escape as a 500.
 			continue
@@ -150,23 +145,15 @@ def _capture_source_lines(fn) -> list[dict]:
 def aggregate_samples(samples: list[list[dict]], picks: list[dict]) -> list[dict]:
 	"""Merge per-request line_profiler samples into the analyzer's input shape.
 
-	Inputs:
-	  samples — list of per-request batches. Each batch is a list of line
-	            records: ``{file, qualname, lineno, hits, total_us}``.
-	            One batch per HTTP request or background job that ran with
-	            phase-2 instrumentation active.
-	  picks   — one entry per picked function with the source-line data
-	            captured at start time:
-	            ``{dotted_path, qualname, file, first_lineno, source_lines: [{lineno, content}]}``.
+	``samples`` is a list of per-request batches, each a list of line records
+	``{file, qualname, lineno, hits, total_us}``. ``picks`` is one entry per
+	picked function with source captured at start time
+	``{dotted_path, qualname, file, first_lineno, source_lines: [{lineno, content}]}``.
 
-	Output: the analyzer's ``results_json`` shape (one entry per pick) with
-	per-line ``hits``, ``total_ms``, ``per_hit_us``, and ``content_hash``
-	merged in.
-
-	Samples that don't match any pick (stale code, renamed function, hot-
-	reload weirdness) are silently dropped. Lines in the sample that no
-	longer exist in the picked function's source are likewise dropped —
-	the source-of-truth is the source captured at start time.
+	Returns the analyzer's ``results_json`` shape (one entry per pick) with
+	per-line ``hits``, ``total_ms``, ``per_hit_us`` and ``content_hash``.
+	Samples that match no pick are silently dropped, as are lines no longer in
+	the pick's captured source (the start-time source is authoritative).
 	"""
 	# Build a lookup: (file, qualname, lineno) → cumulative {hits, total_us}
 	totals: dict[tuple[str, str, int], dict] = {}
@@ -214,7 +201,7 @@ def aggregate_samples(samples: list[list[dict]], picks: list[dict]) -> list[dict
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle (impure — frappe + Redis required)
+# Lifecycle (impure frappe + Redis required)
 # ---------------------------------------------------------------------------
 
 
@@ -229,12 +216,11 @@ def start_line_profile_pass(
 	user: str,
 	picks: list[dict],
 ) -> list[dict]:
-	"""Begin a phase-2 run. Resolves picks, captures source snapshots, persists
-	to Redis, and sets the per-user active flag.
+	"""Begin a phase-2 run: resolve picks, capture source snapshots, persist to
+	Redis and set the per-user active flag.
 
-	Returns the resolved-picks-meta list (with eligibility) so the API can
-	echo it back to the client. Raises ``CaptureError`` if no picks are
-	eligible.
+	Returns the resolved-picks-meta list (with eligibility) for the API to echo
+	to the client. Raises ``CaptureError`` if no picks are eligible.
 	"""
 	_require_frappe()
 	_require_line_profiler()
@@ -291,13 +277,12 @@ def start_line_profile_pass(
 
 def stop_line_profile_pass(run_uuid: str, user: str) -> None:
 	"""Clear the active flag so phase-2 hooks stop instrumenting. The Redis
-	picks/source/samples keys persist until ``cleanup_run`` runs at the end
-	of the analyze pipeline so the analyzer can read them.
+	picks/source/samples keys persist until ``cleanup_run`` so the analyzer
+	can read them.
 
-	Also clears ``frappe.local._lp_active`` so the same web request that
-	called stop doesn't see a stale cached flag from earlier in the
-	request — the enqueue patch in __init__.py reads this to decide
-	whether to propagate ``_lp_session_id`` into job kwargs.
+	Also clears ``frappe.local._lp_active`` so later code in the same request
+	(e.g. the enqueue patch) doesn't see a stale cached flag and leak
+	``_lp_session_id`` into job kwargs.
 	"""
 	_require_frappe()
 	frappe.cache.delete_value(_redis_keys.lp_active(user))
@@ -314,7 +299,7 @@ def stop_line_profile_pass(run_uuid: str, user: str) -> None:
 def is_active(user: str) -> str | None:
 	"""Return the active phase-2 run_uuid for the user, or None.
 
-	Hot-path predicate from the phase-2 request hook — must be cheap. The
+	Hot-path predicate from the phase-2 request hook must be cheap. The
 	value is cached on ``frappe.local._lp_active`` for the request lifetime
 	to avoid repeated Redis hits inside one request.
 	"""
@@ -368,13 +353,13 @@ def _get_or_resolve_picks(run_uuid: str) -> list:
 # its own thread-local ``_lp_profiler``. Under a multi-threaded (gunicorn
 # ``gthread``) worker, two requests can profile concurrently and co-own tool 2.
 # The forcible ``release_monitoring_tool`` (free_tool_id) and the before-hook's
-# orphan self-heal therefore must NOT key on the calling thread's local — freeing
+# orphan self-heal therefore must NOT key on the calling thread's local freeing
 # tool 2 while a sibling thread is still enabled desyncs line_profiler's shared
 # manager (the tool-2 leak class that froze production). This counter is the
 # process-wide truth: reclaim / force-free only when it reads 0.
 #
 # A thread killed mid-flight (without running its after-hook) would leak its
-# increment — but a gunicorn timeout recycles the whole worker, resetting this
+# increment but a gunicorn timeout recycles the whole worker, resetting this
 # global, so that path self-corrects on the next request.
 _active_profiler_lock = threading.Lock()
 _active_profiler_count = 0
@@ -404,17 +389,12 @@ def active_profiler_count() -> int:
 def release_monitoring_tool() -> None:
 	"""Guarantee phase-2 leaves no ``sys.monitoring`` line-trace hook behind.
 
-	On Python 3.12+ line_profiler drives the *process-global* ``sys.monitoring``
-	``PROFILER_ID`` (tool id 2). If a per-request teardown fails (e.g.
-	line_profiler's own ``disable()`` raising ``ValueError: tool 2 is not in
-	use``), tool 2's line events stay registered and EVERY subsequent request in
-	the worker is line-traced → CPU saturation and a frozen UI. This forcibly
-	clears + frees tool 2 so the hook can't leak, regardless of line_profiler's
-	(fragile) internal bookkeeping.
-
-	Idempotent and version-safe: a no-op on Python < 3.12 (no ``sys.monitoring``)
-	and when tool 2 isn't ours. Only reclaims the tool when it's registered to
-	``line_profiler``, so it never stomps a different profiler tool."""
+	On Python 3.12+ line_profiler drives the process-global ``PROFILER_ID``
+	(tool id 2). If a per-request teardown fails, tool 2's line events stay
+	registered and every subsequent request in the worker is line-traced (CPU
+	saturation, frozen UI). This forcibly clears and frees tool 2. Idempotent
+	and version-safe: a no-op on Python < 3.12 and when tool 2 isn't ours (only
+	reclaims the tool when it's registered to ``line_profiler``)."""
 	mon = getattr(sys, "monitoring", None)
 	if mon is None:
 		return
@@ -429,22 +409,18 @@ def release_monitoring_tool() -> None:
 
 
 def disengage_monitoring() -> None:
-	"""Stop line-trace overhead *without* unseating line_profiler — zero tool 2's
-	events but leave the tool registered.
+	"""Zero tool 2's line events but leave the tool registered: stop line-trace
+	overhead without unseating line_profiler.
 
-	This is the watchdog's disengage (vs ``release_monitoring_tool``'s full free).
-	The distinction is load-bearing: ``free_tool_id`` from the watchdog's *timer
-	thread*, while the request thread's profiler is still active, yanks tool 2 out
-	from under line_profiler's shared manager. Its own ``disable_by_count`` then
-	raises ``ValueError: tool 2 is not in use`` and leaves a half-torn-down
-	``LineProfiler`` whose weakref finalizer later fires ``handle_raise_event``
-	with the interpreter's ``sys`` torn down → ``'NoneType' object has no
-	attribute 'monitoring'``, which PEP 669 can surface into a live request and
-	break the user's submit. Zeroing events stops the overhead (observe, don't
-	spoil the flow) while keeping the manager consistent, so the request thread's
-	``disable_by_count`` still does the real, clean teardown.
-
-	Idempotent + version-safe: no-op on Python < 3.12 and when tool 2 isn't ours."""
+	The watchdog's disengage (vs ``release_monitoring_tool``'s full free). The
+	distinction is load-bearing: calling ``free_tool_id`` from the watchdog's
+	timer thread while the request thread's profiler is still active yanks tool
+	2 out from under line_profiler's shared manager, so its ``disable_by_count``
+	raises ``ValueError: tool 2 is not in use`` and orphans a ``LineProfiler``
+	whose finalizer later crashes at teardown. Zeroing events keeps the manager
+	consistent so the request thread's own ``disable_by_count`` does the real
+	teardown. Idempotent and version-safe: no-op on Python < 3.12 and when tool
+	2 isn't ours."""
 	mon = getattr(sys, "monitoring", None)
 	if mon is None:
 		return
@@ -458,7 +434,7 @@ def disengage_monitoring() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Overhead budget — observe without spoiling the flow
+# Overhead budget observe without spoiling the flow
 # ---------------------------------------------------------------------------
 # line_profiler does deterministic per-line tracing, so instrumenting a hot
 # loop multiplies its runtime and would freeze the user's request. A watchdog
@@ -497,13 +473,12 @@ def clear_budget_hit(run_uuid: str) -> None:
 
 
 def _disengage_run(run_uuid: str) -> None:
-	"""Watchdog callback: stop line tracing so the request finishes at its
-	natural speed, and flag the run as budget-truncated. Runs on a timer thread,
-	so it uses ``disengage_monitoring`` (zero events) — NOT ``release_monitoring_tool``
-	(free the tool): freeing tool 2 out from under the request thread's still-active
-	profiler desyncs line_profiler's manager and orphans it (see
-	``disengage_monitoring``). The request thread's own ``disable_by_count`` does
-	the real teardown afterward."""
+	"""Watchdog callback: stop line tracing (so the request finishes at natural
+	speed) and flag the run as budget-truncated. Runs on a timer thread, so it
+	uses ``disengage_monitoring`` (zero events) NOT ``release_monitoring_tool``:
+	freeing the tool from under the request thread's active profiler would
+	desync line_profiler's manager. The request thread's own ``disable_by_count``
+	does the real teardown."""
 	disengage_monitoring()
 	mark_budget_hit(run_uuid)
 
@@ -528,7 +503,7 @@ def start_overhead_watchdog(run_uuid: str, budget_seconds):
 def make_profiler(run_uuid: str):
 	"""Build a fresh ``LineProfiler`` with the run's picks attached. Returns
 	None if line_profiler is unavailable, the run has no resolvable picks,
-	or any other defensive failure — phase 2 then becomes a no-op for this
+	or any other defensive failure phase 2 then becomes a no-op for this
 	request rather than breaking the host flow."""
 	if not _LP_AVAILABLE:
 		return None
@@ -660,7 +635,7 @@ def cleanup_run(run_uuid: str) -> None:
 		try:
 			frappe.cache.delete_value(key_fn(run_uuid))
 		except Exception:
-			# Best-effort — janitor will retry. Don't break analyze on
+			# Best-effort janitor will retry. Don't break analyze on
 			# Redis hiccups.
 			pass
 	_resolved_fns_by_run.pop(run_uuid, None)

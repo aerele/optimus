@@ -3,44 +3,17 @@
 
 """Real-bench integration test for ``api.regenerate_reports`` byte-stability.
 
-``api.regenerate_reports(session_uuid)`` (``optimus/api.py:1121-1241``)
-re-renders the safe-report HTML from an *already-analyzed* session
-without re-running the analyze pipeline. Its purpose is to let an
-operator pick up a renderer / template upgrade on a historical session
-without paying the cost of re-analysis.
+``api.regenerate_reports(session_uuid)`` re-renders the safe-report HTML from
+an already-analyzed session without re-running analyze, so an operator can pick
+up a renderer / template upgrade on a historical session. These tests cover
+what the pure-pytest source-inspection suite can't: two consecutive calls
+produce byte-identical HTML; the endpoint attaches the HTML to
+``Optimus Session.raw_report_file`` and the URL resolves; a session-data change
+produces different HTML; regenerate is allowed on Ready or Failed sessions.
 
-The re-render path is load-bearing for upgrades — every renderer or
-template polish round (v0.7.0 polish day, v0.10.0 renderer split, the
-v0.6.0 "single rendering path" round) shipped on the assumption that
-operators could regenerate old sessions to see the new UI. The
-pure-pytest unit test (``optimus/tests/test_regenerate_reports_api.py``)
-does source inspection only — confirms the endpoint is whitelisted,
-takes ``session_uuid``, doesn't call ``_enqueue_analyze``, calls
-``clear_cached_pdf``, gates on permissions. It says nothing about the
-output.
-
-What that unit suite can't prove:
-
-  * That two consecutive ``regenerate_reports`` calls on the same
-    session produce **byte-identical** HTML. If non-determinism slips
-    into the renderer (a fresh UUID, a dict-iteration order change, a
-    ``time.time()`` snapshot in a stamp), the upgrade path silently
-    starts producing diff'd HTML — which breaks ``regenerate`` as a
-    way to roll forward, and breaks any safe-report diffing workflow
-    a dev-shop might rely on.
-  * That the endpoint actually attaches the rendered HTML to
-    ``Optimus Session.raw_report_file`` (Attach field) and the
-    attachment URL resolves to readable content.
-  * That a session-data change (e.g., the operator edits the title)
-    produces a **different** HTML — the canary's complement.
-  * That regenerate honours its documented "Allowed on Ready OR
-    Failed sessions" claim.
-
-That gap is what this integration test fills. Each test uses a unique
-``session_uuid`` for isolation; ``setUpClass`` patches
-``renderer._internal._now_iso`` to a fixed string so the embedded
-"Generated at" timestamp is deterministic (otherwise the two HTML
-outputs would differ by their stamp alone).
+Each test uses a unique ``session_uuid``; ``setUpClass`` patches
+``renderer._internal._now_iso`` to a fixed string so the "Generated at" stamp
+is deterministic (else two renders would differ by the stamp alone).
 """
 
 from __future__ import annotations
@@ -108,11 +81,9 @@ class TestRegenerateReportsIdempotent(FrappeTestCase):
 
 	def _create_minimal_session(self, session_uuid: str):
 		"""Insert a minimal valid ``Optimus Session`` with status=Ready.
-
-		Reqd fields: session_uuid, title, user, status, started_at.
-		Optional analysis-data fields are left at defaults — the
-		renderer is defensive against missing data, empty sections
-		render as empty, the HTML is still valid."""
+		Required fields: session_uuid, title, user, status, started_at. Optional
+		analysis-data fields are left at defaults (the renderer is defensive
+		against missing data)."""
 		doc = frappe.get_doc(
 			{
 				"doctype": _SESSION_DOCTYPE,
@@ -129,13 +100,9 @@ class TestRegenerateReportsIdempotent(FrappeTestCase):
 		return doc
 
 	def _delete_session_and_attachments(self, docname: str) -> None:
-		"""Delete the session + every File row attached to it.
-
-		``api.regenerate_reports`` creates a fresh File on each call
-		(via ``_save_report_file``); ``force=1`` on
-		``frappe.delete_doc("Optimus Session", ...)`` cascades to
-		attached File rows in Frappe v16, but we wipe explicitly to
-		catch any orphans."""
+		"""Delete the session and every File row attached to it.
+		``api.regenerate_reports`` creates a fresh File on each call, so we wipe
+		attached File rows explicitly to catch orphans the cascade misses."""
 		try:
 			frappe.db.delete(
 				_FILE_DOCTYPE,
@@ -158,12 +125,9 @@ class TestRegenerateReportsIdempotent(FrappeTestCase):
 	# --- HTML-extraction helper ---------------------------------------
 
 	def _read_rendered_html(self, session_name: str) -> bytes:
-		"""Fetch the latest ``raw_report_file`` content as bytes.
-
-		``api.regenerate_reports`` rewrites ``raw_report_file`` on
-		every call, so the URL reflects the most-recent render. The
-		test calls ``_read_rendered_html`` AFTER each regenerate to
-		snapshot the content for byte-diff."""
+		"""Fetch the latest ``raw_report_file`` content as bytes. regenerate
+		rewrites the field on every call, so this snapshots the most-recent
+		render for a byte-diff."""
 		file_url = frappe.db.get_value(
 			_SESSION_DOCTYPE, session_name, "raw_report_file"
 		)
@@ -188,7 +152,7 @@ class TestRegenerateReportsIdempotent(FrappeTestCase):
 		html_1 = self._read_rendered_html(self._session_doc.name)
 		assert html_1, "first render produced empty HTML"
 
-		# Second render — same session, same data, same patched _now_iso.
+		# Second render same session, same data, same patched _now_iso.
 		result_2 = api.regenerate_reports(self._uuid)
 		assert result_2.get("regenerated") is True
 		html_2 = self._read_rendered_html(self._session_doc.name)
@@ -196,7 +160,7 @@ class TestRegenerateReportsIdempotent(FrappeTestCase):
 
 		# Byte-equality is the contract under test.
 		assert html_1 == html_2, (
-			f"regenerate_reports is NOT byte-stable across consecutive calls — "
+			f"regenerate_reports is NOT byte-stable across consecutive calls "
 			f"the upgrade path silently produces diff'd HTML. "
 			f"len(html_1)={len(html_1)}, len(html_2)={len(html_2)}, "
 			f"first 200-byte diff position: "
@@ -236,17 +200,14 @@ class TestRegenerateReportsIdempotent(FrappeTestCase):
 		)
 
 	def test_regenerate_byte_diff_when_session_field_changes(self):
-		"""The canary's complement. Render once, snapshot HTML.
-		Mutate the session's ``title`` field via ``frappe.db.set_value``
-		(the renderer reads it through ``build_report_context``).
-		Render again, snapshot HTML. The two HTMLs must DIFFER — and
-		the new title must appear in HTML 2 but not HTML 1. Catches
-		silent caching that would return stale HTML on field
-		changes."""
+		"""The canary's complement: render, mutate the session's ``title`` via
+		``frappe.db.set_value``, render again. The two HTMLs must differ and the
+		new title must appear in HTML 2 but not HTML 1, catching silent caching
+		that would return stale HTML on field changes."""
 		original_title = self._session_doc.title
 		new_title = f"MUTATED-{frappe.generate_hash(length=8)}"
 
-		# Render 1 — original title.
+		# Render 1 original title.
 		api.regenerate_reports(self._uuid)
 		html_1 = self._read_rendered_html(self._session_doc.name)
 		assert original_title.encode("utf-8") in html_1, (
@@ -256,29 +217,29 @@ class TestRegenerateReportsIdempotent(FrappeTestCase):
 			"new title should NOT appear in HTML 1 (sanity check)"
 		)
 
-		# Mutate the title — direct DB write so we don't trigger the
+		# Mutate the title direct DB write so we don't trigger the
 		# session's on_update hooks (which could side-effect the test).
 		frappe.db.set_value(
 			_SESSION_DOCTYPE, self._session_doc.name, "title", new_title
 		)
 		frappe.db.commit()
 
-		# Render 2 — new title.
+		# Render 2 new title.
 		api.regenerate_reports(self._uuid)
 		html_2 = self._read_rendered_html(self._session_doc.name)
 		assert new_title.encode("utf-8") in html_2, (
-			f"new title {new_title!r} should appear in HTML 2 — regenerate "
+			f"new title {new_title!r} should appear in HTML 2 regenerate "
 			f"did not pick up the field change (silent caching?)"
 		)
 		assert html_1 != html_2, (
-			"HTMLs should differ after the title change — regenerate is "
+			"HTMLs should differ after the title change regenerate is "
 			"silently caching the previous output"
 		)
 
 	def test_regenerate_works_on_failed_status_session(self):
 		"""Validates the docstring claim: regenerate is allowed on
 		Ready OR Failed sessions. A Failed session whose analyze
-		partially completed should still re-render — that's often the
+		partially completed should still re-render that's often the
 		whole reason for the feature ("unblock a demo when a
 		render-time bug was fixed")."""
 		# Demote the session from Ready to Failed.
@@ -301,11 +262,9 @@ class TestRegenerateReportsIdempotent(FrappeTestCase):
 		)
 
 	def test_regenerate_refuses_non_terminal_status(self):
-		"""v0.12.9: regenerate must refuse sessions in non-terminal
-		states (Recording / Stopping / Analyzing). Pre-v0.12.9 the
-		endpoint accepted any status and would attach an incomplete
-		report to a still-running analyze that the pipeline would
-		then overwrite — closing that gap is what this test pins."""
+		"""regenerate must refuse sessions in non-terminal states (Recording /
+		Stopping / Analyzing), so it can't attach an incomplete report to a
+		still-running analyze that the pipeline would then overwrite."""
 		# Move the session from Ready (the setUp default) to Analyzing.
 		frappe.db.set_value(
 			_SESSION_DOCTYPE, self._session_doc.name, "status", "Analyzing"

@@ -1,14 +1,14 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the Aerele Lens companion-tool callout.
+"""Tests for the Jarvis companion-tool callout.
 
-The Lens card is one of a matched pair (beside Jarvis), rendered from the
-companion_tools loop under the Jump-to nav and pointing at lens.aerele.in; it
-is hardcoded in the template (no Settings toggle). These tests pin the block's
-presence, its position before the Jump-to nav, the link target and safety
-attributes, copy fragments and the self-contained-HTML guarantee (no remote
-assets fetched at render time).
+Jarvis sits beside the Aerele Lens card in a matched side-by-side pair under
+the Jump-to nav, pointing at jarvis.aerele.in; it is hardcoded in the template
+(no Settings toggle). These tests mirror ``test_lens_promo.py`` and pin the
+block's presence, its position before the Jump-to nav, the link target and
+safety attributes, copy fragments and the self-contained-HTML guarantee (no
+remote assets fetched at render time).
 """
 
 from types import SimpleNamespace
@@ -18,9 +18,9 @@ from optimus import renderer
 
 def _doc():
 	return SimpleNamespace(
-		name="PS-lens",
-		session_uuid="lens-uuid",
-		title="lens promo test",
+		name="PS-jarvis",
+		session_uuid="jarvis-uuid",
+		title="jarvis promo test",
 		user="tester@example.com",
 		status="Ready",
 		started_at="2026-05-14T00:00:00",
@@ -46,35 +46,35 @@ def _doc():
 	)
 
 
-class TestLensPromoRendering:
+class TestJarvisPromoRendering:
 	def test_block_renders_exactly_once(self):
 		"""Promo is hardcoded should appear on every report, exactly once."""
 		html = renderer.render_raw(_doc(), recordings=[])
-		assert html.count('class="section lens-promo"') == 1
+		assert html.count('class="section jarvis-promo"') == 1
 
 	def test_block_positioned_before_jump_to_nav(self):
-		"""The Lens block must sit BEFORE the Jump-to nav (`<nav
+		"""The Jarvis block must sit BEFORE the Jump-to nav (`<nav
 		class="nav-pills">`); the check anchors on the class attribute since the
 		nav may also carry an aria-label."""
 		html = renderer.render_raw(_doc(), recordings=[])
 		jump_idx = html.find('<nav class="nav-pills"')
-		lens_idx = html.find('class="section lens-promo"')
+		jarvis_idx = html.find('class="section jarvis-promo"')
 		assert jump_idx != -1, "Jump-to nav-pills not found"
-		assert lens_idx != -1, "Lens promo block not found"
-		assert lens_idx < jump_idx, (
-			"Lens promo block must render BEFORE the Jump-to nav, not after"
+		assert jarvis_idx != -1, "Jarvis promo block not found"
+		assert jarvis_idx < jump_idx, (
+			"Jarvis promo block must render BEFORE the Jump-to nav, not after"
 		)
 
 	def test_link_target_and_safety(self):
-		"""Link goes to https://lens.aerele.in/ and carries rel=noopener."""
+		"""Link goes to https://jarvis.aerele.in/ and carries rel=noopener."""
 		html = renderer.render_raw(_doc(), recordings=[])
-		assert 'href="https://lens.aerele.in/"' in html
+		assert 'href="https://jarvis.aerele.in/"' in html
 		# rel="noopener" must appear inside the same <a> tag.
-		anchor_start = html.find('href="https://lens.aerele.in/"')
+		anchor_start = html.find('href="https://jarvis.aerele.in/"')
 		anchor_end = html.find(">", anchor_start)
 		anchor_tag = html[anchor_start:anchor_end]
 		assert 'rel="noopener"' in anchor_tag, (
-			"Lens link must carry rel=\"noopener\" to prevent window.opener "
+			"Jarvis link must carry rel=\"noopener\" to prevent window.opener "
 			"leaks on click"
 		)
 
@@ -82,21 +82,19 @@ class TestLensPromoRendering:
 		"""Spot-check the two load-bearing copy elements so an accidental
 		edit doesn't quietly strip the brand or the value prop."""
 		html = renderer.render_raw(_doc(), recordings=[])
-		# "Try Lens" anchors both the brand and the CTA; a bare "Lens" is too
-		# weak (it also matches the "lens-promo" class and "lens.aerele.in").
-		assert "Try Lens" in html
-		# "Audit" anchors the value proposition phrase used in the hero.
-		assert "Audit" in html
+		assert "Jarvis" in html
+		# "teammate" anchors the value proposition phrase used in the card.
+		assert "teammate" in html
 
 	def test_block_is_self_contained(self):
-		"""The Lens block must be inert text plus a single <a> tag: no <img>,
+		"""The Jarvis block must be inert text plus a single <a> tag: no <img>,
 		<link> or <script>, which would break the saved-HTML offline guarantee.
 		"""
 		html = renderer.render_raw(_doc(), recordings=[])
-		start = html.find('<aside class="section lens-promo"')
-		assert start != -1, "Lens promo block opening tag not found"
+		start = html.find('<aside class="section jarvis-promo"')
+		assert start != -1, "Jarvis promo block opening tag not found"
 		end = html.find("</aside>", start)
-		assert end != -1, "Lens promo block has no closing </aside> tag"
+		assert end != -1, "Jarvis promo block has no closing </aside> tag"
 		block = html[start:end]
 		assert "<img " not in block
 		assert "<link " not in block

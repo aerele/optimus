@@ -3,14 +3,11 @@
 
 """Database-dialect abstraction for the Optimus analysis engine.
 
-A profiler's value — slow-query / index / plan findings — comes from running
-EXPLAIN and inspecting the database's plan output, which is MariaDB-specific.
-To support PostgreSQL too, every dialect-specific operation lives behind the
-``Dialect`` interface, and the analyzers consume the *normalized* dataclasses
-below instead of touching raw EXPLAIN rows. ``optimus.dbdialect.get_dialect()``
-returns the right adapter for the active ``frappe.db.db_type``.
-
-This module is dialect-NEUTRAL — no SQL here. The MariaDB / Postgres SQL lives
+Every dialect-specific EXPLAIN / index / plan operation lives behind the
+``Dialect`` interface; analyzers consume the normalized dataclasses below
+instead of raw EXPLAIN rows, so MariaDB and PostgreSQL are both supported.
+``optimus.dbdialect.get_dialect()`` returns the adapter for the active
+``frappe.db.db_type``. This module is dialect-neutral (no SQL); the SQL lives
 in ``mariadb.py`` / ``postgres.py``.
 """
 
@@ -23,7 +20,7 @@ from dataclasses import dataclass, field
 # Coercion helpers (shared by the adapters). Lifted from explain_flags so the
 # adapters and the analyzer agree on how to read driver-variant numerics:
 # certain drivers / EXPLAIN FORMAT variants return Decimal/str/None where an
-# int/float is expected, and a bare `>` comparison would crash.
+# int/float is expected and a bare `>` comparison would crash.
 # ---------------------------------------------------------------------------
 
 def to_int(val) -> int:
@@ -63,7 +60,7 @@ def to_float(val):
 
 def to_int_or_none(val):
 	"""Coerce an infra metric (a SHOW GLOBAL STATUS value) to int, returning
-	None for an absent/unparseable value — so a missing metric stays None (the
+	None for an absent/unparseable value so a missing metric stays None (the
 	InfraSnapshot 'absent' sentinel) rather than silently reading as 0."""
 	if val is None:
 		return None
@@ -104,7 +101,7 @@ class IndexInfo:
 	name: str
 	columns: list                  # ordered by sequence-in-index
 	unique: bool = False
-	leftmost: str | None = None    # columns[0] if any — the col a b-tree accelerates a single-col filter on
+	leftmost: str | None = None    # columns[0] if any the col a b-tree accelerates a single-col filter on
 
 
 @dataclass
@@ -128,7 +125,7 @@ class Dialect(ABC):
 	# ``DBOptimizer``) can run on this database. That optimizer fetches table
 	# stats with MariaDB-only introspection (``DESCRIBE`` / ``SHOW INDEX FROM``),
 	# so on Postgres it raises a syntax error that ABORTS the whole transaction
-	# (Postgres poisons the txn on any failed statement — every later query then
+	# (Postgres poisons the txn on any failed statement every later query then
 	# fails until rollback). The index-suggestions analyzer gates on this flag so
 	# it never invokes the optimizer on a dialect that can't run it. True by
 	# default (MariaDB); Postgres overrides to False until a PG-native table-stats

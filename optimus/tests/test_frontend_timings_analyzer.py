@@ -1,10 +1,12 @@
 # optimus/tests/test_frontend_timings_analyzer.py
 # Copyright (c) 2026, Optimus contributors
 
-"""Tests for v0.5.0 frontend_timings analyzer."""
+"""Tests for the frontend_timings analyzer."""
 
 import json
 import os
+
+from optimus.analyzers.base import dur
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -47,7 +49,7 @@ def test_orphans_are_separated():
 
 
 def test_lcp_dedup_picks_last_per_page():
-    """LCP fires multiple times — analyzer should keep the last value
+    """LCP fires multiple times analyzer should keep the last value
     per page_url, matching the Web Vitals library convention."""
     from optimus.analyzers import frontend_timings
 
@@ -70,6 +72,46 @@ def test_slow_frontend_render_fires_on_lcp():
     slow = [f for f in result.findings if f["finding_type"] == "Slow Frontend Render"]
     assert len(slow) == 1
     assert slow[0]["severity"] == "Medium"  # 2800ms is Medium (2500 < x < 4000)
+    # Analyzers bake raw ms; the second-rollover is applied at render time
+    # (honouring large_duration_threshold_ms), so the analyzer output is raw ms.
+    assert slow[0]["title"] == f"LCP {dur(2800)} on /app/sales-invoice/SI-001"
+    assert f"took {dur(2800)} for its largest" in slow[0]["customer_description"]
+
+
+def test_lcp_title_rounds_not_truncates():
+    """The baked title must ROUND the duration (like :.0f everywhere else), not
+    truncate with int(). The impact badge renders the raw float via humanize
+    (which rounds), so a truncating title would disagree with the badge by up to
+    1ms / 0.01s once render rolls both over to seconds."""
+    from optimus.analyzers import frontend_timings
+
+    fd = {"xhr": [], "vitals": [
+        {"name": "lcp", "page_url": "/app/x", "timestamp": 1, "value_ms": 2800.7},
+    ]}
+    result = frontend_timings.analyze([], _make_context(fd))
+    slow = [f for f in result.findings if f["finding_type"] == "Slow Frontend Render"]
+    assert len(slow) == 1
+    # Rounded to 2801, not truncated to 2800.
+    assert slow[0]["title"] == f"LCP {dur(2800.7)} on /app/x"
+    assert f"took {dur(2800.7)} for its largest" in slow[0]["customer_description"]
+    # The badge stores round(lcp, 2); for a value already at <=2 decimals that is
+    # the same number, so title and badge agree.
+    assert slow[0]["estimated_impact_ms"] == round(2800.7, 2)
+
+
+def test_lcp_impact_rounds_to_two_decimals_for_badge_agreement():
+    """A raw LCP with sub-0.01ms precision must be stored as round(lcp, 2), so the
+    badge (fmt_ms of the stored impact) and the dur(lcp) title roll over from the
+    SAME number. Storing the raw float made them disagree at a boundary."""
+    from optimus.analyzers import frontend_timings
+
+    fd = {"xhr": [], "vitals": [
+        {"name": "lcp", "page_url": "/app/x", "timestamp": 1, "value_ms": 2801.126},
+    ]}
+    result = frontend_timings.analyze([], _make_context(fd))
+    slow = [f for f in result.findings if f["finding_type"] == "Slow Frontend Render"]
+    assert len(slow) == 1
+    assert slow[0]["estimated_impact_ms"] == round(2801.126, 2)  # 2801.13, not raw
 
 
 def test_network_overhead_fires_on_disproportion():
@@ -166,14 +208,14 @@ def test_missing_frontend_data_attribute_is_safe():
 # ---------------------------------------------------------------------------
 # v0.5.1 regression guards: action_label + backend_ms come from
 # context.actions, not from the raw recording dict. Real production
-# recordings don't have either field — they have `path`, `method`,
-# `cmd`, `duration` — so the pre-v0.5.1 code fell through to the
+# recordings don't have either field they have `path`, `method`,
+# `cmd`, `duration`: so the pre-v0.5.1 code fell through to the
 # synthetic "action_N" label and `backend_ms = 0` every time.
 # ---------------------------------------------------------------------------
 
 
 def _production_shape_recordings():
-	"""Mimics the dict shape Frappe's recorder actually produces — no
+	"""Mimics the dict shape Frappe's recorder actually produces no
 	action_label, no duration_ms, just path/method/cmd/duration."""
 	return [
 		{
@@ -198,13 +240,10 @@ def _production_shape_recordings():
 
 
 def _context_with_per_action_output(recordings):
-	"""Simulate what context.actions looks like AFTER per_action.analyze
-	has run. v0.5.2: action_label on context.actions is the TECHNICAL
-	label (raw cmd with optional :Action suffix, or METHOD+path) —
-	humanization moved to per_action.humanized_label() and is used
-	only by the Steps-to-Reproduce section. The frontend XHR panel
-	mirrors whatever context.actions holds, so these fixtures match
-	the current technical-label format.
+	"""Simulate context.actions after per_action.analyze has run: action_label
+	is the technical label (raw cmd with an optional :Action suffix, or
+	METHOD+path). The frontend XHR panel mirrors context.actions, so these
+	fixtures use that format.
 	"""
 	from optimus.analyzers.base import AnalyzeContext
 	ctx = AnalyzeContext(session_uuid="t", docname="t")
@@ -225,13 +264,8 @@ def _context_with_per_action_output(recordings):
 
 
 def test_action_label_comes_from_context_actions(monkeypatch):
-	"""v0.5.1 fix, still valid in v0.5.2: per-XHR rows read
-	action_label from context.actions rather than from the raw
-	recording dict (which never carries it in production). The
-	specific label format evolved across versions (v0.5.1
-	humanized, v0.5.2 technical with :Action suffix), but the
-	routing through context.actions is invariant — that's what
-	this test guards.
+	"""Per-XHR rows read action_label from context.actions, not from the raw
+	recording dict (which never carries it in production).
 	"""
 	from optimus.analyzers import frontend_timings
 
@@ -275,11 +309,9 @@ def test_action_label_comes_from_context_actions(monkeypatch):
 
 
 def test_backend_ms_comes_from_context_actions():
-	"""v0.5.1 fix: backend_ms is context.actions[idx].duration_ms, not
-	recording.duration_ms (which doesn't exist). Pre-v0.5.1 this
-	field was always 0 in production, which made
-	network_delta_ms == xhr_ms and every XHR looked like it had
-	100% network overhead."""
+	"""backend_ms comes from context.actions[idx].duration_ms, not
+	recording.duration_ms (which doesn't exist), so it isn't always 0 (which
+	would make every XHR look like 100% network overhead)."""
 	from optimus.analyzers import frontend_timings
 
 	recordings = _production_shape_recordings()

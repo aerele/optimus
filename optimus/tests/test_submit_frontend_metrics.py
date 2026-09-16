@@ -1,11 +1,11 @@
 # optimus/tests/test_submit_frontend_metrics.py
 # Copyright (c) 2026, Optimus contributors
 
-"""Tests for api.submit_frontend_metrics (v0.5.0).
+"""Tests for api.submit_frontend_metrics.
 
-The endpoint accepts a JSON string payload (because sendBeacon sends
-raw Blob, not form-encoded), validates session ownership, merges
-against any existing Redis blob, and enforces soft caps server-side.
+The endpoint accepts a JSON string payload (sendBeacon sends a raw Blob, not
+form-encoded), validates session ownership, merges against any existing Redis
+blob and enforces soft caps server-side.
 """
 
 import json
@@ -15,12 +15,9 @@ import pytest
 
 @pytest.fixture
 def mock_frappe(monkeypatch):
-    """Install the minimal Frappe stubs needed to exercise the endpoint
-    without a real site.
-
-    The FakeCache mocks both the v0.4.0 key/value interface and the
-    v0.5.1 Redis list interface (rpush/lrange/ltrim/llen/expire_key)
-    used by submit_frontend_metrics's atomic write path.
+    """Install the minimal Frappe stubs needed to exercise the endpoint without
+    a real site. FakeCache mocks both the key/value interface and the Redis list
+    interface (rpush/lrange/ltrim/llen/expire_key) used by the atomic write path.
     """
     import frappe
 
@@ -170,7 +167,7 @@ def test_submit_accepts_and_stores(mock_frappe):
 
 def test_submit_appends_to_existing_list(mock_frappe):
     """Two sequential submits must accumulate into the Redis list
-    atomically — RPUSH semantics preserve both.
+    atomically RPUSH semantics preserve both.
     """
     from optimus import api
 
@@ -209,11 +206,10 @@ def test_submit_appends_to_existing_list(mock_frappe):
 
 
 def test_atomic_append_survives_simulated_race(mock_frappe):
-    """Regression guard for the pre-v0.5.1 GET-merge-SET race: two
-    'concurrent' submits in a row must not lose each other's data.
-    We can't truly interleave in a single-threaded test, but we can
-    assert that the list grows monotonically under sequential calls
-    (which is the race-free property RPUSH gives us).
+    """Guards the GET-merge-SET race: two sequential submits must not lose each
+    other's data. We can't truly interleave single-threaded, but we assert the
+    list grows monotonically under sequential calls (the race-free property
+    RPUSH gives).
     """
     from optimus import api
 
@@ -242,19 +238,12 @@ def test_atomic_append_survives_simulated_race(mock_frappe):
 
 
 def test_frontend_js_wraps_beacon_body_for_frappe_routing():
-    """Pass-4 regression guard: the sendBeacon path must wrap its
-    inner JSON body as {"payload": "<json string>"} so the server
-    sees a `payload` kwarg matching the endpoint signature.
-
-    Without the wrap, Frappe's request handler parses the raw body
-    as JSON and flattens the top-level keys into form_dict, so
-    submit_frontend_metrics is called with session_uuid=..., xhr=...,
-    vitals=... — which does NOT match the (payload: str) signature
-    and fails with TypeError. The beacon path silently drops every
-    payload in that case.
-
-    This is a source-inspection check on optimus_frontend.js since
-    we can't actually exercise sendBeacon in a unit test.
+    """The sendBeacon path must wrap its inner JSON body as
+    {"payload": "<json>"} so the server sees a ``payload`` kwarg matching the
+    (payload: str) signature. Without the wrap, Frappe flattens the raw body's
+    top-level keys into form_dict and the call fails with TypeError, silently
+    dropping every beacon payload. Source-inspection check on optimus_frontend.js
+    (sendBeacon can't run in a unit test).
     """
     import os
 
@@ -268,7 +257,7 @@ def test_frontend_js_wraps_beacon_body_for_frappe_routing():
     # Must construct a beaconBody distinct from the raw frappe.call body.
     assert "beaconBody" in src, (
         "optimus_frontend.js must construct a beaconBody wrapped as "
-        "{payload: body} for sendBeacon — see comment explaining the "
+        "{payload: body} for sendBeacon see comment explaining the "
         "server contract"
     )
     # Must wrap as {payload: body}.
@@ -278,11 +267,11 @@ def test_frontend_js_wraps_beacon_body_for_frappe_routing():
     )
     # The Blob constructor used with sendBeacon must reference
     # beaconBody, not the unwrapped body. Find `new Blob([beaconBody]`
-    # specifically — this string only appears in actual code, not in
+    # specifically this string only appears in actual code, not in
     # the explanatory comment block.
     assert "new Blob([beaconBody]" in src, (
         "sendBeacon must send new Blob([beaconBody], ...), not the "
-        "raw body — otherwise Frappe's JSON body flattening mismatches "
+        "raw body otherwise Frappe's JSON body flattening mismatches "
         "the endpoint signature"
     )
 
@@ -350,7 +339,7 @@ def test_submit_enforces_soft_cap_tail_prefer(mock_frappe):
         "docname": "PS-0004",
     }
 
-    # Push 1500 XHRs — 500 over the cap of 1000.
+    # Push 1500 XHRs 500 over the cap of 1000.
     xhrs = [
         {"recording_id": f"r{i}", "url": f"/api/{i}",
          "method": "GET", "duration_ms": 10, "status": 200,
@@ -365,7 +354,7 @@ def test_submit_enforces_soft_cap_tail_prefer(mock_frappe):
 
     xhr_list = mock_frappe["list_store"]["profiler:frontend:S4:xhr"]
     assert len(xhr_list) == 1000
-    # Tail preferred — the last entry's timestamp should be 1499.
+    # Tail preferred the last entry's timestamp should be 1499.
     # (Client-side slicing first drops the first 500, then LTRIM is a
     # no-op because the list is already at cap.)
     last = json.loads(xhr_list[-1])

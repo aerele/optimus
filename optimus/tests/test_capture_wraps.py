@@ -1,12 +1,8 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the sidecar wrap factory in capture.py.
-
-These tests exercise the wrap mechanics in isolation by passing in a
-fake `frappe_local_proxy` object — they don't require a real Frappe
-runtime. The integration with frappe.local happens in test_capture_pipeline.py.
-"""
+"""Tests for the sidecar wrap factory in capture.py, exercising the wrap
+mechanics in isolation via a fake local proxy (no real Frappe runtime)."""
 
 import pytest
 
@@ -14,7 +10,7 @@ from optimus import capture
 
 
 class FakeLocal:
-	"""Stand-in for frappe.local — supports getattr/setattr."""
+	"""Stand-in for frappe.local supports getattr/setattr."""
 	pass
 
 
@@ -137,11 +133,9 @@ def test_wrap_chains_preexisting_wrap(fake_local):
 
 
 def test_wrap_identify_args_failure_does_not_break_orig_call(fake_local, monkeypatch):
-	"""If _identify_args raises, orig must still be called and return normally.
-
-	Observability code must never break the host call. A bug in the
-	profiler's identifier-builder is logged-and-skipped, not propagated.
-	"""
+	"""If _identify_args raises, orig must still be called and return normally:
+	observability code must never break the host call (the error is
+	logged-and-skipped, not propagated)."""
 	fake_local._profiler_active_session_id = "test-session"
 	fake_local.optimus_sidecar = []
 
@@ -206,7 +200,7 @@ def test_install_wraps_idempotent():
 	"""Calling install_wraps twice does not double-wrap."""
 	import frappe
 
-	# Reset to a clean state — optimus/__init__.py runs
+	# Reset to a clean state optimus/__init__.py runs
 	# install_wraps() at app-import time, so without this reset
 	# `frappe.get_doc` is already wrapped when this test starts.
 	capture.uninstall_wraps()

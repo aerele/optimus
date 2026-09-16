@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for optimus.line_profile.capture.aggregate_samples — the
+"""Tests for optimus.line_profile.capture.aggregate_samples the
 pure merge step that turns per-request line_profiler stats into the
 analyzer's input shape."""
 
@@ -141,7 +141,7 @@ class TestAggregateSamplesMultiplePicks:
 
 
 class _FakeStats:
-	"""Stand-in for ``line_profiler.LineStats`` — same attribute surface but
+	"""Stand-in for ``line_profiler.LineStats``: same attribute surface but
 	no install dependency on the package."""
 
 	def __init__(self, timings: dict, unit: float = 1e-6):
@@ -196,7 +196,7 @@ class TestSerializeStats:
 
 	def test_three_or_more_tuple_fields_handled(self):
 		# line_profiler may emit (lineno, hits, time, time_per_hit) or
-		# similar — serializer reads only the first three.
+		# similar serializer reads only the first three.
 		stats = _FakeStats(
 			timings={("/p/x.py", 1, "fn"): [(1, 4, 800, 200, "extra")]},
 		)

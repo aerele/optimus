@@ -1,28 +1,36 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Boot-session hook.
-
-Runs once per Desk session init (before any page renders) to attach
-``optimus_enabled`` to ``frappe.boot``. The floating widget reads
-this value synchronously to decide whether to mount itself — so a
-site admin toggling ``Optimus Settings ▸ Profiler Enabled`` off
-hides the widget on the next Desk load, without needing a separate
-HTTP round-trip to the settings endpoint.
+"""Boot-session hook: attach ``optimus_enabled`` to ``frappe.boot`` once per
+Desk session init. The floating widget reads it synchronously to decide whether
+to mount, so toggling ``Profiler Enabled`` off hides the widget on the next
+Desk load without a separate settings request.
 """
 
 
 def boot_session(bootinfo):
-	"""Attach profiler config to frappe.boot.
-
-	Fails open — on ANY error reading settings, we default the widget
-	to visible. A misconfigured settings read should never hide the
-	widget entirely (that would silently break the primary UI without
-	explanation). The site admin can still disable via the DocType
-	directly.
+	"""Attach profiler config to frappe.boot. Fails open (widget visible) on any
+	error reading settings, so a misconfigured read never hides the widget
+	entirely; the admin can still disable it via the DocType.
 	"""
+	# Resolve the (Redis-cached) config once, but keep the two values in separate
+	# try/excepts: a shared one would let a threshold error flip a deliberately
+	# DISABLED Optimus back on. The threshold (for the Desk hot-path picker) is
+	# cfg.large_duration_threshold_ms, already resolved by get_config the same way
+	# display_threshold_ms() returns it. Both fail open (widget visible, default 1000).
+	cfg = None
 	try:
-		from optimus.settings import is_enabled
-		bootinfo.optimus_enabled = bool(is_enabled())
+		from optimus.settings import get_config
+		cfg = get_config()
+		bootinfo.optimus_enabled = bool(cfg.enabled)
 	except Exception:
 		bootinfo.optimus_enabled = True
+	try:
+		from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS
+		bootinfo.optimus_large_duration_threshold_ms = (
+			float(cfg.large_duration_threshold_ms) if cfg is not None
+			else DEFAULT_DISPLAY_THRESHOLD_MS
+		)
+	except Exception:
+		from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS
+		bootinfo.optimus_large_duration_threshold_ms = DEFAULT_DISPLAY_THRESHOLD_MS

@@ -2,10 +2,10 @@ name: Integration
 
 # Real-bench integration tests. Slower than the pure-pytest ``CI`` workflow
 # (``ci.yml``), so the trigger surface is narrower:
-#   * pull requests targeting main — gate merges on real-Frappe behaviour
-#   * push to main                  — catch regressions on the trunk
-#   * scheduled daily               — catch Frappe v16 upstream drift
-#   * manual dispatch                — replay a flake / debug a CI bug
+#   * pull requests targeting main gate merges on real-Frappe behaviour
+#   * push to main catch regressions on the trunk
+#   * scheduled daily catch Frappe v16 upstream drift
+#   * manual dispatch replay a flake / debug a CI bug
 #
 # This workflow does NOT replace ``ci.yml``; the two run in parallel.
 # Branch protection enforces both green for merge.
@@ -13,14 +13,14 @@ name: Integration
 # NB: intentionally NO ``paths-ignore``. This job is a required check in the
 # main branch protection rule; a required check skipped on a docs-only PR
 # never reports and would block the PR forever. Always-run keeps the gate
-# honest — and integration only runs on main-targeted PRs / pushes anyway.
+# honest and integration only runs on main-targeted PRs / pushes anyway.
 on:
   pull_request:
     branches: [main]
   push:
     branches: [main]
   schedule:
-    # 04:00 UTC daily — outside the typical European / Indian working day,
+    # 04:00 UTC daily outside the typical European / Indian working day,
     # before North American developers wake up. A failed scheduled run
     # surfaces via the repo's GitHub Actions notifications.
     - cron: '0 4 * * *'
@@ -30,7 +30,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   # pull_request only: push-to-main and the scheduled cron both run on the
   # ``refs/heads/main`` ref, so an unconditional cancel would let a merge abort
-  # an in-flight trunk build — or a push abort the daily drift-detection run.
+  # an in-flight trunk build or a push abort the daily drift-detection run.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -75,7 +75,7 @@ jobs:
         # a 3.12 venv. 3.14 matches the upstream-mandated minimum and
         # the dev bench's interpreter (Python 3.14.2 locally).
         #
-        # NB: the pure-pytest ``ci.yml`` workflow also runs on 3.14 — it
+        # NB: the pure-pytest ``ci.yml`` workflow also runs on 3.14 it
         # doesn't install Frappe (the conftest stubs it), so it doesn't
         # need the ``bench init`` toolchain. This integration workflow needs
         # the upstream-mandated 3.14 because it actually runs ``bench init``
@@ -91,13 +91,13 @@ jobs:
         # tripped a yarn-install warning ("Node 24") and would
         # subsequently fail Frappe's own ``yarn run`` build steps that
         # check engines strictly. Pinning 24 matches the upstream-
-        # mandated minimum — same pattern as the Python 3.12 → 3.14
+        # mandated minimum same pattern as the Python 3.12 → 3.14
         # bump in the sibling commit. Frappe's asset pipeline needs
         # Node even with --skip-assets; ``bench init`` shells out to
         # ``yarn install`` for the Frappe framework's own JS deps
         # before building the bench skeleton.
         #
-        # NB: no ``cache: 'yarn'`` here — that directive requires a
+        # NB: no ``cache: 'yarn'`` here that directive requires a
         # ``yarn.lock`` in the optimus repo at setup-node time, but
         # optimus is a Frappe app, not a Node project; the yarn.lock
         # we care about ships inside ``apps/frappe`` which only exists
@@ -135,7 +135,7 @@ jobs:
         # ``frappe.tests.utils.FrappeTestCase``. We invoke per-module
         # so a single failing module doesn't abort siblings. v0.12.15:
         # the 9 modules now run through a shell loop driven by a single
-        # list — adding a future module is a one-line addition.
+        # list adding a future module is a one-line addition.
         env:
           RUNNER_TEMP: ${{ runner.temp }}
           INTEGRATION_MODULES: |-
@@ -158,7 +158,7 @@ jobs:
           # `set -e`, which made the FIRST failing module abort all
           # siblings (despite a comment claiming otherwise). The
           # accumulator below runs EVERY module then fails the workflow
-          # if any failed — so a single push surfaces every failure at
+          # if any failed so a single push surfaces every failure at
           # once, not just the first.
           while IFS= read -r module; do
             [ -z "${module}" ] && continue
@@ -187,7 +187,7 @@ jobs:
           {
             echo "## Integration test summary"
             # The runner step writes one log per module as
-            # ``integration-<module>.log`` — glob them all (nullglob so a
+            # ``integration-<module>.log``: glob them all (nullglob so a
             # crash-before-any-log yields an honest empty summary, not a
             # literal-glob error).
             shopt -s nullglob

@@ -39,13 +39,13 @@ needed for your bench setup.
 
 The unit suite above runs in seconds against a Frappe stub. The
 integration suite at `optimus/tests_integration/` runs against a real
-bench — real MariaDB, real Redis, real RQ — and catches regressions in
+bench real MariaDB, real Redis, real RQ and catches regressions in
 the inter-component handoff the unit stubs can't reach.
 
 In CI: `.github/workflows/integration.yml` provisions a fresh Frappe
-v16 bench via `.github/helper/install.sh`, installs optimus, and runs
+v16 bench via `.github/helper/install.sh`, installs optimus and runs
 the integration modules. It runs on pull requests to `main`, on push
-to `main`, daily at 04:00 UTC, and on manual dispatch.
+to `main`, daily at 04:00 UTC and on manual dispatch.
 
 Locally:
 
@@ -59,8 +59,8 @@ bench --site <your-site> run-tests --app optimus \
 ```
 
 Adding a new integration test: read `optimus/tests_integration/README.md`
-for the harness pattern, the deferred-test extraction roadmap, and the
-"no flakiness" rule. Integration tests must justify the bench cost —
+for the harness pattern, the deferred-test extraction roadmap and the
+"no flakiness" rule. Integration tests must justify the bench cost
 prefer a unit test when feasible.
 
 ## Pre-commit

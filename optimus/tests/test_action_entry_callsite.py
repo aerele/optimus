@@ -4,12 +4,10 @@
 """Unit tests for ``renderer._action_entry_callsite`` and the dotted-entry
 derivation that feeds it.
 
-The per-action breakdown and the RQ Jobs section identify an action
-only by a dotted module path (``ugly_code.python.common.bg_recheck_users``)
-or a URL. This resolves that entry point to ``file:line`` + a ±1-line source
-snippet. The tests resolve a real function in *this* app
-(``optimus.renderer.render``) so they're hermetic — no running site,
-no dependence on frappe core's layout.
+An action is identified only by a dotted module path or URL; this resolves that
+entry point to ``file:line`` plus a source snippet. The tests resolve a real
+function in this app (``optimus.renderer.render``) so they're hermetic (no
+running site, no dependence on frappe core's layout).
 """
 
 import inspect
@@ -99,7 +97,7 @@ class TestActionEntryCallsite:
 		fn = cs["filename"].replace("\\", "/")
 		assert fn.endswith("optimus/renderer/_internal.py")
 		assert not os.path.isabs(cs["filename"])
-		# v0.7.x: snippet window widened from ±1 to ±4 — up to 9 rows
+		# v0.7.x: snippet window widened from ±1 to ±4 up to 9 rows
 		# centered on the target line. The target row is "def render(".
 		assert cs["source_snippet"] and len(cs["source_snippet"]) <= 5
 		target = [r for r in cs["source_snippet"] if r["lineno"] == cs["lineno"]]
@@ -161,7 +159,7 @@ class TestActionEntryCallsite:
 
 
 # ---------------------------------------------------------------------------
-# v0.6.x: _resolve_frame_key_to_callsite — Repeated Hot Frame's "path::func" key
+# v0.6.x: _resolve_frame_key_to_callsite Repeated Hot Frame's "path::func" key
 # ---------------------------------------------------------------------------
 
 class TestResolveFrameKeyToCallsite:
@@ -203,13 +201,13 @@ class TestResolveFrameKeyToCallsite:
 
 
 # ---------------------------------------------------------------------------
-# v0.6.x: _attach_representative_callsites — SQL red-flag findings ← recordings
+# v0.6.x: _attach_representative_callsites SQL red-flag findings ← recordings
 # ---------------------------------------------------------------------------
 
 # A real, readable, in-bench-but-not-frappe-app .py for the "user code" frame
 # would be ideal, but walk_callsite treats any path containing "frappe/" or
 # "optimus/" as framework/profiler-own. So use a stdlib module's file
-# (absolute, readable, neither substring) — _resolve_source_path passes
+# (absolute, readable, neither substring) _resolve_source_path passes
 # absolute paths straight through, so the snippet still reads.
 _USER_FRAME_FILE = inspect.__file__
 
@@ -324,7 +322,7 @@ class TestAttachRepresentativeCallsites:
 	def test_framework_only_stack_falls_back_to_frappe_frame(self):
 		# A query issued purely from frappe core: walk_callsite falls back to
 		# the innermost frame (so we never silently drop a legit framework
-		# finding). A callsite IS attached, pointing at frappe — still useful.
+		# finding). A callsite IS attached, pointing at frappe still useful.
 		nq = "SELECT ... FROM `tabUser`"
 		findings = [_sql_finding("Missing Index", "tabUser", nq)]
 		recs = [_rec([
@@ -352,10 +350,9 @@ class TestAttachRepresentativeCallsites:
 
 
 class TestSkipDecoratorsToDef:
-	"""v0.7.x: on CPython 3.11+ ``code.co_firstlineno`` for a decorated
-	function points at the first decorator line. The renderer advances
-	to the ``def`` line so the per-action entry-callsite snippet lands
-	on the signature rather than ``@frappe.whitelist(...)``."""
+	"""On CPython 3.11+ ``code.co_firstlineno`` for a decorated function points at
+	the first decorator line; the renderer advances to the ``def`` line so the
+	snippet lands on the signature rather than the decorator."""
 
 	def test_single_decorator_is_skipped_to_def(self, tmp_path):
 		src = tmp_path / "fake_module.py"
@@ -414,12 +411,11 @@ class TestSkipDecoratorsToDef:
 		assert new_lineno == 2
 
 	def test_non_decorated_lineno_unchanged(self, tmp_path):
-		"""When the line at start_lineno doesn't start with ``@``, the
-		early exit returns it unchanged — no scan, no false advance."""
+		"""A start line not beginning with ``@`` is returned unchanged (no scan)."""
 		src = tmp_path / "fake_module.py"
 		src.write_text(
 			"line1\n"
-			"def target_fn():\n"  # 2 — already the def line
+			"def target_fn():\n"  # 2 already the def line
 			"    pass\n"
 		)
 		assert renderer._skip_decorators_to_def(
@@ -427,13 +423,12 @@ class TestSkipDecoratorsToDef:
 		) == 2
 
 	def test_no_def_found_falls_back_to_start_lineno(self, tmp_path):
-		"""When the start line IS a decorator but no matching def is
-		found within the scan window (mangled source, generated code),
-		fall back to the original lineno."""
+		"""A decorator start line with no matching def in the scan window falls
+		back to the original lineno."""
 		src = tmp_path / "fake_module.py"
 		src.write_text(
 			"@my_decorator\n"  # 1
-			"def different_name():\n"  # 2 — name mismatch
+			"def different_name():\n"  # 2 name mismatch
 			"    pass\n"
 		)
 		assert renderer._skip_decorators_to_def(

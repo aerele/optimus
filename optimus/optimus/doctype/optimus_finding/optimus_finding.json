@@ -75,7 +75,7 @@
    "read_only": 1
   },
   {
-   "description": "JSON: AI-generated fix suggestion for this finding — {suggestion (markdown), model, provider, generated_at}. Populated on demand via the 'Suggest a fix (AI)' action; empty until then.",
+   "description": "JSON: AI-generated fix suggestion for this finding {suggestion (markdown), model, provider, generated_at}. Populated on demand via the 'Suggest a fix (AI)' action; empty until then.",
    "fieldname": "llm_fix_json",
    "fieldtype": "Long Text",
    "label": "AI Fix Suggestion (JSON)",

@@ -1,18 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.5.3 query-table layout fix.
+"""Tests for the query-table layout fix.
 
-The Top Queries and Queries-per-action tables used the default
-``<table>`` CSS (auto layout, no column widths) and collapsed badly
-when one row had an unusually long callsite path. A single
-``frappe/frappe/model/db_query.py:255`` could grab 60-70% of the
-row width, squeezing the Query column to a single-character sliver
-with horizontal scroll.
-
-Fix: dedicated ``.query-table`` class with fixed layout and
-explicit <colgroup> widths. Long callsite code now wraps via
-``word-break: break-all``.
+The Top Queries and Queries-per-action tables collapsed when a row had a
+long callsite path (auto layout, no column widths). Fix: a dedicated
+``.query-table`` class with fixed layout, explicit <colgroup> widths and
+``word-break: break-all`` on callsite code.
 """
 
 import json
@@ -62,8 +56,8 @@ class TestTemplateStructure:
 			)
 
 	def test_queries_per_action_is_flat_table_without_sql(self):
-		"""v0.7.x: Queries-per-action is now one flat data table (Server-Resource
-		style), not per-action expanders, and the normalized-query column is gone."""
+		"""Queries-per-action is one flat data table (not per-action expanders)
+		and the normalized-query column is gone."""
 		tpl = _read_template()
 		m = re.search(r"Queries per action.*?</section>", tpl, re.DOTALL)
 		assert m is not None, "Queries per action section not found"
@@ -91,7 +85,7 @@ class TestTemplateCSS:
 	def test_fixed_layout_rule_present(self):
 		tpl = _read_template()
 		assert "table.query-table { table-layout: fixed; }" in tpl, (
-			"table-layout: fixed must be set on .query-table — "
+			"table-layout: fixed must be set on .query-table "
 			"without it, browsers auto-size columns based on content "
 			"and the layout collapses when one row has a long callsite"
 		)
@@ -142,7 +136,7 @@ class TestTemplateCSS:
 
 	def test_queries_flat_table_col_idx_fits_two_digit_indexes(self):
 		"""Forward-compatible lower bound: col-idx must be ≥ 40px so that
-		even with tight 12px padding it has ≥ 28px content room — enough
+		even with tight 12px padding it has ≥ 28px content room enough
 		for ``10``, ``11``, ``999`` to fit on one line."""
 		tpl = _read_template()
 		m = re.search(
@@ -157,12 +151,8 @@ class TestTemplateCSS:
 		)
 
 	def test_queries_flat_table_col_num_fits_per_hit_label(self):
-		"""Historical: at 92px col-num couldn't fit ``Duration per hit`` inline
-		and the sub-label collapsed to a barely-visible ``P``. We later flipped
-		header scope-tags to ``display: block`` so the sub-label stacks below
-		the main word (no horizontal space needed) — but the 110px width is
-		kept as defensive headroom: even if some future revert makes scope-
-		tags inline again, the column still has room for the inline label."""
+		"""col-num must be ≥ 100px as defensive headroom for the 'Duration per
+		hit' header label, even if scope-tags ever render inline again."""
 		tpl = _read_template()
 		m = re.search(
 			r"table\.queries-flat-table\s+col\.col-num\s+\{[^}]*width:\s*(\d+)px",
@@ -195,11 +185,11 @@ class TestTemplateCSS:
 		"""``th .scope-tag`` must use ``display: block`` so sub-labels stack
 		BELOW the main header word instead of running inline. With nowrap
 		(see test_scope_tag_has_nowrap_guard) the inline form would overflow
-		into the next column header — block-display moves the label to a new
+		into the next column header block-display moves the label to a new
 		row of the th, taking zero horizontal space."""
 		tpl = _read_template()
 		# Match the BARE global rule whose selector starts with ``th .scope-tag``
-		# at the start of a line — distinguishes from compound selectors like
+		# at the start of a line distinguishes from compound selectors like
 		# ``#frontend table.vitals-table thead th .scope-tag``.
 		m = re.search(r"^\s*th\s+\.scope-tag\s*\{", tpl, re.MULTILINE)
 		assert m, (
@@ -215,7 +205,7 @@ class TestTemplateCSS:
 
 	def test_vitals_table_no_longer_overrides_scope_tag_display(self):
 		"""The vitals-table used to have its own override for header scope-
-		tag display:block — we promoted that pattern to the global default,
+		tag display:block we promoted that pattern to the global default,
 		so the per-table override is now redundant and must be removed (to
 		keep the CSS as single-source-of-truth)."""
 		tpl = _read_template()
@@ -226,7 +216,7 @@ class TestTemplateCSS:
 		)
 		assert m is None, (
 			"The `#frontend table.vitals-table thead th .scope-tag` override "
-			"should be removed — the global `th .scope-tag { display: block }` "
+			"should be removed the global `th .scope-tag { display: block }` "
 			"rule subsumes it."
 		)
 
@@ -285,7 +275,7 @@ class TestTemplateCSS:
 
 	def test_xhr_timing_table_has_no_inline_cell_styles(self):
 		"""Once the table uses the `.data` class, the per-cell inline
-		`style=\"padding: 6px 8px; ...\"` attributes must be stripped —
+		`style=\"padding: 6px 8px; ...\"` attributes must be stripped
 		they bypass the global header/body padding and prevent the
 		scope-tag from block-stacking."""
 		block = self._xhr_timing_block(_read_template())
@@ -351,7 +341,7 @@ class TestEndToEndRender:
 
 		# A deeply-nested callsite path that would previously dominate
 		# the column. 90+ chars is typical for a real app. (Must be a
-		# custom-app path, not frappe/* — the Top Queries leaderboard is
+		# custom-app path, not frappe/* the Top Queries leaderboard is
 		# user-app-only now, so a framework callsite would be filtered
 		# out and the table wouldn't render at all.)
 		long_callsite = (

@@ -2,7 +2,7 @@
 // For license information, please see license.txt
 
 // Fill the `app_name` Autocomplete on BOTH the Tracked Apps and Ignored Apps
-// child tables with the bench's installed apps — both share the field on the
+// child tables with the bench's installed apps both share the field on the
 // `Optimus Tracked App` child doctype, so both must be filled.
 //
 // Why on refresh: the Autocomplete options live on the grid docfield,
@@ -10,12 +10,12 @@
 // on refresh survives reloads and "refresh" Ctrl-S cycles.
 
 // The full set of fields the Sensitivity Profile governs. Kept in sync with
-// optimus.settings._SENSITIVITY_KEYS — the preset numbers themselves are NOT
+// optimus.settings._SENSITIVITY_KEYS the preset numbers themselves are NOT
 // duplicated here; they're fetched at runtime from
 // optimus.api.get_config_profiles (single source of truth in settings.py).
 // Fields missing from this list are silently NOT updated by the JS preset-
 // write, even though the backend would still apply the preset at config-
-// resolve time — they'd appear locked under a non-Custom profile but show
+// resolve time they'd appear locked under a non-Custom profile but show
 // stale values. So this MUST match _SENSITIVITY_KEYS exactly.
 const OPTIMUS_SENSITIVITY_FIELDS = [
 	// General → Session retention
@@ -27,7 +27,7 @@ const OPTIMUS_SENSITIVITY_FIELDS = [
 	// Display filters
 	"min_action_duration_ms",
 	"large_duration_threshold_ms",
-	// Analyzer thresholds (detection — the original nine)
+	// Analyzer thresholds (detection the original nine)
 	"redundant_doc_threshold",
 	"redundant_cache_threshold",
 	"redundant_perm_threshold",
@@ -56,7 +56,7 @@ frappe.ui.form.on("Optimus Settings", {
 
 		// The API Key is a secret token, not a human-chosen password, so the
 		// password-strength meter is meaningless for it. It also POSTs the
-		// value to `test_password_strength` (zxcvbn) on every keystroke — and
+		// value to `test_password_strength` (zxcvbn) on every keystroke and
 		// for a long key zxcvbn returns a `guesses` integer larger than 64
 		// bits, which the server's orjson serializer can't encode → a 500
 		// "<!doctype" HTML page the form can't parse. Turning the check off
@@ -75,8 +75,8 @@ frappe.ui.form.on("Optimus Settings", {
 				// Options are a newline-separated string (Frappe splits on \n).
 				const options = r.message.join("\n");
 				// New rows rebuild their docfield from frappe.meta, so set the
-				// base child-doctype meta too — both docfield_map AND
-				// docfield_list — or a freshly-added row's dropdown is blank on
+				// base child-doctype meta too both docfield_map AND
+				// docfield_list or a freshly-added row's dropdown is blank on
 				// older Frappe (e.g. 15.98).
 				try {
 					const child_dt = "Optimus Tracked App";
@@ -91,7 +91,7 @@ frappe.ui.form.on("Optimus Settings", {
 						}
 					});
 				} catch (e) {
-					// meta not ready — per-grid update below covers existing rows.
+					// meta not ready per-grid update below covers existing rows.
 				}
 				// Fill each grid that's present.
 				["tracked_apps", "ignored_apps"].forEach((fieldname) => {
@@ -108,12 +108,12 @@ frappe.ui.form.on("Optimus Settings", {
 			},
 		});
 
-		// "Test AI connection" — only when the feature is on. Saves the
+		// "Test AI connection" only when the feature is on. Saves the
 		// operator a profiling round-trip just to find out the key/model
 		// are wrong.
 		// Also re-evaluate the "Test AI connection" button visibility
 		// when the operator toggles ai_enabled (see the ai_enabled
-		// handler below — it re-runs refresh() so this conditional
+		// handler below it re-runs refresh() so this conditional
 		// fires again).
 		if (frm.doc.ai_enabled) {
 			frm.add_custom_button(__("Test AI connection"), () => {
@@ -156,7 +156,7 @@ frappe.ui.form.on("Optimus Settings", {
 	config_profile(frm) {
 		// Sensitivity Profile changed. Under a named preset (Strict /
 		// Recommended / Relaxed) the threshold fields are read-only and the
-		// preset drives analysis at read time — but we ALSO fill the fields
+		// preset drives analysis at read time but we ALSO fill the fields
 		// with the preset numbers so the operator can see what they're getting
 		// (and so they become the starting point if they later pick Custom).
 		// On Custom we just unlock the fields and leave their current values.
@@ -212,7 +212,7 @@ frappe.ui.form.on("Optimus Settings", {
 	},
 
 	ai_provider(frm) {
-		// Base URL only applies to the "OpenAI-compatible" provider — the
+		// Base URL only applies to the "OpenAI-compatible" provider the
 		// hosted providers (Anthropic / OpenAI / Kimi) use their built-in
 		// default endpoint. Re-evaluate depends_on so Base URL hides/shows
 		// immediately when the provider changes, without a save + reload.

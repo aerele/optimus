@@ -1,13 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Source-inspection regression guards for analyze.py's v0.5.0 wiring.
+"""Source-inspection regression guards for analyze.py's analyzer wiring.
 
-These protect against silent removal/renaming of the v0.5.0 integration
-points. Since analyze.run is a large orchestrator that's hard to
-exercise end-to-end without a running Frappe site, the cheapest
-regression guard is to check that the wiring symbols literally appear
-in the source.
+analyze.run is a large orchestrator that's hard to exercise end-to-end without
+a running Frappe site, so these guard against silent removal or renaming of the
+integration points by checking the wiring symbols literally appear in the source.
 """
 
 import inspect
@@ -69,20 +67,17 @@ def test_persist_writes_v5_aggregate_json():
 
 
 def test_truncate_finding_titles_clamps_overlong():
-	"""Safety net: _persist clamps any finding.title that exceeds the
-	140-char Optimus Finding.title limit. Analyzers are supposed to
-	produce short titles (via base.short_filename), but pathological
-	inputs from future analyzers or unexpected data shapes could still
-	push past the limit. Clamping prevents CharacterLengthExceededError
-	from destroying the whole analyze pipeline."""
+	"""_persist clamps any finding.title over the 140-char Optimus Finding.title
+	limit, preventing CharacterLengthExceededError from breaking the analyze
+	pipeline on a pathological title."""
 	findings = [
-		# Under the limit — untouched.
+		# Under the limit untouched.
 		{"title": "Short title"},
-		# Exactly at the limit — untouched.
+		# Exactly at the limit untouched.
 		{"title": "A" * 140},
-		# One over the limit — must be clamped to 140 and end with "...".
+		# One over the limit must be clamped to 140 and end with "...".
 		{"title": "B" * 141},
-		# Far over the limit — must be clamped to exactly 140.
+		# Far over the limit must be clamped to exactly 140.
 		{"title": "C" * 500},
 		# The production payload that started this bug.
 		{
@@ -106,7 +101,7 @@ def test_truncate_finding_titles_clamps_overlong():
 	assert len(findings[3]["title"]) == 140
 	assert findings[3]["title"].endswith("...")
 
-	# Production payload — was 144 chars, must now be <= 140.
+	# Production payload was 144 chars, must now be <= 140.
 	assert len(findings[4]["title"]) <= 140
 
 

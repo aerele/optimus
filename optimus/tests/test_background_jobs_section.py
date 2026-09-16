@@ -1,12 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.6.0 "RQ Jobs" report section.
+"""Tests for the "RQ Jobs" report section.
 
-`renderer.build_background_jobs` is a pure function (unit-tested directly);
-the section rendering is exercised end-to-end via `renderer.render_raw` with
-a `SimpleNamespace` fake Optimus Session doc (same pattern as
-`test_table_breakdown.py::TestRenderedFrameworkColsNote`).
+``renderer.build_background_jobs`` is pure (unit-tested directly); the section
+rendering is exercised end-to-end via ``renderer.render_raw`` with a
+``SimpleNamespace`` fake Optimus Session doc.
 """
 
 import json
@@ -64,7 +63,7 @@ def _tracked(**kw):
 
 
 # --------------------------------------------------------------------------
-# build_background_jobs — pure
+# build_background_jobs pure
 # --------------------------------------------------------------------------
 
 class TestBuildBackgroundJobs:
@@ -154,13 +153,13 @@ class TestBuildBackgroundJobs:
 		]
 		findings = [
 			{"action_ref": "1"}, {"action_ref": "1"},  # two findings from job at idx 1
-			{"action_ref": "0"},                         # one from the HTTP action — not a job
+			{"action_ref": "0"},                         # one from the HTTP action not a job
 		]
 		out = renderer.build_background_jobs(actions, {}, findings)
 		assert out["any_findings_counted"] is True
 		by_method = {j["method"]: j["findings_count"] for j in out["jobs"]}
 		assert by_method["a"] == 2
-		assert by_method["b"] == 0  # we did look (findings exist) — 0, not None
+		assert by_method["b"] == 0  # we did look (findings exist) 0, not None
 
 	def test_findings_count_none_when_no_action_refs(self):
 		actions = [_action_dict(0, action_label="Job: a", event_type="RQ Job", recording_uuid="r1")]
@@ -171,7 +170,7 @@ class TestBuildBackgroundJobs:
 
 
 # --------------------------------------------------------------------------
-# build_background_jobs — merge with persisted terminal-status rows
+# build_background_jobs merge with persisted terminal-status rows
 # --------------------------------------------------------------------------
 
 class TestBuildBackgroundJobsStatusMerge:
@@ -312,7 +311,7 @@ class TestRenderedBackgroundJobsSection:
 	def test_findings_column_only_when_mappable(self):
 		# With a finding carrying an action_ref that points at the job's
 		# original index, the Findings column appears.
-		# v0.7.x: the finding must also have a callsite — no-callsite
+		# v0.7.x: the finding must also have a callsite no-callsite
 		# findings are filtered before render, so they wouldn't trigger
 		# the Findings column either.
 		doc = _doc(
@@ -334,16 +333,10 @@ class TestRenderedBackgroundJobsSection:
 		assert "<th class=\"num\">Findings</th>" in html
 
 	def test_smoking_gun_block_not_duplicated_into_bg_job_embed(self):
-		"""v0.7.x: the styled smoking-gun panel (file:line header + source
-		snippet + drill-down callout) is hidden when ``finding_card`` is
-		embedded inside a BG-job row — the row already shows the entry
-		callsite as a compact inline link under the method name, so the
-		full panel would just duplicate that anchor inside a blue-bordered
-		box. The canonical Findings section keeps it.
-
-		Pin: ``class="smoking"`` appears exactly once across the
-		whole report (the Findings-section card), never twice (Findings
-		card + BG-job embed)."""
+		"""The smoking-gun panel is hidden when a finding card is embedded inside a
+		BG-job row (the row already shows the entry callsite as a compact inline
+		link), so ``class="smoking"`` appears exactly once (the Findings-section
+		card), never twice."""
 		doc = _doc(
 			actions=[self._job_action(action_label="Job: a", path="a",
 			                          recording_uuid="r1", duration_ms=10)],
@@ -362,9 +355,9 @@ class TestRenderedBackgroundJobsSection:
 			],
 		)
 		html = renderer.render_raw(doc, recordings=[])
-		# Exactly one smoking-gun panel — the one in the Findings section.
+		# Exactly one smoking-gun panel the one in the Findings section.
 		assert html.count('class="smoking"') == 1
-		# Sanity: the BG-jobs section is rendered, and the related-finding
+		# Sanity: the BG-jobs section is rendered and the related-finding
 		# card was embedded under the job (title travels with the card).
 		assert "<h2>RQ Jobs</h2>" in html
 		# Two card-titles for "x": one in Findings section, one in BG embed.
@@ -425,12 +418,9 @@ class TestEntryCallsiteInReport:
 	_DOTTED = "optimus.renderer.render"
 
 	def test_background_job_row_does_not_show_entry_callsite_snippet(self):
-		"""v0.7.x: the multi-line entry-callsite snippet PANEL is dropped
-		from BG job rows. A compact inline ``file:line (function)`` line
-		remains under the job method as a navigation affordance (added
-		in a later iteration). The snippet panel — multi-line table,
-		the def line itself rendered as a yellow-highlighted row — is
-		what's absent."""
+		"""The multi-line entry-callsite snippet PANEL is dropped from BG job rows;
+		a compact inline ``file:line`` link remains under the job method. The def
+		line rendered as a highlighted snippet row is what's absent."""
 		doc = _doc([
 			_action(action_label="Job: " + self._DOTTED, event_type="RQ Job",
 			        path=self._DOTTED, recording_uuid="r1", duration_ms=500, queries_count=2),
@@ -446,11 +436,9 @@ class TestEntryCallsiteInReport:
 		assert "Slowest queries for this job" in html
 
 	def test_http_api_action_renders_no_entry_callsite_snippet_in_per_action_table(self):
-		"""v0.7.x: the per-action table no longer renders the multi-line
-		entry-callsite snippet panel under action rows. A compact inline
-		file:line line remains under the action label as a navigation
-		anchor; the multi-line snippet itself (def body line, yellow-
-		highlighted snippet row) is absent."""
+		"""The per-action table no longer renders the multi-line entry-callsite
+		snippet panel under action rows; a compact inline file:line link remains,
+		but the multi-line snippet (def body line) is absent."""
 		doc = _doc([
 			_action(action_label=self._DOTTED, event_type="HTTP Request", http_method="POST",
 			        path="/api/method/" + self._DOTTED, recording_uuid="r0", duration_ms=900),
@@ -463,11 +451,9 @@ class TestEntryCallsiteInReport:
 		assert "def render(" not in html
 
 	def test_smoking_gun_block_not_duplicated_into_per_action_embed(self):
-		"""Mirror of the BG-job test above, scoped to the per-action
-		breakdown's HTTP API row. With a finding carrying ``action_ref``
-		pointing at the action's idx, the related finding card embeds
-		under the action row. The smoking-gun panel must NOT render
-		there — only inside the Findings section."""
+		"""Per-action variant of the BG-job test: a finding card embeds under the
+		action row (via ``action_ref``), but the smoking-gun panel must NOT render
+		there, only in the Findings section."""
 		import json
 		doc = _doc(
 			actions=[_action(action_label=self._DOTTED, event_type="HTTP Request",
@@ -488,17 +474,16 @@ class TestEntryCallsiteInReport:
 			],
 		)
 		html = renderer.render_raw(doc, recordings=[])
-		# Exactly one smoking-gun panel — the canonical Findings section card.
+		# Exactly one smoking-gun panel the canonical Findings section card.
 		assert html.count('class="smoking"') == 1
-		# Sanity: the embed actually happened — the title travels with the
+		# Sanity: the embed actually happened the title travels with the
 		# card, so it should appear at least twice (Findings + per-action).
 		assert html.count("duplicated-anchor probe") >= 2
 
 	def test_per_action_banner_does_not_duplicate_finding_title(self):
-		"""The per-action 'finding linked' banner is a count-only header — it
-		must NOT inline the finding title, because the finding card renders
-		immediately below it inside the same row. Previously the banner echoed
-		the title verbatim, so it appeared twice within one per-action row."""
+		"""The per-action 'finding linked' banner is a count-only header: it must
+		NOT inline the finding title, since the finding card renders immediately
+		below it in the same row."""
 		import json
 		import re
 		title = "recompute_aggregates is a self-time hot path probe"
@@ -525,7 +510,7 @@ class TestEntryCallsiteInReport:
 		banner = m.group(1)
 		# The labelled count header stays…
 		assert "finding linked" in banner
-		# …but the banner must NOT echo the finding title — the card below it does.
+		# …but the banner must NOT echo the finding title the card below it does.
 		assert title not in banner
 		# Sanity: the embed still happened (title travels with the card).
 		assert html.count(title) >= 2
@@ -568,8 +553,8 @@ class TestEntryCallsiteInReport:
 
 
 # --------------------------------------------------------------------------
-# v0.6.x: action/finding context — target document (from form_dict) shown in
-# the per-action table, on the finding card, and appended to exec-summary bullets
+# v0.6.x: action/finding context target document (from form_dict) shown in
+# the per-action table, on the finding card and appended to exec-summary bullets
 # --------------------------------------------------------------------------
 
 class TestActionContextInReport:
@@ -600,7 +585,7 @@ class TestActionContextInReport:
 		assert "Document:" in html
 		assert "Sales Invoice" in html
 		# v0.7.x redesign Phase B: the exec-summary bullet that
-		# augmented its text with "— Sales Invoice SINV-1" is gone
+		# augmented its text with " Sales Invoice SINV-1" is gone
 		# (exec-summary card replaced by TL;DR hero). Target-doc
 		# surfacing now lives in the per-action breakdown + finding
 		# card breadcrumb above. Drop the bullet-text assertion.
@@ -613,7 +598,7 @@ class TestActionContextInReport:
 		doc = _doc([action], findings=[])
 		recs = [{"uuid": "r0", "calls": [], "form_dict": {"fieldname": "name", "filters": "{}"}}]
 		html = renderer.render_raw(doc, recordings=recs)
-		# Anchor on the breadcrumb's structural form, not the bare arrow —
+		# Anchor on the breadcrumb's structural form, not the bare arrow
 		# v0.7.x added a Lens promo line in the header that also uses
 		# &rarr;, so the previous unanchored assertion no longer
 		# distinguishes "no target doc" from "any arrow anywhere".
@@ -632,7 +617,7 @@ class TestActionContextInReport:
 
 
 # --------------------------------------------------------------------------
-# v0.6.x: "Doc-event lifecycle" section — slow findings grouped by DocType → event
+# v0.6.x: "Doc-event lifecycle" section slow findings grouped by DocType → event
 # --------------------------------------------------------------------------
 
 class TestDocEventLifecycleSection:
@@ -659,7 +644,7 @@ class TestDocEventLifecycleSection:
 		)
 
 	def test_doc_events_hook_finding_renders_grouped_by_doctype(self):
-		# A doc_events-hook finding — inject hook_events into the JSON since
+		# A doc_events-hook finding inject hook_events into the JSON since
 		# _attach_action_context can't compute it without a running site (and
 		# won't clobber it: _finding_hook_events returns [] with an empty index).
 		finding = self._finding(
@@ -679,7 +664,7 @@ class TestDocEventLifecycleSection:
 		assert ">Doc events<" in html  # "Jump to:" nav link
 
 	def test_controller_override_finding_and_cascade_note(self):
-		# A GLEntry.validate finding (controller override — no hooks needed),
+		# A GLEntry.validate finding (controller override no hooks needed),
 		# action target = Sales Invoice → "GL Entry touched during a SI submit".
 		from unittest.mock import patch as _patch
 
@@ -714,22 +699,16 @@ class TestDocEventLifecycleSection:
 
 
 # --------------------------------------------------------------------------
-# _action_to_dict — BG-job action_label normalisation
+# _action_to_dict BG-job action_label normalisation
 # --------------------------------------------------------------------------
 
 class TestBgJobActionLabelNormalisation:
 	"""``_action_to_dict`` rewrites stale BG-job labels at render time.
 
-	A recording captured before per_action._label learned the
-	``"RQ Job: <short>"`` form falls through to the HTTP path and ends
-	up with ``action_label = "GET <dotted.python.path>"``. The action's
-	``event_type`` is later normalised to ``"RQ Job"`` (so the row
-	appears in the RQ Jobs section), but the persisted label still
-	carries the HTTP-shaped string — leaking "GET" into the METHOD
-	column AND into finding titles that read ``In {action_label}``.
-
-	``_action_to_dict`` is the single funnel every downstream
-	consumer reads from, so the fix lives there.
+	An old recording can end up with ``action_label = "GET <dotted.path>"`` while
+	``event_type`` is normalised to ``"RQ Job"``, leaking "GET" into the METHOD
+	column and finding titles. ``_action_to_dict`` is the single funnel every
+	downstream consumer reads from, so the fix lives there.
 	"""
 
 	def test_leaked_http_verb_label_gets_canonicalised(self):
@@ -749,8 +728,7 @@ class TestBgJobActionLabelNormalisation:
 		assert out["path"] == "ugly_code.python.common.bg_recheck_users"
 
 	def test_canonical_label_passes_through_untouched(self):
-		"""A label already prefixed ``"RQ Job: "`` is returned
-		unchanged — no double-prefix, no path-derived rewrite."""
+		"""A label already prefixed ``"RQ Job: "`` is returned unchanged."""
 		child = _action(
 			action_label="RQ Job: sync_customer_data",
 			event_type="RQ Job",
@@ -760,8 +738,7 @@ class TestBgJobActionLabelNormalisation:
 		assert out["action_label"] == "RQ Job: sync_customer_data"
 
 	def test_legacy_job_prefix_still_promoted(self):
-		"""The existing J.12 ``"Job: …"`` → ``"RQ Job: …"`` rewrite
-		still works; the new conditional doesn't interfere with it."""
+		"""The ``"Job: …"`` → ``"RQ Job: …"`` rewrite still works."""
 		child = _action(
 			action_label="Job: legacy_payload",
 			event_type="RQ Job",
@@ -771,8 +748,8 @@ class TestBgJobActionLabelNormalisation:
 		assert out["action_label"] == "RQ Job: legacy_payload"
 
 	def test_non_bg_action_label_untouched(self):
-		"""HTTP requests (event_type != "RQ Job") keep their original
-		``"GET /api/…"`` label — the rewrite only fires for jobs."""
+		"""HTTP requests (event_type != "RQ Job") keep their original label; the
+		rewrite only fires for jobs."""
 		child = _action(
 			action_label="POST /api/method/save",
 			event_type="HTTP Request",
@@ -783,10 +760,8 @@ class TestBgJobActionLabelNormalisation:
 		assert out["action_label"] == "POST /api/method/save"
 
 	def test_bg_job_with_no_path_falls_back_to_original_label(self):
-		"""When event_type is "RQ Job" but ``path`` is empty (degenerate
-		case), the rewrite has no source to derive the short name from
-		— leave the label as-is rather than emitting "RQ Job: " with no
-		body."""
+		"""When event_type is "RQ Job" but ``path`` is empty, the rewrite has no
+		source for the short name, so the label is left as-is."""
 		child = _action(
 			action_label="GET something_weird",
 			event_type="RQ Job",
@@ -798,7 +773,7 @@ class TestBgJobActionLabelNormalisation:
 
 
 def test_rq_jobs_table_has_method_colgroup():
-	# v0.7.x: the RQ Jobs table was cramped across 8 columns — it now carries a
+	# v0.7.x: the RQ Jobs table was cramped across 8 columns it now carries a
 	# colgroup that gives the Method column room.
 	doc = _doc([_action(action_label="Job: myapp.tasks.x", event_type="RQ Job",
 	                    path="myapp.tasks.x", recording_uuid="r1", duration_ms=500,

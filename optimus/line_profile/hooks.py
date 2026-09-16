@@ -1,23 +1,15 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Phase-2 hook callbacks.
+"""Phase-2 (line-profile) hook callbacks, registered alongside the phase-1
+callbacks in ``hooks_callbacks.py``. Phase-1 and phase-2 are mutually
+exclusive per user (separate Redis flags; the API rejects starting one
+while the other is active).
 
-Registered in ``optimus/hooks.py`` alongside the phase-1 callbacks
-in ``hooks_callbacks.py``. Phase-1 and phase-2 are mutually exclusive for
-a single user — they read separate Redis flags
-(``profiler:active:<user>`` vs ``profiler:lp:active:<user>``) and the API
-layer rejects starting one while the other is active.
-
-Each request / job that runs while phase-2 is active for the current user
-gets:
-
-  • a fresh ``LineProfiler`` with the run's picked functions attached
-  • ``enable_by_count()`` before the request body runs
-  • ``disable()`` + per-line stats RPUSH'd to Redis after the body returns
-
-No SQL recording, no pyinstrument, no sidecar wraps. Phase 2 captures
-only line-level timings on the picked functions.
+Each request/job running while phase-2 is active for the user gets a fresh
+``LineProfiler`` with the run's picked functions, ``enable_by_count()``
+before the body and ``disable()`` + per-line stats RPUSH'd to Redis after.
+No SQL recording, pyinstrument or sidecar wraps: only line-level timings.
 """
 
 import frappe
@@ -68,7 +60,7 @@ def before_request_line_profile(*args, **kwargs) -> None:
 		if not run_uuid:
 			return
 
-		# Skip the profiler's own endpoints — same logic phase-1 uses to
+		# Skip the profiler's own endpoints same logic phase-1 uses to
 		# avoid recording its own admin API calls.
 		if hooks_callbacks._should_skip_request():
 			return
@@ -81,10 +73,10 @@ def before_request_line_profile(*args, **kwargs) -> None:
 		# after_request teardown) and left tool 2 registered, clear the orphan
 		# before enabling so the worker recovers without a bench restart. Gated on
 		# the PROCESS-WIDE active count, not this thread's local: under a gthread
-		# worker a sibling thread mid-profile legitimately owns tool 2, and
+		# worker a sibling thread mid-profile legitimately owns tool 2 and
 		# reclaiming it would desync that thread (the tool-2 leak class). The
 		# thread-local check stays as a cheap first gate. Log when the reclaim
-		# actually fires — silent reclaim masked the leak class in production.
+		# actually fires silent reclaim masked the leak class in production.
 		if (
 			capture.active_profiler_count() == 0
 			and getattr(frappe.local, "_lp_profiler", None) is None
@@ -121,8 +113,8 @@ def before_request_line_profile(*args, **kwargs) -> None:
 
 
 def after_request_line_profile(*args, **kwargs) -> None:
-	"""Disable the per-request profiler, serialize per-line stats, and
-	push the batch to Redis. Cleared even if profiler was never enabled,
+	"""Disable the per-request profiler, serialize per-line stats and push the
+	batch to Redis. Locals are cleared even if the profiler was never enabled,
 	to keep frappe.local clean."""
 	profiler = getattr(frappe.local, "_lp_profiler", None)
 	run_uuid = getattr(frappe.local, "_lp_run_uuid", None)
@@ -168,22 +160,14 @@ def after_request_line_profile(*args, **kwargs) -> None:
 
 def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
 	"""Phase-2 equivalent of ``hooks_callbacks.before_job``. Reads
-	``_lp_session_id`` injected by the extended enqueue patch (see
-	``optimus/__init__.py:_patch_enqueue``).
+	``_lp_session_id`` injected by the extended enqueue patch.
 
-	**Critical**: ``_lp_session_id`` is popped from the job's kwargs
-	dict *unconditionally*, even if we end up not instrumenting (run
-	already stopped, line_profiler unavailable, user is Guest, etc.).
-	The kwargs dict is the same one Frappe's ``execute_job`` will splat
-	into the user's method via ``method(**kwargs)`` — leaving our
-	marker in there crashes the method with an unexpected-keyword-
-	argument error.
-
-	Hook signature mirrors phase-1's ``hooks_callbacks.before_job`` so
-	Frappe's hook dispatcher passes ``method`` + ``kwargs`` as named
-	parameters.
+	WARNING: ``_lp_session_id`` is popped from the job's kwargs dict
+	unconditionally, even when not instrumenting. That dict is the one
+	``execute_job`` splats into the user's method, so leaving the marker
+	crashes it with an unexpected-keyword-argument error.
 	"""
-	# Always pop our marker first — before any control-flow that might
+	# Always pop our marker first before any control-flow that might
 	# return early. The mutation propagates because ``kwargs`` is a
 	# reference to the dict execute_job will use.
 	if isinstance(kwargs, dict):
@@ -211,7 +195,7 @@ def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
 		# Self-heal a tool 2 orphaned by a previously-killed job (see
 		# before_request_line_profile). RQ workers run one job at a time, so
 		# the process-wide count is 0 between jobs and this is equivalent to the
-		# old thread-local gate — but we share the same count mechanism for
+		# old thread-local gate but we share the same count mechanism for
 		# consistency and strict safety. Log when the reclaim actually fires.
 		if (
 			capture.active_profiler_count() == 0

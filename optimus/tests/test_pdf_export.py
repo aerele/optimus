@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.4.0 lazy PDF export."""
+"""Tests for lazy PDF export."""
 
 import pytest
 

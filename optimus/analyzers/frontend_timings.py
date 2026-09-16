@@ -2,12 +2,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Analyzer: browser-side timing join + Web Vitals (v0.5.0).
+"""Browser-side timing join + Web Vitals analyzer.
 
-Reads ``context.frontend_data`` (populated by analyze.run from
-``profiler:frontend:<session_uuid>``). Joins XHR timings to Profiler
-Actions by recording_id. Dedupes multi-fire LCP per page. Emits three
-finding types:
+Reads ``context.frontend_data``, joins XHR timings to Profiler Actions by
+recording_id and dedupes multi-fire LCP per page. Emits three finding types:
 
 - Slow Frontend Render    (LCP > 2500ms on any page)
 - Network Overhead        (XHR - backend > 500ms AND > backend * 1.5)
@@ -16,7 +14,7 @@ finding types:
 
 import json
 
-from optimus.analyzers.base import SEVERITY_ORDER, AnalyzerResult
+from optimus.analyzers.base import SEVERITY_ORDER, AnalyzerResult, dur
 
 LCP_MEDIUM_MS = 2500
 LCP_HIGH_MS = 4000
@@ -46,7 +44,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
     # returned None and every XHR row showed up as "action_0",
     # "action_1", etc. in the report. Pull the label from
     # context.actions instead, fall back through the recording's
-    # raw method+path, and only then to the synthetic "action_N".
+    # raw method+path and only then to the synthetic "action_N".
     ctx_actions = getattr(context, "actions", None) or []
 
     def _label_for(idx: int) -> str:
@@ -98,7 +96,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
         # (context.actions[idx].duration_ms), NOT on the raw
         # recording dict. Pre-v0.5.1 this read `action.get("duration_ms")`
         # from the recording and always got None, so backend_ms was
-        # always 0 in production — making every XHR look like 100%
+        # always 0 in production making every XHR look like 100%
         # network overhead. Prefer context.actions[idx].duration_ms,
         # then fall back through the recording's duration_ms (test
         # fixtures occasionally put it here) and finally the
@@ -158,7 +156,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
         elif name == "fcp":
             bucket["fcp_ms"] = v.get("value_ms")
         elif name == "cls":
-            # CLS accumulates across entries — keep the max seen per page.
+            # CLS accumulates across entries keep the max seen per page.
             current = bucket.get("cls", 0) or 0
             val = v.get("value") or 0
             if val > current:
@@ -181,9 +179,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
         findings.append({
             "finding_type": "Slow Frontend Render",
             "severity": severity,
-            "title": f"LCP {int(lcp)}ms on {page}",
+            "title": f"LCP {dur(lcp)} on {page}",
             "customer_description": (
-                f"The page '{page}' took {int(lcp)}ms for its largest "
+                f"The page '{page}' took {dur(lcp)} for its largest "
                 "content element to paint. Users typically perceive pages "
                 "as slow beyond 2.5 seconds."
             ),
@@ -196,11 +194,14 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                 "fix_hint": (
                     "Look at TTFB: if it's large, the backend is slow "
                     "(see Slow Query / N+1 findings). If TTFB is small, "
-                    "the browser spent time downloading or rendering — "
-                    "check response size and JavaScript execution."
+                    "the browser spent time downloading or rendering. "
+                    "Check response size and JavaScript execution."
                 ),
             }, default=str),
-            "estimated_impact_ms": lcp,
+            # Round to 0.01ms so the badge (fmt_ms of this value) and the title
+            # (dur(lcp), which rounds to 0.01ms internally) decide the ms-vs-seconds
+            # rollover from the SAME number and can't disagree at a boundary.
+            "estimated_impact_ms": round(lcp, 2),
             "affected_count": 1,
             "action_ref": "0",
         })
@@ -214,9 +215,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
             findings.append({
                 "finding_type": "Network Overhead",
                 "severity": severity,
-                "title": f"{int(delta)}ms network overhead on {m['action_label']}",
+                "title": f"{dur(delta)} network overhead on {m['action_label']}",
                 "customer_description": (
-                    f"The browser waited {int(delta)}ms longer than the "
+                    f"The browser waited {dur(delta)} longer than the "
                     "server spent processing this request. That extra time "
                     "is network, TLS, serialization, or response download."
                 ),
@@ -227,12 +228,14 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
                     "response_size_bytes": m["response_size_bytes"],
                     "url": m["url"],
                     "fix_hint": (
-                        "Large response sizes cause this — check the "
+                        "Large response sizes cause this. Check the "
                         "Heavy Response finding. If response is small, "
                         "suspect network path: CDN, TLS handshake, proxy."
                     ),
                 }, default=str),
-                "estimated_impact_ms": delta,
+                # Round to 0.01ms so the badge and the dur(delta) title roll over
+                # from the same number (see the LCP note above).
+                "estimated_impact_ms": round(delta, 2),
                 "affected_count": 1,
                 "action_ref": str(m["action_idx"]),
             })

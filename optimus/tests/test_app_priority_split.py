@@ -1,15 +1,13 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""v0.6.x: tests for the "custom prominent, framework collapsed" split.
+"""Tests for the "custom prominent, framework collapsed" split.
 
-The 4 main leaderboard sections (Per-action breakdown, Top queries,
-RQ Jobs, Hot frames) all pre-split their rows in
-``renderer.render()`` into ``<name>`` (custom-app rows) + ``<name>_framework``
-(framework-app rows). The template renders the primary list in a normal
-<table> and the framework list in a collapsed <details class="subsection">
-below. These tests cover both the unit-level classifier and the render-level
-behaviour for each section.
+The four main leaderboard sections (Per-action breakdown, Top queries, RQ Jobs,
+Hot frames) pre-split their rows in ``renderer.render()`` into custom-app rows
+plus ``<name>_framework`` rows; the template renders the primary list in a
+<table> and the framework list in a collapsed <details>. These tests cover both
+the classifier and the render-level behaviour.
 """
 
 import json
@@ -20,7 +18,7 @@ from optimus import renderer
 from optimus.settings import OptimusConfig
 
 # --------------------------------------------------------------------------
-# _is_framework_app — the tiny classifier adapter
+# _is_framework_app the tiny classifier adapter
 # --------------------------------------------------------------------------
 
 
@@ -135,10 +133,9 @@ def _doc(*, actions=None, top_queries=None, hot_frames=None):
 
 class TestPerActionSplit:
 	def test_custom_actions_above_framework_collapsed_block_with_tracked_apps(self):
-		"""v0.7.x: per-action split only kicks in when the admin has
-		configured Tracked Apps. With tracked_apps=("myapp",):
-		1 myapp action in main + 2 frappe actions in the framework
-		subsection."""
+		"""Per-action split only kicks in when Tracked Apps is configured.
+		With tracked_apps=("myapp",): 1 myapp action in main, 2 frappe actions
+		in the framework subsection."""
 		doc = _doc(actions=[
 			_action_ns(action_label="POST /api/method/myapp.handlers.recompute",
 			           event_type="HTTP Request", http_method="POST",
@@ -173,12 +170,9 @@ class TestPerActionSplit:
 		assert "the developer can't easily patch these" in html
 
 	def test_no_split_when_tracked_apps_empty(self):
-		"""v0.7.x: when Tracked Apps is empty (default), the per-action
-		breakdown does NOT split — all actions, including those hitting
-		Frappe endpoints, stay in the main table. Pre-v0.7 every
-		HTTP request to ``/api/method/frappe.*`` was hidden in the
-		collapsed framework subsection, leaving RQ Jobs as the
-		only visible rows in the main table."""
+		"""When Tracked Apps is empty (default), the per-action breakdown does
+		NOT split: all actions, including those hitting Frappe endpoints, stay
+		in the main table."""
 		doc = _doc(actions=[
 			_action_ns(action_label="POST /api/method/myapp.handlers.recompute",
 			           event_type="HTTP Request", http_method="POST",
@@ -192,7 +186,7 @@ class TestPerActionSplit:
 		# Default: get_config returns OptimusConfig with tracked_apps=().
 		html = renderer.render_raw(doc, recordings=[])
 
-		# No subsection summary phrase — no split happened.
+		# No subsection summary phrase no split happened.
 		assert "framework actions (click to expand)" not in html
 		assert "framework action (click to expand)" not in html
 		# Both actions appear in the main table.
@@ -240,7 +234,7 @@ class TestTopQueriesSplit:
 	def test_framework_callsite_query_routes_to_collapsed_block(self):
 		# top_queries normally already excludes framework callsites at
 		# analyze AND render time (``_filter_top_queries_for_display``).
-		# Bypass the render-time filter so both queries reach the split —
+		# Bypass the render-time filter so both queries reach the split
 		# this exercises the framework sub-block code path for the rare
 		# case that a framework query slips through (older sessions).
 		doc = _doc(top_queries=[
@@ -251,7 +245,7 @@ class TestTopQueriesSplit:
 		])
 		# v0.10.0: ``renderer`` is now a package whose ``__init__.py``
 		# re-exports names from ``_internal``. Patching ``renderer.X``
-		# would only swap the package's attribute — the call site inside
+		# would only swap the package's attribute the call site inside
 		# ``_internal.py`` resolves the name through ``_internal``'s own
 		# globals and would see the unpatched original. Patch the actual
 		# location.

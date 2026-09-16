@@ -1,11 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""End-to-end: the v0.5.0 analyzer chain on realistic fixtures.
-
-Runs infra_pressure + frontend_timings against merged recording +
-frontend data without touching Frappe or Redis. This is the
-Frappe-decoupled analyzer pattern extended to the v0.5.0 analyzers.
+"""End-to-end: the infra_pressure + frontend_timings analyzer chain on
+realistic fixtures, run against merged recording + frontend data without
+touching Frappe or Redis.
 """
 
 import json
@@ -61,7 +59,7 @@ def test_full_v5_analyzer_chain_produces_findings_and_aggregates():
 	assert len(infra_findings) == 1
 
 	# Frontend findings: Slow Frontend Render on the LCP 2800ms page,
-	# Network Overhead on the submit XHR (1900 vs 180 backend), and
+	# Network Overhead on the submit XHR (1900 vs 180 backend) and
 	# Heavy Response on the 512000-byte submit response.
 	ft_types = {f["finding_type"] for f in ctx.findings}
 	assert "Slow Frontend Render" in ft_types
@@ -80,8 +78,8 @@ def test_full_v5_analyzer_chain_produces_findings_and_aggregates():
 
 
 def test_analyzer_chain_with_missing_frontend_data():
-	"""Sessions captured before v0.5.0 deployed have no frontend_data.
-	The analyzers must run cleanly and not emit any frontend findings."""
+	"""Sessions with no frontend_data must run cleanly and emit no frontend
+	findings."""
 	from optimus.analyzers import frontend_timings, infra_pressure
 	from optimus.analyzers.base import AnalyzeContext
 
@@ -98,7 +96,7 @@ def test_analyzer_chain_with_missing_frontend_data():
 	]
 
 	ctx = AnalyzeContext(session_uuid="no-frontend", docname="e2e")
-	# ctx.frontend_data intentionally not set — simulates a session from
+	# ctx.frontend_data intentionally not set simulates a session from
 	# a worker that doesn't have v0.5.0's frontend blob in Redis yet.
 
 	infra_result = infra_pressure.analyze(recordings, ctx)
@@ -111,7 +109,7 @@ def test_analyzer_chain_with_missing_frontend_data():
 	ft_types = {f["finding_type"] for f in ctx.findings}
 	assert "Resource Contention" in ft_types
 
-	# Frontend side emits no findings and empty aggregates — clean no-op.
+	# Frontend side emits no findings and empty aggregates clean no-op.
 	assert "Slow Frontend Render" not in ft_types
 	assert "Network Overhead" not in ft_types
 	assert ctx.aggregate["frontend_xhr_matched"] == []

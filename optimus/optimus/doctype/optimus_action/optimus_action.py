@@ -5,5 +5,5 @@ from frappe.model.document import Document
 
 
 class OptimusAction(Document):
-	# Child table — no logic in Phase 0.
+	# Child table no logic in Phase 0.
 	pass

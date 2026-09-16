@@ -1,20 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Integration test for the frappe.enqueue monkey-patch.
-
-The patch lives in optimus/__init__.py and wraps
-frappe.utils.background_jobs.enqueue so that when a user with an active
-profiler session enqueues a background job, `_profiler_session_id` is
-injected into the job's kwargs. This test verifies the wrapper fires
-correctly and injects the marker.
-
-It also verifies the critical property that `frappe.enqueue_doc` (which
-internally calls module-level `enqueue`) also inherits the patch.
-
-To run this test without a real frappe site, we stub out the minimum
-surface of `frappe` and `frappe.utils.background_jobs` that the patch
-references. This keeps the test fast and deterministic.
+"""Integration test for the frappe.enqueue monkey-patch (in
+optimus/__init__.py), which injects ``_profiler_session_id`` into a job's
+kwargs when a user with an active profiler session enqueues it. Verifies the
+wrapper fires and injects the marker (including via ``frappe.enqueue_doc``,
+which calls module-level ``enqueue``). Frappe and frappe.utils.background_jobs
+are stubbed so the test needs no real site.
 """
 
 import sys
@@ -85,7 +77,7 @@ def fake_frappe(monkeypatch):
 	monkeypatch.setitem(sys.modules, "frappe.utils", fake_utils)
 	monkeypatch.setitem(sys.modules, "frappe.utils.background_jobs", fake_bg)
 
-	# optimus.session uses frappe.cache — already stubbed above
+	# optimus.session uses frappe.cache already stubbed above
 	return fake, fake_bg, enqueue_calls
 
 
@@ -96,10 +88,10 @@ def test_patch_injects_session_id(fake_frappe, monkeypatch):
 	# Arrange: put an active session for alice in fake cache
 	fake.cache.set_value("profiler:active:alice@example.com", "test-session-uuid-abc")
 
-	# Import the patch — this triggers _patch_enqueue() at module load
+	# Import the patch this triggers _patch_enqueue() at module load
 	# We need to force a re-import since other tests may have imported it already.
 	_reset_profiler_modules()
-	import optimus  # noqa: F401 — triggers the patch
+	import optimus  # noqa: F401 triggers the patch
 
 	# Act: call frappe.utils.background_jobs.enqueue
 	fake_bg.enqueue("my_module.my_func", x=1, y=2)
@@ -117,7 +109,7 @@ def test_patch_skips_without_active_session(fake_frappe, monkeypatch):
 	"""No active session → no marker injection."""
 	fake, fake_bg, enqueue_calls = fake_frappe
 
-	# Cache is empty — no active session
+	# Cache is empty no active session
 	_reset_profiler_modules()
 	import optimus  # noqa: F401
 

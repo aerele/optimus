@@ -1,38 +1,24 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Line-Level Drilldown panel — the Phase-2 per-line profiling section.
+"""Line-Level Drilldown panel: the phase-2 per-line profiling section.
 
 Sourced from the session's ``phase_2_runs`` child table (one row per
-line-profile pass); each row carries a ``results_json`` blob shaped as
+line-profile pass); each row carries a ``results_json`` blob
 ``[{file, dotted_path, lines: [{lineno, hits, total_ms, ...}]}]`` and a
 ``picks_json`` blob with the user's pick list + auto-expand flags.
 
-Two public surfaces (called from the render orchestrator in
-``_internal.py``):
+Two public surfaces (called from the render orchestrator in ``_internal.py``):
+* ``_build_line_drilldown_callsite_index(session_doc)``: also called by
+  ``optimus.analyze`` (via the renderer-package shim) for the finding-card
+  "Line-Level Drilldown hot line: ..." callout. Returns a
+  ``(basename, function_name) → hottest-line`` dict.
+* ``_render_line_drilldown_panel(session_doc)``: the section HTML, or "" when
+  the session has no phase-2 runs.
 
-* ``_build_line_drilldown_callsite_index(session_doc)`` — semi-public:
-  ``optimus.analyze`` also calls it (via the renderer-package shim) to
-  power the finding-card "Line-Level Drilldown hot line: ..." callout.
-  Returns a ``(basename, function_name) → hottest-line`` dict.
-* ``_render_line_drilldown_panel(session_doc)`` — the section HTML.
-  Empty string when the session has no phase-2 runs.
-
-Plus four internal helpers — ``_make_line_drilldown_lookup`` (Jinja
-adapter for tuple-keyed lookups), ``_phase2_invoked`` (per-function
-"did it run?" check), ``_render_phase2_function_table``,
-``_render_phase2_diff_table`` (per-function HTML pieces) — and two
-back-compat aliases (``_build_phase2_callsite_index``,
-``_make_phase2_lookup``, ``_render_phase2_panel``) that pre-v0.7.x
-renames left behind.
-
-Extracted from ``_internal.py`` in v0.12.12 per the v0.10.0 renderer-
-package roadmap. The 840-LOC line_drilldown cluster was the README's
-"single biggest remaining chunk." NB: ``_find_call_line_in_function_body``
-(an AST-walking helper used by ``_retarget_phase1_callsites_to_drilldown_leaf``
-which is part of the still-pending finding_enrichment cluster) stays
-in ``_internal.py`` for now — it'll move with that cluster, not this
-one. Same for ``_root_cause_key`` / ``_group_findings_by_root_cause``.
+Internal helpers: ``_make_line_drilldown_lookup`` (Jinja tuple-key adapter),
+``_phase2_invoked`` (did-it-run check), ``_render_phase2_function_table`` and
+``_render_phase2_diff_table`` (per-function HTML), plus back-compat aliases.
 """
 
 from __future__ import annotations
@@ -41,47 +27,34 @@ import json
 import os
 from typing import Any
 
+from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS, humanize_duration_ms
 from optimus.renderer.syntax import _highlight_python_snippet
 from optimus.renderer.time_format import _format_duration_ms
 
 
 def _e(text: object) -> str:
-	"""HTML-escape. Local copy of ``_internal._e`` (same pattern as
-	``call_tree_renderer.py`` / ``doc_event_renderer.py``) — keeps this
-	submodule free of a back-reference into ``_internal.py`` that would
-	create a circular import once ``_internal`` re-imports from here."""
+	"""HTML-escape. Local copy of ``_internal._e`` to avoid a back-reference
+	into ``_internal.py`` that would create a circular import."""
 	import html as _html
 
 	return _html.escape("" if text is None else str(text))
 
 
 # ---------------------------------------------------------------------------
-# Callsite index — semi-public (analyze.py calls it via the package shim)
+# Callsite index semi-public (analyze.py calls it via the package shim)
 # ---------------------------------------------------------------------------
 
 
 def _build_line_drilldown_callsite_index(session_doc: Any) -> dict:
 	"""Build a (basename, function_name) → hottest-line lookup from the
-	session's phase-2 runs. Used by ``finding_card`` to inject a
-	"Line-Level Drilldown hot line: ..." callout whenever a finding's
-	callsite resolves to a function that was line-profiled.
+	session's phase-2 runs, for ``finding_card``'s "Line-Level Drilldown hot
+	line: ..." callout.
 
-	Keyed by file basename (not absolute path) so the lookup survives
-	dev-vs-deploy path differences. When the same function appears in
-	multiple runs, the entry with the largest single-line ``total_ms``
-	wins — that's the most informative callout for the developer.
-
-	Per-function, own hottest line — no cross-function redirection.
-	The cross-link's job is "this function's hottest internal line";
-	the smoking-gun snippet's job (handled by
-	``_retarget_phase1_callsites_to_drilldown_leaf``) is "land the
-	reader on the deepest user-code frame". Keeping them separate
-	avoids the cross-link silently re-aiming the user at a different
-	function's data, which was confusing.
-
-	Returns an empty dict when the session has no phase-2 runs or the
-	results blobs are empty / malformed; the macro then renders no
-	callout.
+	Keyed by file basename (not absolute path) so it survives dev-vs-deploy
+	path differences. When a function appears in multiple runs, the entry with
+	the largest single-line ``total_ms`` wins. Per-function only: reports the
+	function's own hottest line, never a cross-function redirect. Returns an
+	empty dict when there are no phase-2 runs or the blobs are empty/malformed.
 	"""
 	runs = list(getattr(session_doc, "phase_2_runs", None) or [])
 	index: dict[tuple, dict] = {}
@@ -118,7 +91,7 @@ def _build_line_drilldown_callsite_index(session_doc: Any) -> dict:
 			# v0.7.x: key under BOTH the full qualname and its bare last
 			# segment. resolve_freeform may emit a prefixed qualname
 			# (``common.bg_recheck_users`` / ``SalesInvoice.validate``) while a
-			# call_tree finding's callsite carries the bare function name — the
+			# call_tree finding's callsite carries the bare function name the
 			# callout silently missed when the two disagreed on the prefix even
 			# though the function was profiled (and showing in the panel).
 			basename = os.path.basename(file_path)
@@ -130,7 +103,7 @@ def _build_line_drilldown_callsite_index(session_doc: Any) -> dict:
 	return index
 
 
-# Back-compat alias — pre-v0.7.x name.
+# Back-compat alias pre-v0.7.x name.
 _build_phase2_callsite_index = _build_line_drilldown_callsite_index
 
 
@@ -144,7 +117,7 @@ def _make_line_drilldown_lookup(index: dict):
 		if not filename or not function_name:
 			return None
 		base = os.path.basename(filename)
-		# Try the function name as-is, then its bare last segment — mirrors the
+		# Try the function name as-is, then its bare last segment mirrors the
 		# dual keying in _build_line_drilldown_callsite_index so a prefix
 		# mismatch (qualname vs callsite function) can't break the callout.
 		return index.get((base, function_name)) or index.get((base, function_name.rsplit(".", 1)[-1]))
@@ -152,7 +125,7 @@ def _make_line_drilldown_lookup(index: dict):
 	return lookup
 
 
-# Back-compat alias — pre-v0.7.x name.
+# Back-compat alias pre-v0.7.x name.
 _make_phase2_lookup = _make_line_drilldown_lookup
 
 
@@ -169,20 +142,13 @@ def _phase2_invoked(fn: dict) -> bool:
 	return _function_invoked(fn)
 
 
-def _render_phase2_function_table(fn: dict) -> str:
+def _render_phase2_function_table(fn: dict, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS) -> str:
 	"""Per-function line table inside one phase-2 run.
 
-	Columns: line number, hit count, total ms, per-hit µs, source.
-
-	v0.6.0 Round 7: previously took ``show_source`` + ``mode`` to gate
-	the source-line column. With safe mode removed, source is always
-	rendered.
-
-	When ``fn`` carries a ``source == "auto_expand"`` marker (set by the
-	renderer from the run's picks_json), the function header is indented
-	and prefixed with ``↳`` so the chain reads visually as a stack: the
-	user's pick appears flush-left, each auto-expanded descendant a
-	level deeper.
+	Columns: line number, hit count, total ms, per-hit µs, source. When ``fn``
+	carries a ``source == "auto_expand"`` marker, the function header is
+	indented and prefixed with ``↳`` so the chain reads as a stack (the user's
+	pick flush-left, each auto-expanded descendant a level deeper).
 	"""
 	# v0.7.x Phase F: editorial styling. Replaces inline-styled divs +
 	# table with `.phase2-func` + `.line-prof` classes. Auto-expanded
@@ -195,7 +161,7 @@ def _render_phase2_function_table(fn: dict) -> str:
 	source = fn.get("source") or "curated"
 
 	# v0.7.x: a picked function that never ran (no lines, or all hits/total
-	# zero) renders nothing — the caller folds it into one "Not exercised in
+	# zero) renders nothing the caller folds it into one "Not exercised in
 	# this pass" note instead of a noisy empty per-line table.
 	if not _phase2_invoked(fn):
 		return ""
@@ -242,7 +208,7 @@ def _render_phase2_function_table(fn: dict) -> str:
 			tr_cls = ' class="zero"'
 		else:
 			tr_cls = ""
-		# `per_hit_us` is microseconds — convert to ms so the timing
+		# `per_hit_us` is microseconds convert to ms so the timing
 		# rule (1s threshold for the `.time-high` highlight) applies.
 		per_hit_ms = (line.get("per_hit_us") or 0) / 1000.0
 		_src_html = line.get("content_html")
@@ -251,8 +217,8 @@ def _render_phase2_function_table(fn: dict) -> str:
 			f"<tr{tr_cls}>"
 			f'<td class="ln">{line.get("lineno", "")}</td>'
 			f'<td class="num">{line.get("hits", 0)}</td>'
-			f'<td class="num">{_format_duration_ms(ms, decimals=2)}</td>'
-			f'<td class="num">{_format_duration_ms(per_hit_ms, decimals=2)}</td>'
+			f'<td class="num">{_format_duration_ms(ms, threshold_ms, decimals=2)}</td>'
+			f'<td class="num">{_format_duration_ms(per_hit_ms, threshold_ms, decimals=2)}</td>'
 			f'<td class="src"><code>{_src_cell}</code></td>'
 			"</tr>"
 		)
@@ -261,13 +227,9 @@ def _render_phase2_function_table(fn: dict) -> str:
 	return "".join(html)
 
 
-def _render_phase2_diff_table(diff_rows: list[dict]) -> str:
-	"""Render the cross-run delta table for one function profiled in 2+
-	runs — the verify-the-fix view.
-
-	v0.6.0 Round 7: source column always shows full code (was previously
-	gated by ``mode == "safe"`` + the safe-source toggle).
-	"""
+def _render_phase2_diff_table(diff_rows: list[dict], threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS) -> str:
+	"""Render the cross-run delta table for one function profiled in 2+ runs
+	(the verify-the-fix view)."""
 	# v0.7.x Phase F: cross-run diff uses the same `.line-prof` base
 	# class as the per-function table, with extra `.added` / `.removed`
 	# row tints for matched-faster / matched-slower / added / removed
@@ -281,9 +243,9 @@ def _render_phase2_diff_table(diff_rows: list[dict]) -> str:
 		"<th>status</th>"
 		'<th class="num">prev #</th>'
 		'<th class="num">curr #</th>'
-		'<th class="num">prev ms</th>'
-		'<th class="num">curr ms</th>'
-		'<th class="num">&Delta; ms</th>'
+		'<th class="num">prev</th>'
+		'<th class="num">curr</th>'
+		'<th class="num">&Delta;</th>'
 		"<th>source</th>"
 		"</tr></thead><tbody>",
 	]
@@ -311,7 +273,19 @@ def _render_phase2_diff_table(diff_rows: list[dict]) -> str:
 			tr_cls = ' class="removed"'
 
 		def _fmt(v):
-			return "—" if v is None else (f"{v:.2f}" if isinstance(v, float) else str(v))
+			return "" if v is None else (f"{v:.2f}" if isinstance(v, float) else str(v))
+
+		def _fmt_ms_cell(v):
+			# ms durations honour the configured second-rollover threshold, like
+			# the sibling per-function table (was previously raw "1500.00").
+			return "" if v is None else _format_duration_ms(v, threshold_ms, decimals=2)
+
+		def _fmt_delta_cell(v):
+			# The row is already tinted green (faster) or red (slower). The delta
+			# value must NOT also carry the amber "time-high" alarm span, or a
+			# 1.6s improvement would look identical to a 1.6s regression. Plain
+			# text, same second-rollover as the other cells.
+			return "" if v is None else humanize_duration_ms(v, threshold_ms, decimals=2)
 
 		_src_html = row.get("content_html")
 		_src = _src_html if _src_html else _e(row.get("content", ""))
@@ -322,9 +296,9 @@ def _render_phase2_diff_table(diff_rows: list[dict]) -> str:
 			f"<td>{_e(status)}</td>"
 			f'<td class="num">{_fmt(row.get("prev_lineno"))}</td>'
 			f'<td class="num">{_fmt(row.get("curr_lineno"))}</td>'
-			f'<td class="num">{_fmt(row.get("prev_ms"))}</td>'
-			f'<td class="num">{_fmt(row.get("curr_ms"))}</td>'
-			f'<td class="num">{_fmt(delta)}</td>'
+			f'<td class="num">{_fmt_ms_cell(row.get("prev_ms"))}</td>'
+			f'<td class="num">{_fmt_ms_cell(row.get("curr_ms"))}</td>'
+			f'<td class="num">{_fmt_delta_cell(delta)}</td>'
 			f'<td class="src">{source_cell}</td>'
 			"</tr>"
 		)
@@ -337,17 +311,10 @@ def _render_phase2_diff_table(diff_rows: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _render_line_drilldown_panel(session_doc: Any) -> str:
-	"""Build the Line-Level Drilldown section HTML. Returns an empty
-	string when the session has no phase-2 runs (the template's
-	``{% if line_drilldown_html %}`` guard then skips the section
-	entirely).
-
-	v0.6.0 Round 7: source-line text is always rendered (was previously
-	gated by the ``safe_report_include_source_lines`` setting in safe
-	mode). With safe mode removed the toggle is gone and the report
-	always shows full code.
-	"""
+def _render_line_drilldown_panel(session_doc: Any, threshold_ms: float = DEFAULT_DISPLAY_THRESHOLD_MS) -> str:
+	"""Build the Line-Level Drilldown section HTML, or "" when the session has
+	no phase-2 runs (the template's ``{% if line_drilldown_html %}`` guard then
+	skips the section)."""
 	from optimus.line_profile import diff as _lp_diff
 
 	runs = list(getattr(session_doc, "phase_2_runs", None) or [])
@@ -433,8 +400,8 @@ def _render_line_drilldown_panel(session_doc: Any) -> str:
 		started = _e(run.get("started_at"))
 		status = _e(run.get("status", ""))
 		total_ms = run.get("total_ms", 0)
-		# v0.7.x: the "Picks:" line is dropped — the per-function tables below
-		# enumerate the picks that ran, and the "Not exercised in this pass" note
+		# v0.7.x: the "Picks:" line is dropped the per-function tables below
+		# enumerate the picks that ran and the "Not exercised in this pass" note
 		# lists the rest, so listing all picks again here is redundant.
 		html.append(
 			'<div class="phase2-run">'
@@ -442,7 +409,7 @@ def _render_line_drilldown_panel(session_doc: Any) -> str:
 			f"<strong>Run {run_idx}</strong>"
 			'<span class="meta">'
 			f'<span class="status-badge status-{status}">{status}</span>'
-			f"{_format_duration_ms(total_ms)} &middot; {started}"
+			f"{_format_duration_ms(total_ms, threshold_ms)} &middot; {started}"
 			"</span>"
 			"</div>"
 		)
@@ -451,7 +418,7 @@ def _render_line_drilldown_panel(session_doc: Any) -> str:
 		not_exercised = []
 		for fn in run.get("functions", []):
 			if _phase2_invoked(fn):
-				html.append(_render_phase2_function_table(fn))
+				html.append(_render_phase2_function_table(fn, threshold_ms))
 			else:
 				not_exercised.append(fn.get("dotted_path", "?"))
 		if not_exercised:
@@ -472,14 +439,14 @@ def _render_line_drilldown_panel(session_doc: Any) -> str:
 			"</p>"
 		)
 		for path, diff_meta in diffs.items():
-			label = f"{path} — Run {diff_meta['prev_run_idx'] + 1} → Run {diff_meta['curr_run_idx'] + 1}"
+			label = f"{path} Run {diff_meta['prev_run_idx'] + 1} → Run {diff_meta['curr_run_idx'] + 1}"
 			html.append(f'<div class="phase2-func"><div class="fn-name">{_e(label)}</div>')
-			html.append(_render_phase2_diff_table(diff_meta["rows"]))
+			html.append(_render_phase2_diff_table(diff_meta["rows"], threshold_ms))
 			html.append("</div>")
 
 	html.append("</section>")
 	return "".join(html)
 
 
-# Back-compat alias — pre-v0.7.x name.
+# Back-compat alias pre-v0.7.x name.
 _render_phase2_panel = _render_line_drilldown_panel

@@ -1,23 +1,15 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Call-tree panel renderer — the hierarchical "where did wall-clock time go"
-section of the safe report.
+"""Call-tree panel renderer: the hierarchical "where did wall-clock time go"
+section of the report.
 
-Sourced from the slowest action's ``call_tree_json`` (built by the
-analyzer); rendered as nested ``<details>`` elements with auto-open
-breadcrumb down to the user-app's first hot frame and depth-capped
-expanders past ``_CALL_TREE_MAX_DEPTH``. Synthetic placeholder nodes
-(``[other: N frames]``, ``[N more frames omitted]``) and ``<sql>``
-query leaves are dropped from the visible tree per user request — the
-queries live in their own table-shaped sections; this panel shows only
-the Python hierarchy.
-
-Extracted from ``_internal.py`` in v0.12.8 per the v0.10.0 renderer-
-package roadmap (``optimus/renderer/README.md``). Self-contained
-cluster: only call-graph dependency is ``optimus.analyzers.base.
-FRAMEWORK_APPS`` (lazily imported inside ``_ct_is_user_frame`` to
-avoid the import-time cycle through ``optimus.analyzers``).
+Sourced from the top actions' ``call_tree_json`` (built by the analyzer);
+rendered as nested ``<details>`` with an auto-open breadcrumb down to the
+user-app's first hot frame and depth-capped expanders past
+``_CALL_TREE_MAX_DEPTH``. Synthetic placeholder nodes (``[other: N frames]``,
+``[N more frames omitted]``) and ``<sql>`` query leaves are dropped: this panel
+shows only the Python hierarchy (queries live in their own sections).
 """
 
 from __future__ import annotations
@@ -25,13 +17,18 @@ from __future__ import annotations
 import json
 import re
 
+# ``analyzers.base`` is a dependency-free leaf (stdlib only), so importing the
+# shared duration formatter here does not create the ``_internal`` cycle the
+# local ``_e`` copy below guards against.
+from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS, humanize_duration_ms
+
 # Depth caps for the call-tree panel. The default cap is what the user
 # sees without clicking; the hard cap is the absolute runaway-protection
 # ceiling beyond which children are silently truncated.
 _CALL_TREE_MAX_DEPTH = 12
 _CALL_TREE_HARD_CAP = 64
 # v0.13: the panel renders the top-N slowest actions' call trees, not just the
-# single slowest — so a flat #1 action (e.g. an RQ job that just loops one
+# single slowest so a flat #1 action (e.g. an RQ job that just loops one
 # function) doesn't hide the deep, structurally-rich trees of the next-slowest
 # actions in the same session.
 _CALL_TREE_MAX_ACTIONS = 3
@@ -42,28 +39,21 @@ _CT_OTHER_RE = re.compile(
 
 
 def _e(text: object) -> str:
-	"""HTML-escape. Local copy of ``_internal._e`` — keeps this
-	submodule free of a back-reference into ``_internal.py`` (which
-	would create a circular import once ``_internal`` re-imports the
-	call-tree symbols)."""
+	"""HTML-escape. Local copy of ``_internal._e`` to avoid a circular import."""
 	import html as _html
 
 	return _html.escape("" if text is None else str(text))
 
 
 def _ct_is_other_frame(fn) -> bool:
-	"""A synthetic call-tree collapse node — either ``[other: N frames]`` or the
-	analyzer's deep-tree pruning placeholder ``[N more frames omitted]``
-	(call_tree.py). Both are dropped from the call tree per user request: they
-	carry no callsite to act on, so they're just noise."""
+	"""True for a synthetic collapse node (``[other: N frames]`` or ``[N more
+	frames omitted]``). These carry no callsite and are dropped from the tree."""
 	return bool(_CT_OTHER_RE.match((fn or "").strip()))
 
 
 def _ct_is_sql_leaf(node) -> bool:
-	"""A ``<sql>`` query leaf frame. Dropped from the call-tree display per
-	user request — the tree shows only the Python hierarchy; the queries
-	themselves live, itemised, in the Slowest-queries / per-action sections,
-	so nothing is lost. (The analyzer still keeps these in ``call_tree_json``.)"""
+	"""True for a ``<sql>`` query leaf frame. Dropped from the call-tree display
+	(the tree shows only the Python hierarchy; queries live in their own sections)."""
 	cn = node or {}
 	return cn.get("function") == "<sql>" and not cn.get("children")
 
@@ -86,23 +76,20 @@ def _ct_is_user_frame(node) -> bool:
 	return app not in FRAMEWORK_APPS
 
 
-def _render_call_tree_node(node, parent_ms, depth=0, unlimited=False, breadcrumb=True):
-	"""Phase K.5: recursive nested-``<details>`` emit for a single
-	call_tree node. Auto-opens the hottest path down to the first user-app
-	frame (``breadcrumb``); deeper branches start collapsed so the panel
-	doesn't unfurl into thousands of frames on first paint.
+def _render_call_tree_node(node, parent_ms, depth=0, unlimited=False, breadcrumb=True, threshold_ms=DEFAULT_DISPLAY_THRESHOLD_MS):
+	"""Recursively emit nested ``<details>`` for a single call_tree node.
 
-	Past ``_CALL_TREE_MAX_DEPTH`` the remaining subtree is wrapped in
-	a click-to-expand ``<details>`` so users can traverse deeper when
-	they want to, with ``unlimited=True`` flipped on for that subtree
-	so we don't keep nesting expanders at every level. ``_CALL_TREE_
-	HARD_CAP`` is the absolute ceiling for runaway protection.
+	Auto-opens the hottest path down to the first user-app frame (``breadcrumb``);
+	deeper branches start collapsed. Past ``_CALL_TREE_MAX_DEPTH`` the rest of the
+	subtree is wrapped in a click-to-expand ``<details>`` (with ``unlimited=True``
+	so expanders don't nest at every level); ``_CALL_TREE_HARD_CAP`` is the
+	absolute runaway ceiling.
 	"""
 	if not isinstance(node, dict):
 		return ""
 	fn = node.get("function") or "<?>"
 	# v0.7.x: drop synthetic "[other: N frames]" collapse nodes entirely (user
-	# request — accepts that a branch's visible children may not sum to its total).
+	# request accepts that a branch's visible children may not sum to its total).
 	if _ct_is_other_frame(fn):
 		return ""
 	file = node.get("filename") or ""
@@ -124,14 +111,14 @@ def _render_call_tree_node(node, parent_ms, depth=0, unlimited=False, breadcrumb
 	pct_label = f" &middot; {pct:.0f}%" if parent_ms else ""
 	self_label = ""
 	if self_ms and cum_ms - self_ms > 1:
-		self_label = f" &middot; self {self_ms:.0f}ms"
+		self_label = f" &middot; self {humanize_duration_ms(self_ms, threshold_ms)}"
 
 	out = [
 		f'<details class="{cls}"{open_attr}>',
 		'<summary>',
 		f'<span class="frame-name">{_e(fn)}</span>',
 		f'<span class="frame-meta">{_e(file)}{meta_lineno} &middot; '
-		f'{cum_ms:.0f}ms{pct_label}{self_label}</span>',
+		f'{humanize_duration_ms(cum_ms, threshold_ms)}{pct_label}{self_label}</span>',
 		'</summary>',
 	]
 	if children:
@@ -161,11 +148,11 @@ def _render_call_tree_node(node, parent_ms, depth=0, unlimited=False, breadcrumb
 					and depth < _CALL_TREE_MAX_DEPTH
 				)
 				out.append(_render_call_tree_node(
-					c, cum_ms, depth + 1, unlimited, breadcrumb=child_bc,
+					c, cum_ms, depth + 1, unlimited, breadcrumb=child_bc, threshold_ms=threshold_ms,
 				))
 			out.append('</div>')
 		elif within_hard:
-			# Past default cap — click-to-expand the rest of the
+			# Past default cap click-to-expand the rest of the
 			# subtree. ``unlimited=True`` prevents further wrapping
 			# at every nested level.
 			out.append(
@@ -179,7 +166,7 @@ def _render_call_tree_node(node, parent_ms, depth=0, unlimited=False, breadcrumb
 			)
 			for c in main:
 				out.append(_render_call_tree_node(
-					c, cum_ms, depth + 1, unlimited=True, breadcrumb=False,
+					c, cum_ms, depth + 1, unlimited=True, breadcrumb=False, threshold_ms=threshold_ms,
 				))
 			out.append('</div></details></div>')
 		else:
@@ -194,7 +181,7 @@ def _render_call_tree_node(node, parent_ms, depth=0, unlimited=False, breadcrumb
 	return "".join(out)
 
 
-def _render_one_call_tree(top):
+def _render_one_call_tree(top, threshold_ms=DEFAULT_DISPLAY_THRESHOLD_MS):
 	"""Render the ``<div class="call-tree">`` block for a single action dict
 	(``call_tree_json`` + ``duration_ms`` + ``action_label``). Returns the
 	tree HTML, or "" when the action has no renderable Python frames (empty
@@ -224,22 +211,16 @@ def _render_one_call_tree(top):
 		cn = c or {}
 		if _ct_is_other_frame(cn.get("function")) or _ct_is_sql_leaf(cn):
 			continue
-		nodes.append(_render_call_tree_node(c, total_ms, depth=0))
+		nodes.append(_render_call_tree_node(c, total_ms, depth=0, threshold_ms=threshold_ms))
 	if not nodes:
 		return ""
 	return '<div class="call-tree">' + "".join(nodes) + '</div>'
 
 
-def _render_call_tree_panel(actions):
-	"""Phase K.5 / v0.13: render the call-tree panel for the top-N slowest
-	actions that carry a ``call_tree_json``. Empty string when no action
-	carries a renderable tree (the template's ``{% if %}`` guard hides the
-	section).
-
-	Was: the single slowest action only — which hid the deep, structurally
-	rich trees of every other slow action (a flow whose #1 action is a flat
-	RQ loop surfaced no hierarchy). Now the ``_CALL_TREE_MAX_ACTIONS``
-	slowest actions are each rendered as their own labeled sub-tree.
+def _render_call_tree_panel(actions, threshold_ms=DEFAULT_DISPLAY_THRESHOLD_MS):
+	"""Render the call-tree panel for the top-N slowest actions (up to
+	``_CALL_TREE_MAX_ACTIONS``) that carry a ``call_tree_json``, each as its own
+	labeled sub-tree. Empty string when no action carries a renderable tree.
 	"""
 	if not actions:
 		return ""
@@ -254,7 +235,7 @@ def _render_call_tree_panel(actions):
 	for top in ranked:
 		if len(rendered) >= _CALL_TREE_MAX_ACTIONS:
 			break
-		tree_html = _render_one_call_tree(top)
+		tree_html = _render_one_call_tree(top, threshold_ms=threshold_ms)
 		if not tree_html:
 			continue
 		total_ms = float(top.get("duration_ms") or 0)
@@ -300,7 +281,7 @@ def _render_call_tree_panel(actions):
 				'<div class="call-tree-action-head">'
 				f'<span class="call-tree-action-rank">#{rank}</span>'
 				f'<span class="call-tree-action-label">{_e(label)}</span>'
-				f'<span class="call-tree-action-meta">{total_ms:.0f}ms</span>'
+				f'<span class="call-tree-action-meta">{humanize_duration_ms(total_ms, threshold_ms)}</span>'
 				'</div>'
 			)
 			parts.append(tree_html)

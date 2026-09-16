@@ -1,17 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""MariaDB dialect adapter — Optimus's current behaviour, behind the Dialect
-interface.
-
-The EXPLAIN / index-introspection / infra-metric logic here is lifted
-**verbatim** from ``analyze.py`` (the EXPLAIN runner + ``_table_existing_indexes``),
-``analyzers/explain_flags.py`` (the EXPLAIN-row field reads), ``analyzers/
-index_suggestions.py`` (``_get_*`` introspection, the table-name guard, the
-ADD INDEX DDL) and ``infra_capture.py`` (``_read_db``). Keeping it byte-faithful
-means the analyzers, once rewired to consume the normalized shapes, produce
-identical MariaDB findings (guarded by the golden-snapshot no-regression test).
-"""
+"""MariaDB dialect adapter (EXPLAIN, index introspection, infra metrics) behind the Dialect interface."""
 
 from __future__ import annotations
 
@@ -29,7 +19,7 @@ from optimus.dbdialect.base import (
 )
 
 # MariaDB TEXT/BLOB columns need a key-length prefix to index; JSON/GEOMETRY
-# can't take a plain b-tree index. (Mirrors index_suggestions — de-duplicated
+# can't take a plain b-tree index. (Mirrors index_suggestions de-duplicated
 # when that analyzer is rewired to call the dialect.)
 _PREFIX_REQUIRED_TYPES = frozenset({
 	"text", "tinytext", "mediumtext", "longtext",
@@ -38,7 +28,7 @@ _PREFIX_REQUIRED_TYPES = frozenset({
 _UNINDEXABLE_TYPES = frozenset({"json", "geometry"})
 _TEXT_INDEX_PREFIX_LENGTH = 255  # index_suggestions.TEXT_INDEX_PREFIX_LENGTH
 
-# MariaDB can't parameterise an identifier in ``SHOW INDEX FROM ?`` — the table
+# MariaDB can't parameterise an identifier in ``SHOW INDEX FROM ?``: the table
 # name is interpolated, so it must pass this whitelist first (index_suggestions
 # ._SAFE_TAB_TABLE_RE / _SAFE_INFOSCHEMA_RE / _is_safe_table_name).
 _SAFE_TAB_TABLE_RE = re.compile(r"^tab[A-Za-z0-9 _\-]+$")
@@ -57,7 +47,7 @@ class MariaDBDialect(Dialect):
 	name = "mariadb"
 
 	def __init__(self) -> None:
-		# max_connections is a server config — cached for the adapter's life
+		# max_connections is a server config cached for the adapter's life
 		# (the factory keeps one adapter per process). Mirrors the old
 		# module-level infra_capture._db_max_connections_cached.
 		self._max_connections_cached: int | None = None
@@ -77,8 +67,7 @@ class MariaDBDialect(Dialect):
 
 	@staticmethod
 	def _row_to_plan_table(row: dict) -> PlanTable:
-		"""Map one MariaDB EXPLAIN row to the normalized PlanTable — the exact
-		field reads from explain_flags._inspect_row."""
+		"""Map one MariaDB EXPLAIN row to a normalized PlanTable."""
 		extra = (row.get("Extra") or row.get("extra") or "").lower()
 		return PlanTable(
 			table=row.get("table") or "?",
@@ -94,9 +83,7 @@ class MariaDBDialect(Dialect):
 	# -- Index introspection --------------------------------------------
 
 	def existing_indexes(self, table: str) -> list:
-		"""``SHOW INDEX FROM `table`` → ``[IndexInfo(...)]``. Empty on any error
-		/ unsafe name (lifted from analyze._table_existing_indexes, with the
-		leftmost column exposed for index_suggestions)."""
+		"""``SHOW INDEX FROM `table`` → ``[IndexInfo(...)]``. Empty on any error or unsafe name."""
 		if not _is_safe_table_name(table):
 			return []
 		import frappe
@@ -134,8 +121,7 @@ class MariaDBDialect(Dialect):
 		return out
 
 	def column_types(self, table: str) -> dict:
-		"""``{column: data_type_lower}`` (lifted from
-		index_suggestions._get_column_types)."""
+		"""``{column: data_type_lower}`` for the table's columns."""
 		import frappe
 
 		try:
@@ -160,8 +146,7 @@ class MariaDBDialect(Dialect):
 		return out
 
 	def index_ddl(self, table: str, column: str, is_text_col: bool) -> str:
-		"""ADD INDEX statement (lifted from index_suggestions._classify_column).
-		TEXT/BLOB columns get the (255)-prefix form."""
+		"""ADD INDEX statement for ``column`` on ``table``. TEXT/BLOB columns get the (255)-prefix form."""
 		if is_text_col:
 			return (
 				f"ALTER TABLE `{table}` ADD INDEX IF NOT EXISTS `{column}_index` "

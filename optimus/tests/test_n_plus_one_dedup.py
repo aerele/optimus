@@ -1,21 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.5.2 round 3 callsite-level N+1 dedup, refined in v0.7.x.
+"""Tests for callsite-level N+1 dedup.
 
-Before v0.5.2: n_plus_one grouped by (normalized_query, filename,
-lineno). A callsite that generated 10 different queries in the same
-loop emitted 10 separate N+1 findings. Report had "Same query ran
-74×" ten times — same fix, same line.
-
-v0.5.2: regrouped by (filename, lineno). A multi-variant callsite
-emitted ONE collapsed finding titled "Callsite ran X queries (N
-variants) at file:line".
-
-v0.7.x: the multi-variant "Callsite ran …" finding type is dropped
-— the wording reads as jargon, the fix hint is generic, and the
-dominant variant is already surfaced elsewhere. Only the
-single-variant classic "Same query ran N× at …" remains.
+n_plus_one groups by (filename, lineno). A multi-variant callsite (many
+distinct query shapes) emits NO finding; only the single-variant classic
+"Same query ran N× at file:line" case is flagged.
 """
 
 import json
@@ -50,13 +40,10 @@ def _make_recording(stack, queries_per_variant, variants, per_query_ms=2.0):
 
 
 def test_multi_variant_callsite_emits_no_finding():
-	"""v0.7.x: a callsite emitting 10 different SQL shapes ×30 each (300
-	total queries) used to collapse into one 'Callsite ran 300 queries
-	(10 variants)' finding. That wording wasn't actionable — drop the
-	multi-variant case entirely. The dominant variant is still visible
-	in the top-queries / table-breakdown sections; truly hot loops with
-	a single repeated SQL shape are still flagged by the classic
-	'Same query ran N× at …' path."""
+	"""A callsite emitting many distinct SQL shapes (multi-variant) emits no N+1
+	finding; the dominant variant is still visible in top-queries /
+	table-breakdown, while single-repeated-shape hot loops are still flagged by
+	the classic 'Same query ran N× at …' path."""
 	stack = [
 		{"filename": "apps/myapp/controllers/bulk.py", "lineno": 42, "function": "f"},
 	]
@@ -73,7 +60,7 @@ def test_multi_variant_callsite_emits_no_finding():
 
 def test_single_variant_keeps_classic_title():
 	"""Backwards compat: 1 variant × N occurrences still reads as
-	'Same query ran N× at file:line' — the classic N+1 shape."""
+	'Same query ran N× at file:line' the classic N+1 shape."""
 	stack = [
 		{"filename": "apps/myapp/foo.py", "lineno": 10, "function": "loop"},
 	]
@@ -89,7 +76,7 @@ def test_single_variant_keeps_classic_title():
 
 
 def test_max_variant_threshold_prevents_fanout_false_positives():
-	"""A fan-out callsite — 10 different queries, each called once —
+	"""A fan-out callsite 10 different queries, each called once
 	isn't an N+1. It's a function that dispatches to multiple queries.
 	We gate by the MOST-repeated variant, not the total, so these
 	don't trigger a finding."""
@@ -104,7 +91,7 @@ def test_max_variant_threshold_prevents_fanout_false_positives():
 	# Must NOT emit a finding.
 	assert result.findings == [], (
 		"Fan-out callsite (20 unique queries × 1 each) must not flag "
-		"as N+1 — the max-variant threshold should filter it. "
+		"as N+1 the max-variant threshold should filter it. "
 		f"Got: {[f['title'] for f in result.findings]}"
 	)
 

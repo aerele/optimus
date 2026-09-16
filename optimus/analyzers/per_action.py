@@ -3,10 +3,8 @@
 
 """Analyzer: per-action breakdown.
 
-Produces one Optimus Action row per recording, with a humanized label
-derived best-effort from the recording's path/cmd/form_dict. The action
-row is the unit the customer sorts/filters by in the report — "which step
-of my flow took the longest?".
+Produces one Optimus Action row per recording, with a label derived best-effort
+from the recording's path/cmd/form_dict (the unit the customer sorts/filters by).
 
 Label detection strategy:
     1. RQ Jobs: "Job: <last component of method name>"
@@ -45,26 +43,11 @@ def _build_action(recording: dict) -> dict:
 def _label(recording: dict) -> str:
 	"""Technical label for the Per-action table / Frontend XHR panel.
 
-	Intentionally NOT humanized — shows the raw cmd (e.g.
-	``frappe.client.save``) or ``METHOD path`` so developers see
-	exactly what hit the server. The Steps-to-Reproduce section
-	uses ``humanized_label`` instead, which reads like English
-	("Save Sales Invoice", "Open Customer CUST-001").
-
-	v0.5.1: cmd falls back to ``_derive_cmd_from_path`` when the
-	recording's stored cmd is empty (Frappe's recorder captures
-	cmd at hook time, BEFORE the REST routing sets form_dict.cmd
-	— see ``_derive_cmd_from_path`` docstring for the full story).
-
-	v0.5.2: ``frappe.desk.form.save.savedocs`` takes an ``action``
-	field in form_dict ("Save"|"Submit"|"Cancel"|"Update") that
-	routes to semantically different behaviors at the same cmd.
-	Pre-v0.5.2 both appeared as the same label in the per-action
-	table, making Save and Submit rows indistinguishable. Now the
-	action is suffixed to the cmd (``frappe.desk.form.save
-	.savedocs:Submit``) so developers can tell them apart without
-	re-enabling the full humanization pipeline (which the user
-	wanted off in technical breakdowns).
+	Intentionally NOT humanized: shows the raw cmd (e.g. ``frappe.client.save``)
+	or ``METHOD path``. The Steps-to-Reproduce section uses ``humanized_label``
+	instead. Falls back to ``_derive_cmd_from_path`` when the recording's cmd is
+	empty. Suffixes a disambiguating ``:<action>`` for multiplexed cmds (e.g.
+	``frappe.desk.form.save.savedocs:Submit``) so Save and Submit rows differ.
 	"""
 	if recording.get("event_type") == "RQ Job":
 		path = recording.get("path") or "RQ Job"
@@ -103,7 +86,7 @@ _SAVEDOCS_ACTIONS = frozenset({"Save", "Submit", "Cancel", "Update"})
 #   run_doc_method                     → form_dict.method (any method name)
 #   frappe.model.workflow.apply_workflow → form_dict.action (Approve/Reject/...)
 #
-# run_doc_method is the biggest one for ERPNext — every custom button
+# run_doc_method is the biggest one for ERPNext every custom button
 # defined via frm.add_custom_button(...) goes through it. Without a
 # suffix, 20 distinct buttons in a Sales Invoice session look like one
 # row of "run_doc_method × 20".
@@ -127,10 +110,9 @@ _SAFE_SUFFIX_RE = _re.compile(r"^[A-Za-z][A-Za-z0-9._\- ]{0,59}$")
 def _multiplex_suffix(cmd: str, form_dict: dict) -> str:
 	"""Return the disambiguating suffix for a multiplexed cmd, or "".
 
-	Looks up the right form_dict key per cmd, validates the value
-	against ``_SAFE_SUFFIX_RE``, and returns it. Unknown / malformed
-	values return "" so the caller falls back to the bare cmd —
-	keeps grouping-by-label stable when payloads are weird.
+	Looks up the right form_dict key per cmd and validates it against
+	``_SAFE_SUFFIX_RE``. Unknown/malformed values return "" (caller falls back to
+	the bare cmd, keeping grouping-by-label stable).
 	"""
 	if not isinstance(form_dict, dict):
 		return ""
@@ -143,7 +125,7 @@ def _multiplex_suffix(cmd: str, form_dict: dict) -> str:
 
 	# run_doc_method: method is the actual dotted method name, e.g.
 	# "make_payment_entry", "send_email", "update_items". Frappe's
-	# whitelisting layer already validates the method exists — we
+	# whitelisting layer already validates the method exists we
 	# just need to pick something that renders cleanly and doesn't
 	# include literal user data (most doc-method names are plain
 	# Python identifiers, but defensively validate).
@@ -156,7 +138,7 @@ def _multiplex_suffix(cmd: str, form_dict: dict) -> str:
 	# apply_workflow: action is a user-defined Workflow Action name
 	# like "Approve", "Reject", "Submit for Approval". Validate
 	# shape because workflow admins occasionally name actions with
-	# emoji or non-ASCII characters — those round-trip OK through
+	# emoji or non-ASCII characters those round-trip OK through
 	# Frappe but look weird in a technical label.
 	if cmd == _APPLY_WORKFLOW_CMD:
 		action = (form_dict.get("action") or "").strip()
@@ -170,24 +152,12 @@ def _multiplex_suffix(cmd: str, form_dict: dict) -> str:
 def humanized_label(recording: dict) -> str:
 	"""Human-readable label for the Steps-to-Reproduce section.
 
-	Reads like English ("Create Sales Invoice", "Submit Delivery Note",
-	"Open Customer CUST-001", "Search Item") rather than the technical
-	cmd string. Used exclusively by ``analyze._build_auto_notes_html`` —
-	the per-action table and frontend XHR panel continue to show the
-	technical label via ``_label``.
-
-	Per user feedback on v0.5.1: "only humanize call name in step to
-	reproduce only not on other breakdowns." The Steps-to-Reproduce
-	section is a high-level flow summary, so English phrasing reads
-	better there. Everywhere else, the raw cmd string is more
-	informative for a developer looking at the technical report.
-
-	Falls back to ``_label`` when the cmd doesn't match any of the
-	humanization rules — so unknown cmds produce the same technical
-	label they would in the per-action table, not an empty string.
+	Reads like English ("Create Sales Invoice", "Open Customer CUST-001") rather
+	than the technical cmd string. Falls back to ``_label`` when no humanization
+	rule matches, so the caller always gets a non-empty string.
 	"""
 	if recording.get("event_type") == "RQ Job":
-		# RQ Jobs use the same label in both views — the
+		# RQ Jobs use the same label in both views the
 		# "Job: <method>" form is already readable.
 		return _label(recording)
 
@@ -285,26 +255,16 @@ def humanized_label(recording: dict) -> str:
 		if doctype:
 			return f"Search {doctype}"
 
-	# No humanization rule matched — defer to the technical label so
+	# No humanization rule matched defer to the technical label so
 	# the caller always gets a non-empty string.
 	return _label(recording)
 
 
 def _derive_cmd_from_path(path: str) -> str:
-	"""Parse ``<method>`` out of ``/api/method/<method>`` and
-	``/api/v2/method/<method>`` URLs so the humanization logic in
-	``_label`` can run on recordings whose ``cmd`` field is empty.
-
-	Returns "" for any other URL shape (``/app/...``, ``/api/
-	resource/...``, static files) — the caller's fallback to
-	``METHOD + path`` still applies.
-
-	Why this is needed: frappe.recorder.Recorder.__init__ reads
-	frappe.local.form_dict.cmd, which the REST routing layer only
-	populates AFTER the before_request hooks have run. Every
-	modern /api/method URL therefore ends up with cmd="" in the
-	captured recording dict, so "Save Sales Invoice"-style
-	humanization never fires without this path fallback.
+	"""Parse ``<method>`` out of ``/api/method/<method>`` (and ``/api/v2/method/``)
+	URLs, so ``_label`` can humanize recordings whose ``cmd`` is empty (the
+	recorder captures cmd before REST routing populates it). Returns "" for any
+	other URL shape.
 	"""
 	if not path:
 		return ""
@@ -319,12 +279,9 @@ def _derive_cmd_from_path(path: str) -> str:
 def _extract_doc_info(form_dict) -> tuple[str | None, bool]:
 	"""Return (doctype, is_new) from a savedocs payload.
 
-	The Desk's savedocs endpoint posts a JSON-encoded `doc` field that
-	contains the doctype plus a ``__islocal: 1`` marker for brand-new
-	(never-persisted) documents. We use that marker to distinguish
-	"Create Sales Invoice" (a new doc) from "Save Sales Invoice"
-	(an existing doc). Returns (None, False) when the payload is
-	unparseable.
+	Reads the JSON-encoded ``doc`` field for the doctype plus the ``__islocal``
+	marker that distinguishes a brand-new doc (Create) from an existing one (Save).
+	Returns (None, False) when the payload is unparseable.
 	"""
 	if not isinstance(form_dict, dict):
 		return None, False
@@ -339,7 +296,7 @@ def _extract_doc_info(form_dict) -> tuple[str | None, bool]:
 	if isinstance(doc, dict):
 		doctype = doctype or doc.get("doctype")
 		# __islocal is sent as 1 for unsaved docs, absent/0 otherwise.
-		# Cast defensively — Frappe sends both int 1 and string "1"
+		# Cast defensively Frappe sends both int 1 and string "1"
 		# depending on the client.
 		raw_islocal = doc.get("__islocal")
 		is_new = bool(raw_islocal) and raw_islocal not in ("0", 0, False)

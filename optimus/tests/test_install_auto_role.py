@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.4.0 auto-role-assignment on install."""
+"""Tests for auto-role-assignment on install."""
 
 import pytest
 
@@ -29,9 +29,8 @@ class FakeUser:
 
 
 def test_auto_assign_role_adds_to_system_managers(monkeypatch):
-	"""v0.6.x: the install hook fetches roles via a single ``Has Role``
-	query (was an N+1 over every user). Only users that ACTUALLY need
-	Optimus User added get loaded as full docs."""
+	"""The install hook fetches roles via a single ``Has Role`` query; only users
+	that actually need Optimus User get loaded as full docs."""
 	import frappe
 
 	users_in_db = {
@@ -78,7 +77,7 @@ def test_auto_assign_role_adds_to_system_managers(monkeypatch):
 	assert users_in_db["bob@example.com"].added_roles == []
 	# Carol (already has both) → not touched
 	assert users_in_db["carol@example.com"].added_roles == []
-	# Critical perf assertion: only Alice was loaded as a full doc — NOT
+	# Critical perf assertion: only Alice was loaded as a full doc NOT
 	# Bob (doesn't qualify) and NOT Carol (already has the role).
 	assert get_doc_calls == ["alice@example.com"], (
 		f"expected ONLY alice loaded as doc, got {get_doc_calls!r}"
@@ -109,12 +108,12 @@ def test_on_user_role_change_skips_already_has_profiler_user(monkeypatch):
 
 
 class _FakeSettings:
-	"""Minimal Optimus Settings Single stand-in. Tracks appends + save calls
-	so the seeder's idempotency contract is observable from the test."""
+	"""Minimal Optimus Settings Single stand-in that tracks appends + save calls
+	so the seeder's idempotency contract is observable."""
 
 	def __init__(self, ignored_apps_rows=None):
 		# ignored_apps mirrors how Frappe represents a child table on a
-		# Single — a list (truthy if rows exist, falsy if empty).
+		# Single a list (truthy if rows exist, falsy if empty).
 		self.ignored_apps = list(ignored_apps_rows or [])
 		self.appended = []
 		self.save_count = 0
@@ -129,19 +128,12 @@ class _FakeSettings:
 
 
 def _stub_seeder_frappe(monkeypatch, *, settings, doctype_exists=True, installed_apps=None):
-	"""Wire just enough frappe surface for ``_seed_ignored_apps_with_framework_apps``
-	to run end-to-end without a real bench.
-
-	``frappe.db`` is a Werkzeug ``LocalProxy`` ([[feedback_frappe_db_local_proxy]])
-	— patching attributes on it raises ``RuntimeError: object is not bound``
-	outside a request context. Replace it wholesale with a SimpleNamespace
-	carrying just the ``exists`` method the seeder calls.
-
-	``installed_apps`` defaults to the full ``_DEFAULT_IGNORED_APPS`` tuple
-	so the "all defaults installed" seeded-rows test stays meaningful
-	without spelling the list out twice. Pass an explicit list to exercise
-	the intersection filter introduced when the seeder stopped blindly
-	appending apps that aren't installed."""
+	"""Wire enough frappe surface for
+	``_seed_ignored_apps_with_framework_apps`` to run without a real bench.
+	``frappe.db`` is replaced wholesale with a SimpleNamespace (patching the real
+	Werkzeug LocalProxy raises outside a request). ``installed_apps`` defaults to
+	the full ``_DEFAULT_IGNORED_APPS`` tuple; pass an explicit list to exercise
+	the installed-apps intersection filter."""
 	import types
 
 	import frappe
@@ -167,7 +159,7 @@ def _stub_seeder_frappe(monkeypatch, *, settings, doctype_exists=True, installed
 		lambda: list(installed_apps),
 		raising=False,
 	)
-	# safe_commit is imported into install.py at module top — patch the
+	# safe_commit is imported into install.py at module top patch the
 	# local binding so the seeder doesn't reach the real one.
 	monkeypatch.setattr(install, "safe_commit", lambda: None, raising=False)
 
@@ -195,7 +187,7 @@ class TestSeedIgnoredAppsWithFrameworkApps:
 			{"app_name": "payments"},
 			{"app_name": "wiki"},
 		]
-		# Single save call — the seeder must not save per-row.
+		# Single save call the seeder must not save per-row.
 		assert settings.save_count == 1
 
 	def test_non_empty_table_is_NOT_overwritten(self, monkeypatch):
@@ -214,7 +206,7 @@ class TestSeedIgnoredAppsWithFrameworkApps:
 		assert settings.ignored_apps == existing
 
 	def test_no_doctype_yet_is_a_silent_noop(self, monkeypatch):
-		# Migration hasn't run yet — DocType doesn't exist. Seeder must
+		# Migration hasn't run yet DocType doesn't exist. Seeder must
 		# return cleanly (mirrors the tracked-apps seed's early-return).
 		settings = _FakeSettings(ignored_apps_rows=[])
 		_stub_seeder_frappe(monkeypatch, settings=settings, doctype_exists=False)
@@ -226,7 +218,7 @@ class TestSeedIgnoredAppsWithFrameworkApps:
 
 	def test_only_installed_apps_get_seeded(self, monkeypatch):
 		# The seeder intersects _DEFAULT_IGNORED_APPS with what's actually
-		# installed — seeding an app that isn't installed is pure UI
+		# installed seeding an app that isn't installed is pure UI
 		# clutter (it can't produce findings). Typical custom-app stack:
 		# frappe + the operator's own app.
 		settings = _FakeSettings(ignored_apps_rows=[])
@@ -239,7 +231,7 @@ class TestSeedIgnoredAppsWithFrameworkApps:
 
 		# Only frappe (the only _DEFAULT_IGNORED_APPS member that's
 		# installed) lands. The custom app ``ugly_code`` is not in the
-		# defaults so it's left alone — that's the tracked-apps seeder's
+		# defaults so it's left alone that's the tracked-apps seeder's
 		# job.
 		assert settings.appended == [{"app_name": "frappe"}]
 		assert settings.save_count == 1
@@ -259,7 +251,7 @@ class TestSeedIgnoredAppsWithFrameworkApps:
 		assert settings.save_count == 0
 
 	def test_partial_install_preserves_alphabetical_order(self, monkeypatch):
-		# A handful of defaults installed — the seeded rows preserve the
+		# A handful of defaults installed the seeded rows preserve the
 		# _DEFAULT_IGNORED_APPS tuple order (alphabetical), not the order
 		# of frappe.get_installed_apps's return value.
 		settings = _FakeSettings(ignored_apps_rows=[])

@@ -2,41 +2,20 @@
 # For license information, please see license.txt
 
 """Structural DOM snapshot of ``renderer.render_raw`` against a synthetic
-fixture session — the canary that protects the template contract during
-the v0.10.0+ renderer split.
+fixture session: a canary that protects the template contract during renderer
+refactors.
 
-The existing renderer-touching tests (46 files) all assert *content* —
-"the string '50× hits' appears in the HTML" — but none of them lock the
-*structure* (tag nesting, CSS class names, section IDs, data attributes).
-A refactor that quietly renamed ``<div class="finding-card">`` to
-``<section class="finding">`` would pass every existing test and break
-the (frozen) template's CSS. This file closes that gap.
+The existing renderer tests assert content; this one locks structure. The
+fingerprint is structural, not byte-for-byte:
 
-The fingerprint is structural, not byte-for-byte:
+  * ``section_ids``: sorted list of every ``id="..."`` value.
+  * ``class_names``: sorted multiset of every distinct ``class`` token.
+  * ``tag_counts``: total count per tag name (coarse DOM-shape sanity).
 
-  * ``section_ids`` — sorted list of every ``id="..."`` attribute value
-    that appears in the document. Catches a section being silently
-    dropped or renamed.
-
-  * ``class_names`` — sorted multiset of every distinct ``class="..."``
-    token (split on whitespace). Catches a CSS class being renamed,
-    added, or removed.
-
-  * ``tag_counts`` — total count per tag name across the whole
-    document. Coarse DOM-shape sanity; catches gross structural drift
-    (e.g. ``<div>`` → ``<section>`` mass rename).
-
-Byte-for-byte would be too brittle (Pygments token ordering across
-versions, dict iteration in JSON, etc.). The structural shape drifts
-slowly and intentionally — when a legitimate template change lands,
-the test fails with a focused diff and the contributor regenerates the
-snapshot via ``REGENERATE_RENDERER_SNAPSHOT=1 pytest``.
-
-This file also enumerates the renderer package's public API and asserts
-each name still resolves after the split. The five 'public + semi-public'
-symbols (``render_raw``, ``_finding_to_dict``, ``build_donut_svg``,
-``build_hot_frames_table``, ``_BoundedFileCache``) are the contract
-``analyze.py`` and external callers rely on.
+On a legitimate template change, regenerate the golden snapshot via
+``REGENERATE_RENDERER_SNAPSHOT=1 pytest``. This file also enumerates the
+renderer package's public API and asserts each name still resolves after the
+file to package split.
 """
 
 from __future__ import annotations
@@ -58,7 +37,7 @@ _REGENERATE_ENV = "REGENERATE_RENDERER_SNAPSHOT"
 
 
 # --------------------------------------------------------------------------
-# Fixture — covers as many of the 14 conditional sections as practical
+# Fixture covers as many of the 14 conditional sections as practical
 # --------------------------------------------------------------------------
 
 
@@ -113,8 +92,8 @@ def _action(idx: int, **kw) -> SimpleNamespace:
 
 
 def _v5_aggregate() -> dict:
-	"""v5_aggregate_json shape that triggers server-resource + frontend
-	panels. Numbers picked to look plausible (matches v0.5.0 test fixtures)."""
+	"""v5_aggregate_json shape that triggers the server-resource + frontend
+	panels, with plausible numbers."""
 	return {
 		"infra_timeline": [
 			{
@@ -173,7 +152,7 @@ def _v5_aggregate() -> dict:
 
 def _snapshot_doc() -> SimpleNamespace:
 	"""Synthetic Optimus Session that exercises the major conditional
-	sections — findings (actionable + observational), actions (HTTP +
+	sections findings (actionable + observational), actions (HTTP +
 	RQ Job → waterfall + background-jobs), top_queries, table_breakdown,
 	and the v5 server-resource + frontend panels."""
 	findings = [
@@ -287,7 +266,7 @@ def _fingerprint(html_text: str) -> dict:
 
 def _diff_message(expected: dict, actual: dict) -> str:
 	"""Return a focused human-readable diff so a snapshot mismatch points
-	straight at what drifted. Cheap to compute — only used on failure."""
+	straight at what drifted. Cheap to compute only used on failure."""
 	msgs = []
 	e_ids = set(expected.get("section_ids", []))
 	a_ids = set(actual.get("section_ids", []))
@@ -310,11 +289,11 @@ def _diff_message(expected: dict, actual: dict) -> str:
 			tag_diffs.append(f"<{t}>: {ev} → {av}")
 	if tag_diffs:
 		msgs.append("tag_counts changed: " + ", ".join(tag_diffs[:15]))
-	return "\n  ".join(msgs) or "fingerprint mismatch (no obvious diff — re-read both)"
+	return "\n  ".join(msgs) or "fingerprint mismatch (no obvious diff re-read both)"
 
 
 # --------------------------------------------------------------------------
-# The canary test — fingerprint matches golden (or regenerates it)
+# The canary test fingerprint matches golden (or regenerates it)
 # --------------------------------------------------------------------------
 
 
@@ -345,7 +324,7 @@ class TestStructureSnapshot:
 
 	def test_self_containment_invariant(self):
 		"""Duplicates the canary assertion from test_report_a11y so the
-		snapshot fixture is itself locked to never grow a remote-fetch URL —
+		snapshot fixture is itself locked to never grow a remote-fetch URL
 		even if the per-section extractions add a section that accidentally
 		imports something with a network side-effect."""
 		doc = _snapshot_doc()
@@ -364,7 +343,7 @@ class TestStructureSnapshot:
 		)
 
 	def test_minimum_sections_present(self):
-		"""Independent of the byte-match — at least the sections triggered
+		"""Independent of the byte-match at least the sections triggered
 		by this fixture must appear. Guards against a future extraction
 		that silently drops a section from the template-context dict (the
 		``{% if report_data.X %}`` gate stays open but the data is missing)."""
@@ -390,14 +369,14 @@ class TestStructureSnapshot:
 
 
 # --------------------------------------------------------------------------
-# Import-surface tests — the contract that survives the split
+# Import-surface tests the contract that survives the split
 # --------------------------------------------------------------------------
 
 
 class TestPublicAPIPreserved:
-	"""The names ``analyze.py``, ``api.py``, and the existing tests rely on
-	MUST keep resolving after the file → package split. Re-export shim
-	regressions surface here."""
+	"""Names that ``analyze.py``, ``api.py`` and the existing tests rely on must
+	keep resolving after the file to package split. Re-export shim regressions
+	surface here."""
 
 	def test_render_raw_resolves(self):
 		assert callable(getattr(renderer, "render_raw", None))
@@ -406,11 +385,11 @@ class TestPublicAPIPreserved:
 		assert callable(getattr(renderer, "render", None))
 
 	def test_finding_to_dict_resolves(self):
-		# Semi-public — used by analyze.py for the AI auto-suggest payload.
+		# Semi-public used by analyze.py for the AI auto-suggest payload.
 		assert callable(getattr(renderer, "_finding_to_dict", None))
 
 	def test_build_donut_svg_resolves(self):
-		# Public — passed into the template context.
+		# Public passed into the template context.
 		assert callable(getattr(renderer, "build_donut_svg", None))
 
 	def test_build_hot_frames_table_resolves(self):
@@ -424,7 +403,7 @@ class TestPublicAPIPreserved:
 		assert getattr(renderer, "_BoundedFileCache", None) is not None
 
 	def test_read_source_snippet_resolves(self):
-		# Heavy semi-public — many analyze + test callers.
+		# Heavy semi-public many analyze + test callers.
 		assert callable(getattr(renderer, "_read_source_snippet", None))
 
 	def test_markdown_to_safe_html_resolves(self):

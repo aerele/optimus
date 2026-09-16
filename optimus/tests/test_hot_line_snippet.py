@@ -1,13 +1,12 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""The Phase-2 'single hottest line' (Hot Line) finding should show the hot
-line WITH surrounding context, like call-tree findings — not a lone line.
+"""The 'single hottest line' (Hot Line) finding shows the hot line with
+surrounding context, like call-tree findings.
 
-_finding_to_dict used to fold the persisted ``line_content`` into a 1-row
-snippet (skipping the file read). v0.7.x reads a ±2 window around the hot line
-while keeping the profiled line's text authoritative, falling back to the
-single stored line when the file can't be read at render.
+``_finding_to_dict`` reads a ±2 window around the hot line while keeping the
+profiled line's text authoritative, falling back to the single stored line when
+the file can't be read at render.
 """
 
 import json
@@ -20,7 +19,7 @@ def _hot_line_row(file, lineno, line_content):
 	row = types.SimpleNamespace()
 	row.finding_type = "Hot Line"
 	row.severity = "High"
-	row.title = f"myapp.mod.func:{lineno} consumed 378ms (100 hits) — single hottest line"
+	row.title = f"myapp.mod.func:{lineno} consumed 378ms (100 hits) single hottest line"
 	row.customer_description = "the dominant time sink"
 	row.estimated_impact_ms = 378.0
 	row.affected_count = 100

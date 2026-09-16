@@ -17,7 +17,7 @@ dependencies = [
 	# Already a transitive Frappe dependency; declared explicitly because
 	# ai_fix.py imports it directly to call the configured LLM endpoint.
 	"requests>=2.28",
-	# Transitive Frappe deps used by app code at module top — declared
+	# Transitive Frappe deps used by app code at module top declared
 	# explicitly so the suite installs cleanly on a non-bench Python
 	# (CI runner) without pulling in all of Frappe.
 	"sqlparse>=0.4",

@@ -1,23 +1,18 @@
 # optimus/tests/test_infra_capture.py
 # Copyright (c) 2026, Optimus contributors
 
-"""Tests for v0.5.0 server infra capture primitives."""
+"""Tests for server infra capture primitives."""
 
 import sys
 import types
 
 
 def test_redis_source_uses_frappe_cache_directly(monkeypatch):
-	"""Regression guard (v0.5.1 architect review): frappe.cache IS a
-	redis.Redis subclass (RedisWrapper), not a wrapper with a .redis
-	child attribute. An earlier version of _read_redis used
-	getattr(frappe.cache, 'redis', None) which silently returned None
-	in production, disabling Redis metrics entirely. The production
-	code must call .info() directly on frappe.cache.
-
-	We check by actually running _read_redis against a stub that
-	rejects the broken access pattern — more robust than source-string
-	matching which can match explanatory comments.
+	"""Regression guard: frappe.cache IS a redis.Redis subclass (RedisWrapper),
+	not a wrapper with a ``.redis`` child, so ``_read_redis`` must call
+	``.info()`` directly on frappe.cache (``getattr(frappe.cache, 'redis', None)``
+	silently returns None in production, disabling Redis metrics). Verified by
+	running ``_read_redis`` against a stub that rejects the broken access pattern.
 	"""
 	import frappe
 
@@ -39,7 +34,7 @@ def test_redis_source_uses_frappe_cache_directly(monkeypatch):
 		def __getattr__(self, name):
 			if name == "redis":
 				raise AssertionError(
-					"_read_redis must not access frappe.cache.redis — "
+					"_read_redis must not access frappe.cache.redis "
 					"frappe.cache IS the redis.Redis instance. Call "
 					"frappe.cache.info() directly."
 				)
@@ -53,14 +48,14 @@ def test_redis_source_uses_frappe_cache_directly(monkeypatch):
 	out = {"redis_instantaneous_ops_per_sec": None}
 	infra_capture._read_redis(out)
 	assert tripwire.info_called_on_root, (
-		"_read_redis never called frappe.cache.info() — the metric "
+		"_read_redis never called frappe.cache.info() the metric "
 		"is silently missing from every production snapshot"
 	)
 	assert out["redis_instantaneous_ops_per_sec"] == 99
 
 
 def test_rq_source_uses_frappe_cache_directly():
-	"""Companion guard for _read_rq — it must pass frappe.cache as the
+	"""Companion guard for _read_rq it must pass frappe.cache as the
 	rq.Queue connection, not getattr(frappe.cache, 'redis', None) which
 	would pass None and fall through to rq's default connection logic."""
 	import inspect
@@ -272,7 +267,7 @@ def _install_infra_stubs(monkeypatch, break_psutil=False):
             return []
 
     # frappe.cache IS a redis.Redis subclass in production (RedisWrapper),
-    # not a wrapper with a .redis child. The stub mirrors this — info()
+    # not a wrapper with a .redis child. The stub mirrors this info()
     # is a method directly on the cache instance, not on a child object.
     class FakeCache:
         def info(self, section=None):

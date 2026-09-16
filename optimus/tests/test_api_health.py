@@ -1,15 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Focused test for the health() ops endpoint after its raw-SQL → frappe.qb
-conversion (Postgres portability, Phase 1).
-
-health() is a thin assembler over three query-builder helpers. The qb queries
-themselves are verified on a real bench (they can't be meaningfully unit-tested
-against the frappe stub, which has no query builder); here we mock the helpers
-and pin that health() assembles their results into the documented response
-shape.
-"""
+"""Tests for the health() ops endpoint: mock its three query-builder helpers and
+pin that health() assembles their results into the documented response shape
+(the qb queries themselves are verified on a real bench)."""
 
 from __future__ import annotations
 

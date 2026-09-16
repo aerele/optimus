@@ -1,20 +1,16 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Phase-2 results processor.
+"""Phase-2 (line-profile) results processor.
 
-Turns the aggregated `results_json` blob (one entry per picked function with
-per-line timings) into report-friendly findings + per-function aggregate.
+Turns the aggregated ``results_json`` (one entry per picked function, with
+per-line timings) into findings plus a per-function aggregate.
 
-Two functions, mirroring the phase-1 ``analyze.run`` ↔ ``analyzers/*``
-split:
-
-- ``analyze(results_json)`` is the **pure** classifier — testable in
-  isolation, no Frappe / Redis access.
-- ``run_analyze(session_uuid, run_uuid)`` is the **impure** RQ entry
-  point — pulls samples from Redis, calls aggregate_samples, calls
-  analyze, persists to the Optimus Phase Two Run row, propagates findings
-  to the parent Session, triggers re-render, publishes realtime events.
+- ``analyze(results_json)`` is the pure classifier (no Frappe / Redis).
+- ``run_analyze(session_uuid, run_uuid)`` is the RQ entry point: reads samples
+  from Redis, aggregates, calls analyze, persists to the Optimus Phase Two Run
+  row, propagates findings to the parent Session, re-renders and publishes
+  realtime events.
 """
 
 import json
@@ -22,7 +18,7 @@ import re
 import traceback
 
 from optimus import safe_commit
-from optimus.analyzers.base import AnalyzerResult
+from optimus.analyzers.base import AnalyzerResult, dur
 
 try:
 	import frappe  # type: ignore[import-not-found]
@@ -46,9 +42,9 @@ HOT_LINES_IN_SUMMARY = 5
 
 
 def _resolve_hot_line_thresholds() -> tuple[float, float, float, float]:
-	"""Return (high_pct, high_ms, med_pct, med_ms) from Profiler
-	Settings (cached). Falls back to legacy constants when settings
-	can't be read (pure-test path, fresh install before migrate)."""
+	"""Return (high_pct, high_ms, med_pct, med_ms) from Optimus Settings
+	(cached). Falls back to module constants when settings can't be read
+	(pure-test path, fresh install before migrate)."""
 	try:
 		from optimus.settings import get_config
 		cfg = get_config()
@@ -69,9 +65,8 @@ def _resolve_hot_line_thresholds() -> tuple[float, float, float, float]:
 def _classify_hot_line(line_ms: float, total_ms: float) -> str | None:
 	"""Return 'High', 'Medium', or None for a candidate hot line.
 
-	The line must concentrate enough fraction AND have enough absolute time
-	to be worth flagging — a single line that's 100% of a 30ms function
-	isn't actionable noise, but 60% of a 300ms function is.
+	A line must concentrate enough of the function's time AND enough absolute
+	ms to be flagged (100% of a 30ms function is noise; 60% of 300ms is not).
 	"""
 	if total_ms <= 0:
 		return None
@@ -85,10 +80,8 @@ def _classify_hot_line(line_ms: float, total_ms: float) -> str | None:
 
 
 def _function_invoked(fn: dict) -> bool:
-	"""A function is 'invoked' if at least one line has hits > 0 OR
-	total_ms > 0. line_profiler may report empty stats (no lines), or the
-	full line list with hits=0 — both mean the picked function was never
-	executed during the recording."""
+	"""True if the function ran: at least one line has hits > 0 or total_ms > 0.
+	Empty stats or an all-hits=0 line list both mean it was never executed."""
 	lines = fn.get("lines") or []
 	if not lines:
 		return False
@@ -98,12 +91,9 @@ def _function_invoked(fn: dict) -> bool:
 def _strip_line_comment(content: str) -> str:
 	"""Drop a trailing ``# …`` comment from a single Python source line.
 
-	Naively tracks single/double-quoted string state so a ``#`` inside a
-	literal doesn't get treated as a comment boundary. Triple-quoted
-	strings aren't recognised — line_profiler's per-line ``content``
-	carries one source line, so multi-line literals shouldn't appear
-	here in practice. A miss only costs a false negative (regex sees
-	the commented call and we don't suppress); never drops a real leaf.
+	Tracks single/double-quote state so a ``#`` inside a literal isn't treated
+	as a comment. Triple-quoted strings aren't recognised (each ``content`` is
+	one source line). A miss only costs a false negative, never drops a real leaf.
 	"""
 	in_s: str | None = None
 	for i, ch in enumerate(content):
@@ -123,21 +113,13 @@ def _detect_pass_through_callee(
 	self_qualname: str,
 	instrumented: set[str],
 ) -> str | None:
-	"""If the hot line is a call into another **instrumented** function,
-	return that callee's qualname; otherwise None.
+	"""If the hot line is a call into another instrumented function, return that
+	callee's qualname, else None.
 
-	The hot line content is matched against ``\\bQ\\s*\\(`` for each
-	other instrumented qualname Q (self-recursion is excluded so a
-	function that calls itself isn't treated as pass-through to itself).
-	Line comments are stripped before matching to avoid false positives
-	on commented-out code like ``# helper(x)``.
-
-	When multiple instrumented qualnames appear on the same source line
-	(e.g. ``a(b(c()))``), the **last** one in the iteration order is
-	returned. The caller resolves chains by walking the per-function
-	classifications transitively, so picking any one of the present
-	qualnames suffices to anchor the chain — the leaf is found by
-	following ``passthrough_to`` until ``None``.
+	Matches the (comment-stripped) line against ``\\bQ\\s*\\(`` for each other
+	instrumented qualname Q; self-recursion is excluded. When several appear on
+	one line (``a(b(c()))``) the last in iteration order is returned; the caller
+	walks ``passthrough_to`` transitively, so any present qualname anchors the chain.
 	"""
 	stripped = _strip_line_comment(content or "")
 	if not stripped:
@@ -152,10 +134,9 @@ def _detect_pass_through_callee(
 
 
 def _looks_like_call_site(content: str) -> bool:
-	"""True if ``content`` begins with an identifier-call shape like
-	``foo(`` or ``module.attr(``. Used to decide whether to attempt a
-	phase-1 fallback hint for a leaf finding whose hot line is still
-	a call into uninstrumented code.
+	"""True if ``content`` begins with a call shape like ``foo(`` or
+	``module.attr(``. Gates the phase-1 fallback hint for a leaf whose hot line
+	is still a call into uninstrumented code.
 	"""
 	stripped = _strip_line_comment(content or "").lstrip()
 	return bool(re.match(r"^[\w.]+\s*\(", stripped))
@@ -166,14 +147,11 @@ def _compute_phase1_hint(
 	leaf_line: dict,
 	call_trees: list[dict] | None,
 ) -> dict | None:
-	"""When the leaf's hot line still looks like a call but no instrumented
-	callee matched, look up the leaf frame in phase-1's pyinstrument
-	trees and surface the hottest user-code descendant as a hint.
+	"""When a leaf's hot line looks like a call but no instrumented callee
+	matched, find the hottest user-code descendant in phase-1's trees as a hint.
 
-	Returns ``{next_hot_callee, phase1_cumulative_ms, suggested_action}``
-	or None when there's no eligible descendant. Reuses
-	``picker._find_hottest_match`` / ``_eligible_descent_children`` so
-	the framework-boundary stop matches auto_expand's behavior.
+	Returns ``{next_hot_callee, phase1_cumulative_ms, suggested_action}`` or None
+	when there's no eligible descendant.
 	"""
 	if not call_trees:
 		return None
@@ -223,14 +201,14 @@ def _hot_line_finding(fn: dict, line: dict, severity: str) -> dict:
 		# module paths overflow Optimus Finding.title's Data(140) field. The full
 		# dotted_path stays in the description + technical_detail below.
 		"title": (
-			f"{_qualname_of(fn)}:{lineno} consumed {total_ms:.0f}ms "
-			f"({hits} hits) — single hottest line"
+			f"{_qualname_of(fn)}:{lineno} consumed {dur(total_ms)} "
+			f"({hits} hits) single hottest line"
 		),
 		"customer_description": (
 			f"The line **{dotted_path}:{lineno}** is the dominant time sink in "
-			f"this function ({total_ms:.0f}ms across {hits} executions). "
+			f"this function ({dur(total_ms)} across {hits} executions). "
 			"Optimizing it directly will move the needle on the function's "
-			"total cost — line-level timing makes the fix targetable."
+			"total cost. Line-level timing makes the fix targetable."
 		),
 		"technical_detail_json": json.dumps({
 			"dotted_path": dotted_path,
@@ -282,21 +260,11 @@ def _build_call_chain(
 ) -> list[dict]:
 	"""Walk upward from a leaf qualname to assemble its call chain.
 
-	Returns an ordered list (outermost → leaf) of step dicts shaped like:
-	``{dotted_path, qualname, file, lineno, content, total_ms, hits}``.
-	Each step is the *hottest line* of the function at that level of
-	the chain (which is the call into the next-deeper instrumented
-	function for every non-leaf step, and the actual leaf hot line at
-	the end).
-
-	Empty chain (length 0) is returned when the leaf has no upstream
-	pass-through caller — i.e. it's a standalone function with no
-	wrapper finding to merge into. Single-step "chain" makes no sense
-	to render either, so we return [] in that case.
-
-	When the leaf has multiple callers (two functions whose hot lines
-	both call into this leaf), the chain follows the **hottest** caller
-	at each step — measured by the caller's function-total ``total_ms``.
+	Returns an ordered list (outermost → leaf) of steps shaped
+	``{dotted_path, qualname, file, lineno, content, total_ms, hits}``, each the
+	hottest line of its function. Returns [] when the leaf has no upstream
+	pass-through caller (a single-step chain isn't worth rendering). With
+	multiple callers, follows the hottest (by function-total ``total_ms``) at each step.
 	"""
 	seen: set[str] = {leaf_qualname}
 	chain_qualnames: list[str] = [leaf_qualname]
@@ -373,7 +341,7 @@ def _attach_phase1_hint(finding: dict, hint: dict) -> None:
 
 	finding["customer_description"] = finding["customer_description"] + (
 		f"\n\nIn phase 1, this descendant **{hint['next_hot_callee']}** "
-		f"accumulated {hint['phase1_cumulative_ms']:.0f}ms across all calls "
+		f"accumulated {dur(hint['phase1_cumulative_ms'])} across all calls "
 		f"of the parent function (not a single-action wall time). "
 		f"{hint['suggested_action']}"
 	)
@@ -385,7 +353,7 @@ def analyze(
 ) -> AnalyzerResult:
 	"""Pure: turn the merged phase-2 ``results_json`` into an AnalyzerResult.
 
-	Input shape (one entry per picked function)::
+	Input (one entry per picked function)::
 
 	    [{
 	        "dotted_path": "my_app.tasks.heavy",
@@ -395,22 +363,19 @@ def analyze(
 	                   "total_ms", "per_hit_us"}, ...],
 	    }, ...]
 
-	``call_trees`` is the optional list of phase-1 pyinstrument trees
-	for the parent session (one per recorded action). When provided, a
-	leaf finding whose hot line still looks like a call into
-	uninstrumented code receives a ``phase1_hint`` pointing at the
-	hottest user-code descendant in phase-1's tree, so the developer
-	knows which function to re-pick for a deeper drill-in.
+	``call_trees`` (optional) are the phase-1 pyinstrument trees for the parent
+	session. When given, a leaf whose hot line still looks like a call into
+	uninstrumented code gets a ``phase1_hint`` pointing at the hottest user-code
+	descendant, so the developer knows which function to re-pick.
 
 	Output:
-	  - findings: ``Hot Line`` (High/Medium) per **leaf** function whose
-	    hot line is the real cost driver. Functions whose hot line is
-	    just a call into another instrumented function are suppressed —
-	    their position is preserved as a breadcrumb on the deeper finding.
-	    ``Function Not Invoked`` (Low) per pick that recorded nothing.
-	  - aggregate: ``{phase2_functions: [per-function summary, ...]}`` —
-	    each summary carries top-5 lines by ``total_ms``.
-	  - warnings: human-readable strings for the report's warnings panel.
+	  - findings: a ``Hot Line`` per leaf function whose hot line is the real
+	    cost driver; a function whose hot line just calls another instrumented
+	    function is suppressed (kept as a breadcrumb on the deeper finding).
+	  - aggregate: ``{phase2_functions: [...]}``, each summary carrying the
+	    top-5 lines by ``total_ms``.
+	  - warnings: strings for the report's warnings panel (uninvoked picks are
+	    folded into one consolidated warning).
 	"""
 	findings: list[dict] = []
 	summaries: list[dict] = []
@@ -478,7 +443,7 @@ def analyze(
 			uninvoked_paths.append(c["fn"].get("dotted_path") or qualname)
 			continue
 		if c["passthrough_to"]:
-			# Suppress — defer to the deeper leaf's finding. The chain is
+			# Suppress defer to the deeper leaf's finding. The chain is
 			# rebuilt when we visit that leaf below.
 			continue
 		fn = c["fn"]
@@ -492,7 +457,7 @@ def analyze(
 		if chain:
 			_attach_call_chain(finding, chain)
 		else:
-			# No upstream pass-through caller — try the phase-1 fallback
+			# No upstream pass-through caller try the phase-1 fallback
 			# hint for the rarer case where this finding's hot line is
 			# itself a call into uninstrumented code.
 			hint = _compute_phase1_hint(fn, hottest, call_trees)
@@ -515,7 +480,7 @@ def analyze(
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator (impure — frappe required)
+# Orchestrator (impure frappe required)
 # ---------------------------------------------------------------------------
 
 
@@ -530,13 +495,13 @@ def _publish(event: str, payload: dict) -> None:
 def run_analyze(session_uuid: str, run_uuid: str) -> None:
 	"""RQ entry point. Reads phase-2 samples from Redis, builds the
 	results_json, persists findings to the parent Optimus Session, marks
-	the Phase 2 Run as Ready (or Failed), and triggers re-render.
+	the Phase 2 Run as Ready (or Failed) and triggers re-render.
 
 	On any uncaught exception: rollback, mark Failed, publish failed event,
 	re-raise so RQ logs it.
 	"""
 	if not _FRAPPE_AVAILABLE:
-		raise RuntimeError("frappe not importable — run under bench")
+		raise RuntimeError("frappe not importable, run under bench")
 
 	from optimus.line_profile import capture
 
@@ -549,7 +514,7 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 	parent_docname = run_row.parent
 	# Resolve the session owner so realtime events reach their Desk tab. This runs
 	# in an RQ worker with no browser socket, so publish_realtime needs an EXPLICIT
-	# user (a None target won't reach the form) — same as phase-1's
+	# user (a None target won't reach the form) same as phase-1's
 	# _publish_session_event. Without this the form never auto-updates the run row.
 	try:
 		owner = frappe.db.get_value("Optimus Session", parent_docname, "user")
@@ -589,12 +554,12 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 				if isinstance(tree, dict):
 					call_trees.append(tree)
 		except Exception:
-			# Loading phase-1 trees is best-effort — without them we
+			# Loading phase-1 trees is best-effort without them we
 			# fall back to regex-only pass-through detection.
 			call_trees = []
 		result = analyze(results_json, call_trees=call_trees or None)
 		# Observe, don't spoil: if the overhead watchdog cut tracing short to
-		# protect the user's flow, the line data is partial — say so (read the
+		# protect the user's flow, the line data is partial say so (read the
 		# flag before cleanup_run clears it below).
 		if capture.budget_was_hit(run_uuid):
 			result.warnings.append(
@@ -613,7 +578,7 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 		# path (which expects session_uuid, not docname).
 		_regenerate_parent_reports(session_uuid)
 
-		# Done — drop ephemeral Redis state.
+		# Done drop ephemeral Redis state.
 		capture.cleanup_run(run_uuid)
 
 		_publish("phase_2_run_ready", {
@@ -693,7 +658,7 @@ def _persist_run(
 	for finding in result.findings:
 		# Optimus Finding.title is a Data(140) field. Phase-2 findings are
 		# appended directly here (bypassing analyze._truncate_finding_titles),
-		# so clamp defensively — a long title must not trip Frappe's truncation
+		# so clamp defensively a long title must not trip Frappe's truncation
 		# warning while stopping phase 2. Full context lives in the description /
 		# technical_detail_json.
 		_title = finding.get("title") or ""
@@ -727,7 +692,7 @@ def _mark_run_failed(parent_docname: str, run_uuid: str, error: str, tb: str) ->
 		parent.save(ignore_permissions=True)
 		safe_commit()
 	except Exception:
-		# Truly best-effort — don't mask the original exception.
+		# Truly best-effort don't mask the original exception.
 		try:
 			frappe.db.rollback()
 		except Exception:
@@ -735,11 +700,8 @@ def _mark_run_failed(parent_docname: str, run_uuid: str, error: str, tb: str) ->
 
 
 def _regenerate_parent_reports(session_uuid: str) -> None:
-	"""Trigger re-render of the parent Optimus Session's HTML reports.
-
-	Phase 1's existing ``api.regenerate_reports(session_uuid)`` does the
-	same job for phase-1 findings; reuse it so phase-2 doesn't get a
-	bespoke re-render path that drifts from the canonical one.
+	"""Trigger re-render of the parent Optimus Session's HTML reports via
+	``api.regenerate_reports(session_uuid)`` (the shared re-render path).
 	"""
 	try:
 		from optimus import api as optimus_api

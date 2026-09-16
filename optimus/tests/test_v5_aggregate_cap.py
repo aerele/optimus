@@ -1,13 +1,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Source-inspection guards + a behavioral test for the v0.5.0
-aggregate size caps in analyze._persist.
-
-Without caps, v5_aggregate_json could balloon to 1 MB+ on a session
-with 200 recordings × full frontend data, which slows the Profiler
-Session form load for every viewer. The cap is tail-preferring and
-surfaces a warning in analyzer_warnings so operators can see the drop.
+"""Source-inspection guards + a behavioral test for the aggregate size caps in
+analyze._persist. Without caps, v5_aggregate_json could balloon to 1 MB+ on a
+large session and slow the Profiler Session form load. The cap is
+tail-preferring and surfaces a warning in analyzer_warnings.
 """
 
 import inspect

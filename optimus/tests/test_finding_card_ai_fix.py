@@ -1,16 +1,14 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the v0.6.0 "Suggested fix (AI)" block in the finding card.
+"""Tests for the "Suggested fix (AI)" block in the finding card.
 
-Exercises renderer.render_raw end to end so the macro runs in its real
-context: when a Optimus Finding row carries an ``llm_fix_json``, the card
-renders the Markdown suggestion (sanitized) under a distinct header with a
-"review before applying" footer; when it doesn't, no AI block appears.
-
-The fixture supplies a ``source_snippet`` on the callsite so the renderer
-never takes the lazy file-read path (which imports ``optimus.analyze``
-and would be flaky under the test-suite's known module-reload pollution).
+Exercises renderer.render_raw end to end: when a Optimus Finding row carries an
+``llm_fix_json``, the card renders the sanitized Markdown suggestion under a
+distinct header with a "review before applying" footer; when it doesn't, no AI
+block appears. The fixture supplies a ``source_snippet`` on the callsite so the
+renderer never takes the lazy file-read path (flaky under the suite's
+module-reload pollution).
 """
 
 import json
@@ -88,14 +86,14 @@ _GOOD_SUGGESTION = (
 
 
 # --------------------------------------------------------------------------
-# renderer._markdown_to_safe_html — unit (markdown → sanitized HTML)
+# renderer._markdown_to_safe_html unit (markdown → sanitized HTML)
 # --------------------------------------------------------------------------
 
 class TestMarkdownToSafeHtml:
 	def test_converts_basic_markdown(self):
 		out = renderer._markdown_to_safe_html("**bold** and a list:\n\n- one\n- two\n")
-		# Either the real converter ran (preferred) or — under module
-		# pollution — the escaped <pre> fallback; both are non-empty and
+		# Either the real converter ran (preferred) or under module
+		# pollution the escaped <pre> fallback; both are non-empty and
 		# never contain a live <script>.
 		assert out
 		assert "<script" not in out.lower()
@@ -160,7 +158,7 @@ class TestAiFixBlockRendering:
 		assert "Suggested fix" in html
 		assert "claude-sonnet-4-6" in html
 		# The suggestion text made it into the page (converted-markdown or
-		# escaped-pre fallback — both contain the words).
+		# escaped-pre fallback both contain the words).
 		assert "Diagnosis" in html and "Why it works" in html
 		assert "batch the lookups" in html
 		# Disclaimer footer.
@@ -169,7 +167,7 @@ class TestAiFixBlockRendering:
 	def test_no_block_when_llm_fix_absent(self):
 		doc = _doc([_finding(llm_fix=None)])
 		html = renderer.render_raw(doc, recordings=[])
-		# The AI-fix block uses class="fix-box" — check that specifically
+		# The AI-fix block uses class="fix-box" check that specifically
 		# instead of "Suggested fix" prose, which is also used by the
 		# Performance Gap Analysis section's `.gap-fix-label`.
 		assert 'class="fix-box"' not in html
@@ -204,7 +202,7 @@ class TestAiFixBlockRendering:
 	def test_no_block_when_llm_fix_json_is_empty_object(self):
 		doc = _doc([_finding(llm_fix={})])
 		html = renderer.render_raw(doc, recordings=[])
-		# Check for the AI-fix box marker specifically — the
+		# Check for the AI-fix box marker specifically the
 		# Gap Analysis section also emits a "Suggested fix" label.
 		assert 'class="fix-box"' not in html
 
@@ -256,7 +254,7 @@ class TestAiFixBlockRendering:
 
 	def test_canned_fix_hint_hidden_when_ai_fix_present(self):
 		"""When an AI 'Suggested fix' renders, the canned 'How to fix' hint is
-		redundant and suppressed (user request) — the AI box stands alone."""
+		redundant and suppressed so the AI box stands alone."""
 		doc = _doc([_finding(
 			fix_hint=self._CANNED_HINT,
 			llm_fix={"suggestion": _GOOD_SUGGESTION, "model": "m",
@@ -283,7 +281,7 @@ class TestAiFixBlockRendering:
 		assert "directional guidance" in html
 
 	def test_no_caution_when_source_available_or_legacy_row(self):
-		# Explicit True — no caution div (the CSS rule is always in <style>,
+		# Explicit True no caution div (the CSS rule is always in <style>,
 		# so match on the element, not the class name).
 		doc = _doc([_finding(llm_fix={
 			"suggestion": _GOOD_SUGGESTION, "model": "m", "provider": "OpenAI",

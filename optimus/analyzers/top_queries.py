@@ -1,23 +1,20 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Analyzer: top N slowest queries across the session + slow-query findings.
+"""Top N slowest queries across the session, plus slow-query findings.
 
-Builds the `top_queries` aggregate (used by the report renderer to draw
-the slowest-queries leaderboard) and emits a `Slow Query` finding for a
-slow single query in that leaderboard (> 200ms by default).
-
-The leaderboard is scoped to the user's *own* app code: queries whose
-blame callsite resolves to framework / third-party code are dropped
-before truncating to top N — they're noise the developer can't act on
-and they crowd real application queries out of the list. The complete,
-unfiltered per-query list is still available in the per-action breakdown.
+Builds the ``top_queries`` aggregate (the report's slowest-queries leaderboard)
+and emits a ``Slow Query`` finding per slow query in it (> 200ms by default).
+The leaderboard is scoped to the user's own app code: framework / third-party
+callsites are dropped before truncating to top N. The full unfiltered per-query
+list stays in the per-action breakdown.
 """
 
 import json
 
 from optimus.analyzers.base import (
 	AnalyzerResult,
+	dur,
 	installed_apps_allowlist,
 	is_framework_callsite_str,
 	is_profiler_own_query,
@@ -34,7 +31,7 @@ HIGH_SEVERITY_MULTIPLIER = 2.5  # High when query > threshold * 2.5 (matches old
 MAX_FINDINGS = 5  # only flag the top 5 slow queries to avoid noise
 
 # Don't pad the "slowest queries" leaderboard with queries that took
-# essentially no time — a panel of 1-3ms queries is noise that reads as
+# essentially no time a panel of 1-3ms queries is noise that reads as
 # "here are your problem queries" when there aren't any. A query has to
 # clear this floor to qualify; if nothing does, the section renders an
 # empty state instead of a list of trivially-fast queries.
@@ -42,9 +39,9 @@ TOP_QUERY_FLOOR_MS = 10.0
 
 
 def _resolve_slow_query_threshold() -> tuple[float, float]:
-	"""Return (slow_threshold_ms, high_severity_threshold_ms). Reads
-	Optimus Settings via the cached config; falls back to the legacy
-	constants when settings aren't reachable (pure-test path)."""
+	"""Return (slow_threshold_ms, high_severity_threshold_ms). Reads Optimus
+	Settings via the cached config; falls back to the module constants when
+	settings aren't reachable (pure-test path)."""
 	try:
 		from optimus.settings import get_config
 		cfg = get_config()
@@ -57,7 +54,7 @@ def _resolve_slow_query_threshold() -> tuple[float, float]:
 def _resolve_tracked_apps() -> tuple[str, ...]:
 	"""``Optimus Settings ▸ Tracked Apps`` allowlist, or ``()`` when
 	settings aren't reachable (pure-test path). Passed to
-	``is_framework_callsite_str`` — an empty tuple makes that classifier
+	``is_framework_callsite_str``: an empty tuple makes that classifier
 	fall back to its built-in ``FRAMEWORK_APPS`` exclusion heuristic."""
 	try:
 		from optimus.settings import get_tracked_apps
@@ -96,14 +93,14 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 	all_queries.sort(key=lambda q: q["query_duration_ms"], reverse=True)
 
-	# Scope the leaderboard to the user's own app code — framework /
+	# Scope the leaderboard to the user's own app code framework /
 	# third-party queries are dropped here, BEFORE truncating to top N,
 	# so a session full of framework-internal queries still surfaces the
 	# slowest application queries instead of a top-N of un-actionable
 	# noise. (The per-action breakdown in the report keeps every query.)
 	# Also drop trivially-fast queries: a "slowest queries" panel padded
 	# with sub-10ms rows reads as "here are your problem queries" when
-	# there aren't any — if nothing clears the floor, the panel stays
+	# there aren't any if nothing clears the floor, the panel stays
 	# empty rather than listing noise.
 	top = [
 		q for q in all_queries
@@ -119,9 +116,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			{
 				"finding_type": "Slow Query",
 				"severity": "High" if q["query_duration_ms"] > high_threshold else "Medium",
-				"title": f"Slow query: {q['query_duration_ms']:.0f}ms",
+				"title": f"Slow query: {dur(q['query_duration_ms'])}",
 				"customer_description": (
-					f"A single query took {q['query_duration_ms']:.0f}ms to run. "
+					f"A single query took {dur(q['query_duration_ms'])} to run. "
 					"This is one of the slowest queries in the session and is "
 					"a likely candidate for optimization."
 				),
@@ -131,7 +128,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 						"callsite": q["callsite"],
 						"recording_uuid": q["recording_uuid"],
 						"fix_hint": (
-							"Investigate this query — it may need an index, a "
+							"Investigate this query. It may need an index, a "
 							"refactored WHERE clause, or a different access pattern. "
 							"Run EXPLAIN ANALYZE on a representative production query "
 							"to see the actual cost."
@@ -139,7 +136,11 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 					},
 					default=str,
 				),
-				"estimated_impact_ms": q["query_duration_ms"],
+				# Round to 0.01ms so the badge (fmt_ms of this value) and the title
+				# (dur(query_duration_ms), which rounds to 0.01ms internally) decide
+				# the ms-vs-seconds rollover from the SAME number and can't disagree
+				# at a boundary (e.g. 623.495 -> title 624ms beside a 623ms badge).
+				"estimated_impact_ms": round(q["query_duration_ms"], 2),
 				"affected_count": 1,
 				"action_ref": str(q["action_idx"]),
 			}
@@ -149,12 +150,10 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 
 def count_suppressed_findings(top_queries: list[dict], slow_threshold_ms: float) -> int:
-	"""B.DI4 — how many user-app slow queries the findings cap dropped.
+	"""How many user-app slow queries the findings cap dropped.
 
-	Computed at render time (not at analyze time) so adding a new
-	disclosure doesn't require a DocType migration: ``top_queries_json``
-	persists the full top-N list, and any change to the slow threshold
-	(Optimus Settings) re-applies on the next render.
+	Computed at render time from the persisted ``top_queries_json`` full list,
+	so a changed slow threshold re-applies on the next render.
 	"""
 	if not top_queries or not slow_threshold_ms:
 		return 0

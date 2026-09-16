@@ -96,7 +96,7 @@
     },
     "frontend": {
       "type": ["object", "null"],
-      "description": "Frontend timings. {kpis, xhrs, web_vitals}."
+      "description": "Frontend timings. {xhrs, web_vitals, summary, xhr_matched, orphans}."
     },
     "hot_frames": {
       "type": ["array", "null"],
@@ -129,6 +129,14 @@
     "large_duration_threshold_ms": {
       "type": ["number", "null"],
       "description": "Threshold above which timings are rendered with the .time-high accent (default 1000)."
+    },
+    "hot_action_ms": {
+      "type": ["number", "null"],
+      "description": "Fixed per-row hot/danger threshold in ms (red bar/value), independent of large_duration_threshold_ms so row danger does not follow the Sensitivity Profile (default 1000)."
+    },
+    "bar_warn_ms": {
+      "type": ["number", "null"],
+      "description": "Amber boundary in ms for the per-row duration bars: at or above this but below hot_action_ms the bar is amber, below it green (default 300)."
     }
   },
   "additionalProperties": true

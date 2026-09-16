@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for v0.4.0 onboarding state API endpoints."""
+"""Tests for the onboarding state API endpoints."""
 
 import pytest
 
@@ -60,7 +60,7 @@ def test_mark_onboarding_seen_persists(fake_env):
 
 def test_check_onboarding_seen_suppressed_when_user_has_existing_sessions(fake_env):
 	cache, fake_db = fake_env
-	# User has a Ready Optimus Session — they're an experienced user
+	# User has a Ready Optimus Session they're an experienced user
 	fake_db._count = 3
 	result = api.check_onboarding_seen()
 	assert result == {"seen": True}

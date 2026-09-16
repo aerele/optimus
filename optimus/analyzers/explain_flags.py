@@ -3,18 +3,10 @@
 
 """Analyzer: parse EXPLAIN output for red flags.
 
-The recorder captures `EXPLAIN <query>` for every SELECT/UPDATE/DELETE but
-nobody reads the result. This analyzer walks every EXPLAIN row and surfaces
-the four most actionable red flags:
-
-    type == "ALL"          → full table scan (no index used)
-    Extra: "Using filesort"  → sorting on disk
-    Extra: "Using temporary" → temp table created
-    filtered < 10            → reading much more than returned
-
-Each match becomes a finding tagged by table. Findings are deduplicated by
-(finding_type, table) — if 50 queries hit the same full-scan table, we
-report it once with the cumulative impact.
+Walks every captured EXPLAIN row and surfaces four actionable flags: full
+table scan (type ALL), filesort, temporary table and low filter ratio
+(filtered < 10). Each match becomes a finding tagged by table; findings are
+deduplicated by (finding_type, table) with cumulative impact.
 """
 
 import json
@@ -35,10 +27,8 @@ from optimus.dbdialect.mariadb import MariaDBDialect
 def _item_to_plan_table(item: dict) -> PlanTable:
 	"""Coerce one ``explain_result`` item to a normalized PlanTable.
 
-	The EXPLAIN runner now stores normalized PlanTable dicts, but older
-	persisted recordings / cache entries / fixtures hold raw MariaDB EXPLAIN
-	rows — distinguish by the presence of the ``full_scan`` key and map a
-	legacy row through the MariaDB adapter so old data still analyzes."""
+	Items with a ``full_scan`` key are already normalized; legacy raw MariaDB
+	EXPLAIN rows are mapped through the MariaDB adapter."""
 	if "full_scan" in item:
 		return PlanTable(
 			table=item.get("table") or "?",
@@ -63,25 +53,25 @@ LOW_FILTERED_MIN_ROWS = 100
 
 # Filesort / Temporary Table findings need a row floor for the same
 # reason Low Filter Ratio does: sorting 1 row or materializing a 5-row
-# intermediate is free, and flagging those fills the report with noise.
+# intermediate is free and flagging those fills the report with noise.
 # A real production run surfaced "Filesort on tabCustom DocPerm" from a
 # SELECT * FROM tabCustom DocPerm WHERE parent=? ORDER BY creation ASC
 # query where EXPLAIN reported rows=1 (a single-parent lookup with the
 # `parent` index already doing const-ref access). The filesort is on
-# one row — actionable only in the abstract. 100 rows is the same
+# one row actionable only in the abstract. 100 rows is the same
 # floor LOW_FILTERED_MIN_ROWS uses for the same reason.
 MIN_ROWS_TO_FLAG_SORT = 100
 
 # v0.5.2 round 3: noise floor. An aggregated bucket (e.g. "Full Table
 # Scan on tabBankClearanceDetail") with tiny total impact AND tiny
-# count isn't actionable — it's a one-off touch during init / metadata
+# count isn't actionable it's a one-off touch during init / metadata
 # resolution, not a hot path. Surfacing it just inflates the
 # "125 findings" stats card with noise. Production report had ~85
 # such entries all at 0-1ms.
 NOISE_FLOOR_IMPACT_MS = 5.0
 NOISE_FLOOR_COUNT = 5
 
-# Framework-owned DocTypes — any scan/filesort/temp finding on one of
+# Framework-owned DocTypes any scan/filesort/temp finding on one of
 # these routes to Observations because the application developer can't
 # add an index to a stock Frappe/ERPNext DocType. Populated lazily
 # from the DocType + Module Def tables on first use per analyze pass.
@@ -89,11 +79,8 @@ _framework_doctypes_cache: frozenset[str] | None = None
 
 
 def _get_framework_doctypes() -> frozenset[str]:
-	"""Return the set of DocType names owned by framework apps
-	(frappe, erpnext, hrms, etc.).
-
-	Cached per process. Fall back to empty set on any error — the
-	noise-floor filter still runs, so we don't lose correctness.
+	"""Return the set of DocType names owned by framework apps (frappe,
+	erpnext, hrms, etc.). Cached per process; returns an empty set on any error.
 	"""
 	global _framework_doctypes_cache
 	if _framework_doctypes_cache is not None:
@@ -126,10 +113,8 @@ def _get_framework_doctypes() -> frozenset[str]:
 
 
 def _is_framework_doctype_table(table: str, framework_doctypes: frozenset[str]) -> bool:
-	"""True if `table` is a stock Frappe/ERPNext DocType the user
-	cannot add indexes to (would require an upstream patch).
-
-	Accepts both ``tab<Name>`` (Frappe convention) and bare names.
+	"""True if `table` is a stock Frappe/ERPNext DocType (user cannot add an
+	index without an upstream patch). Accepts both ``tab<Name>`` and bare names.
 	"""
 	if not table:
 		return False
@@ -213,7 +198,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 		# Framework DocType filter: a Full Scan on tabDocField /
 		# tabWorkspace / tabCustom Field / etc. isn't fixable by the
-		# application developer — requires an upstream index patch.
+		# application developer requires an upstream index patch.
 		# Route to Observations by tagging the finding type.
 		if _is_framework_doctype_table(table, framework_doctypes):
 			drop_framework_doctype += 1
@@ -279,7 +264,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			f"Suppressed SQL findings from {drop_framework_callsite} "
 			"call(s) whose callsite was inside Frappe framework code. "
 			"The loop that issues those queries lives inside frappe/* "
-			"— application developers can't add an index to fix them "
+			" application developers can't add an index to fix them "
 			"from their code. If one of these is a hot spot, raise it "
 			"upstream in the Frappe repo."
 		)
@@ -288,7 +273,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			f"Suppressed {drop_alias} EXPLAIN row(s) whose `table` value "
 			"was a SQL alias (a / c / p / addr / ...) rather than a "
 			"real table name. 'Full table scan on a' isn't actionable "
-			"without knowing which table 'a' aliases — the per-query "
+			"without knowing which table 'a' aliases the per-query "
 			"detail in the Top Queries section shows the actual SQL "
 			"if you want to investigate."
 		)
@@ -297,7 +282,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			f"Suppressed {drop_framework_doctype} SQL finding(s) on "
 			"stock Frappe / ERPNext DocTypes (tabDocField, tabWorkspace, "
 			"tabCustom Field, etc.). You can't add an index to a "
-			"framework-owned DocType from your application code — it "
+			"framework-owned DocType from your application code it "
 			"requires an upstream patch. If one of these is a real "
 			"hot spot, check whether a Frappe upgrade has already "
 			"indexed it, or file an upstream issue."
@@ -337,7 +322,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 # ---------------------------------------------------------------------------
 # MariaDB's `rows` and `filtered` columns come back as int/float in the
 # typical PyMySQL path, but certain driver versions and EXPLAIN FORMAT
-# variants have been observed to return Decimal, str, or even None — any
+# variants have been observed to return Decimal, str, or even None any
 # of which would crash a Python 3 `>` comparison with a numeric literal.
 # v0.5.1 adds explicit coercion helpers so one weird row doesn't take out
 # the whole session.
@@ -349,7 +334,7 @@ def _to_int(val) -> int:
 	if val is None:
 		return 0
 	if isinstance(val, bool):
-		# bool is a subclass of int — treat False as 0, True as 1
+		# bool is a subclass of int treat False as 0, True as 1
 		return int(val)
 	if isinstance(val, int):
 		return val
@@ -384,28 +369,16 @@ def _is_framework_origin(
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
 ) -> bool:
-	"""Return True when the SQL call's blame frame is inside framework
-	code (frappe, erpnext, hrms, lms, …) or a pip-installed library.
+	"""Return True when the SQL call's blame frame is inside framework code
+	(frappe, erpnext, hrms, …) or a pip-installed library, so explain_flags can
+	skip findings the application developer can't fix.
 
-	Accepts ``tracked_apps`` for the inclusion-mode classification
-	(when the site admin has set Optimus Settings ▸ Tracked Apps).
-	Defaults to exclusion mode (built-in FRAMEWORK_APPS) when None.
-
-	Used by explain_flags to skip Full Scan / Filesort / Temporary
-	Table / Low Filter findings whose issuing code lives in the
-	framework. Same rationale as the Framework N+1 split: the
-	application developer can't add an index for a query that
-	Frappe/ERPNext issues — they'd have to patch upstream.
-
-	walk_callsite walks innermost-to-outermost for a non-frappe-core
-	frame; its fallback returns the deepest frame if ALL frames are
-	framework-core. So a None return means "profiler-own stack"
-	(already filtered elsewhere). We additionally filter any blame
-	frame resolving to a framework app via is_framework_callsite()
-	so findings rooted in erpnext loops don't surface as actionable.
+	``tracked_apps`` selects inclusion-mode classification (Optimus Settings
+	Tracked Apps); None uses exclusion mode (built-in FRAMEWORK_APPS). An empty
+	stack returns False (older recordings without per-call stacks).
 	"""
 	if not stack:
-		# No stack captured. Don't filter — fall through to the
+		# No stack captured. Don't filter fall through to the
 		# legacy behavior where every query produces findings.
 		# This path is hit on older recordings that pre-date
 		# stack-per-call capture.
@@ -413,7 +386,7 @@ def _is_framework_origin(
 	callsite = walk_callsite(stack)
 	if callsite is None:
 		# Pure-profiler stack → filtered (though those should
-		# already be gone at this stage — defensive).
+		# already be gone at this stage defensive).
 		return True
 	return is_framework_callsite(
 		callsite.get("filename") or "", tracked_apps=tracked_apps, installed_apps=installed_apps
@@ -423,7 +396,7 @@ def _is_framework_origin(
 # v0.5.2 round 4: INFORMATION_SCHEMA / MariaDB metadata views that
 # show up as ``table`` values in EXPLAIN rows. These ARE real tables
 # (in the ``information_schema`` database), but the user can't add
-# indexes to them — they're engine-managed. Production reports have
+# indexes to them they're engine-managed. Production reports have
 # shown "Full table scan on columns" and "Full table scan on tables"
 # cluttering actionable findings; both are INFORMATION_SCHEMA views.
 # Treat them as aliases (suppressed with the SQL-alias warning).
@@ -439,37 +412,14 @@ _SYSTEM_METADATA_TABLES: frozenset[str] = frozenset({
 
 
 def _is_likely_alias(table: str) -> bool:
-	"""Return True when `table` looks like a SQL alias rather than a
-	real user-addressable table name.
+	"""Return True when `table` looks like a SQL alias or system table rather
+	than a real user-indexable table name.
 
-	Frappe DocType tables always start with ``tab`` (``tabItem``,
-	``tabSales Invoice``, ``tabCustom Field``, etc.), so anything
-	that starts with a letter and is short + lowercase-only is
-	almost certainly an alias:
-
-	  ``a``   — alias
-	  ``c``   — alias
-	  ``ap``  — alias
-	  ``cd``  — alias
-	  ``addr`` — alias (common for Address)
-	  ``p``   — alias
-	  ``d``   — alias
-
-	These come from EXPLAIN rows for JOIN queries where MariaDB
-	uses the aliased name in the `table` column of its output.
-	A finding of "Full table scan on a" has no actionable signal
-	— the user can't index "a", they'd need the real table name.
-
-	Also filters INFORMATION_SCHEMA pseudo-tables (``columns``,
-	``tables``, ``schemata``, etc.) — these are real but not
-	user-indexable, same "no action available" property as a raw
-	alias.
-
-	False negatives are acceptable: a legitimate short table name
-	like a custom "log" table would be mis-classified as alias
-	and filtered. That's rare enough that the noise reduction
-	wins. True aliases (single/double letter) are MUCH more common
-	than short real table names in a Frappe codebase.
+	Flags short lowercase JOIN aliases (a, c, ap, addr), MariaDB
+	``<derivedN>``/``<subqueryN>`` markers and INFORMATION_SCHEMA metadata
+	views (columns, tables, …). Frappe ``tab`` tables and quoted/mixed-case
+	names are always kept. False negatives (a short real table name) are
+	accepted for the noise reduction.
 	"""
 	if not table:
 		return True
@@ -479,22 +429,22 @@ def _is_likely_alias(table: str) -> bool:
 	# view) would otherwise be misclassified as a real Frappe
 	# DocType via the startswith("tab") short-circuit. SQL is case-
 	# insensitive on table names and the engine typically lowercases
-	# them in EXPLAIN output — so "columns" matches, "COLUMNS" also
+	# them in EXPLAIN output so "columns" matches, "COLUMNS" also
 	# matches after lowering.
 	if s.lower() in _SYSTEM_METADATA_TABLES:
 		return True
-	# Real Frappe tables — always kept.
+	# Real Frappe tables always kept.
 	if s.startswith("tab"):
 		return False
 	# Quoted identifiers (with spaces / capitals) are real tables
 	# the user created with a non-standard name.
 	if any(ch.isupper() for ch in s) or " " in s:
 		return False
-	# Non-ASCII characters — assume real table.
+	# Non-ASCII characters assume real table.
 	if not s.isascii():
 		return False
 	# Anything else short + lowercase is probably an alias. 5 chars
-	# is the cutoff — "users", "items" would pass; "a", "ap", "addr"
+	# is the cutoff "users", "items" would pass; "a", "ap", "addr"
 	# would be flagged.
 	if len(s) <= 5 and s.replace("_", "").isalpha() and s.islower():
 		return True
@@ -505,18 +455,17 @@ def _is_likely_alias(table: str) -> bool:
 
 
 def _inspect_table(pt, normalized_query, action_idx, query_duration, buckets):
-	"""Check one normalized PlanTable against four red-flag patterns.
+	"""Check one normalized PlanTable against four red-flag patterns, upserting
+	findings into ``buckets``.
 
-	Returns ``"alias"`` when the table is a SQL alias (skipped, caller counts
-	it for the warning), or ``None`` on normal processing. The plan fields are
-	dialect-blind — the dialect adapter already mapped a MariaDB EXPLAIN row /
-	Postgres plan node onto them; ``pt.raw`` keeps the dialect blob for the
-	report + LLM (it's what ``explain_row`` in technical_detail holds).
+	Returns ``"alias"`` when the table is a SQL alias (skipped; caller counts it
+	for the warning), else ``None``. Plan fields are dialect-blind; ``pt.raw``
+	holds the dialect blob surfaced as ``explain_row`` in technical_detail.
 	"""
 	table = pt.table or "?"
 
 	# v0.5.2: skip SQL aliases (single-letter JOIN aliases, <derivedN>
-	# subquery markers). "Full table scan on a" is uninterpretable — the user
+	# subquery markers). "Full table scan on a" is uninterpretable the user
 	# can't index "a", they'd need the real underlying table name.
 	if _is_likely_alias(table):
 		return "alias"
@@ -545,7 +494,7 @@ def _inspect_table(pt, normalized_query, action_idx, query_duration, buckets):
 			fix_hint="Add an index on the WHERE/JOIN columns of this query.",
 		)
 
-	# Filesort — only worth flagging when the sort has enough rows to
+	# Filesort only worth flagging when the sort has enough rows to
 	# actually matter (see MIN_ROWS_TO_FLAG_SORT). Otherwise "Filesort
 	# on tabCustom DocPerm" fires on single-row parent lookups that the
 	# user can't act on.
@@ -569,7 +518,7 @@ def _inspect_table(pt, normalized_query, action_idx, query_duration, buckets):
 			fix_hint="Add an index that covers the ORDER BY columns of this query.",
 		)
 
-	# Temporary table — same row floor as Filesort. Materializing a
+	# Temporary table same row floor as Filesort. Materializing a
 	# tiny intermediate table is free; flagging it is noise.
 	if pt.temp_used and rows_examined >= MIN_ROWS_TO_FLAG_SORT:
 		_upsert(
@@ -585,7 +534,7 @@ def _inspect_table(pt, normalized_query, action_idx, query_duration, buckets):
 			customer_description=(
 				f"A query against **{table}** had to materialize a temporary "
 				"table to compute its results. This usually indicates a "
-				"GROUP BY or DISTINCT without a covering index, and gets "
+				"GROUP BY or DISTINCT without a covering index and gets "
 				"more expensive as the data grows."
 			),
 			fix_hint="Add a covering index for the GROUP BY/DISTINCT columns.",
@@ -593,7 +542,7 @@ def _inspect_table(pt, normalized_query, action_idx, query_duration, buckets):
 
 	# Low filter ratio: MariaDB's `filtered` column reports what percentage
 	# of rows examined are actually returned after filtering. Values under
-	# 10 mean the query is reading 10x or more of what it needs — the WHERE
+	# 10 mean the query is reading 10x or more of what it needs the WHERE
 	# clause isn't selective enough (or isn't using an index to filter).
 	# v0.5.1: coerce explicitly so Decimal/str values from unusual drivers
 	# don't silently fall through the isinstance guard.
