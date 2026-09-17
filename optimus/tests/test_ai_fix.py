@@ -557,6 +557,24 @@ class TestResolveProvider:
 		assert p["protocol"] == "openai"
 		assert "moonshot" in p["base_url"]
 
+	def test_deepseek_uses_openai_protocol_with_deepseek_default(self):
+		# DeepSeek's API is OpenAI-compatible, so it reuses the OpenAI wire path
+		# with its own hosted endpoint and default model.
+		with patch("optimus.settings.get_config", return_value=_cfg(ai_provider="DeepSeek")):
+			p = ai_fix._resolve_provider()
+		assert p["protocol"] == "openai"
+		assert p["base_url"] == "https://api.deepseek.com/v1"
+		assert p["model"] == "deepseek-chat"
+		assert p["needs_key"] is True
+
+	def test_deepseek_ignores_base_url_override(self):
+		# Hosted provider: a stored ai_base_url must not override its built-in
+		# endpoint (the field is hidden for hosted providers).
+		with patch("optimus.settings.get_config",
+		           return_value=_cfg(ai_provider="DeepSeek", ai_base_url="https://router.example/v1")):
+			p = ai_fix._resolve_provider()
+		assert p["base_url"] == "https://api.deepseek.com/v1"
+
 	def test_base_url_override_ignored_for_hosted_provider(self):
 		# A hosted provider (Anthropic / OpenAI / Kimi) ALWAYS uses its default
 		# endpoint a stored ai_base_url must NOT override it. The Settings

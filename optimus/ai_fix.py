@@ -80,6 +80,16 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 		"model": "kimi-k2-0905-preview",
 		"needs_key": True,
 	},
+	"DeepSeek": {
+		# DeepSeek's API is OpenAI-compatible, so it reuses the OpenAI wire
+		# path. Default to deepseek-chat (V3); deepseek-reasoner (R1) also works
+		# and, if it rejects a custom temperature, _call_openai_chat retries once
+		# without it.
+		"protocol": "openai",
+		"base_url": "https://api.deepseek.com/v1",
+		"model": "deepseek-chat",
+		"needs_key": True,
+	},
 	"OpenAI-compatible": {
 		"protocol": "openai",
 		"base_url": "",

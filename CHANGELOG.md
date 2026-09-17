@@ -10,6 +10,14 @@ versions may contain breaking changes see migration notes below).
 
 ## [0.12.51] - 2026-09-17
 
+### Added
+
+- **DeepSeek as an AI provider.** Pick "DeepSeek" under Optimus Settings ▸ AI Fix
+  Suggestions and paste a DeepSeek API key. Its API is OpenAI-compatible, so it reuses
+  the existing OpenAI wire path with DeepSeek's hosted endpoint
+  (`https://api.deepseek.com/v1`) and defaults to the `deepseek-chat` (V3) model;
+  `deepseek-reasoner` (R1) also works. No new request path was added.
+
 ### Changed
 
 - **"Suggest AI fixes in the report by default" (`ai_auto_suggest`) now defaults to on.**

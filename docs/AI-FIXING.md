@@ -131,6 +131,7 @@ These items are **never** sent in any AI request body:
 | `Anthropic` | Messages | `https://api.anthropic.com` | Yes | Default model: `claude-sonnet-4-6`. |
 | `OpenAI` | Chat completions | `https://api.openai.com/v1` | Yes | Default model: `gpt-4.1-mini`. |
 | `Kimi (Moonshot)` | Chat completions | `https://api.moonshot.ai/v1` | Yes | Default model: `kimi-k2-0905-preview`. |
+| `DeepSeek` | Chat completions | `https://api.deepseek.com/v1` | Yes | Default model: `deepseek-chat` (V3). `deepseek-reasoner` (R1) also works. |
 | `Aerele` | Chat completions | `https://api.aerele.in/optimus/v1` | Yes | Managed service buy a fixed token pack up front. See § 10. |
 | `OpenAI-compatible` | Chat completions | (you set it) | No (configurable) | Use this for local LLMs and any other OpenAI-shaped server. |
 
