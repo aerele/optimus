@@ -47,7 +47,7 @@
    "read_only": 1
   },
   {
-   "description": "JSON: callsite, raw + normalized SQL, EXPLAIN row, suggested DDL or refactor.",
+   "description": "The full technical detail for this finding, stored as JSON: where in the code it happened, the original and cleaned-up SQL, the database query plan and a suggested fix.",
    "fieldname": "technical_detail_json",
    "fieldtype": "Long Text",
    "label": "Technical Detail (JSON)",
@@ -75,7 +75,7 @@
    "read_only": 1
   },
   {
-   "description": "JSON: AI-generated fix suggestion for this finding {suggestion (markdown), model, provider, generated_at}. Populated on demand via the 'Suggest a fix (AI)' action; empty until then.",
+   "description": "The AI-generated fix suggestion for this finding, stored as JSON (the suggestion text plus which model and provider produced it and when). Filled in when you use the 'Suggest a fix (AI)' action, empty until then.",
    "fieldname": "llm_fix_json",
    "fieldtype": "Long Text",
    "label": "AI Fix Suggestion (JSON)",

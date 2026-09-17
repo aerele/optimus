@@ -10,7 +10,7 @@
  ],
  "fields": [
   {
-   "description": "Name of a Frappe app directory (e.g. 'myapp', 'custom_invoicing'). The picker lists apps installed on this bench; Optimus Settings' JS populates the options. Findings whose callsite lives inside an app listed here are treated as user code (actionable). Everything else routes to the collapsed Observations subsection as framework noise.",
+   "description": "The directory name of a Frappe app (for example 'myapp' or 'custom_invoicing'). The dropdown lists the apps installed on this bench. Findings whose code lives inside an app listed here are treated as your own code and shown as actionable. Everything else is tucked into the collapsed Observations subsection as framework noise.",
    "fieldname": "app_name",
    "fieldtype": "Autocomplete",
    "in_list_view": 1,
