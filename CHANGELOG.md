@@ -8,6 +8,20 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.51] - 2026-09-17
+
+### Changed
+
+- **"Suggest AI fixes in the report by default" (`ai_auto_suggest`) now defaults to on.**
+  When AI Fix Suggestions is enabled, analyze auto-suggests fixes for the top-N eligible
+  findings so they are built into the report without a per-finding click. This changes
+  behaviour only *after* an operator enables AI: the master `ai_enabled` switch is still
+  off by default, so nothing is sent to any LLM out of the box. Untick the field to go
+  back to on-demand (click-to-send) suggestions. Existing sites keep their saved value;
+  only fresh installs pick up the new default.
+
+---
+
 ## [0.12.50] - 2026-09-16
 
 ### Fixed

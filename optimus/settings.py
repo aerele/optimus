@@ -120,7 +120,7 @@ _DEFAULTS = {
 	"ai_model": "",
 	# When True, the analyze pipeline auto-generates a fix for the top
 	# ai_auto_suggest_max eligible findings (0 = all).
-	"ai_auto_suggest": False,
+	"ai_auto_suggest": True,
 	"ai_auto_suggest_max": 5,
 	# When True (and ai_enabled), the analyze pipeline rewrites the
 	# auto-generated "Steps to Reproduce" note into a friendly, human-
@@ -358,7 +358,7 @@ class OptimusConfig:
 	ai_provider: str = "Anthropic"
 	ai_base_url: str = ""
 	ai_model: str = ""
-	ai_auto_suggest: bool = False
+	ai_auto_suggest: bool = True
 	ai_auto_suggest_max: int = 5
 	ai_humanize_steps: bool = True
 	# v0.6.x: per-section "use the LLM for X" toggles (hard off).
@@ -515,7 +515,7 @@ def _read_doctype_row() -> dict | None:
 		"ai_provider": (doc.get("ai_provider") or "").strip() or None,
 		"ai_base_url": (doc.get("ai_base_url") or "").strip() or None,
 		"ai_model": (doc.get("ai_model") or "").strip() or None,
-		"ai_auto_suggest": bool(doc.get("ai_auto_suggest")),
+		"ai_auto_suggest": bool(doc.get("ai_auto_suggest", 1)),
 		"ai_auto_suggest_max": int(doc.get("ai_auto_suggest_max") or 0),
 		# Default-on (when AI is enabled) pass a default to .get() so a
 		# Single row predating this field still reads as True.

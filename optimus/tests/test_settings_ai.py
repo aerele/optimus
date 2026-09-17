@@ -20,8 +20,9 @@ class TestAiConfigDefaults:
 		assert cfg.ai_provider == "Anthropic"
 		assert cfg.ai_base_url == ""
 		assert cfg.ai_model == ""
-		# Auto-suggest is off by default; cap is 5.
-		assert cfg.ai_auto_suggest is False
+		# Auto-suggest is on by default (only takes effect once ai_enabled is also
+		# turned on); cap is 5.
+		assert cfg.ai_auto_suggest is True
 		assert cfg.ai_auto_suggest_max == 5
 		# "Humanize Steps to Reproduce" is on by default (only takes effect
 		# once ai_enabled is also turned on).

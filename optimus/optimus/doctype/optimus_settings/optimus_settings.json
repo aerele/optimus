@@ -562,9 +562,9 @@
    "label": "Automatic Suggestions"
   },
   {
-   "default": "0",
+   "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When ticked, analyze automatically asks the AI for a fix on every eligible finding, so the suggestions are already in the report with no need to click \"Suggest a fix (AI)\" for each one. This spends AI tokens (and a little extra analyze time) on every session that is analyzed, so keep it off unless you want suggestions built in by default.",
+   "description": "When ticked, analyze automatically asks the AI for a fix on every eligible finding, so the suggestions are already in the report with no need to click \"Suggest a fix (AI)\" for each one. On by default (takes effect only once AI Fix Suggestions is enabled). It spends AI tokens (and a little extra analyze time) on every session that is analyzed, so untick it if you would rather request a suggestion per finding.",
    "fieldname": "ai_auto_suggest",
    "fieldtype": "Check",
    "label": "Suggest AI fixes in the report by default"
