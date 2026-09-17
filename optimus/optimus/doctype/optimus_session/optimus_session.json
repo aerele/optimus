@@ -319,7 +319,7 @@
    "hidden": 1,
    "label": "v0.5.0 Aggregates (JSON)",
    "read_only": 1,
-   "description": "Stored as JSON: the server-resource and browser-timing summaries that feed the Server Resource and Frontend panels of the report."
+   "description": "Stored as JSON: the server-resource and browser-timing summaries that feed the Server Resource and Frontend panels of the report. Holds these keys: infra_timeline, infra_summary, frontend_xhr_matched, frontend_vitals_by_page, frontend_orphans, frontend_summary."
   },
   {
    "fieldname": "analyzer_warnings",

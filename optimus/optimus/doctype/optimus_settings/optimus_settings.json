@@ -550,7 +550,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When ticked, the AI rewrites each session's auto-generated \"Steps to Reproduce\" note into a friendly, readable flow (the raw list of captured actions is kept below it, falling back to that list if the AI call fails). When off, the note stays as the plain action list, the \"Humanize Steps (AI)\" button is hidden and the API turns down requests. An older session that was already humanized keeps its note until it is re-analyzed.",
+   "description": "When ticked, the AI rewrites each session's auto-generated \"Steps to Reproduce\" note into a friendly, readable flow (if the AI call fails, the note falls back to the plain list of captured actions; the per-action breakdown lists them either way). When off, the note stays as the plain action list, the \"Humanize Steps (AI)\" button is hidden and the API turns down requests. An older session that was already humanized keeps its note until it is re-analyzed.",
    "fieldname": "ai_humanize_steps",
    "fieldtype": "Check",
    "label": "Humanized \"Steps to Reproduce\""
