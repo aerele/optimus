@@ -361,7 +361,7 @@ class OptimusConfig:
 	ai_auto_suggest: bool = True
 	ai_auto_suggest_max: int = 5
 	ai_humanize_steps: bool = True
-	# v0.6.x: per-section "use the LLM for X" toggles (hard off).
+	# v0.6.x: per-section "use the LLM for X" toggles. Default on; turning one off is a hard disable.
 	ai_suggest_findings: bool = True
 	ai_suggest_indexes: bool = True
 	# v0.7.x: Sensitivity Profile name. "Custom" → the threshold fields above
@@ -515,7 +515,7 @@ def _read_doctype_row() -> dict | None:
 		"ai_provider": (doc.get("ai_provider") or "").strip() or None,
 		"ai_base_url": (doc.get("ai_base_url") or "").strip() or None,
 		"ai_model": (doc.get("ai_model") or "").strip() or None,
-		"ai_auto_suggest": bool(doc.get("ai_auto_suggest", 1)),
+		"ai_auto_suggest": bool(doc.get("ai_auto_suggest")),
 		"ai_auto_suggest_max": int(doc.get("ai_auto_suggest_max") or 0),
 		# Default-on (when AI is enabled) pass a default to .get() so a
 		# Single row predating this field still reads as True.
