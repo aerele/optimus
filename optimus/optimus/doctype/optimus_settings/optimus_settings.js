@@ -213,7 +213,7 @@ frappe.ui.form.on("Optimus Settings", {
 
 	ai_provider(frm) {
 		// Base URL only applies to the "OpenAI-compatible" provider the
-		// hosted providers (Anthropic / OpenAI / Kimi) use their built-in
+		// hosted providers (Anthropic / OpenAI / Kimi / DeepSeek) use their built-in
 		// default endpoint. Re-evaluate depends_on so Base URL hides/shows
 		// immediately when the provider changes, without a save + reload.
 		frm.refresh_field("ai_base_url");
