@@ -120,7 +120,7 @@ _DEFAULTS = {
 	"ai_model": "",
 	# When True, the analyze pipeline auto-generates a fix for the top
 	# ai_auto_suggest_max eligible findings (0 = all).
-	"ai_auto_suggest": False,
+	"ai_auto_suggest": True,
 	"ai_auto_suggest_max": 5,
 	# When True (and ai_enabled), the analyze pipeline rewrites the
 	# auto-generated "Steps to Reproduce" note into a friendly, human-
@@ -358,10 +358,10 @@ class OptimusConfig:
 	ai_provider: str = "Anthropic"
 	ai_base_url: str = ""
 	ai_model: str = ""
-	ai_auto_suggest: bool = False
+	ai_auto_suggest: bool = True
 	ai_auto_suggest_max: int = 5
 	ai_humanize_steps: bool = True
-	# v0.6.x: per-section "use the LLM for X" toggles (hard off).
+	# v0.6.x: per-section "use the LLM for X" toggles. Default on; turning one off is a hard disable.
 	ai_suggest_findings: bool = True
 	ai_suggest_indexes: bool = True
 	# v0.7.x: Sensitivity Profile name. "Custom" → the threshold fields above

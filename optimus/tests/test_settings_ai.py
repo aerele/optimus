@@ -20,8 +20,9 @@ class TestAiConfigDefaults:
 		assert cfg.ai_provider == "Anthropic"
 		assert cfg.ai_base_url == ""
 		assert cfg.ai_model == ""
-		# Auto-suggest is off by default; cap is 5.
-		assert cfg.ai_auto_suggest is False
+		# Auto-suggest is on by default (only takes effect once ai_enabled is also
+		# turned on); cap is 5.
+		assert cfg.ai_auto_suggest is True
 		assert cfg.ai_auto_suggest_max == 5
 		# "Humanize Steps to Reproduce" is on by default (only takes effect
 		# once ai_enabled is also turned on).
@@ -73,7 +74,6 @@ class TestAiConfigResolution:
 			"ai_provider": None,
 			"ai_base_url": None,
 			"ai_model": None,
-			"ai_auto_suggest": False,
 			"ai_auto_suggest_max": 5,
 		}
 		row.update(overrides)
@@ -87,6 +87,8 @@ class TestAiConfigResolution:
 		assert cfg.ai_provider == "Anthropic"
 		assert cfg.ai_base_url == ""
 		assert cfg.ai_model == ""
+		# ai_auto_suggest absent from the row (unset Single) → default on.
+		assert cfg.ai_auto_suggest is True
 
 	def test_resolve_picks_up_configured_values(self):
 		row = self._row(
@@ -119,6 +121,11 @@ class TestAiConfigResolution:
 			cfg = settings._resolve()
 		assert cfg.ai_auto_suggest is True
 		assert cfg.ai_auto_suggest_max == 12
+		# Explicitly off in the row → off.
+		row_off = self._row(ai_auto_suggest=False)
+		with patch.object(settings, "_read_doctype_row", return_value=row_off), \
+		     patch.object(settings, "_site_conf_fallback", return_value=None):
+			assert settings._resolve().ai_auto_suggest is False
 
 	def test_auto_suggest_max_zero_means_all(self):
 		# 0 is a legitimate value ("every eligible finding") must not
