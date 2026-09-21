@@ -1489,6 +1489,10 @@
     margin: 12px 0; padding: 10px 12px;
     border: 1px solid var(--rule); border-radius: 4px;
     background: var(--bg-paper);
+    /* Contain a table wider than its card by scrolling it inside the card
+       instead of letting it spill past the report container. The per-function
+       table wraps to fit; the unwrapped cross-run diff table relies on this. */
+    overflow-x: auto;
   }
   .phase2-func.indent-1 { margin-left: 24px; }
   .phase2-func.indent-2 { margin-left: 48px; }
@@ -1529,7 +1533,18 @@
     user-select: none; width: 1%; white-space: nowrap;
   }
   table.line-prof tbody td.num { text-align: right; }
-  table.line-prof tbody td.src code {
+  /* Long source lines wrap inside the src column so the per-function table never
+     forces its card (or the report container) wider than it. ``pre-wrap`` keeps
+     indentation and only wraps a line that would overflow; ``overflow-wrap:
+     anywhere`` (inherited by the <code>) lets the column shrink so an unbroken
+     long token can't push a row border past the card edge. */
+  table.line-prof:not(.line-prof-diff) tbody td.src { overflow-wrap: anywhere; }
+  table.line-prof:not(.line-prof-diff) tbody td.src code {
+    white-space: pre-wrap; font-family: var(--mono); font-size: 12px;
+  }
+  /* The cross-run diff table keeps the original unwrapped source rendering
+     (mono, no wrap) and is contained by the .phase2-func overflow-x scroll. */
+  table.line-prof.line-prof-diff tbody td.src code {
     white-space: pre; font-family: var(--mono); font-size: 12px;
   }
   table.line-prof tbody tr.hot {
@@ -1543,6 +1558,18 @@
   table.line-prof tbody tr.zero td { color: var(--ink-mute); }
   table.line-prof tbody tr.added td { background: rgba(45, 106, 60, 0.12); }
   table.line-prof tbody tr.removed td { background: rgba(197, 57, 43, 0.12); }
+
+  /* PDF export (wkhtmltopdf / QtWebKit). Placed after the screen .line-prof
+     rules so it wins on source order: media queries add no specificity and the
+     base .phase2-func{overflow-x:auto} / td.src{overflow-wrap:anywhere} rules
+     have equal specificity. QtWebKit clips overflow instead of scrolling and
+     ignores overflow-wrap:anywhere, so in paged media show the card's full
+     content and give the per-function source the legacy word-wrap it honors. */
+  @media print {
+    .phase2-func { overflow-x: visible; }
+    table.line-prof:not(.line-prof-diff) tbody td.src,
+    table.line-prof:not(.line-prof-diff) tbody td.src code { word-wrap: break-word; }
+  }
 
   /* DOC-EVENT LIFECYCLE - Phase F. */
   .doctype-block {
