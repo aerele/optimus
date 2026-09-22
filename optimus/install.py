@@ -8,6 +8,7 @@ record their own profiling sessions) and seeds default Settings.
 """
 
 import frappe
+from frappe import _
 
 from optimus import safe_commit
 
@@ -30,11 +31,11 @@ def _refuse_legacy_install():
 		has_doctype = False
 	if has_module or has_doctype:
 		frappe.throw(
-			"Optimus 0.7.x is a fresh-deploy-only release and cannot run "
+			_("Optimus 0.7.x is a fresh-deploy-only release and cannot run "
 			"alongside the legacy ``frappe_profiler`` install. Uninstall "
 			"the old app first: ``bench --site <site> uninstall-app frappe_profiler``, "
 			"then re-run ``bench --site <site> install-app optimus``. "
-			"See CHANGELOG.md for migration notes.",
+			"See CHANGELOG.md for migration notes."),
 			frappe.ValidationError,
 		)
 

@@ -267,6 +267,7 @@ def _settings_stub(monkeypatch):
 	"""Install a minimal frappe stub and return the freshly re-imported OptimusSettings controller class."""
 	stub = types.ModuleType("frappe")
 	stub.msgprint = lambda *a, **k: None
+	stub._ = lambda msg, *a, **k: msg  # identity translation so `from frappe import _` works
 	stub.cache = types.SimpleNamespace(
 		delete_value=lambda k: None,
 		get_value=lambda k: None,

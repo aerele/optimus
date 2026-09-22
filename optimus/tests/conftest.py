@@ -100,6 +100,7 @@ except ImportError:
 		throw=_stub_throw,
 		log_error=lambda *a, **kw: None,
 		msgprint=lambda *a, **kw: None,
+		_=lambda msg, *a, **kw: msg,  # frappe._ identity, for module-top `from frappe import _`
 		get_doc=lambda *a, **kw: None,
 		get_roles=lambda *a, **kw: [],
 		# Real frappe exposes a top-level ``frappe.has_permission`` (re-export of
