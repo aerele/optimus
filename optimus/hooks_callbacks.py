@@ -21,7 +21,7 @@ import frappe
 import frappe.recorder  # imported at module top so function-local `import frappe.recorder` doesn't rebind `frappe` as a local variable (Python scope rule: any `import frappe.X` inside a function makes `frappe` a function-local for the entire scope, breaking earlier `frappe.local` reads caused by Python 3.14 stricter scope detection on a pre-existing pattern)
 
 from optimus import capture as _capture
-from optimus import session
+from optimus import safe_commit, session
 
 # v0.5.1: Skip-list for instrumentation-noise endpoints. Any HTTP request
 # whose ``cmd`` starts with one of these prefixes is NOT recorded against
@@ -925,7 +925,7 @@ def _track_bg_job_finished(session_uuid: str, job_id: str) -> None:
 				"error": error,
 			},
 		)
-		frappe.db.commit()
+		safe_commit()
 	except Exception:
 		# DocType update failure must NOT break the worker and must NOT
 		# suppress the Redis write (which is in a separate try above).
