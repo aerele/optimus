@@ -380,12 +380,32 @@ class TestOpenAiCall:
 		assert "temperature" in fp.calls[0].body   # first attempt sent it
 		assert "temperature" not in fp.calls[1].body  # retry dropped it
 
+	def test_retries_without_temperature_on_422_temperature_error(self, monkeypatch):
+		# Some OpenAI-compatible gateways (LiteLLM / Together / vLLM) return the
+		# temperature rejection as HTTP 422, not 400; the retry must still fire.
+		err = '{"error":"invalid temperature: only 1 is allowed for this model"}'
+		fp = _post_sequence(_FakeResp(422, text=err), _FakeResp(200, _OPENAI_OK))
+		monkeypatch.setattr(requests, "post", fp)
+		text = ai_fix._call_openai_chat("u", "k", "some-thinking-model", "s", [{"role": "user", "content": "x"}])
+		assert text == "**Fix**\n\nuse a join"
+		assert len(fp.calls) == 2
+		assert "temperature" not in fp.calls[1].body  # retry dropped it
+
 	def test_non_temperature_400_is_not_retried(self, monkeypatch):
 		fp = _post_sequence(_FakeResp(400, text='{"error":{"message":"context_length_exceeded"}}'))
 		monkeypatch.setattr(requests, "post", fp)
 		with pytest.raises(ai_fix.AiFixError):
 			ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}])
 		assert len(fp.calls) == 1  # no retry for unrelated 400s
+
+	def test_404_body_mentioning_temperature_does_not_retry(self, monkeypatch):
+		# The retry is gated on a 400 or 422. A 404 whose body merely mentions the
+		# word (e.g. an error listing valid params) must not trigger a second call.
+		fp = _post_sequence(_FakeResp(404, {}, text='{"error":"not found; valid params: temperature, top_p"}'))
+		monkeypatch.setattr(requests, "post", fp)
+		with pytest.raises(ai_fix.AiFixError):
+			ai_fix._call_openai_chat("http://x/v1", "k", "m", "s", [{"role": "user", "content": "x"}])
+		assert len(fp.calls) == 1  # no retry
 
 
 class TestAereleSessionAttribution:
@@ -493,16 +513,20 @@ class TestHttpErrorMapping:
 		with pytest.raises(ai_fix.AiFixError, match="rate-limit"):
 			self._call()
 
-	def test_404_points_at_the_base_url_with_a_v1_hint(self, monkeypatch):
-		# The classic Ollama misconfig: Base URL without '/v1' → 404 on
-		# /chat/completions. The error must name the URL and the '/v1' fix.
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(404, {})))
+	def test_404_names_url_model_and_v1_and_surfaces_body(self, monkeypatch):
+		# A 404 can be a wrong model (editable for every provider) or a custom
+		# Base URL missing '/v1'. The message names the URL, points at the Model,
+		# keeps the conditional '/v1' hint and surfaces the provider's own body.
+		monkeypatch.setattr(requests, "post", _post_returning(
+			_FakeResp(404, {}, text='{"error":"model not found"}')))
 		with pytest.raises(ai_fix.AiFixError) as ei:
-			ai_fix._call_openai_chat("http://localhost:11434", "", "m", "s", [{"role": "user", "content": "x"}])
+			ai_fix._call_openai_chat("http://localhost:11434", "", "bad-model", "s", [{"role": "user", "content": "x"}])
 		msg = str(ei.value)
 		assert "404" in msg
 		assert "/chat/completions" in msg
+		assert "Model" in msg
 		assert "/v1" in msg
+		assert "model not found" in msg   # provider's own error body surfaced
 
 	def test_generic_http_error_includes_body_detail(self, monkeypatch):
 		monkeypatch.setattr(requests, "post", _post_returning(
@@ -557,8 +581,26 @@ class TestResolveProvider:
 		assert p["protocol"] == "openai"
 		assert "moonshot" in p["base_url"]
 
+	def test_deepseek_uses_openai_protocol_with_deepseek_default(self):
+		# DeepSeek's API is OpenAI-compatible, so it reuses the OpenAI wire path
+		# with its own hosted endpoint and default model.
+		with patch("optimus.settings.get_config", return_value=_cfg(ai_provider="DeepSeek")):
+			p = ai_fix._resolve_provider()
+		assert p["protocol"] == "openai"
+		assert p["base_url"] == "https://api.deepseek.com/v1"
+		assert p["model"] == "deepseek-chat"
+		assert p["needs_key"] is True
+
+	def test_deepseek_ignores_base_url_override(self):
+		# Hosted provider: a stored ai_base_url must not override its built-in
+		# endpoint (the field is hidden for hosted providers).
+		with patch("optimus.settings.get_config",
+		           return_value=_cfg(ai_provider="DeepSeek", ai_base_url="https://router.example/v1")):
+			p = ai_fix._resolve_provider()
+		assert p["base_url"] == "https://api.deepseek.com/v1"
+
 	def test_base_url_override_ignored_for_hosted_provider(self):
-		# A hosted provider (Anthropic / OpenAI / Kimi) ALWAYS uses its default
+		# A hosted provider (Anthropic / OpenAI / Kimi / DeepSeek) ALWAYS uses its default
 		# endpoint a stored ai_base_url must NOT override it. The Settings
 		# field is hidden for hosted providers, so a stale value would
 		# otherwise silently route calls to a dead host (ConnectionError). The

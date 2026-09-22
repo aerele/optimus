@@ -54,21 +54,21 @@
    "read_only": 1
   },
   {
-   "description": "JSON: list of {dotted_path, source: curated|freeform} entries the customer picked.",
+   "description": "The functions you picked for this line-profiling pass, stored as JSON. Each entry records the function path and whether it came from the suggested list or was typed in by hand.",
    "fieldname": "picks_json",
    "fieldtype": "Long Text",
    "label": "Picks (JSON)",
    "read_only": 1
   },
   {
-   "description": "JSON: aggregated per-function per-line timings analyzer input + render source.",
+   "description": "The line-by-line timing results for each profiled function, stored as JSON. This is what the analyzer reads and what the report is drawn from.",
    "fieldname": "results_json",
    "fieldtype": "Long Text",
    "label": "Results (JSON)",
    "read_only": 1
   },
   {
-   "description": "JSON: warnings emitted by the analyzer (failed picks, never-invoked, sample truncation).",
+   "description": "Any warnings the analyzer produced, stored as JSON (for example a pick that failed, a function that never ran or results that were trimmed for size).",
    "fieldname": "warnings_json",
    "fieldtype": "Long Text",
    "label": "Warnings (JSON)",

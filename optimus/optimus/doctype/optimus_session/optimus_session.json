@@ -97,17 +97,17 @@
    "label": "Top Severity",
    "options": "\nHigh\nMedium\nLow\nNone",
    "read_only": 1,
-   "description": "Highest severity finding detected in the session."
+   "description": "The most serious finding detected in this session."
   },
   {
    "fieldname": "notes",
    "fieldtype": "Text Editor",
    "label": "Steps to Reproduce / Notes",
-   "description": "What did you do during this session? Describe the flow step-by-step so your dev team (or a third-party reviewer) has full reproduction context alongside the technical findings. Also a good place for related ticket links. Rendered at the top of the report. Editable even on Ready sessions."
+   "description": "Describe what you did during this session, step by step, so your dev team (or an outside reviewer) can reproduce it alongside the technical findings. It is also a good place for related ticket links. This shows at the top of the report and you can edit it even after the session is Ready."
   },
   {
    "default": "0",
-   "description": "Tokens used by the AI Steps-to-Reproduce humanization for this session. Internal; rolled into the report's session AI-token total.",
+   "description": "This counts the AI tokens used to rewrite this session's Steps to Reproduce into plain language. Internal bookkeeping, counted as part of the session's total AI tokens in the report.",
    "fieldname": "ai_steps_tokens",
    "fieldtype": "Int",
    "hidden": 1,
@@ -117,7 +117,7 @@
   },
   {
    "default": "0",
-   "description": "Cumulative LLM tokens billed for this session analyze auto-suggest plus every Refresh / on-demand AI run. Matches the Aerele usage ledger; only ever increases.",
+   "description": "The running total of AI tokens billed for this session, covering the automatic suggestions during analyze plus every Refresh or on-demand AI run. It matches the Aerele usage ledger and only ever goes up.",
    "fieldname": "ai_tokens_spent",
    "fieldtype": "Long Int",
    "label": "AI Tokens Spent",
@@ -126,7 +126,7 @@
   },
   {
    "default": "0",
-   "description": "Number of times \"Refresh AI suggestions\" has been run on this session.",
+   "description": "This counts how many times \"Refresh AI suggestions\" has been run on this session.",
    "fieldname": "ai_refresh_count",
    "fieldtype": "Int",
    "label": "AI Refresh Count",
@@ -191,7 +191,7 @@
    "label": "Analyze Duration (ms)",
    "precision": "2",
    "read_only": 1,
-   "description": "How long the analyze pipeline took useful for tracking profiler health."
+   "description": "This records how long the analyze step took, in milliseconds. Handy for keeping an eye on the profiler's own health."
   },
   {
    "fieldname": "summary_section",
@@ -224,7 +224,7 @@
    "read_only": 1
   },
   {
-   "description": "Background (RQ) jobs the recorded flow enqueued, with their terminal status (completed / failed / timeout / running).",
+   "description": "The background jobs the recorded flow kicked off, each with its status (completed, failed, timed out or still running).",
    "fieldname": "background_jobs",
    "fieldtype": "Table",
    "label": "Background Jobs",
@@ -232,7 +232,7 @@
    "read_only": 1
   },
   {
-   "description": "Phase-2 line-profile runs attached to this session. Each row is one customer drill-down pass.",
+   "description": "The Phase 2 line-profiling runs attached to this session. Each row is one drill-down pass into the hot lines.",
    "fieldname": "phase_2_runs",
    "fieldtype": "Table",
    "label": "Phase 2 Runs",
@@ -245,21 +245,21 @@
    "label": "Reports"
   },
   {
-   "description": "Full data admin-scoped via Frappe File permissions.",
+   "description": "The full report file. Access is limited to admins through Frappe's file permissions.",
    "fieldname": "raw_report_file",
    "fieldtype": "Attach",
    "label": "Report",
    "read_only": 1
   },
   {
-   "description": "PDF version of the report, generated lazily on first download.",
+   "description": "A PDF version of the report. It is created the first time someone downloads it.",
    "fieldname": "raw_report_pdf_file",
    "fieldtype": "Attach",
    "label": "Report (PDF)",
    "read_only": 1
   },
   {
-   "description": "Gzipped JSON snapshot of the raw recordings (redacted at capture). Lets AI re-run and report drill-downs regenerate after the live recording is cleaned from Redis.",
+   "description": "A compressed JSON snapshot of the raw recordings (already redacted when captured). It lets AI re-runs and report drill-downs still work after the live recording has been cleared from Redis.",
    "fieldname": "recordings_file",
    "fieldtype": "Attach",
    "hidden": 1,
@@ -319,7 +319,7 @@
    "hidden": 1,
    "label": "v0.5.0 Aggregates (JSON)",
    "read_only": 1,
-   "description": "v0.5.0+: JSON dict holding infra_pressure and frontend_timings aggregates infra_timeline, infra_summary, frontend_xhr_matched, frontend_vitals_by_page, frontend_orphans, frontend_summary. Consumed by the Server Resource and Frontend panels in the report template."
+   "description": "Stored as JSON: the server-resource and browser-timing summaries that feed the Server Resource and Frontend panels of the report. Holds these keys: infra_timeline, infra_summary, frontend_xhr_matched, frontend_vitals_by_page, frontend_orphans, frontend_summary."
   },
   {
    "fieldname": "analyzer_warnings",

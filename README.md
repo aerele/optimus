@@ -198,7 +198,7 @@ hot-loop pick from freezing the UI.
 
 ### AI fix suggestions (optional)
 
-Optimus can call an LLM (Anthropic, OpenAI, Kimi, or any OpenAI-
+Optimus can call an LLM (Anthropic, OpenAI, Kimi, DeepSeek, or any OpenAI-
 compatible endpoint including local ones like Ollama or LM Studio) to
 suggest concrete fixes for each finding. Off by default no traffic
 leaves your bench until you enable it.
@@ -612,9 +612,9 @@ Off by default no traffic leaves your bench until you turn it on.
 | Field | Default | Purpose |
 |---|---|---|
 | **Enable AI Fix Suggestions** | ✗ off | Master switch for the entire AI feature. When off, every AI button on the Session form is hidden and the API refuses. |
-| **Provider** | `Anthropic` | Wire format. `Anthropic`, `OpenAI`, `Kimi` and `OpenAI-compatible` (which requires Base URL + Model covers Ollama, LM Studio, vLLM, OpenRouter, Together, Groq). |
+| **Provider** | `Anthropic` | Wire format. `Anthropic`, `OpenAI`, `Kimi`, `DeepSeek` and `OpenAI-compatible` (which requires Base URL + Model covers Ollama, LM Studio, vLLM, OpenRouter, Together, Groq). |
 | **Base URL** | _empty_ | Leave blank to use the hosted default. Required for `OpenAI-compatible`: e.g. `http://localhost:11434/v1` (Ollama), `http://localhost:1234/v1` (LM Studio). |
-| **Model** | _empty_ | Leave blank for the provider default. Examples: `claude-sonnet-4-6` (Anthropic), `gpt-4.1-mini` (OpenAI), `kimi-k2-0905-preview` (Kimi), or your local model name. |
+| **Model** | _empty_ | Leave blank for the provider default. Examples: `claude-sonnet-4-6` (Anthropic), `gpt-4.1-mini` (OpenAI), `kimi-k2-0905-preview` (Kimi), `deepseek-chat` (DeepSeek), or your local model name. |
 | **API Key** | _empty_ | Per-site, stored encrypted (Frappe `Password` field). Most local OpenAI-compatible endpoints don't need one; hosted ones do. |
 
 #### Use the LLM for (section toggles)

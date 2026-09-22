@@ -8,6 +8,46 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.52] - 2026-09-20
+
+### Fixed
+
+- **Line-Level Drilldown table no longer overflows the report.** Long source lines
+  used `white-space: pre` and never wrapped, so the per-function drilldown table grew
+  wider than its card and the row borders spilled past the report container. The source
+  column now wraps so the per-function table stays within its card; any table still wider
+  than its card (the cross-run diff table) scrolls inside the card instead of spilling.
+- **A 404 from the AI provider now points at fixable causes and shows the reason.** The
+  404 message named only the Base URL, which is fixed and hidden for hosted providers, so
+  it steered the operator away from the real cause. It now leads with the Model name (a
+  wrong model returns 404 and the field is editable for every provider), phrases the custom
+  Base URL note as a conditional so a hosted-provider operator skips it and surfaces the
+  provider's own error body.
+
+---
+
+## [0.12.51] - 2026-09-17
+
+### Added
+
+- **DeepSeek as an AI provider.** Pick "DeepSeek" under Optimus Settings ▸ AI Fix
+  Suggestions and paste a DeepSeek API key. Its API is OpenAI-compatible, so it reuses
+  the existing OpenAI wire path with DeepSeek's hosted endpoint
+  (`https://api.deepseek.com/v1`) and defaults to the `deepseek-chat` (V3) model;
+  `deepseek-reasoner` (R1) also works. No new request path was added.
+
+### Changed
+
+- **"Suggest AI fixes in the report by default" (`ai_auto_suggest`) now defaults to on.**
+  When AI Fix Suggestions is enabled, analyze auto-suggests fixes for the top-N eligible
+  findings so they are built into the report without a per-finding click. This changes
+  behaviour only *after* an operator enables AI: the master `ai_enabled` switch is still
+  off by default, so nothing is sent to any LLM out of the box. Untick the field to go
+  back to on-demand (click-to-send) suggestions. Existing sites keep their saved value;
+  only fresh installs pick up the new default.
+
+---
+
 ## [0.12.50] - 2026-09-16
 
 ### Fixed

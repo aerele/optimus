@@ -30,7 +30,14 @@ from optimus.analyzers.base import humanize_duration_ms
 
 class AiFixError(Exception):
 	"""User-facing error from the AI-fix path. The API endpoint converts
-	this into ``frappe.throw`` so the message is shown to the operator."""
+	this into ``frappe.throw`` so the message is shown to the operator.
+	``status_code`` carries the provider's HTTP status when the error came
+	from an HTTP response, so callers can react to it (the temperature retry
+	fires only on a 400 or 422)."""
+
+	def __init__(self, message: str = "", *, status_code: int | None = None):
+		super().__init__(message)
+		self.status_code = status_code
 
 
 # Findings that carry enough code / SQL context for the LLM to reason about
@@ -78,6 +85,16 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 		"protocol": "openai",
 		"base_url": "https://api.moonshot.ai/v1",
 		"model": "kimi-k2-0905-preview",
+		"needs_key": True,
+	},
+	"DeepSeek": {
+		# DeepSeek's API is OpenAI-compatible, so it reuses the OpenAI wire
+		# path. Default to deepseek-chat (V3). deepseek-reasoner (R1) also works
+		# and ignores a custom temperature instead of rejecting it, so the
+		# temperature retry in _call_openai_chat never needs to fire for it.
+		"protocol": "openai",
+		"base_url": "https://api.deepseek.com/v1",
+		"model": "deepseek-chat",
 		"needs_key": True,
 	},
 	"OpenAI-compatible": {
@@ -767,7 +784,7 @@ def _resolve_provider() -> dict:
 	defaults = _PROVIDER_DEFAULTS[name]
 	# The Base URL override applies ONLY to bring-your-own providers (those
 	# with no built-in default endpoint i.e. "OpenAI-compatible"). Hosted
-	# providers (Anthropic / OpenAI / Kimi) ALWAYS use their default: the
+	# providers (Anthropic / OpenAI / Kimi / DeepSeek) ALWAYS use their default: the
 	# Settings field is hidden for them, so a previously-stored value must not
 	# silently override and route calls to a dead host (that stale-value trap
 	# caused a ConnectionError after the field was hidden for hosted providers).
@@ -1240,6 +1257,17 @@ def _log_http_error(provider: str, where: str, status: int | None, detail: str =
 		pass
 
 
+def _response_detail(resp) -> str:
+	"""The provider's own error body (capped), as a ': ...' suffix or '' when
+	there is no readable body. Surfaces the specific reason ("model not found",
+	"context too long", ...) so it reaches the operator."""
+	try:
+		body_text = (resp.text or "").strip()
+		return ": " + body_text[:300] if body_text else ""
+	except Exception:
+		return ""
+
+
 def _http_post(url: str, headers: dict, body: dict, *, provider: str, where: str) -> dict:
 	"""POST JSON, return the parsed response dict. Maps transport / HTTP /
 	decode errors to ``AiFixError`` with operator-friendly messages."""
@@ -1256,37 +1284,30 @@ def _http_post(url: str, headers: dict, body: dict, *, provider: str, where: str
 	status = resp.status_code
 	if status in (401, 403):
 		_log_http_error(provider, where, status)
-		raise AiFixError("The AI provider rejected the API key. Check it in Optimus Settings.")
+		raise AiFixError("The AI provider rejected the API key. Check it in Optimus Settings.", status_code=status)
 	if status == 404:
-		# Almost always a wrong Base URL: the path segment is missing.
-		# OpenAI-compatible servers (Ollama, LM Studio, vLLM, OpenRouter,
-		# Together, Groq) expose chat completions under `/v1`, so the Base
-		# URL has to include it.
+		# A 404 means the endpoint path or the model was not found. The Model
+		# field is editable for every provider and a wrong model name returns
+		# 404, so the message leads with that. It also always mentions a custom
+		# ('OpenAI-compatible') Base URL missing the '/v1' segment, phrased as
+		# "if you set a custom Base URL" so a hosted-provider operator (whose
+		# Base URL is fixed and hidden) reads it as not their case. The
+		# provider's own error body is surfaced either way.
 		_log_http_error(provider, where, status, f"url={url}")
-		hint = (
-			" OpenAI-compatible endpoints serve this under '/v1'. Set the Base URL to e.g. "
-			"http://localhost:11434/v1 (Ollama), http://localhost:1234/v1 (LM Studio)."
-			if provider == "openai" else ""
-		)
 		raise AiFixError(
-			f"The AI provider returned 404 (Not Found) for {url}. The Base URL in "
-			f"Optimus Settings is probably missing a path segment.{hint}"
+			f"The AI provider returned 404 (Not Found) for {url}. Check that the Model "
+			"in Optimus Settings is a valid model name for this provider: a wrong model "
+			"returns 404. If you set a custom Base URL, make sure it includes the '/v1' "
+			"path segment (for example http://localhost:11434/v1 for Ollama)."
+			+ _response_detail(resp),
+			status_code=status,
 		)
 	if status == 429:
 		_log_http_error(provider, where, status)
-		raise AiFixError("The AI provider is rate-limiting requests. Try again shortly.")
+		raise AiFixError("The AI provider is rate-limiting requests. Try again shortly.", status_code=status)
 	if status >= 400:
 		_log_http_error(provider, where, status)
-		# Surface the response body's error text if the provider gave one
-		# helpful for "model not found", "context too long", etc. Capped.
-		detail = ""
-		try:
-			body_text = (resp.text or "").strip()
-			if body_text:
-				detail = ": " + body_text[:300]
-		except Exception:
-			detail = ""
-		raise AiFixError(f"The AI provider returned an error (HTTP {status}){detail}")
+		raise AiFixError(f"The AI provider returned an error (HTTP {status}){_response_detail(resp)}", status_code=status)
 
 	try:
 		return resp.json()
@@ -1421,13 +1442,17 @@ def _call_openai_chat(
 	try:
 		data = _http_post(url, headers, body, provider="openai", where="chat/completions")
 	except AiFixError as e:
-		# Some reasoning models reject a non-default `temperature` with HTTP
-		# 400. OpenAI o-series are pre-filtered by `_is_reasoning_model`, but
-		# others e.g. Moonshot/Kimi "thinking" variants only allow the
-		# default and say so ("invalid temperature: only 1 is allowed for this
-		# model"). We can't enumerate every such model, so retry once without
-		# `temperature` (letting the model use its own default).
-		if sent_temperature and "temperature" in str(e).lower():
+		# Some reasoning models reject a non-default `temperature` with a
+		# request-validation error. OpenAI o-series are pre-filtered by
+		# `_is_reasoning_model`, but others e.g. Moonshot/Kimi "thinking"
+		# variants only allow the default and say so ("invalid temperature:
+		# only 1 is allowed for this model"). We can't enumerate every such
+		# model, so retry once without `temperature` (letting the model use its
+		# own default). Gate on a request-validation status (400 or 422; some
+		# OpenAI-compatible gateways use 422) so a body that mentions the word
+		# for another reason (e.g. a 404 listing valid params) can't trigger a
+		# needless second call.
+		if sent_temperature and getattr(e, "status_code", None) in (400, 422) and "temperature" in str(e).lower():
 			body.pop("temperature", None)
 			data = _http_post(url, headers, body, provider="openai", where="chat/completions")
 		else:

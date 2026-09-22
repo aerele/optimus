@@ -102,7 +102,7 @@
   },
   {
    "default": "1",
-   "description": "Master kill-switch. When unchecked, no requests or jobs are profiled even if users have active sessions. Use this to pause all instrumentation site-wide without touching individual users' widgets.",
+   "description": "The master on/off switch. When it is off, nothing is profiled at all, even if people have sessions running. Use it to pause profiling across the whole site without changing anyone's individual widget.",
    "fieldname": "enabled",
    "fieldtype": "Check",
    "label": "Profiler Enabled"
@@ -113,7 +113,7 @@
   },
   {
    "default": "30",
-   "description": "Optimus Session records older than this are eligible for automatic deletion by the daily housekeeping job. Set to 0 to keep forever (the daily sweep becomes a no-op). Reference values: Strict: 1  ·  Recommended: 30  ·  Relaxed: 7.",
+   "description": "Optimus Session records older than this many days become eligible for the daily cleanup job to delete. Set it to 0 to keep them forever (the daily cleanup then does nothing). Reference values: Strict: 1  ·  Recommended: 30  ·  Relaxed: 7.",
    "fieldname": "session_retention_days",
    "fieldtype": "Int",
    "label": "Session Retention (days)",
@@ -162,7 +162,7 @@
    "options": "<p class=\"text-muted small\">Patterns and users to exclude from instrumentation. Matches against request path / job kwargs / session user. The profiler's own admin endpoints are always skipped these settings extend the built-in skip list.</p>"
   },
   {
-   "description": "One pattern per line. URL paths starting with any of these prefixes are NOT profiled, even when an active session exists. Useful for healthcheck endpoints, polling APIs, etc. Lines starting with # are treated as comments. Example: /api/method/ping",
+   "description": "One URL prefix per line. Any request whose path starts with one of these is never profiled, even during an active session. Handy for health-check endpoints, polling APIs and the like. Lines starting with # are treated as comments. Example: /api/method/ping",
    "fieldname": "skip_request_paths",
    "fieldtype": "Small Text",
    "label": "Skip Request Paths"
@@ -172,7 +172,7 @@
    "fieldtype": "Column Break"
   },
   {
-   "description": "One user email per line. Requests / jobs running as one of these users are NOT profiled. Useful for excluding system bot users (scheduler, health-checks). Lines starting with # are treated as comments.",
+   "description": "One user email per line. Requests or jobs running as any of these users are never profiled. Handy for leaving out system or bot users such as the scheduler. Lines starting with # are treated as comments.",
    "fieldname": "skip_users",
    "fieldtype": "Small Text",
    "label": "Skip Users"
@@ -191,7 +191,7 @@
    "fieldname": "sensitive_sql_columns",
    "fieldtype": "Small Text",
    "label": "Sensitive SQL Columns",
-   "description": "Extra column names whose literal values in WHERE / LIKE / IN clauses are redacted to '<REDACTED>'. One per line. Example: recovery_code, bank_account, otp_seed."
+   "description": "Extra database column names whose values should be hidden. When one of these appears in a query filter, its value is replaced with '<REDACTED>'. One name per line. Example: recovery_code, bank_account, otp_seed."
   },
   {
    "fieldname": "column_break_redaction",
@@ -201,7 +201,7 @@
    "fieldname": "sensitive_form_keys",
    "fieldtype": "Small Text",
    "label": "Sensitive Form / Header Keys",
-   "description": "Extra key names (form_dict / headers) whose values are replaced with '<REDACTED:keyname>'. One per line. Example: x-customer-id, recovery_code."
+   "description": "Extra form-field or request-header names whose values should be hidden. Each match is replaced with '<REDACTED:keyname>'. One name per line. Example: x-customer-id, recovery_code."
   },
   {
    "fieldname": "capacity_section",
@@ -215,7 +215,7 @@
   },
   {
    "default": "2000",
-   "description": "Max queries per recording that get enriched (sqlparse format + EXPLAIN + normalization). Anything beyond this is truncated with a warning. Keep reasonable each query costs one EXPLAIN round-trip. Set to 0 for no cap (enrich every query analyze time scales linearly with query volume, so reserve this for forensic deep-dives). Reference values: Strict: 0  ·  Recommended: 2000  ·  Relaxed: 1000.",
+   "description": "Each recording enriches at most this many queries with the full treatment (tidy formatting, a query plan and normalization). Anything past the limit is dropped with a warning. Keep it sensible, since each query adds one database round-trip. Set it to 0 for no limit, which enriches every query but makes analyze time grow with the number of queries, so save that for deep investigations. Reference values: Strict: 0  ·  Recommended: 2000  ·  Relaxed: 1000.",
    "fieldname": "max_queries_per_recording",
    "fieldtype": "Int",
    "label": "Max Queries per Recording",
@@ -224,7 +224,7 @@
   },
   {
    "default": "1.0",
-   "description": "pyinstrument statistical-sampler interval in milliseconds. Lower = finer call-tree resolution but higher overhead. 1ms is the recommended default; raise to 5-10ms for prod-like profiling. Cannot be lower than 0.1ms. Reference values: Strict: 0.5  ·  Recommended: 1.0  ·  Relaxed: 5.0.",
+   "description": "The profiler samples what your code is doing this often, in milliseconds. A smaller number captures more detail but adds more overhead; a larger number is lighter but coarser. 1ms suits most cases, raise it to 5-10ms when profiling on a busy production-like site. It cannot go below 0.1ms. Reference values: Strict: 0.5  ·  Recommended: 1.0  ·  Relaxed: 5.0.",
    "fieldname": "pyinstrument_sampler_interval_ms",
    "fieldtype": "Float",
    "label": "Sampler Interval (ms)",
@@ -237,14 +237,14 @@
   },
   {
    "default": "1",
-   "description": "When checked, the \"Time spent per database table\" section in the report drops Frappe schema/meta tables (tabDocType, tabDocField, tabSingles, tabPatch Log, tabWorkspace, tabRole, tabDocType Link/Action/State, …), framework-internal tables (tabHas Role, tabDefaultValue, tabUser Social Login, tabUser Role Profile, tabBlock Module, tabUser Email) and information_schema.* touched by every request via framework machinery, not user-actionable. A small \"(N tables hidden)\" note replaces them. Other sections (top-queries leaderboard, per-action drill-down, full recordings) are unaffected. Uncheck to see them all.",
+   "description": "When ticked, the report's \"Time spent per database table\" section hides Frappe's own internal tables (things like tabDocType, tabDocField, tabSingles, tabRole and the information_schema tables) that every request touches through the framework and that you cannot act on. A short \"(N tables hidden)\" note takes their place. The other sections (top queries, per-action drill-down, full recordings) are not affected. Untick to see every table.",
    "fieldname": "hide_framework_tables",
    "fieldtype": "Check",
    "label": "Hide framework / internal database tables in the breakdown"
   },
   {
    "default": "300",
-   "description": "How long (seconds, capped at 300) the analyze job watches the background jobs the profiled flow enqueued, waiting for each to reach a terminal state (completed / failed / timeout) before generating the report. Every enqueued job is listed in the report's \"Background jobs\" section with its status; a job still running when this window elapses is shown as \"Running\" (click Retry Analyze once it finishes to capture its data). 0 = don't wait. On a single-worker bench the analyze job yields the worker between checks so those jobs can actually run; if the scheduler is disabled / no worker is available, the wait is skipped. Reference values: Strict: 300  ·  Recommended: 300  ·  Relaxed: 60.",
+   "description": "The analyze step waits this many seconds (capped at 300) for the background jobs your flow started to finish before it builds the report. Every such job is listed in the report's \"Background jobs\" section with its status. A job still going when the wait runs out is shown as \"Running\", so click Retry Analyze once it finishes to pull in its data. Use 0 to skip waiting. On a single-worker bench the analyze step steps aside between checks so those jobs can actually run. If the scheduler is off or no worker is available, the wait is skipped. Reference values: Strict: 300  ·  Recommended: 300  ·  Relaxed: 60.",
    "fieldname": "background_job_wait_seconds",
    "fieldtype": "Int",
    "label": "Wait for Background Jobs (seconds)",
@@ -263,7 +263,7 @@
   },
   {
    "default": "0",
-   "description": "Drop actions shorter than this many milliseconds from the per-action breakdown in reports. 0 = show everything. Useful for declutter when a flow generates many sub-millisecond background polls. Reference values: Strict: 1  ·  Recommended: 0  ·  Relaxed: 50.",
+   "description": "Hide actions shorter than this many milliseconds from the per-action breakdown in the report. Use 0 to show everything. Handy for cutting clutter when a flow fires lots of tiny background polls. Reference values: Strict: 1  ·  Recommended: 0  ·  Relaxed: 50.",
    "fieldname": "min_action_duration_ms",
    "fieldtype": "Float",
    "label": "Min Action Duration to Show (ms)",
@@ -276,7 +276,7 @@
   },
   {
    "default": "1000",
-   "description": "Render any duration above this threshold (in milliseconds) as seconds e.g. with the default of 1000, 5234ms displays as 5.23s but 800ms stays as 800ms. Set to 0 to disable the rollover and keep every duration in milliseconds. Reference values: Strict: 500  ·  Recommended: 1000  ·  Relaxed: 99999999.",
+   "description": "Show any duration above this many milliseconds in seconds instead. For example, with the default of 1000, 5234ms shows as 5.23s while 800ms stays as 800ms. Set it to 0 to turn this off and keep every duration in milliseconds. Reference values: Strict: 500  ·  Recommended: 1000  ·  Relaxed: 99999999.",
    "fieldname": "large_duration_threshold_ms",
    "fieldtype": "Float",
    "label": "Render durations in seconds above (ms)",
@@ -300,7 +300,7 @@
   },
   {
    "default": "Recommended",
-   "description": "Detection-sensitivity preset for the thresholds below. Named presets (Strict / Recommended / Relaxed) drive the thresholds at analysis time and keep the individual fields read-only. Recommended tracks the shipped defaults across upgrades. Switch to Custom to hand-tune.",
+   "description": "A preset for how sensitive the detection thresholds below should be. The named presets (Strict, Recommended, Relaxed) set those thresholds for you and keep the individual fields read-only. Recommended follows the shipped defaults across upgrades. Switch to Custom to set the thresholds by hand.",
    "fieldname": "config_profile",
    "fieldtype": "Select",
    "label": "Sensitivity Profile",
@@ -318,7 +318,7 @@
   },
   {
    "default": "5",
-   "description": "Minimum get_doc calls for the same (doctype, name) from the same callsite before a Redundant Call finding is emitted. Reference values: Strict: 3  ·  Recommended: 5  ·  Relaxed: 10.",
+   "description": "The same document must be loaded this many times from the same spot in the code before it is flagged as a Redundant Call. Reference values: Strict: 3  ·  Recommended: 5  ·  Relaxed: 10.",
    "fieldname": "redundant_doc_threshold",
    "fieldtype": "Int",
    "label": "Redundant get_doc Threshold",
@@ -327,7 +327,7 @@
   },
   {
    "default": "50",
-   "description": "Minimum cache lookups for the same key from the same callsite before a Redundant Call finding is emitted. Cache lookups aren't individually timed, so low-count loops are indistinguishable from framework background noise 50 matches the high-severity threshold and cuts 0ms noise. Reference values: Strict: 20  ·  Recommended: 50  ·  Relaxed: 100.",
+   "description": "The same cache key must be looked up this many times from the same spot in the code before it is flagged as a Redundant Call. Cache lookups are not timed one by one, so small loops look just like normal framework background noise. 50 lines up with the high-severity threshold and cuts out the 0ms noise. Reference values: Strict: 20  ·  Recommended: 50  ·  Relaxed: 100.",
    "fieldname": "redundant_cache_threshold",
    "fieldtype": "Int",
    "label": "Redundant Cache Lookup Threshold",
@@ -340,7 +340,7 @@
   },
   {
    "default": "10",
-   "description": "Minimum has_permission calls for the same (doctype, name, ptype) from the same callsite before a Redundant Call finding is emitted. Reference values: Strict: 5  ·  Recommended: 10  ·  Relaxed: 25.",
+   "description": "The same permission check must run this many times from the same spot in the code before it is flagged as a Redundant Call. Reference values: Strict: 5  ·  Recommended: 10  ·  Relaxed: 25.",
    "fieldname": "redundant_perm_threshold",
    "fieldtype": "Int",
    "label": "Redundant Permission Check Threshold",
@@ -349,7 +349,7 @@
   },
   {
    "default": "10",
-   "description": "Minimum identical queries from the same callsite before an N+1 Query finding is emitted. Reference values: Strict: 5  ·  Recommended: 10  ·  Relaxed: 25.",
+   "description": "The same query must run this many times from the same spot in the code before it is flagged as an N+1 Query. Reference values: Strict: 5  ·  Recommended: 10  ·  Relaxed: 25.",
    "fieldname": "n_plus_one_min_occurrences",
    "fieldtype": "Int",
    "label": "N+1 Minimum Occurrences",
@@ -368,7 +368,7 @@
   },
   {
    "default": "200",
-   "description": "Single SQL query duration above this is flagged as a Slow Query finding. Default 200ms anything below is usually within acceptable per-query budget. Reference values: Strict: 100  ·  Recommended: 200  ·  Relaxed: 500.",
+   "description": "A single SQL query that takes longer than this many milliseconds is flagged as a Slow Query. The default is 200ms; anything under that is usually fine for a single query. Reference values: Strict: 100  ·  Recommended: 200  ·  Relaxed: 500.",
    "fieldname": "slow_query_threshold_ms",
    "fieldtype": "Float",
    "label": "Slow Query Threshold (ms)",
@@ -377,7 +377,7 @@
   },
   {
    "default": "25",
-   "description": "Slow Hot Path threshold as a percentage of the action's wall time. A subtree consuming >= this % AND >= the min-ms below qualifies. Default 25% with 200ms minimum. Reference values: Strict: 15  ·  Recommended: 25  ·  Relaxed: 40.",
+   "description": "The Slow Hot Path threshold, as a percentage of the action's total time. A branch of the call tree qualifies when it uses at least this percentage of the time and also at least the minimum milliseconds set below. The default is 25% with a 200ms minimum. Reference values: Strict: 15  ·  Recommended: 25  ·  Relaxed: 40.",
    "fieldname": "slow_hot_path_pct_threshold",
    "fieldtype": "Float",
    "label": "Slow Hot Path Threshold (% of action wall time)",
@@ -386,7 +386,7 @@
   },
   {
    "default": "200",
-   "description": "Slow Hot Path minimum absolute time. A subtree needs both >= the % above AND >= this many ms to qualify. Reference values: Strict: 100  ·  Recommended: 200  ·  Relaxed: 500.",
+   "description": "The smallest absolute time a Slow Hot Path must take. A branch of the call tree qualifies only when it meets both the percentage above and at least this many milliseconds. Reference values: Strict: 100  ·  Recommended: 200  ·  Relaxed: 500.",
    "fieldname": "slow_hot_path_min_ms",
    "fieldtype": "Float",
    "label": "Slow Hot Path Minimum (ms)",
@@ -399,7 +399,7 @@
   },
   {
    "default": "50",
-   "description": "Phase 2 Hot Line: a single line consuming this %% of the function's total time AND >= the min-ms below is flagged High severity. Default 50% / 100ms. Reference values: Strict: 35  ·  Recommended: 50  ·  Relaxed: 70.",
+   "description": "For Phase 2 line profiling: a single line is flagged as High severity when it uses at least this percentage of its function's total time and also at least the minimum milliseconds below. The default is 50% with a 100ms minimum. Reference values: Strict: 35  ·  Recommended: 50  ·  Relaxed: 70.",
    "fieldname": "hot_line_high_pct",
    "fieldtype": "Float",
    "label": "Hot Line High Severity (% of function time)",
@@ -408,7 +408,7 @@
   },
   {
    "default": "100",
-   "description": "Phase 2 Hot Line minimum absolute time for High severity. Reference values: Strict: 50  ·  Recommended: 100  ·  Relaxed: 250.",
+   "description": "The smallest absolute time a single line must take to be flagged as High severity in Phase 2 line profiling. Reference values: Strict: 50  ·  Recommended: 100  ·  Relaxed: 250.",
    "fieldname": "hot_line_high_min_ms",
    "fieldtype": "Float",
    "label": "Hot Line High Severity Min (ms)",
@@ -427,7 +427,7 @@
   },
   {
    "default": "10",
-   "description": "Cap on how many phase-2 runs can be retained per Optimus Session. When exceeded, the oldest run's full results are archived to a private File and only the row metadata is kept in the DocType. Set to 0 for no cap (every run keeps full results watch DocType size on heavy users). Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
+   "description": "Each session keeps at most this many Phase 2 runs in full. Once there are more, the oldest run's full results are moved to a private file and only its summary row stays on the record. Set it to 0 for no limit, but keep an eye on record size for heavy users. Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
    "fieldname": "phase2_max_runs_per_session",
    "fieldtype": "Int",
    "label": "Phase 2: Max Runs per Session",
@@ -436,7 +436,7 @@
   },
   {
    "default": "1",
-   "description": "When checked, the picker dialog's 'Auto-expand hot chain' checkbox starts ticked. Auto-expansion walks each curated pick down phase-1's call tree to instrument the full hot chain in one shot.",
+   "description": "When ticked, the 'Auto-expand hot chain' box in the picker starts already checked. Auto-expand follows each suggested pick down the Phase 1 call tree so the whole hot chain gets profiled in one go.",
    "fieldname": "phase2_default_auto_expand",
    "fieldtype": "Check",
    "label": "Phase 2: Default Auto-Expand Hot Chain"
@@ -447,7 +447,7 @@
   },
   {
    "default": "10",
-   "description": "Maximum levels deep that auto-expand will follow into the call tree from a curated pick. Set to 0 for unlimited depth (walks to the leaf pairs naturally with auto-expand min-ms 0 for the deepest possible instrumentation). Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
+   "description": "Auto-expand follows into the call tree at most this many levels from a suggested pick. Set it to 0 for unlimited depth, which walks all the way to the leaves (pair it with an auto-expand minimum of 0 for the deepest possible profiling). Reference values: Strict: 0  ·  Recommended: 10  ·  Relaxed: 5.",
    "fieldname": "auto_expand_max_depth",
    "fieldtype": "Int",
    "label": "Auto-Expand: Max Depth",
@@ -456,7 +456,7 @@
   },
   {
    "default": "50",
-   "description": "Auto-expand stops descending when the next-hottest child consumes less than this many milliseconds. Lower = follow deeper into smaller hot spots; higher = stop earlier and instrument fewer functions. Set to 0 to follow into every measurable child (no minimum). Reference values: Strict: 10  ·  Recommended: 50  ·  Relaxed: 100.",
+   "description": "Auto-expand stops going deeper once the next-hottest child takes less than this many milliseconds. A lower value follows further into smaller hot spots; a higher value stops sooner and profiles fewer functions. Set it to 0 to follow into every measurable child (no minimum). Reference values: Strict: 10  ·  Recommended: 50  ·  Relaxed: 100.",
    "fieldname": "auto_expand_min_ms",
    "fieldtype": "Float",
    "label": "Auto-Expand: Minimum Child Time (ms)",
@@ -480,7 +480,7 @@
   },
   {
    "default": "0",
-   "description": "Master switch for the AI fix-suggestion feature. Off by default.",
+   "description": "The master on/off switch for AI fix suggestions. Off by default.",
    "fieldname": "ai_enabled",
    "fieldtype": "Check",
    "label": "Enable AI Fix Suggestions"
@@ -488,15 +488,15 @@
   {
    "default": "Anthropic",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "Wire format / hosted defaults. \"OpenAI-compatible\" requires a Base URL and Model use it for Ollama, LM Studio, vLLM, OpenRouter, Together, Groq, etc.",
+   "description": "This picks the AI provider's wire format. \"OpenAI-compatible\" needs a Base URL and a Model. Use it for Ollama, LM Studio, vLLM, OpenRouter, Together, Groq and similar.",
    "fieldname": "ai_provider",
    "fieldtype": "Select",
    "label": "Provider",
-   "options": "Anthropic\nOpenAI\nKimi (Moonshot)\nOpenAI-compatible"
+   "options": "Anthropic\nOpenAI\nKimi (Moonshot)\nDeepSeek\nOpenAI-compatible"
   },
   {
    "depends_on": "eval:doc.ai_enabled && doc.ai_provider == 'OpenAI-compatible'",
-   "description": "The OpenAI-compatible endpoint base (include /v1) e.g. http://localhost:11434/v1 (Ollama), http://localhost:1234/v1 (LM Studio), https://openrouter.ai/api/v1. Hosted providers (Anthropic, OpenAI, Kimi) use their built-in default, so this is hidden for them.",
+   "description": "The base address of your OpenAI-compatible endpoint (include /v1). For example http://localhost:11434/v1 (Ollama), http://localhost:1234/v1 (LM Studio) or https://openrouter.ai/api/v1. Hosted providers (Anthropic, OpenAI, Kimi, DeepSeek) use their own built-in address, so this box is hidden for them.",
    "fieldname": "ai_base_url",
    "fieldtype": "Data",
    "label": "Base URL"
@@ -507,21 +507,21 @@
   },
   {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "Leave blank to use the provider default. Examples: claude-sonnet-4-6 (Anthropic), gpt-4.1-mini (OpenAI), kimi-k2-0905-preview (Kimi), or your local model name.",
+   "description": "Leave this blank to use the provider's default model. Examples: claude-sonnet-4-6 (Anthropic), gpt-4.1-mini (OpenAI), kimi-k2-0905-preview (Kimi), deepseek-chat (DeepSeek) or the name of your local model.",
    "fieldname": "ai_model",
    "fieldtype": "Data",
    "label": "Model"
   },
   {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "API key for the provider, if it needs one. Stored encrypted per-site. Most local OpenAI-compatible endpoints (Ollama, LM Studio, vLLM) don't need a key; hosted ones (OpenAI, Anthropic, Kimi, OpenRouter, Together, Groq) do.",
+   "description": "The provider's API key, if it needs one. Stored encrypted for this site. Most local endpoints (Ollama, LM Studio, vLLM) do not need a key; hosted ones (OpenAI, Anthropic, Kimi, DeepSeek, OpenRouter, Together, Groq) do.",
    "fieldname": "ai_api_key",
    "fieldtype": "Password",
    "label": "API Key"
   },
   {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "Pick which sections of the report may use the LLM. Turning one off is a hard disable that section is never auto-generated, its buttons on the Optimus Session form are hidden, the API refuses and re-rendered reports omit it.",
+   "description": "Choose which parts of the report are allowed to use the AI. Turning one off disables it completely: that part is never generated automatically, its buttons on the session form are hidden, the API turns down requests for it and re-rendered reports leave it out.",
    "fieldname": "ai_sections_break",
    "fieldtype": "Section Break",
    "label": "Use the LLM for"
@@ -529,7 +529,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When off: no AI-suggested fix on findings not auto-generated during analyze, the \"Suggest a fix (AI)\" / \"Generate AI fixes\" / \"Re-evaluate AI fixes\" buttons are hidden, the API refuses and re-rendered reports omit the AI-fix block.",
+   "description": "When off, findings get no AI-suggested fix: nothing is generated during analyze, the \"Suggest a fix (AI)\", \"Generate AI fixes\" and \"Re-evaluate AI fixes\" buttons are hidden, the API turns down requests and re-rendered reports leave out the AI-fix block.",
    "fieldname": "ai_suggest_findings",
    "fieldtype": "Check",
    "label": "Fix suggestions on findings"
@@ -537,7 +537,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When off: no \"Index advice (AI)\" block in the \"Time spent per database table\" section not auto-generated, the \"Suggest an index (AI)\" button is hidden, the API refuses and re-rendered reports omit it.",
+   "description": "When off, there is no \"Index advice (AI)\" block in the \"Time spent per database table\" section: nothing is generated automatically, the \"Suggest an index (AI)\" button is hidden, the API turns down requests and re-rendered reports leave it out.",
    "fieldname": "ai_suggest_indexes",
    "fieldtype": "Check",
    "label": "Index recommendations (DB-tables breakdown)"
@@ -550,7 +550,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When checked, the auto-generated \"Steps to Reproduce\" note on each session is rewritten by the LLM into a friendly, human-readable flow (the raw captured-actions list is kept below it; falls back to it if the LLM call fails). When off: the note stays the plain action list, the \"Humanize Steps (AI)\" button is hidden and the API refuses. (An already-humanized older session keeps its note until re-analyzed.)",
+   "description": "When ticked, the AI rewrites each session's auto-generated \"Steps to Reproduce\" note into a friendly, readable flow (if the AI call fails, the note falls back to the plain list of captured actions; the per-action breakdown lists them either way). When off, the note stays as the plain action list, the \"Humanize Steps (AI)\" button is hidden and the API turns down requests. An older session that was already humanized keeps its note until it is re-analyzed.",
    "fieldname": "ai_humanize_steps",
    "fieldtype": "Check",
    "label": "Humanized \"Steps to Reproduce\""
@@ -562,9 +562,9 @@
    "label": "Automatic Suggestions"
   },
   {
-   "default": "0",
+   "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When checked, the analyze pipeline asks the LLM for a fix for each eligible finding automatically, so suggestions are already in the report no need to click \"Suggest a fix (AI)\" per finding. Costs LLM tokens (and a little extra analyze time) on every session that's analyzed; keep it off unless you want suggestions baked in by default.",
+   "description": "When ticked, analyze automatically asks the AI for a fix on every eligible finding, so the suggestions are already in the report with no need to click \"Suggest a fix (AI)\" for each one. On by default (takes effect only once AI Fix Suggestions is enabled). It spends AI tokens (and a little extra analyze time) on every session that is analyzed, so untick it if you would rather request a suggestion per finding.",
    "fieldname": "ai_auto_suggest",
    "fieldtype": "Check",
    "label": "Suggest AI fixes in the report by default"
@@ -577,7 +577,7 @@
   {
    "default": "5",
    "depends_on": "eval:doc.ai_enabled && doc.ai_auto_suggest",
-   "description": "Cap on how many findings get an automatic suggestion per session the highest-severity, highest-impact ones first. 0 = every eligible finding (can be slow + costly on big sessions). Reference values: Strict: 0  ·  Recommended: 5  ·  Relaxed: 3.",
+   "description": "Analyze adds an automatic suggestion to at most this many findings per session, taking the highest-severity, highest-impact ones first. Use 0 for every eligible finding, which can be slow and costly on big sessions. Reference values: Strict: 0  ·  Recommended: 5  ·  Relaxed: 3.",
    "fieldname": "ai_auto_suggest_max",
    "read_only_depends_on": "eval:doc.config_profile != \"Custom\"",
    "fieldtype": "Int",
@@ -598,7 +598,7 @@
   },
   {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "One finding type per line those types are skipped in both auto-suggest and on-demand (the payload is never built). Exact-match, case-sensitive. Lines starting with '#' are comments. Use the canonical names: Filesort, Framework N+1, Full Table Scan, Hot Line, Low Filter Ratio, Missing Index, N+1 Query, Redundant Call, Slow Query, Temporary Table.",
+   "description": "One finding type per line. These types are skipped by both automatic and on-demand AI suggestions (no request is ever built for them). Matching is exact and case-sensitive. Lines starting with '#' are comments. Use the official names: Filesort, Framework N+1, Full Table Scan, Hot Line, Low Filter Ratio, Missing Index, N+1 Query, Redundant Call, Slow Query, Temporary Table.",
    "fieldname": "ai_excluded_finding_types",
    "fieldtype": "Small Text",
    "label": "Excluded finding types"
@@ -611,7 +611,7 @@
   {
    "default": "60",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "HTTP timeout for outbound LLM calls. The default 60s is right for hosted providers (Anthropic / OpenAI typically reply in 2–10s). For local LLMs (ollama / LM Studio / vLLM) first-token latency on cold start can exceed 60s; start at 180 and tune down once warm-call P99 is known. Clamped to 10–600s.",
+   "description": "Optimus waits this many seconds for an outbound AI call before giving up. The default of 60s suits hosted providers (Anthropic and OpenAI usually reply in 2 to 10s). Local models (Ollama, LM Studio, vLLM) can take longer than 60s for the first token on a cold start, so start at 180 and lower it once you know your warm-call times. Kept within 10 to 600s.",
    "fieldname": "ai_request_timeout_seconds",
    "fieldtype": "Int",
    "label": "Request timeout (seconds)",

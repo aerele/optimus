@@ -8,7 +8,7 @@ If you're picking up Optimus for the first time: every AI feature here is **off 
 
 ## 1. TL;DR: default OFF
 
-Optimus ships with `ai_enabled = 0` and `ai_auto_suggest = 0` in `Optimus Settings`. No request leaves your host until a System Manager flips the master toggle AND configures a provider (or points at a local LLM). With AI off:
+Optimus ships with `ai_enabled = 0` in `Optimus Settings` — the master gate. No request leaves your host until a System Manager flips that master toggle AND configures a provider (or points at a local LLM). (`ai_auto_suggest` defaults to on, but it is inert while the master gate is off.) With AI off:
 
 - The analyze pipeline runs to completion as it always did.
 - Findings are rendered with the profiler's own deterministic fix hints.
@@ -19,10 +19,10 @@ When AI is enabled, three knobs gate every outbound call:
 | Knob (Optimus Settings → AI) | Default | What it does |
 |---|---|---|
 | `ai_enabled` | OFF | Master gate. OFF → zero LLM calls ever. |
-| `ai_auto_suggest` | OFF | Batch mode. OFF → AI runs only when the operator clicks **Suggest a fix (AI)** on one finding. ON → analyze.run sends the top-N eligible findings during the background analyze pass. |
+| `ai_auto_suggest` | ON | Batch mode (takes effect only once `ai_enabled` is on). ON → analyze.run sends the top-N eligible findings during the background analyze pass. OFF → AI runs only when the operator clicks **Suggest a fix (AI)** on one finding. |
 | `ai_excluded_finding_types` | empty | One finding type per line (v0.9.0+). Listed types are skipped in **both** auto-suggest and on-demand the request body is never built and never sent. |
 
-The combination of `ai_enabled=OFF`, on-demand-only (`ai_auto_suggest=OFF`) and the exclusion list gives the operator three independent axes of consent: feature-level (the master), event-level (the click) and type-level (the exclusion).
+With the master `ai_enabled=OFF` nothing is sent regardless. Once AI is enabled, three axes of consent remain: feature-level (the master), event-level (`ai_auto_suggest` — on by default so suggestions are built into the report; set it OFF to require a per-finding click) and type-level (the exclusion list).
 
 ---
 
@@ -131,6 +131,7 @@ These items are **never** sent in any AI request body:
 | `Anthropic` | Messages | `https://api.anthropic.com` | Yes | Default model: `claude-sonnet-4-6`. |
 | `OpenAI` | Chat completions | `https://api.openai.com/v1` | Yes | Default model: `gpt-4.1-mini`. |
 | `Kimi (Moonshot)` | Chat completions | `https://api.moonshot.ai/v1` | Yes | Default model: `kimi-k2-0905-preview`. |
+| `DeepSeek` | Chat completions | `https://api.deepseek.com/v1` | Yes | Default model: `deepseek-chat` (V3). `deepseek-reasoner` (R1) also works. |
 | `Aerele` | Chat completions | `https://api.aerele.in/optimus/v1` | Yes | Managed service buy a fixed token pack up front. See § 10. |
 | `OpenAI-compatible` | Chat completions | (you set it) | No (configurable) | Use this for local LLMs and any other OpenAI-shaped server. |
 
@@ -243,7 +244,7 @@ Default `ai_request_timeout_seconds = 60` is fine for hosted providers (Anthropi
 What this design protects against:
 
 - **Accidental egress.** With `ai_enabled = OFF` (default) no request body is ever built there's no code path that exfiltrates finding data.
-- **Click-to-send.** With `ai_auto_suggest = OFF` (default) the LLM only sees a finding when the operator explicitly clicks the per-finding button. Every send is a deliberate, attributable action.
+- **Click-to-send.** With `ai_auto_suggest = OFF` the LLM only sees a finding when the operator explicitly clicks the per-finding button; every send is then a deliberate, attributable action. Auto-suggest is on by default, so once AI is enabled the top-N eligible findings are sent during the analyze pass unless you turn it off.
 - **Category-level opt-out.** `ai_excluded_finding_types` lets you keep specific categories (e.g. Slow Query, where raw SQL flows verbatim) out of the wire entirely.
 - **Network-residency.** The OpenAI-compatible provider + a local LLM keeps everything on your host. You can verify with `tcpdump` / `lsof` / `netstat` that no outbound socket opens during an AI call.
 
@@ -287,7 +288,7 @@ This means: if you're worried about a profile shared with a third party leaking 
 
 `Aerele` is a hosted option for customers who don't want to bring their own Anthropic / OpenAI key. The customer purchases a **fixed token pack** (e.g. "10,000 tokens for ₹X") up front; AI fix calls draw from that pack until it's exhausted, at which point the customer buys another pack. There is no subscription, no monthly reset and no overage when the pack runs out, calls are refused until a new pack is purchased.
 
-**Architecturally the Optimus side is identical to the Anthropic / OpenAI / Kimi entries:** the operator picks `Aerele` as the provider, pastes the key Aerele issued into **API Key** and every call hits Aerele's URL. There is no Optimus-side bookkeeping no balance cache, no pre-call gate, no Refresh button, no daily sync. **All token accounting and pack validation happens on Aerele's separate Frappe site** (the URL in the provider matrix above). The bench is a dumb client.
+**Architecturally the Optimus side is identical to the Anthropic / OpenAI / Kimi / DeepSeek entries:** the operator picks `Aerele` as the provider, pastes the key Aerele issued into **API Key** and every call hits Aerele's URL. There is no Optimus-side bookkeeping no balance cache, no pre-call gate, no Refresh button, no daily sync. **All token accounting and pack validation happens on Aerele's separate Frappe site** (the URL in the provider matrix above). The bench is a dumb client.
 
 ### 10.1 Onboarding
 
