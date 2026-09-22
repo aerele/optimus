@@ -288,7 +288,7 @@ This means: if you're worried about a profile shared with a third party leaking 
 
 `Aerele` is a hosted option for customers who don't want to bring their own Anthropic / OpenAI key. The customer purchases a **fixed token pack** (e.g. "10,000 tokens for ₹X") up front; AI fix calls draw from that pack until it's exhausted, at which point the customer buys another pack. There is no subscription, no monthly reset and no overage when the pack runs out, calls are refused until a new pack is purchased.
 
-**Architecturally the Optimus side is identical to the Anthropic / OpenAI / Kimi entries:** the operator picks `Aerele` as the provider, pastes the key Aerele issued into **API Key** and every call hits Aerele's URL. There is no Optimus-side bookkeeping no balance cache, no pre-call gate, no Refresh button, no daily sync. **All token accounting and pack validation happens on Aerele's separate Frappe site** (the URL in the provider matrix above). The bench is a dumb client.
+**Architecturally the Optimus side is identical to the Anthropic / OpenAI / Kimi / DeepSeek entries:** the operator picks `Aerele` as the provider, pastes the key Aerele issued into **API Key** and every call hits Aerele's URL. There is no Optimus-side bookkeeping no balance cache, no pre-call gate, no Refresh button, no daily sync. **All token accounting and pack validation happens on Aerele's separate Frappe site** (the URL in the provider matrix above). The bench is a dumb client.
 
 ### 10.1 Onboarding
 

@@ -41,3 +41,25 @@ class TestAereleProviderDisabled:
 		by_name = {f["fieldname"]: f for f in doc["fields"]}
 		options = by_name["ai_provider"]["options"]
 		assert "Aerele" not in options.split("\n")
+
+
+class TestProviderSelectMatchesDefaults:
+	def test_select_options_match_provider_defaults(self):
+		"""The ai_provider Select options and the _PROVIDER_DEFAULTS keys are two
+		hand-synced lists. _resolve_provider joins them by using the stored Select
+		string directly as a dict key, so any drift (a trailing space, a casing
+		slip or a typo in the 'Kimi (Moonshot)' parenthetical) ships silently and
+		only surfaces as AiFixError('Unknown AI provider ...') when a user picks
+		the odd one out. Lock the two together so the drift fails here instead."""
+		settings_json = (
+			pathlib.Path(__file__).parent.parent
+			/ "optimus" / "doctype" / "optimus_settings" / "optimus_settings.json"
+		)
+		doc = json.loads(settings_json.read_text())
+		by_name = {f["fieldname"]: f for f in doc["fields"]}
+		options = {o for o in by_name["ai_provider"]["options"].split("\n") if o.strip()}
+		defaults = set(ai_fix._PROVIDER_DEFAULTS)
+		assert options == defaults, (
+			"ai_provider Select options must match _PROVIDER_DEFAULTS keys exactly. "
+			f"Select-only: {options - defaults}; defaults-only: {defaults - options}"
+		)
