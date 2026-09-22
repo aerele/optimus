@@ -8,6 +8,27 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.55] - 2026-09-22
+
+### Fixed
+
+- Background-job status writes now use `safe_commit()` so a failed COMMIT rolls
+  back and leaves the connection clean instead of corrupting the next statement.
+
+### Changed
+
+- User-facing `frappe.throw` / `frappe.msgprint` messages are wrapped in `_()`
+  so they can be translated for non-English deployments. This includes the
+  operator-facing fallback strings on the index-suggestion, humanize-steps and
+  phase-2 status paths (the dynamic reason text stays unwrapped).
+
+### Internal
+
+- Documented why the session-write endpoints use `ignore_permissions=True`
+  (ownership is enforced by the endpoint's permission check first).
+
+---
+
 ## [0.12.53] - 2026-09-22
 
 ### Internal
