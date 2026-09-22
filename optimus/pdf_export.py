@@ -11,6 +11,7 @@ cache. The analyze pipeline is never touched.
 import re
 
 import frappe
+from frappe import _
 
 from optimus import safe_commit
 
@@ -82,13 +83,13 @@ def _load_session(session_uuid: str):
 		"Optimus Session", {"session_uuid": session_uuid}, "name",
 	)
 	if not docname:
-		frappe.throw(f"No Optimus Session found for uuid {session_uuid}")
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
 	return frappe.get_doc("Optimus Session", docname)
 
 
 def _load_raw_html(doc) -> str:
 	if not doc.raw_report_file:
-		frappe.throw("This session has no report to convert.")
+		frappe.throw(_("This session has no report to convert."))
 	# audit: ok (get_doc kept .get_content() is a doc-instance method
 	# that streams the attached bytes; db.get_value can only return field
 	# values, not file content. Lens flagged this as "get_doc used only
