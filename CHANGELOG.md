@@ -8,6 +8,16 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.53] - 2026-09-22
+
+### Internal
+
+- Removed three unused imports flagged by the code audit (`json` in `ai_fix.py`,
+  `SEVERITY_ORDER` in `analyzers/call_tree.py`, `defaultdict` in
+  `analyzers/explain_flags.py`). No behavior change.
+
+---
+
 ## [0.12.52] - 2026-09-20
 
 ### Fixed
