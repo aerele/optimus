@@ -9,9 +9,16 @@ them).
 
 It never blocks the migrate: a failed or skipped scrub prints the command to
 run it by hand and returns, because a failing patch would stop the rest of
-the upgrade, the key-leak fix included. Advisory step 3 (re-run the scrub,
-then a dry run reporting 0) is the guarantee.
+the upgrade, the key-leak fix included. Patch Log marks the patch done either
+way, so a skipped or failed scrub also leaves one Error Log row titled
+"Optimus: Error Log key scrub did not run", with the reason (an exception
+type or a row count, never row text) and the command. Every outcome writes
+one counts-only line to the ``optimus`` log. Advisory step 3 (re-run the
+scrub, then a dry run reporting 0) is the guarantee.
 """
+
+_BREADCRUMB_TITLE = "Optimus: Error Log key scrub did not run"
+_COUNTS = ("candidates", "changed", "deleted_docs_changed", "residual", "failed")
 
 
 def execute():
@@ -22,6 +29,7 @@ def execute():
 		f"bench --site {site} execute optimus.maintenance.scrub_error_log_secrets "
 		"--kwargs \"{'dry_run': False}\""
 	)
+	run_it = f"Run it now (Error Log is locked while it is scanned, so on a busy site run it off-peak): {command}"
 	failed = None
 	out = None
 	scan = 0
@@ -43,14 +51,19 @@ def execute():
 			frappe.db.rollback()
 		except Exception:
 			pass
-		print(f"Optimus: the Error Log key scrub failed ({failed}); the migrate continues. Run it now: {command}")
+		_breadcrumb(frappe, failed, command)
+		_log_summary(frappe, f"failed ({failed})")
+		print(f"Optimus: the Error Log key scrub failed ({failed}); the migrate continues. {run_it}")
 		return
 	if out is None:
+		_breadcrumb(frappe, f"skipped: {scan} rows", command)
+		_log_summary(frappe, f"skipped, {scan} rows to read, limit {maintenance.MIGRATE_SCAN_LIMIT}")
 		print(
 			f"Optimus: skipped the Error Log key scrub during migrate ({scan} rows to read, "
-			f"limit {maintenance.MIGRATE_SCAN_LIMIT}). Run it now: {command}"
+			f"limit {maintenance.MIGRATE_SCAN_LIMIT}). {run_it}"
 		)
 		return
+	_log_summary(frappe, "ran, " + " ".join(f"{k}={int(out.get(k) or 0)}" for k in _COUNTS))
 	changed = int(out.get("changed") or 0) + int(out.get("deleted_docs_changed") or 0)
 	if changed:
 		print(
@@ -62,7 +75,30 @@ def execute():
 	if out.get("failed"):
 		print(f"Optimus: {out['failed']} error row(s) could not be masked. Run it again: {command}")
 	if out.get("residual"):
+		purge = f"bench --site {site} execute optimus.maintenance.purge_ai_error_logs --kwargs"
 		print(
-			f"Optimus: {out['residual']} error row(s) still hold a key-shaped value. Delete the AI error rows: "
-			f"bench --site {site} execute optimus.maintenance.purge_ai_error_logs --kwargs \"{{'dry_run': False}}\""
+			f"Optimus: {out['residual']} error row(s) still hold a key-shaped value. Count the AI error rows "
+			f"first: {purge} \"{{'dry_run': True}}\", then delete them: {purge} \"{{'dry_run': False}}\""
 		)
+
+
+def _breadcrumb(frappe, reason: str, command: str) -> None:
+	"""One Error Log row saying the scrub did not run and how to run it, so
+	the skip or failure is still visible once the migrate's console output is
+	gone. ``reason`` is an exception type or a row count, never row text. It
+	is called after the rollback (so the row survives it) and outside any
+	``except`` block (so Frappe's Sentry hook has no active exception to
+	attach). Never raises."""
+	try:
+		frappe.log_error(title=_BREADCRUMB_TITLE, message=f"{reason}. Run it by hand, off-peak: {command}")
+	except Exception:
+		pass
+
+
+def _log_summary(frappe, outcome: str) -> None:
+	"""One counts-only line in the ``optimus`` log for every outcome. Never
+	raises."""
+	try:
+		frappe.logger("optimus").info(f"optimus scrub_ai_keys_from_error_log: {outcome}")
+	except Exception:
+		pass
