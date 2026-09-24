@@ -189,14 +189,23 @@ _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
 _MIN_LITERAL_LEN = 8
 
 
+def _literal_length(api_key) -> int:
+	"""The sort key of a ``scrub_secrets`` literal: its length (0 for a value
+	that is not a string). The parameter holds the key, so it is named
+	``api_key``, a name the traceback sanitizers redact."""
+	return len(api_key) if isinstance(api_key, str) else 0
+
+
 def scrub_secrets(text: str, *, literals: tuple[str, ...] = ()) -> str:
 	"""Return ``text`` with API keys replaced by ``********``.
 
 	Replaces every exact occurrence of each ``literals`` entry that is a
 	string of at least 8 characters (the live key, when the caller knows
-	it), then the header / field / Bearer / URL-credential shapes. Idempotent: an
-	already-masked value is never matched again, so a second pass changes
-	nothing. Non-string input is returned unchanged.
+	it), longest first, so a literal inside another one (a stored key and
+	the key a request was sent with can overlap) never leaves part of the
+	longer one behind; then the header / field / Bearer / URL-credential
+	shapes. Idempotent: an already-masked value is never matched again, so a
+	second pass changes nothing. Non-string input is returned unchanged.
 
 	SECURITY: the key is held only in locals whose names Frappe's traceback
 	sanitizer and Sentry both redact (``secret``, ``api_key``); ``literals``
@@ -205,7 +214,7 @@ def scrub_secrets(text: str, *, literals: tuple[str, ...] = ()) -> str:
 	"""
 	if not text or not isinstance(text, str):
 		return text
-	secret = tuple(literals or ())
+	secret = tuple(sorted(literals or (), key=_literal_length, reverse=True))
 	del literals
 	out = text
 	for api_key in secret:
