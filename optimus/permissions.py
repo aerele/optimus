@@ -5,10 +5,13 @@
 
 Exposes one gate: a ``has_permission`` for the File DocType that
 double-checks downloads of the profiler artifacts (raw_report_file,
-raw_report_pdf_file, recordings_file), so a user who guesses the file URL
-can't fetch it directly, and so a read-sharee on the parent Optimus Session
-(granted access via a DocShare, not ownership or System Manager) can't
-download the raw recordings bundle either. Admin/owner-scoped.
+raw_report_pdf_file, recordings_file). It runs in Frappe's permission
+checks (form load, REST, ``frappe.has_permission``), so a read-sharee on
+the parent Optimus Session (granted access via a DocShare, not ownership
+or System Manager) can't download the raw recordings bundle through those
+checks either. A direct ``/private/files`` download is checked by
+Frappe's own File rule (read on the parent Optimus Session), not by this
+hook. Admin/owner-scoped.
 
 This hook may only deny. When it has no objection it must hand the
 decision on to the next hook, and the value that means "no objection"
