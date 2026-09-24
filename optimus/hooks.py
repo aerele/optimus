@@ -138,8 +138,10 @@ scheduler_events = {
 # ------------------------------
 # Server-side double-check that the raw profiler report can only be
 # downloaded by System Manager + the recording user. The UI hides the
-# download button from non-admins, but this gate also blocks direct URL
-# access in case someone guesses the file name.
+# download button from non-admins, and this gate runs in Frappe's
+# permission checks (form load, REST, frappe.has_permission); a direct
+# /private/files download is checked by Frappe's own File rule (read on
+# the parent Optimus Session), not by this hook.
 
 has_permission = {
 	"File": "optimus.permissions.file_has_permission",
