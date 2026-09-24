@@ -598,46 +598,109 @@ class TestWindowedScan:
 		self._assert_windows(f)
 
 
-class TestScrubScanSize:
-	def _frappe(self, monkeypatch, fail=(), estimate=20):
-		calls = []
+class QueryTimeoutError(Exception):
+	"""Stands in for a driver's timeout (its type name is what is kept)."""
 
-		def part(name, value):
+
+class InFailedSqlTransaction(Exception):
+	"""Postgres: every statement after a failed one, until a rollback."""
+
+
+class TestScrubScanSize:
+	"""count(Error Log) + a bounded exact count of Deleted Document + the
+	Error Log queue length. The Deleted Document count reads at most
+	MIGRATE_SCAN_LIMIT + 1 rows: exact below the limit, above it once the
+	table is larger, and portable (no estimate: v15's is not scoped to the
+	site's schema, Postgres answers -1 for a table never analysed, InnoDB's
+	is about a fifth low)."""
+
+	BOUNDED = "SELECT COUNT(*) FROM (SELECT 1 FROM `tabDeleted Document` LIMIT %s) t"
+
+	def _frappe(self, monkeypatch, fail=None, values=None, deleted_documents=20):
+		"""``fail`` maps a part to the exception it raises; ``values``
+		overrides what a part returns. ``sql`` emulates the LIMIT."""
+		calls = []
+		fail = fail or {}
+		values = values or {}
+
+		def part(name, compute):
 			def call(*a, **k):
 				calls.append((name, a, k))
 				if name in fail:
-					raise RuntimeError(f"{name} failed")
-				return value
+					raise fail[name](f"{name} failed: row text {KEY}")
+				return values[name] if name in values else compute(*a)
 			return call
-		db = SimpleNamespace(count=part("count", 10), estimate_count=part("estimate_count", estimate))
-		cache = SimpleNamespace(llen=part("llen", 3))
+
+		def _sql(query, params):
+			return ((min(deleted_documents, params[0]),),)
+		db = SimpleNamespace(count=part("count", lambda doctype: 10), sql=part("sql", _sql))
+		cache = SimpleNamespace(llen=part("llen", lambda key: 3))
 		monkeypatch.setattr(maintenance, "frappe", SimpleNamespace(db=db, cache=cache))
 		return calls
 
 	def test_counts_error_logs_every_deleted_document_and_the_queue(self, monkeypatch):
 		calls = self._frappe(monkeypatch)
 		assert maintenance.scrub_scan_size() == 33
+		assert maintenance.measure_scan_size() == (33, None)
 		# every Deleted Document: deleted_doctype is not indexed, so the
-		# passes read the whole table; the estimate is O(1)
-		assert sorted(calls) == [
+		# passes read the whole table; the LIMIT is a bound parameter
+		assert calls[:3] == [
 			("count", ("Error Log",), {}),
-			("estimate_count", ("Deleted Document",), {}),
+			("sql", (self.BOUNDED, (maintenance.MIGRATE_SCAN_LIMIT + 1,)), {}),
 			("llen", ("insert_queue_for_Error Log",), {}),
 		]
 
-	@pytest.mark.parametrize("broken", ["count", "estimate_count", "llen"])
+	def test_a_deleted_document_table_past_the_limit_is_counted_only_up_to_it(self, monkeypatch):
+		self._frappe(monkeypatch, deleted_documents=5_000_000)
+		size = maintenance.scrub_scan_size()
+		assert size == 10 + maintenance.MIGRATE_SCAN_LIMIT + 1 + 3
+		assert size > maintenance.MIGRATE_SCAN_LIMIT  # the migrate skips it
+
+	def test_a_deleted_document_table_at_the_limit_is_exact(self, monkeypatch):
+		self._frappe(monkeypatch, deleted_documents=maintenance.MIGRATE_SCAN_LIMIT - 13)
+		assert maintenance.scrub_scan_size() == maintenance.MIGRATE_SCAN_LIMIT
+
+	@pytest.mark.parametrize("broken", ["count", "sql", "llen"])
 	def test_a_part_that_cannot_be_read_makes_the_size_unknown(self, monkeypatch, broken):
 		# An unmeasured table must not look small: the migrate skips the
-		# scrub and prints the command instead.
-		self._frappe(monkeypatch, fail={broken})
-		size = maintenance.scrub_scan_size()
-		assert size == maintenance.SCAN_SIZE_UNKNOWN
+		# scrub and prints the command instead. Only the TYPE name is kept.
+		self._frappe(monkeypatch, fail={broken: QueryTimeoutError})
+		size, reason = maintenance.measure_scan_size()
+		assert size == maintenance.SCAN_SIZE_UNKNOWN == maintenance.scrub_scan_size()
 		assert size > maintenance.MIGRATE_SCAN_LIMIT
+		assert reason == "QueryTimeoutError"
 
-	def test_a_negative_estimate_counts_as_zero(self, monkeypatch):
-		# Postgres reports reltuples = -1 for a table never analysed
-		self._frappe(monkeypatch, estimate=-1)
-		assert maintenance.scrub_scan_size() == 13
+	def test_the_first_failing_part_is_named(self, monkeypatch):
+		# On Postgres a failed statement aborts the transaction, so every
+		# later part fails too: the first failure is the cause.
+		self._frappe(monkeypatch, fail={"count": QueryTimeoutError, "sql": InFailedSqlTransaction})
+		assert maintenance.measure_scan_size().reason == "QueryTimeoutError"
+
+	@pytest.mark.parametrize(
+		("part", "value", "reason"),
+		[
+			("count", None, "no value"),
+			("count", -1, "negative value"),
+			("llen", None, "no value"),
+			("llen", -1, "negative value"),
+			# sql() results: no row, a NULL count, a negative count
+			("sql", None, "no value"),
+			("sql", (), "no value"),
+			("sql", ((None,),), "no value"),
+			("sql", ((-1,),), "negative value"),
+		],
+	)
+	def test_a_part_with_no_count_or_a_negative_one_makes_the_size_unknown(self, monkeypatch, part, value, reason):
+		# A bad count must never be read as 0 (the old estimate clamped
+		# Postgres's -1 for a table never analysed to 0).
+		self._frappe(monkeypatch, values={part: value})
+		assert maintenance.measure_scan_size() == (maintenance.SCAN_SIZE_UNKNOWN, reason)
+
+	def test_a_new_measurement_forgets_the_last_failure(self, monkeypatch):
+		self._frappe(monkeypatch, fail={"llen": ConnectionError})
+		assert maintenance.measure_scan_size().reason == "ConnectionError"
+		self._frappe(monkeypatch)
+		assert maintenance.measure_scan_size() == (33, None)
 
 
 class TestPurgeScope:

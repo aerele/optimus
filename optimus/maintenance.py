@@ -96,6 +96,9 @@ MIGRATE_SCAN_LIMIT = 200_000
 # What scrub_scan_size() returns when a part of the size cannot be read: an
 # unmeasured table must not look small, so the migrate skips the scrub.
 SCAN_SIZE_UNKNOWN = sys.maxsize
+# Deleted Document rows up to a bound (the parameter): exact, portable, and
+# it reads at most that many index entries.
+_DELETED_DOCUMENT_COUNT = "SELECT COUNT(*) FROM (SELECT 1 FROM `tabDeleted Document` LIMIT %s) t"
 # The values dry_run accepts as text (stripped, any case), besides True /
 # False and 1 / 0.
 _DRY_RUN_WORDS = {"true": True, "1": True, "yes": True, "false": False, "0": False, "no": False}
@@ -443,29 +446,67 @@ def _dry_run_flag(value) -> bool:
 	)
 
 
-def scrub_scan_size() -> int:
+class ScanSize(NamedTuple):
+	"""What ``measure_scan_size`` found. ``reason`` is None when every part
+	was read; otherwise it says why ``rows`` is ``SCAN_SIZE_UNKNOWN``: the
+	failing part's exception TYPE name (never its message, which could quote
+	a row), "no value" or "negative value"."""
+
+	rows: int
+	reason: str | None
+
+
+def _deleted_document_count() -> int | None:
+	"""Deleted Document rows, counted exactly up to ``MIGRATE_SCAN_LIMIT + 1``
+	(then the migrate skips the scrub anyway). The subquery stops reading at
+	its LIMIT, so it costs at most that many index entries, and it is plain
+	SQL that runs the same on MariaDB and Postgres. An estimate is not used:
+	Frappe v15's is not scoped to the site's database, Postgres answers -1
+	for a table never analysed, and InnoDB's can be a fifth low."""
+	rows = frappe.db.sql(_DELETED_DOCUMENT_COUNT, (MIGRATE_SCAN_LIMIT + 1,))
+	return rows[0][0] if rows else None
+
+
+def measure_scan_size() -> ScanSize:
 	"""How many rows ``scrub_error_log_secrets`` may read, so ``bench
-	migrate`` can decide whether to run it inline: every Error Log row, every
-	Deleted Document row (not just copies of Error Log rows:
+	migrate`` can decide whether to run it inline: every Error Log row,
+	every Deleted Document row (not just copies of Error Log rows:
 	``deleted_doctype`` is not indexed, so the passes read the whole table;
-	its size is the database's O(1) estimate), and the entries waiting in
-	Error Log's deferred-insert queue. Cheap (no LIKE scan). Never raises:
-	if any part cannot be read, it returns ``SCAN_SIZE_UNKNOWN``, which is
-	above ``MIGRATE_SCAN_LIMIT``, so the migrate skips the scrub and prints
-	the command instead of scanning a table of unknown size."""
+	see ``_deleted_document_count``), and the entries waiting in Error Log's
+	deferred-insert queue. Cheap (no LIKE scan). Never raises: a part that
+	raises, returns no value or returns a negative one makes the size
+	``SCAN_SIZE_UNKNOWN``, which is above ``MIGRATE_SCAN_LIMIT``, so the
+	migrate skips the scrub and prints the command instead of scanning a
+	table of unknown size. It stops at the first such part (on Postgres a
+	failed statement makes every later one fail too) and names it in
+	``reason``."""
 	parts = (
 		lambda: frappe.db.count("Error Log"),
-		lambda: frappe.db.estimate_count("Deleted Document"),
+		_deleted_document_count,
 		lambda: frappe.cache.llen(_ERROR_LOG_QUEUE),
 	)
 	total = 0
-	unknown = False
 	for part in parts:
+		reason = None
 		try:
-			total += max(0, int(part() or 0))
-		except Exception:
-			unknown = True
-	return SCAN_SIZE_UNKNOWN if unknown else total
+			value = part()
+			if value is None:
+				reason = "no value"
+			elif int(value) < 0:
+				reason = "negative value"
+			else:
+				total += int(value)
+		except Exception as e:
+			reason = type(e).__name__
+		if reason is not None:
+			return ScanSize(SCAN_SIZE_UNKNOWN, reason)
+	return ScanSize(total, None)
+
+
+def scrub_scan_size() -> int:
+	"""The row count of ``measure_scan_size`` (``SCAN_SIZE_UNKNOWN`` when a
+	part cannot be read). Never raises."""
+	return measure_scan_size().rows
 
 
 def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> dict:
