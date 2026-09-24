@@ -168,6 +168,46 @@ def test_flat_top_action_does_not_hide_deep_action():
 	assert "looped_validate" in panel
 
 
+def test_panel_excludes_background_jobs():
+	# Background jobs have their own RQ Jobs section, so they must not appear as
+	# call-tree sub-trees here even when they are the slowest action.
+	acts = [
+		{**_act("bg_slow", 9000), "event_type": "RQ Job"},
+		_act("http_fast", 100),
+	]
+	panel = renderer._render_call_tree_panel(acts)
+	assert "http_fast" in panel
+	assert "bg_slow" not in panel
+	# Only the foreground action survives, so it is the single-action layout.
+	assert "Call tree (top action)" in panel
+
+
+def test_panel_empty_when_only_background_jobs():
+	# Nothing but jobs -> no call-tree section at all. Legacy "Background Job" is
+	# excluded too, not just the normalised "RQ Job".
+	acts = [
+		{**_act("bg_a", 9000), "event_type": "RQ Job"},
+		{**_act("bg_b", 8000), "event_type": "Background Job"},
+	]
+	assert renderer._render_call_tree_panel(acts) == ""
+
+
+def test_slow_job_does_not_steal_a_top_n_slot():
+	# The exclusion runs before ranking, so the slowest action being a job must
+	# not consume one of the top-N slots. Here the job is #1 by duration; with it
+	# dropped, the three slowest FOREGROUND actions render (not two + the job).
+	acts = [
+		{**_act("bg_slowest", 9000), "event_type": "RQ Job"},
+		_act("http_a", 5000),
+		_act("http_b", 4000),
+		_act("http_c", 3000),
+	]
+	panel = renderer._render_call_tree_panel(acts)
+	assert "bg_slowest" not in panel
+	assert "http_a" in panel and "http_b" in panel and "http_c" in panel
+	assert panel.count('class="call-tree-action"') == 3
+
+
 def test_drilldown_chain_skips_other_frames():
 	# v0.7.x: the finding call-chain breadcrumb must not walk into a synthetic
 	# "[other: N frames]" node (you can't drill into a collapsed bucket).
