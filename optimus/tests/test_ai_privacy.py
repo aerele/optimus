@@ -170,8 +170,8 @@ def _capture_post():
 	"""Return (post_fake, captured); the fake stashes its kwargs into captured for assertion."""
 	captured: list[dict] = []
 
-	def _fake(url, headers=None, json=None, timeout=None):
-		captured.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+	def _fake(url, headers=None, json=None, timeout=None, auth=None):
+		captured.append({"url": url, "headers": headers, "json": json, "timeout": timeout, "auth": auth})
 		return _CaptureResp()
 
 	return _fake, captured

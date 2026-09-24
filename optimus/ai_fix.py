@@ -533,7 +533,7 @@ def is_available(section: str | None = None) -> bool:
 		return False
 	if not provider.get("model") or not provider.get("base_url"):
 		return False
-	if provider.get("needs_key") and not provider.get("api_key"):
+	if provider.get("needs_key") and not provider.get("has_key"):
 		return False
 	if section:
 		flag = _AI_SECTION_FLAGS.get(section)
@@ -579,7 +579,7 @@ def suggest_fix(finding: dict) -> dict:
 			"No AI base URL is configured set 'Base URL' under Profiler "
 			"Settings ▸ AI Fix Suggestions."
 		)
-	if provider.get("needs_key") and not provider.get("api_key"):
+	if provider.get("needs_key") and not provider.get("has_key"):
 		raise AiFixError(
 			"No API key is configured for this AI provider set it under "
 			"Optimus Settings ▸ AI Fix Suggestions."
@@ -589,12 +589,12 @@ def suggest_fix(finding: dict) -> dict:
 	usage: dict = {}
 	if provider["protocol"] == "anthropic":
 		text = _call_anthropic(
-			provider["base_url"], provider.get("api_key") or "",
+			provider["base_url"], _get_api_key(),
 			provider["model"], system, messages, usage_out=usage,
 		)
 	else:
 		text = _call_openai_chat(
-			provider["base_url"], provider.get("api_key") or "",
+			provider["base_url"], _get_api_key(),
 			provider["model"], system, messages, usage_out=usage,
 			metadata=_aerele_call_metadata(provider, finding.get("finding_type")),
 		)
@@ -636,19 +636,19 @@ def humanize_steps(
 			"AI is not fully configured set the provider, model and base URL "
 			"under Optimus Settings ▸ AI Fix Suggestions."
 		)
-	if provider.get("needs_key") and not provider.get("api_key"):
+	if provider.get("needs_key") and not provider.get("has_key"):
 		raise AiFixError("No API key is configured for this AI provider.")
 	system, messages = _build_steps_messages(
 		actions, session_title, threshold_ms=_resolve_display_threshold_ms()
 	)
 	if provider["protocol"] == "anthropic":
 		text = _call_anthropic(
-			provider["base_url"], provider.get("api_key") or "",
+			provider["base_url"], _get_api_key(),
 			provider["model"], system, messages, usage_out=usage_out,
 		)
 	else:
 		text = _call_openai_chat(
-			provider["base_url"], provider.get("api_key") or "",
+			provider["base_url"], _get_api_key(),
 			provider["model"], system, messages, usage_out=usage_out,
 			metadata=_aerele_call_metadata(provider, "Steps to Reproduce"),
 		)
@@ -675,18 +675,18 @@ def suggest_index(table_payload: dict) -> dict:
 			"AI is not fully configured set the provider, model and base URL "
 			"under Optimus Settings ▸ AI Fix Suggestions."
 		)
-	if provider.get("needs_key") and not provider.get("api_key"):
+	if provider.get("needs_key") and not provider.get("has_key"):
 		raise AiFixError("No API key is configured for this AI provider.")
 	system, messages = _build_index_messages(table_payload)
 	usage: dict = {}
 	if provider["protocol"] == "anthropic":
 		text = _call_anthropic(
-			provider["base_url"], provider.get("api_key") or "",
+			provider["base_url"], _get_api_key(),
 			provider["model"], system, messages, usage_out=usage,
 		)
 	else:
 		text = _call_openai_chat(
-			provider["base_url"], provider.get("api_key") or "",
+			provider["base_url"], _get_api_key(),
 			provider["model"], system, messages, usage_out=usage,
 			metadata=_aerele_call_metadata(provider, "Table Index"),
 		)
@@ -741,7 +741,7 @@ def test_connection() -> dict:
 			"message": "Provider/model/base URL not fully configured.",
 			"model": provider.get("model") or "",
 		}
-	if provider.get("needs_key") and not provider.get("api_key"):
+	if provider.get("needs_key") and not provider.get("has_key"):
 		return {"ok": False, "message": "No API key configured.", "model": provider["model"]}
 
 	messages = [{"role": "user", "content": "Reply with exactly: OK"}]
@@ -749,13 +749,13 @@ def test_connection() -> dict:
 	try:
 		if provider["protocol"] == "anthropic":
 			text = _call_anthropic(
-				provider["base_url"], provider.get("api_key") or "",
+				provider["base_url"], _get_api_key(),
 				provider["model"], "You are a connectivity probe. Reply with exactly: OK",
 				messages, max_tokens=16, usage_out=usage,
 			)
 		else:
 			text = _call_openai_chat(
-				provider["base_url"], provider.get("api_key") or "",
+				provider["base_url"], _get_api_key(),
 				provider["model"], "You are a connectivity probe. Reply with exactly: OK",
 				messages, max_tokens=16, usage_out=usage,
 			)
@@ -859,13 +859,14 @@ class _ApiKeyAuth(requests.auth.AuthBase):
 
 def _resolve_provider() -> dict:
 	"""Resolve the active provider config: protocol, base_url, model,
-	needs_key, api_key (decrypted) and the provider display name. Raises
+	needs_key, has_key and the provider display name. Raises
 	``AiFixError`` on an unknown provider or a custom provider missing its
 	required base_url/model.
 
-	The API key is fetched via ``frappe.utils.password.get_decrypted_password``
-	on every call it is never cached in ``OptimusConfig`` and never
-	returned to the client.
+	SECURITY: the dict carries ``has_key`` (bool), never the key itself: it is
+	a local in most AI frames, and Frappe's traceback sanitizer only redacts a
+	dict key named exactly ``key``. Code that sends a request calls
+	``_get_api_key()`` at the call site.
 	"""
 	from optimus.settings import get_config
 	cfg = get_config()
@@ -886,26 +887,16 @@ def _resolve_provider() -> dict:
 		base_url = (getattr(cfg, "ai_base_url", "") or "").strip().rstrip("/")
 	model = (getattr(cfg, "ai_model", "") or "").strip() or defaults["model"]
 
-	# Always fetch the key (harmless if unset) some OpenAI-compatible
-	# routers (OpenRouter, Together, Groq) need one even though local
-	# endpoints don't, so we let the user set it for any provider.
-	api_key = ""
-	try:
-		from frappe.utils.password import get_decrypted_password
-		api_key = get_decrypted_password(
-			"Optimus Settings", "Optimus Settings", "ai_api_key",
-			raise_exception=False,
-		) or ""
-	except Exception:
-		api_key = ""
-
+	# A key may be set for any provider: some OpenAI-compatible routers
+	# (OpenRouter, Together, Groq) need one even though local endpoints don't.
+	# Only its presence is recorded here.
 	return {
 		"name": name,
 		"protocol": defaults["protocol"],
 		"base_url": base_url,
 		"model": model,
 		"needs_key": bool(defaults["needs_key"]),
-		"api_key": api_key,
+		"has_key": bool(_current_key_or_empty()),
 	}
 
 
@@ -1360,12 +1351,23 @@ def _response_detail(resp) -> str:
 		return ""
 
 
-def _http_post(url: str, headers: dict, body: dict, *, provider: str, where: str) -> dict:
+def _http_post(
+	url: str,
+	headers: dict,
+	body: dict,
+	*,
+	provider: str,
+	where: str,
+	timeout: int | None = None,
+	auth: requests.auth.AuthBase | None = None,
+) -> dict:
 	"""POST JSON, return the parsed response dict. Maps transport / HTTP /
-	decode errors to ``AiFixError`` with operator-friendly messages."""
-	timeout = _resolve_timeout_seconds()
+	decode errors to ``AiFixError`` with operator-friendly messages.
+	``auth`` (an ``_ApiKeyAuth``) attaches the key at send time; ``headers``
+	must never hold it."""
+	timeout = timeout or _resolve_timeout_seconds()
 	try:
-		resp = requests.post(url, headers=headers, json=body, timeout=timeout)
+		resp = requests.post(url, headers=headers, json=body, timeout=timeout, auth=auth)
 	except requests.exceptions.Timeout:
 		_log_http_error(provider, where, None, "timeout")
 		raise AiFixError(f"The AI provider didn't respond within {timeout}s.")
@@ -1485,8 +1487,7 @@ def _call_anthropic(
 		"content-type": "application/json",
 		"anthropic-version": _ANTHROPIC_VERSION,
 	}
-	if api_key:
-		headers["x-api-key"] = api_key
+	auth = _ApiKeyAuth("x-api-key", api_key) if api_key else None
 	body = {
 		"model": model,
 		"max_tokens": max_tokens,
@@ -1494,7 +1495,7 @@ def _call_anthropic(
 		"system": system,
 		"messages": messages,
 	}
-	data = _http_post(url, headers, body, provider="anthropic", where="messages")
+	data = _http_post(url, headers, body, provider="anthropic", where="messages", auth=auth)
 	if usage_out is not None:
 		usage_out.update(_usage_from_anthropic(data))
 		_record_session_spend(usage_out.get("total_tokens"))
@@ -1518,8 +1519,7 @@ def _call_openai_chat(
 ) -> str:
 	url = base_url.rstrip("/") + "/chat/completions"
 	headers = {"content-type": "application/json"}
-	if api_key:
-		headers["authorization"] = f"Bearer {api_key}"
+	auth = _ApiKeyAuth("authorization", api_key, prefix="Bearer ") if api_key else None
 	body = {
 		"model": model,
 		"max_tokens": max_tokens,
@@ -1532,7 +1532,7 @@ def _call_openai_chat(
 	if metadata:
 		body["metadata"] = metadata
 	try:
-		data = _http_post(url, headers, body, provider="openai", where="chat/completions")
+		data = _http_post(url, headers, body, provider="openai", where="chat/completions", auth=auth)
 	except AiFixError as e:
 		# Some reasoning models reject a non-default `temperature` with a
 		# request-validation error. OpenAI o-series are pre-filtered by
@@ -1546,7 +1546,7 @@ def _call_openai_chat(
 		# needless second call.
 		if sent_temperature and getattr(e, "status_code", None) in (400, 422) and "temperature" in str(e).lower():
 			body.pop("temperature", None)
-			data = _http_post(url, headers, body, provider="openai", where="chat/completions")
+			data = _http_post(url, headers, body, provider="openai", where="chat/completions", auth=auth)
 		else:
 			raise
 	if usage_out is not None:

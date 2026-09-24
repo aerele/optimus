@@ -241,15 +241,15 @@ class _FakeResp:
 
 
 def _post_returning(resp):
-	def _fake_post(url, headers=None, json=None, timeout=None):  # noqa: A002
-		_fake_post.last = types.SimpleNamespace(url=url, headers=headers, body=json)
+	def _fake_post(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+		_fake_post.last = types.SimpleNamespace(url=url, headers=headers, body=json, auth=auth)
 		return resp
 	_fake_post.last = None
 	return _fake_post
 
 
 _PROVIDER = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
-             "model": "gpt-4.1-mini", "needs_key": True, "api_key": "sk-test"}
+             "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
 
 
 class TestAiSuggestIndex:
