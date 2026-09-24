@@ -1369,10 +1369,12 @@ def log_ai_failure(
 	- ``reference_doctype`` / ``reference_name`` point at the Optimus Session:
 	  ``docname`` when the caller has it (no lookup), else the session that
 	  ``session_uuid`` resolves to.
-	- The row is inserted directly, in the current transaction. If that
-	  transaction is rolled back later (a ``frappe.throw`` in a web request,
-	  a failing background job), a ``frappe.db.after_rollback`` callback
-	  queues the same scrubbed row again (see ``_requeue_if_rolled_back``).
+	- The row is inserted directly, in the current transaction. On MariaDB
+	  Error Log is a MyISAM table, so the row survives any rollback. On a
+	  transactional engine (Postgres), if that transaction is rolled back
+	  later (a ``frappe.throw`` in a web request, a failing background job),
+	  a ``frappe.db.after_rollback`` callback queues the same scrubbed row
+	  again (see ``_requeue_if_rolled_back``).
 	- If scrubbing fails, the row keeps only the title and the error type:
 	  an unscrubbed message is never written.
 	- An exception is logged at most once: the HTTP layer logs its own
@@ -1463,29 +1465,38 @@ def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None) -
 
 
 def _requeue_if_rolled_back(record: dict, row=None) -> None:
-	"""Queue the Error Log row ``log_ai_failure`` just inserted again if its
-	transaction is rolled back.
+	"""Queue the Error Log row ``log_ai_failure`` just inserted (``row``, the
+	document ``frappe.log_error`` returned) again if a rollback removed it.
 
-	``frappe.log_error`` inserts the row in the current transaction, so a
-	later rollback takes it away: ``frappe.app`` rolls the request back after
-	an exception (a ``frappe.throw`` after the log) and ``execute_job`` does
-	the same for a failing job. A ``frappe.db.after_rollback`` callback then
-	queues the same fields (``record``: the scrubbed message, the title, the
-	references, plus the ``trace_id`` and ``metadata`` of the inserted row
-	``row``) through ``frappe.deferred_insert``. ``commit()`` drops the
-	callbacks, so a committed row is never queued twice; a savepoint rollback
-	runs none. Nothing is registered in read-only mode: ``log_error`` has
-	queued the row itself there.
+	``frappe.log_error`` inserts the row in the current transaction, and
+	``frappe.app`` rolls the request back after an exception (a
+	``frappe.throw`` after the log), as ``execute_job`` does for a failing
+	job. Whether that removes the row depends on the table: on MariaDB Error
+	Log is a MyISAM table (``error_log.json``: ``"engine": "MyISAM"``), so the
+	row survives any rollback; on a transactional engine (Postgres) it is
+	gone. A ``frappe.db.after_rollback`` callback, which runs after the
+	ROLLBACK, therefore queues the same fields (``record``: the scrubbed
+	message, the title, the references, plus the ``trace_id`` and
+	``metadata`` of ``row``) through ``frappe.deferred_insert`` only when
+	``row`` no longer exists. ``commit()`` drops the callbacks, so a committed
+	row is never queued; a savepoint rollback runs none. Nothing is
+	registered in read-only mode (``log_error`` has queued the row itself) or
+	when ``log_error`` returned no named document (nothing was inserted).
 
 	The callback never calls ``frappe.log_error`` (it may run inside an
 	``except`` block, and it must not reach Sentry), never raises
 	(``CallbackManager.run`` would pass the error to the rollback's caller)
-	except an RQ job timeout, and holds only the scrubbed fields."""
+	except an RQ job timeout, and holds only the row name and the scrubbed
+	fields. If the existence check fails, nothing is queued: a queued copy of
+	a row that survived would be a duplicate."""
 	interrupt = None
 	try:
 		import frappe
 
 		if getattr(frappe.flags, "read_only", False):
+			return
+		name = getattr(row, "name", None)
+		if not isinstance(name, str) or not name:
 			return
 		for field in ("trace_id", "metadata"):
 			value = getattr(row, field, None)
@@ -1495,6 +1506,10 @@ def _requeue_if_rolled_back(record: dict, row=None) -> None:
 		def _requeue() -> None:
 			requeue_interrupt = None
 			try:
+				import frappe
+
+				if frappe.db.exists("Error Log", name):
+					return  # MyISAM: the ROLLBACK left the row in place
 				from frappe.deferred_insert import deferred_insert
 
 				deferred_insert("Error Log", [dict(record)])

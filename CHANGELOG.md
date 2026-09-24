@@ -102,13 +102,15 @@ versions may contain breaking changes see migration notes below).
 - An API key pasted with a trailing newline or spaces is trimmed. A key with
   a character that cannot be sent in an HTTP header now fails with a clear
   message before any request is made.
-- An AI failure row is written to the Error Log immediately. If the request
-  or background job then fails and its transaction is rolled back (for
-  example, the `optimus.api.suggest_fix` endpoint reporting the provider's
-  error), the same row is queued in Redis: the scheduler writes it at its
-  next deferred-insert run (every 15 minutes), or the next `bench migrate`
-  does. Before, that rollback lost the row. If the row cannot be written at
-  all, one line with the error type goes to the `optimus` log
+- An AI failure row is written to the Error Log immediately. On MariaDB the
+  Error Log table is MyISAM, so the row survives a rollback of the request
+  or background job that logged it. On Postgres, if the request or
+  background job then fails and its transaction is rolled back (for example,
+  the `optimus.api.suggest_fix` endpoint reporting the provider's error),
+  the same row is queued in Redis: the scheduler writes it at its next
+  deferred-insert run (every 15 minutes), or the next `bench migrate` does.
+  Before, that rollback lost the row on Postgres. If the row cannot be
+  written at all, one line with the error type goes to the `optimus` log
   (`logs/optimus.log`) instead.
 
 ### Upgrade notes
