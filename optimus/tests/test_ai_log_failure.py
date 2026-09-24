@@ -608,6 +608,91 @@ class TestHttpFailurePath:
 		assert str(ei.value).endswith("x" * 10 + "******** t")
 
 	@pytest.mark.parametrize(
+		"old_key",
+		['sk-old-0123"quoted\\escaped-XYZ', "sk-old-inflight-lowercase-words"],
+		ids=["json-escapable", "lowercase-words"],
+	)
+	def test_the_key_the_request_used_is_scrubbed_after_a_rotation(self, logs, monkeypatch, old_key):
+		# Optimus Settings gets a new key while the request is in flight, and
+		# the provider's reply echoes the OLD key (the one the request carried),
+		# raw and JSON-escaped. The key read from Settings at log time is the
+		# new one, so only the in-flight key can mask the echo. The
+		# lowercase-words key has the shape of a provider code, so only the
+		# in-flight exclusion keeps it out of provider_error.
+		new_key = "sk-new-9876543210ZYXwvu"
+		stored = {"key": old_key}
+		monkeypatch.setattr(
+			"frappe.utils.password.get_decrypted_password", lambda *a, **k: stored["key"], raising=False
+		)
+		escaped = json.dumps(old_key)[1:-1]
+		body = {"error": {"message": f"key {old_key} rejected", "type": "invalid_request_error", "code": old_key}}
+		text = json.dumps(body) + f" raw={old_key} escaped={escaped}"
+
+		def _rotated_mid_flight(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+			stored["key"] = new_key
+			return _Resp(400, body, text=text)
+
+		monkeypatch.setattr(requests, "post", _rotated_mid_flight)
+		auth = ai_fix._ApiKeyAuth("authorization", old_key, prefix="Bearer ")
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			ai_fix._http_post("https://x.invalid/v1/chat/completions", {}, {"model": "m"},
+			                  provider="openai", where="chat/completions", auth=auth)
+		message, row = str(ei.value), logs[0]["message"]
+		assert "raw=******** escaped=********" in message  # the echo reached the message, masked
+		for form in (old_key, escaped):
+			assert form not in message and form not in row
+		assert "provider_error=invalid_request_error\n" in row
+
+	def test_the_in_flight_key_is_never_bound_to_a_local_while_scrubbing(self, logs, monkeypatch):
+		# The in-flight key goes from the _ApiKeyAuth straight into the
+		# scrub_secrets call: while the scrubber runs, no ai_fix frame holds it
+		# in a local other than api_key (the names Frappe and Sentry redact).
+		# The reply does not echo it, so any hit comes from the literals.
+		from optimus import redaction
+
+		in_flight = "sk-inflight-0123456789ABCdef"
+		real_scrub = redaction.scrub_secrets
+		scrubbing, offenders = [], []
+
+		def _spy(text, *, literals=()):
+			# Record, never assert here: the callers swallow an error from the
+			# scrubber (they fall back to "").
+			frame = sys._getframe(1)
+			while frame is not None:
+				if frame.f_code.co_filename == ai_fix.__file__:
+					scrubbing.append(frame.f_code.co_name)
+					offenders.extend(
+						f"{frame.f_code.co_name}: {name}" for name, value in frame.f_locals.items()
+						if name != "api_key" and in_flight in repr(value)
+					)
+				frame = frame.f_back
+			return real_scrub(text, literals=literals)
+
+		monkeypatch.setattr(redaction, "scrub_secrets", _spy)
+		body = {"error": {"message": "rejected", "type": "invalid_request_error"}}
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(400, body, text=json.dumps(body))))
+		with pytest.raises(ai_fix.AiFixError):
+			ai_fix._http_post("https://x.invalid/v1/chat/completions", {}, {"model": "m"}, provider="openai",
+			                  where="chat/completions", auth=ai_fix._ApiKeyAuth("authorization", in_flight, prefix="Bearer "))
+		assert {"_response_detail", "_provider_error_code"} <= set(scrubbing)
+		assert offenders == [], f"locals holding the in-flight key while scrubbing: {offenders}"
+
+	def test_a_json_escaped_echo_of_the_stored_key_is_masked(self, logs, monkeypatch):
+		# A JSON body (or a JSON-encoded message) holds the key with its quotes
+		# and backslashes escaped: the raw literal alone would miss it.
+		quoted_key = 'sk-live-0123"quoted\\escaped-XYZ'
+		escaped = json.dumps(quoted_key)[1:-1]
+		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", lambda *a, **k: quoted_key, raising=False)
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(500, {}, text=f'{{"error": "bad key {escaped}"}}')))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			_call()
+		assert escaped not in str(ei.value) and 'bad key ********"' in str(ei.value)
+		ai_fix.log_ai_failure("optimus ai backfill", ai_fix.AiFixError(f"echo {escaped} and {quoted_key}"))
+		row = logs[-1]["message"]
+		assert escaped not in row and quoted_key not in row
+		assert "echo ******** and ********" in row
+
+	@pytest.mark.parametrize(
 		("status", "body", "expected"),
 		[
 			(400, {"error": {"message": "m", "type": "invalid_request_error", "code": "context_length_exceeded"}},

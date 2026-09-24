@@ -18,6 +18,7 @@ helpers are unit-testable without a bench.
 
 from __future__ import annotations
 
+import json
 import re
 import traceback
 from datetime import datetime, timezone
@@ -863,10 +864,34 @@ class _ApiKeyAuth(requests.auth.AuthBase):
 		r.headers[self._header] = self._prefix + self._value
 		return r
 
+	def scrub_literals(self) -> tuple[str, ...]:
+		"""The key this object sends, raw and JSON-escaped (``_key_literals``):
+		the key the request really carried, even if Optimus Settings holds a
+		new one by the time the reply is read. Pass the result straight into
+		``scrub_secrets(..., literals=...)``; never bind it to a local."""
+		return _key_literals(self._value)
+
 	def __repr__(self) -> str:
 		return f"<_ApiKeyAuth {self._header}: ********>"
 
 	__str__ = __repr__
+
+
+def _key_literals(api_key) -> tuple[str, ...]:
+	"""``api_key`` as it can appear in text, for ``scrub_secrets(...,
+	literals=...)``: raw, and JSON-escaped (``json.dumps(api_key)[1:-1]``,
+	how a JSON body or a JSON-encoded message holds it). ``()`` when there is
+	no key. Pass the result straight into that call: the key may only sit in
+	a local named ``api_key`` (or ``secret`` inside ``scrub_secrets``)."""
+	if not isinstance(api_key, str) or not api_key:
+		return ()
+	return (api_key, json.dumps(api_key)[1:-1])
+
+
+def _in_flight_literals(auth) -> tuple[str, ...]:
+	"""The literals of the key a request was sent with (``auth`` is the
+	``_ApiKeyAuth`` it used), or ``()`` when it carried none."""
+	return auth.scrub_literals() if isinstance(auth, _ApiKeyAuth) else ()
 
 
 def _resolve_provider() -> dict:
@@ -1443,16 +1468,17 @@ def log_ai_failure(
 
 def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None) -> str:
 	"""``lines`` joined and passed through ``redaction.scrub_secrets`` with
-	the live key as a literal. If scrubbing fails, the message keeps only the
-	title and the error type, never the unscrubbed text. An RQ job timeout
-	leaves as a fresh instance (no scrubber frame, no chain)."""
+	the live key as a literal, raw and JSON-escaped. If scrubbing fails, the
+	message keeps only the title and the error type, never the unscrubbed
+	text. An RQ job timeout leaves as a fresh instance (no scrubber frame, no
+	chain)."""
 	failed = ""
 	interrupt = None
 	try:
 		from optimus.redaction import scrub_secrets
 
 		api_key = _current_key_or_empty()
-		return scrub_secrets("\n".join(lines), literals=(api_key,))
+		return scrub_secrets("\n".join(lines), literals=_key_literals(api_key))
 	except _job_timeout_types() as e:
 		interrupt = (type(e), e.args)
 	except Exception as e:
@@ -1608,17 +1634,20 @@ def _job_timeout_types() -> tuple[type[BaseException], ...]:
 	return (BaseTimeoutException,)
 
 
-def _response_detail(resp) -> str:
+def _response_detail(resp, auth=None) -> str:
 	"""The provider's own error body (capped), as a ': ...' suffix or '' when
 	there is no readable body. Surfaces the specific reason ("model not found",
 	"context too long", ...) so it reaches the operator.
 
 	SECURITY: a provider can echo the API key in its error body, and this text
 	reaches toasts, API responses and the title of Frappe's own error
-	snapshot, so the body is scrubbed with the live key as a literal BEFORE it
-	is cut to 300 characters (cutting first can split the key, and a partial
-	key no longer matches the literal). Any failure returns ''; an RQ job
-	timeout leaves as a fresh instance, with the raw body unbound."""
+	snapshot, so the body is scrubbed BEFORE it is cut to 300 characters
+	(cutting first can split the key, and a partial key no longer matches the
+	literal). The literals are the key stored in Optimus Settings and the key
+	the request was sent with (``auth``, the ``_ApiKeyAuth`` it used: Settings
+	may hold a new key by now), each raw and JSON-escaped. Any failure returns
+	''; an RQ job timeout leaves as a fresh instance, with the raw body
+	unbound."""
 	body_text = ""
 	interrupt = None
 	try:
@@ -1627,7 +1656,10 @@ def _response_detail(resp) -> str:
 			return ""
 		from optimus.redaction import scrub_secrets
 
-		return ": " + scrub_secrets(body_text[:65536], literals=(_current_key_or_empty(),))[:300]
+		return ": " + scrub_secrets(
+			body_text[:65536],
+			literals=(*_key_literals(_current_key_or_empty()), *_in_flight_literals(auth)),
+		)[:300]
 	except _job_timeout_types() as e:
 		interrupt = (type(e), e.args)
 	except Exception:
@@ -1645,7 +1677,7 @@ _PROVIDER_ERROR_RE = re.compile(r"^[a-z]+(?:[_.:-][a-z]+)*$")
 _PROVIDER_ERROR_MAX_LEN = 64
 
 
-def _provider_error_code(resp) -> str:
+def _provider_error_code(resp, auth=None) -> str:
 	"""The provider's machine-readable reason for an HTTP error, for the Error
 	Log row (whose detail never holds the body: it can echo the prompt), or
 	'' when there is none.
@@ -1654,7 +1686,9 @@ def _provider_error_code(resp) -> str:
 	and compatible servers) or ``type`` (Anthropic). A value is kept only when
 	it is a string of at most 64 characters made of lowercase-letter words
 	joined by ``_ . : -`` (``_PROVIDER_ERROR_RE``: no digits, no upper case)
-	and does not contain the stored key; both kept values are joined as
+	and contains neither the key stored in Optimus Settings nor the key the
+	request was sent with (``auth``, the ``_ApiKeyAuth`` it used), raw or
+	JSON-escaped; both kept values are joined as
 	``type:code`` when that still fits 64 characters, else the first one is
 	used. Any failure returns ''; an RQ job timeout leaves as a fresh
 	instance, with the parsed body unbound."""
@@ -1676,7 +1710,7 @@ def _provider_error_code(resp) -> str:
 				and len(value) <= _PROVIDER_ERROR_MAX_LEN
 				and _PROVIDER_ERROR_RE.fullmatch(value)
 				and value not in parts
-				and scrub_secrets(value, literals=(api_key,)) == value
+				and scrub_secrets(value, literals=(*_key_literals(api_key), *_in_flight_literals(auth))) == value
 			):
 				parts.append(value)
 		if not parts:
@@ -1797,15 +1831,15 @@ def _http_post(
 			"in Optimus Settings is a valid model name for this provider: a wrong model "
 			"returns 404. If you set a custom Base URL, make sure it includes the '/v1' "
 			"path segment (for example http://localhost:11434/v1 for Ollama)."
-			+ _response_detail(resp),
+			+ _response_detail(resp, auth),
 			status_code=status,
 		)
 	elif status == 429:
 		failure = AiFixError("The AI provider is rate-limiting requests. Try again shortly.", status_code=status)
 	elif status >= 400:
-		failure = AiFixError(f"The AI provider returned an error (HTTP {status}){_response_detail(resp)}", status_code=status)
+		failure = AiFixError(f"The AI provider returned an error (HTTP {status}){_response_detail(resp, auth)}", status_code=status)
 	if failure is not None:
-		_log_http_error(provider, where, status, detail, exc=failure, provider_error=_provider_error_code(resp))
+		_log_http_error(provider, where, status, detail, exc=failure, provider_error=_provider_error_code(resp, auth))
 		raise failure
 
 	data = None
