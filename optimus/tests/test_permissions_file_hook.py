@@ -19,8 +19,10 @@ version:
 
 Before this fix the hook always returned None to defer. That was right on
 Frappe 15, and on Frappe 16 it denied every File to every non-Administrator
-user (form load, delete, library attach, REST): see the probe at
-research/2026-09-24-ai-remediation/prototypes/sec/file_hook_probe.py.
+user (form load, delete, library attach, REST), confirmed by manually
+driving Frappe's has_controller_permissions loop against a real v16 site
+and watching a non-Administrator's request for an unrelated public File
+get denied.
 Always returning True instead would fix Frappe 16 and let any logged-in
 user read any private file on Frappe 15. The fix returns
 permissions._no_objection(), which reads frappe.__version__.
@@ -149,9 +151,23 @@ def test_recording_user_defers_true(monkeypatch):
 
 
 def test_user_defaults_to_session_user(monkeypatch):
-	_patch(monkeypatch, roles=["System Manager"], session_user="sysmgr@example.com")
+	"""``user=None`` must default to ``frappe.session.user``. Exercised
+	through the recording-user gate, not System Manager: ``_patch``'s
+	``get_roles`` stub ignores its argument, so a System Manager-role
+	assertion here would still pass with the defaulting line deleted (the
+	stub returns the privileged role for None just as readily as for the
+	real session user)."""
+	_patch(monkeypatch, recording_user="owner@example.com", session_user="owner@example.com")
 	doc = _doc()
 	assert permissions.file_has_permission(doc, "read", user=None) is True
+
+
+def test_user_defaults_to_session_user_denies_stranger(monkeypatch):
+	"""Companion negative: once ``user=None`` resolves to the session user,
+	a session user who is not the recording user is still denied."""
+	_patch(monkeypatch, recording_user="owner@example.com", session_user="stranger@example.com")
+	doc = _doc()
+	assert permissions.file_has_permission(doc, "read", user=None) is False
 
 
 # --- recordings_file gating (new in this PR) --------------------------------
@@ -210,6 +226,21 @@ def _core_file_hook(doc, ptype=None, user=None, debug=False, *, ref_has_permissi
 	return False
 
 
+def _spy_core(calls, **kw):
+	"""The stand-in core File hook with its real signature, recording each
+	call so a test can prove the loop reached it (or never did). Used in
+	both Part B (v16) and Part C (v15): recording at hook entry, not
+	inside a delegated callback like ``ref_has_permission``, is what makes
+	``calls == []`` actually prove core never ran, rather than only
+	proving one particular branch inside core was not reached."""
+
+	def core(doc, ptype=None, user=None, debug=False):
+		calls.append((ptype, user))
+		return _core_file_hook(doc, ptype, user, debug, **kw)
+
+	return core
+
+
 def _pre_fix_file_has_permission(doc, ptype=None, user=None, *, roles=(), recording_user=None):
 	"""Verbatim copy (parameterised so it needs no frappe) of
 	optimus.permissions.file_has_permission exactly as it stood before
@@ -234,7 +265,7 @@ def _pre_fix_file_has_permission(doc, ptype=None, user=None, *, roles=(), record
 
 def _newargs(fn, kwargs):
 	"""Local copy of frappe.get_newargs's filtering (frappe/__init__.py:
-	1150-1161): drop kwargs the callable's signature doesn't declare
+	1150-1172): drop kwargs the callable's signature doesn't declare
 	(unless it takes **kwargs). Needed because file_has_permission has no
 	`debug` parameter while the stand-in core hook does, exactly like the
 	real hooks frappe.call dispatches to."""
@@ -264,10 +295,10 @@ def _has_controller_permissions(doc, ptype, user, methods, *, debug=False):
 def test_non_optimus_file_allowed(monkeypatch):
 	"""A File unrelated to Optimus (e.g. a public ToDo attachment) must be
 	allowed for Guest on Frappe 16, exactly what core Frappe alone would
-	decide. This is the scenario from the original bug probe
-	(prototypes/sec/file_hook_probe.py): before this fix, optimus's hook
-	denied EVERY File, Optimus or not, because it ran first and returned
-	None unconditionally for any doctype other than Optimus Session."""
+	decide. This is the scenario that exposed the original bug: before
+	this fix, optimus's hook denied EVERY File, Optimus or not, because it
+	ran first and returned None unconditionally for any doctype other than
+	Optimus Session."""
 	_patch(monkeypatch)
 	doc = types.SimpleNamespace(
 		attached_to_doctype="ToDo", attached_to_field="attachment",
@@ -276,8 +307,9 @@ def test_non_optimus_file_allowed(monkeypatch):
 	methods = [_core_file_hook, permissions.file_has_permission]
 	assert _has_controller_permissions(doc, "read", "Guest", methods) is True
 
-	pre_fix = functools.partial(_pre_fix_file_has_permission)
-	assert _has_controller_permissions(doc, "read", "Guest", [_core_file_hook, pre_fix]) is False
+	assert _has_controller_permissions(
+		doc, "read", "Guest", [_core_file_hook, _pre_fix_file_has_permission],
+	) is False
 
 
 def test_system_manager_allowed(monkeypatch):
@@ -325,10 +357,7 @@ def test_stranger_denied(monkeypatch):
 	)
 	_patch(monkeypatch, roles=[], recording_user="owner@example.com")
 	calls = []
-	core = functools.partial(
-		_core_file_hook,
-		ref_has_permission=lambda ptype, user: calls.append((ptype, user)) or True,
-	)
+	core = _spy_core(calls, ref_has_permission=lambda ptype, user: True)
 	methods = [core, permissions.file_has_permission]
 	assert _has_controller_permissions(doc, "read", "stranger@example.com", methods) is False
 	assert calls == []
@@ -350,13 +379,10 @@ def test_read_sharee_denied_recordings_file(monkeypatch):
 	)
 	_patch(monkeypatch, roles=[], recording_user="owner@example.com")
 	calls = []
-	core = functools.partial(
-		_core_file_hook,
-		# A share-ee: core's own hook WOULD grant access by delegating to
-		# the parent doc's has_permission, which returns True for a valid
-		# DocShare. optimus's hook must deny before core ever gets asked.
-		ref_has_permission=lambda ptype, user: calls.append((ptype, user)) or True,
-	)
+	# A share-ee: core's own hook WOULD grant access by delegating to
+	# the parent doc's has_permission, which returns True for a valid
+	# DocShare. optimus's hook must deny before core ever gets asked.
+	core = _spy_core(calls, ref_has_permission=lambda ptype, user: True)
 	methods = [core, permissions.file_has_permission]
 	assert _has_controller_permissions(doc, "read", "sharee@example.com", methods) is False
 	assert calls == []
@@ -450,17 +476,6 @@ def _has_controller_permissions_v15(doc, ptype, user, methods, *, debug=False):
 		if controller_permission is not None:
 			return bool(controller_permission)
 	return True
-
-
-def _spy_core(calls, **kw):
-	"""The stand-in core File hook with its real signature, recording each
-	call so a test can prove the loop reached it (or never did)."""
-
-	def core(doc, ptype=None, user=None, debug=False):
-		calls.append((ptype, user))
-		return _core_file_hook(doc, ptype, user, debug, **kw)
-
-	return core
 
 
 def _file(**kw):
