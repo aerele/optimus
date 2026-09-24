@@ -253,7 +253,7 @@ What this design does **not** protect against:
 - **A compromised LLM provider.** If you're using Anthropic / OpenAI / a third-party, your finding context is at the mercy of their logging, retention and abuse-monitoring policies. Read each provider's data-use policy.
 - **On-disk caching by the LLM client.** Local servers (Ollama, LM Studio, vLLM) may log requests to disk depending on their flags. Check their docs and configure logging off if you're paranoid.
 - **Backups and audit logs.** The AI suggestion (the response text) is persisted to `Optimus Finding.llm_fix_json`. Your DB backups include it. If a fix suggestion contains a paraphrase of sensitive code/SQL, it'll be in those backups.
-- **The Optimus Telemetry Event DocType** (v0.8.0+). When telemetry is enabled, Optimus's own failures (including AI HTTP errors) are recorded with the provider name + endpoint label + status code but never with the prompt or the payload. See `optimus/telemetry.py`.
+- **AI failure rows in the Error Log.** Optimus's own AI failures are written by `ai_fix.log_ai_failure`, the only function on the AI surface that writes an Error Log row: one row per failure, linked to the Optimus Session, with an explicit message scrubbed of secrets by `redaction.scrub_secrets`. For an HTTP failure it names the provider, the call site, the status and the provider's error code (`provider_error=`), never the prompt, the reply body or any frame's local variables. These rows are in your backups like any other Error Log row. Frappe's own error snapshots (a server error, a background job that fails or times out, any error in developer mode) still print frame locals, which can include prompt text; see `SECURITY.md`.
 
 ---
 
@@ -277,6 +277,10 @@ This means: if you're worried about a profile shared with a third party leaking 
 | Provider matrix | `optimus/ai_fix.py` | `_PROVIDER_DEFAULTS` |
 | Payload builders | `optimus/ai_fix.py` | `_build_messages`, `_build_steps_messages`, `_build_index_messages` |
 | HTTP layer | `optimus/ai_fix.py` | `_http_post` |
+| API key on the request (masked `repr`; the key never enters a header dict) | `optimus/ai_fix.py` | `_ApiKeyAuth` |
+| AI failure rows (the only Error Log writer on the AI surface) | `optimus/ai_fix.py` | `log_ai_failure` |
+| Secret scrubbing of log text | `optimus/redaction.py` | `scrub_secrets` |
+| Cleaning keys out of old Error Log rows | `optimus/maintenance.py` | `scrub_error_log_secrets`, `purge_ai_error_logs` |
 | Per-type exclusion gate | `optimus/ai_fix.py` | `is_finding_type_excluded` |
 | On-demand entry point | `optimus/api.py` | `suggest_fix`, `suggest_index`, `humanize_steps` |
 | Auto-suggest entry point | `optimus/analyze.py` | `_enrich_findings_with_ai_suggestions`, `_enrich_table_breakdown_with_ai_suggestions` |
