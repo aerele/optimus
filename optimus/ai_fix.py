@@ -864,8 +864,10 @@ def _resolve_provider() -> dict:
 	required base_url/model.
 
 	SECURITY: the dict carries ``has_key`` (bool), never the key itself: it is
-	a local in most AI frames, and Frappe's traceback sanitizer only redacts a
-	dict key named exactly ``key``. Code that sends a request calls
+	a local in most AI frames, and Frappe's traceback sanitizer
+	(``frappe.utils._get_traceback_sanitizer``) only redacts a dict key named
+	exactly ``password``, ``passwd``, ``secret``, ``token``, ``key`` or
+	``pwd``; ``api_key`` is not one of them. Code that sends a request calls
 	``_get_api_key()`` at the call site.
 	"""
 	from optimus.settings import get_config
@@ -1380,6 +1382,9 @@ def log_ai_failure(
 		if exc is not None:
 			lines.append("".join(traceback.format_exception(exc, chain=False)).rstrip())
 		message = _scrubbed_message(title, lines, exc)
+		# Sentry (attach_stacktrace) serialises this frame's locals with the
+		# event: only the scrubbed message may be bound while logging.
+		del lines
 
 		if not docname and session_uuid:
 			try:
@@ -1520,12 +1525,18 @@ def _http_post(
 	``except`` blocks: while an ``except`` block runs, the original exception
 	is the active one, Frappe's Sentry hook captures it with its
 	requests / urllib3 frames (whose locals hold the prepared headers), and
-	a ``raise`` there would chain it as ``__context__``. The catch-all keeps
-	only the exception's type name (a ``UnicodeEncodeError`` from http.client
-	carries the header value)."""
+	a ``raise`` there would chain it as ``__context__``. The catch-all only
+	records plain values (the exception's type name; for an RQ job timeout,
+	its type and args): a ``UnicodeEncodeError`` from http.client carries the
+	header value, so the error to raise is built after the ``try``, where a
+	failure while building it can neither chain that exception nor find it
+	still bound in this frame."""
 	timeout = timeout or _resolve_timeout_seconds()
+	job_timeout_types = _job_timeout_types()
 	failure: AiFixError | None = None
-	interrupt: BaseException | None = None
+	unexpected_name: str | None = None
+	interrupt_type: type[BaseException] | None = None
+	interrupt_args: tuple = ()
 	detail = ""
 	resp = None
 	try:
@@ -1537,18 +1548,20 @@ def _http_post(
 		failure = AiFixError(f"Couldn't reach the AI provider: {type(e).__name__}.", kind="transport")
 		detail = f"{type(e).__name__}: {e}"
 	except Exception as e:
-		if isinstance(e, _job_timeout_types()):
-			# The RQ job hit its timeout while we were sending: it must still
-			# stop the job, so re-raise the same type, but as a fresh instance
-			# with no requests / urllib3 frames and no chain.
-			interrupt = type(e)(*e.args)
+		if isinstance(e, job_timeout_types):
+			interrupt_type, interrupt_args = type(e), e.args
 		else:
-			from frappe import _
+			unexpected_name = type(e).__name__
+	if interrupt_type is not None:
+		# The RQ job hit its timeout while we were sending: it must still stop
+		# the job, so re-raise the same type, but as a fresh instance with no
+		# requests / urllib3 frames and no chain.
+		raise interrupt_type(*interrupt_args)
+	if unexpected_name is not None:
+		from frappe import _
 
-			failure = AiFixError(_("The AI request failed ({0}).").format(type(e).__name__), kind="transport")
-			detail = type(e).__name__
-	if interrupt is not None:
-		raise interrupt
+		failure = AiFixError(_("The AI request failed ({0}).").format(unexpected_name), kind="transport")
+		detail = unexpected_name
 	if failure is not None:
 		_log_http_error(provider, where, None, detail, exc=failure)
 		raise failure
