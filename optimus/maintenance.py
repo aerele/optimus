@@ -410,7 +410,10 @@ def _chunks(doctype: str, filters: list[list], or_filters: list[list] | None, fi
 	chunk never shift a later one). Each statement reads one window of at
 	most ``_WINDOW`` names, ``name > last AND name <= bound``; the last window
 	has no upper bound. Matches from several windows are gathered into one
-	chunk, so sparse matches do not mean a commit per window."""
+	chunk, so sparse matches do not mean a commit per window. Each statement
+	asks only for the rows the chunk still lacks (``batch_size`` minus the
+	rows gathered), so no more than ``batch_size`` rows are ever held, and a
+	window is done when a statement returns fewer rows than it asked for."""
 	last = ""
 	pending: list[dict] = []
 	while True:
@@ -420,19 +423,20 @@ def _chunks(doctype: str, filters: list[list], or_filters: list[list] | None, fi
 			window = [["name", ">", after]]
 			if end is not None:
 				window.append(["name", "<=", end])
+			limit = batch_size - len(pending)
 			rows = frappe.get_all(
 				doctype,
 				filters=[*filters, *window],
 				or_filters=or_filters,
 				fields=fields,
 				order_by="name asc",
-				limit_page_length=batch_size,
+				limit_page_length=limit,
 			)
 			pending += rows
-			while len(pending) >= batch_size:
-				yield pending[:batch_size]
-				pending = pending[batch_size:]
-			if len(rows) < batch_size:
+			if len(pending) >= batch_size:
+				yield pending
+				pending = []
+			if len(rows) < limit:
 				break
 			after = rows[-1]["name"]
 		if end is None:
