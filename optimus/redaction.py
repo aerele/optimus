@@ -148,3 +148,69 @@ def redact_call_queries(calls, *, extra_columns: tuple[str, ...] = ()) -> None:
 			call["normalized_query"] = redact_sql_literals(
 				call["normalized_query"], extra_columns=extra_columns
 			)
+
+
+# ---------------------------------------------------------------------------
+# Secret scrubbing for log text (PR-0a). Used by ai_fix.log_ai_failure on
+# every AI-surface Error Log message and by optimus.maintenance to scrub rows
+# written before the fix. Three shapes cover every leak found in real rows:
+# a dict repr carrying an auth header, a dict repr carrying an api-key field,
+# and a bare "Bearer <token>" anywhere else (exception text, echoed bodies);
+# a fourth masks credentials in a URL (a Base URL typed as user:pass@host).
+# ---------------------------------------------------------------------------
+
+SECRET_PLACEHOLDER = "********"
+
+_SECRET_PATTERNS: tuple[re.Pattern, ...] = (
+	# 'authorization': 'Bearer <tok>' (either quote style; also Basic / Token)
+	re.compile(
+		r"""((['"])(?:proxy-)?authorization\2\s*:\s*(['"])(?:bearer|basic|token)\s+)(?!\*{8}\3)[^'"\s]+(\3)""",
+		re.IGNORECASE,
+	),
+	# 'x-api-key' / 'x-goog-api-key' / 'api_key' / 'api-key' / 'apikey' : '<tok>'
+	re.compile(
+		r"""((['"])(?:x-api-key|x-goog-api-key|api[_-]?key|apikey)\2\s*:\s*(['"]))(?!\*{8}\3)[^'"]+(\3)""",
+		re.IGNORECASE,
+	),
+	# bare "Bearer <tok>" anywhere else. The token is any run of non-quote,
+	# non-space characters, so a pasted smart quote inside or in front of the
+	# key (Bearer \u2019sk-...) is masked too; it never ends on a backslash, so
+	# a JSON-escaped quote after it (Deleted Document data) stays intact.
+	re.compile(r"""(\bBearer\s+)(?!\*{8})[^'"\s]{7,}[^'"\s\\]()()()"""),
+	# credentials in a URL: scheme://user:password@host, up to the LAST "@"
+	# before the path (a password may hold a raw "@"); never across a quote,
+	# so an address in the next field of compact JSON is not swallowed
+	re.compile(r"""(://)()()(?!\*{8}@)[^/\s'"]+(@)"""),
+)
+
+# A literal shorter than this is never replaced: it would shred ordinary words
+# (tests and misconfigured sites use keys like "k"); real provider keys are
+# far longer.
+_MIN_LITERAL_LEN = 8
+
+
+def scrub_secrets(text: str, *, literals: tuple[str, ...] = ()) -> str:
+	"""Return ``text`` with API keys replaced by ``********``.
+
+	Replaces every exact occurrence of each ``literals`` entry that is a
+	string of at least 8 characters (the live key, when the caller knows
+	it), then the header / field / Bearer / URL-credential shapes. Idempotent: an
+	already-masked value is never matched again, so a second pass changes
+	nothing. Non-string input is returned unchanged.
+
+	SECURITY: the key is held only in locals whose names Frappe's traceback
+	sanitizer and Sentry both redact (``secret``, ``api_key``); ``literals``
+	is dropped first. Callers still guard the call and never log a failure
+	of it with frame locals: ``text`` itself holds the unmasked value.
+	"""
+	if not text or not isinstance(text, str):
+		return text
+	secret = tuple(literals or ())
+	del literals
+	out = text
+	for api_key in secret:
+		if isinstance(api_key, str) and len(api_key) >= _MIN_LITERAL_LEN:
+			out = out.replace(api_key, SECRET_PLACEHOLDER)
+	for pattern in _SECRET_PATTERNS:
+		out = pattern.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER + (m.group(4) or ""), out)
+	return out
