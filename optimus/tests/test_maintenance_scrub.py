@@ -1277,7 +1277,7 @@ class TestPurgeAiErrorLogs:
 # ---------------------------------------------------------------------------
 
 _PATCH = "optimus.patches.v0_12.scrub_ai_keys_from_error_log"
-_REAL_SCAN_SIZE = maintenance.scrub_scan_size
+_REAL_MEASURE = maintenance.measure_scan_size
 
 
 def _with_context(exc) -> str:
@@ -1315,10 +1315,12 @@ def patch_logs(monkeypatch):
 		rec.errors.append({"title": title, "message": message, "active": sys.exc_info()[0], **kw})
 
 	def _logger(module=None, *a, **k):
-		def _line(msg, *args, **kwargs):
-			rec.events.append("info")
-			rec.lines.append((module, msg))
-		return SimpleNamespace(info=_line)
+		def _level(level):
+			def _line(msg, *args, **kwargs):
+				rec.events.append(level)
+				rec.lines.append((module, level, msg))
+			return _line
+		return SimpleNamespace(**{level: _level(level) for level in ("debug", "info", "warning", "error")})
 	monkeypatch.setattr(frappe, "log_error", _log_error, raising=False)
 	monkeypatch.setattr(frappe, "logger", _logger, raising=False)
 	return rec
@@ -1330,17 +1332,20 @@ def patch_env(monkeypatch):
 
 	def _scrub(**kw):
 		calls.append(kw)
-		return {"candidates": 3, "changed": 2, "deleted_docs_changed": 1, "residual": 0, "failed": 0}
+		return {"candidates": 3, "changed": 2, "deleted_docs_changed": 1, "residual": 0, "failed": 0, "queued": 0}
 
-	monkeypatch.setattr(maintenance, "scrub_scan_size", lambda: 1000)
+	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(1000, None))
 	monkeypatch.setattr(maintenance, "scrub_error_log_secrets", _scrub)
 	return calls
 
 
 def _one_summary_line(patch_logs) -> str:
+	"""The one counts-only summary line, logged at ERROR: Frappe's loggers
+	drop anything lower unless DEV_SERVER is set, so an info line never
+	reached logs/optimus.log on a production site."""
 	assert len(patch_logs.lines) == 1, patch_logs.lines
-	module, line = patch_logs.lines[0]
-	assert module == "optimus" and "\n" not in line and KEY not in line
+	module, level, line = patch_logs.lines[0]
+	assert (module, level) == ("optimus", "error") and "\n" not in line and KEY not in line
 	return line
 
 
@@ -1350,35 +1355,39 @@ def test_patch_runs_the_scrub_for_real(patch_env, patch_logs, capsys):
 	assert "masked AI API keys in 3 stored error row(s)" in capsys.readouterr().out
 	assert patch_logs.errors == []  # no breadcrumb when the scrub ran
 	line = _one_summary_line(patch_logs)
-	for count in ("candidates=3", "changed=2", "deleted_docs_changed=1", "residual=0", "failed=0"):
+	for count in ("candidates=3", "changed=2", "deleted_docs_changed=1", "residual=0", "failed=0", "queued=0"):
 		assert count in line
 
 
 def test_patch_skips_when_the_size_cannot_be_read(patch_env, patch_logs, monkeypatch, capsys):
 	def _count(*a, **k):
-		raise RuntimeError("Lost connection to server during query")
-	db = SimpleNamespace(count=_count, estimate_count=lambda doctype: 5)
+		raise QueryTimeoutError(f"Lost connection to server during query: {KEY}")
+	db = SimpleNamespace(count=_count, sql=lambda *a, **k: ((5,),))
 	monkeypatch.setattr(maintenance, "frappe", SimpleNamespace(db=db, cache=SimpleNamespace(llen=lambda key: 0)))
-	monkeypatch.setattr(maintenance, "scrub_scan_size", _REAL_SCAN_SIZE)
+	monkeypatch.setattr(maintenance, "measure_scan_size", _REAL_MEASURE)
 	importlib.import_module(_PATCH).execute()
 	assert patch_env == []  # the scrub did not run
 	out = capsys.readouterr().out
-	assert "skipped the Error Log key scrub" in out and "its size could not be read" in out
+	assert "skipped the Error Log key scrub" in out and "its size could not be read (QueryTimeoutError)" in out
 	assert _COMMAND in out and str(maintenance.SCAN_SIZE_UNKNOWN) not in out
 	[crumb] = patch_logs.errors
-	assert crumb["message"].startswith("skipped: size unknown")
-	assert "size could not be read" in _one_summary_line(patch_logs)
+	# the failing part's TYPE name, never its message
+	assert crumb["message"].startswith("skipped: size unknown: QueryTimeoutError. ")
+	line = _one_summary_line(patch_logs)
+	assert "size could not be read (QueryTimeoutError)" in line
+	for text in (out, repr(crumb), line):
+		assert "Lost connection" not in text and KEY not in text
 
 
 def test_patch_runs_the_scrub_at_exactly_the_limit(patch_env, monkeypatch):
-	monkeypatch.setattr(maintenance, "scrub_scan_size", lambda: maintenance.MIGRATE_SCAN_LIMIT)
+	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(maintenance.MIGRATE_SCAN_LIMIT, None))
 	importlib.import_module(_PATCH).execute()
 	assert patch_env == [{"dry_run": False}]
 
 
 def test_patch_skips_a_table_too_large_for_migrate(patch_env, patch_logs, monkeypatch, capsys):
 	size = maintenance.MIGRATE_SCAN_LIMIT + 1
-	monkeypatch.setattr(maintenance, "scrub_scan_size", lambda: size)
+	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(size, None))
 	importlib.import_module(_PATCH).execute()
 	assert patch_env == []
 	out = capsys.readouterr().out
@@ -1404,17 +1413,205 @@ def test_patch_does_not_ask_to_rotate_when_nothing_was_found(patch_env, monkeypa
 	assert out == "Optimus: found no AI API keys in stored error rows.\n"
 
 
-@pytest.mark.parametrize(("failed", "residual"), [(2, 0), (0, 1)])
-def test_patch_prints_only_the_problem_lines_when_nothing_was_masked(patch_env, monkeypatch, capsys, failed, residual):
+@pytest.mark.parametrize(("failed", "residual", "queued"), [(2, 0, 0), (0, 1, 0), (0, 0, 4)])
+def test_patch_prints_only_the_problem_lines_when_nothing_was_masked(
+	patch_env, monkeypatch, capsys, failed, residual, queued,
+):
 	monkeypatch.setattr(
 		maintenance, "scrub_error_log_secrets",
-		lambda **kw: {"candidates": 3, "changed": 0, "deleted_docs_changed": 0, "residual": residual, "failed": failed},
+		lambda **kw: {
+			"candidates": 3, "changed": 0, "deleted_docs_changed": 0, "residual": residual, "failed": failed,
+			"queued": queued,
+		},
 	)
 	importlib.import_module(_PATCH).execute()
 	out = capsys.readouterr().out
 	assert "Rotate" not in out and "found no AI API keys" not in out
 	assert ("could not be masked" in out) is bool(failed)
 	assert ("purge_ai_error_logs" in out) is bool(residual)
+	assert ("4 Error Log entry(ies) are still waiting in the deferred-insert queue" in out) is bool(queued)
+
+
+def test_the_run_by_hand_hint_prefers_off_peak(patch_env, monkeypatch, capsys):
+	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(maintenance.MIGRATE_SCAN_LIMIT + 1, None))
+	importlib.import_module(_PATCH).execute()
+	out = capsys.readouterr().out
+	assert (
+		"Run it by hand (Error Log is locked while it is scanned, so on a busy site prefer off-peak): "
+		f"bench --site <site> {_COMMAND}"
+	) in out
+	assert "Run it now" not in out and "run it off-peak" not in out
+
+
+def test_the_purge_hint_has_the_off_peak_note_too(patch_env, monkeypatch, capsys):
+	monkeypatch.setattr(
+		maintenance, "scrub_error_log_secrets",
+		lambda **kw: {"candidates": 1, "changed": 0, "deleted_docs_changed": 0, "residual": 1, "failed": 0, "queued": 0},
+	)
+	importlib.import_module(_PATCH).execute()
+	out = capsys.readouterr().out
+	purge = "bench --site <site> execute optimus.maintenance.purge_ai_error_logs --kwargs"
+	assert (
+		f"then delete them (Error Log is locked while it is scanned, so on a busy site prefer off-peak): "
+		f"{purge} \"{{'dry_run': False}}\""
+	) in out
+
+
+_PARTIAL_TITLE = "Optimus: Error Log key scrub did not finish"
+
+
+@pytest.mark.parametrize(("failed", "residual", "queued"), [(1, 0, 0), (0, 2, 0), (0, 0, 3), (1, 2, 3)])
+def test_a_partial_scrub_leaves_a_breadcrumb(patch_env, patch_logs, monkeypatch, failed, residual, queued):
+	# Patch Log marks the patch done: without a row, a scrub that left rows
+	# unmasked, key-shaped values or queued entries leaves no lasting trace.
+	monkeypatch.setattr(
+		maintenance, "scrub_error_log_secrets",
+		lambda **kw: {
+			"candidates": 5, "changed": 1, "deleted_docs_changed": 0, "residual": residual, "failed": failed,
+			"queued": queued,
+		},
+	)
+	importlib.import_module(_PATCH).execute()
+	[crumb] = patch_logs.errors
+	assert crumb["title"] == _PARTIAL_TITLE and crumb["active"] is None
+	assert crumb["message"].startswith(f"failed={failed} residual={residual} queued={queued}. Run it by hand (")
+	assert f"bench --site <site> {_COMMAND}" in crumb["message"]
+	assert ("purge_ai_error_logs" in crumb["message"]) is bool(residual)
+	assert KEY not in repr(crumb)
+	line = _one_summary_line(patch_logs)
+	assert f"failed={failed}" in line and f"residual={residual}" in line and f"queued={queued}" in line
+
+
+def test_a_complete_scrub_leaves_no_breadcrumb(patch_env, patch_logs, monkeypatch):
+	monkeypatch.setattr(
+		maintenance, "scrub_error_log_secrets",
+		lambda **kw: {"candidates": 5, "changed": 5, "deleted_docs_changed": 2, "residual": 0, "failed": 0, "queued": 0},
+	)
+	importlib.import_module(_PATCH).execute()
+	assert patch_logs.errors == []
+
+
+class _PgTransaction:
+	"""Postgres after a failed statement: every later statement raises
+	until ``rollback()``. ``written`` is what reached the table."""
+
+	def __init__(self):
+		self.aborted = False
+		self.written = []
+		self.rollbacks = 0
+
+	def fail(self, exc):
+		self.aborted = True
+		raise exc
+
+	def write(self, row):
+		if self.aborted:
+			raise InFailedSqlTransaction("current transaction is aborted, commands ignored until end of transaction block")
+		self.written.append(row)
+
+	def rollback(self, *a, **k):
+		self.rollbacks += 1
+		self.aborted = False
+
+
+@pytest.fixture
+def pg(monkeypatch, patch_logs):
+	"""The patch on Postgres. ``frappe.log_error`` writes through the
+	transaction; after ``execute()`` a test writes the Patch Log row as
+	``execute_patch``'s ``update_patch_log`` does next."""
+	import frappe
+
+	txn = _PgTransaction()
+
+	def _log_error(title=None, message=None, **kw):
+		txn.write(("Error Log", title, message))
+	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=txn.rollback), raising=False)
+	monkeypatch.setattr(frappe, "log_error", _log_error, raising=False)
+	monkeypatch.setattr(maintenance, "measure_scan_size", _REAL_MEASURE)
+	return txn
+
+
+def _pg_maintenance(monkeypatch, txn, count=lambda doctype: 10, deleted=5):
+	db = SimpleNamespace(count=count, sql=lambda *a, **k: txn.write("select") or ((deleted,),))
+	monkeypatch.setattr(maintenance, "frappe", SimpleNamespace(db=db, cache=SimpleNamespace(llen=lambda key: 0)))
+
+
+@pytest.mark.parametrize("outcome", ["size query fails", "scrub fails", "too large"])
+def test_on_postgres_the_patch_log_row_is_still_written(pg, monkeypatch, outcome):
+	# A failed statement aborts the Postgres transaction: without a rollback
+	# the breadcrumb and then execute_patch's update_patch_log fail, and
+	# the migrate stops, on every retry.
+	if outcome == "size query fails":
+		_pg_maintenance(monkeypatch, pg, count=lambda doctype: pg.fail(QueryTimeoutError("canceling statement")))
+	elif outcome == "scrub fails":
+		_pg_maintenance(monkeypatch, pg)
+
+		def _scrub(**kw):
+			pg.fail(RuntimeError("could not update a chunk"))
+		monkeypatch.setattr(maintenance, "scrub_error_log_secrets", _scrub)
+	else:
+		_pg_maintenance(monkeypatch, pg, deleted=maintenance.MIGRATE_SCAN_LIMIT + 1)
+	assert importlib.import_module(_PATCH).execute() is None
+	pg.write("Patch Log")  # raises if the transaction is still aborted
+	crumbs = [r for r in pg.written if r[0] == "Error Log"]
+	assert [c[1] for c in crumbs] == [_CRUMB_TITLE]  # written, after the rollback
+	assert pg.written[-1] == "Patch Log"
+
+
+@pytest.mark.parametrize("outcome", ["skipped", "partial"])
+def test_on_postgres_a_failed_breadcrumb_is_rolled_back_too(pg, monkeypatch, outcome):
+	# The breadcrumb's own INSERT can fail and abort the transaction.
+	import frappe
+
+	_pg_maintenance(monkeypatch, pg, deleted=maintenance.MIGRATE_SCAN_LIMIT + 1 if outcome == "skipped" else 5)
+	monkeypatch.setattr(
+		maintenance, "scrub_error_log_secrets",
+		lambda **kw: {"candidates": 1, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 1, "queued": 0},
+	)
+
+	def _log_error(title=None, message=None, **kw):
+		pg.fail(RuntimeError("value too long for type character varying(140)"))
+	monkeypatch.setattr(frappe, "log_error", _log_error, raising=False)
+	assert importlib.import_module(_PATCH).execute() is None
+	pg.write("Patch Log")  # raises if the transaction is still aborted
+	assert pg.written[-1] == "Patch Log"
+
+
+def test_the_summary_line_reaches_the_log_in_production(patch_env, monkeypatch, capsys):
+	"""Frappe's loggers sit at ERROR unless DEV_SERVER is set (``bench
+	start``), so an info summary never reached logs/optimus.log on a
+	production site. This runs Frappe's real ``get_logger`` level logic
+	(a private copy of ``frappe/utils/logger.py`` with DEV_SERVER unset and
+	stream-only handlers, so no log file is written)."""
+	import importlib.util
+	import logging
+
+	import frappe
+
+	real = pytest.importorskip("frappe.utils.logger")
+	monkeypatch.delenv("DEV_SERVER", raising=False)
+	monkeypatch.setattr(frappe, "_dev_server", 0, raising=False)
+	monkeypatch.setenv("FRAPPE_STREAM_LOGGING", "1")
+	spec = importlib.util.spec_from_file_location("_optimus_test_frappe_logger_patch", real.__file__)
+	private = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(private)
+	assert private.default_log_level == logging.ERROR
+	monkeypatch.setattr(frappe, "loggers", {}, raising=False)
+	monkeypatch.setattr(frappe, "log_level", None, raising=False)
+	monkeypatch.setattr(frappe, "logger", lambda module=None, **k: private.get_logger(module=module, **k), raising=False)
+
+	named = logging.getLogger("optimus-all")  # what get_logger names it without a site
+	saved = (list(named.handlers), named.level, named.propagate)
+	try:
+		importlib.import_module(_PATCH).execute()
+		assert named.level == logging.ERROR
+	finally:
+		for handler in [h for h in named.handlers if h not in saved[0]]:
+			named.removeHandler(handler)
+			handler.close()
+		named.setLevel(saved[1])
+		named.propagate = saved[2]
+	assert "optimus scrub_ai_keys_from_error_log: ran, candidates=3" in capsys.readouterr().err
 
 
 def test_patch_warns_about_residual_rows_with_the_purge_dry_run_first(patch_env, monkeypatch, capsys):
@@ -1444,7 +1641,7 @@ def failing_scrub(monkeypatch, patch_logs):
 	def _rollback(*a, **k):
 		rollbacks.append(1)
 		patch_logs.events.append("rollback")
-	monkeypatch.setattr(maintenance, "scrub_scan_size", lambda: 10)
+	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(10, None))
 	monkeypatch.setattr(maintenance, "scrub_error_log_secrets", _scrub)
 	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=_rollback), raising=False)
 	return rollbacks
@@ -1497,7 +1694,7 @@ def test_a_failing_breadcrumb_or_log_line_never_blocks_migrate(patch_env, monkey
 	monkeypatch.setattr(frappe, "log_error", _boom)
 	monkeypatch.setattr(frappe, "logger", _boom)
 	if outcome == "skipped":
-		monkeypatch.setattr(maintenance, "scrub_scan_size", lambda: maintenance.MIGRATE_SCAN_LIMIT + 1)
+		monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(maintenance.MIGRATE_SCAN_LIMIT + 1, None))
 	elif outcome == "failed":
 		def _scrub(**kw):
 			raise ValueError("boom")

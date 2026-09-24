@@ -9,16 +9,32 @@ them).
 
 It never blocks the migrate: a failed or skipped scrub prints the command to
 run it by hand and returns, because a failing patch would stop the rest of
-the upgrade, the key-leak fix included. Patch Log marks the patch done either
-way, so a skipped or failed scrub also leaves one Error Log row titled
-"Optimus: Error Log key scrub did not run", with the reason (an exception
-type or a row count, never row text) and the command. Every outcome writes
-one counts-only line to the ``optimus`` log. Advisory step 3 (re-run the
+the upgrade, the key-leak fix included. When the scrub did not run, the patch
+rolls the transaction back before it writes anything: on Postgres a failed
+statement (a size query, a scrub chunk) aborts the transaction, and every
+later write, this patch's breadcrumb and the Patch Log row
+``execute_patch`` writes next included, would fail until a rollback, which
+would stop the migrate on every retry. ``execute_patch`` commits just before
+the patch and the scrub commits every chunk, so the rollback drops at most
+the failing chunk's writes.
+
+Patch Log marks the patch done either way, so a skipped or failed scrub also
+leaves one Error Log row titled "Optimus: Error Log key scrub did not run",
+with the reason (an exception type name or a row count, never row text) and
+the command. A scrub that ran but could not process every row, left a
+key-shaped value, or left entries in the Error Log's deferred-insert queue
+leaves one row titled "Optimus: Error Log key scrub did not finish", with
+those counts and the command. Every outcome writes one counts-only line to
+the ``optimus`` log at ERROR level (Frappe's loggers drop lower levels unless
+DEV_SERVER is set, as under ``bench start``), so it reaches
+``logs/optimus.log`` on a production site. Advisory step 3 (re-run the
 scrub, then a dry run reporting 0) is the guarantee.
 """
 
 _BREADCRUMB_TITLE = "Optimus: Error Log key scrub did not run"
-_COUNTS = ("candidates", "changed", "deleted_docs_changed", "residual", "failed")
+_PARTIAL_TITLE = "Optimus: Error Log key scrub did not finish"
+_COUNTS = ("candidates", "changed", "deleted_docs_changed", "residual", "failed", "queued")
+_OFF_PEAK = "Error Log is locked while it is scanned, so on a busy site prefer off-peak"
 
 
 def execute():
@@ -29,78 +45,110 @@ def execute():
 		f"bench --site {site} execute optimus.maintenance.scrub_error_log_secrets "
 		"--kwargs \"{'dry_run': False}\""
 	)
-	run_it = f"Run it now (Error Log is locked while it is scanned, so on a busy site run it off-peak): {command}"
+	purge = f"bench --site {site} execute optimus.maintenance.purge_ai_error_logs --kwargs"
+	run_it = f"Run it by hand ({_OFF_PEAK}): {command}"
+	purge_it = (
+		f"Count the AI error rows first: {purge} \"{{'dry_run': True}}\", then delete them "
+		f"({_OFF_PEAK}): {purge} \"{{'dry_run': False}}\""
+	)
 	failed = None
 	out = None
 	scan = 0
+	unknown_because = None
 	try:
 		# Imported inside the try, so a broken import is reported like any
 		# other failure and never stops the migrate.
 		from optimus import maintenance
 
-		scan = maintenance.scrub_scan_size()
+		scan, unknown_because = maintenance.measure_scan_size()
 		if scan <= maintenance.MIGRATE_SCAN_LIMIT:
 			out = maintenance.scrub_error_log_secrets(dry_run=False)
 	except Exception as e:
 		# Keep only the type name: the scrub's frames hold unmasked rows.
 		failed = type(e).__name__
+	if out is None:
+		# The scrub did not run (skipped or failed): roll back first, so the
+		# breadcrumb and execute_patch's Patch Log row can be written even
+		# after a failed statement on Postgres.
+		_rollback(frappe)
 	if failed is not None:
-		# Drop the failing chunk's uncommitted writes (earlier chunks are
-		# committed), so the transaction the migrate commits next is usable.
-		try:
-			frappe.db.rollback()
-		except Exception:
-			pass
-		_breadcrumb(frappe, failed, command)
+		_breadcrumb(frappe, _BREADCRUMB_TITLE, failed, run_it)
 		_log_summary(frappe, f"failed ({failed})")
 		print(f"Optimus: the Error Log key scrub failed ({failed}); the migrate continues. {run_it}")
 		return
 	if out is None:
-		unknown = scan == maintenance.SCAN_SIZE_UNKNOWN
-		size = "its size could not be read" if unknown else f"{scan} rows to read"
-		_breadcrumb(frappe, "skipped: size unknown" if unknown else f"skipped: {scan} rows", command)
+		if scan == maintenance.SCAN_SIZE_UNKNOWN:
+			because = unknown_because or "unknown"
+			size = f"its size could not be read ({because})"
+			reason = f"skipped: size unknown: {because}"
+		else:
+			size = f"{scan} rows to read"
+			reason = f"skipped: {scan} rows"
+		_breadcrumb(frappe, _BREADCRUMB_TITLE, reason, run_it)
 		_log_summary(frappe, f"skipped, {size}, limit {maintenance.MIGRATE_SCAN_LIMIT}")
 		print(
 			f"Optimus: skipped the Error Log key scrub during migrate ({size}, "
 			f"limit {maintenance.MIGRATE_SCAN_LIMIT}). {run_it}"
 		)
 		return
-	_log_summary(frappe, "ran, " + " ".join(f"{k}={int(out.get(k) or 0)}" for k in _COUNTS))
-	changed = int(out.get("changed") or 0) + int(out.get("deleted_docs_changed") or 0)
+	counts = {k: int(out.get(k) or 0) for k in _COUNTS}
+	_log_summary(frappe, "ran, " + " ".join(f"{k}={v}" for k, v in counts.items()))
+	changed = counts["changed"] + counts["deleted_docs_changed"]
 	if changed:
 		print(
 			f"Optimus: masked AI API keys in {changed} stored error row(s). "
 			"Rotate those keys at the provider: backups taken before this upgrade still hold them."
 		)
-	elif not (out.get("failed") or out.get("residual")):
+	elif not (counts["failed"] or counts["residual"] or counts["queued"]):
 		print("Optimus: found no AI API keys in stored error rows.")
-	if out.get("failed"):
-		print(f"Optimus: {out['failed']} error row(s) could not be masked. Run it again: {command}")
-	if out.get("residual"):
-		purge = f"bench --site {site} execute optimus.maintenance.purge_ai_error_logs --kwargs"
+	if counts["failed"]:
+		print(f"Optimus: {counts['failed']} error row(s) could not be masked. {run_it}")
+	if counts["queued"]:
 		print(
-			f"Optimus: {out['residual']} error row(s) still hold a key-shaped value. Count the AI error rows "
-			f"first: {purge} \"{{'dry_run': True}}\", then delete them: {purge} \"{{'dry_run': False}}\""
+			f"Optimus: {counts['queued']} Error Log entry(ies) are still waiting in the deferred-insert queue "
+			f"and were not scrubbed. {run_it}"
+		)
+	if counts["residual"]:
+		print(f"Optimus: {counts['residual']} error row(s) still hold a key-shaped value. {purge_it}")
+	if counts["failed"] or counts["residual"] or counts["queued"]:
+		hint = f"{run_it} {purge_it}" if counts["residual"] else run_it
+		_breadcrumb(
+			frappe, _PARTIAL_TITLE,
+			f"failed={counts['failed']} residual={counts['residual']} queued={counts['queued']}", hint,
 		)
 
 
-def _breadcrumb(frappe, reason: str, command: str) -> None:
-	"""One Error Log row saying the scrub did not run and how to run it, so
-	the skip or failure is still visible once the migrate's console output is
-	gone. ``reason`` is an exception type or a row count, never row text. It
-	is called after the rollback (so the row survives it) and outside any
-	``except`` block (so Frappe's Sentry hook has no active exception to
-	attach). Never raises."""
+def _rollback(frappe) -> None:
+	"""Roll the current transaction back. Never raises."""
 	try:
-		frappe.log_error(title=_BREADCRUMB_TITLE, message=f"{reason}. Run it by hand, off-peak: {command}")
+		frappe.db.rollback()
 	except Exception:
 		pass
 
 
-def _log_summary(frappe, outcome: str) -> None:
-	"""One counts-only line in the ``optimus`` log for every outcome. Never
-	raises."""
+def _breadcrumb(frappe, title: str, reason: str, hint: str) -> None:
+	"""One Error Log row saying the scrub did not run (or did not finish)
+	and how to run it, so it is still visible once the migrate's console
+	output is gone. ``reason`` is an exception type name or counts, never
+	row text. It is written outside any ``except`` block (so Frappe's Sentry
+	hook has no active exception to attach). If the write itself fails, the
+	transaction is rolled back: a failed INSERT aborts it on Postgres, and
+	execute_patch's Patch Log row comes next. Never raises."""
+	failed = False
 	try:
-		frappe.logger("optimus").info(f"optimus scrub_ai_keys_from_error_log: {outcome}")
+		frappe.log_error(title=title, message=f"{reason}. {hint}")
+	except Exception:
+		failed = True
+	if failed:
+		_rollback(frappe)
+
+
+def _log_summary(frappe, outcome: str) -> None:
+	"""One counts-only line in the ``optimus`` log for every outcome, at
+	ERROR level: Frappe's loggers drop lower levels unless DEV_SERVER is
+	set, so an info line would never reach ``logs/optimus.log`` on a
+	production site. Never raises."""
+	try:
+		frappe.logger("optimus").error(f"optimus scrub_ai_keys_from_error_log: {outcome}")
 	except Exception:
 		pass
