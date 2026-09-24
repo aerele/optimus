@@ -980,3 +980,147 @@ class TestCallSitesLogOnce:
 		assert [r["title"] for r in logs] == ["optimus ai backfill", "optimus ai backfill"]
 		assert "finding=F1" in logs[0]["message"] and "empty response" in logs[0]["message"]
 		assert logs[0]["reference_name"] == "SESS-0001"
+
+
+class TestLogAiStepFailure:
+	"""``analyze._log_ai_step_failure``: how ``analyze.run`` logs a failed AI
+	step (``run`` itself must not reference ai_fix names)."""
+
+	def test_threads_the_title_and_the_session(self, monkeypatch):
+		from optimus import analyze
+
+		calls = []
+		monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **k: calls.append((a, k)) or True)
+		error = RuntimeError("step broke")
+		analyze._log_ai_step_failure("optimus ai auto-suggest (outer)", error, "uuid-3")
+		assert calls == [(("optimus ai auto-suggest (outer)", error), {"session_uuid": "uuid-3"})]
+
+	def test_writes_one_referenced_row(self, logs):
+		from optimus import analyze
+
+		analyze._log_ai_step_failure("optimus ai index-suggest (outer)", RuntimeError("step broke"), "uuid-3")
+		assert len(logs) == 1
+		assert logs[0]["title"] == "optimus ai index-suggest (outer)"
+		assert logs[0]["reference_name"] == "SESS-0001"
+		assert "session_uuid=uuid-3" in logs[0]["message"]
+		assert "RuntimeError: step broke" in logs[0]["message"]
+
+	def test_never_raises(self, logs, monkeypatch, breadcrumbs):
+		import frappe
+
+		from optimus import analyze
+
+		monkeypatch.setattr(frappe, "log_error", _raising(RuntimeError("Error Log insert failed")), raising=False)
+		monkeypatch.setattr(frappe, "db", _FakeDB(raise_on_get=True), raising=False)
+		analyze._log_ai_step_failure("t", RuntimeError("x"), "uuid-3")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# api.py log sites: each failure is logged with its title and session, and the
+# endpoint still returns normally
+# ---------------------------------------------------------------------------
+
+class _ApiDB:
+	"""``frappe.db`` for the api.py paths below."""
+
+	def __init__(self, set_value_error=None):
+		self.set_value_error = set_value_error
+		self.writes = []
+
+	def get_value(self, doctype, filters=None, fieldname=None, *a, as_dict=False, **k):
+		if as_dict:
+			return {"name": "SESS-0001", "user": "Administrator", "status": "Ready"}
+		return "SESS-0001"
+
+	def set_value(self, *a, **k):
+		if self.set_value_error is not None:
+			raise self.set_value_error
+		self.writes.append(a)
+
+
+@pytest.fixture
+def api_env(monkeypatch):
+	"""Fake the gates and data the api.py AI paths read; capture every
+	``log_ai_failure`` call as ``(title, exc, kwargs)``."""
+	import inspect
+
+	import frappe
+
+	from optimus import analyze, api
+	from optimus import settings as _settings
+
+	calls = []
+	monkeypatch.setattr(api, "frappe", frappe)
+	monkeypatch.setattr(analyze, "frappe", frappe)
+	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, exc=None, **kw: calls.append((title, exc, kw)) or True)
+	monkeypatch.setattr(api, "_require_profiler_user", lambda: "Administrator")
+	monkeypatch.setattr(api, "_require_session_permission", lambda *a, **k: "SESS-0001")
+	monkeypatch.setattr(frappe, "get_roles", lambda *a, **k: ["System Manager"], raising=False)
+	monkeypatch.setattr(frappe, "db", _ApiDB(), raising=False)
+	monkeypatch.setattr(frappe.local, "_optimus_spend_session", None, raising=False)
+	finding = SimpleNamespace(name="FIND-1", finding_type="N+1 Query", llm_fix_json=None, action_ref="")
+	doc = SimpleNamespace(
+		name="SESS-0001", session_uuid="uuid-5", findings=[finding],
+		actions=[SimpleNamespace(recording_uuid="rec-1", idx=1)],
+	)
+	monkeypatch.setattr(frappe, "get_doc", lambda *a, **k: doc, raising=False)
+	cfg = _settings.OptimusConfig(ai_enabled=True, ai_provider="OpenAI", ai_suggest_findings=True)
+	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
+	monkeypatch.setattr(analyze, "_load_recordings_bundle", lambda *a, **k: None)
+	monkeypatch.setattr(analyze, "_fetch_recordings", lambda *a, **k: [])
+	monkeypatch.setattr(analyze, "_backfill_ai_suggestions", lambda *a, **k: None)
+	monkeypatch.setattr(analyze, "_render_and_attach_reports", lambda *a, **k: None)
+	monkeypatch.setattr(analyze, "_ai_payload_for_finding", lambda *a, **k: {"finding_type": "N+1 Query"})
+	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
+	monkeypatch.setattr("optimus.pdf_export.clear_cached_pdf", lambda *a, **k: None)
+	monkeypatch.setattr(ai_fix, "is_available", lambda *a, **k: True)
+	monkeypatch.setattr(ai_fix, "suggest_fix", lambda payload: {"suggestion": "batch it", "model": "m"})
+	return SimpleNamespace(
+		calls=calls, doc=doc, api=api, analyze=analyze,
+		regenerate_reports=inspect.unwrap(api.regenerate_reports),
+		suggest_fix=inspect.unwrap(api.suggest_fix),
+	)
+
+
+class TestApiLogSites:
+	def test_regenerate_reports_fetch_error(self, api_env, monkeypatch):
+		error = RuntimeError("redis down")
+		monkeypatch.setattr(api_env.analyze, "_fetch_recordings", _raising(error))
+		out = api_env.regenerate_reports("uuid-5")
+		assert api_env.calls == [("optimus regenerate_reports fetch", error, {"session_uuid": "uuid-5"})]
+		assert out["regenerated"] is True and out["recordings_available"] == 0
+
+	def test_regenerate_reports_backfill_error(self, api_env, monkeypatch):
+		error = RuntimeError("backfill broke")
+		monkeypatch.setattr(api_env.analyze, "_backfill_ai_suggestions", _raising(error))
+		out = api_env.regenerate_reports("uuid-5")
+		assert api_env.calls == [("optimus regenerate ai backfill", error, {"session_uuid": "uuid-5"})]
+		assert out["regenerated"] is True
+
+	def test_suggest_fix_persist_error_on_set_value(self, api_env, monkeypatch):
+		import frappe
+
+		error = RuntimeError("write failed")
+		monkeypatch.setattr(frappe, "db", _ApiDB(set_value_error=error), raising=False)
+		monkeypatch.setattr(api_env.api, "safe_commit", lambda: None)
+		out = api_env.suggest_fix("uuid-5", "FIND-1")
+		assert api_env.calls == [
+			("optimus suggest_fix persist", error, {"session_uuid": "uuid-5", "finding": "FIND-1"}),
+		]
+		assert out["ok"] is True and out["cached"] is False and out["suggestion"] == "batch it"
+
+	def test_suggest_fix_persist_error_on_commit(self, api_env, monkeypatch):
+		error = RuntimeError("commit failed")
+		monkeypatch.setattr(api_env.api, "safe_commit", _raising(error))
+		out = api_env.suggest_fix("uuid-5", "FIND-1")
+		assert api_env.calls == [
+			("optimus suggest_fix persist", error, {"session_uuid": "uuid-5", "finding": "FIND-1"}),
+		]
+		assert out["ok"] is True and out["suggestion"] == "batch it"
+
+	def test_humanize_steps_core_fetch_error(self, api_env, monkeypatch):
+		error = RuntimeError("redis down")
+		monkeypatch.setattr(api_env.analyze, "_fetch_recordings", _raising(error))
+		out = api_env.api._humanize_steps_core(api_env.doc, title="t")
+		assert api_env.calls == [("optimus humanize_steps fetch", error, {"session_uuid": "uuid-5"})]
+		assert out["updated"] is False and out["reason"]
