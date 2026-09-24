@@ -48,8 +48,21 @@ ANTHROPIC_TB = (
 
 
 def _like(value, pattern):
-	rx = "^" + ".*".join(re.escape(p) for p in pattern.split("%")) + "$"
-	return re.search(rx, value or "", re.S) is not None
+	"""SQL ``LIKE`` as MariaDB and Postgres run it: ``%`` and ``_`` are
+	wildcards and a backslash (the default escape) makes the next character
+	literal, so an unescaped backslash in a pattern never matches one in the
+	text."""
+	rx, chars = "", iter(pattern)
+	for ch in chars:
+		if ch == "\\":
+			rx += re.escape(next(chars, "\\"))
+		elif ch == "%":
+			rx += ".*"
+		elif ch == "_":
+			rx += "."
+		else:
+			rx += re.escape(ch)
+	return re.fullmatch(rx, value or "", re.S) is not None
 
 
 def _match(row, flt):
@@ -206,6 +219,24 @@ class TestScrubErrorLogSecrets:
 		assert all(KEY not in json.dumps(r) for r in f.tables["Error Log"].values())
 		assert ("Error Log", "s3", "error") not in f.writes
 
+	def test_a_json_escaped_smart_quote_key_is_found_without_an_ai_frame(self, fake):
+		# Today's key holds a smart quote; JSON text stores it as ’. The
+		# Deleted Document copy and the metadata below have no ai_fix.py frame
+		# and no marker, so only the stored-key LIKE pass can select them, and
+		# its pattern must escape that backslash (LIKE's default escape).
+		escaped = json.dumps(ANTHROPIC_KEY)[1:-1]
+		assert "\\u2019" in escaped
+		data = json.dumps({"doctype": "Error Log", "method": f"HTTP 401: bad key {ANTHROPIC_KEY}"})
+		meta = json.dumps({"form_dict": {"doc": f"key {ANTHROPIC_KEY}"}})
+		assert escaped in data and ANTHROPIC_KEY not in data and escaped in meta
+		f = fake([("e1", "Traceback ...\n")], [("d1", data)], current_key=ANTHROPIC_KEY)
+		f.tables["Error Log"]["e1"]["metadata"] = meta
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		assert (out["candidates"], out["changed"], out["deleted_docs_changed"], out["residual"]) == (1, 1, 1, 0)
+		for text in (f.tables["Deleted Document"]["d1"]["data"], f.tables["Error Log"]["e1"]["metadata"]):
+			assert escaped not in text and "456789abcdef" not in text
+			assert json.loads(text)  # still valid JSON
+
 	@pytest.mark.parametrize(
 		"shape", ["sk-proj-AAAABBBBCCCCDDDDEEEE", "gsk_AAAABBBBCCCCDDDDEEEE", "AIzaSyA-0123456789abcdefghijABCDEFGHIJ"],
 	)
@@ -232,13 +263,31 @@ class _FakeCache:
 
 
 class TestFlushDeferredErrorLogs:
-	def _frappe(self, monkeypatch, cache):
-		inserted, commits = [], []
+	def _frappe(self, monkeypatch, cache, fail_on=None):
+		"""A failed insert aborts the transaction, as a failed statement does
+		on Postgres: every later statement fails until a rollback to a
+		savepoint."""
+		inserted, commits, db_calls = [], [], []
+		state = {"aborted": False}
+
+		def _insert(record):
+			if state["aborted"]:
+				raise RuntimeError("current transaction is aborted")
+			if record.get("error") == fail_on:
+				state["aborted"] = True
+				raise RuntimeError("Duplicate entry")
+			inserted.append(record)
+
+		def _rollback(save_point=None):
+			db_calls.append(("rollback", save_point))
+			state["aborted"] = False
 
 		def _get_doc(record):
-			return SimpleNamespace(insert=lambda ignore_permissions=False: inserted.append(record))
-		monkeypatch.setattr(maintenance, "frappe", SimpleNamespace(cache=cache, get_doc=_get_doc))
+			return SimpleNamespace(insert=lambda ignore_permissions=False: _insert(record))
+		db = SimpleNamespace(savepoint=lambda name: db_calls.append(("savepoint", name)), rollback=_rollback)
+		monkeypatch.setattr(maintenance, "frappe", SimpleNamespace(cache=cache, get_doc=_get_doc, db=db))
 		monkeypatch.setattr(maintenance, "safe_commit", lambda: commits.append(1))
+		self.db_calls = db_calls
 		return inserted, commits
 
 	def test_takes_only_the_error_log_queue(self, monkeypatch):
@@ -257,6 +306,16 @@ class TestFlushDeferredErrorLogs:
 	def test_a_broken_queue_is_not_fatal(self, monkeypatch):
 		self._frappe(monkeypatch, _FakeCache({}, broken=True))
 		assert maintenance._flush_deferred_error_logs() == 1
+
+	def test_a_failing_insert_rolls_back_to_its_savepoint_only(self, monkeypatch):
+		cache = _FakeCache({
+			"insert_queue_for_Error Log": [json.dumps({"error": e}) for e in ("x", "BAD", "z")],
+		})
+		inserted, commits = self._frappe(monkeypatch, cache, fail_on="BAD")
+		assert maintenance._flush_deferred_error_logs() == 1
+		assert [r["error"] for r in inserted] == ["x", "z"]  # the third still lands
+		assert ("rollback", "optimus_scrub_row") in self.db_calls
+		assert commits == [1]
 
 
 class TestPurgeAiErrorLogs:
@@ -321,6 +380,16 @@ def test_patch_skips_a_table_too_large_for_migrate(patch_env, monkeypatch, capsy
 	out = capsys.readouterr().out
 	assert "skipped the Error Log key scrub" in out
 	assert "execute optimus.maintenance.scrub_error_log_secrets" in out
+
+
+def test_patch_does_not_ask_to_rotate_when_nothing_was_found(patch_env, monkeypatch, capsys):
+	monkeypatch.setattr(
+		maintenance, "scrub_error_log_secrets",
+		lambda **kw: {"candidates": 5, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0},
+	)
+	importlib.import_module(_PATCH).execute()
+	out = capsys.readouterr().out
+	assert out == "Optimus: found no AI API keys in stored error rows.\n"
 
 
 def test_patch_warns_about_residual_rows(patch_env, monkeypatch, capsys):
