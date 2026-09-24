@@ -60,7 +60,10 @@ from optimus import settings as _settings
 
 KEY = "sk-CANARY-7f3a9c1e5b2d4f6a8c0e"
 NON_LATIN_KEY = "sk-CANARY-7f3a9c1e\u20195b2d4f6a8c0e"  # pasted smart quote
-KEY_MARKS = ("CANARY-7f3a9c1e5b2d4f6a8c0e", "CANARY-7f3a9c1e\u20195b2d4f6a8c0e")
+# The last mark is the ASCII segment both keys share: it still matches when the
+# non-latin key is written with its smart quote escaped (``json.dumps`` with
+# ``ensure_ascii``, ``ascii()``), which the two whole-key marks would miss.
+KEY_MARKS = ("CANARY-7f3a9c1e5b2d4f6a8c0e", "CANARY-7f3a9c1e\u20195b2d4f6a8c0e", "CANARY-7f3a9c1e")
 PII = "pii.canary@example.com"
 PII_SQL = f"SELECT name FROM `tabCustomer` WHERE email_id = '{PII}'"
 ECHO_MARK = "PROVIDER-ECHO"
@@ -372,14 +375,22 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 	if scenario == "scrub_raises":
 		assert ECHO_MARK not in returned, "a body that could not be scrubbed must be dropped"
 		assert any("details withheld" in t for _, t, _ in sinks.stored), "a failed scrub must still write a row"
+	if scenario == "unicode_encode_error":
+		# The catch-all names the error type. Without an auth header to encode,
+		# the fake would raise something else and the scenario would test nothing.
+		assert "UnicodeEncodeError" in returned, "no header failed to encode: the scenario tested nothing"
 	if scenario == "rq_timeout":
 		assert any(job_timeout.__name__ in t for _, t in sinks.returned), "no RQ timeout escaped"
 	if scenario == "developer_mode":
 		assert any(ECHO_MARK in t for _, t, checked in sinks.stored if not checked), "no snapshot was stored"
-		# The whitelisted endpoints turn the AiFixError into frappe.throw inside
-		# their except block, so the thrown error chains it. That dump must have
-		# been produced and checked, not skipped because the path never ran.
-		escaped_from = {e for e, _ in sinks.escaped}
-		assert {"api.suggest_fix", "api.suggest_index"} <= escaped_from, (
-			"the whitelisted endpoints' frappe.throw path never ran: their chained dump went unchecked"
-		)
+		# The whitelisted endpoints call frappe.throw inside their
+		# ``except AiFixError`` block, so the thrown error chains that AiFixError.
+		# Each endpoint's escaped dump must hold it, as a chained exception
+		# (_dump_exception writes each exception's repr on its own line). An
+		# escape for any other reason, such as a throw before the AI call, leaves
+		# the chained dump unchecked.
+		for ep in ("api.suggest_fix", "api.suggest_index"):
+			assert any(
+				e == ep and any(line.startswith("AiFixError(") for line in t.splitlines())
+				for e, t in sinks.escaped
+			), f"{ep}: the frappe.throw-inside-except path never ran, so its chained dump went unchecked"
