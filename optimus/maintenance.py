@@ -55,7 +55,6 @@ import sys
 from typing import NamedTuple
 
 import frappe
-from frappe.utils import sbool
 
 from optimus import safe_commit
 from optimus.redaction import SECRET_PLACEHOLDER, scrub_secrets
@@ -97,6 +96,9 @@ MIGRATE_SCAN_LIMIT = 200_000
 # What scrub_scan_size() returns when a part of the size cannot be read: an
 # unmeasured table must not look small, so the migrate skips the scrub.
 SCAN_SIZE_UNKNOWN = sys.maxsize
+# The values dry_run accepts as text (stripped, any case), besides True /
+# False and 1 / 0.
+_DRY_RUN_WORDS = {"true": True, "1": True, "yes": True, "false": False, "0": False, "no": False}
 
 # Frappe's with-context traceback prints the locals of the urllib3 /
 # http.client frames that send a header (``value``, ``values``,
@@ -421,6 +423,26 @@ def _scans(api_key: str, error_fields: tuple[str, ...]) -> list[_Scan]:
 	return scans
 
 
+def _dry_run_flag(value) -> bool:
+	"""``dry_run`` as a bool. ``None`` means the default, a dry run. Accepted:
+	``True`` / ``False``, ``1`` / ``0``, and the strings "true", "false",
+	"1", "0", "yes", "no" (surrounding spaces ignored, any case). Anything
+	else raises ``ValueError``, so a typo such as "off" neither runs for real
+	nor silently does nothing."""
+	if value is None:
+		return True
+	if isinstance(value, bool):
+		return value
+	if isinstance(value, int) and value in (0, 1):
+		return bool(value)
+	if isinstance(value, str) and value.strip().lower() in _DRY_RUN_WORDS:
+		return _DRY_RUN_WORDS[value.strip().lower()]
+	raise ValueError(
+		'dry_run must be True or False (also accepted: 1, 0, or the strings "true", "false", "1", "0", '
+		'"yes", "no"; leave it out for a dry run)'
+	)
+
+
 def scrub_scan_size() -> int:
 	"""How many rows ``scrub_error_log_secrets`` may read, so ``bench
 	migrate`` can decide whether to run it inline: every Error Log row, every
@@ -460,8 +482,9 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	inserts the Error Log rows still waiting in the deferred-insert queue
 	(see ``_flush_deferred_error_logs``); a dry run does not, so it does not
 	count them. One row that cannot be masked or written is counted in
-	``failed`` and skipped; it never stops the others. ``dry_run`` also
-	accepts the strings ``"True"`` / ``"False"`` / ``"1"`` / ``"0"``.
+	``failed`` and skipped; it never stops the others. ``dry_run`` accepts
+	only the values ``_dry_run_flag`` names (``None`` is a dry run) and
+	raises ``ValueError`` for anything else.
 
 	Returns ``{"candidates", "changed", "deleted_docs_changed", "residual",
 	"failed"}``: Error Log rows read, Error Log rows and Deleted Document rows
@@ -472,7 +495,7 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	"""
 	from optimus.ai_fix import _current_key_or_empty
 
-	dry_run = sbool(dry_run)
+	dry_run = _dry_run_flag(dry_run)
 	batch_size = max(1, int(batch_size or _BATCH))
 	out = {"candidates": 0, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0}
 	if not dry_run:
@@ -516,10 +539,11 @@ def purge_ai_error_logs(dry_run: bool = True) -> dict:
 
 	Uses ``frappe.db.delete`` so no new Deleted Document copies are made.
 	Returns ``{"error_logs": int, "deleted_documents": int}`` (with
-	``dry_run=True`` the counts say what WOULD be deleted). ``dry_run`` also
-	accepts the strings ``"True"`` / ``"False"`` / ``"1"`` / ``"0"``.
+	``dry_run=True`` the counts say what WOULD be deleted). ``dry_run``
+	accepts only the values ``_dry_run_flag`` names (``None`` is a dry run)
+	and raises ``ValueError`` for anything else.
 	"""
-	dry_run = sbool(dry_run)
+	dry_run = _dry_run_flag(dry_run)
 	out = {"error_logs": 0, "deleted_documents": 0}
 	targets = (
 		("Error Log", [["error", "like", _OPTIMUS_AI_FRAME]], "error_logs"),

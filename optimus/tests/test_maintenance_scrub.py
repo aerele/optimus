@@ -496,27 +496,55 @@ class TestStoredKeyPass:
 
 
 class TestDryRunCoercion:
-	"""``bench execute --kwargs`` or a hand-written call can pass a string."""
+	"""``bench execute --kwargs`` or a hand-written call can pass a string or
+	a number. Only explicit values are accepted, so a typo raises instead of
+	running for real or silently doing nothing."""
 
-	@pytest.mark.parametrize("value", ["False", "false", "0"])
-	def test_a_false_string_writes(self, fake, value):
+	FALSE = [False, 0, "False", "false", "0", "no", " NO ", "\tfalse\n"]
+	TRUE = [True, 1, "True", "true", "1", "yes", " Yes "]
+	BAD = ["off", "", 2, "maybe", "on", -1, "   "]
+
+	@pytest.mark.parametrize("value", FALSE, ids=repr)
+	def test_a_false_value_writes(self, fake, value):
 		f = fake([("a", LEAKY)], [("d1", LEAKY)])
 		out = maintenance.scrub_error_log_secrets(dry_run=value)
 		assert (out["changed"], out["deleted_docs_changed"]) == (1, 1)
 		assert KEY not in f.tables["Error Log"]["a"]["error"] and f.flushes == [0]
 
-	@pytest.mark.parametrize("value", ["True", "true", "1"])
-	def test_a_true_string_writes_nothing(self, fake, value):
+	@pytest.mark.parametrize("value", [*TRUE, None], ids=repr)
+	def test_a_true_value_or_none_writes_nothing(self, fake, value):
 		f = fake([("a", LEAKY)], [("d1", LEAKY)])
 		out = maintenance.scrub_error_log_secrets(dry_run=value)
 		assert (out["changed"], out["deleted_docs_changed"]) == (1, 1)
 		assert f.writes == [] and f.commits == [] and f.flushes == []
 
-	def test_purge_coerces_it_too(self, fake):
+	def test_the_default_is_a_dry_run(self, fake):
 		f = fake([("a", LEAKY), ("c", UNRELATED)])
-		assert maintenance.purge_ai_error_logs(dry_run="True") == {"error_logs": 1, "deleted_documents": 0}
+		assert maintenance.scrub_error_log_secrets()["changed"] == 1
+		assert maintenance.purge_ai_error_logs() == {"error_logs": 1, "deleted_documents": 0}
+		assert f.writes == [] and f.deletes == [] and f.flushes == []
+
+	@pytest.mark.parametrize("value", BAD, ids=repr)
+	@pytest.mark.parametrize("func", ["scrub_error_log_secrets", "purge_ai_error_logs"])
+	def test_anything_else_raises_before_reading_a_row(self, fake, func, value):
+		f = fake([("a", LEAKY)], [("d1", LEAKY)])
+		with pytest.raises(ValueError) as ei:
+			getattr(maintenance, func)(dry_run=value)
+		message = str(ei.value)
+		for allowed in ("True", "False", "1", "0", '"true"', '"false"', '"yes"', '"no"'):
+			assert allowed in message, allowed
+		assert f.statements == [] and f.flushes == [] and f.writes == [] and f.deletes == []
+
+	@pytest.mark.parametrize("value", [*TRUE, None], ids=repr)
+	def test_purge_counts_only_for_a_true_value_or_none(self, fake, value):
+		f = fake([("a", LEAKY), ("c", UNRELATED)])
+		assert maintenance.purge_ai_error_logs(dry_run=value) == {"error_logs": 1, "deleted_documents": 0}
 		assert f.deletes == []
-		assert maintenance.purge_ai_error_logs(dry_run="False") == {"error_logs": 1, "deleted_documents": 0}
+
+	@pytest.mark.parametrize("value", FALSE, ids=repr)
+	def test_purge_deletes_for_a_false_value(self, fake, value):
+		f = fake([("a", LEAKY), ("c", UNRELATED)])
+		assert maintenance.purge_ai_error_logs(dry_run=value) == {"error_logs": 1, "deleted_documents": 0}
 		assert set(f.tables["Error Log"]) == {"c"}
 
 
