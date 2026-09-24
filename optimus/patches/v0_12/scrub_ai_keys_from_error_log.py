@@ -56,10 +56,12 @@ def execute():
 		print(f"Optimus: the Error Log key scrub failed ({failed}); the migrate continues. {run_it}")
 		return
 	if out is None:
-		_breadcrumb(frappe, f"skipped: {scan} rows", command)
-		_log_summary(frappe, f"skipped, {scan} rows to read, limit {maintenance.MIGRATE_SCAN_LIMIT}")
+		unknown = scan == maintenance.SCAN_SIZE_UNKNOWN
+		size = "its size could not be read" if unknown else f"{scan} rows to read"
+		_breadcrumb(frappe, "skipped: size unknown" if unknown else f"skipped: {scan} rows", command)
+		_log_summary(frappe, f"skipped, {size}, limit {maintenance.MIGRATE_SCAN_LIMIT}")
 		print(
-			f"Optimus: skipped the Error Log key scrub during migrate ({scan} rows to read, "
+			f"Optimus: skipped the Error Log key scrub during migrate ({size}, "
 			f"limit {maintenance.MIGRATE_SCAN_LIMIT}). {run_it}"
 		)
 		return

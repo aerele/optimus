@@ -116,8 +116,9 @@ versions may contain breaking changes see migration notes below).
 - `bench migrate` is required: it runs the scrub patch (batches of 200 rows,
   a commit per batch) and clears the cache. The scrub never stops the
   migrate: if the Error Log, the Deleted Document table and the queued
-  Error Log rows together hold more than 200,000 rows, or the scrub fails,
-  the migrate prints the command to run it by hand, writes an Error Log row
+  Error Log rows together hold more than 200,000 rows, or their size cannot
+  be read, or the scrub fails, the migrate prints the command to run it by
+  hand, writes an Error Log row
   titled "Optimus: Error Log key scrub did not run" with the reason and that
   command, and carries on (step 3 above re-runs it anyway).
 - The scrub never sends the key to the database: it searches for an

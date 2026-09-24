@@ -34,20 +34,24 @@ alone), instead of scanning the rest of the table for a few sparse matches.
 On a large Error Log, run it off-peak anyway.
 
 The stored-key pass never sends the key to the database. Its ``LIKE`` value
-is an 8-character fragment from the middle of the key (plus the JSON-escaped
-form of that fragment when it differs), and a row it returns is used only
-when the FULL key, raw or JSON-escaped, is in the row's text, checked in
-Python. So MariaDB's general log and slow log, the processlist, the Postgres
-statement log and Frappe's ``logging: 2`` can record at most that fragment.
-A key shorter than 16 characters is not searched by value at all (the
-fragment would be half of it); the other passes still run and still mask it
-by value in every row they read, if it has at least 8 characters.
+is an 8-character fragment of the key: the window made only of letters,
+digits and ``-`` nearest the middle of the key, which needs no escaping
+and so works the same on Frappe v15 and v16 (a key with no such window uses
+its escaped middle window instead, see ``_key_fragment``). A row the pass
+returns is used only when the FULL key, raw or JSON-escaped, is in the row's
+text, checked in Python. So MariaDB's general log and slow log, the
+processlist, the Postgres statement log and Frappe's ``logging: 2`` can
+record at most that fragment. A key shorter than 16 characters is not
+searched by value at all (the fragment would be half of it); the other
+passes still run and still mask it by value in every row they read, if it
+has at least 8 characters.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import sys
 from typing import NamedTuple
 
 import frappe
@@ -65,16 +69,21 @@ _ERROR_LOG_QUEUE = "insert_queue_for_Error Log"
 _FLUSH_MAX_POPS = 10_000
 _FLUSH_COMMIT_EVERY = 100
 _AI_FRAME = "%ai_fix.py%"
-# The purge's frame pattern: Optimus's own module only (the escaped "_" is a
-# literal underscore), so another app's openai_fix.py rows are never deleted.
-_OPTIMUS_AI_FRAME = "%optimus/ai\\_fix.py%"
+# The purge's frame pattern: Optimus's own module only, so another app's
+# openai_fix.py rows are never deleted (the "optimus/" prefix excludes them).
+# It holds no LIKE escape, so it works on Frappe v15, whose db_query doubles
+# backslashes, as well as on v16; its "_" is a one-character wildcard.
+_OPTIMUS_AI_FRAME = "%optimus/ai_fix.py%"
 # Any of these next to an ai_fix.py frame means the row may hold a key.
 _SECRET_MARKERS = ("%Bearer %", "%api_key%", "%x-api-key%")
 _MIN_KEY_LEN = 8
 # The stored-key pass runs only for a key of at least this many characters,
-# and sends only a fragment of _FRAGMENT_LEN characters from its middle.
+# and sends only a fragment of _FRAGMENT_LEN characters of it: a window made
+# only of _CLEAN_FRAGMENT characters when one exists (no LIKE metacharacter,
+# no JSON escape, so it needs no escaping and is the same on v15 and v16).
 _MIN_SEARCH_KEY_LEN = 16
 _FRAGMENT_LEN = 8
+_CLEAN_FRAGMENT = re.compile(r"[A-Za-z0-9-]+")
 # Each LIKE statement reads at most this many rows by primary key.
 _WINDOW = 1000
 # Error Log.method is Data (varchar(140)). Masking can lengthen a value (a
@@ -85,6 +94,9 @@ _FIELD_LIMITS = {"method": 140}
 # scan of a larger table would stall the migrate, so the patch prints the
 # command to run instead.
 MIGRATE_SCAN_LIMIT = 200_000
+# What scrub_scan_size() returns when a part of the size cannot be read: an
+# unmeasured table must not look small, so the migrate skips the scrub.
+SCAN_SIZE_UNKNOWN = sys.maxsize
 
 # Frappe's with-context traceback prints the locals of the urllib3 /
 # http.client frames that send a header (``value``, ``values``,
@@ -140,24 +152,35 @@ def _like_literal(value: str) -> str:
 	``\\u2019`` of a JSON-escaped key) never matches itself and ``%`` / ``_``
 	would act as wildcards.
 
-	It assumes the pattern reaches the database as a bound parameter, as on
-	Frappe v16, where ``frappe.get_all`` builds the query with the query
-	builder. Frappe v15's ``db_query`` path doubles backslashes itself, so
-	there an escaped pattern matches nothing: the stored-key pass misses a
-	key whose fragment holds ``_``, ``%`` or a JSON-escaped character, and
-	``purge_ai_error_logs`` (whose frame pattern escapes ``_``) deletes
-	nothing. The passes over rows with an ``ai_fix.py`` frame (unescaped
-	constant patterns) and the masking in Python work on v15 too, and the
-	scrub reads ``metadata`` only where Error Log has that column (v15 has
-	none)."""
+	It is used only for the fallback fragment of a key that has no clean
+	window (see ``_key_fragment``). It assumes the pattern reaches the
+	database as a bound parameter, as on Frappe v16, where ``frappe.get_all``
+	builds the query with the query builder. Frappe v15's ``db_query`` path
+	doubles backslashes itself, so on v15 an escaped fallback pattern matches
+	nothing and the stored-key pass misses such a key. Every other pattern
+	holds no escape and works on v15 and v16 alike, the masking happens in
+	Python, and the scrub reads ``metadata`` only where Error Log has that
+	column (v15 has none)."""
 	return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _key_fragment(api_key: str) -> str:
-	"""The ``_FRAGMENT_LEN`` characters in the middle of the key: the only
-	part of it the stored-key pass sends to the database."""
-	start = (len(api_key) - _FRAGMENT_LEN) // 2
-	return api_key[start:start + _FRAGMENT_LEN]
+def _key_fragment(api_key: str) -> tuple[str, bool]:
+	"""``(fragment, clean)``: the only part of the key the stored-key pass
+	sends to the database, ``_FRAGMENT_LEN`` characters long.
+
+	It is the window of the key made only of letters, digits and ``-``
+	(``_CLEAN_FRAGMENT``) that lies nearest the middle of the key. Such a
+	window has no LIKE metacharacter and no JSON escape, so it is sent as is
+	and matches the key and its JSON-escaped copy on Frappe v15 and v16.
+	When the key has no such window, the window in the middle is returned
+	with ``clean=False``, to be LIKE-escaped (v16 only)."""
+	middle = (len(api_key) - _FRAGMENT_LEN) // 2
+	starts = sorted(range(len(api_key) - _FRAGMENT_LEN + 1), key=lambda s: (abs(s - middle), s))
+	for start in starts:
+		window = api_key[start:start + _FRAGMENT_LEN]
+		if _CLEAN_FRAGMENT.fullmatch(window):
+			return window, True
+	return api_key[middle:middle + _FRAGMENT_LEN], False
 
 
 def _holds_key(row: dict, fields: tuple[str, ...], api_key: str) -> bool:
@@ -380,8 +403,11 @@ def _scans(api_key: str, error_fields: tuple[str, ...]) -> list[_Scan]:
 	if len(api_key) >= _MIN_SEARCH_KEY_LEN:
 		# The key stored today, anywhere: a 500 snapshot's title is the
 		# exception message and a request's metadata holds its form data.
-		fragment = _key_fragment(api_key)
-		likes = sorted({f"%{_like_literal(fragment)}%", f"%{_like_literal(_json_escaped(fragment))}%"})
+		fragment, clean = _key_fragment(api_key)
+		if clean:
+			likes = [f"%{fragment}%"]
+		else:
+			likes = sorted({f"%{_like_literal(fragment)}%", f"%{_like_literal(_json_escaped(fragment))}%"})
 		scans += [
 			_Scan(
 				"Error Log", [], [[f, "like", p] for f in error_fields for p in likes], error_fields, "changed",
@@ -401,20 +427,23 @@ def scrub_scan_size() -> int:
 	Deleted Document row (not just copies of Error Log rows:
 	``deleted_doctype`` is not indexed, so the passes read the whole table;
 	its size is the database's O(1) estimate), and the entries waiting in
-	Error Log's deferred-insert queue. Cheap (no LIKE scan). Each part is
-	guarded: one that cannot be read counts as 0."""
+	Error Log's deferred-insert queue. Cheap (no LIKE scan). Never raises:
+	if any part cannot be read, it returns ``SCAN_SIZE_UNKNOWN``, which is
+	above ``MIGRATE_SCAN_LIMIT``, so the migrate skips the scrub and prints
+	the command instead of scanning a table of unknown size."""
 	parts = (
 		lambda: frappe.db.count("Error Log"),
 		lambda: frappe.db.estimate_count("Deleted Document"),
 		lambda: frappe.cache.llen(_ERROR_LOG_QUEUE),
 	)
 	total = 0
+	unknown = False
 	for part in parts:
 		try:
 			total += max(0, int(part() or 0))
 		except Exception:
-			pass
-	return total
+			unknown = True
+	return SCAN_SIZE_UNKNOWN if unknown else total
 
 
 def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> dict:

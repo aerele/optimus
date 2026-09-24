@@ -144,10 +144,13 @@ class _FakeTxn:
 
 class _FakeFrappe:
 	"""``has_metadata=False`` models Frappe v15, whose Error Log has no
-	``metadata`` column: a statement naming it fails. ``method`` is Data
-	(varchar(140)) and a longer write fails as strict mode does."""
+	``metadata`` column: a statement naming it fails. ``v15_like=True``
+	models v15's ``db_query``, which doubles every backslash of a LIKE value
+	before it reaches SQL. ``method`` is Data (varchar(140)) and a longer
+	write fails as strict mode does."""
 
-	def __init__(self, error_logs, deleted_docs=(), has_metadata=True):
+	def __init__(self, error_logs, deleted_docs=(), has_metadata=True, v15_like=False):
+		self.v15_like = v15_like
 		self.tables = {
 			"Error Log": {n: {"name": n, "error": e, "method": "t", "metadata": "{}"} for n, e in error_logs},
 			"Deleted Document": {
@@ -191,6 +194,10 @@ class _FakeFrappe:
 		named = set(fields) | {f[0] for f in statement.filters + statement.or_filters}
 		if doctype == "Error Log" and "metadata" in named and not self.has_metadata:
 			raise RuntimeError("(1054, \"Unknown column 'metadata' in 'SELECT'\")")
+		if self.v15_like:
+			def _sql(flts):
+				return [[f, op, v.replace("\\", "\\\\")] if op == "like" else [f, op, v] for f, op, v in flts or []]
+			filters, or_filters = _sql(filters), _sql(or_filters)
 		rows = [
 			r for r in self.tables[doctype].values()
 			if all(_match(r, f) for f in filters or [])
@@ -232,8 +239,8 @@ class _FakeFrappe:
 
 @pytest.fixture
 def fake(monkeypatch):
-	def _make(error_logs, deleted_docs=(), current_key=KEY, has_metadata=True):
-		f = _FakeFrappe(error_logs, deleted_docs, has_metadata=has_metadata)
+	def _make(error_logs, deleted_docs=(), current_key=KEY, has_metadata=True, v15_like=False):
+		f = _FakeFrappe(error_logs, deleted_docs, has_metadata=has_metadata, v15_like=v15_like)
 		f.flushes = []
 		monkeypatch.setattr(maintenance, "frappe", f)
 		monkeypatch.setattr(maintenance, "safe_commit", f.commit)
@@ -412,7 +419,51 @@ class TestStoredKeyPass:
 		values = f.filter_values()
 		assert values
 		assert [v for v in values if _key_runs_in(v, key, 9)] == []
-		assert [v for v in values if _mid8(key) in _unlike(v)]  # the fragment is what is sent
+		assert [v for v in values if _key_runs_in(v, key, 8)]  # an 8-character fragment is what is sent
+
+	@pytest.mark.parametrize("v15_like", [False, True], ids=["v16", "v15"])
+	@pytest.mark.parametrize(
+		("key", "fragment"),
+		[
+			# the centre window holds "_", "%" or a smart quote; the nearest
+			# window of letters, digits and "-" is sent (not the first one)
+			("sk-proj-AbCd_EfGh_IjKlMnOpQr_StUvWx", "IjKlMnOp"),
+			("sk%live-9Qx7Kp2Z%%rTy5W%m3Nb8Lc1Hvx", "9Qx7Kp2Z"),
+			(ANTHROPIC_KEY, "i03-0123"),
+		],
+		ids=["underscore", "percent", "smart_quote"],
+	)
+	def test_the_fragment_is_the_clean_window_nearest_the_centre(self, fake, key, fragment, v15_like):
+		assert fragment in key and key.index(fragment) != 0
+		data = json.dumps({"doctype": "Error Log", "method": f"HTTP 401: bad key {key}"})
+		f = fake([("m", "Traceback ...\n")], [("d1", data)], current_key=key, v15_like=v15_like)
+		f.tables["Error Log"]["m"]["method"] = f"HTTP 401: bad key {key}"
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		# no escaping needed, so v15's backslash doubling cannot break it
+		key_likes = {v for v in f.filter_values() if _key_runs_in(v, key, 8)}
+		assert key_likes == {f"%{fragment}%"}
+		assert (out["candidates"], out["changed"], out["deleted_docs_changed"]) == (1, 1, 1)
+		assert key not in f.tables["Error Log"]["m"]["method"]
+
+	@pytest.mark.parametrize(
+		("key", "patterns"),
+		[
+			# no 8 letters, digits or "-" in a row: key[5:13], LIKE-escaped
+			("a_b%c_d%e_f%g_h%i_j", {"%\\_d\\%e\\_f\\%g%"}),
+			# and its JSON-escaped form, for the Deleted Document copy
+			("a_b’c_d’e_f’g_h’i_j", {"%\\_d’e\\_f’g%", "%\\_d\\\\u2019e\\_f\\\\u2019g%"}),
+		],
+		ids=["metacharacters", "smart_quotes"],
+	)
+	def test_a_key_without_a_clean_window_falls_back_to_the_escaped_centre(self, fake, key, patterns):
+		data = json.dumps({"doctype": "Error Log", "method": f"HTTP 401: bad key {key}"})
+		f = fake([("m", "Traceback ...\n")], [("d1", data)], current_key=key)
+		f.tables["Error Log"]["m"]["method"] = f"HTTP 401: bad key {key}"
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		key_likes = {v for v in f.filter_values() if "\\" in v}
+		assert key_likes == patterns
+		assert (out["candidates"], out["changed"], out["deleted_docs_changed"]) == (1, 1, 1)
+		assert [v for v in f.filter_values() if _key_runs_in(v, key, 9)] == []
 
 	def test_a_fragment_match_without_the_key_is_neither_counted_nor_changed(self, fake):
 		frag = _mid8(KEY)
@@ -546,10 +597,14 @@ class TestScrubScanSize:
 			("llen", ("insert_queue_for_Error Log",), {}),
 		]
 
-	@pytest.mark.parametrize(("broken", "expected"), [("count", 23), ("estimate_count", 13), ("llen", 30)])
-	def test_each_part_is_guarded(self, monkeypatch, broken, expected):
+	@pytest.mark.parametrize("broken", ["count", "estimate_count", "llen"])
+	def test_a_part_that_cannot_be_read_makes_the_size_unknown(self, monkeypatch, broken):
+		# An unmeasured table must not look small: the migrate skips the
+		# scrub and prints the command instead.
 		self._frappe(monkeypatch, fail={broken})
-		assert maintenance.scrub_scan_size() == expected
+		size = maintenance.scrub_scan_size()
+		assert size == maintenance.SCAN_SIZE_UNKNOWN
+		assert size > maintenance.MIGRATE_SCAN_LIMIT
 
 	def test_a_negative_estimate_counts_as_zero(self, monkeypatch):
 		# Postgres reports reltuples = -1 for a table never analysed
@@ -560,10 +615,25 @@ class TestScrubScanSize:
 class TestPurgeScope:
 	def test_other_apps_ai_fix_frames_are_not_purged(self, fake):
 		other = 'File "apps/acme/acme/openai_fix.py", line 3, in call\n    headers = {\'api_key\': \'x\'}\n'
-		lookalike = 'File "apps/optimus/optimus/ai-fix.py", line 3\n'  # "_" is not a wildcard
-		f = fake([("a", LEAKY), ("o", other), ("l", lookalike)], [("d1", LEAKY), ("d2", other)])
+		f = fake([("a", LEAKY), ("o", other)], [("d1", LEAKY), ("d2", other)])
 		assert maintenance.purge_ai_error_logs(dry_run=False) == {"error_logs": 1, "deleted_documents": 1}
-		assert set(f.tables["Error Log"]) == {"o", "l"}
+		assert set(f.tables["Error Log"]) == {"o"}
+		assert set(f.tables["Deleted Document"]) == {"d2"}
+
+	@pytest.mark.parametrize("v15_like", [False, True], ids=["v16", "v15"])
+	def test_optimus_ai_fix_rows_are_purged_on_v15_and_v16(self, fake, v15_like):
+		# The pattern holds no LIKE escape, so v15's backslash doubling
+		# cannot turn it into one that matches nothing.
+		installed = 'File "env/lib/python3.14/site-packages/optimus/ai_fix.py", line 9, in _http_post\n'
+		other = 'File "apps/acme/acme/openai_fix.py", line 3, in call\n'
+		f = fake(
+			[("a", LEAKY), ("i", installed), ("o", other)],
+			[("d1", json.dumps({"doctype": "Error Log", "error": LEAKY})), ("d2", other)],
+			v15_like=v15_like,
+		)
+		assert maintenance.purge_ai_error_logs(dry_run=True) == {"error_logs": 2, "deleted_documents": 1}
+		assert maintenance.purge_ai_error_logs(dry_run=False) == {"error_logs": 2, "deleted_documents": 1}
+		assert set(f.tables["Error Log"]) == {"o"}
 		assert set(f.tables["Deleted Document"]) == {"d2"}
 
 	def test_the_scrub_still_reads_them(self, fake):
@@ -808,6 +878,7 @@ class TestPurgeAiErrorLogs:
 # ---------------------------------------------------------------------------
 
 _PATCH = "optimus.patches.v0_12.scrub_ai_keys_from_error_log"
+_REAL_SCAN_SIZE = maintenance.scrub_scan_size
 
 
 def _with_context(exc) -> str:
@@ -882,6 +953,22 @@ def test_patch_runs_the_scrub_for_real(patch_env, patch_logs, capsys):
 	line = _one_summary_line(patch_logs)
 	for count in ("candidates=3", "changed=2", "deleted_docs_changed=1", "residual=0", "failed=0"):
 		assert count in line
+
+
+def test_patch_skips_when_the_size_cannot_be_read(patch_env, patch_logs, monkeypatch, capsys):
+	def _count(*a, **k):
+		raise RuntimeError("Lost connection to server during query")
+	db = SimpleNamespace(count=_count, estimate_count=lambda doctype: 5)
+	monkeypatch.setattr(maintenance, "frappe", SimpleNamespace(db=db, cache=SimpleNamespace(llen=lambda key: 0)))
+	monkeypatch.setattr(maintenance, "scrub_scan_size", _REAL_SCAN_SIZE)
+	importlib.import_module(_PATCH).execute()
+	assert patch_env == []  # the scrub did not run
+	out = capsys.readouterr().out
+	assert "skipped the Error Log key scrub" in out and "its size could not be read" in out
+	assert _COMMAND in out and str(maintenance.SCAN_SIZE_UNKNOWN) not in out
+	[crumb] = patch_logs.errors
+	assert crumb["message"].startswith("skipped: size unknown")
+	assert "size could not be read" in _one_summary_line(patch_logs)
 
 
 def test_patch_runs_the_scrub_at_exactly_the_limit(patch_env, monkeypatch):
