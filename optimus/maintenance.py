@@ -82,7 +82,7 @@ _FLUSH_MAX_FAILURES = 3
 _QUEUED_TEXT_FIELDS = ("error", "method", "metadata")
 _AI_FRAME = "%ai_fix.py%"
 # The purge's frame patterns: Optimus's own module only, under its name and
-# under the app's name before 0.7.0 (frappe_profiler), so another app's
+# under the app's name before its rename (frappe_profiler), so another app's
 # openai_fix.py rows are never deleted (the package prefix excludes them).
 # They hold no LIKE escape, so they work on Frappe v15, whose db_query
 # doubles backslashes, as well as on v16; each "_" is a one-character
@@ -685,7 +685,7 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 def purge_ai_error_logs(dry_run: bool = True) -> dict:
 	"""Delete every Error Log row with a frame in Optimus's ``ai_fix.py``
 	(``optimus/ai_fix.py``, or ``frappe_profiler/ai_fix.py`` from a release
-	before the app's rename in 0.7.0), and every Deleted Document copy of
+	before the app was renamed to optimus), and every Deleted Document copy of
 	such a row. Opt-in: run it by hand when the stored prompt text (source
 	code, SQL literals) must go too. Rows with another app's ``*ai_fix.py``
 	frame are left alone.

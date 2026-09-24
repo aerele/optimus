@@ -757,8 +757,8 @@ class TestPurgeScope:
 
 	@pytest.mark.parametrize("v15_like", [False, True], ids=["v16", "v15"])
 	def test_rows_from_the_pre_rename_package_are_purged_too(self, fake, v15_like):
-		# v0.6.x shipped the AI code as frappe_profiler/ai_fix.py (the app
-		# was renamed to optimus in 0.7.0), so its rows name that path.
+		# Releases before the app was renamed to optimus shipped the AI code
+		# as frappe_profiler/ai_fix.py, so their rows name that path.
 		old = 'File "apps/frappe_profiler/frappe_profiler/ai_fix.py", line 9, in _call_openai_chat\n'
 		other = 'File "apps/acme/acme/openai_fix.py", line 3, in call\n'
 		f = fake(
