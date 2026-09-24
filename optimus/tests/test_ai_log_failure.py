@@ -1,0 +1,370 @@
+# Copyright (c) 2026, Optimus contributors
+# For license information, please see license.txt
+
+"""ai_fix.log_ai_failure (the AI-surface Error Log chokepoint) and the HTTP
+layer's failure path (PR-0a).
+
+``frappe.log_error`` and ``frappe.db`` are replaced wholesale (``frappe.db`` is
+a Werkzeug Local proxy on a bench: never patch its attributes).
+"""
+
+from types import SimpleNamespace
+
+import pytest
+import requests
+
+from optimus import ai_fix
+
+KEY = "sk-live-0123456789abcdefXYZ"
+
+
+class _FakeDB:
+	def __init__(self, docname="SESS-0001", raise_on_get=False):
+		self.docname = docname
+		self.raise_on_get = raise_on_get
+		self.lookups = 0
+
+	def get_value(self, doctype, filters, field):
+		self.lookups += 1
+		if self.raise_on_get:
+			raise RuntimeError("db down")
+		return self.docname
+
+
+@pytest.fixture
+def logs(monkeypatch):
+	"""Capture frappe.log_error calls; store a key; fake the DB."""
+	import frappe
+
+	calls = []
+	monkeypatch.setattr(frappe, "log_error", lambda **kw: calls.append(kw), raising=False)
+	monkeypatch.setattr(frappe, "db", _FakeDB(), raising=False)
+	monkeypatch.setattr(
+		"frappe.utils.password.get_decrypted_password", lambda *a, **k: KEY, raising=False
+	)
+	return calls
+
+
+def _raise_with_local_and_chain():
+	private_local = "PII-LOCAL alice@example.com"  # noqa: F841 (must not be logged)
+	try:
+		raise ValueError("CHAINED-CONTEXT")
+	except ValueError:
+		# chained on purpose: log_ai_failure must not print __context__
+		raise ai_fix.AiFixError(f"provider echoed {KEY}")
+
+
+class TestLogAiFailure:
+	def test_message_is_explicit_scrubbed_and_referenced(self, logs):
+		try:
+			_raise_with_local_and_chain()
+		except ai_fix.AiFixError as e:
+			ai_fix.log_ai_failure("optimus ai backfill", e, session_uuid="uuid-1", finding="F1")
+		assert len(logs) == 1
+		row = logs[0]
+		assert row["title"] == "optimus ai backfill"
+		msg = row["message"]
+		assert msg.startswith("optimus ai backfill\n")
+		assert "session_uuid=uuid-1" in msg and "finding=F1" in msg
+		assert "AiFixError: provider echoed ********" in msg
+		assert KEY not in msg
+		assert row["reference_doctype"] == "Optimus Session"
+		assert row["reference_name"] == "SESS-0001"
+		assert row["defer_insert"] is False  # not in a web request
+
+	def test_no_frame_locals_and_no_chain(self, logs):
+		try:
+			_raise_with_local_and_chain()
+		except ai_fix.AiFixError as e:
+			ai_fix.log_ai_failure("t", e)
+		msg = logs[0]["message"]
+		assert "alice@example.com" not in msg
+		assert "CHAINED-CONTEXT" not in msg
+
+	@pytest.mark.parametrize(
+		("in_request", "scheduler_inactive", "expected"),
+		[(True, False, True), (True, True, False), (False, False, False), (True, RuntimeError, False)],
+		ids=["request+scheduler", "request+scheduler-off", "background", "scheduler-check-fails"],
+	)
+	def test_defer_insert_only_in_a_request_on_a_site_whose_scheduler_runs(
+		self, logs, monkeypatch, in_request, scheduler_inactive, expected
+	):
+		# Review Focus #3: deferred rows are flushed by a scheduler job, so a
+		# site with the scheduler paused (optimus.local has pause_scheduler=1)
+		# or disabled must insert directly or the row never lands.
+		import frappe
+
+		if in_request:
+			monkeypatch.setattr(frappe, "request", SimpleNamespace(path="/api/method/x"), raising=False)
+
+		def _inactive(verbose=True):
+			if scheduler_inactive is RuntimeError:
+				raise RuntimeError("no site")
+			return scheduler_inactive
+
+		monkeypatch.setattr("frappe.utils.scheduler.is_scheduler_inactive", _inactive, raising=False)
+		ai_fix.log_ai_failure("t")
+		assert logs[0]["defer_insert"] is expected
+
+	def test_scrub_failure_keeps_only_the_title_and_the_error_type(self, logs, monkeypatch):
+		def _boom(*a, **k):
+			raise RuntimeError("regex engine exploded")
+		monkeypatch.setattr("optimus.redaction.scrub_secrets", _boom)
+		try:
+			_raise_with_local_and_chain()
+		except ai_fix.AiFixError as e:
+			error = e
+		ai_fix.log_ai_failure("optimus ai backfill", error, session_uuid="uuid-1", finding="PII-LOCAL alice@example.com")
+		assert len(logs) == 1  # the failure is still recorded
+		msg = logs[0]["message"]
+		assert KEY not in msg and "alice@example.com" not in msg and "provider echoed" not in msg
+		assert msg == (
+			"optimus ai backfill\n(details withheld: scrubbing the message failed with RuntimeError; "
+			"error type AiFixError)"
+		)
+
+	def test_no_reference_without_a_resolvable_session(self, logs, monkeypatch):
+		import frappe
+
+		ai_fix.log_ai_failure("t")
+		monkeypatch.setattr(frappe, "db", _FakeDB(docname=None), raising=False)
+		ai_fix.log_ai_failure("t", session_uuid="gone")
+		monkeypatch.setattr(frappe, "db", _FakeDB(raise_on_get=True), raising=False)
+		ai_fix.log_ai_failure("t", session_uuid="u")
+		assert [(r["reference_doctype"], r["reference_name"]) for r in logs] == [(None, None)] * 3
+
+	def test_an_explicit_docname_is_the_reference_without_a_lookup(self, logs, monkeypatch):
+		import frappe
+
+		db = _FakeDB(raise_on_get=True)
+		monkeypatch.setattr(frappe, "db", db, raising=False)
+		ai_fix.log_ai_failure("t", session_uuid="uuid-1", docname="SESS-0042")
+		assert (logs[0]["reference_doctype"], logs[0]["reference_name"]) == ("Optimus Session", "SESS-0042")
+		assert db.lookups == 0
+		assert "session_uuid=uuid-1" in logs[0]["message"]
+
+	def test_never_raises(self, monkeypatch):
+		import frappe
+
+		def _boom(**kw):
+			raise RuntimeError("Error Log insert failed")
+		monkeypatch.setattr(frappe, "log_error", _boom, raising=False)
+		ai_fix.log_ai_failure("t", ValueError("x"), session_uuid="u")  # must not raise
+
+	def test_an_exception_is_logged_once(self, logs):
+		e = ai_fix.AiFixError("boom")
+		ai_fix.log_ai_failure("first", e)
+		ai_fix.log_ai_failure("second", e)
+		assert [r["title"] for r in logs] == ["first"]
+
+
+def _post(behaviour):
+	def _fake(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+		return behaviour()
+	return _fake
+
+
+class _Resp:
+	def __init__(self, status_code=200, payload=None, text=""):
+		self.status_code = status_code
+		self._payload = payload
+		self.text = text
+
+	def json(self):
+		if isinstance(self._payload, Exception):
+			raise self._payload
+		return self._payload
+
+
+def _call():
+	return ai_fix._http_post("https://x.invalid/v1/chat/completions", {}, {"model": "m"},
+	                         provider="openai", where="chat/completions")
+
+
+class TestHttpFailurePath:
+	def _raise(self, exc):
+		def _b():
+			raise exc
+		return _b
+
+	def test_transport_failure_is_logged_once_and_not_chained(self, logs, monkeypatch):
+		monkeypatch.setattr(requests, "post", _post(self._raise(
+			requests.exceptions.ConnectionError("HTTPConnectionPool(host='x.invalid', port=443): refused"))))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			_call()
+		assert ei.value.kind == "transport"
+		assert ei.value.__context__ is None and ei.value.__cause__ is None
+		assert len(logs) == 1 and logs[0]["title"] == "optimus ai_fix"
+		assert "detail=ConnectionError: HTTPConnectionPool" in logs[0]["message"]
+		# a caller logging the same error again writes nothing more (K16)
+		ai_fix.log_ai_failure("optimus ai backfill", ei.value)
+		assert len(logs) == 1
+
+	def test_catch_all_keeps_only_the_type_name(self, logs, monkeypatch):
+		# What http.client raises for a header value it cannot encode: the
+		# exception's .object is the whole header, i.e. the key.
+		boom = UnicodeEncodeError("latin-1", f"Bearer {KEY}\u2019", len(KEY) + 7, len(KEY) + 8, "ordinal not in range(256)")
+		monkeypatch.setattr(requests, "post", _post(self._raise(boom)))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			_call()
+		assert ei.value.kind == "transport"
+		assert "UnicodeEncodeError" in str(ei.value) and KEY not in str(ei.value)
+		assert ei.value.__context__ is None
+		assert KEY not in logs[0]["message"]
+		assert "detail=UnicodeEncodeError\n" in logs[0]["message"]  # the type name, nothing more
+
+	def test_rq_job_timeout_still_stops_the_job(self, logs, monkeypatch):
+		# The catch-all must not turn RQ's job timeout into a normal AI error
+		# (callers would carry on to the next item); it re-raises the same type,
+		# fresh, so no requests / urllib3 frame (which hold the prepared
+		# headers) travels with it.
+		timeouts = pytest.importorskip("rq.timeouts")
+		monkeypatch.setattr(requests, "post", _post(self._raise(
+			timeouts.JobTimeoutException("Task exceeded maximum timeout value (60 seconds)"))))
+		with pytest.raises(timeouts.JobTimeoutException) as ei:
+			_call()
+		assert ei.value.__context__ is None and ei.value.__cause__ is None
+		assert logs == []
+
+	@pytest.mark.parametrize("status", [400, 404, 500])
+	def test_an_echoed_key_is_masked_in_the_error_message(self, logs, monkeypatch, status):
+		# The 404 and other >= 400 messages carry the provider body to the
+		# operator (toast, API response, the title of Frappe's own snapshot).
+		body = f'{{"error": "invalid key {KEY} for this model"}}'
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(status, {}, text=body)))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			_call()
+		assert "invalid key ******** for this model" in str(ei.value)
+		assert KEY not in str(ei.value)
+
+	def test_the_body_is_scrubbed_before_it_is_cut(self, logs, monkeypatch):
+		# Cutting first would keep a key prefix the literal no longer matches.
+		body = "x" * 290 + KEY + " tail"
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(500, {}, text=body)))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			_call()
+		assert KEY[:10] not in str(ei.value)
+		assert str(ei.value).endswith("x" * 10 + "******** t")
+
+	def test_http_error_row_never_contains_the_response_body(self, logs, monkeypatch):
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(500, {}, text="RESPONSE-BODY-MARKER")))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			_call()
+		assert "RESPONSE-BODY-MARKER" in str(ei.value)  # still surfaced to the operator
+		assert "RESPONSE-BODY-MARKER" not in logs[0]["message"]
+		assert "status=500" in logs[0]["message"]
+
+	@pytest.mark.parametrize("payload", [["a", "list"], "a string", 42, None])
+	def test_non_object_json_is_a_bad_response(self, logs, monkeypatch, payload):
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(200, payload)))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			_call()
+		assert ei.value.kind == "bad_response"
+		assert len(logs) == 1
+
+	def test_non_json_body_is_a_bad_response(self, logs, monkeypatch):
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(200, ValueError("not json"))))
+		with pytest.raises(ai_fix.AiFixError, match="non-JSON") as ei:
+			_call()
+		assert ei.value.kind == "bad_response" and ei.value.__context__ is None
+
+	def test_http_row_references_the_marked_session(self, logs, monkeypatch):
+		import frappe
+
+		monkeypatch.setattr(frappe.local, "_optimus_spend_session", "uuid-9", raising=False)
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(401, {})))
+		with pytest.raises(ai_fix.AiFixError):
+			_call()
+		assert logs[0]["reference_name"] == "SESS-0001"
+		assert "session_uuid=uuid-9" in logs[0]["message"]
+
+
+class TestNothingIsLoggedOrSentWhileAnExceptionIsActive:
+	"""``frappe.log_error`` calls Sentry's ``capture_exception``, which ships
+	the ACTIVE exception's frame locals (requests / urllib3 frames hold the
+	prepared headers, i.e. the key), and a ``raise`` inside an ``except``
+	chains that exception as ``__context__``. The HTTP layer therefore logs
+	and raises after its ``try``, and the OpenAI temperature retry (a second
+	request, which logs its own failure) is sent after its ``try`` too."""
+
+	_TEMPERATURE_400 = '{"error":{"message":"invalid temperature: only 1 is allowed for this model"}}'
+
+	@pytest.fixture
+	def active_at_log(self, logs, monkeypatch):
+		"""The exception being handled at each ``frappe.log_error`` call."""
+		import sys
+
+		import frappe
+
+		seen = []
+
+		def _log(**kw):
+			seen.append(sys.exc_info()[1])
+			logs.append(kw)
+
+		monkeypatch.setattr(frappe, "log_error", _log, raising=False)
+		return seen
+
+	@staticmethod
+	def _sequence(*results):
+		"""Successive ``requests.post`` results; records the exception being
+		handled when each request is sent."""
+		import sys
+
+		it = iter(results)
+		active_at_send = []
+
+		def _fake(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+			active_at_send.append(sys.exc_info()[1])
+			result = next(it)
+			if isinstance(result, BaseException):
+				raise result
+			return result
+
+		_fake.active_at_send = active_at_send
+		return _fake
+
+	@pytest.mark.parametrize(
+		"result",
+		[
+			requests.exceptions.Timeout("read timed out"),
+			requests.exceptions.ConnectionError("refused"),
+			UnicodeEncodeError("latin-1", "Bearer x’", 8, 9, "ordinal not in range(256)"),
+			_Resp(500, {}, text="upstream down"),
+			_Resp(200, ValueError("not json")),
+			_Resp(200, ["a", "list"]),
+		],
+		ids=["timeout", "transport", "catch-all", "http-500", "non-json", "non-object"],
+	)
+	def test_http_failures_are_logged_and_raised_with_no_active_exception(
+		self, active_at_log, monkeypatch, result
+	):
+		monkeypatch.setattr(requests, "post", self._sequence(result))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			_call()
+		assert active_at_log == [None]
+		assert ei.value.__context__ is None and ei.value.__cause__ is None
+
+	def test_the_temperature_retry_is_sent_with_no_active_exception(self, logs, monkeypatch):
+		ok = {"choices": [{"message": {"content": "done"}}]}
+		fake = self._sequence(_Resp(400, {}, text=self._TEMPERATURE_400), _Resp(200, ok))
+		monkeypatch.setattr(requests, "post", fake)
+		text = ai_fix._call_openai_chat(
+			"https://x.invalid/v1", "", "kimi-k2", "s", [{"role": "user", "content": "x"}]
+		)
+		assert text == "done"
+		assert fake.active_at_send == [None, None]
+
+	def test_a_failed_temperature_retry_is_logged_and_raised_unchained(self, active_at_log, monkeypatch):
+		fake = self._sequence(
+			_Resp(400, {}, text=self._TEMPERATURE_400), _Resp(500, {}, text="upstream down")
+		)
+		monkeypatch.setattr(requests, "post", fake)
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			ai_fix._call_openai_chat(
+				"https://x.invalid/v1", "", "kimi-k2", "s", [{"role": "user", "content": "x"}]
+			)
+		assert ei.value.status_code == 500
+		assert ei.value.__context__ is None and ei.value.__cause__ is None
+		# one row per failed attempt, each written with no exception active
+		assert active_at_log == [None, None]

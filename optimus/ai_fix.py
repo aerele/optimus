@@ -1325,28 +1325,178 @@ def _is_reasoning_model(model: str) -> bool:
 # HTTP layer (uses `requests`; `frappe` only for best-effort logging)
 # ---------------------------------------------------------------------------
 
-def _log_http_error(provider: str, where: str, status: int | None, detail: str = "") -> None:
-	"""Best-effort error log. NEVER includes the prompt, the source code, or
-	the API key: only the provider name, the call site and the HTTP
-	status."""
+_LOGGED_ATTR = "_optimus_ai_logged"
+
+
+def log_ai_failure(
+	title: str,
+	exc: BaseException | None = None,
+	*,
+	session_uuid: str | None = None,
+	docname: str | None = None,
+	**context,
+) -> None:
+	"""Write one Error Log row for an AI-surface failure. This is the ONLY
+	function on the AI surface allowed to call ``frappe.log_error``
+	(``test_ai_log_audit.py`` enforces it).
+
+	Call it OUTSIDE any ``except`` block: record the exception in the
+	handler and log after the ``try``. ``frappe.log_error`` calls Sentry's
+	``capture_exception``, which ships the ACTIVE exception's frame locals
+	even when a message is passed (the audit enforces this too).
+
+	The message is explicit: ``title``, the session, ``context`` as ``k=v``
+	lines and the plain traceback of ``exc`` (code lines only: no frame
+	locals, no exception chain), passed through
+	``redaction.scrub_secrets`` with the live key as a literal. Frappe's own
+	with-context traceback prints every frame's locals, which is how the API
+	key and the prompt reached the Error Log before this fix.
+
+	- ``reference_doctype`` / ``reference_name`` point at the Optimus Session:
+	  ``docname`` when the caller has it (no lookup), else the session that
+	  ``session_uuid`` resolves to.
+	- ``defer_insert`` only inside a web request on a site whose scheduler
+	  runs (see ``_defer_error_log_insert``); everywhere else the row is
+	  inserted directly.
+	- If scrubbing fails, the row keeps only the title and the error type:
+	  an unscrubbed message is never written.
+	- An exception is logged at most once: the HTTP layer logs its own
+	  failures, so a caller that logs the same ``AiFixError`` again is a
+	  no-op (no double rows).
+	- Never raises.
+	"""
 	try:
+		if exc is not None and getattr(exc, _LOGGED_ATTR, False):
+			return
+		import traceback
+
 		import frappe
+
+		lines = [title]
+		if session_uuid:
+			lines.append(f"session_uuid={session_uuid}")
+		for k in sorted(context):
+			lines.append(f"{k}={context[k]}")
+		if exc is not None:
+			lines.append("".join(traceback.format_exception(exc, chain=False)).rstrip())
+		message = _scrubbed_message(title, lines, exc)
+
+		if not docname and session_uuid:
+			try:
+				docname = frappe.db.get_value("Optimus Session", {"session_uuid": session_uuid}, "name")
+			except Exception:
+				docname = None
 		frappe.log_error(
-			message=f"AI fix call failed: provider={provider} at={where} "
-			        f"status={status} {detail}".strip(),
-			title="optimus ai_fix",
+			title=title,
+			message=message,
+			reference_doctype="Optimus Session" if docname else None,
+			reference_name=docname or None,
+			defer_insert=_defer_error_log_insert(),
 		)
+		_mark_logged(exc)
 	except Exception:
 		pass
+
+
+def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None) -> str:
+	"""``lines`` joined and passed through ``redaction.scrub_secrets`` with
+	the live key as a literal. If scrubbing fails, the message keeps only the
+	title and the error type, never the unscrubbed text."""
+	failed = ""
+	try:
+		from optimus.redaction import scrub_secrets
+
+		api_key = _current_key_or_empty()
+		return scrub_secrets("\n".join(lines), literals=(api_key,))
+	except Exception as e:
+		failed = type(e).__name__
+	kind = type(exc).__name__ if exc is not None else "none"
+	return f"{title}\n(details withheld: scrubbing the message failed with {failed}; error type {kind})"
+
+
+def _defer_error_log_insert() -> bool:
+	"""Whether ``log_ai_failure`` passes ``defer_insert=True``.
+
+	Only inside a web request, where a following ``frappe.throw`` rolls the
+	request transaction back and would take a directly inserted row with it,
+	and only when the site's scheduler runs: deferred rows are written by the
+	scheduler job ``frappe.deferred_insert.save_to_db``, so on a site with the
+	scheduler paused or disabled they would never land. Background jobs and
+	those sites insert directly. Any error answers False."""
+	try:
+		import frappe
+
+		if not getattr(frappe, "request", None):
+			return False
+		from frappe.utils.scheduler import is_scheduler_inactive
+
+		return not is_scheduler_inactive(verbose=False)
+	except Exception:
+		return False
+
+
+def _mark_logged(exc: BaseException | None) -> None:
+	"""Flag ``exc`` so a later ``log_ai_failure(..., exc)`` is a no-op."""
+	if exc is not None:
+		try:
+			setattr(exc, _LOGGED_ATTR, True)
+		except Exception:
+			pass
+
+
+def _log_http_error(
+	provider: str, where: str, status: int | None, detail: str = "",
+	*, exc: BaseException | None = None,
+) -> None:
+	"""Log one HTTP-layer failure through ``log_ai_failure``: provider, call
+	site, HTTP status and a short detail (for a transport error, its type and
+	message, scrubbed). Never the prompt, the source code, the headers or the
+	response body. The session reference comes from the per-worker spend
+	marker the caller set (``analyze._mark_ai_spend_session``), the same one
+	``_record_session_spend`` reads. ``exc`` (the ``AiFixError`` about to be
+	raised) is then marked logged, so the caller's own ``log_ai_failure`` for
+	it writes no second row."""
+	session_uuid = None
+	try:
+		import frappe
+
+		session_uuid = getattr(frappe.local, "_optimus_spend_session", None)
+	except Exception:
+		session_uuid = None
+	log_ai_failure(
+		"optimus ai_fix", session_uuid=session_uuid,
+		provider=provider, where=where, status=status, detail=detail,
+	)
+	_mark_logged(exc)
+
+
+def _job_timeout_types() -> tuple[type[BaseException], ...]:
+	"""RQ's job-timeout exception classes (subclasses of ``Exception``), or ``()``
+	when rq is not importable (pure unit-test runs)."""
+	try:
+		from rq.timeouts import BaseTimeoutException
+	except Exception:
+		return ()
+	return (BaseTimeoutException,)
 
 
 def _response_detail(resp) -> str:
 	"""The provider's own error body (capped), as a ': ...' suffix or '' when
 	there is no readable body. Surfaces the specific reason ("model not found",
-	"context too long", ...) so it reaches the operator."""
+	"context too long", ...) so it reaches the operator.
+
+	SECURITY: a provider can echo the API key in its error body, and this text
+	reaches toasts, API responses and the title of Frappe's own error
+	snapshot, so the body is scrubbed with the live key as a literal BEFORE it
+	is cut to 300 characters (cutting first can split the key, and a partial
+	key no longer matches the literal). Any failure returns ''."""
 	try:
 		body_text = (resp.text or "").strip()
-		return ": " + body_text[:300] if body_text else ""
+		if not body_text:
+			return ""
+		from optimus.redaction import scrub_secrets
+
+		return ": " + scrub_secrets(body_text[:65536], literals=(_current_key_or_empty(),))[:300]
 	except Exception:
 		return ""
 
@@ -1362,24 +1512,51 @@ def _http_post(
 	auth: requests.auth.AuthBase | None = None,
 ) -> dict:
 	"""POST JSON, return the parsed response dict. Maps transport / HTTP /
-	decode errors to ``AiFixError`` with operator-friendly messages.
-	``auth`` (an ``_ApiKeyAuth``) attaches the key at send time; ``headers``
-	must never hold it."""
+	decode errors to ``AiFixError`` with operator-friendly messages and logs
+	each failure once (``_log_http_error``).
+
+	SECURITY: ``auth`` (an ``_ApiKeyAuth``) attaches the key at send time, so
+	``headers`` never holds it. Every failure is logged and raised OUTSIDE the
+	``except`` blocks: while an ``except`` block runs, the original exception
+	is the active one, Frappe's Sentry hook captures it with its
+	requests / urllib3 frames (whose locals hold the prepared headers), and
+	a ``raise`` there would chain it as ``__context__``. The catch-all keeps
+	only the exception's type name (a ``UnicodeEncodeError`` from http.client
+	carries the header value)."""
 	timeout = timeout or _resolve_timeout_seconds()
+	failure: AiFixError | None = None
+	interrupt: BaseException | None = None
+	detail = ""
+	resp = None
 	try:
 		resp = requests.post(url, headers=headers, json=body, timeout=timeout, auth=auth)
 	except requests.exceptions.Timeout:
-		_log_http_error(provider, where, None, "timeout")
-		raise AiFixError(f"The AI provider didn't respond within {timeout}s.")
+		failure = AiFixError(f"The AI provider didn't respond within {timeout}s.", kind="timeout")
+		detail = "timeout"
 	except requests.exceptions.RequestException as e:
-		_log_http_error(provider, where, None, type(e).__name__)
-		raise AiFixError(f"Couldn't reach the AI provider: {type(e).__name__}.")
+		failure = AiFixError(f"Couldn't reach the AI provider: {type(e).__name__}.", kind="transport")
+		detail = f"{type(e).__name__}: {e}"
+	except Exception as e:
+		if isinstance(e, _job_timeout_types()):
+			# The RQ job hit its timeout while we were sending: it must still
+			# stop the job, so re-raise the same type, but as a fresh instance
+			# with no requests / urllib3 frames and no chain.
+			interrupt = type(e)(*e.args)
+		else:
+			from frappe import _
+
+			failure = AiFixError(_("The AI request failed ({0}).").format(type(e).__name__), kind="transport")
+			detail = type(e).__name__
+	if interrupt is not None:
+		raise interrupt
+	if failure is not None:
+		_log_http_error(provider, where, None, detail, exc=failure)
+		raise failure
 
 	status = resp.status_code
 	if status in (401, 403):
-		_log_http_error(provider, where, status)
-		raise AiFixError("The AI provider rejected the API key. Check it in Optimus Settings.", status_code=status)
-	if status == 404:
+		failure = AiFixError("The AI provider rejected the API key. Check it in Optimus Settings.", status_code=status)
+	elif status == 404:
 		# A 404 means the endpoint path or the model was not found. The Model
 		# field is editable for every provider and a wrong model name returns
 		# 404, so the message leads with that. It also always mentions a custom
@@ -1387,8 +1564,8 @@ def _http_post(
 		# "if you set a custom Base URL" so a hosted-provider operator (whose
 		# Base URL is fixed and hidden) reads it as not their case. The
 		# provider's own error body is surfaced either way.
-		_log_http_error(provider, where, status, f"url={url}")
-		raise AiFixError(
+		detail = f"url={url}"
+		failure = AiFixError(
 			f"The AI provider returned 404 (Not Found) for {url}. Check that the Model "
 			"in Optimus Settings is a valid model name for this provider: a wrong model "
 			"returns 404. If you set a custom Base URL, make sure it includes the '/v1' "
@@ -1396,18 +1573,35 @@ def _http_post(
 			+ _response_detail(resp),
 			status_code=status,
 		)
-	if status == 429:
-		_log_http_error(provider, where, status)
-		raise AiFixError("The AI provider is rate-limiting requests. Try again shortly.", status_code=status)
-	if status >= 400:
-		_log_http_error(provider, where, status)
-		raise AiFixError(f"The AI provider returned an error (HTTP {status}){_response_detail(resp)}", status_code=status)
+	elif status == 429:
+		failure = AiFixError("The AI provider is rate-limiting requests. Try again shortly.", status_code=status)
+	elif status >= 400:
+		failure = AiFixError(f"The AI provider returned an error (HTTP {status}){_response_detail(resp)}", status_code=status)
+	if failure is not None:
+		_log_http_error(provider, where, status, detail, exc=failure)
+		raise failure
 
+	data = None
 	try:
-		return resp.json()
-	except ValueError:
-		_log_http_error(provider, where, status, "non-JSON body")
-		raise AiFixError("The AI provider returned an unexpected (non-JSON) response.")
+		data = resp.json()
+	except Exception:
+		detail = "non-JSON body"
+		failure = AiFixError(
+			"The AI provider returned an unexpected (non-JSON) response.",
+			status_code=status, kind="bad_response",
+		)
+	if failure is None and not isinstance(data, dict):
+		from frappe import _
+
+		detail = f"JSON {type(data).__name__}, not an object"
+		failure = AiFixError(
+			_("The AI provider returned an unexpected response (not a JSON object)."),
+			status_code=status, kind="bad_response",
+		)
+	if failure is not None:
+		_log_http_error(provider, where, status, detail, exc=failure)
+		raise failure
+	return data
 
 
 def _usage_from_openai(data: dict | None) -> dict:
@@ -1531,6 +1725,7 @@ def _call_openai_chat(
 	# Aerele-only: attribute this call to the originating Optimus Session.
 	if metadata:
 		body["metadata"] = metadata
+	retry_without_temperature = False
 	try:
 		data = _http_post(url, headers, body, provider="openai", where="chat/completions", auth=auth)
 	except AiFixError as e:
@@ -1544,11 +1739,15 @@ def _call_openai_chat(
 		# OpenAI-compatible gateways use 422) so a body that mentions the word
 		# for another reason (e.g. a 404 listing valid params) can't trigger a
 		# needless second call.
+		# The retry runs after the try: a request sent inside this block would
+		# log its own failure while this error is the active exception.
 		if sent_temperature and getattr(e, "status_code", None) in (400, 422) and "temperature" in str(e).lower():
-			body.pop("temperature", None)
-			data = _http_post(url, headers, body, provider="openai", where="chat/completions", auth=auth)
+			retry_without_temperature = True
 		else:
 			raise
+	if retry_without_temperature:
+		body.pop("temperature", None)
+		data = _http_post(url, headers, body, provider="openai", where="chat/completions", auth=auth)
 	if usage_out is not None:
 		usage_out.update(_usage_from_openai(data))
 		_record_session_spend(usage_out.get("total_tokens"))
