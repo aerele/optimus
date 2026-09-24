@@ -1549,13 +1549,15 @@ def _mark_logged(exc: BaseException | None) -> None:
 
 def _log_http_error(
 	provider: str, where: str, status: int | None, detail: str = "",
-	*, exc: BaseException | None = None,
+	*, exc: BaseException | None = None, provider_error: str = "",
 ) -> None:
 	"""Log one HTTP-layer failure through ``log_ai_failure``: provider, call
-	site, HTTP status and a short detail (for a transport error, its type and
-	message, scrubbed). Never the prompt, the source code, the headers or the
-	response body. The session reference comes from the per-worker spend
-	marker the caller set (``analyze._mark_ai_spend_session``), the same one
+	site, HTTP status, the provider's own error identifier when it sent one
+	(``provider_error``, see ``_provider_error_code``) and a short detail
+	(for a transport error, its type and message, scrubbed). Never the
+	prompt, the source code, the headers or the response body. The session
+	reference comes from the per-worker spend marker the caller set
+	(``analyze._mark_ai_spend_session``), the same one
 	``_record_session_spend`` reads. ``exc`` (the ``AiFixError`` about to be
 	raised) is then marked logged, but only if the row was written, so the
 	caller's own ``log_ai_failure`` for it writes no second row and a failed
@@ -1572,10 +1574,10 @@ def _log_http_error(
 		session_uuid = None
 	if interrupt is not None:
 		raise interrupt[0](*interrupt[1])
-	if log_ai_failure(
-		"optimus ai_fix", session_uuid=session_uuid,
-		provider=provider, where=where, status=status, detail=detail,
-	):
+	context = {"provider": provider, "where": where, "status": status, "detail": detail}
+	if provider_error:
+		context["provider_error"] = provider_error
+	if log_ai_failure("optimus ai_fix", session_uuid=session_uuid, **context):
 		_mark_logged(exc)
 
 
@@ -1614,6 +1616,55 @@ def _response_detail(resp) -> str:
 	except Exception:
 		return ""
 	body_text = ""  # the raw body may echo the key: never on the timeout's traceback
+	raise interrupt[0](*interrupt[1])
+
+
+# An identifier-shaped provider error code: nothing that could be prose, a
+# prompt fragment, an address or a URL.
+_PROVIDER_ERROR_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+
+
+def _provider_error_code(resp) -> str:
+	"""The provider's machine-readable reason for an HTTP error, for the Error
+	Log row (whose detail never holds the body: it can echo the prompt), or
+	'' when there is none.
+
+	Read from the JSON body's ``error`` object: ``type`` and ``code`` (OpenAI
+	and compatible servers) or ``type`` (Anthropic). A value is kept only when
+	it is a string that fully matches ``[A-Za-z0-9_.:-]{1,64}`` and does not
+	contain the stored key; both kept values are joined as ``type:code`` when
+	that still fits 64 characters, else the first one is used. Any failure
+	returns ''; an RQ job timeout leaves as a fresh instance, with the parsed
+	body unbound."""
+	data = error = value = None
+	interrupt = None
+	try:
+		data = resp.json()
+		error = data.get("error") if isinstance(data, dict) else None
+		if not isinstance(error, dict):
+			return ""
+		from optimus.redaction import scrub_secrets
+
+		api_key = _current_key_or_empty()
+		parts: list[str] = []
+		for field in ("type", "code"):
+			value = error.get(field)
+			if (
+				isinstance(value, str)
+				and _PROVIDER_ERROR_RE.fullmatch(value)
+				and value not in parts
+				and scrub_secrets(value, literals=(api_key,)) == value
+			):
+				parts.append(value)
+		if not parts:
+			return ""
+		joined = ":".join(parts)
+		return joined if len(joined) <= 64 else parts[0]
+	except _job_timeout_types() as e:
+		interrupt = (type(e), e.args)
+	except Exception:
+		return ""
+	data = error = value = None  # the body may echo the key: never on the timeout's traceback
 	raise interrupt[0](*interrupt[1])
 
 
@@ -1702,7 +1753,7 @@ def _http_post(
 	elif status >= 400:
 		failure = AiFixError(f"The AI provider returned an error (HTTP {status}){_response_detail(resp)}", status_code=status)
 	if failure is not None:
-		_log_http_error(provider, where, status, detail, exc=failure)
+		_log_http_error(provider, where, status, detail, exc=failure, provider_error=_provider_error_code(resp))
 		raise failure
 
 	data = None

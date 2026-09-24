@@ -337,6 +337,13 @@ def _scenario_post(scenario, sinks, job_timeout):
 			raise UnicodeEncodeError("latin-1", value, 0, 1, "ordinal not in range(256)")
 		if scenario == "rq_timeout":
 			raise job_timeout("Task exceeded maximum timeout value (60 seconds)")
+		if scenario == "http_400_echo":
+			# OpenAI's error object: the identifier-shaped type reaches the row,
+			# the echoed key in ``code`` and the message never do.
+			return _reply(400, _json_dumps({"error": {
+				"message": f"{ECHO_MARK}: key {KEY} rejected for {PII}",
+				"type": "invalid_request_error", "code": KEY,
+			}}))
 		if scenario == "http_401":
 			return _reply(401, _json_dumps({"error": f"Incorrect API key {KEY} for {PII}"}))
 		if scenario in _ECHO_STATUS:
@@ -470,6 +477,10 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 	# Positive controls: each scenario really exercised the path it names.
 	assert any(PII in t for _, t in sinks.stack), "the stack channel saw no prompt: it would prove nothing"
 	returned = "\n".join(t for _, t in sinks.returned)
+	if scenario == "http_400_echo":
+		assert any("provider_error=invalid_request_error\n" in t for _, t, _ in sinks.stored), (
+			"the provider's error type never reached the row: the code parser went unchecked"
+		)
 	if scenario in ("http_400_echo", "http_404_echo", "http_500_echo", "developer_mode"):
 		assert ECHO_MARK in returned, "the provider body never reached the operator: nothing was checked"
 	if scenario == "scrub_raises":
