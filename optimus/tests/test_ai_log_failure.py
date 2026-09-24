@@ -1022,7 +1022,10 @@ class TestNothingIsLoggedOrSentWhileAnExceptionIsActive:
 
 
 # ---------------------------------------------------------------------------
-# The never-raise helpers never swallow an RQ job timeout
+# The never-raise helpers of the key read, the Error Log path and the HTTP
+# failure path never swallow an RQ job timeout (other best-effort helpers in
+# ai_fix.py, such as the spend recorder and the config readers, are not
+# covered here)
 # ---------------------------------------------------------------------------
 
 class _JobTimeout(Exception):
@@ -1073,10 +1076,10 @@ class TestAJobTimeoutIsNeverSwallowed:
 	"""RQ raises ``JobTimeoutException`` from a SIGALRM handler, wherever the
 	job happens to be. A helper that swallows it lets the job overrun, and
 	``_current_key_or_empty`` would answer "" and send the request
-	unauthenticated. Each helper lets it through as a fresh instance raised
-	after its ``try``, so the frames it interrupted (Fernet's decrypt frames
-	hold the key bytes; the scrubber's hold the unscrubbed text) never reach
-	``execute_job``'s with-context log."""
+	unauthenticated. Each helper tested here lets it through as a fresh
+	instance raised after its ``try``, so the frames it interrupted (Fernet's
+	decrypt frames hold the key bytes; the scrubber's hold the unscrubbed
+	text) never reach ``execute_job``'s with-context log."""
 
 	def test_current_key_or_empty(self, job_timeout, monkeypatch):
 		raiser = _raising(job_timeout, holds=KEY.encode())
