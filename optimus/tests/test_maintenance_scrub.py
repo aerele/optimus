@@ -8,8 +8,9 @@ the key-leak fix, and the v0_12 patch that runs the scrub on migrate.
 implements just the ORM calls the module makes (``get_all`` with LIKE / = / >
 / <= filters, ``or_filters``, ``order_by="name asc"``, ``limit_start``,
 ``limit_page_length``; ``db.set_value`` with a field dict; ``db.count``;
-``db.estimate_count``; ``db.has_column``; ``db.delete``; savepoints;
-``cache.llen`` / ``cache.lpop``; ``get_doc(...).insert``).
+``db.sql`` (the bounded count); ``db.has_column``; ``db.delete``;
+savepoints; ``cache.llen`` / ``cache.lpop`` / ``cache.rpush``;
+``get_doc(...).insert``).
 """
 
 import importlib
@@ -147,10 +148,14 @@ class _FakeFrappe:
 	``metadata`` column: a statement naming it fails. ``v15_like=True``
 	models v15's ``db_query``, which doubles every backslash of a LIKE value
 	before it reaches SQL. ``method`` is Data (varchar(140)) and a longer
-	write fails as strict mode does."""
+	write fails as strict mode does. ``cache`` holds Error Log's
+	deferred-insert queue, and ``get_doc(record).insert()`` adds a row
+	(``inserted`` keeps each record as it reached the "database")."""
 
 	def __init__(self, error_logs, deleted_docs=(), has_metadata=True, v15_like=False):
 		self.v15_like = v15_like
+		self.cache = _FakeCache({})
+		self.inserted = []
 		self.tables = {
 			"Error Log": {n: {"name": n, "error": e, "method": "t", "metadata": "{}"} for n, e in error_logs},
 			"Deleted Document": {
@@ -167,8 +172,7 @@ class _FakeFrappe:
 		self.db_log = []  # savepoint / release / rollback / write, in order
 		self.txn = _FakeTxn(self.db_log)
 		self.db = SimpleNamespace(
-			set_value=self._set_value, delete=self._delete, count=self._count,
-			estimate_count=lambda doctype: len(self.tables[doctype]), has_column=self._has_column,
+			set_value=self._set_value, delete=self._delete, count=self._count, has_column=self._has_column,
 			savepoint=self.txn.savepoint, release_savepoint=self.txn.release_savepoint,
 			rollback=self.txn.rollback,
 		)
@@ -176,6 +180,16 @@ class _FakeFrappe:
 	def commit(self):
 		self.commits.append(1)
 		self.txn.commit()
+
+	def get_doc(self, record):
+		def _insert(ignore_permissions=False):
+			self.inserted.append(dict(record))
+			name = f"q{len(self.inserted):03d}"
+			self.tables["Error Log"][name] = {
+				"name": name, "error": record.get("error"), "method": record.get("method") or "t",
+				"metadata": record.get("metadata") or "{}",
+			}
+		return SimpleNamespace(insert=_insert)
 
 	def _has_column(self, doctype, column):
 		return self.has_metadata or (doctype, column) != ("Error Log", "metadata")
@@ -244,7 +258,7 @@ def fake(monkeypatch):
 		f.flushes = []
 		monkeypatch.setattr(maintenance, "frappe", f)
 		monkeypatch.setattr(maintenance, "safe_commit", f.commit)
-		monkeypatch.setattr(maintenance, "_flush_deferred_error_logs", lambda: f.flushes.append(f.reads) or 0)
+		monkeypatch.setattr(maintenance, "_flush_deferred_error_logs", lambda *a: f.flushes.append(f.reads) or 0)
 		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", lambda: current_key)
 		return f
 	return _make
@@ -256,13 +270,13 @@ class TestScrubErrorLogSecrets:
 		out = maintenance.scrub_error_log_secrets(dry_run=True)
 		# b has an ai_fix.py frame and the api_key marker, so it is a
 		# candidate, but nothing in it changes.
-		assert out == {"candidates": 2, "changed": 1, "deleted_docs_changed": 1, "residual": 0, "failed": 0}
+		assert out == {"candidates": 2, "changed": 1, "deleted_docs_changed": 1, "residual": 0, "failed": 0, "queued": 0}
 		assert f.writes == [] and f.commits == [] and f.flushes == []
 
 	def test_scrubs_error_log_and_deleted_document_copies(self, fake):
 		f = fake([("a", LEAKY), ("b", CLEAN_AI), ("c", UNRELATED)], [("d1", json.dumps({"error": LEAKY}))])
 		out = maintenance.scrub_error_log_secrets(dry_run=False)
-		assert out == {"candidates": 2, "changed": 1, "deleted_docs_changed": 1, "residual": 0, "failed": 0}
+		assert out == {"candidates": 2, "changed": 1, "deleted_docs_changed": 1, "residual": 0, "failed": 0, "queued": 0}
 		assert f.flushes == [0]  # deferred rows inserted before the first read
 		assert KEY not in f.tables["Error Log"]["a"]["error"]
 		assert "'authorization': 'Bearer ********'" in f.tables["Error Log"]["a"]["error"]
@@ -393,7 +407,7 @@ class TestScrubErrorLogSecrets:
 		f = fake([("a", LEAKY), ("b", CLEAN_AI), ("m", "Traceback ...\n")], has_metadata=False)
 		f.tables["Error Log"]["m"]["method"] = f"bad key {KEY}"
 		out = maintenance.scrub_error_log_secrets(dry_run=False)
-		assert out == {"candidates": 3, "changed": 2, "deleted_docs_changed": 0, "residual": 0, "failed": 0}
+		assert out == {"candidates": 3, "changed": 2, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 0}
 		assert KEY not in f.tables["Error Log"]["a"]["error"] + f.tables["Error Log"]["m"]["method"]
 		assert f.statements  # the fake raises on any statement naming metadata
 
@@ -758,7 +772,8 @@ def test_a_huge_hostile_value_line_masks_fast_with_bounded_memory():
 class _FakeCache:
 	"""``broken`` fails every call (Redis down); ``broken_pop`` fails only
 	``lpop``; ``refill`` is an entry a busy producer pushes back after every
-	pop. More than 1000 pops raise, so a runaway loop fails fast."""
+	pop. More than 1000 pops raise, so a runaway loop fails fast. ``lpop``
+	returns bytes, as Redis does; ``pushes`` records every ``rpush``."""
 
 	def __init__(self, queues, broken=False, broken_pop=False, refill=None):
 		self.queues = queues
@@ -766,6 +781,7 @@ class _FakeCache:
 		self.broken_pop = broken_pop
 		self.refill = refill
 		self.pops = 0
+		self.pushes = []
 
 	def llen(self, key):
 		if self.broken:
@@ -779,14 +795,20 @@ class _FakeCache:
 		if self.pops > 1000:
 			raise RuntimeError("runaway flush")
 		queue = self.queues.setdefault(key, [])
-		item = queue.pop(0).encode() if queue else None
+		item = queue.pop(0) if queue else None
 		if self.refill is not None:
 			queue.append(self.refill)
-		return item
+		return item.encode() if isinstance(item, str) else item
+
+	def rpush(self, key, value):
+		if self.broken:
+			raise ConnectionError("redis down")
+		self.pushes.append((key, value))
+		self.queues.setdefault(key, []).append(value)
 
 
 class TestFlushDeferredErrorLogs:
-	def _frappe(self, monkeypatch, cache, fail_on=None):
+	def _frappe(self, monkeypatch, cache, fail_on=()):
 		"""A failed insert aborts the transaction, as a failed statement does
 		on Postgres: every later statement except a ROLLBACK fails until a
 		rollback to a savepoint that was set (``_FakeTxn``)."""
@@ -802,7 +824,7 @@ class TestFlushDeferredErrorLogs:
 		def _insert(record):
 			_live()
 			self.db_log.append(("insert", record.get("error")))
-			if record.get("error") == fail_on:
+			if record.get("error") in fail_on:
 				state["aborted"] = True
 				raise RuntimeError("Duplicate entry")
 			inserted.append(record)
@@ -840,24 +862,129 @@ class TestFlushDeferredErrorLogs:
 			"insert_queue_for_Route History": [json.dumps({"route": "app"})],
 		})
 		inserted, commits = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs() == 0
-		assert [r["error"] for r in inserted] == [LEAKY, "x", "y"]
+		assert maintenance._flush_deferred_error_logs(KEY) == 0
+		# the leaky record is masked before it is inserted, never verbatim
+		assert [r["error"] for r in inserted] == [maintenance._mask(LEAKY, KEY), "x", "y"]
+		assert KEY not in inserted[0]["error"] and "'Bearer ********'" in inserted[0]["error"]
 		assert all(r["doctype"] == "Error Log" for r in inserted)
 		assert cache.queues["insert_queue_for_Error Log"] == []
 		assert len(cache.queues["insert_queue_for_Route History"]) == 1  # left to the scheduler
 		assert commits == [1]
 		assert self.txn.max_depth == 1  # each insert's savepoint released, never nested
 
+	def test_a_queued_leaky_record_is_inserted_masked(self, monkeypatch):
+		# A pre-fix snapshot queued in Redis holds the key in its traceback,
+		# its title and its request metadata. It must never reach the
+		# database (the INSERT, the binlog, the query logs) verbatim.
+		leaky = {
+			"error": LEAKY,
+			"method": f"The AI provider returned an error (HTTP 401): bad key {KEY}",
+			"metadata": json.dumps({"form_dict": {"doc": f'{{"ai_api_key": "{KEY}"}}'}}),
+			"reference_doctype": "Optimus Session", "reference_name": "s-1", "trace_id": "t-1",
+		}
+		title = "POST " + "x" * 90 + " via http://u:p@proxy.example/v1 "
+		long_title = {"error": "x", "method": title + "y" * (140 - len(title))}
+		assert len(long_title["method"]) == 140
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps(leaky), json.dumps([long_title])]})
+		inserted, _ = self._frappe(monkeypatch, cache)
+		assert maintenance._flush_deferred_error_logs(KEY) == 0
+		assert len(inserted) == 2
+		assert not [r for r in inserted if KEY in json.dumps(r)]
+		first = inserted[0]
+		assert "'Bearer ********'" in first["error"] and first["method"].endswith("bad key ********")
+		assert json.loads(first["metadata"])  # still valid JSON
+		assert (first["reference_doctype"], first["reference_name"], first["trace_id"]) == ("Optimus Session", "s-1", "t-1")
+		# masking lengthens "u:p" to "********": the title is cut to 140
+		assert len(inserted[1]["method"]) == 140 and "u:p@" not in inserted[1]["method"]
+
+	def test_a_queued_smart_quote_key_is_inserted_masked(self, monkeypatch):
+		# The bare header values of the urllib3 frames, and the key
+		# JSON-escaped in the metadata, only the key read before the flush
+		# can find.
+		smart = {"error": ANTHROPIC_TB, "metadata": json.dumps({"doc": f"key {ANTHROPIC_KEY}"})}
+		assert "\\u2019" in smart["metadata"]
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps(smart)]})
+		inserted, _ = self._frappe(monkeypatch, cache)
+		assert maintenance._flush_deferred_error_logs(ANTHROPIC_KEY) == 0
+		[row] = inserted
+		assert "456789abcdef" not in json.dumps(row)
+		assert "      value = ********\n" in row["error"]
+		assert json.loads(row["metadata"]) == {"doc": "key ********"}
+
+	def test_a_record_that_cannot_be_masked_is_never_inserted(self, monkeypatch):
+		real_mask = maintenance._mask
+
+		def _mask(text, api_key):
+			if "BOOM" in text:
+				raise ValueError("catastrophic backtracking")
+			return real_mask(text, api_key)
+		monkeypatch.setattr(maintenance, "_mask", _mask)
+		queue = [json.dumps({"error": LEAKY + "BOOM"}), json.dumps({"error": "z"}), json.dumps(["not a record"])]
+		cache = _FakeCache({"insert_queue_for_Error Log": queue})
+		inserted, _ = self._frappe(monkeypatch, cache)
+		assert maintenance._flush_deferred_error_logs(KEY) == 2
+		assert [r["error"] for r in inserted] == ["z"]
+		assert cache.pushes == []  # dropped, not pushed back for Frappe to insert verbatim
+
+	def test_three_failed_inserts_in_a_row_stop_the_flush_and_push_the_last_entry_back(self, monkeypatch):
+		# A crashed table or a lost connection fails every insert: stop
+		# instead of popping (and losing) up to 10000 entries.
+		entries = [json.dumps({"error": e}) for e in ("B1", "B2", "B3", "d", "e")]
+		cache = _FakeCache({"insert_queue_for_Error Log": list(entries)})
+		inserted, commits = self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3"})
+		assert maintenance._flush_deferred_error_logs(KEY) == 3
+		assert inserted == [] and cache.pops == 3
+		# the third entry is pushed back as popped (bytes), after the rest
+		assert cache.pushes == [("insert_queue_for_Error Log", entries[2].encode())]
+		assert cache.queues["insert_queue_for_Error Log"] == [entries[3], entries[4], entries[2].encode()]
+		assert commits == [1]
+
+	def test_failures_that_are_not_in_a_row_do_not_stop_it(self, monkeypatch):
+		errors = ("B1", "ok1", "B2", "ok2", "B3", "ok3", "B4")
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": e}) for e in errors]})
+		inserted, _ = self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3", "B4"})
+		assert maintenance._flush_deferred_error_logs(KEY) == 4
+		assert [r["error"] for r in inserted] == ["ok1", "ok2", "ok3"]
+		assert cache.pops == 7 and cache.pushes == []
+
+	def test_a_stop_inside_an_entry_pushes_back_only_its_records_not_inserted(self, monkeypatch):
+		# Pushing the whole entry back would insert "ok" twice.
+		entry = [{"error": e} for e in ("ok", "B1", "B2", "B3", "z")]
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps(entry), json.dumps({"error": "next"})]})
+		inserted, _ = self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3"})
+		assert maintenance._flush_deferred_error_logs(KEY) == 3
+		assert [r["error"] for r in inserted] == ["ok"]
+		[(queue, pushed)] = cache.pushes
+		assert json.loads(pushed) == [{"error": e} for e in ("B1", "B2", "B3", "z")]
+		assert cache.queues[queue] == [json.dumps({"error": "next"}), pushed]
+
+	def test_failures_count_across_entries(self, monkeypatch):
+		entries = [json.dumps({"error": "B1"}), json.dumps([{"error": "B2"}, {"error": "B3"}, {"error": "w"}])]
+		cache = _FakeCache({"insert_queue_for_Error Log": list(entries)})
+		inserted, _ = self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3"})
+		assert maintenance._flush_deferred_error_logs(KEY) == 3
+		assert inserted == []
+		assert cache.pushes == [("insert_queue_for_Error Log", entries[1].encode())]
+
+	def test_a_failed_push_back_is_counted(self, monkeypatch):
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": e}) for e in ("B1", "B2", "B3")]})
+		self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3"})
+
+		def _rpush(key, value):
+			raise ConnectionError("redis went away")
+		cache.rpush = _rpush
+		assert maintenance._flush_deferred_error_logs(KEY) == 4
+
 	def test_a_broken_queue_is_not_fatal(self, monkeypatch):
 		self._frappe(monkeypatch, _FakeCache({}, broken=True))
-		assert maintenance._flush_deferred_error_logs() == 1
+		assert maintenance._flush_deferred_error_logs(KEY) == 1
 
 	def test_a_failing_insert_rolls_back_to_its_savepoint_only(self, monkeypatch):
 		cache = _FakeCache({
 			"insert_queue_for_Error Log": [json.dumps({"error": e}) for e in ("x", "BAD", "z")],
 		})
-		inserted, commits = self._frappe(monkeypatch, cache, fail_on="BAD")
-		assert maintenance._flush_deferred_error_logs() == 1
+		inserted, commits = self._frappe(monkeypatch, cache, fail_on={"BAD"})
+		assert maintenance._flush_deferred_error_logs(KEY) == 1
 		assert [r["error"] for r in inserted] == ["x", "z"]  # the third still lands
 		i = self.db_log.index(("insert", "BAD"))
 		assert self.db_log[i - 1] == ("savepoint", "optimus_scrub_row")  # set before the failing insert
@@ -872,7 +999,7 @@ class TestFlushDeferredErrorLogs:
 		queue = [json.dumps({"error": "x"}), "{not json", json.dumps({"error": "z"}), json.dumps([{"error": "w"}])]
 		cache = _FakeCache({"insert_queue_for_Error Log": queue})
 		inserted, commits = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs() == 1
+		assert maintenance._flush_deferred_error_logs(KEY) == 1
 		assert [r["error"] for r in inserted] == ["x", "z", "w"]
 		assert commits == [1]
 		assert cache.queues["insert_queue_for_Error Log"] == []
@@ -890,7 +1017,7 @@ class TestFlushDeferredErrorLogs:
 				raise ConnectionError("redis went away")
 			return real_lpop(key)
 		cache.lpop = _lpop
-		assert maintenance._flush_deferred_error_logs() == 1
+		assert maintenance._flush_deferred_error_logs(KEY) == 1
 		assert [r["error"] for r in inserted] == ["x"]
 		assert commits == [1]
 		assert len(cache.queues["insert_queue_for_Error Log"]) == 1  # left for the next run
@@ -898,7 +1025,7 @@ class TestFlushDeferredErrorLogs:
 	def test_an_lpop_failure_stops_the_loop(self, monkeypatch):
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "x"})] * 3}, broken_pop=True)
 		inserted, commits = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs() == 1
+		assert maintenance._flush_deferred_error_logs(KEY) == 1
 		assert inserted == [] and commits == [1]
 
 	def test_a_producer_that_refills_the_queue_cannot_keep_it_running(self, monkeypatch):
@@ -906,7 +1033,7 @@ class TestFlushDeferredErrorLogs:
 		refill = json.dumps({"error": "new"})
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": e}) for e in "abc"]}, refill=refill)
 		inserted, _ = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs() == 0
+		assert maintenance._flush_deferred_error_logs(KEY) == 0
 		assert cache.pops == 3
 		assert [r["error"] for r in inserted] == ["a", "b", "c"]
 		assert len(cache.queues["insert_queue_for_Error Log"]) == 3
@@ -917,7 +1044,7 @@ class TestFlushDeferredErrorLogs:
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "x"})]})
 		cache.llen = lambda key: 3
 		inserted, commits = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs() == 0
+		assert maintenance._flush_deferred_error_logs(KEY) == 0
 		assert [r["error"] for r in inserted] == ["x"] and cache.pops == 2
 		assert commits == [1]
 
@@ -925,7 +1052,7 @@ class TestFlushDeferredErrorLogs:
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": str(i)}) for i in range(8)]})
 		inserted, _ = self._frappe(monkeypatch, cache)
 		monkeypatch.setattr(maintenance, "_FLUSH_MAX_POPS", 5)
-		assert maintenance._flush_deferred_error_logs() == 0
+		assert maintenance._flush_deferred_error_logs(KEY) == 0
 		assert cache.pops == 5 and len(inserted) == 5
 		assert len(cache.queues["insert_queue_for_Error Log"]) == 3
 
@@ -937,7 +1064,7 @@ class TestFlushDeferredErrorLogs:
 		queue.append(json.dumps([{"error": f"l{i}"} for i in range(100)]))  # one entry, 100 records
 		cache = _FakeCache({"insert_queue_for_Error Log": queue})
 		inserted, _ = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs() == 0
+		assert maintenance._flush_deferred_error_logs(KEY) == 0
 		assert len(inserted) == 250
 		assert self.commit_points == [100, 200, 250]
 
@@ -948,7 +1075,69 @@ class TestFlushDeferredErrorLogs:
 		def _commit():
 			raise RuntimeError("Lost connection to server during query")
 		monkeypatch.setattr(maintenance, "safe_commit", _commit)
-		assert maintenance._flush_deferred_error_logs() == 1
+		assert maintenance._flush_deferred_error_logs(KEY) == 1
+
+
+_REAL_FLUSH = maintenance._flush_deferred_error_logs
+
+
+class TestQueuedRows:
+	"""The scrub reads the key first, flushes Error Log's deferred-insert
+	queue with it (a real run only), and reports what is still queued."""
+
+	def _real_flush(self, fake, monkeypatch, queue, **kw):
+		f = fake([("a", LEAKY)], **kw)
+		f.cache = _FakeCache({"insert_queue_for_Error Log": list(queue)})
+		monkeypatch.setattr(maintenance, "_flush_deferred_error_logs", _REAL_FLUSH)
+		return f
+
+	def test_the_key_is_read_before_the_first_pop(self, fake, monkeypatch):
+		f = self._real_flush(fake, monkeypatch, [json.dumps({"error": f"late row: api_key={KEY}"})])
+		events = []
+		real_lpop = f.cache.lpop
+
+		def _lpop(key):
+			events.append("lpop")
+			return real_lpop(key)
+		f.cache.lpop = _lpop
+		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", lambda: events.append("key") or KEY)
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		assert events[:2] == ["key", "lpop"] and events.count("key") == 1
+		assert f.inserted and KEY not in json.dumps(f.inserted)  # masked before the INSERT
+		assert all(KEY not in r["error"] for r in f.tables["Error Log"].values())
+		assert (out["failed"], out["queued"]) == (0, 0)
+
+	def test_queued_counts_what_the_cap_left(self, fake, monkeypatch):
+		queue = [json.dumps({"error": str(i)}) for i in range(8)]
+		f = self._real_flush(fake, monkeypatch, queue)
+		monkeypatch.setattr(maintenance, "_FLUSH_MAX_POPS", 5)
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		assert (out["queued"], out["failed"]) == (3, 0)
+		assert len(f.inserted) == 5
+
+	def test_queued_counts_an_entry_pushed_back_after_failed_inserts(self, fake, monkeypatch):
+		queue = [json.dumps({"error": e}) for e in ("B1", "B2", "B3", "d")]
+		f = self._real_flush(fake, monkeypatch, queue)
+
+		def _get_doc(record):
+			def _insert(ignore_permissions=False):
+				raise RuntimeError("Table 'tabError Log' is marked as crashed")
+			return SimpleNamespace(insert=_insert)
+		f.get_doc = _get_doc
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		assert (out["queued"], out["failed"]) == (2, 3)
+
+	def test_a_dry_run_reads_the_queue_length_and_never_pops(self, fake, monkeypatch):
+		f = self._real_flush(fake, monkeypatch, [json.dumps({"error": LEAKY})] * 4)
+		out = maintenance.scrub_error_log_secrets(dry_run=True)
+		assert out["queued"] == 4 and f.cache.pops == 0 and f.inserted == []
+
+	@pytest.mark.parametrize("dry_run", [True, False])
+	def test_a_queue_that_cannot_be_read_counts_as_failed(self, fake, dry_run):
+		f = fake([("a", CLEAN_AI)])
+		f.cache = _FakeCache({}, broken=True)
+		out = maintenance.scrub_error_log_secrets(dry_run=dry_run)
+		assert (out["queued"], out["failed"]) == (0, 1)
 
 
 class TestPurgeAiErrorLogs:
