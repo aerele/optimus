@@ -82,10 +82,54 @@ headers are. Two tests keep it that way: `optimus/tests/test_ai_log_audit.py` fa
 `optimus/tests/test_ai_secret_canary.py` fails if a fake key reaches any
 log, traceback, error-tracker payload or response on any failure path.
 
+`log_ai_failure` inserts the row at once, in the current transaction. If
+that transaction is rolled back later (a `frappe.throw` in the same request,
+a background job that fails), a `frappe.db.after_rollback` callback queues
+the same scrubbed row in Redis, and Frappe's scheduler (every 15 minutes) or
+the next `bench migrate` writes it. If the row cannot be written at all, one
+line with the error type goes to the `optimus` log (`logs/optimus.log`). A
+row for an HTTP failure holds the provider, the call site, the status and,
+when the reply names one, the provider's error code (`provider_error=`),
+never the reply body, which can echo the prompt. An unexpected error in the
+HTTP layer is logged with its type and plain `file:line:function` frames,
+without local variables or its message.
+
 Earlier releases with AI fix suggestions could store the key in plain text
 in the Error Log after a failed AI call. See the API key advisory in
 `CHANGELOG.md` for the required key rotation and cleanup
-(`optimus.maintenance`).
+(`optimus.maintenance`), and the next section for checking a site at any
+time.
+
+## Detecting and cleaning a key leak
+
+1. Where to look: Error Log rows titled `optimus *` (for example
+   `optimus ai_fix` or `optimus refill_indexes`), and rows Frappe wrote
+   itself for a server error or a failed background job whose traceback
+   passes through `optimus/ai_fix.py`. A row titled "Optimus: Error Log key
+   scrub did not run" means the migrate skipped or could not finish the
+   scrub; it names the reason and the command to run.
+2. Count what the scrub would change:
+   `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': True}"`.
+   A result of `"changed": 0`, `"deleted_docs_changed": 0`,
+   `"residual": 0` and `"failed": 0` means that every row the scrub reads
+   is already masked (see the known limitations below for which rows it
+   reads). Otherwise run it with `'dry_run': False`, then the dry run again.
+   The scrub locks the Error Log while it scans it, one window of 1000 rows
+   per statement, so on a large Error Log run it off-peak. It sends only an
+   8-character fragment of the stored key to the database, never the key.
+3. To delete the Optimus AI rows entirely (they can also hold prompt text:
+   source code and SQL with literal values), count them first, then delete:
+   `bench --site <site> execute optimus.maintenance.purge_ai_error_logs --kwargs "{'dry_run': True}"`,
+   then the same command with `'dry_run': False`.
+4. Rotate every key that was ever found (create a new key at the provider
+   and revoke the old one): backups and replicas keep the old rows.
+
+The migrate patch that runs the scrub runs once per site. Run step 2 by
+hand after a downgrade to an earlier release and the upgrade back (the
+earlier release can write keys again, and the patch does not run twice), on
+a site that ran an earlier release and then uninstalled Optimus (the rows
+stay), and on a site where Optimus was uninstalled and installed again (a
+new install marks every patch as done).
 
 ## Known limitations
 
@@ -107,7 +151,32 @@ in the Error Log after a failed AI call. See the API key advisory in
   outside the two places described under "API key handling", but its frames
   do hold the prompt (source code and normalised SQL), so prompt text can
   reach Sentry when an AI call fails, and the Error Log when an AI call is
-  cut off by a job timeout or fails in developer mode.
+  cut off by a job timeout or fails in developer mode. On stock Frappe v16
+  (Python 3.14 with sentry-sdk 1.45.1) Sentry currently sends no frame
+  locals at all, so there the prompt does not reach Sentry this way.
+- An AI failure row is still lost when only a savepoint is rolled back, when
+  the database connection drops before the commit, or when the COMMIT itself
+  fails: no rollback callback runs in those cases. On a site whose scheduler
+  is off, a row queued after a rollback waits in Redis until the next
+  `bench migrate` or a real run of the scrub writes it.
+- If the web server's worker timeout interrupts a provider call (a
+  `SystemExit` in the request), that call writes no Error Log row. The HTTP
+  layer clears the interrupted frames from the exception before it leaves,
+  so the prepared request headers do not travel with it.
+- The scrub's `residual` count is masking-complete, not selection-complete.
+  It reads only the rows its candidate filters select (rows with an
+  `ai_fix.py` frame and a secret marker, rows holding the key stored in
+  Optimus Settings, and the Deleted Document copies of both) and reports
+  those that still hold a key shape after masking. A row outside that
+  selection, for example an older key in a row with no `ai_fix.py` frame and
+  no marker, is not counted. Rotating the keys is what makes such a copy
+  harmless.
+- The scrub searches for the stored key by value only when it has at least
+  16 characters (the fragment it sends would otherwise be half the key), and
+  masks it by value only when it has at least 8 characters (a shorter
+  literal would shred ordinary words). A shorter key is masked only where it
+  sits in a header, an API-key field, a `Bearer` token or a URL's
+  credentials.
 
 ## Cryptographic primitives
 
