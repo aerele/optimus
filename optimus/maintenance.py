@@ -81,6 +81,14 @@ def _json_escaped(value: str) -> str:
 	return json.dumps(value)[1:-1] if value else ""
 
 
+def _like_literal(value: str) -> str:
+	"""``value`` escaped for a ``LIKE`` pattern, because backslash is the
+	default LIKE escape on MariaDB and Postgres, so an unescaped backslash (the
+	``\\u2019`` of a JSON-escaped key) never matches itself and ``%`` / ``_``
+	would act as wildcards."""
+	return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _mask(text: str, api_key: str) -> str:
 	out = scrub_secrets(text, literals=(api_key, _json_escaped(api_key)))
 	out = _VALUE_LINE.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER, out)
@@ -113,11 +121,20 @@ def _flush_deferred_error_logs() -> int:
 
 
 def _insert_error_log(record: dict) -> bool:
+	"""Insert one queued record under a savepoint, so a failed insert rolls
+	back only itself, also on Postgres, where a failed statement aborts the
+	transaction and every later queued insert with it."""
 	ok = True
 	try:
+		frappe.db.savepoint(_SAVEPOINT)
 		frappe.get_doc({**record, "doctype": "Error Log"}).insert(ignore_permissions=True)
 	except Exception:
 		ok = False
+	if not ok:
+		try:
+			frappe.db.rollback(save_point=_SAVEPOINT)
+		except Exception:
+			pass
 	return ok
 
 
@@ -186,7 +203,7 @@ def _scans(api_key: str) -> list[tuple[str, list[list], list[list], tuple[str, .
 	if len(api_key) >= _MIN_KEY_LEN:
 		# The key stored today, anywhere: a 500 snapshot's title is the
 		# exception message and a request's metadata holds its form data.
-		likes = sorted({f"%{api_key}%", f"%{_json_escaped(api_key)}%"})
+		likes = sorted({f"%{_like_literal(api_key)}%", f"%{_like_literal(_json_escaped(api_key))}%"})
 		scans += [
 			("Error Log", [], [[f, "like", p] for f in ("error", "method", "metadata") for p in likes],
 				("error", "method", "metadata"), "changed"),

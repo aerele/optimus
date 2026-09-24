@@ -50,6 +50,9 @@ def execute():
 		)
 		return
 	changed = int(out.get("changed") or 0) + int(out.get("deleted_docs_changed") or 0)
+	if not (changed or out.get("failed") or out.get("residual")):
+		print("Optimus: found no AI API keys in stored error rows.")
+		return
 	print(
 		f"Optimus: masked AI API keys in {changed} stored error row(s). "
 		"Rotate those keys at the provider: backups taken before this upgrade still hold them."
