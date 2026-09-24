@@ -8,6 +8,20 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.56] - 2026-09-23
+
+### Fixed
+
+- Optimus Settings no longer stacks a duplicate intro banner. Toggling the AI
+  master switch re-enters the form's refresh handler (`frm.trigger("refresh")`),
+  and Frappe's `set_intro` appends a new message rather than replacing the
+  previous one, so a second identical banner appeared. The intro is now a single
+  id-scoped element rendered outside Frappe's shared message container, so it
+  cannot duplicate and does not clear sibling banners in that container (for
+  example the concurrent-edit warning).
+
+---
+
 ## [0.12.55] - 2026-09-22
 
 ### Fixed
