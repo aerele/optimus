@@ -31,6 +31,10 @@ is replaced by a recorder that is a superset of what really gets stored:
 * ``escaped``: the dump of any exception an entry point lets out.
 * ``returned``: return values and escaped exception reprs (what the UI shows).
 * ``wire``: the ``headers`` / ``json`` arguments handed to ``requests.post``.
+* ``pending``: what each ``frappe.db.after_rollback`` callback holds (its
+  closure). ``log_ai_failure`` registers one per row; after the entry points
+  ran, a rollback runs them and each record they re-queue through
+  ``frappe.deferred_insert`` is a ``stored`` row too.
 
 The only redaction applied is the one Frappe and Sentry both really apply:
 a local variable named exactly ``api_key``.
@@ -51,6 +55,7 @@ import inspect
 import json
 import os
 import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -205,7 +210,10 @@ class _Sinks:
 
 	def __init__(self):
 		self.stored, self.sentry, self.stack, self.escaped, self.returned, self.wire = [], [], [], [], [], []
+		self.pending = []
 		self.posts = 0
+		self.registered = 0
+		self.requeued = 0
 		self.entry = ""
 
 	def __repr__(self):
@@ -221,8 +229,54 @@ class _Sinks:
 			self.sentry.append((self.entry, _dump_exception(active)))
 		self.stack.append((self.entry, _dump_stack(sys._getframe(1))))
 
+	def deferred_insert(self, doctype, records):
+		for record in records:
+			self.requeued += 1
+			self.stored.append((self.entry, f"{record.get('method')}\n{record.get('error')}\n{record!r}", True))
+
+
+class _Callbacks:
+	"""``frappe.utils.CallbackManager`` (``frappe.db.after_rollback``): run in
+	order, each removed before it runs. Every callback added is recorded in the
+	``pending`` channel by what its closure holds."""
+
+	def __init__(self, sinks):
+		self.sinks = sinks
+		self.functions = []
+
+	def __repr__(self):
+		return "<canary callbacks>"
+
+	def add(self, fn):
+		self.sinks.registered += 1
+		held = [repr(cell.cell_contents) for cell in (getattr(fn, "__closure__", None) or ())]
+		self.sinks.pending.append((self.sinks.entry, "\n".join(held)))
+		self.functions.append(fn)
+
+	def run(self):
+		while self.functions:
+			self.functions.pop(0)()
+
+	def reset(self):
+		self.functions.clear()
+
+
+class _Flags(dict):
+	"""``frappe.flags`` (a ``frappe._dict``): a flag never set reads as None."""
+
+	__getattr__ = dict.get
+
 
 class _FakeDB:
+	"""``commit`` drops the rollback callbacks, a full ``rollback`` runs them,
+	as ``frappe.database.Database`` does."""
+
+	def __init__(self, sinks):
+		self.after_rollback = _Callbacks(sinks)
+
+	def __repr__(self):
+		return "<canary db>"
+
 	def get_value(self, doctype, filters=None, fieldname=None, *a, as_dict=False, **k):
 		if as_dict:
 			return {"name": "SESS-CANARY", "user": "Administrator", "status": "Ready", "title": "t"}
@@ -235,10 +289,11 @@ class _FakeDB:
 		return []
 
 	def commit(self):
-		pass
+		self.after_rollback.reset()
 
-	def rollback(self, *a, **k):
-		pass
+	def rollback(self, *, save_point=None, chain=False):
+		if not save_point:
+			self.after_rollback.run()
 
 
 def _reply(status_code: int, body: str) -> requests.Response:
@@ -305,7 +360,11 @@ def canary(monkeypatch, request):
 	monkeypatch.setattr(analyze, "frappe", frappe)
 	monkeypatch.setattr(api, "frappe", frappe)
 	monkeypatch.setattr(frappe, "log_error", sinks.log_error, raising=False)
-	monkeypatch.setattr(frappe, "db", _FakeDB(), raising=False)
+	monkeypatch.setattr(frappe, "db", _FakeDB(sinks), raising=False)
+	monkeypatch.setattr(frappe, "flags", _Flags(), raising=False)
+	queue = types.ModuleType("frappe.deferred_insert")
+	queue.deferred_insert = sinks.deferred_insert
+	monkeypatch.setitem(sys.modules, "frappe.deferred_insert", queue)
 	monkeypatch.setattr(frappe.local, "_optimus_spend_session", None, raising=False)
 	stored_key = NON_LATIN_KEY if scenario == "non_latin_key" else KEY
 	monkeypatch.setattr(
@@ -369,19 +428,31 @@ _PROVIDERS = ("OpenAI", "Anthropic")
 	ids=[f"{s}-{p}" for s in _SCENARIOS for p in _PROVIDERS],
 )
 def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
+	import frappe
+
 	sinks, scenario, job_timeout = canary
 	for name, (fn, args_factory) in _ENTRY_POINTS.items():
 		_drive(name, fn, args_factory, sinks, scenario, job_timeout)
+	# Every row still in the transaction is queued again by its rollback
+	# callback (frappe.throw's request rollback, execute_job's rollback).
+	rows_written = len(sinks.stack)
+	sinks.entry = "(rollback)"
+	frappe.db.rollback()
 
 	if scenario == "non_latin_key":
 		assert sinks.posts == 0, "a key that cannot be sent must fail before any HTTP call"
 	else:
 		assert sinks.posts > 0, "the scenario never reached requests.post: the canary would prove nothing"
 	assert sinks.stored, "no Error Log row was written: failures must still be logged"
+	# Each row written registered exactly one re-queue callback, and the
+	# rollback re-queued rows, so their records were checked below too.
+	assert sinks.registered == rows_written
+	if rows_written:
+		assert sinks.requeued, "no row was re-queued by the rollback: the re-queued records went unchecked"
 
 	channels = {
 		"stored": [(e, t) for e, t, _ in sinks.stored], "sentry": sinks.sentry, "stack": sinks.stack,
-		"escaped": sinks.escaped, "returned": sinks.returned, "wire": sinks.wire,
+		"escaped": sinks.escaped, "returned": sinks.returned, "wire": sinks.wire, "pending": sinks.pending,
 	}
 	for channel, items in channels.items():
 		for entry, text in items:

@@ -8,6 +8,9 @@ layer's failure path (PR-0a).
 a Werkzeug Local proxy on a bench: never patch its attributes).
 """
 
+import json
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -18,17 +21,53 @@ from optimus import ai_fix
 KEY = "sk-live-0123456789abcdefXYZ"
 
 
+class _Callbacks:
+	"""``frappe.utils.CallbackManager`` semantics: functions run in the order
+	they were added, each removed before it runs; ``reset`` drops them all."""
+
+	def __init__(self):
+		self.functions = []
+
+	def add(self, fn):
+		self.functions.append(fn)
+
+	def run(self):
+		while self.functions:
+			self.functions.pop(0)()
+
+	def reset(self):
+		self.functions.clear()
+
+
 class _FakeDB:
+	"""The parts of ``frappe.database.Database`` the AI log path touches.
+	``commit`` drops the rollback callbacks before committing and a full
+	``rollback`` runs them (a savepoint rollback runs none), as Frappe does."""
+
 	def __init__(self, docname="SESS-0001", raise_on_get=False):
 		self.docname = docname
 		self.raise_on_get = raise_on_get
 		self.lookups = 0
+		self.after_rollback = _Callbacks()
 
 	def get_value(self, doctype, filters, field):
 		self.lookups += 1
 		if self.raise_on_get:
 			raise RuntimeError("db down")
 		return self.docname
+
+	def commit(self):
+		self.after_rollback.reset()
+
+	def rollback(self, *, save_point=None, chain=False):
+		if not save_point:
+			self.after_rollback.run()
+
+
+class _Flags(dict):
+	"""``frappe.flags`` is a ``frappe._dict``: a flag never set reads as None."""
+
+	__getattr__ = dict.get
 
 
 @pytest.fixture
@@ -39,10 +78,37 @@ def logs(monkeypatch):
 	calls = []
 	monkeypatch.setattr(frappe, "log_error", lambda **kw: calls.append(kw), raising=False)
 	monkeypatch.setattr(frappe, "db", _FakeDB(), raising=False)
+	monkeypatch.setattr(frappe, "flags", _Flags(), raising=False)
 	monkeypatch.setattr(
 		"frappe.utils.password.get_decrypted_password", lambda *a, **k: KEY, raising=False
 	)
 	return calls
+
+
+@pytest.fixture
+def requeued(monkeypatch):
+	"""Capture ``frappe.deferred_insert.deferred_insert`` calls as
+	``(doctype, records)``."""
+	queued = []
+	module = types.ModuleType("frappe.deferred_insert")
+	module.deferred_insert = lambda doctype, records: queued.append((doctype, records))
+	monkeypatch.setitem(sys.modules, "frappe.deferred_insert", module)
+	return queued
+
+
+@pytest.fixture
+def breadcrumbs(monkeypatch):
+	"""Capture ``frappe.logger(...).warning`` calls as ``(module, message,
+	exception active while logging)``."""
+	import frappe
+
+	lines = []
+
+	def _logger(module=None, *a, **k):
+		return SimpleNamespace(warning=lambda msg, *x, **y: lines.append((module, msg, sys.exc_info()[1])))
+
+	monkeypatch.setattr(frappe, "logger", _logger, raising=False)
+	return lines
 
 
 def _raise_with_local_and_chain():
@@ -70,7 +136,7 @@ class TestLogAiFailure:
 		assert KEY not in msg
 		assert row["reference_doctype"] == "Optimus Session"
 		assert row["reference_name"] == "SESS-0001"
-		assert row["defer_insert"] is False  # not in a web request
+		assert "defer_insert" not in row  # always inserted directly
 
 	def test_no_frame_locals_and_no_chain(self, logs):
 		try:
@@ -81,30 +147,86 @@ class TestLogAiFailure:
 		assert "alice@example.com" not in msg
 		assert "CHAINED-CONTEXT" not in msg
 
-	@pytest.mark.parametrize(
-		("in_request", "scheduler_inactive", "expected"),
-		[(True, False, True), (True, True, False), (False, False, False), (True, RuntimeError, False)],
-		ids=["request+scheduler", "request+scheduler-off", "background", "scheduler-check-fails"],
-	)
-	def test_defer_insert_only_in_a_request_on_a_site_whose_scheduler_runs(
-		self, logs, monkeypatch, in_request, scheduler_inactive, expected
-	):
-		# Review Focus #3: deferred rows are flushed by a scheduler job, so a
-		# site with the scheduler paused (optimus.local has pause_scheduler=1)
-		# or disabled must insert directly or the row never lands.
+	def test_inserts_directly_even_in_a_request_on_a_site_whose_scheduler_runs(self, logs, requeued, monkeypatch):
+		# A deferred row lands up to 15 minutes late and is lost on a cache
+		# Redis restart or eviction: the row is written in the transaction.
 		import frappe
 
-		if in_request:
-			monkeypatch.setattr(frappe, "request", SimpleNamespace(path="/api/method/x"), raising=False)
+		monkeypatch.setattr(frappe, "request", SimpleNamespace(path="/api/method/x"), raising=False)
+		monkeypatch.setattr("frappe.utils.scheduler.is_scheduler_inactive", lambda verbose=True: False, raising=False)
+		assert ai_fix.log_ai_failure("t", session_uuid="uuid-1") is True
+		assert len(logs) == 1 and "defer_insert" not in logs[0]
+		assert requeued == []
 
-		def _inactive(verbose=True):
-			if scheduler_inactive is RuntimeError:
-				raise RuntimeError("no site")
-			return scheduler_inactive
+	def test_a_rollback_requeues_exactly_one_record_with_the_scrubbed_message(self, logs, requeued):
+		# frappe.throw after the log (the request rollback in frappe.app) or a
+		# failing job (execute_job rolls back) takes the inserted row away: the
+		# same scrubbed row is queued again, once.
+		import frappe
 
-		monkeypatch.setattr("frappe.utils.scheduler.is_scheduler_inactive", _inactive, raising=False)
+		ai_fix.log_ai_failure("optimus ai backfill", ai_fix.AiFixError(f"echoed {KEY}"), session_uuid="uuid-1")
+		frappe.db.rollback()
+		frappe.db.rollback()
+		assert len(requeued) == 1
+		doctype, records = requeued[0]
+		assert doctype == "Error Log"
+		assert records == [{
+			"error": logs[0]["message"], "method": "optimus ai backfill",
+			"reference_doctype": "Optimus Session", "reference_name": "SESS-0001",
+		}]
+		assert "AiFixError: echoed ********" in records[0]["error"]
+		assert KEY not in json.dumps(records)
+		assert len(logs) == 1  # the callback never calls frappe.log_error (Sentry)
+
+	def test_a_commit_then_a_rollback_queues_nothing(self, logs, requeued):
+		import frappe
+
+		ai_fix.log_ai_failure("t", ValueError("x"), session_uuid="uuid-1")
+		frappe.db.commit()
+		frappe.db.rollback()
+		assert requeued == []
+
+	def test_a_savepoint_rollback_queues_nothing(self, logs, requeued):
+		# Frappe runs no rollback callbacks for a savepoint rollback.
+		import frappe
+
 		ai_fix.log_ai_failure("t")
-		assert logs[0]["defer_insert"] is expected
+		frappe.db.rollback(save_point="sp")
+		assert requeued == []
+
+	def test_nothing_is_registered_in_read_only_mode(self, logs, requeued, monkeypatch):
+		# frappe.log_error defers the row itself when the site is read-only, so
+		# a rollback cannot take it away: queuing it again would duplicate it.
+		import frappe
+
+		monkeypatch.setattr(frappe, "flags", _Flags(read_only=True), raising=False)
+		ai_fix.log_ai_failure("t")
+		assert frappe.db.after_rollback.functions == []
+
+	def test_the_trace_id_and_metadata_of_the_inserted_row_are_kept(self, logs, requeued, monkeypatch):
+		import frappe
+
+		row = SimpleNamespace(trace_id="trace-1", metadata='{"type": "background_job"}')
+		monkeypatch.setattr(frappe, "log_error", lambda **kw: logs.append(kw) or row, raising=False)
+		ai_fix.log_ai_failure("t")
+		frappe.db.rollback()
+		assert requeued[0][1][0]["trace_id"] == "trace-1"
+		assert requeued[0][1][0]["metadata"] == '{"type": "background_job"}'
+
+	def test_the_rollback_callback_never_raises_and_holds_no_key(self, logs, monkeypatch):
+		import frappe
+
+		def _broken_queue(doctype, records):
+			raise ConnectionError("redis down")
+
+		module = types.ModuleType("frappe.deferred_insert")
+		module.deferred_insert = _broken_queue
+		monkeypatch.setitem(sys.modules, "frappe.deferred_insert", module)
+		ai_fix.log_ai_failure("t", ai_fix.AiFixError(f"echoed {KEY}"), provider="openai")
+		(callback,) = frappe.db.after_rollback.functions
+		held = [repr(cell.cell_contents) for cell in (callback.__closure__ or ())]
+		assert held and not any(KEY in text for text in held)
+		frappe.db.rollback()  # must not raise
 
 	def test_scrub_failure_keeps_only_the_title_and_the_error_type(self, logs, monkeypatch):
 		def _boom(*a, **k):
@@ -143,13 +265,57 @@ class TestLogAiFailure:
 		assert db.lookups == 0
 		assert "session_uuid=uuid-1" in logs[0]["message"]
 
-	def test_never_raises(self, monkeypatch):
+	def test_never_raises(self, monkeypatch, breadcrumbs):
 		import frappe
 
 		def _boom(**kw):
 			raise RuntimeError("Error Log insert failed")
 		monkeypatch.setattr(frappe, "log_error", _boom, raising=False)
 		ai_fix.log_ai_failure("t", ValueError("x"), session_uuid="u")  # must not raise
+
+	def test_returns_true_only_once_log_error_returned(self, logs, monkeypatch, breadcrumbs):
+		import frappe
+
+		e = ai_fix.AiFixError("boom")
+		assert ai_fix.log_ai_failure("first", e) is True
+		assert ai_fix.log_ai_failure("again", e) is False  # already logged: nothing written
+
+		def _boom(**kw):
+			raise RuntimeError("Error Log insert failed")
+		monkeypatch.setattr(frappe, "log_error", _boom, raising=False)
+		failed = ValueError("x")
+		assert ai_fix.log_ai_failure("t", failed) is False
+		assert not getattr(failed, ai_fix._LOGGED_ATTR, False)  # a later caller may still log it
+
+	def test_a_failed_write_leaves_a_type_only_breadcrumb_logged_after_the_handler(self, logs, monkeypatch, breadcrumbs):
+		# The row could not be written: one warning line in the optimus log names
+		# the error TYPE only (its message could hold anything) and is written
+		# with no exception being handled.
+		import frappe
+
+		def _boom(**kw):
+			raise RuntimeError(f"insert failed for {KEY} alice@example.com")
+		monkeypatch.setattr(frappe, "log_error", _boom, raising=False)
+		ai_fix.log_ai_failure("t", ValueError("x"))
+		assert len(breadcrumbs) == 1
+		module, message, active = breadcrumbs[0]
+		assert module == "optimus"
+		assert "RuntimeError" in message
+		assert KEY not in message and "alice@example.com" not in message and "insert failed" not in message
+		assert active is None
+
+	def test_a_failing_breadcrumb_is_swallowed(self, logs, monkeypatch):
+		import frappe
+
+		def _boom(*a, **kw):
+			raise RuntimeError("no log file")
+		monkeypatch.setattr(frappe, "log_error", _boom, raising=False)
+		monkeypatch.setattr(frappe, "logger", _boom, raising=False)
+		assert ai_fix.log_ai_failure("t") is False  # must not raise
+
+	def test_no_breadcrumb_when_the_row_is_written(self, logs, breadcrumbs):
+		ai_fix.log_ai_failure("t", ValueError("x"))
+		assert breadcrumbs == []
 
 	def test_only_the_scrubbed_message_is_bound_while_logging(self, logs, monkeypatch):
 		# Sentry (attach_stacktrace=True) serialises the calling frame's locals
@@ -328,6 +494,29 @@ class TestHttpFailurePath:
 		with pytest.raises(ai_fix.AiFixError, match="non-JSON") as ei:
 			_call()
 		assert ei.value.kind == "bad_response" and ei.value.__context__ is None
+
+	def test_a_failed_http_row_leaves_the_error_unmarked_so_the_caller_logs_it(self, logs, monkeypatch, breadcrumbs):
+		# The HTTP layer's own row could not be written: marking the error
+		# logged anyway would make the caller's log_ai_failure a no-op and the
+		# failure would leave no row at all.
+		import frappe
+
+		attempts = []
+
+		def _fails_once(**kw):
+			attempts.append(kw["title"])
+			if len(attempts) == 1:
+				raise RuntimeError("Error Log insert failed")
+			logs.append(kw)
+
+		monkeypatch.setattr(frappe, "log_error", _fails_once, raising=False)
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(500, {}, text="upstream down")))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			_call()
+		assert not getattr(ei.value, ai_fix._LOGGED_ATTR, False)
+		assert ai_fix.log_ai_failure("optimus ai backfill", ei.value) is True
+		assert attempts == ["optimus ai_fix", "optimus ai backfill"]
+		assert [r["title"] for r in logs] == ["optimus ai backfill"]
 
 	def test_http_row_references_the_marked_session(self, logs, monkeypatch):
 		import frappe
@@ -511,16 +700,16 @@ class TestAJobTimeoutIsNeverSwallowed:
 			ai_fix._scrubbed_message("t", [f"UNSCRUBBED {KEY}"], None)
 		_assert_fresh_and_clean(ei, job_timeout, raiser)
 
-	def test_log_ai_failure_while_scrubbing(self, logs, job_timeout, monkeypatch):
+	def test_log_ai_failure_while_scrubbing(self, logs, job_timeout, monkeypatch, breadcrumbs):
 		raiser = _raising(job_timeout, holds=f"UNSCRUBBED {KEY}")
 		monkeypatch.setattr("optimus.redaction.scrub_secrets", raiser)
 		failed = ai_fix.AiFixError("x")
 		with pytest.raises(_JobTimeout) as ei:
 			ai_fix.log_ai_failure("t", failed, finding="F1")
 		_assert_fresh_and_clean(ei, job_timeout, raiser)
-		assert logs == []
+		assert logs == [] and breadcrumbs == []
 
-	def test_log_ai_failure_while_writing(self, logs, job_timeout, monkeypatch):
+	def test_log_ai_failure_while_writing(self, logs, job_timeout, monkeypatch, breadcrumbs):
 		import frappe
 
 		raiser = _raising(job_timeout)
@@ -530,6 +719,7 @@ class TestAJobTimeoutIsNeverSwallowed:
 			ai_fix.log_ai_failure("t", failed)
 		_assert_fresh_and_clean(ei, job_timeout, raiser)
 		assert not getattr(failed, ai_fix._LOGGED_ATTR, False)
+		assert breadcrumbs == []
 
 	def test_log_ai_failure_while_looking_up_the_session(self, logs, job_timeout, monkeypatch):
 		import frappe
@@ -542,6 +732,37 @@ class TestAJobTimeoutIsNeverSwallowed:
 			ai_fix.log_ai_failure("t", session_uuid="uuid-1")
 		_assert_fresh_and_clean(ei, job_timeout, raiser)
 		assert logs == []
+
+	def test_log_ai_failure_while_registering_the_rollback_callback(self, logs, job_timeout, monkeypatch):
+		import frappe
+
+		raiser = _raising(job_timeout)
+		frappe.db.after_rollback.add = raiser
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix.log_ai_failure("t")
+		_assert_fresh_and_clean(ei, job_timeout, raiser)
+
+	def test_the_breadcrumb(self, logs, job_timeout, monkeypatch):
+		import frappe
+
+		monkeypatch.setattr(frappe, "log_error", _raising(RuntimeError("insert failed")), raising=False)
+		raiser = _raising(job_timeout)
+		monkeypatch.setattr(frappe, "logger", raiser, raising=False)
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix.log_ai_failure("t")
+		_assert_fresh_and_clean(ei, job_timeout, raiser)
+
+	def test_the_rollback_callback(self, logs, job_timeout, monkeypatch):
+		import frappe
+
+		raiser = _raising(job_timeout)
+		module = types.ModuleType("frappe.deferred_insert")
+		module.deferred_insert = raiser
+		monkeypatch.setitem(sys.modules, "frappe.deferred_insert", module)
+		ai_fix.log_ai_failure("t")
+		with pytest.raises(_JobTimeout) as ei:
+			frappe.db.rollback()
+		_assert_fresh_and_clean(ei, job_timeout, raiser)
 
 	def test_mark_logged(self, job_timeout):
 		class _Sticky(Exception):

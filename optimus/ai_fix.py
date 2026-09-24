@@ -19,6 +19,7 @@ helpers are unit-testable without a bench.
 from __future__ import annotations
 
 import re
+import traceback
 from datetime import datetime, timezone
 from typing import Any
 
@@ -1347,7 +1348,7 @@ def log_ai_failure(
 	session_uuid: str | None = None,
 	docname: str | None = None,
 	**context,
-) -> None:
+) -> bool:
 	"""Write one Error Log row for an AI-surface failure. This is the ONLY
 	function on the AI surface allowed to call ``frappe.log_error``
 	(``test_ai_log_audit.py`` enforces it).
@@ -1367,23 +1368,27 @@ def log_ai_failure(
 	- ``reference_doctype`` / ``reference_name`` point at the Optimus Session:
 	  ``docname`` when the caller has it (no lookup), else the session that
 	  ``session_uuid`` resolves to.
-	- ``defer_insert`` only inside a web request on a site whose scheduler
-	  runs (see ``_defer_error_log_insert``); everywhere else the row is
-	  inserted directly.
+	- The row is inserted directly, in the current transaction. If that
+	  transaction is rolled back later (a ``frappe.throw`` in a web request,
+	  a failing background job), a ``frappe.db.after_rollback`` callback
+	  queues the same scrubbed row again (see ``_requeue_if_rolled_back``).
 	- If scrubbing fails, the row keeps only the title and the error type:
 	  an unscrubbed message is never written.
 	- An exception is logged at most once: the HTTP layer logs its own
 	  failures, so a caller that logs the same ``AiFixError`` again is a
-	  no-op (no double rows).
+	  no-op (no double rows). Only a row that was written marks it.
+	- Returns True once ``frappe.log_error`` has returned, else False
+	  (already logged, or the write failed). A failed write leaves one
+	  warning line with the error type in the ``optimus`` log.
 	- Never raises, except an RQ job timeout (the job must still stop),
 	  which leaves as a fresh instance with no chain.
 	"""
+	logged = False
+	failure_type = None
 	interrupt = None
 	try:
 		if exc is not None and getattr(exc, _LOGGED_ATTR, False):
-			return
-		import traceback
-
+			return False
 		import frappe
 
 		lines = [title]
@@ -1405,20 +1410,32 @@ def log_ai_failure(
 				raise
 			except Exception:
 				docname = None
-		frappe.log_error(
+		reference_doctype = "Optimus Session" if docname else None
+		reference_name = docname or None
+		row = frappe.log_error(
 			title=title,
 			message=message,
-			reference_doctype="Optimus Session" if docname else None,
-			reference_name=docname or None,
-			defer_insert=_defer_error_log_insert(),
+			reference_doctype=reference_doctype,
+			reference_name=reference_name,
 		)
+		logged = True
 		_mark_logged(exc)
+		_requeue_if_rolled_back(
+			{
+				"error": message, "method": title,
+				"reference_doctype": reference_doctype, "reference_name": reference_name,
+			},
+			row,
+		)
 	except _job_timeout_types() as e:
 		interrupt = (type(e), e.args)
-	except Exception:
-		pass
+	except Exception as e:
+		failure_type = type(e).__name__
 	if interrupt is not None:
 		raise interrupt[0](*interrupt[1])
+	if failure_type is not None:
+		_note_unwritten_row(failure_type)
+	return logged
 
 
 def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None) -> str:
@@ -1444,30 +1461,75 @@ def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None) -
 	return f"{title}\n(details withheld: scrubbing the message failed with {failed}; error type {kind})"
 
 
-def _defer_error_log_insert() -> bool:
-	"""Whether ``log_ai_failure`` passes ``defer_insert=True``.
+def _requeue_if_rolled_back(record: dict, row=None) -> None:
+	"""Queue the Error Log row ``log_ai_failure`` just inserted again if its
+	transaction is rolled back.
 
-	Only inside a web request, where a following ``frappe.throw`` rolls the
-	request transaction back and would take a directly inserted row with it,
-	and only when the site's scheduler runs: deferred rows are written by the
-	scheduler job ``frappe.deferred_insert.save_to_db``, so on a site with the
-	scheduler paused or disabled they would never land. Background jobs and
-	those sites insert directly. Any error answers False, except an RQ job
-	timeout (re-raised fresh)."""
+	``frappe.log_error`` inserts the row in the current transaction, so a
+	later rollback takes it away: ``frappe.app`` rolls the request back after
+	an exception (a ``frappe.throw`` after the log) and ``execute_job`` does
+	the same for a failing job. A ``frappe.db.after_rollback`` callback then
+	queues the same fields (``record``: the scrubbed message, the title, the
+	references, plus the ``trace_id`` and ``metadata`` of the inserted row
+	``row``) through ``frappe.deferred_insert``. ``commit()`` drops the
+	callbacks, so a committed row is never queued twice; a savepoint rollback
+	runs none. Nothing is registered in read-only mode: ``log_error`` has
+	queued the row itself there.
+
+	The callback never calls ``frappe.log_error`` (it may run inside an
+	``except`` block, and it must not reach Sentry), never raises
+	(``CallbackManager.run`` would pass the error to the rollback's caller)
+	except an RQ job timeout, and holds only the scrubbed fields."""
 	interrupt = None
 	try:
 		import frappe
 
-		if not getattr(frappe, "request", None):
-			return False
-		from frappe.utils.scheduler import is_scheduler_inactive
+		if getattr(frappe.flags, "read_only", False):
+			return
+		for field in ("trace_id", "metadata"):
+			value = getattr(row, field, None)
+			if isinstance(value, str) and value:
+				record[field] = value
 
-		return not is_scheduler_inactive(verbose=False)
+		def _requeue() -> None:
+			requeue_interrupt = None
+			try:
+				from frappe.deferred_insert import deferred_insert
+
+				deferred_insert("Error Log", [dict(record)])
+			except _job_timeout_types() as e:
+				requeue_interrupt = (type(e), e.args)
+			except Exception:
+				pass
+			if requeue_interrupt is not None:
+				raise requeue_interrupt[0](*requeue_interrupt[1])
+
+		frappe.db.after_rollback.add(_requeue)
 	except _job_timeout_types() as e:
 		interrupt = (type(e), e.args)
 	except Exception:
-		return False
-	raise interrupt[0](*interrupt[1])
+		pass
+	if interrupt is not None:
+		raise interrupt[0](*interrupt[1])
+
+
+def _note_unwritten_row(error_type: str) -> None:
+	"""Leave a trace when ``log_ai_failure`` could not write its row: one
+	warning line in the ``optimus`` log naming the error TYPE only (its
+	message could hold anything). Never raises, except an RQ job timeout."""
+	interrupt = None
+	try:
+		import frappe
+
+		frappe.logger("optimus").warning(
+			f"optimus ai_fix: an AI failure could not be written to the Error Log ({error_type})"
+		)
+	except _job_timeout_types() as e:
+		interrupt = (type(e), e.args)
+	except Exception:
+		pass
+	if interrupt is not None:
+		raise interrupt[0](*interrupt[1])
 
 
 def _mark_logged(exc: BaseException | None) -> None:
@@ -1495,8 +1557,9 @@ def _log_http_error(
 	response body. The session reference comes from the per-worker spend
 	marker the caller set (``analyze._mark_ai_spend_session``), the same one
 	``_record_session_spend`` reads. ``exc`` (the ``AiFixError`` about to be
-	raised) is then marked logged, so the caller's own ``log_ai_failure`` for
-	it writes no second row."""
+	raised) is then marked logged, but only if the row was written, so the
+	caller's own ``log_ai_failure`` for it writes no second row and a failed
+	write still leaves the caller's."""
 	session_uuid = None
 	interrupt = None
 	try:
@@ -1509,11 +1572,11 @@ def _log_http_error(
 		session_uuid = None
 	if interrupt is not None:
 		raise interrupt[0](*interrupt[1])
-	log_ai_failure(
+	if log_ai_failure(
 		"optimus ai_fix", session_uuid=session_uuid,
 		provider=provider, where=where, status=status, detail=detail,
-	)
-	_mark_logged(exc)
+	):
+		_mark_logged(exc)
 
 
 def _job_timeout_types() -> tuple[type[BaseException], ...]:
