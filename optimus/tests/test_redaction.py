@@ -210,6 +210,41 @@ class TestScrubSecrets:
 		assert redaction.scrub_secrets("key=abcdefgh end", literals=("abcdefgh",)) == "key=******** end"
 		assert redaction.scrub_secrets("key=abcdefg end", literals=("abcdefg",)) == "key=abcdefg end"
 
+	@pytest.mark.parametrize("order", ["shorter_first", "longer_first"])
+	@pytest.mark.parametrize("where", ["prefix", "inside"])
+	def test_overlapping_literals_are_masked_longest_first(self, order, where):
+		# The stored key and the key a request was sent with can overlap
+		# (one inside the other). Masking the shorter one first would leave
+		# the rest of the longer one in the text.
+		longer = "sk-proj-abcdefgh12345678XYZ98765tail"
+		shorter = longer[:16] if where == "prefix" else longer[8:24]
+		literals = (shorter, longer) if order == "shorter_first" else (longer, shorter)
+		out = redaction.scrub_secrets(f"echo {longer} and {shorter} end", literals=literals)
+		assert out == "echo ******** and ******** end"
+
+	def test_sorting_the_literals_keeps_them_in_redacted_names(self):
+		# The sort key sees every literal: its frame must hold one only as
+		# ``api_key`` (checked as each redaction frame returns).
+		import sys
+
+		literals = ("sk-proj-abcdefgh12345678", "sk-proj-abcdefgh12345678XYZ98765tail")
+		offenders = set()
+
+		def _profile(frame, event, arg):
+			if event != "return" or frame.f_code.co_filename != redaction.__file__:
+				return
+			for name, value in frame.f_locals.items():
+				held = [value] if isinstance(value, str) else list(value) if isinstance(value, (tuple, list)) else []
+				if name not in ("api_key", "secret") and any(v in literals for v in held if isinstance(v, str)):
+					offenders.add(f"{frame.f_code.co_name}.{name}")
+		sys.setprofile(_profile)
+		try:
+			out = redaction.scrub_secrets(f"echo {literals[1]}", literals=literals)
+		finally:
+			sys.setprofile(None)
+		assert out == "echo ********"
+		assert offenders == set()
+
 	def test_an_x_goog_api_key_entry_is_masked(self):
 		text = "headers = {'content-type': 'application/json', 'x-goog-api-key': 'AIzaSyD-0123456789abcdef'}"
 		assert redaction.scrub_secrets(text) == (
