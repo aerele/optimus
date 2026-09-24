@@ -460,6 +460,15 @@ class TestLogAiFailure:
 		assert "message" in frames[0][1]
 		assert "lines" not in frames[0][1]
 
+	def test_mark_logged_never_raises_when_the_flag_cannot_be_set(self):
+		class _Frozen(Exception):
+			def __setattr__(self, name, value):
+				raise AttributeError("read-only exception")
+
+		frozen = _Frozen("x")
+		ai_fix._mark_logged(frozen)  # must not raise
+		assert not getattr(frozen, ai_fix._LOGGED_ATTR, False)
+
 	def test_an_exception_is_logged_once(self, logs):
 		e = ai_fix.AiFixError("boom")
 		ai_fix.log_ai_failure("first", e)
@@ -1364,6 +1373,109 @@ class TestLogAiStepFailure:
 		monkeypatch.setattr(frappe, "log_error", _raising(RuntimeError("Error Log insert failed")), raising=False)
 		monkeypatch.setattr(frappe, "db", _FakeDB(raise_on_get=True), raising=False)
 		analyze._log_ai_step_failure("t", RuntimeError("x"), "uuid-3")  # must not raise
+
+	def test_a_job_timeout_propagates_as_a_fresh_instance(self, logs, job_timeout, monkeypatch):
+		# The one exception to "never raises": the job must still stop, and
+		# run()'s outer handler re-raises it.
+		import frappe
+
+		from optimus import analyze
+
+		raiser = _raising(job_timeout)
+		monkeypatch.setattr(frappe, "log_error", raiser, raising=False)
+		with pytest.raises(_JobTimeout) as ei:
+			analyze._log_ai_step_failure("optimus ai auto-suggest (outer)", RuntimeError("x"), "uuid-3")
+		_assert_fresh_and_clean(ei, job_timeout, raiser)
+
+
+@pytest.fixture
+def run_env(monkeypatch):
+	"""The smallest set of fakes ``analyze.run`` needs for one pass over one
+	recording with no analyzers. Each stubbed step records ``run``'s
+	``ai_error`` local at the moment it is called, in ``trail`` next to the
+	``log_ai_failure`` calls, so a test sees whether the logged error is
+	still bound afterwards. ``status`` holds the session status writes, a
+	rollback and any non-AI ``frappe.log_error``."""
+	import frappe
+
+	from optimus import analyze
+
+	trail, status = [], []
+
+	def _step(name):
+		def _fn(*a, **k):
+			caller = sys._getframe(1)
+			if caller.f_code is analyze.run.__code__:
+				trail.append(("call", name, caller.f_locals.get("ai_error")))
+		return _fn
+
+	class _DB:
+		def get_value(self, *a, **k):
+			return "SESS-RUN"
+
+		def set_value(self, doctype, name, field, value=None, *a, **k):
+			if field == "status":
+				status.append(value)
+
+		def rollback(self, *a, **k):
+			status.append("rollback")
+
+	monkeypatch.setattr(analyze, "frappe", frappe)
+	monkeypatch.setattr(frappe, "db", _DB(), raising=False)
+	monkeypatch.setattr(frappe, "conf", {"optimus_analyze_gc_collect": False}, raising=False)
+	monkeypatch.setattr(frappe, "cache", SimpleNamespace(get_value=lambda *a, **k: None), raising=False)
+	monkeypatch.setattr(frappe, "log_error", lambda *a, **k: status.append("non-AI log_error"), raising=False)
+	monkeypatch.setattr(analyze, "is_scheduler_disabled", lambda: True)
+	monkeypatch.setattr(analyze, "safe_commit", lambda: None)
+	monkeypatch.setattr(analyze, "session", SimpleNamespace(
+		get_recordings=lambda *a, **k: ["rec-1"], get_session_meta=lambda *a, **k: {},
+		delete_session_state=lambda *a, **k: None,
+	))
+	monkeypatch.setattr(analyze, "_bg_wait_for_pending_jobs", lambda *a, **k: 0)
+	monkeypatch.setattr(analyze, "_acquire_singleflight", lambda *a, **k: True)
+	monkeypatch.setattr(analyze, "_fetch_recordings", lambda *a, **k: iter([{"uuid": "rec-1"}]))
+	monkeypatch.setattr(analyze, "_enrich_recordings", lambda *a, **k: [])
+	monkeypatch.setattr(analyze, "_get_analyzers", lambda: [])
+	monkeypatch.setattr("optimus.api._read_frontend_data", lambda *a, **k: {"xhr": [], "vitals": []})
+	for name in (
+		"_touch_singleflight", "_release_singleflight", "_publish_session_event", "_publish_progress",
+		"_mark_ai_spend_session", "_enrich_findings_with_source_snippets",
+		"_enrich_findings_with_ai_suggestions", "_enrich_table_breakdown_with_ai_suggestions",
+		"_persist", "_render_and_attach_reports", "_persist_recordings_file", "_cleanup_redis",
+		"_auto_arm_phase2",
+	):
+		monkeypatch.setattr(analyze, name, _step(name))
+	monkeypatch.setattr(
+		ai_fix, "log_ai_failure", lambda title, exc=None, **kw: trail.append(("log", title, exc, kw)) or True
+	)
+	return SimpleNamespace(analyze=analyze, trail=trail, status=status)
+
+
+class TestRunLogsAFailedAiStepAndCarriesOn:
+	"""``analyze.run`` with one AI step raising: the analyze still completes,
+	the failure is logged once through ``log_ai_failure`` with the step's
+	outer title, and the error is unbound right after (a later non-AI
+	failure is logged by ``run``'s outer handler with frame locals, and a
+	prompt builder's error can carry prompt text)."""
+
+	@pytest.mark.parametrize(
+		("step", "title"),
+		[
+			("_enrich_findings_with_ai_suggestions", "optimus ai auto-suggest (outer)"),
+			("_enrich_table_breakdown_with_ai_suggestions", "optimus ai index-suggest (outer)"),
+		],
+		ids=["auto-suggest", "index-suggest"],
+	)
+	def test_the_step_is_logged_once_and_unbound(self, run_env, monkeypatch, step, title):
+		error = RuntimeError("PROMPT-TEXT step broke")
+		monkeypatch.setattr(run_env.analyze, step, _raising(error))
+		assert run_env.analyze.run("uuid-run") is None
+		assert run_env.status == ["Analyzing", "Ready"]  # completed: no rollback, no failure row
+		logged = [entry for entry in run_env.trail if entry[0] == "log"]
+		assert logged == [("log", title, error, {"session_uuid": "uuid-run"})]
+		after = run_env.trail[run_env.trail.index(logged[0]) + 1:]
+		assert after, "run() called nothing after logging the step: the unbinding went unchecked"
+		assert all(entry[2] is None for entry in after), f"the logged AI error was still bound: {after[0]}"
 
 
 # ---------------------------------------------------------------------------
