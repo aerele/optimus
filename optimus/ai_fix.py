@@ -731,8 +731,9 @@ def _had_concrete_context(finding: dict) -> bool:
 
 def test_connection() -> dict:
 	"""Send a tiny probe to the configured provider. Returns
-	``{"ok": bool, "message": str, "model": str}``: never raises (the
-	failure detail goes in ``message``)."""
+	``{"ok": bool, "message": str, "model": str}``. A provider or
+	configuration failure (``AiFixError``) does not raise: its detail goes in
+	``message``. An RQ job timeout or a worker interrupt still propagates."""
 	try:
 		provider = _resolve_provider()
 	except AiFixError as e:
@@ -1939,7 +1940,8 @@ def _usage_from_openai(data: dict | None) -> dict:
 	"""Normalised token usage from an OpenAI-shaped response (also what the
 	Aerele managed proxy + Ollama/LM Studio/vLLM return). Missing or
 	malformed fields → 0 (see ``_token_count``); ``total`` falls back to
-	prompt+completion when the upstream omits it. Never raises."""
+	prompt+completion when the upstream omits it. Never raises, except an RQ
+	job timeout (``_token_count`` lets it through as a fresh instance)."""
 	u = _usage_block(data)
 	prompt = _token_count(u.get("prompt_tokens"))
 	completion = _token_count(u.get("completion_tokens"))
@@ -1950,7 +1952,8 @@ def _usage_from_openai(data: dict | None) -> dict:
 def _usage_from_anthropic(data: dict | None) -> dict:
 	"""Normalised token usage from an Anthropic Messages response
 	(``usage.input_tokens`` / ``usage.output_tokens``). Missing or malformed
-	fields → 0 (see ``_token_count``). Never raises."""
+	fields → 0 (see ``_token_count``). Never raises, except an RQ job timeout
+	(``_token_count`` lets it through as a fresh instance)."""
 	u = _usage_block(data)
 	prompt = _token_count(u.get("input_tokens"))
 	completion = _token_count(u.get("output_tokens"))
