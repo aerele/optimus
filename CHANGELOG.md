@@ -29,9 +29,9 @@ versions may contain breaking changes see migration notes below).
   gate still returns `False` explicitly where it denies. The "no objection"
   value is version-aware: Frappe v15 stops at the first hook that answers
   non-`None` (a `True` there would skip Frappe's own File check), so on v15
-  the hook keeps returning `None` exactly as before. Verified live on
-  `optimus.local` (v16): see the PR body; v15 semantics are pinned by a
-  replay test of v15's loop.
+  the hook keeps returning `None` exactly as before. Verified live on a
+  Frappe 16 test site; v15 semantics are pinned by a replay test of v15's
+  loop.
 - **`recordings_file` now gated like the two report files.** The raw
   recordings snapshot (a compressed JSON bundle of the whole flow, including
   SQL parameters and Python call trees) was reachable by anyone with read
@@ -51,8 +51,7 @@ versions may contain breaking changes see migration notes below).
   (no DocType JS or `client_cache` entry changes) and no new `site_config`
   keys are introduced. Verify: as a non-Administrator user, open a public
   File (e.g. a ToDo attachment) through the File form or the REST API; it
-  should succeed (200) instead of failing with a permission error (403),
-  exactly as Task 4 of the implementation plan verified live before merge.
+  should succeed (200) instead of failing with a permission error (403).
 
 ---
 

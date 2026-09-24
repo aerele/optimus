@@ -29,11 +29,10 @@ permissions._no_objection(), which reads frappe.__version__.
 
 _GATED_FIELDS also gains recordings_file in this PR: the raw recordings
 snapshot (a compressed JSON bundle of the whole flow, including SQL
-parameters and Python locals that capture-time redaction may not fully
-scrub) was reachable by anyone with read access to the parent Optimus
-Session, including a read-sharee who was never meant to see raw capture
-data, only the rendered report. Gating it the same way as the two report
-files closes that gap.
+parameters and Python call trees) was reachable by anyone with read
+access to the parent Optimus Session, including a read-sharee who was
+never meant to see raw capture data, only the rendered report. Gating
+it the same way as the two report files closes that gap.
 
 An autouse fixture pins frappe.__version__ to a Frappe 16 release, so
 Parts A and B run on the v16 contract. Part A pins file_has_permission's
