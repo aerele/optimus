@@ -33,25 +33,33 @@ versions may contain breaking changes see migration notes below).
   function, `ai_fix.log_ai_failure`, with an explicit, scrubbed message (no
   frame locals) that links to the Optimus Session, written after the failure
   has been handled, so Sentry never receives the frames of the failed
-  request, where the prepared headers are. A behavioural canary test pushes
-  a fake key through every AI
-  entry point under every failure mode and fails if the key appears in any
-  log, traceback, error-tracker payload or response.
+  request, where the prepared headers are. A provider call cut off by the
+  web server's worker timeout (a `SystemExit` in the request) leaves without
+  the frames that held the request headers, and writes no Error Log row. A
+  behavioural canary test pushes a fake key through every AI entry point
+  under every failure mode and fails if the key appears in any log,
+  traceback, error-tracker payload or response.
 - **Do this, in this order:**
-  1. Now, before upgrading: revoke or rotate every AI provider key that was
-     configured on a site running an earlier release. Backups and replicas
-     already hold the plain-text rows, and old processes keep running the
-     old code until they restart; only rotation makes those copies harmless.
+  1. Now, before upgrading: rotate every AI provider key that was configured
+     on a site running an earlier release. Create a new key at the provider
+     and revoke the old one there. Backups and replicas already hold the
+     plain-text rows, and old processes keep running the old code until they
+     restart; only revoking the old key makes those copies harmless. Keep
+     the old key in Optimus Settings until step 3 is done: the scrub also
+     searches the Error Log for the key stored there.
   2. Pull, run `bench --site <site> migrate`, then restart the web server and
      the background workers together (`bench restart`, or your supervisor or
      systemd units). The patch `v0_12.scrub_ai_keys_from_error_log` masks the
      keys in existing Error Log rows and in Deleted Document copies of them,
      and prints how many rows it masked, or that none needed it.
-  3. Run the scrub again, to catch rows the old processes wrote between the
-     migrate and the restart, then check it:
+  3. Run the scrub again, to catch rows the old processes wrote during and
+     after the migrate, until the restart, then check it:
      `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': False}"`,
      then the same command with `'dry_run': True`, which must report
-     `"changed": 0`, `"residual": 0` and `"failed": 0`. Then clear the failed
+     `"changed": 0`, `"deleted_docs_changed": 0`, `"residual": 0` and
+     `"failed": 0`. The scrub locks the Error Log while it scans it (the
+     table is MyISAM on MariaDB), one window of 1000 rows per statement, so
+     on a site with a large Error Log run it off-peak. Then clear the failed
      background jobs from before the upgrade: their stored error text
      (`rq:job:*` `exc_info`) may hold a provider reply that echoed the key
      (Desk: RQ Job list, "Remove Failed Jobs", or
@@ -64,42 +72,65 @@ versions may contain breaking changes see migration notes below).
   - If the site sends errors to Sentry, delete the events whose stack
     contains `ai_fix.py`. Treat database backups taken before this upgrade
     as containing plain-text keys.
+  - A site that ran an earlier release and then uninstalled Optimus still
+    holds the rows, and a site where Optimus was uninstalled and installed
+    again never runs the patch (a new install marks every patch as done): on
+    both, run step 3 by hand (the app must still be on the bench).
+  - If you downgrade to an earlier release, it can write keys into the Error
+    Log again, and upgrading again does not re-run the patch: repeat step 3
+    by hand after the re-upgrade.
 
 ### Fixed
 
 - A failed AI call now writes one Error Log row instead of two.
 - AI Error Log rows written by the HTTP layer now link to the Optimus
-  Session, and the per-table `optimus refill_indexes <table>` titles are now
-  one title, `optimus refill_indexes`, with the table in the message, so the
-  Error Log groups them.
+  Session. For an HTTP error status the row names the provider's own error
+  code (`provider_error=`, for example `invalid_request_error` or
+  `insufficient_quota`) when the reply carries one; the reply body itself is
+  never logged, since it can echo the prompt. An unexpected error inside the
+  HTTP layer is logged with its type and plain `file:line:function` frames,
+  without local variables or its message.
+- The per-table `optimus refill_indexes <table>` titles are now one title,
+  `optimus refill_indexes`, with the table in the message, so the Error Log
+  groups them. An HTTP failure during that refill is logged once, by the
+  HTTP layer, as `optimus ai_fix` (with the provider, the call site, the
+  status and `provider_error=`), so its row does not name the table.
 - A provider reply that is JSON but not an object (a list or a string) is
   reported as an unexpected response instead of failing the request with a
-  server error.
+  server error. A malformed token count in a reply no longer fails a
+  suggestion that was otherwise returned.
 - An API key pasted with a trailing newline or spaces is trimmed. A key with
   a character that cannot be sent in an HTTP header now fails with a clear
   message before any request is made.
-- An AI failure logged during a web request that then fails (for example,
-  the `optimus.api.suggest_fix` endpoint reporting the provider's error) is
-  no longer lost with the request's rollback on a site whose scheduler runs:
-  the row is queued, and the scheduler writes it at its next deferred-insert
-  run (every 15 minutes). A site whose scheduler is paused or disabled, or
-  that is in maintenance mode, keeps inserting the row directly, as before,
-  and so do background jobs.
+- An AI failure row is written to the Error Log immediately. If the request
+  or background job then fails and its transaction is rolled back (for
+  example, the `optimus.api.suggest_fix` endpoint reporting the provider's
+  error), the same row is queued in Redis: the scheduler writes it at its
+  next deferred-insert run (every 15 minutes), or the next `bench migrate`
+  does. Before, that rollback lost the row. If the row cannot be written at
+  all, one line with the error type goes to the `optimus` log
+  (`logs/optimus.log`) instead.
 
 ### Upgrade notes
 
 - `bench migrate` is required: it runs the scrub patch (batches of 200 rows,
   a commit per batch) and clears the cache. The scrub never stops the
-  migrate: if the Error Log and its Deleted Document copies hold more than
-  200,000 rows, or the scrub fails, the migrate prints the command to run it
-  by hand and carries on (step 3 above re-runs it anyway).
+  migrate: if the Error Log, the Deleted Document table and the queued
+  Error Log rows together hold more than 200,000 rows, or the scrub fails,
+  the migrate prints the command to run it by hand, writes an Error Log row
+  titled "Optimus: Error Log key scrub did not run" with the reason and that
+  command, and carries on (step 3 above re-runs it anyway).
+- The scrub never sends the key to the database: it searches for an
+  8-character fragment of the stored key and checks the full key in Python,
+  so the database's query logs record at most that fragment.
 - Restart the web server and the background workers together after the
   migrate: until they restart, the old processes run the old code.
 - No Desk form or JavaScript change (open tabs need no reload) and no new
   `site_config.json` key.
 - Verify: the dry run in step 3 above reports `"changed": 0`,
-  `"residual": 0` and `"failed": 0`, and a failed AI call leaves exactly one Error Log row
-  whose text is an explicit message without a dump of local variables.
+  `"deleted_docs_changed": 0`, `"residual": 0` and `"failed": 0`, and a
+  failed AI call leaves exactly one Error Log row whose text is an explicit
+  message without a dump of local variables.
 
 ---
 
