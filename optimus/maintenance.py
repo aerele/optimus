@@ -129,11 +129,13 @@ _DRY_RUN_WORDS = {"true": True, "1": True, "yes": True, "false": False, "0": Fal
 # backtracking frame per character (about 150 bytes each), so a planted
 # multi-megabyte row could exhaust memory and kill bench migrate. Frappe
 # prints at most 1000 characters of a local, so a real value line fits; a
-# longer one keeps its tail past 2048 units, which the residual check still
-# reads.
+# longer one keeps its tail past _ESCAPED_VALUE_MAX_UNITS units (a character
+# or an escape pair each), which the residual check still reads.
+_ESCAPED_VALUE_MAX_UNITS = 2048
 _VALUE_LINE = re.compile(r"""(?m)^([ \t]+(?:value|values|one_value) = )(?:b?['"]|[\[(]).*$""")
 _ESCAPED_VALUE_LINE = re.compile(
-	r"""(\\n[ \t]+(?:value|values|one_value) = )(?:b?'|b?\\"|[\[(])(?:(?!\\n)(?:\\.|[^"\\])){0,2048}"""
+	r"""(\\n[ \t]+(?:value|values|one_value) = )(?:b?'|b?\\"|[\[(])(?:(?!\\n)(?:\\.|[^"\\]))"""
+	f"{{0,{_ESCAPED_VALUE_MAX_UNITS}}}"
 )
 # Independent residual check: provider key shapes wherever they appear
 # (OpenAI / Anthropic sk-, sk-ant-, sk-proj-; Groq gsk_; Google AIza). It

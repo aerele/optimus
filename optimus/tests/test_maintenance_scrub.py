@@ -800,6 +800,17 @@ def test_a_huge_hostile_value_line_masks_fast_with_bounded_memory():
 	assert peak < 50_000_000, peak
 
 
+@pytest.mark.parametrize("extra", [0, 1])
+def test_an_escaped_value_line_is_masked_up_to_the_named_bound(extra):
+	# The bound is one named constant, interpolated into the pattern: a
+	# value of exactly that many units is masked whole, one more keeps a
+	# one-unit tail (which the residual check still reads).
+	bound = maintenance._ESCAPED_VALUE_MAX_UNITS
+	assert f"{{0,{bound}}}" in maintenance._ESCAPED_VALUE_LINE.pattern
+	out = maintenance._mask("\\n      value = '" + "A" * (bound + extra), "")
+	assert out == "\\n      value = ********" + "A" * extra
+
+
 class _FakeCache:
 	"""``broken`` fails every call (Redis down); ``broken_pop`` fails only
 	``lpop``; ``refill`` is an entry a busy producer pushes back after every
