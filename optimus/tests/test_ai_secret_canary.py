@@ -220,6 +220,7 @@ class _Sinks:
 	def __init__(self):
 		self.stored, self.sentry, self.stack, self.escaped, self.returned, self.wire = [], [], [], [], [], []
 		self.pending = []
+		self.escaped_types = []
 		self.posts = 0
 		self.registered = 0
 		self.requeued = 0
@@ -373,6 +374,16 @@ def _scenario_post(scenario, sinks, job_timeout):
 			# A gunicorn worker timeout while urllib3 sends: this frame holds
 			# the auth-applied headers (wire_headers), i.e. the key.
 			raise SystemExit(1)
+		if scenario == "non_str_text":
+			# A 200 reply whose text is not a string (a dict, then a list): it
+			# counts as no text, and the marker inside never reaches the
+			# operator. OpenAI's equivalent: ``message.content`` a dict, or a
+			# list of parts whose text is a dict.
+			if url.endswith("/chat/completions"):
+				content = {"echo": ECHO_MARK} if sinks.posts % 2 else [{"type": "text", "text": {"echo": ECHO_MARK}}]
+				return _reply(200, _json_dumps({"choices": [{"message": {"content": content}}]}))
+			text = {"echo": ECHO_MARK} if sinks.posts % 2 else [ECHO_MARK, "list"]
+			return _reply(200, _json_dumps({"content": [{"type": "text", "text": text}]}))
 		if scenario == "malformed_usage":
 			# A usable suggestion whose usage block is not what the parsers expect.
 			usage = "x" if sinks.posts % 2 else {
@@ -461,6 +472,7 @@ def _drive(name, fn, args_factory, sinks, scenario, job_timeout):
 	except BaseException as exc:  # noqa: BLE001
 		dump = _dump_exception(exc)
 		sinks.escaped.append((name, dump))
+		sinks.escaped_types.append(type(exc))
 		sinks.returned.append((name, repr(exc)))
 		if scenario == "developer_mode":
 			sinks.stored.append((name, f"{exc}\n{dump}", False))  # every exception, title str(exc)
@@ -473,7 +485,7 @@ def _drive(name, fn, args_factory, sinks, scenario, job_timeout):
 _SCENARIOS = (
 	"connection_error", "unicode_encode_error", "http_401", "http_400_echo", "http_404_echo",
 	"http_500_echo", "non_dict_json", "non_latin_key", "rq_timeout", "developer_mode", "scrub_raises",
-	"system_exit", "malformed_usage",
+	"system_exit", "malformed_usage", "non_str_text",
 )
 _PROVIDERS = ("OpenAI", "Anthropic")
 # Nothing is logged: nothing failed (malformed_usage), or the interrupt must
@@ -546,6 +558,15 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 		assert sinks.escaped == [], f"malformed usage broke a good reply: {[e for e, _ in sinks.escaped]}"
 		for ep in ("ai_fix.suggest_fix", "ai_fix.humanize_steps", "ai_fix.suggest_index", "api.suggest_fix"):
 			assert any(e == ep and SUGGESTION_MARK in t for e, t in sinks.returned), f"{ep}: the suggestion was lost"
+	if scenario == "non_str_text":
+		# Only AI errors (and the endpoints' frappe.throw) left the entry
+		# points: nothing escaped as a 500 whose snapshot holds the prompt.
+		assert sinks.escaped_types, "nothing failed: the non-string text was never read"
+		assert all(issubclass(t, ai_fix.AiFixError | _Thrown) for t in sinks.escaped_types), (
+			f"a non-string text escaped as {[t.__name__ for t in sinks.escaped_types]}"
+		)
+		assert "empty response" in returned or "didn't contain any text" in returned, "the no-text path never ran"
+		assert ECHO_MARK not in returned, "a non-string text reached the operator"
 	if scenario == "http_400_echo":
 		assert any("provider_error=invalid_request_error\n" in t for _, t, _ in sinks.stored), (
 			"the provider's error type never reached the row: the code parser went unchecked"

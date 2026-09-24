@@ -546,6 +546,25 @@ class TestAnthropicCall:
 		assert fp.last.headers["anthropic-version"]
 		assert fp.last.body["system"] == "sys"
 
+	@pytest.mark.parametrize("text", [{"echo": "x"}, ["a", "list"], 42, None], ids=["dict", "list", "int", "null"])
+	@pytest.mark.parametrize("typed", [True, False], ids=["text-block", "first-block-fallback"])
+	def test_a_text_that_is_not_a_string_is_no_text(self, monkeypatch, text, typed):
+		block = {"type": "text", "text": text} if typed else {"text": text}
+		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {"content": [block]})))
+		out = ai_fix._call_anthropic("https://api.anthropic.com", "key", "claude", "sys", [{"role": "user", "content": "hi"}])
+		assert out == ""
+
+	def test_suggest_fix_reports_a_non_string_text_as_an_empty_response(self, monkeypatch):
+		# Not an AttributeError from .strip(): that would escape the endpoint as
+		# a 500 whose snapshot holds the prompt.
+		monkeypatch.setattr(requests, "post", _post_returning(
+			_FakeResp(200, {"content": [{"type": "text", "text": {"echo": "x"}}]})))
+		prov = {"name": "Anthropic", "protocol": "anthropic", "base_url": "https://api.anthropic.com",
+		        "model": "claude-sonnet-4-6", "needs_key": True, "has_key": True}
+		with patch("optimus.ai_fix._resolve_provider", return_value=prov):
+			with pytest.raises(ai_fix.AiFixError, match="empty response"):
+				ai_fix.suggest_fix({"finding_type": "Missing Index", "title": "x", "technical_detail": {}})
+
 
 class TestHttpErrorMapping:
 	def _call(self):

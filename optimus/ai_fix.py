@@ -2007,13 +2007,21 @@ def _call_anthropic(
 		blocks = data.get("content") or []
 		for b in blocks:
 			if isinstance(b, dict) and b.get("type") == "text":
-				return b.get("text") or ""
+				return _text_or_empty(b.get("text"))
 		# Fall back to the first block's text if no explicit type.
 		if blocks and isinstance(blocks[0], dict):
-			return blocks[0].get("text") or ""
+			return _text_or_empty(blocks[0].get("text"))
 	except Exception:
 		pass
 	raise AiFixError("The AI provider's response didn't contain any text.")
+
+
+def _text_or_empty(text) -> str:
+	"""A text block's ``text`` when it is a string, else ``""``: a text that
+	is not a string (a dict, a list) counts as no text, so the callers report
+	an empty response instead of failing on ``.strip()`` (an AttributeError
+	would leave the endpoint as a 500 whose snapshot holds the prompt)."""
+	return text if isinstance(text, str) else ""
 
 
 def _call_openai_chat(
