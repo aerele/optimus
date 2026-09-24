@@ -93,6 +93,30 @@ class TestGetApiKey:
 		# not printed by any traceback formatter or Sentry chain walk.
 		assert ei.value.__cause__ is None
 		assert ei.value.__suppress_context__ is True
+		# The raise happens after the try/except, not inside it, so no
+		# exception is being handled at the point of the raise: __context__
+		# itself is None, not merely suppressed for display. A chain-walker
+		# (Sentry, a custom Error Log formatter) that reads __context__
+		# directly, ignoring __suppress_context__, must not find the key.
+		assert ei.value.__context__ is None
+
+	@pytest.mark.parametrize("bad_key", [
+		"sk-live-0123\n456789",
+		"sk-live-0123\t456789",
+		"sk-live-0123\x00456789",
+	])
+	def test_get_api_key_rejects_control_characters(self, monkeypatch, bad_key):
+		# An internal control character (CR/LF, tab, NUL) passes the latin-1
+		# check but would surface the key in a requests ValueError message
+		# or in http.client putheader locals. Reject it the same way as a
+		# non-latin-1 character, before any HTTP call.
+		_store_key(monkeypatch, bad_key)
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			ai_fix._get_api_key()
+		assert ei.value.kind == "config"
+		assert "sk-live" not in str(ei.value)
+		assert ei.value.__cause__ is None
+		assert ei.value.__context__ is None
 
 	def test_unset_key_is_empty_string(self, monkeypatch):
 		_store_key(monkeypatch, None)
