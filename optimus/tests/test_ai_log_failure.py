@@ -473,6 +473,57 @@ class TestHttpFailurePath:
 		assert KEY[:10] not in str(ei.value)
 		assert str(ei.value).endswith("x" * 10 + "******** t")
 
+	@pytest.mark.parametrize(
+		("status", "body", "expected"),
+		[
+			(400, {"error": {"message": "m", "type": "invalid_request_error", "code": "context_length_exceeded"}},
+			 "invalid_request_error:context_length_exceeded"),
+			(422, {"error": {"message": "m", "type": "invalid_request_error", "code": None}}, "invalid_request_error"),
+			(429, {"error": {"message": "m", "type": "insufficient_quota", "code": "insufficient_quota"}},
+			 "insufficient_quota"),
+			(529, {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}, "overloaded_error"),
+			(500, {"error": {"type": "server_error", "code": "a" * 60}}, "server_error"),
+		],
+		ids=["openai-type-and-code", "openai-type-only", "openai-429", "anthropic", "joined-too-long"],
+	)
+	def test_http_row_names_the_provider_error_code(self, logs, monkeypatch, status, body, expected):
+		# The body stays out of the row (it can echo the prompt), so without the
+		# provider's own error identifier a 400/422/5xx row says nothing about why.
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(status, body, text=json.dumps(body))))
+		with pytest.raises(ai_fix.AiFixError):
+			_call()
+		assert f"provider_error={expected}\n" in logs[0]["message"]
+		assert f"status={status}" in logs[0]["message"]
+
+	@pytest.mark.parametrize(
+		"error",
+		[
+			{"type": KEY, "code": "prompt SELECT name FROM `tabCustomer` WHERE email = 'alice@example.com'"},
+			{"type": "invalid request", "code": "alice@example.com"},
+			{"type": "x" * 65, "code": ["list"]},
+			{"type": 400, "code": {"nested": "dict"}},
+			"a plain string error",
+		],
+		ids=["echoed-key-and-prompt", "not-identifiers", "too-long-and-list", "non-strings", "not-an-object"],
+	)
+	def test_a_provider_error_code_is_kept_only_when_identifier_shaped(self, logs, monkeypatch, error):
+		body = {"error": error}
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(400, body, text=json.dumps(body))))
+		with pytest.raises(ai_fix.AiFixError):
+			_call()
+		msg = logs[0]["message"]
+		assert "provider_error" not in msg
+		assert KEY not in msg and "alice@example.com" not in msg and "tabCustomer" not in msg
+
+	def test_an_echoed_key_code_is_dropped_but_the_type_is_kept(self, logs, monkeypatch):
+		body = {"error": {"message": f"key {KEY} for alice@example.com", "type": "invalid_request_error", "code": KEY}}
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(401, body, text=json.dumps(body))))
+		with pytest.raises(ai_fix.AiFixError):
+			_call()
+		msg = logs[0]["message"]
+		assert "provider_error=invalid_request_error\n" in msg
+		assert KEY not in msg and "alice@example.com" not in msg
+
 	def test_http_error_row_never_contains_the_response_body(self, logs, monkeypatch):
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(500, {}, text="RESPONSE-BODY-MARKER")))
 		with pytest.raises(ai_fix.AiFixError) as ei:
@@ -793,6 +844,28 @@ class TestAJobTimeoutIsNeverSwallowed:
 		with pytest.raises(_JobTimeout) as ei:
 			ai_fix._response_detail(_Resp(400, {}, text=f"UNSCRUBBED echo of {KEY}"))
 		_assert_fresh_and_clean(ei, job_timeout, raiser)
+
+	def test_provider_error_code(self, job_timeout, monkeypatch):
+		raiser = _raising(job_timeout, holds=f"UNSCRUBBED {KEY}")
+		resp = _Resp(400, {}, text="")
+		resp.json = raiser
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix._provider_error_code(resp)
+		_assert_fresh_and_clean(ei, job_timeout, raiser)
+
+	def test_provider_error_code_while_checking_an_echoed_key(self, job_timeout, monkeypatch):
+		# The timeout lands while the echoed key (in ``code``) is being checked.
+		def _scrub(text, literals=()):
+			if KEY in text:
+				raise job_timeout
+			return text
+
+		monkeypatch.setattr("optimus.redaction.scrub_secrets", _scrub)
+		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", lambda *a, **k: KEY, raising=False)
+		resp = _Resp(400, {"error": {"message": f"UNSCRUBBED {KEY}", "type": "invalid_request_error", "code": KEY}})
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix._provider_error_code(resp)
+		_assert_fresh_and_clean(ei, job_timeout, _scrub)
 
 
 # ---------------------------------------------------------------------------
