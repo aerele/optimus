@@ -32,7 +32,9 @@ snapshot (a compressed JSON bundle of the whole flow, including SQL
 parameters and Python call trees) was reachable by anyone with read
 access to the parent Optimus Session, including a read-sharee who was
 never meant to see raw capture data, only the rendered report. Gating
-it the same way as the two report files closes that gap.
+it the same way as the two report files closes that gap in Frappe's
+permission checks (a direct download URL is still checked by Frappe's
+own File rule).
 
 An autouse fixture pins frappe.__version__ to a Frappe 16 release, so
 Parts A and B run on the v16 contract. Part A pins file_has_permission's
