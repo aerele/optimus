@@ -65,12 +65,18 @@ the highest-value security considerations:
 
 The AI provider key is kept out of every log. It is stored in the encrypted
 `ai_api_key` Password field of Optimus Settings and decrypted only when a
-request is sent. Inside the process it exists only in a local variable named
-`api_key` (a name both Frappe's traceback sanitizer and Sentry's default
-denylist redact) and in `ai_fix._ApiKeyAuth`, a `requests` auth object whose
-`repr` is masked. It is never placed in a dict, a header dict, a request
-body, an exception message or an exception chain, and a provider's error
-reply is scrubbed of it before it is shown.
+request is sent. It must be plain printable ASCII: a key with any other
+character (a space inside it, a pasted smart quote or no-break space, a
+control character) is refused with a clear message before any request is
+made. Inside the process it exists only in a local variable named `api_key`
+(a name both Frappe's traceback sanitizer and Sentry's default denylist
+redact) and in `ai_fix._ApiKeyAuth`, a `requests` auth object whose `repr`
+is masked. It is never placed in a dict, a header dict, a request body, an
+exception message or an exception chain. A provider's error reply is
+scrubbed before it is shown, of the key stored in Optimus Settings and of
+the key the request was sent with (so an echo is masked even when the key
+in Settings was changed while the request ran), each in its raw and its
+JSON-escaped form.
 
 Every Error Log row the AI code writes goes through
 `optimus.ai_fix.log_ai_failure`, which writes an explicit message with no
@@ -88,13 +94,19 @@ survives a rollback. On Postgres, if that transaction is rolled back later (a
 `frappe.throw` in the same request, a background job that fails), a
 `frappe.db.after_rollback` callback finds the row gone and queues the same
 scrubbed row in Redis, and Frappe's scheduler (every 15 minutes) or the next
-`bench migrate` writes it. If the row cannot be written at all, one
-line with the error type goes to the `optimus` log (`logs/optimus.log`). A
-row for an HTTP failure holds the provider, the call site, the status and,
-when the reply names one, the provider's error code (`provider_error=`),
-never the reply body, which can echo the prompt. An unexpected error in the
-HTTP layer is logged with its type and plain `file:line:function` frames,
-without local variables or its message.
+`bench migrate` writes it. When a row may be missing (its write failed;
+after a rollback, its existence could not be checked or it could not be
+queued again; or the rollback callback could not be registered), one line
+naming only the error type goes to the `optimus` log (`logs/optimus.log`):
+"an AI Error Log row may not have been written or re-queued". It is logged
+at error level, the lowest level Frappe's loggers keep on a production
+site. A row for an HTTP failure holds the provider, the call site, the
+status and, when the reply names one made only of lowercase words (letters
+joined by `_`, `.`, `:` or `-`, at most 64 characters), the provider's
+error code (`provider_error=`); any other value is left out, and the reply
+body, which can echo the prompt, is never logged. An unexpected error in
+the HTTP layer is logged with its type and plain `file:line:function`
+frames, without local variables or its message.
 
 Earlier releases with AI fix suggestions could store the key in plain text
 in the Error Log after a failed AI call. See the API key advisory in
@@ -104,34 +116,79 @@ time.
 
 ## Detecting and cleaning a key leak
 
-1. Where to look: Error Log rows titled `optimus *` (for example
+1. Revoke the key at the provider now: create a new key there and revoke
+   the old one. Backups, replicas, binlogs and bench log files keep the old
+   text, and only revoking the key makes those copies harmless.
+2. Keep the OLD key in Optimus Settings until the scrub has run and its dry
+   run reports 0 (step 5): the scrub searches the Error Log for the key
+   stored there. Only then enter the new key (step 7).
+3. Where to look: Error Log rows titled `optimus *` (for example
    `optimus ai_fix` or `optimus refill_indexes`), and rows Frappe wrote
    itself for a server error or a failed background job whose traceback
    passes through `optimus/ai_fix.py`. A row titled "Optimus: Error Log key
-   scrub did not run" means the migrate skipped or could not finish the
-   scrub; it names the reason and the command to run.
-2. Count what the scrub would change:
+   scrub did not run" means the migrate skipped the scrub or it failed, and
+   one titled "Optimus: Error Log key scrub did not finish" means it ran but
+   left rows it could not process, key-shaped values or queued entries;
+   both name the reason (counts or an error type) and the command to run.
+4. Count what the scrub would change:
    `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': True}"`.
-   A result of `"changed": 0`, `"deleted_docs_changed": 0`,
-   `"residual": 0` and `"failed": 0` means that every row the scrub reads
-   is already masked (see the known limitations below for which rows it
-   reads). Otherwise run it with `'dry_run': False`, then the dry run again.
-   The scrub locks the Error Log while it scans it, one window of 1000 rows
-   per statement, so on a large Error Log run it off-peak. It sends only an
-   8-character fragment of the stored key to the database, never the key.
-3. To delete the Optimus AI rows entirely (they can also hold prompt text:
-   source code and SQL with literal values), count them first, then delete:
+5. Run it with `'dry_run': False`, then the dry run again. The dry run
+   after the real run must report `"changed": 0`,
+   `"deleted_docs_changed": 0`, `"residual": 0`, `"failed": 0` and
+   `"queued": 0`: every row the scrub reads is then masked (see the known
+   limitations below for which rows it reads). `queued` counts the Error
+   Log entries still waiting in Frappe's deferred-insert queue in Redis. A
+   dry run only counts them; a real run inserts them, masked, so an empty
+   queue after the real run is the goal. If entries are still queued (more
+   than 10,000 were waiting, inserts kept failing, or processes still
+   running old code queued more meanwhile), run the real scrub again. The
+   scrub locks the Error Log while it scans it, one window of 1000 rows per
+   statement, so on a large Error Log run it off-peak. Run it with
+   `bench execute` or `bench --site <site> console`, never as a background
+   job: it refuses to run inside one, because a failed job's log would store
+   the unmasked rows it reads.
+6. Optional: to delete the Optimus AI rows entirely (they can also hold
+   prompt text: source code and SQL with literal values), count them first,
+   then delete:
    `bench --site <site> execute optimus.maintenance.purge_ai_error_logs --kwargs "{'dry_run': True}"`,
-   then the same command with `'dry_run': False`.
-4. Rotate every key that was ever found (create a new key at the provider
-   and revoke the old one): backups and replicas keep the old rows.
+   then the same command with `'dry_run': False`. It deletes the rows with
+   a frame in `optimus/ai_fix.py`, or in `frappe_profiler/ai_fix.py` from
+   releases before the app was renamed, and their Deleted Document copies.
+   It locks the Error Log while it scans it too, so on a busy site run it
+   off-peak.
+7. Enter the new key in Optimus Settings.
 
-The migrate patch that runs the scrub runs once per site. Run step 2 by
-hand after a downgrade to an earlier release and the upgrade back (the
-earlier release can write keys again, and the patch does not run twice), on
-a site that ran an earlier release and then uninstalled Optimus (the rows
-stay), and on a site where Optimus was uninstalled and installed again (a
-new install marks every patch as done).
+What the scrub sends to the database: its search sends at most an
+8-character fragment of the stored key, never the whole key, and checks the
+full key in Python; the queued Error Log rows it inserts are masked before
+the INSERT; and its UPDATEs carry masked text. So the database's query logs
+record at most that fragment of the stored key. A ROW-format binlog still
+records each UPDATE's before-image, the row as it was, and binlogs,
+replicas, bench `logs/` files and backups from before the upgrade
+(including the backup `bench update` takes when it starts) still hold the
+old text. Treat bench log files and binlogs from before the upgrade like
+backups: rotating the key is what makes them harmless.
+
+The migrate patch that runs the scrub runs once per site. Run steps 4 and 5
+by hand after a downgrade to an earlier release and the upgrade back (the
+earlier release can write keys again, and the patch does not run twice),
+and on a site where Optimus was uninstalled and installed again (a new
+install marks every patch as done). A site that ran an earlier release and
+then uninstalled Optimus still holds the rows, and there
+`bench execute optimus.maintenance...` fails because the app is not
+installed on the site. With the app still on the bench, run the scrub from
+`bench --site <site> console` instead:
+
+```python
+from optimus.maintenance import scrub_error_log_secrets
+scrub_error_log_secrets(dry_run=False)
+scrub_error_log_secrets(dry_run=True)  # must report the zeros of step 5
+```
+
+Or install Optimus on the site again and run steps 4 and 5. If no key is
+stored on the site any more, the scrub has no stored key to search for; its
+passes that find rows by an `ai_fix.py` frame and a secret marker still
+run.
 
 ## Known limitations
 
@@ -159,9 +216,10 @@ new install marks every patch as done).
 - On MariaDB an AI failure row survives any rollback (Error Log is a MyISAM
   table). On Postgres it is still lost when only a savepoint is rolled back,
   when the database connection drops before the commit, or when the COMMIT
-  itself fails: no rollback callback runs in those cases. On a site whose
-  scheduler is off, a row queued after a rollback waits in Redis until the
-  next `bench migrate` or a real run of the scrub writes it.
+  itself fails: no rollback callback runs in those cases, and no line goes
+  to the `optimus` log. On a site whose scheduler is off, a row queued after
+  a rollback waits in Redis until the next `bench migrate` or a real run of
+  the scrub writes it.
 - If the web server's worker timeout interrupts a provider call (a
   `SystemExit` in the request), that call writes no Error Log row. The HTTP
   layer clears the interrupted frames from the exception before it leaves,
