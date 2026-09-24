@@ -432,6 +432,149 @@ class TestNothingIsLoggedOrSentWhileAnExceptionIsActive:
 
 
 # ---------------------------------------------------------------------------
+# The never-raise helpers never swallow an RQ job timeout
+# ---------------------------------------------------------------------------
+
+class _JobTimeout(Exception):
+	"""Stands in for rq's ``JobTimeoutException``: an ``Exception`` subclass
+	raised asynchronously (SIGALRM), so it can land inside any helper."""
+
+
+_TIMEOUT_TEXT = "Task exceeded maximum timeout value (60 seconds)"
+
+
+@pytest.fixture
+def job_timeout(monkeypatch):
+	monkeypatch.setattr(ai_fix, "_job_timeout_types", lambda: (_JobTimeout,))
+	return _JobTimeout(_TIMEOUT_TEXT)
+
+
+def _raising(exc, holds=None):
+	"""A callable that raises ``exc`` while a local holds ``holds`` (what the
+	interrupted frame held: decrypted key bytes, unscrubbed text)."""
+	def _raise(*a, **k):
+		held = holds  # noqa: F841
+		raise exc
+	return _raise
+
+
+def _assert_fresh_and_clean(ei, original, *raisers):
+	"""The timeout still leaves (the job must stop), as a fresh instance of
+	its own type with no chain, no frame of the code it interrupted and no
+	local holding the key or unscrubbed text on its way out."""
+	assert type(ei.value) is _JobTimeout
+	assert ei.value is not original and ei.value.args == (_TIMEOUT_TEXT,)
+	assert ei.value.__context__ is None and ei.value.__cause__ is None
+	codes = set()
+	tb = ei.value.__traceback__
+	while tb is not None:
+		codes.add(tb.tb_frame.f_code)
+		for name, value in tb.tb_frame.f_locals.items():
+			if name == "api_key":  # redacted by name by Frappe and Sentry
+				continue
+			assert KEY not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds the key"
+			assert "UNSCRUBBED" not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds unscrubbed text"
+		tb = tb.tb_next
+	for raiser in raisers:
+		assert raiser.__code__ not in codes
+
+
+class TestAJobTimeoutIsNeverSwallowed:
+	"""RQ raises ``JobTimeoutException`` from a SIGALRM handler, wherever the
+	job happens to be. A helper that swallows it lets the job overrun, and
+	``_current_key_or_empty`` would answer "" and send the request
+	unauthenticated. Each helper lets it through as a fresh instance raised
+	after its ``try``, so the frames it interrupted (Fernet's decrypt frames
+	hold the key bytes; the scrubber's hold the unscrubbed text) never reach
+	``execute_job``'s with-context log."""
+
+	def test_current_key_or_empty(self, job_timeout, monkeypatch):
+		raiser = _raising(job_timeout, holds=KEY.encode())
+		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", raiser, raising=False)
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix._current_key_or_empty()
+		_assert_fresh_and_clean(ei, job_timeout, raiser)
+
+	def test_current_key_or_empty_with_the_real_rq_timeout(self, monkeypatch):
+		timeouts = pytest.importorskip("rq.timeouts")
+		original = timeouts.JobTimeoutException(_TIMEOUT_TEXT)
+		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", _raising(original), raising=False)
+		with pytest.raises(timeouts.JobTimeoutException) as ei:
+			ai_fix._current_key_or_empty()
+		assert ei.value is not original and ei.value.__context__ is None
+
+	def test_scrubbed_message(self, job_timeout, monkeypatch):
+		raiser = _raising(job_timeout, holds=f"UNSCRUBBED {KEY}")
+		monkeypatch.setattr("optimus.redaction.scrub_secrets", raiser)
+		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", lambda *a, **k: KEY, raising=False)
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix._scrubbed_message("t", [f"UNSCRUBBED {KEY}"], None)
+		_assert_fresh_and_clean(ei, job_timeout, raiser)
+
+	def test_log_ai_failure_while_scrubbing(self, logs, job_timeout, monkeypatch):
+		raiser = _raising(job_timeout, holds=f"UNSCRUBBED {KEY}")
+		monkeypatch.setattr("optimus.redaction.scrub_secrets", raiser)
+		failed = ai_fix.AiFixError("x")
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix.log_ai_failure("t", failed, finding="F1")
+		_assert_fresh_and_clean(ei, job_timeout, raiser)
+		assert logs == []
+
+	def test_log_ai_failure_while_writing(self, logs, job_timeout, monkeypatch):
+		import frappe
+
+		raiser = _raising(job_timeout)
+		monkeypatch.setattr(frappe, "log_error", raiser, raising=False)
+		failed = ai_fix.AiFixError("x")
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix.log_ai_failure("t", failed)
+		_assert_fresh_and_clean(ei, job_timeout, raiser)
+		assert not getattr(failed, ai_fix._LOGGED_ATTR, False)
+
+	def test_log_ai_failure_while_looking_up_the_session(self, logs, job_timeout, monkeypatch):
+		import frappe
+
+		db = _FakeDB()
+		raiser = _raising(job_timeout)
+		db.get_value = raiser
+		monkeypatch.setattr(frappe, "db", db, raising=False)
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix.log_ai_failure("t", session_uuid="uuid-1")
+		_assert_fresh_and_clean(ei, job_timeout, raiser)
+		assert logs == []
+
+	def test_mark_logged(self, job_timeout):
+		class _Sticky(Exception):
+			def __setattr__(self, name, value):
+				raise job_timeout
+
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix._mark_logged(_Sticky("x"))
+		_assert_fresh_and_clean(ei, job_timeout, _Sticky.__setattr__)
+
+	def test_log_http_error_while_reading_the_session_marker(self, logs, job_timeout, monkeypatch):
+		import frappe
+
+		class _Local:
+			def __getattr__(self, name):
+				raise job_timeout
+
+		monkeypatch.setattr(frappe, "local", _Local(), raising=False)
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix._log_http_error("openai", "chat/completions", 500)
+		_assert_fresh_and_clean(ei, job_timeout, _Local.__getattr__)
+		assert logs == []
+
+	def test_response_detail(self, job_timeout, monkeypatch):
+		raiser = _raising(job_timeout, holds=f"UNSCRUBBED {KEY}")
+		monkeypatch.setattr("optimus.redaction.scrub_secrets", raiser)
+		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", lambda *a, **k: KEY, raising=False)
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix._response_detail(_Resp(400, {}, text=f"UNSCRUBBED echo of {KEY}"))
+		_assert_fresh_and_clean(ei, job_timeout, raiser)
+
+
+# ---------------------------------------------------------------------------
 # analyze.py / api.py call sites: one row per failure, with a session reference
 # ---------------------------------------------------------------------------
 
