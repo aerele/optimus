@@ -17,8 +17,6 @@ then a dry run reporting 0) is the guarantee.
 def execute():
 	import frappe
 
-	from optimus import maintenance
-
 	site = getattr(frappe.local, "site", None) or "<site>"
 	command = (
 		f"bench --site {site} execute optimus.maintenance.scrub_error_log_secrets "
@@ -28,6 +26,10 @@ def execute():
 	out = None
 	scan = 0
 	try:
+		# Imported inside the try, so a broken import is reported like any
+		# other failure and never stops the migrate.
+		from optimus import maintenance
+
 		scan = maintenance.scrub_scan_size()
 		if scan <= maintenance.MIGRATE_SCAN_LIMIT:
 			out = maintenance.scrub_error_log_secrets(dry_run=False)
@@ -50,13 +52,13 @@ def execute():
 		)
 		return
 	changed = int(out.get("changed") or 0) + int(out.get("deleted_docs_changed") or 0)
-	if not (changed or out.get("failed") or out.get("residual")):
+	if changed:
+		print(
+			f"Optimus: masked AI API keys in {changed} stored error row(s). "
+			"Rotate those keys at the provider: backups taken before this upgrade still hold them."
+		)
+	elif not (out.get("failed") or out.get("residual")):
 		print("Optimus: found no AI API keys in stored error rows.")
-		return
-	print(
-		f"Optimus: masked AI API keys in {changed} stored error row(s). "
-		"Rotate those keys at the provider: backups taken before this upgrade still hold them."
-	)
 	if out.get("failed"):
 		print(f"Optimus: {out['failed']} error row(s) could not be masked. Run it again: {command}")
 	if out.get("residual"):

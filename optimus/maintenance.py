@@ -24,6 +24,10 @@ key stored today are read as well. Plain ``LIKE`` filters and the ORM keep
 this portable to Postgres. Rows are processed in chunks of ``batch_size``
 names with a commit per chunk, so a large table never builds one huge
 transaction, and a re-run after an interruption only rewrites what is left.
+
+The stored-key pass sends the key as a bound ``LIKE`` parameter, so a site
+with MariaDB ``general_log`` ON or Frappe ``logging: 2`` records it in that
+log; turn those off before running the scrub.
 """
 
 from __future__ import annotations
@@ -114,25 +118,34 @@ def _flush_deferred_error_logs() -> int:
 			records = json.loads(raw)
 			for record in records if isinstance(records, list) else [records]:
 				failed += not _insert_error_log(record)
-		safe_commit()
 	except Exception:
 		failed += 1
+	finally:
+		# Commit what was inserted even when the loop stopped early: the rows
+		# are already gone from Redis, and a later rollback would drop them.
+		try:
+			safe_commit()
+		except Exception:
+			failed += 1
 	return failed
 
 
 def _insert_error_log(record: dict) -> bool:
 	"""Insert one queued record under a savepoint, so a failed insert rolls
 	back only itself, also on Postgres, where a failed statement aborts the
-	transaction and every later queued insert with it."""
+	transaction and every later queued insert with it. The savepoint is
+	released either way (see ``_write_row``)."""
 	ok = True
 	try:
 		frappe.db.savepoint(_SAVEPOINT)
 		frappe.get_doc({**record, "doctype": "Error Log"}).insert(ignore_permissions=True)
+		frappe.db.release_savepoint(_SAVEPOINT)
 	except Exception:
 		ok = False
 	if not ok:
 		try:
 			frappe.db.rollback(save_point=_SAVEPOINT)
+			frappe.db.release_savepoint(_SAVEPOINT)
 		except Exception:
 			pass
 	return ok
@@ -159,16 +172,21 @@ def _mask_row(row: dict, text_fields: tuple[str, ...], api_key: str) -> tuple[di
 def _write_row(doctype: str, name: str, changes: dict) -> bool:
 	"""Write one masked row under a savepoint, so a failed write (a lock
 	timeout, a row deleted meanwhile) rolls back only itself, also on
-	Postgres, where a failed statement aborts the transaction."""
+	Postgres, where a failed statement aborts the transaction. The savepoint
+	is released after the write or the rollback, as Frappe's own
+	``savepoint()`` helper does, because re-issuing a savepoint of the same
+	name nests a new subtransaction on Postgres instead of replacing it."""
 	failed = False
 	try:
 		frappe.db.savepoint(_SAVEPOINT)
 		frappe.db.set_value(doctype, name, changes, update_modified=False)
+		frappe.db.release_savepoint(_SAVEPOINT)
 	except Exception:
 		failed = True
 	if failed:
 		try:
 			frappe.db.rollback(save_point=_SAVEPOINT)
+			frappe.db.release_savepoint(_SAVEPOINT)
 		except Exception:
 			pass
 	return not failed

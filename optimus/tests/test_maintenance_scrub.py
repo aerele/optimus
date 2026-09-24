@@ -48,10 +48,12 @@ ANTHROPIC_TB = (
 
 
 def _like(value, pattern):
-	"""SQL ``LIKE`` as MariaDB and Postgres run it: ``%`` and ``_`` are
-	wildcards and a backslash (the default escape) makes the next character
-	literal, so an unescaped backslash in a pattern never matches one in the
-	text."""
+	"""SQL ``LIKE`` with the escape rules of MariaDB and Postgres: ``%`` and
+	``_`` are wildcards and a backslash (the default escape) makes the next
+	character literal, so an unescaped backslash in a pattern never matches
+	one in the text. It is case-sensitive, stricter than a MariaDB ``_ci``
+	collation or the ILIKE Frappe runs on Postgres, so the real candidate set
+	is a superset of the one these tests see."""
 	rx, chars = "", iter(pattern)
 	for ch in chars:
 		if ch == "\\":
@@ -76,6 +78,43 @@ def _match(row, flt):
 	raise AssertionError(op)
 
 
+class _FakeTxn:
+	"""Savepoints as Postgres keeps them: SAVEPOINT pushes (a reused name
+	nests), ROLLBACK TO keeps the savepoint and drops later ones, RELEASE
+	drops it and later ones, COMMIT and a full ROLLBACK drop all. ROLLBACK TO
+	or RELEASE of a name that is not set raises, as on both databases.
+	``max_depth`` is the deepest nesting seen."""
+
+	def __init__(self, log):
+		self.log = log
+		self.open = []
+		self.max_depth = 0
+
+	def _index(self, name):
+		if name not in self.open:
+			raise RuntimeError(f"SAVEPOINT {name} does not exist")
+		return len(self.open) - 1 - self.open[::-1].index(name)
+
+	def savepoint(self, name):
+		self.open.append(name)
+		self.max_depth = max(self.max_depth, len(self.open))
+		self.log.append(("savepoint", name))
+
+	def rollback(self, save_point=None):
+		if save_point is None:
+			self.open.clear()
+		else:
+			del self.open[self._index(save_point) + 1:]
+		self.log.append(("rollback", save_point))
+
+	def release_savepoint(self, name):
+		del self.open[self._index(name):]
+		self.log.append(("release", name))
+
+	def commit(self):
+		self.open.clear()
+
+
 class _FakeFrappe:
 	def __init__(self, error_logs, deleted_docs=()):
 		self.tables = {
@@ -88,12 +127,18 @@ class _FakeFrappe:
 		self.writes = []
 		self.deletes = []
 		self.fail_writes = set()
-		self.savepoints = []
+		self.commits = []
+		self.db_log = []  # savepoint / release / rollback / write, in order
+		self.txn = _FakeTxn(self.db_log)
 		self.db = SimpleNamespace(
 			set_value=self._set_value, delete=self._delete, count=self._count,
-			savepoint=self.savepoints.append,
-			rollback=lambda save_point=None: self.savepoints.append(("rollback", save_point)),
+			savepoint=self.txn.savepoint, release_savepoint=self.txn.release_savepoint,
+			rollback=self.txn.rollback,
 		)
+
+	def commit(self):
+		self.commits.append(1)
+		self.txn.commit()
 
 	def get_all(self, doctype, filters=None, or_filters=None, fields=None, order_by=None, limit_page_length=0):
 		assert order_by == "name asc"
@@ -110,6 +155,7 @@ class _FakeFrappe:
 
 	def _set_value(self, doctype, name, values, update_modified=True):
 		assert update_modified is False and isinstance(values, dict)
+		self.db_log.append(("write", name))
 		if name in self.fail_writes:
 			raise RuntimeError("Lock wait timeout exceeded")
 		for field, value in values.items():
@@ -130,9 +176,9 @@ class _FakeFrappe:
 def fake(monkeypatch):
 	def _make(error_logs, deleted_docs=(), current_key=KEY):
 		f = _FakeFrappe(error_logs, deleted_docs)
-		f.commits, f.flushes = [], []
+		f.flushes = []
 		monkeypatch.setattr(maintenance, "frappe", f)
-		monkeypatch.setattr(maintenance, "safe_commit", lambda: f.commits.append(1))
+		monkeypatch.setattr(maintenance, "safe_commit", f.commit)
 		monkeypatch.setattr(maintenance, "_flush_deferred_error_logs", lambda: f.flushes.append(f.reads) or 0)
 		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", lambda: current_key)
 		return f
@@ -173,6 +219,9 @@ class TestScrubErrorLogSecrets:
 		assert out["candidates"] == 5 and out["changed"] == 5
 		assert len(f.commits) == 3  # chunks of 2, 2, 1 (nothing left for the other passes)
 		assert all(KEY not in r["error"] for r in f.tables["Error Log"].values())
+		# every write's savepoint is released, so two writes in a chunk never
+		# nest (a re-issued SAVEPOINT opens a nested subtransaction on Postgres)
+		assert f.txn.max_depth == 1
 
 	def test_a_failing_row_does_not_stop_the_others(self, fake):
 		f = fake([("a", LEAKY), ("b", LEAKY), ("c", LEAKY)])
@@ -181,7 +230,10 @@ class TestScrubErrorLogSecrets:
 		assert (out["changed"], out["failed"]) == (2, 1)
 		assert KEY not in f.tables["Error Log"]["a"]["error"] + f.tables["Error Log"]["c"]["error"]
 		assert f.tables["Error Log"]["b"]["error"] == LEAKY  # rolled back to its savepoint only
-		assert ("rollback", "optimus_scrub_row") in f.savepoints
+		i = f.db_log.index(("write", "b"))
+		assert f.db_log[i - 1] == ("savepoint", "optimus_scrub_row")  # set before the failing write
+		assert f.db_log[i + 1] == ("rollback", "optimus_scrub_row")  # the fake raises for an unset one
+		assert f.txn.max_depth == 1  # released after the rollback too
 
 	def test_a_row_that_cannot_be_masked_is_counted_and_skipped(self, fake, monkeypatch):
 		f = fake([("a", LEAKY), ("b", LEAKY + "BOOM\n")])
@@ -220,7 +272,8 @@ class TestScrubErrorLogSecrets:
 		assert ("Error Log", "s3", "error") not in f.writes
 
 	def test_a_json_escaped_smart_quote_key_is_found_without_an_ai_frame(self, fake):
-		# Today's key holds a smart quote; JSON text stores it as ’. The
+		# Today's key holds a smart quote; JSON text stores it as the six
+		# characters \u2019. The
 		# Deleted Document copy and the metadata below have no ai_fix.py frame
 		# and no marker, so only the stored-key LIKE pass can select them, and
 		# its pattern must escape that backslash (LIKE's default escape).
@@ -265,29 +318,47 @@ class _FakeCache:
 class TestFlushDeferredErrorLogs:
 	def _frappe(self, monkeypatch, cache, fail_on=None):
 		"""A failed insert aborts the transaction, as a failed statement does
-		on Postgres: every later statement fails until a rollback to a
-		savepoint."""
-		inserted, commits, db_calls = [], [], []
+		on Postgres: every later statement except a ROLLBACK fails until a
+		rollback to a savepoint that was set (``_FakeTxn``)."""
+		inserted, commits = [], []
 		state = {"aborted": False}
+		self.db_log = []
+		txn = self.txn = _FakeTxn(self.db_log)
 
-		def _insert(record):
+		def _live():
 			if state["aborted"]:
 				raise RuntimeError("current transaction is aborted")
+
+		def _insert(record):
+			_live()
+			self.db_log.append(("insert", record.get("error")))
 			if record.get("error") == fail_on:
 				state["aborted"] = True
 				raise RuntimeError("Duplicate entry")
 			inserted.append(record)
 
+		def _savepoint(name):
+			_live()
+			txn.savepoint(name)
+
+		def _release(name):
+			_live()
+			txn.release_savepoint(name)
+
 		def _rollback(save_point=None):
-			db_calls.append(("rollback", save_point))
+			txn.rollback(save_point)  # raises for a savepoint that was never set
+			state["aborted"] = False
+
+		def _commit():
+			commits.append(1)
+			txn.commit()
 			state["aborted"] = False
 
 		def _get_doc(record):
 			return SimpleNamespace(insert=lambda ignore_permissions=False: _insert(record))
-		db = SimpleNamespace(savepoint=lambda name: db_calls.append(("savepoint", name)), rollback=_rollback)
+		db = SimpleNamespace(savepoint=_savepoint, release_savepoint=_release, rollback=_rollback)
 		monkeypatch.setattr(maintenance, "frappe", SimpleNamespace(cache=cache, get_doc=_get_doc, db=db))
-		monkeypatch.setattr(maintenance, "safe_commit", lambda: commits.append(1))
-		self.db_calls = db_calls
+		monkeypatch.setattr(maintenance, "safe_commit", _commit)
 		return inserted, commits
 
 	def test_takes_only_the_error_log_queue(self, monkeypatch):
@@ -302,6 +373,7 @@ class TestFlushDeferredErrorLogs:
 		assert cache.queues["insert_queue_for_Error Log"] == []
 		assert len(cache.queues["insert_queue_for_Route History"]) == 1  # left to the scheduler
 		assert commits == [1]
+		assert self.txn.max_depth == 1  # each insert's savepoint released, never nested
 
 	def test_a_broken_queue_is_not_fatal(self, monkeypatch):
 		self._frappe(monkeypatch, _FakeCache({}, broken=True))
@@ -314,8 +386,31 @@ class TestFlushDeferredErrorLogs:
 		inserted, commits = self._frappe(monkeypatch, cache, fail_on="BAD")
 		assert maintenance._flush_deferred_error_logs() == 1
 		assert [r["error"] for r in inserted] == ["x", "z"]  # the third still lands
-		assert ("rollback", "optimus_scrub_row") in self.db_calls
+		i = self.db_log.index(("insert", "BAD"))
+		assert self.db_log[i - 1] == ("savepoint", "optimus_scrub_row")  # set before the failing insert
+		assert self.db_log[i + 1] == ("rollback", "optimus_scrub_row")
+		assert self.txn.max_depth == 1  # released after the rollback too
 		assert commits == [1]
+
+	def test_rows_inserted_before_a_bad_queue_entry_are_committed(self, monkeypatch):
+		# The loop stops at an entry it cannot read; the rows already popped
+		# and inserted are committed, or a later rollback (the patch's, after
+		# a failed scrub) would drop them after Redis has let them go.
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "x"}), "{not json", json.dumps({"error": "z"})]})
+		inserted, commits = self._frappe(monkeypatch, cache)
+		assert maintenance._flush_deferred_error_logs() == 1
+		assert [r["error"] for r in inserted] == ["x"]
+		assert commits == [1]
+		assert len(cache.queues["insert_queue_for_Error Log"]) == 1  # left for the next run
+
+	def test_a_failing_commit_is_not_fatal(self, monkeypatch):
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "x"})]})
+		self._frappe(monkeypatch, cache)
+
+		def _commit():
+			raise RuntimeError("Lost connection to server during query")
+		monkeypatch.setattr(maintenance, "safe_commit", _commit)
+		assert maintenance._flush_deferred_error_logs() == 1
 
 
 class TestPurgeAiErrorLogs:
@@ -392,6 +487,19 @@ def test_patch_does_not_ask_to_rotate_when_nothing_was_found(patch_env, monkeypa
 	assert out == "Optimus: found no AI API keys in stored error rows.\n"
 
 
+@pytest.mark.parametrize(("failed", "residual"), [(2, 0), (0, 1)])
+def test_patch_prints_only_the_problem_lines_when_nothing_was_masked(patch_env, monkeypatch, capsys, failed, residual):
+	monkeypatch.setattr(
+		maintenance, "scrub_error_log_secrets",
+		lambda **kw: {"candidates": 3, "changed": 0, "deleted_docs_changed": 0, "residual": residual, "failed": failed},
+	)
+	importlib.import_module(_PATCH).execute()
+	out = capsys.readouterr().out
+	assert "Rotate" not in out and "found no AI API keys" not in out
+	assert ("could not be masked" in out) is bool(failed)
+	assert ("purge_ai_error_logs" in out) is bool(residual)
+
+
 def test_patch_warns_about_residual_rows(patch_env, monkeypatch, capsys):
 	monkeypatch.setattr(
 		maintenance, "scrub_error_log_secrets",
@@ -425,6 +533,26 @@ def test_a_failed_scrub_never_blocks_migrate(failing_scrub, capsys):
 	assert "execute optimus.maintenance.scrub_error_log_secrets --kwargs \"{'dry_run': False}\"" in out
 	assert KEY not in out
 	assert failing_scrub == [1]  # the failing chunk's writes rolled back
+
+
+def test_an_import_failure_never_blocks_migrate(monkeypatch, capsys):
+	# The module import runs inside the patch's try: a broken import is
+	# reported by its type with the command, and the migrate continues.
+	import sys
+
+	import frappe
+
+	import optimus
+
+	rollbacks = []
+	monkeypatch.delattr(optimus, "maintenance")
+	monkeypatch.setitem(sys.modules, "optimus.maintenance", None)  # the import raises
+	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=lambda *a, **k: rollbacks.append(1)), raising=False)
+	assert importlib.import_module(_PATCH).execute() is None
+	out = capsys.readouterr().out
+	assert "failed (ModuleNotFoundError)" in out
+	assert "execute optimus.maintenance.scrub_error_log_secrets --kwargs \"{'dry_run': False}\"" in out
+	assert rollbacks == [1]
 
 
 def test_the_failure_report_holds_no_row_text(failing_scrub, monkeypatch):
