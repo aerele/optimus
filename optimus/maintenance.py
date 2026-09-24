@@ -17,6 +17,13 @@ Both are safe to re-run and can be called by hand::
     bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': True}"
     bench --site <site> execute optimus.maintenance.purge_ai_error_logs --kwargs "{'dry_run': False}"
 
+Run them with ``bench execute`` or ``bench console``, never enqueue them:
+their frames hold the unmasked rows, and a background job that fails is
+logged with every frame's local variables, so they refuse to run inside an
+RQ job (``InsideBackgroundJobError``). Where they hold the key itself, the
+local is named ``api_key`` or ``secret``, names Frappe's traceback
+sanitizer and Sentry redact.
+
 Candidates are chosen by CONTENT, not title: rows Frappe itself wrote for a
 500 or a failed background job carry no Optimus title but do carry an
 ``ai_fix.py`` frame. Rows whose text, title or request metadata contain the
@@ -153,10 +160,12 @@ def _or_markers(field: str) -> list[list]:
 	return [[field, "like", marker] for marker in _SECRET_MARKERS]
 
 
-def _json_escaped(value: str) -> str:
-	"""``value`` as it appears inside JSON text (Deleted Document data is
-	``as_json`` with ``ensure_ascii``: a smart quote becomes ``\\u2019``)."""
-	return json.dumps(value)[1:-1] if value else ""
+def _json_escaped(secret: str) -> str:
+	"""``secret`` as it appears inside JSON text (Deleted Document data is
+	``as_json`` with ``ensure_ascii``: a smart quote becomes ``\\u2019``).
+	The parameter is named ``secret`` because it is often the full key: a
+	name Frappe's traceback sanitizer and Sentry redact."""
+	return json.dumps(secret)[1:-1] if secret else ""
 
 
 def _like_literal(value: str) -> str:
@@ -198,11 +207,12 @@ def _key_fragment(api_key: str) -> tuple[str, bool]:
 
 def _holds_key(row: dict, fields: tuple[str, ...], api_key: str) -> bool:
 	"""True when the full key, raw or JSON-escaped, is in one of the row's
-	text fields (the fragment the SQL matched is not enough)."""
-	escaped = _json_escaped(api_key)
+	text fields (the fragment the SQL matched is not enough). The escaped
+	key is held as ``secret``, a name the sanitizers redact."""
+	secret = _json_escaped(api_key)
 	for field in fields:
 		text = row.get(field)
-		if isinstance(text, str) and (api_key in text or escaped in text):
+		if isinstance(text, str) and (api_key in text or secret in text):
 			return True
 	return False
 
@@ -489,6 +499,28 @@ def _scans(api_key: str, error_fields: tuple[str, ...]) -> list[_Scan]:
 	return scans
 
 
+class InsideBackgroundJobError(RuntimeError):
+	"""``scrub_error_log_secrets`` or ``purge_ai_error_logs`` was called
+	inside an RQ job."""
+
+
+def _refuse_inside_a_background_job() -> None:
+	"""Raise ``InsideBackgroundJobError`` inside an RQ job. The scrub's frames
+	hold unmasked rows (keys, prompts), and a job that fails is logged with
+	Frappe's with-context traceback, which prints every frame's locals, so
+	those rows would be written back to the Error Log. Where rq cannot be
+	imported there is no RQ job."""
+	try:
+		from rq import get_current_job
+	except Exception:
+		return
+	if get_current_job() is not None:
+		raise InsideBackgroundJobError(
+			"Run optimus.maintenance with bench execute or bench console, never in a background job: "
+			"a failed job's log would store the unmasked rows it reads."
+		)
+
+
 def _dry_run_flag(value) -> bool:
 	"""``dry_run`` as a bool. ``None`` means the default, a dry run. Accepted:
 	``True`` / ``False``, ``1`` / ``0``, and the strings "true", "false",
@@ -589,7 +621,8 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	them, and only reads the queue length. One row that cannot be masked or
 	written is counted in ``failed`` and skipped; it never stops the others.
 	``dry_run`` accepts only the values ``_dry_run_flag`` names (``None`` is
-	a dry run) and raises ``ValueError`` for anything else.
+	a dry run) and raises ``ValueError`` for anything else. Refuses to run
+	inside an RQ job (``InsideBackgroundJobError``).
 
 	Returns ``{"candidates", "changed", "deleted_docs_changed", "residual",
 	"failed", "queued"}``: Error Log rows read, Error Log rows and Deleted
@@ -604,6 +637,7 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	"""
 	from optimus.ai_fix import _current_key_or_empty
 
+	_refuse_inside_a_background_job()
 	dry_run = _dry_run_flag(dry_run)
 	batch_size = max(1, int(batch_size or _BATCH))
 	out = {"candidates": 0, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 0}
@@ -658,8 +692,10 @@ def purge_ai_error_logs(dry_run: bool = True) -> dict:
 	Returns ``{"error_logs": int, "deleted_documents": int}`` (with
 	``dry_run=True`` the counts say what WOULD be deleted). ``dry_run``
 	accepts only the values ``_dry_run_flag`` names (``None`` is a dry run)
-	and raises ``ValueError`` for anything else.
+	and raises ``ValueError`` for anything else. Refuses to run inside an RQ
+	job (``InsideBackgroundJobError``).
 	"""
+	_refuse_inside_a_background_job()
 	dry_run = _dry_run_flag(dry_run)
 	out = {"error_logs": 0, "deleted_documents": 0}
 	targets = (
