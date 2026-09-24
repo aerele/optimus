@@ -819,30 +819,25 @@ def _get_api_key() -> str:
 	trailing newline), or ``""`` when none is stored.
 
 	Raises ``AiFixError(kind="config")`` before any HTTP call when the key
-	cannot be sent in an HTTP header: a character outside latin-1 (usually a
-	pasted smart quote), or a control character such as an internal newline,
-	tab or NUL (which would otherwise reach ``requests``/``http.client`` and
-	surface the key in a ``ValueError`` message or in ``putheader`` locals).
+	holds a character that cannot be sent in an HTTP header or is not plain
+	ASCII: every character must be printable ASCII (``!`` to ``~``). That
+	rejects a pasted smart quote, a no-break space or soft hyphen, a C1
+	control character, an internal space, and a control character such as a
+	newline, tab or NUL (which would otherwise reach ``requests`` /
+	``http.client`` and surface the key in a ``ValueError`` message or in
+	``putheader`` locals).
 
-	Both checks only ever set a local bool inside their ``except``/loop; the
-	``AiFixError`` is raised after the ``try``, once no exception is being
-	handled, so it has no ``__context__`` pointing at the
-	``UnicodeEncodeError`` (whose ``object`` attribute holds the key).
-	``from None`` also keeps ``__suppress_context__`` explicit."""
+	The check runs outside any ``try``, so the ``AiFixError`` is raised with
+	no exception being handled and has no ``__context__``; ``from None`` also
+	keeps ``__suppress_context__`` explicit."""
 	api_key = _current_key_or_empty()
 	if not api_key:
 		return ""
-	try:
-		api_key.encode("latin-1")
-		encodable = True
-	except UnicodeEncodeError:
-		encodable = False
-	has_control_char = any(ch < "\x20" or ch == "\x7f" for ch in api_key)
-	if not encodable or has_control_char:
+	if not all("\x21" <= ch <= "\x7e" for ch in api_key):
 		from frappe import _
 
 		raise AiFixError(
-			_("The AI API key in Optimus Settings contains a character that cannot be sent in an HTTP header (often a pasted smart quote or a stray control character such as a newline or tab). Paste the key again."),
+			_("The AI API key in Optimus Settings contains a character that cannot be sent in an HTTP header or is not plain ASCII (often a pasted smart quote, a no-break space or a stray control character such as a newline or tab). Paste the key again."),
 			kind="config",
 		) from None
 	return api_key
