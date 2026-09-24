@@ -78,9 +78,13 @@ versions may contain breaking changes see migration notes below).
 - An API key pasted with a trailing newline or spaces is trimmed. A key with
   a character that cannot be sent in an HTTP header now fails with a clear
   message before any request is made.
-- On a site whose scheduler is paused or disabled, AI failures logged during
-  a web request now reach the Error Log (they used to wait for a scheduler
-  job that never ran).
+- An AI failure logged during a web request that then fails (for example,
+  the `optimus.api.suggest_fix` endpoint reporting the provider's error) is
+  no longer lost with the request's rollback on a site whose scheduler runs:
+  the row is queued, and the scheduler writes it at its next deferred-insert
+  run (every 15 minutes). A site whose scheduler is paused or disabled, or
+  that is in maintenance mode, keeps inserting the row directly, as before,
+  and so do background jobs.
 
 ### Upgrade notes
 
