@@ -26,6 +26,14 @@ sends them to Sentry. The rules:
    these modules that reaches one of them (``_log_http_error``,
    ``_http_post``, ``suggest_fix``, ...). Record the exception inside the
    handler; log, retry or raise after the ``try``.
+4. No provider request is sent inside an ``except`` handler of any function
+   of these modules (AI function or not), whether or not it logs: no call to
+   ``_http_post``, ``_call_openai_chat``, ``_call_anthropic`` or any function
+   of these modules that reaches one of them. ``_http_post`` lets a
+   worker-timeout ``SystemExit`` (or a ``KeyboardInterrupt``, a gevent
+   ``Timeout``) out with its context cleared, but a raise while an exception
+   is being handled sets ``__context__`` again, so the handled exception
+   would ride along with it.
 """
 
 import ast
@@ -37,6 +45,7 @@ _REQUIRED = ("analyze.py", "api.py", "maintenance.py")
 _OPTIONAL = ("ai_jobs.py",)  # scanned as soon as a later PR adds it
 _AI_WRAPPERS = frozenset({"_backfill_ai_suggestions"})  # analyze.py; calls _run_ai_backfill
 _BASE_LOGGERS = frozenset({"log_error", "log_ai_failure"})
+_SENDERS = frozenset({"_http_post", "_call_openai_chat", "_call_anthropic"})  # ai_fix.py
 _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 _TRIES = (ast.Try, ast.TryStar)
@@ -118,21 +127,27 @@ def _runs_an_ai_step(fn: ast.AST, names: set[str]) -> bool:
 	return False
 
 
-def _loggers(trees: list[ast.Module]) -> set[str]:
-	"""``log_error``, ``log_ai_failure`` and every function in ``trees`` that
-	reaches one of them (fixpoint over direct calls, matched by name)."""
-	loggers = set(_BASE_LOGGERS)
+def _reaching(trees: list[ast.Module], base: frozenset[str]) -> set[str]:
+	"""``base`` and every function in ``trees`` that reaches one of them
+	(fixpoint over direct calls, matched by name)."""
+	reached = set(base)
 	functions = [fn for tree in trees for fn in _functions(tree)]
 	grew = True
 	while grew:
 		grew = False
 		for fn in functions:
-			if fn.name in loggers:
+			if fn.name in reached:
 				continue
-			if any(isinstance(n, ast.Call) and _callee(n) in loggers for n in _own_nodes(fn)):
-				loggers.add(fn.name)
+			if any(isinstance(n, ast.Call) and _callee(n) in reached for n in _own_nodes(fn)):
+				reached.add(fn.name)
 				grew = True
-	return loggers
+	return reached
+
+
+def _loggers(trees: list[ast.Module]) -> set[str]:
+	"""``log_error``, ``log_ai_failure`` and every function in ``trees`` that
+	reaches one of them."""
+	return _reaching(trees, _BASE_LOGGERS)
 
 
 def _unguarded_calls(stmts: list[ast.stmt]) -> set[str | None]:
@@ -150,15 +165,15 @@ def _unguarded_calls(stmts: list[ast.stmt]) -> set[str | None]:
 	return out
 
 
-def _logging_in_handlers(scope: ast.AST, loggers: set[str]) -> list[int]:
-	"""Line numbers of logging calls inside any ``except`` handler of ``scope``
-	(nested functions excluded)."""
+def _calls_in_handlers(scope: ast.AST, names: set[str]) -> list[int]:
+	"""Line numbers of calls to ``names`` inside any ``except`` handler of
+	``scope`` (nested functions excluded)."""
 	lines = []
 	for node in _own_nodes(scope):
 		if isinstance(node, ast.ExceptHandler):
 			lines += [
 				n.lineno for n in _own_nodes(node)
-				if isinstance(n, ast.Call) and _callee(n) in loggers
+				if isinstance(n, ast.Call) and _callee(n) in names
 			]
 	return lines
 
@@ -168,7 +183,7 @@ def _handler_offenders(module: str, tree: ast.Module, loggers: set[str], helpers
 	offenders: set[str] = set()
 	scopes = _functions(tree) if module == "ai_fix.py" else _ai_functions(tree)
 	for fn in scopes:
-		offenders |= {f"{module}:{fn.name}:{line}" for line in _logging_in_handlers(fn, loggers)}
+		offenders |= {f"{module}:{fn.name}:{line}" for line in _calls_in_handlers(fn, loggers)}
 	for node in ast.walk(tree):
 		if isinstance(node, _TRIES) and _unguarded_calls(node.body) & helpers:
 			for handler in node.handlers:
@@ -177,6 +192,14 @@ def _handler_offenders(module: str, tree: ast.Module, loggers: set[str], helpers
 					if isinstance(n, ast.Call) and _callee(n) in loggers
 				}
 	return sorted(offenders)
+
+
+def _request_offenders(module: str, tree: ast.Module, senders: set[str]) -> list[str]:
+	"""Rule 4 for one module: every function's handlers, not only AI
+	functions' (a request sent from any handler rides on its exception)."""
+	return sorted(
+		f"{module}:{fn.name}:{line}" for fn in _functions(tree) for line in _calls_in_handlers(fn, senders)
+	)
 
 
 def _ai_steps(tree: ast.Module) -> set[str]:
@@ -229,6 +252,20 @@ def test_no_logging_inside_except_handlers_on_the_ai_surface():
 		offenders += _handler_offenders(mod, tree, loggers, helpers)
 	assert offenders == [], (
 		"Record the exception inside the except block and log (or retry) after the try: "
+		f"{offenders}"
+	)
+
+
+def test_no_request_is_sent_inside_an_except_handler_on_the_ai_surface():
+	trees = _all_trees()
+	ai_fix_functions = {fn.name for fn in _functions(trees["ai_fix.py"])}
+	assert _SENDERS <= ai_fix_functions, f"renamed or removed: {sorted(_SENDERS - ai_fix_functions)}"
+	senders = _reaching(list(trees.values()), _SENDERS)
+	offenders = []
+	for mod, tree in trees.items():
+		offenders += _request_offenders(mod, tree, senders)
+	assert offenders == [], (
+		"Record the exception inside the except block and send the request after the try: "
 		f"{offenders}"
 	)
 
@@ -374,6 +411,21 @@ def test_logging_inside_an_except_block_is_flagged_even_through_a_wrapper():
 		"def step():\n\tai_fix.suggest_fix({})\n"
 	)
 	assert rule3 == ["mod.py:8"]
+
+
+def test_a_request_inside_an_except_block_is_flagged_even_when_nothing_logs():
+	tree = ast.parse(
+		"from optimus import ai_fix\n"
+		"def f():\n"
+		"\ttry:\n\t\tpass\n\texcept Exception:\n\t\tai_fix._call_anthropic('u', '', 'm', 's', [])\n"
+		"def g():\n\tai_fix._http_post('u', {}, {}, provider='p', where='w')\n"
+		"def h():\n"
+		"\ttry:\n\t\tpass\n\texcept Exception:\n\t\tg()\n"
+	)
+	# h is not AI code itself: it reaches a request through g
+	assert _request_offenders("mod.py", tree, _reaching([tree], _SENDERS)) == ["mod.py:f:6", "mod.py:h:13"]
+	# nothing here logs, so the logging rule alone would not see them
+	assert _handler_offenders("mod.py", tree, _loggers([tree]), set()) == []
 
 
 def test_record_then_log_after_the_try_passes():

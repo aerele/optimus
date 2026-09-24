@@ -1791,7 +1791,11 @@ def _http_post(
 	``try`` as the SAME instance (gevent matches its timeout by identity),
 	with its traceback, ``__context__`` and ``__cause__`` cleared, and is not
 	logged: otherwise it would leave with the requests / urllib3 frames,
-	which Sentry's WSGI middleware ships with their locals."""
+	which Sentry's WSGI middleware ships with their locals. It leaves
+	unchained when ``_http_post`` is not itself called while an exception is
+	being handled (a raise inside a handler sets ``__context__`` again), so no
+	request is sent from inside an ``except`` block (``test_ai_log_audit.py``
+	rule 4)."""
 	timeout = timeout or _resolve_timeout_seconds()
 	job_timeout_types = _job_timeout_types()
 	failure: AiFixError | None = None
@@ -1826,7 +1830,9 @@ def _http_post(
 			]
 	if escaping is not None:
 		# Not ours to handle: it leaves unlogged, without the frames below
-		# this one (their locals hold the prepared headers) and unchained.
+		# this one (their locals hold the prepared headers), and unchained
+		# when _http_post is not itself called while an exception is being
+		# handled.
 		escaping.__traceback__ = None
 		escaping.__context__ = None
 		escaping.__cause__ = None
