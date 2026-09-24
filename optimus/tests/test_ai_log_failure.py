@@ -132,16 +132,19 @@ def requeued(monkeypatch):
 	return queued
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def breadcrumbs(monkeypatch):
-	"""Capture ``frappe.logger(...).warning`` calls as ``(module, message,
-	exception active while logging)``."""
+	"""Capture ``frappe.logger(...).error`` calls as ``(module, message,
+	exception active while logging)``. Autouse: no test here may reach the
+	real ``frappe.logger``, which opens ``../logs/<module>.log``. The fake has
+	no ``warning``: a warning is dropped by Frappe's production log level
+	(see ``TestTheBreadcrumbReachesTheLogInProduction``)."""
 	import frappe
 
 	lines = []
 
 	def _logger(module=None, *a, **k):
-		return SimpleNamespace(warning=lambda msg, *x, **y: lines.append((module, msg, sys.exc_info()[1])))
+		return SimpleNamespace(error=lambda msg, *x, **y: lines.append((module, msg, sys.exc_info()[1])))
 
 	monkeypatch.setattr(frappe, "logger", _logger, raising=False)
 	return lines
@@ -236,6 +239,51 @@ class TestLogAiFailure:
 		ai_fix.log_ai_failure("t", ValueError("x"))
 		frappe.db.rollback()  # must not raise
 		assert requeued == []
+
+	@pytest.mark.parametrize("where", ["existence-check", "queue"])
+	def test_a_failed_requeue_leaves_a_type_only_breadcrumb(self, logs, monkeypatch, breadcrumbs, where):
+		# Postgres: the rollback removed the row and it could not be queued
+		# again, so the failure is gone without a trace unless the optimus log
+		# says so. Type only; written after the callback's try.
+		import frappe
+
+		boom = ConnectionError(f"lost for {KEY} alice@example.com")
+		if where == "existence-check":
+			monkeypatch.setattr(frappe, "db", _FakeDB(raise_on_exists=boom), raising=False)
+		module = types.ModuleType("frappe.deferred_insert")
+		module.deferred_insert = _raising(boom) if where == "queue" else (lambda doctype, records: None)
+		monkeypatch.setitem(sys.modules, "frappe.deferred_insert", module)
+		assert ai_fix.log_ai_failure("t", ValueError("x")) is True
+		assert breadcrumbs == []
+		frappe.db.rollback()  # must not raise
+		assert len(breadcrumbs) == 1
+		logger_module, message, active = breadcrumbs[0]
+		assert logger_module == "optimus" and "(ConnectionError)" in message
+		assert KEY not in message and "alice@example.com" not in message and "lost for" not in message
+		assert active is None
+
+	def test_a_failed_registration_leaves_a_type_only_breadcrumb(self, logs, monkeypatch, breadcrumbs):
+		# The row is written, but no callback will queue it again if a later
+		# rollback removes it (Postgres).
+		import frappe
+
+		frappe.db.after_rollback.add = _raising(RuntimeError(f"no callbacks {KEY}"))
+		assert ai_fix.log_ai_failure("t", ValueError("x")) is True
+		assert len(logs) == 1
+		assert [(m, a) for m, _, a in breadcrumbs] == [("optimus", None)]
+		assert "(RuntimeError)" in breadcrumbs[0][1] and KEY not in breadcrumbs[0][1]
+
+	def test_no_breadcrumb_when_the_requeue_works_or_is_not_needed(self, logs, requeued, monkeypatch, breadcrumbs):
+		import frappe
+
+		ai_fix.log_ai_failure("t", ValueError("x"))
+		frappe.db.rollback()
+		assert len(requeued) == 1  # transactional: queued again
+		monkeypatch.setattr(frappe, "db", _FakeDB(transactional=False), raising=False)
+		ai_fix.log_ai_failure("t", ValueError("y"))
+		frappe.db.rollback()
+		assert len(requeued) == 1  # MyISAM: the row survived, nothing queued
+		assert breadcrumbs == []
 
 	def test_nothing_is_registered_without_a_named_row(self, logs, requeued, monkeypatch):
 		# log_error returns the document only after a direct insert (no
@@ -417,6 +465,49 @@ class TestLogAiFailure:
 		ai_fix.log_ai_failure("first", e)
 		ai_fix.log_ai_failure("second", e)
 		assert [r["title"] for r in logs] == ["first"]
+
+
+class TestTheBreadcrumbReachesTheLogInProduction:
+	def test_it_is_logged_at_a_level_frappes_production_logger_keeps(self, logs, monkeypatch, capsys):
+		"""Frappe's loggers sit at ERROR unless DEV_SERVER is set (``bench
+		start``): ``frappe/utils/logger.py`` sets ``default_log_level`` to
+		WARNING only for the dev server, so a warning breadcrumb would be
+		dropped on every production site. This runs Frappe's real
+		``get_logger`` level logic: a private copy of that module is loaded
+		with DEV_SERVER unset and stream-only handlers (so no log file is
+		written), ``frappe.logger`` goes through its ``get_logger``, and the
+		breadcrumb must come out."""
+		import importlib.util
+		import logging
+
+		import frappe
+
+		real = pytest.importorskip("frappe.utils.logger")
+		monkeypatch.delenv("DEV_SERVER", raising=False)
+		monkeypatch.setattr(frappe, "_dev_server", 0, raising=False)
+		monkeypatch.setenv("FRAPPE_STREAM_LOGGING", "1")
+		spec = importlib.util.spec_from_file_location("_optimus_test_frappe_logger", real.__file__)
+		private = importlib.util.module_from_spec(spec)
+		spec.loader.exec_module(private)
+		assert private.default_log_level == logging.ERROR
+		monkeypatch.setattr(frappe, "loggers", {}, raising=False)
+		monkeypatch.setattr(frappe, "log_level", None, raising=False)
+		monkeypatch.setattr(frappe, "logger", lambda module=None, **k: private.get_logger(module=module, **k), raising=False)
+		monkeypatch.setattr(frappe, "log_error", _raising(RuntimeError("Error Log insert failed")), raising=False)
+
+		named = logging.getLogger("optimus-all")  # what get_logger names it without a site
+		saved = (list(named.handlers), named.level, named.propagate)
+		try:
+			assert ai_fix.log_ai_failure("t", ValueError("x")) is False
+			assert named.level == logging.ERROR
+		finally:
+			for handler in [h for h in named.handlers if h not in saved[0]]:
+				named.removeHandler(handler)
+				handler.close()
+			named.setLevel(saved[1])
+			named.propagate = saved[2]
+		err = capsys.readouterr().err
+		assert "an AI failure could not be written to the Error Log (RuntimeError)" in err
 
 
 def _post(behaviour):

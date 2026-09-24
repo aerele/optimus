@@ -1423,7 +1423,8 @@ def log_ai_failure(
 	  no-op (no double rows). Only a row that was written marks it.
 	- Returns True once ``frappe.log_error`` has returned, else False
 	  (already logged, or the write failed). A failed write leaves one
-	  warning line with the error type in the ``optimus`` log.
+	  error-level line with the error type in the ``optimus`` log
+	  (``_note_unwritten_row``).
 	- Never raises, except an RQ job timeout (the job must still stop),
 	  which leaves as a fresh instance with no chain.
 	"""
@@ -1530,15 +1531,21 @@ def _requeue_if_rolled_back(record: dict, row=None) -> None:
 	(``CallbackManager.run`` would pass the error to the rollback's caller)
 	except an RQ job timeout, and holds only the row name and the scrubbed
 	fields. If the existence check fails, nothing is queued: a queued copy of
-	a row that survived would be a duplicate."""
+	a row that survived would be a duplicate.
+
+	A failed existence check, a failed queue or a failed registration leaves
+	the error type in the ``optimus`` log (``_note_unwritten_row``), recorded
+	in the handler and logged after the ``try``: on Postgres the row may be
+	lost otherwise without a trace."""
 	interrupt = None
+	failure_type = None
 	try:
 		import frappe
 
-		if getattr(frappe.flags, "read_only", False):
-			return
 		name = getattr(row, "name", None)
 		if not isinstance(name, str) or not name:
+			return  # nothing was inserted (no database, or queued in read-only mode)
+		if getattr(frappe.flags, "read_only", False):
 			return
 		for field in ("trace_id", "metadata"):
 			value = getattr(row, field, None)
@@ -1547,6 +1554,7 @@ def _requeue_if_rolled_back(record: dict, row=None) -> None:
 
 		def _requeue() -> None:
 			requeue_interrupt = None
+			requeue_failure = None
 			try:
 				import frappe
 
@@ -1557,29 +1565,38 @@ def _requeue_if_rolled_back(record: dict, row=None) -> None:
 				deferred_insert("Error Log", [dict(record)])
 			except _job_timeout_types() as e:
 				requeue_interrupt = (type(e), e.args)
-			except Exception:
-				pass
+			except Exception as e:
+				requeue_failure = type(e).__name__
 			if requeue_interrupt is not None:
 				raise requeue_interrupt[0](*requeue_interrupt[1])
+			if requeue_failure is not None:
+				_note_unwritten_row(requeue_failure)
 
 		frappe.db.after_rollback.add(_requeue)
 	except _job_timeout_types() as e:
 		interrupt = (type(e), e.args)
-	except Exception:
-		pass
+	except Exception as e:
+		failure_type = type(e).__name__
 	if interrupt is not None:
 		raise interrupt[0](*interrupt[1])
+	if failure_type is not None:
+		_note_unwritten_row(failure_type)
 
 
 def _note_unwritten_row(error_type: str) -> None:
-	"""Leave a trace when ``log_ai_failure`` could not write its row: one
-	warning line in the ``optimus`` log naming the error TYPE only (its
-	message could hold anything). Never raises, except an RQ job timeout."""
+	"""Leave a trace when an AI failure row could not be written (or queued
+	again after a rollback removed it): one line in the ``optimus`` log
+	naming the error TYPE only (its message could hold anything).
+
+	It is logged at ERROR: Frappe's loggers drop anything below ERROR unless
+	DEV_SERVER is set (``bench start``; ``frappe/utils/logger.py``), so a
+	warning would never reach the log on a production site. Never raises,
+	except an RQ job timeout."""
 	interrupt = None
 	try:
 		import frappe
 
-		frappe.logger("optimus").warning(
+		frappe.logger("optimus").error(
 			f"optimus ai_fix: an AI failure could not be written to the Error Log ({error_type})"
 		)
 	except _job_timeout_types() as e:
