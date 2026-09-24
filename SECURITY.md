@@ -61,6 +61,32 @@ the highest-value security considerations:
    directory tree, so a malicious analyzer dict can't be used to
    read arbitrary host files.
 
+## API key handling
+
+The AI provider key is kept out of every log. It is stored in the encrypted
+`ai_api_key` Password field of Optimus Settings and decrypted only when a
+request is sent. Inside the process it exists only in a local variable named
+`api_key` (a name both Frappe's traceback sanitizer and Sentry's default
+denylist redact) and in `ai_fix._ApiKeyAuth`, a `requests` auth object whose
+`repr` is masked. It is never placed in a dict, a header dict, a request
+body, an exception message or an exception chain, and a provider's error
+reply is scrubbed of it before it is shown.
+
+Every Error Log row the AI code writes goes through
+`optimus.ai_fix.log_ai_failure`, which writes an explicit message with no
+frame locals and scrubs secrets from it (`optimus.redaction.scrub_secrets`).
+It is always called after the failure has been handled, so Frappe's Sentry
+hook never receives the frames of the failed request, where the prepared
+headers are. Two tests keep it that way: `optimus/tests/test_ai_log_audit.py` fails if AI code calls
+`frappe.log_error` directly or logs inside an `except` block, and
+`optimus/tests/test_ai_secret_canary.py` fails if a fake key reaches any
+log, traceback, error-tracker payload or response on any failure path.
+
+Earlier releases with AI fix suggestions could store the key in plain text
+in the Error Log after a failed AI call. See the API key advisory in
+`CHANGELOG.md` for the required key rotation and cleanup
+(`optimus.maintenance`).
+
 ## Known limitations
 
 - SQL parameter redaction is **best-effort**; a regex pattern over
@@ -72,6 +98,16 @@ the highest-value security considerations:
 - Rate limiting is **IP-based**, not per-user. Multi-user deployments
   behind a single load balancer share the rate-limit bucket;
   per-user buckets are on the v0.8 roadmap.
+- Frappe attaches the local variables of the failing code's frames to the
+  Error Log row it writes for an error that escapes to it: a server error, a
+  background job that fails or times out, and every error in developer mode.
+  When a site sends errors to Sentry (`FRAPPE_SENTRY_DSN` set and telemetry
+  enabled), every event also carries the local variables of the code on the
+  call stack (`attach_stacktrace`). The AI code never holds the API key
+  outside the two places described under "API key handling", but its frames
+  do hold the prompt (source code and normalised SQL), so prompt text can
+  reach Sentry when an AI call fails, and the Error Log when an AI call is
+  cut off by a job timeout or fails in developer mode.
 
 ## Cryptographic primitives
 
