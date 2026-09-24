@@ -584,3 +584,76 @@ def test_v15_gate_passes_then_core_decides(monkeypatch, user, roles, ptype, pare
 	methods = [core, permissions.file_has_permission]
 	assert _has_controller_permissions_v15(doc, ptype, user, methods) is expected
 	assert calls == [(ptype, user)]
+
+
+# --- Part D (static guard) ----------------------------------------------------
+
+def _is_allowed_return(node: ast.Return) -> bool:
+	"""True for ``return False`` (the gate's deny) and ``return
+	_no_objection()`` (the version-aware defer). Everything else is
+	forbidden: a literal None or a bare return (a deny on Frappe 16), a
+	literal True (a grant that skips Frappe's own File check on Frappe 15),
+	or any other expression."""
+	value = node.value
+	if isinstance(value, ast.Constant):
+		return value.value is False
+	return (
+		isinstance(value, ast.Call)
+		and isinstance(value.func, ast.Name)
+		and value.func.id == "_no_objection"
+		and not value.args
+		and not value.keywords
+	)
+
+
+def _offending_returns(func: ast.FunctionDef) -> list[ast.Return]:
+	return [n for n in ast.walk(func) if isinstance(n, ast.Return) and not _is_allowed_return(n)]
+
+
+def test_file_has_permission_returns_only_false_or_no_objection():
+	"""Static guard pinning the PR-0b fix on both Frappe contracts: every
+	return in file_has_permission is either ``False`` or
+	``_no_objection()``. Reads the LIVE function via inspect.getsource (not
+	a copy), so a future edit that reintroduces ``return None`` (every File
+	denied on Frappe 16) or writes ``return True`` (every File granted on
+	Frappe 15) on any branch fails this test immediately."""
+	func = ast.parse(inspect.getsource(permissions.file_has_permission)).body[0]
+	assert isinstance(func, ast.FunctionDef)
+	returns = [n for n in ast.walk(func) if isinstance(n, ast.Return)]
+	assert returns, "file_has_permission has no return statements to check"
+	offenders = _offending_returns(func)
+	assert not offenders, "file_has_permission must return only False or _no_objection(): " + "; ".join(
+		f"line {n.lineno}: {ast.unparse(n)}" for n in offenders
+	)
+
+
+@pytest.mark.parametrize(
+	("body", "flagged"),
+	[
+		("return None", True),
+		("return", True),
+		("return True", True),
+		("return bool(doc)", True),
+		("return _no_objection(doc)", True),
+		("return False", False),
+		("return _no_objection()", False),
+	],
+)
+def test_ast_guard_classifies_returns(body, flagged):
+	"""Meta-test: the guard's own classifier (the same _offending_returns the
+	live test uses) flags every forbidden shape and accepts the two allowed
+	ones, checked on throwaway source rather than a mutated
+	optimus/permissions.py."""
+	src = f"def file_has_permission(doc, ptype=None, user=None):\n\t{body}\n"
+	func = ast.parse(src).body[0]
+	assert bool(_offending_returns(func)) is flagged
+
+
+def test_gated_fields_include_recordings_file():
+	"""Direct pin on the set itself (not just observed behaviour), so a
+	future edit that silently drops recordings_file from _GATED_FIELDS
+	(e.g. during an unrelated refactor of the frozenset literal) fails
+	immediately."""
+	assert permissions._GATED_FIELDS == frozenset(
+		{"raw_report_file", "raw_report_pdf_file", "recordings_file"}
+	)
