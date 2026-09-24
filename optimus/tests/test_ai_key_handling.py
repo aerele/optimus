@@ -150,3 +150,75 @@ class TestApiKeyAuth:
 		auth = ai_fix._ApiKeyAuth("authorization", KEY, prefix="Bearer ")
 		prepared = requests.Request("POST", "https://x.invalid/v1", headers={"a": "b"}, auth=auth).prepare()
 		assert prepared.headers["authorization"] == f"Bearer {KEY}"
+
+
+# ---------------------------------------------------------------------------
+# The provider dict and every request
+# ---------------------------------------------------------------------------
+
+class TestProviderDict:
+	def test_provider_dict_never_holds_the_key(self, monkeypatch):
+		_store_key(monkeypatch, KEY)
+		with patch("optimus.settings.get_config", return_value=_cfg()):
+			p = ai_fix._resolve_provider()
+		assert "api_key" not in p
+		assert p["has_key"] is True
+		assert KEY not in repr(p)
+
+	def test_has_key_false_when_unset(self, monkeypatch):
+		_store_key(monkeypatch, "")
+		with patch("optimus.settings.get_config", return_value=_cfg()):
+			assert ai_fix._resolve_provider()["has_key"] is False
+			assert ai_fix.is_available() is False  # hosted provider needs a key
+
+
+class TestRequestsCarryTheKeyOnlyInAuth:
+	def test_no_key_provider_sends_no_auth(self, monkeypatch):
+		# Review Focus #1: LAN Ollama over plain http with no key keeps working
+		# and sends no auth header at all.
+		_store_key(monkeypatch, "")
+		fake = _capture(_Resp(200, _OPENAI_OK))
+		monkeypatch.setattr(requests, "post", fake)
+		cfg = _cfg(ai_provider="OpenAI-compatible", ai_base_url="http://10.0.0.5:11434/v1", ai_model="qwen3-coder:30b")
+		with patch("optimus.settings.get_config", return_value=cfg):
+			assert ai_fix.is_available() is True
+			out = ai_fix.suggest_fix(dict(_FINDING))
+		assert out["suggestion"].startswith("**Fix**")
+		call = fake.calls[0]
+		assert call.url == "http://10.0.0.5:11434/v1/chat/completions"
+		assert call.auth is None
+		assert "authorization" not in {k.lower() for k in call.wire_headers}
+
+	def test_openai_key_rides_only_in_the_auth_object(self, monkeypatch):
+		_store_key(monkeypatch, f"{KEY}\n")
+		fake = _capture(_Resp(200, _OPENAI_OK))
+		monkeypatch.setattr(requests, "post", fake)
+		with patch("optimus.settings.get_config", return_value=_cfg()):
+			ai_fix.suggest_fix(dict(_FINDING))
+		call = fake.calls[0]
+		assert KEY not in repr(call.headers) and KEY not in repr(call.body)
+		assert isinstance(call.auth, ai_fix._ApiKeyAuth) and KEY not in repr(call.auth)
+		assert call.wire_headers["authorization"] == f"Bearer {KEY}"
+
+	def test_anthropic_key_rides_only_in_the_auth_object(self, monkeypatch):
+		_store_key(monkeypatch, KEY)
+		fake = _capture(_Resp(200, _ANTHROPIC_OK))
+		monkeypatch.setattr(requests, "post", fake)
+		with patch("optimus.settings.get_config", return_value=_cfg(ai_provider="Anthropic")):
+			ai_fix.suggest_fix(dict(_FINDING))
+		call = fake.calls[0]
+		assert KEY not in repr(call.headers)
+		assert call.wire_headers["x-api-key"] == KEY
+
+	def test_non_latin_key_fails_before_any_http(self, monkeypatch):
+		_store_key(monkeypatch, "sk-live-0123’456789")
+		fake = _capture(_Resp(200, _OPENAI_OK))
+		monkeypatch.setattr(requests, "post", fake)
+		with patch("optimus.settings.get_config", return_value=_cfg()):
+			with pytest.raises(ai_fix.AiFixError) as ei:
+				ai_fix.suggest_fix(dict(_FINDING))
+			probe = ai_fix.test_connection()
+		assert ei.value.kind == "config"
+		assert fake.calls == []
+		assert probe["ok"] is False and "smart quote" in probe["message"]
+		assert "sk-live" not in probe["message"]
