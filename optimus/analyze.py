@@ -874,6 +874,8 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 			except Exception:
 				pass
 			_log_ai_step_failure("optimus ai auto-suggest (outer)", ai_error, session_uuid)
+			# A later non-AI failure is logged with frame locals: unbind it.
+			ai_error = None
 
 		# v0.6.0: same toggle also bakes an LLM-vetted index recommendation
 		# onto the top few tables in the breakdown. Best-effort + double-wrapped.
@@ -885,6 +887,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 			ai_error = e
 		if ai_error is not None:
 			_log_ai_step_failure("optimus ai index-suggest (outer)", ai_error, session_uuid)
+			ai_error = None
 
 		_publish_progress(80, "Writing session data", session_uuid)
 		_persist(docname, context, recordings, analyze_elapsed_ms)

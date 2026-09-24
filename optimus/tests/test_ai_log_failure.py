@@ -151,6 +151,27 @@ class TestLogAiFailure:
 		monkeypatch.setattr(frappe, "log_error", _boom, raising=False)
 		ai_fix.log_ai_failure("t", ValueError("x"), session_uuid="u")  # must not raise
 
+	def test_only_the_scrubbed_message_is_bound_while_logging(self, logs, monkeypatch):
+		# Sentry (attach_stacktrace=True) serialises the calling frame's locals
+		# for the message event, so while frappe.log_error runs the
+		# log_ai_failure frame must hold the scrubbed message, not the
+		# unscrubbed lines it was built from.
+		import sys
+
+		import frappe
+
+		frames = []
+
+		def _log(**kw):
+			caller = sys._getframe(1)
+			frames.append((caller.f_code.co_name, set(caller.f_locals)))
+
+		monkeypatch.setattr(frappe, "log_error", _log, raising=False)
+		ai_fix.log_ai_failure("t", ValueError("x"), session_uuid="u", finding="F1")
+		assert [name for name, _ in frames] == ["log_ai_failure"]
+		assert "message" in frames[0][1]
+		assert "lines" not in frames[0][1]
+
 	def test_an_exception_is_logged_once(self, logs):
 		e = ai_fix.AiFixError("boom")
 		ai_fix.log_ai_failure("first", e)
@@ -212,6 +233,33 @@ class TestHttpFailurePath:
 		assert ei.value.__context__ is None
 		assert KEY not in logs[0]["message"]
 		assert "detail=UnicodeEncodeError\n" in logs[0]["message"]  # the type name, nothing more
+
+	def test_the_catch_all_handler_only_records(self, logs, monkeypatch):
+		# The handler keeps plain values; the AiFixError and its translated
+		# message are built after the try. So even if building them fails, the
+		# error that escapes chains nothing (the http.client error's .object is
+		# the header, i.e. the key) and no ai_fix frame still binds that error.
+		import frappe
+
+		def _broken_translation(*a, **k):
+			raise RuntimeError("translation failed")
+
+		monkeypatch.setattr(frappe, "_", _broken_translation, raising=False)
+		header = f"Bearer {KEY}’"
+		monkeypatch.setattr(requests, "post", _post(self._raise(
+			UnicodeEncodeError("latin-1", header, len(header) - 1, len(header), "ordinal not in range(256)"))))
+		with pytest.raises(RuntimeError, match="translation failed") as ei:
+			_call()
+		assert ei.value.__context__ is None and ei.value.__cause__ is None
+		checked = []
+		tb = ei.value.__traceback__
+		while tb is not None:
+			if tb.tb_frame.f_code.co_filename == ai_fix.__file__:
+				checked.append(tb.tb_frame.f_code.co_name)
+				for name, value in tb.tb_frame.f_locals.items():
+					assert KEY not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds the header"
+			tb = tb.tb_next
+		assert "_http_post" in checked
 
 	def test_rq_job_timeout_still_stops_the_job(self, logs, monkeypatch):
 		# The catch-all must not turn RQ's job timeout into a normal AI error

@@ -89,7 +89,14 @@ def _like_literal(value: str) -> str:
 	"""``value`` escaped for a ``LIKE`` pattern, because backslash is the
 	default LIKE escape on MariaDB and Postgres, so an unescaped backslash (the
 	``\\u2019`` of a JSON-escaped key) never matches itself and ``%`` / ``_``
-	would act as wildcards."""
+	would act as wildcards.
+
+	It assumes the pattern reaches the database as a bound parameter, as on
+	Frappe v16, where ``frappe.get_all`` builds the query with the query
+	builder. Frappe v15's ``db_query`` path doubles backslashes itself, so
+	there the stored-key pass could miss a key containing ``_``, ``%`` or a
+	JSON-escaped character; the passes over rows with an ``ai_fix.py`` frame
+	and the masking of the key in Python are unaffected."""
 	return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
@@ -173,9 +180,11 @@ def _write_row(doctype: str, name: str, changes: dict) -> bool:
 	"""Write one masked row under a savepoint, so a failed write (a lock
 	timeout, a row deleted meanwhile) rolls back only itself, also on
 	Postgres, where a failed statement aborts the transaction. The savepoint
-	is released after the write or the rollback, as Frappe's own
-	``savepoint()`` helper does, because re-issuing a savepoint of the same
-	name nests a new subtransaction on Postgres instead of replacing it."""
+	is released after the write and also after the rollback, because this
+	function reuses one savepoint name and re-issuing a savepoint of the same
+	name nests a new subtransaction on Postgres instead of replacing it.
+	Frappe's own ``savepoint()`` helper releases only after a success (it
+	takes a fresh random name each time)."""
 	failed = False
 	try:
 		frappe.db.savepoint(_SAVEPOINT)

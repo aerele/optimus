@@ -231,6 +231,36 @@ def test_no_logging_inside_except_handlers_on_the_ai_surface():
 	)
 
 
+def test_run_unbinds_each_ai_error_once_logged():
+	# analyze.run's outer handler logs a later non-AI failure with Frappe's
+	# with-context traceback, which prints run's locals. An AI step's error,
+	# once logged through _log_ai_step_failure, must not stay bound there: a
+	# prompt builder's exception can carry prompt text in its args.
+	run = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "run")
+	logged, offenders = 0, []
+	for node in ast.walk(run):
+		for field in ("body", "orelse", "finalbody"):
+			block = getattr(node, field, None)
+			if not isinstance(block, list):
+				continue
+			for i, stmt in enumerate(block):
+				call = stmt.value if isinstance(stmt, ast.Expr) else None
+				if not (isinstance(call, ast.Call) and _callee(call) == "_log_ai_step_failure"):
+					continue
+				logged += 1
+				error = call.args[1].id if len(call.args) > 1 and isinstance(call.args[1], ast.Name) else None
+				nxt = block[i + 1] if i + 1 < len(block) else None
+				unbound = (
+					isinstance(nxt, ast.Assign) and len(nxt.targets) == 1
+					and isinstance(nxt.targets[0], ast.Name) and nxt.targets[0].id == error
+					and isinstance(nxt.value, ast.Constant) and nxt.value.value is None
+				)
+				if not unbound:
+					offenders.append(stmt.lineno)
+	assert logged >= 2, "analyze.run no longer logs its AI steps through _log_ai_step_failure"
+	assert offenders == [], f"set the logged error to None right after _log_ai_step_failure: analyze.py:{offenders}"
+
+
 def test_scanned_modules_and_wrappers_exist():
 	# A renamed module or wrapper would silently weaken the rules: fail loudly.
 	assert all((_PKG / m).exists() for m in _REQUIRED)
