@@ -36,6 +36,10 @@ is replaced by a recorder that is a superset of what really gets stored:
   ran, a rollback runs them and each record they re-queue through
   ``frappe.deferred_insert`` is a ``stored`` row too.
 
+A non-``Exception`` interrupt (``system_exit``: a gunicorn worker timeout) is
+not snapshotted by Frappe (``frappe.app`` catches ``Exception``), so it only
+lands in ``escaped``, which Sentry's WSGI middleware would ship.
+
 The only redaction applied is the one Frappe and Sentry both really apply:
 a local variable named exactly ``api_key``.
 
@@ -337,6 +341,10 @@ def _scenario_post(scenario, sinks, job_timeout):
 			raise UnicodeEncodeError("latin-1", value, 0, 1, "ordinal not in range(256)")
 		if scenario == "rq_timeout":
 			raise job_timeout("Task exceeded maximum timeout value (60 seconds)")
+		if scenario == "system_exit":
+			# A gunicorn worker timeout while urllib3 sends: this frame holds
+			# the auth-applied headers (wire_headers), i.e. the key.
+			raise SystemExit(1)
 		if scenario == "http_400_echo":
 			# OpenAI's error object: the identifier-shaped type reaches the row,
 			# the echoed key in ``code`` and the message never do.
@@ -419,15 +427,18 @@ def _drive(name, fn, args_factory, sinks, scenario, job_timeout):
 			sinks.stored.append((name, f"{exc}\n{dump}", False))  # every exception, title str(exc)
 		elif job_timeout is not None and isinstance(exc, job_timeout):
 			sinks.stored.append((name, dump, False))  # execute_job's with-context log
-		elif not isinstance(exc, ai_fix.AiFixError | _Thrown):
-			sinks.stored.append((name, dump, True))  # 500 snapshot
+		elif isinstance(exc, Exception) and not isinstance(exc, ai_fix.AiFixError | _Thrown):
+			sinks.stored.append((name, dump, True))  # 500 snapshot (frappe.app catches Exception only)
 
 
 _SCENARIOS = (
 	"connection_error", "unicode_encode_error", "http_401", "http_400_echo", "http_404_echo",
 	"http_500_echo", "non_dict_json", "non_latin_key", "rq_timeout", "developer_mode", "scrub_raises",
+	"system_exit",
 )
 _PROVIDERS = ("OpenAI", "Anthropic")
+# Nothing is logged: the interrupt must leave untouched (system_exit).
+_NO_ROW_SCENARIOS = ("system_exit",)
 
 
 @pytest.mark.parametrize(
@@ -450,7 +461,10 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 		assert sinks.posts == 0, "a key that cannot be sent must fail before any HTTP call"
 	else:
 		assert sinks.posts > 0, "the scenario never reached requests.post: the canary would prove nothing"
-	assert sinks.stored, "no Error Log row was written: failures must still be logged"
+	if scenario in _NO_ROW_SCENARIOS:
+		assert sinks.stored == [], f"{scenario}: no Error Log row may be written"
+	else:
+		assert sinks.stored, "no Error Log row was written: failures must still be logged"
 	# Each row written registered exactly one re-queue callback, and the
 	# rollback re-queued rows, so their records were checked below too.
 	assert sinks.registered == rows_written
@@ -475,8 +489,19 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 	)
 
 	# Positive controls: each scenario really exercised the path it names.
-	assert any(PII in t for _, t in sinks.stack), "the stack channel saw no prompt: it would prove nothing"
+	if scenario not in _NO_ROW_SCENARIOS:
+		assert any(PII in t for _, t in sinks.stack), "the stack channel saw no prompt: it would prove nothing"
 	returned = "\n".join(t for _, t in sinks.returned)
+	if scenario == "system_exit":
+		# Every request that was sent let the SystemExit out (none swallowed or
+		# turned into an AI error); each dump walked down to the HTTP layer's
+		# frame (its ``where`` argument) and the prompt-bearing frames, so the
+		# key check above covered them.
+		assert sum(1 for _, t in sinks.returned if t == "SystemExit(1)") == sinks.posts, "a SystemExit did not escape"
+		assert len(sinks.escaped) == sinks.posts and all(
+			"where = 'chat/completions'" in t or "where = 'messages'" in t for _, t in sinks.escaped
+		), "an escaped dump never reached the HTTP layer's frame: the key check proved nothing"
+		assert any(PII in t for _, t in sinks.escaped), "no escaped dump held the prompt: it would prove nothing"
 	if scenario == "http_400_echo":
 		assert any("provider_error=invalid_request_error\n" in t for _, t, _ in sinks.stored), (
 			"the provider's error type never reached the row: the code parser went unchecked"

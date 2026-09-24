@@ -398,7 +398,67 @@ class TestHttpFailurePath:
 		assert "UnicodeEncodeError" in str(ei.value) and KEY not in str(ei.value)
 		assert ei.value.__context__ is None
 		assert KEY not in logs[0]["message"]
-		assert "detail=UnicodeEncodeError\n" in logs[0]["message"]  # the type name, nothing more
+		assert "ordinal not in range" not in logs[0]["message"]  # never the exception's message
+		assert "detail=UnicodeEncodeError\n" in logs[0]["message"]  # the type name, then plain frames
+
+	def test_catch_all_logs_plain_frames_without_locals_or_message(self, logs, monkeypatch):
+		# A local programming error after the POST would otherwise leave only
+		# its type: the row names where it happened, file:line:function per
+		# frame, and nothing else.
+		def _inner(headers):
+			secret_local = f"Bearer {KEY}"  # noqa: F841 (a frame local: never logged)
+			raise KeyError(f"MESSAGE-MARKER {KEY}")
+
+		def _fake(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+			return _inner(headers)
+
+		monkeypatch.setattr(requests, "post", _fake)
+		with pytest.raises(ai_fix.AiFixError):
+			_call()
+		msg = logs[0]["message"]
+		detail = msg.split("detail=", 1)[1]
+		assert detail.startswith("KeyError\n")
+		assert f"{__file__}:{_fake.__code__.co_firstlineno + 1}:_fake" in detail
+		assert f"{__file__}:{_inner.__code__.co_firstlineno + 2}:_inner" in detail
+		assert f"{ai_fix.__file__}:" in detail and ":_http_post" in detail
+		assert "MESSAGE-MARKER" not in msg and KEY not in msg and "secret_local" not in msg
+
+	@pytest.mark.parametrize(
+		"interrupt",
+		[SystemExit(1), KeyboardInterrupt(), type("GreenletTimeout", (BaseException,), {})(5)],
+		ids=["worker-timeout-SystemExit", "KeyboardInterrupt", "gevent-Timeout"],
+	)
+	def test_a_non_exception_interrupt_keeps_its_identity_without_the_send_frames(self, logs, monkeypatch, interrupt):
+		# A gunicorn worker timeout raises SystemExit in the request thread,
+		# possibly while urllib3 holds the prepared headers (the key) in its
+		# locals, and Sentry's WSGI middleware ships frame locals. The same
+		# instance leaves (gevent matches its Timeout by identity), with no
+		# traceback below _http_post, no chain and no log.
+		def _send(headers):
+			prepared = {"authorization": f"Bearer {KEY}"}  # noqa: F841 what urllib3 holds
+			try:
+				raise UnicodeEncodeError("latin-1", f"Bearer {KEY}", 0, 1, "ordinal not in range(256)")
+			except UnicodeEncodeError:
+				raise interrupt  # noqa: B904 (chained to the header error on purpose)
+
+		def _fake(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+			return _send(headers)
+
+		monkeypatch.setattr(requests, "post", _fake)
+		with pytest.raises(BaseException) as ei:
+			_call()
+		assert ei.value is interrupt
+		assert ei.value.__context__ is None and ei.value.__cause__ is None
+		assert ei.value.__suppress_context__ is True
+		codes = set()
+		tb = ei.value.__traceback__
+		while tb is not None:
+			codes.add(tb.tb_frame.f_code)
+			for name, value in tb.tb_frame.f_locals.items():
+				assert KEY not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds the key"
+			tb = tb.tb_next
+		assert _send.__code__ not in codes and _fake.__code__ not in codes
+		assert logs == []
 
 	def test_the_catch_all_handler_only_records(self, logs, monkeypatch):
 		# The handler keeps plain values; the AiFixError and its translated
