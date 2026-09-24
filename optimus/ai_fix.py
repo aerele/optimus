@@ -32,11 +32,26 @@ class AiFixError(Exception):
 	this into ``frappe.throw`` so the message is shown to the operator.
 	``status_code`` carries the provider's HTTP status when the error came
 	from an HTTP response, so callers can react to it (the temperature retry
-	fires only on a 400 or 422)."""
+	fires only on a 400 or 422). ``kind`` classifies the failure
+	(``"config"``, ``"transport"``, ``"timeout"``, ``"bad_response"`` here;
+	later releases fill the rest). ``usage`` carries token usage already
+	billed before the failure, when there was any.
 
-	def __init__(self, message: str = "", *, status_code: int | None = None):
+	The message must never contain the API key: it is shown to the operator
+	and written to the Error Log."""
+
+	def __init__(
+		self,
+		message: str = "",
+		*,
+		status_code: int | None = None,
+		kind: str = "unknown",
+		usage: dict | None = None,
+	):
 		super().__init__(message)
 		self.status_code = status_code
+		self.kind = kind
+		self.usage = usage
 
 
 # Findings that carry enough code / SQL context for the LLM to reason about
@@ -763,6 +778,73 @@ def test_connection() -> dict:
 # ---------------------------------------------------------------------------
 # Config / provider resolution
 # ---------------------------------------------------------------------------
+
+def _current_key_or_empty() -> str:
+	"""The stored ``Optimus Settings.ai_api_key``, stripped, or ``""`` when it
+	is unset or cannot be decrypted. Never raises and never validates, so
+	``log_ai_failure`` can scrub an echoed key even when ``_get_api_key``
+	would reject it.
+
+	SECURITY: the value only ever lives in a local named ``api_key`` (Frappe's
+	traceback sanitizer and Sentry's denylist both redact that name) and in
+	an ``_ApiKeyAuth``. Never put it in a dict, a header dict, a request body
+	or an exception message."""
+	try:
+		from frappe.utils.password import get_decrypted_password
+
+		api_key = get_decrypted_password(
+			"Optimus Settings", "Optimus Settings", "ai_api_key",
+			raise_exception=False,
+		) or ""
+	except Exception:
+		return ""
+	return api_key.strip() if isinstance(api_key, str) else ""
+
+
+def _get_api_key() -> str:
+	"""The API key to send, stripped of surrounding whitespace (a pasted
+	trailing newline), or ``""`` when none is stored.
+
+	Raises ``AiFixError(kind="config")`` before any HTTP call when the key
+	cannot be sent in an HTTP header (a character outside latin-1, usually a
+	pasted smart quote). ``from None`` drops the ``UnicodeEncodeError``, whose
+	``object`` attribute holds the key, from the exception chain."""
+	api_key = _current_key_or_empty()
+	if not api_key:
+		return ""
+	try:
+		api_key.encode("latin-1")
+	except UnicodeEncodeError:
+		from frappe import _
+
+		raise AiFixError(
+			_("The AI API key in Optimus Settings contains a character that cannot be sent in an HTTP header (often a pasted smart quote). Paste the key again."),
+			kind="config",
+		) from None
+	return api_key
+
+
+class _ApiKeyAuth(requests.auth.AuthBase):
+	"""Attaches the API key header at send time, so no headers dict ever holds
+	the key. ``repr``/``str`` are masked because Frappe's with-context
+	tracebacks, RQ failure logs and Sentry all print frame locals by repr."""
+
+	__slots__ = ("_header", "_value", "_prefix")
+
+	def __init__(self, header: str, value: str, prefix: str = ""):
+		self._header = header
+		self._value = value
+		self._prefix = prefix
+
+	def __call__(self, r):
+		r.headers[self._header] = self._prefix + self._value
+		return r
+
+	def __repr__(self) -> str:
+		return f"<_ApiKeyAuth {self._header}: ********>"
+
+	__str__ = __repr__
+
 
 def _resolve_provider() -> dict:
 	"""Resolve the active provider config: protocol, base_url, model,
