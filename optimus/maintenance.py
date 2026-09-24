@@ -64,9 +64,15 @@ _SAVEPOINT = "optimus_scrub_row"
 # frappe.deferred_insert.queue_prefix + doctype: only this queue is flushed.
 _ERROR_LOG_QUEUE = "insert_queue_for_Error Log"
 # The flush takes at most this many queue entries (each a record or a list of
-# them) and commits after every _FLUSH_COMMIT_EVERY inserted rows.
+# them) and commits after every _FLUSH_COMMIT_EVERY inserted rows. It stops
+# after _FLUSH_MAX_FAILURES inserts in a row fail (a crashed table, a lost
+# connection), instead of popping, and losing, every entry left.
 _FLUSH_MAX_POPS = 10_000
 _FLUSH_COMMIT_EVERY = 100
+_FLUSH_MAX_FAILURES = 3
+# The fields of a queued Error Log record that are masked before it is
+# inserted (the ones the scrub reads in a stored row).
+_QUEUED_TEXT_FIELDS = ("error", "method", "metadata")
 _AI_FRAME = "%ai_fix.py%"
 # The purge's frame pattern: Optimus's own module only, so another app's
 # openai_fix.py rows are never deleted (the "optimus/" prefix excludes them).
@@ -221,23 +227,38 @@ def _queued_records(raw) -> list | None:
 	return records if isinstance(records, list) else [records]
 
 
-def _flush_deferred_error_logs() -> int:
+def _flush_deferred_error_logs(api_key: str) -> int:
 	"""Insert the Error Log rows waiting in Frappe's deferred-insert queue in
-	Redis, so the scrub sees them instead of them landing unmasked later.
+	Redis, masked, so they neither land unmasked later nor escape the scrub.
 	Frappe queues its own error snapshots there (a server error, and every
-	error in developer mode), and an AI failure row is queued there again when
-	the transaction that inserted it rolls back. A site whose scheduler is
+	error in developer mode). An AI failure row is queued there again only
+	when a rollback removed it, which happens on a transactional engine
+	(Postgres); on MariaDB the Error Log is a MyISAM table, so the row
+	survives the rollback and nothing is queued. A site whose scheduler is
 	paused never flushes that queue. Only the Error Log queue: other
 	doctypes' queues stay the scheduler's.
+
+	Each record's ``error``, ``method`` and ``metadata`` are masked with
+	``_mask`` and ``api_key`` (the key the caller read before the first pop;
+	``method`` cut to its column) BEFORE the record is inserted, so a queued
+	pre-fix snapshot never reaches the database (the INSERT statement, the
+	binlog, the query logs) with the key in it. A record that cannot be
+	masked is counted and dropped, never inserted unmasked.
 
 	Takes only the entries queued when it starts, at most ``_FLUSH_MAX_POPS``
 	of them, so a busy producer cannot keep it running, and commits after
 	every ``_FLUSH_COMMIT_EVERY`` inserted rows. An entry that is not JSON, or
-	a record that cannot be inserted, is counted and skipped; a failure to
-	read the queue stops the flush. Never raises; returns how many entries or
-	rows could not be inserted (a queue that cannot be read counts as one)."""
+	a record that cannot be inserted, is counted and skipped. After
+	``_FLUSH_MAX_FAILURES`` inserts in a row fail it stops, and pushes the
+	last entry back onto the queue (as popped; or, when some of its records
+	were inserted, only the ones that were not, so none is inserted twice),
+	so it is not lost. A failure to read the queue stops the flush. Never
+	raises; returns how many entries or rows could not be inserted (a queue
+	that cannot be read, or an entry that cannot be pushed back, counts as
+	one)."""
 	failed = 0
 	inserted = 0
+	failures_in_a_row = 0
 	try:
 		pops = min(int(frappe.cache.llen(_ERROR_LOG_QUEUE) or 0), _FLUSH_MAX_POPS)
 		for _ in range(pops):
@@ -248,13 +269,29 @@ def _flush_deferred_error_logs() -> int:
 			if records is None:
 				failed += 1
 				continue
-			for record in records:
-				if not _insert_error_log(record):
+			not_inserted = []  # this entry's records whose insert failed
+			stopped_at = None
+			for i, record in enumerate(records):
+				masked = _masked_record(record, api_key)
+				if masked is None:
 					failed += 1
 					continue
-				inserted += 1
-				if inserted % _FLUSH_COMMIT_EVERY == 0:
-					safe_commit()
+				if _insert_error_log(masked):
+					failures_in_a_row = 0
+					inserted += 1
+					if inserted % _FLUSH_COMMIT_EVERY == 0:
+						safe_commit()
+					continue
+				failed += 1
+				not_inserted.append(record)
+				failures_in_a_row += 1
+				if failures_in_a_row >= _FLUSH_MAX_FAILURES:
+					stopped_at = i
+					break
+			if stopped_at is not None:
+				left = not_inserted + records[stopped_at + 1:]
+				frappe.cache.rpush(_ERROR_LOG_QUEUE, raw if len(left) == len(records) else json.dumps(left))
+				break
 	except Exception:
 		failed += 1
 	finally:
@@ -265,6 +302,26 @@ def _flush_deferred_error_logs() -> int:
 		except Exception:
 			failed += 1
 	return failed
+
+
+def _masked_record(record, api_key: str) -> dict | None:
+	"""A queued ``record`` with its ``_QUEUED_TEXT_FIELDS`` masked (see
+	``_mask_row``), or None when it is not a record or masking it failed."""
+	if not isinstance(record, dict):
+		return None
+	masked = _mask_row(record, _QUEUED_TEXT_FIELDS, api_key)
+	if masked is None:
+		return None
+	return {**record, **masked[0]}
+
+
+def _error_log_queue_length() -> int | None:
+	"""How many entries wait in Error Log's deferred-insert queue, or None
+	when the queue cannot be read."""
+	try:
+		return max(0, int(frappe.cache.llen(_ERROR_LOG_QUEUE) or 0))
+	except Exception:
+		return None
 
 
 def _insert_error_log(record: dict) -> bool:
@@ -519,29 +576,35 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	module docstring). A row is written only when the masking changes it,
 	with ``update_modified=False``. Idempotent: a second run changes nothing.
 	Prompt text (source code, SQL) in those rows is left as is; use
-	``purge_ai_error_logs`` to remove the rows entirely. A real run first
-	inserts the Error Log rows still waiting in the deferred-insert queue
-	(see ``_flush_deferred_error_logs``); a dry run does not, so it does not
-	count them. One row that cannot be masked or written is counted in
-	``failed`` and skipped; it never stops the others. ``dry_run`` accepts
-	only the values ``_dry_run_flag`` names (``None`` is a dry run) and
-	raises ``ValueError`` for anything else.
+	``purge_ai_error_logs`` to remove the rows entirely. It reads the stored
+	key first. A real run then inserts the Error Log rows still waiting in
+	the deferred-insert queue, each masked before its INSERT (see
+	``_flush_deferred_error_logs``); a dry run does not, so it does not count
+	them, and only reads the queue length. One row that cannot be masked or
+	written is counted in ``failed`` and skipped; it never stops the others.
+	``dry_run`` accepts only the values ``_dry_run_flag`` names (``None`` is
+	a dry run) and raises ``ValueError`` for anything else.
 
 	Returns ``{"candidates", "changed", "deleted_docs_changed", "residual",
-	"failed"}``: Error Log rows read, Error Log rows and Deleted Document rows
-	masked, rows that still hold a key-shaped value after masking (checked
-	with a detector independent of the masking, only in the rows read), and
-	rows (or queued rows) that could not be processed. With ``dry_run=True``
-	the counts say what WOULD change and nothing is written.
+	"failed", "queued"}``: Error Log rows read, Error Log rows and Deleted
+	Document rows masked, rows that still hold a key-shaped value after
+	masking (checked with a detector independent of the masking, only in the
+	rows read), rows (or queued rows) that could not be processed, and the
+	entries still waiting in the Error Log's deferred-insert queue when the
+	scrub ends (a queue that cannot be read counts one in ``failed``
+	instead). After a real run ``queued`` should be 0: entries left there
+	were not scrubbed, and the scheduler would insert them as they are. With
+	``dry_run=True`` the counts say what WOULD change and nothing is written.
 	"""
 	from optimus.ai_fix import _current_key_or_empty
 
 	dry_run = _dry_run_flag(dry_run)
 	batch_size = max(1, int(batch_size or _BATCH))
-	out = {"candidates": 0, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0}
-	if not dry_run:
-		out["failed"] += _flush_deferred_error_logs()
+	out = {"candidates": 0, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 0}
+	# The key first: the flush masks each queued record with it.
 	api_key = _current_key_or_empty()
+	if not dry_run:
+		out["failed"] += _flush_deferred_error_logs(api_key)
 	seen: dict[str, set[str]] = {"Error Log": set(), "Deleted Document": set()}
 
 	for scan in _scans(api_key, _error_log_fields()):
@@ -569,6 +632,11 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 					out["failed"] += 1
 			if not dry_run:
 				safe_commit()
+	queued = _error_log_queue_length()
+	if queued is None:
+		out["failed"] += 1
+	else:
+		out["queued"] = queued
 	return out
 
 
