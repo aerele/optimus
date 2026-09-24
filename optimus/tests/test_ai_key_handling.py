@@ -89,15 +89,14 @@ class TestGetApiKey:
 			ai_fix._get_api_key()
 		assert ei.value.kind == "config"
 		assert "sk-live" not in str(ei.value)
-		# `from None`: the UnicodeEncodeError (whose .object is the key) is
-		# not printed by any traceback formatter or Sentry chain walk.
+		# No exception that could carry the key (a UnicodeEncodeError's .object
+		# is the whole header) is chained: `from None` ...
 		assert ei.value.__cause__ is None
 		assert ei.value.__suppress_context__ is True
-		# The raise happens after the try/except, not inside it, so no
-		# exception is being handled at the point of the raise: __context__
-		# itself is None, not merely suppressed for display. A chain-walker
-		# (Sentry, a custom Error Log formatter) that reads __context__
-		# directly, ignoring __suppress_context__, must not find the key.
+		# ... and no exception is being handled at the point of the raise, so
+		# __context__ itself is None, not merely suppressed for display. A
+		# chain-walker (Sentry, a custom Error Log formatter) that reads
+		# __context__ directly, ignoring __suppress_context__, finds nothing.
 		assert ei.value.__context__ is None
 
 	@pytest.mark.parametrize("bad_key", [
@@ -117,6 +116,36 @@ class TestGetApiKey:
 		assert "sk-live" not in str(ei.value)
 		assert ei.value.__cause__ is None
 		assert ei.value.__context__ is None
+
+	@pytest.mark.parametrize("bad_key", [
+		"sk-live-0123\u00a0456789",
+		"sk-live-0123\u00ad456789",
+		"sk-live-0123\x85456789",
+		"sk-live-0123\x80456789",
+		"sk-live-0123 456789",
+	], ids=["no-break-space", "soft-hyphen", "C1-next-line", "C1-0x80", "internal-space"])
+	def test_a_key_that_is_not_printable_ascii_fails_before_any_http(self, monkeypatch, bad_key):
+		# A no-break space, a soft hyphen or a C1 control encodes in latin-1
+		# and so in a header, but a provider key is plain printable ASCII:
+		# any other character is a paste artefact. Reject it before any HTTP
+		# call, like a smart quote or a newline.
+		_store_key(monkeypatch, bad_key)
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			ai_fix._get_api_key()
+		assert ei.value.kind == "config"
+		assert "sk-live" not in str(ei.value) and "not plain ASCII" in str(ei.value)
+		assert ei.value.__cause__ is None and ei.value.__context__ is None
+		fake = _capture(_Resp(200, _OPENAI_OK))
+		monkeypatch.setattr(requests, "post", fake)
+		with patch("optimus.settings.get_config", return_value=_cfg()):
+			with pytest.raises(ai_fix.AiFixError):
+				ai_fix.suggest_fix(dict(_FINDING))
+		assert fake.calls == []
+
+	def test_every_printable_ascii_character_is_accepted(self, monkeypatch):
+		key = "sk-" + "".join(chr(c) for c in range(0x21, 0x7F))
+		_store_key(monkeypatch, f" {key}\n")
+		assert ai_fix._get_api_key() == key
 
 	def test_unset_key_is_empty_string(self, monkeypatch):
 		_store_key(monkeypatch, None)
