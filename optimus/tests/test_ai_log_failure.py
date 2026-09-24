@@ -832,7 +832,7 @@ class TestAJobTimeoutIsNeverSwallowed:
 		assert not getattr(failed, ai_fix._LOGGED_ATTR, False)
 		assert breadcrumbs == []
 
-	def test_log_ai_failure_while_looking_up_the_session(self, logs, job_timeout, monkeypatch):
+	def test_log_ai_failure_while_looking_up_the_session(self, logs, job_timeout, monkeypatch, breadcrumbs):
 		import frappe
 
 		db = _FakeDB()
@@ -842,9 +842,9 @@ class TestAJobTimeoutIsNeverSwallowed:
 		with pytest.raises(_JobTimeout) as ei:
 			ai_fix.log_ai_failure("t", session_uuid="uuid-1")
 		_assert_fresh_and_clean(ei, job_timeout, raiser)
-		assert logs == []
+		assert logs == [] and breadcrumbs == []
 
-	def test_log_ai_failure_while_registering_the_rollback_callback(self, logs, job_timeout, monkeypatch):
+	def test_log_ai_failure_while_registering_the_rollback_callback(self, logs, job_timeout, monkeypatch, breadcrumbs):
 		import frappe
 
 		raiser = _raising(job_timeout)
@@ -852,6 +852,7 @@ class TestAJobTimeoutIsNeverSwallowed:
 		with pytest.raises(_JobTimeout) as ei:
 			ai_fix.log_ai_failure("t")
 		_assert_fresh_and_clean(ei, job_timeout, raiser)
+		assert breadcrumbs == []  # a timeout is not a failed write
 
 	def test_the_breadcrumb(self, logs, job_timeout, monkeypatch):
 		import frappe
