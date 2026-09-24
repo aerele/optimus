@@ -488,6 +488,52 @@ class TestUsageNormalization:
 		assert ai_fix._usage_from_openai({})["total_tokens"] == 0
 		assert ai_fix._usage_from_anthropic(None)["total_tokens"] == 0
 
+	_ZERO = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+	@pytest.mark.parametrize(
+		"data",
+		[
+			{"usage": "x"}, {"usage": 42}, {"usage": ["a"]}, {"usage": None}, "x", ["usage"], 7,
+			{"usage": {"prompt_tokens": "abc", "completion_tokens": -3, "total_tokens": float("nan")}},
+			{"usage": {"prompt_tokens": float("inf"), "completion_tokens": [1], "total_tokens": {"n": 1}}},
+			{"usage": {"prompt_tokens": True, "completion_tokens": 10**30, "total_tokens": "-5"}},
+		],
+		ids=["str", "int", "list", "none", "data-str", "data-list", "data-int",
+		     "non-numeric-negative-nan", "inf-and-containers", "bool-huge-negative-str"],
+	)
+	def test_malformed_usage_is_zero_and_never_raises(self, data):
+		# A 200 reply with a usable suggestion must not turn into a 500 (whose
+		# snapshot holds the prompt) because the usage block is odd.
+		assert ai_fix._usage_from_openai(data) == self._ZERO
+		anthropic = data
+		if isinstance(data, dict) and isinstance(data.get("usage"), dict):
+			u = data["usage"]
+			anthropic = {"usage": {"input_tokens": u["prompt_tokens"], "output_tokens": u["completion_tokens"]}}
+		assert ai_fix._usage_from_anthropic(anthropic) == self._ZERO
+
+	def test_numeric_strings_and_floats_are_counted(self):
+		assert ai_fix._usage_from_openai(
+			{"usage": {"prompt_tokens": "12", "completion_tokens": 3.9, "total_tokens": None}}
+		) == {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}
+		assert ai_fix._usage_from_anthropic(
+			{"usage": {"input_tokens": "7", "output_tokens": -1}}
+		) == {"prompt_tokens": 7, "completion_tokens": 0, "total_tokens": 7}
+
+	@pytest.mark.parametrize("usage", ["x", {"prompt_tokens": "abc", "input_tokens": "abc"}])
+	def test_a_good_suggestion_is_kept_when_usage_is_malformed(self, monkeypatch, usage):
+		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {**_OPENAI_OK, "usage": usage})))
+		out: dict = {}
+		assert ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=out) == (
+			"**Fix**\n\nuse a join"
+		)
+		assert out == self._ZERO
+		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {**_ANTHROPIC_OK, "usage": usage})))
+		out = {}
+		assert ai_fix._call_anthropic("u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=out) == (
+			"**Fix**\n\nadd an index"
+		)
+		assert out == self._ZERO
+
 
 class TestAnthropicCall:
 	def test_extracts_text_block(self, monkeypatch):
