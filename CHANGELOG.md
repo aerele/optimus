@@ -28,17 +28,21 @@ versions may contain breaking changes see migration notes below).
 - Fixed: the key now exists only in the encrypted Password field, in a local
   variable named `api_key` and in a masked `requests` auth object. It is
   never in a dict, a header dict, a request body, an exception message or an
-  exception chain, and a provider's error reply is scrubbed of it before it
-  is shown. Every Error Log row the AI code writes goes through one
-  function, `ai_fix.log_ai_failure`, with an explicit, scrubbed message (no
-  frame locals) that links to the Optimus Session, written after the failure
-  has been handled, so Sentry never receives the frames of the failed
-  request, where the prepared headers are. A provider call cut off by the
-  web server's worker timeout (a `SystemExit` in the request) leaves without
-  the frames that held the request headers, and writes no Error Log row. A
-  behavioural canary test pushes a fake key through every AI entry point
-  under every failure mode and fails if the key appears in any log,
-  traceback, error-tracker payload or response.
+  exception chain. A provider's error reply is scrubbed before it is shown:
+  of the key stored in Optimus Settings and of the key the request was sent
+  with (so an echo is masked even when the key in Settings was changed while
+  the request ran), each in its raw and its JSON-escaped form. Every Error
+  Log row the AI code writes goes through one function,
+  `ai_fix.log_ai_failure`, with an explicit, scrubbed message (no frame
+  locals) that links to the Optimus Session, written after the failure has
+  been handled, so Sentry never receives the frames of the failed request,
+  where the prepared headers are. A provider call cut off by the web
+  server's worker timeout (a `SystemExit` in the request) leaves without the
+  frames that held the request headers, and writes no Error Log row; such
+  an interrupt while the key is being decrypted leaves without the
+  decryption frames too. A behavioural canary test pushes a fake key
+  through every AI entry point under every failure mode and fails if the
+  key appears in any log, traceback, error-tracker payload or response.
 - **Do this, in this order:**
   1. Now, before upgrading: rotate every AI provider key that was configured
      on a site running an earlier release. Create a new key at the provider
@@ -56,26 +60,48 @@ versions may contain breaking changes see migration notes below).
      after the migrate, until the restart, then check it:
      `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': False}"`,
      then the same command with `'dry_run': True`, which must report
-     `"changed": 0`, `"deleted_docs_changed": 0`, `"residual": 0` and
-     `"failed": 0`. The scrub locks the Error Log while it scans it (the
-     table is MyISAM on MariaDB), one window of 1000 rows per statement, so
-     on a site with a large Error Log run it off-peak. Then clear the failed
-     background jobs from before the upgrade: their stored error text
-     (`rq:job:*` `exc_info`) may hold a provider reply that echoed the key
-     (Desk: RQ Job list, "Remove Failed Jobs", or
+     `"changed": 0`, `"deleted_docs_changed": 0`, `"residual": 0`,
+     `"failed": 0` and `"queued": 0`. `queued` counts the Error Log entries
+     still waiting in Frappe's deferred-insert queue in Redis: a real run
+     inserts them, masked, so after it the queue should be empty. If entries
+     are still queued (more than 10,000 were waiting, inserts kept failing,
+     or processes still running the old code queued more meanwhile), run the
+     real scrub again. The scrub locks the Error Log while it scans it
+     (the table is MyISAM on MariaDB), one window of 1000 rows per
+     statement, so on a site with a large Error Log run it off-peak. Run it
+     with `bench execute` or `bench --site <site> console`, never as a
+     background job: it refuses to run inside one, because a failed job's
+     log would store the unmasked rows it reads. Then clear the failed background jobs from
+     before the upgrade: their stored error text (`rq:job:*` `exc_info`) may
+     hold a provider reply that echoed the key (Desk: RQ Job list, "Remove
+     Failed Jobs", or
      `bench --site <site> execute frappe.core.doctype.rq_job.rq_job.remove_failed_jobs`).
   4. Enter the new key in Optimus Settings.
   - Optional: delete the old AI error rows entirely, since they can also
     hold prompt text. Check the counts first, then delete:
     `bench --site <site> execute optimus.maintenance.purge_ai_error_logs --kwargs "{'dry_run': True}"`,
-    then the same command with `'dry_run': False`.
+    then the same command with `'dry_run': False`. It deletes the rows with
+    a frame in `optimus/ai_fix.py`, or in `frappe_profiler/ai_fix.py` from
+    releases before the app was renamed, and their Deleted Document copies.
+    It locks the Error Log while it scans it too, so on a busy site run it
+    off-peak.
   - If the site sends errors to Sentry, delete the events whose stack
     contains `ai_fix.py`. Treat database backups taken before this upgrade
-    as containing plain-text keys.
-  - A site that ran an earlier release and then uninstalled Optimus still
-    holds the rows, and a site where Optimus was uninstalled and installed
-    again never runs the patch (a new install marks every patch as done): on
-    both, run step 3 by hand (the app must still be on the bench).
+    as containing plain-text keys, and treat bench log files (`logs/`) and
+    binlogs from before the upgrade like backups.
+  - A site where Optimus was uninstalled and installed again never runs the
+    patch (a new install marks every patch as done): run step 3 by hand. A
+    site that ran an earlier release and then uninstalled Optimus still
+    holds the rows, and there `bench execute optimus.maintenance...` fails
+    because the app is not installed on the site. With the app still on the
+    bench, run the scrub from `bench --site <site> console` instead:
+    `from optimus.maintenance import scrub_error_log_secrets`, then
+    `scrub_error_log_secrets(dry_run=False)`, then
+    `scrub_error_log_secrets(dry_run=True)`, which must report the zeros of
+    step 3. Or install Optimus on the site again and run step 3. If no key
+    is stored on the site any more, the scrub has no stored key to search
+    for; its passes that find rows by an `ai_fix.py` frame and a secret
+    marker still run.
   - If you downgrade to an earlier release, it can write keys into the Error
     Log again, and upgrading again does not re-run the patch: repeat step 3
     by hand after the re-upgrade.
@@ -86,10 +112,13 @@ versions may contain breaking changes see migration notes below).
 - AI Error Log rows written by the HTTP layer now link to the Optimus
   Session. For an HTTP error status the row names the provider's own error
   code (`provider_error=`, for example `invalid_request_error` or
-  `insufficient_quota`) when the reply carries one; the reply body itself is
-  never logged, since it can echo the prompt. An unexpected error inside the
-  HTTP layer is logged with its type and plain `file:line:function` frames,
-  without local variables or its message.
+  `insufficient_quota`) when the reply carries one made only of lowercase
+  words (letters joined by `_`, `.`, `:` or `-`, at most 64 characters). Any
+  other value is left out, so a key-shaped string is never logged there,
+  and the reply body itself is never logged, since it can echo the prompt.
+  An unexpected error inside the HTTP layer is logged with its type and
+  plain `file:line:function` frames, without local variables or its
+  message.
 - The per-table `optimus refill_indexes <table>` titles are now one title,
   `optimus refill_indexes`, with the table in the message, so the Error Log
   groups them. An HTTP failure during that refill is logged once, by the
@@ -98,10 +127,14 @@ versions may contain breaking changes see migration notes below).
 - A provider reply that is JSON but not an object (a list or a string) is
   reported as an unexpected response instead of failing the request with a
   server error. A malformed token count in a reply no longer fails a
-  suggestion that was otherwise returned.
-- An API key pasted with a trailing newline or spaces is trimmed. A key with
-  a character that cannot be sent in an HTTP header now fails with a clear
-  message before any request is made.
+  suggestion that was otherwise returned. An Anthropic reply whose text is
+  not a string is reported as an empty response instead of failing the
+  request with a server error.
+- An API key pasted with a trailing newline or spaces is trimmed. A key must
+  be plain printable ASCII: a key with any other character (a space inside
+  it, a pasted smart quote or no-break space, a control character such as a
+  newline or a tab) now fails with a clear message before any request is
+  made.
 - An AI failure row is written to the Error Log immediately. On MariaDB the
   Error Log table is MyISAM, so the row survives a rollback of the request
   or background job that logged it. On Postgres, if the request or
@@ -109,9 +142,13 @@ versions may contain breaking changes see migration notes below).
   the `optimus.api.suggest_fix` endpoint reporting the provider's error),
   the same row is queued in Redis: the scheduler writes it at its next
   deferred-insert run (every 15 minutes), or the next `bench migrate` does.
-  Before, that rollback lost the row on Postgres. If the row cannot be
-  written at all, one line with the error type goes to the `optimus` log
-  (`logs/optimus.log`) instead.
+  Before, that rollback lost the row on Postgres. When a row may be missing
+  (its write failed; after a rollback, its existence could not be checked
+  or it could not be queued again; or the rollback callback could not be
+  registered), one line naming only the error type goes to the `optimus`
+  log (`logs/optimus.log`): "an AI Error Log row may not have been written
+  or re-queued". It is logged at error level, the lowest level Frappe's
+  loggers keep on a production site.
 
 ### Upgrade notes
 
@@ -119,21 +156,34 @@ versions may contain breaking changes see migration notes below).
   a commit per batch) and clears the cache. The scrub never stops the
   migrate: if the Error Log, the Deleted Document table and the queued
   Error Log rows together hold more than 200,000 rows, or their size cannot
-  be read, or the scrub fails, the migrate prints the command to run it by
-  hand, writes an Error Log row
-  titled "Optimus: Error Log key scrub did not run" with the reason and that
-  command, and carries on (step 3 above re-runs it anyway).
-- The scrub never sends the key to the database: it searches for an
-  8-character fragment of the stored key and checks the full key in Python,
-  so the database's query logs record at most that fragment.
+  be read, or the scrub fails, the patch rolls back its open transaction
+  (on Postgres a failed statement would otherwise block every later write
+  of the migrate), prints the command to run it by hand, writes an Error Log
+  row titled "Optimus: Error Log key scrub did not run" with the reason (a
+  row count, or an error type name, never row text) and that command, and
+  carries on (step 3 above re-runs it anyway). If the scrub ran but could
+  not process every row, still found a key-shaped value, or left entries in
+  the queue, the patch writes an Error Log row titled "Optimus: Error Log
+  key scrub did not finish" with those counts and the command. Every
+  outcome also writes one line to the `optimus` log (`logs/optimus.log`),
+  at error level, with the outcome and its counts or error type only.
+- What the scrub sends to the database: its search sends at most an
+  8-character fragment of the stored key, never the whole key, and checks
+  the full key in Python; the queued Error Log rows it inserts are masked
+  before the INSERT; and its UPDATEs carry masked text. So the database's
+  query logs record at most that fragment of the stored key. A ROW-format
+  binlog still records each UPDATE's before-image, the row as it was.
+  Binlogs, replicas, bench `logs/` files and backups from before the
+  upgrade (including the backup `bench update` takes when it starts) still
+  hold the old text; rotating the key makes them harmless.
 - Restart the web server and the background workers together after the
   migrate: until they restart, the old processes run the old code.
 - No Desk form or JavaScript change (open tabs need no reload) and no new
   `site_config.json` key.
 - Verify: the dry run in step 3 above reports `"changed": 0`,
-  `"deleted_docs_changed": 0`, `"residual": 0` and `"failed": 0`, and a
-  failed AI call leaves exactly one Error Log row whose text is an explicit
-  message without a dump of local variables.
+  `"deleted_docs_changed": 0`, `"residual": 0`, `"failed": 0` and
+  `"queued": 0`, and a failed AI call leaves exactly one Error Log row whose
+  text is an explicit message without a dump of local variables.
 
 ---
 
