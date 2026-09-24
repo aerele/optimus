@@ -77,6 +77,7 @@ KEY_MARKS = ("CANARY-7f3a9c1e5b2d4f6a8c0e", "CANARY-7f3a9c1e\u20195b2d4f6a8c0e",
 PII = "pii.canary@example.com"
 PII_SQL = f"SELECT name FROM `tabCustomer` WHERE email_id = '{PII}'"
 ECHO_MARK = "PROVIDER-ECHO"
+SUGGESTION_MARK = "CANARY-SUGGESTION"
 _NAME_REDACTED = frozenset({"api_key"})
 _OPTIMUS_DIR = os.sep + "optimus" + os.sep
 _TESTS_DIR = os.sep + "tests" + os.sep
@@ -345,6 +346,15 @@ def _scenario_post(scenario, sinks, job_timeout):
 			# A gunicorn worker timeout while urllib3 sends: this frame holds
 			# the auth-applied headers (wire_headers), i.e. the key.
 			raise SystemExit(1)
+		if scenario == "malformed_usage":
+			# A usable suggestion whose usage block is not what the parsers expect.
+			usage = "x" if sinks.posts % 2 else {
+				"prompt_tokens": "abc", "input_tokens": "abc", "completion_tokens": -3, "output_tokens": -3,
+			}
+			text = f"{SUGGESTION_MARK}: batch the lookup"
+			if url.endswith("/chat/completions"):
+				return _reply(200, _json_dumps({"choices": [{"message": {"content": text}}], "usage": usage}))
+			return _reply(200, _json_dumps({"content": [{"type": "text", "text": text}], "usage": usage}))
 		if scenario == "http_400_echo":
 			# OpenAI's error object: the identifier-shaped type reaches the row,
 			# the echoed key in ``code`` and the message never do.
@@ -402,6 +412,8 @@ def canary(monkeypatch, request):
 	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
 	monkeypatch.setattr(analyze, "_fetch_recordings", lambda *a, **k: [])
 	monkeypatch.setattr(analyze, "_load_recordings_bundle", lambda *a, **k: None)
+	# A successful AI call (malformed_usage) re-renders the report: not an AI path.
+	monkeypatch.setattr(analyze, "_render_and_attach_reports", lambda *a, **k: None)
 	# The whitelisted endpoints' gates: the caller owns the Ready session.
 	monkeypatch.setattr(api, "_require_profiler_user", lambda: "Administrator")
 	monkeypatch.setattr(api, "_require_session_permission", lambda *a, **k: "SESS-CANARY")
@@ -434,11 +446,12 @@ def _drive(name, fn, args_factory, sinks, scenario, job_timeout):
 _SCENARIOS = (
 	"connection_error", "unicode_encode_error", "http_401", "http_400_echo", "http_404_echo",
 	"http_500_echo", "non_dict_json", "non_latin_key", "rq_timeout", "developer_mode", "scrub_raises",
-	"system_exit",
+	"system_exit", "malformed_usage",
 )
 _PROVIDERS = ("OpenAI", "Anthropic")
-# Nothing is logged: the interrupt must leave untouched (system_exit).
-_NO_ROW_SCENARIOS = ("system_exit",)
+# Nothing is logged: nothing failed (malformed_usage), or the interrupt must
+# leave untouched (system_exit).
+_NO_ROW_SCENARIOS = ("system_exit", "malformed_usage")
 
 
 @pytest.mark.parametrize(
@@ -502,6 +515,10 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 			"where = 'chat/completions'" in t or "where = 'messages'" in t for _, t in sinks.escaped
 		), "an escaped dump never reached the HTTP layer's frame: the key check proved nothing"
 		assert any(PII in t for _, t in sinks.escaped), "no escaped dump held the prompt: it would prove nothing"
+	if scenario == "malformed_usage":
+		assert sinks.escaped == [], f"malformed usage broke a good reply: {[e for e, _ in sinks.escaped]}"
+		for ep in ("ai_fix.suggest_fix", "ai_fix.humanize_steps", "ai_fix.suggest_index", "api.suggest_fix"):
+			assert any(e == ep and SUGGESTION_MARK in t for e, t in sinks.returned), f"{ep}: the suggestion was lost"
 	if scenario == "http_400_echo":
 		assert any("provider_error=invalid_request_error\n" in t for _, t, _ in sinks.stored), (
 			"the provider's error type never reached the row: the code parser went unchecked"

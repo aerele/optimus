@@ -927,6 +927,15 @@ class TestAJobTimeoutIsNeverSwallowed:
 			ai_fix._provider_error_code(resp)
 		_assert_fresh_and_clean(ei, job_timeout, _scrub)
 
+	def test_token_count(self, job_timeout):
+		class _Count:
+			def __int__(self):
+				raise job_timeout
+
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix._usage_from_openai({"usage": {"prompt_tokens": _Count()}})
+		_assert_fresh_and_clean(ei, job_timeout, _Count.__int__)
+
 
 # ---------------------------------------------------------------------------
 # analyze.py / api.py call sites: one row per failure, with a session reference

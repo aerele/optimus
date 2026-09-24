@@ -1809,24 +1809,57 @@ def _http_post(
 	return data
 
 
+# Token counts land in Int columns (Optimus Session.ai_tokens_spent,
+# ai_steps_tokens); a larger reported count is not a real one.
+_MAX_TOKEN_COUNT = 2**31 - 1
+
+
+def _token_count(value) -> int:
+	"""A provider-reported token count as a non-negative int, or 0 when it is
+	not one: not a number (``"abc"``, a container, NaN, infinity), a bool, a
+	negative or an absurdly large value. Usage is informational, so an odd
+	usage block must never fail a reply that already carries a suggestion.
+	Never raises, except an RQ job timeout (re-raised fresh)."""
+	if isinstance(value, bool):
+		return 0
+	interrupt = None
+	try:
+		count = int(value)
+	except _job_timeout_types() as e:
+		interrupt = (type(e), e.args)
+	except Exception:
+		return 0
+	if interrupt is not None:
+		raise interrupt[0](*interrupt[1])
+	return count if 0 <= count <= _MAX_TOKEN_COUNT else 0
+
+
+def _usage_block(data) -> dict:
+	"""``data["usage"]`` when it is a dict, else ``{}``."""
+	usage = data.get("usage") if isinstance(data, dict) else None
+	return usage if isinstance(usage, dict) else {}
+
+
 def _usage_from_openai(data: dict | None) -> dict:
 	"""Normalised token usage from an OpenAI-shaped response (also what the
-	Aerele managed proxy + Ollama/LM Studio/vLLM return). Missing fields →
-	0; ``total`` falls back to prompt+completion when the upstream omits it."""
-	u = (data or {}).get("usage") or {}
-	prompt = int(u.get("prompt_tokens") or 0)
-	completion = int(u.get("completion_tokens") or 0)
-	total = int(u.get("total_tokens") or (prompt + completion))
+	Aerele managed proxy + Ollama/LM Studio/vLLM return). Missing or
+	malformed fields → 0 (see ``_token_count``); ``total`` falls back to
+	prompt+completion when the upstream omits it. Never raises."""
+	u = _usage_block(data)
+	prompt = _token_count(u.get("prompt_tokens"))
+	completion = _token_count(u.get("completion_tokens"))
+	total = _token_count(u.get("total_tokens")) or _token_count(prompt + completion)
 	return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
 
 
 def _usage_from_anthropic(data: dict | None) -> dict:
 	"""Normalised token usage from an Anthropic Messages response
-	(``usage.input_tokens`` / ``usage.output_tokens``)."""
-	u = (data or {}).get("usage") or {}
-	prompt = int(u.get("input_tokens") or 0)
-	completion = int(u.get("output_tokens") or 0)
-	return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
+	(``usage.input_tokens`` / ``usage.output_tokens``). Missing or malformed
+	fields → 0 (see ``_token_count``). Never raises."""
+	u = _usage_block(data)
+	prompt = _token_count(u.get("input_tokens"))
+	completion = _token_count(u.get("output_tokens"))
+	return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": _token_count(prompt + completion)}
 
 
 def _record_session_spend(total_tokens) -> None:
