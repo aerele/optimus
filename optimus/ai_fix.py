@@ -1585,9 +1585,14 @@ def _requeue_if_rolled_back(record: dict, row=None) -> None:
 
 
 def _note_unwritten_row(error_type: str) -> None:
-	"""Leave a trace when an AI failure row could not be written (or queued
-	again after a rollback removed it): one line in the ``optimus`` log
-	naming the error TYPE only (its message could hold anything).
+	"""Leave a trace when an AI failure row may be missing from the Error Log:
+	one line in the ``optimus`` log naming the error TYPE only (its message
+	could hold anything). It says the row "may not have been written or
+	re-queued", because that is all that is known: the write failed; or,
+	after a rollback, the existence check failed (on MariaDB the row may
+	well have survived) or the queue failed; or the rollback callback could
+	not be registered (the row was written, but a later rollback on
+	Postgres could remove it without queuing it again).
 
 	It is logged at ERROR: Frappe's loggers drop anything below ERROR unless
 	DEV_SERVER is set (``bench start``; ``frappe/utils/logger.py``), so a
@@ -1598,7 +1603,7 @@ def _note_unwritten_row(error_type: str) -> None:
 		import frappe
 
 		frappe.logger("optimus").error(
-			f"optimus ai_fix: an AI failure could not be written to the Error Log ({error_type})"
+			f"optimus ai_fix: an AI Error Log row may not have been written or re-queued: {error_type}"
 		)
 	except _job_timeout_types() as e:
 		interrupt = (type(e), e.args)
