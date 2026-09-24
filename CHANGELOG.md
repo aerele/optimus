@@ -8,6 +8,17 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.59] - 2026-09-25
+
+### Changed
+
+- The call tree no longer includes background jobs. A slow job's flat worker
+  loop used to crowd out the request hierarchies the panel is meant to surface.
+  Jobs already have their own RQ Jobs section, so the call tree now shows only
+  foreground actions.
+
+---
+
 ## [0.12.58] - 2026-09-25
 
 ### Fixed
