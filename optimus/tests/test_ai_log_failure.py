@@ -219,11 +219,24 @@ class TestHttpFailurePath:
 		# fresh, so no requests / urllib3 frame (which hold the prepared
 		# headers) travels with it.
 		timeouts = pytest.importorskip("rq.timeouts")
-		monkeypatch.setattr(requests, "post", _post(self._raise(
-			timeouts.JobTimeoutException("Task exceeded maximum timeout value (60 seconds)"))))
+		original = timeouts.JobTimeoutException("Task exceeded maximum timeout value (60 seconds)")
+		raiser = self._raise(original)
+		fake_post = _post(raiser)
+		monkeypatch.setattr(requests, "post", fake_post)
 		with pytest.raises(timeouts.JobTimeoutException) as ei:
 			_call()
+		assert ei.value is not original
+		assert ei.value.args == original.args
 		assert ei.value.__context__ is None and ei.value.__cause__ is None
+		# No frame that raised the original (the fake transport here, requests /
+		# urllib3 in production, whose locals hold the auth header) travels
+		# with the re-raised instance.
+		codes = set()
+		tb = ei.value.__traceback__
+		while tb is not None:
+			codes.add(tb.tb_frame.f_code)
+			tb = tb.tb_next
+		assert raiser.__code__ not in codes and fake_post.__code__ not in codes
 		assert logs == []
 
 	@pytest.mark.parametrize("status", [400, 404, 500])
