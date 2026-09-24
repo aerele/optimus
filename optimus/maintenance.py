@@ -264,9 +264,9 @@ def _flush_deferred_error_logs(api_key: str) -> int:
 	every ``_FLUSH_COMMIT_EVERY`` inserted rows. An entry that is not JSON, or
 	a record that cannot be inserted, is counted and skipped. After
 	``_FLUSH_MAX_FAILURES`` inserts in a row fail it stops, and pushes the
-	last entry back onto the queue (as popped; or, when some of its records
-	were inserted, only the ones that were not, so none is inserted twice),
-	so it is not lost. A failure to read the queue stops the flush. Never
+	last entry back onto the queue, so it is not lost: as popped, or, when
+	some of its records were inserted (or dropped as unmaskable), only the
+	ones whose insert failed or was not tried, so none is inserted twice. A failure to read the queue stops the flush. Never
 	raises; returns how many entries or rows could not be inserted (a queue
 	that cannot be read, or an entry that cannot be pushed back, counts as
 	one)."""
