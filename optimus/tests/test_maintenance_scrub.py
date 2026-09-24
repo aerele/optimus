@@ -604,6 +604,20 @@ class TestWindowedScan:
 		assert [len(c) for c in chunks] == [3, 3, 1]
 		self._assert_windows(f)
 
+	def test_a_chunk_never_gathers_more_than_batch_size_rows(self, fake):
+		# One match in the first window, five in the second. The statement
+		# after the carried-over match asks for batch_size - 1 rows, so no
+		# more than batch_size rows are ever held, and the window is read on
+		# until a statement returns fewer rows than it asked for.
+		hits = ("r0100", "r1100", "r1101", "r1102", "r1103", "r1104")
+		f = fake([(n, LEAKY if n in hits else "Traceback ...\n") for n in self.NAMES])
+		chunks = list(maintenance._chunks("Error Log", [["error", "like", "%ai_fix.py%"]], None, ["name"], 3))
+		assert [r["name"] for c in chunks for r in c] == list(hits)
+		assert [len(c) for c in chunks] == [3, 3]
+		likes = [s for s in f.statements if any(x[1] == "like" for x in s.filters)]
+		assert [s.limit_page_length for s in likes] == [3, 2, 3, 3, 3]
+		self._assert_windows(f)
+
 	def test_purge_is_windowed_too(self, fake):
 		f = self._fake(fake)
 		assert maintenance.purge_ai_error_logs(dry_run=False) == {"error_logs": len(self.HITS), "deleted_documents": 0}
