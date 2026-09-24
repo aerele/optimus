@@ -208,6 +208,12 @@ class _Sinks:
 		self.posts = 0
 		self.entry = ""
 
+	def __repr__(self):
+		# The harness sits in the test frames' locals; a custom repr keeps
+		# _dump_local from copying the collected channels into later dumps,
+		# where they would satisfy the positive controls on their own.
+		return "<canary sinks>"
+
 	def log_error(self, title=None, message=None, reference_doctype=None, reference_name=None, **kw):
 		active = sys.exc_info()[1]
 		self.stored.append((self.entry, f"{title}\n{message if message else _dump_exception(active)}", True))
