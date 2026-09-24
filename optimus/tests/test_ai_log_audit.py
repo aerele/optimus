@@ -12,10 +12,11 @@ when an explicit message is passed, so logging inside an ``except`` block
 sends them to Sentry. The rules:
 
 1. In ``ai_fix.py`` only ``log_ai_failure`` calls ``frappe.log_error``.
-2. In the scanned modules (``analyze.py``, ``api.py``, and ``ai_jobs.py`` as
-   soon as it exists) an AI function never calls ``frappe.log_error``. An AI
-   function references the ``ai_fix`` module or any name imported from
-   ``optimus.ai_fix``.
+2. In the scanned modules (``analyze.py``, ``api.py``, ``maintenance.py``,
+   and ``ai_jobs.py`` as soon as it exists) an AI function never calls
+   ``frappe.log_error``. An AI function references the ``ai_fix`` module or
+   any name imported from ``optimus.ai_fix``. Every non-test module that
+   imports ``optimus.ai_fix`` must be scanned (a guard test enforces it).
 3. No logging call runs inside an ``except`` handler of any ``ai_fix.py``
    function, of any AI function, or of any ``try`` whose body runs an AI
    step (an AI function that uses ai_fix for more than ``log_ai_failure``,
@@ -28,10 +29,11 @@ sends them to Sentry. The rules:
 """
 
 import ast
+import re
 from pathlib import Path
 
 _PKG = Path(__file__).resolve().parents[1]
-_REQUIRED = ("analyze.py", "api.py")
+_REQUIRED = ("analyze.py", "api.py", "maintenance.py")
 _OPTIONAL = ("ai_jobs.py",)  # scanned as soon as a later PR adds it
 _AI_WRAPPERS = frozenset({"_backfill_ai_suggestions"})  # analyze.py; calls _run_ai_backfill
 _BASE_LOGGERS = frozenset({"log_error", "log_ai_failure"})
@@ -266,6 +268,79 @@ def test_scanned_modules_and_wrappers_exist():
 	assert all((_PKG / m).exists() for m in _REQUIRED)
 	names = {fn.name for fn in _functions(_tree("analyze.py"))}
 	assert _AI_WRAPPERS <= names
+
+
+_AI_FIX_MODULE_PATH = re.compile(r"optimus\.ai_fix(?:\.\w+)*")
+
+
+def _imports_ai_fix(tree: ast.Module) -> bool:
+	"""True when ``tree`` imports ``optimus.ai_fix`` or a name from it:
+	``import optimus.ai_fix``, ``from optimus import ai_fix``,
+	``from optimus.ai_fix import x``, their relative forms inside the
+	package, or a dotted-path string naming it (``importlib`` /
+	``frappe.get_attr``)."""
+	for n in ast.walk(tree):
+		if isinstance(n, ast.Import):
+			if any(a.name == "optimus.ai_fix" or a.name.startswith("optimus.ai_fix.") for a in n.names):
+				return True
+		elif isinstance(n, ast.ImportFrom):
+			module = n.module or ""
+			if n.level == 0 and module == "optimus.ai_fix":
+				return True
+			if n.level == 0 and module == "optimus" and any(a.name == "ai_fix" for a in n.names):
+				return True
+			if n.level > 0 and (module == "ai_fix" or (not module and any(a.name == "ai_fix" for a in n.names))):
+				return True
+		elif isinstance(n, ast.Constant) and isinstance(n.value, str) and _AI_FIX_MODULE_PATH.fullmatch(n.value):
+			return True
+	return False
+
+
+def _unaudited_ai_fix_importers(scanned: tuple[str, ...]) -> list[str]:
+	"""Non-test modules under ``optimus/`` that import ``optimus.ai_fix`` but are
+	not scanned by the rules above."""
+	out = []
+	for path in sorted(_PKG.rglob("*.py")):
+		rel = path.relative_to(_PKG).as_posix()
+		if rel == "ai_fix.py" or rel.split("/", 1)[0] in ("tests", "tests_integration"):
+			continue
+		if _imports_ai_fix(ast.parse(path.read_text(encoding="utf-8"), filename=rel)) and rel not in scanned:
+			out.append(rel)
+	return out
+
+
+def test_every_module_that_imports_ai_fix_is_audited():
+	# The rules only see the modules they scan: a new caller of ai_fix (or a
+	# module that grows an ai_fix import) must join _REQUIRED / _OPTIONAL, or
+	# its log calls go unchecked.
+	offenders = _unaudited_ai_fix_importers(_REQUIRED + _OPTIONAL)
+	assert offenders == [], (
+		f"these modules import optimus.ai_fix but test_ai_log_audit.py does not scan them: {offenders}. "
+		"Add them to _REQUIRED (or _OPTIONAL)."
+	)
+
+
+def test_the_importer_detector_sees_every_import_form():
+	forms = (
+		"import optimus.ai_fix\n",
+		"import optimus.ai_fix as a\n",
+		"from optimus import ai_fix\n",
+		"from optimus import settings, ai_fix as a\n",
+		"from optimus.ai_fix import log_ai_failure\n",
+		"def f():\n\tfrom optimus.ai_fix import suggest_fix\n",
+		"from . import ai_fix\n",
+		"from .ai_fix import AiFixError\n",
+		"from ..ai_fix import AiFixError\n",
+		"frappe.get_attr('optimus.ai_fix.suggest_fix')\n",
+		"importlib.import_module('optimus.ai_fix')\n",
+	)
+	for src in forms:
+		assert _imports_ai_fix(ast.parse(src)), src
+	for src in (
+		"from optimus import analyze\n", "import optimus.api\n", "x = 'uses optimus.ai_fix here'\n",
+		"from optimus.ai_fixes import x\n", "ai_fix = f.get('llm_fix')\n",
+	):
+		assert not _imports_ai_fix(ast.parse(src)), src
 
 
 # ---------------------------------------------------------------------------

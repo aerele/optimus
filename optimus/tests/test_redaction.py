@@ -205,6 +205,17 @@ class TestScrubSecrets:
 		# A test/misconfigured key like "k" must not shred ordinary words.
 		assert redaction.scrub_secrets("keep kittens", literals=("k", "", None)) == "keep kittens"
 
+	def test_a_literal_of_exactly_the_minimum_length_is_masked(self):
+		# The boundary: an 8-character literal is replaced, a 7-character one is not.
+		assert redaction.scrub_secrets("key=abcdefgh end", literals=("abcdefgh",)) == "key=******** end"
+		assert redaction.scrub_secrets("key=abcdefg end", literals=("abcdefg",)) == "key=abcdefg end"
+
+	def test_an_x_goog_api_key_entry_is_masked(self):
+		text = "headers = {'content-type': 'application/json', 'x-goog-api-key': 'AIzaSyD-0123456789abcdef'}"
+		assert redaction.scrub_secrets(text) == (
+			"headers = {'content-type': 'application/json', 'x-goog-api-key': '********'}"
+		)
+
 	def test_idempotent(self):
 		text = (
 			f"headers = {{'authorization': 'Bearer {_TOK}'}}\n"
