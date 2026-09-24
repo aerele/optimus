@@ -649,6 +649,37 @@ class TestHttpFailurePath:
 		assert "provider_error" not in msg
 		assert KEY not in msg and "alice@example.com" not in msg and "tabCustomer" not in msg
 
+	@pytest.mark.parametrize(
+		"code",
+		[
+			"invalid_request_error", "rate_limit_exceeded", "authentication_error", "overloaded_error",
+			"insufficient_quota", "model_not_found", "context_length_exceeded",
+			"a" * 30 + "." + "b" * 33,  # 64 characters: the longest kept
+		],
+	)
+	def test_a_lowercase_word_code_is_kept(self, logs, code):
+		# Every real provider code is lowercase-letter words joined by _ . : -
+		assert ai_fix._provider_error_code(_Resp(400, {"error": {"type": code}})) == code
+
+	@pytest.mark.parametrize(
+		"value",
+		[
+			"sk-proj-Ab3dE9fGh2IjKlMnOpQ7",
+			"sk-ant-api03-abcdefghijklmnop",
+			"AIzaSyDabcdefghijklmnopqrstuvwxyz",
+			"Invalid_Request_Error",
+			"invalid_request_error_2",
+			"",
+			"a" * 65,
+		],
+		ids=["openai-key", "anthropic-key", "google-key", "mixed-case", "digit", "empty", "65-chars"],
+	)
+	def test_a_key_shape_is_never_a_provider_error_code(self, logs, value):
+		# None of these is the stored key, so only the shape rule can drop them:
+		# an API key always carries a digit or an upper-case letter.
+		assert value != KEY
+		assert ai_fix._provider_error_code(_Resp(400, {"error": {"type": value, "code": value}})) == ""
+
 	def test_an_echoed_key_code_is_dropped_but_the_type_is_kept(self, logs, monkeypatch):
 		body = {"error": {"message": f"key {KEY} for alice@example.com", "type": "invalid_request_error", "code": KEY}}
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(401, body, text=json.dumps(body))))
@@ -1000,17 +1031,31 @@ class TestAJobTimeoutIsNeverSwallowed:
 
 	def test_provider_error_code_while_checking_an_echoed_key(self, job_timeout, monkeypatch):
 		# The timeout lands while the echoed key (in ``code``) is being checked.
+		# Only a code of lowercase-letter words reaches that check, so the
+		# stored key here has that shape.
+		word_key = "sk-echoed-lowercase-words-only"
+
 		def _scrub(text, literals=()):
-			if KEY in text:
+			if word_key in text:
 				raise job_timeout
 			return text
 
 		monkeypatch.setattr("optimus.redaction.scrub_secrets", _scrub)
-		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", lambda *a, **k: KEY, raising=False)
-		resp = _Resp(400, {"error": {"message": f"UNSCRUBBED {KEY}", "type": "invalid_request_error", "code": KEY}})
+		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", lambda *a, **k: word_key, raising=False)
+		resp = _Resp(400, {"error": {"message": f"UNSCRUBBED {KEY}", "type": "invalid_request_error", "code": word_key}})
 		with pytest.raises(_JobTimeout) as ei:
 			ai_fix._provider_error_code(resp)
 		_assert_fresh_and_clean(ei, job_timeout, _scrub)
+		checked = []
+		tb = ei.value.__traceback__
+		while tb is not None:
+			if tb.tb_frame.f_code.co_filename == ai_fix.__file__:
+				checked.append(tb.tb_frame.f_code.co_name)
+				for name, value in tb.tb_frame.f_locals.items():
+					if name != "api_key":  # redacted by name by Frappe and Sentry
+						assert word_key not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds the echoed key"
+			tb = tb.tb_next
+		assert checked == ["_provider_error_code"]
 
 	def test_token_count(self, job_timeout):
 		class _Count:

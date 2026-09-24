@@ -1636,9 +1636,13 @@ def _response_detail(resp) -> str:
 	raise interrupt[0](*interrupt[1])
 
 
-# An identifier-shaped provider error code: nothing that could be prose, a
-# prompt fragment, an address or a URL.
-_PROVIDER_ERROR_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
+# A provider's machine-readable error code: lowercase-letter words joined by
+# "_", ".", ":" or "-" (invalid_request_error, rate_limit_exceeded,
+# overloaded_error, ...), at most 64 characters. Nothing that could be prose,
+# a prompt fragment, an address or a URL, and no API key: a key always
+# carries a digit or an upper-case letter.
+_PROVIDER_ERROR_RE = re.compile(r"^[a-z]+(?:[_.:-][a-z]+)*$")
+_PROVIDER_ERROR_MAX_LEN = 64
 
 
 def _provider_error_code(resp) -> str:
@@ -1648,11 +1652,12 @@ def _provider_error_code(resp) -> str:
 
 	Read from the JSON body's ``error`` object: ``type`` and ``code`` (OpenAI
 	and compatible servers) or ``type`` (Anthropic). A value is kept only when
-	it is a string that fully matches ``[A-Za-z0-9_.:-]{1,64}`` and does not
-	contain the stored key; both kept values are joined as ``type:code`` when
-	that still fits 64 characters, else the first one is used. Any failure
-	returns ''; an RQ job timeout leaves as a fresh instance, with the parsed
-	body unbound."""
+	it is a string of at most 64 characters made of lowercase-letter words
+	joined by ``_ . : -`` (``_PROVIDER_ERROR_RE``: no digits, no upper case)
+	and does not contain the stored key; both kept values are joined as
+	``type:code`` when that still fits 64 characters, else the first one is
+	used. Any failure returns ''; an RQ job timeout leaves as a fresh
+	instance, with the parsed body unbound."""
 	data = error = value = None
 	interrupt = None
 	try:
@@ -1668,6 +1673,7 @@ def _provider_error_code(resp) -> str:
 			value = error.get(field)
 			if (
 				isinstance(value, str)
+				and len(value) <= _PROVIDER_ERROR_MAX_LEN
 				and _PROVIDER_ERROR_RE.fullmatch(value)
 				and value not in parts
 				and scrub_secrets(value, literals=(api_key,)) == value
@@ -1676,7 +1682,7 @@ def _provider_error_code(resp) -> str:
 		if not parts:
 			return ""
 		joined = ":".join(parts)
-		return joined if len(joined) <= 64 else parts[0]
+		return joined if len(joined) <= _PROVIDER_ERROR_MAX_LEN else parts[0]
 	except _job_timeout_types() as e:
 		interrupt = (type(e), e.args)
 	except Exception:
