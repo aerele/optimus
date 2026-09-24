@@ -788,7 +788,13 @@ def _current_key_or_empty() -> str:
 	SECURITY: the value only ever lives in a local named ``api_key`` (Frappe's
 	traceback sanitizer and Sentry's denylist both redact that name) and in
 	an ``_ApiKeyAuth``. Never put it in a dict, a header dict, a request body
-	or an exception message."""
+	or an exception message.
+
+	An RQ job timeout is never swallowed (the job must stop, and answering
+	"" would send the request unauthenticated): it leaves as a fresh
+	instance raised after the ``try``, so the decrypt frames it interrupted
+	(which hold the key bytes) never reach ``execute_job``'s log."""
+	interrupt = None
 	try:
 		from frappe.utils.password import get_decrypted_password
 
@@ -796,8 +802,12 @@ def _current_key_or_empty() -> str:
 			"Optimus Settings", "Optimus Settings", "ai_api_key",
 			raise_exception=False,
 		) or ""
+	except _job_timeout_types() as e:
+		interrupt = (type(e), e.args)
 	except Exception:
 		return ""
+	if interrupt is not None:
+		raise interrupt[0](*interrupt[1])
 	return api_key.strip() if isinstance(api_key, str) else ""
 
 
@@ -1365,8 +1375,10 @@ def log_ai_failure(
 	- An exception is logged at most once: the HTTP layer logs its own
 	  failures, so a caller that logs the same ``AiFixError`` again is a
 	  no-op (no double rows).
-	- Never raises.
+	- Never raises, except an RQ job timeout (the job must still stop),
+	  which leaves as a fresh instance with no chain.
 	"""
+	interrupt = None
 	try:
 		if exc is not None and getattr(exc, _LOGGED_ATTR, False):
 			return
@@ -1389,6 +1401,8 @@ def log_ai_failure(
 		if not docname and session_uuid:
 			try:
 				docname = frappe.db.get_value("Optimus Session", {"session_uuid": session_uuid}, "name")
+			except _job_timeout_types():
+				raise
 			except Exception:
 				docname = None
 		frappe.log_error(
@@ -1399,22 +1413,33 @@ def log_ai_failure(
 			defer_insert=_defer_error_log_insert(),
 		)
 		_mark_logged(exc)
+	except _job_timeout_types() as e:
+		interrupt = (type(e), e.args)
 	except Exception:
 		pass
+	if interrupt is not None:
+		raise interrupt[0](*interrupt[1])
 
 
 def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None) -> str:
 	"""``lines`` joined and passed through ``redaction.scrub_secrets`` with
 	the live key as a literal. If scrubbing fails, the message keeps only the
-	title and the error type, never the unscrubbed text."""
+	title and the error type, never the unscrubbed text. An RQ job timeout
+	leaves as a fresh instance (no scrubber frame, no chain)."""
 	failed = ""
+	interrupt = None
 	try:
 		from optimus.redaction import scrub_secrets
 
 		api_key = _current_key_or_empty()
 		return scrub_secrets("\n".join(lines), literals=(api_key,))
+	except _job_timeout_types() as e:
+		interrupt = (type(e), e.args)
 	except Exception as e:
 		failed = type(e).__name__
+	if interrupt is not None:
+		lines = None  # never ride on the timeout's traceback unscrubbed
+		raise interrupt[0](*interrupt[1])
 	kind = type(exc).__name__ if exc is not None else "none"
 	return f"{title}\n(details withheld: scrubbing the message failed with {failed}; error type {kind})"
 
@@ -1427,7 +1452,9 @@ def _defer_error_log_insert() -> bool:
 	and only when the site's scheduler runs: deferred rows are written by the
 	scheduler job ``frappe.deferred_insert.save_to_db``, so on a site with the
 	scheduler paused or disabled they would never land. Background jobs and
-	those sites insert directly. Any error answers False."""
+	those sites insert directly. Any error answers False, except an RQ job
+	timeout (re-raised fresh)."""
+	interrupt = None
 	try:
 		import frappe
 
@@ -1436,17 +1463,26 @@ def _defer_error_log_insert() -> bool:
 		from frappe.utils.scheduler import is_scheduler_inactive
 
 		return not is_scheduler_inactive(verbose=False)
+	except _job_timeout_types() as e:
+		interrupt = (type(e), e.args)
 	except Exception:
 		return False
+	raise interrupt[0](*interrupt[1])
 
 
 def _mark_logged(exc: BaseException | None) -> None:
 	"""Flag ``exc`` so a later ``log_ai_failure(..., exc)`` is a no-op."""
-	if exc is not None:
-		try:
-			setattr(exc, _LOGGED_ATTR, True)
-		except Exception:
-			pass
+	if exc is None:
+		return
+	interrupt = None
+	try:
+		setattr(exc, _LOGGED_ATTR, True)
+	except _job_timeout_types() as e:
+		interrupt = (type(e), e.args)
+	except Exception:
+		pass
+	if interrupt is not None:
+		raise interrupt[0](*interrupt[1])
 
 
 def _log_http_error(
@@ -1462,12 +1498,17 @@ def _log_http_error(
 	raised) is then marked logged, so the caller's own ``log_ai_failure`` for
 	it writes no second row."""
 	session_uuid = None
+	interrupt = None
 	try:
 		import frappe
 
 		session_uuid = getattr(frappe.local, "_optimus_spend_session", None)
+	except _job_timeout_types() as e:
+		interrupt = (type(e), e.args)
 	except Exception:
 		session_uuid = None
+	if interrupt is not None:
+		raise interrupt[0](*interrupt[1])
 	log_ai_failure(
 		"optimus ai_fix", session_uuid=session_uuid,
 		provider=provider, where=where, status=status, detail=detail,
@@ -1494,7 +1535,10 @@ def _response_detail(resp) -> str:
 	reaches toasts, API responses and the title of Frappe's own error
 	snapshot, so the body is scrubbed with the live key as a literal BEFORE it
 	is cut to 300 characters (cutting first can split the key, and a partial
-	key no longer matches the literal). Any failure returns ''."""
+	key no longer matches the literal). Any failure returns ''; an RQ job
+	timeout leaves as a fresh instance, with the raw body unbound."""
+	body_text = ""
+	interrupt = None
 	try:
 		body_text = (resp.text or "").strip()
 		if not body_text:
@@ -1502,8 +1546,12 @@ def _response_detail(resp) -> str:
 		from optimus.redaction import scrub_secrets
 
 		return ": " + scrub_secrets(body_text[:65536], literals=(_current_key_or_empty(),))[:300]
+	except _job_timeout_types() as e:
+		interrupt = (type(e), e.args)
 	except Exception:
 		return ""
+	body_text = ""  # the raw body may echo the key: never on the timeout's traceback
+	raise interrupt[0](*interrupt[1])
 
 
 def _http_post(
