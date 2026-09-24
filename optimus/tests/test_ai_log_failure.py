@@ -381,3 +381,48 @@ class TestNothingIsLoggedOrSentWhileAnExceptionIsActive:
 		assert ei.value.__context__ is None and ei.value.__cause__ is None
 		# one row per failed attempt, each written with no exception active
 		assert active_at_log == [None, None]
+
+
+# ---------------------------------------------------------------------------
+# analyze.py / api.py call sites: one row per failure, with a session reference
+# ---------------------------------------------------------------------------
+
+def _backfill_env(monkeypatch):
+	import frappe
+
+	from optimus import analyze
+	from optimus import settings as _settings
+
+	monkeypatch.setattr(analyze, "frappe", frappe)
+	monkeypatch.setattr(frappe.local, "_optimus_spend_session", None, raising=False)
+	cfg = _settings.OptimusConfig(ai_enabled=True, ai_provider="OpenAI")
+	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
+	monkeypatch.setattr(analyze, "_ai_payload_for_finding",
+	                    lambda *a, **k: {"finding_type": "N+1 Query", "title": "t", "technical_detail": {}})
+	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
+	rows = [
+		SimpleNamespace(name=n, finding_type="N+1 Query", severity="High", estimated_impact_ms=1, llm_fix_json=None)
+		for n in ("F1", "F2")
+	]
+	return analyze, SimpleNamespace(session_uuid="uuid-7", findings=rows)
+
+
+class TestCallSitesLogOnce:
+	def test_http_failure_during_backfill_writes_one_referenced_row_each(self, logs, monkeypatch):
+		analyze, doc = _backfill_env(monkeypatch)
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(500, {}, text="upstream down")))
+		out = analyze._run_ai_backfill(doc, cap=0)
+		assert out["failed"] == 2
+		assert len(logs) == 2  # K16: one row per failure, not HTTP layer + caller
+		assert {r["title"] for r in logs} == {"optimus ai_fix"}
+		assert all(r["reference_name"] == "SESS-0001" for r in logs)
+		assert all("session_uuid=uuid-7" in r["message"] for r in logs)
+
+	def test_non_http_failure_is_logged_by_the_caller(self, logs, monkeypatch):
+		analyze, doc = _backfill_env(monkeypatch)
+		empty = {"choices": [{"message": {"content": "   "}}]}
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(200, empty)))
+		analyze._run_ai_backfill(doc, cap=0)
+		assert [r["title"] for r in logs] == ["optimus ai backfill", "optimus ai backfill"]
+		assert "finding=F1" in logs[0]["message"] and "empty response" in logs[0]["message"]
+		assert logs[0]["reference_name"] == "SESS-0001"
