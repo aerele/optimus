@@ -755,6 +755,23 @@ class TestPurgeScope:
 		assert set(f.tables["Error Log"]) == {"o"}
 		assert set(f.tables["Deleted Document"]) == {"d2"}
 
+	@pytest.mark.parametrize("v15_like", [False, True], ids=["v16", "v15"])
+	def test_rows_from_the_pre_rename_package_are_purged_too(self, fake, v15_like):
+		# v0.6.x shipped the AI code as frappe_profiler/ai_fix.py (the app
+		# was renamed to optimus in 0.7.0), so its rows name that path.
+		old = 'File "apps/frappe_profiler/frappe_profiler/ai_fix.py", line 9, in _call_openai_chat\n'
+		other = 'File "apps/acme/acme/openai_fix.py", line 3, in call\n'
+		f = fake(
+			[("a", LEAKY), ("p", old), ("o", other)],
+			[("d1", json.dumps({"doctype": "Error Log", "error": old})), ("d2", other)],
+			v15_like=v15_like,
+		)
+		assert maintenance.purge_ai_error_logs(dry_run=True) == {"error_logs": 2, "deleted_documents": 1}
+		assert f.deletes == []
+		assert maintenance.purge_ai_error_logs(dry_run=False) == {"error_logs": 2, "deleted_documents": 1}
+		assert set(f.tables["Error Log"]) == {"o"}
+		assert set(f.tables["Deleted Document"]) == {"d2"}
+
 	def test_the_scrub_still_reads_them(self, fake):
 		# masking is harmless, so the scrub's candidate filter stays broad
 		other = 'File "apps/acme/acme/openai_fix.py", line 3, in call\n    headers = {\'api_key\': \'secret-value-1\'}\n'

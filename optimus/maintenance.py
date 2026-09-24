@@ -74,11 +74,13 @@ _FLUSH_MAX_FAILURES = 3
 # inserted (the ones the scrub reads in a stored row).
 _QUEUED_TEXT_FIELDS = ("error", "method", "metadata")
 _AI_FRAME = "%ai_fix.py%"
-# The purge's frame pattern: Optimus's own module only, so another app's
-# openai_fix.py rows are never deleted (the "optimus/" prefix excludes them).
-# It holds no LIKE escape, so it works on Frappe v15, whose db_query doubles
-# backslashes, as well as on v16; its "_" is a one-character wildcard.
-_OPTIMUS_AI_FRAME = "%optimus/ai_fix.py%"
+# The purge's frame patterns: Optimus's own module only, under its name and
+# under the app's name before 0.7.0 (frappe_profiler), so another app's
+# openai_fix.py rows are never deleted (the package prefix excludes them).
+# They hold no LIKE escape, so they work on Frappe v15, whose db_query
+# doubles backslashes, as well as on v16; each "_" is a one-character
+# wildcard.
+_OPTIMUS_AI_FRAMES = ("%optimus/ai_fix.py%", "%frappe_profiler/ai_fix.py%")
 # Any of these next to an ai_fix.py frame means the row may hold a key.
 _SECRET_MARKERS = ("%Bearer %", "%api_key%", "%x-api-key%")
 _MIN_KEY_LEN = 8
@@ -645,10 +647,12 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 
 
 def purge_ai_error_logs(dry_run: bool = True) -> dict:
-	"""Delete every Error Log row with a frame in Optimus's ``ai_fix.py``, and
-	every Deleted Document copy of such a row. Opt-in: run it by hand when the
-	stored prompt text (source code, SQL literals) must go too. Rows with
-	another app's ``*ai_fix.py`` frame are left alone.
+	"""Delete every Error Log row with a frame in Optimus's ``ai_fix.py``
+	(``optimus/ai_fix.py``, or ``frappe_profiler/ai_fix.py`` from a release
+	before the app's rename in 0.7.0), and every Deleted Document copy of
+	such a row. Opt-in: run it by hand when the stored prompt text (source
+	code, SQL literals) must go too. Rows with another app's ``*ai_fix.py``
+	frame are left alone.
 
 	Uses ``frappe.db.delete`` so no new Deleted Document copies are made.
 	Returns ``{"error_logs": int, "deleted_documents": int}`` (with
@@ -659,15 +663,16 @@ def purge_ai_error_logs(dry_run: bool = True) -> dict:
 	dry_run = _dry_run_flag(dry_run)
 	out = {"error_logs": 0, "deleted_documents": 0}
 	targets = (
-		("Error Log", [["error", "like", _OPTIMUS_AI_FRAME]], "error_logs"),
+		("Error Log", [], [["error", "like", p] for p in _OPTIMUS_AI_FRAMES], "error_logs"),
 		(
 			"Deleted Document",
-			[["deleted_doctype", "=", "Error Log"], ["data", "like", _OPTIMUS_AI_FRAME]],
+			[["deleted_doctype", "=", "Error Log"]],
+			[["data", "like", p] for p in _OPTIMUS_AI_FRAMES],
 			"deleted_documents",
 		),
 	)
-	for doctype, filters, key in targets:
-		for rows in _chunks(doctype, filters, None, ["name"], _BATCH):
+	for doctype, filters, or_filters, key in targets:
+		for rows in _chunks(doctype, filters, or_filters, ["name"], _BATCH):
 			out[key] += len(rows)
 			if not dry_run:
 				frappe.db.delete(doctype, {"name": ("in", [r["name"] for r in rows])})
