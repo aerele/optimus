@@ -1171,6 +1171,83 @@ class TestQueuedRows:
 		assert (out["queued"], out["failed"]) == (0, 1)
 
 
+class TestKeyHandling:
+	"""The frames of the scrub hold the key only under the names Frappe's
+	traceback sanitizer and Sentry redact (``api_key``, ``secret``), and the
+	module refuses to run inside an RQ job, whose failure log would store
+	its frames' locals (the unmasked rows) with context."""
+
+	@staticmethod
+	def _holds(value, forms) -> bool:
+		if isinstance(value, str):
+			return value in forms
+		if isinstance(value, (tuple, list)):
+			return any(isinstance(v, str) and v in forms for v in value)
+		return False
+
+	@pytest.mark.parametrize("key", [KEY, ANTHROPIC_KEY], ids=["ascii", "smart_quote"])
+	def test_no_maintenance_frame_holds_the_key_under_another_name(self, fake, monkeypatch, key):
+		forms = {key, json.dumps(key)[1:-1]}
+		data = json.dumps({"doctype": "Error Log", "method": f"HTTP 401: bad key {key}"})
+		f = fake([("a", LEAKY.replace(KEY, key)), ("m", "Traceback ...\n")], [("d1", data)], current_key=key)
+		f.tables["Error Log"]["m"]["method"] = f"HTTP 401: bad key {key}"
+		f.cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": f"queued api_key={key}"})]})
+		monkeypatch.setattr(maintenance, "_flush_deferred_error_logs", _REAL_FLUSH)
+		offenders = set()
+		seen = set()
+
+		def _profile(frame, event, arg):
+			if frame.f_code.co_filename != maintenance.__file__ or event not in ("call", "return"):
+				return
+			seen.add(frame.f_code.co_name)
+			for name, value in frame.f_locals.items():
+				if name not in ("api_key", "secret") and TestKeyHandling._holds(value, forms):
+					offenders.add(f"{frame.f_code.co_name}.{name}")
+		sys.setprofile(_profile)
+		try:
+			out = maintenance.scrub_error_log_secrets(dry_run=False)
+		finally:
+			sys.setprofile(None)
+		assert offenders == set()
+		# positive control: the key-handling helpers did run, key in hand
+		assert {"_holds_key", "_json_escaped", "_mask", "_flush_deferred_error_logs", "_key_fragment"} <= seen
+		assert out["changed"] >= 2 and out["deleted_docs_changed"] == 1
+
+	@pytest.fixture
+	def in_rq_job(self, monkeypatch):
+		job = SimpleNamespace(id="job-1")
+		monkeypatch.setitem(sys.modules, "rq", SimpleNamespace(get_current_job=lambda: job))
+
+	@pytest.mark.parametrize("dry_run", [True, False])
+	@pytest.mark.parametrize("func", ["scrub_error_log_secrets", "purge_ai_error_logs"])
+	def test_refuses_to_run_inside_an_rq_job(self, fake, monkeypatch, in_rq_job, func, dry_run):
+		f = fake([("a", LEAKY)], [("d1", LEAKY)])
+		reads = []
+		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", lambda: reads.append(1) or KEY)
+		with pytest.raises(maintenance.InsideBackgroundJobError) as ei:
+			getattr(maintenance, func)(dry_run=dry_run)
+		message = str(ei.value)
+		assert "bench execute" in message and "bench console" in message
+		assert KEY not in message
+		assert f.statements == [] and f.flushes == [] and f.writes == [] and f.deletes == [] and reads == []
+
+	def test_runs_outside_a_job(self, fake, monkeypatch):
+		monkeypatch.setitem(sys.modules, "rq", SimpleNamespace(get_current_job=lambda: None))
+		fake([("a", LEAKY)])
+		assert maintenance.scrub_error_log_secrets(dry_run=True)["changed"] == 1
+		assert maintenance.purge_ai_error_logs(dry_run=True)["error_logs"] == 1
+
+	def test_runs_where_rq_is_not_installed(self, fake, monkeypatch):
+		monkeypatch.setitem(sys.modules, "rq", None)  # the import raises
+		fake([("a", LEAKY)])
+		assert maintenance.scrub_error_log_secrets(dry_run=True)["changed"] == 1
+		assert maintenance.purge_ai_error_logs(dry_run=True)["error_logs"] == 1
+
+	def test_the_module_docstring_says_never_enqueue_it(self):
+		doc = " ".join(maintenance.__doc__.split())
+		assert "bench execute" in doc and "bench console" in doc and "never enqueue" in doc
+
+
 class TestPurgeAiErrorLogs:
 	def test_dry_run_counts_only(self, fake):
 		f = fake([("a", LEAKY), ("b", CLEAN_AI), ("c", UNRELATED)], [("d1", LEAKY)])
