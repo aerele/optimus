@@ -132,6 +132,14 @@ def requeued(monkeypatch):
 	return queued
 
 
+def _crumb(error_type: str) -> str:
+	"""The breadcrumb for a row that may be missing. It says "may": a failed
+	existence check leaves a row that may have survived (MariaDB), and a
+	failed callback registration leaves a written row that a later Postgres
+	rollback could remove."""
+	return f"optimus ai_fix: an AI Error Log row may not have been written or re-queued: {error_type}"
+
+
 @pytest.fixture(autouse=True)
 def breadcrumbs(monkeypatch):
 	"""Capture ``frappe.logger(...).error`` calls as ``(module, message,
@@ -258,7 +266,7 @@ class TestLogAiFailure:
 		frappe.db.rollback()  # must not raise
 		assert len(breadcrumbs) == 1
 		logger_module, message, active = breadcrumbs[0]
-		assert logger_module == "optimus" and "(ConnectionError)" in message
+		assert logger_module == "optimus" and message == _crumb("ConnectionError")
 		assert KEY not in message and "alice@example.com" not in message and "lost for" not in message
 		assert active is None
 
@@ -270,8 +278,7 @@ class TestLogAiFailure:
 		frappe.db.after_rollback.add = _raising(RuntimeError(f"no callbacks {KEY}"))
 		assert ai_fix.log_ai_failure("t", ValueError("x")) is True
 		assert len(logs) == 1
-		assert [(m, a) for m, _, a in breadcrumbs] == [("optimus", None)]
-		assert "(RuntimeError)" in breadcrumbs[0][1] and KEY not in breadcrumbs[0][1]
+		assert breadcrumbs == [("optimus", _crumb("RuntimeError"), None)]
 
 	def test_no_breadcrumb_when_the_requeue_works_or_is_not_needed(self, logs, requeued, monkeypatch, breadcrumbs):
 		import frappe
@@ -410,7 +417,7 @@ class TestLogAiFailure:
 		assert not getattr(failed, ai_fix._LOGGED_ATTR, False)  # a later caller may still log it
 
 	def test_a_failed_write_leaves_a_type_only_breadcrumb_logged_after_the_handler(self, logs, monkeypatch, breadcrumbs):
-		# The row could not be written: one warning line in the optimus log names
+		# The row could not be written: one error-level line in the optimus log names
 		# the error TYPE only (its message could hold anything) and is written
 		# with no exception being handled.
 		import frappe
@@ -422,7 +429,7 @@ class TestLogAiFailure:
 		assert len(breadcrumbs) == 1
 		module, message, active = breadcrumbs[0]
 		assert module == "optimus"
-		assert "RuntimeError" in message
+		assert message == _crumb("RuntimeError")
 		assert KEY not in message and "alice@example.com" not in message and "insert failed" not in message
 		assert active is None
 
@@ -516,7 +523,7 @@ class TestTheBreadcrumbReachesTheLogInProduction:
 			named.setLevel(saved[1])
 			named.propagate = saved[2]
 		err = capsys.readouterr().err
-		assert "an AI failure could not be written to the Error Log (RuntimeError)" in err
+		assert _crumb("RuntimeError") in err
 
 
 def _post(behaviour):
