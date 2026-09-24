@@ -1554,9 +1554,10 @@ def _log_http_error(
 	"""Log one HTTP-layer failure through ``log_ai_failure``: provider, call
 	site, HTTP status, the provider's own error identifier when it sent one
 	(``provider_error``, see ``_provider_error_code``) and a short detail
-	(for a transport error, its type and message, scrubbed). Never the
-	prompt, the source code, the headers or the response body. The session
-	reference comes from the per-worker spend marker the caller set
+	(for a transport error, its type and message, scrubbed; for an
+	unexpected error, its type and plain frames). Never the prompt, the
+	source code, the headers or the response body. The session reference
+	comes from the per-worker spend marker the caller set
 	(``analyze._mark_ai_spend_session``), the same one
 	``_record_session_spend`` reads. ``exc`` (the ``AiFixError`` about to be
 	raised) is then marked logged, but only if the row was written, so the
@@ -1688,17 +1689,28 @@ def _http_post(
 	is the active one, Frappe's Sentry hook captures it with its
 	requests / urllib3 frames (whose locals hold the prepared headers), and
 	a ``raise`` there would chain it as ``__context__``. The catch-all only
-	records plain values (the exception's type name; for an RQ job timeout,
-	its type and args): a ``UnicodeEncodeError`` from http.client carries the
-	header value, so the error to raise is built after the ``try``, where a
-	failure while building it can neither chain that exception nor find it
-	still bound in this frame."""
+	records plain values (the exception's type name and its frames as
+	``file:line:function`` strings read off the traceback; for an RQ job
+	timeout, its type and args): a ``UnicodeEncodeError`` from http.client
+	carries the header value, so the error to raise is built after the
+	``try``, where a failure while building it can neither chain that
+	exception nor find it still bound in this frame.
+
+	The catch-all takes ``BaseException``. An interrupt that is not an
+	``Exception`` (``SystemExit`` from a gunicorn worker timeout,
+	``KeyboardInterrupt``, a gevent ``Timeout``) is re-raised after the
+	``try`` as the SAME instance (gevent matches its timeout by identity),
+	with its traceback, ``__context__`` and ``__cause__`` cleared, and is not
+	logged: otherwise it would leave with the requests / urllib3 frames,
+	which Sentry's WSGI middleware ships with their locals."""
 	timeout = timeout or _resolve_timeout_seconds()
 	job_timeout_types = _job_timeout_types()
 	failure: AiFixError | None = None
 	unexpected_name: str | None = None
+	unexpected_frames: list[str] = []
 	interrupt_type: type[BaseException] | None = None
 	interrupt_args: tuple = ()
+	escaping: BaseException | None = None
 	detail = ""
 	resp = None
 	try:
@@ -1709,11 +1721,28 @@ def _http_post(
 	except requests.exceptions.RequestException as e:
 		failure = AiFixError(f"Couldn't reach the AI provider: {type(e).__name__}.", kind="transport")
 		detail = f"{type(e).__name__}: {e}"
-	except Exception as e:
+	except BaseException as e:
 		if isinstance(e, job_timeout_types):
 			interrupt_type, interrupt_args = type(e), e.args
+		elif not isinstance(e, Exception):
+			escaping = e
 		else:
 			unexpected_name = type(e).__name__
+			# file:line:function per frame, read straight off the traceback:
+			# no source lookup (no I/O while this handler runs), no locals,
+			# no message.
+			unexpected_frames = [
+				f"{frame.f_code.co_filename}:{lineno}:{frame.f_code.co_name}"
+				for frame, lineno in traceback.walk_tb(e.__traceback__)
+			]
+	if escaping is not None:
+		# Not ours to handle: it leaves unlogged, without the frames below
+		# this one (their locals hold the prepared headers) and unchained.
+		escaping.__traceback__ = None
+		escaping.__context__ = None
+		escaping.__cause__ = None
+		escaping.__suppress_context__ = True
+		raise escaping
 	if interrupt_type is not None:
 		# The RQ job hit its timeout while we were sending: it must still stop
 		# the job, so re-raise the same type, but as a fresh instance with no
@@ -1723,7 +1752,8 @@ def _http_post(
 		from frappe import _
 
 		failure = AiFixError(_("The AI request failed ({0}).").format(unexpected_name), kind="transport")
-		detail = unexpected_name
+		# Where it happened, never what it said: plain frames, no message, no locals.
+		detail = unexpected_name + "".join(f"\n  {frame}" for frame in unexpected_frames)
 	if failure is not None:
 		_log_http_error(provider, where, None, detail, exc=failure)
 		raise failure
