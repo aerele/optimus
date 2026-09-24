@@ -10,9 +10,10 @@ A fake key and a PII marker are pushed through every AI entry point while
 is replaced by a recorder that is a superset of what really gets stored:
 
 * ``stored``: what an Error Log row would hold. The explicit ``message``,
-  or, when ``message`` is empty, a dump of every frame's locals (repr) of the
-  active exception, walking ``__cause__`` / ``__context__`` the way Python
-  and Sentry do. That is Frappe's ``get_traceback(with_context=True)`` minus
+  or, when ``message`` is empty, a dump of every frame's locals (repr, plus
+  the public attributes of a plain object, as Frappe's formatter prints
+  them; see ``_dump_local``) of the active exception, walking
+  ``__cause__`` / ``__context__`` the way Python and Sentry do. That is Frappe's ``get_traceback(with_context=True)`` minus
   its weak redaction. An exception an entry point lets out is stored too
   when Frappe would store it: a non-``AiFixError`` (the 500 snapshot, or
   ``execute_job``'s log for an RQ job timeout) and, in the
@@ -139,6 +140,33 @@ _ENTRY_POINTS = {
 }
 
 
+def _dump_local(name, value) -> list[str]:
+	"""``name = repr(value)``. For a value whose type keeps the default
+	``object.__repr__``, also ``name.attr = repr(...)`` for each public
+	non-callable attribute: Frappe's formatter (traceback_with_variables,
+	``objects_details=1``) prints such an object by its public attributes,
+	one level deep, so a plain object holding the key must be caught too."""
+	try:
+		parts = [f"{name} = {value!r}"]
+	except Exception:
+		parts = [f"{name} = <unrepr>"]
+	if type(value).__repr__ != object.__repr__:
+		return parts
+	try:
+		attrs = [a for a in dir(value) if not a.startswith("_")]
+	except Exception:
+		return parts + [f"{name}.<dir> = <undir>"]
+	for attr in attrs:
+		try:
+			attr_value = getattr(value, attr)
+			if callable(attr_value):
+				continue
+			parts.append(f"{name}.{attr} = {attr_value!r}")
+		except Exception:
+			parts.append(f"{name}.{attr} = <unrepr>")
+	return parts
+
+
 def _dump_exception(exc) -> str:
 	parts = []
 	seen = set()
@@ -150,10 +178,7 @@ def _dump_exception(exc) -> str:
 			for name, value in list(tb.tb_frame.f_locals.items()):
 				if name in _NAME_REDACTED:
 					continue
-				try:
-					parts.append(f"{name} = {value!r}")
-				except Exception:
-					parts.append(f"{name} = <unrepr>")
+				parts += _dump_local(name, value)
 			tb = tb.tb_next
 		exc = exc.__cause__ if exc.__suppress_context__ else exc.__context__
 	return "\n".join(parts)
@@ -168,10 +193,7 @@ def _dump_stack(frame) -> str:
 			for name, value in list(frame.f_locals.items()):
 				if name in _NAME_REDACTED:
 					continue
-				try:
-					parts.append(f"{name} = {value!r}")
-				except Exception:
-					parts.append(f"{name} = <unrepr>")
+				parts += _dump_local(name, value)
 		frame = frame.f_back
 	return "\n".join(parts)
 
@@ -213,16 +235,17 @@ class _FakeDB:
 		pass
 
 
-class _Resp:
-	"""Plain object like requests.Response: its repr never shows the body."""
-
-	def __init__(self, status_code, payload=None, text=""):
-		self.status_code = status_code
-		self._payload = payload
-		self.text = text
-
-	def json(self):
-		return self._payload
+def _reply(status_code: int, body: str) -> requests.Response:
+	"""The provider's reply as a REAL ``requests.Response`` (what ``_http_post``
+	holds in its ``resp`` local), so the dumps render it exactly as Frappe's
+	formatter and Sentry do (``<Response [400]>``), never by a stand-in's own
+	attributes. ``_http_post`` reads only ``status_code``, ``text`` and
+	``json()``."""
+	resp = requests.Response()
+	resp.status_code = status_code
+	resp._content = body.encode("utf-8")
+	resp.encoding = "utf-8"
+	return resp
 
 
 def _wire_headers(url, headers, auth):
@@ -254,11 +277,11 @@ def _scenario_post(scenario, sinks, job_timeout):
 		if scenario == "rq_timeout":
 			raise job_timeout("Task exceeded maximum timeout value (60 seconds)")
 		if scenario == "http_401":
-			return _Resp(401, {}, text=_json_dumps({"error": f"Incorrect API key {KEY} for {PII}"}))
+			return _reply(401, _json_dumps({"error": f"Incorrect API key {KEY} for {PII}"}))
 		if scenario in _ECHO_STATUS:
-			return _Resp(_ECHO_STATUS[scenario], {}, text=_json_dumps({"error": f"{ECHO_MARK}: key {KEY} rejected for {PII}"}))
+			return _reply(_ECHO_STATUS[scenario], _json_dumps({"error": f"{ECHO_MARK}: key {KEY} rejected for {PII}"}))
 		if scenario == "non_dict_json":
-			return _Resp(200, ["unexpected", "list"])
+			return _reply(200, _json_dumps(["unexpected", "list"]))
 		raise AssertionError(f"requests.post must not be called in scenario {scenario!r}")
 	return _post
 
