@@ -784,20 +784,32 @@ def test_connection() -> dict:
 
 def _current_key_or_empty() -> str:
 	"""The stored ``Optimus Settings.ai_api_key``, stripped, or ``""`` when it
-	is unset or cannot be decrypted. Never raises and never validates, so
-	``log_ai_failure`` can scrub an echoed key even when ``_get_api_key``
-	would reject it.
+	is unset or cannot be decrypted. Never validates, so ``log_ai_failure``
+	can scrub an echoed key even when ``_get_api_key`` would reject it.
 
 	SECURITY: the value only ever lives in a local named ``api_key`` (Frappe's
 	traceback sanitizer and Sentry's denylist both redact that name) and in
 	an ``_ApiKeyAuth``. Never put it in a dict, a header dict, a request body
 	or an exception message.
 
-	An RQ job timeout is never swallowed (the job must stop, and answering
-	"" would send the request unauthenticated): it leaves as a fresh
-	instance raised after the ``try``, so the decrypt frames it interrupted
-	(which hold the key bytes) never reach ``execute_job``'s log."""
+	Any ``Exception`` from the decryption answers ``""``. Two kinds of
+	interrupt still leave, both raised after the ``try`` so the decrypt
+	frames they interrupted (Fernet's and ``cstr``'s locals hold the key
+	bytes) never travel with them:
+
+	- an RQ job timeout (the job must stop, and answering "" would send the
+	  request unauthenticated) leaves as a fresh instance of its type, so
+	  those frames never reach ``execute_job``'s log;
+	- an interrupt that is not an ``Exception`` (``SystemExit`` from a
+	  gunicorn worker timeout, ``KeyboardInterrupt``, a gevent ``Timeout``)
+	  leaves as the SAME instance (gevent matches its timeout by identity),
+	  with its traceback, ``__context__`` and ``__cause__`` cleared, as in
+	  ``_http_post``: Sentry's WSGI middleware would ship those frames'
+	  locals. It leaves unchained when this function is not itself called
+	  while an exception is being handled."""
+	job_timeout_types = _job_timeout_types()
 	interrupt = None
+	escaping: BaseException | None = None
 	try:
 		from frappe.utils.password import get_decrypted_password
 
@@ -805,10 +817,19 @@ def _current_key_or_empty() -> str:
 			"Optimus Settings", "Optimus Settings", "ai_api_key",
 			raise_exception=False,
 		) or ""
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
-	except Exception:
-		return ""
+	except BaseException as e:
+		if isinstance(e, job_timeout_types):
+			interrupt = (type(e), e.args)
+		elif not isinstance(e, Exception):
+			escaping = e
+		else:
+			return ""
+	if escaping is not None:
+		escaping.__traceback__ = None
+		escaping.__context__ = None
+		escaping.__cause__ = None
+		escaping.__suppress_context__ = True
+		raise escaping
 	if interrupt is not None:
 		raise interrupt[0](*interrupt[1])
 	return api_key.strip() if isinstance(api_key, str) else ""

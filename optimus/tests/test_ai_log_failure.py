@@ -1152,6 +1152,51 @@ class TestAJobTimeoutIsNeverSwallowed:
 		_assert_fresh_and_clean(ei, job_timeout, _Count.__int__)
 
 
+class TestAnInterruptWhileDecryptingTheKey:
+	"""A non-``Exception`` interrupt (``SystemExit`` from a gunicorn worker
+	timeout, ``KeyboardInterrupt``, a gevent ``Timeout``) can land while
+	Frappe decrypts the key, when Fernet's and ``cstr``'s frames hold the
+	plaintext in their locals, and Sentry's WSGI middleware ships frame
+	locals. ``_current_key_or_empty`` lets it leave as the same instance
+	(gevent matches its Timeout by identity), without those frames and
+	unchained, as ``_http_post`` does."""
+
+	@pytest.mark.parametrize(
+		"interrupt",
+		[SystemExit(1), KeyboardInterrupt(), type("GreenletTimeout", (BaseException,), {})(5)],
+		ids=["worker-timeout-SystemExit", "KeyboardInterrupt", "gevent-Timeout"],
+	)
+	def test_it_leaves_as_the_same_instance_without_the_decrypt_frames(self, monkeypatch, interrupt):
+		def _decrypt(*a, **k):
+			plaintext = KEY.encode()  # noqa: F841 what Fernet's frame holds
+			try:
+				raise UnicodeDecodeError("utf-8", KEY.encode(), 0, 1, "invalid start byte")
+			except UnicodeDecodeError:
+				raise interrupt  # noqa: B904 (chained to a key-bearing error on purpose)
+
+		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", _decrypt, raising=False)
+		with pytest.raises(BaseException) as ei:
+			ai_fix._current_key_or_empty()
+		assert ei.value is interrupt
+		assert ei.value.__context__ is None and ei.value.__cause__ is None
+		assert ei.value.__suppress_context__ is True
+		codes = set()
+		tb = ei.value.__traceback__
+		while tb is not None:
+			codes.add(tb.tb_frame.f_code)
+			for name, value in tb.tb_frame.f_locals.items():
+				assert KEY not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds the key"
+			tb = tb.tb_next
+		assert _decrypt.__code__ not in codes
+		assert ai_fix._current_key_or_empty.__code__ in codes
+
+	def test_any_other_error_still_answers_empty(self, monkeypatch):
+		monkeypatch.setattr(
+			"frappe.utils.password.get_decrypted_password", _raising(RuntimeError("bad token")), raising=False
+		)
+		assert ai_fix._current_key_or_empty() == ""
+
+
 # ---------------------------------------------------------------------------
 # analyze.py / api.py call sites: one row per failure, with a session reference
 # ---------------------------------------------------------------------------
