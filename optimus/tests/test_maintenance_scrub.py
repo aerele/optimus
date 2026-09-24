@@ -6,14 +6,18 @@ the key-leak fix, and the v0_12 patch that runs the scrub on migrate.
 
 ``maintenance.frappe`` is replaced wholesale by an in-memory fake that
 implements just the ORM calls the module makes (``get_all`` with LIKE / = / >
-filters, ``or_filters``, ``order_by="name asc"``, ``limit_page_length``;
-``db.set_value`` with a field dict; ``db.count``; ``db.delete``; savepoints;
-``cache.lpop``; ``get_doc(...).insert``).
+/ <= filters, ``or_filters``, ``order_by="name asc"``, ``limit_start``,
+``limit_page_length``; ``db.set_value`` with a field dict; ``db.count``;
+``db.estimate_count``; ``db.has_column``; ``db.delete``; savepoints;
+``cache.llen`` / ``cache.lpop``; ``get_doc(...).insert``).
 """
 
 import importlib
+import inspect
 import json
 import re
+import time
+import tracemalloc
 from types import SimpleNamespace
 
 import pytest
@@ -75,7 +79,29 @@ def _match(row, flt):
 		return row.get(field) == val
 	if op == ">":
 		return (row.get(field) or "") > val
+	if op == "<=":
+		return (row.get(field) or "") <= val
 	raise AssertionError(op)
+
+
+def _unlike(pattern: str) -> str:
+	"""A LIKE pattern's literal text: each escaped character kept as itself."""
+	out, chars = "", iter(pattern)
+	for ch in chars:
+		out += next(chars, "\\") if ch == "\\" else ch
+	return out
+
+
+def _key_runs_in(value: str, key: str, run: int) -> list[str]:
+	"""Every ``run``-character stretch of ``key`` that ``value`` (a LIKE
+	pattern, un-escaped first) holds, raw or JSON-escaped."""
+	text = _unlike(value)
+	found = []
+	for i in range(len(key) - run + 1):
+		piece = key[i:i + run]
+		if piece in text or json.dumps(piece)[1:-1] in text:
+			found.append(piece)
+	return found
 
 
 class _FakeTxn:
@@ -116,14 +142,20 @@ class _FakeTxn:
 
 
 class _FakeFrappe:
-	def __init__(self, error_logs, deleted_docs=()):
+	"""``has_metadata=False`` models Frappe v15, whose Error Log has no
+	``metadata`` column: a statement naming it fails. ``method`` is Data
+	(varchar(140)) and a longer write fails as strict mode does."""
+
+	def __init__(self, error_logs, deleted_docs=(), has_metadata=True):
 		self.tables = {
 			"Error Log": {n: {"name": n, "error": e, "method": "t", "metadata": "{}"} for n, e in error_logs},
 			"Deleted Document": {
 				n: {"name": n, "deleted_doctype": "Error Log", "data": d} for n, d in deleted_docs
 			},
 		}
+		self.has_metadata = has_metadata
 		self.reads = 0
+		self.statements = []  # one SimpleNamespace per get_all, with the names it returned
 		self.writes = []
 		self.deletes = []
 		self.fail_writes = set()
@@ -132,6 +164,7 @@ class _FakeFrappe:
 		self.txn = _FakeTxn(self.db_log)
 		self.db = SimpleNamespace(
 			set_value=self._set_value, delete=self._delete, count=self._count,
+			estimate_count=lambda doctype: len(self.tables[doctype]), has_column=self._has_column,
 			savepoint=self.txn.savepoint, release_savepoint=self.txn.release_savepoint,
 			rollback=self.txn.rollback,
 		)
@@ -140,24 +173,48 @@ class _FakeFrappe:
 		self.commits.append(1)
 		self.txn.commit()
 
-	def get_all(self, doctype, filters=None, or_filters=None, fields=None, order_by=None, limit_page_length=0):
+	def _has_column(self, doctype, column):
+		return self.has_metadata or (doctype, column) != ("Error Log", "metadata")
+
+	def get_all(
+		self, doctype, filters=None, or_filters=None, fields=None, order_by=None, limit_start=0, limit_page_length=0,
+	):
 		assert order_by == "name asc"
 		self.reads += 1
+		assert self.reads <= 2000, "runaway scan: the pagination never advances"
+		statement = SimpleNamespace(
+			doctype=doctype, filters=list(filters or []), or_filters=list(or_filters or []), fields=list(fields),
+			limit_start=limit_start, limit_page_length=limit_page_length, returned=[],
+		)
+		self.statements.append(statement)
+		named = set(fields) | {f[0] for f in statement.filters + statement.or_filters}
+		if doctype == "Error Log" and "metadata" in named and not self.has_metadata:
+			raise RuntimeError("(1054, \"Unknown column 'metadata' in 'SELECT'\")")
 		rows = [
 			r for r in self.tables[doctype].values()
 			if all(_match(r, f) for f in filters or [])
 			and (not or_filters or any(_match(r, f) for f in or_filters))
 		]
 		rows.sort(key=lambda r: r["name"])
+		rows = rows[limit_start:]
 		if limit_page_length:
 			rows = rows[:limit_page_length]
+		statement.returned = [r["name"] for r in rows]
 		return [{k: r.get(k) for k in fields} for r in rows]
+
+	def filter_values(self):
+		"""Every value handed to the ORM as a filter (what reaches SQL)."""
+		return [
+			f[2] for s in self.statements for f in s.filters + s.or_filters if isinstance(f[2], str)
+		]
 
 	def _set_value(self, doctype, name, values, update_modified=True):
 		assert update_modified is False and isinstance(values, dict)
 		self.db_log.append(("write", name))
 		if name in self.fail_writes:
 			raise RuntimeError("Lock wait timeout exceeded")
+		if doctype == "Error Log" and len(values.get("method") or "") > 140:
+			raise RuntimeError("(1406, \"Data too long for column 'method' at row 1\")")
 		for field, value in values.items():
 			self.writes.append((doctype, name, field))
 			self.tables[doctype][name][field] = value
@@ -174,8 +231,8 @@ class _FakeFrappe:
 
 @pytest.fixture
 def fake(monkeypatch):
-	def _make(error_logs, deleted_docs=(), current_key=KEY):
-		f = _FakeFrappe(error_logs, deleted_docs)
+	def _make(error_logs, deleted_docs=(), current_key=KEY, has_metadata=True):
+		f = _FakeFrappe(error_logs, deleted_docs, has_metadata=has_metadata)
 		f.flushes = []
 		monkeypatch.setattr(maintenance, "frappe", f)
 		monkeypatch.setattr(maintenance, "safe_commit", f.commit)
@@ -302,17 +359,268 @@ class TestScrubErrorLogSecrets:
 		assert (out["changed"], out["residual"]) == (0, 1)
 		assert f.writes == []
 
+	def test_batch_size_defaults_to_the_module_batch(self):
+		sig = inspect.signature(maintenance.scrub_error_log_secrets)
+		assert sig.parameters["batch_size"].default == maintenance._BATCH
+
+	def test_a_full_length_title_with_url_credentials_is_masked_and_written(self, fake):
+		# Error Log.method is varchar(140): "u:p" becomes "********", so the
+		# masked title is longer than the column. It is cut to 140 characters
+		# instead of failing the whole row (error text included).
+		title = "POST " + "x" * 90 + " via http://u:p@proxy.example/v1 "
+		title += "y" * (140 - len(title))
+		assert len(title) == 140
+		f = fake([("a", LEAKY)])
+		f.tables["Error Log"]["a"]["method"] = title
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		assert (out["changed"], out["failed"]) == (1, 0)
+		row = f.tables["Error Log"]["a"]
+		assert "u:p@" not in row["method"] and "://********@proxy" in row["method"]
+		assert len(row["method"]) == 140 and row["method"].startswith(title[:100])
+		assert KEY not in row["error"]
+
+	def test_runs_where_error_log_has_no_metadata_column(self, fake):
+		# Frappe v15's Error Log has no metadata column: the scrub neither
+		# selects nor filters on it there.
+		f = fake([("a", LEAKY), ("b", CLEAN_AI), ("m", "Traceback ...\n")], has_metadata=False)
+		f.tables["Error Log"]["m"]["method"] = f"bad key {KEY}"
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		assert out == {"candidates": 3, "changed": 2, "deleted_docs_changed": 0, "residual": 0, "failed": 0}
+		assert KEY not in f.tables["Error Log"]["a"]["error"] + f.tables["Error Log"]["m"]["method"]
+		assert f.statements  # the fake raises on any statement naming metadata
+
+
+def _mid8(key: str) -> str:
+	start = (len(key) - 8) // 2
+	return key[start:start + 8]
+
+
+class TestStoredKeyPass:
+	"""The pass that finds rows holding the key stored today. SQL gets only
+	an 8-character fragment from the middle of the key; the full key is
+	checked in Python."""
+
+	@pytest.mark.parametrize("key", [KEY, ANTHROPIC_KEY], ids=["ascii", "smart_quote"])
+	def test_no_filter_value_holds_the_key(self, fake, key):
+		data = json.dumps({"doctype": "Error Log", "method": f"HTTP 401: bad key {key}"})
+		f = fake([("m", "Traceback ...\n")], [("d1", data)], current_key=key)
+		f.tables["Error Log"]["m"]["method"] = f"HTTP 401: bad key {key}"
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		# positive control: only the stored-key pass can select these two rows
+		assert (out["candidates"], out["changed"], out["deleted_docs_changed"]) == (1, 1, 1)
+		values = f.filter_values()
+		assert values
+		assert [v for v in values if _key_runs_in(v, key, 9)] == []
+		assert [v for v in values if _mid8(key) in _unlike(v)]  # the fragment is what is sent
+
+	def test_a_fragment_match_without_the_key_is_neither_counted_nor_changed(self, fake):
+		frag = _mid8(KEY)
+		# holds the fragment and a maskable token, but not the key
+		near = f"GET /x?ref={frag} Authorization: Bearer abcdefghijklmnop"
+		assert frag in near and KEY not in near
+		f = fake(
+			[("a", "Traceback ...\n"), ("fp", "Traceback ...\n")],
+			[("dfp", json.dumps({"doctype": "Error Log", "error": near}))],
+		)
+		f.tables["Error Log"]["a"]["method"] = f"bad key {KEY}"
+		f.tables["Error Log"]["fp"]["method"] = near
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		assert (out["candidates"], out["changed"], out["deleted_docs_changed"], out["residual"]) == (1, 1, 0, 0)
+		assert f.tables["Error Log"]["fp"]["method"] == near
+		assert [w for w in f.writes if w[1] in ("fp", "dfp")] == []
+		# the SQL did return them: the full-key check in Python dropped them
+		assert {"fp", "dfp"} <= {n for s in f.statements for n in s.returned}
+
+	@pytest.mark.parametrize(("length", "searched"), [(15, False), (16, True)])
+	def test_a_key_shorter_than_16_is_not_searched_by_value(self, fake, length, searched):
+		key = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:length]
+		f = fake([("a", LEAKY.replace(KEY, key) + f"    raw = {key}\n"), ("m", "Traceback ...\n")], current_key=key)
+		f.tables["Error Log"]["m"]["method"] = f"bad key {key}"
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		assert key not in f.tables["Error Log"]["a"]["error"]  # marker pass, masked by value
+		assert (key in f.tables["Error Log"]["m"]["method"]) is not searched
+		assert out["candidates"] == 1 + searched
+		assert bool([v for v in f.filter_values() if _key_runs_in(v, key, 8)]) is searched
+
+
+class TestDryRunCoercion:
+	"""``bench execute --kwargs`` or a hand-written call can pass a string."""
+
+	@pytest.mark.parametrize("value", ["False", "false", "0"])
+	def test_a_false_string_writes(self, fake, value):
+		f = fake([("a", LEAKY)], [("d1", LEAKY)])
+		out = maintenance.scrub_error_log_secrets(dry_run=value)
+		assert (out["changed"], out["deleted_docs_changed"]) == (1, 1)
+		assert KEY not in f.tables["Error Log"]["a"]["error"] and f.flushes == [0]
+
+	@pytest.mark.parametrize("value", ["True", "true", "1"])
+	def test_a_true_string_writes_nothing(self, fake, value):
+		f = fake([("a", LEAKY)], [("d1", LEAKY)])
+		out = maintenance.scrub_error_log_secrets(dry_run=value)
+		assert (out["changed"], out["deleted_docs_changed"]) == (1, 1)
+		assert f.writes == [] and f.commits == [] and f.flushes == []
+
+	def test_purge_coerces_it_too(self, fake):
+		f = fake([("a", LEAKY), ("c", UNRELATED)])
+		assert maintenance.purge_ai_error_logs(dry_run="True") == {"error_logs": 1, "deleted_documents": 0}
+		assert f.deletes == []
+		assert maintenance.purge_ai_error_logs(dry_run="False") == {"error_logs": 1, "deleted_documents": 0}
+		assert set(f.tables["Error Log"]) == {"c"}
+
+
+class TestWindowedScan:
+	"""Error Log is MyISAM: a statement holds a table read lock while it
+	runs. Each LIKE statement reads at most one window of 1000 names."""
+
+	NAMES = [f"r{i:04d}" for i in range(2500)]
+	# window edges (the 1000th / 1001st names) and both ends of the table
+	HITS = ("r0000", "r0421", "r0999", "r1000", "r1999", "r2000", "r2499")
+
+	def _fake(self, fake):
+		return fake([(n, LEAKY if n in self.HITS else "Traceback ...\n") for n in self.NAMES])
+
+	def _assert_windows(self, f):
+		likes = 0
+		for s in f.statements:
+			if not any(x[1] == "like" for x in s.filters + s.or_filters):
+				# the lookup of the window's last name: primary key only
+				assert s.fields == ["name"] and s.or_filters == []
+				assert [x[:2] for x in s.filters] == [["name", ">"]]
+				assert (s.limit_start, s.limit_page_length) == (999, 1)
+				continue
+			likes += 1
+			lo = [x[2] for x in s.filters if x[:2] == ["name", ">"]]
+			hi = [x[2] for x in s.filters if x[:2] == ["name", "<="]]
+			assert len(lo) == 1 and len(hi) <= 1
+			window = [n for n in f.tables[s.doctype] if n > lo[0] and (not hi or n <= hi[0])]
+			assert len(window) <= 1000, (lo, hi, len(window))
+		assert likes
+
+	def test_every_match_is_found_once_and_no_statement_spans_more_than_a_window(self, fake):
+		f = self._fake(fake)
+		out = maintenance.scrub_error_log_secrets(dry_run=True, batch_size=2)
+		assert out["candidates"] == len(self.HITS) and out["changed"] == len(self.HITS)
+		self._assert_windows(f)
+
+	def test_chunks_yield_each_match_once_in_batches(self, fake):
+		f = self._fake(fake)
+		chunks = list(maintenance._chunks("Error Log", [["error", "like", "%ai_fix.py%"]], None, ["name"], 3))
+		names = [r["name"] for c in chunks for r in c]
+		assert names == sorted(self.HITS)
+		assert [len(c) for c in chunks] == [3, 3, 1]
+		self._assert_windows(f)
+
+	def test_purge_is_windowed_too(self, fake):
+		f = self._fake(fake)
+		assert maintenance.purge_ai_error_logs(dry_run=False) == {"error_logs": len(self.HITS), "deleted_documents": 0}
+		assert not set(self.HITS) & set(f.tables["Error Log"])
+		assert len(f.tables["Error Log"]) == len(self.NAMES) - len(self.HITS)
+		self._assert_windows(f)
+
+
+class TestScrubScanSize:
+	def _frappe(self, monkeypatch, fail=(), estimate=20):
+		calls = []
+
+		def part(name, value):
+			def call(*a, **k):
+				calls.append((name, a, k))
+				if name in fail:
+					raise RuntimeError(f"{name} failed")
+				return value
+			return call
+		db = SimpleNamespace(count=part("count", 10), estimate_count=part("estimate_count", estimate))
+		cache = SimpleNamespace(llen=part("llen", 3))
+		monkeypatch.setattr(maintenance, "frappe", SimpleNamespace(db=db, cache=cache))
+		return calls
+
+	def test_counts_error_logs_every_deleted_document_and_the_queue(self, monkeypatch):
+		calls = self._frappe(monkeypatch)
+		assert maintenance.scrub_scan_size() == 33
+		# every Deleted Document: deleted_doctype is not indexed, so the
+		# passes read the whole table; the estimate is O(1)
+		assert sorted(calls) == [
+			("count", ("Error Log",), {}),
+			("estimate_count", ("Deleted Document",), {}),
+			("llen", ("insert_queue_for_Error Log",), {}),
+		]
+
+	@pytest.mark.parametrize(("broken", "expected"), [("count", 23), ("estimate_count", 13), ("llen", 30)])
+	def test_each_part_is_guarded(self, monkeypatch, broken, expected):
+		self._frappe(monkeypatch, fail={broken})
+		assert maintenance.scrub_scan_size() == expected
+
+	def test_a_negative_estimate_counts_as_zero(self, monkeypatch):
+		# Postgres reports reltuples = -1 for a table never analysed
+		self._frappe(monkeypatch, estimate=-1)
+		assert maintenance.scrub_scan_size() == 13
+
+
+class TestPurgeScope:
+	def test_other_apps_ai_fix_frames_are_not_purged(self, fake):
+		other = 'File "apps/acme/acme/openai_fix.py", line 3, in call\n    headers = {\'api_key\': \'x\'}\n'
+		lookalike = 'File "apps/optimus/optimus/ai-fix.py", line 3\n'  # "_" is not a wildcard
+		f = fake([("a", LEAKY), ("o", other), ("l", lookalike)], [("d1", LEAKY), ("d2", other)])
+		assert maintenance.purge_ai_error_logs(dry_run=False) == {"error_logs": 1, "deleted_documents": 1}
+		assert set(f.tables["Error Log"]) == {"o", "l"}
+		assert set(f.tables["Deleted Document"]) == {"d2"}
+
+	def test_the_scrub_still_reads_them(self, fake):
+		# masking is harmless, so the scrub's candidate filter stays broad
+		other = 'File "apps/acme/acme/openai_fix.py", line 3, in call\n    headers = {\'api_key\': \'secret-value-1\'}\n'
+		f = fake([("o", other)])
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		assert (out["candidates"], out["changed"]) == (1, 1)
+		assert "secret-value-1" not in f.tables["Error Log"]["o"]["error"]
+
+
+def test_a_huge_hostile_value_line_masks_fast_with_bounded_memory():
+	# A planted multi-MB row: the escaped value-line prefix, then a long run
+	# with no \n escape and no double quote. An unbounded repeat keeps one
+	# backtrack frame per character (about 150 bytes each) and can OOM-kill
+	# bench migrate.
+	hostile = "\\n      value = '" + "A" * 4_000_000
+	tracemalloc.start()
+	try:
+		started = time.perf_counter()
+		out = maintenance._mask(hostile, KEY)
+		elapsed = time.perf_counter() - started
+		peak = tracemalloc.get_traced_memory()[1]
+	finally:
+		tracemalloc.stop()
+	assert out.startswith("\\n      value = ********")
+	assert elapsed < 2, elapsed
+	assert peak < 50_000_000, peak
+
 
 class _FakeCache:
-	def __init__(self, queues, broken=False):
+	"""``broken`` fails every call (Redis down); ``broken_pop`` fails only
+	``lpop``; ``refill`` is an entry a busy producer pushes back after every
+	pop. More than 1000 pops raise, so a runaway loop fails fast."""
+
+	def __init__(self, queues, broken=False, broken_pop=False, refill=None):
 		self.queues = queues
 		self.broken = broken
+		self.broken_pop = broken_pop
+		self.refill = refill
+		self.pops = 0
 
-	def lpop(self, key):
+	def llen(self, key):
 		if self.broken:
 			raise ConnectionError("redis down")
-		queue = self.queues.get(key) or []
-		return queue.pop(0).encode() if queue else None
+		return len(self.queues.get(key) or [])
+
+	def lpop(self, key):
+		if self.broken or self.broken_pop:
+			raise ConnectionError("redis down")
+		self.pops += 1
+		if self.pops > 1000:
+			raise RuntimeError("runaway flush")
+		queue = self.queues.setdefault(key, [])
+		item = queue.pop(0).encode() if queue else None
+		if self.refill is not None:
+			queue.append(self.refill)
+		return item
 
 
 class TestFlushDeferredErrorLogs:
@@ -349,8 +657,11 @@ class TestFlushDeferredErrorLogs:
 			txn.rollback(save_point)  # raises for a savepoint that was never set
 			state["aborted"] = False
 
+		self.commit_points = []  # rows inserted so far, at each commit
+
 		def _commit():
 			commits.append(1)
+			self.commit_points.append(len(inserted))
 			txn.commit()
 			state["aborted"] = False
 
@@ -392,16 +703,81 @@ class TestFlushDeferredErrorLogs:
 		assert self.txn.max_depth == 1  # released after the rollback too
 		assert commits == [1]
 
-	def test_rows_inserted_before_a_bad_queue_entry_are_committed(self, monkeypatch):
-		# The loop stops at an entry it cannot read; the rows already popped
-		# and inserted are committed, or a later rollback (the patch's, after
-		# a failed scrub) would drop them after Redis has let them go.
-		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "x"}), "{not json", json.dumps({"error": "z"})]})
+	def test_a_malformed_record_does_not_stop_the_valid_ones_behind_it(self, monkeypatch):
+		# A record that cannot be parsed is counted and skipped; the records
+		# behind it are still inserted, instead of staying queued and landing
+		# unmasked after the scrub.
+		queue = [json.dumps({"error": "x"}), "{not json", json.dumps({"error": "z"}), json.dumps([{"error": "w"}])]
+		cache = _FakeCache({"insert_queue_for_Error Log": queue})
 		inserted, commits = self._frappe(monkeypatch, cache)
+		assert maintenance._flush_deferred_error_logs() == 1
+		assert [r["error"] for r in inserted] == ["x", "z", "w"]
+		assert commits == [1]
+		assert cache.queues["insert_queue_for_Error Log"] == []
+
+	def test_rows_inserted_before_a_failed_pop_are_committed(self, monkeypatch):
+		# An lpop failure stops the loop; the rows already popped and inserted
+		# are committed, or a later rollback (the patch's, after a failed
+		# scrub) would drop them after Redis has let them go.
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "x"}), json.dumps({"error": "y"})]})
+		inserted, commits = self._frappe(monkeypatch, cache)
+		real_lpop = cache.lpop
+
+		def _lpop(key):
+			if cache.pops:
+				raise ConnectionError("redis went away")
+			return real_lpop(key)
+		cache.lpop = _lpop
 		assert maintenance._flush_deferred_error_logs() == 1
 		assert [r["error"] for r in inserted] == ["x"]
 		assert commits == [1]
 		assert len(cache.queues["insert_queue_for_Error Log"]) == 1  # left for the next run
+
+	def test_an_lpop_failure_stops_the_loop(self, monkeypatch):
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "x"})] * 3}, broken_pop=True)
+		inserted, commits = self._frappe(monkeypatch, cache)
+		assert maintenance._flush_deferred_error_logs() == 1
+		assert inserted == [] and commits == [1]
+
+	def test_a_producer_that_refills_the_queue_cannot_keep_it_running(self, monkeypatch):
+		# Only the entries queued when the flush starts are taken.
+		refill = json.dumps({"error": "new"})
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": e}) for e in "abc"]}, refill=refill)
+		inserted, _ = self._frappe(monkeypatch, cache)
+		assert maintenance._flush_deferred_error_logs() == 0
+		assert cache.pops == 3
+		assert [r["error"] for r in inserted] == ["a", "b", "c"]
+		assert len(cache.queues["insert_queue_for_Error Log"]) == 3
+
+	def test_a_queue_drained_meanwhile_ends_the_flush_without_a_failure(self, monkeypatch):
+		# The scheduler's save_to_db can empty the queue after the length was
+		# read: an empty pop ends the flush, it is not a bad record.
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "x"})]})
+		cache.llen = lambda key: 3
+		inserted, commits = self._frappe(monkeypatch, cache)
+		assert maintenance._flush_deferred_error_logs() == 0
+		assert [r["error"] for r in inserted] == ["x"] and cache.pops == 2
+		assert commits == [1]
+
+	def test_pops_at_most_the_cap(self, monkeypatch):
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": str(i)}) for i in range(8)]})
+		inserted, _ = self._frappe(monkeypatch, cache)
+		monkeypatch.setattr(maintenance, "_FLUSH_MAX_POPS", 5)
+		assert maintenance._flush_deferred_error_logs() == 0
+		assert cache.pops == 5 and len(inserted) == 5
+		assert len(cache.queues["insert_queue_for_Error Log"]) == 3
+
+	def test_the_default_cap_is_ten_thousand_pops(self):
+		assert maintenance._FLUSH_MAX_POPS == 10_000
+
+	def test_commits_every_hundred_inserts(self, monkeypatch):
+		queue = [json.dumps({"error": str(i)}) for i in range(150)]
+		queue.append(json.dumps([{"error": f"l{i}"} for i in range(100)]))  # one entry, 100 records
+		cache = _FakeCache({"insert_queue_for_Error Log": queue})
+		inserted, _ = self._frappe(monkeypatch, cache)
+		assert maintenance._flush_deferred_error_logs() == 0
+		assert len(inserted) == 250
+		assert self.commit_points == [100, 200, 250]
 
 	def test_a_failing_commit_is_not_fatal(self, monkeypatch):
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "x"})]})
