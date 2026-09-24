@@ -52,6 +52,19 @@ except ImportError:
 			error=lambda *a, **kw: None,
 		)
 
+	def _stub_sbool(x):
+		# frappe.utils.sbool: "true" / "1" -> True, "false" / "0" -> False,
+		# anything else is returned as is.
+		try:
+			val = x.lower()
+		except Exception:
+			return x
+		if val in ("true", "1"):
+			return True
+		if val in ("false", "0"):
+			return False
+		return x
+
 	def _stub_get_bench_path():
 		# Two levels above the package root, so a relpath of files inside
 		# the package against this value yields a tidy display like
@@ -131,6 +144,7 @@ except ImportError:
 		get_datetime=lambda *a, **kw: _dt.datetime.now(),
 		time_diff_in_seconds=lambda *a, **kw: 0,
 		get_bench_path=_stub_get_bench_path,
+		sbool=_stub_sbool,
 	)
 	_mk_module("frappe.utils.scheduler", is_scheduler_disabled=lambda: False)
 	_mk_module("frappe.utils.background_jobs", enqueue=lambda *a, **kw: None)
