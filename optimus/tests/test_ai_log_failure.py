@@ -42,13 +42,23 @@ class _Callbacks:
 class _FakeDB:
 	"""The parts of ``frappe.database.Database`` the AI log path touches.
 	``commit`` drops the rollback callbacks before committing and a full
-	``rollback`` runs them (a savepoint rollback runs none), as Frappe does."""
+	``rollback`` runs them after the ROLLBACK (a savepoint rollback runs
+	none), as Frappe does.
 
-	def __init__(self, docname="SESS-0001", raise_on_get=False):
+	``transactional`` is the Error Log table's engine: a ROLLBACK removes the
+	rows inserted since the last commit (Postgres), or leaves them (False:
+	MariaDB, where Error Log is a MyISAM table)."""
+
+	def __init__(self, docname="SESS-0001", raise_on_get=False, transactional=True, raise_on_exists=None):
 		self.docname = docname
 		self.raise_on_get = raise_on_get
 		self.lookups = 0
 		self.after_rollback = _Callbacks()
+		self.transactional = transactional
+		self.raise_on_exists = raise_on_exists
+		self.error_logs = set()
+		self.uncommitted = []
+		self.inserted = 0
 
 	def get_value(self, doctype, filters, field):
 		self.lookups += 1
@@ -56,12 +66,29 @@ class _FakeDB:
 			raise RuntimeError("db down")
 		return self.docname
 
+	def insert_error_log(self):
+		self.inserted += 1
+		name = f"ERR-{self.inserted:04d}"
+		self.error_logs.add(name)
+		self.uncommitted.append(name)
+		return name
+
+	def exists(self, doctype, name=None, *a, **k):
+		if self.raise_on_exists is not None:
+			raise self.raise_on_exists
+		return name if doctype == "Error Log" and name in self.error_logs else None
+
 	def commit(self):
 		self.after_rollback.reset()
+		self.uncommitted.clear()
 
 	def rollback(self, *, save_point=None, chain=False):
-		if not save_point:
-			self.after_rollback.run()
+		if save_point:
+			return
+		if self.transactional:
+			self.error_logs.difference_update(self.uncommitted)
+		self.uncommitted.clear()
+		self.after_rollback.run()
 
 
 class _Flags(dict):
@@ -70,13 +97,22 @@ class _Flags(dict):
 	__getattr__ = dict.get
 
 
+def _inserted_row():
+	"""What ``frappe.log_error`` returns after a direct insert: the Error Log
+	document, named (the row goes into the current fake DB)."""
+	import frappe
+
+	insert = getattr(frappe.db, "insert_error_log", None)
+	return SimpleNamespace(name=insert()) if insert else None
+
+
 @pytest.fixture
 def logs(monkeypatch):
 	"""Capture frappe.log_error calls; store a key; fake the DB."""
 	import frappe
 
 	calls = []
-	monkeypatch.setattr(frappe, "log_error", lambda **kw: calls.append(kw), raising=False)
+	monkeypatch.setattr(frappe, "log_error", lambda **kw: calls.append(kw) or _inserted_row(), raising=False)
 	monkeypatch.setattr(frappe, "db", _FakeDB(), raising=False)
 	monkeypatch.setattr(frappe, "flags", _Flags(), raising=False)
 	monkeypatch.setattr(
@@ -158,14 +194,16 @@ class TestLogAiFailure:
 		assert len(logs) == 1 and "defer_insert" not in logs[0]
 		assert requeued == []
 
-	def test_a_rollback_requeues_exactly_one_record_with_the_scrubbed_message(self, logs, requeued):
-		# frappe.throw after the log (the request rollback in frappe.app) or a
-		# failing job (execute_job rolls back) takes the inserted row away: the
-		# same scrubbed row is queued again, once.
+	def test_a_rollback_that_removes_the_row_requeues_exactly_one_record_with_the_scrubbed_message(self, logs, requeued):
+		# Transactional Error Log (Postgres): frappe.throw after the log (the
+		# request rollback in frappe.app) or a failing job (execute_job rolls
+		# back) takes the inserted row away, so the same scrubbed row is
+		# queued again, once.
 		import frappe
 
 		ai_fix.log_ai_failure("optimus ai backfill", ai_fix.AiFixError(f"echoed {KEY}"), session_uuid="uuid-1")
 		frappe.db.rollback()
+		assert frappe.db.error_logs == set()  # the rollback removed it
 		frappe.db.rollback()
 		assert len(requeued) == 1
 		doctype, records = requeued[0]
@@ -177,6 +215,37 @@ class TestLogAiFailure:
 		assert "AiFixError: echoed ********" in records[0]["error"]
 		assert KEY not in json.dumps(records)
 		assert len(logs) == 1  # the callback never calls frappe.log_error (Sentry)
+
+	def test_a_rollback_that_leaves_the_row_queues_nothing(self, logs, requeued, monkeypatch):
+		# MariaDB: Error Log is a MyISAM table, so the ROLLBACK leaves the row
+		# in place; a queued copy would be written as a second row.
+		import frappe
+
+		monkeypatch.setattr(frappe, "db", _FakeDB(transactional=False), raising=False)
+		ai_fix.log_ai_failure("optimus ai backfill", ValueError("x"), session_uuid="uuid-1")
+		frappe.db.rollback()
+		assert frappe.db.error_logs == {"ERR-0001"}  # still there
+		assert requeued == []
+
+	def test_a_failing_existence_check_queues_nothing_and_never_raises(self, logs, requeued, monkeypatch):
+		# Whether the row survived is unknown: queuing could duplicate it.
+		import frappe
+
+		db = _FakeDB(raise_on_exists=RuntimeError("connection lost"))
+		monkeypatch.setattr(frappe, "db", db, raising=False)
+		ai_fix.log_ai_failure("t", ValueError("x"))
+		frappe.db.rollback()  # must not raise
+		assert requeued == []
+
+	def test_nothing_is_registered_without_a_named_row(self, logs, requeued, monkeypatch):
+		# log_error returns the document only after a direct insert (no
+		# database: it prints and returns None). Without its name the callback
+		# could not tell whether a rollback removed it.
+		import frappe
+
+		monkeypatch.setattr(frappe, "log_error", lambda **kw: logs.append(kw), raising=False)
+		assert ai_fix.log_ai_failure("t") is True
+		assert frappe.db.after_rollback.functions == []
 
 	def test_a_commit_then_a_rollback_queues_nothing(self, logs, requeued):
 		import frappe
@@ -206,8 +275,13 @@ class TestLogAiFailure:
 	def test_the_trace_id_and_metadata_of_the_inserted_row_are_kept(self, logs, requeued, monkeypatch):
 		import frappe
 
-		row = SimpleNamespace(trace_id="trace-1", metadata='{"type": "background_job"}')
-		monkeypatch.setattr(frappe, "log_error", lambda **kw: logs.append(kw) or row, raising=False)
+		def _log_error(**kw):
+			logs.append(kw)
+			return SimpleNamespace(
+				name=frappe.db.insert_error_log(), trace_id="trace-1", metadata='{"type": "background_job"}',
+			)
+
+		monkeypatch.setattr(frappe, "log_error", _log_error, raising=False)
 		ai_fix.log_ai_failure("t")
 		frappe.db.rollback()
 		assert requeued[0][1][0]["trace_id"] == "trace-1"
@@ -875,6 +949,16 @@ class TestAJobTimeoutIsNeverSwallowed:
 		with pytest.raises(_JobTimeout) as ei:
 			frappe.db.rollback()
 		_assert_fresh_and_clean(ei, job_timeout, raiser)
+
+	def test_the_rollback_callback_while_checking_the_row(self, logs, job_timeout, monkeypatch, requeued):
+		import frappe
+
+		monkeypatch.setattr(frappe, "db", _FakeDB(raise_on_exists=job_timeout), raising=False)
+		ai_fix.log_ai_failure("t")
+		with pytest.raises(_JobTimeout) as ei:
+			frappe.db.rollback()
+		_assert_fresh_and_clean(ei, job_timeout, _FakeDB.exists)
+		assert requeued == []
 
 	def test_mark_logged(self, job_timeout):
 		class _Sticky(Exception):

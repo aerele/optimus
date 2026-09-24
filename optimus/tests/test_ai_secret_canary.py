@@ -34,7 +34,11 @@ is replaced by a recorder that is a superset of what really gets stored:
 * ``pending``: what each ``frappe.db.after_rollback`` callback holds (its
   closure). ``log_ai_failure`` registers one per row; after the entry points
   ran, a rollback runs them and each record they re-queue through
-  ``frappe.deferred_insert`` is a ``stored`` row too.
+  ``frappe.deferred_insert`` is a ``stored`` row too. The fake DB models a
+  transactional Error Log table (Postgres), where that rollback removes the
+  rows, so every row is re-queued and checked. On MariaDB the table is
+  MyISAM, the rows survive and nothing is re-queued
+  (``test_ai_log_failure.py`` covers that).
 
 A non-``Exception`` interrupt (``system_exit``: a gunicorn worker timeout) is
 not snapshotted by Frappe (``frappe.app`` catches ``Exception``), so it only
@@ -233,6 +237,10 @@ class _Sinks:
 		if active is not None:
 			self.sentry.append((self.entry, _dump_exception(active)))
 		self.stack.append((self.entry, _dump_stack(sys._getframe(1))))
+		# What log_error returns after a direct insert: the named document.
+		import frappe
+
+		return SimpleNamespace(name=frappe.db.insert_error_log())
 
 	def deferred_insert(self, doctype, records):
 		for record in records:
@@ -273,11 +281,16 @@ class _Flags(dict):
 
 
 class _FakeDB:
-	"""``commit`` drops the rollback callbacks, a full ``rollback`` runs them,
-	as ``frappe.database.Database`` does."""
+	"""``commit`` drops the rollback callbacks, a full ``rollback`` runs them
+	after the ROLLBACK, as ``frappe.database.Database`` does. The Error Log
+	table is transactional (Postgres): a ROLLBACK removes the rows inserted
+	since the last commit."""
 
 	def __init__(self, sinks):
 		self.after_rollback = _Callbacks(sinks)
+		self.error_logs = set()
+		self.uncommitted = []
+		self.inserted = 0
 
 	def __repr__(self):
 		return "<canary db>"
@@ -293,12 +306,26 @@ class _FakeDB:
 	def sql(self, *a, **k):
 		return []
 
+	def insert_error_log(self):
+		self.inserted += 1
+		name = f"ERR-{self.inserted:04d}"
+		self.error_logs.add(name)
+		self.uncommitted.append(name)
+		return name
+
+	def exists(self, doctype, name=None, *a, **k):
+		return name if doctype == "Error Log" and name in self.error_logs else None
+
 	def commit(self):
 		self.after_rollback.reset()
+		self.uncommitted.clear()
 
 	def rollback(self, *, save_point=None, chain=False):
-		if not save_point:
-			self.after_rollback.run()
+		if save_point:
+			return
+		self.error_logs.difference_update(self.uncommitted)
+		self.uncommitted.clear()
+		self.after_rollback.run()
 
 
 def _reply(status_code: int, body: str) -> requests.Response:

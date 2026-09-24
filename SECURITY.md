@@ -82,11 +82,13 @@ headers are. Two tests keep it that way: `optimus/tests/test_ai_log_audit.py` fa
 `optimus/tests/test_ai_secret_canary.py` fails if a fake key reaches any
 log, traceback, error-tracker payload or response on any failure path.
 
-`log_ai_failure` inserts the row at once, in the current transaction. If
-that transaction is rolled back later (a `frappe.throw` in the same request,
-a background job that fails), a `frappe.db.after_rollback` callback queues
-the same scrubbed row in Redis, and Frappe's scheduler (every 15 minutes) or
-the next `bench migrate` writes it. If the row cannot be written at all, one
+`log_ai_failure` inserts the row at once, in the current transaction. On
+MariaDB the Error Log table is MyISAM, so the row is written immediately and
+survives a rollback. On Postgres, if that transaction is rolled back later (a
+`frappe.throw` in the same request, a background job that fails), a
+`frappe.db.after_rollback` callback finds the row gone and queues the same
+scrubbed row in Redis, and Frappe's scheduler (every 15 minutes) or the next
+`bench migrate` writes it. If the row cannot be written at all, one
 line with the error type goes to the `optimus` log (`logs/optimus.log`). A
 row for an HTTP failure holds the provider, the call site, the status and,
 when the reply names one, the provider's error code (`provider_error=`),
@@ -154,11 +156,12 @@ new install marks every patch as done).
   cut off by a job timeout or fails in developer mode. On stock Frappe v16
   (Python 3.14 with sentry-sdk 1.45.1) Sentry currently sends no frame
   locals at all, so there the prompt does not reach Sentry this way.
-- An AI failure row is still lost when only a savepoint is rolled back, when
-  the database connection drops before the commit, or when the COMMIT itself
-  fails: no rollback callback runs in those cases. On a site whose scheduler
-  is off, a row queued after a rollback waits in Redis until the next
-  `bench migrate` or a real run of the scrub writes it.
+- On MariaDB an AI failure row survives any rollback (Error Log is a MyISAM
+  table). On Postgres it is still lost when only a savepoint is rolled back,
+  when the database connection drops before the commit, or when the COMMIT
+  itself fails: no rollback callback runs in those cases. On a site whose
+  scheduler is off, a row queued after a rollback waits in Redis until the
+  next `bench migrate` or a real run of the scrub writes it.
 - If the web server's worker timeout interrupts a provider call (a
   `SystemExit` in the request), that call writes no Error Log row. The HTTP
   layer clears the interrupted frames from the exception before it leaves,
