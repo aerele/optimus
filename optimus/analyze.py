@@ -979,7 +979,9 @@ def _log_ai_step_failure(title: str, exc: BaseException, session_uuid: str | Non
 	``run()`` keeps plain ``frappe.log_error`` calls for its own non-AI
 	failures, so it must not reference ``ai_fix`` names itself
 	(``test_ai_log_audit.py`` treats a function that does as AI code). Call
-	it outside any ``except`` block. Never raises."""
+	it outside any ``except`` block. Never raises, except an RQ job timeout:
+	``log_ai_failure`` lets that through as a fresh instance so the job
+	still stops, and ``run()``'s outer handler re-raises it."""
 	from optimus.ai_fix import log_ai_failure
 
 	log_ai_failure(title, exc, session_uuid=session_uuid)
