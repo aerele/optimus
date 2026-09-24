@@ -35,8 +35,9 @@ class AiFixError(Exception):
 	from an HTTP response, so callers can react to it (the temperature retry
 	fires only on a 400 or 422). ``kind`` classifies the failure
 	(``"config"``, ``"transport"``, ``"timeout"``, ``"bad_response"`` here;
-	later releases fill the rest). ``usage`` carries token usage already
-	billed before the failure, when there was any.
+	later releases fill the rest). ``usage`` is reserved for later releases
+	(token usage already billed before the failure): no raise site sets it
+	yet, so it is always None for now.
 
 	The message must never contain the API key: it is shown to the operator
 	and written to the Error Log."""
