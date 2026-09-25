@@ -47,7 +47,7 @@ def _wire_headers(headers, auth):
 
 
 def _post_returning(resp):
-	def _fake_post(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002, F811
+	def _fake_post(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002, F811
 		_fake_post.last = SimpleNamespace(
 			url=url, headers=_wire_headers(headers, auth), raw_headers=headers,
 			body=json, timeout=timeout, auth=auth,
@@ -58,7 +58,7 @@ def _post_returning(resp):
 
 
 def _post_raising(exc):
-	def _fake_post(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002, F811
+	def _fake_post(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002, F811
 		raise exc
 	return _fake_post
 
@@ -69,7 +69,7 @@ def _post_sequence(*resps):
 	calls = []
 	it = iter(resps)
 
-	def _fake_post(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002, F811
+	def _fake_post(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002, F811
 		calls.append(SimpleNamespace(
 			url=url, headers=_wire_headers(headers, auth), body=dict(json or {}), timeout=timeout,
 		))

@@ -357,7 +357,7 @@ _ECHO_STATUS = {
 
 
 def _scenario_post(scenario, sinks, job_timeout):
-	def _post(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+	def _post(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002
 		sinks.posts += 1
 		sinks.wire.append((sinks.entry, repr(headers) + repr(json)))
 		wire_headers = _wire_headers(url, headers, auth)

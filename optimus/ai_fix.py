@@ -1868,10 +1868,13 @@ def _http_post(
 ) -> dict:
 	"""POST JSON, return the parsed response dict. Maps transport / HTTP /
 	decode errors to ``AiFixError`` with operator-friendly messages and logs
-	each failure once (``_log_http_error``). A 3xx reply (a redirect
-	``requests`` did not follow) is ``kind="bad_response"`` and a 4xx / 5xx
-	reply an HTTP error; both are logged with a body-free log text
-	(``_LOG_TEXT_ATTR``), never their body.
+	each failure once (``_log_http_error``). A redirect is never followed
+	(``allow_redirects=False``): ``requests`` drops only a header named
+	``Authorization`` when it follows one to another host, so Anthropic's
+	``x-api-key`` header would be sent on to the redirect target. A 3xx
+	reply is therefore ``kind="bad_response"`` and a 4xx / 5xx reply an HTTP
+	error; both are logged with a body-free log text (``_LOG_TEXT_ATTR``),
+	never their body.
 
 	SECURITY: ``auth`` (an ``_ApiKeyAuth``) attaches the key at send time, so
 	``headers`` never holds it. Every failure is logged and raised OUTSIDE the
@@ -1908,7 +1911,7 @@ def _http_post(
 	detail = ""
 	resp = None
 	try:
-		resp = requests.post(url, headers=headers, json=body, timeout=timeout, auth=auth)
+		resp = requests.post(url, headers=headers, json=body, timeout=timeout, auth=auth, allow_redirects=False)
 	except requests.exceptions.Timeout:
 		failure = AiFixError(f"The AI provider didn't respond within {timeout}s.", kind="timeout")
 		detail = "timeout"
@@ -1956,9 +1959,9 @@ def _http_post(
 
 	status = resp.status_code
 	if 300 <= status < 400:
-		# requests follows a redirect it can, so one that arrives here (no
-		# Location header, or a status it does not follow) is not the
-		# provider's reply, whatever its body holds.
+		# A redirect is never followed (allow_redirects=False, so the key
+		# header is never sent on to its target): it is not the provider's
+		# reply, whatever its body holds.
 		from frappe import _
 
 		failure = AiFixError(
