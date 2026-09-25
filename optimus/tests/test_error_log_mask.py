@@ -564,10 +564,12 @@ class TestFrappesInsertPaths:
 		# The real Document.hook composer (frappe/model/document.py), with
 		# get_doc_hooks and get_attr standing in for their site lookups.
 		document = pytest.importorskip("frappe.model.document", exc_type=ImportError)
+		if not hasattr(getattr(document, "Document", None), "hook"):
+			pytest.skip("frappe is the conftest stub here, without Document.hook")
 		import frappe
 
-		monkeypatch.setattr(frappe, "get_doc_hooks", _doc_events)
-		monkeypatch.setattr(frappe, "get_attr", _resolve)
+		monkeypatch.setattr(frappe, "get_doc_hooks", _doc_events, raising=False)
+		monkeypatch.setattr(frappe, "get_attr", _resolve, raising=False)
 		monkeypatch.setattr(frappe, "db", SimpleNamespace(_disable_transaction_control=0), raising=False)
 		ran = []
 
