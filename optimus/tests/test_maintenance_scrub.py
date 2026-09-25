@@ -997,6 +997,28 @@ class TestMaskedRecord:
 		title = "t" * 140
 		assert maintenance._masked_record({"error": "e", "method": title}, KEY) == {"error": "e", "method": title}
 
+	def test_a_title_one_character_past_its_column_goes_in_front_of_the_error(self):
+		title = "t" * 141
+		assert maintenance._masked_record({"error": "e", "method": title}, KEY) == {
+			"error": f"{title}\ne", "method": "t" * 140,
+		}
+
+	def test_without_optimus_ai_fix_a_timeout_check_lets_everything_go_on(self, monkeypatch):
+		# _reraise_job_timeout imports ai_fix lazily; where that fails it
+		# re-raises nothing, so the masking's fail-safes still work.
+		monkeypatch.setitem(sys.modules, "optimus.ai_fix", None)
+
+		class JobTimeoutException(Exception):
+			pass
+		assert maintenance._reraise_job_timeout(JobTimeoutException("t")) is None
+		assert maintenance._reraise_job_timeout(ValueError("x")) is None
+
+		def _mask(*a, **k):
+			raise ValueError("catastrophic backtracking")
+		monkeypatch.setattr(maintenance, "_mask", _mask)
+		assert maintenance._mask_row({"error": LEAKY}, ("error",), KEY) is None
+		assert maintenance._masked_record({"error": LEAKY}, KEY) is None
+
 	def test_a_smart_quote_key_is_masked(self):
 		# The bare header values of the urllib3 frames, and the key
 		# JSON-escaped in the metadata, only the stored key can find.
