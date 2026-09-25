@@ -66,6 +66,12 @@ import frappe
 from optimus import safe_commit
 from optimus.redaction import SECRET_PLACEHOLDER, scrub_secrets
 
+
+class InsideBackgroundJobError(RuntimeError):
+	"""``scrub_error_log_secrets`` or ``purge_ai_error_logs`` was called
+	inside an RQ job."""
+
+
 _BATCH = 200
 _SAVEPOINT = "optimus_scrub_row"
 # frappe.deferred_insert.queue_prefix + doctype: only this queue is flushed.
@@ -104,12 +110,13 @@ _WINDOW = 1000
 # URL's "u:p" becomes "********"), and in strict mode a value longer than
 # the column fails the whole row's write, error text included.
 _FIELD_LIMITS = {"method": 140}
-# bench migrate runs the scrub only when scrub_scan_size() is at most this; a
-# scan of a larger table would stall the migrate, so the patch prints the
-# command to run instead.
+# bench migrate runs the scrub only when measure_scan_size() finds at most
+# this many rows; a scan of a larger table would stall the migrate, so the
+# patch prints the command to run instead.
 MIGRATE_SCAN_LIMIT = 200_000
-# What scrub_scan_size() returns when a part of the size cannot be read: an
-# unmeasured table must not look small, so the migrate skips the scrub.
+# The row count measure_scan_size() reports when a part of the size cannot
+# be read: an unmeasured table must not look small, so the migrate skips the
+# scrub.
 SCAN_SIZE_UNKNOWN = sys.maxsize
 # Deleted Document rows up to a bound (the parameter): exact, portable, and
 # it reads at most that many index entries.
@@ -496,11 +503,6 @@ def _scans(api_key: str, error_fields: tuple[str, ...]) -> list[_Scan]:
 	return scans
 
 
-class InsideBackgroundJobError(RuntimeError):
-	"""``scrub_error_log_secrets`` or ``purge_ai_error_logs`` was called
-	inside an RQ job."""
-
-
 def _refuse_inside_a_background_job() -> None:
 	"""Raise ``InsideBackgroundJobError`` inside an RQ job. The scrub's frames
 	hold unmasked rows (keys, prompts), and a job that fails is logged with
@@ -597,7 +599,9 @@ def measure_scan_size() -> ScanSize:
 
 def scrub_scan_size() -> int:
 	"""The row count of ``measure_scan_size`` (``SCAN_SIZE_UNKNOWN`` when a
-	part cannot be read). Never raises."""
+	part cannot be read), a convenience for ``bench console`` and ``bench
+	execute``. The migrate patch calls ``measure_scan_size``, which also
+	says why a size is unknown. Never raises."""
 	return measure_scan_size().rows
 
 
