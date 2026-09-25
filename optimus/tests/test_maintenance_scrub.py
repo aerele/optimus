@@ -1894,10 +1894,13 @@ def test_the_queued_line_says_migrate_inserts_them_and_to_run_the_scrub_again(pa
 		lambda **kw: {"candidates": 3, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 1},
 	)
 	importlib.import_module(_PATCH).execute()
+	# "unless the flush stopped early": a queue that failed mid-flush can
+	# leave entries it never masked, and failed counts that.
 	assert capsys.readouterr().out == (
-		"Optimus: Error Log entries still in the deferred-insert queue: 1. The scrub masked the ones that were "
-		"waiting when it started; bench migrate inserts them all right after the patches. Run the scrub again "
-		f"after the restart to mask them in the table: bench --site <site> {_COMMAND}\n"
+		"Optimus: Error Log entries still in the deferred-insert queue: 1. The scrub masked the ones waiting "
+		"when it started, unless the flush stopped early (see the failed count); bench migrate inserts them "
+		"all right after the patches. Run the scrub again after the restart to mask them in the table: "
+		f"bench --site <site> {_COMMAND}\n"
 	)
 
 
