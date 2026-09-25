@@ -41,7 +41,10 @@ versions may contain breaking changes see migration notes below).
   its JSON-escaped form. A 404 message names the request URL with any
   credentials in it masked (a `user:password@` typed into a custom Base URL,
   or the key), or only "(the configured Base URL)" when the URL cannot be
-  scrubbed. Every Error Log row the AI code writes goes through one
+  scrubbed. A request never follows a redirect: the HTTP library drops only a
+  header named `Authorization` when it follows one to another host, so the
+  `x-api-key` header Anthropic uses would have been sent on to the redirect
+  target. Every Error Log row the AI code writes goes through one
   function, `ai_fix.log_ai_failure`, with an explicit, scrubbed message (no
   frame locals) that links to the Optimus Session, written after the failure
   has been handled, so Sentry never receives the frames of the failed
@@ -53,6 +56,43 @@ versions may contain breaking changes see migration notes below).
   every AI entry point in each of the failure scenarios it models, and fails
   if the key appears in any log, traceback, error-tracker payload or
   response.
+- New: an Error Log `before_insert` hook (`optimus.error_log_mask`) masks the
+  AI key in Error Log rows as Frappe inserts them. Frappe runs it for every
+  Error Log row, before `validate`, the length check and the INSERT, whether
+  `frappe.log_error` inserts the row at once or Frappe inserts it later from
+  its deferred-insert queue in Redis (a server error's snapshot, or an error
+  logged while the site is read-only: bench migrate inserts those right
+  after the patches, and the scheduler every 15 minutes). It changes only a
+  row from Optimus's AI code (an `optimus/ai_fix.py` or
+  `frappe_profiler/ai_fix.py` frame in its error, title or metadata) or one
+  holding the key stored in Optimus Settings (raw or JSON-escaped). In such
+  a row it masks the key, the key shapes `redaction.scrub_secrets` knows
+  and the bare header value lines of the HTTP library's frames in `error`,
+  `method` (the title) and `metadata`, and moves a title longer than its
+  140-character column in front of the error, as Frappe v16 does, so on
+  Frappe v15 such a row is no longer dropped by the length check. Every
+  other row, another app's included, is stored exactly as it was. It reads
+  the stored key once per Error Log insert (one SELECT on `__Auth`, and a
+  decrypt when a key is stored), never caches it, and never raises, except
+  an RQ job timeout, which still stops the job. It fails open: when it
+  cannot import the rest of Optimus or read the key, the row is stored as it
+  was. The one exception is a row it would mask whose masking fails: its
+  error text is replaced by "Optimus withheld this error text: it could not
+  be masked.", its title and metadata too when they hold an `ai_fix.py`
+  frame or the key (a title holding neither is kept, cut to 140
+  characters). A row whose AI check itself fails is treated as an AI row.
+  Each such failure writes one line to the `optimus` log, naming at most an
+  exception type. Its module imports only the standard library, so a
+  process still running the previous release resolves it without error;
+  there its import of the rest of Optimus can fail (the old modules are
+  still loaded), and it then stores the row as it was.
+  Frappe caches every app's hooks in Redis, and a process still running the
+  previous release can cache the old hooks, without this one, while the
+  migrate runs; every process then reads those until the cache is cleared,
+  and a restart does not clear it. A real run of the scrub clears and
+  reloads that cache first, as the migrate patch does when it skips or
+  cannot run the scrub, so the hook reaches every process once the scrub
+  runs after the restart (step 3).
 - **Do this, in this order:**
   1. Now, before upgrading: rotate every AI provider key that was configured
      on a site running an earlier release. Create a new key at the provider
@@ -65,47 +105,36 @@ versions may contain breaking changes see migration notes below).
      the background workers together (`bench restart`, or your supervisor or
      systemd units). The patch `v0_12.scrub_ai_keys_from_error_log` masks the
      keys in existing Error Log rows and in Deleted Document copies of them,
-     and prints how many rows it masked, or that none needed it. It also masks
-     the Error Log records waiting in Frappe's deferred-insert queue in Redis,
-     even when it skips the scan of the tables or the scan fails. It never
-     inserts them: it claims the queue, masks each record and pushes it back
-     onto the queue, and Frappe inserts the masked records itself. bench
-     migrate does so after the patches, about 500 records on Frappe v15 and
-     about 10,000 on v16, and the scheduler inserts the rest every 15 minutes.
-     Entries the old processes queue while the migrate runs are not masked:
-     step 3 masks them once they are in the table.
+     and prints how many rows it masked, or that none needed it. It never
+     reads or changes the Error Log records waiting in Frappe's
+     deferred-insert queue in Redis: the Error Log hook masks the key in
+     them when Frappe inserts them, bench migrate right after the patches
+     and the scheduler every 15 minutes, and the patch prints a line saying
+     nothing needs doing for the queue. Rows the old processes insert until
+     the restart may be stored unmasked: step 3 masks them in the table.
   3. After the restart, run the scrub again, to catch rows the old processes
-     wrote during and after the migrate, until the restart, then check it:
+     wrote during and after the migrate, until the restart, and so the Error
+     Log hook reaches every process (a real run clears and reloads Frappe's
+     cached hooks first), then check it:
      `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': False}"`,
      then, right after it, the same command with `'dry_run': True`, which must
      report these values: `changed` 0, `deleted_docs_changed` 0, `residual` 0,
-     `failed` 0, `queue_unmasked` 0 and `key_unreadable` False. `queued` is
-     not required to be 0: it counts the Error Log entries waiting in Frappe's
-     deferred-insert queue in Redis when the scrub ends. A real run masks the
-     entries that were waiting when it started and pushes them back onto the
-     queue; it never inserts them (the scheduler does, every 15 minutes, or
-     the next `bench migrate`). A dry run only counts. `queue_masked` counts
-     the entries a real run masked; entries an earlier run left in its claim
-     key (see `queue_unmasked`) count twice. `queued` also counts Frappe's own
-     new server-error snapshots, and every error in developer mode: after the
-     restart these come from the fixed code and are harmless, so a small
-     `queued` that changes between runs is new traffic. `queue_unmasked`
-     counts the entries held back unmasked in Optimus's claim key in Redis
-     (`optimus_error_log_queue_claim`), where Frappe never inserts them: Redis
-     refused a write or stopped answering while the scrub masked the queue,
-     and the masking stopped there. If Redis refused a push, the one entry
-     being pushed is lost. If the held-back entries were left by an earlier
-     run, the scrub stops before it claims the queue, and Frappe inserts the
-     entries waiting there as they are. The entries `queue_unmasked` counts
-     are held back, not inserted: run the scrub again once Redis accepts
-     writes. `key_unreadable` is True when a key is stored in Optimus Settings
-     but cannot be decrypted (the site's `encryption_key` changed, for example
-     on a backup restored onto another site): the scrub can then neither
-     search for the key nor mask it by value, and it counts one in `failed`.
-     Restore the site's `encryption_key`, or enter the old key again in
-     Optimus Settings, then run the scrub again. The scrub locks the Error Log
-     while it scans it (the table is MyISAM on MariaDB), one window of 1000
-     rows per statement, so on a site with a large Error Log run it off-peak.
+     `failed` 0 and `key_unreadable` False. The scrub reads only the Error Log
+     and Deleted Document tables: it never reads or changes Frappe's
+     deferred-insert queue, and a dry run touches no Redis at all. A failed
+     refresh of the cached hooks is not counted in `failed`; if you skip this
+     step, or are unsure the refresh ran, run `bench --site <site> clear-cache`
+     after the restart. `key_unreadable` is True when a key is stored in
+     Optimus Settings but cannot be decrypted (the site's `encryption_key`
+     changed, for example on a backup restored onto another site): the scrub
+     can then neither search for the key nor mask it by value, and it counts
+     one in `failed`. Restore the site's `encryption_key`, or enter the OLD key
+     again in Optimus Settings (the scrub searches for the key that leaked),
+     then run the scrub again. If Optimus Settings cannot be read for another
+     reason, `failed` counts one and `key_unreadable` stays False. The scrub
+     locks the Error Log while it scans it (the table is MyISAM on MariaDB),
+     one window of 1000 rows per statement, so on a site with a large Error
+     Log run it off-peak.
      Run it with `bench execute` or `bench --site <site> console`, never as a
      background job: it refuses to run inside one, because a failed job's log
      would store the unmasked rows it reads. Then clear the failed background
@@ -146,10 +175,17 @@ versions may contain breaking changes see migration notes below).
     Or install Optimus on the site again and run step 3. If no key
     is stored on the site any more, the scrub has no stored key to search
     for; its passes that find rows by an `ai_fix.py` frame and a secret
-    marker still run.
-  - If you downgrade to an earlier release, it can write keys into the Error
-    Log again, and upgrading again does not re-run the patch: repeat step 3
-    by hand after the re-upgrade.
+    marker still run, and `key_unreadable` is False there (no key is
+    stored). The Error Log hook does not run on such a site: Frappe runs
+    only the hooks of the apps installed on the site.
+  - If you downgrade to an earlier release, clear the site's cache after it
+    (`bench migrate` does, and after the restart run
+    `bench --site <site> clear-cache`): Frappe's cached hooks still name the
+    Error Log hook, which the earlier release does not have, and until they
+    are cleared every Error Log insert fails (`frappe.log_error` raises, and
+    a queued record is dropped). The earlier release can also write keys
+    into the Error Log again, and upgrading again does not re-run the patch:
+    repeat step 3 by hand after the re-upgrade.
 
 ### Fixed
 
@@ -177,11 +213,11 @@ versions may contain breaking changes see migration notes below).
   server error. A malformed token count in a reply no longer fails a
   suggestion that was otherwise returned. An Anthropic reply whose text is
   not a string is reported as an empty response instead of failing the
-  request with a server error. A redirect that reaches Optimus (an HTTP 3xx
-  reply the HTTP library did not follow) is reported as an unexpected
-  response that names its status, instead of being read as the reply; its
-  Error Log row holds the status and the call site (and `provider_error=`
-  when the reply names a code), never the body.
+  request with a server error. A redirect (an HTTP 3xx reply, which is never
+  followed) is reported as an unexpected response that names its status,
+  instead of being read as the reply; its Error Log row holds the status and
+  the call site (and `provider_error=` when the reply names a code), never
+  the body.
 - An API key pasted with a trailing newline or spaces is trimmed. A key must
   be plain printable ASCII: a key with any other character (a space inside
   it, a pasted smart quote or no-break space, a control character such as a
@@ -213,33 +249,37 @@ versions may contain breaking changes see migration notes below).
   if the Error Log and the Deleted Document table together hold more than
   200,000 rows, or their size cannot be read, or the scrub fails, the patch
   rolls back its open transaction (on Postgres a failed statement would
-  otherwise block every later write of the migrate), still masks the Error Log
-  queue in Redis (`optimus.maintenance.mask_error_log_queue`, which takes no
-  table lock), prints the command to run the scrub by hand, writes an Error
-  Log row titled "Optimus: Error Log key scrub did not run" with the reason (a
-  row count or an error type name, and the queue's counts; never row text) and
-  that command, and carries on (step 3 above re-runs it anyway). If the scrub
-  ran but could not process every row or queued entry, still found a
-  key-shaped value, held queued entries back unmasked (`queue_unmasked`) or
-  could not read the stored key (`key_unreadable`), the patch writes an Error
-  Log row titled "Optimus: Error Log key scrub did not finish" with its counts
-  and the command. The queue's counts are printed, with a reminder to run the
-  scrub again after the restart, but `queued` and `queue_masked` alone write
-  no such row: `queued` also holds Frappe's own new error snapshots, and a
-  masked entry is done. Every outcome also writes one line to the `optimus`
-  log (`logs/optimus.log`), at error level, with the outcome and its counts or
-  error type only.
+  otherwise block every later write of the migrate), clears and reloads
+  Frappe's cached hooks when `optimus.maintenance` imports (so the migrate's
+  own insert of the queued Error Log records, right after the patches, runs
+  the Error Log hook, unless a process still running the previous release
+  caches the old hooks again in between),
+  prints the command to run the scrub by hand, writes an Error Log row titled
+  "Optimus: Error Log key scrub did not run" with the reason (a row count or
+  an error type name; never row text) and that command, and carries on (step
+  3 above re-runs it anyway). If the scrub ran but could not process every
+  row, still found a key-shaped value or could not read the stored key
+  (`key_unreadable`), the patch writes an Error Log row titled "Optimus: Error
+  Log key scrub did not finish" with its counts and the command. Every path
+  then prints one line saying that Optimus masks the Error Log entries still
+  queued in Redis when Frappe inserts them and nothing needs doing for the
+  queue, or, when `optimus.maintenance` cannot be imported, that rows, queued
+  ones included, may be stored unmasked until it can. Every outcome also
+  writes one line to the `optimus` log (`logs/optimus.log`), at error level,
+  with the outcome and its counts or error type only.
 - What the scrub sends to the database: its search sends at most an
   8-character fragment of the stored key, never the whole key, and checks the
-  full key in Python; it never inserts the queued Error Log records (it masks
-  them in Redis, and Frappe inserts them); and its UPDATEs carry masked text.
-  So the database's query logs record at most that fragment of the stored key.
+  full key in Python, and its UPDATEs carry masked text. So the database's
+  query logs record at most that fragment of the stored key.
   A ROW-format binlog still records each UPDATE's before-image, the row as it
   was. Binlogs, replicas, bench `logs/` files and backups from before the
   upgrade (including the backup `bench update` takes when it starts) still
   hold the old text; rotating the key makes them harmless.
 - Restart the web server and the background workers together after the
-  migrate: until they restart, the old processes run the old code.
+  migrate: until they restart, the old processes run the old code, and the
+  rows they insert may not be masked by the Error Log hook.
+- Every Error Log insert on the site now reads the stored AI key once (the
+  Error Log hook needs it to tell a row holding the key).
 - No Desk form or JavaScript change (open tabs need no reload) and no new
   `site_config.json` key.
 - Verify: the dry run in step 3 above reports the values listed there, and
