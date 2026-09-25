@@ -573,6 +573,16 @@ def is_framework_callsite_str(
 	return is_framework_callsite(filename, tracked_apps, installed_apps)
 
 
+# The Error Log hook's module. It reads the stored AI key on every Error Log
+# insert, inside the user's ``frappe.log_error``: a query whose innermost
+# non-Frappe frames are Optimus's and include this one is Optimus's own.
+_ERROR_LOG_HOOK_FRAME = "optimus/error_log_mask.py"
+
+
+def _is_error_log_hook_frame(filename: str) -> bool:
+	return filename.endswith(_ERROR_LOG_HOOK_FRAME)
+
+
 def is_profiler_own_query(stack: list | None) -> bool:
 	"""True if a SQL call's Python stack originates from the profiler's own
 	instrumentation (e.g. the ``SHOW GLOBAL STATUS`` / ``SHOW VARIABLES`` snapshots
@@ -580,6 +590,8 @@ def is_profiler_own_query(stack: list | None) -> bool:
 
 	Walk innermost to outermost:
 	- a user frame (not ``frappe/`` and not ``optimus/``) → False (keep the query).
+	- the Error Log hook's frame (``optimus/error_log_mask.py``) before any user
+	  frame → True: its stored-key read runs inside the user's ``log_error``.
 	- only ``frappe/`` + ``optimus/`` frames with at least one ``optimus/`` → True.
 	- only ``frappe/`` frames → False (legitimate framework query).
 	"""
@@ -600,6 +612,8 @@ def is_profiler_own_query(stack: list | None) -> bool:
 		# shapes, letting profiler frames slip through to be blamed
 		# as Framework N+1 findings.
 		if "optimus/" in filename:
+			if _is_error_log_hook_frame(filename):
+				return True
 			has_profiler_frame = True
 			continue
 		if "frappe/" in filename:
@@ -619,7 +633,8 @@ def walk_callsite(stack: list | None) -> dict | None:
 	(``FRAMEWORK_PREFIXES``). Returns a dict with ``filename``, ``lineno``,
 	``function``. Falls back to the innermost frame when every frame is in
 	``frappe/`` (so legitimate framework queries still surface), but returns None
-	when the stack is profiler instrumentation (``is_profiler_own_query``).
+	when the stack is profiler instrumentation (``is_profiler_own_query``),
+	the Error Log hook's key read included.
 	"""
 	if not stack:
 		return None
@@ -629,6 +644,9 @@ def walk_callsite(stack: list | None) -> dict | None:
 			continue
 		filename = (frame.get("filename") or "").replace("\\", "/")
 		lineno = frame.get("lineno")
+		if _is_error_log_hook_frame(filename):
+			# The Error Log hook's key read: Optimus's own query.
+			return None
 		if not filename or lineno is None:
 			continue
 		# v0.5.1: substring (not startswith) matches bench and absolute
