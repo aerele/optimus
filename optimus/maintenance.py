@@ -36,8 +36,10 @@ left.
 The scrub reads only the tables. Error Log records still waiting in
 Frappe's deferred-insert queue in Redis are never read or changed here:
 the Error Log ``before_insert`` hook (``optimus.error_log_mask``) masks
-every Error Log row as Frappe inserts it, with ``_masked_record`` below,
-the queued ones included when Frappe's ``save_to_db`` inserts them. A real
+every Error Log row from Optimus's AI code or holding the key
+(``_is_ai_record``) as Frappe inserts it, with ``_masked_record`` below,
+the queued ones included when Frappe's ``save_to_db`` inserts them; it
+leaves every other row as it was. A real
 scrub first refreshes the hooks Frappe caches (``_refresh_hooks_cache``),
 so that hook reaches every process once all of them run the new code.
 
@@ -258,7 +260,9 @@ def _masked_record(record, api_key: str) -> dict | None:
 
 	Its bare header value lines are masked only when ``_is_ai_record``: any
 	other snapshot (an ERPNext error with a ``value = ...`` local, say) goes
-	through ``scrub_secrets`` alone and keeps them. The residual check is
+	through ``scrub_secrets`` alone and keeps them. The hook calls it only
+	for a record ``_is_ai_record`` recognises, and leaves every other row
+	as it was. The residual check is
 	skipped: its answer is never used here, and it costs about a third of
 	the masking's time. None when it is not a record or masking it failed,
 	the joined pass included: the hook then withholds a record from the AI
