@@ -566,6 +566,31 @@ class TestStaleProcess:
 			stale(_Doc(error=LEAKY), "before_insert")
 		assert ei.value is not raised[0] and ei.value.__context__ is None and env.lines == []
 
+	def test_the_stored_key_is_read_stripped(self, env, stale):
+		# as ai_fix._current_key_or_empty strips it (a pasted trailing newline)
+		env.key = f"  {KEY}\n"
+		doc = _Doc(error=f"bad key {KEY} here")
+		stale(doc, "before_insert")
+		assert doc.error == "bad key ******** here"
+
+	def test_a_timeout_during_the_optimus_import_is_re_raised_not_turned_into_the_fallback(self, env, stale, monkeypatch):
+		# The import itself can be interrupted (a large module, a slow disk):
+		# the job must stop, as a fresh instance.
+		raised = []
+
+		class _Interrupting:
+			@staticmethod
+			def find_spec(name, path=None, target=None):
+				if name == "optimus.maintenance":
+					raised.append(JobTimeoutException("Task exceeded maximum timeout value (180 seconds)"))
+					raise raised[-1]
+				return None
+		monkeypatch.setattr(sys, "meta_path", [_Interrupting, *sys.meta_path])
+		with pytest.raises(JobTimeoutException) as ei:
+			stale(_Doc(error=LEAKY), "before_insert")
+		assert raised and ei.value is not raised[0] and ei.value.__context__ is None
+		assert env.frappe_reads == [] and env.lines == []
+
 	def test_it_works_where_rq_cannot_be_imported_either(self, env, stale, monkeypatch):
 		monkeypatch.setitem(sys.modules, "rq", None)
 		monkeypatch.setitem(sys.modules, "rq.timeouts", None)
