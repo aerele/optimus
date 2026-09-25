@@ -155,9 +155,9 @@ class _RecordingCache:
 	"""``frappe.cache`` (and Frappe v16's ``frappe.client_cache``) over
 	``store``, a Redis shared by both: ``delete_value`` and every other
 	write-side call is logged in ``calls`` as ``(name, *args)``;
-	``make_key`` / ``get`` (the raw read-back) are logged in ``gets``.
+	``make_key`` / ``exists`` (the raw existence check) are logged in ``gets``.
 	``down`` models Redis unreachable: Frappe's wrappers swallow the
-	``ConnectionError`` on delete, while a raw ``get`` raises it."""
+	``ConnectionError`` on delete, while a raw ``exists`` raises it."""
 
 	def __init__(self, store=None):
 		self.calls = []
@@ -174,11 +174,11 @@ class _RecordingCache:
 		if not self.down:
 			self.store.pop(self.make_key(key), None)
 
-	def get(self, raw_key):
+	def exists(self, raw_key):
 		self.gets.append(raw_key)
 		if self.down:
 			raise ConnectionError("Error 111 connecting to 127.0.0.1:13000. Connection refused.")
-		return self.store.get(raw_key)
+		return int(raw_key in self.store)
 
 	def __getattr__(self, name):
 		if name.startswith("__"):
@@ -983,6 +983,14 @@ class TestMaskedRecord:
 	(``optimus.error_log_mask``) stores it, before Frappe's ``validate``,
 	length check and INSERT."""
 
+	def test_repr_escaped_key_is_found_masked_and_checked_for_residuals(self):
+		api_key = "quoted-'and\"-provider-0123456789"
+		text = repr({"note": api_key})
+		assert maintenance._holds_key({"error": text}, ("error",), api_key)
+		assert maintenance._has_residual_secret(text, api_key)
+		assert maintenance._mask(text, api_key) == "{'note': '********'}"
+		assert not maintenance._has_residual_secret("{'note': '********'}", api_key)
+
 	def test_masks_the_key_in_every_text_field_and_keeps_the_rest(self):
 		leaky = {
 			"error": LEAKY,
@@ -1205,8 +1213,20 @@ class TestHooksCacheRefresh:
 	``clear_cache`` puts back the old hooks, without the Error Log hook, and
 	every process reads them until the key is deleted again. A real scrub
 	deletes the key, reloads the hooks in its own (new-code) process, drops
-	that process's doc-event copy and reads the key back, before it reads
+	that process's doc-event copy and checks the key exists, before it reads
 	any row."""
+
+	def test_refresh_does_not_decode_frappe_s_private_cache_storage(self, fake):
+		f = fake([])
+
+		def get_hooks(hook=None, default=None):
+			f.redis[f.cache.make_key("app_hooks")] = b"opaque storage owned by Frappe"
+			return _NEW_HOOKS.get(hook, default) if hook else _NEW_HOOKS
+
+		f.get_hooks = get_hooks
+		assert maintenance._refresh_hooks_cache() is True
+		assert f.cache.gets == [f.cache.make_key("app_hooks")]
+		assert f.lines == []
 
 	def test_a_real_run_refreshes_the_hooks_before_reading_any_row(self, fake):
 		f = fake([("a", LEAKY)])
@@ -1214,10 +1234,10 @@ class TestHooksCacheRefresh:
 		out = maintenance.scrub_error_log_secrets(dry_run=False)
 		assert f.client_cache.calls == [("delete_value", "app_hooks")]
 		# reloaded after the delete, before the first row was read
-		assert f.hook_loads == [([("delete_value", "app_hooks")], 0)]
+		assert f.hook_loads == [([("delete_value", "app_hooks")], 0)] * 2
 		assert f.local.doc_events_hooks is None
 		assert f.cache.calls == []
-		# read back raw from Redis: the new hooks
+		# Raw Redis existence check; Frappe owns serialization of the value
 		assert f.cache.gets == [f.cache.make_key("app_hooks")]
 		assert pickle.loads(f.redis[f.cache.make_key("app_hooks")]) == _NEW_HOOKS
 		assert out["hooks_refreshed"] is True
@@ -1226,7 +1246,7 @@ class TestHooksCacheRefresh:
 		f = fake([("a", LEAKY)])
 		f.client_cache = None
 		out = maintenance.scrub_error_log_secrets(dry_run=False)
-		assert f.cache.calls == [("delete_value", "app_hooks")] and len(f.hook_loads) == 1
+		assert f.cache.calls == [("delete_value", "app_hooks")] and len(f.hook_loads) == 2
 		assert out["hooks_refreshed"] is True
 
 	def test_a_dry_run_leaves_them_and_reports_false(self, fake):
@@ -1247,7 +1267,7 @@ class TestHooksCacheRefresh:
 		elif step == "reload":
 			f.get_hooks = _boom
 		else:
-			f.cache.get = _boom
+			f.cache.exists = _boom
 		assert maintenance.scrub_error_log_secrets(dry_run=False) == {**_OUT, "candidates": 1, "changed": 1}
 		refresh_lines = [line for _, _, line in f.lines if "optimus maintenance:" in line]
 		assert refresh_lines == ["optimus maintenance: Frappe's cached hooks were not refreshed (ConnectionError)"]
@@ -1255,7 +1275,7 @@ class TestHooksCacheRefresh:
 
 	def test_redis_down_is_not_a_refresh(self, fake):
 		# Frappe's wrappers swallow a ConnectionError on delete and set, so
-		# every step "succeeds"; only the read-back shows nothing was cached.
+		# every step "succeeds"; the raw EXISTS still raises.
 		f = fake([("a", LEAKY)])
 		f.cache.down = f.client_cache.down = True
 		assert maintenance._refresh_hooks_cache() is False
@@ -1272,16 +1292,11 @@ class TestHooksCacheRefresh:
 		assert out["hooks_refreshed"] is False and out["failed"] == 0
 		assert ("optimus", "error", "optimus maintenance: Frappe's cached hooks were not refreshed (nothing cached)") in f.lines
 
-	def test_old_hooks_cached_again_before_the_read_back_are_not_a_refresh(self, fake):
-		# An old process missed the key between the reload and the read-back.
+	def test_reloaded_process_hooks_without_the_handler_are_not_a_refresh(self, fake):
+		# The raw existence check says nothing about contents; Frappe's own
+		# get_hooks must also report the handler in this process's hooks.
 		f = fake([("a", LEAKY)])
-		real = f.get_hooks
-
-		def _get_hooks(*a, **k):
-			value = real(*a, **k)
-			f.redis[f.cache.make_key("app_hooks")] = pickle.dumps(_OLD_HOOKS)
-			return value
-		f.get_hooks = _get_hooks
+		f.hooks = _OLD_HOOKS
 		assert maintenance._refresh_hooks_cache() is False
 		assert f.lines == [
 			("optimus", "error", "optimus maintenance: Frappe's cached hooks were not refreshed (the Error Log hook is missing)"),
@@ -1320,7 +1335,7 @@ class TestHooksCacheRefresh:
 				local.doc_events_hooks = get_hooks("doc_events", {})
 			return local.doc_events_hooks
 		client_cache = SimpleNamespace(delete_value=lambda key: redis.pop(key, None))
-		cache = SimpleNamespace(make_key=lambda key: key, get=lambda key: pickle.dumps(redis[key]) if key in redis else None)
+		cache = SimpleNamespace(make_key=lambda key: key, exists=lambda key: int(key in redis))
 		monkeypatch.setattr(
 			maintenance, "frappe",
 			SimpleNamespace(client_cache=client_cache, cache=cache, get_hooks=get_hooks, local=local),
@@ -1338,6 +1353,25 @@ class TestHooksCacheRefresh:
 class TestScrubSummaryLine:
 	"""Each completed call leaves one counts-only line in the ``optimus``
 	log, so a scrub run by hand leaves a durable trail."""
+
+	def test_a_logger_timeout_escapes_fresh_without_its_frames(self, fake):
+		JobTimeoutException = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
+		f = fake([])
+		raised = JobTimeoutException("Task exceeded maximum timeout value (180 seconds)")
+
+		def _logger(*a, **k):
+			held = KEY  # noqa: F841
+			raise raised
+
+		f.logger = _logger
+		with pytest.raises(JobTimeoutException) as caught:
+			maintenance._log_line("counts only")
+		assert caught.value is not raised and caught.value.args == raised.args
+		assert caught.value.__context__ is None and caught.value.__cause__ is None
+		tb = caught.value.__traceback__
+		while tb:
+			assert tb.tb_frame.f_code.co_name != "_logger"
+			tb = tb.tb_next
 
 	@pytest.mark.parametrize("dry_run", [True, False])
 	def test_one_counts_only_line(self, fake, dry_run):
@@ -1645,14 +1679,14 @@ def _scrub_answers(monkeypatch, **counts):
 
 _OFF_PEAK_NOTE = "on MariaDB, Error Log is locked while it is scanned, so on a busy site prefer off-peak"
 _RUN_IT = f"Run it by hand after the restart ({_OFF_PEAK_NOTE}): bench --site <site> {_COMMAND}"
-# Every outcome but a failed import prints it last; it repeats no command.
+# Every outcome but a failed import prints it before the restart line.
 _QUEUE_LINE = (
 	"Optimus: Error Log entries still queued in Redis are masked by Optimus when Frappe inserts them; nothing "
 	"needs doing for the queue."
 )
 _NOT_MASKED_LINE = (
-	"Optimus: Error Log rows, queued ones included, may be stored unmasked while optimus.maintenance cannot be "
-	"imported; run the command above once it can."
+	"Optimus: only key shapes may stay unmasked in Error Log rows, queued ones included, while "
+	"optimus.maintenance cannot be imported; run the command above once it can."
 )
 
 

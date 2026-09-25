@@ -19,21 +19,21 @@ the patch and the scrub commits every chunk, so the rollback drops at most
 the failing chunk's writes.
 
 It never reads or changes Frappe's deferred-insert queue. The Error Log
-``before_insert`` hook (``optimus.error_log_mask``) masks every Error Log
-row from Optimus's AI code or holding the key as Frappe inserts it, so the
-records queued in Redis are masked when bench migrate (right after the
-patches) or the scheduler inserts them. Every path but a failed import of
-``optimus.maintenance`` prints one line saying so; after a failed import
-it says rows may be stored unmasked until the module imports, since the
-hook needs it too. Frappe caches the hooks, and a process started before
-the upgrade can cache the old ones again during or after the migrate; so,
-as a real scrub does first, the patch refreshes that cache when the scrub
-did not run (``_refresh_hooks_cache``), and this migrate's flush of the
-queue runs the hook. Every path then prints one last line: run the scrub
-after restarting the web server and the background workers (advisory step
-3), which refreshes that cache again once no old process is left, or at
-least ``bench --site <site> clear-cache``; it says so explicitly when the
-cache could not be refreshed during the migrate.
+``before_insert`` hook (``optimus.error_log_mask``) masks every Error Log row
+from Optimus's AI code or holding the key as Frappe inserts it, so the records
+queued in Redis are masked when bench migrate (right after the patches) or the
+scheduler inserts them. Every path but a failed import of
+``optimus.maintenance`` prints one line saying so; after a failed import it
+says only key shapes may stay unmasked until the module imports: the hook
+falls back to masking the stored key with Frappe alone. Frappe caches the
+hooks, and a process started before the upgrade can cache the old ones again
+during or after the migrate; so, as a real scrub does first, the patch
+refreshes that cache when the scrub did not run (``_refresh_hooks_cache``),
+and this migrate's flush of the queue runs the hook. Every path then prints
+one last line: run the scrub after restarting the web server and the
+background workers (advisory step 3), which refreshes that cache again once no
+old process is left, or at least ``bench --site <site> clear-cache``; it says
+so explicitly when the cache could not be refreshed during the migrate.
 
 Patch Log marks the patch done either way, so a skipped or failed scrub also
 leaves one Error Log row titled "Optimus: Error Log key scrub did not run",
@@ -47,6 +47,7 @@ under ``bench start``), so it reaches ``logs/optimus.log`` on a production
 site.
 """
 
+
 _BREADCRUMB_TITLE = "Optimus: Error Log key scrub did not run"
 _PARTIAL_TITLE = "Optimus: Error Log key scrub did not finish"
 _COUNTS = ("candidates", "changed", "deleted_docs_changed", "residual", "failed")
@@ -55,17 +56,17 @@ _KEY_HINT = (
 	"The stored AI API key cannot be decrypted: restore the site's encryption_key, or enter the OLD key again in "
 	"Optimus Settings, then run the scrub again."
 )
-# Printed last on every path but a failed import. It repeats no command: the
-# one instruction line above it has it.
+# Printed on every path but a failed import, before the restart line.
+# It repeats no command.
 _QUEUE_LINE = (
 	"Optimus: Error Log entries still queued in Redis are masked by Optimus when Frappe inserts them; nothing "
 	"needs doing for the queue."
 )
 # Printed instead after a failed import: the Error Log hook imports the same
-# module, so it cannot mask anything either until the module imports.
+# module, so only its Frappe-only stored-key fallback can mask the row.
 _NOT_MASKED_LINE = (
-	"Optimus: Error Log rows, queued ones included, may be stored unmasked while optimus.maintenance cannot be "
-	"imported; run the command above once it can."
+	"Optimus: only key shapes may stay unmasked in Error Log rows, queued ones included, while "
+	"optimus.maintenance cannot be imported; run the command above once it can."
 )
 # Printed last on every path. {command} is the scrub command, or "the command
 # above" when a line above already gave it.
@@ -120,9 +121,11 @@ def execute():
 		# hook; its reload reads the installed apps, so a refresh that failed
 		# is rolled back too.
 		_rollback(frappe)
-		refreshed = maintenance is not None and _refresh_hooks(maintenance)
-		if maintenance is not None and not refreshed:
-			_rollback(frappe)
+		refreshed = False
+		if maintenance is not None:
+			refreshed = _refresh_hooks(maintenance)
+			if not refreshed:
+				_rollback(frappe)
 		if failed is not None:
 			_breadcrumb(frappe, _BREADCRUMB_TITLE, failed, run_it)
 			_log_summary(frappe, f"failed ({failed})")
