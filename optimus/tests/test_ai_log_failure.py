@@ -1307,6 +1307,50 @@ class TestAnInterruptWhileDecryptingTheKey:
 		assert ai_fix._current_key_or_empty() == ""
 
 
+def _real_reply(status_code: int, body: str) -> requests.Response:
+	"""The provider's reply as a REAL ``requests.Response``, so a frame that
+	holds it renders as Frappe's formatter and Sentry render it
+	(``<Response [400]>``); only a local bound to its text or its parsed JSON
+	shows the body."""
+	resp = requests.Response()
+	resp.status_code = status_code
+	resp._content = body.encode("utf-8")
+	resp.encoding = "utf-8"
+	return resp
+
+
+class TestAnInterruptWhileReadingTheKeyForAReply:
+	"""``_response_detail`` and ``_provider_error_code`` read the stored key
+	(a database read, where a gunicorn worker timeout's ``SystemExit`` can
+	land) BEFORE they bind the provider's reply, which can echo the key.
+	Nothing there catches an interrupt that is not an ``Exception``, so it
+	leaves with their frames, and Sentry's WSGI middleware ships frame
+	locals: none of them may hold the reply yet."""
+
+	@pytest.mark.parametrize("reader", ["_response_detail", "_provider_error_code"])
+	def test_no_frame_holds_the_echoed_key(self, monkeypatch, reader):
+		interrupt = SystemExit(1)
+
+		def _decrypt(*a, **k):
+			raise interrupt
+
+		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", _decrypt, raising=False)
+		resp = _real_reply(400, json.dumps({
+			"error": {"message": f"invalid key {KEY}", "type": "invalid_request_error", "code": KEY},
+		}))
+		with pytest.raises(SystemExit) as ei:
+			getattr(ai_fix, reader)(resp, ai_fix._ApiKeyAuth("authorization", KEY, prefix="Bearer "))
+		assert ei.value is interrupt
+		walked = []
+		tb = ei.value.__traceback__
+		while tb is not None:
+			walked.append(tb.tb_frame.f_code.co_name)
+			for name, value in tb.tb_frame.f_locals.items():
+				assert KEY not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds the echoed key"
+			tb = tb.tb_next
+		assert reader in walked and "_current_key_or_empty" in walked
+
+
 # ---------------------------------------------------------------------------
 # analyze.py / api.py call sites: one row per failure, with a session reference
 # ---------------------------------------------------------------------------

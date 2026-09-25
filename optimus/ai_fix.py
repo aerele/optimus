@@ -916,7 +916,9 @@ def _scrub_literals_for(auth) -> tuple[str, ...]:
 	literals=...)``: the key stored in Optimus Settings, then the key the
 	request was sent with (``auth``, the ``_ApiKeyAuth`` it used: Settings may
 	hold a new key by now), each raw and JSON-escaped. Pass the result
-	straight into that call, or bind it only to a local named ``api_key``."""
+	straight into that call, or bind it only to a local named ``api_key``.
+	Reading the stored key is a database query: call this BEFORE binding the
+	reply (see ``_response_detail``)."""
 	return (*_key_literals(_current_key_or_empty()), *_in_flight_literals(auth))
 
 
@@ -1695,16 +1697,24 @@ def _response_detail(resp, auth=None) -> str:
 	the request was sent with (``auth``, the ``_ApiKeyAuth`` it used: Settings
 	may hold a new key by now), each raw and JSON-escaped. Any failure returns
 	''; an RQ job timeout leaves as a fresh instance, with the raw body
-	unbound."""
+	unbound.
+
+	The literals are read BEFORE the body is bound. Reading the stored key is
+	a database query, where an interrupt that is not an ``Exception``
+	(``SystemExit`` from a gunicorn worker timeout) can land; nothing here
+	catches one, so it leaves with this frame, and at that point no local
+	holds the body. Once the body is bound only CPU work runs until this
+	returns."""
 	body_text = ""
 	interrupt = None
 	try:
+		from optimus.redaction import scrub_secrets
+
+		api_key = _scrub_literals_for(auth)
 		body_text = (resp.text or "").strip()
 		if not body_text:
 			return ""
-		from optimus.redaction import scrub_secrets
-
-		return ": " + scrub_secrets(body_text[:65536], literals=_scrub_literals_for(auth))[:300]
+		return ": " + scrub_secrets(body_text[:65536], literals=api_key)[:300]
 	except _job_timeout_types() as e:
 		interrupt = (type(e), e.args)
 	except Exception:
@@ -1736,17 +1746,19 @@ def _provider_error_code(resp, auth=None) -> str:
 	JSON-escaped; both kept values are joined as
 	``type:code`` when that still fits 64 characters, else the first one is
 	used. Any failure returns ''; an RQ job timeout leaves as a fresh
-	instance, with the parsed body unbound."""
+	instance, with the parsed body unbound. As in ``_response_detail``, the
+	literals are read BEFORE the body is parsed and bound, so an interrupt
+	during that database read finds no local holding the body."""
 	data = error = value = None
 	interrupt = None
 	try:
+		from optimus.redaction import scrub_secrets
+
+		api_key = _scrub_literals_for(auth)
 		data = resp.json()
 		error = data.get("error") if isinstance(data, dict) else None
 		if not isinstance(error, dict):
 			return ""
-		from optimus.redaction import scrub_secrets
-
-		api_key = _scrub_literals_for(auth)
 		parts: list[str] = []
 		for field in ("type", "code"):
 			value = error.get(field)
