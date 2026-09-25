@@ -78,8 +78,9 @@ _SAVEPOINT = "optimus_scrub_row"
 _ERROR_LOG_QUEUE = "insert_queue_for_Error Log"
 # The flush takes at most this many queue entries (each a record or a list of
 # them) and commits after every _FLUSH_COMMIT_EVERY inserted rows. It stops
-# after _FLUSH_MAX_FAILURES inserts in a row fail (a crashed table, a lost
-# connection), instead of popping, and losing, every entry left.
+# after _FLUSH_MAX_FAILURES inserts in a row fail (a lost connection),
+# instead of popping, and losing, every entry left, and pushes back, masked,
+# the records it took and did not insert.
 _FLUSH_MAX_POPS = 10_000
 _FLUSH_COMMIT_EVERY = 100
 _FLUSH_MAX_FAILURES = 3
@@ -260,7 +261,9 @@ class _Flushed(NamedTuple):
 
 
 class _FlushRun:
-	"""The running counts of one flush."""
+	"""The running counts of one flush. ``streak`` holds the MASKED records
+	of the current run of failed inserts (never a raw record): the ones a
+	stop pushes back."""
 
 	__slots__ = ("failed", "inserted", "popped", "queue_failed", "streak")
 
@@ -269,7 +272,7 @@ class _FlushRun:
 		self.inserted = 0
 		self.popped = 0
 		self.queue_failed = False
-		self.streak = 0  # inserts that failed in a row
+		self.streak: list[dict] = []
 
 	def queue_error(self) -> None:
 		"""Count a failed read or write of the queue, once per flush."""
@@ -299,12 +302,15 @@ def _flush_deferred_error_logs(api_key: str) -> _Flushed:
 	Takes only the entries queued when it starts, at most ``_FLUSH_MAX_POPS``
 	of them, so a busy producer cannot keep it running, and commits after
 	every ``_FLUSH_COMMIT_EVERY`` inserted rows. An entry that is not JSON, or
-	a record that cannot be inserted, is counted and skipped. After
-	``_FLUSH_MAX_FAILURES`` inserts in a row fail it stops, and pushes the
-	last entry back onto the queue, so it is not lost: as popped, or, when
-	some of its records were inserted (or dropped as unmaskable), only the
-	ones whose insert failed or was not tried, so none is inserted twice. A
-	failure to read the queue stops the flush. Never raises; returns a
+	a record that cannot be inserted, is counted and skipped. A row the table
+	kept although its insert failed counts as inserted (see
+	``_insert_error_log``). After ``_FLUSH_MAX_FAILURES`` inserts in a row
+	fail, or when a periodic commit fails, it stops and pushes back, as one
+	entry, every record it took and did not insert: the run of failed
+	inserts, across entries, and the untried rest of the current entry, all
+	masked (``_push_back``). A record inserted before the stop is never
+	pushed back, so none is inserted twice. A failure to read the queue
+	stops the flush. Never raises; returns a
 	``_Flushed``: how many entries or rows could not be inserted (a failed
 	read or write of the queue counts as one, however often it fails), and
 	whether the queue failed."""
@@ -321,11 +327,19 @@ def _flush_deferred_error_logs(api_key: str) -> _Flushed:
 	finally:
 		# Commit what was inserted even when the loop stopped early: the rows
 		# are already gone from Redis, and a later rollback would drop them.
-		try:
-			safe_commit()
-		except Exception:
-			run.failed += 1
+		_committed(run)
 	return _Flushed(run.failed, run.queue_failed)
+
+
+def _committed(run: _FlushRun) -> bool:
+	"""``safe_commit()``; a failure is counted in ``run.failed``. Never
+	raises."""
+	try:
+		safe_commit()
+		return True
+	except Exception:
+		run.failed += 1
+		return False
 
 
 def _pop(run: _FlushRun):
@@ -359,25 +373,47 @@ def _insert_queued(run: _FlushRun, api_key: str, pops: int) -> None:
 		if records is None:
 			run.failed += 1
 			continue
-		not_inserted = []  # this entry's records whose insert failed
 		for i, record in enumerate(records):
-			masked = _masked_record(record, api_key)
-			if masked is None:
-				run.failed += 1
-				continue
-			if _insert_error_log(masked):
-				run.streak = 0
-				run.inserted += 1
-				if run.inserted % _FLUSH_COMMIT_EVERY == 0:
-					safe_commit()
-				continue
-			run.failed += 1
-			not_inserted.append(record)
-			run.streak += 1
-			if run.streak >= _FLUSH_MAX_FAILURES:
-				left = not_inserted + records[i + 1:]
-				_push(run, raw if len(left) == len(records) else json.dumps(left))
+			if not _insert_one(run, record, api_key):
+				_push_back(run, records[i + 1:], api_key)
 				return
+
+
+def _insert_one(run: _FlushRun, record, api_key: str) -> bool:
+	"""Insert one queued record, masked (a record that cannot be masked is
+	counted and dropped). False when the flush must stop: after
+	``_FLUSH_MAX_FAILURES`` failed inserts in a row, or when a periodic
+	commit failed."""
+	masked = _masked_record(record, api_key)
+	if masked is None:
+		run.failed += 1
+		return True
+	if _insert_error_log(masked):
+		run.streak.clear()
+		run.inserted += 1
+		return run.inserted % _FLUSH_COMMIT_EVERY != 0 or _committed(run)
+	run.failed += 1
+	run.streak.append(masked)
+	return len(run.streak) < _FLUSH_MAX_FAILURES
+
+
+def _push_back(run: _FlushRun, rest: list, api_key: str) -> None:
+	"""After a stop, push back, as one entry at the end of the queue, every
+	record the flush took and did not insert: the run of failed inserts
+	(``run.streak``, across entries) and the untried ``rest`` of the current
+	entry. All of them MASKED (a record of ``rest`` that cannot be masked is
+	counted and dropped), never as popped: bench migrate's own flush inserts
+	the queue as it is right after the patches."""
+	left = list(run.streak)
+	run.streak.clear()
+	for record in rest:
+		masked = _masked_record(record, api_key)
+		if masked is None:
+			run.failed += 1
+		else:
+			left.append(masked)
+	if left:
+		_push(run, json.dumps(left))
 
 
 def _masked_record(record, api_key: str) -> dict | None:
