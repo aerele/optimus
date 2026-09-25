@@ -931,6 +931,44 @@ class TestHttpFailurePath:
 		assert "RESPONSE-BODY-MARKER" not in logs[0]["message"]
 		assert "status=500" in logs[0]["message"]
 
+	@pytest.mark.parametrize("status", [300, 302, 307, 399])
+	def test_a_redirect_with_a_json_object_body_is_a_bad_response_logged_without_its_body(
+		self, logs, monkeypatch, status,
+	):
+		# requests follows a redirect it can; one that reaches here (no
+		# Location header, or a status it does not follow) is not the
+		# provider's reply, even with a JSON object body. The body stays out
+		# of the message and the row (the caller's row too:
+		# test_the_callers_row_never_holds_the_reply_when_the_http_row_failed).
+		pii = "pii.redirect@example.com"
+		body = {
+			"choices": [{"message": {"content": f"REDIRECT-BODY {pii}"}}],
+			"error": {"type": "moved_permanently"},
+		}
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(status, body, text=json.dumps(body))))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			_call()
+		assert ei.value.kind == "bad_response" and ei.value.status_code == status
+		assert ei.value.__context__ is None
+		assert f"(HTTP {status})" in str(ei.value)
+		assert len(logs) == 1
+		row = logs[0]["message"]
+		assert f"status={status}" in row and "provider_error=moved_permanently\n" in row
+		for text in (str(ei.value), row):
+			assert "REDIRECT-BODY" not in text and pii not in text
+		assert getattr(ei.value, ai_fix._LOG_TEXT_ATTR) == (
+			f"HTTP {status} from the AI provider (where=chat/completions, provider_error=moved_permanently)"
+		)
+		# the HTTP layer's row was written, so the caller's log is a no-op
+		assert ai_fix.log_ai_failure("optimus ai backfill", ei.value) is False
+		assert len(logs) == 1
+
+	@pytest.mark.parametrize("status", [200, 201, 299])
+	def test_a_2xx_json_object_is_the_reply(self, logs, monkeypatch, status):
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(status, {"ok": 1})))
+		assert _call() == {"ok": 1}
+		assert logs == []
+
 	@pytest.mark.parametrize("payload", [["a", "list"], "a string", 42, None])
 	def test_non_object_json_is_a_bad_response(self, logs, monkeypatch, payload):
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(200, payload)))
@@ -968,7 +1006,7 @@ class TestHttpFailurePath:
 		assert attempts == ["optimus ai_fix", "optimus ai backfill"]
 		assert [r["title"] for r in logs] == ["optimus ai backfill"]
 
-	@pytest.mark.parametrize("status", [400, 401, 403, 404, 422, 429, 500])
+	@pytest.mark.parametrize("status", [302, 307, 400, 401, 403, 404, 422, 429, 500])
 	def test_the_callers_row_never_holds_the_reply_when_the_http_row_failed(
 		self, logs, monkeypatch, breadcrumbs, status,
 	):
@@ -993,7 +1031,7 @@ class TestHttpFailurePath:
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(status, body, text=json.dumps(body))))
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			_call()
-		if status not in (401, 403, 429):
+		if status >= 400 and status not in (401, 403, 429):
 			assert f"REPLY-BODY: you asked about {pii}" in str(ei.value)  # the operator's message is unchanged
 		assert ai_fix.log_ai_failure("optimus ai backfill", ei.value) is True
 		assert attempts == ["optimus ai_fix", "optimus ai backfill"]
