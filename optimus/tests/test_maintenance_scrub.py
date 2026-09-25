@@ -17,6 +17,7 @@ import fnmatch
 import importlib
 import inspect
 import json
+import pickle
 import re
 import sys
 import time
@@ -144,13 +145,40 @@ class _FakeTxn:
 		self.open.clear()
 
 
-class _RecordingCache:
-	"""``frappe.cache`` (and Frappe v16's ``frappe.client_cache``): every
-	method call is logged in ``calls`` as ``(name, *args)`` and answers
-	None."""
+_HOOK = "optimus.error_log_mask.mask_error_log"
+# The hooks this (new-code) process loads, and the ones an old process loads.
+_NEW_HOOKS = {"doc_events": {"Error Log": {"before_insert": [_HOOK]}, "User": {"validate": ["x"]}}}
+_OLD_HOOKS = {"doc_events": {"User": {"validate": ["x"]}}}
 
-	def __init__(self):
+
+class _RecordingCache:
+	"""``frappe.cache`` (and Frappe v16's ``frappe.client_cache``) over
+	``store``, a Redis shared by both: ``delete_value`` and every other
+	write-side call is logged in ``calls`` as ``(name, *args)``;
+	``make_key`` / ``get`` (the raw read-back) are logged in ``gets``.
+	``down`` models Redis unreachable: Frappe's wrappers swallow the
+	``ConnectionError`` on delete, while a raw ``get`` raises it."""
+
+	def __init__(self, store=None):
 		self.calls = []
+		self.gets = []
+		self.store = {} if store is None else store
+		self.down = False
+
+	@staticmethod
+	def make_key(key):
+		return f"_site|{key}".encode()
+
+	def delete_value(self, key):
+		self.calls.append(("delete_value", key))
+		if not self.down:
+			self.store.pop(self.make_key(key), None)
+
+	def get(self, raw_key):
+		self.gets.append(raw_key)
+		if self.down:
+			raise ConnectionError("Error 111 connecting to 127.0.0.1:13000. Connection refused.")
+		return self.store.get(raw_key)
 
 	def __getattr__(self, name):
 		if name.startswith("__"):
@@ -180,13 +208,19 @@ class _FakeFrappe:
 
 	def __init__(self, error_logs, deleted_docs=(), has_metadata=True, v15_like=False):
 		self.v15_like = v15_like
-		self.cache = _RecordingCache()
+		self.redis = {}
+		self.cache = _RecordingCache(self.redis)
 		# Frappe v16 keeps the hooks in client_cache; v15 has none (None here)
 		# and keeps them in frappe.cache.
-		self.client_cache = _RecordingCache()
-		# get_hooks() reloads: each call logs the Redis calls made before it
+		self.client_cache = _RecordingCache(self.redis)
+		# get_hooks() reloads: each call logs the Redis calls made before it.
+		# It caches the hooks this process loads (hooks) in Redis on a miss,
+		# unless the write is lost (Frappe swallows a failed write).
 		self.hook_loads = []
-		self.local = SimpleNamespace(doc_events_hooks={"User": {}})
+		self.hooks = _NEW_HOOKS
+		self.hook_writes_lost = False
+		self.local = SimpleNamespace(doc_events_hooks={"User": {}}, conf={})
+		self.lines = []  # the optimus log: (module, level, line)
 		self.inserted = []
 		self.singles = {}
 		self.installed_singles = {"Optimus Settings"}
@@ -213,9 +247,25 @@ class _FakeFrappe:
 			rollback=self.txn.rollback, sql=self._sql, get_single_value=self._get_single_value,
 		)
 
-	def get_hooks(self, *a, **k):
+	def get_hooks(self, hook=None, default=None):
 		self.hook_loads.append((list(self.client_cache.calls if self.client_cache else self.cache.calls), self.reads))
-		return {}
+		if self.local.conf.get("developer_mode"):
+			hooks = self.hooks  # per process, never in Redis
+		else:
+			key = self.cache.make_key("app_hooks")
+			raw = None if self.cache.down else self.redis.get(key)
+			if raw is None:
+				hooks = self.hooks
+				if not (self.hook_writes_lost or self.cache.down):
+					self.redis[key] = pickle.dumps(hooks)
+			else:
+				hooks = pickle.loads(raw)
+		return hooks.get(hook, default) if hook else hooks
+
+	def logger(self, module=None, *a, **k):
+		def _level(level):
+			return lambda msg, *a, **k: self.lines.append((module, level, msg))
+		return SimpleNamespace(**{level: _level(level) for level in ("debug", "info", "warning", "error")})
 
 	def _get_single_value(self, doctype, fieldname, cache=True):
 		self.single_reads.append((doctype, fieldname))
@@ -305,7 +355,10 @@ class _FakeFrappe:
 # The scrub's result when nothing was found: every count 0, the key readable.
 _OUT = {
 	"candidates": 0, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "key_unreadable": False,
+	"hooks_refreshed": False,
 }
+# A real run's, the cached hooks refreshed.
+_RAN = {**_OUT, "hooks_refreshed": True}
 
 
 @pytest.fixture
@@ -331,7 +384,7 @@ class TestScrubErrorLogSecrets:
 	def test_scrubs_error_log_and_deleted_document_copies(self, fake):
 		f = fake([("a", LEAKY), ("b", CLEAN_AI), ("c", UNRELATED)], [("d1", json.dumps({"error": LEAKY}))])
 		out = maintenance.scrub_error_log_secrets(dry_run=False)
-		assert out == {**_OUT, "candidates": 2, "changed": 1, "deleted_docs_changed": 1}
+		assert out == {**_RAN, "candidates": 2, "changed": 1, "deleted_docs_changed": 1}
 		assert _queue_calls(f) == []  # the Error Log hook masks queued records as Frappe inserts them
 		assert KEY not in f.tables["Error Log"]["a"]["error"]
 		assert "'authorization': 'Bearer ********'" in f.tables["Error Log"]["a"]["error"]
@@ -462,7 +515,7 @@ class TestScrubErrorLogSecrets:
 		f = fake([("a", LEAKY), ("b", CLEAN_AI), ("m", "Traceback ...\n")], has_metadata=False)
 		f.tables["Error Log"]["m"]["method"] = f"bad key {KEY}"
 		out = maintenance.scrub_error_log_secrets(dry_run=False)
-		assert out == {**_OUT, "candidates": 3, "changed": 2}
+		assert out == {**_RAN, "candidates": 3, "changed": 2}
 		assert KEY not in f.tables["Error Log"]["a"]["error"] + f.tables["Error Log"]["m"]["method"]
 		assert f.statements  # the fake raises on any statement naming metadata
 
@@ -1122,13 +1175,15 @@ class TestNoQueue:
 
 	def test_a_real_run_never_touches_the_queue_and_inserts_nothing(self, fake):
 		f = fake([("a", LEAKY)])
-		assert maintenance.scrub_error_log_secrets(dry_run=False) == {**_OUT, "candidates": 1, "changed": 1}
+		assert maintenance.scrub_error_log_secrets(dry_run=False) == {**_RAN, "candidates": 1, "changed": 1}
 		assert _queue_calls(f) == [] and f.inserted == []
 
 	def test_the_result_has_no_queue_counts(self, fake):
 		fake([])
 		out = maintenance.scrub_error_log_secrets(dry_run=False)
-		assert set(out) == {"candidates", "changed", "deleted_docs_changed", "residual", "failed", "key_unreadable"}
+		assert set(out) == {
+			"candidates", "changed", "deleted_docs_changed", "residual", "failed", "key_unreadable", "hooks_refreshed",
+		}
 
 	def test_the_queue_code_is_gone(self):
 		for name in (
@@ -1149,41 +1204,96 @@ class TestHooksCacheRefresh:
 	started before the upgrade that misses that key after migrate's
 	``clear_cache`` puts back the old hooks, without the Error Log hook, and
 	every process reads them until the key is deleted again. A real scrub
-	deletes the key, reloads the hooks in its own (new-code) process and
-	drops that process's doc-event copy, before it reads any row."""
+	deletes the key, reloads the hooks in its own (new-code) process, drops
+	that process's doc-event copy and reads the key back, before it reads
+	any row."""
 
 	def test_a_real_run_refreshes_the_hooks_before_reading_any_row(self, fake):
 		f = fake([("a", LEAKY)])
-		maintenance.scrub_error_log_secrets(dry_run=False)
+		f.redis[f.cache.make_key("app_hooks")] = pickle.dumps(_OLD_HOOKS)  # an old process cached them
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
 		assert f.client_cache.calls == [("delete_value", "app_hooks")]
 		# reloaded after the delete, before the first row was read
 		assert f.hook_loads == [([("delete_value", "app_hooks")], 0)]
 		assert f.local.doc_events_hooks is None
 		assert f.cache.calls == []
+		# read back raw from Redis: the new hooks
+		assert f.cache.gets == [f.cache.make_key("app_hooks")]
+		assert pickle.loads(f.redis[f.cache.make_key("app_hooks")]) == _NEW_HOOKS
+		assert out["hooks_refreshed"] is True
 
 	def test_on_frappe_v15_it_deletes_them_from_frappe_cache(self, fake):
 		f = fake([("a", LEAKY)])
 		f.client_cache = None
-		maintenance.scrub_error_log_secrets(dry_run=False)
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
 		assert f.cache.calls == [("delete_value", "app_hooks")] and len(f.hook_loads) == 1
+		assert out["hooks_refreshed"] is True
 
-	def test_a_dry_run_leaves_them(self, fake):
+	def test_a_dry_run_leaves_them_and_reports_false(self, fake):
 		f = fake([("a", LEAKY)])
-		maintenance.scrub_error_log_secrets(dry_run=True)
-		assert f.client_cache.calls == [] and f.cache.calls == [] and f.hook_loads == []
+		out = maintenance.scrub_error_log_secrets(dry_run=True)
+		assert f.client_cache.calls == [] and f.cache.calls == [] and f.hook_loads == [] and f.cache.gets == []
 		assert f.local.doc_events_hooks == {"User": {}}
+		assert out["hooks_refreshed"] is False
 
-	@pytest.mark.parametrize("step", ["delete", "reload"])
-	def test_a_refresh_that_fails_never_stops_the_scrub(self, fake, step):
+	@pytest.mark.parametrize("step", ["delete", "reload", "read_back"])
+	def test_a_refresh_that_fails_never_stops_the_scrub_and_is_logged(self, fake, step):
 		f = fake([("a", LEAKY)])
 
 		def _boom(*a, **k):
-			raise ConnectionError("Connection refused")
+			raise ConnectionError(f"Connection refused near {KEY}")
 		if step == "delete":
 			f.client_cache.delete_value = _boom
-		else:
+		elif step == "reload":
 			f.get_hooks = _boom
+		else:
+			f.cache.get = _boom
 		assert maintenance.scrub_error_log_secrets(dry_run=False) == {**_OUT, "candidates": 1, "changed": 1}
+		refresh_lines = [line for _, _, line in f.lines if "optimus maintenance:" in line]
+		assert refresh_lines == ["optimus maintenance: Frappe's cached hooks were not refreshed (ConnectionError)"]
+		assert all(level == "error" and module == "optimus" for module, level, _ in f.lines)
+
+	def test_redis_down_is_not_a_refresh(self, fake):
+		# Frappe's wrappers swallow a ConnectionError on delete and set, so
+		# every step "succeeds"; only the read-back shows nothing was cached.
+		f = fake([("a", LEAKY)])
+		f.cache.down = f.client_cache.down = True
+		assert maintenance._refresh_hooks_cache() is False
+		assert f.lines == [
+			("optimus", "error", "optimus maintenance: Frappe's cached hooks were not refreshed (ConnectionError)"),
+		]
+
+	def test_a_key_that_was_not_cached_again_is_not_a_refresh(self, fake):
+		# The delete and the reload worked, but the reload's write was lost.
+		f = fake([("a", LEAKY)])
+		f.redis[f.cache.make_key("app_hooks")] = pickle.dumps(_OLD_HOOKS)
+		f.hook_writes_lost = True
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		assert out["hooks_refreshed"] is False and out["failed"] == 0
+		assert ("optimus", "error", "optimus maintenance: Frappe's cached hooks were not refreshed (nothing cached)") in f.lines
+
+	def test_old_hooks_cached_again_before_the_read_back_are_not_a_refresh(self, fake):
+		# An old process missed the key between the reload and the read-back.
+		f = fake([("a", LEAKY)])
+		real = f.get_hooks
+
+		def _get_hooks(*a, **k):
+			value = real(*a, **k)
+			f.redis[f.cache.make_key("app_hooks")] = pickle.dumps(_OLD_HOOKS)
+			return value
+		f.get_hooks = _get_hooks
+		assert maintenance._refresh_hooks_cache() is False
+		assert f.lines == [
+			("optimus", "error", "optimus maintenance: Frappe's cached hooks were not refreshed (the Error Log hook is missing)"),
+		]
+
+	def test_in_developer_mode_this_process_s_hooks_are_checked(self, fake):
+		# Frappe keeps the hooks per process there, never in Redis.
+		f = fake([("a", LEAKY)])
+		f.local.conf = {"developer_mode": 1}
+		assert maintenance._refresh_hooks_cache() is True
+		assert f.cache.gets == [] and f.lines == []
+		f.hooks = _OLD_HOOKS
 		assert maintenance._refresh_hooks_cache() is False
 
 	def test_the_hooks_an_old_process_cached_are_replaced(self, monkeypatch):
@@ -1203,19 +1313,57 @@ class TestHooksCacheRefresh:
 				value = redis["app_hooks"] = _load_app_hooks()
 			return value.get(hook, default) if hook else value
 
-		local = SimpleNamespace(doc_events_hooks=None)
+		local = SimpleNamespace(doc_events_hooks=None, conf={})
 
 		def get_doc_hooks():
 			if not local.doc_events_hooks:
 				local.doc_events_hooks = get_hooks("doc_events", {})
 			return local.doc_events_hooks
 		client_cache = SimpleNamespace(delete_value=lambda key: redis.pop(key, None))
+		cache = SimpleNamespace(make_key=lambda key: key, get=lambda key: pickle.dumps(redis[key]) if key in redis else None)
 		monkeypatch.setattr(
-			maintenance, "frappe", SimpleNamespace(client_cache=client_cache, get_hooks=get_hooks, local=local),
+			maintenance, "frappe",
+			SimpleNamespace(client_cache=client_cache, cache=cache, get_hooks=get_hooks, local=local),
 		)
 		assert "Error Log" not in get_doc_hooks()  # stale, and cached in this process too
 		assert maintenance._refresh_hooks_cache() is True
 		assert get_doc_hooks()["Error Log"] == {"before_insert": ["optimus.error_log_mask.mask_error_log"]}
+
+	def test_it_names_the_handler_hooks_py_registers(self):
+		from optimus import hooks
+
+		assert hooks.doc_events["Error Log"]["before_insert"] == maintenance._ERROR_LOG_HOOK
+
+
+class TestScrubSummaryLine:
+	"""Each completed call leaves one counts-only line in the ``optimus``
+	log, so a scrub run by hand leaves a durable trail."""
+
+	@pytest.mark.parametrize("dry_run", [True, False])
+	def test_one_counts_only_line(self, fake, dry_run):
+		f = fake([("a", LEAKY), ("b", CLEAN_AI)], [("d1", json.dumps({"error": LEAKY}))])
+		maintenance.scrub_error_log_secrets(dry_run=dry_run)
+		assert f.lines == [(
+			"optimus", "error",
+			f"optimus scrub_error_log_secrets: {'dry run' if dry_run else 'ran'}, candidates=2 changed=1 "
+			f"deleted_docs_changed=1 residual=0 failed=0 key_unreadable=0 hooks_refreshed={0 if dry_run else 1}",
+		)]
+		assert KEY not in repr(f.lines) and "Bearer" not in repr(f.lines)
+
+	def test_a_failing_log_never_stops_the_scrub(self, fake):
+		f = fake([("a", LEAKY)])
+
+		def _logger(*a, **k):
+			raise OSError("disk full")
+		f.logger = _logger
+		assert maintenance.scrub_error_log_secrets(dry_run=False) == {**_RAN, "candidates": 1, "changed": 1}
+
+	def test_it_is_written_outside_any_except(self, fake, monkeypatch):
+		fake([("a", LEAKY)])
+		active = []
+		monkeypatch.setattr(maintenance, "_log_line", lambda line: active.append((line, sys.exc_info()[0])))
+		maintenance.scrub_error_log_secrets(dry_run=False)
+		assert [a for _, a in active] == [None]
 
 
 class TestKeyUnreadable:
@@ -1256,7 +1404,7 @@ class TestKeyUnreadable:
 		f = fake([("a", LEAKY)], [("d1", json.dumps({"error": LEAKY}))], current_key="")
 		f.installed_singles.clear()
 		out = maintenance.scrub_error_log_secrets(dry_run=dry_run)
-		assert out == {**_OUT, "candidates": 1, "changed": 1, "deleted_docs_changed": 1}
+		assert out == {**(_OUT if dry_run else _RAN), "candidates": 1, "changed": 1, "deleted_docs_changed": 1}
 		assert f.single_reads == [("Optimus Settings", "ai_api_key")]
 		assert ("Bearer ********" in f.tables["Error Log"]["a"]["error"]) is not dry_run
 
@@ -1265,7 +1413,7 @@ class TestKeyUnreadable:
 		f = fake([("a", LEAKY)], current_key="")
 		f.single_error = RuntimeError("Lost connection to server during query")
 		out = maintenance.scrub_error_log_secrets(dry_run=dry_run)
-		assert out == {**_OUT, "candidates": 1, "changed": 1, "failed": 1}
+		assert out == {**(_OUT if dry_run else _RAN), "candidates": 1, "changed": 1, "failed": 1}
 
 	def test_the_docstring_says_to_enter_the_old_key(self):
 		# The scrub searches for the key that leaked: a new key would not find it.
@@ -1455,7 +1603,10 @@ def patch_env(monkeypatch, patch_logs):
 
 	def _scrub(**kw):
 		calls.append(kw)
-		return {"candidates": 3, "changed": 2, "deleted_docs_changed": 1, "residual": 0, "failed": 0}
+		return {
+			"candidates": 3, "changed": 2, "deleted_docs_changed": 1, "residual": 0, "failed": 0, "key_unreadable": False,
+			"hooks_refreshed": True,
+		}
 
 	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(1000, None))
 	monkeypatch.setattr(maintenance, "scrub_error_log_secrets", _scrub)
@@ -1485,12 +1636,15 @@ def _one_summary_line(patch_logs) -> str:
 
 def _scrub_answers(monkeypatch, **counts):
 	"""The scrub answers ``counts`` over a clean run's."""
-	out = {"candidates": 3, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, **counts}
+	out = {
+		"candidates": 3, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "hooks_refreshed": True,
+		**counts,
+	}
 	monkeypatch.setattr(maintenance, "scrub_error_log_secrets", lambda **kw: dict(out))
 
 
 _OFF_PEAK_NOTE = "on MariaDB, Error Log is locked while it is scanned, so on a busy site prefer off-peak"
-_RUN_IT = f"Run it by hand ({_OFF_PEAK_NOTE}): bench --site <site> {_COMMAND}"
+_RUN_IT = f"Run it by hand after the restart ({_OFF_PEAK_NOTE}): bench --site <site> {_COMMAND}"
 # Every outcome but a failed import prints it last; it repeats no command.
 _QUEUE_LINE = (
 	"Optimus: Error Log entries still queued in Redis are masked by Optimus when Frappe inserts them; nothing "
@@ -1502,13 +1656,32 @@ _NOT_MASKED_LINE = (
 )
 
 
+def _restart_line(command: str = "the command above", refreshed: bool = True) -> str:
+	"""The line every path prints last: run the scrub after the restart
+	(advisory step 3), or at least ``bench clear-cache``."""
+	start = (
+		"Optimus: after" if refreshed else
+		"Optimus: Frappe's cached hooks were not refreshed during this migrate, so the Error Log hook may not "
+		"reach every process yet. After"
+	)
+	return (
+		f"{start} restarting the web server and the background workers, run {command} (step 3); it also refreshes "
+		"Frappe's cached hooks so the Error Log hook reaches every process. If you cannot run it, run "
+		"bench --site <site> clear-cache after the restart."
+	)
+
+
+_FULL_COMMAND = f"bench --site <site> {_COMMAND}"
+
+
 def test_patch_runs_the_scrub_for_real(patch_env, patch_logs, capsys):
 	importlib.import_module(_PATCH).execute()
 	assert patch_env == [{"dry_run": False}]
 	assert "refresh" not in patch_logs.events  # the scrub refreshed the hooks cache itself
 	out = capsys.readouterr().out
 	assert "masked AI API keys in 3 stored error row(s)" in out
-	assert out.endswith(f"{_QUEUE_LINE}\n")
+	assert out.endswith(f"{_QUEUE_LINE}\n{_restart_line(_FULL_COMMAND)}\n")
+	assert out.count(_COMMAND) == 1
 	assert patch_logs.errors == []  # no breadcrumb when the scrub ran
 	line = _one_summary_line(patch_logs)
 	assert line.endswith(
@@ -1579,9 +1752,10 @@ def test_a_scrub_that_did_not_run_prints_one_instruction_line(patch_env, patch_l
 		monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(rows, "OperationalError"))
 	importlib.import_module(_PATCH).execute()
 	out = capsys.readouterr().out
-	assert out.count(_COMMAND) == 1 and out.count("bench --site") == 1
+	assert out.count(_COMMAND) == 1 and out.count("clear-cache") == 1
 	lines = out.splitlines()
-	assert len(lines) == 2 and _RUN_IT in lines[0] and lines[1] == _QUEUE_LINE
+	assert len(lines) == 3 and _RUN_IT in lines[0] and lines[1] == _QUEUE_LINE
+	assert lines[2] == _restart_line()
 	# rolled back, the hooks cache refreshed, then the breadcrumb
 	assert patch_logs.events[:3] == ["rollback", "refresh", "log_error"]
 
@@ -1594,18 +1768,48 @@ def test_every_outcome_says_the_queue_needs_nothing(patch_env, monkeypatch, caps
 	_scrub_answers(monkeypatch, **counts)
 	importlib.import_module(_PATCH).execute()
 	out = capsys.readouterr().out
-	assert out.endswith(f"{_QUEUE_LINE}\n") and out.count(_QUEUE_LINE) == 1
+	command = "the command above" if counts.get("failed") else _FULL_COMMAND
+	assert out.endswith(f"{_QUEUE_LINE}\n{_restart_line(command)}\n") and out.count(_QUEUE_LINE) == 1
+	# the last line gives the command only when no line above did
+	assert out.count(_COMMAND) == 1 + bool(counts.get("key_unreadable"))
 	assert "masked in Redis" not in out and "deferred-insert queue" not in out
 
 
 def test_patch_does_not_ask_to_rotate_when_nothing_was_found(patch_env, monkeypatch, capsys):
 	monkeypatch.setattr(
 		maintenance, "scrub_error_log_secrets",
-		lambda **kw: {"candidates": 5, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0},
+		lambda **kw: {
+			"candidates": 5, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "hooks_refreshed": True,
+		},
 	)
 	importlib.import_module(_PATCH).execute()
 	out = capsys.readouterr().out
-	assert out == f"Optimus: found no AI API keys in stored error rows.\n{_QUEUE_LINE}\n"
+	assert out == (
+		f"Optimus: found no AI API keys in stored error rows.\n{_QUEUE_LINE}\n{_restart_line(_FULL_COMMAND)}\n"
+	)
+
+
+@pytest.mark.parametrize("path", ["ran", "skipped", "failed"])
+def test_a_refresh_that_failed_is_said_explicitly_and_is_not_a_breadcrumb(patch_env, patch_logs, monkeypatch, capsys, path):
+	import frappe
+
+	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=lambda *a, **k: None), raising=False)
+	_stub_refresh(monkeypatch, patch_logs.events, False)
+	if path == "ran":
+		_scrub_answers(monkeypatch, hooks_refreshed=False)
+	elif path == "skipped":
+		monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(maintenance.MIGRATE_SCAN_LIMIT + 1, None))
+	else:
+		def _scrub(**kw):
+			raise ValueError("boom")
+		monkeypatch.setattr(maintenance, "scrub_error_log_secrets", _scrub)
+	importlib.import_module(_PATCH).execute()
+	out = capsys.readouterr().out
+	command = _FULL_COMMAND if path == "ran" else "the command above"
+	assert out.endswith(f"{_QUEUE_LINE}\n{_restart_line(command, refreshed=False)}\n")
+	assert out.count(_COMMAND) == 1
+	# hooks_refreshed is not a done value: a clean scrub leaves no breadcrumb
+	assert (patch_logs.errors == []) is (path == "ran")
 
 
 @pytest.mark.parametrize(
@@ -1901,7 +2105,7 @@ def test_a_failed_scrub_never_blocks_migrate(failing_scrub, patch_logs, capsys):
 	assert KEY not in repr(crumb) and "cannot update" not in repr(crumb)
 	line = _one_summary_line(patch_logs)
 	assert "failed" in line and "ValueError" in line
-	assert out.endswith(f"{_QUEUE_LINE}\n")
+	assert out.endswith(f"{_QUEUE_LINE}\n{_restart_line()}\n")
 
 
 def test_an_import_failure_never_blocks_migrate(patch_logs, monkeypatch, capsys):
@@ -1922,7 +2126,7 @@ def test_an_import_failure_never_blocks_migrate(patch_logs, monkeypatch, capsys)
 	assert "failed (ModuleNotFoundError)" in out
 	assert out.count(_COMMAND) == 1
 	assert rollbacks == [1]
-	assert out.endswith(f"{_NOT_MASKED_LINE}\n") and _QUEUE_LINE not in out
+	assert out.endswith(f"{_NOT_MASKED_LINE}\n{_restart_line(refreshed=False)}\n") and _QUEUE_LINE not in out
 	[crumb] = patch_logs.errors
 	assert crumb["message"].startswith("ModuleNotFoundError. ")
 

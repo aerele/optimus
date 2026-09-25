@@ -67,6 +67,7 @@ has at least 8 characters.
 from __future__ import annotations
 
 import json
+import pickle
 import re
 import sys
 from typing import NamedTuple
@@ -127,6 +128,8 @@ SCAN_SIZE_UNKNOWN = sys.maxsize
 # The LIMIT bounds the cost: on MariaDB it reads at most that many index
 # entries; Postgres scans the table and stops at that many rows.
 _DELETED_DOCUMENT_COUNT = "SELECT COUNT(*) FROM (SELECT 1 FROM `tabDeleted Document` LIMIT %s) t"
+# The Error Log hook as Frappe's cached hooks list it (hooks.py doc_events).
+_ERROR_LOG_HOOK = "optimus.error_log_mask.mask_error_log"
 # The values dry_run accepts as text (stripped, any case), besides True /
 # False and 1 / 0.
 _DRY_RUN_WORDS = {"true": True, "1": True, "yes": True, "false": False, "0": False, "no": False}
@@ -531,16 +534,63 @@ def _refresh_hooks_cache() -> bool:
 	hooks at once, and drops this process's own copy of the doc events
 	(``frappe.local.doc_events_hooks``, kept for a whole request, or a whole
 	bench migrate). It helps only once every process runs the new code: a
-	process still running the old code can cache the old hooks again. True
-	when it did all three; never raises."""
+	process still running the old code can cache the old hooks again.
+
+	True only when the hooks were refreshed and the cache is read back
+	holding the Error Log hook (``_hooks_cache_problem``): Frappe's Redis
+	wrappers swallow a ``ConnectionError`` on delete and set, so the steps
+	alone succeed with Redis down. Otherwise False, with one line in the
+	``optimus`` log naming an exception type or the problem, never row
+	text. Never raises.
+
+	In developer_mode Frappe keeps the hooks per process instead (v16's
+	``_site_cached_load_app_hooks``, v15's per-request load), not in Redis;
+	this cannot reach other processes' copies there, so a restart is the
+	remedy."""
+	problem = None
 	try:
 		cache = getattr(frappe, "client_cache", None) or frappe.cache
 		cache.delete_value("app_hooks")
 		frappe.get_hooks()
 		frappe.local.doc_events_hooks = None
+		problem = _hooks_cache_problem()
+	except Exception as e:
+		problem = type(e).__name__
+	if problem is None:
 		return True
+	_log_line(f"optimus maintenance: Frappe's cached hooks were not refreshed ({problem})")
+	return False
+
+
+def _hooks_cache_problem() -> str | None:
+	"""None when the hooks the other processes will read hold the Error Log
+	hook; otherwise what is wrong. Outside developer_mode that is the
+	"app_hooks" value in Redis, read back raw (``frappe.cache.get``, which
+	bypasses both the per-request and the v16 client-side copies and raises
+	when Redis is down); in developer_mode, where Frappe keeps the hooks per
+	process, this process's hooks. Raises what it cannot read."""
+	conf = getattr(getattr(frappe, "local", None), "conf", None) or {}
+	if conf.get("developer_mode"):
+		doc_events = frappe.get_hooks("doc_events", {})
+	else:
+		raw = frappe.cache.get(frappe.cache.make_key("app_hooks"))
+		if raw is None:
+			return "nothing cached"
+		doc_events = (pickle.loads(raw) or {}).get("doc_events") or {}
+	handlers = (doc_events.get("Error Log") or {}).get("before_insert") or []
+	if _ERROR_LOG_HOOK not in (handlers if isinstance(handlers, list | tuple) else [handlers]):
+		return "the Error Log hook is missing"
+	return None
+
+
+def _log_line(line: str) -> None:
+	"""``line`` in the ``optimus`` log at ERROR level (Frappe's loggers drop
+	lower levels on a production site). It holds counts, exception type
+	names or fixed text, never row text. Never raises."""
+	try:
+		frappe.logger("optimus").error(line)
 	except Exception:
-		return False
+		pass
 
 
 def _refuse_inside_a_background_job() -> None:
@@ -674,8 +724,8 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	inserts it. A real run first refreshes the hooks Frappe caches
 	(``_refresh_hooks_cache``), so that hook reaches every process once all
 	of them run the new code (run it after the restart); a failed refresh is
-	not counted and never stops the scrub. A dry run does not touch Redis at
-	all.
+	not counted and never stops the scrub. A dry run neither refreshes the
+	cached hooks nor reads the deferred-insert queue.
 
 	Returns a dict:
 
@@ -692,10 +742,17 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	  site's ``encryption_key``, or enter the OLD key again in Optimus
 	  Settings (the scrub searches for the key that leaked), then run the
 	  scrub again. On a site Optimus was uninstalled from no key is stored,
-	  so it is False.
+	  so it is False;
+	- ``hooks_refreshed``: True when this run refreshed Frappe's cached
+	  hooks and read them back holding the Error Log hook
+	  (``_refresh_hooks_cache``); False on a dry run, which does not refresh
+	  them. Not a sign that the scrub is done: when it is False, run the
+	  scrub again, or ``bench --site <site> clear-cache``, after restarting
+	  the web server and the background workers.
 
 	With ``dry_run=True`` the counts say what WOULD change and nothing is
-	written.
+	written. Each call that completes writes one counts-only line to the
+	``optimus`` log.
 	"""
 	from optimus.ai_fix import _current_key_or_empty
 
@@ -704,11 +761,11 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	batch_size = max(1, int(batch_size or _BATCH))
 	out = {
 		"candidates": 0, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0,
-		"key_unreadable": False,
+		"key_unreadable": False, "hooks_refreshed": False,
 	}
 	api_key = _current_key_or_empty()
 	if not dry_run:
-		_refresh_hooks_cache()
+		out["hooks_refreshed"] = _refresh_hooks_cache()
 	unreadable = _key_unreadable(api_key)
 	if unreadable is None:
 		out["failed"] += 1
@@ -742,6 +799,10 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 					out["failed"] += 1
 			if not dry_run:
 				safe_commit()
+	_log_line(
+		f"optimus scrub_error_log_secrets: {'dry run' if dry_run else 'ran'}, "
+		+ " ".join(f"{k}={int(v)}" for k, v in out.items())
+	)
 	return out
 
 
