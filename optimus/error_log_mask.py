@@ -47,12 +47,14 @@ every Frappe site has, so it cannot fail in a healthy transaction.
 It never raises, except an RQ job timeout (the job must stop), which leaves
 as a fresh instance raised after the ``try``, so the frames it interrupted
 (the record's text, the key read) never travel with it. It fails open: any
-other failure (an import, the key read, the masking) leaves the doc as it
-was, with one exception. When the masking fails (on a record of Optimus's,
-the only ones it masks), the text is withheld (``_withhold``) instead of
-inserted raw. Each failure leaves one line in the ``optimus`` log (an
-exception type name at most, never row text). It never writes an Error Log
-itself: that insert would run this hook again.
+other failure (the key read, the masking) leaves the doc as it was, with
+two exceptions. When the masking fails (on a record of Optimus's, the only
+ones it masks), the text is withheld (``_withhold``) instead of inserted
+raw. When Optimus's other modules cannot be imported, the stored key alone
+is masked with Frappe alone (``_mask_stored_key_only``, below). Each
+failure leaves a line in the ``optimus`` log (an exception type name at
+most, never row text). It never writes an Error Log itself: that insert
+would run this hook again.
 
 Frappe caches every app's hooks ("app_hooks" in Redis). A process started
 before the upgrade that misses that key after migrate's ``clear_cache``
@@ -66,11 +68,21 @@ The module imports only the standard library at import time; every Optimus
 import is inside the guarded ``try``. Frappe resolves the handler outside
 any ``try``, in every process that reads the hooks, and a process started
 before the upgrade still holds the old Optimus modules (``optimus.redaction``
-without ``SECRET_PLACEHOLDER``): there the handler resolves, its import of
-``optimus.maintenance`` fails inside the guard, and the row is stored as it
-was, instead of every Error Log insert of that process failing until it is
-restarted.
+without ``SECRET_PLACEHOLDER``): there the handler resolves and its import
+of ``optimus.maintenance`` fails inside the guard, instead of every Error
+Log insert of that process failing until it is restarted. That process
+still runs the old AI code, the code that leaks the key, so the hook then
+falls back to Frappe alone: it reads the stored key with
+``frappe.utils.password.get_decrypted_password`` (messages muted, held as
+``api_key``, its JSON-escaped form as ``secret``) and replaces both with
+``********`` in ``error``, ``method`` and ``metadata``, wherever they hold
+them. A row without the key is left byte-identical, and a key shorter than
+8 characters is not replaced, as in the masking above. Key shapes and
+value lines are not masked there: that needs the modules that failed to
+import.
 """
+
+import json
 
 # The Error Log fields that are masked (the ones the scrub reads in a row).
 _TEXT_FIELDS = ("error", "method", "metadata")
@@ -79,6 +91,10 @@ WITHHELD = "Optimus withheld this error text: it could not be masked."
 WITHHELD_TITLE = "Optimus withheld this error title: it could not be masked."
 # Error Log.method is Data (varchar(140)).
 _TITLE_LIMIT = 140
+# optimus.redaction.SECRET_PLACEHOLDER and maintenance._MIN_KEY_LEN, copied:
+# the fallback runs where those modules cannot be imported.
+_PLACEHOLDER = "********"
+_MIN_KEY_LEN = 8
 
 
 def mask_error_log(doc, method=None) -> None:
@@ -104,13 +120,21 @@ def mask_error_log(doc, method=None) -> None:
 
 def _mask_doc(doc, timeout_types) -> str | None:
 	"""Mask ``doc``'s text fields in place when it is a record of Optimus's
-	(``_is_ai``). None when it is done (masked, not Optimus's, or nothing to
-	mask); otherwise the outcome for the ``optimus`` log. Raises what it
-	cannot handle; ``mask_error_log`` catches it."""
+	(``_is_ai``), or, when Optimus's other modules cannot be imported, its
+	stored key alone (``_mask_stored_key_only``). None when it is done
+	(masked, not Optimus's, or nothing to mask); otherwise the outcome for
+	the ``optimus`` log. Raises what it cannot handle; ``mask_error_log``
+	catches it."""
 	import frappe
 
-	from optimus import maintenance
-	from optimus.ai_fix import _current_key_or_empty
+	stale = None
+	try:
+		from optimus import maintenance
+		from optimus.ai_fix import _current_key_or_empty
+	except Exception as e:
+		if isinstance(e, timeout_types):
+			raise
+		stale = type(e).__name__
 
 	record = {}
 	for field in _TEXT_FIELDS:
@@ -120,6 +144,8 @@ def _mask_doc(doc, timeout_types) -> str | None:
 		record[field] = str(value) if value and not isinstance(value, str) else value
 	if not record:
 		return None
+	if stale is not None:
+		return _mask_stored_key_only(frappe, doc, stale)
 	api_key = _read_key(frappe, _current_key_or_empty)
 	# Only a record from Optimus's AI code or holding the key is Optimus's to
 	# change; every other row is left exactly as it was.
@@ -135,11 +161,45 @@ def _mask_doc(doc, timeout_types) -> str | None:
 	return None
 
 
+def _mask_stored_key_only(frappe, doc, stale: str) -> str:
+	"""The fallback of a process whose Optimus modules cannot be imported
+	(``stale``, the import's exception type name): replace the stored key,
+	raw and JSON-escaped, with ``_PLACEHOLDER`` in the text fields that hold
+	it (a truthy value that is not text is read as ``str(value)``), using
+	Frappe alone. A key shorter than ``_MIN_KEY_LEN`` characters is not
+	replaced; a row without the key is left as it was. Returns the outcome
+	for the ``optimus`` log. Raises what it cannot handle;
+	``mask_error_log`` catches it."""
+	api_key = _read_key(frappe, _stored_key)
+	if len(api_key) >= _MIN_KEY_LEN:
+		secret = json.dumps(api_key)[1:-1]
+		for field in _TEXT_FIELDS:
+			value = doc.get(field)
+			if not value:
+				continue
+			text = value if isinstance(value, str) else str(value)
+			if api_key in text or secret in text:
+				doc.set(field, text.replace(secret, _PLACEHOLDER).replace(api_key, _PLACEHOLDER))
+	return f"checked for the stored key alone (Optimus's modules could not be imported: {stale})"
+
+
+def _stored_key() -> str:
+	"""The stored ``Optimus Settings.ai_api_key``, stripped, or ``""``, read
+	with Frappe alone (``ai_fix._current_key_or_empty`` without Optimus):
+	the same ``__Auth`` SELECT, ``raise_exception=False``, so an
+	undecryptable key answers ``""``. Held only as ``api_key``."""
+	from frappe.utils.password import get_decrypted_password
+
+	api_key = get_decrypted_password("Optimus Settings", "Optimus Settings", "ai_api_key", raise_exception=False)
+	return api_key.strip() if isinstance(api_key, str) else ""
+
+
 def _read_key(frappe, read) -> str:
-	"""``read()`` (``_current_key_or_empty``) with Frappe's messages muted:
-	for an undecryptable key Frappe's ``decrypt`` calls ``frappe.throw``,
-	which would add "Encryption key is invalid" to the reply of every request
-	that logs an error. The flag is restored whatever happens."""
+	"""``read()`` (``_current_key_or_empty``, or ``_stored_key``) with
+	Frappe's messages muted: for an undecryptable key Frappe's ``decrypt``
+	calls ``frappe.throw``, which would add "Encryption key is invalid" to
+	the reply of every request that logs an error. The flag is restored
+	whatever happens."""
 	flags = frappe.flags
 	muted = getattr(flags, "mute_messages", None)
 	flags.mute_messages = True
