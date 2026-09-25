@@ -1756,9 +1756,33 @@ def patch_logs(monkeypatch):
 	return rec
 
 
+class _Calls(list):
+	"""The scrub's calls; ``masks`` holds the calls of ``mask_error_log_queue``."""
+
+	def __init__(self):
+		super().__init__()
+		self.masks = []
+
+
+# What mask_error_log_queue answers when the queue is empty and Redis works.
+_QUEUE_EMPTY = {"queue_masked": 0, "queue_unmasked": 0, "queued": 0, "failed": 0}
+
+
+def _stub_queue_masking(monkeypatch, calls, events=None, counts=None):
+	"""Replace ``maintenance.mask_error_log_queue``: each call is logged in
+	``calls`` (and as "mask" in ``events``) and answers ``counts``."""
+
+	def _mask():
+		calls.append({})
+		if events is not None:
+			events.append("mask")
+		return dict(counts or _QUEUE_EMPTY)
+	monkeypatch.setattr(maintenance, "mask_error_log_queue", _mask)
+
+
 @pytest.fixture
-def patch_env(monkeypatch):
-	calls = []
+def patch_env(monkeypatch, patch_logs):
+	calls = _Calls()
 
 	def _scrub(**kw):
 		calls.append(kw)
@@ -1766,6 +1790,7 @@ def patch_env(monkeypatch):
 
 	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(1000, None))
 	monkeypatch.setattr(maintenance, "scrub_error_log_secrets", _scrub)
+	_stub_queue_masking(monkeypatch, calls.masks, patch_logs.events)
 	return calls
 
 
@@ -1779,13 +1804,31 @@ def _one_summary_line(patch_logs) -> str:
 	return line
 
 
+def _scrub_answers(monkeypatch, **counts):
+	"""The scrub answers ``counts`` over a clean run's."""
+	out = {"candidates": 3, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 0, **counts}
+	monkeypatch.setattr(maintenance, "scrub_error_log_secrets", lambda **kw: dict(out))
+
+
+_OFF_PEAK_NOTE = "on MariaDB, Error Log is locked while it is scanned, so on a busy site prefer off-peak"
+_RUN_IT = f"Run it by hand ({_OFF_PEAK_NOTE}): bench --site <site> {_COMMAND}"
+_INSERTS = (
+	"bench migrate then inserts up to 500 (Frappe v15) or 10,000 (v16) queued records; the scheduler inserts "
+	"the rest every 15 minutes."
+)
+
+
 def test_patch_runs_the_scrub_for_real(patch_env, patch_logs, capsys):
 	importlib.import_module(_PATCH).execute()
 	assert patch_env == [{"dry_run": False}]
+	assert patch_env.masks == []  # the scrub masked the queue itself
 	assert "masked AI API keys in 3 stored error row(s)" in capsys.readouterr().out
 	assert patch_logs.errors == []  # no breadcrumb when the scrub ran
 	line = _one_summary_line(patch_logs)
-	for count in ("candidates=3", "changed=2", "deleted_docs_changed=1", "residual=0", "failed=0", "queued=0"):
+	for count in (
+		"candidates=3", "changed=2", "deleted_docs_changed=1", "residual=0", "failed=0", "queued=0", "queue_masked=0",
+		"queue_unmasked=0", "key_unreadable=0",
+	):
 		assert count in line
 
 
@@ -1801,8 +1844,10 @@ def test_patch_skips_when_the_size_cannot_be_read(patch_env, patch_logs, monkeyp
 	assert "skipped the Error Log key scrub" in out and "its size could not be read (QueryTimeoutError)" in out
 	assert _COMMAND in out and str(maintenance.SCAN_SIZE_UNKNOWN) not in out
 	[crumb] = patch_logs.errors
-	# the failing part's TYPE name, never its message
-	assert crumb["message"].startswith("skipped: size unknown: QueryTimeoutError. ")
+	# the failing part's TYPE name, never its message, and the queue's counts
+	assert crumb["message"].startswith(
+		"skipped: size unknown: QueryTimeoutError; queue: masked=0 unmasked=0 queued=0 failed=0. "
+	)
 	line = _one_summary_line(patch_logs)
 	assert "size could not be read (QueryTimeoutError)" in line
 	for text in (out, repr(crumb), line):
@@ -1823,7 +1868,7 @@ def test_patch_skips_a_table_too_large_for_migrate(patch_env, patch_logs, monkey
 	out = capsys.readouterr().out
 	assert "skipped the Error Log key scrub" in out
 	assert _COMMAND in out
-	assert "locked while it is scanned" in out and "off-peak" in out
+	assert _OFF_PEAK_NOTE in out
 	# one breadcrumb, so the skip is visible after the console is gone
 	[crumb] = patch_logs.errors
 	assert crumb["title"] == _CRUMB_TITLE and crumb["active"] is None
@@ -1831,6 +1876,35 @@ def test_patch_skips_a_table_too_large_for_migrate(patch_env, patch_logs, monkey
 	assert f"bench --site <site> {_COMMAND}" in crumb["message"]
 	line = _one_summary_line(patch_logs)
 	assert "skipped" in line and str(size) in line
+
+
+def test_the_skipped_scrub_still_masks_the_queue(patch_env, patch_logs, monkeypatch, capsys):
+	# The queue masking takes no table lock, so it runs even when the scan
+	# is too large for the migrate: bench migrate inserts the queue right
+	# after the patches.
+	import frappe
+
+	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=lambda *a, **k: patch_logs.events.append("rollback")), raising=False)
+	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(maintenance.MIGRATE_SCAN_LIMIT + 1, None))
+	_stub_queue_masking(
+		monkeypatch, patch_env.masks, patch_logs.events,
+		{"queue_masked": 5, "queue_unmasked": 2, "queued": 7, "failed": 1},
+	)
+	importlib.import_module(_PATCH).execute()
+	assert patch_env == [] and len(patch_env.masks) == 1
+	# rolled back before the masking reads the key, and again before the
+	# breadcrumb, in case that read failed and aborted the transaction
+	assert patch_logs.events[:4] == ["rollback", "mask", "rollback", "log_error"]
+	[crumb] = patch_logs.errors
+	assert "; queue: masked=5 unmasked=2 queued=7 failed=1. " in crumb["message"]
+	assert "queue: masked=5 unmasked=2 queued=7 failed=1" in _one_summary_line(patch_logs)
+	out = capsys.readouterr().out
+	assert "Optimus: queued Error Log entries masked in Redis: 5, unmasked: 2; entries now in the deferred-insert queue: 7." in out
+	assert (
+		"Optimus: queued Error Log entries that could not be masked because Redis refused writes or stopped "
+		"answering: 2."
+	) in out
+	assert "Optimus: queued Error Log entries or records that could not be processed: 1." in out
 
 
 def test_patch_does_not_ask_to_rotate_when_nothing_was_found(patch_env, monkeypatch, capsys):
@@ -1843,103 +1917,128 @@ def test_patch_does_not_ask_to_rotate_when_nothing_was_found(patch_env, monkeypa
 	assert out == "Optimus: found no AI API keys in stored error rows.\n"
 
 
-@pytest.mark.parametrize(("failed", "residual", "queued"), [(2, 0, 0), (0, 1, 0), (0, 0, 4)])
-def test_patch_prints_only_the_problem_lines_when_nothing_was_masked(
-	patch_env, monkeypatch, capsys, failed, residual, queued,
-):
-	monkeypatch.setattr(
-		maintenance, "scrub_error_log_secrets",
-		lambda **kw: {
-			"candidates": 3, "changed": 0, "deleted_docs_changed": 0, "residual": residual, "failed": failed,
-			"queued": queued,
-		},
-	)
+@pytest.mark.parametrize(
+	"counts",
+	[
+		{"failed": 2}, {"residual": 1}, {"queued": 4}, {"queue_masked": 4}, {"queue_unmasked": 1},
+		{"key_unreadable": True, "failed": 1},
+	],
+	ids=["failed", "residual", "queued", "queue_masked", "queue_unmasked", "key_unreadable"],
+)
+def test_patch_prints_only_the_problem_lines_when_nothing_was_masked(patch_env, monkeypatch, capsys, counts):
+	_scrub_answers(monkeypatch, **counts)
 	importlib.import_module(_PATCH).execute()
 	out = capsys.readouterr().out
 	assert "Rotate" not in out and "found no AI API keys" not in out
-	assert ("could not be processed" in out) is bool(failed)
-	assert ("purge_ai_error_logs" in out) is bool(residual)
-	assert ("Error Log entries still in the deferred-insert queue: 4." in out) is bool(queued)
-
-
-def test_the_queued_line_says_migrate_inserts_them_and_to_run_the_scrub_again(patch_env, monkeypatch, capsys):
-	monkeypatch.setattr(
-		maintenance, "scrub_error_log_secrets",
-		lambda **kw: {"candidates": 3, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 1},
+	assert ("could not be processed" in out) is bool(counts.get("failed"))
+	assert ("purge_ai_error_logs" in out) is bool(counts.get("residual"))
+	assert ("entries now in the deferred-insert queue" in out) is bool(
+		counts.get("queued") or counts.get("queue_masked") or counts.get("queue_unmasked")
 	)
+	assert ("could not be masked because Redis" in out) is bool(counts.get("queue_unmasked"))
+	assert ("cannot be decrypted" in out) is bool(counts.get("key_unreadable"))
+
+
+def test_the_queue_lines_say_what_was_masked_and_when_frappe_inserts_it(patch_env, monkeypatch, capsys):
+	_scrub_answers(monkeypatch, queued=7, queue_masked=5, queue_unmasked=2, failed=1)
 	importlib.import_module(_PATCH).execute()
-	# "unless the flush stopped early": a queue that failed mid-flush can
-	# leave entries it never masked, and failed counts that.
+	command = f"bench --site <site> {_COMMAND}"
 	assert capsys.readouterr().out == (
-		"Optimus: Error Log entries still in the deferred-insert queue: 1. The scrub masked the ones waiting "
-		"when it started, unless the flush stopped early (see the failed count); bench migrate inserts them "
-		"all right after the patches. Run the scrub again after the restart to mask them in the table: "
-		f"bench --site <site> {_COMMAND}\n"
+		f"Optimus: 1 error row(s) or queued entries could not be processed. {_RUN_IT}\n"
+		"Optimus: queued Error Log entries masked in Redis: 5, unmasked: 2; entries now in the deferred-insert "
+		f"queue: 7. {_INSERTS} Entries queued while the migrate runs are not masked: run the scrub again after "
+		f"the restart (step 3): {command}\n"
+		"Optimus: queued Error Log entries that could not be masked because Redis refused writes or stopped "
+		f"answering: 2. They are held back and not inserted; run the scrub again (step 3): {command}\n"
 	)
+
+
+def test_no_line_blames_the_failed_count_for_the_queue(patch_env, patch_logs, monkeypatch, capsys):
+	# failed is shared with rows that could not be written: it cannot say
+	# how many queued entries were left unmasked. queue_unmasked does.
+	_scrub_answers(monkeypatch, queued=3, queue_masked=3, failed=1)
+	importlib.import_module(_PATCH).execute()
+	out = capsys.readouterr().out + repr(patch_logs.errors)
+	assert "see the failed count" not in out and "unless the flush stopped early" not in out
 
 
 def test_the_run_by_hand_hint_prefers_off_peak(patch_env, monkeypatch, capsys):
 	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(maintenance.MIGRATE_SCAN_LIMIT + 1, None))
 	importlib.import_module(_PATCH).execute()
 	out = capsys.readouterr().out
-	assert (
-		"Run it by hand (Error Log is locked while it is scanned, so on a busy site prefer off-peak): "
-		f"bench --site <site> {_COMMAND}"
-	) in out
+	# only MariaDB's Error Log (MyISAM) is locked while it is scanned
+	assert _RUN_IT in out
 	assert "Run it now" not in out and "run it off-peak" not in out
 
 
 def test_the_purge_hint_has_the_off_peak_note_too(patch_env, monkeypatch, capsys):
-	monkeypatch.setattr(
-		maintenance, "scrub_error_log_secrets",
-		lambda **kw: {"candidates": 1, "changed": 0, "deleted_docs_changed": 0, "residual": 1, "failed": 0, "queued": 0},
-	)
+	_scrub_answers(monkeypatch, candidates=1, residual=1)
 	importlib.import_module(_PATCH).execute()
 	out = capsys.readouterr().out
 	purge = "bench --site <site> execute optimus.maintenance.purge_ai_error_logs --kwargs"
-	assert (
-		f"then delete them (Error Log is locked while it is scanned, so on a busy site prefer off-peak): "
-		f"{purge} \"{{'dry_run': False}}\""
-	) in out
+	assert f"then delete them ({_OFF_PEAK_NOTE}): {purge} \"{{'dry_run': False}}\"" in out
 
 
 _PARTIAL_TITLE = "Optimus: Error Log key scrub did not finish"
 
 
-@pytest.mark.parametrize(("failed", "residual", "queued"), [(1, 0, 0), (0, 2, 0), (1, 0, 3), (1, 2, 3)])
-def test_a_partial_scrub_leaves_a_breadcrumb(patch_env, patch_logs, monkeypatch, failed, residual, queued):
+@pytest.mark.parametrize(
+	"counts",
+	[
+		{"failed": 1}, {"residual": 2}, {"failed": 1, "queued": 3}, {"failed": 1, "residual": 2, "queued": 3},
+		{"queue_unmasked": 4}, {"key_unreadable": True, "failed": 1}, {"key_unreadable": True},
+	],
+	ids=["failed", "residual", "failed+queued", "all", "queue_unmasked", "key_unreadable", "key_unreadable_alone"],
+)
+def test_a_partial_scrub_leaves_a_breadcrumb(patch_env, patch_logs, monkeypatch, counts):
 	# Patch Log marks the patch done: without a row, a scrub that could not
-	# process every row or left key-shaped values leaves no lasting trace.
-	monkeypatch.setattr(
-		maintenance, "scrub_error_log_secrets",
-		lambda **kw: {
-			"candidates": 5, "changed": 1, "deleted_docs_changed": 0, "residual": residual, "failed": failed,
-			"queued": queued,
-		},
-	)
+	# process every row, left key-shaped values, held queued entries back
+	# unmasked or could not read the key leaves no lasting trace. The flag
+	# alone is enough, whether or not the scrub also counted it in failed.
+	_scrub_answers(monkeypatch, candidates=5, changed=1, **counts)
 	importlib.import_module(_PATCH).execute()
 	[crumb] = patch_logs.errors
 	assert crumb["title"] == _PARTIAL_TITLE and crumb["active"] is None
-	assert crumb["message"].startswith(f"failed={failed} residual={residual} queued={queued}. Run it by hand (")
-	assert f"bench --site <site> {_COMMAND}" in crumb["message"]
-	assert ("purge_ai_error_logs" in crumb["message"]) is bool(residual)
+	c = {"failed": 0, "residual": 0, "queued": 0, "queue_masked": 0, "queue_unmasked": 0, **counts}
+	assert crumb["message"].startswith(
+		f"failed={c['failed']} residual={c['residual']} queued={c['queued']} queue_masked=0 "
+		f"queue_unmasked={c['queue_unmasked']} key_unreadable={int(bool(counts.get('key_unreadable')))}. "
+	)
+	assert f"{_RUN_IT}" in crumb["message"]
+	assert ("purge_ai_error_logs" in crumb["message"]) is bool(c["residual"])
 	assert KEY not in repr(crumb)
 	line = _one_summary_line(patch_logs)
-	assert f"failed={failed}" in line and f"residual={residual}" in line and f"queued={queued}" in line
+	assert f"failed={c['failed']}" in line and f"residual={c['residual']}" in line and f"queued={c['queued']}" in line
 
 
-def test_entries_still_queued_alone_leave_no_breadcrumb(patch_env, patch_logs, monkeypatch, capsys):
-	# queued also counts Frappe's own new error snapshots (a server error,
-	# any error in developer mode), so on a busy site it is rarely 0: it is
-	# printed and logged, but it is not a scrub that "did not finish".
-	monkeypatch.setattr(
-		maintenance, "scrub_error_log_secrets",
-		lambda **kw: {"candidates": 5, "changed": 1, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 3},
+def test_an_unreadable_key_says_how_to_make_it_readable(patch_env, patch_logs, monkeypatch, capsys):
+	_scrub_answers(monkeypatch, key_unreadable=True, failed=1)
+	importlib.import_module(_PATCH).execute()
+	hint = (
+		"The stored AI API key cannot be decrypted: restore the site's encryption_key, or enter the key again "
+		"in Optimus Settings, then run the scrub again."
 	)
+	[crumb] = patch_logs.errors
+	assert f". {hint} {_RUN_IT}" in crumb["message"]
+	out = capsys.readouterr().out
+	assert (
+		"Optimus: the AI API key stored in Optimus Settings cannot be decrypted, so the scrub could not search "
+		"for it or mask it by value. Restore the site's encryption_key, or enter the key again in Optimus "
+		f"Settings, then run the scrub again: bench --site <site> {_COMMAND}\n"
+	) in out
+
+
+@pytest.mark.parametrize("counts", [{"queued": 3}, {"queue_masked": 3, "queued": 5}], ids=["queued", "masked"])
+def test_queue_entries_alone_leave_no_breadcrumb(patch_env, patch_logs, monkeypatch, capsys, counts):
+	# queued also counts Frappe's own new error snapshots (a server error,
+	# any error in developer mode), so on a busy site it is rarely 0, and a
+	# masked entry is done: printed and logged, but not a scrub that "did
+	# not finish".
+	_scrub_answers(monkeypatch, candidates=5, changed=1, **counts)
 	importlib.import_module(_PATCH).execute()
 	assert patch_logs.errors == []
-	assert "Error Log entries still in the deferred-insert queue: 3." in capsys.readouterr().out
-	assert "queued=3" in _one_summary_line(patch_logs)
+	assert f"entries now in the deferred-insert queue: {counts['queued']}." in capsys.readouterr().out
+	assert f"queued={counts['queued']}" in _one_summary_line(patch_logs)
 
 
 def test_a_complete_scrub_leaves_no_breadcrumb(patch_env, patch_logs, monkeypatch):
@@ -1988,6 +2087,7 @@ def pg(monkeypatch, patch_logs):
 	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=txn.rollback), raising=False)
 	monkeypatch.setattr(frappe, "log_error", _log_error, raising=False)
 	monkeypatch.setattr(maintenance, "measure_scan_size", _REAL_MEASURE)
+	_stub_queue_masking(monkeypatch, [])
 	return txn
 
 
@@ -2016,6 +2116,21 @@ def test_on_postgres_the_patch_log_row_is_still_written(pg, monkeypatch, outcome
 	crumbs = [r for r in pg.written if r[0] == "Error Log"]
 	assert [c[1] for c in crumbs] == [_CRUMB_TITLE]  # written, after the rollback
 	assert pg.written[-1] == "Patch Log"
+
+
+def test_on_postgres_a_key_read_that_fails_is_rolled_back_before_the_breadcrumb(pg, monkeypatch):
+	# The queue masking reads the stored key (one SELECT). If that read
+	# fails it aborts the transaction; _current_key_or_empty swallows the
+	# error, so the patch cannot tell: it rolls back again after it.
+	_pg_maintenance(monkeypatch, pg, deleted=maintenance.MIGRATE_SCAN_LIMIT + 1)
+
+	def _mask():
+		pg.aborted = True  # the failed key read
+		return dict(_QUEUE_EMPTY)
+	monkeypatch.setattr(maintenance, "mask_error_log_queue", _mask)
+	assert importlib.import_module(_PATCH).execute() is None
+	assert [r[1] for r in pg.written if r[0] == "Error Log"] == [_CRUMB_TITLE]
+	pg.write("Patch Log")
 
 
 @pytest.mark.parametrize("outcome", ["skipped", "partial"])
@@ -2089,45 +2204,50 @@ def test_patch_warns_about_residual_rows_with_the_purge_dry_run_first(patch_env,
 @pytest.fixture
 def failing_scrub(monkeypatch, patch_logs):
 	"""A scrub that fails while a frame local and its message hold a key;
-	``frappe.db`` replaced wholesale to record the rollback."""
+	``frappe.db`` replaced wholesale to record the rollbacks. Returns the
+	calls of the queue masking."""
 	import frappe
 
 	def _scrub(**kw):
 		row_text = f"headers = {{'authorization': 'Bearer {KEY}'}}"  # noqa: F841 (a frame local)
 		raise ValueError(f"cannot update row holding {KEY}")
 
-	rollbacks = []
-
 	def _rollback(*a, **k):
-		rollbacks.append(1)
 		patch_logs.events.append("rollback")
 	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(10, None))
 	monkeypatch.setattr(maintenance, "scrub_error_log_secrets", _scrub)
 	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=_rollback), raising=False)
-	return rollbacks
+	masks = []
+	_stub_queue_masking(monkeypatch, masks, patch_logs.events, {"queue_masked": 2, "queue_unmasked": 0, "queued": 2, "failed": 0})
+	return masks
 
 
 def test_a_failed_scrub_never_blocks_migrate(failing_scrub, patch_logs, capsys):
 	assert importlib.import_module(_PATCH).execute() is None  # returns normally
 	out = capsys.readouterr().out
 	assert "failed (ValueError)" in out
-	assert _COMMAND in out and "locked while it is scanned" in out
+	assert _COMMAND in out and _OFF_PEAK_NOTE in out
 	assert KEY not in out
-	assert failing_scrub == [1]  # the failing chunk's writes rolled back
-	# the breadcrumb is written after the rollback (so it survives it), with
-	# no exception being handled, and holds the type and the command only
-	assert patch_logs.events.index("rollback") < patch_logs.events.index("log_error")
+	# the failing chunk's writes rolled back, then the queue masked in Redis
+	# (the scrub may have failed before it did), then a rollback again; the
+	# breadcrumb is written after them (so it survives them), with no
+	# exception being handled, and holds the type, the counts and the command
+	assert failing_scrub == [{}]
+	assert patch_logs.events[:4] == ["rollback", "mask", "rollback", "log_error"]
 	[crumb] = patch_logs.errors
 	assert crumb["title"] == _CRUMB_TITLE and crumb["active"] is None
-	assert crumb["message"].startswith("ValueError") and f"bench --site <site> {_COMMAND}" in crumb["message"]
+	assert crumb["message"].startswith("ValueError; queue: masked=2 unmasked=0 queued=2 failed=0. ")
+	assert f"bench --site <site> {_COMMAND}" in crumb["message"]
 	assert KEY not in repr(crumb) and "cannot update" not in repr(crumb)
 	line = _one_summary_line(patch_logs)
 	assert "failed" in line and "ValueError" in line
+	assert "Optimus: queued Error Log entries masked in Redis: 2, unmasked: 0;" in out
 
 
 def test_an_import_failure_never_blocks_migrate(patch_logs, monkeypatch, capsys):
 	# The module import runs inside the patch's try: a broken import is
-	# reported by its type with the command, and the migrate continues.
+	# reported by its type with the command, and the migrate continues. The
+	# queue cannot be masked then, and the console says so.
 	import frappe
 
 	import optimus
@@ -2141,8 +2261,27 @@ def test_an_import_failure_never_blocks_migrate(patch_logs, monkeypatch, capsys)
 	assert "failed (ModuleNotFoundError)" in out
 	assert _COMMAND in out
 	assert rollbacks == [1]
+	assert (
+		"Optimus: the Error Log deferred-insert queue was not masked; bench migrate inserts it as it is. Run the "
+		f"scrub after the restart (step 3): bench --site <site> {_COMMAND}\n"
+	) in out
 	[crumb] = patch_logs.errors
-	assert crumb["message"].startswith("ModuleNotFoundError")
+	assert crumb["message"].startswith("ModuleNotFoundError; queue: not masked. ")
+
+
+def test_a_failing_queue_masking_never_blocks_migrate(patch_env, patch_logs, monkeypatch, capsys):
+	import frappe
+
+	def _mask():
+		raise RuntimeError(f"cannot mask {KEY}")
+	monkeypatch.setattr(maintenance, "mask_error_log_queue", _mask)
+	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(maintenance.MIGRATE_SCAN_LIMIT + 1, None))
+	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=lambda *a, **k: None), raising=False)
+	assert importlib.import_module(_PATCH).execute() is None
+	out = capsys.readouterr().out
+	assert "the Error Log deferred-insert queue was not masked" in out and KEY not in out
+	[crumb] = patch_logs.errors
+	assert "; queue: not masked. " in crumb["message"] and KEY not in repr(crumb)
 
 
 @pytest.mark.parametrize("outcome", ["ran", "skipped", "failed"])
@@ -2185,12 +2324,8 @@ def test_patch_reports_rows_that_could_not_be_masked(patch_env, monkeypatch, cap
 	)
 	importlib.import_module(_PATCH).execute()
 	out = capsys.readouterr().out
-	# failed also counts queued entries that could not be inserted or masked
-	assert (
-		"Optimus: 1 error row(s) or queued entries could not be processed. Run it by hand ("
-		"Error Log is locked while it is scanned, so on a busy site prefer off-peak): "
-		f"bench --site <site> {_COMMAND}\n"
-	) in out
+	# failed also counts queued entries that could not be masked
+	assert f"Optimus: 1 error row(s) or queued entries could not be processed. {_RUN_IT}\n" in out
 	assert "could not be masked" not in out
 
 
