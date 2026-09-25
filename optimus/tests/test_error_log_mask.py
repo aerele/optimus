@@ -304,6 +304,15 @@ class TestFailOpen:
 		assert KEY not in json.dumps(doc.fields()) and "ai_fix.py" not in json.dumps(doc.fields())
 		assert _one_line(env).endswith("withheld: its masking failed")
 
+	def test_the_withheld_note_says_where_the_reason_is(self):
+		# Stored Error Log content: fixed, untranslated, key-free, with a
+		# next step.
+		assert error_log_mask.WITHHELD == (
+			"Optimus withheld this error text: it could not be masked. See logs/optimus.log for the reason."
+		)
+		assert error_log_mask.WITHHELD_TITLE == "Optimus withheld this error title: it could not be masked."
+		assert len(error_log_mask.WITHHELD_TITLE) <= error_log_mask._TITLE_LIMIT
+
 	def test_metadata_without_a_frame_or_the_key_is_kept_when_the_text_is_withheld(self, env, monkeypatch):
 		monkeypatch.setattr(maintenance, "_mask", _boom)
 		meta = json.dumps({"user": "a@b.c"})

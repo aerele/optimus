@@ -86,8 +86,10 @@ import json
 
 # The Error Log fields that are masked (the ones the scrub reads in a row).
 _TEXT_FIELDS = ("error", "method", "metadata")
-# What a withheld record stores instead of its text.
-WITHHELD = "Optimus withheld this error text: it could not be masked."
+# What a withheld record stores instead of its text: stored Error Log
+# content, so untranslated (a translation at write time would bake in the
+# failing request's language), key-free, with the next step.
+WITHHELD = "Optimus withheld this error text: it could not be masked. See logs/optimus.log for the reason."
 WITHHELD_TITLE = "Optimus withheld this error title: it could not be masked."
 # Error Log.method is Data (varchar(140)).
 _TITLE_LIMIT = 140
