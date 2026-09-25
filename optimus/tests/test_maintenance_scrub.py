@@ -10,8 +10,7 @@ implements just the ORM calls the module makes (``get_all`` with LIKE / = / >
 ``limit_page_length``; ``db.set_value`` with a field dict; ``db.count``;
 ``db.sql`` (the bounded count); ``db.has_column``; ``db.delete``;
 ``db.get_single_value``; savepoints; ``get_doc(...).insert``, which the
-scrub must never call). ``cache`` is ``_FakeRedis``, Frappe's RedisWrapper
-over an in-memory Redis.
+scrub must never call). ``cache`` records every Redis call the scrub makes.
 """
 
 import fnmatch
@@ -145,20 +144,33 @@ class _FakeTxn:
 		self.open.clear()
 
 
+class _RecordingCache:
+	"""``frappe.cache`` (and Frappe v16's ``frappe.client_cache``): every
+	method call is logged in ``calls`` as ``(name, *args)`` and answers
+	None."""
+
+	def __init__(self):
+		self.calls = []
+
+	def __getattr__(self, name):
+		if name.startswith("__"):
+			raise AttributeError(name)
+		return lambda *a, **k: self.calls.append((name, *a))
+
+
 class _FakeFrappe:
 	"""``has_metadata=False`` models Frappe v15, whose Error Log has no
 	``metadata`` column: a statement naming it fails. ``v15_like=True``
 	models v15's ``db_query``, which doubles every backslash of a LIKE value
 	before it reaches SQL. ``method`` is Data (varchar(140)) and a longer
-	write fails as strict mode does. ``cache`` holds Error Log's
-	deferred-insert queue, and ``get_doc(record).insert()`` adds a row
-	(``inserted`` keeps each record as it reached the "database"; the scrub
-	never inserts, Frappe's own flush does). ``singles`` holds the Singles
-	values ``db.get_single_value`` reads (``single_reads`` logs each read)."""
+	write fails as strict mode does. ``cache`` records the Redis calls, and
+	``get_doc(record).insert()`` adds a row (``inserted`` keeps each record;
+	the scrub never inserts). ``singles`` holds the Singles values
+	``db.get_single_value`` reads (``single_reads`` logs each read)."""
 
 	def __init__(self, error_logs, deleted_docs=(), has_metadata=True, v15_like=False):
 		self.v15_like = v15_like
-		self.cache = _FakeRedis()
+		self.cache = _RecordingCache()
 		self.inserted = []
 		self.singles = {}
 		self.single_reads = []
@@ -266,8 +278,7 @@ class _FakeFrappe:
 
 # The scrub's result when nothing was found: every count 0, the key readable.
 _OUT = {
-	"candidates": 0, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 0,
-	"queue_masked": 0, "queue_unmasked": 0, "key_unreadable": False,
+	"candidates": 0, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "key_unreadable": False,
 }
 
 
@@ -275,13 +286,8 @@ _OUT = {
 def fake(monkeypatch):
 	def _make(error_logs, deleted_docs=(), current_key=KEY, has_metadata=True, v15_like=False):
 		f = _FakeFrappe(error_logs, deleted_docs, has_metadata=has_metadata, v15_like=v15_like)
-		f.remasks = []
 		monkeypatch.setattr(maintenance, "frappe", f)
 		monkeypatch.setattr(maintenance, "safe_commit", f.commit)
-		monkeypatch.setattr(
-			maintenance, "_remask_error_log_queue",
-			lambda *a: f.remasks.append(f.reads) or maintenance._QueueMasked(0, 0, 0, False),
-		)
 		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", lambda: current_key)
 		return f
 	return _make
@@ -294,13 +300,13 @@ class TestScrubErrorLogSecrets:
 		# b has an ai_fix.py frame and the api_key marker, so it is a
 		# candidate, but nothing in it changes.
 		assert out == {**_OUT, "candidates": 2, "changed": 1, "deleted_docs_changed": 1}
-		assert f.writes == [] and f.commits == [] and f.remasks == []
+		assert f.writes == [] and f.commits == [] and f.cache.calls == []
 
 	def test_scrubs_error_log_and_deleted_document_copies(self, fake):
 		f = fake([("a", LEAKY), ("b", CLEAN_AI), ("c", UNRELATED)], [("d1", json.dumps({"error": LEAKY}))])
 		out = maintenance.scrub_error_log_secrets(dry_run=False)
 		assert out == {**_OUT, "candidates": 2, "changed": 1, "deleted_docs_changed": 1}
-		assert f.remasks == [0]  # the queue masked in Redis before the first read
+		assert _queue_calls(f) == []  # the Error Log hook masks queued records as Frappe inserts them
 		assert KEY not in f.tables["Error Log"]["a"]["error"]
 		assert "'authorization': 'Bearer ********'" in f.tables["Error Log"]["a"]["error"]
 		assert KEY not in f.tables["Deleted Document"]["d1"]["data"]
@@ -546,20 +552,20 @@ class TestDryRunCoercion:
 		f = fake([("a", LEAKY)], [("d1", LEAKY)])
 		out = maintenance.scrub_error_log_secrets(dry_run=value)
 		assert (out["changed"], out["deleted_docs_changed"]) == (1, 1)
-		assert KEY not in f.tables["Error Log"]["a"]["error"] and f.remasks == [0]
+		assert KEY not in f.tables["Error Log"]["a"]["error"] and _queue_calls(f) == []
 
 	@pytest.mark.parametrize("value", [*TRUE, None], ids=repr)
 	def test_a_true_value_or_none_writes_nothing(self, fake, value):
 		f = fake([("a", LEAKY)], [("d1", LEAKY)])
 		out = maintenance.scrub_error_log_secrets(dry_run=value)
 		assert (out["changed"], out["deleted_docs_changed"]) == (1, 1)
-		assert f.writes == [] and f.commits == [] and f.remasks == []
+		assert f.writes == [] and f.commits == [] and f.cache.calls == []
 
 	def test_the_default_is_a_dry_run(self, fake):
 		f = fake([("a", LEAKY), ("c", UNRELATED)])
 		assert maintenance.scrub_error_log_secrets()["changed"] == 1
 		assert maintenance.purge_ai_error_logs() == {"error_logs": 1, "deleted_documents": 0}
-		assert f.writes == [] and f.deletes == [] and f.remasks == []
+		assert f.writes == [] and f.deletes == [] and f.cache.calls == []
 
 	@pytest.mark.parametrize("value", BAD, ids=repr)
 	@pytest.mark.parametrize("func", ["scrub_error_log_secrets", "purge_ai_error_logs"])
@@ -570,7 +576,7 @@ class TestDryRunCoercion:
 		message = str(ei.value)
 		for allowed in ("True", "False", "1", "0", '"true"', '"false"', '"yes"', '"no"'):
 			assert allowed in message, allowed
-		assert f.statements == [] and f.remasks == [] and f.writes == [] and f.deletes == []
+		assert f.statements == [] and f.cache.calls == [] and f.writes == [] and f.deletes == []
 
 	@pytest.mark.parametrize("value", [*TRUE, None], ids=repr)
 	def test_purge_counts_only_for_a_true_value_or_none(self, fake, value):
@@ -663,8 +669,8 @@ class TestScrubScanSize:
 	below the limit, above it once the table is larger, and portable (no
 	estimate: v15's is not scoped to the site's schema, Postgres answers -1
 	for a table never analysed, InnoDB's is about a fifth low). The Error
-	Log queue is not part of it: it is masked in Redis and never read by
-	the table scan."""
+	Log queue is not part of it: the scrub never reads it (the Error Log
+	hook masks queued records as Frappe inserts them)."""
 
 	BOUNDED = "SELECT COUNT(*) FROM (SELECT 1 FROM `tabDeleted Document` LIMIT %s) t"
 
@@ -696,7 +702,7 @@ class TestScrubScanSize:
 		assert maintenance.measure_scan_size() == (30, None)
 		# every Deleted Document: deleted_doctype is not indexed, so the
 		# passes read the whole table; the LIMIT is a bound parameter. The
-		# queue adds no table-scan work (it is masked in Redis), so its
+		# queue adds no table-scan work (the scrub never reads it), so its
 		# length is never read.
 		assert calls == [
 			("count", ("Error Log",), {}),
@@ -893,330 +899,89 @@ def _v16_error_log_validate(row: dict) -> dict:
 	return row
 
 
-class ResponseError(Exception):
-	"""redis-py's ``ResponseError``: Redis refused the command."""
+class TestMaskedRecord:
+	"""``_masked_record``: an Error Log record as the Error Log hook
+	(``optimus.error_log_mask``) stores it, before Frappe's ``validate``,
+	length check and INSERT."""
 
-
-class OutOfMemoryError(ResponseError):
-	"""redis-py's ``OutOfMemoryError``: past ``maxmemory`` with the
-	``noeviction`` policy, Redis refuses every command that adds data (an
-	RPUSH) and still runs the others (a read, a pop, a rename)."""
-
-
-class _FakeRedis:
-	"""Frappe's ``RedisWrapper`` over an in-memory Redis.
-
-	``make_key`` prefixes the site's db name and encodes, as
-	``RedisWrapper.make_key`` does. The wrapper's ``llen`` / ``lpop`` /
-	``rpush`` / ``get_keys`` / ``delete_value`` make the key and send the raw
-	command, as RedisWrapper does. ``execute_command`` is the raw client: it
-	takes made keys only (an unmade one fails the test). Lists hold bytes, a
-	list that runs empty is deleted, and RENAME / RENAMENX of a missing key
-	raise ``ResponseError("no such key")``, all as in Redis.
-
-	``commands`` logs every raw command. ``fail`` maps a command (or "*",
-	every command) to a function of its arguments that returns the exception
-	to raise instead of running it, or None. ``lost`` holds commands that
-	run and then raise, as when the connection drops before the reply.
-	``before(command, args)`` runs before each raw command: another process
-	acting in between."""
-
-	DB = "_optimus_test_site"
-
-	def __init__(self, queues=None):
-		self.store = {}
-		self.commands = []
-		self.fail = {}
-		self.lost = set()
-		self.before = None
-		for name, entries in (queues or {}).items():
-			if entries:
-				self.store[self.make_key(name)] = [e.encode() if isinstance(e, str) else e for e in entries]
-
-	def make_key(self, key, user=None, shared=False):
-		assert user is None and not shared
-		return f"{self.DB}|{key}".encode()
-
-	def _made(self, key):
-		assert isinstance(key, bytes) and key.startswith(f"{self.DB}|".encode()), key
-		return key
-
-	def execute_command(self, command, *args, **options):
-		self.commands.append((command, *args))
-		if self.before is not None:
-			self.before(command, args)
-		check = self.fail.get(command) or self.fail.get("*")
-		error = check(args) if check else None
-		if error is not None:
-			raise error
-		result = self._run(command, args)
-		if command in self.lost:
-			raise ConnectionError("Connection closed by server.")
-		return result
-
-	def _run(self, command, args):
-		if command == "EXISTS":
-			return sum(1 for key in args if self._made(key) in self.store)
-		if command == "LLEN":
-			return len(self.store.get(self._made(args[0]), []))
-		if command == "LPOP":
-			queue = self.store.get(self._made(args[0]))
-			if not queue:
-				return None
-			item = queue.pop(0)
-			if not queue:
-				del self.store[args[0]]
-			return item
-		if command == "RPUSH":
-			queue = self.store.setdefault(self._made(args[0]), [])
-			queue += [v.encode() if isinstance(v, str) else v for v in args[1:]]
-			return len(queue)
-		if command in ("RENAME", "RENAMENX"):
-			src, dst = self._made(args[0]), self._made(args[1])
-			if src not in self.store:
-				raise ResponseError("no such key")
-			if command == "RENAMENX" and dst in self.store:
-				return False
-			self.store[dst] = self.store.pop(src)
-			return True
-		if command == "KEYS":
-			pattern = args[0].decode()
-			return [key for key in self.store if fnmatch.fnmatchcase(key.decode(), pattern)]
-		if command == "UNLINK":
-			return sum(1 for key in args if self.store.pop(self._made(key), None) is not None)
-		raise AssertionError(f"unexpected Redis command {command}")
-
-	# RedisWrapper's own methods: each makes the key, then sends the command.
-	def llen(self, key):
-		return self.execute_command("LLEN", self.make_key(key))
-
-	def lpop(self, key):
-		return self.execute_command("LPOP", self.make_key(key))
-
-	def rpush(self, key, value):
-		return self.execute_command("RPUSH", self.make_key(key), value)
-
-	def get_keys(self, key):
-		return self.execute_command("KEYS", self.make_key(key + "*"))
-
-	def delete_value(self, keys, make_keys=True):
-		if keys:
-			self.execute_command("UNLINK", *(self.make_key(k) if make_keys else k for k in keys))
-
-	def entries(self, name) -> list[str]:
-		"""The entries of the list ``name`` (an unmade key), as text."""
-		return [e.decode() for e in self.store.get(self.make_key(name), [])]
-
-
-Q = "insert_queue_for_Error Log"
-CLAIM = "optimus_error_log_queue_claim"
-
-
-def _frappe_save_to_db(cache, insert, cap=10_000):
-	"""Frappe's ``frappe.deferred_insert.save_to_db`` (v16; v15 caps at 500),
-	which bench migrate runs right after the patches and the scheduler every
-	15 minutes: it finds the queues by the ``insert_queue_for_`` prefix, reads
-	the doctype from the rest of the key, and inserts every record it pops as
-	it is (``insert`` gets the record with its doctype set)."""
-	for key in cache.get_keys("insert_queue_for_"):
-		count = 0
-		queue_key = key.decode().split("|")[1]
-		doctype = key.decode().split("insert_queue_for_")[1]
-		while cache.llen(queue_key) > 0 and count <= cap:
-			records = json.loads(cache.lpop(queue_key).decode("utf-8"))
-			for record in [records] if isinstance(records, dict) else records:
-				count += 1
-				record.update({"doctype": doctype})
-				insert(record)
-
-
-# Frappe's own persistent_cache_keys (frappe/hooks.py, v16; v15 has all but
-# "concurrency:*").
-_FRAPPE_PERSISTENT_CACHE_KEYS = (
-	"changelog-*", "insert_queue_for_*", "recorder-*", "global_search_queue", "monitor-transactions",
-	"rate-limit-counter-*", "rl:*", "concurrency:*",
-)
-
-
-def _frappe_clear_cache(cache):
-	"""What ``frappe.clear_cache()`` (no doctype, no user) does to Redis, as
-	bench migrate's setUp runs it: delete every key of the site except those
-	matching an app's ``persistent_cache_keys`` (``frappe/cache_manager.py``
-	``clear_cache`` on v16, ``frappe/__init__.py`` on v15). Optimus's entries
-	are read from its real hooks module."""
-	from optimus import hooks
-
-	doomed = set(cache.get_keys(""))
-	for key in (*_FRAPPE_PERSISTENT_CACHE_KEYS, *getattr(hooks, "persistent_cache_keys", ())):
-		doomed.difference_update(cache.get_keys(key))
-	cache.delete_value(list(doomed), make_keys=False)
-
-
-class _NoDatabase:
-	"""``frappe.db`` for the re-mask: any use of it is logged in ``used``
-	and fails."""
-
-	def __init__(self):
-		self.used = []
-
-	def __getattr__(self, name):
-		self.used.append(name)
-		raise AssertionError(f"frappe.db.{name} used")
-
-
-@pytest.fixture
-def redis(monkeypatch):
-	"""``maintenance.frappe`` with a ``_FakeRedis`` cache and no database:
-	``r.db.used`` logs any database use, ``r.touched`` any insert or commit."""
-
-	def _make(queues=None):
-		r = _FakeRedis(queues)
-		r.db = _NoDatabase()
-		r.touched = []
-		frappe = SimpleNamespace(cache=r, db=r.db, get_doc=lambda *a, **k: r.touched.append("get_doc"))
-		monkeypatch.setattr(maintenance, "frappe", frappe)
-		monkeypatch.setattr(maintenance, "safe_commit", lambda: r.touched.append("commit"))
-		return r
-	return _make
-
-
-def _masked(record, api_key=KEY):
-	"""The one-record entry the re-mask pushes for ``record``."""
-	return [maintenance._masked_record(record, api_key)]
-
-
-class TestRemaskErrorLogQueue:
-	"""The scrub no longer inserts queued Error Log records. It claims the
-	queue at once (RENAMENX to a key Frappe never reads), masks each entry,
-	pushes the masked records back onto the queue, and leaves inserting them
-	to Frappe's own ``save_to_db``."""
-
-	def test_claims_masks_and_pushes_so_frappes_flush_inserts_each_masked_row_once(self, redis):
+	def test_masks_the_key_in_every_text_field_and_keeps_the_rest(self):
 		leaky = {
 			"error": LEAKY,
 			"method": f"The AI provider returned an error (HTTP 401): bad key {KEY}",
 			"metadata": json.dumps({"form_dict": {"doc": f'{{"ai_api_key": "{KEY}"}}'}}),
 			"reference_doctype": "Optimus Session", "reference_name": "s-1", "trace_id": "t-1",
 		}
-		pair = [{"error": "x"}, {"error": f"y api_key={KEY}"}]
-		r = redis({Q: [json.dumps(leaky), json.dumps(pair)], "insert_queue_for_Route History": [json.dumps({"route": "app"})]})
-		assert maintenance._remask_error_log_queue(KEY) == (2, 0, 0, False)
-		# the whole queue claimed at once, then only ever pushed onto: never popped
-		assert ("RENAMENX", r.make_key(Q), r.make_key(CLAIM)) in r.commands
-		assert not [c for c in r.commands if c[0] == "LPOP" and c[1] == r.make_key(Q)]
-		assert r.make_key(CLAIM) not in r.store
-		assert r.entries(Q) == [json.dumps(_masked(leaky)), json.dumps([maintenance._masked_record(x, KEY) for x in pair])]
-		assert r.entries("insert_queue_for_Route History") == [json.dumps({"route": "app"})]  # not Error Log's
-		# a second run changes nothing, so a re-run never inserts twice
-		assert maintenance._remask_error_log_queue(KEY) == (2, 0, 0, False)
-		rows = []
-		_frappe_save_to_db(r, rows.append)
-		logs = [{k: v for k, v in row.items() if k != "doctype"} for row in rows if row["doctype"] == "Error Log"]
-		assert logs == [maintenance._masked_record(x, KEY) for x in (leaky, *pair)]  # each once
-		assert not [row for row in rows if KEY in json.dumps(row)]
-		first = logs[0]
-		assert "'Bearer ********'" in first["error"] and first["method"].endswith("bad key ********")
-		assert json.loads(first["metadata"])  # still valid JSON
-		assert (first["reference_doctype"], first["reference_name"], first["trace_id"]) == ("Optimus Session", "s-1", "t-1")
-		assert r.touched == [] and r.db.used == []  # Frappe inserted them, not the scrub
+		row = maintenance._masked_record(leaky, KEY)
+		assert KEY not in json.dumps(row)
+		assert "'Bearer ********'" in row["error"] and row["method"].endswith("bad key ********")
+		assert json.loads(row["metadata"])  # still valid JSON
+		assert (row["reference_doctype"], row["reference_name"], row["trace_id"]) == ("Optimus Session", "s-1", "t-1")
+		assert maintenance._masked_record(row, KEY) == row  # idempotent
 
-	def test_a_claim_an_interrupted_run_left_is_drained_before_the_queue_is_claimed(self, redis):
-		left = [{"error": f"L{i} api_key={KEY}"} for i in range(2)]
-		new = [{"error": f"R{i} api_key={KEY}"} for i in range(2)]
-		r = redis({CLAIM: [json.dumps(x) for x in left], Q: [json.dumps(x) for x in new]})
-		# The leftover's masked entries join the queue, so the claim takes
-		# them again with it and they are pushed twice (masking is
-		# idempotent): 2 + 4 pushes.
-		assert maintenance._remask_error_log_queue(KEY) == (6, 0, 0, False)
-		assert r.entries(Q) == [json.dumps(_masked(x)) for x in new + left]
-		assert r.make_key(CLAIM) not in r.store
-		# the leftover first, so the rename found no claim and moved the queue
-		assert [c[0] for c in r.commands] == [
-			"EXISTS", "LLEN", *["LPOP", "RPUSH"] * 2, "RENAMENX", "LLEN", *["LPOP", "RPUSH"] * 4,
-		]
+	@pytest.mark.parametrize("with_key", [False, True])
+	def test_a_long_title_goes_in_front_of_the_error_as_v16_does(self, with_key):
+		# Frappe v16's ErrorLog.validate moves a title over 140 characters in
+		# front of the error and cuts it; v15 has no such validate and fails
+		# the insert (CharacterLengthExceededError). The hook stores the same
+		# row on both.
+		title = ("T" * 150 + (f" key {KEY} " if with_key else " ") + "tail ").ljust(300, "z")
+		assert len(title) == 300
+		row = maintenance._masked_record({"error": "Traceback ...", "method": title}, KEY)
+		full = title.replace(KEY, "********")
+		assert row["error"] == f"{full}\nTraceback ..."  # the full title is kept
+		assert row["method"] == full[:140] and len(row["method"]) == 140  # v15's length check passes
+		assert KEY not in json.dumps(row)
+		assert _v16_error_log_validate(dict(row)) == row  # v16's validate has nothing left to do
 
-	def test_a_claim_that_appears_just_before_the_rename_is_never_renamed_over(self, redis):
-		# Another run claimed the queue after this run's check, and a new
-		# snapshot was queued since. Renaming over that claim would drop the
-		# entries it holds.
-		other = [{"error": f"C{i} api_key={KEY}"} for i in range(2)]
-		newer = json.dumps({"error": "a new snapshot"})
-		r = redis({Q: [newer]})
+	def test_a_masked_title_longer_than_the_column_goes_in_front_of_the_error(self):
+		# Masking lengthens "u:p" to "********": the full masked title goes
+		# in front of the error, and the title is cut to 140.
+		title = "POST " + "x" * 90 + " via http://u:p@proxy.example/v1 "
+		title += "y" * (140 - len(title))
+		assert len(title) == 140
+		row = maintenance._masked_record({"error": "x", "method": title}, KEY)
+		masked_title = title.replace("u:p@", "********@")
+		assert row["error"] == f"{masked_title}\nx"
+		assert row["method"] == masked_title[:140] and "u:p@" not in row["method"]
 
-		def _other_run(command, args):
-			if command in ("RENAME", "RENAMENX") and r.make_key(CLAIM) not in r.store:
-				r.store[r.make_key(CLAIM)] = [json.dumps(x).encode() for x in other]
-		r.before = _other_run
-		assert maintenance._remask_error_log_queue(KEY) == (2, 0, 0, False)
-		assert r.entries(Q) == [newer, *[json.dumps(_masked(x)) for x in other]]
+	def test_a_shape_the_long_title_and_the_error_complete_together_is_masked(self):
+		# The title ends in "Bearer" and the error starts with the token: only
+		# the joined "<title>\n<error>" holds "Bearer <token>". It is masked
+		# once joined, so a second pass, or the scrub of the stored row,
+		# changes nothing.
+		title = "x" * 140 + " Bearer"
+		row = maintenance._masked_record({"error": "abcdefghij rest", "method": title}, KEY)
+		assert row["error"] == f"{title}\n******** rest"
+		assert row["method"] == title[:140]
+		assert maintenance._masked_record(row, KEY) == row
+		assert maintenance._mask_row({"name": "ERR-1", **row}, ("error", "method"), KEY) == ({}, False)
 
-	def test_a_refused_push_stops_it_and_holds_the_rest_back_in_the_claim(self, redis):
-		# Redis past maxmemory with noeviction: pops still work, pushes fail.
-		# Popping on would lose every entry after the first refused push.
-		entries = [{"error": f"E{i} api_key={KEY}"} for i in range(5)]
-		r = redis({Q: [json.dumps(x) for x in entries]})
-		pushes = []
+	def test_only_the_joined_pass_failing_gives_none_never_the_joined_raw_text(self, monkeypatch):
+		# Each field was masked; the pass over the joined text failed. The
+		# joined text completes "Bearer <token>", so it is never returned.
+		real = maintenance._mask_row
 
-		def _rpush(args):
-			pushes.append(args)
-			return OutOfMemoryError("OOM command not allowed when used memory > 'maxmemory'.") if len(pushes) > 2 else None
-		r.fail["RPUSH"] = _rpush
-		assert maintenance._remask_error_log_queue(KEY) == (2, 2, 1, True)
-		assert [c[0] for c in r.commands].count("LPOP") == 3  # none after the refused push
-		held = [json.dumps(x) for x in entries[3:]]
-		assert r.entries(CLAIM) == held  # E2, popped and refused, is the one entry lost
-		rows = []
-		_frappe_save_to_db(r, rows.append)
-		assert [row["error"] for row in rows] == ["E0 api_key=********", "E1 api_key=********"]
-		assert r.entries(CLAIM) == held  # Frappe never inserts the claim
-		# the next run, with Redis taking writes again, masks what was held
-		# back (pushed twice: from the leftover claim, then with the queue)
-		del r.fail["RPUSH"]
-		assert maintenance._remask_error_log_queue(KEY) == (4, 0, 0, False)
-		assert r.entries(Q) == [json.dumps(_masked(x)) for x in entries[3:]]
-		assert r.make_key(CLAIM) not in r.store
+		def _mask_row(row, text_fields, api_key, **kw):
+			return None if text_fields == ("error",) else real(row, text_fields, api_key, **kw)
+		monkeypatch.setattr(maintenance, "_mask_row", _mask_row)
+		assert maintenance._masked_record({"error": "abcdefghij rest", "method": "x" * 140 + " Bearer"}, KEY) is None
+		assert maintenance._masked_record({"error": "e", "method": "short"}, KEY) == {"error": "e", "method": "short"}
 
-	def test_a_failed_pop_stops_it_and_the_rest_stays_in_the_claim(self, redis):
-		r = redis({Q: [json.dumps({"error": e}) for e in "abc"]})
-		pops = []
+	def test_a_title_that_fits_is_left_as_it_is(self):
+		title = "t" * 140
+		assert maintenance._masked_record({"error": "e", "method": title}, KEY) == {"error": "e", "method": title}
 
-		def _lpop(args):
-			pops.append(args)
-			return ConnectionError("Connection reset by peer") if len(pops) > 1 else None
-		r.fail["LPOP"] = _lpop
-		assert maintenance._remask_error_log_queue(KEY) == (1, 2, 1, True)
-		assert r.entries(CLAIM) == [json.dumps({"error": e}) for e in "bc"]
-		assert r.entries(Q) == [json.dumps([{"error": "a"}])]
+	def test_a_smart_quote_key_is_masked(self):
+		# The bare header values of the urllib3 frames, and the key
+		# JSON-escaped in the metadata, only the stored key can find.
+		smart = {"error": ANTHROPIC_TB, "metadata": json.dumps({"doc": f"key {ANTHROPIC_KEY}"})}
+		assert "\\u2019" in smart["metadata"]
+		row = maintenance._masked_record(smart, ANTHROPIC_KEY)
+		assert "456789abcdef" not in json.dumps(row)
+		assert "      value = ********\n" in row["error"]
+		assert json.loads(row["metadata"]) == {"doc": "key ********"}
 
-	def test_a_consumer_popping_the_queue_meanwhile_never_gets_a_raw_entry(self, redis):
-		# Frappe's scheduler runs save_to_db every 15 minutes, and bench
-		# migrate does not pause it: it can pop the queue while this runs.
-		entries = [{"error": f"E{i} api_key={KEY}", "method": f"bad key {KEY}"} for i in range(6)]
-		r = redis({Q: [json.dumps(x) for x in entries]})
-		got = []
-
-		def _save_to_db(command, args):
-			# between any two commands, once the run takes entries
-			queue = r.store.get(r.make_key(Q))
-			if queue and any(c[0] == "LPOP" for c in r.commands):
-				got.append(queue.pop(0).decode())
-				if not queue:
-					del r.store[r.make_key(Q)]
-		r.before = _save_to_db
-		maintenance._remask_error_log_queue(KEY)
-		assert got  # the consumer did take entries
-		taken = got + r.entries(Q)
-		assert sorted(taken) == sorted(json.dumps(_masked(x)) for x in entries)
-		assert not [e for e in taken if KEY in e]
-
-	def test_an_entry_that_is_not_json_or_not_a_record_is_counted_and_dropped(self, redis):
-		# save_to_db would fail on it; a record that is not a dict cannot be masked.
-		queue = [json.dumps({"error": f"x api_key={KEY}"}), "{not json", json.dumps([{"error": "z"}, "not a record"]), "5"]
-		r = redis({Q: queue})
-		assert maintenance._remask_error_log_queue(KEY) == (2, 0, 3, False)
-		assert r.entries(Q) == [json.dumps([{"error": "x api_key=********"}]), json.dumps([{"error": "z"}])]
-
-	def test_a_record_that_cannot_be_masked_is_dropped_never_pushed_back_raw(self, redis, monkeypatch):
+	def test_a_record_that_cannot_be_masked_or_is_not_a_record_gives_none(self, monkeypatch):
 		real_mask = maintenance._mask
 
 		def _mask(text, api_key, **kw):
@@ -1224,157 +989,10 @@ class TestRemaskErrorLogQueue:
 				raise ValueError("catastrophic backtracking")
 			return real_mask(text, api_key, **kw)
 		monkeypatch.setattr(maintenance, "_mask", _mask)
-		r = redis({Q: [json.dumps({"error": LEAKY + "BOOM"}), json.dumps([{"error": "z"}, {"error": LEAKY + "BOOM"}])]})
-		assert maintenance._remask_error_log_queue(KEY) == (1, 0, 2, False)
-		assert r.entries(Q) == [json.dumps([{"error": "z"}])]
+		assert maintenance._masked_record({"error": LEAKY + "BOOM"}, KEY) is None
+		assert maintenance._masked_record("not a record", KEY) is None
 
-	def test_it_never_touches_the_database(self, redis):
-		# A record too large for max_allowed_packet kills a MariaDB
-		# connection on INSERT: the re-mask has no insert, read or commit.
-		r = redis({CLAIM: [json.dumps({"error": LEAKY})], Q: [json.dumps({"error": LEAKY, "method": "t" * 300})]})
-		assert maintenance._remask_error_log_queue(KEY) == (3, 0, 0, False)
-		assert r.db.used == [] and r.touched == []
-		assert len(r.entries(Q)) == 2 and not [e for e in r.entries(Q) if KEY in e]
-
-	def test_an_empty_queue_is_not_a_failure(self, redis):
-		# RENAMENX of a missing key fails ("no such key"): nothing to claim.
-		r = redis({})
-		assert maintenance._remask_error_log_queue(KEY) == (0, 0, 0, False)
-		assert "RENAMENX" in [c[0] for c in r.commands]
-
-	def test_a_rename_refused_while_the_queue_is_there_counts_once(self, redis):
-		r = redis({Q: [json.dumps({"error": "x"})]})
-		r.fail["RENAMENX"] = lambda args: ResponseError("READONLY You can't write against a read only replica.")
-		assert maintenance._remask_error_log_queue(KEY) == (0, 0, 1, True)
-		assert r.entries(Q) == [json.dumps({"error": "x"})]
-
-	def test_a_rename_whose_answer_was_lost_is_still_drained(self, redis):
-		# The rename ran, then the connection dropped: the claim holds the
-		# queue, and it is drained anyway.
-		r = redis({Q: [json.dumps({"error": f"x api_key={KEY}"})]})
-		r.lost = {"RENAMENX"}
-		assert maintenance._remask_error_log_queue(KEY) == (1, 0, 0, False)
-		assert r.entries(Q) == [json.dumps([{"error": "x api_key=********"}])]
-		assert r.make_key(CLAIM) not in r.store
-
-	def test_redis_down_counts_once(self, redis):
-		r = redis({Q: [json.dumps({"error": "x"})]})
-		r.fail["*"] = lambda args: ConnectionError("Error 61 connecting to 127.0.0.1:13000. Connection refused.")
-		assert maintenance._remask_error_log_queue(KEY) == (0, 0, 1, True)
-
-	def test_redis_going_down_after_the_first_command_counts_once(self, redis):
-		# The rename, the check of the queue and the drain all fail.
-		r = redis({Q: [json.dumps({"error": "x"})]})
-		r.fail["*"] = lambda args: ConnectionError("Connection reset by peer") if len(r.commands) > 1 else None
-		assert maintenance._remask_error_log_queue(KEY) == (0, 0, 1, True)
-		assert [c[0] for c in r.commands] == ["EXISTS", "RENAMENX", "EXISTS", "LLEN"]
-
-	def test_a_refused_push_while_draining_a_leftover_stops_the_run(self, redis):
-		# The queue is not claimed then: the claim key still holds entries.
-		left = [{"error": f"L{i}"} for i in range(3)]
-		r = redis({CLAIM: [json.dumps(x) for x in left], Q: [json.dumps({"error": "new"})]})
-		r.fail["RPUSH"] = lambda args: OutOfMemoryError("OOM command not allowed when used memory > 'maxmemory'.")
-		assert maintenance._remask_error_log_queue(KEY) == (0, 2, 1, True)
-		assert r.entries(CLAIM) == [json.dumps(x) for x in left[1:]]
-		assert r.entries(Q) == [json.dumps({"error": "new"})]
-		assert "RENAMENX" not in [c[0] for c in r.commands]
-
-	def test_the_drain_is_bounded_by_the_claims_length_when_it_starts(self, redis):
-		r = redis({Q: [json.dumps({"error": str(i)}) for i in range(3)]})
-
-		def _refill(command, args):
-			if command == "LPOP":
-				r.store.setdefault(r.make_key(CLAIM), []).append(json.dumps({"error": "late"}).encode())
-		r.before = _refill
-		maintenance._remask_error_log_queue(KEY)
-		assert [c[0] for c in r.commands].count("LPOP") == 3
-
-	def test_entries_queued_after_the_claim_are_left_as_they_are(self, redis):
-		# Only the entries the claim took are masked, and the queue is only
-		# ever added to: a new snapshot keeps its place.
-		new = json.dumps({"error": "a new snapshot"})
-		r = redis({Q: [json.dumps({"error": str(i)}) for i in range(2)]})
-
-		def _producer(command, args):
-			if command == "LPOP":
-				r.store.setdefault(r.make_key(Q), []).append(new.encode())
-		r.before = _producer
-		assert maintenance._remask_error_log_queue(KEY) == (2, 0, 0, False)
-		assert r.entries(Q) == [new, json.dumps([{"error": "0"}]), new, json.dumps([{"error": "1"}])]
-
-	def test_the_claim_key_is_outside_frappes_queue_prefix(self, redis):
-		# save_to_db finds its queues by the prefix and reads the doctype
-		# from the rest of the key: the claim must never look like a queue.
-		r = redis({CLAIM: [json.dumps({"error": "held"})], Q: [json.dumps({"error": "x"})]})
-		assert r.get_keys("insert_queue_for_") == [r.make_key(Q)]
-		assert not maintenance._QUEUE_CLAIM.startswith("insert_queue_for_")
-
-	@pytest.mark.parametrize("with_key", [False, True])
-	def test_a_long_queued_title_goes_in_front_of_the_error_as_v16_does(self, redis, with_key):
-		# Frappe v16's ErrorLog.validate moves a title over 140 characters in
-		# front of the error and cuts it; v15 has no such validate and fails
-		# the insert (CharacterLengthExceededError), which save_to_db logs
-		# and drops. Doing it in Redis stores the same row on both.
-		title = ("T" * 150 + (f" key {KEY} " if with_key else " ") + "tail ").ljust(300, "z")
-		assert len(title) == 300
-		r = redis({Q: [json.dumps({"error": "Traceback ...", "method": title})]})
-		maintenance._remask_error_log_queue(KEY)
-		[[row]] = [json.loads(e) for e in r.entries(Q)]
-		full = title.replace(KEY, "********")
-		assert row["error"] == f"{full}\nTraceback ..."  # the full title is kept
-		assert row["method"] == full[:140] and len(row["method"]) == 140  # v15's length check passes
-		assert KEY not in json.dumps(row)
-		assert _v16_error_log_validate(dict(row)) == row  # v16's validate has nothing left to do
-
-	def test_a_masked_title_longer_than_the_column_goes_in_front_of_the_error(self, redis):
-		# Masking lengthens "u:p" to "********": the full masked title goes
-		# in front of the error, and the title is cut to 140.
-		title = "POST " + "x" * 90 + " via http://u:p@proxy.example/v1 "
-		title += "y" * (140 - len(title))
-		assert len(title) == 140
-		r = redis({Q: [json.dumps([{"error": "x", "method": title}])]})
-		maintenance._remask_error_log_queue(KEY)
-		[[row]] = [json.loads(e) for e in r.entries(Q)]
-		masked_title = title.replace("u:p@", "********@")
-		assert row["error"] == f"{masked_title}\nx"
-		assert row["method"] == masked_title[:140] and "u:p@" not in row["method"]
-
-	def test_a_shape_the_long_title_and_the_error_complete_together_is_masked(self, redis):
-		# The title ends in "Bearer" and the error starts with the token: only
-		# the joined "<title>\n<error>" holds "Bearer <token>". It is masked in
-		# Redis, so a second run, or the scrub of the row once Frappe has
-		# inserted it, changes nothing.
-		title = "x" * 140 + " Bearer"
-		r = redis({Q: [json.dumps({"error": "abcdefghij rest", "method": title})]})
-		maintenance._remask_error_log_queue(KEY)
-		[[row]] = [json.loads(e) for e in r.entries(Q)]
-		assert row["error"] == f"{title}\n******** rest"
-		assert row["method"] == title[:140]
-		maintenance._remask_error_log_queue(KEY)
-		assert [json.loads(e) for e in r.entries(Q)] == [[row]]
-		assert maintenance._mask_row({"name": "ERR-1", **row}, ("error", "method"), KEY) == ({}, False)
-
-	def test_a_queued_title_that_fits_is_left_as_it_is(self, redis):
-		title = "t" * 140
-		r = redis({Q: [json.dumps({"error": "e", "method": title})]})
-		maintenance._remask_error_log_queue(KEY)
-		assert r.entries(Q) == [json.dumps([{"error": "e", "method": title}])]
-
-	def test_a_queued_smart_quote_key_is_masked(self, redis):
-		# The bare header values of the urllib3 frames, and the key
-		# JSON-escaped in the metadata, only the key read first can find.
-		smart = {"error": ANTHROPIC_TB, "metadata": json.dumps({"doc": f"key {ANTHROPIC_KEY}"})}
-		assert "\\u2019" in smart["metadata"]
-		r = redis({Q: [json.dumps(smart)]})
-		assert maintenance._remask_error_log_queue(ANTHROPIC_KEY).failed == 0
-		[[row]] = [json.loads(e) for e in r.entries(Q)]
-		assert "456789abcdef" not in json.dumps(row)
-		assert "      value = ********\n" in row["error"]
-		assert json.loads(row["metadata"]) == {"doc": "key ********"}
-
-
-
-	def test_the_queue_path_skips_the_residual_check(self, monkeypatch):
+	def test_it_skips_the_residual_check(self, monkeypatch):
 		# Its answer is never used there, and it is about a third of the
 		# masking's time.
 		checks = []
@@ -1383,30 +1001,6 @@ class TestRemaskErrorLogQueue:
 		masked = maintenance._masked_record(record, KEY)
 		assert KEY not in json.dumps(masked) and checks == []
 		assert maintenance._mask_row(record, ("error",), KEY) is not None and checks  # the stored-row path checks
-
-
-class TestClaimKeySurvivesClearCache:
-	"""bench migrate's setUp runs ``frappe.clear_cache()``, which deletes
-	every Redis key of the site except the ``persistent_cache_keys`` of the
-	installed apps: without its hook entry, the claim an interrupted run
-	left (entries it could not mask) would be dropped."""
-
-	def test_the_hook_names_the_claim_key(self):
-		from optimus import hooks
-
-		assert maintenance._QUEUE_CLAIM in hooks.persistent_cache_keys
-
-	def test_clear_cache_between_two_runs_keeps_the_claim(self, redis):
-		entries = [{"error": f"E{i} api_key={KEY}"} for i in range(3)]
-		r = redis({Q: [json.dumps(x) for x in entries], "bootinfo": ["cached"]})
-		r.fail["RPUSH"] = lambda args: OutOfMemoryError("OOM command not allowed when used memory > 'maxmemory'.")
-		assert maintenance._remask_error_log_queue(KEY).unmasked == 2
-		_frappe_clear_cache(r)
-		assert r.make_key("bootinfo") not in r.store  # the cache was cleared
-		assert r.entries(CLAIM) == [json.dumps(x) for x in entries[1:]]  # the claim was kept
-		del r.fail["RPUSH"]
-		assert maintenance._remask_error_log_queue(KEY) == (4, 0, 0, False)
-		assert r.entries(Q) == [json.dumps(_masked(x)) for x in entries[1:]]
 
 
 # Frappe's with-context traceback of an ordinary ERPNext error: its value
@@ -1421,128 +1015,81 @@ ERP_TB = (
 )
 
 
-class TestQueuedValueLines:
-	"""The re-mask masks the bare header value lines (``value = ...``) only
-	in a queued record from the AI code (a frame in Optimus's ``ai_fix.py``,
+class TestRecordValueLines:
+	"""``_masked_record`` masks the bare header value lines (``value = ...``)
+	only in a record from the AI code (a frame in Optimus's ``ai_fix.py``,
 	under either package name, in its error, title or metadata) or one
 	holding the stored key. Any other snapshot keeps them: scrub_secrets
 	alone."""
 
-	def _remasked(self, redis, record, api_key=KEY):
-		r = redis({Q: [json.dumps(record)]})
-		assert maintenance._remask_error_log_queue(api_key) == (1, 0, 0, False)
-		[[row]] = [json.loads(e) for e in r.entries(Q)]
-		return row
-
 	@pytest.mark.parametrize("api_key", [KEY, ""], ids=["key_stored", "no_key_stored"])
-	def test_an_unrelated_snapshot_keeps_its_value_lines(self, redis, api_key):
-		row = self._remasked(redis, {"error": ERP_TB, "method": "Stock Entry failed"}, api_key)
+	def test_an_unrelated_snapshot_keeps_its_value_lines(self, api_key):
+		row = maintenance._masked_record({"error": ERP_TB, "method": "Stock Entry failed"}, api_key)
 		assert row["error"] == ERP_TB
 
-	def test_another_apps_ai_fix_frame_is_not_optimus(self, redis):
+	def test_another_apps_ai_fix_frame_is_not_optimus(self):
 		error = ERP_TB.replace("erpnext/erpnext/stock/doctype/stock_entry/stock_entry.py", "other/other/openai_fix.py")
 		assert "ai_fix.py" in error
-		assert self._remasked(redis, {"error": error})["error"] == error
+		assert maintenance._masked_record({"error": error}, KEY)["error"] == error
 
 	@pytest.mark.parametrize("package", ["optimus", "frappe_profiler"])
-	def test_an_ai_snapshot_has_its_value_lines_masked(self, redis, package):
+	def test_an_ai_snapshot_has_its_value_lines_masked(self, package):
 		error = ERP_TB + f'  File "apps/{package}/{package}/ai_fix.py", line 1290, in _http_post\n'
-		row = self._remasked(redis, {"error": error})
+		row = maintenance._masked_record({"error": error}, KEY)
 		assert "Acme" not in row["error"] and "      value = ********\n" in row["error"]
 
 	@pytest.mark.parametrize("field", ["method", "metadata"])
-	def test_an_ai_frame_in_the_title_or_the_metadata_counts_too(self, redis, field):
+	def test_an_ai_frame_in_the_title_or_the_metadata_counts_too(self, field):
 		# A 500 snapshot's title is the exception text, and a request's
 		# metadata can quote a traceback: the frame may sit there alone.
 		frame = 'File "apps/optimus/optimus/ai_fix.py", line 1290, in _http_post'
-		row = self._remasked(redis, {"error": ERP_TB, field: frame})
+		row = maintenance._masked_record({"error": ERP_TB, field: frame}, KEY)
 		assert "Acme" not in row["error"] and "      value = ********\n" in row["error"]
 
-	def test_a_snapshot_holding_the_key_has_its_value_lines_masked(self, redis):
+	def test_a_snapshot_holding_the_key_has_its_value_lines_masked(self):
 		# No ai_fix.py frame, but the key is in its request metadata.
 		record = {"error": ERP_TB, "metadata": json.dumps({"form_dict": {"ai_api_key": KEY}})}
-		row = self._remasked(redis, record)
+		row = maintenance._masked_record(record, KEY)
 		assert "Acme" not in row["error"] and KEY not in row["metadata"]
 
 
-_REAL_REMASK = maintenance._remask_error_log_queue
+def _queue_calls(f) -> list:
+	"""The Redis calls the scrub made that name Error Log's deferred-insert
+	queue or the claim key an earlier release moved it to."""
+	return [c for c in f.cache.calls if any("insert_queue_for_" in str(a) or "queue_claim" in str(a) for a in c[1:])]
 
 
-class TestQueuedRows:
-	"""The scrub reads the key first, masks Error Log's deferred-insert queue
-	in Redis with it (a real run only), and reports the queue."""
+class TestNoQueue:
+	"""The Error Log hook masks every queued record as Frappe inserts it, so
+	the scrub never reads or changes Frappe's deferred-insert queue, and a
+	dry run does not touch Redis at all."""
 
-	def _real_remask(self, fake, monkeypatch, queue, claim=(), **kw):
-		f = fake([("a", LEAKY)], **kw)
-		f.cache = _FakeRedis({Q: list(queue), CLAIM: list(claim)})
-		monkeypatch.setattr(maintenance, "_remask_error_log_queue", _REAL_REMASK)
-		return f
+	def test_a_dry_run_touches_no_redis(self, fake):
+		f = fake([("a", LEAKY)])
+		assert maintenance.scrub_error_log_secrets(dry_run=True) == {**_OUT, "candidates": 1, "changed": 1}
+		assert f.cache.calls == []
 
-	def test_the_key_is_read_before_the_queue_is_touched(self, fake, monkeypatch):
-		f = self._real_remask(fake, monkeypatch, [json.dumps({"error": f"late row: api_key={KEY}"})])
-		events = []
-		f.cache.before = lambda command, args: events.append(command)
-		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", lambda: events.append("key") or KEY)
+	def test_a_real_run_never_touches_the_queue_and_inserts_nothing(self, fake):
+		f = fake([("a", LEAKY)])
+		assert maintenance.scrub_error_log_secrets(dry_run=False) == {**_OUT, "candidates": 1, "changed": 1}
+		assert _queue_calls(f) == [] and f.inserted == []
+
+	def test_the_result_has_no_queue_counts(self, fake):
+		fake([])
 		out = maintenance.scrub_error_log_secrets(dry_run=False)
-		assert events[0] == "key" and events.count("key") == 1 and "LPOP" in events
-		assert f.cache.entries(Q) == [json.dumps([{"error": "late row: api_key=********"}])]
-		assert (out["failed"], out["queued"], out["queue_masked"], out["queue_unmasked"]) == (0, 1, 1, 0)
+		assert set(out) == {"candidates", "changed", "deleted_docs_changed", "residual", "failed", "key_unreadable"}
 
-	def test_the_queue_is_masked_before_any_row_is_read(self, fake, monkeypatch):
-		# A failing statement later in the scan cannot stop it.
-		f = self._real_remask(fake, monkeypatch, [json.dumps({"error": "x"})])
-		reads_at_pop = []
-		f.cache.before = lambda command, args: command == "LPOP" and reads_at_pop.append(f.reads)
-		maintenance.scrub_error_log_secrets(dry_run=False)
-		assert reads_at_pop == [0]
+	def test_the_queue_code_is_gone(self):
+		for name in (
+			"mask_error_log_queue", "_remask_error_log_queue", "_claim_queue", "_drain_claim", "_QUEUE_CLAIM",
+			"_ERROR_LOG_QUEUE", "_error_log_queue_length", "_claim_length", "_read_queue",
+		):
+			assert not hasattr(maintenance, name), name
 
-	def test_a_real_run_masks_the_queue_and_inserts_nothing(self, fake, monkeypatch):
-		queue = [json.dumps({"error": f"late row {i}: api_key={KEY}"}) for i in range(3)]
-		f = self._real_remask(fake, monkeypatch, queue)
-		out = maintenance.scrub_error_log_secrets(dry_run=False)
-		assert (out["queue_masked"], out["queue_unmasked"], out["queued"], out["failed"]) == (3, 0, 3, 0)
-		assert f.inserted == []  # Frappe's own flush inserts them
-		assert not [e for e in f.cache.entries(Q) if KEY in e]
+	def test_the_claim_key_is_no_longer_kept_across_clear_cache(self):
+		from optimus import hooks
 
-	def test_a_stop_reports_the_entries_held_back(self, fake, monkeypatch):
-		queue = [json.dumps({"error": f"E{i}"}) for i in range(4)]
-		f = self._real_remask(fake, monkeypatch, queue)
-		f.cache.fail["RPUSH"] = lambda args: OutOfMemoryError("OOM command not allowed when used memory > 'maxmemory'.")
-		out = maintenance.scrub_error_log_secrets(dry_run=False)
-		assert (out["queue_masked"], out["queue_unmasked"], out["queued"], out["failed"]) == (0, 3, 0, 1)
-
-	def test_a_dry_run_reports_the_queue_and_the_claim_and_never_pops(self, fake, monkeypatch):
-		f = self._real_remask(fake, monkeypatch, [json.dumps({"error": LEAKY})] * 4, claim=[json.dumps({"error": LEAKY})] * 2)
-		out = maintenance.scrub_error_log_secrets(dry_run=True)
-		assert (out["queued"], out["queue_unmasked"], out["queue_masked"], out["failed"]) == (4, 2, 0, 0)
-		assert {c[0] for c in f.cache.commands} == {"LLEN"}
-		assert len(f.cache.entries(Q)) == 4 and f.inserted == []
-
-	@pytest.mark.parametrize("dry_run", [True, False])
-	def test_a_queue_that_cannot_be_read_counts_as_failed(self, fake, dry_run):
-		f = fake([("a", CLEAN_AI)])
-		f.cache.fail["*"] = lambda args: ConnectionError("Error 61 connecting to 127.0.0.1:13000. Connection refused.")
-		out = maintenance.scrub_error_log_secrets(dry_run=dry_run)
-		assert (out["queued"], out["queue_unmasked"], out["failed"]) == (0, 0, 1)
-
-	def test_one_redis_outage_counts_once(self, fake, monkeypatch):
-		# The re-mask cannot reach Redis and neither can the final count:
-		# one outage, one failure.
-		f = self._real_remask(fake, monkeypatch, [json.dumps({"error": "x"})])
-		f.cache.fail["*"] = lambda args: ConnectionError("Error 61 connecting to 127.0.0.1:13000. Connection refused.")
-		out = maintenance.scrub_error_log_secrets(dry_run=False)
-		assert (out["queued"], out["queue_masked"], out["failed"]) == (0, 0, 1)
-
-	def test_a_queue_failure_after_a_clean_remask_still_counts(self, fake, monkeypatch):
-		f = self._real_remask(fake, monkeypatch, [json.dumps({"error": "x"})])
-		lens = []
-
-		def _llen(args):
-			lens.append(args)
-			return ConnectionError("redis went away") if len(lens) > 1 else None
-		f.cache.fail["LLEN"] = _llen
-		out = maintenance.scrub_error_log_secrets(dry_run=False)
-		assert len(lens) == 2 and (out["queue_masked"], out["queued"], out["failed"]) == (1, 0, 1)
+		assert not hasattr(hooks, "persistent_cache_keys")
 
 
 class TestKeyUnreadable:
@@ -1574,33 +1121,6 @@ class TestKeyUnreadable:
 		assert out["key_unreadable"] is False and out["failed"] == 0 and f.single_reads == []
 
 
-class TestMaskErrorLogQueue:
-	"""The queue half of the scrub alone, for the migrate patch when the
-	scrub was skipped or failed."""
-
-	def test_reads_the_key_masks_the_queue_and_reports_it(self, redis, monkeypatch):
-		r = redis({Q: [json.dumps({"error": f"x api_key={KEY}"})], CLAIM: [json.dumps({"error": "held"})]})
-		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", lambda: KEY)
-		out = maintenance.mask_error_log_queue()
-		# the leftover pushed, then claimed again with the queue: 1 + 2
-		assert out == {"queue_masked": 3, "queue_unmasked": 0, "queued": 2, "failed": 0}
-		assert not [e for e in r.entries(Q) if KEY in e]
-		assert r.db.used == [] and r.touched == []  # past the key read, Redis only
-
-	def test_a_redis_outage_counts_once(self, redis, monkeypatch):
-		r = redis({Q: [json.dumps({"error": "x"})]})
-		r.fail["*"] = lambda args: ConnectionError("Error 61 connecting to 127.0.0.1:13000. Connection refused.")
-		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", lambda: KEY)
-		assert maintenance.mask_error_log_queue() == {"queue_masked": 0, "queue_unmasked": 0, "queued": 0, "failed": 1}
-
-	def test_refuses_to_run_inside_an_rq_job(self, redis, monkeypatch):
-		r = redis({Q: [json.dumps({"error": f"x api_key={KEY}"})]})
-		monkeypatch.setitem(sys.modules, "rq", SimpleNamespace(get_current_job=lambda: SimpleNamespace(id="job-1")))
-		with pytest.raises(maintenance.InsideBackgroundJobError):
-			maintenance.mask_error_log_queue()
-		assert r.commands == []
-
-
 class TestKeyHandling:
 	"""The frames of the scrub hold the key only under the names Frappe's
 	traceback sanitizer and Sentry redact (``api_key``, ``secret``), and the
@@ -1621,20 +1141,12 @@ class TestKeyHandling:
 		data = json.dumps({"doctype": "Error Log", "method": f"HTTP 401: bad key {key}"})
 		f = fake([("a", LEAKY.replace(KEY, key)), ("m", "Traceback ...\n")], [("d1", data)], current_key=key)
 		f.tables["Error Log"]["m"]["method"] = f"HTTP 401: bad key {key}"
-		f.cache = _FakeRedis({
-			Q: [json.dumps({"error": f"queued api_key={key}"})], CLAIM: [json.dumps({"error": f"held api_key={key}"})],
-		})
-		monkeypatch.setattr(maintenance, "_remask_error_log_queue", _REAL_REMASK)
 		out = {}
 		offenders, seen = self._profiled(lambda: out.update(maintenance.scrub_error_log_secrets(dry_run=False)), forms)
 		assert offenders == set()
 		# positive control: the key-handling helpers did run, key in hand
-		assert {
-			"_holds_key", "_json_escaped", "_mask", "_remask_error_log_queue", "_drain_claim", "_masked_record",
-			"_key_fragment",
-		} <= seen
+		assert {"_holds_key", "_json_escaped", "_mask", "_key_fragment"} <= seen
 		assert out["changed"] >= 2 and out["deleted_docs_changed"] == 1
-		assert f.cache.entries(Q) and not [e for e in f.cache.entries(Q) if key in e]
 
 	@staticmethod
 	def _profiled(run, forms):
@@ -1683,7 +1195,7 @@ class TestKeyHandling:
 		message = str(ei.value)
 		assert "bench execute" in message and "bench console" in message
 		assert KEY not in message
-		assert f.statements == [] and f.remasks == [] and f.writes == [] and f.deletes == [] and reads == []
+		assert f.statements == [] and f.cache.calls == [] and f.writes == [] and f.deletes == [] and reads == []
 
 	def test_runs_outside_a_job(self, fake, monkeypatch):
 		monkeypatch.setitem(sys.modules, "rq", SimpleNamespace(get_current_job=lambda: None))
@@ -1779,41 +1291,16 @@ def patch_logs(monkeypatch):
 	return rec
 
 
-class _Calls(list):
-	"""The scrub's calls; ``masks`` holds the calls of ``mask_error_log_queue``."""
-
-	def __init__(self):
-		super().__init__()
-		self.masks = []
-
-
-# What mask_error_log_queue answers when the queue is empty and Redis works.
-_QUEUE_EMPTY = {"queue_masked": 0, "queue_unmasked": 0, "queued": 0, "failed": 0}
-
-
-def _stub_queue_masking(monkeypatch, calls, events=None, counts=None):
-	"""Replace ``maintenance.mask_error_log_queue``: each call is logged in
-	``calls`` (and as "mask" in ``events``) and answers ``counts``."""
-
-	def _mask():
-		calls.append({})
-		if events is not None:
-			events.append("mask")
-		return dict(counts or _QUEUE_EMPTY)
-	monkeypatch.setattr(maintenance, "mask_error_log_queue", _mask)
-
-
 @pytest.fixture
 def patch_env(monkeypatch, patch_logs):
-	calls = _Calls()
+	calls = []
 
 	def _scrub(**kw):
 		calls.append(kw)
-		return {"candidates": 3, "changed": 2, "deleted_docs_changed": 1, "residual": 0, "failed": 0, "queued": 0}
+		return {"candidates": 3, "changed": 2, "deleted_docs_changed": 1, "residual": 0, "failed": 0}
 
 	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(1000, None))
 	monkeypatch.setattr(maintenance, "scrub_error_log_secrets", _scrub)
-	_stub_queue_masking(monkeypatch, calls.masks, patch_logs.events)
 	return calls
 
 
@@ -1829,30 +1316,35 @@ def _one_summary_line(patch_logs) -> str:
 
 def _scrub_answers(monkeypatch, **counts):
 	"""The scrub answers ``counts`` over a clean run's."""
-	out = {"candidates": 3, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 0, **counts}
+	out = {"candidates": 3, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, **counts}
 	monkeypatch.setattr(maintenance, "scrub_error_log_secrets", lambda **kw: dict(out))
 
 
 _OFF_PEAK_NOTE = "on MariaDB, Error Log is locked while it is scanned, so on a busy site prefer off-peak"
 _RUN_IT = f"Run it by hand ({_OFF_PEAK_NOTE}): bench --site <site> {_COMMAND}"
-_INSERTS = (
-	"bench migrate then inserts about 500 (Frappe v15) or about 10,000 (v16) queued records; the scheduler "
-	"inserts the rest every 15 minutes."
+# Every outcome but a failed import prints it last; it repeats no command.
+_QUEUE_LINE = (
+	"Optimus: Error Log entries still queued in Redis are masked by Optimus when Frappe inserts them; nothing "
+	"needs doing for the queue."
+)
+_NOT_MASKED_LINE = (
+	"Optimus: Error Log rows, queued ones included, may be stored unmasked while optimus.maintenance cannot be "
+	"imported; run the command above once it can."
 )
 
 
 def test_patch_runs_the_scrub_for_real(patch_env, patch_logs, capsys):
 	importlib.import_module(_PATCH).execute()
 	assert patch_env == [{"dry_run": False}]
-	assert patch_env.masks == []  # the scrub masked the queue itself
-	assert "masked AI API keys in 3 stored error row(s)" in capsys.readouterr().out
+	out = capsys.readouterr().out
+	assert "masked AI API keys in 3 stored error row(s)" in out
+	assert out.endswith(f"{_QUEUE_LINE}\n")
 	assert patch_logs.errors == []  # no breadcrumb when the scrub ran
 	line = _one_summary_line(patch_logs)
-	for count in (
-		"candidates=3", "changed=2", "deleted_docs_changed=1", "residual=0", "failed=0", "queued=0", "queue_masked=0",
-		"queue_unmasked=0", "key_unreadable=0",
-	):
-		assert count in line
+	assert line.endswith(
+		"ran, candidates=3 changed=2 deleted_docs_changed=1 residual=0 failed=0 key_unreadable=0"
+	)
+	assert "queue" not in line
 
 
 def test_patch_skips_when_the_size_cannot_be_read(patch_env, patch_logs, monkeypatch, capsys):
@@ -1867,10 +1359,8 @@ def test_patch_skips_when_the_size_cannot_be_read(patch_env, patch_logs, monkeyp
 	assert "skipped the Error Log key scrub" in out and "its size could not be read (QueryTimeoutError)" in out
 	assert _COMMAND in out and str(maintenance.SCAN_SIZE_UNKNOWN) not in out
 	[crumb] = patch_logs.errors
-	# the failing part's TYPE name, never its message, and the queue's counts
-	assert crumb["message"].startswith(
-		"skipped: size unknown: QueryTimeoutError; queue: masked=0 unmasked=0 queued=0 failed=0. "
-	)
+	# the failing part's TYPE name, never its message
+	assert crumb["message"].startswith("skipped: size unknown: QueryTimeoutError. ")
 	line = _one_summary_line(patch_logs)
 	assert "size could not be read (QueryTimeoutError)" in line
 	for text in (out, repr(crumb), line):
@@ -1904,33 +1394,38 @@ def test_patch_skips_a_table_too_large_for_migrate(patch_env, patch_logs, monkey
 	assert f"skipped, {size} Error Log and Deleted Document rows to read, limit " in line
 
 
-def test_the_skipped_scrub_still_masks_the_queue(patch_env, patch_logs, monkeypatch, capsys):
-	# The queue masking takes no table lock, so it runs even when the scan
-	# is too large for the migrate: bench migrate inserts the queue right
-	# after the patches.
+@pytest.mark.parametrize("outcome", ["too large", "size unknown", "failed"])
+def test_a_scrub_that_did_not_run_prints_one_instruction_line(patch_env, patch_logs, monkeypatch, capsys, outcome):
+	# One line gives the command; the queue line after it repeats none.
 	import frappe
 
 	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=lambda *a, **k: patch_logs.events.append("rollback")), raising=False)
-	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(maintenance.MIGRATE_SCAN_LIMIT + 1, None))
-	_stub_queue_masking(
-		monkeypatch, patch_env.masks, patch_logs.events,
-		{"queue_masked": 5, "queue_unmasked": 2, "queued": 7, "failed": 1},
-	)
+	if outcome == "failed":
+		def _scrub(**kw):
+			raise ValueError("boom")
+		monkeypatch.setattr(maintenance, "scrub_error_log_secrets", _scrub)
+	else:
+		rows = maintenance.MIGRATE_SCAN_LIMIT + 1 if outcome == "too large" else maintenance.SCAN_SIZE_UNKNOWN
+		monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(rows, "OperationalError"))
 	importlib.import_module(_PATCH).execute()
-	assert patch_env == [] and len(patch_env.masks) == 1
-	# rolled back before the masking reads the key, and again before the
-	# breadcrumb, in case that read failed and aborted the transaction
-	assert patch_logs.events[:4] == ["rollback", "mask", "rollback", "log_error"]
-	[crumb] = patch_logs.errors
-	assert "; queue: masked=5 unmasked=2 queued=7 failed=1. " in crumb["message"]
-	assert "queue: masked=5 unmasked=2 queued=7 failed=1" in _one_summary_line(patch_logs)
 	out = capsys.readouterr().out
-	assert "Optimus: queued Error Log entries masked in Redis: 5, unmasked: 2; entries now in the deferred-insert queue: 7." in out
-	assert (
-		"Optimus: queued Error Log entries that could not be masked because Redis refused writes or stopped "
-		"answering: 2."
-	) in out
-	assert "Optimus: queued Error Log entries or records that could not be processed: 1." in out
+	assert out.count(_COMMAND) == 1 and out.count("bench --site") == 1
+	lines = out.splitlines()
+	assert len(lines) == 2 and _RUN_IT in lines[0] and lines[1] == _QUEUE_LINE
+	# rolled back once, before the breadcrumb; nothing else runs in between
+	assert patch_logs.events[:2] == ["rollback", "log_error"]
+
+
+@pytest.mark.parametrize(
+	"counts", [{}, {"changed": 2}, {"failed": 1}, {"residual": 1}, {"key_unreadable": True, "failed": 1}],
+	ids=["clean", "changed", "failed", "residual", "key_unreadable"],
+)
+def test_every_outcome_says_the_queue_needs_nothing(patch_env, monkeypatch, capsys, counts):
+	_scrub_answers(monkeypatch, **counts)
+	importlib.import_module(_PATCH).execute()
+	out = capsys.readouterr().out
+	assert out.endswith(f"{_QUEUE_LINE}\n") and out.count(_QUEUE_LINE) == 1
+	assert "masked in Redis" not in out and "deferred-insert queue" not in out
 
 
 def test_patch_does_not_ask_to_rotate_when_nothing_was_found(patch_env, monkeypatch, capsys):
@@ -1940,16 +1435,13 @@ def test_patch_does_not_ask_to_rotate_when_nothing_was_found(patch_env, monkeypa
 	)
 	importlib.import_module(_PATCH).execute()
 	out = capsys.readouterr().out
-	assert out == "Optimus: found no AI API keys in stored error rows.\n"
+	assert out == f"Optimus: found no AI API keys in stored error rows.\n{_QUEUE_LINE}\n"
 
 
 @pytest.mark.parametrize(
 	"counts",
-	[
-		{"failed": 2}, {"residual": 1}, {"queued": 4}, {"queue_masked": 4}, {"queue_unmasked": 1},
-		{"key_unreadable": True, "failed": 1},
-	],
-	ids=["failed", "residual", "queued", "queue_masked", "queue_unmasked", "key_unreadable"],
+	[{"failed": 2}, {"residual": 1}, {"key_unreadable": True, "failed": 1}],
+	ids=["failed", "residual", "key_unreadable"],
 )
 def test_patch_prints_only_the_problem_lines_when_nothing_was_masked(patch_env, monkeypatch, capsys, counts):
 	_scrub_answers(monkeypatch, **counts)
@@ -1958,34 +1450,7 @@ def test_patch_prints_only_the_problem_lines_when_nothing_was_masked(patch_env, 
 	assert "Rotate" not in out and "found no AI API keys" not in out
 	assert ("could not be processed" in out) is bool(counts.get("failed"))
 	assert ("purge_ai_error_logs" in out) is bool(counts.get("residual"))
-	assert ("entries now in the deferred-insert queue" in out) is bool(
-		counts.get("queued") or counts.get("queue_masked") or counts.get("queue_unmasked")
-	)
-	assert ("could not be masked because Redis" in out) is bool(counts.get("queue_unmasked"))
 	assert ("cannot be decrypted" in out) is bool(counts.get("key_unreadable"))
-
-
-def test_the_queue_lines_say_what_was_masked_and_when_frappe_inserts_it(patch_env, monkeypatch, capsys):
-	_scrub_answers(monkeypatch, queued=7, queue_masked=5, queue_unmasked=2, failed=1)
-	importlib.import_module(_PATCH).execute()
-	command = f"bench --site <site> {_COMMAND}"
-	assert capsys.readouterr().out == (
-		f"Optimus: 1 error row(s) or queued entries could not be processed. {_RUN_IT}\n"
-		"Optimus: queued Error Log entries masked in Redis: 5, unmasked: 2; entries now in the deferred-insert "
-		f"queue: 7. {_INSERTS} Entries queued while the migrate runs are not masked: run the scrub again after "
-		f"the restart (step 3): {command}\n"
-		"Optimus: queued Error Log entries that could not be masked because Redis refused writes or stopped "
-		f"answering: 2. They are held back and not inserted; run the scrub again (step 3): {command}\n"
-	)
-
-
-def test_no_line_blames_the_failed_count_for_the_queue(patch_env, patch_logs, monkeypatch, capsys):
-	# failed is shared with rows that could not be written: it cannot say
-	# how many queued entries were left unmasked. queue_unmasked does.
-	_scrub_answers(monkeypatch, queued=3, queue_masked=3, failed=1)
-	importlib.import_module(_PATCH).execute()
-	out = capsys.readouterr().out + repr(patch_logs.errors)
-	assert "see the failed count" not in out and "unless the flush stopped early" not in out
 
 
 def test_the_run_by_hand_hint_prefers_off_peak(patch_env, monkeypatch, capsys):
@@ -2011,30 +1476,29 @@ _PARTIAL_TITLE = "Optimus: Error Log key scrub did not finish"
 @pytest.mark.parametrize(
 	"counts",
 	[
-		{"failed": 1}, {"residual": 2}, {"failed": 1, "queued": 3}, {"failed": 1, "residual": 2, "queued": 3},
-		{"queue_unmasked": 4}, {"key_unreadable": True, "failed": 1}, {"key_unreadable": True},
+		{"failed": 1}, {"residual": 2}, {"failed": 1, "residual": 2}, {"key_unreadable": True, "failed": 1},
+		{"key_unreadable": True},
 	],
-	ids=["failed", "residual", "failed+queued", "all", "queue_unmasked", "key_unreadable", "key_unreadable_alone"],
+	ids=["failed", "residual", "both", "key_unreadable", "key_unreadable_alone"],
 )
 def test_a_partial_scrub_leaves_a_breadcrumb(patch_env, patch_logs, monkeypatch, counts):
 	# Patch Log marks the patch done: without a row, a scrub that could not
-	# process every row, left key-shaped values, held queued entries back
-	# unmasked or could not read the key leaves no lasting trace. The flag
-	# alone is enough, whether or not the scrub also counted it in failed.
+	# process every row, left key-shaped values or could not read the key
+	# leaves no lasting trace. The flag alone is enough, whether or not the
+	# scrub also counted it in failed.
 	_scrub_answers(monkeypatch, candidates=5, changed=1, **counts)
 	importlib.import_module(_PATCH).execute()
 	[crumb] = patch_logs.errors
 	assert crumb["title"] == _PARTIAL_TITLE and crumb["active"] is None
-	c = {"failed": 0, "residual": 0, "queued": 0, "queue_masked": 0, "queue_unmasked": 0, **counts}
+	c = {"failed": 0, "residual": 0, **counts}
 	assert crumb["message"].startswith(
-		f"failed={c['failed']} residual={c['residual']} queued={c['queued']} queue_masked=0 "
-		f"queue_unmasked={c['queue_unmasked']} key_unreadable={int(bool(counts.get('key_unreadable')))}. "
+		f"failed={c['failed']} residual={c['residual']} key_unreadable={int(bool(counts.get('key_unreadable')))}. "
 	)
 	assert f"{_RUN_IT}" in crumb["message"]
 	assert ("purge_ai_error_logs" in crumb["message"]) is bool(c["residual"])
-	assert KEY not in repr(crumb)
+	assert KEY not in repr(crumb) and "queue" not in crumb["message"]
 	line = _one_summary_line(patch_logs)
-	assert f"failed={c['failed']}" in line and f"residual={c['residual']}" in line and f"queued={c['queued']}" in line
+	assert f"failed={c['failed']}" in line and f"residual={c['residual']}" in line
 
 
 def test_an_unreadable_key_says_how_to_make_it_readable(patch_env, patch_logs, monkeypatch, capsys):
@@ -2054,23 +1518,10 @@ def test_an_unreadable_key_says_how_to_make_it_readable(patch_env, patch_logs, m
 	) in out
 
 
-@pytest.mark.parametrize("counts", [{"queued": 3}, {"queue_masked": 3, "queued": 5}], ids=["queued", "masked"])
-def test_queue_entries_alone_leave_no_breadcrumb(patch_env, patch_logs, monkeypatch, capsys, counts):
-	# queued also counts Frappe's own new error snapshots (a server error,
-	# any error in developer mode), so on a busy site it is rarely 0, and a
-	# masked entry is done: printed and logged, but not a scrub that "did
-	# not finish".
-	_scrub_answers(monkeypatch, candidates=5, changed=1, **counts)
-	importlib.import_module(_PATCH).execute()
-	assert patch_logs.errors == []
-	assert f"entries now in the deferred-insert queue: {counts['queued']}." in capsys.readouterr().out
-	assert f"queued={counts['queued']}" in _one_summary_line(patch_logs)
-
-
 def test_a_complete_scrub_leaves_no_breadcrumb(patch_env, patch_logs, monkeypatch):
 	monkeypatch.setattr(
 		maintenance, "scrub_error_log_secrets",
-		lambda **kw: {"candidates": 5, "changed": 5, "deleted_docs_changed": 2, "residual": 0, "failed": 0, "queued": 0},
+		lambda **kw: {"candidates": 5, "changed": 5, "deleted_docs_changed": 2, "residual": 0, "failed": 0},
 	)
 	importlib.import_module(_PATCH).execute()
 	assert patch_logs.errors == []
@@ -2113,7 +1564,6 @@ def pg(monkeypatch, patch_logs):
 	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=txn.rollback), raising=False)
 	monkeypatch.setattr(frappe, "log_error", _log_error, raising=False)
 	monkeypatch.setattr(maintenance, "measure_scan_size", _REAL_MEASURE)
-	_stub_queue_masking(monkeypatch, [])
 	return txn
 
 
@@ -2144,21 +1594,6 @@ def test_on_postgres_the_patch_log_row_is_still_written(pg, monkeypatch, outcome
 	assert pg.written[-1] == "Patch Log"
 
 
-def test_on_postgres_a_key_read_that_fails_is_rolled_back_before_the_breadcrumb(pg, monkeypatch):
-	# The queue masking reads the stored key (one SELECT). If that read
-	# fails it aborts the transaction; _current_key_or_empty swallows the
-	# error, so the patch cannot tell: it rolls back again after it.
-	_pg_maintenance(monkeypatch, pg, deleted=maintenance.MIGRATE_SCAN_LIMIT + 1)
-
-	def _mask():
-		pg.aborted = True  # the failed key read
-		return dict(_QUEUE_EMPTY)
-	monkeypatch.setattr(maintenance, "mask_error_log_queue", _mask)
-	assert importlib.import_module(_PATCH).execute() is None
-	assert [r[1] for r in pg.written if r[0] == "Error Log"] == [_CRUMB_TITLE]
-	pg.write("Patch Log")
-
-
 @pytest.mark.parametrize("outcome", ["skipped", "partial"])
 def test_on_postgres_a_failed_breadcrumb_is_rolled_back_too(pg, monkeypatch, outcome):
 	# The breadcrumb's own INSERT can fail and abort the transaction.
@@ -2167,7 +1602,7 @@ def test_on_postgres_a_failed_breadcrumb_is_rolled_back_too(pg, monkeypatch, out
 	_pg_maintenance(monkeypatch, pg, deleted=maintenance.MIGRATE_SCAN_LIMIT + 1 if outcome == "skipped" else 5)
 	monkeypatch.setattr(
 		maintenance, "scrub_error_log_secrets",
-		lambda **kw: {"candidates": 1, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 1, "queued": 0},
+		lambda **kw: {"candidates": 1, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 1},
 	)
 
 	def _log_error(title=None, message=None, **kw):
@@ -2230,8 +1665,7 @@ def test_patch_warns_about_residual_rows_with_the_purge_dry_run_first(patch_env,
 @pytest.fixture
 def failing_scrub(monkeypatch, patch_logs):
 	"""A scrub that fails while a frame local and its message hold a key;
-	``frappe.db`` replaced wholesale to record the rollbacks. Returns the
-	calls of the queue masking."""
+	``frappe.db`` replaced wholesale to record the rollbacks."""
 	import frappe
 
 	def _scrub(**kw):
@@ -2243,9 +1677,6 @@ def failing_scrub(monkeypatch, patch_logs):
 	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(10, None))
 	monkeypatch.setattr(maintenance, "scrub_error_log_secrets", _scrub)
 	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=_rollback), raising=False)
-	masks = []
-	_stub_queue_masking(monkeypatch, masks, patch_logs.events, {"queue_masked": 2, "queue_unmasked": 0, "queued": 2, "failed": 0})
-	return masks
 
 
 def test_a_failed_scrub_never_blocks_migrate(failing_scrub, patch_logs, capsys):
@@ -2254,26 +1685,25 @@ def test_a_failed_scrub_never_blocks_migrate(failing_scrub, patch_logs, capsys):
 	assert "failed (ValueError)" in out
 	assert _COMMAND in out and _OFF_PEAK_NOTE in out
 	assert KEY not in out
-	# the failing chunk's writes rolled back, then the queue masked in Redis
-	# (the scrub may have failed before it did), then a rollback again; the
-	# breadcrumb is written after them (so it survives them), with no
-	# exception being handled, and holds the type, the counts and the command
-	assert failing_scrub == [{}]
-	assert patch_logs.events[:4] == ["rollback", "mask", "rollback", "log_error"]
+	# the failing chunk's writes rolled back; the breadcrumb is written after
+	# (so it survives it), with no exception being handled, and holds the
+	# type and the command
+	assert patch_logs.events[:2] == ["rollback", "log_error"]
 	[crumb] = patch_logs.errors
 	assert crumb["title"] == _CRUMB_TITLE and crumb["active"] is None
-	assert crumb["message"].startswith("ValueError; queue: masked=2 unmasked=0 queued=2 failed=0. ")
+	assert crumb["message"].startswith("ValueError. ")
 	assert f"bench --site <site> {_COMMAND}" in crumb["message"]
 	assert KEY not in repr(crumb) and "cannot update" not in repr(crumb)
 	line = _one_summary_line(patch_logs)
 	assert "failed" in line and "ValueError" in line
-	assert "Optimus: queued Error Log entries masked in Redis: 2, unmasked: 0;" in out
+	assert out.endswith(f"{_QUEUE_LINE}\n")
 
 
 def test_an_import_failure_never_blocks_migrate(patch_logs, monkeypatch, capsys):
 	# The module import runs inside the patch's try: a broken import is
 	# reported by its type with the command, and the migrate continues. The
-	# queue cannot be masked then, and the console says so.
+	# Error Log hook imports the same module, so the console does not say
+	# queued entries are masked then.
 	import frappe
 
 	import optimus
@@ -2285,29 +1715,11 @@ def test_an_import_failure_never_blocks_migrate(patch_logs, monkeypatch, capsys)
 	assert importlib.import_module(_PATCH).execute() is None
 	out = capsys.readouterr().out
 	assert "failed (ModuleNotFoundError)" in out
-	assert _COMMAND in out
+	assert out.count(_COMMAND) == 1
 	assert rollbacks == [1]
-	assert (
-		"Optimus: the Error Log deferred-insert queue was not masked; bench migrate inserts it as it is. Run the "
-		f"scrub after the restart (step 3): bench --site <site> {_COMMAND}\n"
-	) in out
+	assert out.endswith(f"{_NOT_MASKED_LINE}\n") and _QUEUE_LINE not in out
 	[crumb] = patch_logs.errors
-	assert crumb["message"].startswith("ModuleNotFoundError; queue: not masked. ")
-
-
-def test_a_failing_queue_masking_never_blocks_migrate(patch_env, patch_logs, monkeypatch, capsys):
-	import frappe
-
-	def _mask():
-		raise RuntimeError(f"cannot mask {KEY}")
-	monkeypatch.setattr(maintenance, "mask_error_log_queue", _mask)
-	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(maintenance.MIGRATE_SCAN_LIMIT + 1, None))
-	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=lambda *a, **k: None), raising=False)
-	assert importlib.import_module(_PATCH).execute() is None
-	out = capsys.readouterr().out
-	assert "the Error Log deferred-insert queue was not masked" in out and KEY not in out
-	[crumb] = patch_logs.errors
-	assert "; queue: not masked. " in crumb["message"] and KEY not in repr(crumb)
+	assert crumb["message"].startswith("ModuleNotFoundError. ")
 
 
 @pytest.mark.parametrize("outcome", ["ran", "skipped", "failed"])
@@ -2350,9 +1762,7 @@ def test_patch_reports_rows_that_could_not_be_masked(patch_env, monkeypatch, cap
 	)
 	importlib.import_module(_PATCH).execute()
 	out = capsys.readouterr().out
-	# failed also counts queued entries that could not be masked
-	assert f"Optimus: 1 error row(s) or queued entries could not be processed. {_RUN_IT}\n" in out
-	assert "could not be masked" not in out
+	assert f"Optimus: 1 error row(s) could not be processed. {_RUN_IT}\n" in out
 
 
 def test_patch_is_registered_post_model_sync():

@@ -164,10 +164,11 @@ _ERROR_STARTS = ("", "abcdefghij rest'", "  value = 'abc'")
 
 
 @st.composite
-def _queued_records(draw):
-	"""``(key, record)``: a queued Error Log record whose text fields may
-	hold the key in any shape, with a title of any length, which may end in
-	the start of a shape that the error's first line completes."""
+def _error_log_records(draw):
+	"""``(key, record)``: an Error Log record, as the Error Log hook masks it
+	before its insert, whose text fields may hold the key in any shape,
+	with a title of any length, which may end in the start of a shape that
+	the error's first line completes."""
 	key = draw(_keys)
 	fields = {}
 	for field in ("error", "method", "metadata"):
@@ -196,7 +197,7 @@ _SPLIT_BEARER = ("sk-live-0123456789abcdefXYZ", {
 
 class TestMaskedRecord:
 	@_SETTINGS
-	@given(_queued_records())
+	@given(_error_log_records())
 	def test_the_key_never_survives(self, case):
 		key, record = case
 		out = maintenance._masked_record(record, key)
@@ -205,7 +206,7 @@ class TestMaskedRecord:
 			assert not _survives(key, out[field]), field
 
 	@_SETTINGS
-	@given(_queued_records())
+	@given(_error_log_records())
 	@example(_SPLIT_BEARER)
 	def test_it_is_idempotent(self, case):
 		key, record = case
@@ -213,7 +214,7 @@ class TestMaskedRecord:
 		assert maintenance._masked_record(once, key) == once
 
 	@_SETTINGS
-	@given(_queued_records())
+	@given(_error_log_records())
 	def test_the_title_fits_its_column_and_a_long_one_leads_the_error(self, case):
 		key, record = case
 		out = maintenance._masked_record(record, key)
