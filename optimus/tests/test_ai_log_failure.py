@@ -1025,7 +1025,11 @@ class TestHttpFailurePath:
 			_call()
 		assert ei.value.kind == "bad_response" and ei.value.status_code == status
 		assert ei.value.__context__ is None
-		assert f"(HTTP {status})" in str(ei.value)
+		assert str(ei.value) == (
+			f"The AI provider answered with a redirect (HTTP {status}) instead of a reply. Check the Base URL in "
+			"Optimus Settings: a Base URL that redirects must be set to the address it redirects to (its https:// "
+			"address, for example)."
+		)
 		assert len(logs) == 1
 		row = logs[0]["message"]
 		assert f"status={status}" in row and "provider_error=moved_permanently\n" in row
