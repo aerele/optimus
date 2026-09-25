@@ -690,6 +690,23 @@ def _scans(api_key: str, error_fields: tuple[str, ...]) -> list[_Scan]:
 	return scans
 
 
+def _key_unreadable(api_key: str) -> bool:
+	"""True when Optimus Settings holds an API key that
+	``_current_key_or_empty`` could not read (``api_key`` is ""): the site's
+	``encryption_key`` changed (a backup restored onto another site, say) or
+	the encrypted copy in ``__Auth`` is gone. The scrub then cannot search
+	for the key or mask it by value. Frappe keeps a Password field's value
+	encrypted in ``__Auth`` and only asterisks, one per character, in the
+	field itself, so this reads that field plainly (``get_single_value``),
+	never the decrypted key. The value read is held as ``secret``, a name
+	the sanitizers redact, in case a key was ever written into the field
+	as plain text."""
+	if api_key:
+		return False
+	secret = frappe.db.get_single_value("Optimus Settings", "ai_api_key")
+	return isinstance(secret, str) and bool(secret.strip())
+
+
 def _refuse_inside_a_background_job() -> None:
 	"""Raise ``InsideBackgroundJobError`` inside an RQ job. The scrub's frames
 	hold unmasked rows (keys, prompts), and a job that fails is logged with
@@ -838,7 +855,11 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	- ``queue_unmasked``: the entries left unmasked in the claim key, where
 	  Frappe never inserts them: after a stop (Redis refused a push or a
 	  read), or, in a dry run, what an earlier run left there. The next real
-	  run masks them.
+	  run masks them;
+	- ``key_unreadable``: True when a key is stored but cannot be read
+	  (``_key_unreadable``); it also counts one in ``failed``. Restore the
+	  site's ``encryption_key``, or enter the key again in Optimus
+	  Settings, then run the scrub again.
 
 	With ``dry_run=True`` the counts say what WOULD change and nothing is
 	written.
@@ -850,7 +871,7 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	batch_size = max(1, int(batch_size or _BATCH))
 	out = {
 		"candidates": 0, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 0,
-		"queue_masked": 0, "queue_unmasked": 0,
+		"queue_masked": 0, "queue_unmasked": 0, "key_unreadable": False,
 	}
 	# The key first: the re-mask masks each queued record with it.
 	api_key = _current_key_or_empty()
@@ -861,6 +882,9 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 		out["queue_masked"], out["queue_unmasked"] = queue.masked, queue.unmasked
 		out["failed"] += queue.failed
 		queue_failed = queue.queue_failed
+	if _key_unreadable(api_key):
+		out["key_unreadable"] = True
+		out["failed"] += 1
 	seen: dict[str, set[str]] = {"Error Log": set(), "Deleted Document": set()}
 
 	for scan in _scans(api_key, _error_log_fields()):

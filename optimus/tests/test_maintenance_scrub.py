@@ -264,10 +264,10 @@ class _FakeFrappe:
 			self.tables[doctype].pop(n, None)
 
 
-# The scrub's result when nothing was found: every count 0.
+# The scrub's result when nothing was found: every count 0, the key readable.
 _OUT = {
 	"candidates": 0, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 0,
-	"queue_masked": 0, "queue_unmasked": 0,
+	"queue_masked": 0, "queue_unmasked": 0, "key_unreadable": False,
 }
 
 
@@ -1522,6 +1522,35 @@ class TestQueuedRows:
 		assert len(lens) == 2 and (out["queue_masked"], out["queued"], out["failed"]) == (1, 0, 1)
 
 
+class TestKeyUnreadable:
+	"""A key is stored but ``_current_key_or_empty`` answers "": the site's
+	``encryption_key`` changed (a restore onto another site) or its
+	encrypted copy in ``__Auth`` is gone. The scrub then cannot search for
+	it or mask it by value, so it says so instead of reporting clean."""
+
+	@pytest.mark.parametrize("dry_run", [True, False])
+	def test_a_key_that_is_set_but_cannot_be_read_is_flagged_and_counted(self, fake, dry_run):
+		f = fake([("a", LEAKY)], current_key="")
+		f.singles[("Optimus Settings", "ai_api_key")] = "*" * len(KEY)  # what Frappe stores in the field
+		out = maintenance.scrub_error_log_secrets(dry_run=dry_run)
+		assert out["key_unreadable"] is True and out["failed"] == 1
+		# the field itself, read plainly: never the decrypted value
+		assert f.single_reads == [("Optimus Settings", "ai_api_key")]
+
+	@pytest.mark.parametrize("stored", [None, "", "  "])
+	def test_no_key_stored_is_not_unreadable(self, fake, stored):
+		f = fake([("a", LEAKY)], current_key="")
+		f.singles[("Optimus Settings", "ai_api_key")] = stored
+		out = maintenance.scrub_error_log_secrets(dry_run=True)
+		assert out["key_unreadable"] is False and out["failed"] == 0
+
+	def test_a_key_that_was_read_is_not_checked_again(self, fake):
+		f = fake([("a", LEAKY)])
+		f.singles[("Optimus Settings", "ai_api_key")] = "*" * len(KEY)
+		out = maintenance.scrub_error_log_secrets(dry_run=True)
+		assert out["key_unreadable"] is False and out["failed"] == 0 and f.single_reads == []
+
+
 class TestMaskErrorLogQueue:
 	"""The queue half of the scrub alone, for the migrate patch when the
 	scrub was skipped or failed."""
@@ -1605,6 +1634,15 @@ class TestKeyHandling:
 		finally:
 			sys.setprofile(None)
 		return offenders, seen
+
+	def test_a_key_written_plainly_into_the_field_is_held_as_secret(self, fake):
+		# Frappe keeps asterisks in a Password field; a key written there
+		# by hand is read, for the unreadable-key check, as ``secret``.
+		f = fake([("a", "Traceback ...\n")], current_key="")
+		f.singles[("Optimus Settings", "ai_api_key")] = KEY
+		out = {}
+		offenders, seen = self._profiled(lambda: out.update(maintenance.scrub_error_log_secrets(dry_run=True)), {KEY})
+		assert offenders == set() and "_key_unreadable" in seen and out["key_unreadable"] is True
 
 	@pytest.fixture
 	def in_rq_job(self, monkeypatch):
