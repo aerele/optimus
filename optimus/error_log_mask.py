@@ -47,13 +47,14 @@ every Frappe site has, so it cannot fail in a healthy transaction.
 It never raises, except an RQ job timeout (the job must stop), which leaves
 as a fresh instance raised after the ``try``, so the frames it interrupted
 (the record's text, the key read) never travel with it. It fails open: any
-other failure (the key read, the masking) leaves the doc as it was, with
-two exceptions. When the masking fails (on a record of Optimus's, the only
-ones it masks), the text is withheld (``_withhold``) instead of inserted
-raw. When Optimus's other modules cannot be imported, the stored key alone
-is masked with Frappe alone (``_mask_stored_key_only``, below). Each
-failure leaves a line in the ``optimus`` log (an exception type name at
-most, never row text; a repeated outcome only every 1000th time, ``_note``). It never writes an Error Log itself: that insert
+other failure (the key read, the masking) leaves the doc as it was, with two
+exceptions. When the masking fails (on a record of Optimus's, the only ones
+it masks), the text is withheld (``_withhold``) instead of inserted raw.
+When Optimus's other modules cannot be imported, the stored key alone is
+masked with Frappe alone (``_mask_stored_key_only``, below). Each failure
+leaves a line in the ``optimus`` log (an exception type name at most, never
+row text; an outcome the first time it happens in the process, then every
+1000th time, ``_note``). It never writes an Error Log itself: that insert
 would run this hook again.
 
 Frappe caches every app's hooks ("app_hooks" in Redis). A process started
@@ -66,20 +67,24 @@ run, and every real scrub delete and reload that cache
 
 The module imports only the standard library at import time; every Optimus
 import is inside the guarded ``try``. Frappe resolves the handler outside
-any ``try``, in every process that reads the hooks, and a process started
-before the upgrade still holds the old Optimus modules (``optimus.redaction``
-without ``SECRET_PLACEHOLDER``): there the handler resolves and its import
-of ``optimus.maintenance`` fails inside the guard, instead of every Error
-Log insert of that process failing until it is restarted. That process
-still runs the old AI code, the code that leaks the key, so the hook then
-falls back to Frappe alone: it reads the stored key with
-``frappe.utils.password.get_decrypted_password`` (messages muted, held as
-``api_key``, its JSON-escaped form as ``secret``) and replaces both with
+any ``try``, in every process that reads the hooks. On an in-place upgrade
+(the new code on the filesystem the running processes use), a process
+started before the upgrade still holds the old Optimus modules
+(``optimus.redaction`` without ``SECRET_PLACEHOLDER``): there the handler
+resolves and its import of ``optimus.maintenance`` fails inside the guard,
+instead of every Error Log insert of that process failing until it is
+restarted. That process still runs the old AI code, the code that leaks the
+key, so the hook then falls back to Frappe alone: it reads the stored key
+with ``frappe.utils.password.get_decrypted_password`` (messages muted, held
+as ``api_key``, its JSON-escaped form as ``secret``) and replaces both with
 ``********`` in ``error``, ``method`` and ``metadata``, wherever they hold
-them. A row without the key is left byte-identical, and a key shorter than
-8 characters is not replaced, as in the masking above. Key shapes and
-value lines are not masked there: that needs the modules that failed to
-import.
+them. A row without the key is left byte-identical, and a key shorter than 8
+characters is not replaced, as in the masking above. Key shapes and value
+lines are not masked there: that needs the modules that failed to import. On
+an image-based or rolling deployment a process of the old image has no such
+module: once it reads the new hooks, every Error Log insert there fails
+until the process is replaced, and no code here can prevent it (SECURITY.md,
+"Known limitations").
 """
 
 import json
