@@ -905,7 +905,9 @@ def _replay_frappe_flush(cache, insert):
 
 
 class TestFlushDeferredErrorLogs:
-	def _frappe(self, monkeypatch, cache, fail_on=(), stored_then_fail=lambda error: False, transactional=False):
+	def _frappe(
+		self, monkeypatch, cache, fail_on=(), stored_then_fail=lambda error: False, transactional=False, outage=False,
+	):
 		"""A failed insert aborts the transaction, as a failed statement does
 		on Postgres: every later statement except a ROLLBACK fails until a
 		rollback to a savepoint that was set (``_FakeTxn``).
@@ -914,7 +916,12 @@ class TestFlushDeferredErrorLogs:
 		hook after it then raises, as a failing ``after_insert`` does. The
 		row stays in ``self.table`` after the rollback to the savepoint, as
 		in a MyISAM table, unless ``transactional`` (the rollback removes
-		it, as on Postgres). ``frappe.db.exists`` reads ``self.table``."""
+		it, as on Postgres). ``frappe.db.exists`` reads ``self.table``.
+		``fail_on`` is a set of ``error`` values or a predicate over it.
+		``outage``: the database is down, so ``select 1`` fails too
+		(``self.probes`` counts the calls)."""
+		fails = fail_on if callable(fail_on) else (lambda error: error in fail_on)
+		self.probes = 0
 		inserted, commits = [], []
 		state = {"aborted": False}
 		self.db_log = []
@@ -934,9 +941,9 @@ class TestFlushDeferredErrorLogs:
 		def _insert(doc, record):
 			_live()
 			self.db_log.append(("insert", record.get("error")))
-			if record.get("error") in fail_on:
+			if fails(record.get("error")):
 				state["aborted"] = True
-				raise RuntimeError("Duplicate entry")
+				raise RuntimeError("Lost connection to server during query" if outage else "Duplicate entry")
 			_store(doc, record)
 			if stored_then_fail(record.get("error")):
 				raise RuntimeError("after_insert hook failed")
@@ -964,6 +971,14 @@ class TestFlushDeferredErrorLogs:
 			_live()
 			return name if name in self.table else None
 
+		def _sql(query, *a, **k):
+			assert query == "select 1"
+			self.probes += 1
+			_live()
+			if outage:
+				raise RuntimeError("Lost connection to server during query")
+			return ((1,),)
+
 		self.commit_points = []  # rows inserted so far, at each commit
 
 		def _commit():
@@ -976,7 +991,9 @@ class TestFlushDeferredErrorLogs:
 			doc = SimpleNamespace(name=None)
 			doc.insert = lambda ignore_permissions=False: _insert(doc, record)
 			return doc
-		db = SimpleNamespace(savepoint=_savepoint, release_savepoint=_release, rollback=_rollback, exists=_exists)
+		db = SimpleNamespace(
+			savepoint=_savepoint, release_savepoint=_release, rollback=_rollback, exists=_exists, sql=_sql,
+		)
 		monkeypatch.setattr(maintenance, "frappe", SimpleNamespace(cache=cache, get_doc=_get_doc, db=db))
 		monkeypatch.setattr(maintenance, "safe_commit", _commit)
 		return inserted, commits
@@ -1051,18 +1068,46 @@ class TestFlushDeferredErrorLogs:
 		assert [r["error"] for r in inserted] == ["z"]
 		assert cache.pushes == []  # dropped, not pushed back for Frappe to insert verbatim
 
-	def test_three_failed_inserts_in_a_row_stop_the_flush_and_push_the_last_entry_back(self, monkeypatch):
-		# A crashed table or a lost connection fails every insert: stop
-		# instead of popping (and losing) up to 10000 entries.
-		entries = [json.dumps({"error": e}) for e in ("B1", "B2", "B3", "d", "e")]
+	def test_three_failed_inserts_in_a_row_push_every_one_back_masked(self, monkeypatch):
+		# The database is down: stop instead of popping (and losing) up to
+		# 10000 entries, and push back EVERY record of the run of failures,
+		# masked, as one entry at the end of the queue. bench migrate's own
+		# flush inserts it right after the patches, as it is.
+		leaky = [{"error": f"L{i} api_key={KEY}", "method": f"bad key {KEY}"} for i in (1, 2, 3)]
+		entries = [json.dumps(r) for r in leaky] + [json.dumps({"error": "d"})]
 		cache = _FakeCache({"insert_queue_for_Error Log": list(entries)})
-		inserted, commits = self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3"})
+		inserted, commits = self._frappe(monkeypatch, cache, fail_on=lambda e: e.startswith("L"), outage=True)
+		assert maintenance._flush_deferred_error_logs(KEY) == (3, False)
+		assert inserted == [] and commits == [1]
+		[(queue, pushed)] = cache.pushes
+		assert json.loads(pushed) == [maintenance._masked_record(r, KEY) for r in leaky]  # none lost
+		assert KEY not in pushed and "api_key=********" in pushed
+		assert cache.queues[queue] == [entries[3], pushed]  # after the rest
+
+	def test_a_stop_pushes_back_the_untried_rest_of_the_entry_masked(self, monkeypatch):
+		entry = [{"error": "ok"}] + [{"error": f"L{i} api_key={KEY}"} for i in (1, 2, 3)] + [{"error": f"T api_key={KEY}"}]
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps(entry)]})
+		inserted, _ = self._frappe(monkeypatch, cache, fail_on=lambda e: e.startswith("L"), outage=True)
 		assert maintenance._flush_deferred_error_logs(KEY).failed == 3
-		assert inserted == [] and cache.pops == 3
-		# the third entry is pushed back as popped (bytes), after the rest
-		assert cache.pushes == [("insert_queue_for_Error Log", entries[2].encode())]
-		assert cache.queues["insert_queue_for_Error Log"] == [entries[3], entries[4], entries[2].encode()]
-		assert commits == [1]
+		assert [r["error"] for r in inserted] == ["ok"]  # never pushed back: no duplicate
+		[(_, pushed)] = cache.pushes
+		assert json.loads(pushed) == [maintenance._masked_record(r, KEY) for r in entry[1:]]
+		assert KEY not in pushed
+
+	def test_a_failed_periodic_commit_stops_and_pushes_back_the_rest_of_the_entry_masked(self, monkeypatch):
+		entry = [{"error": f"R{i} api_key={KEY}"} for i in range(102)]
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps(entry), json.dumps({"error": "next"})]})
+		inserted, _ = self._frappe(monkeypatch, cache)
+
+		def _commit():
+			raise RuntimeError("Lost connection to server during query")
+		monkeypatch.setattr(maintenance, "safe_commit", _commit)
+		# the periodic commit after row 100 and the final one
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 2
+		assert len(inserted) == 100
+		[(_, pushed)] = [p for p in cache.pushes if "R100" in p[1]]
+		assert json.loads(pushed) == [maintenance._masked_record(r, KEY) for r in entry[100:]]
+		assert KEY not in pushed
 
 	def test_failures_that_are_not_in_a_row_do_not_stop_it(self, monkeypatch):
 		errors = ("B1", "ok1", "B2", "ok2", "B3", "ok3", "B4")
@@ -1076,24 +1121,26 @@ class TestFlushDeferredErrorLogs:
 		# Pushing the whole entry back would insert "ok" twice.
 		entry = [{"error": e} for e in ("ok", "B1", "B2", "B3", "z")]
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps(entry), json.dumps({"error": "next"})]})
-		inserted, _ = self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3"})
+		inserted, _ = self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3"}, outage=True)
 		assert maintenance._flush_deferred_error_logs(KEY).failed == 3
 		assert [r["error"] for r in inserted] == ["ok"]
 		[(queue, pushed)] = cache.pushes
 		assert json.loads(pushed) == [{"error": e} for e in ("B1", "B2", "B3", "z")]
 		assert cache.queues[queue] == [json.dumps({"error": "next"}), pushed]
 
-	def test_failures_count_across_entries(self, monkeypatch):
+	def test_failures_count_across_entries_and_all_of_them_are_pushed_back(self, monkeypatch):
+		# The run of failures spans two entries: the first entry's record is
+		# pushed back too, not lost.
 		entries = [json.dumps({"error": "B1"}), json.dumps([{"error": "B2"}, {"error": "B3"}, {"error": "w"}])]
 		cache = _FakeCache({"insert_queue_for_Error Log": list(entries)})
-		inserted, _ = self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3"})
+		inserted, _ = self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3"}, outage=True)
 		assert maintenance._flush_deferred_error_logs(KEY).failed == 3
 		assert inserted == []
-		assert cache.pushes == [("insert_queue_for_Error Log", entries[1].encode())]
+		assert cache.pushes == [("insert_queue_for_Error Log", json.dumps([{"error": e} for e in ("B1", "B2", "B3", "w")]))]
 
 	def test_a_failed_push_back_is_counted(self, monkeypatch):
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": e}) for e in ("B1", "B2", "B3")]})
-		self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3"})
+		self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3"}, outage=True)
 
 		def _rpush(key, value):
 			raise ConnectionError("redis went away")
