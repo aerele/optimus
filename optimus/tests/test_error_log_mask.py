@@ -93,12 +93,18 @@ def env(monkeypatch):
 	log lines; ``inserts`` any ``frappe.log_error`` / ``frappe.get_doc`` call
 	(the hook must make none). A fake ``rq`` provides the job timeout."""
 	import frappe
+	import frappe.utils.password
 
-	rec = SimpleNamespace(reads=[], lines=[], inserts=[], key=KEY)
+	rec = SimpleNamespace(reads=[], frappe_reads=[], lines=[], inserts=[], key=KEY)
 	flags = SimpleNamespace(mute_messages=False)
 
 	def _read():
 		rec.reads.append(flags.mute_messages)
+		return rec.key
+
+	def _get_decrypted_password(*args, **kwargs):
+		# Frappe's own read, which the stale-process fallback uses
+		rec.frappe_reads.append((flags.mute_messages, args, kwargs))
 		return rec.key
 
 	def _logger(module=None, *a, **k):
@@ -111,6 +117,7 @@ def env(monkeypatch):
 	monkeypatch.setattr(frappe, "log_error", lambda *a, **k: rec.inserts.append(("log_error", a, k)), raising=False)
 	monkeypatch.setattr(frappe, "get_doc", lambda *a, **k: rec.inserts.append(("get_doc", a, k)), raising=False)
 	monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", _read)
+	monkeypatch.setattr(frappe.utils.password, "get_decrypted_password", _get_decrypted_password, raising=False)
 	rq = types.ModuleType("rq")
 	timeouts = types.ModuleType("rq.timeouts")
 	timeouts.BaseTimeoutException = JobTimeoutException
@@ -263,26 +270,6 @@ class TestFailOpen:
 		assert _one_line(env).endswith("stored as it was: RuntimeError")
 		assert env.inserts == []
 
-	def test_a_process_with_stale_optimus_modules_leaves_the_doc_as_it_was(self, env, monkeypatch):
-		# A process started before the upgrade holds develop's optimus.redaction
-		# (no SECRET_PLACEHOLDER, no scrub_secrets). The new hooks reach it
-		# through the Redis cache: Frappe resolves the handler (this module
-		# needs only the standard library to import), and the handler's
-		# import of optimus.maintenance fails inside its guard.
-		import optimus
-
-		stale = types.ModuleType("optimus.redaction")
-		stale.redact_sensitive = lambda payload, **kw: payload
-		monkeypatch.setitem(sys.modules, "optimus.redaction", stale)
-		for name in ("maintenance", "error_log_mask"):
-			monkeypatch.delitem(sys.modules, f"optimus.{name}", raising=False)
-			monkeypatch.delattr(optimus, name, raising=False)
-		handler = _resolve(HANDLER)
-		doc = _Doc(error=LEAKY, method="optimus ai_fix")
-		assert handler(doc, "before_insert") is None
-		assert doc.sets == [] and doc.error == LEAKY
-		assert _one_line(env).endswith("stored as it was: ImportError")
-
 	def test_a_record_that_is_not_ai_is_never_masked_so_a_masking_failure_cannot_touch_it(self, env, monkeypatch):
 		calls = []
 
@@ -375,6 +362,158 @@ class TestFailOpen:
 
 def _boom(*a, **k):
 	raise ValueError(f"catastrophic backtracking near {KEY}")
+
+
+@pytest.fixture
+def stale(env, monkeypatch):
+	"""A process started before the upgrade: it holds develop's
+	optimus.redaction (no SECRET_PLACEHOLDER, no scrub_secrets), and the new
+	hooks reach it through the Redis cache. Frappe resolves the handler
+	(this module needs only the standard library to import); the handler's
+	import of optimus.maintenance fails inside its guard. Answers the
+	handler, resolved as ``frappe.get_attr`` does."""
+	import optimus
+
+	old = types.ModuleType("optimus.redaction")
+	old.redact_sensitive = lambda payload, **kw: payload
+	monkeypatch.setitem(sys.modules, "optimus.redaction", old)
+	for name in ("maintenance", "error_log_mask"):
+		monkeypatch.delitem(sys.modules, f"optimus.{name}", raising=False)
+		monkeypatch.delattr(optimus, name, raising=False)
+	return _resolve(HANDLER)
+
+
+_STALE_LINE = "checked for the stored key alone (Optimus's modules could not be imported: ImportError)"
+
+
+class TestStaleProcess:
+	"""The fallback of a process whose Optimus modules cannot be imported:
+	that process still runs the old AI code, the code that leaks the key, so
+	the stored key is masked with Frappe alone."""
+
+	def test_the_stored_key_is_masked_with_frappe_alone(self, env, stale):
+		meta = json.dumps({"form_dict": {"doc": f'{{"ai_api_key": "{KEY}"}}'}})
+		doc = _Doc(error=LEAKY, method=f"The AI provider returned an error (HTTP 401): bad key {KEY}", metadata=meta)
+		assert stale(doc, "before_insert") is None
+		assert KEY not in json.dumps(doc.fields())
+		assert doc.error == LEAKY.replace(KEY, "********")
+		assert doc.method == "The AI provider returned an error (HTTP 401): bad key ********"
+		assert doc.metadata == meta.replace(KEY, "********") and json.loads(doc.metadata)
+		assert sorted(doc.sets) == ["error", "metadata", "method"]
+		# Frappe's own read, messages muted, the flag restored; Optimus's never
+		assert env.frappe_reads == [
+			(True, ("Optimus Settings", "Optimus Settings", "ai_api_key"), {"raise_exception": False}),
+		]
+		assert env.reads == [] and env.flags.mute_messages is False
+		assert _one_line(env).endswith(_STALE_LINE)
+		assert env.inserts == []
+
+	def test_the_placeholder_is_the_masking_s_own(self, env):
+		from optimus.redaction import SECRET_PLACEHOLDER
+
+		assert error_log_mask._PLACEHOLDER == SECRET_PLACEHOLDER
+		assert error_log_mask._MIN_KEY_LEN == maintenance._MIN_KEY_LEN
+
+	@pytest.mark.parametrize("field", ["error", "method", "metadata"])
+	def test_the_key_is_masked_in_each_field_that_holds_it(self, env, stale, field):
+		fields = {"error": "Traceback ...", "method": "Stock Entry failed", "metadata": "{}"}
+		fields[field] = f"bad key {KEY} here"
+		doc = _Doc(**fields)
+		stale(doc, "before_insert")
+		assert doc.sets == [field] and doc.get(field) == "bad key ******** here"
+
+	def test_the_json_escaped_key_is_masked(self, env, stale):
+		env.key = 'sk-live-01234"56789\\abcdef'
+		meta = json.dumps({"doc": f"key {env.key}"})
+		assert env.key not in meta  # only its JSON-escaped form is there
+		doc = _Doc(error=f"raw {env.key}", metadata=meta)
+		stale(doc, "before_insert")
+		assert doc.error == "raw ********" and json.loads(doc.metadata) == {"doc": "key ********"}
+
+	@pytest.mark.parametrize("shape", ["dict", "list"])
+	def test_a_non_str_value_holding_the_key_is_masked_as_the_text_the_row_stores(self, env, stale, shape):
+		value = {"note": f"bad key {KEY}"} if shape == "dict" else [f"bad key {KEY}"]
+		doc = _Doc(error="e", metadata=value)
+		stale(doc, "before_insert")
+		assert doc.metadata == str(value).replace(KEY, "********") and doc.sets == ["metadata"]
+
+	def test_a_row_without_the_key_is_left_byte_identical(self, env, stale):
+		fields = {"error": OTHER_TB, "method": OTHER_TITLE, "metadata": {"user": "a@b.c"}}
+		original = dict(fields)
+		doc = _Doc(**fields)
+		stale(doc, "before_insert")
+		assert doc.sets == [] and all(doc.get(k) is original[k] for k in original)
+		assert len(env.frappe_reads) == 1
+
+	@pytest.mark.parametrize("key", ["", "   ", None, "1234567"], ids=["empty", "blank", "none", "short"])
+	def test_no_key_or_a_key_shorter_than_8_characters_is_not_replaced(self, env, stale, key):
+		env.key = key
+		doc = _Doc(error="Traceback ... 1234567 ...", method="1234567")
+		stale(doc, "before_insert")
+		assert doc.sets == []
+		assert _one_line(env).endswith(_STALE_LINE)
+
+	def test_a_key_of_exactly_8_characters_is_replaced(self, env, stale):
+		env.key = "12345678"
+		doc = _Doc(error="Traceback ... 12345678 ...")
+		stale(doc, "before_insert")
+		assert doc.error == "Traceback ... ******** ..."
+
+	def test_a_key_read_that_fails_leaves_the_doc_as_it_was(self, env, stale, monkeypatch):
+		import frappe.utils.password
+
+		def _read(*a, **k):
+			raise RuntimeError(f"cannot read {KEY}")
+		monkeypatch.setattr(frappe.utils.password, "get_decrypted_password", _read)
+		doc = _Doc(error=LEAKY)
+		assert stale(doc, "before_insert") is None
+		assert doc.sets == [] and env.flags.mute_messages is False
+		assert _one_line(env).endswith("stored as it was: RuntimeError")
+
+	def test_an_empty_record_reads_no_key(self, env, stale):
+		doc = _Doc()
+		stale(doc, "before_insert")
+		assert env.frappe_reads == [] and env.lines == [] and doc.sets == []
+
+	def test_a_timeout_during_its_key_read_is_re_raised_as_a_fresh_instance(self, env, stale, monkeypatch):
+		import frappe.utils.password
+
+		raised = []
+
+		def _read(*a, **k):
+			raised.append(JobTimeoutException("Task exceeded maximum timeout value (180 seconds)"))
+			raise raised[-1]
+		monkeypatch.setattr(frappe.utils.password, "get_decrypted_password", _read)
+		with pytest.raises(JobTimeoutException) as ei:
+			stale(_Doc(error=LEAKY), "before_insert")
+		assert ei.value is not raised[0] and ei.value.__context__ is None and env.lines == []
+
+	def test_it_works_where_rq_cannot_be_imported_either(self, env, stale, monkeypatch):
+		monkeypatch.setitem(sys.modules, "rq", None)
+		monkeypatch.setitem(sys.modules, "rq.timeouts", None)
+		doc = _Doc(error=LEAKY)
+		assert stale(doc, "before_insert") is None
+		assert KEY not in doc.error
+
+	def test_its_frames_hold_the_key_only_as_api_key_or_secret(self, env, stale):
+		mask_file = sys.modules["optimus.error_log_mask"].__file__
+		offenders, seen = set(), set()
+		escaped = json.dumps(KEY)[1:-1]
+
+		def _profile(frame, event, arg):
+			if frame.f_code.co_filename != mask_file or event not in ("call", "return"):
+				return
+			seen.add(frame.f_code.co_name)
+			for name, value in frame.f_locals.items():
+				if name not in ("api_key", "secret") and isinstance(value, str) and value in (KEY, escaped):
+					offenders.add(f"{frame.f_code.co_name}.{name}")
+		sys.setprofile(_profile)
+		try:
+			stale(_Doc(error=LEAKY, metadata=json.dumps({"k": KEY})), "before_insert")
+		finally:
+			sys.setprofile(None)
+		assert offenders == set()
+		assert {"_mask_stored_key_only", "_stored_key", "_read_key"} <= seen  # positive control
 
 
 class TestJobTimeout:
