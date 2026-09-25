@@ -1427,6 +1427,14 @@ class TestQueuedValueLines:
 		row = self._remasked(redis, {"error": error})
 		assert "Acme" not in row["error"] and "      value = ********\n" in row["error"]
 
+	@pytest.mark.parametrize("field", ["method", "metadata"])
+	def test_an_ai_frame_in_the_title_or_the_metadata_counts_too(self, redis, field):
+		# A 500 snapshot's title is the exception text, and a request's
+		# metadata can quote a traceback: the frame may sit there alone.
+		frame = 'File "apps/optimus/optimus/ai_fix.py", line 1290, in _http_post'
+		row = self._remasked(redis, {"error": ERP_TB, field: frame})
+		assert "Acme" not in row["error"] and "      value = ********\n" in row["error"]
+
 	def test_a_snapshot_holding_the_key_has_its_value_lines_masked(self, redis):
 		# No ai_fix.py frame, but the key is in its request metadata.
 		record = {"error": ERP_TB, "metadata": json.dumps({"form_dict": {"ai_api_key": KEY}})}
