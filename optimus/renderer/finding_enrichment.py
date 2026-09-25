@@ -11,6 +11,7 @@ imported lazily to avoid renderer import cycles.
 from __future__ import annotations
 
 import json
+import os
 import re
 
 # v0.7.x: severity rank for picking the dominant finding within a
@@ -211,7 +212,10 @@ def _walk_drilldown_chain(
 	if not isinstance(tree, dict) or not isinstance(callsite, dict):
 		return []
 	filename = callsite.get("filename") or ""
-	function = callsite.get("function") or ""
+	# Strip the " (DocType)" display suffix _attach_action_context adds to hook
+	# findings: the pyinstrument tree holds the raw function name, so a suffixed
+	# callsite would miss _find_node_in_tree and wrongly yield an empty chain.
+	function = _strip_doctype_suffix(callsite.get("function") or "")
 	if not function:
 		return []
 
@@ -481,6 +485,8 @@ def _retarget_phase1_callsites_to_drilldown_leaf(
 		callsite = detail.get("callsite") or {}
 		if callsite.get("is_representative"):
 			continue
+		if callsite.get("self_time_hot_line_pinned"):
+			continue  # already pinned to a related hot line; don't re-aim it
 		fname = callsite.get("filename") or ""
 		fn_name = callsite.get("function") or ""
 		if not fn_name:
@@ -882,14 +888,152 @@ def _decorator_through_def_rows(
 	return rows, def_lineno
 
 
+# Finding types whose callsite is PERSISTED (survives a re-render) and names a
+# concrete hot statement inside the deepest user frame. SQL red-flag types
+# (Missing Index, Full Table Scan, ...) are deliberately excluded: their callsite
+# is derived at render time from the transient recorder, so a pin relying on them
+# would silently regress on Regenerate Reports.
+_HOT_LINE_SOURCE_TYPES = frozenset({"N+1 Query", "Hot Line", "Redundant Call"})
+
+# ``_attach_action_context`` appends a " (DocType)" display suffix to hook
+# findings' callsite.function; strip it so a suffixed name matches the raw
+# pyinstrument function name carried on the drill-down chain.
+_DOCTYPE_SUFFIX_RE = re.compile(r"\s+\([^)]*\)$")
+
+
+def _strip_doctype_suffix(fn: str) -> str:
+	return _DOCTYPE_SUFFIX_RE.sub("", fn or "")
+
+
+def _pin_slow_hot_path_to_related_hot_line(findings, *, file_cache: dict | None = None) -> None:
+	"""Pin a Slow Hot Path card to the exact hot line inside its deepest
+	user-code frame.
+
+	A self-time hot path whose time is spent in DB calls otherwise shows only the
+	function signature (empty chain, e.g. a job that calls framework directly) or
+	a call-to-a-function line (a chain whose leaf calls framework), because the
+	call tree holds framework internals with no user line for the hot work. The
+	frame's related findings DO carry the real line: the N+1 / hot-line / redundant
+	finding for that same frame stores the offending statement's callsite. Pin the
+	card to the hottest such line (by estimated impact), reusing that finding's
+	already-resolved snippet + abs path (no path re-resolution here). These come
+	from persisted findings, so the pin survives a report re-render.
+
+	A compute-bound leaf with no related finding is left untouched, for
+	``_expand_self_time_snippets`` / ``_retarget_phase1_callsites_to_drilldown_leaf``.
+
+	Runs after ``_attach_drilldown_chains`` (needs the chain) and before those two
+	(its ``self_time_hot_line_pinned`` marker suppresses their fallbacks). Mutates
+	findings in place."""
+	if not findings:
+		return
+
+	def _base(p):
+		return os.path.basename(p or "")
+
+	# Highest-impact hot-line finding per (action_ref, stripped-function, basename).
+	# We keep the source finding's already-resolved callsite fields so the pin is a
+	# pure copy no re-reading the file, no re-resolving a path (which for a Server
+	# Script returns a tuple, not a string).
+	hot_index: dict[tuple, dict] = {}
+	for g in findings:
+		if (g.get("finding_type") or "") not in _HOT_LINE_SOURCE_TYPES:
+			continue
+		af = g.get("action_ref")
+		if af in (None, ""):
+			continue  # no action dimension can't safely attribute a line
+		gcs = (g.get("technical_detail") or {}).get("callsite") or {}
+		gfn = gcs.get("function")
+		gln = gcs.get("lineno")
+		gfile = gcs.get("filename")
+		snippet = gcs.get("source_snippet")
+		# Require a persisted snippet so the pin is a copy, never a re-resolve.
+		if not gfn or gln is None or not gfile or not snippet:
+			continue
+		try:
+			gln = int(gln)
+		except (TypeError, ValueError):
+			continue  # malformed lineno never crash the whole render
+		key = (af, _strip_doctype_suffix(gfn), _base(gfile))
+		imp = g.get("estimated_impact_ms") or 0
+		prev = hot_index.get(key)
+		if prev is None or imp > prev["impact"]:
+			hot_index[key] = {
+				"impact": imp,
+				"lineno": gln,
+				"filename": gfile,
+				"_abs": gcs.get("_abs"),
+				"_link_kind": gcs.get("_link_kind"),
+				"source_snippet": snippet,
+				"function": gfn,  # display name (may carry the DocType suffix)
+			}
+
+	for f in findings:
+		if (f.get("finding_type") or "") != "Slow Hot Path":
+			continue
+		af = f.get("action_ref")
+		if af in (None, ""):
+			continue
+		detail = f.get("technical_detail") or {}
+		callsite = detail.get("callsite") or {}
+		chain = detail.get("drilldown_chain") or []
+		if chain and isinstance(chain[-1], dict):
+			leaf_fn = chain[-1].get("function")
+			leaf_file = chain[-1].get("filename")
+		else:
+			leaf_fn = callsite.get("function")
+			leaf_file = callsite.get("filename")
+		if not leaf_fn:
+			continue
+		hot = hot_index.get((af, _strip_doctype_suffix(leaf_fn), _base(leaf_file)))
+		if not hot:
+			continue
+		# Keep the origin function for the "entered through <fn> - pinned here to
+		# the actual hot line" banner; move the card's file:line + snippet +
+		# function to the leaf's hot statement (reusing the source finding's
+		# resolved fields). phase2_lookup_* keeps the Line-Level Drilldown crosslink
+		# aimed at the leaf (its keys use the raw pyinstrument function name).
+		callsite["original_wrapper"] = {
+			"filename": callsite.get("filename"),
+			"lineno": callsite.get("lineno"),
+			"function": callsite.get("function"),
+		}
+		callsite["filename"] = hot["filename"]
+		# Overwrite the link fields unconditionally: if the origin was a Server
+		# Script wrapper (_abs = desk URL, _link_kind = "desk") but the hot line is
+		# in a regular file, a leftover wrapper _abs would open the wrong editor
+		# target. Clear them when the hot source has none.
+		if hot.get("_abs"):
+			callsite["_abs"] = hot["_abs"]
+		else:
+			callsite.pop("_abs", None)
+		if hot.get("_link_kind"):
+			callsite["_link_kind"] = hot["_link_kind"]
+		else:
+			callsite.pop("_link_kind", None)
+		callsite["lineno"] = hot["lineno"]
+		# Copy the list so a future per-finding snippet mutation can't bleed
+		# between the source finding and the pinned card (they share the rows,
+		# which is fine: the row highlight is idempotent).
+		callsite["source_snippet"] = list(hot["source_snippet"])
+		callsite["function"] = hot["function"]
+		callsite["phase2_lookup_function"] = _strip_doctype_suffix(hot["function"])
+		callsite["phase2_lookup_filename"] = hot["filename"]
+		callsite["self_time_hot_line_pinned"] = True
+		callsite.pop("self_time_no_pinpoint", None)
+		detail["callsite"] = callsite
+		f["technical_detail"] = detail
+
+
 def _expand_self_time_snippets(findings, *, file_cache: dict | None = None) -> None:
 	"""For self-time Slow Hot Path findings with no deeper user-code frame (empty
-	``drilldown_chain``), narrow the snippet to the function's signature line and
-	flag it ``self_time_no_pinpoint`` (sampling can't pinpoint a single hot line,
-	so the card shows just the ``def`` plus a note to run a Line-Level Drilldown).
+	``drilldown_chain``) that were NOT pinned to a related hot line, narrow the
+	snippet to the function's signature line and flag it ``self_time_no_pinpoint``
+	(a compute-only leaf where sampling genuinely can't pinpoint a line, so the
+	card shows the ``def`` plus a note to run a Line-Level Drilldown).
 
-	Runs after ``_attach_drilldown_chains`` and mutates findings in place; acts
-	only on the empty-``drilldown_chain`` case."""
+	Runs after ``_pin_slow_hot_path_to_related_hot_line`` and mutates findings in
+	place; acts only on the empty-``drilldown_chain`` case."""
 	for finding in findings or []:
 		if (finding.get("finding_type") or "") != "Slow Hot Path":
 			continue
@@ -898,6 +1042,8 @@ def _expand_self_time_snippets(findings, *, file_cache: dict | None = None) -> N
 		if detail.get("drilldown_chain") != []:
 			continue
 		callsite = detail.get("callsite") or {}
+		if callsite.get("self_time_hot_line_pinned"):
+			continue  # already pinned to a related hot line
 		fn = callsite.get("filename")
 		ln = callsite.get("lineno")
 		if not fn or ln is None:

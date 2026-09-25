@@ -208,6 +208,19 @@ def test_slow_job_does_not_steal_a_top_n_slot():
 	assert panel.count('class="call-tree-action"') == 3
 
 
+def test_drilldown_chain_strips_doctype_suffix():
+	# _attach_action_context suffixes a hook finding's callsite.function with
+	# " (DocType)" before the chain is built, but the pyinstrument tree holds the
+	# raw name. The walk must strip the suffix or the origin lookup misses and the
+	# chain wrongly comes back empty (which then shows only the def line).
+	tree = _node("looped_validate", "ugly_code/common.py", 100, [
+		_node("_check_user_exists", "ugly_code/common.py", 95, [], lineno=20),
+	], lineno=8)
+	cs = {"filename": "ugly_code/common.py", "function": "looped_validate (Sales Invoice)", "lineno": 8}
+	chain = renderer._walk_drilldown_chain(tree, cs, tracked_apps=("ugly_code",))
+	assert [c["function"] for c in chain] == ["_check_user_exists"]
+
+
 def test_drilldown_chain_skips_other_frames():
 	# v0.7.x: the finding call-chain breadcrumb must not walk into a synthetic
 	# "[other: N frames]" node (you can't drill into a collapsed bucket).
