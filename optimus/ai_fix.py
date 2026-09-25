@@ -885,7 +885,7 @@ class _ApiKeyAuth(requests.auth.AuthBase):
 		r.headers[self._header] = self._prefix + self._value
 		return r
 
-	def scrub_literals(self) -> tuple[str, ...]:
+	def _scrub_literals(self) -> tuple[str, ...]:
 		"""The key this object sends, raw and JSON-escaped (``_key_literals``):
 		the key the request really carried, even if Optimus Settings holds a
 		new one by the time the reply is read. Pass the result straight into
@@ -912,7 +912,7 @@ def _key_literals(api_key) -> tuple[str, ...]:
 def _in_flight_literals(auth) -> tuple[str, ...]:
 	"""The literals of the key a request was sent with (``auth`` is the
 	``_ApiKeyAuth`` it used), or ``()`` when it carried none."""
-	return auth.scrub_literals() if isinstance(auth, _ApiKeyAuth) else ()
+	return auth._scrub_literals() if isinstance(auth, _ApiKeyAuth) else ()
 
 
 def _scrub_literals_for(auth) -> tuple[str, ...]:
