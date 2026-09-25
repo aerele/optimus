@@ -1339,6 +1339,21 @@ class TestRemaskErrorLogQueue:
 		assert row["error"] == f"{masked_title}\nx"
 		assert row["method"] == masked_title[:140] and "u:p@" not in row["method"]
 
+	def test_a_shape_the_long_title_and_the_error_complete_together_is_masked(self, redis):
+		# The title ends in "Bearer" and the error starts with the token: only
+		# the joined "<title>\n<error>" holds "Bearer <token>". It is masked in
+		# Redis, so a second run, or the scrub of the row once Frappe has
+		# inserted it, changes nothing.
+		title = "x" * 140 + " Bearer"
+		r = redis({Q: [json.dumps({"error": "abcdefghij rest", "method": title})]})
+		maintenance._remask_error_log_queue(KEY)
+		[[row]] = [json.loads(e) for e in r.entries(Q)]
+		assert row["error"] == f"{title}\n******** rest"
+		assert row["method"] == title[:140]
+		maintenance._remask_error_log_queue(KEY)
+		assert [json.loads(e) for e in r.entries(Q)] == [[row]]
+		assert maintenance._mask_row({"name": "ERR-1", **row}, ("error", "method"), KEY) == ({}, False)
+
 	def test_a_queued_title_that_fits_is_left_as_it_is(self, redis):
 		title = "t" * 140
 		r = redis({Q: [json.dumps({"error": "e", "method": title})]})

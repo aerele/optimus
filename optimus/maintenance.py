@@ -465,7 +465,8 @@ def _masked_record(record, api_key: str) -> dict | None:
 	"""A queued ``record`` as the re-mask pushes it back for Frappe's
 	``save_to_db`` to insert (see ``_remask_error_log_queue``): its
 	``_QUEUED_TEXT_FIELDS`` masked (``_mask_row``), with a title longer than
-	its column moved in front of ``error`` (``_long_title_into_error``).
+	its column moved in front of ``error`` (``_long_title_into_error``) and
+	the joined ``error`` masked again, so it is idempotent.
 	The residual check is skipped: its answer is never used here, and it
 	costs about a third of the masking's time. Its bare header value lines are masked only when ``_is_ai_record``: any
 	other snapshot (an ERPNext error with a ``value = ...`` local, say) goes
@@ -485,7 +486,18 @@ def _masked_record(record, api_key: str) -> dict | None:
 	)
 	if masked is None:
 		return None
-	return _long_title_into_error({**record, **masked[0]})
+	merged = {**record, **masked[0]}
+	moved = _long_title_into_error(merged)
+	if moved is merged:
+		return merged
+	# The joined "<title>\n<error>" is masked again as a whole: a shape the
+	# join completes (a title ending in "Bearer", an error starting with the
+	# token) is masked now, so a second pass, or the scrub of the row once
+	# Frappe has inserted it, changes nothing.
+	joined = _mask_row(moved, ("error",), api_key, value_lines=value_lines, cut=False, check_residual=False)
+	if joined is None:
+		return None
+	return {**moved, **joined[0]}
 
 
 def _long_title_into_error(record: dict) -> dict:
