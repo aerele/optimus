@@ -22,14 +22,18 @@ It never reads or changes Frappe's deferred-insert queue. The Error Log
 ``before_insert`` hook (``optimus.error_log_mask``) masks every Error Log
 row from Optimus's AI code or holding the key as Frappe inserts it, so the
 records queued in Redis are masked when bench migrate (right after the
-patches) or the scheduler inserts them.
-Every path but a failed import of ``optimus.maintenance`` prints one line
-saying so; after a failed import it says rows may be stored unmasked until
-the module imports, since the hook needs it too. Frappe caches the hooks,
-and a process started before the upgrade can cache the old ones again
-during the migrate; so, as a real scrub does first, the patch refreshes
-that cache when the scrub did not run (``_refresh_hooks_cache``), and
-this migrate's flush of the queue runs the hook.
+patches) or the scheduler inserts them. Every path but a failed import of
+``optimus.maintenance`` prints one line saying so; after a failed import
+it says rows may be stored unmasked until the module imports, since the
+hook needs it too. Frappe caches the hooks, and a process started before
+the upgrade can cache the old ones again during or after the migrate; so,
+as a real scrub does first, the patch refreshes that cache when the scrub
+did not run (``_refresh_hooks_cache``), and this migrate's flush of the
+queue runs the hook. Every path then prints one last line: run the scrub
+after restarting the web server and the background workers (advisory step
+3), which refreshes that cache again once no old process is left, or at
+least ``bench --site <site> clear-cache``; it says so explicitly when the
+cache could not be refreshed during the migrate.
 
 Patch Log marks the patch done either way, so a skipped or failed scrub also
 leaves one Error Log row titled "Optimus: Error Log key scrub did not run",
@@ -63,6 +67,18 @@ _NOT_MASKED_LINE = (
 	"Optimus: Error Log rows, queued ones included, may be stored unmasked while optimus.maintenance cannot be "
 	"imported; run the command above once it can."
 )
+# Printed last on every path. {command} is the scrub command, or "the command
+# above" when a line above already gave it.
+_RESTART_LINE = (
+	"{start} restarting the web server and the background workers, run {command} (step 3); it also refreshes "
+	"Frappe's cached hooks so the Error Log hook reaches every process. If you cannot run it, run "
+	"bench --site {site} clear-cache after the restart."
+)
+_REFRESHED_START = "Optimus: after"
+_NOT_REFRESHED_START = (
+	"Optimus: Frappe's cached hooks were not refreshed during this migrate, so the Error Log hook may not reach "
+	"every process yet. After"
+)
 
 
 def execute():
@@ -74,7 +90,7 @@ def execute():
 		"--kwargs \"{'dry_run': False}\""
 	)
 	purge = f"bench --site {site} execute optimus.maintenance.purge_ai_error_logs --kwargs"
-	run_it = f"Run it by hand ({_OFF_PEAK}): {command}"
+	run_it = f"Run it by hand after the restart ({_OFF_PEAK}): {command}"
 	purge_it = (
 		f"Count the AI error rows first: {purge} \"{{'dry_run': True}}\", then delete them "
 		f"({_OFF_PEAK}): {purge} \"{{'dry_run': False}}\""
@@ -104,7 +120,8 @@ def execute():
 		# hook; its reload reads the installed apps, so a refresh that failed
 		# is rolled back too.
 		_rollback(frappe)
-		if maintenance is not None and not _refresh_hooks(maintenance):
+		refreshed = maintenance is not None and _refresh_hooks(maintenance)
+		if maintenance is not None and not refreshed:
 			_rollback(frappe)
 		if failed is not None:
 			_breadcrumb(frappe, _BREADCRUMB_TITLE, failed, run_it)
@@ -125,6 +142,7 @@ def execute():
 				f"limit {maintenance.MIGRATE_SCAN_LIMIT}). {run_it}"
 			)
 		print(_QUEUE_LINE if maintenance is not None else _NOT_MASKED_LINE)
+		print(_restart_line(site, "the command above", refreshed))
 		return
 	counts = {k: int(out.get(k) or 0) for k in _COUNTS}
 	key_unreadable = bool(out.get("key_unreadable"))
@@ -150,6 +168,10 @@ def execute():
 	if counts["residual"]:
 		print(f"Optimus: {counts['residual']} error row(s) still hold a key-shaped value. {purge_it}")
 	print(_QUEUE_LINE)
+	print(_restart_line(
+		site, "the command above" if counts["failed"] or key_unreadable else command,
+		bool(out.get("hooks_refreshed")),
+	))
 	if counts["failed"] or counts["residual"] or key_unreadable:
 		hint = run_it
 		if key_unreadable:
@@ -161,6 +183,14 @@ def execute():
 			" ".join(f"{k}={counts[k]}" for k in ("failed", "residual")) + f" key_unreadable={int(key_unreadable)}",
 			hint,
 		)
+
+
+def _restart_line(site: str, command: str, refreshed: bool) -> str:
+	"""The last console line: run the scrub (``command``) after the restart,
+	or at least ``bench clear-cache``; led by a note that the cached hooks
+	were not refreshed when ``refreshed`` is False."""
+	start = _REFRESHED_START if refreshed else _NOT_REFRESHED_START
+	return _RESTART_LINE.format(start=start, command=command, site=site)
 
 
 def _refresh_hooks(maintenance) -> bool:
