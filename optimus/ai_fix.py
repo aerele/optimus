@@ -911,6 +911,15 @@ def _in_flight_literals(auth) -> tuple[str, ...]:
 	return auth.scrub_literals() if isinstance(auth, _ApiKeyAuth) else ()
 
 
+def _scrub_literals_for(auth) -> tuple[str, ...]:
+	"""What a provider reply is scrubbed of, for ``scrub_secrets(...,
+	literals=...)``: the key stored in Optimus Settings, then the key the
+	request was sent with (``auth``, the ``_ApiKeyAuth`` it used: Settings may
+	hold a new key by now), each raw and JSON-escaped. Pass the result
+	straight into that call, or bind it only to a local named ``api_key``."""
+	return (*_key_literals(_current_key_or_empty()), *_in_flight_literals(auth))
+
+
 def _resolve_provider() -> dict:
 	"""Resolve the active provider config: protocol, base_url, model,
 	needs_key, has_key and the provider display name. Raises
@@ -1695,10 +1704,7 @@ def _response_detail(resp, auth=None) -> str:
 			return ""
 		from optimus.redaction import scrub_secrets
 
-		return ": " + scrub_secrets(
-			body_text[:65536],
-			literals=(*_key_literals(_current_key_or_empty()), *_in_flight_literals(auth)),
-		)[:300]
+		return ": " + scrub_secrets(body_text[:65536], literals=_scrub_literals_for(auth))[:300]
 	except _job_timeout_types() as e:
 		interrupt = (type(e), e.args)
 	except Exception:
@@ -1740,7 +1746,7 @@ def _provider_error_code(resp, auth=None) -> str:
 			return ""
 		from optimus.redaction import scrub_secrets
 
-		api_key = _current_key_or_empty()
+		api_key = _scrub_literals_for(auth)
 		parts: list[str] = []
 		for field in ("type", "code"):
 			value = error.get(field)
@@ -1749,7 +1755,7 @@ def _provider_error_code(resp, auth=None) -> str:
 				and len(value) <= _PROVIDER_ERROR_MAX_LEN
 				and _PROVIDER_ERROR_RE.fullmatch(value)
 				and value not in parts
-				and scrub_secrets(value, literals=(*_key_literals(api_key), *_in_flight_literals(auth))) == value
+				and scrub_secrets(value, literals=api_key) == value
 			):
 				parts.append(value)
 		if not parts:

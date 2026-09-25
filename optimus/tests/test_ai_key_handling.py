@@ -181,6 +181,25 @@ class TestApiKeyAuth:
 		assert prepared.headers["authorization"] == f"Bearer {KEY}"
 
 
+class TestScrubLiteralsFor:
+	"""The literals a provider reply is scrubbed of: the stored key and the
+	key the request was sent with, each raw and JSON-escaped."""
+
+	def test_the_stored_key_then_the_in_flight_key(self, monkeypatch):
+		stored, in_flight = 'sk-stored-0123"quoted', "sk-inflight-0123456789"
+		_store_key(monkeypatch, f" {stored}\n")
+		auth = ai_fix._ApiKeyAuth("authorization", in_flight, prefix="Bearer ")
+		assert ai_fix._scrub_literals_for(auth) == (stored, 'sk-stored-0123\\"quoted', in_flight, in_flight)
+
+	def test_no_key_and_no_auth_is_empty(self, monkeypatch):
+		_store_key(monkeypatch, None)
+		assert ai_fix._scrub_literals_for(None) == ()
+
+	def test_an_auth_that_is_not_ours_adds_nothing(self, monkeypatch):
+		_store_key(monkeypatch, KEY)
+		assert ai_fix._scrub_literals_for(requests.auth.HTTPBasicAuth("u", "p")) == (KEY, KEY)
+
+
 # ---------------------------------------------------------------------------
 # The provider dict and every request
 # ---------------------------------------------------------------------------
