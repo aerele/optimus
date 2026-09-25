@@ -679,11 +679,12 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 
 	It reads the stored key first. It never reads or changes Frappe's
 	deferred-insert queue: the Error Log hook (``optimus.error_log_mask``)
-	masks every queued record as Frappe inserts it. A real run first
-	refreshes the hooks Frappe caches (``_refresh_hooks_cache``), so that
-	hook reaches every process once all of them run the new code (run it
-	after the restart); a failed refresh is not counted and never stops the
-	scrub. A dry run does not touch Redis at all.
+	masks each queued record from the AI code or holding the key as Frappe
+	inserts it. A real run first refreshes the hooks Frappe caches
+	(``_refresh_hooks_cache``), so that hook reaches every process once all
+	of them run the new code (run it after the restart); a failed refresh is
+	not counted and never stops the scrub. A dry run does not touch Redis at
+	all.
 
 	Returns a dict:
 

@@ -14,7 +14,7 @@ way it is written:
   ``save_to_db`` inserts it later (bench migrate right after the patches,
   and the scheduler every 15 minutes), again through ``Document.insert``.
 
-So nothing reads or changes that queue: a queued record is masked when it
+So nothing reads or changes that queue: a queued record is handled when it
 is inserted, by the code running at that moment.
 
 It changes only the rows that are Optimus's to change: a record from
