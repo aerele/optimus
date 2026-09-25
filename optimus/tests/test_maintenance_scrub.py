@@ -1636,6 +1636,16 @@ class TestKeyHandling:
 		assert maintenance.scrub_error_log_secrets(dry_run=True)["changed"] == 1
 		assert maintenance.purge_ai_error_logs(dry_run=True)["error_logs"] == 1
 
+	def test_runs_where_rq_cannot_say_whether_this_is_a_job(self, fake, monkeypatch):
+		# get_current_job reads rq's connection stack; if it raises, the
+		# guard treats it as "no job" (it fails open) instead of stopping.
+		def _get_current_job():
+			raise RuntimeError("No connection has been pushed")
+		monkeypatch.setitem(sys.modules, "rq", SimpleNamespace(get_current_job=_get_current_job))
+		fake([("a", LEAKY)])
+		assert maintenance.scrub_error_log_secrets(dry_run=True)["changed"] == 1
+		assert maintenance.purge_ai_error_logs(dry_run=True)["error_logs"] == 1
+
 	def test_the_module_docstring_says_never_enqueue_it(self):
 		doc = " ".join(maintenance.__doc__.split())
 		assert "bench execute" in doc and "bench console" in doc and "never enqueue" in doc
