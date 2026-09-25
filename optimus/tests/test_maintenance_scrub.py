@@ -901,6 +901,15 @@ class TestUnderSavepoint:
 		assert log == [("savepoint", "optimus_scrub_row"), ("rollback", "optimus_scrub_row")]
 
 
+def _v16_error_log_validate(row: dict) -> dict:
+	"""Frappe v16's ``ErrorLog.validate``, applied to a row dict."""
+	row["method"], row["error"] = str(row.get("method")), str(row.get("error"))
+	if len(row["method"]) > 140:
+		row["error"] = f"{row['method']}\n{row['error']}"
+		row["method"] = row["method"][:140]
+	return row
+
+
 def _replay_frappe_flush(cache, insert):
 	"""Frappe's ``save_to_db`` for the Error Log queue, which bench migrate
 	runs right after the patches: every entry left is inserted as it is."""
@@ -1043,8 +1052,36 @@ class TestFlushDeferredErrorLogs:
 		assert "'Bearer ********'" in first["error"] and first["method"].endswith("bad key ********")
 		assert json.loads(first["metadata"])  # still valid JSON
 		assert (first["reference_doctype"], first["reference_name"], first["trace_id"]) == ("Optimus Session", "s-1", "t-1")
-		# masking lengthens "u:p" to "********": the title is cut to 140
-		assert len(inserted[1]["method"]) == 140 and "u:p@" not in inserted[1]["method"]
+		# masking lengthens "u:p" to "********": the full masked title goes in
+		# front of the error, and the title is cut to 140
+		masked_title = long_title["method"].replace("u:p@", "********@")
+		assert inserted[1]["error"] == f"{masked_title}\nx"
+		assert inserted[1]["method"] == masked_title[:140] and "u:p@" not in inserted[1]["method"]
+
+	@pytest.mark.parametrize("with_key", [False, True])
+	def test_a_long_queued_title_goes_in_front_of_the_error_as_v16_does(self, monkeypatch, with_key):
+		# Frappe v16's ErrorLog.validate moves a title over 140 characters in
+		# front of the error and cuts it; v15 has no such validate and fails
+		# the insert (CharacterLengthExceededError). Doing it before the
+		# insert stores the same row on both.
+		title = ("T" * 150 + (f" key {KEY} " if with_key else " ") + "tail ").ljust(300, "z")
+		assert len(title) == 300
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "Traceback ...", "method": title})]})
+		inserted, _ = self._frappe(monkeypatch, cache)
+		assert maintenance._flush_deferred_error_logs(KEY) == (0, False)
+		[row] = inserted
+		full = title.replace(KEY, "********")
+		assert row["error"] == f"{full}\nTraceback ..."  # the full title is kept
+		assert row["method"] == full[:140] and len(row["method"]) == 140  # v15's length check passes
+		assert KEY not in json.dumps(row)
+		assert _v16_error_log_validate(dict(row)) == row  # v16's validate has nothing left to do
+
+	def test_a_queued_title_that_fits_is_left_as_it_is(self, monkeypatch):
+		title = "t" * 140
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "e", "method": title})]})
+		inserted, _ = self._frappe(monkeypatch, cache)
+		maintenance._flush_deferred_error_logs(KEY)
+		assert inserted == [{"error": "e", "method": title, "doctype": "Error Log"}]
 
 	def test_a_queued_smart_quote_key_is_inserted_masked(self, monkeypatch):
 		# The bare header values of the urllib3 frames, and the key

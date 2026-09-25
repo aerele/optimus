@@ -112,7 +112,9 @@ _CLEAN_FRAGMENT = re.compile(r"[A-Za-z0-9-]+")
 _WINDOW = 1000
 # Error Log.method is Data (varchar(140)). Masking can lengthen a value (a
 # URL's "u:p" becomes "********"), and in strict mode a value longer than
-# the column fails the whole row's write, error text included.
+# the column fails the whole row's write, error text included. The scrub's
+# UPDATE of a stored row cuts a masked value to fit; a queued record's long
+# title is moved in front of its error first (_long_title_into_error).
 _FIELD_LIMITS = {"method": 140}
 # bench migrate runs the scrub only when measure_scan_size() finds at most
 # this many rows; a scan of a larger table would stall the migrate, so the
@@ -305,8 +307,9 @@ def _flush_deferred_error_logs(api_key: str) -> _Flushed:
 	Each record's ``error``, ``method`` and ``metadata`` are masked by
 	``_masked_record`` with ``api_key`` (the key the caller read before the
 	first pop; header value lines only in a record from the AI code or
-	holding the key; ``method`` cut to its column) BEFORE the record is
-	inserted, so a queued
+	holding the key; a title longer than its column moved in front of
+	``error`` and cut, as Frappe v16's ``ErrorLog.validate`` does) BEFORE
+	the record is inserted, so a queued
 	pre-fix snapshot never reaches the database (the INSERT statement, the
 	binlog, the query logs) with the key in it. A record that cannot be
 	masked is counted and dropped, never inserted unmasked.
@@ -513,10 +516,25 @@ def _masked_record(record, api_key: str) -> dict | None:
 		value_lines = _is_ai_record(record, api_key)
 	except Exception:
 		return None
-	masked = _mask_row(record, _QUEUED_TEXT_FIELDS, api_key, value_lines=value_lines)
+	masked = _mask_row(record, _QUEUED_TEXT_FIELDS, api_key, value_lines=value_lines, cut=False)
 	if masked is None:
 		return None
-	return {**record, **masked[0]}
+	return _long_title_into_error({**record, **masked[0]})
+
+
+def _long_title_into_error(record: dict) -> dict:
+	"""``record`` as Frappe v16's ``ErrorLog.validate`` leaves it: a title
+	(``method``) longer than its column goes, in full, in front of
+	``error``, then is cut to fit. Done before the insert, so the row is the
+	same on Frappe v15, whose Error Log has no such ``validate`` and fails
+	the insert instead (``CharacterLengthExceededError``); on v16
+	``validate`` then has nothing left to do."""
+	method = record.get("method")
+	limit = _FIELD_LIMITS["method"]
+	if not isinstance(method, str) or len(method) <= limit:
+		return record
+	error = record.get("error")
+	return {**record, "error": f"{method}\n{'' if error is None else error}", "method": method[:limit]}
 
 
 def _is_ai_record(record: dict, api_key: str) -> bool:
@@ -599,11 +617,11 @@ def _row_stored(doc) -> bool:
 
 
 def _mask_row(
-	row: dict, text_fields: tuple[str, ...], api_key: str, value_lines: bool = True,
+	row: dict, text_fields: tuple[str, ...], api_key: str, value_lines: bool = True, cut: bool = True,
 ) -> tuple[dict, bool] | None:
 	"""``(changes, residual)`` for one row (``_mask`` with ``value_lines``),
-	or None when masking it failed. A masked value longer than its column
-	(``_FIELD_LIMITS``) is cut to fit."""
+	or None when masking it failed. With ``cut``, a masked value longer than
+	its column (``_FIELD_LIMITS``) is cut to fit."""
 	result = None
 	try:
 		changes = {}
@@ -612,7 +630,8 @@ def _mask_row(
 			old = row.get(field) or ""
 			new = _mask(old, api_key, value_lines=value_lines)
 			if new != old:
-				new = new[:_FIELD_LIMITS.get(field, len(new))]
+				if cut:
+					new = new[:_FIELD_LIMITS.get(field, len(new))]
 				changes[field] = new
 			residual = residual or _has_residual_secret(new, api_key)
 		result = (changes, residual)
