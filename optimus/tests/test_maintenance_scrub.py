@@ -171,10 +171,11 @@ class _FakeFrappe:
 		self.commits = []
 		self.db_log = []  # savepoint / release / rollback / write, in order
 		self.txn = _FakeTxn(self.db_log)
+		self.db_down = False  # select 1 fails, as in an outage
 		self.db = SimpleNamespace(
 			set_value=self._set_value, delete=self._delete, count=self._count, has_column=self._has_column,
 			savepoint=self.txn.savepoint, release_savepoint=self.txn.release_savepoint,
-			rollback=self.txn.rollback,
+			rollback=self.txn.rollback, sql=self._sql,
 		)
 
 	def commit(self):
@@ -190,6 +191,12 @@ class _FakeFrappe:
 				"metadata": record.get("metadata") or "{}",
 			}
 		return SimpleNamespace(insert=_insert)
+
+	def _sql(self, query, *a, **k):
+		assert query == "select 1"
+		if self.db_down:
+			raise RuntimeError("Lost connection to server during query")
+		return ((1,),)
 
 	def _has_column(self, doctype, column):
 		return self.has_metadata or (doctype, column) != ("Error Log", "metadata")
@@ -1116,6 +1123,55 @@ class TestFlushDeferredErrorLogs:
 		assert maintenance._flush_deferred_error_logs(KEY).failed == 4
 		assert [r["error"] for r in inserted] == ["ok1", "ok2", "ok3"]
 		assert cache.pops == 7 and cache.pushes == []
+		assert self.probes == 1  # B4 ends the queue: checked, answered, dropped
+
+	def test_three_bad_records_in_a_row_do_not_stop_it_while_the_database_answers(self, monkeypatch):
+		# A burst of records that fail validation is not an outage: select 1
+		# answers, so the bad records are counted and dropped, and the leaky
+		# snapshots behind them are still inserted masked, instead of being
+		# left for bench migrate's own flush to insert as they are.
+		queue = [json.dumps({"error": f"BAD{i}"}) for i in range(3)]
+		queue += [json.dumps({"error": f"row {i} api_key={KEY}"}) for i in range(100)]
+		cache = _FakeCache({"insert_queue_for_Error Log": queue})
+		inserted, _ = self._frappe(monkeypatch, cache, fail_on=lambda e: e.startswith("BAD"))
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 3
+		assert len(inserted) == 100 and not [r for r in inserted if KEY in r["error"]]
+		assert cache.pushes == [] and cache.queues["insert_queue_for_Error Log"] == []
+		assert self.probes == 1  # asked once, on the third failure in a row
+
+	def test_a_run_of_failures_is_checked_again_after_each_third(self, monkeypatch):
+		# Six bad records: two probes, both answered, nothing pushed back.
+		queue = [json.dumps({"error": f"BAD{i}"}) for i in range(6)] + [json.dumps({"error": "ok"})]
+		cache = _FakeCache({"insert_queue_for_Error Log": queue})
+		inserted, _ = self._frappe(monkeypatch, cache, fail_on=lambda e: e.startswith("BAD"))
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 6
+		assert [r["error"] for r in inserted] == ["ok"] and cache.pushes == [] and self.probes == 2
+
+	def test_a_probe_that_fails_to_run_counts_as_an_outage(self, monkeypatch):
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": f"B{i}"}) for i in range(4)]})
+		self._frappe(monkeypatch, cache, fail_on=lambda e: True)
+
+		def _sql(query, *a, **k):
+			raise TimeoutError("statement timeout")
+		maintenance.frappe.db.sql = _sql
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 3
+		[(_, pushed)] = cache.pushes
+		assert [r["error"] for r in json.loads(pushed)] == ["B0", "B1", "B2"]
+
+	@pytest.mark.parametrize("outage", [True, False])
+	def test_failures_at_the_end_of_the_queue_are_kept_only_in_an_outage(self, monkeypatch, outage):
+		# The queue ends during a run of fewer than three failures: in an
+		# outage they are pushed back, masked; otherwise dropped as bad.
+		queue = [json.dumps({"error": "ok"}), json.dumps({"error": f"L1 api_key={KEY}"}), json.dumps({"error": "L2"})]
+		cache = _FakeCache({"insert_queue_for_Error Log": queue})
+		self._frappe(monkeypatch, cache, fail_on=lambda e: e.startswith("L"), outage=outage)
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 2
+		assert self.probes == 1
+		if outage:
+			[(_, pushed)] = cache.pushes
+			assert [r["error"] for r in json.loads(pushed)] == ["L1 api_key=********", "L2"]
+		else:
+			assert cache.pushes == []
 
 	def test_a_stop_inside_an_entry_pushes_back_only_its_records_not_inserted(self, monkeypatch):
 		# Pushing the whole entry back would insert "ok" twice.
@@ -1329,10 +1385,11 @@ class TestQueuedRows:
 	def test_queued_counts_an_entry_pushed_back_after_failed_inserts(self, fake, monkeypatch):
 		queue = [json.dumps({"error": e}) for e in ("B1", "B2", "B3", "d")]
 		f = self._real_flush(fake, monkeypatch, queue)
+		f.db_down = True
 
 		def _get_doc(record):
 			def _insert(ignore_permissions=False):
-				raise RuntimeError("Table 'tabError Log' is marked as crashed")
+				raise RuntimeError("Lost connection to server during query")
 			return SimpleNamespace(insert=_insert)
 		f.get_doc = _get_doc
 		out = maintenance.scrub_error_log_secrets(dry_run=False)

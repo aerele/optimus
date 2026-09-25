@@ -77,10 +77,11 @@ _SAVEPOINT = "optimus_scrub_row"
 # frappe.deferred_insert.queue_prefix + doctype: only this queue is flushed.
 _ERROR_LOG_QUEUE = "insert_queue_for_Error Log"
 # The flush takes at most this many queue entries (each a record or a list of
-# them) and commits after every _FLUSH_COMMIT_EVERY inserted rows. It stops
-# after _FLUSH_MAX_FAILURES inserts in a row fail (a lost connection),
-# instead of popping, and losing, every entry left, and pushes back, masked,
-# the records it took and did not insert.
+# them) and commits after every _FLUSH_COMMIT_EVERY inserted rows. After
+# _FLUSH_MAX_FAILURES inserts in a row fail it checks the database: in an
+# outage (a lost connection) it stops, instead of popping, and losing, every
+# entry left, and pushes back, masked, the records it took and did not
+# insert.
 _FLUSH_MAX_POPS = 10_000
 _FLUSH_COMMIT_EVERY = 100
 _FLUSH_MAX_FAILURES = 3
@@ -305,12 +306,16 @@ def _flush_deferred_error_logs(api_key: str) -> _Flushed:
 	a record that cannot be inserted, is counted and skipped. A row the table
 	kept although its insert failed counts as inserted (see
 	``_insert_error_log``). After ``_FLUSH_MAX_FAILURES`` inserts in a row
-	fail, or when a periodic commit fails, it stops and pushes back, as one
-	entry, every record it took and did not insert: the run of failed
-	inserts, across entries, and the untried rest of the current entry, all
-	masked (``_push_back``). A record inserted before the stop is never
-	pushed back, so none is inserted twice. A failure to read the queue
-	stops the flush. Never raises; returns a
+	fail it asks the database for ``select 1``: when that answers, the
+	records were bad, they are dropped and the flush goes on; when it fails
+	(an outage), or when a periodic commit fails, the flush stops and
+	pushes back, as one entry, every record it took and did not insert: the
+	run of failed inserts, across entries, and the untried rest of the
+	current entry, all masked (``_push_back``). A shorter run of failures at
+	the end of the entries is checked and pushed back the same way. A record
+	inserted before the stop is never pushed back, so none is inserted
+	twice. A failure to read the queue stops the flush. Never raises;
+	returns a
 	``_Flushed``: how many entries or rows could not be inserted (a failed
 	read or write of the queue counts as one, however often it fails), and
 	whether the queue failed."""
@@ -367,7 +372,7 @@ def _insert_queued(run: _FlushRun, api_key: str, pops: int) -> None:
 	for _ in range(pops):
 		raw = _pop(run)
 		if raw is None:
-			return
+			break
 		run.popped += 1
 		records = _queued_records(raw)
 		if records is None:
@@ -377,13 +382,23 @@ def _insert_queued(run: _FlushRun, api_key: str, pops: int) -> None:
 			if not _insert_one(run, record, api_key):
 				_push_back(run, records[i + 1:], api_key)
 				return
+	# The entries ran out during a run of failed inserts: keep those records
+	# if the database is down, as a stop would.
+	if run.streak and not _database_answers():
+		_push_back(run, [], api_key)
 
 
 def _insert_one(run: _FlushRun, record, api_key: str) -> bool:
 	"""Insert one queued record, masked (a record that cannot be masked is
-	counted and dropped). False when the flush must stop: after
-	``_FLUSH_MAX_FAILURES`` failed inserts in a row, or when a periodic
-	commit failed."""
+	counted and dropped). False when the flush must stop: the database is
+	down, or a periodic commit failed.
+
+	After ``_FLUSH_MAX_FAILURES`` failed inserts in a row it asks the
+	database for ``select 1``. If that fails, it is an outage: stop. If it
+	answers, the records are bad (a validation error, say): they stay
+	counted in ``failed`` and are dropped, the run starts over, and the
+	flush goes on, so the snapshots behind a burst of bad records are still
+	inserted masked."""
 	masked = _masked_record(record, api_key)
 	if masked is None:
 		run.failed += 1
@@ -394,7 +409,22 @@ def _insert_one(run: _FlushRun, record, api_key: str) -> bool:
 		return run.inserted % _FLUSH_COMMIT_EVERY != 0 or _committed(run)
 	run.failed += 1
 	run.streak.append(masked)
-	return len(run.streak) < _FLUSH_MAX_FAILURES
+	if len(run.streak) < _FLUSH_MAX_FAILURES:
+		return True
+	if _database_answers():
+		run.streak.clear()
+		return True
+	return False
+
+
+def _database_answers() -> bool:
+	"""True when the database answers ``select 1``, so failed inserts are
+	bad records rather than an outage. Never raises."""
+	try:
+		frappe.db.sql("select 1")
+		return True
+	except Exception:
+		return False
 
 
 def _push_back(run: _FlushRun, rest: list, api_key: str) -> None:
