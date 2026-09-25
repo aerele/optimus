@@ -26,7 +26,7 @@ hypothesis = pytest.importorskip("hypothesis")
 from hypothesis import HealthCheck, example, given, settings  # noqa: E402
 from hypothesis import strategies as st  # noqa: E402
 
-from optimus import maintenance  # noqa: E402
+from optimus import error_log_mask, maintenance  # noqa: E402
 from optimus.redaction import scrub_secrets  # noqa: E402
 
 _SETTINGS = settings(
@@ -135,6 +135,26 @@ def _leaky_error(draw, keys=_keys):
 	return key, joined
 
 
+class _HookDoc:
+	"""The ``get`` / ``set`` of Frappe's ``Document`` the Error Log hook uses;
+	``sets`` logs every field it set."""
+
+	def __init__(self, fields: dict):
+		self.fields = dict(fields)
+		self.sets = []
+
+	def get(self, key, default=None):
+		return self.fields.get(key, default)
+
+	def set(self, key, value):
+		self.sets.append(key)
+		self.fields[key] = value
+
+
+class _Flags:
+	mute_messages = False
+
+
 _AI_FRAME = '  File "apps/optimus/optimus/ai_fix.py", line 1347, in _call_openai_chat'
 _OTHER_FRAME = '  File "apps/erpnext/erpnext/controllers/queries.py", line 80, in get'
 # A value line's value where no pattern can apply: no quote, "Bearer",
@@ -144,17 +164,17 @@ _plain_values = st.text(alphabet=string.ascii_lowercase + string.digits + " ", m
 
 class TestMask:
 	@_SETTINGS
-	@given(_leaky_error(), st.booleans())
-	def test_the_key_never_survives(self, case, value_lines):
+	@given(_leaky_error())
+	def test_the_key_never_survives(self, case):
 		key, text = case
-		assert not _survives(key, maintenance._mask(text, key, value_lines=value_lines))
+		assert not _survives(key, maintenance._mask(text, key))
 
 	@_SETTINGS
-	@given(_leaky_error(), st.booleans())
-	def test_it_is_idempotent(self, case, value_lines):
+	@given(_leaky_error())
+	def test_it_is_idempotent(self, case):
 		key, text = case
-		once = maintenance._mask(text, key, value_lines=value_lines)
-		assert maintenance._mask(once, key, value_lines=value_lines) == once
+		once = maintenance._mask(text, key)
+		assert maintenance._mask(once, key) == once
 
 
 # The end of a title that a shape can continue across the join when a long
@@ -220,9 +240,8 @@ class TestMaskedRecord:
 		out = maintenance._masked_record(record, key)
 		limit = maintenance._FIELD_LIMITS["method"]
 		assert len(out["method"]) <= limit
-		value_lines = maintenance._is_ai_record(record, key)
-		title = maintenance._mask(record["method"], key, value_lines=value_lines)
-		error = maintenance._mask(record["error"], key, value_lines=value_lines)
+		title = maintenance._mask(record["method"], key)
+		error = maintenance._mask(record["error"], key)
 		if len(title) > limit:
 			assert out["method"] == title[:limit]
 			# v16's ErrorLog.validate: the whole title, a newline, then the
@@ -230,7 +249,7 @@ class TestMaskedRecord:
 			# completes is masked too; where it completes none, this is the
 			# masked title, a newline and the masked error.
 			joined = f"{title}\n{error}"
-			assert out["error"] == maintenance._mask(joined, key, value_lines=value_lines)
+			assert out["error"] == maintenance._mask(joined, key)
 		else:
 			assert out["method"] == title
 			assert out["error"] == error
@@ -259,14 +278,21 @@ class TestMaskedRecord:
 
 	@_SETTINGS
 	@given(_keys, st.lists(_plain_values, min_size=1, max_size=4), _filler)
-	def test_a_record_that_is_not_an_ai_record_keeps_its_value_lines(self, key, values, filler):
+	def test_a_record_that_is_not_an_ai_record_is_left_as_it_is(self, key, values, filler):
 		# An ERPNext error with value locals: not from Optimus's AI code and
-		# without the key, so only scrub_secrets runs on it.
+		# without the key. The Error Log hook's gate (_is_ai_record) keeps it
+		# away from the masking, so its value lines, like the rest of it, are
+		# stored exactly as they are.
 		lines = [f"      value = '{value}'" for value in values]
 		error = "\n".join([_OTHER_FRAME, *lines, filler])
 		hypothesis.assume(not _survives(key, error))
 		record = {"error": error, "method": "frappe.client.get", "metadata": None}
 		assert not maintenance._is_ai_record(record, key)
-		out = maintenance._masked_record(record, key)
-		for line in lines:
-			assert line in out["error"]
+		doc = _HookDoc(record)
+		with pytest.MonkeyPatch.context() as mp:
+			import frappe
+
+			mp.setattr("optimus.ai_fix._current_key_or_empty", lambda: key)
+			mp.setattr(frappe, "flags", _Flags(), raising=False)
+			error_log_mask.mask_error_log(doc, "before_insert")
+		assert doc.sets == [] and doc.fields["error"] is error

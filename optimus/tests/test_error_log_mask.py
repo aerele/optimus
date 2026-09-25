@@ -310,10 +310,19 @@ class TestFailOpen:
 		doc = _run(_Doc(error=LEAKY, method="optimus ai_fix", metadata=meta))
 		assert doc.error == error_log_mask.WITHHELD and doc.metadata == meta
 
+	def test_a_record_whose_ai_check_fails_is_masked_as_one_of_optimus_s(self, env, monkeypatch):
+		# Nothing shows it is not Optimus's: it is masked as an AI record,
+		# value lines included.
+		monkeypatch.setattr(maintenance, "_is_ai_record", _boom)
+		doc = _run(_Doc(error=ERP_TB, method="Stock Entry failed"))
+		assert "Acme" not in doc.error and "      value = ********\n" in doc.error
+		assert doc.method == "Stock Entry failed" and env.lines == []
+
 	def test_a_record_whose_ai_check_fails_too_is_withheld(self, env, monkeypatch):
 		# The masking failed and so did the check that would tell an AI
 		# record from another: nothing shows the text is safe.
 		monkeypatch.setattr(maintenance, "_is_ai_record", _boom)
+		monkeypatch.setattr(maintenance, "_mask", _boom)
 		doc = _run(_Doc(error=ERP_TB, method="Stock Entry failed", metadata=json.dumps({"user": "a@b.c"})))
 		assert doc.fields() == {
 			"error": error_log_mask.WITHHELD, "method": error_log_mask.WITHHELD_TITLE, "metadata": error_log_mask.WITHHELD,
@@ -603,9 +612,6 @@ class TestJobTimeout:
 		monkeypatch.setattr(maintenance, "_mask", _timeout)
 		with pytest.raises(JobTimeoutException):
 			maintenance._mask_row({"error": "x"}, ("error",), KEY)
-		with pytest.raises(JobTimeoutException):
-			maintenance._masked_record({"error": "x"}, KEY)
-		monkeypatch.setattr(maintenance, "_is_ai_record", _timeout)
 		with pytest.raises(JobTimeoutException):
 			maintenance._masked_record({"error": "x"}, KEY)
 
