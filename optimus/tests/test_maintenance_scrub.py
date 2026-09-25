@@ -258,7 +258,10 @@ def fake(monkeypatch):
 		f.flushes = []
 		monkeypatch.setattr(maintenance, "frappe", f)
 		monkeypatch.setattr(maintenance, "safe_commit", f.commit)
-		monkeypatch.setattr(maintenance, "_flush_deferred_error_logs", lambda *a: f.flushes.append(f.reads) or 0)
+		monkeypatch.setattr(
+			maintenance, "_flush_deferred_error_logs",
+			lambda *a: f.flushes.append(f.reads) or maintenance._Flushed(0, False),
+		)
 		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", lambda: current_key)
 		return f
 	return _make
@@ -946,7 +949,7 @@ class TestFlushDeferredErrorLogs:
 			"insert_queue_for_Route History": [json.dumps({"route": "app"})],
 		})
 		inserted, commits = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs(KEY) == 0
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 0
 		# the leaky record is masked before it is inserted, never verbatim
 		assert [r["error"] for r in inserted] == [maintenance._mask(LEAKY, KEY), "x", "y"]
 		assert KEY not in inserted[0]["error"] and "'Bearer ********'" in inserted[0]["error"]
@@ -971,7 +974,7 @@ class TestFlushDeferredErrorLogs:
 		assert len(long_title["method"]) == 140
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps(leaky), json.dumps([long_title])]})
 		inserted, _ = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs(KEY) == 0
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 0
 		assert len(inserted) == 2
 		assert not [r for r in inserted if KEY in json.dumps(r)]
 		first = inserted[0]
@@ -989,7 +992,7 @@ class TestFlushDeferredErrorLogs:
 		assert "\\u2019" in smart["metadata"]
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps(smart)]})
 		inserted, _ = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs(ANTHROPIC_KEY) == 0
+		assert maintenance._flush_deferred_error_logs(ANTHROPIC_KEY).failed == 0
 		[row] = inserted
 		assert "456789abcdef" not in json.dumps(row)
 		assert "      value = ********\n" in row["error"]
@@ -1006,7 +1009,7 @@ class TestFlushDeferredErrorLogs:
 		queue = [json.dumps({"error": LEAKY + "BOOM"}), json.dumps({"error": "z"}), json.dumps(["not a record"])]
 		cache = _FakeCache({"insert_queue_for_Error Log": queue})
 		inserted, _ = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs(KEY) == 2
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 2
 		assert [r["error"] for r in inserted] == ["z"]
 		assert cache.pushes == []  # dropped, not pushed back for Frappe to insert verbatim
 
@@ -1016,7 +1019,7 @@ class TestFlushDeferredErrorLogs:
 		entries = [json.dumps({"error": e}) for e in ("B1", "B2", "B3", "d", "e")]
 		cache = _FakeCache({"insert_queue_for_Error Log": list(entries)})
 		inserted, commits = self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3"})
-		assert maintenance._flush_deferred_error_logs(KEY) == 3
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 3
 		assert inserted == [] and cache.pops == 3
 		# the third entry is pushed back as popped (bytes), after the rest
 		assert cache.pushes == [("insert_queue_for_Error Log", entries[2].encode())]
@@ -1027,7 +1030,7 @@ class TestFlushDeferredErrorLogs:
 		errors = ("B1", "ok1", "B2", "ok2", "B3", "ok3", "B4")
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": e}) for e in errors]})
 		inserted, _ = self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3", "B4"})
-		assert maintenance._flush_deferred_error_logs(KEY) == 4
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 4
 		assert [r["error"] for r in inserted] == ["ok1", "ok2", "ok3"]
 		assert cache.pops == 7 and cache.pushes == []
 
@@ -1036,7 +1039,7 @@ class TestFlushDeferredErrorLogs:
 		entry = [{"error": e} for e in ("ok", "B1", "B2", "B3", "z")]
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps(entry), json.dumps({"error": "next"})]})
 		inserted, _ = self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3"})
-		assert maintenance._flush_deferred_error_logs(KEY) == 3
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 3
 		assert [r["error"] for r in inserted] == ["ok"]
 		[(queue, pushed)] = cache.pushes
 		assert json.loads(pushed) == [{"error": e} for e in ("B1", "B2", "B3", "z")]
@@ -1046,7 +1049,7 @@ class TestFlushDeferredErrorLogs:
 		entries = [json.dumps({"error": "B1"}), json.dumps([{"error": "B2"}, {"error": "B3"}, {"error": "w"}])]
 		cache = _FakeCache({"insert_queue_for_Error Log": list(entries)})
 		inserted, _ = self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3"})
-		assert maintenance._flush_deferred_error_logs(KEY) == 3
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 3
 		assert inserted == []
 		assert cache.pushes == [("insert_queue_for_Error Log", entries[1].encode())]
 
@@ -1057,18 +1060,23 @@ class TestFlushDeferredErrorLogs:
 		def _rpush(key, value):
 			raise ConnectionError("redis went away")
 		cache.rpush = _rpush
-		assert maintenance._flush_deferred_error_logs(KEY) == 4
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 4
 
 	def test_a_broken_queue_is_not_fatal(self, monkeypatch):
 		self._frappe(monkeypatch, _FakeCache({}, broken=True))
-		assert maintenance._flush_deferred_error_logs(KEY) == 1
+		assert maintenance._flush_deferred_error_logs(KEY) == (1, True)
+
+	def test_a_queue_that_was_read_reports_no_queue_failure(self, monkeypatch):
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "x"})]})
+		self._frappe(monkeypatch, cache, fail_on={"x"})
+		assert maintenance._flush_deferred_error_logs(KEY) == (1, False)
 
 	def test_a_failing_insert_rolls_back_to_its_savepoint_only(self, monkeypatch):
 		cache = _FakeCache({
 			"insert_queue_for_Error Log": [json.dumps({"error": e}) for e in ("x", "BAD", "z")],
 		})
 		inserted, commits = self._frappe(monkeypatch, cache, fail_on={"BAD"})
-		assert maintenance._flush_deferred_error_logs(KEY) == 1
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 1
 		assert [r["error"] for r in inserted] == ["x", "z"]  # the third still lands
 		i = self.db_log.index(("insert", "BAD"))
 		assert self.db_log[i - 1] == ("savepoint", "optimus_scrub_row")  # set before the failing insert
@@ -1083,7 +1091,7 @@ class TestFlushDeferredErrorLogs:
 		queue = [json.dumps({"error": "x"}), "{not json", json.dumps({"error": "z"}), json.dumps([{"error": "w"}])]
 		cache = _FakeCache({"insert_queue_for_Error Log": queue})
 		inserted, commits = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs(KEY) == 1
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 1
 		assert [r["error"] for r in inserted] == ["x", "z", "w"]
 		assert commits == [1]
 		assert cache.queues["insert_queue_for_Error Log"] == []
@@ -1101,7 +1109,7 @@ class TestFlushDeferredErrorLogs:
 				raise ConnectionError("redis went away")
 			return real_lpop(key)
 		cache.lpop = _lpop
-		assert maintenance._flush_deferred_error_logs(KEY) == 1
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 1
 		assert [r["error"] for r in inserted] == ["x"]
 		assert commits == [1]
 		assert len(cache.queues["insert_queue_for_Error Log"]) == 1  # left for the next run
@@ -1109,7 +1117,7 @@ class TestFlushDeferredErrorLogs:
 	def test_an_lpop_failure_stops_the_loop(self, monkeypatch):
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "x"})] * 3}, broken_pop=True)
 		inserted, commits = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs(KEY) == 1
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 1
 		assert inserted == [] and commits == [1]
 
 	def test_a_producer_that_refills_the_queue_cannot_keep_it_running(self, monkeypatch):
@@ -1117,7 +1125,7 @@ class TestFlushDeferredErrorLogs:
 		refill = json.dumps({"error": "new"})
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": e}) for e in "abc"]}, refill=refill)
 		inserted, _ = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs(KEY) == 0
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 0
 		assert cache.pops == 3
 		assert [r["error"] for r in inserted] == ["a", "b", "c"]
 		assert len(cache.queues["insert_queue_for_Error Log"]) == 3
@@ -1128,7 +1136,7 @@ class TestFlushDeferredErrorLogs:
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "x"})]})
 		cache.llen = lambda key: 3
 		inserted, commits = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs(KEY) == 0
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 0
 		assert [r["error"] for r in inserted] == ["x"] and cache.pops == 2
 		assert commits == [1]
 
@@ -1136,7 +1144,7 @@ class TestFlushDeferredErrorLogs:
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": str(i)}) for i in range(8)]})
 		inserted, _ = self._frappe(monkeypatch, cache)
 		monkeypatch.setattr(maintenance, "_FLUSH_MAX_POPS", 5)
-		assert maintenance._flush_deferred_error_logs(KEY) == 0
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 0
 		assert cache.pops == 5 and len(inserted) == 5
 		assert len(cache.queues["insert_queue_for_Error Log"]) == 3
 
@@ -1148,7 +1156,7 @@ class TestFlushDeferredErrorLogs:
 		queue.append(json.dumps([{"error": f"l{i}"} for i in range(100)]))  # one entry, 100 records
 		cache = _FakeCache({"insert_queue_for_Error Log": queue})
 		inserted, _ = self._frappe(monkeypatch, cache)
-		assert maintenance._flush_deferred_error_logs(KEY) == 0
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 0
 		assert len(inserted) == 250
 		assert self.commit_points == [100, 200, 250]
 
@@ -1159,7 +1167,7 @@ class TestFlushDeferredErrorLogs:
 		def _commit():
 			raise RuntimeError("Lost connection to server during query")
 		monkeypatch.setattr(maintenance, "safe_commit", _commit)
-		assert maintenance._flush_deferred_error_logs(KEY) == 1
+		assert maintenance._flush_deferred_error_logs(KEY).failed == 1
 
 
 _REAL_FLUSH = maintenance._flush_deferred_error_logs
@@ -1222,6 +1230,28 @@ class TestQueuedRows:
 		f.cache = _FakeCache({}, broken=True)
 		out = maintenance.scrub_error_log_secrets(dry_run=dry_run)
 		assert (out["queued"], out["failed"]) == (0, 1)
+
+	def test_one_redis_outage_counts_once(self, fake, monkeypatch):
+		# The flush cannot read the queue and neither can the final count:
+		# one outage, one failure.
+		f = self._real_flush(fake, monkeypatch, [])
+		f.cache = _FakeCache({}, broken=True)
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		assert (out["queued"], out["failed"]) == (0, 1)
+
+	def test_a_queue_failure_after_a_clean_flush_still_counts(self, fake, monkeypatch):
+		f = self._real_flush(fake, monkeypatch, [json.dumps({"error": "x"})])
+		real_llen = f.cache.llen
+		reads = []
+
+		def _llen(key):
+			reads.append(key)
+			if len(reads) > 1:
+				raise ConnectionError("redis went away")
+			return real_llen(key)
+		f.cache.llen = _llen
+		out = maintenance.scrub_error_log_secrets(dry_run=False)
+		assert len(reads) == 2 and (out["queued"], out["failed"]) == (0, 1)
 
 
 class TestKeyHandling:

@@ -248,7 +248,37 @@ def _queued_records(raw) -> list | None:
 	return records if isinstance(records, list) else [records]
 
 
-def _flush_deferred_error_logs(api_key: str) -> int:
+class _Flushed(NamedTuple):
+	"""What ``_flush_deferred_error_logs`` did: ``failed``, the entries or
+	rows it could not insert (see there), and ``queue_failed``, True when a
+	read or a write of the queue failed. That failure is counted once in
+	``failed``, so the scrub does not count its own failed read of the queue
+	again: one Redis outage is one failure."""
+
+	failed: int
+	queue_failed: bool
+
+
+class _FlushRun:
+	"""The running counts of one flush."""
+
+	__slots__ = ("failed", "inserted", "popped", "queue_failed", "streak")
+
+	def __init__(self):
+		self.failed = 0
+		self.inserted = 0
+		self.popped = 0
+		self.queue_failed = False
+		self.streak = 0  # inserts that failed in a row
+
+	def queue_error(self) -> None:
+		"""Count a failed read or write of the queue, once per flush."""
+		if not self.queue_failed:
+			self.queue_failed = True
+			self.failed += 1
+
+
+def _flush_deferred_error_logs(api_key: str) -> _Flushed:
 	"""Insert the Error Log rows waiting in Frappe's deferred-insert queue in
 	Redis, masked, so they neither land unmasked later nor escape the scrub.
 	Frappe queues its own error snapshots there (a server error, and every
@@ -273,56 +303,81 @@ def _flush_deferred_error_logs(api_key: str) -> int:
 	``_FLUSH_MAX_FAILURES`` inserts in a row fail it stops, and pushes the
 	last entry back onto the queue, so it is not lost: as popped, or, when
 	some of its records were inserted (or dropped as unmaskable), only the
-	ones whose insert failed or was not tried, so none is inserted twice. A failure to read the queue stops the flush. Never
-	raises; returns how many entries or rows could not be inserted (a queue
-	that cannot be read, or an entry that cannot be pushed back, counts as
-	one)."""
-	failed = 0
-	inserted = 0
-	failures_in_a_row = 0
+	ones whose insert failed or was not tried, so none is inserted twice. A
+	failure to read the queue stops the flush. Never raises; returns a
+	``_Flushed``: how many entries or rows could not be inserted (a failed
+	read or write of the queue counts as one, however often it fails), and
+	whether the queue failed."""
+	run = _FlushRun()
 	try:
-		pops = min(int(frappe.cache.llen(_ERROR_LOG_QUEUE) or 0), _FLUSH_MAX_POPS)
-		for _ in range(pops):
-			raw = frappe.cache.lpop(_ERROR_LOG_QUEUE)
-			if raw is None:
-				break
-			records = _queued_records(raw)
-			if records is None:
-				failed += 1
-				continue
-			not_inserted = []  # this entry's records whose insert failed
-			stopped_at = None
-			for i, record in enumerate(records):
-				masked = _masked_record(record, api_key)
-				if masked is None:
-					failed += 1
-					continue
-				if _insert_error_log(masked):
-					failures_in_a_row = 0
-					inserted += 1
-					if inserted % _FLUSH_COMMIT_EVERY == 0:
-						safe_commit()
-					continue
-				failed += 1
-				not_inserted.append(record)
-				failures_in_a_row += 1
-				if failures_in_a_row >= _FLUSH_MAX_FAILURES:
-					stopped_at = i
-					break
-			if stopped_at is not None:
-				left = not_inserted + records[stopped_at + 1:]
-				frappe.cache.rpush(_ERROR_LOG_QUEUE, raw if len(left) == len(records) else json.dumps(left))
-				break
+		snapshot = max(0, int(frappe.cache.llen(_ERROR_LOG_QUEUE) or 0))
 	except Exception:
-		failed += 1
+		run.queue_error()
+		return _Flushed(run.failed, run.queue_failed)
+	try:
+		_insert_queued(run, api_key, min(snapshot, _FLUSH_MAX_POPS))
+	except Exception:
+		run.failed += 1
 	finally:
 		# Commit what was inserted even when the loop stopped early: the rows
 		# are already gone from Redis, and a later rollback would drop them.
 		try:
 			safe_commit()
 		except Exception:
-			failed += 1
-	return failed
+			run.failed += 1
+	return _Flushed(run.failed, run.queue_failed)
+
+
+def _pop(run: _FlushRun):
+	"""The next entry of the queue, or None when it is empty or cannot be
+	read (``run.queue_error``)."""
+	try:
+		return frappe.cache.lpop(_ERROR_LOG_QUEUE)
+	except Exception:
+		run.queue_error()
+		return None
+
+
+def _push(run: _FlushRun, entry) -> None:
+	"""Put ``entry`` back at the end of the queue (``run.queue_error`` when
+	it cannot be written)."""
+	try:
+		frappe.cache.rpush(_ERROR_LOG_QUEUE, entry)
+	except Exception:
+		run.queue_error()
+
+
+def _insert_queued(run: _FlushRun, api_key: str, pops: int) -> None:
+	"""The flush's insert loop over at most ``pops`` entries (see
+	``_flush_deferred_error_logs``)."""
+	for _ in range(pops):
+		raw = _pop(run)
+		if raw is None:
+			return
+		run.popped += 1
+		records = _queued_records(raw)
+		if records is None:
+			run.failed += 1
+			continue
+		not_inserted = []  # this entry's records whose insert failed
+		for i, record in enumerate(records):
+			masked = _masked_record(record, api_key)
+			if masked is None:
+				run.failed += 1
+				continue
+			if _insert_error_log(masked):
+				run.streak = 0
+				run.inserted += 1
+				if run.inserted % _FLUSH_COMMIT_EVERY == 0:
+					safe_commit()
+				continue
+			run.failed += 1
+			not_inserted.append(record)
+			run.streak += 1
+			if run.streak >= _FLUSH_MAX_FAILURES:
+				left = not_inserted + records[i + 1:]
+				_push(run, raw if len(left) == len(records) else json.dumps(left))
+				return
 
 
 def _masked_record(record, api_key: str) -> dict | None:
@@ -632,7 +687,8 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	rows read), rows (or queued rows) that could not be processed, and the
 	entries still waiting in the Error Log's deferred-insert queue when the
 	scrub ends (a queue that cannot be read counts one in ``failed``
-	instead). After a real run ``queued`` should be 0: entries left there
+	instead, once, also when the flush could not read or write it either).
+	After a real run ``queued`` should be 0: entries left there
 	were not scrubbed, and the scheduler would insert them as they are. With
 	``dry_run=True`` the counts say what WOULD change and nothing is written.
 	"""
@@ -644,8 +700,11 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	out = {"candidates": 0, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 0}
 	# The key first: the flush masks each queued record with it.
 	api_key = _current_key_or_empty()
+	queue_failed = False
 	if not dry_run:
-		out["failed"] += _flush_deferred_error_logs(api_key)
+		flushed = _flush_deferred_error_logs(api_key)
+		out["failed"] += flushed.failed
+		queue_failed = flushed.queue_failed
 	seen: dict[str, set[str]] = {"Error Log": set(), "Deleted Document": set()}
 
 	for scan in _scans(api_key, _error_log_fields()):
@@ -674,10 +733,11 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 			if not dry_run:
 				safe_commit()
 	queued = _error_log_queue_length()
-	if queued is None:
-		out["failed"] += 1
-	else:
+	if queued is not None:
 		out["queued"] = queued
+	elif not queue_failed:
+		# One Redis outage is one failure: not again when the flush counted it.
+		out["failed"] += 1
 	return out
 
 
