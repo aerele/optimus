@@ -245,6 +245,30 @@ class TestScrubSecrets:
 		assert out == "echo ********"
 		assert offenders == set()
 
+	def test_while_the_literals_are_sorted_scrub_secrets_holds_them_only_as_secret(self, monkeypatch):
+		# The sort calls its key back in Python, where an interrupt can land
+		# and leave with this frame: by then ``literals`` must be gone.
+		import sys
+
+		literals = ("sk-proj-abcdefgh12345678", "sk-proj-abcdefgh12345678XYZ98765tail")
+		real_length = redaction._literal_length
+		seen, offenders = [], set()
+
+		def _spy(api_key):
+			frame = sys._getframe(1)
+			seen.append(frame.f_code.co_name)
+			for name, value in frame.f_locals.items():
+				held = [value] if isinstance(value, str) else list(value) if isinstance(value, (tuple, list)) else []
+				if name not in ("api_key", "secret") and any(v in literals for v in held if isinstance(v, str)):
+					offenders.add(name)
+			return real_length(api_key)
+
+		monkeypatch.setattr(redaction, "_literal_length", _spy)
+		out = redaction.scrub_secrets(f"echo {literals[1]}", literals=literals)
+		assert out == "echo ********"
+		assert seen == ["scrub_secrets", "scrub_secrets"]
+		assert offenders == set()
+
 	def test_an_x_goog_api_key_entry_is_masked(self):
 		text = "headers = {'content-type': 'application/json', 'x-goog-api-key': 'AIzaSyD-0123456789abcdef'}"
 		assert redaction.scrub_secrets(text) == (
