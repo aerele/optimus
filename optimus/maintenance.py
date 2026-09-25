@@ -498,7 +498,7 @@ def _scans(api_key: str, error_fields: tuple[str, ...]) -> list[_Scan]:
 	return scans
 
 
-def _key_unreadable(api_key: str) -> bool:
+def _key_unreadable(api_key: str) -> bool | None:
 	"""True when Optimus Settings holds an API key that
 	``_current_key_or_empty`` could not read (``api_key`` is ""): the site's
 	``encryption_key`` changed (a backup restored onto another site, say) or
@@ -508,10 +508,19 @@ def _key_unreadable(api_key: str) -> bool:
 	field itself, so this reads that field plainly (``get_single_value``),
 	never the decrypted key. The value read is held as ``secret``, a name
 	the sanitizers redact, in case a key was ever written into the field
-	as plain text."""
+	as plain text.
+
+	False when there is no Optimus Settings at all (``DoesNotExistError``:
+	a site Optimus was uninstalled from, where no key is stored), and None
+	when the read failed for another reason, which the scrub counts in
+	``failed``. Never raises."""
 	if api_key:
 		return False
-	secret = frappe.db.get_single_value("Optimus Settings", "ai_api_key")
+	missing = getattr(frappe, "DoesNotExistError", ())
+	try:
+		secret = frappe.db.get_single_value("Optimus Settings", "ai_api_key")
+	except Exception as e:
+		return False if isinstance(e, missing) else None
 	return isinstance(secret, str) and bool(secret.strip())
 
 
@@ -680,11 +689,14 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	- ``residual``: rows that still hold a key-shaped value after masking
 	  (checked with a detector independent of the masking, only in the rows
 	  read);
-	- ``failed``: rows that could not be processed;
+	- ``failed``: rows that could not be processed, plus one when the check
+	  for an unreadable key could not read Optimus Settings;
 	- ``key_unreadable``: True when a key is stored but cannot be read
 	  (``_key_unreadable``); it also counts one in ``failed``. Restore the
-	  site's ``encryption_key``, or enter the key again in Optimus
-	  Settings, then run the scrub again.
+	  site's ``encryption_key``, or enter the OLD key again in Optimus
+	  Settings (the scrub searches for the key that leaked), then run the
+	  scrub again. On a site Optimus was uninstalled from no key is stored,
+	  so it is False.
 
 	With ``dry_run=True`` the counts say what WOULD change and nothing is
 	written.
@@ -701,7 +713,10 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	api_key = _current_key_or_empty()
 	if not dry_run:
 		_refresh_hooks_cache()
-	if _key_unreadable(api_key):
+	unreadable = _key_unreadable(api_key)
+	if unreadable is None:
+		out["failed"] += 1
+	elif unreadable:
 		out["key_unreadable"] = True
 		out["failed"] += 1
 	seen: dict[str, set[str]] = {"Error Log": set(), "Deleted Document": set()}

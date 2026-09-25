@@ -47,7 +47,7 @@ _PARTIAL_TITLE = "Optimus: Error Log key scrub did not finish"
 _COUNTS = ("candidates", "changed", "deleted_docs_changed", "residual", "failed")
 _OFF_PEAK = "on MariaDB, Error Log is locked while it is scanned, so on a busy site prefer off-peak"
 _KEY_HINT = (
-	"The stored AI API key cannot be decrypted: restore the site's encryption_key, or enter the key again in "
+	"The stored AI API key cannot be decrypted: restore the site's encryption_key, or enter the OLD key again in "
 	"Optimus Settings, then run the scrub again."
 )
 # Printed last on every path but a failed import. It repeats no command: the
@@ -143,7 +143,7 @@ def execute():
 	if key_unreadable:
 		print(
 			"Optimus: the AI API key stored in Optimus Settings cannot be decrypted, so the scrub could not "
-			"search for it or mask it by value. Restore the site's encryption_key, or enter the key again in "
+			"search for it or mask it by value. Restore the site's encryption_key, or enter the OLD key again in "
 			f"Optimus Settings, then run the scrub again: {command}"
 		)
 	if counts["residual"]:
