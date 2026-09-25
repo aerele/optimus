@@ -53,7 +53,7 @@ ones it masks), the text is withheld (``_withhold``) instead of inserted
 raw. When Optimus's other modules cannot be imported, the stored key alone
 is masked with Frappe alone (``_mask_stored_key_only``, below). Each
 failure leaves a line in the ``optimus`` log (an exception type name at
-most, never row text). It never writes an Error Log itself: that insert
+most, never row text; a repeated outcome only every 1000th time, ``_note``). It never writes an Error Log itself: that insert
 would run this hook again.
 
 Frappe caches every app's hooks ("app_hooks" in Redis). A process started
@@ -95,6 +95,12 @@ _TITLE_LIMIT = 140
 # the fallback runs where those modules cannot be imported.
 _PLACEHOLDER = "********"
 _MIN_KEY_LEN = 8
+# How many times each outcome has been noted in this process (_note), and
+# how often a repeated one is logged: its first time, then every
+# _NOTE_EVERY-th time. The outcomes are a few fixed texts and exception
+# type names, so this stays small.
+_NOTED: dict[str, int] = {}
+_NOTE_EVERY = 1000
 
 
 def mask_error_log(doc, method=None) -> None:
@@ -256,15 +262,27 @@ def _withhold(doc, maintenance, record: dict, api_key: str, timeout_types) -> No
 
 
 def _note(outcome: str, timeout_types) -> None:
-	"""One line in the ``optimus`` log saying what happened to the row
+	"""A line in the ``optimus`` log saying what happened to the row
 	(``outcome`` holds an exception type name at most, never row text), at
 	ERROR level: Frappe's loggers drop lower levels on a production site.
-	Never raises, except an RQ job timeout, re-raised as a fresh instance."""
+	Each outcome is logged the first time it happens in this process, then
+	once every ``_NOTE_EVERY`` times with its count, so a storm of failing
+	Error Log inserts (a process started before the upgrade fails on every
+	one) cannot fill the log, which Frappe rotates, and push out the
+	migrate's summary lines. Never raises, except an RQ job timeout,
+	re-raised as a fresh instance."""
+	count = _NOTED.get(outcome, 0) + 1
+	_NOTED[outcome] = count
+	if count > 1 and count % _NOTE_EVERY:
+		return
+	line = f"optimus error_log_mask: an Error Log row was {outcome}"
+	if count > 1:
+		line = f"{line} ({count} times so far in this process)"
 	interrupt = None
 	try:
 		import frappe
 
-		frappe.logger("optimus").error(f"optimus error_log_mask: an Error Log row was {outcome}")
+		frappe.logger("optimus").error(line)
 	except Exception as e:
 		if isinstance(e, timeout_types):
 			interrupt = (type(e), e.args)

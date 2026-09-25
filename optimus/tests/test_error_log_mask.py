@@ -124,6 +124,7 @@ def env(monkeypatch):
 	rq.timeouts = timeouts
 	monkeypatch.setitem(sys.modules, "rq", rq)
 	monkeypatch.setitem(sys.modules, "rq.timeouts", timeouts)
+	monkeypatch.setattr(error_log_mask, "_NOTED", {})
 	rec.flags = flags
 	return rec
 
@@ -362,6 +363,38 @@ class TestFailOpen:
 
 def _boom(*a, **k):
 	raise ValueError(f"catastrophic backtracking near {KEY}")
+
+
+class TestBreadcrumbStorm:
+	"""A process started before the upgrade fails on every Error Log insert
+	of the site; Frappe rotates the ``optimus`` log (100 KB x 20), so one
+	line per insert would push out the migrate's summary lines."""
+
+	def test_10000_failing_inserts_write_a_bounded_number_of_lines(self, env, monkeypatch):
+		def _read():
+			raise RuntimeError(f"cannot read {KEY}")
+		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", _read)
+		for _ in range(10_000):
+			_run(_Doc(error=LEAKY))
+		lines = [line for _, _, line in env.lines]
+		first = "optimus error_log_mask: an Error Log row was stored as it was: RuntimeError"
+		assert lines == [first] + [f"{first} ({n} times so far in this process)" for n in range(1000, 10_001, 1000)]
+		assert all(KEY not in line for line in lines)
+
+	def test_each_outcome_is_counted_on_its_own(self, env, monkeypatch):
+		monkeypatch.setattr(maintenance, "_mask", _boom)
+		for _ in range(3):
+			_run(_Doc(error=LEAKY))
+
+		def _read():
+			raise RuntimeError("boom")
+		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", _read)
+		for _ in range(3):
+			_run(_Doc(error=LEAKY))
+		assert [line.rsplit(" was ", 1)[1] for _, _, line in env.lines] == [
+			"withheld: its masking failed", "stored as it was: RuntimeError",
+		]
+		assert error_log_mask._NOTED == {"withheld: its masking failed": 3, "stored as it was: RuntimeError": 3}
 
 
 @pytest.fixture
