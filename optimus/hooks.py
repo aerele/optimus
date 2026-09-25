@@ -148,9 +148,16 @@ has_permission = {
 # v0.4.0: doc_events hooks.
 # - User.validate auto-grants Optimus User to any user that has
 #   System Manager. See install.on_user_role_change for the logic.
+# - Error Log.before_insert masks the stored AI API key (and other key
+#   shapes) in every Error Log row as Frappe inserts it, the rows Frappe's
+#   save_to_db takes from the deferred-insert queue included. See
+#   optimus/error_log_mask.py.
 doc_events = {
 	"User": {
 		"validate": "optimus.install.on_user_role_change",
+	},
+	"Error Log": {
+		"before_insert": "optimus.error_log_mask.mask_error_log",
 	},
 }
 
