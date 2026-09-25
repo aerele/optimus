@@ -130,8 +130,9 @@ MIGRATE_SCAN_LIMIT = 200_000
 # be read: an unmeasured table must not look small, so the migrate skips the
 # scrub.
 SCAN_SIZE_UNKNOWN = sys.maxsize
-# Deleted Document rows up to a bound (the parameter): exact, portable, and
-# it reads at most that many index entries.
+# Deleted Document rows up to a bound (the parameter): exact and portable.
+# The LIMIT bounds the cost: on MariaDB it reads at most that many index
+# entries; Postgres scans the table and stops at that many rows.
 _DELETED_DOCUMENT_COUNT = "SELECT COUNT(*) FROM (SELECT 1 FROM `tabDeleted Document` LIMIT %s) t"
 # The values dry_run accepts as text (stripped, any case), besides True /
 # False and 1 / 0.
@@ -762,10 +763,12 @@ class ScanSize(NamedTuple):
 def _deleted_document_count() -> int | None:
 	"""Deleted Document rows, counted exactly up to ``MIGRATE_SCAN_LIMIT + 1``
 	(then the migrate skips the scrub anyway). The subquery stops reading at
-	its LIMIT, so it costs at most that many index entries, and it is plain
-	SQL that runs the same on MariaDB and Postgres. An estimate is not used:
-	Frappe v15's is not scoped to the site's database, Postgres answers -1
-	for a table never analysed, and InnoDB's can be a fifth low."""
+	its LIMIT, which bounds the cost: on MariaDB it reads at most that many
+	index entries, and Postgres, which scans the table, stops after that
+	many rows. It is plain SQL that runs the same on both. An estimate is
+	not used: Frappe v15's is not scoped to the site's database, Postgres
+	answers -1 for a table never analysed, and InnoDB's can be a fifth
+	low."""
 	rows = frappe.db.sql(_DELETED_DOCUMENT_COUNT, (MIGRATE_SCAN_LIMIT + 1,))
 	return rows[0][0] if rows else None
 
