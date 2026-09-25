@@ -499,13 +499,16 @@ def _long_title_into_error(record: dict) -> dict:
 
 
 def _is_ai_record(record: dict, api_key: str) -> bool:
-	"""True when a queued record comes from Optimus's AI code (its ``error``
-	has a frame in ``optimus/ai_fix.py`` or ``frappe_profiler/ai_fix.py``) or
-	holds the stored key (of at least ``_MIN_KEY_LEN`` characters, raw or
-	JSON-escaped, in any of its text fields)."""
-	error = record.get("error")
-	if isinstance(error, str) and any(path in error for path in _OPTIMUS_AI_FRAME_PATHS):
-		return True
+	"""True when a queued record comes from Optimus's AI code (a frame in
+	``optimus/ai_fix.py`` or ``frappe_profiler/ai_fix.py`` in any of its text
+	fields: its ``error``, its title, whose text a 500 snapshot takes from the
+	exception, or its request ``metadata``) or holds the stored key (of at
+	least ``_MIN_KEY_LEN`` characters, raw or JSON-escaped, in any of its text
+	fields)."""
+	for field in _QUEUED_TEXT_FIELDS:
+		text = record.get(field)
+		if isinstance(text, str) and any(path in text for path in _OPTIMUS_AI_FRAME_PATHS):
+			return True
 	return len(api_key) >= _MIN_KEY_LEN and _holds_key(record, _QUEUED_TEXT_FIELDS, api_key)
 
 
