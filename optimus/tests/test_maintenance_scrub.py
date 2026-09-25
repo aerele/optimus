@@ -158,6 +158,11 @@ class _RecordingCache:
 		return lambda *a, **k: self.calls.append((name, *a))
 
 
+class DoesNotExistError(Exception):
+	"""``frappe.DoesNotExistError``: ``get_single_value`` of a DocType that
+	is not installed (``frappe.get_meta`` finds no such DocType)."""
+
+
 class _FakeFrappe:
 	"""``has_metadata=False`` models Frappe v15, whose Error Log has no
 	``metadata`` column: a statement naming it fails. ``v15_like=True``
@@ -166,7 +171,12 @@ class _FakeFrappe:
 	write fails as strict mode does. ``cache`` records the Redis calls, and
 	``get_doc(record).insert()`` adds a row (``inserted`` keeps each record;
 	the scrub never inserts). ``singles`` holds the Singles values
-	``db.get_single_value`` reads (``single_reads`` logs each read)."""
+	``db.get_single_value`` reads (``single_reads`` logs each read); a
+	Single whose DocType is not in ``installed_singles`` raises
+	``DoesNotExistError``, as on a site Optimus was uninstalled from, and
+	``single_error`` makes every read raise it instead."""
+
+	DoesNotExistError = DoesNotExistError
 
 	def __init__(self, error_logs, deleted_docs=(), has_metadata=True, v15_like=False):
 		self.v15_like = v15_like
@@ -179,6 +189,8 @@ class _FakeFrappe:
 		self.local = SimpleNamespace(doc_events_hooks={"User": {}})
 		self.inserted = []
 		self.singles = {}
+		self.installed_singles = {"Optimus Settings"}
+		self.single_error = None
 		self.single_reads = []
 		self.tables = {
 			"Error Log": {n: {"name": n, "error": e, "method": "t", "metadata": "{}"} for n, e in error_logs},
@@ -207,6 +219,10 @@ class _FakeFrappe:
 
 	def _get_single_value(self, doctype, fieldname, cache=True):
 		self.single_reads.append((doctype, fieldname))
+		if self.single_error is not None:
+			raise self.single_error
+		if doctype not in self.installed_singles:
+			raise DoesNotExistError(f"DocType {doctype} not found")
 		return self.singles.get((doctype, fieldname))
 
 	def commit(self):
@@ -1205,6 +1221,38 @@ class TestKeyUnreadable:
 		out = maintenance.scrub_error_log_secrets(dry_run=True)
 		assert out["key_unreadable"] is False and out["failed"] == 0 and f.single_reads == []
 
+	@pytest.mark.parametrize("dry_run", [True, False])
+	def test_a_site_optimus_was_uninstalled_from_completes_clean(self, fake, dry_run):
+		# The documented console route: uninstalling deletes Optimus
+		# Settings (its DocType, its Singles values and its __Auth copy), so
+		# the key reads "" and the field's read raises DoesNotExistError.
+		# There is no stored key to be unreadable: nothing is flagged or
+		# counted, and the rows are still masked by their shapes.
+		f = fake([("a", LEAKY)], [("d1", json.dumps({"error": LEAKY}))], current_key="")
+		f.installed_singles.clear()
+		out = maintenance.scrub_error_log_secrets(dry_run=dry_run)
+		assert out == {**_OUT, "candidates": 1, "changed": 1, "deleted_docs_changed": 1}
+		assert f.single_reads == [("Optimus Settings", "ai_api_key")]
+		assert ("Bearer ********" in f.tables["Error Log"]["a"]["error"]) is not dry_run
+
+	@pytest.mark.parametrize("dry_run", [True, False])
+	def test_a_read_that_fails_otherwise_counts_one_failed_and_flags_nothing(self, fake, dry_run):
+		f = fake([("a", LEAKY)], current_key="")
+		f.single_error = RuntimeError("Lost connection to server during query")
+		out = maintenance.scrub_error_log_secrets(dry_run=dry_run)
+		assert out == {**_OUT, "candidates": 1, "changed": 1, "failed": 1}
+
+	def test_the_docstring_says_to_enter_the_old_key(self):
+		# The scrub searches for the key that leaked: a new key would not find it.
+		doc = " ".join(maintenance.scrub_error_log_secrets.__doc__.split())
+		assert "enter the OLD key again in Optimus Settings" in doc
+
+	def test_it_never_raises_even_without_frappes_error_class(self, fake, monkeypatch):
+		f = fake([("a", LEAKY)], current_key="")
+		f.installed_singles.clear()
+		monkeypatch.delattr(_FakeFrappe, "DoesNotExistError")
+		assert maintenance._key_unreadable("") is None  # an unknown failure, counted by the scrub
+
 
 class TestKeyHandling:
 	"""The frames of the scrub hold the key only under the names Frappe's
@@ -1601,16 +1649,17 @@ def test_a_partial_scrub_leaves_a_breadcrumb(patch_env, patch_logs, monkeypatch,
 def test_an_unreadable_key_says_how_to_make_it_readable(patch_env, patch_logs, monkeypatch, capsys):
 	_scrub_answers(monkeypatch, key_unreadable=True, failed=1)
 	importlib.import_module(_PATCH).execute()
+	# The scrub searches for the key that leaked: a new key would not find it.
 	hint = (
-		"The stored AI API key cannot be decrypted: restore the site's encryption_key, or enter the key again "
-		"in Optimus Settings, then run the scrub again."
+		"The stored AI API key cannot be decrypted: restore the site's encryption_key, or enter the OLD key "
+		"again in Optimus Settings, then run the scrub again."
 	)
 	[crumb] = patch_logs.errors
 	assert f". {hint} {_RUN_IT}" in crumb["message"]
 	out = capsys.readouterr().out
 	assert (
 		"Optimus: the AI API key stored in Optimus Settings cannot be decrypted, so the scrub could not search "
-		"for it or mask it by value. Restore the site's encryption_key, or enter the key again in Optimus "
+		"for it or mask it by value. Restore the site's encryption_key, or enter the OLD key again in Optimus "
 		f"Settings, then run the scrub again: bench --site <site> {_COMMAND}\n"
 	) in out
 
