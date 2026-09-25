@@ -1856,7 +1856,10 @@ def _http_post(
 ) -> dict:
 	"""POST JSON, return the parsed response dict. Maps transport / HTTP /
 	decode errors to ``AiFixError`` with operator-friendly messages and logs
-	each failure once (``_log_http_error``).
+	each failure once (``_log_http_error``). A 3xx reply (a redirect
+	``requests`` did not follow) is ``kind="bad_response"`` and a 4xx / 5xx
+	reply an HTTP error; both are logged with a body-free log text
+	(``_LOG_TEXT_ATTR``), never their body.
 
 	SECURITY: ``auth`` (an ``_ApiKeyAuth``) attaches the key at send time, so
 	``headers`` never holds it. Every failure is logged and raised OUTSIDE the
@@ -1940,7 +1943,17 @@ def _http_post(
 		raise failure
 
 	status = resp.status_code
-	if status in (401, 403):
+	if 300 <= status < 400:
+		# requests follows a redirect it can, so one that arrives here (no
+		# Location header, or a status it does not follow) is not the
+		# provider's reply, whatever its body holds.
+		from frappe import _
+
+		failure = AiFixError(
+			_("The AI provider answered with a redirect (HTTP {0}) instead of a reply. Check the Base URL in Optimus Settings.").format(status),
+			status_code=status, kind="bad_response",
+		)
+	elif status in (401, 403):
 		failure = AiFixError("The AI provider rejected the API key. Check it in Optimus Settings.", status_code=status)
 	elif status == 404:
 		# A 404 means the endpoint path or the model was not found. The Model

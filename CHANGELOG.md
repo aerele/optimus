@@ -158,7 +158,11 @@ versions may contain breaking changes see migration notes below).
   server error. A malformed token count in a reply no longer fails a
   suggestion that was otherwise returned. An Anthropic reply whose text is
   not a string is reported as an empty response instead of failing the
-  request with a server error.
+  request with a server error. A redirect that reaches Optimus (an HTTP 3xx
+  reply the HTTP library did not follow) is reported as an unexpected
+  response that names its status, instead of being read as the reply; its
+  Error Log row holds the status and the call site (and `provider_error=`
+  when the reply names a code), never the body.
 - An API key pasted with a trailing newline or spaces is trimmed. A key must
   be plain printable ASCII: a key with any other character (a space inside
   it, a pasted smart quote or no-break space, a control character such as a
