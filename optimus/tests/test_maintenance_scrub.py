@@ -849,6 +849,48 @@ class _FakeCache:
 		self.queues.setdefault(key, []).append(value)
 
 
+class TestUnderSavepoint:
+	"""The one savepoint helper of the flush's inserts and the scrub's
+	updates: True when the write and the savepoint's release succeeded;
+	otherwise the write is rolled back to the savepoint, the savepoint is
+	released, and it returns False."""
+
+	def _db(self, monkeypatch, release_fails=False):
+		log = []
+		txn = _FakeTxn(log)
+
+		def _release(name):
+			if release_fails:
+				raise RuntimeError("SAVEPOINT optimus_scrub_row does not exist")
+			txn.release_savepoint(name)
+		db = SimpleNamespace(savepoint=txn.savepoint, release_savepoint=_release, rollback=txn.rollback)
+		monkeypatch.setattr(maintenance, "frappe", SimpleNamespace(db=db))
+		return log, txn
+
+	def test_a_write_that_succeeds_returns_true_and_releases_the_savepoint(self, monkeypatch):
+		log, txn = self._db(monkeypatch)
+		writes = []
+		assert maintenance._under_savepoint(lambda: writes.append(1)) is True
+		assert writes == [1] and txn.open == []
+		assert log == [("savepoint", "optimus_scrub_row"), ("release", "optimus_scrub_row")]
+
+	def test_a_write_that_fails_is_rolled_back_to_the_savepoint_and_released(self, monkeypatch):
+		log, txn = self._db(monkeypatch)
+
+		def _write():
+			raise RuntimeError("Lock wait timeout exceeded")
+		assert maintenance._under_savepoint(_write) is False
+		assert log == [
+			("savepoint", "optimus_scrub_row"), ("rollback", "optimus_scrub_row"), ("release", "optimus_scrub_row"),
+		]
+		assert txn.open == []
+
+	def test_a_release_that_fails_rolls_the_write_back(self, monkeypatch):
+		log, _ = self._db(monkeypatch, release_fails=True)
+		assert maintenance._under_savepoint(lambda: None) is False
+		assert log == [("savepoint", "optimus_scrub_row"), ("rollback", "optimus_scrub_row")]
+
+
 class TestFlushDeferredErrorLogs:
 	def _frappe(self, monkeypatch, cache, fail_on=()):
 		"""A failed insert aborts the transaction, as a failed statement does

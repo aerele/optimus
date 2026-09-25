@@ -338,18 +338,25 @@ def _error_log_queue_length() -> int | None:
 		return None
 
 
-def _insert_error_log(record: dict) -> bool:
-	"""Insert one queued record under a savepoint, so a failed insert rolls
-	back only itself, also on Postgres, where a failed statement aborts the
-	transaction and every later queued insert with it. The savepoint is
-	released either way (see ``_write_row``)."""
-	ok = True
+def _under_savepoint(write) -> bool:
+	"""Run ``write()`` under the savepoint ``_SAVEPOINT``. True when it and
+	the savepoint's release succeeded. Otherwise the write is rolled back to
+	the savepoint, so a failure undoes only itself, also on Postgres, where a
+	failed statement aborts the transaction and every later statement with
+	it; then it returns False. The savepoint is released after the write and
+	also after the rollback, because every write reuses one savepoint name
+	and re-issuing a savepoint of the same name nests a new subtransaction on
+	Postgres instead of replacing it. Frappe's own ``savepoint()`` helper
+	releases only after a success (it takes a fresh random name each time).
+	Never raises."""
+	ok = False
 	try:
 		frappe.db.savepoint(_SAVEPOINT)
-		frappe.get_doc({**record, "doctype": "Error Log"}).insert(ignore_permissions=True)
+		write()
 		frappe.db.release_savepoint(_SAVEPOINT)
+		ok = True
 	except Exception:
-		ok = False
+		pass
 	if not ok:
 		try:
 			frappe.db.rollback(save_point=_SAVEPOINT)
@@ -357,6 +364,12 @@ def _insert_error_log(record: dict) -> bool:
 		except Exception:
 			pass
 	return ok
+
+
+def _insert_error_log(record: dict) -> bool:
+	"""Insert one queued record under a savepoint (``_under_savepoint``),
+	so a failed insert rolls back only itself."""
+	return _under_savepoint(lambda: frappe.get_doc({**record, "doctype": "Error Log"}).insert(ignore_permissions=True))
 
 
 def _mask_row(row: dict, text_fields: tuple[str, ...], api_key: str) -> tuple[dict, bool] | None:
@@ -380,28 +393,10 @@ def _mask_row(row: dict, text_fields: tuple[str, ...], api_key: str) -> tuple[di
 
 
 def _write_row(doctype: str, name: str, changes: dict) -> bool:
-	"""Write one masked row under a savepoint, so a failed write (a lock
-	timeout, a row deleted meanwhile) rolls back only itself, also on
-	Postgres, where a failed statement aborts the transaction. The savepoint
-	is released after the write and also after the rollback, because this
-	function reuses one savepoint name and re-issuing a savepoint of the same
-	name nests a new subtransaction on Postgres instead of replacing it.
-	Frappe's own ``savepoint()`` helper releases only after a success (it
-	takes a fresh random name each time)."""
-	failed = False
-	try:
-		frappe.db.savepoint(_SAVEPOINT)
-		frappe.db.set_value(doctype, name, changes, update_modified=False)
-		frappe.db.release_savepoint(_SAVEPOINT)
-	except Exception:
-		failed = True
-	if failed:
-		try:
-			frappe.db.rollback(save_point=_SAVEPOINT)
-			frappe.db.release_savepoint(_SAVEPOINT)
-		except Exception:
-			pass
-	return not failed
+	"""Write one masked row under a savepoint (``_under_savepoint``), so a
+	failed write (a lock timeout, a row deleted meanwhile) rolls back only
+	itself. True when it was written."""
+	return _under_savepoint(lambda: frappe.db.set_value(doctype, name, changes, update_modified=False))
 
 
 def _window_end(doctype: str, last: str) -> str | None:
