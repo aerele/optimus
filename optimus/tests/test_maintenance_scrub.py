@@ -1042,25 +1042,26 @@ ERP_TB = (
 
 
 class TestRecordValueLines:
-	"""``_masked_record`` masks the bare header value lines (``value = ...``)
-	only in a record from the AI code (a frame in Optimus's ``ai_fix.py``,
-	under either package name, in its error, title or metadata) or one
-	holding the stored key. Any other snapshot keeps them: scrub_secrets
-	alone."""
+	"""The bare header value lines (``value = ...``) are masked only in a
+	record from the AI code (a frame in Optimus's ``ai_fix.py``, under
+	either package name, in its error, title or metadata) or one holding
+	the stored key: the Error Log hook sends only those to
+	``_masked_record`` (``_is_ai_record``), and leaves any other snapshot,
+	value lines included, exactly as it was."""
 
 	@pytest.mark.parametrize("api_key", [KEY, ""], ids=["key_stored", "no_key_stored"])
-	def test_an_unrelated_snapshot_keeps_its_value_lines(self, api_key):
-		row = maintenance._masked_record({"error": ERP_TB, "method": "Stock Entry failed"}, api_key)
-		assert row["error"] == ERP_TB
+	def test_an_unrelated_snapshot_is_not_an_ai_record(self, api_key):
+		assert not maintenance._is_ai_record({"error": ERP_TB, "method": "Stock Entry failed"}, api_key)
 
 	def test_another_apps_ai_fix_frame_is_not_optimus(self):
 		error = ERP_TB.replace("erpnext/erpnext/stock/doctype/stock_entry/stock_entry.py", "other/other/openai_fix.py")
 		assert "ai_fix.py" in error
-		assert maintenance._masked_record({"error": error}, KEY)["error"] == error
+		assert not maintenance._is_ai_record({"error": error}, KEY)
 
 	@pytest.mark.parametrize("package", ["optimus", "frappe_profiler"])
 	def test_an_ai_snapshot_has_its_value_lines_masked(self, package):
 		error = ERP_TB + f'  File "apps/{package}/{package}/ai_fix.py", line 1290, in _http_post\n'
+		assert maintenance._is_ai_record({"error": error}, KEY)
 		row = maintenance._masked_record({"error": error}, KEY)
 		assert "Acme" not in row["error"] and "      value = ********\n" in row["error"]
 
@@ -1069,12 +1070,14 @@ class TestRecordValueLines:
 		# A 500 snapshot's title is the exception text, and a request's
 		# metadata can quote a traceback: the frame may sit there alone.
 		frame = 'File "apps/optimus/optimus/ai_fix.py", line 1290, in _http_post'
+		assert maintenance._is_ai_record({"error": ERP_TB, field: frame}, KEY)
 		row = maintenance._masked_record({"error": ERP_TB, field: frame}, KEY)
 		assert "Acme" not in row["error"] and "      value = ********\n" in row["error"]
 
 	def test_a_snapshot_holding_the_key_has_its_value_lines_masked(self):
 		# No ai_fix.py frame, but the key is in its request metadata.
 		record = {"error": ERP_TB, "metadata": json.dumps({"form_dict": {"ai_api_key": KEY}})}
+		assert maintenance._is_ai_record(record, KEY)
 		row = maintenance._masked_record(record, KEY)
 		assert "Acme" not in row["error"] and KEY not in row["metadata"]
 

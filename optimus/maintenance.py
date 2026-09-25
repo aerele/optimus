@@ -233,13 +233,13 @@ def _holds_key(row: dict, fields: tuple[str, ...], api_key: str) -> bool:
 	return False
 
 
-def _mask(text: str, api_key: str, value_lines: bool = True) -> str:
+def _mask(text: str, api_key: str) -> str:
 	"""``text`` through ``scrub_secrets`` with the key (raw and JSON-escaped)
-	as literals, then, when ``value_lines``, with the bare header value
-	lines masked (``_VALUE_LINE``, ``_ESCAPED_VALUE_LINE``)."""
+	as literals, then with the bare header value lines masked
+	(``_VALUE_LINE``, ``_ESCAPED_VALUE_LINE``). Only text from the AI code or
+	holding the key comes here: the scrub's rows and the records the hook
+	recognises (``_is_ai_record``)."""
 	out = scrub_secrets(text, literals=(api_key, _json_escaped(api_key)))
-	if not value_lines:
-		return out
 	out = _VALUE_LINE.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER, out)
 	return _ESCAPED_VALUE_LINE.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER, out)
 
@@ -258,26 +258,18 @@ def _masked_record(record, api_key: str) -> dict | None:
 	``error`` (``_long_title_into_error``) and the joined ``error`` masked
 	again, so it is idempotent.
 
-	Its bare header value lines are masked only when ``_is_ai_record``: any
-	other snapshot (an ERPNext error with a ``value = ...`` local, say) goes
-	through ``scrub_secrets`` alone and keeps them. The hook calls it only
-	for a record ``_is_ai_record`` recognises, and leaves every other row
-	as it was. The residual check is
-	skipped: its answer is never used here, and it costs about a third of
+	The hook calls it only for a record from the AI code or holding the key
+	(``_is_ai_record``, or a record whose check failed, which the hook
+	treats as one), and leaves every other row as it was; so its bare header
+	value lines are masked too, as in the scrub's rows. The residual check
+	is skipped: its answer is never used here, and it costs about a third of
 	the masking's time. None when it is not a record or masking it failed,
-	the joined pass included: the hook then withholds a record from the AI
-	code or holding the key, and never stores the joined text unmasked. An
-	RQ job timeout is raised, not swallowed (``_reraise_job_timeout``)."""
+	the joined pass included: the hook then withholds the record, and never
+	stores the joined text unmasked. An RQ job timeout is raised, not
+	swallowed (``_reraise_job_timeout``)."""
 	if not isinstance(record, dict):
 		return None
-	try:
-		value_lines = _is_ai_record(record, api_key)
-	except Exception as e:
-		_reraise_job_timeout(e)
-		return None
-	masked = _mask_row(
-		record, _RECORD_TEXT_FIELDS, api_key, value_lines=value_lines, cut=False, check_residual=False,
-	)
+	masked = _mask_row(record, _RECORD_TEXT_FIELDS, api_key, cut=False, check_residual=False)
 	if masked is None:
 		return None
 	merged = {**record, **masked[0]}
@@ -288,7 +280,7 @@ def _masked_record(record, api_key: str) -> dict | None:
 	# join completes (a title ending in "Bearer", an error starting with the
 	# token) is masked now, so a second pass, or the scrub of the row once
 	# Frappe has inserted it, changes nothing.
-	joined = _mask_row(moved, ("error",), api_key, value_lines=value_lines, cut=False, check_residual=False)
+	joined = _mask_row(moved, ("error",), api_key, cut=False, check_residual=False)
 	if joined is None:
 		return None
 	return {**moved, **joined[0]}
@@ -354,11 +346,10 @@ def _under_savepoint(write) -> bool:
 
 
 def _mask_row(
-	row: dict, text_fields: tuple[str, ...], api_key: str, value_lines: bool = True, cut: bool = True,
-	check_residual: bool = True,
+	row: dict, text_fields: tuple[str, ...], api_key: str, cut: bool = True, check_residual: bool = True,
 ) -> tuple[dict, bool] | None:
-	"""``(changes, residual)`` for one row (``_mask`` with ``value_lines``),
-	or None when masking it failed. With ``cut``, a masked value longer than
+	"""``(changes, residual)`` for one row (``_mask``), or None when masking
+	it failed. With ``cut``, a masked value longer than
 	its column (``_FIELD_LIMITS``) is cut to fit. Without
 	``check_residual``, ``residual`` is always False: the independent
 	detector (``_has_residual_secret``) is not run."""
@@ -368,7 +359,7 @@ def _mask_row(
 		residual = False
 		for field in text_fields:
 			old = row.get(field) or ""
-			new = _mask(old, api_key, value_lines=value_lines)
+			new = _mask(old, api_key)
 			if new != old:
 				if cut:
 					new = new[:_FIELD_LIMITS.get(field, len(new))]
