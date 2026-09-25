@@ -11,6 +11,8 @@ business logic.
 
 import json
 
+import pytest
+
 from optimus.analyzers import n_plus_one
 
 
@@ -1141,3 +1143,135 @@ def test_sub_millisecond_loop_cost_reads_less_than_1ms_not_0ms(empty_context, mo
 	# A regressed ">= 0.5" guard (or a dropped branch) would render "0ms" here.
 	assert "<1ms" in f["customer_description"]
 	assert "0ms" not in f["customer_description"]
+
+
+# ---------------------------------------------------------------------------
+# The Error Log hook's key read (optimus/error_log_mask.py)
+# ---------------------------------------------------------------------------
+# The Error Log ``before_insert`` hook reads the stored AI key on every Error
+# Log insert: one SELECT on ``__Auth`` inside the user's ``frappe.log_error``.
+# It is Optimus's own query. Attributed to the user's call site, it gave
+# that call site a second query shape, so a real "Same query ran N×" finding
+# for a log_error-in-a-loop flow vanished (the N+1 analyzer drops a call
+# site with more than one shape).
+
+_IMPORTER = {"filename": "myapp/myapp/importer.py", "lineno": 42, "function": "import_rows"}
+_LOG_ERROR = [
+	{"filename": "frappe/frappe/utils/error.py", "lineno": 80, "function": "log_error"},
+	{"filename": "frappe/frappe/model/document.py", "lineno": 441, "function": "insert"},
+]
+_INSERT_STACK = [
+	_IMPORTER,
+	*_LOG_ERROR,
+	{"filename": "frappe/frappe/model/base_document.py", "lineno": 600, "function": "db_insert"},
+	{"filename": "frappe/frappe/database/database.py", "lineno": 270, "function": "sql"},
+]
+_KEY_READ = [
+	{"filename": "frappe/frappe/utils/password.py", "lineno": 34, "function": "get_decrypted_password"},
+	{"filename": "frappe/frappe/query_builder/utils.py", "lineno": 131, "function": "execute_query"},
+	{"filename": "frappe/frappe/database/database.py", "lineno": 270, "function": "sql"},
+]
+
+
+def _hook_stack(prefix: str = "optimus/", via_ai_fix: bool = True) -> list[dict]:
+	"""The stack of the hook's ``__Auth`` SELECT: through
+	``ai_fix._current_key_or_empty``, or straight from the hook (its
+	fallback when Optimus's other modules cannot be imported). ``prefix`` is
+	the path shape: the recorder's (``optimus/optimus/``), pyinstrument's
+	(``optimus/``) or an absolute bench path."""
+	stack = [
+		_IMPORTER,
+		*_LOG_ERROR,
+		{"filename": "frappe/frappe/model/document.py", "lineno": 1184, "function": "run_method"},
+		{"filename": f"{prefix}error_log_mask.py", "lineno": 104, "function": "mask_error_log"},
+		{"filename": f"{prefix}error_log_mask.py", "lineno": 131, "function": "_read_key"},
+	]
+	if via_ai_fix:
+		stack.append({"filename": f"{prefix}ai_fix.py", "lineno": 819, "function": "_current_key_or_empty"})
+	return stack + _KEY_READ
+
+
+_AUTH_SELECT = (
+	"SELECT `password` FROM `__Auth` WHERE `doctype`=? AND `name`=? AND `fieldname`=? AND `encrypted`=? LIMIT ?"
+)
+_ERROR_LOG_INSERT = "INSERT INTO `tabError Log` (...) VALUES (?)"
+
+
+def _log_error_loop(hook_stack: list[dict] | None, n: int = 50) -> dict:
+	"""One request calling ``frappe.log_error`` ``n`` times in a loop; with
+	``hook_stack``, each insert first runs the hook's key read."""
+	calls = []
+	for _ in range(n):
+		if hook_stack is not None:
+			calls.append({"query": _AUTH_SELECT, "normalized_query": _AUTH_SELECT, "duration": 0.1, "stack": hook_stack})
+		calls.append({
+			"query": _ERROR_LOG_INSERT, "normalized_query": _ERROR_LOG_INSERT, "duration": 1.0, "stack": _INSERT_STACK,
+		})
+	return {
+		"uuid": "log-error-loop", "path": "/api/method/myapp.importer.import_rows", "cmd": None, "method": "POST",
+		"event_type": "HTTP Request", "duration": 200, "calls": calls,
+	}
+
+
+@pytest.mark.parametrize("via_ai_fix", [True, False], ids=["through_ai_fix", "hook_alone"])
+def test_the_error_log_hooks_key_read_never_hides_a_log_error_loop(empty_context, via_ai_fix):
+	without = n_plus_one.analyze([_log_error_loop(None)], empty_context)
+	assert [f["title"] for f in without.findings] == ["Same query ran 50× at myapp/importer.py:42"]
+	with_hook = n_plus_one.analyze([_log_error_loop(_hook_stack(via_ai_fix=via_ai_fix))], empty_context)
+	assert [f["title"] for f in with_hook.findings] == ["Same query ran 50× at myapp/importer.py:42"]
+
+
+@pytest.mark.parametrize(
+	"prefix",
+	["optimus/optimus/", "optimus/", "apps/optimus/optimus/", "/home/frappe/bench/apps/optimus/optimus/"],
+	ids=["recorder", "pyinstrument", "bench_relative", "absolute"],
+)
+@pytest.mark.parametrize("via_ai_fix", [True, False], ids=["through_ai_fix", "hook_alone"])
+def test_the_hooks_key_read_is_optimus_own_query(prefix, via_ai_fix):
+	from optimus.analyzers.base import is_profiler_own_query, walk_callsite
+
+	stack = _hook_stack(prefix, via_ai_fix)
+	assert is_profiler_own_query(stack) is True
+	assert walk_callsite(stack) is None
+
+
+def test_a_user_frame_inside_the_hook_is_still_the_users():
+	# Only a query whose innermost non-Frappe frame is Optimus's belongs to
+	# the hook: a user frame between the hook and the query wins.
+	from optimus.analyzers.base import is_profiler_own_query, walk_callsite
+
+	stack = [*_hook_stack()[:-len(_KEY_READ)], _IMPORTER, *_KEY_READ]
+	assert is_profiler_own_query(stack) is False
+	assert walk_callsite(stack) == _IMPORTER
+
+
+def test_another_optimus_module_is_not_the_hook():
+	# The clause is the hook's module alone: an Optimus wrap frame between the
+	# user and the query still leaves the query the user's.
+	from optimus.analyzers.base import is_profiler_own_query, walk_callsite
+
+	stack = [
+		_IMPORTER,
+		{"filename": "optimus/optimus/capture.py", "lineno": 88, "function": "wrapped_get_doc"},
+		{"filename": "optimus/optimus/error_log_mask_helpers.py", "lineno": 1, "function": "f"},
+		*_KEY_READ,
+	]
+	assert is_profiler_own_query(stack) is False
+	assert walk_callsite(stack) == _IMPORTER
+
+
+def test_top_queries_leaves_out_the_hooks_key_read(empty_context):
+	from optimus.analyzers import top_queries
+
+	slow = 500.0  # above the leaderboard's floor
+	recording = {
+		"uuid": "slow", "path": "/", "cmd": None, "method": "POST", "event_type": "HTTP Request", "duration": 2000,
+		"calls": [
+			{"query": _AUTH_SELECT, "normalized_query": _AUTH_SELECT, "duration": slow, "stack": _hook_stack()},
+			{"query": _ERROR_LOG_INSERT, "normalized_query": _ERROR_LOG_INSERT, "duration": slow, "stack": _INSERT_STACK},
+		],
+	}
+	result = top_queries.analyze([recording], empty_context)
+	shown = [q["normalized_query"] for q in result.aggregate["top_queries"]]
+	assert _ERROR_LOG_INSERT in shown  # positive control
+	assert _AUTH_SELECT not in shown
