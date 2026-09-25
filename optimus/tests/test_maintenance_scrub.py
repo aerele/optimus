@@ -171,6 +171,12 @@ class _FakeFrappe:
 	def __init__(self, error_logs, deleted_docs=(), has_metadata=True, v15_like=False):
 		self.v15_like = v15_like
 		self.cache = _RecordingCache()
+		# Frappe v16 keeps the hooks in client_cache; v15 has none (None here)
+		# and keeps them in frappe.cache.
+		self.client_cache = _RecordingCache()
+		# get_hooks() reloads: each call logs the Redis calls made before it
+		self.hook_loads = []
+		self.local = SimpleNamespace(doc_events_hooks={"User": {}})
 		self.inserted = []
 		self.singles = {}
 		self.single_reads = []
@@ -194,6 +200,10 @@ class _FakeFrappe:
 			savepoint=self.txn.savepoint, release_savepoint=self.txn.release_savepoint,
 			rollback=self.txn.rollback, sql=self._sql, get_single_value=self._get_single_value,
 		)
+
+	def get_hooks(self, *a, **k):
+		self.hook_loads.append((list(self.client_cache.calls if self.client_cache else self.cache.calls), self.reads))
+		return {}
 
 	def _get_single_value(self, doctype, fieldname, cache=True):
 		self.single_reads.append((doctype, fieldname))
@@ -1092,6 +1102,81 @@ class TestNoQueue:
 		assert not hasattr(hooks, "persistent_cache_keys")
 
 
+class TestHooksCacheRefresh:
+	"""Frappe caches every app's hooks under "app_hooks" (Redis, through
+	``frappe.client_cache`` on v16 and ``frappe.cache`` on v15). A process
+	started before the upgrade that misses that key after migrate's
+	``clear_cache`` puts back the old hooks, without the Error Log hook, and
+	every process reads them until the key is deleted again. A real scrub
+	deletes the key, reloads the hooks in its own (new-code) process and
+	drops that process's doc-event copy, before it reads any row."""
+
+	def test_a_real_run_refreshes_the_hooks_before_reading_any_row(self, fake):
+		f = fake([("a", LEAKY)])
+		maintenance.scrub_error_log_secrets(dry_run=False)
+		assert f.client_cache.calls == [("delete_value", "app_hooks")]
+		# reloaded after the delete, before the first row was read
+		assert f.hook_loads == [([("delete_value", "app_hooks")], 0)]
+		assert f.local.doc_events_hooks is None
+		assert f.cache.calls == []
+
+	def test_on_frappe_v15_it_deletes_them_from_frappe_cache(self, fake):
+		f = fake([("a", LEAKY)])
+		f.client_cache = None
+		maintenance.scrub_error_log_secrets(dry_run=False)
+		assert f.cache.calls == [("delete_value", "app_hooks")] and len(f.hook_loads) == 1
+
+	def test_a_dry_run_leaves_them(self, fake):
+		f = fake([("a", LEAKY)])
+		maintenance.scrub_error_log_secrets(dry_run=True)
+		assert f.client_cache.calls == [] and f.cache.calls == [] and f.hook_loads == []
+		assert f.local.doc_events_hooks == {"User": {}}
+
+	@pytest.mark.parametrize("step", ["delete", "reload"])
+	def test_a_refresh_that_fails_never_stops_the_scrub(self, fake, step):
+		f = fake([("a", LEAKY)])
+
+		def _boom(*a, **k):
+			raise ConnectionError("Connection refused")
+		if step == "delete":
+			f.client_cache.delete_value = _boom
+		else:
+			f.get_hooks = _boom
+		assert maintenance.scrub_error_log_secrets(dry_run=False) == {**_OUT, "candidates": 1, "changed": 1}
+		assert maintenance._refresh_hooks_cache() is False
+
+	def test_the_hooks_an_old_process_cached_are_replaced(self, monkeypatch):
+		# Frappe v16's get_hooks and get_doc_hooks over a Redis that holds the
+		# hooks an old process loaded (no Error Log event). Only the refresh
+		# makes the Error Log hook reach get_doc_hooks.
+		from optimus import hooks
+
+		redis = {"app_hooks": {"doc_events": {"User": {"validate": ["optimus.install.on_user_role_change"]}}}}
+
+		def _load_app_hooks():  # this process's modules: the new hooks.py
+			return {"doc_events": {dt: {ev: [h] for ev, h in evs.items()} for dt, evs in hooks.doc_events.items()}}
+
+		def get_hooks(hook=None, default=None):
+			value = redis.get("app_hooks")
+			if value is None:
+				value = redis["app_hooks"] = _load_app_hooks()
+			return value.get(hook, default) if hook else value
+
+		local = SimpleNamespace(doc_events_hooks=None)
+
+		def get_doc_hooks():
+			if not local.doc_events_hooks:
+				local.doc_events_hooks = get_hooks("doc_events", {})
+			return local.doc_events_hooks
+		client_cache = SimpleNamespace(delete_value=lambda key: redis.pop(key, None))
+		monkeypatch.setattr(
+			maintenance, "frappe", SimpleNamespace(client_cache=client_cache, get_hooks=get_hooks, local=local),
+		)
+		assert "Error Log" not in get_doc_hooks()  # stale, and cached in this process too
+		assert maintenance._refresh_hooks_cache() is True
+		assert get_doc_hooks()["Error Log"] == {"before_insert": ["optimus.error_log_mask.mask_error_log"]}
+
+
 class TestKeyUnreadable:
 	"""A key is stored but ``_current_key_or_empty`` answers "": the site's
 	``encryption_key`` changed (a restore onto another site) or its
@@ -1301,7 +1386,18 @@ def patch_env(monkeypatch, patch_logs):
 
 	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(1000, None))
 	monkeypatch.setattr(maintenance, "scrub_error_log_secrets", _scrub)
+	_stub_refresh(monkeypatch, patch_logs.events)
 	return calls
+
+
+def _stub_refresh(monkeypatch, events, answer=True):
+	"""Replace ``maintenance._refresh_hooks_cache``: each call is logged as
+	"refresh" in ``events`` and answers ``answer`` (a callable is called)."""
+
+	def _refresh():
+		events.append("refresh")
+		return answer() if callable(answer) else answer
+	monkeypatch.setattr(maintenance, "_refresh_hooks_cache", _refresh)
 
 
 def _one_summary_line(patch_logs) -> str:
@@ -1336,6 +1432,7 @@ _NOT_MASKED_LINE = (
 def test_patch_runs_the_scrub_for_real(patch_env, patch_logs, capsys):
 	importlib.import_module(_PATCH).execute()
 	assert patch_env == [{"dry_run": False}]
+	assert "refresh" not in patch_logs.events  # the scrub refreshed the hooks cache itself
 	out = capsys.readouterr().out
 	assert "masked AI API keys in 3 stored error row(s)" in out
 	assert out.endswith(f"{_QUEUE_LINE}\n")
@@ -1412,8 +1509,8 @@ def test_a_scrub_that_did_not_run_prints_one_instruction_line(patch_env, patch_l
 	assert out.count(_COMMAND) == 1 and out.count("bench --site") == 1
 	lines = out.splitlines()
 	assert len(lines) == 2 and _RUN_IT in lines[0] and lines[1] == _QUEUE_LINE
-	# rolled back once, before the breadcrumb; nothing else runs in between
-	assert patch_logs.events[:2] == ["rollback", "log_error"]
+	# rolled back, the hooks cache refreshed, then the breadcrumb
+	assert patch_logs.events[:3] == ["rollback", "refresh", "log_error"]
 
 
 @pytest.mark.parametrize(
@@ -1564,6 +1661,7 @@ def pg(monkeypatch, patch_logs):
 	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=txn.rollback), raising=False)
 	monkeypatch.setattr(frappe, "log_error", _log_error, raising=False)
 	monkeypatch.setattr(maintenance, "measure_scan_size", _REAL_MEASURE)
+	_stub_refresh(monkeypatch, patch_logs.events)
 	return txn
 
 
@@ -1592,6 +1690,38 @@ def test_on_postgres_the_patch_log_row_is_still_written(pg, monkeypatch, outcome
 	crumbs = [r for r in pg.written if r[0] == "Error Log"]
 	assert [c[1] for c in crumbs] == [_CRUMB_TITLE]  # written, after the rollback
 	assert pg.written[-1] == "Patch Log"
+
+
+@pytest.mark.parametrize("answer", ["false", "raises"])
+def test_on_postgres_a_refresh_that_fails_is_rolled_back_before_the_breadcrumb(pg, patch_logs, monkeypatch, answer):
+	# The refresh reloads the hooks, which reads the installed apps (a
+	# SELECT). If that read fails it aborts the transaction, and the refresh
+	# cannot say why: the patch rolls back again after a failed refresh.
+	_pg_maintenance(monkeypatch, pg, deleted=maintenance.MIGRATE_SCAN_LIMIT + 1)
+
+	def _aborting():
+		pg.aborted = True  # the failed read
+		if answer == "raises":
+			raise RuntimeError("boom")
+		return False
+	_stub_refresh(monkeypatch, patch_logs.events, _aborting)
+	assert importlib.import_module(_PATCH).execute() is None
+	assert [r[1] for r in pg.written if r[0] == "Error Log"] == [_CRUMB_TITLE]
+	pg.write("Patch Log")  # raises if the transaction is still aborted
+	assert pg.rollbacks == 2
+
+
+def test_an_import_failure_skips_the_refresh(patch_logs, monkeypatch, capsys):
+	import frappe
+
+	import optimus
+
+	calls = []
+	monkeypatch.delattr(optimus, "maintenance")
+	monkeypatch.setitem(sys.modules, "optimus.maintenance", None)  # the import raises
+	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=lambda *a, **k: calls.append("rollback")), raising=False)
+	assert importlib.import_module(_PATCH).execute() is None
+	assert calls == ["rollback"]
 
 
 @pytest.mark.parametrize("outcome", ["skipped", "partial"])
@@ -1677,6 +1807,7 @@ def failing_scrub(monkeypatch, patch_logs):
 	monkeypatch.setattr(maintenance, "measure_scan_size", lambda: maintenance.ScanSize(10, None))
 	monkeypatch.setattr(maintenance, "scrub_error_log_secrets", _scrub)
 	monkeypatch.setattr(frappe, "db", SimpleNamespace(rollback=_rollback), raising=False)
+	_stub_refresh(monkeypatch, patch_logs.events)
 
 
 def test_a_failed_scrub_never_blocks_migrate(failing_scrub, patch_logs, capsys):
@@ -1685,10 +1816,10 @@ def test_a_failed_scrub_never_blocks_migrate(failing_scrub, patch_logs, capsys):
 	assert "failed (ValueError)" in out
 	assert _COMMAND in out and _OFF_PEAK_NOTE in out
 	assert KEY not in out
-	# the failing chunk's writes rolled back; the breadcrumb is written after
-	# (so it survives it), with no exception being handled, and holds the
-	# type and the command
-	assert patch_logs.events[:2] == ["rollback", "log_error"]
+	# the failing chunk's writes rolled back, the hooks cache refreshed; the
+	# breadcrumb is written after (so it survives the rollback), with no
+	# exception being handled, and holds the type and the command
+	assert patch_logs.events[:3] == ["rollback", "refresh", "log_error"]
 	[crumb] = patch_logs.errors
 	assert crumb["title"] == _CRUMB_TITLE and crumb["active"] is None
 	assert crumb["message"].startswith("ValueError. ")

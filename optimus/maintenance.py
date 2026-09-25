@@ -37,7 +37,9 @@ The scrub reads only the tables. Error Log records still waiting in
 Frappe's deferred-insert queue in Redis are never read or changed here:
 the Error Log ``before_insert`` hook (``optimus.error_log_mask``) masks
 every Error Log row as Frappe inserts it, with ``_masked_record`` below,
-the queued ones included when Frappe's ``save_to_db`` inserts them.
+the queued ones included when Frappe's ``save_to_db`` inserts them. A real
+scrub first refreshes the hooks Frappe caches (``_refresh_hooks_cache``),
+so that hook reaches every process once all of them run the new code.
 
 ``tabError Log`` is MyISAM on MariaDB, so each statement holds a table read
 lock while it runs and blocks every Error Log insert meanwhile. Each ``LIKE``
@@ -513,6 +515,30 @@ def _key_unreadable(api_key: str) -> bool:
 	return isinstance(secret, str) and bool(secret.strip())
 
 
+def _refresh_hooks_cache() -> bool:
+	"""Make the hooks every process reads carry the Error Log hook
+	(``optimus.error_log_mask``). Frappe caches all apps' hooks under
+	"app_hooks" (in Redis, through ``frappe.client_cache`` on v16 and
+	``frappe.cache`` on v15), and a process started before the upgrade that
+	misses that key, after migrate's ``clear_cache``, loads its own old
+	modules and caches the old hooks again; every process then reads them
+	until the key is deleted. This deletes the key, reloads the hooks in
+	this process, whose modules are the new ones, so the key holds the new
+	hooks at once, and drops this process's own copy of the doc events
+	(``frappe.local.doc_events_hooks``, kept for a whole request, or a whole
+	bench migrate). It helps only once every process runs the new code: a
+	process still running the old code can cache the old hooks again. True
+	when it did all three; never raises."""
+	try:
+		cache = getattr(frappe, "client_cache", None) or frappe.cache
+		cache.delete_value("app_hooks")
+		frappe.get_hooks()
+		frappe.local.doc_events_hooks = None
+		return True
+	except Exception:
+		return False
+
+
 def _refuse_inside_a_background_job() -> None:
 	"""Raise ``InsideBackgroundJobError`` inside an RQ job. The scrub's frames
 	hold unmasked rows (keys, prompts), and a job that fails is logged with
@@ -639,9 +665,12 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	Refuses to run inside an RQ job (``InsideBackgroundJobError``).
 
 	It reads the stored key first. It never reads or changes Frappe's
-	deferred-insert queue, and a dry run does not touch Redis at all: the
-	Error Log hook (``optimus.error_log_mask``) masks every queued record as
-	Frappe inserts it.
+	deferred-insert queue: the Error Log hook (``optimus.error_log_mask``)
+	masks every queued record as Frappe inserts it. A real run first
+	refreshes the hooks Frappe caches (``_refresh_hooks_cache``), so that
+	hook reaches every process once all of them run the new code (run it
+	after the restart); a failed refresh is not counted and never stops the
+	scrub. A dry run does not touch Redis at all.
 
 	Returns a dict:
 
@@ -670,6 +699,8 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 		"key_unreadable": False,
 	}
 	api_key = _current_key_or_empty()
+	if not dry_run:
+		_refresh_hooks_cache()
 	if _key_unreadable(api_key):
 		out["key_unreadable"] = True
 		out["failed"] += 1
