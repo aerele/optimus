@@ -861,7 +861,7 @@ def _get_api_key() -> str:
 		from frappe import _
 
 		raise AiFixError(
-			_("The AI API key in Optimus Settings contains a character that cannot be sent in an HTTP header or is not plain ASCII (often a pasted smart quote, a no-break space or a stray control character such as a newline or tab). Paste the key again."),
+			_("The AI API key in Optimus Settings contains a character that cannot be sent in an HTTP header or is not plain ASCII (often a pasted smart quote, a stray space, a no-break space, or a control character such as a newline or tab). Paste the key again."),
 			kind="config",
 		) from None
 	return api_key
