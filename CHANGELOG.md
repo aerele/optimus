@@ -65,8 +65,8 @@ versions may contain breaking changes see migration notes below).
   the patches, and the scheduler every 15 minutes). It changes only a row from
   Optimus's AI code (an `optimus/ai_fix.py` or `frappe_profiler/ai_fix.py`
   frame in its error, title or metadata) or one holding the key stored in
-  Optimus Settings (raw or JSON-escaped). In such a row it masks the key, the
-  key shapes `redaction.scrub_secrets` knows and the bare header value lines
+  Optimus Settings (raw, JSON-escaped or repr-escaped). In such a row it masks
+  the key, the key shapes `redaction.scrub_secrets` knows and the bare header value lines
   of the HTTP library's frames in `error`, `method` (the title) and
   `metadata`, and moves a title longer than its 140-character column in front
   of the error, as Frappe v16 does, so on Frappe v15 such a row is no longer
@@ -90,8 +90,8 @@ versions may contain breaking changes see migration notes below).
   resolves the hook without error, since its module imports only the standard
   library. There its import of the rest of Optimus can fail (the old modules
   are still loaded), and it then falls back to Frappe alone: it masks the
-  stored key, raw or JSON-escaped, in `error`, `method` and `metadata`, but
-  not the other key shapes or the value lines; step 3 masks those in the
+  stored key, raw, JSON-escaped or repr-escaped, in `error`, `method` and
+  `metadata`, but not the other key shapes or the value lines; step 3 masks those in the
   table. An image-based or rolling deployment is different: see the upgrade
   notes.
 
@@ -143,14 +143,15 @@ versions may contain breaking changes see migration notes below).
      report these values: `changed` 0, `deleted_docs_changed` 0, `residual` 0,
      `failed` 0 and `key_unreadable` False. The result also holds
      `hooks_refreshed`, which is not one of those values: True when the real
-     run refreshed Frappe's cached hooks and read them back holding the Error
-     Log hook, and always False on a dry run. A failed refresh is not counted
-     in `failed`; if the real run's `hooks_refreshed` is False, or you cannot
-     run this step, run `bench --site <site> clear-cache` after the restart.
+     run refreshed Frappe's cached hooks, confirmed the Redis key exists and
+     found the Error Log hook in this process's hooks (only that check runs
+     in developer mode); always False on a dry run. A failed refresh is not
+     counted in `failed`; if the real run's `hooks_refreshed` is False, or you
+     cannot run this step, run `bench --site <site> clear-cache` after the restart.
      To confirm that the hooks the site's processes read carry the Error Log
      hook, check that this prints `optimus.error_log_mask.mask_error_log`
      under `before_insert`:
-     `bench --site <site> execute frappe.get_hooks --kwargs "{'hook': 'doc_events'}" | grep -o '"Error Log": {[^}]*}'`
+     `bench --site <site> execute frappe.get_doc_hooks | grep -o '"Error Log": {[^}]*}'`
      (in developer mode it shows only its own process's hooks). If it does
      not, a process of the previous release still runs or cached the old
      hooks: restart or replace every such process, run
@@ -297,9 +298,9 @@ versions may contain breaking changes see migration notes below).
   finish" with its counts and the command. Every path then prints one line
   saying that Optimus masks the Error Log entries still queued in Redis when
   Frappe inserts them and nothing needs doing for the queue, or, when
-  `optimus.maintenance` cannot be imported, that rows, queued ones included,
-  may be stored unmasked until it can. Every path ends with a line saying to
-  run the scrub (step 3) after restarting the web server and the background
+  `optimus.maintenance` cannot be imported, that only key shapes may stay
+  unmasked in rows, queued ones included, until it can. Every path ends
+  with a line saying to run the scrub (step 3) after restarting the web server and the background
   workers, since it also refreshes Frappe's cached hooks, or, if you cannot,
   `bench --site <site> clear-cache` after the restart; that line first says
   the cached hooks were not refreshed during the migrate when the refresh
@@ -343,7 +344,8 @@ versions may contain breaking changes see migration notes below).
 - No Desk form or JavaScript change (open tabs need no reload) and no new
   `site_config.json` key.
 - Verify: the dry run in step 3 above reports the values listed there, the
-  check in step 3 shows the Error Log hook, and a failed AI call leaves
+  check `bench --site <site> execute frappe.get_doc_hooks | grep -o '"Error Log": {[^}]*}'`
+  shows the Error Log hook, and a failed AI call leaves
   exactly one Error Log row whose text is an explicit message without a dump
   of local variables.
 

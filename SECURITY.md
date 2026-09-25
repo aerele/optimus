@@ -139,8 +139,8 @@ its deferred-insert queue in Redis (bench migrate right after the patches,
 and the scheduler every 15 minutes). It changes only a row from Optimus's AI
 code (an `optimus/ai_fix.py` or `frappe_profiler/ai_fix.py` frame in its
 error, title or metadata) or one holding the key stored in Optimus Settings
-(raw or JSON-escaped). In such a row it masks the key, the key shapes
-`scrub_secrets` knows and the bare header value lines of the HTTP library's
+(raw, JSON-escaped or repr-escaped). In such a row it masks the key, the
+key shapes `scrub_secrets` knows and the bare header value lines of the HTTP library's
 frames in `error`, `method` (the title) and `metadata`, and moves a title
 longer than its 140-character column in front of the error, as Frappe v16
 does. Every other row, another app's included, is stored exactly as it was.
@@ -165,8 +165,8 @@ in-place upgrade (the new code on the filesystem the running processes use),
 a process still running the previous release that reads the new hooks
 resolves the hook without error; there its import of the rest of Optimus can
 fail (the old modules are still loaded), and it then falls back to Frappe
-alone: it masks the stored key, raw or JSON-escaped, in `error`, `method`
-and `metadata` (a key shorter than 8 characters is not replaced), but not
+alone: it masks the stored key, raw, JSON-escaped or repr-escaped, in
+`error`, `method` and `metadata` (a key shorter than 8 characters is not replaced), but not
 the other key shapes or the value lines. An image-based or rolling
 deployment is different. See the known limitations below for both, and for
 when the hook takes effect.
@@ -206,9 +206,10 @@ time.
    the Error Log and Deleted Document tables: it never reads or changes
    Frappe's deferred-insert queue in Redis, whose records the Error Log hook
    masks when Frappe inserts them. A real run first clears and reloads the
-   hooks Frappe caches and reads them back, so the hook reaches every
+   hooks Frappe caches, so the hook reaches every
    process once all of them run this release; its result's `hooks_refreshed`
-   is True when the hooks read back hold the Error Log hook.
+   is True when the Redis key exists and this process's hooks hold the
+   Error Log hook (in developer mode only this process's hooks are checked).
    `hooks_refreshed` is not one of the values above, and a failed refresh is
    not counted in `failed`. A dry run neither refreshes the cached hooks nor
    reads the deferred-insert queue, so its `hooks_refreshed` is always
@@ -217,7 +218,7 @@ time.
    restart. To confirm that the hooks the site's processes read carry the
    Error Log hook, check that this prints
    `optimus.error_log_mask.mask_error_log` under `before_insert`:
-   `bench --site <site> execute frappe.get_hooks --kwargs "{'hook': 'doc_events'}" | grep -o '"Error Log": {[^}]*}'`
+   `bench --site <site> execute frappe.get_doc_hooks | grep -o '"Error Log": {[^}]*}'`
    (in developer mode it shows only its own process's hooks). If it does
    not, a process of the previous release still runs or cached the old
    hooks: restart or replace every such process, run
@@ -266,9 +267,9 @@ clears and reloads the hooks Frappe caches, as a real scrub does first, so
 the migrate's own insert of the queue runs the hook (unless a process still
 running the previous release caches the old hooks again in between). On
 every path it prints one line saying nothing needs doing for the queue (or,
-when `optimus.maintenance` cannot be imported, that rows, queued ones
-included, may be stored unmasked until it can), then a last line saying to
-run the scrub after restarting the web server and the background workers,
+when `optimus.maintenance` cannot be imported, that only key shapes may
+stay unmasked in rows, queued ones included, until it can), then a last
+line saying to run the scrub after restarting the web server and the background workers,
 since it also refreshes Frappe's cached hooks, or, if you cannot,
 `bench --site <site> clear-cache` after the restart; that line first says
 the cached hooks were not refreshed during the migrate when the refresh
@@ -352,10 +353,13 @@ installed on the site.
   those started after the restart included, then reads those until the cache
   is cleared again. So the normal case is to run steps 4 and 5 after the
   restart: a real run of the scrub clears and reloads the cached hooks and
-  reads them back (`hooks_refreshed`). If you do not run them, or
+  checks that the Redis key exists and this process's hooks hold the
+  Error Log hook (`hooks_refreshed`). If you do not run them, or
   `hooks_refreshed` is False, run `bench --site <site> clear-cache` after
-  the restart. The scrub run after the restart masks, in the table, the rows
-  written while the hook was not fully active.
+  the restart. Verify with
+  `bench --site <site> execute frappe.get_doc_hooks | grep -o '"Error Log": {[^}]*}'`.
+  The scrub run after the restart masks, in the table, the rows written
+  while the hook was not fully active.
 - In developer mode Frappe keeps the hooks in each process (on v16 a copy
   per process, on v15 loaded again for each request from the modules the
   process has already imported), not in Redis. No process can cache old
