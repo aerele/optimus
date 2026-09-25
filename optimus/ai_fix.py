@@ -41,7 +41,9 @@ class AiFixError(Exception):
 	yet, so it is always None for now.
 
 	The message must never contain the API key: it is shown to the operator
-	and written to the Error Log."""
+	and written to the Error Log. An HTTP-status error from ``_http_post``
+	is the exception: its message carries the provider's reply, so its row
+	shows a body-free log text instead (``_LOG_TEXT_ATTR``)."""
 
 	def __init__(
 		self,
@@ -1393,6 +1395,9 @@ def _is_reasoning_model(model: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _LOGGED_ATTR = "_optimus_ai_logged"
+# The body-free text an HTTP-status AiFixError from _http_post is logged with
+# (see _exception_text): its message carries the provider's reply.
+_LOG_TEXT_ATTR = "_optimus_log_text"
 
 
 def log_ai_failure(
@@ -1414,7 +1419,9 @@ def log_ai_failure(
 
 	The message is explicit: ``title``, the session, ``context`` as ``k=v``
 	lines and the plain traceback of ``exc`` (code lines only: no frame
-	locals, no exception chain), passed through
+	locals, no exception chain; for an HTTP-status error from ``_http_post``
+	the exception line holds its body-free log text, not its message: see
+	``_exception_text``), passed through
 	``redaction.scrub_secrets`` with the live key as a literal. Frappe's own
 	with-context traceback prints every frame's locals, which is how the API
 	key and the prompt reached the Error Log before this fix.
@@ -1454,7 +1461,7 @@ def log_ai_failure(
 		for k in sorted(context):
 			lines.append(f"{k}={context[k]}")
 		if exc is not None:
-			lines.append("".join(traceback.format_exception(exc, chain=False)).rstrip())
+			lines.append(_exception_text(exc))
 		message = _scrubbed_message(title, lines, exc)
 		# Sentry (attach_stacktrace) serialises this frame's locals with the
 		# event: only the scrubbed message may be bound while logging.
@@ -1493,6 +1500,29 @@ def log_ai_failure(
 	if failure_type is not None:
 		_note_unwritten_row(failure_type)
 	return logged
+
+
+def _exception_text(exc: BaseException) -> str:
+	"""The plain traceback of ``exc`` for its Error Log row: the code lines
+	of its frames (no frame locals, no exception chain), then the exception
+	line.
+
+	An HTTP-status ``AiFixError`` from ``_http_post`` carries a body-free log
+	text (``_LOG_TEXT_ATTR``: the status, the call site and the provider's
+	error code). Its message holds the provider's reply for the operator,
+	and the reply can echo the prompt, so its exception line shows that text
+	instead of the message. The HTTP layer logs such an error itself; this
+	matters when that row could not be written and the caller logs it."""
+	log_text = getattr(exc, _LOG_TEXT_ATTR, None)
+	if not isinstance(log_text, str):
+		return "".join(traceback.format_exception(exc, chain=False)).rstrip()
+	frames = traceback.format_tb(exc.__traceback__)
+	head = "".join(["Traceback (most recent call last):\n", *frames]) if frames else ""
+	cls = type(exc)
+	name = cls.__qualname__
+	if cls.__module__ not in ("__main__", "builtins"):
+		name = f"{cls.__module__}.{name}"  # as traceback.format_exception names it
+	return f"{head}{name}: {log_text}"
 
 
 def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None) -> str:
@@ -1902,7 +1932,12 @@ def _http_post(
 	elif status >= 400:
 		failure = AiFixError(f"The AI provider returned an error (HTTP {status}){_response_detail(resp, auth)}", status_code=status)
 	if failure is not None:
-		_log_http_error(provider, where, status, detail, exc=failure, provider_error=_provider_error_code(resp, auth))
+		provider_error = _provider_error_code(resp, auth)
+		# If the row below cannot be written, the caller logs this error: with
+		# this text, never the reply its message carries (_exception_text).
+		code = f", provider_error={provider_error}" if provider_error else ""
+		setattr(failure, _LOG_TEXT_ATTR, f"HTTP {status} from the AI provider (where={where}{code})")
+		_log_http_error(provider, where, status, detail, exc=failure, provider_error=provider_error)
 		raise failure
 
 	data = None

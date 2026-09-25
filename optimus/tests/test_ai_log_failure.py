@@ -926,6 +926,41 @@ class TestHttpFailurePath:
 		assert attempts == ["optimus ai_fix", "optimus ai backfill"]
 		assert [r["title"] for r in logs] == ["optimus ai backfill"]
 
+	@pytest.mark.parametrize("status", [400, 401, 403, 404, 422, 429, 500])
+	def test_the_callers_row_never_holds_the_reply_when_the_http_row_failed(
+		self, logs, monkeypatch, breadcrumbs, status,
+	):
+		# The HTTP layer's own row could not be written, so the caller logs the
+		# error itself. Its message carries the provider's reply to the
+		# operator, and the reply can echo the prompt: the caller's row names
+		# the status, the call site and the provider's error code instead, and
+		# keeps the plain frames.
+		import frappe
+
+		attempts = []
+
+		def _fails_once(**kw):
+			attempts.append(kw["title"])
+			if len(attempts) == 1:
+				raise RuntimeError("Error Log insert failed")
+			logs.append(kw)
+
+		monkeypatch.setattr(frappe, "log_error", _fails_once, raising=False)
+		pii = "pii.reply@example.com"
+		body = {"error": {"message": f"REPLY-BODY: you asked about {pii}", "type": "invalid_request_error"}}
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(status, body, text=json.dumps(body))))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			_call()
+		if status not in (401, 403, 429):
+			assert f"REPLY-BODY: you asked about {pii}" in str(ei.value)  # the operator's message is unchanged
+		assert ai_fix.log_ai_failure("optimus ai backfill", ei.value) is True
+		assert attempts == ["optimus ai_fix", "optimus ai backfill"]
+		row = logs[0]["message"]
+		assert pii not in row and "REPLY-BODY" not in row and "you asked" not in row
+		assert f"HTTP {status} " in row
+		assert "where=chat/completions" in row and "provider_error=invalid_request_error" in row
+		assert "Traceback (most recent call last):" in row and ", in _http_post\n" in row  # the plain frames stay
+
 	def test_http_row_references_the_marked_session(self, logs, monkeypatch):
 		import frappe
 
