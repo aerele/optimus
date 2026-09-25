@@ -418,7 +418,7 @@ def canary(monkeypatch, request):
 	scenario, provider = request.param
 	job_timeout = None
 	if scenario == "rq_timeout":
-		job_timeout = pytest.importorskip("rq.timeouts").JobTimeoutException
+		job_timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
 	sinks = _Sinks()
 	monkeypatch.setattr(analyze, "frappe", frappe)
 	monkeypatch.setattr(api, "frappe", frappe)
