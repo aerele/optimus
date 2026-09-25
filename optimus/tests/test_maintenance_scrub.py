@@ -894,30 +894,57 @@ class TestUnderSavepoint:
 		assert log == [("savepoint", "optimus_scrub_row"), ("rollback", "optimus_scrub_row")]
 
 
+def _replay_frappe_flush(cache, insert):
+	"""Frappe's ``save_to_db`` for the Error Log queue, which bench migrate
+	runs right after the patches: every entry left is inserted as it is."""
+	queue = cache.queues.get("insert_queue_for_Error Log") or []
+	while queue:
+		records = json.loads(queue.pop(0))
+		for record in records if isinstance(records, list) else [records]:
+			insert(record)
+
+
 class TestFlushDeferredErrorLogs:
-	def _frappe(self, monkeypatch, cache, fail_on=()):
+	def _frappe(self, monkeypatch, cache, fail_on=(), stored_then_fail=lambda error: False, transactional=False):
 		"""A failed insert aborts the transaction, as a failed statement does
 		on Postgres: every later statement except a ROLLBACK fails until a
-		rollback to a savepoint that was set (``_FakeTxn``)."""
+		rollback to a savepoint that was set (``_FakeTxn``).
+
+		``stored_then_fail(error)`` picks records whose INSERT runs and a
+		hook after it then raises, as a failing ``after_insert`` does. The
+		row stays in ``self.table`` after the rollback to the savepoint, as
+		in a MyISAM table, unless ``transactional`` (the rollback removes
+		it, as on Postgres). ``frappe.db.exists`` reads ``self.table``."""
 		inserted, commits = [], []
 		state = {"aborted": False}
 		self.db_log = []
+		self.table = {}  # name -> record, every row the "database" holds
+		since_savepoint = []
 		txn = self.txn = _FakeTxn(self.db_log)
 
 		def _live():
 			if state["aborted"]:
 				raise RuntimeError("current transaction is aborted")
 
-		def _insert(record):
+		def _store(doc, record):
+			doc.name = f"e{len(self.table) + 1:04d}"
+			self.table[doc.name] = record
+			since_savepoint.append(doc.name)
+
+		def _insert(doc, record):
 			_live()
 			self.db_log.append(("insert", record.get("error")))
 			if record.get("error") in fail_on:
 				state["aborted"] = True
 				raise RuntimeError("Duplicate entry")
+			_store(doc, record)
+			if stored_then_fail(record.get("error")):
+				raise RuntimeError("after_insert hook failed")
 			inserted.append(record)
 
 		def _savepoint(name):
 			_live()
+			since_savepoint.clear()
 			txn.savepoint(name)
 
 		def _release(name):
@@ -927,6 +954,15 @@ class TestFlushDeferredErrorLogs:
 		def _rollback(save_point=None):
 			txn.rollback(save_point)  # raises for a savepoint that was never set
 			state["aborted"] = False
+			if transactional:
+				for name in since_savepoint:
+					self.table.pop(name, None)
+			since_savepoint.clear()
+
+		def _exists(doctype, name):
+			assert doctype == "Error Log"
+			_live()
+			return name if name in self.table else None
 
 		self.commit_points = []  # rows inserted so far, at each commit
 
@@ -937,8 +973,10 @@ class TestFlushDeferredErrorLogs:
 			state["aborted"] = False
 
 		def _get_doc(record):
-			return SimpleNamespace(insert=lambda ignore_permissions=False: _insert(record))
-		db = SimpleNamespace(savepoint=_savepoint, release_savepoint=_release, rollback=_rollback)
+			doc = SimpleNamespace(name=None)
+			doc.insert = lambda ignore_permissions=False: _insert(doc, record)
+			return doc
+		db = SimpleNamespace(savepoint=_savepoint, release_savepoint=_release, rollback=_rollback, exists=_exists)
 		monkeypatch.setattr(maintenance, "frappe", SimpleNamespace(cache=cache, get_doc=_get_doc, db=db))
 		monkeypatch.setattr(maintenance, "safe_commit", _commit)
 		return inserted, commits
@@ -1083,6 +1121,40 @@ class TestFlushDeferredErrorLogs:
 		assert self.db_log[i + 1] == ("rollback", "optimus_scrub_row")
 		assert self.txn.max_depth == 1  # released after the rollback too
 		assert commits == [1]
+
+	def test_a_row_stored_before_its_insert_failed_counts_as_inserted(self, monkeypatch):
+		# Error Log is MyISAM on MariaDB: the rollback to the savepoint does
+		# not undo an INSERT, so a hook that fails after it leaves the row
+		# stored. It counts as inserted: not failed, never pushed back (bench
+		# migrate's own flush would insert it a second time, unmasked), and it
+		# resets the run of failed inserts, so the flush does not stop.
+		errors = ("B1", "B2", f"H1 api_key={KEY}", "B3", f"H2 api_key={KEY}", f"H3 api_key={KEY}", "B4", "ok")
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": e}) for e in errors]})
+		self._frappe(monkeypatch, cache, fail_on={"B1", "B2", "B3", "B4"}, stored_then_fail=lambda e: e.startswith("H"))
+		assert maintenance._flush_deferred_error_logs(KEY) == (4, False)
+		assert cache.pushes == [] and cache.queues["insert_queue_for_Error Log"] == []
+		rows = sorted(r["error"] for r in self.table.values())
+		assert rows == sorted([maintenance._mask(f"H{i} api_key={KEY}", KEY) for i in (1, 2, 3)] + ["ok"])
+		_replay_frappe_flush(cache, lambda record: self.table.setdefault(f"f{len(self.table)}", record))
+		assert len(self.table) == 4  # no duplicate
+		assert not [r for r in self.table.values() if KEY in json.dumps(r)]
+
+	def test_a_row_the_rollback_removed_counts_as_failed(self, monkeypatch):
+		# On a transactional engine (Postgres) the rollback to the savepoint
+		# removes the row the failing hook followed: not inserted.
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "H1"}), json.dumps({"error": "ok"})]})
+		self._frappe(monkeypatch, cache, stored_then_fail=lambda e: e == "H1", transactional=True)
+		assert maintenance._flush_deferred_error_logs(KEY) == (1, False)
+		assert [r["error"] for r in self.table.values()] == ["ok"]
+
+	def test_a_stored_row_that_cannot_be_checked_counts_as_failed(self, monkeypatch):
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "H1"})]})
+		self._frappe(monkeypatch, cache, stored_then_fail=lambda e: True)
+
+		def _exists(doctype, name):
+			raise RuntimeError("Lost connection to server during query")
+		maintenance.frappe.db.exists = _exists
+		assert maintenance._flush_deferred_error_logs(KEY) == (1, False)
 
 	def test_a_malformed_record_does_not_stop_the_valid_ones_behind_it(self, monkeypatch):
 		# A record that cannot be parsed is counted and skipped; the records
