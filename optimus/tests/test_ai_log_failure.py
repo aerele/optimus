@@ -135,10 +135,14 @@ def requeued(monkeypatch):
 
 def _crumb(error_type: str) -> str:
 	"""The breadcrumb for a row that may be missing. It says "may": a failed
-	existence check leaves a row that may have survived (MariaDB), and a
-	failed callback registration leaves a written row that a later Postgres
-	rollback could remove."""
-	return f"optimus ai_fix: an AI Error Log row may not have been written or re-queued: {error_type}"
+	existence check leaves a row that may have survived (MariaDB), a failed
+	callback registration leaves a written row that a later Postgres
+	rollback could remove, and a hook that fails after the insert (a broken
+	Error Log notification, say) leaves a written row whose write raised."""
+	return (
+		"optimus ai_fix: an AI Error Log row may not have been written or re-queued, "
+		f"or a hook after the insert failed: {error_type}"
+	)
 
 
 @pytest.fixture(autouse=True)
@@ -424,15 +428,35 @@ class TestLogAiFailure:
 		import frappe
 
 		def _boom(**kw):
-			raise RuntimeError(f"insert failed for {KEY} alice@example.com")
+			raise RuntimeError(f"MESSAGE-MARKER: insert failed for {KEY} alice@example.com")
 		monkeypatch.setattr(frappe, "log_error", _boom, raising=False)
 		ai_fix.log_ai_failure("t", ValueError("x"))
 		assert len(breadcrumbs) == 1
 		module, message, active = breadcrumbs[0]
 		assert module == "optimus"
 		assert message == _crumb("RuntimeError")
-		assert KEY not in message and "alice@example.com" not in message and "insert failed" not in message
+		assert KEY not in message and "alice@example.com" not in message and "MESSAGE-MARKER" not in message
 		assert active is None
+
+	def test_a_hook_that_fails_after_the_insert_is_named_by_the_breadcrumb(self, logs, monkeypatch, breadcrumbs):
+		# frappe.log_error inserted the row, then a hook after the insert failed
+		# (a broken Error Log notification, say). The row is there but the write
+		# raised, so the error stays unmarked and a caller that logs it again
+		# writes a second row (an accepted residual). The breadcrumb covers this
+		# case too, and still names the error type only.
+		import frappe
+
+		def _insert_then_hook_fails(**kw):
+			logs.append(kw)
+			raise RuntimeError(f"notification hook failed for {KEY} alice@example.com")
+		monkeypatch.setattr(frappe, "log_error", _insert_then_hook_fails, raising=False)
+		failed = ai_fix.AiFixError("x")
+		assert ai_fix.log_ai_failure("t", failed) is False
+		assert len(logs) == 1  # the row was written
+		assert not getattr(failed, ai_fix._LOGGED_ATTR, False)
+		assert breadcrumbs == [("optimus", _crumb("RuntimeError"), None)]
+		assert "or a hook after the insert failed: RuntimeError" in breadcrumbs[0][1]
+		assert KEY not in breadcrumbs[0][1] and "alice@example.com" not in breadcrumbs[0][1]
 
 	def test_a_failing_breadcrumb_is_swallowed(self, logs, monkeypatch):
 		import frappe

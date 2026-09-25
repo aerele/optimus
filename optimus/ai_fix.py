@@ -1443,9 +1443,11 @@ def log_ai_failure(
 	  failures, so a caller that logs the same ``AiFixError`` again is a
 	  no-op (no double rows). Only a row that was written marks it.
 	- Returns True once ``frappe.log_error`` has returned, else False
-	  (already logged, or the write failed). A failed write leaves one
+	  (already logged, or the write raised). A write that raised leaves one
 	  error-level line with the error type in the ``optimus`` log
-	  (``_note_unwritten_row``).
+	  (``_note_unwritten_row``). It raises also when a hook after the insert
+	  fails: the row is then written but ``exc`` stays unmarked, so a caller
+	  that logs it again writes a second row.
 	- Never raises, except an RQ job timeout (the job must still stop),
 	  which leaves as a fresh instance with no chain.
 	"""
@@ -1634,11 +1636,15 @@ def _note_unwritten_row(error_type: str) -> None:
 	"""Leave a trace when an AI failure row may be missing from the Error Log:
 	one line in the ``optimus`` log naming the error TYPE only (its message
 	could hold anything). It says the row "may not have been written or
-	re-queued", because that is all that is known: the write failed; or,
-	after a rollback, the existence check failed (on MariaDB the row may
-	well have survived) or the queue failed; or the rollback callback could
-	not be registered (the row was written, but a later rollback on
-	Postgres could remove it without queuing it again).
+	re-queued, or a hook after the insert failed", because that is all that
+	is known: the write failed; or a hook that runs after the insert (a
+	broken Error Log notification, say) failed, so the row is there but
+	the write raised (the error then stays unmarked, and a caller that logs
+	it again writes a second row); or, after a rollback, the existence check
+	failed (on MariaDB the row may well have survived) or the queue failed;
+	or the rollback callback could not be registered (the row was written,
+	but a later rollback on Postgres could remove it without queuing it
+	again).
 
 	It is logged at ERROR: Frappe's loggers drop anything below ERROR unless
 	DEV_SERVER is set (``bench start``; ``frappe/utils/logger.py``), so a
@@ -1649,7 +1655,8 @@ def _note_unwritten_row(error_type: str) -> None:
 		import frappe
 
 		frappe.logger("optimus").error(
-			f"optimus ai_fix: an AI Error Log row may not have been written or re-queued: {error_type}"
+			"optimus ai_fix: an AI Error Log row may not have been written or re-queued, "
+			f"or a hook after the insert failed: {error_type}"
 		)
 	except _job_timeout_types() as e:
 		interrupt = (type(e), e.args)
