@@ -1514,17 +1514,20 @@ def _exception_text(exc: BaseException) -> str:
 	error code). Its message holds the provider's reply for the operator,
 	and the reply can echo the prompt, so its exception line shows that text
 	instead of the message. The HTTP layer logs such an error itself; this
-	matters when that row could not be written and the caller logs it."""
+	matters when that row could not be written and the caller logs it.
+
+	Both are ``traceback.format_exception`` output: for such an error it
+	formats a stand-in of the same type whose only argument is the log text,
+	with the error's own traceback, so the stdlib still names the type and
+	formats the frames and only the message differs. The stand-in is made
+	with ``__new__`` alone (no ``__init__``), so it carries nothing else of
+	the error: no notes, no chain."""
+	shown = exc
 	log_text = getattr(exc, _LOG_TEXT_ATTR, None)
-	if not isinstance(log_text, str):
-		return "".join(traceback.format_exception(exc, chain=False)).rstrip()
-	frames = traceback.format_tb(exc.__traceback__)
-	head = "".join(["Traceback (most recent call last):\n", *frames]) if frames else ""
-	cls = type(exc)
-	name = cls.__qualname__
-	if cls.__module__ not in ("__main__", "builtins"):
-		name = f"{cls.__module__}.{name}"  # as traceback.format_exception names it
-	return f"{head}{name}: {log_text}"
+	if isinstance(log_text, str):
+		shown = type(exc).__new__(type(exc))
+		shown.args = (log_text,)
+	return "".join(traceback.format_exception(type(shown), shown, exc.__traceback__, chain=False)).rstrip()
 
 
 def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None) -> str:
