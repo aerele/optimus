@@ -89,13 +89,15 @@ _FLUSH_MAX_FAILURES = 3
 # inserted (the ones the scrub reads in a stored row).
 _QUEUED_TEXT_FIELDS = ("error", "method", "metadata")
 _AI_FRAME = "%ai_fix.py%"
-# The purge's frame patterns: Optimus's own module only, under its name and
-# under the app's name before its rename (frappe_profiler), so another app's
-# openai_fix.py rows are never deleted (the package prefix excludes them).
-# They hold no LIKE escape, so they work on Frappe v15, whose db_query
-# doubles backslashes, as well as on v16; each "_" is a one-character
-# wildcard.
-_OPTIMUS_AI_FRAMES = ("%optimus/ai_fix.py%", "%frappe_profiler/ai_fix.py%")
+# Optimus's own AI module, under its name and under the app's name before its
+# rename (frappe_profiler): a queued record with such a frame has its value
+# lines masked (_is_ai_record), and the purge deletes the rows with one.
+_OPTIMUS_AI_FRAME_PATHS = ("optimus/ai_fix.py", "frappe_profiler/ai_fix.py")
+# The purge's frame patterns, so another app's openai_fix.py rows are never
+# deleted (the package prefix excludes them). They hold no LIKE escape, so
+# they work on Frappe v15, whose db_query doubles backslashes, as well as on
+# v16; each "_" is a one-character wildcard.
+_OPTIMUS_AI_FRAMES = tuple(f"%{path}%" for path in _OPTIMUS_AI_FRAME_PATHS)
 # Any of these next to an ai_fix.py frame means the row may hold a key.
 _SECRET_MARKERS = ("%Bearer %", "%api_key%", "%x-api-key%")
 _MIN_KEY_LEN = 8
@@ -132,7 +134,8 @@ _DRY_RUN_WORDS = {"true": True, "1": True, "yes": True, "false": False, "0": Fal
 # ``one_value``): the raw header value, so an ``x-api-key`` header shows as a
 # bare key that no scrub_secrets shape matches. Only string-like values
 # (quoted, bytes, list, tuple) are masked, and only in rows already selected
-# as AI rows. The second form is the same line inside Deleted Document data,
+# as AI rows, or queued records from the AI code or holding the key
+# (_is_ai_record): other snapshots keep their value lines. The second form is the same line inside Deleted Document data,
 # which is JSON (newlines escaped as \n); it consumes escape pairs whole so
 # the JSON stays valid. Its repeat is bounded: an unbounded one keeps a
 # backtracking frame per character (about 150 bytes each), so a planted
@@ -228,8 +231,13 @@ def _holds_key(row: dict, fields: tuple[str, ...], api_key: str) -> bool:
 	return False
 
 
-def _mask(text: str, api_key: str) -> str:
+def _mask(text: str, api_key: str, value_lines: bool = True) -> str:
+	"""``text`` through ``scrub_secrets`` with the key (raw and JSON-escaped)
+	as literals, then, when ``value_lines``, with the bare header value
+	lines masked (``_VALUE_LINE``, ``_ESCAPED_VALUE_LINE``)."""
 	out = scrub_secrets(text, literals=(api_key, _json_escaped(api_key)))
+	if not value_lines:
+		return out
 	out = _VALUE_LINE.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER, out)
 	return _ESCAPED_VALUE_LINE.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER, out)
 
@@ -294,9 +302,11 @@ def _flush_deferred_error_logs(api_key: str) -> _Flushed:
 	paused never flushes that queue. Only the Error Log queue: other
 	doctypes' queues stay the scheduler's.
 
-	Each record's ``error``, ``method`` and ``metadata`` are masked with
-	``_mask`` and ``api_key`` (the key the caller read before the first pop;
-	``method`` cut to its column) BEFORE the record is inserted, so a queued
+	Each record's ``error``, ``method`` and ``metadata`` are masked by
+	``_masked_record`` with ``api_key`` (the key the caller read before the
+	first pop; header value lines only in a record from the AI code or
+	holding the key; ``method`` cut to its column) BEFORE the record is
+	inserted, so a queued
 	pre-fix snapshot never reaches the database (the INSERT statement, the
 	binlog, the query logs) with the key in it. A record that cannot be
 	masked is counted and dropped, never inserted unmasked.
@@ -493,13 +503,31 @@ def _mask_left_in_queue(run: _FlushRun, api_key: str, left: int) -> None:
 
 def _masked_record(record, api_key: str) -> dict | None:
 	"""A queued ``record`` with its ``_QUEUED_TEXT_FIELDS`` masked (see
-	``_mask_row``), or None when it is not a record or masking it failed."""
+	``_mask_row``), or None when it is not a record or masking it failed.
+	Its bare header value lines are masked only when ``_is_ai_record``:
+	any other snapshot (an ERPNext error with a ``value = ...`` local, say)
+	goes through ``scrub_secrets`` alone and keeps them."""
 	if not isinstance(record, dict):
 		return None
-	masked = _mask_row(record, _QUEUED_TEXT_FIELDS, api_key)
+	try:
+		value_lines = _is_ai_record(record, api_key)
+	except Exception:
+		return None
+	masked = _mask_row(record, _QUEUED_TEXT_FIELDS, api_key, value_lines=value_lines)
 	if masked is None:
 		return None
 	return {**record, **masked[0]}
+
+
+def _is_ai_record(record: dict, api_key: str) -> bool:
+	"""True when a queued record comes from Optimus's AI code (its ``error``
+	has a frame in ``optimus/ai_fix.py`` or ``frappe_profiler/ai_fix.py``) or
+	holds the stored key (of at least ``_MIN_KEY_LEN`` characters, raw or
+	JSON-escaped, in any of its text fields)."""
+	error = record.get("error")
+	if isinstance(error, str) and any(path in error for path in _OPTIMUS_AI_FRAME_PATHS):
+		return True
+	return len(api_key) >= _MIN_KEY_LEN and _holds_key(record, _QUEUED_TEXT_FIELDS, api_key)
 
 
 def _error_log_queue_length() -> int | None:
@@ -570,16 +598,19 @@ def _row_stored(doc) -> bool:
 		return False
 
 
-def _mask_row(row: dict, text_fields: tuple[str, ...], api_key: str) -> tuple[dict, bool] | None:
-	"""``(changes, residual)`` for one row, or None when masking it failed. A
-	masked value longer than its column (``_FIELD_LIMITS``) is cut to fit."""
+def _mask_row(
+	row: dict, text_fields: tuple[str, ...], api_key: str, value_lines: bool = True,
+) -> tuple[dict, bool] | None:
+	"""``(changes, residual)`` for one row (``_mask`` with ``value_lines``),
+	or None when masking it failed. A masked value longer than its column
+	(``_FIELD_LIMITS``) is cut to fit."""
 	result = None
 	try:
 		changes = {}
 		residual = False
 		for field in text_fields:
 			old = row.get(field) or ""
-			new = _mask(old, api_key)
+			new = _mask(old, api_key, value_lines=value_lines)
 			if new != old:
 				new = new[:_FIELD_LIMITS.get(field, len(new))]
 				changes[field] = new
