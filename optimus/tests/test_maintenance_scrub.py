@@ -1351,6 +1351,17 @@ class TestRemaskErrorLogQueue:
 
 
 
+	def test_the_queue_path_skips_the_residual_check(self, monkeypatch):
+		# Its answer is never used there, and it is about a third of the
+		# masking's time.
+		checks = []
+		monkeypatch.setattr(maintenance, "_has_residual_secret", lambda *a: checks.append(a) or False)
+		record = {"error": LEAKY, "method": f"bad key {KEY}", "metadata": "{}"}
+		masked = maintenance._masked_record(record, KEY)
+		assert KEY not in json.dumps(masked) and checks == []
+		assert maintenance._mask_row(record, ("error",), KEY) is not None and checks  # the stored-row path checks
+
+
 class TestClaimKeySurvivesClearCache:
 	"""bench migrate's setUp runs ``frappe.clear_cache()``, which deletes
 	every Redis key of the site except the ``persistent_cache_keys`` of the
