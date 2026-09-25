@@ -50,7 +50,7 @@ def _capture(resp):
 	requests would really send after the ``auth`` object ran."""
 	calls = []
 
-	def _post(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+	def _post(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002
 		wire = requests.Request("POST", url, headers=dict(headers or {}), json=json, auth=auth).prepare()
 		calls.append(SimpleNamespace(
 			url=url, headers=headers, body=json, auth=auth, wire_headers=dict(wire.headers),

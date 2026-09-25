@@ -241,7 +241,7 @@ class _FakeResp:
 
 
 def _post_returning(resp):
-	def _fake_post(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+	def _fake_post(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002
 		_fake_post.last = types.SimpleNamespace(url=url, headers=headers, body=json, auth=auth)
 		return resp
 	_fake_post.last = None

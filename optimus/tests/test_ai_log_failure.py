@@ -8,6 +8,7 @@ layer's failure path (PR-0a).
 a Werkzeug Local proxy on a bench: never patch its attributes).
 """
 
+import io
 import json
 import sys
 import traceback
@@ -601,7 +602,7 @@ class TestExceptionText:
 
 
 def _post(behaviour):
-	def _fake(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+	def _fake(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002
 		return behaviour()
 	return _fake
 
@@ -664,7 +665,7 @@ class TestHttpFailurePath:
 			secret_local = f"Bearer {KEY}"  # noqa: F841 (a frame local: never logged)
 			raise KeyError(f"MESSAGE-MARKER {KEY}")
 
-		def _fake(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+		def _fake(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002
 			return _inner(headers)
 
 		monkeypatch.setattr(requests, "post", _fake)
@@ -696,7 +697,7 @@ class TestHttpFailurePath:
 			except UnicodeEncodeError:
 				raise interrupt  # noqa: B904 (chained to the header error on purpose)
 
-		def _fake(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+		def _fake(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002
 			return _send(headers)
 
 		monkeypatch.setattr(requests, "post", _fake)
@@ -849,7 +850,7 @@ class TestHttpFailurePath:
 		body = {"error": {"message": f"key {old_key} rejected", "type": "invalid_request_error", "code": old_key}}
 		text = json.dumps(body) + f" raw={old_key} escaped={escaped}"
 
-		def _rotated_mid_flight(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+		def _rotated_mid_flight(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002
 			stored["key"] = new_key
 			return _Resp(400, body, text=text)
 
@@ -1009,9 +1010,9 @@ class TestHttpFailurePath:
 	def test_a_redirect_with_a_json_object_body_is_a_bad_response_logged_without_its_body(
 		self, logs, monkeypatch, status,
 	):
-		# requests follows a redirect it can; one that reaches here (no
-		# Location header, or a status it does not follow) is not the
-		# provider's reply, even with a JSON object body. The body stays out
+		# A redirect is never followed (allow_redirects=False:
+		# TestARedirectIsNeverFollowed), so every 3xx reaches here, and it is
+		# not the provider's reply, even with a JSON object body. The body stays out
 		# of the message and the row (the caller's row too:
 		# test_the_callers_row_never_holds_the_reply_when_the_http_row_failed).
 		pii = "pii.redirect@example.com"
@@ -1126,6 +1127,69 @@ class TestHttpFailurePath:
 		assert "session_uuid=uuid-9" in logs[0]["message"]
 
 
+class _RedirectingAdapter(requests.adapters.BaseAdapter):
+	"""A fake transport under a REAL ``requests`` Session (the one
+	``requests.post`` builds): the provider's host answers 302 to another
+	host, which would answer 200 with a reply. ``sent`` records every
+	request that reached the transport, as (url, headers)."""
+
+	PROVIDER = "https://api.provider.invalid"
+	ELSEWHERE = "https://collector.example.net/v1/messages"
+
+	def __init__(self, sent: list):
+		super().__init__()
+		self.sent = sent
+
+	def send(self, request, **kwargs):
+		self.sent.append((request.url, request.headers.copy()))
+		resp = requests.Response()
+		resp.request, resp.url, resp.raw, resp.encoding = request, request.url, io.BytesIO(b""), "utf-8"
+		if request.url.startswith(self.PROVIDER):
+			resp.status_code = 302
+			resp.headers["Location"] = self.ELSEWHERE
+			resp._content = b""
+		else:
+			resp.status_code = 200
+			resp._content = json.dumps({
+				"content": [{"type": "text", "text": "ok"}],
+				"choices": [{"message": {"content": "ok"}}],
+			}).encode()
+		return resp
+
+	def close(self):
+		pass
+
+
+class TestARedirectIsNeverFollowed:
+	"""``requests`` drops only a header named ``Authorization`` when it
+	follows a redirect to another host, so Anthropic's ``x-api-key`` would be
+	sent on to the redirect target. ``_http_post`` sends with
+	``allow_redirects=False``: a 3xx is the provider's answer, and a
+	``bad_response``."""
+
+	@pytest.mark.parametrize(
+		("call", "header", "value"),
+		[
+			(ai_fix._call_anthropic, "x-api-key", KEY),
+			(ai_fix._call_openai_chat, "Authorization", f"Bearer {KEY}"),
+		],
+		ids=["anthropic", "openai"],
+	)
+	def test_a_302_to_another_host_is_a_bad_response_and_the_key_never_reaches_it(
+		self, logs, monkeypatch, call, header, value,
+	):
+		sent = []
+		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _RedirectingAdapter(sent))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			call(_RedirectingAdapter.PROVIDER, KEY, "m", "system", [{"role": "user", "content": "hi"}])
+		assert ei.value.kind == "bad_response" and ei.value.status_code == 302
+		assert len(sent) == 1  # the redirect was not followed
+		url, headers = sent[0]
+		assert url.startswith(_RedirectingAdapter.PROVIDER) and headers[header] == value  # the key was sent there
+		assert not [u for u, _h in sent if u.startswith("https://collector.example.net")]
+		assert len(logs) == 1 and KEY not in logs[0]["message"]
+
+
 class TestNothingIsLoggedOrSentWhileAnExceptionIsActive:
 	"""``frappe.log_error`` calls Sentry's ``capture_exception``, which ships
 	the ACTIVE exception's frame locals (requests / urllib3 frames hold the
@@ -1161,7 +1225,7 @@ class TestNothingIsLoggedOrSentWhileAnExceptionIsActive:
 		it = iter(results)
 		active_at_send = []
 
-		def _fake(url, headers=None, json=None, timeout=None, auth=None):  # noqa: A002
+		def _fake(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002
 			active_at_send.append(sys.exc_info()[1])
 			result = next(it)
 			if isinstance(result, BaseException):
