@@ -50,24 +50,22 @@ key (``name > last AND name <= bound``, the bound read from the primary key
 alone), instead of scanning the rest of the table for a few sparse matches.
 On a large Error Log, run it off-peak anyway.
 
-The stored-key pass never sends the key to the database. Its ``LIKE`` value
-is an 8-character fragment of the key: the window made only of letters,
-digits and ``-`` nearest the middle of the key, which needs no escaping
-and so works the same on Frappe v15 and v16 (a key with no such window uses
-its escaped middle window instead, see ``_key_fragment``). A row the pass
-returns is used only when the FULL key, raw or JSON-escaped, is in the row's
+The stored-key pass never sends the key to the database. Its ``LIKE`` value is
+an 8-character fragment of the key: the window made only of letters, digits
+and ``-`` nearest the middle of the key, which needs no escaping and so works
+the same on Frappe v15 and v16 (a key with no such window uses its escaped
+middle window instead, see ``_key_fragment``). A row the pass returns is used
+only when the FULL key, raw, JSON-escaped or repr-escaped, is in the row's
 text, checked in Python. So MariaDB's general log and slow log, the
-processlist, the Postgres statement log and Frappe's ``logging: 2`` can
-record at most that fragment. A key shorter than 16 characters is not
-searched by value at all (the fragment would be half of it); the other
-passes still run and still mask it by value in every row they read, if it
-has at least 8 characters.
-"""
+processlist, the Postgres statement log and Frappe's ``logging: 2`` can record
+at most that fragment. A key shorter than 16 characters is not searched by
+value at all (the fragment would be half of it); the other passes still run
+and still mask it by value in every row they read, if it has at least 8
+characters. """
 
 from __future__ import annotations
 
 import json
-import pickle
 import re
 import sys
 from typing import NamedTuple
@@ -226,24 +224,24 @@ def _key_fragment(api_key: str) -> tuple[str, bool]:
 
 
 def _holds_key(row: dict, fields: tuple[str, ...], api_key: str) -> bool:
-	"""True when the full key, raw or JSON-escaped, is in one of the row's
-	text fields (the fragment the SQL matched is not enough). The escaped
-	key is held as ``secret``, a name the sanitizers redact."""
-	secret = _json_escaped(api_key)
-	for field in fields:
-		text = row.get(field)
-		if isinstance(text, str) and (api_key in text or secret in text):
-			return True
+	"""True when the full key, raw, JSON-escaped or repr-escaped, is in one of
+	the row's text fields (the fragment the SQL matched is not enough). The
+	escaped key is held as ``secret``, a name the sanitizers redact."""
+	for secret in {api_key, _json_escaped(api_key), repr(api_key)[1:-1]}:
+		for field in fields:
+			text = row.get(field)
+			if isinstance(text, str) and secret in text:
+				return True
 	return False
 
 
 def _mask(text: str, api_key: str) -> str:
-	"""``text`` through ``scrub_secrets`` with the key (raw and JSON-escaped)
-	as literals, then with the bare header value lines masked
+	"""``text`` through ``scrub_secrets`` with the key (raw, JSON-escaped and
+	repr-escaped) as literals, then with the bare header value lines masked
 	(``_VALUE_LINE``, ``_ESCAPED_VALUE_LINE``). Only text from the AI code or
 	holding the key comes here: the scrub's rows and the records the hook
 	recognises (``_is_ai_record``)."""
-	out = scrub_secrets(text, literals=(api_key, _json_escaped(api_key)))
+	out = scrub_secrets(text, literals=(api_key, _json_escaped(api_key), repr(api_key)[1:-1]))
 	out = _VALUE_LINE.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER, out)
 	return _ESCAPED_VALUE_LINE.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER, out)
 
@@ -251,10 +249,10 @@ def _mask(text: str, api_key: str) -> str:
 def _has_residual_secret(text: str, api_key: str) -> bool:
 	if _KEY_SHAPE.search(text):
 		return True
-	return len(api_key) >= _MIN_KEY_LEN and (api_key in text or _json_escaped(api_key) in text)
+	return len(api_key) >= _MIN_KEY_LEN and _holds_key({"error": text}, ("error",), api_key)
 
 
-def _masked_record(record, api_key: str) -> dict | None:
+def _masked_record(record, api_key: str, *, failures: list[str] | None = None) -> dict | None:
 	"""An Error Log ``record`` as the Error Log hook
 	(``optimus.error_log_mask``) stores it, before Frappe's ``validate``,
 	length check and INSERT: its ``_RECORD_TEXT_FIELDS`` masked
@@ -263,17 +261,17 @@ def _masked_record(record, api_key: str) -> dict | None:
 	again, so it is idempotent.
 
 	The hook calls it only for a record from the AI code or holding the key
-	(``_is_ai_record``, or a record whose check failed, which the hook
-	treats as one), and leaves every other row as it was; so its bare header
-	value lines are masked too, as in the scrub's rows. The residual check
-	is skipped: its answer is never used here, and it costs about a third of
-	the masking's time. None when it is not a record or masking it failed,
-	the joined pass included: the hook then withholds the record, and never
-	stores the joined text unmasked. An RQ job timeout is raised, not
-	swallowed (``_reraise_job_timeout``)."""
+	(``_is_ai_record``, or a record whose check failed, which the hook treats as
+	one), and leaves every other row as it was; so its bare header value lines
+	are masked too, as in the scrub's rows. The residual check is skipped: its
+	answer is never used here, and it costs about a third of the masking's time.
+	None when it is not a record or masking it failed, the joined pass included.
+	``failures``, when supplied, receives exception type names only: the hook
+	then withholds the record, and never stores the joined text unmasked. An RQ
+	job timeout is raised, not swallowed (``_reraise_job_timeout``)."""
 	if not isinstance(record, dict):
 		return None
-	masked = _mask_row(record, _RECORD_TEXT_FIELDS, api_key, cut=False, check_residual=False)
+	masked = _mask_row(record, _RECORD_TEXT_FIELDS, api_key, cut=False, check_residual=False, failures=failures)
 	if masked is None:
 		return None
 	merged = {**record, **masked[0]}
@@ -284,7 +282,7 @@ def _masked_record(record, api_key: str) -> dict | None:
 	# join completes (a title ending in "Bearer", an error starting with the
 	# token) is masked now, so a second pass, or the scrub of the row once
 	# Frappe has inserted it, changes nothing.
-	joined = _mask_row(moved, ("error",), api_key, cut=False, check_residual=False)
+	joined = _mask_row(moved, ("error",), api_key, cut=False, check_residual=False, failures=failures)
 	if joined is None:
 		return None
 	return {**moved, **joined[0]}
@@ -311,9 +309,9 @@ def _is_ai_record(record: dict, api_key: str) -> bool:
 	"""True when an Error Log record comes from Optimus's AI code (a frame in
 	``optimus/ai_fix.py`` or ``frappe_profiler/ai_fix.py`` in any of its text
 	fields: its ``error``, its title, whose text a 500 snapshot takes from the
-	exception, or its request ``metadata``) or holds the stored key (of at
-	least ``_MIN_KEY_LEN`` characters, raw or JSON-escaped, in any of its text
-	fields)."""
+	exception, or its request ``metadata``) or holds the stored key (of at least
+	``_MIN_KEY_LEN`` characters, raw, JSON-escaped or repr-escaped, in any of its
+	text fields)."""
 	for field in _RECORD_TEXT_FIELDS:
 		text = record.get(field)
 		if isinstance(text, str) and any(path in text for path in _OPTIMUS_AI_FRAME_PATHS):
@@ -351,12 +349,14 @@ def _under_savepoint(write) -> bool:
 
 def _mask_row(
 	row: dict, text_fields: tuple[str, ...], api_key: str, cut: bool = True, check_residual: bool = True,
+	*, failures: list[str] | None = None,
 ) -> tuple[dict, bool] | None:
-	"""``(changes, residual)`` for one row (``_mask``), or None when masking
-	it failed. With ``cut``, a masked value longer than
-	its column (``_FIELD_LIMITS``) is cut to fit. Without
-	``check_residual``, ``residual`` is always False: the independent
-	detector (``_has_residual_secret``) is not run."""
+	"""``(changes, residual)`` for one row (``_mask``), or None when masking it
+	failed. With ``cut``, a masked value longer than its column
+	(``_FIELD_LIMITS``) is cut to fit. Without ``check_residual``, ``residual``
+	is always False: the independent detector (``_has_residual_secret``) is not
+	run. ``failures``, when supplied, receives exception type names only for the
+	hook's withheld breadcrumb."""
 	result = None
 	try:
 		changes = {}
@@ -373,6 +373,8 @@ def _mask_row(
 		result = (changes, residual)
 	except Exception as e:
 		_reraise_job_timeout(e)
+		if failures is not None:
+			failures.append(type(e).__name__)
 		result = None
 	return result
 
@@ -537,17 +539,18 @@ def _refresh_hooks_cache() -> bool:
 	bench migrate). It helps only once every process runs the new code: a
 	process still running the old code can cache the old hooks again.
 
-	True only when the hooks were refreshed and the cache is read back
-	holding the Error Log hook (``_hooks_cache_problem``): Frappe's Redis
-	wrappers swallow a ``ConnectionError`` on delete and set, so the steps
+	True only when the hooks were refreshed, the Redis key exists and this
+	process's hooks hold the Error Log hook (``_hooks_cache_problem``): Frappe's
+	Redis wrappers swallow a ``ConnectionError`` on delete and set, so the steps
 	alone succeed with Redis down. Otherwise False, with one line in the
-	``optimus`` log naming an exception type or the problem, never row
-	text. Never raises.
+	``optimus`` log naming an exception type or the problem, never row text.
+	Never raises.
 
 	In developer_mode Frappe keeps the hooks per process instead (v16's
 	``_site_cached_load_app_hooks``, v15's per-request load), not in Redis;
 	this cannot reach other processes' copies there, so a restart is the
 	remedy."""
+
 	problem = None
 	try:
 		cache = getattr(frappe, "client_cache", None) or frappe.cache
@@ -564,20 +567,17 @@ def _refresh_hooks_cache() -> bool:
 
 
 def _hooks_cache_problem() -> str | None:
-	"""None when the hooks the other processes will read hold the Error Log
-	hook; otherwise what is wrong. Outside developer_mode that is the
-	"app_hooks" value in Redis, read back raw (``frappe.cache.get``, which
-	bypasses both the per-request and the v16 client-side copies and raises
-	when Redis is down); in developer_mode, where Frappe keeps the hooks per
-	process, this process's hooks. Raises what it cannot read."""
+	"""None when the refreshed cache key exists and this process's hooks hold
+	the Error Log handler; otherwise what is wrong. Raw Redis ``exists``
+	bypasses local copies and raises when Redis is down, without decoding
+	Frappe's private cache storage. In developer_mode only this process's
+	hooks are checked. An old process can still re-cache old hooks: this
+	check cannot replace restarting every process. Raises on read failure."""
 	conf = getattr(getattr(frappe, "local", None), "conf", None) or {}
-	if conf.get("developer_mode"):
-		doc_events = frappe.get_hooks("doc_events", {})
-	else:
-		raw = frappe.cache.get(frappe.cache.make_key("app_hooks"))
-		if raw is None:
+	if not conf.get("developer_mode"):
+		if not frappe.cache.exists(frappe.cache.make_key("app_hooks")):
 			return "nothing cached"
-		doc_events = (pickle.loads(raw) or {}).get("doc_events") or {}
+	doc_events = frappe.get_hooks("doc_events", {})
 	handlers = (doc_events.get("Error Log") or {}).get("before_insert") or []
 	if _ERROR_LOG_HOOK not in (handlers if isinstance(handlers, list | tuple) else [handlers]):
 		return "the Error Log hook is missing"
@@ -587,11 +587,19 @@ def _hooks_cache_problem() -> str | None:
 def _log_line(line: str) -> None:
 	"""``line`` in the ``optimus`` log at ERROR level (Frappe's loggers drop
 	lower levels on a production site). It holds counts, exception type
-	names or fixed text, never row text. Never raises."""
+	names or fixed text, never row text. An RQ job timeout leaves as a fresh
+	instance; other logging exceptions are swallowed."""
+	from optimus.error_log_mask import _job_timeout_types
+
+	timeout_types = _job_timeout_types()
+	interrupt = None
 	try:
 		frappe.logger("optimus").error(line)
-	except Exception:
-		pass
+	except Exception as e:
+		if isinstance(e, timeout_types):
+			interrupt = (type(e), e.args)
+	if interrupt is not None:
+		raise interrupt[0](*interrupt[1])
 
 
 def _refuse_inside_a_background_job() -> None:
@@ -745,8 +753,8 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	  scrub again. On a site Optimus was uninstalled from no key is stored,
 	  so it is False;
 	- ``hooks_refreshed``: True when this run refreshed Frappe's cached
-	  hooks and read them back holding the Error Log hook
-	  (``_refresh_hooks_cache``); False on a dry run, which does not refresh
+	  hooks, confirmed the Redis key exists and found the Error Log hook in
+	  this process's hooks (``_refresh_hooks_cache``); False on a dry run, which does not refresh
 	  them. Not a sign that the scrub is done: when it is False, run the
 	  scrub again, or ``bench --site <site> clear-cache``, after restarting
 	  the web server and the background workers.

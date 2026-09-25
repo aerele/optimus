@@ -302,7 +302,7 @@ class TestFailOpen:
 		assert doc.method == method
 		assert doc.metadata == error_log_mask.WITHHELD  # it held the key
 		assert KEY not in json.dumps(doc.fields()) and "ai_fix.py" not in json.dumps(doc.fields())
-		assert _one_line(env).endswith("withheld: its masking failed")
+		assert _one_line(env).endswith("withheld: its masking failed (ValueError)")
 
 	@pytest.mark.parametrize(("length", "cut"), [(140, False), (141, True)])
 	def test_a_plain_title_is_cut_only_past_its_column_when_the_text_is_withheld(self, env, monkeypatch, length, cut):
@@ -345,7 +345,7 @@ class TestFailOpen:
 		assert doc.fields() == {
 			"error": error_log_mask.WITHHELD, "method": error_log_mask.WITHHELD_TITLE, "metadata": error_log_mask.WITHHELD,
 		}
-		assert _one_line(env).endswith("withheld: its masking failed")
+		assert _one_line(env).endswith("withheld: its masking failed (ValueError)")
 
 	def test_only_the_joined_pass_failing_withholds_the_text_never_the_joined_raw_text(self, env, monkeypatch):
 		# The first pass masks each field; the pass over the joined
@@ -407,7 +407,7 @@ class TestEdges:
 		monkeypatch.setattr(maintenance, "_mask", _boom)
 		doc = _run(_Doc(error=LEAKY))
 		assert doc.error == error_log_mask.WITHHELD
-		assert _one_line(env).endswith("withheld: its masking failed")
+		assert _one_line(env).endswith("withheld: its masking failed (ValueError)")
 
 
 class TestBreadcrumbStorm:
@@ -437,9 +437,9 @@ class TestBreadcrumbStorm:
 		for _ in range(3):
 			_run(_Doc(error=LEAKY))
 		assert [line.rsplit(" was ", 1)[1] for _, _, line in env.lines] == [
-			"withheld: its masking failed", "stored as it was: RuntimeError",
+			"withheld: its masking failed (ValueError)", "stored as it was: RuntimeError",
 		]
-		assert error_log_mask._NOTED == {"withheld: its masking failed": 3, "stored as it was: RuntimeError": 3}
+		assert error_log_mask._NOTED == {"withheld: its masking failed (ValueError)": 3, "stored as it was: RuntimeError": 3}
 
 
 @pytest.fixture
@@ -462,6 +462,80 @@ def stale(env, monkeypatch):
 
 
 _STALE_LINE = "checked for the stored key alone (Optimus's modules could not be imported: ImportError)"
+
+
+@pytest.mark.parametrize("kind", [SystemExit, KeyboardInterrupt, BaseException])
+def test_decrypt_interrupt_keeps_identity_without_key_frames_or_chain(env, stale, monkeypatch, kind):
+	import frappe.utils.password
+
+	interrupt = kind(1)
+
+	def _decrypt(*a, **k):
+		unpadded = KEY.encode()  # noqa: F841
+		s = KEY  # noqa: F841
+		try:
+			raise ValueError("decrypt interrupted")
+		except ValueError as cause:
+			raise interrupt from cause
+
+	monkeypatch.setattr(frappe.utils.password, "get_decrypted_password", _decrypt)
+	with pytest.raises(kind) as caught:
+		stale(_Doc(error=OTHER_TB), "before_insert")
+	assert caught.value is interrupt
+	assert interrupt.__context__ is None and interrupt.__cause__ is None
+	assert interrupt.__suppress_context__ is True
+	offenders = set()
+	tb = interrupt.__traceback__
+	while tb:
+		for name, value in tb.tb_frame.f_locals.items():
+			if name not in ("api_key", "secret") and (
+				(isinstance(value, str) and KEY in value)
+				or (isinstance(value, bytes) and KEY.encode() in value)
+			):
+				offenders.add((tb.tb_frame.f_code.co_name, name))
+		tb = tb.tb_next
+	assert not offenders
+	assert env.flags.mute_messages is False
+
+
+def test_stored_key_returns_empty_when_decryption_fails(env, monkeypatch):
+	import frappe.utils.password
+
+	monkeypatch.setattr(frappe.utils.password, "get_decrypted_password", _boom)
+	assert error_log_mask._stored_key() == ""
+
+
+def test_missing_auth_row_returns_empty_and_leaves_the_row_identical(env, stale):
+	env.key = None
+	assert sys.modules["optimus.error_log_mask"]._stored_key() == ""
+	doc = _Doc(error=OTHER_TB, method=OTHER_TITLE, metadata={"note": "ordinary"})
+	before = doc.fields()
+	stale(doc, "before_insert")
+	assert doc.fields() == before and doc.sets == []
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("field", FIELDS)
+def test_repr_escaped_key_in_a_dict_field_is_masked(env, request, fallback, field):
+	env.key = "quoted-'and\"-provider-0123456789"
+	handler = request.getfixturevalue("stale") if fallback else error_log_mask.mask_error_log
+	doc = _Doc(**{field: {"note": env.key}})
+	handler(doc)
+	assert doc.get(field) == "{'note': '********'}"
+	assert doc.sets == [field]
+
+
+def test_withheld_reason_keeps_masking_and_ai_check_exception_types(env, monkeypatch):
+	def _check(*a, **k):
+		raise TypeError(f"invalid record {KEY}")
+
+	monkeypatch.setattr(maintenance, "_is_ai_record", _check)
+	monkeypatch.setattr(maintenance, "_mask", _boom)
+	doc = _run(_Doc(error=ERP_TB))
+	assert doc.error == error_log_mask.WITHHELD
+	line = _one_line(env)
+	assert "TypeError" in line and "ValueError" in line
+	assert "invalid record" not in line and "catastrophic" not in line
 
 
 class TestStaleProcess:
@@ -546,7 +620,7 @@ class TestStaleProcess:
 		doc = _Doc(error=LEAKY)
 		assert stale(doc, "before_insert") is None
 		assert doc.sets == [] and env.flags.mute_messages is False
-		assert _one_line(env).endswith("stored as it was: RuntimeError")
+		assert _one_line(env).endswith(_STALE_LINE)
 
 	def test_an_empty_record_reads_no_key(self, env, stale):
 		doc = _Doc()

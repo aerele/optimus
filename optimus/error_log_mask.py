@@ -17,25 +17,25 @@ way it is written:
 So nothing reads or changes that queue: a queued record is handled when it
 is inserted, by the code running at that moment.
 
-It changes only the rows that are Optimus's to change: a record from
-Optimus's AI code (an ``optimus/ai_fix.py`` or ``frappe_profiler/ai_fix.py``
-frame in ``error``, ``method`` or ``metadata``) or holding the stored key
-(raw or JSON-escaped), as ``maintenance._is_ai_record`` decides. Every other
-row, another app's included, is left byte-identical: the hook is site-wide
-and permanent, so it applies no key shape and moves no title there, and
-Frappe's own ``validate`` and length check treat it as they would without
+It changes only the rows that are Optimus's to change: a record from Optimus's
+AI code (an ``optimus/ai_fix.py`` or ``frappe_profiler/ai_fix.py`` frame in
+``error``, ``method`` or ``metadata``) or holding the stored key (raw,
+JSON-escaped or repr-escaped), as ``maintenance._is_ai_record`` decides. Every
+other row, another app's included, is left byte-identical: the hook is
+site-wide and permanent, so it applies no key shape and moves no title there,
+and Frappe's own ``validate`` and length check treat it as they would without
 Optimus. If that check itself fails, the record is treated as one of
 Optimus's.
 
 In such a record the masking is ``optimus.maintenance._masked_record``, the
-scrub's own: the stored key (raw and JSON-escaped), the key shapes
-``scrub_secrets`` knows and the bare header value lines are masked in
-``error``, ``method`` and ``metadata`` (a field the doc does not hold, such
-as ``metadata`` on Frappe v15, is left alone); a title longer than its
-column is moved in front of ``error``, as v16's ``ErrorLog.validate`` does,
-and the joined text masked again. A truthy value that is not text is read
-as ``str(value)``, the text the row stores, both to recognise the key and to
-mask it. Only the fields the masking changed are set.
+scrub's own: the stored key (raw, JSON-escaped and repr-escaped), the key
+shapes ``scrub_secrets`` knows and the bare header value lines are masked in
+``error``, ``method`` and ``metadata`` (a field the doc does not hold, such as
+``metadata`` on Frappe v15, is left alone); a title longer than its column is
+moved in front of ``error``, as v16's ``ErrorLog.validate`` does, and the
+joined text masked again. A truthy value that is not text is read as
+``str(value)``, the text the row stores, both to recognise the key and to mask
+it. Only the fields the masking changed are set.
 
 The key is read once per insert, of every Error Log row, since a row
 holding the key is one of Optimus's (``ai_fix._current_key_or_empty``,
@@ -44,18 +44,18 @@ undecryptable key does not add "Encryption key is invalid" to the reply of
 every request that logs an error. It is a SELECT on ``__Auth``, a table
 every Frappe site has, so it cannot fail in a healthy transaction.
 
-It never raises, except an RQ job timeout (the job must stop), which leaves
-as a fresh instance raised after the ``try``, so the frames it interrupted
-(the record's text, the key read) never travel with it. It fails open: any
-other failure (the key read, the masking) leaves the doc as it was, with two
-exceptions. When the masking fails (on a record of Optimus's, the only ones
-it masks), the text is withheld (``_withhold``) instead of inserted raw.
-When Optimus's other modules cannot be imported, the stored key alone is
-masked with Frappe alone (``_mask_stored_key_only``, below). Each failure
-leaves a line in the ``optimus`` log (an exception type name at most, never
-row text; an outcome the first time it happens in the process, then every
-1000th time, ``_note``). It never writes an Error Log itself: that insert
-would run this hook again.
+An RQ job timeout (the job must stop) leaves as a fresh instance raised after
+the ``try``, so the frames it interrupted (the record's text, the key read)
+never travel with it. Non-Exception interrupts during the key read keep their
+identity with decrypt frames and exception chains cleared. Ordinary failures
+leave the doc as it was, with two exceptions. When the masking fails (on a
+record of Optimus's, the only ones it masks), the text is withheld
+(``_withhold``) instead of inserted raw. When Optimus's other modules cannot
+be imported, the stored key alone is masked with Frappe alone
+(``_mask_stored_key_only``, below). Each failure leaves a line in the
+``optimus`` log (an exception type name at most, never row text; an outcome
+the first time it happens in the process, then every 1000th time, ``_note``).
+It never writes an Error Log itself: that insert would run this hook again.
 
 Frappe caches every app's hooks ("app_hooks" in Redis). A process started
 before the upgrade that misses that key after migrate's ``clear_cache``
@@ -76,7 +76,7 @@ instead of every Error Log insert of that process failing until it is
 restarted. That process still runs the old AI code, the code that leaks the
 key, so the hook then falls back to Frappe alone: it reads the stored key
 with ``frappe.utils.password.get_decrypted_password`` (messages muted, held
-as ``api_key``, its JSON-escaped form as ``secret``) and replaces both with
+as ``api_key``, its escaped forms as ``secret``) and replaces them with
 ``********`` in ``error``, ``method`` and ``metadata``, wherever they hold
 them. A row without the key is left byte-identical, and a key shorter than 8
 characters is not replaced, as in the masking above. Key shapes and value
@@ -86,6 +86,7 @@ module: once it reads the new hooks, every Error Log insert there fails
 until the process is replaced, and no code here can prevent it (SECURITY.md,
 "Known limitations").
 """
+
 
 import json
 
@@ -111,10 +112,11 @@ _NOTE_EVERY = 1000
 
 
 def mask_error_log(doc, method=None) -> None:
-	"""The Error Log ``before_insert`` doc event: in a record from Optimus's
-	AI code or holding the stored key, mask the key and the key shapes;
-	leave every other ``doc`` as it was (see the module docstring). Never
-	raises, except an RQ job timeout, re-raised as a fresh instance."""
+	"""The Error Log ``before_insert`` doc event: in a record from Optimus's AI
+	code or holding the stored key, mask the key and the key shapes; leave every
+	other ``doc`` as it was (see the module docstring). An RQ job timeout leaves
+	as a fresh instance. Non-Exception interrupts during the key read keep their
+	identity, with decrypt frames and exception chains cleared."""
 	timeout_types = _job_timeout_types()
 	interrupt = None
 	outcome = None
@@ -162,12 +164,14 @@ def _mask_doc(doc, timeout_types) -> str | None:
 	api_key = _read_key(frappe, _current_key_or_empty)
 	# Only a record from Optimus's AI code or holding the key is Optimus's to
 	# change; every other row is left exactly as it was.
-	if not _is_ai(maintenance, record, api_key, timeout_types):
+	failures = []
+	if not _is_ai(maintenance, record, api_key, timeout_types, failures=failures):
 		return None
-	masked = _masked(maintenance, record, api_key, timeout_types)
+	masked = _masked(maintenance, record, api_key, timeout_types, failures=failures)
 	if masked is None:
 		_withhold(doc, maintenance, record, api_key, timeout_types)
-		return "withheld: its masking failed"
+		reason = ", ".join(dict.fromkeys(failures)) or "no masked record"
+		return f"withheld: its masking failed ({reason})"
 	for field in _TEXT_FIELDS:
 		if field in masked and masked[field] != record.get(field):
 			doc.set(field, masked[field])
@@ -176,23 +180,27 @@ def _mask_doc(doc, timeout_types) -> str | None:
 
 def _mask_stored_key_only(frappe, doc, stale: str) -> str:
 	"""The fallback of a process whose Optimus modules cannot be imported
-	(``stale``, the import's exception type name): replace the stored key,
-	raw and JSON-escaped, with ``_PLACEHOLDER`` in the text fields that hold
-	it (a truthy value that is not text is read as ``str(value)``), using
-	Frappe alone. A key shorter than ``_MIN_KEY_LEN`` characters is not
-	replaced; a row without the key is left as it was. Returns the outcome
-	for the ``optimus`` log. Raises what it cannot handle;
-	``mask_error_log`` catches it."""
+	(``stale``, the import's exception type name): replace the stored key, raw,
+	JSON-escaped and repr-escaped, with ``_PLACEHOLDER`` in the text fields that
+	hold it (a truthy value that is not text is read as ``str(value)``), using
+	Frappe alone. A key shorter than ``_MIN_KEY_LEN`` characters is not replaced;
+	a row without the key is left as it was. Returns the outcome for the
+	``optimus`` log. Raises what it cannot handle; ``mask_error_log`` catches
+	it."""
 	api_key = _read_key(frappe, _stored_key)
 	if len(api_key) >= _MIN_KEY_LEN:
-		secret = json.dumps(api_key)[1:-1]
 		for field in _TEXT_FIELDS:
 			value = doc.get(field)
 			if not value:
 				continue
 			text = value if isinstance(value, str) else str(value)
-			if api_key in text or secret in text:
-				doc.set(field, text.replace(secret, _PLACEHOLDER).replace(api_key, _PLACEHOLDER))
+			masked = text
+			# Escaped forms first: replacing raw backslashes first could
+			# leave an escape from the representation beside the mask.
+			for secret in sorted({api_key, json.dumps(api_key)[1:-1], repr(api_key)[1:-1]}, key=len, reverse=True):
+				masked = masked.replace(secret, _PLACEHOLDER)
+			if masked != text:
+				doc.set(field, masked)
 	return f"checked for the stored key alone (Optimus's modules could not be imported: {stale})"
 
 
@@ -200,10 +208,35 @@ def _stored_key() -> str:
 	"""The stored ``Optimus Settings.ai_api_key``, stripped, or ``""``, read
 	with Frappe alone (``ai_fix._current_key_or_empty`` without Optimus):
 	the same ``__Auth`` SELECT, ``raise_exception=False``, so an
-	undecryptable key answers ``""``. Held only as ``api_key``."""
-	from frappe.utils.password import get_decrypted_password
+	undecryptable key answers ``""``. Held only as ``api_key``. Ordinary
+	exceptions answer ``""``; RQ timeouts leave fresh. Other interrupts keep
+	their identity with traceback, context and cause cleared, so decrypt
+	frames never escape. This guard cannot import another Optimus module."""
+	job_timeout_types = _job_timeout_types()
+	interrupt = None
+	escaping: BaseException | None = None
+	try:
+		from frappe.utils.password import get_decrypted_password
 
-	api_key = get_decrypted_password("Optimus Settings", "Optimus Settings", "ai_api_key", raise_exception=False)
+		api_key = get_decrypted_password(
+			"Optimus Settings", "Optimus Settings", "ai_api_key",
+			raise_exception=False,
+		) or ""
+	except BaseException as e:
+		if isinstance(e, job_timeout_types):
+			interrupt = (type(e), e.args)
+		elif not isinstance(e, Exception):
+			escaping = e
+		else:
+			return ""
+	if escaping is not None:
+		escaping.__traceback__ = None
+		escaping.__context__ = None
+		escaping.__cause__ = None
+		escaping.__suppress_context__ = True
+		raise escaping
+	if interrupt is not None:
+		raise interrupt[0](*interrupt[1])
 	return api_key.strip() if isinstance(api_key, str) else ""
 
 
@@ -223,28 +256,32 @@ def _read_key(frappe, read) -> str:
 	return api_key
 
 
-def _masked(maintenance, record: dict, api_key: str, timeout_types) -> dict | None:
+def _masked(maintenance, record: dict, api_key: str, timeout_types, *, failures: list[str]) -> dict | None:
 	"""``maintenance._masked_record(record, api_key)``, or None when the
-	masking failed (it answered None or raised). An RQ job timeout goes
-	through."""
+	masking failed (it answered None or raised). Only exception type names
+	go into ``failures``. An RQ job timeout goes through."""
 	try:
-		return maintenance._masked_record(record, api_key)
+		return maintenance._masked_record(record, api_key, failures=failures)
 	except Exception as e:
 		if isinstance(e, timeout_types):
 			raise
+		failures.append(type(e).__name__)
 		return None
 
 
-def _is_ai(maintenance, fields: dict, api_key: str, timeout_types) -> bool:
+def _is_ai(maintenance, fields: dict, api_key: str, timeout_types, *, failures: list[str] | None = None) -> bool:
 	"""True when ``fields`` hold a frame of Optimus's AI code or the key
 	(``maintenance._is_ai_record``). True also when that check fails:
 	nothing then shows the record is not Optimus's, and, once its masking
-	failed, nothing shows the text is safe."""
+	failed, nothing shows the text is safe. When supplied, ``failures``
+	receives only the exception type name."""
 	try:
 		return bool(maintenance._is_ai_record(fields, api_key))
 	except Exception as e:
 		if isinstance(e, timeout_types):
 			raise
+		if failures is not None:
+			failures.append(type(e).__name__)
 		return True
 
 
