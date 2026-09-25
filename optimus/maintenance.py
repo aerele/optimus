@@ -33,6 +33,12 @@ this portable to Postgres. Matching rows are processed in chunks of
 huge transaction, and a re-run after an interruption only rewrites what is
 left.
 
+Error Log records still waiting in Frappe's deferred-insert queue in Redis
+are masked there, and never inserted by this module: a real scrub (or
+``mask_error_log_queue``, which the migrate patch runs when the scrub was
+skipped or failed) claims the queue, masks each record and pushes it back,
+and Frappe's own flush inserts it (see ``_remask_error_log_queue``).
+
 ``tabError Log`` is MyISAM on MariaDB, so each statement holds a table read
 lock while it runs and blocks every Error Log insert meanwhile. Each ``LIKE``
 statement therefore reads one window of at most ``_WINDOW`` rows by primary
@@ -68,25 +74,25 @@ from optimus.redaction import SECRET_PLACEHOLDER, scrub_secrets
 
 
 class InsideBackgroundJobError(RuntimeError):
-	"""``scrub_error_log_secrets`` or ``purge_ai_error_logs`` was called
-	inside an RQ job."""
+	"""``scrub_error_log_secrets``, ``mask_error_log_queue`` or
+	``purge_ai_error_logs`` was called inside an RQ job."""
 
 
 _BATCH = 200
 _SAVEPOINT = "optimus_scrub_row"
-# frappe.deferred_insert.queue_prefix + doctype: only this queue is flushed.
+# Error Log's deferred-insert queue (frappe.deferred_insert.queue_prefix +
+# doctype): the only queue the re-mask touches.
 _ERROR_LOG_QUEUE = "insert_queue_for_Error Log"
-# The flush takes at most this many queue entries (each a record or a list of
-# them) and commits after every _FLUSH_COMMIT_EVERY inserted rows. After
-# _FLUSH_MAX_FAILURES inserts in a row fail it checks the database: in an
-# outage (a lost connection) it stops, instead of popping, and losing, every
-# entry left, and pushes back, masked, the records it took and did not
-# insert.
-_FLUSH_MAX_POPS = 10_000
-_FLUSH_COMMIT_EVERY = 100
-_FLUSH_MAX_FAILURES = 3
-# The fields of a queued Error Log record that are masked before it is
-# inserted (the ones the scrub reads in a stored row).
+# The key the re-mask moves that queue to before it masks it (_claim_queue).
+# It is outside the "insert_queue_for_" prefix: Frappe's save_to_db finds its
+# queues by that prefix and reads the doctype from the rest of the key, so it
+# never inserts a claimed entry. hooks.py lists it in persistent_cache_keys,
+# so the frappe.clear_cache() in bench migrate's setUp keeps the entries an
+# interrupted run left there. frappe.cache.make_key() turns each name into the
+# site's Redis key, as RedisWrapper does for its own list commands.
+_QUEUE_CLAIM = "optimus_error_log_queue_claim"
+# The fields of a queued Error Log record that are masked (the ones the scrub
+# reads in a stored row).
 _QUEUED_TEXT_FIELDS = ("error", "method", "metadata")
 _AI_FRAME = "%ai_fix.py%"
 # Optimus's own AI module, under its name and under the app's name before its
@@ -260,213 +266,182 @@ def _queued_records(raw) -> list | None:
 	return records if isinstance(records, list) else [records]
 
 
-class _Flushed(NamedTuple):
-	"""What ``_flush_deferred_error_logs`` did: ``failed``, the entries or
-	rows it could not insert (see there), and ``queue_failed``, True when a
-	read or a write of the queue failed. That failure is counted once in
-	``failed``, so the scrub does not count its own failed read of the queue
-	again: one Redis outage is one failure."""
+class _QueueMasked(NamedTuple):
+	"""What ``_remask_error_log_queue`` did.
 
+	- ``masked``: queue entries masked and pushed onto the queue. The entries
+	  of a claim an earlier run left are pushed first and then claimed and
+	  pushed again with the queue, so they count twice.
+	- ``unmasked``: entries a stop left in the claim key, unmasked. Frappe
+	  never inserts them there; the next run masks them.
+	- ``failed``: entries or records dropped because they are not JSON, not
+	  a record or cannot be masked, plus one for a failed Redis command.
+	- ``queue_failed``: True when a Redis command failed. That failure is
+	  counted once in ``failed``, so the scrub does not count its own failed
+	  read of the queue again: one Redis outage is one failure."""
+
+	masked: int
+	unmasked: int
 	failed: int
 	queue_failed: bool
 
 
-class _FlushRun:
-	"""The running counts of one flush. ``streak`` holds the MASKED records
-	of the current run of failed inserts (never a raw record): the ones a
-	stop pushes back."""
+class _QueueRun:
+	"""The running counts of one re-mask (see ``_QueueMasked``)."""
 
-	__slots__ = ("drained", "failed", "inserted", "popped", "queue_failed", "streak")
+	__slots__ = ("failed", "masked", "queue_failed", "unmasked")
 
 	def __init__(self):
-		self.drained = False  # the insert loop found the queue empty
 		self.failed = 0
-		self.inserted = 0
-		self.popped = 0
+		self.masked = 0
 		self.queue_failed = False
-		self.streak: list[dict] = []
+		self.unmasked = 0
 
 	def queue_error(self) -> None:
-		"""Count a failed read or write of the queue, once per flush."""
+		"""Count a failed Redis command, once per run."""
 		if not self.queue_failed:
 			self.queue_failed = True
 			self.failed += 1
 
+	def result(self) -> _QueueMasked:
+		return _QueueMasked(self.masked, self.unmasked, self.failed, self.queue_failed)
 
-def _flush_deferred_error_logs(api_key: str) -> _Flushed:
-	"""Insert the Error Log rows waiting in Frappe's deferred-insert queue in
-	Redis, masked, so they neither land unmasked later nor escape the scrub.
-	Frappe queues its own error snapshots there (a server error, and every
-	error in developer mode). An AI failure row is queued there again only
-	when a rollback removed it, which happens on a transactional engine
-	(Postgres); on MariaDB the Error Log is a MyISAM table, so the row
-	survives the rollback and nothing is queued. A site whose scheduler is
-	paused never flushes that queue. Only the Error Log queue: other
-	doctypes' queues stay the scheduler's.
 
-	Each record's ``error``, ``method`` and ``metadata`` are masked by
-	``_masked_record`` with ``api_key`` (the key the caller read before the
-	first pop; header value lines only in a record from the AI code or
-	holding the key; a title longer than its column moved in front of
-	``error`` and cut, as Frappe v16's ``ErrorLog.validate`` does) BEFORE
-	the record is inserted, so a queued
-	pre-fix snapshot never reaches the database (the INSERT statement, the
-	binlog, the query logs) with the key in it. A record that cannot be
-	masked is counted and dropped, never inserted unmasked.
+def _redis(command: str, *args):
+	"""One raw Redis command on ``frappe.cache``, for keys already made with
+	``frappe.cache.make_key``. RedisWrapper's own ``llen``, ``lpop``,
+	``rpush`` and ``exists`` make the key themselves (a made key would be
+	prefixed twice) and it has no ``renamenx`` of its own, so the re-mask
+	sends every command through the client's ``execute_command``."""
+	return frappe.cache.execute_command(command, *args)
 
-	Takes only the entries queued when it starts, at most ``_FLUSH_MAX_POPS``
-	of them, so a busy producer cannot keep it running, and commits after
-	every ``_FLUSH_COMMIT_EVERY`` inserted rows. An entry that is not JSON, or
-	a record that cannot be inserted, is counted and skipped. A row the table
-	kept although its insert failed counts as inserted (see
-	``_insert_error_log``). After ``_FLUSH_MAX_FAILURES`` inserts in a row
-	fail it asks the database for ``select 1``: when that answers, the
-	records were bad, they are dropped and the flush goes on; when it fails
-	(an outage), or when a periodic commit fails, the flush stops and
-	pushes back, as one entry, every record it took and did not insert: the
-	run of failed inserts, across entries, and the untried rest of the
-	current entry, all masked (``_push_back``). A shorter run of failures at
-	the end of the entries is checked and pushed back the same way. A record
-	inserted before the stop is never pushed back, so none is inserted
-	twice. A failure to read the queue stops the flush.
 
-	Then, past the cap or after a stop, it masks in Redis the entries it
-	did not take of those queued when it started (``_mask_left_in_queue``,
-	no database access): bench migrate inserts the queue as it is right
-	after the patches.
+def _remask_error_log_queue(api_key: str) -> _QueueMasked:
+	"""Mask, in Redis, the Error Log records waiting in Frappe's deferred-insert
+	queue, and leave inserting them to Frappe. Frappe queues its own error
+	snapshots there (a server error, and every error in developer mode). An
+	AI failure row is queued there again only when a rollback removed it,
+	which happens on a transactional engine (Postgres); on MariaDB the Error
+	Log is a MyISAM table, so the row survives the rollback and nothing is
+	queued. Only the Error Log queue: other doctypes' queues are never
+	touched.
 
-	Never raises; returns a ``_Flushed``: how many entries or rows could not
-	be inserted (a failed read or write of the queue counts as one, however
-	often it fails), and whether the queue failed."""
-	run = _FlushRun()
+	1. A claim an earlier run left (it was interrupted, or Redis refused its
+	   writes) is drained first (``_drain_claim``), so the claim key is free.
+	2. The whole queue is claimed at once (``_claim_queue``): RENAMENX moves
+	   it to the claim key, where Frappe's ``save_to_db`` never looks, so from
+	   that instant no consumer can pop an entry this run has not masked.
+	3. The claim is drained, whatever the rename answered: each entry is
+	   popped from the claim, its records masked (``_masked_records``), and
+	   the masked records pushed as one entry onto the queue. The run only
+	   ever adds to the queue; it never pops from it.
+
+	Frappe's ``save_to_db`` then inserts the masked records: bench migrate
+	runs it right after the patches, and the scheduler every 15 minutes. Each
+	run takes entries until it has inserted about 500 records (Frappe v15) or
+	10,000 (v16), so a larger queue is inserted over several scheduler runs.
+	Entries queued after the claim are not masked: those the old processes
+	queue while bench migrate runs are inserted as they are, which is why the
+	advisory's step 3 runs the scrub again after the restart (it then masks
+	them in the table).
+
+	It never touches the database (no insert, no read, no commit), so no
+	queued record can kill a database connection or fail the migrate. An
+	entry that is not JSON (``save_to_db`` would fail on it), or a record
+	that is not a dict or cannot be masked, is counted and dropped, never
+	pushed back raw. A failed push or read stops it: popping on after a
+	refused push (Redis past ``maxmemory`` with ``noeviction`` refuses the
+	push and still allows the pop) would lose every entry after it. The
+	entry whose push failed is lost; the rest stay in the claim key, where
+	Frappe never inserts them, and the next run masks them.
+
+	Never raises; returns a ``_QueueMasked``."""
+	run = _QueueRun()
 	try:
-		snapshot = max(0, int(frappe.cache.llen(_ERROR_LOG_QUEUE) or 0))
+		queue = frappe.cache.make_key(_ERROR_LOG_QUEUE)
+		claim = frappe.cache.make_key(_QUEUE_CLAIM)
+		left = _redis("EXISTS", claim)
 	except Exception:
 		run.queue_error()
-		return _Flushed(run.failed, run.queue_failed)
-	try:
-		_insert_queued(run, api_key, min(snapshot, _FLUSH_MAX_POPS))
-	except Exception:
-		run.failed += 1
-	finally:
-		# Commit what was inserted even when the loop stopped early: the rows
-		# are already gone from Redis, and a later rollback would drop them.
-		_committed(run)
-	try:
-		_mask_left_in_queue(run, api_key, 0 if run.drained else snapshot - run.popped)
-	except Exception:
-		run.failed += 1
-	return _Flushed(run.failed, run.queue_failed)
+		return run.result()
+	if left and not _drain_claim(run, queue, claim, api_key):
+		return run.result()
+	_claim_queue(run, queue, claim)
+	_drain_claim(run, queue, claim, api_key)
+	return run.result()
 
 
-def _committed(run: _FlushRun) -> bool:
-	"""``safe_commit()``; a failure is counted in ``run.failed``. Never
-	raises."""
+def _claim_queue(run: _QueueRun, queue, claim) -> None:
+	"""Move the whole queue to the claim key at once: RENAMENX, which never
+	replaces a claim key that exists (it then answers False and changes
+	nothing, and the caller drains that claim). RENAMENX of a queue that is
+	not there fails ("no such key"): the queue is empty, or ``save_to_db``
+	emptied it meanwhile, which is not a failure. A rename that fails while
+	the queue is still there, or a queue that cannot be read, is one.
+	Never raises."""
+	claimed = False
 	try:
-		safe_commit()
-		return True
+		_redis("RENAMENX", queue, claim)
+		claimed = True
 	except Exception:
-		run.failed += 1
+		pass
+	if claimed:
+		return
+	try:
+		if _redis("EXISTS", queue):
+			run.queue_error()
+	except Exception:
+		run.queue_error()
+
+
+def _drain_claim(run: _QueueRun, queue, claim, api_key: str) -> bool:
+	"""Pop each entry of the claim key, mask its records
+	(``_masked_records``) and push them as one entry at the end of the
+	queue, up to the claim's length when it starts. True when it took them
+	all (or the claim ran empty early: another run took the rest). False
+	when a read or a push failed: it stops there, and the entries it did not
+	take stay in the claim key (``run.unmasked``). Never raises."""
+	try:
+		size = int(_redis("LLEN", claim) or 0)
+	except Exception:
+		run.queue_error()
 		return False
-
-
-def _pop(run: _FlushRun):
-	"""The next entry of the queue, or None when it is empty or cannot be
-	read (``run.queue_error``)."""
-	try:
-		return frappe.cache.lpop(_ERROR_LOG_QUEUE)
-	except Exception:
-		run.queue_error()
-		return None
-
-
-def _push(run: _FlushRun, entry) -> bool:
-	"""Put ``entry`` back at the end of the queue. False when it cannot be
-	written (``run.queue_error``)."""
-	try:
-		frappe.cache.rpush(_ERROR_LOG_QUEUE, entry)
-		return True
-	except Exception:
-		run.queue_error()
-		return False
-
-
-def _insert_queued(run: _FlushRun, api_key: str, pops: int) -> None:
-	"""The flush's insert loop over at most ``pops`` entries (see
-	``_flush_deferred_error_logs``)."""
-	for _ in range(pops):
-		raw = _pop(run)
+	for taken in range(size):
+		try:
+			raw = _redis("LPOP", claim)
+		except Exception:
+			run.queue_error()
+			run.unmasked += size - taken
+			return False
 		if raw is None:
-			run.drained = not run.queue_failed
-			break
-		run.popped += 1
+			return True
 		records = _queued_records(raw)
 		if records is None:
 			run.failed += 1
 			continue
-		for i, record in enumerate(records):
-			if not _insert_one(run, record, api_key):
-				_push_back(run, records[i + 1:], api_key)
-				return
-	# The entries ran out during a run of failed inserts: keep those records
-	# if the database is down, as a stop would.
-	if run.streak and not _database_answers():
-		_push_back(run, [], api_key)
+		masked = _masked_records(run, records, api_key)
+		if not masked:
+			continue
+		if not _push(queue, masked):
+			# Stop: another pop could lose one more entry.
+			run.queue_error()
+			run.unmasked += size - taken - 1
+			return False
+		run.masked += 1
+	return True
 
 
-def _insert_one(run: _FlushRun, record, api_key: str) -> bool:
-	"""Insert one queued record, masked (a record that cannot be masked is
-	counted and dropped). False when the flush must stop: the database is
-	down, or a periodic commit failed.
-
-	After ``_FLUSH_MAX_FAILURES`` failed inserts in a row it asks the
-	database for ``select 1``. If that fails, it is an outage: stop. If it
-	answers, the records are bad (a validation error, say): they stay
-	counted in ``failed`` and are dropped, the run starts over, and the
-	flush goes on, so the snapshots behind a burst of bad records are still
-	inserted masked."""
-	masked = _masked_record(record, api_key)
-	if masked is None:
-		run.failed += 1
-		return True
-	if _insert_error_log(masked):
-		run.streak.clear()
-		run.inserted += 1
-		return run.inserted % _FLUSH_COMMIT_EVERY != 0 or _committed(run)
-	run.failed += 1
-	run.streak.append(masked)
-	if len(run.streak) < _FLUSH_MAX_FAILURES:
-		return True
-	if _database_answers():
-		run.streak.clear()
-		return True
-	return False
-
-
-def _database_answers() -> bool:
-	"""True when the database answers ``select 1``, so failed inserts are
-	bad records rather than an outage. Never raises."""
+def _push(queue, records: list[dict]) -> bool:
+	"""Push ``records`` as one entry at the end of ``queue``. False when
+	Redis refuses it. Never raises."""
 	try:
-		frappe.db.sql("select 1")
+		_redis("RPUSH", queue, json.dumps(records))
 		return True
 	except Exception:
 		return False
 
 
-def _push_back(run: _FlushRun, rest: list, api_key: str) -> None:
-	"""After a stop, push back, as one entry at the end of the queue, every
-	record the flush took and did not insert: the run of failed inserts
-	(``run.streak``, across entries) and the untried ``rest`` of the current
-	entry. All of them MASKED (a record of ``rest`` that cannot be masked is
-	counted and dropped), never as popped: bench migrate's own flush inserts
-	the queue as it is right after the patches."""
-	left = [*run.streak, *_masked_records(run, rest, api_key)]
-	run.streak.clear()
-	if left:
-		_push(run, json.dumps(left))
-
-
-def _masked_records(run: _FlushRun, records: list, api_key: str) -> list[dict]:
+def _masked_records(run: _QueueRun, records: list, api_key: str) -> list[dict]:
 	"""``records`` masked (``_masked_record``); one that cannot be masked is
 	counted in ``run.failed`` and dropped."""
 	out = []
@@ -479,37 +454,18 @@ def _masked_records(run: _FlushRun, records: list, api_key: str) -> list[dict]:
 	return out
 
 
-def _mask_left_in_queue(run: _FlushRun, api_key: str, left: int) -> None:
-	"""Mask, in Redis, the ``left`` entries the insert loop did not take of
-	those queued when the flush started (past the cap, or after a stop),
-	with no database access: each is popped, masked and pushed back at the
-	end of the queue, as one list entry. bench migrate inserts the Error
-	Log queue as it is right after the patches, so an entry left unmasked
-	would reach the table with the key. Entries queued after the flush
-	started are left alone: once the processes have restarted they come
-	from the fixed code. An entry that is not JSON (Frappe's own flush
-	would fail on it) or a record that cannot be masked is counted and
-	dropped, as in the insert loop. Stops when the queue is empty or
-	cannot be read or written."""
-	for _ in range(max(0, left)):
-		raw = _pop(run)
-		if raw is None:
-			return
-		records = _queued_records(raw)
-		if records is None:
-			run.failed += 1
-			continue
-		masked = _masked_records(run, records, api_key)
-		if masked and not _push(run, json.dumps(masked)):
-			return
-
-
 def _masked_record(record, api_key: str) -> dict | None:
-	"""A queued ``record`` with its ``_QUEUED_TEXT_FIELDS`` masked (see
-	``_mask_row``), or None when it is not a record or masking it failed.
-	Its bare header value lines are masked only when ``_is_ai_record``:
-	any other snapshot (an ERPNext error with a ``value = ...`` local, say)
-	goes through ``scrub_secrets`` alone and keeps them."""
+	"""A queued ``record`` as the re-mask pushes it back for Frappe's
+	``save_to_db`` to insert (see ``_remask_error_log_queue``): its
+	``_QUEUED_TEXT_FIELDS`` masked (``_mask_row``), with a title longer than
+	its column moved in front of ``error`` (``_long_title_into_error``).
+	Its bare header value lines are masked only when ``_is_ai_record``: any
+	other snapshot (an ERPNext error with a ``value = ...`` local, say) goes
+	through ``scrub_secrets`` alone and keeps them. None when it is not a
+	record or masking it failed: the re-mask counts it and drops it, and
+	never pushes it back raw. Nothing here inserts it: ``save_to_db`` does,
+	right after the patches in bench migrate and every 15 minutes from the
+	scheduler, about 500 records a run on Frappe v15 and 10,000 on v16."""
 	if not isinstance(record, dict):
 		return None
 	try:
@@ -525,10 +481,12 @@ def _masked_record(record, api_key: str) -> dict | None:
 def _long_title_into_error(record: dict) -> dict:
 	"""``record`` as Frappe v16's ``ErrorLog.validate`` leaves it: a title
 	(``method``) longer than its column goes, in full, in front of
-	``error``, then is cut to fit. Done before the insert, so the row is the
-	same on Frappe v15, whose Error Log has no such ``validate`` and fails
-	the insert instead (``CharacterLengthExceededError``); on v16
-	``validate`` then has nothing left to do."""
+	``error``, then is cut to fit. Done in Redis, before Frappe's
+	``save_to_db`` inserts the record, so the row is the same on Frappe v15,
+	whose Error Log has no such ``validate``: its insert would fail
+	(``CharacterLengthExceededError``), and ``save_to_db`` logs such a
+	failure and drops the record. On v16 ``validate`` then has nothing left
+	to do."""
 	method = record.get("method")
 	limit = _FIELD_LIMITS["method"]
 	if not isinstance(method, str) or len(method) <= limit:
@@ -553,6 +511,15 @@ def _error_log_queue_length() -> int | None:
 	when the queue cannot be read."""
 	try:
 		return max(0, int(frappe.cache.llen(_ERROR_LOG_QUEUE) or 0))
+	except Exception:
+		return None
+
+
+def _claim_length() -> int | None:
+	"""How many entries a stopped or interrupted run left in the claim key
+	(see ``_remask_error_log_queue``), or None when it cannot be read."""
+	try:
+		return max(0, int(_redis("LLEN", frappe.cache.make_key(_QUEUE_CLAIM)) or 0))
 	except Exception:
 		return None
 
@@ -583,38 +550,6 @@ def _under_savepoint(write) -> bool:
 		except Exception:
 			pass
 	return ok
-
-
-def _insert_error_log(record: dict) -> bool:
-	"""Insert one queued record under a savepoint (``_under_savepoint``),
-	so a failed insert rolls back only itself. True when the row is in the
-	table: inserted, or stored although the insert then failed. On MariaDB
-	Error Log is a MyISAM table, so the rollback to the savepoint does not
-	undo an INSERT: when something after it fails (a hook that runs after
-	the INSERT), the row stays. Such a row counts as inserted, so it is
-	never pushed back to the queue and inserted a second time. Never
-	raises."""
-	doc = None
-
-	def _insert():
-		nonlocal doc
-		doc = frappe.get_doc({**record, "doctype": "Error Log"})
-		doc.insert(ignore_permissions=True)
-	return _under_savepoint(_insert) or _row_stored(doc)
-
-
-def _row_stored(doc) -> bool:
-	"""True when ``doc`` got a name and an Error Log row of that name exists,
-	read after the rollback to the savepoint. The read runs under its own
-	savepoint (``_under_savepoint``): on Postgres a failed statement aborts
-	the transaction, and the flush's final COMMIT would then roll back every
-	row inserted since the last commit. A read that fails counts as not
-	stored. Never raises."""
-	name = getattr(doc, "name", None)
-	if not name:
-		return False
-	found = []
-	return _under_savepoint(lambda: found.append(frappe.db.exists("Error Log", name))) and bool(found[0])
 
 
 def _mask_row(
@@ -854,7 +789,8 @@ def scrub_scan_size() -> int:
 
 def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> dict:
 	"""Mask API keys left in Error Log rows (and Deleted Document copies of
-	Error Log rows) by AI failures before the fix.
+	Error Log rows) by AI failures before the fix, and in the Error Log
+	records waiting in Frappe's deferred-insert queue.
 
 	Reads rows whose text contains an ``ai_fix.py`` frame AND a secret
 	marker, plus rows whose text, title or metadata contain the key stored
@@ -862,43 +798,59 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	module docstring). A row is written only when the masking changes it,
 	with ``update_modified=False``. Idempotent: a second run changes nothing.
 	Prompt text (source code, SQL) in those rows is left as is; use
-	``purge_ai_error_logs`` to remove the rows entirely. It reads the stored
-	key first. A real run then inserts the Error Log rows still waiting in
-	the deferred-insert queue, each masked before its INSERT (see
-	``_flush_deferred_error_logs``); a dry run does not, so it does not count
-	them, and only reads the queue length. One row that cannot be masked or
-	written is counted in ``failed`` and skipped; it never stops the others.
-	``dry_run`` accepts only the values ``_dry_run_flag`` names (``None`` is
-	a dry run) and raises ``ValueError`` for anything else. Refuses to run
-	inside an RQ job (``InsideBackgroundJobError``).
+	``purge_ai_error_logs`` to remove the rows entirely. One row that cannot
+	be masked or written is counted in ``failed`` and skipped; it never stops
+	the others. ``dry_run`` accepts only the values ``_dry_run_flag`` names
+	(``None`` is a dry run) and raises ``ValueError`` for anything else.
+	Refuses to run inside an RQ job (``InsideBackgroundJobError``).
 
-	Returns ``{"candidates", "changed", "deleted_docs_changed", "residual",
-	"failed", "queued"}``: Error Log rows read, Error Log rows and Deleted
-	Document rows masked, rows that still hold a key-shaped value after
-	masking (checked with a detector independent of the masking, only in the
-	rows read), rows (or queued rows) that could not be processed, and the
-	entries still waiting in the Error Log's deferred-insert queue when the
-	scrub ends (a queue that cannot be read counts one in ``failed``
-	instead, once, also when the flush could not read or write it either).
-	After a real run, the entries still queued are the ones the flush masked
-	in Redis (past its cap or after it stopped) and the ones queued while
-	the scrub ran, which include Frappe's own new error snapshots; bench
-	migrate and the scheduler insert them as they are. With
-	``dry_run=True`` the counts say what WOULD change and nothing is written.
+	It reads the stored key first. A real run then masks the queue in Redis,
+	before it reads any row (``_remask_error_log_queue``): it never inserts
+	a queued record, Frappe's own ``save_to_db`` does, right after the
+	patches in bench migrate and every 15 minutes from the scheduler. A dry
+	run only reads the queue's length and the claim key's.
+
+	Returns a dict:
+
+	- ``candidates``: Error Log rows read;
+	- ``changed`` / ``deleted_docs_changed``: Error Log rows and Deleted
+	  Document rows masked;
+	- ``residual``: rows that still hold a key-shaped value after masking
+	  (checked with a detector independent of the masking, only in the rows
+	  read);
+	- ``failed``: rows, queue entries or queued records that could not be
+	  processed; a Redis failure counts one, once;
+	- ``queued``: the entries in the Error Log's deferred-insert queue when
+	  the scrub ends: after a real run, the ones it masked and the ones
+	  queued meanwhile, which include Frappe's own new error snapshots;
+	- ``queue_masked``: the queue entries it masked and pushed back (0 in a
+	  dry run);
+	- ``queue_unmasked``: the entries left unmasked in the claim key, where
+	  Frappe never inserts them: after a stop (Redis refused a push or a
+	  read), or, in a dry run, what an earlier run left there. The next real
+	  run masks them.
+
+	With ``dry_run=True`` the counts say what WOULD change and nothing is
+	written.
 	"""
 	from optimus.ai_fix import _current_key_or_empty
 
 	_refuse_inside_a_background_job()
 	dry_run = _dry_run_flag(dry_run)
 	batch_size = max(1, int(batch_size or _BATCH))
-	out = {"candidates": 0, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 0}
-	# The key first: the flush masks each queued record with it.
+	out = {
+		"candidates": 0, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 0,
+		"queue_masked": 0, "queue_unmasked": 0,
+	}
+	# The key first: the re-mask masks each queued record with it.
 	api_key = _current_key_or_empty()
 	queue_failed = False
 	if not dry_run:
-		flushed = _flush_deferred_error_logs(api_key)
-		out["failed"] += flushed.failed
-		queue_failed = flushed.queue_failed
+		# Before any row is read, so a failing statement cannot stop it.
+		queue = _remask_error_log_queue(api_key)
+		out["queue_masked"], out["queue_unmasked"] = queue.masked, queue.unmasked
+		out["failed"] += queue.failed
+		queue_failed = queue.queue_failed
 	seen: dict[str, set[str]] = {"Error Log": set(), "Deleted Document": set()}
 
 	for scan in _scans(api_key, _error_log_fields()):
@@ -926,13 +878,43 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 					out["failed"] += 1
 			if not dry_run:
 				safe_commit()
+	_read_queue(out, queue_failed, claim=dry_run)
+	return out
+
+
+def mask_error_log_queue() -> dict:
+	"""The queue half of ``scrub_error_log_secrets`` alone: read the stored
+	key, then mask, in Redis, the Error Log records waiting in the
+	deferred-insert queue (``_remask_error_log_queue``), with no other
+	database access. The migrate patch runs it when the scrub was skipped
+	(the tables are too large to scan during the migrate) or failed.
+
+	Returns ``{"queue_masked", "queue_unmasked", "queued", "failed"}``, as
+	``scrub_error_log_secrets`` counts them. Refuses to run inside an RQ job
+	(``InsideBackgroundJobError``): its frames hold the unmasked entries."""
+	from optimus.ai_fix import _current_key_or_empty
+
+	_refuse_inside_a_background_job()
+	api_key = _current_key_or_empty()
+	queue = _remask_error_log_queue(api_key)
+	out = {"queue_masked": queue.masked, "queue_unmasked": queue.unmasked, "queued": 0, "failed": queue.failed}
+	_read_queue(out, queue.queue_failed, claim=False)
+	return out
+
+
+def _read_queue(out: dict, queue_failed: bool, claim: bool) -> None:
+	"""Set ``out["queued"]`` to the queue's length now and, with ``claim``,
+	``out["queue_unmasked"]`` to the claim key's. A read that fails counts
+	one in ``out["failed"]``, unless ``queue_failed`` says a Redis failure
+	was already counted: one Redis outage is one failure."""
 	queued = _error_log_queue_length()
+	held = _claim_length() if claim else out["queue_unmasked"]
 	if queued is not None:
 		out["queued"] = queued
-	elif not queue_failed:
-		# One Redis outage is one failure: not again when the flush counted it.
+	if held is not None:
+		out["queue_unmasked"] = held
+	if (queued is None or held is None) and not queue_failed:
 		out["failed"] += 1
-	return out
 
 
 def purge_ai_error_logs(dry_run: bool = True) -> dict:

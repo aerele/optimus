@@ -153,3 +153,9 @@ doc_events = {
 		"validate": "optimus.install.on_user_role_change",
 	},
 }
+
+# Redis keys frappe.clear_cache() keeps (bench migrate clears the cache in
+# its setUp). optimus.maintenance claims Error Log's deferred-insert queue
+# under this key while it masks it; a run that stops leaves the entries it
+# could not mask there, held back from Frappe's flush until the next run.
+persistent_cache_keys = ["optimus_error_log_queue_claim"]
