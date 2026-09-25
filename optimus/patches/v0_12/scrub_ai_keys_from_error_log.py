@@ -28,7 +28,8 @@ the Error Log's deferred-insert queue are printed and logged, but alone they
 leave no such row: that count also holds Frappe's own new error snapshots
 (a server error, any error in developer mode), and bench migrate inserts the
 queue right after the patches (the scrub masked the entries that were
-waiting when it started). Every outcome writes one counts-only line to
+waiting when it started, unless the flush stopped early, which the failed
+count shows). Every outcome writes one counts-only line to
 the ``optimus`` log at ERROR level (Frappe's loggers drop lower levels unless
 DEV_SERVER is set, as under ``bench start``), so it reaches
 ``logs/optimus.log`` on a production site. Advisory step 3 (re-run the
@@ -110,8 +111,9 @@ def execute():
 	if counts["queued"]:
 		print(
 			f"Optimus: Error Log entries still in the deferred-insert queue: {counts['queued']}. The scrub "
-			"masked the ones that were waiting when it started; bench migrate inserts them all right after the "
-			f"patches. Run the scrub again after the restart to mask them in the table: {command}"
+			"masked the ones waiting when it started, unless the flush stopped early (see the failed count); "
+			"bench migrate inserts them all right after the patches. Run the scrub again after the restart to "
+			f"mask them in the table: {command}"
 		)
 	if counts["residual"]:
 		print(f"Optimus: {counts['residual']} error row(s) still hold a key-shaped value. {purge_it}")
