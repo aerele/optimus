@@ -109,7 +109,7 @@ def execute():
 				size = f"its size could not be read ({because})"
 				reason = f"skipped: size unknown: {because}"
 			else:
-				size = f"{scan} rows to read"
+				size = f"{scan} Error Log and Deleted Document rows to read"
 				reason = f"skipped: {scan} rows"
 			_breadcrumb(frappe, _BREADCRUMB_TITLE, f"{reason}{note}", run_it)
 			_log_summary(frappe, f"skipped, {size}, limit {maintenance.MIGRATE_SCAN_LIMIT}{note}")

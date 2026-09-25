@@ -781,21 +781,22 @@ def _deleted_document_count() -> int | None:
 
 def measure_scan_size() -> ScanSize:
 	"""How many rows ``scrub_error_log_secrets`` may read, so ``bench
-	migrate`` can decide whether to run it inline: every Error Log row,
+	migrate`` can decide whether to run it inline: every Error Log row and
 	every Deleted Document row (not just copies of Error Log rows:
 	``deleted_doctype`` is not indexed, so the passes read the whole table;
-	see ``_deleted_document_count``), and the entries waiting in Error Log's
-	deferred-insert queue. Cheap (no LIKE scan). Never raises: a part that
-	raises, returns no value or returns a negative one makes the size
-	``SCAN_SIZE_UNKNOWN``, which is above ``MIGRATE_SCAN_LIMIT``, so the
-	migrate skips the scrub and prints the command instead of scanning a
-	table of unknown size. It stops at the first such part (on Postgres a
-	failed statement makes every later one fail too) and names it in
-	``reason``."""
+	see ``_deleted_document_count``). The Error Log records waiting in the
+	deferred-insert queue are not counted: they are masked in Redis
+	(``_remask_error_log_queue``), which adds no work to the table scan, and
+	the migrate patch masks them whether or not the scrub runs. Cheap (no
+	LIKE scan). Never raises: a part that raises, returns no value or
+	returns a negative one makes the size ``SCAN_SIZE_UNKNOWN``, which is
+	above ``MIGRATE_SCAN_LIMIT``, so the migrate skips the scrub and prints
+	the command instead of scanning a table of unknown size. It stops at the
+	first such part (on Postgres a failed statement makes every later one
+	fail too) and names it in ``reason``."""
 	parts = (
 		lambda: frappe.db.count("Error Log"),
 		_deleted_document_count,
-		lambda: frappe.cache.llen(_ERROR_LOG_QUEUE),
 	)
 	total = 0
 	for part in parts:

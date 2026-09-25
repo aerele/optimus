@@ -658,12 +658,13 @@ class InFailedSqlTransaction(Exception):
 
 
 class TestScrubScanSize:
-	"""count(Error Log) + a bounded exact count of Deleted Document + the
-	Error Log queue length. The Deleted Document count reads at most
-	MIGRATE_SCAN_LIMIT + 1 rows: exact below the limit, above it once the
-	table is larger, and portable (no estimate: v15's is not scoped to the
-	site's schema, Postgres answers -1 for a table never analysed, InnoDB's
-	is about a fifth low)."""
+	"""count(Error Log) + a bounded exact count of Deleted Document. The
+	Deleted Document count reads at most MIGRATE_SCAN_LIMIT + 1 rows: exact
+	below the limit, above it once the table is larger, and portable (no
+	estimate: v15's is not scoped to the site's schema, Postgres answers -1
+	for a table never analysed, InnoDB's is about a fifth low). The Error
+	Log queue is not part of it: it is masked in Redis and never read by
+	the table scan."""
 
 	BOUNDED = "SELECT COUNT(*) FROM (SELECT 1 FROM `tabDeleted Document` LIMIT %s) t"
 
@@ -689,29 +690,38 @@ class TestScrubScanSize:
 		monkeypatch.setattr(maintenance, "frappe", SimpleNamespace(db=db, cache=cache))
 		return calls
 
-	def test_counts_error_logs_every_deleted_document_and_the_queue(self, monkeypatch):
+	def test_counts_error_logs_and_every_deleted_document_but_not_the_queue(self, monkeypatch):
 		calls = self._frappe(monkeypatch)
-		assert maintenance.scrub_scan_size() == 33
-		assert maintenance.measure_scan_size() == (33, None)
+		assert maintenance.scrub_scan_size() == 30
+		assert maintenance.measure_scan_size() == (30, None)
 		# every Deleted Document: deleted_doctype is not indexed, so the
-		# passes read the whole table; the LIMIT is a bound parameter
-		assert calls[:3] == [
+		# passes read the whole table; the LIMIT is a bound parameter. The
+		# queue adds no table-scan work (it is masked in Redis), so its
+		# length is never read.
+		assert calls == [
 			("count", ("Error Log",), {}),
 			("sql", (self.BOUNDED, (maintenance.MIGRATE_SCAN_LIMIT + 1,)), {}),
-			("llen", ("insert_queue_for_Error Log",), {}),
-		]
+		] * 2
+
+	def test_a_huge_queue_never_skips_the_scan_of_a_small_table(self, monkeypatch):
+		self._frappe(monkeypatch, values={"llen": maintenance.MIGRATE_SCAN_LIMIT * 10})
+		assert maintenance.measure_scan_size() == (30, None)
+
+	def test_a_queue_that_cannot_be_read_leaves_the_size_known(self, monkeypatch):
+		self._frappe(monkeypatch, fail={"llen": ConnectionError})
+		assert maintenance.measure_scan_size() == (30, None)
 
 	def test_a_deleted_document_table_past_the_limit_is_counted_only_up_to_it(self, monkeypatch):
 		self._frappe(monkeypatch, deleted_documents=5_000_000)
 		size = maintenance.scrub_scan_size()
-		assert size == 10 + maintenance.MIGRATE_SCAN_LIMIT + 1 + 3
+		assert size == 10 + maintenance.MIGRATE_SCAN_LIMIT + 1
 		assert size > maintenance.MIGRATE_SCAN_LIMIT  # the migrate skips it
 
 	def test_a_deleted_document_table_at_the_limit_is_exact(self, monkeypatch):
-		self._frappe(monkeypatch, deleted_documents=maintenance.MIGRATE_SCAN_LIMIT - 13)
+		self._frappe(monkeypatch, deleted_documents=maintenance.MIGRATE_SCAN_LIMIT - 10)
 		assert maintenance.scrub_scan_size() == maintenance.MIGRATE_SCAN_LIMIT
 
-	@pytest.mark.parametrize("broken", ["count", "sql", "llen"])
+	@pytest.mark.parametrize("broken", ["count", "sql"])
 	def test_a_part_that_cannot_be_read_makes_the_size_unknown(self, monkeypatch, broken):
 		# An unmeasured table must not look small: the migrate skips the
 		# scrub and prints the command instead. Only the TYPE name is kept.
@@ -732,8 +742,6 @@ class TestScrubScanSize:
 		[
 			("count", None, "no value"),
 			("count", -1, "negative value"),
-			("llen", None, "no value"),
-			("llen", -1, "negative value"),
 			# sql() results: no row, a NULL count, a negative count
 			("sql", None, "no value"),
 			("sql", (), "no value"),
@@ -748,10 +756,10 @@ class TestScrubScanSize:
 		assert maintenance.measure_scan_size() == (maintenance.SCAN_SIZE_UNKNOWN, reason)
 
 	def test_a_new_measurement_forgets_the_last_failure(self, monkeypatch):
-		self._frappe(monkeypatch, fail={"llen": ConnectionError})
+		self._frappe(monkeypatch, fail={"count": ConnectionError})
 		assert maintenance.measure_scan_size().reason == "ConnectionError"
 		self._frappe(monkeypatch)
-		assert maintenance.measure_scan_size() == (33, None)
+		assert maintenance.measure_scan_size() == (30, None)
 
 
 class TestPurgeScope:
@@ -1866,7 +1874,10 @@ def test_patch_skips_a_table_too_large_for_migrate(patch_env, patch_logs, monkey
 	importlib.import_module(_PATCH).execute()
 	assert patch_env == []
 	out = capsys.readouterr().out
-	assert "skipped the Error Log key scrub" in out
+	assert (
+		f"skipped the Error Log key scrub during migrate ({size} Error Log and Deleted Document rows to read, "
+		f"limit {maintenance.MIGRATE_SCAN_LIMIT})"
+	) in out
 	assert _COMMAND in out
 	assert _OFF_PEAK_NOTE in out
 	# one breadcrumb, so the skip is visible after the console is gone
@@ -1875,7 +1886,7 @@ def test_patch_skips_a_table_too_large_for_migrate(patch_env, patch_logs, monkey
 	assert crumb["message"].startswith(f"skipped: {size} rows")
 	assert f"bench --site <site> {_COMMAND}" in crumb["message"]
 	line = _one_summary_line(patch_logs)
-	assert "skipped" in line and str(size) in line
+	assert f"skipped, {size} Error Log and Deleted Document rows to read, limit " in line
 
 
 def test_the_skipped_scrub_still_masks_the_queue(patch_env, patch_logs, monkeypatch, capsys):
