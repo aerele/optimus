@@ -1919,10 +1919,14 @@ def _http_post(
 		# ('OpenAI-compatible') Base URL missing the '/v1' segment, phrased as
 		# "if you set a custom Base URL" so a hosted-provider operator (whose
 		# Base URL is fixed and hidden) reads it as not their case. The
-		# provider's own error body is surfaced either way.
+		# provider's own error body is surfaced either way. The URL is shown
+		# scrubbed: a custom Base URL can be typed as user:password@host.
+		from optimus.redaction import scrub_secrets
+
 		detail = f"url={url}"
+		shown_url = scrub_secrets(url, literals=_scrub_literals_for(auth))
 		failure = AiFixError(
-			f"The AI provider returned 404 (Not Found) for {url}. Check that the Model "
+			f"The AI provider returned 404 (Not Found) for {shown_url}. Check that the Model "
 			"in Optimus Settings is a valid model name for this provider: a wrong model "
 			"returns 404. If you set a custom Base URL, make sure it includes the '/v1' "
 			"path segment (for example http://localhost:11434/v1 for Ollama)."

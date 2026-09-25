@@ -705,6 +705,30 @@ class TestHttpFailurePath:
 		assert "invalid key ******** for this model" in str(ei.value)
 		assert KEY not in str(ei.value)
 
+	def test_the_404_message_masks_credentials_in_the_base_url(self, logs, monkeypatch):
+		# A custom Base URL typed as user:password@host: the 404 message names
+		# the URL, and it reaches toasts and API responses.
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(404, {}, text="")))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			ai_fix._call_openai_chat(
+				"http://alice:hunter2-pass@llm.internal:11434/v1", "", "m", "s", [{"role": "user", "content": "x"}]
+			)
+		message = str(ei.value)
+		assert "404 (Not Found) for http://********@llm.internal:11434/v1/chat/completions. " in message
+		assert "alice" not in message and "hunter2-pass" not in message
+		assert "alice" not in logs[0]["message"] and "hunter2-pass" not in logs[0]["message"]
+
+	def test_the_404_message_masks_the_key_in_the_base_url(self, logs, monkeypatch):
+		# Some gateways take the key in the path: the stored key is scrubbed
+		# from the URL the message names, like any other literal.
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(404, {}, text="")))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			ai_fix._call_openai_chat(
+				f"https://gw.internal/{KEY}/v1", "", "m", "s", [{"role": "user", "content": "x"}]
+			)
+		assert "404 (Not Found) for https://gw.internal/********/v1/chat/completions. " in str(ei.value)
+		assert KEY not in str(ei.value)
+
 	def test_the_body_is_scrubbed_before_it_is_cut(self, logs, monkeypatch):
 		# Cutting first would keep a key prefix the literal no longer matches.
 		body = "x" * 290 + KEY + " tail"
