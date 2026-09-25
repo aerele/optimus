@@ -304,6 +304,15 @@ class TestFailOpen:
 		assert KEY not in json.dumps(doc.fields()) and "ai_fix.py" not in json.dumps(doc.fields())
 		assert _one_line(env).endswith("withheld: its masking failed")
 
+	@pytest.mark.parametrize(("length", "cut"), [(140, False), (141, True)])
+	def test_a_plain_title_is_cut_only_past_its_column_when_the_text_is_withheld(self, env, monkeypatch, length, cut):
+		monkeypatch.setattr(maintenance, "_mask", _boom)
+		title = "t" * length
+		doc = _run(_Doc(error=LEAKY, method=title))
+		assert doc.error == error_log_mask.WITHHELD
+		assert doc.method == "t" * 140
+		assert ("method" in doc.sets) is cut
+
 	def test_the_withheld_note_says_where_the_reason_is(self):
 		# Stored Error Log content: fixed, untranslated, key-free, with a
 		# next step.
@@ -381,6 +390,24 @@ class TestFailOpen:
 
 def _boom(*a, **k):
 	raise ValueError(f"catastrophic backtracking near {KEY}")
+
+
+class TestEdges:
+	@pytest.mark.parametrize("fields", [{}, {"error": None, "method": None, "metadata": None}], ids=["absent", "none"])
+	def test_an_empty_record_is_left_alone_and_reads_no_key(self, env, fields):
+		doc = _run(_Doc(**fields))
+		assert doc.sets == [] and env.reads == [] and env.lines == [] and env.inserts == []
+
+	def test_where_rq_cannot_be_imported_no_timeout_type_is_caught_and_the_hook_still_works(self, env, monkeypatch):
+		monkeypatch.setitem(sys.modules, "rq", None)
+		monkeypatch.setitem(sys.modules, "rq.timeouts", None)
+		assert error_log_mask._job_timeout_types() == ()
+		doc = _run(_Doc(error=LEAKY, method="optimus ai_fix"))
+		assert KEY not in doc.error and env.lines == []
+		monkeypatch.setattr(maintenance, "_mask", _boom)
+		doc = _run(_Doc(error=LEAKY))
+		assert doc.error == error_log_mask.WITHHELD
+		assert _one_line(env).endswith("withheld: its masking failed")
 
 
 class TestBreadcrumbStorm:
