@@ -605,15 +605,16 @@ def _insert_error_log(record: dict) -> bool:
 
 def _row_stored(doc) -> bool:
 	"""True when ``doc`` got a name and an Error Log row of that name exists,
-	read after the rollback to the savepoint. A read that fails counts as
-	not stored. Never raises."""
+	read after the rollback to the savepoint. The read runs under its own
+	savepoint (``_under_savepoint``): on Postgres a failed statement aborts
+	the transaction, and the flush's final COMMIT would then roll back every
+	row inserted since the last commit. A read that fails counts as not
+	stored. Never raises."""
 	name = getattr(doc, "name", None)
 	if not name:
 		return False
-	try:
-		return bool(frappe.db.exists("Error Log", name))
-	except Exception:
-		return False
+	found = []
+	return _under_savepoint(lambda: found.append(frappe.db.exists("Error Log", name))) and bool(found[0])
 
 
 def _mask_row(

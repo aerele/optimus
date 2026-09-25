@@ -923,6 +923,7 @@ def _replay_frappe_flush(cache, insert):
 class TestFlushDeferredErrorLogs:
 	def _frappe(
 		self, monkeypatch, cache, fail_on=(), stored_then_fail=lambda error: False, transactional=False, outage=False,
+		exists_fails=False,
 	):
 		"""A failed insert aborts the transaction, as a failed statement does
 		on Postgres: every later statement except a ROLLBACK fails until a
@@ -935,9 +936,14 @@ class TestFlushDeferredErrorLogs:
 		it, as on Postgres). ``frappe.db.exists`` reads ``self.table``.
 		``fail_on`` is a set of ``error`` values or a predicate over it.
 		``outage``: the database is down, so ``select 1`` fails too
-		(``self.probes`` counts the calls)."""
+		(``self.probes`` counts the calls). ``exists_fails``: the
+		``frappe.db.exists`` read fails and aborts the transaction.
+		``self.committed`` holds the inserted rows a COMMIT made durable: as
+		on Postgres, a COMMIT of an aborted transaction rolls it back."""
 		fails = fail_on if callable(fail_on) else (lambda error: error in fail_on)
 		self.probes = 0
+		self.committed = []
+		pending = []  # inserted since the last commit
 		inserted, commits = [], []
 		state = {"aborted": False}
 		self.db_log = []
@@ -964,6 +970,7 @@ class TestFlushDeferredErrorLogs:
 			if stored_then_fail(record.get("error")):
 				raise RuntimeError("after_insert hook failed")
 			inserted.append(record)
+			pending.append(record)
 
 		def _savepoint(name):
 			_live()
@@ -985,6 +992,9 @@ class TestFlushDeferredErrorLogs:
 		def _exists(doctype, name):
 			assert doctype == "Error Log"
 			_live()
+			if exists_fails:
+				state["aborted"] = True
+				raise RuntimeError("canceling statement due to statement timeout")
 			return name if name in self.table else None
 
 		def _sql(query, *a, **k):
@@ -1000,6 +1010,9 @@ class TestFlushDeferredErrorLogs:
 		def _commit():
 			commits.append(1)
 			self.commit_points.append(len(inserted))
+			if not state["aborted"]:
+				self.committed += pending
+			pending.clear()
 			txn.commit()
 			state["aborted"] = False
 
@@ -1286,6 +1299,20 @@ class TestFlushDeferredErrorLogs:
 		self._frappe(monkeypatch, cache, stored_then_fail=lambda e: e == "H1", transactional=True)
 		assert maintenance._flush_deferred_error_logs(KEY) == (1, False)
 		assert [r["error"] for r in self.table.values()] == ["ok"]
+
+	def test_a_failed_read_of_a_stored_row_cannot_abort_the_transaction(self, monkeypatch):
+		# Postgres: a failed statement aborts the transaction, and the final
+		# COMMIT then rolls it back. The read of the row a failing hook may
+		# have left runs under its own savepoint, so its failure undoes only
+		# itself: the rows inserted before and after it still commit.
+		errors = ("ok1", "ok2", "H1", "ok3")
+		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": e}) for e in errors]})
+		self._frappe(
+			monkeypatch, cache, stored_then_fail=lambda e: e == "H1", transactional=True, exists_fails=True,
+		)
+		assert maintenance._flush_deferred_error_logs(KEY) == (1, False)
+		assert [r["error"] for r in self.committed] == ["ok1", "ok2", "ok3"]
+		assert cache.pushes == [] and self.txn.open == []
 
 	def test_a_stored_row_that_cannot_be_checked_counts_as_failed(self, monkeypatch):
 		cache = _FakeCache({"insert_queue_for_Error Log": [json.dumps({"error": "H1"})]})
