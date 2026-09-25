@@ -524,7 +524,7 @@ class TestTheBreadcrumbReachesTheLogInProduction:
 
 		import frappe
 
-		real = pytest.importorskip("frappe.utils.logger")
+		real = pytest.importorskip("frappe.utils.logger", exc_type=ImportError)
 		monkeypatch.delenv("DEV_SERVER", raising=False)
 		monkeypatch.setattr(frappe, "_dev_server", 0, raising=False)
 		monkeypatch.setenv("FRAPPE_STREAM_LOGGING", "1")
@@ -748,7 +748,7 @@ class TestHttpFailurePath:
 		# (callers would carry on to the next item); it re-raises the same type,
 		# fresh, so no requests / urllib3 frame (which hold the prepared
 		# headers) travels with it.
-		timeouts = pytest.importorskip("rq.timeouts")
+		timeouts = pytest.importorskip("rq.timeouts", exc_type=ImportError)
 		original = timeouts.JobTimeoutException("Task exceeded maximum timeout value (60 seconds)")
 		raiser = self._raise(original)
 		fake_post = _post(raiser)
@@ -1349,7 +1349,7 @@ class TestAJobTimeoutIsNeverSwallowed:
 		_assert_fresh_and_clean(ei, job_timeout, raiser)
 
 	def test_current_key_or_empty_with_the_real_rq_timeout(self, monkeypatch):
-		timeouts = pytest.importorskip("rq.timeouts")
+		timeouts = pytest.importorskip("rq.timeouts", exc_type=ImportError)
 		original = timeouts.JobTimeoutException(_TIMEOUT_TEXT)
 		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", _raising(original), raising=False)
 		with pytest.raises(timeouts.JobTimeoutException) as ei:

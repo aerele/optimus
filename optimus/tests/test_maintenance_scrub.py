@@ -1803,7 +1803,7 @@ def test_the_summary_line_reaches_the_log_in_production(patch_env, monkeypatch, 
 
 	import frappe
 
-	real = pytest.importorskip("frappe.utils.logger")
+	real = pytest.importorskip("frappe.utils.logger", exc_type=ImportError)
 	monkeypatch.delenv("DEV_SERVER", raising=False)
 	monkeypatch.setattr(frappe, "_dev_server", 0, raising=False)
 	monkeypatch.setenv("FRAPPE_STREAM_LOGGING", "1")
