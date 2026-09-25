@@ -8,6 +8,22 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.58] - 2026-09-25
+
+### Fixed
+
+- The Python call tree no longer hides its deepest frames. Each nesting level
+  indents the tree and long file paths run wide, so deep frames were squeezed
+  into an unreadable sliver clipped inside the panel. The call tree section now
+  has its own horizontal scrollbar and its rows keep their natural width, so
+  every frame stays full width and reachable. The row highlight spans the full
+  scrolled width so scrolling right leaves no blank gap. Scoped to the call tree, so the
+  rest of the report layout is unchanged. In print the scroll is dropped and
+  rows fit the page width so the meta ellipsizes rather than running off the
+  page edge.
+
+---
+
 ## [0.12.56] - 2026-09-23
 
 ### Fixed
