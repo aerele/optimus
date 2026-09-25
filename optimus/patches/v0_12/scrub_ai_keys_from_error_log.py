@@ -21,10 +21,14 @@ the failing chunk's writes.
 Patch Log marks the patch done either way, so a skipped or failed scrub also
 leaves one Error Log row titled "Optimus: Error Log key scrub did not run",
 with the reason (an exception type name or a row count, never row text) and
-the command. A scrub that ran but could not process every row, left a
-key-shaped value, or left entries in the Error Log's deferred-insert queue
-leaves one row titled "Optimus: Error Log key scrub did not finish", with
-those counts and the command. Every outcome writes one counts-only line to
+the command. A scrub that ran but could not process every row or queued
+entry, or left a key-shaped value, leaves one row titled "Optimus: Error Log
+key scrub did not finish", with its counts and the command. Entries still in
+the Error Log's deferred-insert queue are printed and logged, but alone they
+leave no such row: that count also holds Frappe's own new error snapshots
+(a server error, any error in developer mode), and bench migrate inserts the
+queue right after the patches (the scrub masked the entries that were
+waiting when it started). Every outcome writes one counts-only line to
 the ``optimus`` log at ERROR level (Frappe's loggers drop lower levels unless
 DEV_SERVER is set, as under ``bench start``), so it reaches
 ``logs/optimus.log`` on a production site. Advisory step 3 (re-run the
@@ -102,15 +106,17 @@ def execute():
 	elif not (counts["failed"] or counts["residual"] or counts["queued"]):
 		print("Optimus: found no AI API keys in stored error rows.")
 	if counts["failed"]:
-		print(f"Optimus: {counts['failed']} error row(s) could not be masked. {run_it}")
+		print(f"Optimus: {counts['failed']} error row(s) or queued entries could not be processed. {run_it}")
 	if counts["queued"]:
 		print(
-			f"Optimus: {counts['queued']} Error Log entry(ies) are still waiting in the deferred-insert queue "
-			f"and were not scrubbed. {run_it}"
+			f"Optimus: Error Log entries still in the deferred-insert queue: {counts['queued']}. The scrub "
+			"masked the ones that were waiting when it started; bench migrate inserts them all right after the "
+			f"patches. Run the scrub again after the restart to mask them in the table: {command}"
 		)
 	if counts["residual"]:
 		print(f"Optimus: {counts['residual']} error row(s) still hold a key-shaped value. {purge_it}")
-	if counts["failed"] or counts["residual"] or counts["queued"]:
+	# Not on queued alone: it also counts Frappe's own new error snapshots.
+	if counts["failed"] or counts["residual"]:
 		hint = f"{run_it} {purge_it}" if counts["residual"] else run_it
 		_breadcrumb(
 			frappe, _PARTIAL_TITLE,

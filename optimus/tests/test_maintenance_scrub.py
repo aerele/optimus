@@ -1819,9 +1819,22 @@ def test_patch_prints_only_the_problem_lines_when_nothing_was_masked(
 	importlib.import_module(_PATCH).execute()
 	out = capsys.readouterr().out
 	assert "Rotate" not in out and "found no AI API keys" not in out
-	assert ("could not be masked" in out) is bool(failed)
+	assert ("could not be processed" in out) is bool(failed)
 	assert ("purge_ai_error_logs" in out) is bool(residual)
-	assert ("4 Error Log entry(ies) are still waiting in the deferred-insert queue" in out) is bool(queued)
+	assert ("Error Log entries still in the deferred-insert queue: 4." in out) is bool(queued)
+
+
+def test_the_queued_line_says_migrate_inserts_them_and_to_run_the_scrub_again(patch_env, monkeypatch, capsys):
+	monkeypatch.setattr(
+		maintenance, "scrub_error_log_secrets",
+		lambda **kw: {"candidates": 3, "changed": 0, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 1},
+	)
+	importlib.import_module(_PATCH).execute()
+	assert capsys.readouterr().out == (
+		"Optimus: Error Log entries still in the deferred-insert queue: 1. The scrub masked the ones that were "
+		"waiting when it started; bench migrate inserts them all right after the patches. Run the scrub again "
+		f"after the restart to mask them in the table: bench --site <site> {_COMMAND}\n"
+	)
 
 
 def test_the_run_by_hand_hint_prefers_off_peak(patch_env, monkeypatch, capsys):
@@ -1852,10 +1865,10 @@ def test_the_purge_hint_has_the_off_peak_note_too(patch_env, monkeypatch, capsys
 _PARTIAL_TITLE = "Optimus: Error Log key scrub did not finish"
 
 
-@pytest.mark.parametrize(("failed", "residual", "queued"), [(1, 0, 0), (0, 2, 0), (0, 0, 3), (1, 2, 3)])
+@pytest.mark.parametrize(("failed", "residual", "queued"), [(1, 0, 0), (0, 2, 0), (1, 0, 3), (1, 2, 3)])
 def test_a_partial_scrub_leaves_a_breadcrumb(patch_env, patch_logs, monkeypatch, failed, residual, queued):
-	# Patch Log marks the patch done: without a row, a scrub that left rows
-	# unmasked, key-shaped values or queued entries leaves no lasting trace.
+	# Patch Log marks the patch done: without a row, a scrub that could not
+	# process every row or left key-shaped values leaves no lasting trace.
 	monkeypatch.setattr(
 		maintenance, "scrub_error_log_secrets",
 		lambda **kw: {
@@ -1872,6 +1885,20 @@ def test_a_partial_scrub_leaves_a_breadcrumb(patch_env, patch_logs, monkeypatch,
 	assert KEY not in repr(crumb)
 	line = _one_summary_line(patch_logs)
 	assert f"failed={failed}" in line and f"residual={residual}" in line and f"queued={queued}" in line
+
+
+def test_entries_still_queued_alone_leave_no_breadcrumb(patch_env, patch_logs, monkeypatch, capsys):
+	# queued also counts Frappe's own new error snapshots (a server error,
+	# any error in developer mode), so on a busy site it is rarely 0: it is
+	# printed and logged, but it is not a scrub that "did not finish".
+	monkeypatch.setattr(
+		maintenance, "scrub_error_log_secrets",
+		lambda **kw: {"candidates": 5, "changed": 1, "deleted_docs_changed": 0, "residual": 0, "failed": 0, "queued": 3},
+	)
+	importlib.import_module(_PATCH).execute()
+	assert patch_logs.errors == []
+	assert "Error Log entries still in the deferred-insert queue: 3." in capsys.readouterr().out
+	assert "queued=3" in _one_summary_line(patch_logs)
 
 
 def test_a_complete_scrub_leaves_no_breadcrumb(patch_env, patch_logs, monkeypatch):
@@ -2116,7 +2143,14 @@ def test_patch_reports_rows_that_could_not_be_masked(patch_env, monkeypatch, cap
 		lambda **kw: {"candidates": 3, "changed": 2, "deleted_docs_changed": 0, "residual": 0, "failed": 1},
 	)
 	importlib.import_module(_PATCH).execute()
-	assert "1 error row(s) could not be masked" in capsys.readouterr().out
+	out = capsys.readouterr().out
+	# failed also counts queued entries that could not be inserted or masked
+	assert (
+		"Optimus: 1 error row(s) or queued entries could not be processed. Run it by hand ("
+		"Error Log is locked while it is scanned, so on a busy site prefer off-peak): "
+		f"bench --site <site> {_COMMAND}\n"
+	) in out
+	assert "could not be masked" not in out
 
 
 def test_patch_is_registered_post_model_sync():
