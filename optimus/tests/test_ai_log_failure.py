@@ -10,6 +10,7 @@ a Werkzeug Local proxy on a bench: never patch its attributes).
 
 import json
 import sys
+import traceback
 import types
 from types import SimpleNamespace
 
@@ -524,6 +525,55 @@ class TestTheBreadcrumbReachesTheLogInProduction:
 			named.propagate = saved[2]
 		err = capsys.readouterr().err
 		assert _crumb("RuntimeError") in err
+
+
+class TestExceptionText:
+	"""``_exception_text`` is the stdlib's plain traceback of the exception
+	(no frame locals, no chain). For an HTTP-status error from
+	``_http_post``, only its message is replaced by the body-free log text:
+	the stdlib still names the type and formats the frames."""
+
+	_LOG_TEXT = "HTTP 400 from the AI provider (where=chat/completions, provider_error=invalid_request_error)"
+
+	@staticmethod
+	def _raised(exc):
+		try:
+			raise exc
+		except BaseException as e:
+			return e
+
+	@pytest.mark.parametrize("module", ["optimus.ai_fix", "__main__", "builtins", None])
+	def test_the_exception_line_names_the_type_as_the_stdlib_does(self, module):
+		cls = type("Moved", (ai_fix.AiFixError,), {"__module__": module, "__qualname__": "Outer.<locals>.Moved"})
+		exc = self._raised(cls("REPLY-BODY echo"))
+		setattr(exc, ai_fix._LOG_TEXT_ATTR, self._LOG_TEXT)
+		stdlib = "".join(traceback.format_exception(exc, chain=False)).rstrip()
+		assert ai_fix._exception_text(exc) == stdlib.replace("REPLY-BODY echo", self._LOG_TEXT)
+
+	def test_the_log_text_replaces_the_message_and_nothing_else_is_added(self):
+		reply = "REPLY-BODY echo"  # a variable: the frame lines print the raise statement's source
+		try:
+			try:
+				raise ValueError("CHAINED-CONTEXT")
+			except ValueError:
+				raise ai_fix.AiFixError(reply)  # noqa: B904 (chained on purpose)
+		except ai_fix.AiFixError as e:
+			exc = e
+		exc.add_note("NOTE-MARKER")
+		setattr(exc, ai_fix._LOG_TEXT_ATTR, self._LOG_TEXT)
+		text = ai_fix._exception_text(exc)
+		assert text.startswith("Traceback (most recent call last):\n")
+		assert text.endswith(f"\noptimus.ai_fix.AiFixError: {self._LOG_TEXT}")
+		assert "REPLY-BODY" not in text and "CHAINED-CONTEXT" not in text and "NOTE-MARKER" not in text
+
+	def test_an_error_that_was_never_raised_is_its_exception_line(self):
+		exc = ai_fix.AiFixError("REPLY-BODY echo")
+		setattr(exc, ai_fix._LOG_TEXT_ATTR, self._LOG_TEXT)
+		assert ai_fix._exception_text(exc) == f"optimus.ai_fix.AiFixError: {self._LOG_TEXT}"
+
+	def test_without_a_log_text_it_is_the_stdlibs_plain_traceback(self):
+		exc = self._raised(ai_fix.AiFixError("plain message"))
+		assert ai_fix._exception_text(exc) == "".join(traceback.format_exception(exc, chain=False)).rstrip()
 
 
 def _post(behaviour):
