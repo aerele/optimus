@@ -8,6 +8,23 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.61] - 2026-09-26
+
+### Fixed
+
+- Self-time hot path findings now point at the exact hot line. When a function's
+  time is spent in database calls, its card pinned only to the `def` signature or
+  a call-to-another-function line, because the call tree holds framework
+  internals with no user-code line for the hot work. The card now pins to the
+  hottest related finding line (the N+1 or slow query) inside its deepest user
+  frame and shows it with context, the way a chain-pinned finding does. This
+  covers both a job that calls the database directly and a validate hook whose
+  deepest user frame runs the N+1 loop. The line comes from persisted findings,
+  so it survives a report re-render. A compute-only path with no related finding
+  still falls back to the signature line plus the Line-Level Drilldown note.
+
+---
+
 ## [0.12.59] - 2026-09-25
 
 ### Changed
