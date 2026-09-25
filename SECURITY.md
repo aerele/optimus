@@ -130,33 +130,37 @@ time.
    the old one. Backups, replicas, binlogs and bench log files keep the old
    text, and only revoking the key makes those copies harmless.
 2. Keep the OLD key in Optimus Settings until the scrub has run and its dry
-   run reports 0 (step 5): the scrub searches the Error Log for the key
-   stored there. Only then enter the new key (step 7).
+   run reports the values of step 5: the scrub searches the Error Log for
+   the key stored there. Only then enter the new key (step 7).
 3. Where to look: Error Log rows titled `optimus *` (for example
    `optimus ai_fix` or `optimus refill_indexes`), and rows Frappe wrote
    itself for a server error or a failed background job whose traceback
    passes through `optimus/ai_fix.py`. A row titled "Optimus: Error Log key
    scrub did not run" means the migrate skipped the scrub or it failed, and
    one titled "Optimus: Error Log key scrub did not finish" means it ran but
-   left rows it could not process, key-shaped values or queued entries;
+   could not process every row or queued entry, or left key-shaped values;
    both name the reason (counts or an error type) and the command to run.
 4. Count what the scrub would change:
    `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': True}"`.
-5. Run it with `'dry_run': False`, then the dry run again. The dry run
-   after the real run must report `"changed": 0`,
-   `"deleted_docs_changed": 0`, `"residual": 0`, `"failed": 0` and
-   `"queued": 0`: every row the scrub reads is then masked (see the known
-   limitations below for which rows it reads). `queued` counts the Error
-   Log entries still waiting in Frappe's deferred-insert queue in Redis. A
-   dry run only counts them; a real run inserts them, masked, so an empty
-   queue after the real run is the goal. If entries are still queued (more
-   than 10,000 were waiting, inserts kept failing, or processes still
-   running old code queued more meanwhile), run the real scrub again. The
-   scrub locks the Error Log while it scans it, one window of 1000 rows per
-   statement, so on a large Error Log run it off-peak. Run it with
-   `bench execute` or `bench --site <site> console`, never as a background
-   job: it refuses to run inside one, because a failed job's log would store
-   the unmasked rows it reads.
+5. Run it with `'dry_run': False`, then, right after it, the dry run
+   again. The dry run after the real run must report these values:
+   `changed` 0, `deleted_docs_changed` 0, `residual` 0 and `failed` 0.
+   Every row the scrub reads is then masked (see the known limitations
+   below for which rows it reads). `queued` counts the Error Log entries
+   still waiting in Frappe's deferred-insert queue in Redis. A dry run only
+   counts them. A real run inserts the entries that were waiting when it
+   started, each masked first; entries past the first 10,000, or left when
+   the database stopped answering, it masks in Redis and leaves queued.
+   `queued` also counts Frappe's own new server-error snapshots, and every
+   error in developer mode: once the processes have restarted on this
+   release these come from the fixed code and are harmless. So a small
+   `queued` that changes between runs is new traffic; if it stays large,
+   run the real scrub again. The scrub locks the Error Log while it scans
+   it, one window of 1000 rows per statement, so on a large Error Log run
+   it off-peak. Run it with `bench execute` or
+   `bench --site <site> console`, never as a background job: it refuses to
+   run inside one, because a failed job's log would store the unmasked rows
+   it reads.
 6. Optional: to delete the Optimus AI rows entirely (they can also hold
    prompt text: source code and SQL with literal values), count them first,
    then delete:
@@ -179,20 +183,27 @@ replicas, bench `logs/` files and backups from before the upgrade
 old text. Treat bench log files and binlogs from before the upgrade like
 backups: rotating the key is what makes them harmless.
 
-The migrate patch that runs the scrub runs once per site. Run steps 4 and 5
-by hand after a downgrade to an earlier release and the upgrade back (the
+The migrate patch that runs the scrub runs once per site. bench migrate
+inserts whatever is left in the deferred-insert queue right after the
+patches, so the scrub first masks in Redis the entries it leaves there of
+those that were waiting when it started. Run steps 4 and 5 again after the
+restart, to mask any rows that reached the table another way. Run them by
+hand after a downgrade to an earlier release and the upgrade back (the
 earlier release can write keys again, and the patch does not run twice),
-and on a site where Optimus was uninstalled and installed again (a new
-install marks every patch as done). A site that ran an earlier release and
-then uninstalled Optimus still holds the rows, and there
-`bench execute optimus.maintenance...` fails because the app is not
-installed on the site. With the app still on the bench, run the scrub from
-`bench --site <site> console` instead:
+on a site where Optimus was uninstalled and installed again (a new install
+marks every patch as done), and on a site that ran `frappe_profiler` 0.6.x
+with AI fix suggestions and then installed Optimus fresh (for the same
+reason). The scrub's passes that find rows by an `ai_fix.py` frame and a
+secret marker also find the rows with a `frappe_profiler/ai_fix.py` frame.
+A site that ran an earlier release and then uninstalled Optimus still
+holds the rows, and there `bench execute optimus.maintenance...` fails
+because the app is not installed on the site. With the app still on the
+bench, run the scrub from `bench --site <site> console` instead:
 
 ```python
 from optimus.maintenance import scrub_error_log_secrets
 scrub_error_log_secrets(dry_run=False)
-scrub_error_log_secrets(dry_run=True)  # must report the zeros of step 5
+scrub_error_log_secrets(dry_run=True)  # must report the values of step 5
 ```
 
 Or install Optimus on the site again and run steps 4 and 5. If no key is
