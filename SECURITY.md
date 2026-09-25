@@ -67,16 +67,23 @@ The AI provider key is kept out of every log. It is stored in the encrypted
 `ai_api_key` Password field of Optimus Settings and decrypted only when a
 request is sent. It must be plain printable ASCII: a key with any other
 character (a space inside it, a pasted smart quote or no-break space, a
-control character) is refused with a clear message before any request is
-made. Inside the process it exists only in a local variable named `api_key`
-(a name both Frappe's traceback sanitizer and Sentry's default denylist
-redact) and in `ai_fix._ApiKeyAuth`, a `requests` auth object whose `repr`
-is masked. It is never placed in a dict, a header dict, a request body, an
-exception message or an exception chain. A provider's error reply is
+control character) is refused before any request is made, with a message
+that names the usual causes (a pasted smart quote, a stray space, a
+no-break space, a control character). In Optimus's code it exists only in
+local variables named `api_key` or `secret` (names both Frappe's traceback
+sanitizer and Sentry's default denylist redact) and in
+`ai_fix._ApiKeyAuth`, a `requests` auth object whose `repr` is masked. That
+object sets the header on the HTTP library's own prepared request, whose
+headers hold the key while the request is sent; the response keeps that
+request, and neither one's `repr` shows its headers. Apart from those, it
+is never placed in a dict, a header dict, a request body, an exception
+message or an exception chain. A provider's error reply is
 scrubbed before it is shown, of the key stored in Optimus Settings and of
 the key the request was sent with (so an echo is masked even when the key
 in Settings was changed while the request ran), each in its raw and its
-JSON-escaped form.
+JSON-escaped form. A 404 message names the request URL with any
+credentials in it masked (a `user:password@` typed into a custom Base URL,
+or the key).
 
 Every Error Log row the AI code writes goes through
 `optimus.ai_fix.log_ai_failure`, which writes an explicit message with no
@@ -104,9 +111,12 @@ site. A row for an HTTP failure holds the provider, the call site, the
 status and, when the reply names one made only of lowercase words (letters
 joined by `_`, `.`, `:` or `-`, at most 64 characters), the provider's
 error code (`provider_error=`); any other value is left out, and the reply
-body, which can echo the prompt, is never logged. An unexpected error in
-the HTTP layer is logged with its type and plain `file:line:function`
-frames, without local variables or its message.
+body, which can echo the prompt, is never logged. That holds when this row
+cannot be written and the caller logs the error instead: the caller's row
+shows the status, the call site and `provider_error=` in place of the
+error's message, which can quote the reply. An unexpected error in the HTTP
+layer is logged with its type and plain `file:line:function` frames,
+without local variables or its message.
 
 Earlier releases with AI fix suggestions could store the key in plain text
 in the Error Log after a failed AI call. See the API key advisory in
