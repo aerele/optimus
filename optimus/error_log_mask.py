@@ -43,6 +43,14 @@ raw. Each failure leaves one line in the ``optimus`` log (an exception type
 name at most, never row text). It never writes an Error Log itself: that
 insert would run this hook again.
 
+Frappe caches every app's hooks ("app_hooks" in Redis). A process started
+before the upgrade that misses that key after migrate's ``clear_cache``
+caches its old hooks again, without this event, and every process reads
+them until the key is deleted. The migrate patch, when the scrub did not
+run, and every real scrub delete and reload that cache
+(``maintenance._refresh_hooks_cache``); the one run after the restart
+(advisory step 3) makes the event reach every process for good.
+
 The module imports only the standard library at import time; every Optimus
 import is inside the guarded ``try``. Frappe resolves the handler outside
 any ``try``, in every process that reads the hooks, and a process started

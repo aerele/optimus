@@ -24,7 +24,11 @@ row as Frappe inserts it, so the records queued in Redis are masked when
 bench migrate (right after the patches) or the scheduler inserts them.
 Every path but a failed import of ``optimus.maintenance`` prints one line
 saying so; after a failed import it says rows may be stored unmasked until
-the module imports, since the hook needs it too.
+the module imports, since the hook needs it too. Frappe caches the hooks,
+and a process started before the upgrade can cache the old ones again
+during the migrate; so, as a real scrub does first, the patch refreshes
+that cache when the scrub did not run (``_refresh_hooks_cache``), and
+this migrate's flush of the queue runs the hook.
 
 Patch Log marks the patch done either way, so a skipped or failed scrub also
 leaves one Error Log row titled "Optimus: Error Log key scrub did not run",
@@ -93,8 +97,14 @@ def execute():
 	if out is None:
 		# The scrub did not run (skipped or failed): roll back first, so the
 		# breadcrumb and execute_patch's Patch Log row can be written, even
-		# after a failed statement on Postgres.
+		# after a failed statement on Postgres. Then refresh the hooks Frappe
+		# caches, as a real scrub does first, so this process's flush of the
+		# deferred-insert queue, right after the patches, runs the Error Log
+		# hook; its reload reads the installed apps, so a refresh that failed
+		# is rolled back too.
 		_rollback(frappe)
+		if maintenance is not None and not _refresh_hooks(maintenance):
+			_rollback(frappe)
 		if failed is not None:
 			_breadcrumb(frappe, _BREADCRUMB_TITLE, failed, run_it)
 			_log_summary(frappe, f"failed ({failed})")
@@ -150,6 +160,15 @@ def execute():
 			" ".join(f"{k}={counts[k]}" for k in ("failed", "residual")) + f" key_unreadable={int(key_unreadable)}",
 			hint,
 		)
+
+
+def _refresh_hooks(maintenance) -> bool:
+	"""``maintenance._refresh_hooks_cache()``: False when it failed or
+	raised. Never raises."""
+	try:
+		return bool(maintenance._refresh_hooks_cache())
+	except Exception:
+		return False
 
 
 def _rollback(frappe) -> None:
