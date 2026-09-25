@@ -1776,8 +1776,9 @@ def _shown_url(url: str, auth=None) -> str:
 	"""``url`` as a 404 message names it: scrubbed of the key stored in
 	Optimus Settings and of the key the request was sent with (``auth``),
 	raw and JSON-escaped, and of credentials in it (a custom Base URL typed
-	as ``user:password@host``). Any failure returns ``_UNSHOWN_URL``, never
-	the unscrubbed URL; an RQ job timeout leaves as a fresh instance, raised
+	as ``user:password@host``). A ``url`` that is not a str, or is empty, is
+	returned as it is: there is nothing to scrub. Any failure returns
+	``_UNSHOWN_URL``, never the unscrubbed URL; an RQ job timeout leaves as a fresh instance, raised
 	after the ``try``, so the frames it interrupted (``json.dumps`` holds the
 	key under the names ``obj`` and ``o`` while the literals are built) never
 	travel with it."""
