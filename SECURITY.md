@@ -186,7 +186,8 @@ backups: rotating the key is what makes them harmless.
 The migrate patch that runs the scrub runs once per site. bench migrate
 inserts whatever is left in the deferred-insert queue right after the
 patches, so the scrub first masks in Redis the entries it leaves there of
-those that were waiting when it started. Run steps 4 and 5 again after the
+those that were waiting when it started, unless the flush stopped early (it
+then reports failed entries). Run steps 4 and 5 again after the
 restart, to mask any rows that reached the table another way. Run them by
 hand after a downgrade to an earlier release and the upgrade back (the
 earlier release can write keys again, and the patch does not run twice),
