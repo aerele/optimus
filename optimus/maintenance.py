@@ -730,12 +730,17 @@ def _refuse_inside_a_background_job() -> None:
 	hold unmasked rows (keys, prompts), and a job that fails is logged with
 	Frappe's with-context traceback, which prints every frame's locals, so
 	those rows would be written back to the Error Log. Where rq cannot be
-	imported there is no RQ job."""
+	imported there is no RQ job. It fails open: if ``get_current_job()``
+	itself raises, that counts as "no job", so a broken rq never stops a
+	scrub run by hand or by the migrate patch (which never runs in a job)."""
+	job = None
 	try:
 		from rq import get_current_job
+
+		job = get_current_job()
 	except Exception:
-		return
-	if get_current_job() is not None:
+		job = None
+	if job is not None:
 		raise InsideBackgroundJobError(
 			"Run optimus.maintenance with bench execute or bench console, never in a background job: "
 			"a failed job's log would store the unmasked rows it reads."
