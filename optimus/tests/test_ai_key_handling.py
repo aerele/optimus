@@ -134,6 +134,8 @@ class TestGetApiKey:
 			ai_fix._get_api_key()
 		assert ei.value.kind == "config"
 		assert "sk-live" not in str(ei.value) and "not plain ASCII" in str(ei.value)
+		# The message names the usual culprits, a plain space first among them.
+		assert "(often a pasted smart quote, a stray space, a no-break space, or a control character" in str(ei.value)
 		assert ei.value.__cause__ is None and ei.value.__context__ is None
 		fake = _capture(_Resp(200, _OPENAI_OK))
 		monkeypatch.setattr(requests, "post", fake)
