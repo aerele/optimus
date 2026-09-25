@@ -459,7 +459,8 @@ def _masked_record(record, api_key: str) -> dict | None:
 	``save_to_db`` to insert (see ``_remask_error_log_queue``): its
 	``_QUEUED_TEXT_FIELDS`` masked (``_mask_row``), with a title longer than
 	its column moved in front of ``error`` (``_long_title_into_error``).
-	Its bare header value lines are masked only when ``_is_ai_record``: any
+	The residual check is skipped: its answer is never used here, and it
+	costs about a third of the masking's time. Its bare header value lines are masked only when ``_is_ai_record``: any
 	other snapshot (an ERPNext error with a ``value = ...`` local, say) goes
 	through ``scrub_secrets`` alone and keeps them. None when it is not a
 	record or masking it failed: the re-mask counts it and drops it, and
@@ -472,7 +473,9 @@ def _masked_record(record, api_key: str) -> dict | None:
 		value_lines = _is_ai_record(record, api_key)
 	except Exception:
 		return None
-	masked = _mask_row(record, _QUEUED_TEXT_FIELDS, api_key, value_lines=value_lines, cut=False)
+	masked = _mask_row(
+		record, _QUEUED_TEXT_FIELDS, api_key, value_lines=value_lines, cut=False, check_residual=False,
+	)
 	if masked is None:
 		return None
 	return _long_title_into_error({**record, **masked[0]})
@@ -554,10 +557,13 @@ def _under_savepoint(write) -> bool:
 
 def _mask_row(
 	row: dict, text_fields: tuple[str, ...], api_key: str, value_lines: bool = True, cut: bool = True,
+	check_residual: bool = True,
 ) -> tuple[dict, bool] | None:
 	"""``(changes, residual)`` for one row (``_mask`` with ``value_lines``),
 	or None when masking it failed. With ``cut``, a masked value longer than
-	its column (``_FIELD_LIMITS``) is cut to fit."""
+	its column (``_FIELD_LIMITS``) is cut to fit. Without
+	``check_residual``, ``residual`` is always False: the independent
+	detector (``_has_residual_secret``) is not run."""
 	result = None
 	try:
 		changes = {}
@@ -569,7 +575,8 @@ def _mask_row(
 				if cut:
 					new = new[:_FIELD_LIMITS.get(field, len(new))]
 				changes[field] = new
-			residual = residual or _has_residual_secret(new, api_key)
+			if check_residual:
+				residual = residual or _has_residual_secret(new, api_key)
 		result = (changes, residual)
 	except Exception:
 		result = None
