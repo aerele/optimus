@@ -1755,6 +1755,33 @@ def _response_detail(resp, auth=None) -> str:
 	raise interrupt[0](*interrupt[1])
 
 
+# What a 404 message names instead of the request URL when the URL cannot be
+# scrubbed (_shown_url).
+_UNSHOWN_URL = "(the configured Base URL)"
+
+
+def _shown_url(url: str, auth=None) -> str:
+	"""``url`` as a 404 message names it: scrubbed of the key stored in
+	Optimus Settings and of the key the request was sent with (``auth``),
+	raw and JSON-escaped, and of credentials in it (a custom Base URL typed
+	as ``user:password@host``). Any failure returns ``_UNSHOWN_URL``, never
+	the unscrubbed URL; an RQ job timeout leaves as a fresh instance, raised
+	after the ``try``, so the frames it interrupted (``json.dumps`` holds the
+	key under the names ``obj`` and ``o`` while the literals are built) never
+	travel with it."""
+	interrupt = None
+	try:
+		from optimus.redaction import scrub_secrets
+
+		api_key = _scrub_literals_for(auth)
+		return scrub_secrets(url, literals=api_key)
+	except _job_timeout_types() as e:
+		interrupt = (type(e), e.args)
+	except Exception:
+		return _UNSHOWN_URL
+	raise interrupt[0](*interrupt[1])
+
+
 # A provider's machine-readable error code: lowercase-letter words joined by
 # "_", ".", ":" or "-" (invalid_request_error, rate_limit_exceeded,
 # overloaded_error, ...), at most 64 characters. Nothing that could be prose,
@@ -1923,11 +1950,10 @@ def _http_post(
 		# "if you set a custom Base URL" so a hosted-provider operator (whose
 		# Base URL is fixed and hidden) reads it as not their case. The
 		# provider's own error body is surfaced either way. The URL is shown
-		# scrubbed: a custom Base URL can be typed as user:password@host.
-		from optimus.redaction import scrub_secrets
-
+		# scrubbed (_shown_url): a custom Base URL can be typed as
+		# user:password@host.
 		detail = f"url={url}"
-		shown_url = scrub_secrets(url, literals=_scrub_literals_for(auth))
+		shown_url = _shown_url(url, auth)
 		failure = AiFixError(
 			f"The AI provider returned 404 (Not Found) for {shown_url}. Check that the Model "
 			"in Optimus Settings is a valid model name for this provider: a wrong model "
