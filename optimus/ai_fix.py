@@ -1758,8 +1758,11 @@ def _response_detail(resp, auth=None) -> str:
 # A provider's machine-readable error code: lowercase-letter words joined by
 # "_", ".", ":" or "-" (invalid_request_error, rate_limit_exceeded,
 # overloaded_error, ...), at most 64 characters. Nothing that could be prose,
-# a prompt fragment, an address or a URL, and no API key: a key always
-# carries a digit or an upper-case letter.
+# a prompt fragment, an address or a URL. The shape also rules out most API
+# keys (they carry a digit or an upper-case letter), but not every key: one
+# made only of lowercase words matches it. What keeps such a key out is the
+# literal check in _provider_error_code, which drops a value holding the
+# stored or the in-flight key (8 characters or more, raw or JSON-escaped).
 _PROVIDER_ERROR_RE = re.compile(r"^[a-z]+(?:[_.:-][a-z]+)*$")
 _PROVIDER_ERROR_MAX_LEN = 64
 

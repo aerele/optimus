@@ -892,7 +892,9 @@ class TestHttpFailurePath:
 	)
 	def test_a_key_shape_is_never_a_provider_error_code(self, logs, value):
 		# None of these is the stored key, so only the shape rule can drop them:
-		# an API key always carries a digit or an upper-case letter.
+		# the key shapes carry a digit or an upper-case letter, as most real
+		# keys do. A key made only of lowercase words passes the shape rule; the
+		# literal check drops it (test_the_key_the_request_used_is_scrubbed_after_a_rotation).
 		assert value != KEY
 		assert ai_fix._provider_error_code(_Resp(400, {"error": {"type": value, "code": value}})) == ""
 
