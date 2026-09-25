@@ -22,21 +22,21 @@ the failing chunk's writes.
 The queue is masked in Redis on every path, and this patch never inserts a
 queued record: the scrub masks it when it runs, and
 ``maintenance.mask_error_log_queue`` does when the scrub was skipped (it
-takes no table lock) or failed. bench migrate then inserts up to 500 (Frappe
-v15) or 10,000 (v16) queued records right after the patches; the scheduler
+takes no table lock) or failed. bench migrate then inserts about 500 (Frappe
+v15) or about 10,000 (v16) queued records after the patches; the scheduler
 inserts the rest every 15 minutes. Entries the old processes queue while the
 migrate runs are not masked: advisory step 3 (run the scrub again after the
-restart, then a dry run reporting 0) masks them in the table and is the
-guarantee.
+restart, then a dry run reporting the values it lists) masks them in the
+table and is the guarantee.
 
 Patch Log marks the patch done either way, so a skipped or failed scrub also
 leaves one Error Log row titled "Optimus: Error Log key scrub did not run",
 with the reason (an exception type name or a row count, and the queue's
 counts, never row text) and the command. A scrub that ran but could not
 process every row or queued entry, left a key-shaped value, held queued
-entries back unmasked (Redis refused a write) or could not read the stored
-key leaves one row titled "Optimus: Error Log key scrub did not finish",
-with its counts and the command. Entries in the queue alone, masked or not
+entries back unmasked (Redis refused a write or stopped answering) or could
+not read the stored key leaves one row titled "Optimus: Error Log key scrub
+did not finish", with its counts and the command. Entries in the queue alone, masked or not
 yet, are printed and logged, but leave no such row: that count also holds
 Frappe's own new error snapshots (a server error, any error in developer
 mode). Every outcome writes one counts-only line to the ``optimus`` log at
@@ -52,8 +52,8 @@ _COUNTS = (
 )
 _OFF_PEAK = "on MariaDB, Error Log is locked while it is scanned, so on a busy site prefer off-peak"
 _INSERTS = (
-	"bench migrate then inserts up to 500 (Frappe v15) or 10,000 (v16) queued records; the scheduler inserts "
-	"the rest every 15 minutes."
+	"bench migrate then inserts about 500 (Frappe v15) or about 10,000 (v16) queued records; the scheduler "
+	"inserts the rest every 15 minutes."
 )
 _KEY_HINT = (
 	"The stored AI API key cannot be decrypted: restore the site's encryption_key, or enter the key again in "

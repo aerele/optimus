@@ -1836,8 +1836,8 @@ def _scrub_answers(monkeypatch, **counts):
 _OFF_PEAK_NOTE = "on MariaDB, Error Log is locked while it is scanned, so on a busy site prefer off-peak"
 _RUN_IT = f"Run it by hand ({_OFF_PEAK_NOTE}): bench --site <site> {_COMMAND}"
 _INSERTS = (
-	"bench migrate then inserts up to 500 (Frappe v15) or 10,000 (v16) queued records; the scheduler inserts "
-	"the rest every 15 minutes."
+	"bench migrate then inserts about 500 (Frappe v15) or about 10,000 (v16) queued records; the scheduler "
+	"inserts the rest every 15 minutes."
 )
 
 
