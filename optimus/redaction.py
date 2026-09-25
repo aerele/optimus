@@ -208,14 +208,17 @@ def scrub_secrets(text: str, *, literals: tuple[str, ...] = ()) -> str:
 	second pass changes nothing. Non-string input is returned unchanged.
 
 	SECURITY: the key is held only in locals whose names Frappe's traceback
-	sanitizer and Sentry both redact (``secret``, ``api_key``); ``literals``
-	is dropped first. Callers still guard the call and never log a failure
-	of it with frame locals: ``text`` itself holds the unmasked value.
+	sanitizer and Sentry both redact (``secret``, ``api_key``): ``literals``
+	is moved into ``secret`` and dropped before the sort, which calls its key
+	back in Python, where an interrupt can land. Callers still guard the call
+	and never log a failure of it with frame locals: ``text`` itself holds
+	the unmasked value.
 	"""
 	if not text or not isinstance(text, str):
 		return text
-	secret = tuple(sorted(literals or (), key=_literal_length, reverse=True))
+	secret = list(literals or ())
 	del literals
+	secret.sort(key=_literal_length, reverse=True)
 	out = text
 	for api_key in secret:
 		if isinstance(api_key, str) and len(api_key) >= _MIN_LITERAL_LEN:

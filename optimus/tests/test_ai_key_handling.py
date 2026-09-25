@@ -180,6 +180,24 @@ class TestApiKeyAuth:
 		prepared = requests.Request("POST", "https://x.invalid/v1", headers={"a": "b"}, auth=auth).prepare()
 		assert prepared.headers["authorization"] == f"Bearer {KEY}"
 
+	def test_the_constructor_holds_the_key_only_as_api_key(self):
+		# While __init__ runs, its parameter holds the key: Frappe's traceback
+		# sanitizer and Sentry's denylist redact a local named api_key.
+		import sys
+
+		holders = set()
+
+		def _profile(frame, event, arg):
+			if event == "return" and frame.f_code is ai_fix._ApiKeyAuth.__init__.__code__:
+				holders.update(name for name, value in frame.f_locals.items() if KEY in repr(value))
+
+		sys.setprofile(_profile)
+		try:
+			ai_fix._ApiKeyAuth("authorization", KEY, prefix="Bearer ")
+		finally:
+			sys.setprofile(None)
+		assert holders == {"api_key"}
+
 
 class TestScrubLiteralsFor:
 	"""The literals a provider reply is scrubbed of: the stored key and the

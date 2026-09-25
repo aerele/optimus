@@ -874,9 +874,11 @@ class _ApiKeyAuth(requests.auth.AuthBase):
 
 	__slots__ = ("_header", "_value", "_prefix")
 
-	def __init__(self, header: str, value: str, prefix: str = ""):
+	def __init__(self, header: str, api_key: str, prefix: str = ""):
+		# The parameter holds the key while this runs: named api_key, a name
+		# Frappe's traceback sanitizer and Sentry's denylist redact.
 		self._header = header
-		self._value = value
+		self._value = api_key
 		self._prefix = prefix
 
 	def __call__(self, r):
