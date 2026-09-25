@@ -25,13 +25,20 @@ versions may contain breaking changes see migration notes below).
   workers. A key containing a character outside latin-1 (a pasted smart
   quote) leaked through the HTTP library's own frames, and a provider that
   echoed the key in its error reply had it shown in the error message.
-- Fixed: the key now exists only in the encrypted Password field, in a local
-  variable named `api_key` and in a masked `requests` auth object. It is
-  never in a dict, a header dict, a request body, an exception message or an
-  exception chain. A provider's error reply is scrubbed before it is shown:
-  of the key stored in Optimus Settings and of the key the request was sent
-  with (so an echo is masked even when the key in Settings was changed while
-  the request ran), each in its raw and its JSON-escaped form. Every Error
+- Fixed: the key now exists only in the encrypted Password field, in local
+  variables named `api_key` or `secret` (names Frappe's traceback sanitizer
+  and Sentry redact) and in a masked `requests` auth object
+  (`ai_fix._ApiKeyAuth`). That object sets the header on the HTTP library's
+  own prepared request, whose headers hold the key while the request is
+  sent; the response keeps that request, and neither one's `repr` shows its
+  headers. Apart from those, it is never in a dict, a header dict, a
+  request body, an exception message or an exception chain.
+  A provider's error reply is scrubbed before it is shown: of the key
+  stored in Optimus Settings and of the key the request was sent with (so
+  an echo is masked even when the key in Settings was changed while the
+  request ran), each in its raw and its JSON-escaped form. A 404 message
+  names the request URL with any credentials in it masked (a
+  `user:password@` typed into a custom Base URL, or the key). Every Error
   Log row the AI code writes goes through one function,
   `ai_fix.log_ai_failure`, with an explicit, scrubbed message (no frame
   locals) that links to the Optimus Session, written after the failure has
@@ -116,9 +123,12 @@ versions may contain breaking changes see migration notes below).
   words (letters joined by `_`, `.`, `:` or `-`, at most 64 characters). Any
   other value is left out, so a key-shaped string is never logged there,
   and the reply body itself is never logged, since it can echo the prompt.
-  An unexpected error inside the HTTP layer is logged with its type and
-  plain `file:line:function` frames, without local variables or its
-  message.
+  That holds when the HTTP layer's row cannot be written and the caller
+  logs the error instead: the caller's row shows the status, the call site
+  and `provider_error=` in place of the error's message, which can quote
+  the reply. An unexpected error inside the HTTP layer is logged with its
+  type and plain `file:line:function` frames, without local variables or
+  its message.
 - The per-table `optimus refill_indexes <table>` titles are now one title,
   `optimus refill_indexes`, with the table in the message, so the Error Log
   groups them. An HTTP failure during that refill is logged once, by the
@@ -133,8 +143,9 @@ versions may contain breaking changes see migration notes below).
 - An API key pasted with a trailing newline or spaces is trimmed. A key must
   be plain printable ASCII: a key with any other character (a space inside
   it, a pasted smart quote or no-break space, a control character such as a
-  newline or a tab) now fails with a clear message before any request is
-  made.
+  newline or a tab) now fails before any request is made, with a message
+  that names the usual causes: a pasted smart quote, a stray space, a
+  no-break space, or a control character such as a newline or tab.
 - An AI failure row is written to the Error Log immediately. On MariaDB the
   Error Log table is MyISAM, so the row survives a rollback of the request
   or background job that logged it. On Postgres, if the request or
