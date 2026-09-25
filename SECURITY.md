@@ -89,7 +89,8 @@ URL cannot be scrubbed. A request never follows a redirect
 (`allow_redirects=False`): the HTTP library drops only a header named
 `Authorization` when it follows one to another host, so the `x-api-key`
 header Anthropic uses would have been sent on to the redirect target. A 3xx
-reply is reported as an unexpected response.
+reply is reported as an unexpected response that names its status and says
+to set the Base URL to the address it redirects to.
 
 Every Error Log row the AI code writes goes through
 `optimus.ai_fix.log_ai_failure`, which writes an explicit message with no
@@ -146,19 +147,29 @@ does. Every other row, another app's included, is stored exactly as it was.
 It reads the stored key once per Error Log insert (one SELECT on `__Auth`,
 and a decrypt when a key is stored) with Frappe's messages muted, never
 caches it, and never raises, except an RQ job timeout, which leaves as a
-fresh exception so the job still stops. It fails open: when it cannot import
-the rest of Optimus or read the key, the row is stored as it was. The one
-exception is a row it would mask whose masking fails: its error text is
-replaced by "Optimus withheld this error text: it could not be masked.", its
-title and metadata too when they hold an `ai_fix.py` frame or the key (a
-title holding neither is kept, cut to 140 characters). A row whose AI check
-itself fails is treated as an AI row. Each such failure writes one line to
-the `optimus` log, naming at most an exception type; the hook never writes
-an Error Log row itself. Its module imports only the standard library at
-import time, so a process still running the previous release resolves it
-without error; there its import of the rest of Optimus can fail (the old
-modules are still loaded), and it then stores the row as it was. See the
-known limitations below for when the hook takes effect.
+fresh exception so the job still stops. It fails open: when it cannot read
+the key, the row is stored as it was. The one exception is a row it would
+mask whose masking fails: its error text is replaced by "Optimus withheld
+this error text: it could not be masked. See logs/optimus.log for the
+reason.", its title and metadata too when they hold an `ai_fix.py` frame or
+the key (a title holding neither is kept, cut to 140 characters). A row
+whose AI check itself fails is treated as an AI row. Each failure, and each
+use of the fallback below, writes one line to the `optimus` log
+(`logs/optimus.log`), naming at most an exception type: the first time that
+outcome happens in a process, then every 1000th time, with its count, so a
+storm of failing inserts cannot fill the log, which Frappe rotates. The hook
+never writes an Error Log row itself.
+
+Its module imports only the standard library at import time. So on an
+in-place upgrade (the new code on the filesystem the running processes use),
+a process still running the previous release that reads the new hooks
+resolves the hook without error; there its import of the rest of Optimus can
+fail (the old modules are still loaded), and it then falls back to Frappe
+alone: it masks the stored key, raw or JSON-escaped, in `error`, `method`
+and `metadata` (a key shorter than 8 characters is not replaced), but not
+the other key shapes or the value lines. An image-based or rolling
+deployment is different. See the known limitations below for both, and for
+when the hook takes effect.
 
 Earlier releases with AI fix suggestions could store the key in plain text
 in the Error Log after a failed AI call. See the API key advisory in
@@ -186,29 +197,46 @@ time.
 4. Count what the scrub would change:
    `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': True}"`.
 5. Run it with `'dry_run': False`, then, right after it, the dry run again.
-   The dry run after the real run must report these values: `changed` 0,
-   `deleted_docs_changed` 0, `residual` 0, `failed` 0 and `key_unreadable`
-   False. Every row the scrub reads is then masked (see the known
-   limitations below for which rows it reads). The scrub reads only the
-   Error Log and Deleted Document tables: it never reads or changes Frappe's
-   deferred-insert queue in Redis, whose records the Error Log hook masks
-   when Frappe inserts them. A real run first clears and reloads the hooks
-   Frappe caches, so the hook reaches every process once all of them run
-   this release; run it after the restart. A failed refresh is not counted
-   in `failed`. A dry run touches no Redis at all. `key_unreadable` is True
-   when a key is stored in Optimus Settings but cannot be decrypted (the
-   site's `encryption_key` changed, for example on a backup restored onto
-   another site): the scrub can then neither search for the key nor mask it
-   by value, and it counts one in `failed`. Restore the site's
-   `encryption_key`, or enter the OLD key again in Optimus Settings (the
-   scrub searches for the key that leaked), then run the scrub again. If
-   Optimus Settings cannot be read for another reason, `failed` counts one
-   and `key_unreadable` stays False. On MariaDB the scrub locks the Error
-   Log while it scans it (the table is MyISAM), one window of 1000 rows per
-   statement, so on a large Error Log run it off-peak. Run it with
-   `bench execute` or `bench --site <site> console`, never as a background
-   job: it refuses to run inside one, because a failed job's log would store
-   the unmasked rows it reads.
+   If you just upgraded, run them after restarting the web server and the
+   background workers (on an image-based or rolling deployment, after the
+   rollout). The dry run after the real run must report these values:
+   `changed` 0, `deleted_docs_changed` 0, `residual` 0, `failed` 0 and
+   `key_unreadable` False. Every row the scrub reads is then masked (see the
+   known limitations below for which rows it reads). The scrub reads only
+   the Error Log and Deleted Document tables: it never reads or changes
+   Frappe's deferred-insert queue in Redis, whose records the Error Log hook
+   masks when Frappe inserts them. A real run first clears and reloads the
+   hooks Frappe caches and reads them back, so the hook reaches every
+   process once all of them run this release; its result's `hooks_refreshed`
+   is True when the hooks read back hold the Error Log hook.
+   `hooks_refreshed` is not one of the values above, and a failed refresh is
+   not counted in `failed`. A dry run neither refreshes the cached hooks nor
+   reads the deferred-insert queue, so its `hooks_refreshed` is always
+   False. If the real run's `hooks_refreshed` is False, or you just upgraded
+   and cannot run the scrub, run `bench --site <site> clear-cache` after the
+   restart. To confirm that the hooks the site's processes read carry the
+   Error Log hook, check that this prints
+   `optimus.error_log_mask.mask_error_log` under `before_insert`:
+   `bench --site <site> execute frappe.get_hooks --kwargs "{'hook': 'doc_events'}" | grep -o '"Error Log": {[^}]*}'`
+   (in developer mode it shows only its own process's hooks). If it does
+   not, a process of the previous release still runs or cached the old
+   hooks: restart or replace every such process, run
+   `bench --site <site> clear-cache`, and check again. Each run of the scrub
+   that completes writes one line with its counts to the `optimus` log
+   (`logs/optimus.log`). `key_unreadable` is True when a key is stored in
+   Optimus Settings but cannot be decrypted (the site's `encryption_key`
+   changed, for example on a backup restored onto another site): the scrub
+   can then neither search for the key nor mask it by value, and it counts
+   one in `failed`. Restore the site's `encryption_key`, or enter the OLD
+   key again in Optimus Settings (the scrub searches for the key that
+   leaked), then run the scrub again. If Optimus Settings cannot be read for
+   another reason, `failed` counts one and `key_unreadable` stays False. On
+   MariaDB the scrub locks the Error Log while it scans it (the table is
+   MyISAM), one window of 1000 rows per statement, so on a large Error Log
+   run it off-peak. Run it with `bench execute` or
+   `bench --site <site> console`, never as a background job: it refuses to
+   run inside one, because a failed job's log would store the unmasked rows
+   it reads.
 6. Optional: to delete the Optimus AI rows entirely (they can also hold
    prompt text: source code and SQL with literal values), count them first,
    then delete:
@@ -239,15 +267,20 @@ the migrate's own insert of the queue runs the hook (unless a process still
 running the previous release caches the old hooks again in between). On
 every path it prints one line saying nothing needs doing for the queue (or,
 when `optimus.maintenance` cannot be imported, that rows, queued ones
-included, may be stored unmasked until it can). Rows the old processes
-insert until the restart may be stored unmasked: run steps 4 and 5 again
-after the restart, which mask them in the table and make the hook reach
-every process. Run them by hand after a downgrade to an earlier release and
-the upgrade back (the earlier release can write keys again, and the patch
-does not run twice), on a site where Optimus was uninstalled and installed
-again (a new install marks every patch as done), and on a site that ran
-`frappe_profiler` 0.6.x with AI fix suggestions and then installed Optimus
-fresh (for the same reason). The scrub's passes that find rows by an
+included, may be stored unmasked until it can), then a last line saying to
+run the scrub after restarting the web server and the background workers,
+since it also refreshes Frappe's cached hooks, or, if you cannot,
+`bench --site <site> clear-cache` after the restart; that line first says
+the cached hooks were not refreshed during the migrate when the refresh
+failed or was not attempted. Rows the old processes insert until the restart
+may be stored unmasked, or with only the stored key masked: run steps 4 and
+5 again after the restart, which mask them in the table and make the hook
+reach every process. Run them by hand after a downgrade to an earlier
+release and the upgrade back (the earlier release can write keys again, and
+the patch does not run twice), on a site where Optimus was uninstalled and
+installed again (a new install marks every patch as done), and on a site
+that ran `frappe_profiler` 0.6.x with AI fix suggestions and then installed
+Optimus fresh (for the same reason). The scrub's passes that find rows by an
 `ai_fix.py` frame and a secret marker also find the rows with a
 `frappe_profiler/ai_fix.py` frame. A site that ran an earlier release and
 then uninstalled Optimus still holds the rows, and there
@@ -293,9 +326,9 @@ installed on the site.
   (`user:password@host`, or a key in its path) can reach those places too.
   In the Error Log, the Error Log hook masks the `user:password@` shape and
   the stored key in a row from the AI code, but not the prompt text, nor a
-  key in the path that is not the stored key. On
-  stock Frappe v16 (Python 3.14 with sentry-sdk 1.45.1) Sentry currently
-  sends no frame locals at all, so there neither reaches Sentry this way.
+  key in the path that is not the stored key. On stock Frappe v16 (Python
+  3.14 with sentry-sdk 1.45.1) Sentry currently sends no frame locals at
+  all, so there neither reaches Sentry this way.
 - On MariaDB an AI failure row survives any rollback (Error Log is a MyISAM
   table). On Postgres it is still lost when only a savepoint is rolled back,
   when the database connection drops before the commit, or when the COMMIT
@@ -303,20 +336,44 @@ installed on the site.
   the `optimus` log. On a site whose scheduler is off, a row queued after a
   rollback waits in Redis until the next `bench migrate` writes it.
 - The Error Log hook takes effect in a process only once that process runs
-  this release and reads hooks that carry it. Until the web server and
-  background workers restart, the processes still running the previous
-  release may insert Error Log rows unmasked (they read the old hooks, or
-  the hook's import of the rest of Optimus fails there, the old modules
-  being still loaded, and it stores the row as it was). Frappe caches every
+  this release and reads hooks that carry it. On an in-place upgrade, until
+  the web server and background workers restart, the processes still running
+  the previous release may insert Error Log rows unmasked (while they read
+  the old hooks) or with only the stored key masked (once they read the new
+  hooks: the hook's import of the rest of Optimus can fail there, the old
+  modules being still loaded, and it then masks the stored key with Frappe
+  alone, not the other key shapes or the value lines). Frappe caches every
   app's hooks in Redis ("app_hooks"), and a restart does not clear them: a
   process still running the previous release can cache the old hooks,
-  without the Error Log hook, after the migrate clears the cache (and after
-  the patch's own refresh), and every process, those started after the
-  restart included, then reads those until the cache is cleared again. A
-  real run of the scrub clears and reloads them, so run steps 4 and 5 after
-  the restart; if you do not, or a refresh failed (it is not counted in
-  `failed`), run `bench --site <site> clear-cache` after the restart. The scrub run after the restart masks, in the table, the rows
-  written while the hook was not active.
+  without the Error Log hook, during or after the migrate (after the migrate
+  clears the cache, after the patch's own refresh, and after
+  `bench update`'s asset build, which flushes the whole Redis cache, every
+  site's, after the migrate and before the restart), and every process,
+  those started after the restart included, then reads those until the cache
+  is cleared again. So the normal case is to run steps 4 and 5 after the
+  restart: a real run of the scrub clears and reloads the cached hooks and
+  reads them back (`hooks_refreshed`). If you do not run them, or
+  `hooks_refreshed` is False, run `bench --site <site> clear-cache` after
+  the restart. The scrub run after the restart masks, in the table, the rows
+  written while the hook was not fully active.
+- In developer mode Frappe keeps the hooks in each process (on v16 a copy
+  per process, on v15 loaded again for each request from the modules the
+  process has already imported), not in Redis. No process can cache old
+  hooks for the others there, but the refresh, `hooks_refreshed` and the
+  check in step 5 see only their own process, and a process started before
+  the upgrade keeps the old hooks until it restarts: restarting every
+  process is the remedy.
+- The fail-open behaviour described under "API key handling" holds for an
+  in-place upgrade only. On an image-based or rolling deployment (Docker,
+  Kubernetes, or blue-green benches sharing one `redis_cache`), the
+  processes still running the old image do not have the hook's module. Once
+  the new hooks are cached they read them too, and Frappe resolves the hook
+  outside any error handling, so every Error Log insert in those processes
+  fails, for every app (`frappe.log_error` raises, and a queued record is
+  dropped), until they are replaced. Nothing in this release can prevent it,
+  since the old code runs there. Stop or replace every old web and worker
+  process before running the migrate, then run steps 4 and 5 after the
+  rollout.
 - Error Log records waiting in Frappe's deferred-insert queue are masked
   only when Frappe inserts them: until then (the scheduler's next run, every
   15 minutes, or the next `bench migrate` when the scheduler is off) they
@@ -324,7 +381,10 @@ installed on the site.
   nothing to disk.
 - Every Error Log insert on the site reads the stored AI key once (a SELECT
   on `__Auth`, and a decrypt when a key is stored), whichever app writes the
-  row: the hook needs the key to tell a row holding it.
+  row: the hook needs the key to tell a row holding it. While Optimus
+  profiles a flow, that read appears in the report's per-table and
+  per-action query breakdowns, one `__Auth` query per Error Log insert; the
+  N+1 and slowest-query findings leave it out, as Optimus's own query.
 - If you downgrade to a release without the Error Log hook, clear the site's
   cache after it (`bench migrate` does, and after the restart run
   `bench --site <site> clear-cache`): until the cached hooks are cleared they
