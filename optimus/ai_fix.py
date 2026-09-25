@@ -1778,10 +1778,10 @@ def _shown_url(url: str, auth=None) -> str:
 	raw and JSON-escaped, and of credentials in it (a custom Base URL typed
 	as ``user:password@host``). A ``url`` that is not a str, or is empty, is
 	returned as it is: there is nothing to scrub. Any failure returns
-	``_UNSHOWN_URL``, never the unscrubbed URL; an RQ job timeout leaves as a fresh instance, raised
-	after the ``try``, so the frames it interrupted (``json.dumps`` holds the
-	key under the names ``obj`` and ``o`` while the literals are built) never
-	travel with it."""
+	``_UNSHOWN_URL``, never the unscrubbed URL; an RQ job timeout leaves as
+	a fresh instance, raised after the ``try``, so the frames it interrupted
+	(``json.dumps`` holds the key under the names ``obj`` and ``o`` while
+	the literals are built) never travel with it."""
 	interrupt = None
 	try:
 		from optimus.redaction import scrub_secrets
