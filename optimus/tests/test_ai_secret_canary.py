@@ -3,7 +3,7 @@
 
 """Behavioural canary (PR-0a): the API key never reaches any log, traceback,
 error-tracker event or response, and the prompt never reaches an Error Log
-row, on any AI failure path.
+row, in any of the AI failure scenarios below.
 
 A fake key and a PII marker are pushed through every AI entry point while
 ``requests.post`` fails in each way seen in the field. ``frappe.log_error``

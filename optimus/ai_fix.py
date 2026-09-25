@@ -868,9 +868,11 @@ def _get_api_key() -> str:
 
 
 class _ApiKeyAuth(requests.auth.AuthBase):
-	"""Attaches the API key header at send time, so no headers dict ever holds
-	the key. ``repr``/``str`` are masked because Frappe's with-context
-	tracebacks, RQ failure logs and Sentry all print frame locals by repr."""
+	"""Attaches the API key header at send time, so no header dict of
+	Optimus's ever holds the key: only the HTTP library's own prepared
+	request does, while it is sent. ``repr``/``str`` are masked because
+	Frappe's with-context tracebacks, RQ failure logs and Sentry all print
+	frame locals by repr."""
 
 	__slots__ = ("_header", "_value", "_prefix")
 
