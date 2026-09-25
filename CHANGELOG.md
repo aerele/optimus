@@ -179,9 +179,12 @@ versions may contain breaking changes see migration notes below).
   Before, that rollback lost the row on Postgres. When a row may be missing
   (its write failed; after a rollback, its existence could not be checked
   or it could not be queued again; or the rollback callback could not be
-  registered), one line naming only the error type goes to the `optimus`
-  log (`logs/optimus.log`): "an AI Error Log row may not have been written
-  or re-queued". It is logged at error level, the lowest level Frappe's
+  registered), or a hook that runs after the insert failed (a broken Error
+  Log notification, say: the row is then written, and a caller that logs
+  the same error again writes a second row), one line naming only the
+  error type goes to the `optimus` log (`logs/optimus.log`): "an AI Error
+  Log row may not have been written or re-queued, or a hook after the
+  insert failed". It is logged at error level, the lowest level Frappe's
   loggers keep on a production site.
 
 ### Upgrade notes
