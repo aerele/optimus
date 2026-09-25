@@ -8,6 +8,97 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.62] - 2026-09-26
+
+### Security
+
+- **Advisory: the AI provider API key could be stored in plain text in the
+  Error Log.** Affects every earlier release with AI fix suggestions, on any
+  site where an AI call ever failed (network error, rejected key, timeout,
+  rate limit, unexpected reply). The failure was logged with Frappe's full
+  traceback, which prints the local variables of every frame. The provider
+  settings and the request headers were such locals, so the key, and the
+  prompt (your source code and SQL with literal values), were written to
+  `tabError Log`. The same traceback could reach Sentry when
+  `FRAPPE_SENTRY_DSN` was set, the snapshot Frappe stores for a server error
+  or for any error in developer mode, and the failed-job log of background
+  workers. A key containing a character outside latin-1 (a pasted smart
+  quote) leaked through the HTTP library's own frames, and a provider that
+  echoed the key in its error reply had it shown in the error message.
+- Fixed: the key now exists only in the encrypted Password field, in a local
+  variable named `api_key` and in a masked `requests` auth object. It is
+  never in a dict, a header dict, a request body, an exception message or an
+  exception chain, and a provider's error reply is scrubbed of it before it
+  is shown. Every Error Log row the AI code writes goes through one
+  function, `ai_fix.log_ai_failure`, with an explicit, scrubbed message (no
+  frame locals) that links to the Optimus Session, written after the failure
+  has been handled, so Sentry never receives the frames of the failed
+  request, where the prepared headers are. A behavioural canary test pushes
+  a fake key through every AI
+  entry point under every failure mode and fails if the key appears in any
+  log, traceback, error-tracker payload or response.
+- **Do this, in this order:**
+  1. Now, before upgrading: revoke or rotate every AI provider key that was
+     configured on a site running an earlier release. Backups and replicas
+     already hold the plain-text rows, and old processes keep running the
+     old code until they restart; only rotation makes those copies harmless.
+  2. Pull, run `bench --site <site> migrate`, then restart the web server and
+     the background workers together (`bench restart`, or your supervisor or
+     systemd units). The patch `v0_12.scrub_ai_keys_from_error_log` masks the
+     keys in existing Error Log rows and in Deleted Document copies of them,
+     and prints how many rows it masked, or that none needed it.
+  3. Run the scrub again, to catch rows the old processes wrote between the
+     migrate and the restart, then check it:
+     `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': False}"`,
+     then the same command with `'dry_run': True`, which must report
+     `"changed": 0`, `"residual": 0` and `"failed": 0`. Then clear the failed
+     background jobs from before the upgrade: their stored error text
+     (`rq:job:*` `exc_info`) may hold a provider reply that echoed the key
+     (Desk: RQ Job list, "Remove Failed Jobs", or
+     `bench --site <site> execute frappe.core.doctype.rq_job.rq_job.remove_failed_jobs`).
+  4. Enter the new key in Optimus Settings.
+  - Optional: delete the old AI error rows entirely, since they can also
+    hold prompt text. Check the counts first, then delete:
+    `bench --site <site> execute optimus.maintenance.purge_ai_error_logs --kwargs "{'dry_run': True}"`,
+    then the same command with `'dry_run': False`.
+  - If the site sends errors to Sentry, delete the events whose stack
+    contains `ai_fix.py`. Treat database backups taken before this upgrade
+    as containing plain-text keys.
+
+### Fixed
+
+- A failed AI call now writes one Error Log row instead of two.
+- AI Error Log rows written by the HTTP layer now link to the Optimus
+  Session, and the per-table `optimus refill_indexes <table>` titles are now
+  one title, `optimus refill_indexes`, with the table in the message, so the
+  Error Log groups them.
+- A provider reply that is JSON but not an object (a list or a string) is
+  reported as an unexpected response instead of failing the request with a
+  server error.
+- An API key pasted with a trailing newline or spaces is trimmed. A key with
+  a character that cannot be sent in an HTTP header now fails with a clear
+  message before any request is made.
+- On a site whose scheduler is paused or disabled, AI failures logged during
+  a web request now reach the Error Log (they used to wait for a scheduler
+  job that never ran).
+
+### Upgrade notes
+
+- `bench migrate` is required: it runs the scrub patch (batches of 200 rows,
+  a commit per batch) and clears the cache. The scrub never stops the
+  migrate: if the Error Log and its Deleted Document copies hold more than
+  200,000 rows, or the scrub fails, the migrate prints the command to run it
+  by hand and carries on (step 3 above re-runs it anyway).
+- Restart the web server and the background workers together after the
+  migrate: until they restart, the old processes run the old code.
+- No Desk form or JavaScript change (open tabs need no reload) and no new
+  `site_config.json` key.
+- Verify: the dry run in step 3 above reports `"changed": 0`,
+  `"residual": 0` and `"failed": 0`, and a failed AI call leaves exactly one Error Log row
+  whose text is an explicit message without a dump of local variables.
+
+---
+
 ## [0.12.61] - 2026-09-26
 
 ### Fixed
