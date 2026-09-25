@@ -329,9 +329,14 @@ def _remask_error_log_queue(api_key: str) -> _QueueMasked:
 
 	1. A claim an earlier run left (it was interrupted, or Redis refused its
 	   writes) is drained first (``_drain_claim``), so the claim key is free.
+	   Its masked entries join the queue, and step 2 claims them again with
+	   it (masking is idempotent). If that drain stops, the run stops before
+	   claiming the queue, and Frappe inserts the queue's entries as they
+	   are: Redis is then refusing the writes the masking needs.
 	2. The whole queue is claimed at once (``_claim_queue``): RENAMENX moves
-	   it to the claim key, where Frappe's ``save_to_db`` never looks, so from
-	   that instant no consumer can pop an entry this run has not masked.
+	   it to the claim key, where Frappe's ``save_to_db`` never looks, so
+	   from that instant no consumer can pop a claimed entry before it is
+	   masked.
 	3. The claim is drained, whatever the rename answered: each entry is
 	   popped from the claim, its records masked (``_masked_records``), and
 	   the masked records pushed as one entry onto the queue. The run only
@@ -401,7 +406,8 @@ def _drain_claim(run: _QueueRun, queue, claim, api_key: str) -> bool:
 	queue, up to the claim's length when it starts. True when it took them
 	all (or the claim ran empty early: another run took the rest). False
 	when a read or a push failed: it stops there, and the entries it did not
-	take stay in the claim key (``run.unmasked``). Never raises."""
+	take stay in the claim key (``run.unmasked``); an entry whose push
+	failed is lost, counted with the failure. Never raises."""
 	try:
 		size = int(_redis("LLEN", claim) or 0)
 	except Exception:
