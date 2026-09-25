@@ -2,9 +2,11 @@
 # For license information, please see license.txt
 
 """optimus.error_log_mask: the Error Log ``before_insert`` hook that masks the
-stored AI key (and the key shapes ``scrub_secrets`` knows) in every Error Log
-row as Frappe inserts it, the direct ``frappe.log_error`` insert and the
-records Frappe's ``save_to_db`` takes from the deferred-insert queue alike.
+stored AI key (and the key shapes ``scrub_secrets`` knows) in the Error Log
+rows from Optimus's AI code or holding the key as Frappe inserts them, the
+direct ``frappe.log_error`` insert and the records Frappe's ``save_to_db``
+takes from the deferred-insert queue alike. Every other row is left exactly
+as it was.
 
 ``frappe`` is the real module on a bench host and the conftest stub on CI:
 the hook only reads ``frappe.flags`` and ``frappe.logger``, which each test
@@ -41,6 +43,20 @@ ERP_TB = (
 	"      value = 'Acme Traders: 12 units'\n"
 	"      values = ['Acme Traders', 'Beta Stores']\n"
 )
+# Another app's with-context traceback holding the key shapes scrub_secrets
+# masks (an authorization header, an api_key field, a bare Bearer token, URL
+# credentials) and a value line: not Optimus's to change.
+OTHER_TB = (
+	"Traceback (most recent call last):\n"
+	'  File "apps/acme/acme/webhook.py", line 12, in send\n'
+	"    headers = {'Authorization': 'Bearer " + "h" * 40 + "'}\n"
+	"    params = {'api_key': '" + "k" * 32 + "'}\n"
+	"    url = 'https://acme:" + "p" * 20 + "@hooks.example.com/in'\n"
+	"      value = 'Bearer " + "v" * 40 + "'\n"
+)
+# Another app's title longer than its column, holding a Bearer token.
+OTHER_TITLE = "Webhook failed: Authorization: Bearer " + "q" * 40 + " " + "z" * 260
+FRAME = 'File "apps/optimus/optimus/ai_fix.py", line 1347, in _call_openai_chat'
 HANDLER = "optimus.error_log_mask.mask_error_log"
 FIELDS = ("error", "method", "metadata")
 
@@ -143,9 +159,11 @@ class TestMasking:
 		# The title ends in "Bearer" and the error starts with the token: only
 		# the joined "<title>\n<error>" (v16's validate joins them) holds it.
 		title = "x" * 140 + " Bearer"
-		doc = _run(_Doc(error="abcdefghij rest", method=title))
+		meta = json.dumps({"tb": FRAME})
+		doc = _run(_Doc(error="abcdefghij rest", method=title, metadata=meta))
 		assert doc.error == f"{title}\n******** rest"
 		assert doc.method == title[:140]
+		assert doc.metadata == meta
 
 	def test_a_long_title_goes_in_front_of_the_error_as_v16_validate_does(self, env):
 		title = ("T" * 150 + f" key {KEY} tail ").ljust(300, "z")
@@ -159,6 +177,32 @@ class TestMasking:
 		doc = _run(_Doc(error=ERP_TB, method="Stock Entry failed", metadata=json.dumps({"user": "a@b.c"})))
 		assert doc.sets == [] and doc.error == ERP_TB
 		assert env.reads == [True] and env.lines == []
+
+	@pytest.mark.parametrize("with_metadata", [True, False], ids=["v16", "v15"])
+	def test_a_row_neither_from_the_ai_code_nor_holding_the_key_is_left_byte_identical(self, env, with_metadata):
+		# Another app's row: key shapes scrub_secrets would mask, a value
+		# line, and a title longer than its column. The hook is site-wide
+		# and permanent, so it changes nothing here (Frappe's own validate
+		# and length check decide the title, as without Optimus).
+		fields = {"error": OTHER_TB, "method": OTHER_TITLE}
+		if with_metadata:
+			fields["metadata"] = json.dumps({"headers": {"Authorization": "Bearer " + "m" * 40}, "api_key": "p" * 32})
+		original = {k: v for k, v in fields.items()}
+		doc = _run(_Doc(**fields))
+		assert doc.sets == [] and doc.fields() == original
+		assert all(doc.get(k) is original[k] for k in original)
+		assert env.reads == [True] and env.lines == [] and env.inserts == []
+
+	def test_the_same_shapes_in_an_ai_record_are_masked(self, env):
+		# The positive twin: the same text with an ai_fix.py frame, or with
+		# the stored key, is masked and its long title moved.
+		for extra in (f"\n{FRAME}", f"\nbad key {KEY}"):
+			doc = _run(_Doc(error=OTHER_TB + extra, method=OTHER_TITLE))
+			text = json.dumps(doc.fields())
+			for secret in ("q" * 40, "h" * 40, "k" * 32, "p" * 20, "v" * 40, KEY):
+				assert secret not in text
+			assert doc.error.startswith("Webhook failed: Authorization: Bearer ******** zzz")
+			assert doc.method == doc.error[:140]
 
 	@pytest.mark.parametrize("field", ["error", "method", "metadata"])
 	@pytest.mark.parametrize("shape", ["dict", "list"])
@@ -239,11 +283,16 @@ class TestFailOpen:
 		assert doc.sets == [] and doc.error == LEAKY
 		assert _one_line(env).endswith("stored as it was: ImportError")
 
-	def test_masking_that_fails_on_a_record_that_is_not_ai_leaves_it_as_it_was(self, env, monkeypatch):
-		monkeypatch.setattr(maintenance, "_mask", _boom)
+	def test_a_record_that_is_not_ai_is_never_masked_so_a_masking_failure_cannot_touch_it(self, env, monkeypatch):
+		calls = []
+
+		def _mask(*a, **k):
+			calls.append(a)
+			return _boom()
+		monkeypatch.setattr(maintenance, "_mask", _mask)
 		doc = _run(_Doc(error=ERP_TB, method="Stock Entry failed"))
 		assert doc.sets == [] and doc.error == ERP_TB
-		assert _one_line(env).endswith("stored as it was: its masking failed")
+		assert calls == [] and env.lines == []
 
 	@pytest.mark.parametrize(
 		("fields", "method"),
@@ -320,8 +369,8 @@ class TestFailOpen:
 			raise OSError("disk full")
 		monkeypatch.setattr(frappe, "logger", _logger, raising=False)
 		monkeypatch.setattr(maintenance, "_mask", _boom)
-		doc = _run(_Doc(error=ERP_TB))
-		assert doc.error == ERP_TB
+		doc = _run(_Doc(error=LEAKY))
+		assert doc.error == error_log_mask.WITHHELD
 
 
 def _boom(*a, **k):
@@ -371,7 +420,7 @@ class TestJobTimeout:
 		monkeypatch.setattr(frappe, "logger", _logger, raising=False)
 		monkeypatch.setattr(maintenance, "_mask", _boom)
 		with pytest.raises(JobTimeoutException) as ei:
-			_run(_Doc(error=ERP_TB))
+			_run(_Doc(error=LEAKY))
 		assert ei.value.__context__ is None
 
 	def test_the_masking_lets_a_timeout_through(self, env, monkeypatch):
@@ -543,6 +592,21 @@ class TestFrappesInsertPaths:
 		# insert no longer fails the length check and is dropped
 		assert rows[1]["error"].startswith("T" * 150 + " Bearer ********\n") and len(rows[1]["method"]) == 140
 		assert rows[2] == (plain if v15 else _v16_validate(_Doc(**plain)).fields())
+
+	@pytest.mark.parametrize("v15", [False, True], ids=["v16", "v15"])
+	def test_another_apps_long_titled_record_is_left_to_frappe(self, env, v15):
+		# Not an AI record: the hook leaves it as it was, so Frappe decides as
+		# it would without Optimus (v16's validate moves the title; v15's
+		# length check fails the insert and save_to_db drops the record).
+		record = {"error": OTHER_TB, "method": "Webhook failed " + "w" * 200}
+		queues = {"insert_queue_for_Error Log": [json.dumps(record).encode()]}
+		rows, dropped = [], []
+		_frappe_save_to_db(queues, rows, dropped, v15)
+		if v15:
+			assert rows == [] and dropped == ["CharacterLengthExceededError"]
+		else:
+			assert dropped == [] and rows == [_v16_validate(_Doc(**record)).fields()]
+			assert "h" * 40 in rows[0]["error"]  # its text kept as it was
 
 	def test_a_direct_log_error_insert_is_masked_too(self, env):
 		# frappe.log_error builds the doc and calls insert() at once (no

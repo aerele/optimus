@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Mask AI provider API keys in every Error Log row as Frappe inserts it.
+"""Mask AI provider API keys in the Error Log rows Frappe inserts.
 
 ``hooks.py`` registers ``mask_error_log`` as the ``before_insert`` doc event
 of Error Log. Frappe runs it inside ``Document.insert``, before ``validate``,
@@ -15,19 +15,31 @@ way it is written:
   and the scheduler every 15 minutes), again through ``Document.insert``.
 
 So nothing reads or changes that queue: a queued record is masked when it
-is inserted, by the code running at that moment. The masking is
-``optimus.maintenance._masked_record``, the scrub's own: the stored key
-(raw and JSON-escaped) and the key shapes ``scrub_secrets`` knows are masked
-in ``error``, ``method`` and ``metadata`` (a field the doc does not hold,
-such as ``metadata`` on Frappe v15, is left alone); the bare header value
-lines only in a record from Optimus's AI code or holding the key; a title
-longer than its column is moved in front of ``error``, as v16's
-``ErrorLog.validate`` does, and the joined text masked again. A truthy value
-that is not text is masked as ``str(value)``, the text the row stores. Only
-the fields the masking changed are set.
+is inserted, by the code running at that moment.
 
-The key is read once per insert (``ai_fix._current_key_or_empty``, never
-cached, held only as ``api_key``), with Frappe's messages muted, so an
+It changes only the rows that are Optimus's to change: a record from
+Optimus's AI code (an ``optimus/ai_fix.py`` or ``frappe_profiler/ai_fix.py``
+frame in ``error``, ``method`` or ``metadata``) or holding the stored key
+(raw or JSON-escaped), as ``maintenance._is_ai_record`` decides. Every other
+row, another app's included, is left byte-identical: the hook is site-wide
+and permanent, so it applies no key shape and moves no title there, and
+Frappe's own ``validate`` and length check treat it as they would without
+Optimus. If that check itself fails, the record is treated as one of
+Optimus's.
+
+In such a record the masking is ``optimus.maintenance._masked_record``, the
+scrub's own: the stored key (raw and JSON-escaped), the key shapes
+``scrub_secrets`` knows and the bare header value lines are masked in
+``error``, ``method`` and ``metadata`` (a field the doc does not hold, such
+as ``metadata`` on Frappe v15, is left alone); a title longer than its
+column is moved in front of ``error``, as v16's ``ErrorLog.validate`` does,
+and the joined text masked again. A truthy value that is not text is read
+as ``str(value)``, the text the row stores, both to recognise the key and to
+mask it. Only the fields the masking changed are set.
+
+The key is read once per insert, of every Error Log row, since a row
+holding the key is one of Optimus's (``ai_fix._current_key_or_empty``,
+never cached, held only as ``api_key``), with Frappe's messages muted, so an
 undecryptable key does not add "Encryption key is invalid" to the reply of
 every request that logs an error. It is a SELECT on ``__Auth``, a table
 every Frappe site has, so it cannot fail in a healthy transaction.
@@ -36,12 +48,11 @@ It never raises, except an RQ job timeout (the job must stop), which leaves
 as a fresh instance raised after the ``try``, so the frames it interrupted
 (the record's text, the key read) never travel with it. It fails open: any
 other failure (an import, the key read, the masking) leaves the doc as it
-was, with one exception. When the masking fails on a record that is
-recognisably from Optimus's AI code (an ``ai_fix.py`` frame in any field) or
-holds the key, the text is withheld (``_withhold``) instead of inserted
-raw. Each failure leaves one line in the ``optimus`` log (an exception type
-name at most, never row text). It never writes an Error Log itself: that
-insert would run this hook again.
+was, with one exception. When the masking fails (on a record of Optimus's,
+the only ones it masks), the text is withheld (``_withhold``) instead of
+inserted raw. Each failure leaves one line in the ``optimus`` log (an
+exception type name at most, never row text). It never writes an Error Log
+itself: that insert would run this hook again.
 
 Frappe caches every app's hooks ("app_hooks" in Redis). A process started
 before the upgrade that misses that key after migrate's ``clear_cache``
@@ -71,9 +82,10 @@ _TITLE_LIMIT = 140
 
 
 def mask_error_log(doc, method=None) -> None:
-	"""The Error Log ``before_insert`` doc event: mask the stored AI key and
-	the key shapes in ``doc`` (see the module docstring). Never raises,
-	except an RQ job timeout, re-raised as a fresh instance."""
+	"""The Error Log ``before_insert`` doc event: in a record from Optimus's
+	AI code or holding the stored key, mask the key and the key shapes;
+	leave every other ``doc`` as it was (see the module docstring). Never
+	raises, except an RQ job timeout, re-raised as a fresh instance."""
 	timeout_types = _job_timeout_types()
 	interrupt = None
 	outcome = None
@@ -91,9 +103,10 @@ def mask_error_log(doc, method=None) -> None:
 
 
 def _mask_doc(doc, timeout_types) -> str | None:
-	"""Mask ``doc``'s text fields in place. None when it is done (masked, or
-	nothing to mask); otherwise the outcome for the ``optimus`` log. Raises
-	what it cannot handle; ``mask_error_log`` catches it."""
+	"""Mask ``doc``'s text fields in place when it is a record of Optimus's
+	(``_is_ai``). None when it is done (masked, not Optimus's, or nothing to
+	mask); otherwise the outcome for the ``optimus`` log. Raises what it
+	cannot handle; ``mask_error_log`` catches it."""
 	import frappe
 
 	from optimus import maintenance
@@ -108,12 +121,14 @@ def _mask_doc(doc, timeout_types) -> str | None:
 	if not record:
 		return None
 	api_key = _read_key(frappe, _current_key_or_empty)
+	# Only a record from Optimus's AI code or holding the key is Optimus's to
+	# change; every other row is left exactly as it was.
+	if not _is_ai(maintenance, record, api_key, timeout_types):
+		return None
 	masked = _masked(maintenance, record, api_key, timeout_types)
 	if masked is None:
-		if _is_ai(maintenance, record, api_key, timeout_types):
-			_withhold(doc, maintenance, record, api_key, timeout_types)
-			return "withheld: its masking failed"
-		return "stored as it was: its masking failed"
+		_withhold(doc, maintenance, record, api_key, timeout_types)
+		return "withheld: its masking failed"
 	for field in _TEXT_FIELDS:
 		if field in masked and masked[field] != record.get(field):
 			doc.set(field, masked[field])
@@ -149,8 +164,9 @@ def _masked(maintenance, record: dict, api_key: str, timeout_types) -> dict | No
 
 def _is_ai(maintenance, fields: dict, api_key: str, timeout_types) -> bool:
 	"""True when ``fields`` hold a frame of Optimus's AI code or the key
-	(``maintenance._is_ai_record``). True also when that check fails: the
-	masking already failed, and nothing then shows the text is safe."""
+	(``maintenance._is_ai_record``). True also when that check fails:
+	nothing then shows the record is not Optimus's, and, once its masking
+	failed, nothing shows the text is safe."""
 	try:
 		return bool(maintenance._is_ai_record(fields, api_key))
 	except Exception as e:

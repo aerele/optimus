@@ -20,8 +20,9 @@ the failing chunk's writes.
 
 It never reads or changes Frappe's deferred-insert queue. The Error Log
 ``before_insert`` hook (``optimus.error_log_mask``) masks every Error Log
-row as Frappe inserts it, so the records queued in Redis are masked when
-bench migrate (right after the patches) or the scheduler inserts them.
+row from Optimus's AI code or holding the key as Frappe inserts it, so the
+records queued in Redis are masked when bench migrate (right after the
+patches) or the scheduler inserts them.
 Every path but a failed import of ``optimus.maintenance`` prints one line
 saying so; after a failed import it says rows may be stored unmasked until
 the module imports, since the hook needs it too. Frappe caches the hooks,
