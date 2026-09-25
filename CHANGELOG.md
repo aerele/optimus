@@ -66,7 +66,8 @@ versions may contain breaking changes see migration notes below).
      inserts, masked, the Error Log rows waiting in Frappe's deferred-insert
      queue in Redis. bench migrate inserts whatever is left in that queue
      right after the patches, so the scrub first masks in Redis the entries
-     it leaves there of those that were waiting when it started. Step 3
+     it leaves there of those that were waiting when it started, unless the
+     flush stopped early (it then reports failed entries). Step 3
      re-runs the scrub after the restart, to mask any rows that reached the
      table another way.
   3. After the restart, run the scrub again, to catch rows the old processes
