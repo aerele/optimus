@@ -729,6 +729,22 @@ class TestHttpFailurePath:
 		assert "404 (Not Found) for https://gw.internal/********/v1/chat/completions. " in str(ei.value)
 		assert KEY not in str(ei.value)
 
+	@pytest.mark.parametrize("fails", ["reading-the-key", "scrubbing"])
+	def test_a_404_url_that_cannot_be_scrubbed_is_never_shown(self, logs, monkeypatch, fails):
+		# If the URL cannot be scrubbed, the message names a placeholder, never
+		# the unscrubbed URL (a custom Base URL can carry user:password@).
+		target = "optimus.ai_fix._scrub_literals_for" if fails == "reading-the-key" else "optimus.redaction.scrub_secrets"
+		monkeypatch.setattr(target, _raising(RuntimeError("scrub failed")))
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(404, {}, text="")))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			ai_fix._call_openai_chat(
+				"http://alice:hunter2-pass@llm.internal:11434/v1", "", "m", "s", [{"role": "user", "content": "x"}]
+			)
+		message = str(ei.value)
+		assert "404 (Not Found) for (the configured Base URL). Check that the Model " in message
+		assert "alice" not in message and "hunter2-pass" not in message and "llm.internal" not in message
+		assert "hunter2-pass" not in logs[0]["message"]
+
 	def test_the_body_is_scrubbed_before_it_is_cut(self, logs, monkeypatch):
 		# Cutting first would keep a key prefix the literal no longer matches.
 		body = "x" * 290 + KEY + " tail"
@@ -1312,6 +1328,38 @@ class TestAJobTimeoutIsNeverSwallowed:
 						assert word_key not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds the echoed key"
 			tb = tb.tb_next
 		assert checked == ["_provider_error_code"]
+
+	def test_the_404_url_scrub(self, logs, job_timeout, monkeypatch):
+		# The timeout lands inside json.dumps while the key's literals are
+		# built for the URL the 404 message names: json's frames hold the key
+		# as ``obj`` and ``o``, names no sanitizer redacts. It leaves fresh,
+		# and no frame on its way out holds the key under any name. It fires
+		# once, as RQ's SIGALRM does: a helper that swallowed it would let
+		# the job run on.
+		real_encode = json.JSONEncoder.encode
+		fired = []
+
+		def _encode(self, o):
+			if o == KEY and not fired:
+				fired.append(True)
+				raise job_timeout
+			return real_encode(self, o)
+
+		monkeypatch.setattr(json.JSONEncoder, "encode", _encode)
+		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(404, {}, text="")))
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix._http_post("https://llm.internal/v1/chat/completions", {}, {"model": "m"}, provider="openai",
+			                  where="chat/completions", auth=ai_fix._ApiKeyAuth("authorization", KEY, prefix="Bearer "))
+		_assert_fresh_and_clean(ei, job_timeout, _encode)
+		walked = []
+		tb = ei.value.__traceback__
+		while tb is not None:
+			walked.append(tb.tb_frame.f_code.co_name)
+			for name, value in tb.tb_frame.f_locals.items():
+				assert KEY not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds the key"
+			tb = tb.tb_next
+		assert "_http_post" in walked
+		assert logs == []
 
 	def test_token_count(self, job_timeout):
 		class _Count:
