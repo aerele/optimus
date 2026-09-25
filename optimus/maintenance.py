@@ -39,9 +39,9 @@ the Error Log ``before_insert`` hook (``optimus.error_log_mask``) masks
 every Error Log row from Optimus's AI code or holding the key
 (``_is_ai_record``) as Frappe inserts it, with ``_masked_record`` below,
 the queued ones included when Frappe's ``save_to_db`` inserts them; it
-leaves every other row as it was. A real
-scrub first refreshes the hooks Frappe caches (``_refresh_hooks_cache``),
-so that hook reaches every process once all of them run the new code.
+leaves every other row as it was. A real scrub first refreshes the hooks
+Frappe caches (``_refresh_hooks_cache``), so that hook reaches every
+process once all of them run the new code.
 
 ``tabError Log`` is MyISAM on MariaDB, so each statement holds a table read
 lock while it runs and blocks every Error Log insert meanwhile. Each ``LIKE``
@@ -140,14 +140,15 @@ _DRY_RUN_WORDS = {"true": True, "1": True, "yes": True, "false": False, "0": Fal
 # bare key that no scrub_secrets shape matches. Only string-like values
 # (quoted, bytes, list, tuple) are masked, and only in rows already selected
 # as AI rows, or in records from the AI code or holding the key
-# (_is_ai_record): other snapshots keep their value lines. The second form
-# is the same line inside Deleted Document data, which is JSON (newlines
-# escaped as \n); it consumes escape pairs whole so the JSON stays valid. Its repeat is bounded: an unbounded one keeps a
-# backtracking frame per character (about 150 bytes each), so a planted
-# multi-megabyte row could exhaust memory and kill bench migrate. Frappe
-# prints at most 1000 characters of a local, so a real value line fits; a
-# longer one keeps its tail past _ESCAPED_VALUE_MAX_UNITS units (a character
-# or an escape pair each), which the residual check still reads.
+# (_is_ai_record): other snapshots keep their value lines. The second form is
+# the same line inside Deleted Document data, which is JSON (newlines escaped
+# as \n); it consumes escape pairs whole so the JSON stays valid. Its repeat
+# is bounded: an unbounded one keeps a backtracking frame per character (about
+# 150 bytes each), so a planted multi-megabyte row could exhaust memory and
+# kill bench migrate. Frappe prints at most 1000 characters of a local, so a
+# real value line fits; a longer one keeps its tail past
+# _ESCAPED_VALUE_MAX_UNITS units (a character or an escape pair each), which
+# the residual check still reads.
 _ESCAPED_VALUE_MAX_UNITS = 2048
 _VALUE_LINE = re.compile(r"""(?m)^([ \t]+(?:value|values|one_value) = )(?:b?['"]|[\[(]).*$""")
 _ESCAPED_VALUE_LINE = re.compile(
