@@ -62,24 +62,34 @@ versions may contain breaking changes see migration notes below).
      the background workers together (`bench restart`, or your supervisor or
      systemd units). The patch `v0_12.scrub_ai_keys_from_error_log` masks the
      keys in existing Error Log rows and in Deleted Document copies of them,
-     and prints how many rows it masked, or that none needed it.
-  3. Run the scrub again, to catch rows the old processes wrote during and
-     after the migrate, until the restart, then check it:
+     and prints how many rows it masked, or that none needed it. It also
+     inserts, masked, the Error Log rows waiting in Frappe's deferred-insert
+     queue in Redis. bench migrate inserts whatever is left in that queue
+     right after the patches, so the scrub first masks in Redis the entries
+     it leaves there of those that were waiting when it started. Step 3
+     re-runs the scrub after the restart, to mask any rows that reached the
+     table another way.
+  3. After the restart, run the scrub again, to catch rows the old processes
+     wrote during and after the migrate, until the restart, then check it:
      `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': False}"`,
-     then the same command with `'dry_run': True`, which must report
-     `"changed": 0`, `"deleted_docs_changed": 0`, `"residual": 0`,
-     `"failed": 0` and `"queued": 0`. `queued` counts the Error Log entries
-     still waiting in Frappe's deferred-insert queue in Redis: a real run
-     inserts them, masked, so after it the queue should be empty. If entries
-     are still queued (more than 10,000 were waiting, inserts kept failing,
-     or processes still running the old code queued more meanwhile), run the
-     real scrub again. The scrub locks the Error Log while it scans it
-     (the table is MyISAM on MariaDB), one window of 1000 rows per
-     statement, so on a site with a large Error Log run it off-peak. Run it
-     with `bench execute` or `bench --site <site> console`, never as a
-     background job: it refuses to run inside one, because a failed job's
-     log would store the unmasked rows it reads. Then clear the failed background jobs from
-     before the upgrade: their stored error text (`rq:job:*` `exc_info`) may
+     then, right after it, the same command with `'dry_run': True`, which
+     must report these values: `changed` 0, `deleted_docs_changed` 0,
+     `residual` 0 and `failed` 0. `queued` counts the Error Log entries
+     still waiting in Frappe's deferred-insert queue in Redis. A real run
+     inserts the entries that were waiting when it started, each masked
+     first; entries past the first 10,000, or left when the database
+     stopped answering, it masks in Redis and leaves queued. `queued` also
+     counts Frappe's own new server-error snapshots, and every error in
+     developer mode: after the restart these come from the fixed code and
+     are harmless. So a small `queued` that changes between runs is new
+     traffic; if it stays large, run the real scrub again. The scrub locks
+     the Error Log while it scans it (the table is MyISAM on MariaDB), one
+     window of 1000 rows per statement, so on a site with a large Error Log
+     run it off-peak. Run it with `bench execute` or
+     `bench --site <site> console`, never as a background job: it refuses to
+     run inside one, because a failed job's log would store the unmasked
+     rows it reads. Then clear the failed background jobs from before the
+     upgrade: their stored error text (`rq:job:*` `exc_info`) may
      hold a provider reply that echoed the key (Desk: RQ Job list, "Remove
      Failed Jobs", or
      `bench --site <site> execute frappe.core.doctype.rq_job.rq_job.remove_failed_jobs`).
@@ -97,15 +107,23 @@ versions may contain breaking changes see migration notes below).
     as containing plain-text keys, and treat bench log files (`logs/`) and
     binlogs from before the upgrade like backups.
   - A site where Optimus was uninstalled and installed again never runs the
-    patch (a new install marks every patch as done): run step 3 by hand. A
+    patch (a new install marks every patch as done): run step 3 by hand.
+    Nor does a site that ran `frappe_profiler` 0.6.x with AI fix suggestions
+    and then installed Optimus fresh: run step 3 by hand there too. The
+    scrub's passes that find rows by an `ai_fix.py` frame and a secret
+    marker also find the rows with a `frappe_profiler/ai_fix.py` frame. A
     site that ran an earlier release and then uninstalled Optimus still
     holds the rows, and there `bench execute optimus.maintenance...` fails
     because the app is not installed on the site. With the app still on the
     bench, run the scrub from `bench --site <site> console` instead:
-    `from optimus.maintenance import scrub_error_log_secrets`, then
-    `scrub_error_log_secrets(dry_run=False)`, then
-    `scrub_error_log_secrets(dry_run=True)`, which must report the zeros of
-    step 3. Or install Optimus on the site again and run step 3. If no key
+
+    ```python
+    from optimus.maintenance import scrub_error_log_secrets
+    scrub_error_log_secrets(dry_run=False)
+    scrub_error_log_secrets(dry_run=True)  # must report the values of step 3
+    ```
+
+    Or install Optimus on the site again and run step 3. If no key
     is stored on the site any more, the scrub has no stored key to search
     for; its passes that find rows by an `ai_fix.py` frame and a secret
     marker still run.
@@ -173,11 +191,14 @@ versions may contain breaking changes see migration notes below).
   row titled "Optimus: Error Log key scrub did not run" with the reason (a
   row count, or an error type name, never row text) and that command, and
   carries on (step 3 above re-runs it anyway). If the scrub ran but could
-  not process every row, still found a key-shaped value, or left entries in
-  the queue, the patch writes an Error Log row titled "Optimus: Error Log
-  key scrub did not finish" with those counts and the command. Every
-  outcome also writes one line to the `optimus` log (`logs/optimus.log`),
-  at error level, with the outcome and its counts or error type only.
+  not process every row or queued entry, or still found a key-shaped value,
+  the patch writes an Error Log row titled "Optimus: Error Log key scrub did
+  not finish" with its counts and the command. Entries still in the queue
+  are printed, with a reminder to run the scrub again after the restart,
+  but alone they write no such row: that count also holds Frappe's own new
+  error snapshots. Every outcome also writes one line to the `optimus` log
+  (`logs/optimus.log`), at error level, with the outcome and its counts or
+  error type only.
 - What the scrub sends to the database: its search sends at most an
   8-character fragment of the stored key, never the whole key, and checks
   the full key in Python; the queued Error Log rows it inserts are masked
@@ -191,10 +212,9 @@ versions may contain breaking changes see migration notes below).
   migrate: until they restart, the old processes run the old code.
 - No Desk form or JavaScript change (open tabs need no reload) and no new
   `site_config.json` key.
-- Verify: the dry run in step 3 above reports `"changed": 0`,
-  `"deleted_docs_changed": 0`, `"residual": 0`, `"failed": 0` and
-  `"queued": 0`, and a failed AI call leaves exactly one Error Log row whose
-  text is an explicit message without a dump of local variables.
+- Verify: the dry run in step 3 above reports the values listed there, and
+  a failed AI call leaves exactly one Error Log row whose text is an
+  explicit message without a dump of local variables.
 
 ---
 
