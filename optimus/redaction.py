@@ -207,12 +207,14 @@ def scrub_secrets(text: str, *, literals: tuple[str, ...] = ()) -> str:
 	shapes. Idempotent: an already-masked value is never matched again, so a
 	second pass changes nothing. Non-string input is returned unchanged.
 
-	SECURITY: the key is held only in locals whose names Frappe's traceback
-	sanitizer and Sentry both redact (``secret``, ``api_key``): ``literals``
-	is moved into ``secret`` and dropped before the sort, which calls its key
-	back in Python, where an interrupt can land. Callers still guard the call
-	and never log a failure of it with frame locals: ``text`` itself holds
-	the unmasked value.
+	SECURITY: the key arrives in the ``literals`` parameter, a name neither
+	Frappe's traceback sanitizer nor Sentry redacts, so it is moved into
+	``secret`` and ``literals`` dropped before any scrubbing, and before the
+	sort, which calls its key back in Python, where an interrupt can land.
+	From then on the key is held only in locals whose names both redact
+	(``secret``, ``api_key``). Callers still guard the call and never log a
+	failure of it with frame locals: ``text`` itself holds the unmasked
+	value.
 	"""
 	if not text or not isinstance(text, str):
 		return text
