@@ -266,9 +266,10 @@ class _FlushRun:
 	of the current run of failed inserts (never a raw record): the ones a
 	stop pushes back."""
 
-	__slots__ = ("failed", "inserted", "popped", "queue_failed", "streak")
+	__slots__ = ("drained", "failed", "inserted", "popped", "queue_failed", "streak")
 
 	def __init__(self):
+		self.drained = False  # the insert loop found the queue empty
 		self.failed = 0
 		self.inserted = 0
 		self.popped = 0
@@ -314,11 +315,16 @@ def _flush_deferred_error_logs(api_key: str) -> _Flushed:
 	current entry, all masked (``_push_back``). A shorter run of failures at
 	the end of the entries is checked and pushed back the same way. A record
 	inserted before the stop is never pushed back, so none is inserted
-	twice. A failure to read the queue stops the flush. Never raises;
-	returns a
-	``_Flushed``: how many entries or rows could not be inserted (a failed
-	read or write of the queue counts as one, however often it fails), and
-	whether the queue failed."""
+	twice. A failure to read the queue stops the flush.
+
+	Then, past the cap or after a stop, it masks in Redis the entries it
+	did not take of those queued when it started (``_mask_left_in_queue``,
+	no database access): bench migrate inserts the queue as it is right
+	after the patches.
+
+	Never raises; returns a ``_Flushed``: how many entries or rows could not
+	be inserted (a failed read or write of the queue counts as one, however
+	often it fails), and whether the queue failed."""
 	run = _FlushRun()
 	try:
 		snapshot = max(0, int(frappe.cache.llen(_ERROR_LOG_QUEUE) or 0))
@@ -333,6 +339,10 @@ def _flush_deferred_error_logs(api_key: str) -> _Flushed:
 		# Commit what was inserted even when the loop stopped early: the rows
 		# are already gone from Redis, and a later rollback would drop them.
 		_committed(run)
+	try:
+		_mask_left_in_queue(run, api_key, 0 if run.drained else snapshot - run.popped)
+	except Exception:
+		run.failed += 1
 	return _Flushed(run.failed, run.queue_failed)
 
 
@@ -357,13 +367,15 @@ def _pop(run: _FlushRun):
 		return None
 
 
-def _push(run: _FlushRun, entry) -> None:
-	"""Put ``entry`` back at the end of the queue (``run.queue_error`` when
-	it cannot be written)."""
+def _push(run: _FlushRun, entry) -> bool:
+	"""Put ``entry`` back at the end of the queue. False when it cannot be
+	written (``run.queue_error``)."""
 	try:
 		frappe.cache.rpush(_ERROR_LOG_QUEUE, entry)
+		return True
 	except Exception:
 		run.queue_error()
+		return False
 
 
 def _insert_queued(run: _FlushRun, api_key: str, pops: int) -> None:
@@ -372,6 +384,7 @@ def _insert_queued(run: _FlushRun, api_key: str, pops: int) -> None:
 	for _ in range(pops):
 		raw = _pop(run)
 		if raw is None:
+			run.drained = not run.queue_failed
 			break
 		run.popped += 1
 		records = _queued_records(raw)
@@ -434,16 +447,48 @@ def _push_back(run: _FlushRun, rest: list, api_key: str) -> None:
 	entry. All of them MASKED (a record of ``rest`` that cannot be masked is
 	counted and dropped), never as popped: bench migrate's own flush inserts
 	the queue as it is right after the patches."""
-	left = list(run.streak)
+	left = [*run.streak, *_masked_records(run, rest, api_key)]
 	run.streak.clear()
-	for record in rest:
+	if left:
+		_push(run, json.dumps(left))
+
+
+def _masked_records(run: _FlushRun, records: list, api_key: str) -> list[dict]:
+	"""``records`` masked (``_masked_record``); one that cannot be masked is
+	counted in ``run.failed`` and dropped."""
+	out = []
+	for record in records:
 		masked = _masked_record(record, api_key)
 		if masked is None:
 			run.failed += 1
 		else:
-			left.append(masked)
-	if left:
-		_push(run, json.dumps(left))
+			out.append(masked)
+	return out
+
+
+def _mask_left_in_queue(run: _FlushRun, api_key: str, left: int) -> None:
+	"""Mask, in Redis, the ``left`` entries the insert loop did not take of
+	those queued when the flush started (past the cap, or after a stop),
+	with no database access: each is popped, masked and pushed back at the
+	end of the queue, as one list entry. bench migrate inserts the Error
+	Log queue as it is right after the patches, so an entry left unmasked
+	would reach the table with the key. Entries queued after the flush
+	started are left alone: once the processes have restarted they come
+	from the fixed code. An entry that is not JSON (Frappe's own flush
+	would fail on it) or a record that cannot be masked is counted and
+	dropped, as in the insert loop. Stops when the queue is empty or
+	cannot be read or written."""
+	for _ in range(max(0, left)):
+		raw = _pop(run)
+		if raw is None:
+			return
+		records = _queued_records(raw)
+		if records is None:
+			run.failed += 1
+			continue
+		masked = _masked_records(run, records, api_key)
+		if masked and not _push(run, json.dumps(masked)):
+			return
 
 
 def _masked_record(record, api_key: str) -> dict | None:
@@ -779,8 +824,10 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	entries still waiting in the Error Log's deferred-insert queue when the
 	scrub ends (a queue that cannot be read counts one in ``failed``
 	instead, once, also when the flush could not read or write it either).
-	After a real run ``queued`` should be 0: entries left there
-	were not scrubbed, and the scheduler would insert them as they are. With
+	After a real run, the entries still queued are the ones the flush masked
+	in Redis (past its cap or after it stopped) and the ones queued while
+	the scrub ran, which include Frappe's own new error snapshots; bench
+	migrate and the scheduler insert them as they are. With
 	``dry_run=True`` the counts say what WOULD change and nothing is written.
 	"""
 	from optimus.ai_fix import _current_key_or_empty
