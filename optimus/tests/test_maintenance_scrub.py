@@ -328,10 +328,10 @@ class TestScrubErrorLogSecrets:
 		f = fake([("a", LEAKY), ("b", LEAKY + "BOOM\n")])
 		real_mask = maintenance._mask
 
-		def _mask(text, api_key):
+		def _mask(text, api_key, **kw):
 			if "BOOM" in text:
 				raise ValueError("catastrophic backtracking")
-			return real_mask(text, api_key)
+			return real_mask(text, api_key, **kw)
 		monkeypatch.setattr(maintenance, "_mask", _mask)
 		out = maintenance.scrub_error_log_secrets(dry_run=False)
 		assert (out["changed"], out["failed"]) == (1, 1)
@@ -1063,10 +1063,10 @@ class TestFlushDeferredErrorLogs:
 	def test_a_record_that_cannot_be_masked_is_never_inserted(self, monkeypatch):
 		real_mask = maintenance._mask
 
-		def _mask(text, api_key):
+		def _mask(text, api_key, **kw):
 			if "BOOM" in text:
 				raise ValueError("catastrophic backtracking")
-			return real_mask(text, api_key)
+			return real_mask(text, api_key, **kw)
 		monkeypatch.setattr(maintenance, "_mask", _mask)
 		queue = [json.dumps({"error": LEAKY + "BOOM"}), json.dumps({"error": "z"}), json.dumps(["not a record"])]
 		cache = _FakeCache({"insert_queue_for_Error Log": queue})
@@ -1409,6 +1409,72 @@ class TestFlushDeferredErrorLogs:
 			raise RuntimeError("Lost connection to server during query")
 		monkeypatch.setattr(maintenance, "safe_commit", _commit)
 		assert maintenance._flush_deferred_error_logs(KEY).failed == 1
+
+
+# Frappe's with-context traceback of an ordinary ERPNext error: its value
+# lines are the user's data, not a header.
+ERP_TB = (
+	"Traceback (most recent call last):\n"
+	'  File "apps/erpnext/erpnext/stock/doctype/stock_entry/stock_entry.py", line 88, in validate\n'
+	"    self.set_value(fieldname, value)\n"
+	"      fieldname = 'customer'\n"
+	"      value = 'Acme Traders: 12 units'\n"
+	"      values = ['Acme Traders', 'Beta Stores']\n"
+)
+
+
+class TestQueuedValueLines:
+	"""The flush masks the bare header value lines (``value = ...``) only in
+	a queued record from the AI code (a frame in Optimus's ``ai_fix.py``, under
+	either package name) or one holding the stored key. Any other snapshot
+	keeps them: scrub_secrets alone."""
+
+	def _frappe(self, monkeypatch, queue):
+		cache = _FakeCache({"insert_queue_for_Error Log": queue})
+		inserted = []
+
+		def _get_doc(rec):
+			return SimpleNamespace(name=None, insert=lambda ignore_permissions=False: inserted.append(rec))
+		db = SimpleNamespace(savepoint=lambda n: None, release_savepoint=lambda n: None, rollback=lambda **k: None)
+		monkeypatch.setattr(maintenance, "frappe", SimpleNamespace(cache=cache, get_doc=_get_doc, db=db))
+		monkeypatch.setattr(maintenance, "safe_commit", lambda: None)
+		return cache, inserted
+
+	def _flush(self, monkeypatch, record, api_key=KEY):
+		_, inserted = self._frappe(monkeypatch, [json.dumps(record)])
+		assert maintenance._flush_deferred_error_logs(api_key) == (0, False)
+		[row] = inserted
+		return row
+
+	@pytest.mark.parametrize("api_key", [KEY, ""], ids=["key_stored", "no_key_stored"])
+	def test_an_unrelated_snapshot_keeps_its_value_lines(self, monkeypatch, api_key):
+		row = self._flush(monkeypatch, {"error": ERP_TB, "method": "Stock Entry failed"}, api_key)
+		assert row["error"] == ERP_TB
+
+	def test_another_apps_ai_fix_frame_is_not_optimus(self, monkeypatch):
+		error = ERP_TB.replace("erpnext/erpnext/stock/doctype/stock_entry/stock_entry.py", "other/other/openai_fix.py")
+		assert "ai_fix.py" in error
+		assert self._flush(monkeypatch, {"error": error})["error"] == error
+
+	@pytest.mark.parametrize("package", ["optimus", "frappe_profiler"])
+	def test_an_ai_snapshot_has_its_value_lines_masked(self, monkeypatch, package):
+		error = ERP_TB + f'  File "apps/{package}/{package}/ai_fix.py", line 1290, in _http_post\n'
+		row = self._flush(monkeypatch, {"error": error})
+		assert "Acme" not in row["error"] and "      value = ********\n" in row["error"]
+
+	def test_a_snapshot_holding_the_key_has_its_value_lines_masked(self, monkeypatch):
+		# No ai_fix.py frame, but the key is in its request metadata.
+		record = {"error": ERP_TB, "metadata": json.dumps({"form_dict": {"ai_api_key": KEY}})}
+		row = self._flush(monkeypatch, record)
+		assert "Acme" not in row["error"] and KEY not in row["metadata"]
+
+	def test_the_masking_of_what_is_left_in_redis_follows_the_same_rule(self, monkeypatch):
+		ai = ERP_TB + '  File "apps/optimus/optimus/ai_fix.py", line 1290, in _http_post\n'
+		cache, _ = self._frappe(monkeypatch, [json.dumps({"error": e}) for e in ("x", ERP_TB, ai)])
+		monkeypatch.setattr(maintenance, "_FLUSH_MAX_POPS", 1)
+		assert maintenance._flush_deferred_error_logs(KEY) == (0, False)
+		erp, masked = (json.loads(e)[0]["error"] for e in cache.queues["insert_queue_for_Error Log"])
+		assert erp == ERP_TB and "Acme" not in masked
 
 
 _REAL_FLUSH = maintenance._flush_deferred_error_logs
