@@ -430,8 +430,33 @@ def _under_savepoint(write) -> bool:
 
 def _insert_error_log(record: dict) -> bool:
 	"""Insert one queued record under a savepoint (``_under_savepoint``),
-	so a failed insert rolls back only itself."""
-	return _under_savepoint(lambda: frappe.get_doc({**record, "doctype": "Error Log"}).insert(ignore_permissions=True))
+	so a failed insert rolls back only itself. True when the row is in the
+	table: inserted, or stored although the insert then failed. On MariaDB
+	Error Log is a MyISAM table, so the rollback to the savepoint does not
+	undo an INSERT: when something after it fails (a hook that runs after
+	the INSERT), the row stays. Such a row counts as inserted, so it is
+	never pushed back to the queue and inserted a second time. Never
+	raises."""
+	doc = None
+
+	def _insert():
+		nonlocal doc
+		doc = frappe.get_doc({**record, "doctype": "Error Log"})
+		doc.insert(ignore_permissions=True)
+	return _under_savepoint(_insert) or _row_stored(doc)
+
+
+def _row_stored(doc) -> bool:
+	"""True when ``doc`` got a name and an Error Log row of that name exists,
+	read after the rollback to the savepoint. A read that fails counts as
+	not stored. Never raises."""
+	name = getattr(doc, "name", None)
+	if not name:
+		return False
+	try:
+		return bool(frappe.db.exists("Error Log", name))
+	except Exception:
+		return False
 
 
 def _mask_row(row: dict, text_fields: tuple[str, ...], api_key: str) -> tuple[dict, bool] | None:
