@@ -479,7 +479,8 @@ def _masked_record(record, api_key: str) -> dict | None:
 		return None
 	try:
 		value_lines = _is_ai_record(record, api_key)
-	except Exception:
+	except Exception as e:
+		_reraise_job_timeout(e)
 		return None
 	masked = _mask_row(
 		record, _QUEUED_TEXT_FIELDS, api_key, value_lines=value_lines, cut=False, check_residual=False,
@@ -600,9 +601,26 @@ def _mask_row(
 			if check_residual:
 				residual = residual or _has_residual_secret(new, api_key)
 		result = (changes, residual)
-	except Exception:
+	except Exception as e:
+		_reraise_job_timeout(e)
 		result = None
 	return result
+
+
+def _reraise_job_timeout(e: Exception) -> None:
+	"""Raise ``e`` again when it is an RQ job timeout, so the masking's own
+	fail-safes never swallow it: the Error Log hook (``error_log_mask``) runs
+	this masking inside RQ jobs, and the job must stop. The hook re-raises it
+	as a fresh instance, so these frames never travel with it. Any other
+	exception returns."""
+	try:
+		from optimus.ai_fix import _job_timeout_types
+
+		timeout_types = _job_timeout_types()
+	except Exception:
+		timeout_types = ()
+	if isinstance(e, timeout_types):
+		raise e
 
 
 def _write_row(doctype: str, name: str, changes: dict) -> bool:

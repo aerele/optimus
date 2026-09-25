@@ -13,7 +13,7 @@ sends them to Sentry. The rules:
 
 1. In ``ai_fix.py`` only ``log_ai_failure`` calls ``frappe.log_error``.
 2. In the scanned modules (``analyze.py``, ``api.py``, ``maintenance.py``,
-   and ``ai_jobs.py`` as soon as it exists) an AI function never calls
+   ``error_log_mask.py``, and ``ai_jobs.py`` as soon as it exists) an AI function never calls
    ``frappe.log_error``. An AI function references the ``ai_fix`` module or
    any name imported from ``optimus.ai_fix``. Every non-test module that
    imports ``optimus.ai_fix`` must be scanned (a guard test enforces it).
@@ -41,7 +41,7 @@ import re
 from pathlib import Path
 
 _PKG = Path(__file__).resolve().parents[1]
-_REQUIRED = ("analyze.py", "api.py", "maintenance.py")
+_REQUIRED = ("analyze.py", "api.py", "maintenance.py", "error_log_mask.py")
 _OPTIONAL = ("ai_jobs.py",)  # scanned as soon as a later PR adds it
 _AI_WRAPPERS = frozenset({"_backfill_ai_suggestions"})  # analyze.py; calls _run_ai_backfill
 _BASE_LOGGERS = frozenset({"log_error", "log_ai_failure"})
