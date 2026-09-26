@@ -145,6 +145,8 @@ For an explicit data-residency choice, use `OpenAI-compatible` pointed at a proc
 
 Every fix suggestion is verified before it is stored (`optimus/ai_guardrails.py`): the diff's `-` and context lines must match the source Optimus sent, and every block the report would show as code (any section, any indent, including indented code blocks and `~~~` fences) is parsed and checked against the Frappe rules the prompt teaches; code quoted verbatim from the shown source counts as context.
 
+Adding a whitelist decorator or editing an argument on a later signature line triggers the type-hint check, including positional-only and keyword-only arguments. Adding a child-row mutation inside an existing loop also triggers its check. An unrelated body edit does not turn an unchanged signature or mutation into a new violation.
+
 ### 4.1 Guardrail tiers
 
 The rules come in tiers.

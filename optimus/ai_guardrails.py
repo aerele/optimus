@@ -510,13 +510,17 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 			):
 				out.append(_v("ignore-permissions"))
 			elif isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef):
+				arguments = [*n.args.posonlyargs, *n.args.args, *n.args.kwonlyargs]
+				# A kept def line can gain a whitelist decorator or lose an argument
+				# annotation on a later line. A body edit alone keeps the signature old.
+				signature_changed = introduced(n) or any(introduced(a) for a in arguments)
 				for d in n.decorator_list:
 					dn = _dotted(d.func if isinstance(d, ast.Call) else d)
 					if dn.split(".")[-1] in ("lru_cache", "cache") and introduced(d):
 						out.append(_v("multitenant-cache", dn))
-					if dn == "frappe.whitelist" and introduced(n):
+					if dn == "frappe.whitelist" and (signature_changed or introduced(d)):
 						untyped = [
-							a.arg for a in n.args.args if a.arg not in ("self", "cls") and a.annotation is None
+							a.arg for a in arguments if a.arg not in ("self", "cls") and a.annotation is None
 						]
 						if untyped:
 							out.append(_v("whitelist-type-hints", ", ".join(untyped)))
@@ -535,10 +539,12 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 						out.append(_v("modify-not-saved", n.name))
 			elif (
 				isinstance(n, ast.For)
-				and introduced(n)
 				and _dotted(n.iter).startswith("self.")
 				and any(
-					isinstance(c, ast.Call) and _dotted(c.func) in ("self.remove", "self.append") for c in ast.walk(n)
+					isinstance(c, ast.Call)
+					and _dotted(c.func) in ("self.remove", "self.append")
+					and (introduced(n) or introduced(n.iter) or introduced(c))
+					for c in ast.walk(n)
 				)
 			):
 				out.append(_v("child-modify-while-iterating"))
