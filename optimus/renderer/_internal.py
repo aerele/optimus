@@ -144,6 +144,7 @@ from optimus.renderer.finding_enrichment import (
 	_group_findings_by_root_cause,
 	_markdown_to_safe_html,
 	_normalize_callsite,
+	_pin_slow_hot_path_to_related_hot_line,
 	_retarget_phase1_callsites_to_drilldown_leaf,
 	_root_cause_key,
 	_walk_drilldown_chain,
@@ -755,8 +756,18 @@ def render(
 	# finding's origin function down to the deepest user-code frame. Lets
 	# non-LLM users see the same actionable chain the AI narrative produces.
 	_attach_drilldown_chains(all_findings, actions, tracked_apps=tracked_apps)
-	# v0.7.x: self-time hot paths with no deeper user frame show the whole
-	# function body (Phase-1 can't pinpoint the line; the function is the unit).
+	# Pin a Slow Hot Path card to the exact hot line inside its deepest user
+	# frame, using the related N+1 / slow-query finding's callsite. A hot path
+	# whose time is in DB calls otherwise shows only the function signature or a
+	# call line, because the call tree holds framework internals with no user
+	# line. Persisted findings survive re-render, so this must run before the two
+	# fallbacks below (its marker suppresses them).
+	_pin_slow_hot_path_to_related_hot_line(
+		all_findings, file_cache=_finding_file_cache
+	)
+	# v0.7.x: self-time hot paths with no deeper user frame AND no related hot
+	# line fall back to the function signature + a Line-Level Drilldown note
+	# (Phase-1 can't pinpoint a compute-only leaf line).
 	_expand_self_time_snippets(all_findings, file_cache=_finding_file_cache)
 	# v0.7.x: re-anchor each finding's smoking-gun snippet on the deepest
 	# user-code frame of its drill-down chain (when the chain points at a
