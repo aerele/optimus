@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import traceback
 from datetime import datetime, timezone
 from typing import Any
 
 import requests
 
+from optimus import ai_budget, ai_guardrails, ai_prompts
 from optimus.analyzers.base import humanize_duration_ms
 
 
@@ -37,9 +39,7 @@ class AiFixError(Exception):
 	from an HTTP response, so callers can react to it (the temperature retry
 	fires only on a 400 or 422). ``kind`` classifies the failure
 	(``"config"``, ``"transport"``, ``"timeout"``, ``"bad_response"`` here;
-	later releases fill the rest). ``usage`` is reserved for later releases
-	(token usage already billed before the failure): no raise site sets it
-	yet, so it is always None for now.
+	later releases fill the rest). ``usage`` carries token usage already billed before an empty-response failure.
 
 	The message must never contain the API key: it is shown to the operator
 	and written to the Error Log. An HTTP-status error from ``_http_post``
@@ -90,24 +90,28 @@ AI_ELIGIBLE_FINDING_TYPES: frozenset[str] = frozenset({
 # REQUIRES both (no hosted default to fall back to).
 _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 	"Anthropic": {
+		"context_tokens": 200000,
 		"protocol": "anthropic",
 		"base_url": "https://api.anthropic.com",
 		"model": "claude-sonnet-4-6",
 		"needs_key": True,
 	},
 	"OpenAI": {
+		"context_tokens": 128000,
 		"protocol": "openai",
 		"base_url": "https://api.openai.com/v1",
 		"model": "gpt-4.1-mini",
 		"needs_key": True,
 	},
 	"Kimi (Moonshot)": {
+		"context_tokens": 128000,
 		"protocol": "openai",
 		"base_url": "https://api.moonshot.ai/v1",
 		"model": "kimi-k2-0905-preview",
 		"needs_key": True,
 	},
 	"DeepSeek": {
+		"context_tokens": 64000,
 		# DeepSeek's API is OpenAI-compatible, so it reuses the OpenAI wire
 		# path. Default to deepseek-chat (V3). deepseek-reasoner (R1) also works
 		# and ignores a custom temperature instead of rejecting it, so the
@@ -118,6 +122,7 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 		"needs_key": True,
 	},
 	"OpenAI-compatible": {
+		"context_tokens": 4096,
 		"protocol": "openai",
 		"base_url": "",
 		"model": "",
@@ -139,6 +144,7 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 	# descriptions) in optimus_settings.json. The _aerele_call_metadata
 	# wiring further down is left intact, ready to use.
 	# "Aerele": {
+	# 	"context_tokens": 200000,
 	# 	"protocol": "openai",
 	# 	"base_url": "https://api.aerele.in/optimus/v1",
 	# 	"model": "claude-sonnet-4-6",  # Aerele picks the upstream model
@@ -146,6 +152,11 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 	# },
 }
 _DEFAULT_PROVIDER = "Anthropic"
+_DEFAULT_CONTEXT_TOKENS = 4096  # a provider dict without context_tokens gets the tightest window
+# Silent prompt truncation is a small-window local-server failure (Ollama num_ctx);
+# hosted windows are far larger than any Optimus prompt, so they are not checked.
+_TRUNCATION_CHECK_MAX_CONTEXT = 32768
+_WINDOW_STEPS = (80, 48, 32, 20, 12, 8)  # source-window sizes tried, largest first
 
 
 def provider_needs_key(name: str) -> bool:
@@ -177,33 +188,14 @@ _ANTHROPIC_VERSION = "2023-06-01"
 # Compact "what this finding type means + how it's usually fixed in Frappe"
 # line, injected into the user message. Keeps the system prompt general and
 # gives the model a strong, type-specific starting point.
-_FINDING_TYPE_HINTS = {
-	"N+1 Query": "A query repeats once per row of an outer loop. Fix: lift it out of the loop and batch one `frappe.get_all(<DocType>, filters={'name': ('in', names)}, fields=[...])` (or `frappe.db.get_values`) then build a dict keyed by the join column.",
-	"Framework N+1": "Same N+1 pattern, but the loop is inside framework code (frappe/erpnext). Fix: change YOUR calling pattern so the framework isn't invoked per-row e.g. pass a list of names where the API accepts one, fetch needed fields up front, or avoid `get_doc` in a loop.",
-	"Slow Query": "A single SQL statement is slow. Fix: add the right index (Frappe way: Customize Form → the field → tick 'Search Index'; raw `ALTER TABLE … ADD INDEX` only if you can't customize), or restructure the WHERE/ORDER BY so an existing index is usable, or reduce the rows touched (tighter filters, fewer columns).",
-	"Missing Index": "A WHERE/JOIN/ORDER BY column has no usable index. Fix: add a Search Index (Customize Form → field → 'Search Index') prefer a composite index when several columns are filtered together; only fall back to `ALTER TABLE … ADD INDEX (...)` if customization isn't an option.",
-	"Full Table Scan": "EXPLAIN shows `type=ALL`: the whole table is read. Fix: index the filtering column (Search Index), or make the WHERE sargable (no functions on the column, no leading-wildcard LIKE).",
-	"Filesort": "EXPLAIN shows `Using filesort`: MariaDB sorts the result set in memory/on disk. Fix: a composite index ending in the ORDER BY column(s) so the read returns rows already ordered; or, if the sort isn't needed, drop the ORDER BY.",
-	"Temporary Table": "EXPLAIN shows `Using temporary`: usually a GROUP BY / DISTINCT that can't use an index. Fix: a covering composite index on the grouped columns, or pre-aggregate, or drop an unnecessary DISTINCT.",
-	"Low Filter Ratio": "EXPLAIN's `filtered` is low the index (if any) isn't selective; most examined rows are thrown away. Fix: index a more selective column, add a composite index matching the WHERE, or tighten the filter.",
-	"Redundant Call": "The same `get_doc` / cache lookup / `has_permission` runs many times for the same arguments from one callsite. Fix: hoist it out of the loop, or memoize for the request stash on `frappe.local` (request-scoped) or `frappe.cache().get_value(key)` / `set_value(key, val, expires_in_sec=…)` for cross-request.",
-	"Slow Hot Path": "A subtree of the call tree dominates the action's wall time. Fix: look at what that function does fetching data it doesn't need, doing per-row work that could be batched, recomputing something cacheable and remove/defer/batch it. `frappe.enqueue(...)` if it's work that doesn't need to block the response.",
-	"Hook Bottleneck": "A `doc_events` / `before_*` / `after_*` hook is expensive and runs on every save/submit. Fix: make the hook do less (skip when nothing relevant changed check `doc.has_value_changed(...)`), or move heavy work to `frappe.enqueue(...)` so it doesn't block the save.",
-	"Repeated Hot Frame": "The same function shows up many times in the sampled stacks it's called a lot. Fix: reduce call count (batch / cache) or make each call cheaper.",
-	"Hot Line": "A single source line is the dominant time sink inside its function. Fix: optimize that line specifically hoist invariant work out of a loop, replace an O(n²) pattern, avoid a per-iteration DB/cache hit, or use a set/dict for membership tests.",
-}
+_FINDING_TYPE_HINTS = ai_prompts.FINDING_TYPE_HINTS
 
 # Postgres phrasings for the four EXPLAIN-based hints. The rest of
 # _FINDING_TYPE_HINTS is dialect-neutral; MariaDB uses it verbatim. On Postgres
 # these swap the MariaDB EXPLAIN-column wording (type=ALL / Using filesort / …)
 # for plan-node wording (Seq Scan / Sort node / HashAggregate). The fix advice
 # is identical.
-_POSTGRES_EXPLAIN_HINTS = {
-	"Full Table Scan": "EXPLAIN shows a `Seq Scan`: the whole table is read. Fix: index the filtering column (Search Index), or make the WHERE sargable (no functions on the column, no leading-wildcard LIKE).",
-	"Filesort": "EXPLAIN shows a `Sort` node no index provides the required order, so Postgres sorts in memory/on disk. Fix: a composite index ending in the ORDER BY column(s) so the read returns rows already ordered; or, if the sort isn't needed, drop the ORDER BY.",
-	"Temporary Table": "EXPLAIN shows a `HashAggregate` / `Materialize`: usually a GROUP BY / DISTINCT that can't use an index. Fix: a covering composite index on the grouped columns, or pre-aggregate, or drop an unnecessary DISTINCT.",
-	"Low Filter Ratio": "EXPLAIN's row-count estimate shows low selectivity most examined rows are thrown away. Fix: index a more selective column, add a composite index matching the WHERE, or tighten the filter.",
-}
+_POSTGRES_EXPLAIN_HINTS = ai_prompts.POSTGRES_EXPLAIN_HINTS
 
 
 def _finding_type_hint(ftype):
@@ -219,268 +211,14 @@ def _finding_type_hint(ftype):
 			pass
 	return _FINDING_TYPE_HINTS.get(ftype)
 
-_SYSTEM_PROMPT = (
-	"You are a senior Frappe Framework / ERPNext engineer doing a precise code "
-	"review of one finding from a performance profiler. Propose the smallest "
-	"concrete, Frappe-idiomatic change that fixes the ROOT CAUSE not generic "
-	"advice, not a rewrite.\n\n"
-
-	"WRITE IDIOMATIC FRAPPE. Use `frappe.get_all` / `frappe.get_list` / "
-	"`frappe.db.get_value` / `frappe.db.get_values` / `frappe.qb` (the query "
-	"builder) never hand-built SQL strings and never an ORM call inside a "
-	"loop. Per-request memoization goes on `frappe.local`; cross-request "
-	"caching goes through `frappe.cache().get_value(key)` / "
-	"`set_value(key, value, expires_in_sec=...)`. Background work that needn't "
-	"block the response goes through `frappe.enqueue(...)`. Adding an index "
-	"means: Customize Form → the field → tick **Search Index** (which `bench "
-	"migrate` then creates) only fall back to a raw `ALTER TABLE ... ADD "
-	"INDEX (...)` when customization genuinely isn't an option and prefer a "
-	"single composite index over several single-column ones when the same "
-	"columns are filtered together.\n\n"
-
-	"NO RAW SQL IN YOUR PROPOSED FIX. `frappe.db.sql(\"SELECT ...\")` / "
-	"`\"INSERT ...\"` / `\"UPDATE ...\"` / `\"DELETE ...\"` / `\"REPLACE ...\"` "
-	"is forbidden in your `+` lines (proposed code) even when the `before` "
-	"code being REPLACED was raw SQL. The replacement MUST use one of the "
-	"framework APIs above: `frappe.get_all` for typical reads / lists; "
-	"`frappe.qb` for joins, aggregations, dynamic conditions or anything the "
-	"Document API can't express; `frappe.db.get_value` / `frappe.db.get_values` "
-	"for single-row / dict-shape lookups. If you genuinely cannot map the SQL "
-	"to a framework call without breaking semantics, say so plainly in "
-	"**Diagnosis** and leave the SQL in place (recommend caching / hoisting / "
-	"adding an index / changing the query shape instead). Narrow exception: "
-	"DDL via raw SQL `ALTER TABLE ... ADD INDEX ...` / `CREATE INDEX ...` "
-	" is acceptable when an index recommendation truly can't go through "
-	"Customize Form's Search Index toggle.\n\n"
-
-	"GROUND EVERYTHING IN THE CODE YOU WERE SHOWN DO NOT INVENT CODE. The "
-	"only source you have is what appears under \"Source around the callsite\" "
-	"in the user message (if anything appears there at all). Treat every other "
-	"line of code as unknown to you. Hard rules:\n"
-	"  • If your **Fix** shows a \"before\" snippet or `-` lines in a "
-	"```diff``` block every one of those lines MUST be copied VERBATIM from "
-	"the shown source: identical text and keep its line number. Do NOT "
-	"reconstruct, paraphrase, summarise, or imagine what the code \"probably\" "
-	"looks like. A `for … in …:` loop, a `frappe.get_doc(...)` call, a "
-	"variable name if you weren't shown it, you don't get to write it as if "
-	"you were.\n"
-	"  • If the loop / call / WHERE / line this finding is actually about is "
-	"NOT visible in the shown source (or no source was shown at all), then you "
-	"do NOT have the offending code. In that case: in **Diagnosis** say so "
-	"plainly (\"the offending code isn't in the window I was shown it's "
-	"likely in `<name>`\") and in **Fix** give ONLY a short directional "
-	"recommendation, explicitly framed as \"without seeing the code, the likely "
-	"fix is …\". NO before/after snippet, NO diff, NO fabricated code block.\n"
-	"  • Never present a guess as a verified fix. If you're not certain a "
-	"symbol exists, don't use it or mark it clearly as an assumption.\n"
-	"  • SQL substitution discipline: if your **Fix** replaces a raw SQL "
-	"string with `frappe.get_all` / `frappe.get_list` / `frappe.db.get_value` "
-	"/ `frappe.db.get_values` / `frappe.qb`, the new call MUST be "
-	"semantically equivalent to the SQL it replaces same table(s), same "
-	"WHERE / JOIN / GROUP BY / ORDER BY / LIMIT, same field list. If the SQL "
-	"had no WHERE clause, the replacement gets no `filters=`. If the SQL had "
-	"`LIMIT N`, the replacement gets `limit=N`. Do NOT invent filters by "
-	"copying a variable that appears elsewhere in the function "
-	"(e.g. `frappe.session.user`) and NEVER synthesise list shapes like "
-	"`[some_var] * N` to fit an `('in', ...)` filter that is hallucination, "
-	"not refactoring. If you cannot preserve semantics, say so plainly in "
-	"**Diagnosis** and leave the SQL as-is (recommend caching / hoisting / "
-	"adding an index instead).\n\n"
-
-	"NEVER suggest indexing Frappe's standard metadata columns `name`, "
-	"`idx`, `parent`, `parentfield`, `parenttype`, `creation`, `modified`, "
-	"`modified_by`, `owner`, `docstatus`, `doctype`, `_user_tags`, "
-	"`_comments`, `_assign`, `_liked_by`, `_seen`: nor any of Frappe's "
-	"framework meta tables (`tabDocType`, `tabDocField`, `tabCustom Field`, "
-	"`tabProperty Setter`, `tabSingles`, `tabSeries`, `tab__global_search`, "
-	"workspace/dashboard config tables, …). Frappe writes the former on every "
-	"save (or they're already indexed); `bench migrate` owns the latter's "
-	"schema. If the only index you can think of targets one of those, say "
-	"there's no good index-side fix and propose a query-shape change instead.\n\n"
-
-	"OUTPUT Markdown, exactly these four headings, nothing before or after:\n"
-	"**Diagnosis**: 1-2 sentences: the actual cause, referring to the shown "
-	"source by line number when you can (e.g. \"the `frappe.get_doc(...)` on "
-	"line 14 runs once per item N round-trips\"). If the offending code "
-	"wasn't shown to you, say that here.\n"
-	"**Fix**: the concrete change, using real Frappe APIs. Only if the "
-	"offending code is in the source you were shown: present it as a unified "
-	"diff in a ```diff fenced block (preferred it renders with before/after "
-	"highlighting; `-` lines = the existing code copied verbatim from the "
-	"source above, `+` lines = the replacement). Otherwise: NO snippet/diff "
-	"just the directional recommendation (\"without seeing the code, the likely "
-	"fix is …\"). For an index, give the Customize Form path AND (only as a "
-	"fallback) the `ALTER TABLE` DDL that's a config change, not invented "
-	"code, so it's fine without a source window.\n"
-	"**Why it works**: 1-2 sentences tying the change to the cause.\n"
-	"**Verify**: 1 line: how to confirm it worked (re-profile the same flow "
-	"and check the relevant number dropped query count / wall time / EXPLAIN).\n\n"
-
-	"Keep the whole answer focused roughly 150-350 words. Do not restate the "
-	"finding's title or numbers back at the reader.\n\n"
-
-	"EXAMPLE this is ONLY to show the heading shape and the verbatim-before "
-	"discipline. It happens to be an N+1; that does NOT mean your finding is an "
-	"N+1 most aren't. Match YOUR finding type and YOUR shown code and if "
-	"your source window doesn't contain a loop like this one, do NOT produce a "
-	"diff like this one:\n"
-	"**Diagnosis**: `frappe.db.get_value('Item', d.item_code, 'stock_uom')` "
-	"on line 12 runs once per row of `self.items`: that's the N+1.\n"
-	"**Fix**\n"
-	"```diff\n"
-	"-for d in self.items:\n"
-	"-    uom = frappe.db.get_value('Item', d.item_code, 'stock_uom')\n"
-	"-    ...\n"
-	"+uoms = {r.name: r.stock_uom for r in frappe.get_all(\n"
-	"+    'Item', filters={'name': ('in', [d.item_code for d in self.items])},\n"
-	"+    fields=['name', 'stock_uom'])}\n"
-	"+for d in self.items:\n"
-	"+    uom = uoms.get(d.item_code)\n"
-	"+    ...\n"
-	"```\n"
-	"**Why it works**: one batched `frappe.get_all` replaces N per-row "
-	"queries; the dict lookup is in-memory.\n"
-	"**Verify**: re-record the same Save and confirm the `tabItem` query "
-	"count for this action dropped from ~N to 1.\n\n"
-
-	"SECOND EXAMPLE same heading shape, this time showing the "
-	"SQL-equivalence rule: a raw SQL with NO WHERE clause maps to a "
-	"`frappe.get_all` with NO `filters=`. Notice the replacement preserves "
-	"exactly the original table, fields and LIMIT nothing is invented:\n"
-	"**Diagnosis**: line 207 runs a raw `SELECT name, email FROM `tabUser` "
-	"LIMIT 50` which can be replaced with the framework-idiomatic call.\n"
-	"**Fix**\n"
-	"```diff\n"
-	"-users = frappe.db.sql(\"SELECT name, email FROM `tabUser` LIMIT 50\", as_dict=True)\n"
-	"+users = frappe.get_all('User', fields=['name', 'email'], limit=50)\n"
-	"```\n"
-	"**Why it works**: `frappe.get_all` is the framework-idiomatic shape; "
-	"same table, same fields, same LIMIT, so the result set is identical.\n"
-	"**Verify**: diff the row count returned by the new call vs. the old "
-	"`frappe.db.sql` and confirm they match.\n"
-)
 
 
-_STEPS_SYSTEM_PROMPT = (
-	"You are a senior ERPNext / Frappe Framework functional + technical expert "
-	" you know every standard ERPNext document flow cold and you know exactly "
-	"which Desk UI gesture produces which HTTP call. Your job: write the "
-	"\"Steps to Reproduce\" section of a performance report. You're given the "
-	"ordered list of HTTP actions a user performed during a profiling session "
-	"(a humanized label, the raw `cmd`/path, the DocType when known and how "
-	"long each took). Infer what the user was actually DOING and rewrite it as "
-	"clear, friendly steps a developer or QA could follow to reproduce the "
-	"same flow in the Desk UI.\n\n"
-
-	"WHAT THE RAW CALLS MEAN (use this to decode the trace):\n"
-	"  • `frappe.desk.form.save.savedocs` / `frappe.client.save` / `.insert`: "
-	"the user clicked **Save** on a form. If the action is \"Submit\" it was "
-	"the **Submit** button; \"Cancel\" → **Cancel**; a new (`__islocal`) doc → "
-	"they had clicked **New** first. `frappe.client.submit` / `.cancel` / "
-	"`.delete` are the same buttons hit programmatically.\n"
-	"  • `run_doc_method` / `runserverobj`: the user clicked a button on a "
-	"form: a **Create ▸ <Target>** mapping (e.g. Sales Order → Delivery Note / "
-	"Sales Invoice, Purchase Order → Purchase Receipt, Quotation → Sales "
-	"Order), or a custom Action button. The humanized label tells you which "
-	"(\"Make Delivery Note on Sales Order SO-0001\" → they clicked Create ▸ "
-	"Delivery Note on that Sales Order).\n"
-	"  • `frappe.model.workflow.apply_workflow`: the user clicked a **workflow "
-	"action** button (Approve / Reject / Submit for Approval / …).\n"
-	"  • `frappe.desk.search.search_link` / `frappe.client.get_list` from a "
-	"form the user was typing into a Link field (picking a Customer, Item, "
-	"etc.) that's part of \"fill in the form\", not its own step.\n"
-	"  • `frappe.desk.reportview.get` / `frappe.client.get_count`: opening a "
-	"**List view** of that DocType. `frappe.desk.query_report.run`: running a "
-	"**Query/Script Report**. `frappe.desk.form.load.getdoc`: **opening an "
-	"existing record**.\n\n"
-
-	"ERPNEXT FLOWS YOU KNOW (recognise these chains and name them):\n"
-	"  • Selling: Lead → Opportunity → Quotation → Sales Order → Delivery Note "
-	"→ Sales Invoice → Payment Entry.\n"
-	"  • Buying: Material Request → Request for Quotation → Supplier Quotation → "
-	"Purchase Order → Purchase Receipt → Purchase Invoice → Payment Entry.\n"
-	"  • Stock: Stock Entry (Material Receipt / Issue / Transfer / Manufacture), "
-	"Stock Reconciliation, Pick List, Delivery Note, Purchase Receipt.\n"
-	"  • Manufacturing: BOM → Work Order → Job Card → Stock Entry "
-	"(Manufacture) → completion.\n"
-	"  • Accounts: Journal Entry, Payment Entry, Sales/Purchase Invoice, "
-	"Bank Reconciliation, Period Closing Voucher.\n"
-	"  • HR/Payroll: Employee → Attendance / Leave Application → Salary "
-	"Structure Assignment → Payroll Entry → Salary Slip.\n"
-	"  • Projects: Project → Task → Timesheet → Sales Invoice.\n"
-	"If the trace walks one of these, say so (\"Create a Sales Order from the "
-	"Quotation, then make a Delivery Note from it\").\n\n"
-
-	"RULES:\n"
-	"  • Collapse mechanical multi-call sequences into ONE human step a form "
-	"load + a few Link-field lookups + a save is just \"Create a Sales Invoice "
-	"with a customer and at least one item, then Save\", not five steps. "
-	"Background / polling calls (realtime permission checks, notification "
-	"counts, list counters, asset loads, bare form-metadata loads) are noise "
-	"ignore them entirely.\n"
-	"  • Use Desk UI language: \"Go to the <DocType> list\", \"Click New\", "
-	"\"Fill in <fields> and Save\", \"Submit it\", \"Open <DocType> <name>\", "
-	"\"Click **Create ▸ <Target>**\", \"Click the <Action> button\", \"Run the "
-	"<Report> report\". Name the DocType whenever you can tell what it was.\n"
-	"  • Do NOT invent data you weren't given write \"with at least one item "
-	"row\", not \"with item WIDGET-001\". If an action's purpose genuinely "
-	"isn't clear from the label/cmd, describe it neutrally (\"Call the "
-	"<method> endpoint on <DocType>\") rather than guessing a UI gesture.\n"
-	"  • Keep it tight usually 2 to 6 steps. Don't restate timings; the "
-	"report shows those separately. Don't add commentary about performance or "
-	"what's slow.\n\n"
-
-	"OUTPUT a Markdown ordered list of the steps to reproduce, then a blank "
-	"line, then ONE sentence beginning \"**Summary:**\" that says what the "
-	"session profiled (e.g. \"**Summary:** creating a Sales Order and then "
-	"making a Delivery Note from it.\"). Nothing before the list, nothing "
-	"after the summary line, no headings, no code fences."
-)
 
 _MAX_STEPS_ACTIONS = 60
 _MAX_STEPS_USER_CHARS = 8000
 
 
-_INDEX_SYSTEM_PROMPT = (
-	"You are a senior Frappe Framework / ERPNext DBA reviewing index candidates "
-	"for ONE database table flagged by a performance profiler. You're given the "
-	"table, the columns the profiled session filtered / joined / ordered on (how "
-	"often and which appeared together), a few of the actual queries and the "
-	"table's CURRENT indexes (`SHOW INDEX` output). Recommend the SMALLEST set of "
-	"indexes that actually helps almost always ONE composite, columns ordered "
-	"equality-then-range-then-ORDER-BY, leftmost = the most selective / always-"
-	"present one.\n\n"
-
-	"RULES:\n"
-	"  • If an existing index already covers a candidate as a leftmost prefix, do "
-	"NOT recommend it say it's already covered.\n"
-	"  • Never index Frappe's metadata columns (`name`, `creation`, `modified`, "
-	"`modified_by`, `owner`, `parent`, `parentfield`, `parenttype`, `idx`, "
-	"`docstatus`, …) they're written on every save or already indexed.\n"
-	"  • Adding an index to a write-hot table (GL Entry, Stock Ledger Entry, Bin, "
-	"Payment Ledger Entry, Serial and Batch Bundle, …) slows every submitted "
-	"document in production only recommend it if a query that filters this way "
-	"is genuinely slow and say so.\n"
-	"  • Customize Form ▸ field ▸ Search Index makes only SINGLE-column indexes; a "
-	"composite needs a patch with `frappe.db.add_index('<DocType>', "
-	"['col_a', 'col_b'])`.\n\n"
-
-	"OUTPUT Markdown, exactly these headings, nothing before or after:\n"
-	"**Recommendation**: the one index to add (e.g. `(against_voucher_type, "
-	"against_voucher_no)` on `GL Entry`), OR \"nothing the existing indexes "
-	"already cover these read patterns\".\n"
-	"**Why**: 1-2 sentences tying it to the queries / explaining the column order.\n"
-	"**How to add**: the `frappe.db.add_index(\"<DocType>\", [\"col_a\", "
-	"\"col_b\"])` patch line (for a single column you may instead say Customize "
-	"Form ▸ field ▸ Search Index). Omit this heading entirely if the "
-	"Recommendation is \"nothing\".\n"
-	"**Skip**: one line per candidate column or combo you're NOT recommending and "
-	"why (already covered by `<index name>` / a Frappe metadata column / not worth "
-	"the write cost). If there's nothing to skip, write \"None\".\n\n"
-
-	"Keep it tight roughly 120-300 words. Don't restate the table's read/write "
-	"numbers back at the reader."
-)
+_INDEX_SYSTEM_PROMPT = ai_prompts.INDEX_SYSTEM_PROMPT
 
 _MAX_INDEX_SAMPLE_QUERIES = 4
 _MAX_INDEX_USER_CHARS = 10000
@@ -567,110 +305,66 @@ def _resolve_display_threshold_ms() -> float:
 	return display_threshold_ms()
 
 
-def suggest_fix(finding: dict) -> dict:
+def suggest_fix(finding: dict, *, timeout: int | None = None) -> dict:
 	"""Ask the configured LLM for a fix for ``finding``.
 
-	``finding`` is the shape produced by ``renderer._finding_to_dict`` plus an
-	optional ``source_window`` (``[{lineno, content, is_target}]``) the caller
-	gathered around the callsite.
-
-	Returns ``{"suggestion": <markdown>, "model", "provider", "generated_at",
-	"source_available"}`` (plus ``tokens`` when the provider reports usage).
-	``source_available`` is False when the LLM got neither a source window nor a
-	SQL statement, so the UI can mark the result directional. Raises
-	``AiFixError`` on a config / network / auth / rate-limit problem or an empty
-	response; when the finding's type is in ``ai_excluded_finding_types`` it
-	raises immediately, before any request leaves the host.
-	"""
+	Returns ``{suggestion, model, provider, generated_at, source_available,
+	prompt_version, guardrail, finish_reason}`` plus ``tokens`` when the provider
+	reported usage. ``timeout`` caps the whole first-call-plus-re-ask budget
+	(default: the configured request timeout). Raises ``AiFixError``."""
 	if is_finding_type_excluded(finding.get("finding_type")):
-		raise AiFixError("excluded by ai_excluded_finding_types")
+		raise AiFixError("excluded by ai_excluded_finding_types", kind="config")
 	provider = _resolve_provider()
-	if not provider.get("model"):
-		raise AiFixError(
-			"No AI model is configured set 'Model' under Optimus Settings ▸ "
-			"AI Fix Suggestions."
-		)
-	if not provider.get("base_url"):
-		raise AiFixError(
-			"No AI base URL is configured set 'Base URL' under Profiler "
-			"Settings ▸ AI Fix Suggestions."
-		)
-	if provider.get("needs_key") and not provider.get("has_key"):
-		raise AiFixError(
-			"No API key is configured for this AI provider set it under "
-			"Optimus Settings ▸ AI Fix Suggestions."
-		)
-	system, messages = _build_messages(finding, threshold_ms=_resolve_display_threshold_ms())
-
+	_require_configured(provider)
+	ctx = _context_tokens(provider)
+	system, messages, shown = _build_fix_request(
+		finding, threshold_ms=_resolve_display_threshold_ms(), context_tokens=ctx, out_tokens=_output_tokens(provider)
+	)
+	_check_context_fits(system, ctx, messages=messages, out_tokens=_output_tokens(provider))
 	usage: dict = {}
-	if provider["protocol"] == "anthropic":
-		text = _call_anthropic(
-			provider["base_url"], _get_api_key(),
-			provider["model"], system, messages, usage_out=usage,
-		)
-	else:
-		text = _call_openai_chat(
-			provider["base_url"], _get_api_key(),
-			provider["model"], system, messages, usage_out=usage,
-			metadata=_aerele_call_metadata(provider, finding.get("finding_type")),
-		)
-
-	text = (text or "").strip()
-	if not text:
-		raise AiFixError("The AI provider returned an empty response.")
-	text = _flag_metadata_column_index_advice(text)
-	text = _flag_raw_sql_in_fix(text)
-
+	text, guardrail, finish = _complete_with_guardrails(
+		provider,
+		system,
+		messages,
+		shown_lines=shown,
+		usage=usage,
+		metadata=_aerele_call_metadata(provider, finding.get("finding_type")),
+		started_at=time.monotonic(),
+		timeout=int(timeout or _resolve_timeout_seconds()),
+	)
 	result = {
 		"suggestion": text,
 		"model": provider["model"],
 		"provider": provider["name"],
 		"generated_at": datetime.now(timezone.utc).isoformat(),
 		"source_available": _had_concrete_context(finding),
+		"prompt_version": ai_prompts.PROMPT_VERSION,
+		"guardrail": guardrail,
+		"finish_reason": finish,
 	}
-	# Token usage as the provider reported it (the Aerele managed proxy
-	# forwards the upstream usage verbatim, so for that path it's the real
-	# billed count). Omitted when the provider returns no usage block.
 	if usage.get("total_tokens"):
 		result["tokens"] = usage
 	return result
 
 
-def humanize_steps(
-	actions: list[dict], *, session_title: str | None = None, usage_out: dict | None = None
-) -> str:
-	"""Ask the configured LLM to turn the recorded actions into a friendly
-	"Steps to Reproduce" narrative (Markdown). ``actions`` is a list of
-	``{label, cmd, path, method, doctype, duration_ms}`` dicts (best-effort
-	missing keys are fine). Raises ``AiFixError`` on a config / network
-	problem or an empty response."""
+def humanize_steps(actions: list[dict], *, session_title: str | None = None, usage_out: dict | None = None) -> str:
+	from frappe import _
+
 	if not actions:
-		raise AiFixError("There are no recorded actions to summarise.")
+		raise AiFixError(_("There are no recorded actions to summarise."), kind="config")
 	provider = _resolve_provider()
-	if not provider.get("model") or not provider.get("base_url"):
-		raise AiFixError(
-			"AI is not fully configured set the provider, model and base URL "
-			"under Optimus Settings ▸ AI Fix Suggestions."
-		)
-	if provider.get("needs_key") and not provider.get("has_key"):
-		raise AiFixError("No API key is configured for this AI provider.")
+	_require_configured(provider)
 	system, messages = _build_steps_messages(
-		actions, session_title, threshold_ms=_resolve_display_threshold_ms()
+		actions, session_title, threshold_ms=_resolve_display_threshold_ms(), context_tokens=_context_tokens(provider)
 	)
-	if provider["protocol"] == "anthropic":
-		text = _call_anthropic(
-			provider["base_url"], _get_api_key(),
-			provider["model"], system, messages, usage_out=usage_out,
-		)
-	else:
-		text = _call_openai_chat(
-			provider["base_url"], _get_api_key(),
-			provider["model"], system, messages, usage_out=usage_out,
-			metadata=_aerele_call_metadata(provider, "Steps to Reproduce"),
-		)
+	_check_context_fits(system, _context_tokens(provider), messages=messages, out_tokens=_output_tokens(provider))
+	text = _dispatch_call(
+		provider, system, messages, usage_out=usage_out,
+		metadata=_aerele_call_metadata(provider, "Steps to Reproduce"),
+	)
 	text = (text or "").strip()
 	if not text:
-		raise AiFixError("The AI provider returned an empty response.")
+		raise AiFixError(_("The AI provider returned an empty response."), kind="bad_response")
 	return text
 
 
@@ -743,51 +437,26 @@ def _had_concrete_context(finding: dict) -> bool:
 
 
 def test_connection() -> dict:
-	"""Send a tiny probe to the configured provider. Returns
-	``{"ok": bool, "message": str, "model": str}``. A provider or
-	configuration failure (``AiFixError``) does not raise: its detail goes in
-	``message``. An RQ job timeout or a worker interrupt still propagates."""
 	try:
 		provider = _resolve_provider()
 	except AiFixError as e:
 		return {"ok": False, "message": str(e), "model": ""}
-
 	if not provider.get("model") or not provider.get("base_url"):
-		return {
-			"ok": False,
-			"message": "Provider/model/base URL not fully configured.",
-			"model": provider.get("model") or "",
-		}
+		return {"ok": False, "message": "Provider/model/base URL not fully configured.", "model": provider.get("model") or ""}
 	if provider.get("needs_key") and not provider.get("has_key"):
 		return {"ok": False, "message": "No API key configured.", "model": provider["model"]}
-
 	messages = [{"role": "user", "content": "Reply with exactly: OK"}]
 	usage: dict = {}
 	try:
-		if provider["protocol"] == "anthropic":
-			text = _call_anthropic(
-				provider["base_url"], _get_api_key(),
-				provider["model"], "You are a connectivity probe. Reply with exactly: OK",
-				messages, max_tokens=16, usage_out=usage,
-			)
-		else:
-			text = _call_openai_chat(
-				provider["base_url"], _get_api_key(),
-				provider["model"], "You are a connectivity probe. Reply with exactly: OK",
-				messages, max_tokens=16, usage_out=usage,
-			)
+		text = _dispatch_call(
+			provider, "You are a connectivity probe. Reply with exactly: OK", messages, usage_out=usage, max_tokens=16
+		)
 	except AiFixError as e:
 		return {"ok": False, "message": str(e), "model": provider["model"]}
-
-	# A connectivity probe is a Settings test, not session work show its
-	# count here, but it does NOT roll into a session's token total.
 	_toks = usage.get("total_tokens") or 0
 	return {
 		"ok": True,
-		"message": (
-			f"Reachable. Model replied: {(text or '').strip()[:60]!r}"
-			+ (f" ({_toks} tokens)" if _toks else "")
-		),
+		"message": f"Reachable. Model replied: {(text or '').strip()[:60]!r}" + (f" ({_toks} tokens)" if _toks else ""),
 		"model": provider["model"],
 	}
 
@@ -970,6 +639,9 @@ def _resolve_provider() -> dict:
 	else:
 		base_url = (getattr(cfg, "ai_base_url", "") or "").strip().rstrip("/")
 	model = (getattr(cfg, "ai_model", "") or "").strip() or defaults["model"]
+	# The Settings override applies only to bring-your-own endpoints (no built-in
+	# base_url), like the Base URL: the field is hidden for hosted providers.
+	ctx_override = 0 if defaults["base_url"] else int(getattr(cfg, "ai_context_tokens", 0) or 0)
 
 	# A key may be set for any provider: some OpenAI-compatible routers
 	# (OpenRouter, Together, Groq) need one even though local endpoints don't.
@@ -981,6 +653,8 @@ def _resolve_provider() -> dict:
 		"model": model,
 		"needs_key": bool(defaults["needs_key"]),
 		"has_key": bool(_current_key_or_empty()),
+		"context_tokens": ctx_override if ctx_override > 0 else int(defaults["context_tokens"]),
+		"max_output_tokens": defaults.get("max_output_tokens"),
 	}
 
 
@@ -1168,17 +842,13 @@ def _truncate(text: Any, limit: int) -> str:
 
 
 def _build_steps_messages(
-	actions: list[dict], session_title: str | None, *, threshold_ms: float = 1000.0
+	actions: list[dict], session_title: str | None, *, threshold_ms: float = 1000.0,
+	context_tokens: int = _DEFAULT_CONTEXT_TOKENS,
 ) -> tuple[str, list[dict]]:
-	"""Build ``(system_prompt, [user_message])`` for the Steps-to-Reproduce
-	humanizer. Pure no Frappe, no I/O. ``actions`` items use the keys
-	``label`` / ``cmd`` / ``path`` / ``method`` / ``doctype`` /
-	``duration_ms`` (all optional). ``threshold_ms`` is the report's
-	seconds-rollover threshold so the model sees durations in the report's unit."""
 	lines: list[str] = []
 	title = (str(session_title).strip() if session_title else "")
 	if title:
-		lines.append(f"Session title (what the user named this run): {title}")
+		lines.append(f"Session title: {title}")
 		lines.append("")
 	lines.append("Recorded actions, in order:")
 	for i, a in enumerate(actions[:_MAX_STEPS_ACTIONS], 1):
@@ -1188,9 +858,7 @@ def _build_steps_messages(
 		if cmd:
 			bits.append(f"cmd={cmd}")
 		else:
-			endpoint = " ".join(p for p in (
-				(a.get("method") or "").strip(), (a.get("path") or "").strip(),
-			) if p)
+			endpoint = " ".join(p for p in ((a.get("method") or "").strip(), (a.get("path") or "").strip()) if p)
 			if endpoint:
 				bits.append(endpoint)
 		doctype = (a.get("doctype") or "").strip()
@@ -1206,9 +874,17 @@ def _build_steps_messages(
 		lines.append(f"{i}. {label}{suffix}")
 	extra = len(actions) - _MAX_STEPS_ACTIONS
 	if extra > 0:
-		lines.append(f"… and {extra} more action(s).")
-	content = _truncate("\n".join(lines), _MAX_STEPS_USER_CHARS)
-	return _STEPS_SYSTEM_PROMPT, [{"role": "user", "content": content}]
+		lines.append(f"... and {extra} more action(s).")
+	system = ai_prompts.STEPS_SYSTEM_PROMPT
+	limit = min(
+		_MAX_STEPS_USER_CHARS,
+		ai_budget.user_char_budget(context_tokens, system, out_tokens=ai_budget.output_tokens(context_tokens)),
+	)
+	text = "\n".join(lines)
+	if ai_budget.text_size(text) > limit - 60:
+		text = ai_budget.clip(text, limit - 80) + "\n…(truncated)"
+	content = ai_budget.data_block("actions", text)
+	return system, [{"role": "user", "content": content}]
 
 
 def _build_index_messages(payload: dict) -> tuple[str, list[dict]]:
@@ -1269,133 +945,12 @@ def _build_index_messages(payload: dict) -> tuple[str, list[dict]]:
 	return _INDEX_SYSTEM_PROMPT, [{"role": "user", "content": content}]
 
 
-def _build_messages(finding: dict, *, threshold_ms: float = 1000.0) -> tuple[str, list[dict]]:
-	"""Build ``(system_prompt, [user_message])`` from a finding dict.
-
-	Pure no Frappe, no I/O. ``threshold_ms`` is the report's seconds-rollover
-	threshold, so every duration handed to the model reads in the same unit as
-	the report the operator is looking at. ``finding`` keys used: ``finding_type``,
-	``severity``, ``title``, ``customer_description``, ``estimated_impact_ms``,
-	``affected_count``, ``technical_detail`` (``callsite``, ``function``,
-	``cumulative_ms``, ``action_wall_time_ms``, ``normalized_query``,
-	``suggested_ddl``, ``explain_row``, ``fix_hint``, ``validation_note``,
-	``example_queries``), ``source_window`` (``[{lineno, content, is_target}]``),
-	and ``phase2_hotline`` (``{lineno, content, total_ms, hits}``: the hottest
-	line from a Phase-2 line-profile pass over the finding's function).
-	"""
-	detail = finding.get("technical_detail") or {}
-	callsite = detail.get("callsite") or {}
-
-	parts: list[str] = []
-	ftype = finding.get("finding_type") or "Unknown"
-	parts.append(f"Finding type: {ftype}")
-	type_hint = _finding_type_hint(ftype)
-	if type_hint:
-		parts.append(f"What this finding type means / how it's usually fixed in Frappe: {type_hint}")
-	parts.append(f"Severity: {finding.get('severity') or 'Unknown'}")
-	# The title / description are read from stored finding rows (may predate dur()
-	# markers), so format them through format_durations (markers + prose fallback)
-	# with the report's threshold, matching the report's findings path, so the model
-	# reads "5.23s" just like the report shows. Lazy import keeps this frappe-free.
-	from optimus.analyzers.base import format_durations
-	if finding.get("title"):
-		parts.append(f"Title: {format_durations(finding['title'], threshold_ms)}")
-	if finding.get("customer_description"):
-		parts.append(
-			f"Description: {format_durations(finding['customer_description'], threshold_ms)}"
-		)
-	impact = finding.get("estimated_impact_ms")
-	if impact:
-		parts.append(f"Estimated impact: ~{humanize_duration_ms(float(impact), threshold_ms=threshold_ms)}")
-	if finding.get("affected_count"):
-		parts.append(f"Affected occurrences: {finding['affected_count']}")
-
-	had_callsite = bool(callsite.get("filename") and callsite.get("lineno") is not None)
-	if had_callsite:
-		fn = f" ({callsite['function']})" if callsite.get("function") else ""
-		parts.append(
-			f"Callsite (the closest non-framework frame to the cost the "
-			f"offending loop/call may be in a function this points into, not "
-			f"necessarily AT this line): {callsite['filename']}:{callsite['lineno']}{fn}"
-		)
-
-	# For call-tree (hot-path) findings: name the hot function + its share of
-	# the action's time, so the model knows exactly which function's body
-	# (shown below) to look at.
-	hot_fn = (detail.get("function") or "").strip()
-	cum_ms = detail.get("cumulative_ms")
-	wall_ms = detail.get("action_wall_time_ms")
-	if hot_fn and cum_ms:
-		share = ""
-		try:
-			if wall_ms:
-				share = f", {round(float(cum_ms) / float(wall_ms) * 100)}% of this action's {humanize_duration_ms(float(wall_ms), threshold_ms=threshold_ms)} wall time"
-		except (TypeError, ValueError, ZeroDivisionError):
-			share = ""
-		parts.append(
-			f"Hot function (the call-tree subtree that dominates this action): "
-			f"`{hot_fn}`: ~{humanize_duration_ms(float(cum_ms), threshold_ms=threshold_ms)}{share}. Its source is below; "
-			"point at the specific lines/loop/call inside it that cost the time."
-		)
-
-	window = finding.get("source_window") or callsite.get("source_snippet") or []
-	if window:
-		lines_out: list[str] = []
-		for sl in window[:_MAX_SOURCE_WINDOW_LINES]:
-			marker = ">> " if sl.get("is_target") else "   "
-			lines_out.append(f"{marker}{sl.get('lineno')}: {sl.get('content', '')}")
-		parts.append(
-			"Source around the callsite THIS IS THE ONLY CODE YOU HAVE; any "
-			"\"before\" snippet / diff `-` line in your answer must be copied "
-			"verbatim from here, with its line number. `>>` marks the callsite "
-			"line. This is a window, not necessarily the whole function if the "
-			"loop/call this finding is about isn't in these lines, say so and "
-			"give a directional fix only (no diff):\n```python\n"
-			+ "\n".join(lines_out) + "\n```"
-		)
-	elif had_callsite:
-		parts.append(
-			"Source around the callsite: NOT AVAILABLE the profiler couldn't "
-			"read this file, so you have NO source code for this finding. Do not "
-			"write a before/after snippet or a diff (you'd be inventing the "
-			"\"before\"). Give a short directional fix only, framed as \"without "
-			"seeing the code, the likely fix is …\"."
-		)
-
-	hot = finding.get("phase2_hotline") or {}
-	if isinstance(hot, dict) and hot.get("lineno") is not None:
-		hl_content = str(hot.get("content") or "").strip()
-		hl_ms = hot.get("total_ms") or 0
-		hl_hits = hot.get("hits") or 0
-		parts.append(
-			f"Line-profile (Phase 2) over this function found its hottest line is "
-			f"line {hot['lineno']}"
-			+ (f" `{hl_content}`" if hl_content else "")
-			+ (f" ({humanize_duration_ms(float(hl_ms), threshold_ms=threshold_ms)}" + (f" over {int(hl_hits)} call(s)" if hl_hits else "") + ")"
-			   if hl_ms else "")
-			+ ". Start your fix there."
-		)
-
-	if detail.get("normalized_query"):
-		parts.append("Query (normalized):\n```sql\n"
-			+ _truncate(detail["normalized_query"], _MAX_QUERY_CHARS) + "\n```")
-	if detail.get("suggested_ddl"):
-		parts.append("Profiler's suggested DDL:\n```sql\n"
-			+ _truncate(detail["suggested_ddl"], _MAX_QUERY_CHARS) + "\n```")
-	if detail.get("explain_row"):
-		parts.append(f"EXPLAIN row: {_truncate(detail['explain_row'], 800)}")
-	if detail.get("fix_hint"):
-		parts.append(f"Profiler's static fix hint: {detail['fix_hint']}")
-	if detail.get("validation_note"):
-		parts.append(f"Note: {detail['validation_note']}")
-	examples = detail.get("example_queries") or []
-	if examples:
-		shown = [_truncate(q, _MAX_QUERY_CHARS) for q in examples[:2]]
-		parts.append("Example affected queries:\n```sql\n" + "\n---\n".join(shown) + "\n```")
-
-	content = "\n\n".join(p for p in parts if p).strip()
-	content = _truncate(content, _MAX_USER_CONTENT_CHARS)
-	return _SYSTEM_PROMPT, [{"role": "user", "content": content}]
+def _build_messages(
+	finding: dict, *, threshold_ms: float = 1000.0, context_tokens: int = 200000
+) -> tuple[str, list[dict]]:
+	"""``(system, [user_message])`` for ``finding``; see ``_build_fix_request``."""
+	system, messages, _shown = _build_fix_request(finding, threshold_ms=threshold_ms, context_tokens=context_tokens)
+	return system, messages
 
 
 _REASONING_MODEL_RE = re.compile(r"^o[0-9]")  # OpenAI o1/o3/o4… reject `temperature`
@@ -2005,7 +1560,13 @@ def _http_post(
 	elif status == 429:
 		failure = AiFixError("The AI provider is rate-limiting requests. Try again shortly.", status_code=status)
 	elif status >= 400:
-		failure = AiFixError(f"The AI provider returned an error (HTTP {status}){_response_detail(resp, auth)}", status_code=status)
+		response_detail = _response_detail(resp, auth)
+		context_error = status == 400 and _CONTEXT_LIMIT_RE.search(response_detail)
+		failure = AiFixError(
+			f"The AI provider returned an error (HTTP {status}){response_detail}"
+			+ (" " + _context_advice() if context_error else ""),
+			status_code=status, kind="config" if context_error else "unknown",
+		)
 	if failure is not None:
 		provider_error = _provider_error_code(resp, auth)
 		# If the row below cannot be written, the caller logs this error: with
@@ -2088,7 +1649,9 @@ def _usage_from_anthropic(data: dict | None) -> dict:
 	fields → 0 (see ``_token_count``). Never raises, except an RQ job timeout
 	(``_token_count`` lets it through as a fresh instance)."""
 	u = _usage_block(data)
-	prompt = _token_count(u.get("input_tokens"))
+	prompt = _token_count(sum(_token_count(u.get(k)) for k in (
+		"input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+	)))
 	completion = _token_count(u.get("output_tokens"))
 	return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": _token_count(prompt + completion)}
 
@@ -2144,6 +1707,7 @@ def _aerele_call_metadata(provider, finding_type=None) -> dict | None:
 def _call_anthropic(
 	base_url: str, api_key: str, model: str, system: str, messages: list[dict],
 	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
+	timeout: int | None = None, meta_out: dict | None = None,
 ) -> str:
 	url = base_url.rstrip("/") + "/v1/messages"
 	headers = {
@@ -2155,13 +1719,15 @@ def _call_anthropic(
 		"model": model,
 		"max_tokens": max_tokens,
 		"temperature": _TEMPERATURE,
-		"system": system,
+		"system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
 		"messages": messages,
 	}
-	data = _http_post(url, headers, body, provider="anthropic", where="messages", auth=auth)
+	data = _http_post(url, headers, body, provider="anthropic", where="messages", auth=auth, timeout=timeout)
 	if usage_out is not None:
 		usage_out.update(_usage_from_anthropic(data))
 		_record_session_spend(usage_out.get("total_tokens"))
+	if meta_out is not None:
+		meta_out["finish_reason"] = _ANTHROPIC_FINISH.get(_text_or_empty(data.get("stop_reason")))
 	try:
 		blocks = data.get("content") or []
 		for b in blocks:
@@ -2186,7 +1752,7 @@ def _text_or_empty(text) -> str:
 def _call_openai_chat(
 	base_url: str, api_key: str, model: str, system: str, messages: list[dict],
 	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
-	metadata: dict | None = None,
+	metadata: dict | None = None, timeout: int | None = None, meta_out: dict | None = None,
 ) -> str:
 	url = base_url.rstrip("/") + "/chat/completions"
 	headers = {"content-type": "application/json"}
@@ -2204,7 +1770,7 @@ def _call_openai_chat(
 		body["metadata"] = metadata
 	retry_without_temperature = False
 	try:
-		data = _http_post(url, headers, body, provider="openai", where="chat/completions", auth=auth)
+		data = _http_post(url, headers, body, provider="openai", where="chat/completions", auth=auth, timeout=timeout)
 	except AiFixError as e:
 		# Some reasoning models reject a non-default `temperature` with a
 		# request-validation error. OpenAI o-series are pre-filtered by
@@ -2224,12 +1790,15 @@ def _call_openai_chat(
 			raise
 	if retry_without_temperature:
 		body.pop("temperature", None)
-		data = _http_post(url, headers, body, provider="openai", where="chat/completions", auth=auth)
+		data = _http_post(url, headers, body, provider="openai", where="chat/completions", auth=auth, timeout=timeout)
 	if usage_out is not None:
 		usage_out.update(_usage_from_openai(data))
 		_record_session_spend(usage_out.get("total_tokens"))
+	choices = data.get("choices") or []
+	if meta_out is not None:
+		first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+		meta_out["finish_reason"] = _OPENAI_FINISH.get(_text_or_empty(first.get("finish_reason")))
 	try:
-		choices = data.get("choices") or []
 		if choices:
 			msg = choices[0].get("message") or {}
 			content = msg.get("content")
@@ -2243,3 +1812,374 @@ def _call_openai_chat(
 	except Exception:
 		pass
 	raise AiFixError("The AI provider's response didn't contain any text.")
+
+
+def _reask_enabled() -> bool:
+	"""Operator knob in site_config; an ordinary read failure defaults to enabled."""
+	failure = None
+	try:
+		import frappe
+
+		return bool(frappe.conf.get("optimus_ai_reask", True))
+	except Exception as exc:
+		failure = exc
+	if isinstance(failure, _job_timeout_types()):
+		raise type(failure)(*failure.args)
+	return True
+
+
+def _log_reask(outcome: str, codes: list[str] | None = None) -> None:
+	"""Log only the outcome and rule codes; an RQ timeout must still stop the job."""
+	failure = None
+	try:
+		import frappe
+
+		frappe.logger("optimus").info(f"ai_fix guardrail re-ask: {outcome} {','.join(codes or [])}".strip())
+	except Exception as exc:
+		failure = exc
+	if isinstance(failure, _job_timeout_types()):
+		raise type(failure)(*failure.args)
+
+
+def _context_tokens(provider: dict) -> int:
+	return int(provider.get("context_tokens") or _DEFAULT_CONTEXT_TOKENS)
+
+
+def _output_tokens(provider: dict) -> int:
+	return int(provider.get("max_output_tokens") or ai_budget.output_tokens(_context_tokens(provider)))
+
+
+def _context_advice() -> str:
+	from frappe import _
+
+	return _(
+		"Raise the context window on the model server (Ollama: OLLAMA_CONTEXT_LENGTH or a Modelfile "
+		"PARAMETER num_ctx) and set the same value in Optimus Settings > AI > Context window (tokens)."
+	)
+
+
+def _check_context_fits(
+	system: str, context_tokens: int, *, messages=(), out_tokens: int = 512,
+) -> None:
+	"""Refuse before any HTTP call when the window cannot hold the prompt."""
+	need = (ai_budget.estimate_tokens(system)
+		+ sum(ai_budget.estimate_tokens(m.get("content") or "") for m in messages)
+		+ out_tokens + ai_budget.TEMPLATE_TOKENS)
+	if context_tokens >= max(ai_budget.min_context_tokens(system), need):
+		return
+	from frappe import _
+
+	raise AiFixError(
+		_("The model's context window ({0} tokens) is too small for the Optimus prompt.").format(context_tokens)
+		+ " "
+		+ _context_advice(),
+		kind="config",
+	)
+
+
+def _dispatch_call(
+	provider: dict,
+	system: str,
+	messages: list[dict],
+	*,
+	usage_out: dict | None,
+	metadata: dict | None = None,
+	timeout: int | None = None,
+	max_tokens: int | None = None,
+	meta_out: dict | None = None,
+) -> str:
+	"""Send one chat completion through the provider's protocol handler. The API
+	key is fetched here into a local named ``api_key`` (never into ``provider``)."""
+	api_key = _get_api_key() if provider.get("has_key") else ""
+	out = int(max_tokens or _output_tokens(provider))
+	if provider["protocol"] == "anthropic":
+		return _call_anthropic(
+			provider["base_url"], api_key, provider["model"], system, messages,
+			max_tokens=out, usage_out=usage_out, timeout=timeout, meta_out=meta_out,
+		)
+	return _call_openai_chat(
+		provider["base_url"], api_key, provider["model"], system, messages,
+		max_tokens=out, usage_out=usage_out, metadata=metadata, timeout=timeout, meta_out=meta_out,
+	)
+
+
+def _add_usage(total: dict, part: dict) -> None:
+	for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+		if part.get(k):
+			total[k] = total.get(k, 0) + part[k]
+
+
+def _complete_with_guardrails(
+	provider: dict,
+	system: str,
+	messages: list[dict],
+	*,
+	shown_lines: list[str],
+	usage: dict,
+	metadata: dict | None = None,
+	started_at: float,
+	timeout: int,
+) -> tuple[str, dict, str | None]:
+	"""First call, verification, at most one re-ask, fallback.
+
+	Returns ``(suggestion, guardrail, finish_reason)`` where ``guardrail`` is
+	``{"violations": [codes], "reasked": bool, "fallback": bool}`` and ``fallback``
+	means the code was removed. Every call's tokens land in ``usage`` even when a
+	later step fails. The re-ask is sent only when the knob is on, the answer was
+	not cut off, a block rule is broken (advise and note rules never re-ask), less
+	than half the time budget is used and the re-ask fits the context window. The
+	rewrite is adopted only when it keeps the four headings, is not cut off and
+	breaks strictly fewer block rules."""
+	ctx = _context_tokens(provider)
+	out = _output_tokens(provider)
+	meta: dict = {}
+	text = _dispatch_call(
+		provider, system, messages, usage_out=usage, metadata=metadata, timeout=timeout, max_tokens=out, meta_out=meta
+	)
+	text = (text or "").strip()
+	if not text:
+		from frappe import _
+
+		raise AiFixError(_("The AI provider returned an empty response."), kind="bad_response", usage=dict(usage))
+	first_usage = dict(usage)
+	finish = meta.get("finish_reason")
+	violations = ai_guardrails.verify_fix(text, source_lines=shown_lines, finish_reason=finish)
+	to_fix = ai_guardrails.reaskable(violations)
+	reasked = False
+	if to_fix:
+		reask_text = ai_guardrails.reask_message(violations)
+		fit_usage = {
+			"prompt_tokens": first_usage.get("prompt_tokens")
+			or ai_budget.estimate_tokens(system)
+			+ sum(ai_budget.estimate_tokens(m.get("content") or "") for m in messages)
+			+ ai_budget.TEMPLATE_TOKENS,
+			"completion_tokens": first_usage.get("completion_tokens") or ai_budget.estimate_tokens(text),
+		}
+		elapsed = time.monotonic() - started_at
+		if not _reask_enabled():
+			_log_reask("skipped-knob")
+		elif elapsed >= timeout * 0.5:
+			_log_reask("skipped-budget")
+		elif not ai_budget.reask_fits(ctx, fit_usage, reask_text, out_tokens=out):
+			_log_reask("skipped-fit")
+		else:
+			reasked = True
+			reask_usage: dict = {}
+			reask_meta: dict = {}
+			rewritten = None
+			reask_error: Exception | None = None
+			try:
+				rewritten = _dispatch_call(
+					provider,
+					system,
+					[*messages, {"role": "assistant", "content": text}, {"role": "user", "content": reask_text}],
+					usage_out=reask_usage,
+					metadata=metadata,
+					timeout=max(1, int(timeout - elapsed)),
+					max_tokens=ai_budget.reask_output_tokens(out, fit_usage["completion_tokens"]),
+					meta_out=reask_meta,
+				)
+			except Exception as e:
+				reask_error = e  # record only; act after the try (no log or raise while it is active)
+			finally:
+				# A billed re-ask counts even when its text is unusable.
+				_add_usage(usage, reask_usage)
+			if isinstance(reask_error, _job_timeout_types()):
+				# The RQ job hit its timeout during the re-ask: stop the job with a
+				# fresh instance of the same type (no frames, no chain).
+				raise type(reask_error)(*reask_error.args)
+			if reask_error is not None:
+				_log_reask("failed", [type(reask_error).__name__])
+			rewritten = (rewritten or "").strip()
+			if rewritten:
+				new = ai_guardrails.verify_fix(
+					rewritten, source_lines=shown_lines, finish_reason=reask_meta.get("finish_reason")
+				)
+				adopt = (
+					not any(v.action == ai_guardrails.TRUNCATED for v in new)
+					and not ai_guardrails.check_headings(rewritten)
+					and len(ai_guardrails.reaskable(new)) < len(to_fix)
+				)
+				_log_reask("adopted" if adopt else "kept-original", [v.code for v in to_fix])
+				if adopt:
+					text, violations, finish = rewritten, new, reask_meta.get("finish_reason")
+	sent_size = ai_budget.text_size(system) + sum(ai_budget.text_size(m.get("content") or "") for m in messages)
+	if ctx <= _TRUNCATION_CHECK_MAX_CONTEXT and ai_budget.context_truncated(first_usage, sent_size):
+		violations = [*violations, ai_guardrails.Violation("context-truncated")]
+	final = ai_guardrails.apply_fallback(text, violations)
+	# fallback = the code was removed (a block rule still holds or the answer was cut off).
+	guardrail = {
+		"violations": [v.code for v in violations],
+		"reasked": reasked,
+		"fallback": ai_guardrails.strips_code(violations),
+	}
+	return final, guardrail, finish
+
+
+def _require_configured(provider: dict) -> None:
+	from frappe import _
+
+	if not provider.get("model"):
+		raise AiFixError(_("No AI model is configured. Set Model under Optimus Settings > AI Fix Suggestions."), kind="config")
+	if not provider.get("base_url"):
+		raise AiFixError(_("No AI base URL is configured. Set Base URL under Optimus Settings > AI Fix Suggestions."), kind="config")
+	if provider.get("needs_key") and not provider.get("has_key"):
+		raise AiFixError(_("No API key is configured for this AI provider. Set it under Optimus Settings > AI Fix Suggestions."), kind="config")
+
+
+def _index_candidate_prose(detail: dict) -> str:
+	"""The analyzer's suggested DDL as a sentence, never as DDL: the model is taught
+	the durable recipe, and a raw ALTER TABLE in the prompt invites one back."""
+	ddl = str(detail.get("suggested_ddl") or "")
+	table = str(detail.get("table") or "")
+	column = str(detail.get("column") or "")
+	if ddl and not table:
+		m = _DDL_TABLE_RE.search(ddl)
+		table = (m.group(1) or m.group(2)) if m else ""
+	if ddl and not column:
+		m = _DDL_COLUMN_RE.search(ddl)
+		column = m.group(1) if m else ""
+	if not (ddl and table and column):
+		return ""
+	doctype = table[3:] if table.startswith("tab") else table
+	return f"Profiler's index candidate: column `{column}` of DocType `{doctype}`."
+
+
+def _window_lines(window: list[dict]) -> str:
+	return "\n".join(
+		f"{'>> ' if row.get('is_target') else '   '}{row.get('lineno')}: {row.get('content', '')}" for row in window
+	)
+
+
+def _build_fix_request(
+	finding: dict, *, threshold_ms: float, context_tokens: int, out_tokens: int | None = None
+) -> tuple[str, list[dict], list[str]]:
+	"""Build ``(system, [user_message], shown_lines)`` for one finding. Pure.
+
+	The user message is assembled from priority parts inside the context budget:
+	priority 0 parts are always sent (the source window shrinks around the target
+	line until they fit), the rest are dropped whole, largest number first. Every
+	piece of captured text sits in a ``<data-NONCE>`` block with a fence it cannot
+	break. ``shown_lines`` are the source lines actually sent, for the verbatim
+	check. The analyzer's ``customer_description`` and ``fix_hint`` are not sent
+	(the hint steered models to ``get_all``), and ``suggested_ddl`` is sent as prose."""
+	from optimus.analyzers.base import format_durations
+
+	system = ai_prompts.SYSTEM_PROMPT
+	out = int(out_tokens or ai_budget.output_tokens(context_tokens))
+	budget = ai_budget.user_char_budget(context_tokens, system, out_tokens=out)
+	nonce = ai_budget.new_nonce()
+	detail = finding.get("technical_detail") or {}
+	callsite = detail.get("callsite") or {}
+
+	def block(kind: str, text: str, lang: str = "") -> str:
+		return ai_budget.data_block(kind, text, lang=lang, nonce=nonce)
+
+	ftype = finding.get("finding_type") or "Unknown"
+	head = [f"Finding type: {ftype}"]
+	hint = _finding_type_hint(ftype)
+	if hint:
+		head.append(f"How this type is usually fixed: {hint}")
+	head.append(f"Severity: {finding.get('severity') or 'Unknown'}")
+	impact = finding.get("estimated_impact_ms")
+	if impact:
+		head.append(f"Estimated impact: ~{humanize_duration_ms(float(impact), threshold_ms=threshold_ms)}")
+	if finding.get("affected_count"):
+		head.append(f"Affected occurrences: {finding['affected_count']}")
+
+	fixed: list[tuple[int, str]] = [(0, "\n".join(head))]
+	if finding.get("title"):
+		fixed.append((0, "Title:\n" + block("title", ai_budget.clip(format_durations(finding["title"], threshold_ms), 400))))
+	had_callsite = bool(callsite.get("filename") and callsite.get("lineno") is not None)
+	if had_callsite:
+		fn = f" ({callsite['function']})" if callsite.get("function") else ""
+		fixed.append((
+			0,
+			"Callsite (the closest non-framework frame to the cost; the loop or call may be in a function it calls):\n"
+			+ block("callsite", ai_budget.clip(f"{callsite['filename']}:{callsite['lineno']}{fn}", 400)),
+		))
+	hot_fn = (detail.get("function") or "").strip()
+	cum_ms = detail.get("cumulative_ms")
+	wall_ms = detail.get("action_wall_time_ms")
+	if hot_fn and cum_ms:
+		share = ""
+		try:
+			if wall_ms:
+				share = (
+					f", {round(float(cum_ms) / float(wall_ms) * 100)}% of this action's "
+					f"{humanize_duration_ms(float(wall_ms), threshold_ms=threshold_ms)} wall time"
+				)
+		except (TypeError, ValueError, ZeroDivisionError):
+			share = ""
+		fixed.append((
+			1,
+			f"Hot function (dominates this action): ~{humanize_duration_ms(float(cum_ms), threshold_ms=threshold_ms)}"
+			f"{share}. Point at the lines inside it that cost the time.\n" + block("function", hot_fn),
+		))
+
+	tail: list[tuple[int, str]] = []
+	hot = finding.get("phase2_hotline") or {}
+	hot_content = ""
+	if isinstance(hot, dict) and hot.get("lineno") is not None:
+		hot_content = str(hot.get("content") or "").strip()
+		hl_ms = hot.get("total_ms") or 0
+		hl_hits = hot.get("hits") or 0
+		timing = ""
+		if hl_ms:
+			timing = f" ({humanize_duration_ms(float(hl_ms), threshold_ms=threshold_ms)}"
+			timing += f" over {int(hl_hits)} call(s))" if hl_hits else ")"
+		tail.append((
+			1,
+			f"Line profile: the hottest line is line {hot['lineno']}{timing}. Start your fix there."
+			+ ("\n" + block("hot-line", hot_content) if hot_content else ""),
+		))
+	if detail.get("normalized_query"):
+		tail.append((2, "Query (normalized):\n" + block("sql", _truncate(detail["normalized_query"], _MAX_QUERY_CHARS), "sql")))
+	candidate = _index_candidate_prose(detail)
+	if candidate:
+		tail.append((3, block("index-candidate", candidate)))
+	if detail.get("explain_row"):
+		tail.append((4, "EXPLAIN row:\n" + block("explain", _truncate(detail["explain_row"], 800))))
+	examples = detail.get("example_queries") or []
+	if examples:
+		shown_q = [_truncate(q, _MAX_QUERY_CHARS) for q in examples[:2]]
+		tail.append((5, "Example affected queries:\n" + block("sql", "\n---\n".join(shown_q), "sql")))
+	if detail.get("validation_note"):
+		tail.append((6, "Note:\n" + block("validation", str(detail["validation_note"]))))
+
+	window = finding.get("source_window") or callsite.get("source_snippet") or []
+	content, shown = "", []
+	for max_lines in (*_WINDOW_STEPS, 4, 2, 1, 0):
+		trimmed = ai_budget.trim_window(window, max_lines=max_lines)
+		if trimmed:
+			source = (
+				"Source (the only code you have; copy `-` and context lines verbatim; `>>` marks the callsite "
+				"line; it is a window, so if the code this finding is about is not in it, write no diff):\n"
+				+ block("source", _window_lines(trimmed), "python")
+			)
+		elif had_callsite or window:
+			source = (
+				"Source: NOT AVAILABLE within this request. Write no diff; start **Fix** "
+				"with \"Without seeing the code, the likely fix is\"."
+			)
+		else:
+			source = ""
+		content = ai_budget.assemble([*fixed, (0, source), *tail], budget)
+		shown = [str(row.get("content", "")) for row in trimmed]
+		if ai_budget.text_size(content) <= budget or not trimmed:
+			break
+	if hot_content and block("hot-line", hot_content) in content:
+		shown.append(hot_content)
+	return system, [{"role": "user", "content": content}], shown
+
+
+_DDL_TABLE_RE = re.compile(r"(?:ALTER\s+TABLE|\bON)\s+(?:[`\"]([^`\"]+)[`\"]|(\S+))", re.I)
+_DDL_COLUMN_RE = re.compile(r"\(\s*[`\"]?([A-Za-z_]\w*)")
+_OPENAI_FINISH = {"stop": "stop", "length": "length"}
+_ANTHROPIC_FINISH = {
+	"end_turn": "stop",
+	"stop_sequence": "stop",
+	"max_tokens": "length",
+	"model_context_window_exceeded": "length",
+}
+_CONTEXT_LIMIT_RE = re.compile(r"context[ _-]?(?:length|window|size)|maximum context|too many tokens|num_ctx", re.I)

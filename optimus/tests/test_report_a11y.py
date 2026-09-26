@@ -198,3 +198,26 @@ def test_report_is_self_contained_offline():
 	assert "dh-add" in html  # diff colouring survived the strict allowlist
 	assert '<img src="https://attacker' not in html  # the model name is escaped too (Jinja autoescape)
 	assert 'href="https://frappeframework.com"' in html  # a legitimate doc link still renders as a live link
+
+
+# --------------------------------------------------------------------------
+# Review Focus 2: llm_fix_json written before prompt v2 still renders
+# --------------------------------------------------------------------------
+
+def test_legacy_llm_fix_json_renders():
+	legacy = {  # a row written before prompt v2: no prompt_version / guardrail / finish_reason
+		"suggestion": "**Diagnosis**: d\n**Fix**\n\nBatch the query.", "model": "qwen3-coder:30b",
+		"provider": "OpenAI-compatible", "generated_at": "2026-09-09T00:00:00+00:00", "source_available": True,
+		"tokens": {"prompt_tokens": 2900, "completion_tokens": 300, "total_tokens": 3200},
+	}
+	current = dict(
+		legacy,
+		prompt_version=3,
+		guardrail={"violations": ["raw-sql"], "reasked": True, "fallback": True},
+		finish_reason="stop",
+	)
+	for blob in (legacy, current):
+		html = _render(findings=[_finding(llm_fix_json=json.dumps(blob))])
+		assert html.count('class="fix-body"') == 1
+		assert "<p>Batch the query.</p>" in html
+		assert "AI &middot; qwen3-coder:30b &middot; 3200 tokens" in html

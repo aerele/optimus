@@ -653,6 +653,7 @@ as pre-DocType fallbacks. The DocType row wins if both are set.
 
 | Key | Default | Purpose |
 |---|---|---|
+| `optimus_ai_reask` | `True` | When an AI fix suggestion breaks a block rule the guardrail checks (code not copied from the shown source, new raw SQL or DDL, a removed permission check, ...), send the model ONE follow-up turn listing the broken rules; the rewrite is kept only if it has the four headings and breaks fewer block rules. Advise rules (conventions no pinned semgrep rule checks) never cost a follow-up turn. Skipped when the first answer was cut off, when half the timeout budget is used or when the follow-up would not fit the context window. Set `False` to avoid the extra round-trip on a slow local model. |
 | `optimus_max_recordings_per_session` | `200` | Soft cap on HTTP requests + bg jobs per session. When hit, further recordings are silently dropped and the report shows a truncation banner. |
 | `optimus_inline_analyze_limit` | `50` | Max recordings allowed for inline analyze on scheduler-disabled sites. Sessions larger than this are refused with an actionable error pointing at `bench enable-scheduler` + the Retry Analyze button. |
 
