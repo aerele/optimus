@@ -18,10 +18,14 @@ versions may contain breaking changes see migration notes below).
   the session form's single "Refresh AI suggestions" button
   (`optimus.api.refill_ai_suggestions`) replaced the per-section buttons. A
   script that still calls one now gets a "Failed to get method" error; call
-  `refill_ai_suggestions` (POST, `session_uuid`) instead. The AI library
-  functions behind them are unchanged.
+  `refill_ai_suggestions` (POST, `session_uuid`) instead. Internal AI library
+  calls remain available.
 
 ### Changed
+
+- **AI finding suggestions validate proposed code before storing it.** One bounded repair request handles fabricated diffs, unsafe code and checked Frappe rule violations. Code that still fails is removed with a profiler note; advisory rules retain the code. Set `optimus_ai_reask` to `false` to disable the repair request.
+- **AI prompts fit the configured context window.** Captured data is delimited, optional context is dropped before source lines, and non-ASCII text is budgeted conservatively. Output-limit stops remove incomplete code. Anthropic requests use a static cacheable prefix and count cache tokens in usage.
+
 
 - **Optimus Users can run AI and session actions on their own sessions.** A
   user with the Optimus User role can now run Refresh AI suggestions,
