@@ -568,14 +568,16 @@ def _refresh_hooks_cache() -> bool:
 
 def _hooks_cache_problem() -> str | None:
 	"""None when the refreshed cache key exists and this process's hooks hold
-	the Error Log handler; otherwise what is wrong. Raw Redis ``exists``
+	the Error Log handler; otherwise what is wrong. Raw Redis ``EXISTS``
 	bypasses local copies and raises when Redis is down, without decoding
 	Frappe's private cache storage. In developer_mode only this process's
 	hooks are checked. An old process can still re-cache old hooks: this
 	check cannot replace restarting every process. Raises on read failure."""
 	conf = getattr(getattr(frappe, "local", None), "conf", None) or {}
 	if not conf.get("developer_mode"):
-		if not frappe.cache.exists(frappe.cache.make_key("app_hooks")):
+		# RedisWrapper.exists adds a site prefix and swallows connection
+		# errors. Use the raw command with this already-prefixed key.
+		if not frappe.cache.execute_command("EXISTS", frappe.cache.make_key("app_hooks")):
 			return "nothing cached"
 	doc_events = frappe.get_hooks("doc_events", {})
 	handlers = (doc_events.get("Error Log") or {}).get("before_insert") or []
