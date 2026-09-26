@@ -1,0 +1,205 @@
+{
+	"rules_commit": "b101a16e69df049b3fed1478bcc16223e957cca2",
+	"semgrep": "1.177.0",
+	"rules": {
+		"frappe-after-save-controller-hook": {
+			"kind": "prompt",
+			"idiom": "Controller hooks are validate, before_save, on_update, on_submit and the other documented names; there is no after_save."
+		},
+		"frappe-breaks-multitenancy": {
+			"kind": "guardrail",
+			"code": "module-state"
+		},
+		"frappe-cache-breaks-multitenancy": {
+			"kind": "prompt",
+			"idiom": "Cross-request caching goes through @redis_cache(ttl=...) from frappe.utils.caching or frappe.cache.get_value/set_value, never a raw Redis get/set."
+		},
+		"frappe-codeinjection-eval": {
+			"kind": "guardrail",
+			"code": "eval-exec"
+		},
+		"frappe-cur-frm-usage": {
+			"kind": "n/a",
+			"reason": "JavaScript/JSON rule; AI fixes and recipes are Python for server-side code."
+		},
+		"frappe-enqueue-without-after-commit": {
+			"kind": "guardrail",
+			"code": "enqueue-without-after-commit"
+		},
+		"frappe-format-string-injection": {
+			"kind": "n/a",
+			"reason": "Exception objects formatted into translated strings; no product check. The eval scan counts any hit."
+		},
+		"frappe-incorrect-debounce": {
+			"kind": "n/a",
+			"reason": "JavaScript/JSON rule; AI fixes and recipes are Python for server-side code."
+		},
+		"frappe-manual-commit": {
+			"kind": "guardrail",
+			"code": "manual-commit"
+		},
+		"frappe-missing-translate-function-in-report-python": {
+			"kind": "guardrail",
+			"code": "untranslated",
+			"note": "report-folder variant of the same rule"
+		},
+		"frappe-missing-translate-function-js": {
+			"kind": "n/a",
+			"reason": "JavaScript/JSON rule; AI fixes and recipes are Python for server-side code."
+		},
+		"frappe-missing-translate-function-python": {
+			"kind": "guardrail",
+			"code": "untranslated"
+		},
+		"frappe-missing-translation-button-text": {
+			"kind": "n/a",
+			"reason": "JavaScript/JSON rule; AI fixes and recipes are Python for server-side code."
+		},
+		"frappe-modifying-but-not-comitting": {
+			"kind": "guardrail",
+			"code": "modify-not-saved"
+		},
+		"frappe-modifying-but-not-comitting-other-method": {
+			"kind": "guardrail",
+			"code": "modify-not-saved"
+		},
+		"frappe-modifying-child-tables-while-iterating": {
+			"kind": "guardrail",
+			"code": "child-modify-while-iterating"
+		},
+		"frappe-monkey-patching-not-allowed": {
+			"kind": "guardrail",
+			"code": "local-state",
+			"note": "partial: covers reassigning frappe request proxies; other monkey patches only by the eval scan"
+		},
+		"frappe-no-functional-code": {
+			"kind": "prompt",
+			"idiom": "Prefer comprehensions to map/filter/lambda chains."
+		},
+		"frappe-overriding-local-proxies": {
+			"kind": "guardrail",
+			"code": "local-state"
+		},
+		"frappe-print-function-in-doctypes": {
+			"kind": "prompt",
+			"idiom": "Log with frappe.logger() or frappe.msgprint, never print()."
+		},
+		"frappe-qb-incorrect-order-usage": {
+			"kind": "guardrail",
+			"code": "qb-orderby-positional"
+		},
+		"frappe-query-debug-statement": {
+			"kind": "prompt",
+			"idiom": "Never leave debug=True on a query call."
+		},
+		"frappe-realtime-pick-room": {
+			"kind": "n/a",
+			"reason": "A performance fix does not publish realtime events. The eval scan counts any hit."
+		},
+		"frappe-redis-flush": {
+			"kind": "n/a",
+			"reason": "A performance fix never flushes Redis. The eval scan counts any hit."
+		},
+		"frappe-same-key-assigned-twice": {
+			"kind": "n/a",
+			"reason": "Generic lint (duplicate dict key); no Frappe idiom to teach. The eval scan counts any hit."
+		},
+		"frappe-security-file-traversal": {
+			"kind": "n/a",
+			"reason": "Manual-audit advisory on any file access; a performance fix does not read files. The eval scan counts any hit."
+		},
+		"frappe-set-value-semantics": {
+			"kind": "guardrail",
+			"code": "single-doctype-value"
+		},
+		"frappe-setuser": {
+			"kind": "guardrail",
+			"code": "set-user-admin",
+			"note": "partial: the guardrail blocks switching to Administrator; any other set_user only by the eval scan"
+		},
+		"frappe-single-value-type-safety": {
+			"kind": "guardrail",
+			"code": "single-doctype-value"
+		},
+		"frappe-sql-format-injection": {
+			"kind": "guardrail",
+			"code": "sql-format-injection"
+		},
+		"frappe-ssti": {
+			"kind": "n/a",
+			"reason": "A performance fix never renders templates. The eval scan counts any hit."
+		},
+		"frappe-test-whitelist-missing-protection": {
+			"kind": "n/a",
+			"reason": "Scoped to test files; AI fixes and recipes never write tests."
+		},
+		"frappe-translated-values-in-business-logic": {
+			"kind": "n/a",
+			"reason": "JavaScript/JSON rule; AI fixes and recipes are Python for server-side code."
+		},
+		"frappe-translation-empty-string": {
+			"kind": "prompt",
+			"idiom": "Translate whole literal sentences: _(\"Text {0}\").format(value)."
+		},
+		"frappe-translation-js-formatting": {
+			"kind": "n/a",
+			"reason": "JavaScript/JSON rule; AI fixes and recipes are Python for server-side code."
+		},
+		"frappe-translation-js-splitting": {
+			"kind": "n/a",
+			"reason": "JavaScript/JSON rule; AI fixes and recipes are Python for server-side code."
+		},
+		"frappe-translation-python-formatting": {
+			"kind": "prompt",
+			"idiom": "Translate whole literal sentences: _(\"Text {0}\").format(value)."
+		},
+		"frappe-translation-python-splitting": {
+			"kind": "prompt",
+			"idiom": "Translate whole literal sentences: _(\"Text {0}\").format(value)."
+		},
+		"frappe-translation-trailing-spaces": {
+			"kind": "prompt",
+			"idiom": "Translate whole literal sentences: _(\"Text {0}\").format(value)."
+		},
+		"frappe-translation-variable-only": {
+			"kind": "prompt",
+			"idiom": "Translate whole literal sentences: _(\"Text {0}\").format(value)."
+		},
+		"frappe-untranslated-label-in-translated-message": {
+			"kind": "prompt",
+			"idiom": "Translate labels read from meta: _(meta.get_label(fieldname))."
+		},
+		"guest-whitelisted-method": {
+			"kind": "guardrail",
+			"code": "allow-guest"
+		},
+		"missing-argument-type-hint": {
+			"kind": "guardrail",
+			"code": "whitelist-type-hints"
+		},
+		"override-doctype-class": {
+			"kind": "n/a",
+			"reason": "Scoped to hooks.py; a performance fix never overrides a DocType class. The eval scan wraps code as a DocType module, so it cannot fire here."
+		},
+		"overusing-args": {
+			"kind": "n/a",
+			"reason": "Signature style rule; a performance fix keeps the signature of the code it edits. The eval scan still counts any hit."
+		},
+		"relaxed-permissions": {
+			"kind": "n/a",
+			"reason": "DocType permission JSON; AI fixes never emit DocType JSON."
+		},
+		"unchecked-frappe-permission-call": {
+			"kind": "guardrail",
+			"code": "unchecked-permission"
+		},
+		"use-vanilla-js-include": {
+			"kind": "n/a",
+			"reason": "JavaScript/JSON rule; AI fixes and recipes are Python for server-side code."
+		},
+		"useless-get-doc-dict": {
+			"kind": "n/a",
+			"reason": "Style only (same behaviour). No product check; the eval scan counts any hit."
+		}
+	}
+}

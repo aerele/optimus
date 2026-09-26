@@ -22,6 +22,14 @@ import pytest
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
+def pytest_configure(config):
+	# Tests that need an optional tool carry one of these markers so CI's ai-quality
+	# workflow (which installs rq and semgrep) selects them with -k "semgrep or rq";
+	# without the tool they skip locally.
+	config.addinivalue_line("markers", "rq: needs the rq package (installed by the ai-quality workflow)")
+	config.addinivalue_line("markers", "semgrep: needs the semgrep CLI and OPTIMUS_SEMGREP_RULES_DIR")
+
+
 # --- CI-friendly baseline frappe stub ---------------------------------------
 # On a bench host frappe is importable and we use the real module. On CI
 # (the GitHub Actions runner, or any pure pip venv) frappe is NOT installed,
