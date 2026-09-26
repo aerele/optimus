@@ -8,6 +8,53 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.62] - 2026-09-26
+
+### Fixed
+
+- **Advisory: every v16 site with Optimus installed had non-Administrator File
+  permission checks denied.** `optimus.permissions.file_has_permission` returned
+  `None` to mean "no objection, defer to the next check" for every File that
+  wasn't a gated profiler artifact (in practice, almost every File on the
+  site), but Frappe v16's `has_controller_permissions` treats any falsy hook
+  result, `False` or `None`, as an outright deny, and calls app hooks in
+  reversed install order, so this hook ran before Frappe core's own File
+  permission check in the same AND loop. Practical effect on any v16 site
+  with Optimus installed: form loads, deletes, library attaches and REST
+  calls against File records were denied for every non-Administrator user,
+  regardless of whether they owned the file or had a valid share.
+  Administrator was unaffected (it short-circuits earlier in Frappe's
+  permission pipeline). On Frappe 16 the fix returns `True` (no objection)
+  instead of `None` in every deferring branch; the profiler artifacts' own admin/owner
+  gate still returns `False` explicitly where it denies. The "no objection"
+  value is version-aware: Frappe v15 stops at the first hook that answers
+  non-`None` (a `True` there would skip Frappe's own File check), so on v15
+  the hook keeps returning `None` exactly as before. Verified live on a
+  Frappe 16 test site; v15 semantics are pinned by a replay test of v15's
+  loop.
+- **`recordings_file` now gated like the two report files.** The raw
+  recordings snapshot (a compressed JSON bundle of the whole flow, including
+  SQL parameters and Python call trees) was reachable by anyone with read
+  access to the parent Optimus Session, including a read-sharee who was only
+  ever meant to see the rendered report. It is now denied in Frappe's
+  permission checks (the File form, REST, `frappe.has_permission`) to
+  anyone other than a System Manager or the recording user, the same check
+  already applied to `raw_report_file` and `raw_report_pdf_file`. A direct
+  download URL is still governed by Frappe's own File rule (read access on
+  the parent Optimus Session), unchanged by this release.
+- No migration needed (both changes are in-memory Python, not schema or data).
+  **Upgrade:** restart the web and worker processes together after deploying
+  so they load the fixed `optimus/permissions.py` (a partial restart leaves
+  some workers still serving the pre-fix, over-denying behaviour until they
+  too are restarted; there is no under-denial window, since the pre-fix bug
+  only ever denies more than it should). No `bench clear-cache` is required
+  (no DocType JS or `client_cache` entry changes) and no new `site_config`
+  keys are introduced. Verify: as a non-Administrator user, open a public
+  File (e.g. a ToDo attachment) through the File form or the REST API; it
+  should succeed (200) instead of failing with a permission error (403).
+
+---
+
 ## [0.12.61] - 2026-09-26
 
 ### Fixed
