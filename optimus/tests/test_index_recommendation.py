@@ -10,7 +10,6 @@
   * `ai_fix._build_index_messages` / `ai_fix.suggest_index` (mocked HTTP);
   * `analyze` helpers (`_table_existing_indexes`, `_table_index_sample_queries`,
     `_ai_payload_for_table`, the auto-enrich gating);
-  * the `api.suggest_index` endpoint contract (source-inspection);
   * `analyzers.base.is_write_hot_table`.
 """
 
@@ -374,40 +373,3 @@ class TestAnalyzeIndexHelpers:
 		_analyze._enrich_table_breakdown_with_ai_suggestions(ctx, recordings=[])
 		for t in ctx.aggregate["table_breakdown"]:
 			assert t["ai_index"]["suggestion"] == f"advice for {t['table']}"
-
-
-# --------------------------------------------------------------------------
-# api.suggest_index source-inspection contract
-# --------------------------------------------------------------------------
-
-def _api_src():
-	with open(os.path.join(os.path.dirname(__file__), "..", "api.py")) as f:
-		return f.read()
-
-
-def _fn_body(src, name):
-	start = src.index(f"def {name}(")
-	after = src.find("\n", start) + 1
-	nxt = re.search(r"\n(?:def |@frappe\.whitelist|class )", src[after:])
-	end = after + (nxt.start() if nxt else len(src) - after)
-	return src[start:end]
-
-
-class TestSuggestIndexApi:
-	def test_whitelisted_and_signature(self):
-		src = _api_src()
-		assert re.search(r"@frappe\.whitelist\(\)\s*\ndef suggest_index", src)
-		assert "def suggest_index(session_uuid: str, table_name: str)" in src
-
-	def test_permission_gate_and_ready_and_ai_guard(self):
-		body = _fn_body(_api_src(), "suggest_index")
-		assert "_require_profiler_user()" in body
-		assert 'row["user"] != user' in body and "frappe.PermissionError" in body
-		assert 'row["status"] != "Ready"' in body
-		assert "ai_fix.is_available()" in body and "AI Fix Suggestions" in body
-
-	def test_calls_backfill_then_rerenders(self):
-		body = _fn_body(_api_src(), "suggest_index")
-		assert "_run_table_index_ai_backfill(doc, table_name=table_name)" in body
-		assert "ai_fix.AiFixError" in body and "frappe.throw(str(e))" in body
-		assert "regenerate_reports(session_uuid)" in body

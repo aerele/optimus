@@ -152,7 +152,9 @@ class OptimusSettings(Document):
 		if not self.get("ai_enabled"):
 			return
 		provider = (self.get("ai_provider") or "Anthropic").strip()
-		needs_key = provider != "OpenAI-compatible"
+		from optimus import ai_fix
+
+		needs_key = ai_fix.provider_needs_key(provider)
 		# ai_model can be blank when a hosted default exists for the
 		# provider; only "OpenAI-compatible" truly requires it (no
 		# default to fall back to). We still nudge if it's blank for the

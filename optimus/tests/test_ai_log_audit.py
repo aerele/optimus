@@ -41,7 +41,10 @@ import re
 from pathlib import Path
 
 _PKG = Path(__file__).resolve().parents[1]
-_REQUIRED = ("analyze.py", "api.py", "maintenance.py", "error_log_mask.py")
+_REQUIRED = (
+	"analyze.py", "api.py", "maintenance.py", "error_log_mask.py",
+	"optimus/doctype/optimus_settings/optimus_settings.py",
+)
 _OPTIONAL = ("ai_jobs.py",)  # scanned as soon as a later PR adds it
 _AI_WRAPPERS = frozenset({"_backfill_ai_suggestions"})  # analyze.py; calls _run_ai_backfill
 _BASE_LOGGERS = frozenset({"log_error", "log_ai_failure"})
