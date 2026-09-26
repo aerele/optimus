@@ -17,7 +17,8 @@ each case. Score it with scripts/ai_eval/report.py OUT.
 
 Makes real, possibly billed, LLM calls. Refuses any site other than optimus.local unless
 OPTIMUS_EVAL_ALLOW_SITE names it. Reads Optimus Settings but never changes them, never
-charges a session's AI spend and rolls back after every case. Never records the API key.
+charges a session's AI spend and rolls back after every case. Never records the API key:
+a failure's message drops the provider's reply and URL credentials (safe_message).
 Not collected by any test runner (scripts/ has no tests and no package markers).
 """
 
@@ -26,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -38,6 +40,9 @@ import _corpus
 DEFAULT_SITE = "optimus.local"
 ALLOW_ENV = "OPTIMUS_EVAL_ALLOW_SITE"
 PROVIDER_FIELDS = ("name", "protocol", "model", "context_tokens", "max_output_tokens")
+# A URL's userinfo ("user:password@"): develop's 404 message names the request URL.
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]*@")
+_MESSAGE_LIMIT = 300
 
 
 class EvalRefused(SystemExit):
@@ -72,6 +77,40 @@ def provider_meta(provider: dict) -> dict:
 	return meta
 
 
+def safe_message(message, api_key: str = "") -> str:
+	"""A failure message as run.json may keep it: key-free and credential-free.
+
+	develop's ai_fix appends the provider's raw reply after ": " (``_response_detail``),
+	and a provider can echo the API key there, so everything after the first ": " is
+	dropped. URL userinfo is masked (develop's 404 message names the request URL), and
+	the stored key (``api_key``: raw, JSON-escaped and repr-escaped) is replaced wherever
+	it still appears. Capped at 300 characters. The scorer uses only the error kind."""
+	text = str(message)
+	head, sep, _ = text.partition(": ")
+	if sep:
+		text = f"{head} (provider reply omitted)"
+	text = _URL_USERINFO.sub(r"\1********@", text)
+	if api_key:
+		for secret in sorted({api_key, json.dumps(api_key)[1:-1], repr(api_key)[1:-1]}, key=len, reverse=True):
+			text = text.replace(secret, "********")
+	return text[:_MESSAGE_LIMIT]
+
+
+def _stored_key() -> str:
+	"""The stored Optimus Settings API key, read with Frappe alone (the same __Auth
+	read on develop and every later PR), or "" when unset or undecryptable. Held only
+	as ``api_key``, used only to scrub failure messages."""
+	try:
+		from frappe.utils.password import get_decrypted_password
+
+		api_key = get_decrypted_password(
+			"Optimus Settings", "Optimus Settings", "ai_api_key", raise_exception=False,
+		) or ""
+	except Exception:
+		return ""
+	return api_key.strip() if isinstance(api_key, str) else ""
+
+
 def git_facts(path: str) -> dict:
 	def git(*args):
 		proc = subprocess.run(["git", "-C", path, *args], capture_output=True, text=True, check=False)
@@ -80,8 +119,10 @@ def git_facts(path: str) -> dict:
 	return {"git_head": git("rev-parse", "HEAD"), "git_dirty": bool(git("status", "--porcelain", "--untracked-files=no"))}
 
 
-def run_case(case: dict, ai_fix, *, source_lines: list[str] | None = None) -> dict:
-	"""Evaluate one case with the product's own eligibility, recipe and gate checks."""
+def run_case(case: dict, ai_fix, *, source_lines: list[str] | None = None, api_key: str = "") -> dict:
+	"""Evaluate one case with the product's own eligibility, recipe and gate checks.
+	A failure's message is recorded through ``safe_message`` (``api_key`` is the stored
+	key, used only to scrub it)."""
 	record = {"name": case["name"], "finding_type": case["finding_type"], "outcome": None,
 		"result": None, "error": None, "elapsed_s": 0.0}
 	try:
@@ -103,7 +144,7 @@ def run_case(case: dict, ai_fix, *, source_lines: list[str] | None = None) -> di
 	try:
 		record["result"] = ai_fix.suggest_fix(finding)
 	except ai_fix.AiFixError as exc:
-		failure = {"kind": getattr(exc, "kind", "") or "unknown", "message": str(exc)[:300]}
+		failure = {"kind": getattr(exc, "kind", "") or "unknown", "message": safe_message(exc, api_key)}
 	except Exception as exc:
 		failure = {"kind": "internal", "message": type(exc).__name__}
 	record["elapsed_s"] = round(time.monotonic() - t0, 1)
@@ -169,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
 		if excluded:
 			raise EvalRefused(f"Optimus Settings excludes {sorted(set(excluded))}; clear it for the eval")
 		provider = ai_fix._resolve_provider()
+		api_key = _stored_key()
 		resolve_timeout = getattr(ai_fix, "_resolve_timeout_seconds", None)
 		run = {
 			"meta": {
@@ -190,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
 			lines, drift = (None, [])
 			if case.get("masked") and not args.no_hydrate:
 				lines, drift = _corpus.hydrate(case, apps_dir)
-			record = run_case(case, ai_fix, source_lines=lines)
+			record = run_case(case, ai_fix, source_lines=lines, api_key=api_key)
 			record["drift"] = drift
 			frappe.db.rollback()
 			run["cases"].append(record)
