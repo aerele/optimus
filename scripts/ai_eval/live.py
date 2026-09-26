@@ -40,8 +40,10 @@ import _corpus
 DEFAULT_SITE = "optimus.local"
 ALLOW_ENV = "OPTIMUS_EVAL_ALLOW_SITE"
 PROVIDER_FIELDS = ("name", "protocol", "model", "context_tokens", "max_output_tokens")
-# A URL's userinfo ("user:password@"): develop's 404 message names the request URL.
-_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]*@")
+# A URL's userinfo: develop's 404 message names the request URL. A password may
+# contain raw @, so match through the last @ in the authority, without crossing
+# into a path, query or fragment. Quotes can themselves occur in credentials.
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/?#\s]+@")
 _MESSAGE_LIMIT = 300
 
 
