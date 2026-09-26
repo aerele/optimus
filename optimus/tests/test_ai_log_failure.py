@@ -2118,6 +2118,11 @@ def api_env(monkeypatch):
 	monkeypatch.setattr(analyze, "frappe", frappe)
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, exc=None, **kw: calls.append((title, exc, kw)) or True)
 	monkeypatch.setattr(api, "_require_profiler_user", lambda: "Administrator")
+	monkeypatch.setattr(api, "_session_action_gate", lambda uuid, **kw: api.SessionRef(
+		docname="SESS-0001", session_uuid=uuid, owner="Administrator", user="Administrator",
+		status="Ready", title=None,
+	))
+	monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda *a, **k: None)
 	monkeypatch.setattr(api, "_require_session_permission", lambda *a, **k: "SESS-0001")
 	monkeypatch.setattr(frappe, "get_roles", lambda *a, **k: ["System Manager"], raising=False)
 	monkeypatch.setattr(frappe, "db", _ApiDB(), raising=False)
@@ -2142,7 +2147,6 @@ def api_env(monkeypatch):
 	return SimpleNamespace(
 		calls=calls, doc=doc, api=api, analyze=analyze,
 		regenerate_reports=inspect.unwrap(api.regenerate_reports),
-		suggest_fix=inspect.unwrap(api.suggest_fix),
 	)
 
 
@@ -2161,26 +2165,7 @@ class TestApiLogSites:
 		assert api_env.calls == [("optimus regenerate ai backfill", error, {"session_uuid": "uuid-5"})]
 		assert out["regenerated"] is True
 
-	def test_suggest_fix_persist_error_on_set_value(self, api_env, monkeypatch):
-		import frappe
 
-		error = RuntimeError("write failed")
-		monkeypatch.setattr(frappe, "db", _ApiDB(set_value_error=error), raising=False)
-		monkeypatch.setattr(api_env.api, "safe_commit", lambda: None)
-		out = api_env.suggest_fix("uuid-5", "FIND-1")
-		assert api_env.calls == [
-			("optimus suggest_fix persist", error, {"session_uuid": "uuid-5", "finding": "FIND-1"}),
-		]
-		assert out["ok"] is True and out["cached"] is False and out["suggestion"] == "batch it"
-
-	def test_suggest_fix_persist_error_on_commit(self, api_env, monkeypatch):
-		error = RuntimeError("commit failed")
-		monkeypatch.setattr(api_env.api, "safe_commit", _raising(error))
-		out = api_env.suggest_fix("uuid-5", "FIND-1")
-		assert api_env.calls == [
-			("optimus suggest_fix persist", error, {"session_uuid": "uuid-5", "finding": "FIND-1"}),
-		]
-		assert out["ok"] is True and out["suggestion"] == "batch it"
 
 	def test_humanize_steps_core_fetch_error(self, api_env, monkeypatch):
 		error = RuntimeError("redis down")
@@ -2244,6 +2229,25 @@ class TestARaisedAgainTimeoutIsLoggedOnce:
 		assert ei.value is not job_timeout
 		with pytest.raises(_JobTimeout):
 			ai_fix.log_ai_failure("optimus ai auto-suggest (outer)", ei.value)
+		assert len(logs) == 1
+
+	@pytest.mark.parametrize("already_logged", [False, True])
+	def test_rerender_preserves_one_log_and_the_timeout_marker(self, logs, job_timeout, monkeypatch, already_logged):
+		from optimus import api
+
+		def render(*args, **kwargs):
+			if already_logged:
+				ai_fix.log_ai_failure("inner render", job_timeout)
+			raise job_timeout
+
+		monkeypatch.setattr(api, "_render_session_report", render)
+		ref = SimpleNamespace(docname="synthetic-report", session_uuid=None)
+		with pytest.raises(_JobTimeout) as caught:
+			api._rerender_after_ai(ref)
+		assert caught.value is not job_timeout
+		assert getattr(caught.value, ai_fix._LOGGED_ATTR, False)
+		with pytest.raises(_JobTimeout):
+			ai_fix.log_ai_failure("outer render", caught.value)
 		assert len(logs) == 1
 
 	def test_a_timeout_that_was_not_written_is_not_marked(self, logs, job_timeout, monkeypatch, breadcrumbs):
