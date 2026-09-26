@@ -61,7 +61,7 @@ bench --site <your-site> install-app optimus
 bench restart
 ```
 
-Tested on **Frappe v16** with MariaDB and Redis. The app declares `required_apps = ["frappe"]`. Runtime dependencies (installed automatically by `bench get-app`) are listed in [`pyproject.toml`](./pyproject.toml) currently `pyinstrument`, `line_profiler`, `requests`, `sqlparse` and `Jinja2`, all pure-Python with no compiled extensions (`line_profiler` ships a small C extension; pre-built wheels exist for cpython 3.10–3.14).
+Tested on **Frappe v16** with MariaDB and Redis. The app declares `required_apps = ["frappe"]`. Runtime dependencies are listed in [`pyproject.toml`](./pyproject.toml) and installed by `bench get-app` or `bench setup requirements`: `pyinstrument`, `line_profiler`, `requests`, `sqlparse`, `Jinja2`, `nh3` and `markdown2`. Some include compiled extensions with pre-built wheels; `nh3` is the Rust HTML sanitizer used for AI suggestions. Frappe v16 already installs `nh3` and `markdown2`. On Frappe v15, run `bench setup requirements` after pulling Optimus to install `nh3`; without it, AI suggestions safely fall back to escaped plain text in a `<pre>` block.
 
 After install, an **Optimus User** role is created automatically. All existing System Managers are granted this role and new System Managers get it automatically via a `User.validate` hook.
 

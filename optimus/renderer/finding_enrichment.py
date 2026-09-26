@@ -566,26 +566,130 @@ def _retarget_phase1_callsites_to_drilldown_leaf(
 		detail["callsite"] = new_callsite
 
 
+# Strict allowlist for AI-generated Markdown rendered into the
+# report. No images, forms, inline styles or ids: the report stays
+# self-contained and an AI answer cannot fetch, overlay or phish.
+_AI_HTML_TAGS = frozenset({
+	"p", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "strong", "b", "em", "i",
+	"code", "pre", "blockquote", "ul", "ol", "li", "table", "thead", "tbody", "tr",
+	"th", "td", "span", "del", "s", "sup", "sub", "a",
+})
+# NEVER add "class" here: nh3 panics (a BaseException the fallback below cannot
+# catch) when "class" is both an allowed attribute and governed by
+# allowed_classes for the same tag.
+_AI_HTML_ATTRIBUTES = {"a": frozenset({"href", "title"}), "th": frozenset({"align"}), "td": frozenset({"align"})}
+_AI_CODE_LANGS = (
+	"python", "py", "sql", "diff", "js", "javascript", "json", "bash", "sh", "shell",
+	"html", "text", "plaintext", "toml", "yaml",
+)
+_AI_HTML_CLASSES = {"code": frozenset(_AI_CODE_LANGS) | frozenset(f"language-{lang}" for lang in _AI_CODE_LANGS)}
+_AI_HTML_URL_SCHEMES = frozenset({"https", "http"})
+# Public link policy shared by rendering and AI guardrails. A link
+# stays live only when ai_link_allowed accepts it: scheme http or https and
+# a host exactly equal to one of these. An entry with a "/" also restricts the
+# path (github.com/frappe allows github.com/frappe/frappe/issues/1, not
+# github.com/someone-else/x). Every other link keeps its text, not its href.
+AI_LINK_HOSTS = ("frappeframework.com", "docs.frappe.io", "docs.erpnext.com", "github.com/frappe")
+# Raw substrings (matched lower-cased) that browsers and urllib.parse read
+# differently. A browser treats "\" as "/", so "https://evil.com\@docs.frappe.io/x"
+# opens evil.com while urlparse reports host docs.frappe.io; "@" and "%40"
+# carry userinfo; "%5c" and "%2e" decode to "\" and "." (a browser resolves
+# "/frappe/%2e%2e/x" to "/x").
+_AI_LINK_BAD_SUBSTRINGS = ("\\", "@", "%5c", "%40", "%2e")
+# The subset of frappe.utils.data.md_to_html's markdown2 extras that survives
+# the allowlist (header ids, toc and table/img classes are stripped anyway).
+_AI_MD_EXTRAS = {"fenced-code-blocks": None, "tables": None, "highlightjs-lang": None}
+
+
+def ai_link_allowed(href: str) -> bool:
+	"""Return whether an AI documentation link may keep its href.
+
+	Reject ambiguous raw characters before parsing. Require http/https, an
+	exact allowed netloc, no dot segments, and any required path prefix.
+	Rendering and AI guardrails share this policy. Invalid URLs return False.
+	"""
+	if not isinstance(href, str) or not href:
+		return False
+	from urllib.parse import urlsplit
+
+	low = href.lower()
+	if any(ord(c) <= 0x20 or ord(c) >= 0x7F for c in href) or any(b in low for b in _AI_LINK_BAD_SUBSTRINGS):
+		return False
+	try:
+		parsed = urlsplit(href)
+	except ValueError:
+		return False
+	netloc = parsed.netloc.lower()
+	if parsed.scheme.lower() not in ("http", "https"):
+		return False
+	segments = parsed.path.split("/")
+	if "." in segments or ".." in segments:
+		return False
+	for allowed in AI_LINK_HOSTS:
+		host, _, prefix = allowed.partition("/")
+		if netloc != host:
+			continue
+		if not prefix or parsed.path == "/" + prefix or parsed.path.startswith("/" + prefix + "/"):
+			return True
+	return False
+
+
+def _ai_html_attribute_filter(tag: str, attr: str, value: str) -> str | None:
+	"""nh3 ``attribute_filter`` callback: every attribute passes through except
+	an anchor's ``href``, which is kept only when ``ai_link_allowed`` accepts
+	it; the anchor's text still renders, just not as a live link."""
+	if tag != "a" or attr != "href":
+		return value
+	return value if ai_link_allowed(value) else None
+
+
+def _md_to_html(raw: str) -> str:
+	"""Markdown to HTML via Frappe's ``md_to_html``; falls back to markdown2
+	with the same extras where Frappe is not importable (the CI runner), so the
+	sanitizer sees the same shape either way."""
+	try:
+		from frappe.utils.data import md_to_html
+	except ImportError:
+		import markdown2
+
+		return str(markdown2.markdown(raw, extras=_AI_MD_EXTRAS))
+	return str(md_to_html(raw) or "")
+
+
 def _markdown_to_safe_html(text) -> str:
-	"""Render Markdown to sanitized HTML for the report (``frappe.utils.markdown``
-	+ ``sanitize_html(always_sanitize=True)``). On any failure, falls back to an
-	HTML-escaped ``<pre>`` block so the report never renders un-sanitized model
-	output. Fenced ``diff`` blocks then get per-line ``dh-add`` / ``dh-del`` /
-	``dh-meta`` span wrappers (added only around already-escaped text) for diff
-	colouring.
+	"""Render Markdown through a strict HTML and documentation-link allowlist.
+
+	Use md_to_html so angle brackets in code do not suppress Markdown
+	conversion. On failure, render escaped text in a pre block. Diff colours
+	are added only after sanitization or escaping.
 	"""
 	from optimus.renderer.syntax import _highlight_diff_html
 
 	raw = "" if text is None else str(text)
+	if not raw.strip():
+		return ""
 	try:
-		from frappe.utils import markdown as _md
-		from frappe.utils.html_utils import sanitize_html
-		return _highlight_diff_html(sanitize_html(_md(raw), always_sanitize=True))
+		import nh3
+
+		html = _md_to_html(raw)
+		if not html.strip():
+			raise ValueError("markdown conversion produced no HTML")
+		clean = nh3.clean(
+			html,
+			tags=set(_AI_HTML_TAGS),
+			attributes={tag: set(attrs) for tag, attrs in _AI_HTML_ATTRIBUTES.items()},
+			attribute_filter=_ai_html_attribute_filter,
+			allowed_classes={tag: set(classes) for tag, classes in _AI_HTML_CLASSES.items()},
+			url_schemes=set(_AI_HTML_URL_SCHEMES),
+			link_rel="noopener noreferrer nofollow",
+			strip_comments=True,
+			clean_content_tags={"script", "style"},
+		)
+		return _highlight_diff_html(clean)
 	except Exception:
 		import html as _html
-		return _highlight_diff_html(
-			'<pre style="white-space:pre-wrap;">' + _html.escape(raw) + "</pre>"
-		)
+
+		return _highlight_diff_html("<pre>" + _html.escape(raw) + "</pre>")
 
 
 def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
