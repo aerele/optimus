@@ -143,3 +143,47 @@ def test_main_verifies_requested_checkout_before_ai_calls(tmp_path, monkeypatch)
 	with pytest.raises(live.EvalRefused, match="checkout"):
 		live.main(["--out", str(tmp_path / "run"), "--optimus-src", str(checkout)])
 	assert destroyed == [True]
+
+
+# A fake key: never a real one.
+_FAKE_KEY = "sk-fake-0123456789abcdefXYZ"
+
+
+@pytest.mark.parametrize("message, leaked", [
+	# develop's _response_detail appends the provider's raw reply, which can echo the key
+	(f'The AI provider rejected the API key (HTTP 401): {{"error": "Incorrect API key provided: {_FAKE_KEY}"}}',
+		_FAKE_KEY),
+	# develop's 404 message names the request URL, with a Base URL's credentials
+	("The AI provider returned 404 (Not Found) for https://tester:fake-password@llm.example/v1/chat/completions. "
+		"Check that the Model name is right.", "fake-password"),
+	# the stored key anywhere else in the message
+	(f"unexpected reply mentioning {_FAKE_KEY}", _FAKE_KEY),
+])
+def test_a_failure_message_never_carries_the_key_or_url_credentials(corpus, message, leaked):
+	live = load("live")
+	case = load("_corpus").case_by_name("3q1nfc4d2l", corpus)
+	failing, _ = _fake_ai_fix(**{"raise": _AiFixError(message, kind="auth")})
+	record = live.run_case(case, failing, api_key=_FAKE_KEY)
+	assert record["error"]["kind"] == "auth"
+	assert leaked not in json.dumps(record)
+
+
+def test_a_failure_message_keeps_its_key_free_summary():
+	live = load("live")
+	assert live.safe_message(
+		f"The AI provider rejected the API key (HTTP 401): echo {_FAKE_KEY}", api_key=_FAKE_KEY,
+	) == "The AI provider rejected the API key (HTTP 401) (provider reply omitted)"
+	assert live.safe_message("timed out") == "timed out"
+	assert live.safe_message("see https://u:p@h.example/x", api_key="") == "see https://********@h.example/x"
+	assert len(live.safe_message("x" * 1000)) == 300
+
+
+def test_main_passes_the_stored_key_only_as_api_key():
+	# main reads the key with Frappe alone and hands it to run_case as api_key;
+	# the run record never holds it (checked above).
+	import inspect
+
+	live = load("live")
+	assert "api_key" in inspect.signature(live.run_case).parameters
+	src = inspect.getsource(live.main)
+	assert "api_key=api_key" in src and "_stored_key(" in src
