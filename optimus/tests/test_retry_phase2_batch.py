@@ -32,7 +32,7 @@ def _fn_body(name: str) -> str:
 class TestRetryPhase2BatchEndpoint:
 	def test_whitelisted(self):
 		src = _read(_API_PATH)
-		assert re.search(r"@frappe\.whitelist\(\)\s*\ndef retry_phase2_analyzes_batch", src)
+		assert re.search(r'@frappe\.whitelist\(methods=\["POST"\]\)\s*\ndef retry_phase2_analyzes_batch', src)
 
 	def test_gated_by_require_profiler_user(self):
 		body = _fn_body("retry_phase2_analyzes_batch")

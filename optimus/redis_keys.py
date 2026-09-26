@@ -238,6 +238,14 @@ def schema_version() -> str:
 	return "optimus:schema_version"
 
 
+def user_rate_limit(action: str, user: str, window: int) -> str:
+	"""Per-user fixed-window counter for a rate-limited Optimus action (see
+	:mod:`optimus.ratelimit`). Value: an integer (``INCR``). TTL: ``window`` seconds (``EXPIRE``
+	by the call that opens the window; re-armed when found missing). The window length is part of
+	the key so a changed limit never inherits an old counter."""
+	return f"optimus:ratelimit:{action}:{window}:{user}"
+
+
 # ---------------------------------------------------------------------------
 # KEY_PATTERNS used by the audit test + REDIS-SCHEMA.md drift check
 # ---------------------------------------------------------------------------
@@ -276,4 +284,5 @@ KEY_PATTERNS: tuple[str, ...] = (
 	"optimus:retention_backlog",
 	"optimus_settings_cached",
 	"optimus:schema_version",
+	"optimus:ratelimit:<action>:<window>:<user>",
 )

@@ -151,8 +151,6 @@ _ENTRY_POINTS = {
 		analyze, "_run_table_index_ai_backfill", lambda: ((_session_doc(),), {"table_name": "tabCustomer"})),
 	"api._refill_indexes_for_doc": _entry(api, "_refill_indexes_for_doc", lambda: ((_session_doc(),), {})),
 	"api._humanize_steps_core": _entry(api, "_humanize_steps_core", lambda: ((_session_doc(),), {"title": "t"})),
-	"api.suggest_fix": _entry(api, "suggest_fix", lambda: (("uuid-canary", "FIND-1"), {}), unwrap=True),
-	"api.suggest_index": _entry(api, "suggest_index", lambda: (("uuid-canary", "tabCustomer"), {}), unwrap=True),
 }
 
 
@@ -558,7 +556,7 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 		assert any(PII in t for _, t in sinks.escaped), "no escaped dump held the prompt: it would prove nothing"
 	if scenario == "malformed_usage":
 		assert sinks.escaped == [], f"malformed usage broke a good reply: {[e for e, _ in sinks.escaped]}"
-		for ep in ("ai_fix.suggest_fix", "ai_fix.humanize_steps", "ai_fix.suggest_index", "api.suggest_fix"):
+		for ep in ("ai_fix.suggest_fix", "ai_fix.humanize_steps", "ai_fix.suggest_index"):
 			assert any(e == ep and SUGGESTION_MARK in t for e, t in sinks.returned), f"{ep}: the suggestion was lost"
 	if scenario == "non_str_text":
 		# Only AI errors (and the endpoints' frappe.throw) left the entry
@@ -586,14 +584,3 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 		assert any(job_timeout.__name__ in t for _, t in sinks.returned), "no RQ timeout escaped"
 	if scenario == "developer_mode":
 		assert any(ECHO_MARK in t for _, t, checked in sinks.stored if not checked), "no snapshot was stored"
-		# The whitelisted endpoints call frappe.throw inside their
-		# ``except AiFixError`` block, so the thrown error chains that AiFixError.
-		# Each endpoint's escaped dump must hold it, as a chained exception
-		# (_dump_exception writes each exception's repr on its own line). An
-		# escape for any other reason, such as a throw before the AI call, leaves
-		# the chained dump unchecked.
-		for ep in ("api.suggest_fix", "api.suggest_index"):
-			assert any(
-				e == ep and any(line.startswith("AiFixError(") for line in t.splitlines())
-				for e, t in sinks.escaped
-			), f"{ep}: the frappe.throw-inside-except path never ran, so its chained dump went unchecked"

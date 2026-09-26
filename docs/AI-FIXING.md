@@ -283,7 +283,7 @@ This means: if you're worried about a profile shared with a third party leaking 
 | Cleaning keys out of old Error Log rows | `optimus/maintenance.py` | `scrub_error_log_secrets`, `purge_ai_error_logs` |
 | Masking the key in Error Log rows as Frappe inserts them | `optimus/error_log_mask.py` | `mask_error_log` (the Error Log `before_insert` hook) |
 | Per-type exclusion gate | `optimus/ai_fix.py` | `is_finding_type_excluded` |
-| On-demand entry point | `optimus/api.py` | `suggest_fix`, `suggest_index`, `humanize_steps` |
+| On-demand entry points | `optimus/api.py` | `refill_ai_suggestions` (the "Refresh AI suggestions" button), `test_ai_connection` (Optimus Settings), `ai_capabilities` (which AI buttons the form shows) |
 | Auto-suggest entry point | `optimus/analyze.py` | `_enrich_findings_with_ai_suggestions`, `_enrich_table_breakdown_with_ai_suggestions` |
 | Settings dataclass | `optimus/settings.py` | `OptimusConfig` |
 

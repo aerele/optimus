@@ -46,6 +46,9 @@ major version can't be read it returns ``None``: on Frappe 16 that
 over-denies Files (loud, reported at once, and exactly the behaviour
 before this fix), whereas ``True`` on Frappe 15 would silently expose every
 private file on the site.
+
+``may_act_on_session`` is the pure decision behind every Optimus Session endpoint that changes a
+session or spends AI tokens on it; ``api._session_action_gate`` is its only production caller.
 """
 
 import re
@@ -122,3 +125,21 @@ def file_has_permission(doc, ptype=None, user=None) -> bool | None:
 		return False
 
 	return _no_objection()  # passed our gate; let standard checks run
+
+
+def may_act_on_session(*, user: str, owner: str, can_read: bool, can_write: bool) -> bool:
+	"""Decide whether ``user`` may run an action on an Optimus Session: an AI action, Regenerate
+	Reports, Retry Analyze or a Phase 2 start, stop or retry (design decision D1).
+
+	Allowed when the user can read the session AND is its owner or holds write on it. Write comes
+	from the System Manager role (Optimus Session DocPerm) or an explicit write share; Administrator
+	always has it. A read-only share lets a user view the session but not spend AI tokens on it or
+	change it. The owner match ignores email case, and a blank owner or user never matches.
+
+	Pure: the caller passes Frappe's two permission answers, so this stays testable without a
+	site. ``api._session_action_gate`` is the only production caller.
+	"""
+	if not can_read:
+		return False
+	is_owner = bool(user) and bool(owner) and bool(user.strip()) and user.strip().lower() == owner.strip().lower()
+	return is_owner or bool(can_write)

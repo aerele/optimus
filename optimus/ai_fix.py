@@ -4,8 +4,9 @@
 """On-demand LLM-suggested fixes for Optimus Findings.
 
 Turns a finding's callsite / source snippet / normalized SQL + EXPLAIN into a
-concrete fix by asking a configured LLM. Invoked only from the
-``optimus.api.suggest_fix`` whitelisted endpoint, never from an analyzer, so
+concrete fix by asking a configured LLM. Called from analyze-time
+auto-suggest in ``optimus.analyze`` and from the "Refresh AI suggestions"
+endpoint ``optimus.api.refill_ai_suggestions``, never from an analyzer, so
 the pure-analyzer / frozen-capture invariants are untouched.
 
 Provider-agnostic: two wire formats (Anthropic Messages, OpenAI Chat
@@ -145,6 +146,16 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 	# },
 }
 _DEFAULT_PROVIDER = "Anthropic"
+
+
+def provider_needs_key(name: str) -> bool:
+	"""True when the provider named ``name`` (an ``ai_provider`` Select value) needs an API key,
+	read from ``_PROVIDER_DEFAULTS[name]["needs_key"]`` so adding a provider stays data-only. An
+	unknown or blank name returns True, so a settings check errs toward asking for a key."""
+	defaults = _PROVIDER_DEFAULTS.get((name or "").strip())
+	if defaults is None:
+		return True
+	return bool(defaults.get("needs_key", True))
 
 # Fallback timeout when settings can't be read (pure-pytest path with no
 # bench, or a settings cache miss during early bootstrap). v0.9.0+ the live

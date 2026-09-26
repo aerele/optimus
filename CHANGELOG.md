@@ -8,6 +8,83 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [Unreleased]
+
+### Removed
+
+- **Four unused AI endpoints.** `optimus.api.suggest_fix`,
+  `optimus.api.backfill_ai_fixes`, `optimus.api.humanize_steps` and
+  `optimus.api.suggest_index` are gone. Nothing in Optimus called them since
+  the session form's single "Refresh AI suggestions" button
+  (`optimus.api.refill_ai_suggestions`) replaced the per-section buttons. A
+  script that still calls one now gets a "Failed to get method" error; call
+  `refill_ai_suggestions` (POST, `session_uuid`) instead. The AI library
+  functions behind them are unchanged.
+
+### Changed
+
+- **Optimus Users can run AI and session actions on their own sessions.** A
+  user with the Optimus User role can now run Refresh AI suggestions,
+  Regenerate Reports, Retry Analyze and the Phase 2 start, stop and retry
+  actions on sessions they recorded. Before, most of these failed for anyone
+  who was not a System Manager. A user the session is shared with for editing
+  can run them too; a read-only share still only lets the user view the
+  session. The Optimus Session permissions themselves are unchanged.
+- **Mutating API endpoints accept POST only.** `refill_ai_suggestions`,
+  `regenerate_reports`, `retry_analyze`, `test_ai_connection`, `start`,
+  `stop`, `mark_onboarding_seen`, `start_line_profile_pass`,
+  `stop_line_profile_pass`, `retry_phase2_analyze`,
+  `retry_phase2_analyzes_batch` and `force_stop_phase2` now reject GET, so a
+  link on another site can no longer trigger them. The Desk UI already used
+  POST; scripts that call these endpoints with GET must switch to POST.
+- **Rate limits are per user.** Limits used to be per IP and could be bypassed
+  by adding a form field. Defaults: `refill_ai_suggestions` 6 per hour;
+  `regenerate_reports` 30 per minute; `retry_analyze` 5 per minute;
+  `test_ai_connection` 10 per minute; `download_pdf` and `export_session` 20
+  per minute. Override any of them in site_config:
+  `"optimus_rate_limits": {"refill_ai_suggestions": [12, 3600]}`.
+- `retry_analyze` on a session that is not Failed now returns an error instead
+  of `{"retried": false}`.
+
+### Fixed
+
+- Refresh AI suggestions no longer fails with a permission error after the AI
+  calls already ran (and were billed): the final report re-render no longer
+  re-checks permissions. If that re-render fails, the AI results stay saved,
+  the error is logged and the response says `regenerated: false`.
+- The Phase 2 re-render after analysis now works for session owners.
+- The Optimus Settings "incomplete AI config" warning reads which providers need
+  an API key from the provider table instead of a hard-coded provider name.
+- The "No Optimus Session found" message no longer echoes the requested id
+  unescaped.
+
+### Internal
+
+- One permission gate (`permissions.may_act_on_session` plus
+  `api._session_action_gate`, `_ai_session_gate` and `_phase2_run_gate`)
+  replaces five copy-pasted owner checks. A structural test fails the build if a
+  session-scoped endpoint that writes skips its gate, is not POST-only or has an
+  unannotated parameter, and another if a whitelisted AI endpoint has no Desk
+  caller.
+- The AI endpoint tests call the endpoints instead of searching the source text.
+
+### Upgrade notes
+
+- No `bench migrate` is needed (no DocType or patch change), and no
+  `bench --site <site> clear-cache` (no form JS change; running it is
+  harmless). Open Desk tabs need no reload.
+- Restart web AND background workers together (`bench restart`, or your
+  process manager): the Phase 2 re-render runs `regenerate_reports` inside a
+  worker, which must run the same code as the web tier.
+- New optional site_config key: `optimus_rate_limits`
+  (`{"<endpoint name>": [limit, seconds]}`).
+- Scripts: switch calls to the four removed endpoints to
+  `optimus.api.refill_ai_suggestions`, and any GET call to a mutating endpoint
+  to POST.
+- Verify: as a user with only the Optimus User role, open one of your Ready
+  sessions and click Regenerate Reports (it now works); a GET to
+  `/api/method/optimus.api.regenerate_reports` returns 403.
+
 ## [0.12.62] - 2026-09-26
 
 ### Fixed

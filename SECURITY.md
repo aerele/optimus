@@ -52,10 +52,20 @@ the highest-value security considerations:
    Redis-poisoning attacker without the encryption_key cannot
    inject a malicious pickle - signature verification fires on
    read.
-4. **Whitelisted API endpoints carry IP-based rate limits.**
-   `suggest_fix`, `regenerate_*`, `download_pdf`, `export_session`,
-   `retry_analyze` are throttled (5-30 req/min per IP depending
-   on cost) to prevent LLM-cost-burn or CPU DoS.
+4. **Session actions share a permission gate and mutating endpoints require POST.**
+   Refresh AI suggestions, Regenerate Reports, Retry Analyze and Phase 2
+   actions use `api._session_action_gate`: the caller needs the profiler
+   role, read access, and ownership or write permission. Read-only sharing
+   does not permit these actions. Mutating endpoints require POST, so
+   Frappe applies its CSRF protection. AI and report actions count per-user
+   fixed-window limits (`optimus/ratelimit.py`) after permission checks. Defaults:
+   `refill_ai_suggestions` 6 per hour; `regenerate_reports` 30 per minute;
+   `retry_analyze` 5 per minute; `test_ai_connection` 10 per minute;
+   `download_pdf` and `export_session` 20 per minute. Override any of them
+   in site_config, for example
+   `"optimus_rate_limits": {"refill_ai_suggestions": [12, 3600]}`.
+   The whitelisted AI surface is only what the Desk UI calls: a test fails
+   the build when an AI endpoint has no Desk caller and no written reason.
 5. **`_resolve_source_path` enforces a bench-boundary check.**
    Analyzer-controlled callsite filenames cannot escape the bench
    directory tree, so a malicious analyzer dict can't be used to
@@ -308,11 +318,15 @@ installed on the site.
   known-sensitive column names catches `WHERE password = '...'`
   shapes but won't catch obscure column names or UPDATE SET
   clauses with sensitive values.
-- Optimus User role grants access to any session the user
-  recorded. There's no per-recording fine-grained ACL.
-- Rate limiting is **IP-based**, not per-user. Multi-user deployments
-  behind a single load balancer share the rate-limit bucket;
-  per-user buckets are on the v0.8 roadmap.
+- An Optimus User can view and act on the sessions they recorded. Sharing a
+  session read-only lets another user open it in Desk; sharing it with
+  write also lets them run Refresh AI suggestions, Regenerate Reports,
+  Retry Analyze and Phase 2 on it. The PDF download and JSON export stay
+  limited to the recording user and System Managers. There is no
+  finer-grained ACL.
+- The per-user limits on AI and report actions live in Redis. If Redis is
+  down the limiter refuses the action (fails closed); Frappe sessions need
+  Redis anyway, so this changes nothing in practice.
 - Frappe attaches the local variables of the failing code's frames to the
   Error Log row it writes for an error that escapes to it: a server error, a
   background job that fails or times out, and every error in developer mode.
