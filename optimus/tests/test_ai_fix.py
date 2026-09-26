@@ -1408,6 +1408,27 @@ class TestGuardedCompletion:
 		assert out["guardrail"] == {"violations": ["truncated"], "reasked": False, "fallback": True}
 		assert "```" not in out["suggestion"] and "cut off" in out["suggestion"]
 
+	def test_an_oversized_reply_is_cut_and_treated_as_cut_off(self, monkeypatch):
+		# A server that ignores max_tokens can return any size; the guardrails' Markdown
+		# checks are superlinear, so the reply is cut at MAX_REPLY_CHARS first.
+		from optimus import ai_budget
+
+		huge = self._GOOD + "\n" + "[" * 60_000 + "](" * 60_000 + "`" * 60_000
+		fake = _post_sequence(self._resp(huge))
+		out = self._run(fake, monkeypatch)
+		assert len(fake.calls) == 1  # a cut-off answer is never re-asked
+		assert out["finish_reason"] == "length"
+		assert out["guardrail"] == {"violations": ["truncated"], "reasked": False, "fallback": True}
+		assert len(out["suggestion"].split("> **Profiler note:**")[0]) <= ai_budget.MAX_REPLY_CHARS
+
+	def test_an_oversized_rewrite_is_cut_and_not_adopted(self, monkeypatch):
+		huge = self._GOOD + "\n" + "x" * 50_000
+		fake = _post_sequence(self._resp(self._RAW), self._resp(huge))
+		out = self._run(fake, monkeypatch)
+		assert len(fake.calls) == 2
+		assert out["guardrail"]["violations"] == ["raw-sql"] and out["finish_reason"] == "stop"
+		assert "x" * 100 not in out["suggestion"]
+
 	def test_truncated_rewrite_is_not_adopted(self, monkeypatch):
 		fake = _post_sequence(self._resp(self._RAW), self._resp(self._GOOD, finish="length"))
 		out = self._run(fake, monkeypatch)

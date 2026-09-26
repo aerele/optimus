@@ -153,7 +153,7 @@ The rules come in tiers.
 - **Advise rules** are conventions no pinned semgrep rule checks: no dynamic imports, and no index led by a Frappe metadata column. They never cost a follow-up turn and never remove code: one profiler note lists them.
 - **Notes** tell you about the answer: Customize Form has no index option, the model saw only part of the prompt, an image or an off-site link was removed, captured-data markers were echoed.
 
-An answer cut off at the output limit is never re-asked and its code is removed. The follow-up turn is on by default; set `optimus_ai_reask` to `false` in site_config to skip it on a slow local model.
+An answer cut off at the output limit is never re-asked and its code is removed. A reply longer than 16,384 characters (16 per token of the largest budget; only a server that ignores `max_tokens` sends one) is cut there and treated the same way, so the checks stay fast. The follow-up turn is on by default; set `optimus_ai_reask` to `false` in site_config to skip it on a slow local model.
 
 ### 4.2 Context window and answer size
 

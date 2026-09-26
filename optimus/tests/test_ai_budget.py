@@ -129,3 +129,14 @@ def test_assemble_measures_non_ascii_parts_by_size():
 	parts = [(0, "A"), (1, "处" * 10)]
 	assert B.assemble(parts, 20) == "A"  # 10 CJK characters are 36 units, not 10
 	assert B.assemble(parts, 40) == "A\n\n" + "处" * 10
+
+
+def test_cap_reply_cuts_only_an_oversized_reply_and_marks_it_cut_off():
+	from optimus import ai_budget
+
+	limit = ai_budget.MAX_REPLY_CHARS
+	assert ai_budget.cap_reply("ok", "stop") == ("ok", "stop")
+	assert ai_budget.cap_reply("a" * limit, None) == ("a" * limit, None)
+	assert ai_budget.cap_reply("a" * (limit + 1), "stop") == ("a" * limit, "length")
+	# 1024 output tokens (the most any call asks for) fit with room to spare
+	assert limit >= ai_budget.MAX_OUTPUT_TOKENS * 16

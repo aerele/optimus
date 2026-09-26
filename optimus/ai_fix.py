@@ -1942,7 +1942,7 @@ def _complete_with_guardrails(
 
 		raise AiFixError(_("The AI provider returned an empty response."), kind="bad_response", usage=dict(usage))
 	first_usage = dict(usage)
-	finish = meta.get("finish_reason")
+	text, finish = ai_budget.cap_reply(text, meta.get("finish_reason"))
 	violations = ai_guardrails.verify_fix(text, source_lines=shown_lines, finish_reason=finish)
 	to_fix = ai_guardrails.reaskable(violations)
 	reasked = False
@@ -1992,9 +1992,8 @@ def _complete_with_guardrails(
 				_log_reask("failed", [type(reask_error).__name__])
 			rewritten = (rewritten or "").strip()
 			if rewritten:
-				new = ai_guardrails.verify_fix(
-					rewritten, source_lines=shown_lines, finish_reason=reask_meta.get("finish_reason")
-				)
+				rewritten, rewritten_finish = ai_budget.cap_reply(rewritten, reask_meta.get("finish_reason"))
+				new = ai_guardrails.verify_fix(rewritten, source_lines=shown_lines, finish_reason=rewritten_finish)
 				adopt = (
 					not any(v.action == ai_guardrails.TRUNCATED for v in new)
 					and not ai_guardrails.check_headings(rewritten)
@@ -2002,7 +2001,7 @@ def _complete_with_guardrails(
 				)
 				_log_reask("adopted" if adopt else "kept-original", [v.code for v in to_fix])
 				if adopt:
-					text, violations, finish = rewritten, new, reask_meta.get("finish_reason")
+					text, violations, finish = rewritten, new, rewritten_finish
 	sent_size = ai_budget.text_size(system) + sum(ai_budget.text_size(m.get("content") or "") for m in messages)
 	if ctx <= _TRUNCATION_CHECK_MAX_CONTEXT and ai_budget.context_truncated(first_usage, sent_size):
 		violations = [*violations, ai_guardrails.Violation("context-truncated")]

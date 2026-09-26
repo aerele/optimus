@@ -23,6 +23,9 @@ CHARS_PER_TOKEN_SAFE = 3.3
 CHARS_PER_TOKEN_CENTRAL = 4.0
 TEMPLATE_TOKENS = 64  # chat-template role markers and similar overhead
 MAX_OUTPUT_TOKENS = 1024  # stored answers measure 194 to 366 tokens
+# The longest reply the guardrails check: the largest completion budget at 16 characters a
+# token. Only a provider that ignores max_tokens sends more (cap_reply).
+MAX_REPLY_CHARS = MAX_OUTPUT_TOKENS * 16
 MIN_OUTPUT_TOKENS = 512
 REASK_MIN_OUTPUT_TOKENS = 400
 MIN_USER_CHARS = 1200
@@ -51,6 +54,17 @@ def clip(text: str, size: int) -> str:
 		else:
 			hi = mid - 1
 	return t[:lo]
+
+
+def cap_reply(text: str, finish_reason: str | None) -> tuple[str, str | None]:
+	"""``(text, finish_reason)`` for a reply the guardrails may check. A reply is capped
+	only by the max_tokens a provider honours, one that ignores it can send any size, and
+	the guardrails' Markdown checks are superlinear, so a reply past ``MAX_REPLY_CHARS``
+	is cut there and reported as cut off at the output limit (``"length"``): it is never
+	re-asked and its code is removed."""
+	if len(text) <= MAX_REPLY_CHARS:
+		return text, finish_reason
+	return text[:MAX_REPLY_CHARS], "length"
 
 
 def estimate_tokens(text: str) -> int:
