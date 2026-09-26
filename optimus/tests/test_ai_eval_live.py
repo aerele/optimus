@@ -178,6 +178,35 @@ def test_a_failure_message_keeps_its_key_free_summary():
 	assert len(live.safe_message("x" * 1000)) == 300
 
 
+@pytest.mark.parametrize("userinfo", [
+	"tester:fake-password@remainder",
+	"tester:fake@password@remainder",
+	"tester:fake%40password",
+	"tester:fake'password@remainder",
+	'tester:fake"password@remainder',
+])
+def test_failure_url_masks_all_userinfo_before_the_last_at(corpus, userinfo):
+	"""requests accepts raw @ in a password; the last @ separates the host."""
+	live = load("live")
+	case = corpus["cases"][0]
+	failing, _ = _fake_ai_fix(**{"raise": _AiFixError(
+		f"The AI provider returned 404 for https://{userinfo}@llm.example/v1/chat/completions.",
+		kind="http",
+	)})
+	record = live.run_case(case, failing)
+	assert record["error"]["message"] == (
+		"The AI provider returned 404 for https://********@llm.example/v1/chat/completions."
+	)
+
+
+@pytest.mark.parametrize("suffix", ["/v1", "?contact=help@example.test", "#help@example.test"])
+def test_failure_url_mask_stops_at_url_component_boundaries(suffix):
+	live = load("live")
+	assert live.safe_message(
+		f'https://tester:fake@part@llm.example{suffix}'
+	) == f'https://********@llm.example{suffix}'
+
+
 def test_main_passes_the_stored_key_only_as_api_key():
 	# main reads the key with Frappe alone and hands it to run_case as api_key;
 	# the run record never holds it (checked above).
