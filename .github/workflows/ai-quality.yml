@@ -1,0 +1,168 @@
+name: AI Quality
+
+# Pinned Frappe semgrep rules on the app code, plus the tests that need semgrep or rq.
+#
+# A separate workflow from ci.yml (which this does not touch). semgrep 1.177.0 pins
+# click and pyjwt versions that must never meet the app's dependencies, so it is
+# installed into its own virtualenv and only its CLI is put on PATH. The rules are
+# frappe/semgrep-rules at a pinned commit; scripts/ai_eval/semgrep_rule_map.json
+# carries the same two pins and optimus/tests/test_ai_eval_semgrep.py fails if they
+# drift apart.
+#
+# Jobs:
+#   semgrep   Diff-aware: fails only on findings the change adds (the baseline is the
+#             PR base, the pushed range, or the merge-base with develop). A report-only
+#             full scan follows and never fails the job; it lists the existing debt.
+#   ai-tests  Installs the app, its test deps, rq==2.6.1 and semgrep, then runs every
+#             test selected by -k "semgrep or rq" (module names and the rq / semgrep
+#             markers) with REQUIRE_SEMGREP=1, so a missing tool fails instead of
+#             skipping. Also lints scripts/ (ci.yml lints optimus/ only).
+on:
+  pull_request:
+    branches: ['**']
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  SEMGREP_RULES_COMMIT: b101a16e69df049b3fed1478bcc16223e957cca2
+
+jobs:
+  semgrep:
+    name: semgrep
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (full history for the diff baseline)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install pinned semgrep into its own virtualenv
+        run: |
+          python -m venv "$RUNNER_TEMP/semgrep-venv"
+          "$RUNNER_TEMP/semgrep-venv/bin/pip" install --quiet semgrep==1.177.0
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -s "$RUNNER_TEMP/semgrep-venv/bin/semgrep" "$RUNNER_TEMP/bin/semgrep"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch pinned frappe/semgrep-rules (outside the workspace)
+        run: |
+          git clone --quiet https://github.com/frappe/semgrep-rules.git "$RUNNER_TEMP/frappe-semgrep-rules"
+          git -C "$RUNNER_TEMP/frappe-semgrep-rules" checkout --quiet "$SEMGREP_RULES_COMMIT"
+
+      - name: Compute the diff baseline
+        id: base
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base=""
+          case "$EVENT" in
+            pull_request) base="$PR_BASE" ;;
+            push) base="$PUSH_BEFORE" ;;
+          esac
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+              || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            base="$(git merge-base origin/develop HEAD 2>/dev/null || true)"
+          fi
+          if [ "$base" = "$(git rev-parse HEAD)" ]; then
+            base=""
+          fi
+          echo "baseline=$base" >> "$GITHUB_OUTPUT"
+          echo "Diff baseline: ${base:-none; only the report-only full scan runs}"
+
+      - name: Semgrep, new findings only (fails the job)
+        if: steps.base.outputs.baseline != ''
+        env:
+          BASELINE: ${{ steps.base.outputs.baseline }}
+        run: |
+          semgrep scan --config "$RUNNER_TEMP/frappe-semgrep-rules/rules" \
+            --metrics=off --disable-version-check --error \
+            --baseline-commit "$BASELINE" \
+            --exclude tests --exclude tests_integration \
+            optimus/
+
+      - name: Semgrep, full scan (report only)
+        if: always()
+        continue-on-error: true
+        run: |
+          semgrep scan --config "$RUNNER_TEMP/frappe-semgrep-rules/rules" \
+            --metrics=off --disable-version-check --quiet \
+            --exclude tests --exclude tests_integration \
+            --json --output semgrep-full.json optimus/ || true
+          python - >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          import collections, json
+          results = json.load(open("semgrep-full.json")).get("results", [])
+          print(f"## Pinned semgrep, full scan (report only): {len(results)} findings")
+          by_rule = collections.Counter(r["check_id"].rsplit(".", 1)[-1] for r in results)
+          for rule, count in by_rule.most_common():
+              print(f"- {rule}: {count}")
+          EOF
+
+  ai-tests:
+    name: ai-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: 'pyproject.toml'
+
+      - name: Install the app, the test deps and rq
+        # The same install as ci.yml's tests job, plus rq at the version Frappe v16 pins.
+        run: |
+          uv pip install --system -e .
+          uv pip install --system pytest pytest-github-actions-annotate-failures hypothesis Faker pdfplumber pypdf sql_metadata jsonschema rq==2.6.1 'ruff>=0.6,<1'
+
+      - name: Install pinned semgrep into its own virtualenv
+        run: |
+          python -m venv "$RUNNER_TEMP/semgrep-venv"
+          "$RUNNER_TEMP/semgrep-venv/bin/pip" install --quiet semgrep==1.177.0
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -s "$RUNNER_TEMP/semgrep-venv/bin/semgrep" "$RUNNER_TEMP/bin/semgrep"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch pinned frappe/semgrep-rules (outside the workspace)
+        run: |
+          git clone --quiet https://github.com/frappe/semgrep-rules.git "$RUNNER_TEMP/frappe-semgrep-rules"
+          git -C "$RUNNER_TEMP/frappe-semgrep-rules" checkout --quiet "$SEMGREP_RULES_COMMIT"
+
+      - name: Lint scripts/
+        run: ruff check scripts
+
+      - name: Run the semgrep and rq tests (a missing tool fails, never skips)
+        env:
+          REQUIRE_SEMGREP: '1'
+        run: |
+          set -eo pipefail
+          export OPTIMUS_SEMGREP_RULES_DIR="$RUNNER_TEMP/frappe-semgrep-rules/rules"
+          python -m pytest optimus/tests -k "semgrep or rq" -v -rs 2>&1 | tee ai-tests.log
+          if grep -E "^SKIPPED .*could not import 'rq" ai-tests.log; then
+            echo "::error::an rq test was skipped although rq is installed"
+            exit 1
+          fi
