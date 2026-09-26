@@ -16,6 +16,8 @@ import types
 from types import SimpleNamespace
 
 import pytest
+
+pytestmark = pytest.mark.rq
 import requests
 
 from optimus import ai_fix

@@ -26,6 +26,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.rq
+
 from optimus import maintenance
 
 KEY = "sk-live-0123456789abcdefXYZ"
