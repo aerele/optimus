@@ -155,9 +155,9 @@ class _RecordingCache:
 	"""``frappe.cache`` (and Frappe v16's ``frappe.client_cache``) over
 	``store``, a Redis shared by both: ``delete_value`` and every other
 	write-side call is logged in ``calls`` as ``(name, *args)``;
-	``make_key`` / ``exists`` (the raw existence check) are logged in ``gets``.
+	``execute_command`` (the raw existence check) are logged in ``gets``.
 	``down`` models Redis unreachable: Frappe's wrappers swallow the
-	``ConnectionError`` on delete, while a raw ``exists`` raises it."""
+	``ConnectionError`` on delete, while raw ``execute_command`` raises it."""
 
 	def __init__(self, store=None):
 		self.calls = []
@@ -174,7 +174,15 @@ class _RecordingCache:
 		if not self.down:
 			self.store.pop(self.make_key(key), None)
 
-	def exists(self, raw_key):
+	def exists(self, key):
+		# Frappe namespaces even a key that the caller already namespaced.
+		try:
+			return self.execute_command("EXISTS", self.make_key(key))
+		except ConnectionError:
+			return False
+
+	def execute_command(self, command, raw_key):
+		assert command == "EXISTS"
 		self.gets.append(raw_key)
 		if self.down:
 			raise ConnectionError("Error 111 connecting to 127.0.0.1:13000. Connection refused.")
@@ -1216,6 +1224,15 @@ class TestHooksCacheRefresh:
 	that process's doc-event copy and checks the key exists, before it reads
 	any row."""
 
+	def test_refresh_checks_the_raw_key_without_a_second_site_prefix(self, fake):
+		f = fake([])
+		assert maintenance._refresh_hooks_cache() is True
+		assert f.cache.gets == [f.cache.make_key("app_hooks")]
+		# Positive control: Frappe's convenience wrapper looks elsewhere
+		# when passed make_key's bytes, despite the actual key being present.
+		assert f.cache.exists(f.cache.make_key("app_hooks")) == 0
+		assert f.cache.exists("app_hooks") == 1
+
 	def test_refresh_does_not_decode_frappe_s_private_cache_storage(self, fake):
 		f = fake([])
 
@@ -1267,7 +1284,7 @@ class TestHooksCacheRefresh:
 		elif step == "reload":
 			f.get_hooks = _boom
 		else:
-			f.cache.exists = _boom
+			f.cache.execute_command = _boom
 		assert maintenance.scrub_error_log_secrets(dry_run=False) == {**_OUT, "candidates": 1, "changed": 1}
 		refresh_lines = [line for _, _, line in f.lines if "optimus maintenance:" in line]
 		assert refresh_lines == ["optimus maintenance: Frappe's cached hooks were not refreshed (ConnectionError)"]
@@ -1335,7 +1352,7 @@ class TestHooksCacheRefresh:
 				local.doc_events_hooks = get_hooks("doc_events", {})
 			return local.doc_events_hooks
 		client_cache = SimpleNamespace(delete_value=lambda key: redis.pop(key, None))
-		cache = SimpleNamespace(make_key=lambda key: key, exists=lambda key: int(key in redis))
+		cache = SimpleNamespace(make_key=lambda key: key, execute_command=lambda command, key: int(key in redis))
 		monkeypatch.setattr(
 			maintenance, "frappe",
 			SimpleNamespace(client_cache=client_cache, cache=cache, get_hooks=get_hooks, local=local),
