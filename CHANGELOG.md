@@ -8,6 +8,40 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.62] - 2026-09-26
+
+### Fixed
+
+- AI-generated report content now uses a strict HTML allowlist. Remote images,
+  scripts, forms, frames, inline styles and IDs are removed. Links stay clickable
+  only for exact `http` or `https` URLs on `frappeframework.com`, `docs.frappe.io`,
+  `docs.erpnext.com`, or `github.com/frappe` paths. Userinfo, ports, look-alike
+  hosts, dot segments and ambiguous URL characters are rejected; other links
+  keep their text. This applies to fix suggestions, index suggestions and
+  AI-written steps to reproduce.
+- Markdown containing angle brackets, such as `List<int>` inside code, now
+  converts normally. HTML and Jinja inside code fences remain escaped and
+  readable, and diff highlighting is preserved. Conversion or sanitizer failures
+  fall back to escaped plain text without adding an error log.
+
+### Upgrade notes
+
+- Run `bench setup requirements` after pulling the update. Optimus now declares
+  `nh3>=0.2.22` and `markdown2>=2.5` directly. Frappe v16 already installs these
+  dependencies; Frappe v15 needs `nh3`. Without it, AI suggestions safely render
+  as escaped text in a `<pre>` block instead of formatted Markdown.
+- Restart web and background workers together to load the sanitizer in every
+  process. There is no schema change or migration patch.
+- Existing report files retain their old HTML. Use **Regenerate Reports**, a
+  new analysis, or **Refresh AI suggestions** to rebuild them. Previously
+  downloaded copies also retain their old content.
+- Verify a regenerated AI-fix card: documentation links remain clickable,
+  off-domain links lose their href, remote images disappear, and fenced code
+  remains readable. `AI_LINK_HOSTS` and `ai_link_allowed` provide the shared
+  renderer link policy for future AI checks.
+
+---
+
 ## [0.12.61] - 2026-09-26
 
 ### Fixed
