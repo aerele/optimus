@@ -22,6 +22,10 @@ dependencies = [
 	# (CI runner) without pulling in all of Frappe.
 	"sqlparse>=0.4",
 	"Jinja2>=3.0",
+	# The AI report sanitizer imports these directly, including outside Frappe.
+	# nh3 0.2.22 first supports allowed_classes with attribute_filter.
+	"nh3>=0.2.22",
+	"markdown2>=2.5",
 ]
 
 [build-system]
