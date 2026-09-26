@@ -9,6 +9,8 @@ they exercise the regex + substring patterns directly so the same code
 is provably equivalent in both call paths.
 """
 
+import pytest
+
 from optimus import redaction
 
 # ---------------------------------------------------------------------------
@@ -159,3 +161,186 @@ class TestRedactCallQueries:
 		# Must not crash on dict-as-calls (defensive).
 		redaction.redact_call_queries({"not": "a list"})
 		redaction.redact_call_queries(None)
+
+
+# ---------------------------------------------------------------------------
+# scrub_secrets (PR-0a): API keys in log text
+# ---------------------------------------------------------------------------
+
+_TOK = "sk-live-0123456789abcdefXYZ"
+
+
+class TestScrubSecrets:
+	def test_masks_the_three_leak_shapes_seen_in_real_rows(self):
+		cases = [
+			# headers dict from _call_openai_chat / _http_post frames
+			f"headers = {{'content-type': 'application/json', 'authorization': 'Bearer {_TOK}'}}",
+			# provider dict (api_key is not the exact name Frappe's printer redacts)
+			f"provider = {{'name': 'OpenAI', 'api_key': '{_TOK}', 'model': 'm'}}",
+			# anthropic header
+			f"headers = {{'x-api-key': '{_TOK}', 'anthropic-version': '2023-06-01'}}",
+			# JSON-style double quotes
+			f'{{"Authorization": "Bearer {_TOK}"}}',
+			# bare Bearer in an exception message
+			f"401 for Bearer {_TOK} at /v1/chat/completions",
+			f"'authorization': 'Basic {_TOK}'",
+		]
+		for text in cases:
+			out = redaction.scrub_secrets(text)
+			assert _TOK not in out, text
+			assert "********" in out
+
+	def test_keeps_surrounding_structure(self):
+		out = redaction.scrub_secrets(f"provider = {{'api_key': '{_TOK}', 'model': 'm'}}")
+		assert out == "provider = {'api_key': '********', 'model': 'm'}"
+
+	def test_leaves_empty_key_fields_and_plain_text_alone(self):
+		for text in ("provider = {'api_key': ''}", "no secrets here", "Bearer short"):
+			assert redaction.scrub_secrets(text) == text
+
+	def test_literal_replacement(self):
+		assert redaction.scrub_secrets(f"echoed {_TOK} back", literals=(_TOK,)) == "echoed ******** back"
+
+	def test_short_or_empty_literals_are_ignored(self):
+		# A test/misconfigured key like "k" must not shred ordinary words.
+		assert redaction.scrub_secrets("keep kittens", literals=("k", "", None)) == "keep kittens"
+
+	def test_a_literal_of_exactly_the_minimum_length_is_masked(self):
+		# The boundary: an 8-character literal is replaced, a 7-character one is not.
+		assert redaction.scrub_secrets("key=abcdefgh end", literals=("abcdefgh",)) == "key=******** end"
+		assert redaction.scrub_secrets("key=abcdefg end", literals=("abcdefg",)) == "key=abcdefg end"
+
+	@pytest.mark.parametrize("order", ["shorter_first", "longer_first"])
+	@pytest.mark.parametrize("where", ["prefix", "inside"])
+	def test_overlapping_literals_are_masked_longest_first(self, order, where):
+		# The stored key and the key a request was sent with can overlap
+		# (one inside the other). Masking the shorter one first would leave
+		# the rest of the longer one in the text.
+		longer = "sk-proj-abcdefgh12345678XYZ98765tail"
+		shorter = longer[:16] if where == "prefix" else longer[8:24]
+		literals = (shorter, longer) if order == "shorter_first" else (longer, shorter)
+		out = redaction.scrub_secrets(f"echo {longer} and {shorter} end", literals=literals)
+		assert out == "echo ******** and ******** end"
+
+	def test_sorting_the_literals_keeps_them_in_redacted_names(self):
+		# The sort key sees every literal: its frame must hold one only as
+		# ``api_key`` (checked as each redaction frame returns).
+		import sys
+
+		literals = ("sk-proj-abcdefgh12345678", "sk-proj-abcdefgh12345678XYZ98765tail")
+		offenders = set()
+
+		def _profile(frame, event, arg):
+			if event != "return" or frame.f_code.co_filename != redaction.__file__:
+				return
+			for name, value in frame.f_locals.items():
+				held = [value] if isinstance(value, str) else list(value) if isinstance(value, (tuple, list)) else []
+				if name not in ("api_key", "secret") and any(v in literals for v in held if isinstance(v, str)):
+					offenders.add(f"{frame.f_code.co_name}.{name}")
+		sys.setprofile(_profile)
+		try:
+			out = redaction.scrub_secrets(f"echo {literals[1]}", literals=literals)
+		finally:
+			sys.setprofile(None)
+		assert out == "echo ********"
+		assert offenders == set()
+
+	def test_while_the_literals_are_sorted_scrub_secrets_holds_them_only_as_secret(self, monkeypatch):
+		# The sort calls its key back in Python, where an interrupt can land
+		# and leave with this frame: by then ``literals`` must be gone.
+		import sys
+
+		literals = ("sk-proj-abcdefgh12345678", "sk-proj-abcdefgh12345678XYZ98765tail")
+		real_length = redaction._literal_length
+		seen, offenders = [], set()
+
+		def _spy(api_key):
+			frame = sys._getframe(1)
+			seen.append(frame.f_code.co_name)
+			for name, value in frame.f_locals.items():
+				held = [value] if isinstance(value, str) else list(value) if isinstance(value, (tuple, list)) else []
+				if name not in ("api_key", "secret") and any(v in literals for v in held if isinstance(v, str)):
+					offenders.add(name)
+			return real_length(api_key)
+
+		monkeypatch.setattr(redaction, "_literal_length", _spy)
+		out = redaction.scrub_secrets(f"echo {literals[1]}", literals=literals)
+		assert out == "echo ********"
+		assert seen == ["scrub_secrets", "scrub_secrets"]
+		assert offenders == set()
+
+	def test_an_x_goog_api_key_entry_is_masked(self):
+		text = "headers = {'content-type': 'application/json', 'x-goog-api-key': 'AIzaSyD-0123456789abcdef'}"
+		assert redaction.scrub_secrets(text) == (
+			"headers = {'content-type': 'application/json', 'x-goog-api-key': '********'}"
+		)
+
+	def test_idempotent(self):
+		text = (
+			f"headers = {{'authorization': 'Bearer {_TOK}'}}\n"
+			f"provider = {{'api_key': '{_TOK}'}}\nBearer {_TOK}"
+		)
+		once = redaction.scrub_secrets(text, literals=(_TOK,))
+		assert redaction.scrub_secrets(once, literals=(_TOK,)) == once
+
+	def test_non_string_passthrough(self):
+		assert redaction.scrub_secrets(None) is None
+		assert redaction.scrub_secrets("") == ""
+
+	def test_a_smart_quote_in_or_before_the_key_is_masked_whole(self):
+		# Frame-local lines Frappe prints for the requests / http.client frames
+		# when a pasted smart quote made the header unencodable (observed).
+		mid = "sk-live-0123\u2019456789abcdef"
+		lead = "\u2019sk-proj-0123456789abcdef\u2019"
+		for text in (f"      value = 'Bearer {mid}'", f"      one_value = 'Bearer {lead}'"):
+			out = redaction.scrub_secrets(text)
+			assert out.endswith("= 'Bearer ********'"), out
+			assert "456789abcdef" not in out
+
+	def test_url_userinfo_is_masked(self):
+		text = "POST http://user:s3cret-pass@10.0.0.5:11434/v1/chat/completions failed"
+		out = redaction.scrub_secrets(text)
+		assert out == "POST http://********@10.0.0.5:11434/v1/chat/completions failed"
+		assert redaction.scrub_secrets(out) == out
+		# a raw "@" in the password: masked up to the last "@" before the path
+		raw_at = redaction.scrub_secrets("http://user:p@ss@w0rd@10.0.0.5/v1")
+		assert raw_at == "http://********@10.0.0.5/v1"
+		assert redaction.scrub_secrets(raw_at) == raw_at
+		for plain in (
+			"https://api.openai.com/v1", "https://github.com/frappe@v16", "mailto:a@b.example",
+			'{"url":"http://x","owner":"a@b.example"}', "url = 'http://host',owner@example.com",
+		):
+			assert redaction.scrub_secrets(plain) == plain
+
+	def test_json_escaped_text_stays_valid_json(self):
+		# Deleted Document data is JSON: the smart quote is escaped as \u2019
+		# and a JSON-style header dump escapes its double quotes.
+		import json
+
+		doc = {
+			"error": "      value = 'Bearer sk-live-0123\u2019456789abcdef'\n next line",
+			"method": 'dump {"Authorization": "Bearer sk-live-0123456789abcdefXYZ"} end',
+		}
+		out = redaction.scrub_secrets(json.dumps(doc))
+		assert json.loads(out) == {
+			"error": "      value = 'Bearer ********'\n next line",
+			"method": 'dump {"Authorization": "Bearer ********"} end',
+		}
+
+	def test_the_key_sits_only_in_locals_the_log_formatters_redact(self, monkeypatch):
+		# Frappe's traceback sanitizer redacts local names containing "secret"
+		# or "key"; Sentry's denylist has "secret" and "api_key". If a pattern
+		# ever raised, the with-context traceback of this frame must not print
+		# the key under any other name (``literals`` is deleted first).
+		class _Boom:
+			def sub(self, *a, **k):
+				raise RuntimeError("boom")
+
+		monkeypatch.setattr(redaction, "_SECRET_PATTERNS", (_Boom(),))
+		with pytest.raises(RuntimeError) as ei:
+			redaction.scrub_secrets("text without it", literals=(_TOK,))
+		tb = ei.value.__traceback__
+		while tb.tb_frame.f_code.co_name != "scrub_secrets":
+			tb = tb.tb_next
+		holders = {name for name, value in tb.tb_frame.f_locals.items() if _TOK in repr(value)}
+		assert holders == {"secret", "api_key"}
