@@ -504,6 +504,51 @@ def test_markup_notes_and_fallback_neutralises_them():
 	assert out.count("> **Profiler note:**") == 3
 
 
+def test_the_link_pattern_has_only_bounded_repeats():
+	# The reply is capped only by the max_tokens a provider honours: a server that
+	# ignores it can return any size. An unbounded repeat in the link pattern made
+	# unclosed "[...](" text rescan the rest of the reply from every "[" (60,000
+	# characters took about 35 s). Every repeat must have an upper bound.
+	import re._parser as parser
+
+	def unbounded(items):
+		for op, arg in items:
+			if op in (parser.MAX_REPEAT, parser.MIN_REPEAT, parser.POSSESSIVE_REPEAT):
+				if arg[1] == parser.MAXREPEAT:
+					return True
+				if unbounded(arg[2]):
+					return True
+			elif op == parser.SUBPATTERN and unbounded(arg[3]):
+				return True
+			elif op == parser.BRANCH and any(unbounded(branch) for branch in arg[1]):
+				return True
+		return False
+
+	assert not unbounded(parser.parse(G._MD_LINK.pattern))
+
+
+def test_a_reply_of_unclosed_links_is_checked_quickly():
+	import time
+
+	for hostile in (
+		"[" * 10_000 + "](" * 10_000,  # link texts that never close
+		("[x](" + "a" * 96) * 2_000,  # destinations that never close
+	):
+		start = time.perf_counter()
+		G.check_markup(hostile)
+		G.apply_fallback(hostile, [G.Violation("markdown-image")])
+		assert time.perf_counter() - start < 10
+
+
+def test_a_long_link_and_a_long_image_are_still_noted():
+	url = "https://evil.example/" + "a" * 1900
+	vs = G.check_markup(f"see [{'t' * 900}]({url}) and ![{'a' * 900}]({url}.png)")
+	assert {v.code for v in vs} == {"external-link", "markdown-image"}
+	# whitespace, a line break included, around the destination and a title still match
+	vs = G.check_markup('see [x](\n  https://evil.example/p "t"\n) and ![i]( https://evil.example/i.png )')
+	assert {v.code for v in vs} == {"external-link", "markdown-image"}
+
+
 def test_entity_encoded_allowed_link_is_not_flagged():
 	# The renderer decodes entities before PR-0c's matcher sees the href; so does the note.
 	assert "external-link" not in codes(H.format("See [docs](https://docs.frappe.io&#47;framework)."))

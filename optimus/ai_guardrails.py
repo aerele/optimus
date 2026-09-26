@@ -645,7 +645,13 @@ def check_prose_ddl(text: str, blocks: list[Block]) -> list[Violation]:
 
 
 # --------------------------------------------------------------- links, images, echoed tags
-_MD_LINK = re.compile(r"(!?)\[([^\]\n]*)\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"\n]*\")?\s*\)")
+# Every repeat is bounded: the reply is capped only by the max_tokens a provider honours,
+# and unbounded runs made unclosed "[...](" text rescan the rest of the reply from every
+# "[" (quadratic). A link text, URL or title past these bounds is not a real Markdown link;
+# the renderer's sanitizer still drops any image and any off-allowlist href.
+_MD_LINK = re.compile(
+	r"(!?)\[([^\]\n]{0,1000})\]\(\s{0,64}<?([^)\s>]{1,2048})>?(?:\s{1,64}\"[^\"\n]{0,1000}\")?\s{0,64}\)"
+)
 _AUTOLINK = re.compile(r"<(https?://[^>\s]+)>")
 _DATA_TAG = re.compile(r"</?data-[0-9a-f]{6}\b[^>]*>", re.I)
 
