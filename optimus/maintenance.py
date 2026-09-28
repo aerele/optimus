@@ -165,8 +165,10 @@ _ESCAPED_VALUE_LINE = re.compile(
 # So an identifier, a file name or prose that merely starts with such a
 # prefix (sk-learn-..., my_sk-..., gsk_config_...) is not flagged. It never
 # drives the masking, so a row it still flags after the scrub holds a shape
-# the masking misses. Other providers' key shapes are covered only by the
-# stored-key literal and by the owner's count of the rotated keys.
+# the masking misses. It only adds to the known literals, which come first
+# (_has_residual_secret): other providers' keys (Mistral, Cohere, ...) are
+# covered only by the stored-key literal and by the owner's count of the
+# rotated keys.
 _KEY_SHAPE = re.compile(
 	r"(?<![A-Za-z0-9_-])(?:"
 	r"sk-(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{32,}"
@@ -261,10 +263,19 @@ def _mask(text: str, api_key: str) -> str:
 	return _ESCAPED_VALUE_LINE.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER, out)
 
 
-def _has_residual_secret(text: str, api_key: str) -> bool:
-	if _KEY_SHAPE.search(text):
-		return True
-	return len(api_key) >= _MIN_KEY_LEN and _holds_key({"error": text}, ("error",), api_key)
+def _has_residual_secret(text: str, api_key: str, *, literals: tuple[str, ...] = ()) -> bool:
+	"""True when ``text`` still holds a key after masking. The known literals
+	drive it: the stored key (``api_key``) and any key literal passed in
+	(``literals``), each of at least ``_MIN_KEY_LEN`` characters, raw,
+	JSON-escaped or repr-escaped (``_holds_key``); then the provider shapes
+	(``_KEY_SHAPE``) add the keys no literal names. So a residual of 0 means
+	no current key and no known provider-shaped key is left, not that no key
+	of any provider is. Each key is held as ``secret``, a name the
+	sanitizers redact."""
+	for secret in (api_key, *literals):
+		if isinstance(secret, str) and len(secret) >= _MIN_KEY_LEN and _holds_key({"error": text}, ("error",), secret):
+			return True
+	return bool(_KEY_SHAPE.search(text))
 
 
 def _masked_record(record, api_key: str, *, failures: list[str] | None = None) -> dict | None:
@@ -758,9 +769,11 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	- ``candidates``: Error Log rows read;
 	- ``changed`` / ``deleted_docs_changed``: Error Log rows and Deleted
 	  Document rows masked;
-	- ``residual``: rows that still hold a key-shaped value after masking
-	  (checked with a detector independent of the masking, only in the rows
-	  read);
+	- ``residual``: rows that still hold the stored key (raw, JSON-escaped or
+	  repr-escaped) or a known provider key shape after masking
+	  (``_has_residual_secret``, independent of the masking, only in the rows
+	  read). 0 means no current key and no known provider-shaped key is left
+	  in them, not that no key of any provider is;
 	- ``failed``: rows that could not be processed, plus one when the check
 	  for an unreadable key could not read Optimus Settings;
 	- ``key_unreadable``: True when a key is stored but cannot be read

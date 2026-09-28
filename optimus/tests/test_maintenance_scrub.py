@@ -1061,6 +1061,47 @@ class TestResidualKeyShapes:
 		assert not maintenance._has_residual_secret(masked, "")
 
 
+# Fake keys of providers whose shape _KEY_SHAPE does not know (32 and 40
+# letters and digits): only the known literal can find them.
+_UNSHAPED_KEYS = {
+	"mistral": "Mq7Rt2Vx" * 4,
+	"cohere": "Co9hEr3eKy" * 4,
+}
+
+
+class TestResidualIsDrivenByTheKnownLiteral:
+	"""The residual check counts a row holding the stored key (raw,
+	JSON-escaped or repr-escaped) or any key literal passed in, first; the
+	provider shapes (``_KEY_SHAPE``) only add to it. So a key of a provider
+	whose shape it does not know is still counted when it is the known one."""
+
+	@pytest.mark.parametrize("name", sorted(_UNSHAPED_KEYS))
+	def test_a_stored_key_of_an_unknown_shape_left_in_a_row_is_counted(self, name):
+		key = _UNSHAPED_KEYS[name]
+		assert not maintenance._KEY_SHAPE.search(key)
+		for text in (f"echo {key}", json.dumps({"k": f"{key}\u2019"}), repr({"k": key})):
+			assert maintenance._has_residual_secret(text, key), text
+		assert not maintenance._has_residual_secret("echo ********", key)
+
+	@pytest.mark.parametrize("name", sorted(_UNSHAPED_KEYS))
+	def test_a_key_literal_passed_in_is_counted(self, name):
+		key = _UNSHAPED_KEYS[name]
+		assert maintenance._has_residual_secret(f"old key {key} here", "", literals=(key,))
+		assert maintenance._has_residual_secret(
+			f"old key {key} here", "sk-a-different-stored-key-0123456789", literals=("", key)
+		)
+		assert not maintenance._has_residual_secret("old key ******** here", "", literals=(key,))
+		assert not maintenance._has_residual_secret("keep kittens", "", literals=("k",))
+
+	@pytest.mark.parametrize("name", sorted(_UNSHAPED_KEYS))
+	def test_the_scrub_counts_a_stored_key_its_masking_left(self, fake, monkeypatch, name):
+		key = _UNSHAPED_KEYS[name]
+		fake([("a", LEAKY.replace(KEY, key))], current_key=key)
+		monkeypatch.setattr(maintenance, "_mask", lambda text, api_key: text)
+		out = maintenance.scrub_error_log_secrets(dry_run=True)
+		assert out["residual"] > 0
+
+
 class TestMaskedRecord:
 	"""``_masked_record``: an Error Log record as the Error Log hook
 	(``optimus.error_log_mask``) stores it, before Frappe's ``validate``,
