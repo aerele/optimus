@@ -18,6 +18,7 @@ from collections import Counter, defaultdict
 
 from optimus.analyzers.base import (
 	AnalyzerResult,
+	is_error_log_hook_query,
 	is_frappe_meta_table,
 	is_frappe_metadata_column,
 	is_write_hot_table,
@@ -71,6 +72,8 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 	for recording in recordings:
 		for call in recording.get("calls") or []:
+			if is_error_log_hook_query(call.get("stack")):
+				continue
 			query = call.get("normalized_query") or call.get("query") or ""
 			if not query:
 				continue

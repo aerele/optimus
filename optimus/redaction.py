@@ -180,16 +180,18 @@ SECRET_PLACEHOLDER = "********"
 
 _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
 	# 'authorization': 'Bearer <tok>' (either quote style; also Basic, Token,
-	# Key, ApiKey; the value may be bytes: b'Bearer <tok>')
+	# Key, ApiKey; the value may be bytes: b'Bearer <tok>'). A frame-local
+	# cut may remove the closing quote; stop at that line's end. A cut
+	# through an existing placeholder must not expand it again.
 	re.compile(
-		r"""((['"])(?:proxy-)?authorization\2\s*:\s*b?(['"])(?:bearer|basic|token|key|apikey)\s+)(?!\*{8}\3)[^'"\s]+(\3)""",
-		re.IGNORECASE,
+		r"""((['"])(?:proxy-)?authorization\2\s*:\s*b?(['"])(?:bearer|basic|token|key|apikey)\s+)(?!\*{8}\3|\*{1,8}\r?$)[^'"\s]+(\3|(?=\r?$))""",
+		re.IGNORECASE | re.MULTILINE,
 	),
 	# 'x-api-key' / 'x-goog-api-key' / 'api_key' / 'api-key' / 'apikey' : '<tok>'
 	# (the value may be bytes: b'<tok>')
 	re.compile(
-		r"""((['"])(?:x-api-key|x-goog-api-key|api[_-]?key|apikey)\2\s*:\s*b?(['"]))(?!\*{8}\3)[^'"]+(\3)""",
-		re.IGNORECASE,
+		r"""((['"])(?:x-api-key|x-goog-api-key|api[_-]?key|apikey)\2\s*:\s*b?(['"]))(?!\*{8}\3|\*{1,8}\r?$)[^'"\r\n]+(\3|(?=\r?$))""",
+		re.IGNORECASE | re.MULTILINE,
 	),
 	# bare "Bearer <tok>" anywhere else. The token is any run of non-quote,
 	# non-space characters, so a pasted smart quote inside or in front of the
@@ -221,7 +223,7 @@ _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
 	# http.client's "Invalid header value b'<value>'" and requests' "... in
 	# header value: '<value>'"; the quoted repr is masked whole, its escape
 	# pairs consumed together (bounded, so a planted huge value stays cheap)
-	re.compile(r"""(\b(?:Invalid header value|in header value:) b?(['"]))(?!\*{8}\2)(?:\\.|(?!\2)[^\\\n]){1,2048}()(\2)"""),
+	re.compile(r"""(\b(?:Invalid header value|in header value:) b?(['"]))(?!\*{8}\2|\*{1,8}\r?$)(?:\\[^\r\n]|(?!\2)[^\\\r\n]){1,2048}()(\2|(?=\r?$))""", re.MULTILINE),
 	# credentials in a URL's authority: scheme://user:password@host, up to the
 	# LAST "@" before the path, query or fragment (a password may hold a raw
 	# "@"); the userinfo holds no "/", "?" or "#", so an address in a query

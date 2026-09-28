@@ -287,6 +287,10 @@ class _FakeDB:
 	table is transactional (Postgres): a ROLLBACK removes the rows inserted
 	since the last commit."""
 
+	def get_single_value(self, doctype, fieldname):
+		assert (doctype, fieldname) == ("Optimus Settings", "ai_api_key")
+		return "********"
+
 	def __init__(self, sinks):
 		self.sinks = sinks
 		self.after_rollback = _Callbacks(sinks)

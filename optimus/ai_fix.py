@@ -947,7 +947,7 @@ def _scrub_literals_for(auth) -> tuple[str, ...]:
 
 def _resolve_provider() -> dict:
 	"""``_provider_config()`` plus ``has_key``: whether a key is stored (one
-	read of it, a SELECT on ``__Auth``). For ``is_available``; a call that
+	read of its cached, non-decrypting Singles value). For ``is_available``; a call that
 	sends a request uses ``_provider_config()`` and reads the key once
 	itself (``_get_api_key``).
 
@@ -958,7 +958,18 @@ def _resolve_provider() -> dict:
 	``pwd``; ``api_key`` is not one of them.
 	"""
 	provider = _provider_config()
-	provider["has_key"] = bool(_current_key_or_empty())
+	provider["has_key"] = False
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			import frappe
+
+			secret = frappe.db.get_single_value("Optimus Settings", "ai_api_key")
+			provider["has_key"] = isinstance(secret, str) and bool(secret.strip())
+	except Exception:
+		pass
+	if guard.pending():
+		raise guard.interrupt()
 	return provider
 
 
@@ -2332,7 +2343,7 @@ def _usage_from_openai(data: dict | None) -> dict:
 	u = _usage_block(data)
 	prompt = _token_count(u.get("prompt_tokens"))
 	completion = _token_count(u.get("completion_tokens"))
-	total = _token_count(u.get("total_tokens")) or _token_count(prompt + completion)
+	total = _token_count(u.get("total_tokens")) or (prompt + completion)
 	return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
 
 
@@ -2344,7 +2355,7 @@ def _usage_from_anthropic(data: dict | None) -> dict:
 	u = _usage_block(data)
 	prompt = _token_count(u.get("input_tokens"))
 	completion = _token_count(u.get("output_tokens"))
-	return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": _token_count(prompt + completion)}
+	return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
 
 
 def _record_session_spend(total_tokens) -> None:

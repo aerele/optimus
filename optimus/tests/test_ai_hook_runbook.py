@@ -61,8 +61,8 @@ def _flat(document: str) -> str:
 		"the key the request was sent with (the only key the provider received",
 		"or of the key stored in Optimus Settings when the request carried none",
 		"neither sent nor refused",  # a keyless provider and an unsendable key
-		"the session's query count and query time leave it out",
-		"the per-action breakdown, the N+1 and slowest-query findings",
+		"the per-table and per-action breakdowns, index suggestions",
+		"the session's query count and query time leave these reads out",
 		"must be set to the final URL it redirects to",
 		"no current key and no known provider-shaped key",
 		"refused when Optimus Settings is saved",

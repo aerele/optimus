@@ -295,34 +295,15 @@ def _run_ai_step_errors(fn: ast.AST) -> list[tuple[ast.stmt, list[ast.stmt], int
 	return out
 
 
-def _unbinds(stmt: ast.stmt | None, name: str) -> bool:
-	return (
-		isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
-		and isinstance(stmt.targets[0], ast.Name) and stmt.targets[0].id == name
-		and isinstance(stmt.value, ast.Constant) and stmt.value.value is None
-	)
-
-
-def test_run_unbinds_each_ai_error_once_logged():
-	# analyze.run's outer handler logs a later non-AI failure with Frappe's
-	# with-context traceback, which prints run's locals. An AI step's error,
-	# once _run_ai_step has logged it, must not stay bound there: a prompt
-	# builder's exception can carry prompt text in its args. The error is
-	# unbound first thing in the ``if <error> is not None:`` after the call.
-	run = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "run")
-	steps = _run_ai_step_errors(run)
-	offenders = []
-	for stmt, block, i, error in steps:
-		nxt = block[i + 1] if i + 1 < len(block) else None
-		guarded = (
-			error is not None and isinstance(nxt, ast.If) and isinstance(nxt.test, ast.Compare)
-			and isinstance(nxt.test.left, ast.Name) and nxt.test.left.id == error
-			and isinstance(nxt.test.ops[0], ast.IsNot) and _unbinds(nxt.body[0], error)
-		)
-		if not guarded:
-			offenders.append(stmt.lineno)
-	assert len(steps) >= 2, "analyze.run no longer runs its AI steps through _run_ai_step"
-	assert offenders == [], f"unbind the error first thing after _run_ai_step: analyze.py:{offenders}"
+def test_ai_step_returns_only_a_boolean_failure_flag():
+	# Callers can safely retain the flag when a later non-AI error logs locals.
+	helper = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "_run_ai_step")
+	returns = [n for n in ast.walk(helper) if isinstance(n, ast.Return)]
+	assert len(returns) == 2
+	for node in returns:
+		assert isinstance(node.value, ast.Tuple) and len(node.value.elts) == 2
+		flag = node.value.elts[1]
+		assert isinstance(flag, ast.Constant) and type(flag.value) is bool
 
 
 def test_the_ai_steps_log_through_the_one_helper():
@@ -341,7 +322,7 @@ def test_the_ai_steps_log_through_the_one_helper():
 		"_log_ai_step_failure": {"analyze.py:_run_ai_step"},
 	}
 	helper = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "_run_ai_step")
-	tries = [n for n in _own_nodes(helper) if isinstance(n, _TRIES)]
+	tries = [n for n in _own_nodes(helper) if isinstance(n, _TRIES) and n.handlers]
 	assert len(tries) == 1
 	handler_calls = [n for h in tries[0].handlers for n in _own_nodes(h) if isinstance(n, ast.Call)]
 	assert handler_calls == [], "_run_ai_step's handler must only record the error"

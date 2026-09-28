@@ -9,6 +9,8 @@ or moving the module cannot silently stop the match."""
 
 from pathlib import Path
 
+import pytest
+
 from optimus import error_log_mask
 from optimus.analyzers import base
 
@@ -119,3 +121,45 @@ class TestPerActionReconcilesWithTheTotals:
 		by_uuid = {a["recording_uuid"]: a for a in actions}
 		assert by_uuid["r2"]["queries_count"] == 0 and by_uuid["r2"]["slowest_query_ms"] == 0
 		assert by_uuid["r1"]["slowest_query_ms"] == 10.0
+
+
+@pytest.mark.parametrize("query", [
+	"SELECT password FROM __Auth WHERE doctype = 'Optimus Settings'",
+	"SELECT value FROM tabSingles WHERE field = 'ai_api_key'",
+])
+@pytest.mark.parametrize("stack", [[_USER, *_LOG_ERROR, _HOOK, *_KEY_READ], [_USER, _HOOK, _AI_FIX, *_KEY_READ]])
+def test_table_consumers_exclude_only_hook_reads(monkeypatch, query, stack):
+	from optimus import analyze
+	from optimus.analyzers import index_suggestions, table_breakdown
+	from optimus.tests.test_index_suggestions import _install_fake_recorder_module
+
+	user_query = "SELECT item_code FROM tabItem WHERE item_group = 'Products'"
+	user_calls = [
+		{"query": user_query, "duration": 10.0, "stack": [_USER, _DB]},
+		# Same SQL used outside the hook remains visible, even when the hook
+		# called the user's code. Missing stacks also remain visible.
+		{"query": query, "duration": 5.0, "stack": [_HOOK, _USER, _DB]},
+		{"query": query, "duration": 2.0},
+	]
+	recordings = [{"calls": [{"query": query, "duration": 100.0, "stack": stack}, *user_calls]}]
+	for call in recordings[0]["calls"]:
+		call["normalized_query"] = call["query"]
+	baseline = [{"calls": user_calls}]
+	rows = table_breakdown.analyze(recordings, None).aggregate["table_breakdown"]
+	assert rows == table_breakdown.analyze(baseline, None).aggregate["table_breakdown"]
+	assert (sum(row["queries"] for row in rows), sum(row["consolidated_time_ms"] for row in rows)) == analyze._session_query_totals(recordings)
+
+	optimized = []
+	_install_fake_recorder_module(monkeypatch, lambda sql: optimized.append(sql))
+	index_suggestions.analyze(recordings, None)
+	assert optimized == [user_query, query]
+
+
+def test_hook_only_queries_never_reach_index_optimizer(monkeypatch):
+	from optimus.analyzers import index_suggestions
+	from optimus.tests.test_index_suggestions import _install_fake_recorder_module
+
+	optimized = []
+	_install_fake_recorder_module(monkeypatch, lambda sql: optimized.append(sql))
+	result = index_suggestions.analyze([{"calls": [dict(c, normalized_query=c["query"]) for c in _calls()[1:3]]}], None)
+	assert optimized == [] and result.findings == []

@@ -155,12 +155,12 @@ key shapes `scrub_secrets` knows and the bare header value lines of the HTTP lib
 frames in `error`, `method` (the title) and `metadata`, and moves a title
 longer than its 140-character column in front of the error, as Frappe v16
 does. Every other row, another app's included, is stored exactly as it was.
-It reads the stored key once per Error Log insert (one SELECT on `__Auth`,
+It normally reads the stored key once per Error Log insert (one SELECT on `__Auth`,
 and a decrypt when a key is stored) with Frappe's messages muted, never
 caches it, and never raises, except an RQ job timeout, which leaves as a
-fresh exception so the job still stops. It fails open: when it cannot read
-the key, the row is stored as it was. The one exception is a row it would
-mask whose masking fails: its error text is replaced by "Optimus withheld
+fresh exception so the job still stops. When the key cannot be read, only the AI
+frame check identifies a row to mask. A row it would mask whose masking
+fails is withheld: its error text is replaced by "Optimus withheld
 this error text: it could not be masked. See logs/optimus.log for the
 reason.", its title and metadata too when they hold an `ai_fix.py` frame or
 the key (a title holding neither is kept, cut to 140 characters). A row
@@ -187,6 +187,12 @@ in the Error Log after a failed AI call. See the API key advisory in
 `CHANGELOG.md` for the required key rotation and cleanup
 (`optimus.maintenance`), and the next section for checking a site at any
 time.
+
+An unexpected hook failure triggers one independent stored-key read with
+Frappe alone. A row holding that key, including its JSON-escaped or repr-escaped form, is withheld even without an AI frame. A row from the AI code is
+withheld whenever it cannot be masked; unrelated rows remain unchanged. Quoted
+header values cut off before their closing quote are masked through the end of
+that line, including keys that have since been rotated.
 
 ## Detecting and cleaning a key leak
 
@@ -394,15 +400,14 @@ installed on the site.
   15 minutes, or the next `bench migrate` when the scheduler is off) they
   sit unmasked in Redis. Bench's default cache Redis (`redis_cache`) saves
   nothing to disk.
-- Every Error Log insert on the site reads the stored AI key once (a SELECT
-  on `__Auth`, and a decrypt), whichever app writes the row, when a key is
-  stored: the hook needs the key to tell a row holding it; no key is read
-  on a site where none is stored (it checks the Password field's plain
-  value, asterisks, first). While Optimus profiles a flow, that read appears in the
-  report's per-table query breakdown, one `__Auth` query per Error Log
-  insert; the per-action breakdown, the N+1 and slowest-query findings and
-  the session's query count and query time leave it out, as Optimus's own
-  query.
+- Every Error Log insert on the site normally reads the stored AI key once (a
+  SELECT on `__Auth`, and a decrypt), whichever app writes the row, when a key
+  is stored: the hook needs the key to tell a row holding it; no key is read
+  on a site where none is stored (it checks the Password field's plain value,
+  asterisks, first). While Optimus profiles a flow, the per-table and
+  per-action breakdowns, index suggestions, the N+1 and slowest-query findings
+  and the session's query count and query time leave these reads out, as
+  Optimus's own queries.
 - The Error Log hook is fail-closed for Optimus's own rows: a row from
   Optimus's AI code is withheld whenever it cannot be masked (its masking
   failed, the hook failed unexpectedly, or the process still runs the

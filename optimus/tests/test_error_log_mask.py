@@ -295,6 +295,7 @@ class TestMasking:
 
 class TestFailOpen:
 	def test_a_key_read_that_raises_leaves_a_record_without_an_ai_frame_as_it_was(self, env, monkeypatch):
+		env.key = ""  # The independent fallback read cannot recover the key either.
 		def _read():
 			raise RuntimeError(f"cannot read {KEY}")
 		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", _read)
@@ -452,7 +453,7 @@ class TestBreadcrumbStorm:
 			raise RuntimeError(f"cannot read {KEY}")
 		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", _read)
 		for _ in range(10_000):
-			_run(_Doc(error=NOFRAME))
+			_run(_Doc(error=OTHER_TB))
 		lines = [line for _, _, line in env.lines]
 		first = "optimus error_log_mask: an Error Log row was stored as it was: RuntimeError"
 		assert lines == [first] + [f"{first} ({n} times so far in this process)" for n in range(1000, 10_001, 1000)]
@@ -467,7 +468,7 @@ class TestBreadcrumbStorm:
 			raise RuntimeError("boom")
 		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", _read)
 		for _ in range(3):
-			_run(_Doc(error=NOFRAME))
+			_run(_Doc(error=OTHER_TB))
 		assert [line.rsplit(" was ", 1)[1] for _, _, line in env.lines] == [
 			"withheld: its masking failed (ValueError)", "stored as it was: RuntimeError",
 		]
@@ -1133,6 +1134,28 @@ class TestTheOuterFailurePathFailsClosedForAnAiRecord:
 		assert KEY not in json.dumps(doc.fields())
 		assert _one_line(env).endswith("withheld: its masking failed unexpectedly (RuntimeError)")
 
+	def test_a_fallback_read_failure_still_withholds_an_ai_frame(self, env, monkeypatch):
+		monkeypatch.setattr(error_log_mask, "_read_key", lambda *a: _boom())
+		doc = _run(_Doc(error=LEAKY, method="AI error"))
+		assert doc.error == error_log_mask.WITHHELD
+
+	def test_an_unexpected_field_write_failure_withholds_a_key_only_record(self, env):
+		class _FailsOnce(_Doc):
+			failed = False
+
+			def set(self, field, value):
+				if not self.failed:
+					self.failed = True
+					raise TypeError("field write failed")
+				super().set(field, value)
+
+		doc = _run(_FailsOnce(error=NOFRAME, method="failure " + KEY, metadata=KEY))
+		assert doc.fields() == {
+			"error": error_log_mask.WITHHELD, "method": error_log_mask.WITHHELD_TITLE,
+			"metadata": error_log_mask.WITHHELD,
+		}
+		assert _one_line(env).endswith("withheld: its masking failed unexpectedly (TypeError)")
+
 	def test_a_title_with_a_frame_is_withheld_too(self, env, failing):
 		doc = _run(_Doc(error="Traceback ...", method=f"{FRAME}: failed"))
 		assert doc.error == error_log_mask.WITHHELD and doc.method == error_log_mask.WITHHELD_TITLE
@@ -1143,6 +1166,20 @@ class TestTheOuterFailurePathFailsClosedForAnAiRecord:
 		doc = _run(_Doc(**fields))
 		assert doc.sets == [] and doc.fields() == original
 		assert _one_line(env).endswith("stored as it was: RuntimeError")
+
+	@pytest.mark.parametrize("field", FIELDS)
+	@pytest.mark.parametrize("escaped", [False, True])
+	def test_a_key_by_value_without_an_ai_frame_is_withheld(self, env, failing, field, escaped):
+		env.key = "Mq7Rt2Vx" * 4 + "'\""
+		secret = repr(env.key)[1:-1] if escaped else env.key
+		doc = _run(_Doc(**{field: "failure " + secret}))
+		assert doc.error == error_log_mask.WITHHELD
+		assert secret not in json.dumps(doc.fields())
+		if field == "method":
+			assert doc.method == error_log_mask.WITHHELD_TITLE
+		if field == "metadata":
+			assert doc.metadata == error_log_mask.WITHHELD
+		assert _one_line(env).endswith("withheld: its masking failed unexpectedly (RuntimeError)")
 
 	def test_a_failure_while_withholding_never_raises(self, env, failing):
 		class _Unsettable(_Doc):

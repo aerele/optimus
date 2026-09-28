@@ -545,3 +545,27 @@ class TestSchemeAndHeaderShapes:
 	)
 	def test_ordinary_prose_is_left(self, plain):
 		assert redaction.scrub_secrets(plain) == plain
+@pytest.mark.parametrize("prefix", [
+	"{'x-api-key': '", '{"api-key": "', "{'api_key': b'",
+	"{'Authorization': 'Key ", '{"Proxy-Authorization": "ApiKey ',
+	"Invalid header value b'", 'in header value: "',
+])
+@pytest.mark.parametrize("ending", ["", "\nnext = 'ordinary value'", "\r\nnext = 'ordinary value'"])
+def test_truncated_quoted_headers_are_masked_without_the_rotated_key(prefix, ending):
+	from optimus.redaction import scrub_secrets
+
+	secret = "Mq7Rt2Vx" * 4
+	text = prefix + secret + "..." + ending
+	masked = scrub_secrets(text)
+	assert secret not in masked
+	assert masked == prefix + "********" + ending
+	assert scrub_secrets(masked) == masked
+
+
+@pytest.mark.parametrize("prefix", ["{'api_key': '", "{'Authorization': 'Key ", "Invalid header value b'"])
+@pytest.mark.parametrize("stars", range(1, 9))
+def test_truncating_a_masked_header_does_not_expand_its_placeholder(prefix, stars):
+	# A 140-character title can cut through the placeholder. Expanding it
+	# again would move that title into the error on every scrub pass.
+	text = prefix + "*" * stars
+	assert redaction.scrub_secrets(text) == text

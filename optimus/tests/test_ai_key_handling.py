@@ -243,6 +243,9 @@ class TestScrubLiteralsFor:
 
 class TestProviderDict:
 	def test_provider_dict_never_holds_the_key(self, monkeypatch):
+		import frappe
+
+		monkeypatch.setattr(frappe, "db", SimpleNamespace(get_single_value=lambda *a: "********"), raising=False)
 		_store_key(monkeypatch, KEY)
 		with patch("optimus.settings.get_config", return_value=_cfg()):
 			p = ai_fix._resolve_provider()
@@ -251,6 +254,9 @@ class TestProviderDict:
 		assert KEY not in repr(p)
 
 	def test_has_key_false_when_unset(self, monkeypatch):
+		import frappe
+
+		monkeypatch.setattr(frappe, "db", SimpleNamespace(get_single_value=lambda *a: ""), raising=False)
 		_store_key(monkeypatch, "")
 		with patch("optimus.settings.get_config", return_value=_cfg()):
 			assert ai_fix._resolve_provider()["has_key"] is False

@@ -52,6 +52,10 @@ class _FakeDB:
 	rows inserted since the last commit (Postgres), or leaves them (False:
 	MariaDB, where Error Log is a MyISAM table)."""
 
+	def get_single_value(self, doctype, fieldname):
+		assert (doctype, fieldname) == ("Optimus Settings", "ai_api_key")
+		return "********"
+
 	def __init__(self, docname="SESS-0001", raise_on_get=False, transactional=True, raise_on_exists=None):
 		self.docname = docname
 		self.raise_on_get = raise_on_get
@@ -1929,8 +1933,19 @@ class TestRunAiStep:
 	def test_a_step_that_succeeds_returns_its_result_and_logs_nothing(self, logs):
 		from optimus import analyze
 
-		assert analyze._run_ai_step(lambda: {"fix": "x"}, title="t", session_uuid="u") == ({"fix": "x"}, None)
+		result, failed = analyze._run_ai_step(lambda: {"fix": "x"}, title="t", session_uuid="u")
+		assert result == {"fix": "x"} and failed is False
 		assert logs == []
+
+	def test_key_presence_lookup_propagates_a_fresh_timeout(self, monkeypatch, job_timeout):
+		import frappe
+
+		monkeypatch.setattr(ai_fix, "_provider_config", lambda: {"needs_key": True})
+		reader = _raising(job_timeout)
+		monkeypatch.setattr(frappe, "db", SimpleNamespace(get_single_value=lambda *a: reader()), raising=False)
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix._resolve_provider()
+		_assert_fresh_and_clean(ei, job_timeout, reader)
 
 	def test_a_step_that_fails_is_logged_after_the_try_with_its_context(self, logs, monkeypatch):
 		import frappe
@@ -1946,7 +1961,7 @@ class TestRunAiStep:
 		monkeypatch.setattr(frappe, "log_error", _log, raising=False)
 		error = RuntimeError("step broke")
 		result, got = analyze._run_ai_step(_raising(error), title="optimus ai backfill", session_uuid="u-1", finding="F-1")
-		assert result is None and got is error
+		assert result is None and got is True
 		assert active == [None]  # no exception was being handled when it logged
 		assert len(logs) == 1 and logs[0]["title"] == "optimus ai backfill"
 		assert "finding=F-1" in logs[0]["message"] and "session_uuid=u-1" in logs[0]["message"]
@@ -1957,6 +1972,11 @@ class TestRunAiStep:
 		with pytest.raises(_JobTimeout) as ei:
 			analyze._run_ai_step(_raising(job_timeout), title="t", session_uuid="u")
 		assert ei.value is not job_timeout and ei.value.__context__ is None
+		tb = ei.value.__traceback__
+		while tb is not None:
+			if tb.tb_frame.f_code is analyze._run_ai_step.__code__:
+				assert tb.tb_frame.f_locals.get("error") is None
+			tb = tb.tb_next
 		assert len(logs) == 1
 
 	def test_a_non_exception_interrupt_goes_through(self, logs):
@@ -1971,7 +1991,7 @@ class TestRunAiStep:
 def run_env(monkeypatch):
 	"""The smallest set of fakes ``analyze.run`` needs for one pass over one
 	recording with no analyzers. Each stubbed step records ``run``'s
-	``ai_error`` local at the moment it is called, in ``trail`` next to the
+	``step_failed`` local at the moment it is called, in ``trail`` next to the
 	``log_ai_failure`` calls, so a test sees whether the logged error is
 	still bound afterwards. ``status`` holds the session status writes, a
 	rollback and any non-AI ``frappe.log_error``."""
@@ -1985,7 +2005,7 @@ def run_env(monkeypatch):
 		def _fn(*a, **k):
 			caller = sys._getframe(1)
 			if caller.f_code is analyze.run.__code__:
-				trail.append(("call", name, caller.f_locals.get("ai_error")))
+				trail.append(("call", name, caller.f_locals.get("step_failed")))
 		return _fn
 
 	class _DB:
@@ -2054,7 +2074,7 @@ class TestRunLogsAFailedAiStepAndCarriesOn:
 		assert logged == [("log", title, error, {"session_uuid": "uuid-run"})]
 		after = run_env.trail[run_env.trail.index(logged[0]) + 1:]
 		assert after, "run() called nothing after logging the step: the unbinding went unchecked"
-		assert all(entry[2] is None for entry in after), f"the logged AI error was still bound: {after[0]}"
+		assert all(type(entry[2]) is bool for entry in after), "a caller retained more than a boolean failure flag"
 
 
 # ---------------------------------------------------------------------------

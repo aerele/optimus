@@ -859,13 +859,11 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# fill the suggestions in afterward via the "Generate AI fixes"
 		# button on the form (api.backfill_ai_fixes).
 		_touch_singleflight(session_uuid)  # AI auto-suggest can run up to its own timeout (240s)
-		_, ai_error = _run_ai_step(
+		_, step_failed = _run_ai_step(
 			lambda: _enrich_findings_with_ai_suggestions(context, recordings=recordings),
 			title="optimus ai auto-suggest (outer)", session_uuid=session_uuid,
 		)
-		if ai_error is not None:
-			# A later non-AI failure is logged with frame locals: unbind it.
-			ai_error = None
+		if step_failed:
 			try:
 				context.warnings.append(
 					"AI auto-suggest was skipped after an unexpected error "
@@ -878,12 +876,10 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# v0.6.0: same toggle also bakes an LLM-vetted index recommendation
 		# onto the top few tables in the breakdown. Best-effort + double-wrapped.
 		_touch_singleflight(session_uuid)  # AI index-suggest can run up to 90s
-		_, ai_error = _run_ai_step(
+		_run_ai_step(
 			lambda: _enrich_table_breakdown_with_ai_suggestions(context, recordings),
 			title="optimus ai index-suggest (outer)", session_uuid=session_uuid,
 		)
-		if ai_error is not None:
-			ai_error = None
 
 		_publish_progress(80, "Writing session data", session_uuid)
 		_persist(docname, context, recordings, analyze_elapsed_ms)
@@ -970,23 +966,26 @@ def _mark_ai_spend_session(session_uuid) -> None:
 
 
 def _run_ai_step(fn, *, title: str, session_uuid: str | None = None, **context):
-	"""Run one AI step, ``fn()``, and return ``(result, None)``; when it raises
-	an ``Exception``, return ``(None, error)`` once the error is logged through
+	"""Run one AI step, ``fn()``, and return ``(result, failed)``; when it raises
+	an ``Exception``, return ``(None, True)`` once the error is logged through
 	``_log_ai_step_failure`` (``ai_fix.log_ai_failure``, with ``title``, the
 	session and ``context`` as ``k=v`` lines), AFTER the ``try``: never
 	inside the ``except`` block, where Sentry would ship the active
 	exception's frame locals. The one capture-then-log skeleton of the AI
-	steps of this module and ``optimus.api``. The caller unbinds the error it
-	gets back once it has used it (a later non-AI failure is logged with frame
-	locals). Never raises, except an RQ job timeout, which ``log_ai_failure``
+	steps of this module and ``optimus.api``. Callers receive only a boolean
+	failure flag, so a later non-AI failure cannot log the exception's frames
+	or text through their locals. Never raises, except an RQ job timeout, which ``log_ai_failure``
 	raises again as a fresh instance so the job still stops. It references
 	no ``ai_fix`` name itself, so ``run()`` can use it."""
 	try:
-		return fn(), None
+		return fn(), False
 	except Exception as e:
 		error = e
-	_log_ai_step_failure(title, error, session_uuid, **context)
-	return None, error
+	try:
+		_log_ai_step_failure(title, error, session_uuid, **context)
+	finally:
+		error = None
+	return None, True
 
 
 def _log_ai_step_failure(title: str, exc: BaseException, session_uuid: str | None, **context) -> None:
@@ -2091,13 +2090,12 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 			))
 			f["llm_fix_json"] = json.dumps(result, default=str)
 
-		_, error = _run_ai_step(
+		_, step_failed = _run_ai_step(
 			_suggest, title="optimus ai auto-suggest",
 			session_uuid=getattr(context, "session_uuid", None),
 			finding_type=f.get("finding_type") or "",
 		)
-		if error is not None:
-			error = None
+		if step_failed:
 			failures += 1
 
 	if failures:
@@ -2297,13 +2295,12 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 			r.llm_fix_json = blob
 			out["added"] += 1
 
-		_, error = _run_ai_step(
+		_, step_failed = _run_ai_step(
 			_suggest, title="optimus ai backfill",
 			session_uuid=getattr(doc, "session_uuid", None),
 			finding=getattr(r, "name", "") or "",
 		)
-		if error is not None:
-			error = None
+		if step_failed:
 			out["failed"] += 1
 	if out["added"]:
 		try:
@@ -2427,15 +2424,14 @@ def _enrich_table_breakdown_with_ai_suggestions(context, recordings: list[dict])
 			)
 		except Exception:
 			pass
-		index, error = _run_ai_step(
+		index, step_failed = _run_ai_step(
 			lambda t=t: ai_fix.suggest_index(_ai_payload_for_table(t, recordings)),
 			title="optimus ai index-suggest",
 			session_uuid=getattr(context, "session_uuid", None),
 			table=t.get("table") or "",
 		)
-		if error is None:
+		if not step_failed:
 			t["ai_index"] = index
-		error = None
 
 
 def _run_table_index_ai_backfill(doc, *, table_name: str) -> dict:
@@ -2675,12 +2671,12 @@ def _build_humanized_notes_html(
 	actions = _actions_for_humanizer(recordings)
 	if not actions:
 		return ""
-	steps_md, error = _run_ai_step(
+	steps_md, step_failed = _run_ai_step(
 		lambda: ai_fix.humanize_steps(actions, session_title=session_title, usage_out=usage_out),
 		title="optimus humanize_steps",
 		session_uuid=getattr(frappe.local, "_optimus_spend_session", None),
 	)
-	if error is not None:
+	if step_failed:
 		return ""
 	if not (steps_md or "").strip():
 		return ""

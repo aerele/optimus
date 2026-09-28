@@ -39,7 +39,7 @@ appended), so a huge record costs a bounded amount of work. A truthy value that 
 ``str(value)``, the text the row stores, both to recognise the key and to mask
 it. Only the fields the masking changed are set.
 
-The key is read once per insert, of every Error Log row, since a row
+The key is normally read once per insert, of every Error Log row, since a row
 holding the key is one of Optimus's (``ai_fix._current_key_or_empty``,
 never cached, held only as ``api_key``), with Frappe's messages muted, so an
 undecryptable key does not add "Encryption key is invalid" to the reply of
@@ -58,7 +58,8 @@ leave another app's doc as it was, and fail closed for a record of the AI
 code. When the masking fails (on a record of Optimus's, the only ones it
 masks), the text is withheld (``_withhold``) instead of inserted raw. When
 anything else fails unexpectedly, a record holding an ``ai_fix.py`` frame
-(a plain substring check, standard library alone) is withheld the same way
+or the stored key (standard library checks alone, one independent key read
+with Frappe) is withheld the same way
 and every other record is left as it was (``_fail_closed``). When Optimus's
 other modules cannot be imported, the fallback works with Frappe alone
 (``_mask_stored_key_only``, below). Each failure leaves a line in the
@@ -160,8 +161,7 @@ def mask_error_log(doc, method=None) -> None:
 
 def _fail_closed(doc, failure: str, timeout_types) -> str:
 	"""After an unexpected failure (``failure``, its exception type name):
-	a record holding a frame of Optimus's AI module (``_holds_ai_frame``, a
-	plain substring check with the standard library alone) has its text
+	a record holding a frame of Optimus's AI module or the stored key has its text
 	withheld (``_withhold``, the same rule as a failed masking); every other
 	record is left as it was (fail-open: the hook is site-wide). Returns the
 	outcome for the ``optimus`` log. Never raises, except an RQ job timeout,
@@ -170,9 +170,23 @@ def _fail_closed(doc, failure: str, timeout_types) -> str:
 	outcome = f"stored as it was: {failure}"
 	interrupt = None
 	try:
+		import frappe
+
 		record = _record(doc)
-		if _holds_ai_frame(record):
-			_withhold(doc, record, _holds_ai_frame)
+		# The failed pass may already have changed some fields. Check the
+		# remaining text with Frappe alone, including key-only records.
+		api_key = ""
+		try:
+			api_key = _read_key(frappe, _stored_key) if _key_stored(frappe, timeout_types) else ""
+		except Exception as e:
+			if isinstance(e, timeout_types):
+				raise
+			# A broken key read cannot disable the independent frame check.
+
+		def is_ai(fields):
+			return _holds_ai_frame(fields) or _holds_key(fields, api_key)
+		if is_ai(record):
+			_withhold(doc, record, is_ai)
 			outcome = f"withheld: its masking failed unexpectedly ({failure})"
 	except Exception as e:
 		if isinstance(e, timeout_types):

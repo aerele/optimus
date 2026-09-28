@@ -727,7 +727,30 @@ class TestResolveProvider:
 # is_available truth table
 # --------------------------------------------------------------------------
 
+@pytest.mark.parametrize("prompt,completion", [(2**30, 2**30), (2**31 - 1, 1), (2**31 - 1, 2**31 - 1)])
+def test_usage_total_preserves_the_sum_of_valid_counts(prompt, completion):
+	for read, fields in (
+		(ai_fix._usage_from_openai, ("prompt_tokens", "completion_tokens")),
+		(ai_fix._usage_from_anthropic, ("input_tokens", "output_tokens")),
+	):
+		usage = read({"usage": dict(zip(fields, (prompt, completion), strict=True))})
+		assert usage == {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
+
+
 class TestIsAvailable:
+
+	@pytest.mark.parametrize("stored", ["********", "", None])
+	def test_checks_cached_presence_without_decrypting(self, monkeypatch, stored):
+		import frappe
+
+		reads = []
+		monkeypatch.setattr(frappe, "db", SimpleNamespace(get_single_value=lambda *a: stored), raising=False)
+		monkeypatch.setattr(ai_fix, "_current_key_or_empty", lambda: reads.append(True) or "fake-key")
+		with patch("optimus.settings.get_config", return_value=_cfg(ai_enabled=True, ai_provider="OpenAI")):
+			assert ai_fix.is_available() is bool(stored)
+			assert ai_fix.is_available() is bool(stored)
+		assert reads == []
+
 	def test_false_when_disabled(self):
 		with patch("optimus.settings.get_config", return_value=_cfg(ai_enabled=False)):
 			assert ai_fix.is_available() is False

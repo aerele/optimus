@@ -1102,14 +1102,13 @@ def regenerate_reports(session_uuid: str) -> dict:
 		for a in (doc.actions or [])
 		if getattr(a, "recording_uuid", None)
 	]
-	recordings, fetch_error = _analyze_mod._run_ai_step(
+	recordings, step_failed = _analyze_mod._run_ai_step(
 		lambda: list(_analyze_mod._fetch_recordings(
 			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
 		)),
 		title="optimus regenerate_reports fetch", session_uuid=session_uuid,
 	)
-	if fetch_error is not None:
-		fetch_error = None
+	if step_failed:
 		recordings = []
 
 	# v0.6.0: if "Suggest AI fixes in the report by default" is on, backfill
@@ -1509,14 +1508,13 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 		a.recording_uuid for a in (doc.actions or [])
 		if getattr(a, "recording_uuid", None)
 	]
-	recordings, fetch_error = _analyze_mod._run_ai_step(
+	recordings, step_failed = _analyze_mod._run_ai_step(
 		lambda: list(_analyze_mod._fetch_recordings(
 			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
 		)),
 		title="optimus humanize_steps fetch", session_uuid=getattr(doc, "session_uuid", None),
 	)
-	if fetch_error is not None:
-		fetch_error = None
+	if step_failed:
 		recordings = []
 
 	actions = _analyze_mod._actions_for_humanizer(recordings)
@@ -1650,12 +1648,11 @@ def _refill_indexes_for_doc(doc) -> dict:
 			continue
 		# One title for every table (the table goes in the message), so the
 		# Error Log groups these rows instead of creating one title per table.
-		out, error = _analyze_mod._run_ai_step(
+		out, step_failed = _analyze_mod._run_ai_step(
 			lambda table_name=table_name: _analyze_mod._run_table_index_ai_backfill(doc, table_name=table_name),
 			title="optimus refill_indexes", session_uuid=getattr(doc, "session_uuid", None), table=table_name,
 		)
-		if error is not None:
-			error = None
+		if step_failed:
 			failed += 1
 			continue
 		if out.get("ok"):

@@ -79,11 +79,11 @@ versions may contain breaking changes see migration notes below).
   `metadata`, and moves a title longer than its 140-character column in front
   of the error, as Frappe v16 does, so on Frappe v15 such a row is no longer
   dropped by the length check. Every other row, another app's included, is
-  stored exactly as it was. It reads the stored key once per Error Log insert
+  stored exactly as it was. It normally reads the stored key once per Error Log insert
   (one SELECT on `__Auth`, and a decrypt when a key is stored), never caches
   it, and never raises, except an RQ job timeout, which still stops the job.
-  It fails open: when it cannot read the key, the row is stored as it was. The
-  one exception is a row it would mask whose masking fails: its error text is
+  When the key cannot be read, only the AI frame check identifies a row
+  to mask. A row it would mask whose masking fails is withheld: its error text is
   replaced by "Optimus withheld this error text: it could not be masked. See
   logs/optimus.log for the reason.", its title and metadata too when they hold
   an `ai_fix.py` frame or the key (a title holding neither is kept, cut to 140
@@ -345,6 +345,19 @@ versions may contain breaking changes see migration notes below).
   a redirect's address is read, now leaves without the key, the unscrubbed
   text or the Base URL.
 
+An unexpected hook failure triggers one independent stored-key read with
+Frappe alone. A row holding that key, including its JSON-escaped or repr-escaped form, is withheld even without an AI frame. A row from the AI code is
+withheld whenever it cannot be masked; unrelated rows remain unchanged. Quoted
+header values cut off before their closing quote are masked through the end of
+that line, including keys that have since been rotated.
+
+- AI availability checks use the cached Password-field presence without
+  decrypting the key. Each AI request still reads and validates its key.
+- Token totals preserve the sum of valid input and output counts when that
+  sum exceeds the bound applied to individual provider fields.
+- AI steps return a boolean failure flag after logging, so callers retain no
+  caught exception or traceback.
+
 ### Upgrade notes
 
 - `bench migrate` is required: it runs the scrub patch (batches of 200 rows, a
@@ -415,13 +428,12 @@ versions may contain breaking changes see migration notes below).
   Optimus Settings is saved, with the same message. Keyless providers
   (OpenAI-compatible) are unaffected: there such a key is neither sent nor
   refused.
-- Every Error Log insert on the site now reads the stored AI key once (the
-  Error Log hook needs it to tell a row holding the key). While Optimus
-  profiles a flow, that read appears in the report's per-table query
-  breakdown, one `__Auth` query per Error Log insert; the per-action
-  breakdown, the N+1 and slowest-query findings and the session's query
-  count and query time leave it out, as Optimus's own query. A site where no
-  key is stored reads none.
+- Every Error Log insert on the site normally reads the stored AI key once
+  (the Error Log hook needs it to tell a row holding the key). While Optimus
+  profiles a flow, the per-table and per-action breakdowns, index suggestions,
+  the N+1 and slowest-query findings and the session's query count and query
+  time leave these reads out, as Optimus's own queries. A site where no key is
+  stored reads none.
 - No Desk form or JavaScript change (open tabs need no reload) and no new
   `site_config.json` key.
 - Verify: the dry run in step 3 above reports the values listed there, the
