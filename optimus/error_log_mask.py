@@ -42,7 +42,11 @@ holding the key is one of Optimus's (``ai_fix._current_key_or_empty``,
 never cached, held only as ``api_key``), with Frappe's messages muted, so an
 undecryptable key does not add "Encryption key is invalid" to the reply of
 every request that logs an error. It is a SELECT on ``__Auth``, a table
-every Frappe site has, so it cannot fail in a healthy transaction.
+every Frappe site has, so it cannot fail in a healthy transaction. It is
+read only when one is stored (``_key_stored``: the Password field's plain
+Singles value, asterisks that Frappe caches per transaction, never
+decrypted); on a site where AI was never enabled no key is read, and only
+the frame check decides.
 
 An RQ job timeout (the job must stop) leaves as a fresh instance raised after
 the ``try``, so the frames it interrupted (the record's text, the key read)
@@ -166,7 +170,7 @@ def _mask_doc(doc, timeout_types) -> str | None:
 		return None
 	if stale is not None:
 		return _mask_stored_key_only(frappe, doc, stale)
-	api_key = _read_key(frappe, _current_key_or_empty)
+	api_key = _read_key(frappe, _current_key_or_empty) if _key_stored(frappe, timeout_types) else ""
 	# Only a record from Optimus's AI code or holding the key is Optimus's to
 	# change; every other row is left exactly as it was.
 	failures = []
@@ -192,7 +196,7 @@ def _mask_stored_key_only(frappe, doc, stale: str) -> str:
 	a row without the key is left as it was. Returns the outcome for the
 	``optimus`` log. Raises what it cannot handle; ``mask_error_log`` catches
 	it."""
-	api_key = _read_key(frappe, _stored_key)
+	api_key = _read_key(frappe, _stored_key) if _key_stored(frappe, _job_timeout_types()) else ""
 	if len(api_key) >= _MIN_KEY_LEN:
 		for field in _TEXT_FIELDS:
 			value = doc.get(field)
@@ -207,6 +211,29 @@ def _mask_stored_key_only(frappe, doc, stale: str) -> str:
 			if masked != text:
 				doc.set(field, masked)
 	return f"checked for the stored key alone (Optimus's modules could not be imported: {stale})"
+
+
+def _key_stored(frappe, timeout_types) -> bool:
+	"""False only when Optimus Settings holds no API key (none was ever stored:
+	AI never enabled), so the key is not read at all: no SELECT on ``__Auth``,
+	no decrypt, on every Error Log insert of such a site. It reads the plain
+	Singles value of the Password field (``frappe.db.get_single_value``),
+	which holds one asterisk per character of a stored key, never the key,
+	and which Frappe caches per transaction (``Database.value_cache`` on v15
+	and v16, cleared at commit and rollback); a key written there by hand as
+	plain text is held as ``secret``, a name the sanitizers redact. As in
+	``maintenance._key_unreadable``: no Optimus Settings DocType
+	(``DoesNotExistError``) means no key; any other failure answers True, so
+	the key is read as before. An RQ job timeout goes through
+	(``mask_error_log`` raises it again, fresh)."""
+	missing = getattr(frappe, "DoesNotExistError", ())
+	try:
+		secret = frappe.db.get_single_value("Optimus Settings", "ai_api_key")
+	except Exception as e:
+		if isinstance(e, timeout_types):
+			raise
+		return not isinstance(e, missing)
+	return isinstance(secret, str) and bool(secret.strip())
 
 
 def _key_literals(api_key) -> tuple[str, ...]:

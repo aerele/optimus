@@ -95,8 +95,17 @@ def env(monkeypatch):
 	import frappe
 	import frappe.utils.password
 
-	rec = SimpleNamespace(reads=[], frappe_reads=[], lines=[], inserts=[], key=KEY)
+	rec = SimpleNamespace(
+		reads=[], frappe_reads=[], lines=[], inserts=[], key=KEY, single_reads=[], placeholder="*" * len(KEY),
+	)
 	flags = SimpleNamespace(mute_messages=False)
+
+	def _get_single_value(doctype, fieldname, *a, **k):
+		# the plain Singles value of the Password field: asterisks, never the key
+		rec.single_reads.append((doctype, fieldname))
+		if isinstance(rec.placeholder, BaseException):
+			raise rec.placeholder
+		return rec.placeholder
 
 	def _read():
 		rec.reads.append(flags.mute_messages)
@@ -113,6 +122,7 @@ def env(monkeypatch):
 		return SimpleNamespace(**{level: _level(level) for level in ("debug", "info", "warning", "error")})
 
 	monkeypatch.setattr(frappe, "flags", flags, raising=False)
+	monkeypatch.setattr(frappe, "db", SimpleNamespace(get_single_value=_get_single_value), raising=False)
 	monkeypatch.setattr(frappe, "logger", _logger, raising=False)
 	monkeypatch.setattr(frappe, "log_error", lambda *a, **k: rec.inserts.append(("log_error", a, k)), raising=False)
 	monkeypatch.setattr(frappe, "get_doc", lambda *a, **k: rec.inserts.append(("get_doc", a, k)), raising=False)
@@ -974,3 +984,67 @@ class TestFrappesInsertPaths:
 		doc = _Doc(error=LEAKY, method="optimus ai_fix")
 		document.Document.hook(before_insert)(doc)
 		assert ran == ["controller"] and "error" in doc.sets and KEY not in doc.error
+
+
+# ---------------------------------------------------------------------------
+# The key is read (a SELECT on __Auth) only when one is stored
+# ---------------------------------------------------------------------------
+
+
+class _DoesNotExistError(Exception):
+	"""frappe.DoesNotExistError: Optimus Settings is not a DocType here."""
+
+
+class TestTheKeyIsReadOnlyWhenOneIsStored:
+	"""Before any decrypt the hook reads the plain Singles value of the
+	Password field (asterisks, cached per transaction by
+	``frappe.db.get_single_value``). With none stored (AI never enabled) it
+	reads nothing from ``__Auth``; the frame check still runs."""
+
+	@pytest.fixture(autouse=True)
+	def _missing(self, monkeypatch):
+		import frappe
+
+		monkeypatch.setattr(frappe, "DoesNotExistError", _DoesNotExistError, raising=False)
+
+	@pytest.mark.parametrize("placeholder", [None, "", "   "], ids=["none", "empty", "blank"])
+	def test_no_stored_key_means_no_auth_read_and_an_ai_record_is_still_masked(self, env, placeholder):
+		env.placeholder = placeholder
+		doc = _run(_Doc(error=LEAKY, method="optimus ai_fix"))
+		assert env.reads == [] and env.frappe_reads == []
+		assert env.single_reads == [("Optimus Settings", "ai_api_key")]
+		assert KEY not in doc.error and "'authorization': 'Bearer ********'" in doc.error
+		assert env.lines == []
+
+	def test_no_stored_key_leaves_another_apps_row_byte_identical(self, env):
+		env.placeholder = None
+		doc = _run(_Doc(error=OTHER_TB, method=OTHER_TITLE))
+		assert doc.sets == [] and env.reads == []
+
+	def test_a_stored_key_is_read_once(self, env):
+		doc = _run(_Doc(error=ERP_TB, method=f"bad key {KEY}"))
+		assert env.reads == [True] and env.single_reads == [("Optimus Settings", "ai_api_key")]
+		assert doc.method == "bad key ********"
+
+	def test_no_optimus_settings_doctype_means_no_key(self, env):
+		env.placeholder = _DoesNotExistError("DocType Optimus Settings not found")
+		_run(_Doc(error=ERP_TB, method="Stock Entry failed"))
+		assert env.reads == [] and env.lines == []
+
+	def test_any_other_error_falls_back_to_the_decrypt_path(self, env):
+		env.placeholder = RuntimeError("db down")
+		doc = _run(_Doc(error=ERP_TB, method=f"bad key {KEY}"))
+		assert env.reads == [True] and doc.method == "bad key ********"
+
+	def test_a_job_timeout_during_the_plain_read_still_stops_the_job(self, env):
+		env.placeholder = JobTimeoutException("Task exceeded maximum timeout value (60 seconds)")
+		with pytest.raises(JobTimeoutException) as ei:
+			_run(_Doc(error=LEAKY))
+		assert ei.value is not env.placeholder and ei.value.__context__ is None
+		assert env.reads == []
+
+	def test_the_stale_fallback_reads_no_key_when_none_is_stored(self, env, stale):
+		env.placeholder = None
+		doc = _Doc(error=ERP_TB, method="Stock Entry failed")
+		stale(doc, "before_insert")
+		assert env.frappe_reads == [] and doc.sets == []
