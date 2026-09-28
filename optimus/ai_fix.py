@@ -810,31 +810,19 @@ def _current_key_or_empty() -> str:
 	  ``_http_post``: Sentry's WSGI middleware would ship those frames'
 	  locals. It leaves unchained when this function is not itself called
 	  while an exception is being handled."""
-	job_timeout_types = _job_timeout_types()
-	interrupt = None
-	escaping: BaseException | None = None
+	guard = _InterruptGuard(base=True)
 	try:
-		from frappe.utils.password import get_decrypted_password
+		with guard:
+			from frappe.utils.password import get_decrypted_password
 
-		api_key = get_decrypted_password(
-			"Optimus Settings", "Optimus Settings", "ai_api_key",
-			raise_exception=False,
-		) or ""
-	except BaseException as e:
-		if isinstance(e, job_timeout_types):
-			interrupt = (type(e), e.args)
-		elif not isinstance(e, Exception):
-			escaping = e
-		else:
-			return ""
-	if escaping is not None:
-		escaping.__traceback__ = None
-		escaping.__context__ = None
-		escaping.__cause__ = None
-		escaping.__suppress_context__ = True
-		raise escaping
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+			api_key = get_decrypted_password(
+				"Optimus Settings", "Optimus Settings", "ai_api_key",
+				raise_exception=False,
+			) or ""
+	except Exception:
+		return ""
+	if guard.pending():
+		raise guard.interrupt()
 	return api_key.strip() if isinstance(api_key, str) else ""
 
 
@@ -1458,62 +1446,53 @@ def log_ai_failure(
 	"""
 	logged = False
 	failure_type = None
-	interrupt = None
+	guard = _InterruptGuard()
+	guard.note(exc)
 	try:
-		timeout_types = _job_timeout_types()
-		if exc is not None and timeout_types and isinstance(exc, timeout_types):
-			interrupt = (type(exc), exc.args)
-	except Exception:
-		pass
-	try:
-		if exc is not None and getattr(exc, _LOGGED_ATTR, False):
-			if interrupt is not None:
-				raise interrupt[0](*interrupt[1])
-			return False
-		import frappe
+		with guard:
+			if exc is None or not getattr(exc, _LOGGED_ATTR, False):
+				import frappe
 
-		lines = [title]
-		if session_uuid:
-			lines.append(f"session_uuid={session_uuid}")
-		for k in sorted(context):
-			lines.append(f"{k}={context[k]}")
-		if exc is not None:
-			lines.append(_exception_text(exc))
-		message = _scrubbed_message(title, lines, exc)
-		# Sentry (attach_stacktrace) serialises this frame's locals with the
-		# event: only the scrubbed message may be bound while logging.
-		del lines
+				lines = [title]
+				if session_uuid:
+					lines.append(f"session_uuid={session_uuid}")
+				for k in sorted(context):
+					lines.append(f"{k}={context[k]}")
+				if exc is not None:
+					lines.append(_exception_text(exc))
+				message = _scrubbed_message(title, lines, exc)
+				# Sentry (attach_stacktrace) serialises this frame's locals with the
+				# event: only the scrubbed message may be bound while logging.
+				del lines
 
-		if not docname and session_uuid:
-			try:
-				docname = frappe.db.get_value("Optimus Session", {"session_uuid": session_uuid}, "name")
-			except _job_timeout_types():
-				raise
-			except Exception:
-				docname = None
-		reference_doctype = "Optimus Session" if docname else None
-		reference_name = docname or None
-		row = frappe.log_error(
-			title=title,
-			message=message,
-			reference_doctype=reference_doctype,
-			reference_name=reference_name,
-		)
-		logged = True
-		_mark_logged(exc)
-		_requeue_if_rolled_back(
-			{
-				"error": message, "method": title,
-				"reference_doctype": reference_doctype, "reference_name": reference_name,
-			},
-			row,
-		)
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+				if not docname and session_uuid:
+					try:
+						docname = frappe.db.get_value("Optimus Session", {"session_uuid": session_uuid}, "name")
+					except _job_timeout_types():
+						raise
+					except Exception:
+						docname = None
+				reference_doctype = "Optimus Session" if docname else None
+				reference_name = docname or None
+				row = frappe.log_error(
+					title=title,
+					message=message,
+					reference_doctype=reference_doctype,
+					reference_name=reference_name,
+				)
+				logged = True
+				_mark_logged(exc)
+				_requeue_if_rolled_back(
+					{
+						"error": message, "method": title,
+						"reference_doctype": reference_doctype, "reference_name": reference_name,
+					},
+					row,
+				)
 	except Exception as e:
 		failure_type = type(e).__name__
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 	if failure_type is not None:
 		_note_unwritten_row(failure_type)
 	return logged
@@ -1552,19 +1531,18 @@ def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None) -
 	text. An RQ job timeout leaves as a fresh instance (no scrubber frame, no
 	chain)."""
 	failed = ""
-	interrupt = None
+	guard = _InterruptGuard()
 	try:
-		from optimus.redaction import scrub_secrets
+		with guard:
+			from optimus.redaction import scrub_secrets
 
-		api_key = _current_key_or_empty()
-		return scrub_secrets("\n".join(lines), literals=_key_literals(api_key))
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+			api_key = _current_key_or_empty()
+			return scrub_secrets("\n".join(lines), literals=_key_literals(api_key))
 	except Exception as e:
 		failed = type(e).__name__
-	if interrupt is not None:
+	if guard.pending():
 		lines = None  # never ride on the timeout's traceback unscrubbed
-		raise interrupt[0](*interrupt[1])
+		raise guard.interrupt()
 	kind = type(exc).__name__ if exc is not None else "none"
 	return f"{title}\n(details withheld: scrubbing the message failed with {failed}; error type {kind})"
 
@@ -1599,48 +1577,46 @@ def _requeue_if_rolled_back(record: dict, row=None) -> None:
 	the error type in the ``optimus`` log (``_note_unwritten_row``), recorded
 	in the handler and logged after the ``try``: on Postgres the row may be
 	lost otherwise without a trace."""
-	interrupt = None
+	guard = _InterruptGuard()
 	failure_type = None
 	try:
-		import frappe
+		with guard:
+			import frappe
 
-		name = getattr(row, "name", None)
-		if not isinstance(name, str) or not name:
-			return  # nothing was inserted (no database, or queued in read-only mode)
-		if getattr(frappe.flags, "read_only", False):
-			return
-		for field in ("trace_id", "metadata"):
-			value = getattr(row, field, None)
-			if isinstance(value, str) and value:
-				record[field] = value
+			name = getattr(row, "name", None)
+			if not isinstance(name, str) or not name:
+				return  # nothing was inserted (no database, or queued in read-only mode)
+			if getattr(frappe.flags, "read_only", False):
+				return
+			for field in ("trace_id", "metadata"):
+				value = getattr(row, field, None)
+				if isinstance(value, str) and value:
+					record[field] = value
 
-		def _requeue() -> None:
-			requeue_interrupt = None
-			requeue_failure = None
-			try:
-				import frappe
+			def _requeue() -> None:
+				requeue_guard = _InterruptGuard()
+				requeue_failure = None
+				try:
+					with requeue_guard:
+						import frappe
 
-				if frappe.db.exists("Error Log", name):
-					return  # MyISAM: the ROLLBACK left the row in place
-				from frappe.deferred_insert import deferred_insert
+						if frappe.db.exists("Error Log", name):
+							return  # MyISAM: the ROLLBACK left the row in place
+						from frappe.deferred_insert import deferred_insert
 
-				deferred_insert("Error Log", [dict(record)])
-			except _job_timeout_types() as e:
-				requeue_interrupt = (type(e), e.args)
-			except Exception as e:
-				requeue_failure = type(e).__name__
-			if requeue_interrupt is not None:
-				raise requeue_interrupt[0](*requeue_interrupt[1])
-			if requeue_failure is not None:
-				_note_unwritten_row(requeue_failure)
+						deferred_insert("Error Log", [dict(record)])
+				except Exception as e:
+					requeue_failure = type(e).__name__
+				if requeue_guard.pending():
+					raise requeue_guard.interrupt()
+				if requeue_failure is not None:
+					_note_unwritten_row(requeue_failure)
 
-		frappe.db.after_rollback.add(_requeue)
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+			frappe.db.after_rollback.add(_requeue)
 	except Exception as e:
 		failure_type = type(e).__name__
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 	if failure_type is not None:
 		_note_unwritten_row(failure_type)
 
@@ -1663,35 +1639,33 @@ def _note_unwritten_row(error_type: str) -> None:
 	DEV_SERVER is set (``bench start``; ``frappe/utils/logger.py``), so a
 	warning would never reach the log on a production site. Never raises,
 	except an RQ job timeout."""
-	interrupt = None
+	guard = _InterruptGuard()
 	try:
-		import frappe
+		with guard:
+			import frappe
 
-		frappe.logger("optimus").error(
-			"optimus ai_fix: an AI Error Log row may not have been written or re-queued, "
-			f"or a hook after the insert failed: {error_type}"
-		)
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+			frappe.logger("optimus").error(
+				"optimus ai_fix: an AI Error Log row may not have been written or re-queued, "
+				f"or a hook after the insert failed: {error_type}"
+			)
 	except Exception:
 		pass
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 
 
 def _mark_logged(exc: BaseException | None) -> None:
 	"""Flag ``exc`` so a later ``log_ai_failure(..., exc)`` is a no-op."""
 	if exc is None:
 		return
-	interrupt = None
+	guard = _InterruptGuard()
 	try:
-		setattr(exc, _LOGGED_ATTR, True)
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+		with guard:
+			setattr(exc, _LOGGED_ATTR, True)
 	except Exception:
 		pass
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 
 
 def _log_http_error(
@@ -1711,17 +1685,16 @@ def _log_http_error(
 	caller's own ``log_ai_failure`` for it writes no second row and a failed
 	write still leaves the caller's."""
 	session_uuid = None
-	interrupt = None
+	guard = _InterruptGuard()
 	try:
-		import frappe
+		with guard:
+			import frappe
 
-		session_uuid = getattr(frappe.local, "_optimus_spend_session", None)
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+			session_uuid = getattr(frappe.local, "_optimus_spend_session", None)
 	except Exception:
 		session_uuid = None
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 	context = {"provider": provider, "where": where, "status": status, "detail": detail}
 	if provider_error:
 		context["provider_error"] = provider_error
@@ -1737,6 +1710,97 @@ def _job_timeout_types() -> tuple[type[BaseException], ...]:
 	except Exception:
 		return ()
 	return (BaseTimeoutException,)
+
+
+class _InterruptGuard:
+	"""The one record-then-raise-after-the-``try`` idiom of this module::
+
+		guard = _InterruptGuard()          # base=True: also non-Exception ones
+		try:
+			with guard:
+				...                          # the guarded work
+		except Exception:
+			...                          # the site's own handling
+		if guard.pending():
+			raise guard.interrupt()
+
+	Leaving the ``with`` block, the guard swallows and records:
+
+	- an RQ job timeout (``_job_timeout_types``): only its type and args;
+	  it is raised again as a FRESH instance of that type, with no chain and
+	  none of the frames it interrupted (the job must still stop, and those
+	  frames can hold the key or unscrubbed text);
+	- with ``base=True``, an interrupt that is not an ``Exception``
+	  (``SystemExit`` from a gunicorn worker timeout, ``KeyboardInterrupt``,
+	  a gevent ``Timeout``): it is raised again as the SAME instance (gevent
+	  matches its timeout by identity) with its traceback, ``__context__`` and
+	  ``__cause__`` cleared, so Sentry's WSGI middleware never ships the
+	  interrupted frames' locals.
+
+	Anything else goes through to the site's own ``except``. The site raises
+	``interrupt()`` itself, after the ``try``, where no exception is being handled, so it chains
+	nothing (unless the site itself was called while one was being handled).
+	Clear any local holding unscrubbed text before calling it: the site's own
+	frame travels with what it raises. ``note(exc)`` records a timeout that was
+	passed in rather than raised (``log_ai_failure``). The guard never holds a
+	traceback. ``error_log_mask`` keeps its own copy: it must work where this
+	module cannot be imported."""
+
+	__slots__ = ("_base", "_timeout", "_escaping")
+
+	def __init__(self, *, base: bool = False):
+		self._base = base
+		self._timeout: tuple[type[BaseException], tuple] | None = None
+		self._escaping: BaseException | None = None
+
+	def __enter__(self) -> _InterruptGuard:
+		return self
+
+	def __exit__(self, exc_type, exc, tb) -> bool:
+		if exc is None:
+			return False
+		if self._record_timeout(exc):
+			return True
+		if self._base and not isinstance(exc, Exception):
+			self._escaping = exc
+			return True
+		return False
+
+	def _record_timeout(self, exc) -> bool:
+		timeout_types = _job_timeout_types()
+		if timeout_types and isinstance(exc, timeout_types):
+			self._timeout = (type(exc), exc.args)
+			return True
+		return False
+
+	def note(self, exc: BaseException | None) -> None:
+		"""Record ``exc`` when it is an RQ job timeout, so it is raised again,
+		fresh. Never raises."""
+		try:
+			if exc is not None:
+				self._record_timeout(exc)
+		except Exception:
+			pass
+
+	def pending(self) -> bool:
+		"""True when the guard recorded an interrupt to raise again."""
+		return self._timeout is not None or self._escaping is not None
+
+	def interrupt(self) -> BaseException | None:
+		"""What the guard recorded, ready to raise (see the class), or None;
+		the guard forgets it. The site raises it itself, so no frame of the
+		guard travels with it."""
+		escaping, self._escaping = self._escaping, None
+		if escaping is not None:
+			escaping.__traceback__ = None
+			escaping.__context__ = None
+			escaping.__cause__ = None
+			escaping.__suppress_context__ = True
+			return escaping
+		timeout, self._timeout = self._timeout, None
+		if timeout is not None:
+			return timeout[0](*timeout[1])
+		return None
 
 
 def _response_detail(resp, auth=None) -> str:
@@ -1761,21 +1825,21 @@ def _response_detail(resp, auth=None) -> str:
 	holds the body. Once the body is bound only CPU work runs until this
 	returns."""
 	body_text = ""
-	interrupt = None
+	guard = _InterruptGuard()
 	try:
-		from optimus.redaction import scrub_secrets
+		with guard:
+			from optimus.redaction import scrub_secrets
 
-		api_key = _scrub_literals_for(auth)
-		body_text = (resp.text or "").strip()
-		if not body_text:
-			return ""
-		return ": " + scrub_secrets(body_text[:65536], literals=api_key)[:300]
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+			api_key = _scrub_literals_for(auth)
+			body_text = (resp.text or "").strip()
+			if not body_text:
+				return ""
+			return ": " + scrub_secrets(body_text[:65536], literals=api_key)[:300]
 	except Exception:
 		return ""
 	body_text = ""  # the raw body may echo the key: never on the timeout's traceback
-	raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 
 
 # What a 404 message names instead of the request URL when the URL cannot be
@@ -1793,17 +1857,17 @@ def _shown_url(url: str, auth=None) -> str:
 	a fresh instance, raised after the ``try``, so the frames it interrupted
 	(``json.dumps`` holds the key under the names ``obj`` and ``o`` while
 	the literals are built) never travel with it."""
-	interrupt = None
+	guard = _InterruptGuard()
 	try:
-		from optimus.redaction import scrub_secrets
+		with guard:
+			from optimus.redaction import scrub_secrets
 
-		api_key = _scrub_literals_for(auth)
-		return scrub_secrets(url, literals=api_key)
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+			api_key = _scrub_literals_for(auth)
+			return scrub_secrets(url, literals=api_key)
 	except Exception:
 		return _UNSHOWN_URL
-	raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 
 
 # A provider's machine-readable error code: lowercase-letter words joined by
@@ -1836,36 +1900,36 @@ def _provider_error_code(resp, auth=None) -> str:
 	literals are read BEFORE the body is parsed and bound, so an interrupt
 	during that database read finds no local holding the body."""
 	data = error = value = None
-	interrupt = None
+	guard = _InterruptGuard()
 	try:
-		from optimus.redaction import scrub_secrets
+		with guard:
+			from optimus.redaction import scrub_secrets
 
-		api_key = _scrub_literals_for(auth)
-		data = resp.json()
-		error = data.get("error") if isinstance(data, dict) else None
-		if not isinstance(error, dict):
-			return ""
-		parts: list[str] = []
-		for field in ("type", "code"):
-			value = error.get(field)
-			if (
-				isinstance(value, str)
-				and len(value) <= _PROVIDER_ERROR_MAX_LEN
-				and _PROVIDER_ERROR_RE.fullmatch(value)
-				and value not in parts
-				and scrub_secrets(value, literals=api_key) == value
-			):
-				parts.append(value)
-		if not parts:
-			return ""
-		joined = ":".join(parts)
-		return joined if len(joined) <= _PROVIDER_ERROR_MAX_LEN else parts[0]
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+			api_key = _scrub_literals_for(auth)
+			data = resp.json()
+			error = data.get("error") if isinstance(data, dict) else None
+			if not isinstance(error, dict):
+				return ""
+			parts: list[str] = []
+			for field in ("type", "code"):
+				value = error.get(field)
+				if (
+					isinstance(value, str)
+					and len(value) <= _PROVIDER_ERROR_MAX_LEN
+					and _PROVIDER_ERROR_RE.fullmatch(value)
+					and value not in parts
+					and scrub_secrets(value, literals=api_key) == value
+				):
+					parts.append(value)
+			if not parts:
+				return ""
+			joined = ":".join(parts)
+			return joined if len(joined) <= _PROVIDER_ERROR_MAX_LEN else parts[0]
 	except Exception:
 		return ""
 	data = error = value = None  # the body may echo the key: never on the timeout's traceback
-	raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 
 
 def _http_post(
@@ -1913,52 +1977,38 @@ def _http_post(
 	request is sent from inside an ``except`` block (``test_ai_log_audit.py``
 	rule 4)."""
 	timeout = timeout or _resolve_timeout_seconds()
-	job_timeout_types = _job_timeout_types()
 	failure: AiFixError | None = None
 	unexpected_name: str | None = None
 	unexpected_frames: list[str] = []
-	interrupt_type: type[BaseException] | None = None
-	interrupt_args: tuple = ()
-	escaping: BaseException | None = None
 	detail = ""
 	resp = None
+	guard = _InterruptGuard(base=True)
 	try:
-		resp = requests.post(url, headers=headers, json=body, timeout=timeout, auth=auth, allow_redirects=False)
+		with guard:
+			resp = requests.post(url, headers=headers, json=body, timeout=timeout, auth=auth, allow_redirects=False)
 	except requests.exceptions.Timeout:
 		failure = AiFixError(f"The AI provider didn't respond within {timeout}s.", kind="timeout")
 		detail = "timeout"
 	except requests.exceptions.RequestException as e:
 		failure = AiFixError(f"Couldn't reach the AI provider: {type(e).__name__}.", kind="transport")
 		detail = f"{type(e).__name__}: {e}"
-	except BaseException as e:
-		if isinstance(e, job_timeout_types):
-			interrupt_type, interrupt_args = type(e), e.args
-		elif not isinstance(e, Exception):
-			escaping = e
-		else:
-			unexpected_name = type(e).__name__
-			# file:line:function per frame, read straight off the traceback:
-			# no source lookup (no I/O while this handler runs), no locals,
-			# no message.
-			unexpected_frames = [
-				f"{frame.f_code.co_filename}:{lineno}:{frame.f_code.co_name}"
-				for frame, lineno in traceback.walk_tb(e.__traceback__)
-			]
-	if escaping is not None:
-		# Not ours to handle: it leaves unlogged, without the frames below
-		# this one (their locals hold the prepared headers), and unchained
-		# when _http_post is not itself called while an exception is being
-		# handled.
-		escaping.__traceback__ = None
-		escaping.__context__ = None
-		escaping.__cause__ = None
-		escaping.__suppress_context__ = True
-		raise escaping
-	if interrupt_type is not None:
-		# The RQ job hit its timeout while we were sending: it must still stop
-		# the job, so re-raise the same type, but as a fresh instance with no
-		# requests / urllib3 frames and no chain.
-		raise interrupt_type(*interrupt_args)
+	except Exception as e:
+		unexpected_name = type(e).__name__
+		# file:line:function per frame, read straight off the traceback:
+		# no source lookup (no I/O while this handler runs), no locals,
+		# no message.
+		unexpected_frames = [
+			f"{frame.f_code.co_filename}:{lineno}:{frame.f_code.co_name}"
+			for frame, lineno in traceback.walk_tb(e.__traceback__)
+		]
+	# A non-Exception interrupt is not ours to handle: it leaves unlogged, as
+	# the same instance, without the frames below this one (their locals hold
+	# the prepared headers), and unchained when _http_post is not itself
+	# called while an exception is being handled. An RQ job timeout must
+	# still stop the job: the same type, raised fresh, with no requests /
+	# urllib3 frames and no chain.
+	if guard.pending():
+		raise guard.interrupt()
 	if unexpected_name is not None:
 		from frappe import _
 
@@ -2051,15 +2101,14 @@ def _token_count(value) -> int:
 	Never raises, except an RQ job timeout (re-raised fresh)."""
 	if isinstance(value, bool):
 		return 0
-	interrupt = None
+	guard = _InterruptGuard()
 	try:
-		count = int(value)
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+		with guard:
+			count = int(value)
 	except Exception:
 		return 0
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 	return count if 0 <= count <= _MAX_TOKEN_COUNT else 0
 
 
