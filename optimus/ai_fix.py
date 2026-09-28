@@ -1571,10 +1571,16 @@ def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None, a
 	else the stored key). If scrubbing fails, the
 	message keeps only the title and the error type, never the unscrubbed
 	text. An RQ job timeout leaves as a fresh instance (no scrubber frame, no
-	chain). ``lines`` is unbound on every path, so an interrupt that is not an
-	``Exception`` never leaves with it either."""
+	chain). An interrupt that is not an ``Exception`` (``SystemExit`` from a
+	gunicorn worker timeout) gets the reply readers' guard
+	(``_InterruptGuard(base=True)``): the same instance leaves with its
+	traceback, context and cause cleared, so the scrubber's frame (the joined
+	text, the literals) never travels with it. ``lines`` and the literals
+	(``api_key``) are unbound on every path, so this frame, which does
+	travel with what it raises, holds neither."""
 	failed = ""
-	guard = _InterruptGuard()
+	api_key = None
+	guard = _InterruptGuard(base=True)
 	try:
 		with guard:
 			from optimus.redaction import scrub_secrets
@@ -1584,9 +1590,10 @@ def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None, a
 	except Exception as e:
 		failed = type(e).__name__
 	finally:
-		# Never ride unscrubbed on an interrupt: a timeout raised below, or a
-		# non-Exception one that leaves with this frame.
+		# Never ride unscrubbed on an interrupt: a timeout or a non-Exception
+		# interrupt is raised below, with this frame.
 		lines = None
+		api_key = None
 	if guard.pending():
 		raise guard.interrupt()
 	kind = type(exc).__name__ if exc is not None else "none"

@@ -277,3 +277,68 @@ class TestAnInterruptDuringTheReplyScrub:
 		assert interrupt.scrub.__code__ not in walked
 		assert getattr(ai_fix, reader).__code__ in walked
 		assert _tb_holders(ei.value, "UNSCRUBBED-BODY") == []
+
+
+# ---------------------------------------------------------------------------
+# _scrubbed_message: an interrupt during the scrub leaves without the key
+# ---------------------------------------------------------------------------
+
+class TestAnInterruptDuringTheMessageScrub:
+	"""``_scrubbed_message`` holds the key's literals and the unscrubbed lines
+	while ``scrub_secrets`` runs. An interrupt that is not an ``Exception``
+	(``SystemExit`` from a gunicorn worker timeout) gets the sibling sites'
+	guard (``_InterruptGuard(base=True)``): the same instance leaves with its
+	traceback, context and cause cleared, and no frame it leaves holds the
+	key or the lines."""
+
+	@pytest.fixture(autouse=True)
+	def _no_rq(self, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_job_timeout_types", lambda: ())
+
+	@pytest.fixture
+	def interrupt(self, monkeypatch):
+		interrupt = SystemExit(1)
+
+		def _scrub(text, literals=()):
+			held = (text, literals)  # noqa: F841 what the scrubber's frame holds
+			try:
+				raise ValueError(text)
+			except ValueError:
+				raise interrupt  # noqa: B904 (chained to a key-bearing error on purpose)
+
+		monkeypatch.setattr("optimus.redaction.scrub_secrets", _scrub)
+		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", lambda *a, **k: KEY, raising=False)
+		interrupt.scrub = _scrub
+		return interrupt
+
+	@staticmethod
+	def _codes(exc):
+		walked = []
+		tb = exc.__traceback__
+		while tb is not None:
+			walked.append(tb.tb_frame.f_code)
+			tb = tb.tb_next
+		return walked
+
+	def test_the_same_interrupt_leaves_without_the_key_or_the_lines(self, interrupt):
+		with pytest.raises(SystemExit) as ei:
+			ai_fix._scrubbed_message("optimus ai_fix", ["UNSCRUBBED line", f"echo {KEY}"], None)
+		assert ei.value is interrupt
+		assert ei.value.__context__ is None and ei.value.__cause__ is None
+		assert ei.value.__suppress_context__ is True
+		assert interrupt.scrub.__code__ not in self._codes(ei.value)
+		assert ai_fix._scrubbed_message.__code__ in self._codes(ei.value)
+		assert _tb_holders(ei.value, KEY) == []
+		assert _tb_holders(ei.value, "UNSCRUBBED") == []
+
+	def test_through_log_ai_failure_no_frame_holds_the_key(self, interrupt, monkeypatch):
+		import frappe
+
+		monkeypatch.setattr(frappe, "log_error", lambda **kw: None, raising=False)
+		with pytest.raises(SystemExit) as ei:
+			ai_fix.log_ai_failure("optimus ai_fix", None, detail=f"UNSCRUBBED {KEY}")
+		assert ei.value is interrupt
+		assert interrupt.scrub.__code__ not in self._codes(ei.value)
+		# the caller's own keyword arguments (``context``) are the caller's to hold
+		assert _tb_holders(ei.value, KEY, names={"lines", "message", "api_key", "secret", "text"}) == []
+		assert [h for h in _tb_holders(ei.value, KEY) if not h.endswith(": context")] == []
