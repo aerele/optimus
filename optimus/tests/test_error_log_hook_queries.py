@@ -26,3 +26,73 @@ class TestTheHookFrameSuffix:
 	def test_the_analyzers_never_spell_the_path_out(self):
 		source = Path(base.__file__).read_text(encoding="utf-8")
 		assert '"optimus/error_log_mask.py"' not in source
+
+
+# ---------------------------------------------------------------------------
+# The session totals leave the hook's key read out
+# ---------------------------------------------------------------------------
+
+_USER = {"filename": "apps/myapp/myapp/importer.py", "lineno": 42, "function": "import_rows"}
+_LOG_ERROR = [
+	{"filename": "apps/frappe/frappe/utils/error.py", "lineno": 80, "function": "log_error"},
+	{"filename": "apps/frappe/frappe/model/document.py", "lineno": 1184, "function": "run_method"},
+]
+_KEY_READ = [
+	{"filename": "apps/frappe/frappe/utils/password.py", "lineno": 34, "function": "get_decrypted_password"},
+	{"filename": "apps/frappe/frappe/database/database.py", "lineno": 270, "function": "sql"},
+]
+_HOOK = {"filename": "apps/optimus/optimus/error_log_mask.py", "lineno": 131, "function": "_read_key"}
+_AI_FIX = {"filename": "apps/optimus/optimus/ai_fix.py", "lineno": 819, "function": "_current_key_or_empty"}
+_DB = {"filename": "apps/frappe/frappe/database/database.py", "lineno": 270, "function": "sql"}
+
+
+def _calls():
+	"""A user query, the hook's key read (through ai_fix, and straight from
+	the hook), a framework-only query and Optimus's own infra snapshot."""
+	return [
+		{"query": "SELECT 1 FROM `tabItem`", "duration": 10.0, "stack": [_USER, _DB]},
+		{"query": "SELECT `password` FROM `__Auth`", "duration": 3.0, "stack": [_USER, *_LOG_ERROR, _HOOK, _AI_FIX, *_KEY_READ]},
+		{"query": "SELECT `password` FROM `__Auth`", "duration": 2.0, "stack": [_USER, *_LOG_ERROR, _HOOK, *_KEY_READ]},
+		{"query": "SELECT `name` FROM `tabDocType`", "duration": 1.5, "stack": [_DB]},
+		{"query": "SHOW GLOBAL STATUS", "duration": 0.5,
+		 "stack": [{"filename": "apps/optimus/optimus/infra_capture.py", "lineno": 5, "function": "snap"}, _DB]},
+		{"query": "SELECT 2", "duration": 1.0},  # no stack recorded
+	]
+
+
+class TestSessionQueryTotals:
+	def test_the_predicate_marks_only_the_hooks_read(self):
+		marked = [base.is_error_log_hook_query(c.get("stack")) for c in _calls()]
+		assert marked == [False, True, True, False, False, False]
+		# a user frame between the hook and the query: the user's query
+		assert not base.is_error_log_hook_query([_HOOK, _USER, *_KEY_READ])
+
+	def test_the_totals_leave_the_hooks_read_out(self):
+		from optimus import analyze
+
+		recordings = [{"calls": _calls()}, {"calls": _calls()[:1]}, {"calls": None}, {}]
+		assert analyze._session_query_totals(recordings) == (5, 23.0)
+
+	def test_persist_stores_those_totals(self, monkeypatch):
+		import pytest
+
+		from optimus import analyze
+
+		class _Stop(Exception):
+			pass
+
+		class _Doc:
+			notes = "<p>kept</p>"
+			title = "t"
+
+			def __setattr__(self, name, value):
+				if name == "top_severity":
+					raise _Stop  # everything the test needs is set by now
+				object.__setattr__(self, name, value)
+
+		doc = _Doc()
+		monkeypatch.setattr(analyze.frappe, "get_doc", lambda *a, **k: doc, raising=False)
+		context = base.AnalyzeContext(session_uuid="u", docname="d")
+		with pytest.raises(_Stop):
+			analyze._persist("d", context, [{"calls": _calls(), "duration": 50}])
+		assert (doc.total_queries, doc.total_query_time_ms) == (4, 13.0)

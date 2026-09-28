@@ -587,6 +587,31 @@ def _is_error_log_hook_frame(filename: str) -> bool:
 	return filename.endswith(_ERROR_LOG_HOOK_FRAME)
 
 
+def is_error_log_hook_query(stack: list | None) -> bool:
+	"""True when a SQL call is the Error Log hook's own stored-key read: walking
+	innermost to outermost, the hook's frame (``_ERROR_LOG_HOOK_FRAME``) comes
+	before any user frame (one in neither ``frappe/`` nor ``optimus/``). The
+	same rule ``is_profiler_own_query`` and ``walk_callsite`` apply to the
+	hook; the session totals (``analyze._session_query_totals``) leave these
+	calls out."""
+	if not stack:
+		return False
+	for frame in reversed(stack):
+		if not isinstance(frame, dict):
+			continue
+		filename = (frame.get("filename") or "").replace("\\", "/")
+		if not filename:
+			continue
+		if "optimus/" in filename:
+			if _is_error_log_hook_frame(filename):
+				return True
+			continue
+		if "frappe/" in filename:
+			continue
+		return False
+	return False
+
+
 def is_profiler_own_query(stack: list | None) -> bool:
 	"""True if a SQL call's Python stack originates from the profiler's own
 	instrumentation (e.g. the ``SHOW GLOBAL STATUS`` / ``SHOW VARIABLES`` snapshots

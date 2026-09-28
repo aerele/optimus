@@ -42,7 +42,7 @@ from optimus.analyzers import (
 	table_breakdown,
 	top_queries,
 )
-from optimus.analyzers.base import _DUR_SEP, SEVERITY_ORDER, AnalyzeContext, dur
+from optimus.analyzers.base import _DUR_SEP, SEVERITY_ORDER, AnalyzeContext, dur, is_error_log_hook_query
 from optimus.dbdialect import get_dialect
 
 # v0.3.0: per-analyzer wall-clock budget. If the cumulative analyze
@@ -1503,6 +1503,22 @@ def _hard_truncate_tree(tree_json: str) -> str:
 	return _json.dumps(out, default=str)
 
 
+def _session_query_totals(recordings: list[dict]) -> tuple[int, float]:
+	"""``(query count, query time in ms)`` over every recorded call, leaving
+	out the Error Log hook's own stored-key read (``is_error_log_hook_query``,
+	the analyzers' rule for it): one ``__Auth`` SELECT per Error Log insert
+	that is Optimus's, not the flow's."""
+	count = 0
+	time_ms = 0
+	for r in recordings:
+		for c in r.get("calls") or []:
+			if isinstance(c, dict) and is_error_log_hook_query(c.get("stack")):
+				continue
+			count += 1
+			time_ms += c.get("duration", 0)
+	return count, time_ms
+
+
 def _persist(
 	docname: str,
 	context: AnalyzeContext,
@@ -1511,10 +1527,7 @@ def _persist(
 ) -> None:
 	"""Write the analyzed data into the Optimus Session DocType row."""
 	total_requests = len(recordings)
-	total_queries = sum(len(r.get("calls") or []) for r in recordings)
-	total_query_time_ms = sum(
-		sum(c.get("duration", 0) for c in r.get("calls") or []) for r in recordings
-	)
+	total_queries, total_query_time_ms = _session_query_totals(recordings)
 	total_duration_ms = sum(r.get("duration", 0) for r in recordings)
 
 	doc = frappe.get_doc("Optimus Session", docname)
