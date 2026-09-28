@@ -154,21 +154,35 @@ def redact_call_queries(calls, *, extra_columns: tuple[str, ...] = ()) -> None:
 # ---------------------------------------------------------------------------
 # Secret scrubbing for log text (PR-0a). Used by ai_fix.log_ai_failure on
 # every AI-surface Error Log message and by optimus.maintenance to scrub rows
-# written before the fix. Three shapes cover every leak found in real rows:
-# a dict repr carrying an auth header, a dict repr carrying an api-key field,
-# and a bare "Bearer <token>" anywhere else (exception text, echoed bodies);
-# two more mask an x-api-key header line and a header value quoted in an
-# HTTP library's error message (a key no longer stored, after a rotation),
-# and the last masks credentials in a URL (a Base URL typed as user:pass@host).
+# written before the fix. The shapes, each masked without the key literal (a
+# key no longer stored, after a rotation):
+# - a dict repr entry carrying an auth header (authorization or
+#   proxy-authorization with the Bearer, Basic, Token, Key or ApiKey scheme)
+#   or an api-key field (x-api-key, x-goog-api-key, api_key, api-key,
+#   apikey), with a str or bytes value;
+# - "Bearer <token>" anywhere (exception text, echoed bodies), as spelled;
+# - bearer, basic or token in any case followed by a token holding a digit
+#   (a random key has one), so prose such as "the bearer of" or "token
+#   expired" is left;
+# - an "Authorization: <scheme> <token>" header line, any case, with one of
+#   the five schemes above;
+# - an x-api-key or x-goog-api-key header line, and an api-key or api_key
+#   header line whose token holds a digit;
+# - a header value quoted in an HTTP library's error message;
+# - credentials in a URL (a Base URL typed as user:pass@host).
+# A token is a run of 8 or more characters with no quote and no whitespace
+# that never ends on a backslash, so a JSON-escaped quote after it stays.
+# Nothing else is masked by shape: another header, or a key in running prose
+# with no scheme or header name in front of it, is masked only as a literal.
 # ---------------------------------------------------------------------------
 
 SECRET_PLACEHOLDER = "********"
 
 _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
-	# 'authorization': 'Bearer <tok>' (either quote style; also Basic / Token;
-	# the value may be bytes: b'Bearer <tok>')
+	# 'authorization': 'Bearer <tok>' (either quote style; also Basic, Token,
+	# Key, ApiKey; the value may be bytes: b'Bearer <tok>')
 	re.compile(
-		r"""((['"])(?:proxy-)?authorization\2\s*:\s*b?(['"])(?:bearer|basic|token)\s+)(?!\*{8}\3)[^'"\s]+(\3)""",
+		r"""((['"])(?:proxy-)?authorization\2\s*:\s*b?(['"])(?:bearer|basic|token|key|apikey)\s+)(?!\*{8}\3)[^'"\s]+(\3)""",
 		re.IGNORECASE,
 	),
 	# 'x-api-key' / 'x-goog-api-key' / 'api_key' / 'api-key' / 'apikey' : '<tok>'
@@ -187,6 +201,22 @@ _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
 	# (a rotated key): the token, as for Bearer, is a run of 8 or more
 	# non-quote, non-space characters that never ends on a backslash
 	re.compile(r"""(\bx-(?:goog-)?api-key:[ \t]*)(?!\*{8})[^'"\s]{7,}[^'"\s\\]()()()""", re.IGNORECASE),
+	# bearer / basic / token in any case, when the token holds a digit (a
+	# random key has one; "the bearer of", "token expired" do not)
+	re.compile(
+		r"""(\b(?:bearer|basic|token)\s+)(?!\*{8})(?=[^'"\s]*[0-9])[^'"\s]{7,}[^'"\s\\]()()()""", re.IGNORECASE,
+	),
+	# an Authorization header line: Authorization: <scheme> <token>, any case
+	re.compile(
+		r"""(\b(?:proxy-)?authorization:[ \t]*(?:bearer|basic|token|key|apikey)[ \t]+)(?!\*{8})"""
+		r"""[^'"\s]{7,}[^'"\s\\]()()()""",
+		re.IGNORECASE,
+	),
+	# a bare api-key / api_key header line (Azure OpenAI's api-key header),
+	# when the token holds a digit ("api_key: required" is prose)
+	re.compile(
+		r"""(\bapi[-_]key:[ \t]*)(?!\*{8})(?=[^'"\s]*[0-9])[^'"\s]{7,}[^'"\s\\]()()()""", re.IGNORECASE,
+	),
 	# a header value an HTTP library could not send, quoted in its message:
 	# http.client's "Invalid header value b'<value>'" and requests' "... in
 	# header value: '<value>'"; the quoted repr is masked whole, its escape
@@ -238,8 +268,10 @@ def scrub_secrets(text: str, *, literals: tuple[str, ...] = ()) -> str:
 	string of at least 8 characters (the live key, when the caller knows
 	it), longest first, so a literal inside another one (a stored key and
 	the key a request was sent with can overlap) never leaves part of the
-	longer one behind; then the header / field / Bearer / URL-credential
-	shapes. Idempotent: an already-masked value is never matched again, so a
+	longer one behind; then the shapes listed above ``_SECRET_PATTERNS``
+	(header entries and lines with a scheme or an api-key name, Bearer,
+	URL credentials): a key in running prose with none of those in front of
+	it is masked only as a literal. Idempotent: an already-masked value is never matched again, so a
 	second pass changes nothing. Non-string input is returned unchanged.
 
 	SECURITY: the key arrives in the ``literals`` parameter, a name neither

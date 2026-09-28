@@ -488,3 +488,60 @@ class TestBytesHeaderValues:
 		assert out == masked
 		assert "OLD" not in out
 		assert redaction.scrub_secrets(out) == out
+
+
+class TestSchemeAndHeaderShapes:
+	"""Bare Bearer / Basic / Token in any case, the Key and ApiKey header
+	schemes and a bare api-key / api_key header line; ordinary prose stays."""
+
+	@pytest.mark.parametrize(
+		("text", "masked"),
+		[
+			("401 for bearer sk-OLDkey0123456789abcdef", "401 for bearer ********"),
+			("BEARER sk-OLDkey0123456789abcdef rejected", "BEARER ******** rejected"),
+			("sent Basic dXNlcjpPTERwYXNzd29yZDE= to the proxy", "sent Basic ******** to the proxy"),
+			("header was token OLDapikey123:OLDsecret456", "header was token ********"),
+			("TOKEN OLDapikey123:OLDsecret456", "TOKEN ********"),
+			("Authorization: Key fal-OLDkey0123456789abcdef", "Authorization: Key ********"),
+			("authorization: ApiKey OLDkeyvaluewithoutdigits", "authorization: ApiKey ********"),
+			("      header = b'Authorization: key OLDkey0123456789'", "      header = b'Authorization: key ********'"),
+			("headers = {'authorization': 'Key OLDkey0123456789abcdef'}", "headers = {'authorization': 'Key ********'}"),
+			('headers = {"Authorization": "ApiKey OLDkey0123456789abcdef"}', 'headers = {"Authorization": "ApiKey ********"}'),
+			("      header = b'api-key: 0123OLD456789abcdef0123456789ab'", "      header = b'api-key: ********'"),
+			("api_key: sk-OLD0123456789abcdef in the request", "api_key: ******** in the request"),
+			("Api-Key: 0123OLD456789abcdef0123456789ab", "Api-Key: ********"),
+		],
+		ids=[
+			"bearer-lower", "bearer-upper", "basic", "token-lower", "token-upper", "authz-key",
+			"authz-apikey", "authz-key-bytes-line", "dict-key", "dict-apikey", "api-key-line",
+			"api_key-line", "api-key-mixed-case",
+		],
+	)
+	def test_masked_without_the_key(self, text, masked):
+		out = redaction.scrub_secrets(text, literals=("sk-new-stored-0123456789",))
+		assert out == masked
+		assert "OLD" not in out
+		assert redaction.scrub_secrets(out) == out
+
+	@pytest.mark.parametrize(
+		"plain",
+		[
+			"the bearer of bad news arrived",
+			"Token counts: 1200 prompt, 300 completion",
+			"token expired at midnight",
+			"basic information is missing",
+			"Basic authentication failed for this user",
+			"Primary Key constraint failed",
+			"Key 1234567890 is a duplicate",
+			"ApiKey rotation reminder",
+			"api_key: required",
+			"api-key: notconfigured",
+			"api_key = 'x'",
+			"Authorization failed for user administrator",
+			"Authorization: Bearer ********",
+			"token ********",
+			"max_tokens exceeded for model gpt-4o-2024-08-06",
+		],
+	)
+	def test_ordinary_prose_is_left(self, plain):
+		assert redaction.scrub_secrets(plain) == plain
