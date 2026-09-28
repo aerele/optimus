@@ -208,14 +208,25 @@ class TestApiKeyAuth:
 
 
 class TestScrubLiteralsFor:
-	"""The literals a provider reply is scrubbed of: the stored key and the
-	key the request was sent with, each raw and JSON-escaped."""
+	"""The literals a provider reply is scrubbed of, each raw and
+	JSON-escaped: the key the request was sent with, or, when it carried
+	none, the stored key."""
 
-	def test_the_stored_key_then_the_in_flight_key(self, monkeypatch):
-		stored, in_flight = 'sk-stored-0123"quoted', "sk-inflight-0123456789"
-		_store_key(monkeypatch, f" {stored}\n")
+	def test_the_in_flight_key_without_reading_the_stored_one(self, monkeypatch):
+		in_flight = 'sk-inflight-0123"quoted'
+		reads = []
+		monkeypatch.setattr(
+			"frappe.utils.password.get_decrypted_password", lambda *a, **k: reads.append(1) or "sk-stored-0123456789",
+			raising=False,
+		)
 		auth = ai_fix._ApiKeyAuth("authorization", in_flight, prefix="Bearer ")
-		assert ai_fix._scrub_literals_for(auth) == (stored, 'sk-stored-0123\\"quoted', in_flight, in_flight)
+		assert ai_fix._scrub_literals_for(auth) == (in_flight, 'sk-inflight-0123\\"quoted')
+		assert reads == []
+
+	def test_the_stored_key_when_no_key_was_sent(self, monkeypatch):
+		stored = 'sk-stored-0123"quoted'
+		_store_key(monkeypatch, f" {stored}\n")
+		assert ai_fix._scrub_literals_for(None) == (stored, 'sk-stored-0123\\"quoted')
 
 	def test_no_key_and_no_auth_is_empty(self, monkeypatch):
 		_store_key(monkeypatch, None)
@@ -296,3 +307,93 @@ class TestRequestsCarryTheKeyOnlyInAuth:
 		assert fake.calls == []
 		assert probe["ok"] is False and "smart quote" in probe["message"]
 		assert "sk-live" not in probe["message"]
+
+
+# ---------------------------------------------------------------------------
+# The stored key is read once per call (one __Auth SELECT)
+# ---------------------------------------------------------------------------
+
+class TestTheKeyIsReadOncePerCall:
+	"""Each read of the stored key is a SELECT on ``__Auth``. A call reads it
+	once, at the entry point; the scrub helpers use the key the request was
+	sent with (the ``_ApiKeyAuth``), and read the stored key again only when a
+	request carried none. Nothing is cached across calls."""
+
+	@pytest.fixture
+	def reads(self, monkeypatch):
+		import frappe
+
+		count = {"n": 0, "key": KEY}
+
+		def _decrypt(*a, **k):
+			count["n"] += 1
+			return count["key"]
+
+		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", _decrypt, raising=False)
+		monkeypatch.setattr(frappe, "log_error", lambda **kw: None, raising=False)
+		return count
+
+	@pytest.mark.parametrize("provider", ["OpenAI", "Anthropic"])
+	@pytest.mark.parametrize(
+		("status", "payload", "text"),
+		[
+			(200, None, ""),
+			(401, {"error": {"type": "authentication_error"}}, f'{{"error": "bad key {KEY}"}}'),
+			(500, {"error": {"type": "server_error"}}, f'{{"error": "upstream echoed {KEY}"}}'),
+			(404, {}, f"not found {KEY}"),
+		],
+		ids=["ok", "401", "500", "404"],
+	)
+	def test_suggest_fix_reads_it_once(self, reads, monkeypatch, provider, status, payload, text):
+		ok = _ANTHROPIC_OK if provider == "Anthropic" else _OPENAI_OK
+		monkeypatch.setattr(requests, "post", _capture(_Resp(status, ok if status == 200 else payload, text=text)))
+		with patch("optimus.settings.get_config", return_value=_cfg(ai_provider=provider)):
+			if status == 200:
+				ai_fix.suggest_fix(dict(_FINDING))
+			else:
+				with pytest.raises(ai_fix.AiFixError) as ei:
+					ai_fix.suggest_fix(dict(_FINDING))
+				assert KEY not in str(ei.value)
+		assert reads["n"] == 1
+
+	def test_the_other_entry_points_read_it_once(self, reads, monkeypatch):
+		monkeypatch.setattr(requests, "post", _capture(_Resp(200, _OPENAI_OK)))
+		with patch("optimus.settings.get_config", return_value=_cfg()):
+			for call in (
+				lambda: ai_fix.humanize_steps([{"label": "open", "cmd": "x", "duration_ms": 5}]),
+				lambda: ai_fix.suggest_index({"table": "tabItem", "candidates": {}}),
+				ai_fix.test_connection,
+			):
+				reads["n"] = 0
+				call()
+				assert reads["n"] == 1
+
+	def test_the_temperature_retry_reads_nothing_more(self, reads, monkeypatch):
+		err = '{"error":{"message":"invalid temperature: only 1 is allowed for this model"}}'
+		replies = iter([_Resp(400, {}, text=err), _Resp(200, _OPENAI_OK)])
+		monkeypatch.setattr(requests, "post", lambda *a, **k: next(replies))
+		with patch("optimus.settings.get_config", return_value=_cfg(ai_model="kimi-k2")):
+			ai_fix.suggest_fix(dict(_FINDING))
+		assert reads["n"] == 1
+
+	def test_nothing_is_cached_across_calls(self, reads, monkeypatch):
+		fake = _capture(_Resp(200, _OPENAI_OK))
+		monkeypatch.setattr(requests, "post", fake)
+		with patch("optimus.settings.get_config", return_value=_cfg()):
+			ai_fix.suggest_fix(dict(_FINDING))
+			reads["key"] = "sk-rotated-9876543210ZYXwvu"
+			ai_fix.suggest_fix(dict(_FINDING))
+		assert reads["n"] == 2
+		assert fake.calls[1].wire_headers["authorization"] == "Bearer sk-rotated-9876543210ZYXwvu"
+
+	def test_a_request_without_a_key_scrubs_with_the_stored_one(self, reads, monkeypatch):
+		# No auth: the scrub helpers read the stored key again (it may have
+		# been set since) and mask it in the reply.
+		reads["key"] = ""
+		monkeypatch.setattr(requests, "post", _capture(_Resp(500, {}, text="late key sk-late-0123456789abcdef")))
+		cfg = _cfg(ai_provider="OpenAI-compatible", ai_base_url="http://10.0.0.5:11434/v1", ai_model="q")
+		with patch("optimus.settings.get_config", return_value=cfg):
+			reads["key"] = ""
+			with pytest.raises(ai_fix.AiFixError):
+				ai_fix.suggest_fix(dict(_FINDING))
+		assert reads["n"] > 1

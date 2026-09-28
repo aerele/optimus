@@ -1629,7 +1629,9 @@ class TestAnInterruptWhileReadingTheKeyForAReply:
 			"error": {"message": f"invalid key {KEY}", "type": "invalid_request_error", "code": KEY},
 		}))
 		with pytest.raises(SystemExit) as ei:
-			getattr(ai_fix, reader)(resp, ai_fix._ApiKeyAuth("authorization", KEY, prefix="Bearer "))
+			# No auth: a request that carried no key, the case where the
+			# stored key is read here (an _ApiKeyAuth needs no read).
+			getattr(ai_fix, reader)(resp, None)
 		assert ei.value is interrupt
 		walked = []
 		tb = ei.value.__traceback__

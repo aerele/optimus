@@ -57,6 +57,19 @@ def _post_returning(resp):
 	return _fake_post
 
 
+def _provider(provider: dict):
+	"""Patch what an entry point reads: the provider config (``_provider_config``,
+	no key) and the one read of the key (``_get_api_key``): a fake key when
+	``provider["has_key"]``, else none."""
+	from contextlib import ExitStack
+
+	config = {k: v for k, v in provider.items() if k != "has_key"}
+	stack = ExitStack()
+	stack.enter_context(patch("optimus.ai_fix._provider_config", return_value=config))
+	stack.enter_context(patch("optimus.ai_fix._get_api_key", return_value="k-fake-test-key" if provider.get("has_key") else ""))
+	return stack
+
+
 def _post_raising(exc):
 	def _fake_post(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002, F811
 		raise exc
@@ -570,7 +583,7 @@ class TestAnthropicCall:
 			_FakeResp(200, {"content": [{"type": "text", "text": {"echo": "x"}}]})))
 		prov = {"name": "Anthropic", "protocol": "anthropic", "base_url": "https://api.anthropic.com",
 		        "model": "claude-sonnet-4-6", "needs_key": True, "has_key": True}
-		with patch("optimus.ai_fix._resolve_provider", return_value=prov):
+		with _provider(prov):
 			with pytest.raises(ai_fix.AiFixError, match="empty response"):
 				ai_fix.suggest_fix({"finding_type": "Missing Index", "title": "x", "technical_detail": {}})
 
@@ -754,7 +767,7 @@ class TestSuggestFix:
 
 	def test_happy_path_returns_payload(self, monkeypatch):
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, _OPENAI_OK)))
-		with patch("optimus.ai_fix._resolve_provider", return_value=dict(self._PROVIDER)):
+		with _provider(dict(self._PROVIDER)):
 			out = ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "slow", "technical_detail": {}})
 		assert out["suggestion"] == "**Fix**\n\nuse a join"
 		assert out["model"] == "gpt-4.1-mini"
@@ -766,7 +779,7 @@ class TestSuggestFix:
 		resp = {"choices": [{"message": {"content": "**Fix**"}}],
 		        "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, resp)))
-		with patch("optimus.ai_fix._resolve_provider", return_value=dict(self._PROVIDER)):
+		with _provider(dict(self._PROVIDER)):
 			out = ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
 		assert out["tokens"] == {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
 
@@ -774,14 +787,14 @@ class TestSuggestFix:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, _ANTHROPIC_OK)))
 		prov = {"name": "Anthropic", "protocol": "anthropic", "base_url": "https://api.anthropic.com",
 		        "model": "claude-sonnet-4-6", "needs_key": True, "has_key": True}
-		with patch("optimus.ai_fix._resolve_provider", return_value=prov):
+		with _provider(prov):
 			out = ai_fix.suggest_fix({"finding_type": "Missing Index", "title": "x", "technical_detail": {}})
 		assert out["suggestion"] == "**Fix**\n\nadd an index"
 		assert out["provider"] == "Anthropic"
 
 	def test_empty_response_raises(self, monkeypatch):
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {"choices": [{"message": {"content": "   "}}]})))
-		with patch("optimus.ai_fix._resolve_provider", return_value=dict(self._PROVIDER)):
+		with _provider(dict(self._PROVIDER)):
 			with pytest.raises(ai_fix.AiFixError, match="empty"):
 				ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
 
@@ -789,7 +802,7 @@ class TestSuggestFix:
 		called = {"n": 0}
 		monkeypatch.setattr(requests, "post", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
 		bad = dict(self._PROVIDER, model="")
-		with patch("optimus.ai_fix._resolve_provider", return_value=bad):
+		with _provider(bad):
 			with pytest.raises(ai_fix.AiFixError, match="model"):
 				ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x"})
 		assert called["n"] == 0
@@ -798,7 +811,7 @@ class TestSuggestFix:
 		called = {"n": 0}
 		monkeypatch.setattr(requests, "post", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
 		bad = dict(self._PROVIDER, has_key=False)
-		with patch("optimus.ai_fix._resolve_provider", return_value=bad):
+		with _provider(bad):
 			with pytest.raises(ai_fix.AiFixError, match="API key"):
 				ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x"})
 		assert called["n"] == 0
@@ -810,7 +823,7 @@ class TestSourceAvailableFlag:
 
 	def _suggest(self, monkeypatch, finding):
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, _OPENAI_OK)))
-		with patch("optimus.ai_fix._resolve_provider", return_value=dict(self._PROVIDER)):
+		with _provider(dict(self._PROVIDER)):
 			return ai_fix.suggest_fix(finding)
 
 	def test_true_when_source_window_present(self, monkeypatch):
@@ -854,7 +867,7 @@ class TestSuggestIndex:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, resp)))
 		monkeypatch.setattr(ai_fix, "_build_index_messages",
 		                    lambda payload: ("sys", [{"role": "user", "content": "x"}]))
-		with patch("optimus.ai_fix._resolve_provider", return_value=dict(self._PROVIDER)):
+		with _provider(dict(self._PROVIDER)):
 			out = ai_fix.suggest_index({"table": "tabUser"})
 		assert out["tokens"] == {"prompt_tokens": 90, "completion_tokens": 30, "total_tokens": 120}
 		assert out["suggestion"].startswith("**Index**")
@@ -899,7 +912,7 @@ class TestHumanizeSteps:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, out)))
 		prov = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
 		        "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
-		with patch("optimus.ai_fix._resolve_provider", return_value=prov):
+		with _provider(prov):
 			text = ai_fix.humanize_steps(self._ACTIONS, session_title="x")
 		assert "Create a Sales Invoice" in text and "**Summary:**" in text
 
@@ -911,7 +924,7 @@ class TestHumanizeSteps:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {"choices": [{"message": {"content": "  "}}]})))
 		prov = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
 		        "model": "m", "needs_key": True, "has_key": True}
-		with patch("optimus.ai_fix._resolve_provider", return_value=prov):
+		with _provider(prov):
 			with pytest.raises(ai_fix.AiFixError, match="empty"):
 				ai_fix.humanize_steps(self._ACTIONS)
 
@@ -947,7 +960,7 @@ class TestMetadataIndexGuardrail:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, bad)))
 		prov = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
 		        "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
-		with patch("optimus.ai_fix._resolve_provider", return_value=prov):
+		with _provider(prov):
 			out = ai_fix.suggest_fix({"finding_type": "Missing Index", "title": "x", "technical_detail": {}})
 		assert "Profiler note" in out["suggestion"]
 		assert "docstatus" in out["suggestion"]
@@ -1152,7 +1165,7 @@ class TestRawSqlGuardrail:
 		prov = {"name": "OpenAI", "protocol": "openai",
 		        "base_url": "https://api.openai.com/v1",
 		        "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
-		with patch("optimus.ai_fix._resolve_provider", return_value=prov):
+		with _provider(prov):
 			out = ai_fix.suggest_fix({
 				"finding_type": "N+1 Query", "title": "x", "technical_detail": {},
 			})
