@@ -23,6 +23,7 @@ import re
 import traceback
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -1988,13 +1989,21 @@ def _http_post(
 ) -> dict:
 	"""POST JSON, return the parsed response dict. Maps transport / HTTP /
 	decode errors to ``AiFixError`` with operator-friendly messages and logs
-	each failure once (``_log_http_error``). A redirect is never followed
-	(``allow_redirects=False``): ``requests`` drops only a header named
-	``Authorization`` when it follows one to another host, so Anthropic's
-	``x-api-key`` header would be sent on to the redirect target. A 3xx
-	reply is therefore ``kind="bad_response"`` and a 4xx / 5xx reply an HTTP
-	error; both are logged with a body-free log text (``_LOG_TEXT_ATTR``),
-	never their body.
+	each failure once (``_log_http_error``).
+
+	``requests`` never follows a redirect here (``allow_redirects=False``):
+	it drops only a header named ``Authorization`` when it follows one to
+	another host, so Anthropic's ``x-api-key`` header would be sent on to the
+	redirect target. A 307 or 308 whose Location stays on the same host and
+	port, with the same scheme or an http to https upgrade on that host
+	(``_same_origin_redirect``), is followed by hand, at most
+	``_MAX_REDIRECTS`` times: a new POST of the same body to that address,
+	the key attached again by the same ``auth``. Every other 3xx (301, 302
+	and 303 would turn the POST into a GET; another host or port; a
+	downgrade; one redirect too many) is ``kind="bad_response"``. The
+	Location is never logged or shown. A 4xx / 5xx reply is an HTTP error;
+	both are logged with a body-free log text (``_LOG_TEXT_ATTR``), never
+	their body.
 
 	SECURITY: ``auth`` (an ``_ApiKeyAuth``) attaches the key at send time, so
 	``headers`` never holds it. Every failure is logged and raised OUTSIDE the
@@ -2022,52 +2031,64 @@ def _http_post(
 	rule 4)."""
 	timeout = timeout or _resolve_timeout_seconds()
 	failure: AiFixError | None = None
-	unexpected_name: str | None = None
-	unexpected_frames: list[str] = []
 	detail = ""
 	resp = None
-	guard = _InterruptGuard(base=True)
-	try:
-		with guard:
-			resp = requests.post(url, headers=headers, json=body, timeout=timeout, auth=auth, allow_redirects=False)
-	except requests.exceptions.Timeout:
-		failure = AiFixError(f"The AI provider didn't respond within {timeout}s.", kind="timeout")
-		detail = "timeout"
-	except requests.exceptions.RequestException as e:
-		failure = AiFixError(f"Couldn't reach the AI provider: {type(e).__name__}.", kind="transport")
-		detail = f"{type(e).__name__}: {e}"
-	except Exception as e:
-		unexpected_name = type(e).__name__
-		# file:line:function per frame, read straight off the traceback:
-		# no source lookup (no I/O while this handler runs), no locals,
-		# no message.
-		unexpected_frames = [
-			f"{frame.f_code.co_filename}:{lineno}:{frame.f_code.co_name}"
-			for frame, lineno in traceback.walk_tb(e.__traceback__)
-		]
-	# A non-Exception interrupt is not ours to handle: it leaves unlogged, as
-	# the same instance, without the frames below this one (their locals hold
-	# the prepared headers), and unchained when _http_post is not itself
-	# called while an exception is being handled. An RQ job timeout must
-	# still stop the job: the same type, raised fresh, with no requests /
-	# urllib3 frames and no chain.
-	if guard.pending():
-		raise guard.interrupt()
-	if unexpected_name is not None:
-		from frappe import _
+	target = url
+	redirects = 0
+	while True:
+		unexpected_name: str | None = None
+		unexpected_frames: list[str] = []
+		guard = _InterruptGuard(base=True)
+		try:
+			with guard:
+				resp = requests.post(target, headers=headers, json=body, timeout=timeout, auth=auth, allow_redirects=False)
+		except requests.exceptions.Timeout:
+			failure = AiFixError(f"The AI provider didn't respond within {timeout}s.", kind="timeout")
+			detail = "timeout"
+		except requests.exceptions.RequestException as e:
+			failure = AiFixError(f"Couldn't reach the AI provider: {type(e).__name__}.", kind="transport")
+			detail = f"{type(e).__name__}: {e}"
+		except Exception as e:
+			unexpected_name = type(e).__name__
+			# file:line:function per frame, read straight off the traceback:
+			# no source lookup (no I/O while this handler runs), no locals,
+			# no message.
+			unexpected_frames = [
+				f"{frame.f_code.co_filename}:{lineno}:{frame.f_code.co_name}"
+				for frame, lineno in traceback.walk_tb(e.__traceback__)
+			]
+		# A non-Exception interrupt is not ours to handle: it leaves unlogged,
+		# as the same instance, without the frames below this one (their locals
+		# hold the prepared headers), and unchained when _http_post is not
+		# itself called while an exception is being handled. An RQ job timeout
+		# must still stop the job: the same type, raised fresh, with no
+		# requests / urllib3 frames and no chain.
+		if guard.pending():
+			raise guard.interrupt()
+		if unexpected_name is not None:
+			from frappe import _
 
-		failure = AiFixError(_("The AI request failed ({0}).").format(unexpected_name), kind="transport")
-		# Where it happened, never what it said: plain frames, no message, no locals.
-		detail = unexpected_name + "".join(f"\n  {frame}" for frame in unexpected_frames)
-	if failure is not None:
-		_log_http_error(provider, where, None, detail, exc=failure, auth=auth)
-		raise failure
+			failure = AiFixError(_("The AI request failed ({0}).").format(unexpected_name), kind="transport")
+			# Where it happened, never what it said: plain frames, no message, no locals.
+			detail = unexpected_name + "".join(f"\n  {frame}" for frame in unexpected_frames)
+		if failure is not None:
+			_log_http_error(provider, where, None, detail, exc=failure, auth=auth)
+			raise failure
+		if resp.status_code not in (307, 308) or redirects >= _MAX_REDIRECTS:
+			break
+		# 307 / 308 keep the method and the body. The key goes again only to
+		# the same host and port (_same_origin_redirect); anything else is the
+		# bad_response below. The Location is never logged or shown.
+		follow = _same_origin_redirect(target, resp)
+		if follow is None:
+			break
+		target = follow
+		redirects += 1
 
 	status = resp.status_code
 	if 300 <= status < 400:
-		# A redirect is never followed (allow_redirects=False, so the key
-		# header is never sent on to its target): it is not the provider's
-		# reply, whatever its body holds.
+		# Not followed (see the docstring): it is not the provider's reply,
+		# whatever its body holds, and the key never goes to its target.
 		from frappe import _
 
 		failure = AiFixError(
@@ -2130,6 +2151,50 @@ def _http_post(
 		_log_http_error(provider, where, status, detail, exc=failure, auth=auth)
 		raise failure
 	return data
+
+
+# How many same-origin 307 / 308 redirects _http_post follows for one request.
+_MAX_REDIRECTS = 3
+# The port a URL scheme means when the URL names none.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _same_origin_redirect(current: str, resp) -> str | None:
+	"""The absolute URL a redirect reply (``resp``) points to, when the key may
+	be sent there: the same host and the same port, with the same scheme, or
+	an upgrade from http to https on that host (port 80 to 443, or the same
+	port), and no credentials of its own in the URL. None otherwise, for a
+	missing or unparsable Location, and on any failure (never raises, except
+	an RQ job timeout, raised fresh). Neither the Location nor the result is
+	ever logged or shown: it comes from the reply, not from Optimus Settings."""
+	guard = _InterruptGuard()
+	try:
+		with guard:
+			location = resp.headers.get("location")
+			if not isinstance(location, str) or not location.strip():
+				return None
+			follow = urljoin(current, location.strip())
+			old, new = urlsplit(current), urlsplit(follow)
+			if not old.hostname or new.hostname != old.hostname:
+				return None
+			if (new.username, new.password) != (old.username, old.password):
+				return None
+			old_port = old.port or _DEFAULT_PORTS.get(old.scheme)
+			new_port = new.port or _DEFAULT_PORTS.get(new.scheme)
+			if old_port is None or new_port is None:
+				return None
+			if new.scheme == old.scheme:
+				same_origin = new_port == old_port
+			else:
+				same_origin = (old.scheme, new.scheme) == ("http", "https") and (
+					new_port == old_port or (old_port, new_port) == (80, 443)
+				)
+			return follow if same_origin else None
+	except Exception:
+		return None
+	if guard.pending():
+		raise guard.interrupt()
+	return None
 
 
 # Token counts land in Int columns (Optimus Session.ai_tokens_spent,

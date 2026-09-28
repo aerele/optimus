@@ -14,6 +14,7 @@ import sys
 import traceback
 import types
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 import requests
@@ -1168,8 +1169,9 @@ class TestARedirectIsNeverFollowed:
 	"""``requests`` drops only a header named ``Authorization`` when it
 	follows a redirect to another host, so Anthropic's ``x-api-key`` would be
 	sent on to the redirect target. ``_http_post`` sends with
-	``allow_redirects=False``: a 3xx is the provider's answer, and a
-	``bad_response``."""
+	``allow_redirects=False``: a 302 to another host is the provider's
+	answer, and a ``bad_response`` (see also
+	``TestOnlyASameOriginRedirectIsFollowed``)."""
 
 	@pytest.mark.parametrize(
 		("call", "header", "value"),
@@ -1192,6 +1194,175 @@ class TestARedirectIsNeverFollowed:
 		assert url.startswith(_RedirectingAdapter.PROVIDER) and headers[header] == value  # the key was sent there
 		assert not [u for u, _h in sent if u.startswith("https://collector.example.net")]
 		assert len(logs) == 1 and KEY not in logs[0]["message"]
+
+
+class _ScriptedAdapter(requests.adapters.BaseAdapter):
+	"""A fake transport under a REAL ``requests`` Session: each request gets
+	the next scripted reply, ``(status, location)`` for a redirect or
+	``(200, None)`` for the provider's reply. ``sent`` records every request
+	that reached the transport, as (method, url, headers, body)."""
+
+	def __init__(self, sent: list, script: list):
+		super().__init__()
+		self.sent, self.script = sent, script
+
+	def send(self, request, **kwargs):
+		self.sent.append((request.method, request.url, request.headers.copy(), request.body))
+		status, location = self.script.pop(0)
+		resp = requests.Response()
+		resp.request, resp.url, resp.raw, resp.encoding = request, request.url, io.BytesIO(b""), "utf-8"
+		resp.status_code = status
+		if location is not None:
+			resp.headers["Location"] = location
+			resp._content = b""
+		else:
+			resp._content = json.dumps({
+				"content": [{"type": "text", "text": "ok"}],
+				"choices": [{"message": {"content": "ok"}}],
+			}).encode()
+		return resp
+
+	def close(self):
+		pass
+
+
+_CALLS = [
+	(ai_fix._call_anthropic, "https://api.provider.invalid", "/v1/messages", "x-api-key", KEY),
+	(ai_fix._call_openai_chat, "https://api.provider.invalid/v1", "/chat/completions", "Authorization", f"Bearer {KEY}"),
+]
+
+
+class TestOnlyASameOriginRedirectIsFollowed:
+	"""A 307 or 308 to the same host and port (the same scheme, or http to
+	https on that host) is followed with the same method and body, and the
+	key is attached again by the same ``_ApiKeyAuth``: at most 3 times. Any
+	other 3xx (301 / 302 / 303, which would turn the POST into a GET; another
+	host or port; a downgrade to http; a 4th redirect) is a ``bad_response``,
+	and the key never reaches another host. The Location is never logged or
+	shown."""
+
+	def _run(self, monkeypatch, call, base, script):
+		sent = []
+		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
+		text = call(base, KEY, "m", "system", [{"role": "user", "content": "hi"}])
+		return text, sent
+
+	@pytest.mark.parametrize(("call", "base", "path", "header", "value"), _CALLS, ids=["anthropic", "openai"])
+	@pytest.mark.parametrize("status", [307, 308])
+	@pytest.mark.parametrize(
+		"location",
+		["/v2/moved", "https://api.provider.invalid/v2/moved", "https://API.provider.invalid:443/v2/moved"],
+		ids=["relative", "absolute", "explicit-default-port"],
+	)
+	def test_a_same_origin_307_or_308_is_followed_with_the_body_and_the_key(
+		self, logs, monkeypatch, call, base, path, header, value, status, location,
+	):
+		text, sent = self._run(monkeypatch, call, base, [(status, location), (200, None)])
+		assert text == "ok"
+		assert len(sent) == 2
+		(m1, u1, h1, b1), (m2, u2, h2, b2) = sent
+		assert (m1, m2) == ("POST", "POST") and b1 == b2 and b1
+		assert u1 == base + path
+		assert urlsplit(u2).hostname == "api.provider.invalid" and urlsplit(u2).path == "/v2/moved"
+		assert h1[header] == value and h2[header] == value
+		assert logs == []
+
+	@pytest.mark.parametrize(("call", "base", "path", "header", "value"), _CALLS, ids=["anthropic", "openai"])
+	def test_an_http_to_https_upgrade_on_the_same_host_is_followed(
+		self, logs, monkeypatch, call, base, path, header, value,
+	):
+		plain = base.replace("https://", "http://")
+		text, sent = self._run(monkeypatch, call, plain, [(308, base + path), (200, None)])
+		assert text == "ok" and [u for _m, u, _h, _b in sent] == [plain + path, base + path]
+		assert sent[1][2][header] == value
+
+	@pytest.mark.parametrize(("call", "base", "path", "header", "value"), _CALLS, ids=["anthropic", "openai"])
+	@pytest.mark.parametrize(
+		("status", "location"),
+		[
+			(302, "https://collector.example.net/v1/messages"),
+			(307, "https://collector.example.net/v1/messages"),
+			(308, "https://api.provider.invalid.collector.example.net/v1"),
+			(307, "https://api.provider.invalid:8443/v1/messages"),
+			(307, "http://api.provider.invalid/v1/messages"),
+			(307, "//collector.example.net/v1/messages"),
+			(307, "https://user:pw@api.provider.invalid/v1/messages"),
+			(301, "/v2/moved"),
+			(302, "/v2/moved"),
+			(303, "/v2/moved"),
+			(307, None),
+		],
+		ids=[
+			"302-other-host", "307-other-host", "308-suffix-host", "307-other-port", "307-downgrade",
+			"307-scheme-relative-other-host", "307-new-credentials", "301-same-host", "302-same-host",
+			"303-same-host", "307-no-location",
+		],
+	)
+	def test_any_other_redirect_is_a_bad_response_and_the_key_stays_home(
+		self, logs, monkeypatch, call, base, path, header, value, status, location,
+	):
+		sent = []
+		script = [(status, location), (200, None)]
+		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			call(base, KEY, "m", "system", [{"role": "user", "content": "hi"}])
+		assert ei.value.kind == "bad_response" and ei.value.status_code == status
+		assert "a Base URL that redirects must be set to the address it redirects to" in str(ei.value)
+		assert len(sent) == 1 and sent[0][1] == base + path  # not followed
+		assert len(logs) == 1 and KEY not in logs[0]["message"]
+		if location:
+			assert location not in str(ei.value) and location not in logs[0]["message"]
+			assert "collector" not in logs[0]["message"] and "/v2/moved" not in logs[0]["message"]
+
+	@pytest.mark.parametrize(
+		("base", "location", "followed"),
+		[
+			("https://api.provider.invalid:8443", "http://api.provider.invalid:8443/v1/messages", False),
+			("http://api.provider.invalid:8443", "https://api.provider.invalid:8443/v1/messages", True),
+			("http://api.provider.invalid:8080", "https://api.provider.invalid/v1/messages", False),
+		],
+		ids=["downgrade-same-port", "upgrade-same-port", "upgrade-other-port"],
+	)
+	def test_a_scheme_change_on_a_named_port(self, logs, monkeypatch, base, location, followed):
+		sent = []
+		script = [(307, location), (200, None)]
+		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
+		if followed:
+			assert ai_fix._call_anthropic(base, KEY, "m", "s", [{"role": "user", "content": "hi"}]) == "ok"
+			assert [u for _m, u, _h, _b in sent] == [base + "/v1/messages", location]
+			assert sent[1][2]["x-api-key"] == KEY
+		else:
+			with pytest.raises(ai_fix.AiFixError) as ei:
+				ai_fix._call_anthropic(base, KEY, "m", "s", [{"role": "user", "content": "hi"}])
+			assert ei.value.kind == "bad_response" and len(sent) == 1
+
+	@pytest.mark.parametrize(("call", "base", "path", "header", "value"), _CALLS, ids=["anthropic", "openai"])
+	def test_at_most_three_redirects_are_followed(self, logs, monkeypatch, call, base, path, header, value):
+		sent = []
+		script = [(307, f"/hop{i}") for i in range(1, 5)] + [(200, None)]
+		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			call(base, KEY, "m", "system", [{"role": "user", "content": "hi"}])
+		assert ei.value.kind == "bad_response" and ei.value.status_code == 307
+		assert [u.rsplit("/", 1)[-1] for _m, u, _h, _b in sent][1:] == ["hop1", "hop2", "hop3"]
+		assert len(logs) == 1 and "hop" not in logs[0]["message"]
+
+	def test_a_job_timeout_while_reading_the_location_still_stops_the_job(self, logs, job_timeout, monkeypatch):
+		sent = []
+		script = [(307, "/v2/moved"), (200, None)]
+		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
+		monkeypatch.setattr(ai_fix, "urljoin", _raising(job_timeout, holds=KEY))
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix._call_anthropic(_CALLS[0][1], KEY, "m", "s", [{"role": "user", "content": "hi"}])
+		assert ei.value is not job_timeout and ei.value.__context__ is None
+		assert len(sent) == 1 and logs == []
+
+	def test_three_redirects_then_the_reply(self, logs, monkeypatch):
+		sent = []
+		script = [(307, "/hop1"), (308, "/hop2"), (307, "/hop3"), (200, None)]
+		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
+		assert ai_fix._call_anthropic(_CALLS[0][1], KEY, "m", "s", [{"role": "user", "content": "hi"}]) == "ok"
+		assert len(sent) == 4
 
 
 class TestNothingIsLoggedOrSentWhileAnExceptionIsActive:
