@@ -1522,10 +1522,18 @@ def log_ai_failure(
 				)
 	except Exception as e:
 		failure_type = type(e).__name__
-	if guard.pending():
-		raise guard.interrupt()
+	# The breadcrumb comes first: a write that failed while a timeout was
+	# passed in still leaves its line before the timeout is raised again.
 	if failure_type is not None:
 		_note_unwritten_row(failure_type)
+	if guard.pending():
+		interrupt = guard.interrupt()
+		# The fresh timeout stands for the passed-in one: when that one's row
+		# was written, mark it too, so run()'s outer handler does not log the
+		# same timeout a second time. It carries no traceback or chain.
+		if exc is not None and getattr(exc, _LOGGED_ATTR, False) and type(interrupt) is type(exc):
+			_mark_logged(interrupt)
+		raise interrupt
 	return logged
 
 

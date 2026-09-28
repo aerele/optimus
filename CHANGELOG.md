@@ -233,6 +233,11 @@ versions may contain breaking changes see migration notes below).
 ### Fixed
 
 - A failed AI call now writes one Error Log row instead of two.
+- An RQ job that times out during AI enrichment now stops. Each AI loop
+  catches failures with `except Exception`, which also caught the job
+  timeout, so the loop logged it and went on calling the provider past the
+  job's deadline. The timeout is now logged once and raised again, so the
+  job ends as a timed-out job and the rest of its AI work is skipped.
 - AI Error Log rows written by the HTTP layer now link to the Optimus
   Session. For an HTTP error status the row names the provider's own error
   code (`provider_error=`, for example `invalid_request_error` or

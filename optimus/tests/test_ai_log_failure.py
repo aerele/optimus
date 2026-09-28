@@ -2147,3 +2147,39 @@ class TestAPassedInJobTimeoutStopsTheJob:
 
 	def test_other_errors_still_never_raise(self, logs, job_timeout):
 		assert ai_fix.log_ai_failure("t", ai_fix.AiFixError("x")) is True
+
+
+class TestARaisedAgainTimeoutIsLoggedOnce:
+	"""The fresh timeout ``log_ai_failure`` raises again carries the logged
+	mark, so ``run()``'s outer handler, which logs what reaches it through
+	``log_ai_failure``, does not write a second row for the same timeout."""
+
+	def test_the_fresh_instance_is_not_logged_again(self, logs, job_timeout):
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix.log_ai_failure("optimus ai auto-suggest", job_timeout)
+		assert ei.value is not job_timeout
+		with pytest.raises(_JobTimeout):
+			ai_fix.log_ai_failure("optimus ai auto-suggest (outer)", ei.value)
+		assert len(logs) == 1
+
+	def test_a_timeout_that_was_not_written_is_not_marked(self, logs, job_timeout, monkeypatch, breadcrumbs):
+		import frappe
+
+		def fail(*a, **k):
+			raise RuntimeError("db down")
+
+		monkeypatch.setattr(frappe, "log_error", fail, raising=False)
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix.log_ai_failure("t", job_timeout)
+		assert not getattr(ei.value, ai_fix._LOGGED_ATTR, False)
+
+	def test_a_failed_write_still_leaves_its_breadcrumb(self, logs, job_timeout, monkeypatch, breadcrumbs):
+		import frappe
+
+		def fail(*a, **k):
+			raise RuntimeError("db down")
+
+		monkeypatch.setattr(frappe, "log_error", fail, raising=False)
+		with pytest.raises(_JobTimeout):
+			ai_fix.log_ai_failure("t", job_timeout)
+		assert len(breadcrumbs) == 1 and "RuntimeError" in str(breadcrumbs[0])
