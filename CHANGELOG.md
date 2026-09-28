@@ -8,6 +8,18 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.62] - 2026-09-28
+
+### Internal
+
+- Declared the app's Frappe dependency in `[tool.bench.frappe-dependencies]`
+  (`frappe >=15.0.0,<17.0.0`, covering v15 and v16), mirroring `hooks.py`
+  `required_apps`, so bench and Frappe Cloud resolve and version-gate it at deploy
+  time. optimus runs on plain Frappe (ERPNext optional), so frappe is the only
+  hard dependency.
+
+---
+
 ## [0.12.61] - 2026-09-26
 
 ### Fixed
