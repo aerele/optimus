@@ -96,3 +96,26 @@ class TestSessionQueryTotals:
 		with pytest.raises(_Stop):
 			analyze._persist("d", context, [{"calls": _calls(), "duration": 50}])
 		assert (doc.total_queries, doc.total_query_time_ms) == (4, 13.0)
+
+
+class TestPerActionReconcilesWithTheTotals:
+	"""The per-action breakdown leaves the hook's key read out, as the session
+	totals do, so its rows add up to them."""
+
+	def test_per_action_sums_equal_the_session_totals(self):
+		from optimus import analyze
+		from optimus.analyzers import per_action
+
+		recordings = [
+			{"uuid": "r1", "calls": _calls(), "duration": 50},
+			{"uuid": "r2", "calls": _calls()[1:3], "duration": 9},
+			{"uuid": "r3", "calls": _calls()[:1], "duration": 12},
+			{"uuid": "r4", "calls": None},
+		]
+		actions = per_action.analyze(recordings, None).actions
+		count, time_ms = analyze._session_query_totals(recordings)
+		assert sum(a["queries_count"] for a in actions) == count == 5
+		assert round(sum(a["query_time_ms"] for a in actions), 2) == round(time_ms, 2) == 23.0
+		by_uuid = {a["recording_uuid"]: a for a in actions}
+		assert by_uuid["r2"]["queries_count"] == 0 and by_uuid["r2"]["slowest_query_ms"] == 0
+		assert by_uuid["r1"]["slowest_query_ms"] == 10.0
