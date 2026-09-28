@@ -1102,18 +1102,15 @@ def regenerate_reports(session_uuid: str) -> dict:
 		for a in (doc.actions or [])
 		if getattr(a, "recording_uuid", None)
 	]
-	from optimus.ai_fix import log_ai_failure
-
-	fetch_error = None
-	try:
-		recordings = list(_analyze_mod._fetch_recordings(
+	recordings, fetch_error = _analyze_mod._run_ai_step(
+		lambda: list(_analyze_mod._fetch_recordings(
 			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
-		))
-	except Exception as e:
-		fetch_error = e
-		recordings = []
+		)),
+		title="optimus regenerate_reports fetch", session_uuid=session_uuid,
+	)
 	if fetch_error is not None:
-		log_ai_failure("optimus regenerate_reports fetch", fetch_error, session_uuid=session_uuid)
+		fetch_error = None
+		recordings = []
 
 	# v0.6.0: if "Suggest AI fixes in the report by default" is on, backfill
 	# AI suggestions onto the top eligible findings that don't have one yet,
@@ -1121,13 +1118,10 @@ def regenerate_reports(session_uuid: str) -> dict:
 	# Regenerate. Best-effort + tightly time-budgeted (it runs synchronously
 	# in this web request). The persisted llm_fix_json is what the renderer
 	# below reads to draw the "Suggested fix (AI)" block under each finding.
-	backfill_error = None
-	try:
-		_analyze_mod._backfill_ai_suggestions(doc)
-	except Exception as e:
-		backfill_error = e
-	if backfill_error is not None:
-		log_ai_failure("optimus regenerate ai backfill", backfill_error, session_uuid=session_uuid)
+	_analyze_mod._run_ai_step(
+		lambda: _analyze_mod._backfill_ai_suggestions(doc),
+		title="optimus regenerate ai backfill", session_uuid=session_uuid,
+	)
 
 	# Invalidate the cached PDF next /api/method/download_pdf call
 	# will regenerate it from the freshly-rendered HTML.
@@ -1292,20 +1286,17 @@ def suggest_fix(session_uuid: str, finding_ref: str, regenerate=0) -> dict:
 	except ai_fix.AiFixError as e:
 		frappe.throw(str(e))
 
-	persist_error = None
-	try:
+	def _persist():
 		frappe.db.set_value(
 			"Optimus Finding", child.name, "llm_fix_json", json.dumps(result),
 		)
 		safe_commit()
-	except Exception as e:
-		# Failing to persist isn't fatal the operator still gets the
-		# suggestion in the dialog, just not cached / in the report.
-		persist_error = e
-	if persist_error is not None:
-		ai_fix.log_ai_failure(
-			"optimus suggest_fix persist", persist_error, session_uuid=session_uuid, finding=child.name,
-		)
+
+	# Failing to persist isn't fatal the operator still gets the
+	# suggestion in the dialog, just not cached / in the report.
+	_analyze_mod._run_ai_step(
+		_persist, title="optimus suggest_fix persist", session_uuid=session_uuid, finding=child.name,
+	)
 
 	return {"ok": True, "finding": child.name, "cached": False, **result}
 
@@ -1518,18 +1509,15 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 		a.recording_uuid for a in (doc.actions or [])
 		if getattr(a, "recording_uuid", None)
 	]
-	fetch_error = None
-	try:
-		recordings = list(_analyze_mod._fetch_recordings(
+	recordings, fetch_error = _analyze_mod._run_ai_step(
+		lambda: list(_analyze_mod._fetch_recordings(
 			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
-		))
-	except Exception as e:
-		fetch_error = e
-		recordings = []
+		)),
+		title="optimus humanize_steps fetch", session_uuid=getattr(doc, "session_uuid", None),
+	)
 	if fetch_error is not None:
-		ai_fix.log_ai_failure(
-			"optimus humanize_steps fetch", fetch_error, session_uuid=getattr(doc, "session_uuid", None),
-		)
+		fetch_error = None
+		recordings = []
 
 	actions = _analyze_mod._actions_for_humanizer(recordings)
 	if not actions:
@@ -1642,7 +1630,6 @@ def _refill_indexes_for_doc(doc) -> dict:
 	import json as _json
 
 	from optimus import analyze as _analyze_mod
-	from optimus.ai_fix import log_ai_failure
 
 	try:
 		breakdown = _json.loads(doc.table_breakdown_json or "[]")
@@ -1661,18 +1648,14 @@ def _refill_indexes_for_doc(doc) -> dict:
 		if not table_name:
 			skipped += 1
 			continue
-		error = None
-		try:
-			out = _analyze_mod._run_table_index_ai_backfill(doc, table_name=table_name)
-		except Exception as e:
-			error = e
+		# One title for every table (the table goes in the message), so the
+		# Error Log groups these rows instead of creating one title per table.
+		out, error = _analyze_mod._run_ai_step(
+			lambda table_name=table_name: _analyze_mod._run_table_index_ai_backfill(doc, table_name=table_name),
+			title="optimus refill_indexes", session_uuid=getattr(doc, "session_uuid", None), table=table_name,
+		)
 		if error is not None:
-			# One title for every table (the table goes in the message), so the
-			# Error Log groups these rows instead of creating one title per table.
-			log_ai_failure(
-				"optimus refill_indexes", error,
-				session_uuid=getattr(doc, "session_uuid", None), table=table_name,
-			)
+			error = None
 			failed += 1
 			continue
 		if out.get("ok"):

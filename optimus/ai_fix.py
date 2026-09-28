@@ -2033,7 +2033,6 @@ def _provider_error_code(resp, auth=None) -> str:
 	cleared and the parsed body unbound (``_InterruptGuard(base=True)``). As
 	in ``_response_detail``, the literals are read BEFORE the body is parsed
 	and bound."""
-	data = error = value = None
 	guard = _InterruptGuard(base=True)
 	try:
 		with guard:

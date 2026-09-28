@@ -1922,6 +1922,51 @@ class TestLogAiStepFailure:
 		_assert_fresh_and_clean(ei, job_timeout, raiser)
 
 
+class TestRunAiStep:
+	"""``analyze._run_ai_step``: the one capture-then-log skeleton of the AI
+	steps of analyze.py and api.py."""
+
+	def test_a_step_that_succeeds_returns_its_result_and_logs_nothing(self, logs):
+		from optimus import analyze
+
+		assert analyze._run_ai_step(lambda: {"fix": "x"}, title="t", session_uuid="u") == ({"fix": "x"}, None)
+		assert logs == []
+
+	def test_a_step_that_fails_is_logged_after_the_try_with_its_context(self, logs, monkeypatch):
+		import frappe
+
+		from optimus import analyze
+
+		active = []
+		real = frappe.log_error
+
+		def _log(**kw):
+			active.append(sys.exc_info()[1])
+			return real(**kw)
+		monkeypatch.setattr(frappe, "log_error", _log, raising=False)
+		error = RuntimeError("step broke")
+		result, got = analyze._run_ai_step(_raising(error), title="optimus ai backfill", session_uuid="u-1", finding="F-1")
+		assert result is None and got is error
+		assert active == [None]  # no exception was being handled when it logged
+		assert len(logs) == 1 and logs[0]["title"] == "optimus ai backfill"
+		assert "finding=F-1" in logs[0]["message"] and "session_uuid=u-1" in logs[0]["message"]
+
+	def test_a_job_timeout_still_stops_the_job(self, logs, job_timeout):
+		from optimus import analyze
+
+		with pytest.raises(_JobTimeout) as ei:
+			analyze._run_ai_step(_raising(job_timeout), title="t", session_uuid="u")
+		assert ei.value is not job_timeout and ei.value.__context__ is None
+		assert len(logs) == 1
+
+	def test_a_non_exception_interrupt_goes_through(self, logs):
+		from optimus import analyze
+
+		with pytest.raises(KeyboardInterrupt):
+			analyze._run_ai_step(_raising(KeyboardInterrupt()), title="t")
+		assert logs == []
+
+
 @pytest.fixture
 def run_env(monkeypatch):
 	"""The smallest set of fakes ``analyze.run`` needs for one pass over one
