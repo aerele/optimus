@@ -33,7 +33,9 @@ shapes ``scrub_secrets`` knows and the bare header value lines are masked in
 ``error``, ``method`` and ``metadata`` (a field the doc does not hold, such as
 ``metadata`` on Frappe v15, is left alone); a title longer than its column is
 moved in front of ``error``, as v16's ``ErrorLog.validate`` does, and the
-joined text masked again. A truthy value that is not text is read as
+lines around the join masked again. Each field is cut to 65536 characters
+first (``redaction.SCRUB_TEXT_CAP``, its last token dropped and ``[...]``
+appended), so a huge record costs a bounded amount of work. A truthy value that is not text is read as
 ``str(value)``, the text the row stores, both to recognise the key and to mask
 it. Only the fields the masking changed are set.
 

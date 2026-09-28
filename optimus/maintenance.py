@@ -73,7 +73,7 @@ from typing import NamedTuple
 import frappe
 
 from optimus import safe_commit
-from optimus.redaction import MIN_KEY_LEN, SECRET_PLACEHOLDER, key_literals, scrub_secrets
+from optimus.redaction import MIN_KEY_LEN, SCRUB_TEXT_CAP, SECRET_PLACEHOLDER, key_literals, scrub_secrets
 
 
 class InsideBackgroundJobError(RuntimeError):
@@ -114,6 +114,15 @@ _WINDOW = 1000
 # UPDATE of a stored row cuts a masked value to fit; _masked_record moves a
 # record's long title in front of its error first (_long_title_into_error).
 _FIELD_LIMITS = {"method": 140}
+# The Error Log hook masks at most SCRUB_TEXT_CAP characters of each text
+# field (_capped): a longer one is cut there, its last token (a key the cut
+# may have split) dropped, and _CUT_MARK appended. _CUT_MARK holds no quote
+# and no run of 8 non-space characters, so no masking shape takes it: the
+# cut text stays masked-stable. The pass over a long title joined to its
+# error (_masked_record) masks only the lines within _JOIN_WINDOW characters
+# of the join, the only place the join can complete a shape.
+_CUT_MARK = "\n[...]"
+_JOIN_WINDOW = 8192
 # bench migrate runs the scrub only when measure_scan_size() finds at most
 # this many rows; a scan of a larger table would stall the migrate, so the
 # patch prints the command to run instead.
@@ -281,10 +290,12 @@ def _has_residual_secret(text: str, api_key: str, *, literals: tuple[str, ...] =
 def _masked_record(record, api_key: str, *, failures: list[str] | None = None) -> dict | None:
 	"""An Error Log ``record`` as the Error Log hook
 	(``optimus.error_log_mask``) stores it, before Frappe's ``validate``,
-	length check and INSERT: its ``_RECORD_TEXT_FIELDS`` masked
-	(``_mask_row``), with a title longer than its column moved in front of
-	``error`` (``_long_title_into_error``) and the joined ``error`` masked
-	again, so it is idempotent.
+	length check and INSERT: its ``_RECORD_TEXT_FIELDS`` cut to
+	``SCRUB_TEXT_CAP`` characters (``_capped``) and masked (``_mask_row``),
+	with a title longer than its column moved in front of ``error``
+	(``_long_title_into_error``), the joined ``error`` cut again, and the
+	lines around the join masked again (``_join_masked``), so it is
+	idempotent.
 
 	The hook calls it only for a record from the AI code or holding the key
 	(``_is_ai_record``, or a record whose check failed, which the hook treats as
@@ -297,21 +308,50 @@ def _masked_record(record, api_key: str, *, failures: list[str] | None = None) -
 	job timeout is raised, not swallowed (``_reraise_job_timeout``)."""
 	if not isinstance(record, dict):
 		return None
-	masked = _mask_row(record, _RECORD_TEXT_FIELDS, api_key, cut=False, check_residual=False, failures=failures)
+	capped = {**record, **{f: _capped(record[f]) for f in _RECORD_TEXT_FIELDS if f in record}}
+	masked = _mask_row(capped, _RECORD_TEXT_FIELDS, api_key, cut=False, check_residual=False, failures=failures)
 	if masked is None:
 		return None
-	merged = {**record, **masked[0]}
+	merged = {**capped, **masked[0]}
 	moved = _long_title_into_error(merged)
 	if moved is merged:
 		return merged
-	# The joined "<title>\n<error>" is masked again as a whole: a shape the
-	# join completes (a title ending in "Bearer", an error starting with the
-	# token) is masked now, so a second pass, or the scrub of the row once
-	# Frappe has inserted it, changes nothing.
-	joined = _mask_row(moved, ("error",), api_key, cut=False, check_residual=False, failures=failures)
+	# The joined "<title>\n<error>" is masked again around the join: a shape
+	# the join completes (a title ending in "Bearer", an error starting with
+	# the token) is masked now, so a second pass, or the scrub of the row
+	# once Frappe has inserted it, changes nothing.
+	joined = _join_masked(_capped(moved["error"]), len(merged["method"]), api_key, failures)
 	if joined is None:
 		return None
-	return {**moved, **joined[0]}
+	return {**moved, "error": joined}
+
+
+def _capped(text):
+	"""``text`` cut to ``SCRUB_TEXT_CAP`` characters with ``_CUT_MARK`` at the
+	end, its last token (after the last ASCII whitespace) dropped, so a key
+	the cut split is never left in part; ``text`` itself when it fits or is
+	not a str."""
+	if not isinstance(text, str) or len(text) <= SCRUB_TEXT_CAP:
+		return text
+	head = text[:SCRUB_TEXT_CAP - len(_CUT_MARK)]
+	last_space = max(head.rfind(ch) for ch in " \t\n\r\x0b\x0c")
+	return head[:last_space + 1] + _CUT_MARK
+
+
+def _join_masked(error: str, join: int, api_key: str, failures: list[str] | None) -> str | None:
+	"""``error`` (``<title>\n<error>``, the title ``join`` characters long)
+	with the lines within ``_JOIN_WINDOW`` characters of the join masked
+	again as one text (``_mask_row``); the rest, each part already masked on
+	its own, is kept. A shape can cross the join only there: the masking's
+	shapes are bounded, and those of them that can span a line end are a
+	scheme or a name and its token. None when that pass failed."""
+	start = error.rfind("\n", 0, max(0, join - _JOIN_WINDOW)) + 1
+	end = error.find("\n", min(len(error), join + 1 + _JOIN_WINDOW))
+	end = len(error) if end < 0 else end
+	window = _mask_row({"error": error[start:end]}, ("error",), api_key, cut=False, check_residual=False, failures=failures)
+	if window is None:
+		return None
+	return error[:start] + window[0].get("error", error[start:end]) + error[end:]
 
 
 def _long_title_into_error(record: dict) -> dict:

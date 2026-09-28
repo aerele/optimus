@@ -1102,6 +1102,80 @@ class TestResidualIsDrivenByTheKnownLiteral:
 		assert out["residual"] > 0
 
 
+class TestTheHookPathIsBounded:
+	"""``_masked_record`` (the Error Log hook's masking) cuts each text field to
+	``SCRUB_TEXT_CAP`` characters before any pass, and masks again only the
+	lines around the join of a long title and its error."""
+
+	CAP = 65536
+
+	@staticmethod
+	def _lines(n_chars):
+		line = f'File "apps/optimus/optimus/ai_fix.py", line 1, in f\n    headers = {{\'authorization\': \'Bearer {KEY}\'}}\n'
+		return (line * (n_chars // len(line) + 1))[:n_chars]
+
+	def test_the_cap_is_the_one_constant(self):
+		from pathlib import Path
+
+		from optimus import ai_fix, redaction
+
+		assert maintenance.SCRUB_TEXT_CAP is redaction.SCRUB_TEXT_CAP == 65536
+		assert "65536" not in Path(ai_fix.__file__).read_text(encoding="utf-8")
+
+	def test_a_long_field_is_cut_with_the_mark_and_masked(self):
+		row = maintenance._masked_record({"error": self._lines(1_048_576), "method": "optimus ai_fix"}, KEY)
+		assert len(row["error"]) <= self.CAP and row["error"].endswith(maintenance._CUT_MARK)
+		assert KEY not in row["error"] and "Bearer ********" in row["error"]
+		assert maintenance._masked_record(row, KEY) == row
+
+	@pytest.mark.parametrize("offset", [1, 5, 13, 20])
+	def test_a_key_the_cut_splits_leaves_no_part_behind(self, offset):
+		head = "x " * ((self.CAP - len(maintenance._CUT_MARK) - offset) // 2)
+		text = head + "tok=" + "OLDKEYabcdefghijklmnopqrstuvwxyz0123456789" + " tail" * 50
+		row = maintenance._masked_record({"error": text}, KEY)
+		assert "OLDKEY" not in row["error"] and "abcdefghij" not in row["error"]
+		assert row["error"].endswith(maintenance._CUT_MARK)
+
+	def test_the_cut_of_the_stored_key_straddling_the_cap_leaves_no_part_of_it(self):
+		head = "x " * ((self.CAP - len(maintenance._CUT_MARK) - 10) // 2)
+		row = maintenance._masked_record({"error": f"{head}{KEY} rest " * 1}, KEY)
+		assert KEY[:8] not in row["error"]
+
+	def test_no_pass_reads_more_than_the_cap(self, monkeypatch):
+		real, seen = maintenance._mask, []
+
+		def _spy(text, api_key):
+			seen.append(len(text))
+			return real(text, api_key)
+		monkeypatch.setattr(maintenance, "_mask", _spy)
+		big = self._lines(1_048_576)
+		maintenance._masked_record({"error": big, "method": big, "metadata": big}, KEY)
+		assert seen and max(seen) <= self.CAP
+
+	def test_only_the_lines_around_the_join_are_masked_again(self, monkeypatch):
+		title = self._lines(40_000) + "x" * 140 + " Bearer"
+		error = "abcdefghij rest\n" + self._lines(40_000)
+		real, windows = maintenance._mask_row, []
+
+		def _spy(row, text_fields, api_key, **kw):
+			if text_fields == ("error",):
+				windows.append(len(row["error"]))
+			return real(row, text_fields, api_key, **kw)
+		monkeypatch.setattr(maintenance, "_mask_row", _spy)
+		row = maintenance._masked_record({"error": error, "method": title}, KEY)
+		assert "Bearer\n******** rest" in row["error"] and KEY not in row["error"]
+		assert windows and max(windows) <= 2 * maintenance._JOIN_WINDOW + 400
+		assert maintenance._masked_record(row, KEY) == row
+		assert maintenance._mask_row({"name": "ERR-1", **row}, ("error", "method"), KEY) == ({}, False)
+
+	def test_a_long_title_and_a_long_error_stay_idempotent(self):
+		big = self._lines(1_048_576)
+		row = maintenance._masked_record({"error": big, "method": big, "metadata": big}, KEY)
+		assert len(row["error"]) <= self.CAP and len(row["method"]) == 140
+		assert KEY not in json.dumps(row)
+		assert maintenance._masked_record(row, KEY) == row
+
+
 class TestMaskedRecord:
 	"""``_masked_record``: an Error Log record as the Error Log hook
 	(``optimus.error_log_mask``) stores it, before Frappe's ``validate``,

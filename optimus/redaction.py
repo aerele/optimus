@@ -238,6 +238,13 @@ _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
 MIN_KEY_LEN = 8
 
 
+# The most characters of one text any scrub pass reads: a provider's reply
+# (ai_fix._response_detail) and each text field of a record the Error Log
+# hook masks (maintenance._masked_record) are cut to it first, so a planted
+# multi-megabyte value costs a bounded amount of regex work.
+SCRUB_TEXT_CAP = 65536
+
+
 def key_literals(api_key) -> tuple[str, ...]:
 	"""``api_key`` in every form text can hold it, for ``scrub_secrets(...,
 	literals=...)`` and for the stored-key checks: raw, JSON-escaped

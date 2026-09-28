@@ -1883,13 +1883,13 @@ def _response_detail(resp, auth=None) -> str:
 	guard = _InterruptGuard(base=True)
 	try:
 		with guard:
-			from optimus.redaction import scrub_secrets
+			from optimus.redaction import SCRUB_TEXT_CAP, scrub_secrets
 
 			api_key = _scrub_literals_for(auth)
 			body_text = (resp.text or "").strip()
 			if not body_text:
 				return ""
-			return ": " + scrub_secrets(body_text[:65536], literals=api_key)[:300]
+			return ": " + scrub_secrets(body_text[:SCRUB_TEXT_CAP], literals=api_key)[:300]
 	except Exception:
 		return ""
 	body_text = ""  # the raw body may echo the key: never on the interrupt's traceback
