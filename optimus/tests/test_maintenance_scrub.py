@@ -2,7 +2,7 @@
 # For license information, please see license.txt
 
 """optimus.maintenance: scrub / purge of the AI Error Log rows written before
-the key-leak fix, and the v0_12 patch that runs the scrub on migrate.
+the key-leak fix, and the v0_12_0 patch that runs the scrub on migrate.
 
 ``maintenance.frappe`` is replaced wholesale by an in-memory fake that
 implements just the ORM calls the module makes (``get_all`` with LIKE / = / >
@@ -1673,8 +1673,21 @@ class TestPurgeAiErrorLogs:
 # The migrate patch
 # ---------------------------------------------------------------------------
 
-_PATCH = "optimus.patches.v0_12.scrub_ai_keys_from_error_log"
+_PATCH = "optimus.patches.v0_12_0.scrub_ai_keys_from_error_log"
 _REAL_MEASURE = maintenance.measure_scan_size
+
+
+def test_the_patch_lives_in_the_versioned_directory_and_patches_txt_names_it():
+	# optimus/patches/v0_X_Y/, like every other patch directory.
+	from pathlib import Path
+
+	pkg = Path(maintenance.__file__).resolve().parent
+	assert (pkg / "patches" / "v0_12_0" / "scrub_ai_keys_from_error_log.py").is_file()
+	assert (pkg / "patches" / "v0_12_0" / "__init__.py").is_file()
+	assert not (pkg / "patches" / "v0_12").exists()
+	lines = (pkg / "patches.txt").read_text(encoding="utf-8").splitlines()
+	assert _PATCH in lines and not [line for line in lines if ".v0_12." in line]
+	assert callable(importlib.import_module(_PATCH).execute)
 
 
 def _with_context(exc) -> str:

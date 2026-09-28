@@ -120,7 +120,7 @@ versions may contain breaking changes see migration notes below).
      Kubernetes, or blue-green benches sharing one `redis_cache`), stop or
      replace every web and worker process of the old release before running
      the migrate, and run step 3 once the rollout is done (see the upgrade
-     notes). The patch `v0_12.scrub_ai_keys_from_error_log` masks the keys in
+     notes). The patch `v0_12_0.scrub_ai_keys_from_error_log` masks the keys in
      existing Error Log rows and in Deleted Document copies of them, and
      prints how many rows it masked, or that none needed it. It never reads or
      changes the Error Log records waiting in Frappe's deferred-insert queue

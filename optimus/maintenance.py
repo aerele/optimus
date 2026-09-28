@@ -7,7 +7,7 @@ key leak (see the security advisory in CHANGELOG.md).
 A failed AI call could store the provider API key in plain text in
 ``tabError Log`` (and, once such a row was deleted, in its
 ``tabDeleted Document`` copy). ``scrub_error_log_secrets`` masks those keys in
-place; the ``v0_12.scrub_ai_keys_from_error_log`` patch runs it once on
+place; the ``v0_12_0.scrub_ai_keys_from_error_log`` patch runs it once on
 ``bench migrate``. ``purge_ai_error_logs`` is the opt-in stronger option: it
 deletes every Optimus AI row (they may also hold prompt text: source code and
 SQL with literal values).
