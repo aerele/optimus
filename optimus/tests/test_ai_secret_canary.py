@@ -288,6 +288,7 @@ class _FakeDB:
 	since the last commit."""
 
 	def __init__(self, sinks):
+		self.sinks = sinks
 		self.after_rollback = _Callbacks(sinks)
 		self.error_logs = set()
 		self.uncommitted = []
@@ -301,8 +302,11 @@ class _FakeDB:
 			return {"name": "SESS-CANARY", "user": "Administrator", "status": "Ready", "title": "t"}
 		return "SESS-CANARY"
 
-	def set_value(self, *a, **k):
-		pass
+	def set_value(self, doctype=None, name=None, field=None, value=None, *a, **k):
+		# log_ai_failure appends a later caller's context to the row it wrote:
+		# that text is stored Error Log content too
+		if doctype == "Error Log":
+			self.sinks.stored.append((self.sinks.entry, f"{field}\n{value}", True))
 
 	def sql(self, *a, **k):
 		return []

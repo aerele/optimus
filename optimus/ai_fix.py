@@ -1423,6 +1423,9 @@ def _is_reasoning_model(model: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _LOGGED_ATTR = "_optimus_ai_logged"
+# The name of the Error Log row an exception was logged in (_mark_logged), so
+# a later log_ai_failure for it adds its context to that row.
+_LOGGED_ROW_ATTR = "_optimus_ai_log_row"
 # The body-free text an HTTP-status AiFixError from _http_post is logged with
 # (see _exception_text): its message carries the provider's reply.
 _LOG_TEXT_ATTR = "_optimus_log_text"
@@ -1435,6 +1438,7 @@ def log_ai_failure(
 	session_uuid: str | None = None,
 	docname: str | None = None,
 	auth: requests.auth.AuthBase | None = None,
+	marks: BaseException | None = None,
 	**context,
 ) -> bool:
 	"""Write one Error Log row for an AI-surface failure. This is the ONLY
@@ -1469,8 +1473,14 @@ def log_ai_failure(
 	- If scrubbing fails, the row keeps only the title and the error type:
 	  an unscrubbed message is never written.
 	- An exception is logged at most once: the HTTP layer logs its own
-	  failures, so a caller that logs the same ``AiFixError`` again is a
-	  no-op (no double rows). Only a row that was written marks it.
+	  failures, so a caller that logs the same ``AiFixError`` again writes
+	  no second row. Its title and ``k=v`` lines (and the session), scrubbed
+	  like the message, are appended to the row already written instead
+	  (``_append_context``: ``frappe.db.set_value`` on that row's ``error``),
+	  so the caller's context (the finding, the step) is not lost. Only a
+	  row that was written marks the exception, with the row's name.
+	  ``marks`` is another exception the written row stands for (the HTTP
+	  layer's ``AiFixError``, logged before it is raised).
 	- Returns True once ``frappe.log_error`` has returned, else False
 	  (already logged, or the write raised). A write that raised leaves one
 	  error-level line with the error type in the ``optimus`` log
@@ -1489,7 +1499,9 @@ def log_ai_failure(
 	guard.note(exc)
 	try:
 		with guard:
-			if exc is None or not getattr(exc, _LOGGED_ATTR, False):
+			if exc is not None and getattr(exc, _LOGGED_ATTR, False):
+				_append_context(exc, title, session_uuid, context, auth)
+			else:
 				import frappe
 
 				lines = [title]
@@ -1524,7 +1536,9 @@ def log_ai_failure(
 					reference_name=reference_name,
 				)
 				logged = True
-				_mark_logged(exc)
+				row_name = getattr(row, "name", None)
+				_mark_logged(exc, row_name)
+				_mark_logged(marks, row_name)
 				_requeue_if_rolled_back(
 					{
 						"error": message, "method": title,
@@ -1544,9 +1558,48 @@ def log_ai_failure(
 		# was written, mark it too, so run()'s outer handler does not log the
 		# same timeout a second time. It carries no traceback or chain.
 		if exc is not None and getattr(exc, _LOGGED_ATTR, False) and type(interrupt) is type(exc):
-			_mark_logged(interrupt)
+			_mark_logged(interrupt, getattr(exc, _LOGGED_ROW_ATTR, None))
 		raise interrupt
 	return logged
+
+
+def _append_context(exc: BaseException, title: str, session_uuid: str | None, context: dict, auth=None) -> None:
+	"""Append a later caller's ``title``, session and ``k=v`` lines, scrubbed
+	like the message (``_scrubbed_message``), to the Error Log row ``exc``
+	was logged in (its ``_LOGGED_ROW_ATTR``): a blank line, then those lines,
+	after the row's ``error``, with ``frappe.db.set_value`` (no second row,
+	``modified`` kept). Nothing when ``exc`` carries no row name or the row is
+	gone. A failure leaves one line with its error type in the ``optimus`` log
+	and is never raised; an RQ job timeout leaves as a fresh instance. Runs
+	outside any ``except`` block."""
+	name = getattr(exc, _LOGGED_ROW_ATTR, None)
+	if not isinstance(name, str) or not name:
+		return
+	lines = [title]
+	try:
+		if session_uuid:
+			lines.append(f"session_uuid={session_uuid}")
+		for k in sorted(context):
+			lines.append(f"{k}={context[k]}")
+		addition = _scrubbed_message(title, lines, exc, auth)
+	finally:
+		# only the scrubbed lines may be bound (see log_ai_failure)
+		del lines
+	failure_type = None
+	guard = _InterruptGuard()
+	try:
+		with guard:
+			import frappe
+
+			existing = frappe.db.get_value("Error Log", name, "error")
+			if existing is not None:
+				frappe.db.set_value("Error Log", name, "error", f"{existing}\n\n{addition}", update_modified=False)
+	except Exception as e:
+		failure_type = type(e).__name__
+	if guard.pending():
+		raise guard.interrupt()
+	if failure_type is not None:
+		_note_line(f"optimus ai_fix: the caller's context could not be added to an AI Error Log row: {failure_type}")
 
 
 def _exception_text(exc: BaseException) -> str:
@@ -1703,29 +1756,39 @@ def _note_unwritten_row(error_type: str) -> None:
 	DEV_SERVER is set (``bench start``; ``frappe/utils/logger.py``), so a
 	warning would never reach the log on a production site. Never raises,
 	except an RQ job timeout."""
+	_note_line(
+		"optimus ai_fix: an AI Error Log row may not have been written or re-queued, "
+		f"or a hook after the insert failed: {error_type}"
+	)
+
+
+def _note_line(line: str) -> None:
+	"""``line`` (fixed text and an error type, never row text) in the
+	``optimus`` log at ERROR. Never raises, except an RQ job timeout."""
 	guard = _InterruptGuard()
 	try:
 		with guard:
 			import frappe
 
-			frappe.logger("optimus").error(
-				"optimus ai_fix: an AI Error Log row may not have been written or re-queued, "
-				f"or a hook after the insert failed: {error_type}"
-			)
+			frappe.logger("optimus").error(line)
 	except Exception:
 		pass
 	if guard.pending():
 		raise guard.interrupt()
 
 
-def _mark_logged(exc: BaseException | None) -> None:
-	"""Flag ``exc`` so a later ``log_ai_failure(..., exc)`` is a no-op."""
+def _mark_logged(exc: BaseException | None, row_name: str | None = None) -> None:
+	"""Flag ``exc`` so a later ``log_ai_failure(..., exc)`` writes no second
+	row, and keep the name of the row it was logged in (``row_name``), so
+	that call appends its context there (``_append_context``)."""
 	if exc is None:
 		return
 	guard = _InterruptGuard()
 	try:
 		with guard:
 			setattr(exc, _LOGGED_ATTR, True)
+			if isinstance(row_name, str) and row_name:
+				setattr(exc, _LOGGED_ROW_ATTR, row_name)
 	except Exception:
 		pass
 	if guard.pending():
@@ -1764,8 +1827,7 @@ def _log_http_error(
 	context = {"provider": provider, "where": where, "status": status, "detail": detail}
 	if provider_error:
 		context["provider_error"] = provider_error
-	if log_ai_failure("optimus ai_fix", session_uuid=session_uuid, auth=auth, **context):
-		_mark_logged(exc)
+	log_ai_failure("optimus ai_fix", session_uuid=session_uuid, auth=auth, marks=exc, **context)
 
 
 def _job_timeout_types() -> tuple[type[BaseException], ...]:

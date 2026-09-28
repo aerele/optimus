@@ -62,18 +62,32 @@ class _FakeDB:
 		self.error_logs = set()
 		self.uncommitted = []
 		self.inserted = 0
+		# the inserted rows' text, and the set_value calls on them
+		self.rows = {}
+		self.set_values = []
+		self.raise_on_set = None
 
 	def get_value(self, doctype, filters, field):
+		if doctype == "Error Log":
+			return (self.rows.get(filters) or {}).get(field)
 		self.lookups += 1
 		if self.raise_on_get:
 			raise RuntimeError("db down")
 		return self.docname
 
-	def insert_error_log(self):
+	def set_value(self, doctype, name, field, value, update_modified=True):
+		self.set_values.append((doctype, name, field, update_modified))
+		if self.raise_on_set is not None:
+			raise self.raise_on_set
+		self.rows.setdefault(name, {})[field] = value
+
+	def insert_error_log(self, record=None):
 		self.inserted += 1
 		name = f"ERR-{self.inserted:04d}"
 		self.error_logs.add(name)
 		self.uncommitted.append(name)
+		if record is not None:
+			self.rows[name] = {"error": record.get("message"), "method": record.get("title")}
 		return name
 
 	def exists(self, doctype, name=None, *a, **k):
@@ -100,13 +114,15 @@ class _Flags(dict):
 	__getattr__ = dict.get
 
 
-def _inserted_row():
+def _inserted_row(record=None):
 	"""What ``frappe.log_error`` returns after a direct insert: the Error Log
 	document, named (the row goes into the current fake DB)."""
 	import frappe
 
 	insert = getattr(frappe.db, "insert_error_log", None)
-	return SimpleNamespace(name=insert()) if insert else None
+	if not insert:
+		return None
+	return SimpleNamespace(name=insert(record) if record is not None else insert())
 
 
 @pytest.fixture
@@ -115,7 +131,7 @@ def logs(monkeypatch):
 	import frappe
 
 	calls = []
-	monkeypatch.setattr(frappe, "log_error", lambda **kw: calls.append(kw) or _inserted_row(), raising=False)
+	monkeypatch.setattr(frappe, "log_error", lambda **kw: calls.append(kw) or _inserted_row(kw), raising=False)
 	monkeypatch.setattr(frappe, "db", _FakeDB(), raising=False)
 	monkeypatch.setattr(frappe, "flags", _Flags(), raising=False)
 	monkeypatch.setattr(
@@ -2184,3 +2200,93 @@ class TestARaisedAgainTimeoutIsLoggedOnce:
 		with pytest.raises(_JobTimeout):
 			ai_fix.log_ai_failure("t", job_timeout)
 		assert len(breadcrumbs) == 1 and "RuntimeError" in str(breadcrumbs[0])
+
+
+# ---------------------------------------------------------------------------
+# A second log of an already-logged error adds its context to the row
+# ---------------------------------------------------------------------------
+
+
+class TestTheCallersContextJoinsTheRow:
+	"""The HTTP layer logs its own failure (generic lines: provider, where,
+	status, detail); the caller then logs the same error with its own context
+	(the finding, the step). No second row: the caller's title and ``k=v``
+	lines, scrubbed like the message, are appended to the row already
+	written."""
+
+	def _http_failure(self, monkeypatch):
+		def _refused(*a, **k):
+			raise requests.exceptions.ConnectionError("refused")
+		monkeypatch.setattr(requests, "post", _refused)
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			_call()
+		return ei.value
+
+	def test_an_http_failure_then_the_callers_log_is_one_row_with_both(self, logs, monkeypatch, breadcrumbs):
+		import frappe
+
+		exc = self._http_failure(monkeypatch)
+		assert getattr(exc, ai_fix._LOGGED_ROW_ATTR) == "ERR-0001"
+		assert ai_fix.log_ai_failure("optimus ai backfill", exc, session_uuid="uuid-1", finding_type="n_plus_one") is False
+		assert len(logs) == 1
+		row = frappe.db.rows["ERR-0001"]["error"]
+		assert row.startswith(logs[0]["message"])  # the generic lines stay first
+		assert "detail=ConnectionError: refused" in row
+		assert "\n\noptimus ai backfill\nsession_uuid=uuid-1\nfinding_type=n_plus_one" in row
+		assert frappe.db.set_values == [("Error Log", "ERR-0001", "error", False)]
+		assert breadcrumbs == []
+
+	def test_the_appended_lines_are_scrubbed(self, logs, monkeypatch):
+		import frappe
+
+		exc = self._http_failure(monkeypatch)
+		ai_fix.log_ai_failure("optimus ai backfill", exc, note=f"echo Bearer {KEY} and {KEY}")
+		row = frappe.db.rows["ERR-0001"]["error"]
+		assert KEY not in row and "note=echo Bearer ******** and ********" in row
+
+	def test_a_direct_log_then_a_second_one_appends(self, logs):
+		import frappe
+
+		exc = ai_fix.AiFixError("boom")
+		assert ai_fix.log_ai_failure("first", exc, step="one") is True
+		assert ai_fix.log_ai_failure("second", exc, step="two") is False
+		assert len(logs) == 1
+		assert frappe.db.rows["ERR-0001"]["error"].endswith("\n\nsecond\nstep=two")
+
+	def test_a_failing_append_is_swallowed_with_a_breadcrumb(self, logs, monkeypatch, breadcrumbs):
+		import frappe
+
+		exc = self._http_failure(monkeypatch)
+		frappe.db.raise_on_set = RuntimeError(f"lock wait {KEY}")
+		assert ai_fix.log_ai_failure("optimus ai backfill", exc, finding_type="n_plus_one") is False
+		assert len(logs) == 1
+		assert [(m, msg) for m, msg, _active in breadcrumbs] == [
+			("optimus", "optimus ai_fix: the caller's context could not be added to an AI Error Log row: RuntimeError"),
+		]
+		assert all(active is None for _m, _msg, active in breadcrumbs)
+
+	def test_a_row_that_is_gone_is_left_alone(self, logs, monkeypatch, breadcrumbs):
+		import frappe
+
+		exc = self._http_failure(monkeypatch)
+		del frappe.db.rows["ERR-0001"]
+		ai_fix.log_ai_failure("optimus ai backfill", exc, finding_type="n_plus_one")
+		assert frappe.db.set_values == [] and breadcrumbs == []
+
+	def test_a_job_timeout_during_the_append_still_stops_the_job(self, logs, job_timeout, monkeypatch):
+		import frappe
+
+		exc = self._http_failure(monkeypatch)
+		frappe.db.raise_on_set = job_timeout
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix.log_ai_failure("optimus ai backfill", exc, finding_type="n_plus_one")
+		assert ei.value is not job_timeout and ei.value.__context__ is None
+		assert len(logs) == 1
+
+	def test_an_error_never_written_is_not_appended_to(self, logs, monkeypatch):
+		import frappe
+
+		exc = ai_fix.AiFixError("boom")
+		setattr(exc, ai_fix._LOGGED_ATTR, True)  # marked, but no row name
+		assert ai_fix.log_ai_failure("again", exc, step="two") is False
+		assert frappe.db.set_values == [] and logs == []
