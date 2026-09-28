@@ -24,12 +24,14 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _frappe_stub(monkeypatch):
-	monkeypatch.setitem(sys.modules, "frappe", types.ModuleType("frappe"))
+	stub = types.ModuleType("frappe")
+	stub._ = lambda msg, *a, **k: msg  # pdf_export does `from frappe import _` at module top
+	monkeypatch.setitem(sys.modules, "frappe", stub)
 
 
-# Import is safe under any sys.modules state because pdf_export only
-# touches frappe inside its functions; we deferred the import below
-# the fixture for clarity.
+# pdf_export does `from frappe import _` at module top, so the frappe module in
+# sys.modules must expose `_` (the fixture stub above and the conftest baseline
+# stub both provide it).
 from optimus.pdf_export import _expand_collapsible_sections  # noqa: E402
 
 

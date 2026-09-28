@@ -10,7 +10,6 @@ deduplicated by (finding_type, table) with cumulative impact.
 """
 
 import json
-from collections import defaultdict
 
 from optimus.analyzers.base import (
 	SEVERITY_ORDER,

@@ -8,6 +8,107 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.62] - 2026-09-28
+
+### Internal
+
+- Declared the app's Frappe dependency in `[tool.bench.frappe-dependencies]`
+  (`frappe >=15.0.0,<17.0.0`, covering v15 and v16), mirroring `hooks.py`
+  `required_apps`, so bench and Frappe Cloud resolve and version-gate it at deploy
+  time. optimus runs on plain Frappe (ERPNext optional), so frappe is the only
+  hard dependency.
+
+---
+
+## [0.12.61] - 2026-09-26
+
+### Fixed
+
+- Self-time hot path findings now point at the exact hot line. When a function's
+  time is spent in database calls, its card pinned only to the `def` signature or
+  a call-to-another-function line, because the call tree holds framework
+  internals with no user-code line for the hot work. The card now pins to the
+  hottest related finding line (the N+1 or slow query) inside its deepest user
+  frame and shows it with context, the way a chain-pinned finding does. This
+  covers both a job that calls the database directly and a validate hook whose
+  deepest user frame runs the N+1 loop. The line comes from persisted findings,
+  so it survives a report re-render. A compute-only path with no related finding
+  still falls back to the signature line plus the Line-Level Drilldown note.
+
+---
+
+## [0.12.59] - 2026-09-25
+
+### Changed
+
+- The call tree no longer includes background jobs. A slow job's flat worker
+  loop used to crowd out the request hierarchies the panel is meant to surface.
+  Jobs already have their own RQ Jobs section, so the call tree now shows only
+  foreground actions.
+
+---
+
+## [0.12.58] - 2026-09-25
+
+### Fixed
+
+- The Python call tree no longer hides its deepest frames. Each nesting level
+  indents the tree and long file paths run wide, so deep frames were squeezed
+  into an unreadable sliver clipped inside the panel. The call tree section now
+  has its own horizontal scrollbar and its rows keep their natural width, so
+  every frame stays full width and reachable. The row highlight spans the full
+  scrolled width so scrolling right leaves no blank gap. Scoped to the call tree, so the
+  rest of the report layout is unchanged. In print the scroll is dropped and
+  rows fit the page width so the meta ellipsizes rather than running off the
+  page edge.
+
+---
+
+## [0.12.56] - 2026-09-23
+
+### Fixed
+
+- Optimus Settings no longer stacks a duplicate intro banner. Toggling the AI
+  master switch re-enters the form's refresh handler (`frm.trigger("refresh")`),
+  and Frappe's `set_intro` appends a new message rather than replacing the
+  previous one, so a second identical banner appeared. The intro is now a single
+  id-scoped element rendered outside Frappe's shared message container, so it
+  cannot duplicate and does not clear sibling banners in that container (for
+  example the concurrent-edit warning).
+
+---
+
+## [0.12.55] - 2026-09-22
+
+### Fixed
+
+- Background-job status writes now use `safe_commit()` so a failed COMMIT rolls
+  back and leaves the connection clean instead of corrupting the next statement.
+
+### Changed
+
+- User-facing `frappe.throw` / `frappe.msgprint` messages are wrapped in `_()`
+  so they can be translated for non-English deployments. This includes the
+  operator-facing fallback strings on the index-suggestion, humanize-steps and
+  phase-2 status paths (the dynamic reason text stays unwrapped).
+
+### Internal
+
+- Documented why the session-write endpoints use `ignore_permissions=True`
+  (ownership is enforced by the endpoint's permission check first).
+
+---
+
+## [0.12.53] - 2026-09-22
+
+### Internal
+
+- Removed three unused imports flagged by the code audit (`json` in `ai_fix.py`,
+  `SEVERITY_ORDER` in `analyzers/call_tree.py`, `defaultdict` in
+  `analyzers/explain_flags.py`). No behavior change.
+
+---
+
 ## [0.12.52] - 2026-09-20
 
 ### Fixed

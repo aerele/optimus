@@ -11,6 +11,7 @@ import json
 import time
 
 import frappe
+from frappe import _
 from frappe.rate_limiter import rate_limit
 from frappe.utils import add_to_date, now_datetime
 
@@ -27,7 +28,7 @@ def _require_user() -> str:
 	"""Return the calling user, or throw if Guest."""
 	user = frappe.session.user
 	if not user or user == "Guest":
-		frappe.throw("You must be logged in to use the profiler.")
+		frappe.throw(_("You must be logged in to use the profiler."))
 	return user
 
 
@@ -44,7 +45,7 @@ def _require_profiler_user() -> str:
 	roles = set(frappe.get_roles(user))
 	if not (ALLOWED_ROLES & roles):
 		frappe.throw(
-			"You need the Optimus User or System Manager role to use the profiler.",
+			_("You need the Optimus User or System Manager role to use the profiler."),
 			frappe.PermissionError,
 		)
 	return user
@@ -60,13 +61,13 @@ def _require_session_permission(session_uuid: str, permission_type: str = "read"
 	denied rather than downgraded to the role-only gate.
 	"""
 	if not session_uuid:
-		frappe.throw("session_uuid is required", frappe.ValidationError)
+		frappe.throw(_("session_uuid is required"), frappe.ValidationError)
 	docname = frappe.db.get_value(
 		"Optimus Session", {"session_uuid": session_uuid}, "name"
 	)
 	if not docname:
 		frappe.throw(
-			f"No Optimus Session found for uuid {session_uuid}",
+			_("No Optimus Session found for uuid {0}").format(session_uuid),
 			frappe.DoesNotExistError,
 		)
 	try:
@@ -80,15 +81,24 @@ def _require_session_permission(session_uuid: str, permission_type: str = "read"
 		except Exception:
 			pass
 		frappe.throw(
-			"You do not have permission to access this Optimus Session.",
+			_("You do not have permission to access this Optimus Session."),
 			frappe.PermissionError,
 		)
 	if not allowed:
 		frappe.throw(
-			"You do not have permission to access this Optimus Session.",
+			_("You do not have permission to access this Optimus Session."),
 			frappe.PermissionError,
 		)
 	return docname
+
+
+def _save_parent_bypassing_perms(parent) -> None:
+	"""Persist a phase-2 line-profile parent Optimus Session. Ownership is
+	enforced by the caller's _require_session_permission check before this runs,
+	so the DocType write-perm is bypassed here."""
+	parent.flags.ignore_validate_update_after_submit = True
+	parent.save(ignore_permissions=True)
+	safe_commit()
 
 
 @frappe.whitelist()
@@ -151,6 +161,8 @@ def start(
 	notes_clean = (notes or "").strip()
 	if notes_clean:
 		doc_fields["notes"] = notes_clean
+	# Caller passed _require_profiler_user; the profiler creates their own
+	# session, which regular users have no create-perm for.
 	doc = frappe.get_doc(doc_fields).insert(ignore_permissions=True)
 
 	# Store metadata in Redis (used by the analyze pipeline later).
@@ -807,7 +819,7 @@ def download_pdf(session_uuid: str) -> dict:
 	"""
 	user = _require_profiler_user()
 	if not session_uuid:
-		frappe.throw("session_uuid is required")
+		frappe.throw(_("session_uuid is required"))
 	_require_session_permission(session_uuid, "read")
 
 	row = frappe.db.get_value(
@@ -817,9 +829,9 @@ def download_pdf(session_uuid: str) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(f"No Optimus Session found for uuid {session_uuid}")
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
 	if row["status"] != "Ready":
-		frappe.throw(f"Cannot generate PDF for session in '{row['status']}' state")
+		frappe.throw(_("Cannot generate PDF for session in '{0}' state").format(row['status']))
 
 	roles = set(frappe.get_roles(user))
 	if (
@@ -828,7 +840,7 @@ def download_pdf(session_uuid: str) -> dict:
 		and user != "Administrator"
 	):
 		frappe.throw(
-			"You can only download PDFs for your own sessions.",
+			_("You can only download PDFs for your own sessions."),
 			frappe.PermissionError,
 		)
 
@@ -852,7 +864,7 @@ def export_session(session_uuid: str) -> dict:
 
 	user = _require_profiler_user()
 	if not session_uuid:
-		frappe.throw("session_uuid is required")
+		frappe.throw(_("session_uuid is required"))
 	_require_session_permission(session_uuid, "read")
 
 	row = frappe.db.get_value(
@@ -862,14 +874,14 @@ def export_session(session_uuid: str) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(f"No Optimus Session found for uuid {session_uuid}")
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
 
 	doc = frappe.get_doc("Optimus Session", row["name"])
 
 	# Permission gate (same logic as retry_analyze)
 	roles = set(frappe.get_roles(user))
 	if doc.user != user and "System Manager" not in roles and user != "Administrator":
-		frappe.throw("You can only export your own sessions.", frappe.PermissionError)
+		frappe.throw(_("You can only export your own sessions."), frappe.PermissionError)
 
 	def _parse_json_field(value):
 		if not value:
@@ -957,7 +969,7 @@ def retry_analyze(session_uuid: str) -> dict:
 	"""
 	user = _require_profiler_user()
 	if not session_uuid:
-		frappe.throw("session_uuid is required")
+		frappe.throw(_("session_uuid is required"))
 	_require_session_permission(session_uuid, "write")
 
 	doc = frappe.db.get_value(
@@ -967,12 +979,12 @@ def retry_analyze(session_uuid: str) -> dict:
 		as_dict=True,
 	)
 	if not doc:
-		frappe.throw(f"No Optimus Session found for uuid {session_uuid}")
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
 
 	# Permission check: recording user OR System Manager only
 	roles = set(frappe.get_roles(user))
 	if doc["user"] != user and "System Manager" not in roles and user != "Administrator":
-		frappe.throw("You can only retry your own sessions.", frappe.PermissionError)
+		frappe.throw(_("You can only retry your own sessions."), frappe.PermissionError)
 
 	if doc["status"] != "Failed":
 		return {
@@ -1044,7 +1056,7 @@ def regenerate_reports(session_uuid: str) -> dict:
 	"""
 	user = _require_profiler_user()
 	if not session_uuid:
-		frappe.throw("session_uuid is required")
+		frappe.throw(_("session_uuid is required"))
 	_require_session_permission(session_uuid, "write")
 
 	row = frappe.db.get_value(
@@ -1054,7 +1066,7 @@ def regenerate_reports(session_uuid: str) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(f"No Optimus Session found for uuid {session_uuid}")
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
 
 	# v0.12.9: enforce the docstring's "Allowed on Ready OR Failed
 	# sessions" contract. The pre-v0.12.9 code accepted any status,
@@ -1064,10 +1076,7 @@ def regenerate_reports(session_uuid: str) -> dict:
 	# in v0.12.4 by the integration test that exercised this gap.
 	if row["status"] not in ("Ready", "Failed"):
 		frappe.throw(
-			f"regenerate_reports requires the session to be in a terminal "
-			f"state (Ready or Failed); this one is '{row['status']}'. "
-			f"Wait for analyze to finish, or use retry_analyze to restart "
-			f"a stuck pipeline."
+			_("regenerate_reports requires the session to be in a terminal state (Ready or Failed); this one is '{0}'. Wait for analyze to finish, or use retry_analyze to restart a stuck pipeline.").format(row['status'])
 		)
 
 	roles = set(frappe.get_roles(user))
@@ -1077,7 +1086,7 @@ def regenerate_reports(session_uuid: str) -> dict:
 		and user != "Administrator"
 	):
 		frappe.throw(
-			"You can only regenerate reports for your own sessions.",
+			_("You can only regenerate reports for your own sessions."),
 			frappe.PermissionError,
 		)
 
@@ -1151,9 +1160,9 @@ def suggest_fix(session_uuid: str, finding_ref: str, regenerate=0) -> dict:
 	"""
 	user = _require_profiler_user()
 	if not session_uuid:
-		frappe.throw("session_uuid is required")
+		frappe.throw(_("session_uuid is required"))
 	if not finding_ref:
-		frappe.throw("finding_ref is required")
+		frappe.throw(_("finding_ref is required"))
 	_require_session_permission(session_uuid, "write")
 	regenerate = bool(frappe.utils.cint(regenerate))
 
@@ -1164,11 +1173,10 @@ def suggest_fix(session_uuid: str, finding_ref: str, regenerate=0) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(f"No Optimus Session found for uuid {session_uuid}")
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
 	if row["status"] != "Ready":
 		frappe.throw(
-			f"AI fix suggestions are only available for Ready sessions "
-			f"(this one is '{row['status']}')."
+			_("AI fix suggestions are only available for Ready sessions (this one is '{0}').").format(row['status'])
 		)
 
 	roles = set(frappe.get_roles(user))
@@ -1178,7 +1186,7 @@ def suggest_fix(session_uuid: str, finding_ref: str, regenerate=0) -> dict:
 		and user != "Administrator"
 	):
 		frappe.throw(
-			"You can only request AI fixes for your own sessions.",
+			_("You can only request AI fixes for your own sessions."),
 			frappe.PermissionError,
 		)
 
@@ -1186,14 +1194,18 @@ def suggest_fix(session_uuid: str, finding_ref: str, regenerate=0) -> dict:
 
 	if not ai_fix.is_available():
 		frappe.throw(
-			"AI fix suggestions aren't configured enable them in Profiler "
-			"Settings ▸ AI Fix Suggestions and set a provider, model and API key."
+			_(
+				"AI fix suggestions aren't configured enable them in Profiler "
+				"Settings ▸ AI Fix Suggestions and set a provider, model and API key."
+			)
 		)
 	from optimus.settings import get_config
 	if not get_config().ai_suggest_findings:
 		frappe.throw(
-			'AI fix suggestions on findings are turned off enable '
-			'"Fix suggestions on findings" under Optimus Settings ▸ AI.'
+			_(
+				'AI fix suggestions on findings are turned off enable '
+				'"Fix suggestions on findings" under Optimus Settings ▸ AI.'
+			)
 		)
 
 	doc = frappe.get_doc("Optimus Session", row["name"])
@@ -1204,21 +1216,18 @@ def suggest_fix(session_uuid: str, finding_ref: str, regenerate=0) -> dict:
 		if 0 <= idx < len(findings):
 			child = findings[idx]
 	if child is None:
-		frappe.throw(f"Finding {finding_ref!r} not found on this session.")
+		frappe.throw(_("Finding {0!r} not found on this session.").format(finding_ref))
 
 	if (child.finding_type or "") not in ai_fix.AI_ELIGIBLE_FINDING_TYPES:
 		frappe.throw(
-			f"AI fix suggestions aren't offered for '{child.finding_type}' "
-			"findings they don't carry enough code/SQL context."
+			_("AI fix suggestions aren't offered for '{0}' findings they don't carry enough code/SQL context.").format(child.finding_type)
 		)
 	# v0.9.0: per-type opt-out (Critical Risk #2). Refuse on-demand calls
 	# for types listed in ``ai_excluded_finding_types`` with a clear message
 	# pointing the operator at the setting they configured.
 	if ai_fix.is_finding_type_excluded(child.finding_type or ""):
 		frappe.throw(
-			f"'{child.finding_type}' is on the exclusion list in Optimus "
-			"Settings ▸ AI ▸ Privacy & Operations ▸ Excluded finding types. "
-			"Remove the line if you want AI suggestions for this type."
+			_("'{0}' is on the exclusion list in Optimus Settings ▸ AI ▸ Privacy & Operations ▸ Excluded finding types. Remove the line if you want AI suggestions for this type.").format(child.finding_type)
 		)
 
 	# Return the cached suggestion unless the caller asked to regenerate.
@@ -1303,7 +1312,7 @@ def test_ai_connection() -> dict:
 	roles = set(frappe.get_roles(user))
 	if "System Manager" not in roles and user != "Administrator":
 		frappe.throw(
-			"Only a System Manager can test the AI connection.",
+			_("Only a System Manager can test the AI connection."),
 			frappe.PermissionError,
 		)
 	from optimus import ai_fix
@@ -1342,7 +1351,7 @@ def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
 	"""
 	user = _require_profiler_user()
 	if not session_uuid:
-		frappe.throw("session_uuid is required")
+		frappe.throw(_("session_uuid is required"))
 	regenerate_all = bool(frappe.utils.cint(regenerate_all))
 
 	row = frappe.db.get_value(
@@ -1352,11 +1361,10 @@ def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(f"No Optimus Session found for uuid {session_uuid}")
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
 	if row["status"] != "Ready":
 		frappe.throw(
-			f"AI fixes can only be generated for Ready sessions "
-			f"(this one is '{row['status']}')."
+			_("AI fixes can only be generated for Ready sessions (this one is '{0}').").format(row['status'])
 		)
 
 	roles = set(frappe.get_roles(user))
@@ -1366,7 +1374,7 @@ def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
 		and user != "Administrator"
 	):
 		frappe.throw(
-			"You can only generate AI fixes for your own sessions.",
+			_("You can only generate AI fixes for your own sessions."),
 			frappe.PermissionError,
 		)
 
@@ -1374,14 +1382,18 @@ def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
 
 	if not ai_fix.is_available():
 		frappe.throw(
-			"AI fix suggestions aren't configured enable them in Profiler "
-			"Settings ▸ AI Fix Suggestions and set a provider, model and API key."
+			_(
+				"AI fix suggestions aren't configured enable them in Profiler "
+				"Settings ▸ AI Fix Suggestions and set a provider, model and API key."
+			)
 		)
 	from optimus.settings import get_config
 	if not get_config().ai_suggest_findings:
 		frappe.throw(
-			'AI fix suggestions on findings are turned off enable '
-			'"Fix suggestions on findings" under Optimus Settings ▸ AI.'
+			_(
+				'AI fix suggestions on findings are turned off enable '
+				'"Fix suggestions on findings" under Optimus Settings ▸ AI.'
+			)
 		)
 
 	from optimus import analyze as _analyze_mod
@@ -1419,7 +1431,7 @@ def humanize_steps(session_uuid: str) -> dict:
 	"""
 	user = _require_profiler_user()
 	if not session_uuid:
-		frappe.throw("session_uuid is required")
+		frappe.throw(_("session_uuid is required"))
 
 	row = frappe.db.get_value(
 		"Optimus Session",
@@ -1428,11 +1440,10 @@ def humanize_steps(session_uuid: str) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(f"No Optimus Session found for uuid {session_uuid}")
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
 	if row["status"] != "Ready":
 		frappe.throw(
-			f"Steps can only be (re)generated for Ready sessions "
-			f"(this one is '{row['status']}')."
+			_("Steps can only be (re)generated for Ready sessions (this one is '{0}').").format(row['status'])
 		)
 
 	roles = set(frappe.get_roles(user))
@@ -1442,7 +1453,7 @@ def humanize_steps(session_uuid: str) -> dict:
 		and user != "Administrator"
 	):
 		frappe.throw(
-			"You can only do this for your own sessions.",
+			_("You can only do this for your own sessions."),
 			frappe.PermissionError,
 		)
 
@@ -1450,14 +1461,16 @@ def humanize_steps(session_uuid: str) -> dict:
 
 	if not ai_fix.is_available():
 		frappe.throw(
-			"AI isn't configured enable it under Optimus Settings ▸ "
-			"AI Fix Suggestions and set a provider, model and API key."
+			_("AI isn't configured enable it under Optimus Settings ▸ "
+			"AI Fix Suggestions and set a provider, model and API key.")
 		)
 	from optimus.settings import get_config
 	if not get_config().ai_humanize_steps:
 		frappe.throw(
-			'AI-humanized "Steps to Reproduce" is turned off enable it '
-			'under Optimus Settings ▸ AI.'
+			_(
+				'AI-humanized "Steps to Reproduce" is turned off enable it '
+				'under Optimus Settings ▸ AI.'
+			)
 		)
 
 	doc = frappe.get_doc("Optimus Session", row["name"])
@@ -1465,7 +1478,7 @@ def humanize_steps(session_uuid: str) -> dict:
 	if not status.get("updated"):
 		# Mirror the legacy endpoint's contract: surface "no actions" as a
 		# user-facing error rather than a silent skip.
-		reason = status.get("reason") or "Couldn't humanize the steps."
+		reason = status.get("reason") or _("Couldn't humanize the steps.")
 		frappe.throw(reason)
 
 	regen = regenerate_reports(session_uuid)
@@ -1540,7 +1553,7 @@ def suggest_index(session_uuid: str, table_name: str) -> dict:
 	"""
 	user = _require_profiler_user()
 	if not session_uuid or not table_name:
-		frappe.throw("session_uuid and table_name are required")
+		frappe.throw(_("session_uuid and table_name are required"))
 
 	row = frappe.db.get_value(
 		"Optimus Session",
@@ -1549,11 +1562,10 @@ def suggest_index(session_uuid: str, table_name: str) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(f"No Optimus Session found for uuid {session_uuid}")
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
 	if row["status"] != "Ready":
 		frappe.throw(
-			f"Index suggestions are only available for Ready sessions "
-			f"(this one is '{row['status']}')."
+			_("Index suggestions are only available for Ready sessions (this one is '{0}').").format(row['status'])
 		)
 
 	roles = set(frappe.get_roles(user))
@@ -1563,7 +1575,7 @@ def suggest_index(session_uuid: str, table_name: str) -> dict:
 		and user != "Administrator"
 	):
 		frappe.throw(
-			"You can only request index suggestions for your own sessions.",
+			_("You can only request index suggestions for your own sessions."),
 			frappe.PermissionError,
 		)
 
@@ -1571,14 +1583,16 @@ def suggest_index(session_uuid: str, table_name: str) -> dict:
 
 	if not ai_fix.is_available():
 		frappe.throw(
-			"AI isn't configured enable it under Optimus Settings ▸ "
-			"AI Fix Suggestions and set a provider, model and API key."
+			_("AI isn't configured enable it under Optimus Settings ▸ "
+			"AI Fix Suggestions and set a provider, model and API key.")
 		)
 	from optimus.settings import get_config
 	if not get_config().ai_suggest_indexes:
 		frappe.throw(
-			'AI index recommendations are turned off enable '
-			'"Index recommendations (DB-tables breakdown)" under Optimus Settings ▸ AI.'
+			_(
+				'AI index recommendations are turned off enable '
+				'"Index recommendations (DB-tables breakdown)" under Optimus Settings ▸ AI.'
+			)
 		)
 
 	from optimus import analyze as _analyze_mod
@@ -1589,7 +1603,7 @@ def suggest_index(session_uuid: str, table_name: str) -> dict:
 	except ai_fix.AiFixError as e:
 		frappe.throw(str(e))
 	if not out.get("ok"):
-		frappe.throw(out.get("reason") or "Couldn't generate an index suggestion for that table.")
+		frappe.throw(out.get("reason") or _("Couldn't generate an index suggestion for that table."))
 
 	regen = regenerate_reports(session_uuid)
 	return {
@@ -1655,7 +1669,7 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 	"""
 	user = _require_profiler_user()
 	if not session_uuid:
-		frappe.throw("session_uuid is required")
+		frappe.throw(_("session_uuid is required"))
 
 	row = frappe.db.get_value(
 		"Optimus Session",
@@ -1664,11 +1678,10 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(f"No Optimus Session found for uuid {session_uuid}")
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
 	if row["status"] != "Ready":
 		frappe.throw(
-			f"AI suggestions can only be refreshed for Ready sessions "
-			f"(this one is '{row['status']}')."
+			_("AI suggestions can only be refreshed for Ready sessions (this one is '{0}').").format(row['status'])
 		)
 
 	roles = set(frappe.get_roles(user))
@@ -1678,7 +1691,7 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 		and user != "Administrator"
 	):
 		frappe.throw(
-			"You can only refresh AI suggestions for your own sessions.",
+			_("You can only refresh AI suggestions for your own sessions."),
 			frappe.PermissionError,
 		)
 
@@ -1686,8 +1699,8 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 
 	if not ai_fix.is_available():
 		frappe.throw(
-			"AI isn't configured enable it under Optimus Settings ▸ "
-			"AI Fix Suggestions and set a provider, model and API key."
+			_("AI isn't configured enable it under Optimus Settings ▸ "
+			"AI Fix Suggestions and set a provider, model and API key.")
 		)
 
 	from optimus import analyze as _analyze_mod
@@ -1753,8 +1766,8 @@ def get_installed_apps_for_tracking() -> list[str]:
 	"""
 	if "System Manager" not in (frappe.get_roles() or []):
 		frappe.throw(
-			"Only System Manager can list installed apps for the "
-			"Optimus Settings picker."
+			_("Only System Manager can list installed apps for the "
+			"Optimus Settings picker.")
 		)
 	apps = frappe.get_installed_apps() or []
 	return [app for app in apps if app != "optimus"]
@@ -1768,7 +1781,7 @@ def get_config_profiles() -> dict:
 	"""
 	if "System Manager" not in (frappe.get_roles() or []):
 		frappe.throw(
-			"Only System Manager can read the Optimus sensitivity profiles."
+			_("Only System Manager can read the Optimus sensitivity profiles.")
 		)
 	from optimus import settings
 	# Plain dict of dicts JSON-serializable as-is for the whitelist response.
@@ -1952,11 +1965,11 @@ def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 		try:
 			picks_list = _json.loads(picks)
 		except _json.JSONDecodeError:
-			frappe.throw("picks must be a JSON list of {dotted_path, source} entries.")
+			frappe.throw(_("picks must be a JSON list of {dotted_path, source} entries."))
 	else:
 		picks_list = picks
 	if not isinstance(picks_list, list) or not picks_list:
-		frappe.throw("Provide at least one function to line-profile.")
+		frappe.throw(_("Provide at least one function to line-profile."))
 
 	# Coerce auto_expand from the JS payload (frappe.call sends "true"/"false"
 	# strings; whitelisted view fns accept Python types when available).
@@ -1968,8 +1981,8 @@ def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 	# read separate Redis flags but only one can be active at a time.
 	if session.get_active_session_for(user):
 		frappe.throw(
-			"You currently have a phase-1 session recording. Stop it before "
-			"starting a phase-2 line-profile run.",
+			_("You currently have a phase-1 session recording. Stop it before "
+			"starting a phase-2 line-profile run."),
 		)
 
 	# Look up the parent Optimus Session and verify it's Ready.
@@ -1979,17 +1992,19 @@ def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 		"name",
 	)
 	if not parent_docname:
-		frappe.throw(f"Optimus Session {session_uuid!r} not found.")
+		frappe.throw(_("Optimus Session {0!r} not found.").format(session_uuid))
 	parent_status = frappe.db.get_value("Optimus Session", parent_docname, "status")
 	if parent_status != "Ready":
 		frappe.throw(
-			f"Phase-2 requires a finished session (status=Ready); current "
-			f"status is {parent_status!r}.",
+			_(
+				"Phase-2 requires a finished session (status=Ready); current "
+				"status is {0!r}."
+			).format(parent_status)
 		)
 
 	# Reject if the user already has a phase-2 run in flight elsewhere.
 	if _lp_capture.is_active(user):
-		frappe.throw("You already have a phase-2 line-profile run active.")
+		frappe.throw(_("You already have a phase-2 line-profile run active."))
 
 	# Auto-expand curated picks via phase-1's call tree. Curated picks come
 	# in as {dotted_path, source: "curated"}; the expansion adds their hot
@@ -2071,7 +2086,7 @@ def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 					})
 		picks_list = expanded_picks
 		if not picks_list:
-			frappe.throw("Provide at least one function to line-profile.")
+			frappe.throw(_("Provide at least one function to line-profile."))
 
 	run_uuid = _uuid.uuid4().hex
 
@@ -2098,9 +2113,7 @@ def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 			for r in resolved if r.get("eligible")
 		]),
 	})
-	parent.flags.ignore_validate_update_after_submit = True
-	parent.save(ignore_permissions=True)
-	safe_commit()
+	_save_parent_bypassing_perms(parent)
 
 	frappe.publish_realtime("phase_2_run_recording", {
 		"session_uuid": session_uuid,
@@ -2224,9 +2237,9 @@ def stop_line_profile_pass(run_uuid: str) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(f"Phase 2 run {run_uuid!r} not found.")
+		frappe.throw(_("Phase 2 run {0!r} not found.").format(run_uuid))
 	if row.status != "Recording":
-		frappe.throw(f"Phase 2 run is in status {row.status!r}, not Recording.")
+		frappe.throw(_("Phase 2 run is in status {0!r}, not Recording.").format(row.status))
 
 	parent_docname = row.parent
 	session_uuid = frappe.db.get_value("Optimus Session", parent_docname, "session_uuid")
@@ -2244,9 +2257,7 @@ def stop_line_profile_pass(run_uuid: str) -> dict:
 			child.status = "Analyzing"
 			child.ended_at = now_datetime()
 			break
-	parent.flags.ignore_validate_update_after_submit = True
-	parent.save(ignore_permissions=True)
-	safe_commit()
+	_save_parent_bypassing_perms(parent)
 
 	frappe.publish_realtime("phase_2_run_analyzing", {
 		"session_uuid": session_uuid,
@@ -2331,7 +2342,7 @@ def retry_phase2_analyze(run_uuid: str) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(f"Phase 2 run {run_uuid!r} not found.")
+		frappe.throw(_("Phase 2 run {0!r} not found.").format(run_uuid))
 	parent_docname = row.parent
 	session_uuid = frappe.db.get_value("Optimus Session", parent_docname, "session_uuid")
 	# SECURITY: ownership gate on the resolved parent session (run_uuid alone is
@@ -2344,9 +2355,7 @@ def retry_phase2_analyze(run_uuid: str) -> dict:
 		if child.run_uuid == run_uuid:
 			child.status = "Analyzing"
 			break
-	parent.flags.ignore_validate_update_after_submit = True
-	parent.save(ignore_permissions=True)
-	safe_commit()
+	_save_parent_bypassing_perms(parent)
 
 	try:
 		_lp_analyzer.run_analyze(session_uuid, run_uuid)
@@ -2382,9 +2391,9 @@ def retry_phase2_analyzes_batch(run_uuids) -> dict:
 		try:
 			run_uuids = _json.loads(run_uuids)
 		except (TypeError, ValueError):
-			frappe.throw("run_uuids must be a JSON array of run-uuid strings.")
+			frappe.throw(_("run_uuids must be a JSON array of run-uuid strings."))
 	if not isinstance(run_uuids, (list, tuple)) or not run_uuids:
-		frappe.throw("run_uuids must be a non-empty list of run-uuid strings.")
+		frappe.throw(_("run_uuids must be a non-empty list of run-uuid strings."))
 
 	results: list[dict] = []
 	for run_uuid in run_uuids:

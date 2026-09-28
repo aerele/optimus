@@ -28,7 +28,6 @@ from collections import defaultdict
 
 from optimus.analyzers.base import (
 	_THIRD_PARTY_LIB_NAMES,
-	SEVERITY_ORDER,
 	AnalyzerResult,
 	_last_app_segment,
 	dur,

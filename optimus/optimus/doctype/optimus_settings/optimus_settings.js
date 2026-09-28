@@ -47,12 +47,14 @@ const OPTIMUS_SENSITIVITY_FIELDS = [
 
 frappe.ui.form.on("Optimus Settings", {
 	refresh(frm) {
-		frm.set_intro(
-			__(
-				"Optimus app-wide settings. Changes apply to new sessions; in-flight recordings keep the values they started with."
-			),
-			"blue"
-		);
+		// Render the app-wide intro as one id-scoped banner (see
+		// _render_settings_intro). The ai_enabled handler re-enters refresh via
+		// frm.trigger("refresh"), and set_intro / set_headline_alert APPEND a new
+		// .form-message per call, so a bare set_intro stacked a duplicate on that
+		// re-entry. Owning our own element keeps it idempotent AND avoids clearing
+		// the shared message container, which would wipe a sibling banner frappe
+		// puts there, e.g. the concurrent-edit warning from show_conflict_message.
+		_render_settings_intro(frm);
 
 		// The API Key is a secret token, not a human-chosen password, so the
 		// password-strength meter is meaningless for it. It also POSTs the
@@ -219,3 +221,31 @@ frappe.ui.form.on("Optimus Settings", {
 		frm.refresh_field("ai_base_url");
 	},
 });
+
+// Render the app-wide intro as a single id-scoped element, created once and
+// reused. It lives OUTSIDE frappe's .form-message-container (prepended to
+// .form-layout), so refresh re-entry can't duplicate it and it never clobbers a
+// sibling banner in that container, e.g. the realtime concurrent-edit warning
+// that form.js show_conflict_message sets via set_headline_alert. frappe's
+// set_intro / set_headline_alert both APPEND to that container (layout.js
+// show_message), and clearing the container to dedupe would take the siblings
+// with it, so we own our own element. Mirrors optimus_session.js's
+// _single_banner; kept separate because desk doctype scripts share no module.
+function _render_settings_intro(frm) {
+	const root = frm.$wrapper;
+	if (!root || !root.length) {
+		return;
+	}
+	let $intro = root.find(".optimus-settings-intro");
+	if (!$intro.length) {
+		$intro = $('<div class="optimus-settings-intro form-message blue"></div>');
+		const $host = root.find(".form-layout").first();
+		($host.length ? $host : root).prepend($intro);
+	}
+	// Plain text (no markup), so .text() both sets and escapes it.
+	$intro.text(
+		__(
+			"Optimus app-wide settings. Changes apply to new sessions; in-flight recordings keep the values they started with."
+		)
+	);
+}

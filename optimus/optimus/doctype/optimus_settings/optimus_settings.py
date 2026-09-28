@@ -2,6 +2,7 @@
 # For license information, please see license.txt
 
 import frappe
+from frappe import _
 from frappe.model.document import Document
 
 
@@ -126,22 +127,20 @@ class OptimusSettings(Document):
 		})
 		if not offenders:
 			return
-		msg = (
-			"<b>Heads up:</b> you added "
-			+ ", ".join(f"<code>{a}</code>" for a in offenders)
-			+ " to Tracked Apps. These are framework/first-party apps. "
-			"Adding them here flips the filter into <i>inclusion mode</i>, "
-			"so their findings will now show up as <b>actionable</b> "
-			"instead of in the collapsed Framework observations section. "
-			"<br><br>"
-			"If you want the default behavior (frappe + erpnext + stock "
-			"apps treated as framework), <b>remove these rows and leave "
-			"the table empty</b>. Only add your own custom app here if "
-			"you want to narrow the actionable list to just that app."
-		)
+		msg = _(
+			"<b>Heads up:</b> you added {0} to Tracked Apps. These are "
+			"framework/first-party apps. Adding them here flips the filter "
+			"into <i>inclusion mode</i>, so their findings will now show up "
+			"as <b>actionable</b> instead of in the collapsed Framework "
+			"observations section. <br><br>If you want the default behavior "
+			"(frappe + erpnext + stock apps treated as framework), <b>remove "
+			"these rows and leave the table empty</b>. Only add your own "
+			"custom app here if you want to narrow the actionable list to "
+			"just that app."
+		).format(", ".join(f"<code>{a}</code>" for a in offenders))
 		frappe.msgprint(
 			msg,
-			title="Tracked Apps possible misconfiguration",
+			title=_("Tracked Apps possible misconfiguration"),
 			indicator="orange",
 		)
 
@@ -161,18 +160,28 @@ class OptimusSettings(Document):
 		missing = []
 		if provider == "OpenAI-compatible":
 			if not (self.get("ai_base_url") or "").strip():
-				missing.append("Base URL")
+				missing.append(_("Base URL"))
 			if not (self.get("ai_model") or "").strip():
-				missing.append("Model")
+				missing.append(_("Model"))
 		if needs_key and not (self.get("ai_api_key") or "").strip():
-			missing.append("API Key")
+			missing.append(_("API Key"))
 		if not missing:
 			return
+		names = ", ".join(missing)
+		if len(missing) == 1:
+			body = _(
+				"AI Fix Suggestions are enabled but {0} is not set. The "
+				"<b>Suggest a fix (AI)</b> button will report a configuration "
+				"error until you fill it in."
+			).format(names)
+		else:
+			body = _(
+				"AI Fix Suggestions are enabled but {0} are not set. The "
+				"<b>Suggest a fix (AI)</b> button will report a configuration "
+				"error until you fill them in."
+			).format(names)
 		frappe.msgprint(
-			"AI Fix Suggestions are enabled but " + ", ".join(missing)
-			+ (" is" if len(missing) == 1 else " are")
-			+ " not set. The <b>Suggest a fix (AI)</b> button will report a "
-			"configuration error until you fill these in.",
-			title="AI Fix Suggestions incomplete config",
+			body,
+			title=_("AI Fix Suggestions incomplete config"),
 			indicator="orange",
 		)

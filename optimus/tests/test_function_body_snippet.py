@@ -66,6 +66,18 @@ class TestExpandSelfTimeSnippets:
 		assert _snippet(f) == [{"lineno": 3, "content": "def x():"}]  # untouched
 		assert "self_time_no_pinpoint" not in _callsite(f)
 
+	def test_pinned_finding_is_left_alone(self, tmp_path):
+		# A finding already pinned to a related hot line (see
+		# _pin_slow_hot_path_to_related_hot_line) must not be narrowed back to def.
+		src = tmp_path / "m.py"
+		src.write_text(_SAMPLE)
+		f = _func_finding(str(src), 3, drilldown_chain=[])
+		_callsite(f)["self_time_hot_line_pinned"] = True
+		_callsite(f)["lineno"] = 6
+		renderer._expand_self_time_snippets([f], file_cache=None)
+		assert _callsite(f)["lineno"] == 6
+		assert "self_time_no_pinpoint" not in _callsite(f)
+
 	def test_other_finding_types_left_unchanged(self, tmp_path):
 		src = tmp_path / "m.py"
 		src.write_text(_SAMPLE)

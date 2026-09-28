@@ -1101,9 +1101,30 @@
     background: var(--bg-paper);
     border: 1px solid var(--rule);
     border-radius: 4px; padding: 4px 0;
+    /* A deep tree indents each level (see .call-tree-children) and long
+       file paths run wide, so the deepest frames used to be squeezed into
+       an unreadable sliver clipped inside this box. Give the call tree its
+       own horizontal scrollbar so those frames stay full width and reachable
+       instead of being hidden. Scoped to .call-tree, so only this section
+       scrolls; the surrounding report layout is untouched. Paired with
+       width:max-content on the rows below so the content can exceed this
+       box and actually trigger the scrollbar. */
+    overflow-x: auto;
+    /* overflow-x:auto coerces overflow-y to auto per the CSS overflow spec
+       (a visible/non-visible pair is not allowed). Declared explicitly so the
+       coupling is intentional: the box has no height cap, so it grows to its
+       content and this never clips or shows a vertical scrollbar. */
+    overflow-y: auto;
   }
   details.call-tree-node {
     border: none; margin: 0; padding: 0;
+    /* Grow each node to its widest descendant so a hot / hovered row's
+       background (set on the summary via min-width:100%) spans the full
+       scrolled width instead of stopping at the visible container edge and
+       leaving a white gap when scrolled right. .call-tree-children carries the
+       same rule so sibling branches of unequal width all fill to the scroll
+       width. The @media print block resets both so paper still fits. */
+    min-width: max-content;
   }
   details.call-tree-node > summary {
     cursor: pointer; padding: 4px 12px 4px 28px;
@@ -1112,6 +1133,12 @@
     position: relative;
     border-radius: 0;
     transition: background 0.1s;
+    /* Size each row to its content so the path (frame-meta) is never
+       squeezed to an ellipsis by deep indentation; the extra width overflows
+       .call-tree, which scrolls it. min-width keeps shorter rows filling the
+       node so their hover / hot highlight spans the full width. */
+    width: max-content;
+    min-width: 100%;
   }
   details.call-tree-node > summary:hover { background: var(--bg-tint); }
   details.call-tree-node > summary::-webkit-details-marker { display: none; }
@@ -1147,6 +1174,9 @@
     padding-left: 16px;
     border-left: 1px dashed var(--rule);
     margin-left: 18px;
+    /* Match the node so nested rows and unequal sibling branches also stretch
+       to the full scrolled width (see details.call-tree-node). Reset for print. */
+    min-width: max-content;
   }
   .call-tree-truncated {
     padding: 4px 12px;
@@ -1205,6 +1235,18 @@
       display: revert !important;
     }
     details.call-tree-deeper-toggle > summary::before { display: none; }
+    /* Paper can't scroll, so max-content rows would run off the right page
+       edge and hard-clip their trailing timings with no ellipsis. For print,
+       drop the scroll and let rows fit the page width so the meta ellipsizes
+       instead (a visible "..." rather than silently cut-off numbers), which is
+       how the tree printed before the on-screen scroll fix. overflow must be
+       visible on BOTH axes: a visible/auto pair is coerced back to auto by the
+       CSS overflow rule, which would keep the box a clipping container in paged
+       media and truncate a tall tree to the first PDF page. */
+    .call-tree { overflow: visible; }
+    details.call-tree-node > summary { width: auto; min-width: 0; }
+    details.call-tree-node,
+    .call-tree-children { min-width: 0; }
   }
 
   /* FIX-BOX - AI-suggested fix. Replaces the old `.ai-fix` panel. */

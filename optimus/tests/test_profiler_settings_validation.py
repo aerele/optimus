@@ -36,6 +36,9 @@ def _install_frappe_stub(monkeypatch):
 		set_value=lambda k, v: None,
 	)
 	stub.log_error = lambda **kwargs: None
+	# Translation function: identity (returns the msgid) so the controller's
+	# _("...").format(...) i18n calls work under the stub.
+	stub._ = lambda msg, *args, **kwargs: msg
 
 	model_mod = types.ModuleType("frappe.model")
 	doc_mod = types.ModuleType("frappe.model.document")

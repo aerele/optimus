@@ -224,7 +224,18 @@ def _render_call_tree_panel(actions, threshold_ms=DEFAULT_DISPLAY_THRESHOLD_MS):
 	"""
 	if not actions:
 		return ""
-	candidates = [a for a in actions if isinstance(a, dict) and a.get("call_tree_json")]
+	# Background jobs are excluded from the call tree: they get their own
+	# "RQ Jobs" section. A slow job's flat worker loop otherwise crowds out the
+	# request hierarchies this panel is meant to surface. event_type is
+	# normalised to "RQ Job" at read time; the legacy "Background Job" value is
+	# matched too in case an un-normalised dict reaches here.
+	candidates = [
+		a
+		for a in actions
+		if isinstance(a, dict)
+		and a.get("call_tree_json")
+		and a.get("event_type") not in ("RQ Job", "Background Job")
+	]
 	if not candidates:
 		return ""
 	ranked = sorted(
