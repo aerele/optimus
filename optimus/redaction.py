@@ -177,10 +177,12 @@ _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
 	# key (Bearer \u2019sk-...) is masked too; it never ends on a backslash, so
 	# a JSON-escaped quote after it (Deleted Document data) stays intact.
 	re.compile(r"""(\bBearer\s+)(?!\*{8})[^'"\s]{7,}[^'"\s\\]()()()"""),
-	# credentials in a URL: scheme://user:password@host, up to the LAST "@"
-	# before the path (a password may hold a raw "@"); never across a quote,
-	# so an address in the next field of compact JSON is not swallowed
-	re.compile(r"""(://)()()(?!\*{8}@)[^/\s'"]+(@)"""),
+	# credentials in a URL's authority: scheme://user:password@host, up to the
+	# LAST "@" before the path, query or fragment (a password may hold a raw
+	# "@"); the userinfo holds no "/", "?" or "#", so an address in a query
+	# string (?to=a@b.com) or a fragment is not a credential; never across a
+	# quote, so an address in the next field of compact JSON is not swallowed
+	re.compile(r"""(://)()()(?!\*{8}@)[^/?#\s'"]+(@)"""),
 )
 
 # A literal shorter than this is never replaced: it would shred ordinary words

@@ -38,8 +38,9 @@ _KEY_CHARS = "".join(chr(c) for c in range(0x21, 0x7F) if chr(c) != "*")
 _keys = st.text(alphabet=_KEY_CHARS, min_size=8, max_size=48)
 # Keys the shape patterns alone must mask (a key the caller does not know,
 # such as an older, rotated one): no quote, backslash, slash or "*", the
-# characters that end a token in those shapes.
-_SHAPE_KEY_CHARS = "".join(ch for ch in _KEY_CHARS if ch not in "'\"\\/")
+# characters that end a token in those shapes, and no "?" or "#", which end a
+# URL's userinfo (a raw one is never part of a URL's credentials).
+_SHAPE_KEY_CHARS = "".join(ch for ch in _KEY_CHARS if ch not in "'\"\\/?#")
 _shape_keys = st.text(alphabet=_SHAPE_KEY_CHARS, min_size=8, max_size=48)
 # Ordinary text around the key: one log line's worth, quotes and URL
 # characters included, no "*".

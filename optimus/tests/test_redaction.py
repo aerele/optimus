@@ -312,6 +312,21 @@ class TestScrubSecrets:
 		):
 			assert redaction.scrub_secrets(plain) == plain
 
+	def test_url_userinfo_is_only_the_authority(self):
+		# The credential shape is scheme://userinfo@host, with no "/", "?" or
+		# "#" in the userinfo: an address in a query string or a fragment is
+		# not a credential.
+		for plain in (
+			"POST https://llm.internal?to=a@b.com failed",
+			"https://example.com/notify?to=a@b.com&cc=c@d.com",
+			"https://example.com#contact=a@b.com",
+			"http://host:8080?x=1@2",
+		):
+			assert redaction.scrub_secrets(plain) == plain
+		assert redaction.scrub_secrets("https://user:p@ss@host/") == "https://********@host/"
+		assert redaction.scrub_secrets("https://user:p@ss@host?to=a@b.com") == "https://********@host?to=a@b.com"
+		assert redaction.scrub_secrets("https://user:pw@host#frag@x") == "https://********@host#frag@x"
+
 	def test_json_escaped_text_stays_valid_json(self):
 		# Deleted Document data is JSON: the smart quote is escaped as \u2019
 		# and a JSON-style header dump escapes its double quotes.
