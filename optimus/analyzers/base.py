@@ -24,6 +24,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from optimus.error_log_mask import HOOK_FRAME_SUFFIX
+
 # ---------------------------------------------------------------------------
 # Shared constants and helpers (Round 2 fixes #19 + #20)
 # ---------------------------------------------------------------------------
@@ -575,8 +577,10 @@ def is_framework_callsite_str(
 
 # The Error Log hook's module. It reads the stored AI key on every Error Log
 # insert, inside the user's ``frappe.log_error``: a query whose innermost
-# non-Frappe frames are Optimus's and include this one is Optimus's own.
-_ERROR_LOG_HOOK_FRAME = "optimus/error_log_mask.py"
+# non-Frappe frames are Optimus's and include this one is Optimus's own. The
+# suffix comes from the module itself (it imports only the standard library),
+# so a rename cannot leave this match behind.
+_ERROR_LOG_HOOK_FRAME = HOOK_FRAME_SUFFIX
 
 
 def _is_error_log_hook_frame(filename: str) -> bool:

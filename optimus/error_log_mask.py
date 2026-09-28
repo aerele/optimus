@@ -90,6 +90,11 @@ until the process is replaced, and no code here can prevent it (SECURITY.md,
 
 import json
 
+# The path suffix of this module's frames ("optimus/error_log_mask.py"), built
+# from its own name so a rename or a move cannot leave a stale copy: the
+# analyzers (optimus.analyzers.base) recognise the hook's own stored-key read
+# by it.
+HOOK_FRAME_SUFFIX = __name__.replace(".", "/") + ".py"
 # The Error Log fields that are masked (the ones the scrub reads in a row).
 _TEXT_FIELDS = ("error", "method", "metadata")
 # What a withheld record stores instead of its text: stored Error Log
