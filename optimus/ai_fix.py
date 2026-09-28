@@ -855,16 +855,27 @@ def _get_api_key(needs_key: bool = True) -> str:
 	api_key = _current_key_or_empty()
 	if not api_key:
 		return ""
-	if not all("\x21" <= ch <= "\x7e" for ch in api_key):
+	if not _key_is_sendable(api_key):
 		if not needs_key:
 			return ""
-		from frappe import _
-
-		raise AiFixError(
-			_("The AI API key in Optimus Settings contains a character that cannot be sent in an HTTP header or is not plain ASCII (often a pasted smart quote, a stray space, a no-break space, or a control character such as a newline or tab). Paste the key again."),
-			kind="config",
-		) from None
+		raise AiFixError(_unsendable_key_message(), kind="config") from None
 	return api_key
+
+
+def _key_is_sendable(api_key: str) -> bool:
+	"""True when every character of ``api_key`` (already stripped) is
+	printable ASCII (``!`` to ``~``): what ``_get_api_key`` sends, and what
+	Optimus Settings accepts on save for a provider that needs a key."""
+	return all("\x21" <= ch <= "\x7e" for ch in api_key)
+
+
+def _unsendable_key_message() -> str:
+	"""The one message for a key ``_key_is_sendable`` refuses, raised by
+	``_get_api_key`` and by Optimus Settings' save validation. It never
+	holds the key."""
+	from frappe import _
+
+	return _("The AI API key in Optimus Settings contains a character that cannot be sent in an HTTP header or is not plain ASCII (often a pasted smart quote, a stray space, a no-break space, or a control character such as a newline or tab). Paste the key again.")
 
 
 class _ApiKeyAuth(requests.auth.AuthBase):
