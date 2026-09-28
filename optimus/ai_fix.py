@@ -581,7 +581,7 @@ def suggest_fix(finding: dict) -> dict:
 			"Settings ▸ AI Fix Suggestions."
 		)
 	# The one read of the stored key for this call (a SELECT on __Auth).
-	api_key = _get_api_key()
+	api_key = _get_api_key(provider.get("needs_key", True))
 	if provider.get("needs_key") and not api_key:
 		raise AiFixError(
 			"No API key is configured for this AI provider set it under "
@@ -639,7 +639,7 @@ def humanize_steps(
 			"AI is not fully configured set the provider, model and base URL "
 			"under Optimus Settings ▸ AI Fix Suggestions."
 		)
-	api_key = _get_api_key()  # the one read of the stored key for this call
+	api_key = _get_api_key(provider.get("needs_key", True))  # the one read of the stored key for this call
 	if provider.get("needs_key") and not api_key:
 		raise AiFixError("No API key is configured for this AI provider.")
 	system, messages = _build_steps_messages(
@@ -679,7 +679,7 @@ def suggest_index(table_payload: dict) -> dict:
 			"AI is not fully configured set the provider, model and base URL "
 			"under Optimus Settings ▸ AI Fix Suggestions."
 		)
-	api_key = _get_api_key()  # the one read of the stored key for this call
+	api_key = _get_api_key(provider.get("needs_key", True))  # the one read of the stored key for this call
 	if provider.get("needs_key") and not api_key:
 		raise AiFixError("No API key is configured for this AI provider.")
 	system, messages = _build_index_messages(table_payload)
@@ -748,7 +748,7 @@ def test_connection() -> dict:
 			"model": provider.get("model") or "",
 		}
 	try:
-		api_key = _get_api_key()  # the one read of the stored key for this call
+		api_key = _get_api_key(provider.get("needs_key", True))  # the one read of the stored key for this call
 	except AiFixError as e:
 		return {"ok": False, "message": str(e), "model": provider["model"]}
 	if provider.get("needs_key") and not api_key:
@@ -830,13 +830,18 @@ def _current_key_or_empty() -> str:
 	return api_key.strip() if isinstance(api_key, str) else ""
 
 
-def _get_api_key() -> str:
+def _get_api_key(needs_key: bool = True) -> str:
 	"""The API key to send, stripped of surrounding whitespace (a pasted
 	trailing newline), or ``""`` when none is stored.
 
-	Raises ``AiFixError(kind="config")`` before any HTTP call when the key
-	holds a character that cannot be sent in an HTTP header or is not plain
-	ASCII: every character must be printable ASCII (``!`` to ``~``). That
+	For a provider that needs a key (``needs_key``), raises
+	``AiFixError(kind="config")`` before any HTTP call when the key holds a
+	character that cannot be sent in an HTTP header or is not plain ASCII:
+	every character must be printable ASCII (``!`` to ``~``). For a provider
+	that needs none (Ollama, LM Studio, vLLM behind "OpenAI-compatible"),
+	such a key is not an error: ``""`` is returned and the request goes
+	without a key. A sendable key is still returned for it (a router such as
+	OpenRouter needs one). That
 	rejects a pasted smart quote, a no-break space or soft hyphen, a C1
 	control character, an internal space, and a control character such as a
 	newline, tab or NUL (which would otherwise reach ``requests`` /
@@ -850,6 +855,8 @@ def _get_api_key() -> str:
 	if not api_key:
 		return ""
 	if not all("\x21" <= ch <= "\x7e" for ch in api_key):
+		if not needs_key:
+			return ""
 		from frappe import _
 
 		raise AiFixError(

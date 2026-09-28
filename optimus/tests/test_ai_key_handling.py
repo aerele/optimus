@@ -397,3 +397,64 @@ class TestTheKeyIsReadOncePerCall:
 			with pytest.raises(ai_fix.AiFixError):
 				ai_fix.suggest_fix(dict(_FINDING))
 		assert reads["n"] > 1
+
+
+# ---------------------------------------------------------------------------
+# A provider that needs no key never fails on a stored key it cannot send
+# ---------------------------------------------------------------------------
+
+_LOCAL = {"ai_provider": "OpenAI-compatible", "ai_base_url": "http://10.0.0.5:11434/v1", "ai_model": "qwen3-coder:30b"}
+
+
+class TestAKeylessProviderIgnoresAnUnsendableKey:
+	"""Ollama, LM Studio and vLLM (``needs_key=False``) need no key. A stored
+	key that cannot be sent in a header (a pasted smart quote, a newline) is
+	not sent and not validated there: the request goes without one. A
+	sendable key is still sent (routers such as OpenRouter need one). A
+	provider that needs a key keeps the validation."""
+
+	@pytest.mark.parametrize("bad_key", ["sk-live-0123’456789", "sk-live-0123\n456789", "sk-live 0123456789"])
+	def test_the_request_goes_without_the_key(self, monkeypatch, bad_key):
+		_store_key(monkeypatch, bad_key)
+		fake = _capture(_Resp(200, _OPENAI_OK))
+		monkeypatch.setattr(requests, "post", fake)
+		with patch("optimus.settings.get_config", return_value=_cfg(**_LOCAL)):
+			out = ai_fix.suggest_fix(dict(_FINDING))
+			probe = ai_fix.test_connection()
+			steps = ai_fix.humanize_steps([{"label": "open", "cmd": "x", "duration_ms": 5}])
+			index = ai_fix.suggest_index({"table": "tabItem", "candidates": {}})
+		assert out["suggestion"].startswith("**Fix**") and steps and index["suggestion"]
+		assert probe["ok"] is True
+		assert len(fake.calls) == 4
+		for call in fake.calls:
+			assert call.auth is None
+			assert "authorization" not in {k.lower() for k in call.wire_headers}
+
+	def test_a_sendable_key_is_still_sent(self, monkeypatch):
+		_store_key(monkeypatch, KEY)
+		fake = _capture(_Resp(200, _OPENAI_OK))
+		monkeypatch.setattr(requests, "post", fake)
+		with patch("optimus.settings.get_config", return_value=_cfg(**_LOCAL)):
+			ai_fix.suggest_fix(dict(_FINDING))
+		assert fake.calls[0].wire_headers["authorization"] == f"Bearer {KEY}"
+
+	@pytest.mark.parametrize("provider", ["OpenAI", "Anthropic"])
+	def test_a_provider_that_needs_a_key_still_rejects_it(self, monkeypatch, provider):
+		_store_key(monkeypatch, "sk-live-0123’456789")
+		fake = _capture(_Resp(200, _OPENAI_OK))
+		monkeypatch.setattr(requests, "post", fake)
+		with patch("optimus.settings.get_config", return_value=_cfg(ai_provider=provider)):
+			with pytest.raises(ai_fix.AiFixError) as ei:
+				ai_fix.suggest_fix(dict(_FINDING))
+			probe = ai_fix.test_connection()
+		assert ei.value.kind == "config" and "sk-live" not in str(ei.value)
+		assert probe["ok"] is False and "smart quote" in probe["message"]
+		assert fake.calls == []
+
+	def test_get_api_key_without_need(self, monkeypatch):
+		_store_key(monkeypatch, "sk-live-0123’456789")
+		assert ai_fix._get_api_key(needs_key=False) == ""
+		with pytest.raises(ai_fix.AiFixError):
+			ai_fix._get_api_key(needs_key=True)
+		_store_key(monkeypatch, f" {KEY}\n")
+		assert ai_fix._get_api_key(needs_key=False) == KEY
