@@ -57,6 +57,9 @@ OTHER_TB = (
 # Another app's title longer than its column, holding a Bearer token.
 OTHER_TITLE = "Webhook failed: Authorization: Bearer " + "q" * 40 + " " + "z" * 260
 FRAME = 'File "apps/optimus/optimus/ai_fix.py", line 1347, in _call_openai_chat'
+# LEAKY with another app's frame instead of Optimus's AI module: it holds the
+# key but no ai_fix.py frame.
+NOFRAME = LEAKY.replace("optimus/optimus/ai_fix.py", "acme/acme/client.py")
 HANDLER = "optimus.error_log_mask.mask_error_log"
 FIELDS = ("error", "method", "metadata")
 
@@ -291,12 +294,12 @@ class TestMasking:
 
 
 class TestFailOpen:
-	def test_a_key_read_that_raises_leaves_the_doc_as_it_was(self, env, monkeypatch):
+	def test_a_key_read_that_raises_leaves_a_record_without_an_ai_frame_as_it_was(self, env, monkeypatch):
 		def _read():
 			raise RuntimeError(f"cannot read {KEY}")
 		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", _read)
-		doc = _run(_Doc(error=LEAKY, method="optimus ai_fix"))
-		assert doc.sets == [] and doc.error == LEAKY
+		doc = _run(_Doc(error=NOFRAME, method="Stock Entry failed"))
+		assert doc.sets == [] and doc.error == NOFRAME
 		assert _one_line(env).endswith("stored as it was: RuntimeError")
 		assert env.inserts == []
 
@@ -449,7 +452,7 @@ class TestBreadcrumbStorm:
 			raise RuntimeError(f"cannot read {KEY}")
 		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", _read)
 		for _ in range(10_000):
-			_run(_Doc(error=LEAKY))
+			_run(_Doc(error=NOFRAME))
 		lines = [line for _, _, line in env.lines]
 		first = "optimus error_log_mask: an Error Log row was stored as it was: RuntimeError"
 		assert lines == [first] + [f"{first} ({n} times so far in this process)" for n in range(1000, 10_001, 1000)]
@@ -464,7 +467,7 @@ class TestBreadcrumbStorm:
 			raise RuntimeError("boom")
 		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", _read)
 		for _ in range(3):
-			_run(_Doc(error=LEAKY))
+			_run(_Doc(error=NOFRAME))
 		assert [line.rsplit(" was ", 1)[1] for _, _, line in env.lines] == [
 			"withheld: its masking failed (ValueError)", "stored as it was: RuntimeError",
 		]
@@ -574,10 +577,10 @@ class TestStaleProcess:
 
 	def test_the_stored_key_is_masked_with_frappe_alone(self, env, stale):
 		meta = json.dumps({"form_dict": {"doc": f'{{"ai_api_key": "{KEY}"}}'}})
-		doc = _Doc(error=LEAKY, method=f"The AI provider returned an error (HTTP 401): bad key {KEY}", metadata=meta)
+		doc = _Doc(error=NOFRAME, method=f"The AI provider returned an error (HTTP 401): bad key {KEY}", metadata=meta)
 		assert stale(doc, "before_insert") is None
 		assert KEY not in json.dumps(doc.fields())
-		assert doc.error == LEAKY.replace(KEY, "********")
+		assert doc.error == NOFRAME.replace(KEY, "********")
 		assert doc.method == "The AI provider returned an error (HTTP 401): bad key ********"
 		assert doc.metadata == meta.replace(KEY, "********") and json.loads(doc.metadata)
 		assert sorted(doc.sets) == ["error", "metadata", "method"]
@@ -646,7 +649,7 @@ class TestStaleProcess:
 		def _read(*a, **k):
 			raise RuntimeError(f"cannot read {KEY}")
 		monkeypatch.setattr(frappe.utils.password, "get_decrypted_password", _read)
-		doc = _Doc(error=LEAKY)
+		doc = _Doc(error=NOFRAME)
 		assert stale(doc, "before_insert") is None
 		assert doc.sets == [] and env.flags.mute_messages is False
 		assert _one_line(env).endswith(_STALE_LINE)
@@ -1048,3 +1051,115 @@ class TestTheKeyIsReadOnlyWhenOneIsStored:
 		doc = _Doc(error=ERP_TB, method="Stock Entry failed")
 		stale(doc, "before_insert")
 		assert env.frappe_reads == [] and doc.sets == []
+
+
+# ---------------------------------------------------------------------------
+# Fail closed for a record of the AI code: the stale fallback and the
+# hook's outer failure path withhold its text
+# ---------------------------------------------------------------------------
+
+ROTATED = "sk-ant-api03-rotatedAWAY0123456789abcdefXYZ"
+
+
+class TestTheStaleFallbackFailsClosedForAnAiRecord:
+	"""A process whose Optimus modules cannot be imported still runs the old
+	AI code, and it cannot mask a key it does not know (a rotated one): a
+	record with an ai_fix.py frame is withheld."""
+
+	@pytest.mark.parametrize("path", ["optimus/ai_fix.py", "frappe_profiler/ai_fix.py"])
+	def test_an_ai_record_with_a_rotated_key_is_withheld(self, env, stale, path):
+		env.key = "sk-a-new-stored-key-0123456789"
+		error = LEAKY.replace(KEY, ROTATED).replace("optimus/ai_fix.py", path)
+		doc = _Doc(error=error, method="optimus ai_fix", metadata=json.dumps({"tb": f"{path} {ROTATED}"}))
+		stale(doc, "before_insert")
+		assert doc.error == error_log_mask.WITHHELD
+		assert doc.method == "optimus ai_fix"
+		assert doc.metadata == error_log_mask.WITHHELD
+		assert ROTATED not in json.dumps(doc.fields())
+		assert _one_line(env).endswith(
+			"withheld: a record of the AI code (Optimus's modules could not be imported: ImportError)"
+		)
+
+	def test_a_title_holding_the_stored_key_is_withheld(self, env, stale):
+		doc = _Doc(error=LEAKY, method=f"bad key {KEY}")
+		stale(doc, "before_insert")
+		assert doc.error == error_log_mask.WITHHELD and doc.method == error_log_mask.WITHHELD_TITLE
+		assert "metadata" not in doc.sets
+
+	def test_a_key_shorter_than_8_characters_does_not_withhold_the_title(self, env, stale):
+		env.key = "1234567"
+		env.placeholder = "*" * 7
+		doc = _Doc(error=LEAKY, method="retry 1234567 failed")
+		stale(doc, "before_insert")
+		assert doc.error == error_log_mask.WITHHELD and doc.method == "retry 1234567 failed"
+
+	def test_a_long_plain_title_is_cut_to_its_column(self, env, stale):
+		doc = _Doc(error=LEAKY, method="t" * 200)
+		stale(doc, "before_insert")
+		assert doc.error == error_log_mask.WITHHELD and doc.method == "t" * 140
+
+	def test_with_no_stored_key_an_ai_record_is_still_withheld(self, env, stale):
+		env.placeholder = None
+		doc = _Doc(error=LEAKY.replace(KEY, ROTATED))
+		stale(doc, "before_insert")
+		assert doc.error == error_log_mask.WITHHELD and env.frappe_reads == []
+
+	def test_a_record_without_a_frame_or_the_key_stays_byte_identical(self, env, stale):
+		fields = {"error": OTHER_TB.replace("h" * 40, ROTATED), "method": OTHER_TITLE}
+		original = dict(fields)
+		doc = _Doc(**fields)
+		stale(doc, "before_insert")
+		assert doc.sets == [] and doc.fields() == original
+
+	def test_the_frame_paths_are_the_masking_s_own(self):
+		assert error_log_mask._AI_FRAME_PATHS == maintenance._OPTIMUS_AI_FRAME_PATHS
+
+
+class TestTheOuterFailurePathFailsClosedForAnAiRecord:
+	"""An unexpected failure of the masking leaves another app's record as it
+	was (the hook is site-wide) but withholds a record with an ai_fix.py
+	frame. It never raises, except an RQ job timeout, raised fresh."""
+
+	@pytest.fixture
+	def failing(self, monkeypatch):
+		def _read():
+			raise RuntimeError(f"cannot read {KEY}")
+		monkeypatch.setattr("optimus.ai_fix._current_key_or_empty", _read)
+
+	def test_an_ai_record_is_withheld(self, env, failing):
+		doc = _run(_Doc(error=LEAKY, method="optimus ai_fix", metadata=json.dumps({"tb": FRAME})))
+		assert doc.error == error_log_mask.WITHHELD and doc.method == "optimus ai_fix"
+		assert doc.metadata == error_log_mask.WITHHELD
+		assert KEY not in json.dumps(doc.fields())
+		assert _one_line(env).endswith("withheld: its masking failed unexpectedly (RuntimeError)")
+
+	def test_a_title_with_a_frame_is_withheld_too(self, env, failing):
+		doc = _run(_Doc(error="Traceback ...", method=f"{FRAME}: failed"))
+		assert doc.error == error_log_mask.WITHHELD and doc.method == error_log_mask.WITHHELD_TITLE
+
+	def test_another_apps_record_is_left_as_it_was(self, env, failing):
+		fields = {"error": OTHER_TB, "method": OTHER_TITLE, "metadata": json.dumps({"user": "a@b.c"})}
+		original = dict(fields)
+		doc = _run(_Doc(**fields))
+		assert doc.sets == [] and doc.fields() == original
+		assert _one_line(env).endswith("stored as it was: RuntimeError")
+
+	def test_a_failure_while_withholding_never_raises(self, env, failing):
+		class _Unsettable(_Doc):
+			def set(self, key, value):
+				raise RuntimeError("read-only doc")
+
+		doc = _Unsettable(error=LEAKY)
+		error_log_mask.mask_error_log(doc, "before_insert")
+		assert _one_line(env).endswith("stored as it was: RuntimeError")
+
+	def test_a_job_timeout_while_withholding_still_stops_the_job(self, env, failing):
+		timeout = JobTimeoutException("Task exceeded maximum timeout value (60 seconds)")
+
+		class _Stopping(_Doc):
+			def set(self, key, value):
+				raise timeout
+
+		with pytest.raises(JobTimeoutException) as ei:
+			error_log_mask.mask_error_log(_Stopping(error=LEAKY), "before_insert")
+		assert ei.value is not timeout and ei.value.__context__ is None
