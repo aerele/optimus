@@ -1102,12 +1102,13 @@ def regenerate_reports(session_uuid: str) -> dict:
 		for a in (doc.actions or [])
 		if getattr(a, "recording_uuid", None)
 	]
-	try:
-		recordings = list(_analyze_mod._fetch_recordings(
+	recordings, step_failed = _analyze_mod._run_ai_step(
+		lambda: list(_analyze_mod._fetch_recordings(
 			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
-		))
-	except Exception:
-		frappe.log_error(title="optimus regenerate_reports fetch")
+		)),
+		title="optimus regenerate_reports fetch", session_uuid=session_uuid,
+	)
+	if step_failed:
 		recordings = []
 
 	# v0.6.0: if "Suggest AI fixes in the report by default" is on, backfill
@@ -1116,10 +1117,10 @@ def regenerate_reports(session_uuid: str) -> dict:
 	# Regenerate. Best-effort + tightly time-budgeted (it runs synchronously
 	# in this web request). The persisted llm_fix_json is what the renderer
 	# below reads to draw the "Suggested fix (AI)" block under each finding.
-	try:
-		_analyze_mod._backfill_ai_suggestions(doc)
-	except Exception:
-		frappe.log_error(title="optimus regenerate ai backfill")
+	_analyze_mod._run_ai_step(
+		lambda: _analyze_mod._backfill_ai_suggestions(doc),
+		title="optimus regenerate ai backfill", session_uuid=session_uuid,
+	)
 
 	# Invalidate the cached PDF next /api/method/download_pdf call
 	# will regenerate it from the freshly-rendered HTML.
@@ -1284,15 +1285,17 @@ def suggest_fix(session_uuid: str, finding_ref: str, regenerate=0) -> dict:
 	except ai_fix.AiFixError as e:
 		frappe.throw(str(e))
 
-	try:
+	def _persist():
 		frappe.db.set_value(
 			"Optimus Finding", child.name, "llm_fix_json", json.dumps(result),
 		)
 		safe_commit()
-	except Exception:
-		# Failing to persist isn't fatal the operator still gets the
-		# suggestion in the dialog, just not cached / in the report.
-		frappe.log_error(title="optimus suggest_fix persist")
+
+	# Failing to persist isn't fatal the operator still gets the
+	# suggestion in the dialog, just not cached / in the report.
+	_analyze_mod._run_ai_step(
+		_persist, title="optimus suggest_fix persist", session_uuid=session_uuid, finding=child.name,
+	)
 
 	return {"ok": True, "finding": child.name, "cached": False, **result}
 
@@ -1505,12 +1508,13 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 		a.recording_uuid for a in (doc.actions or [])
 		if getattr(a, "recording_uuid", None)
 	]
-	try:
-		recordings = list(_analyze_mod._fetch_recordings(
+	recordings, step_failed = _analyze_mod._run_ai_step(
+		lambda: list(_analyze_mod._fetch_recordings(
 			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
-		))
-	except Exception:
-		frappe.log_error(title="optimus humanize_steps fetch")
+		)),
+		title="optimus humanize_steps fetch", session_uuid=getattr(doc, "session_uuid", None),
+	)
+	if step_failed:
 		recordings = []
 
 	actions = _analyze_mod._actions_for_humanizer(recordings)
@@ -1642,10 +1646,13 @@ def _refill_indexes_for_doc(doc) -> dict:
 		if not table_name:
 			skipped += 1
 			continue
-		try:
-			out = _analyze_mod._run_table_index_ai_backfill(doc, table_name=table_name)
-		except Exception:
-			frappe.log_error(title=f"optimus refill_indexes {table_name}")
+		# One title for every table (the table goes in the message), so the
+		# Error Log groups these rows instead of creating one title per table.
+		out, step_failed = _analyze_mod._run_ai_step(
+			lambda table_name=table_name: _analyze_mod._run_table_index_ai_backfill(doc, table_name=table_name),
+			title="optimus refill_indexes", session_uuid=getattr(doc, "session_uuid", None), table=table_name,
+		)
+		if step_failed:
 			failed += 1
 			continue
 		if out.get("ok"):
