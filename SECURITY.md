@@ -65,11 +65,14 @@ the highest-value security considerations:
 
 The AI provider key is kept out of every log. It is stored in the encrypted
 `ai_api_key` Password field of Optimus Settings and decrypted only when a
-request is sent. It must be plain printable ASCII: a key with any other
+request is sent, once per call (one SELECT on `__Auth`). For a provider
+that needs a key it must be plain printable ASCII: a key with any other
 character (a space inside it, a pasted smart quote or no-break space, a
 control character) is refused before any request is made, with a message
 that names the usual causes (a pasted smart quote, a stray space, a no-break
-space, a control character). In Optimus's code it exists only in local
+space, a control character). The OpenAI-compatible provider needs no key
+(Ollama, LM Studio, vLLM): there such a key is neither sent nor refused, and
+the request goes without one; a key it can send is still sent. In Optimus's code it exists only in local
 variables named `api_key` or `secret` (names both Frappe's traceback
 sanitizer and Sentry's default denylist redact), for a moment in the
 `literals` parameter of `redaction.scrub_secrets` (which moves the key into
@@ -79,18 +82,24 @@ on the HTTP library's own prepared request, whose headers hold the key while
 the request is sent; the response keeps that request, and neither one's
 `repr` shows its headers. Apart from those, it is never placed in a dict, a
 header dict, a request body, an exception message or an exception chain. A
-provider's error reply is scrubbed before it is shown, of the key stored in
-Optimus Settings and of the key the request was sent with (so an echo is
-masked even when the key in Settings was changed while the request ran),
-each in its raw and its JSON-escaped form. A 404 message names the request
-URL with any credentials in it masked (a `user:password@` typed into a
-custom Base URL, or the key), or only "(the configured Base URL)" when the
-URL cannot be scrubbed. A request never follows a redirect
-(`allow_redirects=False`): the HTTP library drops only a header named
-`Authorization` when it follows one to another host, so the `x-api-key`
-header Anthropic uses would have been sent on to the redirect target. A 3xx
-reply is reported as an unexpected response that names its status and says
-to set the Base URL to the address it redirects to.
+provider's error reply is scrubbed before it is shown, of the key the
+request was sent with (the only key the provider received, so an echo is
+masked even when the key in Settings was changed while the request ran), or
+of the key stored in Optimus Settings when the request carried none, each
+in its raw and its JSON-escaped form. A 404 message names the request URL
+with any credentials in it masked (a `user:password@` typed into a custom
+Base URL, or the key), or only "(the configured Base URL)" when the URL
+cannot be scrubbed. The HTTP library never follows a redirect
+(`allow_redirects=False`): it drops only a header named `Authorization`
+when it follows one to another host, so the `x-api-key` header Anthropic
+uses would have been sent on to the redirect target. Optimus follows at most
+three 307 or 308 redirects itself, and only when the address stays on the
+same host and port, with the same scheme or an upgrade from http to https on
+that host: it sends the same request again, the key attached by the same
+auth object. Any other 3xx reply (a 301, 302 or 303, another host or port, a
+downgrade to http, a fourth redirect) is reported as an unexpected response
+that names its status and says to set the Base URL to the address it
+redirects to. The address a redirect points to is never logged or shown.
 
 Every Error Log row the AI code writes goes through
 `optimus.ai_fix.log_ai_failure`, which writes an explicit message with no
@@ -388,7 +397,8 @@ installed on the site.
   row: the hook needs the key to tell a row holding it. While Optimus
   profiles a flow, that read appears in the report's per-table and
   per-action query breakdowns, one `__Auth` query per Error Log insert; the
-  N+1 and slowest-query findings leave it out, as Optimus's own query.
+  N+1 and slowest-query findings and the session's query count and query
+  time leave it out, as Optimus's own query.
 - If you downgrade to a release without the Error Log hook, clear the site's
   cache after it (`bench migrate` does, and after the restart run
   `bench --site <site> clear-cache`): until the cached hooks are cleared they
@@ -398,21 +408,27 @@ installed on the site.
 - If the web server's worker timeout interrupts a provider call (a
   `SystemExit` in the request), that call writes no Error Log row. The HTTP
   layer clears the interrupted frames from the exception before it leaves,
-  so the prepared request headers do not travel with it.
+  so the prepared request headers do not travel with it; so do the code that
+  scrubs a provider's reply and the code that builds a failure's log message,
+  which also unbind the reply and the unscrubbed message first.
 - The scrub's `residual` count is masking-complete, not selection-complete.
   It reads only the rows its candidate filters select (rows with an
   `ai_fix.py` frame and a secret marker, rows holding the key stored in
   Optimus Settings, and the Deleted Document copies of both) and reports
-  those that still hold a key shape after masking. A row outside that
+  those that still hold a key shape after masking: a provider key shape at
+  its real length, as a whole token (`sk-` keys of OpenAI, Anthropic,
+  DeepSeek, Kimi and OpenRouter, Groq's `gsk_`, Google's `AIza`). A row outside that
   selection, for example an older key in a row with no `ai_fix.py` frame and
   no marker, is not counted. Rotating the keys is what makes such a copy
   harmless.
 - The scrub searches for the stored key by value only when it has at least
   16 characters (the fragment it sends would otherwise be half the key), and
   masks it by value only when it has at least 8 characters (a shorter
-  literal would shred ordinary words). A shorter key is masked only where it
-  sits in a header, an API-key field, a `Bearer` token or a URL's
-  credentials.
+  literal would shred ordinary words). A shorter key, or a key no longer
+  stored in Optimus Settings, is masked only where it sits in a header, an
+  API-key field, a `Bearer` token, an `x-api-key` header line
+  (`x-api-key: <key>`), a header value quoted in an "Invalid header value"
+  error, or a URL's credentials (the `user:password@` in front of the host).
 
 ## Cryptographic primitives
 

@@ -34,17 +34,23 @@ versions may contain breaking changes see migration notes below).
   own prepared request, whose headers hold the key while the request is
   sent; the response keeps that request, and neither one's `repr` shows its
   headers. Apart from those, it is never in a dict, a header dict, a request
-  body, an exception message or an exception chain. A provider's error reply
-  is scrubbed before it is shown: of the key stored in Optimus Settings and
-  of the key the request was sent with (so an echo is masked even when the
-  key in Settings was changed while the request ran), each in its raw and
-  its JSON-escaped form. A 404 message names the request URL with any
-  credentials in it masked (a `user:password@` typed into a custom Base URL,
-  or the key), or only "(the configured Base URL)" when the URL cannot be
-  scrubbed. A request never follows a redirect: the HTTP library drops only a
-  header named `Authorization` when it follows one to another host, so the
-  `x-api-key` header Anthropic uses would have been sent on to the redirect
-  target. Every Error Log row the AI code writes goes through one
+  body, an exception message or an exception chain. A call reads the stored
+  key once (one SELECT on `__Auth`). A provider's error reply is scrubbed
+  before it is shown, of the key the request was sent with (the only key the
+  provider received, so an echo is masked even when the key in Settings was
+  changed while the request ran), or of the key stored in Optimus Settings
+  when the request carried none, each in its raw and its JSON-escaped form.
+  A 404 message names the request URL with any credentials in it masked (a
+  `user:password@` typed into a custom Base URL, or the key), or only "(the
+  configured Base URL)" when the URL cannot be scrubbed. The HTTP library
+  never follows a redirect for Optimus: it drops only a header named
+  `Authorization` when it follows one to another host, so the `x-api-key`
+  header Anthropic uses would have been sent on to the redirect target.
+  Optimus itself follows at most three 307 or 308 redirects that stay on the
+  same host and port (the same scheme, or http to https on that host),
+  sending the same request, key included, again; it follows no other
+  redirect, and never logs or shows the address a redirect points to. Every
+  Error Log row the AI code writes goes through one
   function, `ai_fix.log_ai_failure`, with an explicit, scrubbed message (no
   frame locals) that links to the Optimus Session, written after the failure
   has been handled, so Sentry never receives the frames of the failed
@@ -52,7 +58,9 @@ versions may contain breaking changes see migration notes below).
   web server's worker timeout (a `SystemExit` in the request) leaves without
   the frames that held the request headers, and writes no Error Log row;
   such an interrupt while the key is being decrypted leaves without the
-  decryption frames too. A behavioural canary test pushes a fake key through
+  decryption frames too, and one while a provider's reply is scrubbed or a
+  failure's log message is built leaves without the reply or the unscrubbed
+  message. A behavioural canary test pushes a fake key through
   every AI entry point in each of the failure scenarios it models, and fails
   if the key appears in any log, traceback, error-tracker payload or
   response.
@@ -248,17 +256,38 @@ versions may contain breaking changes see migration notes below).
   server error. A malformed token count in a reply no longer fails a
   suggestion that was otherwise returned. An Anthropic reply whose text is not
   a string is reported as an empty response instead of failing the request
-  with a server error. A redirect (an HTTP 3xx reply, which is never followed)
-  is reported as an unexpected response that names its status and says to set
-  the Base URL to the address it redirects to, instead of being read as the
-  reply; its Error Log row holds the status and the call site (and
-  `provider_error=` when the reply names a code), never the body.
+  with a server error. An OpenAI-compatible reply whose content is a list of
+  parts keeps the text of its parts when one of them has no text (`null`),
+  instead of being reported as a reply without text. A redirect that is not
+  followed (any HTTP 3xx reply but a 307 or 308 to the same host and port,
+  and a fourth redirect) is reported as an unexpected response that names
+  its status and says to set the Base URL to the address it redirects to,
+  instead of being read as the reply; its Error Log row holds the status and
+  the call site (and `provider_error=` when the reply names a code), never
+  the body or the address the redirect points to.
 - An API key pasted with a trailing newline or spaces is trimmed. A key must
   be plain printable ASCII: a key with any other character (a space inside
   it, a pasted smart quote or no-break space, a control character such as a
   newline or a tab) now fails before any request is made, with a message
   that names the usual causes: a pasted smart quote, a stray space, a
-  no-break space, or a control character such as a newline or tab.
+  no-break space, or a control character such as a newline or tab. That
+  holds for a provider that needs a key. The OpenAI-compatible provider needs
+  none (Ollama, LM Studio, vLLM): there such a key is neither sent nor
+  refused, and the request goes without a key; a key it can send is still
+  sent (a router such as OpenRouter needs one).
+- The masking (the scrub, the Error Log hook in the rows it changes, and
+  every AI Error Log row) now also recognises an `x-api-key` header line as
+  the HTTP library builds it (`x-api-key: <key>`) and a header value quoted in
+  an "Invalid header value" error of `http.client` or `requests`, without
+  needing the key itself, so a key no longer stored in Optimus Settings (a
+  rotated one) is masked there too. A web address with an e-mail address in
+  its query string or fragment (`?to=a@b.com`) is no longer masked as
+  credentials: only the `user:password@` part in front of the host is.
+- The scrub's `residual` count now flags only provider key shapes at their
+  real lengths, as whole tokens (`sk-` keys of OpenAI, Anthropic, DeepSeek,
+  Kimi and OpenRouter, Groq's `gsk_`, Google's `AIza`), so an identifier, a
+  file name or prose that only starts with such a prefix is no longer
+  counted.
 - An AI failure row is written to the Error Log immediately. On MariaDB the
   Error Log table is MyISAM, so the row survives a rollback of the request
   or background job that logged it. On Postgres, if the request or
@@ -332,15 +361,19 @@ versions may contain breaking changes see migration notes below).
   replaced. Nothing in this release can prevent it, since the old code runs
   there. Stop or replace every old web and worker process before running the
   migrate, then run step 3 after the rollout.
-- Requests to the AI provider no longer follow redirects. A Base URL that
-  redirects (from http to https, for example, or through a proxy that rewrites
-  the path) now fails with a message naming the redirect's status: set the
-  Base URL in Optimus Settings to the address it redirects to.
+- Requests to the AI provider follow a redirect only when it is a 307 or 308
+  to the same host and port (http to https on that host included), at most
+  three in a row. A Base URL that answers any other redirect (a 301, 302 or
+  303, the usual way a server sends http to https, or a redirect to another
+  host or port, or through a proxy that rewrites the host) now fails with a
+  message naming the redirect's status: set the Base URL in Optimus Settings
+  to the address it redirects to.
 - Every Error Log insert on the site now reads the stored AI key once (the
   Error Log hook needs it to tell a row holding the key). While Optimus
   profiles a flow, that read appears in the report's per-table and per-action
   query breakdowns, one `__Auth` query per Error Log insert; the N+1 and
-  slowest-query findings leave it out, as Optimus's own query.
+  slowest-query findings and the session's query count and query time leave
+  it out, as Optimus's own query.
 - No Desk form or JavaScript change (open tabs need no reload) and no new
   `site_config.json` key.
 - Verify: the dry run in step 3 above reports the values listed there, the
