@@ -1451,13 +1451,24 @@ def log_ai_failure(
 	  fails: the row is then written but ``exc`` stays unmarked, so a caller
 	  that logs it again writes a second row.
 	- Never raises, except an RQ job timeout (the job must still stop),
-	  which leaves as a fresh instance with no chain.
+	  which leaves as a fresh instance with no chain. That includes a
+	  timeout passed in as ``exc``: callers catch it with ``except
+	  Exception`` (rq's ``JobTimeoutException`` is one), so its row is
+	  written and it is then raised again, fresh, stopping the AI loop.
 	"""
 	logged = False
 	failure_type = None
 	interrupt = None
 	try:
+		timeout_types = _job_timeout_types()
+		if exc is not None and timeout_types and isinstance(exc, timeout_types):
+			interrupt = (type(exc), exc.args)
+	except Exception:
+		pass
+	try:
 		if exc is not None and getattr(exc, _LOGGED_ATTR, False):
+			if interrupt is not None:
+				raise interrupt[0](*interrupt[1])
 			return False
 		import frappe
 

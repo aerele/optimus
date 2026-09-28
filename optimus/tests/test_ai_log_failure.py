@@ -1930,3 +1930,46 @@ class TestApiLogSites:
 		out = api_env.api._humanize_steps_core(api_env.doc, title="t")
 		assert api_env.calls == [("optimus humanize_steps fetch", error, {"session_uuid": "uuid-5"})]
 		assert out["updated"] is False and out["reason"]
+
+
+class TestAPassedInJobTimeoutStopsTheJob:
+	"""A caller's ``except Exception`` catches rq's ``JobTimeoutException``
+	(an ``Exception`` subclass), including the fresh one ``_http_post``
+	re-raises, and hands it to ``log_ai_failure``. The row is written, then
+	the timeout leaves as a fresh instance so the AI loop stops instead of
+	making more provider calls past the job's deadline."""
+
+	def test_it_is_logged_then_raised_fresh(self, logs, job_timeout):
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix.log_ai_failure("optimus ai auto-suggest", job_timeout)
+		assert ei.value is not job_timeout and ei.value.args == (_TIMEOUT_TEXT,)
+		assert ei.value.__context__ is None and ei.value.__cause__ is None
+		assert len(logs) == 1
+
+	def test_an_already_logged_timeout_is_still_raised(self, logs, job_timeout):
+		with pytest.raises(_JobTimeout):
+			ai_fix.log_ai_failure("t", job_timeout)
+		with pytest.raises(_JobTimeout):
+			ai_fix.log_ai_failure("t", job_timeout)
+		assert len(logs) == 1
+
+	def test_a_timeout_stops_an_ai_loop_after_its_first_item(self, logs, job_timeout):
+		calls = []
+
+		def loop():
+			for item in range(5):
+				error = None
+				try:
+					calls.append(item)
+					raise job_timeout
+				except Exception as e:
+					error = e
+				if error is not None:
+					ai_fix.log_ai_failure("optimus ai auto-suggest", error)
+
+		with pytest.raises(_JobTimeout):
+			loop()
+		assert calls == [0]
+
+	def test_other_errors_still_never_raise(self, logs, job_timeout):
+		assert ai_fix.log_ai_failure("t", ai_fix.AiFixError("x")) is True
