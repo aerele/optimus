@@ -68,13 +68,19 @@ _FINDING = {"finding_type": "Slow Query", "title": "slow", "technical_detail": {
 # ---------------------------------------------------------------------------
 
 class TestAiFixErrorShape:
-	def test_carries_kind_usage_and_status(self):
-		e = ai_fix.AiFixError("m", status_code=429, kind="rate_limited", usage={"total_tokens": 5})
-		assert (str(e), e.status_code, e.kind, e.usage) == ("m", 429, "rate_limited", {"total_tokens": 5})
+	def test_carries_kind_and_status(self):
+		e = ai_fix.AiFixError("m", status_code=429, kind="rate_limited")
+		assert (str(e), e.status_code, e.kind) == ("m", 429, "rate_limited")
 
 	def test_defaults(self):
 		e = ai_fix.AiFixError("m")
-		assert (e.status_code, e.kind, e.usage) == (None, "unknown", None)
+		assert (e.status_code, e.kind) == (None, "unknown")
+
+	def test_has_no_usage_field(self):
+		# Nothing ever set or read it: it is gone, parameter included.
+		assert not hasattr(ai_fix.AiFixError("m"), "usage")
+		with pytest.raises(TypeError):
+			ai_fix.AiFixError("m", usage={"total_tokens": 5})
 
 
 class TestGetApiKey:

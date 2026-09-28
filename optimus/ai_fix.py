@@ -36,9 +36,7 @@ class AiFixError(Exception):
 	from an HTTP response, so callers can react to it (the temperature retry
 	fires only on a 400 or 422). ``kind`` classifies the failure
 	(``"config"``, ``"transport"``, ``"timeout"``, ``"bad_response"`` here;
-	later releases fill the rest). ``usage`` is reserved for later releases
-	(token usage already billed before the failure): no raise site sets it
-	yet, so it is always None for now.
+	later releases fill the rest).
 
 	The message must never contain the API key: it is shown to the operator
 	and written to the Error Log. An HTTP-status error from ``_http_post``
@@ -51,12 +49,10 @@ class AiFixError(Exception):
 		*,
 		status_code: int | None = None,
 		kind: str = "unknown",
-		usage: dict | None = None,
 	):
 		super().__init__(message)
 		self.status_code = status_code
 		self.kind = kind
-		self.usage = usage
 
 
 # Findings that carry enough code / SQL context for the LLM to reason about
