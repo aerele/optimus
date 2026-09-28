@@ -241,15 +241,15 @@ class _FakeResp:
 
 
 def _post_returning(resp):
-	def _fake_post(url, headers=None, json=None, timeout=None):  # noqa: A002
-		_fake_post.last = types.SimpleNamespace(url=url, headers=headers, body=json)
+	def _fake_post(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002
+		_fake_post.last = types.SimpleNamespace(url=url, headers=headers, body=json, auth=auth)
 		return resp
 	_fake_post.last = None
 	return _fake_post
 
 
 _PROVIDER = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
-             "model": "gpt-4.1-mini", "needs_key": True, "api_key": "sk-test"}
+             "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
 
 
 class TestAiSuggestIndex:
@@ -286,7 +286,8 @@ class TestAiSuggestIndex:
 
 		out_payload = {"choices": [{"message": {"content": "**Recommendation**\n\nAdd `(customer, posting_date)`."}}]}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, out_payload)))
-		with patch("optimus.ai_fix._resolve_provider", return_value=dict(_PROVIDER)):
+		with patch("optimus.ai_fix._provider_config", return_value=dict(_PROVIDER)), \
+		     patch("optimus.ai_fix._get_api_key", return_value="k-fake-test-key"):
 			out = ai_fix.suggest_index({"table": "tabSales Invoice", "doctype": "Sales Invoice"})
 		assert "customer, posting_date" in out["suggestion"]
 		assert out["model"] == "gpt-4.1-mini" and out["provider"] == "OpenAI" and out["generated_at"]
@@ -303,7 +304,8 @@ class TestAiSuggestIndex:
 		from optimus import ai_fix
 
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {"choices": [{"message": {"content": "  "}}]})))
-		with patch("optimus.ai_fix._resolve_provider", return_value=dict(_PROVIDER)):
+		with patch("optimus.ai_fix._provider_config", return_value=dict(_PROVIDER)), \
+		     patch("optimus.ai_fix._get_api_key", return_value="k-fake-test-key"):
 			with pytest.raises(ai_fix.AiFixError, match="empty"):
 				ai_fix.suggest_index({"table": "tabFoo"})
 

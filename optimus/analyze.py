@@ -42,7 +42,7 @@ from optimus.analyzers import (
 	table_breakdown,
 	top_queries,
 )
-from optimus.analyzers.base import _DUR_SEP, SEVERITY_ORDER, AnalyzeContext, dur
+from optimus.analyzers.base import _DUR_SEP, SEVERITY_ORDER, AnalyzeContext, dur, is_error_log_hook_query
 from optimus.dbdialect import get_dialect
 
 # v0.3.0: per-analyzer wall-clock budget. If the cumulative analyze
@@ -859,29 +859,27 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# fill the suggestions in afterward via the "Generate AI fixes"
 		# button on the form (api.backfill_ai_fixes).
 		_touch_singleflight(session_uuid)  # AI auto-suggest can run up to its own timeout (240s)
-		try:
-			_enrich_findings_with_ai_suggestions(context, recordings=recordings)
-		except Exception:
+		_, step_failed = _run_ai_step(
+			lambda: _enrich_findings_with_ai_suggestions(context, recordings=recordings),
+			title="optimus ai auto-suggest (outer)", session_uuid=session_uuid,
+		)
+		if step_failed:
 			try:
 				context.warnings.append(
 					"AI auto-suggest was skipped after an unexpected error "
 					"use 'Generate AI fixes' on the session form to fill them in. "
 					"(see error log)"
 				)
-				frappe.log_error(title="optimus ai auto-suggest (outer)")
 			except Exception:
 				pass
 
 		# v0.6.0: same toggle also bakes an LLM-vetted index recommendation
 		# onto the top few tables in the breakdown. Best-effort + double-wrapped.
 		_touch_singleflight(session_uuid)  # AI index-suggest can run up to 90s
-		try:
-			_enrich_table_breakdown_with_ai_suggestions(context, recordings)
-		except Exception:
-			try:
-				frappe.log_error(title="optimus ai index-suggest (outer)")
-			except Exception:
-				pass
+		_run_ai_step(
+			lambda: _enrich_table_breakdown_with_ai_suggestions(context, recordings),
+			title="optimus ai index-suggest (outer)", session_uuid=session_uuid,
+		)
 
 		_publish_progress(80, "Writing session data", session_uuid)
 		_persist(docname, context, recordings, analyze_elapsed_ms)
@@ -965,6 +963,44 @@ def _mark_ai_spend_session(session_uuid) -> None:
 		frappe.local._optimus_spend_session = session_uuid
 	except Exception:
 		pass
+
+
+def _run_ai_step(fn, *, title: str, session_uuid: str | None = None, **context):
+	"""Run one AI step, ``fn()``, and return ``(result, failed)``; when it raises
+	an ``Exception``, return ``(None, True)`` once the error is logged through
+	``_log_ai_step_failure`` (``ai_fix.log_ai_failure``, with ``title``, the
+	session and ``context`` as ``k=v`` lines), AFTER the ``try``: never
+	inside the ``except`` block, where Sentry would ship the active
+	exception's frame locals. The one capture-then-log skeleton of the AI
+	steps of this module and ``optimus.api``. Callers receive only a boolean
+	failure flag, so a later non-AI failure cannot log the exception's frames
+	or text through their locals. Never raises, except an RQ job timeout, which ``log_ai_failure``
+	raises again as a fresh instance so the job still stops. It references
+	no ``ai_fix`` name itself, so ``run()`` can use it."""
+	try:
+		return fn(), False
+	except Exception as e:
+		error = e
+	try:
+		_log_ai_step_failure(title, error, session_uuid, **context)
+	finally:
+		error = None
+	return None, True
+
+
+def _log_ai_step_failure(title: str, exc: BaseException, session_uuid: str | None, **context) -> None:
+	"""Log a failed AI step through ``ai_fix.log_ai_failure`` (``context`` as
+	its ``k=v`` lines).
+
+	``run()`` keeps plain ``frappe.log_error`` calls for its own non-AI
+	failures, so it must not reference ``ai_fix`` names itself
+	(``test_ai_log_audit.py`` treats a function that does as AI code). Call
+	it outside any ``except`` block. Never raises, except an RQ job timeout:
+	``log_ai_failure`` lets that through as a fresh instance so the job
+	still stops, and ``run()``'s outer handler re-raises it."""
+	from optimus.ai_fix import log_ai_failure
+
+	log_ai_failure(title, exc, session_uuid=session_uuid, **context)
 
 
 def _deserialize_tree(uuid: str, tree_blob):
@@ -1483,6 +1519,22 @@ def _hard_truncate_tree(tree_json: str) -> str:
 	return _json.dumps(out, default=str)
 
 
+def _session_query_totals(recordings: list[dict]) -> tuple[int, float]:
+	"""``(query count, query time in ms)`` over every recorded call, leaving
+	out the Error Log hook's own stored-key read (``is_error_log_hook_query``,
+	the analyzers' rule for it): one ``__Auth`` SELECT per Error Log insert
+	that is Optimus's, not the flow's."""
+	count = 0
+	time_ms = 0
+	for r in recordings:
+		for c in r.get("calls") or []:
+			if isinstance(c, dict) and is_error_log_hook_query(c.get("stack")):
+				continue
+			count += 1
+			time_ms += c.get("duration", 0)
+	return count, time_ms
+
+
 def _persist(
 	docname: str,
 	context: AnalyzeContext,
@@ -1491,10 +1543,7 @@ def _persist(
 ) -> None:
 	"""Write the analyzed data into the Optimus Session DocType row."""
 	total_requests = len(recordings)
-	total_queries = sum(len(r.get("calls") or []) for r in recordings)
-	total_query_time_ms = sum(
-		sum(c.get("duration", 0) for c in r.get("calls") or []) for r in recordings
-	)
+	total_queries, total_query_time_ms = _session_query_totals(recordings)
 	total_duration_ms = sum(r.get("duration", 0) for r in recordings)
 
 	doc = frappe.get_doc("Optimus Session", docname)
@@ -2021,7 +2070,8 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 			)
 		except Exception:
 			pass
-		try:
+
+		def _suggest(f=f):
 			ns = SimpleNamespace(
 				finding_type=f.get("finding_type") or "",
 				severity=f.get("severity") or "Low",
@@ -2039,12 +2089,14 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 				actions_by_idx=actions_by_idx,
 			))
 			f["llm_fix_json"] = json.dumps(result, default=str)
-		except Exception:
+
+		_, step_failed = _run_ai_step(
+			_suggest, title="optimus ai auto-suggest",
+			session_uuid=getattr(context, "session_uuid", None),
+			finding_type=f.get("finding_type") or "",
+		)
+		if step_failed:
 			failures += 1
-			try:
-				frappe.log_error(title="optimus ai auto-suggest")
-			except Exception:
-				pass
 
 	if failures:
 		context.warnings.append(
@@ -2235,18 +2287,21 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 		if time.monotonic() - started > time_budget:
 			out["skipped_time"] = len(chosen) - idx
 			break
-		try:
+
+		def _suggest(r=r):
 			result = ai_fix.suggest_fix(_ai_payload_for_finding(r, file_cache, phase2_index=phase2_index))
 			blob = json.dumps(result, default=str)
 			frappe.db.set_value("Optimus Finding", r.name, "llm_fix_json", blob)
 			r.llm_fix_json = blob
 			out["added"] += 1
-		except Exception:
+
+		_, step_failed = _run_ai_step(
+			_suggest, title="optimus ai backfill",
+			session_uuid=getattr(doc, "session_uuid", None),
+			finding=getattr(r, "name", "") or "",
+		)
+		if step_failed:
 			out["failed"] += 1
-			try:
-				frappe.log_error(title="optimus ai backfill")
-			except Exception:
-				pass
 	if out["added"]:
 		try:
 			safe_commit()
@@ -2369,13 +2424,14 @@ def _enrich_table_breakdown_with_ai_suggestions(context, recordings: list[dict])
 			)
 		except Exception:
 			pass
-		try:
-			t["ai_index"] = ai_fix.suggest_index(_ai_payload_for_table(t, recordings))
-		except Exception:
-			try:
-				frappe.log_error(title="optimus ai index-suggest")
-			except Exception:
-				pass
+		index, step_failed = _run_ai_step(
+			lambda t=t: ai_fix.suggest_index(_ai_payload_for_table(t, recordings)),
+			title="optimus ai index-suggest",
+			session_uuid=getattr(context, "session_uuid", None),
+			table=t.get("table") or "",
+		)
+		if not step_failed:
+			t["ai_index"] = index
 
 
 def _run_table_index_ai_backfill(doc, *, table_name: str) -> dict:
@@ -2615,13 +2671,12 @@ def _build_humanized_notes_html(
 	actions = _actions_for_humanizer(recordings)
 	if not actions:
 		return ""
-	try:
-		steps_md = ai_fix.humanize_steps(actions, session_title=session_title, usage_out=usage_out)
-	except Exception:
-		try:
-			frappe.log_error(title="optimus humanize_steps")
-		except Exception:
-			pass
+	steps_md, step_failed = _run_ai_step(
+		lambda: ai_fix.humanize_steps(actions, session_title=session_title, usage_out=usage_out),
+		title="optimus humanize_steps",
+		session_uuid=getattr(frappe.local, "_optimus_spend_session", None),
+	)
+	if step_failed:
 		return ""
 	if not (steps_md or "").strip():
 		return ""
