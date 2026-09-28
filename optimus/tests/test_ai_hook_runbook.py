@@ -42,3 +42,34 @@ def test_documented_hook_check_accepts_tuple_doc_events(document):
 		)
 		assert result.returncode == (0 if active else 1)
 		assert ("optimus.error_log_mask.mask_error_log" in result.stdout) is active
+
+
+_ROOT = Path(__file__).resolve().parents[2]
+_DOCS = ("CHANGELOG.md", "SECURITY.md", "docs/AI-FIXING.md")
+
+
+def _flat(document: str) -> str:
+	"""The document's text with its line wrapping undone."""
+	return " ".join((_ROOT / document).read_text().split())
+
+
+@pytest.mark.parametrize("document", _DOCS)
+@pytest.mark.parametrize(
+	"statement",
+	[
+		"307 or 308",  # the only redirects followed, same host and port
+		"the key the request was sent with (the only key the provider received",
+		"or of the key stored in Optimus Settings when the request carried none",
+		"neither sent nor refused",  # a keyless provider and an unsendable key
+		"the session's query count and query time leave it out",
+	],
+)
+def test_the_three_documents_agree(document, statement):
+	assert statement in _flat(document)
+
+
+@pytest.mark.parametrize("document", _DOCS)
+def test_no_document_still_says_a_redirect_is_never_followed(document):
+	text = _flat(document)
+	for stale in ("A request never follows a redirect", "no longer follow redirects", "which is never followed"):
+		assert stale not in text
