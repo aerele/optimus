@@ -1450,16 +1450,20 @@ def log_ai_failure(
 				import frappe
 
 				lines = [title]
-				if session_uuid:
-					lines.append(f"session_uuid={session_uuid}")
-				for k in sorted(context):
-					lines.append(f"{k}={context[k]}")
-				if exc is not None:
-					lines.append(_exception_text(exc))
-				message = _scrubbed_message(title, lines, exc)
-				# Sentry (attach_stacktrace) serialises this frame's locals with the
-				# event: only the scrubbed message may be bound while logging.
-				del lines
+				try:
+					if session_uuid:
+						lines.append(f"session_uuid={session_uuid}")
+					for k in sorted(context):
+						lines.append(f"{k}={context[k]}")
+					if exc is not None:
+						lines.append(_exception_text(exc))
+					message = _scrubbed_message(title, lines, exc)
+				finally:
+					# Sentry (attach_stacktrace) serialises this frame's locals
+					# with the event, and an interrupt that is not an Exception
+					# leaves with this frame: only the scrubbed message may be
+					# bound, on every path.
+					del lines
 
 				if not docname and session_uuid:
 					try:
@@ -1525,7 +1529,8 @@ def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None) -
 	the live key as a literal, raw and JSON-escaped. If scrubbing fails, the
 	message keeps only the title and the error type, never the unscrubbed
 	text. An RQ job timeout leaves as a fresh instance (no scrubber frame, no
-	chain)."""
+	chain). ``lines`` is unbound on every path, so an interrupt that is not an
+	``Exception`` never leaves with it either."""
 	failed = ""
 	guard = _InterruptGuard()
 	try:
@@ -1536,8 +1541,11 @@ def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None) -
 			return scrub_secrets("\n".join(lines), literals=_key_literals(api_key))
 	except Exception as e:
 		failed = type(e).__name__
+	finally:
+		# Never ride unscrubbed on an interrupt: a timeout raised below, or a
+		# non-Exception one that leaves with this frame.
+		lines = None
 	if guard.pending():
-		lines = None  # never ride on the timeout's traceback unscrubbed
 		raise guard.interrupt()
 	kind = type(exc).__name__ if exc is not None else "none"
 	return f"{title}\n(details withheld: scrubbing the message failed with {failed}; error type {kind})"

@@ -146,3 +146,65 @@ def test_ai_fix_has_one_copy_of_the_interrupt_idiom():
 			if id(node) not in inside:
 				offenders.append(node.lineno)
 	assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# log_ai_failure: the unscrubbed lines never ride on an interrupt
+# ---------------------------------------------------------------------------
+
+def _tb_holders(exc: BaseException, needle: str, *skip_codes, names=None) -> list[str]:
+	"""``frame: local`` for every frame on ``exc``'s traceback (outside this
+	test module) whose local (among ``names``, when given) holds ``needle``."""
+	found = []
+	tb = exc.__traceback__
+	while tb is not None:
+		code = tb.tb_frame.f_code
+		if code.co_filename != __file__ and code not in skip_codes:
+			for name, value in tb.tb_frame.f_locals.items():
+				if (names is None or name in names) and needle in repr(value):
+					found.append(f"{code.co_name}: {name}")
+		tb = tb.tb_next
+	return found
+
+
+class TestLogAiFailureClearsItsLines:
+	"""``log_ai_failure`` builds the unscrubbed ``lines`` (context values, the
+	exception text) and passes them to ``_scrubbed_message``. An interrupt
+	that is not an ``Exception`` (``SystemExit`` from a gunicorn worker
+	timeout) goes through both, and Sentry's WSGI middleware ships the
+	locals of every frame it leaves: no frame may still hold those lines (the
+	caller's own arguments, ``context`` here, are the caller's to hold)."""
+
+	@pytest.fixture(autouse=True)
+	def _no_rq(self, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_job_timeout_types", lambda: ())
+
+	def test_an_interrupt_from_the_scrubber_leaves_no_lines_bound(self, monkeypatch):
+		interrupt = SystemExit(1)
+
+		def _scrub(title, lines, exc, *a, **k):
+			raise interrupt
+
+		monkeypatch.setattr(ai_fix, "_scrubbed_message", _scrub)
+		with pytest.raises(SystemExit) as ei:
+			ai_fix.log_ai_failure("optimus ai_fix", None, detail="UNSCRUBBED body")
+		assert ei.value is interrupt
+		assert _tb_holders(ei.value, "UNSCRUBBED", _scrub.__code__, names={"lines", "message"}) == []
+
+	def test_an_interrupt_while_reading_the_key_leaves_no_lines_bound(self, monkeypatch):
+		interrupt = SystemExit(1)
+
+		def _decrypt(*a, **k):
+			raise interrupt
+
+		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", _decrypt, raising=False)
+		with pytest.raises(SystemExit) as ei:
+			ai_fix.log_ai_failure("optimus ai_fix", None, detail="UNSCRUBBED body")
+		assert ei.value is interrupt
+		walked = []
+		tb = ei.value.__traceback__
+		while tb is not None:
+			walked.append(tb.tb_frame.f_code.co_name)
+			tb = tb.tb_next
+		assert "log_ai_failure" in walked and "_scrubbed_message" in walked
+		assert _tb_holders(ei.value, "UNSCRUBBED", names={"lines", "message"}) == []
