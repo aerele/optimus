@@ -1027,9 +1027,10 @@ class TestHttpFailurePath:
 		assert ei.value.kind == "bad_response" and ei.value.status_code == status
 		assert ei.value.__context__ is None
 		assert str(ei.value) == (
-			f"The AI provider answered with a redirect (HTTP {status}) instead of a reply. Check the Base URL in "
-			"Optimus Settings: a Base URL that redirects must be set to the address it redirects to (its https:// "
-			"address, for example)."
+			f"The AI provider answered with a redirect (HTTP {status}) instead of a reply. Optimus follows only a "
+			"307 or 308 redirect to the same host: a Base URL that answers 301, 302 or 303, or redirects to another "
+			"host, must be set to the final URL it redirects to. Change the Base URL in Optimus Settings to that "
+			"final URL (its https:// address, for example)."
 		)
 		assert len(logs) == 1
 		row = logs[0]["message"]
@@ -1307,7 +1308,7 @@ class TestOnlyASameOriginRedirectIsFollowed:
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			call(base, KEY, "m", "system", [{"role": "user", "content": "hi"}])
 		assert ei.value.kind == "bad_response" and ei.value.status_code == status
-		assert "a Base URL that redirects must be set to the address it redirects to" in str(ei.value)
+		assert "a Base URL that answers 301, 302 or 303, or redirects to another host, must be set to the final URL" in str(ei.value)
 		assert len(sent) == 1 and sent[0][1] == base + path  # not followed
 		assert len(logs) == 1 and KEY not in logs[0]["message"]
 		if location:

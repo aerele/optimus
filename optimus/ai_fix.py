@@ -2119,7 +2119,7 @@ def _http_post(
 		from frappe import _
 
 		failure = AiFixError(
-			_("The AI provider answered with a redirect (HTTP {0}) instead of a reply. Check the Base URL in Optimus Settings: a Base URL that redirects must be set to the address it redirects to (its https:// address, for example).").format(status),
+			_("The AI provider answered with a redirect (HTTP {0}) instead of a reply. Optimus follows only a 307 or 308 redirect to the same host: a Base URL that answers 301, 302 or 303, or redirects to another host, must be set to the final URL it redirects to. Change the Base URL in Optimus Settings to that final URL (its https:// address, for example).").format(status),
 			status_code=status, kind="bad_response",
 		)
 	elif status in (401, 403):
