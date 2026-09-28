@@ -266,7 +266,8 @@ versions may contain breaking changes see migration notes below).
   instead of being reported as a reply without text. A redirect that is not
   followed (any HTTP 3xx reply but a 307 or 308 to the same host and port,
   and a fourth redirect) is reported as an unexpected response that names
-  its status and says to set the Base URL to the address it redirects to,
+  its status and says that a Base URL that redirects
+  must be set to the final URL it redirects to,
   instead of being read as the reply; its Error Log row holds the status and
   the call site (and `provider_error=` when the reply names a code), never
   the body or the address the redirect points to.
@@ -288,11 +289,15 @@ versions may contain breaking changes see migration notes below).
   rotated one) is masked there too. A web address with an e-mail address in
   its query string or fragment (`?to=a@b.com`) is no longer masked as
   credentials: only the `user:password@` part in front of the host is.
-- The scrub's `residual` count now flags only provider key shapes at their
-  real lengths, as whole tokens (`sk-` keys of OpenAI, Anthropic, DeepSeek,
-  Kimi and OpenRouter, Groq's `gsk_`, Google's `AIza`), so an identifier, a
-  file name or prose that only starts with such a prefix is no longer
-  counted.
+- The scrub's `residual` count is driven by the known key first: it counts a
+  row still holding the stored key (raw, JSON-escaped or repr-escaped), then
+  adds provider key shapes at their real lengths, as whole tokens (`sk-` keys
+  of OpenAI, Anthropic, DeepSeek, Kimi and OpenRouter, Groq's `gsk_`,
+  Google's `AIza`), so an identifier, a file name or prose that only starts
+  with such a prefix is not counted. A residual of 0 means no current key
+  and no known provider-shaped key is left in the rows read, not that no key
+  of any provider is (a rotated Mistral or Cohere key has no shape it
+  knows).
 - An AI failure row is written to the Error Log immediately. On MariaDB the
   Error Log table is MyISAM, so the row survives a rollback of the request
   or background job that logged it. On Postgres, if the request or
@@ -310,6 +315,35 @@ versions may contain breaking changes see migration notes below).
   Log row may not have been written or re-queued, or a hook after the
   insert failed". It is logged at error level, the lowest level Frappe's
   loggers keep on a production site.
+
+- A second log of an AI failure that is already in the Error Log (the HTTP
+  layer logs its own failure, then the caller logs the same error with the
+  finding or step it was working on) no longer drops the caller's context:
+  its title and `k=v` lines, scrubbed like the message, are appended to the
+  row already written: there is still one row. A failed append leaves one line with
+  its error type in the `optimus` log.
+- The masking now also recognises a header entry whose value is bytes
+  (`'x-api-key': b'...'`), a lowercase or upper-case `bearer`, `basic` or
+  `token` followed by a token holding a digit, the `Key` and `ApiKey`
+  schemes of an `Authorization` header, and an `api-key` or `api_key` header
+  line holding a digit. Ordinary prose ("the bearer of", "token expired") is
+  left alone.
+- The Error Log hook reads the stored AI key only when one is stored: no key
+  is read on a site where none is stored (AI never enabled). It checks the
+  Password field's plain value (asterisks, never the key) first.
+- The Error Log hook is fail-closed for Optimus's own rows: a row from
+  Optimus's AI code is withheld whenever it cannot be masked, including in a
+  process still running the previous release and after an unexpected
+  failure of the hook. Another app's row is still stored exactly as it was.
+- The Error Log hook cuts each text field of a row it masks to 65536
+  characters (the last token before the cut is dropped, and `[...]` is
+  appended) and masks again only the lines around the join of a long title
+  and its error, so a huge row costs a bounded amount of work.
+- The report's per-action breakdown now leaves out the Error Log hook's own
+  key read too, so its rows add up to the session's query count and time.
+- A worker-timeout interrupt while a failure's message is scrubbed, or while
+  a redirect's address is read, now leaves without the key, the unscrubbed
+  text or the Base URL.
 
 ### Upgrade notes
 
@@ -371,14 +405,23 @@ versions may contain breaking changes see migration notes below).
   three in a row. A Base URL that answers any other redirect (a 301, 302 or
   303, the usual way a server sends http to https, or a redirect to another
   host or port, or through a proxy that rewrites the host) now fails with a
-  message naming the redirect's status: set the Base URL in Optimus Settings
-  to the address it redirects to.
+  message naming the redirect's status. A Base URL that redirects (301, 302
+  or 303, or a 307 or 308 to another host) must be set to the final URL it
+  redirects to: change the Base URL in Optimus Settings to that final URL.
+- A stored AI key with a space inside it or a character that is not plain
+  printable ASCII (a pasted smart quote, a no-break space, a control
+  character) is now rejected with a clear message, both when a request is
+  made and when Optimus Settings is saved: such a key is refused when
+  Optimus Settings is saved, with the same message. Keyless providers
+  (OpenAI-compatible) are unaffected: there such a key is neither sent nor
+  refused.
 - Every Error Log insert on the site now reads the stored AI key once (the
   Error Log hook needs it to tell a row holding the key). While Optimus
-  profiles a flow, that read appears in the report's per-table and per-action
-  query breakdowns, one `__Auth` query per Error Log insert; the N+1 and
-  slowest-query findings and the session's query count and query time leave
-  it out, as Optimus's own query.
+  profiles a flow, that read appears in the report's per-table query
+  breakdown, one `__Auth` query per Error Log insert; the per-action
+  breakdown, the N+1 and slowest-query findings and the session's query
+  count and query time leave it out, as Optimus's own query. A site where no
+  key is stored reads none.
 - No Desk form or JavaScript change (open tabs need no reload) and no new
   `site_config.json` key.
 - Verify: the dry run in step 3 above reports the values listed there, the

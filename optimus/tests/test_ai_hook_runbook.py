@@ -62,6 +62,13 @@ def _flat(document: str) -> str:
 		"or of the key stored in Optimus Settings when the request carried none",
 		"neither sent nor refused",  # a keyless provider and an unsendable key
 		"the session's query count and query time leave it out",
+		"the per-action breakdown, the N+1 and slowest-query findings",
+		"must be set to the final URL it redirects to",
+		"no current key and no known provider-shaped key",
+		"refused when Optimus Settings is saved",
+		"appended to the row already written",
+		"is withheld whenever it cannot be masked",
+		"no key is read on a site where none is stored",
 	],
 )
 def test_the_three_documents_agree(document, statement):
@@ -71,5 +78,8 @@ def test_the_three_documents_agree(document, statement):
 @pytest.mark.parametrize("document", _DOCS)
 def test_no_document_still_says_a_redirect_is_never_followed(document):
 	text = _flat(document)
-	for stale in ("A request never follows a redirect", "no longer follow redirects", "which is never followed"):
+	for stale in (
+		"A request never follows a redirect", "no longer follow redirects", "which is never followed",
+		"set the Base URL to the address it redirects to", "per-table and per-action query breakdowns",
+	):
 		assert stale not in text

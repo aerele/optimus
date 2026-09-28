@@ -70,7 +70,8 @@ that needs a key it must be plain printable ASCII: a key with any other
 character (a space inside it, a pasted smart quote or no-break space, a
 control character) is refused before any request is made, with a message
 that names the usual causes (a pasted smart quote, a stray space, a no-break
-space, a control character). The OpenAI-compatible provider needs no key
+space, a control character); such a key is also refused when Optimus
+Settings is saved, with the same message. The OpenAI-compatible provider needs no key
 (Ollama, LM Studio, vLLM): there such a key is neither sent nor refused, and
 the request goes without one; a key it can send is still sent. In Optimus's code it exists only in local
 variables named `api_key` or `secret` (names both Frappe's traceback
@@ -98,7 +99,8 @@ same host and port, with the same scheme or an upgrade from http to https on
 that host: it sends the same request again, the key attached by the same
 auth object. Any other 3xx reply (a 301, 302 or 303, another host or port, a
 downgrade to http, a fourth redirect) is reported as an unexpected response
-that names its status and says to set the Base URL to the address it
+that names its status and says that a Base URL that redirects (301, 302 or
+303, or a 307 or 308 to another host) must be set to the final URL it
 redirects to. The address a redirect points to is never logged or shown.
 
 Every Error Log row the AI code writes goes through
@@ -393,12 +395,23 @@ installed on the site.
   sit unmasked in Redis. Bench's default cache Redis (`redis_cache`) saves
   nothing to disk.
 - Every Error Log insert on the site reads the stored AI key once (a SELECT
-  on `__Auth`, and a decrypt when a key is stored), whichever app writes the
-  row: the hook needs the key to tell a row holding it. While Optimus
-  profiles a flow, that read appears in the report's per-table and
-  per-action query breakdowns, one `__Auth` query per Error Log insert; the
-  N+1 and slowest-query findings and the session's query count and query
-  time leave it out, as Optimus's own query.
+  on `__Auth`, and a decrypt), whichever app writes the row, when a key is
+  stored: the hook needs the key to tell a row holding it; no key is read
+  on a site where none is stored (it checks the Password field's plain
+  value, asterisks, first). While Optimus profiles a flow, that read appears in the
+  report's per-table query breakdown, one `__Auth` query per Error Log
+  insert; the per-action breakdown, the N+1 and slowest-query findings and
+  the session's query count and query time leave it out, as Optimus's own
+  query.
+- The Error Log hook is fail-closed for Optimus's own rows: a row from
+  Optimus's AI code is withheld whenever it cannot be masked (its masking
+  failed, the hook failed unexpectedly, or the process still runs the
+  previous release and cannot import the masking). Another app's row is
+  stored exactly as it was. Each text field of a row the hook masks is cut
+  to 65536 characters first.
+- A later log of an AI failure already in the Error Log adds the caller's
+  context (title and `k=v` lines, scrubbed) to that row: it is appended to
+  the row already written, not a second row.
 - If you downgrade to a release without the Error Log hook, clear the site's
   cache after it (`bench migrate` does, and after the restart run
   `bench --site <site> clear-cache`): until the cached hooks are cleared they
@@ -409,15 +422,21 @@ installed on the site.
   `SystemExit` in the request), that call writes no Error Log row. The HTTP
   layer clears the interrupted frames from the exception before it leaves,
   so the prepared request headers do not travel with it; so do the code that
-  scrubs a provider's reply and the code that builds a failure's log message,
-  which also unbind the reply and the unscrubbed message first.
+  scrubs a provider's reply, the code that builds a failure's log message
+  and the code that reads a redirect's address, which also unbind the
+  reply, the unscrubbed message and the key's literals, or the Base URL,
+  first.
 - The scrub's `residual` count is masking-complete, not selection-complete.
   It reads only the rows its candidate filters select (rows with an
   `ai_fix.py` frame and a secret marker, rows holding the key stored in
   Optimus Settings, and the Deleted Document copies of both) and reports
-  those that still hold a key shape after masking: a provider key shape at
-  its real length, as a whole token (`sk-` keys of OpenAI, Anthropic,
-  DeepSeek, Kimi and OpenRouter, Groq's `gsk_`, Google's `AIza`). A row outside that
+  those that still hold a key after masking: the stored key first (raw,
+  JSON-escaped or repr-escaped), then a provider key shape at its real
+  length, as a whole token (`sk-` keys of OpenAI, Anthropic, DeepSeek, Kimi
+  and OpenRouter, Groq's `gsk_`, Google's `AIza`). So `residual` 0 proves no
+  current key and no known provider-shaped key is left in the rows read,
+  not that no key of any provider is: a rotated key of another provider
+  (Mistral, Cohere) has no shape it knows. A row outside that
   selection, for example an older key in a row with no `ai_fix.py` frame and
   no marker, is not counted. Rotating the keys is what makes such a copy
   harmless.
@@ -426,8 +445,11 @@ installed on the site.
   masks it by value only when it has at least 8 characters (a shorter
   literal would shred ordinary words). A shorter key, or a key no longer
   stored in Optimus Settings, is masked only where it sits in a header, an
-  API-key field, a `Bearer` token, an `x-api-key` header line
-  (`x-api-key: <key>`), a header value quoted in an "Invalid header value"
+  API-key field (a str or bytes value), a `Bearer` token, a `bearer`,
+  `basic` or `token` scheme in any case followed by a token holding a digit,
+  an `Authorization` header line (Bearer, Basic, Token, Key or ApiKey), an
+  `x-api-key` header line (`x-api-key: <key>`), an `api-key` header line
+  holding a digit, a header value quoted in an "Invalid header value"
   error, or a URL's credentials (the `user:password@` in front of the host).
 
 ## Cryptographic primitives
