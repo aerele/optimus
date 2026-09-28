@@ -2280,10 +2280,12 @@ def _call_openai_chat(
 			content = msg.get("content")
 			if isinstance(content, str):
 				return content
-			# Some servers return content as a list of parts.
+			# Some servers return content as a list of parts. A part whose
+			# text is None or not a string counts as no text (_text_or_empty),
+			# so one odd part never loses the whole reply.
 			if isinstance(content, list):
 				return "".join(
-					p.get("text", "") for p in content if isinstance(p, dict)
+					_text_or_empty(p.get("text")) for p in content if isinstance(p, dict)
 				)
 	except Exception:
 		pass

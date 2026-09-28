@@ -365,6 +365,15 @@ class TestOpenAiCall:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		assert ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}]) == "ab"
 
+	def test_content_list_with_a_none_or_non_str_text_keeps_the_rest(self, monkeypatch):
+		# A part whose "text" is None (or not a string) counts as no text: the
+		# join must not raise, which lost the whole reply.
+		payload = {"choices": [{"message": {"content": [
+			{"text": "a"}, {"type": "text", "text": None}, "stray", {"text": 7}, {"type": "image"}, {"text": "b"},
+		]}}]}
+		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
+		assert ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}]) == "ab"
+
 	def test_no_text_in_response_raises(self, monkeypatch):
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {"choices": []})))
 		with pytest.raises(ai_fix.AiFixError):
