@@ -73,7 +73,7 @@ from typing import NamedTuple
 import frappe
 
 from optimus import safe_commit
-from optimus.redaction import SECRET_PLACEHOLDER, scrub_secrets
+from optimus.redaction import MIN_KEY_LEN, SECRET_PLACEHOLDER, key_literals, scrub_secrets
 
 
 class InsideBackgroundJobError(RuntimeError):
@@ -98,7 +98,7 @@ _OPTIMUS_AI_FRAME_PATHS = ("optimus/ai_fix.py", "frappe_profiler/ai_fix.py")
 _OPTIMUS_AI_FRAMES = tuple(f"%{path}%" for path in _OPTIMUS_AI_FRAME_PATHS)
 # Any of these next to an ai_fix.py frame means the row may hold a key.
 _SECRET_MARKERS = ("%Bearer %", "%api_key%", "%x-api-key%")
-_MIN_KEY_LEN = 8
+_MIN_KEY_LEN = MIN_KEY_LEN
 # The stored-key pass runs only for a key of at least this many characters,
 # and sends only a fragment of _FRAGMENT_LEN characters of it: a window made
 # only of _CLEAN_FRAGMENT characters when one exists (no LIKE metacharacter,
@@ -240,8 +240,9 @@ def _key_fragment(api_key: str) -> tuple[str, bool]:
 def _holds_key(row: dict, fields: tuple[str, ...], api_key: str) -> bool:
 	"""True when the full key, raw, JSON-escaped or repr-escaped, is in one of
 	the row's text fields (the fragment the SQL matched is not enough). The
-	escaped key is held as ``secret``, a name the sanitizers redact."""
-	for secret in {api_key, _json_escaped(api_key), repr(api_key)[1:-1]}:
+	escaped key is held as ``secret``, a name the sanitizers redact. The
+	forms are ``redaction.key_literals``."""
+	for secret in key_literals(api_key):
 		for field in fields:
 			text = row.get(field)
 			if isinstance(text, str) and secret in text:
@@ -255,7 +256,7 @@ def _mask(text: str, api_key: str) -> str:
 	(``_VALUE_LINE``, ``_ESCAPED_VALUE_LINE``). Only text from the AI code or
 	holding the key comes here: the scrub's rows and the records the hook
 	recognises (``_is_ai_record``)."""
-	out = scrub_secrets(text, literals=(api_key, _json_escaped(api_key), repr(api_key)[1:-1]))
+	out = scrub_secrets(text, literals=key_literals(api_key))
 	out = _VALUE_LINE.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER, out)
 	return _ESCAPED_VALUE_LINE.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER, out)
 

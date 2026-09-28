@@ -414,3 +414,45 @@ class TestScrubSecrets:
 			tb = tb.tb_next
 		holders = {name for name, value in tb.tb_frame.f_locals.items() if _TOK in repr(value)}
 		assert holders == {"secret", "api_key"}
+
+
+# ---------------------------------------------------------------------------
+# key_literals: the one helper for the forms text holds a key in
+# ---------------------------------------------------------------------------
+
+
+class TestKeyLiterals:
+	def test_raw_json_and_repr_forms_raw_first_without_duplicates(self):
+		import json
+
+		key = "sk-live-0123’quote\"back\\slash'tail"
+		forms = redaction.key_literals(key)
+		assert forms[0] == key
+		assert json.dumps(key)[1:-1] in forms and repr(key)[1:-1] in forms
+		assert len(forms) == len(set(forms)) == 3
+		assert redaction.key_literals(_TOK) == (_TOK,)
+
+	def test_no_key_is_empty(self):
+		for value in (None, "", 0, b"sk-bytes-0123456789"):
+			assert redaction.key_literals(value) == ()
+
+	def test_the_minimum_length_and_placeholder_are_public(self):
+		assert redaction.MIN_KEY_LEN == 8
+		assert redaction.SECRET_PLACEHOLDER == "********"
+
+	def test_a_repr_escaped_key_is_masked_through_the_literals(self):
+		key = "sk-live-0123 456789abcdef"
+		text = f"      api_key = {key!r}\n      held = {key!a}"
+		out = redaction.scrub_secrets(text, literals=redaction.key_literals(key))
+		assert "456789abcdef" not in out.split("held")[0]
+		assert "0123\\xa0456789" not in out
+
+	def test_every_user_shares_the_one_helper(self):
+		from optimus import ai_fix, error_log_mask, maintenance
+
+		key = 'sk-live-01\\23"45’67 89abcdef'
+		assert ai_fix._key_literals(key) == redaction.key_literals(key)
+		assert error_log_mask._key_literals(key) == redaction.key_literals(key)
+		assert error_log_mask._MIN_KEY_LEN == redaction.MIN_KEY_LEN == maintenance._MIN_KEY_LEN
+		assert error_log_mask._PLACEHOLDER == redaction.SECRET_PLACEHOLDER
+		assert maintenance._holds_key({"error": f"x {repr(key)[1:-1]} y"}, ("error",), key)

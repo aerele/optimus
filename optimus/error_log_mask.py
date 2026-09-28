@@ -104,8 +104,8 @@ WITHHELD = "Optimus withheld this error text: it could not be masked. See logs/o
 WITHHELD_TITLE = "Optimus withheld this error title: it could not be masked."
 # Error Log.method is Data (varchar(140)).
 _TITLE_LIMIT = 140
-# optimus.redaction.SECRET_PLACEHOLDER and maintenance._MIN_KEY_LEN, copied:
-# the fallback runs where those modules cannot be imported.
+# optimus.redaction.SECRET_PLACEHOLDER and MIN_KEY_LEN, copied: the fallback
+# runs where those modules cannot be imported (a test pins them equal).
 _PLACEHOLDER = "********"
 _MIN_KEY_LEN = 8
 # How many times each outcome has been noted in this process (_note), and
@@ -202,11 +202,21 @@ def _mask_stored_key_only(frappe, doc, stale: str) -> str:
 			masked = text
 			# Escaped forms first: replacing raw backslashes first could
 			# leave an escape from the representation beside the mask.
-			for secret in sorted({api_key, json.dumps(api_key)[1:-1], repr(api_key)[1:-1]}, key=len, reverse=True):
+			for secret in sorted(_key_literals(api_key), key=len, reverse=True):
 				masked = masked.replace(secret, _PLACEHOLDER)
 			if masked != text:
 				doc.set(field, masked)
 	return f"checked for the stored key alone (Optimus's modules could not be imported: {stale})"
+
+
+def _key_literals(api_key) -> tuple[str, ...]:
+	"""``optimus.redaction.key_literals``, copied with the standard library
+	alone for the fallback (a test pins the two equal): ``api_key`` raw,
+	JSON-escaped and repr-escaped, without duplicates, raw first; ``()`` for
+	no key."""
+	if not isinstance(api_key, str) or not api_key:
+		return ()
+	return tuple(dict.fromkeys((api_key, json.dumps(api_key)[1:-1], repr(api_key)[1:-1])))
 
 
 def _stored_key() -> str:

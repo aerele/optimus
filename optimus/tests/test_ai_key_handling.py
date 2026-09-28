@@ -234,7 +234,7 @@ class TestScrubLiteralsFor:
 
 	def test_an_auth_that_is_not_ours_adds_nothing(self, monkeypatch):
 		_store_key(monkeypatch, KEY)
-		assert ai_fix._scrub_literals_for(requests.auth.HTTPBasicAuth("u", "p")) == (KEY, KEY)
+		assert ai_fix._scrub_literals_for(requests.auth.HTTPBasicAuth("u", "p")) == (KEY,)
 
 
 # ---------------------------------------------------------------------------

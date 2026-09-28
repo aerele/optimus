@@ -24,6 +24,7 @@ typo can't disable redaction of a known-sensitive key.
 
 from __future__ import annotations
 
+import json
 import re
 from functools import lru_cache
 
@@ -199,8 +200,26 @@ _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
 
 # A literal shorter than this is never replaced: it would shred ordinary words
 # (tests and misconfigured sites use keys like "k"); real provider keys are
-# far longer.
-_MIN_LITERAL_LEN = 8
+# far longer. The one minimum key length of the AI key handling: ai_fix, the
+# scrub (optimus.maintenance) and this module use it; error_log_mask keeps a
+# copy (a test pins them equal).
+MIN_KEY_LEN = 8
+
+
+def key_literals(api_key) -> tuple[str, ...]:
+	"""``api_key`` in every form text can hold it, for ``scrub_secrets(...,
+	literals=...)`` and for the stored-key checks: raw, JSON-escaped
+	(``json.dumps(api_key)[1:-1]``: a JSON body, Deleted Document data) and
+	repr-escaped (``repr(api_key)[1:-1]``: a frame local Frappe prints by
+	repr), without duplicates, raw first. ``()`` when there is no key (not a
+	string, or empty). The parameter holds the key, so it is named
+	``api_key``, a name the traceback sanitizers redact; pass the result
+	straight into the call that uses it. ``optimus.error_log_mask`` keeps a
+	stdlib-only copy (``_key_literals``) for the process whose Optimus
+	modules cannot be imported; a test pins the two equal."""
+	if not isinstance(api_key, str) or not api_key:
+		return ()
+	return tuple(dict.fromkeys((api_key, json.dumps(api_key)[1:-1], repr(api_key)[1:-1])))
 
 
 def _literal_length(api_key) -> int:
@@ -237,7 +256,7 @@ def scrub_secrets(text: str, *, literals: tuple[str, ...] = ()) -> str:
 	secret.sort(key=_literal_length, reverse=True)
 	out = text
 	for api_key in secret:
-		if isinstance(api_key, str) and len(api_key) >= _MIN_LITERAL_LEN:
+		if isinstance(api_key, str) and len(api_key) >= MIN_KEY_LEN:
 			out = out.replace(api_key, SECRET_PLACEHOLDER)
 	for pattern in _SECRET_PATTERNS:
 		out = pattern.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER + (m.group(4) or ""), out)

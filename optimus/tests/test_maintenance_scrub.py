@@ -1577,7 +1577,7 @@ class TestKeyHandling:
 		offenders, seen = self._profiled(lambda: out.update(maintenance.scrub_error_log_secrets(dry_run=False)), forms)
 		assert offenders == set()
 		# positive control: the key-handling helpers did run, key in hand
-		assert {"_holds_key", "_json_escaped", "_mask", "_key_fragment"} <= seen
+		assert {"_holds_key", "_mask", "_key_fragment"} <= seen
 		assert out["changed"] >= 2 and out["deleted_docs_changed"] == 1
 
 	@staticmethod

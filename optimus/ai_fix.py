@@ -888,7 +888,7 @@ class _ApiKeyAuth(requests.auth.AuthBase):
 		return r
 
 	def _scrub_literals(self) -> tuple[str, ...]:
-		"""The key this object sends, raw and JSON-escaped (``_key_literals``):
+		"""The key this object sends, raw, JSON-escaped and repr-escaped (``_key_literals``):
 		the key the request really carried, even if Optimus Settings holds a
 		new one by the time the reply is read. Pass the result straight into
 		``scrub_secrets(..., literals=...)``; never bind it to a local."""
@@ -902,13 +902,14 @@ class _ApiKeyAuth(requests.auth.AuthBase):
 
 def _key_literals(api_key) -> tuple[str, ...]:
 	"""``api_key`` as it can appear in text, for ``scrub_secrets(...,
-	literals=...)``: raw, and JSON-escaped (``json.dumps(api_key)[1:-1]``,
-	how a JSON body or a JSON-encoded message holds it). ``()`` when there is
-	no key. Pass the result straight into that call: the key may only sit in
-	a local named ``api_key`` (or ``secret`` inside ``scrub_secrets``)."""
-	if not isinstance(api_key, str) or not api_key:
-		return ()
-	return (api_key, json.dumps(api_key)[1:-1])
+	literals=...)``: raw, JSON-escaped (how a JSON body or a JSON-encoded
+	message holds it) and repr-escaped (a frame local printed by repr), the
+	one helper ``redaction.key_literals``. ``()`` when there is no key. Pass
+	the result straight into that call: the key may only sit in a local named
+	``api_key`` (or ``secret`` inside ``scrub_secrets``)."""
+	from optimus.redaction import key_literals
+
+	return key_literals(api_key)
 
 
 def _in_flight_literals(auth) -> tuple[str, ...]:
@@ -919,7 +920,7 @@ def _in_flight_literals(auth) -> tuple[str, ...]:
 
 def _scrub_literals_for(auth) -> tuple[str, ...]:
 	"""What a provider reply (or a failure's log text) is scrubbed of, for
-	``scrub_secrets(..., literals=...)``, raw and JSON-escaped: the key the
+	``scrub_secrets(..., literals=...)``, raw, JSON-escaped and repr-escaped: the key the
 	request was sent with when ``auth`` is the ``_ApiKeyAuth`` it used (the
 	only key the provider ever received, even if Optimus Settings holds a new
 	one by now), with no database read; otherwise the key stored in Optimus
@@ -1565,7 +1566,7 @@ def _exception_text(exc: BaseException) -> str:
 
 def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None, auth=None) -> str:
 	"""``lines`` joined and passed through ``redaction.scrub_secrets`` with
-	the key as a literal, raw and JSON-escaped (``_scrub_literals_for(auth)``:
+	the key as a literal, raw, JSON-escaped and repr-escaped (``_scrub_literals_for(auth)``:
 	the in-flight key when ``auth`` is the ``_ApiKeyAuth`` the request used,
 	else the stored key). If scrubbing fails, the
 	message keeps only the title and the error type, never the unscrubbed
@@ -1861,7 +1862,7 @@ def _response_detail(resp, auth=None) -> str:
 	(cutting first can split the key, and a partial key no longer matches the
 	literal). The literals are the key the request was sent with (``auth``,
 	the ``_ApiKeyAuth`` it used), or the key stored in Optimus Settings when
-	it carried none (``_scrub_literals_for``), raw and JSON-escaped. Any failure returns
+	it carried none (``_scrub_literals_for``), raw, JSON-escaped and repr-escaped. Any failure returns
 	''; an RQ job timeout leaves as a fresh instance, with the raw body
 	unbound.
 
@@ -1897,7 +1898,7 @@ _UNSHOWN_URL = "(the configured Base URL)"
 def _shown_url(url: str, auth=None) -> str:
 	"""``url`` as a 404 message names it: scrubbed of the key the request was
 	sent with (``auth``), or the stored key when it carried none
-	(``_scrub_literals_for``), raw and JSON-escaped, and of credentials in it (a custom Base URL typed
+	(``_scrub_literals_for``), raw, JSON-escaped and repr-escaped, and of credentials in it (a custom Base URL typed
 	as ``user:password@host``). A ``url`` that is not a str, or is empty, is
 	returned as it is: there is nothing to scrub. Any failure returns
 	``_UNSHOWN_URL``, never the unscrubbed URL; an RQ job timeout leaves as
@@ -1928,7 +1929,7 @@ def _shown_url(url: str, auth=None) -> str:
 # made only of lowercase words matches it. What keeps such a key out is the
 # literal check in _provider_error_code, which drops a value holding the
 # in-flight key, or the stored key when no key was sent (8 characters or
-# more, raw or JSON-escaped).
+# more, raw, JSON-escaped or repr-escaped).
 _PROVIDER_ERROR_RE = re.compile(r"^[a-z]+(?:[_.:-][a-z]+)*$")
 _PROVIDER_ERROR_MAX_LEN = 64
 
@@ -1943,8 +1944,8 @@ def _provider_error_code(resp, auth=None) -> str:
 	it is a string of at most 64 characters made of lowercase-letter words
 	joined by ``_ . : -`` (``_PROVIDER_ERROR_RE``: no digits, no upper case)
 	and does not contain the key the request was sent with (``auth``, the
-	``_ApiKeyAuth`` it used), or the stored key when it carried none, raw or
-	JSON-escaped; both kept values are joined as
+	``_ApiKeyAuth`` it used), or the stored key when it carried none, raw,
+	JSON-escaped or repr-escaped; both kept values are joined as
 	``type:code`` when that still fits 64 characters, else the first one is
 	used. Any failure returns ''; an RQ job timeout leaves as a fresh
 	instance, with the parsed body unbound, and an interrupt that is not an
