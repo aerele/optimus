@@ -342,3 +342,49 @@ class TestAnInterruptDuringTheMessageScrub:
 		# the caller's own keyword arguments (``context``) are the caller's to hold
 		assert _tb_holders(ei.value, KEY, names={"lines", "message", "api_key", "secret", "text"}) == []
 		assert [h for h in _tb_holders(ei.value, KEY) if not h.endswith(": context")] == []
+
+
+# ---------------------------------------------------------------------------
+# _same_origin_redirect: an interrupt while the Location is parsed
+# ---------------------------------------------------------------------------
+
+class TestAnInterruptWhileTheRedirectIsParsed:
+	"""``_same_origin_redirect`` holds the Base URL (which can carry
+	``user:password@``) and the reply's Location while it parses them. A
+	``SystemExit`` there leaves as the same instance with its traceback and
+	chain cleared, and the frame that raises it holds neither URL."""
+
+	@pytest.fixture(autouse=True)
+	def _no_rq(self, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_job_timeout_types", lambda: ())
+
+	@pytest.mark.parametrize("where", ["urljoin", "urlsplit"])
+	def test_the_same_interrupt_leaves_without_the_credentials(self, monkeypatch, where):
+		from types import SimpleNamespace
+
+		interrupt = SystemExit(1)
+		real = getattr(ai_fix, where)
+
+		def _parse(*a, **k):
+			held = a  # noqa: F841 what the parser's frame holds
+			real(*a, **k)
+			try:
+				raise ValueError(repr(a))
+			except ValueError:
+				raise interrupt  # noqa: B904 (chained to a credential-bearing error on purpose)
+
+		monkeypatch.setattr(ai_fix, where, _parse)
+		resp = SimpleNamespace(headers={"location": "https://user:LOCATIONPW@llm.internal/v2"})
+		with pytest.raises(SystemExit) as ei:
+			ai_fix._same_origin_redirect("https://user:BASEURLPW@llm.internal/v1", resp)
+		assert ei.value is interrupt
+		assert ei.value.__context__ is None and ei.value.__cause__ is None
+		walked = []
+		tb = ei.value.__traceback__
+		while tb is not None:
+			walked.append(tb.tb_frame.f_code)
+			tb = tb.tb_next
+		assert _parse.__code__ not in walked
+		assert ai_fix._same_origin_redirect.__code__ in walked
+		assert _tb_holders(ei.value, "LOCATIONPW") == []
+		assert _tb_holders(ei.value, "BASEURLPW") == []

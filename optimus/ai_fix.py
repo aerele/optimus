@@ -2181,9 +2181,15 @@ def _same_origin_redirect(current: str, resp) -> str | None:
 	an upgrade from http to https on that host (port 80 to 443, or the same
 	port), and no credentials of its own in the URL. None otherwise, for a
 	missing or unparsable Location, and on any failure (never raises, except
-	an RQ job timeout, raised fresh). Neither the Location nor the result is
-	ever logged or shown: it comes from the reply, not from Optimus Settings."""
-	guard = _InterruptGuard()
+	an RQ job timeout, raised fresh, and an interrupt that is not an
+	``Exception``, which leaves as the same instance with its traceback,
+	context and cause cleared: ``_InterruptGuard(base=True)``). Neither the
+	Location nor the result is ever logged or shown: it comes from the reply,
+	not from Optimus Settings. Before an interrupt is raised, the URLs
+	(``current`` can carry the Base URL's ``user:password@``) and the reply are unbound, so
+	this frame, which travels with it, holds no credential."""
+	location = follow = old = new = None
+	guard = _InterruptGuard(base=True)
 	try:
 		with guard:
 			location = resp.headers.get("location")
@@ -2208,6 +2214,8 @@ def _same_origin_redirect(current: str, resp) -> str | None:
 			return follow if same_origin else None
 	except Exception:
 		return None
+	# the URLs may carry credentials: never on the interrupt's traceback
+	current = resp = location = follow = old = new = None
 	if guard.pending():
 		raise guard.interrupt()
 	return None
