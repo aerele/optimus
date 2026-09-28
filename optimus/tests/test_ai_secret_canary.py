@@ -67,12 +67,12 @@ import types
 from types import SimpleNamespace
 
 import pytest
-
-pytestmark = pytest.mark.rq
 import requests
 
 from optimus import ai_fix, analyze, api
 from optimus import settings as _settings
+
+pytestmark = pytest.mark.rq
 
 KEY = "sk-CANARY-7f3a9c1e5b2d4f6a8c0e"
 NON_LATIN_KEY = "sk-CANARY-7f3a9c1e\u20195b2d4f6a8c0e"  # pasted smart quote
@@ -287,7 +287,12 @@ class _FakeDB:
 	table is transactional (Postgres): a ROLLBACK removes the rows inserted
 	since the last commit."""
 
+	def get_single_value(self, doctype, fieldname):
+		assert (doctype, fieldname) == ("Optimus Settings", "ai_api_key")
+		return "********"
+
 	def __init__(self, sinks):
+		self.sinks = sinks
 		self.after_rollback = _Callbacks(sinks)
 		self.error_logs = set()
 		self.uncommitted = []
@@ -301,8 +306,11 @@ class _FakeDB:
 			return {"name": "SESS-CANARY", "user": "Administrator", "status": "Ready", "title": "t"}
 		return "SESS-CANARY"
 
-	def set_value(self, *a, **k):
-		pass
+	def set_value(self, doctype=None, name=None, field=None, value=None, *a, **k):
+		# log_ai_failure appends a later caller's context to the row it wrote:
+		# that text is stored Error Log content too
+		if doctype == "Error Log":
+			self.sinks.stored.append((self.sinks.entry, f"{field}\n{value}", True))
 
 	def sql(self, *a, **k):
 		return []

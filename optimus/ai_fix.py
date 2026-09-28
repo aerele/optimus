@@ -25,6 +25,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -57,7 +58,12 @@ class AiFixError(Exception):
 		super().__init__(message)
 		self.status_code = status_code
 		self.kind = kind
-		self.usage = usage
+		# Only billed counts belong on an exception that may reach a log.
+		self.usage = {
+			key: value for key, value in (usage or {}).items()
+			if key in ("prompt_tokens", "completion_tokens", "total_tokens")
+			and type(value) is int and value >= 0
+		} if usage is not None else None
 
 
 # Findings that carry enough code / SQL context for the LLM to reason about
@@ -158,7 +164,6 @@ _DEFAULT_CONTEXT_TOKENS = 4096  # a provider dict without context_tokens gets th
 _TRUNCATION_CHECK_MAX_CONTEXT = 32768
 _WINDOW_STEPS = (80, 48, 32, 20, 12, 8)  # source-window sizes tried, largest first
 
-
 def provider_needs_key(name: str) -> bool:
 	"""True when the provider named ``name`` (an ``ai_provider`` Select value) needs an API key,
 	read from ``_PROVIDER_DEFAULTS[name]["needs_key"]`` so adding a provider stays data-only. An
@@ -167,6 +172,7 @@ def provider_needs_key(name: str) -> bool:
 	if defaults is None:
 		return True
 	return bool(defaults.get("needs_key", True))
+
 
 # Fallback timeout when settings can't be read (pure-pytest path with no
 # bench, or a settings cache miss during early bootstrap). v0.9.0+ the live
@@ -314,7 +320,7 @@ def suggest_fix(finding: dict, *, timeout: int | None = None) -> dict:
 	(default: the configured request timeout). Raises ``AiFixError``."""
 	if is_finding_type_excluded(finding.get("finding_type")):
 		raise AiFixError("excluded by ai_excluded_finding_types", kind="config")
-	provider = _resolve_provider()
+	provider = _provider_config()
 	_require_configured(provider)
 	ctx = _context_tokens(provider)
 	system, messages, shown = _build_fix_request(
@@ -352,7 +358,7 @@ def humanize_steps(actions: list[dict], *, session_title: str | None = None, usa
 
 	if not actions:
 		raise AiFixError(_("There are no recorded actions to summarise."), kind="config")
-	provider = _resolve_provider()
+	provider = _provider_config()
 	_require_configured(provider)
 	system, messages = _build_steps_messages(
 		actions, session_title, threshold_ms=_resolve_display_threshold_ms(), context_tokens=_context_tokens(provider)
@@ -379,24 +385,25 @@ def suggest_index(table_payload: dict) -> dict:
 	empty response."""
 	if not table_payload or not table_payload.get("table"):
 		raise AiFixError("No table to analyse for an index suggestion.")
-	provider = _resolve_provider()
+	provider = _provider_config()
 	if not provider.get("model") or not provider.get("base_url"):
 		raise AiFixError(
 			"AI is not fully configured set the provider, model and base URL "
 			"under Optimus Settings ▸ AI Fix Suggestions."
 		)
-	if provider.get("needs_key") and not provider.get("has_key"):
+	api_key = _get_api_key(provider.get("needs_key", True))  # the one read of the stored key for this call
+	if provider.get("needs_key") and not api_key:
 		raise AiFixError("No API key is configured for this AI provider.")
 	system, messages = _build_index_messages(table_payload)
 	usage: dict = {}
 	if provider["protocol"] == "anthropic":
 		text = _call_anthropic(
-			provider["base_url"], _get_api_key(),
+			provider["base_url"], api_key,
 			provider["model"], system, messages, usage_out=usage,
 		)
 	else:
 		text = _call_openai_chat(
-			provider["base_url"], _get_api_key(),
+			provider["base_url"], api_key,
 			provider["model"], system, messages, usage_out=usage,
 			metadata=_aerele_call_metadata(provider, "Table Index"),
 		)
@@ -438,13 +445,11 @@ def _had_concrete_context(finding: dict) -> bool:
 
 def test_connection() -> dict:
 	try:
-		provider = _resolve_provider()
+		provider = _provider_config()
 	except AiFixError as e:
 		return {"ok": False, "message": str(e), "model": ""}
 	if not provider.get("model") or not provider.get("base_url"):
 		return {"ok": False, "message": "Provider/model/base URL not fully configured.", "model": provider.get("model") or ""}
-	if provider.get("needs_key") and not provider.get("has_key"):
-		return {"ok": False, "message": "No API key configured.", "model": provider["model"]}
 	messages = [{"role": "user", "content": "Reply with exactly: OK"}]
 	usage: dict = {}
 	try:
@@ -490,41 +495,34 @@ def _current_key_or_empty() -> str:
 	  ``_http_post``: Sentry's WSGI middleware would ship those frames'
 	  locals. It leaves unchained when this function is not itself called
 	  while an exception is being handled."""
-	job_timeout_types = _job_timeout_types()
-	interrupt = None
-	escaping: BaseException | None = None
+	guard = _InterruptGuard(base=True)
 	try:
-		from frappe.utils.password import get_decrypted_password
+		with guard:
+			from frappe.utils.password import get_decrypted_password
 
-		api_key = get_decrypted_password(
-			"Optimus Settings", "Optimus Settings", "ai_api_key",
-			raise_exception=False,
-		) or ""
-	except BaseException as e:
-		if isinstance(e, job_timeout_types):
-			interrupt = (type(e), e.args)
-		elif not isinstance(e, Exception):
-			escaping = e
-		else:
-			return ""
-	if escaping is not None:
-		escaping.__traceback__ = None
-		escaping.__context__ = None
-		escaping.__cause__ = None
-		escaping.__suppress_context__ = True
-		raise escaping
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+			api_key = get_decrypted_password(
+				"Optimus Settings", "Optimus Settings", "ai_api_key",
+				raise_exception=False,
+			) or ""
+	except Exception:
+		return ""
+	if guard.pending():
+		raise guard.interrupt()
 	return api_key.strip() if isinstance(api_key, str) else ""
 
 
-def _get_api_key() -> str:
+def _get_api_key(needs_key: bool = True) -> str:
 	"""The API key to send, stripped of surrounding whitespace (a pasted
 	trailing newline), or ``""`` when none is stored.
 
-	Raises ``AiFixError(kind="config")`` before any HTTP call when the key
-	holds a character that cannot be sent in an HTTP header or is not plain
-	ASCII: every character must be printable ASCII (``!`` to ``~``). That
+	For a provider that needs a key (``needs_key``), raises
+	``AiFixError(kind="config")`` before any HTTP call when the key holds a
+	character that cannot be sent in an HTTP header or is not plain ASCII:
+	every character must be printable ASCII (``!`` to ``~``). For a provider
+	that needs none (Ollama, LM Studio, vLLM behind "OpenAI-compatible"),
+	such a key is not an error: ``""`` is returned and the request goes
+	without a key. A sendable key is still returned for it (a router such as
+	OpenRouter needs one). That
 	rejects a pasted smart quote, a no-break space or soft hyphen, a C1
 	control character, an internal space, and a control character such as a
 	newline, tab or NUL (which would otherwise reach ``requests`` /
@@ -537,14 +535,27 @@ def _get_api_key() -> str:
 	api_key = _current_key_or_empty()
 	if not api_key:
 		return ""
-	if not all("\x21" <= ch <= "\x7e" for ch in api_key):
-		from frappe import _
-
-		raise AiFixError(
-			_("The AI API key in Optimus Settings contains a character that cannot be sent in an HTTP header or is not plain ASCII (often a pasted smart quote, a stray space, a no-break space, or a control character such as a newline or tab). Paste the key again."),
-			kind="config",
-		) from None
+	if not _key_is_sendable(api_key):
+		if not needs_key:
+			return ""
+		raise AiFixError(_unsendable_key_message(), kind="config") from None
 	return api_key
+
+
+def _key_is_sendable(api_key: str) -> bool:
+	"""True when every character of ``api_key`` (already stripped) is
+	printable ASCII (``!`` to ``~``): what ``_get_api_key`` sends, and what
+	Optimus Settings accepts on save for a provider that needs a key."""
+	return all("\x21" <= ch <= "\x7e" for ch in api_key)
+
+
+def _unsendable_key_message() -> str:
+	"""The one message for a key ``_key_is_sendable`` refuses, raised by
+	``_get_api_key`` and by Optimus Settings' save validation. It never
+	holds the key."""
+	from frappe import _
+
+	return _("The AI API key in Optimus Settings contains a character that cannot be sent in an HTTP header or is not plain ASCII (often a pasted smart quote, a stray space, a no-break space, or a control character such as a newline or tab). Paste the key again.")
 
 
 class _ApiKeyAuth(requests.auth.AuthBase):
@@ -568,7 +579,7 @@ class _ApiKeyAuth(requests.auth.AuthBase):
 		return r
 
 	def _scrub_literals(self) -> tuple[str, ...]:
-		"""The key this object sends, raw and JSON-escaped (``_key_literals``):
+		"""The key this object sends, raw, JSON-escaped and repr-escaped (``_key_literals``):
 		the key the request really carried, even if Optimus Settings holds a
 		new one by the time the reply is read. Pass the result straight into
 		``scrub_secrets(..., literals=...)``; never bind it to a local."""
@@ -582,13 +593,14 @@ class _ApiKeyAuth(requests.auth.AuthBase):
 
 def _key_literals(api_key) -> tuple[str, ...]:
 	"""``api_key`` as it can appear in text, for ``scrub_secrets(...,
-	literals=...)``: raw, and JSON-escaped (``json.dumps(api_key)[1:-1]``,
-	how a JSON body or a JSON-encoded message holds it). ``()`` when there is
-	no key. Pass the result straight into that call: the key may only sit in
-	a local named ``api_key`` (or ``secret`` inside ``scrub_secrets``)."""
-	if not isinstance(api_key, str) or not api_key:
-		return ()
-	return (api_key, json.dumps(api_key)[1:-1])
+	literals=...)``: raw, JSON-escaped (how a JSON body or a JSON-encoded
+	message holds it) and repr-escaped (a frame local printed by repr), the
+	one helper ``redaction.key_literals``. ``()`` when there is no key. Pass
+	the result straight into that call: the key may only sit in a local named
+	``api_key`` (or ``secret`` inside ``scrub_secrets``)."""
+	from optimus.redaction import key_literals
+
+	return key_literals(api_key)
 
 
 def _in_flight_literals(auth) -> tuple[str, ...]:
@@ -598,29 +610,54 @@ def _in_flight_literals(auth) -> tuple[str, ...]:
 
 
 def _scrub_literals_for(auth) -> tuple[str, ...]:
-	"""What a provider reply is scrubbed of, for ``scrub_secrets(...,
-	literals=...)``: the key stored in Optimus Settings, then the key the
-	request was sent with (``auth``, the ``_ApiKeyAuth`` it used: Settings may
-	hold a new key by now), each raw and JSON-escaped. Pass the result
-	straight into that call, or bind it only to a local named ``api_key``.
-	Reading the stored key is a database query: call this BEFORE binding the
-	reply (see ``_response_detail``)."""
-	return (*_key_literals(_current_key_or_empty()), *_in_flight_literals(auth))
+	"""What a provider reply (or a failure's log text) is scrubbed of, for
+	``scrub_secrets(..., literals=...)``, raw, JSON-escaped and repr-escaped: the key the
+	request was sent with when ``auth`` is the ``_ApiKeyAuth`` it used (the
+	only key the provider ever received, even if Optimus Settings holds a new
+	one by now), with no database read; otherwise the key stored in Optimus
+	Settings, read again (a SELECT on ``__Auth``). So a call reads the stored
+	key once, at its entry point, unless its request carried no key. Nothing
+	is cached across calls. Pass the result straight into that call, or bind
+	it only to a local named ``api_key``. Call this BEFORE binding the reply
+	(see ``_response_detail``): the read is a database query."""
+	if isinstance(auth, _ApiKeyAuth):
+		return _in_flight_literals(auth)
+	return _key_literals(_current_key_or_empty())
 
 
 def _resolve_provider() -> dict:
-	"""Resolve the active provider config: protocol, base_url, model,
-	needs_key, has_key and the provider display name. Raises
-	``AiFixError`` on an unknown provider or a custom provider missing its
-	required base_url/model.
+	"""``_provider_config()`` plus ``has_key``: whether a key is stored (one
+	read of its cached, non-decrypting Singles value). For ``is_available``; a call that
+	sends a request uses ``_provider_config()`` and reads the key once
+	itself (``_get_api_key``).
 
 	SECURITY: the dict carries ``has_key`` (bool), never the key itself: it is
 	a local in most AI frames, and Frappe's traceback sanitizer
 	(``frappe.utils._get_traceback_sanitizer``) only redacts a dict key named
 	exactly ``password``, ``passwd``, ``secret``, ``token``, ``key`` or
-	``pwd``; ``api_key`` is not one of them. Code that sends a request calls
-	``_get_api_key()`` at the call site.
+	``pwd``; ``api_key`` is not one of them.
 	"""
+	provider = _provider_config()
+	provider["has_key"] = False
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			import frappe
+
+			secret = frappe.db.get_single_value("Optimus Settings", "ai_api_key")
+			provider["has_key"] = isinstance(secret, str) and bool(secret.strip())
+	except Exception:
+		pass
+	if guard.pending():
+		raise guard.interrupt()
+	return provider
+
+
+def _provider_config() -> dict:
+	"""Resolve the active provider config: protocol, base_url, model,
+	needs_key and the provider display name, without reading the key. Raises
+	``AiFixError`` on an unknown provider or a custom provider missing its
+	required base_url/model."""
 	from optimus.settings import get_config
 	cfg = get_config()
 	name = (getattr(cfg, "ai_provider", "") or _DEFAULT_PROVIDER).strip()
@@ -645,14 +682,12 @@ def _resolve_provider() -> dict:
 
 	# A key may be set for any provider: some OpenAI-compatible routers
 	# (OpenRouter, Together, Groq) need one even though local endpoints don't.
-	# Only its presence is recorded here.
 	return {
 		"name": name,
 		"protocol": defaults["protocol"],
 		"base_url": base_url,
 		"model": model,
 		"needs_key": bool(defaults["needs_key"]),
-		"has_key": bool(_current_key_or_empty()),
 		"context_tokens": ctx_override if ctx_override > 0 else int(defaults["context_tokens"]),
 		"max_output_tokens": defaults.get("max_output_tokens"),
 	}
@@ -965,6 +1000,9 @@ def _is_reasoning_model(model: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _LOGGED_ATTR = "_optimus_ai_logged"
+# The name of the Error Log row an exception was logged in (_mark_logged), so
+# a later log_ai_failure for it adds its context to that row.
+_LOGGED_ROW_ATTR = "_optimus_ai_log_row"
 # The body-free text an HTTP-status AiFixError from _http_post is logged with
 # (see _exception_text): its message carries the provider's reply.
 _LOG_TEXT_ATTR = "_optimus_log_text"
@@ -976,6 +1014,8 @@ def log_ai_failure(
 	*,
 	session_uuid: str | None = None,
 	docname: str | None = None,
+	auth: requests.auth.AuthBase | None = None,
+	marks: BaseException | None = None,
 	**context,
 ) -> bool:
 	"""Write one Error Log row for an AI-surface failure. This is the ONLY
@@ -992,7 +1032,9 @@ def log_ai_failure(
 	locals, no exception chain; for an HTTP-status error from ``_http_post``
 	the exception line holds its body-free log text, not its message: see
 	``_exception_text``), passed through
-	``redaction.scrub_secrets`` with the live key as a literal. Frappe's own
+	``redaction.scrub_secrets`` with the key as a literal (``auth``, the
+	``_ApiKeyAuth`` a failed request was sent with, when the HTTP layer logs
+	it; else the stored key, read again: ``_scrub_literals_for``). Frappe's own
 	with-context traceback prints every frame's locals, which is how the API
 	key and the prompt reached the Error Log before this fix.
 
@@ -1008,8 +1050,14 @@ def log_ai_failure(
 	- If scrubbing fails, the row keeps only the title and the error type:
 	  an unscrubbed message is never written.
 	- An exception is logged at most once: the HTTP layer logs its own
-	  failures, so a caller that logs the same ``AiFixError`` again is a
-	  no-op (no double rows). Only a row that was written marks it.
+	  failures, so a caller that logs the same ``AiFixError`` again writes
+	  no second row. Its title and ``k=v`` lines (and the session), scrubbed
+	  like the message, are appended to the row already written instead
+	  (``_append_context``: ``frappe.db.set_value`` on that row's ``error``),
+	  so the caller's context (the finding, the step) is not lost. Only a
+	  row that was written marks the exception, with the row's name.
+	  ``marks`` is another exception the written row stands for (the HTTP
+	  layer's ``AiFixError``, logged before it is raised).
 	- Returns True once ``frappe.log_error`` has returned, else False
 	  (already logged, or the write raised). A write that raised leaves one
 	  error-level line with the error type in the ``optimus`` log
@@ -1017,61 +1065,118 @@ def log_ai_failure(
 	  fails: the row is then written but ``exc`` stays unmarked, so a caller
 	  that logs it again writes a second row.
 	- Never raises, except an RQ job timeout (the job must still stop),
-	  which leaves as a fresh instance with no chain.
+	  which leaves as a fresh instance with no chain. That includes a
+	  timeout passed in as ``exc``: callers catch it with ``except
+	  Exception`` (rq's ``JobTimeoutException`` is one), so its row is
+	  written and it is then raised again, fresh, stopping the AI loop.
 	"""
 	logged = False
 	failure_type = None
-	interrupt = None
+	guard = _InterruptGuard()
+	guard.note(exc)
 	try:
-		if exc is not None and getattr(exc, _LOGGED_ATTR, False):
-			return False
-		import frappe
+		with guard:
+			if exc is not None and getattr(exc, _LOGGED_ATTR, False):
+				_append_context(exc, title, session_uuid, context, auth)
+			else:
+				import frappe
 
-		lines = [title]
+				lines = [title]
+				try:
+					if session_uuid:
+						lines.append(f"session_uuid={session_uuid}")
+					for k in sorted(context):
+						lines.append(f"{k}={context[k]}")
+					if exc is not None:
+						lines.append(_exception_text(exc))
+					message = _scrubbed_message(title, lines, exc, auth)
+				finally:
+					# Sentry (attach_stacktrace) serialises this frame's locals
+					# with the event, and an interrupt that is not an Exception
+					# leaves with this frame: only the scrubbed message may be
+					# bound, on every path.
+					del lines
+
+				if not docname and session_uuid:
+					try:
+						docname = frappe.db.get_value("Optimus Session", {"session_uuid": session_uuid}, "name")
+					except _job_timeout_types():
+						raise
+					except Exception:
+						docname = None
+				reference_doctype = "Optimus Session" if docname else None
+				reference_name = docname or None
+				row = frappe.log_error(
+					title=title,
+					message=message,
+					reference_doctype=reference_doctype,
+					reference_name=reference_name,
+				)
+				logged = True
+				row_name = getattr(row, "name", None)
+				_mark_logged(exc, row_name)
+				_mark_logged(marks, row_name)
+				_requeue_if_rolled_back(
+					{
+						"error": message, "method": title,
+						"reference_doctype": reference_doctype, "reference_name": reference_name,
+					},
+					row,
+				)
+	except Exception as e:
+		failure_type = type(e).__name__
+	# The breadcrumb comes first: a write that failed while a timeout was
+	# passed in still leaves its line before the timeout is raised again.
+	if failure_type is not None:
+		_note_unwritten_row(failure_type)
+	if guard.pending():
+		interrupt = guard.interrupt()
+		# The fresh timeout stands for the passed-in one: when that one's row
+		# was written, mark it too, so run()'s outer handler does not log the
+		# same timeout a second time. It carries no traceback or chain.
+		if exc is not None and getattr(exc, _LOGGED_ATTR, False) and type(interrupt) is type(exc):
+			_mark_logged(interrupt, getattr(exc, _LOGGED_ROW_ATTR, None))
+		raise interrupt
+	return logged
+
+
+def _append_context(exc: BaseException, title: str, session_uuid: str | None, context: dict, auth=None) -> None:
+	"""Append a later caller's ``title``, session and ``k=v`` lines, scrubbed
+	like the message (``_scrubbed_message``), to the Error Log row ``exc``
+	was logged in (its ``_LOGGED_ROW_ATTR``): a blank line, then those lines,
+	after the row's ``error``, with ``frappe.db.set_value`` (no second row,
+	``modified`` kept). Nothing when ``exc`` carries no row name or the row is
+	gone. A failure leaves one line with its error type in the ``optimus`` log
+	and is never raised; an RQ job timeout leaves as a fresh instance. Runs
+	outside any ``except`` block."""
+	name = getattr(exc, _LOGGED_ROW_ATTR, None)
+	if not isinstance(name, str) or not name:
+		return
+	lines = [title]
+	try:
 		if session_uuid:
 			lines.append(f"session_uuid={session_uuid}")
 		for k in sorted(context):
 			lines.append(f"{k}={context[k]}")
-		if exc is not None:
-			lines.append(_exception_text(exc))
-		message = _scrubbed_message(title, lines, exc)
-		# Sentry (attach_stacktrace) serialises this frame's locals with the
-		# event: only the scrubbed message may be bound while logging.
+		addition = _scrubbed_message(title, lines, exc, auth)
+	finally:
+		# only the scrubbed lines may be bound (see log_ai_failure)
 		del lines
+	failure_type = None
+	guard = _InterruptGuard()
+	try:
+		with guard:
+			import frappe
 
-		if not docname and session_uuid:
-			try:
-				docname = frappe.db.get_value("Optimus Session", {"session_uuid": session_uuid}, "name")
-			except _job_timeout_types():
-				raise
-			except Exception:
-				docname = None
-		reference_doctype = "Optimus Session" if docname else None
-		reference_name = docname or None
-		row = frappe.log_error(
-			title=title,
-			message=message,
-			reference_doctype=reference_doctype,
-			reference_name=reference_name,
-		)
-		logged = True
-		_mark_logged(exc)
-		_requeue_if_rolled_back(
-			{
-				"error": message, "method": title,
-				"reference_doctype": reference_doctype, "reference_name": reference_name,
-			},
-			row,
-		)
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+			existing = frappe.db.get_value("Error Log", name, "error")
+			if existing is not None:
+				frappe.db.set_value("Error Log", name, "error", f"{existing}\n\n{addition}", update_modified=False)
 	except Exception as e:
 		failure_type = type(e).__name__
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 	if failure_type is not None:
-		_note_unwritten_row(failure_type)
-	return logged
+		_note_line(f"optimus ai_fix: the caller's context could not be added to an AI Error Log row: {failure_type}")
 
 
 def _exception_text(exc: BaseException) -> str:
@@ -1100,26 +1205,38 @@ def _exception_text(exc: BaseException) -> str:
 	return "".join(traceback.format_exception(type(shown), shown, exc.__traceback__, chain=False)).rstrip()
 
 
-def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None) -> str:
+def _scrubbed_message(title: str, lines: list[str], exc: BaseException | None, auth=None) -> str:
 	"""``lines`` joined and passed through ``redaction.scrub_secrets`` with
-	the live key as a literal, raw and JSON-escaped. If scrubbing fails, the
+	the key as a literal, raw, JSON-escaped and repr-escaped (``_scrub_literals_for(auth)``:
+	the in-flight key when ``auth`` is the ``_ApiKeyAuth`` the request used,
+	else the stored key). If scrubbing fails, the
 	message keeps only the title and the error type, never the unscrubbed
 	text. An RQ job timeout leaves as a fresh instance (no scrubber frame, no
-	chain)."""
+	chain). An interrupt that is not an ``Exception`` (``SystemExit`` from a
+	gunicorn worker timeout) gets the reply readers' guard
+	(``_InterruptGuard(base=True)``): the same instance leaves with its
+	traceback, context and cause cleared, so the scrubber's frame (the joined
+	text, the literals) never travels with it. ``lines`` and the literals
+	(``api_key``) are unbound on every path, so this frame, which does
+	travel with what it raises, holds neither."""
 	failed = ""
-	interrupt = None
+	api_key = None
+	guard = _InterruptGuard(base=True)
 	try:
-		from optimus.redaction import scrub_secrets
+		with guard:
+			from optimus.redaction import scrub_secrets
 
-		api_key = _current_key_or_empty()
-		return scrub_secrets("\n".join(lines), literals=_key_literals(api_key))
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+			api_key = _scrub_literals_for(auth)
+			return scrub_secrets("\n".join(lines), literals=api_key)
 	except Exception as e:
 		failed = type(e).__name__
-	if interrupt is not None:
-		lines = None  # never ride on the timeout's traceback unscrubbed
-		raise interrupt[0](*interrupt[1])
+	finally:
+		# Never ride unscrubbed on an interrupt: a timeout or a non-Exception
+		# interrupt is raised below, with this frame.
+		lines = None
+		api_key = None
+	if guard.pending():
+		raise guard.interrupt()
 	kind = type(exc).__name__ if exc is not None else "none"
 	return f"{title}\n(details withheld: scrubbing the message failed with {failed}; error type {kind})"
 
@@ -1154,48 +1271,46 @@ def _requeue_if_rolled_back(record: dict, row=None) -> None:
 	the error type in the ``optimus`` log (``_note_unwritten_row``), recorded
 	in the handler and logged after the ``try``: on Postgres the row may be
 	lost otherwise without a trace."""
-	interrupt = None
+	guard = _InterruptGuard()
 	failure_type = None
 	try:
-		import frappe
+		with guard:
+			import frappe
 
-		name = getattr(row, "name", None)
-		if not isinstance(name, str) or not name:
-			return  # nothing was inserted (no database, or queued in read-only mode)
-		if getattr(frappe.flags, "read_only", False):
-			return
-		for field in ("trace_id", "metadata"):
-			value = getattr(row, field, None)
-			if isinstance(value, str) and value:
-				record[field] = value
+			name = getattr(row, "name", None)
+			if not isinstance(name, str) or not name:
+				return  # nothing was inserted (no database, or queued in read-only mode)
+			if getattr(frappe.flags, "read_only", False):
+				return
+			for field in ("trace_id", "metadata"):
+				value = getattr(row, field, None)
+				if isinstance(value, str) and value:
+					record[field] = value
 
-		def _requeue() -> None:
-			requeue_interrupt = None
-			requeue_failure = None
-			try:
-				import frappe
+			def _requeue() -> None:
+				requeue_guard = _InterruptGuard()
+				requeue_failure = None
+				try:
+					with requeue_guard:
+						import frappe
 
-				if frappe.db.exists("Error Log", name):
-					return  # MyISAM: the ROLLBACK left the row in place
-				from frappe.deferred_insert import deferred_insert
+						if frappe.db.exists("Error Log", name):
+							return  # MyISAM: the ROLLBACK left the row in place
+						from frappe.deferred_insert import deferred_insert
 
-				deferred_insert("Error Log", [dict(record)])
-			except _job_timeout_types() as e:
-				requeue_interrupt = (type(e), e.args)
-			except Exception as e:
-				requeue_failure = type(e).__name__
-			if requeue_interrupt is not None:
-				raise requeue_interrupt[0](*requeue_interrupt[1])
-			if requeue_failure is not None:
-				_note_unwritten_row(requeue_failure)
+						deferred_insert("Error Log", [dict(record)])
+				except Exception as e:
+					requeue_failure = type(e).__name__
+				if requeue_guard.pending():
+					raise requeue_guard.interrupt()
+				if requeue_failure is not None:
+					_note_unwritten_row(requeue_failure)
 
-		frappe.db.after_rollback.add(_requeue)
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+			frappe.db.after_rollback.add(_requeue)
 	except Exception as e:
 		failure_type = type(e).__name__
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 	if failure_type is not None:
 		_note_unwritten_row(failure_type)
 
@@ -1218,40 +1333,48 @@ def _note_unwritten_row(error_type: str) -> None:
 	DEV_SERVER is set (``bench start``; ``frappe/utils/logger.py``), so a
 	warning would never reach the log on a production site. Never raises,
 	except an RQ job timeout."""
-	interrupt = None
-	try:
-		import frappe
+	_note_line(
+		"optimus ai_fix: an AI Error Log row may not have been written or re-queued, "
+		f"or a hook after the insert failed: {error_type}"
+	)
 
-		frappe.logger("optimus").error(
-			"optimus ai_fix: an AI Error Log row may not have been written or re-queued, "
-			f"or a hook after the insert failed: {error_type}"
-		)
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+
+def _note_line(line: str) -> None:
+	"""``line`` (fixed text and an error type, never row text) in the
+	``optimus`` log at ERROR. Never raises, except an RQ job timeout."""
+	guard = _InterruptGuard()
+	try:
+		with guard:
+			import frappe
+
+			frappe.logger("optimus").error(line)
 	except Exception:
 		pass
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 
 
-def _mark_logged(exc: BaseException | None) -> None:
-	"""Flag ``exc`` so a later ``log_ai_failure(..., exc)`` is a no-op."""
+def _mark_logged(exc: BaseException | None, row_name: str | None = None) -> None:
+	"""Flag ``exc`` so a later ``log_ai_failure(..., exc)`` writes no second
+	row, and keep the name of the row it was logged in (``row_name``), so
+	that call appends its context there (``_append_context``)."""
 	if exc is None:
 		return
-	interrupt = None
+	guard = _InterruptGuard()
 	try:
-		setattr(exc, _LOGGED_ATTR, True)
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+		with guard:
+			setattr(exc, _LOGGED_ATTR, True)
+			if isinstance(row_name, str) and row_name:
+				setattr(exc, _LOGGED_ROW_ATTR, row_name)
 	except Exception:
 		pass
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 
 
 def _log_http_error(
 	provider: str, where: str, status: int | None, detail: str = "",
-	*, exc: BaseException | None = None, provider_error: str = "",
+	*, exc: BaseException | None = None, provider_error: str = "", auth=None,
 ) -> None:
 	"""Log one HTTP-layer failure through ``log_ai_failure``: provider, call
 	site, HTTP status, the provider's own error identifier when it sent one
@@ -1264,24 +1387,24 @@ def _log_http_error(
 	``_record_session_spend`` reads. ``exc`` (the ``AiFixError`` about to be
 	raised) is then marked logged, but only if the row was written, so the
 	caller's own ``log_ai_failure`` for it writes no second row and a failed
-	write still leaves the caller's."""
+	write still leaves the caller's. ``auth`` (the ``_ApiKeyAuth`` the request
+	was sent with) is what the row is scrubbed of, so logging it reads no key
+	from the database."""
 	session_uuid = None
-	interrupt = None
+	guard = _InterruptGuard()
 	try:
-		import frappe
+		with guard:
+			import frappe
 
-		session_uuid = getattr(frappe.local, "_optimus_spend_session", None)
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+			session_uuid = getattr(frappe.local, "_optimus_spend_session", None)
 	except Exception:
 		session_uuid = None
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 	context = {"provider": provider, "where": where, "status": status, "detail": detail}
 	if provider_error:
 		context["provider_error"] = provider_error
-	if log_ai_failure("optimus ai_fix", session_uuid=session_uuid, **context):
-		_mark_logged(exc)
+	log_ai_failure("optimus ai_fix", session_uuid=session_uuid, auth=auth, marks=exc, **context)
 
 
 def _job_timeout_types() -> tuple[type[BaseException], ...]:
@@ -1294,6 +1417,97 @@ def _job_timeout_types() -> tuple[type[BaseException], ...]:
 	return (BaseTimeoutException,)
 
 
+class _InterruptGuard:
+	"""The one record-then-raise-after-the-``try`` idiom of this module::
+
+		guard = _InterruptGuard()          # base=True: also non-Exception ones
+		try:
+			with guard:
+				...                          # the guarded work
+		except Exception:
+			...                          # the site's own handling
+		if guard.pending():
+			raise guard.interrupt()
+
+	Leaving the ``with`` block, the guard swallows and records:
+
+	- an RQ job timeout (``_job_timeout_types``): only its type and args;
+	  it is raised again as a FRESH instance of that type, with no chain and
+	  none of the frames it interrupted (the job must still stop, and those
+	  frames can hold the key or unscrubbed text);
+	- with ``base=True``, an interrupt that is not an ``Exception``
+	  (``SystemExit`` from a gunicorn worker timeout, ``KeyboardInterrupt``,
+	  a gevent ``Timeout``): it is raised again as the SAME instance (gevent
+	  matches its timeout by identity) with its traceback, ``__context__`` and
+	  ``__cause__`` cleared, so Sentry's WSGI middleware never ships the
+	  interrupted frames' locals.
+
+	Anything else goes through to the site's own ``except``. The site raises
+	``interrupt()`` itself, after the ``try``, where no exception is being handled, so it chains
+	nothing (unless the site itself was called while one was being handled).
+	Clear any local holding unscrubbed text before calling it: the site's own
+	frame travels with what it raises. ``note(exc)`` records a timeout that was
+	passed in rather than raised (``log_ai_failure``). The guard never holds a
+	traceback. ``error_log_mask`` keeps its own copy: it must work where this
+	module cannot be imported."""
+
+	__slots__ = ("_base", "_timeout", "_escaping")
+
+	def __init__(self, *, base: bool = False):
+		self._base = base
+		self._timeout: tuple[type[BaseException], tuple] | None = None
+		self._escaping: BaseException | None = None
+
+	def __enter__(self) -> _InterruptGuard:
+		return self
+
+	def __exit__(self, exc_type, exc, tb) -> bool:
+		if exc is None:
+			return False
+		if self._record_timeout(exc):
+			return True
+		if self._base and not isinstance(exc, Exception):
+			self._escaping = exc
+			return True
+		return False
+
+	def _record_timeout(self, exc) -> bool:
+		timeout_types = _job_timeout_types()
+		if timeout_types and isinstance(exc, timeout_types):
+			self._timeout = (type(exc), exc.args)
+			return True
+		return False
+
+	def note(self, exc: BaseException | None) -> None:
+		"""Record ``exc`` when it is an RQ job timeout, so it is raised again,
+		fresh. Never raises."""
+		try:
+			if exc is not None:
+				self._record_timeout(exc)
+		except Exception:
+			pass
+
+	def pending(self) -> bool:
+		"""True when the guard recorded an interrupt to raise again."""
+		return self._timeout is not None or self._escaping is not None
+
+	def interrupt(self) -> BaseException | None:
+		"""What the guard recorded, ready to raise (see the class), or None;
+		the guard forgets it. The site raises it itself, so no frame of the
+		guard travels with it."""
+		escaping, self._escaping = self._escaping, None
+		if escaping is not None:
+			escaping.__traceback__ = None
+			escaping.__context__ = None
+			escaping.__cause__ = None
+			escaping.__suppress_context__ = True
+			return escaping
+		timeout, self._timeout = self._timeout, None
+		if timeout is not None:
+			return timeout[0](*timeout[1])
+		return None
+
+
 def _response_detail(resp, auth=None) -> str:
 	"""The provider's own error body (capped), as a ': ...' suffix or '' when
 	there is no readable body. Surfaces the specific reason ("model not found",
@@ -1303,34 +1517,34 @@ def _response_detail(resp, auth=None) -> str:
 	reaches toasts, API responses and the title of Frappe's own error
 	snapshot, so the body is scrubbed BEFORE it is cut to 300 characters
 	(cutting first can split the key, and a partial key no longer matches the
-	literal). The literals are the key stored in Optimus Settings and the key
-	the request was sent with (``auth``, the ``_ApiKeyAuth`` it used: Settings
-	may hold a new key by now), each raw and JSON-escaped. Any failure returns
+	literal). The literals are the key the request was sent with (``auth``,
+	the ``_ApiKeyAuth`` it used), or the key stored in Optimus Settings when
+	it carried none (``_scrub_literals_for``), raw, JSON-escaped and repr-escaped. Any failure returns
 	''; an RQ job timeout leaves as a fresh instance, with the raw body
 	unbound.
 
-	The literals are read BEFORE the body is bound. Reading the stored key is
-	a database query, where an interrupt that is not an ``Exception``
-	(``SystemExit`` from a gunicorn worker timeout) can land; nothing here
-	catches one, so it leaves with this frame, and at that point no local
-	holds the body. Once the body is bound only CPU work runs until this
-	returns."""
+	The literals are read BEFORE the body is bound: reading the stored key is
+	a database query (only when no key was sent). An interrupt that is not an ``Exception`` (``SystemExit``
+	from a gunicorn worker timeout) gets ``_http_post``'s guard
+	(``_InterruptGuard(base=True)``): the body is unbound, then the same
+	instance leaves with its traceback, context and cause cleared, so neither
+	the scrubber's frames nor this one carry the body."""
 	body_text = ""
-	interrupt = None
+	guard = _InterruptGuard(base=True)
 	try:
-		from optimus.redaction import scrub_secrets
+		with guard:
+			from optimus.redaction import SCRUB_TEXT_CAP, scrub_secrets
 
-		api_key = _scrub_literals_for(auth)
-		body_text = (resp.text or "").strip()
-		if not body_text:
-			return ""
-		return ": " + scrub_secrets(body_text[:65536], literals=api_key)[:300]
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+			api_key = _scrub_literals_for(auth)
+			body_text = (resp.text or "").strip()
+			if not body_text:
+				return ""
+			return ": " + scrub_secrets(body_text[:SCRUB_TEXT_CAP], literals=api_key)[:300]
 	except Exception:
 		return ""
-	body_text = ""  # the raw body may echo the key: never on the timeout's traceback
-	raise interrupt[0](*interrupt[1])
+	body_text = ""  # the raw body may echo the key: never on the interrupt's traceback
+	if guard.pending():
+		raise guard.interrupt()
 
 
 # What a 404 message names instead of the request URL when the URL cannot be
@@ -1339,26 +1553,29 @@ _UNSHOWN_URL = "(the configured Base URL)"
 
 
 def _shown_url(url: str, auth=None) -> str:
-	"""``url`` as a 404 message names it: scrubbed of the key stored in
-	Optimus Settings and of the key the request was sent with (``auth``),
-	raw and JSON-escaped, and of credentials in it (a custom Base URL typed
+	"""``url`` as a 404 message names it: scrubbed of the key the request was
+	sent with (``auth``), or the stored key when it carried none
+	(``_scrub_literals_for``), raw, JSON-escaped and repr-escaped, and of credentials in it (a custom Base URL typed
 	as ``user:password@host``). A ``url`` that is not a str, or is empty, is
 	returned as it is: there is nothing to scrub. Any failure returns
 	``_UNSHOWN_URL``, never the unscrubbed URL; an RQ job timeout leaves as
 	a fresh instance, raised after the ``try``, so the frames it interrupted
 	(``json.dumps`` holds the key under the names ``obj`` and ``o`` while
-	the literals are built) never travel with it."""
-	interrupt = None
+	the literals are built) never travel with it. An interrupt that is not an
+	``Exception`` leaves as the same instance with its traceback, context and
+	cause cleared, and ``url`` unbound (``_InterruptGuard(base=True)``)."""
+	guard = _InterruptGuard(base=True)
 	try:
-		from optimus.redaction import scrub_secrets
+		with guard:
+			from optimus.redaction import scrub_secrets
 
-		api_key = _scrub_literals_for(auth)
-		return scrub_secrets(url, literals=api_key)
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+			api_key = _scrub_literals_for(auth)
+			return scrub_secrets(url, literals=api_key)
 	except Exception:
 		return _UNSHOWN_URL
-	raise interrupt[0](*interrupt[1])
+	url = None  # it may hold credentials: never on the interrupt's traceback
+	if guard.pending():
+		raise guard.interrupt()
 
 
 # A provider's machine-readable error code: lowercase-letter words joined by
@@ -1368,7 +1585,8 @@ def _shown_url(url: str, auth=None) -> str:
 # keys (they carry a digit or an upper-case letter), but not every key: one
 # made only of lowercase words matches it. What keeps such a key out is the
 # literal check in _provider_error_code, which drops a value holding the
-# stored or the in-flight key (8 characters or more, raw or JSON-escaped).
+# in-flight key, or the stored key when no key was sent (8 characters or
+# more, raw, JSON-escaped or repr-escaped).
 _PROVIDER_ERROR_RE = re.compile(r"^[a-z]+(?:[_.:-][a-z]+)*$")
 _PROVIDER_ERROR_MAX_LEN = 64
 
@@ -1382,45 +1600,46 @@ def _provider_error_code(resp, auth=None) -> str:
 	and compatible servers) or ``type`` (Anthropic). A value is kept only when
 	it is a string of at most 64 characters made of lowercase-letter words
 	joined by ``_ . : -`` (``_PROVIDER_ERROR_RE``: no digits, no upper case)
-	and contains neither the key stored in Optimus Settings nor the key the
-	request was sent with (``auth``, the ``_ApiKeyAuth`` it used), raw or
-	JSON-escaped; both kept values are joined as
+	and does not contain the key the request was sent with (``auth``, the
+	``_ApiKeyAuth`` it used), or the stored key when it carried none, raw,
+	JSON-escaped or repr-escaped; both kept values are joined as
 	``type:code`` when that still fits 64 characters, else the first one is
 	used. Any failure returns ''; an RQ job timeout leaves as a fresh
-	instance, with the parsed body unbound. As in ``_response_detail``, the
-	literals are read BEFORE the body is parsed and bound, so an interrupt
-	during that database read finds no local holding the body."""
-	data = error = value = None
-	interrupt = None
+	instance, with the parsed body unbound, and an interrupt that is not an
+	``Exception`` as the same instance with its traceback, context and cause
+	cleared and the parsed body unbound (``_InterruptGuard(base=True)``). As
+	in ``_response_detail``, the literals are read BEFORE the body is parsed
+	and bound."""
+	guard = _InterruptGuard(base=True)
 	try:
-		from optimus.redaction import scrub_secrets
+		with guard:
+			from optimus.redaction import scrub_secrets
 
-		api_key = _scrub_literals_for(auth)
-		data = resp.json()
-		error = data.get("error") if isinstance(data, dict) else None
-		if not isinstance(error, dict):
-			return ""
-		parts: list[str] = []
-		for field in ("type", "code"):
-			value = error.get(field)
-			if (
-				isinstance(value, str)
-				and len(value) <= _PROVIDER_ERROR_MAX_LEN
-				and _PROVIDER_ERROR_RE.fullmatch(value)
-				and value not in parts
-				and scrub_secrets(value, literals=api_key) == value
-			):
-				parts.append(value)
-		if not parts:
-			return ""
-		joined = ":".join(parts)
-		return joined if len(joined) <= _PROVIDER_ERROR_MAX_LEN else parts[0]
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+			api_key = _scrub_literals_for(auth)
+			data = resp.json()
+			error = data.get("error") if isinstance(data, dict) else None
+			if not isinstance(error, dict):
+				return ""
+			parts: list[str] = []
+			for field in ("type", "code"):
+				value = error.get(field)
+				if (
+					isinstance(value, str)
+					and len(value) <= _PROVIDER_ERROR_MAX_LEN
+					and _PROVIDER_ERROR_RE.fullmatch(value)
+					and value not in parts
+					and scrub_secrets(value, literals=api_key) == value
+				):
+					parts.append(value)
+			if not parts:
+				return ""
+			joined = ":".join(parts)
+			return joined if len(joined) <= _PROVIDER_ERROR_MAX_LEN else parts[0]
 	except Exception:
 		return ""
-	data = error = value = None  # the body may echo the key: never on the timeout's traceback
-	raise interrupt[0](*interrupt[1])
+	data = error = value = None  # the body may echo the key: never on the interrupt's traceback
+	if guard.pending():
+		raise guard.interrupt()
 
 
 def _http_post(
@@ -1435,13 +1654,21 @@ def _http_post(
 ) -> dict:
 	"""POST JSON, return the parsed response dict. Maps transport / HTTP /
 	decode errors to ``AiFixError`` with operator-friendly messages and logs
-	each failure once (``_log_http_error``). A redirect is never followed
-	(``allow_redirects=False``): ``requests`` drops only a header named
-	``Authorization`` when it follows one to another host, so Anthropic's
-	``x-api-key`` header would be sent on to the redirect target. A 3xx
-	reply is therefore ``kind="bad_response"`` and a 4xx / 5xx reply an HTTP
-	error; both are logged with a body-free log text (``_LOG_TEXT_ATTR``),
-	never their body.
+	each failure once (``_log_http_error``).
+
+	``requests`` never follows a redirect here (``allow_redirects=False``):
+	it drops only a header named ``Authorization`` when it follows one to
+	another host, so Anthropic's ``x-api-key`` header would be sent on to the
+	redirect target. A 307 or 308 whose Location stays on the same host and
+	port, with the same scheme or an http to https upgrade on that host
+	(``_same_origin_redirect``), is followed by hand, at most
+	``_MAX_REDIRECTS`` times: a new POST of the same body to that address,
+	the key attached again by the same ``auth``. Every other 3xx (301, 302
+	and 303 would turn the POST into a GET; another host or port; a
+	downgrade; one redirect too many) is ``kind="bad_response"``. The
+	Location is never logged or shown. A 4xx / 5xx reply is an HTTP error;
+	both are logged with a body-free log text (``_LOG_TEXT_ATTR``), never
+	their body.
 
 	SECURITY: ``auth`` (an ``_ApiKeyAuth``) attaches the key at send time, so
 	``headers`` never holds it. Every failure is logged and raised OUTSIDE the
@@ -1468,29 +1695,25 @@ def _http_post(
 	request is sent from inside an ``except`` block (``test_ai_log_audit.py``
 	rule 4)."""
 	timeout = timeout or _resolve_timeout_seconds()
-	job_timeout_types = _job_timeout_types()
 	failure: AiFixError | None = None
-	unexpected_name: str | None = None
-	unexpected_frames: list[str] = []
-	interrupt_type: type[BaseException] | None = None
-	interrupt_args: tuple = ()
-	escaping: BaseException | None = None
 	detail = ""
 	resp = None
-	try:
-		resp = requests.post(url, headers=headers, json=body, timeout=timeout, auth=auth, allow_redirects=False)
-	except requests.exceptions.Timeout:
-		failure = AiFixError(f"The AI provider didn't respond within {timeout}s.", kind="timeout")
-		detail = "timeout"
-	except requests.exceptions.RequestException as e:
-		failure = AiFixError(f"Couldn't reach the AI provider: {type(e).__name__}.", kind="transport")
-		detail = f"{type(e).__name__}: {e}"
-	except BaseException as e:
-		if isinstance(e, job_timeout_types):
-			interrupt_type, interrupt_args = type(e), e.args
-		elif not isinstance(e, Exception):
-			escaping = e
-		else:
+	target = url
+	redirects = 0
+	while True:
+		unexpected_name: str | None = None
+		unexpected_frames: list[str] = []
+		guard = _InterruptGuard(base=True)
+		try:
+			with guard:
+				resp = requests.post(target, headers=headers, json=body, timeout=timeout, auth=auth, allow_redirects=False)
+		except requests.exceptions.Timeout:
+			failure = AiFixError(f"The AI provider didn't respond within {timeout}s.", kind="timeout")
+			detail = "timeout"
+		except requests.exceptions.RequestException as e:
+			failure = AiFixError(f"Couldn't reach the AI provider: {type(e).__name__}.", kind="transport")
+			detail = f"{type(e).__name__}: {e}"
+		except Exception as e:
 			unexpected_name = type(e).__name__
 			# file:line:function per frame, read straight off the traceback:
 			# no source lookup (no I/O while this handler runs), no locals,
@@ -1499,40 +1722,42 @@ def _http_post(
 				f"{frame.f_code.co_filename}:{lineno}:{frame.f_code.co_name}"
 				for frame, lineno in traceback.walk_tb(e.__traceback__)
 			]
-	if escaping is not None:
-		# Not ours to handle: it leaves unlogged, without the frames below
-		# this one (their locals hold the prepared headers), and unchained
-		# when _http_post is not itself called while an exception is being
-		# handled.
-		escaping.__traceback__ = None
-		escaping.__context__ = None
-		escaping.__cause__ = None
-		escaping.__suppress_context__ = True
-		raise escaping
-	if interrupt_type is not None:
-		# The RQ job hit its timeout while we were sending: it must still stop
-		# the job, so re-raise the same type, but as a fresh instance with no
+		# A non-Exception interrupt is not ours to handle: it leaves unlogged,
+		# as the same instance, without the frames below this one (their locals
+		# hold the prepared headers), and unchained when _http_post is not
+		# itself called while an exception is being handled. An RQ job timeout
+		# must still stop the job: the same type, raised fresh, with no
 		# requests / urllib3 frames and no chain.
-		raise interrupt_type(*interrupt_args)
-	if unexpected_name is not None:
-		from frappe import _
+		if guard.pending():
+			raise guard.interrupt()
+		if unexpected_name is not None:
+			from frappe import _
 
-		failure = AiFixError(_("The AI request failed ({0}).").format(unexpected_name), kind="transport")
-		# Where it happened, never what it said: plain frames, no message, no locals.
-		detail = unexpected_name + "".join(f"\n  {frame}" for frame in unexpected_frames)
-	if failure is not None:
-		_log_http_error(provider, where, None, detail, exc=failure)
-		raise failure
+			failure = AiFixError(_("The AI request failed ({0}).").format(unexpected_name), kind="transport")
+			# Where it happened, never what it said: plain frames, no message, no locals.
+			detail = unexpected_name + "".join(f"\n  {frame}" for frame in unexpected_frames)
+		if failure is not None:
+			_log_http_error(provider, where, None, detail, exc=failure, auth=auth)
+			raise failure
+		if resp.status_code not in (307, 308) or redirects >= _MAX_REDIRECTS:
+			break
+		# 307 / 308 keep the method and the body. The key goes again only to
+		# the same host and port (_same_origin_redirect); anything else is the
+		# bad_response below. The Location is never logged or shown.
+		follow = _same_origin_redirect(target, resp)
+		if follow is None:
+			break
+		target = follow
+		redirects += 1
 
 	status = resp.status_code
 	if 300 <= status < 400:
-		# A redirect is never followed (allow_redirects=False, so the key
-		# header is never sent on to its target): it is not the provider's
-		# reply, whatever its body holds.
+		# Not followed (see the docstring): it is not the provider's reply,
+		# whatever its body holds, and the key never goes to its target.
 		from frappe import _
 
 		failure = AiFixError(
-			_("The AI provider answered with a redirect (HTTP {0}) instead of a reply. Check the Base URL in Optimus Settings: a Base URL that redirects must be set to the address it redirects to (its https:// address, for example).").format(status),
+			_("The AI provider answered with a redirect (HTTP {0}) instead of a reply. Optimus follows only a 307 or 308 redirect to the same host: a Base URL that answers 301, 302 or 303, or redirects to another host, must be set to the final URL it redirects to. Change the Base URL in Optimus Settings to that final URL (its https:// address, for example).").format(status),
 			status_code=status, kind="bad_response",
 		)
 	elif status in (401, 403):
@@ -1573,7 +1798,7 @@ def _http_post(
 		# this text, never the reply its message carries (_exception_text).
 		code = f", provider_error={provider_error}" if provider_error else ""
 		setattr(failure, _LOG_TEXT_ATTR, f"HTTP {status} from the AI provider (where={where}{code})")
-		_log_http_error(provider, where, status, detail, exc=failure, provider_error=provider_error)
+		_log_http_error(provider, where, status, detail, exc=failure, provider_error=provider_error, auth=auth)
 		raise failure
 
 	data = None
@@ -1594,9 +1819,61 @@ def _http_post(
 			status_code=status, kind="bad_response",
 		)
 	if failure is not None:
-		_log_http_error(provider, where, status, detail, exc=failure)
+		_log_http_error(provider, where, status, detail, exc=failure, auth=auth)
 		raise failure
 	return data
+
+
+# How many same-origin 307 / 308 redirects _http_post follows for one request.
+_MAX_REDIRECTS = 3
+# The port a URL scheme means when the URL names none.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _same_origin_redirect(current: str, resp) -> str | None:
+	"""The absolute URL a redirect reply (``resp``) points to, when the key may
+	be sent there: the same host and the same port, with the same scheme, or
+	an upgrade from http to https on that host (port 80 to 443, or the same
+	port), and no credentials of its own in the URL. None otherwise, for a
+	missing or unparsable Location, and on any failure (never raises, except
+	an RQ job timeout, raised fresh, and an interrupt that is not an
+	``Exception``, which leaves as the same instance with its traceback,
+	context and cause cleared: ``_InterruptGuard(base=True)``). Neither the
+	Location nor the result is ever logged or shown: it comes from the reply,
+	not from Optimus Settings. Before an interrupt is raised, the URLs
+	(``current`` can carry the Base URL's ``user:password@``) and the reply are unbound, so
+	this frame, which travels with it, holds no credential."""
+	location = follow = old = new = None
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			location = resp.headers.get("location")
+			if not isinstance(location, str) or not location.strip():
+				return None
+			follow = urljoin(current, location.strip())
+			old, new = urlsplit(current), urlsplit(follow)
+			if not old.hostname or new.hostname != old.hostname:
+				return None
+			if (new.username, new.password) != (old.username, old.password):
+				return None
+			old_port = old.port or _DEFAULT_PORTS.get(old.scheme)
+			new_port = new.port or _DEFAULT_PORTS.get(new.scheme)
+			if old_port is None or new_port is None:
+				return None
+			if new.scheme == old.scheme:
+				same_origin = new_port == old_port
+			else:
+				same_origin = (old.scheme, new.scheme) == ("http", "https") and (
+					new_port == old_port or (old_port, new_port) == (80, 443)
+				)
+			return follow if same_origin else None
+	except Exception:
+		return None
+	# the URLs may carry credentials: never on the interrupt's traceback
+	current = resp = location = follow = old = new = None
+	if guard.pending():
+		raise guard.interrupt()
+	return None
 
 
 # Token counts land in Int columns (Optimus Session.ai_tokens_spent,
@@ -1612,15 +1889,14 @@ def _token_count(value) -> int:
 	Never raises, except an RQ job timeout (re-raised fresh)."""
 	if isinstance(value, bool):
 		return 0
-	interrupt = None
+	guard = _InterruptGuard()
 	try:
-		count = int(value)
-	except _job_timeout_types() as e:
-		interrupt = (type(e), e.args)
+		with guard:
+			count = int(value)
 	except Exception:
 		return 0
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+	if guard.pending():
+		raise guard.interrupt()
 	return count if 0 <= count <= _MAX_TOKEN_COUNT else 0
 
 
@@ -1639,7 +1915,7 @@ def _usage_from_openai(data: dict | None) -> dict:
 	u = _usage_block(data)
 	prompt = _token_count(u.get("prompt_tokens"))
 	completion = _token_count(u.get("completion_tokens"))
-	total = _token_count(u.get("total_tokens")) or _token_count(prompt + completion)
+	total = _token_count(u.get("total_tokens")) or (prompt + completion)
 	return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
 
 
@@ -1649,11 +1925,11 @@ def _usage_from_anthropic(data: dict | None) -> dict:
 	fields → 0 (see ``_token_count``). Never raises, except an RQ job timeout
 	(``_token_count`` lets it through as a fresh instance)."""
 	u = _usage_block(data)
-	prompt = _token_count(sum(_token_count(u.get(k)) for k in (
+	prompt = sum(_token_count(u.get(k)) for k in (
 		"input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
-	)))
+	))
 	completion = _token_count(u.get("output_tokens"))
-	return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": _token_count(prompt + completion)}
+	return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
 
 
 def _record_session_spend(total_tokens) -> None:
@@ -1804,10 +2080,12 @@ def _call_openai_chat(
 			content = msg.get("content")
 			if isinstance(content, str):
 				return content
-			# Some servers return content as a list of parts.
+			# Some servers return content as a list of parts. A part whose
+			# text is None or not a string counts as no text (_text_or_empty),
+			# so one odd part never loses the whole reply.
 			if isinstance(content, list):
 				return "".join(
-					p.get("text", "") for p in content if isinstance(p, dict)
+					_text_or_empty(p.get("text")) for p in content if isinstance(p, dict)
 				)
 	except Exception:
 		pass
@@ -1890,7 +2168,11 @@ def _dispatch_call(
 ) -> str:
 	"""Send one chat completion through the provider's protocol handler. The API
 	key is fetched here into a local named ``api_key`` (never into ``provider``)."""
-	api_key = _get_api_key() if provider.get("has_key") else ""
+	api_key = _get_api_key(provider.get("needs_key", True))
+	if provider.get("needs_key") and not api_key:
+		from frappe import _
+
+		raise AiFixError(_("No API key is configured for this AI provider. Set it under Optimus Settings > AI Fix Suggestions."), kind="config")
 	out = int(max_tokens or _output_tokens(provider))
 	if provider["protocol"] == "anthropic":
 		return _call_anthropic(
@@ -1985,11 +2267,19 @@ def _complete_with_guardrails(
 				# A billed re-ask counts even when its text is unusable.
 				_add_usage(usage, reask_usage)
 			if isinstance(reask_error, _job_timeout_types()):
-				# The RQ job hit its timeout during the re-ask: stop the job with a
-				# fresh instance of the same type (no frames, no chain).
-				raise type(reask_error)(*reask_error.args)
+				guard = _InterruptGuard()
+				guard.note(reask_error)
+				logged = getattr(reask_error, _LOGGED_ATTR, False)
+				row_name = getattr(reask_error, _LOGGED_ROW_ATTR, None)
+				reask_error = None  # no failed request frames in the escaping frame
+				interrupt = guard.interrupt()
+				if logged:
+					_mark_logged(interrupt, row_name)
+				raise interrupt
 			if reask_error is not None:
-				_log_reask("failed", [type(reask_error).__name__])
+				error_type = type(reask_error).__name__
+				reask_error = None
+				_log_reask("failed", [error_type])
 			rewritten = (rewritten or "").strip()
 			if rewritten:
 				rewritten, rewritten_finish = ai_budget.cap_reply(rewritten, reask_meta.get("finish_reason"))
@@ -2022,8 +2312,6 @@ def _require_configured(provider: dict) -> None:
 		raise AiFixError(_("No AI model is configured. Set Model under Optimus Settings > AI Fix Suggestions."), kind="config")
 	if not provider.get("base_url"):
 		raise AiFixError(_("No AI base URL is configured. Set Base URL under Optimus Settings > AI Fix Suggestions."), kind="config")
-	if provider.get("needs_key") and not provider.get("has_key"):
-		raise AiFixError(_("No API key is configured for this AI provider. Set it under Optimus Settings > AI Fix Suggestions."), kind="config")
 
 
 def _index_candidate_prose(detail: dict) -> str:

@@ -273,34 +273,81 @@ def test_no_request_is_sent_inside_an_except_handler_on_the_ai_surface():
 	)
 
 
-def test_run_unbinds_each_ai_error_once_logged():
-	# analyze.run's outer handler logs a later non-AI failure with Frappe's
-	# with-context traceback, which prints run's locals. An AI step's error,
-	# once logged through _log_ai_step_failure, must not stay bound there: a
-	# prompt builder's exception can carry prompt text in its args.
-	run = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "run")
-	logged, offenders = 0, []
-	for node in ast.walk(run):
+def _run_ai_step_errors(fn: ast.AST) -> list[tuple[ast.stmt, list[ast.stmt], int, str | None]]:
+	"""``(statement, its block, its index, error name)`` for every
+	``<result>, <error> = _run_ai_step(...)`` in ``fn`` (``error`` None when
+	the call is not unpacked into two names)."""
+	out = []
+	for node in ast.walk(fn):
 		for field in ("body", "orelse", "finalbody"):
 			block = getattr(node, field, None)
 			if not isinstance(block, list):
 				continue
 			for i, stmt in enumerate(block):
-				call = stmt.value if isinstance(stmt, ast.Expr) else None
-				if not (isinstance(call, ast.Call) and _callee(call) == "_log_ai_step_failure"):
+				value = stmt.value if isinstance(stmt, ast.Assign | ast.Expr) else None
+				if not (isinstance(value, ast.Call) and _callee(value) == "_run_ai_step"):
 					continue
-				logged += 1
-				error = call.args[1].id if len(call.args) > 1 and isinstance(call.args[1], ast.Name) else None
-				nxt = block[i + 1] if i + 1 < len(block) else None
-				unbound = (
-					isinstance(nxt, ast.Assign) and len(nxt.targets) == 1
-					and isinstance(nxt.targets[0], ast.Name) and nxt.targets[0].id == error
-					and isinstance(nxt.value, ast.Constant) and nxt.value.value is None
-				)
-				if not unbound:
-					offenders.append(stmt.lineno)
-	assert logged >= 2, "analyze.run no longer logs its AI steps through _log_ai_step_failure"
-	assert offenders == [], f"set the logged error to None right after _log_ai_step_failure: analyze.py:{offenders}"
+				error = None
+				if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Tuple):
+					elts = stmt.targets[0].elts
+					if len(elts) == 2 and isinstance(elts[1], ast.Name):
+						error = elts[1].id
+				out.append((stmt, block, i, error))
+	return out
+
+
+def test_ai_step_returns_only_a_boolean_failure_flag():
+	# Callers can safely retain the flag when a later non-AI error logs locals.
+	helper = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "_run_ai_step")
+	returns = [n for n in ast.walk(helper) if isinstance(n, ast.Return)]
+	assert len(returns) == 2
+	for node in returns:
+		assert isinstance(node.value, ast.Tuple) and len(node.value.elts) == 2
+		flag = node.value.elts[1]
+		assert isinstance(flag, ast.Constant) and type(flag.value) is bool
+
+
+def test_the_ai_steps_log_through_the_one_helper():
+	# The capture-then-log skeleton lives in analyze._run_ai_step alone: in
+	# analyze.py and api.py nothing else calls log_ai_failure (only
+	# _log_ai_step_failure, which _run_ai_step calls after its try). And the
+	# helper's handler only records the error: its log call is after the try.
+	callers = {}
+	for mod in ("analyze.py", "api.py"):
+		for fn in _functions(_tree(mod)):
+			calls = {_callee(n) for n in _own_nodes(fn) if isinstance(n, ast.Call)}
+			for name in calls & {"log_ai_failure", "_log_ai_step_failure"}:
+				callers.setdefault(name, set()).add(f"{mod}:{fn.name}")
+	assert callers == {
+		"log_ai_failure": {"analyze.py:_log_ai_step_failure"},
+		"_log_ai_step_failure": {"analyze.py:_run_ai_step"},
+	}
+	helper = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "_run_ai_step")
+	tries = [n for n in _own_nodes(helper) if isinstance(n, _TRIES) and n.handlers]
+	assert len(tries) == 1
+	handler_calls = [n for h in tries[0].handlers for n in _own_nodes(h) if isinstance(n, ast.Call)]
+	assert handler_calls == [], "_run_ai_step's handler must only record the error"
+	after = helper.body[helper.body.index(tries[0]) + 1:]
+	assert any(
+		isinstance(n, ast.Call) and _callee(n) == "_log_ai_step_failure" for stmt in after for n in ast.walk(stmt)
+	)
+
+
+def test_the_helper_is_used_where_the_skeleton_was():
+	# Every AI step of these modules that logs its failure goes through
+	# _run_ai_step: no function keeps a "X = None / try / except: X = e /
+	# if X is not None" skeleton around an AI call.
+	uses = {
+		mod: {fn.name for fn in _functions(_tree(mod)) if _run_ai_step_errors(fn)}
+		for mod in ("analyze.py", "api.py")
+	}
+	assert uses == {
+		"analyze.py": {
+			"run", "_enrich_findings_with_ai_suggestions", "_run_ai_backfill",
+			"_enrich_table_breakdown_with_ai_suggestions", "_build_humanized_notes_html",
+		},
+		"api.py": {"_render_session_report", "_rerender_after_ai", "_humanize_steps_core", "_refill_indexes_for_doc"},
+	}
 
 
 def test_scanned_modules_and_wrappers_exist():

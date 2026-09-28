@@ -32,7 +32,7 @@ def test_reask_rq_job_timeout_propagates_fresh(monkeypatch):
 	logged = []
 	monkeypatch.setattr(ai_fix, "_log_reask", lambda *a, **k: logged.append(a))
 	monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: True)
-	with patch("optimus.ai_fix._resolve_provider", return_value=dict(g._PROVIDER)):
+	with patch("optimus.ai_fix._provider_config", return_value=dict(g._PROVIDER)):
 		with pytest.raises(timeouts.JobTimeoutException) as ei:
 			ai_fix.suggest_fix(dict(g._FINDING))
 	assert ei.value.__context__ is None and ei.value.__cause__ is None

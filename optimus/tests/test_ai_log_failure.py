@@ -14,13 +14,14 @@ import sys
 import traceback
 import types
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
-
-pytestmark = pytest.mark.rq
 import requests
 
 from optimus import ai_fix
+
+pytestmark = pytest.mark.rq
 
 KEY = "sk-live-0123456789abcdefXYZ"
 
@@ -53,6 +54,10 @@ class _FakeDB:
 	rows inserted since the last commit (Postgres), or leaves them (False:
 	MariaDB, where Error Log is a MyISAM table)."""
 
+	def get_single_value(self, doctype, fieldname):
+		assert (doctype, fieldname) == ("Optimus Settings", "ai_api_key")
+		return "********"
+
 	def __init__(self, docname="SESS-0001", raise_on_get=False, transactional=True, raise_on_exists=None):
 		self.docname = docname
 		self.raise_on_get = raise_on_get
@@ -63,18 +68,32 @@ class _FakeDB:
 		self.error_logs = set()
 		self.uncommitted = []
 		self.inserted = 0
+		# the inserted rows' text, and the set_value calls on them
+		self.rows = {}
+		self.set_values = []
+		self.raise_on_set = None
 
 	def get_value(self, doctype, filters, field):
+		if doctype == "Error Log":
+			return (self.rows.get(filters) or {}).get(field)
 		self.lookups += 1
 		if self.raise_on_get:
 			raise RuntimeError("db down")
 		return self.docname
 
-	def insert_error_log(self):
+	def set_value(self, doctype, name, field, value, update_modified=True):
+		self.set_values.append((doctype, name, field, update_modified))
+		if self.raise_on_set is not None:
+			raise self.raise_on_set
+		self.rows.setdefault(name, {})[field] = value
+
+	def insert_error_log(self, record=None):
 		self.inserted += 1
 		name = f"ERR-{self.inserted:04d}"
 		self.error_logs.add(name)
 		self.uncommitted.append(name)
+		if record is not None:
+			self.rows[name] = {"error": record.get("message"), "method": record.get("title")}
 		return name
 
 	def exists(self, doctype, name=None, *a, **k):
@@ -101,13 +120,15 @@ class _Flags(dict):
 	__getattr__ = dict.get
 
 
-def _inserted_row():
+def _inserted_row(record=None):
 	"""What ``frappe.log_error`` returns after a direct insert: the Error Log
 	document, named (the row goes into the current fake DB)."""
 	import frappe
 
 	insert = getattr(frappe.db, "insert_error_log", None)
-	return SimpleNamespace(name=insert()) if insert else None
+	if not insert:
+		return None
+	return SimpleNamespace(name=insert(record) if record is not None else insert())
 
 
 @pytest.fixture
@@ -116,7 +137,7 @@ def logs(monkeypatch):
 	import frappe
 
 	calls = []
-	monkeypatch.setattr(frappe, "log_error", lambda **kw: calls.append(kw) or _inserted_row(), raising=False)
+	monkeypatch.setattr(frappe, "log_error", lambda **kw: calls.append(kw) or _inserted_row(kw), raising=False)
 	monkeypatch.setattr(frappe, "db", _FakeDB(), raising=False)
 	monkeypatch.setattr(frappe, "flags", _Flags(), raising=False)
 	monkeypatch.setattr(
@@ -1028,9 +1049,10 @@ class TestHttpFailurePath:
 		assert ei.value.kind == "bad_response" and ei.value.status_code == status
 		assert ei.value.__context__ is None
 		assert str(ei.value) == (
-			f"The AI provider answered with a redirect (HTTP {status}) instead of a reply. Check the Base URL in "
-			"Optimus Settings: a Base URL that redirects must be set to the address it redirects to (its https:// "
-			"address, for example)."
+			f"The AI provider answered with a redirect (HTTP {status}) instead of a reply. Optimus follows only a "
+			"307 or 308 redirect to the same host: a Base URL that answers 301, 302 or 303, or redirects to another "
+			"host, must be set to the final URL it redirects to. Change the Base URL in Optimus Settings to that "
+			"final URL (its https:// address, for example)."
 		)
 		assert len(logs) == 1
 		row = logs[0]["message"]
@@ -1170,8 +1192,9 @@ class TestARedirectIsNeverFollowed:
 	"""``requests`` drops only a header named ``Authorization`` when it
 	follows a redirect to another host, so Anthropic's ``x-api-key`` would be
 	sent on to the redirect target. ``_http_post`` sends with
-	``allow_redirects=False``: a 3xx is the provider's answer, and a
-	``bad_response``."""
+	``allow_redirects=False``: a 302 to another host is the provider's
+	answer, and a ``bad_response`` (see also
+	``TestOnlyASameOriginRedirectIsFollowed``)."""
 
 	@pytest.mark.parametrize(
 		("call", "header", "value"),
@@ -1194,6 +1217,175 @@ class TestARedirectIsNeverFollowed:
 		assert url.startswith(_RedirectingAdapter.PROVIDER) and headers[header] == value  # the key was sent there
 		assert not [u for u, _h in sent if u.startswith("https://collector.example.net")]
 		assert len(logs) == 1 and KEY not in logs[0]["message"]
+
+
+class _ScriptedAdapter(requests.adapters.BaseAdapter):
+	"""A fake transport under a REAL ``requests`` Session: each request gets
+	the next scripted reply, ``(status, location)`` for a redirect or
+	``(200, None)`` for the provider's reply. ``sent`` records every request
+	that reached the transport, as (method, url, headers, body)."""
+
+	def __init__(self, sent: list, script: list):
+		super().__init__()
+		self.sent, self.script = sent, script
+
+	def send(self, request, **kwargs):
+		self.sent.append((request.method, request.url, request.headers.copy(), request.body))
+		status, location = self.script.pop(0)
+		resp = requests.Response()
+		resp.request, resp.url, resp.raw, resp.encoding = request, request.url, io.BytesIO(b""), "utf-8"
+		resp.status_code = status
+		if location is not None:
+			resp.headers["Location"] = location
+			resp._content = b""
+		else:
+			resp._content = json.dumps({
+				"content": [{"type": "text", "text": "ok"}],
+				"choices": [{"message": {"content": "ok"}}],
+			}).encode()
+		return resp
+
+	def close(self):
+		pass
+
+
+_CALLS = [
+	(ai_fix._call_anthropic, "https://api.provider.invalid", "/v1/messages", "x-api-key", KEY),
+	(ai_fix._call_openai_chat, "https://api.provider.invalid/v1", "/chat/completions", "Authorization", f"Bearer {KEY}"),
+]
+
+
+class TestOnlyASameOriginRedirectIsFollowed:
+	"""A 307 or 308 to the same host and port (the same scheme, or http to
+	https on that host) is followed with the same method and body, and the
+	key is attached again by the same ``_ApiKeyAuth``: at most 3 times. Any
+	other 3xx (301 / 302 / 303, which would turn the POST into a GET; another
+	host or port; a downgrade to http; a 4th redirect) is a ``bad_response``,
+	and the key never reaches another host. The Location is never logged or
+	shown."""
+
+	def _run(self, monkeypatch, call, base, script):
+		sent = []
+		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
+		text = call(base, KEY, "m", "system", [{"role": "user", "content": "hi"}])
+		return text, sent
+
+	@pytest.mark.parametrize(("call", "base", "path", "header", "value"), _CALLS, ids=["anthropic", "openai"])
+	@pytest.mark.parametrize("status", [307, 308])
+	@pytest.mark.parametrize(
+		"location",
+		["/v2/moved", "https://api.provider.invalid/v2/moved", "https://API.provider.invalid:443/v2/moved"],
+		ids=["relative", "absolute", "explicit-default-port"],
+	)
+	def test_a_same_origin_307_or_308_is_followed_with_the_body_and_the_key(
+		self, logs, monkeypatch, call, base, path, header, value, status, location,
+	):
+		text, sent = self._run(monkeypatch, call, base, [(status, location), (200, None)])
+		assert text == "ok"
+		assert len(sent) == 2
+		(m1, u1, h1, b1), (m2, u2, h2, b2) = sent
+		assert (m1, m2) == ("POST", "POST") and b1 == b2 and b1
+		assert u1 == base + path
+		assert urlsplit(u2).hostname == "api.provider.invalid" and urlsplit(u2).path == "/v2/moved"
+		assert h1[header] == value and h2[header] == value
+		assert logs == []
+
+	@pytest.mark.parametrize(("call", "base", "path", "header", "value"), _CALLS, ids=["anthropic", "openai"])
+	def test_an_http_to_https_upgrade_on_the_same_host_is_followed(
+		self, logs, monkeypatch, call, base, path, header, value,
+	):
+		plain = base.replace("https://", "http://")
+		text, sent = self._run(monkeypatch, call, plain, [(308, base + path), (200, None)])
+		assert text == "ok" and [u for _m, u, _h, _b in sent] == [plain + path, base + path]
+		assert sent[1][2][header] == value
+
+	@pytest.mark.parametrize(("call", "base", "path", "header", "value"), _CALLS, ids=["anthropic", "openai"])
+	@pytest.mark.parametrize(
+		("status", "location"),
+		[
+			(302, "https://collector.example.net/v1/messages"),
+			(307, "https://collector.example.net/v1/messages"),
+			(308, "https://api.provider.invalid.collector.example.net/v1"),
+			(307, "https://api.provider.invalid:8443/v1/messages"),
+			(307, "http://api.provider.invalid/v1/messages"),
+			(307, "//collector.example.net/v1/messages"),
+			(307, "https://user:pw@api.provider.invalid/v1/messages"),
+			(301, "/v2/moved"),
+			(302, "/v2/moved"),
+			(303, "/v2/moved"),
+			(307, None),
+		],
+		ids=[
+			"302-other-host", "307-other-host", "308-suffix-host", "307-other-port", "307-downgrade",
+			"307-scheme-relative-other-host", "307-new-credentials", "301-same-host", "302-same-host",
+			"303-same-host", "307-no-location",
+		],
+	)
+	def test_any_other_redirect_is_a_bad_response_and_the_key_stays_home(
+		self, logs, monkeypatch, call, base, path, header, value, status, location,
+	):
+		sent = []
+		script = [(status, location), (200, None)]
+		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			call(base, KEY, "m", "system", [{"role": "user", "content": "hi"}])
+		assert ei.value.kind == "bad_response" and ei.value.status_code == status
+		assert "a Base URL that answers 301, 302 or 303, or redirects to another host, must be set to the final URL" in str(ei.value)
+		assert len(sent) == 1 and sent[0][1] == base + path  # not followed
+		assert len(logs) == 1 and KEY not in logs[0]["message"]
+		if location:
+			assert location not in str(ei.value) and location not in logs[0]["message"]
+			assert "collector" not in logs[0]["message"] and "/v2/moved" not in logs[0]["message"]
+
+	@pytest.mark.parametrize(
+		("base", "location", "followed"),
+		[
+			("https://api.provider.invalid:8443", "http://api.provider.invalid:8443/v1/messages", False),
+			("http://api.provider.invalid:8443", "https://api.provider.invalid:8443/v1/messages", True),
+			("http://api.provider.invalid:8080", "https://api.provider.invalid/v1/messages", False),
+		],
+		ids=["downgrade-same-port", "upgrade-same-port", "upgrade-other-port"],
+	)
+	def test_a_scheme_change_on_a_named_port(self, logs, monkeypatch, base, location, followed):
+		sent = []
+		script = [(307, location), (200, None)]
+		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
+		if followed:
+			assert ai_fix._call_anthropic(base, KEY, "m", "s", [{"role": "user", "content": "hi"}]) == "ok"
+			assert [u for _m, u, _h, _b in sent] == [base + "/v1/messages", location]
+			assert sent[1][2]["x-api-key"] == KEY
+		else:
+			with pytest.raises(ai_fix.AiFixError) as ei:
+				ai_fix._call_anthropic(base, KEY, "m", "s", [{"role": "user", "content": "hi"}])
+			assert ei.value.kind == "bad_response" and len(sent) == 1
+
+	@pytest.mark.parametrize(("call", "base", "path", "header", "value"), _CALLS, ids=["anthropic", "openai"])
+	def test_at_most_three_redirects_are_followed(self, logs, monkeypatch, call, base, path, header, value):
+		sent = []
+		script = [(307, f"/hop{i}") for i in range(1, 5)] + [(200, None)]
+		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			call(base, KEY, "m", "system", [{"role": "user", "content": "hi"}])
+		assert ei.value.kind == "bad_response" and ei.value.status_code == 307
+		assert [u.rsplit("/", 1)[-1] for _m, u, _h, _b in sent][1:] == ["hop1", "hop2", "hop3"]
+		assert len(logs) == 1 and "hop" not in logs[0]["message"]
+
+	def test_a_job_timeout_while_reading_the_location_still_stops_the_job(self, logs, job_timeout, monkeypatch):
+		sent = []
+		script = [(307, "/v2/moved"), (200, None)]
+		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
+		monkeypatch.setattr(ai_fix, "urljoin", _raising(job_timeout, holds=KEY))
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix._call_anthropic(_CALLS[0][1], KEY, "m", "s", [{"role": "user", "content": "hi"}])
+		assert ei.value is not job_timeout and ei.value.__context__ is None
+		assert len(sent) == 1 and logs == []
+
+	def test_three_redirects_then_the_reply(self, logs, monkeypatch):
+		sent = []
+		script = [(307, "/hop1"), (308, "/hop2"), (307, "/hop3"), (200, None)]
+		monkeypatch.setattr(requests.sessions, "HTTPAdapter", lambda *a, **k: _ScriptedAdapter(sent, script))
+		assert ai_fix._call_anthropic(_CALLS[0][1], KEY, "m", "s", [{"role": "user", "content": "hi"}]) == "ok"
+		assert len(sent) == 4
 
 
 class TestNothingIsLoggedOrSentWhileAnExceptionIsActive:
@@ -1614,9 +1806,10 @@ class TestAnInterruptWhileReadingTheKeyForAReply:
 	"""``_response_detail`` and ``_provider_error_code`` read the stored key
 	(a database read, where a gunicorn worker timeout's ``SystemExit`` can
 	land) BEFORE they bind the provider's reply, which can echo the key.
-	Nothing there catches an interrupt that is not an ``Exception``, so it
-	leaves with their frames, and Sentry's WSGI middleware ships frame
-	locals: none of them may hold the reply yet."""
+	Sentry's WSGI middleware ships the locals of the frames such an interrupt
+	leaves with: none of them may hold the reply. It leaves as the same
+	instance from the reader itself, with the frames below it (the key read)
+	cleared (``_InterruptGuard(base=True)``)."""
 
 	@pytest.mark.parametrize("reader", ["_response_detail", "_provider_error_code"])
 	def test_no_frame_holds_the_echoed_key(self, monkeypatch, reader):
@@ -1630,7 +1823,9 @@ class TestAnInterruptWhileReadingTheKeyForAReply:
 			"error": {"message": f"invalid key {KEY}", "type": "invalid_request_error", "code": KEY},
 		}))
 		with pytest.raises(SystemExit) as ei:
-			getattr(ai_fix, reader)(resp, ai_fix._ApiKeyAuth("authorization", KEY, prefix="Bearer "))
+			# No auth: a request that carried no key, the case where the
+			# stored key is read here (an _ApiKeyAuth needs no read).
+			getattr(ai_fix, reader)(resp, None)
 		assert ei.value is interrupt
 		walked = []
 		tb = ei.value.__traceback__
@@ -1639,7 +1834,7 @@ class TestAnInterruptWhileReadingTheKeyForAReply:
 			for name, value in tb.tb_frame.f_locals.items():
 				assert KEY not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds the echoed key"
 			tb = tb.tb_next
-		assert reader in walked and "_current_key_or_empty" in walked
+		assert reader in walked and "_current_key_or_empty" not in walked
 
 
 # ---------------------------------------------------------------------------
@@ -1733,11 +1928,72 @@ class TestLogAiStepFailure:
 		_assert_fresh_and_clean(ei, job_timeout, raiser)
 
 
+class TestRunAiStep:
+	"""``analyze._run_ai_step``: the one capture-then-log skeleton of the AI
+	steps of analyze.py and api.py."""
+
+	def test_a_step_that_succeeds_returns_its_result_and_logs_nothing(self, logs):
+		from optimus import analyze
+
+		result, failed = analyze._run_ai_step(lambda: {"fix": "x"}, title="t", session_uuid="u")
+		assert result == {"fix": "x"} and failed is False
+		assert logs == []
+
+	def test_key_presence_lookup_propagates_a_fresh_timeout(self, monkeypatch, job_timeout):
+		import frappe
+
+		monkeypatch.setattr(ai_fix, "_provider_config", lambda: {"needs_key": True})
+		reader = _raising(job_timeout)
+		monkeypatch.setattr(frappe, "db", SimpleNamespace(get_single_value=lambda *a: reader()), raising=False)
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix._resolve_provider()
+		_assert_fresh_and_clean(ei, job_timeout, reader)
+
+	def test_a_step_that_fails_is_logged_after_the_try_with_its_context(self, logs, monkeypatch):
+		import frappe
+
+		from optimus import analyze
+
+		active = []
+		real = frappe.log_error
+
+		def _log(**kw):
+			active.append(sys.exc_info()[1])
+			return real(**kw)
+		monkeypatch.setattr(frappe, "log_error", _log, raising=False)
+		error = RuntimeError("step broke")
+		result, got = analyze._run_ai_step(_raising(error), title="optimus ai backfill", session_uuid="u-1", finding="F-1")
+		assert result is None and got is True
+		assert active == [None]  # no exception was being handled when it logged
+		assert len(logs) == 1 and logs[0]["title"] == "optimus ai backfill"
+		assert "finding=F-1" in logs[0]["message"] and "session_uuid=u-1" in logs[0]["message"]
+
+	def test_a_job_timeout_still_stops_the_job(self, logs, job_timeout):
+		from optimus import analyze
+
+		with pytest.raises(_JobTimeout) as ei:
+			analyze._run_ai_step(_raising(job_timeout), title="t", session_uuid="u")
+		assert ei.value is not job_timeout and ei.value.__context__ is None
+		tb = ei.value.__traceback__
+		while tb is not None:
+			if tb.tb_frame.f_code is analyze._run_ai_step.__code__:
+				assert tb.tb_frame.f_locals.get("error") is None
+			tb = tb.tb_next
+		assert len(logs) == 1
+
+	def test_a_non_exception_interrupt_goes_through(self, logs):
+		from optimus import analyze
+
+		with pytest.raises(KeyboardInterrupt):
+			analyze._run_ai_step(_raising(KeyboardInterrupt()), title="t")
+		assert logs == []
+
+
 @pytest.fixture
 def run_env(monkeypatch):
 	"""The smallest set of fakes ``analyze.run`` needs for one pass over one
 	recording with no analyzers. Each stubbed step records ``run``'s
-	``ai_error`` local at the moment it is called, in ``trail`` next to the
+	``step_failed`` local at the moment it is called, in ``trail`` next to the
 	``log_ai_failure`` calls, so a test sees whether the logged error is
 	still bound afterwards. ``status`` holds the session status writes, a
 	rollback and any non-AI ``frappe.log_error``."""
@@ -1751,7 +2007,7 @@ def run_env(monkeypatch):
 		def _fn(*a, **k):
 			caller = sys._getframe(1)
 			if caller.f_code is analyze.run.__code__:
-				trail.append(("call", name, caller.f_locals.get("ai_error")))
+				trail.append(("call", name, caller.f_locals.get("step_failed")))
 		return _fn
 
 	class _DB:
@@ -1820,7 +2076,7 @@ class TestRunLogsAFailedAiStepAndCarriesOn:
 		assert logged == [("log", title, error, {"session_uuid": "uuid-run"})]
 		after = run_env.trail[run_env.trail.index(logged[0]) + 1:]
 		assert after, "run() called nothing after logging the step: the unbinding went unchecked"
-		assert all(entry[2] is None for entry in after), f"the logged AI error was still bound: {after[0]}"
+		assert all(type(entry[2]) is bool for entry in after), "a caller retained more than a boolean failure flag"
 
 
 # ---------------------------------------------------------------------------
@@ -1917,3 +2173,172 @@ class TestApiLogSites:
 		out = api_env.api._humanize_steps_core(api_env.doc, title="t")
 		assert api_env.calls == [("optimus humanize_steps fetch", error, {"session_uuid": "uuid-5"})]
 		assert out["updated"] is False and out["reason"]
+
+
+class TestAPassedInJobTimeoutStopsTheJob:
+	"""A caller's ``except Exception`` catches rq's ``JobTimeoutException``
+	(an ``Exception`` subclass), including the fresh one ``_http_post``
+	re-raises, and hands it to ``log_ai_failure``. The row is written, then
+	the timeout leaves as a fresh instance so the AI loop stops instead of
+	making more provider calls past the job's deadline."""
+
+	def test_it_is_logged_then_raised_fresh(self, logs, job_timeout):
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix.log_ai_failure("optimus ai auto-suggest", job_timeout)
+		assert ei.value is not job_timeout and ei.value.args == (_TIMEOUT_TEXT,)
+		assert ei.value.__context__ is None and ei.value.__cause__ is None
+		assert len(logs) == 1
+
+	def test_an_already_logged_timeout_is_still_raised(self, logs, job_timeout):
+		with pytest.raises(_JobTimeout):
+			ai_fix.log_ai_failure("t", job_timeout)
+		with pytest.raises(_JobTimeout):
+			ai_fix.log_ai_failure("t", job_timeout)
+		assert len(logs) == 1
+
+	def test_a_timeout_stops_an_ai_loop_after_its_first_item(self, logs, job_timeout):
+		calls = []
+
+		def loop():
+			for item in range(5):
+				error = None
+				try:
+					calls.append(item)
+					raise job_timeout
+				except Exception as e:
+					error = e
+				if error is not None:
+					ai_fix.log_ai_failure("optimus ai auto-suggest", error)
+
+		with pytest.raises(_JobTimeout):
+			loop()
+		assert calls == [0]
+
+	def test_other_errors_still_never_raise(self, logs, job_timeout):
+		assert ai_fix.log_ai_failure("t", ai_fix.AiFixError("x")) is True
+
+
+class TestARaisedAgainTimeoutIsLoggedOnce:
+	"""The fresh timeout ``log_ai_failure`` raises again carries the logged
+	mark, so ``run()``'s outer handler, which logs what reaches it through
+	``log_ai_failure``, does not write a second row for the same timeout."""
+
+	def test_the_fresh_instance_is_not_logged_again(self, logs, job_timeout):
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix.log_ai_failure("optimus ai auto-suggest", job_timeout)
+		assert ei.value is not job_timeout
+		with pytest.raises(_JobTimeout):
+			ai_fix.log_ai_failure("optimus ai auto-suggest (outer)", ei.value)
+		assert len(logs) == 1
+
+	def test_a_timeout_that_was_not_written_is_not_marked(self, logs, job_timeout, monkeypatch, breadcrumbs):
+		import frappe
+
+		def fail(*a, **k):
+			raise RuntimeError("db down")
+
+		monkeypatch.setattr(frappe, "log_error", fail, raising=False)
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix.log_ai_failure("t", job_timeout)
+		assert not getattr(ei.value, ai_fix._LOGGED_ATTR, False)
+
+	def test_a_failed_write_still_leaves_its_breadcrumb(self, logs, job_timeout, monkeypatch, breadcrumbs):
+		import frappe
+
+		def fail(*a, **k):
+			raise RuntimeError("db down")
+
+		monkeypatch.setattr(frappe, "log_error", fail, raising=False)
+		with pytest.raises(_JobTimeout):
+			ai_fix.log_ai_failure("t", job_timeout)
+		assert len(breadcrumbs) == 1 and "RuntimeError" in str(breadcrumbs[0])
+
+
+# ---------------------------------------------------------------------------
+# A second log of an already-logged error adds its context to the row
+# ---------------------------------------------------------------------------
+
+
+class TestTheCallersContextJoinsTheRow:
+	"""The HTTP layer logs its own failure (generic lines: provider, where,
+	status, detail); the caller then logs the same error with its own context
+	(the finding, the step). No second row: the caller's title and ``k=v``
+	lines, scrubbed like the message, are appended to the row already
+	written."""
+
+	def _http_failure(self, monkeypatch):
+		def _refused(*a, **k):
+			raise requests.exceptions.ConnectionError("refused")
+		monkeypatch.setattr(requests, "post", _refused)
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			_call()
+		return ei.value
+
+	def test_an_http_failure_then_the_callers_log_is_one_row_with_both(self, logs, monkeypatch, breadcrumbs):
+		import frappe
+
+		exc = self._http_failure(monkeypatch)
+		assert getattr(exc, ai_fix._LOGGED_ROW_ATTR) == "ERR-0001"
+		assert ai_fix.log_ai_failure("optimus ai backfill", exc, session_uuid="uuid-1", finding_type="n_plus_one") is False
+		assert len(logs) == 1
+		row = frappe.db.rows["ERR-0001"]["error"]
+		assert row.startswith(logs[0]["message"])  # the generic lines stay first
+		assert "detail=ConnectionError: refused" in row
+		assert "\n\noptimus ai backfill\nsession_uuid=uuid-1\nfinding_type=n_plus_one" in row
+		assert frappe.db.set_values == [("Error Log", "ERR-0001", "error", False)]
+		assert breadcrumbs == []
+
+	def test_the_appended_lines_are_scrubbed(self, logs, monkeypatch):
+		import frappe
+
+		exc = self._http_failure(monkeypatch)
+		ai_fix.log_ai_failure("optimus ai backfill", exc, note=f"echo Bearer {KEY} and {KEY}")
+		row = frappe.db.rows["ERR-0001"]["error"]
+		assert KEY not in row and "note=echo Bearer ******** and ********" in row
+
+	def test_a_direct_log_then_a_second_one_appends(self, logs):
+		import frappe
+
+		exc = ai_fix.AiFixError("boom")
+		assert ai_fix.log_ai_failure("first", exc, step="one") is True
+		assert ai_fix.log_ai_failure("second", exc, step="two") is False
+		assert len(logs) == 1
+		assert frappe.db.rows["ERR-0001"]["error"].endswith("\n\nsecond\nstep=two")
+
+	def test_a_failing_append_is_swallowed_with_a_breadcrumb(self, logs, monkeypatch, breadcrumbs):
+		import frappe
+
+		exc = self._http_failure(monkeypatch)
+		frappe.db.raise_on_set = RuntimeError(f"lock wait {KEY}")
+		assert ai_fix.log_ai_failure("optimus ai backfill", exc, finding_type="n_plus_one") is False
+		assert len(logs) == 1
+		assert [(m, msg) for m, msg, _active in breadcrumbs] == [
+			("optimus", "optimus ai_fix: the caller's context could not be added to an AI Error Log row: RuntimeError"),
+		]
+		assert all(active is None for _m, _msg, active in breadcrumbs)
+
+	def test_a_row_that_is_gone_is_left_alone(self, logs, monkeypatch, breadcrumbs):
+		import frappe
+
+		exc = self._http_failure(monkeypatch)
+		del frappe.db.rows["ERR-0001"]
+		ai_fix.log_ai_failure("optimus ai backfill", exc, finding_type="n_plus_one")
+		assert frappe.db.set_values == [] and breadcrumbs == []
+
+	def test_a_job_timeout_during_the_append_still_stops_the_job(self, logs, job_timeout, monkeypatch):
+		import frappe
+
+		exc = self._http_failure(monkeypatch)
+		frappe.db.raise_on_set = job_timeout
+		with pytest.raises(_JobTimeout) as ei:
+			ai_fix.log_ai_failure("optimus ai backfill", exc, finding_type="n_plus_one")
+		assert ei.value is not job_timeout and ei.value.__context__ is None
+		assert len(logs) == 1
+
+	def test_an_error_never_written_is_not_appended_to(self, logs, monkeypatch):
+		import frappe
+
+		exc = ai_fix.AiFixError("boom")
+		setattr(exc, ai_fix._LOGGED_ATTR, True)  # marked, but no row name
+		assert ai_fix.log_ai_failure("again", exc, step="two") is False
+		assert frappe.db.set_values == [] and logs == []

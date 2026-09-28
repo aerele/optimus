@@ -2,7 +2,7 @@
 # For license information, please see license.txt
 
 """optimus.maintenance: scrub / purge of the AI Error Log rows written before
-the key-leak fix, and the v0_12 patch that runs the scrub on migrate.
+the key-leak fix, and the v0_12_0 patch that runs the scrub on migrate.
 
 ``maintenance.frappe`` is replaced wholesale by an in-memory fake that
 implements just the ORM calls the module makes (``get_all`` with LIKE / = / >
@@ -26,9 +26,9 @@ from types import SimpleNamespace
 
 import pytest
 
-pytestmark = pytest.mark.rq
-
 from optimus import maintenance
+
+pytestmark = pytest.mark.rq
 
 KEY = "sk-live-0123456789abcdefXYZ"
 LEAKY = (
@@ -488,7 +488,13 @@ class TestScrubErrorLogSecrets:
 			assert json.loads(text)  # still valid JSON
 
 	@pytest.mark.parametrize(
-		"shape", ["sk-proj-AAAABBBBCCCCDDDDEEEE", "gsk_AAAABBBBCCCCDDDDEEEE", "AIzaSyA-0123456789abcdefghijABCDEFGHIJ"],
+		"shape",
+		[
+			"sk-proj-" + "Ab1_" * 12 + "T3BlbkFJ" + "cD2-" * 12,
+			"gsk_" + "Wx7Yz" * 10 + "Q9",
+			"AIzaSyA-0123456789abcdefghijABCDEFGHIJK",
+		],
+		ids=["openai-project", "groq", "google"],
 	)
 	def test_residual_counts_a_key_shape_the_masking_misses(self, fake, shape):
 		# An older key (not the one stored today) in plain prose: no marker
@@ -986,6 +992,190 @@ def _v16_error_log_validate(row: dict) -> dict:
 		row["error"] = f"{row['method']}\n{row['error']}"
 		row["method"] = row["method"][:140]
 	return row
+
+
+# Fake keys with the shapes and lengths of real ones (never real keys).
+_REAL_SHAPES = {
+	"openai-legacy": "sk-" + "Ab3dEf6hIj9kLm2nOp5qRs8tUv1w" + "T3BlbkFJ" + "Xy4zAb7cDe0f",
+	"openai-project": "sk-proj-" + "Ab1_Cd2-Ef3G" * 13,
+	"openai-svcacct": "sk-svcacct-" + "Zz9_Yy8-Xx7W" * 12,
+	"anthropic": "sk-ant-api03-" + "aB3_cD4-eF5g" * 7 + "hI6jK7lM8" + "AA",
+	"deepseek": "sk-" + "0123456789abcdef" * 2,
+	"moonshot": "sk-" + "Q1w2E3r4T5y6U7i8O9p0" * 2 + "AsDfGhJk",
+	"openrouter": "sk-or-v1-" + "0123456789abcdef" * 4,
+	"groq": "gsk_" + "Wx7Yz" * 10 + "Q9",
+	"google": "AIzaSyA-0123456789abcdefghijABCDEFGHIJK",
+}
+# Tokens that only look like the prefixes: identifiers, file names, prose.
+_NOT_KEYS = [
+	"sk-learn-preprocessing-pipeline-for-large-datasets",
+	"my_sk-learn-preprocessing-pipeline-0123456789-abcdefgh",
+	"task-0123456789abcdef0123456789abcdef-scheduler",
+	"sk-0123456789",
+	"sk-0123456789abcdefABCD0123",
+	"sk-proj-0123456789-abcdefghij",
+	"sk-" + "0123456789abcdef" * 2 + "_suffix.py",
+	"import sk-proj-helpers-module-for-the-billing-dashboard",
+	"gsk_config_loader_for_production_environment",
+	"gsk_" + "Wx7Yz" * 4,
+	"AIzaSyA-0123456789abcdefghijABCDEFGHIJKLMNOP",
+	"xAIzaSyA-0123456789abcdefghijABCDEFGHIJK",
+	"AIzaSyA-0123456789abcdefghijABCDEFGH",
+	"prefix_AIzaSyA-0123456789abcdefghijABCDEFGHIJK",
+]
+
+
+class TestResidualKeyShapes:
+	"""``_KEY_SHAPE``, the residual check independent of the masking: real
+	provider key shapes, at their real lengths, as whole tokens."""
+
+	@pytest.mark.parametrize("name", sorted(_REAL_SHAPES))
+	@pytest.mark.parametrize(
+		"context", ["{k}", "note = '{k}'", '{{"key": "{k}"}}', "rotated {k}, then", "key={k}\n"],
+		ids=["bare", "quoted", "json", "prose", "line"],
+	)
+	def test_a_real_shape_is_flagged(self, name, context):
+		key = _REAL_SHAPES[name]
+		text = context.format(k=key)
+		assert maintenance._KEY_SHAPE.search(text), (name, text)
+		assert maintenance._has_residual_secret(text, "")
+
+	@pytest.mark.parametrize("text", _NOT_KEYS)
+	def test_a_look_alike_is_not_flagged(self, text):
+		assert not maintenance._KEY_SHAPE.search(text), text
+		assert not maintenance._has_residual_secret(text, "")
+
+	@pytest.mark.parametrize("name", sorted(_REAL_SHAPES))
+	@pytest.mark.parametrize(
+		"shape",
+		[
+			"headers = {{'authorization': 'Bearer {k}'}}",
+			'headers = {{"x-api-key": "{k}"}}',
+			"      header = b'x-api-key: {k}'",
+			"provider = {{'api_key': '{k}'}}",
+		],
+		ids=["bearer", "x-api-key-dict", "x-api-key-line", "api-key-field"],
+	)
+	def test_the_masking_still_masks_every_real_shape_without_the_key(self, name, shape):
+		text = shape.format(k=_REAL_SHAPES[name])
+		masked = maintenance._mask(text, "sk-a-different-stored-key-0123456789")
+		assert _REAL_SHAPES[name] not in masked
+		assert not maintenance._has_residual_secret(masked, "")
+
+
+# Fake keys of providers whose shape _KEY_SHAPE does not know (32 and 40
+# letters and digits): only the known literal can find them.
+_UNSHAPED_KEYS = {
+	"mistral": "Mq7Rt2Vx" * 4,
+	"cohere": "Co9hEr3eKy" * 4,
+}
+
+
+class TestResidualIsDrivenByTheKnownLiteral:
+	"""The residual check counts a row holding the stored key (raw,
+	JSON-escaped or repr-escaped) or any key literal passed in, first; the
+	provider shapes (``_KEY_SHAPE``) only add to it. So a key of a provider
+	whose shape it does not know is still counted when it is the known one."""
+
+	@pytest.mark.parametrize("name", sorted(_UNSHAPED_KEYS))
+	def test_a_stored_key_of_an_unknown_shape_left_in_a_row_is_counted(self, name):
+		key = _UNSHAPED_KEYS[name]
+		assert not maintenance._KEY_SHAPE.search(key)
+		for text in (f"echo {key}", json.dumps({"k": f"{key}\u2019"}), repr({"k": key})):
+			assert maintenance._has_residual_secret(text, key), text
+		assert not maintenance._has_residual_secret("echo ********", key)
+
+	@pytest.mark.parametrize("name", sorted(_UNSHAPED_KEYS))
+	def test_a_key_literal_passed_in_is_counted(self, name):
+		key = _UNSHAPED_KEYS[name]
+		assert maintenance._has_residual_secret(f"old key {key} here", "", literals=(key,))
+		assert maintenance._has_residual_secret(
+			f"old key {key} here", "sk-a-different-stored-key-0123456789", literals=("", key)
+		)
+		assert not maintenance._has_residual_secret("old key ******** here", "", literals=(key,))
+		assert not maintenance._has_residual_secret("keep kittens", "", literals=("k",))
+
+	@pytest.mark.parametrize("name", sorted(_UNSHAPED_KEYS))
+	def test_the_scrub_counts_a_stored_key_its_masking_left(self, fake, monkeypatch, name):
+		key = _UNSHAPED_KEYS[name]
+		fake([("a", LEAKY.replace(KEY, key))], current_key=key)
+		monkeypatch.setattr(maintenance, "_mask", lambda text, api_key: text)
+		out = maintenance.scrub_error_log_secrets(dry_run=True)
+		assert out["residual"] > 0
+
+
+class TestTheHookPathIsBounded:
+	"""``_masked_record`` (the Error Log hook's masking) cuts each text field to
+	``SCRUB_TEXT_CAP`` characters before any pass, and masks again only the
+	lines around the join of a long title and its error."""
+
+	CAP = 65536
+
+	@staticmethod
+	def _lines(n_chars):
+		line = f'File "apps/optimus/optimus/ai_fix.py", line 1, in f\n    headers = {{\'authorization\': \'Bearer {KEY}\'}}\n'
+		return (line * (n_chars // len(line) + 1))[:n_chars]
+
+	def test_the_cap_is_the_one_constant(self):
+		from pathlib import Path
+
+		from optimus import ai_fix, redaction
+
+		assert maintenance.SCRUB_TEXT_CAP is redaction.SCRUB_TEXT_CAP == 65536
+		assert "65536" not in Path(ai_fix.__file__).read_text(encoding="utf-8")
+
+	def test_a_long_field_is_cut_with_the_mark_and_masked(self):
+		row = maintenance._masked_record({"error": self._lines(1_048_576), "method": "optimus ai_fix"}, KEY)
+		assert len(row["error"]) <= self.CAP and row["error"].endswith(maintenance._CUT_MARK)
+		assert KEY not in row["error"] and "Bearer ********" in row["error"]
+		assert maintenance._masked_record(row, KEY) == row
+
+	@pytest.mark.parametrize("offset", [1, 5, 13, 20])
+	def test_a_key_the_cut_splits_leaves_no_part_behind(self, offset):
+		head = "x " * ((self.CAP - len(maintenance._CUT_MARK) - offset) // 2)
+		text = head + "tok=" + "OLDKEYabcdefghijklmnopqrstuvwxyz0123456789" + " tail" * 50
+		row = maintenance._masked_record({"error": text}, KEY)
+		assert "OLDKEY" not in row["error"] and "abcdefghij" not in row["error"]
+		assert row["error"].endswith(maintenance._CUT_MARK)
+
+	def test_the_cut_of_the_stored_key_straddling_the_cap_leaves_no_part_of_it(self):
+		head = "x " * ((self.CAP - len(maintenance._CUT_MARK) - 10) // 2)
+		row = maintenance._masked_record({"error": f"{head}{KEY} rest " * 1}, KEY)
+		assert KEY[:8] not in row["error"]
+
+	def test_no_pass_reads_more_than_the_cap(self, monkeypatch):
+		real, seen = maintenance._mask, []
+
+		def _spy(text, api_key):
+			seen.append(len(text))
+			return real(text, api_key)
+		monkeypatch.setattr(maintenance, "_mask", _spy)
+		big = self._lines(1_048_576)
+		maintenance._masked_record({"error": big, "method": big, "metadata": big}, KEY)
+		assert seen and max(seen) <= self.CAP
+
+	def test_only_the_lines_around_the_join_are_masked_again(self, monkeypatch):
+		title = self._lines(40_000) + "x" * 140 + " Bearer"
+		error = "abcdefghij rest\n" + self._lines(40_000)
+		real, windows = maintenance._mask_row, []
+
+		def _spy(row, text_fields, api_key, **kw):
+			if text_fields == ("error",):
+				windows.append(len(row["error"]))
+			return real(row, text_fields, api_key, **kw)
+		monkeypatch.setattr(maintenance, "_mask_row", _spy)
+		row = maintenance._masked_record({"error": error, "method": title}, KEY)
+		assert "Bearer\n******** rest" in row["error"] and KEY not in row["error"]
+		assert windows and max(windows) <= 2 * maintenance._JOIN_WINDOW + 400
+		assert maintenance._masked_record(row, KEY) == row
+		assert maintenance._mask_row({"name": "ERR-1", **row}, ("error", "method"), KEY) == ({}, False)
+
+	def test_a_long_title_and_a_long_error_stay_idempotent(self):
+		big = self._lines(1_048_576)
+		row = maintenance._masked_record({"error": big, "method": big, "metadata": big}, KEY)
+		assert len(row["error"]) <= self.CAP and len(row["method"]) == 140
+		assert KEY not in json.dumps(row)
+		assert maintenance._masked_record(row, KEY) == row
 
 
 class TestMaskedRecord:
@@ -1504,7 +1694,7 @@ class TestKeyHandling:
 		offenders, seen = self._profiled(lambda: out.update(maintenance.scrub_error_log_secrets(dry_run=False)), forms)
 		assert offenders == set()
 		# positive control: the key-handling helpers did run, key in hand
-		assert {"_holds_key", "_json_escaped", "_mask", "_key_fragment"} <= seen
+		assert {"_holds_key", "_mask", "_key_fragment"} <= seen
 		assert out["changed"] >= 2 and out["deleted_docs_changed"] == 1
 
 	@staticmethod
@@ -1600,8 +1790,21 @@ class TestPurgeAiErrorLogs:
 # The migrate patch
 # ---------------------------------------------------------------------------
 
-_PATCH = "optimus.patches.v0_12.scrub_ai_keys_from_error_log"
+_PATCH = "optimus.patches.v0_12_0.scrub_ai_keys_from_error_log"
 _REAL_MEASURE = maintenance.measure_scan_size
+
+
+def test_the_patch_lives_in_the_versioned_directory_and_patches_txt_names_it():
+	# optimus/patches/v0_X_Y/, like every other patch directory.
+	from pathlib import Path
+
+	pkg = Path(maintenance.__file__).resolve().parent
+	assert (pkg / "patches" / "v0_12_0" / "scrub_ai_keys_from_error_log.py").is_file()
+	assert (pkg / "patches" / "v0_12_0" / "__init__.py").is_file()
+	assert not (pkg / "patches" / "v0_12").exists()
+	lines = (pkg / "patches.txt").read_text(encoding="utf-8").splitlines()
+	assert _PATCH in lines and not [line for line in lines if ".v0_12." in line]
+	assert callable(importlib.import_module(_PATCH).execute)
 
 
 def _with_context(exc) -> str:

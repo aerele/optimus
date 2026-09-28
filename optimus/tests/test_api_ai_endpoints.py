@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from optimus import ai_fix, api
+from optimus import analyze as _analyze
 from optimus.tests.gate_fakes import (
 	DOCNAME,
 	FakePermissionError,
@@ -212,6 +213,7 @@ def core(monkeypatch):
 	monkeypatch.setattr(api, "safe_commit", lambda: commits.append(True))
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, exc=None, **kw: logged.append(title))
 	install_module(monkeypatch, "optimus.analyze", SimpleNamespace(
+		_run_ai_step=_analyze._run_ai_step,
 		_mark_ai_spend_session=lambda session_uuid: None,
 		_fetch_recordings=lambda uuids, recordings_bundle=None: [{"uuid": u} for u in uuids],
 		_load_recordings_bundle=lambda d: None,

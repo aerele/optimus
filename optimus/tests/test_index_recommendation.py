@@ -285,7 +285,8 @@ class TestAiSuggestIndex:
 
 		out_payload = {"choices": [{"message": {"content": "**Recommendation**\n\nAdd `(customer, posting_date)`."}}]}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, out_payload)))
-		with patch("optimus.ai_fix._resolve_provider", return_value=dict(_PROVIDER)):
+		with patch("optimus.ai_fix._provider_config", return_value=dict(_PROVIDER)), \
+		     patch("optimus.ai_fix._get_api_key", return_value="k-fake-test-key"):
 			out = ai_fix.suggest_index({"table": "tabSales Invoice", "doctype": "Sales Invoice"})
 		assert "customer, posting_date" in out["suggestion"]
 		assert out["model"] == "gpt-4.1-mini" and out["provider"] == "OpenAI" and out["generated_at"]
@@ -302,7 +303,8 @@ class TestAiSuggestIndex:
 		from optimus import ai_fix
 
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {"choices": [{"message": {"content": "  "}}]})))
-		with patch("optimus.ai_fix._resolve_provider", return_value=dict(_PROVIDER)):
+		with patch("optimus.ai_fix._provider_config", return_value=dict(_PROVIDER)), \
+		     patch("optimus.ai_fix._get_api_key", return_value="k-fake-test-key"):
 			with pytest.raises(ai_fix.AiFixError, match="empty"):
 				ai_fix.suggest_index({"table": "tabFoo"})
 

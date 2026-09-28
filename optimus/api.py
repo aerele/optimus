@@ -1213,33 +1213,22 @@ def _render_session_report(docname: str, *, ai_backfill: bool = False) -> dict:
 	recording_uuids = [
 		a.recording_uuid for a in (doc.actions or []) if getattr(a, "recording_uuid", None)
 	]
-	fetch_error = None
-	interrupt = None
-	try:
-		recordings = list(_analyze_mod._fetch_recordings(
+	recordings, step_failed = _analyze_mod._run_ai_step(
+		lambda: list(_analyze_mod._fetch_recordings(
 			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
-		))
-	except ai_fix._job_timeout_types() as e:
-		interrupt = (type(e), e.args)
-	except Exception as e:
-		fetch_error, recordings = e, []
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
-	if fetch_error is not None:
-		ai_fix.log_ai_failure("optimus regenerate_reports fetch", fetch_error, session_uuid=doc.session_uuid)
+		)),
+		title="optimus regenerate_reports fetch", session_uuid=doc.session_uuid,
+	)
+	if step_failed:
+		recordings = []
 
 	if ai_backfill:
-		backfill_error = None
-		try:
-			_analyze_mod._backfill_ai_suggestions(doc)
-		except ai_fix._job_timeout_types() as e:
-			interrupt = (type(e), e.args)
-		except Exception as e:
-			backfill_error = e
-		if interrupt is not None:
-			raise interrupt[0](*interrupt[1])
-		if backfill_error is not None:
-			ai_fix.log_ai_failure("optimus regenerate ai backfill", backfill_error, session_uuid=doc.session_uuid)
+		_analyze_mod._run_ai_step(
+			lambda: _analyze_mod._backfill_ai_suggestions(doc),
+			title="optimus regenerate ai backfill", session_uuid=doc.session_uuid,
+		)
+
+	interrupt = None
 
 	try:
 		from optimus import pdf_export
@@ -1270,28 +1259,29 @@ def _rerender_after_ai(ref: SessionRef) -> bool:
 	RQ job timeouts still escape as fresh instances and stop the worker job.
 	"""
 	from optimus import ai_fix
+	from optimus import analyze as _analyze_mod
 
-	failure = None
-	interrupt = None
-	try:
-		return bool(_render_session_report(ref.docname).get("regenerated"))
-	except ai_fix._job_timeout_types() as e:
-		interrupt = (type(e), e.args)
-	except Exception as e:
-		failure = e
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
-	try:
-		frappe.db.rollback()
-	except ai_fix._job_timeout_types() as e:
-		interrupt = (type(e), e.args)
-	except Exception:
-		pass
-	if interrupt is not None:
-		failure = None
-		raise interrupt[0](*interrupt[1])
-	ai_fix.log_ai_failure("optimus AI re-render", failure, session_uuid=ref.session_uuid)
-	return False
+	def _render():
+		try:
+			return _render_session_report(ref.docname)
+		except ai_fix._job_timeout_types():
+			raise
+		except Exception:
+			# Undo the failed render before the helper writes its Error Log row.
+			guard = ai_fix._InterruptGuard()
+			try:
+				with guard:
+					frappe.db.rollback()
+			except Exception:
+				pass
+			if guard.pending():
+				raise guard.interrupt()
+			raise
+
+	out, step_failed = _analyze_mod._run_ai_step(
+		_render, title="optimus AI re-render", session_uuid=ref.session_uuid,
+	)
+	return not step_failed and bool(out.get("regenerated"))
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1322,9 +1312,6 @@ def regenerate_reports(session_uuid: str) -> dict:
 		"recordings_available": out["recordings_available"],
 		"actions_total": out["actions_total"],
 	}
-
-
-
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1389,18 +1376,14 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 		a.recording_uuid for a in (doc.actions or [])
 		if getattr(a, "recording_uuid", None)
 	]
-	fetch_error = None
-	try:
-		recordings = list(_analyze_mod._fetch_recordings(
+	recordings, step_failed = _analyze_mod._run_ai_step(
+		lambda: list(_analyze_mod._fetch_recordings(
 			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
-		))
-	except Exception as e:
-		fetch_error = e
+		)),
+		title="optimus humanize_steps fetch", session_uuid=getattr(doc, "session_uuid", None),
+	)
+	if step_failed:
 		recordings = []
-	if fetch_error is not None:
-		ai_fix.log_ai_failure(
-			"optimus humanize_steps fetch", fetch_error, session_uuid=getattr(doc, "session_uuid", None),
-		)
 
 	actions = _analyze_mod._actions_for_humanizer(recordings)
 	if not actions:
@@ -1443,7 +1426,6 @@ def _refill_indexes_for_doc(doc) -> dict:
 	import json as _json
 
 	from optimus import analyze as _analyze_mod
-	from optimus.ai_fix import log_ai_failure
 
 	try:
 		breakdown = _json.loads(doc.table_breakdown_json or "[]")
@@ -1462,18 +1444,13 @@ def _refill_indexes_for_doc(doc) -> dict:
 		if not table_name:
 			skipped += 1
 			continue
-		error = None
-		try:
-			out = _analyze_mod._run_table_index_ai_backfill(doc, table_name=table_name)
-		except Exception as e:
-			error = e
-		if error is not None:
-			# One title for every table (the table goes in the message), so the
-			# Error Log groups these rows instead of creating one title per table.
-			log_ai_failure(
-				"optimus refill_indexes", error,
-				session_uuid=getattr(doc, "session_uuid", None), table=table_name,
-			)
+		# One title for every table (the table goes in the message), so the
+		# Error Log groups these rows instead of creating one title per table.
+		out, step_failed = _analyze_mod._run_ai_step(
+			lambda table_name=table_name: _analyze_mod._run_table_index_ai_backfill(doc, table_name=table_name),
+			title="optimus refill_indexes", session_uuid=getattr(doc, "session_uuid", None), table=table_name,
+		)
+		if step_failed:
 			failed += 1
 			continue
 		if out.get("ok"):

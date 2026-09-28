@@ -312,6 +312,76 @@ class TestScrubSecrets:
 		):
 			assert redaction.scrub_secrets(plain) == plain
 
+	@pytest.mark.parametrize(
+		("text", "masked"),
+		[
+			# http.client's putheader local: the header line it sends
+			("      header = b'x-api-key: sk-ant-api03-OLDkey0123456789abcdef'",
+			 "      header = b'x-api-key: ********'"),
+			("      header = b'X-Goog-Api-Key: AIzaOLDkey0123456789abcdefghijklmnop'",
+			 "      header = b'X-Goog-Api-Key: ********'"),
+			("x-api-key: sk-ant-api03-OLDkey0123456789 rejected", "x-api-key: ******** rejected"),
+			# a pasted smart quote, as the bytes repr shows it
+			("      header = b'x-api-key: sk-ant-OLD0123\\xe2\\x80\\x99456789'",
+			 "      header = b'x-api-key: ********'"),
+			# http.client's own message for a value it cannot send
+			("ValueError: Invalid header value b'sk-ant-api03-OLDkey0123456789\\n'",
+			 "ValueError: Invalid header value b'********'"),
+			('ValueError: Invalid header value b"sk-ant-OLD\'s-key-0123456789"',
+			 'ValueError: Invalid header value b"********"'),
+			# both quotes in the value: repr escapes the one it quotes with
+			("ValueError: Invalid header value b'sk-ant-OLD\\'s\"key-0123456789' tail",
+			 "ValueError: Invalid header value b'********' tail"),
+			# requests' message for the same
+			("InvalidHeader: Invalid leading whitespace, reserved character(s), or return character(s) "
+			 "in header value: ' sk-ant-api03-OLDkey0123456789'",
+			 "InvalidHeader: Invalid leading whitespace, reserved character(s), or return character(s) "
+			 "in header value: '********'"),
+		],
+		ids=[
+			"putheader", "goog", "bare-line", "smart-quote-bytes", "http-client-msg", "http-client-dq",
+			"http-client-escaped-quote", "requests-msg",
+		],
+	)
+	def test_an_x_api_key_header_value_is_masked_without_the_key(self, text, masked):
+		# A key that is not the stored one (rotated away) is masked by shape:
+		# the header line http.client builds and the messages that quote a
+		# header value it cannot send.
+		out = redaction.scrub_secrets(text, literals=("sk-new-stored-0123456789",))
+		assert out == masked
+		assert redaction.scrub_secrets(out) == out
+		assert "OLD" not in out
+
+	def test_an_x_api_key_value_in_json_escaped_text_keeps_the_json_valid(self):
+		import json
+
+		doc = {"error": "      header = b'x-api-key: sk-ant-OLD0123\\xe2\\x80\\x99456789'\nValueError: Invalid header value b'sk-ant-OLD0123456789\\n'"}
+		out = redaction.scrub_secrets(json.dumps(doc))
+		assert json.loads(out) == {"error": "      header = b'x-api-key: ********'\nValueError: Invalid header value b'********'"}
+		# a JSON-escaped double quote right after the value stays whole
+		curl = {"cmd": 'curl -H "x-api-key: sk-ant-OLDkey0123456789" https://api.anthropic.com'}
+		out = redaction.scrub_secrets(json.dumps(curl))
+		assert json.loads(out) == {"cmd": 'curl -H "x-api-key: ********" https://api.anthropic.com'}
+
+	def test_short_or_masked_x_api_key_values_are_left(self):
+		for plain in ("x-api-key: missing", "x-api-key: ********", "Invalid header value b'********'", "Invalid header value b''"):
+			assert redaction.scrub_secrets(plain) == plain
+
+	def test_url_userinfo_is_only_the_authority(self):
+		# The credential shape is scheme://userinfo@host, with no "/", "?" or
+		# "#" in the userinfo: an address in a query string or a fragment is
+		# not a credential.
+		for plain in (
+			"POST https://llm.internal?to=a@b.com failed",
+			"https://example.com/notify?to=a@b.com&cc=c@d.com",
+			"https://example.com#contact=a@b.com",
+			"http://host:8080?x=1@2",
+		):
+			assert redaction.scrub_secrets(plain) == plain
+		assert redaction.scrub_secrets("https://user:p@ss@host/") == "https://********@host/"
+		assert redaction.scrub_secrets("https://user:p@ss@host?to=a@b.com") == "https://********@host?to=a@b.com"
+		assert redaction.scrub_secrets("https://user:pw@host#frag@x") == "https://********@host#frag@x"
+
 	def test_json_escaped_text_stays_valid_json(self):
 		# Deleted Document data is JSON: the smart quote is escaped as \u2019
 		# and a JSON-style header dump escapes its double quotes.
@@ -344,3 +414,158 @@ class TestScrubSecrets:
 			tb = tb.tb_next
 		holders = {name for name, value in tb.tb_frame.f_locals.items() if _TOK in repr(value)}
 		assert holders == {"secret", "api_key"}
+
+
+# ---------------------------------------------------------------------------
+# key_literals: the one helper for the forms text holds a key in
+# ---------------------------------------------------------------------------
+
+
+class TestKeyLiterals:
+	def test_raw_json_and_repr_forms_raw_first_without_duplicates(self):
+		import json
+
+		key = "sk-live-0123’quote\"back\\slash'tail"
+		forms = redaction.key_literals(key)
+		assert forms[0] == key
+		assert json.dumps(key)[1:-1] in forms and repr(key)[1:-1] in forms
+		assert len(forms) == len(set(forms)) == 3
+		assert redaction.key_literals(_TOK) == (_TOK,)
+
+	def test_no_key_is_empty(self):
+		for value in (None, "", 0, b"sk-bytes-0123456789"):
+			assert redaction.key_literals(value) == ()
+
+	def test_the_minimum_length_and_placeholder_are_public(self):
+		assert redaction.MIN_KEY_LEN == 8
+		assert redaction.SECRET_PLACEHOLDER == "********"
+
+	def test_a_repr_escaped_key_is_masked_through_the_literals(self):
+		key = "sk-live-0123 456789abcdef"
+		text = f"      api_key = {key!r}\n      held = {key!a}"
+		out = redaction.scrub_secrets(text, literals=redaction.key_literals(key))
+		assert "456789abcdef" not in out.split("held")[0]
+		assert "0123\\xa0456789" not in out
+
+	def test_every_user_shares_the_one_helper(self):
+		from optimus import ai_fix, error_log_mask, maintenance
+
+		key = 'sk-live-01\\23"45’67 89abcdef'
+		assert ai_fix._key_literals(key) == redaction.key_literals(key)
+		assert error_log_mask._key_literals(key) == redaction.key_literals(key)
+		assert error_log_mask._MIN_KEY_LEN == redaction.MIN_KEY_LEN == maintenance._MIN_KEY_LEN
+		assert error_log_mask._PLACEHOLDER == redaction.SECRET_PLACEHOLDER
+		assert maintenance._holds_key({"error": f"x {repr(key)[1:-1]} y"}, ("error",), key)
+
+
+class TestBytesHeaderValues:
+	"""A header dict printed with bytes values (``{'x-api-key': b'...'}``, as
+	urllib3 or a caller holds them) is masked like its str form."""
+
+	@pytest.mark.parametrize(
+		("text", "masked"),
+		[
+			("headers = {'x-api-key': b'sk-ant-api03-OLDkey0123456789abcdef'}",
+			 "headers = {'x-api-key': b'********'}"),
+			('headers = {"x-goog-api-key": b"AIzaSyOLDkey0123456789abcdefghijklmn"}',
+			 'headers = {"x-goog-api-key": b"********"}'),
+			("headers = {b'authorization': b'Bearer sk-OLDkey0123456789abcdef'}",
+			 "headers = {b'authorization': b'Bearer ********'}"),
+			# no bare shape takes this one: only the header entry does
+			("headers = {'Authorization': b'token OLDapikeyvalue:OLDapisecretvalue'}",
+			 "headers = {'Authorization': b'token ********'}"),
+			("headers = {'x-api-key': 'sk-ant-api03-OLDkey0123456789abcdef'}",
+			 "headers = {'x-api-key': '********'}"),
+			('headers = {"x-goog-api-key": "AIzaSyOLDkey0123456789abcdefghijklmn"}',
+			 'headers = {"x-goog-api-key": "********"}'),
+			("headers = {'authorization': 'Bearer sk-OLDkey0123456789abcdef'}",
+			 "headers = {'authorization': 'Bearer ********'}"),
+		],
+		ids=["x-api-key-bytes", "goog-bytes", "authorization-bytes", "authorization-token-bytes", "x-api-key-str", "goog-str", "authorization-str"],
+	)
+	def test_bytes_and_str_values_are_masked(self, text, masked):
+		out = redaction.scrub_secrets(text)
+		assert out == masked
+		assert "OLD" not in out
+		assert redaction.scrub_secrets(out) == out
+
+
+class TestSchemeAndHeaderShapes:
+	"""Bare Bearer / Basic / Token in any case, the Key and ApiKey header
+	schemes and a bare api-key / api_key header line; ordinary prose stays."""
+
+	@pytest.mark.parametrize(
+		("text", "masked"),
+		[
+			("401 for bearer sk-OLDkey0123456789abcdef", "401 for bearer ********"),
+			("BEARER sk-OLDkey0123456789abcdef rejected", "BEARER ******** rejected"),
+			("sent Basic dXNlcjpPTERwYXNzd29yZDE= to the proxy", "sent Basic ******** to the proxy"),
+			("header was token OLDapikey123:OLDsecret456", "header was token ********"),
+			("TOKEN OLDapikey123:OLDsecret456", "TOKEN ********"),
+			("Authorization: Key fal-OLDkey0123456789abcdef", "Authorization: Key ********"),
+			("authorization: ApiKey OLDkeyvaluewithoutdigits", "authorization: ApiKey ********"),
+			("      header = b'Authorization: key OLDkey0123456789'", "      header = b'Authorization: key ********'"),
+			("headers = {'authorization': 'Key OLDkey0123456789abcdef'}", "headers = {'authorization': 'Key ********'}"),
+			('headers = {"Authorization": "ApiKey OLDkey0123456789abcdef"}', 'headers = {"Authorization": "ApiKey ********"}'),
+			("      header = b'api-key: 0123OLD456789abcdef0123456789ab'", "      header = b'api-key: ********'"),
+			("api_key: sk-OLD0123456789abcdef in the request", "api_key: ******** in the request"),
+			("Api-Key: 0123OLD456789abcdef0123456789ab", "Api-Key: ********"),
+		],
+		ids=[
+			"bearer-lower", "bearer-upper", "basic", "token-lower", "token-upper", "authz-key",
+			"authz-apikey", "authz-key-bytes-line", "dict-key", "dict-apikey", "api-key-line",
+			"api_key-line", "api-key-mixed-case",
+		],
+	)
+	def test_masked_without_the_key(self, text, masked):
+		out = redaction.scrub_secrets(text, literals=("sk-new-stored-0123456789",))
+		assert out == masked
+		assert "OLD" not in out
+		assert redaction.scrub_secrets(out) == out
+
+	@pytest.mark.parametrize(
+		"plain",
+		[
+			"the bearer of bad news arrived",
+			"Token counts: 1200 prompt, 300 completion",
+			"token expired at midnight",
+			"basic information is missing",
+			"Basic authentication failed for this user",
+			"Primary Key constraint failed",
+			"Key 1234567890 is a duplicate",
+			"ApiKey rotation reminder",
+			"api_key: required",
+			"api-key: notconfigured",
+			"api_key = 'x'",
+			"Authorization failed for user administrator",
+			"Authorization: Bearer ********",
+			"token ********",
+			"max_tokens exceeded for model gpt-4o-2024-08-06",
+		],
+	)
+	def test_ordinary_prose_is_left(self, plain):
+		assert redaction.scrub_secrets(plain) == plain
+@pytest.mark.parametrize("prefix", [
+	"{'x-api-key': '", '{"api-key": "', "{'api_key': b'",
+	"{'Authorization': 'Key ", '{"Proxy-Authorization": "ApiKey ',
+	"Invalid header value b'", 'in header value: "',
+])
+@pytest.mark.parametrize("ending", ["", "\nnext = 'ordinary value'", "\r\nnext = 'ordinary value'"])
+def test_truncated_quoted_headers_are_masked_without_the_rotated_key(prefix, ending):
+	from optimus.redaction import scrub_secrets
+
+	secret = "Mq7Rt2Vx" * 4
+	text = prefix + secret + "..." + ending
+	masked = scrub_secrets(text)
+	assert secret not in masked
+	assert masked == prefix + "********" + ending
+	assert scrub_secrets(masked) == masked
+
+
+@pytest.mark.parametrize("prefix", ["{'api_key': '", "{'Authorization': 'Key ", "Invalid header value b'"])
+@pytest.mark.parametrize("stars", range(1, 9))
+def test_truncating_a_masked_header_does_not_expand_its_placeholder(prefix, stars):
+	# A 140-character title can cut through the placeholder. Expanding it
+	# again would move that title into the error on every scrub pass.
+	text = prefix + "*" * stars
+	assert redaction.scrub_secrets(text) == text

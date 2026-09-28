@@ -74,7 +74,9 @@ versions may contain breaking changes see migration notes below).
 
 ### Upgrade notes
 
-- No `bench migrate` is needed (no DocType or patch change), and no
+- Follow the security migration and restart runbook in 0.12.63 below when
+  deploying this stack. The session action changes alone add no migration.
+- For the session action changes, no `bench migrate` is needed (no DocType or patch change), and no
   `bench --site <site> clear-cache` (no form JS change; running it is
   harmless). Open Desk tabs need no reload.
 - Restart web AND background workers together (`bench restart`, or your
@@ -89,7 +91,7 @@ versions may contain breaking changes see migration notes below).
   sessions and click Regenerate Reports (it now works); a GET to
   `/api/method/optimus.api.regenerate_reports` returns 403.
 
-## [0.12.62] - 2026-09-26
+### AI report rendering (pending)
 
 ### Fixed
 
@@ -121,6 +123,53 @@ versions may contain breaking changes see migration notes below).
   remains readable. `AI_LINK_HOSTS` and `ai_link_allowed` provide the shared
   renderer link policy for future AI checks.
 
+### File permissions
+
+- **Advisory: every v16 site with Optimus installed had non-Administrator File
+  permission checks denied.** `optimus.permissions.file_has_permission` returned
+  `None` to mean "no objection, defer to the next check" for every File that
+  wasn't a gated profiler artifact (in practice, almost every File on the
+  site), but Frappe v16's `has_controller_permissions` treats any falsy hook
+  result, `False` or `None`, as an outright deny, and calls app hooks in
+  reversed install order, so this hook ran before Frappe core's own File
+  permission check in the same AND loop. Practical effect on any v16 site
+  with Optimus installed: form loads, deletes, library attaches and REST
+  calls against File records were denied for every non-Administrator user,
+  regardless of whether they owned the file or had a valid share.
+  Administrator was unaffected (it short-circuits earlier in Frappe's
+  permission pipeline). On Frappe 16 the fix returns `True` (no objection)
+  instead of `None` in every deferring branch; the profiler artifacts' own admin/owner
+  gate still returns `False` explicitly where it denies. The "no objection"
+  value is version-aware: Frappe v15 stops at the first hook that answers
+  non-`None` (a `True` there would skip Frappe's own File check), so on v15
+  the hook keeps returning `None` exactly as before. Verified live on a
+  Frappe 16 test site; v15 semantics are pinned by a replay test of v15's
+  loop.
+- **`recordings_file` now gated like the two report files.** The raw
+  recordings snapshot (a compressed JSON bundle of the whole flow, including
+  SQL parameters and Python call trees) was reachable by anyone with read
+  access to the parent Optimus Session, including a read-sharee who was only
+  ever meant to see the rendered report. It is now denied in Frappe's
+  permission checks (the File form, REST, `frappe.has_permission`) to
+  anyone other than a System Manager or the recording user, the same check
+  already applied to `raw_report_file` and `raw_report_pdf_file`. A direct
+  download URL is still governed by Frappe's own File rule (read access on
+  the parent Optimus Session), unchanged by this release.
+- No migration needed (both changes are in-memory Python, not schema or data).
+  **Upgrade:** restart the web and worker processes together after deploying
+  so they load the fixed `optimus/permissions.py` (a partial restart leaves
+  some workers still serving the pre-fix, over-denying behaviour until they
+  too are restarted; there is no under-denial window, since the pre-fix bug
+  only ever denies more than it should). No `bench clear-cache` is required
+  (no DocType JS or `client_cache` entry changes) and no new `site_config`
+  keys are introduced. Verify: as a non-Administrator user, open a public
+  File (e.g. a ToDo attachment) through the File form or the REST API; it
+  should succeed (200) instead of failing with a permission error (403).
+
+---
+
+## [0.12.63] - 2026-09-28
+
 ### Security
 
 - **Advisory: the AI provider API key could be stored in plain text in the
@@ -145,17 +194,23 @@ versions may contain breaking changes see migration notes below).
   own prepared request, whose headers hold the key while the request is
   sent; the response keeps that request, and neither one's `repr` shows its
   headers. Apart from those, it is never in a dict, a header dict, a request
-  body, an exception message or an exception chain. A provider's error reply
-  is scrubbed before it is shown: of the key stored in Optimus Settings and
-  of the key the request was sent with (so an echo is masked even when the
-  key in Settings was changed while the request ran), each in its raw and
-  its JSON-escaped form. A 404 message names the request URL with any
-  credentials in it masked (a `user:password@` typed into a custom Base URL,
-  or the key), or only "(the configured Base URL)" when the URL cannot be
-  scrubbed. A request never follows a redirect: the HTTP library drops only a
-  header named `Authorization` when it follows one to another host, so the
-  `x-api-key` header Anthropic uses would have been sent on to the redirect
-  target. Every Error Log row the AI code writes goes through one
+  body, an exception message or an exception chain. A call reads the stored
+  key once (one SELECT on `__Auth`). A provider's error reply is scrubbed
+  before it is shown, of the key the request was sent with (the only key the
+  provider received, so an echo is masked even when the key in Settings was
+  changed while the request ran), or of the key stored in Optimus Settings
+  when the request carried none, each in its raw and its JSON-escaped form.
+  A 404 message names the request URL with any credentials in it masked (a
+  `user:password@` typed into a custom Base URL, or the key), or only "(the
+  configured Base URL)" when the URL cannot be scrubbed. The HTTP library
+  never follows a redirect for Optimus: it drops only a header named
+  `Authorization` when it follows one to another host, so the `x-api-key`
+  header Anthropic uses would have been sent on to the redirect target.
+  Optimus itself follows at most three 307 or 308 redirects that stay on the
+  same host and port (the same scheme, or http to https on that host),
+  sending the same request, key included, again; it follows no other
+  redirect, and never logs or shows the address a redirect points to. Every
+  Error Log row the AI code writes goes through one
   function, `ai_fix.log_ai_failure`, with an explicit, scrubbed message (no
   frame locals) that links to the Optimus Session, written after the failure
   has been handled, so Sentry never receives the frames of the failed
@@ -163,7 +218,9 @@ versions may contain breaking changes see migration notes below).
   web server's worker timeout (a `SystemExit` in the request) leaves without
   the frames that held the request headers, and writes no Error Log row;
   such an interrupt while the key is being decrypted leaves without the
-  decryption frames too. A behavioural canary test pushes a fake key through
+  decryption frames too, and one while a provider's reply is scrubbed or a
+  failure's log message is built leaves without the reply or the unscrubbed
+  message. A behavioural canary test pushes a fake key through
   every AI entry point in each of the failure scenarios it models, and fails
   if the key appears in any log, traceback, error-tracker payload or
   response.
@@ -182,11 +239,11 @@ versions may contain breaking changes see migration notes below).
   `metadata`, and moves a title longer than its 140-character column in front
   of the error, as Frappe v16 does, so on Frappe v15 such a row is no longer
   dropped by the length check. Every other row, another app's included, is
-  stored exactly as it was. It reads the stored key once per Error Log insert
+  stored exactly as it was. It normally reads the stored key once per Error Log insert
   (one SELECT on `__Auth`, and a decrypt when a key is stored), never caches
   it, and never raises, except an RQ job timeout, which still stops the job.
-  It fails open: when it cannot read the key, the row is stored as it was. The
-  one exception is a row it would mask whose masking fails: its error text is
+  When the key cannot be read, only the AI frame check identifies a row
+  to mask. A row it would mask whose masking fails is withheld: its error text is
   replaced by "Optimus withheld this error text: it could not be masked. See
   logs/optimus.log for the reason.", its title and metadata too when they hold
   an `ai_fix.py` frame or the key (a title holding neither is kept, cut to 140
@@ -231,7 +288,7 @@ versions may contain breaking changes see migration notes below).
      Kubernetes, or blue-green benches sharing one `redis_cache`), stop or
      replace every web and worker process of the old release before running
      the migrate, and run step 3 once the rollout is done (see the upgrade
-     notes). The patch `v0_12.scrub_ai_keys_from_error_log` masks the keys in
+     notes). The patch `v0_12_0.scrub_ai_keys_from_error_log` masks the keys in
      existing Error Log rows and in Deleted Document copies of them, and
      prints how many rows it masked, or that none needed it. It never reads or
      changes the Error Log records waiting in Frappe's deferred-insert queue
@@ -336,6 +393,11 @@ versions may contain breaking changes see migration notes below).
 ### Fixed
 
 - A failed AI call now writes one Error Log row instead of two.
+- An RQ job that times out during AI enrichment now stops. Each AI loop
+  catches failures with `except Exception`, which also caught the job
+  timeout, so the loop logged it and went on calling the provider past the
+  job's deadline. The timeout is now logged once and raised again, so the
+  job ends as a timed-out job and the rest of its AI work is skipped.
 - AI Error Log rows written by the HTTP layer now link to the Optimus
   Session. For an HTTP error status the row names the provider's own error
   code (`provider_error=`, for example `invalid_request_error` or
@@ -359,17 +421,43 @@ versions may contain breaking changes see migration notes below).
   server error. A malformed token count in a reply no longer fails a
   suggestion that was otherwise returned. An Anthropic reply whose text is not
   a string is reported as an empty response instead of failing the request
-  with a server error. A redirect (an HTTP 3xx reply, which is never followed)
-  is reported as an unexpected response that names its status and says to set
-  the Base URL to the address it redirects to, instead of being read as the
-  reply; its Error Log row holds the status and the call site (and
-  `provider_error=` when the reply names a code), never the body.
+  with a server error. An OpenAI-compatible reply whose content is a list of
+  parts keeps the text of its parts when one of them has no text (`null`),
+  instead of being reported as a reply without text. A redirect that is not
+  followed (any HTTP 3xx reply but a 307 or 308 to the same host and port,
+  and a fourth redirect) is reported as an unexpected response that names
+  its status and says that a Base URL that redirects
+  must be set to the final URL it redirects to,
+  instead of being read as the reply; its Error Log row holds the status and
+  the call site (and `provider_error=` when the reply names a code), never
+  the body or the address the redirect points to.
 - An API key pasted with a trailing newline or spaces is trimmed. A key must
   be plain printable ASCII: a key with any other character (a space inside
   it, a pasted smart quote or no-break space, a control character such as a
   newline or a tab) now fails before any request is made, with a message
   that names the usual causes: a pasted smart quote, a stray space, a
-  no-break space, or a control character such as a newline or tab.
+  no-break space, or a control character such as a newline or tab. That
+  holds for a provider that needs a key. The OpenAI-compatible provider needs
+  none (Ollama, LM Studio, vLLM): there such a key is neither sent nor
+  refused, and the request goes without a key; a key it can send is still
+  sent (a router such as OpenRouter needs one).
+- The masking (the scrub, the Error Log hook in the rows it changes, and
+  every AI Error Log row) now also recognises an `x-api-key` header line as
+  the HTTP library builds it (`x-api-key: <key>`) and a header value quoted in
+  an "Invalid header value" error of `http.client` or `requests`, without
+  needing the key itself, so a key no longer stored in Optimus Settings (a
+  rotated one) is masked there too. A web address with an e-mail address in
+  its query string or fragment (`?to=a@b.com`) is no longer masked as
+  credentials: only the `user:password@` part in front of the host is.
+- The scrub's `residual` count is driven by the known key first: it counts a
+  row still holding the stored key (raw, JSON-escaped or repr-escaped), then
+  adds provider key shapes at their real lengths, as whole tokens (`sk-` keys
+  of OpenAI, Anthropic, DeepSeek, Kimi and OpenRouter, Groq's `gsk_`,
+  Google's `AIza`), so an identifier, a file name or prose that only starts
+  with such a prefix is not counted. A residual of 0 means no current key
+  and no known provider-shaped key is left in the rows read, not that no key
+  of any provider is (a rotated Mistral or Cohere key has no shape it
+  knows).
 - An AI failure row is written to the Error Log immediately. On MariaDB the
   Error Log table is MyISAM, so the row survives a rollback of the request
   or background job that logged it. On Postgres, if the request or
@@ -387,6 +475,48 @@ versions may contain breaking changes see migration notes below).
   Log row may not have been written or re-queued, or a hook after the
   insert failed". It is logged at error level, the lowest level Frappe's
   loggers keep on a production site.
+
+- A second log of an AI failure that is already in the Error Log (the HTTP
+  layer logs its own failure, then the caller logs the same error with the
+  finding or step it was working on) no longer drops the caller's context:
+  its title and `k=v` lines, scrubbed like the message, are appended to the
+  row already written: there is still one row. A failed append leaves one line with
+  its error type in the `optimus` log.
+- The masking now also recognises a header entry whose value is bytes
+  (`'x-api-key': b'...'`), a lowercase or upper-case `bearer`, `basic` or
+  `token` followed by a token holding a digit, the `Key` and `ApiKey`
+  schemes of an `Authorization` header, and an `api-key` or `api_key` header
+  line holding a digit. Ordinary prose ("the bearer of", "token expired") is
+  left alone.
+- The Error Log hook reads the stored AI key only when one is stored: no key
+  is read on a site where none is stored (AI never enabled). It checks the
+  Password field's plain value (asterisks, never the key) first.
+- The Error Log hook is fail-closed for Optimus's own rows: a row from
+  Optimus's AI code is withheld whenever it cannot be masked, including in a
+  process still running the previous release and after an unexpected
+  failure of the hook. Another app's row is still stored exactly as it was.
+- The Error Log hook cuts each text field of a row it masks to 65536
+  characters (the last token before the cut is dropped, and `[...]` is
+  appended) and masks again only the lines around the join of a long title
+  and its error, so a huge row costs a bounded amount of work.
+- The report's per-action breakdown now leaves out the Error Log hook's own
+  key read too, so its rows add up to the session's query count and time.
+- A worker-timeout interrupt while a failure's message is scrubbed, or while
+  a redirect's address is read, now leaves without the key, the unscrubbed
+  text or the Base URL.
+
+An unexpected hook failure triggers one independent stored-key read with
+Frappe alone. A row holding that key, including its JSON-escaped or repr-escaped form, is withheld even without an AI frame. A row from the AI code is
+withheld whenever it cannot be masked; unrelated rows remain unchanged. Quoted
+header values cut off before their closing quote are masked through the end of
+that line, including keys that have since been rotated.
+
+- AI availability checks use the cached Password-field presence without
+  decrypting the key. Each AI request still reads and validates its key.
+- Token totals preserve the sum of valid input and output counts when that
+  sum exceeds the bound applied to individual provider fields.
+- AI steps return a boolean failure flag after logging, so callers retain no
+  caught exception or traceback.
 
 ### Upgrade notes
 
@@ -443,15 +573,27 @@ versions may contain breaking changes see migration notes below).
   replaced. Nothing in this release can prevent it, since the old code runs
   there. Stop or replace every old web and worker process before running the
   migrate, then run step 3 after the rollout.
-- Requests to the AI provider no longer follow redirects. A Base URL that
-  redirects (from http to https, for example, or through a proxy that rewrites
-  the path) now fails with a message naming the redirect's status: set the
-  Base URL in Optimus Settings to the address it redirects to.
-- Every Error Log insert on the site now reads the stored AI key once (the
-  Error Log hook needs it to tell a row holding the key). While Optimus
-  profiles a flow, that read appears in the report's per-table and per-action
-  query breakdowns, one `__Auth` query per Error Log insert; the N+1 and
-  slowest-query findings leave it out, as Optimus's own query.
+- Requests to the AI provider follow a redirect only when it is a 307 or 308
+  to the same host and port (http to https on that host included), at most
+  three in a row. A Base URL that answers any other redirect (a 301, 302 or
+  303, the usual way a server sends http to https, or a redirect to another
+  host or port, or through a proxy that rewrites the host) now fails with a
+  message naming the redirect's status. A Base URL that redirects (301, 302
+  or 303, or a 307 or 308 to another host) must be set to the final URL it
+  redirects to: change the Base URL in Optimus Settings to that final URL.
+- A stored AI key with a space inside it or a character that is not plain
+  printable ASCII (a pasted smart quote, a no-break space, a control
+  character) is now rejected with a clear message, both when a request is
+  made and when Optimus Settings is saved: such a key is refused when
+  Optimus Settings is saved, with the same message. Keyless providers
+  (OpenAI-compatible) are unaffected: there such a key is neither sent nor
+  refused.
+- Every Error Log insert on the site normally reads the stored AI key once
+  (the Error Log hook needs it to tell a row holding the key). While Optimus
+  profiles a flow, the per-table and per-action breakdowns, index suggestions,
+  the N+1 and slowest-query findings and the session's query count and query
+  time leave these reads out, as Optimus's own queries. A site where no key is
+  stored reads none.
 - No Desk form or JavaScript change (open tabs need no reload) and no new
   `site_config.json` key.
 - Verify: the dry run in step 3 above reports the values listed there, the
@@ -460,48 +602,17 @@ versions may contain breaking changes see migration notes below).
   exactly one Error Log row whose text is an explicit message without a dump
   of local variables.
 
-### File permissions
+---
 
-- **Advisory: every v16 site with Optimus installed had non-Administrator File
-  permission checks denied.** `optimus.permissions.file_has_permission` returned
-  `None` to mean "no objection, defer to the next check" for every File that
-  wasn't a gated profiler artifact (in practice, almost every File on the
-  site), but Frappe v16's `has_controller_permissions` treats any falsy hook
-  result, `False` or `None`, as an outright deny, and calls app hooks in
-  reversed install order, so this hook ran before Frappe core's own File
-  permission check in the same AND loop. Practical effect on any v16 site
-  with Optimus installed: form loads, deletes, library attaches and REST
-  calls against File records were denied for every non-Administrator user,
-  regardless of whether they owned the file or had a valid share.
-  Administrator was unaffected (it short-circuits earlier in Frappe's
-  permission pipeline). On Frappe 16 the fix returns `True` (no objection)
-  instead of `None` in every deferring branch; the profiler artifacts' own admin/owner
-  gate still returns `False` explicitly where it denies. The "no objection"
-  value is version-aware: Frappe v15 stops at the first hook that answers
-  non-`None` (a `True` there would skip Frappe's own File check), so on v15
-  the hook keeps returning `None` exactly as before. Verified live on a
-  Frappe 16 test site; v15 semantics are pinned by a replay test of v15's
-  loop.
-- **`recordings_file` now gated like the two report files.** The raw
-  recordings snapshot (a compressed JSON bundle of the whole flow, including
-  SQL parameters and Python call trees) was reachable by anyone with read
-  access to the parent Optimus Session, including a read-sharee who was only
-  ever meant to see the rendered report. It is now denied in Frappe's
-  permission checks (the File form, REST, `frappe.has_permission`) to
-  anyone other than a System Manager or the recording user, the same check
-  already applied to `raw_report_file` and `raw_report_pdf_file`. A direct
-  download URL is still governed by Frappe's own File rule (read access on
-  the parent Optimus Session), unchanged by this release.
-- No migration needed (both changes are in-memory Python, not schema or data).
-  **Upgrade:** restart the web and worker processes together after deploying
-  so they load the fixed `optimus/permissions.py` (a partial restart leaves
-  some workers still serving the pre-fix, over-denying behaviour until they
-  too are restarted; there is no under-denial window, since the pre-fix bug
-  only ever denies more than it should). No `bench clear-cache` is required
-  (no DocType JS or `client_cache` entry changes) and no new `site_config`
-  keys are introduced. Verify: as a non-Administrator user, open a public
-  File (e.g. a ToDo attachment) through the File form or the REST API; it
-  should succeed (200) instead of failing with a permission error (403).
+## [0.12.62] - 2026-09-28
+
+### Internal
+
+- Declared the app's Frappe dependency in `[tool.bench.frappe-dependencies]`
+  (`frappe >=15.0.0,<17.0.0`, covering v15 and v16), mirroring `hooks.py`
+  `required_apps`, so bench and Frappe Cloud resolve and version-gate it at deploy
+  time. optimus runs on plain Frappe (ERPNext optional), so frappe is the only
+  hard dependency.
 
 ---
 

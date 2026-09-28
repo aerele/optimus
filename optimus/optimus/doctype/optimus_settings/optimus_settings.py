@@ -19,6 +19,7 @@ class OptimusSettings(Document):
 		self._clamp_numeric_floors()
 		self._warn_on_framework_apps_in_tracked()
 		self._warn_on_incomplete_ai_config()
+		self._refuse_an_unsendable_ai_key()
 
 	def on_update(self):
 		# Settings are read on every request (via the `enabled` gate in
@@ -143,6 +144,28 @@ class OptimusSettings(Document):
 			title=_("Tracked Apps possible misconfiguration"),
 			indicator="orange",
 		)
+
+	def _refuse_an_unsendable_ai_key(self):
+		"""Refuse, on save, an API key the AI calls would refuse to send: for a
+		provider that needs a key, one holding a character that is not
+		printable ASCII (a space, a smart quote, a no-break space, a control
+		character) after its surrounding whitespace is stripped, with the same
+		message (``ai_fix._unsendable_key_message``). ``validate`` runs before
+		Frappe encrypts the field, so a newly typed key is here in plain text;
+		a key left unchanged is Frappe's asterisks, which pass the check. A
+		keyless provider ("OpenAI-compatible") never sends such a key, so it
+		is not refused there. The key is held only as ``api_key``, a name the
+		traceback sanitizers redact, and never put in the message."""
+		from optimus.ai_fix import _PROVIDER_DEFAULTS, _key_is_sendable, _unsendable_key_message
+
+		provider = (self.get("ai_provider") or "Anthropic").strip()
+		if not _PROVIDER_DEFAULTS.get(provider, {}).get("needs_key", True):
+			return
+		api_key = self.get("ai_api_key")
+		api_key = api_key.strip() if isinstance(api_key, str) else ""
+		if not api_key or _key_is_sendable(api_key):
+			return
+		frappe.throw(_unsendable_key_message())
 
 	def _warn_on_incomplete_ai_config(self):
 		"""Non-blocking warning when AI fix suggestions are enabled but

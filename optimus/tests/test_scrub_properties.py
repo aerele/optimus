@@ -38,8 +38,9 @@ _KEY_CHARS = "".join(chr(c) for c in range(0x21, 0x7F) if chr(c) != "*")
 _keys = st.text(alphabet=_KEY_CHARS, min_size=8, max_size=48)
 # Keys the shape patterns alone must mask (a key the caller does not know,
 # such as an older, rotated one): no quote, backslash, slash or "*", the
-# characters that end a token in those shapes.
-_SHAPE_KEY_CHARS = "".join(ch for ch in _KEY_CHARS if ch not in "'\"\\/")
+# characters that end a token in those shapes, and no "?" or "#", which end a
+# URL's userinfo (a raw one is never part of a URL's credentials).
+_SHAPE_KEY_CHARS = "".join(ch for ch in _KEY_CHARS if ch not in "'\"\\/?#")
 _shape_keys = st.text(alphabet=_SHAPE_KEY_CHARS, min_size=8, max_size=48)
 # Ordinary text around the key: one log line's worth, quotes and URL
 # characters included, no "*".
@@ -58,14 +59,21 @@ def _shape(name: str, key: str) -> str:
 		"api_key_field": f"provider = {{'name': 'OpenAI', 'api_key': '{key}'}}",
 		"bearer": f"Authorization: Bearer {key} rejected",
 		"url_userinfo": f"POST https://user:{key}@llm.internal:11434/v1/chat/completions",
+		"x_api_key_line": f"      header = b'x-api-key: {key}'",
+		"invalid_header": f"ValueError: Invalid header value b'{key}'",
 		"bare": f"the provider echoed {key} back",
 		"json_escaped": f'{{"error": "invalid key {_escaped(key)}"}}',
 	}[name]
 
 
-_SHAPES = ("header_dict", "x_api_key_dict", "api_key_field", "bearer", "url_userinfo", "bare", "json_escaped")
+_SHAPES = (
+	"header_dict", "x_api_key_dict", "api_key_field", "bearer", "url_userinfo", "x_api_key_line", "invalid_header",
+	"bare", "json_escaped",
+)
 # The shapes the patterns cover without the key as a literal.
-_PATTERN_SHAPES = ("header_dict", "x_api_key_dict", "api_key_field", "bearer", "url_userinfo")
+_PATTERN_SHAPES = (
+	"header_dict", "x_api_key_dict", "api_key_field", "bearer", "url_userinfo", "x_api_key_line", "invalid_header",
+)
 
 
 @st.composite

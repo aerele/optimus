@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from optimus import ai_fix, api
+from optimus import analyze as _analyze
 from optimus.tests.gate_fakes import (
 	DOCNAME,
 	OWNER,
@@ -57,16 +58,21 @@ def _env(monkeypatch, *, status="Ready", user=OWNER, perms=None, fetch_raises=Fa
 		seen.backfilled.append(d.name)
 
 	install_module(monkeypatch, "optimus.analyze", SimpleNamespace(
+		_run_ai_step=_analyze._run_ai_step,
 		_fetch_recordings=fetch,
 		_load_recordings_bundle=lambda d: None,
 		_backfill_ai_suggestions=backfill,
 		_render_and_attach_reports=lambda name, recs: seen.rendered.append((name, len(recs))),
 	))
 	install_module(monkeypatch, "optimus.pdf_export", SimpleNamespace(clear_cached_pdf=lambda u: seen.cleared.append(u)))
-	monkeypatch.setattr(
-		ai_fix, "log_ai_failure",
-		lambda title, exc=None, **kw: seen.logged.append((title, type(exc).__name__, sys.exc_info()[0])),
-	)
+	def log_failure(title, exc=None, **kw):
+		seen.logged.append((title, type(exc).__name__, sys.exc_info()[0]))
+		guard = ai_fix._InterruptGuard()
+		guard.note(exc)
+		if guard.pending():
+			raise guard.interrupt()
+
+	monkeypatch.setattr(ai_fix, "log_ai_failure", log_failure)
 	monkeypatch.setattr(api, "_enqueue_analyze", _must_not_run)
 	return fake, seen
 
@@ -234,4 +240,13 @@ def test_report_helpers_propagate_job_timeouts_without_the_failed_frames(monkeyp
 		frames.append(tb.tb_frame.f_code.co_name)
 		tb = tb.tb_next
 	assert "interrupted" not in frames
-	assert seen.logged == [] and seen.rendered == []
+	assert seen.rendered == []
+	if stage == "pdf":
+		assert seen.logged == []
+	else:
+		title = {
+			"fetch": "optimus regenerate_reports fetch",
+			"backfill": "optimus regenerate ai backfill",
+			"render": "optimus AI re-render", "rollback": "optimus AI re-render",
+		}[stage]
+		assert seen.logged == [(title, "_JobTimeout", None)]

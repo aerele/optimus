@@ -7,7 +7,7 @@ key leak (see the security advisory in CHANGELOG.md).
 A failed AI call could store the provider API key in plain text in
 ``tabError Log`` (and, once such a row was deleted, in its
 ``tabDeleted Document`` copy). ``scrub_error_log_secrets`` masks those keys in
-place; the ``v0_12.scrub_ai_keys_from_error_log`` patch runs it once on
+place; the ``v0_12_0.scrub_ai_keys_from_error_log`` patch runs it once on
 ``bench migrate``. ``purge_ai_error_logs`` is the opt-in stronger option: it
 deletes every Optimus AI row (they may also hold prompt text: source code and
 SQL with literal values).
@@ -73,7 +73,7 @@ from typing import NamedTuple
 import frappe
 
 from optimus import safe_commit
-from optimus.redaction import SECRET_PLACEHOLDER, scrub_secrets
+from optimus.redaction import MIN_KEY_LEN, SCRUB_TEXT_CAP, SECRET_PLACEHOLDER, key_literals, scrub_secrets
 
 
 class InsideBackgroundJobError(RuntimeError):
@@ -98,7 +98,7 @@ _OPTIMUS_AI_FRAME_PATHS = ("optimus/ai_fix.py", "frappe_profiler/ai_fix.py")
 _OPTIMUS_AI_FRAMES = tuple(f"%{path}%" for path in _OPTIMUS_AI_FRAME_PATHS)
 # Any of these next to an ai_fix.py frame means the row may hold a key.
 _SECRET_MARKERS = ("%Bearer %", "%api_key%", "%x-api-key%")
-_MIN_KEY_LEN = 8
+_MIN_KEY_LEN = MIN_KEY_LEN
 # The stored-key pass runs only for a key of at least this many characters,
 # and sends only a fragment of _FRAGMENT_LEN characters of it: a window made
 # only of _CLEAN_FRAGMENT characters when one exists (no LIKE metacharacter,
@@ -114,6 +114,15 @@ _WINDOW = 1000
 # UPDATE of a stored row cuts a masked value to fit; _masked_record moves a
 # record's long title in front of its error first (_long_title_into_error).
 _FIELD_LIMITS = {"method": 140}
+# The Error Log hook masks at most SCRUB_TEXT_CAP characters of each text
+# field (_capped): a longer one is cut there, its last token (a key the cut
+# may have split) dropped, and _CUT_MARK appended. _CUT_MARK holds no quote
+# and no run of 8 non-space characters, so no masking shape takes it: the
+# cut text stays masked-stable. The pass over a long title joined to its
+# error (_masked_record) masks only the lines within _JOIN_WINDOW characters
+# of the join, the only place the join can complete a shape.
+_CUT_MARK = "\n[...]"
+_JOIN_WINDOW = 8192
 # bench migrate runs the scrub only when measure_scan_size() finds at most
 # this many rows; a scan of a larger table would stall the migrate, so the
 # patch prints the command to run instead.
@@ -153,13 +162,29 @@ _ESCAPED_VALUE_LINE = re.compile(
 	r"""(\\n[ \t]+(?:value|values|one_value) = )(?:b?'|b?\\"|[\[(])(?:(?!\\n)(?:\\.|[^"\\]))"""
 	f"{{0,{_ESCAPED_VALUE_MAX_UNITS}}}"
 )
-# Independent residual check: provider key shapes wherever they appear
-# (OpenAI / Anthropic sk-, sk-ant-, sk-proj-; Groq gsk_; Google AIza). It
-# never drives the masking, so a row it still flags after the scrub holds a
-# shape the masking misses. Other providers' key shapes are covered only by
-# the stored-key literal and by the owner's count of the rotated keys.
+# Independent residual check: provider key shapes wherever they appear, as
+# whole tokens (no letter, digit, "_" or "-" on either side) at their real
+# lengths, with the digit a random key always has:
+# - sk- then 32 or more letters and digits (OpenAI's older keys, DeepSeek,
+#   Kimi / Moonshot);
+# - sk-<word>- then 32 or more characters of [A-Za-z0-9_-] (OpenAI sk-proj- /
+#   sk-svcacct- / sk-admin-, Anthropic sk-ant-api03-, OpenRouter sk-or-v1-);
+# - Groq gsk_ then 48 or more letters and digits;
+# - Google AIza then exactly 35 characters of [A-Za-z0-9_-].
+# So an identifier, a file name or prose that merely starts with such a
+# prefix (sk-learn-..., my_sk-..., gsk_config_...) is not flagged. It never
+# drives the masking, so a row it still flags after the scrub holds a shape
+# the masking misses. It only adds to the known literals, which come first
+# (_has_residual_secret): other providers' keys (Mistral, Cohere, ...) are
+# covered only by the stored-key literal and by the owner's count of the
+# rotated keys.
 _KEY_SHAPE = re.compile(
-	r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_\-]{16,}|gsk_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{30,})"
+	r"(?<![A-Za-z0-9_-])(?:"
+	r"sk-(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{32,}"
+	r"|sk-[a-z]{2,10}-(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]{32,}"
+	r"|gsk_(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{48,}"
+	r"|AIza[0-9A-Za-z_-]{35}"
+	r")(?![A-Za-z0-9_-])"
 )
 
 
@@ -226,8 +251,9 @@ def _key_fragment(api_key: str) -> tuple[str, bool]:
 def _holds_key(row: dict, fields: tuple[str, ...], api_key: str) -> bool:
 	"""True when the full key, raw, JSON-escaped or repr-escaped, is in one of
 	the row's text fields (the fragment the SQL matched is not enough). The
-	escaped key is held as ``secret``, a name the sanitizers redact."""
-	for secret in {api_key, _json_escaped(api_key), repr(api_key)[1:-1]}:
+	escaped key is held as ``secret``, a name the sanitizers redact. The
+	forms are ``redaction.key_literals``."""
+	for secret in key_literals(api_key):
 		for field in fields:
 			text = row.get(field)
 			if isinstance(text, str) and secret in text:
@@ -241,24 +267,35 @@ def _mask(text: str, api_key: str) -> str:
 	(``_VALUE_LINE``, ``_ESCAPED_VALUE_LINE``). Only text from the AI code or
 	holding the key comes here: the scrub's rows and the records the hook
 	recognises (``_is_ai_record``)."""
-	out = scrub_secrets(text, literals=(api_key, _json_escaped(api_key), repr(api_key)[1:-1]))
+	out = scrub_secrets(text, literals=key_literals(api_key))
 	out = _VALUE_LINE.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER, out)
 	return _ESCAPED_VALUE_LINE.sub(lambda m: m.group(1) + SECRET_PLACEHOLDER, out)
 
 
-def _has_residual_secret(text: str, api_key: str) -> bool:
-	if _KEY_SHAPE.search(text):
-		return True
-	return len(api_key) >= _MIN_KEY_LEN and _holds_key({"error": text}, ("error",), api_key)
+def _has_residual_secret(text: str, api_key: str, *, literals: tuple[str, ...] = ()) -> bool:
+	"""True when ``text`` still holds a key after masking. The known literals
+	drive it: the stored key (``api_key``) and any key literal passed in
+	(``literals``), each of at least ``_MIN_KEY_LEN`` characters, raw,
+	JSON-escaped or repr-escaped (``_holds_key``); then the provider shapes
+	(``_KEY_SHAPE``) add the keys no literal names. So a residual of 0 means
+	no current key and no known provider-shaped key is left, not that no key
+	of any provider is. Each key is held as ``secret``, a name the
+	sanitizers redact."""
+	for secret in (api_key, *literals):
+		if isinstance(secret, str) and len(secret) >= _MIN_KEY_LEN and _holds_key({"error": text}, ("error",), secret):
+			return True
+	return bool(_KEY_SHAPE.search(text))
 
 
 def _masked_record(record, api_key: str, *, failures: list[str] | None = None) -> dict | None:
 	"""An Error Log ``record`` as the Error Log hook
 	(``optimus.error_log_mask``) stores it, before Frappe's ``validate``,
-	length check and INSERT: its ``_RECORD_TEXT_FIELDS`` masked
-	(``_mask_row``), with a title longer than its column moved in front of
-	``error`` (``_long_title_into_error``) and the joined ``error`` masked
-	again, so it is idempotent.
+	length check and INSERT: its ``_RECORD_TEXT_FIELDS`` cut to
+	``SCRUB_TEXT_CAP`` characters (``_capped``) and masked (``_mask_row``),
+	with a title longer than its column moved in front of ``error``
+	(``_long_title_into_error``), the joined ``error`` cut again, and the
+	lines around the join masked again (``_join_masked``), so it is
+	idempotent.
 
 	The hook calls it only for a record from the AI code or holding the key
 	(``_is_ai_record``, or a record whose check failed, which the hook treats as
@@ -271,21 +308,50 @@ def _masked_record(record, api_key: str, *, failures: list[str] | None = None) -
 	job timeout is raised, not swallowed (``_reraise_job_timeout``)."""
 	if not isinstance(record, dict):
 		return None
-	masked = _mask_row(record, _RECORD_TEXT_FIELDS, api_key, cut=False, check_residual=False, failures=failures)
+	capped = {**record, **{f: _capped(record[f]) for f in _RECORD_TEXT_FIELDS if f in record}}
+	masked = _mask_row(capped, _RECORD_TEXT_FIELDS, api_key, cut=False, check_residual=False, failures=failures)
 	if masked is None:
 		return None
-	merged = {**record, **masked[0]}
+	merged = {**capped, **masked[0]}
 	moved = _long_title_into_error(merged)
 	if moved is merged:
 		return merged
-	# The joined "<title>\n<error>" is masked again as a whole: a shape the
-	# join completes (a title ending in "Bearer", an error starting with the
-	# token) is masked now, so a second pass, or the scrub of the row once
-	# Frappe has inserted it, changes nothing.
-	joined = _mask_row(moved, ("error",), api_key, cut=False, check_residual=False, failures=failures)
+	# The joined "<title>\n<error>" is masked again around the join: a shape
+	# the join completes (a title ending in "Bearer", an error starting with
+	# the token) is masked now, so a second pass, or the scrub of the row
+	# once Frappe has inserted it, changes nothing.
+	joined = _join_masked(_capped(moved["error"]), len(merged["method"]), api_key, failures)
 	if joined is None:
 		return None
-	return {**moved, **joined[0]}
+	return {**moved, "error": joined}
+
+
+def _capped(text):
+	"""``text`` cut to ``SCRUB_TEXT_CAP`` characters with ``_CUT_MARK`` at the
+	end, its last token (after the last ASCII whitespace) dropped, so a key
+	the cut split is never left in part; ``text`` itself when it fits or is
+	not a str."""
+	if not isinstance(text, str) or len(text) <= SCRUB_TEXT_CAP:
+		return text
+	head = text[:SCRUB_TEXT_CAP - len(_CUT_MARK)]
+	last_space = max(head.rfind(ch) for ch in " \t\n\r\x0b\x0c")
+	return head[:last_space + 1] + _CUT_MARK
+
+
+def _join_masked(error: str, join: int, api_key: str, failures: list[str] | None) -> str | None:
+	"""``error`` (``<title>\n<error>``, the title ``join`` characters long)
+	with the lines within ``_JOIN_WINDOW`` characters of the join masked
+	again as one text (``_mask_row``); the rest, each part already masked on
+	its own, is kept. A shape can cross the join only there: the masking's
+	shapes are bounded, and those of them that can span a line end are a
+	scheme or a name and its token. None when that pass failed."""
+	start = error.rfind("\n", 0, max(0, join - _JOIN_WINDOW)) + 1
+	end = error.find("\n", min(len(error), join + 1 + _JOIN_WINDOW))
+	end = len(error) if end < 0 else end
+	window = _mask_row({"error": error[start:end]}, ("error",), api_key, cut=False, check_residual=False, failures=failures)
+	if window is None:
+		return None
+	return error[:start] + window[0].get("error", error[start:end]) + error[end:]
 
 
 def _long_title_into_error(record: dict) -> dict:
@@ -591,17 +657,16 @@ def _log_line(line: str) -> None:
 	lower levels on a production site). It holds counts, exception type
 	names or fixed text, never row text. An RQ job timeout leaves as a fresh
 	instance; other logging exceptions are swallowed."""
-	from optimus.error_log_mask import _job_timeout_types
+	from optimus.ai_fix import _InterruptGuard
 
-	timeout_types = _job_timeout_types()
-	interrupt = None
+	guard = _InterruptGuard()
 	try:
-		frappe.logger("optimus").error(line)
-	except Exception as e:
-		if isinstance(e, timeout_types):
-			interrupt = (type(e), e.args)
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
+		with guard:
+			frappe.logger("optimus").error(line)
+	except Exception:
+		pass
+	if guard.pending():
+		raise guard.interrupt()
 
 
 def _refuse_inside_a_background_job() -> None:
@@ -743,9 +808,11 @@ def scrub_error_log_secrets(dry_run: bool = True, batch_size: int = _BATCH) -> d
 	- ``candidates``: Error Log rows read;
 	- ``changed`` / ``deleted_docs_changed``: Error Log rows and Deleted
 	  Document rows masked;
-	- ``residual``: rows that still hold a key-shaped value after masking
-	  (checked with a detector independent of the masking, only in the rows
-	  read);
+	- ``residual``: rows that still hold the stored key (raw, JSON-escaped or
+	  repr-escaped) or a known provider key shape after masking
+	  (``_has_residual_secret``, independent of the masking, only in the rows
+	  read). 0 means no current key and no known provider-shaped key is left
+	  in them, not that no key of any provider is;
 	- ``failed``: rows that could not be processed, plus one when the check
 	  for an unreadable key could not read Optimus Settings;
 	- ``key_unreadable``: True when a key is stored but cannot be read

@@ -250,3 +250,67 @@ class TestNumericFloorClamp:
 		# String passes through unchanged Frappe's Int validator
 		# rejects it on save.
 		assert doc.session_retention_days == "not a number"
+
+
+# ---------------------------------------------------------------------------
+# An API key that cannot be sent is refused at save time
+# ---------------------------------------------------------------------------
+
+
+class _Thrown(Exception):
+	pass
+
+
+def _settings_with_throw(monkeypatch):
+	OptimusSettings, stub = _fresh_controller(monkeypatch)
+
+	def _throw(msg, *a, **k):
+		raise _Thrown(msg)
+	stub.throw = _throw
+	return OptimusSettings, stub
+
+
+class TestAnUnsendableKeyIsRefusedOnSave:
+	"""The same check, and the same message, as ``ai_fix._get_api_key``: a key
+	that needs to be sent must be printable ASCII with no space. A key left
+	unchanged (Frappe's asterisks) and a keyless provider are not checked."""
+
+	@pytest.mark.parametrize(
+		"key",
+		["sk-live 0123456789", "sk-live-0123’456789", "sk-live- 0123456789", "sk-li\tve-0123456789", "sk-lé-0123"],
+		ids=["space", "smart-quote", "nbsp", "tab", "non-ascii"],
+	)
+	@pytest.mark.parametrize("provider", ["Anthropic", "OpenAI", None])
+	def test_refused_with_the_runtime_message(self, monkeypatch, key, provider):
+		OptimusSettings, _stub = _settings_with_throw(monkeypatch)
+		from optimus import ai_fix
+
+		doc = OptimusSettings(ai_api_key=key, ai_provider=provider, ai_enabled=0, tracked_apps=[])
+		with pytest.raises(_Thrown) as ei:
+			doc.validate()
+		assert str(ei.value) == ai_fix._unsendable_key_message()
+		assert key.strip() not in str(ei.value)
+
+	@pytest.mark.parametrize(
+		("key", "provider"),
+		[
+			("sk-live-0123456789abcdef", "Anthropic"),
+			("  sk-live-0123456789abcdef\n", "OpenAI"),  # stripped, as it is read
+			("*" * 24, "Anthropic"),  # unchanged: Frappe's placeholder
+			("", "Anthropic"),
+			(None, "OpenAI"),
+			("local key with spaces", "OpenAI-compatible"),  # keyless provider: never sent
+		],
+		ids=["ok", "surrounding-space", "placeholder", "empty", "none", "keyless"],
+	)
+	def test_accepted(self, monkeypatch, key, provider):
+		OptimusSettings, _stub = _settings_with_throw(monkeypatch)
+		OptimusSettings(ai_api_key=key, ai_provider=provider, ai_enabled=0, tracked_apps=[]).validate()
+
+	def test_the_runtime_check_raises_the_same_message(self, monkeypatch):
+		from optimus import ai_fix
+
+		monkeypatch.setattr(ai_fix, "_current_key_or_empty", lambda: "sk-live 0123456789")
+		with pytest.raises(ai_fix.AiFixError) as ei:
+			ai_fix._get_api_key(True)
+		assert str(ei.value) == ai_fix._unsendable_key_message()

@@ -33,25 +33,35 @@ shapes ``scrub_secrets`` knows and the bare header value lines are masked in
 ``error``, ``method`` and ``metadata`` (a field the doc does not hold, such as
 ``metadata`` on Frappe v15, is left alone); a title longer than its column is
 moved in front of ``error``, as v16's ``ErrorLog.validate`` does, and the
-joined text masked again. A truthy value that is not text is read as
+lines around the join masked again. Each field is cut to 65536 characters
+first (``redaction.SCRUB_TEXT_CAP``, its last token dropped and ``[...]``
+appended), so a huge record costs a bounded amount of work. A truthy value that is not text is read as
 ``str(value)``, the text the row stores, both to recognise the key and to mask
 it. Only the fields the masking changed are set.
 
-The key is read once per insert, of every Error Log row, since a row
+The key is normally read once per insert, of every Error Log row, since a row
 holding the key is one of Optimus's (``ai_fix._current_key_or_empty``,
 never cached, held only as ``api_key``), with Frappe's messages muted, so an
 undecryptable key does not add "Encryption key is invalid" to the reply of
 every request that logs an error. It is a SELECT on ``__Auth``, a table
-every Frappe site has, so it cannot fail in a healthy transaction.
+every Frappe site has, so it cannot fail in a healthy transaction. It is
+read only when one is stored (``_key_stored``: the Password field's plain
+Singles value, asterisks that Frappe caches per transaction, never
+decrypted); on a site where AI was never enabled no key is read, and only
+the frame check decides.
 
 An RQ job timeout (the job must stop) leaves as a fresh instance raised after
 the ``try``, so the frames it interrupted (the record's text, the key read)
 never travel with it. Non-Exception interrupts during the key read keep their
 identity with decrypt frames and exception chains cleared. Ordinary failures
-leave the doc as it was, with two exceptions. When the masking fails (on a
-record of Optimus's, the only ones it masks), the text is withheld
-(``_withhold``) instead of inserted raw. When Optimus's other modules cannot
-be imported, the stored key alone is masked with Frappe alone
+leave another app's doc as it was, and fail closed for a record of the AI
+code. When the masking fails (on a record of Optimus's, the only ones it
+masks), the text is withheld (``_withhold``) instead of inserted raw. When
+anything else fails unexpectedly, a record holding an ``ai_fix.py`` frame
+or the stored key (standard library checks alone, one independent key read
+with Frappe) is withheld the same way
+and every other record is left as it was (``_fail_closed``). When Optimus's
+other modules cannot be imported, the fallback works with Frappe alone
 (``_mask_stored_key_only``, below). Each failure leaves a line in the
 ``optimus`` log (an exception type name at most, never row text; an outcome
 the first time it happens in the process, then every 1000th time, ``_note``).
@@ -74,13 +84,16 @@ started before the upgrade still holds the old Optimus modules
 resolves and its import of ``optimus.maintenance`` fails inside the guard,
 instead of every Error Log insert of that process failing until it is
 restarted. That process still runs the old AI code, the code that leaks the
-key, so the hook then falls back to Frappe alone: it reads the stored key
-with ``frappe.utils.password.get_decrypted_password`` (messages muted, held
-as ``api_key``, its escaped forms as ``secret``) and replaces them with
-``********`` in ``error``, ``method`` and ``metadata``, wherever they hold
-them. A row without the key is left byte-identical, and a key shorter than 8
-characters is not replaced, as in the masking above. Key shapes and value
-lines are not masked there: that needs the modules that failed to import. On
+key, so the hook then falls back to Frappe alone. A record holding an
+``ai_fix.py`` frame is withheld (``_withhold``: it cannot be masked there,
+and its key may be one no longer stored). In every other record it reads
+the stored key with ``frappe.utils.password.get_decrypted_password``
+(messages muted, held as ``api_key``, its escaped forms as ``secret``) and
+replaces them with ``********`` in ``error``, ``method`` and ``metadata``,
+wherever they hold them. A row without the key is left byte-identical, and a
+key shorter than 8 characters is not replaced, as in the masking above. Key
+shapes and value lines are not masked there: that needs the modules that
+failed to import. On
 an image-based or rolling deployment a process of the old image has no such
 module: once it reads the new hooks, every Error Log insert there fails
 until the process is replaced, and no code here can prevent it (SECURITY.md,
@@ -90,6 +103,11 @@ until the process is replaced, and no code here can prevent it (SECURITY.md,
 
 import json
 
+# The path suffix of this module's frames ("optimus/error_log_mask.py"), built
+# from its own name so a rename or a move cannot leave a stale copy: the
+# analyzers (optimus.analyzers.base) recognise the hook's own stored-key read
+# by it.
+HOOK_FRAME_SUFFIX = __name__.replace(".", "/") + ".py"
 # The Error Log fields that are masked (the ones the scrub reads in a row).
 _TEXT_FIELDS = ("error", "method", "metadata")
 # What a withheld record stores instead of its text: stored Error Log
@@ -99,10 +117,15 @@ WITHHELD = "Optimus withheld this error text: it could not be masked. See logs/o
 WITHHELD_TITLE = "Optimus withheld this error title: it could not be masked."
 # Error Log.method is Data (varchar(140)).
 _TITLE_LIMIT = 140
-# optimus.redaction.SECRET_PLACEHOLDER and maintenance._MIN_KEY_LEN, copied:
-# the fallback runs where those modules cannot be imported.
+# optimus.redaction.SECRET_PLACEHOLDER and MIN_KEY_LEN, copied: the fallback
+# runs where those modules cannot be imported (a test pins them equal).
 _PLACEHOLDER = "********"
 _MIN_KEY_LEN = 8
+# maintenance._OPTIMUS_AI_FRAME_PATHS, copied for the same reason: the frame
+# paths of Optimus's AI module (under its name and under the app's name
+# before the rename). A record holding one is withheld whenever it cannot be
+# masked (_fail_closed, _mask_stored_key_only).
+_AI_FRAME_PATHS = ("optimus/ai_fix.py", "frappe_profiler/ai_fix.py")
 # How many times each outcome has been noted in this process (_note), and
 # how often a repeated one is logged: its first time, then every
 # _NOTE_EVERY-th time. The outcomes are a few fixed texts and exception
@@ -120,17 +143,76 @@ def mask_error_log(doc, method=None) -> None:
 	timeout_types = _job_timeout_types()
 	interrupt = None
 	outcome = None
+	failure = None
 	try:
 		outcome = _mask_doc(doc, timeout_types)
 	except Exception as e:
 		if isinstance(e, timeout_types):
 			interrupt = (type(e), e.args)
 		else:
-			outcome = f"stored as it was: {type(e).__name__}"
+			failure = type(e).__name__
 	if interrupt is not None:
 		raise interrupt[0](*interrupt[1])
+	if failure is not None:
+		outcome = _fail_closed(doc, failure, timeout_types)
 	if outcome is not None:
 		_note(outcome, timeout_types)
+
+
+def _fail_closed(doc, failure: str, timeout_types) -> str:
+	"""After an unexpected failure (``failure``, its exception type name):
+	a record holding a frame of Optimus's AI module or the stored key has its text
+	withheld (``_withhold``, the same rule as a failed masking); every other
+	record is left as it was (fail-open: the hook is site-wide). Returns the
+	outcome for the ``optimus`` log. Never raises, except an RQ job timeout,
+	raised again as a fresh instance; a failure here leaves the outcome
+	"stored as it was"."""
+	outcome = f"stored as it was: {failure}"
+	interrupt = None
+	try:
+		import frappe
+
+		record = _record(doc)
+		# The failed pass may already have changed some fields. Check the
+		# remaining text with Frappe alone, including key-only records.
+		api_key = ""
+		try:
+			api_key = _read_key(frappe, _stored_key) if _key_stored(frappe, timeout_types) else ""
+		except Exception as e:
+			if isinstance(e, timeout_types):
+				raise
+			# A broken key read cannot disable the independent frame check.
+
+		def is_ai(fields):
+			return _holds_ai_frame(fields) or _holds_key(fields, api_key)
+		if is_ai(record):
+			_withhold(doc, record, is_ai)
+			outcome = f"withheld: its masking failed unexpectedly ({failure})"
+	except Exception as e:
+		if isinstance(e, timeout_types):
+			interrupt = (type(e), e.args)
+	if interrupt is not None:
+		raise interrupt[0](*interrupt[1])
+	return outcome
+
+
+def _record(doc) -> dict:
+	"""``doc``'s text fields that are set, a truthy value that is not text read
+	as ``str(value)`` (the text the row stores)."""
+	record = {}
+	for field in _TEXT_FIELDS:
+		value = doc.get(field)
+		if value is None:
+			continue
+		record[field] = str(value) if value and not isinstance(value, str) else value
+	return record
+
+
+def _holds_ai_frame(fields: dict) -> bool:
+	"""True when a text field of ``fields`` holds a frame of Optimus's AI
+	module (``_AI_FRAME_PATHS``): a plain substring check, standard library
+	alone, as ``maintenance._is_ai_record`` makes it."""
+	return any(isinstance(text, str) and any(path in text for path in _AI_FRAME_PATHS) for text in fields.values())
 
 
 def _mask_doc(doc, timeout_types) -> str | None:
@@ -151,17 +233,12 @@ def _mask_doc(doc, timeout_types) -> str | None:
 			raise
 		stale = type(e).__name__
 
-	record = {}
-	for field in _TEXT_FIELDS:
-		value = doc.get(field)
-		if value is None:
-			continue
-		record[field] = str(value) if value and not isinstance(value, str) else value
+	record = _record(doc)
 	if not record:
 		return None
 	if stale is not None:
-		return _mask_stored_key_only(frappe, doc, stale)
-	api_key = _read_key(frappe, _current_key_or_empty)
+		return _mask_stored_key_only(frappe, doc, stale, record)
+	api_key = _read_key(frappe, _current_key_or_empty) if _key_stored(frappe, timeout_types) else ""
 	# Only a record from Optimus's AI code or holding the key is Optimus's to
 	# change; every other row is left exactly as it was.
 	failures = []
@@ -169,7 +246,7 @@ def _mask_doc(doc, timeout_types) -> str | None:
 		return None
 	masked = _masked(maintenance, record, api_key, timeout_types, failures=failures)
 	if masked is None:
-		_withhold(doc, maintenance, record, api_key, timeout_types)
+		_withhold(doc, record, lambda fields: _is_ai(maintenance, fields, api_key, timeout_types))
 		reason = ", ".join(dict.fromkeys(failures)) or "no masked record"
 		return f"withheld: its masking failed ({reason})"
 	for field in _TEXT_FIELDS:
@@ -178,16 +255,24 @@ def _mask_doc(doc, timeout_types) -> str | None:
 	return None
 
 
-def _mask_stored_key_only(frappe, doc, stale: str) -> str:
+def _mask_stored_key_only(frappe, doc, stale: str, record: dict) -> str:
 	"""The fallback of a process whose Optimus modules cannot be imported
-	(``stale``, the import's exception type name): replace the stored key, raw,
-	JSON-escaped and repr-escaped, with ``_PLACEHOLDER`` in the text fields that
-	hold it (a truthy value that is not text is read as ``str(value)``), using
-	Frappe alone. A key shorter than ``_MIN_KEY_LEN`` characters is not replaced;
-	a row without the key is left as it was. Returns the outcome for the
-	``optimus`` log. Raises what it cannot handle; ``mask_error_log`` catches
-	it."""
-	api_key = _read_key(frappe, _stored_key)
+	(``stale``, the import's exception type name), with Frappe and the
+	standard library alone. It fails closed for a record of Optimus's AI code
+	(a frame of it in ``record``, ``_holds_ai_frame``): that process runs the
+	old AI code and the key shapes cannot be masked here, so its text is
+	withheld (``_withhold``, the same rule as a failed masking: the title and
+	the metadata too when they hold a frame or the stored key). In every
+	other record the stored key, raw, JSON-escaped and repr-escaped, is
+	replaced with ``_PLACEHOLDER`` in the text fields that hold it (a truthy
+	value that is not text is read as ``str(value)``); a key shorter than
+	``_MIN_KEY_LEN`` characters is not replaced, and a row without the key is
+	left as it was. Returns the outcome for the ``optimus`` log. Raises what
+	it cannot handle; ``mask_error_log`` catches it."""
+	api_key = _read_key(frappe, _stored_key) if _key_stored(frappe, _job_timeout_types()) else ""
+	if _holds_ai_frame(record):
+		_withhold(doc, record, lambda fields: _holds_ai_frame(fields) or _holds_key(fields, api_key))
+		return f"withheld: a record of the AI code (Optimus's modules could not be imported: {stale})"
 	if len(api_key) >= _MIN_KEY_LEN:
 		for field in _TEXT_FIELDS:
 			value = doc.get(field)
@@ -197,11 +282,55 @@ def _mask_stored_key_only(frappe, doc, stale: str) -> str:
 			masked = text
 			# Escaped forms first: replacing raw backslashes first could
 			# leave an escape from the representation beside the mask.
-			for secret in sorted({api_key, json.dumps(api_key)[1:-1], repr(api_key)[1:-1]}, key=len, reverse=True):
+			for secret in sorted(_key_literals(api_key), key=len, reverse=True):
 				masked = masked.replace(secret, _PLACEHOLDER)
 			if masked != text:
 				doc.set(field, masked)
 	return f"checked for the stored key alone (Optimus's modules could not be imported: {stale})"
+
+
+def _holds_key(fields: dict, api_key: str) -> bool:
+	"""True when a text field of ``fields`` holds ``api_key`` (at least
+	``_MIN_KEY_LEN`` characters), raw, JSON-escaped or repr-escaped: the
+	standard-library check of the fallback."""
+	if not isinstance(api_key, str) or len(api_key) < _MIN_KEY_LEN:
+		return False
+	return any(
+		isinstance(text, str) and secret in text for secret in _key_literals(api_key) for text in fields.values()
+	)
+
+
+def _key_stored(frappe, timeout_types) -> bool:
+	"""False only when Optimus Settings holds no API key (none was ever stored:
+	AI never enabled), so the key is not read at all: no SELECT on ``__Auth``,
+	no decrypt, on every Error Log insert of such a site. It reads the plain
+	Singles value of the Password field (``frappe.db.get_single_value``),
+	which holds one asterisk per character of a stored key, never the key,
+	and which Frappe caches per transaction (``Database.value_cache`` on v15
+	and v16, cleared at commit and rollback); a key written there by hand as
+	plain text is held as ``secret``, a name the sanitizers redact. As in
+	``maintenance._key_unreadable``: no Optimus Settings DocType
+	(``DoesNotExistError``) means no key; any other failure answers True, so
+	the key is read as before. An RQ job timeout goes through
+	(``mask_error_log`` raises it again, fresh)."""
+	missing = getattr(frappe, "DoesNotExistError", ())
+	try:
+		secret = frappe.db.get_single_value("Optimus Settings", "ai_api_key")
+	except Exception as e:
+		if isinstance(e, timeout_types):
+			raise
+		return not isinstance(e, missing)
+	return isinstance(secret, str) and bool(secret.strip())
+
+
+def _key_literals(api_key) -> tuple[str, ...]:
+	"""``optimus.redaction.key_literals``, copied with the standard library
+	alone for the fallback (a test pins the two equal): ``api_key`` raw,
+	JSON-escaped and repr-escaped, without duplicates, raw first; ``()`` for
+	no key."""
+	if not isinstance(api_key, str) or not api_key:
+		return ()
+	return tuple(dict.fromkeys((api_key, json.dumps(api_key)[1:-1], repr(api_key)[1:-1])))
 
 
 def _stored_key() -> str:
@@ -285,23 +414,25 @@ def _is_ai(maintenance, fields: dict, api_key: str, timeout_types, *, failures: 
 		return True
 
 
-def _withhold(doc, maintenance, record: dict, api_key: str, timeout_types) -> None:
-	"""Store a fixed, key-free note instead of a record whose masking failed:
-	``error`` always gets ``WITHHELD``. The title (``method``) gets
-	``WITHHELD_TITLE`` when it holds a frame of Optimus's AI code or the key;
-	otherwise it is kept, cut to its column as v16's ``validate`` cuts it
-	(the full title would have gone in front of the withheld error).
-	``metadata`` gets ``WITHHELD`` when it holds a frame or the key, and is
-	kept otherwise."""
+def _withhold(doc, record: dict, is_ai) -> None:
+	"""Store a fixed, key-free note instead of a record that could not be
+	masked: ``error`` always gets ``WITHHELD``. The title (``method``) gets
+	``WITHHELD_TITLE`` when ``is_ai({"method": title})`` (it holds a frame of
+	Optimus's AI code or the key); otherwise it is kept, cut to its column as
+	v16's ``validate`` cuts it (the full title would have gone in front of
+	the withheld error). ``metadata`` gets ``WITHHELD`` when
+	``is_ai({"metadata": metadata})``, and is kept otherwise. ``is_ai`` is
+	the masking's own check (``_is_ai``) or, where Optimus's modules are not
+	used, the standard-library one."""
 	doc.set("error", WITHHELD)
 	title = record.get("method")
 	if isinstance(title, str):
-		if _is_ai(maintenance, {"method": title}, api_key, timeout_types):
+		if is_ai({"method": title}):
 			doc.set("method", WITHHELD_TITLE)
 		elif len(title) > _TITLE_LIMIT:
 			doc.set("method", title[:_TITLE_LIMIT])
 	metadata = record.get("metadata")
-	if metadata is not None and _is_ai(maintenance, {"metadata": metadata}, api_key, timeout_types):
+	if metadata is not None and is_ai({"metadata": metadata}):
 		doc.set("metadata", WITHHELD)
 
 
