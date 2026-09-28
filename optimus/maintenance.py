@@ -153,13 +153,27 @@ _ESCAPED_VALUE_LINE = re.compile(
 	r"""(\\n[ \t]+(?:value|values|one_value) = )(?:b?'|b?\\"|[\[(])(?:(?!\\n)(?:\\.|[^"\\]))"""
 	f"{{0,{_ESCAPED_VALUE_MAX_UNITS}}}"
 )
-# Independent residual check: provider key shapes wherever they appear
-# (OpenAI / Anthropic sk-, sk-ant-, sk-proj-; Groq gsk_; Google AIza). It
-# never drives the masking, so a row it still flags after the scrub holds a
-# shape the masking misses. Other providers' key shapes are covered only by
-# the stored-key literal and by the owner's count of the rotated keys.
+# Independent residual check: provider key shapes wherever they appear, as
+# whole tokens (no letter, digit, "_" or "-" on either side) at their real
+# lengths, with the digit a random key always has:
+# - sk- then 32 or more letters and digits (OpenAI's older keys, DeepSeek,
+#   Kimi / Moonshot);
+# - sk-<word>- then 32 or more characters of [A-Za-z0-9_-] (OpenAI sk-proj- /
+#   sk-svcacct- / sk-admin-, Anthropic sk-ant-api03-, OpenRouter sk-or-v1-);
+# - Groq gsk_ then 48 or more letters and digits;
+# - Google AIza then exactly 35 characters of [A-Za-z0-9_-].
+# So an identifier, a file name or prose that merely starts with such a
+# prefix (sk-learn-..., my_sk-..., gsk_config_...) is not flagged. It never
+# drives the masking, so a row it still flags after the scrub holds a shape
+# the masking misses. Other providers' key shapes are covered only by the
+# stored-key literal and by the owner's count of the rotated keys.
 _KEY_SHAPE = re.compile(
-	r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_\-]{16,}|gsk_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{30,})"
+	r"(?<![A-Za-z0-9_-])(?:"
+	r"sk-(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{32,}"
+	r"|sk-[a-z]{2,10}-(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]{32,}"
+	r"|gsk_(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{48,}"
+	r"|AIza[0-9A-Za-z_-]{35}"
+	r")(?![A-Za-z0-9_-])"
 )
 
 

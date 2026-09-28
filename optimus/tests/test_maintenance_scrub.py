@@ -486,7 +486,13 @@ class TestScrubErrorLogSecrets:
 			assert json.loads(text)  # still valid JSON
 
 	@pytest.mark.parametrize(
-		"shape", ["sk-proj-AAAABBBBCCCCDDDDEEEE", "gsk_AAAABBBBCCCCDDDDEEEE", "AIzaSyA-0123456789abcdefghijABCDEFGHIJ"],
+		"shape",
+		[
+			"sk-proj-" + "Ab1_" * 12 + "T3BlbkFJ" + "cD2-" * 12,
+			"gsk_" + "Wx7Yz" * 10 + "Q9",
+			"AIzaSyA-0123456789abcdefghijABCDEFGHIJK",
+		],
+		ids=["openai-project", "groq", "google"],
 	)
 	def test_residual_counts_a_key_shape_the_masking_misses(self, fake, shape):
 		# An older key (not the one stored today) in plain prose: no marker
@@ -984,6 +990,75 @@ def _v16_error_log_validate(row: dict) -> dict:
 		row["error"] = f"{row['method']}\n{row['error']}"
 		row["method"] = row["method"][:140]
 	return row
+
+
+# Fake keys with the shapes and lengths of real ones (never real keys).
+_REAL_SHAPES = {
+	"openai-legacy": "sk-" + "Ab3dEf6hIj9kLm2nOp5qRs8tUv1w" + "T3BlbkFJ" + "Xy4zAb7cDe0f",
+	"openai-project": "sk-proj-" + "Ab1_Cd2-Ef3G" * 13,
+	"openai-svcacct": "sk-svcacct-" + "Zz9_Yy8-Xx7W" * 12,
+	"anthropic": "sk-ant-api03-" + "aB3_cD4-eF5g" * 7 + "hI6jK7lM8" + "AA",
+	"deepseek": "sk-" + "0123456789abcdef" * 2,
+	"moonshot": "sk-" + "Q1w2E3r4T5y6U7i8O9p0" * 2 + "AsDfGhJk",
+	"openrouter": "sk-or-v1-" + "0123456789abcdef" * 4,
+	"groq": "gsk_" + "Wx7Yz" * 10 + "Q9",
+	"google": "AIzaSyA-0123456789abcdefghijABCDEFGHIJK",
+}
+# Tokens that only look like the prefixes: identifiers, file names, prose.
+_NOT_KEYS = [
+	"sk-learn-preprocessing-pipeline-for-large-datasets",
+	"my_sk-learn-preprocessing-pipeline-0123456789-abcdefgh",
+	"task-0123456789abcdef0123456789abcdef-scheduler",
+	"sk-0123456789",
+	"sk-0123456789abcdefABCD0123",
+	"sk-proj-0123456789-abcdefghij",
+	"sk-" + "0123456789abcdef" * 2 + "_suffix.py",
+	"import sk-proj-helpers-module-for-the-billing-dashboard",
+	"gsk_config_loader_for_production_environment",
+	"gsk_" + "Wx7Yz" * 4,
+	"AIzaSyA-0123456789abcdefghijABCDEFGHIJKLMNOP",
+	"xAIzaSyA-0123456789abcdefghijABCDEFGHIJK",
+	"AIzaSyA-0123456789abcdefghijABCDEFGH",
+	"prefix_AIzaSyA-0123456789abcdefghijABCDEFGHIJK",
+]
+
+
+class TestResidualKeyShapes:
+	"""``_KEY_SHAPE``, the residual check independent of the masking: real
+	provider key shapes, at their real lengths, as whole tokens."""
+
+	@pytest.mark.parametrize("name", sorted(_REAL_SHAPES))
+	@pytest.mark.parametrize(
+		"context", ["{k}", "note = '{k}'", '{{"key": "{k}"}}', "rotated {k}, then", "key={k}\n"],
+		ids=["bare", "quoted", "json", "prose", "line"],
+	)
+	def test_a_real_shape_is_flagged(self, name, context):
+		key = _REAL_SHAPES[name]
+		text = context.format(k=key)
+		assert maintenance._KEY_SHAPE.search(text), (name, text)
+		assert maintenance._has_residual_secret(text, "")
+
+	@pytest.mark.parametrize("text", _NOT_KEYS)
+	def test_a_look_alike_is_not_flagged(self, text):
+		assert not maintenance._KEY_SHAPE.search(text), text
+		assert not maintenance._has_residual_secret(text, "")
+
+	@pytest.mark.parametrize("name", sorted(_REAL_SHAPES))
+	@pytest.mark.parametrize(
+		"shape",
+		[
+			"headers = {{'authorization': 'Bearer {k}'}}",
+			'headers = {{"x-api-key": "{k}"}}',
+			"      header = b'x-api-key: {k}'",
+			"provider = {{'api_key': '{k}'}}",
+		],
+		ids=["bearer", "x-api-key-dict", "x-api-key-line", "api-key-field"],
+	)
+	def test_the_masking_still_masks_every_real_shape_without_the_key(self, name, shape):
+		text = shape.format(k=_REAL_SHAPES[name])
+		masked = maintenance._mask(text, "sk-a-different-stored-key-0123456789")
+		assert _REAL_SHAPES[name] not in masked
+		assert not maintenance._has_residual_secret(masked, "")
 
 
 class TestMaskedRecord:
