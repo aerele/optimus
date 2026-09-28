@@ -1050,8 +1050,9 @@
   .line-prof .tok-cm                             { color: #008000; font-style: italic; }
   .line-prof .tok-o, .line-prof .tok-p           { color: #000000; }
 
-  /* CHAIN - call-chain pill track. Replaces the dashed-border-top
-     Phase 2 / drill-down callouts inside the old smoking-gun panel. */
+  /* CHAIN - nested-call tree. Renders each finding's call breadcrumb as an
+     indented tree of frames (outer at the top, deepest = terminal red),
+     replacing the old single-line pill track. */
   .chain {
     margin-top: 12px; padding-top: 12px;
     border-top: 1px dashed var(--rule);
@@ -1060,23 +1061,46 @@
     font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase;
     color: var(--ink-mute); font-weight: 600; margin-bottom: 8px;
   }
-  .chain-track {
-    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  .chain-tree {
     font-family: var(--mono); font-size: 12px;
+    /* Scoped horizontal scrollbar so a deep chain's trailing frames stay
+       reachable instead of clipping; only this block scrolls. */
+    overflow-x: auto;
+    /* overflow-x:auto coerces overflow-y to auto per the CSS overflow spec
+       (a visible/non-visible pair is not allowed). Declared explicitly so the
+       coupling is intentional: the box has no height cap, so it grows to its
+       content and never clips or shows a vertical scrollbar. Same pattern as
+       .call-tree above. */
+    overflow-y: auto;
   }
-  .chain-track .step {
+  /* max-content rows so a deep/wide chain overflows the box and the
+     scroll above kicks in (rather than clipping the trailing frames). */
+  .chain-tree .ct-node {
+    display: flex; align-items: center; gap: 6px; line-height: 1.6;
+    width: max-content; white-space: nowrap;
+  }
+  .chain-tree .ct-node + .ct-node { margin-top: 4px; }
+  .chain-tree .ct-branch { color: var(--ink-mute); white-space: pre; }
+  .chain-tree .ct-step {
     padding: 3px 8px; background: var(--bg-paper);
     border: 1px solid var(--rule);
     border-radius: 3px; color: var(--ink-soft);
   }
-  .chain-track .step.terminal {
+  .chain-tree .ct-step.terminal {
     background: var(--accent); color: white;
     border-color: var(--accent);
   }
-  .chain-track .arrow { color: var(--ink-mute); font-size: 11px; }
   .chain-foot {
     font-size: 11px; color: var(--ink-mute); margin-top: 6px;
     font-family: var(--sans);
+  }
+  @media print {
+    /* Paper can't scroll, so drop the scroll and let a long row wrap onto
+       the page instead of hard-clipping its trailing frames (same reasoning
+       as the call-tree print fix above). overflow must be visible on both
+       axes or the CSS rule coerces the auto/visible pair back to auto. */
+    .chain-tree { overflow: visible; }
+    .chain-tree .ct-node { width: auto; min-width: 0; white-space: normal; }
   }
 
   /* PHASE 2 hottest-line callout - when present and the finding
@@ -1802,6 +1826,22 @@
 </head>
 <body>
 
+{# Nested-call tree. Takes a list of frame label strings (outer first,
+   deepest last) and renders them as an indented tree: the first row is the
+   root (no connector) while each deeper row is indented one level under a
+   corner connector. The deepest row is the terminal (accent) node, but only
+   when there is a descent (more than one row) so a lone root is never
+   reddened. Named for its .chain-tree output, distinct from the separate
+   call_tree_renderer that builds the .call-tree panel. Shared by the
+   Drill-down and Call chain blocks so every finding card reads the same way. #}
+{% macro chain_tree(rows) %}
+<div class="chain-tree">
+  {% for row in rows %}
+  <div class="ct-node" style="padding-left: {{ loop.index0 * 16 }}px">{% if not loop.first %}<span class="ct-branch" aria-hidden="true">&#9492;&#9472; </span>{% endif %}<span class="ct-step{% if loop.last and rows | length > 1 %} terminal{% endif %}">{{ row }}</span></div>
+  {% endfor %}
+</div>
+{% endmacro %}
+
 {# v0.5.2: shared finding-card macro used by both Findings and
    Observations sections. DRYs out the ~40-line card markup so the
    per-app bucket loop stays readable. `show_fix_hint_label` toggles
@@ -1811,7 +1851,7 @@
 
      - `.finding-top` 3-zone grid: severity pill | title + meta | impact.
      - `.finding-body` wraps the smoking-gun (dark code block) + call
-       chain (pill track, last step red) + technical details + AI fix
+       chain (nested tree, deepest frame red) + technical details + AI fix
        box.
      - Old `.finding-header` / `.severity-badge` / `.smoking-gun` /
        `.ai-fix` class names became orphaned; their CSS is still in the
@@ -1877,7 +1917,7 @@
 
     {# v0.7.x redesign Phase D: smoking-gun block. The file:line
        callsite header moved into `.finding-meta` under the title; this
-       block is now purely the dark code-block + chain pills + Phase 2
+       block is now purely the dark code-block + chain tree + Phase 2
        crosslink + target-doc breadcrumb.
 
        Callers embedding the macro in narrow contexts (per-action row,
@@ -1923,14 +1963,14 @@
         {% endif %}
       {% endif %}
 
-      {# Call chain (Phase 2 instrumented chain). Pills, terminal red. #}
+      {# Call chain (Phase 2 instrumented chain). Nested-call tree, terminal red. #}
       {% set _phase2_chain = (f.technical_detail or {}).get("call_chain") if f.technical_detail else None %}
       {% if _phase2_chain and _phase2_chain | length > 1 %}
       <div class="chain">
         <div class="chain-label">Call chain</div>
-        <div class="chain-track">
-          {% for step in _phase2_chain %}<span class="step{% if loop.last %} terminal{% endif %}">{{ step.qualname }}:{{ step.lineno }}</span>{% if not loop.last %}<span class="arrow">&rarr;</span>{% endif %}{% endfor %}
-        </div>
+        {% set _cc_rows = [] %}
+        {% for step in _phase2_chain %}{% set _ = _cc_rows.append(step.qualname ~ (":" ~ step.lineno if step.lineno else "")) %}{% endfor %}
+        {{ chain_tree(_cc_rows) }}
         <div class="chain-foot">deepest line is where the cost is incurred</div>
       </div>
       {% endif %}
@@ -1947,7 +1987,7 @@
       </div>
       {% endif %}
 
-      {# Drill-down chain. Renders as a pill track ending in red
+      {# Drill-down chain. Renders as a nested-call tree ending in red
          (terminal = deepest user-code frame). Empty chain renders
          the placeholder. #}
       {% set _drilldown = (f.technical_detail or {}).get("drilldown_chain") if f.technical_detail else None %}
@@ -1955,10 +1995,9 @@
       {% if _drilldown %}
       <div class="chain">
         <div class="chain-label">Drill-down</div>
-        <div class="chain-track">
-          <span class="step">{{ _drill_root_fn }}</span>
-          {% for level in _drilldown %}<span class="arrow">&rarr;</span><span class="step{% if loop.last %} terminal{% endif %}">{{ level.function }}:{{ level.lineno }}</span>{% endfor %}
-        </div>
+        {% set _dd_rows = [_drill_root_fn] %}
+        {% for level in _drilldown %}{% set _ = _dd_rows.append(level.function ~ (":" ~ level.lineno if level.lineno else "")) %}{% endfor %}
+        {{ chain_tree(_dd_rows) }}
         <div class="chain-foot">time inside <code>{{ _drill_root_fn }}</code> walked through</div>
       </div>
       {% elif _drilldown is not none %}
