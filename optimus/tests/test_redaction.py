@@ -456,3 +456,35 @@ class TestKeyLiterals:
 		assert error_log_mask._MIN_KEY_LEN == redaction.MIN_KEY_LEN == maintenance._MIN_KEY_LEN
 		assert error_log_mask._PLACEHOLDER == redaction.SECRET_PLACEHOLDER
 		assert maintenance._holds_key({"error": f"x {repr(key)[1:-1]} y"}, ("error",), key)
+
+
+class TestBytesHeaderValues:
+	"""A header dict printed with bytes values (``{'x-api-key': b'...'}``, as
+	urllib3 or a caller holds them) is masked like its str form."""
+
+	@pytest.mark.parametrize(
+		("text", "masked"),
+		[
+			("headers = {'x-api-key': b'sk-ant-api03-OLDkey0123456789abcdef'}",
+			 "headers = {'x-api-key': b'********'}"),
+			('headers = {"x-goog-api-key": b"AIzaSyOLDkey0123456789abcdefghijklmn"}',
+			 'headers = {"x-goog-api-key": b"********"}'),
+			("headers = {b'authorization': b'Bearer sk-OLDkey0123456789abcdef'}",
+			 "headers = {b'authorization': b'Bearer ********'}"),
+			# no bare shape takes this one: only the header entry does
+			("headers = {'Authorization': b'token OLDapikeyvalue:OLDapisecretvalue'}",
+			 "headers = {'Authorization': b'token ********'}"),
+			("headers = {'x-api-key': 'sk-ant-api03-OLDkey0123456789abcdef'}",
+			 "headers = {'x-api-key': '********'}"),
+			('headers = {"x-goog-api-key": "AIzaSyOLDkey0123456789abcdefghijklmn"}',
+			 'headers = {"x-goog-api-key": "********"}'),
+			("headers = {'authorization': 'Bearer sk-OLDkey0123456789abcdef'}",
+			 "headers = {'authorization': 'Bearer ********'}"),
+		],
+		ids=["x-api-key-bytes", "goog-bytes", "authorization-bytes", "authorization-token-bytes", "x-api-key-str", "goog-str", "authorization-str"],
+	)
+	def test_bytes_and_str_values_are_masked(self, text, masked):
+		out = redaction.scrub_secrets(text)
+		assert out == masked
+		assert "OLD" not in out
+		assert redaction.scrub_secrets(out) == out

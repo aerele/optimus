@@ -165,14 +165,16 @@ def redact_call_queries(calls, *, extra_columns: tuple[str, ...] = ()) -> None:
 SECRET_PLACEHOLDER = "********"
 
 _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
-	# 'authorization': 'Bearer <tok>' (either quote style; also Basic / Token)
+	# 'authorization': 'Bearer <tok>' (either quote style; also Basic / Token;
+	# the value may be bytes: b'Bearer <tok>')
 	re.compile(
-		r"""((['"])(?:proxy-)?authorization\2\s*:\s*(['"])(?:bearer|basic|token)\s+)(?!\*{8}\3)[^'"\s]+(\3)""",
+		r"""((['"])(?:proxy-)?authorization\2\s*:\s*b?(['"])(?:bearer|basic|token)\s+)(?!\*{8}\3)[^'"\s]+(\3)""",
 		re.IGNORECASE,
 	),
 	# 'x-api-key' / 'x-goog-api-key' / 'api_key' / 'api-key' / 'apikey' : '<tok>'
+	# (the value may be bytes: b'<tok>')
 	re.compile(
-		r"""((['"])(?:x-api-key|x-goog-api-key|api[_-]?key|apikey)\2\s*:\s*(['"]))(?!\*{8}\3)[^'"]+(\3)""",
+		r"""((['"])(?:x-api-key|x-goog-api-key|api[_-]?key|apikey)\2\s*:\s*b?(['"]))(?!\*{8}\3)[^'"]+(\3)""",
 		re.IGNORECASE,
 	),
 	# bare "Bearer <tok>" anywhere else. The token is any run of non-quote,
