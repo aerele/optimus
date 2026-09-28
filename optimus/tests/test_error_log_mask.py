@@ -212,6 +212,25 @@ class TestMasking:
 			assert doc.error.startswith("Webhook failed: Authorization: Bearer ******** zzz")
 			assert doc.method == doc.error[:140]
 
+	@pytest.mark.parametrize("ai", [True, False], ids=["ai-record", "other-app"])
+	def test_an_old_key_in_x_api_key_header_forms_is_masked_only_in_an_ai_record(self, env, ai):
+		# The stored key is a new one: the rotated key survives only as a
+		# shape, the header line http.client builds and the message for a
+		# value it cannot send. Another app's row stays byte-identical.
+		old = "sk-ant-api03-ROTATEDaway0123456789abcdef"
+		text = (
+			(f"{FRAME}\n" if ai else 'File "apps/acme/acme/client.py", line 5, in send\n')
+			+ f"      header = b'x-api-key: {old}'\n"
+			+ f"ValueError: Invalid header value b'{old}\\n'\n"
+		)
+		doc = _run(_Doc(error=text, method="failed"))
+		if ai:
+			assert old not in doc.error
+			assert "header = b'x-api-key: ********'" in doc.error
+			assert "Invalid header value b'********'" in doc.error
+		else:
+			assert doc.sets == [] and doc.error == text
+
 	@pytest.mark.parametrize("field", ["error", "method", "metadata"])
 	@pytest.mark.parametrize("shape", ["dict", "list"])
 	def test_a_non_str_value_holding_the_key_is_masked_as_the_text_the_row_stores(self, env, field, shape):

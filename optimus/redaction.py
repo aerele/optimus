@@ -156,7 +156,9 @@ def redact_call_queries(calls, *, extra_columns: tuple[str, ...] = ()) -> None:
 # written before the fix. Three shapes cover every leak found in real rows:
 # a dict repr carrying an auth header, a dict repr carrying an api-key field,
 # and a bare "Bearer <token>" anywhere else (exception text, echoed bodies);
-# a fourth masks credentials in a URL (a Base URL typed as user:pass@host).
+# two more mask an x-api-key header line and a header value quoted in an
+# HTTP library's error message (a key no longer stored, after a rotation),
+# and the last masks credentials in a URL (a Base URL typed as user:pass@host).
 # ---------------------------------------------------------------------------
 
 SECRET_PLACEHOLDER = "********"
@@ -177,6 +179,16 @@ _SECRET_PATTERNS: tuple[re.Pattern, ...] = (
 	# key (Bearer \u2019sk-...) is masked too; it never ends on a backslash, so
 	# a JSON-escaped quote after it (Deleted Document data) stays intact.
 	re.compile(r"""(\bBearer\s+)(?!\*{8})[^'"\s]{7,}[^'"\s\\]()()()"""),
+	# an x-api-key / x-goog-api-key header line as http.client builds it (its
+	# putheader local: b'x-api-key: <key>'), with no key literal to match it
+	# (a rotated key): the token, as for Bearer, is a run of 8 or more
+	# non-quote, non-space characters that never ends on a backslash
+	re.compile(r"""(\bx-(?:goog-)?api-key:[ \t]*)(?!\*{8})[^'"\s]{7,}[^'"\s\\]()()()""", re.IGNORECASE),
+	# a header value an HTTP library could not send, quoted in its message:
+	# http.client's "Invalid header value b'<value>'" and requests' "... in
+	# header value: '<value>'"; the quoted repr is masked whole, its escape
+	# pairs consumed together (bounded, so a planted huge value stays cheap)
+	re.compile(r"""(\b(?:Invalid header value|in header value:) b?(['"]))(?!\*{8}\2)(?:\\.|(?!\2)[^\\\n]){1,2048}()(\2)"""),
 	# credentials in a URL's authority: scheme://user:password@host, up to the
 	# LAST "@" before the path, query or fragment (a password may hold a raw
 	# "@"); the userinfo holds no "/", "?" or "#", so an address in a query

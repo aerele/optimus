@@ -312,6 +312,61 @@ class TestScrubSecrets:
 		):
 			assert redaction.scrub_secrets(plain) == plain
 
+	@pytest.mark.parametrize(
+		("text", "masked"),
+		[
+			# http.client's putheader local: the header line it sends
+			("      header = b'x-api-key: sk-ant-api03-OLDkey0123456789abcdef'",
+			 "      header = b'x-api-key: ********'"),
+			("      header = b'X-Goog-Api-Key: AIzaOLDkey0123456789abcdefghijklmnop'",
+			 "      header = b'X-Goog-Api-Key: ********'"),
+			("x-api-key: sk-ant-api03-OLDkey0123456789 rejected", "x-api-key: ******** rejected"),
+			# a pasted smart quote, as the bytes repr shows it
+			("      header = b'x-api-key: sk-ant-OLD0123\\xe2\\x80\\x99456789'",
+			 "      header = b'x-api-key: ********'"),
+			# http.client's own message for a value it cannot send
+			("ValueError: Invalid header value b'sk-ant-api03-OLDkey0123456789\\n'",
+			 "ValueError: Invalid header value b'********'"),
+			('ValueError: Invalid header value b"sk-ant-OLD\'s-key-0123456789"',
+			 'ValueError: Invalid header value b"********"'),
+			# both quotes in the value: repr escapes the one it quotes with
+			("ValueError: Invalid header value b'sk-ant-OLD\\'s\"key-0123456789' tail",
+			 "ValueError: Invalid header value b'********' tail"),
+			# requests' message for the same
+			("InvalidHeader: Invalid leading whitespace, reserved character(s), or return character(s) "
+			 "in header value: ' sk-ant-api03-OLDkey0123456789'",
+			 "InvalidHeader: Invalid leading whitespace, reserved character(s), or return character(s) "
+			 "in header value: '********'"),
+		],
+		ids=[
+			"putheader", "goog", "bare-line", "smart-quote-bytes", "http-client-msg", "http-client-dq",
+			"http-client-escaped-quote", "requests-msg",
+		],
+	)
+	def test_an_x_api_key_header_value_is_masked_without_the_key(self, text, masked):
+		# A key that is not the stored one (rotated away) is masked by shape:
+		# the header line http.client builds and the messages that quote a
+		# header value it cannot send.
+		out = redaction.scrub_secrets(text, literals=("sk-new-stored-0123456789",))
+		assert out == masked
+		assert redaction.scrub_secrets(out) == out
+		assert "OLD" not in out
+
+	def test_an_x_api_key_value_in_json_escaped_text_keeps_the_json_valid(self):
+		import json
+
+		doc = {"error": "      header = b'x-api-key: sk-ant-OLD0123\\xe2\\x80\\x99456789'\nValueError: Invalid header value b'sk-ant-OLD0123456789\\n'"}
+		out = redaction.scrub_secrets(json.dumps(doc))
+		assert json.loads(out) == {"error": "      header = b'x-api-key: ********'\nValueError: Invalid header value b'********'"}
+		# a JSON-escaped double quote right after the value stays whole
+		curl = {"cmd": 'curl -H "x-api-key: sk-ant-OLDkey0123456789" https://api.anthropic.com'}
+		out = redaction.scrub_secrets(json.dumps(curl))
+		assert json.loads(out) == {"cmd": 'curl -H "x-api-key: ********" https://api.anthropic.com'}
+
+	def test_short_or_masked_x_api_key_values_are_left(self):
+		for plain in ("x-api-key: missing", "x-api-key: ********", "Invalid header value b'********'", "Invalid header value b''"):
+			assert redaction.scrub_secrets(plain) == plain
+
 	def test_url_userinfo_is_only_the_authority(self):
 		# The credential shape is scheme://userinfo@host, with no "/", "?" or
 		# "#" in the userinfo: an address in a query string or a fragment is

@@ -59,14 +59,21 @@ def _shape(name: str, key: str) -> str:
 		"api_key_field": f"provider = {{'name': 'OpenAI', 'api_key': '{key}'}}",
 		"bearer": f"Authorization: Bearer {key} rejected",
 		"url_userinfo": f"POST https://user:{key}@llm.internal:11434/v1/chat/completions",
+		"x_api_key_line": f"      header = b'x-api-key: {key}'",
+		"invalid_header": f"ValueError: Invalid header value b'{key}'",
 		"bare": f"the provider echoed {key} back",
 		"json_escaped": f'{{"error": "invalid key {_escaped(key)}"}}',
 	}[name]
 
 
-_SHAPES = ("header_dict", "x_api_key_dict", "api_key_field", "bearer", "url_userinfo", "bare", "json_escaped")
+_SHAPES = (
+	"header_dict", "x_api_key_dict", "api_key_field", "bearer", "url_userinfo", "x_api_key_line", "invalid_header",
+	"bare", "json_escaped",
+)
 # The shapes the patterns cover without the key as a literal.
-_PATTERN_SHAPES = ("header_dict", "x_api_key_dict", "api_key_field", "bearer", "url_userinfo")
+_PATTERN_SHAPES = (
+	"header_dict", "x_api_key_dict", "api_key_field", "bearer", "url_userinfo", "x_api_key_line", "invalid_header",
+)
 
 
 @st.composite
