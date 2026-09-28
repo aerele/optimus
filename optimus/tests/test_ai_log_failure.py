@@ -1612,9 +1612,10 @@ class TestAnInterruptWhileReadingTheKeyForAReply:
 	"""``_response_detail`` and ``_provider_error_code`` read the stored key
 	(a database read, where a gunicorn worker timeout's ``SystemExit`` can
 	land) BEFORE they bind the provider's reply, which can echo the key.
-	Nothing there catches an interrupt that is not an ``Exception``, so it
-	leaves with their frames, and Sentry's WSGI middleware ships frame
-	locals: none of them may hold the reply yet."""
+	Sentry's WSGI middleware ships the locals of the frames such an interrupt
+	leaves with: none of them may hold the reply. It leaves as the same
+	instance from the reader itself, with the frames below it (the key read)
+	cleared (``_InterruptGuard(base=True)``)."""
 
 	@pytest.mark.parametrize("reader", ["_response_detail", "_provider_error_code"])
 	def test_no_frame_holds_the_echoed_key(self, monkeypatch, reader):
@@ -1637,7 +1638,7 @@ class TestAnInterruptWhileReadingTheKeyForAReply:
 			for name, value in tb.tb_frame.f_locals.items():
 				assert KEY not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds the echoed key"
 			tb = tb.tb_next
-		assert reader in walked and "_current_key_or_empty" in walked
+		assert reader in walked and "_current_key_or_empty" not in walked
 
 
 # ---------------------------------------------------------------------------

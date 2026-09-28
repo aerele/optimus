@@ -208,3 +208,72 @@ class TestLogAiFailureClearsItsLines:
 			tb = tb.tb_next
 		assert "log_ai_failure" in walked and "_scrubbed_message" in walked
 		assert _tb_holders(ei.value, "UNSCRUBBED", names={"lines", "message"}) == []
+
+
+# ---------------------------------------------------------------------------
+# The reply readers: an interrupt during the scrub leaves without the body
+# ---------------------------------------------------------------------------
+
+def _reply(status_code: int, body: str):
+	import requests
+
+	resp = requests.Response()
+	resp.status_code = status_code
+	resp._content = body.encode("utf-8")
+	resp.encoding = "utf-8"
+	return resp
+
+
+class TestAnInterruptDuringTheReplyScrub:
+	"""``_response_detail``, ``_provider_error_code`` and ``_shown_url`` bind the
+	provider's reply (or the URL), then scrub it: CPU work where an interrupt
+	that is not an ``Exception`` can still land. They use ``_http_post``'s
+	guard: the raw text is unbound, and the SAME instance leaves with its
+	traceback, context and cause cleared, so neither the scrubber's frame
+	nor theirs carries the text."""
+
+	@pytest.fixture(autouse=True)
+	def _no_rq(self, monkeypatch):
+		monkeypatch.setattr(ai_fix, "_job_timeout_types", lambda: ())
+
+	@pytest.fixture
+	def interrupt(self, monkeypatch):
+		interrupt = SystemExit(1)
+
+		def _scrub(text, literals=()):
+			held = text  # noqa: F841 what the scrubber's frame holds
+			try:
+				raise ValueError(text)
+			except ValueError:
+				raise interrupt  # noqa: B904 (chained to a body-bearing error on purpose)
+
+		monkeypatch.setattr("optimus.redaction.scrub_secrets", _scrub)
+		monkeypatch.setattr("frappe.utils.password.get_decrypted_password", lambda *a, **k: KEY, raising=False)
+		interrupt.scrub = _scrub
+		return interrupt
+
+	@pytest.mark.parametrize(
+		("reader", "args"),
+		[
+			("_response_detail", (_reply(400, '{"error": {"message": "UNSCRUBBED-BODY"}}'),)),
+			("_provider_error_code", (_reply(
+				400, '{"error": {"message": "UNSCRUBBED-BODY", "type": "invalid_request_error"}}'
+			),)),
+			("_shown_url", ("https://user:UNSCRUBBED-BODY@llm.internal/v1/chat/completions",)),
+		],
+		ids=["response_detail", "provider_error_code", "shown_url"],
+	)
+	def test_the_same_interrupt_leaves_without_the_text(self, interrupt, reader, args):
+		with pytest.raises(SystemExit) as ei:
+			getattr(ai_fix, reader)(*args)
+		assert ei.value is interrupt
+		assert ei.value.__context__ is None and ei.value.__cause__ is None
+		assert ei.value.__suppress_context__ is True
+		walked = []
+		tb = ei.value.__traceback__
+		while tb is not None:
+			walked.append(tb.tb_frame.f_code)
+			tb = tb.tb_next
+		assert interrupt.scrub.__code__ not in walked
+		assert getattr(ai_fix, reader).__code__ in walked
+		assert _tb_holders(ei.value, "UNSCRUBBED-BODY") == []
