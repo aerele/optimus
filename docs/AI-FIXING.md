@@ -165,7 +165,7 @@ An answer cut off at the output limit is never re-asked and its code is removed.
 
 Each provider has a context window in `_PROVIDER_DEFAULTS` (`context_tokens`): Anthropic 200,000, OpenAI 128,000, Kimi 128,000, DeepSeek 64,000, OpenAI-compatible 4,096. For OpenAI-compatible servers set **Optimus Settings > AI > Context window (tokens)** to the window your server really has (0 uses Optimus's 4,096-token budget). Optimus reserves a fifth of the window for the answer (between 512 and 1,024 tokens), sizes the user message to the rest, and refuses with a clear message when the window cannot hold the prompt. Sizes count every non-ASCII character (Chinese, Japanese, Arabic, Hebrew, accented letters) as a whole token, to reduce underestimation for those scripts; token counts remain estimates. Offline corpus checks fit the first request inside 4,096 tokens. A follow-up is sent only when the first call's reported usage leaves room; live model quality still requires evaluation.
 
-The table-card index path keeps its existing prompt and regex notes; these new checks apply to finding fixes. Static checks do not establish that a suggestion fixes the performance problem. Review its semantics before applying it.
+The table-card index path keeps its existing prompt and regex notes, and uses the same provider-aware output budget and pre-send context-fit check. The code guardrails apply to finding fixes in every rendered block, regardless of its fence label or section. Static checks do not establish that a suggestion fixes the performance problem. Review its semantics before applying it.
 
 ## 5. Eligible finding types
 

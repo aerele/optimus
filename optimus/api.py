@@ -35,6 +35,11 @@ _AI_LIMITS: dict[str, dict[str, int]] = {
 	"test_ai_connection": {"limit": 10, "seconds": 60},
 }
 _ACTION_LIMITS: dict[str, dict[str, int]] = {
+	"start": {"limit": 10, "seconds": 60},
+	"stop": {"limit": 20, "seconds": 60},
+	"start_line_profile_pass": {"limit": 10, "seconds": 60},
+	"stop_line_profile_pass": {"limit": 20, "seconds": 60},
+	"retry_phase2_analyze": {"limit": 5, "seconds": 60},
 	"regenerate_reports": {"limit": 30, "seconds": 60},
 	"retry_analyze": {"limit": 5, "seconds": 60},
 	"download_pdf": {"limit": 20, "seconds": 60},
@@ -305,6 +310,7 @@ def start(
 	        top of the report; also editable on the Optimus Session form.
 	"""
 	user = _require_profiler_user()
+	ratelimit.enforce_user_rate_limit("start", **_ACTION_LIMITS["start"])
 
 	# v0.3.0: clear any in-flight capture state from a previous request
 	# on this worker BEFORE we look at session state, so leaked state
@@ -389,6 +395,8 @@ def stop() -> dict:
 	active = session.get_active_session_for(user)
 	if not active:
 		return {"stopped": False, "reason": "no active session"}
+
+	ratelimit.enforce_user_rate_limit("stop", **_ACTION_LIMITS["stop"])
 
 	docname, ran_inline = _stop_session(user, active)
 
@@ -1728,6 +1736,7 @@ def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: b
 	from optimus.line_profile import picker as _lp_picker
 
 	ref = _session_action_gate(session_uuid, action="start_line_profile_pass")
+	ratelimit.enforce_user_rate_limit("start_line_profile_pass", **_ACTION_LIMITS["start_line_profile_pass"])
 	user = frappe.session.user
 	parent_docname = ref.docname
 
@@ -1978,6 +1987,7 @@ def stop_line_profile_pass(run_uuid: str) -> dict:
 	from optimus.line_profile import capture as _lp_capture
 
 	ref, _run = _phase2_run_gate(run_uuid, action="stop_line_profile_pass", run_statuses=("Recording",))
+	ratelimit.enforce_user_rate_limit("stop_line_profile_pass", **_ACTION_LIMITS["stop_line_profile_pass"])
 	user = frappe.session.user
 	session_uuid = ref.session_uuid
 	parent_docname = ref.docname
@@ -2064,6 +2074,7 @@ def retry_phase2_analyze(run_uuid: str) -> dict:
 	from optimus.line_profile import analyzer as _lp_analyzer
 
 	ref, _run = _phase2_run_gate(run_uuid, action="retry_phase2_analyze")
+	ratelimit.enforce_user_rate_limit("retry_phase2_analyze", **_ACTION_LIMITS["retry_phase2_analyze"])
 	session_uuid = ref.session_uuid
 	parent_docname = ref.docname
 
@@ -2096,8 +2107,10 @@ def retry_phase2_analyzes_batch(run_uuids: str | list) -> dict:
 	"""Batch variant of ``retry_phase2_analyze``: retries a list of
 	``run_uuid``s in a single server round-trip instead of N client calls.
 
-	Per-run failures are isolated (one bad retry doesn't abort the rest).
-	The response carries a per-run status list plus an aggregate tally."""
+	At most five entries are accepted; duplicate runs are retried once.
+	Each retry uses the single-run per-user limit. A limit refusal stops the
+	batch; other per-run failures are isolated. The response carries a per-run
+	status list plus an aggregate tally."""
 	import json as _json
 
 	_require_profiler_user()
@@ -2113,14 +2126,23 @@ def retry_phase2_analyzes_batch(run_uuids: str | list) -> dict:
 	if not isinstance(run_uuids, (list, tuple)) or not run_uuids:
 		frappe.throw(_("run_uuids must be a non-empty list of run-uuid strings."), frappe.ValidationError, title=_("Optimus"))
 
+	if len(run_uuids) > 5:
+		frappe.throw(_("Retry at most 5 Phase 2 runs per request."), frappe.ValidationError, title=_("Optimus"))
+
+	seen: set[str] = set()
 	results: list[dict] = []
 	for run_uuid in run_uuids:
 		if not isinstance(run_uuid, str) or not run_uuid.strip():
 			results.append({"run_uuid": run_uuid, "status": "Skipped",
 			                "error": "empty / non-string run_uuid"})
 			continue
+		if run_uuid in seen:
+			continue
+		seen.add(run_uuid)
 		try:
 			results.append(retry_phase2_analyze(run_uuid))
+		except frappe.RateLimitExceededError:
+			raise
 		except Exception as exc:
 			# Don't let one bad row abort the rest of the batch.
 			results.append({

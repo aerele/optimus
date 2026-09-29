@@ -1333,7 +1333,7 @@ class TestFinishReason:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		meta: dict = {}
 		ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
-		assert meta == {"finish_reason": want}
+		assert meta == {"finish_reason": want, "prompt_tokens_reported": False}
 
 	@pytest.mark.parametrize(
 		"raw,want",
@@ -1345,7 +1345,7 @@ class TestFinishReason:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		meta: dict = {}
 		ai_fix._call_anthropic("u", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
-		assert meta == {"finish_reason": want}
+		assert meta == {"finish_reason": want, "prompt_tokens_reported": False}
 
 	def test_meta_out_is_set_even_when_the_text_is_missing(self, monkeypatch):
 		payload = {"choices": [{"message": {"content": None}, "finish_reason": "length"}]}
@@ -1353,7 +1353,7 @@ class TestFinishReason:
 		meta: dict = {}
 		with pytest.raises(ai_fix.AiFixError):
 			ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
-		assert meta == {"finish_reason": "length"}
+		assert meta == {"finish_reason": "length", "prompt_tokens_reported": False}
 
 
 class TestGuardedCompletion:
@@ -2090,7 +2090,7 @@ class TestGuardrailBoundaries:
         call = ai_fix._call_openai_chat if protocol == "openai" else ai_fix._call_anthropic
         meta = {}
         assert call("http://fake.invalid", "fake-key", "m", "s", [], meta_out=meta) == "ok"
-        assert meta == {"finish_reason": None}
+        assert meta == {"finish_reason": None, "prompt_tokens_reported": False}
 
     def test_dropped_hot_line_is_not_available_for_grounding(self):
         f = {"finding_type": "Hot Line", "title": "x",

@@ -363,13 +363,11 @@ def _code_units(blocks: list[Block], source_lines: list[str]):
 	"""Yield (after_rows, minus_text) per code block. after_rows = [(code, is_new)]."""
 	src = {_norm(s) for s in source_lines}
 	for b in blocks:
-		if b.info in ("sql", "text", "json", "bash", "shell", "console", "sh"):
-			continue
 		if _is_diff(b):
 			rows = diff_rows(b)
 			after = [(c, t == "+") for t, c in rows if t != "-"]
 			minus = {_norm(c) for t, c in rows if t == "-"}
-		else:  # a plain python block: lines verbatim from the source are context
+		else:  # a non-diff block: lines verbatim from the source are context
 			after = [(ln, _norm(ln) not in src) for ln in b.lines]
 			minus = set()
 		yield after, minus
@@ -404,8 +402,9 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 			return any(i in _new and _norm(_after[i][0]) not in _minus
 				for i in range(max(0, start), min(len(_after), end)))
 
-		# A kept SQL opener also pays for a safe parameterisation of its arguments.
-		prior = "\n".join([*minus, *(c for c, new in after if not new)])
+		# Only removed SQL calls can pay for replacement calls. A retained
+		# opener may change its own arguments, without granting another call.
+		prior = "\n".join(minus)
 		reshapes = [len(re.findall(r"frappe\.(?:local\.)?db\.(?:multi)?sql\s*\(", prior))]
 		aliases = {
 			t.id
@@ -442,15 +441,18 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 							out.append(_v("sql-format-injection", name))
 						if _DDL_RE.search(lit):
 							pass  # raw-ddl comes from check_prose_ddl, which reads every rendered block
+						elif not unsafe and 0 <= n.lineno - 1 - off < len(after) and not after[n.lineno - 1 - off][1]:
+							pass  # this call kept its opener and changed only its arguments
 						elif reshapes[0] > 0 and not unsafe:
-							reshapes[0] -= 1  # a kept `-` SQL reshaped into a parameterised call
+							reshapes[0] -= 1  # a removed SQL call replaced with a parameterised call
 						else:
 							out.append(_v("raw-sql", name))
 				elif name in ("frappe.db.commit", "frappe.db.rollback") and introduced(n):
 					out.append(_v("manual-commit"))
 				elif name in ("frappe.enqueue", "frappe.enqueue_doc", "enqueue", "enqueue_doc") and introduced(n):
 					kws = {k.arg: k.value for k in n.keywords}
-					if "enqueue_after_commit" not in kws and not (
+					if not (isinstance(kws.get("enqueue_after_commit"), ast.Constant)
+						and kws["enqueue_after_commit"].value is True) and not (
 						isinstance(kws.get("now"), ast.Constant) and kws["now"].value is True
 					):
 						out.append(_v("enqueue-without-after-commit", name))
@@ -715,8 +717,8 @@ def verify_fix(text: str, *, source_lines: list[str], finish_reason: str | None 
 		return out  # never re-ask a cut-off answer: the re-ask would be cut off too
 	out += check_headings(text)
 	fix = section(text, "Fix", FIX_HEADINGS) or text
-	out += check_grounding(code_blocks(fix), source_lines)  # the diff: **Fix** only
 	every = rendered_blocks(text)  # every block the report renders as code, any section
+	out += check_grounding(every, source_lines)
 	out += check_code(every, source_lines)  # lines verbatim from the shown source are context
 	out += check_prose_ddl(fix, every)
 	out += check_metadata_index(text)

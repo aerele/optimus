@@ -158,5 +158,7 @@ def context_truncated(usage: dict, sent_size: int) -> bool:
 	"""True when the provider reports far fewer prompt tokens than were sent
 	(``sent_size`` in ``text_size`` units): an Ollama server whose real num_ctx is
 	smaller than the prompt drops tokens silently and reports only what it kept."""
-	reported = int(usage.get("prompt_tokens") or 0)
-	return bool(reported) and reported < TRUNCATION_RATIO * (int(sent_size) / CHARS_PER_TOKEN_CENTRAL)
+	if usage.get("prompt_tokens") is None:
+		return False
+	reported = int(usage["prompt_tokens"])
+	return reported >= 0 and reported < TRUNCATION_RATIO * (int(sent_size) / CHARS_PER_TOKEN_CENTRAL)

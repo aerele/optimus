@@ -386,27 +386,14 @@ def suggest_index(table_payload: dict) -> dict:
 	if not table_payload or not table_payload.get("table"):
 		raise AiFixError("No table to analyse for an index suggestion.")
 	provider = _provider_config()
-	if not provider.get("model") or not provider.get("base_url"):
-		raise AiFixError(
-			"AI is not fully configured set the provider, model and base URL "
-			"under Optimus Settings ▸ AI Fix Suggestions."
-		)
-	api_key = _get_api_key(provider.get("needs_key", True))  # the one read of the stored key for this call
-	if provider.get("needs_key") and not api_key:
-		raise AiFixError("No API key is configured for this AI provider.")
+	_require_configured(provider)
 	system, messages = _build_index_messages(table_payload)
+	_check_context_fits(system, _context_tokens(provider), messages=messages, out_tokens=_output_tokens(provider))
 	usage: dict = {}
-	if provider["protocol"] == "anthropic":
-		text = _call_anthropic(
-			provider["base_url"], api_key,
-			provider["model"], system, messages, usage_out=usage,
-		)
-	else:
-		text = _call_openai_chat(
-			provider["base_url"], api_key,
-			provider["model"], system, messages, usage_out=usage,
-			metadata=_aerele_call_metadata(provider, "Table Index"),
-		)
+	text = _dispatch_call(
+		provider, system, messages, usage_out=usage,
+		metadata=_aerele_call_metadata(provider, "Table Index"),
+	)
 	text = (text or "").strip()
 	if not text:
 		raise AiFixError("The AI provider returned an empty response.")
@@ -2003,6 +1990,9 @@ def _call_anthropic(
 		usage_out.update(_usage_from_anthropic(data))
 		_record_session_spend(usage_out.get("total_tokens"))
 	if meta_out is not None:
+		meta_out["prompt_tokens_reported"] = any(_usage_block(data).get(k) is not None for k in (
+			"input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+		))
 		meta_out["finish_reason"] = _ANTHROPIC_FINISH.get(_text_or_empty(data.get("stop_reason")))
 	try:
 		blocks = data.get("content") or []
@@ -2073,6 +2063,7 @@ def _call_openai_chat(
 	choices = data.get("choices") or []
 	if meta_out is not None:
 		first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+		meta_out["prompt_tokens_reported"] = _usage_block(data).get("prompt_tokens") is not None
 		meta_out["finish_reason"] = _OPENAI_FINISH.get(_text_or_empty(first.get("finish_reason")))
 	try:
 		if choices:
@@ -2224,6 +2215,8 @@ def _complete_with_guardrails(
 
 		raise AiFixError(_("The AI provider returned an empty response."), kind="bad_response", usage=dict(usage))
 	first_usage = dict(usage)
+	if meta.get("prompt_tokens_reported") is False:
+		first_usage.pop("prompt_tokens", None)  # normalized zero is not a reported zero
 	text, finish = ai_budget.cap_reply(text, meta.get("finish_reason"))
 	violations = ai_guardrails.verify_fix(text, source_lines=shown_lines, finish_reason=finish)
 	to_fix = ai_guardrails.reaskable(violations)

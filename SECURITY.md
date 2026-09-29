@@ -61,7 +61,12 @@ the highest-value security considerations:
    fixed-window limits (`optimus/ratelimit.py`) after permission checks. Defaults:
    `refill_ai_suggestions` 6 per hour; `regenerate_reports` 30 per minute;
    `retry_analyze` 5 per minute; `test_ai_connection` 10 per minute;
-   `download_pdf` and `export_session` 20 per minute. Override any of them
+   `download_pdf` and `export_session` 20 per minute. Session and Phase 2
+   starts allow 10 per minute, their stops allow 20 per minute, and
+   `retry_phase2_analyze` allows 5 per minute. A batch contains at most 5
+   entries, retries each distinct run once, and uses the same per-run limit.
+   A rate-limit refusal stops the batch. Recovery cancellation remains unlimited.
+   Override any of them
    in site_config, for example
    `"optimus_rate_limits": {"refill_ai_suggestions": [12, 3600]}`.
    The whitelisted AI surface is only what the Desk UI calls: a test fails
@@ -427,7 +432,9 @@ installed on the site.
   failed, the hook failed unexpectedly, or the process still runs the
   previous release and cannot import the masking). Another app's row is
   stored exactly as it was. Each text field of a row the hook masks is cut
-  to 65536 characters first.
+  to 65536 characters first. The final token is dropped so a cut cannot
+  retain part of a secret. An oversized field without a whitespace boundary
+  can therefore retain only the cut notice.
 - A later log of an AI failure already in the Error Log adds the caller's
   context (title and `k=v` lines, scrubbed) to that row: it is appended to
   the row already written, not a second row.
@@ -457,7 +464,10 @@ installed on the site.
   not that no key of any provider is: a rotated key of another provider
   (Mistral, Cohere) has no shape it knows. A row outside that
   selection, for example an older key in a row with no `ai_fix.py` frame and
-  no marker, is not counted. Rotating the keys is what makes such a copy
+  no marker, is not counted. The historical frame-and-marker pass checks
+  `error` (or the serialized `data` of a Deleted Document). A frame only in
+  the title or metadata does not select a historical row unless the stored-key
+  search also finds it. Rotating the keys is what makes such a copy
   harmless.
 - The scrub searches for the stored key by value only when it has at least
   16 characters (the fragment it sends would otherwise be half the key), and

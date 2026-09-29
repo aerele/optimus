@@ -45,12 +45,25 @@ versions may contain breaking changes see migration notes below).
   by adding a form field. Defaults: `refill_ai_suggestions` 6 per hour;
   `regenerate_reports` 30 per minute; `retry_analyze` 5 per minute;
   `test_ai_connection` 10 per minute; `download_pdf` and `export_session` 20
-  per minute. Override any of them in site_config:
+  per minute. Session and Phase 2 starts allow 10 per minute, their stops
+  allow 20 per minute, and Phase 2 retries allow 5 per minute. Retry batches
+  accept at most 5 entries, deduplicate runs and stop on a rate-limit refusal.
+  Recovery cancellation remains unlimited. Override any of them in site_config:
   `"optimus_rate_limits": {"refill_ai_suggestions": [12, 3600]}`.
 - `retry_analyze` on a session that is not Failed now returns an error instead
   of `{"retried": false}`.
 
 ### Fixed
+
+- Guardrails inspect Python code regardless of its fence label and ground
+  diffs in every section. Existing SQL in context cannot authorize an
+  additional raw SQL call, and enqueueing with after-commit explicitly
+  disabled is flagged.
+- Index suggestions use the provider's output budget and reject prompts
+  that cannot fit. A reported zero prompt-token count triggers the silent
+  truncation note; missing usage does not.
+- Call-tree SQL totals exclude the Error Log hook's own reads, matching the
+  other query summaries.
 
 - Refresh AI suggestions no longer fails with a permission error after the AI
   calls already ran (and were billed): the final report re-render no longer
