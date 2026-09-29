@@ -1370,6 +1370,12 @@
     margin-top: 6px; color: var(--ink-soft);
     white-space: pre-wrap; font-size: 12.5px;
   }
+  .sub-finding-row .sub-drill { margin-top: 8px; }
+  .sub-finding-row .sub-drill-label {
+    display: block;
+    font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--ink-mute); font-weight: 600; margin-bottom: 6px;
+  }
 
   /* DATA TABLES - Phase E.
      Editorial table style applied to per-action breakdown, background
@@ -1988,9 +1994,12 @@
       {% endif %}
 
       {# Drill-down chain. Renders as a nested-call tree ending in red
-         (terminal = deepest user-code frame). Empty chain renders
+         (terminal = deepest user-code frame). A finding that sits at a leaf
+         user frame has no descent, so it falls back to its ancestry (the
+         nested call path that leads to it); only a truly top-level leaf keeps
          the placeholder. #}
       {% set _drilldown = (f.technical_detail or {}).get("drilldown_chain") if f.technical_detail else None %}
+      {% set _drill_ancestry = (f.technical_detail or {}).get("drilldown_ancestry") if f.technical_detail else None %}
       {% set _drill_root_fn = callsite.original_wrapper.function if callsite.original_wrapper else callsite.function %}
       {% if _drilldown %}
       <div class="chain">
@@ -1999,6 +2008,14 @@
         {% for level in _drilldown %}{% set _ = _dd_rows.append(level.function ~ (":" ~ level.lineno if level.lineno else "")) %}{% endfor %}
         {{ chain_tree(_dd_rows) }}
         <div class="chain-foot">time inside <code>{{ _drill_root_fn }}</code> walked through</div>
+      </div>
+      {% elif _drill_ancestry %}
+      <div class="chain">
+        <div class="chain-label">Drill-down</div>
+        {% set _an_rows = [] %}
+        {% for level in _drill_ancestry %}{% set _ = _an_rows.append(level.function ~ (":" ~ level.lineno if level.lineno else "")) %}{% endfor %}
+        {{ chain_tree(_an_rows) }}
+        <div class="chain-foot">nested call path to <code>{{ _drill_ancestry[-1].function }}</code></div>
       </div>
       {% elif _drilldown is not none %}
       <div class="chain">
@@ -2136,6 +2153,15 @@
         </summary>
         {% if s.customer_description %}
         <div class="sub-desc">{{ s.customer_description }}</div>
+        {% endif %}
+        {# A grouped sub-finding is still a finding in a nested function, so it
+           carries its own drill-down rows (built before grouping). Show them
+           compactly here so expanding the row reveals the nested call path. #}
+        {% if s.drill_rows %}
+        <div class="sub-drill">
+          <span class="sub-drill-label">Drill-down</span>
+          {{ chain_tree(s.drill_rows) }}
+        </div>
         {% endif %}
       </details>
       {% endfor %}

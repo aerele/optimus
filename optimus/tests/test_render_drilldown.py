@@ -269,6 +269,46 @@ class TestDrilldownRender:
 		assert ":None" not in cc
 		assert 'class="ct-step">_pass_through</span>' in cc
 
+	def test_leaf_finding_renders_ancestry_call_path(self):
+		"""A finding that sits at a leaf user frame (nothing to drill below, so the
+		downward chain is empty) renders its nested call path instead of the bare
+		'no deeper user-code frame' placeholder: the outer frame at the top down to
+		the finding as the terminal."""
+		from optimus import renderer
+
+		# callsite = _check_user_exists, whose only child in the tree is the
+		# framework get_doc -> downward chain empty -> ancestry fallback.
+		f = types.SimpleNamespace(
+			finding_type="N+1 Query", severity="High",
+			title="Same query ran 150x at common.py:19",
+			customer_description="", estimated_impact_ms=70.0, affected_count=150,
+			action_ref="0",
+			technical_detail_json=json.dumps({
+				"callsite": {
+					"filename": "apps/ugly_code/ugly_code/python/common.py",
+					"lineno": 19, "function": "_check_user_exists",
+				},
+			}),
+			llm_fix_json=None,
+		)
+		doc = _doc(
+			actions=[_action("POST /x", "r0", 689, _tree_for_screenshot())],
+			findings=[f],
+		)
+		html = renderer.render_raw(doc, recordings=[])
+
+		start = html.find('chain-label">Drill-down')
+		assert start > 0
+		dd = html[start:html.find("chain-foot", start) + 120]
+		# The nested path renders as a tree, finding is the terminal.
+		assert 'class="chain-tree"' in dd
+		assert 'class="ct-step">looped_validate:6</span>' in dd
+		assert 'class="ct-step">_run_validations:15</span>' in dd
+		assert 'ct-step terminal">_check_user_exists:19' in dd
+		# Ancestry foot, not the old "no deeper user-code frame" placeholder.
+		assert "nested call path to" in dd
+		assert "no deeper user-code frame" not in dd
+
 	def test_finding_without_matching_tree_node_renders_placeholder(self):
 		"""A finding whose callsite matches no tree node (origin lookup fails)
 		still renders the Drill-down placeholder ('no deeper user-code frame'):
