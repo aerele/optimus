@@ -186,9 +186,10 @@ class TestDrilldownRender:
 			< dd.find("_check_user_exists:19")
 		)
 		# Two nested rows below the root, each with a corner connector and a
-		# deeper indent than the last.
+		# deeper indent than the last (depth carried by --ctd; padding is derived
+		# in CSS so print can scale it down).
 		assert dd.count("ct-branch") == 2
-		assert "padding-left: 16px" in dd and "padding-left: 32px" in dd
+		assert "--ctd: 1" in dd and "--ctd: 2" in dd
 
 	def test_call_chain_renders_as_indented_tree(self):
 		"""The Phase-2 Call chain block goes through the same nested-tree macro:
@@ -233,7 +234,7 @@ class TestDrilldownRender:
 			< cc.find("_do_math:55")
 		)
 		assert cc.count("ct-branch") == 2                          # two nested rows
-		assert "padding-left: 16px" in cc and "padding-left: 32px" in cc
+		assert "--ctd: 1" in cc and "--ctd: 2" in cc
 
 	def test_chain_step_without_lineno_omits_colon(self):
 		"""A frame whose lineno is None (a pass-through step the analyzer left
@@ -308,6 +309,30 @@ class TestDrilldownRender:
 		# Ancestry foot, not the old "no deeper user-code frame" placeholder.
 		assert "nested call path to" in dd
 		assert "no deeper user-code frame" not in dd
+
+	def test_print_media_caps_indent_and_breaks_long_labels(self):
+		"""On paper the card can't scroll, so the chain tree must cap its indent
+		and let a long pill shrink and break, or a deep chain clips past the
+		card's edge. Lock the print rules in the rendered stylesheet."""
+		from optimus import renderer
+
+		doc = _doc(
+			actions=[_action("POST /x", "r0", 689, _tree_for_screenshot())],
+			findings=[_finding(
+				callsite_filename="apps/ugly_code/ugly_code/python/common.py",
+				callsite_function="looped_validate", callsite_lineno=6,
+			)],
+		)
+		html = renderer.render_raw(doc, recordings=[])
+		# Indent is derived from --ctd so print can scale it: 16px/level on
+		# screen, a gentler 6px/level on paper.
+		assert "calc(var(--ctd, 0) * 16px)" in html
+		assert "calc(var(--ctd, 0) * 6px)" in html
+		# The pill can shrink below its content and break a long name in print.
+		assert (
+			"min-width: 0; overflow-wrap: break-word; word-break: break-word;"
+			in html
+		)
 
 	def test_finding_without_matching_tree_node_renders_placeholder(self):
 		"""A finding whose callsite matches no tree node (origin lookup fails)

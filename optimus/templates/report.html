@@ -1074,10 +1074,13 @@
     overflow-y: auto;
   }
   /* max-content rows so a deep/wide chain overflows the box and the
-     scroll above kicks in (rather than clipping the trailing frames). */
+     scroll above kicks in (rather than clipping the trailing frames). Depth
+     comes from --ctd (the 0-based level, set inline) so print can scale the
+     indent down without touching the on-screen 16px/level. */
   .chain-tree .ct-node {
     display: flex; align-items: center; gap: 6px; line-height: 1.6;
     width: max-content; white-space: nowrap;
+    padding-left: calc(var(--ctd, 0) * 16px);
   }
   .chain-tree .ct-node + .ct-node { margin-top: 4px; }
   .chain-tree .ct-branch { color: var(--ink-mute); white-space: pre; }
@@ -1100,7 +1103,17 @@
        as the call-tree print fix above). overflow must be visible on both
        axes or the CSS rule coerces the auto/visible pair back to auto. */
     .chain-tree { overflow: visible; }
-    .chain-tree .ct-node { width: auto; min-width: 0; white-space: normal; }
+    /* Cap the indent (a gentler slope than the 16px/level on screen) so a deep
+       chain doesn't push rows past the card's clipped edge on paper. */
+    .chain-tree .ct-node {
+      width: auto; min-width: 0; white-space: normal;
+      padding-left: calc(var(--ctd, 0) * 6px);
+    }
+    /* Let the pill shrink below its content and break a long function name so
+       it wraps within the remaining width instead of overflowing the card. */
+    .chain-tree .ct-step {
+      min-width: 0; overflow-wrap: break-word; word-break: break-word;
+    }
   }
 
   /* PHASE 2 hottest-line callout - when present and the finding
@@ -1843,7 +1856,7 @@
 {% macro chain_tree(rows) %}
 <div class="chain-tree">
   {% for row in rows %}
-  <div class="ct-node" style="padding-left: {{ loop.index0 * 16 }}px">{% if not loop.first %}<span class="ct-branch" aria-hidden="true">&#9492;&#9472; </span>{% endif %}<span class="ct-step{% if loop.last and rows | length > 1 %} terminal{% endif %}">{{ row }}</span></div>
+  <div class="ct-node" style="--ctd: {{ loop.index0 }}">{% if not loop.first %}<span class="ct-branch" aria-hidden="true">&#9492;&#9472; </span>{% endif %}<span class="ct-step{% if loop.last and rows | length > 1 %} terminal{% endif %}">{{ row }}</span></div>
   {% endfor %}
 </div>
 {% endmacro %}
