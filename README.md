@@ -126,8 +126,11 @@ read-only sections:
    - **Download Safe Report** / **Open Safe Report**: the customer-
      safe HTML. Email-shareable.
    - **Download Raw Report** / **Open Raw Report**: the un-redacted
-     version. Hidden from non-admins; the link itself is permission-
-     gated server-side, so guessing the file name does not bypass it.
+     version. A `File.has_permission` hook runs in Frappe's permission
+     checks (the File form, REST, `frappe.has_permission`) and lets
+     only a System Manager or the recording user through; a direct
+     download URL bypasses the hook and grants access to anyone who
+     can read the parent Optimus Session, including a read-sharee.
    - **Re-analyze**: re-runs the analyze pipeline from the captured
      recordings (which live in Redis for 10 minutes after Stop).
      Useful when a session ends `Failed` because of a transient
@@ -451,9 +454,7 @@ When a session moves to `Ready`, the source recordings in Redis (`RECORDER_REQUE
 ### Two report modes
 
 - **`safe_report_file`**: Normalized SQL, redacted URLs/headers/form data, sanitized notes, redacted custom-app function names. Safe to email to a third-party.
-- **`raw_report_file`**: Full data: raw SQL with literals, request headers, form data, complete stack traces. **Gated at two layers:**
-  1. The "Download Raw Report" button is hidden in the form UI unless the user has `System Manager` role or recorded the session themselves.
-  2. A `File.has_permission` hook (`optimus.permissions.file_has_permission`) blocks direct URL access even if the user guesses the file name.
+- **`raw_report_file`**: Full data: raw SQL with literals, request headers, form data, complete stack traces. A `File.has_permission` hook (`optimus.permissions.file_has_permission`) runs in Frappe's permission checks (the File form, REST, `frappe.has_permission`) and lets only a System Manager or the recording user through. Direct `/private/files` downloads bypass this hook and allow a parent Session read-sharee access to raw HTML, PDF and recordings. The hidden `recordings_file` field remains at permlevel 0, so its URL can be returned when the parent is read through REST. A Session read share does not restrict the recipient to sanitized output; share a separately reviewed safe export when raw access is inappropriate.
 
 ---
 

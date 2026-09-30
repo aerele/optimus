@@ -321,6 +321,17 @@ installed on the site.
 
 ## Known limitations
 
+- **A Session read share also permits direct raw-artifact downloads.** The
+  Optimus File hook restricts the File form, REST calls against `File`, and
+  `frappe.has_permission` to the recording user or System Manager. Frappe's
+  `/private/files` route bypasses that hook and accepts read permission on
+  the parent Optimus Session. This affects `raw_report_file`,
+  `raw_report_pdf_file` and `recordings_file`. The hidden `recordings_file`
+  field has permlevel 0, so a Session REST response can disclose its URL;
+  hiding a field is not an access control. Restricting URL visibility alone
+  would not protect a URL already known to the recipient. Do not use a
+  Session read share to provide sanitized-only access; share a separately
+  reviewed safe export instead. The File-hook fix does not close this gap.
 - SQL parameter redaction is **best-effort**; a regex pattern over
   known-sensitive column names catches `WHERE password = '...'`
   shapes but won't catch obscure column names or UPDATE SET
