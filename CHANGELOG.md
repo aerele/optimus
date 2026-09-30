@@ -8,6 +8,27 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.63] - 2026-09-29
+
+### Changed
+
+- Finding cards now render the Drill-down and Call chain as an indented tree of
+  nested function calls instead of a single-line arrow breadcrumb. The outer
+  frame sits at the top and each deeper call is indented one level under a corner
+  connector, with the deepest user frame shown as the terminal (red) node. Deep
+  or long chains that used to overflow the card now read top to bottom. This
+  applies to every finding card through one shared template block.
+- A finding that sits inside a nested function now always shows a drill-down. When
+  the finding is at a leaf user frame with nothing to drill into below it (an N+1
+  query, a redundant call, a framework call made from user code), the drill-down
+  shows the nested call path that leads to it, from the outermost user frame down
+  to the finding, instead of the bare "no deeper user-code frame" note. A finding
+  called straight from the framework (not nested under any user frame) keeps that
+  note. Grouped sub-findings (collapsed under a shared root cause) carry their own
+  drill-down as well, so every finding in a nested function shows its call path.
+
+---
+
 ## [0.12.62] - 2026-09-28
 
 ### Internal
