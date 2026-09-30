@@ -40,8 +40,11 @@ versions may contain breaking changes see migration notes below).
   permission checks (the File form, REST, `frappe.has_permission`) to
   anyone other than a System Manager or the recording user, the same check
   already applied to `raw_report_file` and `raw_report_pdf_file`. A direct
-  download URL is still governed by Frappe's own File rule (read access on
-  the parent Optimus Session), unchanged by this release.
+  `/private/files` download bypasses this hook and still grants a parent
+  read-sharee access to the raw bundle and reports. `recordings_file` is
+  hidden but remains at permlevel 0, so reading the parent Session through
+  REST can reveal its URL. This release does not close that download gap;
+  the tests of the controller hook do not prove raw-artifact confidentiality.
 - No migration needed (both changes are in-memory Python, not schema or data).
   **Upgrade:** restart the web and worker processes together after deploying
   so they load the fixed `optimus/permissions.py` (a partial restart leaves
