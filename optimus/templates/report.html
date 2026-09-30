@@ -1103,11 +1103,11 @@
        as the call-tree print fix above). overflow must be visible on both
        axes or the CSS rule coerces the auto/visible pair back to auto. */
     .chain-tree { overflow: visible; }
-    /* Cap the indent (a gentler slope than the 16px/level on screen) so a deep
-       chain doesn't push rows past the card's clipped edge on paper. */
+    /* Reserve at least three quarters of the row for labels, even for very
+       deep chains, so indentation cannot push them outside the printed card. */
     .chain-tree .ct-node {
       width: auto; min-width: 0; white-space: normal;
-      padding-left: calc(var(--ctd, 0) * 6px);
+      padding-left: min(calc(var(--ctd, 0) * 6px), 25%);
     }
     /* Let the pill shrink below its content and break a long function name so
        it wraps within the remaining width instead of overflowing the card. */

@@ -325,9 +325,9 @@ class TestDrilldownRender:
 		)
 		html = renderer.render_raw(doc, recordings=[])
 		# Indent is derived from --ctd so print can scale it: 16px/level on
-		# screen, a gentler 6px/level on paper.
+		# screen, 6px/level capped at a quarter of the row on paper.
 		assert "calc(var(--ctd, 0) * 16px)" in html
-		assert "calc(var(--ctd, 0) * 6px)" in html
+		assert "min(calc(var(--ctd, 0) * 6px), 25%)" in html
 		# The pill can shrink below its content and break a long name in print.
 		assert (
 			"min-width: 0; overflow-wrap: break-word; word-break: break-word;"
