@@ -8,6 +8,18 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.64] - 2026-10-01
+
+### Internal
+
+- Set the app publisher to "Aerele Technologies" and the support email to
+  hello@aerele.in in `hooks.py` (both were blank before), so the app's About
+  page and marketplace metadata show the right owner.
+- Added a `CODEOWNERS` file so pull requests are routed to the app maintainers
+  for review.
+
+---
+
 ## [0.12.63] - 2026-09-29
 
 ### Changed
