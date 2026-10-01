@@ -21,6 +21,8 @@ import requests
 
 from optimus import ai_fix
 
+pytestmark = pytest.mark.rq  # Selected by AI Quality, which installs RQ.
+
 KEY = "sk-live-0123456789abcdefXYZ"
 
 

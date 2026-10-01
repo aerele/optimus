@@ -72,6 +72,8 @@ import requests
 from optimus import ai_fix, analyze, api
 from optimus import settings as _settings
 
+pytestmark = pytest.mark.rq  # Selected by AI Quality, which installs RQ.
+
 KEY = "sk-CANARY-7f3a9c1e5b2d4f6a8c0e"
 NON_LATIN_KEY = "sk-CANARY-7f3a9c1e\u20195b2d4f6a8c0e"  # pasted smart quote
 # The last mark is the ASCII segment both keys share: it still matches when the
