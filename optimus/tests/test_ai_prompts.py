@@ -7,8 +7,7 @@ Every Frappe fact the prompt teaches is pinned here, so a later edit cannot
 silently reintroduce a wrong one (Customize Form indexes, raw DDL, frappe.cache(),
 isinstance type checks, enqueue without enqueue_after_commit). Also pins the
 static-prefix contract (one byte-identical SYSTEM_PROMPT) and its size.
-INDEX_SYSTEM_PROMPT (the table-card index path) is not part of prompt v2: it keeps
-the develop text until PR-L1 deletes that path, so it is not pinned here.
+Index advice is deterministic and has no model prompt.
 """
 
 import re
@@ -42,8 +41,8 @@ def _examples():
 
 
 # ---------------------------------------------------------------- shape
-def test_prompt_version_is_3():
-	assert P.PROMPT_VERSION == 3
+def test_prompt_version_is_4():
+	assert P.PROMPT_VERSION == 4
 
 
 def test_system_prompt_fits_the_char_budget():
@@ -102,7 +101,7 @@ def test_no_em_or_en_dashes_or_sweep_artifacts(name):
 
 
 def test_hints_and_rule_text_have_no_dashes():
-	for text in list(P.FINDING_TYPE_HINTS.values()) + list(P.POSTGRES_EXPLAIN_HINTS.values()) + list(
+	for text in list(P.FINDING_TYPE_HINTS.values()) + list(
 		P.RULE_TEXT.values()
 	):
 		assert "\u2014" not in text and "\u2013" not in text
@@ -207,7 +206,7 @@ def test_redundant_call_hint_keeps_permission_check():
 
 def test_hints_cover_exactly_the_eligible_types():
 	assert set(P.FINDING_TYPE_HINTS) == set(ai_fix.AI_ELIGIBLE_FINDING_TYPES)
-	assert set(P.POSTGRES_EXPLAIN_HINTS) <= set(P.FINDING_TYPE_HINTS)
+	assert not hasattr(P, "POSTGRES_EXPLAIN_HINTS")
 	for h in P.FINDING_TYPE_HINTS.values():
 		assert "Customize Form" not in h and "ALTER TABLE" not in h
 

@@ -93,7 +93,6 @@ _FINDING = {
 	"finding_type": "N+1 Query", "severity": "High", "title": "Customer lookup in a loop",
 	"technical_detail": {"normalized_query": PII_SQL, "example_queries": [PII_SQL]},
 }
-_TABLE_PAYLOAD = {"table": "tabCustomer", "doctype": "Customer", "sample_queries": [PII_SQL]}
 _ACTIONS = [{"label": f"Open Customer {PII}", "cmd": "frappe.desk.form.load.getdoc", "duration_ms": 12}]
 
 
@@ -138,18 +137,12 @@ def _entry(module, name: str, args_factory, *, unwrap: bool = False):
 _ENTRY_POINTS = {
 	"ai_fix.suggest_fix": _entry(ai_fix, "suggest_fix", lambda: ((json.loads(json.dumps(_FINDING)),), {})),
 	"ai_fix.humanize_steps": _entry(ai_fix, "humanize_steps", lambda: (([dict(x) for x in _ACTIONS],), {"session_title": "t"})),
-	"ai_fix.suggest_index": _entry(ai_fix, "suggest_index", lambda: ((dict(_TABLE_PAYLOAD),), {})),
 	"ai_fix.test_connection": _entry(ai_fix, "test_connection", lambda: ((), {})),
 	"analyze._enrich_findings_with_ai_suggestions": _entry(
 		analyze, "_enrich_findings_with_ai_suggestions", lambda: ((_ctx(),), {"recordings": []})),
 	"analyze._run_ai_backfill": _entry(analyze, "_run_ai_backfill", lambda: ((_session_doc(),), {"cap": 0})),
-	"analyze._enrich_table_breakdown_with_ai_suggestions": _entry(
-		analyze, "_enrich_table_breakdown_with_ai_suggestions", lambda: ((_ctx(), []), {})),
 	"analyze._build_humanized_notes_html": _entry(
 		analyze, "_build_humanized_notes_html", lambda: (([],), {"session_title": "t"})),
-	"analyze._run_table_index_ai_backfill": _entry(
-		analyze, "_run_table_index_ai_backfill", lambda: ((_session_doc(),), {"table_name": "tabCustomer"})),
-	"api._refill_indexes_for_doc": _entry(api, "_refill_indexes_for_doc", lambda: ((_session_doc(),), {})),
 	"api._humanize_steps_core": _entry(api, "_humanize_steps_core", lambda: ((_session_doc(),), {"title": "t"})),
 }
 
@@ -453,7 +446,6 @@ def canary(monkeypatch, request):
 	# Keep the analyze helpers off the source-reading / Redis paths: the payload
 	# builders return the PII-bearing inputs directly.
 	monkeypatch.setattr(analyze, "_ai_payload_for_finding", lambda *a, **k: json.loads(json.dumps(_FINDING)))
-	monkeypatch.setattr(analyze, "_ai_payload_for_table", lambda *a, **k: dict(_TABLE_PAYLOAD))
 	monkeypatch.setattr(analyze, "_actions_for_humanizer", lambda *a, **k: [dict(x) for x in _ACTIONS])
 	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
 	monkeypatch.setattr(analyze, "_fetch_recordings", lambda *a, **k: [])
@@ -564,7 +556,7 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 		assert any(PII in t for _, t in sinks.escaped), "no escaped dump held the prompt: it would prove nothing"
 	if scenario == "malformed_usage":
 		assert sinks.escaped == [], f"malformed usage broke a good reply: {[e for e, _ in sinks.escaped]}"
-		for ep in ("ai_fix.suggest_fix", "ai_fix.humanize_steps", "ai_fix.suggest_index"):
+		for ep in ("ai_fix.suggest_fix", "ai_fix.humanize_steps"):
 			assert any(e == ep and SUGGESTION_MARK in t for e, t in sinks.returned), f"{ep}: the suggestion was lost"
 	if scenario == "non_str_text":
 		# Only AI errors (and the endpoints' frappe.throw) left the entry

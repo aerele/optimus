@@ -8,6 +8,38 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.68] - 2026-10-02
+
+### Changed
+
+- Build index advice from analyzer evidence and DocType metadata without an AI
+  call. Recipes select Search Index, a Property Setter, or a durable
+  `frappe.db.add_index` patch or hook according to field type and ownership.
+  Raw analyzer DDL is replaced in reports; single-column non-text table cards
+  fall back to their candidate list.
+- Retire the index-only AI prompt, helpers and refresh step. The existing
+  index-AI Settings field is read-only and has no effect. Refresh AI suggestions
+  updates eligible finding fixes and humanized steps, then renders once.
+- Limit AI finding fixes to N+1 Query, Slow Query, Redundant Call and Hot Line.
+  Framework Hot Lines and lines dominated by a non-trivial callee get an
+  explanatory note. Framework N+1 and index findings do not call the model.
+- Correct the Redundant Call sidecar stack direction and stamp new findings.
+  Older unstamped findings require re-recording before another AI suggestion;
+  their stored suggestion stays visible with a warning when the report is
+  regenerated.
+- Ground finding prompts in the enclosing function when it fits within 80
+  lines, otherwise retain the bounded source window. Add AST-derived loop
+  facts about dependencies, result use and observed writes. Prompt version 4
+  marks older displayed suggestions as outdated after report regeneration.
+
+### Upgrade notes
+
+- Regenerate Reports updates deterministic advice and the older-suggestion
+  notices without changing stored suggestion JSON. Re-record flows with older
+  Redundant Call findings to obtain corrected callsites.
+- This change does not move AI work out of analysis or add a persistence
+  checkpoint before optional AI calls. Those changes remain follow-up work.
+
 ## [0.12.67] - 2026-10-02
 
 ### Changed

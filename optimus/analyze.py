@@ -61,11 +61,6 @@ ANALYZE_PER_ANALYZER_SOFT_CAP_SECONDS = 60
 # provider can't push the analyze job past the RQ 25-min timeout.
 AI_AUTO_SUGGEST_TIME_BUDGET_SECONDS = 240
 
-# v0.6.0: same toggle also bakes an LLM-vetted index recommendation onto the
-# top N tables in the breakdown capped tables + its own wall-time budget.
-AI_AUTO_INDEX_MAX_TABLES = 3
-AI_AUTO_INDEX_TIME_BUDGET_SECONDS = 90
-
 # Tighter budget for the same backfill done from api.regenerate_reports
 # that runs synchronously inside a web request, so it must stay well under
 # the gunicorn worker timeout (~120s). Anything not done in this window is
@@ -870,14 +865,6 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 				)
 			except Exception:
 				pass
-
-		# v0.6.0: same toggle also bakes an LLM-vetted index recommendation
-		# onto the top few tables in the breakdown. Best-effort + double-wrapped.
-		_touch_singleflight(session_uuid)  # AI index-suggest can run up to 90s
-		_run_ai_step(
-			lambda: _enrich_table_breakdown_with_ai_suggestions(context, recordings),
-			title="optimus ai index-suggest (outer)", session_uuid=session_uuid,
-		)
 
 		_publish_progress(80, "Writing session data", session_uuid)
 		_persist(docname, context, recordings, analyze_elapsed_ms)
@@ -2021,7 +2008,7 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 
 	eligible = [
 		f for f in findings
-		if (f.get("finding_type") or "") in ai_fix.AI_ELIGIBLE_FINDING_TYPES
+		if ai_fix.llm_gate_note(f) is None
 	]
 	# v0.9.0: per-type opt-out (Critical Risk #2). Filter BEFORE the loop so
 	# the operator's exclusion list short-circuits payload-building too, not
@@ -2127,19 +2114,10 @@ def _ai_payload_for_finding(
 	slowest queries from that action's recording are attached as
 	``technical_detail.example_queries`` (verbatim SQL evidence), unless already
 	set by a SQL red-flag analyzer."""
-	from optimus import ai_fix
-
 	payload = renderer._finding_to_dict(child, file_cache=file_cache)
 	callsite = (payload.get("technical_detail") or {}).get("callsite") or {}
 	if callsite.get("filename") and callsite.get("lineno") is not None:
-		try:
-			window = renderer._read_source_window(
-				callsite["filename"], callsite["lineno"],
-				before=ai_fix._SOURCE_LINES_BEFORE, after=ai_fix._SOURCE_LINES_AFTER,
-				cache=file_cache,
-			)
-		except Exception:
-			window = None
+		window = _ai_grounding_window(callsite["filename"], callsite["lineno"], file_cache)
 		if window:
 			payload["source_window"] = window
 
@@ -2163,6 +2141,33 @@ def _ai_payload_for_finding(
 		actions_by_idx=actions_by_idx,
 	)
 	return payload
+
+
+def _ai_grounding_window(filename: str, lineno, file_cache: dict) -> list[dict] | None:
+	"""Prefer a complete enclosing function; retain the bounded fallback window.
+
+	Unreadable source gives no window. A job timeout escapes as a fresh timeout.
+	"""
+	from optimus import ai_fix
+	from optimus.renderer import fix_recipes
+	from optimus.renderer import source as _source
+
+	guard = ai_fix._InterruptGuard()
+	window = None
+	try:
+		with guard:
+			lines = _source._source_lines(filename, cache=file_cache)
+			if lines and not isinstance(lineno, bool):
+				window = fix_recipes.enclosing_function_window(
+					lines, int(lineno),
+					before=ai_fix._SOURCE_LINES_BEFORE, after=ai_fix._SOURCE_LINES_AFTER,
+					max_line_chars=_source._SNIPPET_TRUNCATE_CHARS,
+				)
+	except Exception:
+		pass
+	if guard.pending():
+		raise guard.interrupt()
+	return window or None
 
 
 _AI_EXAMPLE_QUERIES_MAX = 3
@@ -2259,7 +2264,7 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	rows = list(getattr(doc, "findings", None) or [])
 	chosen = [
 		r for r in rows
-		if (getattr(r, "finding_type", "") or "") in ai_fix.AI_ELIGIBLE_FINDING_TYPES
+		if ai_fix.llm_gate_note(ai_fix.gate_input(r)) is None
 		and (regenerate_all or not ((getattr(r, "llm_fix_json", None) or "").strip()))
 	]
 	out["total_pending"] = len(chosen)
@@ -2322,153 +2327,6 @@ def _backfill_ai_suggestions(doc) -> bool:
 	        and getattr(cfg, "ai_auto_suggest", False)):
 		return False
 	return _run_ai_backfill(doc)["added"] > 0
-
-
-# ---------------------------------------------------------------------------
-# v0.6.0: LLM-vetted per-table index recommendation. Auto (gated by the
-# "Suggest AI fixes by default" toggle, for the top N tables that have a
-# heuristic recommendation) and on-demand (the "Suggest an index (AI)" button
-# → api.suggest_index). The result is stashed on the table's breakdown entry
-# as ``ai_index = {suggestion, model, provider, generated_at}``: the renderer
-# turns the markdown into safe HTML. Network I/O lives here in the
-# orchestrator / the API endpoint, never in an analyzer.
-# ---------------------------------------------------------------------------
-
-
-def _table_index_sample_queries(recordings: list[dict], table: str, limit: int = 4) -> list[str]:
-	"""Up to ``limit`` distinct normalized SELECT queries from the session that
-	touched ``table``, as context for the LLM's index advice. Best-effort."""
-	out: list[str] = []
-	seen: set[str] = set()
-	for recording in recordings or []:
-		for call in recording.get("calls") or []:
-			q = (call.get("normalized_query") or call.get("query") or "").strip()
-			if not q or q in seen:
-				continue
-			try:
-				meta = table_breakdown._parse_query(q)
-			except Exception:
-				continue
-			if meta.get("verb") == "SELECT" and table in (meta.get("tables") or []):
-				seen.add(q)
-				out.append(q)
-				if len(out) >= limit:
-					return out
-	return out
-
-
-def _table_existing_indexes(table: str) -> list[dict]:
-	"""``[{name, columns, unique}]`` for ``table`` (best-effort, [] on error).
-	Delegates to the dialect adapter so it's portable across MariaDB / Postgres."""
-	from optimus.dbdialect import get_dialect
-
-	return [
-		{"name": ix.name, "columns": ix.columns, "unique": ix.unique}
-		for ix in get_dialect().existing_indexes(table)
-	]
-
-
-def _ai_payload_for_table(t_entry: dict, recordings: list[dict]) -> dict:
-	"""Build the dict ``ai_fix.suggest_index`` expects from a breakdown entry."""
-	table = t_entry.get("table") or ""
-	rec = t_entry.get("recommended_index") or {}
-	return {
-		"table": table,
-		"doctype": rec.get("doctype") or (table[3:] if table.lower().startswith("tab") else ""),
-		"read_count": t_entry.get("read_count") or 0,
-		"write_count": t_entry.get("write_count") or 0,
-		"is_write_hot": bool(t_entry.get("is_write_hot")),
-		"recommended_index": rec,
-		"candidates": t_entry.get("index_candidates") or [],
-		"framework_cols_filtered": t_entry.get("framework_cols_filtered") or [],
-		"existing_indexes": _table_existing_indexes(table),
-		"sample_queries": _table_index_sample_queries(recordings, table),
-	}
-
-
-def _enrich_table_breakdown_with_ai_suggestions(context, recordings: list[dict]) -> None:
-	"""When Optimus Settings has ``ai_enabled`` and ``ai_auto_suggest``, ask the
-	LLM for an index recommendation on the top ``AI_AUTO_INDEX_MAX_TABLES``
-	tables that have a heuristic ``recommended_index``, stashing it on each
-	breakdown entry's ``ai_index``. Best-effort and time-budgeted: never fails
-	analyze."""
-	breakdown = (context.aggregate or {}).get("table_breakdown") or []
-	eligible = [t for t in breakdown if isinstance(t, dict) and t.get("recommended_index")]
-	if not eligible:
-		return
-	try:
-		from optimus.settings import get_config
-		cfg = get_config()
-	except Exception:
-		return
-	if not (getattr(cfg, "ai_enabled", False) and getattr(cfg, "ai_suggest_indexes", True)
-	        and getattr(cfg, "ai_auto_suggest", False)):
-		return
-	from optimus import ai_fix
-	if not ai_fix.is_available(section="indexes"):
-		return  # the findings auto-suggest step already warned about this
-
-	eligible = eligible[:AI_AUTO_INDEX_MAX_TABLES]
-	started = time.monotonic()
-	total = len(eligible)
-	for idx, t in enumerate(eligible):
-		if time.monotonic() - started > AI_AUTO_INDEX_TIME_BUDGET_SECONDS:
-			break
-		try:
-			_publish_progress(
-				79 + (idx / total) * 1.0,
-				f"Asking the AI to review index candidates ({idx + 1}/{total})…",
-				context.session_uuid,
-			)
-		except Exception:
-			pass
-		index, step_failed = _run_ai_step(
-			lambda t=t: ai_fix.suggest_index(_ai_payload_for_table(t, recordings)),
-			title="optimus ai index-suggest",
-			session_uuid=getattr(context, "session_uuid", None),
-			table=t.get("table") or "",
-		)
-		if not step_failed:
-			t["ai_index"] = index
-
-
-def _run_table_index_ai_backfill(doc, *, table_name: str) -> dict:
-	"""Generate (or regenerate) the LLM index recommendation for one table on a
-	persisted Optimus Session ``doc`` and write it into ``table_breakdown_json``.
-	Ungated but still needs a configured provider. Returns
-	``{"ok", "table", "reason"?}``; lets ``ai_fix.AiFixError`` propagate."""
-	_mark_ai_spend_session(getattr(doc, "session_uuid", None))
-	if not table_name:
-		return {"ok": False, "reason": "no table specified"}
-	from optimus import ai_fix
-	if not ai_fix.is_available(section="indexes"):
-		return {"ok": False, "table": table_name, "reason": "AI index recommendations not available"}
-	try:
-		breakdown = json.loads(doc.table_breakdown_json or "[]")
-	except Exception:
-		breakdown = []
-	t_entry = next((t for t in breakdown if isinstance(t, dict) and t.get("table") == table_name), None)
-	if t_entry is None:
-		return {"ok": False, "table": table_name, "reason": "table not in the breakdown"}
-	if not t_entry.get("recommended_index"):
-		return {"ok": False, "table": table_name, "reason": "no index candidate for this table"}
-
-	recording_uuids = [
-		a.recording_uuid for a in (doc.actions or []) if getattr(a, "recording_uuid", None)
-	]
-	try:
-		recordings = list(_fetch_recordings(recording_uuids, recordings_bundle=_load_recordings_bundle(doc)))
-	except Exception:
-		recordings = []
-
-	result = ai_fix.suggest_index(_ai_payload_for_table(t_entry, recordings))
-	t_entry["ai_index"] = result
-	frappe.db.set_value(
-		"Optimus Session", doc.name, "table_breakdown_json",
-		json.dumps(breakdown, default=str),
-	)
-	safe_commit()
-	return {"ok": True, "table": table_name}
 
 
 # v0.5.1: auto-generated "Steps to Reproduce" from captured actions. The

@@ -78,18 +78,20 @@ class AiFixError(Exception):
 # losing diagnostic signal the broader hot-path findings still appear
 # in the Findings section with their smoking-gun + drill-down; they
 # just no longer carry an LLM-rendered "Suggested fix" block.
+
+# Index-family findings (Missing Index, Full Table Scan, Filesort, Temporary
+# Table, Low Filter Ratio) get a deterministic recipe from
+# optimus.renderer.fix_recipes instead of an LLM answer, and Framework N+1
+# findings point at a loop inside framework code the app cannot change, so
+# none of them reaches the LLM. A Hot Line and a Redundant Call are further
+# gated per finding by ``llm_gate_note``.
 AI_ELIGIBLE_FINDING_TYPES: frozenset[str] = frozenset({
 	"N+1 Query",
-	"Framework N+1",
 	"Slow Query",
-	"Missing Index",
-	"Full Table Scan",
-	"Filesort",
-	"Temporary Table",
-	"Low Filter Ratio",
 	"Redundant Call",
 	"Hot Line",
 })
+
 
 # Per-provider protocol + sensible defaults. ``ai_base_url`` / ``ai_model``
 # from Optimus Settings override these; the "OpenAI-compatible" provider
@@ -196,38 +198,18 @@ _ANTHROPIC_VERSION = "2023-06-01"
 # gives the model a strong, type-specific starting point.
 _FINDING_TYPE_HINTS = ai_prompts.FINDING_TYPE_HINTS
 
-# Postgres phrasings for the four EXPLAIN-based hints. The rest of
-# _FINDING_TYPE_HINTS is dialect-neutral; MariaDB uses it verbatim. On Postgres
-# these swap the MariaDB EXPLAIN-column wording (type=ALL / Using filesort / …)
-# for plan-node wording (Seq Scan / Sort node / HashAggregate). The fix advice
-# is identical.
-_POSTGRES_EXPLAIN_HINTS = ai_prompts.POSTGRES_EXPLAIN_HINTS
-
 
 def _finding_type_hint(ftype):
-	"""Per-finding-type hint for the LLM prompt. The four EXPLAIN-based hints are
-	phrased for the active dialect (MariaDB EXPLAIN columns vs Postgres plan
-	nodes); the rest are dialect-neutral."""
-	if ftype in _POSTGRES_EXPLAIN_HINTS:
-		try:
-			from optimus.dbdialect import active_db_type
-			if active_db_type() == "postgres":
-				return _POSTGRES_EXPLAIN_HINTS[ftype]
-		except Exception:
-			pass
-	return _FINDING_TYPE_HINTS.get(ftype)
-
-
+	"""Per-finding-type hint for the LLM prompt (dialect-neutral: the EXPLAIN
+	types whose hints differed per dialect no longer reach the LLM)."""
+	return ai_prompts.FINDING_TYPE_HINTS.get(ftype)
 
 
 _MAX_STEPS_ACTIONS = 60
 _MAX_STEPS_USER_CHARS = 8000
 
 
-_INDEX_SYSTEM_PROMPT = ai_prompts.INDEX_SYSTEM_PROMPT
 
-_MAX_INDEX_SAMPLE_QUERIES = 4
-_MAX_INDEX_USER_CHARS = 10000
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +219,6 @@ _MAX_INDEX_USER_CHARS = 10000
 # v0.6.x: per-section "use the LLM for X" toggle → the config attribute.
 _AI_SECTION_FLAGS = {
 	"findings": "ai_suggest_findings",
-	"indexes": "ai_suggest_indexes",
 	"humanize": "ai_humanize_steps",
 }
 
@@ -259,6 +240,63 @@ def is_finding_type_excluded(finding_type: str | None) -> bool:
 	return finding_type in (excluded or ())
 
 
+_INDEX_TYPE_NOTE = (
+	"Index advice is built by Optimus from the DocType metadata, without the AI. "
+	"See the recipe on this finding in the report."
+)
+_FRAMEWORK_N1_NOTE = (
+	"A Framework N+1 finding points at a loop inside framework code, which your app "
+	"cannot change, so Optimus does not ask the AI about it."
+)
+_NOT_ELIGIBLE_NOTE = "This finding type does not carry enough code or SQL context for an AI suggestion."
+
+
+def _app_scope() -> tuple[tuple[str, ...], frozenset[str] | None]:
+	"""The site's Tracked Apps and installed apps, the same inputs the report
+	uses to tell your code from framework code. Ordinary settings failures fall
+	back to the default scope; job timeouts propagate."""
+	from optimus.analyzers.base import installed_apps_allowlist
+	from optimus.renderer import fix_recipes
+	from optimus.settings import get_config
+
+	tracked = fix_recipes._best_effort(lambda: tuple(getattr(get_config(), "tracked_apps", ()) or ()), ())
+	return tracked, fix_recipes._best_effort(installed_apps_allowlist, None)
+
+
+def gate_input(row) -> dict:
+	"""The dict ``llm_gate_note`` reads, built from an Optimus Finding row (or
+	any object with its attributes)."""
+	return {
+		"finding_type": getattr(row, "finding_type", "") or "",
+		"technical_detail_json": getattr(row, "technical_detail_json", None) or "{}",
+	}
+
+
+def llm_gate_note(finding: dict) -> str | None:
+	"""None when the LLM may be asked about ``finding``; otherwise why not, as a
+	sentence the report can show. The single eligibility chokepoint for
+	analyze, the refresh backfill and ``suggest_fix``. Accepts a render dict
+	(``technical_detail``), a row-shaped dict (``technical_detail_json``) or
+	a ``gate_input(row)`` dict."""
+	ftype = finding.get("finding_type") or ""
+	from optimus.renderer import fix_recipes
+
+	if ftype not in AI_ELIGIBLE_FINDING_TYPES:
+		if ftype in fix_recipes.INDEX_FINDING_TYPES:
+			return _INDEX_TYPE_NOTE
+		if ftype == "Framework N+1":
+			return _FRAMEWORK_N1_NOTE
+		return _NOT_ELIGIBLE_NOTE
+	if ftype == "Redundant Call":
+		if fix_recipes.analyzed_before_callsite_fix(finding):
+			return fix_recipes.PRE_L5_REDUNDANT_CALL_NOTE
+		return None
+	if ftype != "Hot Line":
+		return None
+	tracked, installed = _app_scope()
+	return fix_recipes.hot_line_gate(finding, tracked_apps=tracked, installed_apps=installed)
+
+
 def _resolve_timeout_seconds() -> int:
 	"""Return the configured HTTP timeout (seconds) for outbound LLM calls,
 	clamped to ``[10, 600]`` and falling back to :data:`_HTTP_TIMEOUT` when
@@ -277,7 +315,7 @@ def is_available(section: str | None = None) -> bool:
 	``ai_enabled`` set, a model resolvable for the chosen provider and an API
 	key present unless the provider needs none (local endpoints).
 
-	When ``section`` is ``"findings"`` / ``"indexes"`` / ``"humanize"``, also
+	When ``section`` is ``"findings"`` / ``"humanize"``, also
 	requires the matching per-section toggle. Fails soft: an unknown ``section``
 	or an unreadable config attr does not block once ``ai_enabled`` has passed."""
 	try:
@@ -320,6 +358,13 @@ def suggest_fix(finding: dict, *, timeout: int | None = None) -> dict:
 	(default: the configured request timeout). Raises ``AiFixError``."""
 	if is_finding_type_excluded(finding.get("finding_type")):
 		raise AiFixError("excluded by ai_excluded_finding_types", kind="config")
+	gate_note = llm_gate_note(finding)
+	if gate_note:
+		from frappe import _
+
+		raise AiFixError(
+			_("No AI suggestion for this finding: {0}").format(gate_note), kind="not_eligible",
+		)
 	provider = _provider_config()
 	_require_configured(provider)
 	ctx = _context_tokens(provider)
@@ -374,46 +419,6 @@ def humanize_steps(actions: list[dict], *, session_title: str | None = None, usa
 	return text
 
 
-def suggest_index(table_payload: dict) -> dict:
-	"""Ask the configured LLM to vet/refine an index recommendation for one
-	table. ``table_payload`` keys: ``table`` / ``doctype`` / ``read_count`` /
-	``write_count`` / ``is_write_hot`` / ``recommended_index`` (the heuristic
-	pick) / ``candidates`` (column→clauses→hits) / ``framework_cols_filtered`` /
-	``existing_indexes`` (``[{name, columns, unique}]`` from SHOW INDEX) /
-	``sample_queries``. Returns ``{"suggestion": <markdown>, "model", "provider",
-	"generated_at"}``. Raises ``AiFixError`` on a config / network problem or an
-	empty response."""
-	if not table_payload or not table_payload.get("table"):
-		raise AiFixError("No table to analyse for an index suggestion.")
-	provider = _provider_config()
-	_require_configured(provider)
-	system, messages = _build_index_messages(table_payload)
-	_check_context_fits(system, _context_tokens(provider), messages=messages, out_tokens=_output_tokens(provider))
-	usage: dict = {}
-	text = _dispatch_call(
-		provider, system, messages, usage_out=usage,
-		metadata=_aerele_call_metadata(provider, "Table Index"),
-	)
-	text = (text or "").strip()
-	if not text:
-		raise AiFixError("The AI provider returned an empty response.")
-	# Same guardrail as suggest_fix: if the model recommended indexing a Frappe
-	# metadata column, append a correction note. Plus the raw-SQL guardrail
-	# the index-suggestion path doesn't usually emit code, but a model can
-	# still volunteer a ``frappe.db.sql("ALTER ...")`` fallback that should
-	# be flagged (DDL verbs are excluded from the detector anyway, so this
-	# guard fires only on the broader anti-pattern).
-	text = _flag_metadata_column_index_advice(text)
-	text = _flag_raw_sql_in_fix(text)
-	result = {
-		"suggestion": text,
-		"model": provider["model"],
-		"provider": provider["name"],
-		"generated_at": datetime.now(timezone.utc).isoformat(),
-	}
-	if usage.get("total_tokens"):
-		result["tokens"] = usage
-	return result
 
 
 def _had_concrete_context(finding: dict) -> bool:
@@ -909,62 +914,6 @@ def _build_steps_messages(
 	return system, [{"role": "user", "content": content}]
 
 
-def _build_index_messages(payload: dict) -> tuple[str, list[dict]]:
-	"""Build ``(system_prompt, [user_message])`` for the per-table index
-	suggestion. Pure no Frappe, no I/O. See ``suggest_index`` for the
-	``payload`` shape."""
-	t = payload.get("table") or "?"
-	dt = (payload.get("doctype") or "").strip()
-	parts: list[str] = []
-	parts.append(f"Table: `{t}`" + (f"  (DocType: \"{dt}\")" if dt else ""))
-	rc = int(payload.get("read_count") or 0)
-	wc = int(payload.get("write_count") or 0)
-	parts.append(f"This profiling session: {rc} read(s), {wc} write(s) on this table.")
-	if payload.get("is_write_hot"):
-		parts.append(
-			"This is a write-hot core table in production it takes many "
-			"INSERT/UPDATE rows per submitted document."
-		)
-	rec = payload.get("recommended_index") or {}
-	if rec.get("columns"):
-		parts.append(
-			"Profiler's heuristic pick (most-used filter combination): ("
-			+ ", ".join(rec["columns"])
-			+ f") those columns were filtered together in {int(rec.get('together_count') or 0)} of {rc} read(s)."
-		)
-	cands = payload.get("candidates") or []
-	if cands:
-		parts.append(
-			"Columns this session filtered / joined / ordered on (shown as column: clauses (count)):\n"
-			+ "\n".join(
-				f"  - {c.get('column')}: {', '.join(c.get('sources') or [])} ({int(c.get('hits') or 0)}×)"
-				for c in cands
-			)
-		)
-	fw = payload.get("framework_cols_filtered") or []
-	if fw:
-		parts.append("Also filtered on Frappe metadata columns (do NOT index): " + ", ".join(fw))
-	ex = payload.get("existing_indexes") or []
-	if ex:
-		parts.append(
-			"CURRENT indexes on this table (from `SHOW INDEX`):\n"
-			+ "\n".join(
-				f"  - {i.get('name')}: (" + ", ".join(i.get("columns") or []) + ")"
-				+ (" UNIQUE" if i.get("unique") else "")
-				for i in ex
-			)
-		)
-	else:
-		parts.append(
-			f"CURRENT indexes on this table: not available be cautious about "
-			f"redundancy; the operator should run `SHOW INDEX FROM `{t}`` to check."
-		)
-	sq = payload.get("sample_queries") or []
-	if sq:
-		shown = [_truncate(q, _MAX_QUERY_CHARS) for q in sq[:_MAX_INDEX_SAMPLE_QUERIES]]
-		parts.append("A few of the actual read queries:\n```sql\n" + "\n---\n".join(shown) + "\n```")
-	content = _truncate("\n\n".join(p for p in parts if p).strip(), _MAX_INDEX_USER_CHARS)
-	return _INDEX_SYSTEM_PROMPT, [{"role": "user", "content": content}]
 
 
 def _build_messages(
@@ -2307,28 +2256,40 @@ def _require_configured(provider: dict) -> None:
 		raise AiFixError(_("No AI base URL is configured. Set Base URL under Optimus Settings > AI Fix Suggestions."), kind="config")
 
 
-def _index_candidate_prose(detail: dict) -> str:
-	"""The analyzer's suggested DDL as a sentence, never as DDL: the model is taught
-	the durable recipe, and a raw ALTER TABLE in the prompt invites one back."""
-	ddl = str(detail.get("suggested_ddl") or "")
-	table = str(detail.get("table") or "")
-	column = str(detail.get("column") or "")
-	if ddl and not table:
-		m = _DDL_TABLE_RE.search(ddl)
-		table = (m.group(1) or m.group(2)) if m else ""
-	if ddl and not column:
-		m = _DDL_COLUMN_RE.search(ddl)
-		column = m.group(1) if m else ""
-	if not (ddl and table and column):
-		return ""
-	doctype = table[3:] if table.startswith("tab") else table
-	return f"Profiler's index candidate: column `{column}` of DocType `{doctype}`."
 
 
 def _window_lines(window: list[dict]) -> str:
 	return "\n".join(
 		f"{'>> ' if row.get('is_target') else '   '}{row.get('lineno')}: {row.get('content', '')}" for row in window
 	)
+
+
+_LOOP_FACT_TYPES: frozenset[str] = frozenset({"N+1 Query", "Redundant Call", "Hot Line"})
+
+
+def _loop_facts_text(finding: dict) -> str:
+	"""Profiler-computed loop facts for the user message (fix_recipes.loop_facts
+	over the source window), or "" when the type is not loop-shaped or the
+	window is missing, gapped or has no target row. Identifiers only, no values."""
+	if (finding.get("finding_type") or "") not in _LOOP_FACT_TYPES:
+		return ""
+	detail = finding.get("technical_detail") or {}
+	callsite = detail.get("callsite") or {}
+	window = finding.get("source_window") or callsite.get("source_snippet") or []
+	rows = [r for r in window if isinstance(r, dict) and isinstance(r.get("lineno"), int)]
+	if not rows or any(b["lineno"] != a["lineno"] + 1 for a, b in zip(rows, rows[1:], strict=False)):
+		return ""
+	target = next((i for i, r in enumerate(rows) if r.get("is_target")), None)
+	if target is None:
+		target = next((i for i, r in enumerate(rows) if r["lineno"] == callsite.get("lineno")), None)
+	if target is None:
+		return ""
+	from optimus.renderer import fix_recipes
+
+	facts = fix_recipes._best_effort(
+		lambda: fix_recipes.loop_facts([str(r.get("content") or "") for r in rows], target + 1), {},
+	)
+	return fix_recipes.format_loop_facts(facts, line_offset=rows[0]["lineno"] - 1)
 
 
 def _build_fix_request(
@@ -2415,9 +2376,6 @@ def _build_fix_request(
 		))
 	if detail.get("normalized_query"):
 		tail.append((2, "Query (normalized):\n" + block("sql", _truncate(detail["normalized_query"], _MAX_QUERY_CHARS), "sql")))
-	candidate = _index_candidate_prose(detail)
-	if candidate:
-		tail.append((3, block("index-candidate", candidate)))
 	if detail.get("explain_row"):
 		tail.append((4, "EXPLAIN row:\n" + block("explain", _truncate(detail["explain_row"], 800))))
 	examples = detail.get("example_queries") or []
@@ -2428,6 +2386,9 @@ def _build_fix_request(
 		tail.append((6, "Note:\n" + block("validation", str(detail["validation_note"]))))
 
 	window = finding.get("source_window") or callsite.get("source_snippet") or []
+	loop_text = _loop_facts_text(finding)
+	if loop_text:
+		tail.append((1, loop_text))
 	content, shown = "", []
 	for max_lines in (*_WINDOW_STEPS, 4, 2, 1, 0):
 		trimmed = ai_budget.trim_window(window, max_lines=max_lines)
@@ -2453,8 +2414,6 @@ def _build_fix_request(
 	return system, [{"role": "user", "content": content}], shown
 
 
-_DDL_TABLE_RE = re.compile(r"(?:ALTER\s+TABLE|\bON)\s+(?:[`\"]([^`\"]+)[`\"]|(\S+))", re.I)
-_DDL_COLUMN_RE = re.compile(r"\(\s*[`\"]?([A-Za-z_]\w*)")
 _OPENAI_FINISH = {"stop": "stop", "length": "length"}
 _ANTHROPIC_FINISH = {
 	"end_turn": "stop",

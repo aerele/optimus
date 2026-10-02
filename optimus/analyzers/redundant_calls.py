@@ -200,7 +200,9 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			drop_no_caller_stack += 1
 			continue
 
-		callsite = walk_callsite(first_stack)
+		# Cache sidecars store innermost-first stacks; the walker expects
+		# outermost-first, so the selected frame is the caller of the lookup.
+		callsite = walk_callsite(list(reversed(first_stack)))
 		if callsite is None or is_framework_callsite(
 			callsite.get("filename") or "", tracked_apps=tracked_apps, installed_apps=installed_apps
 		):
@@ -258,6 +260,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 				fn_name, max_in_any_action, callsite=callsite
 			),
 			"technical_detail_json": json.dumps({
+				"callsite_walk": "outermost_first",
 				"fn_name": fn_name,
 				"identifier_safe": (
 					list(identifier_safe) if isinstance(identifier_safe, tuple) else identifier_safe
