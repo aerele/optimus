@@ -32,6 +32,7 @@ from optimus.analyzers.base import (
 	_last_app_segment,
 	dur,
 	installed_apps_allowlist,
+	is_error_log_hook_query,
 	is_framework_callsite,
 	short_filename,
 )
@@ -1586,7 +1587,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 		# "all trees at once" to "one at a time". Covers the pyi-is-None branch
 		# below too. (Guarded by a test that no later analyzer reads pyi_session.)
 		pyi = recording.pop("pyi_session", None)
-		calls = recording.get("calls") or []
+		calls = [c for c in recording.get("calls") or [] if not is_error_log_hook_query(c.get("stack"))]
 		# Track SQL time even if no pyi tree
 		sql_total_ms += sum(c.get("duration", 0) for c in calls)
 

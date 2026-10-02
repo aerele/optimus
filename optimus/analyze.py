@@ -853,11 +853,9 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 
 		# v0.6.0: optionally bake LLM fix suggestions into the report
 		# (Optimus Settings ▸ AI Fix Suggestions ▸ "Suggest AI fixes by
-		# default"). Best-effort + time-budgeted and double-wrapped here so
-		# even a bug in the AI path can NEVER fail the analyze. If the LLM
-		# was unavailable / errored, the session still completes; you can
-		# fill the suggestions in afterward via the "Generate AI fixes"
-		# button on the form (api.backfill_ai_fixes).
+		# default"). Ordinary provider errors are best-effort: the session
+		# still completes, and Refresh AI suggestions can fill the gaps later.
+		# The RQ job's hard deadline still propagates and terminates analysis.
 		_touch_singleflight(session_uuid)  # AI auto-suggest can run up to its own timeout (240s)
 		_, step_failed = _run_ai_step(
 			lambda: _enrich_findings_with_ai_suggestions(context, recordings=recordings),

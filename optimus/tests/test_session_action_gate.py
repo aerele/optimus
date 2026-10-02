@@ -248,6 +248,11 @@ def test_limit_tables_are_the_reviewed_defaults():
 		"test_ai_connection": {"limit": 10, "seconds": 60},
 	}
 	assert api._ACTION_LIMITS == {
+		"start": {"limit": 10, "seconds": 60},
+		"stop": {"limit": 20, "seconds": 60},
+		"start_line_profile_pass": {"limit": 10, "seconds": 60},
+		"stop_line_profile_pass": {"limit": 20, "seconds": 60},
+		"retry_phase2_analyze": {"limit": 5, "seconds": 60},
 		"regenerate_reports": {"limit": 30, "seconds": 60},
 		"retry_analyze": {"limit": 5, "seconds": 60},
 		"download_pdf": {"limit": 20, "seconds": 60},

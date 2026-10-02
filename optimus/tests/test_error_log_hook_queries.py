@@ -163,3 +163,24 @@ def test_hook_only_queries_never_reach_index_optimizer(monkeypatch):
 	_install_fake_recorder_module(monkeypatch, lambda sql: optimized.append(sql))
 	result = index_suggestions.analyze([{"calls": [dict(c, normalized_query=c["query"]) for c in _calls()[1:3]]}], None)
 	assert optimized == [] and result.findings == []
+
+
+def test_call_tree_sql_total_matches_session_total():
+	from optimus import analyze
+	from optimus.analyzers import call_tree
+
+	recordings = [{"calls": _calls(), "duration": 50.0}]
+	result = call_tree.analyze(recordings, base.AnalyzeContext(session_uuid="fake", docname="fake"))
+	assert result.aggregate["total_sql_ms"] == analyze._session_query_totals(recordings)[1] == 13.0
+
+
+def test_call_tree_excludes_hook_reads_from_reconciliation(monkeypatch):
+	from optimus.analyzers import call_tree
+
+	seen = []
+	def reconcile(pyi, calls, wall_time):
+		seen.extend(calls)
+		return {"function": "<root>", "children": [], "cumulative_ms": 0, "self_ms": 0, "kind": "python"}
+	monkeypatch.setattr(call_tree, "reconcile", reconcile)
+	call_tree.analyze([{"calls": _calls(), "pyi_session": object()}], base.AnalyzeContext(session_uuid="fake", docname="fake"))
+	assert seen == [_calls()[i] for i in (0, 3, 4, 5)]

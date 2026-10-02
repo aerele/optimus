@@ -8,6 +8,47 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.67] - 2026-10-02
+
+### Changed
+
+- **AI finding suggestions validate proposed code before storing it.** One
+  bounded repair request handles fabricated diffs, unsafe code and checked
+  Frappe rule violations. Code that still fails is removed with a profiler
+  note; advisory rules retain the code. Set `optimus_ai_reask` to `false` in
+  site_config to disable the repair request.
+- **AI prompts fit the provider's context window.** Captured data is
+  delimited, optional context is dropped before source lines, and non-ASCII
+  text is budgeted conservatively. Output-limit stops remove incomplete
+  code. Anthropic requests use a static cacheable prefix and count cache
+  tokens in usage.
+- Session and Phase 2 starts now allow 10 requests per user per minute, their
+  stops allow 20, and Phase 2 retries allow 5. Retry batches accept at most
+  5 entries, deduplicate runs and stop on a rate-limit refusal. Recovery
+  cancellation remains unlimited. Override limits with `optimus_rate_limits`
+  in site_config, as described in 0.12.66 below.
+
+### Fixed
+
+- Guardrails inspect Python code regardless of its fence label and ground
+  diffs in every section. Existing SQL in context cannot authorize an
+  additional raw SQL call, and enqueueing with after-commit explicitly
+  disabled is flagged.
+- Index suggestions use the provider's output budget and reject prompts
+  that cannot fit. A reported zero prompt-token count triggers the silent
+  truncation note; missing usage does not.
+- Call-tree SQL totals exclude the Error Log hook's own reads, matching the
+  other query summaries.
+
+### Upgrade notes
+
+- Restart web and background workers together after deployment. Existing
+  stored AI suggestions continue to render; refresh them to apply the new
+  guardrails. Follow the security migration and restart runbook in 0.12.63
+  when deploying these changes with the preceding security fixes.
+
+---
+
 ## [0.12.66] - 2026-10-01
 
 ### Removed

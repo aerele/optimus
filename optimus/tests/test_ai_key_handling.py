@@ -17,6 +17,14 @@ import requests
 from optimus import ai_fix
 from optimus import settings as _settings
 
+
+@pytest.fixture(autouse=True)
+def single_completion(monkeypatch):
+	# These key-handling tests isolate one completion. Guardrail retries and key
+	# rotation across them are covered in test_ai_guardrail_security.py.
+	monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: False)
+
+
 KEY = "sk-live-0123456789abcdefXYZ"
 _OPENAI_OK = {"choices": [{"message": {"content": "**Fix**\n\nuse a join"}}]}
 _ANTHROPIC_OK = {"content": [{"type": "text", "text": "**Fix**\n\nadd an index"}]}
@@ -76,11 +84,9 @@ class TestAiFixErrorShape:
 		e = ai_fix.AiFixError("m")
 		assert (e.status_code, e.kind) == (None, "unknown")
 
-	def test_has_no_usage_field(self):
-		# Nothing ever set or read it: it is gone, parameter included.
-		assert not hasattr(ai_fix.AiFixError("m"), "usage")
-		with pytest.raises(TypeError):
-			ai_fix.AiFixError("m", usage={"total_tokens": 5})
+	def test_usage_is_optional_billed_counts(self):
+		assert ai_fix.AiFixError("m").usage is None
+		assert ai_fix.AiFixError("m", usage={"total_tokens": 5}).usage == {"total_tokens": 5}
 
 
 class TestGetApiKey:
