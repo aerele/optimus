@@ -4,14 +4,15 @@
 """Server-side permission gates for profiler artifacts.
 
 Exposes one gate: a ``has_permission`` for the File DocType that
-double-checks downloads of the profiler artifacts (raw_report_file,
+checks File access to the profiler artifacts (raw_report_file,
 raw_report_pdf_file, recordings_file). It runs in Frappe's permission
 checks (form load, REST, ``frappe.has_permission``), so a read-sharee on
 the parent Optimus Session (granted access via a DocShare, not ownership
-or System Manager) can't download the raw recordings bundle through those
-checks either. A direct ``/private/files`` download is checked by
-Frappe's own File rule (read on the parent Optimus Session), not by this
-hook. Admin/owner-scoped.
+or System Manager) is denied through those checks. A direct
+``/private/files`` download bypasses this hook and still allows a parent
+read-sharee to download raw artifacts. The hidden, permlevel-0 attachment
+field can expose the URL when the parent Session is read through REST.
+This hook does not provide end-to-end raw-artifact confidentiality.
 
 This hook may only deny. When it has no objection it must hand the
 decision on to the next hook, and the value that means "no objection"
@@ -84,13 +85,13 @@ def _no_objection() -> bool | None:
 
 
 def file_has_permission(doc, ptype=None, user=None) -> bool | None:
-	"""Gate downloads of the profiler artifacts (report HTML + PDF, raw
-	recordings snapshot).
+	"""Gate File permission checks for report HTML/PDF and raw recordings.
 
 	On top of Frappe's standard File permission check, restricts these
 	files to the System Manager or the recording user (even if another role,
 	including a read-sharee on the parent Optimus Session, got read access to
-	the parent). Returns False to deny. Every other branch returns
+	the parent). Direct download URLs bypass this hook and still allow a
+	parent read-sharee access. Returns False to deny. Every other branch returns
 	``_no_objection()`` (True on Frappe 16, None on Frappe 15), so Frappe's
 	own File check still runs. Never a literal None (a deny on Frappe 16)
 	and never a literal True (a grant that skips Frappe's File check on

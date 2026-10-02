@@ -28,7 +28,7 @@ import pytest
 
 from optimus import maintenance
 
-pytestmark = pytest.mark.rq
+pytestmark = pytest.mark.rq  # Selected by AI Quality, which installs RQ.
 
 KEY = "sk-live-0123456789abcdefXYZ"
 LEAKY = (

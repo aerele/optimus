@@ -21,7 +21,7 @@ import requests
 
 from optimus import ai_fix
 
-pytestmark = pytest.mark.rq
+pytestmark = pytest.mark.rq  # Selected by AI Quality, which installs RQ.
 
 KEY = "sk-live-0123456789abcdefXYZ"
 
@@ -2229,6 +2229,25 @@ class TestARaisedAgainTimeoutIsLoggedOnce:
 		assert ei.value is not job_timeout
 		with pytest.raises(_JobTimeout):
 			ai_fix.log_ai_failure("optimus ai auto-suggest (outer)", ei.value)
+		assert len(logs) == 1
+
+	@pytest.mark.parametrize("already_logged", [False, True])
+	def test_rerender_preserves_one_log_and_the_timeout_marker(self, logs, job_timeout, monkeypatch, already_logged):
+		from optimus import api
+
+		def render(*args, **kwargs):
+			if already_logged:
+				ai_fix.log_ai_failure("inner render", job_timeout)
+			raise job_timeout
+
+		monkeypatch.setattr(api, "_render_session_report", render)
+		ref = SimpleNamespace(docname="synthetic-report", session_uuid=None)
+		with pytest.raises(_JobTimeout) as caught:
+			api._rerender_after_ai(ref)
+		assert caught.value is not job_timeout
+		assert getattr(caught.value, ai_fix._LOGGED_ATTR, False)
+		with pytest.raises(_JobTimeout):
+			ai_fix.log_ai_failure("outer render", caught.value)
 		assert len(logs) == 1
 
 	def test_a_timeout_that_was_not_written_is_not_marked(self, logs, job_timeout, monkeypatch, breadcrumbs):

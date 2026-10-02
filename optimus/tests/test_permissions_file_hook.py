@@ -32,9 +32,11 @@ snapshot (a compressed JSON bundle of the whole flow, including SQL
 parameters and Python call trees) was reachable by anyone with read
 access to the parent Optimus Session, including a read-sharee who was
 never meant to see raw capture data, only the rendered report. Gating
-it the same way as the two report files closes that gap in Frappe's
-permission checks (a direct download URL is still checked by Frappe's
-own File rule).
+it the same way as the two report files denies File form and REST access.
+It does not close the raw-download gap: a read-sharee can still obtain
+the URL from the parent Session and fetch it through /private/files.
+test_permissions_download_boundary.py characterizes that separate path
+using installed Frappe code, rather than the hook-loop replays below.
 
 An autouse fixture pins frappe.__version__ to a Frappe 16 release, so
 Parts A and B run on the v16 contract. Part A pins file_has_permission's
@@ -173,11 +175,11 @@ def test_user_defaults_to_session_user_denies_stranger(monkeypatch):
 
 # --- recordings_file gating (new in this PR) --------------------------------
 
-def test_recordings_file_denies_stranger(monkeypatch):
-	"""The raw recordings bundle is now gated exactly like the two report
-	files: a stranger (not System Manager/Administrator, not the recording
-	user) must be denied, not just able to see it because they can read the
-	parent Optimus Session."""
+def test_recordings_file_hook_denies_stranger(monkeypatch):
+	"""The hook denies File read access to a non-owner without System Manager.
+
+	This assertion does not exercise the direct-download route.
+	"""
 	_patch(monkeypatch, recording_user="owner@example.com")
 	doc = _doc(attached_to_field="recordings_file")
 	assert permissions.file_has_permission(doc, "read", user="stranger@example.com") is False
@@ -364,16 +366,13 @@ def test_stranger_denied(monkeypatch):
 	assert calls == []
 
 
-def test_read_sharee_denied_recordings_file(monkeypatch):
-	"""A read-sharee (someone granted read on the parent Optimus Session via
-	a DocShare, not a role and not the recording user) must be denied the
-	raw recordings bundle, and core's hook (the one that would actually
-	grant a share-ee access by delegating to the parent doc's
-	has_permission) must never even run. This is the exact gap this PR
-	closes: recordings_file joining _GATED_FIELDS means a share-ee who can
-	legitimately read the Optimus Session (and see its rendered report
-	through the normal UI) still cannot fetch the raw capture bundle
-	directly."""
+def test_read_sharee_denied_recordings_file_through_controller_hooks(monkeypatch):
+	"""The v16 hook loop denies File read access before core can grant it.
+
+	This models form/REST checks on File, not /private/files downloads.
+	The latter bypass this loop and still grant a parent read-sharee access
+	to the raw bundle, as test_permissions_download_boundary.py demonstrates.
+	"""
 	doc = types.SimpleNamespace(
 		attached_to_doctype="Optimus Session", attached_to_field="recordings_file",
 		attached_to_name="OS-0004", is_private=True, owner="system@example.com",
@@ -542,10 +541,10 @@ def test_v15_own_shared_public_file_allowed(monkeypatch, doc, user, shared_with)
 
 
 def test_v15_gated_file_stranger_denied_before_core(monkeypatch):
-	"""The gate's explicit False stops the Frappe 15 loop too: a read-sharee
-	on the parent Optimus Session is denied the recordings bundle and
-	Frappe's own File hook (which would grant through the share) never
-	runs."""
+	"""The gate's False stops the v15 controller loop before core can grant.
+
+	This denies File read checks, not the separate direct-download path.
+	"""
 	_on_frappe(monkeypatch, _V15)
 	_patch(monkeypatch, recording_user="owner@example.com")
 	doc = _file(

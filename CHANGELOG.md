@@ -8,7 +8,48 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [Unreleased]
+## [0.12.67] - 2026-10-02
+
+### Changed
+
+- **AI finding suggestions validate proposed code before storing it.** One
+  bounded repair request handles fabricated diffs, unsafe code and checked
+  Frappe rule violations. Code that still fails is removed with a profiler
+  note; advisory rules retain the code. Set `optimus_ai_reask` to `false` in
+  site_config to disable the repair request.
+- **AI prompts fit the provider's context window.** Captured data is
+  delimited, optional context is dropped before source lines, and non-ASCII
+  text is budgeted conservatively. Output-limit stops remove incomplete
+  code. Anthropic requests use a static cacheable prefix and count cache
+  tokens in usage.
+- Session and Phase 2 starts now allow 10 requests per user per minute, their
+  stops allow 20, and Phase 2 retries allow 5. Retry batches accept at most
+  5 entries, deduplicate runs and stop on a rate-limit refusal. Recovery
+  cancellation remains unlimited. Override limits with `optimus_rate_limits`
+  in site_config, as described in 0.12.66 below.
+
+### Fixed
+
+- Guardrails inspect Python code regardless of its fence label and ground
+  diffs in every section. Existing SQL in context cannot authorize an
+  additional raw SQL call, and enqueueing with after-commit explicitly
+  disabled is flagged.
+- Index suggestions use the provider's output budget and reject prompts
+  that cannot fit. A reported zero prompt-token count triggers the silent
+  truncation note; missing usage does not.
+- Call-tree SQL totals exclude the Error Log hook's own reads, matching the
+  other query summaries.
+
+### Upgrade notes
+
+- Restart web and background workers together after deployment. Existing
+  stored AI suggestions continue to render; refresh them to apply the new
+  guardrails. Follow the security migration and restart runbook in 0.12.63
+  when deploying these changes with the preceding security fixes.
+
+---
+
+## [0.12.66] - 2026-10-01
 
 ### Removed
 
@@ -18,14 +59,10 @@ versions may contain breaking changes see migration notes below).
   the session form's single "Refresh AI suggestions" button
   (`optimus.api.refill_ai_suggestions`) replaced the per-section buttons. A
   script that still calls one now gets a "Failed to get method" error; call
-  `refill_ai_suggestions` (POST, `session_uuid`) instead. Internal AI library
-  calls remain available.
+  `refill_ai_suggestions` (POST, `session_uuid`) instead. The AI library
+  functions behind them are unchanged.
 
 ### Changed
-
-- **AI finding suggestions validate proposed code before storing it.** One bounded repair request handles fabricated diffs, unsafe code and checked Frappe rule violations. Code that still fails is removed with a profiler note; advisory rules retain the code. Set `optimus_ai_reask` to `false` to disable the repair request.
-- **AI prompts fit the configured context window.** Captured data is delimited, optional context is dropped before source lines, and non-ASCII text is budgeted conservatively. Output-limit stops remove incomplete code. Anthropic requests use a static cacheable prefix and count cache tokens in usage.
-
 
 - **Optimus Users can run AI and session actions on their own sessions.** A
   user with the Optimus User role can now run Refresh AI suggestions,
@@ -45,25 +82,12 @@ versions may contain breaking changes see migration notes below).
   by adding a form field. Defaults: `refill_ai_suggestions` 6 per hour;
   `regenerate_reports` 30 per minute; `retry_analyze` 5 per minute;
   `test_ai_connection` 10 per minute; `download_pdf` and `export_session` 20
-  per minute. Session and Phase 2 starts allow 10 per minute, their stops
-  allow 20 per minute, and Phase 2 retries allow 5 per minute. Retry batches
-  accept at most 5 entries, deduplicate runs and stop on a rate-limit refusal.
-  Recovery cancellation remains unlimited. Override any of them in site_config:
+  per minute. Override any of them in site_config:
   `"optimus_rate_limits": {"refill_ai_suggestions": [12, 3600]}`.
 - `retry_analyze` on a session that is not Failed now returns an error instead
   of `{"retried": false}`.
 
 ### Fixed
-
-- Guardrails inspect Python code regardless of its fence label and ground
-  diffs in every section. Existing SQL in context cannot authorize an
-  additional raw SQL call, and enqueueing with after-commit explicitly
-  disabled is flagged.
-- Index suggestions use the provider's output budget and reject prompts
-  that cannot fit. A reported zero prompt-token count triggers the silent
-  truncation note; missing usage does not.
-- Call-tree SQL totals exclude the Error Log hook's own reads, matching the
-  other query summaries.
 
 - Refresh AI suggestions no longer fails with a permission error after the AI
   calls already ran (and were billed): the final report re-render no longer
@@ -87,9 +111,7 @@ versions may contain breaking changes see migration notes below).
 
 ### Upgrade notes
 
-- Follow the security migration and restart runbook in 0.12.63 below when
-  deploying this stack. The session action changes alone add no migration.
-- For the session action changes, no `bench migrate` is needed (no DocType or patch change), and no
+- No `bench migrate` is needed (no DocType or patch change), and no
   `bench --site <site> clear-cache` (no form JS change; running it is
   harmless). Open Desk tabs need no reload.
 - Restart web AND background workers together (`bench restart`, or your
@@ -104,7 +126,9 @@ versions may contain breaking changes see migration notes below).
   sessions and click Regenerate Reports (it now works); a GET to
   `/api/method/optimus.api.regenerate_reports` returns 403.
 
-### AI report rendering (pending)
+---
+
+## [0.12.65] - 2026-10-01
 
 ### Fixed
 
@@ -136,7 +160,11 @@ versions may contain breaking changes see migration notes below).
   remains readable. `AI_LINK_HOSTS` and `ai_link_allowed` provide the shared
   renderer link policy for future AI checks.
 
-### File permissions
+---
+
+## [0.12.64] - 2026-09-30
+
+### Fixed
 
 - **Advisory: every v16 site with Optimus installed had non-Administrator File
   permission checks denied.** `optimus.permissions.file_has_permission` returned
@@ -166,8 +194,11 @@ versions may contain breaking changes see migration notes below).
   permission checks (the File form, REST, `frappe.has_permission`) to
   anyone other than a System Manager or the recording user, the same check
   already applied to `raw_report_file` and `raw_report_pdf_file`. A direct
-  download URL is still governed by Frappe's own File rule (read access on
-  the parent Optimus Session), unchanged by this release.
+  `/private/files` download bypasses this hook and still grants a parent
+  read-sharee access to the raw bundle and reports. `recordings_file` is
+  hidden but remains at permlevel 0, so reading the parent Session through
+  REST can reveal its URL. This release does not close that download gap;
+  the tests of the controller hook do not prove raw-artifact confidentiality.
 - No migration needed (both changes are in-memory Python, not schema or data).
   **Upgrade:** restart the web and worker processes together after deploying
   so they load the fixed `optimus/permissions.py` (a partial restart leaves
