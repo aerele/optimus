@@ -141,6 +141,7 @@ except ImportError:
 		PermissionError=type("PermissionError", (Exception,), {}),
 		ValidationError=_StubValidationError,
 		DoesNotExistError=type("DoesNotExistError", (Exception,), {}),
+		RateLimitExceededError=type("RateLimitExceededError", (_StubValidationError,), {}),
 	)
 	_mk_module(
 		"frappe.utils",
@@ -231,6 +232,7 @@ _FRAPPE_DEPENDENT_LEAVES = frozenset({
 	"optimus.janitor",
 	"optimus.pdf_export",
 	"optimus.permissions",
+	"optimus.ratelimit",
 	"optimus.session",
 })
 
