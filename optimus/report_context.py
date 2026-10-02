@@ -924,7 +924,6 @@ def _build_footer(render_config) -> dict:
 		f"tracked_apps={', '.join(tracked) if tracked else '(none)'}",
 		f"ignored_apps={', '.join(ignored) if ignored else '(none)'}",
 		f"ai_suggest_findings={'on' if rc.get('ai_suggest_findings') else 'off'}",
-		f"ai_suggest_indexes={'on' if rc.get('ai_suggest_indexes') else 'off'}",
 		f"min_action_duration_ms={int(rc.get('min_action_duration_ms') or 0)}",
 		f"large_duration_threshold_ms={int(rc.get('large_duration_threshold_ms') or 0)}",
 	]
@@ -963,7 +962,7 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 	# non-default profile can't split the report into ms-here / seconds-there.
 	_fmt_ms = ctx.get("fmt_ms") or (lambda v, **kw: _ms_display(v, _threshold_ms, **kw))
 	# AI token-usage transparency: total tokens every AI feature consumed this
-	# session fix suggestions (per finding), index suggestions (per table),
+	# session fix suggestions (per finding),
 	# and the Steps-to-Reproduce humanization (one per session). Derived at
 	# render time so re-generated reports stay in sync never baked at
 	# analyze time. (The connectivity probe is a Settings test, not session
@@ -979,8 +978,6 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 	for _bucket in ctx.get("findings_by_app", []) or []:
 		for _f in (_bucket.get("findings") if isinstance(_bucket, dict) else []) or []:
 			_add_tokens(_f.get("llm_fix") if isinstance(_f, dict) else None)
-	for _t in ctx.get("table_breakdown", []) or []:
-		_add_tokens(_t.get("ai_index") if isinstance(_t, dict) else None)
 	_steps_tokens = int(getattr(session_doc, "ai_steps_tokens", 0) or 0)
 	_ai_tokens_total += _steps_tokens
 	return {

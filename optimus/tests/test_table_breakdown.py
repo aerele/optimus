@@ -641,7 +641,7 @@ class TestRenderConfigFooter:
 			"helpdesk, hrms, insights, lms, payments, wiki"
 		) in html
 		assert "ai_suggest_findings=on" in html
-		assert "ai_suggest_indexes=on" in html
+		assert "ai_suggest_indexes" not in html
 		assert "min_action_duration_ms=0" in html
 		assert "large_duration_threshold_ms=1000" in html
 		# The nudge phrase explains why the user might be looking at stale
@@ -670,6 +670,6 @@ class TestRenderConfigFooter:
 		assert "tracked_apps=myapp, ugly_code" in html
 		assert "ignored_apps=frappe" in html
 		assert "ai_suggest_findings=off" in html
-		assert "ai_suggest_indexes=off" in html
+		assert "ai_suggest_indexes" not in html
 		assert "min_action_duration_ms=42" in html
 		assert "large_duration_threshold_ms=2500" in html

@@ -2041,7 +2041,7 @@ def run_env(monkeypatch):
 	for name in (
 		"_touch_singleflight", "_release_singleflight", "_publish_session_event", "_publish_progress",
 		"_mark_ai_spend_session", "_enrich_findings_with_source_snippets",
-		"_enrich_findings_with_ai_suggestions", "_enrich_table_breakdown_with_ai_suggestions",
+		"_enrich_findings_with_ai_suggestions",
 		"_persist", "_render_and_attach_reports", "_persist_recordings_file", "_cleanup_redis",
 		"_auto_arm_phase2",
 	):
@@ -2063,9 +2063,8 @@ class TestRunLogsAFailedAiStepAndCarriesOn:
 		("step", "title"),
 		[
 			("_enrich_findings_with_ai_suggestions", "optimus ai auto-suggest (outer)"),
-			("_enrich_table_breakdown_with_ai_suggestions", "optimus ai index-suggest (outer)"),
 		],
-		ids=["auto-suggest", "index-suggest"],
+		ids=["auto-suggest"],
 	)
 	def test_the_step_is_logged_once_and_unbound(self, run_env, monkeypatch, step, title):
 		error = RuntimeError("PROMPT-TEXT step broke")

@@ -522,7 +522,7 @@ class TestAnthropicCall:
 		        "model": "claude-sonnet-4-6", "needs_key": True, "has_key": True}
 		with _provider(prov):
 			with pytest.raises(ai_fix.AiFixError, match="empty response"):
-				ai_fix.suggest_fix({"finding_type": "Missing Index", "title": "x", "technical_detail": {}})
+				ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
 
 
 class TestHttpErrorMapping:
@@ -749,7 +749,7 @@ class TestSuggestFix:
 		prov = {"name": "Anthropic", "protocol": "anthropic", "base_url": "https://api.anthropic.com",
 		        "model": "claude-sonnet-4-6", "needs_key": True, "has_key": True}
 		with _provider(prov):
-			out = ai_fix.suggest_fix({"finding_type": "Missing Index", "title": "x", "technical_detail": {}})
+			out = ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
 		assert out["suggestion"] == "**Fix**\n\nadd an index"
 		assert out["provider"] == "Anthropic"
 
@@ -803,7 +803,7 @@ class TestSourceAvailableFlag:
 
 	def test_false_when_only_title_and_numbers(self, monkeypatch):
 		out = self._suggest(monkeypatch, {
-			"finding_type": "Slow Hot Path", "title": "x", "technical_detail": {},
+			"finding_type": "Slow Query", "title": "x", "technical_detail": {},
 		})
 		assert out["source_available"] is False
 
@@ -812,26 +812,12 @@ class TestSourceAvailableFlag:
 		# line-profiled it has the per-line numbers, so don't show the
 		# "no source" caveat.
 		out = self._suggest(monkeypatch, {
-			"finding_type": "Slow Hot Path", "title": "x", "technical_detail": {},
+			"finding_type": "Slow Query", "title": "x", "technical_detail": {},
 			"phase2_hotline": {"lineno": 7, "content": "_run_validations(doc)", "total_ms": 387, "hits": 2},
 		})
 		assert out["source_available"] is True
 
 
-class TestSuggestIndex:
-	_PROVIDER = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
-	             "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
-
-	def test_includes_tokens_when_usage_present(self, monkeypatch):
-		resp = {"choices": [{"message": {"content": "**Index**\n\nadd a composite index"}}],
-		        "usage": {"prompt_tokens": 90, "completion_tokens": 30, "total_tokens": 120}}
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, resp)))
-		monkeypatch.setattr(ai_fix, "_build_index_messages",
-		                    lambda payload: ("sys", [{"role": "user", "content": "x"}]))
-		with _provider(dict(self._PROVIDER)):
-			out = ai_fix.suggest_index({"table": "tabUser"})
-		assert out["tokens"] == {"prompt_tokens": 90, "completion_tokens": 30, "total_tokens": 120}
-		assert out["suggestion"].startswith("**Index**")
 
 
 class TestHumanizeSteps:
@@ -922,7 +908,7 @@ class TestMetadataIndexGuardrail:
 		prov = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
 		        "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
 		with _provider(prov):
-			out = ai_fix.suggest_fix({"finding_type": "Missing Index", "title": "x", "technical_detail": {}})
+			out = ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
 		assert "Profiler note" in out["suggestion"]
 		assert "docstatus" in out["suggestion"]
 
@@ -1164,9 +1150,9 @@ class TestTemperature:
 def test_eligible_finding_types_is_a_frozenset_of_known_types():
 	assert isinstance(ai_fix.AI_ELIGIBLE_FINDING_TYPES, frozenset)
 	# Spot-check: the high-context types are in, the infra ones are out.
-	for t in ("N+1 Query", "Slow Query", "Missing Index", "Hot Line", "Redundant Call"):
+	for t in ("N+1 Query", "Slow Query", "Hot Line", "Redundant Call"):
 		assert t in ai_fix.AI_ELIGIBLE_FINDING_TYPES
-	for t in ("Memory Pressure", "Background Queue Backlog", "Slow Frontend Render", "Function Not Invoked"):
+	for t in ("Memory Pressure", "Background Queue Backlog", "Slow Frontend Render", "Function Not Invoked", "Missing Index", "Framework N+1", "Full Table Scan", "Filesort", "Temporary Table", "Low Filter Ratio"):
 		assert t not in ai_fix.AI_ELIGIBLE_FINDING_TYPES
 
 
@@ -1196,7 +1182,6 @@ class TestIsAvailableSection:
 		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
 			assert ai_fix.is_available() is True
 			assert ai_fix.is_available(section="findings") is True
-			assert ai_fix.is_available(section="indexes") is True
 			assert ai_fix.is_available(section="humanize") is True
 
 	def test_findings_section_off_blocks_only_findings(self):
@@ -1204,28 +1189,20 @@ class TestIsAvailableSection:
 		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
 			assert ai_fix.is_available() is True
 			assert ai_fix.is_available(section="findings") is False
-			assert ai_fix.is_available(section="indexes") is True
 			assert ai_fix.is_available(section="humanize") is True
 
-	def test_indexes_section_off_blocks_only_indexes(self):
-		with patch("optimus.settings.get_config", return_value=_cfg_ai_on(ai_suggest_indexes=False)), \
-		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
-			assert ai_fix.is_available(section="findings") is True
-			assert ai_fix.is_available(section="indexes") is False
-			assert ai_fix.is_available(section="humanize") is True
 
 	def test_humanize_section_off_blocks_only_humanize(self):
 		with patch("optimus.settings.get_config", return_value=_cfg_ai_on(ai_humanize_steps=False)), \
 		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
 			assert ai_fix.is_available(section="findings") is True
-			assert ai_fix.is_available(section="indexes") is True
 			assert ai_fix.is_available(section="humanize") is False
 
 	def test_master_switch_off_blocks_everything(self):
 		with patch("optimus.settings.get_config", return_value=_cfg_ai_on(ai_enabled=False)), \
 		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
 			assert ai_fix.is_available() is False
-			for s in ("findings", "indexes", "humanize"):
+			for s in ("findings", "humanize"):
 				assert ai_fix.is_available(section=s) is False
 
 	def test_unknown_section_does_not_block(self):
@@ -1407,7 +1384,7 @@ class TestGuardedCompletion:
 		assert set(out) == {"suggestion", "model", "provider", "generated_at", "source_available",
 		                    "prompt_version", "guardrail", "finish_reason"}
 		assert out["suggestion"] == self._GOOD
-		assert out["prompt_version"] == ai_prompts.PROMPT_VERSION == 3
+		assert out["prompt_version"] == ai_prompts.PROMPT_VERSION == 4
 		assert out["guardrail"] == {"violations": [], "reasked": False, "fallback": False}
 		assert out["finish_reason"] == "stop"
 
@@ -1878,20 +1855,15 @@ class TestBuildFixRequest:
 		_, _, shown = ai_fix._build_fix_request(f, threshold_ms=1000.0, context_tokens=200000)
 		assert shown == ["total += compute(row)"]
 
-	def test_suggested_ddl_is_sent_as_prose_not_ddl(self):
+	def test_suggested_ddl_and_candidate_are_not_sent(self):
 		f = {"finding_type": "Missing Index", "title": "Add index on tabSales Invoice(customer)",
 		     "technical_detail": {"table": "tabSales Invoice", "column": "customer",
 		                          "suggested_ddl": "ALTER TABLE `tabSales Invoice` ADD INDEX IF NOT EXISTS `customer_index` (`customer`);"}}
 		_, messages, _ = ai_fix._build_fix_request(f, threshold_ms=1000.0, context_tokens=200000)
 		c = messages[0]["content"]
-		assert "Profiler's index candidate: column `customer` of DocType `Sales Invoice`." in c
+		assert "Profiler's index candidate" not in c
 		assert "ALTER TABLE" not in c
 
-	def test_suggested_ddl_without_table_fields_is_parsed(self):
-		assert ai_fix._index_candidate_prose(
-			{"suggested_ddl": "ALTER TABLE `tabBOM Item` ADD INDEX IF NOT EXISTS `item_code_index` (`item_code`(255));"}
-		) == "Profiler's index candidate: column `item_code` of DocType `BOM Item`."
-		assert ai_fix._index_candidate_prose({"suggested_ddl": "garbage"}) == ""
 
 	def test_small_window_drops_optional_parts_before_the_source(self):
 		f = TestBuildMessages()._finding()
@@ -2118,7 +2090,7 @@ class TestGuardrailBoundaries:
         assert all(line in content for line in shown)
         assert content.count("<data-") == content.count("</data-")
 
-    def test_captured_index_and_validation_text_are_data(self):
+    def test_validation_text_is_data_and_index_candidate_is_absent(self):
         detail = {"table": "tabA", "column": "col", "suggested_ddl": "anything",
                   "validation_note": "captured note"}
         _, messages, _ = ai_fix._build_fix_request(
@@ -2127,7 +2099,7 @@ class TestGuardrailBoundaries:
         text = messages[0]["content"]
         blocks = re.findall(r'<data-[0-9a-f]{6} kind="[a-z-]+">(.*?)</data-[0-9a-f]{6}>', text, re.S)
         assert any("captured note" in b for b in blocks)
-        assert any("column `col`" in b for b in blocks)
+        assert "column `col`" not in text
 
 
 @pytest.mark.parametrize("entry", ["fix", "steps"])

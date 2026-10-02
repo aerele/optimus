@@ -367,6 +367,7 @@ class OptimusConfig:
 	ai_humanize_steps: bool = True
 	# v0.6.x: per-section "use the LLM for X" toggles. Default on; turning one off is a hard disable.
 	ai_suggest_findings: bool = True
+	# Retired: index advice is deterministic. Retained for existing settings rows.
 	ai_suggest_indexes: bool = True
 	# v0.7.x: Sensitivity Profile name. "Custom" → the threshold fields above
 	# carry the authoritative values; a named preset (Strict/Recommended/
