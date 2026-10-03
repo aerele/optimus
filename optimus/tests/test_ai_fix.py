@@ -174,7 +174,7 @@ class TestBuildMessages:
 	def test_query_is_truncated_when_huge(self):
 		f = self._finding()
 		f["technical_detail"]["normalized_query"] = "SELECT " + "x," * 5000 + "1"
-		_, messages = ai_fix._build_messages(f)
+		_, messages, _ = ai_fix._build_fix_request(f, threshold_ms=1000, context_tokens=32768, send_raw=True)
 		assert "(truncated)" in messages[0]["content"]
 
 	def test_handles_minimal_finding_without_detail(self):
@@ -313,7 +313,7 @@ class TestOpenAiCall:
 	def test_content_as_list_of_parts(self, monkeypatch):
 		payload = {"choices": [{"message": {"content": [{"text": "a"}, {"text": "b"}]}}]}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
-		assert ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}]) == "ab"
+		assert ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}]) == "ab"
 
 	def test_content_list_with_a_none_or_non_str_text_keeps_the_rest(self, monkeypatch):
 		# A part whose "text" is None (or not a string) counts as no text: the
@@ -322,12 +322,12 @@ class TestOpenAiCall:
 			{"text": "a"}, {"type": "text", "text": None}, "stray", {"text": 7}, {"type": "image"}, {"text": "b"},
 		]}}]}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
-		assert ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}]) == "ab"
+		assert ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}]) == "ab"
 
 	def test_no_text_in_response_raises(self, monkeypatch):
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {"choices": []})))
 		with pytest.raises(ai_fix.AiFixError):
-			ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}])
+			ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}])
 
 	def test_populates_usage_out_when_provided(self, monkeypatch):
 		payload = {
@@ -336,7 +336,7 @@ class TestOpenAiCall:
 		}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		usage: dict = {}
-		ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage)
+		ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage)
 		assert usage == {"prompt_tokens": 120, "completion_tokens": 45, "total_tokens": 165}
 
 	def test_retries_without_temperature_on_400_temperature_error(self, monkeypatch):
@@ -345,7 +345,7 @@ class TestOpenAiCall:
 		err = '{"error":{"message":"invalid temperature: only 1 is allowed for this model"}}'
 		fp = _post_sequence(_FakeResp(400, text=err), _FakeResp(200, _OPENAI_OK))
 		monkeypatch.setattr(requests, "post", fp)
-		text = ai_fix._call_openai_chat("u", "k", "kimi-k2.6", "s", [{"role": "user", "content": "x"}])
+		text = ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "kimi-k2.6", "s", [{"role": "user", "content": "x"}])
 		assert text == "**Fix**\n\nuse a join"
 		assert len(fp.calls) == 2
 		assert "temperature" in fp.calls[0].body   # first attempt sent it
@@ -357,7 +357,7 @@ class TestOpenAiCall:
 		err = '{"error":"invalid temperature: only 1 is allowed for this model"}'
 		fp = _post_sequence(_FakeResp(422, text=err), _FakeResp(200, _OPENAI_OK))
 		monkeypatch.setattr(requests, "post", fp)
-		text = ai_fix._call_openai_chat("u", "k", "some-thinking-model", "s", [{"role": "user", "content": "x"}])
+		text = ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "some-thinking-model", "s", [{"role": "user", "content": "x"}])
 		assert text == "**Fix**\n\nuse a join"
 		assert len(fp.calls) == 2
 		assert "temperature" not in fp.calls[1].body  # retry dropped it
@@ -366,7 +366,7 @@ class TestOpenAiCall:
 		fp = _post_sequence(_FakeResp(400, text='{"error":{"message":"context_length_exceeded"}}'))
 		monkeypatch.setattr(requests, "post", fp)
 		with pytest.raises(ai_fix.AiFixError):
-			ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}])
+			ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}])
 		assert len(fp.calls) == 1  # no retry for unrelated 400s
 
 	def test_404_body_mentioning_temperature_does_not_retry(self, monkeypatch):
@@ -400,7 +400,7 @@ class TestSessionAttribution:
 		fp = _post_returning(_FakeResp(200, _OPENAI_OK))
 		monkeypatch.setattr(requests, "post", fp)
 		ai_fix._call_openai_chat(
-			"u", "k", "m", "s", [{"role": "user", "content": "x"}],
+			"https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}],
 			metadata={"optimus_session": "abc"},
 		)
 		assert fp.last.body["metadata"] == {"optimus_session": "abc"}
@@ -408,7 +408,7 @@ class TestSessionAttribution:
 	def test_call_omits_metadata_key_when_none(self, monkeypatch):
 		fp = _post_returning(_FakeResp(200, _OPENAI_OK))
 		monkeypatch.setattr(requests, "post", fp)
-		ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}])
+		ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}])
 		assert "metadata" not in fp.last.body
 
 
@@ -467,13 +467,13 @@ class TestUsageNormalization:
 	def test_a_good_suggestion_is_kept_when_usage_is_malformed(self, monkeypatch, usage):
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {**_OPENAI_OK, "usage": usage})))
 		out: dict = {}
-		assert ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=out) == (
+		assert ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=out) == (
 			"**Fix**\n\nuse a join"
 		)
 		assert out == self._ZERO
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {**_ANTHROPIC_OK, "usage": usage})))
 		out = {}
-		assert ai_fix._call_anthropic("u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=out) == (
+		assert ai_fix._call_anthropic("https://fake.invalid", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=out) == (
 			"**Fix**\n\nadd an index"
 		)
 		assert out == self._ZERO
@@ -512,7 +512,7 @@ class TestAnthropicCall:
 
 class TestHttpErrorMapping:
 	def _call(self):
-		return ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}])
+		return ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}])
 
 	def test_timeout(self, monkeypatch):
 		monkeypatch.setattr(requests, "post", _post_raising(requests.exceptions.Timeout()))
@@ -544,10 +544,10 @@ class TestHttpErrorMapping:
 			ai_fix._call_openai_chat("http://localhost:11434", "", "bad-model", "s", [{"role": "user", "content": "x"}])
 		msg = str(ei.value)
 		assert "404" in msg
-		assert "/chat/completions" in msg
+		assert "/chat/completions" in ei.value.detail and "/chat/completions" not in msg
 		assert "Model" in msg
 		assert "/v1" in msg
-		assert "model not found" in msg   # provider's own error body surfaced
+		assert "model not found" in ei.value.detail and "model not found" not in msg
 
 	def test_generic_http_error_includes_body_detail(self, monkeypatch):
 		monkeypatch.setattr(requests, "post", _post_returning(
@@ -558,8 +558,9 @@ class TestHttpErrorMapping:
 		# found" / "context too long" etc. reach the operator.
 		monkeypatch.setattr(requests, "post", _post_returning(
 			_FakeResp(400, {}, text="bad model name")))
-		with pytest.raises(ai_fix.AiFixError, match="bad model name"):
+		with pytest.raises(ai_fix.AiFixError, match="HTTP 400") as caught:
 			self._call()
+		assert "bad model name" in caught.value.detail
 
 	def test_non_json_body(self, monkeypatch):
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, raise_on_json=True)))
@@ -816,7 +817,7 @@ class TestHumanizeSteps:
 	]
 
 	def test_build_steps_messages_shape(self):
-		system, messages = ai_fix._build_steps_messages(self._ACTIONS, "Save SI flow")
+		system, messages = ai_fix._build_steps_messages(self._ACTIONS, "Save SI flow", send_raw=True)
 		low = system.lower()
 		assert "steps to reproduce" in low
 		assert "**summary:**" in low
@@ -1230,7 +1231,7 @@ class TestCallChokepointCollectsUsage:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		usage = {}
 		ai_fix._call_openai_chat(
-			"u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage
+			"https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage
 		)
 		assert usage["total_tokens"] == 10
 		assert recorded == []
@@ -1246,7 +1247,7 @@ class TestCallChokepointCollectsUsage:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		usage = {}
 		ai_fix._call_anthropic(
-			"u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage
+			"https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage
 		)
 		assert usage["total_tokens"] == 10
 		assert recorded == []
@@ -1258,7 +1259,7 @@ class TestFinishReason:
 		payload = {"choices": [{"message": {"content": "ok"}, "finish_reason": raw}]}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		meta: dict = {}
-		ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
+		ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
 		assert meta == {"finish_reason": want, "prompt_tokens_reported": False}
 
 	@pytest.mark.parametrize(
@@ -1270,7 +1271,7 @@ class TestFinishReason:
 		payload = dict(_ANTHROPIC_OK, stop_reason=raw)
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		meta: dict = {}
-		ai_fix._call_anthropic("u", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
+		ai_fix._call_anthropic("https://fake.invalid", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
 		assert meta == {"finish_reason": want, "prompt_tokens_reported": False}
 
 	def test_meta_out_is_set_even_when_the_text_is_missing(self, monkeypatch):
@@ -1278,7 +1279,7 @@ class TestFinishReason:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		meta: dict = {}
 		with pytest.raises(ai_fix.AiFixError):
-			ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
+			ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
 		assert meta == {"finish_reason": "length", "prompt_tokens_reported": False}
 
 
@@ -1321,7 +1322,7 @@ class TestGuardedCompletion:
 
 	def _run(self, fake, monkeypatch, provider=None, **kw):
 		monkeypatch.setattr(requests, "post", fake)
-		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True: "sk-test")
+		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True, **kw: "sk-test")
 		monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: True)
 		with patch("optimus.ai_fix._provider_config", return_value=dict(provider or self._PROVIDER)):
 			return ai_fix.suggest_fix(dict(self._FINDING), **kw)
@@ -1408,7 +1409,7 @@ class TestGuardedCompletion:
 	def test_knob_off_means_no_reask(self, monkeypatch):
 		fake = _post_sequence(self._resp(self._RAW))
 		monkeypatch.setattr(requests, "post", fake)
-		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True: "sk-test")
+		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True, **kw: "sk-test")
 		monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: False)
 		with patch("optimus.ai_fix._provider_config", return_value=dict(self._PROVIDER)):
 			out = ai_fix.suggest_fix(dict(self._FINDING))
@@ -1660,7 +1661,7 @@ class TestAnthropicEndToEnd:
 
 	def _run(self, monkeypatch, *payloads):
 		fake = _post_sequence(*[_FakeResp(200, p) for p in payloads])
-		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True: "sk-test-anthropic")
+		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True, **kw: "sk-test-anthropic")
 		monkeypatch.setattr(requests, "post", fake)
 		monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: True)
 		with patch("optimus.ai_fix._provider_config", return_value=dict(self._PROVIDER)):
@@ -1916,7 +1917,7 @@ class TestNonLatinBudget:
 			 "doctype": "Sales Invoice"}
 			for i in range(40)
 		]
-		system, messages = ai_fix._build_steps_messages(actions, _CJK, context_tokens=4096)
+		system, messages = ai_fix._build_steps_messages(actions, _CJK, context_tokens=4096, send_raw=True)
 		user = messages[0]["content"]
 		assert "(truncated)" in user
 		out = ai_budget.output_tokens(4096)
@@ -1930,14 +1931,14 @@ class TestProviderContext:
 		assert ai_fix._PROVIDER_DEFAULTS["OpenAI-compatible"]["context_tokens"] == 4096
 
 	def test_resolve_provider_reports_context_and_output_limits(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True: "")
+		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True, **kw: "")
 		with patch("optimus.settings.get_config", return_value=_cfg(ai_provider="Anthropic")):
 			p = ai_fix._resolve_provider()
 		assert p["context_tokens"] == 200000 and p["max_output_tokens"] is None
 		assert "api_key" not in p
 
 	def test_settings_override_applies_to_openai_compatible_only(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True: "")
+		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True, **kw: "")
 		cfg = _cfg(ai_provider="OpenAI-compatible", ai_base_url="http://10.0.0.5:11434/v1", ai_model="qwen3-coder:30b",
 		           ai_context_tokens=8192)
 		with patch("optimus.settings.get_config", return_value=cfg):
@@ -1951,7 +1952,7 @@ class TestProviderContext:
 	def test_too_small_window_fails_before_any_http(self, monkeypatch):
 		called = {"n": 0}
 		monkeypatch.setattr(requests, "post", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
-		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True: "")
+		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True, **kw: "")
 		prov = {"name": "OpenAI-compatible", "protocol": "openai", "base_url": "http://x/v1", "model": "m",
 		        "needs_key": False, "has_key": False, "context_tokens": 2048}
 		with patch("optimus.ai_fix._provider_config", return_value=prov):

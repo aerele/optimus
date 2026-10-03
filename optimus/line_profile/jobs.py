@@ -8,6 +8,7 @@ queue redelivery never repeats a claimed generation. No request runs analysis.
 import json
 import time
 import uuid
+from contextlib import contextmanager
 from contextvars import ContextVar
 
 import frappe
@@ -22,16 +23,33 @@ JOB_SECONDS = 1500
 LEASE_SECONDS = JOB_SECONDS + 120
 MAX_ATTEMPTS = 4
 JOURNAL_FIELDS = (
+	"recording_user",
 	"analyze_generation", "analyze_requested_by", "analyze_worker_token", "analyze_lease_until",
 	"analyze_dispatch_at", "analyze_dispatch_pending", "analyze_attempts", "analyze_render_pending",
 )
 _RESULT_SAVE = ContextVar("optimus_phase2_result_save", default=False)
+_CAPTURE_CREATION = ContextVar("optimus_phase2_capture_creation", default=None)
+
+
+@contextmanager
+def capture_creation(parent, run_uuid, user):
+	"""Allow only the new capture row admitted by the server under its lock."""
+	token = _CAPTURE_CREATION.set((parent, run_uuid, user))
+	try:
+		yield
+	finally:
+		_CAPTURE_CREATION.reset(token)
 
 
 def _validate_journal_row(row, before):
+	if (not before and _CAPTURE_CREATION.get() == (row.get("parent"), row.get("run_uuid"), row.get("recording_user"))
+		and row.get("recording_user") and row.get("status") == "Recording"
+		and row.get("parenttype") == "Optimus Session" and row.get("parentfield") == "phase_2_runs"
+		and not any(row.get(key) for key in (*JOURNAL_FIELDS[1:], "results_json", "warnings_json", "total_ms", "ended_at"))):
+		return
 	fields = JOURNAL_FIELDS
 	if any(row.get(key) or before.get(key) for key in JOURNAL_FIELDS):
-		fields += ("run_uuid", "parent", "parenttype", "parentfield")
+		fields += ("run_uuid", "parent", "parenttype", "parentfield", "picks_json", "started_at")
 		if not _RESULT_SAVE.get():
 			fields += ("status", "results_json", "warnings_json", "total_ms", "ended_at")
 	if any((row.get(key) or None) != (before.get(key) or None) for key in fields):
@@ -101,6 +119,72 @@ def _authorized(parent, user):
 		can_read=bool(frappe.has_permission("Optimus Session", "read", parent["name"], user=user)),
 		can_write=bool(frappe.has_permission("Optimus Session", "write", parent["name"], user=user)),
 	)
+
+
+def _force_stop_capture(docname, run_uuid, user):
+	"""Fence only this user's still-recording generation under the parent lock."""
+	parent, row = _locked(docname, run_uuid)
+	if not parent or not row or row["status"] != "Recording":
+		return False
+	if (row.get("recording_user") or parent.get("user")) != user:
+		return False
+	_write(row, status="Failed", analyze_dispatch_pending=0,
+		warnings_json=json.dumps(["Capture stopped by its recording user. Retry analysis while input is available, or record a new pass."]))
+	return True
+
+
+def _capture_candidates(user):
+	query = """SELECT c.parent, c.run_uuid FROM `tabOptimus Phase Two Run` c
+		INNER JOIN `tabOptimus Session` s ON c.parent = s.name
+		WHERE c.status = 'Recording' AND (c.recording_user = %(user)s OR
+			((c.recording_user IS NULL OR c.recording_user = '') AND s.user = %(user)s))
+		ORDER BY c.creation, c.name LIMIT 100"""
+	return frappe.db.multisql({"mariadb": query, "postgres": query.replace("`", '"')},
+		{"user": user}, as_dict=True)
+
+
+def stop_captures(captures, *, cleanup=False):
+	"""Post-commit Redis compensation. A stale stop cannot delete a newer run."""
+	from optimus.line_profile import capture
+	cleared, failed = False, 0
+	for run_uuid, user in captures:
+		guard = ai_fix._InterruptGuard(base=True)
+		failure_type = None
+		try:
+			with guard:
+				cleared = capture.stop_line_profile_pass(run_uuid, user) or cleared
+				if cleanup:
+					capture.cleanup_run(run_uuid)
+		except Exception as exc:
+			failure_type = type(exc).__name__
+		if guard.pending():
+			raise guard.interrupt()
+		if failure_type:
+			failed += 1
+			_log("optimus Phase 2 capture recovery", RuntimeError(failure_type))
+	return bool(cleared), failed
+
+
+def force_stop_captures(user):
+	"""Bounded recovery, including an orphaned Redis pointer with no SQL row."""
+	from optimus.line_profile import capture
+	_identity(user)
+	ai_jobs._transaction(lambda: None)
+	rows = _capture_candidates(user)
+	active = capture.is_active(user, fresh=True)
+	ai_jobs._transaction(lambda: None)
+	stopped = []
+	for row in rows:
+		if ai_jobs._retry_sql(lambda: _force_stop_capture(row["parent"], row["run_uuid"], user)):
+			stopped.append((row["run_uuid"], user))
+	failed_rows = len(stopped)
+	if active and (active, user) not in stopped:
+		stopped.append((active, user))
+	# An explicit retry may claim a Failed row as soon as the SQL commit
+	# finishes. Keep input for that retry; its bounded TTL handles retention.
+	cleared, cleanup_failed = stop_captures(stopped)
+	return {"cleared_active_flag": cleared, "prior_run_uuid": active,
+		"rows_marked_failed": failed_rows, "cleanup_failed": cleanup_failed}
 
 
 def _admit(docname, session_uuid, run_uuid, requested_by, *, generation, now, from_recording=False):

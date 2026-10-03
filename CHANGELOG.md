@@ -8,6 +8,51 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.72] - 2026-10-03
+
+### Security
+
+- Read persisted recordings as bounded, session-bound JSON from an exact
+  private File attachment. Never unpickle persisted trees or sidecars.
+  Live Redis trees require HMAC verification by default on signing-capable
+  sites; legacy unsigned input requires an explicit compatibility override.
+- Validate provider URLs and every redirect target. Withhold API keys over
+  non-loopback HTTP unless explicitly enabled by the operator. Bind the
+  provider settings and encrypted credential in one SQL snapshot before
+  dispatch, so a changed key cannot be paired with an old cached endpoint.
+- Keep provider replies and endpoint details out of public errors and AI logs.
+  Detach prompt, reply and URL frames from escaping AI exceptions. Preserve
+  worker interrupts and administrator-only scrubbed connection diagnostics.
+- Default raw-value consent off. Remove SQL literals/comments and Steps
+  document names/session title at the prompt boundary. Record Settings
+  changes, strip URL credentials before history, and clear unchanged stored
+  keys when the effective destination changes.
+- Restrict source reads to canonical app/library source, with bounded reads.
+  Check Server Script permission for both the principal and actor before
+  reading cached or saved snippets. Import dotted paths only from installed apps.
+- Prepare Phase 2 picks/source before SQL locks, record the capture actor, and
+  reserve complete input atomically. Stop only the expected generation.
+  Reject corrupt, evicted or over-budget input and retain interrupt behavior.
+- Delete private AI journals with their Session in one transaction; preserve
+  uncertain history while the Session exists. Reject document saves that
+  overwrite worker-maintained usage counters. Escape identifiers in errors.
+
+### Upgrade notes
+
+- Back up, migrate the new consent and capture-actor fields, then replace web,
+  workers and scheduler together. Do not mix old and new capture writers.
+  The endpoint-policy patch warns without decrypting keys or changing settings.
+- New Phase 2 input expires after 24 hours; missing/expired input requires a
+  new capture. Legacy input can lack TTLs. Old persisted JSON remains usable
+  within the new bounds, but its trees and sidecars are ignored.
+- Review raw-value consent, provider TLS/egress policy and source permissions.
+  The URL policy does not resolve DNS or prevent DNS rebinding. Settings
+  validation in developer mode can still snapshot submitted form data.
+- This does not close the accepted direct private-file download limitation or
+  rewrite historical reports/Versions. Final model evaluation and deployment
+  acceptance remain release gates. See [security boundaries](SECURITY.md) and
+  [refresh operations](docs/AI-REFRESH.md).
+
 ## [0.12.71] - 2026-10-03
 
 ### Changed

@@ -1168,7 +1168,10 @@ def render_raw(session_doc: Any, recordings: list[dict]) -> str:
 	(raw SQL, headers, form_dict and full stack traces are not stored on the
 	DocType).
 	"""
-	return render(session_doc, recordings)
+	from optimus.renderer.source import server_script_readers
+
+	with server_script_readers(getattr(session_doc, "owner", None)):
+		return render(session_doc, recordings)
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ from optimus import ai_fix, ai_jobs
 from optimus.tests import test_ai_refresh_journal as journal_tests
 from optimus.tests import test_ai_secret_canary as base
 
-pytestmark = pytest.mark.rq
+pytestmark = [pytest.mark.rq, pytest.mark.usefixtures("bound_provider_credentials")]
 
 
 @pytest.fixture

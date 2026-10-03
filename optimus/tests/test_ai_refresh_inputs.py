@@ -150,7 +150,7 @@ def light(monkeypatch):
 		raise AssertionError("light loading must not deserialize a tree")
 
 	monkeypatch.setattr(analyze, "_deserialize_tree", forbid)
-	monkeypatch.setattr(analyze, "_rehydrate_from_bundle", forbid)
+	monkeypatch.setattr(analyze, "_rehydrate_from_bundle", forbid, raising=False)
 	doc = SimpleNamespace(
 		name="fake-doc",
 		session_uuid="fake-session",
@@ -244,10 +244,10 @@ def test_bundle_read_logs_outside_except_and_never_swallows_rq(monkeypatch, inte
 	monkeypatch.setattr(
 		analyze,
 		"frappe",
-		SimpleNamespace(get_doc=failed, log_error=lambda **kw: seen.append(sys.exc_info()[0])),
+		SimpleNamespace(get_all=failed, get_doc=failed, log_error=lambda **kw: seen.append(sys.exc_info()[0])),
 	)
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: seen.append(sys.exc_info()[0]))
-	doc = SimpleNamespace(recordings_file="fake-file", session_uuid="fake-session")
+	doc = SimpleNamespace(name="fake-doc", recordings_file="/private/files/fake.json.gz", session_uuid="fake-session")
 	if interrupt:
 		with pytest.raises(Timeout) as caught:
 			analyze._load_recordings_bundle(doc)

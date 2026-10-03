@@ -118,38 +118,47 @@ frappe.ui.form.on("Optimus Settings", {
 		// handler below it re-runs refresh() so this conditional
 		// fires again).
 		if (frm.doc.ai_enabled) {
-			frm.add_custom_button(__("Test AI connection"), () => {
+			const probe_button = frm.add_custom_button(__("Test AI connection"), () => {
+				if (frm._optimus_ai_probe_pending) return;
 				if (frm.is_dirty()) {
 					frappe.msgprint(
 						__("Save your AI settings first, then test the connection.")
 					);
 					return;
 				}
-				frappe.show_alert({
-					message: __("Pinging the AI provider…"),
-					indicator: "blue",
-				});
-				frappe.call({
-					method: "optimus.api.test_ai_connection",
-					callback(r) {
-						const m = (r && r.message) || {};
-						frappe.msgprint({
-							title: m.ok
-								? __("AI connection OK")
-								: __("AI connection failed"),
-							indicator: m.ok ? "green" : "red",
-							message:
-								(m.model ? __("Model: {0}", [m.model]) + "<br>" : "") +
-								frappe.utils.escape_html(m.message || ""),
-						});
-					},
-					error() {
-						frappe.show_alert({
-							message: __("AI connection test failed"),
-							indicator: "red",
-						});
-					},
-				});
+				frm._optimus_ai_probe_pending = true;
+				try {
+					frappe.call({
+						method: "optimus.api.test_ai_connection",
+						btn: probe_button,
+						freeze: true,
+						freeze_message: __("Testing the AI connection, up to 60 seconds. A local model may need time to load."),
+						always() {
+							frm._optimus_ai_probe_pending = false;
+						},
+						callback(r) {
+							const m = (r && r.message) || {};
+							frappe.msgprint({
+								title: m.ok
+									? __("AI connection OK")
+									: __("AI connection failed"),
+								indicator: m.ok ? "green" : "red",
+								message:
+									(m.model ? __("Model: {0}", [frappe.utils.escape_html(String(m.model))]) + "<br>" : "") +
+									frappe.utils.escape_html(String(m.message || "")),
+							});
+						},
+						error() {
+							frappe.show_alert({
+								message: __("AI connection test failed"),
+								indicator: "red",
+							});
+						},
+					});
+				} catch (error) {
+					frm._optimus_ai_probe_pending = false;
+					frappe.show_alert({message: __("AI connection test could not start. Try again."), indicator: "red"});
+				}
 			});
 		}
 
@@ -201,6 +210,7 @@ frappe.ui.form.on("Optimus Settings", {
 		frm.refresh_field("ai_base_url");
 		frm.refresh_field("ai_model");
 		frm.refresh_field("ai_api_key");
+		frm.refresh_field("ai_send_raw_values");
 		frm.refresh_field("ai_sections_break");
 		frm.refresh_field("ai_suggest_findings");
 		frm.refresh_field("ai_suggest_indexes");

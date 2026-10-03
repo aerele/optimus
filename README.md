@@ -618,16 +618,25 @@ sections. The index setting is read-only and has no effect.
 |---|---|---|
 | **Fix suggestions on findings** | ✓ on | Eligible finding fixes through Refresh AI suggestions and the automatic pass. |
 | **Index recommendations (DB-tables breakdown)** | read-only | No effect: index advice is deterministic and never uses the AI. |
-| **Humanized "Steps to Reproduce"** | ✓ on | LLM rewrites the auto-captured action list into a friendly flow at analyze time (and on demand). Falls back to the raw action list on any failure. |
+| **Humanized "Steps to Reproduce"** | ✓ on | Manual background Refresh AI suggestions may rewrite the action list. Failure preserves saved results; captured actions remain available. |
 
 #### Automatic Suggestions section
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Suggest AI fixes in the report by default** | ✗ off | When on, the analyze pipeline auto-generates a fix for each eligible finding so suggestions are already in the report no need to click per finding. Costs LLM tokens (and a little analyze time) on every session. Keep off unless you want suggestions baked in. |
-| **Max auto-suggested findings per session** | `5` | Cap on how many findings get an automatic suggestion highest-severity, highest-impact first. `0` = every eligible finding (can be slow + costly on big sessions). _Strict 10 · Recommended 5 · Relaxed 3._ |
+| **Suggest AI fixes in the report by default** | ✓ on | When AI is enabled, queue optional fixes after profiling is Ready. Requires an AI worker and uses provider tokens; saved profiling results survive AI failure. |
+| **Max auto-suggested findings per session** | `5` | Cap on how many findings get an automatic suggestion highest-severity, highest-impact first. `0` = every eligible finding (can be slow + costly on big sessions). _Strict 0 · Recommended 5 · Relaxed 3._ |
 
 #### Privacy & Operations section
+
+**Send raw values to the AI provider** is off by default. SQL literals/comments
+and Steps document names/session title are omitted unless explicitly enabled.
+Code, finding titles and schema names can still contain private information.
+Use type exclusions or disable AI when sharing that context is unacceptable.
+Settings changes are recorded in Version history. Provider URLs are validated,
+and changing the destination clears an unchanged stored key. See the
+[security boundaries and deployment limits](SECURITY.md) and
+[background refresh operations](docs/AI-REFRESH.md).
 
 | Field | Default | Purpose |
 |---|---|---|
@@ -678,7 +687,8 @@ as pre-DocType fallbacks. The DocType row wins if both are set.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `optimus_allow_unsigned_pickles` | `True` | Whether to accept legacy un-signed pyinstrument blobs in Redis during analyze. Defaults to `True` to keep pre-v0.7 sessions analyzable. Set `False` on hardened sites to refuse unsigned blobs entirely (requires `encryption_key` in site_config). |
+| `optimus_allow_unsigned_pickles` | `False` with an encryption key | Legacy live-Redis compatibility only. Explicit true weakens HMAC protection; sites without an encryption key retain the legacy default. Persisted JSON bundles never unpickle. |
+| `optimus_ai_allow_key_over_http` | `False` | Explicitly allow credentials over non-loopback plain HTTP on a trusted network. Prefer HTTPS; this does not encrypt prompts or credentials. |
 
 ### Infra-pressure analyzer
 

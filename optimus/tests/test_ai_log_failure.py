@@ -661,7 +661,8 @@ class TestHttpFailurePath:
 		assert ei.value.kind == "transport"
 		assert ei.value.__context__ is None and ei.value.__cause__ is None
 		assert len(logs) == 1 and logs[0]["title"] == "optimus ai_fix"
-		assert "detail=ConnectionError: HTTPConnectionPool" in logs[0]["message"]
+		assert "detail=ConnectionError\n" in logs[0]["message"]
+		assert "HTTPConnectionPool" not in logs[0]["message"]
 		# a caller logging the same error again writes nothing more (K16)
 		ai_fix.log_ai_failure("optimus ai backfill", ei.value)
 		assert len(logs) == 1
@@ -764,7 +765,7 @@ class TestHttpFailurePath:
 				for name, value in tb.tb_frame.f_locals.items():
 					assert KEY not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds the header"
 			tb = tb.tb_next
-		assert "_http_post" in checked
+		assert ai_fix._http_post.__code__.co_name in checked
 
 	def test_rq_job_timeout_still_stops_the_job(self, logs, monkeypatch):
 		# The catch-all must not turn RQ's job timeout into a normal AI error
@@ -793,28 +794,26 @@ class TestHttpFailurePath:
 		assert logs == []
 
 	@pytest.mark.parametrize("status", [400, 404, 500])
-	def test_an_echoed_key_is_masked_in_the_error_message(self, logs, monkeypatch, status):
-		# The 404 and other >= 400 messages carry the provider body to the
-		# operator (toast, API response, the title of Frappe's own snapshot).
+	def test_an_echoed_key_is_masked_in_admin_detail(self, logs, monkeypatch, status):
+		# Only admin detail carries the scrubbed body, never the public error.
 		body = f'{{"error": "invalid key {KEY} for this model"}}'
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(status, {}, text=body)))
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			_call()
-		assert "invalid key ******** for this model" in str(ei.value)
+		assert "invalid key ******** for this model" in ei.value.detail
+		assert "invalid key" not in str(ei.value) and KEY not in ei.value.detail
 		assert KEY not in str(ei.value)
 
-	def test_the_404_message_masks_credentials_in_the_base_url(self, logs, monkeypatch):
-		# A custom Base URL typed as user:password@host: the 404 message names
-		# the URL, and it reaches toasts and API responses.
-		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(404, {}, text="")))
+	def test_credentials_in_the_base_url_are_refused_before_http(self, logs, monkeypatch):
+		monkeypatch.setattr(requests, "post", lambda *a, **k: pytest.fail("credentials reached transport"))
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			ai_fix._call_openai_chat(
 				"http://alice:hunter2-pass@llm.internal:11434/v1", "", "m", "s", [{"role": "user", "content": "x"}]
 			)
 		message = str(ei.value)
-		assert "404 (Not Found) for http://********@llm.internal:11434/v1/chat/completions. " in message
+		assert ei.value.kind == "config"
 		assert "alice" not in message and "hunter2-pass" not in message
-		assert "alice" not in logs[0]["message"] and "hunter2-pass" not in logs[0]["message"]
+		assert logs == []
 
 	def test_the_404_message_masks_the_key_in_the_base_url(self, logs, monkeypatch):
 		# Some gateways take the key in the path: the stored key is scrubbed
@@ -824,22 +823,24 @@ class TestHttpFailurePath:
 			ai_fix._call_openai_chat(
 				f"https://gw.internal/{KEY}/v1", "", "m", "s", [{"role": "user", "content": "x"}]
 			)
-		assert "404 (Not Found) for https://gw.internal/********/v1/chat/completions. " in str(ei.value)
+		assert "https://gw.internal/********/v1/chat/completions" in ei.value.detail
+		assert "gw.internal" not in str(ei.value) and KEY not in ei.value.detail
 		assert KEY not in str(ei.value)
 
 	@pytest.mark.parametrize("fails", ["reading-the-key", "scrubbing"])
 	def test_a_404_url_that_cannot_be_scrubbed_is_never_shown(self, logs, monkeypatch, fails):
-		# If the URL cannot be scrubbed, the message names a placeholder, never
-		# the unscrubbed URL (a custom Base URL can carry user:password@).
+		# A gateway path may itself be sensitive. A failed scrub substitutes
+		# the placeholder even in administrator-only detail.
 		target = "optimus.ai_fix._scrub_literals_for" if fails == "reading-the-key" else "optimus.redaction.scrub_secrets"
 		monkeypatch.setattr(target, _raising(RuntimeError("scrub failed")))
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(404, {}, text="")))
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			ai_fix._call_openai_chat(
-				"http://alice:hunter2-pass@llm.internal:11434/v1", "", "m", "s", [{"role": "user", "content": "x"}]
+				"https://llm.internal/hunter2-pass/v1", "", "m", "s", [{"role": "user", "content": "x"}]
 			)
 		message = str(ei.value)
-		assert "404 (Not Found) for (the configured Base URL). Check that the Model " in message
+		assert "(the configured Base URL)" in ei.value.detail
+		assert "hunter2-pass" not in ei.value.detail and "llm.internal" not in ei.value.detail
 		assert "alice" not in message and "hunter2-pass" not in message and "llm.internal" not in message
 		assert "hunter2-pass" not in logs[0]["message"]
 
@@ -850,7 +851,8 @@ class TestHttpFailurePath:
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			_call()
 		assert KEY[:10] not in str(ei.value)
-		assert str(ei.value).endswith("x" * 10 + "******** t")
+		assert ei.value.detail.endswith("x" * 10 + "******** t")
+		assert KEY[:10] not in ei.value.detail
 
 	@pytest.mark.parametrize(
 		"old_key",
@@ -882,7 +884,7 @@ class TestHttpFailurePath:
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			ai_fix._http_post("https://x.invalid/v1/chat/completions", {}, {"model": "m"},
 			                  provider="openai", where="chat/completions", auth=auth)
-		message, row = str(ei.value), logs[0]["message"]
+		message, row = ei.value.detail, logs[0]["message"]
 		assert "raw=******** escaped=********" in message  # the echo reached the message, masked
 		for form in (old_key, escaped):
 			assert form not in message and form not in row
@@ -931,7 +933,8 @@ class TestHttpFailurePath:
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(500, {}, text=f'{{"error": "bad key {escaped}"}}')))
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			_call()
-		assert escaped not in str(ei.value) and 'bad key ********"' in str(ei.value)
+		assert escaped not in ei.value.detail and 'bad key ********"' in ei.value.detail
+		assert "bad key" not in str(ei.value)
 		ai_fix.log_ai_failure("optimus ai backfill", ai_fix.AiFixError(f"echo {escaped} and {quoted_key}"))
 		row = logs[-1]["message"]
 		assert escaped not in row and quoted_key not in row
@@ -1025,7 +1028,8 @@ class TestHttpFailurePath:
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(500, {}, text="RESPONSE-BODY-MARKER")))
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			_call()
-		assert "RESPONSE-BODY-MARKER" in str(ei.value)  # still surfaced to the operator
+		assert "RESPONSE-BODY-MARKER" in ei.value.detail
+		assert "RESPONSE-BODY-MARKER" not in str(ei.value)
 		assert "RESPONSE-BODY-MARKER" not in logs[0]["message"]
 		assert "status=500" in logs[0]["message"]
 
@@ -1135,14 +1139,16 @@ class TestHttpFailurePath:
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			_call()
 		if status >= 400 and status not in (401, 403, 429):
-			assert f"REPLY-BODY: you asked about {pii}" in str(ei.value)  # the operator's message is unchanged
+			assert f"REPLY-BODY: you asked about {pii}" in ei.value.detail
+			assert pii not in str(ei.value)
 		assert ai_fix.log_ai_failure("optimus ai backfill", ei.value) is True
 		assert attempts == ["optimus ai_fix", "optimus ai backfill"]
 		row = logs[0]["message"]
 		assert pii not in row and "REPLY-BODY" not in row and "you asked" not in row
 		assert f"HTTP {status} " in row
 		assert "where=chat/completions" in row and "provider_error=invalid_request_error" in row
-		assert "Traceback (most recent call last):" in row and ", in _http_post\n" in row  # the plain frames stay
+		assert "Traceback (most recent call last):" in row
+		assert f", in {ai_fix._http_post.__code__.co_name}\n" in row  # sanitized boundary remains
 
 	def test_http_row_references_the_explicit_session(self, logs, monkeypatch):
 		import frappe
@@ -1728,7 +1734,7 @@ class TestAJobTimeoutIsNeverSwallowed:
 			for name, value in tb.tb_frame.f_locals.items():
 				assert KEY not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds the key"
 			tb = tb.tb_next
-		assert "_http_post" in walked
+		assert ai_fix._http_post.__code__.co_name in walked
 		assert logs == []
 
 	def test_token_count(self, job_timeout):
@@ -1856,6 +1862,7 @@ def _backfill_env(monkeypatch):
 	return analyze, SimpleNamespace(session_uuid="uuid-7", findings=rows)
 
 
+@pytest.mark.usefixtures("bound_provider_credentials")
 class TestCallSitesLogOnce:
 	def test_http_failure_during_backfill_writes_one_referenced_row_each(self, logs, monkeypatch):
 		analyze, doc = _backfill_env(monkeypatch)
@@ -2133,7 +2140,7 @@ class TestTheCallersContextJoinsTheRow:
 		assert len(logs) == 1
 		row = frappe.db.rows["ERR-0001"]["error"]
 		assert row.startswith(logs[0]["message"])  # the generic lines stay first
-		assert "detail=ConnectionError: refused" in row
+		assert "detail=ConnectionError\n" in row
 		assert "\n\noptimus ai backfill\nsession_uuid=uuid-1\nfinding_type=n_plus_one" in row
 		assert frappe.db.set_values == [("Error Log", "ERR-0001", "error", False)]
 		assert breadcrumbs == []

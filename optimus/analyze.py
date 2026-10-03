@@ -522,134 +522,111 @@ def _bg_wait_for_pending_jobs(session_uuid: str, docname: str, deadline):
 
 
 def _auto_arm_phase2(docname: str, context) -> None:
-	"""When ``optimus_phase2_auto_arm`` is set in site_config, arm a phase-2
-	line-profile pass on the recommended hot-path functions right after analyze
-	finishes, so the user just re-runs the flow once for line-level data.
+	"""Optional capture after the Ready commit. Worker interrupts still stop work."""
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
 
-	Opt-in and admin-only: arming instruments the user's NEXT run of the flow,
-	so it suits replay-safe / non-production flows only. Best-effort: never fails
-	analyze (the report is already saved)."""
+	guard = _InterruptGuard(base=True)
+	failure = None
 	try:
-		if not frappe.conf.get("optimus_phase2_auto_arm"):
-			return
-
-		import uuid as _uuid
-
-		from frappe.utils import now_datetime
-
-		from optimus.line_profile import capture as _lp_capture
-		from optimus.line_profile import picker as _lp_picker
-		from optimus.settings import get_config
-
-		doc = frappe.get_doc("Optimus Session", docname)
-		user = getattr(doc, "user", None)
-		if not user:
-			return
-
-		# Guard: respect the per-session run cap. v0.13.x: 0 = no cap
-		# (Strict-as-unlimited). Pre-v0.13.x the ``or 10`` swallowed 0
-		# and silently re-applied the default cap.
-		cap = int(getattr(get_config(), "phase2_max_runs_per_session", 10))
-		if cap > 0 and len(doc.get("phase_2_runs") or []) >= cap:
-			return
-
-		# Guard: don't arm over an active phase-1 or phase-2 pass for this user.
-		try:
-			if (
-				frappe.cache.get_value(_redis_keys.lp_active(user))
-				or frappe.cache.get_value(_redis_keys.session_active(user))
-			):
-				return
-		except Exception:
-			pass
-
-		# Recommended hot paths, derived from the persisted call trees (same
-		# candidate builder the picker uses).
-		trees: list = []
-		for action in (doc.get("actions") or []):
-			raw = getattr(action, "call_tree_json", None)
-			if not raw:
-				continue
-			try:
-				tree = json.loads(raw)
-			except (TypeError, ValueError):
-				continue
-			if isinstance(tree, dict) and "root" in tree:
-				tree = tree["root"]
-			trees.append(tree)
-
-		candidates = _lp_picker._build_tree_indented_candidates(trees)
-		# Don't auto-arm Ignored-App functions (same filter as the picker).
-		try:
-			from optimus.settings import get_ignored_apps
-			_ignored_apps = get_ignored_apps()
-		except Exception:
-			_ignored_apps = ()
-		candidates, _ = _lp_picker.filter_out_ignored_apps(candidates, _ignored_apps)
-		picks = [
-			{"dotted_path": c["dotted_path"], "source": "curated"}
-			for c in candidates
-			if c.get("recommended") and c.get("dotted_path")
-		]
-		if not picks:
-			return
-
-		run_uuid = _uuid.uuid4().hex
-		from optimus.api import _lock_phase2_for_write
-		_lock_phase2_for_write(docname)
-		doc = frappe.get_doc("Optimus Session", docname)
-		if cap > 0 and len(doc.get("phase_2_runs") or []) >= cap:
+		with guard:
+			_arm_phase2(docname, context)
+	except Exception as exc:
+		failure = exc
+	if failure is not None or guard.pending():
+		with guard:
 			frappe.db.rollback()
-			return
-		resolved = _lp_capture.start_line_profile_pass(
-			session_uuid=context.session_uuid,
-			run_uuid=run_uuid,
-			user=user,
-			picks=picks,
-		)
-		eligible = [r for r in (resolved or []) if r.get("eligible")]
-		if not eligible:
-			frappe.db.rollback()
-			return
+	if guard.pending():
+		failure = context = None
+		raise guard.interrupt()
+	if failure is not None:
+		log_ai_failure("optimus auto-arm phase 2", failure)
 
-		doc.append("phase_2_runs", {
-			"run_uuid": run_uuid,
-			"status": "Recording",
-			"started_at": now_datetime(),
-			"picks_json": frappe.as_json([
-				{"dotted_path": r["dotted_path"], "source": r.get("source", "curated")}
-				for r in eligible
-			]),
-		})
-		doc.flags.ignore_validate_update_after_submit = True
-		doc.save(ignore_permissions=True)
-		safe_commit()
 
-		# Auto-arm runs server-side during analyze, when the user isn't on the
-		# form tell them a pass is armed and what to do next (re-run + Stop),
-		# since arming alone does nothing until the flow re-executes.
-		functions = [r["dotted_path"].rsplit(".", 1)[-1] for r in eligible][:5]
+def _arm_phase2(docname: str, context) -> None:
+	if not frappe.conf.get("optimus_phase2_auto_arm"):
+		return
+
+	import uuid as _uuid
+
+	from optimus.line_profile import capture as _lp_capture
+	from optimus.line_profile import picker as _lp_picker
+	from optimus.settings import get_config
+
+	doc = frappe.get_doc("Optimus Session", docname)
+	user = getattr(doc, "user", None)
+	if not user:
+		return
+
+	# Guard: respect the per-session run cap. v0.13.x: 0 = no cap
+	# (Strict-as-unlimited). Pre-v0.13.x the ``or 10`` swallowed 0
+	# and silently re-applied the default cap.
+	cap = int(getattr(get_config(), "phase2_max_runs_per_session", 10))
+	if cap > 0 and len(doc.get("phase_2_runs") or []) >= cap:
+		return
+
+	# Redis failure refuses optional arming; atomic start rechecks ownership.
+	if (frappe.cache.get_value(_redis_keys.lp_active(user))
+		or frappe.cache.get_value(_redis_keys.session_active(user))):
+		return
+
+	# Recommended hot paths, derived from the persisted call trees (same
+	# candidate builder the picker uses).
+	trees: list = []
+	for action in (doc.get("actions") or []):
+		raw = getattr(action, "call_tree_json", None)
+		if not raw:
+			continue
 		try:
-			frappe.publish_realtime(
-				"optimus_phase2_armed",
-				{
-					"docname": docname,
-					"run_uuid": run_uuid,
-					"count": len(eligible),
-					"functions": functions,
-				},
-				user=user,
-			)
-		except Exception:
-			pass
-		frappe.logger().info(
-			f"optimus: auto-armed phase-2 pass {run_uuid} for {docname} "
-			f"({len(eligible)} function(s)) re-run the flow + Stop to capture line data."
-		)
-	except Exception:
-		# Never let auto-arm break a finished analyze.
+			tree = json.loads(raw)
+		except (TypeError, ValueError):
+			continue
+		if isinstance(tree, dict) and "root" in tree:
+			tree = tree["root"]
+		trees.append(tree)
+
+	candidates = _lp_picker._build_tree_indented_candidates(trees)
+	# Don't auto-arm Ignored-App functions (same filter as the picker).
+	from optimus.settings import get_ignored_apps
+	_ignored_apps = get_ignored_apps()
+	candidates, _ = _lp_picker.filter_out_ignored_apps(candidates, _ignored_apps)
+	picks = [
+		{"dotted_path": c["dotted_path"], "source": "curated"}
+		for c in candidates
+		if c.get("recommended") and c.get("dotted_path")
+	]
+	if not picks:
+		return
+
+	prepared = _lp_capture.prepare_line_profile_picks(picks)
+	run_uuid = _uuid.uuid4().hex
+	from optimus.api import _lock_phase2_for_write, _persist_phase2_capture
+	from optimus.line_profile.jobs import _authorized
+	_lock_phase2_for_write(docname)
+	doc = frappe.get_doc("Optimus Session", docname)
+	if cap > 0 and len(doc.get("phase_2_runs") or []) >= cap:
 		frappe.db.rollback()
-		frappe.log_error(title="optimus auto-arm phase 2")
+		return
+	if (getattr(doc, "user", None) != user or getattr(doc, "session_uuid", None) != context.session_uuid
+		or not _authorized({"name": docname, "owner": getattr(doc, "owner", None)}, user)):
+		frappe.db.rollback()
+		return
+	resolved = _persist_phase2_capture(doc, docname, context.session_uuid, run_uuid, user, prepared)
+	eligible = [r for r in resolved if r.get("eligible")]
+
+	# Auto-arm runs server-side during analyze, when the user isn't on the
+	# form tell them a pass is armed and what to do next (re-run + Stop),
+	# since arming alone does nothing until the flow re-executes.
+	functions = [r["dotted_path"].rsplit(".", 1)[-1] for r in eligible][:5]
+	frappe.publish_realtime(
+		"optimus_phase2_armed",
+		{
+			"docname": docname,
+			"run_uuid": run_uuid,
+			"count": len(eligible),
+			"functions": functions,
+		},
+		user=user,
+	)
 
 
 def run(session_uuid: str, _bg_wait_until: float | None = None,
@@ -685,6 +662,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 
 	analyze_start = time.monotonic()
 	bg_jobs_unfinished = 0
+	failure = None
 
 	try:
 		# v0.6.0: wait for the background jobs the profiled flow enqueued to
@@ -849,7 +827,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# v0.6.0: attach ±1-line source snippets to each finding's callsite
 		# before persisting, so finding cards can show the offending line
 		# without requiring a per-render file read.
-		_enrich_findings_with_source_snippets(context.findings)
+		_enrich_findings_with_source_snippets(context.findings, owner=frappe.db.get_value("Optimus Session", docname, "owner"))
 
 		_publish_progress(80, "Writing session data", session_uuid)
 		_persist(docname, context, recordings, analyze_elapsed_ms)
@@ -885,9 +863,9 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 			docname=docname,
 		)
 
-	except Exception:
+	except Exception as exc:
+		failure = exc
 		frappe.db.rollback()
-		frappe.log_error(title=f"optimus analyze {session_uuid}")
 		try:
 			frappe.db.set_value("Optimus Session", docname, "status", "Failed")
 			safe_commit()
@@ -896,7 +874,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# v0.5.1: push "failed" to any open widgets so they transition
 		# out of "Analyzing…" immediately instead of hanging forever.
 		# Best-effort and isolated so a publish failure can't mask the
-		# original exception the outer `raise` is about to re-raise.
+		# original exception, logged and raised after this handler.
 		try:
 			_publish_session_event(
 				"optimus_session_failed",
@@ -905,7 +883,6 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 			)
 		except Exception:
 			pass
-		raise
 	finally:
 		# v0.7.x (M2): always release the single-flight flag so the next
 		# session can analyze. Compare-then-delete (only if we still hold it);
@@ -915,6 +892,10 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# requests in the same worker process can profile normally.
 		if hasattr(frappe.local, "optimus_analyzing"):
 			del frappe.local.optimus_analyzing
+
+	if failure is not None:
+		_log_ai_step_failure("optimus analyze", failure, session_uuid=session_uuid)
+		raise failure
 
 	# This is outside the profiling failure handler. Optional admission may
 	# fail or time out, but the committed Ready result must stay usable.
@@ -1008,168 +989,115 @@ def _log_ai_step_failure(title: str, exc: BaseException, session_uuid: str | Non
 	log_ai_failure(title, exc, session_uuid=session_uuid, **context)
 
 
-def _deserialize_tree(uuid: str, tree_blob):
-	"""Verify (HMAC) and unpickle a pyinstrument tree blob; returns the pyi
-	session object or None. Shared by the live-Redis and persisted-bundle read
-	paths so both reconstruct identically.
+def _allow_unsigned_pickles() -> bool:
+	"""Legacy Redis opt-in; signing-capable sites require verification by default."""
+	from optimus.ai_fix import _InterruptGuard
 
-	SECURITY: ``session.unsign_blob`` rejects any tree whose HMAC signature
-	doesn't match the site's encryption_key, so a Redis-poisoning attacker can't
-	slip in a malicious pickle. Unsigned blobs fall back to raw ``pickle.loads``
-	only when ``optimus_allow_unsigned_pickles`` is truthy (default True; flip it
-	off once the keyspace has rolled over). See SECURITY.md.
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			value = frappe.conf.get("optimus_allow_unsigned_pickles")
+			if value is not None:
+				return value is True or (type(value) is int and value == 1) or (
+					isinstance(value, str) and value.lower() in {"1", "true"}
+				)
+			return not bool(frappe.conf.get("encryption_key"))
+	except Exception:
+		return False
+	if guard.pending():
+		raise guard.interrupt()
+
+
+def _deserialize_tree(uuid: str, tree_blob, *, allow_unsigned: bool = False):
+	"""Verify and unpickle a live Redis tree. Persisted bundles never use this.
+
+	Only an explicit legacy override (or a site without a signing secret)
+	permits the old raw/stripped-signature formats. Failure logs contain fixed
+	reasons, never the blob or an active exception's locals.
 	"""
 	import pickle
 
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
+	from optimus.session import unsign_blob
+
 	if not tree_blob:
 		return None
-	pyi_session = None
+	problem = None
+	guard = _InterruptGuard(base=True)
 	try:
-		from optimus.session import unsign_blob
-		verified = unsign_blob(tree_blob)
-		if verified is not None:
-			pyi_session = pickle.loads(verified)
-		else:
-			# Either (a) blob predates HMAC rollout (raw pickle, no
-			# prefix), or (b) the HMAC secret drifted across processes so
-			# signed blobs land here as ``32-byte sig + pickle``. Try BOTH
-			# shapes - the first ``pickle.loads`` that succeeds wins.
-			allow_unsigned = True
-			try:
-				allow_unsigned = bool(
-					frappe.conf.get("optimus_allow_unsigned_pickles", True)
-				)
-			except Exception:
-				pass
+		with guard:
+			verified = unsign_blob(tree_blob)
+			if verified is not None:
+				return pickle.loads(verified)
+			problem = "signature_verification_failed"
 			if allow_unsigned and isinstance(tree_blob, (bytes, bytearray)):
-				attempts = [bytes(tree_blob)]
-				if len(tree_blob) > 32:
-					attempts.append(bytes(tree_blob[32:]))
-				for payload in attempts:
+				for payload in (bytes(tree_blob), bytes(tree_blob[32:])):
 					try:
-						pyi_session = pickle.loads(payload)
-						break
+						with guard:
+							result = pickle.loads(payload)
 					except Exception:
 						continue
-				if pyi_session is None:
-					frappe.log_error(
-						title="optimus analyze",
-						message=(
-							f"Pyi tree load failed under both raw "
-							f"and stripped-sig paths for {uuid}"
-						),
-					)
-				else:
-					try:
-						frappe.logger().warning(
-							f"optimus analyze: loaded pyi tree for "
-							f"{uuid} via unsigned-fallback path "
-							f"(encryption_key missing in site_config "
-							f"or HMAC secret drifted across "
-							f"processes)."
-						)
-					except Exception:
-						pass
-			else:
-				frappe.log_error(
-					title="optimus analyze",
-					message=(
-						f"Pyi tree signature mismatch for {uuid}; "
-						f"unsigned fallback disabled by site_config."
-					),
-				)
+					if guard.pending():
+						break
+					return result
+				problem = "invalid_legacy_pickle"
 	except Exception:
-		frappe.log_error(
-			title="optimus analyze",
-			message=f"Failed to deserialize pyi tree for {uuid}",
-		)
-		pyi_session = None
-	return pyi_session
+		problem = "invalid_tree"
+	if guard.pending():
+		tree_blob = verified = payload = None
+		raise guard.interrupt()
+	log_ai_failure("optimus recording tree load", reason=problem)
+	return None
 
 
-def _rehydrate_from_bundle(recordings_bundle, uuid: str):
-	"""Rebuild a recording dict (rec + pyi_session + sidecar) from a persisted
-	bundle entry, mirroring the live-Redis read path. Returns the rec dict, or
-	None when the bundle lacks this uuid. Accepts either the full bundle
-	(``{"recordings": {...}}``) or the inner uuid->entry map.
-
-	``rec``/``sidecar`` come back through JSON (tuples become lists), which is
-	transparent to consumers. ``sparse``/``infra`` are intentionally not
-	re-attached (not part of the live rec shape)."""
-	import base64
-
-	if not isinstance(recordings_bundle, dict):
-		return None
-	recs = recordings_bundle.get("recordings")
-	if not isinstance(recs, dict):
-		recs = recordings_bundle
-	entry = recs.get(uuid)
-	if not isinstance(entry, dict):
-		return None
-	rec = entry.get("rec")
-	if not isinstance(rec, dict):
-		return None
-	tree_blob = None
-	tree_b64 = entry.get("tree_b64")
-	if tree_b64:
-		try:
-			tree_blob = base64.b64decode(tree_b64)
-		except Exception:
-			tree_blob = None
-	rec["pyi_session"] = _deserialize_tree(uuid, tree_blob)
-	sidecar = entry.get("sidecar")
-	rec["sidecar"] = sidecar if isinstance(sidecar, list) else []
-	return rec
-
-
-def _fetch_recordings(recording_uuids: list[str], *, recordings_bundle=None):
+def _fetch_recordings(recording_uuids: list[str]):
 	"""Stream recording dicts from Redis one at a time (a generator, so the
 	pipeline can free each pyi_session between recordings instead of holding all
 	in RAM).
 
 	For each recording also loads the per-recording pyi tree pickle and sidecar
-	log (best-effort; a missing piece yields None). Falls back to
-	``recordings_bundle`` when Redis has been cleaned up post-analyze. Yields
-	recorder dicts with added ``pyi_session`` and ``sidecar`` keys.
+	log (best-effort; a missing piece yields None). Persisted JSON consumers
+	use load_recordings_light instead, with no pickle or sidecar loading.
 	"""
+	allow_unsigned = _allow_unsigned_pickles()
 	for uuid in recording_uuids:
 		rec = frappe.cache.hget(RECORDER_REQUEST_HASH, uuid)
 		if not rec:
-			# v0.13: after analyze, _cleanup_redis deletes the recording
-			# hash + tree + sidecar. If a caller passed the persisted
-			# recordings bundle, rebuild from it so re-humanize / fix
-			# grounding / report drill-down regeneration still work
-			# post-cleanup (same verified tree-load as the Redis branch).
-			rec = _rehydrate_from_bundle(recordings_bundle, uuid)
-			if rec is not None:
-				yield rec
 			continue
 
 		# Load the pyinstrument tree pickle (best-effort) via the shared,
 		# HMAC-verified loader (see _deserialize_tree).
+		from optimus.ai_fix import _InterruptGuard, log_ai_failure
+		guard = _InterruptGuard(base=True)
 		pyi_session = None
+		failed = False
 		try:
-			tree_blob = frappe.cache.get_value(_redis_keys.tree(uuid))
-			pyi_session = _deserialize_tree(uuid, tree_blob)
+			with guard:
+				tree_blob = frappe.cache.get_value(_redis_keys.tree(uuid))
+				pyi_session = _deserialize_tree(uuid, tree_blob, allow_unsigned=allow_unsigned)
 		except Exception:
-			frappe.log_error(
-				title="optimus analyze",
-				message=f"Failed to load pyi tree for {uuid}",
-			)
-			pyi_session = None
+			failed = True
+		if guard.pending():
+			tree_blob = None
+			raise guard.interrupt()
+		if failed:
+			log_ai_failure("optimus recording tree read", reason="tree_read_failed")
 
 		# Load the sidecar argument log (best-effort)
 		sidecar = []
+		failed = False
 		try:
-			loaded = frappe.cache.get_value(_redis_keys.sidecar(uuid))
-			if isinstance(loaded, list):
-				sidecar = loaded
+			with guard:
+				loaded = frappe.cache.get_value(_redis_keys.sidecar(uuid))
+				if isinstance(loaded, list):
+					sidecar = loaded
 		except Exception:
-			frappe.log_error(
-				title="optimus analyze",
-				message=f"Failed to load sidecar for {uuid}",
-			)
-			sidecar = []
+			failed = True
+		if guard.pending():
+			loaded = sidecar = rec = tree_blob = None
+			raise guard.interrupt()
+		if failed:
+			log_ai_failure("optimus recording sidecar read", reason="sidecar_read_failed")
 
 		rec["pyi_session"] = pyi_session
 		rec["sidecar"] = sidecar
@@ -1910,7 +1838,7 @@ def _truncate_finding_titles(findings: list[dict]) -> None:
 _FINDING_SNIPPET_TRUNCATE_CHARS = 200
 
 
-def _enrich_findings_with_source_snippets(findings: list[dict]) -> None:
+def _enrich_findings_with_source_snippets(findings: list[dict], *, owner: str | None = None) -> None:
 	"""Mutate findings in place: attach a source snippet to each finding whose
 	technical_detail.callsite resolves to a readable file.
 
@@ -1973,7 +1901,10 @@ def _enrich_findings_with_source_snippets(findings: list[dict]) -> None:
 		# renderer._read_source_snippet resolves app-relative callsite paths
 		# (e.g. "ugly_code/python/common.py") to real files; a bare open()
 		# would fail because the worker cwd is <bench>/sites.
-		snippet = renderer._read_source_snippet(filename, lineno, cache=file_cache)
+		from optimus.renderer.source import server_script_readers
+
+		with server_script_readers(owner):
+			snippet = renderer._read_source_snippet(filename, lineno, cache=file_cache)
 		if not snippet:
 			continue
 		callsite["source_snippet"] = snippet
@@ -2068,6 +1999,7 @@ def _maybe_attach_recorded_queries(
 	action_ref,
 	recordings_by_uuid: dict | None,
 	actions_by_idx: dict | None,
+	send_raw: bool | None = None,
 ) -> None:
 	"""When recordings + actions are available and the finding has an
 	``action_ref``, attach the top-N slowest SQL queries from that action's
@@ -2096,13 +2028,16 @@ def _maybe_attach_recorded_queries(
 	if detail.get("example_queries"):
 		# Analyzer (SQL red flag) set these; respect they're the most relevant.
 		return
+	from optimus import ai_privacy
+
+	send_raw = ai_privacy.raw_values_enabled() if send_raw is None else send_raw
 	top = []
 	for c in sorted(calls, key=lambda c: -(c.get("duration") or c.get("duration_ms") or 0)):
 		dur_ms = c.get("duration") or c.get("duration_ms") or 0
 		if dur_ms < _AI_EXAMPLE_QUERY_MIN_MS:
 			continue
-		q = (c.get("query") or "").strip()
-		if not q:
+		q = ai_privacy.query_text(c.get("query") if send_raw else (c.get("normalized_query") or c.get("query")), send_raw=send_raw)
+		if not q or q in top:
 			continue
 		top.append(q)
 		if len(top) >= _AI_EXAMPLE_QUERIES_MAX:
@@ -2427,37 +2362,34 @@ _HUMANIZED_NOTES_PREAMBLE = (
 )
 
 
-def _actions_for_humanizer(recordings: list[dict]) -> list[dict]:
+def _actions_for_humanizer(recordings: list[dict], *, send_raw: bool | None = None) -> list[dict]:
 	"""Compact per-action dicts (label / cmd / path / method / doctype /
 	duration_ms) for ``ai_fix.humanize_steps``, noise-filtered and capped like
 	the raw auto-notes list."""
+	from optimus import ai_privacy
+
+	send_raw = ai_privacy.raw_values_enabled() if send_raw is None else send_raw
 	out: list[dict] = []
-	for rec in _recordings_for_reproducer(recordings)[:_AUTO_NOTES_MAX_ENTRIES]:
-		fd = rec.get("form_dict") or {}
-		doctype = ""
-		if isinstance(fd, dict):
-			doctype = (fd.get("doctype") or fd.get("dt") or fd.get("doc_type") or "").strip()
-			if not doctype:
-				# savedocs embeds the doctype in a `doc` JSON blob; client.*
-				# uses `doc` / `dt`. Reuse per_action's extractors.
-				try:
-					doctype = (per_action._extract_doc_info(fd)[0] or "").strip()
-				except Exception:
-					doctype = ""
-				if not doctype:
-					try:
-						doctype = (per_action._extract_doctype(fd) or "").strip()
-					except Exception:
-						doctype = ""
+	for original in recordings or []:
+		rec = ai_privacy.action_recording(original)
+		if rec is None or _is_reproducer_noise(rec):
+			continue
+		if len(out) >= _AUTO_NOTES_MAX_ENTRIES:
+			break
+		fd = rec["form_dict"]
+		doctype, is_new = per_action._extract_doc_info(fd)
+		doctype = doctype or fd.get("dt") or fd.get("doc_type") or ""
 		out.append({
 			"label": per_action.humanized_label(rec) or "",
 			"cmd": (rec.get("cmd") or "").strip(),
 			"path": (rec.get("path") or "").strip(),
 			"method": (rec.get("method") or "").strip(),
 			"doctype": doctype,
+			"operation": fd.get("action"),
+			"is_new": is_new,
 			"duration_ms": round(rec.get("duration") or 0, 1),
 		})
-	return out
+	return out if send_raw else [ai_privacy.private_action(action) for action in out]
 
 
 def _assemble_humanized_notes(steps_markdown: str) -> str:
@@ -2669,155 +2601,138 @@ def _render_and_attach_reports(docname: str, recordings: list[dict]) -> bool:
 
 
 def _save_report_file(*, docname: str, filename: str, attached_to_field: str, content) -> str | None:
-	"""Insert a private File attached to the Optimus Session. Returns its
-	file_url, or None on failure.
+	"""Attach generated recording bytes; ordinary failure is optional, interrupts escape."""
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
 
-	Temporarily clears ``frappe.local.request`` around the insert so
-	``File.validate_file_extension`` takes its code-generated-file bypass (it
-	only fires when ``frappe.request`` is falsy). Needed on the inline path
-	(scheduler disabled), where a real request would otherwise make File reject
-	HTML via System Settings' allowed_file_extensions. The request is restored
-	in a ``finally`` so the caller's response building is unaffected.
-	"""
+	guard = _InterruptGuard(base=True)
+	failed = False
 	try:
-		file_doc = frappe.get_doc(
-			{
-				"doctype": "File",
-				"file_name": filename,
-				"attached_to_doctype": "Optimus Session",
-				"attached_to_name": docname,
+		with guard:
+			file_doc = frappe.get_doc({
+				"doctype": "File", "file_name": filename,
+				"attached_to_doctype": "Optimus Session", "attached_to_name": docname,
 				"attached_to_field": attached_to_field,
 				"content": content if isinstance(content, (bytes, bytearray)) else content.encode("utf-8"),
 				"is_private": 1,
-			}
-		)
-		saved_request = getattr(frappe.local, "request", None)
-		try:
-			# Temporarily stash the request so File's
-			# validate_file_extension hits its no-request bypass.
-			# Narrow window only the insert() call, which doesn't
-			# touch request-scoped state.
+			})
+			saved_request = getattr(frappe.local, "request", None)
 			try:
+				# Preserve the narrow generated-file extension exception.
 				frappe.local.request = None
-			except Exception:
-				# frappe.local might be a werkzeug Local proxy on some
-				# versions; setting via attribute assignment works but
-				# guard defensively.
-				pass
-			file_doc.insert(ignore_permissions=True)
-		finally:
-			# Restore unconditionally. A failed insert STILL needs the
-			# original request object back so the caller's response-
-			# building code isn't broken.
-			try:
+				file_doc.insert(ignore_permissions=True)
+			finally:
 				frappe.local.request = saved_request
-			except Exception:
-				pass
-		return file_doc.file_url
+			return file_doc.file_url
 	except Exception:
-		frappe.log_error(title=f"optimus save_report_file {filename}")
-		return None
+		failed = True
+	if guard.pending():
+		content = file_doc = None
+		raise guard.interrupt()
+	if failed:
+		log_ai_failure("optimus save recording File", reason="file_write_failed")
+	return None
 
 
 def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: list[str]) -> None:
-	"""Snapshot every per-session Redis artifact to a gzipped JSON File on the
-	session BEFORE :func:`_cleanup_redis` deletes them, so the steps humanizer,
-	AI-fix grounding and report drill-downs can re-run once the live recording
-	is gone.
+	"""Persist recorder JSON for later refresh and report regeneration.
 
-	Bundle shape::
-
-	    {"schema", "session_uuid", "session_state",
-	     "recordings": {uuid: {rec, sparse, tree_b64, sidecar, infra}}}
-
-	``rec`` + ``tree`` + ``sidecar`` are what :func:`_rehydrate_from_bundle`
-	reconstructs; ``sparse`` + ``infra`` + ``session_state`` are captured for
-	future use and not read today. Values are already capture-time redacted; the
-	tree stays as the raw HMAC-signed pickle (base64) so it reloads through the
-	verified path. Best-effort: a failure never aborts analyze.
+	Trees and argument sidecars remain transient Redis input for the first
+	analysis. Neither opaque artifact is copied into persisted snapshots.
 	"""
-	import base64
-	import gzip
+	from optimus import recording_bundle
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
 
+	guard = _InterruptGuard(base=True)
+	failed = False
 	try:
-		recordings: dict = {}
-		for uuid in recording_uuids:
-			rec = frappe.cache.hget(RECORDER_REQUEST_HASH, uuid)
-			if not isinstance(rec, dict):
-				continue
-			entry: dict = {"rec": rec}
-			sparse = frappe.cache.hget(RECORDER_REQUEST_SPARSE_HASH, uuid)
-			if isinstance(sparse, dict):
-				entry["sparse"] = sparse
-			tree_blob = frappe.cache.get_value(_redis_keys.tree(uuid))
-			if isinstance(tree_blob, (bytes, bytearray)):
-				entry["tree_b64"] = base64.b64encode(bytes(tree_blob)).decode("ascii")
-			sidecar = frappe.cache.get_value(_redis_keys.sidecar(uuid))
-			if isinstance(sidecar, list):
-				entry["sidecar"] = sidecar
-			infra_blob = frappe.cache.get_value(_redis_keys.infra(uuid))
-			if isinstance(infra_blob, dict):
-				entry["infra"] = infra_blob
-			# Carry the resolved target-doc onto the snapshotted rec so a regenerated report still shows the real doc name.
-			resolved_doc = frappe.cache.get_value(_redis_keys.resolved_doc(uuid))
-			if isinstance(resolved_doc, dict):
-				rec["resolved_target_doc"] = resolved_doc
-			recordings[uuid] = entry
+		with guard:
+			recordings: dict = {}
+			for uuid in recording_uuids:
+				rec = frappe.cache.hget(RECORDER_REQUEST_HASH, uuid)
+				if not isinstance(rec, dict):
+					continue
+				rec = {key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}}
+				entry: dict = {"rec": rec}
+				sparse = frappe.cache.hget(RECORDER_REQUEST_SPARSE_HASH, uuid)
+				if isinstance(sparse, dict):
+					entry["sparse"] = sparse
+				infra_blob = frappe.cache.get_value(_redis_keys.infra(uuid))
+				if isinstance(infra_blob, dict):
+					entry["infra"] = infra_blob
+				# Carry the resolved target-doc onto the snapshotted rec so a regenerated report still shows the real doc name.
+				resolved_doc = frappe.cache.get_value(_redis_keys.resolved_doc(uuid))
+				if isinstance(resolved_doc, dict):
+					rec["resolved_target_doc"] = resolved_doc
+				recordings[uuid] = entry
 
-		if not recordings:
-			return
+			if not recordings:
+				return
 
-		bundle = {
-			"schema": 1,
-			"session_uuid": session_uuid,
-			"session_state": session.get_session_meta(session_uuid),
-			"recordings": recordings,
-		}
-		payload = gzip.compress(json.dumps(bundle, default=str).encode("utf-8"))
-		url = _save_report_file(
-			docname=docname,
-			filename=f"optimus_recordings_{session_uuid}.json.gz",
-			attached_to_field="recordings_file",
-			content=payload,
-		)
-		if url:
-			frappe.db.set_value("Optimus Session", docname, "recordings_file", url)
+			bundle = {
+				"schema": 1,
+				"session_uuid": session_uuid,
+				"session_state": session.get_session_meta(session_uuid),
+				"recordings": recordings,
+			}
+			payload = recording_bundle.encode(bundle)
+			url = _save_report_file(
+				docname=docname,
+				filename=f"optimus_recordings_{session_uuid}.json.gz",
+				attached_to_field="recordings_file",
+				content=payload,
+			)
+			if url:
+				frappe.db.set_value("Optimus Session", docname, "recordings_file", url)
 	except Exception:
-		try:
-			frappe.log_error(title="optimus persist recordings")
-		except Exception:
-			pass
+		failed = True
+	if guard.pending():
+		recordings = rec = bundle = payload = None
+		raise guard.interrupt()
+	if failed:
+		log_ai_failure("optimus persist recordings", reason="snapshot_write_failed")
 
 
 def _load_recordings_bundle(session_doc):
-	"""Load the persisted recordings snapshot for a session as a parsed bundle
-	dict, for passing to ``_fetch_recordings(recordings_bundle=...)`` once Redis
-	is cleaned up. None when there's no snapshot or it can't be read."""
-	import gzip
+	"""Read bounded JSON only from the private File bound to this session.
 
+	Missing snapshots are optional. Rejections/read failures are logged with
+	fixed reasons, outside exception handlers, without recording content.
+	"""
+	from optimus import recording_bundle
 	from optimus.ai_fix import _InterruptGuard, log_ai_failure
 
 	url = getattr(session_doc, "recordings_file", None)
 	if not url:
 		return None
-	failure = None
-	guard = _InterruptGuard()
+	problem = None
+	guard = _InterruptGuard(base=True)
 	try:
 		with guard:
-			file_doc = frappe.get_doc("File", {"file_url": url})
-			with open(file_doc.get_full_path(), "rb") as fh:
-				raw = fh.read()
-			bundle = json.loads(gzip.decompress(raw).decode("utf-8"))
-			return bundle if isinstance(bundle, dict) else None
-	except Exception as exc:
-		failure = exc
+			docname = getattr(session_doc, "name", None)
+			session_uuid = getattr(session_doc, "session_uuid", None)
+			if (not docname or not session_uuid or not isinstance(url, str)
+				or not url.startswith("/private/files/") or not url.removeprefix("/private/files/")
+				or any(char in url.removeprefix("/private/files/") for char in ("/", "\\", "?", "#", "\0"))):
+				raise recording_bundle.InvalidBundle("invalid_file_reference")
+			binding = {"file_url": url, "is_private": 1, "attached_to_doctype": "Optimus Session",
+				"attached_to_name": docname, "attached_to_field": "recordings_file"}
+			names = frappe.get_all("File", filters=binding, pluck="name", limit_page_length=2)
+			if len(names) != 1:
+				raise recording_bundle.InvalidBundle("file_not_bound_to_session")
+			file_doc = frappe.get_doc("File", names[0])
+			if any(getattr(file_doc, key, None) != value for key, value in binding.items()):
+				raise recording_bundle.InvalidBundle("file_binding_changed")
+			return recording_bundle.read(file_doc.get_full_path(),
+				private_root=frappe.get_site_path("private", "files"), session_uuid=session_uuid)
+	except recording_bundle.InvalidBundle as exc:
+		problem = str(exc)
+	except Exception:
+		problem = "bundle_read_failed"
 	if guard.pending():
 		raise guard.interrupt()
-	if failure is not None:
-		try:
-			log_ai_failure("optimus load recordings bundle", failure, session_uuid=getattr(session_doc, "session_uuid", None))
-		finally:
-			failure = None
+	if problem:
+		log_ai_failure("optimus load recordings bundle", reason=problem,
+			session_uuid=getattr(session_doc, "session_uuid", None))
 	return None
 
 

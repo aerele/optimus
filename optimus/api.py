@@ -255,10 +255,10 @@ def _phase2_run_gate(
 	constrained it); ``run_statuses`` constrains the run row and is checked after permission.
 	Returns the session ref and the run row ``{name, parent, status}``."""
 	_require_profiler_user()
-	if not run_uuid:
+	if not isinstance(run_uuid, str) or not run_uuid or len(run_uuid) > 140:
 		frappe.throw(_("run_uuid is required"), frappe.ValidationError, title=_("Optimus"))
 	run = frappe.db.get_value(
-		"Optimus Phase Two Run", {"run_uuid": run_uuid}, ["name", "parent", "status"], as_dict=True
+		"Optimus Phase Two Run", {"run_uuid": run_uuid}, ["name", "parent", "status", "recording_user"], as_dict=True
 	)
 	session_uuid = frappe.db.get_value("Optimus Session", run["parent"], "session_uuid") if run else None
 	if not run or not session_uuid:
@@ -1034,7 +1034,7 @@ def download_pdf(session_uuid: str) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(html.escape(str(session_uuid))))
 	if row["status"] != "Ready":
 		frappe.throw(_("Cannot generate PDF for session in '{0}' state").format(row['status']))
 
@@ -1080,7 +1080,7 @@ def export_session(session_uuid: str) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(_("No Optimus Session found for uuid {0}").format(session_uuid))
+		frappe.throw(_("No Optimus Session found for uuid {0}").format(html.escape(str(session_uuid))))
 
 	doc = frappe.get_doc("Optimus Session", row["name"])
 
@@ -1610,14 +1610,20 @@ def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: b
 
 	# The picks arg often arrives as a string from JS accept both shapes.
 	if isinstance(picks, str):
+		if len(picks) > 64000:
+			frappe.throw(_("The selected function list is too large."), frappe.ValidationError, title=_("Optimus"))
 		try:
 			picks_list = _json.loads(picks)
-		except _json.JSONDecodeError:
+		except (_json.JSONDecodeError, RecursionError):
 			frappe.throw(_("picks must be a JSON list of {dotted_path, source} entries."), frappe.ValidationError, title=_("Optimus"))
 	else:
 		picks_list = picks
 	if not isinstance(picks_list, list) or not picks_list:
 		frappe.throw(_("Provide at least one function to line-profile."), frappe.ValidationError, title=_("Optimus"))
+	try:
+		_lp_capture.validate_picks(picks_list)
+	except _lp_capture.CaptureError as exc:
+		frappe.throw(str(exc), frappe.ValidationError, title=_("Optimus"))
 
 	# Coerce auto_expand from the JS payload (frappe.call sends "true"/"false"
 	# strings; whitelisted view fns accept Python types when available).
@@ -1636,7 +1642,7 @@ def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: b
 
 
 	# Reject if the user already has a phase-2 run in flight elsewhere.
-	if _lp_capture.is_active(user):
+	if _lp_capture.is_active(user, fresh=True):
 		frappe.throw(_("You already have a phase-2 line-profile run active."), frappe.ValidationError, title=_("Optimus"))
 
 	# Auto-expand curated picks via phase-1's call tree. Curated picks come
@@ -1722,38 +1728,20 @@ def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: b
 			frappe.throw(_("Provide at least one function to line-profile."), frappe.ValidationError, title=_("Optimus"))
 
 	run_uuid = _uuid.uuid4().hex
+	try:
+		prepared = _lp_capture.prepare_line_profile_picks(picks_list)
+	except _lp_capture.CaptureError as exc:
+		frappe.throw(str(exc), frappe.ValidationError, title=_("Optimus"))
 
 	_lock_phase2_for_write(parent_docname)
+	_session_action_gate(session_uuid, action="start_line_profile_pass")
 	from optimus.settings import get_config
 	parent = frappe.get_doc("Optimus Session", parent_docname)
 	cap = get_config().phase2_max_runs_per_session
 	if cap > 0 and len(parent.phase_2_runs or []) >= cap:
 		frappe.throw(_("The Phase 2 run limit for this session has been reached."),
 			frappe.ValidationError, title=_("Optimus"))
-	# Resolve picks + persist Redis state. Raises CaptureError if no pick
-	# is eligible.
-	try:
-		resolved = _lp_capture.start_line_profile_pass(
-			session_uuid=session_uuid,
-			run_uuid=run_uuid,
-			user=user,
-			picks=picks_list,
-		)
-	except _lp_capture.CaptureError as exc:
-		frappe.throw(str(exc), frappe.ValidationError, title=_("Optimus"))
-
-	# Append the Phase 2 Run row in Recording status.
-	parent = frappe.get_doc("Optimus Session", parent_docname)
-	parent.append("phase_2_runs", {
-		"run_uuid": run_uuid,
-		"status": "Recording",
-		"started_at": now_datetime(),
-		"picks_json": frappe.as_json([
-			{"dotted_path": r["dotted_path"], "source": r.get("source", "freeform")}
-			for r in resolved if r.get("eligible")
-		]),
-	})
-	_save_parent_bypassing_perms(parent)
+	resolved = _persist_phase2_capture(parent, parent_docname, session_uuid, run_uuid, user, prepared)
 
 	frappe.publish_realtime("phase_2_run_recording", {
 		"session_uuid": session_uuid,
@@ -1770,89 +1758,75 @@ def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: b
 	}
 
 
+def _persist_phase2_capture(parent, parent_docname, session_uuid, run_uuid, user, prepared):
+	"""Publish prepared input and save its actor under the caller's admission lock."""
+	from optimus import ai_fix as _ai_fix
+	from optimus.line_profile import capture as _lp_capture
+	from optimus.line_profile.jobs import capture_creation
+	guard = _ai_fix._InterruptGuard(base=True)
+	failure = None
+	try:
+		with guard:
+			resolved = _lp_capture.start_line_profile_pass(
+				session_uuid=session_uuid, run_uuid=run_uuid, user=user, prepared=prepared,
+			)
+			parent.append("phase_2_runs", {
+				"run_uuid": run_uuid, "recording_user": user,
+				"status": "Recording", "started_at": now_datetime(),
+				"picks_json": frappe.as_json([
+					{"dotted_path": r["dotted_path"], "source": r.get("source", "freeform")}
+					for r in resolved if r.get("eligible")
+				]),
+			})
+			with capture_creation(parent_docname, run_uuid, user):
+				_save_parent_bypassing_perms(parent)
+	except Exception as exc:
+		failure = exc
+	if guard.pending() or failure is not None:
+		_cleanup_failed_capture(run_uuid, user, guard)
+		if guard.pending():
+			failure = prepared = None
+			raise guard.interrupt()
+		if isinstance(failure, _lp_capture.CaptureError):
+			frappe.throw(str(failure), frappe.ValidationError, title=_("Optimus"))
+		raise failure
+
+	return resolved
+
+
+def _cleanup_failed_capture(run_uuid, user, guard):
+	"""Compensate only this admission, even if Redis lost its acknowledgement.
+	SQL/Redis cannot commit together. A hard process death leaves a bounded
+	active TTL; explicit force-stop recovers the orphan. An ambiguous SQL commit
+	may leave a Recording row whose missing input is reported as Failed later.
+	"""
+	from optimus import ai_fix as _ai_fix
+	from optimus.line_profile import capture
+	for action in (frappe.db.rollback, lambda: capture.stop_line_profile_pass(run_uuid, user),
+		lambda: capture.cleanup_run(run_uuid)):
+		failure_type = None
+		try:
+			with guard:
+				action()
+		except Exception as exc:
+			# Cleanup cannot hide the original failure. No captured data in logs.
+			failure_type = type(exc).__name__
+		if failure_type:
+			try:
+				with guard:
+					_ai_fix.log_ai_failure("optimus Phase 2 admission cleanup", RuntimeError(failure_type))
+			except Exception:
+				pass  # The caller still reports the admission failure.
+
+
 @frappe.whitelist(methods=["POST"])
 def force_stop_phase2() -> dict:
-	"""Recovery endpoint: clears the calling user's phase-2 active flag and
-	marks any of their in-flight Phase 2 Run rows as Failed.
-
-	Idempotent safe to call when nothing is stuck. Use this when the
-	form rejects ``start_line_profile_pass`` with "phase-2 already
-	active" and the previous run never reached Stop (worker crash, tab
-	close, or interrupted reproduction).
-	"""
-	from optimus.line_profile import capture as _lp_capture
+	"""Recover only the caller's captures, with locked status and identity checks."""
+	from optimus.line_profile.jobs import force_stop_captures
 
 	user = _require_profiler_user()
-
-	cleared_run = _lp_capture.is_active(user)
-	# Always clear the flag, even if is_active returned None (defensive
-	# against stale frappe.local caches mid-test or after worker recycle).
-	_lp_capture.stop_line_profile_pass(cleared_run or "_unknown_", user)
-
-	# Mark any Recording rows the user owns as Failed so the form's child
-	# table reflects the recovery. We scope to rows where parent.user ==
-	# the calling user so a System Manager hitting this doesn't sweep
-	# other users' active runs.
-	# Portable, no join: the user's session names first, then their Recording
-	# Phase-2 Run child rows (parent == session name). Works on MariaDB + PG.
-	session_names = frappe.get_all(
-		"Optimus Session", filters={"user": user}, pluck="name"
-	)
-	stuck_rows = (
-		frappe.get_all(
-			"Optimus Phase Two Run",
-			filters={"status": "Recording", "parent": ["in", session_names]},
-			fields=["name", "parent", "run_uuid"],
-		)
-		if session_names
-		else []
-	)
-
-	# v0.6.x: group stuck rows by their parent Optimus Session so each
-	# parent doc is loaded + saved EXACTLY ONCE per batch (was N loads + N
-	# saves when one session held multiple stuck runs the common case
-	# for a user spamming the picker).
-	rows_by_parent: dict[str, list[dict]] = {}
-	for row in stuck_rows:
-		rows_by_parent.setdefault(row["parent"], []).append(row)
-
-	failed = 0
-	for parent_name, rows in rows_by_parent.items():
-		try:
-			parent = frappe.get_doc("Optimus Session", parent_name)
-			matched_in_parent = 0
-			wanted_uuids = {r["run_uuid"] for r in rows}
-			for child in (parent.phase_2_runs or []):
-				if child.run_uuid in wanted_uuids:
-					child.status = "Failed"
-					child.warnings_json = frappe.as_json([
-						"Force-stopped by user via api.force_stop_phase2.",
-					])
-					child.ended_at = now_datetime()
-					try:
-						_lp_capture.cleanup_run(child.run_uuid)
-					except Exception:
-						frappe.log_error(
-							title="force_stop_phase2 redis cleanup",
-							message=f"{parent_name}/{child.run_uuid}",
-						)
-					matched_in_parent += 1
-			if matched_in_parent:
-				parent.flags.ignore_validate_update_after_submit = True
-				parent.save(ignore_permissions=True)
-				failed += matched_in_parent
-		except Exception as exc:
-			frappe.log_error(
-				title="force_stop_phase2 parent save",
-				message=f"{parent_name}: {exc}",
-			)
-	safe_commit()
-
-	return {
-		"cleared_active_flag": bool(cleared_run),
-		"prior_run_uuid": cleared_run,
-		"rows_marked_failed": failed,
-	}
+	ratelimit.enforce_user_rate_limit("force_stop_phase2", **_ACTION_LIMITS["stop_line_profile_pass"])
+	return force_stop_captures(user)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1863,9 +1837,9 @@ def stop_line_profile_pass(run_uuid: str) -> dict:
 	from optimus.line_profile import capture as _lp_capture
 	from optimus.line_profile import jobs as _lp_jobs
 
-	_lp_capture.stop_line_profile_pass(run_uuid, ref.user)
+	_lp_capture.stop_line_profile_pass(run_uuid, _run.get("recording_user") or ref.user)
 	return _phase2_admission_result(_lp_jobs.request(
-		ref.docname, ref.session_uuid, run_uuid, ref.user, from_recording=True,
+		ref.docname, ref.session_uuid, run_uuid, frappe.session.user, from_recording=True,
 	))
 
 
@@ -1880,7 +1854,7 @@ def retry_phase2_analyze(run_uuid: str) -> dict:
 	ratelimit.enforce_user_rate_limit("retry_phase2_analyze", **_ACTION_LIMITS["retry_phase2_analyze"])
 	from optimus.line_profile import jobs as _lp_jobs
 
-	return _phase2_admission_result(_lp_jobs.request(ref.docname, ref.session_uuid, run_uuid, ref.user))
+	return _phase2_admission_result(_lp_jobs.request(ref.docname, ref.session_uuid, run_uuid, frappe.session.user))
 
 
 def _phase2_admission_result(out: dict) -> dict:
@@ -1908,6 +1882,8 @@ def retry_phase2_analyzes_batch(run_uuids: str | list) -> dict:
 	status list plus an aggregate tally."""
 	import json as _json
 
+	from optimus.ai_fix import _InterruptGuard
+
 	_require_profiler_user()
 
 	# Accept JSON-encoded list (Frappe's whitelisted-API arg marshalling
@@ -1934,8 +1910,10 @@ def retry_phase2_analyzes_batch(run_uuids: str | list) -> dict:
 		if run_uuid in seen:
 			continue
 		seen.add(run_uuid)
+		guard = _InterruptGuard(base=True)
 		try:
-			results.append(retry_phase2_analyze(run_uuid))
+			with guard:
+				results.append(retry_phase2_analyze(run_uuid))
 		except frappe.RateLimitExceededError:
 			raise
 		except Exception as exc:
@@ -1945,6 +1923,8 @@ def retry_phase2_analyzes_batch(run_uuids: str | list) -> dict:
 				"status": "Failed",
 				"error": str(exc),
 			})
+		if guard.pending():
+			raise guard.interrupt()
 
 	# Quick aggregate for the UI to render a single message.
 	tallies = {"Ready": 0, "Failed": 0, "Analyzing": 0, "Skipped": 0}

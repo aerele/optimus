@@ -16,3 +16,4 @@ optimus.patches.v0_9_0.add_ai_privacy_fields
 optimus.patches.v0_12_0.scrub_ai_keys_from_error_log
 optimus.patches.v0_12_0.initialize_ai_refresh_store
 optimus.patches.v0_12_0.seed_ai_refresh_max_findings
+optimus.patches.v0_12_0.warn_ai_endpoint_policy

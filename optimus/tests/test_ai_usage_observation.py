@@ -11,7 +11,7 @@ from optimus.tests.test_ai_reliability_core import Reply
 @pytest.fixture
 def provider(monkeypatch):
 	monkeypatch.setattr(ai_fix, "_current_key_or_empty", lambda: "")
-	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a: "")
+	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a, **kw: "")
 	monkeypatch.setattr(
 		ai_fix,
 		"_provider_config",

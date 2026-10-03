@@ -497,7 +497,7 @@ def cancel(run_id, *, now, cancelled_by=None):
 	return _finish_locked(parent, run, state="cancelled", reason="cancelled", now=now)
 
 
-def prepare_analyze_retry(docname, session_uuid, *, requested_by, now):
+def prepare_analyze_retry(docname, session_uuid, *, requested_by, now, stopped_captures=None):
 	"""Fence optional workers and reset a Failed parent in the same transaction."""
 	parent = _read("Optimus Session", docname, lock=True)
 	if not parent or parent.get("session_uuid") != session_uuid or parent.get("status") != "Failed":
@@ -507,14 +507,33 @@ def prepare_analyze_retry(docname, session_uuid, *, requested_by, now):
 		cancel(run_id, now=now, cancelled_by=requested_by)
 	for child in frappe.db.get_values(
 		"Optimus Phase Two Run", {"parent": docname, "status": ["in", ["Recording", "Analyzing"]]},
-		["name"], as_dict=True, for_update=True,
+		["name", "run_uuid", "recording_user", "status"], as_dict=True, for_update=True,
 	):
+		if stopped_captures is not None and child["status"] == "Recording":
+			stopped_captures.append((child["run_uuid"], child.get("recording_user") or parent.get("user")))
 		frappe.db.set_value("Optimus Phase Two Run", child["name"], {
 			"status": "Failed", "analyze_dispatch_pending": 0,
 			"warnings_json": '["Phase 2 stopped because profiling analysis was restarted."]',
 		}, update_modified=False)
 	frappe.db.set_value("Optimus Session", docname, {"status": "Stopping", "analyzer_warnings": None})
 	return True
+
+
+def delete_session_journal(docname, session_uuid):
+	"""Delete private history within the framework's parent-deletion transaction.
+
+	The parent lock serializes all result/usage writers. Never prune uncertain
+	history from a surviving session. No commit, provider or Redis work here.
+	"""
+	parent = _read("Optimus Session", docname, lock=True)
+	if not parent or parent.get("session_uuid") != session_uuid:
+		raise ValueError("Session identity changed during journal deletion")
+	if frappe.db.table_exists(RUN):
+		frappe.db.get_values(RUN, {"session_name": docname}, ["name"], for_update=True, order_by="name")
+	if frappe.db.table_exists(ATTEMPT):
+		frappe.db.delete(ATTEMPT, {"session_name": docname})
+	if frappe.db.table_exists(RUN):
+		frappe.db.delete(RUN, {"session_name": docname})
 
 
 def abandon(run_id, *, worker_token, now):

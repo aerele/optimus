@@ -258,7 +258,7 @@ def test_post_response_failures_preserve_usage_without_raw_exception_text(wire, 
 	}
 	monkeypatch.setattr(ai_fix, "_provider_config", lambda: provider)
 	monkeypatch.setattr(ai_fix, "_resolve_display_threshold_ms", lambda: 1000)
-	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a: "")
+	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a, **kw: "")
 	monkeypatch.setattr(ai_fix, "is_finding_type_excluded", lambda *a: False)
 
 	def failed(*a, **kw):

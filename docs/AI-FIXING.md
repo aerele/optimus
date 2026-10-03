@@ -19,7 +19,7 @@ When AI is enabled, three knobs gate every outbound call:
 | Knob (Optimus Settings → AI) | Default | What it does |
 |---|---|---|
 | `ai_enabled` | OFF | Master gate. OFF → zero LLM calls ever. |
-| `ai_auto_suggest` | ON | Batch mode (takes effect only once `ai_enabled` is on). ON → analyze.run sends the top-N eligible findings during the background analyze pass. OFF → AI runs only when the operator uses the session's **Refresh AI suggestions** action. |
+| `ai_auto_suggest` | ON | Batch mode (takes effect only once `ai_enabled` is on). ON → a separate background run sends eligible findings after profiling is saved as Ready. OFF → AI runs only when the operator uses the session's **Refresh AI suggestions** action. |
 | `ai_excluded_finding_types` | empty | One finding type per line (v0.9.0+). Listed types are skipped in **both** auto-suggest and on-demand the request body is never built and never sent. |
 
 With the master `ai_enabled=OFF` nothing is sent regardless. Once AI is enabled, three axes of consent remain: feature-level (the master), event-level (`ai_auto_suggest` — on by default so suggestions are built into the report; set it OFF to require a session refresh) and type-level (the exclusion list).
@@ -28,11 +28,19 @@ With the master `ai_enabled=OFF` nothing is sent regardless. Once AI is enabled,
 
 ## 2. What data leaves the host
 
+`ai_send_raw_values` defaults to OFF. Both prompt builders enforce it, including
+for SQL already saved in a finding. SQL literals/comments and Steps document
+names/session title are omitted unless explicitly enabled. A fresh SQL consent
+check accompanies an opt-in. Source code, titles and schema names still leave
+the host and may contain sensitive business information. Disable AI or exclude
+types when this disclosure is unacceptable. Settings changes are versioned.
+
+
 There are three outbound request shapes. Each table lists every distinct field that crosses the network boundary, the typical size and the source.
 
 ### 2.1 Finding fix suggestion (`/v1/messages` or `/chat/completions`)
 
-Triggered by the session's **Refresh AI suggestions** action or auto-suggest at analyze time. Built by `ai_fix._build_fix_request` in `optimus/ai_fix.py`.
+Triggered by the session's **Refresh AI suggestions** action or automatic enrichment after profiling is Ready. Built by `ai_fix._build_fix_request` in `optimus/ai_fix.py`.
 
 **System prompt** (static, 6.9 KB, about 2,150 conservatively estimated tokens): Frappe framework rules for the proposed code, caching and data-layer idioms, the durable index recipe, grounding rules and the output format (Diagnosis / Fix / Why it works / Verify). It is byte-identical for every finding, so providers can reuse its prefix. Anthropic requests include one cache breakpoint; caching still depends on the model's minimum prefix size.
 
@@ -59,7 +67,7 @@ Every value captured from your site (title, callsite, source, SQL, EXPLAIN, hot 
 | `technical_detail.normalized_query` | technical_detail_json | 100–2400 chars | **Capped 2400.** Normalized SQL table names, column names, WHERE clause structure preserved; literals replaced by `?` (then redacted again by `optimus.redaction` if they match sensitive column names). |
 | `technical_detail.explain_row` | technical_detail_json | 100–800 chars | `EXPLAIN` output, capped type / rows / key / Extra etc. |
 | `technical_detail.validation_note` | technical_detail_json | 0–300 chars | Caveats. |
-| **`technical_detail.example_queries`** | live recording (Redis) | **0–4800 chars** | Up to 2 of the slowest **raw** SQL queries from this action's recording, each capped at 2400 chars. These are real production queries table names, column names, WHERE values are preserved (after `password = '…'`-style literal redaction at capture time, see `optimus.redaction`). |
+| **`technical_detail.example_queries`** | live recording (Redis) | **0–4800 chars** | Up to 2 query examples, each capped at 2400 chars. SQL literals and comments are removed by default, including in previously saved examples. Raw-value consent retains business literals subject to sensitive-column redaction. Malformed or oversized SQL is omitted. |
 
 The user message is assembled to fit the provider's context window (section 4.2): optional parts (example queries, EXPLAIN row, the normalized query and loop facts) are dropped whole, the least useful first, and only then does the source window shrink around the target line. Nothing is cut inside a block.
 
@@ -67,7 +75,7 @@ Oversized title and callsite text are clipped before wrapping. A source line is 
 
 ### 2.2 Humanize "Steps to Reproduce" (`/v1/messages` or `/chat/completions`)
 
-Triggered by `ai_humanize_steps`. Built by `_build_steps_messages` in `optimus/ai_fix.py`.
+Included in manual Refresh AI suggestions when `ai_humanize_steps` is enabled; automatic fix enrichment does not rewrite Steps. Built by `_build_steps_messages` in `optimus/ai_fix.py`.
 
 **System prompt** (static, ~2.9 KB): ERPNext workflow knowledge, Frappe API decoding rules, collapse rules, output spec (ordered Markdown list + one-sentence summary).
 
@@ -75,9 +83,9 @@ Triggered by `ai_humanize_steps`. Built by `_build_steps_messages` in `optimus/a
 
 | Field per action | Source | Typical size | Notes |
 |---|---|---|---|
-| `label` | `per_action.humanized_label(recording)` | 20–100 chars | E.g. "Save Sales Order SO-0001". |
+| `label` | `per_action.humanized_label(recording)` | 20–100 chars | Default: "Save Sales Order". The document name is included only with raw-value consent. |
 | `cmd` | recording.cmd | 20–80 chars | E.g. "frappe.desk.form.save.savedocs". |
-| `path` | recording.path | 30–100 chars | URL path, when applicable. |
+| `path` | recording.path | 30–100 chars | Default: route shape with document names, query and fragment removed; raw-value consent permits original paths. |
 | `method` | recording.method | 4–8 chars | HTTP verb. |
 | `doctype` | extracted from form_dict | 20–60 chars | E.g. "Sales Invoice". |
 | `duration_ms` | recording.duration | ~5 chars | Wall time. |
@@ -106,7 +114,7 @@ A guardrail repair request is a separate completion: it reads the current key on
 when sent. Same-origin redirects and parameter retries reuse that completion's
 auth object without decrypting again.
 
-- **Your API keys.** The provider API key is stored in an encrypted Password field and decrypted only when a request is sent (`frappe.utils.password.get_decrypted_password`), once per call (one SELECT on `__Auth`). For a provider that needs a key it must be plain printable ASCII: a key with any other character (a space inside it, a pasted smart quote or no-break space, a control character) is refused before any request is made, with a message that names the usual causes (a pasted smart quote, a stray space, a no-break space, a control character), and such a key is refused when Optimus Settings is saved, with the same message. The OpenAI-compatible provider needs no key (Ollama, LM Studio, vLLM): there such a key is neither sent nor refused, and the request goes without one; a key it can send is still sent (a router such as OpenRouter needs one). In Optimus's code it sits only in local variables named `api_key` or `secret` (names Frappe's traceback sanitizer and Sentry redact), for a moment in the `literals` parameter of `redaction.scrub_secrets` (which moves the key into `secret` before it scrubs anything), and in a masked `requests` auth object (`_ApiKeyAuth`). It travels only in the HTTP header (`x-api-key` or `Authorization: Bearer ...`), which that object sets on the HTTP library's own prepared request, whose headers hold it while the request is sent (the response keeps that request, and neither one's `repr` shows its headers). The HTTP library never follows a redirect: it drops only a header named `Authorization` when it follows one to another host, so the `x-api-key` header would have been sent on to the redirect target. Optimus follows at most three 307 or 308 redirects itself, only to the same host and port (with the same scheme, or http to https on that host), sending the same request and key again; any other 3xx reply (a 301, 302 or 303, another host or port, a downgrade, a fourth redirect) is reported as an unexpected response instead, which says that a Base URL that redirects (301, 302 or 303, or a 307 or 308 to another host) must be set to the final URL it redirects to, and the address a redirect points to is never logged or shown. Apart from those it is never part of a settings dict, a header dict, the prompt or an exception message. A provider's error reply is scrubbed before it is shown, of the key the request was sent with (the only key the provider received, so an echo is masked even when the key in Settings was changed while the request ran), or of the key stored in Optimus Settings when the request carried none, each in its raw and its JSON-escaped form. A 404 message names the request URL with any credentials in it masked (a `user:password@` typed into a custom Base URL, or the key), or only "(the configured Base URL)" when the URL cannot be scrubbed. In each of the failure scenarios the canary test (`optimus/tests/test_ai_secret_canary.py`) models, it appears in no Error Log row, traceback or Sentry event (earlier releases could log it: see the API key advisory in `CHANGELOG.md`), and it is never returned to the client. The OpenAI-compatible provider with `needs_key=False` (local endpoints) sends no auth header at all when no key is set.
+- **Your API keys.** The provider API key is stored in an encrypted Password field. Sending reads current settings and encrypted `__Auth` together in one SQL statement, refuses a changed destination/configuration, then decrypts the bound key once per completion. Logging and the Error Log hook also read the stored key for masking. For a provider that needs a key it must be plain printable ASCII: a key with any other character (a space inside it, a pasted smart quote or no-break space, a control character) is refused before any request is made, with a message that names the usual causes (a pasted smart quote, a stray space, a no-break space, a control character), and such a key is refused when Optimus Settings is saved, with the same message. The OpenAI-compatible provider needs no key (Ollama, LM Studio, vLLM): there such a key is neither sent nor refused, and the request goes without one; a key it can send is still sent (a router such as OpenRouter needs one). In Optimus's code it sits only in local variables named `api_key` or `secret` (names Frappe's traceback sanitizer and Sentry redact), for a moment in the `literals` parameter of `redaction.scrub_secrets` (which moves the key into `secret` before it scrubs anything), and in a masked `requests` auth object (`_ApiKeyAuth`). It travels only in the HTTP header (`x-api-key` or `Authorization: Bearer ...`), which that object sets on the HTTP library's own prepared request, whose headers hold it while the request is sent (the response keeps that request, and neither one's `repr` shows its headers). The HTTP library never follows a redirect: it drops only a header named `Authorization` when it follows one to another host, so the `x-api-key` header would have been sent on to the redirect target. Optimus follows at most three 307 or 308 redirects itself, only to the same host and port (with the same scheme, or http to https on that host), sending the same request and key again; any other 3xx reply (a 301, 302 or 303, another host or port, a downgrade, a fourth redirect) is reported as an unexpected response instead, which says that a Base URL that redirects (301, 302 or 303, or a 307 or 308 to another host) must be set to the final URL it redirects to, and the address a redirect points to is never logged or shown. Apart from those it is never part of a settings dict, a header dict, the prompt or an exception message. A provider's error reply is scrubbed before it is shown, of the key the request was sent with (the only key the provider received, so an echo is masked even when the key in Settings was changed while the request ran), or of the key stored in Optimus Settings when the request carried none, each in its raw and its JSON-escaped form. Scrubbed provider replies and 404 URL details are administrator-only `AiFixError.detail`; public exception strings and AI logs omit them. Escaping provider exceptions have prompt/reply/URL frames detached, but live debugger or telemetry stack capture remains a deployment consideration. In each of the failure scenarios the canary test (`optimus/tests/test_ai_secret_canary.py`) models, it appears in no Error Log row, traceback or Sentry event (earlier releases could log it: see the API key advisory in `CHANGELOG.md`), and it is never returned to the client. The OpenAI-compatible provider with `needs_key=False` (local endpoints) sends no auth header at all when no key is set.
 - **Recording UUIDs.** Internal Redis keys.
 - **Your full DB schema.** Only tables observed in this profile's recordings are mentioned by name.
 - **Other sessions / users / findings.** Each suggestion is scoped to one finding (or table or session). A repair request includes that finding's first answer and the broken-rule list. No cross-session context.
@@ -130,6 +138,17 @@ auth object without decrypting again.
 `ai_model` overrides the default model and `ai_api_key` supplies the credential. `ai_base_url` overrides the endpoint only for OpenAI-compatible providers. The HTTP timeout is `ai_request_timeout_seconds` (v0.9.0+, default 60s, clamped 10–600s).
 
 For an explicit data-residency choice, use `OpenAI-compatible` pointed at a process you run yourself see § 6.
+
+URL validation allows loopback and LAN HTTP(S), rejects credentials, queries,
+fragments, ambiguous syntax and literal metadata/link-local addresses, and runs
+again for each allowed redirect. Keys are withheld on non-loopback plain HTTP
+unless the operator explicitly enables `optimus_ai_allow_key_over_http`.
+Prefer HTTPS. DNS resolution/rebinding is not policed; apply network egress
+controls. An endpoint change clears an unchanged stored key. Provider settings
+and the encrypted credential are bound by a single SQL snapshot at dispatch.
+Test connection is capped at 60 seconds and displays escaped, scrubbed details
+only to administrators. [Security policy](../SECURITY.md) describes residuals.
+
 
 ---
 

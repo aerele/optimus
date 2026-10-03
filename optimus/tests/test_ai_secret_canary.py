@@ -47,11 +47,10 @@ lands in ``escaped``, which Sentry's WSGI middleware would ship.
 The only redaction applied is the one Frappe and Sentry both really apply:
 a local variable named exactly ``api_key``.
 
-The key must appear in none of them. The PII marker must not appear in a
-stored row, except in the dump of an escaped RQ job timeout and in a
-developer-mode snapshot: frame locals legitimately hold the prompt, so those
-dumps (like ``stack``, i.e. Sentry's) can contain it. That residual is
-documented in SECURITY.md.
+The key must appear in none of them. Application frames on an escaping
+exception must also discard the prompt. The full harness dump still holds
+its caller-supplied input, so privacy is additionally checked on production
+frames alone. A separately attached live stack can still hold prompt inputs.
 
 Entry points are resolved with ``getattr`` when this module is imported, so
 a renamed or deleted entry point is a collection error, never a silently
@@ -72,7 +71,7 @@ import requests
 from optimus import ai_fix, analyze, api
 from optimus import settings as _settings
 
-pytestmark = pytest.mark.rq  # Selected by AI Quality, which installs RQ.
+pytestmark = [pytest.mark.rq, pytest.mark.usefixtures("bound_provider_credentials")]  # Selected by AI Quality, which installs RQ.
 
 KEY = "sk-CANARY-7f3a9c1e5b2d4f6a8c0e"
 NON_LATIN_KEY = "sk-CANARY-7f3a9c1e\u20195b2d4f6a8c0e"  # pasted smart quote
@@ -169,7 +168,7 @@ def _dump_local(name, value) -> list[str]:
 	return parts
 
 
-def _dump_exception(exc) -> str:
+def _dump_exception(exc, *, production_only=False) -> str:
 	parts = []
 	seen = set()
 	while exc is not None and id(exc) not in seen:
@@ -177,6 +176,10 @@ def _dump_exception(exc) -> str:
 		parts.append(repr(exc))
 		tb = exc.__traceback__
 		while tb is not None:
+			path = tb.tb_frame.f_code.co_filename
+			if production_only and (_OPTIMUS_DIR not in path or _TESTS_DIR in path):
+				tb = tb.tb_next
+				continue
 			for name, value in list(tb.tb_frame.f_locals.items()):
 				if name in _NAME_REDACTED:
 					continue
@@ -208,6 +211,7 @@ class _Sinks:
 	def __init__(self):
 		self.stored, self.sentry, self.stack, self.escaped, self.returned, self.wire = [], [], [], [], [], []
 		self.pending = []
+		self.private_frames = []
 		self.escaped_types = []
 		self.posts = 0
 		self.registered = 0
@@ -421,6 +425,7 @@ def canary(monkeypatch, request):
 	monkeypatch.setattr(frappe, "log_error", sinks.log_error, raising=False)
 	monkeypatch.setattr(frappe, "db", _FakeDB(sinks), raising=False)
 	monkeypatch.setattr(frappe, "flags", _Flags(), raising=False)
+	monkeypatch.setattr(frappe, "session", SimpleNamespace(user="Administrator"), raising=False)
 	queue = types.ModuleType("frappe.deferred_insert")
 	queue.deferred_insert = sinks.deferred_insert
 	monkeypatch.setitem(sys.modules, "frappe.deferred_insert", queue)
@@ -429,8 +434,12 @@ def canary(monkeypatch, request):
 		"frappe.utils.password.get_decrypted_password", lambda *a, **k: stored_key, raising=False
 	)
 	cfg = _settings.OptimusConfig(
-		ai_enabled=True, ai_provider=provider, ai_auto_suggest=True, ai_auto_suggest_max=0,
+		ai_enabled=True, ai_provider=provider, ai_auto_suggest=True, ai_auto_suggest_max=0, ai_send_raw_values=True,
 	)
+	# This matrix deliberately sends private business values so escaping-frame
+	# checks remain meaningful. The separate input-privacy matrix checks the
+	# default-off policy and fresh stored consent, including revocation.
+	monkeypatch.setattr(ai_fix.ai_privacy, "raw_values_enabled", lambda: True)
 	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
 	monkeypatch.setattr(requests, "post", _scenario_post(scenario, sinks, job_timeout))
 	if scenario == "scrub_raises":
@@ -465,6 +474,7 @@ def _drive(name, fn, args_factory, sinks, scenario, job_timeout):
 		sinks.returned.append((name, repr(fn(*args, **kwargs))))
 	except BaseException as exc:  # noqa: BLE001
 		dump = _dump_exception(exc)
+		sinks.private_frames.append((name, _dump_exception(exc, production_only=True)))
 		sinks.escaped.append((name, dump))
 		sinks.escaped_types.append(type(exc))
 		sinks.returned.append((name, repr(exc)))
@@ -521,6 +531,7 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 	channels = {
 		"stored": [(e, t) for e, t, _ in sinks.stored], "sentry": sinks.sentry, "stack": sinks.stack,
 		"escaped": sinks.escaped, "returned": sinks.returned, "wire": sinks.wire, "pending": sinks.pending,
+		"private_frames": sinks.private_frames,
 	}
 	for channel, items in channels.items():
 		for entry, text in items:
@@ -529,6 +540,8 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 	for entry, text, pii_checked in sinks.stored:
 		if pii_checked:
 			assert PII not in text, f"prompt data stored in the Error Log by {entry} ({scenario})"
+	for entry, text in sinks.private_frames:
+		assert PII not in text, f"prompt data escaped in application traceback frames from {entry} ({scenario})"
 	# Every log call runs outside an except block, so Sentry never gets an
 	# active exception (and its frame locals) to ship.
 	assert sinks.sentry == [], (
@@ -540,15 +553,14 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 		assert any(PII in t for _, t in sinks.stack), "the stack channel saw no prompt: it would prove nothing"
 	returned = "\n".join(t for _, t in sinks.returned)
 	if scenario == "system_exit":
-		# Every request that was sent let the SystemExit out (none swallowed or
-		# turned into an AI error); each dump walked down to the HTTP layer's
-		# frame (its ``where`` argument) and the prompt-bearing frames, so the
-		# key check above covered them.
+		# Every sent request lets SystemExit out, through the privacy boundary.
+		# The wire is the positive control for a real prompt-bearing request;
+		# that prompt must no longer escape in production traceback frames.
 		assert sum(1 for _, t in sinks.returned if t == "SystemExit(1)") == sinks.posts, "a SystemExit did not escape"
 		assert len(sinks.escaped) == sinks.posts and all(
-			"where = 'chat/completions'" in t or "where = 'messages'" in t for _, t in sinks.escaped
-		), "an escaped dump never reached the HTTP layer's frame: the key check proved nothing"
-		assert any(PII in t for _, t in sinks.escaped), "no escaped dump held the prompt: it would prove nothing"
+			"args = None" in t and "kwargs = None" in t for _, t in sinks.escaped
+		), "an interrupt did not pass through the privacy boundary"
+		assert any(PII in t for _, t in sinks.wire), "no request held a prompt: the privacy check proved nothing"
 	if scenario == "malformed_usage":
 		assert sinks.escaped == [], f"malformed usage broke a good reply: {[e for e, _ in sinks.escaped]}"
 		for ep in ("ai_fix.suggest_fix", "ai_fix.humanize_steps"):
@@ -578,4 +590,6 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 	if scenario == "rq_timeout":
 		assert any(job_timeout.__name__ in t for _, t in sinks.returned), "no RQ timeout escaped"
 	if scenario == "developer_mode":
-		assert any(ECHO_MARK in t for _, t, checked in sinks.stored if not checked), "no snapshot was stored"
+		snapshots = [t for _, t, checked in sinks.stored if not checked]
+		assert snapshots and all("AiFixError" in t for t in snapshots), "no snapshot was stored"
+		assert all(ECHO_MARK not in t for t in snapshots), "provider reply reached a snapshot"

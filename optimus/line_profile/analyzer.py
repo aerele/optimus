@@ -510,8 +510,11 @@ def _compute_run(parent_docname: str, run_uuid: str):
 	from optimus.line_profile import capture
 	from optimus.line_profile.jobs import MissingInput
 
-	samples = capture.read_all_samples(run_uuid)
-	picks = capture.read_picks_meta(run_uuid)
+	try:
+		samples = capture.read_all_samples(run_uuid)
+		picks = capture.read_picks_meta(run_uuid)
+	except capture.CaptureInputError:
+		raise MissingInput() from None
 	if (not isinstance(samples, list) or not isinstance(picks, list) or not picks
 		or any(not isinstance(batch, list) or any(not isinstance(item, dict) for item in batch) for batch in samples)
 		or any(not isinstance(pick, dict) or not isinstance(pick.get("dotted_path"), str) or not pick["dotted_path"] for pick in picks)):

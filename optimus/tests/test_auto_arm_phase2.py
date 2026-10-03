@@ -16,6 +16,8 @@ import pytest
 
 from optimus import analyze
 
+pytestmark = pytest.mark.rq
+
 
 class FakeCache:
 	def __init__(self, store=None):
@@ -28,6 +30,8 @@ class FakeCache:
 class FakeDoc:
 	def __init__(self, user="u@x.com", phase_2_runs=None, actions=None):
 		self.user = user
+		self.owner = user
+		self.session_uuid = "sess-1"
 		self._tables = {"phase_2_runs": list(phase_2_runs or []), "actions": list(actions or [])}
 		self.flags = types.SimpleNamespace()
 		self.saved = False
@@ -56,6 +60,7 @@ def arm_env(monkeypatch):
 		start_calls=[],
 		published=[],
 		lock_calls=[],
+		prepared=[], stopped=[], cleaned=[],
 	)
 	monkeypatch.setattr(frappe, "conf",
 		types.SimpleNamespace(get=lambda k, d=None: state.conf.get(k, d)), raising=False)
@@ -70,7 +75,9 @@ def arm_env(monkeypatch):
 		raising=False)
 	monkeypatch.setattr(analyze, "safe_commit", lambda: None, raising=False)
 	from optimus import api
+	monkeypatch.setattr(api, "now_datetime", lambda: "2026-05-21 09:00:00")
 	monkeypatch.setattr(api, "_lock_phase2_for_write", lambda docname: state.lock_calls.append(docname))
+	monkeypatch.setattr(api, "_save_parent_bypassing_perms", lambda parent: parent.save())
 	monkeypatch.setattr(frappe, "db", types.SimpleNamespace(rollback=lambda: None))
 
 	# get_config → phase2_max_runs_per_session cap.
@@ -82,9 +89,15 @@ def arm_env(monkeypatch):
 	# modules `from optimus.line_profile import capture` binds the package
 	# attribute, so sys.modules swapping wouldn't take effect under bench.
 	import optimus.line_profile.capture as cap_real
+	import optimus.line_profile.jobs as jobs
 	import optimus.line_profile.picker as picker_real
+	monkeypatch.setattr(jobs, "_authorized", lambda parent, user: True)
+	monkeypatch.setattr(cap_real, "prepare_line_profile_picks", lambda picks: state.prepared.append(picks) or picks)
+	monkeypatch.setattr(cap_real, "stop_line_profile_pass", lambda run, user: state.stopped.append((run, user)))
+	monkeypatch.setattr(cap_real, "cleanup_run", lambda run: state.cleaned.append(run))
 
-	def _start(session_uuid, run_uuid, user, picks):
+	def _start(session_uuid, run_uuid, user, picks=None, *, prepared=None):
+		picks = prepared if prepared is not None else picks
 		assert state.lock_calls == ["PS-1"], "auto-arm must reserve against concurrent AI first"
 		state.start_calls.append({"picks": picks, "user": user})
 		# Echo picks back as eligible (the resolved-meta shape).
@@ -214,5 +227,45 @@ def test_auto_arm_rechecks_run_cap_after_taking_the_admission_lock(arm_env, monk
 		arm_env.lock_calls.append("PS-1")
 		arm_env.doc._tables["phase_2_runs"] = [{"run_uuid": "concurrent-pass"}]
 	monkeypatch.setattr(api, "_lock_phase2_for_write", locked)
+	analyze._auto_arm_phase2("PS-1", _ctx())
+	assert not arm_env.start_calls and not arm_env.doc.saved
+
+
+def test_auto_arm_prepares_before_lock_and_persists_actor(arm_env, monkeypatch):
+	from optimus import api
+	def lock(*args):
+		assert arm_env.prepared
+		arm_env.lock_calls.append("PS-1")
+	monkeypatch.setattr(api, "_lock_phase2_for_write", lock)
+	analyze._auto_arm_phase2("PS-1", _ctx())
+	assert arm_env.doc.get("phase_2_runs")[0]["recording_user"] == arm_env.doc.user
+
+
+@pytest.mark.rq
+def test_auto_arm_preserves_worker_timeout_after_saved_profiling(arm_env, monkeypatch):
+	JobTimeoutException = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
+	original = JobTimeoutException("fake timeout")
+	def fail(*args):
+		raise original
+	monkeypatch.setattr(frappe, "get_doc", fail)
+	with pytest.raises(JobTimeoutException) as caught:
+		analyze._auto_arm_phase2("PS-1", _ctx())
+	assert caught.value is not original and caught.value.__context__ is None
+	assert not arm_env.start_calls
+
+
+def test_auto_arm_save_failure_cleans_its_capture(arm_env, monkeypatch):
+	def fail(*a, **kw):
+		raise ValueError("simulated save failure")
+	monkeypatch.setattr(arm_env.doc, "save", fail)
+	analyze._auto_arm_phase2("PS-1", _ctx())
+	assert len(arm_env.stopped) == 1
+	assert arm_env.stopped[0][1] == arm_env.doc.user
+	assert arm_env.cleaned == [arm_env.stopped[0][0]]
+
+
+def test_auto_arm_rechecks_capturing_users_permission(arm_env, monkeypatch):
+	from optimus.line_profile import jobs
+	monkeypatch.setattr(jobs, "_authorized", lambda parent, user: False)
 	analyze._auto_arm_phase2("PS-1", _ctx())
 	assert not arm_env.start_calls and not arm_env.doc.saved

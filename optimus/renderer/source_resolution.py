@@ -28,8 +28,9 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 
-from optimus.renderer.source import _read_source_snippet, _resolve_source_path, _source_lines
+from optimus.renderer.source import _installed_apps, _read_source_snippet, _resolve_source_path, _source_lines
 
 
 def _action_dotted_entry(action) -> str | None:
@@ -79,20 +80,6 @@ def _skip_decorators_to_def(
 	# Read source through the shared primitive (cache-aware; also resolves
 	# Server Script sentinels, which a bare open() here used to miss).
 	lines = _source_lines(abs_filename, cache=cache)
-	if not lines and not abs_filename.startswith("<"):
-		# _source_lines rejects out-of-bench paths (Phase-K hardening). But
-		# abs_filename is a trusted co_filename and we return only a line number,
-		# never content so read an out-of-bench app's source directly.
-		try:
-			with open(abs_filename, encoding="utf-8") as _fh:
-				lines = _fh.read().splitlines()
-		except Exception:
-			lines = None
-		# Repopulate the shared per-render cache (``_source_lines`` stored None for
-		# this out-of-bench path when it rejected it above) so other decorated
-		# callsites in the same file don't each re-read it from disk.
-		if cache is not None:
-			cache[abs_filename] = lines
 	if not lines or start_lineno > len(lines):
 		return start_lineno
 	# Cheap early exit: the line at start_lineno isn't a decorator →
@@ -125,43 +112,52 @@ def _resolve_dotted_to_code(
 	resolved lineno points at a decorator line, it is advanced to the ``def`` line
 	so the callsite snippet anchors on the signature.
 	"""
-	if not dotted or "." not in str(dotted):
+	if not isinstance(dotted, str) or len(dotted) > 500 or "." not in dotted or not all(part.isidentifier() for part in dotted.split(".")):
 		return None
-	try:
-		import importlib
-		import inspect
+	from optimus.ai_fix import _InterruptGuard
 
-		parts = str(dotted).split(".")
-		module = None
-		mod_parts = 0
-		for i in range(len(parts), 0, -1):
-			try:
-				module = importlib.import_module(".".join(parts[:i]))
-				mod_parts = i
-				break
-			except Exception:
-				continue
-		if module is None or mod_parts == len(parts):
-			return None  # nothing imported, or it's a module not a callable
-		obj = module
-		for attr in parts[mod_parts:]:
-			obj = getattr(obj, attr)
-		obj = inspect.unwrap(obj)
-		code = getattr(obj, "__code__", None)
-		if code is None:
-			return None  # builtin / C func / not a plain Python function
-		filename = code.co_filename or ""
-		lineno = code.co_firstlineno or 0
-		if not filename or filename.startswith("<") or lineno <= 0:
-			return None  # Server Script / eval'd code / bogus
-		abs_path = os.path.abspath(filename)
-		fn_name = getattr(obj, "__name__", "") or ""
-		lineno = _skip_decorators_to_def(
-			abs_path, int(lineno), fn_name, cache=file_cache,
-		)
-		return (abs_path, int(lineno), fn_name)
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			import importlib
+			import inspect
+
+			parts = dotted.split(".")
+			may_import = parts[0] in _installed_apps()
+			module = None
+			mod_parts = 0
+			for i in range(len(parts), 0, -1):
+				try:
+					module = importlib.import_module(".".join(parts[:i])) if may_import else sys.modules.get(".".join(parts[:i]))
+					if module is None:
+						continue
+					mod_parts = i
+					break
+				except ImportError:
+					continue
+			if module is None or mod_parts == len(parts):
+				return None  # nothing imported, or it's a module not a callable
+			obj = module
+			for attr in parts[mod_parts:]:
+				obj = getattr(obj, attr)
+			obj = inspect.unwrap(obj)
+			code = getattr(obj, "__code__", None)
+			if code is None:
+				return None  # builtin / C func / not a plain Python function
+			filename = code.co_filename or ""
+			lineno = code.co_firstlineno or 0
+			if not filename or filename.startswith("<") or lineno <= 0:
+				return None  # Server Script / eval'd code / bogus
+			abs_path = os.path.abspath(filename)
+			fn_name = getattr(obj, "__name__", "") or ""
+			lineno = _skip_decorators_to_def(
+				abs_path, int(lineno), fn_name, cache=file_cache,
+			)
+			return (abs_path, int(lineno), fn_name)
 	except Exception:
 		return None
+	if guard.pending():
+		raise guard.interrupt()
 
 
 def _bench_relative_display(abs_path: str) -> str:
@@ -205,66 +201,37 @@ def _action_entry_callsite(action, *, cache: dict | None = None) -> dict | None:
 
 
 def _resolve_frame_key_to_callsite(function_key, *, cache: dict | None = None) -> dict | None:
-	"""Resolve a Repeated Hot Frame's ``function`` value to a callsite + a
-	±1-line snippet, or ``None``.
+	"""Resolve a recorded short_path::function through the same source boundary."""
+	from optimus.ai_fix import _InterruptGuard
 
-	The key is ``call_tree._redacted_module_key`` output ``f"{short_path}::{func}"``
-	(``short_path`` = last ≤2 path segments of the file; ``func`` = bare frame name,
-	occasionally ``Class.method``), or just ``func`` when there was no filename.
-	Two best-effort strategies: (1) rebuild ``short_path`` into a dotted module and
-	resolve ``.func`` via ``_resolve_dotted_to_code``; (2) resolve ``short_path`` to
-	a file and grep for ``def <func>``. A bare ``func`` (no ``::``) → ``None``.
-	Returns ``{"filename", "_abs", "lineno", "function", "source_snippet"}`` or
-	``None``. Never raises.
-	"""
-	if not function_key:
+	if not isinstance(function_key, str) or len(function_key) > 4096 or "::" not in function_key:
 		return None
+	guard = _InterruptGuard(base=True)
 	try:
-		key = str(function_key)
-		if "::" not in key:
-			return None
-		short_path, _, func = key.partition("::")
-		short_path = short_path.strip()
-		func = func.strip()
-		if not short_path or not func:
-			return None
-
-		# (1) "ugly_code/python/common.py" + "looped_validate"
-		#     → "ugly_code.python.common.looped_validate"
-		norm = short_path.replace("\\", "/")
-		if norm.endswith(".py"):
-			norm = norm[:-3]
-		dotted = norm.replace("/", ".").strip(".")
-		if dotted:
-			resolved = _resolve_dotted_to_code(f"{dotted}.{func}", file_cache=cache)
+		with guard:
+			short_path, _, func = function_key.partition("::")
+			short_path, func = short_path.strip(), func.strip()
+			if not short_path or not func:
+				return None
+			norm = short_path.replace("\\", "/")
+			dotted = norm.removesuffix(".py").replace("/", ".").strip(".")
+			resolved = _resolve_dotted_to_code(f"{dotted}.{func}", file_cache=cache) if dotted else None
 			if resolved:
 				abs_path, lineno, name = resolved
-				return {
-					"filename": _bench_relative_display(abs_path),
-					"_abs": abs_path,
-					"lineno": lineno,
-					"function": name or func,
-					"source_snippet": _read_source_snippet(abs_path, lineno, cache=cache),
-				}
-
-		# (2) grep the resolved file for "def <last component of func>"
-		abs_path = _resolve_source_path(short_path)
-		if abs_path:
-			bare = func.rsplit(".", 1)[-1]
-			pat = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+" + re.escape(bare) + r"\b")
-			try:
-				with open(abs_path, encoding="utf-8") as fh:
-					for i, line in enumerate(fh, start=1):
-						if pat.match(line):
-							return {
-								"filename": _bench_relative_display(abs_path),
-								"_abs": abs_path,
-								"lineno": i,
-								"function": func,
-								"source_snippet": _read_source_snippet(abs_path, i, cache=cache),
-							}
-			except Exception:
-				pass
+			else:
+				abs_path = _resolve_source_path(short_path)
+				if not isinstance(abs_path, str):
+					return None
+				lines = _source_lines(short_path, cache=cache)
+				pattern = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+" + re.escape(func.rsplit(".", 1)[-1]) + r"\b")
+				lineno = next((i for i, line in enumerate(lines or [], start=1) if pattern.match(line)), None)
+				if lineno is None:
+					return None
+				name = func
+			return {"filename": _bench_relative_display(abs_path), "_abs": abs_path, "lineno": lineno,
+				"function": name or func, "source_snippet": _read_source_snippet(abs_path, lineno, cache=cache)}
 	except Exception:
 		return None
+	if guard.pending():
+		raise guard.interrupt()
 	return None

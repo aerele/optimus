@@ -7,6 +7,7 @@
  "engine": "InnoDB",
  "field_order": [
   "run_uuid",
+  "recording_user",
   "status",
   "started_at",
   "ended_at",
@@ -24,6 +25,15 @@
   "analyze_render_pending"
  ],
  "fields": [
+  {
+   "fieldname": "recording_user",
+   "fieldtype": "Link",
+   "options": "User",
+   "label": "Recording User",
+   "read_only": 1,
+   "hidden": 1,
+   "no_copy": 1
+  },
   {
    "fieldname": "run_uuid",
    "fieldtype": "Data",

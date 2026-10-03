@@ -155,3 +155,19 @@ def test_auto_admission_refusal_leaves_an_operator_notice(monkeypatch, reason):
 	monkeypatch.setattr(ai_jobs, "record_admission_notice", lambda *a, **kw: notices.append((a, kw)), raising=False)
 	analyze._queue_analyze_time_ai("fake-doc")
 	assert notices == [(("fake-doc",), {"reason": reason})]
+
+
+def test_recording_failure_uses_scrubbed_logging_outside_the_handler(pipeline, monkeypatch):
+	import sys
+
+	failure = RuntimeError("fake recording failure")
+	logged = []
+	def failed(*a):
+		raise failure
+	monkeypatch.setattr(analyze, "_fetch_recordings", failed)
+	monkeypatch.setattr(analyze, "_log_ai_step_failure", lambda title, exc, **kw: logged.append((exc, sys.exc_info()[0])))
+	with pytest.raises(RuntimeError, match="fake recording failure"):
+		analyze.run("fake-session")
+	assert pipeline.durable["status"] == "Failed"
+	assert logged == [(failure, None)]
+	assert "log" not in pipeline.events, "never print frame locals through the old core fallback"

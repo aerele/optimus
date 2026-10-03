@@ -263,7 +263,7 @@ def test_missing_or_malformed_input_never_reaches_classifier(monkeypatch, sample
 def test_valid_picks_with_no_invocations_still_produce_real_diagnostics(monkeypatch):
 	from optimus.line_profile import analyzer, capture
 	monkeypatch.setattr(capture, "read_all_samples", lambda *a: [])
-	monkeypatch.setattr(capture, "read_picks_meta", lambda *a: [{"dotted_path": "fake.app.fn", "file": "fake.py", "qualname": "fn", "first_lineno": 1, "source_lines": []}])
+	monkeypatch.setattr(capture, "read_picks_meta", lambda *a: [{"dotted_path": "fake.app.fn", "file": "fake.py", "qualname": "fn", "first_lineno": 1, "source_lines": [{"lineno": 1, "content": "def fn(): pass"}]}])
 	monkeypatch.setattr(capture, "budget_was_hit", lambda *a: False)
 	monkeypatch.setattr(analyzer, "frappe", SimpleNamespace(get_doc=lambda *a: SimpleNamespace(actions=[])))
 	results, result, total_ms = analyzer._compute_run("fake-doc", "fake-run")
@@ -538,3 +538,85 @@ def test_only_fenced_result_transaction_can_change_managed_results(phase2):
 		assert phase2.mod._complete(run, now=102, persist=lambda: phase2.mod.validate_parent_journal(doc))
 	with pytest.raises(Exception, match="Phase 2 analysis state is managed by the server"):
 		phase2.mod.validate_parent_journal(doc)
+
+
+@pytest.mark.parametrize("field,value", [
+	("recording_user", "forged@example.com"), ("recording_user", None),
+	("run_uuid", "forged-run"), ("status", "Ready"), ("picks_json", "[]"),
+])
+def test_capture_actor_and_input_identity_cannot_be_forged(field, value):
+	from optimus.line_profile import jobs
+	before = {"recording_user": "capture@example.com", "run_uuid": "fake-run", "status": "Recording",
+		"parent": "fake-parent", "picks_json": "fake-input"}
+	with pytest.raises(Exception, match="managed by the server"):
+		jobs._validate_journal_row({**before, field: value}, before)
+
+
+def test_capture_creation_scope_is_exact_and_resets():
+	from optimus.line_profile import jobs
+	row = {"recording_user": "capture@example.com", "run_uuid": "fake-run", "status": "Recording",
+		"parent": "fake-parent", "parenttype": "Optimus Session", "parentfield": "phase_2_runs"}
+	with pytest.raises(Exception, match="managed by the server"):
+		jobs._validate_journal_row(row, {})
+	with jobs.capture_creation("fake-parent", "fake-run", "capture@example.com"):
+		jobs._validate_journal_row(row, {})
+		for mutation in ({"run_uuid": "other"}, {"recording_user": "other"}, {"analyze_attempts": 1},
+			{"status": "Ready"}, {"results_json": "forged"}, {"parenttype": "Other"}):
+			with pytest.raises(Exception, match="managed by the server"):
+				jobs._validate_journal_row({**row, **mutation}, {})
+	with pytest.raises(Exception, match="managed by the server"):
+		jobs._validate_journal_row(row, {})
+
+
+def test_missing_capture_data_is_an_explicit_input_failure(monkeypatch):
+	from optimus.line_profile import analyzer, capture, jobs
+	def corrupt(*args):
+		raise capture.CaptureInputError("invalid fake source")
+	monkeypatch.setattr(capture, "read_all_samples", corrupt)
+	with pytest.raises(jobs.MissingInput):
+		analyzer._compute_run("fake-parent", "fake-run")
+
+
+@pytest.mark.parametrize("actor,status,expected", [
+	("fake-capture-user", "Recording", True), ("different-user", "Recording", False),
+	("fake-capture-user", "Analyzing", False), ("fake-capture-user", "Ready", False),
+])
+def test_force_stop_rechecks_actual_capture_actor_and_current_status(phase2, actor, status, expected):
+	phase2.row().update(recording_user=actor, status=status)
+	with phase2.db.transaction():
+		assert phase2.mod._force_stop_capture("fake-session-doc", "fake-phase2", "fake-capture-user") is expected
+	assert phase2.row()["status"] == ("Failed" if expected else status)
+
+
+def test_force_stop_legacy_capture_checks_parent_recording_user(phase2):
+	phase2.row()["status"] = "Recording"
+	phase2.db.rows["Optimus Session"]["fake-session-doc"]["user"] = "legacy-user"
+	with phase2.db.transaction():
+		assert not phase2.mod._force_stop_capture("fake-session-doc", "fake-phase2", "other")
+		assert phase2.mod._force_stop_capture("fake-session-doc", "fake-phase2", "legacy-user")
+
+
+@pytest.mark.parametrize("raced", [False, True])
+def test_force_stop_preserves_input_if_analysis_claims_it(phase2, monkeypatch, raced):
+	from optimus.line_profile import capture
+	phase2.row().update(recording_user="capture-user", status="Recording")
+	def transaction(operation):
+		with phase2.db.transaction():
+			return operation()
+	monkeypatch.setattr(phase2.mod.ai_jobs, "_transaction", transaction)
+	monkeypatch.setattr(phase2.mod.ai_jobs, "_retry_sql", transaction)
+	monkeypatch.setattr(phase2.mod, "_capture_candidates", lambda user: [{"parent": "fake-session-doc", "run_uuid": "fake-phase2"}])
+	def active(user, *, fresh=False):
+		assert fresh
+		if raced:
+			phase2.row()["status"] = "Analyzing"
+		return "fake-phase2"
+	monkeypatch.setattr(capture, "is_active", active)
+	def stop(run_uuid, user):
+		assert not phase2.db.active
+		return not raced
+	monkeypatch.setattr(capture, "stop_line_profile_pass", stop)
+	monkeypatch.setattr(capture, "cleanup_run", lambda *a: pytest.fail("deleted input used by a possible retry"))
+	out = phase2.mod.force_stop_captures("capture-user")
+	assert out["rows_marked_failed"] == int(not raced)
+	assert phase2.row()["status"] == ("Analyzing" if raced else "Failed")
