@@ -117,7 +117,8 @@ def test_humanize_steps_sends_its_timeout_to_the_provider(monkeypatch):
 	}
 	with _provider(provider):
 		ai_fix.humanize_steps([{"label": "open", "cmd": "x", "duration_ms": 5}], timeout=analyze.AI_CALL_TIMEOUT_CAP_SECONDS)
-	assert post.last.timeout == analyze.AI_CALL_TIMEOUT_CAP_SECONDS
+	# (connect, read): the read budget is the timeout humanize_steps was given
+	assert post.last.timeout == pytest.approx((10, analyze.AI_CALL_TIMEOUT_CAP_SECONDS), abs=0.1)
 
 
 # --- a touch never takes another session's flag ---------------------

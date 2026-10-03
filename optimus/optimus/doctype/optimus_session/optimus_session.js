@@ -909,21 +909,14 @@ function render_regenerate_report_button(frm) {
 	frm.add_custom_button(__("Regenerate Reports"), () => {
 		frappe.confirm(
 			__(
-				"Re-render the HTML report from stored session data. This "
-				+ "does NOT re-run the analyzer. Note: if \"Suggest AI fixes "
-				+ "in the report by default\" is enabled, this also asks the "
-				+ "LLM for fixes for any findings that don't have one yet "
-				+ "which can take a while."
+				"Re-render the HTML report from stored session data. Saved AI suggestions are retained. Use Refresh AI suggestions to request new answers."
 			),
 			() => {
 				frappe.call({
 					method: "optimus.api.regenerate_reports",
 					args: { session_uuid: frm.doc.session_uuid },
 					freeze: true,
-					freeze_message: __(
-						"Regenerating the report… (this can take a while if "
-						+ "AI fix suggestions are enabled)"
-					),
+					freeze_message: __("Regenerating the report…"),
 					callback: (r) => {
 						const data = (r && r.message) || {};
 						if (data.regenerated) {

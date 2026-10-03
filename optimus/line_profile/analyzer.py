@@ -700,18 +700,23 @@ def _mark_run_failed(parent_docname: str, run_uuid: str, error: str, tb: str) ->
 
 
 def _regenerate_parent_reports(session_uuid: str) -> None:
-	"""Trigger re-render of the parent Optimus Session's HTML reports via
-	``api.regenerate_reports(session_uuid)`` (the shared re-render path).
-	"""
-	try:
-		from optimus import api as optimus_api
+	"""Re-render saved results from the authorized Phase-2 worker."""
+	from optimus import api as optimus_api
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
 
-		optimus_api.regenerate_reports(session_uuid)  # type: ignore[attr-defined]
+	failure = None
+	guard = _InterruptGuard()
+	try:
+		with guard:
+			docname = frappe.db.get_value("Optimus Session", {"session_uuid": session_uuid}, "name")
+			if docname:
+				optimus_api._render_session_report(docname)
 	except Exception as exc:
-		# Re-render failure is non-fatal: data is persisted, the customer
-		# just needs to click "Regenerate Reports" manually. Surface the
-		# error in the run row for debuggability.
-		frappe.log_error(
-			title="phase 2 re-render failed",
-			message=f"{session_uuid}: {exc}\n{traceback.format_exc()}",
-		)
+		failure = exc
+	if guard.pending():
+		raise guard.interrupt()
+	if failure is not None:
+		try:
+			log_ai_failure("phase 2 re-render failed", failure, session_uuid=session_uuid)
+		finally:
+			failure = None

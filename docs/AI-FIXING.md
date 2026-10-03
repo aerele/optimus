@@ -253,7 +253,7 @@ These items are **never** sent in any AI request body:
 - **Sensitive SQL literals.** `password = '...'`, `api_key = '...'`, `token = '...'` and the 12 other patterns in `optimus.redaction.DEFAULT_SENSITIVE_SQL_COLUMNS` are replaced with `<REDACTED>` at capture time, so even the `example_queries` field sees the redacted form. Operators can extend this list via `sensitive_sql_columns` in Optimus Settings.
 - **HTTP form bodies.** `form_dict` keys matching `password` / `api_key` / `token` / etc. are redacted at capture (`optimus.redaction.DEFAULT_SENSITIVE_KEYS`) and form bodies themselves are never included in AI payloads only summary fields like `cmd` / `doctype` reach the humanize-steps path.
 A guardrail repair request is a separate completion: it reads the current key once
-when sent. Same-origin redirects and the temperature retry reuse that completion's
+when sent. Same-origin redirects and parameter retries reuse that completion's
 auth object without decrypting again.
 
 - **Your API keys.** The provider API key is stored in an encrypted Password field and decrypted only when a request is sent (`frappe.utils.password.get_decrypted_password`), once per call (one SELECT on `__Auth`). For a provider that needs a key it must be plain printable ASCII: a key with any other character (a space inside it, a pasted smart quote or no-break space, a control character) is refused before any request is made, with a message that names the usual causes (a pasted smart quote, a stray space, a no-break space, a control character), and such a key is refused when Optimus Settings is saved, with the same message. The OpenAI-compatible provider needs no key (Ollama, LM Studio, vLLM): there such a key is neither sent nor refused, and the request goes without one; a key it can send is still sent (a router such as OpenRouter needs one). In Optimus's code it sits only in local variables named `api_key` or `secret` (names Frappe's traceback sanitizer and Sentry redact), for a moment in the `literals` parameter of `redaction.scrub_secrets` (which moves the key into `secret` before it scrubs anything), and in a masked `requests` auth object (`_ApiKeyAuth`). It travels only in the HTTP header (`x-api-key` or `Authorization: Bearer ...`), which that object sets on the HTTP library's own prepared request, whose headers hold it while the request is sent (the response keeps that request, and neither one's `repr` shows its headers). The HTTP library never follows a redirect: it drops only a header named `Authorization` when it follows one to another host, so the `x-api-key` header would have been sent on to the redirect target. Optimus follows at most three 307 or 308 redirects itself, only to the same host and port (with the same scheme, or http to https on that host), sending the same request and key again; any other 3xx reply (a 301, 302 or 303, another host or port, a downgrade, a fourth redirect) is reported as an unexpected response instead, which says that a Base URL that redirects (301, 302 or 303, or a 307 or 308 to another host) must be set to the final URL it redirects to, and the address a redirect points to is never logged or shown. Apart from those it is never part of a settings dict, a header dict, the prompt or an exception message. A provider's error reply is scrubbed before it is shown, of the key the request was sent with (the only key the provider received, so an echo is masked even when the key in Settings was changed while the request ran), or of the key stored in Optimus Settings when the request carried none, each in its raw and its JSON-escaped form. A 404 message names the request URL with any credentials in it masked (a `user:password@` typed into a custom Base URL, or the key), or only "(the configured Base URL)" when the URL cannot be scrubbed. In each of the failure scenarios the canary test (`optimus/tests/test_ai_secret_canary.py`) models, it appears in no Error Log row, traceback or Sentry event (earlier releases could log it: see the API key advisory in `CHANGELOG.md`), and it is never returned to the client. The OpenAI-compatible provider with `needs_key=False` (local endpoints) sends no auth header at all when no key is set.
@@ -333,7 +333,7 @@ The list is empty by default. The exclusion list is **additive**: types not list
 
 ### 5.2 Errors, Refresh AI suggestions and the analyze-time step
 
-`ai_fix.AiFixError` carries a `kind`: `config` (Optimus Settings cannot serve the call: AI off, no model or key, a context window too small), `not_eligible` (the gate or the per-type exclusion refused the finding and no request was built), `transport`, `timeout`, `bad_response` and `unknown`. **Only `not_eligible` counts as a skip** (`AI_SKIP_KINDS`); every other kind, `config` included, is a failure that is logged to the Error Log and counted.
+`ai_fix.AiFixError` carries a `kind`: `config` (Optimus Settings cannot serve the call: AI off, no model or key, a context window too small), `not_eligible` (the gate or the per-type exclusion refused the finding and no request was built), `auth`, `quota`, `rate_limited`, `not_found`, `server` and `bad_request` (an HTTP error status, classified as described under "Request failures and retries" in section 6), `transport`, `timeout`, `bad_response`, `internal` (an unexpected error while sending or processing) and `unknown`. A context-limit rejection is `config`. **Only `not_eligible` counts as a skip** (`AI_SKIP_KINDS`); every other kind, `config` included, is a failure that is logged to the Error Log and counted.
 
 `optimus.api.refill_ai_suggestions` returns, in its `fixes` result, `added`, `failed`, `skipped_time`, `skipped`, `gated` (AI-eligible findings and Framework N+1 that the report answers with Optimus's own advice or a note; index findings are not counted), `excluded` (AI-eligible types under Excluded finding types in Optimus Settings) and `skipped_ineligible`. The old `indexes` result is removed: `optimus.api.ai_capabilities` always reports `indexes: false`. Missing and outdated suggestions are refreshed first, so repeated refreshes make every eligible finding current.
 
@@ -405,6 +405,34 @@ Optimus Settings → AI:
 Default `ai_request_timeout_seconds = 60` is fine for hosted providers (Anthropic / OpenAI typically respond in 2–10s). For local stacks, **start at 180** and tune down once you've measured your warm-call P99. The setting is clamped to `[10, 600]` seconds.
 
 ---
+
+### Request failures and retries
+
+Optimus classifies authentication, missing endpoint/model, exhausted quota,
+rate limit, context/configuration, server, transport, timeout and malformed
+response failures separately. Error Logs retain status and validated error
+codes, never the provider response body. A validation rejection (HTTP 400 or
+422) may trigger removal of `temperature` or replacement of `max_tokens` with
+`max_completion_tokens`, each at most once. There are at most three validation attempts for
+this parameter adaptation; each can follow the permitted redirects. Context-limit and quota failures never use it;
+network failures are not automatically retried.
+
+Parameter retries and permitted redirects use the remaining request budget.
+Each connection attempt is limited to 10 seconds, or the remaining budget
+when shorter. The read timeout uses the remaining budget. The HTTP library's
+read timeout measures socket inactivity, not a strict overall wall-clock
+limit; background worker limits remain necessary. A guardrail repair request
+also uses the remaining completion budget. Reasoning models retain the same
+provider-aware output cap. Leading inline thinking blocks are removed, and
+unfinished thinking is an unusable response. Reported tokens stay attached to
+a failure after a billed response, including a validation failure.
+
+Regenerate Reports renders stored data and saved AI suggestions without
+calling the provider. Refresh AI suggestions remains the action for new AI
+answers. Both report regeneration and step humanization can load the saved
+recording JSON without deserializing its Python trees or sidecars. This
+release supplies helpers for the upcoming background engine; it does not yet
+move optional AI work out of analysis or make refresh asynchronous.
 
 ### 6.5 Troubleshooting
 

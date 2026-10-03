@@ -8,6 +8,40 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.69] - 2026-10-03
+
+### Changed
+
+- Classify AI provider errors consistently. Request-validation retries can
+  remove temperature or rename the output-token parameter, at most once each,
+  within a shared request budget. Network failures are not retried. Known
+  reasoning models keep the provider-aware output cap; inline thinking is
+  removed before an answer is processed.
+- Regenerate Reports uses stored answers and does not call the model. Report
+  regeneration and step humanization read recording JSON without loading
+  Python trees or sidecars. Use Refresh AI suggestions for new answers.
+- Add shared selection of missing and outdated suggestions, explicit session
+  attribution, and portable atomic usage/counter helpers for background work.
+  Counter failures propagate so a caller can roll back its result transaction.
+
+### Fixed
+
+- Keep reported token usage when a response is unusable or later validation
+  fails. Preserve fresh RQ timeouts and the existing failure-log marker.
+- Keep recording-read failure logs outside exception handlers, and propagate
+  RQ timeouts instead of swallowing them. A Redis read failure falls back to
+  the saved recording bundle.
+- Phase 2 report regeneration uses the internal render helper without a
+  second HTTP permission/rate-limit gate. The 24-hour analysis health metric
+  uses the session stop time, independent of later AI updates.
+
+### Upgrade notes
+
+- Background refresh jobs and persistence before optional AI work are still
+  pending follow-up changes. Refresh remains synchronous in this change.
+- Request read timeouts measure socket inactivity, not a strict wall-clock
+  deadline. Worker time limits remain necessary.
+
 ## [0.12.68] - 2026-10-02
 
 ### Changed
