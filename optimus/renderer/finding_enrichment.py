@@ -766,6 +766,16 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 					"source_snippet": _read_source_snippet(_abs, _ln, cache=file_cache),
 				}
 
+	# Stored snippets are also subject to Server Script permissions. A prior
+	# authorized render must not become a cache bypass for a later requester.
+	callsite = detail.get("callsite") or {}
+	from optimus.server_script_source import extract_script_name, get_server_script_record
+
+	script = extract_script_name(callsite.get("filename"))
+	if script and not get_server_script_record(script, cache=file_cache):
+		callsite.pop("source_snippet", None)
+		detail.pop("line_content", None)
+
 	# Hot Line finding line_content windowing keep the profiled text
 	# authoritative for the hot line itself.
 	callsite = detail.get("callsite") or {}

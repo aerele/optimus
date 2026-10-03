@@ -46,6 +46,9 @@ _REQUIRED = (
 	"optimus/doctype/optimus_settings/optimus_settings.py", "renderer/recipe_enrichment.py", "line_profile/analyzer.py",
 	"ai_jobs.py", "ai_refresh_store.py", "sql_work.py", "ai_refresh_view.py", "settings.py", "report_refresh.py", "line_profile/jobs.py",
 	"patches/v0_12_0/seed_ai_refresh_max_findings.py",
+	"renderer/source.py", "renderer/source_resolution.py", "server_script_source.py",
+	"line_profile/capture.py", "line_profile/hooks.py", "ai_privacy.py",
+	"patches/v0_12_0/warn_ai_endpoint_policy.py",
 )
 _OPTIONAL: tuple[str, ...] = ()  # modules a later PR adds, scanned as soon as they exist
 _AI_WRAPPERS: frozenset[str] = frozenset()  # names of non-step functions that count as AI code (none today)
@@ -323,10 +326,8 @@ def test_the_ai_steps_log_through_the_one_helper():
 			for name in calls & {"log_ai_failure", "_log_ai_step_failure"}:
 				callers.setdefault(name, set()).add(f"{mod}:{fn.name}")
 	assert callers == {
-		"log_ai_failure": {
-			"analyze.py:_log_ai_step_failure", "analyze.py:_increment_session_counter", "analyze.py:queue_analyze_time_ai",
-		},
-		"_log_ai_step_failure": {"analyze.py:_run_ai_step"},
+		"log_ai_failure": {"analyze.py:_increment_session_counter", "analyze.py:_deserialize_tree", "analyze.py:_fetch_recordings", "analyze.py:_save_report_file", "analyze.py:_persist_recordings_file", "analyze.py:_log_ai_step_failure", "analyze.py:load_recordings_light", "analyze.py:_load_recordings_bundle", "analyze.py:phase2_index_for", "analyze.py:queue_analyze_time_ai", "analyze.py:_auto_arm_phase2", "api.py:_cleanup_failed_capture"},
+		"_log_ai_step_failure": {"analyze.py:_run_ai_step", "analyze.py:run"},
 	}
 	helper = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "_run_ai_step")
 	tries = [n for n in _own_nodes(helper) if isinstance(n, _TRIES) and n.handlers]

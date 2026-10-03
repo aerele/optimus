@@ -19,17 +19,19 @@ helpers are unit-testable without a bench.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import time
 import traceback
 from datetime import datetime, timezone
+from functools import wraps
 from typing import Any, NamedTuple
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 
-from optimus import ai_budget, ai_grounding, ai_guardrails, ai_prompts, safe_call
+from optimus import ai_budget, ai_grounding, ai_guardrails, ai_privacy, ai_prompts, safe_call
 from optimus.analyzers.base import INDEX_FINDING_TYPES, humanize_duration_ms, row_get
 
 
@@ -83,12 +85,9 @@ class AiFixError(Exception):
 	failure reads ``fatal`` and keeps none of its own.
 	``usage`` carries reported tokens when later processing fails.
 
-	The message must never contain the API key: it is shown to the operator
-	and written to the Error Log. A failure whose message is not what its row
-	should show carries a log text instead (``_LOG_TEXT_ATTR``): an
-	HTTP-status error from ``_http_post`` (its message carries the provider's
-	reply, so the row gets a body-free text) and an unexpected error while
-	processing a reply (the row gets its type and plain frames)."""
+	The message contains neither a key nor provider reply. Scrubbed provider
+	context is kept separately in ``detail`` and shown only to administrators
+	by ``user_message``. Logging never consumes that detail."""
 
 	def __init__(
 		self,
@@ -98,10 +97,12 @@ class AiFixError(Exception):
 		kind: str = "unknown",
 		usage: dict | None = None,
 		usage_complete: bool | None = None,
+		detail: str = "",
 	):
 		super().__init__(message)
 		self.status_code = status_code
 		self.kind = kind
+		self.detail = detail
 		self.usage_complete = (
 			bool(getattr(usage, "complete", False)) if usage_complete is None else usage_complete is True
 		)
@@ -175,6 +176,56 @@ def _failure_context(exc: BaseException | None) -> dict[str, Any]:
 	if type(tokens) is int and tokens > 0:
 		context["tokens"] = tokens
 	return context
+
+
+def user_message(exc: AiFixError) -> str:
+	"""Public explanation, with provider detail only for System Managers."""
+	allowed = False
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			import frappe
+
+			user = frappe.session.user
+			allowed = user == "Administrator" or bool(user and user != "Guest" and "System Manager" in frappe.get_roles(user))
+	except Exception:
+		pass
+	if guard.pending():
+		exc = None
+		raise guard.interrupt()
+	return str(exc) + ("\n" + exc.detail if allowed and exc.detail else "")
+
+
+def _private_ai_frames(function):
+	"""Keep prompts, replies and URLs out of escaping provider tracebacks.
+
+	The HTTP layer logs plain frames before this boundary. Public AI entry
+	points also need it: their own prompt-building and retry frames otherwise
+	remain attached even when the transport discards its request frames.
+	Preserve typed outcomes, usage and log markers, and reuse the interrupt
+	guard so worker timeouts stay fresh and gevent timeouts keep identity.
+	"""
+	@wraps(function)
+	def private_call(*args, **kwargs):
+		failure = None
+		unexpected = ""
+		guard = _InterruptGuard(base=True)
+		try:
+			with guard:
+				return function(*args, **kwargs)
+		except AiFixError as exc:
+			failure = exc
+		except Exception as exc:
+			unexpected = type(exc).__name__
+		args = kwargs = None
+		if guard.pending():
+			raise guard.interrupt()
+		if failure is None:
+			from frappe import _
+
+			failure = AiFixError(_("The AI operation failed ({0}).").format(unexpected), kind="internal")
+		raise guard.detach(failure)
+	return private_call
 
 
 # Findings that carry enough code / SQL context for the LLM to reason about
@@ -485,6 +536,7 @@ def _resolve_display_threshold_ms() -> float:
 	return display_threshold_ms()
 
 
+@_private_ai_frames
 def suggest_fix(
 	finding: dict, *, timeout: int | None = None,
 	session_uuid: str | None = None, docname: str | None = None,
@@ -528,7 +580,8 @@ def suggest_fix(
 	_require_configured(provider)
 	ctx = _context_tokens(provider)
 	system, messages, shown = _build_fix_request(
-		finding, threshold_ms=_resolve_display_threshold_ms(), context_tokens=ctx, out_tokens=_output_tokens(provider)
+		finding, threshold_ms=_resolve_display_threshold_ms(), context_tokens=ctx, out_tokens=_output_tokens(provider),
+		send_raw=ai_privacy.raw_values_enabled(),
 	)
 	_check_context_fits(
 		system, ctx, messages=messages, out_tokens=_output_tokens(provider),
@@ -563,6 +616,7 @@ def suggest_fix(
 	return result
 
 
+@_private_ai_frames
 def humanize_steps(
 	actions: list[dict], *, session_title: str | None = None, usage_out: dict | None = None,
 	timeout: int | None = None, session_uuid: str | None = None, docname: str | None = None,
@@ -585,7 +639,8 @@ def humanize_steps(
 	provider = _provider_config()
 	_require_configured(provider)
 	system, messages = _build_steps_messages(
-		actions, session_title, threshold_ms=_resolve_display_threshold_ms(), context_tokens=_context_tokens(provider)
+		actions, session_title, threshold_ms=_resolve_display_threshold_ms(), context_tokens=_context_tokens(provider),
+		send_raw=ai_privacy.raw_values_enabled(),
 	)
 	_check_context_fits(
 		system, _context_tokens(provider), messages=messages, out_tokens=_output_tokens(provider),
@@ -687,17 +742,27 @@ def test_connection() -> dict:
 	try:
 		provider = _provider_config()
 	except AiFixError as e:
-		return {"ok": False, "message": str(e), "model": ""}
+		return {"ok": False, "message": user_message(e), "model": ""}
 	if not provider.get("model") or not provider.get("base_url"):
 		return {"ok": False, "message": "Provider/model/base URL not fully configured.", "model": provider.get("model") or ""}
 	messages = [{"role": "user", "content": "Reply with exactly: OK"}]
 	usage: dict = {}
 	try:
 		text = _dispatch_call(
-			provider, "You are a connectivity probe. Reply with exactly: OK", messages, usage_out=usage, max_tokens=16
+			provider, "You are a connectivity probe. Reply with exactly: OK", messages, usage_out=usage, max_tokens=16,
+			timeout=min(request_timeout_seconds(), 60),
 		)
 	except AiFixError as e:
-		return {"ok": False, "message": str(e), "model": provider["model"]}
+		failure = e
+	else:
+		failure = None
+	if failure is not None:
+		from frappe import _
+
+		message = user_message(failure)
+		if failure.kind == "timeout":
+			message += " " + _("A local model may still be loading. Wait a little and try Test AI connection again.")
+		return {"ok": False, "message": message, "model": provider["model"]}
 	_toks = usage.get("total_tokens") or 0
 	return {
 		"ok": True,
@@ -751,7 +816,71 @@ def _current_key_or_empty() -> str:
 	return api_key.strip() if isinstance(api_key, str) else ""
 
 
-def _get_api_key(needs_key: bool = True) -> str:
+def _read_provider_snapshot():
+	"""One statement binds the encrypted credential to its endpoint settings.
+
+	No Redis/local cache and no locks across HTTP. A concurrent Settings save
+	changes Singles and __Auth in one transaction, so even READ COMMITTED cannot
+	pair a new credential with the previous endpoint. Only ciphertext leaves
+	this helper; plaintext is decrypted after the prepared config is checked.
+	"""
+	from types import SimpleNamespace
+
+	import frappe
+
+	query = """SELECT s.field, s.value, a.password
+		FROM `tabSingles` s LEFT JOIN `__Auth` a
+		ON a.doctype = %s AND a.name = %s AND a.fieldname = %s AND a.encrypted = 1
+		WHERE s.doctype = %s AND s.field IN (%s, %s, %s, %s, %s)"""
+	rows = frappe.db.multisql(
+		{"mariadb": query, "postgres": query.replace("`", '"')},
+		values=("Optimus Settings", "Optimus Settings", "ai_api_key", "Optimus Settings",
+			"ai_enabled", "ai_provider", "ai_base_url", "ai_model", "ai_context_tokens"),
+	)
+	values = {field: value for field, value, _ in rows}
+	values["ai_enabled"] = ai_privacy.opted_in(values.get("ai_enabled"))
+	return SimpleNamespace(**values), rows[0][2] if rows else None
+
+
+
+def _decrypt_bound_key(ciphertext) -> str:
+	# Match the existing unavailable-key contract without another SQL read.
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			from frappe.utils.password import decrypt
+
+			api_key = decrypt(ciphertext, key="Optimus Settings.Optimus Settings.ai_api_key") if ciphertext else ""
+	except Exception:
+		return ""
+	if guard.pending():
+		raise guard.interrupt()
+	return api_key if isinstance(api_key, str) else ""
+
+
+def _key_for_provider(provider: dict) -> str:
+	"""Refuse stale configuration before decrypting or contacting a provider."""
+	from frappe import _
+
+	guard = _InterruptGuard(base=True)
+	failed = False
+	try:
+		with guard:
+			cfg, ciphertext = _read_provider_snapshot()
+			if not cfg.ai_enabled or _provider_config(cfg) != provider:
+				failed = True
+			else:
+				api_key = _decrypt_bound_key(ciphertext)
+	except Exception:
+		failed = True
+	if guard.pending():
+		raise guard.interrupt()
+	if failed:
+		raise AiFixError(_("AI configuration changed or could not be read. Check Optimus Settings and retry the refresh."), kind="config") from None
+	return api_key.strip() if isinstance(api_key, str) else ""
+
+
+def _get_api_key(needs_key: bool = True, *, provider: dict | None = None) -> str:
 	"""The API key to send, stripped of surrounding whitespace (a pasted
 	trailing newline), or ``""`` when none is stored.
 
@@ -772,7 +901,7 @@ def _get_api_key(needs_key: bool = True) -> str:
 	The check runs outside any ``try``, so the ``AiFixError`` is raised with
 	no exception being handled and has no ``__context__``; ``from None`` also
 	keeps ``__suppress_context__`` explicit."""
-	api_key = _current_key_or_empty()
+	api_key = _key_for_provider(provider) if provider is not None else _current_key_or_empty()
 	if not api_key:
 		return ""
 	if not _key_is_sendable(api_key):
@@ -893,13 +1022,125 @@ def _resolve_provider() -> dict:
 	return provider
 
 
-def _provider_config() -> dict:
+_METADATA_HOSTNAMES = frozenset({
+	"metadata", "metadata.google.internal", "metadata.goog", "instance-data", "instance-data.ec2.internal",
+})
+_METADATA_IPS = frozenset({ipaddress.ip_address("100.100.100.200"), ipaddress.ip_address("fd00:ec2::254")})
+_URL_CONTROL_RE = re.compile(r"[\x00-\x20\x7f]")
+
+
+def _host_ip(host: str):
+	try:
+		address = ipaddress.ip_address(host)
+	except ValueError:
+		return None
+	if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+		return address.ipv4_mapped
+	return address
+
+
+def validate_base_url(url: str) -> str:
+	"""Validate an administrator's endpoint without DNS or network access.
+
+	Private LAN providers are supported. This rejects literal metadata and
+	unsafe URL shapes, not names that resolve to a private address. Legacy
+	numeric IP spellings are not recognized as loopback for key transport.
+	A failure never quotes the URL, including in this frame's escaping locals.
+	"""
+	from frappe import _
+
+	raw = url.strip(" ") if isinstance(url, str) else ""
+	parts = None
+	host = ""
+	port = None
+	reason = ""
+	if not raw or len(raw) > 4096:
+		reason = _("it is empty or too long")
+	elif _URL_CONTROL_RE.search(raw):
+		reason = _("it contains spaces or control characters")
+	else:
+		try:
+			parts = urlsplit(raw)
+			host, port = parts.hostname or "", parts.port
+		except ValueError:
+			reason = _("it is not a valid address or port")
+	if not reason:
+		if parts.scheme not in ("http", "https"):
+			reason = _("only http:// and https:// addresses are supported")
+		elif "\\" in parts.netloc or "%" in parts.netloc or not parts.netloc.isascii():
+			reason = _("the host name has a backslash, a percent escape or non-ASCII characters")
+		elif "@" in parts.netloc:
+			reason = _("it must not contain a user name or password; use the API Key field")
+		elif "?" in raw or "#" in raw:
+			reason = _("it must not contain a query string or a fragment")
+		elif not host:
+			reason = _("it has no host name")
+		elif parts.netloc.endswith(":") or port == 0:
+			reason = _("the port is not a valid number")
+		elif parts.netloc.startswith("[") and not re.fullmatch(r"\[[0-9a-fA-F:.]+\](?::[0-9]+)?", parts.netloc):
+			reason = _("it is not a valid bracketed address")
+		else:
+			host = host.rstrip(".").lower()
+			address = _host_ip(host)
+			if host in _METADATA_HOSTNAMES or address in _METADATA_IPS:
+				reason = _("it points at a cloud metadata service")
+			elif address is not None and (address.is_link_local or address.is_unspecified or address.is_multicast):
+				reason = _("it points at a link-local, unspecified or multicast address")
+	if reason:
+		url = raw = parts = host = None
+		raise AiFixError(_("The AI Base URL in Optimus Settings is not allowed: {0}.").format(reason), kind="config")
+	return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
+
+
+def _is_loopback_host(host: str) -> bool:
+	host = host.rstrip(".").lower()
+	address = _host_ip(host)
+	return host == "localhost" or host.endswith(".localhost") or bool(address is not None and address.is_loopback)
+
+
+_URL_USERINFO_RE = re.compile(r"^(\s*(?:[A-Za-z][A-Za-z0-9+.-]*:)?//)?[^/?#]*@")
+
+
+def strip_url_userinfo(url) -> str:
+	"""Remove authority credentials before Settings/version history saves them.
+
+	Also handles protocol-relative and schemeless pasted values. An @ in a
+	path is not authority userinfo. Validation remains a separate operation.
+	"""
+	return _URL_USERINFO_RE.sub(r"\1", url, count=1) if isinstance(url, str) else ""
+
+
+def key_over_http_blocked(url: str, *, allow: bool) -> bool:
+	"""Withhold a key on remote plain HTTP unless the site explicitly opts in."""
+	try:
+		parts = urlsplit(validate_base_url(url))
+	except AiFixError:
+		return True
+	return not allow and parts.scheme == "http" and not _is_loopback_host(parts.hostname)
+
+
+def _allow_key_over_http() -> bool:
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			import frappe
+
+			value = frappe.conf.get("optimus_ai_allow_key_over_http")
+			return value is True or type(value) is int and value == 1 or isinstance(value, str) and value.lower() in {"1", "true"}
+	except Exception:
+		return False
+	if guard.pending():
+		raise guard.interrupt()
+
+
+@_private_ai_frames
+def _provider_config(cfg=None) -> dict:
 	"""Resolve the active provider config: protocol, base_url, model,
 	needs_key and the provider display name, without reading the key. Raises
 	``AiFixError`` on an unknown provider or a custom provider missing its
 	required base_url/model."""
 	from optimus.settings import get_config
-	cfg = get_config()
+	cfg = get_config() if cfg is None else cfg
 	name = (getattr(cfg, "ai_provider", "") or _DEFAULT_PROVIDER).strip()
 	if name not in _PROVIDER_DEFAULTS:
 		from frappe import _
@@ -919,7 +1160,8 @@ def _provider_config() -> dict:
 	if defaults["base_url"]:
 		base_url = defaults["base_url"]
 	else:
-		base_url = (getattr(cfg, "ai_base_url", "") or "").strip().rstrip("/")
+		base_url = getattr(cfg, "ai_base_url", "") or ""
+	base_url = validate_base_url(base_url)
 	model = (getattr(cfg, "ai_model", "") or "").strip() or defaults["model"]
 	# The Settings override applies only to bring-your-own endpoints (no built-in
 	# base_url), like the Base URL: the field is hidden for hosted providers.
@@ -953,14 +1195,19 @@ def _truncate(text: Any, limit: int) -> str:
 def _build_steps_messages(
 	actions: list[dict], session_title: str | None, *, threshold_ms: float = 1000.0,
 	context_tokens: int = _DEFAULT_CONTEXT_TOKENS,
+	send_raw: bool = False,
 ) -> tuple[str, list[dict]]:
 	lines: list[str] = []
-	title = (str(session_title).strip() if session_title else "")
+	title = (str(session_title).strip() if session_title and send_raw else "")
 	if title:
 		lines.append(f"Session title: {title}")
 		lines.append("")
 	lines.append("Recorded actions, in order:")
 	for i, a in enumerate(actions[:_MAX_STEPS_ACTIONS], 1):
+		if not isinstance(a, dict):
+			continue
+		if not send_raw:
+			a = ai_privacy.private_action(a)
 		label = (a.get("label") or "").strip() or "(unnamed action)"
 		bits: list[str] = []
 		cmd = (a.get("cmd") or "").strip()
@@ -1442,6 +1689,23 @@ class _InterruptGuard(safe_call.InterruptGuard):
 	def _timeout_types(self) -> tuple[type[BaseException], ...]:
 		return _job_timeout_types()
 
+	def _timeout_state(self, exc) -> dict:
+		"""Preserve billing evidence and log deduplication through private frames."""
+		state = {}
+		usage = getattr(exc, "usage", None)
+		if isinstance(usage, dict):
+			state["usage"] = {key: value for key, value in usage.items() if key in (
+				"prompt_tokens", "completion_tokens", "total_tokens",
+			) and type(value) is int and 0 <= value <= MAX_TOKEN_COUNT}
+		if hasattr(exc, "usage_complete"):
+			state["usage_complete"] = exc.usage_complete is True
+		if getattr(exc, _LOGGED_ATTR, False) is True:
+			state[_LOGGED_ATTR] = True
+			row_name = getattr(exc, _LOGGED_ROW_ATTR, None)
+			if isinstance(row_name, str):
+				state[_LOGGED_ROW_ATTR] = row_name
+		return state
+
 
 def _response_detail(resp, auth=None) -> str:
 	"""The provider's own error body (capped), as a ': ...' suffix or '' when
@@ -1623,10 +1887,10 @@ def _classify_http_error(
 		).format(url), detail)
 	if status == 404:
 		return HttpErrorClassification("not_found", _(
-			"The AI provider returned 404 (Not Found) for {0}. Check that the Model in Optimus Settings "
+			"The AI provider returned 404 (Not Found). Check that the Model in Optimus Settings "
 			"is a valid model name for this provider. If you set a custom Base URL, make sure it includes "
 			"the '/v1' path segment (for example http://localhost:11434/v1 for Ollama)."
-		).format(url), detail)
+		), detail)
 	if status == 429:
 		return HttpErrorClassification("rate_limited", _("The AI provider is rate-limiting requests. Try again shortly."), detail)
 	if status >= 500:
@@ -1660,6 +1924,7 @@ def _error_text(exc: AiFixError) -> str:
 	return str(exc).lower()
 
 
+@_private_ai_frames
 def _http_post(
 	url: str,
 	headers: dict,
@@ -1728,6 +1993,8 @@ def _http_post(
 	its posts gets only what is left. Every failure message is built after the
 	``try`` it comes from, so a failure while building it cannot chain the
 	requests exception."""
+	validate_base_url(url)
+	allow_http_key = _allow_key_over_http()
 	timeout = timeout or request_timeout_seconds()
 	budget = budget or timeout
 	deadline = time.monotonic() + timeout
@@ -1747,9 +2014,10 @@ def _http_post(
 		unexpected_frames: list[str] = []
 		connect_timeout = min(_CONNECT_TIMEOUT_CAP, remaining)
 		guard = _InterruptGuard(base=True)
+		withheld = auth is not None and key_over_http_blocked(target, allow=allow_http_key)
 		try:
 			with guard:
-				resp = requests.post(target, headers=headers, json=body, timeout=(connect_timeout, remaining), auth=auth, allow_redirects=False)
+				resp = requests.post(target, headers=headers, json=body, timeout=(connect_timeout, remaining), auth=None if withheld else auth, allow_redirects=False)
 		except requests.exceptions.ConnectTimeout as e:
 			error_name = type(e).__name__
 			detail = _error_types(e)
@@ -1783,6 +2051,7 @@ def _http_post(
 		# must still stop the job: the same type, raised fresh, with no
 		# requests / urllib3 frames and no chain.
 		if guard.pending():
+			url = target = body = resp = detail = None
 			raise guard.interrupt()
 		if failed_kind is not None:
 			failure = _request_failure(failed_kind, error_name, budget)
@@ -1819,8 +2088,17 @@ def _http_post(
 			hosted=_is_hosted_endpoint(url),
 		)
 		failure = AiFixError(
-			_with_reply(classified.message, classified.detail), status_code=status, kind=classified.kind,
+			classified.message, status_code=status, kind=classified.kind,
+			detail=((_shown_url(target, auth) + "\n") if status == 404 else "") + classified.detail,
 		)
+		if withheld and status in (401, 403):
+			from frappe import _
+
+			failure = AiFixError(_(
+				"The AI provider requires authentication, but Optimus withheld the API key because the "
+				"Base URL uses plain http:// to another machine. Use https:// or explicitly set "
+				"optimus_ai_allow_key_over_http in the site configuration if you trust this network."
+			), status_code=status, kind="auth")
 	if failure is not None:
 		provider_error = _provider_error_code(resp, auth)
 		# If the row below cannot be written, the caller logs this error: with
@@ -1941,7 +2219,10 @@ def _same_origin_redirect(current: str, resp) -> str | None:
 			location = resp.headers.get("location")
 			if not isinstance(location, str) or not location.strip():
 				return None
+			if _URL_CONTROL_RE.search(location.strip(" ")):
+				return None  # urljoin would silently discard some controls.
 			follow = urljoin(current, location.strip())
+			validate_base_url(follow)
 			old, new = urlsplit(current), urlsplit(follow)
 			if not old.hostname or new.hostname != old.hostname:
 				return None
@@ -2414,6 +2695,7 @@ def _check_context_fits(
 	raise AiFixError(_context_message(hosted=hosted, window=context_tokens), kind="context")
 
 
+@_private_ai_frames
 def _dispatch_call(
 	provider: dict,
 	system: str,
@@ -2434,7 +2716,7 @@ def _dispatch_call(
 	Fetch the API key locally, collect usage for SQL settlement, and attribute logs
 	only to the explicit session reference. The parameter memo and whole-call
 	budget are shared with a possible guardrail re-ask."""
-	api_key = _get_api_key(provider.get("needs_key", True))
+	api_key = _get_api_key(provider.get("needs_key", True), provider=provider)
 	if provider.get("needs_key") and not api_key:
 		from frappe import _
 
@@ -2659,7 +2941,7 @@ def _loop_facts_text(finding: dict, rows: list[dict] | None = None) -> str:
 
 
 def _build_fix_request(
-	finding: dict, *, threshold_ms: float, context_tokens: int, out_tokens: int | None = None
+	finding: dict, *, threshold_ms: float, context_tokens: int, out_tokens: int | None = None, send_raw: bool = False,
 ) -> tuple[str, list[dict], list[str]]:
 	"""Build ``(system, [user_message], shown_lines)`` for one finding. Pure.
 
@@ -2740,16 +3022,22 @@ def _build_fix_request(
 			f"Line profile: the hottest line is line {hot['lineno']}{timing}. Start your fix there."
 			+ ("\n" + block("hot-line", hot_content) if hot_content else ""),
 		))
-	if detail.get("normalized_query"):
-		tail.append((2, "Query (normalized):\n" + block("sql", _truncate(detail["normalized_query"], _MAX_QUERY_CHARS), "sql")))
+	query = ai_privacy.query_text(detail.get("normalized_query"), send_raw=send_raw)
+	if query:
+		tail.append((2, "Query (normalized):\n" + block("sql", _truncate(query, _MAX_QUERY_CHARS), "sql")))
 	advice = finding.get("index_advice")
 	if ftype == "Slow Query" and isinstance(advice, dict) and advice.get("text"):
 		tail.append((1, _INDEX_ADVICE_HEAD + "\n" + block("index-advice", ai_budget.clip(_index_advice_text(advice), 1600))))
 	if detail.get("explain_row"):
 		tail.append((4, "EXPLAIN row:\n" + block("explain", _truncate(detail["explain_row"], 800))))
 	examples = detail.get("example_queries") or []
-	if examples:
-		shown_q = [_truncate(q, _MAX_QUERY_CHARS) for q in examples[:2]]
+	shown_q = []
+	if isinstance(examples, list) and examples:
+		shown_q = [
+			_truncate(query, _MAX_QUERY_CHARS) for q in examples[:2]
+			if (query := ai_privacy.query_text(q, send_raw=send_raw))
+		]
+	if shown_q:
 		tail.append((5, "Example affected queries:\n" + block("sql", "\n---\n".join(shown_q), "sql")))
 	if detail.get("validation_note"):
 		tail.append((6, "Note:\n" + block("validation", str(detail["validation_note"]))))

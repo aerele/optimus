@@ -56,3 +56,16 @@ def test_retry_analyze_rechecks_parent_status_under_lock(journal):
 		assert not journal.mod.prepare_analyze_retry("fake-session-doc", "fake-session", requested_by="fake-owner", now=100)
 	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["status"] == "Ready"
 	assert journal.run["state"] == "queued"
+
+
+def test_retry_analyze_returns_exact_owned_captures_for_postcommit_stop(journal):
+	journal.db.rows["Optimus Session"]["fake-session-doc"].update(status="Failed", user="legacy-user")
+	journal.db.rows["Optimus Phase Two Run"] = {
+		"one": {"name": "one", "parent": "fake-session-doc", "run_uuid": "one-run", "status": "Recording", "recording_user": "capture-user"},
+		"two": {"name": "two", "parent": "fake-session-doc", "run_uuid": "two-run", "status": "Recording"},
+		"three": {"name": "three", "parent": "fake-session-doc", "run_uuid": "three-run", "status": "Analyzing"},
+	}
+	captures = []
+	with journal.db.transaction():
+		assert journal.mod.prepare_analyze_retry("fake-session-doc", "fake-session", requested_by="fake-owner", now=100, stopped_captures=captures)
+	assert captures == [("one-run", "capture-user"), ("two-run", "legacy-user")]

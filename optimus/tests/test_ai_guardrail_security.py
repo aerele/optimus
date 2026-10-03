@@ -12,7 +12,7 @@ from optimus import ai_fix, settings
 from optimus.tests.test_ai_fix import TestGuardedCompletion as _Replies
 from optimus.tests.test_ai_fix import _post_sequence
 
-pytestmark = pytest.mark.rq
+pytestmark = [pytest.mark.rq, pytest.mark.usefixtures("bound_provider_credentials")]
 
 
 @pytest.mark.parametrize("keyless", [False, True])
