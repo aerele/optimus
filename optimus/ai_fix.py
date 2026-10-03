@@ -1408,25 +1408,12 @@ def _log_http_error(
 	(for a transport error, its type and message, scrubbed; for an
 	unexpected error, its type and plain frames). Never the prompt, the
 	source code, the headers or the response body. The session reference
-	comes from the per-worker spend marker the caller set
-	(``analyze._mark_ai_spend_session``), the same one
-	``_record_session_spend`` reads. ``exc`` (the ``AiFixError`` about to be
+	comes only from the caller's explicit argument. ``exc`` (the ``AiFixError`` about to be
 	raised) is then marked logged, but only if the row was written, so the
 	caller's own ``log_ai_failure`` for it writes no second row and a failed
 	write still leaves the caller's. ``auth`` (the ``_ApiKeyAuth`` the request
 	was sent with) is what the row is scrubbed of, so logging it reads no key
 	from the database."""
-	guard = _InterruptGuard()
-	try:
-		with guard:
-			import frappe
-
-			if session_uuid is None:
-				session_uuid = getattr(frappe.local, "_optimus_spend_session", None)
-	except Exception:
-		pass
-	if guard.pending():
-		raise guard.interrupt()
 	context = {"provider": provider, "where": where, "status": status, "detail": detail}
 	if provider_error:
 		context["provider_error"] = provider_error
@@ -2011,10 +1998,7 @@ def _accept_usage(usage_out, usage, *, session_uuid):
 		usage_out.update(usage)
 		if isinstance(usage_out, Usage):
 			usage_out.observe(usage.complete)
-		# Explicit jobs commit their outcome and spend together in the journal.
-		# Keep ambient accounting only for callers not yet using that contract.
-		if session_uuid is None:
-			_record_session_spend(usage.get("total_tokens"))
+		# The worker commits usage together with its answer and outcome.
 
 
 def _usage_from_openai(data: dict | None) -> dict:
@@ -2043,25 +2027,6 @@ def _usage_from_anthropic(data: dict | None) -> dict:
 	return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
 
 
-def _record_session_spend(total_tokens) -> None:
-	"""Best-effort: add this call's tokens to the active session's cumulative
-	``Optimus Session.ai_tokens_spent``. The session uuid comes from
-	``frappe.local._optimus_spend_session`` (set by the caller before any AI
-	call); ``None`` (e.g. the settings probe) is a no-op."""
-	try:
-		import frappe
-
-		su = getattr(frappe.local, "_optimus_spend_session", None)
-		n = int(total_tokens or 0)
-		if su and n > 0:
-			frappe.db.sql(
-				"update `tabOptimus Session` "
-				"set ai_tokens_spent = coalesce(ai_tokens_spent, 0) + %s "
-				"where session_uuid = %s",
-				(n, su),
-			)
-	except Exception:
-		pass
 
 
 def _session_call_metadata(provider, *, session_uuid, docname, finding_type=None) -> dict | None:

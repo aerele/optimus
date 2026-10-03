@@ -79,7 +79,7 @@ class _FakeDB:
 		pass
 
 
-def test_refresh_backfill_skips_pre_fix_redundant_calls():
+def test_refresh_selection_skips_pre_fix_redundant_calls():
 	rows = [
 		SimpleNamespace(
 			name=name, finding_type=ftype, severity="High", title="t", customer_description="d",
@@ -92,16 +92,9 @@ def test_refresh_backfill_skips_pre_fix_redundant_calls():
 			("n1", "N+1 Query", "{}"),
 		)
 	]
-	doc = SimpleNamespace(findings=rows, session_uuid="u", name="PS-1")
-	fake = SimpleNamespace(db=_FakeDB(), log_error=lambda *a, **k: None)
-	cfg = SimpleNamespace(ai_auto_suggest_max=0, ai_excluded_finding_types=())
-	with patch("optimus.settings.get_config", return_value=cfg), \
-	     patch("optimus.ai_fix.is_available", return_value=True), \
-	     patch("optimus.ai_fix.suggest_fix", side_effect=lambda *a, **k: {"suggestion": "x", "model": "m"}), \
-	     patch.object(analyze, "frappe", fake):
-		out = analyze._run_ai_backfill(doc, cap=0)
-	assert sorted(fake.db.writes) == ["n1", "rc_new"]
-	assert out["total_pending"] == 2
+	cfg = SimpleNamespace(ai_excluded_finding_types=())
+	selected = analyze.eligible_findings(rows, cfg)
+	assert sorted(r.name for r in selected) == ["n1", "rc_new"]
 
 
 def test_only_redundant_call_findings_can_be_pre_fix():

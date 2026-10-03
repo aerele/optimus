@@ -73,6 +73,7 @@
   "ai_base_url",
   "column_break_ai",
   "ai_model",
+  "ai_context_tokens",
   "ai_api_key",
   "ai_sections_break",
   "ai_suggest_findings",
@@ -83,6 +84,7 @@
   "ai_auto_suggest",
   "column_break_ai_auto",
   "ai_auto_suggest_max",
+  "ai_refresh_max_findings",
   "ai_privacy_section",
   "ai_privacy_description",
   "ai_excluded_finding_types",
@@ -513,6 +515,13 @@
    "label": "Model"
   },
   {
+   "fieldname": "ai_context_tokens",
+   "fieldtype": "Int",
+   "label": "AI model context window (tokens)",
+   "default": "0",
+   "description": "0 uses the provider default. Set the model's supported context window so prompts and reserved output fit together."
+  },
+  {
    "depends_on": "eval:doc.ai_enabled",
    "description": "The provider's API key, if it needs one. Stored encrypted for this site. Most local endpoints (Ollama, LM Studio, vLLM) do not need a key; hosted ones (OpenAI, Anthropic, Kimi, DeepSeek, OpenRouter, Together, Groq) do.",
    "fieldname": "ai_api_key",
@@ -584,6 +593,13 @@
    "fieldtype": "Int",
    "label": "Max auto-suggested findings per session",
    "non_negative": 1
+  },
+  {
+   "fieldname": "ai_refresh_max_findings",
+   "fieldtype": "Int",
+   "label": "Maximum findings per AI refresh",
+   "default": "20",
+   "description": "Applies to manual refresh and Regenerate all. 0 means no item cap; the background run deadline still applies."
   },
   {
    "depends_on": "eval:doc.ai_enabled",

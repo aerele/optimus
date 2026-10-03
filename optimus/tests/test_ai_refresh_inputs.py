@@ -261,3 +261,25 @@ def test_bundle_read_logs_outside_except_and_never_swallows_rq(monkeypatch, inte
 def test_selection_handles_malformed_severity():
 	r = row("fake", severity=[])
 	assert analyze.eligible_findings([r], config()) == [r]
+
+
+
+@pytest.mark.parametrize("cap", [0, 1, 20])
+def test_confirmation_plan_uses_actual_worker_eligibility_and_manual_cap(monkeypatch, cap):
+	from optimus import ai_jobs
+	cfg = config("Slow Query")
+	cfg.ai_enabled = cfg.ai_suggest_findings = cfg.ai_humanize_steps = True
+	cfg.ai_refresh_max_findings = cap
+	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
+	monkeypatch.setattr(ai_jobs, "_now", lambda: 1780000000)
+	findings = [row("missing"), row("outdated", answer(prompt_version=0)), row("current", answer()),
+		row("recipe", finding_type="Missing Index"), row("excluded", finding_type="Slow Query")]
+	plan = ai_jobs.refresh_plan({"findings": findings, "actions": [{"recording_uuid": "fake"}]})
+	assert plan == {"pending": 2, "total": 3, "cap": cap, "selected": min(2, cap) if cap else 2,
+		"selected_all": min(3, cap) if cap else 3, "steps": True}
+
+
+def test_missing_worker_notice_names_the_queue_to_start(monkeypatch):
+	from optimus import ai_jobs
+	monkeypatch.setattr(ai_jobs, "ai_queue", lambda: "fake-ai-queue")
+	assert "fake-ai-queue" in ai_jobs.admission_message("no_worker")

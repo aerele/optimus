@@ -288,6 +288,22 @@ def _save_parent_bypassing_perms(parent) -> None:
 	safe_commit()
 
 
+def _lock_phase2_for_write(docname: str, *, allow_failed: bool = False) -> None:
+	"""Serialize Phase 2 admission with AI until the caller saves its run row."""
+	from optimus import ai_refresh_store
+
+	# End the permission/configuration snapshot before taking current locks.
+	safe_commit()
+	reason = ai_refresh_store.lock_phase2_parent(docname, allow_failed=allow_failed)
+	if reason:
+		frappe.db.rollback()
+		frappe.throw(
+			_("Wait for the AI refresh to finish or cancel it before starting Phase 2.")
+			if reason == "ai_refresh" else _("The session is no longer ready for Phase 2."),
+			frappe.ValidationError,
+		)
+
+
 @frappe.whitelist(methods=["POST"])
 def start(
 	label: str = "",
@@ -1160,13 +1176,10 @@ def retry_analyze(session_uuid: str) -> dict:
 	ref = _session_action_gate(session_uuid, action="retry_analyze", statuses=("Failed",))
 	ratelimit.enforce_user_rate_limit("retry_analyze", **_ACTION_LIMITS["retry_analyze"])
 
-	# Reset to Stopping so the analyze pipeline runs through its usual state transitions.
-	frappe.db.set_value(
-		"Optimus Session",
-		ref.docname,
-		{"status": "Stopping", "analyzer_warnings": None},
-	)
-	safe_commit()
+	from optimus import ai_jobs
+	if not ai_jobs.prepare_analyze_retry(ref.docname, ref.session_uuid, requested_by=ref.user):
+		frappe.throw(_("The session changed before Retry Analyze. Reload it and try again."),
+			frappe.ValidationError, title=_("Optimus"))
 
 	# Clear the cached PDF so the next download regenerates from the fresh HTML.
 	try:
@@ -1199,84 +1212,25 @@ def retry_analyze(session_uuid: str) -> dict:
 
 
 def _render_session_report(docname: str) -> dict:
-	"""Re-render the session's HTML report from stored data and re-attach it.
+	"""Render saved answers and atomically replace the report; caller authorizes access.
 
-	Not whitelisted and ungated: every caller must already have passed ``_session_action_gate``
-	(or run as trusted server code). Other Optimus modules may call it; the leading underscore
-	means "not an HTTP endpoint". Rendering uses saved AI answers and never
-	calls the provider or loads recording trees.
-
-	Recordings are best-effort: if they expired from Redis (and no bundle is attached) the
-	per-query drill-down renders empty and every persisted section stays intact. Clears the cached
-	PDF. Returns ``{"regenerated": True, "recordings_available": int, "actions_total": int}``; a
-	render failure raises. Failures are logged after their ``try`` block, never inside the
-	``except`` (a log call inside an ``except`` lets Sentry attach the active frame's locals).
+	No provider call is made. A failed or stale replacement keeps the previous
+	report and PDF reference. RQ timeouts still terminate the worker.
 	"""
-	from optimus import ai_fix
 	from optimus import analyze as _analyze_mod
+	from optimus.report_refresh import render_report
 
-	doc = frappe.get_doc("Optimus Session", docname)
-	recordings, step_failed = _analyze_mod._run_ai_step(
-		lambda: _analyze_mod.load_recordings_light(doc),
-		title="optimus regenerate_reports fetch", session_uuid=doc.session_uuid,
+	out, failed = _analyze_mod._run_ai_step(
+		lambda: render_report(docname), title="optimus regenerate report", docname=docname,
 	)
-	if step_failed:
-		recordings = []
-
-	interrupt = None
-
-	try:
-		from optimus import pdf_export
-
-		pdf_export.clear_cached_pdf(doc.session_uuid)
-	except ai_fix._job_timeout_types() as e:
-		interrupt = (type(e), e.args)
-	except Exception:
-		pass
-	if interrupt is not None:
-		raise interrupt[0](*interrupt[1])
-
-	_analyze_mod._render_and_attach_reports(docname, recordings)
-	return {
-		"regenerated": True,
-		"recordings_available": len(recordings),
-		"actions_total": len(doc.actions or []),
-	}
+	if failed:
+		frappe.throw(
+			_("Report regeneration failed or the session changed. The previous report was kept. Try again."),
+			frappe.ValidationError, title=_("Optimus"),
+		)
+	return out
 
 
-def _rerender_after_ai(ref: SessionRef) -> bool:
-	"""Re-render after an AI endpoint persisted (and committed) its results.
-
-	A render failure must not turn saved, already-billed work into an error response: it is rolled
-	back, logged through the AI log chokepoint (after the ``try``, not inside the ``except``) and
-	reported as ``regenerated: False`` (the user can click Regenerate Reports). Never calls the
-	whitelisted ``regenerate_reports``, so no second gate or rate limit runs after the LLM spend.
-	RQ job timeouts still escape as fresh instances and stop the worker job.
-	"""
-	from optimus import ai_fix
-	from optimus import analyze as _analyze_mod
-
-	def _render():
-		try:
-			return _render_session_report(ref.docname)
-		except ai_fix._job_timeout_types():
-			raise
-		except Exception:
-			# Undo the failed render before the helper writes its Error Log row.
-			guard = ai_fix._InterruptGuard()
-			try:
-				with guard:
-					frappe.db.rollback()
-			except Exception:
-				pass
-			if guard.pending():
-				raise guard.interrupt()
-			raise
-
-	out, step_failed = _analyze_mod._run_ai_step(
-		_render, title="optimus AI re-render", session_uuid=ref.session_uuid,
-	)
-	return not step_failed and bool(out.get("regenerated"))
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1298,6 +1252,9 @@ def regenerate_reports(session_uuid: str) -> dict:
 		statuses=("Ready", "Failed"),
 		status_hint=_("regenerate_reports requires the session to be in a terminal state (Ready or Failed); this one is '{0}'. Wait for analyze to finish, or use retry_analyze to restart a stuck pipeline."),
 	)
+	from optimus import ai_jobs
+	if ai_jobs.active_refresh(ref.docname):
+		frappe.throw(_("Wait for the AI refresh to finish or cancel it before regenerating reports."), frappe.ValidationError)
 	ratelimit.enforce_user_rate_limit("regenerate_reports", **_ACTION_LIMITS["regenerate_reports"])
 	out = _render_session_report(ref.docname)
 	return {
@@ -1322,11 +1279,6 @@ def test_ai_connection() -> dict:
 			title=_("Optimus"),
 		)
 	ratelimit.enforce_user_rate_limit("test_ai_connection", **_AI_LIMITS["test_ai_connection"])
-	# The settings probe isn't billable to any session: clear the spend marker so its tokens
-	# don't land on whatever session this worker last served.
-	from optimus import analyze as _analyze_mod
-
-	_analyze_mod._mark_ai_spend_session(None)
 	from optimus import ai_fix
 
 	return ai_fix.test_connection()
@@ -1356,113 +1308,101 @@ def ai_capabilities() -> dict:
 
 
 
-def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
-	"""Validation-free rewrite of the session's "Steps to Reproduce" via the
-	configured LLM. Caller is responsible for the permission / status / AI-
-	available / toggle gates and for the final re-render. Returns
-	``{"updated": bool, "reason": str|None}`` so the composite endpoint can
-	report per-step outcomes without raising.
-	"""
-	from optimus import ai_fix
-	from optimus import analyze as _analyze_mod
-
-	_analyze_mod._mark_ai_spend_session(getattr(doc, "session_uuid", None))
-
-	recordings, step_failed = _analyze_mod._run_ai_step(
-		lambda: _analyze_mod.load_recordings_light(doc),
-		title="optimus humanize_steps fetch", session_uuid=getattr(doc, "session_uuid", None),
-	)
-	if step_failed:
-		recordings = []
-
-	actions = _analyze_mod._actions_for_humanizer(recordings)
-	if not actions:
-		return {
-			"updated": False,
-			"reason": (
-				"This session has no user actions to summarise it was all "
-				"background / polling traffic (or the recordings have expired)."
-			),
-		}
-	_steps_usage: dict = {}
-	try:
-		steps_md = ai_fix.humanize_steps(actions, session_title=title, usage_out=_steps_usage)
-	except ai_fix.AiFixError as e:
-		return {"updated": False, "reason": str(e)}
-
-	frappe.db.set_value(
-		"Optimus Session", doc.name, {
-			"notes": _analyze_mod._assemble_humanized_notes(steps_md),
-			# Tokens for this Steps-to-Reproduce humanization. The report's
-			# session total rolls it in alongside finding fix suggestions
-			# (notes is markdown, so the count needs its own field).
-			"ai_steps_tokens": int(_steps_usage.get("total_tokens") or 0),
-		},
-	)
-	safe_commit()
-	return {"updated": True, "reason": None}
 
 
 
 
 
+
+
+def _refresh_flag(value) -> bool:
+	if type(value) is bool:
+		return value
+	if type(value) is int and value in (0, 1):
+		return bool(value)
+	if isinstance(value, str) and value.lower() in {"0", "1", "true", "false"}:
+		return value.lower() in {"1", "true"}
+	frappe.throw(_("Refresh options must be true or false."), frappe.ValidationError)
 
 
 @frappe.whitelist(methods=["POST"])
-def refill_ai_suggestions(session_uuid: str) -> dict:
-	"""Single-button entry point: re-fills every AI-generated report section in one round-trip:
-	(1) overwrite every eligible finding's fix suggestion, (2) rewrite Steps to Reproduce,
-	(3) one final re-render.
+def refill_ai_suggestions(
+	session_uuid: str, regenerate_all: bool | str | int = False,
+	resume_from: str | None = None, retry_uncertain: bool | str | int = False,
+) -> dict:
+	"""Admit optional AI work. The response describes a queued run, not completed answers.
 
-	Each step is gated by its per-section toggle; a toggle-off step is skipped, not errored.
-	``_ai_session_gate`` runs once at the top (permission, Ready status, AI configured, per-user
-	limit).
+	The existing route and session argument remain supported. By default only
+	missing/outdated fixes are selected; replacing current answers is explicit.
+	An existing reservation attaches without depending on Redis availability.
 	"""
-	ref = _ai_session_gate(session_uuid, section=None, action="refill_ai_suggestions")
-
-	from optimus import analyze as _analyze_mod
+	ref = _session_action_gate(session_uuid, action="refill_ai_suggestions")
+	from optimus import ai_jobs, analyze
 	from optimus.settings import get_config
 
+	regenerate_all, retry_uncertain = _refresh_flag(regenerate_all), _refresh_flag(retry_uncertain)
+	if resume_from is not None and (not isinstance(resume_from, str) or not resume_from or len(resume_from) > 140):
+		frappe.throw(_("Invalid refresh run."), frappe.ValidationError)
+	current = ai_jobs.active_refresh(ref.docname)
+	if current:
+		return {"ok": True, "status": "already_running", "session_uuid": ref.session_uuid, "refresh": current}
+	ratelimit.enforce_user_rate_limit("refill_ai_suggestions", **_AI_LIMITS["refill_ai_suggestions"])
 	cfg = get_config()
-	doc = frappe.get_doc("Optimus Session", ref.docname)
 
-	# Count this refresh (cumulative; only ever increases). Portable read-modify-write off
-	# the already-loaded doc; update_modified=False so the counter bump doesn't touch `modified`.
-	# Refresh is user-initiated and rate-limited, so the non-atomic increment is acceptable
-	# (PR-2 makes it atomic).
-	frappe.db.set_value(
-		"Optimus Session", doc.name, "ai_refresh_count",
-		(getattr(doc, "ai_refresh_count", 0) or 0) + 1,
-		update_modified=False,
-	)
+	def start_refresh():
+		try:
+			return ai_jobs.start_refresh(
+				docname=ref.docname, session_uuid=ref.session_uuid, requested_by=frappe.session.user,
+				regenerate_all=regenerate_all, cap=cfg.ai_refresh_max_findings,
+				include_fixes=bool(cfg.ai_suggest_findings), include_steps=bool(cfg.ai_humanize_steps),
+				resume_from=resume_from, retry_uncertain=retry_uncertain,
+			)
+		except ai_jobs.StopRefresh as exc:
+			return {"status": "refused", "reason": exc.reason}
 
-	fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None}
-	if cfg.ai_suggest_findings:
-		counts = _analyze_mod._run_ai_backfill(doc, cap=0, regenerate_all=True)
-		fixes = {
-			"added": counts.get("added", 0),
-			"failed": counts.get("failed", 0),
-			"skipped_time": counts.get("skipped_time", 0),
-			"skipped": None,
-		}
-	else:
-		fixes["skipped"] = "toggle_off"
+	out, failed = analyze._run_ai_step(start_refresh, title="optimus AI refresh admission", session_uuid=ref.session_uuid)
+	if failed:
+		out = {"status": "refused", "reason": "internal"}
+	out.update(ok=out["status"] in {"queued", "already_running"}, session_uuid=ref.session_uuid)
+	if out["status"] == "refused":
+		out["message"] = ai_jobs.admission_message(out.get("reason"))
+	return out
 
-	steps = {"updated": False, "reason": None}
-	if cfg.ai_humanize_steps:
-		# Re-fetch the doc: the backfill above may have mutated rows.
-		doc = frappe.get_doc("Optimus Session", ref.docname)
-		steps = _humanize_steps_core(doc, title=ref.title or None)
-	else:
-		steps["reason"] = "toggle_off"
 
-	return {
-		"ok": True,
-		"session_uuid": ref.session_uuid,
-		"fixes": fixes,
-		"steps": steps,
-		"regenerated": _rerender_after_ai(ref),
-	}
+@frappe.whitelist()
+def ai_refresh_status(session_uuid: str) -> dict:
+	"""Read SQL progress even during a queue outage. No per-user polling limit."""
+	user = _require_profiler_user()
+	docname = _require_session_permission(session_uuid)
+	from optimus import ai_jobs, analyze
+
+	def status_view():
+		refresh = ai_jobs.refresh_state(docname)
+		doc = frappe.get_doc("Optimus Session", docname)
+		can_write = frappe.has_permission("Optimus Session", "write", docname, user=user)
+		can_act = may_act_on_session(
+			user=user, owner=doc.owner or "", can_read=True,
+			can_write=bool(can_write),
+		)
+		busy = bool(refresh and refresh["state"] in {"queued", "running", "unknown"})
+		plan = ai_jobs.refresh_plan(doc) if can_act and not busy and doc.status == "Ready" else None
+		return {"status": "ok", "refresh": refresh, "can_act": can_act, "plan": plan}
+
+	out, failed = analyze._run_ai_step(status_view, title="optimus AI refresh status", session_uuid=session_uuid)
+	return {"status": "unknown", "refresh": None, "can_act": False, "plan": None} if failed else out
+
+
+@frappe.whitelist(methods=["POST"])
+def cancel_ai_refresh(session_uuid: str, run_id: str) -> dict:
+	"""Cancel only the specified run of an authorized parent, without Redis."""
+	ref = _session_action_gate(session_uuid, action="cancel_ai_refresh", statuses=())
+	from optimus import ai_jobs
+	from optimus import ai_refresh_store as store
+
+	if (not isinstance(run_id, str) or not run_id or len(run_id) > 140
+		or frappe.db.get_value(store.RUN, {"name": run_id, "session_name": ref.docname}, "name") != run_id):
+		frappe.throw(_("No matching AI refresh was found for this session."), frappe.ValidationError)
+	return {"status": "ok", "refresh": ai_jobs.cancel_refresh(run_id, requested_by=frappe.session.user)}
 
 
 @frappe.whitelist()
@@ -1783,6 +1723,13 @@ def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: b
 
 	run_uuid = _uuid.uuid4().hex
 
+	_lock_phase2_for_write(parent_docname)
+	from optimus.settings import get_config
+	parent = frappe.get_doc("Optimus Session", parent_docname)
+	cap = get_config().phase2_max_runs_per_session
+	if cap > 0 and len(parent.phase_2_runs or []) >= cap:
+		frappe.throw(_("The Phase 2 run limit for this session has been reached."),
+			frappe.ValidationError, title=_("Optimus"))
 	# Resolve picks + persist Redis state. Raises CaptureError if no pick
 	# is eligible.
 	try:
@@ -1910,124 +1857,44 @@ def force_stop_phase2() -> dict:
 
 @frappe.whitelist(methods=["POST"])
 def stop_line_profile_pass(run_uuid: str) -> dict:
-	"""End a phase-2 run, mark it Analyzing, enqueue the analyzer. Gated by ``_phase2_run_gate``:
-	the caller must be allowed to act on the run's parent session and the run must be Recording."""
-	from optimus.line_profile import capture as _lp_capture
-
+	"""Stop capture and queue durable Phase 2 analysis; never compute inline."""
 	ref, _run = _phase2_run_gate(run_uuid, action="stop_line_profile_pass", run_statuses=("Recording",))
 	ratelimit.enforce_user_rate_limit("stop_line_profile_pass", **_ACTION_LIMITS["stop_line_profile_pass"])
-	user = frappe.session.user
-	session_uuid = ref.session_uuid
-	parent_docname = ref.docname
+	from optimus.line_profile import capture as _lp_capture
+	from optimus.line_profile import jobs as _lp_jobs
 
-	# Clear the active flag (capture won't instrument further requests).
-	_lp_capture.stop_line_profile_pass(run_uuid, user)
-
-	# Mark run Analyzing.
-	parent = frappe.get_doc("Optimus Session", parent_docname)
-	for child in (parent.phase_2_runs or []):
-		if child.run_uuid == run_uuid:
-			child.status = "Analyzing"
-			child.ended_at = now_datetime()
-			break
-	_save_parent_bypassing_perms(parent)
-
-	frappe.publish_realtime("phase_2_run_analyzing", {
-		"session_uuid": session_uuid,
-		"run_uuid": run_uuid,
-	}, user=user)
-
-	# When the scheduler is disabled (e.g. dev sites without
-	# `bench start`), no RQ worker will pick up the long-queue job and
-	# the run gets stuck in Analyzing. Mirror api.stop's inline fallback:
-	# run the analyzer in-process so the request completes with results.
-	from frappe.utils.scheduler import is_scheduler_disabled
-
-	run_inline = False
-	try:
-		run_inline = bool(is_scheduler_disabled())
-	except Exception:
-		frappe.log_error(title="optimus phase-2 scheduler check")
-
-	if run_inline:
-		frappe.logger().warning(
-			f"optimus: scheduler disabled; running phase-2 "
-			f"analyze inline for run {run_uuid}. Caller will block."
-		)
-		from optimus.line_profile import analyzer as _lp_analyzer
-
-		try:
-			_lp_analyzer.run_analyze(session_uuid, run_uuid)
-		except Exception as exc:
-			# run_analyze marks the run Failed itself; surface the error
-			# in the API response so the caller isn't silently puzzled.
-			return {
-				"run_uuid": run_uuid,
-				"session_uuid": session_uuid,
-				"status": "Failed",
-				"error": str(exc),
-				"ran_inline": True,
-			}
-		return {
-			"run_uuid": run_uuid,
-			"session_uuid": session_uuid,
-			"status": "Ready",
-			"ran_inline": True,
-		}
-
-	# Otherwise enqueue normally.
-	frappe.enqueue(
-		"optimus.line_profile.analyzer.run_analyze",
-		queue="long",
-		timeout=25 * 60,
-		session_uuid=session_uuid,
-		run_uuid=run_uuid,
-	)
-
-	return {
-		"run_uuid": run_uuid,
-		"session_uuid": session_uuid,
-		"status": "Analyzing",
-	}
+	_lp_capture.stop_line_profile_pass(run_uuid, ref.user)
+	return _phase2_admission_result(_lp_jobs.request(
+		ref.docname, ref.session_uuid, run_uuid, ref.user, from_recording=True,
+	))
 
 
 @frappe.whitelist(methods=["POST"])
 def retry_phase2_analyze(run_uuid: str) -> dict:
-	"""Re-trigger run_analyze for a Phase 2 Run row stuck in Analyzing or Failed. Useful when the
-	original RQ enqueue never landed (no worker) or the analyzer crashed.
+	"""Queue a bounded retry, or attach to its current live analysis generation.
 
-	Resets the row to Analyzing, then runs inline so the response carries the final status (Ready
-	or Failed). Gated by ``_phase2_run_gate`` on the run's parent session.
+	Permissions and the per-user limit precede admission. Analyzing means
+	queued or running; completion arrives through the saved row/realtime event.
 	"""
-	from optimus.line_profile import analyzer as _lp_analyzer
-
-	ref, _run = _phase2_run_gate(run_uuid, action="retry_phase2_analyze")
+	ref, _run = _phase2_run_gate(run_uuid, action="retry_phase2_analyze", run_statuses=("Analyzing", "Failed"))
 	ratelimit.enforce_user_rate_limit("retry_phase2_analyze", **_ACTION_LIMITS["retry_phase2_analyze"])
-	session_uuid = ref.session_uuid
-	parent_docname = ref.docname
+	from optimus.line_profile import jobs as _lp_jobs
 
-	# Reset to Analyzing so the realtime event flow still makes sense.
-	parent = frappe.get_doc("Optimus Session", parent_docname)
-	for child in (parent.phase_2_runs or []):
-		if child.run_uuid == run_uuid:
-			child.status = "Analyzing"
-			break
-	_save_parent_bypassing_perms(parent)
+	return _phase2_admission_result(_lp_jobs.request(ref.docname, ref.session_uuid, run_uuid, ref.user))
 
-	try:
-		_lp_analyzer.run_analyze(session_uuid, run_uuid)
-	except Exception as exc:
-		return {
-			"run_uuid": run_uuid,
-			"session_uuid": session_uuid,
-			"status": "Failed",
-			"error": str(exc),
+
+def _phase2_admission_result(out: dict) -> dict:
+	if out["status"] == "Refused":
+		messages = {
+			"ai_refresh": _("Wait for the AI refresh to finish or cancel it before retrying Phase 2."),
+			"not_ready": _("Phase 2 requires a Ready session. Wait for profiling analysis to finish."),
+			"not_retryable": _("This Phase 2 run is no longer retryable. Reload the session."),
+			"retry_limit": _("Phase 2 retry limit reached. Record a new line-profile pass."),
+			"permission": _("Session permissions changed. Reload the session before retrying."),
 		}
-	return {
-		"run_uuid": run_uuid,
-		"session_uuid": session_uuid,
-		"status": "Ready",
-	}
+		frappe.throw(messages.get(out.get("reason"), _("The Phase 2 run is unavailable. Reload the session.")),
+			frappe.ValidationError, title=_("Optimus"))
+	return out
 
 
 @frappe.whitelist(methods=["POST"])

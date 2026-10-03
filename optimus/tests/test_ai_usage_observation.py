@@ -27,7 +27,8 @@ def provider(monkeypatch):
 	monkeypatch.setattr(ai_fix, "_resolve_display_threshold_ms", lambda: 1000)
 	monkeypatch.setattr(ai_fix, "is_finding_type_excluded", lambda *a: False)
 	spend = []
-	monkeypatch.setattr(ai_fix, "_record_session_spend", spend.append)
+	import frappe
+	monkeypatch.setattr(frappe, "db", SimpleNamespace(sql=lambda *a, **kw: spend.append(True)))
 
 	def install(usage, *, content="answer", protocol="openai"):
 		body = (
@@ -89,11 +90,11 @@ def test_anthropic_usage_accounts_for_cache_components(provider, raw, known, tot
 	assert provider.spend == []
 
 
-def test_legacy_caller_still_records_ambient_spend(provider):
+def test_unattributed_call_collects_usage_without_ambient_spending(provider):
 	provider.install({"total_tokens": 7})
 	usage = ai_fix.Usage()
 	ai_fix._call_openai_chat("https://fake.invalid/v1", "", "fake", "system", [], usage_out=usage)
-	assert provider.spend == [7]
+	assert usage["total_tokens"] == 7 and provider.spend == []
 
 
 def test_known_zero_survives_public_result(provider):

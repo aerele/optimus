@@ -10,6 +10,7 @@ lock spanning the request. Result, usage and outcome share one SQL transaction.
 """
 
 import hashlib
+import html
 import json
 import re
 import time
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import frappe
+from frappe import _
 
 from optimus import ai_fix, safe_commit
 from optimus import ai_refresh_store as store
@@ -357,7 +359,7 @@ def _settle(operation):
 	cases safe. This function never invokes the provider again.
 	"""
 	failure = None
-	for _ in range(2):
+	for _attempt in range(2):
 		guard = ai_fix._InterruptGuard(base=True)
 		succeeded = False
 		try:
@@ -380,7 +382,42 @@ def _settle(operation):
 
 
 def _end(run_id, worker_token, reason):
+	# Completed answers are already committed. Rendering must neither hold a
+	# provider transaction nor turn a failed attachment into a repeated call.
+	if reason in {"complete", "uncertain", "breaker"}:
+		failure = None
+		guard = ai_fix._InterruptGuard(base=True)
+		try:
+			with guard:
+				_render_pending(run_id, worker_token)
+		except StopRefresh as exc:
+			reason = exc.reason
+		except Exception as exc:
+			failure = exc
+		if guard.pending():
+			failure = None
+			raise guard.interrupt()
+		if failure is not None:
+			ai_fix.log_ai_failure("optimus AI refresh report", failure)
+			failure = None
+			_transaction(lambda: None)
+			reason = "render_failed"
 	return _retry_sql(lambda: store.finish(run_id, worker_token=worker_token, now=_now(), reason=reason))
+
+
+def _render_pending(run_id, worker_token):
+	from optimus.report_refresh import render_report
+
+	run = _read_run(run_id)
+	if not run or not store._owns(run, worker_token, _now()):
+		return
+	if run["deadline"] <= _now():
+		raise StopRefresh("deadline")
+	_check_run(run)
+	# A previous cancelled/failed run may have saved answers without a report.
+	# This also repairs that report when the new selection makes no AI calls.
+	if frappe.db.get_value(store.RUN, {"session_name": run["session_name"], "render_pending": 1}, "name"):
+		render_report(run["session_name"], run_id=run_id, worker_token=worker_token)
 
 
 def _yield(run_id, worker_token):
@@ -743,7 +780,10 @@ def start_refresh(
 	"""
 	if any(not isinstance(v, str) or not v or len(v) > 140 for v in (docname, session_uuid, requested_by)):
 		raise ValueError("Invalid AI refresh identity")
-	_check_run({"session_name": docname, "session_uuid": session_uuid, "requested_by": requested_by})
+	try:
+		_check_run({"session_name": docname, "session_uuid": session_uuid, "requested_by": requested_by})
+	except StopRefresh as exc:
+		return {"status": "refused", "reason": exc.reason}
 	# Attaching only reads progress. Redis or a disabled provider must not hide
 	# an existing run; admission below still serializes any competing new run.
 	current = frappe.db.get_value(store.RUN, {"active_session": docname}, "*", as_dict=True)
@@ -825,10 +865,71 @@ def refresh_state(docname):
 	return public_state(run) if run else None
 
 
+def active_refresh(docname):
+	run = frappe.db.get_value(store.RUN, {"active_session": docname}, "*", as_dict=True)
+	return public_state(run) if run else None
+
+
+def refresh_plan(doc):
+	"""Count the same eligible rows the worker selects, without source or file I/O."""
+	from optimus import analyze
+	from optimus.settings import get_config
+
+	cfg = get_config()
+	fixes = bool(cfg.ai_enabled and cfg.ai_suggest_findings)
+	cutoff = datetime.fromtimestamp(_now(), timezone.utc)
+	rows = doc.get("findings") or []
+	pending = len(analyze.eligible_findings(rows, cfg, requested_at=cutoff)) if fixes else 0
+	total = len(analyze.eligible_findings(rows, cfg, regenerate_all=True, requested_at=cutoff)) if fixes else 0
+	cap = cfg.ai_refresh_max_findings
+	return {
+		"pending": pending, "total": total, "cap": cap,
+		"selected": min(pending, cap) if cap else pending,
+		"selected_all": min(total, cap) if cap else total,
+		"steps": bool(cfg.ai_enabled and cfg.ai_humanize_steps and doc.get("actions")),
+	}
+
+
+def admission_message(reason):
+	"""Fixed translated explanations, never provider text or exception detail."""
+	if reason == "no_worker":
+		return _("No background worker is listening on the AI queue {0}.").format(ai_queue())
+	return {
+		"queue_unavailable": _("The background queue is unavailable. Try again after it recovers."),
+		"phase2": _("Wait for the active Phase 2 run to finish."),
+		"disabled": _("AI suggestions are disabled or the provider is not configured."),
+		"not_ready": _("The session must be Ready before AI suggestions can run."),
+		"permission": _("The requesting user can no longer update this session."),
+		"site_cap": _("The site already has the maximum number of active AI refreshes."),
+		"user_cap": _("You already have the maximum number of active AI refreshes."),
+		"retry_limit": _("This refresh has reached its resume limit. Start a new refresh to try again."),
+		"already_resumed": _("This run has already been resumed. Reload its current progress."),
+		"not_resumable": _("This run cannot be resumed."),
+	}.get(reason, _("AI enrichment could not start. See the Error Log for details."))
+
+
+def record_admission_notice(docname, *, reason):
+	"""Record an automatic refusal on the already committed session timeline."""
+	message = _("AI enrichment was not started: {0}").format(admission_message(reason))
+	_transaction(lambda: frappe.get_doc({
+		"doctype": "Comment", "comment_type": "Info",
+		"reference_doctype": "Optimus Session", "reference_name": docname,
+		"content": html.escape(message),
+	}).insert(ignore_permissions=True))
+
+
 def cancel_refresh(run_id, *, requested_by):
 	"""Caller authorizes the run's parent. SQL cancellation works without Redis."""
 	run = _retry_sql(lambda: store.cancel(run_id, now=_now(), cancelled_by=requested_by))
 	return public_state(run) if run else None
+
+
+def prepare_analyze_retry(docname, session_uuid, *, requested_by):
+	"""Called after the action gate; a stale refresh cannot write into a retry."""
+	_transaction(lambda: None)
+	return _retry_sql(lambda: store.prepare_analyze_retry(
+		docname, session_uuid, requested_by=requested_by, now=_now(),
+	))
 
 
 def public_state(run):

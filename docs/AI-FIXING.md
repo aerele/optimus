@@ -273,8 +273,12 @@ Regenerate Reports renders stored data and saved AI suggestions without
 calling the provider. Refresh AI suggestions remains the action for new AI
 answers. Both report regeneration and step humanization can load the saved
 recording JSON without deserializing its Python trees or sidecars. This
-release supplies helpers for the upcoming background engine; it does not yet
-move optional AI work out of analysis or make refresh asynchronous.
+feature queues optional AI only after the profiling result is saved. Manual
+refresh is asynchronous, selects missing and outdated suggestions by default,
+and shows its capped selection before admission. A listening worker and an
+enabled scheduler are required for execution and recovery. See
+[background refresh operations](AI-REFRESH.md) for deployment, cancellation,
+uncertain usage, resume limits, report recovery and API response changes.
 
 ### 6.5 Troubleshooting
 

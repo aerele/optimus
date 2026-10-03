@@ -55,6 +55,7 @@ def arm_env(monkeypatch):
 			"recommended": True}],
 		start_calls=[],
 		published=[],
+		lock_calls=[],
 	)
 	monkeypatch.setattr(frappe, "conf",
 		types.SimpleNamespace(get=lambda k, d=None: state.conf.get(k, d)), raising=False)
@@ -68,6 +69,9 @@ def arm_env(monkeypatch):
 		lambda: types.SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None),
 		raising=False)
 	monkeypatch.setattr(analyze, "safe_commit", lambda: None, raising=False)
+	from optimus import api
+	monkeypatch.setattr(api, "_lock_phase2_for_write", lambda docname: state.lock_calls.append(docname))
+	monkeypatch.setattr(frappe, "db", types.SimpleNamespace(rollback=lambda: None))
 
 	# get_config → phase2_max_runs_per_session cap.
 	import optimus.settings as settings_mod
@@ -81,6 +85,7 @@ def arm_env(monkeypatch):
 	import optimus.line_profile.picker as picker_real
 
 	def _start(session_uuid, run_uuid, user, picks):
+		assert state.lock_calls == ["PS-1"], "auto-arm must reserve against concurrent AI first"
 		state.start_calls.append({"picks": picks, "user": user})
 		# Echo picks back as eligible (the resolved-meta shape).
 		return [{"dotted_path": p["dotted_path"], "source": p.get("source", "curated"),
@@ -94,6 +99,15 @@ def arm_env(monkeypatch):
 	monkeypatch.setattr(futils, "now_datetime", lambda: "2026-05-21 09:00:00", raising=False)
 
 	return state
+
+
+def test_auto_arm_does_not_capture_over_a_concurrent_ai_refresh(arm_env, monkeypatch):
+	from optimus import api
+	def refused(*a):
+		raise RuntimeError("fake active AI refresh")
+	monkeypatch.setattr(api, "_lock_phase2_for_write", refused)
+	analyze._auto_arm_phase2("PS-1", _ctx())
+	assert not arm_env.start_calls and not arm_env.doc.saved
 
 
 def _ctx():
@@ -191,3 +205,14 @@ def test_run_calls_auto_arm_after_ready():
 	# Must be after the Ready status write.
 	ready_idx = src.find('"status", "Ready"')
 	assert ready_idx != -1 and src.find("_auto_arm_phase2", ready_idx) != -1
+
+
+def test_auto_arm_rechecks_run_cap_after_taking_the_admission_lock(arm_env, monkeypatch):
+	from optimus import api, settings
+	monkeypatch.setattr(settings, "get_config", lambda: types.SimpleNamespace(phase2_max_runs_per_session=1))
+	def locked(*a):
+		arm_env.lock_calls.append("PS-1")
+		arm_env.doc._tables["phase_2_runs"] = [{"run_uuid": "concurrent-pass"}]
+	monkeypatch.setattr(api, "_lock_phase2_for_write", locked)
+	analyze._auto_arm_phase2("PS-1", _ctx())
+	assert not arm_env.start_calls and not arm_env.doc.saved

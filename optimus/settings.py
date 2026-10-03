@@ -125,6 +125,7 @@ _DEFAULTS = {
 	# ai_auto_suggest_max eligible findings (0 = all).
 	"ai_auto_suggest": True,
 	"ai_auto_suggest_max": 5,
+	"ai_refresh_max_findings": 20,
 	# When True (and ai_enabled), the analyze pipeline rewrites the
 	# auto-generated "Steps to Reproduce" note into a friendly, human-
 	# readable flow via the LLM (falls back to the raw action list on any
@@ -364,6 +365,7 @@ class OptimusConfig:
 	ai_model: str = ""
 	ai_auto_suggest: bool = True
 	ai_auto_suggest_max: int = 5
+	ai_refresh_max_findings: int = 20
 	ai_humanize_steps: bool = True
 	# v0.6.x: per-section "use the LLM for X" toggles. Default on; turning one off is a hard disable.
 	ai_suggest_findings: bool = True
@@ -412,23 +414,29 @@ def _opt_float(value) -> float | None:
 		return None
 
 
-def _read_doctype_row() -> dict | None:
-	"""Load the Single doc's field dict, or None if the DocType doesn't exist yet
-	(fresh install / pre-migration), so callers degrade cleanly to defaults.
-	"""
-	import frappe
-	try:
-		# Short-circuit: if the DocType row doesn't exist, fall back
-		# to defaults instead of raising from inside get_single_value.
-		if not frappe.db.exists("DocType", "Optimus Settings"):
-			return None
-	except Exception:
-		# frappe.db unavailable (e.g. schema still loading) defaults.
-		return None
+def _best_effort(call, default=None):
+	"""Keep ordinary Settings fallbacks without consuming a worker interrupt."""
+	from optimus.ai_fix import _InterruptGuard
 
+	guard = _InterruptGuard(base=True)
 	try:
-		doc = frappe.get_cached_doc("Optimus Settings")
+		with guard:
+			return call()
 	except Exception:
+		return default
+	if guard.pending():
+		call = None
+		raise guard.interrupt()
+
+
+def _read_doctype_row() -> dict | None:
+	"""Read the Single, using defaults before schema installation or on ordinary failure."""
+	import frappe
+
+	if not _best_effort(lambda: frappe.db.exists("DocType", "Optimus Settings"), False):
+		return None
+	doc = _best_effort(lambda: frappe.get_cached_doc("Optimus Settings"))
+	if doc is None:
 		return None
 
 	return {
@@ -523,6 +531,7 @@ def _read_doctype_row() -> dict | None:
 		"ai_model": (doc.get("ai_model") or "").strip() or None,
 		"ai_auto_suggest": bool(doc.get("ai_auto_suggest")),
 		"ai_auto_suggest_max": int(doc.get("ai_auto_suggest_max") or 0),
+		"ai_refresh_max_findings": _opt_float(doc.get("ai_refresh_max_findings")),
 		# Default-on (when AI is enabled) pass a default to .get() so a
 		# Single row predating this field still reads as True.
 		"ai_humanize_steps": bool(doc.get("ai_humanize_steps", 1)),
@@ -729,6 +738,10 @@ def _resolve() -> OptimusConfig:
 		# v0.13.x: profile-aware. Allows 0 (= every eligible finding)
 		# the zero-OK variant keeps a stored 0 under Custom.
 		ai_auto_suggest_max=_sens_int_zero_ok("ai_auto_suggest_max"),
+		ai_refresh_max_findings=max(0, min(2**31 - 1, int(
+			row["ai_refresh_max_findings"] if row.get("ai_refresh_max_findings") is not None
+			else _DEFAULTS["ai_refresh_max_findings"]
+		))),
 		ai_humanize_steps=bool(
 			row.get("ai_humanize_steps")
 			if "ai_humanize_steps" in row
@@ -755,63 +768,30 @@ def _resolve() -> OptimusConfig:
 
 
 def get_config() -> OptimusConfig:
-	"""Return the resolved config, cached in Redis until the Single is saved.
-
-	Fails soft on ANY exception (including Frappe not importable in unit tests),
-	returning the hardcoded defaults: a settings read must never crash a request.
-	"""
+	"""Return cached configuration, falling back on ordinary errors, never RQ timeouts."""
 	try:
 		import frappe
 	except ImportError:
-		# Unit-test path no bench context.
 		return OptimusConfig()
+	from optimus import redis_schema
 
-	try:
-		# v0.12.11: ``settings_cache`` is the first value to migrate to the
-		# v0.12.0 versioned envelope. ``unwrap_value`` returns ``(payload,
-		# version)``; the payload is the OptimusConfig field dict in either
-		# the new-shape envelope (``{"_v": 1, "data": {...}}``) or the
-		# legacy bare-dict shape (pre-v0.12.11 writes still flow through
-		# unchanged via the legacy-detection branch). On a schema-version
-		# bump WITHOUT a migration, ``unwrap_value`` returns ``(default=
-		# None, observed_version)``: the request falls through to the slow
-		# path (``_resolve``) and re-writes a fresh envelope.
-		from optimus import redis_schema
-
-		cached_raw = frappe.cache.get_value(_CACHE_KEY)
-		payload, _version = redis_schema.unwrap_value(cached_raw)
+	def cached_config():
+		payload, _version = redis_schema.unwrap_value(frappe.cache.get_value(_CACHE_KEY))
 		if isinstance(payload, dict) and payload:
 			return OptimusConfig(**payload)
-	except Exception:
-		pass
+		return None
 
-	try:
-		cfg = _resolve()
-	except Exception:
-		return OptimusConfig()
-
-	try:
-		from optimus import redis_schema
-
-		frappe.cache.set_value(
-			_CACHE_KEY, redis_schema.wrap_value(cfg.__dict__)
-		)
-	except Exception:
-		pass
-
+	cached = _best_effort(cached_config)
+	if cached is not None:
+		return cached
+	cfg = _best_effort(_resolve, OptimusConfig())
+	_best_effort(lambda: frappe.cache.set_value(_CACHE_KEY, redis_schema.wrap_value(cfg.__dict__)))
 	return cfg
 
 
 def is_enabled() -> bool:
 	"""Convenience wrapper hot-path entry point from hooks_callbacks."""
-	try:
-		return get_config().enabled
-	except Exception:
-		# Fail open: if we can't read the setting, don't silently
-		# disable the profiler that would be a very confusing
-		# support issue ("why isn't recording working"). Default to
-		# on, matching the DocType default.
-		return True
+	return _best_effort(lambda: get_config().enabled, True)
 
 
 def display_threshold_ms() -> float:
@@ -825,10 +805,7 @@ def display_threshold_ms() -> float:
 	snapshot; ``report_context._resolve_threshold_ms`` reads it back from that
 	snapshot dict, which is why that one lives there and not here.)
 	"""
-	try:
-		return float(get_config().large_duration_threshold_ms)
-	except Exception:
-		return DEFAULT_DISPLAY_THRESHOLD_MS
+	return _best_effort(lambda: float(get_config().large_duration_threshold_ms), DEFAULT_DISPLAY_THRESHOLD_MS)
 
 
 def get_tracked_apps() -> tuple[str, ...]:
@@ -836,16 +813,10 @@ def get_tracked_apps() -> tuple[str, ...]:
 	``is_framework_callsite`` to flip it from exclusion mode to inclusion mode
 	(user code = exactly the tracked apps).
 	"""
-	try:
-		return get_config().tracked_apps
-	except Exception:
-		return ()
+	return _best_effort(lambda: get_config().tracked_apps, ())
 
 
 def get_ignored_apps() -> tuple[str, ...]:
 	"""Exclusion list: apps whose findings are dropped from the report entirely
 	(both Findings and Observations sections). Empty tuple means none dropped."""
-	try:
-		return get_config().ignored_apps
-	except Exception:
-		return ()
+	return _best_effort(lambda: get_config().ignored_apps, ())

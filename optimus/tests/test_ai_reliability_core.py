@@ -50,7 +50,6 @@ def wire(monkeypatch):
 	monkeypatch.setattr(ai_fix, "_current_key_or_empty", lambda: "")
 	monkeypatch.setattr(ai_fix, "_log_http_error", lambda *a, **kw: logs.append((a, kw)))
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: logs.append((a, kw)))
-	monkeypatch.setattr(ai_fix, "_record_session_spend", lambda *_: None)
 
 	def install(*replies):
 		pending = iter(replies)

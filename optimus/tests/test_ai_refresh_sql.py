@@ -22,6 +22,7 @@ import pytest
 
 from optimus import ai_fix, ai_jobs
 from optimus import ai_refresh_store as store
+from optimus.line_profile import jobs as phase2
 
 
 class SQLDatabase:
@@ -136,6 +137,7 @@ def sql(monkeypatch):
 		table: prefix + "_" + suffix
 		for table, suffix in (
 			("Optimus Session", "session"),
+			("Optimus Phase Two Run", "phase2"),
 			(store.RUN, "run"),
 			(store.ATTEMPT, "attempt"),
 			(store.CONTROL, "control"),
@@ -195,6 +197,9 @@ def sql(monkeypatch):
 	facade = Facade()
 	monkeypatch.setattr(store, "frappe", facade)
 	monkeypatch.setattr(ai_jobs, "frappe", facade)
+	monkeypatch.setattr(phase2, "frappe", facade)
+	monkeypatch.setattr(phase2, "_authorized", lambda *a: True)
+	monkeypatch.setattr(ai_jobs, "_touch_session", lambda name: facade.db.set_value("Optimus Session", name, {"modified": "changed"}))
 	monkeypatch.setattr(ai_jobs, "safe_commit", lambda: facade.db.connection.commit())
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: None)
 	monkeypatch.setattr(
@@ -213,11 +218,19 @@ def sql(monkeypatch):
 			"ai_tokens_spent": "BIGINT DEFAULT 0",
 			"ai_refresh_count": "INTEGER DEFAULT 0",
 			"answer": "TEXT",
+			"modified": "VARCHAR(140)",
 		}
 		for table in tables:
 			unique = []
 			if table == "Optimus Session":
 				columns = parent_columns
+			elif table == "Optimus Phase Two Run":
+				columns = {"parent": "VARCHAR(140)", "status": "VARCHAR(140)", "run_uuid": "VARCHAR(140)",
+					"warnings_json": "TEXT", "analyze_generation": "VARCHAR(140)",
+					"analyze_requested_by": "VARCHAR(140)", "analyze_worker_token": "VARCHAR(140)",
+					"analyze_lease_until": "DECIMAL(21,9) DEFAULT 0", "analyze_dispatch_at": "DECIMAL(21,9) DEFAULT 0",
+					"analyze_dispatch_pending": "SMALLINT DEFAULT 0", "analyze_render_pending": "SMALLINT DEFAULT 0",
+					"analyze_attempts": "INTEGER DEFAULT 0"}
 			else:
 				folder = table.lower().replace(" ", "_")
 				path = (
@@ -314,6 +327,28 @@ def test_old_snapshot_cannot_admit_beyond_site_capacity(sql):
 		}
 	if sql.backend == "postgres":
 		assert "40001" in older.conflicts
+
+
+def test_phase2_commit_fences_an_older_ai_admission_snapshot(sql):
+	older = sql.connect()
+	older.get_value("Optimus Session", "parent-a", "status")
+	def phase2():
+		assert store.lock_phase2_parent("parent-a") is None
+		sql.primary.insert({"doctype": "Optimus Phase Two Run", "name": "phase2-a",
+			"parent": "parent-a", "status": "Recording"})
+	ai_jobs._transaction(phase2)
+	with sql.using(older):
+		assert ai_jobs._retry_sql(admit) == {"status": "refused", "reason": "phase2"}
+	if sql.backend == "postgres":
+		assert "40001" in older.conflicts
+
+
+def test_ai_admission_fences_an_older_phase2_snapshot(sql):
+	older = sql.connect()
+	older.get_value("Optimus Session", "parent-a", "status")
+	assert ai_jobs._retry_sql(admit)["status"] == "queued"
+	with sql.using(older):
+		assert ai_jobs._retry_sql(lambda: store.lock_phase2_parent("parent-a")) == "ai_refresh"
 
 
 def test_duplicate_delivery_from_an_older_snapshot_claims_only_once(sql):
@@ -431,3 +466,64 @@ def test_completion_counter_failure_cannot_release_the_reservation(sql, monkeypa
 		)
 	assert sql.primary.get_value("Optimus Session", "parent-a", "ai_refresh_count") == 1
 	assert sql.primary.get_value(store.RUN, "run-a", "active_session") is None
+
+
+
+def phase2_admit(sql):
+	sql.primary.insert({"doctype": phase2.TABLE, "name": "fake-child", "parent": "parent-a",
+		"run_uuid": "fake-phase2", "status": "Failed"})
+	sql.primary.connection.commit()
+	out = ai_jobs._retry_sql(lambda: phase2._admit("parent-a", "fake-parent-a", "fake-phase2", "fake-user",
+		generation="generation-a", now=100))
+	assert out["status"] == "queued"
+
+
+def phase2_claim():
+	return ai_jobs._retry_sql(lambda: phase2._claim("parent-a", "fake-phase2", "generation-a", "worker-a", now=101))
+
+
+def test_phase2_duplicate_delivery_from_old_snapshot_claims_once(sql):
+	phase2_admit(sql)
+	older = sql.connect()
+	older.get_value(phase2.TABLE, "fake-child", "analyze_worker_token")
+	assert phase2_claim()
+	with sql.using(older):
+		assert phase2_claim() is None
+	if sql.backend == "postgres":
+		assert "40001" in older.conflicts
+
+
+def test_phase2_answer_and_ready_outcome_roll_back_together(sql):
+	phase2_admit(sql)
+	run = phase2_claim()
+	def fail():
+		sql.primary.set_value("Optimus Session", "parent-a", {"answer": "fake phase2 answer"})
+		raise RuntimeError("fake save failure")
+	with pytest.raises(RuntimeError):
+		ai_jobs._transaction(lambda: phase2._complete(run, now=102, persist=fail))
+	assert sql.primary.get_value("Optimus Session", "parent-a", "answer") is None
+	assert sql.primary.get_value(phase2.TABLE, "fake-child", "status") == "Analyzing"
+
+
+def test_phase2_ambiguous_commit_replay_does_not_append_twice(sql):
+	phase2_admit(sql)
+	run = phase2_claim()
+	def persist():
+		sql.primary.increment("parent-a", "ai_refresh_count", 1)  # stand-in append count
+	assert ai_jobs._transaction(lambda: phase2._complete(run, now=102, persist=persist))
+	assert not ai_jobs._transaction(lambda: phase2._complete(run, now=103, persist=persist))
+	assert not ai_jobs._transaction(lambda: phase2._fail(run, now=103, reason="failed"))
+	assert sql.primary.get_value("Optimus Session", "parent-a", "ai_refresh_count") == 1
+	assert sql.primary.get_value(phase2.TABLE, "fake-child", "status") == "Ready"
+
+
+def test_phase2_old_worker_cannot_commit_after_expired_generation_is_replaced(sql):
+	phase2_admit(sql)
+	run = phase2_claim()
+	out = ai_jobs._retry_sql(lambda: phase2._admit("parent-a", "fake-parent-a", "fake-phase2", "fake-user",
+		generation="generation-b", now=3000))
+	assert out["status"] == "queued"
+	writes = []
+	assert not ai_jobs._transaction(lambda: phase2._complete(run, now=3001, persist=lambda: writes.append(True)))
+	assert not writes
+	assert sql.primary.get_value(phase2.TABLE, "fake-child", "analyze_generation") == "generation-b"

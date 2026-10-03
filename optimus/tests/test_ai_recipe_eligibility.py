@@ -82,13 +82,7 @@ class TestGateNote:
 
 class TestAutoSuggestPath:
 	def _run(self, findings):
-		ctx = SimpleNamespace(session_uuid="u", findings=findings, warnings=[])
-		sent = []
-		with patch("optimus.settings.get_config", return_value=_cfg()), \
-		     patch("optimus.ai_fix.is_available", return_value=True), \
-		     patch("optimus.ai_fix.suggest_fix", side_effect=lambda p: sent.append(p["finding_type"]) or dict(_RESULT)):
-			analyze._enrich_findings_with_ai_suggestions(ctx)
-		return sent
+		return [row["finding_type"] for row in analyze.eligible_findings(findings, _cfg(), include_outdated=False)]
 
 	def test_auto_suggest_never_sends_framework_n_plus_one_or_index_findings(self):
 		sent = self._run([_finding("Framework N+1"), _finding("Missing Index"), _finding("N+1 Query")])
@@ -111,14 +105,8 @@ class TestBackfillPath:
 			_row("hl_ok", "Hot Line", {"file": _USER_FILE, "line_content": "n = len(rows)"}),
 			_row("n1", "N+1 Query"),
 		]
-		doc = SimpleNamespace(findings=rows)
-		with patch("optimus.settings.get_config", return_value=_cfg()), \
-		     patch("optimus.ai_fix.is_available", return_value=True), \
-		     patch("optimus.ai_fix.suggest_fix", side_effect=lambda p: dict(_RESULT)), \
-		     patch.object(analyze, "frappe", _fake_frappe()) as fk:
-			out = analyze._run_ai_backfill(doc, cap=0)
-		assert sorted(fk.db.writes) == ["hl_ok", "n1"]
-		assert out["total_pending"] == 2
+		selected = analyze.eligible_findings(rows, _cfg())
+		assert sorted(row.name for row in selected) == ["hl_ok", "n1"]
 
 
 class TestSuggestFixGuard:

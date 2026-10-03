@@ -136,6 +136,16 @@ def test_missing_worker_refuses_admission_without_creating_a_run(queue, monkeypa
 	assert not queue.journal.db.rows[queue.journal.mod.RUN] and not queue.sent
 
 
+@pytest.mark.parametrize("reason", ["phase2", "permission", "not_ready"])
+def test_expected_admission_refusal_is_an_outcome_for_both_http_and_analyze_callers(queue, monkeypatch, reason):
+	def refuse(*a):
+		raise queue.jobs.StopRefresh(reason)
+	monkeypatch.setattr(queue.jobs, "_check_run", refuse)
+	out = queue.jobs.start_refresh(docname="fake-session-doc", session_uuid="fake-session", requested_by="fake-owner")
+	assert out == {"status": "refused", "reason": reason}
+	assert not queue.sent and not queue.logs
+
+
 def test_existing_refresh_is_visible_even_when_provider_or_queue_is_unavailable(queue, monkeypatch):
 	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
 	monkeypatch.setattr(ai_fix, "is_available", lambda: False)
@@ -227,3 +237,8 @@ def test_nonserialization_errors_are_not_retried_as_admissions(queue):
 	with pytest.raises(ValueError):
 		queue.jobs._retry_sql(fail)
 	assert len(calls) == 1
+
+
+def test_scheduler_wires_durable_recovery_every_minute():
+	from optimus import hooks
+	assert "optimus.ai_jobs.recover_pending" in hooks.scheduler_events["cron"]["* * * * *"]

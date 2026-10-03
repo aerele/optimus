@@ -8,6 +8,39 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.71] - 2026-10-03
+
+### Changed
+
+- Save profiling findings and the first report before queuing optional AI
+  enrichment. Provider failures and timeouts no longer discard a completed
+  profile. Refresh AI suggestions now queues background work and shows SQL
+  progress, cancellation, reported usage and uncertain outcomes in Desk.
+- Select missing and outdated suggestions by default. Replacing current
+  answers or retrying an uncertain provider call requires explicit consent.
+  Keep unsaved form edits when background work finishes.
+- Queue Phase 2 analysis and retries, including when the scheduler is
+  disabled. Persist generation ownership, bounded attempts and delivery intent
+  so duplicate or stale workers cannot append findings twice. Saved Phase 2
+  results remain Ready if optional report rendering fails.
+- Replace reports transactionally, retaining the previous report on failure.
+  Regenerate Reports repairs pending output using saved results without AI.
+- Add an independent manual refresh cap of 20 and expose the existing model
+  context-window setting. An explicitly saved zero cap remains unlimited
+  within the refresh deadline.
+
+### Upgrade notes
+
+- Migrate the new Phase 2 queue fields and Settings defaults, then replace
+  web, worker and scheduler processes together. Keep a `long` worker for
+  Phase 2 and a worker on the configured AI queue. Minute recovery sweeps
+  require the scheduler. Old running workers do not acquire the new fences.
+- Refresh and Phase 2 stop/retry responses now acknowledge queued work;
+  integrations must poll saved progress instead of assuming inline completion.
+  See [refresh operations and compatibility](docs/AI-REFRESH.md).
+- This staged integration still requires recording/provider/source/privacy
+  hardening and final deployment and model acceptance before release.
+
 ## [0.12.70] - 2026-10-03
 
 ### Internal

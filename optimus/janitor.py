@@ -461,72 +461,25 @@ def _sweep_stale_stopping():
 
 
 def _sweep_stale_phase2_runs():
-	"""Force-stop Optimus Phase Two Run child rows stuck in Recording (>11min)
-	or Analyzing (>30min): mark them Failed and clean up their Redis
-	picks/source/samples keys via line_profile.capture.cleanup_run.
+	"""Expire old captures/legacy jobs with a current locked status check.
+
+	The durable queue scheduler owns upgraded jobs. Failed analyses retain
+	input for explicit retry; never erase samples merely because a job died.
 	"""
+	from optimus import ai_jobs
 	from optimus.line_profile import capture as _lp_capture
+	from optimus.line_profile import jobs as _lp_jobs
 
-	rec_cutoff = add_to_date(now_datetime(), minutes=-STALE_RECORDING_MINUTES)
-	rec_stale = frappe.db.get_all(
-		"Optimus Phase Two Run",
-		filters={"status": "Recording", "modified": ["<", rec_cutoff]},
-		fields=["name", "parent", "run_uuid"],
-	)
-	if rec_stale:
-		# v0.6.x: single batched UPDATE; the per-row Redis cleanup stays
-		# per-row below since it touches Redis, not the DB.
-		try:
-			frappe.db.set_value(
-				"Optimus Phase Two Run",
-				{"name": ("in", [r["name"] for r in rec_stale])},
-				{
-					"status": "Failed",
-					"warnings_json": frappe.as_json([
-						"Phase 2 run expired before any line data was captured "
-						"(no flow re-run within the window) auto-stopped by "
-						"janitor. To retry: click \"Run Line-Profile Pass\", "
-						"re-run your flow, then \"Stop Phase 2 Run\".",
-					]),
-					"ended_at": now_datetime(),
-				},
-			)
-			safe_commit()
-		except Exception:
-			frappe.log_error(title="optimus janitor stale phase-2 recording")
-		for row in rec_stale:
-			try:
+	for status, age in (("Recording", STALE_RECORDING_MINUTES), ("Analyzing", STALE_ANALYZING_MINUTES)):
+		cutoff = add_to_date(now_datetime(), minutes=-age)
+		rows = frappe.db.get_all(
+			"Optimus Phase Two Run", filters={"status": status, "modified": ["<", cutoff]},
+			fields=["name", "parent", "run_uuid"], limit_page_length=100,
+		)
+		ai_jobs._transaction(lambda: None)
+		for row in rows:
+			changed = ai_jobs._retry_sql(lambda: _lp_jobs.expire_legacy(
+				row["parent"], row["run_uuid"], status=status, cutoff=cutoff,
+			))
+			if changed and status == "Recording":
 				_lp_capture.cleanup_run(row["run_uuid"])
-			except Exception:
-				frappe.log_error(title="optimus janitor stale phase-2 recording cleanup")
-
-	ana_cutoff = add_to_date(now_datetime(), minutes=-STALE_ANALYZING_MINUTES)
-	ana_stuck = frappe.db.get_all(
-		"Optimus Phase Two Run",
-		filters={"status": "Analyzing", "modified": ["<", ana_cutoff]},
-		fields=["name", "parent", "run_uuid"],
-	)
-	if ana_stuck:
-		try:
-			frappe.db.set_value(
-				"Optimus Phase Two Run",
-				{"name": ("in", [r["name"] for r in ana_stuck])},
-				{
-					"status": "Failed",
-					"warnings_json": frappe.as_json([
-						"Phase 2 analyze timed out or crashed. Retry from a "
-						"Frappe console: "
-						"optimus.line_profile.analyzer.run_analyze("
-						"'<session_uuid>', '<run_uuid>')",
-					]),
-					"ended_at": now_datetime(),
-				},
-			)
-			safe_commit()
-		except Exception:
-			frappe.log_error(title="optimus janitor stuck phase-2 analyzing")
-		for row in ana_stuck:
-			try:
-				_lp_capture.cleanup_run(row["run_uuid"])
-			except Exception:
-				frappe.log_error(title="optimus janitor stuck phase-2 analyzing cleanup")

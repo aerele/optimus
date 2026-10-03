@@ -11,7 +11,7 @@ from optimus.tests.test_ai_refresh_journal import journal as _journal_fixture  #
 pytestmark = pytest.mark.rq
 
 
-@pytest.fixture
+@pytest.fixture(name="worker")
 def worker(journal, monkeypatch):
 	jobs = import_module("optimus.ai_jobs")
 	clock = [20.0]
@@ -29,6 +29,8 @@ def worker(journal, monkeypatch):
 	monkeypatch.setattr(jobs, "_call_timeout", lambda: 10)
 	monkeypatch.setattr(jobs, "_check_run", lambda run, **kw: None)
 	monkeypatch.setattr(jobs, "_dispatch_pending", queued.append)
+	render_pending = getattr(jobs, "_render_pending", None)
+	monkeypatch.setattr(jobs, "_render_pending", lambda *a: None, raising=False)
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: logs.append(type(a[1]).__name__))
 	monkeypatch.setattr(
 		jobs, "frappe", SimpleNamespace(db=SimpleNamespace(rollback=lambda: None), local=SimpleNamespace())
@@ -45,6 +47,7 @@ def worker(journal, monkeypatch):
 		send_hook=None,
 		persist_hook=None,
 		valid=True,
+		render_pending=render_pending,
 	)
 
 	def next_item(run, memo):

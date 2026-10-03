@@ -43,10 +43,12 @@ from pathlib import Path
 _PKG = Path(__file__).resolve().parents[1]
 _REQUIRED = (
 	"analyze.py", "api.py", "maintenance.py", "error_log_mask.py",
+	"settings.py", "report_refresh.py", "line_profile/jobs.py",
+	"patches/v0_12_0/seed_ai_refresh_max_findings.py",
 	"optimus/doctype/optimus_settings/optimus_settings.py", "renderer/fix_recipes.py", "line_profile/analyzer.py",
 )
 _OPTIONAL = ("ai_jobs.py",)  # scanned as soon as a later PR adds it
-_AI_WRAPPERS = frozenset({"_backfill_ai_suggestions"})  # analyze.py; calls _run_ai_backfill
+_AI_WRAPPERS = frozenset()  # Session AI now runs only in ai_jobs.py.
 _BASE_LOGGERS = frozenset({"log_error", "log_ai_failure"})
 _SENDERS = frozenset({"_http_post", "_call_openai_chat", "_call_anthropic"})  # ai_fix.py
 _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -319,7 +321,7 @@ def test_the_ai_steps_log_through_the_one_helper():
 			for name in calls & {"log_ai_failure", "_log_ai_step_failure"}:
 				callers.setdefault(name, set()).add(f"{mod}:{fn.name}")
 	assert callers == {
-		"log_ai_failure": {"analyze.py:_log_ai_step_failure", "analyze.py:load_recordings_light", "analyze.py:_load_recordings_bundle", "analyze.py:_phase2_index_for"},
+		"log_ai_failure": {"analyze.py:_log_ai_step_failure", "analyze.py:load_recordings_light", "analyze.py:_load_recordings_bundle", "analyze.py:_phase2_index_for", "analyze.py:_queue_analyze_time_ai"},
 		"_log_ai_step_failure": {"analyze.py:_run_ai_step"},
 	}
 	helper = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "_run_ai_step")
@@ -342,11 +344,8 @@ def test_the_helper_is_used_where_the_skeleton_was():
 		for mod in ("analyze.py", "api.py")
 	}
 	assert uses == {
-		"analyze.py": {
-			"run", "_enrich_findings_with_ai_suggestions", "_run_ai_backfill",
-			"_build_humanized_notes_html",
-		},
-		"api.py": {"_render_session_report", "_rerender_after_ai", "_humanize_steps_core"},
+		"analyze.py": set(),
+		"api.py": {"_render_session_report", "ai_refresh_status", "refill_ai_suggestions"},
 	}
 
 

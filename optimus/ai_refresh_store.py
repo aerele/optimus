@@ -116,6 +116,11 @@ def admit(
 	current = frappe.db.get_value(RUN, {"active_session": docname}, "*", as_dict=True, for_update=True)
 	if current:
 		return {"status": "already_running", "run": current}
+	if frappe.db.get_values(
+		"Optimus Phase Two Run", {"parent": docname, "status": ["in", ["Recording", "Analyzing"]]},
+		["name"], for_update=True, limit=1,
+	):
+		return {"status": "refused", "reason": "phase2"}
 	retry_no = 0
 	steps_state, render_pending = "not_requested", 0
 	if resume_from:
@@ -212,6 +217,24 @@ def admit(
 		total_items=0,
 	)
 	return {"status": "queued", "run": run}
+
+
+def lock_phase2_parent(docname, *, allow_failed=False):
+	"""Caller owns this transaction until its Phase 2 row commits.
+
+	The shared mutex update also fences PostgreSQL REPEATABLE READ snapshots
+	opened before an opposing admission. No Redis/provider call happens here.
+	"""
+	control = frappe.db.get_value(CONTROL, "site", "*", as_dict=True, for_update=True, wait=False)
+	if not control:
+		raise JournalUnavailable("AI refresh storage is not initialized")
+	parent = _read("Optimus Session", docname, lock=True)
+	if not parent or parent.get("status") not in ({"Ready", "Failed"} if allow_failed else {"Ready"}):
+		return "not_ready"
+	if frappe.db.get_value(RUN, {"active_session": docname}, "name", for_update=True):
+		return "ai_refresh"
+	_update(CONTROL, control, generation=(control.get("generation") or 0) + 1)
+	return None
 
 
 def _owns(run, worker_token, now):
@@ -472,6 +495,26 @@ def cancel(run_id, *, now, cancelled_by=None):
 	_mark_uncertain(run, "cancelled")
 	_update(RUN, run, cancelled_by=cancelled_by)
 	return _finish_locked(parent, run, state="cancelled", reason="cancelled", now=now)
+
+
+def prepare_analyze_retry(docname, session_uuid, *, requested_by, now):
+	"""Fence optional workers and reset a Failed parent in the same transaction."""
+	parent = _read("Optimus Session", docname, lock=True)
+	if not parent or parent.get("session_uuid") != session_uuid or parent.get("status") != "Failed":
+		return False
+	run_id = frappe.db.get_value(RUN, {"active_session": docname}, "name", for_update=True)
+	if run_id:
+		cancel(run_id, now=now, cancelled_by=requested_by)
+	for child in frappe.db.get_values(
+		"Optimus Phase Two Run", {"parent": docname, "status": ["in", ["Recording", "Analyzing"]]},
+		["name"], as_dict=True, for_update=True,
+	):
+		frappe.db.set_value("Optimus Phase Two Run", child["name"], {
+			"status": "Failed", "analyze_dispatch_pending": 0,
+			"warnings_json": '["Phase 2 stopped because profiling analysis was restarted."]',
+		}, update_modified=False)
+	frappe.db.set_value("Optimus Session", docname, {"status": "Stopping", "analyzer_warnings": None})
+	return True
 
 
 def abandon(run_id, *, worker_token, now):

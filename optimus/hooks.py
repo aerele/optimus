@@ -125,6 +125,7 @@ after_job = [
 
 scheduler_events = {
 	"cron": {
+		"* * * * *": ["optimus.ai_jobs.recover_pending", "optimus.line_profile.jobs.recover_pending"],
 		"*/5 * * * *": [
 			"optimus.janitor.sweep_stale_sessions",
 		],
