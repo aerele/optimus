@@ -28,6 +28,9 @@ _OPTIMUS_DOCTYPES = (
 	"Optimus Background Job",
 	"Optimus Phase Two Run",
 	"Optimus Tracked App",
+	"Optimus AI Refresh Control",
+	"Optimus AI Refresh Run",
+	"Optimus AI Refresh Attempt",
 )
 
 
@@ -50,6 +53,9 @@ class TestInstallSmoke(FrappeTestCase):
 			if not frappe.db.exists("DocType", dt)
 		]
 		assert not missing, f"missing DocTypes after install: {missing!r}"
+		assert frappe.db.exists("Optimus AI Refresh Control", "site"), (
+			"AI admission mutex missing after install; refresh must refuse without it"
+		)
 
 	def test_optimus_settings_single_doc_readable(self):
 		"""The Single doc is creatable + readable. ``get_single`` works

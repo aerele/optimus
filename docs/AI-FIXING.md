@@ -2,7 +2,7 @@
 
 This document inventories **exactly** what data leaves your host when Optimus's AI fix suggestion feature is enabled, where it goes and how to keep everything on-box with a local LLM. It's written for operators making the consent decision and for reviewers (compliance / security / a dev shop receiving a profile) who need to audit the wire.
 
-If you're picking up Optimus for the first time: every AI feature here is **off by default**. The rest of this doc only matters once an operator explicitly turns one on.
+The AI master switch is **off by default**. Enabling it also enables automatic finding suggestions unless you turn that separate switch off. Review the disclosure below before enabling AI. See [background operations](AI-REFRESH.md) and the [release acceptance checklist](AI-ACCEPTANCE.md).
 
 ---
 
@@ -42,7 +42,7 @@ There are three outbound request shapes. Each table lists every distinct field t
 
 Triggered by the session's **Refresh AI suggestions** action or automatic enrichment after profiling is Ready. Built by `ai_fix._build_fix_request` in `optimus/ai_fix.py`.
 
-**System prompt** (static, 6.9 KB, about 2,150 conservatively estimated tokens): Frappe framework rules for the proposed code, caching and data-layer idioms, the durable index recipe, grounding rules and the output format (Diagnosis / Fix / Why it works / Verify). It is byte-identical for every finding, so providers can reuse its prefix. Anthropic requests include one cache breakpoint; caching still depends on the model's minimum prefix size.
+**System prompt** (static; measured below): Frappe framework rules for the proposed code, caching and data-layer idioms, the durable index recipe, grounding rules and the output format (Diagnosis / Fix / Why it works / Verify). It is byte-identical for every finding, so providers can reuse its prefix. Anthropic requests include one cache breakpoint; caching still depends on the model's minimum prefix size.
 
 **User message** (per-finding, sized to the model's context window; 18,000 budget-unit cap):
 
@@ -67,7 +67,7 @@ Every value captured from your site (title, callsite, source, SQL, EXPLAIN, hot 
 | `technical_detail.normalized_query` | technical_detail_json | 100–2400 chars | **Capped 2400.** Normalized SQL table names, column names, WHERE clause structure preserved; literals replaced by `?` (then redacted again by `optimus.redaction` if they match sensitive column names). |
 | `technical_detail.explain_row` | technical_detail_json | 100–800 chars | `EXPLAIN` output, capped type / rows / key / Extra etc. |
 | `technical_detail.validation_note` | technical_detail_json | 0–300 chars | Caveats. |
-| **`technical_detail.example_queries`** | live recording (Redis) | **0–4800 chars** | Up to 2 query examples, each capped at 2400 chars. SQL literals and comments are removed by default, including in previously saved examples. Raw-value consent retains business literals subject to sensitive-column redaction. Malformed or oversized SQL is omitted. |
+| **`technical_detail.example_queries`** | validated live or saved recording JSON | **0–4800 chars** | Up to 2 query examples, each capped at 2400 chars. SQL literals and comments are removed by default, including in previously saved examples. Raw-value consent retains business literals subject to sensitive-column redaction. Malformed or oversized SQL is omitted. |
 
 The user message is assembled to fit the provider's context window (section 4.2): optional parts (example queries, EXPLAIN row, the normalized query and loop facts) are dropped whole, the least useful first, and only then does the source window shrink around the target line. Nothing is cut inside a block.
 
@@ -77,7 +77,7 @@ Oversized title and callsite text are clipped before wrapping. A source line is 
 
 Included in manual Refresh AI suggestions when `ai_humanize_steps` is enabled; automatic fix enrichment does not rewrite Steps. Built by `_build_steps_messages` in `optimus/ai_fix.py`.
 
-**System prompt** (static, ~2.9 KB): ERPNext workflow knowledge, Frappe API decoding rules, collapse rules, output spec (ordered Markdown list + one-sentence summary).
+**System prompt** (static; measured below): ERPNext workflow knowledge, Frappe API decoding rules, collapse rules, output spec (ordered Markdown list + one-sentence summary).
 
 **User message** (per-session, ~1–8 KB, **8 KB hard cap**):
 
@@ -91,6 +91,16 @@ Included in manual Refresh AI suggestions when `ai_humanize_steps` is enabled; a
 | `duration_ms` | recording.duration | ~5 chars | Wall time. |
 
 Up to `_MAX_STEPS_ACTIONS = 60` actions, sent inside one data block and limited to 8,000 chars or the context budget, whichever is smaller. `_is_reproducer_noise` pre-filters polling, form-load and asset requests.
+
+### Prompt measurements
+
+Measured from the shipped constants, excluding user data and chat-template overhead.
+Token values use Optimus's conservative estimator, not a provider tokenizer.
+
+| Constant | UTF-8 bytes | Estimated tokens |
+| --- | --- | --- |
+| `SYSTEM_PROMPT` | 6935 | 2102 |
+| `STEPS_SYSTEM_PROMPT` | 4144 | 1256 |
 
 ### 2.3 Index suggestion (removed)
 
@@ -132,7 +142,6 @@ auth object without decrypting again.
 | `OpenAI` | Chat completions | `https://api.openai.com/v1` | Yes | Default model: `gpt-4.1-mini`. |
 | `Kimi (Moonshot)` | Chat completions | `https://api.moonshot.ai/v1` | Yes | Default model: `kimi-k2-0905-preview`. |
 | `DeepSeek` | Chat completions | `https://api.deepseek.com/v1` | Yes | Default model: `deepseek-chat` (V3). `deepseek-reasoner` (R1) also works. |
-| `Aerele` | Chat completions | `https://api.aerele.in/optimus/v1` | Yes | Managed service buy a fixed token pack up front. See § 10. |
 | `OpenAI-compatible` | Chat completions | (you set it) | No (configurable) | Use this for local LLMs and any other OpenAI-shaped server. |
 
 `ai_model` overrides the default model and `ai_api_key` supplies the credential. `ai_base_url` overrides the endpoint only for OpenAI-compatible providers. The HTTP timeout is `ai_request_timeout_seconds` (v0.9.0+, default 60s, clamped 10–600s).
@@ -313,16 +322,16 @@ uncertain usage, resume limits, report recovery and API response changes.
 What this design protects against:
 
 - **Accidental egress.** With `ai_enabled = OFF` (default) no request body is ever built there's no code path that exfiltrates finding data.
-- **Click-to-send.** With `ai_auto_suggest = OFF` the LLM only sees a finding when the operator explicitly clicks the per-finding button; every send is then a deliberate, attributable action. Auto-suggest is on by default, so once AI is enabled the top-N eligible findings are sent during the analyze pass unless you turn it off.
-- **Category-level opt-out.** `ai_excluded_finding_types` lets you keep specific categories (e.g. Slow Query, where raw SQL flows verbatim) out of the wire entirely.
-- **Network-residency.** The OpenAI-compatible provider + a local LLM keeps everything on your host. You can verify with `tcpdump` / `lsof` / `netstat` that no outbound socket opens during an AI call.
+- **Explicit refresh.** With `ai_auto_suggest = OFF`, finding requests require the session's Refresh AI suggestions action. Auto-suggest defaults to on once the master switch is enabled; it queues eligible findings only after profiling is saved as Ready. Steps are included only in a manual refresh when enabled.
+- **Category-level opt-out.** `ai_excluded_finding_types` lets you keep specific categories (e.g. Slow Query, where SQL structure and schema names are sent) out of the wire entirely.
+- **Network residency.** An OpenAI-compatible endpoint on loopback keeps the request on that host; a LAN endpoint sends it across your network. Both use sockets. Verify the configured destination and enforce network egress policy. Local model servers can still retain prompts or contact their own upstream services.
 
 What this design does **not** protect against:
 
 - **A compromised LLM provider.** If you're using Anthropic / OpenAI / a third-party, your finding context is at the mercy of their logging, retention and abuse-monitoring policies. Read each provider's data-use policy.
 - **On-disk caching by the LLM client.** Local servers (Ollama, LM Studio, vLLM) may log requests to disk depending on their flags. Check their docs and configure logging off if you're paranoid.
 - **Backups and audit logs.** The AI suggestion (the response text) is persisted to `Optimus Finding.llm_fix_json`. Your DB backups include it. If a fix suggestion contains a paraphrase of sensitive code/SQL, it'll be in those backups.
-- **AI failure rows in the Error Log.** Optimus's own AI failures are written by `ai_fix.log_ai_failure`, the only function on the AI surface that writes an Error Log row: one row per failure, linked to the Optimus Session, with an explicit message scrubbed of secrets by `redaction.scrub_secrets`. For an HTTP failure it names the provider, the call site, the status and the provider's error code (`provider_error=`, only when it is made of lowercase words: letters joined by `_`, `.`, `:` or `-`, at most 64 characters), never the prompt, the reply body or any frame's local variables. That holds when this row cannot be written and the caller logs the error instead: the caller's row shows the status, the call site and `provider_error=` in place of the error's message, which can quote the reply. When such a row may be missing (its write failed; after a rollback, its existence could not be checked or it could not be queued again; or the rollback callback could not be registered), or a hook that runs after the insert failed (a broken Error Log notification, say: the row is then written, and a caller that logs the same error again writes a second row), one line naming only the error type goes to the `optimus` log (`logs/optimus.log`) at error level, the lowest level Frappe's loggers keep on a production site. These rows are in your backups like any other Error Log row. Frappe's own error snapshots (a server error, a background job that fails or times out, any error in developer mode) still print frame locals, which can include prompt text and a custom Base URL typed with credentials in it; see `SECURITY.md`. An Error Log `before_insert` hook (`optimus.error_log_mask`) masks the stored key, the key shapes `scrub_secrets` knows (among them an `x-api-key: <key>` header line and a header value quoted in an "Invalid header value" error, so a rotated key in those forms is masked too) and the bare header value lines in every Error Log row from Optimus's AI code (an `optimus/ai_fix.py` or `frappe_profiler/ai_fix.py` frame in its error, title or metadata) or holding the stored key, as Frappe inserts it, the rows Frappe inserts from its deferred-insert queue in Redis included; every other row, another app's included, is stored exactly as it was. It normally reads the stored key once per Error Log insert when one is stored (no key is read on a site where none is stored), cuts each text field of a row it masks to 65536 characters, and never raises (except an RQ job timeout, which still stops the job). A row from Optimus's AI code is withheld whenever it cannot be masked ("Optimus withheld this error text: it could not be masked. See logs/optimus.log for the reason."). After an in-place upgrade, a process still running the previous release withholds a row from the AI code and masks only the stored key in other rows, and only once it reads the new hooks. While Optimus profiles a flow, the per-table and per-action breakdowns, index suggestions, the N+1 and slowest-query findings and the session's query count and query time leave these reads out, as Optimus's own queries. When the caller logs an AI failure the HTTP layer already logged, its context (title and `k=v` lines, scrubbed) is appended to the row already written. The scrub's `residual` count checks the stored key first, then known provider key shapes: 0 means no current key and no known provider-shaped key is left in the rows it reads. `SECURITY.md` ("API key handling" and "Known limitations") says when the hook takes effect after an upgrade, and why an image-based or rolling deployment must stop or replace every old process before the migrate.
+- **AI failure rows in the Error Log.** Optimus's own AI failures are written by `ai_fix.log_ai_failure`, the only function on the AI surface that writes an Error Log row: one row per failure, linked to the Optimus Session, with an explicit message scrubbed of secrets by `redaction.scrub_secrets`. For an HTTP failure it names the provider, the call site, the status and the provider's error code (`provider_error=`, only when it is made of lowercase words: letters joined by `_`, `.`, `:` or `-`, at most 64 characters), never the prompt, the reply body or any frame's local variables. That holds when this row cannot be written and the caller logs the error instead: the caller's row shows the status, the call site and `provider_error=` without including administrator-only provider details. When such a row may be missing (its write failed; after a rollback, its existence could not be checked or it could not be queued again; or the rollback callback could not be registered), or a hook that runs after the insert failed (a broken Error Log notification, say: the row is then written, and a caller that logs the same error again writes a second row), one line naming only the error type goes to the `optimus` log (`logs/optimus.log`) at error level, the lowest level Frappe's loggers keep on a production site. These rows are in your backups like any other Error Log row. The AI boundaries detach prompt, reply and URL frames from escaping exceptions. This does not sanitize arbitrary live debugger or telemetry stack capture, developer-mode request snapshots or historical logs; see `SECURITY.md`. An Error Log `before_insert` hook (`optimus.error_log_mask`) masks the stored key, the key shapes `scrub_secrets` knows (among them an `x-api-key: <key>` header line and a header value quoted in an "Invalid header value" error, so a rotated key in those forms is masked too) and the bare header value lines in every Error Log row from Optimus's AI code (an `optimus/ai_fix.py` or `frappe_profiler/ai_fix.py` frame in its error, title or metadata) or holding the stored key, as Frappe inserts it, the rows Frappe inserts from its deferred-insert queue in Redis included; every other row, another app's included, is stored exactly as it was. It normally reads the stored key once per Error Log insert when one is stored (no key is read on a site where none is stored), cuts each text field of a row it masks to 65536 characters, and never raises (except an RQ job timeout, which still stops the job). A row from Optimus's AI code is withheld whenever it cannot be masked ("Optimus withheld this error text: it could not be masked. See logs/optimus.log for the reason."). After an in-place upgrade, a process still running the previous release withholds a row from the AI code and masks only the stored key in other rows, and only once it reads the new hooks. While Optimus profiles a flow, the per-table and per-action breakdowns, index suggestions, the N+1 and slowest-query findings and the session's query count and query time leave these reads out, as Optimus's own queries. When the caller logs an AI failure the HTTP layer already logged, its context (title and `k=v` lines, scrubbed) is appended to the row already written. The scrub's `residual` count checks the stored key first, then known provider key shapes: 0 means no current key and no known provider-shaped key is left in the rows it reads. `SECURITY.md` ("API key handling" and "Known limitations") says when the hook takes effect after an upgrade, and why an image-based or rolling deployment must stop or replace every old process before the migrate.
 
 An unexpected hook failure triggers one independent stored-key read with
 Frappe alone. A row holding that key, including its JSON-escaped or repr-escaped form, is withheld even without an AI frame. A row from the AI code is
@@ -337,7 +346,7 @@ that line, including keys that have since been rotated.
 The "safe report" HTML file Optimus produces (the dev-shop interchange format) **does not** call any LLM at render or open time. When the operator sends you a profile:
 
 - The report is fully self-contained no CDN, no remote fetch on open.
-- AI fix suggestions, if any, are **baked into the report** at analyze time. The HTML embeds the suggestion text as static markup; opening the report locally never triggers an AI call.
+- AI fix suggestions, if any, are **baked into the report** when the background run or Regenerate Reports saves it. The HTML embeds the suggestion text as static markup; opening the report locally never triggers an AI call.
 - The dev shop doesn't need an API key / provider configured to read the report they need it only if they want to **regenerate** suggestions on their own bench.
 
 This means: if you're worried about a profile shared with a third party leaking your code to their LLM provider, the answer is "the profile itself doesn't." But it also means: AI suggestions baked into the report carry the same content the LLM produced review those before sharing if they paraphrase sensitive logic.
@@ -360,45 +369,120 @@ This means: if you're worried about a profile shared with a third party leaking 
 | AI failure rows (the only Error Log writer on the AI surface) | `optimus/ai_fix.py` | `log_ai_failure` |
 | Secret scrubbing of log text | `optimus/redaction.py` | `scrub_secrets` |
 | Cleaning keys out of old Error Log rows | `optimus/maintenance.py` | `scrub_error_log_secrets`, `purge_ai_error_logs` |
-| Masking the key in Error Log rows as Frappe inserts them | `optimus/error_log_mask.py` | `mask_error_log` (the Error Log `before_insert` hook) |
+| Masking the key in Error Log rows as Frappe inserts them | `optimus/error_log_mask.py` | `mask_error_log` (the Error Log before_insert hook) |
 | Per-type exclusion gate | `optimus/ai_fix.py` | `is_finding_type_excluded` |
 | On-demand entry points | `optimus/api.py` | `refill_ai_suggestions` (the "Refresh AI suggestions" button), `test_ai_connection` (Optimus Settings), `ai_capabilities` (which AI buttons the form shows) |
-| Auto-suggest entry point | `optimus/analyze.py` | `_enrich_findings_with_ai_suggestions` |
+| Auto-suggest entry point | `optimus/analyze.py` | `_queue_analyze_time_ai` |
+| Refresh worker and recovery | `optimus/ai_jobs.py` | `start_refresh`, `run_ai_refresh_slice`, `recover_pending` |
+| Durable SQL transitions | `optimus/ai_refresh_store.py` | `admit`, `claim`, `begin_attempt`, `settle_attempt` |
+| Report replacement | `optimus/report_refresh.py` | `render_report` |
+| Phase 2 queue | `optimus/line_profile/jobs.py` | `request`, `run`, `recover_pending` |
+| Prompt privacy | `optimus/ai_privacy.py` | `query_text`, `private_action`, `raw_values_enabled` |
+| Persisted JSON snapshots | `optimus/recording_bundle.py` | `read`, `encode` |
 | Settings dataclass | `optimus/settings.py` | `OptimusConfig` |
 
 ---
 
-## 10. Aerele Managed Provider (v0.14.x+)
+## 10. Managed provider status
 
-`Aerele` is a hosted option for customers who don't want to bring their own Anthropic / OpenAI key. The customer purchases a **fixed token pack** (e.g. "10,000 tokens for ₹X") up front; AI fix calls draw from that pack until it's exhausted, at which point the customer buys another pack. There is no subscription, no monthly reset and no overage when the pack runs out, calls are refused until a new pack is purchased.
+Aerele is disabled in the provider matrix and Settings options until its billing
+and managed gateway are production-ready. It cannot currently be selected.
+The retained session-attribution support is internal preparation, not a token-pack
+service or a local wallet. No release date or purchase flow is promised here.
 
-**Architecturally the Optimus side is identical to the Anthropic / OpenAI / Kimi / DeepSeek entries:** the operator picks `Aerele` as the provider, pastes the key Aerele issued into **API Key** and every call hits Aerele's URL. There is no Optimus-side bookkeeping no balance cache, no pre-call gate, no Refresh button, no daily sync. **All token accounting and pack validation happens on Aerele's separate Frappe site** (the URL in the provider matrix above). The bench is a dumb client.
+## 11. Operator diagnostics
 
-### 10.1 Onboarding
+Start with the Session's refresh state and fixed reason, then check the worker
+queue and scheduler. A Ready profile remains usable even if optional AI stops.
+Regenerate Reports repairs pending HTML without spending provider tokens. Only
+explicit Retry can resume a stopped run; uncertain calls need a deliberate
+choice because the provider might already have billed them.
 
-1. Sign up at [aerele.in/optimus/signup](https://aerele.in/optimus/signup) and purchase a token pack at [aerele.in/optimus/billing](https://aerele.in/optimus/billing).
-2. In Optimus Settings ▸ AI Fix Suggestions:
-   - Set **Provider** to `Aerele`.
-   - Paste the issued key into **API Key**.
-   - Save.
+Error Log entries on this surface use the scrubbed chokepoint. Review counts,
+fixed error kinds and HTTP status. Do not export prompts, row text, credentials
+or recording identities into tickets. Type-only fallback breadcrumbs go to
+`logs/optimus.log`; SQL/Redis outages can prevent an Error Log row from being
+written. Absence of a row does not establish success.
 
-That is the entire integration. `ai_base_url` and `ai_model` use Aerele's defaults (`https://api.aerele.in/optimus/v1` + the upstream model Aerele has provisioned for the customer); leave them blank unless Aerele tells you otherwise.
+### Guardrail reference
 
-### 10.2 Where the token pack lives
+A `block` rule may trigger one bounded repair; remaining unsafe code is removed.
+`headings` alone never removes code. `truncated` removes incomplete code without
+repair. `advise` and `note` add explanations without removing code or sending
+another request. These checks do not prove semantic correctness.
 
-The customer manages their pack entirely on `aerele.in`: sign-ups, purchases, remaining-balance display, usage history. Optimus never sees, displays, or caches the remaining balance. Each AI call is validated server-side on every request by Aerele's Frappe site; pack-exhausted and rate-limit refusals surface through `_http_post`'s existing 4xx handling with the response body's error text.
+| Code | Tier | Meaning or corrective action |
+| --- | --- | --- |
+| `ungrounded` | block | Diff lines must be copied verbatim from the shown source; these were not: the reported location. |
+| `no-source-diff` | block | No source was shown, so the fix must not contain `-` or context lines. |
+| `no-op-diff` | block | The diff changes nothing (removed and added lines are identical). |
+| `raw-sql` | block | New code must not call `frappe.db.sql` / `frappe.db.multisql` (the reported location); use `frappe.get_list` / `frappe.get_all` / `frappe.db.get_values` / `frappe.qb`. |
+| `raw-ddl` | block | Indexes are never raw `ALTER TABLE` / `CREATE INDEX`: use the field's Search Index, a `search_index` Property Setter, or `frappe.db.add_index("DocType", [cols])` in `on_doctype_update()` of your own DocType or in a patch. |
+| `sql-format-injection` | block | SQL values must be parameters (`%(name)s` with a dict), not f-strings, `.format`, `%` or `+` (the reported location). |
+| `ignore-permissions` | block | Do not add `ignore_permissions=True`. |
+| `allow-guest` | block | Do not add `allow_guest=True`. |
+| `permission-downgrade` | block | The original code checked permissions (the reported location); preserve the permission semantics of the call you replace. |
+| `eval-exec` | block | Remove `eval` / `exec` / `safe_exec` (the reported location). |
+| `unsafe-deserialize` | block | Do not deserialise with `pickle` / `marshal` (the reported location); use `json` or `frappe.parse_json`. |
+| `shell-exec` | block | Do not run shell commands (`subprocess`, `os.system`) (the reported location); a performance fix never needs one. |
+| `set-user-admin` | block | Do not switch to Administrator with `frappe.set_user("Administrator")`; keep the caller's permissions. |
+| `manual-commit` | block | Remove `frappe.db.commit()` / `frappe.db.rollback()`; Frappe commits the request. |
+| `multitenant-cache` | block | No `functools.lru_cache` / `@cache` / module-level cache (the reported location): use `@request_cache` or `@redis_cache(ttl=...)` from `frappe.utils.caching`, or `frappe.get_cached_value`. |
+| `enqueue-without-after-commit` | block | `frappe.enqueue(...)` must pass `enqueue_after_commit=True` (the reported location). |
+| `headings` | block | Use exactly the headings **Diagnosis**, **Fix**, **Why it works**, **Verify**, in order, each at the start of its own line (the reported location). |
+| `untranslated` | block | Wrap user-facing text in `_()`: `frappe.throw(_("..."))` (the reported location). |
+| `whitelist-type-hints` | block | Annotate every argument of a `@frappe.whitelist()` function (the reported location). |
+| `qb-orderby-positional` | block | `.orderby(field, order=frappe.qb.desc)`: `order` must be a keyword. |
+| `single-doctype-value` | block | Single DocType values use `frappe.db.get_single_value` / `frappe.db.set_single_value` (the reported location). |
+| `modify-not-saved` | block | In `the reported location` a `self.<field> = ...` is never saved: use `self.db_set(field, value)`. |
+| `child-modify-while-iterating` | block | Do not add or remove rows of a child table while iterating it; build a new list. |
+| `module-state` | block | No module-level `x = frappe....` values (the reported location); they leak across sites. Compute inside the function. |
+| `local-state` | block | Do not store state on or replace a Frappe request proxy (the reported location); use `@request_cache` for per-request values. |
+| `unchecked-permission` | block | The result of `frappe.has_permission(...)` is ignored: pass `throw=True`. |
+| `truncated` | truncated | The answer was cut off; its incomplete code is removed. |
+| `dynamic-import` | advise | Do not import modules by name at runtime (the reported location); use a normal import. |
+| `metadata-index` | advise | Do not index Frappe metadata column the reported location alone or first; index the business column from the WHERE, or a composite led by it. |
+| `customize-form-index` | note | Customize Form has no Search Index option in Frappe v16. Index one column of your own DocType with its Search Index checkbox, one column of another app's DocType with a `search_index` Property Setter, and several columns with `frappe.db.add_index(...)` in `on_doctype_update()` of your own DocType or in a patch. |
+| `context-truncated` | note | the model saw only part of the prompt because its context window is smaller than the prompt. Raise it (Ollama: OLLAMA_CONTEXT_LENGTH or a Modelfile PARAMETER num_ctx) and set the same value in Optimus Settings > Context window (tokens). |
+| `markdown-image` | note | an image in the answer was removed; the report never loads remote content. |
+| `external-link` | note | links outside the Frappe and ERPNext documentation were removed from the answer. |
+| `echoed-data-tag` | note | the answer echoed captured-data markers; they were removed. |
 
-When a pack runs out, the next AI fix attempt from Optimus surfaces Aerele's "pack exhausted purchase a new one" message as an inline `AiFixError` alert. The operator then visits aerele.in, buys another pack and the existing API key automatically draws from the new pack no Optimus re-configuration needed.
+### Error Log reference
 
-### 10.3 What additionally leaves the host
+These fixed titles cover AI calls, refresh, report and recording helpers that
+share the scrubbed logging path. The same failure can accumulate caller context
+in one row rather than producing one row for every title.
 
-Compared to the per-pathway data inventory in § 2, picking `Aerele` adds nothing structural over what the other hosted providers already send:
-
-- The customer's Aerele API key as `Authorization: Bearer <key>` on every call to `api.aerele.in`.
-- The same OpenAI-shaped finding / steps payload from sections 2.1 and 2.2.
-
-What is **NOT** sent (matches § 3):
-
-- The bench's `encryption_key` or any other site secret beyond the Aerele key itself.
-- Cross-session correlation IDs, recording UUIDs, schema, or DocType names beyond what the finding-specific payload already includes.
-- Heartbeat / pack-status / usage-counting calls. Aerele tracks consumption from the actual `/chat/completions` traffic; the bench never pings out otherwise.
+| Title | Operator action |
+| --- | --- |
+| `optimus AI Phase 2 context` | Check the Phase 2 input and source permissions; unavailable context may reduce suggestion coverage. |
+| `optimus AI admission after analyze` | The profile is saved; check AI enablement, worker availability and admission capacity, then refresh explicitly. |
+| `optimus AI refresh accounting recovered` | A retried SQL settlement succeeded; this is not another provider call. Check database health if it recurs. |
+| `optimus AI refresh admission` | Check worker, database and capacity availability; a refused request has not established a new running refresh. |
+| `optimus AI refresh enqueue` | Restore the queue and scheduler; committed dispatch intent can be redelivered without replacing the run. |
+| `optimus AI refresh item` | Check the failure kind and breaker state; successful prior items remain saved, and known tokens remain accounted. |
+| `optimus AI refresh recovery` | Restore database access and the scheduler; do not delete Calling attempts to clear a stuck run. |
+| `optimus AI refresh report` | Saved answers remain available; use Regenerate Reports after resolving the rendering or attachment failure. |
+| `optimus AI refresh result storage` | The provider may have returned a usable answer but local storage failed; inspect reported usage before retrying. |
+| `optimus AI refresh status` | State is unknown; restore database access and poll again before editing or admitting more work. |
+| `optimus AI refresh worker` | Inspect terminal state and uncertainty after recovery; preserve completed findings and avoid repeating an unknown call automatically. |
+| `optimus AI worker availability` | Check worker discovery and that a worker listens on the configured AI queue before admitting work. |
+| `optimus Phase 2 admission cleanup` | Capture admission failed and cleanup also failed; inspect the recording actor and generation before recovery. |
+| `optimus Phase 2 capture recovery` | Retry exact owned capture cleanup after Redis recovers; do not delete unrelated recording flags. |
+| `optimus Phase 2 enqueue` | Restore a long-queue worker and Redis; the committed generation can be redelivered by the scheduler. |
+| `optimus Phase 2 queue recovery` | Restore database, Redis and scheduler access; inspect expired generations before an explicit retry. |
+| `optimus Phase 2 recovery` | Inspect the failed generation and input availability; a new capture is required if input expired. |
+| `optimus Phase 2 report` | Phase 2 findings can remain Ready; regenerate the report without repeating the analysis. |
+| `optimus Phase 2 worker` | Check bounded capture input and the attempt count; retry valid input explicitly or record a new pass. |
+| `optimus ai_fix` | Check the fixed error kind and HTTP status; fix authentication, quota, context or endpoint settings before an explicit retry. |
+| `optimus analyze` | Inspect the core analysis failure separately from optional AI; retry only after its input and infrastructure are available. |
+| `optimus auto-arm phase 2` | The core profile remains saved; inspect capture availability and start a manual pass when appropriate. |
+| `optimus load recordings bundle` | Check the exact private attachment, size and format; re-record missing, corrupt or rejected legacy input. |
+| `optimus persist recordings` | The finalized snapshot was not saved; check file storage before relying on later report regeneration. |
+| `optimus recording cache read` | Check live Redis input availability; a validated saved JSON bundle may be available for report refresh. |
+| `optimus recording sidecar read` | A live sidecar could not be read; inspect Redis availability and expect reduced capture detail. |
+| `optimus recording tree load` | The live tree failed validation or signature checks; do not enable unsigned pickle loading as a general workaround. |
+| `optimus recording tree read` | A live tree could not be read; inspect Redis availability and use a fresh recording if necessary. |
+| `optimus regenerate report` | Resolve the rendering or file-storage failure and regenerate; no provider call is needed. |
+| `optimus save recording File` | Check private-file storage and database availability; do not attach another session's file as a substitute. |

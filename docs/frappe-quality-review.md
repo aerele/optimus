@@ -1,5 +1,7 @@
 # Frappe Quality Code Review : reference checklist
 
+The shipped [guardrail reference](AI-FIXING.md#guardrail-reference) distinguishes blocking rules, advice and notes. See [acceptance evidence](AI-ACCEPTANCE.md) for the remaining model and deployment checks.
+
 > **Source:** https://github.com/frappe/skills/blob/main/skills/quality-code-review/SKILL.md
 > **Synced:** 2026-09-13
 > **Maintained copy.** This checklist is the reference behind `FRAPPE_REVIEW_RULES` in `optimus/ai_prompts.py`, which distils its performance-fix subset (the rules a fix's `+` lines can break) into the AI-fix prompt; the full checklist is not sent. Re-sync this file when Frappe updates the upstream skill, then check that `FRAPPE_REVIEW_RULES` and its fact pins in `optimus/tests/test_ai_prompts.py` still hold.

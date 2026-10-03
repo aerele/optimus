@@ -72,6 +72,15 @@ The baseline remains unfinished until the owner labels its answers. The CI workf
 checks new Frappe Semgrep findings against the PR base and reports existing findings
 separately. It also runs Semgrep/RQ tests; it never contacts the reference model.
 
+## Final acceptance evidence
+
+Follow [AI acceptance](../../docs/AI-ACCEPTANCE.md) for the prescribed reference
+model, context variants, baseline comparison and remaining deployment gates.
+`--num-ctx` records server metadata only; it does not change server or Optimus
+configuration. Confirm both before running. Stored answers are a diagnostic
+fixture, not a new reference-model evaluation or owner confirmation. CI checks
+guardrails and tooling but does not establish a live model-quality verdict.
+
 ## Limits
 
 The corpus represents one test flow. It carries source windows rather than full

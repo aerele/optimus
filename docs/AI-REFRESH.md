@@ -135,7 +135,7 @@ progress or a fixed explanation. It no longer returns completed inline work.
 a stopped run; `retry_uncertain` is explicit consent to possible duplicate
 provider charges. Resume preserves the original selection time and cap.
 
-`ai_refresh_status` requires session read permission and returns counts, states
+`ai_refresh_status` requires the profiler role and session read permission, and returns counts, states
 and usage. Only an actor who may update the session receives a new selection
 plan. `cancel_ai_refresh` requires the action gate and binds its run identity
 to that session. Polling and cancellation are not rate-limited and do not need
@@ -193,12 +193,12 @@ checks on disposable test-owned tables. Those checks exercise real row locks
 and isolation through a narrow database adapter; they do not replace Frappe
 document-hook or end-user acceptance tests.
 
-Journal history cleanup belongs to the privacy/retention work
-in the security follow-up. Until then, journal history is retained; uncertain
-attempts must not be pruned while their parent exists, because that would erase
-the protection against silently repeating an unknown call. Final model
-evaluations and both-database end-user/deployment acceptance remain release
-requirements, not results established by these unit tests.
+Deleting a Session deletes its journal in the same SQL transaction. History,
+including uncertain attempts, is retained while its parent exists; pruning it
+could erase the protection against silently repeating an unknown call. Final
+model evaluations and both-database end-user/deployment acceptance remain
+release requirements. Track the evidence and open gates in
+[release acceptance](AI-ACCEPTANCE.md).
 
 ## Capture admission, bounded inputs and retention
 

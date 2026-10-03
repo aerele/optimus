@@ -1,5 +1,7 @@
 # Frappe data-layer idioms for AI fix suggestions
 
+The shipped [guardrail reference](AI-FIXING.md#guardrail-reference) distinguishes blocking rules, advice and notes. See [acceptance evidence](AI-ACCEPTANCE.md) for the remaining model and deployment checks.
+
 This is the performance-fix subset behind `FRAPPE_DEV_IDIOMS` in `optimus/ai_prompts.py`. It was checked against the local Frappe v16 sources. The broader upstream reference is [frappe-app-dev](https://github.com/frappe/skills/tree/main/skills/frappe-app-dev).
 
 The prompt focuses on existing code: batching reads, preserving permissions and transactions, and avoiding state shared across sites. App scaffolding and operations are outside that scope.

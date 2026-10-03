@@ -201,7 +201,7 @@ Feature controls, all under **Optimus Settings → AI Fix
 Suggestions → Use the LLM for**:
 
 - **Fix suggestions on findings**: enables eligible finding fixes through
-  **Refresh AI suggestions** and the automatic pass during analysis.
+  **Refresh AI suggestions** and the background pass after profiling is Ready.
 - **Index recommendations**: retired. The report builds index advice from
   analyzer data and DocType metadata, without calling the AI.
 - **Humanized "Steps to Reproduce"**: rewrites the auto-captured
@@ -325,7 +325,7 @@ Five sentences:
 4. **Frontend capture wraps WHATWG primitives, not Frappe APIs.** `optimus_frontend.js` hooks `window.fetch` and `XMLHttpRequest.prototype.open/send` directly the same approach every production APM library uses. Survives future Frappe upgrades because `fetch` and `XHR` are stable web platform standards, while jQuery `ajaxComplete` hooks would break when Frappe drops jQuery.
 5. **Ten analyzers, all pure functions.** Per-action breakdown, top-N slow queries, N+1 (by callsite), EXPLAIN flags, index suggestions (verified against schema), per-table breakdown, Python call tree (v0.3.0), redundant calls (v0.3.0), infra pressure (v0.5.0), frontend timings (v0.5.0). Each is independently testable from JSON fixtures with no Frappe DB access.
 
-For the full architecture (data-flow diagrams, hook order, edge cases, extension points), read the inline docstrings in [`optimus/analyze.py`](./optimus/analyze.py) and [`optimus/renderer.py`](./optimus/renderer.py).
+For the full architecture (data-flow diagrams, hook order, edge cases, extension points), read the inline docstrings in [`optimus/analyze.py`](./optimus/analyze.py) and [`optimus/renderer.py`](./optimus/renderer/__init__.py).
 
 ---
 
@@ -460,13 +460,13 @@ When a session moves to `Ready`, the source recordings in Redis (`RECORDER_REQUE
 
 ## Scheduler-disabled sites
 
-On sites where `bench disable-scheduler` is in effect common on dev, demo and Frappe Cloud trial instances the analyze RQ queue has no worker consuming it. v0.5.0+ detects this via `frappe.utils.scheduler.is_scheduler_disabled()` and falls back to `frappe.enqueue(now=True)`, which runs analyze **synchronously inside the stop request**.
+For core profiling, Optimus checks `frappe.utils.scheduler.is_scheduler_disabled()` and can fall back to `frappe.enqueue(now=True)`, running analyze **synchronously inside the stop request**. A disabled scheduler does not itself prove that workers are absent. Optional AI and Phase 2 analysis always queue work; they never use this inline fallback.
 
 Consequences:
 
 - **The stop API blocks for the analyze duration** (typically 2–20 seconds). The widget transitions from "Stopping…" directly to "Report ready" or "Analyze failed" skipping the intermediate "Analyzing…" state because the session is already finalized by the time the stop response arrives.
 - **A safety cap (`optimus_inline_analyze_limit`, default 50) refuses inline analyze on huge sessions** to avoid gunicorn's 120-second request timeout. When a session exceeds the cap, it's marked `Failed` with an actionable error pointing the user to `bench enable-scheduler` and the **Retry Analyze** button.
-- **`retry_analyze` and the janitor's auto-stop path also use the scheduler-aware enqueue**: you can't accidentally get stuck with a Failed session that won't retry.
+- **`retry_analyze` and the janitor's auto-stop path also use the scheduler-aware enqueue**. Input loss or infrastructure failure can still prevent completion; inspect the reported failure before retrying.
 
 ---
 
@@ -553,7 +553,7 @@ or analyzed.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Sensitivity Profile** | `Recommended` | One-knob preset for the 9 detection thresholds below. **Strict** catches more (lower thresholds, more findings, more noise). **Relaxed** catches less. **Recommended** is the shipped default and automatically tracks future tuning across upgrades. **Custom** lets you hand-tune the individual fields they stay locked under the named presets. Display filters, Phase-2, capture, retention and AI settings are **not** affected by the profile. |
+| **Sensitivity Profile** | `Recommended` | One-knob preset for the 9 detection thresholds below. **Strict** catches more (lower thresholds, more findings, more noise). **Relaxed** catches less. **Recommended** is the shipped default and automatically tracks future tuning across upgrades. **Custom** lets you hand-tune the individual fields they stay locked under the named presets. Profiles also set the Phase 2 run/expansion limits and automatic AI finding cap. Manual AI refresh, provider/privacy, display filters, capture and retention settings are independent. |
 
 #### Analyzer Thresholds section
 
@@ -627,6 +627,14 @@ sections. The index setting is read-only and has no effect.
 | **Suggest AI fixes in the report by default** | ✓ on | When AI is enabled, queue optional fixes after profiling is Ready. Requires an AI worker and uses provider tokens; saved profiling results survive AI failure. |
 | **Max auto-suggested findings per session** | `5` | Cap on how many findings get an automatic suggestion highest-severity, highest-impact first. `0` = every eligible finding (can be slow + costly on big sessions). _Strict 0 · Recommended 5 · Relaxed 3._ |
 
+#### Refresh and privacy settings
+
+| Field name | Default | Meaning |
+| --- | --- | --- |
+| `ai_context_tokens` | 0 | Model context window. Zero uses the provider default; for OpenAI-compatible that is 4096. Set the server's actual window too. |
+| `ai_refresh_max_findings` | 20 | Findings per manual refresh, including Regenerate all. Zero removes the item cap, not the run deadline. This is not a limit on the number of refreshes per session. |
+| `ai_send_raw_values` | 0 | Default-private SQL/Steps input. Opt in only when sending business values to the provider is acceptable; source, titles and schema can still disclose information. |
+
 #### Privacy & Operations section
 
 **Send raw values to the AI provider** is off by default. SQL literals/comments
@@ -650,8 +658,8 @@ and changing the destination clears an unchanged stored key. See the
 Knobs that don't have a UI yet usually because they're emergency
 levers, performance trade-offs, or security hardening that an admin
 should not be flipping casually. All live in
-`sites/<your-site>/site_config.json`; all are optional; defaults are
-inert.
+`sites/<your-site>/site_config.json`; all are optional. Defaults still control queue budgets, rate limits and safety
+bounds; they are not all inert.
 
 A handful of them (the threshold ones `optimus_redundant_*_threshold`,
 `optimus_n_plus_one_threshold`, `optimus_sampler_interval_ms`) also work
@@ -664,6 +672,47 @@ as pre-DocType fallbacks. The DocType row wins if both are set.
 | `optimus_ai_reask` | `True` | When an AI fix suggestion breaks a block rule the guardrail checks (code not copied from the shown source, new raw SQL or DDL, a removed permission check, ...), send the model ONE follow-up turn listing the broken rules; the rewrite is kept only if it has the four headings and breaks fewer block rules. Advise rules (conventions no pinned semgrep rule checks) never cost a follow-up turn. Skipped when the first answer was cut off, when half the timeout budget is used or when the follow-up would not fit the context window. Set `False` to avoid the extra round-trip on a slow local model. |
 | `optimus_max_recordings_per_session` | `200` | Soft cap on HTTP requests + bg jobs per session. When hit, further recordings are silently dropped and the report shows a truncation banner. |
 | `optimus_inline_analyze_limit` | `50` | Max recordings allowed for inline analyze on scheduler-disabled sites. Sessions larger than this are refused with an actionable error pointing at `bench enable-scheduler` + the Retry Analyze button. |
+
+### Background AI jobs
+
+| Key | Default | Accepted range | Purpose |
+| --- | --- | --- | --- |
+| `optimus_ai_queue` | long | Lowercase name, 1 to 40 characters | Worker queue; letters, digits, underscores and hyphens, starting with a letter. |
+| `optimus_ai_slice_seconds` | 120 | 30 to 1800 | Time budget before queuing a continuation; an in-flight call can extend a slice. |
+| `optimus_ai_refresh_max_seconds` | 3600 | 60 to 86400 | Total run deadline, independent of the finding cap. |
+| `optimus_ai_max_active_refreshes` | 2 | 1 to 1000 | Site manual-refresh capacity; manual requests also have a per-user cap of two. |
+
+Invalid queue/budget settings are refused. Automatic finding runs reserve a
+Session but bypass manual capacity counts. A worker must listen on the AI
+queue; Phase 2 also needs `long`. Keep the scheduler enabled for recovery.
+An idle or missing worker has no finite queue-wait guarantee. SQL holds progress
+and usage, while Redis handles delivery. See [refresh operations](docs/AI-REFRESH.md)
+for timeouts, uncertainty, cancellation and bounded explicit resume.
+
+### Per-user request limits
+
+`optimus_rate_limits` defaults to no overrides. Set an action to `[limit, seconds]`
+to override its fixed-window policy. Malformed overrides retain the defaults.
+These counters are per site, authenticated user and action, not per IP. Gates
+run first; a Redis failure refuses the limited action. Polling and cancellation
+have no rate limit. Force Stop uses the stop policy defaults but a separate bucket
+named `force_stop_phase2`. Phase 2 batch retry has at most five runs and counts
+against `retry_phase2_analyze` for each admitted endpoint call.
+
+| Action | Requests | Window seconds |
+| --- | --- | --- |
+| `refill_ai_suggestions` | 6 | 3600 |
+| `test_ai_connection` | 10 | 60 |
+| `start` | 10 | 60 |
+| `stop` | 20 | 60 |
+| `start_line_profile_pass` | 10 | 60 |
+| `stop_line_profile_pass` | 20 | 60 |
+| `force_stop_phase2` | 20 | 60 |
+| `retry_phase2_analyze` | 5 | 60 |
+| `regenerate_reports` | 30 | 60 |
+| `retry_analyze` | 5 | 60 |
+| `download_pdf` | 20 | 60 |
+| `export_session` | 20 | 60 |
 
 ### Analyze pipeline knobs
 
@@ -782,6 +831,9 @@ Contract:
 See [`optimus/analyzers/base.py`](./optimus/analyzers/base.py) for the full type contract and the analyzers under [`optimus/analyzers/`](./optimus/analyzers/) for working examples (each is a self-contained module `n_plus_one.py`, `call_tree.py`, `redundant_calls.py` and `infra_pressure.py` are good starting points).
 
 ---
+
+For the staged AI changes, use the [deployment and acceptance checklist](docs/AI-ACCEPTANCE.md).
+Unit and CI success do not establish model quality or production rollout acceptance.
 
 ## Verification checklist
 

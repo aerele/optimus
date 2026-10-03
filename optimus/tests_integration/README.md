@@ -1,139 +1,84 @@
-# `optimus.tests_integration`: real-bench integration tests
+# Real-bench integration tests
 
-A sibling to `optimus/tests/`. The unit suite (`optimus/tests/`) runs in
-~6 seconds against a Frappe stub and ships with the pure-pytest CI
-workflow. This directory holds tests that need a **live Frappe bench**
-real MariaDB, real Redis, real RQ workers and runs in CI via
-`.github/workflows/integration.yml` against a bench provisioned by
-`.github/helper/install.sh`.
+This directory uses the real Frappe v16 runner, MariaDB, Redis and workers.
+The separate `optimus/tests/` suite uses controlled fakes when a bench is absent.
+`.github/workflows/integration.yml` provisions a disposable bench using
+`.github/helper/install.sh` and invokes the modules below individually. No real
+AI provider is contacted by this workflow.
 
-## Why a separate directory
+## Current CI coverage
 
-The unit suite's `conftest.py` installs a Frappe **stub** at collection
-time so `from optimus import …` works without a bench. Integration
-tests need the **real** Frappe; running them under the stub would
-explode. Keeping the two suites in sibling directories means:
+| Module | Boundary exercised |
+| --- | --- |
+| `test_install_smoke` | Installation, declared DocTypes and readable Settings. |
+| `test_recording_lifecycle_e2e` | Start, capture, stop and persisted profiling results through the real bench. |
+| `test_atomic_lua_merge_concurrent` | Concurrent real Redis/Lua recording and status merge, first-writer values and job identity preservation. |
+| `test_regenerate_reports_idempotent` | Attached report generation, deterministic repeated rendering and updated inputs. |
+| `test_phase2_tool_orphan_recovery` | Monitoring-tool ownership and cleanup; real Redis capture admission, losing start, exact-generation stop, bounded counters, TTLs and eviction. |
+| `test_safe_report_self_contained_on_real_bench` | Attached Safe HTML contains no external assets, scripts or bench-local references. |
+| `test_janitor_sweeps_actually_delete` | Terminal-session retention and attached File deletion, with active sessions preserved. |
 
-* `pytest optimus/tests/` collects ONLY unit tests (the integration
-  directory is never traversed by the unit workflow).
-* `bench --site test_site run-tests --app optimus --module
-  optimus.tests_integration.<name>` collects ONLY integration tests
-  (Frappe's test runner already skips `tests/` because it expects each
-  test class to subclass `frappe.tests.utils.FrappeTestCase`).
+AI Quality separately runs `optimus/tests/test_ai_refresh_sql.py` against
+MariaDB and PostgreSQL disposable tables. These are real isolation, lock and
+transaction tests through a narrow adapter, not real Frappe document or
+permission tests. Unit and real-RQ tests cover interruption, duplicate delivery,
+uncertain usage, stale ownership, rollback and bounded retry interleavings.
+The [acceptance checklist](../../docs/AI-ACCEPTANCE.md) distinguishes these
+results from the pending end-user and deployment checks.
 
-## Running locally
+## Running tests safely
 
-You need a Frappe bench with optimus installed. The CI helper script
-provisions one from scratch; a local developer with an existing bench
-can run directly:
+Use the CI-provisioned disposable bench for this suite. Some fixtures delete all
+sessions belonging to the current test user; they are unsafe on a populated site.
+Do not point this suite at a production site or assume a transaction rollback
+undoes worker commits, File writes or Redis changes.
 
-```
-cd ~/frappe-bench
-bench --site optimus.local run-tests \
-    --app optimus \
-    --module optimus.tests_integration.test_install_smoke
+For this remediation's local acceptance, only `optimus.local` and
+`optimus-pg.local` are approved. Back up first, use fake credentials and isolated
+fixture identities, and delete exactly the created rows/files/keys. Starting
+workers or services needs the owner's authorization. Never switch the owner's
+checkout, run its migration or assume it imports a worktree. A worktree-based
+probe must insert that path before imports and assert every loaded Optimus
+module resolves there. Do not publish recording identities or row text.
 
-bench --site optimus.local run-tests \
-    --app optimus \
-    --module optimus.tests_integration.test_recording_lifecycle_e2e
-```
+CI runs this command on its freshly provisioned `test_site`:
 
-Both modules complete in well under a minute on a warm bench.
-
-To run BOTH modules in one go:
-
-```
-bench --site optimus.local run-tests --app optimus
-```
-
-(That picks up every `FrappeTestCase` subclass under
-`optimus/tests_integration/`. The pure-pytest unit suite in
-`optimus/tests/` is NOT a `FrappeTestCase` subclass, so it's not
-picked up here.)
-
-## Fixtures (`conftest.py`)
-
-* **`test_site`**: yields `frappe.local.site` (the site the runner
-  connected to). Tests rarely need it explicitly but it's useful for
-  shelling out to `bench --site {test_site} …`.
-* **`cleanup_session`**: autouse. After every test, hard-deletes any
-  `Optimus Session` rows for the current user + clears the user's
-  Redis active-session pointer. `FrappeTestCase` already rolls back
-  per-test, but the analyze pipeline writes through a background-worker
-  connection that escapes the rollback in production flows same for
-  Redis state. The cleanup is defence-in-depth.
-* **`seeded_session`**: convenience wrapper. Calls `api.start`, yields
-  the `session_uuid`, then on teardown calls `api.stop` + waits up to
-  60 s for the session to land on a terminal state (`Ready` /
-  `Failed`).
-
-## The "no flakiness" rule
-
-A flaky integration test gets **quarantined**, not retried.
-
-If a test fails intermittently in CI:
-
-1. Within 24 hours, add `@pytest.mark.skip(reason="quarantined: see #N")`
-   on the test method.
-2. File a GitHub issue with the CI logs (uploaded as the
-   `integration-logs` artifact on failure).
-3. The next PR that comes through fixes the root cause OR removes the
-   test if the underlying behaviour can't be made deterministic.
-
-Retry-on-failure is OFF. We want flakiness to surface, not get masked.
-
-## Adding a new integration test
-
-The harness pattern from the existing two tests:
-
-```python
-# optimus/tests_integration/test_<feature>.py
-import frappe
-from frappe.tests.utils import FrappeTestCase
-
-
-class TestMyFeature(FrappeTestCase):
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        frappe.set_user("Administrator")  # or another fixture user
-
-    def test_my_invariant(self):
-        # Direct frappe.db / frappe.cache / api calls no mocks.
-        ...
+```sh
+bench --site test_site run-tests --app optimus \
+  --module optimus.tests_integration.test_install_smoke
 ```
 
-Add the new module to `.github/workflows/integration.yml`'s "Run the
-integration suite" step (one `bench run-tests --module …` line per
-file). Each module gets its own log artifact on failure.
+Repeat with a module listed above. The workflow records a separate log for each
+and fails if any fails. It does not retry a failed test to produce green output.
+Use the workflow's installed Python/Frappe versions when reproducing CI; local
+framework differences can change collection and runner behavior.
 
-## Extraction roadmap
+## Fixture and runner distinction
 
-The architecture review identified seven high-ROI integration scenarios
-beyond what this directory ships today. Each is a separate follow-up PR
-using the harness above:
+`conftest.py` contains pytest fixtures. Frappe's unittest-based `bench run-tests`
+does not execute pytest autouse fixtures. Each Frappe test class must arrange
+its own setup/teardown. In particular, do not rely on `cleanup_session` to undo
+a worker's committed writes. Its helper deletes every current-user Session,
+so it is not acceptable cleanup for the owner's test sites.
 
-| Test | What it adds | Catches |
-|---|---|---|
-| ✓ `test_atomic_lua_merge_concurrent.py` (done in v0.12.1) | real-Redis + real-Lua concurrent test exercising the v0.7.x trilogy's invariants (recording+status race, distinct job_ids, setdefault first-writer-wins, fallback path) | Field loss under worker contention |
-| ✓ `test_regenerate_reports_idempotent.py` (done in v0.12.4) | calls `api.regenerate_reports` twice and byte-diffs the two HTML outputs (patches `renderer._now_iso` for determinism), confirms attachment lands on `raw_report_file`, confirms session-field changes produce different HTML, confirms Failed-status sessions still re-render | Re-render path is byte-stable across consecutive calls; silent caching / non-determinism would break upgrade roll-forward |
-| ✓ `test_phase2_tool_orphan_recovery.py` (done in v0.12.5) | leaks `sys.monitoring` tool 2 as `line_profiler`, calls `optimus._startup_probe_tool2()`, asserts the leak is reclaimed (tool freed + events cleared); also asserts the probe respects non-line_profiler ownership boundaries and is a no-op when tool 2 is free | The v0.7.x `fbf3179` fix holds across real worker bounces without it, a worker line-traces every subsequent request → CPU peg + frozen UI |
-| ✓ `test_safe_report_self_contained_on_real_bench.py` (done in v0.12.6) | renders a session via `api.regenerate_reports`, reads the on-disk attached HTML, asserts no remote-fetch URLs (`src=https?:` / `<link href=https?:` / `@import` / `url(http`), no `<script>` tags (inline or external), no bench-local asset references (`/assets/`, `/files/`, `/api/method/`) | Self-containment canary holds when assets come through real Frappe file_manager paths load-bearing dev-shop interchange guarantee |
-| ✓ `test_janitor_sweeps_actually_delete.py` (done in v0.12.7) | seeds Optimus Sessions with controlled `started_at` + status, runs `janitor.sweep_old_sessions`, asserts: 100-day Ready session deleted, 30-day Ready session kept, 100-day Analyzing session kept (terminal-state-only contract), attached File rows cascade-deleted alongside parent session | Daily retention cron actually deletes (not just marks); attached file rows don't orphan; active sessions untouched regardless of age |
-| `test_file_permission_hook.py` (deferred, PR-0b) | real-bench `has_controller_permissions` check on a File: a public non-Optimus File for Guest/a stranger, an Optimus Session report file for System Manager, for the recording user, and for a stranger, plus a read-sharee (DocShare, not a role) denied the `recordings_file` snapshot, asserting the PR-0b fix (`optimus.permissions.file_has_permission` deferring with `_no_objection()`, which is `True` on Frappe 16 and `None` on Frappe 15, and `recordings_file` joining `_GATED_FIELDS`) holds against Frappe's actual hook-merging and installed-app order; on a Frappe 15 bench additionally that another user's private File stays denied and an own/shared/public File is allowed; not just the copied-loop unit tests in `optimus/tests/test_permissions_file_hook.py` | A future Frappe core change to `has_controller_permissions`'s loop semantics (on either version), or a change to installed-app hook ordering, silently reintroducing the "every File denied" regression on v16 or a "every File granted" leak on v15 that unit tests (which fake the loop) can't see |
-| `test_session_gate_share_matrix.py` (deferred) | seeds an Optimus Session started by a plain Optimus User, then under `frappe.set_user` calls `api._session_action_gate(uuid, action="regenerate_reports")` as: the owner; a read-sharee (`frappe.share.add_docshare("Optimus Session", name, user, read=1)`); a write-sharee (`read=1, write=1`); a System Manager; a stranger with the Optimus User role; the owner restricted by a User Permission to a different session. Expects allow, deny, allow, allow, deny, deny; then `api.regenerate_reports` as the owner attaches a report | A Frappe permission-engine change (if_owner read, share rights, User Permission filtering) that the unit fakes in `optimus/tests/gate_fakes.py` cannot see |
+New tests should use exact fixture identities and `try/finally` cleanup, preserve
+unrelated state, and show which assertions require real Redis/SQL/Frappe rather
+than a fake. Never invoke migration inside an initialized test process: its
+teardown can destroy the runner's Frappe context. Test upgrade/rollback in a
+separate authorized deployment rehearsal.
 
-Each is ~100-200 LOC. Pick the highest-impact one when you're picking
-work.
+## Deferred integration coverage
 
-## Justification rule
+| Check | Current limit and completion trigger |
+| --- | --- |
+| File hook matrix on Frappe 15 and 16 | Unit hook-loop tests are not a real installed-app permission test. Exercise owner, System Manager, stranger and read-sharee under the actual hook order before claiming this coverage. The accepted direct `/private/files` download gap is outside that hook; never assert it blocks that route. |
+| Session owner/share/User Permission matrix | Unit gates are covered. Real owner, read-sharee, write-sharee, manager, stranger and User Permission restrictions still require isolated users and exact cleanup. |
+| Upgrade/rollback on both databases | Fresh CI installation is not a populated-site upgrade or rollback proof. Verify schema/default preservation, scheduler hooks, mixed-process restrictions and backup restore in a deployment rehearsal. |
+| Full background-user journey | Scripted interleavings do not replace browser/worker acceptance with provider loss, worker death, cancellation, permission changes, resume and report recovery. |
+| Durable index recipes | Verify metadata choices survive schema synchronization on both databases before approving recipe acceptance. |
 
-Integration tests cost ~5 seconds of CI wall time each (cheap compared
-to the bench bootstrap) but they're harder to debug than unit tests,
-they're harder to keep deterministic and they raise the bar to
-contributing.
-
-**Before adding an integration test, ask: could a unit test have
-caught this?** If yes, write the unit test instead. The integration
-suite is reserved for behaviour that genuinely needs the inter-
-component handoff (Redis ↔ MariaDB ↔ RQ ↔ Optimus's own hooks).
+These gaps are tracked in [AI acceptance](../../docs/AI-ACCEPTANCE.md), not silently
+waived by a green workflow. Add tests to an existing appropriate module when
+possible. New workflow modules require review of the integration workflow's
+frozen scope. Quarantine a confirmed flaky test with an issue and a clear
+reason, then fix or remove it; do not mask it with unconditional retries.

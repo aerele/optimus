@@ -8,6 +8,35 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.73] - 2026-10-03
+
+### Changed
+
+- Document the SQL background refresh engine, queue requirements, bounded
+  recovery, usage uncertainty, privacy controls and deployment/rollback checks.
+  Correct stale synchronous-AI, managed-provider and journal-retention guidance.
+- Measure both shipped prompts and document every guardrail tier, scrubbed
+  failure title, refresh setting and per-user request limit. Add automated
+  checks against the code and schema to detect documentation drift.
+- Correct integration-runner and cleanup guidance. Extend real-bench install
+  checks to the three private AI journal DocTypes and admission mutex.
+
+### Upgrade notes
+
+- This increment changes documentation and tests, plus the version. It adds
+  no migration, Settings field or service requirement. The earlier changes in
+  the stack still require their documented migration and process replacement.
+
+### Acceptance and known limitations
+
+- Release acceptance remains incomplete. Owner-confirmed labels, comparable
+  baseline/final model runs, real permission and index-durability checks, and
+  both-database deployment/rollback evidence are pending. See
+  `docs/AI-ACCEPTANCE.md`; green CI alone does not close those gates.
+- Splitting provider configuration and HTTP transport out of `ai_fix.py`
+  remains a deferred maintainability follow-up after security hardening.
+  Existing direct-download, DNS and telemetry residuals remain documented.
+
 ## [0.12.72] - 2026-10-03
 
 ### Security
