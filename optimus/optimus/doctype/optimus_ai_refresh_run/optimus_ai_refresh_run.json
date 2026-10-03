@@ -1,0 +1,349 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "editable_grid": 0,
+ "module": "Optimus",
+ "permissions": [],
+ "track_changes": 0,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "links": [],
+ "name": "Optimus AI Refresh Run",
+ "autoname": "field:run_id",
+ "naming_rule": "By fieldname",
+ "field_order": [
+  "run_id",
+  "session_name",
+  "session_uuid",
+  "requested_by",
+  "active_session",
+  "scope",
+  "state",
+  "regenerate_all",
+  "include_steps",
+  "include_fixes",
+  "retry_uncertain",
+  "completion_counted",
+  "dispatch_pending",
+  "render_pending",
+  "cap",
+  "slice_no",
+  "attempted",
+  "completed",
+  "failed",
+  "uncertain",
+  "skipped",
+  "consecutive_failures",
+  "usage_incomplete",
+  "total_items",
+  "tokens_reported",
+  "requested_at_epoch",
+  "deadline",
+  "lease_until",
+  "heartbeat",
+  "ended_at_epoch",
+  "dispatched_at_epoch",
+  "worker_token",
+  "active_attempt",
+  "end_reason",
+  "cancelled_by",
+  "resume_from",
+  "steps_state",
+  "breaker_kind",
+  "seq",
+  "retry_no",
+  "blocked_uncertain"
+ ],
+ "fields": [
+  {
+   "fieldname": "run_id",
+   "fieldtype": "Data",
+   "label": "Run Id",
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "session_name",
+   "fieldtype": "Data",
+   "label": "Session Name",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "session_uuid",
+   "fieldtype": "Data",
+   "label": "Session Uuid",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "requested_by",
+   "fieldtype": "Data",
+   "label": "Requested By",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "active_session",
+   "fieldtype": "Data",
+   "label": "Active Session",
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "scope",
+   "fieldtype": "Select",
+   "label": "Scope",
+   "read_only": 1,
+   "options": "all\nfixes_missing",
+   "reqd": 1
+  },
+  {
+   "fieldname": "state",
+   "fieldtype": "Select",
+   "label": "State",
+   "read_only": 1,
+   "options": "queued\nrunning\ncomplete\nstopped\ncancelled\ninterrupted",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "regenerate_all",
+   "fieldtype": "Check",
+   "label": "Regenerate All",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "include_steps",
+   "fieldtype": "Check",
+   "label": "Include Steps",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "include_fixes",
+   "fieldtype": "Check",
+   "label": "Include Fixes",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "retry_uncertain",
+   "fieldtype": "Check",
+   "label": "Retry Uncertain",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "completion_counted",
+   "fieldtype": "Check",
+   "label": "Completion Counted",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "dispatch_pending",
+   "fieldtype": "Check",
+   "label": "Dispatch Pending",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "render_pending",
+   "fieldtype": "Check",
+   "label": "Render Pending",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "cap",
+   "fieldtype": "Int",
+   "label": "Cap",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "slice_no",
+   "fieldtype": "Int",
+   "label": "Slice No",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "attempted",
+   "fieldtype": "Int",
+   "label": "Attempted",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "completed",
+   "fieldtype": "Int",
+   "label": "Completed",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "failed",
+   "fieldtype": "Int",
+   "label": "Failed",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "uncertain",
+   "fieldtype": "Int",
+   "label": "Uncertain",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "skipped",
+   "fieldtype": "Int",
+   "label": "Skipped",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "consecutive_failures",
+   "fieldtype": "Int",
+   "label": "Consecutive Failures",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "usage_incomplete",
+   "fieldtype": "Int",
+   "label": "Usage Incomplete",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "total_items",
+   "fieldtype": "Int",
+   "label": "Total Items",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "tokens_reported",
+   "fieldtype": "Long Int",
+   "label": "Tokens Reported",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "requested_at_epoch",
+   "fieldtype": "Float",
+   "label": "Requested At Epoch",
+   "read_only": 1,
+   "precision": "6"
+  },
+  {
+   "fieldname": "deadline",
+   "fieldtype": "Float",
+   "label": "Deadline",
+   "read_only": 1,
+   "precision": "6"
+  },
+  {
+   "fieldname": "lease_until",
+   "fieldtype": "Float",
+   "label": "Lease Until",
+   "read_only": 1,
+   "precision": "6"
+  },
+  {
+   "fieldname": "heartbeat",
+   "fieldtype": "Float",
+   "label": "Heartbeat",
+   "read_only": 1,
+   "precision": "6"
+  },
+  {
+   "fieldname": "ended_at_epoch",
+   "fieldtype": "Float",
+   "label": "Ended At Epoch",
+   "read_only": 1,
+   "precision": "6"
+  },
+  {
+   "fieldname": "dispatched_at_epoch",
+   "fieldtype": "Float",
+   "label": "Dispatched At Epoch",
+   "read_only": 1,
+   "precision": "6"
+  },
+  {
+   "fieldname": "worker_token",
+   "fieldtype": "Data",
+   "label": "Worker Token",
+   "read_only": 1
+  },
+  {
+   "fieldname": "active_attempt",
+   "fieldtype": "Data",
+   "label": "Active Attempt",
+   "read_only": 1
+  },
+  {
+   "fieldname": "end_reason",
+   "fieldtype": "Data",
+   "label": "End Reason",
+   "read_only": 1
+  },
+  {
+   "fieldname": "cancelled_by",
+   "fieldtype": "Data",
+   "label": "Cancelled By",
+   "read_only": 1
+  },
+  {
+   "fieldname": "resume_from",
+   "fieldtype": "Data",
+   "label": "Resume From",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "steps_state",
+   "fieldtype": "Data",
+   "label": "Steps State",
+   "read_only": 1
+  },
+  {
+   "fieldname": "breaker_kind",
+   "fieldtype": "Data",
+   "label": "Breaker Kind",
+   "read_only": 1
+  },
+  {
+   "fieldname": "seq",
+   "fieldtype": "Int",
+   "label": "Seq",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "retry_no",
+   "fieldtype": "Int",
+   "label": "Retry No",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "blocked_uncertain",
+   "fieldtype": "Int",
+   "label": "Blocked Uncertain",
+   "read_only": 1,
+   "default": "0"
+  }
+ ]
+}

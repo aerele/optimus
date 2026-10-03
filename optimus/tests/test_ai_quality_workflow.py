@@ -57,3 +57,13 @@ def test_rq_dependent_test_modules_carry_the_rq_marker():
 			if rq_use.search(src) and "rq" not in name and not marked.search(src):
 				offenders.append(name)
 	assert offenders == []
+
+
+def test_sql_journal_is_exercised_on_both_database_engines(workflow):
+	for needle in (
+		'  sql-journal:\n', 'database: [mariadb, postgres]', 'image: mariadb:10.6', 'image: postgres:16',
+		'OPTIMUS_TEST_SQL: ${{ matrix.database }}', 'PyMySQL==1.1.2', 'psycopg2-binary==2.9.12',
+		'python -m pytest optimus/tests/test_ai_refresh_sql.py',
+	):
+		assert needle in workflow
+	assert 'continue-on-error' not in workflow.split('  sql-journal:\n', 1)[1]

@@ -8,6 +8,34 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.70] - 2026-10-03
+
+### Internal
+
+- Add the background AI refresh engine and private SQL run/attempt journal.
+  A send intent commits before the provider call; the answer, reported usage
+  and outcome commit together. Duplicate deliveries cannot repeat a claimed
+  slice, and cancelled or expired workers cannot overwrite newer results.
+- Keep interrupted calls with an unknown outcome as uncertain. Automatic
+  recovery delivers queued work but never repeats an uncertain provider call.
+  Explicit resumes preserve the selection cursor and have a bounded chain.
+- Add durable progress, SQL cancellation, site/user admission limits, bounded
+  job slices and provider failure limits. Redis coordinates queue delivery;
+  progress and accounting remain in SQL.
+- Distinguish known zero token usage from missing or contradictory usage,
+  preserve reported usage on processing failures, and widen the stored step
+  token count. Keep RQ timeouts fresh, including when worker cleanup fails.
+
+### Upgrade notes
+
+- This engine is not yet connected to the UI, API, analyzer or scheduler.
+  Existing refresh behavior remains synchronous. The wiring follow-up must
+  land before release; profiling isolation is completed there.
+- Normal deployment migration installs three internal DocTypes and seeds the
+  admission mutex. Missing storage refuses new work. See
+  [background engine details](docs/AI-REFRESH.md) for transactions, queue
+  requirements and the remaining deployment work.
+
 ## [0.12.69] - 2026-10-03
 
 ### Changed
