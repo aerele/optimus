@@ -59,6 +59,8 @@ class OptimusSettings(Document):
 		"redundant_perm_threshold": 1,
 		"n_plus_one_min_occurrences": 1,
 		"ai_auto_suggest_max": 0,
+		"ai_refresh_max_findings": 0,
+		"ai_context_tokens": 0,
 		# v0.9.0: AI request timeout. Below 10s breaks the LLM round-trip
 		# entirely; the ceiling 600s is applied in settings.py:_resolve
 		# (we can't enforce it from a floor). Clamping below pairs with

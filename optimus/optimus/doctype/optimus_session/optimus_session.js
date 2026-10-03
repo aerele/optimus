@@ -61,26 +61,179 @@ function optimus_fmt_ms(ms, decimals) {
 	return text + "ms";
 }
 
-// Single AI button: "Refresh AI suggestions". Replaces five legacy
-// buttons (Suggest a fix / Generate AI fixes / Re-evaluate AI fixes /
-// Humanize Steps / Suggest an index). One server endpoint
-// (api.refill_ai_suggestions) runs all three operations per-section
-// and re-renders the report once. The master AI switch still gates
-// whether the button appears at all; per-section toggles are honored
-// inside the server endpoint (a toggle-off section is skipped silently).
+// A background completion must not discard edits typed while it was running.
+function _reload_clean_form(frm) {
+	if (frm.is_dirty && frm.is_dirty()) {
+		frappe.show_alert({message: __("Background results are saved. Your unsaved edits were kept; reload after saving or discarding them."), indicator: "orange"});
+		return;
+	}
+	frm.reload_doc();
+}
+
+// SQL progress is authoritative. Queue outages never imply completion.
+function _ai_current(frm, state) {
+	const route = frappe.get_route();
+	return frm._optimus_ai === state && frm.doc.session_uuid === state.session_uuid &&
+		route[0] === "Form" && route[1] === "Optimus Session" && route[2] === frm.doc.name;
+}
+
+function _ai_hold_save(frm, state) {
+	if (!frm.save_disabled || state.held_save) {
+		state.held_save = true;
+		frm.disable_save(true);
+	}
+}
+
+function _ai_release_save(frm, state) {
+	const writable = !frm.read_only && (!frm.perm || (frm.perm[0] && frm.perm[0].write)) &&
+		!(frappe.boot && frappe.boot.read_only);
+	if (state.held_save && writable && frm.doc.session_uuid === state.session_uuid) frm.enable_save();
+	state.held_save = false;
+}
+
+function _ai_stop(frm, state) {
+	if (!state) return;
+	clearTimeout(state.timer);
+	state.epoch++;
+	_ai_release_save(frm, state);
+}
+
 function render_ai_buttons(frm) {
+	let state = frm._optimus_ai;
+	if (!state || state.session_uuid !== frm.doc.session_uuid) {
+		_ai_stop(frm, state);
+		state = frm._optimus_ai = {session_uuid: frm.doc.session_uuid, epoch: 0, delay: 5000,
+			run: null, busy: false, held_save: false, submitting: false, can_act: false};
+		_single_banner(frm, "optimus-ai-progress", "", null);
+	}
 	if (frm.is_new()) return;
-	if (frm.doc.status !== "Ready") return;
+	if (!frm._optimus_ai_route_watch) {
+		frm._optimus_ai_route_watch = true;
+		frappe.router.on("change", () => {
+			if (frm._optimus_ai && !_ai_current(frm, frm._optimus_ai)) _ai_stop(frm, frm._optimus_ai);
+		});
+	}
+	// Frappe may reset Save while refreshing the same form.
+	if (state.busy || state.submitting || state.unknown) _ai_hold_save(frm, state);
+	clearTimeout(state.timer);
+	_ai_poll(frm, state);
+}
+
+function _ai_schedule(frm, state, delay) {
+	clearTimeout(state.timer);
+	state.timer = setTimeout(() => {
+		if (_ai_current(frm, state)) _ai_poll(frm, state);
+		else _ai_stop(frm, state);
+	}, delay);
+}
+
+function _ai_unknown(frm, state) {
+	// Even the first failed poll can hide another process's active reservation.
+	state.unknown = true;
+	_ai_hold_save(frm, state);
+	state.can_act = false;
+	frm.remove_custom_button(__("Refresh AI suggestions"), __("AI"));
+	frm.remove_custom_button(__("Resume AI refresh"), __("AI"));
+	_single_banner(frm, "optimus-ai-progress", "form-message orange",
+		'<span role="status">' + frappe.utils.escape_html(__("AI refresh status is unavailable. Checking again; saved profiling results are retained.")) + '</span>');
+	state.delay = Math.min(30000, state.delay * 2);
+	_ai_schedule(frm, state, state.delay);
+}
+
+function _ai_poll(frm, state) {
+	if (!_ai_current(frm, state)) return _ai_stop(frm, state);
+	if (state.submitting) return _ai_schedule(frm, state, 5000);
+	const epoch = ++state.epoch;
 	frappe.call({
-		method: "optimus.api.ai_capabilities",
+		method: "optimus.api.ai_refresh_status", args: {session_uuid: state.session_uuid},
 		callback: (r) => {
-			const c = (r && r.message) || {};
-			if (!c.enabled) return; // master switch off → no AI button
-			render_ai_refill_button(frm);
+			if (!_ai_current(frm, state) || state.epoch !== epoch) return;
+			const data = r && r.message;
+			if (!data || data.status !== "ok") return _ai_unknown(frm, state);
+			_ai_apply_status(frm, state, data);
 		},
-		// Read failed (e.g. not configured / no perm) → render nothing.
-		error: () => {},
+		error: () => {
+			if (_ai_current(frm, state) && state.epoch === epoch) _ai_unknown(frm, state);
+		},
 	});
+}
+
+function _ai_apply_status(frm, state, data) {
+	const run = data.refresh;
+	const old = state.run;
+	if (run && old && ((run.run_id === old.run_id && run.seq < old.seq) ||
+		(run.run_id !== old.run_id && run.requested_at < old.requested_at))) {
+		return _ai_schedule(frm, state, 5000);
+	}
+	if ((!run && state.busy && old) || (run && !["queued", "running", "complete", "stopped", "cancelled", "interrupted"].includes(run.state))) {
+		return _ai_unknown(frm, state);
+	}
+	const was_busy = state.busy;
+	state.unknown = false;
+	state.run = run;
+	state.busy = !!run && ["queued", "running"].includes(run.state);
+	state.can_act = !!data.can_act;
+	state.plan = data.plan;
+	state.delay = 5000;
+	if (state.busy) _ai_hold_save(frm, state);
+	else _ai_release_save(frm, state);
+	frm.remove_custom_button(__("Refresh AI suggestions"), __("AI"));
+	frm.remove_custom_button(__("Resume AI refresh"), __("AI"));
+	if (state.can_act && !state.busy && frm.doc.status === "Ready") {
+		const plan = state.plan;
+		if (plan && (plan.total || plan.steps)) render_ai_refill_button(frm, state);
+		if (run && run.scope === "all" && ["stopped", "interrupted", "cancelled"].includes(run.state) && run.retry_no < 3) {
+			frm.add_custom_button(__("Resume AI refresh"), () => _ai_resume_dialog(frm, state), __("AI"));
+		}
+	}
+	_ai_progress_banner(frm, state);
+	if (was_busy && !state.busy && run) {
+		frappe.show_alert({message: __("AI refresh finished. Saved profiling results are retained."),
+			indicator: run.state === "complete" ? "green" : "orange"});
+		_reload_clean_form(frm);
+	}
+	_ai_schedule(frm, state, state.busy ? 5000 : 30000);
+}
+
+function _ai_progress_banner(frm, state) {
+	const run = state.run;
+	if (!run) return _single_banner(frm, "optimus-ai-progress", "", null);
+	const labels = {queued: __("Queued"), running: __("Running"), complete: __("Complete"),
+		stopped: __("Stopped"), interrupted: __("Interrupted"), cancelled: __("Cancelled")};
+	const usage = run.usage || {};
+	let text = __("AI refresh: {0}. Saved {1}, failed {2}, skipped {3}, uncertain {4}, not reached {5}. Reported tokens: {6}.",
+		[labels[run.state], run.done || 0, run.failed || 0, run.skipped || 0,
+			(run.uncertain || 0) + (run.blocked_uncertain || 0), run.not_reached || 0, usage.tokens_reported || 0]);
+	if (usage.incomplete_attempts) text += " " + __("Provider usage is incomplete; these counts are not an exact bill.");
+	if (run.render_pending) text += " " + __("Saved answers still need a report update. Use Regenerate Reports after the refresh stops.");
+	if (run.end_reason) text += " " + _ai_end_message(run);
+	const cancel = state.busy && state.can_act;
+	const html = '<span role="status">' + frappe.utils.escape_html(text) + '</span>' +
+		(cancel ? ' <button type="button" class="btn btn-xs btn-default optimus-ai-cancel">' + frappe.utils.escape_html(__("Cancel AI refresh")) + '</button>' : '');
+	const banner = _single_banner(frm, "optimus-ai-progress", "form-message blue", html);
+	if (banner && cancel) banner.find(".optimus-ai-cancel").on("click", () => {
+		if (!_ai_current(frm, state)) return;
+		const run_id = run.run_id;
+		const epoch = ++state.epoch;
+		const current = () => _ai_current(frm, state) && state.epoch === epoch && state.run && state.run.run_id === run_id;
+		frappe.call({
+			method: "optimus.api.cancel_ai_refresh", args: {session_uuid: state.session_uuid, run_id},
+			callback: () => { if (current()) _ai_poll(frm, state); },
+			error: () => { if (current()) _ai_unknown(frm, state); },
+		});
+	});
+}
+
+function _ai_end_message(run) {
+	if (run.end_reason === "breaker") return __("Repeated provider errors or a provider limit stopped this run. Check the provider configuration and Error Log before retrying.");
+	if (run.end_reason === "deadline") return __("The refresh time limit was reached.");
+	if (run.end_reason === "render_failed") return __("Report replacement failed; the previous report was kept.");
+	if (["uncertain", "lease_expired", "worker_interrupted"].includes(run.end_reason)) return __("An interrupted call may have been billed. It will not be repeated automatically.");
+	if (run.end_reason === "history_limit") return __("Refresh history reached its safety limit. Ask an administrator to review the retained attempts.");
+	if (run.end_reason === "not_ready") return __("The session changed and is no longer Ready for AI work.");
+	if (run.end_reason === "permission") return __("The requesting user no longer has permission.");
+	if (run.end_reason === "phase2") return __("A Phase 2 run prevented further AI work.");
+	return "";
 }
 
 // Shared single-banner mechanism for the in-form status banners (analyze
@@ -208,76 +361,75 @@ function subscribe_session_progress(frm) {
 	});
 }
 
-// Single AI button: "Refresh AI suggestions" replaces five legacy
-// buttons (Suggest a fix / Generate AI fixes / Re-evaluate AI fixes /
-// Humanize Steps / Suggest an index). One server endpoint runs all
-// three AI operations server-side and re-renders the report once at
-// the end. The per-section toggles still gate which operations run
-// inside the endpoint a toggle-off section is skipped silently.
-function render_ai_refill_button(frm) {
-	if (frm.is_new()) return;
-	if (frm.doc.status !== "Ready") return;
-	frm.add_custom_button(
-		__("Refresh AI suggestions"),
-		() => {
-			frappe.confirm(
-				__(
-					"Refresh every AI-generated section of the report? " +
-						"This re-runs fix suggestions on findings, the " +
-						"humanized Steps to Reproduce and index advice " +
-						"for tables with a candidate then re-renders " +
-						"the report once. Calls the configured LLM for " +
-						"each, so it can take a bit. If it doesn't " +
-						"finish in one pass, run it again."
-				),
-				() => _refill_ai_call(frm)
-			);
-		},
-		__("AI")
-	);
+function render_ai_refill_button(frm, state) {
+	frm.add_custom_button(__("Refresh AI suggestions"), () => {
+		if (!_ai_current(frm, state) || state.busy || state.submitting) return;
+		if (frm.is_dirty && frm.is_dirty()) return frappe.msgprint(__("Save or discard your edits before starting an AI refresh."));
+		const plan = state.plan;
+		const description = (all) => frappe.utils.escape_html(__("Current selection: {0} finding(s), plus {1} Steps to Reproduce rewrite. The worker rechecks eligibility; the finding limit for this refresh is {2}. Saved profiling results remain available.",
+			[all ? plan.selected_all : plan.selected, plan.steps ? 1 : 0, plan.cap || __("unlimited")]));
+		const dialog = new frappe.ui.Dialog({title: __("Refresh AI suggestions"), fields: [
+			{fieldtype: "HTML", fieldname: "summary", options: description(false)},
+			{fieldtype: "Check", fieldname: "regenerate_all", default: 0,
+				label: __("Also replace current suggestions"), onchange: () => {
+					dialog.fields_dict.summary.df.options = description(!!dialog.get_value("regenerate_all"));
+					dialog.refresh_field("summary");
+				}},
+		], primary_action_label: __("Queue refresh"), primary_action: (values) => {
+			if (!values.regenerate_all && !plan.selected && !plan.steps) return frappe.msgprint(__("No missing or outdated suggestions need a refresh."));
+			dialog.hide();
+			_refill_ai_call(frm, state, {regenerate_all: !!values.regenerate_all});
+		}});
+		dialog.show();
+	}, __("AI"));
 }
 
-function _refill_ai_call(frm) {
+function _ai_resume_dialog(frm, state) {
+	if (!_ai_current(frm, state) || state.busy || state.submitting) return;
+	const run = state.run;
+	const uncertain = (run.uncertain || 0) + (run.blocked_uncertain || 0);
+	const dialog = new frappe.ui.Dialog({title: __("Resume AI refresh"), fields: [
+		{fieldtype: "HTML", fieldname: "summary", options: frappe.utils.escape_html(__("Resume the original selection and cap. Already saved answers will be kept."))},
+		{fieldtype: "Check", fieldname: "retry_uncertain", default: 0, hidden: !uncertain,
+			label: __("Repeat uncertain calls, accepting possible duplicate provider charges")},
+	], primary_action_label: __("Queue resume"), primary_action: (values) => {
+		dialog.hide();
+		_refill_ai_call(frm, state, {resume_from: run.run_id, retry_uncertain: !!values.retry_uncertain});
+	}});
+	dialog.show();
+}
+
+function _refill_ai_call(frm, state, options) {
+	if (!_ai_current(frm, state) || state.busy || state.submitting) return;
+	if (frm.is_dirty && frm.is_dirty()) return frappe.msgprint(__("Save or discard your edits before starting an AI refresh."));
+	state.submitting = true;
+	state.epoch++; // invalidate a status response sent before this request
+	clearTimeout(state.timer);
+	_ai_hold_save(frm, state);
 	frappe.call({
 		method: "optimus.api.refill_ai_suggestions",
-		args: { session_uuid: frm.doc.session_uuid },
-		freeze: true,
-		freeze_message: __("Refreshing AI suggestions & re-rendering the report…"),
+		args: {session_uuid: state.session_uuid, ...options},
 		callback: (r) => {
-			const m = (r && r.message) || {};
-			const fx = m.fixes || {};
-			const ix = m.indexes || {};
-			const st = m.steps || {};
-			const parts = [];
-			if (fx.added) parts.push(__("{0} fix(es)", [fx.added]));
-			if (st.updated) parts.push(__("steps rewritten"));
-			if (ix.added) parts.push(__("{0} index suggestion(s)", [ix.added]));
-			const msg = parts.length
-				? __("Refreshed: {0}.", [parts.join(", ")])
-				: __("Nothing to refresh.");
-			const failed = (fx.failed || 0) + (ix.failed || 0);
-			const skipped = (fx.skipped_time || 0) + (ix.skipped || 0);
-			const indicator = failed ? "red" : parts.length ? "green" : "orange";
-			frappe.show_alert({ message: msg, indicator: indicator });
-			if (failed) {
-				frappe.show_alert({
-					message: __("{0} call(s) failed old suggestions kept (see Error Log).", [failed]),
-					indicator: "red",
-				});
+			if (!_ai_current(frm, state)) return;
+			state.submitting = false;
+			const data = r && r.message;
+			if (data && data.ok && data.refresh) {
+				_ai_apply_status(frm, state, {refresh: data.refresh, can_act: true, plan: null});
+			} else if (data && data.status === "refused") {
+				_ai_release_save(frm, state);
+				frappe.msgprint(frappe.utils.escape_html(data.message || __("AI refresh could not start.")));
+				_ai_poll(frm, state);
+			} else {
+				state.busy = true;
+				_ai_unknown(frm, state);
 			}
-			if (skipped) {
-				frappe.show_alert({
-					message: __("{0} skipped (time budget) run it again for the rest.", [skipped]),
-					indicator: "orange",
-				});
-			}
-			setTimeout(() => frm.reload_doc(), 1200);
 		},
 		error: () => {
-			frappe.show_alert({
-				message: __("The AI refresh request failed see the error popup for details."),
-				indicator: "red",
-			});
+			if (!_ai_current(frm, state)) return;
+			state.submitting = false;
+			// A lost HTTP response can follow a committed admission. Poll SQL.
+			state.busy = true;
+			_ai_unknown(frm, state);
 		},
 	});
 }
@@ -356,78 +508,56 @@ function render_phase2_button(frm) {
 			)
 		);
 	} else {
-		// Clear the armed banner once no pass is Recording (e.g. after Stop).
-		_phase2_armed_banner(frm, null);
+		// A saved result can still need a report after a file/render failure.
+		const pending = (frm.doc.phase_2_runs || []).some(row => row.analyze_render_pending);
+		_phase2_armed_banner(frm, pending
+			? __("Phase 2 results are saved. Use Regenerate Reports to update the report.") : null);
 	}
 
-	// Surface a Retry button for any Phase 2 Run row stuck in Analyzing
-	// or Failed. The most common cause of stuck Analyzing is a dev site
-	// running without `bench start`: no RQ worker picks up the long
-	// queue. retry_phase2_analyze runs inline so the click resolves
-	// directly to Ready or Failed.
-	var stuck_runs = (frm.doc.phase_2_runs || []).filter(function (row) {
-		return row.status === "Analyzing" || row.status === "Failed";
-	});
-
-	// v0.6.x: when there are 2+ stuck runs, surface a SINGLE "Retry all
-	// stuck Phase-2 runs" button that fires ONE batched server call
-	// (addresses Lens-audit "frappe.call(...) inside a loop"). The
-	// per-run buttons below stay they let the operator retry one
-	// specific run when only one is misbehaving.
+	// Retrying attaches to live work or queues a bounded new generation.
+	const stuck_runs = (frm.doc.phase_2_runs || []).filter(row =>
+		row.status === "Analyzing" || row.status === "Failed");
+	const clean_form = () => {
+		if (!frm.is_dirty()) return true;
+		frappe.msgprint(__("Save or discard your changes before queueing Phase 2 analysis."));
+		return false;
+	};
 	if (stuck_runs.length >= 2) {
-		frm.add_custom_button(
-			__("Retry all " + stuck_runs.length + " stuck Phase-2 runs"),
-			function () {
-				frappe.call({
-					method: "optimus.api.retry_phase2_analyzes_batch",
-					args: { run_uuids: stuck_runs.map(function (r) { return r.run_uuid; }) },
-					freeze: true,
-					freeze_message: __("Re-running phase-2 analyzers..."),
-					callback: function (r) {
-						var msg = (r && r.message) || {};
-						var t = msg.tallies || {};
-						frappe.show_alert({
-							message: __(
-								"Batch retry finished " +
-								(t.Ready || 0) + " Ready · " +
-								(t.Failed || 0) + " Failed" +
-								((t.Analyzing || 0) ? " · " + t.Analyzing + " still Analyzing" : "")
-							),
-							indicator: (t.Failed || 0) === 0 ? "green" : "orange",
-						});
-						frm.reload_doc();
-					},
-				});
-			},
-			__("Phase 2")
-		);
+		const batch = stuck_runs.slice(0, 5);
+		frm.add_custom_button(__("Retry next {0} Phase 2 runs", [batch.length]), () => {
+			if (!clean_form()) return;
+			frappe.call({
+				method: "optimus.api.retry_phase2_analyzes_batch",
+				args: {run_uuids: batch.map(row => row.run_uuid)},
+				callback(r) {
+					const tally = ((r && r.message) || {}).tallies || {};
+					frappe.show_alert({
+						message: __("Phase 2: {0} queued or running; {1} refused or failed.",
+							[tally.Analyzing || 0, (tally.Failed || 0) + (tally.Skipped || 0)]),
+						indicator: tally.Failed ? "orange" : "blue",
+					});
+					_reload_clean_form(frm);
+				},
+			});
+		}, __("Phase 2"));
 	}
-
-	stuck_runs.forEach(function (row) {
-		frm.add_custom_button(
-			__("Retry Phase 2 Analyze (" + row.run_uuid.slice(0, 8) + ")"),
-			function () {
-				frappe.call({
-					method: "optimus.api.retry_phase2_analyze",
-					args: { run_uuid: row.run_uuid },
-					freeze: true,
-					freeze_message: __("Re-running phase-2 analyzer..."),
-					callback: function (r) {
-						var msg = (r && r.message) || {};
-						frappe.show_alert({
-							message: __(
-								"Retry finished status: " +
-								(msg.status || "unknown") +
-								(msg.error ? " · " + msg.error : "")
-							),
-							indicator: msg.status === "Ready" ? "green" : "red",
-						});
-						frm.reload_doc();
-					},
-				});
-			},
-			__("Phase 2")
-		);
+	stuck_runs.forEach(row => {
+		frm.add_custom_button(__("Retry Phase 2 Analyze ({0})", [row.run_uuid.slice(0, 8)]), () => {
+			if (!clean_form()) return;
+			frappe.call({
+				method: "optimus.api.retry_phase2_analyze",
+				args: {run_uuid: row.run_uuid},
+				callback(r) {
+					const accepted = r && r.message && r.message.status === "Analyzing";
+					frappe.show_alert({
+						message: accepted ? __("Phase 2 analysis is queued or running. Results will appear when it finishes.")
+							: __("Phase 2 admission was not confirmed. Reload the session to check its status."),
+						indicator: accepted ? "blue" : "orange",
+					});
+					_reload_clean_form(frm);
+				},
+			});
+		}, __("Phase 2"));
 	});
 
 	frm.add_custom_button(__("Run Line-Profile Pass"), function () {
@@ -849,7 +979,7 @@ function subscribe_phase2_events(frm) {
 						indicator: "red",
 					});
 				}
-				frm.reload_doc();
+				_reload_clean_form(frm);
 			});
 		}
 	);
@@ -873,7 +1003,7 @@ function render_retry_button(frm) {
 								message: __("Analyze retry enqueued"),
 								indicator: "orange",
 							});
-							setTimeout(() => frm.reload_doc(), 2000);
+							setTimeout(() => _reload_clean_form(frm), 2000);
 						} else {
 							frappe.show_alert({
 								message: data.reason || __("Retry skipped"),
@@ -901,21 +1031,14 @@ function render_regenerate_report_button(frm) {
 	frm.add_custom_button(__("Regenerate Reports"), () => {
 		frappe.confirm(
 			__(
-				"Re-render the HTML report from stored session data. This "
-				+ "does NOT re-run the analyzer. Note: if \"Suggest AI fixes "
-				+ "in the report by default\" is enabled, this also asks the "
-				+ "LLM for fixes for any findings that don't have one yet "
-				+ "which can take a while."
+				"Re-render the HTML report from stored session data. Saved AI suggestions are retained. Use Refresh AI suggestions to request new answers."
 			),
 			() => {
 				frappe.call({
 					method: "optimus.api.regenerate_reports",
 					args: { session_uuid: frm.doc.session_uuid },
 					freeze: true,
-					freeze_message: __(
-						"Regenerating the report… (this can take a while if "
-						+ "AI fix suggestions are enabled)"
-					),
+					freeze_message: __("Regenerating the report…"),
 					callback: (r) => {
 						const data = (r && r.message) || {};
 						if (data.regenerated) {
@@ -936,7 +1059,7 @@ function render_regenerate_report_button(frm) {
 								message: msg,
 								indicator: "green",
 							});
-							setTimeout(() => frm.reload_doc(), 1500);
+							setTimeout(() => _reload_clean_form(frm), 1500);
 						} else {
 							frappe.show_alert({
 								message: __("Regeneration skipped"),
@@ -1200,4 +1323,3 @@ function render_findings_summary(frm) {
 		__("Performance issues"),
 	);
 }
-

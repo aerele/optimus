@@ -3,9 +3,9 @@
 
 """Tests for the janitor sweeps' batched updates.
 
-Every sweep calls ``frappe.db.set_value`` ONCE with a ``{"name": ("in",
+The lifecycle sweeps call ``frappe.db.set_value`` ONCE with a ``{"name": ("in",
 [...])}`` filter; ``_sweep_old_sessions`` preloads every File-doc name in a
-single ``frappe.get_all``. ``frappe`` is stubbed via
+single ``frappe.get_all``. Phase 2 additionally checks current ownership under row locks. ``frappe`` is stubbed via
 ``monkeypatch.setitem(sys.modules, ...)`` so these run pure (no bench / no
 MariaDB) and the real module is restored at teardown.
 """
@@ -258,45 +258,35 @@ class TestSweepStaleStopping:
 # --------------------------------------------------------------------------
 
 class TestSweepStalePhase2Runs:
-	def test_one_set_value_call_per_branch(self, monkeypatch):
+	def test_only_locked_expired_recordings_are_cleaned(self, monkeypatch):
+		from optimus import ai_jobs
+		from optimus.line_profile import capture, jobs
 		stub = _install_frappe_stub(monkeypatch)
-		# The janitor calls get_all twice on "Optimus Phase Two Run" (formerly
-		# "Optimus Phase 2 Run" before the v0.6.x Title-Case rename) once for
-		# Recording rows, once for Analyzing. We return DIFFERENT row sets on
-		# each call, so the side-effect channel needs an index counter.
-		rec_rows = [
-			{"name": "PR-rec-1", "parent": "PS-x", "run_uuid": "rrec1"},
-			{"name": "PR-rec-2", "parent": "PS-x", "run_uuid": "rrec2"},
+		recordings = [
+			{"name": "rec-1", "parent": "fake-parent", "run_uuid": "expired"},
+			{"name": "rec-2", "parent": "fake-parent", "run_uuid": "newer-generation"},
 		]
-		ana_rows = [
-			{"name": "PR-ana-1", "parent": "PS-y", "run_uuid": "rana1"},
-		]
-		# Override get_all to alternate per call.
-		state = {"i": 0, "sequence": [rec_rows, ana_rows]}
-		def _get_all(doctype, filters=None, fields=None, **kwargs):
-			stub._get_all_calls.append((doctype, filters, tuple(fields or ())))
-			if doctype == "Optimus Phase Two Run":
-				out = state["sequence"][state["i"]] if state["i"] < len(state["sequence"]) else []
-				state["i"] += 1
-				return list(out)
-			return []
-		stub.db.get_all = _get_all
-		stub.get_all = _get_all
-
+		analyses = [{"name": "ana-1", "parent": "fake-parent", "run_uuid": "stale-analysis"}]
+		stub.db.get_all = lambda doctype, **kw: recordings if kw["filters"]["status"] == "Recording" else analyses
+		calls, cleanups = [], []
+		def expire(parent, run_uuid, **kw):
+			calls.append((run_uuid, kw["status"]))
+			return run_uuid != "newer-generation"
+		monkeypatch.setattr(jobs, "expire_legacy", expire)
+		monkeypatch.setattr(capture, "cleanup_run", cleanups.append)
+		monkeypatch.setattr(ai_jobs, "_transaction", lambda fn: fn())
+		monkeypatch.setattr(ai_jobs, "_retry_sql", lambda fn: fn())
 		janitor = _reload_janitor(monkeypatch)
 		janitor._sweep_stale_phase2_runs()
-
-		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Phase Two Run"]
-		# Exactly 2 batched set_values (one per branch).
-		assert len(set_value_calls) == 2
-		# Recording branch first call.
-		assert set_value_calls[0][1] == {"name": ("in", ["PR-rec-1", "PR-rec-2"])}
-		# Analyzing branch second call.
-		assert set_value_calls[1][1] == {"name": ("in", ["PR-ana-1"])}
+		assert calls == [("expired", "Recording"), ("newer-generation", "Recording"), ("stale-analysis", "Analyzing")]
+		assert cleanups == ["expired"], "analysis failure must preserve samples for retry"
+		assert not stub._set_value_calls, "the journal checks current status under a lock"
 
 	def test_no_set_value_when_no_phase2_rows(self, monkeypatch):
+		from optimus import ai_jobs
 		stub = _install_frappe_stub(monkeypatch)
 		stub._get_all_return["Optimus Phase Two Run"] = []
+		monkeypatch.setattr(ai_jobs, "_transaction", lambda fn: fn())
 		janitor = _reload_janitor(monkeypatch)
 		janitor._sweep_stale_phase2_runs()
 		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Phase Two Run"]

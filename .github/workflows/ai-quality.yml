@@ -166,3 +166,53 @@ jobs:
             echo "::error::an rq test was skipped although rq is installed"
             exit 1
           fi
+
+  sql-journal:
+    name: AI journal (${{ matrix.database }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        database: [mariadb, postgres]
+    services:
+      mariadb:
+        image: mariadb:10.6
+        env:
+          MARIADB_ROOT_PASSWORD: optimus_test
+          MARIADB_DATABASE: optimus_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: optimus_test
+          POSTGRES_PASSWORD: optimus_test
+          POSTGRES_DB: optimus_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U optimus_test -d optimus_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install app and SQL validation dependencies
+        run: |
+          python -m pip install --quiet -e . pytest hypothesis Faker sql_metadata jsonschema PyMySQL==1.1.2 psycopg2-binary==2.9.12
+      - name: Check journal transactions on a real database
+        env:
+          OPTIMUS_TEST_SQL: ${{ matrix.database }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -m pytest optimus/tests/test_ai_refresh_sql.py -q -p no:cacheprovider

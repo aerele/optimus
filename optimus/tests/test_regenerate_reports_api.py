@@ -3,10 +3,8 @@
 
 """regenerate_reports and the internal render helpers (PR-1).
 
-``_render_session_report`` is the one re-render path. AI endpoints re-render through
-``_rerender_after_ai`` (default ``ai_backfill=False``, never the whitelisted
-``regenerate_reports``), and ``regenerate_reports`` keeps ``ai_backfill=True`` until the AI path
-leaves regenerate. Failure logs are pinned to run outside any ``except`` block: the fake
+API rendering delegates to the transactional report helper. Report regeneration
+never calls the model. Failure logs are pinned outside any ``except`` block: the fake
 ``log_ai_failure`` records ``sys.exc_info()[0]``, which is None only outside a handler.
 """
 
@@ -37,115 +35,66 @@ def _must_not_run(*args, **kwargs):
 	raise AssertionError("regenerate_reports must not re-run analyze")
 
 
-def _env(monkeypatch, *, status="Ready", user=OWNER, perms=None, fetch_raises=False, backfill_raises=False, conf=None):
-	doc = fake_session_doc(actions=[SimpleNamespace(recording_uuid="rec-1"), SimpleNamespace(recording_uuid="")])
-	fake = make_fake_frappe(
-		user=user, sessions={SESSION_UUID: session_row(status=status)},
-		perms=owner_perms() if perms is None else perms, docs={DOCNAME: doc}, conf=conf,
-	)
+def _env(monkeypatch, *, status="Ready", user=OWNER, perms=None, conf=None):
+	fake = make_fake_frappe(user=user, sessions={SESSION_UUID: session_row(status=status)},
+		perms=owner_perms() if perms is None else perms, conf=conf)
 	install(monkeypatch, fake)
-	seen = SimpleNamespace(fetched=[], backfilled=[], rendered=[], cleared=[], logged=[])
-
-	def fetch(uuids, recordings_bundle=None):
-		if fetch_raises:
-			raise RuntimeError("redis gone")
-		seen.fetched.append(list(uuids))
-		return [{"uuid": "rec-1"}]
-
-	def backfill(d):
-		if backfill_raises:
-			raise RuntimeError("llm down")
-		seen.backfilled.append(d.name)
-
-	install_module(monkeypatch, "optimus.analyze", SimpleNamespace(
-		_run_ai_step=_analyze._run_ai_step,
-		_fetch_recordings=fetch,
-		_load_recordings_bundle=lambda d: None,
-		_backfill_ai_suggestions=backfill,
-		_render_and_attach_reports=lambda name, recs: seen.rendered.append((name, len(recs))),
-	))
-	install_module(monkeypatch, "optimus.pdf_export", SimpleNamespace(clear_cached_pdf=lambda u: seen.cleared.append(u)))
+	from optimus import ai_jobs, report_refresh
+	seen = SimpleNamespace(rendered=[], logged=[])
+	monkeypatch.setattr(ai_jobs, "active_refresh", lambda *a: None)
+	def render(docname):
+		seen.rendered.append((docname, 1))
+		return {"regenerated": True, "recordings_available": 1, "actions_total": 2}
+	monkeypatch.setattr(report_refresh, "render_report", render)
+	monkeypatch.setattr(ai_fix, "suggest_fix", _must_not_run)
+	monkeypatch.setattr(ai_fix, "humanize_steps", _must_not_run)
 	def log_failure(title, exc=None, **kw):
 		seen.logged.append((title, type(exc).__name__, sys.exc_info()[0]))
 		guard = ai_fix._InterruptGuard()
 		guard.note(exc)
 		if guard.pending():
 			raise guard.interrupt()
-
 	monkeypatch.setattr(ai_fix, "log_ai_failure", log_failure)
 	monkeypatch.setattr(api, "_enqueue_analyze", _must_not_run)
 	return fake, seen
 
 
-def _ref():
-	return api.SessionRef(
-		docname=DOCNAME, session_uuid=SESSION_UUID, owner=OWNER, user=OWNER, status="Ready", title=None
-	)
-
-
-def test_render_session_report_is_render_only_by_default(monkeypatch):
+def test_render_session_report_only_delegates_to_transactional_report_helper(monkeypatch):
 	_, seen = _env(monkeypatch)
-	out = api._render_session_report(DOCNAME)
-	assert out == {"regenerated": True, "recordings_available": 1, "actions_total": 2}
-	assert seen.fetched == [["rec-1"]]
-	assert seen.backfilled == []
+	assert api._render_session_report(DOCNAME) == {"regenerated": True, "recordings_available": 1, "actions_total": 2}
 	assert seen.rendered == [(DOCNAME, 1)]
-	assert seen.cleared == [SESSION_UUID]
 
 
-def test_render_session_report_ai_backfill_true_backfills_first(monkeypatch):
+def test_render_helper_rejects_the_removed_ai_side_effect_option(monkeypatch):
 	_, seen = _env(monkeypatch)
-	api._render_session_report(DOCNAME, ai_backfill=True)
-	assert seen.backfilled == [DOCNAME] and seen.rendered == [(DOCNAME, 1)]
+	with pytest.raises(TypeError):
+		api._render_session_report(DOCNAME, ai_backfill=True)
+	assert not seen.rendered
 
 
-def test_expired_recordings_render_with_an_empty_list(monkeypatch):
-	_, seen = _env(monkeypatch, fetch_raises=True)
-	out = api._render_session_report(DOCNAME)
-	assert out["recordings_available"] == 0 and seen.rendered == [(DOCNAME, 0)]
-	# Logged once, with the exception, and outside the except block (no active exception).
-	assert seen.logged == [("optimus regenerate_reports fetch", "RuntimeError", None)]
-
-
-def test_backfill_failure_still_renders(monkeypatch):
-	_, seen = _env(monkeypatch, backfill_raises=True)
-	api._render_session_report(DOCNAME, ai_backfill=True)
-	assert seen.rendered == [(DOCNAME, 1)]
-	assert seen.logged == [("optimus regenerate ai backfill", "RuntimeError", None)]
-
-
-def test_rerender_after_ai_success_never_backfills(monkeypatch):
+def test_report_failure_is_logged_outside_except_and_returns_a_fixed_user_message(monkeypatch):
 	_, seen = _env(monkeypatch)
-	assert api._rerender_after_ai(_ref()) is True
-	assert seen.backfilled == [] and seen.rendered == [(DOCNAME, 1)]
+	from optimus import report_refresh
+	def fail(*a):
+		raise OSError("fake rendering failure")
+	monkeypatch.setattr(report_refresh, "render_report", fail)
+	with pytest.raises(FakeValidationError, match="previous report was kept"):
+		api._render_session_report(DOCNAME)
+	assert seen.logged == [("optimus regenerate report", "OSError", None)]
 
 
-def test_rerender_after_ai_reports_failure_instead_of_raising(monkeypatch):
+def test_regenerate_reports_never_spends_tokens(monkeypatch):
 	fake, seen = _env(monkeypatch)
-
-	def boom(docname, *, ai_backfill=False):
-		raise RuntimeError("disk full")
-
-	monkeypatch.setattr(api, "_render_session_report", boom)
-	assert api._rerender_after_ai(_ref()) is False
-	assert seen.logged == [("optimus AI re-render", "RuntimeError", None)]
-	assert len(fake.spies.rollback) == 1
-
-
-def test_regenerate_reports_keeps_ai_backfill_until_pr2(monkeypatch):
-	fake, seen = _env(monkeypatch)
-	out = api.regenerate_reports(session_uuid=SESSION_UUID)
-	assert out == {
+	assert api.regenerate_reports(SESSION_UUID) == {
 		"regenerated": True, "session_uuid": SESSION_UUID, "docname": DOCNAME,
 		"recordings_available": 1, "actions_total": 2,
 	}
-	assert seen.backfilled == [DOCNAME]
-	assert fake.spies.enqueue == []
+	assert seen.rendered == [(DOCNAME, 1)] and not fake.spies.enqueue
 
 
 def test_regenerate_reports_allows_failed_sessions(monkeypatch):
 	_, seen = _env(monkeypatch, status="Failed")
-	api.regenerate_reports(session_uuid=SESSION_UUID)
+	api.regenerate_reports(SESSION_UUID)
 	assert seen.rendered == [(DOCNAME, 1)]
 
 
@@ -187,66 +136,35 @@ def test_regenerate_reports_rate_limited_per_user(monkeypatch):
 		api.regenerate_reports(session_uuid=SESSION_UUID)
 
 
-def test_phase2_worker_rerender_passes_gate_for_owner(monkeypatch):
-	"""line_profile/analyzer._regenerate_parent_reports (frozen) calls the whitelisted
-	regenerate_reports as the enqueuing user; a plain Optimus User owner must now pass."""
+def test_phase2_worker_rerender_does_not_call_http_endpoint(monkeypatch):
+	"""Trusted worker re-renders already-authorized work without a second rate limit."""
 	_, seen = _env(monkeypatch)
-	from optimus.line_profile import analyzer as lp_analyzer
+	from optimus.line_profile import jobs
 
-	lp_analyzer._regenerate_parent_reports(SESSION_UUID)
+	monkeypatch.setattr(api, "regenerate_reports", _must_not_run)
+	jobs._render({"parent": DOCNAME})
 	assert seen.rendered == [(DOCNAME, 1)]
+
 
 
 class _JobTimeout(Exception):
 	pass
 
 
-@pytest.mark.parametrize("stage", ["fetch", "backfill", "pdf", "render", "rollback"])
-def test_report_helpers_propagate_job_timeouts_without_the_failed_frames(monkeypatch, stage):
-	fake, seen = _env(monkeypatch)
+def test_report_api_propagates_job_timeouts_without_the_failed_frames(monkeypatch):
+	_, seen = _env(monkeypatch)
 	monkeypatch.setattr(ai_fix, "_job_timeout_types", lambda: (_JobTimeout,))
-	original = _JobTimeout("job expired")
-
-	def interrupted(*args, **kwargs):
+	original = _JobTimeout("fake job expired")
+	def interrupted(*a):
 		raise original
-
-	from optimus import analyze, pdf_export
-
-	if stage == "fetch":
-		monkeypatch.setattr(analyze, "_fetch_recordings", interrupted)
-	elif stage == "backfill":
-		monkeypatch.setattr(analyze, "_backfill_ai_suggestions", interrupted)
-	elif stage == "pdf":
-		monkeypatch.setattr(pdf_export, "clear_cached_pdf", interrupted)
-	elif stage == "render":
-		monkeypatch.setattr(api, "_render_session_report", interrupted)
-	else:
-		def broken_render(*args, **kwargs):
-			raise RuntimeError("disk full")
-		monkeypatch.setattr(api, "_render_session_report", broken_render)
-		fake.db.rollback = interrupted
-
+	from optimus import report_refresh
+	monkeypatch.setattr(report_refresh, "render_report", interrupted)
 	with pytest.raises(_JobTimeout) as caught:
-		if stage in {"render", "rollback"}:
-			api._rerender_after_ai(_ref())
-		else:
-			api._render_session_report(DOCNAME, ai_backfill=True)
+		api._render_session_report(DOCNAME)
 	assert caught.value is not original
-	assert caught.value.args == original.args
 	assert caught.value.__context__ is None and caught.value.__cause__ is None
-	frames = []
 	tb = caught.value.__traceback__
 	while tb:
-		frames.append(tb.tb_frame.f_code.co_name)
+		assert tb.tb_frame.f_code is not interrupted.__code__
 		tb = tb.tb_next
-	assert "interrupted" not in frames
-	assert seen.rendered == []
-	if stage == "pdf":
-		assert seen.logged == []
-	else:
-		title = {
-			"fetch": "optimus regenerate_reports fetch",
-			"backfill": "optimus regenerate ai backfill",
-			"render": "optimus AI re-render", "rollback": "optimus AI re-render",
-		}[stage]
-		assert seen.logged == [(title, "_JobTimeout", None)]
+	assert seen.logged == [("optimus regenerate report", "_JobTimeout", None)]

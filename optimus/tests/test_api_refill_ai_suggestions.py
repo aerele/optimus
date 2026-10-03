@@ -1,21 +1,11 @@
-# Copyright (c) 2026, Optimus contributors
-# For license information, please see license.txt
-
-"""Tests for ``optimus.api.refill_ai_suggestions``.
-
-The endpoint chains three helpers (``_run_ai_backfill``, ``_humanize_steps_core``,
-``_refill_indexes_for_doc``) and re-renders once at the end through ``_render_session_report``
-(never the whitelisted ``regenerate_reports``). Covers the happy path for a plain Optimus User
-owner, toggle-off sections and gate failures (provider missing, non-Ready, non-owner): each
-raises before any helper runs.
-"""
-
+"""The legacy refresh route now admits background work, preserving its session gates."""
+from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from optimus import ai_fix, api
+from optimus import api
 from optimus.tests.gate_fakes import (
 	DOCNAME,
 	OWNER,
@@ -30,91 +20,176 @@ from optimus.tests.gate_fakes import (
 )
 
 
-def _cfg(**overrides):
-	defaults = {"ai_suggest_findings": True, "ai_humanize_steps": True, "ai_suggest_indexes": True}
-	defaults.update(overrides)
-	return SimpleNamespace(**defaults)
-
-
-def _must_not_be_called(*args, **kwargs):
-	raise AssertionError("refill must re-render via _render_session_report, not regenerate_reports")
-
-
 @pytest.fixture
 def env(monkeypatch):
-	def _make(*, status="Ready", user=OWNER, perms=None, available=True, cfg=None):
-		fake = make_fake_frappe(
-			user=user, sessions={SESSION_UUID: session_row(status=status)},
-			perms=owner_perms() if perms is None else perms, docs={DOCNAME: fake_session_doc()},
-		)
+	def make(*, status="Ready", user=OWNER, perms=None, cfg=None):
+		fake = make_fake_frappe(user=user, sessions={SESSION_UUID: session_row(status=status)},
+			perms=owner_perms() if perms is None else perms, docs={DOCNAME: fake_session_doc()})
 		install(monkeypatch, fake)
-		monkeypatch.setattr(ai_fix, "is_available", lambda section=None: available)
-		monkeypatch.setattr("optimus.settings.get_config", lambda: cfg or _cfg())
-		helpers = SimpleNamespace(
-			backfill=MagicMock(return_value={"added": 3, "failed": 0, "skipped_time": 1, "total_pending": 4}),
-			humanize=MagicMock(return_value={"updated": True, "reason": None}),
-			indexes=MagicMock(return_value={"added": 2, "failed": 0, "skipped": 0}),
-			render=MagicMock(return_value={"regenerated": True, "recordings_available": 0, "actions_total": 0}),
-		)
-		monkeypatch.setattr("optimus.analyze._run_ai_backfill", helpers.backfill)
-		monkeypatch.setattr(api, "_humanize_steps_core", helpers.humanize)
-		monkeypatch.setattr(api, "_refill_indexes_for_doc", helpers.indexes)
-		monkeypatch.setattr(api, "_render_session_report", helpers.render)
-		monkeypatch.setattr(api, "regenerate_reports", _must_not_be_called)
-		return fake, helpers
-
-	return _make
+		jobs = import_module("optimus.ai_jobs")
+		monkeypatch.setattr(jobs, "frappe", fake)
+		h = SimpleNamespace(start=MagicMock(return_value={"status": "queued", "refresh": {"run_id": "fake-run", "state": "queued"}}),
+			active=MagicMock(return_value=None))
+		monkeypatch.setattr(jobs, "active_refresh", h.active, raising=False)
+		monkeypatch.setattr(jobs, "start_refresh", h.start)
+		monkeypatch.setattr("optimus.settings.get_config", lambda: cfg or SimpleNamespace(
+			ai_suggest_findings=True, ai_humanize_steps=True, ai_refresh_max_findings=20))
+		return fake, h
+	return make
 
 
-def test_refill_runs_all_three_steps_for_a_plain_owner(env):
+def test_refill_queues_for_plain_owner_without_inline_spend_or_counter_write(env):
 	fake, h = env()
-	out = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
-	assert out["ok"] is True and out["session_uuid"] == SESSION_UUID
-	assert out["fixes"]["added"] == 3 and out["fixes"]["skipped_time"] == 1
-	assert out["steps"]["updated"] is True and out["indexes"]["added"] == 2
-	assert out["regenerated"] is True
-	assert h.backfill.call_args.kwargs == {"cap": 0, "regenerate_all": True}
-	assert h.humanize.call_args.kwargs == {"title": "Checkout flow"}
-	assert h.indexes.call_count == 1
-	h.render.assert_called_once_with(DOCNAME)
-	assert fake.spies.set_value[0][0][:3] == ("Optimus Session", DOCNAME, "ai_refresh_count")
+	out = api.refill_ai_suggestions(SESSION_UUID)
+	assert out["status"] == "queued" and out["ok"] is True
+	assert out["session_uuid"] == SESSION_UUID
+	assert h.start.call_args.kwargs == dict(docname=DOCNAME, session_uuid=SESSION_UUID,
+		requested_by=OWNER, regenerate_all=False, include_fixes=True, include_steps=True,
+		cap=20, resume_from=None, retry_uncertain=False)
+	assert not fake.spies.set_value and not fake.spies.get_doc
 
 
-def test_refill_skips_sections_whose_toggle_is_off(env):
-	_, h = env(cfg=_cfg(ai_humanize_steps=False, ai_suggest_indexes=False))
-	out = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
-	assert h.backfill.call_count == 1
-	assert h.humanize.call_count == 0 and h.indexes.call_count == 0
-	assert out["steps"]["reason"] == "toggle_off"
-	assert out["indexes"]["skipped_reason"] == "toggle_off"
-	assert h.render.call_count == 1
+def test_refill_honors_section_flags_and_explicit_unlimited_cap(env):
+	_, h = env(cfg=SimpleNamespace(ai_suggest_findings=False, ai_humanize_steps=True, ai_refresh_max_findings=0))
+	api.refill_ai_suggestions(SESSION_UUID, regenerate_all="1")
+	assert h.start.call_args.kwargs["include_fixes"] is False
+	assert h.start.call_args.kwargs["regenerate_all"] is True
+	assert h.start.call_args.kwargs["cap"] == 0
 
 
-def test_refill_fails_fast_when_provider_missing(env):
-	fake, h = env(available=False)
-	with pytest.raises(FakeValidationError) as exc:
-		api.refill_ai_suggestions(session_uuid=SESSION_UUID)
-	assert "aren't configured" in str(exc.value)
-	assert h.backfill.call_count == h.humanize.call_count == h.indexes.call_count == h.render.call_count == 0
-	assert fake.spies.set_value == []
-
-
-def test_refill_requires_ready_status(env):
+def test_refill_requires_ready_status_before_admission(env):
 	_, h = env(status="Analyzing")
-	with pytest.raises(FakeValidationError) as exc:
-		api.refill_ai_suggestions(session_uuid=SESSION_UUID)
-	assert "Ready" in str(exc.value)
-	assert h.backfill.call_count == 0
+	with pytest.raises(FakeValidationError):
+		api.refill_ai_suggestions(SESSION_UUID)
+	h.start.assert_not_called()
 
 
-def test_refill_denies_a_non_owner_without_write(env):
-	_, h = env(user="someone-else@example.com", perms={})
+def test_refill_denies_nonowner_without_write(env):
+	fake, h = env(user="other@example.com", perms={})
 	with pytest.raises(FakePermissionError):
-		api.refill_ai_suggestions(session_uuid=SESSION_UUID)
-	assert h.backfill.call_count == 0
+		api.refill_ai_suggestions(SESSION_UUID)
+	h.start.assert_not_called()
+	assert not fake.cache.calls
 
 
-def test_refill_allows_a_write_sharee(env):
-	sharee = "sharee@example.com"
-	_, h = env(user=sharee, perms={("read", DOCNAME, sharee): True, ("write", DOCNAME, sharee): True})
-	assert api.refill_ai_suggestions(session_uuid=SESSION_UUID)["ok"] is True
+def test_refill_allows_write_sharee_and_attributes_actual_requester(env):
+	user = "sharee@example.com"
+	_, h = env(user=user, perms={("read", DOCNAME, user): True, ("write", DOCNAME, user): True})
+	assert api.refill_ai_suggestions(SESSION_UUID)["ok"]
+	assert h.start.call_args.kwargs["requested_by"] == user
+
+
+@pytest.mark.parametrize("value", ["yes please", "2", [], {}, None, 2, 0.5])
+def test_malformed_flags_do_not_admit_or_consume_rate_limit(env, value):
+	fake, h = env()
+	with pytest.raises(FakeValidationError):
+		api.refill_ai_suggestions(SESSION_UUID, regenerate_all=value)
+	h.start.assert_not_called()
+	assert not fake.cache.calls
+
+
+@pytest.mark.parametrize("value,expected", [(False, False), (True, True), (0, False), (1, True),
+	("0", False), ("1", True), ("false", False), ("true", True), ("FALSE", False)])
+def test_refresh_flags_keep_false_strings_false(env, value, expected):
+	_, h = env()
+	api.refill_ai_suggestions(SESSION_UUID, regenerate_all=value, retry_uncertain=value)
+	assert h.start.call_args.kwargs["regenerate_all"] is expected
+	assert h.start.call_args.kwargs["retry_uncertain"] is expected
+
+
+def test_existing_run_attaches_without_redis_or_configuration(env, monkeypatch):
+	fake, h = env()
+	h.active.return_value = {"run_id": "fake-run", "state": "running"}
+	monkeypatch.setattr("optimus.settings.get_config", lambda: pytest.fail("must attach without Settings"))
+	out = api.refill_ai_suggestions(SESSION_UUID)
+	assert out["status"] == "already_running"
+	assert not fake.cache.calls
+	h.start.assert_not_called()
+
+
+@pytest.mark.parametrize("reason", ["no_worker", "queue_unavailable", "site_cap", "disabled"])
+def test_admission_refusal_is_explicit_without_inline_fallback(env, reason):
+	fake, h = env()
+	h.start.return_value = {"status": "refused", "reason": reason}
+	out = api.refill_ai_suggestions(SESSION_UUID)
+	assert out["ok"] is False and out["reason"] == reason and out["message"]
+	assert not fake.spies.set_value
+
+
+def test_cancel_cannot_target_another_sessions_run(env, monkeypatch):
+	fake, _ = env()
+	jobs = import_module("optimus.ai_jobs")
+	cancel = MagicMock()
+	monkeypatch.setattr(jobs, "cancel_refresh", cancel)
+	# The fake DB finds no run bound to this parent, even if a run id is supplied.
+	with pytest.raises(FakeValidationError):
+		api.cancel_ai_refresh(SESSION_UUID, "foreign-run")
+	cancel.assert_not_called()
+	assert not fake.cache.calls
+
+
+def test_status_checks_read_permission_before_touching_journal(env, monkeypatch):
+	fake, _ = env(user="stranger@example.com", perms={})
+	jobs = import_module("optimus.ai_jobs")
+	monkeypatch.setattr(jobs, "refresh_state", lambda *a: pytest.fail("unauthorized journal read"))
+	with pytest.raises(FakePermissionError):
+		api.ai_refresh_status(SESSION_UUID)
+
+
+@pytest.mark.parametrize("owner", [True, False])
+def test_read_sharee_can_poll_but_only_actor_sees_refresh_plan(env, monkeypatch, owner):
+	user = OWNER if owner else "reader@example.com"
+	fake, _ = env(user=user, perms={("read", DOCNAME, user): True})
+	permission = fake.has_permission
+	monkeypatch.setattr(fake, "has_permission", lambda dt, ptype, doc, user=None: permission(dt, ptype, doc, user=user or fake.session.user))
+	monkeypatch.setattr(fake, "get_doc", lambda *a: fake_session_doc(owner=OWNER, status="Ready"))
+	jobs = import_module("optimus.ai_jobs")
+	monkeypatch.setattr(jobs, "refresh_state", lambda *a: {"state": "complete", "seq": 9})
+	plan = MagicMock(return_value={"pending": 3})
+	monkeypatch.setattr(jobs, "refresh_plan", plan)
+	out = api.ai_refresh_status(SESSION_UUID)
+	assert out["status"] == "ok" and out["refresh"]["seq"] == 9
+	assert out["can_act"] is owner
+	assert bool(out["plan"]) is owner
+	assert plan.call_count == int(owner)
+	assert not fake.cache.calls
+
+
+def test_cancel_passes_exact_requested_run_even_when_a_newer_run_is_active(env, monkeypatch):
+	fake, _ = env(status="Failed")
+	jobs = import_module("optimus.ai_jobs")
+	read = fake.db.get_value
+	def get_value(table, filters, field="name", **kw):
+		if table == "Optimus AI Refresh Run":
+			assert filters == {"name": "old-run", "session_name": DOCNAME}
+			return "old-run"
+		return read(table, filters, field, **kw)
+	monkeypatch.setattr(fake, "db", SimpleNamespace(get_value=get_value))
+	cancel = MagicMock(return_value={"state": "cancelled", "run_id": "old-run"})
+	monkeypatch.setattr(jobs, "cancel_refresh", cancel)
+	assert api.cancel_ai_refresh(SESSION_UUID, "old-run")["refresh"]["state"] == "cancelled"
+	cancel.assert_called_once_with("old-run", requested_by=OWNER)
+	assert not fake.cache.calls
+
+
+def test_progress_failure_is_unknown_and_does_not_claim_completion(env, monkeypatch):
+	fake, _ = env()
+	monkeypatch.setattr(fake, "has_permission", lambda *a, **kw: True)
+	jobs = import_module("optimus.ai_jobs")
+	def fail(*a):
+		raise ConnectionError("fake SQL outage")
+	monkeypatch.setattr(jobs, "refresh_state", fail)
+	logs = []
+	monkeypatch.setattr("optimus.analyze._log_ai_step_failure", lambda *a, **kw: logs.append(type(a[1]).__name__))
+	assert api.ai_refresh_status(SESSION_UUID) == {
+		"status": "unknown", "refresh": None, "can_act": False, "plan": None,
+	}
+	assert logs == ["ConnectionError"]
+
+
+def test_render_only_action_refuses_active_refresh_before_consuming_rate_limit(env):
+	fake, helpers = env()
+	helpers.active.return_value = {"run_id": "fake-run", "state": "running"}
+	with pytest.raises(FakeValidationError, match="AI refresh"):
+		api.regenerate_reports(SESSION_UUID)
+	assert not fake.cache.calls

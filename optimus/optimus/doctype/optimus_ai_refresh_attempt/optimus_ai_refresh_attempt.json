@@ -1,0 +1,137 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "editable_grid": 0,
+ "module": "Optimus",
+ "permissions": [],
+ "track_changes": 0,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "links": [],
+ "name": "Optimus AI Refresh Attempt",
+ "autoname": "field:attempt_id",
+ "naming_rule": "By fieldname",
+ "field_order": [
+  "attempt_id",
+  "run_id",
+  "kind",
+  "target_name",
+  "input_hash",
+  "worker_token",
+  "state",
+  "settled",
+  "tokens_reported",
+  "usage_complete",
+  "error_kind",
+  "started_at_epoch",
+  "finished_at_epoch",
+  "session_name"
+ ],
+ "fields": [
+  {
+   "fieldname": "attempt_id",
+   "fieldtype": "Data",
+   "label": "Attempt Id",
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "run_id",
+   "fieldtype": "Data",
+   "label": "Run Id",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "kind",
+   "fieldtype": "Select",
+   "label": "Kind",
+   "read_only": 1,
+   "options": "fix\nsteps",
+   "reqd": 1
+  },
+  {
+   "fieldname": "target_name",
+   "fieldtype": "Data",
+   "label": "Target Name",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "input_hash",
+   "fieldtype": "Data",
+   "label": "Input Hash",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "worker_token",
+   "fieldtype": "Data",
+   "label": "Worker Token",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "state",
+   "fieldtype": "Select",
+   "label": "State",
+   "read_only": 1,
+   "options": "calling\nsucceeded\nfailed\nskipped\nuncertain\ndiscarded",
+   "reqd": 1
+  },
+  {
+   "fieldname": "settled",
+   "fieldtype": "Check",
+   "label": "Settled",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "tokens_reported",
+   "fieldtype": "Long Int",
+   "label": "Tokens Reported",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "usage_complete",
+   "fieldtype": "Check",
+   "label": "Usage Complete",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "error_kind",
+   "fieldtype": "Data",
+   "label": "Error Kind",
+   "read_only": 1
+  },
+  {
+   "fieldname": "started_at_epoch",
+   "fieldtype": "Float",
+   "label": "Started At Epoch",
+   "read_only": 1,
+   "precision": "6"
+  },
+  {
+   "fieldname": "finished_at_epoch",
+   "fieldtype": "Float",
+   "label": "Finished At Epoch",
+   "read_only": 1,
+   "precision": "6"
+  },
+  {
+   "fieldname": "session_name",
+   "fieldtype": "Data",
+   "label": "Session Name",
+   "read_only": 1,
+   "search_index": 1,
+   "reqd": 1
+  }
+ ]
+}

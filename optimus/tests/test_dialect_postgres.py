@@ -158,23 +158,16 @@ def test_explain_flags_derives_findings_from_postgres_plan(monkeypatch, empty_co
 	assert len(scans) == 1 and "tabGL Entry" in scans[0]["title"]
 
 
-def test_ai_finding_hint_is_dialect_aware(monkeypatch):
-	"""The four EXPLAIN-based AI hints use MariaDB EXPLAIN-column wording on MariaDB
-	and Postgres plan-node wording on Postgres; neutral types are the same on both."""
+def test_only_eligible_ai_hints_remain_for_either_dialect(monkeypatch):
 	import frappe
 
 	from optimus import ai_fix
 
-	monkeypatch.setattr(frappe, "db", types.SimpleNamespace(db_type="mariadb"), raising=False)
-	assert "type=ALL" in ai_fix._finding_type_hint("Full Table Scan")
-	assert "Using filesort" in ai_fix._finding_type_hint("Filesort")
-
-	monkeypatch.setattr(frappe, "db", types.SimpleNamespace(db_type="postgres"), raising=False)
-	assert "Seq Scan" in ai_fix._finding_type_hint("Full Table Scan")
-	assert "`Sort` node" in ai_fix._finding_type_hint("Filesort")
-
-	# A dialect-neutral finding type is identical regardless of dialect.
-	assert ai_fix._finding_type_hint("N+1 Query") == ai_fix._FINDING_TYPE_HINTS["N+1 Query"]
+	for dialect in ("mariadb", "postgres"):
+		monkeypatch.setattr(frappe, "db", types.SimpleNamespace(db_type=dialect), raising=False)
+		for finding_type in ("Full Table Scan", "Filesort", "Temporary Table", "Low Filter Ratio"):
+			assert ai_fix._finding_type_hint(finding_type) is None
+		assert ai_fix._finding_type_hint("N+1 Query") == ai_fix._FINDING_TYPE_HINTS["N+1 Query"]
 
 
 # --- _safe_sql transaction-safety hardening -----------------------------------

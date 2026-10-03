@@ -8,6 +8,133 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.71] - 2026-10-03
+
+### Changed
+
+- Save profiling findings and the first report before queuing optional AI
+  enrichment. Provider failures and timeouts no longer discard a completed
+  profile. Refresh AI suggestions now queues background work and shows SQL
+  progress, cancellation, reported usage and uncertain outcomes in Desk.
+- Select missing and outdated suggestions by default. Replacing current
+  answers or retrying an uncertain provider call requires explicit consent.
+  Keep unsaved form edits when background work finishes.
+- Queue Phase 2 analysis and retries, including when the scheduler is
+  disabled. Persist generation ownership, bounded attempts and delivery intent
+  so duplicate or stale workers cannot append findings twice. Saved Phase 2
+  results remain Ready if optional report rendering fails.
+- Replace reports transactionally, retaining the previous report on failure.
+  Regenerate Reports repairs pending output using saved results without AI.
+- Add an independent manual refresh cap of 20 and expose the existing model
+  context-window setting. An explicitly saved zero cap remains unlimited
+  within the refresh deadline.
+
+### Upgrade notes
+
+- Migrate the new Phase 2 queue fields and Settings defaults, then replace
+  web, worker and scheduler processes together. Keep a `long` worker for
+  Phase 2 and a worker on the configured AI queue. Minute recovery sweeps
+  require the scheduler. Old running workers do not acquire the new fences.
+- Refresh and Phase 2 stop/retry responses now acknowledge queued work;
+  integrations must poll saved progress instead of assuming inline completion.
+  See [refresh operations and compatibility](docs/AI-REFRESH.md).
+- This staged integration still requires recording/provider/source/privacy
+  hardening and final deployment and model acceptance before release.
+
+## [0.12.70] - 2026-10-03
+
+### Internal
+
+- Add the background AI refresh engine and private SQL run/attempt journal.
+  A send intent commits before the provider call; the answer, reported usage
+  and outcome commit together. Duplicate deliveries cannot repeat a claimed
+  slice, and cancelled or expired workers cannot overwrite newer results.
+- Keep interrupted calls with an unknown outcome as uncertain. Automatic
+  recovery delivers queued work but never repeats an uncertain provider call.
+  Explicit resumes preserve the selection cursor and have a bounded chain.
+- Add durable progress, SQL cancellation, site/user admission limits, bounded
+  job slices and provider failure limits. Redis coordinates queue delivery;
+  progress and accounting remain in SQL.
+- Distinguish known zero token usage from missing or contradictory usage,
+  preserve reported usage on processing failures, and widen the stored step
+  token count. Keep RQ timeouts fresh, including when worker cleanup fails.
+
+### Upgrade notes
+
+- This engine is not yet connected to the UI, API, analyzer or scheduler.
+  Existing refresh behavior remains synchronous. The wiring follow-up must
+  land before release; profiling isolation is completed there.
+- Normal deployment migration installs three internal DocTypes and seeds the
+  admission mutex. Missing storage refuses new work. See
+  [background engine details](docs/AI-REFRESH.md) for transactions, queue
+  requirements and the remaining deployment work.
+
+## [0.12.69] - 2026-10-03
+
+### Changed
+
+- Classify AI provider errors consistently. Request-validation retries can
+  remove temperature or rename the output-token parameter, at most once each,
+  within a shared request budget. Network failures are not retried. Known
+  reasoning models keep the provider-aware output cap; inline thinking is
+  removed before an answer is processed.
+- Regenerate Reports uses stored answers and does not call the model. Report
+  regeneration and step humanization read recording JSON without loading
+  Python trees or sidecars. Use Refresh AI suggestions for new answers.
+- Add shared selection of missing and outdated suggestions, explicit session
+  attribution, and portable atomic usage/counter helpers for background work.
+  Counter failures propagate so a caller can roll back its result transaction.
+
+### Fixed
+
+- Keep reported token usage when a response is unusable or later validation
+  fails. Preserve fresh RQ timeouts and the existing failure-log marker.
+- Keep recording-read failure logs outside exception handlers, and propagate
+  RQ timeouts instead of swallowing them. A Redis read failure falls back to
+  the saved recording bundle.
+- Phase 2 report regeneration uses the internal render helper without a
+  second HTTP permission/rate-limit gate. The 24-hour analysis health metric
+  uses the session stop time, independent of later AI updates.
+
+### Upgrade notes
+
+- Background refresh jobs and persistence before optional AI work are still
+  pending follow-up changes. Refresh remains synchronous in this change.
+- Request read timeouts measure socket inactivity, not a strict wall-clock
+  deadline. Worker time limits remain necessary.
+
+## [0.12.68] - 2026-10-02
+
+### Changed
+
+- Build index advice from analyzer evidence and DocType metadata without an AI
+  call. Recipes select Search Index, a Property Setter, or a durable
+  `frappe.db.add_index` patch or hook according to field type and ownership.
+  Raw analyzer DDL is replaced in reports; single-column non-text table cards
+  fall back to their candidate list.
+- Retire the index-only AI prompt, helpers and refresh step. The existing
+  index-AI Settings field is read-only and has no effect. Refresh AI suggestions
+  updates eligible finding fixes and humanized steps, then renders once.
+- Limit AI finding fixes to N+1 Query, Slow Query, Redundant Call and Hot Line.
+  Framework Hot Lines and lines dominated by a non-trivial callee get an
+  explanatory note. Framework N+1 and index findings do not call the model.
+- Correct the Redundant Call sidecar stack direction and stamp new findings.
+  Older unstamped findings require re-recording before another AI suggestion;
+  their stored suggestion stays visible with a warning when the report is
+  regenerated.
+- Ground finding prompts in the enclosing function when it fits within 80
+  lines, otherwise retain the bounded source window. Add AST-derived loop
+  facts about dependencies, result use and observed writes. Prompt version 4
+  marks older displayed suggestions as outdated after report regeneration.
+
+### Upgrade notes
+
+- Regenerate Reports updates deterministic advice and the older-suggestion
+  notices without changing stored suggestion JSON. Re-record flows with older
+  Redundant Call findings to obtain corrected callsites.
+- This change does not move AI work out of analysis or add a persistence
+  checkpoint before optional AI calls. Those changes remain follow-up work.
+
 ## [0.12.67] - 2026-10-02
 
 ### Changed

@@ -37,7 +37,7 @@ def test_guarded_reask_reads_key_once_per_completion(monkeypatch, keyless):
     assert result["guardrail"] == {"violations": [], "reasked": True, "fallback": False}
     assert result["finish_reason"] == "stop"
     assert len(fake.calls) == len(reads) == 2
-    assert all(0 < call.timeout <= 47 for call in fake.calls)
+    assert all(0 < call.timeout[0] <= 10 and 0 < call.timeout[1] <= 47 for call in fake.calls)
     assert all((call.auth is None) == keyless for call in fake.calls)
 
 

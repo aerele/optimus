@@ -38,7 +38,8 @@ def _env(monkeypatch, *, user=OWNER, roles=("Optimus User",), perms=None, run_st
 		perms=owner_perms() if perms is None else perms, docs={DOCNAME: doc},
 	)
 	install(monkeypatch, fake)
-	seen = SimpleNamespace(saved=[], capture=[], analyzed=[])
+	seen = SimpleNamespace(saved=[], capture=[], analyzed=[], queued=[])
+	monkeypatch.setattr(api, "_lock_phase2_for_write", lambda *a, **kw: None)
 	monkeypatch.setattr(api, "_save_parent_bypassing_perms", lambda parent: seen.saved.append(parent.name))
 	install_module(monkeypatch, "optimus.line_profile.capture", SimpleNamespace(
 		is_active=lambda u: None,
@@ -49,6 +50,10 @@ def _env(monkeypatch, *, user=OWNER, roles=("Optimus User",), perms=None, run_st
 	))
 	install_module(monkeypatch, "optimus.line_profile.picker", SimpleNamespace(expand_hot_chain=lambda *a, **k: []))
 	install_module(monkeypatch, "optimus.line_profile.analyzer", SimpleNamespace(run_analyze=lambda s, r: seen.analyzed.append((s, r))))
+	def request(docname, session_uuid, run_uuid, requested_by, **kw):
+		seen.queued.append((docname, session_uuid, run_uuid, requested_by, kw))
+		return {"run_uuid": run_uuid, "session_uuid": session_uuid, "status": "Analyzing", "ran_inline": False, "reason": None}
+	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request))
 	scheduler = types.ModuleType("frappe.utils.scheduler")
 	scheduler.is_scheduler_disabled = lambda: False
 	monkeypatch.setitem(sys.modules, "frappe.utils.scheduler", scheduler)
@@ -94,10 +99,10 @@ def test_start_rejects_a_bad_picks_payload_with_a_title(monkeypatch):
 def test_stop_by_the_owner(monkeypatch):
 	fake, doc, seen = _env(monkeypatch)
 	out = api.stop_line_profile_pass(run_uuid="run-1")
-	assert out == {"run_uuid": "run-1", "session_uuid": SESSION_UUID, "status": "Analyzing"}
+	assert out == {"run_uuid": "run-1", "session_uuid": SESSION_UUID, "status": "Analyzing", "ran_inline": False, "reason": None}
 	assert seen.capture == [("stop", "run-1", OWNER)]
-	assert doc.phase_2_runs[0].status == "Analyzing" and seen.saved == [DOCNAME]
-	assert len(fake.spies.enqueue) == 1
+	assert seen.queued == [(DOCNAME, SESSION_UUID, "run-1", OWNER, {"from_recording": True})]
+	assert not seen.analyzed and not seen.saved
 
 
 def test_stop_rejects_run_not_recording_without_writes(monkeypatch):
@@ -116,8 +121,9 @@ def test_stop_denies_a_stranger_before_the_run_status(monkeypatch):
 
 def test_retry_phase2_analyze_by_the_owner(monkeypatch):
 	_, _, seen = _env(monkeypatch, run_status="Failed")
-	assert api.retry_phase2_analyze(run_uuid="run-1") == {"run_uuid": "run-1", "session_uuid": SESSION_UUID, "status": "Ready"}
-	assert seen.analyzed == [(SESSION_UUID, "run-1")] and seen.saved == [DOCNAME]
+	assert api.retry_phase2_analyze(run_uuid="run-1")["status"] == "Analyzing"
+	assert not seen.analyzed and not seen.saved
+	assert seen.queued == [(DOCNAME, SESSION_UUID, "run-1", OWNER, {})]
 
 
 def test_batch_isolates_a_foreign_run(monkeypatch):
@@ -135,9 +141,38 @@ def test_batch_isolates_a_foreign_run(monkeypatch):
 	saved, analyzed = [], []
 	monkeypatch.setattr(api, "_save_parent_bypassing_perms", lambda parent: saved.append(parent.name))
 	install_module(monkeypatch, "optimus.line_profile.analyzer", SimpleNamespace(run_analyze=lambda s, r: analyzed.append((s, r))))
+	queued = []
+	def request(docname, session_uuid, run_uuid, requested_by):
+		queued.append(run_uuid)
+		return {"run_uuid": run_uuid, "session_uuid": session_uuid, "status": "Analyzing", "ran_inline": False}
+	install_module(monkeypatch, "optimus.line_profile.jobs", SimpleNamespace(request=request))
 	out = api.retry_phase2_analyzes_batch(run_uuids='["run-1", "run-2"]')
-	assert analyzed == [(SESSION_UUID, "run-1")]
-	assert out["tallies"] == {"Ready": 1, "Failed": 1, "Analyzing": 0, "Skipped": 0}
-	assert out["results"][0] == {"run_uuid": "run-1", "session_uuid": SESSION_UUID, "status": "Ready"}
+	assert queued == ["run-1"] and not analyzed
+	assert out["tallies"] == {"Ready": 0, "Failed": 1, "Analyzing": 1, "Skipped": 0}
+	assert out["results"][0] == {"run_uuid": "run-1", "session_uuid": SESSION_UUID, "status": "Analyzing", "ran_inline": False}
 	assert out["results"][1]["run_uuid"] == "run-2" and out["results"][1]["status"] == "Failed"
-	assert saved == [DOCNAME]
+	assert not saved
+
+
+@pytest.mark.parametrize("status", ["Recording", "Ready"])
+def test_retry_refuses_non_retryable_run_before_queue(monkeypatch, status):
+	_, _, seen = _env(monkeypatch, run_status=status)
+	with pytest.raises(FakeValidationError):
+		api.retry_phase2_analyze(run_uuid="run-1")
+	assert not seen.queued and not seen.analyzed
+
+
+def test_stop_never_falls_back_inline_when_scheduler_is_disabled(monkeypatch):
+	_, _, seen = _env(monkeypatch)
+	sys.modules["frappe.utils.scheduler"].is_scheduler_disabled = lambda: True
+	out = api.stop_line_profile_pass(run_uuid="run-1")
+	assert out["status"] == "Analyzing" and out["ran_inline"] is False
+	assert seen.queued and not seen.analyzed
+
+
+def test_manual_start_obeys_the_configured_run_cap_before_capture(monkeypatch):
+	_, _, seen = _env(monkeypatch)
+	monkeypatch.setattr("optimus.settings.get_config", lambda: SimpleNamespace(phase2_max_runs_per_session=1))
+	with pytest.raises(FakeValidationError, match="run limit"):
+		api.start_line_profile_pass(SESSION_UUID, PICKS, auto_expand=False)
+	assert not seen.capture and not seen.saved
