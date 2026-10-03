@@ -109,7 +109,7 @@
    "default": "0",
    "description": "This counts the AI tokens used to rewrite this session's Steps to Reproduce into plain language. Internal bookkeeping, counted as part of the session's total AI tokens in the report.",
    "fieldname": "ai_steps_tokens",
-   "fieldtype": "Int",
+   "fieldtype": "Long Int",
    "hidden": 1,
    "label": "AI Steps Tokens",
    "no_copy": 1,

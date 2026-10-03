@@ -323,6 +323,7 @@ def test_the_ai_steps_log_through_the_one_helper():
 	assert callers == {
 		"log_ai_failure": {
 			"analyze.py:_log_ai_step_failure", "analyze.py:_increment_session_counter", "analyze.py:_write_ai_answer",
+			"analyze.py:_phase2_index_for",
 		},
 		"_log_ai_step_failure": {"analyze.py:_run_ai_step"},
 	}

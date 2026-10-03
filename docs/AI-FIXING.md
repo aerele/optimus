@@ -369,6 +369,7 @@ Parameter retries and permitted redirects use the remaining request budget. Each
 - `optimus ai backfill` (Refresh AI suggestions), `optimus ai auto-suggest` and `optimus ai auto-suggest (outer)` (analyze), and `optimus ai humanize_steps` (the Steps to Reproduce rewrite, at analyze and on Refresh): a failure after the reply arrived (an answer with no text or only reasoning, an unexpected error while processing it), or a Refresh answer that could not be saved.
 - `optimus ai spend` and `optimus ai refresh count`: a session counter increment that failed (section 5.2).
 - `optimus ai recording cache read`, `optimus ai load recordings bundle`, `optimus ai humanize_steps fetch` and `optimus ai regenerate_reports fetch`: reading the saved recordings failed; the report or the Steps rewrite went on with what it had.
+- `optimus ai phase 2 context`: reading the session's Phase 2 line data for the fix prompts failed; the suggestions were asked without it.
 - `optimus ai re-render` (the re-render after Refresh) and `optimus ai phase 2 re-render` (the re-render after a Phase 2 run): the report re-render failed; use Regenerate Reports.
 
 A failure row opens with the lines that tell you what to do, then the technical detail:
