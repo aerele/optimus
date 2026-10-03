@@ -13,6 +13,7 @@ SQL conflicts are retried as whole short transactions, never as provider calls.
 """
 
 import hashlib
+import html
 import json
 import re
 import time
@@ -22,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import frappe
+from frappe import _
 
 from optimus import ai_fix, safe_call, safe_commit
 from optimus import ai_refresh_store as store
@@ -699,11 +701,46 @@ def _begin_attempt(run, item, *, run_id, docname, worker_token, signals=None):
 
 
 def _end(run_id, docname, worker_token, reason):
+	# Completed answers are already committed. Rendering must neither hold a
+	# provider transaction nor turn a failed attachment into a repeated call.
+	if reason in {"complete", "uncertain", "breaker"}:
+		failure = None
+		guard = safe_call.InterruptGuard(base=True)
+		try:
+			with guard:
+				_render_pending(run_id, worker_token)
+		except StopRefresh as exc:
+			reason = exc.reason
+		except Exception as exc:
+			failure = exc
+		if guard.pending():
+			failure = None
+			raise guard.interrupt()
+		if failure is not None:
+			ai_fix.log_ai_failure("optimus ai refresh report", failure, docname=docname, run_id=run_id)
+			failure = None
+			_transaction(lambda: None)
+			reason = "render_failed"
 	run = _retry_sql(
 		lambda: store.finish(run_id, docname=docname, worker_token=worker_token, now=_now(), reason=reason)
 	)
 	_note_ending(run, docname)
 	return run
+
+
+def _render_pending(run_id, worker_token):
+	from optimus.report_refresh import render_report
+
+	run = _read_run(run_id)
+	if not run or not store.owns(run, worker_token, _now()):
+		return
+	if run["deadline"] <= _now():
+		raise StopRefresh("deadline")
+	_check_run(run)
+	# A previous cancelled/failed run may have saved answers without a report.
+	# This also repairs that report when the new selection makes no AI calls.
+	if frappe.db.get_value(store.RUN, {"session_name": run["session_name"], "render_pending": 1}, "name"):
+		render_report(run["session_name"], run_id=run_id, worker_token=worker_token)
 
 
 def _yield(run_id, docname, worker_token, *, progressed=True):
@@ -1251,20 +1288,6 @@ def start_refresh(
 	site_cap = _setting_int("optimus_ai_max_active_refreshes", 2, 1, 1000)
 	slice_seconds()
 	ai_queue()
-	if _refresh_flag_held(session_uuid):
-		# Q3: #72's synchronous Refresh holds this session; it refuses a click while this
-		# engine's reservation is held, and the engine refuses while its flag is. Nothing is
-		# counted or billed.
-		from frappe import _
-
-		return {
-			"status": "refused",
-			"reason": "refresh_running",
-			"message": _(
-				"A Refresh AI suggestions is already running for this session. "
-				"Wait for it to finish, then try again."
-			),
-		}
 	workers = _workers_listening(docname)
 	if workers is not True:
 		return {"status": "refused", "reason": "no_worker" if workers is False else "queue_unavailable"}
@@ -1315,13 +1338,6 @@ def start_refresh(
 	return out
 
 
-def _refresh_flag_held(session_uuid):
-	"""True while #72's synchronous Refresh holds this session's flag
-	(``redis_keys.ai_refresh_inflight``), read fresh from Redis (``api._refresh_flight_held``).
-	Redis not answering is not a hold: a cache failure never blocks a refresh (as there)."""
-	from optimus import api
-
-	return api._refresh_flight_held(session_uuid)
 
 
 def live_run(docname):
@@ -1540,6 +1556,69 @@ def refresh_state(docname):
 		store.RUN, {"session_name": docname}, "*", as_dict=True, order_by="creation desc"
 	)
 	return public_state(run) if run else None
+
+
+def active_refresh(docname):
+	run = live_run(docname)
+	return public_state(run) if run else None
+
+
+def refresh_plan(doc):
+	"""Count the same eligible rows the worker selects, without source or file I/O."""
+	from optimus import analyze
+	from optimus.settings import get_config
+
+	cfg = get_config()
+	fixes = bool(cfg.ai_enabled and cfg.ai_suggest_findings)
+	cutoff = datetime.fromtimestamp(_now(), timezone.utc)
+	rows = doc.get("findings") or []
+	pending = len(analyze.eligible_findings(rows, cfg, requested_at=cutoff)) if fixes else 0
+	total = len(analyze.eligible_findings(rows, cfg, regenerate_all=True, requested_at=cutoff)) if fixes else 0
+	cap = cfg.ai_refresh_max_findings
+	return {
+		"pending": pending, "total": total, "cap": cap,
+		"selected": min(pending, cap) if cap else pending,
+		"selected_all": min(total, cap) if cap else total,
+		"steps": bool(cfg.ai_enabled and cfg.ai_humanize_steps and doc.get("actions")),
+	}
+
+
+def admission_message(reason):
+	"""Fixed translated explanations, never provider text or exception detail."""
+	if reason == "no_worker":
+		return _("No background worker is listening on the AI queue {0}.").format(ai_queue())
+	return {
+		"queue_unavailable": _("The background queue is unavailable. Try again after it recovers."),
+		"busy": _("The session is busy. Wait a moment and try again."),
+		"not_running": _("This refresh has already ended. Reload its current progress."),
+		"phase2": _("Wait for the active Phase 2 run to finish."),
+		"disabled": _("AI suggestions are disabled or the provider is not configured."),
+		"not_ready": _("The session must be Ready before AI suggestions can run."),
+		"permission": _("The requesting user can no longer update this session."),
+		"site_cap": _("The site already has the maximum number of active AI refreshes."),
+		"user_cap": _("You already have the maximum number of active AI refreshes."),
+		"retry_limit": _("This refresh has reached its resume limit. Start a new refresh to try again."),
+		"already_resumed": _("This run has already been resumed. Reload its current progress."),
+		"not_resumable": _("This run cannot be resumed."),
+	}.get(reason, _("AI enrichment could not start. Search the Error Log for titles starting with optimus ai."))
+
+
+def record_admission_notice(docname, *, reason):
+	"""Record an automatic refusal on the already committed session timeline."""
+	message = _("AI enrichment was not started: {0}").format(admission_message(reason))
+	_transaction(lambda: frappe.get_doc({
+		"doctype": "Comment", "comment_type": "Info",
+		"reference_doctype": "Optimus Session", "reference_name": docname,
+		"content": html.escape(message),
+	}).insert(ignore_permissions=True))
+
+
+def prepare_analyze_retry(docname, session_uuid, *, requested_by):
+	"""Called after the action gate; a stale refresh cannot write into a retry."""
+	_transaction(lambda: None)
+	return _retry_sql(lambda: store.prepare_analyze_retry(
+		docname, session_uuid, requested_by=requested_by, now=_now(),
+	))
 
 
 def cancel_refresh(run_id, *, docname, requested_by):

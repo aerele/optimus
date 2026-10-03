@@ -242,7 +242,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize("path", [
-	_ROOT / "analyze.py", _ROOT / "optimus" / "doctype" / "optimus_session" / "optimus_session.js",
+	_ROOT / "ai_jobs.py", _ROOT / "optimus" / "doctype" / "optimus_session" / "optimus_session.js",
 ])
 def test_operators_are_told_to_search_for_the_title_a_provider_failure_row_has(path):
 	"""A provider failure is logged by the HTTP layer under the title ``optimus ai_fix``; the step

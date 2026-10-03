@@ -312,11 +312,11 @@ def _ask(entry, **attribution):
 
 @pytest.mark.parametrize("protocol", ["openai", "anthropic"])
 @pytest.mark.parametrize("entry", ["fix", "steps"])
-def test_an_unattributed_call_charges_the_ambient_session_once(provider, charged, entry, protocol):
+def test_an_unattributed_call_never_charges_a_previous_worker_session(provider, charged, entry, protocol):
 	provider.use(protocol)
 	provider.install(_Reply(_ANSWER if entry == "fix" else "1. step", 7, protocol=protocol))
 	_ask(entry)
-	assert charged == [("uuid-A", "ai_tokens_spent", 7, "session_uuid")]
+	assert charged == []
 
 
 @pytest.mark.parametrize(
@@ -351,11 +351,11 @@ def test_an_internal_call_with_an_explicit_session_never_charges_the_ambient_one
 	ai_fix._dispatch_call(dict(_PROVIDER), "system", [], usage_out={}, session_uuid="uuid-B")
 	assert charged == []
 	ai_fix._dispatch_call(dict(_PROVIDER), "system", [], usage_out={})
-	assert charged == [("uuid-A", "ai_tokens_spent", 5, "session_uuid")]
+	assert charged == []
 
 
 @pytest.mark.parametrize("attribution", [{}, {"docname": "SESS-B"}])
-def test_each_billed_call_of_a_reask_is_charged_once(provider, charged, monkeypatch, attribution):
+def test_each_billed_call_of_a_reask_is_collected_once_for_sql_settlement(provider, charged, monkeypatch, attribution):
 	violation = ai_fix.ai_guardrails.Violation
 	verdicts = iter([[violation("invented-api")], []])
 	monkeypatch.setattr(ai_fix.ai_guardrails, "verify_fix", lambda text, **k: next(verdicts))
@@ -365,8 +365,8 @@ def test_each_billed_call_of_a_reask_is_charged_once(provider, charged, monkeypa
 	provider.install(_Reply(_ANSWER, 7), _Reply(_ANSWER, 11))
 	result = ai_fix.suggest_fix({"finding_type": "N+1 Query"}, **attribution)
 	assert len(provider.posts) == 2 and result["tokens"]["total_tokens"] == 18
-	# unattributed: both replies charged to the ambient session; attributed: neither (the caller's)
-	assert [amount for _key, _field, amount, _by in charged] == ([] if attribution else [7, 11])
+	# Both replies are returned for settlement; the client never writes a session counter.
+	assert charged == []
 
 
 def test_humanize_reports_each_call_once_through_a_reused_usage_out(provider, charged):
@@ -382,13 +382,13 @@ def test_humanize_reports_each_call_once_through_a_reused_usage_out(provider, ch
 	with pytest.raises(ai_fix.AiFixError) as down:
 		ai_fix.humanize_steps([{"label": "fake"}], usage_out=usage_out)
 	assert down.value.usage is None  # nothing billed by this call, whatever the caller's dict holds
-	assert [amount for _key, _field, amount, _by in charged] == [7, 11]
+	assert charged == []
 
 
-def test_humanize_without_usage_out_still_charges_an_unattributed_call(provider, charged):
+def test_humanize_without_usage_out_never_charges_an_unattributed_session(provider, charged):
 	provider.install(_Reply("1. step", 9))
 	ai_fix.humanize_steps([{"label": "fake"}])
-	assert charged == [("uuid-A", "ai_tokens_spent", 9, "session_uuid")]
+	assert charged == []
 
 
 @pytest.mark.parametrize(
@@ -400,87 +400,34 @@ def test_an_empty_session_or_docname_is_unattributed(provider, charged, entry, a
 	provider.use(protocol)
 	provider.install(_Reply(_ANSWER if entry == "fix" else "1. step", 7, protocol=protocol))
 	_ask(entry, **attribution)
-	assert charged == [("uuid-A", "ai_tokens_spent", 7, "session_uuid")]
+	assert charged == []
 
 
-def test_an_internal_call_with_an_empty_session_is_charged_and_logged_to_the_ambient_one(
+def test_an_empty_session_is_never_charged_or_logged_to_a_previous_worker_session(
 	provider, charged, monkeypatch,
 ):
 	provider.install(_Reply("ok", 5))
 	ai_fix._dispatch_call(dict(_PROVIDER), "system", [], usage_out={}, session_uuid="")
-	assert charged == [("uuid-A", "ai_tokens_spent", 5, "session_uuid")]
+	assert charged == []
 	rows = []
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, **kw: rows.append(kw["session_uuid"]) or True)
 	monkeypatch.setattr(ai_fix, "_log_http_error", _REAL_LOG_HTTP_ERROR)
 	ai_fix._log_http_error("openai", "chat/completions", 500, session_uuid="")
-	assert rows == ["uuid-A"]
+	assert rows == [None]
 
 
-def test_the_ambient_recorder_is_a_thin_wrapper_over_the_session_counter(charged):
-	ai_fix._record_session_spend(150)
-	assert charged == [("uuid-A", "ai_tokens_spent", 150, "session_uuid")]
 
 
-@pytest.mark.parametrize("tokens", [0, None, -1, "abc", True])
-def test_the_ambient_recorder_ignores_a_call_without_tokens(charged, tokens):
-	ai_fix._record_session_spend(tokens)
-	assert charged == []
 
 
-def test_the_ambient_recorder_without_a_marker_is_a_no_op(charged, monkeypatch):
-	import frappe
-
-	monkeypatch.setattr(frappe.local, "_optimus_spend_session", None, raising=False)
-	ai_fix._record_session_spend(150)
-	assert charged == []
 
 
-def test_a_deadlocked_ambient_charge_keeps_the_answer_and_logs_once(provider, counter_db):
-	# MariaDB rolled the whole transaction back: the savepoint is gone, so the counter logs and
-	# raises again. A per-call charge has no short transaction to retry: the reply is kept.
-	db = counter_db(run_error=RuntimeError("fake deadlock"), rollback_error=RuntimeError("fake no savepoint"))
-	provider.install(_Reply(_ANSWER, 7))
-	result = ai_fix.suggest_fix({"finding_type": "N+1 Query"})
-	assert result["suggestion"].startswith("## Diagnosis")
-	assert [(log[0], log[2]["savepoint_rollback"]) for log in db.logs] == [("optimus ai spend", "failed: RuntimeError")]
 
 
-def test_an_unlogged_counter_error_is_logged_once_and_the_reply_kept(charged, monkeypatch):
-	error = RuntimeError("fake unexpected counter failure")
-
-	def counter(*a, **k):
-		raise error
-
-	monkeypatch.setattr(analyze, "_increment_session_counter", counter)
-	rows = []
-	monkeypatch.setattr(
-		ai_fix, "log_ai_failure",
-		lambda title, exc=None, **kw: rows.append((title, exc, kw.get("session_uuid"), sys.exc_info()[0])) or True,
-	)
-	ai_fix._record_session_spend(7)  # returns: the reply that billed these tokens is kept
-	assert rows == [("optimus ai spend", error, "uuid-A", None)]
 
 
-def test_an_rq_timeout_in_the_ambient_charge_leaves_fresh(charged, monkeypatch):
-	Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
-	original = Timeout("fake timeout")
-
-	def counter(*a, **k):
-		raise original
-
-	monkeypatch.setattr(analyze, "_increment_session_counter", counter)
-	with pytest.raises(Timeout) as caught:
-		ai_fix._record_session_spend(7)
-	assert caught.value is not original and caught.value.__context__ is None
 
 
-def test_a_failed_spend_counter_keeps_the_billed_answer(provider, counter_db):
-	db = counter_db(run_error=RuntimeError("fake lock wait timeout"))
-	provider.install(_Reply(_ANSWER, 7))
-	result = ai_fix.suggest_fix({"finding_type": "N+1 Query"})
-	assert result["suggestion"].startswith("## Diagnosis")
-	assert ("update", "uuid-A", "ai_tokens_spent", 7, "session_uuid") in db.calls
-	assert [(log[0], log[2].get("session_uuid")) for log in db.logs] == [("optimus ai spend", "uuid-A")]
 
 
 @pytest.mark.parametrize("entry", ["fix", "steps"])
@@ -514,7 +461,7 @@ def test_public_call_explicit_session_reaches_protocol(monkeypatch, entry):
 		)
 	assert seen[0]["session_uuid"] == "fake-session" and seen[0]["timeout"] == 17
 	# the explicit caller records this call's spend itself (analyze._add_ai_spend)
-	assert seen[0]["record_spend"] is False
+	assert seen[0]["docname"] == "fake-doc"
 
 
 def test_health_window_uses_stopped_at_not_ai_modified(monkeypatch):
@@ -557,7 +504,7 @@ def test_every_session_save_runs_the_counter_hook():
 		if isinstance(n, ast.ClassDef) and n.name == "OptimusSession"
 	)
 	hooks = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
-	assert set(hooks) == {"before_validate"}
+	assert {"before_validate", "validate"} <= set(hooks)
 	calls = [
 		n for n in ast.walk(hooks["before_validate"])
 		if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_keep_session_counters"
@@ -608,7 +555,7 @@ def test_an_increment_after_get_doc_survives_a_real_session_save(monkeypatch, ig
 		{f: self.__dict__.get(f) for f in ("ai_tokens_spent", "ai_refresh_count", "notes")}
 	))
 	stored = SimpleNamespace(
-		name="SESS-1", modified="2026-10-10 10:00:00", docstatus=DocStatus(0), ai_tokens_spent=10, ai_refresh_count=0,
+		name="SESS-1", modified="2026-10-10 10:00:00", docstatus=DocStatus(0), ai_tokens_spent=10, ai_refresh_count=0, phase_2_runs=[],
 	)
 	monkeypatch.setattr(frappe, "get_doc", lambda *a, **kw: loads.append((a, kw)) or stored)
 	doc = object.__new__(OptimusSession)
@@ -616,7 +563,7 @@ def test_an_increment_after_get_doc_survives_a_real_session_save(monkeypatch, ig
 		doctype="Optimus Session", name="SESS-1", modified="2026-10-10 10:00:00",
 		_original_modified="2026-10-10 10:00:00", docstatus=DocStatus(0),
 		flags=frappe._dict(ignore_validate=ignore_validate),
-		ai_tokens_spent=10, ai_refresh_count=0, notes="analyzed notes",
+		ai_tokens_spent=10, ai_refresh_count=0, notes="analyzed notes", phase_2_runs=[],
 	)
 	stored.ai_tokens_spent, stored.ai_refresh_count = 52, 1  # humanize tokens; a refresh
 	doc.save(ignore_permissions=True)
@@ -668,7 +615,7 @@ _FAILURES = {
 ])
 @pytest.mark.parametrize("entry", ["fix", "steps"])
 @pytest.mark.parametrize("attribution,row", [
-	({}, ("uuid-A", None)),  # unattributed: the session the worker is processing
+	({}, (None, None)),  # no attribution: never borrow a previous worker session
 	({"session_uuid": "uuid-B"}, ("uuid-B", None)),
 	({"docname": "SESS-B"}, (None, "SESS-B")),  # docname only: filed under B, never under stale A
 	({"session_uuid": "uuid-B", "docname": "SESS-B"}, ("uuid-B", "SESS-B")),
@@ -688,7 +635,7 @@ def test_an_explicit_call_never_borrows_the_ambient_session_for_its_row(provider
 	row has no session rather than the worker's last one."""
 	provider.install(_Reply("x", 1, status=500))
 	with pytest.raises(ai_fix.AiFixError):
-		ai_fix._dispatch_call(dict(_PROVIDER), "system", [], usage_out={}, record_spend=False)
+		ai_fix._dispatch_call(dict(_PROVIDER), "system", [], usage_out={})
 	assert http_rows == [("optimus ai_fix", None, None)]
 
 
@@ -698,7 +645,7 @@ def test_the_ambient_and_the_explicit_session_differ_and_each_row_follows_its_ca
 		ai_fix.suggest_fix({"finding_type": "N+1 Query"}, docname="SESS-B")
 	with pytest.raises(ai_fix.AiFixError):
 		ai_fix.suggest_fix({"finding_type": "N+1 Query"})
-	assert http_rows == [("optimus ai_fix", None, "SESS-B"), ("optimus ai_fix", "uuid-A", None)]
+	assert http_rows == [("optimus ai_fix", None, "SESS-B"), ("optimus ai_fix", None, None)]
 
 
 # --- the .usage boundary ------------------------------------------------------------------------
@@ -802,28 +749,3 @@ def test_an_unreadable_spend_marker_files_the_row_without_a_session(monkeypatch)
 	monkeypatch.setattr(frappe, "local", _UnreadableLocal(RuntimeError("no request context")))
 	_REAL_LOG_HTTP_ERROR("openai", "chat/completions", 500)
 	assert rows == [None]
-
-
-def test_a_timeout_while_reading_the_spend_marker_leaves_fresh(monkeypatch):
-	import frappe
-
-	from optimus import safe_call
-
-	monkeypatch.setattr(safe_call, "job_timeout_types", lambda: (_FakeTimeout,))
-	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **k: pytest.fail("no row after a timeout"))
-	original = _FakeTimeout("expired")
-	monkeypatch.setattr(frappe, "local", _UnreadableLocal(original))
-	for read in (lambda: _REAL_LOG_HTTP_ERROR("openai", "chat/completions", 500), lambda: ai_fix._record_session_spend(7)):
-		with pytest.raises(_FakeTimeout) as caught:
-			read()
-		assert caught.value is not original and caught.value.__context__ is None
-
-
-def test_an_unreadable_spend_marker_charges_nothing(monkeypatch):
-	import frappe
-
-	seen = []
-	monkeypatch.setattr(analyze, "_increment_session_counter", lambda *a, **k: seen.append(a))
-	monkeypatch.setattr(frappe, "local", _UnreadableLocal(RuntimeError("no request context")))
-	ai_fix._record_session_spend(7)
-	assert seen == []

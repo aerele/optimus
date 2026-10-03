@@ -18,13 +18,6 @@ from optimus import ai_fix, ai_grounding, analyze, renderer, safe_call
 from optimus.renderer import index_recipes, recipe_enrichment
 
 
-@pytest.fixture(autouse=True)
-def _commit_on_the_fake_db(monkeypatch):
-	"""``_run_ai_backfill`` commits each answer through ``analyze.safe_commit``; send that commit
-	to whatever ``analyze.frappe`` a test installs."""
-	monkeypatch.setattr(analyze, "safe_commit", lambda: analyze.frappe.db.commit())
-
-
 def _boom(*args, **kwargs):
 	raise RuntimeError("recipe bug")
 
@@ -286,43 +279,8 @@ def _record_suggest(sent):
 	return suggest
 
 
-def test_a_broken_gate_never_aborts_the_analyze_ai_step(monkeypatch):
-	"""The Hot Line is gated and counted; the other finding still gets its suggestion."""
-	monkeypatch.setattr(ai_grounding, "hot_line_gate", _boom)
-	monkeypatch.setattr(analyze, "_ai_payload_for_finding", lambda row, *a, **k: {"finding_type": row.finding_type})
-	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
-	monkeypatch.setattr(analyze, "_publish_progress", lambda *a, **k: None)
-	monkeypatch.setattr(analyze, "_touch_singleflight", lambda uuid: None)
-	findings = [
-		{**vars(_row("hot", "Hot Line", _hot_line_detail())), "llm_fix_json": None},
-		{**vars(_row("n1", "N+1 Query", {})), "llm_fix_json": None},
-	]
-	ctx = SimpleNamespace(session_uuid="u", docname="PS-1", findings=findings, warnings=[], actions=[])
-	sent = []
-	with patch("optimus.settings.get_config", return_value=_AI_CFG), \
-	     patch("optimus.ai_fix.is_available", return_value=True), \
-	     patch("optimus.ai_fix.suggest_fix", side_effect=_record_suggest(sent)):
-		analyze._enrich_findings_with_ai_suggestions(ctx)
-	assert sent == ["N+1 Query"]
-	assert findings[0]["llm_fix_json"] is None and findings[1]["llm_fix_json"]
-	assert any(w.startswith("AI auto-suggest: 1 finding(s) were not sent to the AI") for w in ctx.warnings)
 
 
-def test_a_broken_gate_never_aborts_the_refresh(monkeypatch):
-	monkeypatch.setattr(ai_grounding, "hot_line_gate", _boom)
-	writes = []
-	db = SimpleNamespace(set_value=lambda dt, name, *a, **k: writes.append(name), commit=lambda: None)
-	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(db=db, local=SimpleNamespace(), log_error=lambda *a, **k: None))
-	monkeypatch.setattr(analyze, "_ai_payload_for_finding", lambda row, *a, **k: {"finding_type": row.finding_type})
-	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
-	rows = [_row("hot", "Hot Line", _hot_line_detail()), _row("n1", "N+1 Query", {})]
-	sent = []
-	with patch("optimus.settings.get_config", return_value=_AI_CFG), \
-	     patch("optimus.ai_fix.is_available", return_value=True), \
-	     patch("optimus.ai_fix.suggest_fix", side_effect=_record_suggest(sent)):
-		out = analyze._run_ai_backfill(SimpleNamespace(findings=rows, session_uuid="u", name="PS-1"), cap=0)
-	assert sent == ["N+1 Query"] and writes == ["n1"]
-	assert (out["gated"], out["added"], out["failed"]) == (1, 1, 0)
 
 
 def test_a_broken_gate_never_offers_a_refresh(monkeypatch):

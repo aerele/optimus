@@ -38,36 +38,6 @@ _AI_CFG = SimpleNamespace(
 )
 
 
-@pytest.mark.parametrize("configured", [60, 180, 600])
-def test_the_heartbeat_gap_stays_under_the_ttl(monkeypatch, configured):
-	clock = SimpleNamespace(now=0.0)
-	touches, timeouts = [], []
-
-	def slow_suggest(payload, *, timeout=None):
-		timeouts.append(timeout)
-		clock.now += timeout  # worst case: the provider uses its whole timeout
-		return {"suggestion": "x", "model": "m"}
-
-	def payload(*args, **kwargs):
-		clock.now += _PAYLOAD_SECONDS
-		return {"finding_type": "N+1 Query"}
-
-	monkeypatch.setattr(analyze, "time", SimpleNamespace(monotonic=lambda: clock.now))
-	monkeypatch.setattr(analyze, "_touch_singleflight", lambda uuid: touches.append(clock.now))
-	monkeypatch.setattr(analyze, "_ai_payload_for_finding", payload)
-	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
-	monkeypatch.setattr(analyze, "_publish_progress", lambda *a, **k: None)
-	ctx = SimpleNamespace(session_uuid="u", docname="PS-1", findings=[_finding(i) for i in range(6)], warnings=[], actions=[])
-	with patch("optimus.settings.get_config", return_value=_AI_CFG), \
-	     patch("optimus.ai_fix.is_available", return_value=True), \
-	     patch("optimus.ai_fix._resolve_timeout_seconds", return_value=configured), \
-	     patch("optimus.ai_fix.suggest_fix", side_effect=slow_suggest):
-		analyze._enrich_findings_with_ai_suggestions(ctx)
-	assert timeouts and timeouts == [min(configured, analyze.AI_CALL_TIMEOUT_CAP_SECONDS)] * len(timeouts)
-	assert analyze.AI_CALL_TIMEOUT_CAP_SECONDS + _PAYLOAD_SECONDS < analyze._SINGLEFLIGHT_TTL_SECONDS
-	assert len(touches) == len(timeouts)  # a heartbeat before every call
-	beats = [*touches, clock.now]  # run() touches again right before _persist, when the step returns
-	assert max(b - a for a, b in zip(beats, beats[1:], strict=False)) < analyze._SINGLEFLIGHT_TTL_SECONDS
 
 
 def test_run_touches_the_flag_right_before_persist():
@@ -86,21 +56,6 @@ def test_run_touches_the_flag_right_before_persist():
 	raise AssertionError("no _persist call found in analyze.run")
 
 
-@pytest.mark.parametrize("configured", [60, 600])
-def test_the_humanize_call_in_persist_is_capped_below_the_ttl(monkeypatch, configured):
-	seen = {}
-
-	def humanize(actions, *, session_title=None, usage_out=None, timeout=None):
-		seen["timeout"] = timeout
-		return "1. Open the Sales Invoice list"
-
-	monkeypatch.setattr(analyze, "_actions_for_humanizer", lambda recordings: [{"label": "open"}])
-	with patch("optimus.settings.get_config", return_value=SimpleNamespace(ai_enabled=True, ai_humanize_steps=True)), \
-	     patch("optimus.ai_fix.is_available", return_value=True), \
-	     patch("optimus.ai_fix._resolve_timeout_seconds", return_value=configured), \
-	     patch("optimus.ai_fix.humanize_steps", side_effect=humanize):
-		analyze._build_humanized_notes_html([])
-	assert seen["timeout"] == min(configured, analyze.AI_CALL_TIMEOUT_CAP_SECONDS)
 
 
 def test_humanize_steps_sends_its_timeout_to_the_provider(monkeypatch):
@@ -156,24 +111,6 @@ def test_a_touch_refreshes_only_a_flag_this_session_may_hold(monkeypatch, holder
 	assert (cache.holder, cache.ttl) == after
 
 
-def test_after_a_lapse_the_ai_loop_never_steals_another_sessions_flag(monkeypatch):
-	"""A's flag lapsed during a long step and B took it: A's per-call heartbeats must
-	leave B's flag alone."""
-	import frappe
-
-	cache = FlagCache("B", ttl=10)
-	monkeypatch.setattr(frappe, "cache", cache, raising=False)
-	monkeypatch.setattr(analyze, "_ai_payload_for_finding", lambda *a, **k: {"finding_type": "N+1 Query"})
-	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
-	monkeypatch.setattr(analyze, "_publish_progress", lambda *a, **k: None)
-	sent = []
-	ctx = SimpleNamespace(session_uuid="A", docname="PS-A", findings=[_finding(i) for i in range(3)], warnings=[], actions=[])
-	with patch("optimus.settings.get_config", return_value=_AI_CFG), \
-	     patch("optimus.ai_fix.is_available", return_value=True), \
-	     patch("optimus.ai_fix.suggest_fix", side_effect=lambda p, **k: sent.append(p) or {"suggestion": "x"}):
-		analyze._enrich_findings_with_ai_suggestions(ctx)
-	assert len(sent) == 3  # the AI step itself still ran
-	assert (cache.holder, cache.ttl) == ("B", 10)
 
 
 def _drive_run(monkeypatch, *, cache, scheduler_disabled, deadline=None, configured=600, n=3, build=0.0, touch=None):
@@ -221,8 +158,8 @@ def _drive_run(monkeypatch, *, cache, scheduler_disabled, deadline=None, configu
 	monkeypatch.setattr(analyze, "_ai_payload_for_finding", payload)
 	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
 	monkeypatch.setattr(analyze, "_actions_for_humanizer", lambda recordings: [{"label": "open"}])
-	monkeypatch.setattr(analyze, "_persist", lambda *a, **k: analyze._build_humanized_notes_html([]))
-	for name in ("_publish_session_event", "_publish_progress", "_mark_ai_spend_session", "_render_and_attach_reports",
+	monkeypatch.setattr(analyze, "_persist", lambda *a, **k: None)
+	for name in ("_publish_session_event", "_publish_progress", "_queue_analyze_time_ai", "_render_and_attach_reports",
 	             "_persist_recordings_file", "_cleanup_redis", "_auto_arm_phase2"):
 		monkeypatch.setattr(analyze, name, lambda *a, **k: None)
 	if touch is not None:

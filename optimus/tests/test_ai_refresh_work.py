@@ -20,7 +20,7 @@ class Doc(dict):
 		return dict(self)
 
 
-@pytest.fixture
+@pytest.fixture(name="work")
 def work(journal, monkeypatch):
 	jobs = import_module("optimus.ai_jobs")
 	run = journal.run

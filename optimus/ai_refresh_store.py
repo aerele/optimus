@@ -313,6 +313,13 @@ def admit(
 			)
 	# The run being resumed belongs to this session, so its row is locked after the session.
 	previous = _read(RUN, resume_from, lock=True) if resume_from else None
+	# Phase 2 writers also hold and change the parent. Read these rows before
+	# opening the plain-read snapshot used for capacity and resume checks.
+	if frappe.db.get_values(
+		"Optimus Phase Two Run", {"parent": docname, "status": ["in", ["Recording", "Analyzing"]]},
+		["name"], for_update=True, limit=1,
+	):
+		return {"status": "refused", "reason": "phase2"}
 	# Plain reads from here on: every lock above comes first (see the docstring).
 	current = frappe.db.get_value(RUN, {"active_session": docname}, "*", as_dict=True)
 	taken_over = None
@@ -425,6 +432,7 @@ def admit(
 	)
 	if run is None:
 		return _answer(taken_over, status="already_running", run=None)
+	_touch_parent(parent)
 	if scope == "all":
 		# One bump per accepted user refresh, a resume included (Q1), in the transaction that
 		# reserves the session: a refused admission never counts. #72's counter is
@@ -438,6 +446,29 @@ def admit(
 		# retry, instead of missing the new active reservation.
 		_update(CONTROL, control, generation=(control.get("generation") or 0) + 1)
 	return _answer(taken_over, status="queued", run=run)
+
+
+def lock_phase2_parent(docname, *, allow_failed=False):
+	"""Serialize Phase 2 admission with AI through the parent row.
+
+	Every admission updates this row before committing, fencing older PostgreSQL
+	snapshots. The active-run probe is plain: a missing key must not take a gap lock.
+	"""
+	parent = _read("Optimus Session", docname, lock=True)
+	if not parent or parent.get("status") not in ({"Ready", "Failed"} if allow_failed else {"Ready"}):
+		return "not_ready"
+	if frappe.db.get_value(RUN, {"active_session": docname}, "name"):
+		return "ai_refresh"
+	_touch_parent(parent)
+	return None
+
+
+def _touch_parent(parent):
+	from frappe.utils import now_datetime
+
+	# Even automatic AI admission changes the parent. PostgreSQL's old snapshots
+	# must fail on this lock before an opposing Phase 2 admission reads the journal.
+	_update("Optimus Session", parent, modified=now_datetime())
 
 
 def _answer(taken_over, **out):
@@ -831,6 +862,26 @@ def cancel(run_id, *, docname, now, cancelled_by=None):
 		return None
 	_update(RUN, run, cancelled_by=cancelled_by)
 	return _release(run, docname, state="cancelled", reason="cancelled", now=now)
+
+
+def prepare_analyze_retry(docname, session_uuid, *, requested_by, now):
+	"""Fence optional workers and reset a Failed parent in the same transaction."""
+	parent = _read("Optimus Session", docname, lock=True)
+	if not parent or parent.get("session_uuid") != session_uuid or parent.get("status") != "Failed":
+		return False
+	run_id = frappe.db.get_value(RUN, {"active_session": docname}, "name")
+	if run_id:
+		cancel(run_id, docname=docname, now=now, cancelled_by=requested_by)
+	for child in frappe.db.get_values(
+		"Optimus Phase Two Run", {"parent": docname, "status": ["in", ["Recording", "Analyzing"]]},
+		["name"], as_dict=True, for_update=True,
+	):
+		frappe.db.set_value("Optimus Phase Two Run", child["name"], {
+			"status": "Failed", "analyze_dispatch_pending": 0,
+			"warnings_json": '["Phase 2 stopped because profiling analysis was restarted."]',
+		}, update_modified=False)
+	frappe.db.set_value("Optimus Session", docname, {"status": "Stopping", "analyzer_warnings": None})
+	return True
 
 
 def abandon(run_id, *, docname, worker_token, now):

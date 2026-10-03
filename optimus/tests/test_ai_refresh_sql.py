@@ -44,6 +44,7 @@ import pytest
 
 from optimus import ai_fix, ai_jobs, analyze
 from optimus import ai_refresh_store as store
+from optimus.line_profile import jobs as phase2
 
 BACKEND = os.environ.get("OPTIMUS_TEST_SQL")
 SNAPSHOT = os.environ.get("OPTIMUS_TEST_SQL_SNAPSHOT") == "1"
@@ -127,7 +128,10 @@ def _column(field, backend):
 def _ddl(doctype, table, backend):
 	"""``MariaDBTable.create`` / ``PostgresTable.create`` for a parent DocType."""
 	folder = doctype.lower().replace(" ", "_")
-	fields = json.loads((_DOCTYPES / folder / (folder + ".json")).read_text())["fields"]
+	meta = json.loads((_DOCTYPES / folder / (folder + ".json")).read_text())
+	fields = meta["fields"]
+	if meta.get("istable"):
+		fields += [{"fieldname": key, "fieldtype": "Data", "search_index": key == "parent"} for key in ("parent", "parenttype", "parentfield")]
 	fields = [f for f in fields if f["fieldtype"] not in _LAYOUT]
 	q = "`" if backend == "mariadb" else '"'
 	columns = [f"{q}{f['fieldname']}{q} {_column(f, backend)}" for f in fields]
@@ -415,6 +419,9 @@ class Facade:
 
 @pytest.fixture
 def sql(monkeypatch):
+	from datetime import datetime
+
+	monkeypatch.setattr("frappe.utils.now_datetime", lambda: datetime(2026, 10, 14, 12))
 	if not BACKEND:
 		pytest.skip("Requires a disposable SQL validation service")
 	assert BACKEND in {"mariadb", "postgres"}
@@ -423,6 +430,7 @@ def sql(monkeypatch):
 		doctype: prefix + "_" + suffix
 		for doctype, suffix in (
 			("Optimus Session", "session"),
+			("Optimus Phase Two Run", "phase2"),
 			(store.RUN, "run"),
 			(store.ATTEMPT, "attempt"),
 			(store.CONTROL, "control"),
@@ -475,6 +483,8 @@ def sql(monkeypatch):
 	monkeypatch.setattr(ai_jobs, "frappe", facade)
 	monkeypatch.setattr(analyze, "frappe", facade)
 	monkeypatch.setattr(ai_jobs, "safe_commit", lambda: facade.db.commit())
+	monkeypatch.setattr(phase2, "frappe", facade)
+	monkeypatch.setattr(phase2, "_authorized", lambda *a: True)
 	monkeypatch.setattr(
 		ai_fix, "log_ai_failure", lambda title, exc=None, **kw: counter_rows.append((title, exc, kw))
 	)
@@ -484,7 +494,7 @@ def sql(monkeypatch):
 	monkeypatch.setitem(sys.modules, "frappe.query_builder.functions", functions)
 	created = []
 	try:
-		for doctype in ("Optimus Session", store.RUN, store.ATTEMPT, store.CONTROL):
+		for doctype in ("Optimus Session", phase2.TABLE, store.RUN, store.ATTEMPT, store.CONTROL):
 			for statement in _ddl(doctype, tables[doctype], BACKEND):
 				primary.sql(statement)
 			created.append(tables[doctype])
@@ -728,6 +738,63 @@ def test_an_admission_waiting_on_its_session_still_counts_a_run_admitted_meanwhi
 		assert "40001" in b["db"].conflicts
 	else:
 		assert not b["db"].conflicts
+
+
+def test_phase2_commit_fences_an_older_ai_admission_snapshot(sql):
+	older = sql.connect()
+	older.get_value("Optimus Session", "parent-a", "status")
+	def phase2():
+		assert store.lock_phase2_parent("parent-a") is None
+		sql.primary.insert({"doctype": "Optimus Phase Two Run", "name": "phase2-a",
+			"parent": "parent-a", "status": "Recording"})
+	ai_jobs._transaction(phase2)
+	with sql.using(older):
+		assert ai_jobs._retry_sql(admit) == {"status": "refused", "reason": "phase2"}
+	assert older.conflicts == []  # the public SQL wrapper closes the old snapshot first
+
+
+def test_ai_admission_fences_an_older_phase2_snapshot(sql):
+	older = sql.connect()
+	older.get_value("Optimus Session", "parent-a", "status")
+	assert ai_jobs._retry_sql(admit)["status"] == "queued"
+	with sql.using(older):
+		assert ai_jobs._retry_sql(lambda: store.lock_phase2_parent("parent-a")) == "ai_refresh"
+
+
+@pytest.mark.parametrize("scope", ["all", "fixes_missing"])
+def test_phase2_waiting_on_ai_admission_cannot_miss_its_reservation(sql, scope):
+	# PostgreSQL opens a snapshot when the locking SELECT begins, before the
+	# winner commits. Automatic admission must change the parent even though
+	# it does not increment the manual refresh counter.
+	sql.primary.get_value("Optimus Session", "parent-a", "status", for_update=True)
+	thread, waiting = in_thread(
+		sql, "phase2-admission", lambda: ai_jobs._retry_sql(lambda: store.lock_phase2_parent("parent-a"))
+	)
+	wait_until_blocked(sql)
+	try:
+		assert admit(scope=scope)["status"] == "queued"
+	finally:
+		sql.primary.commit()
+		thread.join(30)
+	assert "error" not in waiting and waiting["value"] == "ai_refresh"
+	if BACKEND == "postgres":
+		assert "40001" in waiting["db"].conflicts
+	assert value(sql, "Optimus Session", "parent-a", "ai_refresh_count") == int(scope == "all")
+
+
+@pytest.mark.parametrize("scope", ["all", "fixes_missing"])
+def test_ai_waiting_on_phase2_admission_cannot_start_a_provider_run(sql, scope):
+	assert store.lock_phase2_parent("parent-a") is None
+	thread, waiting = in_thread(sql, "ai-admission", lambda: ai_jobs._retry_sql(lambda: admit(scope=scope)))
+	wait_until_blocked(sql)
+	try:
+		sql.primary.insert({"doctype": phase2.TABLE, "name": "phase2-a", "parent": "parent-a", "status": "Recording"})
+	finally:
+		sql.primary.commit()
+		thread.join(30)
+	assert "error" not in waiting and waiting["value"] == {"status": "refused", "reason": "phase2"}
+	assert value(sql, "Optimus Session", "parent-a", "ai_refresh_count") == 0
+	assert value(sql, store.RUN, "run-a", "name") is None
 
 
 def test_duplicate_delivery_from_an_older_snapshot_claims_only_once(sql):
@@ -1525,7 +1592,6 @@ def _http_ready(monkeypatch):
 	monkeypatch.setattr(ai_jobs, "_workers_listening", lambda docname=None: True)
 	monkeypatch.setattr(ai_jobs, "_call_timeout", lambda: 60)
 	monkeypatch.setattr(ai_jobs, "_selection_counts", lambda *a, **kw: (0, 0))
-	monkeypatch.setattr(ai_jobs, "_refresh_flag_held", lambda session_uuid: False)
 	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: True)
 
 
@@ -2044,3 +2110,64 @@ def test_the_active_runs_query_flags_an_expired_run_on_every_database(sql):
 	rows = {r["name"]: bool(r["expired"]) for r in primary.sql(query.replace("%", "%%"))}
 	primary.rollback()
 	assert rows == {"r-dead": True, "r-live": False}
+
+
+def phase2_admit(sql):
+	sql.primary.insert({"doctype": phase2.TABLE, "name": "fake-child", "parent": "parent-a",
+		"run_uuid": "fake-phase2", "status": "Failed"})
+	sql.primary.connection.commit()
+	out = ai_jobs._retry_sql(lambda: phase2._admit("parent-a", "fake-parent-a", "fake-phase2", "fake-user",
+		generation="generation-a", now=100))
+	assert out["status"] == "queued"
+
+
+def phase2_claim():
+	return ai_jobs._retry_sql(lambda: phase2._claim("parent-a", "fake-phase2", "generation-a", "worker-a", now=101))
+
+
+def test_phase2_duplicate_delivery_from_old_snapshot_claims_once(sql):
+	phase2_admit(sql)
+	older = sql.connect()
+	older.get_value(phase2.TABLE, "fake-child", "analyze_worker_token")
+	assert phase2_claim()
+	with sql.using(older):
+		assert phase2_claim() is None
+	assert older.conflicts == []  # the public SQL wrapper closes the old snapshot first
+
+
+def test_phase2_answer_and_ready_outcome_roll_back_together(sql):
+	sql.primary.set_value("answer", "row-00", {"body": "previous answer"}, update_modified=False)
+	sql.primary.commit()
+	phase2_admit(sql)
+	run = phase2_claim()
+	def fail():
+		sql.primary.set_value("answer", "row-00", {"body": "fake phase2 answer"}, update_modified=False)
+		raise RuntimeError("fake save failure")
+	with pytest.raises(RuntimeError):
+		ai_jobs._transaction(lambda: phase2._complete(run, now=102, persist=fail))
+	assert value(sql, "answer", "row-00", "body") == "previous answer"
+	assert sql.primary.get_value(phase2.TABLE, "fake-child", "status") == "Analyzing"
+
+
+def test_phase2_ambiguous_commit_replay_does_not_append_twice(sql):
+	phase2_admit(sql)
+	run = phase2_claim()
+	def persist():
+		analyze._bump_ai_refresh_count("parent-a")  # stand-in append count, same real SQL transaction
+	assert ai_jobs._transaction(lambda: phase2._complete(run, now=102, persist=persist))
+	assert not ai_jobs._transaction(lambda: phase2._complete(run, now=103, persist=persist))
+	assert not ai_jobs._transaction(lambda: phase2._fail(run, now=103, reason="failed"))
+	assert sql.primary.get_value("Optimus Session", "parent-a", "ai_refresh_count") == 1
+	assert sql.primary.get_value(phase2.TABLE, "fake-child", "status") == "Ready"
+
+
+def test_phase2_old_worker_cannot_commit_after_expired_generation_is_replaced(sql):
+	phase2_admit(sql)
+	run = phase2_claim()
+	out = ai_jobs._retry_sql(lambda: phase2._admit("parent-a", "fake-parent-a", "fake-phase2", "fake-user",
+		generation="generation-b", now=3000))
+	assert out["status"] == "queued"
+	writes = []
+	assert not ai_jobs._transaction(lambda: phase2._complete(run, now=3001, persist=lambda: writes.append(True)))
+	assert not writes
+	assert sql.primary.get_value(phase2.TABLE, "fake-child", "analyze_generation") == "generation-b"

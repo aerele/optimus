@@ -147,6 +147,9 @@ class Database:
 
 @pytest.fixture(name="journal")
 def journal(monkeypatch):
+	from datetime import datetime
+
+	monkeypatch.setattr("frappe.utils.now_datetime", lambda: datetime(2026, 10, 14, 12))
 	mod = import_module("optimus.ai_refresh_store")
 	db = Database()
 

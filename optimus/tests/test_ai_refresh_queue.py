@@ -49,7 +49,6 @@ def queue(journal, monkeypatch):
 	)
 	# The selection counts and the Refresh flag have their own tests (test_ai_refresh_contracts).
 	monkeypatch.setattr(jobs, "_selection_counts", lambda *a, **kw: (0, 0))
-	monkeypatch.setattr(jobs, "_refresh_flag_held", lambda session_uuid: False)
 	return SimpleNamespace(jobs=jobs, journal=journal, sent=sent, logs=logs, callbacks=callbacks)
 
 
@@ -1201,3 +1200,7 @@ def test_the_rows_of_the_sweep_are_committed_after_the_last_one(queue, monkeypat
 	rows = [i for i, e in enumerate(events) if e.startswith("optimus ai refresh")]
 	assert len(rows) == (2 if outcome == "ended" else 1)
 	assert events[rows[-1] + 1 :] == ["commit"]
+
+def test_scheduler_wires_durable_recovery_every_minute():
+	from optimus import hooks
+	assert "optimus.ai_jobs.recover_pending" in hooks.scheduler_events["cron"]["* * * * *"]

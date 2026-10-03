@@ -547,7 +547,6 @@ def suggest_fix(
 		metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type=finding.get("finding_type")),
 		session_uuid=session_uuid,
 		docname=docname,
-		record_spend=not (session_uuid or docname),
 		started_at=time.monotonic(),
 		timeout=int(timeout or _resolve_timeout_seconds()),
 	), usage)
@@ -603,7 +602,7 @@ def humanize_steps(
 		text = _with_usage_on_failure(lambda: _dispatch_call(
 			provider, system, messages, usage_out=usage,
 			metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type="Steps to Reproduce"),
-			timeout=timeout, session_uuid=session_uuid, docname=docname, record_spend=not (session_uuid or docname),
+			timeout=timeout, session_uuid=session_uuid, docname=docname,
 		), usage)
 	finally:
 		if usage_out is not None:
@@ -1408,19 +1407,15 @@ def _mark_logged(exc: BaseException | None, row_name: str | None = None) -> None
 def _log_http_error(
 	provider: str, where: str, status: int | None, detail: str = "",
 	*, exc: BaseException | None = None, provider_error: str = "", auth=None,
-	session_uuid: str | None = None, docname: str | None = None, ambient: bool = True, **extra,
+	session_uuid: str | None = None, docname: str | None = None, **extra,
 ) -> None:
 	"""Log one HTTP-layer failure through ``log_ai_failure``: provider, call
 	site, HTTP status, the provider's own error identifier when it sent one
 	(``provider_error``, see ``_provider_error_code``) and a short detail
-	(for a transport error, its type and the type of the error it wraps,
-	never its message; for an unexpected error, its type and plain frames). Never the prompt, the
-	source code, the headers or the response body. The row is filed under the call's own session:
-	``session_uuid`` and ``docname`` when the call is explicitly attributed (``ambient`` False:
-	``record_spend`` False, or either one given), with no session when it has neither, never
-	another session's; only an unattributed call (``ambient`` True and neither given) falls back
-	to the per-worker spend marker the caller set (``analyze._mark_ai_spend_session``), the same
-	one ``_record_session_spend`` reads. ``exc`` (the ``AiFixError`` about to be
+	(for a transport error, its type and the type of the error it wraps, never its message; for an
+	unexpected error, its type and plain frames). Never the prompt, the
+	source code, the headers or the response body. The session reference
+	comes only from the caller's explicit argument. ``exc`` (the ``AiFixError`` about to be
 	raised) is then marked logged, but only if the row was written, so the
 	caller's own ``log_ai_failure`` for it writes no second row and a failed
 	write still leaves the caller's. ``auth`` (the ``_ApiKeyAuth`` the request
@@ -1428,17 +1423,6 @@ def _log_http_error(
 	from the database. ``extra`` adds more ``k=v`` lines to the row (the parameter ladder's
 	``attempts`` and ``dropped``); the row also carries the failure's ``kind``, ``fatal`` and
 	``hint`` (``log_ai_failure``)."""
-	if ambient and not session_uuid and not docname:
-		guard = _InterruptGuard()
-		try:
-			with guard:
-				import frappe
-
-				session_uuid = getattr(frappe.local, "_optimus_spend_session", None)
-		except Exception:
-			session_uuid = None
-		if guard.pending():
-			raise guard.interrupt()
 	context = {"provider": provider, "where": where, "status": status, "detail": detail, **extra}
 	if provider_error:
 		context["provider_error"] = provider_error
@@ -1694,7 +1678,6 @@ def _http_post(
 	quiet_statuses: tuple[int, ...] = (),
 	session_uuid: str | None = None,
 	docname: str | None = None,
-	ambient: bool = True,
 	budget: float | None = None,
 	log_extra: dict | None = None,
 ) -> dict:
@@ -1742,7 +1725,7 @@ def _http_post(
 	rule 4).
 
 	``log_extra`` adds ``k=v`` lines to the Error Log row of a failure of this post (the ladder's
-	``attempts`` and ``dropped``). ``session_uuid``, ``docname`` and ``ambient`` say whose session
+	``attempts`` and ``dropped``). ``session_uuid`` and ``docname`` say whose session
 	that row is filed under (``_log_http_error``).
 
 	``timeout`` is this request's time budget, shared by its redirect hops.
@@ -1763,7 +1746,7 @@ def _http_post(
 		remaining = deadline - time.monotonic()
 		if remaining <= 0:
 			failure = _timeout_failure(budget)
-			_log_http_error(provider, where, None, "timeout", exc=failure, auth=auth, session_uuid=session_uuid, docname=docname, ambient=ambient, **(log_extra or {}))
+			_log_http_error(provider, where, None, "timeout", exc=failure, auth=auth, session_uuid=session_uuid, docname=docname, **(log_extra or {}))
 			raise failure
 		failed_kind: str | None = None
 		error_name = ""
@@ -1812,7 +1795,7 @@ def _http_post(
 			if failed_kind == "internal":
 				# Where it happened, never what it said: plain frames, no message, no locals.
 				detail = error_name + "".join(f"\n  {frame}" for frame in unexpected_frames)
-			_log_http_error(provider, where, None, detail, exc=failure, auth=auth, session_uuid=session_uuid, docname=docname, ambient=ambient, **(log_extra or {}))
+			_log_http_error(provider, where, None, detail, exc=failure, auth=auth, session_uuid=session_uuid, docname=docname, **(log_extra or {}))
 			raise failure
 		if resp.status_code not in (307, 308) or redirects >= _MAX_REDIRECTS:
 			break
@@ -1854,7 +1837,7 @@ def _http_post(
 		# scrubbed machine code so its terminal log keeps the same context.
 		failure._optimus_provider_error = provider_error
 		if status not in quiet_statuses:
-			_log_http_error(provider, where, status, detail, exc=failure, provider_error=provider_error, auth=auth, session_uuid=session_uuid, docname=docname, ambient=ambient, **(log_extra or {}))
+			_log_http_error(provider, where, status, detail, exc=failure, provider_error=provider_error, auth=auth, session_uuid=session_uuid, docname=docname, **(log_extra or {}))
 		raise failure
 
 	data = None
@@ -1882,7 +1865,7 @@ def _http_post(
 			status_code=status, kind="bad_response",
 		)
 	if failure is not None:
-		_log_http_error(provider, where, status, detail, exc=failure, auth=auth, session_uuid=session_uuid, docname=docname, ambient=ambient, **(log_extra or {}))
+		_log_http_error(provider, where, status, detail, exc=failure, auth=auth, session_uuid=session_uuid, docname=docname, **(log_extra or {}))
 		raise failure
 	return data
 
@@ -2059,15 +2042,12 @@ def _response_usage(data, protocol):
 	return usage
 
 
-def _accept_usage(usage_out, usage, *, ambient):
+def _accept_usage(usage_out, usage):
 	if usage_out is not None:
 		usage_out.update(usage)
 		if isinstance(usage_out, Usage):
 			usage_out.observe(usage.complete)
-		# An explicitly attributed call (the journal included) is charged by its caller.
-		# Only an unattributed call is charged here, once, to the ambient session.
-		if ambient:
-			_record_session_spend(usage["total_tokens"])
+		# The worker commits usage together with its answer and outcome.
 
 
 def _usage_from_openai(data: dict | None) -> dict:
@@ -2096,56 +2076,6 @@ def _usage_from_anthropic(data: dict | None) -> dict:
 	return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
 
 
-def _record_session_spend(total_tokens) -> None:
-	"""Charge one provider call's ``total_tokens`` to the worker's ambient session: the
-	``Optimus Session.ai_tokens_spent`` of the session ``frappe.local._optimus_spend_session``
-	names (``analyze._mark_ai_spend_session``). No marker (the settings probe clears it) or no
-	tokens is a no-op.
-
-	The one spend source per provider call: the protocol handlers call it once for each billed
-	reply, and only for a call WITHOUT explicit attribution (no ``session_uuid`` or ``docname``
-	from the caller of ``suggest_fix`` / ``humanize_steps``, so ``record_spend`` stayed True). An
-	explicitly attributed call is never charged here: its caller adds the tokens to its own
-	session with ``analyze._add_ai_spend``, so no call is counted twice or charged to another
-	session. A thin wrapper over that same counter (``analyze._increment_session_counter``,
-	matched on ``session_uuid``): portable SQL in a savepoint, a failure rolled back to it and
-	logged after the ``try`` while the reply is kept, an RQ job timeout raised again fresh.
-
-	The counter raises again only when the rollback to its savepoint fails (the whole transaction
-	is already gone: a MariaDB deadlock), after it has logged the error. A per-call charge has no
-	short transaction to retry, so that error ends here and the reply is still returned: its
-	tokens are lost and the Error Log row says so. An error the counter did not log is logged
-	here once, after the ``try``. Never raises, except an RQ job timeout (fresh)."""
-	session_uuid = None
-	guard = _InterruptGuard()
-	try:
-		with guard:
-			import frappe
-
-			session_uuid = getattr(frappe.local, "_optimus_spend_session", None)
-	except Exception:
-		session_uuid = None
-	if guard.pending():
-		raise guard.interrupt()
-	tokens = _token_count(total_tokens)
-	if not isinstance(session_uuid, str) or not session_uuid or not tokens:
-		return
-	from optimus import analyze
-
-	failure = None
-	guard = _InterruptGuard()
-	try:
-		with guard:
-			analyze._increment_session_counter(
-				session_uuid, "ai_tokens_spent", tokens, by="session_uuid", title="optimus ai spend",
-			)
-	except Exception as exc:
-		failure = exc
-	if guard.pending():
-		raise guard.interrupt()
-	if failure is not None and not getattr(failure, _LOGGED_ATTR, False):
-		log_ai_failure("optimus ai spend", failure, session_uuid=session_uuid, field="ai_tokens_spent", amount=tokens)
-	failure = None
 
 
 def _session_call_metadata(provider, *, session_uuid, docname, finding_type=None) -> dict | None:
@@ -2168,16 +2098,12 @@ def _call_anthropic(
 	base_url: str, api_key: str, model: str, system: str, messages: list[dict],
 	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
 	timeout: int | None = None, meta_out: dict | None = None, session_uuid: str | None = None,
-	docname: str | None = None, record_spend: bool = True, budget: float | None = None,
+	docname: str | None = None, budget: float | None = None,
 ) -> str:
-	"""One Anthropic Messages call. ``budget`` is the whole call's budget a timeout
-	message names (``_http_post``). ``usage_out`` receives the reply's reported usage, and when
-	the caller passed one this billed reply is charged once to the ambient session
-	(``_record_session_spend``), unless the call is explicitly attributed (a non-empty
-	``session_uuid`` or ``docname``, or ``record_spend`` False): its caller then records the
-	spend itself, and a failure row is filed under that session, never the ambient one.
-	An empty ``session_uuid`` or ``docname`` counts as none, here and in the public entries."""
-	ambient = record_spend and not session_uuid and not docname
+	"""Send one Anthropic request and collect its reported usage.
+
+	The caller owns SQL settlement. Failure rows use only the explicit session reference.
+	The total call budget includes response processing and any parameter retries."""
 	url = base_url.rstrip("/") + "/v1/messages"
 	headers = {
 		"content-type": "application/json",
@@ -2195,10 +2121,10 @@ def _call_anthropic(
 		usage_out.begin()
 	data = _http_post(
 		url, headers, body, provider="anthropic", where="messages", auth=auth, timeout=timeout,
-		session_uuid=session_uuid, docname=docname, ambient=ambient, budget=budget,
+		session_uuid=session_uuid, docname=docname, budget=budget,
 	)
 	usage = _response_usage(data, "anthropic")
-	_accept_usage(usage_out, usage, ambient=ambient)
+	_accept_usage(usage_out, usage)
 	if meta_out is not None:
 		meta_out["prompt_tokens_reported"] = any(_usage_block(data).get(k) is not None for k in (
 			"input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
@@ -2264,7 +2190,7 @@ def _adapt_body(body: dict, rung: str) -> None:
 
 
 def _post_with_param_ladder(
-	url, headers, body, *, auth=None, timeout=None, session_uuid=None, docname=None, ambient=True,
+	url, headers, body, *, auth=None, timeout=None, session_uuid=None, docname=None,
 	adapted=None, budget=None,
 ) -> dict:
 	"""At most three posts, sharing one budget; only the final rejection is logged, with
@@ -2280,7 +2206,7 @@ def _post_with_param_ladder(
 	new one is added, so a re-ask never repeats a rejected post. It is never
 	shared between calls: another call may go to another model.
 
-	``session_uuid``, ``docname`` and ``ambient`` say whose session a failure row is filed under
+	``session_uuid`` and ``docname`` say whose session a failure row is filed under
 	(``_log_http_error``)."""
 	timeout = timeout or _resolve_timeout_seconds()
 	budget = budget or timeout
@@ -2299,7 +2225,7 @@ def _post_with_param_ladder(
 			failure = _timeout_failure(budget)
 			_log_http_error(
 				"openai", "chat/completions", None, "timeout", exc=failure, auth=auth, session_uuid=session_uuid,
-				docname=docname, ambient=ambient, **{**trail, "attempts": _attempt},
+				docname=docname, **{**trail, "attempts": _attempt},
 			)
 			raise failure
 		failure = None
@@ -2307,7 +2233,7 @@ def _post_with_param_ladder(
 			return _http_post(
 				url, headers, body, provider="openai", where="chat/completions",
 				auth=auth, timeout=remaining, quiet_statuses=_PARAM_RETRY_STATUSES, session_uuid=session_uuid,
-				docname=docname, ambient=ambient, budget=budget, log_extra=trail,
+				docname=docname, budget=budget, log_extra=trail,
 			)
 		except AiFixError as exc:
 			failure = exc
@@ -2317,7 +2243,7 @@ def _post_with_param_ladder(
 				_log_http_error(
 					"openai", "chat/completions", failure.status_code, exc=failure,
 					provider_error=getattr(failure, "_optimus_provider_error", ""),
-					auth=auth, session_uuid=session_uuid, docname=docname, ambient=ambient, **trail,
+					auth=auth, session_uuid=session_uuid, docname=docname, **trail,
 				)
 			raise failure
 		_adapt_body(body, rung)
@@ -2361,16 +2287,13 @@ def _call_openai_chat(
 	base_url: str, api_key: str, model: str, system: str, messages: list[dict],
 	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
 	metadata: dict | None = None, timeout: int | None = None, meta_out: dict | None = None,
-	session_uuid: str | None = None, docname: str | None = None, record_spend: bool = True,
+	session_uuid: str | None = None, docname: str | None = None,
 	adapted_params: list | None = None, budget: float | None = None,
 ) -> str:
-	"""One OpenAI-compatible chat completion (through the parameter ladder). ``usage_out``,
-	``docname`` and ``record_spend`` work as in ``_call_anthropic``: one ambient charge per billed
-	reply and failure rows under the ambient session for an unattributed call, neither for an
-	explicitly attributed one. ``adapted_params`` is the call chain's parameter memo
-	and ``budget`` the whole call's budget a timeout message names
-	(``_post_with_param_ladder``)."""
-	ambient = record_spend and not session_uuid and not docname
+	"""Send an OpenAI-compatible request through the bounded parameter ladder.
+
+	Collect reported usage for the caller to settle in SQL. Attribute errors only
+	to the explicit session reference. Never charge a previous worker session."""
 	url = base_url.rstrip("/") + "/chat/completions"
 	headers = {"content-type": "application/json"}
 	auth = _ApiKeyAuth("authorization", api_key, prefix="Bearer ") if api_key else None
@@ -2390,10 +2313,10 @@ def _call_openai_chat(
 		usage_out.begin()
 	data = _post_with_param_ladder(
 		url, headers, body, auth=auth, timeout=timeout, session_uuid=session_uuid, docname=docname,
-		ambient=ambient, adapted=adapted_params, budget=budget,
+		adapted=adapted_params, budget=budget,
 	)
 	usage = _response_usage(data, "openai")
-	_accept_usage(usage_out, usage, ambient=ambient)
+	_accept_usage(usage_out, usage)
 	first = _first_choice(data)
 	if meta_out is not None:
 		meta_out["prompt_tokens_reported"] = _usage_block(data).get("prompt_tokens") is not None
@@ -2509,19 +2432,14 @@ def _dispatch_call(
 	meta_out: dict | None = None,
 	session_uuid: str | None = None,
 	docname: str | None = None,
-	record_spend: bool = True,
 	adapted_params: list | None = None,
 	budget: float | None = None,
 ) -> str:
-	"""Send one chat completion through the provider's protocol handler. The API
-	key is fetched here into a local named ``api_key`` (never into ``provider``).
-	``record_spend`` False (or a non-empty ``session_uuid`` or ``docname``) marks an explicitly
-	attributed call, whose spend its caller records itself (``analyze._add_ai_spend``) and whose
-	failure rows the HTTP layer files under that ``session_uuid`` / ``docname`` (none when it has
-	neither), never the worker's ambient session; otherwise the billed reply is charged to the
-	ambient session (``_record_session_spend``) and a failure row is filed under it. ``adapted_params`` (OpenAI-compatible only) is the
-	call chain's parameter memo (``_post_with_param_ladder``). ``budget`` is the whole
-	call's time budget a timeout message names (default: ``timeout``)."""
+	"""Send one completion through the configured protocol handler.
+
+	Fetch the API key locally, collect usage for SQL settlement, and attribute logs
+	only to the explicit session reference. The parameter memo and whole-call
+	budget are shared with a possible guardrail re-ask."""
 	api_key = _get_api_key(provider.get("needs_key", True))
 	if provider.get("needs_key") and not api_key:
 		from frappe import _
@@ -2532,12 +2450,12 @@ def _dispatch_call(
 		return _call_anthropic(
 			provider["base_url"], api_key, provider["model"], system, messages,
 			max_tokens=out, usage_out=usage_out, timeout=timeout, meta_out=meta_out, session_uuid=session_uuid,
-			docname=docname, record_spend=record_spend, budget=budget,
+			docname=docname, budget=budget,
 		)
 	return _call_openai_chat(
 		provider["base_url"], api_key, provider["model"], system, messages,
 		max_tokens=out, usage_out=usage_out, metadata=metadata, timeout=timeout, meta_out=meta_out, session_uuid=session_uuid,
-		docname=docname, record_spend=record_spend, adapted_params=adapted_params, budget=budget,
+		docname=docname, adapted_params=adapted_params, budget=budget,
 	)
 
 
@@ -2562,7 +2480,6 @@ def _complete_with_guardrails(
 	timeout: int,
 	session_uuid: str | None = None,
 	docname: str | None = None,
-	record_spend: bool = True,
 ) -> tuple[str, dict, str | None]:
 	"""First call, verification, at most one re-ask, fallback.
 
@@ -2573,7 +2490,7 @@ def _complete_with_guardrails(
 	not cut off, a block rule is broken (advise and note rules never re-ask), less
 	than half the time budget is used and the re-ask fits the context window. The
 	rewrite is adopted only when it keeps the four headings, is not cut off and
-	breaks strictly fewer block rules. ``session_uuid``, ``docname`` and ``record_spend`` go to
+	breaks strictly fewer block rules. ``session_uuid`` and ``docname`` go to
 	both calls (``_dispatch_call``), so each billed reply is charged at most once and each
 	failure row is filed under the call's own session.
 	Both calls share one parameter memo (``adapted``): the re-ask starts from the
@@ -2585,7 +2502,7 @@ def _complete_with_guardrails(
 	adapted: list[str] = []
 	text = _dispatch_call(
 		provider, system, messages, usage_out=usage, metadata=metadata, timeout=timeout, max_tokens=out, meta_out=meta,
-		session_uuid=session_uuid, docname=docname, record_spend=record_spend, adapted_params=adapted,
+		session_uuid=session_uuid, docname=docname, adapted_params=adapted,
 	)
 	text = (text or "").strip()
 	if not text:
@@ -2633,7 +2550,7 @@ def _complete_with_guardrails(
 					metadata=metadata,
 					timeout=max(1, int(timeout - elapsed)),
 					max_tokens=ai_budget.reask_output_tokens(out, fit_usage["completion_tokens"]),
-					meta_out=reask_meta, session_uuid=session_uuid, docname=docname, record_spend=record_spend,
+					meta_out=reask_meta, session_uuid=session_uuid, docname=docname,
 					adapted_params=adapted,
 					budget=timeout,
 				)

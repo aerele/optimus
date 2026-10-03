@@ -27,7 +27,8 @@ DOCNAME = "SESS-1"
 # test_api_gate_audit.py checks api.py against it; test_api_gate_deny_paths.py drives every
 # entry through the deny path. Adding a gated endpoint means adding it here on purpose.
 GATED_ENDPOINTS: dict[str, str] = {
-	"refill_ai_suggestions": "_ai_session_gate",
+	"refill_ai_suggestions": "_session_action_gate",
+	"cancel_ai_refresh": "_session_action_gate",
 	"regenerate_reports": "_session_action_gate",
 	"retry_analyze": "_session_action_gate",
 	"start_line_profile_pass": "_session_action_gate",

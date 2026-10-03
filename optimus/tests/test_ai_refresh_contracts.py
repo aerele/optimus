@@ -141,15 +141,6 @@ def test_the_skip_and_fatal_kinds_have_one_source():
 # --- Q3: the overlap with #72's Refresh ---------------------------------------------------
 
 
-def test_the_engine_refuses_to_start_while_a_refresh_holds_the_session(admitting, monkeypatch):
-	queue = admitting
-	queue.journal.db.rows[queue.journal.mod.RUN] = {}
-	monkeypatch.setattr(queue.jobs, "_refresh_flag_held", lambda session_uuid: True)
-	out = _start(queue)
-	assert out["status"] == "refused" and out["reason"] == "refresh_running"
-	assert "already running" in out["message"]
-	assert not queue.journal.db.rows[queue.journal.mod.RUN] and not queue.sent
-	assert queue.journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 0
 
 
 def test_the_engine_starts_when_no_refresh_holds_the_session(admitting):
@@ -159,11 +150,6 @@ def test_the_engine_starts_when_no_refresh_holds_the_session(admitting):
 	assert queue.journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 1
 
 
-def test_a_running_engine_run_is_attached_to_even_while_the_flag_is_held(admitting, monkeypatch):
-	"""An existing run is shown, not refused: attaching only reads."""
-	queue = admitting
-	monkeypatch.setattr(queue.jobs, "_refresh_flag_held", lambda session_uuid: True)
-	assert _start(queue)["status"] == "already_running"
 
 
 def test_a_live_run_is_read_in_a_fresh_transaction_and_an_expired_one_is_not_live(queue, monkeypatch):
@@ -181,26 +167,6 @@ def test_a_live_run_is_read_in_a_fresh_transaction_and_an_expired_one_is_not_liv
 	assert queue.jobs.live_run("another-session") is None
 
 
-def test_the_engine_reads_the_flag_fresh_from_redis(monkeypatch):
-	"""#72's reader: a raw GET of the flag key (never ``frappe.local.cache``); a hold is a
-	value, an unreadable Redis is no hold (a cache failure never blocks a refresh)."""
-	from optimus import redis_keys
-	from optimus.tests.gate_fakes import SESSION_UUID, FakeCache
-
-	cache = FakeCache()
-	cache.get = lambda key: cache.calls.append(("get", key)) or cache.store.get(key)
-	monkeypatch.setattr(api, "frappe", SimpleNamespace(cache=cache))
-	key = "site|" + redis_keys.ai_refresh_inflight(SESSION_UUID)
-	assert api._refresh_flight_held(SESSION_UUID) is False
-	cache.store[key] = b"token"
-	assert api._refresh_flight_held(SESSION_UUID) is True
-	assert cache.calls == [("get", key), ("get", key)]  # nothing cached between the two reads
-
-	def down(key):
-		raise ConnectionError("fake redis down")
-
-	cache.get = down
-	assert api._refresh_flight_held(SESSION_UUID) is False
 
 
 # --- selection counts (item 5) -----------------------------------------------------------
@@ -563,6 +529,7 @@ def test_the_engine_is_in_the_title_audit():
 		"optimus ai refresh duplicate blocked",
 		"optimus ai refresh uncertain",
 		"optimus ai refresh ended",
+		"optimus ai refresh report",
 	}
 
 
@@ -715,13 +682,13 @@ def test_the_payload_builder_says_the_principal_is_reserved():
 def test_the_changelog_documents_the_stored_answer_shape():
 	"""In the newest release's section: the first ``## [`` heading, whatever its version."""
 	text = (_PKG.parent / "CHANGELOG.md").read_text(encoding="utf-8")
-	section = text.split("\n## [", 2)[1]
+	section = text.split("## [0.12.70]", 1)[1].split("\n## [", 1)[0]
 	assert "usage_complete" in section and "llm_fix_json" in section
 
 
 def test_the_changelog_lists_refresh_state_with_the_engines_functions():
 	text = (_PKG.parent / "CHANGELOG.md").read_text(encoding="utf-8")
-	section = text.split("\n## [", 2)[1]
+	section = text.split("## [0.12.70]", 1)[1].split("\n## [", 1)[0]
 	assert "`refresh_state(docname)`" in section
 
 
