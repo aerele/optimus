@@ -921,7 +921,7 @@ def _session_perf_24h() -> dict:
 			Avg(s.analyze_duration_ms).as_("avg_ms"),
 			Max(s.analyze_duration_ms).as_("max_ms"),
 		)
-		.where((s.status == "Ready") & (s.modified > cutoff))
+		.where((s.status == "Ready") & (s.stopped_at > cutoff))
 	).run(as_dict=True)
 	agg = rows[0] if rows else {}
 	return {
@@ -1198,15 +1198,13 @@ def retry_analyze(session_uuid: str) -> dict:
 	}
 
 
-def _render_session_report(docname: str, *, ai_backfill: bool = False) -> dict:
+def _render_session_report(docname: str) -> dict:
 	"""Re-render the session's HTML report from stored data and re-attach it.
 
 	Not whitelisted and ungated: every caller must already have passed ``_session_action_gate``
 	(or run as trusted server code). Other Optimus modules may call it; the leading underscore
-	means "not an HTTP endpoint", not "private to this module". ``ai_backfill=True`` first fills
-	missing AI fix suggestions when "Suggest AI fixes by default" is on; only the whitelisted
-	``regenerate_reports`` passes it until that path is removed, so a re-render never calls the
-	LLM. AI endpoints use the default False: they have just generated what they wanted.
+	means "not an HTTP endpoint". Rendering uses saved AI answers and never
+	calls the provider or loads recording trees.
 
 	Recordings are best-effort: if they expired from Redis (and no bundle is attached) the
 	per-query drill-down renders empty and every persisted section stays intact. Clears the cached
@@ -1218,23 +1216,12 @@ def _render_session_report(docname: str, *, ai_backfill: bool = False) -> dict:
 	from optimus import analyze as _analyze_mod
 
 	doc = frappe.get_doc("Optimus Session", docname)
-	recording_uuids = [
-		a.recording_uuid for a in (doc.actions or []) if getattr(a, "recording_uuid", None)
-	]
 	recordings, step_failed = _analyze_mod._run_ai_step(
-		lambda: list(_analyze_mod._fetch_recordings(
-			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
-		)),
+		lambda: _analyze_mod.load_recordings_light(doc),
 		title="optimus regenerate_reports fetch", session_uuid=doc.session_uuid,
 	)
 	if step_failed:
 		recordings = []
-
-	if ai_backfill:
-		_analyze_mod._run_ai_step(
-			lambda: _analyze_mod._backfill_ai_suggestions(doc),
-			title="optimus regenerate ai backfill", session_uuid=doc.session_uuid,
-		)
 
 	interrupt = None
 
@@ -1302,8 +1289,8 @@ def regenerate_reports(session_uuid: str) -> dict:
 	Failed sessions; any other status is refused with the long-standing message that names
 	retry_analyze (pinned by the real-bench integration test). Permission:
 	``_session_action_gate`` (the owner, a System Manager or a user the session is shared with for
-	editing); then the per-user limit. Until the AI path is removed from regenerate it still
-	backfills missing AI fix suggestions first when "Suggest AI fixes by default" is on.
+	editing); then the per-user limit. Uses saved AI answers without making new
+	provider calls. Use Refresh AI suggestions to request new answers.
 	"""
 	ref = _session_action_gate(
 		session_uuid,
@@ -1312,7 +1299,7 @@ def regenerate_reports(session_uuid: str) -> dict:
 		status_hint=_("regenerate_reports requires the session to be in a terminal state (Ready or Failed); this one is '{0}'. Wait for analyze to finish, or use retry_analyze to restart a stuck pipeline."),
 	)
 	ratelimit.enforce_user_rate_limit("regenerate_reports", **_ACTION_LIMITS["regenerate_reports"])
-	out = _render_session_report(ref.docname, ai_backfill=True)
+	out = _render_session_report(ref.docname)
 	return {
 		"regenerated": bool(out.get("regenerated")),
 		"session_uuid": ref.session_uuid,
@@ -1381,14 +1368,8 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 
 	_analyze_mod._mark_ai_spend_session(getattr(doc, "session_uuid", None))
 
-	recording_uuids = [
-		a.recording_uuid for a in (doc.actions or [])
-		if getattr(a, "recording_uuid", None)
-	]
 	recordings, step_failed = _analyze_mod._run_ai_step(
-		lambda: list(_analyze_mod._fetch_recordings(
-			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
-		)),
+		lambda: _analyze_mod.load_recordings_light(doc),
 		title="optimus humanize_steps fetch", session_uuid=getattr(doc, "session_uuid", None),
 	)
 	if step_failed:

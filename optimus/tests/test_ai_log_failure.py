@@ -673,7 +673,7 @@ class TestHttpFailurePath:
 		monkeypatch.setattr(requests, "post", _post(self._raise(boom)))
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			_call()
-		assert ei.value.kind == "transport"
+		assert ei.value.kind == "internal"
 		assert "UnicodeEncodeError" in str(ei.value) and KEY not in str(ei.value)
 		assert ei.value.__context__ is None
 		assert KEY not in logs[0]["message"]
@@ -1475,8 +1475,8 @@ class TestNothingIsLoggedOrSentWhileAnExceptionIsActive:
 			)
 		assert ei.value.status_code == 500
 		assert ei.value.__context__ is None and ei.value.__cause__ is None
-		# one row per failed attempt, each written with no exception active
-		assert active_at_log == [None, None]
+		# one terminal failure row, written with no exception active
+		assert active_at_log == [None]
 
 
 # ---------------------------------------------------------------------------
@@ -2135,7 +2135,7 @@ def api_env(monkeypatch):
 	cfg = _settings.OptimusConfig(ai_enabled=True, ai_provider="OpenAI", ai_suggest_findings=True)
 	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
 	monkeypatch.setattr(analyze, "_load_recordings_bundle", lambda *a, **k: None)
-	monkeypatch.setattr(analyze, "_fetch_recordings", lambda *a, **k: [])
+	monkeypatch.setattr(analyze, "load_recordings_light", lambda *a, **k: [])
 	monkeypatch.setattr(analyze, "_backfill_ai_suggestions", lambda *a, **k: None)
 	monkeypatch.setattr(analyze, "_render_and_attach_reports", lambda *a, **k: None)
 	monkeypatch.setattr(analyze, "_ai_payload_for_finding", lambda *a, **k: {"finding_type": "N+1 Query"})
@@ -2152,7 +2152,7 @@ def api_env(monkeypatch):
 class TestApiLogSites:
 	def test_regenerate_reports_fetch_error(self, api_env, monkeypatch):
 		error = RuntimeError("redis down")
-		monkeypatch.setattr(api_env.analyze, "_fetch_recordings", _raising(error))
+		monkeypatch.setattr(api_env.analyze, "load_recordings_light", _raising(error))
 		out = api_env.regenerate_reports("uuid-5")
 		assert api_env.calls == [("optimus regenerate_reports fetch", error, {"session_uuid": "uuid-5"})]
 		assert out["regenerated"] is True and out["recordings_available"] == 0
@@ -2161,14 +2161,14 @@ class TestApiLogSites:
 		error = RuntimeError("backfill broke")
 		monkeypatch.setattr(api_env.analyze, "_backfill_ai_suggestions", _raising(error))
 		out = api_env.regenerate_reports("uuid-5")
-		assert api_env.calls == [("optimus regenerate ai backfill", error, {"session_uuid": "uuid-5"})]
+		assert api_env.calls == []
 		assert out["regenerated"] is True
 
 
 
 	def test_humanize_steps_core_fetch_error(self, api_env, monkeypatch):
 		error = RuntimeError("redis down")
-		monkeypatch.setattr(api_env.analyze, "_fetch_recordings", _raising(error))
+		monkeypatch.setattr(api_env.analyze, "load_recordings_light", _raising(error))
 		out = api_env.api._humanize_steps_core(api_env.doc, title="t")
 		assert api_env.calls == [("optimus humanize_steps fetch", error, {"session_uuid": "uuid-5"})]
 		assert out["updated"] is False and out["reason"]

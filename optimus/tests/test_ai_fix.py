@@ -379,37 +379,22 @@ class TestOpenAiCall:
 		assert len(fp.calls) == 1  # no retry
 
 
-class TestAereleSessionAttribution:
-	"""The Aerele managed proxy is sent a ``metadata`` block attributing each
-	call to the originating Optimus Session, so the billing portal can show
-	per-session usage. Only the Aerele provider gets it; OpenAI/Anthropic must
-	not receive unknown body fields."""
+class TestSessionAttribution:
+	"""Only providers opting into metadata receive explicit session attribution."""
 
-	def test_metadata_none_for_non_aerele_provider(self):
-		assert ai_fix._aerele_call_metadata({"name": "OpenAI"}, "N+1 Query") is None
-		assert ai_fix._aerele_call_metadata(None) is None
+	def test_metadata_is_opt_in_even_for_previously_special_provider(self):
+		for provider in (None, {"name": "Aerele"}, {"name": "OpenAI"}):
+			assert ai_fix._session_call_metadata(provider, session_uuid="fake-session", docname="fake-doc") is None
 
-	def test_metadata_none_for_aerele_without_active_session(self, monkeypatch):
-		import frappe
+	def test_flag_works_without_provider_name_or_database(self):
+		meta = ai_fix._session_call_metadata(
+			{"send_session_metadata": True}, session_uuid="fake-session", docname="fake-doc", finding_type="N+1 Query",
+		)
+		assert meta == {"optimus_session_uuid": "fake-session", "optimus_session": "fake-doc", "optimus_finding_type": "N+1 Query"}
 
-		monkeypatch.setattr(frappe.local, "_optimus_spend_session", None, raising=False)
-		assert ai_fix._aerele_call_metadata({"name": "Aerele"}, "Steps") is None
+	def test_no_explicit_session_means_no_metadata(self):
+		assert ai_fix._session_call_metadata({"send_session_metadata": True}, session_uuid=None, docname=None) is None
 
-	def test_metadata_builds_ref_for_aerele_with_session(self, monkeypatch):
-		import frappe
-
-		class _FakeDB:
-			def get_value(self, *a, **k):
-				return "nonj171gfs"
-
-		monkeypatch.setattr(frappe.local, "_optimus_spend_session", "uuid-123", raising=False)
-		monkeypatch.setattr(frappe, "db", _FakeDB(), raising=False)
-		meta = ai_fix._aerele_call_metadata({"name": "Aerele"}, "N+1 Query")
-		assert meta == {
-			"optimus_session_uuid": "uuid-123",
-			"optimus_session": "nonj171gfs",
-			"optimus_finding_type": "N+1 Query",
-		}
 
 	def test_call_includes_metadata_in_body(self, monkeypatch):
 		fp = _post_returning(_FakeResp(200, _OPENAI_OK))
@@ -1532,13 +1517,13 @@ class TestGuardedCompletion:
 		monkeypatch.setattr(ai_fix.time, "monotonic", fake_monotonic)
 		fake = _post_sequence(self._resp(self._RAW), self._resp(self._GOOD))
 		self._run(fake, monkeypatch)
-		assert fake.calls[0].timeout == 60  # first call: the full budget
-		assert fake.calls[1].timeout == 40  # re-ask: what remains
+		assert fake.calls[0].timeout == (10, 60)  # first call: the full read budget
+		assert fake.calls[1].timeout == (10, 40)  # re-ask: what remains
 
 	def test_timeout_argument_caps_the_budget(self, monkeypatch):
 		fake = _post_sequence(self._resp(self._GOOD))
 		self._run(fake, monkeypatch, timeout=30)
-		assert fake.calls[0].timeout == 30
+		assert fake.calls[0].timeout == pytest.approx((10, 30), abs=0.1)
 
 	def test_reask_tokens_accumulate(self, monkeypatch):
 		fake = _post_sequence(

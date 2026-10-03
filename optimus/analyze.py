@@ -13,11 +13,13 @@ leaves it so analyze can be retried.
 
 import html
 import json
+import math
 import os
 import re
 import time
 from collections import OrderedDict
 from dataclasses import asdict
+from datetime import datetime, timezone
 
 import frappe
 import sqlparse
@@ -2236,6 +2238,159 @@ def _phase2_index_for(doc_or_docname) -> dict:
 		return {}
 
 
+_SESSION_COUNTER_FIELDS = frozenset({"ai_tokens_spent", "ai_refresh_count"})
+
+
+def _session_increment_query(docname: str, fieldname: str, n: int):
+	"""One portable SQL increment, never a stale read-modify-write."""
+	if fieldname not in _SESSION_COUNTER_FIELDS or type(n) is not int or n < 0:
+		raise ValueError("Invalid session counter increment")
+	from frappe.query_builder.functions import Coalesce
+
+	table = frappe.qb.DocType("Optimus Session")
+	field = table[fieldname]
+	return frappe.qb.update(table).set(field, Coalesce(field, 0) + n).where(table.name == docname)
+
+
+def _increment_session_counter(docname: str, fieldname: str, n: int) -> None:
+	"""Participate in the caller's result transaction without committing it.
+
+	An accounting failure must abort that transaction, otherwise an answer
+	could be saved without its usage. The caller owns rollback and logging.
+	"""
+	from optimus.ai_fix import _InterruptGuard
+
+	guard = _InterruptGuard()
+	with guard:
+		_session_increment_query(docname, fieldname, n).run()
+	if guard.pending():
+		raise guard.interrupt()
+
+
+def _add_ai_spend(docname: str, tokens: int) -> None:
+	_increment_session_counter(docname, "ai_tokens_spent", tokens)
+
+
+def _bump_ai_refresh_count(docname: str) -> None:
+	_increment_session_counter(docname, "ai_refresh_count", 1)
+
+
+def _row_get(row, key, default=None):
+	return row.get(key, default) if isinstance(row, dict) else getattr(row, key, default)
+
+
+def _ai_timestamp(value) -> float:
+	"""Legacy naive dates are UTC; corrupt/missing dates sort before known ones."""
+	if not isinstance(value, (str, datetime)):
+		return 0.0
+	try:
+		parsed = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else value
+		return parsed.replace(tzinfo=timezone.utc).timestamp() if parsed.tzinfo is None else parsed.timestamp()
+	except (ValueError, OverflowError, OSError):
+		return 0.0
+
+
+def eligible_findings(rows, cfg, *, regenerate_all=False, requested_at=None, include_outdated=True) -> list:
+	"""Select refresh work consistently, preserving each original child row.
+
+	Missing answers precede obsolete answers, then (for an explicit full
+	refresh) current answers. Resuming a run skips answers generated since its
+	request time. Selection never reads Settings again for the exclusion list.
+	"""
+	from optimus import ai_fix, ai_prompts
+
+	selected = []
+	cutoff = _ai_timestamp(requested_at)
+	for row in rows:
+		finding = ai_fix.gate_input(row)
+		if ai_fix.is_finding_type_excluded(finding["finding_type"], cfg=cfg) or ai_fix.llm_gate_note(finding):
+			continue
+		stored = _row_get(row, "llm_fix_json")
+		try:
+			stored = json.loads(stored) if isinstance(stored, str) else None
+		except (ValueError, TypeError):
+			stored = None
+		generated = _ai_timestamp(stored.get("generated_at")) if isinstance(stored, dict) else 0.0
+		if not isinstance(stored, dict):
+			bucket = 0
+		else:
+			suggestion = stored.get("suggestion")
+			guardrail = stored.get("guardrail")
+			outdated = (
+				not isinstance(suggestion, str) or not suggestion.strip() or bool(stored.get("error"))
+				or stored.get("prompt_version") != ai_prompts.PROMPT_VERSION
+				or (isinstance(guardrail, dict) and bool(guardrail.get("fallback")))
+			)
+			bucket = 1 if outdated else 2
+		if (bucket == 1 and not include_outdated and not regenerate_all) or (bucket == 2 and not regenerate_all):
+			continue
+		if bucket and cutoff and generated >= cutoff:
+			continue
+		try:
+			impact = float(_row_get(row, "estimated_impact_ms", 0) or 0)
+		except (TypeError, ValueError, OverflowError):
+			impact = 0.0
+		if not math.isfinite(impact):
+			impact = 0.0
+		severity = _row_get(row, "severity")
+		key = (bucket, generated, SEVERITY_ORDER.get(severity, 3) if isinstance(severity, str) else 3, -impact)
+		selected.append((key, row))
+	return [row for _, row in sorted(selected, key=lambda pair: pair[0])]
+
+
+def action_recording_map(actions) -> dict:
+	"""``action_ref`` is a zero-based position, unlike Frappe's one-based idx."""
+	return {i: {"recording_uuid": _row_get(action, "recording_uuid")} for i, action in enumerate(actions or ())}
+
+
+def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
+	"""Load only recorder JSON, without deserializing trees or sidecars.
+
+	A slice's caller-owned memo parses the persisted bundle at most once per
+	session/file. An explicitly empty UUID list requests no recordings. Missing
+	or malformed records are omitted; Redis errors fall back to the bundle.
+	"""
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
+
+	if uuids is None:
+		uuids = [_row_get(action, "recording_uuid") for action in (_row_get(doc, "actions") or ())]
+	uuids = list(dict.fromkeys(uuid for uuid in uuids if isinstance(uuid, str) and uuid))
+	if not uuids:
+		return []
+	memo = {} if memo is None else memo
+	memo_key = ("recordings", _row_get(doc, "name"), _row_get(doc, "session_uuid"), _row_get(doc, "recordings_file"))
+	result, failure = [], None
+	redis_failed = False
+	for uuid in uuids:
+		rec = None
+		guard = _InterruptGuard()
+		try:
+			with guard:
+				if not redis_failed:
+					rec = frappe.cache.hget(RECORDER_REQUEST_HASH, uuid)
+		except Exception as exc:
+			failure = exc
+			redis_failed = True
+		if guard.pending():
+			rec = None
+			raise guard.interrupt()
+		if failure is not None:
+			try:
+				log_ai_failure("optimus recording cache read", failure, session_uuid=_row_get(doc, "session_uuid"))
+			finally:
+				failure = None
+		if not isinstance(rec, dict) or not rec:
+			if memo_key not in memo:
+				memo[memo_key] = _load_recordings_bundle(doc)
+			bundle = memo[memo_key]
+			recordings = bundle.get("recordings") if isinstance(bundle, dict) else None
+			entry = recordings.get(uuid) if isinstance(recordings, dict) else None
+			rec = entry.get("rec") if isinstance(entry, dict) else None
+		if isinstance(rec, dict) and rec:
+			result.append({key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}})
+	return result
+
+
 def _run_ai_backfill(doc, *, cap: int | None = None,
                      time_budget: float = AI_BACKFILL_TIME_BUDGET_SECONDS,
                      regenerate_all: bool = False) -> dict:
@@ -2886,18 +3041,30 @@ def _load_recordings_bundle(session_doc):
 	is cleaned up. None when there's no snapshot or it can't be read."""
 	import gzip
 
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
+
 	url = getattr(session_doc, "recordings_file", None)
 	if not url:
 		return None
+	failure = None
+	guard = _InterruptGuard()
 	try:
-		file_doc = frappe.get_doc("File", {"file_url": url})
-		with open(file_doc.get_full_path(), "rb") as fh:
-			raw = fh.read()
-		bundle = json.loads(gzip.decompress(raw).decode("utf-8"))
-		return bundle if isinstance(bundle, dict) else None
-	except Exception:
-		frappe.log_error(title="optimus load recordings bundle")
-		return None
+		with guard:
+			file_doc = frappe.get_doc("File", {"file_url": url})
+			with open(file_doc.get_full_path(), "rb") as fh:
+				raw = fh.read()
+			bundle = json.loads(gzip.decompress(raw).decode("utf-8"))
+			return bundle if isinstance(bundle, dict) else None
+	except Exception as exc:
+		failure = exc
+	if guard.pending():
+		raise guard.interrupt()
+	if failure is not None:
+		try:
+			log_ai_failure("optimus load recordings bundle", failure, session_uuid=getattr(session_doc, "session_uuid", None))
+		finally:
+			failure = None
+	return None
 
 
 def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:

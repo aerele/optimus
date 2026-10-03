@@ -43,7 +43,7 @@ from pathlib import Path
 _PKG = Path(__file__).resolve().parents[1]
 _REQUIRED = (
 	"analyze.py", "api.py", "maintenance.py", "error_log_mask.py",
-	"optimus/doctype/optimus_settings/optimus_settings.py", "renderer/fix_recipes.py",
+	"optimus/doctype/optimus_settings/optimus_settings.py", "renderer/fix_recipes.py", "line_profile/analyzer.py",
 )
 _OPTIONAL = ("ai_jobs.py",)  # scanned as soon as a later PR adds it
 _AI_WRAPPERS = frozenset({"_backfill_ai_suggestions"})  # analyze.py; calls _run_ai_backfill
@@ -309,8 +309,8 @@ def test_ai_step_returns_only_a_boolean_failure_flag():
 
 def test_the_ai_steps_log_through_the_one_helper():
 	# The capture-then-log skeleton lives in analyze._run_ai_step alone: in
-	# analyze.py and api.py nothing else calls log_ai_failure (only
-	# _log_ai_step_failure, which _run_ai_step calls after its try). And the
+	# analyze.py and api.py the standalone recording readers also log their
+	# own failures. All log calls stay outside exception handlers. The
 	# helper's handler only records the error: its log call is after the try.
 	callers = {}
 	for mod in ("analyze.py", "api.py"):
@@ -319,7 +319,7 @@ def test_the_ai_steps_log_through_the_one_helper():
 			for name in calls & {"log_ai_failure", "_log_ai_step_failure"}:
 				callers.setdefault(name, set()).add(f"{mod}:{fn.name}")
 	assert callers == {
-		"log_ai_failure": {"analyze.py:_log_ai_step_failure"},
+		"log_ai_failure": {"analyze.py:_log_ai_step_failure", "analyze.py:load_recordings_light", "analyze.py:_load_recordings_bundle"},
 		"_log_ai_step_failure": {"analyze.py:_run_ai_step"},
 	}
 	helper = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "_run_ai_step")
