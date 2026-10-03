@@ -19,18 +19,43 @@ helpers are unit-testable without a bench.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import time
 import traceback
 from datetime import datetime, timezone
-from typing import Any
-from urllib.parse import urljoin, urlsplit
+from functools import wraps
+from typing import Any, NamedTuple
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 
-from optimus import ai_budget, ai_guardrails, ai_prompts
+from optimus import ai_budget, ai_guardrails, ai_privacy, ai_prompts
 from optimus.analyzers.base import humanize_duration_ms
+
+
+class Usage(dict):
+	"""Numeric usage plus whether every attempted completion reported its cost.
+
+	The attributes stay out of the provider-compatible numeric mapping. Missing
+	usage is unknown, including when the normalized count happens to be zero.
+	"""
+
+	def __init__(self):
+		super().__init__()
+		self.calls = 0
+		self.known_calls = 0
+
+	@property
+	def complete(self):
+		return self.calls > 0 and self.known_calls == self.calls
+
+	def begin(self):
+		self.calls += 1
+
+	def observe(self, known):
+		self.known_calls += int(known)
 
 
 class AiFixError(Exception):
@@ -39,13 +64,13 @@ class AiFixError(Exception):
 	``status_code`` carries the provider's HTTP status when the error came
 	from an HTTP response, so callers can react to it (the temperature retry
 	fires only on a 400 or 422). ``kind`` classifies the failure
-	(``"config"``, ``"transport"``, ``"timeout"``, ``"bad_response"`` here;
-	later releases fill the rest). ``usage`` carries token usage already billed before an empty-response failure.
+	(``auth``, ``quota``, ``rate_limited``, ``not_found``, ``config``,
+	``server``, ``bad_request``, ``transport``, ``timeout``, ``bad_response``
+	or ``internal``). ``usage`` carries reported tokens when later processing fails.
 
-	The message must never contain the API key: it is shown to the operator
-	and written to the Error Log. An HTTP-status error from ``_http_post``
-	is the exception: its message carries the provider's reply, so its row
-	shows a body-free log text instead (``_LOG_TEXT_ATTR``)."""
+	The message contains neither a key nor provider reply. Scrubbed provider
+	context is kept separately in ``detail`` and shown only to administrators
+	by ``user_message``. Logging never consumes that detail."""
 
 	def __init__(
 		self,
@@ -54,16 +79,77 @@ class AiFixError(Exception):
 		status_code: int | None = None,
 		kind: str = "unknown",
 		usage: dict | None = None,
+		usage_complete: bool | None = None,
+		detail: str = "",
 	):
 		super().__init__(message)
 		self.status_code = status_code
 		self.kind = kind
+		self.detail = detail
+		self.usage_complete = (
+			bool(getattr(usage, "complete", False)) if usage_complete is None else usage_complete is True
+		)
 		# Only billed counts belong on an exception that may reach a log.
 		self.usage = {
 			key: value for key, value in (usage or {}).items()
 			if key in ("prompt_tokens", "completion_tokens", "total_tokens")
 			and type(value) is int and value >= 0
 		} if usage is not None else None
+
+	@property
+	def fatal(self) -> bool:
+		"""Failures that need an operator/configuration change before another call."""
+		return self.kind in {"auth", "not_found", "quota", "config"}
+
+
+def user_message(exc: AiFixError) -> str:
+	"""Public explanation, with provider detail only for System Managers."""
+	allowed = False
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			import frappe
+
+			user = frappe.session.user
+			allowed = user == "Administrator" or bool(user and user != "Guest" and "System Manager" in frappe.get_roles(user))
+	except Exception:
+		pass
+	if guard.pending():
+		exc = None
+		raise guard.interrupt()
+	return str(exc) + ("\n" + exc.detail if allowed and exc.detail else "")
+
+
+def _private_ai_frames(function):
+	"""Keep prompts, replies and URLs out of escaping provider tracebacks.
+
+	The HTTP layer logs plain frames before this boundary. Public AI entry
+	points also need it: their own prompt-building and retry frames otherwise
+	remain attached even when the transport discards its request frames.
+	Preserve typed outcomes, usage and log markers, and reuse the interrupt
+	guard so worker timeouts stay fresh and gevent timeouts keep identity.
+	"""
+	@wraps(function)
+	def private_call(*args, **kwargs):
+		failure = None
+		unexpected = ""
+		guard = _InterruptGuard(base=True)
+		try:
+			with guard:
+				return function(*args, **kwargs)
+		except AiFixError as exc:
+			failure = exc
+		except Exception as exc:
+			unexpected = type(exc).__name__
+		args = kwargs = None
+		if guard.pending():
+			raise guard.interrupt()
+		if failure is None:
+			from frappe import _
+
+			failure = AiFixError(_("The AI operation failed ({0}).").format(unexpected), kind="internal")
+		raise guard.detach(failure)
+	return private_call
 
 
 # Findings that carry enough code / SQL context for the LLM to reason about
@@ -78,18 +164,20 @@ class AiFixError(Exception):
 # losing diagnostic signal the broader hot-path findings still appear
 # in the Findings section with their smoking-gun + drill-down; they
 # just no longer carry an LLM-rendered "Suggested fix" block.
+
+# Index-family findings (Missing Index, Full Table Scan, Filesort, Temporary
+# Table, Low Filter Ratio) get a deterministic recipe from
+# optimus.renderer.fix_recipes instead of an LLM answer, and Framework N+1
+# findings point at a loop inside framework code the app cannot change, so
+# none of them reaches the LLM. A Hot Line and a Redundant Call are further
+# gated per finding by ``llm_gate_note``.
 AI_ELIGIBLE_FINDING_TYPES: frozenset[str] = frozenset({
 	"N+1 Query",
-	"Framework N+1",
 	"Slow Query",
-	"Missing Index",
-	"Full Table Scan",
-	"Filesort",
-	"Temporary Table",
-	"Low Filter Ratio",
 	"Redundant Call",
 	"Hot Line",
 })
+
 
 # Per-provider protocol + sensible defaults. ``ai_base_url`` / ``ai_model``
 # from Optimus Settings override these; the "OpenAI-compatible" provider
@@ -147,9 +235,10 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 	# TEMPORARILY DISABLED until Aerele billing + the managed LLM gateway
 	# are production-ready. To re-enable: uncomment this entry AND add
 	# "Aerele" back to the ai_provider Select options (plus its two
-	# descriptions) in optimus_settings.json. The _aerele_call_metadata
+	# descriptions) in optimus_settings.json. The _session_call_metadata
 	# wiring further down is left intact, ready to use.
 	# "Aerele": {
+	# 	"send_session_metadata": True,
 	# 	"context_tokens": 200000,
 	# 	"protocol": "openai",
 	# 	"base_url": "https://api.aerele.in/optimus/v1",
@@ -196,38 +285,18 @@ _ANTHROPIC_VERSION = "2023-06-01"
 # gives the model a strong, type-specific starting point.
 _FINDING_TYPE_HINTS = ai_prompts.FINDING_TYPE_HINTS
 
-# Postgres phrasings for the four EXPLAIN-based hints. The rest of
-# _FINDING_TYPE_HINTS is dialect-neutral; MariaDB uses it verbatim. On Postgres
-# these swap the MariaDB EXPLAIN-column wording (type=ALL / Using filesort / …)
-# for plan-node wording (Seq Scan / Sort node / HashAggregate). The fix advice
-# is identical.
-_POSTGRES_EXPLAIN_HINTS = ai_prompts.POSTGRES_EXPLAIN_HINTS
-
 
 def _finding_type_hint(ftype):
-	"""Per-finding-type hint for the LLM prompt. The four EXPLAIN-based hints are
-	phrased for the active dialect (MariaDB EXPLAIN columns vs Postgres plan
-	nodes); the rest are dialect-neutral."""
-	if ftype in _POSTGRES_EXPLAIN_HINTS:
-		try:
-			from optimus.dbdialect import active_db_type
-			if active_db_type() == "postgres":
-				return _POSTGRES_EXPLAIN_HINTS[ftype]
-		except Exception:
-			pass
-	return _FINDING_TYPE_HINTS.get(ftype)
-
-
+	"""Per-finding-type hint for the LLM prompt (dialect-neutral: the EXPLAIN
+	types whose hints differed per dialect no longer reach the LLM)."""
+	return ai_prompts.FINDING_TYPE_HINTS.get(ftype)
 
 
 _MAX_STEPS_ACTIONS = 60
 _MAX_STEPS_USER_CHARS = 8000
 
 
-_INDEX_SYSTEM_PROMPT = ai_prompts.INDEX_SYSTEM_PROMPT
 
-_MAX_INDEX_SAMPLE_QUERIES = 4
-_MAX_INDEX_USER_CHARS = 10000
 
 
 # ---------------------------------------------------------------------------
@@ -237,12 +306,11 @@ _MAX_INDEX_USER_CHARS = 10000
 # v0.6.x: per-section "use the LLM for X" toggle → the config attribute.
 _AI_SECTION_FLAGS = {
 	"findings": "ai_suggest_findings",
-	"indexes": "ai_suggest_indexes",
 	"humanize": "ai_humanize_steps",
 }
 
 
-def is_finding_type_excluded(finding_type: str | None) -> bool:
+def is_finding_type_excluded(finding_type: str | None, *, cfg=None) -> bool:
 	"""Return True when ``finding_type`` is in ``cfg.ai_excluded_finding_types``.
 
 	Exact case-sensitive match. Empty / unknown type, or any read error (no
@@ -251,12 +319,73 @@ def is_finding_type_excluded(finding_type: str | None) -> bool:
 	"""
 	if not finding_type or not isinstance(finding_type, str):
 		return False
+	guard = _InterruptGuard()
 	try:
-		from optimus.settings import get_config
-		excluded = get_config().ai_excluded_finding_types
+		with guard:
+			if cfg is None:
+				from optimus.settings import get_config
+				cfg = get_config()
+			excluded = getattr(cfg, "ai_excluded_finding_types", ())
 	except Exception:
 		return False
+	if guard.pending():
+		raise guard.interrupt()
 	return finding_type in (excluded or ())
+
+
+_INDEX_TYPE_NOTE = (
+	"Index advice is built by Optimus from the DocType metadata, without the AI. "
+	"See the recipe on this finding in the report."
+)
+_FRAMEWORK_N1_NOTE = (
+	"A Framework N+1 finding points at a loop inside framework code, which your app "
+	"cannot change, so Optimus does not ask the AI about it."
+)
+_NOT_ELIGIBLE_NOTE = "This finding type does not carry enough code or SQL context for an AI suggestion."
+
+
+def _app_scope() -> tuple[tuple[str, ...], frozenset[str] | None]:
+	"""The site's Tracked Apps and installed apps, the same inputs the report
+	uses to tell your code from framework code. Ordinary settings failures fall
+	back to the default scope; job timeouts propagate."""
+	from optimus.analyzers.base import installed_apps_allowlist
+	from optimus.renderer import fix_recipes
+	from optimus.settings import get_config
+
+	tracked = fix_recipes._best_effort(lambda: tuple(getattr(get_config(), "tracked_apps", ()) or ()), ())
+	return tracked, fix_recipes._best_effort(installed_apps_allowlist, None)
+
+
+def gate_input(row) -> dict:
+	"""The dict ``llm_gate_note`` reads, built from an Optimus Finding row (or
+	any object with its attributes)."""
+	get = row.get if isinstance(row, dict) else lambda key, default=None: getattr(row, key, default)
+	return {"finding_type": get("finding_type") or "", "technical_detail_json": get("technical_detail_json") or "{}"}
+
+
+def llm_gate_note(finding: dict) -> str | None:
+	"""None when the LLM may be asked about ``finding``; otherwise why not, as a
+	sentence the report can show. The single eligibility chokepoint for
+	analyze, the refresh backfill and ``suggest_fix``. Accepts a render dict
+	(``technical_detail``), a row-shaped dict (``technical_detail_json``) or
+	a ``gate_input(row)`` dict."""
+	ftype = finding.get("finding_type") or ""
+	from optimus.renderer import fix_recipes
+
+	if ftype not in AI_ELIGIBLE_FINDING_TYPES:
+		if ftype in fix_recipes.INDEX_FINDING_TYPES:
+			return _INDEX_TYPE_NOTE
+		if ftype == "Framework N+1":
+			return _FRAMEWORK_N1_NOTE
+		return _NOT_ELIGIBLE_NOTE
+	if ftype == "Redundant Call":
+		if fix_recipes.analyzed_before_callsite_fix(finding):
+			return fix_recipes.PRE_L5_REDUNDANT_CALL_NOTE
+		return None
+	if ftype != "Hot Line":
+		return None
+	tracked, installed = _app_scope()
+	return fix_recipes.hot_line_gate(finding, tracked_apps=tracked, installed_apps=installed)
 
 
 def _resolve_timeout_seconds() -> int:
@@ -264,12 +393,16 @@ def _resolve_timeout_seconds() -> int:
 	clamped to ``[10, 600]`` and falling back to :data:`_HTTP_TIMEOUT` when
 	settings can't be read.
 	"""
+	guard = _InterruptGuard()
 	try:
-		from optimus.settings import get_config
-		v = get_config().ai_request_timeout_seconds
-		return max(10, min(600, int(v or _HTTP_TIMEOUT)))
+		with guard:
+			from optimus.settings import get_config
+			v = get_config().ai_request_timeout_seconds
+			return max(10, min(600, int(v or _HTTP_TIMEOUT)))
 	except Exception:
 		return _HTTP_TIMEOUT
+	if guard.pending():
+		raise guard.interrupt()
 
 
 def is_available(section: str | None = None) -> bool:
@@ -277,14 +410,18 @@ def is_available(section: str | None = None) -> bool:
 	``ai_enabled`` set, a model resolvable for the chosen provider and an API
 	key present unless the provider needs none (local endpoints).
 
-	When ``section`` is ``"findings"`` / ``"indexes"`` / ``"humanize"``, also
+	When ``section`` is ``"findings"`` / ``"humanize"``, also
 	requires the matching per-section toggle. Fails soft: an unknown ``section``
 	or an unreadable config attr does not block once ``ai_enabled`` has passed."""
+	guard = _InterruptGuard()
 	try:
-		from optimus.settings import get_config
-		cfg = get_config()
+		with guard:
+			from optimus.settings import get_config
+			cfg = get_config()
 	except Exception:
 		return False
+	if guard.pending():
+		raise guard.interrupt()
 	if not getattr(cfg, "ai_enabled", False):
 		return False
 	try:
@@ -311,7 +448,11 @@ def _resolve_display_threshold_ms() -> float:
 	return display_threshold_ms()
 
 
-def suggest_fix(finding: dict, *, timeout: int | None = None) -> dict:
+@_private_ai_frames
+def suggest_fix(
+	finding: dict, *, timeout: int | None = None,
+	session_uuid: str | None = None, docname: str | None = None,
+) -> dict:
 	"""Ask the configured LLM for a fix for ``finding``.
 
 	Returns ``{suggestion, model, provider, generated_at, source_available,
@@ -320,24 +461,33 @@ def suggest_fix(finding: dict, *, timeout: int | None = None) -> dict:
 	(default: the configured request timeout). Raises ``AiFixError``."""
 	if is_finding_type_excluded(finding.get("finding_type")):
 		raise AiFixError("excluded by ai_excluded_finding_types", kind="config")
+	gate_note = llm_gate_note(finding)
+	if gate_note:
+		from frappe import _
+
+		raise AiFixError(
+			_("No AI suggestion for this finding: {0}").format(gate_note), kind="not_eligible",
+		)
 	provider = _provider_config()
 	_require_configured(provider)
 	ctx = _context_tokens(provider)
 	system, messages, shown = _build_fix_request(
-		finding, threshold_ms=_resolve_display_threshold_ms(), context_tokens=ctx, out_tokens=_output_tokens(provider)
+		finding, threshold_ms=_resolve_display_threshold_ms(), context_tokens=ctx, out_tokens=_output_tokens(provider),
+		send_raw=ai_privacy.raw_values_enabled(),
 	)
 	_check_context_fits(system, ctx, messages=messages, out_tokens=_output_tokens(provider))
-	usage: dict = {}
-	text, guardrail, finish = _complete_with_guardrails(
+	usage = Usage()
+	text, guardrail, finish = _with_usage_on_failure(lambda: _complete_with_guardrails(
 		provider,
 		system,
 		messages,
 		shown_lines=shown,
 		usage=usage,
-		metadata=_aerele_call_metadata(provider, finding.get("finding_type")),
+		metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type=finding.get("finding_type")),
+		session_uuid=session_uuid,
 		started_at=time.monotonic(),
 		timeout=int(timeout or _resolve_timeout_seconds()),
-	)
+	), usage)
 	result = {
 		"suggestion": text,
 		"model": provider["model"],
@@ -347,13 +497,18 @@ def suggest_fix(finding: dict, *, timeout: int | None = None) -> dict:
 		"prompt_version": ai_prompts.PROMPT_VERSION,
 		"guardrail": guardrail,
 		"finish_reason": finish,
+		"usage_complete": usage.complete,
 	}
-	if usage.get("total_tokens"):
+	if usage.get("total_tokens") or usage.complete:
 		result["tokens"] = usage
 	return result
 
 
-def humanize_steps(actions: list[dict], *, session_title: str | None = None, usage_out: dict | None = None) -> str:
+@_private_ai_frames
+def humanize_steps(
+	actions: list[dict], *, session_title: str | None = None, usage_out: dict | None = None,
+	timeout: int | None = None, session_uuid: str | None = None, docname: str | None = None,
+) -> str:
 	from frappe import _
 
 	if not actions:
@@ -361,59 +516,53 @@ def humanize_steps(actions: list[dict], *, session_title: str | None = None, usa
 	provider = _provider_config()
 	_require_configured(provider)
 	system, messages = _build_steps_messages(
-		actions, session_title, threshold_ms=_resolve_display_threshold_ms(), context_tokens=_context_tokens(provider)
+		actions, session_title, threshold_ms=_resolve_display_threshold_ms(), context_tokens=_context_tokens(provider),
+		send_raw=ai_privacy.raw_values_enabled(),
 	)
 	_check_context_fits(system, _context_tokens(provider), messages=messages, out_tokens=_output_tokens(provider))
-	text = _dispatch_call(
-		provider, system, messages, usage_out=usage_out,
-		metadata=_aerele_call_metadata(provider, "Steps to Reproduce"),
-	)
+	usage = Usage() if usage_out is None else usage_out
+	text = _with_usage_on_failure(lambda: _dispatch_call(
+		provider, system, messages, usage_out=usage,
+		metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type="Steps to Reproduce"),
+		timeout=timeout, session_uuid=session_uuid,
+	), usage)
 	text = (text or "").strip()
 	if not text:
-		raise AiFixError(_("The AI provider returned an empty response."), kind="bad_response")
+		raise AiFixError(_("The AI provider returned an empty response."), kind="bad_response", usage=usage)
 	return text
 
 
-def suggest_index(table_payload: dict) -> dict:
-	"""Ask the configured LLM to vet/refine an index recommendation for one
-	table. ``table_payload`` keys: ``table`` / ``doctype`` / ``read_count`` /
-	``write_count`` / ``is_write_hot`` / ``recommended_index`` (the heuristic
-	pick) / ``candidates`` (column→clauses→hits) / ``framework_cols_filtered`` /
-	``existing_indexes`` (``[{name, columns, unique}]`` from SHOW INDEX) /
-	``sample_queries``. Returns ``{"suggestion": <markdown>, "model", "provider",
-	"generated_at"}``. Raises ``AiFixError`` on a config / network problem or an
-	empty response."""
-	if not table_payload or not table_payload.get("table"):
-		raise AiFixError("No table to analyse for an index suggestion.")
-	provider = _provider_config()
-	_require_configured(provider)
-	system, messages = _build_index_messages(table_payload)
-	_check_context_fits(system, _context_tokens(provider), messages=messages, out_tokens=_output_tokens(provider))
-	usage: dict = {}
-	text = _dispatch_call(
-		provider, system, messages, usage_out=usage,
-		metadata=_aerele_call_metadata(provider, "Table Index"),
-	)
-	text = (text or "").strip()
-	if not text:
-		raise AiFixError("The AI provider returned an empty response.")
-	# Same guardrail as suggest_fix: if the model recommended indexing a Frappe
-	# metadata column, append a correction note. Plus the raw-SQL guardrail
-	# the index-suggestion path doesn't usually emit code, but a model can
-	# still volunteer a ``frappe.db.sql("ALTER ...")`` fallback that should
-	# be flagged (DDL verbs are excluded from the detector anyway, so this
-	# guard fires only on the broader anti-pattern).
-	text = _flag_metadata_column_index_advice(text)
-	text = _flag_raw_sql_in_fix(text)
-	result = {
-		"suggestion": text,
-		"model": provider["model"],
-		"provider": provider["name"],
-		"generated_at": datetime.now(timezone.utc).isoformat(),
-	}
-	if usage.get("total_tokens"):
-		result["tokens"] = usage
-	return result
+def _with_usage_on_failure(call, usage):
+	"""Retain reported spend when parsing/validation fails after a response.
+
+	Unexpected exceptions become typed failures with no raw message. Timeout
+	frames are discarded, keeping the existing log-deduplication marker.
+	"""
+	failure = None
+	try:
+		return call()
+	except Exception as exc:
+		if isinstance(exc, _job_timeout_types()):
+			guard = _InterruptGuard()
+			guard.note(exc)
+			failure = guard.interrupt()
+			if getattr(exc, _LOGGED_ATTR, False):
+				_mark_logged(failure, getattr(exc, _LOGGED_ROW_ATTR, None))
+		elif isinstance(exc, AiFixError):
+			failure = exc
+		else:
+			from frappe import _
+
+			failure = AiFixError(_("The AI response could not be processed ({0}).").format(type(exc).__name__), kind="internal")
+	if usage:
+		failure.usage = {
+			key: value for key, value in usage.items()
+			if key in ("prompt_tokens", "completion_tokens", "total_tokens") and type(value) is int and value >= 0
+		}
+	failure.usage_complete = bool(getattr(usage, "complete", False))
+	raise failure
+
+
 
 
 def _had_concrete_context(finding: dict) -> bool:
@@ -434,17 +583,27 @@ def test_connection() -> dict:
 	try:
 		provider = _provider_config()
 	except AiFixError as e:
-		return {"ok": False, "message": str(e), "model": ""}
+		return {"ok": False, "message": user_message(e), "model": ""}
 	if not provider.get("model") or not provider.get("base_url"):
 		return {"ok": False, "message": "Provider/model/base URL not fully configured.", "model": provider.get("model") or ""}
 	messages = [{"role": "user", "content": "Reply with exactly: OK"}]
 	usage: dict = {}
 	try:
 		text = _dispatch_call(
-			provider, "You are a connectivity probe. Reply with exactly: OK", messages, usage_out=usage, max_tokens=16
+			provider, "You are a connectivity probe. Reply with exactly: OK", messages, usage_out=usage, max_tokens=16,
+			timeout=min(_resolve_timeout_seconds(), 60),
 		)
 	except AiFixError as e:
-		return {"ok": False, "message": str(e), "model": provider["model"]}
+		failure = e
+	else:
+		failure = None
+	if failure is not None:
+		from frappe import _
+
+		message = user_message(failure)
+		if failure.kind == "timeout":
+			message += " " + _("A local model may still be loading. Wait a little and try Test AI connection again.")
+		return {"ok": False, "message": message, "model": provider["model"]}
 	_toks = usage.get("total_tokens") or 0
 	return {
 		"ok": True,
@@ -498,7 +657,71 @@ def _current_key_or_empty() -> str:
 	return api_key.strip() if isinstance(api_key, str) else ""
 
 
-def _get_api_key(needs_key: bool = True) -> str:
+def _read_provider_snapshot():
+	"""One statement binds the encrypted credential to its endpoint settings.
+
+	No Redis/local cache and no locks across HTTP. A concurrent Settings save
+	changes Singles and __Auth in one transaction, so even READ COMMITTED cannot
+	pair a new credential with the previous endpoint. Only ciphertext leaves
+	this helper; plaintext is decrypted after the prepared config is checked.
+	"""
+	from types import SimpleNamespace
+
+	import frappe
+
+	query = """SELECT s.field, s.value, a.password
+		FROM `tabSingles` s LEFT JOIN `__Auth` a
+		ON a.doctype = %s AND a.name = %s AND a.fieldname = %s AND a.encrypted = 1
+		WHERE s.doctype = %s AND s.field IN (%s, %s, %s, %s, %s)"""
+	rows = frappe.db.multisql(
+		{"mariadb": query, "postgres": query.replace("`", '"')},
+		values=("Optimus Settings", "Optimus Settings", "ai_api_key", "Optimus Settings",
+			"ai_enabled", "ai_provider", "ai_base_url", "ai_model", "ai_context_tokens"),
+	)
+	values = {field: value for field, value, _ in rows}
+	values["ai_enabled"] = ai_privacy.opted_in(values.get("ai_enabled"))
+	return SimpleNamespace(**values), rows[0][2] if rows else None
+
+
+
+def _decrypt_bound_key(ciphertext) -> str:
+	# Match the existing unavailable-key contract without another SQL read.
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			from frappe.utils.password import decrypt
+
+			api_key = decrypt(ciphertext, key="Optimus Settings.Optimus Settings.ai_api_key") if ciphertext else ""
+	except Exception:
+		return ""
+	if guard.pending():
+		raise guard.interrupt()
+	return api_key if isinstance(api_key, str) else ""
+
+
+def _key_for_provider(provider: dict) -> str:
+	"""Refuse stale configuration before decrypting or contacting a provider."""
+	from frappe import _
+
+	guard = _InterruptGuard(base=True)
+	failed = False
+	try:
+		with guard:
+			cfg, ciphertext = _read_provider_snapshot()
+			if not cfg.ai_enabled or _provider_config(cfg) != provider:
+				failed = True
+			else:
+				api_key = _decrypt_bound_key(ciphertext)
+	except Exception:
+		failed = True
+	if guard.pending():
+		raise guard.interrupt()
+	if failed:
+		raise AiFixError(_("AI configuration changed or could not be read. Check Optimus Settings and retry the refresh."), kind="config") from None
+	return api_key.strip() if isinstance(api_key, str) else ""
+
+
+def _get_api_key(needs_key: bool = True, *, provider: dict | None = None) -> str:
 	"""The API key to send, stripped of surrounding whitespace (a pasted
 	trailing newline), or ``""`` when none is stored.
 
@@ -519,7 +742,7 @@ def _get_api_key(needs_key: bool = True) -> str:
 	The check runs outside any ``try``, so the ``AiFixError`` is raised with
 	no exception being handled and has no ``__context__``; ``from None`` also
 	keeps ``__suppress_context__`` explicit."""
-	api_key = _current_key_or_empty()
+	api_key = _key_for_provider(provider) if provider is not None else _current_key_or_empty()
 	if not api_key:
 		return ""
 	if not _key_is_sendable(api_key):
@@ -640,13 +863,125 @@ def _resolve_provider() -> dict:
 	return provider
 
 
-def _provider_config() -> dict:
+_METADATA_HOSTNAMES = frozenset({
+	"metadata", "metadata.google.internal", "metadata.goog", "instance-data", "instance-data.ec2.internal",
+})
+_METADATA_IPS = frozenset({ipaddress.ip_address("100.100.100.200"), ipaddress.ip_address("fd00:ec2::254")})
+_URL_CONTROL_RE = re.compile(r"[\x00-\x20\x7f]")
+
+
+def _host_ip(host: str):
+	try:
+		address = ipaddress.ip_address(host)
+	except ValueError:
+		return None
+	if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+		return address.ipv4_mapped
+	return address
+
+
+def validate_base_url(url: str) -> str:
+	"""Validate an administrator's endpoint without DNS or network access.
+
+	Private LAN providers are supported. This rejects literal metadata and
+	unsafe URL shapes, not names that resolve to a private address. Legacy
+	numeric IP spellings are not recognized as loopback for key transport.
+	A failure never quotes the URL, including in this frame's escaping locals.
+	"""
+	from frappe import _
+
+	raw = url.strip(" ") if isinstance(url, str) else ""
+	parts = None
+	host = ""
+	port = None
+	reason = ""
+	if not raw or len(raw) > 4096:
+		reason = _("it is empty or too long")
+	elif _URL_CONTROL_RE.search(raw):
+		reason = _("it contains spaces or control characters")
+	else:
+		try:
+			parts = urlsplit(raw)
+			host, port = parts.hostname or "", parts.port
+		except ValueError:
+			reason = _("it is not a valid address or port")
+	if not reason:
+		if parts.scheme not in ("http", "https"):
+			reason = _("only http:// and https:// addresses are supported")
+		elif "\\" in parts.netloc or "%" in parts.netloc or not parts.netloc.isascii():
+			reason = _("the host name has a backslash, a percent escape or non-ASCII characters")
+		elif "@" in parts.netloc:
+			reason = _("it must not contain a user name or password; use the API Key field")
+		elif "?" in raw or "#" in raw:
+			reason = _("it must not contain a query string or a fragment")
+		elif not host:
+			reason = _("it has no host name")
+		elif parts.netloc.endswith(":") or port == 0:
+			reason = _("the port is not a valid number")
+		elif parts.netloc.startswith("[") and not re.fullmatch(r"\[[0-9a-fA-F:.]+\](?::[0-9]+)?", parts.netloc):
+			reason = _("it is not a valid bracketed address")
+		else:
+			host = host.rstrip(".").lower()
+			address = _host_ip(host)
+			if host in _METADATA_HOSTNAMES or address in _METADATA_IPS:
+				reason = _("it points at a cloud metadata service")
+			elif address is not None and (address.is_link_local or address.is_unspecified or address.is_multicast):
+				reason = _("it points at a link-local, unspecified or multicast address")
+	if reason:
+		url = raw = parts = host = None
+		raise AiFixError(_("The AI Base URL in Optimus Settings is not allowed: {0}.").format(reason), kind="config")
+	return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
+
+
+def _is_loopback_host(host: str) -> bool:
+	host = host.rstrip(".").lower()
+	address = _host_ip(host)
+	return host == "localhost" or host.endswith(".localhost") or bool(address is not None and address.is_loopback)
+
+
+_URL_USERINFO_RE = re.compile(r"^(\s*(?:[A-Za-z][A-Za-z0-9+.-]*:)?//)?[^/?#]*@")
+
+
+def strip_url_userinfo(url) -> str:
+	"""Remove authority credentials before Settings/version history saves them.
+
+	Also handles protocol-relative and schemeless pasted values. An @ in a
+	path is not authority userinfo. Validation remains a separate operation.
+	"""
+	return _URL_USERINFO_RE.sub(r"\1", url, count=1) if isinstance(url, str) else ""
+
+
+def key_over_http_blocked(url: str, *, allow: bool) -> bool:
+	"""Withhold a key on remote plain HTTP unless the site explicitly opts in."""
+	try:
+		parts = urlsplit(validate_base_url(url))
+	except AiFixError:
+		return True
+	return not allow and parts.scheme == "http" and not _is_loopback_host(parts.hostname)
+
+
+def _allow_key_over_http() -> bool:
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			import frappe
+
+			value = frappe.conf.get("optimus_ai_allow_key_over_http")
+			return value is True or type(value) is int and value == 1 or isinstance(value, str) and value.lower() in {"1", "true"}
+	except Exception:
+		return False
+	if guard.pending():
+		raise guard.interrupt()
+
+
+@_private_ai_frames
+def _provider_config(cfg=None) -> dict:
 	"""Resolve the active provider config: protocol, base_url, model,
 	needs_key and the provider display name, without reading the key. Raises
 	``AiFixError`` on an unknown provider or a custom provider missing its
 	required base_url/model."""
 	from optimus.settings import get_config
-	cfg = get_config()
+	cfg = get_config() if cfg is None else cfg
 	name = (getattr(cfg, "ai_provider", "") or _DEFAULT_PROVIDER).strip()
 	if name not in _PROVIDER_DEFAULTS:
 		raise AiFixError(f"Unknown AI provider {name!r}. Pick one in Optimus Settings.")
@@ -661,7 +996,8 @@ def _provider_config() -> dict:
 	if defaults["base_url"]:
 		base_url = defaults["base_url"]
 	else:
-		base_url = (getattr(cfg, "ai_base_url", "") or "").strip().rstrip("/")
+		base_url = getattr(cfg, "ai_base_url", "") or ""
+	base_url = validate_base_url(base_url)
 	model = (getattr(cfg, "ai_model", "") or "").strip() or defaults["model"]
 	# The Settings override applies only to bring-your-own endpoints (no built-in
 	# base_url), like the Base URL: the field is hidden for hosted providers.
@@ -677,6 +1013,7 @@ def _provider_config() -> dict:
 		"needs_key": bool(defaults["needs_key"]),
 		"context_tokens": ctx_override if ctx_override > 0 else int(defaults["context_tokens"]),
 		"max_output_tokens": defaults.get("max_output_tokens"),
+		"send_session_metadata": bool(defaults.get("send_session_metadata", False)),
 	}
 
 
@@ -866,14 +1203,19 @@ def _truncate(text: Any, limit: int) -> str:
 def _build_steps_messages(
 	actions: list[dict], session_title: str | None, *, threshold_ms: float = 1000.0,
 	context_tokens: int = _DEFAULT_CONTEXT_TOKENS,
+	send_raw: bool = False,
 ) -> tuple[str, list[dict]]:
 	lines: list[str] = []
-	title = (str(session_title).strip() if session_title else "")
+	title = (str(session_title).strip() if session_title and send_raw else "")
 	if title:
 		lines.append(f"Session title: {title}")
 		lines.append("")
 	lines.append("Recorded actions, in order:")
 	for i, a in enumerate(actions[:_MAX_STEPS_ACTIONS], 1):
+		if not isinstance(a, dict):
+			continue
+		if not send_raw:
+			a = ai_privacy.private_action(a)
 		label = (a.get("label") or "").strip() or "(unnamed action)"
 		bits: list[str] = []
 		cmd = (a.get("cmd") or "").strip()
@@ -909,62 +1251,6 @@ def _build_steps_messages(
 	return system, [{"role": "user", "content": content}]
 
 
-def _build_index_messages(payload: dict) -> tuple[str, list[dict]]:
-	"""Build ``(system_prompt, [user_message])`` for the per-table index
-	suggestion. Pure no Frappe, no I/O. See ``suggest_index`` for the
-	``payload`` shape."""
-	t = payload.get("table") or "?"
-	dt = (payload.get("doctype") or "").strip()
-	parts: list[str] = []
-	parts.append(f"Table: `{t}`" + (f"  (DocType: \"{dt}\")" if dt else ""))
-	rc = int(payload.get("read_count") or 0)
-	wc = int(payload.get("write_count") or 0)
-	parts.append(f"This profiling session: {rc} read(s), {wc} write(s) on this table.")
-	if payload.get("is_write_hot"):
-		parts.append(
-			"This is a write-hot core table in production it takes many "
-			"INSERT/UPDATE rows per submitted document."
-		)
-	rec = payload.get("recommended_index") or {}
-	if rec.get("columns"):
-		parts.append(
-			"Profiler's heuristic pick (most-used filter combination): ("
-			+ ", ".join(rec["columns"])
-			+ f") those columns were filtered together in {int(rec.get('together_count') or 0)} of {rc} read(s)."
-		)
-	cands = payload.get("candidates") or []
-	if cands:
-		parts.append(
-			"Columns this session filtered / joined / ordered on (shown as column: clauses (count)):\n"
-			+ "\n".join(
-				f"  - {c.get('column')}: {', '.join(c.get('sources') or [])} ({int(c.get('hits') or 0)}×)"
-				for c in cands
-			)
-		)
-	fw = payload.get("framework_cols_filtered") or []
-	if fw:
-		parts.append("Also filtered on Frappe metadata columns (do NOT index): " + ", ".join(fw))
-	ex = payload.get("existing_indexes") or []
-	if ex:
-		parts.append(
-			"CURRENT indexes on this table (from `SHOW INDEX`):\n"
-			+ "\n".join(
-				f"  - {i.get('name')}: (" + ", ".join(i.get("columns") or []) + ")"
-				+ (" UNIQUE" if i.get("unique") else "")
-				for i in ex
-			)
-		)
-	else:
-		parts.append(
-			f"CURRENT indexes on this table: not available be cautious about "
-			f"redundancy; the operator should run `SHOW INDEX FROM `{t}`` to check."
-		)
-	sq = payload.get("sample_queries") or []
-	if sq:
-		shown = [_truncate(q, _MAX_QUERY_CHARS) for q in sq[:_MAX_INDEX_SAMPLE_QUERIES]]
-		parts.append("A few of the actual read queries:\n```sql\n" + "\n---\n".join(shown) + "\n```")
-	content = _truncate("\n\n".join(p for p in parts if p).strip(), _MAX_INDEX_USER_CHARS)
-	return _INDEX_SYSTEM_PROMPT, [{"role": "user", "content": content}]
 
 
 def _build_messages(
@@ -975,7 +1261,8 @@ def _build_messages(
 	return system, messages
 
 
-_REASONING_MODEL_RE = re.compile(r"^o[0-9]")  # OpenAI o1/o3/o4… reject `temperature`
+_REASONING_MODEL_RE = re.compile(r"^(?:[\w.-]+/)*(?:o\d|gpt-5)")
+_PARAM_RETRY_STATUSES = (400, 422)
 
 
 def _is_reasoning_model(model: str) -> bool:
@@ -1362,6 +1649,7 @@ def _mark_logged(exc: BaseException | None, row_name: str | None = None) -> None
 def _log_http_error(
 	provider: str, where: str, status: int | None, detail: str = "",
 	*, exc: BaseException | None = None, provider_error: str = "", auth=None,
+	session_uuid: str | None = None,
 ) -> None:
 	"""Log one HTTP-layer failure through ``log_ai_failure``: provider, call
 	site, HTTP status, the provider's own error identifier when it sent one
@@ -1369,25 +1657,12 @@ def _log_http_error(
 	(for a transport error, its type and message, scrubbed; for an
 	unexpected error, its type and plain frames). Never the prompt, the
 	source code, the headers or the response body. The session reference
-	comes from the per-worker spend marker the caller set
-	(``analyze._mark_ai_spend_session``), the same one
-	``_record_session_spend`` reads. ``exc`` (the ``AiFixError`` about to be
+	comes only from the caller's explicit argument. ``exc`` (the ``AiFixError`` about to be
 	raised) is then marked logged, but only if the row was written, so the
 	caller's own ``log_ai_failure`` for it writes no second row and a failed
 	write still leaves the caller's. ``auth`` (the ``_ApiKeyAuth`` the request
 	was sent with) is what the row is scrubbed of, so logging it reads no key
 	from the database."""
-	session_uuid = None
-	guard = _InterruptGuard()
-	try:
-		with guard:
-			import frappe
-
-			session_uuid = getattr(frappe.local, "_optimus_spend_session", None)
-	except Exception:
-		session_uuid = None
-	if guard.pending():
-		raise guard.interrupt()
 	context = {"provider": provider, "where": where, "status": status, "detail": detail}
 	if provider_error:
 		context["provider_error"] = provider_error
@@ -1418,7 +1693,8 @@ class _InterruptGuard:
 
 	Leaving the ``with`` block, the guard swallows and records:
 
-	- an RQ job timeout (``_job_timeout_types``): only its type and args;
+	- an RQ job timeout (``_job_timeout_types``): only its type, args, numeric
+	  usage and log-deduplication marker;
 	  it is raised again as a FRESH instance of that type, with no chain and
 	  none of the frames it interrupted (the job must still stop, and those
 	  frames can hold the key or unscrubbed text);
@@ -1442,7 +1718,7 @@ class _InterruptGuard:
 
 	def __init__(self, *, base: bool = False):
 		self._base = base
-		self._timeout: tuple[type[BaseException], tuple] | None = None
+		self._timeout: tuple[type[BaseException], tuple, dict] | None = None
 		self._escaping: BaseException | None = None
 
 	def __enter__(self) -> _InterruptGuard:
@@ -1461,7 +1737,20 @@ class _InterruptGuard:
 	def _record_timeout(self, exc) -> bool:
 		timeout_types = _job_timeout_types()
 		if timeout_types and isinstance(exc, timeout_types):
-			self._timeout = (type(exc), exc.args)
+			state = {}
+			usage = getattr(exc, "usage", None)
+			if isinstance(usage, dict):
+				state["usage"] = {k: v for k, v in usage.items() if k in (
+					"prompt_tokens", "completion_tokens", "total_tokens",
+				) and type(v) is int and v >= 0}
+			if hasattr(exc, "usage_complete"):
+				state["usage_complete"] = exc.usage_complete is True
+			if getattr(exc, _LOGGED_ATTR, False) is True:
+				state[_LOGGED_ATTR] = True
+				row_name = getattr(exc, _LOGGED_ROW_ATTR, None)
+				if isinstance(row_name, str):
+					state[_LOGGED_ROW_ATTR] = row_name
+			self._timeout = (type(exc), exc.args, state)
 			return True
 		return False
 
@@ -1478,20 +1767,27 @@ class _InterruptGuard:
 		"""True when the guard recorded an interrupt to raise again."""
 		return self._timeout is not None or self._escaping is not None
 
+	@staticmethod
+	def detach(exc: BaseException) -> BaseException:
+		"""Detach private frames from a typed failure or identity-bound interrupt."""
+		exc.__traceback__ = None
+		exc.__context__ = None
+		exc.__cause__ = None
+		exc.__suppress_context__ = True
+		return exc
+
 	def interrupt(self) -> BaseException | None:
 		"""What the guard recorded, ready to raise (see the class), or None;
 		the guard forgets it. The site raises it itself, so no frame of the
 		guard travels with it."""
 		escaping, self._escaping = self._escaping, None
 		if escaping is not None:
-			escaping.__traceback__ = None
-			escaping.__context__ = None
-			escaping.__cause__ = None
-			escaping.__suppress_context__ = True
-			return escaping
+			return self.detach(escaping)
 		timeout, self._timeout = self._timeout, None
 		if timeout is not None:
-			return timeout[0](*timeout[1])
+			fresh = timeout[0](*timeout[1])
+			fresh.__dict__.update(timeout[2])
+			return fresh
 		return None
 
 
@@ -1629,6 +1925,50 @@ def _provider_error_code(resp, auth=None) -> str:
 		raise guard.interrupt()
 
 
+class HttpErrorClassification(NamedTuple):
+	kind: str
+	message: str
+	detail: str
+
+
+def _classify_http_error(status: int, detail: str, *, provider_error: str = "", url: str = "") -> HttpErrorClassification:
+	"""Classify a status using already scrubbed reply text and machine codes.
+
+	A billing URL in a rate-limit message is not evidence of exhausted credit.
+	Context errors take precedence over parameter-retry and quota matching.
+	"""
+	from frappe import _
+
+	if status in (401, 403):
+		return HttpErrorClassification("auth", _("The AI provider rejected the API key. Check it in Optimus Settings."), "")
+	if status in _PARAM_RETRY_STATUSES and _CONTEXT_LIMIT_RE.search(detail):
+		return HttpErrorClassification("config", _context_advice(), detail)
+	quota_codes = {"insufficient_quota", "billing_hard_limit_reached", "billing_not_active"}
+	if (
+		status == 402 or quota_codes.intersection(provider_error.split(":"))
+		or (status == 400 and "credit balance" in detail.lower() and "too low" in detail.lower())
+	):
+		return HttpErrorClassification("quota", _("The AI provider has insufficient credit or quota. Check your provider balance before retrying."), detail)
+	if status == 404:
+		return HttpErrorClassification("not_found", _(
+			"The AI provider returned 404 (Not Found). Check that the Model in Optimus Settings "
+			"is a valid model name for this provider. If you set a custom Base URL, make sure it includes "
+			"the '/v1' path segment (for example http://localhost:11434/v1 for Ollama)."
+		), detail)
+	if status == 429:
+		return HttpErrorClassification("rate_limited", _("The AI provider is rate-limiting requests. Try again shortly."), detail)
+	return HttpErrorClassification(
+		"server" if status >= 500 else "bad_request",
+		_("The AI provider returned an error (HTTP {0})").format(status), detail,
+	)
+
+
+def _error_text(exc: AiFixError) -> str:
+	"""Internal parameter matching; never use this text in a log or progress record."""
+	return (str(exc) + " " + getattr(exc, "detail", "")).lower()
+
+
+@_private_ai_frames
 def _http_post(
 	url: str,
 	headers: dict,
@@ -1638,6 +1978,8 @@ def _http_post(
 	where: str,
 	timeout: int | None = None,
 	auth: requests.auth.AuthBase | None = None,
+	quiet_statuses: tuple[int, ...] = (),
+	session_uuid: str | None = None,
 ) -> dict:
 	"""POST JSON, return the parsed response dict. Maps transport / HTTP /
 	decode errors to ``AiFixError`` with operator-friendly messages and logs
@@ -1681,25 +2023,36 @@ def _http_post(
 	being handled (a raise inside a handler sets ``__context__`` again), so no
 	request is sent from inside an ``except`` block (``test_ai_log_audit.py``
 	rule 4)."""
+	validate_base_url(url)
+	allow_http_key = _allow_key_over_http()
 	timeout = timeout or _resolve_timeout_seconds()
+	deadline = time.monotonic() + timeout
 	failure: AiFixError | None = None
 	detail = ""
 	resp = None
 	target = url
 	redirects = 0
 	while True:
+		remaining = deadline - time.monotonic()
+		if remaining <= 0:
+			from frappe import _
+
+			failure = AiFixError(_("The AI request exhausted its time budget."), kind="timeout")
+			_log_http_error(provider, where, None, "timeout", exc=failure, auth=auth, session_uuid=session_uuid)
+			raise failure
 		unexpected_name: str | None = None
 		unexpected_frames: list[str] = []
 		guard = _InterruptGuard(base=True)
+		withheld = auth is not None and key_over_http_blocked(target, allow=allow_http_key)
 		try:
 			with guard:
-				resp = requests.post(target, headers=headers, json=body, timeout=timeout, auth=auth, allow_redirects=False)
+				resp = requests.post(target, headers=headers, json=body, timeout=(min(10, remaining), remaining), auth=None if withheld else auth, allow_redirects=False)
 		except requests.exceptions.Timeout:
 			failure = AiFixError(f"The AI provider didn't respond within {timeout}s.", kind="timeout")
 			detail = "timeout"
 		except requests.exceptions.RequestException as e:
 			failure = AiFixError(f"Couldn't reach the AI provider: {type(e).__name__}.", kind="transport")
-			detail = f"{type(e).__name__}: {e}"
+			detail = type(e).__name__
 		except Exception as e:
 			unexpected_name = type(e).__name__
 			# file:line:function per frame, read straight off the traceback:
@@ -1716,15 +2069,16 @@ def _http_post(
 		# must still stop the job: the same type, raised fresh, with no
 		# requests / urllib3 frames and no chain.
 		if guard.pending():
+			url = target = body = resp = detail = None
 			raise guard.interrupt()
 		if unexpected_name is not None:
 			from frappe import _
 
-			failure = AiFixError(_("The AI request failed ({0}).").format(unexpected_name), kind="transport")
+			failure = AiFixError(_("The AI request failed ({0}).").format(unexpected_name), kind="internal")
 			# Where it happened, never what it said: plain frames, no message, no locals.
 			detail = unexpected_name + "".join(f"\n  {frame}" for frame in unexpected_frames)
 		if failure is not None:
-			_log_http_error(provider, where, None, detail, exc=failure, auth=auth)
+			_log_http_error(provider, where, None, detail, exc=failure, auth=auth, session_uuid=session_uuid)
 			raise failure
 		if resp.status_code not in (307, 308) or redirects >= _MAX_REDIRECTS:
 			break
@@ -1747,56 +2101,50 @@ def _http_post(
 			_("The AI provider answered with a redirect (HTTP {0}) instead of a reply. Optimus follows only a 307 or 308 redirect to the same host: a Base URL that answers 301, 302 or 303, or redirects to another host, must be set to the final URL it redirects to. Change the Base URL in Optimus Settings to that final URL (its https:// address, for example).").format(status),
 			status_code=status, kind="bad_response",
 		)
-	elif status in (401, 403):
-		failure = AiFixError("The AI provider rejected the API key. Check it in Optimus Settings.", status_code=status)
-	elif status == 404:
-		# A 404 means the endpoint path or the model was not found. The Model
-		# field is editable for every provider and a wrong model name returns
-		# 404, so the message leads with that. It also always mentions a custom
-		# ('OpenAI-compatible') Base URL missing the '/v1' segment, phrased as
-		# "if you set a custom Base URL" so a hosted-provider operator (whose
-		# Base URL is fixed and hidden) reads it as not their case. The
-		# provider's own error body is surfaced either way. The URL is shown
-		# scrubbed (_shown_url): a custom Base URL can be typed as
-		# user:password@host.
-		detail = f"url={url}"
-		shown_url = _shown_url(url, auth)
-		failure = AiFixError(
-			f"The AI provider returned 404 (Not Found) for {shown_url}. Check that the Model "
-			"in Optimus Settings is a valid model name for this provider: a wrong model "
-			"returns 404. If you set a custom Base URL, make sure it includes the '/v1' "
-			"path segment (for example http://localhost:11434/v1 for Ollama)."
-			+ _response_detail(resp, auth),
-			status_code=status,
-		)
-	elif status == 429:
-		failure = AiFixError("The AI provider is rate-limiting requests. Try again shortly.", status_code=status)
 	elif status >= 400:
-		response_detail = _response_detail(resp, auth)
-		context_error = status == 400 and _CONTEXT_LIMIT_RE.search(response_detail)
-		failure = AiFixError(
-			f"The AI provider returned an error (HTTP {status}){response_detail}"
-			+ (" " + _context_advice() if context_error else ""),
-			status_code=status, kind="config" if context_error else "unknown",
+		classified = _classify_http_error(
+			status, "" if status in (401, 403) else _response_detail(resp, auth),
+			provider_error=_provider_error_code(resp, auth), url=_shown_url(url, auth) if status == 404 else "",
 		)
+		failure = AiFixError(
+			classified.message, status_code=status, kind=classified.kind,
+			detail=((_shown_url(target, auth) + "\n") if status == 404 else "") + classified.detail,
+		)
+		if withheld and status in (401, 403):
+			from frappe import _
+
+			failure = AiFixError(_(
+				"The AI provider requires authentication, but Optimus withheld the API key because the "
+				"Base URL uses plain http:// to another machine. Use https:// or explicitly set "
+				"optimus_ai_allow_key_over_http in the site configuration if you trust this network."
+			), status_code=status, kind="auth")
 	if failure is not None:
 		provider_error = _provider_error_code(resp, auth)
 		# If the row below cannot be written, the caller logs this error: with
 		# this text, never the reply its message carries (_exception_text).
 		code = f", provider_error={provider_error}" if provider_error else ""
 		setattr(failure, _LOG_TEXT_ATTR, f"HTTP {status} from the AI provider (where={where}{code})")
-		_log_http_error(provider, where, status, detail, exc=failure, provider_error=provider_error, auth=auth)
+		# The validation ladder delays logging. Carry only the validated,
+		# scrubbed machine code so its terminal log keeps the same context.
+		failure._optimus_provider_error = provider_error
+		if status not in quiet_statuses:
+			_log_http_error(provider, where, status, detail, exc=failure, provider_error=provider_error, auth=auth, session_uuid=session_uuid)
 		raise failure
 
 	data = None
+	guard = _InterruptGuard(base=True)
 	try:
-		data = resp.json()
+		with guard:
+			data = resp.json()
 	except Exception:
 		detail = "non-JSON body"
 		failure = AiFixError(
 			"The AI provider returned an unexpected (non-JSON) response.",
 			status_code=status, kind="bad_response",
 		)
+	if guard.pending():
+		data = resp = body = url = target = None
+		raise guard.interrupt()
 	if failure is None and not isinstance(data, dict):
 		from frappe import _
 
@@ -1806,7 +2154,7 @@ def _http_post(
 			status_code=status, kind="bad_response",
 		)
 	if failure is not None:
-		_log_http_error(provider, where, status, detail, exc=failure, auth=auth)
+		_log_http_error(provider, where, status, detail, exc=failure, auth=auth, session_uuid=session_uuid)
 		raise failure
 	return data
 
@@ -1837,7 +2185,10 @@ def _same_origin_redirect(current: str, resp) -> str | None:
 			location = resp.headers.get("location")
 			if not isinstance(location, str) or not location.strip():
 				return None
+			if _URL_CONTROL_RE.search(location.strip(" ")):
+				return None  # urljoin would silently discard some controls.
 			follow = urljoin(current, location.strip())
+			validate_base_url(follow)
 			old, new = urlsplit(current), urlsplit(follow)
 			if not old.hostname or new.hostname != old.hostname:
 				return None
@@ -1863,8 +2214,8 @@ def _same_origin_redirect(current: str, resp) -> str | None:
 	return None
 
 
-# Token counts land in Int columns (Optimus Session.ai_tokens_spent,
-# ai_steps_tokens); a larger reported count is not a real one.
+# Bound each provider-supplied count. Sums and cumulative session usage use
+# Long Int columns so adding valid counts does not overflow a 32-bit field.
 _MAX_TOKEN_COUNT = 2**31 - 1
 
 
@@ -1893,6 +2244,50 @@ def _usage_block(data) -> dict:
 	return usage if isinstance(usage, dict) else {}
 
 
+def _valid_reported_count(value):
+	"""Only exact, bounded JSON counts establish a known provider outcome."""
+	if type(value) is int:
+		return 0 <= value <= _MAX_TOKEN_COUNT
+	if type(value) is float:
+		return 0 <= value <= _MAX_TOKEN_COUNT and value.is_integer()
+	if type(value) is str and len(value) <= 32:
+		value = value.strip()
+		return bool(value and value.isascii() and value.isdecimal() and int(value) <= _MAX_TOKEN_COUNT)
+	return False
+
+
+def _response_usage(data, protocol):
+	u = _usage_block(data)
+	usage = Usage()
+	usage.begin()
+	if protocol == "openai":
+		usage.update(_usage_from_openai(data))
+		known = _valid_reported_count(u.get("total_tokens")) or all(
+			_valid_reported_count(u.get(k)) for k in ("prompt_tokens", "completion_tokens")
+		)
+		components = usage["prompt_tokens"] + usage["completion_tokens"]
+		if _valid_reported_count(u.get("total_tokens")) and int(u["total_tokens"]) < components:
+			# Preserve the reported components, but mark a contradictory total
+			# incomplete rather than presenting an undercount as exact usage.
+			usage["total_tokens"] = components
+			known = False
+	else:
+		usage.update(_usage_from_anthropic(data))
+		known = all(_valid_reported_count(u.get(k)) for k in ("input_tokens", "output_tokens")) and all(
+			_valid_reported_count(u[k]) for k in ("cache_creation_input_tokens", "cache_read_input_tokens") if k in u
+		)
+	usage.observe(known)
+	return usage
+
+
+def _accept_usage(usage_out, usage, *, session_uuid):
+	if usage_out is not None:
+		usage_out.update(usage)
+		if isinstance(usage_out, Usage):
+			usage_out.observe(usage.complete)
+		# The worker commits usage together with its answer and outcome.
+
+
 def _usage_from_openai(data: dict | None) -> dict:
 	"""Normalised token usage from an OpenAI-shaped response (also what the
 	Aerele managed proxy + Ollama/LM Studio/vLLM return). Missing or
@@ -1919,58 +2314,28 @@ def _usage_from_anthropic(data: dict | None) -> dict:
 	return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
 
 
-def _record_session_spend(total_tokens) -> None:
-	"""Best-effort: add this call's tokens to the active session's cumulative
-	``Optimus Session.ai_tokens_spent``. The session uuid comes from
-	``frappe.local._optimus_spend_session`` (set by the caller before any AI
-	call); ``None`` (e.g. the settings probe) is a no-op."""
-	try:
-		import frappe
-
-		su = getattr(frappe.local, "_optimus_spend_session", None)
-		n = int(total_tokens or 0)
-		if su and n > 0:
-			frappe.db.sql(
-				"update `tabOptimus Session` "
-				"set ai_tokens_spent = coalesce(ai_tokens_spent, 0) + %s "
-				"where session_uuid = %s",
-				(n, su),
-			)
-	except Exception:
-		pass
 
 
-def _aerele_call_metadata(provider, finding_type=None) -> dict | None:
-	"""Metadata attaching an Aerele managed-proxy request to the originating
-	Optimus Session, so the Aerele billing portal can attribute each AI call.
+def _session_call_metadata(provider, *, session_uuid, docname, finding_type=None) -> dict | None:
+	"""Explicit attribution, only for endpoints declaring metadata support.
 
-	Returns ``None`` for every non-Aerele provider (so no unknown body fields
-	reach OpenAI / Anthropic) and on any failure (the call then proceeds
-	unattributed). The session uuid comes from
-	``frappe.local._optimus_spend_session``; the docname is resolved from it."""
-	if not provider or provider.get("name") != "Aerele":
+	No ambient worker state or database lookup: a caller cannot accidentally
+	attribute one session's request to an earlier job on the same worker.
+	"""
+	if not provider or not provider.get("send_session_metadata") or not session_uuid:
 		return None
-	try:
-		import frappe
-
-		uuid = getattr(frappe.local, "_optimus_spend_session", None)
-		if not uuid:
-			return None
-		meta = {"optimus_session_uuid": uuid}
-		docname = frappe.db.get_value("Optimus Session", {"session_uuid": uuid}, "name")
-		if docname:
-			meta["optimus_session"] = docname
-		if finding_type:
-			meta["optimus_finding_type"] = finding_type
-		return meta
-	except Exception:
-		return None
+	meta = {"optimus_session_uuid": session_uuid}
+	if docname:
+		meta["optimus_session"] = docname
+	if finding_type:
+		meta["optimus_finding_type"] = finding_type
+	return meta
 
 
 def _call_anthropic(
 	base_url: str, api_key: str, model: str, system: str, messages: list[dict],
 	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
-	timeout: int | None = None, meta_out: dict | None = None,
+	timeout: int | None = None, meta_out: dict | None = None, session_uuid: str | None = None,
 ) -> str:
 	url = base_url.rstrip("/") + "/v1/messages"
 	headers = {
@@ -1985,26 +2350,26 @@ def _call_anthropic(
 		"system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
 		"messages": messages,
 	}
-	data = _http_post(url, headers, body, provider="anthropic", where="messages", auth=auth, timeout=timeout)
-	if usage_out is not None:
-		usage_out.update(_usage_from_anthropic(data))
-		_record_session_spend(usage_out.get("total_tokens"))
+	if isinstance(usage_out, Usage):
+		usage_out.begin()
+	data = _http_post(url, headers, body, provider="anthropic", where="messages", auth=auth, timeout=timeout, session_uuid=session_uuid)
+	usage = _response_usage(data, "anthropic")
+	_accept_usage(usage_out, usage, session_uuid=session_uuid)
 	if meta_out is not None:
 		meta_out["prompt_tokens_reported"] = any(_usage_block(data).get(k) is not None for k in (
 			"input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
 		))
 		meta_out["finish_reason"] = _ANTHROPIC_FINISH.get(_text_or_empty(data.get("stop_reason")))
-	try:
-		blocks = data.get("content") or []
+	blocks = data.get("content")
+	if isinstance(blocks, list):
 		for b in blocks:
 			if isinstance(b, dict) and b.get("type") == "text":
 				return _text_or_empty(b.get("text"))
-		# Fall back to the first block's text if no explicit type.
 		if blocks and isinstance(blocks[0], dict):
 			return _text_or_empty(blocks[0].get("text"))
-	except Exception:
-		pass
-	raise AiFixError("The AI provider's response didn't contain any text.")
+	from frappe import _
+
+	raise AiFixError(_("The AI provider's response didn't contain any text."), kind="bad_response", usage=usage)
 
 
 def _text_or_empty(text) -> str:
@@ -2015,72 +2380,126 @@ def _text_or_empty(text) -> str:
 	return text if isinstance(text, str) else ""
 
 
+def _param_rung(exc: AiFixError, body: dict) -> str | None:
+	"""Only request-validation failures can change a request parameter.
+
+	Each change removes its triggering parameter, so it can occur at most once.
+	Authentication, quota and context errors must never enter this ladder.
+	"""
+	if exc.kind != "bad_request" or exc.status_code not in _PARAM_RETRY_STATUSES:
+		return None
+	text = _error_text(exc)
+	for parameter in ("temperature", "max_tokens"):
+		if parameter in body and parameter in text:
+			return parameter
+	return None
+
+
+def _post_with_param_ladder(url, headers, body, *, auth=None, timeout=None, session_uuid=None) -> dict:
+	"""At most three posts, sharing one budget; only the final rejection is logged."""
+	from frappe import _
+
+	deadline = time.monotonic() + (timeout or _resolve_timeout_seconds())
+	body = dict(body)
+	for _attempt in range(3):
+		remaining = deadline - time.monotonic()
+		if remaining <= 0:
+			failure = AiFixError(_("The AI request exhausted its time budget."), kind="timeout")
+			_log_http_error("openai", "chat/completions", None, "timeout", exc=failure, auth=auth, session_uuid=session_uuid)
+			raise failure
+		failure = None
+		try:
+			return _http_post(
+				url, headers, body, provider="openai", where="chat/completions",
+				auth=auth, timeout=remaining, quiet_statuses=_PARAM_RETRY_STATUSES, session_uuid=session_uuid,
+			)
+		except AiFixError as exc:
+			failure = exc
+		rung = _param_rung(failure, body)
+		if rung is None or _attempt == 2:
+			if failure.status_code in _PARAM_RETRY_STATUSES:
+				_log_http_error(
+					"openai", "chat/completions", failure.status_code, exc=failure,
+					provider_error=getattr(failure, "_optimus_provider_error", ""),
+					auth=auth, session_uuid=session_uuid,
+				)
+			raise failure
+		if rung == "temperature":
+			body.pop("temperature")
+		else:
+			body["max_completion_tokens"] = body.pop("max_tokens")
+		failure = None
+
+
+_THINK_BLOCK_RE = re.compile(r"\A\s*<think>.*?</think>\s*", re.S | re.I)
+_THINK_OPEN_RE = re.compile(r"\A\s*<think>", re.I)
+
+
+def _strip_leading_think(text: str, *, usage: dict) -> str:
+	"""Keep the answer after up to three leading reasoning blocks.
+
+	An unfinished or excessive block sequence is not an answer, regardless of
+	the server's finish marker. Separate reasoning fields are never consumed.
+	"""
+	for _block in range(3):
+		match = _THINK_BLOCK_RE.match(text)
+		if not match:
+			break
+		text = text[match.end():]
+	if _THINK_OPEN_RE.match(text):
+		from frappe import _
+
+		raise AiFixError(_(
+			"The AI model returned reasoning without a usable answer. Use a non-reasoning model "
+			"or turn off thinking mode on the model server."
+		), kind="bad_response", usage=usage)
+	return text
+
+
+def _first_choice(data: dict) -> dict:
+	choices = data.get("choices")
+	return choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+
+
 def _call_openai_chat(
 	base_url: str, api_key: str, model: str, system: str, messages: list[dict],
 	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
 	metadata: dict | None = None, timeout: int | None = None, meta_out: dict | None = None,
+	session_uuid: str | None = None,
 ) -> str:
 	url = base_url.rstrip("/") + "/chat/completions"
 	headers = {"content-type": "application/json"}
 	auth = _ApiKeyAuth("authorization", api_key, prefix="Bearer ") if api_key else None
 	body = {
 		"model": model,
-		"max_tokens": max_tokens,
 		"messages": [{"role": "system", "content": system}, *messages],
 	}
-	sent_temperature = not _is_reasoning_model(model)
-	if sent_temperature:
+	if _is_reasoning_model(model):
+		body["max_completion_tokens"] = max_tokens
+	else:
+		body["max_tokens"] = max_tokens
 		body["temperature"] = _TEMPERATURE
-	# Aerele-only: attribute this call to the originating Optimus Session.
+	# Opt-in endpoints: attribute this call to the originating Optimus Session.
 	if metadata:
 		body["metadata"] = metadata
-	retry_without_temperature = False
-	try:
-		data = _http_post(url, headers, body, provider="openai", where="chat/completions", auth=auth, timeout=timeout)
-	except AiFixError as e:
-		# Some reasoning models reject a non-default `temperature` with a
-		# request-validation error. OpenAI o-series are pre-filtered by
-		# `_is_reasoning_model`, but others e.g. Moonshot/Kimi "thinking"
-		# variants only allow the default and say so ("invalid temperature:
-		# only 1 is allowed for this model"). We can't enumerate every such
-		# model, so retry once without `temperature` (letting the model use its
-		# own default). Gate on a request-validation status (400 or 422; some
-		# OpenAI-compatible gateways use 422) so a body that mentions the word
-		# for another reason (e.g. a 404 listing valid params) can't trigger a
-		# needless second call.
-		# The retry runs after the try: a request sent inside this block would
-		# log its own failure while this error is the active exception.
-		if sent_temperature and getattr(e, "status_code", None) in (400, 422) and "temperature" in str(e).lower():
-			retry_without_temperature = True
-		else:
-			raise
-	if retry_without_temperature:
-		body.pop("temperature", None)
-		data = _http_post(url, headers, body, provider="openai", where="chat/completions", auth=auth, timeout=timeout)
-	if usage_out is not None:
-		usage_out.update(_usage_from_openai(data))
-		_record_session_spend(usage_out.get("total_tokens"))
-	choices = data.get("choices") or []
+	if isinstance(usage_out, Usage):
+		usage_out.begin()
+	data = _post_with_param_ladder(url, headers, body, auth=auth, timeout=timeout, session_uuid=session_uuid)
+	usage = _response_usage(data, "openai")
+	_accept_usage(usage_out, usage, session_uuid=session_uuid)
+	first = _first_choice(data)
 	if meta_out is not None:
-		first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
 		meta_out["prompt_tokens_reported"] = _usage_block(data).get("prompt_tokens") is not None
 		meta_out["finish_reason"] = _OPENAI_FINISH.get(_text_or_empty(first.get("finish_reason")))
-	try:
-		if choices:
-			msg = choices[0].get("message") or {}
-			content = msg.get("content")
-			if isinstance(content, str):
-				return content
-			# Some servers return content as a list of parts. A part whose
-			# text is None or not a string counts as no text (_text_or_empty),
-			# so one odd part never loses the whole reply.
-			if isinstance(content, list):
-				return "".join(
-					_text_or_empty(p.get("text")) for p in content if isinstance(p, dict)
-				)
-	except Exception:
-		pass
-	raise AiFixError("The AI provider's response didn't contain any text.")
+	msg = first.get("message")
+	content = msg.get("content") if isinstance(msg, dict) else None
+	if isinstance(content, list):
+		content = "".join(_text_or_empty(p.get("text")) for p in content if isinstance(p, dict))
+	if isinstance(content, str):
+		return _strip_leading_think(content, usage=usage)
+	from frappe import _
+
+	raise AiFixError(_("The AI provider's response didn't contain any text."), kind="bad_response", usage=usage)
 
 
 def _reask_enabled() -> bool:
@@ -2146,6 +2565,7 @@ def _check_context_fits(
 	)
 
 
+@_private_ai_frames
 def _dispatch_call(
 	provider: dict,
 	system: str,
@@ -2156,10 +2576,11 @@ def _dispatch_call(
 	timeout: int | None = None,
 	max_tokens: int | None = None,
 	meta_out: dict | None = None,
+	session_uuid: str | None = None,
 ) -> str:
 	"""Send one chat completion through the provider's protocol handler. The API
 	key is fetched here into a local named ``api_key`` (never into ``provider``)."""
-	api_key = _get_api_key(provider.get("needs_key", True))
+	api_key = _get_api_key(provider.get("needs_key", True), provider=provider)
 	if provider.get("needs_key") and not api_key:
 		from frappe import _
 
@@ -2168,15 +2589,18 @@ def _dispatch_call(
 	if provider["protocol"] == "anthropic":
 		return _call_anthropic(
 			provider["base_url"], api_key, provider["model"], system, messages,
-			max_tokens=out, usage_out=usage_out, timeout=timeout, meta_out=meta_out,
+			max_tokens=out, usage_out=usage_out, timeout=timeout, meta_out=meta_out, session_uuid=session_uuid,
 		)
 	return _call_openai_chat(
 		provider["base_url"], api_key, provider["model"], system, messages,
-		max_tokens=out, usage_out=usage_out, metadata=metadata, timeout=timeout, meta_out=meta_out,
+		max_tokens=out, usage_out=usage_out, metadata=metadata, timeout=timeout, meta_out=meta_out, session_uuid=session_uuid,
 	)
 
 
 def _add_usage(total: dict, part: dict) -> None:
+	if isinstance(total, Usage) and isinstance(part, Usage):
+		total.calls += part.calls
+		total.known_calls += part.known_calls
 	for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
 		if part.get(k):
 			total[k] = total.get(k, 0) + part[k]
@@ -2192,6 +2616,7 @@ def _complete_with_guardrails(
 	metadata: dict | None = None,
 	started_at: float,
 	timeout: int,
+	session_uuid: str | None = None,
 ) -> tuple[str, dict, str | None]:
 	"""First call, verification, at most one re-ask, fallback.
 
@@ -2207,7 +2632,7 @@ def _complete_with_guardrails(
 	out = _output_tokens(provider)
 	meta: dict = {}
 	text = _dispatch_call(
-		provider, system, messages, usage_out=usage, metadata=metadata, timeout=timeout, max_tokens=out, meta_out=meta
+		provider, system, messages, usage_out=usage, metadata=metadata, timeout=timeout, max_tokens=out, meta_out=meta, session_uuid=session_uuid
 	)
 	text = (text or "").strip()
 	if not text:
@@ -2239,7 +2664,7 @@ def _complete_with_guardrails(
 			_log_reask("skipped-fit")
 		else:
 			reasked = True
-			reask_usage: dict = {}
+			reask_usage = Usage()
 			reask_meta: dict = {}
 			rewritten = None
 			reask_error: Exception | None = None
@@ -2252,7 +2677,7 @@ def _complete_with_guardrails(
 					metadata=metadata,
 					timeout=max(1, int(timeout - elapsed)),
 					max_tokens=ai_budget.reask_output_tokens(out, fit_usage["completion_tokens"]),
-					meta_out=reask_meta,
+					meta_out=reask_meta, session_uuid=session_uuid,
 				)
 			except Exception as e:
 				reask_error = e  # record only; act after the try (no log or raise while it is active)
@@ -2307,22 +2732,6 @@ def _require_configured(provider: dict) -> None:
 		raise AiFixError(_("No AI base URL is configured. Set Base URL under Optimus Settings > AI Fix Suggestions."), kind="config")
 
 
-def _index_candidate_prose(detail: dict) -> str:
-	"""The analyzer's suggested DDL as a sentence, never as DDL: the model is taught
-	the durable recipe, and a raw ALTER TABLE in the prompt invites one back."""
-	ddl = str(detail.get("suggested_ddl") or "")
-	table = str(detail.get("table") or "")
-	column = str(detail.get("column") or "")
-	if ddl and not table:
-		m = _DDL_TABLE_RE.search(ddl)
-		table = (m.group(1) or m.group(2)) if m else ""
-	if ddl and not column:
-		m = _DDL_COLUMN_RE.search(ddl)
-		column = m.group(1) if m else ""
-	if not (ddl and table and column):
-		return ""
-	doctype = table[3:] if table.startswith("tab") else table
-	return f"Profiler's index candidate: column `{column}` of DocType `{doctype}`."
 
 
 def _window_lines(window: list[dict]) -> str:
@@ -2331,8 +2740,36 @@ def _window_lines(window: list[dict]) -> str:
 	)
 
 
+_LOOP_FACT_TYPES: frozenset[str] = frozenset({"N+1 Query", "Redundant Call", "Hot Line"})
+
+
+def _loop_facts_text(finding: dict) -> str:
+	"""Profiler-computed loop facts for the user message (fix_recipes.loop_facts
+	over the source window), or "" when the type is not loop-shaped or the
+	window is missing, gapped or has no target row. Identifiers only, no values."""
+	if (finding.get("finding_type") or "") not in _LOOP_FACT_TYPES:
+		return ""
+	detail = finding.get("technical_detail") or {}
+	callsite = detail.get("callsite") or {}
+	window = finding.get("source_window") or callsite.get("source_snippet") or []
+	rows = [r for r in window if isinstance(r, dict) and isinstance(r.get("lineno"), int)]
+	if not rows or any(b["lineno"] != a["lineno"] + 1 for a, b in zip(rows, rows[1:], strict=False)):
+		return ""
+	target = next((i for i, r in enumerate(rows) if r.get("is_target")), None)
+	if target is None:
+		target = next((i for i, r in enumerate(rows) if r["lineno"] == callsite.get("lineno")), None)
+	if target is None:
+		return ""
+	from optimus.renderer import fix_recipes
+
+	facts = fix_recipes._best_effort(
+		lambda: fix_recipes.loop_facts([str(r.get("content") or "") for r in rows], target + 1), {},
+	)
+	return fix_recipes.format_loop_facts(facts, line_offset=rows[0]["lineno"] - 1)
+
+
 def _build_fix_request(
-	finding: dict, *, threshold_ms: float, context_tokens: int, out_tokens: int | None = None
+	finding: dict, *, threshold_ms: float, context_tokens: int, out_tokens: int | None = None, send_raw: bool = False,
 ) -> tuple[str, list[dict], list[str]]:
 	"""Build ``(system, [user_message], shown_lines)`` for one finding. Pure.
 
@@ -2413,21 +2850,27 @@ def _build_fix_request(
 			f"Line profile: the hottest line is line {hot['lineno']}{timing}. Start your fix there."
 			+ ("\n" + block("hot-line", hot_content) if hot_content else ""),
 		))
-	if detail.get("normalized_query"):
-		tail.append((2, "Query (normalized):\n" + block("sql", _truncate(detail["normalized_query"], _MAX_QUERY_CHARS), "sql")))
-	candidate = _index_candidate_prose(detail)
-	if candidate:
-		tail.append((3, block("index-candidate", candidate)))
+	query = ai_privacy.query_text(detail.get("normalized_query"), send_raw=send_raw)
+	if query:
+		tail.append((2, "Query (normalized):\n" + block("sql", _truncate(query, _MAX_QUERY_CHARS), "sql")))
 	if detail.get("explain_row"):
 		tail.append((4, "EXPLAIN row:\n" + block("explain", _truncate(detail["explain_row"], 800))))
 	examples = detail.get("example_queries") or []
-	if examples:
-		shown_q = [_truncate(q, _MAX_QUERY_CHARS) for q in examples[:2]]
+	shown_q = []
+	if isinstance(examples, list) and examples:
+		shown_q = [
+			_truncate(query, _MAX_QUERY_CHARS) for q in examples[:2]
+			if (query := ai_privacy.query_text(q, send_raw=send_raw))
+		]
+	if shown_q:
 		tail.append((5, "Example affected queries:\n" + block("sql", "\n---\n".join(shown_q), "sql")))
 	if detail.get("validation_note"):
 		tail.append((6, "Note:\n" + block("validation", str(detail["validation_note"]))))
 
 	window = finding.get("source_window") or callsite.get("source_snippet") or []
+	loop_text = _loop_facts_text(finding)
+	if loop_text:
+		tail.append((1, loop_text))
 	content, shown = "", []
 	for max_lines in (*_WINDOW_STEPS, 4, 2, 1, 0):
 		trimmed = ai_budget.trim_window(window, max_lines=max_lines)
@@ -2453,8 +2896,6 @@ def _build_fix_request(
 	return system, [{"role": "user", "content": content}], shown
 
 
-_DDL_TABLE_RE = re.compile(r"(?:ALTER\s+TABLE|\bON)\s+(?:[`\"]([^`\"]+)[`\"]|(\S+))", re.I)
-_DDL_COLUMN_RE = re.compile(r"\(\s*[`\"]?([A-Za-z_]\w*)")
 _OPENAI_FINISH = {"stop": "stop", "length": "length"}
 _ANTHROPIC_FINISH = {
 	"end_turn": "stop",

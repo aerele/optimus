@@ -32,6 +32,8 @@ optimus/renderer/
                            # `from optimus.renderer import X` still works)
   _internal.py             # the legacy bulk content (~4,400 LOC,
                            # was 4,958 before the v0.10.0 extractions)
+  fix_recipes.py           # deterministic index recipes, eligibility, loop facts
+  recipe_enrichment.py     # metadata lookup and recipe/stale-note render glue
   README.md                # this file
   source.py                # source-file I/O + _BoundedFileCache (LRU)
                            # _path_within_bench, _resolve_source_path,

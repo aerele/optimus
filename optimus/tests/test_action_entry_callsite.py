@@ -465,11 +465,9 @@ class TestSkipDecoratorsToDef:
 		assert renderer._skip_decorators_to_def(str(src), 0, "target_fn") == 0
 		assert renderer._skip_decorators_to_def(str(src), -1, "target_fn") == -1
 
-	def test_out_of_bench_source_read_directly_when_primitive_rejects(self, tmp_path, monkeypatch):
-		# On-bench, _source_lines applies a bench-boundary reject, so an app
-		# installed OUTSIDE the bench tree yields no lines. Since this returns only
-		# a line NUMBER (never content), it falls back to a direct read so the
-		# callsite still anchors on the def, not the decorator.
+	def test_rejected_source_does_not_bypass_primitive(self, tmp_path, monkeypatch):
+		# Source access is decided by the shared primitive, including soft-linked
+		# apps. A rejection cannot seed private lines into the shared cache.
 		import optimus.renderer.source_resolution as sr
 
 		src = tmp_path / "oob_module.py"
@@ -480,7 +478,7 @@ class TestSkipDecoratorsToDef:
 			"    return 1\n"
 		)
 		monkeypatch.setattr(sr, "_source_lines", lambda *a, **k: [])
-		assert sr._skip_decorators_to_def(str(src), 2, "target_fn") == 3
+		assert sr._skip_decorators_to_def(str(src), 2, "target_fn") == 2
 
 	def test_synthetic_sentinel_never_read_from_disk(self, monkeypatch):
 		# A Server Script sentinel (``<serverscript:...>``) must never trigger a

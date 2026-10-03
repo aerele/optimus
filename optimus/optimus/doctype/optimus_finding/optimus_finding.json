@@ -75,7 +75,7 @@
    "read_only": 1
   },
   {
-   "description": "The AI-generated fix suggestion for this finding, stored as JSON (the suggestion text plus which model and provider produced it and when). Filled in when you use the 'Suggest a fix (AI)' action, empty until then.",
+   "description": "The AI-generated fix suggestion for this finding, stored as JSON (the suggestion text plus which model and provider produced it and when). Filled in by Refresh AI suggestions or automatic background enrichment after profiling is Ready; empty until a suggestion is saved.",
    "fieldname": "llm_fix_json",
    "fieldtype": "Long Text",
    "label": "AI Fix Suggestion (JSON)",

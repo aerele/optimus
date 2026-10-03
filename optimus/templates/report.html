@@ -2024,7 +2024,7 @@
          tables. #}
 
       {% if detail.suggested_ddl %}
-        <span class="label">Suggested DDL</span>
+        <span class="label">Suggested index</span>
         <pre>{{ detail.suggested_ddl }}</pre>
       {% endif %}
 
@@ -2074,7 +2074,7 @@
       <div class="fix-caution">The profiler couldn&rsquo;t show the AI this finding&rsquo;s source code (or SQL) - treat the suggestion below as directional guidance, not a verified code fix.</div>
       {% endif %}
       <div class="fix-body">{{ f.llm_fix.suggestion_html | safe }}</div>
-      <div class="fix-foot">Machine-generated{% if f.llm_fix.generated_at %} &middot; {{ fmt_dt(f.llm_fix.generated_at) }}{% endif %} - review before applying.</div>
+      <div class="fix-foot">Machine-generated{% if f.llm_fix.generated_at %} &middot; {{ fmt_dt(f.llm_fix.generated_at) }}{% endif %} - review before applying.{% if f.llm_fix.outdated %} Generated with an earlier version of the AI reviewer; use Refresh AI suggestions to update.{% endif %}</div>
     </div>
     {% endif %}
 
@@ -3550,7 +3550,7 @@
             <div class="index-rec-label">Index candidate - to speed up reads</div>
             <p>The most-used filter on this table was <code>({% for c in rec.columns %}{{ c }}{% if not loop.last %}, {% endif %}{% endfor %})</code> - those columns were filtered together in <strong>{{ rec.together_count }}</strong> of {{ rec.read_count }} read{{ 's' if rec.read_count != 1 else '' }}. A composite index on them, leftmost-first, would help those reads:</p>
             <pre class="sql-snip">frappe.db.add_index("{{ rec.doctype }}", [{% for c in rec.columns %}"{{ c }}"{% if not loop.last %}, {% endif %}{% endfor %}])</pre>
-            <p class="note-text">Put that in a patch - Customize&nbsp;Form ▸ field ▸ <em>Search&nbsp;Index</em> only makes single-column indexes. First run <code>SHOW INDEX FROM `{{ t.table }}`</code>: this may already be covered.</p>
+            <p class="note-text">Put that in a patch in your own app: frappe.db.add_index skips an index that already exists, and bench migrate keeps an index that spans several columns or covers a text column. A single-column index belongs on the field instead: tick <em>Search&nbsp;Index</em> on it in the DocType editor of your own DocType, set search_index with a Property Setter for another app's DocType, or tick it on the Custom Field. First run <code>SHOW INDEX FROM `{{ t.table }}`</code>: this may already be covered.</p>
             {% if t.get("write_count", 0) %}
               <div class="warn-text">&#9888; {{ t.write_count }} write{% if t.write_count != 1 %}s{% endif %} on this table in this session{% if t.get("is_write_hot") %} - and <code>{{ t.table }}</code> is a write-hot core table (many rows inserted per submitted document in production){% endif %} - every index also slows writes, so add it only if a query in the per-action breakdown that filters this way is actually slow.</div>
             {% elif t.get("is_write_hot") %}

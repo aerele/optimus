@@ -27,7 +27,7 @@ We aim to:
 - **Publish a CVE-style advisory** in the CHANGELOG once the patch
   ships, crediting the reporter.
 
-## Threat model (v0.7.x)
+## Threat model
 
 Optimus runs inside a Frappe bench process, with full DB +
 filesystem access via the Frappe stack. The following surfaces are
@@ -44,8 +44,9 @@ the highest-value security considerations:
    is enabled (Optimus Settings ▸ AI Fix), code snippets +
    normalised SQL are POSTed to the configured `ai_base_url`. The
    site operator chooses the endpoint (typically OpenAI / Anthropic
-   / a self-hosted Ollama instance). No validation that the URL is
-   safe; operators are responsible for endpoint selection.
+   / a self-hosted Ollama instance). The URL policy below rejects unsafe
+   syntax and literal metadata addresses. Operators still control the
+   destination and must enforce network egress restrictions.
 3. **Redis cache contains HMAC-signed pickles.** Optimus stashes
    pyinstrument trees as HMAC-SHA256-signed pickle blobs in Redis
    (signature derived from `frappe.conf.encryption_key`). A
@@ -71,16 +72,23 @@ the highest-value security considerations:
    `"optimus_rate_limits": {"refill_ai_suggestions": [12, 3600]}`.
    The whitelisted AI surface is only what the Desk UI calls: a test fails
    the build when an AI endpoint has no Desk caller and no written reason.
-5. **`_resolve_source_path` enforces a bench-boundary check.**
-   Analyzer-controlled callsite filenames cannot escape the bench
-   directory tree, so a malicious analyzer dict can't be used to
-   read arbitrary host files.
+5. **Source access uses a canonical allowlist.** Only `.py`, `.js` and
+   `.html` files under bench `apps/`, `env/` or soft-linked app roots are
+   readable. Sites, config, logs and archived directories remain denied,
+   including under test mode. Missing or unknown roots fail closed.
+   Dotted paths import installed apps only; other paths may inspect already
+   loaded modules. Server Script bodies require both the acting user and
+   the session owner or refresh requester to have read permission.
 
 ## API key handling
 
 The AI provider key is kept out of every log. It is stored in the encrypted
-`ai_api_key` Password field of Optimus Settings and decrypted only when a
-request is sent, once per call (one SELECT on `__Auth`). For a provider
+`ai_api_key` Password field of Optimus Settings. Before each completion,
+one SQL statement reads provider settings and encrypted `__Auth` together;
+a mismatch with the prepared provider refuses the call before decryption.
+This prevents a cached old endpoint from receiving a newly saved key.
+The bound key is decrypted once per completion. Logging and the Error Log
+hook also read it when needed for masking. For a provider
 that needs a key it must be plain printable ASCII: a key with any other
 character (a space inside it, a pasted smart quote or no-break space, a
 control character) is refused before any request is made, with a message
@@ -102,10 +110,11 @@ provider's error reply is scrubbed before it is shown, of the key the
 request was sent with (the only key the provider received, so an echo is
 masked even when the key in Settings was changed while the request ran), or
 of the key stored in Optimus Settings when the request carried none, each
-in its raw and its JSON-escaped form. A 404 message names the request URL
-with any credentials in it masked (a `user:password@` typed into a custom
-Base URL, or the key), or only "(the configured Base URL)" when the URL
-cannot be scrubbed. The HTTP library never follows a redirect
+in its raw and its JSON-escaped form. Provider replies and scrubbed 404
+URL details are kept in `AiFixError.detail`, available only to Administrator
+or a System Manager through `user_message`. Public exception strings and
+AI logs omit those details. The connection form escapes administrator detail
+before displaying it. The HTTP library never follows a redirect
 (`allow_redirects=False`): it drops only a header named `Authorization`
 when it follows one to another host, so the `x-api-key` header Anthropic
 uses would have been sent on to the redirect target. Optimus follows at most
@@ -360,23 +369,22 @@ installed on the site.
 - The per-user limits on AI and report actions live in Redis. If Redis is
   down the limiter refuses the action (fails closed); Frappe sessions need
   Redis anyway, so this changes nothing in practice.
-- Frappe attaches the local variables of the failing code's frames to the
-  Error Log row it writes for an error that escapes to it: a server error, a
-  background job that fails or times out, and every error in developer mode.
-  When a site sends errors to Sentry (`FRAPPE_SENTRY_DSN` set and telemetry
-  enabled), every event also carries the local variables of the code on the
-  call stack (`attach_stacktrace`). The AI code never holds the API key
-  outside the places described under "API key handling", but its frames do
-  hold the prompt (source code and normalised SQL), so prompt text can reach
-  Sentry when an AI call fails, and the Error Log when an AI call is cut off
-  by a job timeout or fails in developer mode. The same frames also hold the
-  Base URL, so a custom Base URL typed with credentials in it
-  (`user:password@host`, or a key in its path) can reach those places too.
-  In the Error Log, the Error Log hook masks the `user:password@` shape and
-  the stored key in a row from the AI code, but not the prompt text, nor a
-  key in the path that is not the stored key. On stock Frappe v16 (Python
-  3.14 with sentry-sdk 1.45.1) Sentry currently sends no frame locals at
-  all, so there neither reaches Sentry this way.
+- Public AI, dispatch and HTTP boundaries detach prompt, reply and URL frames
+  from escaping exceptions; worker interrupts retain their interrupt behavior.
+  This is not a universal sanitizer for a live stack captured independently
+  by Sentry or another debugger while a provider call is running. Source and
+  business context may still appear in such diagnostics. The Error Log hook
+  masks keys, not arbitrary prompt text.
+- Keep `developer_mode` off in production. Framework Settings validation and
+  the existing unsendable-key save check can snapshot submitted form data
+  while a newly typed password is still plaintext. URL-policy checks warn
+  instead of throwing and strip URL authority credentials before Version
+  history, but do not eliminate framework validation snapshots. After entering
+  a key on a development site, follow the runbook and run
+  `bench --site <site> execute optimus.maintenance.scrub_error_log_secrets --kwargs "{'dry_run': False}"`.
+  The scrub can mask a newly saved current key; it cannot guarantee removal
+  of an invalid key that was never saved. Restrict access to diagnostic files
+  and use fake keys when testing validation failures.
 - On MariaDB an AI failure row survives any rollback (Error Log is a MyISAM
   table). On Postgres it is still lost when only a savepoint is rolled back,
   when the database connection drops before the commit, or when the COMMIT
@@ -499,27 +507,84 @@ installed on the site.
 - No bespoke crypto.
 - No `eval` / `exec` / dynamic imports in production code paths.
 
-## Post-deploy hardening: `optimus_allow_unsigned_pickles`
+## Recording and source input boundaries
 
-Sprint 1 introduced HMAC signing of the pyinstrument tree blob in
-Redis. To avoid silently breaking analyze for sessions in flight at
-deploy time (their blobs predate the signing rollout), the read
-path falls back to raw `pickle.loads` on unsigned blobs when
-`optimus_allow_unsigned_pickles` is truthy in `site_config.json`.
+Persisted `recordings_file` snapshots are JSON-only gzip. They must be a unique,
+private File attached to the exact Session and field; the loader rechecks that
+binding, the session UUID, recording identities and query record shapes. Only
+a regular file directly under that site's private-files directory is opened,
+using a directory descriptor and no-follow/nonblocking flags. Limits are
+16 MiB compressed, 64 MiB expanded JSON, 250,000 nodes, depth 64 and 20,000
+recordings. Duplicate keys and nonfinite numbers are refused. New snapshots
+obey the same bounds and omit pickled trees and sidecars. Old JSON snapshots
+remain readable within those bounds, but their trees and sidecars are ignored.
+Missing or corrupt snapshots are reported through fixed, scrubbed diagnostics.
+Retry Analyze may need a new capture once live trees expire.
 
-The default is `true`. **Operators should flip it to `false` after
-the deploy has been live longer than the Redis blob TTL (10 minutes)
-- at that point every blob in Redis was written by the new signing
-code and the fallback only weakens the RCE protection.**
+Live Redis trees still use HMAC verification before unpickling. With an
+`encryption_key`, `optimus_allow_unsigned_pickles` now defaults to false.
+An explicit true/1 override permits legacy unsigned data and weakens that
+boundary; use it only for a controlled transition and remove it promptly.
+A site without an encryption key retains the legacy default and cannot claim
+signed-tree protection. Failed configuration reads refuse unsigned data.
+Persisted snapshots never use this override. Failure logs contain fixed reasons,
+not blobs or recording identities. Protect Redis and the site's encryption key.
 
-```json
-// sites/<site>/site_config.json
-{
-  "optimus_allow_unsigned_pickles": false
-}
-```
+Source reads are bounded to 4 MiB per file and checked before cache lookup.
+Server Script permissions are rechecked even for cached or previously saved
+snippets. A missing installed-app list closes the import boundary and emits
+one type-only breadcrumb per process. This does not retroactively rewrite
+already generated reports after permissions change. Filesystem roots and app
+symlinks are operator-controlled; these checks do not sandbox an attacker who
+can replace the bench code or its directory layout.
 
-When the fallback fires, a warning is logged to
-`frappe.logger().warning(...)` with the recording UUID and a
-pointer to this section. Tail `bench logs` after deploy; once the
-warnings stop, flip the flag to false.
+## Provider transport and input privacy
+
+Base URLs allow HTTP(S), including loopback and LAN models. They reject
+credentials in the authority, query strings, fragments, control characters,
+ambiguous hosts/ports and literal link-local, metadata, unspecified and multicast
+addresses, including mapped IPv4. Validation happens before sending and at each
+redirect hop. Only the existing same-origin 307 or 308 policy is allowed.
+No DNS lookup or probe is performed by validation. DNS rebinding, a hostname
+resolving to a metadata address, and unusual numeric IPv4 spellings require
+operator egress controls; this is not a general SSRF sandbox. Do not place
+credentials in URL paths. Only trusted System Managers should configure AI.
+
+Keys are withheld over non-loopback plain HTTP. Prefer HTTPS, or a keyless local
+provider. `optimus_ai_allow_key_over_http: true` is an explicit operator override
+for a trusted network; prompts sent over HTTP are still unencrypted. Changing
+the effective provider or endpoint clears an unchanged stored key. An explicitly
+entered new key is retained for that destination. Path case is significant.
+Invalid URL saves warn, and the read-only migration patch prints fixed guidance;
+call-time validation refuses the request. Test connection is limited to 60 seconds.
+
+AI is disabled by default. `ai_send_raw_values` is also off: the prompt boundary
+removes SQL literals/comments, minimizes Steps routes and labels, and omits the
+session title. Stored profiling data is not rewritten. Explicit opt-in permits
+business values while retaining sensitive-column redaction; opt-in is confirmed
+from SQL before each call so a cached consent cannot silently outlive revocation.
+This is minimization, not anonymization: source code, finding titles, function,
+file and schema names can reveal business information. Type exclusions and
+section switches reduce disclosure; disabling AI prevents new provider calls.
+Already sent requests cannot be recalled. Settings consent changes are versioned.
+
+## Capture ownership and journal retention
+
+Phase 2 prepares bounded picks/source before SQL admission, records its actual
+capturing user, and reserves Redis input and the active flag atomically. Stops
+compare the exact active generation. Retry Analyze and Force Stop commit their
+SQL fence before stopping only the corresponding capture. A failed or interrupted
+start cleans up its own generation. New capture inputs expire after 24 hours;
+legacy keys may have no TTL. Mixed old/new sample writers require a new capture.
+Missing, corrupt, evicted or over-budget input fails explicitly; valid zero-hit
+captures remain valid. See [refresh operations](docs/AI-REFRESH.md) for bounds.
+
+Private AI journals contain identities, hashes, states and counts, never prompts,
+provider replies or credentials. Uncertain history is retained while its Session
+exists so later refreshes cannot silently repeat an unknown provider outcome.
+Deleting a Session removes its journal in the same SQL transaction and fences
+late answers. Exact-run capture cleanup occurs after commit; failure produces
+counts-only logging. Deletion ends this retry history. A restored profiling
+record is not a way to resume deleted jobs. Ordinary Session saves cannot replace
+worker-maintained usage counters. These counters are informational, not a wallet
+or an enforceable provider spending balance.

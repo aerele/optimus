@@ -24,6 +24,7 @@ from optimus.analyzers.base import (
 	SEVERITY_ORDER,
 	format_duration_markers,
 	format_durations,
+	installed_apps_allowlist,
 )
 
 # Sensitive-data redaction lives in ``optimus/redaction.py`` (pure
@@ -165,6 +166,14 @@ from optimus.renderer.line_drilldown import (
 	_render_phase2_diff_table,
 	_render_phase2_function_table,
 	_render_phase2_panel,
+)
+
+# render-time deterministic recipes (index advice, Hot Line gate notes).
+from optimus.renderer.recipe_enrichment import (
+	apply_finding_recipes,
+	apply_table_recipes,
+	make_meta_lookup,
+	mark_outdated_ai_fixes,
 )
 from optimus.renderer.source import (
 	_FILE_CACHE_MAX_ENTRIES,
@@ -507,18 +516,6 @@ def render(
 		table_breakdown = json.loads(session_doc.table_breakdown_json or "[]")
 	except Exception:
 		table_breakdown = []
-	# v0.6.0: an LLM-vetted index recommendation may be stashed on a table
-	# entry (by analyze.py's auto step or the "Suggest an index (AI)" button)
-	# as ``ai_index = {"suggestion": <markdown>, "model": ..., ...}``. Render
-	# the markdown → sanitized HTML here so the template can `| safe` it
-	# (same path as the finding AI-fix blocks).
-	for _t in table_breakdown:
-		if isinstance(_t, dict) and isinstance(_t.get("ai_index"), dict):
-			raw = (_t["ai_index"].get("suggestion") or "").strip()
-			if raw:
-				_t["ai_index"]["suggestion_html"] = _markdown_to_safe_html(raw)
-
-
 	# v0.6.x: a per-section LLM toggle being off is a hard disable drop any
 	# previously-generated AI output for that section so re-rendering an older
 	# session (analyzed while it was on) doesn't show the block. (Humanized
@@ -529,7 +526,6 @@ def render(
 		from optimus.settings import get_config as _get_cfg
 		_cfg = _get_cfg()
 		_ai_findings_on = getattr(_cfg, "ai_suggest_findings", True)
-		_ai_indexes_on = getattr(_cfg, "ai_suggest_indexes", True)
 		_hide_framework_tables = getattr(_cfg, "hide_framework_tables", True)
 		# v0.6.x: snapshot the render-affecting settings so the footer can
 		# stamp THIS file with the values that were in effect. Saved HTML
@@ -549,7 +545,6 @@ def render(
 			"tracked_apps": tuple(getattr(_cfg, "tracked_apps", ()) or ()),
 			"ignored_apps": tuple(getattr(_cfg, "ignored_apps", ()) or ()),
 			"ai_suggest_findings": _ai_findings_on,
-			"ai_suggest_indexes": _ai_indexes_on,
 			"min_action_duration_ms": float(
 				getattr(_cfg, "min_action_duration_ms", 0.0) or 0.0
 			),
@@ -558,7 +553,7 @@ def render(
 			"config_profile": getattr(_cfg, "config_profile", "Custom"),
 		}
 	except Exception:
-		_ai_findings_on = _ai_indexes_on = True
+		_ai_findings_on = True
 		_hide_framework_tables = True
 		_large_duration_threshold_ms = DEFAULT_DISPLAY_THRESHOLD_MS
 		render_config = {
@@ -566,7 +561,6 @@ def render(
 			"tracked_apps": (),
 			"ignored_apps": (),
 			"ai_suggest_findings": True,
-			"ai_suggest_indexes": True,
 			"min_action_duration_ms": 0.0,
 			"large_duration_threshold_ms": DEFAULT_DISPLAY_THRESHOLD_MS,
 			"config_profile": "Custom",
@@ -596,10 +590,20 @@ def render(
 	if not _ai_findings_on:
 		for _f in all_findings:
 			_f["llm_fix"] = None
-	if not _ai_indexes_on:
-		for _t in table_breakdown:
-			if isinstance(_t, dict):
-				_t.pop("ai_index", None)
+	# deterministic index recipes fill the existing fix-hint / code /
+	# table-card slots, retired AI output (index-family and Framework N+1
+	# suggestions, table ``ai_index``) is hidden and gated Hot Lines get their
+	# note. Render time, so regenerating an older session picks it up.
+	_installed_apps = installed_apps_allowlist()
+	_meta_lookup = make_meta_lookup(
+		tracked_apps=render_config["tracked_apps"], installed_apps=_installed_apps,
+	)
+	apply_finding_recipes(
+		all_findings, meta_lookup=_meta_lookup,
+		tracked_apps=render_config["tracked_apps"], installed_apps=_installed_apps,
+	)
+	apply_table_recipes(table_breakdown, meta_lookup=_meta_lookup)
+	mark_outdated_ai_fixes(all_findings)
 
 	# v0.6.x: drop framework/internal db tables from the "Time spent per
 	# database table" section schema/meta (DocType/DocField/…), user-
@@ -1164,7 +1168,10 @@ def render_raw(session_doc: Any, recordings: list[dict]) -> str:
 	(raw SQL, headers, form_dict and full stack traces are not stored on the
 	DocType).
 	"""
-	return render(session_doc, recordings)
+	from optimus.renderer.source import server_script_readers
+
+	with server_script_readers(getattr(session_doc, "owner", None)):
+		return render(session_doc, recordings)
 
 
 # ---------------------------------------------------------------------------

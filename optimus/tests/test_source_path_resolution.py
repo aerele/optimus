@@ -181,7 +181,7 @@ class TestAiPayloadRecordedQueries:
 		examples = payload["technical_detail"].get("example_queries") or []
 		# Top-3 by duration, descending: 320ms tabUser, 80ms Sales Invoice, 12ms tabRole.
 		assert examples == [
-			"SELECT name, email FROM `tabUser` LIMIT 50",
+			"SELECT name, email FROM `tabUser` LIMIT ?",
 			"SELECT name FROM `tabSales Invoice`",
 			"SELECT * FROM `tabRole`",
 		]

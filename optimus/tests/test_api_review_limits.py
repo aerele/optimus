@@ -81,4 +81,4 @@ def test_batch_and_single_retry_share_the_same_limit(monkeypatch):
     api.retry_phase2_analyze("run-1")
     with pytest.raises(FakeRateLimitExceededError):
         api.retry_phase2_analyzes_batch(["run-1"])
-    assert len(seen.analyzed) == len(seen.saved) == 1
+    assert len(seen.queued) == 1 and not seen.analyzed and not seen.saved

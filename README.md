@@ -197,20 +197,20 @@ compatible endpoint including local ones like Ollama or LM Studio) to
 suggest concrete fixes for each finding. Off by default no traffic
 leaves your bench until you enable it.
 
-Three feature toggles, all under **Optimus Settings → AI Fix
+Feature controls, all under **Optimus Settings → AI Fix
 Suggestions → Use the LLM for**:
 
-- **Fix suggestions on findings**: adds a "Suggest a fix (AI)" button
-  per finding and an auto-suggest pass during analyze (when the
-  auto-suggest checkbox below is on).
-- **Index recommendations**: adds a "Suggest an index (AI)" button to
-  the per-table breakdown.
+- **Fix suggestions on findings**: enables eligible finding fixes through
+  **Refresh AI suggestions** and the automatic pass during analysis.
+- **Index recommendations**: retired. The report builds index advice from
+  analyzer data and DocType metadata, without calling the AI.
 - **Humanized "Steps to Reproduce"**: rewrites the auto-captured
   action list into a friendly flow ("Open Sales Invoice list, click
   New, …").
 
-Turning any one of these off is a hard disable the button is hidden,
-the API refuses and re-rendered reports omit the AI block. See
+Turning an active AI section off disables generation for that section;
+re-rendered reports omit its stored AI block. Deterministic index advice
+is independent of the AI controls. See
 [`docs/AI-FIXING.md`](./docs/AI-FIXING.md) for the per-pathway data
 inventory and local-LLM recipes.
 
@@ -611,28 +611,36 @@ Off by default no traffic leaves your bench until you turn it on.
 
 #### Use the LLM for (section toggles)
 
-Three independent on/off switches. Turning any one off is a **hard
-disable**: the section is never auto-generated, the matching button is
-hidden, the API refuses and re-rendered reports omit the block.
+The findings and humanized-steps switches control their respective AI
+sections. The index setting is read-only and has no effect.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Fix suggestions on findings** | ✓ on | "Suggest a fix (AI)" / "Generate AI fixes" / "Re-evaluate AI fixes" buttons on findings. |
-| **Index recommendations (DB-tables breakdown)** | ✓ on | "Suggest an index (AI)" button in the per-table breakdown. |
-| **Humanized "Steps to Reproduce"** | ✓ on | LLM rewrites the auto-captured action list into a friendly flow at analyze time (and on demand). Falls back to the raw action list on any failure. |
+| **Fix suggestions on findings** | ✓ on | Eligible finding fixes through Refresh AI suggestions and the automatic pass. |
+| **Index recommendations (DB-tables breakdown)** | read-only | No effect: index advice is deterministic and never uses the AI. |
+| **Humanized "Steps to Reproduce"** | ✓ on | Manual background Refresh AI suggestions may rewrite the action list. Failure preserves saved results; captured actions remain available. |
 
 #### Automatic Suggestions section
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Suggest AI fixes in the report by default** | ✗ off | When on, the analyze pipeline auto-generates a fix for each eligible finding so suggestions are already in the report no need to click per finding. Costs LLM tokens (and a little analyze time) on every session. Keep off unless you want suggestions baked in. |
-| **Max auto-suggested findings per session** | `5` | Cap on how many findings get an automatic suggestion highest-severity, highest-impact first. `0` = every eligible finding (can be slow + costly on big sessions). _Strict 10 · Recommended 5 · Relaxed 3._ |
+| **Suggest AI fixes in the report by default** | ✓ on | When AI is enabled, queue optional fixes after profiling is Ready. Requires an AI worker and uses provider tokens; saved profiling results survive AI failure. |
+| **Max auto-suggested findings per session** | `5` | Cap on how many findings get an automatic suggestion highest-severity, highest-impact first. `0` = every eligible finding (can be slow + costly on big sessions). _Strict 0 · Recommended 5 · Relaxed 3._ |
 
 #### Privacy & Operations section
 
+**Send raw values to the AI provider** is off by default. SQL literals/comments
+and Steps document names/session title are omitted unless explicitly enabled.
+Code, finding titles and schema names can still contain private information.
+Use type exclusions or disable AI when sharing that context is unacceptable.
+Settings changes are recorded in Version history. Provider URLs are validated,
+and changing the destination clears an unchanged stored key. See the
+[security boundaries and deployment limits](SECURITY.md) and
+[background refresh operations](docs/AI-REFRESH.md).
+
 | Field | Default | Purpose |
 |---|---|---|
-| **Excluded finding types** | _empty_ | One finding type per line. Those types are skipped in both auto-suggest and on-demand the payload is never built (no data ever sent for them). Exact-match, case-sensitive. `#` comments. Canonical names: `Filesort`, `Framework N+1`, `Full Table Scan`, `Hot Line`, `Low Filter Ratio`, `Missing Index`, `N+1 Query`, `Redundant Call`, `Slow Query`, `Temporary Table`. |
+| **Excluded finding types** | _empty_ | One finding type per line. Those types are skipped in both auto-suggest and on-demand the payload is never built (no data ever sent for them). Exact-match, case-sensitive. `#` comments. Canonical names: `Hot Line`, `N+1 Query`, `Redundant Call`, `Slow Query`. Index findings and Framework N+1 never call the AI. |
 | **Request timeout (seconds)** | `60` | HTTP timeout for outbound LLM calls. `60s` fits hosted providers (Anthropic / OpenAI reply in 2–10s typically). For local LLMs (Ollama / LM Studio / vLLM) first-token cold-start can exceed 60s start at `180` and tune once warm-call P99 is known. Clamped to `10–600`. |
 
 ---
@@ -679,7 +687,8 @@ as pre-DocType fallbacks. The DocType row wins if both are set.
 
 | Key | Default | Purpose |
 |---|---|---|
-| `optimus_allow_unsigned_pickles` | `True` | Whether to accept legacy un-signed pyinstrument blobs in Redis during analyze. Defaults to `True` to keep pre-v0.7 sessions analyzable. Set `False` on hardened sites to refuse unsigned blobs entirely (requires `encryption_key` in site_config). |
+| `optimus_allow_unsigned_pickles` | `False` with an encryption key | Legacy live-Redis compatibility only. Explicit true weakens HMAC protection; sites without an encryption key retain the legacy default. Persisted JSON bundles never unpickle. |
+| `optimus_ai_allow_key_over_http` | `False` | Explicitly allow credentials over non-loopback plain HTTP on a trusted network. Prefer HTTPS; this does not encrypt prompts or credentials. |
 
 ### Infra-pressure analyzer
 

@@ -41,7 +41,9 @@ DELETED = ("suggest_fix", "backfill_ai_fixes", "humanize_steps", "suggest_index"
 
 # name -> why this whitelisted AI endpoint has no caller in Optimus's own JS. Keep it empty
 # unless an endpoint exists for scripts on purpose; a stale entry fails the test below.
-AI_ENDPOINT_ALLOWLIST: dict[str, str] = {}
+AI_ENDPOINT_ALLOWLIST: dict[str, str] = {
+	"ai_capabilities": "Retained read-only configuration API for existing integrations; Desk now polls progress and selection together.",
+}
 
 _AI_NAMES = frozenset({"ai_fix", "_ai_session_gate", "_AI_LIMITS"})
 
@@ -157,7 +159,7 @@ def probe(monkeypatch):
 			ai_fix, "test_connection",
 			lambda: calls.append(True) or {"ok": True, "message": "Reachable.", "model": "m"},
 		)
-		install_module(monkeypatch, "optimus.analyze", SimpleNamespace(_mark_ai_spend_session=lambda u: marks.append(u)))
+		monkeypatch.setattr(fake, "db", SimpleNamespace(sql=lambda *a, **kw: marks.append(True)))
 		return fake, calls, marks
 
 	return _make
@@ -166,7 +168,7 @@ def probe(monkeypatch):
 def test_system_manager_can_probe(probe):
 	_, calls, marks = probe(("System Manager",))
 	assert api.test_ai_connection() == {"ok": True, "message": "Reachable.", "model": "m"}
-	assert calls == [True] and marks == [None]
+	assert calls == [True] and marks == []
 
 
 def test_non_manager_is_refused_without_probing_or_counting(probe):
@@ -203,47 +205,3 @@ def test_ai_capabilities_reports_the_toggles_without_writing(monkeypatch):
 
 
 # --- _humanize_steps_core (kept: refill_ai_suggestions uses it) ------------------------------
-
-
-@pytest.fixture
-def core(monkeypatch):
-	fake = make_fake_frappe()
-	install(monkeypatch, fake)
-	commits, logged = [], []
-	monkeypatch.setattr(api, "safe_commit", lambda: commits.append(True))
-	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, exc=None, **kw: logged.append(title))
-	install_module(monkeypatch, "optimus.analyze", SimpleNamespace(
-		_run_ai_step=_analyze._run_ai_step,
-		_mark_ai_spend_session=lambda session_uuid: None,
-		_fetch_recordings=lambda uuids, recordings_bundle=None: [{"uuid": u} for u in uuids],
-		_load_recordings_bundle=lambda d: None,
-		_actions_for_humanizer=lambda recordings: [{"method": "POST", "path": "/api/method/x"}] if recordings else [],
-		_assemble_humanized_notes=lambda md: "NOTES\n" + md,
-	))
-	doc = fake_session_doc(actions=[SimpleNamespace(recording_uuid="rec-1")])
-	return SimpleNamespace(fake=fake, commits=commits, logged=logged, doc=doc)
-
-
-def test_humanize_core_persists_the_notes_and_the_tokens(core, monkeypatch):
-	def humanize(actions, *, session_title=None, usage_out=None, **kw):
-		assert session_title == "Checkout flow" and actions
-		usage_out["total_tokens"] = 42
-		return "1. Open the Sales Invoice form"
-
-	monkeypatch.setattr(ai_fix, "humanize_steps", humanize)
-	assert api._humanize_steps_core(core.doc, title="Checkout flow") == {"updated": True, "reason": None}
-	((args, _kwargs),) = core.fake.spies.set_value
-	assert args == (
-		"Optimus Session", DOCNAME,
-		{"notes": "NOTES\n1. Open the Sales Invoice form", "ai_steps_tokens": 42},
-	)
-	assert core.commits == [True]
-
-
-def test_humanize_core_turns_an_ai_error_into_a_reason(core, monkeypatch):
-	def fail(actions, **kw):
-		raise ai_fix.AiFixError("provider said no")
-
-	monkeypatch.setattr(ai_fix, "humanize_steps", fail)
-	assert api._humanize_steps_core(core.doc, title=None) == {"updated": False, "reason": "provider said no"}
-	assert core.fake.spies.set_value == [] and core.commits == []

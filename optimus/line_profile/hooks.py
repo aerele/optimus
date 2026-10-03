@@ -18,6 +18,7 @@ from optimus import hooks_callbacks
 from optimus.line_profile import capture
 
 
+@capture._interrupt_boundary
 def _overhead_budget_seconds() -> float:
 	"""Wall-clock seconds line tracing may run before the watchdog disengages
 	it, so profiling can't freeze the user's flow (observe, don't spoil).
@@ -25,10 +26,12 @@ def _overhead_budget_seconds() -> float:
 	``0`` disables the budget (unlimited profiling)."""
 	try:
 		return float(frappe.conf.get("optimus_phase2_overhead_budget_seconds", 10) or 0)
-	except Exception:
+	except Exception as exc:
+		capture._raise_if_interrupt(exc)
 		return 10.0
 
 
+@capture._interrupt_boundary
 def _cancel_watchdog() -> None:
 	"""Stop and clear this request/job's overhead watchdog. Called first in the
 	after_* teardown so a request that finished within budget keeps full data
@@ -38,7 +41,8 @@ def _cancel_watchdog() -> None:
 	if watchdog is not None:
 		try:
 			watchdog.cancel()
-		except Exception:
+		except Exception as exc:
+			capture._raise_if_interrupt(exc)
 			pass
 
 
@@ -47,6 +51,7 @@ def _cancel_watchdog() -> None:
 # ---------------------------------------------------------------------------
 
 
+@capture._interrupt_boundary
 def before_request_line_profile(*args, **kwargs) -> None:
 	"""If phase-2 is active for this user, build a per-request LineProfiler
 	and enable it. Returns silently otherwise.
@@ -54,6 +59,9 @@ def before_request_line_profile(*args, **kwargs) -> None:
 	Best-effort: any exception is swallowed and logged so the host request
 	is never broken by profiler instrumentation.
 	"""
+	failure = None
+	registered = ready = False
+	profiler = None
 	try:
 		user = frappe.session.user
 		run_uuid = capture.is_active(user)
@@ -93,11 +101,8 @@ def before_request_line_profile(*args, **kwargs) -> None:
 		# Register process-wide BEFORE enabling so a concurrent sibling's teardown
 		# can't observe a 0 count and free the tool we're about to enable.
 		capture.incr_active_profilers()
-		try:
-			profiler.enable_by_count()
-		except Exception:
-			capture.decr_active_profilers()
-			raise
+		registered = True
+		profiler.enable_by_count()
 		frappe.local._lp_profiler = profiler
 		frappe.local._lp_run_uuid = run_uuid
 		# Arm the overhead watchdog: if this request runs past the budget,
@@ -105,13 +110,18 @@ def before_request_line_profile(*args, **kwargs) -> None:
 		frappe.local._lp_watchdog = capture.start_overhead_watchdog(
 			run_uuid, _overhead_budget_seconds()
 		)
+		ready = True
 	except Exception as exc:
-		frappe.log_error(
-			title="phase 2 before_request failed",
-			message=f"{type(exc).__name__}: {exc}",
-		)
+		capture._raise_if_interrupt(exc)
+		failure = exc
+	finally:
+		if registered and not ready:
+			_discard_failed_start(profiler)
+	if failure is not None:
+		_log_capture_failure("phase 2 before_request failed", failure)
 
 
+@capture._interrupt_boundary
 def after_request_line_profile(*args, **kwargs) -> None:
 	"""Disable the per-request profiler, serialize per-line stats and push the
 	batch to Redis. Locals are cleared even if the profiler was never enabled,
@@ -123,34 +133,9 @@ def after_request_line_profile(*args, **kwargs) -> None:
 	frappe.local._lp_profiler = None
 	frappe.local._lp_run_uuid = None
 	frappe.local._lp_active = None  # invalidate the per-request is_active cache
-	_cancel_watchdog()
-
-	if profiler is None or not run_uuid:
-		return
-
-	try:
-		try:
-			# Pair with before_request's enable_by_count(); count-guarded so it's
-			# safe even if line_profiler already tore down (the "tool 2 is not in
-			# use" path). Stats are still readable after, so don't skip serialize.
-			profiler.disable_by_count()
-		except Exception:
-			pass
-		samples = capture.serialize_stats(profiler)
-		capture.flush_samples(run_uuid, samples)
-	except Exception as exc:
-		frappe.log_error(
-			title="phase 2 after_request failed",
-			message=f"{type(exc).__name__}: {exc}",
-		)
-	finally:
-		# Unregister this profiler, then force-free tool 2 ONLY when no sibling
-		# thread is still profiling. Freeing it while a concurrent gthread request
-		# is enabled would desync line_profiler's shared manager (the tool-2 leak
-		# class). When this is the last active profiler, the free guarantees no
-		# line-trace hook survives to slow later requests.
-		if capture.decr_active_profilers() == 0:
-			capture.release_monitoring_tool()
+	failure = _finish_capture(profiler, run_uuid)
+	if failure is not None:
+		_log_capture_failure("phase 2 after_request failed", failure)
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +143,7 @@ def after_request_line_profile(*args, **kwargs) -> None:
 # ---------------------------------------------------------------------------
 
 
+@capture._interrupt_boundary
 def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
 	"""Phase-2 equivalent of ``hooks_callbacks.before_job``. Reads
 	``_lp_session_id`` injected by the extended enqueue patch.
@@ -178,6 +164,9 @@ def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
 	if not run_uuid:
 		return
 
+	failure = None
+	registered = ready = False
+	profiler = None
 	try:
 		user = getattr(frappe.session, "user", None)
 		if not user or user == "Guest":
@@ -211,23 +200,25 @@ def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
 				)
 			capture.release_monitoring_tool()
 		capture.incr_active_profilers()
-		try:
-			profiler.enable_by_count()
-		except Exception:
-			capture.decr_active_profilers()
-			raise
+		registered = True
+		profiler.enable_by_count()
 		frappe.local._lp_profiler = profiler
 		frappe.local._lp_run_uuid = run_uuid
 		frappe.local._lp_watchdog = capture.start_overhead_watchdog(
 			run_uuid, _overhead_budget_seconds()
 		)
+		ready = True
 	except Exception as exc:
-		frappe.log_error(
-			title="phase 2 before_job failed",
-			message=f"{type(exc).__name__}: {exc}",
-		)
+		capture._raise_if_interrupt(exc)
+		failure = exc
+	finally:
+		if registered and not ready:
+			_discard_failed_start(profiler)
+	if failure is not None:
+		_log_capture_failure("phase 2 before_job failed", failure)
 
 
+@capture._interrupt_boundary
 def after_job_line_profile(method=None, kwargs=None, result=None, **rest) -> None:
 	"""Phase-2 equivalent of ``hooks_callbacks.after_job``. Same as
 	``after_request_line_profile`` but called from the job lifecycle.
@@ -238,25 +229,56 @@ def after_job_line_profile(method=None, kwargs=None, result=None, **rest) -> Non
 	frappe.local._lp_profiler = None
 	frappe.local._lp_run_uuid = None
 	frappe.local._lp_active = None
-	_cancel_watchdog()
+	failure = _finish_capture(profiler, run_uuid)
+	if failure is not None:
+		_log_capture_failure("phase 2 after_job failed", failure)
 
-	if profiler is None or not run_uuid:
-		return
 
+def _log_capture_failure(title, failure):
+	from optimus.ai_fix import log_ai_failure
+	log_ai_failure(title, failure)
+
+
+def _discard_failed_start(profiler):
+	"""An interrupted enable/arm must not leave process-wide tracing registered."""
+	frappe.local._lp_profiler = None
+	frappe.local._lp_run_uuid = None
+	frappe.local._lp_active = None
+	_finish_capture(profiler, None, flush=False)
+
+
+def _finish_capture(profiler, run_uuid, *, flush=True):
+	"""Complete cleanup even when cancelling the watchdog is interrupted."""
+	from optimus.ai_fix import _InterruptGuard
+
+	guard = _InterruptGuard(base=True)
+	failure = samples = None
 	try:
-		try:
-			profiler.disable_by_count()
-		except Exception:
-			pass
-		samples = capture.serialize_stats(profiler)
-		capture.flush_samples(run_uuid, samples)
+		with guard:
+			_cancel_watchdog()
 	except Exception as exc:
-		frappe.log_error(
-			title="phase 2 after_job failed",
-			message=f"{type(exc).__name__}: {exc}",
-		)
-	finally:
-		# Force-free tool 2 only when no sibling profiler is still active (see
-		# after_request_line_profile).
-		if capture.decr_active_profilers() == 0:
-			capture.release_monitoring_tool()
+		failure = exc
+	if profiler is not None:
+		try:
+			try:
+				with guard:
+					profiler.disable_by_count()
+			except ValueError:
+				pass  # line_profiler may already have released tool 2
+			except Exception as exc:
+				failure = failure or exc
+			if flush and run_uuid and failure is None and not guard.pending():
+				with guard:
+					samples = capture.serialize_stats(profiler)
+					capture.flush_samples(run_uuid, samples)
+		except Exception as exc:
+			failure = failure or exc
+		finally:
+			# Only the last Optimus profiler may free the process-wide tool.
+			with guard:
+				if capture.decr_active_profilers() == 0:
+					capture.release_monitoring_tool()
+	if guard.pending():
+		failure = samples = profiler = None
+		raise guard.interrupt()
+	return failure

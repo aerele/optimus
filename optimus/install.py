@@ -94,6 +94,11 @@ def after_install():
 		except Exception:
 			pass
 
+	# The same idempotent seed runs after model sync on existing installs.
+	from optimus.patches.v0_12_0 import initialize_ai_refresh_store
+
+	initialize_ai_refresh_store.execute()
+
 
 # v0.13.x: the Frappe-organization-maintained apps seeded into Ignored
 # Apps on fresh install. Mirrors ``FRAMEWORK_APPS`` in

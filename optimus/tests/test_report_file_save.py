@@ -1,15 +1,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for the HTML report-file save bypass.
+"""Generated recording-file insertion keeps the narrow request bypass.
 
-Frappe's File DocType throws ``FileTypeNotAllowed`` in before_insert when HTML
-is not in the site's allowed-extension allowlist, but skips validation when
-there is no ``frappe.request`` (code-generated files). analyze normally runs as
-a background RQ job (no request, bypass fires); when the scheduler is disabled
-it runs inline in the HTTP handler (request set, bypass would not fire), so
-``_save_report_file`` nulls the request around the insert. These tests lock in
-that behavior.
+The transactional report writer has separate tests. This legacy helper now
+serves recording bundles and must restore request state on every outcome.
 """
 
 import inspect
@@ -66,13 +61,21 @@ def test_save_report_file_restore_is_in_finally():
 	)
 
 
-def test_save_report_file_preserves_original_error_handling():
-	"""The outer try/except that logs failures to the Error Log and
-	returns None must still wrap everything. Without this, a
-	validator failure would crash the whole analyze pipeline
-	instead of logging and continuing with no report attachment."""
-	from optimus import analyze
+def test_save_recording_file_failure_is_logged_safely_and_remains_optional(monkeypatch):
+	import sys
+	from types import SimpleNamespace
 
-	src = inspect.getsource(analyze._save_report_file)
-	assert "frappe.log_error" in src
-	assert "return None" in src
+	from optimus import ai_fix, analyze
+
+	request, logs = object(), []
+	local = SimpleNamespace(request=request)
+	def insert(**kw):
+		assert local.request is None
+		raise RuntimeError("fake insert failure")
+	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(local=local,
+		get_doc=lambda *a: SimpleNamespace(insert=insert)))
+	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: logs.append((sys.exc_info()[0], kw)))
+	assert analyze._save_report_file(docname="fake-doc", filename="fake.json.gz",
+		attached_to_field="recordings_file", content=b"fake") is None
+	assert local.request is request
+	assert logs == [(None, {"reason": "file_write_failed"})]

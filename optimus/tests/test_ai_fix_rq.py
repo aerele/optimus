@@ -40,7 +40,8 @@ def test_reask_rq_job_timeout_propagates_fresh(monkeypatch):
 	while tb:
 		frames.append(tb.tb_frame.f_code.co_name)
 		tb = tb.tb_next
-	assert frames[-1] == "_complete_with_guardrails" and "fake_dispatch" not in frames  # a fresh instance
+	assert frames[-1] == ai_fix.suggest_fix.__code__.co_name and "fake_dispatch" not in frames  # a fresh instance
+	assert ei.value.usage == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
 	assert not any(a and a[0] == "failed" for a in logged)
 
 

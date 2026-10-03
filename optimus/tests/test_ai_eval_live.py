@@ -216,3 +216,16 @@ def test_main_passes_the_stored_key_only_as_api_key():
 	assert "api_key" in inspect.signature(live.run_case).parameters
 	src = inspect.getsource(live.main)
 	assert "api_key=api_key" in src and "_stored_key(" in src
+
+
+
+
+def test_run_case_gates_pre_l5_redundant_calls_with_the_real_gate(corpus):
+	from optimus import ai_fix
+	from optimus.renderer import fix_recipes
+
+	live = load("live")
+	case = load("_corpus").case_by_name("3q1efl686s", corpus)
+	fake, calls = _fake_ai_fix(gate=ai_fix.llm_gate_note)
+	record = live.run_case(case, fake)
+	assert record["outcome"] == "gated" and record["gate_note"] == fix_recipes.PRE_L5_REDUNDANT_CALL_NOTE and not calls

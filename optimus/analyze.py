@@ -13,11 +13,13 @@ leaves it so analyze can be retried.
 
 import html
 import json
+import math
 import os
 import re
 import time
 from collections import OrderedDict
 from dataclasses import asdict
+from datetime import datetime, timezone
 
 import frappe
 import sqlparse
@@ -60,11 +62,6 @@ ANALYZE_PER_ANALYZER_SOFT_CAP_SECONDS = 60
 # findings. Cap the total wall time spent on those calls so a slow
 # provider can't push the analyze job past the RQ 25-min timeout.
 AI_AUTO_SUGGEST_TIME_BUDGET_SECONDS = 240
-
-# v0.6.0: same toggle also bakes an LLM-vetted index recommendation onto the
-# top N tables in the breakdown capped tables + its own wall-time budget.
-AI_AUTO_INDEX_MAX_TABLES = 3
-AI_AUTO_INDEX_TIME_BUDGET_SECONDS = 90
 
 # Tighter budget for the same backfill done from api.regenerate_reports
 # that runs synchronously inside a web request, so it must stay well under
@@ -525,126 +522,111 @@ def _bg_wait_for_pending_jobs(session_uuid: str, docname: str, deadline):
 
 
 def _auto_arm_phase2(docname: str, context) -> None:
-	"""When ``optimus_phase2_auto_arm`` is set in site_config, arm a phase-2
-	line-profile pass on the recommended hot-path functions right after analyze
-	finishes, so the user just re-runs the flow once for line-level data.
+	"""Optional capture after the Ready commit. Worker interrupts still stop work."""
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
 
-	Opt-in and admin-only: arming instruments the user's NEXT run of the flow,
-	so it suits replay-safe / non-production flows only. Best-effort: never fails
-	analyze (the report is already saved)."""
+	guard = _InterruptGuard(base=True)
+	failure = None
 	try:
-		if not frappe.conf.get("optimus_phase2_auto_arm"):
-			return
+		with guard:
+			_arm_phase2(docname, context)
+	except Exception as exc:
+		failure = exc
+	if failure is not None or guard.pending():
+		with guard:
+			frappe.db.rollback()
+	if guard.pending():
+		failure = context = None
+		raise guard.interrupt()
+	if failure is not None:
+		log_ai_failure("optimus auto-arm phase 2", failure)
 
-		import uuid as _uuid
 
-		from frappe.utils import now_datetime
+def _arm_phase2(docname: str, context) -> None:
+	if not frappe.conf.get("optimus_phase2_auto_arm"):
+		return
 
-		from optimus.line_profile import capture as _lp_capture
-		from optimus.line_profile import picker as _lp_picker
-		from optimus.settings import get_config
+	import uuid as _uuid
 
-		doc = frappe.get_doc("Optimus Session", docname)
-		user = getattr(doc, "user", None)
-		if not user:
-			return
+	from optimus.line_profile import capture as _lp_capture
+	from optimus.line_profile import picker as _lp_picker
+	from optimus.settings import get_config
 
-		# Guard: respect the per-session run cap. v0.13.x: 0 = no cap
-		# (Strict-as-unlimited). Pre-v0.13.x the ``or 10`` swallowed 0
-		# and silently re-applied the default cap.
-		cap = int(getattr(get_config(), "phase2_max_runs_per_session", 10))
-		if cap > 0 and len(doc.get("phase_2_runs") or []) >= cap:
-			return
+	doc = frappe.get_doc("Optimus Session", docname)
+	user = getattr(doc, "user", None)
+	if not user:
+		return
 
-		# Guard: don't arm over an active phase-1 or phase-2 pass for this user.
+	# Guard: respect the per-session run cap. v0.13.x: 0 = no cap
+	# (Strict-as-unlimited). Pre-v0.13.x the ``or 10`` swallowed 0
+	# and silently re-applied the default cap.
+	cap = int(getattr(get_config(), "phase2_max_runs_per_session", 10))
+	if cap > 0 and len(doc.get("phase_2_runs") or []) >= cap:
+		return
+
+	# Redis failure refuses optional arming; atomic start rechecks ownership.
+	if (frappe.cache.get_value(_redis_keys.lp_active(user))
+		or frappe.cache.get_value(_redis_keys.session_active(user))):
+		return
+
+	# Recommended hot paths, derived from the persisted call trees (same
+	# candidate builder the picker uses).
+	trees: list = []
+	for action in (doc.get("actions") or []):
+		raw = getattr(action, "call_tree_json", None)
+		if not raw:
+			continue
 		try:
-			if (
-				frappe.cache.get_value(_redis_keys.lp_active(user))
-				or frappe.cache.get_value(_redis_keys.session_active(user))
-			):
-				return
-		except Exception:
-			pass
+			tree = json.loads(raw)
+		except (TypeError, ValueError):
+			continue
+		if isinstance(tree, dict) and "root" in tree:
+			tree = tree["root"]
+		trees.append(tree)
 
-		# Recommended hot paths, derived from the persisted call trees (same
-		# candidate builder the picker uses).
-		trees: list = []
-		for action in (doc.get("actions") or []):
-			raw = getattr(action, "call_tree_json", None)
-			if not raw:
-				continue
-			try:
-				tree = json.loads(raw)
-			except (TypeError, ValueError):
-				continue
-			if isinstance(tree, dict) and "root" in tree:
-				tree = tree["root"]
-			trees.append(tree)
+	candidates = _lp_picker._build_tree_indented_candidates(trees)
+	# Don't auto-arm Ignored-App functions (same filter as the picker).
+	from optimus.settings import get_ignored_apps
+	_ignored_apps = get_ignored_apps()
+	candidates, _ = _lp_picker.filter_out_ignored_apps(candidates, _ignored_apps)
+	picks = [
+		{"dotted_path": c["dotted_path"], "source": "curated"}
+		for c in candidates
+		if c.get("recommended") and c.get("dotted_path")
+	]
+	if not picks:
+		return
 
-		candidates = _lp_picker._build_tree_indented_candidates(trees)
-		# Don't auto-arm Ignored-App functions (same filter as the picker).
-		try:
-			from optimus.settings import get_ignored_apps
-			_ignored_apps = get_ignored_apps()
-		except Exception:
-			_ignored_apps = ()
-		candidates, _ = _lp_picker.filter_out_ignored_apps(candidates, _ignored_apps)
-		picks = [
-			{"dotted_path": c["dotted_path"], "source": "curated"}
-			for c in candidates
-			if c.get("recommended") and c.get("dotted_path")
-		]
-		if not picks:
-			return
+	prepared = _lp_capture.prepare_line_profile_picks(picks)
+	run_uuid = _uuid.uuid4().hex
+	from optimus.api import _lock_phase2_for_write, _persist_phase2_capture
+	from optimus.line_profile.jobs import _authorized
+	_lock_phase2_for_write(docname)
+	doc = frappe.get_doc("Optimus Session", docname)
+	if cap > 0 and len(doc.get("phase_2_runs") or []) >= cap:
+		frappe.db.rollback()
+		return
+	if (getattr(doc, "user", None) != user or getattr(doc, "session_uuid", None) != context.session_uuid
+		or not _authorized({"name": docname, "owner": getattr(doc, "owner", None)}, user)):
+		frappe.db.rollback()
+		return
+	resolved = _persist_phase2_capture(doc, docname, context.session_uuid, run_uuid, user, prepared)
+	eligible = [r for r in resolved if r.get("eligible")]
 
-		run_uuid = _uuid.uuid4().hex
-		resolved = _lp_capture.start_line_profile_pass(
-			session_uuid=context.session_uuid,
-			run_uuid=run_uuid,
-			user=user,
-			picks=picks,
-		)
-		eligible = [r for r in (resolved or []) if r.get("eligible")]
-		if not eligible:
-			return
-
-		doc.append("phase_2_runs", {
+	# Auto-arm runs server-side during analyze, when the user isn't on the
+	# form tell them a pass is armed and what to do next (re-run + Stop),
+	# since arming alone does nothing until the flow re-executes.
+	functions = [r["dotted_path"].rsplit(".", 1)[-1] for r in eligible][:5]
+	frappe.publish_realtime(
+		"optimus_phase2_armed",
+		{
+			"docname": docname,
 			"run_uuid": run_uuid,
-			"status": "Recording",
-			"started_at": now_datetime(),
-			"picks_json": frappe.as_json([
-				{"dotted_path": r["dotted_path"], "source": r.get("source", "curated")}
-				for r in eligible
-			]),
-		})
-		doc.flags.ignore_validate_update_after_submit = True
-		doc.save(ignore_permissions=True)
-		safe_commit()
-
-		# Auto-arm runs server-side during analyze, when the user isn't on the
-		# form tell them a pass is armed and what to do next (re-run + Stop),
-		# since arming alone does nothing until the flow re-executes.
-		functions = [r["dotted_path"].rsplit(".", 1)[-1] for r in eligible][:5]
-		try:
-			frappe.publish_realtime(
-				"optimus_phase2_armed",
-				{
-					"docname": docname,
-					"run_uuid": run_uuid,
-					"count": len(eligible),
-					"functions": functions,
-				},
-				user=user,
-			)
-		except Exception:
-			pass
-		frappe.logger().info(
-			f"optimus: auto-armed phase-2 pass {run_uuid} for {docname} "
-			f"({len(eligible)} function(s)) re-run the flow + Stop to capture line data."
-		)
-	except Exception:
-		# Never let auto-arm break a finished analyze.
-		frappe.log_error(title="optimus auto-arm phase 2")
+			"count": len(eligible),
+			"functions": functions,
+		},
+		user=user,
+	)
 
 
 def run(session_uuid: str, _bg_wait_until: float | None = None,
@@ -680,6 +662,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 
 	analyze_start = time.monotonic()
 	bg_jobs_unfinished = 0
+	failure = None
 
 	try:
 		# v0.6.0: wait for the background jobs the profiled flow enqueued to
@@ -730,11 +713,6 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 
 		_touch_singleflight(session_uuid)  # M2 heartbeat before the EXPLAIN burst
 
-		# v0.13: mark this session active for AI-token spend tracking. Every
-		# ai_fix LLM call below (auto-suggest fixes/indexes + humanized steps)
-		# funnels through ai_fix._record_session_spend, which adds its tokens to
-		# this session's cumulative ai_tokens_spent.
-		_mark_ai_spend_session(session_uuid)
 		_publish_progress(20, "Running EXPLAIN on queries", session_uuid)
 		enrichment_warnings = _enrich_recordings(recordings)
 
@@ -849,35 +827,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# v0.6.0: attach ±1-line source snippets to each finding's callsite
 		# before persisting, so finding cards can show the offending line
 		# without requiring a per-render file read.
-		_enrich_findings_with_source_snippets(context.findings)
-
-		# v0.6.0: optionally bake LLM fix suggestions into the report
-		# (Optimus Settings ▸ AI Fix Suggestions ▸ "Suggest AI fixes by
-		# default"). Ordinary provider errors are best-effort: the session
-		# still completes, and Refresh AI suggestions can fill the gaps later.
-		# The RQ job's hard deadline still propagates and terminates analysis.
-		_touch_singleflight(session_uuid)  # AI auto-suggest can run up to its own timeout (240s)
-		_, step_failed = _run_ai_step(
-			lambda: _enrich_findings_with_ai_suggestions(context, recordings=recordings),
-			title="optimus ai auto-suggest (outer)", session_uuid=session_uuid,
-		)
-		if step_failed:
-			try:
-				context.warnings.append(
-					"AI auto-suggest was skipped after an unexpected error "
-					"use 'Generate AI fixes' on the session form to fill them in. "
-					"(see error log)"
-				)
-			except Exception:
-				pass
-
-		# v0.6.0: same toggle also bakes an LLM-vetted index recommendation
-		# onto the top few tables in the breakdown. Best-effort + double-wrapped.
-		_touch_singleflight(session_uuid)  # AI index-suggest can run up to 90s
-		_run_ai_step(
-			lambda: _enrich_table_breakdown_with_ai_suggestions(context, recordings),
-			title="optimus ai index-suggest (outer)", session_uuid=session_uuid,
-		)
+		_enrich_findings_with_source_snippets(context.findings, owner=frappe.db.get_value("Optimus Session", docname, "owner"))
 
 		_publish_progress(80, "Writing session data", session_uuid)
 		_persist(docname, context, recordings, analyze_elapsed_ms)
@@ -901,9 +851,6 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# Phase: Ready
 		frappe.db.set_value("Optimus Session", docname, "status", "Ready")
 		safe_commit()
-		# v0.7.x (P3): opt-in arm a phase-2 pass on the hot paths so the user
-		# just re-runs the flow once for line data. Best-effort; never fails analyze.
-		_auto_arm_phase2(docname, context)
 		_publish_progress(100, "Report ready", session_uuid)
 
 		# Notify the UI so the floating widget can navigate the user to
@@ -916,9 +863,9 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 			docname=docname,
 		)
 
-	except Exception:
+	except Exception as exc:
+		failure = exc
 		frappe.db.rollback()
-		frappe.log_error(title=f"optimus analyze {session_uuid}")
 		try:
 			frappe.db.set_value("Optimus Session", docname, "status", "Failed")
 			safe_commit()
@@ -927,7 +874,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# v0.5.1: push "failed" to any open widgets so they transition
 		# out of "Analyzing…" immediately instead of hanging forever.
 		# Best-effort and isolated so a publish failure can't mask the
-		# original exception the outer `raise` is about to re-raise.
+		# original exception, logged and raised after this handler.
 		try:
 			_publish_session_event(
 				"optimus_session_failed",
@@ -936,7 +883,6 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 			)
 		except Exception:
 			pass
-		raise
 	finally:
 		# v0.7.x (M2): always release the single-flight flag so the next
 		# session can analyze. Compare-then-delete (only if we still hold it);
@@ -947,20 +893,62 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		if hasattr(frappe.local, "optimus_analyzing"):
 			del frappe.local.optimus_analyzing
 
+	if failure is not None:
+		_log_ai_step_failure("optimus analyze", failure, session_uuid=session_uuid)
+		raise failure
+
+	# This is outside the profiling failure handler. Optional admission may
+	# fail or time out, but the committed Ready result must stay usable.
+	_auto_arm_phase2(docname, context)
+	_queue_analyze_time_ai(docname)
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
 
-def _mark_ai_spend_session(session_uuid) -> None:
-	"""Tag the worker-local "active session" so ai_fix's per-call spend recorder
-	charges this session's cumulative ``Optimus Session.ai_tokens_spent``.
-	Best-effort and guarded so frappe-stubbing unit tests don't break."""
+def _queue_analyze_time_ai(docname: str) -> None:
+	"""Admit optional work only after the profiling result and report commit.
+
+	Ordinary admission failures are logged; job interrupts still stop this
+	worker. Neither path enters run's handler that marks profiling Failed.
+	"""
+	from optimus import ai_fix, ai_jobs
+	from optimus.settings import get_config
+
+	guard = ai_fix._InterruptGuard(base=True)
+	failure = None
 	try:
-		frappe.local._optimus_spend_session = session_uuid
-	except Exception:
-		pass
+		with guard:
+			cfg = get_config()
+			fixes = bool(cfg.ai_enabled and cfg.ai_auto_suggest and cfg.ai_suggest_findings)
+			steps = bool(cfg.ai_enabled and cfg.ai_humanize_steps)
+			if not (fixes or steps):
+				return
+			row = frappe.db.get_value("Optimus Session", docname, "*", as_dict=True)
+			if not row or row.get("status") != "Ready":
+				return
+			out = ai_jobs.start_refresh(
+				docname=docname, session_uuid=row["session_uuid"], requested_by=row["owner"],
+				scope="fixes_missing", cap=cfg.ai_auto_suggest_max,
+				include_fixes=fixes, include_steps=steps,
+			)
+			if out["status"] == "refused":
+				ai_jobs.record_admission_notice(docname, reason=out.get("reason", "unknown"))
+	except Exception as exc:
+		failure = exc
+	if guard.pending():
+		raise guard.interrupt()
+	if failure is not None:
+		frappe.db.rollback()
+		try:
+			ai_fix.log_ai_failure("optimus AI admission after analyze", failure, docname=docname)
+		finally:
+			failure = None
+		safe_commit()
+
+
 
 
 def _run_ai_step(fn, *, title: str, session_uuid: str | None = None, **context):
@@ -1001,168 +989,115 @@ def _log_ai_step_failure(title: str, exc: BaseException, session_uuid: str | Non
 	log_ai_failure(title, exc, session_uuid=session_uuid, **context)
 
 
-def _deserialize_tree(uuid: str, tree_blob):
-	"""Verify (HMAC) and unpickle a pyinstrument tree blob; returns the pyi
-	session object or None. Shared by the live-Redis and persisted-bundle read
-	paths so both reconstruct identically.
+def _allow_unsigned_pickles() -> bool:
+	"""Legacy Redis opt-in; signing-capable sites require verification by default."""
+	from optimus.ai_fix import _InterruptGuard
 
-	SECURITY: ``session.unsign_blob`` rejects any tree whose HMAC signature
-	doesn't match the site's encryption_key, so a Redis-poisoning attacker can't
-	slip in a malicious pickle. Unsigned blobs fall back to raw ``pickle.loads``
-	only when ``optimus_allow_unsigned_pickles`` is truthy (default True; flip it
-	off once the keyspace has rolled over). See SECURITY.md.
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			value = frappe.conf.get("optimus_allow_unsigned_pickles")
+			if value is not None:
+				return value is True or (type(value) is int and value == 1) or (
+					isinstance(value, str) and value.lower() in {"1", "true"}
+				)
+			return not bool(frappe.conf.get("encryption_key"))
+	except Exception:
+		return False
+	if guard.pending():
+		raise guard.interrupt()
+
+
+def _deserialize_tree(uuid: str, tree_blob, *, allow_unsigned: bool = False):
+	"""Verify and unpickle a live Redis tree. Persisted bundles never use this.
+
+	Only an explicit legacy override (or a site without a signing secret)
+	permits the old raw/stripped-signature formats. Failure logs contain fixed
+	reasons, never the blob or an active exception's locals.
 	"""
 	import pickle
 
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
+	from optimus.session import unsign_blob
+
 	if not tree_blob:
 		return None
-	pyi_session = None
+	problem = None
+	guard = _InterruptGuard(base=True)
 	try:
-		from optimus.session import unsign_blob
-		verified = unsign_blob(tree_blob)
-		if verified is not None:
-			pyi_session = pickle.loads(verified)
-		else:
-			# Either (a) blob predates HMAC rollout (raw pickle, no
-			# prefix), or (b) the HMAC secret drifted across processes so
-			# signed blobs land here as ``32-byte sig + pickle``. Try BOTH
-			# shapes - the first ``pickle.loads`` that succeeds wins.
-			allow_unsigned = True
-			try:
-				allow_unsigned = bool(
-					frappe.conf.get("optimus_allow_unsigned_pickles", True)
-				)
-			except Exception:
-				pass
+		with guard:
+			verified = unsign_blob(tree_blob)
+			if verified is not None:
+				return pickle.loads(verified)
+			problem = "signature_verification_failed"
 			if allow_unsigned and isinstance(tree_blob, (bytes, bytearray)):
-				attempts = [bytes(tree_blob)]
-				if len(tree_blob) > 32:
-					attempts.append(bytes(tree_blob[32:]))
-				for payload in attempts:
+				for payload in (bytes(tree_blob), bytes(tree_blob[32:])):
 					try:
-						pyi_session = pickle.loads(payload)
-						break
+						with guard:
+							result = pickle.loads(payload)
 					except Exception:
 						continue
-				if pyi_session is None:
-					frappe.log_error(
-						title="optimus analyze",
-						message=(
-							f"Pyi tree load failed under both raw "
-							f"and stripped-sig paths for {uuid}"
-						),
-					)
-				else:
-					try:
-						frappe.logger().warning(
-							f"optimus analyze: loaded pyi tree for "
-							f"{uuid} via unsigned-fallback path "
-							f"(encryption_key missing in site_config "
-							f"or HMAC secret drifted across "
-							f"processes)."
-						)
-					except Exception:
-						pass
-			else:
-				frappe.log_error(
-					title="optimus analyze",
-					message=(
-						f"Pyi tree signature mismatch for {uuid}; "
-						f"unsigned fallback disabled by site_config."
-					),
-				)
+					if guard.pending():
+						break
+					return result
+				problem = "invalid_legacy_pickle"
 	except Exception:
-		frappe.log_error(
-			title="optimus analyze",
-			message=f"Failed to deserialize pyi tree for {uuid}",
-		)
-		pyi_session = None
-	return pyi_session
+		problem = "invalid_tree"
+	if guard.pending():
+		tree_blob = verified = payload = None
+		raise guard.interrupt()
+	log_ai_failure("optimus recording tree load", reason=problem)
+	return None
 
 
-def _rehydrate_from_bundle(recordings_bundle, uuid: str):
-	"""Rebuild a recording dict (rec + pyi_session + sidecar) from a persisted
-	bundle entry, mirroring the live-Redis read path. Returns the rec dict, or
-	None when the bundle lacks this uuid. Accepts either the full bundle
-	(``{"recordings": {...}}``) or the inner uuid->entry map.
-
-	``rec``/``sidecar`` come back through JSON (tuples become lists), which is
-	transparent to consumers. ``sparse``/``infra`` are intentionally not
-	re-attached (not part of the live rec shape)."""
-	import base64
-
-	if not isinstance(recordings_bundle, dict):
-		return None
-	recs = recordings_bundle.get("recordings")
-	if not isinstance(recs, dict):
-		recs = recordings_bundle
-	entry = recs.get(uuid)
-	if not isinstance(entry, dict):
-		return None
-	rec = entry.get("rec")
-	if not isinstance(rec, dict):
-		return None
-	tree_blob = None
-	tree_b64 = entry.get("tree_b64")
-	if tree_b64:
-		try:
-			tree_blob = base64.b64decode(tree_b64)
-		except Exception:
-			tree_blob = None
-	rec["pyi_session"] = _deserialize_tree(uuid, tree_blob)
-	sidecar = entry.get("sidecar")
-	rec["sidecar"] = sidecar if isinstance(sidecar, list) else []
-	return rec
-
-
-def _fetch_recordings(recording_uuids: list[str], *, recordings_bundle=None):
+def _fetch_recordings(recording_uuids: list[str]):
 	"""Stream recording dicts from Redis one at a time (a generator, so the
 	pipeline can free each pyi_session between recordings instead of holding all
 	in RAM).
 
 	For each recording also loads the per-recording pyi tree pickle and sidecar
-	log (best-effort; a missing piece yields None). Falls back to
-	``recordings_bundle`` when Redis has been cleaned up post-analyze. Yields
-	recorder dicts with added ``pyi_session`` and ``sidecar`` keys.
+	log (best-effort; a missing piece yields None). Persisted JSON consumers
+	use load_recordings_light instead, with no pickle or sidecar loading.
 	"""
+	allow_unsigned = _allow_unsigned_pickles()
 	for uuid in recording_uuids:
 		rec = frappe.cache.hget(RECORDER_REQUEST_HASH, uuid)
 		if not rec:
-			# v0.13: after analyze, _cleanup_redis deletes the recording
-			# hash + tree + sidecar. If a caller passed the persisted
-			# recordings bundle, rebuild from it so re-humanize / fix
-			# grounding / report drill-down regeneration still work
-			# post-cleanup (same verified tree-load as the Redis branch).
-			rec = _rehydrate_from_bundle(recordings_bundle, uuid)
-			if rec is not None:
-				yield rec
 			continue
 
 		# Load the pyinstrument tree pickle (best-effort) via the shared,
 		# HMAC-verified loader (see _deserialize_tree).
+		from optimus.ai_fix import _InterruptGuard, log_ai_failure
+		guard = _InterruptGuard(base=True)
 		pyi_session = None
+		failed = False
 		try:
-			tree_blob = frappe.cache.get_value(_redis_keys.tree(uuid))
-			pyi_session = _deserialize_tree(uuid, tree_blob)
+			with guard:
+				tree_blob = frappe.cache.get_value(_redis_keys.tree(uuid))
+				pyi_session = _deserialize_tree(uuid, tree_blob, allow_unsigned=allow_unsigned)
 		except Exception:
-			frappe.log_error(
-				title="optimus analyze",
-				message=f"Failed to load pyi tree for {uuid}",
-			)
-			pyi_session = None
+			failed = True
+		if guard.pending():
+			tree_blob = None
+			raise guard.interrupt()
+		if failed:
+			log_ai_failure("optimus recording tree read", reason="tree_read_failed")
 
 		# Load the sidecar argument log (best-effort)
 		sidecar = []
+		failed = False
 		try:
-			loaded = frappe.cache.get_value(_redis_keys.sidecar(uuid))
-			if isinstance(loaded, list):
-				sidecar = loaded
+			with guard:
+				loaded = frappe.cache.get_value(_redis_keys.sidecar(uuid))
+				if isinstance(loaded, list):
+					sidecar = loaded
 		except Exception:
-			frappe.log_error(
-				title="optimus analyze",
-				message=f"Failed to load sidecar for {uuid}",
-			)
-			sidecar = []
+			failed = True
+		if guard.pending():
+			loaded = sidecar = rec = tree_blob = None
+			raise guard.interrupt()
+		if failed:
+			log_ai_failure("optimus recording sidecar read", reason="sidecar_read_failed")
 
 		rec["pyi_session"] = pyi_session
 		rec["sidecar"] = sidecar
@@ -1554,22 +1489,9 @@ def _persist(
 	# the notes field on the doc form between start and stop get their
 	# text left alone.
 	if not (doc.notes or "").strip():
-		# v0.6.0: when AI is enabled, draft a friendly human-readable flow
-		# (with the raw action list kept below); otherwise or if the LLM
-		# call fails fall back to the plain labelled list.
-		# v0.13: capture the humanizer's token usage here so the steps tokens
-		# show in the report and roll into the session's cumulative spend on
-		# the auto-analyze path too not only after a manual "Refresh AI
-		# suggestions". (usage_out non-None also arms _record_session_spend at
-		# the ai_fix chokepoint, since the analyze run set the spend marker.)
-		_steps_usage: dict = {}
-		notes_html = _build_humanized_notes_html(
-			recordings, session_title=(doc.title or None), usage_out=_steps_usage
-		) or _build_auto_notes_html(recordings)
+		notes_html = _build_auto_notes_html(recordings)
 		if notes_html:
 			doc.notes = notes_html
-		if _steps_usage.get("total_tokens"):
-			doc.ai_steps_tokens = int(_steps_usage.get("total_tokens") or 0)
 
 	doc.total_requests = total_requests
 	doc.total_queries = total_queries
@@ -1916,7 +1838,7 @@ def _truncate_finding_titles(findings: list[dict]) -> None:
 _FINDING_SNIPPET_TRUNCATE_CHARS = 200
 
 
-def _enrich_findings_with_source_snippets(findings: list[dict]) -> None:
+def _enrich_findings_with_source_snippets(findings: list[dict], *, owner: str | None = None) -> None:
 	"""Mutate findings in place: attach a source snippet to each finding whose
 	technical_detail.callsite resolves to a readable file.
 
@@ -1979,7 +1901,10 @@ def _enrich_findings_with_source_snippets(findings: list[dict]) -> None:
 		# renderer._read_source_snippet resolves app-relative callsite paths
 		# (e.g. "ugly_code/python/common.py") to real files; a bare open()
 		# would fail because the worker cwd is <bench>/sites.
-		snippet = renderer._read_source_snippet(filename, lineno, cache=file_cache)
+		from optimus.renderer.source import server_script_readers
+
+		with server_script_readers(owner):
+			snippet = renderer._read_source_snippet(filename, lineno, cache=file_cache)
 		if not snippet:
 			continue
 		callsite["source_snippet"] = snippet
@@ -1987,125 +1912,6 @@ def _enrich_findings_with_source_snippets(findings: list[dict]) -> None:
 		finding["technical_detail_json"] = json.dumps(detail, default=str)
 
 
-def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = None) -> None:
-	"""Mutate ``context.findings`` in place: when Optimus Settings has
-	``ai_enabled`` and ``ai_auto_suggest``, ask the LLM for a fix on the top
-	``ai_auto_suggest_max`` eligible findings (0 = all), highest severity/impact
-	first, storing each on ``llm_fix_json``.
-
-	Best-effort and bounded by ``AI_AUTO_SUGGEST_TIME_BUDGET_SECONDS``: a bad
-	provider or per-finding error just means fewer suggestions, never a failed
-	analyze. Network I/O lives here in the orchestrator, never in an analyzer.
-	"""
-	findings = context.findings or []
-	if not findings:
-		return
-
-	try:
-		from optimus.settings import get_config
-		cfg = get_config()
-	except Exception:
-		return
-	if not (getattr(cfg, "ai_enabled", False) and getattr(cfg, "ai_suggest_findings", True)
-	        and getattr(cfg, "ai_auto_suggest", False)):
-		return
-
-	from optimus import ai_fix
-
-	if not ai_fix.is_available(section="findings"):
-		context.warnings.append(
-			"AI auto-suggest is on but the AI provider isn't fully configured "
-			"no suggestions were generated (see Optimus Settings ▸ AI Fix Suggestions)."
-		)
-		return
-
-	eligible = [
-		f for f in findings
-		if (f.get("finding_type") or "") in ai_fix.AI_ELIGIBLE_FINDING_TYPES
-	]
-	# v0.9.0: per-type opt-out (Critical Risk #2). Filter BEFORE the loop so
-	# the operator's exclusion list short-circuits payload-building too, not
-	# just the network send.
-	eligible = [f for f in eligible if not ai_fix.is_finding_type_excluded(f.get("finding_type"))]
-	if not eligible:
-		return
-	eligible.sort(key=lambda f: (
-		SEVERITY_ORDER.get(f.get("severity") or "Low", 3),
-		-(f.get("estimated_impact_ms") or 0),
-	))
-	cap = int(getattr(cfg, "ai_auto_suggest_max", 0) or 0)
-	if cap > 0:
-		eligible = eligible[:cap]
-
-	from types import SimpleNamespace
-
-	file_cache: dict = {}
-	phase2_index = _phase2_index_for(getattr(context, "docname", None))
-	# v0.6.x: when recordings are in scope (analyze-time path), build the
-	# lookup maps once so each finding's payload can carry verbatim SQL
-	# evidence (top-N queries from its action's recording).
-	recordings_by_uuid = {
-		(r.get("uuid") or ""): r for r in (recordings or []) if r.get("uuid")
-	}
-	actions_by_idx = {a["idx"]: a for a in (getattr(context, "actions", None) or []) if "idx" in a}
-	started = time.monotonic()
-	failures = 0
-	skipped_for_time = 0
-	total = len(eligible)
-	for idx, f in enumerate(eligible):
-		if time.monotonic() - started > AI_AUTO_SUGGEST_TIME_BUDGET_SECONDS:
-			skipped_for_time = total - idx
-			break
-		# Live progress per finding the floating widget / form headline
-		# show movement during the (potentially minute-long) LLM round
-		# trips instead of a frozen "Analyzing 78%". Range 78→80 leads into
-		# the next milestone ("Writing session data").
-		try:
-			_publish_progress(
-				78 + (idx / total) * 2.0,
-				f"Asking the AI for fix suggestions ({idx + 1}/{total})…",
-				context.session_uuid,
-			)
-		except Exception:
-			pass
-
-		def _suggest(f=f):
-			ns = SimpleNamespace(
-				finding_type=f.get("finding_type") or "",
-				severity=f.get("severity") or "Low",
-				title=f.get("title") or "",
-				customer_description=f.get("customer_description") or "",
-				estimated_impact_ms=f.get("estimated_impact_ms") or 0,
-				affected_count=f.get("affected_count") or 0,
-				action_ref=f.get("action_ref") or "",
-				technical_detail_json=f.get("technical_detail_json") or "{}",
-				llm_fix_json=None,
-			)
-			result = ai_fix.suggest_fix(_ai_payload_for_finding(
-				ns, file_cache, phase2_index=phase2_index,
-				recordings_by_uuid=recordings_by_uuid,
-				actions_by_idx=actions_by_idx,
-			))
-			f["llm_fix_json"] = json.dumps(result, default=str)
-
-		_, step_failed = _run_ai_step(
-			_suggest, title="optimus ai auto-suggest",
-			session_uuid=getattr(context, "session_uuid", None),
-			finding_type=f.get("finding_type") or "",
-		)
-		if step_failed:
-			failures += 1
-
-	if failures:
-		context.warnings.append(
-			f"AI auto-suggest: {failures} finding(s) couldn't get a suggestion "
-			"(provider error / timeout see error log)."
-		)
-	if skipped_for_time:
-		context.warnings.append(
-			f"AI auto-suggest: {skipped_for_time} finding(s) skipped hit the "
-			f"{AI_AUTO_SUGGEST_TIME_BUDGET_SECONDS}s budget for AI suggestions."
-		)
 
 
 def _ai_payload_for_finding(
@@ -2127,19 +1933,10 @@ def _ai_payload_for_finding(
 	slowest queries from that action's recording are attached as
 	``technical_detail.example_queries`` (verbatim SQL evidence), unless already
 	set by a SQL red-flag analyzer."""
-	from optimus import ai_fix
-
 	payload = renderer._finding_to_dict(child, file_cache=file_cache)
 	callsite = (payload.get("technical_detail") or {}).get("callsite") or {}
 	if callsite.get("filename") and callsite.get("lineno") is not None:
-		try:
-			window = renderer._read_source_window(
-				callsite["filename"], callsite["lineno"],
-				before=ai_fix._SOURCE_LINES_BEFORE, after=ai_fix._SOURCE_LINES_AFTER,
-				cache=file_cache,
-			)
-		except Exception:
-			window = None
+		window = _ai_grounding_window(callsite["filename"], callsite["lineno"], file_cache)
 		if window:
 			payload["source_window"] = window
 
@@ -2165,6 +1962,33 @@ def _ai_payload_for_finding(
 	return payload
 
 
+def _ai_grounding_window(filename: str, lineno, file_cache: dict) -> list[dict] | None:
+	"""Prefer a complete enclosing function; retain the bounded fallback window.
+
+	Unreadable source gives no window. A job timeout escapes as a fresh timeout.
+	"""
+	from optimus import ai_fix
+	from optimus.renderer import fix_recipes
+	from optimus.renderer import source as _source
+
+	guard = ai_fix._InterruptGuard()
+	window = None
+	try:
+		with guard:
+			lines = _source._source_lines(filename, cache=file_cache)
+			if lines and not isinstance(lineno, bool):
+				window = fix_recipes.enclosing_function_window(
+					lines, int(lineno),
+					before=ai_fix._SOURCE_LINES_BEFORE, after=ai_fix._SOURCE_LINES_AFTER,
+					max_line_chars=_source._SNIPPET_TRUNCATE_CHARS,
+				)
+	except Exception:
+		pass
+	if guard.pending():
+		raise guard.interrupt()
+	return window or None
+
+
 _AI_EXAMPLE_QUERIES_MAX = 3
 _AI_EXAMPLE_QUERY_MIN_MS = 0.5  # drop sub-half-ms queries (cache hits, etc.)
 
@@ -2175,6 +1999,7 @@ def _maybe_attach_recorded_queries(
 	action_ref,
 	recordings_by_uuid: dict | None,
 	actions_by_idx: dict | None,
+	send_raw: bool | None = None,
 ) -> None:
 	"""When recordings + actions are available and the finding has an
 	``action_ref``, attach the top-N slowest SQL queries from that action's
@@ -2203,13 +2028,16 @@ def _maybe_attach_recorded_queries(
 	if detail.get("example_queries"):
 		# Analyzer (SQL red flag) set these; respect they're the most relevant.
 		return
+	from optimus import ai_privacy
+
+	send_raw = ai_privacy.raw_values_enabled() if send_raw is None else send_raw
 	top = []
 	for c in sorted(calls, key=lambda c: -(c.get("duration") or c.get("duration_ms") or 0)):
 		dur_ms = c.get("duration") or c.get("duration_ms") or 0
 		if dur_ms < _AI_EXAMPLE_QUERY_MIN_MS:
 			continue
-		q = (c.get("query") or "").strip()
-		if not q:
+		q = ai_privacy.query_text(c.get("query") if send_raw else (c.get("normalized_query") or c.get("query")), send_raw=send_raw)
+		if not q or q in top:
 			continue
 		top.append(q)
 		if len(top) >= _AI_EXAMPLE_QUERIES_MAX:
@@ -2221,254 +2049,180 @@ def _maybe_attach_recorded_queries(
 
 def _phase2_index_for(doc_or_docname) -> dict:
 	"""``renderer._build_line_drilldown_callsite_index`` for a session doc or
-	docname, or ``{}`` on any error (no phase-2 runs yet, doc gone, etc.)."""
+	docname. Ordinary failures use empty context; job timeouts stop the worker."""
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
+
+	guard = _InterruptGuard()
+	failure = None
 	try:
-		doc = doc_or_docname
-		if isinstance(doc, str):
-			doc = frappe.get_doc("Optimus Session", doc)
-		return renderer._build_line_drilldown_callsite_index(doc) or {}
-	except Exception:
-		return {}
+		with guard:
+			doc = doc_or_docname
+			if isinstance(doc, str):
+				doc = frappe.get_doc("Optimus Session", doc)
+			return renderer._build_line_drilldown_callsite_index(doc) or {}
+	except Exception as exc:
+		failure = exc
+	if guard.pending():
+		raise guard.interrupt()
+	log_ai_failure("optimus AI Phase 2 context", failure)
+	return {}
 
 
-def _run_ai_backfill(doc, *, cap: int | None = None,
-                     time_budget: float = AI_BACKFILL_TIME_BUDGET_SECONDS,
-                     regenerate_all: bool = False) -> dict:
-	"""Generate AI fix suggestions for eligible findings on a persisted Optimus
-	Session ``doc``, persist them (DB + in-memory rows) and report counts.
+_SESSION_COUNTER_FIELDS = frozenset({"ai_tokens_spent", "ai_refresh_count"})
 
-	By default only fills findings without a suggestion yet;
-	``regenerate_all=True`` (re)generates every eligible one, overwriting (old
-	suggestion kept on a mid-run failure, since writes happen only on success).
-	Requires ``ai_fix.is_available()`` (returns all-zeros otherwise).
 
-	``cap``: max findings this run. None uses Optimus Settings'
-	``ai_auto_suggest_max``; 0 means no cap (as many as fit ``time_budget``).
-	Best-effort and time-budgeted (callers run in a web request). Returns
-	``{"added", "failed", "skipped_time", "total_pending"}``, where
-	``total_pending`` is the count targeted before the cap.
+def _session_increment_query(docname: str, fieldname: str, n: int):
+	"""One portable SQL increment, never a stale read-modify-write."""
+	if fieldname not in _SESSION_COUNTER_FIELDS or type(n) is not int or n < 0:
+		raise ValueError("Invalid session counter increment")
+	from frappe.query_builder.functions import Coalesce
+
+	table = frappe.qb.DocType("Optimus Session")
+	field = table[fieldname]
+	return frappe.qb.update(table).set(field, Coalesce(field, 0) + n).where(table.name == docname)
+
+
+def _increment_session_counter(docname: str, fieldname: str, n: int) -> None:
+	"""Participate in the caller's result transaction without committing it.
+
+	An accounting failure must abort that transaction, otherwise an answer
+	could be saved without its usage. The caller owns rollback and logging.
 	"""
-	out = {"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0}
-	_mark_ai_spend_session(getattr(doc, "session_uuid", None))
+	from optimus.ai_fix import _InterruptGuard
 
-	from optimus import ai_fix
-
-	if not ai_fix.is_available(section="findings"):
-		return out
-
-	rows = list(getattr(doc, "findings", None) or [])
-	chosen = [
-		r for r in rows
-		if (getattr(r, "finding_type", "") or "") in ai_fix.AI_ELIGIBLE_FINDING_TYPES
-		and (regenerate_all or not ((getattr(r, "llm_fix_json", None) or "").strip()))
-	]
-	out["total_pending"] = len(chosen)
-	if not chosen:
-		return out
-	chosen.sort(key=lambda r: (
-		SEVERITY_ORDER.get(getattr(r, "severity", None) or "Low", 3),
-		-(getattr(r, "estimated_impact_ms", 0) or 0),
-	))
-	if cap is None:
-		try:
-			from optimus.settings import get_config
-			cap = int(getattr(get_config(), "ai_auto_suggest_max", 0) or 0)
-		except Exception:
-			cap = 0
-	if cap and cap > 0:
-		chosen = chosen[:cap]
-
-	file_cache: dict = {}
-	phase2_index = _phase2_index_for(doc)
-	started = time.monotonic()
-	for idx, r in enumerate(chosen):
-		if time.monotonic() - started > time_budget:
-			out["skipped_time"] = len(chosen) - idx
-			break
-
-		def _suggest(r=r):
-			result = ai_fix.suggest_fix(_ai_payload_for_finding(r, file_cache, phase2_index=phase2_index))
-			blob = json.dumps(result, default=str)
-			frappe.db.set_value("Optimus Finding", r.name, "llm_fix_json", blob)
-			r.llm_fix_json = blob
-			out["added"] += 1
-
-		_, step_failed = _run_ai_step(
-			_suggest, title="optimus ai backfill",
-			session_uuid=getattr(doc, "session_uuid", None),
-			finding=getattr(r, "name", "") or "",
-		)
-		if step_failed:
-			out["failed"] += 1
-	if out["added"]:
-		try:
-			safe_commit()
-		except Exception:
-			pass
-	return out
+	guard = _InterruptGuard()
+	with guard:
+		_session_increment_query(docname, fieldname, n).run()
+	if guard.pending():
+		raise guard.interrupt()
 
 
-def _backfill_ai_suggestions(doc) -> bool:
-	"""Auto-suggest-gated AI backfill: run ``_run_ai_backfill`` only when Optimus
-	Settings has ``ai_enabled`` and ``ai_auto_suggest``. Returns True if any
-	suggestion was added. The explicit "Generate AI fixes" button bypasses this
-	gate by calling ``_run_ai_backfill`` directly."""
+def _add_ai_spend(docname: str, tokens: int) -> None:
+	_increment_session_counter(docname, "ai_tokens_spent", tokens)
+
+
+def _bump_ai_refresh_count(docname: str) -> None:
+	_increment_session_counter(docname, "ai_refresh_count", 1)
+
+
+def _row_get(row, key, default=None):
+	return row.get(key, default) if isinstance(row, dict) else getattr(row, key, default)
+
+
+def _ai_timestamp(value) -> float:
+	"""Legacy naive dates are UTC; corrupt/missing dates sort before known ones."""
+	if not isinstance(value, (str, datetime)):
+		return 0.0
 	try:
-		from optimus.settings import get_config
-		cfg = get_config()
-	except Exception:
-		return False
-	if not (getattr(cfg, "ai_enabled", False) and getattr(cfg, "ai_suggest_findings", True)
-	        and getattr(cfg, "ai_auto_suggest", False)):
-		return False
-	return _run_ai_backfill(doc)["added"] > 0
+		parsed = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else value
+		return parsed.replace(tzinfo=timezone.utc).timestamp() if parsed.tzinfo is None else parsed.timestamp()
+	except (ValueError, OverflowError, OSError):
+		return 0.0
 
 
-# ---------------------------------------------------------------------------
-# v0.6.0: LLM-vetted per-table index recommendation. Auto (gated by the
-# "Suggest AI fixes by default" toggle, for the top N tables that have a
-# heuristic recommendation) and on-demand (the "Suggest an index (AI)" button
-# → api.suggest_index). The result is stashed on the table's breakdown entry
-# as ``ai_index = {suggestion, model, provider, generated_at}``: the renderer
-# turns the markdown into safe HTML. Network I/O lives here in the
-# orchestrator / the API endpoint, never in an analyzer.
-# ---------------------------------------------------------------------------
+def eligible_findings(rows, cfg, *, regenerate_all=False, requested_at=None, include_outdated=True) -> list:
+	"""Select refresh work consistently, preserving each original child row.
 
+	Missing answers precede obsolete answers, then (for an explicit full
+	refresh) current answers. Resuming a run skips answers generated since its
+	request time. Selection never reads Settings again for the exclusion list.
+	"""
+	from optimus import ai_fix, ai_prompts
 
-def _table_index_sample_queries(recordings: list[dict], table: str, limit: int = 4) -> list[str]:
-	"""Up to ``limit`` distinct normalized SELECT queries from the session that
-	touched ``table``, as context for the LLM's index advice. Best-effort."""
-	out: list[str] = []
-	seen: set[str] = set()
-	for recording in recordings or []:
-		for call in recording.get("calls") or []:
-			q = (call.get("normalized_query") or call.get("query") or "").strip()
-			if not q or q in seen:
-				continue
-			try:
-				meta = table_breakdown._parse_query(q)
-			except Exception:
-				continue
-			if meta.get("verb") == "SELECT" and table in (meta.get("tables") or []):
-				seen.add(q)
-				out.append(q)
-				if len(out) >= limit:
-					return out
-	return out
-
-
-def _table_existing_indexes(table: str) -> list[dict]:
-	"""``[{name, columns, unique}]`` for ``table`` (best-effort, [] on error).
-	Delegates to the dialect adapter so it's portable across MariaDB / Postgres."""
-	from optimus.dbdialect import get_dialect
-
-	return [
-		{"name": ix.name, "columns": ix.columns, "unique": ix.unique}
-		for ix in get_dialect().existing_indexes(table)
-	]
-
-
-def _ai_payload_for_table(t_entry: dict, recordings: list[dict]) -> dict:
-	"""Build the dict ``ai_fix.suggest_index`` expects from a breakdown entry."""
-	table = t_entry.get("table") or ""
-	rec = t_entry.get("recommended_index") or {}
-	return {
-		"table": table,
-		"doctype": rec.get("doctype") or (table[3:] if table.lower().startswith("tab") else ""),
-		"read_count": t_entry.get("read_count") or 0,
-		"write_count": t_entry.get("write_count") or 0,
-		"is_write_hot": bool(t_entry.get("is_write_hot")),
-		"recommended_index": rec,
-		"candidates": t_entry.get("index_candidates") or [],
-		"framework_cols_filtered": t_entry.get("framework_cols_filtered") or [],
-		"existing_indexes": _table_existing_indexes(table),
-		"sample_queries": _table_index_sample_queries(recordings, table),
-	}
-
-
-def _enrich_table_breakdown_with_ai_suggestions(context, recordings: list[dict]) -> None:
-	"""When Optimus Settings has ``ai_enabled`` and ``ai_auto_suggest``, ask the
-	LLM for an index recommendation on the top ``AI_AUTO_INDEX_MAX_TABLES``
-	tables that have a heuristic ``recommended_index``, stashing it on each
-	breakdown entry's ``ai_index``. Best-effort and time-budgeted: never fails
-	analyze."""
-	breakdown = (context.aggregate or {}).get("table_breakdown") or []
-	eligible = [t for t in breakdown if isinstance(t, dict) and t.get("recommended_index")]
-	if not eligible:
-		return
-	try:
-		from optimus.settings import get_config
-		cfg = get_config()
-	except Exception:
-		return
-	if not (getattr(cfg, "ai_enabled", False) and getattr(cfg, "ai_suggest_indexes", True)
-	        and getattr(cfg, "ai_auto_suggest", False)):
-		return
-	from optimus import ai_fix
-	if not ai_fix.is_available(section="indexes"):
-		return  # the findings auto-suggest step already warned about this
-
-	eligible = eligible[:AI_AUTO_INDEX_MAX_TABLES]
-	started = time.monotonic()
-	total = len(eligible)
-	for idx, t in enumerate(eligible):
-		if time.monotonic() - started > AI_AUTO_INDEX_TIME_BUDGET_SECONDS:
-			break
+	selected = []
+	cutoff = _ai_timestamp(requested_at)
+	for row in rows:
+		finding = ai_fix.gate_input(row)
+		if ai_fix.is_finding_type_excluded(finding["finding_type"], cfg=cfg) or ai_fix.llm_gate_note(finding):
+			continue
+		stored = _row_get(row, "llm_fix_json")
 		try:
-			_publish_progress(
-				79 + (idx / total) * 1.0,
-				f"Asking the AI to review index candidates ({idx + 1}/{total})…",
-				context.session_uuid,
+			stored = json.loads(stored) if isinstance(stored, str) else None
+		except (ValueError, TypeError):
+			stored = None
+		generated = _ai_timestamp(stored.get("generated_at")) if isinstance(stored, dict) else 0.0
+		if not isinstance(stored, dict):
+			bucket = 0
+		else:
+			suggestion = stored.get("suggestion")
+			guardrail = stored.get("guardrail")
+			outdated = (
+				not isinstance(suggestion, str) or not suggestion.strip() or bool(stored.get("error"))
+				or stored.get("prompt_version") != ai_prompts.PROMPT_VERSION
+				or (isinstance(guardrail, dict) and bool(guardrail.get("fallback")))
 			)
-		except Exception:
-			pass
-		index, step_failed = _run_ai_step(
-			lambda t=t: ai_fix.suggest_index(_ai_payload_for_table(t, recordings)),
-			title="optimus ai index-suggest",
-			session_uuid=getattr(context, "session_uuid", None),
-			table=t.get("table") or "",
-		)
-		if not step_failed:
-			t["ai_index"] = index
+			bucket = 1 if outdated else 2
+		if (bucket == 1 and not include_outdated and not regenerate_all) or (bucket == 2 and not regenerate_all):
+			continue
+		if bucket and cutoff and generated >= cutoff:
+			continue
+		try:
+			impact = float(_row_get(row, "estimated_impact_ms", 0) or 0)
+		except (TypeError, ValueError, OverflowError):
+			impact = 0.0
+		if not math.isfinite(impact):
+			impact = 0.0
+		severity = _row_get(row, "severity")
+		key = (bucket, generated, SEVERITY_ORDER.get(severity, 3) if isinstance(severity, str) else 3, -impact)
+		selected.append((key, row))
+	return [row for _, row in sorted(selected, key=lambda pair: pair[0])]
 
 
-def _run_table_index_ai_backfill(doc, *, table_name: str) -> dict:
-	"""Generate (or regenerate) the LLM index recommendation for one table on a
-	persisted Optimus Session ``doc`` and write it into ``table_breakdown_json``.
-	Ungated but still needs a configured provider. Returns
-	``{"ok", "table", "reason"?}``; lets ``ai_fix.AiFixError`` propagate."""
-	_mark_ai_spend_session(getattr(doc, "session_uuid", None))
-	if not table_name:
-		return {"ok": False, "reason": "no table specified"}
-	from optimus import ai_fix
-	if not ai_fix.is_available(section="indexes"):
-		return {"ok": False, "table": table_name, "reason": "AI index recommendations not available"}
-	try:
-		breakdown = json.loads(doc.table_breakdown_json or "[]")
-	except Exception:
-		breakdown = []
-	t_entry = next((t for t in breakdown if isinstance(t, dict) and t.get("table") == table_name), None)
-	if t_entry is None:
-		return {"ok": False, "table": table_name, "reason": "table not in the breakdown"}
-	if not t_entry.get("recommended_index"):
-		return {"ok": False, "table": table_name, "reason": "no index candidate for this table"}
+def action_recording_map(actions) -> dict:
+	"""``action_ref`` is a zero-based position, unlike Frappe's one-based idx."""
+	return {i: {"recording_uuid": _row_get(action, "recording_uuid")} for i, action in enumerate(actions or ())}
 
-	recording_uuids = [
-		a.recording_uuid for a in (doc.actions or []) if getattr(a, "recording_uuid", None)
-	]
-	try:
-		recordings = list(_fetch_recordings(recording_uuids, recordings_bundle=_load_recordings_bundle(doc)))
-	except Exception:
-		recordings = []
 
-	result = ai_fix.suggest_index(_ai_payload_for_table(t_entry, recordings))
-	t_entry["ai_index"] = result
-	frappe.db.set_value(
-		"Optimus Session", doc.name, "table_breakdown_json",
-		json.dumps(breakdown, default=str),
-	)
-	safe_commit()
-	return {"ok": True, "table": table_name}
+def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
+	"""Load only recorder JSON, without deserializing trees or sidecars.
+
+	A slice's caller-owned memo parses the persisted bundle at most once per
+	session/file. An explicitly empty UUID list requests no recordings. Missing
+	or malformed records are omitted; Redis errors fall back to the bundle.
+	"""
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
+
+	if uuids is None:
+		uuids = [_row_get(action, "recording_uuid") for action in (_row_get(doc, "actions") or ())]
+	uuids = list(dict.fromkeys(uuid for uuid in uuids if isinstance(uuid, str) and uuid))
+	if not uuids:
+		return []
+	memo = {} if memo is None else memo
+	memo_key = ("recordings", _row_get(doc, "name"), _row_get(doc, "session_uuid"), _row_get(doc, "recordings_file"))
+	result, failure = [], None
+	redis_failed = False
+	for uuid in uuids:
+		rec = None
+		guard = _InterruptGuard()
+		try:
+			with guard:
+				if not redis_failed:
+					rec = frappe.cache.hget(RECORDER_REQUEST_HASH, uuid)
+		except Exception as exc:
+			failure = exc
+			redis_failed = True
+		if guard.pending():
+			rec = None
+			raise guard.interrupt()
+		if failure is not None:
+			try:
+				log_ai_failure("optimus recording cache read", failure, session_uuid=_row_get(doc, "session_uuid"))
+			finally:
+				failure = None
+		if not isinstance(rec, dict) or not rec:
+			if memo_key not in memo:
+				memo[memo_key] = _load_recordings_bundle(doc)
+			bundle = memo[memo_key]
+			recordings = bundle.get("recordings") if isinstance(bundle, dict) else None
+			entry = recordings.get(uuid) if isinstance(recordings, dict) else None
+			rec = entry.get("rec") if isinstance(entry, dict) else None
+		if isinstance(rec, dict) and rec:
+			result.append({key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}})
+	return result
+
+
+
+
 
 
 # v0.5.1: auto-generated "Steps to Reproduce" from captured actions. The
@@ -2608,37 +2362,34 @@ _HUMANIZED_NOTES_PREAMBLE = (
 )
 
 
-def _actions_for_humanizer(recordings: list[dict]) -> list[dict]:
+def _actions_for_humanizer(recordings: list[dict], *, send_raw: bool | None = None) -> list[dict]:
 	"""Compact per-action dicts (label / cmd / path / method / doctype /
 	duration_ms) for ``ai_fix.humanize_steps``, noise-filtered and capped like
 	the raw auto-notes list."""
+	from optimus import ai_privacy
+
+	send_raw = ai_privacy.raw_values_enabled() if send_raw is None else send_raw
 	out: list[dict] = []
-	for rec in _recordings_for_reproducer(recordings)[:_AUTO_NOTES_MAX_ENTRIES]:
-		fd = rec.get("form_dict") or {}
-		doctype = ""
-		if isinstance(fd, dict):
-			doctype = (fd.get("doctype") or fd.get("dt") or fd.get("doc_type") or "").strip()
-			if not doctype:
-				# savedocs embeds the doctype in a `doc` JSON blob; client.*
-				# uses `doc` / `dt`. Reuse per_action's extractors.
-				try:
-					doctype = (per_action._extract_doc_info(fd)[0] or "").strip()
-				except Exception:
-					doctype = ""
-				if not doctype:
-					try:
-						doctype = (per_action._extract_doctype(fd) or "").strip()
-					except Exception:
-						doctype = ""
+	for original in recordings or []:
+		rec = ai_privacy.action_recording(original)
+		if rec is None or _is_reproducer_noise(rec):
+			continue
+		if len(out) >= _AUTO_NOTES_MAX_ENTRIES:
+			break
+		fd = rec["form_dict"]
+		doctype, is_new = per_action._extract_doc_info(fd)
+		doctype = doctype or fd.get("dt") or fd.get("doc_type") or ""
 		out.append({
 			"label": per_action.humanized_label(rec) or "",
 			"cmd": (rec.get("cmd") or "").strip(),
 			"path": (rec.get("path") or "").strip(),
 			"method": (rec.get("method") or "").strip(),
 			"doctype": doctype,
+			"operation": fd.get("action"),
+			"is_new": is_new,
 			"duration_ms": round(rec.get("duration") or 0, 1),
 		})
-	return out
+	return out if send_raw else [ai_privacy.private_action(action) for action in out]
 
 
 def _assemble_humanized_notes(steps_markdown: str) -> str:
@@ -2648,37 +2399,6 @@ def _assemble_humanized_notes(steps_markdown: str) -> str:
 	return _HUMANIZED_NOTES_PREAMBLE + renderer._markdown_to_safe_html(steps_markdown)
 
 
-def _build_humanized_notes_html(
-	recordings: list[dict], *, session_title: str | None = None,
-	usage_out: dict | None = None,
-) -> str:
-	"""LLM-humanized "Steps to Reproduce" HTML, or "" when AI isn't
-	enabled/available, there's nothing to summarise, or the LLM call fails (the
-	caller then falls back to ``_build_auto_notes_html``). Best-effort, never
-	raises."""
-	try:
-		from optimus.settings import get_config
-		cfg = get_config()
-	except Exception:
-		return ""
-	if not (getattr(cfg, "ai_enabled", False) and getattr(cfg, "ai_humanize_steps", True)):
-		return ""
-	from optimus import ai_fix
-	if not ai_fix.is_available(section="humanize"):
-		return ""
-	actions = _actions_for_humanizer(recordings)
-	if not actions:
-		return ""
-	steps_md, step_failed = _run_ai_step(
-		lambda: ai_fix.humanize_steps(actions, session_title=session_title, usage_out=usage_out),
-		title="optimus humanize_steps",
-		session_uuid=getattr(frappe.local, "_optimus_spend_session", None),
-	)
-	if step_failed:
-		return ""
-	if not (steps_md or "").strip():
-		return ""
-	return _assemble_humanized_notes(steps_md)
 
 
 def _compute_top_severity(findings: list[dict]) -> str:
@@ -2873,173 +2593,147 @@ def _finalize_with_empty_session(docname: str) -> None:
 	safe_commit()
 
 
-def _render_and_attach_reports(docname: str, recordings: list[dict]) -> None:
-	"""Render the HTML report and attach it as a PRIVATE File on the Optimus
-	Session. Private-file read permission plus the ``if_owner=1`` rule and
-	``permissions.file_has_permission`` gate mean non-admins can only download
-	reports for their own sessions."""
-	# Re-fetch the doc so child rows persisted by _persist are visible.
-	doc = frappe.get_doc("Optimus Session", docname)
+def _render_and_attach_reports(docname: str, recordings: list[dict]) -> bool:
+	"""Atomically replace the private HTML report, preserving the old file on failure."""
+	from optimus.report_refresh import render_report
 
-	# v0.6.0 Round 7: safe-mode reporting removed. Single admin-scoped
-	# raw report only see product_thesis_self_hosted.md memory for
-	# the rationale (PII redaction was a moat the user opted to drop in
-	# favor of single-rendering-path simplicity).
-	try:
-		raw_html = renderer.render_raw(doc, recordings)
-		raw_url = _save_report_file(
-			docname=docname,
-			filename=f"optimus_raw_report_{doc.session_uuid}.html",
-			attached_to_field="raw_report_file",
-			content=raw_html,
-		)
-		if raw_url:
-			frappe.db.set_value("Optimus Session", docname, "raw_report_file", raw_url)
-	except Exception:
-		frappe.log_error(title="optimus render raw report")
-
-	safe_commit()
+	return bool(render_report(docname, recordings)["regenerated"])
 
 
 def _save_report_file(*, docname: str, filename: str, attached_to_field: str, content) -> str | None:
-	"""Insert a private File attached to the Optimus Session. Returns its
-	file_url, or None on failure.
+	"""Attach generated recording bytes; ordinary failure is optional, interrupts escape."""
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
 
-	Temporarily clears ``frappe.local.request`` around the insert so
-	``File.validate_file_extension`` takes its code-generated-file bypass (it
-	only fires when ``frappe.request`` is falsy). Needed on the inline path
-	(scheduler disabled), where a real request would otherwise make File reject
-	HTML via System Settings' allowed_file_extensions. The request is restored
-	in a ``finally`` so the caller's response building is unaffected.
-	"""
+	guard = _InterruptGuard(base=True)
+	failed = False
 	try:
-		file_doc = frappe.get_doc(
-			{
-				"doctype": "File",
-				"file_name": filename,
-				"attached_to_doctype": "Optimus Session",
-				"attached_to_name": docname,
+		with guard:
+			file_doc = frappe.get_doc({
+				"doctype": "File", "file_name": filename,
+				"attached_to_doctype": "Optimus Session", "attached_to_name": docname,
 				"attached_to_field": attached_to_field,
 				"content": content if isinstance(content, (bytes, bytearray)) else content.encode("utf-8"),
 				"is_private": 1,
-			}
-		)
-		saved_request = getattr(frappe.local, "request", None)
-		try:
-			# Temporarily stash the request so File's
-			# validate_file_extension hits its no-request bypass.
-			# Narrow window only the insert() call, which doesn't
-			# touch request-scoped state.
+			})
+			saved_request = getattr(frappe.local, "request", None)
 			try:
+				# Preserve the narrow generated-file extension exception.
 				frappe.local.request = None
-			except Exception:
-				# frappe.local might be a werkzeug Local proxy on some
-				# versions; setting via attribute assignment works but
-				# guard defensively.
-				pass
-			file_doc.insert(ignore_permissions=True)
-		finally:
-			# Restore unconditionally. A failed insert STILL needs the
-			# original request object back so the caller's response-
-			# building code isn't broken.
-			try:
+				file_doc.insert(ignore_permissions=True)
+			finally:
 				frappe.local.request = saved_request
-			except Exception:
-				pass
-		return file_doc.file_url
+			return file_doc.file_url
 	except Exception:
-		frappe.log_error(title=f"optimus save_report_file {filename}")
-		return None
+		failed = True
+	if guard.pending():
+		content = file_doc = None
+		raise guard.interrupt()
+	if failed:
+		log_ai_failure("optimus save recording File", reason="file_write_failed")
+	return None
 
 
 def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: list[str]) -> None:
-	"""Snapshot every per-session Redis artifact to a gzipped JSON File on the
-	session BEFORE :func:`_cleanup_redis` deletes them, so the steps humanizer,
-	AI-fix grounding and report drill-downs can re-run once the live recording
-	is gone.
+	"""Persist recorder JSON for later refresh and report regeneration.
 
-	Bundle shape::
-
-	    {"schema", "session_uuid", "session_state",
-	     "recordings": {uuid: {rec, sparse, tree_b64, sidecar, infra}}}
-
-	``rec`` + ``tree`` + ``sidecar`` are what :func:`_rehydrate_from_bundle`
-	reconstructs; ``sparse`` + ``infra`` + ``session_state`` are captured for
-	future use and not read today. Values are already capture-time redacted; the
-	tree stays as the raw HMAC-signed pickle (base64) so it reloads through the
-	verified path. Best-effort: a failure never aborts analyze.
+	Trees and argument sidecars remain transient Redis input for the first
+	analysis. Neither opaque artifact is copied into persisted snapshots.
 	"""
-	import base64
-	import gzip
+	from optimus import recording_bundle
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
 
+	guard = _InterruptGuard(base=True)
+	failed = False
 	try:
-		recordings: dict = {}
-		for uuid in recording_uuids:
-			rec = frappe.cache.hget(RECORDER_REQUEST_HASH, uuid)
-			if not isinstance(rec, dict):
-				continue
-			entry: dict = {"rec": rec}
-			sparse = frappe.cache.hget(RECORDER_REQUEST_SPARSE_HASH, uuid)
-			if isinstance(sparse, dict):
-				entry["sparse"] = sparse
-			tree_blob = frappe.cache.get_value(_redis_keys.tree(uuid))
-			if isinstance(tree_blob, (bytes, bytearray)):
-				entry["tree_b64"] = base64.b64encode(bytes(tree_blob)).decode("ascii")
-			sidecar = frappe.cache.get_value(_redis_keys.sidecar(uuid))
-			if isinstance(sidecar, list):
-				entry["sidecar"] = sidecar
-			infra_blob = frappe.cache.get_value(_redis_keys.infra(uuid))
-			if isinstance(infra_blob, dict):
-				entry["infra"] = infra_blob
-			# Carry the resolved target-doc onto the snapshotted rec so a regenerated report still shows the real doc name.
-			resolved_doc = frappe.cache.get_value(_redis_keys.resolved_doc(uuid))
-			if isinstance(resolved_doc, dict):
-				rec["resolved_target_doc"] = resolved_doc
-			recordings[uuid] = entry
+		with guard:
+			recordings: dict = {}
+			for uuid in recording_uuids:
+				rec = frappe.cache.hget(RECORDER_REQUEST_HASH, uuid)
+				if not isinstance(rec, dict):
+					continue
+				rec = {key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}}
+				entry: dict = {"rec": rec}
+				sparse = frappe.cache.hget(RECORDER_REQUEST_SPARSE_HASH, uuid)
+				if isinstance(sparse, dict):
+					entry["sparse"] = sparse
+				infra_blob = frappe.cache.get_value(_redis_keys.infra(uuid))
+				if isinstance(infra_blob, dict):
+					entry["infra"] = infra_blob
+				# Carry the resolved target-doc onto the snapshotted rec so a regenerated report still shows the real doc name.
+				resolved_doc = frappe.cache.get_value(_redis_keys.resolved_doc(uuid))
+				if isinstance(resolved_doc, dict):
+					rec["resolved_target_doc"] = resolved_doc
+				recordings[uuid] = entry
 
-		if not recordings:
-			return
+			if not recordings:
+				return
 
-		bundle = {
-			"schema": 1,
-			"session_uuid": session_uuid,
-			"session_state": session.get_session_meta(session_uuid),
-			"recordings": recordings,
-		}
-		payload = gzip.compress(json.dumps(bundle, default=str).encode("utf-8"))
-		url = _save_report_file(
-			docname=docname,
-			filename=f"optimus_recordings_{session_uuid}.json.gz",
-			attached_to_field="recordings_file",
-			content=payload,
-		)
-		if url:
-			frappe.db.set_value("Optimus Session", docname, "recordings_file", url)
+			bundle = {
+				"schema": 1,
+				"session_uuid": session_uuid,
+				"session_state": session.get_session_meta(session_uuid),
+				"recordings": recordings,
+			}
+			payload = recording_bundle.encode(bundle)
+			url = _save_report_file(
+				docname=docname,
+				filename=f"optimus_recordings_{session_uuid}.json.gz",
+				attached_to_field="recordings_file",
+				content=payload,
+			)
+			if url:
+				frappe.db.set_value("Optimus Session", docname, "recordings_file", url)
 	except Exception:
-		try:
-			frappe.log_error(title="optimus persist recordings")
-		except Exception:
-			pass
+		failed = True
+	if guard.pending():
+		recordings = rec = bundle = payload = None
+		raise guard.interrupt()
+	if failed:
+		log_ai_failure("optimus persist recordings", reason="snapshot_write_failed")
 
 
 def _load_recordings_bundle(session_doc):
-	"""Load the persisted recordings snapshot for a session as a parsed bundle
-	dict, for passing to ``_fetch_recordings(recordings_bundle=...)`` once Redis
-	is cleaned up. None when there's no snapshot or it can't be read."""
-	import gzip
+	"""Read bounded JSON only from the private File bound to this session.
+
+	Missing snapshots are optional. Rejections/read failures are logged with
+	fixed reasons, outside exception handlers, without recording content.
+	"""
+	from optimus import recording_bundle
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
 
 	url = getattr(session_doc, "recordings_file", None)
 	if not url:
 		return None
+	problem = None
+	guard = _InterruptGuard(base=True)
 	try:
-		file_doc = frappe.get_doc("File", {"file_url": url})
-		with open(file_doc.get_full_path(), "rb") as fh:
-			raw = fh.read()
-		bundle = json.loads(gzip.decompress(raw).decode("utf-8"))
-		return bundle if isinstance(bundle, dict) else None
+		with guard:
+			docname = getattr(session_doc, "name", None)
+			session_uuid = getattr(session_doc, "session_uuid", None)
+			if (not docname or not session_uuid or not isinstance(url, str)
+				or not url.startswith("/private/files/") or not url.removeprefix("/private/files/")
+				or any(char in url.removeprefix("/private/files/") for char in ("/", "\\", "?", "#", "\0"))):
+				raise recording_bundle.InvalidBundle("invalid_file_reference")
+			binding = {"file_url": url, "is_private": 1, "attached_to_doctype": "Optimus Session",
+				"attached_to_name": docname, "attached_to_field": "recordings_file"}
+			names = frappe.get_all("File", filters=binding, pluck="name", limit_page_length=2)
+			if len(names) != 1:
+				raise recording_bundle.InvalidBundle("file_not_bound_to_session")
+			file_doc = frappe.get_doc("File", names[0])
+			if any(getattr(file_doc, key, None) != value for key, value in binding.items()):
+				raise recording_bundle.InvalidBundle("file_binding_changed")
+			return recording_bundle.read(file_doc.get_full_path(),
+				private_root=frappe.get_site_path("private", "files"), session_uuid=session_uuid)
+	except recording_bundle.InvalidBundle as exc:
+		problem = str(exc)
 	except Exception:
-		frappe.log_error(title="optimus load recordings bundle")
-		return None
+		problem = "bundle_read_failed"
+	if guard.pending():
+		raise guard.interrupt()
+	if problem:
+		log_ai_failure("optimus load recordings bundle", reason=problem,
+			session_uuid=getattr(session_doc, "session_uuid", None))
+	return None
 
 
 def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:

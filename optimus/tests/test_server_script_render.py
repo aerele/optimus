@@ -34,6 +34,9 @@ def fake_frappe_db(monkeypatch):
 		return [dict(r) for r in state["rows"]]
 
 	monkeypatch.setattr(frappe, "get_all", fake_get_all, raising=False)
+	monkeypatch.setattr("optimus.renderer.source._may_read_server_script", lambda *a: True)
+	monkeypatch.setattr(frappe, "db", types.SimpleNamespace(get_value=lambda dt, name, field: next(
+		(row.get("script") for row in state["rows"] if row["name"] == name), None)), raising=False)
 	return state
 
 

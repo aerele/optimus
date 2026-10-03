@@ -174,7 +174,7 @@ class TestBuildMessages:
 	def test_query_is_truncated_when_huge(self):
 		f = self._finding()
 		f["technical_detail"]["normalized_query"] = "SELECT " + "x," * 5000 + "1"
-		_, messages = ai_fix._build_messages(f)
+		_, messages, _ = ai_fix._build_fix_request(f, threshold_ms=1000, context_tokens=32768, send_raw=True)
 		assert "(truncated)" in messages[0]["content"]
 
 	def test_handles_minimal_finding_without_detail(self):
@@ -313,7 +313,7 @@ class TestOpenAiCall:
 	def test_content_as_list_of_parts(self, monkeypatch):
 		payload = {"choices": [{"message": {"content": [{"text": "a"}, {"text": "b"}]}}]}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
-		assert ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}]) == "ab"
+		assert ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}]) == "ab"
 
 	def test_content_list_with_a_none_or_non_str_text_keeps_the_rest(self, monkeypatch):
 		# A part whose "text" is None (or not a string) counts as no text: the
@@ -322,12 +322,12 @@ class TestOpenAiCall:
 			{"text": "a"}, {"type": "text", "text": None}, "stray", {"text": 7}, {"type": "image"}, {"text": "b"},
 		]}}]}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
-		assert ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}]) == "ab"
+		assert ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}]) == "ab"
 
 	def test_no_text_in_response_raises(self, monkeypatch):
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {"choices": []})))
 		with pytest.raises(ai_fix.AiFixError):
-			ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}])
+			ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}])
 
 	def test_populates_usage_out_when_provided(self, monkeypatch):
 		payload = {
@@ -336,7 +336,7 @@ class TestOpenAiCall:
 		}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		usage: dict = {}
-		ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage)
+		ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage)
 		assert usage == {"prompt_tokens": 120, "completion_tokens": 45, "total_tokens": 165}
 
 	def test_retries_without_temperature_on_400_temperature_error(self, monkeypatch):
@@ -345,7 +345,7 @@ class TestOpenAiCall:
 		err = '{"error":{"message":"invalid temperature: only 1 is allowed for this model"}}'
 		fp = _post_sequence(_FakeResp(400, text=err), _FakeResp(200, _OPENAI_OK))
 		monkeypatch.setattr(requests, "post", fp)
-		text = ai_fix._call_openai_chat("u", "k", "kimi-k2.6", "s", [{"role": "user", "content": "x"}])
+		text = ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "kimi-k2.6", "s", [{"role": "user", "content": "x"}])
 		assert text == "**Fix**\n\nuse a join"
 		assert len(fp.calls) == 2
 		assert "temperature" in fp.calls[0].body   # first attempt sent it
@@ -357,7 +357,7 @@ class TestOpenAiCall:
 		err = '{"error":"invalid temperature: only 1 is allowed for this model"}'
 		fp = _post_sequence(_FakeResp(422, text=err), _FakeResp(200, _OPENAI_OK))
 		monkeypatch.setattr(requests, "post", fp)
-		text = ai_fix._call_openai_chat("u", "k", "some-thinking-model", "s", [{"role": "user", "content": "x"}])
+		text = ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "some-thinking-model", "s", [{"role": "user", "content": "x"}])
 		assert text == "**Fix**\n\nuse a join"
 		assert len(fp.calls) == 2
 		assert "temperature" not in fp.calls[1].body  # retry dropped it
@@ -366,7 +366,7 @@ class TestOpenAiCall:
 		fp = _post_sequence(_FakeResp(400, text='{"error":{"message":"context_length_exceeded"}}'))
 		monkeypatch.setattr(requests, "post", fp)
 		with pytest.raises(ai_fix.AiFixError):
-			ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}])
+			ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}])
 		assert len(fp.calls) == 1  # no retry for unrelated 400s
 
 	def test_404_body_mentioning_temperature_does_not_retry(self, monkeypatch):
@@ -379,43 +379,28 @@ class TestOpenAiCall:
 		assert len(fp.calls) == 1  # no retry
 
 
-class TestAereleSessionAttribution:
-	"""The Aerele managed proxy is sent a ``metadata`` block attributing each
-	call to the originating Optimus Session, so the billing portal can show
-	per-session usage. Only the Aerele provider gets it; OpenAI/Anthropic must
-	not receive unknown body fields."""
+class TestSessionAttribution:
+	"""Only providers opting into metadata receive explicit session attribution."""
 
-	def test_metadata_none_for_non_aerele_provider(self):
-		assert ai_fix._aerele_call_metadata({"name": "OpenAI"}, "N+1 Query") is None
-		assert ai_fix._aerele_call_metadata(None) is None
+	def test_metadata_is_opt_in_even_for_previously_special_provider(self):
+		for provider in (None, {"name": "Aerele"}, {"name": "OpenAI"}):
+			assert ai_fix._session_call_metadata(provider, session_uuid="fake-session", docname="fake-doc") is None
 
-	def test_metadata_none_for_aerele_without_active_session(self, monkeypatch):
-		import frappe
+	def test_flag_works_without_provider_name_or_database(self):
+		meta = ai_fix._session_call_metadata(
+			{"send_session_metadata": True}, session_uuid="fake-session", docname="fake-doc", finding_type="N+1 Query",
+		)
+		assert meta == {"optimus_session_uuid": "fake-session", "optimus_session": "fake-doc", "optimus_finding_type": "N+1 Query"}
 
-		monkeypatch.setattr(frappe.local, "_optimus_spend_session", None, raising=False)
-		assert ai_fix._aerele_call_metadata({"name": "Aerele"}, "Steps") is None
+	def test_no_explicit_session_means_no_metadata(self):
+		assert ai_fix._session_call_metadata({"send_session_metadata": True}, session_uuid=None, docname=None) is None
 
-	def test_metadata_builds_ref_for_aerele_with_session(self, monkeypatch):
-		import frappe
-
-		class _FakeDB:
-			def get_value(self, *a, **k):
-				return "nonj171gfs"
-
-		monkeypatch.setattr(frappe.local, "_optimus_spend_session", "uuid-123", raising=False)
-		monkeypatch.setattr(frappe, "db", _FakeDB(), raising=False)
-		meta = ai_fix._aerele_call_metadata({"name": "Aerele"}, "N+1 Query")
-		assert meta == {
-			"optimus_session_uuid": "uuid-123",
-			"optimus_session": "nonj171gfs",
-			"optimus_finding_type": "N+1 Query",
-		}
 
 	def test_call_includes_metadata_in_body(self, monkeypatch):
 		fp = _post_returning(_FakeResp(200, _OPENAI_OK))
 		monkeypatch.setattr(requests, "post", fp)
 		ai_fix._call_openai_chat(
-			"u", "k", "m", "s", [{"role": "user", "content": "x"}],
+			"https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}],
 			metadata={"optimus_session": "abc"},
 		)
 		assert fp.last.body["metadata"] == {"optimus_session": "abc"}
@@ -423,7 +408,7 @@ class TestAereleSessionAttribution:
 	def test_call_omits_metadata_key_when_none(self, monkeypatch):
 		fp = _post_returning(_FakeResp(200, _OPENAI_OK))
 		monkeypatch.setattr(requests, "post", fp)
-		ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}])
+		ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}])
 		assert "metadata" not in fp.last.body
 
 
@@ -482,13 +467,13 @@ class TestUsageNormalization:
 	def test_a_good_suggestion_is_kept_when_usage_is_malformed(self, monkeypatch, usage):
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {**_OPENAI_OK, "usage": usage})))
 		out: dict = {}
-		assert ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=out) == (
+		assert ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=out) == (
 			"**Fix**\n\nuse a join"
 		)
 		assert out == self._ZERO
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {**_ANTHROPIC_OK, "usage": usage})))
 		out = {}
-		assert ai_fix._call_anthropic("u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=out) == (
+		assert ai_fix._call_anthropic("https://fake.invalid", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=out) == (
 			"**Fix**\n\nadd an index"
 		)
 		assert out == self._ZERO
@@ -522,12 +507,12 @@ class TestAnthropicCall:
 		        "model": "claude-sonnet-4-6", "needs_key": True, "has_key": True}
 		with _provider(prov):
 			with pytest.raises(ai_fix.AiFixError, match="empty response"):
-				ai_fix.suggest_fix({"finding_type": "Missing Index", "title": "x", "technical_detail": {}})
+				ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
 
 
 class TestHttpErrorMapping:
 	def _call(self):
-		return ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}])
+		return ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}])
 
 	def test_timeout(self, monkeypatch):
 		monkeypatch.setattr(requests, "post", _post_raising(requests.exceptions.Timeout()))
@@ -559,10 +544,10 @@ class TestHttpErrorMapping:
 			ai_fix._call_openai_chat("http://localhost:11434", "", "bad-model", "s", [{"role": "user", "content": "x"}])
 		msg = str(ei.value)
 		assert "404" in msg
-		assert "/chat/completions" in msg
+		assert "/chat/completions" in ei.value.detail and "/chat/completions" not in msg
 		assert "Model" in msg
 		assert "/v1" in msg
-		assert "model not found" in msg   # provider's own error body surfaced
+		assert "model not found" in ei.value.detail and "model not found" not in msg
 
 	def test_generic_http_error_includes_body_detail(self, monkeypatch):
 		monkeypatch.setattr(requests, "post", _post_returning(
@@ -573,8 +558,9 @@ class TestHttpErrorMapping:
 		# found" / "context too long" etc. reach the operator.
 		monkeypatch.setattr(requests, "post", _post_returning(
 			_FakeResp(400, {}, text="bad model name")))
-		with pytest.raises(ai_fix.AiFixError, match="bad model name"):
+		with pytest.raises(ai_fix.AiFixError, match="HTTP 400") as caught:
 			self._call()
+		assert "bad model name" in caught.value.detail
 
 	def test_non_json_body(self, monkeypatch):
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, raise_on_json=True)))
@@ -749,7 +735,7 @@ class TestSuggestFix:
 		prov = {"name": "Anthropic", "protocol": "anthropic", "base_url": "https://api.anthropic.com",
 		        "model": "claude-sonnet-4-6", "needs_key": True, "has_key": True}
 		with _provider(prov):
-			out = ai_fix.suggest_fix({"finding_type": "Missing Index", "title": "x", "technical_detail": {}})
+			out = ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
 		assert out["suggestion"] == "**Fix**\n\nadd an index"
 		assert out["provider"] == "Anthropic"
 
@@ -803,7 +789,7 @@ class TestSourceAvailableFlag:
 
 	def test_false_when_only_title_and_numbers(self, monkeypatch):
 		out = self._suggest(monkeypatch, {
-			"finding_type": "Slow Hot Path", "title": "x", "technical_detail": {},
+			"finding_type": "Slow Query", "title": "x", "technical_detail": {},
 		})
 		assert out["source_available"] is False
 
@@ -812,26 +798,12 @@ class TestSourceAvailableFlag:
 		# line-profiled it has the per-line numbers, so don't show the
 		# "no source" caveat.
 		out = self._suggest(monkeypatch, {
-			"finding_type": "Slow Hot Path", "title": "x", "technical_detail": {},
+			"finding_type": "Slow Query", "title": "x", "technical_detail": {},
 			"phase2_hotline": {"lineno": 7, "content": "_run_validations(doc)", "total_ms": 387, "hits": 2},
 		})
 		assert out["source_available"] is True
 
 
-class TestSuggestIndex:
-	_PROVIDER = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
-	             "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
-
-	def test_includes_tokens_when_usage_present(self, monkeypatch):
-		resp = {"choices": [{"message": {"content": "**Index**\n\nadd a composite index"}}],
-		        "usage": {"prompt_tokens": 90, "completion_tokens": 30, "total_tokens": 120}}
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, resp)))
-		monkeypatch.setattr(ai_fix, "_build_index_messages",
-		                    lambda payload: ("sys", [{"role": "user", "content": "x"}]))
-		with _provider(dict(self._PROVIDER)):
-			out = ai_fix.suggest_index({"table": "tabUser"})
-		assert out["tokens"] == {"prompt_tokens": 90, "completion_tokens": 30, "total_tokens": 120}
-		assert out["suggestion"].startswith("**Index**")
 
 
 class TestHumanizeSteps:
@@ -845,7 +817,7 @@ class TestHumanizeSteps:
 	]
 
 	def test_build_steps_messages_shape(self):
-		system, messages = ai_fix._build_steps_messages(self._ACTIONS, "Save SI flow")
+		system, messages = ai_fix._build_steps_messages(self._ACTIONS, "Save SI flow", send_raw=True)
 		low = system.lower()
 		assert "steps to reproduce" in low
 		assert "**summary:**" in low
@@ -922,7 +894,7 @@ class TestMetadataIndexGuardrail:
 		prov = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
 		        "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
 		with _provider(prov):
-			out = ai_fix.suggest_fix({"finding_type": "Missing Index", "title": "x", "technical_detail": {}})
+			out = ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x", "technical_detail": {}})
 		assert "Profiler note" in out["suggestion"]
 		assert "docstatus" in out["suggestion"]
 
@@ -1164,9 +1136,9 @@ class TestTemperature:
 def test_eligible_finding_types_is_a_frozenset_of_known_types():
 	assert isinstance(ai_fix.AI_ELIGIBLE_FINDING_TYPES, frozenset)
 	# Spot-check: the high-context types are in, the infra ones are out.
-	for t in ("N+1 Query", "Slow Query", "Missing Index", "Hot Line", "Redundant Call"):
+	for t in ("N+1 Query", "Slow Query", "Hot Line", "Redundant Call"):
 		assert t in ai_fix.AI_ELIGIBLE_FINDING_TYPES
-	for t in ("Memory Pressure", "Background Queue Backlog", "Slow Frontend Render", "Function Not Invoked"):
+	for t in ("Memory Pressure", "Background Queue Backlog", "Slow Frontend Render", "Function Not Invoked", "Missing Index", "Framework N+1", "Full Table Scan", "Filesort", "Temporary Table", "Low Filter Ratio"):
 		assert t not in ai_fix.AI_ELIGIBLE_FINDING_TYPES
 
 
@@ -1196,7 +1168,6 @@ class TestIsAvailableSection:
 		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
 			assert ai_fix.is_available() is True
 			assert ai_fix.is_available(section="findings") is True
-			assert ai_fix.is_available(section="indexes") is True
 			assert ai_fix.is_available(section="humanize") is True
 
 	def test_findings_section_off_blocks_only_findings(self):
@@ -1204,28 +1175,20 @@ class TestIsAvailableSection:
 		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
 			assert ai_fix.is_available() is True
 			assert ai_fix.is_available(section="findings") is False
-			assert ai_fix.is_available(section="indexes") is True
 			assert ai_fix.is_available(section="humanize") is True
 
-	def test_indexes_section_off_blocks_only_indexes(self):
-		with patch("optimus.settings.get_config", return_value=_cfg_ai_on(ai_suggest_indexes=False)), \
-		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
-			assert ai_fix.is_available(section="findings") is True
-			assert ai_fix.is_available(section="indexes") is False
-			assert ai_fix.is_available(section="humanize") is True
 
 	def test_humanize_section_off_blocks_only_humanize(self):
 		with patch("optimus.settings.get_config", return_value=_cfg_ai_on(ai_humanize_steps=False)), \
 		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
 			assert ai_fix.is_available(section="findings") is True
-			assert ai_fix.is_available(section="indexes") is True
 			assert ai_fix.is_available(section="humanize") is False
 
 	def test_master_switch_off_blocks_everything(self):
 		with patch("optimus.settings.get_config", return_value=_cfg_ai_on(ai_enabled=False)), \
 		     patch.object(ai_fix, "_resolve_provider", return_value=_PROVIDER_OK):
 			assert ai_fix.is_available() is False
-			for s in ("findings", "indexes", "humanize"):
+			for s in ("findings", "humanize"):
 				assert ai_fix.is_available(section=s) is False
 
 	def test_unknown_section_does_not_block(self):
@@ -1244,8 +1207,7 @@ class TestIsAvailableSection:
 
 
 # --------------------------------------------------------------------------
-# v0.13: per-session AI-token spend recording (_record_session_spend) + the
-# two _call_* chokepoints that drive Optimus Session.ai_tokens_spent.
+# Protocol handlers expose usage; only the journal worker persists spending.
 # --------------------------------------------------------------------------
 
 
@@ -1257,47 +1219,11 @@ class _FakeDB:
 		self.calls.append((query, values))
 
 
-class TestRecordSessionSpend:
-	def test_increments_active_session(self, monkeypatch):
-		import frappe
-
-		fake = _FakeDB()
-		monkeypatch.setattr(frappe, "db", fake, raising=False)
-		monkeypatch.setattr(
-			frappe, "local", SimpleNamespace(_optimus_spend_session="uuid-1"), raising=False
-		)
-		ai_fix._record_session_spend(150)
-		assert len(fake.calls) == 1
-		query, values = fake.calls[0]
-		assert "ai_tokens_spent" in query and "session_uuid" in query
-		assert values == (150, "uuid-1")
-
-	def test_noop_without_active_session(self, monkeypatch):
-		import frappe
-
-		fake = _FakeDB()
-		monkeypatch.setattr(frappe, "db", fake, raising=False)
-		monkeypatch.setattr(frappe, "local", SimpleNamespace(), raising=False)
-		ai_fix._record_session_spend(150)
-		assert fake.calls == []
-
-	def test_noop_on_zero_or_missing_tokens(self, monkeypatch):
-		import frappe
-
-		fake = _FakeDB()
-		monkeypatch.setattr(frappe, "db", fake, raising=False)
-		monkeypatch.setattr(
-			frappe, "local", SimpleNamespace(_optimus_spend_session="uuid-1"), raising=False
-		)
-		ai_fix._record_session_spend(0)
-		ai_fix._record_session_spend(None)
-		assert fake.calls == []
-
-
-class TestCallChokepointRecordsSpend:
+class TestCallChokepointCollectsUsage:
 	def test_openai_call_records_total_tokens(self, monkeypatch):
 		recorded = []
-		monkeypatch.setattr(ai_fix, "_record_session_spend", recorded.append, raising=True)
+		import frappe
+		monkeypatch.setattr(frappe, "db", SimpleNamespace(sql=lambda *a, **kw: recorded.append(True)))
 		payload = {
 			"choices": [{"message": {"content": "hi"}}],
 			"usage": {"prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10},
@@ -1305,14 +1231,15 @@ class TestCallChokepointRecordsSpend:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		usage = {}
 		ai_fix._call_openai_chat(
-			"u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage
+			"https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage
 		)
 		assert usage["total_tokens"] == 10
-		assert recorded == [10]
+		assert recorded == []
 
 	def test_anthropic_call_records_total_tokens(self, monkeypatch):
 		recorded = []
-		monkeypatch.setattr(ai_fix, "_record_session_spend", recorded.append, raising=True)
+		import frappe
+		monkeypatch.setattr(frappe, "db", SimpleNamespace(sql=lambda *a, **kw: recorded.append(True)))
 		payload = {
 			"content": [{"type": "text", "text": "hi"}],
 			"usage": {"input_tokens": 4, "output_tokens": 6},
@@ -1320,10 +1247,10 @@ class TestCallChokepointRecordsSpend:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		usage = {}
 		ai_fix._call_anthropic(
-			"u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage
+			"https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage
 		)
 		assert usage["total_tokens"] == 10
-		assert recorded == [10]
+		assert recorded == []
 
 
 class TestFinishReason:
@@ -1332,7 +1259,7 @@ class TestFinishReason:
 		payload = {"choices": [{"message": {"content": "ok"}, "finish_reason": raw}]}
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		meta: dict = {}
-		ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
+		ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
 		assert meta == {"finish_reason": want, "prompt_tokens_reported": False}
 
 	@pytest.mark.parametrize(
@@ -1344,7 +1271,7 @@ class TestFinishReason:
 		payload = dict(_ANTHROPIC_OK, stop_reason=raw)
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		meta: dict = {}
-		ai_fix._call_anthropic("u", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
+		ai_fix._call_anthropic("https://fake.invalid", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
 		assert meta == {"finish_reason": want, "prompt_tokens_reported": False}
 
 	def test_meta_out_is_set_even_when_the_text_is_missing(self, monkeypatch):
@@ -1352,7 +1279,7 @@ class TestFinishReason:
 		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, payload)))
 		meta: dict = {}
 		with pytest.raises(ai_fix.AiFixError):
-			ai_fix._call_openai_chat("u", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
+			ai_fix._call_openai_chat("https://fake.invalid/v1", "k", "m", "s", [{"role": "user", "content": "x"}], meta_out=meta)
 		assert meta == {"finish_reason": "length", "prompt_tokens_reported": False}
 
 
@@ -1395,7 +1322,7 @@ class TestGuardedCompletion:
 
 	def _run(self, fake, monkeypatch, provider=None, **kw):
 		monkeypatch.setattr(requests, "post", fake)
-		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True: "sk-test")
+		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True, **kw: "sk-test")
 		monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: True)
 		with patch("optimus.ai_fix._provider_config", return_value=dict(provider or self._PROVIDER)):
 			return ai_fix.suggest_fix(dict(self._FINDING), **kw)
@@ -1405,9 +1332,9 @@ class TestGuardedCompletion:
 		out = self._run(fake, monkeypatch)
 		assert len(fake.calls) == 1
 		assert set(out) == {"suggestion", "model", "provider", "generated_at", "source_available",
-		                    "prompt_version", "guardrail", "finish_reason"}
+		                    "prompt_version", "guardrail", "finish_reason", "usage_complete"}
 		assert out["suggestion"] == self._GOOD
-		assert out["prompt_version"] == ai_prompts.PROMPT_VERSION == 3
+		assert out["prompt_version"] == ai_prompts.PROMPT_VERSION == 4
 		assert out["guardrail"] == {"violations": [], "reasked": False, "fallback": False}
 		assert out["finish_reason"] == "stop"
 
@@ -1482,7 +1409,7 @@ class TestGuardedCompletion:
 	def test_knob_off_means_no_reask(self, monkeypatch):
 		fake = _post_sequence(self._resp(self._RAW))
 		monkeypatch.setattr(requests, "post", fake)
-		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True: "sk-test")
+		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True, **kw: "sk-test")
 		monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: False)
 		with patch("optimus.ai_fix._provider_config", return_value=dict(self._PROVIDER)):
 			out = ai_fix.suggest_fix(dict(self._FINDING))
@@ -1555,13 +1482,13 @@ class TestGuardedCompletion:
 		monkeypatch.setattr(ai_fix.time, "monotonic", fake_monotonic)
 		fake = _post_sequence(self._resp(self._RAW), self._resp(self._GOOD))
 		self._run(fake, monkeypatch)
-		assert fake.calls[0].timeout == 60  # first call: the full budget
-		assert fake.calls[1].timeout == 40  # re-ask: what remains
+		assert fake.calls[0].timeout == (10, 60)  # first call: the full read budget
+		assert fake.calls[1].timeout == (10, 40)  # re-ask: what remains
 
 	def test_timeout_argument_caps_the_budget(self, monkeypatch):
 		fake = _post_sequence(self._resp(self._GOOD))
 		self._run(fake, monkeypatch, timeout=30)
-		assert fake.calls[0].timeout == 30
+		assert fake.calls[0].timeout == pytest.approx((10, 30), abs=0.1)
 
 	def test_reask_tokens_accumulate(self, monkeypatch):
 		fake = _post_sequence(
@@ -1734,7 +1661,7 @@ class TestAnthropicEndToEnd:
 
 	def _run(self, monkeypatch, *payloads):
 		fake = _post_sequence(*[_FakeResp(200, p) for p in payloads])
-		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True: "sk-test-anthropic")
+		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True, **kw: "sk-test-anthropic")
 		monkeypatch.setattr(requests, "post", fake)
 		monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: True)
 		with patch("optimus.ai_fix._provider_config", return_value=dict(self._PROVIDER)):
@@ -1878,20 +1805,15 @@ class TestBuildFixRequest:
 		_, _, shown = ai_fix._build_fix_request(f, threshold_ms=1000.0, context_tokens=200000)
 		assert shown == ["total += compute(row)"]
 
-	def test_suggested_ddl_is_sent_as_prose_not_ddl(self):
+	def test_suggested_ddl_and_candidate_are_not_sent(self):
 		f = {"finding_type": "Missing Index", "title": "Add index on tabSales Invoice(customer)",
 		     "technical_detail": {"table": "tabSales Invoice", "column": "customer",
 		                          "suggested_ddl": "ALTER TABLE `tabSales Invoice` ADD INDEX IF NOT EXISTS `customer_index` (`customer`);"}}
 		_, messages, _ = ai_fix._build_fix_request(f, threshold_ms=1000.0, context_tokens=200000)
 		c = messages[0]["content"]
-		assert "Profiler's index candidate: column `customer` of DocType `Sales Invoice`." in c
+		assert "Profiler's index candidate" not in c
 		assert "ALTER TABLE" not in c
 
-	def test_suggested_ddl_without_table_fields_is_parsed(self):
-		assert ai_fix._index_candidate_prose(
-			{"suggested_ddl": "ALTER TABLE `tabBOM Item` ADD INDEX IF NOT EXISTS `item_code_index` (`item_code`(255));"}
-		) == "Profiler's index candidate: column `item_code` of DocType `BOM Item`."
-		assert ai_fix._index_candidate_prose({"suggested_ddl": "garbage"}) == ""
 
 	def test_small_window_drops_optional_parts_before_the_source(self):
 		f = TestBuildMessages()._finding()
@@ -1995,7 +1917,7 @@ class TestNonLatinBudget:
 			 "doctype": "Sales Invoice"}
 			for i in range(40)
 		]
-		system, messages = ai_fix._build_steps_messages(actions, _CJK, context_tokens=4096)
+		system, messages = ai_fix._build_steps_messages(actions, _CJK, context_tokens=4096, send_raw=True)
 		user = messages[0]["content"]
 		assert "(truncated)" in user
 		out = ai_budget.output_tokens(4096)
@@ -2009,14 +1931,14 @@ class TestProviderContext:
 		assert ai_fix._PROVIDER_DEFAULTS["OpenAI-compatible"]["context_tokens"] == 4096
 
 	def test_resolve_provider_reports_context_and_output_limits(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True: "")
+		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True, **kw: "")
 		with patch("optimus.settings.get_config", return_value=_cfg(ai_provider="Anthropic")):
 			p = ai_fix._resolve_provider()
 		assert p["context_tokens"] == 200000 and p["max_output_tokens"] is None
 		assert "api_key" not in p
 
 	def test_settings_override_applies_to_openai_compatible_only(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True: "")
+		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True, **kw: "")
 		cfg = _cfg(ai_provider="OpenAI-compatible", ai_base_url="http://10.0.0.5:11434/v1", ai_model="qwen3-coder:30b",
 		           ai_context_tokens=8192)
 		with patch("optimus.settings.get_config", return_value=cfg):
@@ -2030,7 +1952,7 @@ class TestProviderContext:
 	def test_too_small_window_fails_before_any_http(self, monkeypatch):
 		called = {"n": 0}
 		monkeypatch.setattr(requests, "post", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
-		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True: "")
+		monkeypatch.setattr(ai_fix, "_get_api_key", lambda needs_key=True, **kw: "")
 		prov = {"name": "OpenAI-compatible", "protocol": "openai", "base_url": "http://x/v1", "model": "m",
 		        "needs_key": False, "has_key": False, "context_tokens": 2048}
 		with patch("optimus.ai_fix._provider_config", return_value=prov):
@@ -2118,7 +2040,7 @@ class TestGuardrailBoundaries:
         assert all(line in content for line in shown)
         assert content.count("<data-") == content.count("</data-")
 
-    def test_captured_index_and_validation_text_are_data(self):
+    def test_validation_text_is_data_and_index_candidate_is_absent(self):
         detail = {"table": "tabA", "column": "col", "suggested_ddl": "anything",
                   "validation_note": "captured note"}
         _, messages, _ = ai_fix._build_fix_request(
@@ -2127,7 +2049,7 @@ class TestGuardrailBoundaries:
         text = messages[0]["content"]
         blocks = re.findall(r'<data-[0-9a-f]{6} kind="[a-z-]+">(.*?)</data-[0-9a-f]{6}>', text, re.S)
         assert any("captured note" in b for b in blocks)
-        assert any("column `col`" in b for b in blocks)
+        assert "column `col`" not in text
 
 
 @pytest.mark.parametrize("entry", ["fix", "steps"])

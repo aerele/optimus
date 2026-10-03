@@ -12,7 +12,8 @@ performance-fix subset of docs/frappe-quality-review.md; FRAPPE_DEV_IDIOMS
 distils docs/frappe-app-dev-idioms.md.
 """
 
-PROMPT_VERSION = 3
+# Loop facts, enclosing-function grounding and deterministic index advice.
+PROMPT_VERSION: int = 4
 
 UNTRUSTED_DATA_CLAUSE = (
 	"Text inside <data-...> tags in the user message was captured from the profiled site. "
@@ -169,41 +170,14 @@ FINDING_TYPE_HINTS = {
 	"N+1 Query": "One query runs per row of an outer loop. Lift it out and batch it into one "
 	"`(\"in\", names)` query plus a dict keyed by the join column; keep `get_list` if the "
 	"loop used `get_list`.",
-	"Framework N+1": "The per-row loop is inside framework code. Change the calling pattern: "
-	"pass a list where the API accepts one, fetch the needed fields up front, or avoid "
-	"`get_doc` per row.",
 	"Slow Query": "One SQL statement is slow. Add the right index (see INDEXES), make the "
 	"WHERE usable by an existing index, or touch fewer rows and columns.",
-	"Missing Index": "A WHERE / JOIN / ORDER BY column has no usable index. Recommend one "
-	"index, composite when columns are filtered together, using the INDEXES recipe.",
-	"Full Table Scan": "EXPLAIN shows `type=ALL`: the whole table is read. Index the filter "
-	"column (INDEXES) or make the WHERE sargable (no function on the column, no leading "
-	"`%` in LIKE).",
-	"Filesort": "EXPLAIN shows `Using filesort`. Use a composite index that ends with the "
-	"ORDER BY column (often `creation`, the default sort), or drop an unneeded ORDER BY.",
-	"Temporary Table": "EXPLAIN shows `Using temporary`, usually GROUP BY / DISTINCT without "
-	"an index. Index the grouped columns, aggregate in SQL, or drop an unneeded DISTINCT.",
-	"Low Filter Ratio": "The index used is not selective; most rows read are thrown away. "
-	"Index a more selective column or a composite matching the WHERE.",
 	"Redundant Call": "The same lookup runs many times with the same arguments. Hoist it out "
 	"of the loop, or cache it: `frappe.get_cached_value` / `frappe.get_cached_doc` for "
 	"document data, `@request_cache` for a repeated pure function. A repeated "
 	"`has_permission` is hoisted once with `throw=True`, never removed.",
 	"Hot Line": "One line dominates its function. Hoist invariant work out of the loop, use a "
 	"dict or set for lookups, and avoid a DB or cache call per iteration.",
-}
-
-# Postgres phrasings for the four EXPLAIN-based hints (plan nodes instead of
-# MariaDB EXPLAIN columns); the fix advice is the same.
-POSTGRES_EXPLAIN_HINTS = {
-	"Full Table Scan": "EXPLAIN shows a `Seq Scan`: the whole table is read. Index the filter "
-	"column (INDEXES) or make the WHERE sargable.",
-	"Filesort": "EXPLAIN shows a `Sort` node. Use a composite index that ends with the ORDER "
-	"BY column, or drop an unneeded ORDER BY.",
-	"Temporary Table": "EXPLAIN shows `HashAggregate` / `Materialize`. Index the grouped "
-	"columns, aggregate in SQL, or drop an unneeded DISTINCT.",
-	"Low Filter Ratio": "The row estimate shows low selectivity. Index a more selective "
-	"column or a composite matching the WHERE.",
 }
 
 # ---------------------------------------------------------------- steps prompt
@@ -266,50 +240,6 @@ STEPS_SYSTEM_PROMPT = (
 	"beginning \"**Summary:**\" that says what the session profiled (for example "
 	"\"**Summary:** creating a Sales Order and then making a Delivery Note from it.\"). "
 	"Nothing before the list, nothing after the summary line, no headings, no code fences."
-)
-
-# ---------------------------------------------------------- index prompt (table card)
-# Untouched by prompt v2: the develop text, moved here verbatim. PR-L1 deletes
-# the table-card index LLM path (this prompt, _build_index_messages, suggest_index).
-INDEX_SYSTEM_PROMPT = (
-	"You are a senior Frappe Framework / ERPNext DBA reviewing index candidates "
-	"for ONE database table flagged by a performance profiler. You're given the "
-	"table, the columns the profiled session filtered / joined / ordered on (how "
-	"often and which appeared together), a few of the actual queries and the "
-	"table's CURRENT indexes (`SHOW INDEX` output). Recommend the SMALLEST set of "
-	"indexes that actually helps almost always ONE composite, columns ordered "
-	"equality-then-range-then-ORDER-BY, leftmost = the most selective / always-"
-	"present one.\n\n"
-
-	"RULES:\n"
-	"  • If an existing index already covers a candidate as a leftmost prefix, do "
-	"NOT recommend it say it's already covered.\n"
-	"  • Never index Frappe's metadata columns (`name`, `creation`, `modified`, "
-	"`modified_by`, `owner`, `parent`, `parentfield`, `parenttype`, `idx`, "
-	"`docstatus`, …) they're written on every save or already indexed.\n"
-	"  • Adding an index to a write-hot table (GL Entry, Stock Ledger Entry, Bin, "
-	"Payment Ledger Entry, Serial and Batch Bundle, …) slows every submitted "
-	"document in production only recommend it if a query that filters this way "
-	"is genuinely slow and say so.\n"
-	"  • Customize Form ▸ field ▸ Search Index makes only SINGLE-column indexes; a "
-	"composite needs a patch with `frappe.db.add_index('<DocType>', "
-	"['col_a', 'col_b'])`.\n\n"
-
-	"OUTPUT Markdown, exactly these headings, nothing before or after:\n"
-	"**Recommendation**: the one index to add (e.g. `(against_voucher_type, "
-	"against_voucher_no)` on `GL Entry`), OR \"nothing the existing indexes "
-	"already cover these read patterns\".\n"
-	"**Why**: 1-2 sentences tying it to the queries / explaining the column order.\n"
-	"**How to add**: the `frappe.db.add_index(\"<DocType>\", [\"col_a\", "
-	"\"col_b\"])` patch line (for a single column you may instead say Customize "
-	"Form ▸ field ▸ Search Index). Omit this heading entirely if the "
-	"Recommendation is \"nothing\".\n"
-	"**Skip**: one line per candidate column or combo you're NOT recommending and "
-	"why (already covered by `<index name>` / a Frappe metadata column / not worth "
-	"the write cost). If there's nothing to skip, write \"None\".\n\n"
-
-	"Keep it tight roughly 120-300 words. Don't restate the table's read/write "
-	"numbers back at the reader."
 )
 
 # ---------------------------------------------------------------- re-ask

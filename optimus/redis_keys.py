@@ -189,6 +189,11 @@ def lp_budget_hit(run_uuid: str) -> str:
 	return f"profiler:lp:budget_hit:{run_uuid}"
 
 
+def lp_sample_state(run_uuid: str) -> str:
+	"""Raw byte counter for bounded sample appends; -1 means incomplete input."""
+	return f"profiler:lp:{run_uuid}:sample_state"
+
+
 # ---------------------------------------------------------------------------
 # Cross-session / app-level state
 # ---------------------------------------------------------------------------

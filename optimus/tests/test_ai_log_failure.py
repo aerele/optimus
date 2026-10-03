@@ -642,9 +642,9 @@ class _Resp:
 		return self._payload
 
 
-def _call():
+def _call(session_uuid=None):
 	return ai_fix._http_post("https://x.invalid/v1/chat/completions", {}, {"model": "m"},
-	                         provider="openai", where="chat/completions")
+	                         provider="openai", where="chat/completions", session_uuid=session_uuid)
 
 
 class TestHttpFailurePath:
@@ -661,7 +661,8 @@ class TestHttpFailurePath:
 		assert ei.value.kind == "transport"
 		assert ei.value.__context__ is None and ei.value.__cause__ is None
 		assert len(logs) == 1 and logs[0]["title"] == "optimus ai_fix"
-		assert "detail=ConnectionError: HTTPConnectionPool" in logs[0]["message"]
+		assert "detail=ConnectionError\n" in logs[0]["message"]
+		assert "HTTPConnectionPool" not in logs[0]["message"]
 		# a caller logging the same error again writes nothing more (K16)
 		ai_fix.log_ai_failure("optimus ai backfill", ei.value)
 		assert len(logs) == 1
@@ -673,7 +674,7 @@ class TestHttpFailurePath:
 		monkeypatch.setattr(requests, "post", _post(self._raise(boom)))
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			_call()
-		assert ei.value.kind == "transport"
+		assert ei.value.kind == "internal"
 		assert "UnicodeEncodeError" in str(ei.value) and KEY not in str(ei.value)
 		assert ei.value.__context__ is None
 		assert KEY not in logs[0]["message"]
@@ -764,7 +765,7 @@ class TestHttpFailurePath:
 				for name, value in tb.tb_frame.f_locals.items():
 					assert KEY not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds the header"
 			tb = tb.tb_next
-		assert "_http_post" in checked
+		assert ai_fix._http_post.__code__.co_name in checked
 
 	def test_rq_job_timeout_still_stops_the_job(self, logs, monkeypatch):
 		# The catch-all must not turn RQ's job timeout into a normal AI error
@@ -793,28 +794,26 @@ class TestHttpFailurePath:
 		assert logs == []
 
 	@pytest.mark.parametrize("status", [400, 404, 500])
-	def test_an_echoed_key_is_masked_in_the_error_message(self, logs, monkeypatch, status):
-		# The 404 and other >= 400 messages carry the provider body to the
-		# operator (toast, API response, the title of Frappe's own snapshot).
+	def test_an_echoed_key_is_masked_in_admin_detail(self, logs, monkeypatch, status):
+		# Only admin detail carries the scrubbed body, never the public error.
 		body = f'{{"error": "invalid key {KEY} for this model"}}'
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(status, {}, text=body)))
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			_call()
-		assert "invalid key ******** for this model" in str(ei.value)
+		assert "invalid key ******** for this model" in ei.value.detail
+		assert "invalid key" not in str(ei.value) and KEY not in ei.value.detail
 		assert KEY not in str(ei.value)
 
-	def test_the_404_message_masks_credentials_in_the_base_url(self, logs, monkeypatch):
-		# A custom Base URL typed as user:password@host: the 404 message names
-		# the URL, and it reaches toasts and API responses.
-		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(404, {}, text="")))
+	def test_credentials_in_the_base_url_are_refused_before_http(self, logs, monkeypatch):
+		monkeypatch.setattr(requests, "post", lambda *a, **k: pytest.fail("credentials reached transport"))
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			ai_fix._call_openai_chat(
 				"http://alice:hunter2-pass@llm.internal:11434/v1", "", "m", "s", [{"role": "user", "content": "x"}]
 			)
 		message = str(ei.value)
-		assert "404 (Not Found) for http://********@llm.internal:11434/v1/chat/completions. " in message
+		assert ei.value.kind == "config"
 		assert "alice" not in message and "hunter2-pass" not in message
-		assert "alice" not in logs[0]["message"] and "hunter2-pass" not in logs[0]["message"]
+		assert logs == []
 
 	def test_the_404_message_masks_the_key_in_the_base_url(self, logs, monkeypatch):
 		# Some gateways take the key in the path: the stored key is scrubbed
@@ -824,22 +823,24 @@ class TestHttpFailurePath:
 			ai_fix._call_openai_chat(
 				f"https://gw.internal/{KEY}/v1", "", "m", "s", [{"role": "user", "content": "x"}]
 			)
-		assert "404 (Not Found) for https://gw.internal/********/v1/chat/completions. " in str(ei.value)
+		assert "https://gw.internal/********/v1/chat/completions" in ei.value.detail
+		assert "gw.internal" not in str(ei.value) and KEY not in ei.value.detail
 		assert KEY not in str(ei.value)
 
 	@pytest.mark.parametrize("fails", ["reading-the-key", "scrubbing"])
 	def test_a_404_url_that_cannot_be_scrubbed_is_never_shown(self, logs, monkeypatch, fails):
-		# If the URL cannot be scrubbed, the message names a placeholder, never
-		# the unscrubbed URL (a custom Base URL can carry user:password@).
+		# A gateway path may itself be sensitive. A failed scrub substitutes
+		# the placeholder even in administrator-only detail.
 		target = "optimus.ai_fix._scrub_literals_for" if fails == "reading-the-key" else "optimus.redaction.scrub_secrets"
 		monkeypatch.setattr(target, _raising(RuntimeError("scrub failed")))
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(404, {}, text="")))
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			ai_fix._call_openai_chat(
-				"http://alice:hunter2-pass@llm.internal:11434/v1", "", "m", "s", [{"role": "user", "content": "x"}]
+				"https://llm.internal/hunter2-pass/v1", "", "m", "s", [{"role": "user", "content": "x"}]
 			)
 		message = str(ei.value)
-		assert "404 (Not Found) for (the configured Base URL). Check that the Model " in message
+		assert "(the configured Base URL)" in ei.value.detail
+		assert "hunter2-pass" not in ei.value.detail and "llm.internal" not in ei.value.detail
 		assert "alice" not in message and "hunter2-pass" not in message and "llm.internal" not in message
 		assert "hunter2-pass" not in logs[0]["message"]
 
@@ -850,7 +851,8 @@ class TestHttpFailurePath:
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			_call()
 		assert KEY[:10] not in str(ei.value)
-		assert str(ei.value).endswith("x" * 10 + "******** t")
+		assert ei.value.detail.endswith("x" * 10 + "******** t")
+		assert KEY[:10] not in ei.value.detail
 
 	@pytest.mark.parametrize(
 		"old_key",
@@ -882,7 +884,7 @@ class TestHttpFailurePath:
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			ai_fix._http_post("https://x.invalid/v1/chat/completions", {}, {"model": "m"},
 			                  provider="openai", where="chat/completions", auth=auth)
-		message, row = str(ei.value), logs[0]["message"]
+		message, row = ei.value.detail, logs[0]["message"]
 		assert "raw=******** escaped=********" in message  # the echo reached the message, masked
 		for form in (old_key, escaped):
 			assert form not in message and form not in row
@@ -931,7 +933,8 @@ class TestHttpFailurePath:
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(500, {}, text=f'{{"error": "bad key {escaped}"}}')))
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			_call()
-		assert escaped not in str(ei.value) and 'bad key ********"' in str(ei.value)
+		assert escaped not in ei.value.detail and 'bad key ********"' in ei.value.detail
+		assert "bad key" not in str(ei.value)
 		ai_fix.log_ai_failure("optimus ai backfill", ai_fix.AiFixError(f"echo {escaped} and {quoted_key}"))
 		row = logs[-1]["message"]
 		assert escaped not in row and quoted_key not in row
@@ -1025,7 +1028,8 @@ class TestHttpFailurePath:
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(500, {}, text="RESPONSE-BODY-MARKER")))
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			_call()
-		assert "RESPONSE-BODY-MARKER" in str(ei.value)  # still surfaced to the operator
+		assert "RESPONSE-BODY-MARKER" in ei.value.detail
+		assert "RESPONSE-BODY-MARKER" not in str(ei.value)
 		assert "RESPONSE-BODY-MARKER" not in logs[0]["message"]
 		assert "status=500" in logs[0]["message"]
 
@@ -1135,22 +1139,23 @@ class TestHttpFailurePath:
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			_call()
 		if status >= 400 and status not in (401, 403, 429):
-			assert f"REPLY-BODY: you asked about {pii}" in str(ei.value)  # the operator's message is unchanged
+			assert f"REPLY-BODY: you asked about {pii}" in ei.value.detail
+			assert pii not in str(ei.value)
 		assert ai_fix.log_ai_failure("optimus ai backfill", ei.value) is True
 		assert attempts == ["optimus ai_fix", "optimus ai backfill"]
 		row = logs[0]["message"]
 		assert pii not in row and "REPLY-BODY" not in row and "you asked" not in row
 		assert f"HTTP {status} " in row
 		assert "where=chat/completions" in row and "provider_error=invalid_request_error" in row
-		assert "Traceback (most recent call last):" in row and ", in _http_post\n" in row  # the plain frames stay
+		assert "Traceback (most recent call last):" in row
+		assert f", in {ai_fix._http_post.__code__.co_name}\n" in row  # sanitized boundary remains
 
-	def test_http_row_references_the_marked_session(self, logs, monkeypatch):
+	def test_http_row_references_the_explicit_session(self, logs, monkeypatch):
 		import frappe
 
-		monkeypatch.setattr(frappe.local, "_optimus_spend_session", "uuid-9", raising=False)
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(401, {})))
 		with pytest.raises(ai_fix.AiFixError):
-			_call()
+			_call(session_uuid="uuid-9")
 		assert logs[0]["reference_name"] == "SESS-0001"
 		assert "session_uuid=uuid-9" in logs[0]["message"]
 
@@ -1475,8 +1480,8 @@ class TestNothingIsLoggedOrSentWhileAnExceptionIsActive:
 			)
 		assert ei.value.status_code == 500
 		assert ei.value.__context__ is None and ei.value.__cause__ is None
-		# one row per failed attempt, each written with no exception active
-		assert active_at_log == [None, None]
+		# one terminal failure row, written with no exception active
+		assert active_at_log == [None]
 
 
 # ---------------------------------------------------------------------------
@@ -1646,18 +1651,15 @@ class TestAJobTimeoutIsNeverSwallowed:
 			ai_fix._mark_logged(_Sticky("x"))
 		_assert_fresh_and_clean(ei, job_timeout, _Sticky.__setattr__)
 
-	def test_log_http_error_while_reading_the_session_marker(self, logs, job_timeout, monkeypatch):
+	def test_log_http_error_does_not_read_a_worker_local_session_marker(self, logs, job_timeout, monkeypatch):
 		import frappe
-
 		class _Local:
 			def __getattr__(self, name):
-				raise job_timeout
-
+				raise AssertionError("HTTP logging must use explicit attribution")
 		monkeypatch.setattr(frappe, "local", _Local(), raising=False)
-		with pytest.raises(_JobTimeout) as ei:
-			ai_fix._log_http_error("openai", "chat/completions", 500)
-		_assert_fresh_and_clean(ei, job_timeout, _Local.__getattr__)
-		assert logs == []
+		ai_fix._log_http_error("openai", "chat/completions", 500, session_uuid="uuid-9")
+		assert logs[0]["reference_name"] == "SESS-0001"
+		assert "session_uuid=uuid-9" in logs[0]["message"]
 
 	def test_response_detail(self, job_timeout, monkeypatch):
 		raiser = _raising(job_timeout, holds=f"UNSCRUBBED {KEY}")
@@ -1732,7 +1734,7 @@ class TestAJobTimeoutIsNeverSwallowed:
 			for name, value in tb.tb_frame.f_locals.items():
 				assert KEY not in repr(value), f"{tb.tb_frame.f_code.co_name}: {name} holds the key"
 			tb = tb.tb_next
-		assert "_http_post" in walked
+		assert ai_fix._http_post.__code__.co_name in walked
 		assert logs == []
 
 	def test_token_count(self, job_timeout):
@@ -1848,7 +1850,6 @@ def _backfill_env(monkeypatch):
 	from optimus import settings as _settings
 
 	monkeypatch.setattr(analyze, "frappe", frappe)
-	monkeypatch.setattr(frappe.local, "_optimus_spend_session", None, raising=False)
 	cfg = _settings.OptimusConfig(ai_enabled=True, ai_provider="OpenAI")
 	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
 	monkeypatch.setattr(analyze, "_ai_payload_for_finding",
@@ -1861,12 +1862,16 @@ def _backfill_env(monkeypatch):
 	return analyze, SimpleNamespace(session_uuid="uuid-7", findings=rows)
 
 
+@pytest.mark.usefixtures("bound_provider_credentials")
 class TestCallSitesLogOnce:
 	def test_http_failure_during_backfill_writes_one_referenced_row_each(self, logs, monkeypatch):
 		analyze, doc = _backfill_env(monkeypatch)
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(500, {}, text="upstream down")))
-		out = analyze._run_ai_backfill(doc, cap=0)
-		assert out["failed"] == 2
+		failed = [analyze._run_ai_step(
+			lambda: ai_fix.suggest_fix({"finding_type": "N+1 Query", "technical_detail": {}}, session_uuid=doc.session_uuid),
+			title="optimus AI refresh item", session_uuid=doc.session_uuid,
+		)[1] for row in doc.findings]
+		assert failed == [True, True]
 		assert len(logs) == 2  # K16: one row per failure, not HTTP layer + caller
 		assert {r["title"] for r in logs} == {"optimus ai_fix"}
 		assert all(r["reference_name"] == "SESS-0001" for r in logs)
@@ -1876,8 +1881,12 @@ class TestCallSitesLogOnce:
 		analyze, doc = _backfill_env(monkeypatch)
 		empty = {"choices": [{"message": {"content": "   "}}]}
 		monkeypatch.setattr(requests, "post", _post(lambda: _Resp(200, empty)))
-		analyze._run_ai_backfill(doc, cap=0)
-		assert [r["title"] for r in logs] == ["optimus ai backfill", "optimus ai backfill"]
+		for row in doc.findings:
+			analyze._run_ai_step(
+				lambda: ai_fix.suggest_fix({"finding_type": "N+1 Query", "technical_detail": {}}, session_uuid=doc.session_uuid),
+				title="optimus AI refresh item", session_uuid=doc.session_uuid, finding=row.name,
+			)
+		assert [r["title"] for r in logs] == ["optimus AI refresh item", "optimus AI refresh item"]
 		assert "finding=F1" in logs[0]["message"] and "empty response" in logs[0]["message"]
 		assert logs[0]["reference_name"] == "SESS-0001"
 
@@ -1989,94 +1998,8 @@ class TestRunAiStep:
 		assert logs == []
 
 
-@pytest.fixture
-def run_env(monkeypatch):
-	"""The smallest set of fakes ``analyze.run`` needs for one pass over one
-	recording with no analyzers. Each stubbed step records ``run``'s
-	``step_failed`` local at the moment it is called, in ``trail`` next to the
-	``log_ai_failure`` calls, so a test sees whether the logged error is
-	still bound afterwards. ``status`` holds the session status writes, a
-	rollback and any non-AI ``frappe.log_error``."""
-	import frappe
-
-	from optimus import analyze
-
-	trail, status = [], []
-
-	def _step(name):
-		def _fn(*a, **k):
-			caller = sys._getframe(1)
-			if caller.f_code is analyze.run.__code__:
-				trail.append(("call", name, caller.f_locals.get("step_failed")))
-		return _fn
-
-	class _DB:
-		def get_value(self, *a, **k):
-			return "SESS-RUN"
-
-		def set_value(self, doctype, name, field, value=None, *a, **k):
-			if field == "status":
-				status.append(value)
-
-		def rollback(self, *a, **k):
-			status.append("rollback")
-
-	monkeypatch.setattr(analyze, "frappe", frappe)
-	monkeypatch.setattr(frappe, "db", _DB(), raising=False)
-	monkeypatch.setattr(frappe, "conf", {"optimus_analyze_gc_collect": False}, raising=False)
-	monkeypatch.setattr(frappe, "cache", SimpleNamespace(get_value=lambda *a, **k: None), raising=False)
-	monkeypatch.setattr(frappe, "log_error", lambda *a, **k: status.append("non-AI log_error"), raising=False)
-	monkeypatch.setattr(analyze, "is_scheduler_disabled", lambda: True)
-	monkeypatch.setattr(analyze, "safe_commit", lambda: None)
-	monkeypatch.setattr(analyze, "session", SimpleNamespace(
-		get_recordings=lambda *a, **k: ["rec-1"], get_session_meta=lambda *a, **k: {},
-		delete_session_state=lambda *a, **k: None,
-	))
-	monkeypatch.setattr(analyze, "_bg_wait_for_pending_jobs", lambda *a, **k: 0)
-	monkeypatch.setattr(analyze, "_acquire_singleflight", lambda *a, **k: True)
-	monkeypatch.setattr(analyze, "_fetch_recordings", lambda *a, **k: iter([{"uuid": "rec-1"}]))
-	monkeypatch.setattr(analyze, "_enrich_recordings", lambda *a, **k: [])
-	monkeypatch.setattr(analyze, "_get_analyzers", lambda: [])
-	monkeypatch.setattr("optimus.api._read_frontend_data", lambda *a, **k: {"xhr": [], "vitals": []})
-	for name in (
-		"_touch_singleflight", "_release_singleflight", "_publish_session_event", "_publish_progress",
-		"_mark_ai_spend_session", "_enrich_findings_with_source_snippets",
-		"_enrich_findings_with_ai_suggestions", "_enrich_table_breakdown_with_ai_suggestions",
-		"_persist", "_render_and_attach_reports", "_persist_recordings_file", "_cleanup_redis",
-		"_auto_arm_phase2",
-	):
-		monkeypatch.setattr(analyze, name, _step(name))
-	monkeypatch.setattr(
-		ai_fix, "log_ai_failure", lambda title, exc=None, **kw: trail.append(("log", title, exc, kw)) or True
-	)
-	return SimpleNamespace(analyze=analyze, trail=trail, status=status)
 
 
-class TestRunLogsAFailedAiStepAndCarriesOn:
-	"""``analyze.run`` with one AI step raising: the analyze still completes,
-	the failure is logged once through ``log_ai_failure`` with the step's
-	outer title, and the error is unbound right after (a later non-AI
-	failure is logged by ``run``'s outer handler with frame locals, and a
-	prompt builder's error can carry prompt text)."""
-
-	@pytest.mark.parametrize(
-		("step", "title"),
-		[
-			("_enrich_findings_with_ai_suggestions", "optimus ai auto-suggest (outer)"),
-			("_enrich_table_breakdown_with_ai_suggestions", "optimus ai index-suggest (outer)"),
-		],
-		ids=["auto-suggest", "index-suggest"],
-	)
-	def test_the_step_is_logged_once_and_unbound(self, run_env, monkeypatch, step, title):
-		error = RuntimeError("PROMPT-TEXT step broke")
-		monkeypatch.setattr(run_env.analyze, step, _raising(error))
-		assert run_env.analyze.run("uuid-run") is None
-		assert run_env.status == ["Analyzing", "Ready"]  # completed: no rollback, no failure row
-		logged = [entry for entry in run_env.trail if entry[0] == "log"]
-		assert logged == [("log", title, error, {"session_uuid": "uuid-run"})]
-		after = run_env.trail[run_env.trail.index(logged[0]) + 1:]
-		assert after, "run() called nothing after logging the step: the unbinding went unchecked"
-		assert all(type(entry[2]) is bool for entry in after), "a caller retained more than a boolean failure flag"
 
 
 # ---------------------------------------------------------------------------
@@ -2084,95 +2007,10 @@ class TestRunLogsAFailedAiStepAndCarriesOn:
 # endpoint still returns normally
 # ---------------------------------------------------------------------------
 
-class _ApiDB:
-	"""``frappe.db`` for the api.py paths below."""
-
-	def __init__(self, set_value_error=None):
-		self.set_value_error = set_value_error
-		self.writes = []
-
-	def get_value(self, doctype, filters=None, fieldname=None, *a, as_dict=False, **k):
-		if as_dict:
-			return {"name": "SESS-0001", "user": "Administrator", "status": "Ready"}
-		return "SESS-0001"
-
-	def set_value(self, *a, **k):
-		if self.set_value_error is not None:
-			raise self.set_value_error
-		self.writes.append(a)
-
-
-@pytest.fixture
-def api_env(monkeypatch):
-	"""Fake the gates and data the api.py AI paths read; capture every
-	``log_ai_failure`` call as ``(title, exc, kwargs)``."""
-	import inspect
-
-	import frappe
-
-	from optimus import analyze, api
-	from optimus import settings as _settings
-
-	calls = []
-	monkeypatch.setattr(api, "frappe", frappe)
-	monkeypatch.setattr(analyze, "frappe", frappe)
-	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, exc=None, **kw: calls.append((title, exc, kw)) or True)
-	monkeypatch.setattr(api, "_require_profiler_user", lambda: "Administrator")
-	monkeypatch.setattr(api, "_session_action_gate", lambda uuid, **kw: api.SessionRef(
-		docname="SESS-0001", session_uuid=uuid, owner="Administrator", user="Administrator",
-		status="Ready", title=None,
-	))
-	monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda *a, **k: None)
-	monkeypatch.setattr(api, "_require_session_permission", lambda *a, **k: "SESS-0001")
-	monkeypatch.setattr(frappe, "get_roles", lambda *a, **k: ["System Manager"], raising=False)
-	monkeypatch.setattr(frappe, "db", _ApiDB(), raising=False)
-	monkeypatch.setattr(frappe.local, "_optimus_spend_session", None, raising=False)
-	finding = SimpleNamespace(name="FIND-1", finding_type="N+1 Query", llm_fix_json=None, action_ref="")
-	doc = SimpleNamespace(
-		name="SESS-0001", session_uuid="uuid-5", findings=[finding],
-		actions=[SimpleNamespace(recording_uuid="rec-1", idx=1)],
-	)
-	monkeypatch.setattr(frappe, "get_doc", lambda *a, **k: doc, raising=False)
-	cfg = _settings.OptimusConfig(ai_enabled=True, ai_provider="OpenAI", ai_suggest_findings=True)
-	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
-	monkeypatch.setattr(analyze, "_load_recordings_bundle", lambda *a, **k: None)
-	monkeypatch.setattr(analyze, "_fetch_recordings", lambda *a, **k: [])
-	monkeypatch.setattr(analyze, "_backfill_ai_suggestions", lambda *a, **k: None)
-	monkeypatch.setattr(analyze, "_render_and_attach_reports", lambda *a, **k: None)
-	monkeypatch.setattr(analyze, "_ai_payload_for_finding", lambda *a, **k: {"finding_type": "N+1 Query"})
-	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
-	monkeypatch.setattr("optimus.pdf_export.clear_cached_pdf", lambda *a, **k: None)
-	monkeypatch.setattr(ai_fix, "is_available", lambda *a, **k: True)
-	monkeypatch.setattr(ai_fix, "suggest_fix", lambda payload: {"suggestion": "batch it", "model": "m"})
-	return SimpleNamespace(
-		calls=calls, doc=doc, api=api, analyze=analyze,
-		regenerate_reports=inspect.unwrap(api.regenerate_reports),
-	)
-
-
-class TestApiLogSites:
-	def test_regenerate_reports_fetch_error(self, api_env, monkeypatch):
-		error = RuntimeError("redis down")
-		monkeypatch.setattr(api_env.analyze, "_fetch_recordings", _raising(error))
-		out = api_env.regenerate_reports("uuid-5")
-		assert api_env.calls == [("optimus regenerate_reports fetch", error, {"session_uuid": "uuid-5"})]
-		assert out["regenerated"] is True and out["recordings_available"] == 0
-
-	def test_regenerate_reports_backfill_error(self, api_env, monkeypatch):
-		error = RuntimeError("backfill broke")
-		monkeypatch.setattr(api_env.analyze, "_backfill_ai_suggestions", _raising(error))
-		out = api_env.regenerate_reports("uuid-5")
-		assert api_env.calls == [("optimus regenerate ai backfill", error, {"session_uuid": "uuid-5"})]
-		assert out["regenerated"] is True
 
 
 
-	def test_humanize_steps_core_fetch_error(self, api_env, monkeypatch):
-		error = RuntimeError("redis down")
-		monkeypatch.setattr(api_env.analyze, "_fetch_recordings", _raising(error))
-		out = api_env.api._humanize_steps_core(api_env.doc, title="t")
-		assert api_env.calls == [("optimus humanize_steps fetch", error, {"session_uuid": "uuid-5"})]
-		assert out["updated"] is False and out["reason"]
+
 
 
 class TestAPassedInJobTimeoutStopsTheJob:
@@ -2240,10 +2078,10 @@ class TestARaisedAgainTimeoutIsLoggedOnce:
 				ai_fix.log_ai_failure("inner render", job_timeout)
 			raise job_timeout
 
-		monkeypatch.setattr(api, "_render_session_report", render)
-		ref = SimpleNamespace(docname="synthetic-report", session_uuid=None)
+		from optimus import report_refresh
+		monkeypatch.setattr(report_refresh, "render_report", render)
 		with pytest.raises(_JobTimeout) as caught:
-			api._rerender_after_ai(ref)
+			api._render_session_report("synthetic-report")
 		assert caught.value is not job_timeout
 		assert getattr(caught.value, ai_fix._LOGGED_ATTR, False)
 		with pytest.raises(_JobTimeout):
@@ -2302,7 +2140,7 @@ class TestTheCallersContextJoinsTheRow:
 		assert len(logs) == 1
 		row = frappe.db.rows["ERR-0001"]["error"]
 		assert row.startswith(logs[0]["message"])  # the generic lines stay first
-		assert "detail=ConnectionError: refused" in row
+		assert "detail=ConnectionError\n" in row
 		assert "\n\noptimus ai backfill\nsession_uuid=uuid-1\nfinding_type=n_plus_one" in row
 		assert frappe.db.set_values == [("Error Log", "ERR-0001", "error", False)]
 		assert breadcrumbs == []

@@ -22,6 +22,27 @@ import pytest
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
+@pytest.fixture
+def bound_provider_credentials(monkeypatch):
+	"""Transport fixtures model a stable saved config with their existing fake key.
+
+	Only suites opting into this fixture replace the SQL snapshot. Binding and
+	query tests exercise the real reader separately. Keep the production binding,
+	sendability and interrupt checks, and each suite's fake decryption/rotation.
+	"""
+	from types import SimpleNamespace
+
+	from optimus import ai_fix, settings
+
+	def snapshot():
+		values = vars(settings.get_config()).copy()
+		values.setdefault("ai_enabled", True)
+		return SimpleNamespace(**values), "fake encrypted credential"
+
+	monkeypatch.setattr(ai_fix, "_read_provider_snapshot", snapshot)
+	monkeypatch.setattr("frappe.utils.password.decrypt", lambda *a, **kw: ai_fix._current_key_or_empty(), raising=False)
+
+
 def pytest_configure(config):
 	# Tests that need an optional tool carry one of these markers so CI's ai-quality
 	# workflow (which installs rq and semgrep) selects them with -k "semgrep or rq";
@@ -235,6 +256,31 @@ _FRAPPE_DEPENDENT_LEAVES = frozenset({
 	"optimus.ratelimit",
 	"optimus.session",
 })
+
+
+class _InTestFlags:
+	in_test = True
+
+	def __getattr__(self, name):
+		raise RuntimeError("Frappe flag is not bound outside a site")
+
+
+@pytest.fixture(autouse=True)
+def _frappe_in_test_flag():
+	# Manual restoration preserves the module-fence/monkeypatch teardown order.
+	import frappe
+
+	try:
+		frappe.flags.in_test
+	except Exception:
+		saved = frappe.__dict__.get("flags")
+		frappe.flags = _InTestFlags()
+		try:
+			yield
+		finally:
+			frappe.flags = saved
+		return
+	yield
 
 
 @pytest.fixture(autouse=True)

@@ -10,9 +10,9 @@ source lines through here. Three responsibilities:
     app-relative paths into absolute paths via ``frappe.get_app_path`` / bench
     fallback. Server Script callsites resolve to a tuple sentinel that
     downstream branches load from the ``tabServer Script`` DocType, not disk.
-  * Bench-boundary check (:func:`_path_within_bench`): refuse a callsite that
-    resolves outside the bench (e.g. ``/etc/passwd`` via a tampered analyzer
-    dict). Bypassed under ``frappe.flags.in_test`` so /tmp fixtures work.
+  * Source boundary (:func:`_path_within_bench`): allow canonical app/library
+    .py/.js/.html source, including soft-linked apps; deny site data, config,
+    logs and archives. Tests may relax only the root allowlist.
   * Per-render file cache (:class:`_BoundedFileCache`): a 50-entry
     move-to-end LRU dict passed as ``file_cache=`` to cap memory on big codebases.
 
@@ -25,7 +25,10 @@ pure-pytest tests don't need a bench.
 from __future__ import annotations
 
 import os
+import stat
 from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 # Per-line truncation for source snippets/windows keeps a single
 # multi-kilobyte minified line out of technical_detail_json / the LLM
@@ -69,130 +72,195 @@ class _BoundedFileCache:
 			self._data.popitem(last=False)
 
 
-def _path_within_bench(path: str) -> bool:
-	"""Boundary check: True only when absolute ``path`` lies inside the bench
-	tree, so ``_resolve_source_path`` can refuse callsites resolving outside it
-	(e.g. ``/etc/passwd``). Returns True (bypass) under ``frappe.flags.in_test``
-	(so /tmp fixtures work) or when ``get_bench_path`` isn't available.
-	"""
+_SOURCE_EXTENSIONS = frozenset({".py", ".js", ".html"})
+_DENIED_BENCH_DIRS = ("sites", "config", "logs", "archived")
+_SOURCE_MAX_BYTES = 4 * 1024 * 1024
+_SCRIPT_READERS = ContextVar("optimus_script_readers", default=())
+_APPS_WARNING_SENT = False
+
+
+def _is_inside(path: str, root: str) -> bool:
+	return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _bench_paths():
+	import frappe
+
 	try:
-		import frappe
-		if getattr(frappe.flags, "in_test", False):
-			return True
-		import frappe.utils
-		bench = frappe.utils.get_bench_path()
-	except Exception:
+		sites_path = frappe.local.sites_path
+	except (AttributeError, RuntimeError):
+		return None, None
+	if not isinstance(sites_path, str) or not sites_path:
+		return None, None
+	sites = os.path.abspath(sites_path)
+	return os.path.realpath(os.path.dirname(sites)), os.path.realpath(sites)
+
+
+def _in_test_context():
+	import frappe
+
+	try:
+		return getattr(frappe.flags, "in_test", False) is True
+	except (AttributeError, RuntimeError):
+		return False
+
+
+def _installed_apps():
+	from optimus.ai_fix import _InterruptGuard
+
+	global _APPS_WARNING_SENT
+	site_bound = False
+	problem = ""
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			import frappe
+
+			if not getattr(frappe.local, "site", None):
+				return frozenset()
+			site_bound = True
+			return frozenset(app for app in frappe.get_installed_apps() or () if isinstance(app, str) and app.isidentifier())
+	except Exception as exc:
+		problem = type(exc).__name__
+	if guard.pending():
+		raise guard.interrupt()
+	if site_bound and problem and not _APPS_WARNING_SENT:
+		_APPS_WARNING_SENT = True
+		guard = _InterruptGuard(base=True)
+		try:
+			with guard:
+				frappe.logger("optimus").warning("optimus source access: installed apps unavailable (%s)", problem)
+		except Exception:
+			pass  # The source boundary remains closed if logging also fails.
+		if guard.pending():
+			raise guard.interrupt()
+	return frozenset()
+
+
+def _path_within_bench(path: str) -> bool:
+	"""Canonical source allowlist; site data stays denied even in tests."""
+	if not isinstance(path, str) or not path or "\x00" in path:
+		return False
+	real = os.path.realpath(path)
+	if os.path.splitext(real)[1].lower() not in _SOURCE_EXTENSIONS:
+		return False
+	bench, sites = _bench_paths()
+	denied = [os.path.join(bench, name) for name in _DENIED_BENCH_DIRS] if bench else []
+	if sites:
+		denied.append(sites)
+	if any(_is_inside(real.casefold(), os.path.realpath(root).casefold()) for root in denied):
+		return False
+	if _in_test_context():
 		return True
 	if not bench:
-		return True
+		return False
+	roots = [os.path.realpath(os.path.join(bench, name)) for name in ("apps", "env")]
 	try:
-		bench_abs = os.path.abspath(bench)
-		path_abs = os.path.abspath(path)
+		with os.scandir(os.path.join(bench, "apps")) as entries:
+			roots.extend(os.path.realpath(entry.path) for entry in entries if entry.is_symlink() and entry.is_dir())
+	except OSError:
+		pass
+	return any(_is_inside(real, root) for root in roots)
+
+
+@contextmanager
+def server_script_readers(*users):
+	"""Intersect nested principals with the acting user; always reset context."""
+	token = _SCRIPT_READERS.set(tuple(dict.fromkeys((*_SCRIPT_READERS.get(), *(u for u in users if u)))))
+	try:
+		yield
+	finally:
+		_SCRIPT_READERS.reset(token)
+
+
+def _may_read_server_script(name=None):
+	from optimus.ai_fix import _InterruptGuard
+
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			import frappe
+
+			actor = getattr(frappe.session, "user", None)
+			users = {*_SCRIPT_READERS.get(), actor}
+			if not actor or any(not isinstance(user, str) or not user or user == "Guest" for user in users):
+				return False
+			return all(frappe.has_permission("Server Script", "read", user=user, **({"doc": name} if name else {})) for user in users)
 	except Exception:
 		return False
-	return path_abs == bench_abs or path_abs.startswith(bench_abs + os.sep)
+	if guard.pending():
+		raise guard.interrupt()
 
 
-def _resolve_source_path(filename):
-	"""Map a finding's callsite ``filename`` to a real on-disk file, or to a
-	Server Script sentinel for synthetic ``<serverscript>`` filenames.
+def _resolve_source_path(filename, *, must_exist=True):
+	"""Resolve a stored source path without importing an uninstalled app."""
+	from optimus.ai_fix import _InterruptGuard
 
-	Return shapes:
-	  - ``str``: a real on-disk path.
-	  - ``("server_script", scrubbed_name)``: sentinel; readers load the body
-	    from the ``tabServer Script`` DocType and the callsite builder renders a
-	    Desk link instead of a ``vscode://file`` link.
-	  - ``None``: unresolvable (synthetic frames like ``<string>``, missing
-	    files, or paths outside the bench).
-
-	Callsites are stored app-relative (``ugly_code/python/common.py``); resolved
-	via ``frappe.get_app_path`` with fallbacks for absolute / cwd-relative /
-	``apps/…`` forms. Every resolved path is finally checked against the bench
-	boundary (``_path_within_bench``); one pointing outside returns ``None``.
-	"""
-	if not filename:
+	if not isinstance(filename, str) or not filename.strip() or len(filename) > 4096 or "\x00" in filename:
 		return None
-	name = str(filename).strip()
-	if not name:
-		return None
-	# Server Script special case: bridge to DB-stored script body via the
-	# tuple sentinel; downstream branches load + link to the Desk form.
-	if name.startswith("<serverscript") or name.startswith("<server-script"):
+	name = filename.strip()
+	if name.startswith("<"):
 		from optimus.server_script_source import extract_script_name
 
-		_scrubbed = extract_script_name(name)
-		if _scrubbed:
-			return ("server_script", _scrubbed)
-		# Bare ``<serverscript>``: no script to look up; treat as
-		# unresolvable so the renderer falls back to plain-text display
-		# without a broken link.
-		return None
-	if name.startswith("<"):
-		return None
-	resolved: str | None = None
+		script = extract_script_name(name)
+		return ("server_script", script) if script else None
+	guard = _InterruptGuard(base=True)
 	try:
-		if os.path.isabs(name):
-			resolved = name if os.path.exists(name) else None
-		elif os.path.exists(name):
-			resolved = name
-		else:
-			parts = [p for p in name.replace("\\", "/").split("/") if p]
-			if not parts:
-				return None
-			import frappe
+		with guard:
+			candidates = [name]
+			if not os.path.isabs(name):
+				import frappe
 
-			candidates = []
-			try:
-				candidates.append(frappe.get_app_path(parts[0], *parts[1:]))
-			except Exception:
-				pass
-			try:
-				import frappe.utils
-				bench = frappe.utils.get_bench_path()
-				candidates.append(os.path.join(bench, name))
-				candidates.append(os.path.join(bench, "apps", name))
-			except Exception:
-				pass
-			for cand in candidates:
-				if cand and os.path.exists(cand):
-					resolved = cand
-					break
+				parts = name.replace("\\", "/").split("/")
+				if parts[0] in _installed_apps():
+					candidates.append(frappe.get_app_path(parts[0], *parts[1:]))
+				bench, _sites = _bench_paths()
+				if bench:
+					candidates.extend((os.path.join(bench, name), os.path.join(bench, "apps", name)))
+			for candidate in candidates:
+				real = os.path.realpath(candidate)
+				if _path_within_bench(real) and (not must_exist or os.path.isfile(real)):
+					return real
 	except Exception:
 		return None
-	if resolved and not _path_within_bench(resolved):
-		# Defence-in-depth: refuse paths that escape the bench tree.
-		# Log at warning level (best-effort - frappe may not be
-		# importable in unit-test contexts).
-		try:
-			import frappe
-			frappe.logger().warning(
-				f"optimus._resolve_source_path: rejected out-of-bench path {resolved!r}"
-			)
-		except Exception:
-			pass
-		return None
-	return resolved
+	if guard.pending():
+		raise guard.interrupt()
+	return None
 
 
 def _source_lines(filename: str, *, cache: dict | None = None) -> list[str] | None:
-	"""``filename``'s source lines, or ``None`` if unreadable. The single
-	source-read primitive: resolves the (app-relative) path via
-	``_resolve_source_path`` (Server Script sentinels read from the DocType) and
-	memoises in the shared per-render ``cache`` (keyed by ``filename``, ``None``
-	included). All the snippet/window/decorator readers go through it."""
-	if cache is not None and filename in cache:
-		return cache[filename]
-	resolved = _resolve_source_path(filename)
-	if isinstance(resolved, tuple) and resolved[0] == "server_script":
-		from optimus.server_script_source import get_server_script_lines
+	"""Validate access before cache lookup, including Server Script revocation."""
+	from optimus.ai_fix import _InterruptGuard
 
-		lines = get_server_script_lines(resolved[1], cache=cache)
-	else:
-		try:
-			with open(resolved, encoding="utf-8") as fh:
-				lines = fh.read().splitlines()
-		except Exception:
-			lines = None
+	guard = _InterruptGuard(base=True)
+	lines = None
+	try:
+		with guard:
+			resolved = _resolve_source_path(filename, must_exist=not (cache is not None and filename in cache))
+			if isinstance(resolved, tuple):
+				from optimus.server_script_source import get_server_script_lines
+
+				return get_server_script_lines(resolved[1], cache=cache)
+			if not resolved:
+				return None
+			if cache is not None and filename in cache:
+				return cache[filename]
+			fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+			try:
+				with os.fdopen(fd, "rb", closefd=False) as fh:
+					info = os.fstat(fh.fileno())
+					if not stat.S_ISREG(info.st_mode) or info.st_size > _SOURCE_MAX_BYTES:
+						return None
+					data = fh.read(_SOURCE_MAX_BYTES + 1)
+					if len(data) <= _SOURCE_MAX_BYTES:
+						lines = data.decode("utf-8").splitlines()
+			finally:
+				os.close(fd)
+	except Exception:
+		lines = None
+	if guard.pending():
+		lines = data = None
+		raise guard.interrupt()
 	if cache is not None:
 		cache[filename] = lines
 	return lines

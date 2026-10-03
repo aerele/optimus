@@ -21,23 +21,7 @@ import frappe  # noqa: E402
 
 from optimus.line_profile import capture as cap  # noqa: E402
 from optimus.line_profile import hooks as lp_hooks  # noqa: E402
-
-
-class FakeCache:
-	"""Dict-backed cache without rpush/lrange, so flush/read use the
-	JSON-list fallback (exercises the same aggregate path as production)."""
-
-	def __init__(self):
-		self.store = {}
-
-	def get_value(self, k):
-		return self.store.get(k)
-
-	def set_value(self, k, v, expires_in_sec=None):
-		self.store[k] = v
-
-	def delete_value(self, k):
-		self.store.pop(k, None)
+from optimus.tests.phase2_cache_fake import Cache as FakeCache  # noqa: E402
 
 
 @pytest.fixture
@@ -54,9 +38,11 @@ def lp_env(monkeypatch, tmp_path):
 	monkeypatch.syspath_prepend(str(mod_dir))
 	sys.modules.pop("ugly_hot", None)
 
+	from optimus.renderer import source
+	monkeypatch.setattr(source, "_installed_apps", lambda: {"ugly_hot"})
 	cache = FakeCache()
 	monkeypatch.setattr(frappe, "cache", cache, raising=False)
-	monkeypatch.setattr(frappe, "local", types.SimpleNamespace(), raising=False)
+	monkeypatch.setattr(frappe, "local", types.SimpleNamespace(cache={}), raising=False)
 	monkeypatch.setattr(frappe, "session", types.SimpleNamespace(user="u@x.com"), raising=False)
 	monkeypatch.setattr(frappe, "log_error", lambda *a, **k: None, raising=False)
 	# _should_skip_request is only used by the request hook; not needed here.

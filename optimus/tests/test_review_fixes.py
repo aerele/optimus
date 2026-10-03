@@ -29,17 +29,6 @@ def _fn_body(src: str, name: str) -> str:
 # --- HIGH-1: steps tokens captured on the auto-analyze path -----------------
 
 
-class TestAutoAnalyzeStepsTokens:
-	def test_build_humanized_notes_threads_usage_out(self):
-		body = _fn_body(_read(_ANALYZE_PATH), "_build_humanized_notes_html")
-		assert "usage_out: dict | None = None" in body
-		assert "usage_out=usage_out" in body  # forwarded to ai_fix.humanize_steps
-
-	def test_persist_records_steps_tokens(self):
-		src = _read(_ANALYZE_PATH)
-		# The _persist caller passes a usage dict and writes ai_steps_tokens.
-		assert "usage_out=_steps_usage" in src
-		assert "doc.ai_steps_tokens = int(_steps_usage" in src
 
 
 # --- HIGH-2: drain phase stays on "Capturing Background Jobs" ----------------
@@ -80,10 +69,6 @@ class TestDrainProgressEndpoint:
 # --- test_ai_connection must not bill the probe to a prior session -----------
 
 
-class TestProbeClearsSpendMarker:
-	def test_ai_connection_clears_marker(self):
-		body = _fn_body(_read(_API_PATH), "test_ai_connection")
-		assert "_mark_ai_spend_session(None)" in body
 
 
 # --- export_session parity --------------------------------------------------
@@ -102,21 +87,25 @@ class TestExportSessionTokenParity:
 
 class TestLoadRecordingsBundleCorrupt:
 	def test_corrupt_gzip_returns_none(self, monkeypatch, tmp_path):
-		import frappe
+		from types import SimpleNamespace
 
-		from optimus import analyze
+		from optimus import ai_fix, analyze
 
-		bad = tmp_path / "bad.json.gz"
+		root = tmp_path / "private" / "files"
+		root.mkdir(parents=True)
+		bad = root / "bad.json.gz"
 		bad.write_bytes(b"this is definitely not gzip")
-
-		class _FileDoc:
-			def get_full_path(self):
-				return str(bad)
-
-		monkeypatch.setattr(frappe, "get_doc", lambda *a, **k: _FileDoc(), raising=False)
-		monkeypatch.setattr(frappe, "log_error", lambda **kw: None, raising=False)
-
-		class Doc:
-			recordings_file = "/private/files/bad.json.gz"
-
-		assert analyze._load_recordings_bundle(Doc()) is None
+		doc = SimpleNamespace(name="fake-doc", session_uuid="fake-session", recordings_file="/private/files/bad.json.gz")
+		opened, failures = [], []
+		def path():
+			opened.append(True)
+			return str(bad)
+		file = SimpleNamespace(file_url=doc.recordings_file, is_private=1,
+			attached_to_doctype="Optimus Session", attached_to_name=doc.name, attached_to_field="recordings_file",
+			get_full_path=path)
+		monkeypatch.setattr(analyze, "frappe", SimpleNamespace(get_all=lambda *a, **kw: ["fake-file"],
+			get_doc=lambda *a: file, get_site_path=lambda *a: str(root)))
+		monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: failures.append(kw))
+		assert analyze._load_recordings_bundle(doc) is None
+		assert opened == [True], "the test must reach corrupt gzip, not fail an unrelated binding check"
+		assert failures[0]["reason"] == "bundle_read_failed"
