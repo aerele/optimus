@@ -319,7 +319,7 @@ def test_the_ai_steps_log_through_the_one_helper():
 			for name in calls & {"log_ai_failure", "_log_ai_step_failure"}:
 				callers.setdefault(name, set()).add(f"{mod}:{fn.name}")
 	assert callers == {
-		"log_ai_failure": {"analyze.py:_log_ai_step_failure", "analyze.py:load_recordings_light", "analyze.py:_load_recordings_bundle"},
+		"log_ai_failure": {"analyze.py:_log_ai_step_failure", "analyze.py:load_recordings_light", "analyze.py:_load_recordings_bundle", "analyze.py:_phase2_index_for"},
 		"_log_ai_step_failure": {"analyze.py:_run_ai_step"},
 	}
 	helper = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "_run_ai_step")

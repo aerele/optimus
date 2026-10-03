@@ -2228,14 +2228,23 @@ def _maybe_attach_recorded_queries(
 
 def _phase2_index_for(doc_or_docname) -> dict:
 	"""``renderer._build_line_drilldown_callsite_index`` for a session doc or
-	docname, or ``{}`` on any error (no phase-2 runs yet, doc gone, etc.)."""
+	docname. Ordinary failures use empty context; job timeouts stop the worker."""
+	from optimus.ai_fix import _InterruptGuard, log_ai_failure
+
+	guard = _InterruptGuard()
+	failure = None
 	try:
-		doc = doc_or_docname
-		if isinstance(doc, str):
-			doc = frappe.get_doc("Optimus Session", doc)
-		return renderer._build_line_drilldown_callsite_index(doc) or {}
-	except Exception:
-		return {}
+		with guard:
+			doc = doc_or_docname
+			if isinstance(doc, str):
+				doc = frappe.get_doc("Optimus Session", doc)
+			return renderer._build_line_drilldown_callsite_index(doc) or {}
+	except Exception as exc:
+		failure = exc
+	if guard.pending():
+		raise guard.interrupt()
+	log_ai_failure("optimus AI Phase 2 context", failure)
+	return {}
 
 
 _SESSION_COUNTER_FIELDS = frozenset({"ai_tokens_spent", "ai_refresh_count"})

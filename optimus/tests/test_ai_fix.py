@@ -1367,7 +1367,7 @@ class TestGuardedCompletion:
 		out = self._run(fake, monkeypatch)
 		assert len(fake.calls) == 1
 		assert set(out) == {"suggestion", "model", "provider", "generated_at", "source_available",
-		                    "prompt_version", "guardrail", "finish_reason"}
+		                    "prompt_version", "guardrail", "finish_reason", "usage_complete"}
 		assert out["suggestion"] == self._GOOD
 		assert out["prompt_version"] == ai_prompts.PROMPT_VERSION == 4
 		assert out["guardrail"] == {"violations": [], "reasked": False, "fallback": False}
