@@ -921,7 +921,7 @@ def _session_perf_24h() -> dict:
 			Avg(s.analyze_duration_ms).as_("avg_ms"),
 			Max(s.analyze_duration_ms).as_("max_ms"),
 		)
-		.where((s.status == "Ready") & (s.modified > cutoff))
+		.where((s.status == "Ready") & (s.stopped_at > cutoff))
 	).run(as_dict=True)
 	agg = rows[0] if rows else {}
 	return {
@@ -1198,15 +1198,13 @@ def retry_analyze(session_uuid: str) -> dict:
 	}
 
 
-def _render_session_report(docname: str, *, ai_backfill: bool = False) -> dict:
+def _render_session_report(docname: str) -> dict:
 	"""Re-render the session's HTML report from stored data and re-attach it.
 
 	Not whitelisted and ungated: every caller must already have passed ``_session_action_gate``
 	(or run as trusted server code). Other Optimus modules may call it; the leading underscore
-	means "not an HTTP endpoint", not "private to this module". ``ai_backfill=True`` first fills
-	missing AI fix suggestions when "Suggest AI fixes by default" is on; only the whitelisted
-	``regenerate_reports`` passes it until that path is removed, so a re-render never calls the
-	LLM. AI endpoints use the default False: they have just generated what they wanted.
+	means "not an HTTP endpoint". Rendering uses saved AI answers and never
+	calls the provider or loads recording trees.
 
 	Recordings are best-effort: if they expired from Redis (and no bundle is attached) the
 	per-query drill-down renders empty and every persisted section stays intact. Clears the cached
@@ -1218,23 +1216,12 @@ def _render_session_report(docname: str, *, ai_backfill: bool = False) -> dict:
 	from optimus import analyze as _analyze_mod
 
 	doc = frappe.get_doc("Optimus Session", docname)
-	recording_uuids = [
-		a.recording_uuid for a in (doc.actions or []) if getattr(a, "recording_uuid", None)
-	]
 	recordings, step_failed = _analyze_mod._run_ai_step(
-		lambda: list(_analyze_mod._fetch_recordings(
-			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
-		)),
+		lambda: _analyze_mod.load_recordings_light(doc),
 		title="optimus regenerate_reports fetch", session_uuid=doc.session_uuid,
 	)
 	if step_failed:
 		recordings = []
-
-	if ai_backfill:
-		_analyze_mod._run_ai_step(
-			lambda: _analyze_mod._backfill_ai_suggestions(doc),
-			title="optimus regenerate ai backfill", session_uuid=doc.session_uuid,
-		)
 
 	interrupt = None
 
@@ -1302,8 +1289,8 @@ def regenerate_reports(session_uuid: str) -> dict:
 	Failed sessions; any other status is refused with the long-standing message that names
 	retry_analyze (pinned by the real-bench integration test). Permission:
 	``_session_action_gate`` (the owner, a System Manager or a user the session is shared with for
-	editing); then the per-user limit. Until the AI path is removed from regenerate it still
-	backfills missing AI fix suggestions first when "Suggest AI fixes by default" is on.
+	editing); then the per-user limit. Uses saved AI answers without making new
+	provider calls. Use Refresh AI suggestions to request new answers.
 	"""
 	ref = _session_action_gate(
 		session_uuid,
@@ -1312,7 +1299,7 @@ def regenerate_reports(session_uuid: str) -> dict:
 		status_hint=_("regenerate_reports requires the session to be in a terminal state (Ready or Failed); this one is '{0}'. Wait for analyze to finish, or use retry_analyze to restart a stuck pipeline."),
 	)
 	ratelimit.enforce_user_rate_limit("regenerate_reports", **_ACTION_LIMITS["regenerate_reports"])
-	out = _render_session_report(ref.docname, ai_backfill=True)
+	out = _render_session_report(ref.docname)
 	return {
 		"regenerated": bool(out.get("regenerated")),
 		"session_uuid": ref.session_uuid,
@@ -1350,14 +1337,15 @@ def ai_capabilities() -> dict:
 	"""The per-section LLM toggles, for the Optimus Session form to decide
 	which AI buttons to show. Any logged-in profiler user no Profiler
 	Settings read permission needed (the server still enforces the toggles).
-	Returns ``{enabled, findings, indexes, humanize}`` (all bools)."""
+	Returns ``{enabled, findings, indexes, humanize}`` (all bools);
+	``indexes`` is always False since index advice stopped using the AI."""
 	_require_profiler_user()
 	from optimus.settings import get_config
 	cfg = get_config()
 	return {
 		"enabled": bool(getattr(cfg, "ai_enabled", False)),
 		"findings": bool(getattr(cfg, "ai_suggest_findings", True)),
-		"indexes": bool(getattr(cfg, "ai_suggest_indexes", True)),
+		"indexes": False,
 		"humanize": bool(getattr(cfg, "ai_humanize_steps", True)),
 	}
 
@@ -1380,14 +1368,8 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 
 	_analyze_mod._mark_ai_spend_session(getattr(doc, "session_uuid", None))
 
-	recording_uuids = [
-		a.recording_uuid for a in (doc.actions or [])
-		if getattr(a, "recording_uuid", None)
-	]
 	recordings, step_failed = _analyze_mod._run_ai_step(
-		lambda: list(_analyze_mod._fetch_recordings(
-			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
-		)),
+		lambda: _analyze_mod.load_recordings_light(doc),
 		title="optimus humanize_steps fetch", session_uuid=getattr(doc, "session_uuid", None),
 	)
 	if step_failed:
@@ -1412,7 +1394,7 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 		"Optimus Session", doc.name, {
 			"notes": _analyze_mod._assemble_humanized_notes(steps_md),
 			# Tokens for this Steps-to-Reproduce humanization. The report's
-			# session total rolls it in alongside fix + index suggestions
+			# session total rolls it in alongside finding fix suggestions
 			# (notes is markdown, so the count needs its own field).
 			"ai_steps_tokens": int(_steps_usage.get("total_tokens") or 0),
 		},
@@ -1424,58 +1406,13 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 
 
 
-def _refill_indexes_for_doc(doc) -> dict:
-	"""Walk the session's table breakdown and run the per-table index AI
-	helper for every table that has a heuristic ``recommended_index`` but
-	no ``ai_index`` yet. Returns ``{"added": N, "failed": N, "skipped": N}``.
-	Caller is responsible for permission / status / AI-available gates and
-	for the final re-render.
-	"""
-	import json as _json
-
-	from optimus import analyze as _analyze_mod
-
-	try:
-		breakdown = _json.loads(doc.table_breakdown_json or "[]")
-	except Exception:
-		breakdown = []
-
-	eligible = [
-		t for t in (breakdown or [])
-		if isinstance(t, dict)
-		and (t.get("recommended_index") or {}).get("columns")
-		and not t.get("ai_index")
-	]
-	added = failed = skipped = 0
-	for t in eligible:
-		table_name = t.get("table")
-		if not table_name:
-			skipped += 1
-			continue
-		# One title for every table (the table goes in the message), so the
-		# Error Log groups these rows instead of creating one title per table.
-		out, step_failed = _analyze_mod._run_ai_step(
-			lambda table_name=table_name: _analyze_mod._run_table_index_ai_backfill(doc, table_name=table_name),
-			title="optimus refill_indexes", session_uuid=getattr(doc, "session_uuid", None), table=table_name,
-		)
-		if step_failed:
-			failed += 1
-			continue
-		if out.get("ok"):
-			added += 1
-		else:
-			# Helper returned a reason (e.g. provider missing for one call)
-			# treat as skipped, not failed, since the doc state is unchanged.
-			skipped += 1
-	return {"added": added, "failed": failed, "skipped": skipped}
 
 
 @frappe.whitelist(methods=["POST"])
 def refill_ai_suggestions(session_uuid: str) -> dict:
 	"""Single-button entry point: re-fills every AI-generated report section in one round-trip:
-	(1) overwrite every eligible finding's fix suggestion, (2) rewrite Steps to Reproduce, (3) run
-	the per-table index helper for tables with a candidate but no AI advice, (4) one final
-	re-render.
+	(1) overwrite every eligible finding's fix suggestion, (2) rewrite Steps to Reproduce,
+	(3) one final re-render.
 
 	Each step is gated by its per-section toggle; a toggle-off step is skipped, not errored.
 	``_ai_session_gate`` runs once at the top (permission, Ready status, AI configured, per-user
@@ -1519,20 +1456,11 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 	else:
 		steps["reason"] = "toggle_off"
 
-	indexes = {"added": 0, "failed": 0, "skipped": 0, "skipped_reason": None}
-	if cfg.ai_suggest_indexes:
-		doc = frappe.get_doc("Optimus Session", ref.docname)
-		indexes = _refill_indexes_for_doc(doc)
-		indexes["skipped_reason"] = None
-	else:
-		indexes["skipped_reason"] = "toggle_off"
-
 	return {
 		"ok": True,
 		"session_uuid": ref.session_uuid,
 		"fixes": fixes,
 		"steps": steps,
-		"indexes": indexes,
 		"regenerated": _rerender_after_ai(ref),
 	}
 

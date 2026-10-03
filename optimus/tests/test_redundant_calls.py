@@ -14,18 +14,23 @@ from optimus.analyzers.base import AnalyzeContext
 # Canonical user-code caller stack used by the default fixture. Passing
 # this through walk_callsite yields ``apps/myapp/controllers/bulk.py:42``
 # as the blame frame, so findings built from this fixture are kept.
+# Canonical user-code caller stack used by the default fixture, innermost frame
+# first (the order capture._capture_caller_stack builds). redundant_calls
+# reverses it before walk_callsite, which yields
+# apps/myapp/controllers/bulk.py:42 as the blame frame, so findings built from
+# this fixture are kept.
 _USER_CALLER_STACK = [
-	{"filename": "frappe/app.py", "lineno": 120, "function": "application"},
-	{"filename": "frappe/handler.py", "lineno": 46, "function": "handle"},
 	{"filename": "apps/myapp/controllers/bulk.py", "lineno": 42, "function": "do_import"},
+	{"filename": "frappe/handler.py", "lineno": 46, "function": "handle"},
+	{"filename": "frappe/app.py", "lineno": 120, "function": "application"},
 ]
 
-# Framework-only stack walk_callsite returns None for this, so
-# findings built from it get filtered out.
+# Framework-only stack (innermost first): walk_callsite returns only framework
+# frames for it, so findings built from it get filtered out.
 _FRAMEWORK_CALLER_STACK = [
-	{"filename": "frappe/app.py", "lineno": 120, "function": "application"},
-	{"filename": "frappe/model/document.py", "lineno": 500, "function": "save"},
 	{"filename": "frappe/cache_manager.py", "lineno": 30, "function": "get_doctype_map"},
+	{"filename": "frappe/model/document.py", "lineno": 500, "function": "save"},
+	{"filename": "frappe/app.py", "lineno": 120, "function": "application"},
 ]
 
 
@@ -412,3 +417,97 @@ def test_missing_caller_stack_is_dropped_with_warning():
 	assert any("no captured caller stack" in w for w in ctx.warnings), (
 		f"Expected no-caller-stack warning; got: {ctx.warnings}"
 	)
+
+
+
+
+# ---------------------------------------------------------------------------
+# L5 (corpus anchors): the real loop line, not the outer doc-event-hook frame
+# ---------------------------------------------------------------------------
+# These chains mirror ugly_code/ugly_code/python/common.py (looped_validate:9
+# calls _run_validations -> _check_user_exists, whose loop line 24 fetches the
+# User doc; looped_validate:11 calls _run_post_checks -> _verify_permissions,
+# whose loop lines 205 and 206 check read and write permission). Before the fix
+# the corpus findings 3q1efl686s, 3q1qg8btng and 3q1fsdhl5p were anchored to
+# looped_validate:9 / :11. Each stack is innermost-first, the order
+# capture._capture_caller_stack builds it in.
+
+_COMMON_PY = "apps/ugly_code/ugly_code/python/common.py"
+
+
+def _hook_chain(loop_line, loop_fn, mid_line, mid_fn, hook_line):
+	return [
+		{"filename": _COMMON_PY, "lineno": loop_line, "function": loop_fn},
+		{"filename": _COMMON_PY, "lineno": mid_line, "function": mid_fn},
+		{"filename": _COMMON_PY, "lineno": hook_line, "function": "looped_validate"},
+		{"filename": "apps/frappe/frappe/model/document.py", "lineno": 500, "function": "run_method"},
+		{"filename": "apps/frappe/frappe/app.py", "lineno": 120, "function": "application"},
+	]
+
+
+def _anchor(fn_name, raw, safe, stack, count):
+	recording = {
+		"uuid": "rec-1",
+		"calls": [],
+		"pyi_session": None,
+		"sidecar": [_sidecar_entry(fn_name, raw, safe, caller_stack=stack) for _ in range(count)],
+	}
+	ctx = AnalyzeContext(session_uuid="t", docname="t")
+	rc = [f for f in redundant_calls.analyze([recording], ctx).findings if f["finding_type"] == "Redundant Call"]
+	assert len(rc) == 1
+	detail = json.loads(rc[0]["technical_detail_json"])
+	assert detail["callsite_walk"] == "outermost_first"  # D-STAMP: built by the fixed walk
+	return detail["callsite"], rc[0]
+
+
+def test_corpus_anchor_get_doc_3q1efl686s():
+	callsite, finding = _anchor(
+		"get_doc", ("User", "Administrator"), ("User", "hashadmin"),
+		_hook_chain(24, "_check_user_exists", 15, "_run_validations", 9), 150,
+	)
+	assert (callsite["lineno"], callsite["function"]) == (24, "_check_user_exists")
+	assert f"{_COMMON_PY}:24" in finding["customer_description"]
+
+
+def test_corpus_anchor_has_permission_read_3q1qg8btng():
+	callsite, _ = _anchor(
+		"has_permission", ("User", "Administrator", "read"), ("User", "hashadmin", "read"),
+		_hook_chain(205, "_verify_permissions", 198, "_run_post_checks", 11), 120,
+	)
+	assert (callsite["lineno"], callsite["function"]) == (205, "_verify_permissions")
+
+
+def test_corpus_anchor_has_permission_write_3q1fsdhl5p():
+	callsite, _ = _anchor(
+		"has_permission", ("User", "Administrator", "write"), ("User", "hashadmin", "write"),
+		_hook_chain(206, "_verify_permissions", 198, "_run_post_checks", 11), 120,
+	)
+	assert (callsite["lineno"], callsite["function"]) == (206, "_verify_permissions")
+
+
+def test_corpus_anchor_cache_get_inside_erpnext_is_suppressed_3q1gf7r9lq():
+	"""Corpus id 3q1gf7r9lq: the repeated Company cache lookup runs inside ERPNext's
+	validate chain (the innermost frame outside frappe/ is ERPNext code), so after the fix
+	the finding is suppressed as framework code, as this analyzer always intended; the
+	pre-fix walk blamed the outer ugly_code override line instead. The ERPNext frames
+	here are illustrative (the corpus stores only the blamed frame)."""
+	stack = [
+		{"filename": "apps/erpnext/erpnext/setup/doctype/company/company.py", "lineno": 900, "function": "get_default_currency"},
+		{"filename": "apps/erpnext/erpnext/accounts/doctype/sales_invoice/sales_invoice.py", "lineno": 300, "function": "validate"},
+		{"filename": "apps/ugly_code/ugly_code/customizations/sales_invoice_override.py", "lineno": 35, "function": "validate"},
+		{"filename": "apps/frappe/frappe/model/document.py", "lineno": 500, "function": "run_method"},
+		{"filename": "apps/frappe/frappe/app.py", "lineno": 120, "function": "application"},
+	]
+	recording = {
+		"uuid": "rec-1",
+		"calls": [],
+		"pyi_session": None,
+		"sidecar": [
+			_sidecar_entry("cache_get", "document_cache::Company::Aerele (Demo)", "93bf3d83c65a", caller_stack=stack)
+			for _ in range(200)
+		],
+	}
+	ctx = AnalyzeContext(session_uuid="t", docname="t")
+	result = redundant_calls.analyze([recording], ctx)
+	assert [f for f in result.findings if f["finding_type"] == "Redundant Call"] == []
+	assert any("Frappe framework code" in w for w in ctx.warnings)

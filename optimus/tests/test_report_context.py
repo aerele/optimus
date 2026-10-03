@@ -152,7 +152,7 @@ class TestTopLevelKeys:
 
 
 class TestAiTokensTotal:
-	def test_sums_fix_index_and_steps(self):
+	def test_sums_fix_and_steps_ignoring_retired_index_advice(self):
 		ctx = _ctx(
 			findings_by_app=[
 				{"app": "myapp", "findings": [
@@ -169,9 +169,9 @@ class TestAiTokensTotal:
 				{"table": "tabNote"},                     # no ai_index key at all
 			],
 		)
-		# fix 165+300+40=505 + index 80 + steps 55 = 640
+		# fix 165+300+40=505 + steps 55 = 560; retired index advice is not shown
 		out = build_report_context(_doc(ai_steps_tokens=55), ctx)
-		assert out["ai_tokens_total"] == 640
+		assert out["ai_tokens_total"] == 560
 		assert out["ai_steps_tokens"] == 55  # surfaced for the inline Steps display
 
 	def test_zero_when_no_ai(self):
