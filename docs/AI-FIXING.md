@@ -28,7 +28,7 @@ With the master `ai_enabled=OFF` nothing is sent regardless. Once AI is enabled,
 
 ## 2. What data leaves the host
 
-There are four outbound request shapes. Each table lists every distinct field that crosses the network boundary, the typical size and the source.
+There are three outbound request shapes. Each table lists every distinct field that crosses the network boundary, the typical size and the source.
 
 ### 2.1 Finding fix suggestion (`/v1/messages` or `/chat/completions`)
 
@@ -42,7 +42,7 @@ Every value captured from your site (title, callsite, source, SQL, EXPLAIN, hot 
 
 | Field | Source | Typical size | Notes |
 |---|---|---|---|
-| `finding_type` | Optimus Finding | ~15 chars | One of the 10 eligible types (§ 5). |
+| `finding_type` | Optimus Finding | ~15 chars | One of the 4 eligible types (§ 5). |
 | `severity` | Optimus Finding | 4–6 chars | High / Medium / Low. |
 | `title` | Optimus Finding | 60–200 chars | Profiler-generated label (e.g. "`frappe.get_doc` on line 12 loops 18×"). |
 | `estimated_impact_ms` | Optimus Finding | ~5 chars | Profiler's impact estimate. |
@@ -50,18 +50,18 @@ Every value captured from your site (title, callsite, source, SQL, EXPLAIN, hot 
 | `callsite.filename` | technical_detail_json | 40–80 chars | Relative path under your bench, e.g. `apps/myapp/myapp/forms/invoice.py`. |
 | `callsite.lineno` | technical_detail_json | 3–5 chars | Line number. |
 | `callsite.function` | technical_detail_json | 20–60 chars | Function name from your code. |
-| **`source_window`** | `renderer._read_source_window` | **1–2 KB typical** | Up to 80 lines of your source: 24 before / 24 after the callsite, capped at `_MAX_SOURCE_WINDOW_LINES`. Verbatim including comments, strings, variable names. **This is the largest field in a typical request.** |
+| **`source_window`** | `analyze._ai_grounding_window` | **1-2 KB typical** | The whole enclosing function, including decorators, when it fits in 80 lines; otherwise 24 lines before and after the callsite. The request budget can shorten it further. Verbatim comments, strings and names are included, with a 200-character cap per source line. **This is the largest field in a typical request.** |
+| loop facts | computed from `source_window` | bounded by the request budget | N+1 Query, Redundant Call and Hot Line only: whether the callsite is in a loop, which loop variables its call uses, whether the result is used and which writes the profiler can identify. Identifiers only, no values. |
 | `phase2_hotline` | Phase 2 line-profile | 100–400 chars | When available, the hottest single line from line-profiling (line number, content, total ms, hit count). |
 | `technical_detail.function` | technical_detail_json | 30–80 chars | Hot function name (for Slow-Hot-Path-type findings). |
 | `technical_detail.cumulative_ms` | technical_detail_json | ~5 chars | Time in that function. |
 | `technical_detail.action_wall_time_ms` | technical_detail_json | ~5 chars | Action's total wall time. |
 | `technical_detail.normalized_query` | technical_detail_json | 100–2400 chars | **Capped 2400.** Normalized SQL table names, column names, WHERE clause structure preserved; literals replaced by `?` (then redacted again by `optimus.redaction` if they match sensitive column names). |
-| `technical_detail.suggested_ddl` | technical_detail_json | 50-300 chars | Sent as one sentence naming the column and DocType ("Profiler's index candidate: column `c` of DocType `X`"), never as DDL. |
 | `technical_detail.explain_row` | technical_detail_json | 100–800 chars | `EXPLAIN` output, capped type / rows / key / Extra etc. |
 | `technical_detail.validation_note` | technical_detail_json | 0–300 chars | Caveats. |
 | **`technical_detail.example_queries`** | live recording (Redis) | **0–4800 chars** | Up to 2 of the slowest **raw** SQL queries from this action's recording, each capped at 2400 chars. These are real production queries table names, column names, WHERE values are preserved (after `password = '…'`-style literal redaction at capture time, see `optimus.redaction`). |
 
-The user message is assembled to fit the provider's context window (section 4.2): optional parts (example queries, EXPLAIN row, index candidate, the normalized query) are dropped whole, the least useful first, and only then does the source window shrink around the target line. Nothing is cut inside a block.
+The user message is assembled to fit the provider's context window (section 4.2): optional parts (example queries, EXPLAIN row, the normalized query and loop facts) are dropped whole, the least useful first, and only then does the source window shrink around the target line. Nothing is cut inside a block.
 
 Oversized title and callsite text are clipped before wrapping. A source line is kept verbatim or omitted with a no-source notice; omitted lines cannot ground a proposed diff.
 
@@ -84,25 +84,11 @@ Triggered by `ai_humanize_steps`. Built by `_build_steps_messages` in `optimus/a
 
 Up to `_MAX_STEPS_ACTIONS = 60` actions, sent inside one data block and limited to 8,000 chars or the context budget, whichever is smaller. `_is_reproducer_noise` pre-filters polling, form-load and asset requests.
 
-### 2.3 Index suggestion (`/v1/messages` or `/chat/completions`)
+### 2.3 Index suggestion (removed)
 
-Triggered by the session's **Refresh AI suggestions** action or auto-suggest. Built by `_build_index_messages` in `optimus/ai_fix.py`.
+Index advice for Missing Index, Full Table Scan, Filesort, Temporary Table and Low Filter Ratio findings, and for the per-table index cards, is built by Optimus itself (`optimus/renderer/fix_recipes.py`) from the analyzer's data and DocType metadata. This path sends nothing to the AI provider. Eligible Slow Query and N+1 Query suggestions can still include query context and index advice.
 
-**System prompt** (static, ~1.2 KB): DBA-perspective index design rules, Frappe metadata-column guardrails, write-hot-table warnings.
-
-**User message** (per-table, ~2–10 KB, **10 KB hard cap**):
-
-| Field | Source | Typical size | Notes |
-|---|---|---|---|
-| `table` | table_breakdown | 15–50 chars | E.g. `tabSales Invoice Item`. |
-| `doctype` | table_breakdown | 20–60 chars | DocType label. |
-| `read_count` / `write_count` | table_breakdown | ~3–4 chars each | Session counts. |
-| `is_write_hot` | table_breakdown | 4–5 chars | Boolean. |
-| `recommended_index` | table_breakdown | 50–200 chars | Profiler's heuristic pick (columns + together_count). |
-| `candidates` | table_breakdown | 100–400 chars | Each candidate column + sources + hit count. |
-| `framework_cols_filtered` | table_breakdown | 30–150 chars | Frappe metadata columns touched (the LLM is told NOT to index these). |
-| `existing_indexes` | `SHOW INDEX` | 100–600 chars | Name / columns / unique flag per index already on the table. |
-| **`sample_queries`** | live recording (Redis) | **0–9600 chars** | Up to 4 distinct normalized SELECT queries from the session that touched this table. Each capped 2400 chars. |
+The recipes use a DocField's Search Index flag for a standard field in your app, a Property Setter for another app's field, and the Custom Field or custom DocType editor for custom metadata. Composite and text-column indexes use `frappe.db.add_index` in a patch or, for your own standard DocType, `on_doctype_update` plus a one-time patch. Text columns use a prefix on MariaDB. Single-column non-text table cards fall back to their candidate list because an index added only by a patch would not survive schema synchronization.
 
 ### 2.4 Connectivity probe (Optimus Settings → AI → "Test connection" button)
 
@@ -117,7 +103,7 @@ These items are **never** sent in any AI request body:
 - **Sensitive SQL literals.** `password = '...'`, `api_key = '...'`, `token = '...'` and the 12 other patterns in `optimus.redaction.DEFAULT_SENSITIVE_SQL_COLUMNS` are replaced with `<REDACTED>` at capture time, so even the `example_queries` field sees the redacted form. Operators can extend this list via `sensitive_sql_columns` in Optimus Settings.
 - **HTTP form bodies.** `form_dict` keys matching `password` / `api_key` / `token` / etc. are redacted at capture (`optimus.redaction.DEFAULT_SENSITIVE_KEYS`) and form bodies themselves are never included in AI payloads only summary fields like `cmd` / `doctype` reach the humanize-steps path.
 A guardrail repair request is a separate completion: it reads the current key once
-when sent. Same-origin redirects and the temperature retry reuse that completion's
+when sent. Same-origin redirects and parameter retries reuse that completion's
 auth object without decrypting again.
 
 - **Your API keys.** The provider API key is stored in an encrypted Password field and decrypted only when a request is sent (`frappe.utils.password.get_decrypted_password`), once per call (one SELECT on `__Auth`). For a provider that needs a key it must be plain printable ASCII: a key with any other character (a space inside it, a pasted smart quote or no-break space, a control character) is refused before any request is made, with a message that names the usual causes (a pasted smart quote, a stray space, a no-break space, a control character), and such a key is refused when Optimus Settings is saved, with the same message. The OpenAI-compatible provider needs no key (Ollama, LM Studio, vLLM): there such a key is neither sent nor refused, and the request goes without one; a key it can send is still sent (a router such as OpenRouter needs one). In Optimus's code it sits only in local variables named `api_key` or `secret` (names Frappe's traceback sanitizer and Sentry redact), for a moment in the `literals` parameter of `redaction.scrub_secrets` (which moves the key into `secret` before it scrubs anything), and in a masked `requests` auth object (`_ApiKeyAuth`). It travels only in the HTTP header (`x-api-key` or `Authorization: Bearer ...`), which that object sets on the HTTP library's own prepared request, whose headers hold it while the request is sent (the response keeps that request, and neither one's `repr` shows its headers). The HTTP library never follows a redirect: it drops only a header named `Authorization` when it follows one to another host, so the `x-api-key` header would have been sent on to the redirect target. Optimus follows at most three 307 or 308 redirects itself, only to the same host and port (with the same scheme, or http to https on that host), sending the same request and key again; any other 3xx reply (a 301, 302 or 303, another host or port, a downgrade, a fourth redirect) is reported as an unexpected response instead, which says that a Base URL that redirects (301, 302 or 303, or a 307 or 308 to another host) must be set to the final URL it redirects to, and the address a redirect points to is never logged or shown. Apart from those it is never part of a settings dict, a header dict, the prompt or an exception message. A provider's error reply is scrubbed before it is shown, of the key the request was sent with (the only key the provider received, so an echo is masked even when the key in Settings was changed while the request ran), or of the key stored in Optimus Settings when the request carried none, each in its raw and its JSON-escaped form. A 404 message names the request URL with any credentials in it masked (a `user:password@` typed into a custom Base URL, or the key), or only "(the configured Base URL)" when the URL cannot be scrubbed. In each of the failure scenarios the canary test (`optimus/tests/test_ai_secret_canary.py`) models, it appears in no Error Log row, traceback or Sentry event (earlier releases could log it: see the API key advisory in `CHANGELOG.md`), and it is never returned to the client. The OpenAI-compatible provider with `needs_key=False` (local endpoints) sends no auth header at all when no key is set.
@@ -165,36 +151,32 @@ An answer cut off at the output limit is never re-asked and its code is removed.
 
 Each provider has a context window in `_PROVIDER_DEFAULTS` (`context_tokens`): Anthropic 200,000, OpenAI 128,000, Kimi 128,000, DeepSeek 64,000, OpenAI-compatible 4,096. For OpenAI-compatible servers set **Optimus Settings > AI > Context window (tokens)** to the window your server really has (0 uses Optimus's 4,096-token budget). Optimus reserves a fifth of the window for the answer (between 512 and 1,024 tokens), sizes the user message to the rest, and refuses with a clear message when the window cannot hold the prompt. Sizes count every non-ASCII character (Chinese, Japanese, Arabic, Hebrew, accented letters) as a whole token, to reduce underestimation for those scripts; token counts remain estimates. Offline corpus checks fit the first request inside 4,096 tokens. A follow-up is sent only when the first call's reported usage leaves room; live model quality still requires evaluation.
 
-The table-card index path keeps its existing prompt and regex notes, and uses the same provider-aware output budget and pre-send context-fit check. The code guardrails apply to finding fixes in every rendered block, regardless of its fence label or section. Static checks do not establish that a suggestion fixes the performance problem. Review its semantics before applying it.
+The code guardrails apply to finding fixes in every rendered block, regardless of its fence label or section. Static checks do not establish that a suggestion fixes the performance problem. Review its semantics before applying it.
 
 ## 5. Eligible finding types
 
-These ten finding types are the only ones for which Optimus builds an AI payload. All other types (Slow Hot Path, Hook Bottleneck, Repeated Hot Frame, infra / frontend findings, etc.) are skipped they don't carry enough code/SQL context for the LLM to add value over the profiler's own deterministic suggestions.
+These four finding types are the only ones for which Optimus builds an AI payload. Infrastructure, frontend and call-tree findings lack enough code or SQL context. Index findings receive deterministic recipes; Framework N+1 findings refer to framework code the app cannot change. A Hot Line is also skipped when it calls another non-trivial function or sits in framework code. The report shows an explanation instead.
 
-- Filesort
-- Framework N+1
-- Full Table Scan
 - Hot Line
-- Low Filter Ratio
-- Missing Index
 - N+1 Query
 - Redundant Call
 - Slow Query
-- Temporary Table
+
+Redundant Call findings recorded before the callsite correction are excluded from AI suggestions. Newly analyzed findings carry a `callsite_walk: outermost_first` stamp. Re-record the flow to obtain a corrected finding. Stored suggestions remain in the database. Regeneration hides index, Framework N+1 and gated Hot Line suggestions. An older Redundant Call suggestion stays visible with a re-recording caveat. Every displayed suggestion from an earlier prompt version is marked outdated.
 
 The exact set lives in `optimus/ai_fix.py::AI_ELIGIBLE_FINDING_TYPES`. A test (`test_ai_privacy.py::TestDocStaysFresh`) compares this section's list against the frozenset to make sure the doc never drifts from the code.
 
 ### 5.1 Per-type opt-out (`ai_excluded_finding_types`)
 
-`Optimus Settings → AI → Privacy & Operations → Excluded finding types` is a multi-line list. Each line names one of the ten types above (exact match, case-sensitive). Lines starting with `#` are comments. Listed types are skipped in **both** auto-suggest and on-demand calls no payload is built, no request is sent, the on-demand button surfaces a clear "excluded by Optimus Settings" message.
+`Optimus Settings → AI → Privacy & Operations → Excluded finding types` is a multi-line list. Each line names one of the four types above (exact match, case-sensitive). Lines starting with `#` are comments. Listed types are skipped in **both** auto-suggest and on-demand calls no payload is built, no request is sent, the on-demand button surfaces a clear "excluded by Optimus Settings" message.
 
 Use this when the SQL or source for a particular finding category embeds business logic you don't want flowing to a hosted provider:
 
 ```text
 # We're fine sending N+1 patterns to Anthropic, but our pricing-rule SQL
-# embeds margin formulas: skip Slow Query and Full Table Scan.
+# embeds margin formulas: skip Slow Query and N+1 Query.
 Slow Query
-Full Table Scan
+N+1 Query
 ```
 
 The list is empty by default. The exclusion list is **additive**: types not listed continue to flow normally.
@@ -266,6 +248,34 @@ Default `ai_request_timeout_seconds = 60` is fine for hosted providers (Anthropi
 
 ---
 
+### Request failures and retries
+
+Optimus classifies authentication, missing endpoint/model, exhausted quota,
+rate limit, context/configuration, server, transport, timeout and malformed
+response failures separately. Error Logs retain status and validated error
+codes, never the provider response body. A validation rejection (HTTP 400 or
+422) may trigger removal of `temperature` or replacement of `max_tokens` with
+`max_completion_tokens`, each at most once. There are at most three validation attempts for
+this parameter adaptation; each can follow the permitted redirects. Context-limit and quota failures never use it;
+network failures are not automatically retried.
+
+Parameter retries and permitted redirects use the remaining request budget.
+Each connection attempt is limited to 10 seconds, or the remaining budget
+when shorter. The read timeout uses the remaining budget. The HTTP library's
+read timeout measures socket inactivity, not a strict overall wall-clock
+limit; background worker limits remain necessary. A guardrail repair request
+also uses the remaining completion budget. Reasoning models retain the same
+provider-aware output cap. Leading inline thinking blocks are removed, and
+unfinished thinking is an unusable response. Reported tokens stay attached to
+a failure after a billed response, including a validation failure.
+
+Regenerate Reports renders stored data and saved AI suggestions without
+calling the provider. Refresh AI suggestions remains the action for new AI
+answers. Both report regeneration and step humanization can load the saved
+recording JSON without deserializing its Python trees or sidecars. This
+release supplies helpers for the upcoming background engine; it does not yet
+move optional AI work out of analysis or make refresh asynchronous.
+
 ### 6.5 Troubleshooting
 
 - **"The model's context window (N tokens) is too small for the Optimus prompt."** The window cannot hold the system prompt plus a minimal answer (about 3,100 tokens). Raise the server's window and the Context window (tokens) setting together.
@@ -315,9 +325,10 @@ This means: if you're worried about a profile shared with a third party leaking 
 
 | Concern | File | Symbol |
 |---|---|---|
+| Deterministic recipes and AI gates | `optimus/renderer/fix_recipes.py` | `index_recipe`, `hot_line_gate`, `loop_facts` |
 | Eligible-types frozenset | `optimus/ai_fix.py` | `AI_ELIGIBLE_FINDING_TYPES` |
 | Provider matrix | `optimus/ai_fix.py` | `_PROVIDER_DEFAULTS` |
-| Payload builders | `optimus/ai_fix.py` | `_build_fix_request` (`_build_messages` wrapper), `_build_steps_messages`, `_build_index_messages` |
+| Payload builders | `optimus/ai_fix.py` | `_build_fix_request` (`_build_messages` wrapper), `_build_steps_messages` |
 | Prompt text | `optimus/ai_prompts.py` | `SYSTEM_PROMPT`, `FINDING_TYPE_HINTS`, `RULE_TEXT`, `PROMPT_VERSION` |
 | Answer verification | `optimus/ai_guardrails.py` | `verify_fix`, `reask_message`, `apply_fallback` |
 | Context budget | `optimus/ai_budget.py` | `user_char_budget`, `data_block`, `assemble`, `reask_fits` |
@@ -329,7 +340,7 @@ This means: if you're worried about a profile shared with a third party leaking 
 | Masking the key in Error Log rows as Frappe inserts them | `optimus/error_log_mask.py` | `mask_error_log` (the Error Log `before_insert` hook) |
 | Per-type exclusion gate | `optimus/ai_fix.py` | `is_finding_type_excluded` |
 | On-demand entry points | `optimus/api.py` | `refill_ai_suggestions` (the "Refresh AI suggestions" button), `test_ai_connection` (Optimus Settings), `ai_capabilities` (which AI buttons the form shows) |
-| Auto-suggest entry point | `optimus/analyze.py` | `_enrich_findings_with_ai_suggestions`, `_enrich_table_breakdown_with_ai_suggestions` |
+| Auto-suggest entry point | `optimus/analyze.py` | `_enrich_findings_with_ai_suggestions` |
 | Settings dataclass | `optimus/settings.py` | `OptimusConfig` |
 
 ---
@@ -361,7 +372,7 @@ When a pack runs out, the next AI fix attempt from Optimus surfaces Aerele's "pa
 Compared to the per-pathway data inventory in § 2, picking `Aerele` adds nothing structural over what the other hosted providers already send:
 
 - The customer's Aerele API key as `Authorization: Bearer <key>` on every call to `api.aerele.in`.
-- The same OpenAI-shaped finding / steps / index payload from § 2.1–2.3.
+- The same OpenAI-shaped finding / steps payload from sections 2.1 and 2.2.
 
 What is **NOT** sent (matches § 3):
 

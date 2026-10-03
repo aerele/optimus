@@ -196,7 +196,7 @@ class TestTimeoutHonored:
 			provider="openai",
 			where="test",
 		)
-		assert captured[0]["timeout"] == 180
+		assert captured[0]["timeout"] == pytest.approx((10, 180), abs=0.1)
 
 	def test_http_post_clamps_below_floor(self, monkeypatch):
 		# _resolve_timeout_seconds clamps below 10 → 10.
@@ -216,7 +216,7 @@ class TestTimeoutHonored:
 			provider="openai",
 			where="test",
 		)
-		assert captured[0]["timeout"] == 10
+		assert captured[0]["timeout"] == pytest.approx((10, 10), abs=0.1)
 
 	def test_http_post_clamps_above_ceiling(self, monkeypatch):
 		# _resolve_timeout_seconds clamps above 600 → 600.
@@ -236,7 +236,7 @@ class TestTimeoutHonored:
 			provider="openai",
 			where="test",
 		)
-		assert captured[0]["timeout"] == 600
+		assert captured[0]["timeout"] == pytest.approx((10, 600), abs=0.1)
 
 	def test_http_post_falls_back_when_settings_unreadable(self, monkeypatch):
 		# No bench / pure-pytest path fallback to _HTTP_TIMEOUT (60).
@@ -255,7 +255,7 @@ class TestTimeoutHonored:
 			provider="openai",
 			where="test",
 		)
-		assert captured[0]["timeout"] == ai_fix._HTTP_TIMEOUT
+		assert captured[0]["timeout"] == pytest.approx((10, ai_fix._HTTP_TIMEOUT), abs=0.1)
 
 
 # --------------------------------------------------------------------------

@@ -215,7 +215,7 @@ def core(monkeypatch):
 	install_module(monkeypatch, "optimus.analyze", SimpleNamespace(
 		_run_ai_step=_analyze._run_ai_step,
 		_mark_ai_spend_session=lambda session_uuid: None,
-		_fetch_recordings=lambda uuids, recordings_bundle=None: [{"uuid": u} for u in uuids],
+		load_recordings_light=lambda d: [{"uuid": a.recording_uuid} for a in d.actions],
 		_load_recordings_bundle=lambda d: None,
 		_actions_for_humanizer=lambda recordings: [{"method": "POST", "path": "/api/method/x"}] if recordings else [],
 		_assemble_humanized_notes=lambda md: "NOTES\n" + md,

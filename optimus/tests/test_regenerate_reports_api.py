@@ -4,9 +4,8 @@
 """regenerate_reports and the internal render helpers (PR-1).
 
 ``_render_session_report`` is the one re-render path. AI endpoints re-render through
-``_rerender_after_ai`` (default ``ai_backfill=False``, never the whitelisted
-``regenerate_reports``), and ``regenerate_reports`` keeps ``ai_backfill=True`` until the AI path
-leaves regenerate. Failure logs are pinned to run outside any ``except`` block: the fake
+``_rerender_after_ai`` (never the whitelisted ``regenerate_reports``). Report
+regeneration never calls the model or deserializes recording trees. Failure logs are pinned to run outside any ``except`` block: the fake
 ``log_ai_failure`` records ``sys.exc_info()[0]``, which is None only outside a handler.
 """
 
@@ -46,10 +45,10 @@ def _env(monkeypatch, *, status="Ready", user=OWNER, perms=None, fetch_raises=Fa
 	install(monkeypatch, fake)
 	seen = SimpleNamespace(fetched=[], backfilled=[], rendered=[], cleared=[], logged=[])
 
-	def fetch(uuids, recordings_bundle=None):
+	def fetch(doc):
 		if fetch_raises:
 			raise RuntimeError("redis gone")
-		seen.fetched.append(list(uuids))
+		seen.fetched.append([a.recording_uuid for a in doc.actions if a.recording_uuid])
 		return [{"uuid": "rec-1"}]
 
 	def backfill(d):
@@ -59,7 +58,8 @@ def _env(monkeypatch, *, status="Ready", user=OWNER, perms=None, fetch_raises=Fa
 
 	install_module(monkeypatch, "optimus.analyze", SimpleNamespace(
 		_run_ai_step=_analyze._run_ai_step,
-		_fetch_recordings=fetch,
+		_fetch_recordings=_must_not_run,
+		load_recordings_light=fetch,
 		_load_recordings_bundle=lambda d: None,
 		_backfill_ai_suggestions=backfill,
 		_render_and_attach_reports=lambda name, recs: seen.rendered.append((name, len(recs))),
@@ -93,10 +93,11 @@ def test_render_session_report_is_render_only_by_default(monkeypatch):
 	assert seen.cleared == [SESSION_UUID]
 
 
-def test_render_session_report_ai_backfill_true_backfills_first(monkeypatch):
+def test_render_helper_no_longer_accepts_an_ai_side_effect(monkeypatch):
 	_, seen = _env(monkeypatch)
-	api._render_session_report(DOCNAME, ai_backfill=True)
-	assert seen.backfilled == [DOCNAME] and seen.rendered == [(DOCNAME, 1)]
+	with pytest.raises(TypeError):
+		api._render_session_report(DOCNAME, ai_backfill=True)
+	assert seen.backfilled == seen.rendered == []
 
 
 def test_expired_recordings_render_with_an_empty_list(monkeypatch):
@@ -109,9 +110,9 @@ def test_expired_recordings_render_with_an_empty_list(monkeypatch):
 
 def test_backfill_failure_still_renders(monkeypatch):
 	_, seen = _env(monkeypatch, backfill_raises=True)
-	api._render_session_report(DOCNAME, ai_backfill=True)
+	api._render_session_report(DOCNAME)
 	assert seen.rendered == [(DOCNAME, 1)]
-	assert seen.logged == [("optimus regenerate ai backfill", "RuntimeError", None)]
+	assert seen.logged == [] and seen.backfilled == []
 
 
 def test_rerender_after_ai_success_never_backfills(monkeypatch):
@@ -132,14 +133,14 @@ def test_rerender_after_ai_reports_failure_instead_of_raising(monkeypatch):
 	assert len(fake.spies.rollback) == 1
 
 
-def test_regenerate_reports_keeps_ai_backfill_until_pr2(monkeypatch):
+def test_regenerate_reports_never_spends_tokens(monkeypatch):
 	fake, seen = _env(monkeypatch)
 	out = api.regenerate_reports(session_uuid=SESSION_UUID)
 	assert out == {
 		"regenerated": True, "session_uuid": SESSION_UUID, "docname": DOCNAME,
 		"recordings_available": 1, "actions_total": 2,
 	}
-	assert seen.backfilled == [DOCNAME]
+	assert seen.backfilled == []
 	assert fake.spies.enqueue == []
 
 
@@ -187,12 +188,13 @@ def test_regenerate_reports_rate_limited_per_user(monkeypatch):
 		api.regenerate_reports(session_uuid=SESSION_UUID)
 
 
-def test_phase2_worker_rerender_passes_gate_for_owner(monkeypatch):
-	"""line_profile/analyzer._regenerate_parent_reports (frozen) calls the whitelisted
-	regenerate_reports as the enqueuing user; a plain Optimus User owner must now pass."""
-	_, seen = _env(monkeypatch)
+def test_phase2_worker_rerender_does_not_call_http_endpoint(monkeypatch):
+	"""Trusted worker re-renders already-authorized work without a second rate limit."""
+	fake, seen = _env(monkeypatch)
 	from optimus.line_profile import analyzer as lp_analyzer
 
+	monkeypatch.setattr(lp_analyzer, "frappe", fake)
+	monkeypatch.setattr(api, "regenerate_reports", _must_not_run)
 	lp_analyzer._regenerate_parent_reports(SESSION_UUID)
 	assert seen.rendered == [(DOCNAME, 1)]
 
@@ -201,7 +203,7 @@ class _JobTimeout(Exception):
 	pass
 
 
-@pytest.mark.parametrize("stage", ["fetch", "backfill", "pdf", "render", "rollback"])
+@pytest.mark.parametrize("stage", ["fetch", "pdf", "render", "rollback"])
 def test_report_helpers_propagate_job_timeouts_without_the_failed_frames(monkeypatch, stage):
 	fake, seen = _env(monkeypatch)
 	monkeypatch.setattr(ai_fix, "_job_timeout_types", lambda: (_JobTimeout,))
@@ -213,9 +215,7 @@ def test_report_helpers_propagate_job_timeouts_without_the_failed_frames(monkeyp
 	from optimus import analyze, pdf_export
 
 	if stage == "fetch":
-		monkeypatch.setattr(analyze, "_fetch_recordings", interrupted)
-	elif stage == "backfill":
-		monkeypatch.setattr(analyze, "_backfill_ai_suggestions", interrupted)
+		monkeypatch.setattr(analyze, "load_recordings_light", interrupted)
 	elif stage == "pdf":
 		monkeypatch.setattr(pdf_export, "clear_cached_pdf", interrupted)
 	elif stage == "render":
@@ -230,7 +230,7 @@ def test_report_helpers_propagate_job_timeouts_without_the_failed_frames(monkeyp
 		if stage in {"render", "rollback"}:
 			api._rerender_after_ai(_ref())
 		else:
-			api._render_session_report(DOCNAME, ai_backfill=True)
+			api._render_session_report(DOCNAME)
 	assert caught.value is not original
 	assert caught.value.args == original.args
 	assert caught.value.__context__ is None and caught.value.__cause__ is None
@@ -246,7 +246,6 @@ def test_report_helpers_propagate_job_timeouts_without_the_failed_frames(monkeyp
 	else:
 		title = {
 			"fetch": "optimus regenerate_reports fetch",
-			"backfill": "optimus regenerate ai backfill",
 			"render": "optimus AI re-render", "rollback": "optimus AI re-render",
 		}[stage]
 		assert seen.logged == [(title, "_JobTimeout", None)]

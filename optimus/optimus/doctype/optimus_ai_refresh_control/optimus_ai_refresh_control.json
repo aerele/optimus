@@ -1,0 +1,38 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "editable_grid": 0,
+ "module": "Optimus",
+ "permissions": [],
+ "track_changes": 0,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "links": [],
+ "name": "Optimus AI Refresh Control",
+ "autoname": "field:scope",
+ "naming_rule": "By fieldname",
+ "field_order": [
+  "scope",
+  "generation"
+ ],
+ "fields": [
+  {
+   "fieldname": "scope",
+   "fieldtype": "Data",
+   "label": "Scope",
+   "read_only": 1,
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "generation",
+   "fieldtype": "Long Int",
+   "label": "Generation",
+   "read_only": 1,
+   "default": "0"
+  }
+ ]
+}

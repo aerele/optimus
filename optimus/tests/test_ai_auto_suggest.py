@@ -135,7 +135,7 @@ class TestSelectionAndPersistence:
 		findings = [
 			_finding("Slow Query", "Low", 9999, title="low-but-huge"),
 			_finding("N+1 Query", "High", 100, title="the-high-one"),
-			_finding("Missing Index", "Medium", 5000, title="med"),
+			_finding("N+1 Query", "Medium", 5000, title="med"),
 		]
 		ctx = _ctx(findings)
 		p1, p2, p3 = _patches(_cfg(ai_auto_suggest_max=1))
@@ -147,7 +147,7 @@ class TestSelectionAndPersistence:
 
 	def test_cap_zero_means_all_eligible(self):
 		findings = [_finding("N+1 Query", "High", 500), _finding("Slow Query", "Medium", 200),
-		            _finding("Missing Index", "Low", 50)]
+		            _finding("N+1 Query", "Low", 50)]
 		ctx = _ctx(findings)
 		p1, p2, p3 = _patches(_cfg(ai_auto_suggest_max=0))
 		with p1, p2, p3:
@@ -273,7 +273,7 @@ class TestBackfillAiSuggestions:
 		rows = [
 			_row("low", "Slow Query", "Low", 9999),
 			_row("high", "N+1 Query", "High", 100),
-			_row("med", "Missing Index", "Medium", 5000),
+			_row("med", "N+1 Query", "Medium", 5000),
 		]
 		doc = SimpleNamespace(findings=rows)
 		p1, p2, p3 = _patches(_cfg(ai_auto_suggest_max=1))
@@ -291,7 +291,7 @@ class TestRunAiBackfillCore:
 		rows = [
 			_row("F1", "N+1 Query", "High", 500),
 			_row("F2", "Slow Query", "Medium", 200, llm_fix_json='{"suggestion":"already"}'),
-			_row("F3", "Missing Index", "Low", 50),
+			_row("F3", "N+1 Query", "Low", 50),
 			_row("F4", "Memory Pressure", "High", 9),  # ineligible type
 		]
 		doc = SimpleNamespace(findings=rows)

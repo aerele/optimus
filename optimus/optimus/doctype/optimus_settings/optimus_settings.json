@@ -537,10 +537,11 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When off, there is no \"Index advice (AI)\" block in the \"Time spent per database table\" section: nothing is generated automatically, the \"Suggest an index (AI)\" button is hidden, the API turns down requests and re-rendered reports leave it out.",
+   "description": "This setting no longer does anything. Index advice (the recipes on Missing Index, Full Table Scan, Filesort, Temporary Table and Low Filter Ratio findings and the per-table index cards) is built by Optimus from the analyzer's data and the DocType metadata, without the AI, so nothing about your tables is sent to the AI provider for it. The field is kept only so existing sites migrate cleanly.",
    "fieldname": "ai_suggest_indexes",
    "fieldtype": "Check",
-   "label": "Index recommendations (DB-tables breakdown)"
+   "label": "Index recommendations (DB-tables breakdown)",
+   "read_only": 1
   },
   {
    "depends_on": "eval:doc.ai_enabled",
@@ -598,7 +599,7 @@
   },
   {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "One finding type per line. These types are skipped by both automatic and on-demand AI suggestions (no request is ever built for them). Matching is exact and case-sensitive. Lines starting with '#' are comments. Use the official names: Filesort, Framework N+1, Full Table Scan, Hot Line, Low Filter Ratio, Missing Index, N+1 Query, Redundant Call, Slow Query, Temporary Table.",
+   "description": "One finding type per line. These types are skipped by both automatic and on-demand AI suggestions (no request is ever built for them). Matching is exact and case-sensitive. Lines starting with '#' are comments. Use the official names: Hot Line, N+1 Query, Redundant Call, Slow Query. Index findings and Framework N+1 never call the AI.",
    "fieldname": "ai_excluded_finding_types",
    "fieldtype": "Small Text",
    "label": "Excluded finding types"
