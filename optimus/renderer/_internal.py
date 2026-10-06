@@ -140,6 +140,7 @@ from optimus.renderer.finding_enrichment import (
 	_expand_self_time_snippets,
 	_find_call_line_in_function_body,
 	_find_node_in_tree,
+	_find_node_path_in_tree,
 	_finding_to_dict,
 	_group_findings_by_root_cause,
 	_markdown_to_safe_html,
@@ -147,6 +148,7 @@ from optimus.renderer.finding_enrichment import (
 	_pin_slow_hot_path_to_related_hot_line,
 	_retarget_phase1_callsites_to_drilldown_leaf,
 	_root_cause_key,
+	_walk_ancestor_chain,
 	_walk_drilldown_chain,
 )
 

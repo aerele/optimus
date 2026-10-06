@@ -10,7 +10,13 @@ follows hottest-child links down to (a) a framework frame, (b) ``max_depth``,
 Each tree node is a dict shaped like ``analyzers/call_tree._walk_pyi_frame``:
 function / filename / lineno / self_ms / cumulative_ms / children."""
 
-from optimus.renderer import _find_node_in_tree, _walk_drilldown_chain
+from optimus.renderer import (
+	_find_node_in_tree,
+	_find_node_path_in_tree,
+	_walk_ancestor_chain,
+	_walk_drilldown_chain,
+)
+from optimus.renderer.finding_enrichment import _drilldown_display_rows
 
 
 def _node(function, filename, lineno, cumulative_ms, children=None):
@@ -248,3 +254,156 @@ class TestWalkDrilldownChain:
 		assert _walk_drilldown_chain(None, {"function": "x"}) == []
 		assert _walk_drilldown_chain({}, None) == []
 		assert _walk_drilldown_chain({"children": "not-a-list"}, {"function": "x"}) == []
+
+
+class TestFindNodePathInTree:
+	def test_returns_full_ancestry_path(self):
+		tree = _screenshot_tree()
+		path = _find_node_path_in_tree(tree, "common.py", "_check_user_exists")
+		assert [n["function"] for n in path] == [
+			"<root>", "looped_validate", "_run_validations", "_check_user_exists",
+		]
+
+	def test_root_node_path_is_itself(self):
+		tree = _screenshot_tree()
+		path = _find_node_path_in_tree(tree, "common.py", "looped_validate")
+		assert path[-1]["function"] == "looped_validate"
+		assert path[0]["function"] == "<root>"
+
+	def test_missing_function_returns_none(self):
+		assert _find_node_path_in_tree(_screenshot_tree(), "common.py", "nope") is None
+
+	def test_empty_function_returns_none(self):
+		assert _find_node_path_in_tree(_screenshot_tree(), "common.py", "") is None
+
+
+class TestWalkAncestorChain:
+	def test_leaf_finding_shows_nested_call_path(self):
+		# A finding at the deepest user frame (nothing to drill below) shows the
+		# user-code call path that leads to it; the synthetic <root> and the
+		# framework get_doc below are excluded; the finding is the terminal.
+		tree = _screenshot_tree()
+		callsite = {
+			"filename": "apps/ugly_code/ugly_code/python/common.py",
+			"function": "_check_user_exists",
+		}
+		chain = _walk_ancestor_chain(tree, callsite, tracked_apps=("ugly_code",))
+		assert [c["function"] for c in chain] == [
+			"looped_validate", "_run_validations", "_check_user_exists",
+		]
+		assert chain[-1]["function"] == "_check_user_exists"  # terminal = finding
+
+	def test_doctype_suffix_stripped_for_lookup(self):
+		tree = _screenshot_tree()
+		callsite = {
+			"filename": "apps/ugly_code/ugly_code/python/common.py",
+			"function": "_check_user_exists (Sales Invoice)",
+		}
+		chain = _walk_ancestor_chain(tree, callsite, tracked_apps=("ugly_code",))
+		assert [c["function"] for c in chain][-1] == "_check_user_exists"
+
+	def test_top_level_leaf_has_no_ancestry(self):
+		# A user frame called straight from framework (no user ancestor) is not
+		# nested → empty, so the caller keeps the "no deeper frame" placeholder.
+		tree = _node(
+			function="<root>", filename="", lineno=0, cumulative_ms=100.0,
+			children=[
+				_node(function="bg_job", filename="apps/ugly_code/x.py",
+				      lineno=1, cumulative_ms=100.0, children=[]),
+			],
+		)
+		callsite = {"filename": "apps/ugly_code/x.py", "function": "bg_job"}
+		assert _walk_ancestor_chain(tree, callsite, tracked_apps=("ugly_code",)) == []
+
+	def test_framework_callsite_returns_empty(self):
+		tree = _screenshot_tree()
+		callsite = {"filename": "apps/frappe/frappe/model/document.py", "function": "get_doc"}
+		assert _walk_ancestor_chain(tree, callsite, tracked_apps=("ugly_code",)) == []
+
+	def test_missing_function_returns_empty(self):
+		tree = _screenshot_tree()
+		assert _walk_ancestor_chain(tree, {"filename": "apps/ugly_code/x.py"}) == []
+
+	def test_node_not_in_tree_returns_empty(self):
+		tree = _screenshot_tree()
+		callsite = {"filename": "apps/ugly_code/other.py", "function": "nowhere"}
+		assert _walk_ancestor_chain(tree, callsite, tracked_apps=("ugly_code",)) == []
+
+	def test_intervening_framework_frames_are_dropped(self):
+		# user → framework dispatch → user leaf: the ancestry keeps only the user
+		# frames, so it still reads as a nested user-code path.
+		tree = _node(
+			function="<root>", filename="", lineno=0, cumulative_ms=100.0,
+			children=[
+				_node(function="outer", filename="apps/ugly_code/a.py", lineno=1,
+				      cumulative_ms=100.0, children=[
+					_node(function="dispatch", filename="apps/frappe/frappe/d.py",
+					      lineno=5, cumulative_ms=90.0, children=[
+						_node(function="inner_leaf", filename="apps/ugly_code/a.py",
+						      lineno=9, cumulative_ms=80.0, children=[]),
+					]),
+				]),
+			],
+		)
+		callsite = {"filename": "apps/ugly_code/a.py", "function": "inner_leaf"}
+		chain = _walk_ancestor_chain(tree, callsite, tracked_apps=("ugly_code",))
+		assert [c["function"] for c in chain] == ["outer", "inner_leaf"]
+
+	def test_defensive_garbage(self):
+		assert _walk_ancestor_chain(None, {"function": "x"}) == []
+		assert _walk_ancestor_chain({}, None) == []
+
+
+class TestDrilldownDisplayRows:
+	"""The label rows a sub-finding carries so its collapsed row can render the
+	same nested tree as a primary card."""
+
+	def test_downward_chain_prefixes_root(self):
+		detail = {
+			"callsite": {"function": "looped_validate"},
+			"drilldown_chain": [
+				{"function": "_run_validations", "lineno": 14},
+				{"function": "_check_user_exists", "lineno": 20},
+			],
+		}
+		assert _drilldown_display_rows(detail) == [
+			"looped_validate", "_run_validations:14", "_check_user_exists:20",
+		]
+
+	def test_root_uses_original_wrapper_when_present(self):
+		detail = {
+			"callsite": {
+				"function": "_check_user_exists",
+				"original_wrapper": {"function": "looped_validate (Sales Invoice)"},
+			},
+			"drilldown_chain": [{"function": "_inner", "lineno": 9}],
+		}
+		assert _drilldown_display_rows(detail)[0] == "looped_validate (Sales Invoice)"
+
+	def test_ancestry_rows_without_root_prefix(self):
+		detail = {
+			"callsite": {"function": "_check_user_exists"},
+			"drilldown_ancestry": [
+				{"function": "looped_validate", "lineno": 8},
+				{"function": "_run_enrichment", "lineno": 141},
+				{"function": "_fetch_related_docs", "lineno": 146},
+			],
+		}
+		assert _drilldown_display_rows(detail) == [
+			"looped_validate:8", "_run_enrichment:141", "_fetch_related_docs:146",
+		]
+
+	def test_missing_lineno_omits_colon(self):
+		detail = {
+			"callsite": {"function": "a"},
+			"drilldown_ancestry": [
+				{"function": "a", "lineno": 1},
+				{"function": "b", "lineno": None},
+			],
+		}
+		assert _drilldown_display_rows(detail) == ["a:1", "b"]
+
+	def test_no_chain_or_ancestry_returns_none(self):
+		assert _drilldown_display_rows({"callsite": {"function": "x"}}) is None
+		assert _drilldown_display_rows({"drilldown_chain": []}) is None
+		assert _drilldown_display_rows(None) is None
