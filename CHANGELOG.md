@@ -8,6 +8,23 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.65] - 2026-10-07
+
+### Fixed
+
+- Phase 2 (Line-Level Drilldown): the run no longer flips to "Ready" minutes
+  before its report exists. Previously the Phase 2 Run was committed as Ready in
+  `_persist_run`, then the slow re-render plus AI-suggestion backfill ran, so
+  the "Phase 2 report generated" popup fired only afterwards and the session
+  showed Ready long before the report was actually there. Now the findings are
+  committed durably while the run is still "Analyzing" (so a worker restart
+  mid-render can no longer lose them, with no write lock held across the AI
+  backfill's network calls). The run flips to "Ready" only after the report is
+  attached, in the same step as the popup, so the status the client polls and
+  the notification land together.
+
+---
+
 ## [0.12.64] - 2026-10-01
 
 ### Internal
