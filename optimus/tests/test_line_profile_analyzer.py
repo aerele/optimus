@@ -415,3 +415,82 @@ def test_publish_swallows_errors(monkeypatch):
 	monkeypatch.setattr(frappe, "publish_realtime", boom, raising=False)
 	# Best-effort: a realtime failure must never derail analyze.
 	analyzer._publish("phase_2_run_ready", {"user": "x@y.z"})
+
+
+# ---------------------------------------------------------------------------
+# run_analyze status/commit sequencing (v0.12.x): the findings are committed
+# durably as "Analyzing" BEFORE the slow re-render (so a worker kill mid-render
+# can't lose them; no write lock is held across the AI backfill). The run flips
+# to "Ready" (committed) only AFTER the report is attached, so the status the
+# client polls and the phase_2_run_ready popup land together. Previously
+# _persist_run marked Ready + committed before the re-render + AI backfill.
+# ---------------------------------------------------------------------------
+
+
+def test_run_analyze_persists_analyzing_then_flips_ready_after_render(monkeypatch):
+	import types
+
+	from optimus.analyzers.base import AnalyzerResult
+	from optimus.line_profile import analyzer
+	from optimus.line_profile import capture as lp_capture
+
+	# Each recorded event carries the run's status at that instant we do NOT mock
+	# _persist_run / _mark_run_ready, so their real status writes are exercised.
+	order: list = []
+
+	child = types.SimpleNamespace(
+		run_uuid="run-1", status="Analyzing", results_json=None, warnings_json=None,
+		total_ms=None, ended_at=None, started_at=None,
+	)
+	doc = types.SimpleNamespace(
+		phase_2_runs=[child], actions=[], findings=[], flags=types.SimpleNamespace(),
+	)
+	doc.append = lambda field, value: getattr(doc, field).append(value)
+	doc.save = lambda **kw: None
+
+	# Replace the frappe reference inside the analyzer module (this test file runs
+	# against the real, unbound frappe, so we can't poke frappe.db directly).
+	fake_frappe = types.SimpleNamespace(
+		get_doc=lambda *a, **k: doc,
+		db=types.SimpleNamespace(get_value=lambda *a, **k: "u@e.com"),
+		utils=types.SimpleNamespace(now_datetime=lambda: "2026-01-01 00:00:00"),
+		log_error=lambda *a, **k: None,
+	)
+	monkeypatch.setattr(analyzer, "frappe", fake_frappe)
+	monkeypatch.setattr(analyzer, "_find_run_row",
+		lambda s, r: types.SimpleNamespace(name="PTR-1", parent="PS-1"))
+	monkeypatch.setattr(analyzer, "analyze",
+		lambda *a, **k: AnalyzerResult(findings=[], aggregate={"phase2_functions": []}, warnings=[]))
+	monkeypatch.setattr(lp_capture, "read_all_samples", lambda r: [], raising=False)
+	monkeypatch.setattr(lp_capture, "read_picks_meta", lambda r: [], raising=False)
+	monkeypatch.setattr(lp_capture, "aggregate_samples", lambda s, p: [], raising=False)
+	monkeypatch.setattr(lp_capture, "budget_was_hit", lambda r: False, raising=False)
+	monkeypatch.setattr(lp_capture, "cleanup_run",
+		lambda r: order.append(("cleanup", child.status)), raising=False)
+	monkeypatch.setattr(analyzer, "_regenerate_parent_reports",
+		lambda s: order.append(("regenerate", child.status)))
+	monkeypatch.setattr(analyzer, "safe_commit",
+		lambda: order.append(("commit", child.status)))
+	monkeypatch.setattr(analyzer, "_publish",
+		lambda event, payload: order.append(("publish", event, child.status)))
+
+	analyzer.run_analyze("sess-1", "run-1")
+
+	# The analysis is committed durably with the run still Analyzing (NOT Ready),
+	# so a worker kill during the slow render can't lose it.
+	assert ("commit", "Analyzing") in order, order
+	persist_commit = order.index(("commit", "Analyzing"))
+	# The re-render runs while the run is still Analyzing.
+	assert ("regenerate", "Analyzing") in order, order
+	regen = order.index(("regenerate", "Analyzing"))
+	# The run flips to Ready and commits only AFTER the render.
+	assert ("commit", "Ready") in order, order
+	ready_commit = order.index(("commit", "Ready"))
+	# The ready popup fires with the run already Ready, right after that commit.
+	ready_popup = order.index(("publish", "phase_2_run_ready", "Ready"))
+
+	assert persist_commit < regen < ready_commit < ready_popup, order
+	# No commit ever observes Ready before the render (the old bug).
+	assert not any(
+		ev == ("commit", "Ready") and i < regen for i, ev in enumerate(order)
+	), order
