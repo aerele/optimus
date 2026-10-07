@@ -15,6 +15,7 @@ with JSON fixtures and no running site. Run with:
 
 import json
 import os
+import re
 import sys
 
 import pytest
@@ -120,6 +121,8 @@ except ImportError:
 		PermissionError=type("PermissionError", (Exception,), {}),
 		ValidationError=_StubValidationError,
 		DoesNotExistError=type("DoesNotExistError", (Exception,), {}),
+		QueryDeadlockError=type("QueryDeadlockError", (Exception,), {}),
+		QueryTimeoutError=type("QueryTimeoutError", (Exception,), {}),
 	)
 	_mk_module(
 		"frappe.utils",
@@ -158,6 +161,10 @@ except ImportError:
 		mark_duplicates=lambda *a, **kw: None,
 		record=lambda *a, **kw: None,
 		dump=lambda *a, **kw: None,
+		# Minimal stand-in for the real normalizer: strip quoted strings and bare
+		# numbers to ``?`` so lock-capture tests exercise real literal-stripping
+		# (the real frappe.recorder.normalize_query does richer masking).
+		normalize_query=lambda q: re.sub(r"'[^']*'|\b\d+\b", "?", q or ""),
 	)
 	_mk_module("frappe.model")
 	_mk_module("frappe.model.document", Document=type("Document", (object,), {}))

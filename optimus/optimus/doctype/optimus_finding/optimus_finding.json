@@ -22,7 +22,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Type",
-   "options": "N+1 Query\nFramework N+1\nFull Table Scan\nFilesort\nTemporary Table\nLow Filter Ratio\nMissing Index\nSlow Query\nSlow Hot Path\nHook Bottleneck\nRepeated Hot Frame\nRedundant Call\nResource Contention\nMemory Pressure\nDB Pool Saturation\nBackground Queue Backlog\nSlow Background Job\nSlow Frontend Render\nNetwork Overhead\nHeavy Response\nHot Line\nFunction Not Invoked",
+   "options": "N+1 Query\nFramework N+1\nFull Table Scan\nFilesort\nTemporary Table\nLow Filter Ratio\nMissing Index\nSlow Query\nSlow Hot Path\nHook Bottleneck\nRepeated Hot Frame\nRedundant Call\nResource Contention\nMemory Pressure\nDB Pool Saturation\nBackground Queue Backlog\nSlow Background Job\nSlow Frontend Render\nNetwork Overhead\nHeavy Response\nHot Line\nFunction Not Invoked\nLock Contention",
    "read_only": 1
   },
   {
