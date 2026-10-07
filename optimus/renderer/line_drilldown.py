@@ -347,10 +347,16 @@ def _render_line_drilldown_panel(session_doc: Any, threshold_ms: float = DEFAULT
 					"source": picks_source.get(fn.get("dotted_path"), "curated"),
 				}
 			)
+		# A run with parsed results is finished. The parent flips its stored status
+		# to Ready only AFTER this render runs (so the status the client polls lands
+		# in step with the completion popup), so a just-finished run is still
+		# "Analyzing" here treat "has results" as Ready so the badge is correct. A
+		# genuinely in-progress run has no results yet; Failed stays Failed.
+		display_status = "Ready" if (results and child.status != "Failed") else child.status
 		parsed_runs.append(
 			{
 				"run_uuid": child.run_uuid,
-				"status": child.status,
+				"status": display_status,
 				"started_at": child.started_at,
 				"ended_at": child.ended_at,
 				"total_ms": child.total_ms or 0,
