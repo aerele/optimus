@@ -1044,59 +1044,39 @@ def _export_index_advice(findings: list[dict], tables) -> None:
 	"""Owner decision D6: an export carries the deterministic index advice the report
 	shows, never the analyzer's stored raw DDL (``suggested_ddl``) or the retired index AI
 	output (a table's ``ai_index``; finding ``llm_fix_json`` is never exported). Mutates in
-	place. Each index-family finding gains ``index_advice`` (``route``, ``doctype``,
-	``table``, ``columns``, ``index_name``, ``text`` and ``code``, the report's fix-hint
-	prose and code), or None when the advisor has nothing to say; with advice, its
-	``technical_detail.fix_hint`` is that same text, as in the report. When the advisor
-	raises, the finding carries the report's failure note (``RECIPE_FAILED_HINT``, route
-	no_code, no code) and the failures are logged once, as a render logs them. Each table's
-	``recommended_index`` goes through the same advisor. One per-export evidence lookup
-	(memoised per table) serves both, as in the report."""
+	place. Each index-family finding gains ``index_advice`` from
+	``recipe_enrichment.export_advice``, the advice step the report runs too (M4):
+	``route``, ``doctype``, ``table``, ``columns``, ``index_name``, ``text`` and ``code``,
+	the report's fix-hint prose and code, or None when the advisor has nothing to say. With
+	advice, its ``technical_detail.fix_hint`` is that same text, and its ``title`` and
+	``customer_description`` are the report's (``finding_display``: no "Add index" title
+	next to a no-code advice). When the advisor raises, the finding carries the report's
+	failure note (``RECIPE_FAILED_HINT``, route no_code, no code) and the failures are
+	logged once, as a render logs them. Each table's ``recommended_index`` goes through the
+	same advisor. One per-export evidence lookup (memoised per table) and one per-export
+	query parser (memoised per query, PF2) serve both, as in the report."""
 	from optimus.analyzers.base import INDEX_FINDING_TYPES
-	from optimus.renderer import index_recipes, recipe_enrichment
+	from optimus.renderer import recipe_enrichment
 	from optimus.safe_call import best_effort
 	from optimus.settings import get_config
 
 	tracked = best_effort(lambda: tuple(getattr(get_config(), "tracked_apps", ()) or ()), ())
 	lookup = recipe_enrichment.make_evidence_lookup()
+	parser = recipe_enrichment.make_query_parser()
 	failed = 0
 	for f in findings:
 		detail = f.get("technical_detail")
 		if f.get("finding_type") in INDEX_FINDING_TYPES:
-			advice = best_effort(
-				lambda: index_recipes.advise_finding(f, evidence_lookup=lookup, tracked_apps=tracked),
-				recipe_enrichment.RECIPE_FAILED,
+			advice, advice_failed = recipe_enrichment.export_advice(
+				f, evidence_lookup=lookup, tracked_apps=tracked, parser=parser,
 			)
-			if advice is recipe_enrichment.RECIPE_FAILED:
-				# The report's failure note, as the report shows it (O-I1).
-				failed += 1
-				table = str(detail.get("table") or "") if isinstance(detail, dict) else ""
-				doctype = index_recipes.doctype_of(table)
-				text = recipe_enrichment.RECIPE_FAILED_HINT
-				f["index_advice"] = {
-					"route": index_recipes.ROUTE_NO_CODE,
-					"doctype": doctype,
-					"table": f"tab{doctype}" if doctype else None,
-					"columns": [],
-					"index_name": None,
-					"text": text,
-					"code": None,
-				}
-			else:
-				text = None if advice is None else index_recipes.finding_text(advice)
-				f["index_advice"] = None if advice is None else {
-					"route": advice.route,
-					"doctype": advice.doctype,
-					"table": advice.table,
-					"columns": list(advice.columns),
-					"index_name": (advice.entry or {}).get("index_name"),
-					"text": text,
-					"code": advice.code,
-				}
-			if text is not None and isinstance(detail, dict):
+			failed += advice_failed
+			f["index_advice"] = advice
+			if advice is not None and isinstance(detail, dict):
 				# The report's prose in the report's slot: the analyzer's stored hint ("Add an
 				# index on ...") must never sit next to a no_code advice.
-				detail["fix_hint"] = text
+				detail["fix_hint"] = advice["text"]
+			f.update(recipe_enrichment.finding_display(f, advice))
 		if isinstance(detail, dict):
 			detail.pop("suggested_ddl", None)
 	tables = [t for t in (tables if isinstance(tables, list) else []) if isinstance(t, dict)]

@@ -24,7 +24,13 @@ rules a column out. The advisor picks one route:
   first and a ``search_index`` Property Setter only after that, so a failed build leaves
   nothing that a later sync of the DocType would retry outside the guard. Index builds wait
   at most 300 seconds for a table lock.
-- ``no_code``: an explanation and no code.
+- ``no_code``: an explanation and no code. The index exists already when an existing
+  index starts with the whole final recipe; a one-column recipe is also refused when its
+  column is unique on its own, leads an index, or leads an index EXPLAIN names. The table's
+  real index list decides, never the Search Index flag. A no_code that only says Optimus
+  could not tell (``unknown``: no evidence for the table, an unread filter, a UNION that
+  filters the table in more than one branch, a query too long to parse) is no verdict, so a
+  table card never says "Do not add this index." for it.
 
 Frappe v16.18 facts relied on: MariaDB schema sync drops a single-column index its
 DocField does not declare but never one that spans several columns or covers a text
@@ -58,6 +64,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from optimus.analyzers.base import (
+	FRAMEWORK_APPS,
 	FRAPPE_METADATA_COLUMNS,
 	INDEX_FINDING_TYPES,
 	QUERY_TEXT_LIMIT,
@@ -160,10 +167,8 @@ _TYPE_LEADS: dict[str, str] = {
 _FILTER_LEAD = _TYPE_LEADS["Full Table Scan"]
 # What an index on the sort or group column removes, for the finding types about it.
 _SERVES: dict[str, str] = {"Filesort": "the sort", "Temporary Table": "the temporary table"}
-_SHAPE_GENERIC = (
-	"a LIKE pattern that starts with a wildcard, a function or IFNULL wrapped around the column, "
-	"an OR between conditions, or a filter that matches most of the table's rows"
-)
+# A table card's neutral verdict when its no-code advice is no verdict on the index (U2).
+NO_VERDICT = "Optimus cannot say whether this index would help."
 
 _ENSURE_FUNCTION = '''def ensure_indexes():
 	"""Create each index in INDEXES once. One failed entry never stops the others."""
@@ -273,7 +278,10 @@ class IndexAdvice:
 	"""One piece of index advice. ``columns`` are what ``frappe.db.add_index`` takes
 	(``col(255)`` is a MariaDB text prefix); ``reason`` is the route's explanation;
 	``lead`` is the finding type's opening sentence (findings only); ``entry`` is the
-	``ensure_indexes()`` entry for ``ROUTE_ENSURE_INDEXES``."""
+	``ensure_indexes()`` entry for ``ROUTE_ENSURE_INDEXES``. ``unknown`` marks a
+	``ROUTE_NO_CODE`` that is no verdict on the index, only a sign that Optimus could not
+	tell (no evidence for the table, a filter it could not read, a query too long to parse),
+	so a table card never says "Do not add this index." for it (U2, E6)."""
 
 	route: str
 	doctype: str
@@ -284,6 +292,7 @@ class IndexAdvice:
 	entry: dict | None = None
 	app_name: str = UNKNOWN_APP
 	lead: str = ""
+	unknown: bool = False
 
 	@property
 	def code(self) -> str | None:
@@ -390,6 +399,13 @@ def _index_target(ftype: str, detail: dict, parse) -> tuple[str, list[tuple[str,
 		col = str(detail.get("column") or "").strip().strip("`")
 		return table, ([("WHERE", col)] if col else [])
 	return _explain_columns(ftype, table, str(detail.get("normalized_query") or ""), parse)
+
+
+def _unindexable(evidence: TableEvidence, col: str) -> bool:
+	"""True for a column a plain index cannot cover: its database type says so, or it is a
+	JSON field, which MariaDB's information_schema reports as longtext (C4)."""
+	field = evidence.fields.get(col)
+	return col in evidence.unindexable_columns or (field is not None and field.fieldtype == "JSON")
 
 
 def _clean_columns(columns, *, cap: bool = True) -> list[str]:
@@ -838,8 +854,10 @@ def _unusable_where_columns(query: str, labelled, qualifiers=None, *, truncated:
 	return _scan_where(query, labelled, qualifiers, truncated=truncated)[0]
 
 
-def _target_qualifiers(query: str, table: str) -> frozenset[str]:
-	"""The target table's name and its aliases (sql_metadata ``tables_aliases``)."""
+def table_aliases(query: str) -> dict:
+	"""sql_metadata's ``tables_aliases`` for ``query`` (``{alias: table}``), {} when it
+	cannot parse the query. A second parse of the query, so a render memoises it per query
+	text (``recipe_enrichment.make_query_parser``, PF2)."""
 
 	def aliases() -> dict:
 		from sql_metadata import Parser
@@ -847,7 +865,35 @@ def _target_qualifiers(query: str, table: str) -> frozenset[str]:
 		return dict(Parser(query, disable_logging=True).tables_aliases or {})
 
 	found = best_effort(aliases, {})
+	return found if isinstance(found, dict) else {}
+
+
+def _target_qualifiers(query: str, table: str, aliases: Callable[[str], dict] | None = None) -> frozenset[str]:
+	"""The target table's name and its aliases. ``aliases(query)`` gives the alias map
+	(``table_aliases``, or a per-render memo of it)."""
+	found = (aliases or table_aliases)(query)
 	return frozenset({table} | {alias for alias, real in (found or {}).items() if real == table})
+
+
+def _union_branches(query: str, qualifiers) -> int:
+	"""How many branches of the main query's top-level UNION filter the target table: a
+	branch with a WHERE of its own that names the table or one of its aliases outside
+	brackets. A query without a top-level UNION is one branch (E7)."""
+	tokens = [tok for tok in _SQL_TOKEN_RE.findall(query or "") if not _COMMENT_RE.match(tok)]
+	branches: list[list[str]] = [[]]
+	depth = 0
+	for tok in tokens:
+		depth += {"(": 1, ")": -1}.get(tok, 0)
+		if not depth and tok not in ("(", ")") and tok.lower() == "union":
+			branches.append([])
+			continue
+		if not depth and tok not in ("(", ")"):
+			branches[-1].append(tok)
+	names = {str(q).lower() for q in qualifiers}
+	return sum(
+		1 for branch in branches
+		if any(tok.lower() == "where" for tok in branch) and any(tok.strip('`"').lower() in names for tok in branch)
+	)
 
 
 def _index_order(
@@ -924,44 +970,86 @@ def _select_aliases(tokens: list[str]) -> set[str]:
 	return aliases
 
 
-def _plain_sort(query: str, ftype: str, qualifiers, evidence: TableEvidence | None) -> bool:
-	"""True when every ORDER BY (Filesort) or GROUP BY (Temporary Table) item is a bare
-	column of the target table: one name, qualified by the table or an alias or not at
-	all, ASC or DESC, all in one direction, a real column (not a select alias) that an
-	index can order by (not text, not JSON). A function, FIELD(), CASE, arithmetic or a
-	parameter around a sort item, or a GROUP BY / ORDER BY pair that differs, gives
-	False: an index on the column cannot then return the rows in order."""
+def _aggregate_aliases(tokens: list[str]) -> set[str]:
+	"""Lowercase names the main query's select list gives an aggregate: ``SUM(x) AS total``,
+	or ``SUM(x) total`` right before a comma or FROM."""
+	pairs = _bracket_pairs(tokens)
+	out: set[str] = set()
+	depth = 0
+	for i, tok in enumerate(tokens):
+		if not depth and tok.lower() == "from":
+			break
+		if tok == "(" and not depth and i and tokens[i - 1].lower() in _AGGREGATES and i in pairs:
+			j = pairs[i] + 1
+			explicit = j < len(tokens) and tokens[j].lower() == "as"
+			j += explicit
+			after = tokens[j + 1].lower() if j + 1 < len(tokens) else ""
+			if j < len(tokens) and _NAME_RE.fullmatch(tokens[j]) and tokens[j].lower() != "from" and (
+				explicit or after in (",", "from")
+			):
+				out.add(tokens[j].strip('`"').lower())
+		depth += {"(": 1, ")": -1}.get(tok, 0)
+	return out
+
+
+def _aggregate_item(item: list[str], aggregate_aliases: set[str]) -> bool:
+	"""True when one ORDER BY item is an aggregate (``SUM(x) DESC``) or a select alias of one."""
+	if len(item) > 1 and item[0].lower() in _AGGREGATES and item[1] == "(":
+		return True
+	return bool(item) and _NAME_RE.fullmatch(item[0]) is not None and item[0].strip('`"').lower() in aggregate_aliases
+
+
+def _sort_problem(query: str, ftype: str, qualifiers, evidence: TableEvidence | None) -> str:
+	"""Why an index on the ORDER BY (Filesort) or GROUP BY (Temporary Table) columns
+	cannot return the rows in order, or "" when it can: every item of that clause is a bare
+	column of the target table (one name, qualified by the table or an alias or not at all,
+	ASC or DESC, all in one direction, a real column and no select alias, one an index can
+	order by: not text, not JSON) and the other clause, when there is one, names the same
+	columns. Otherwise (C7):
+
+	- ``"aggregate"``: the ORDER BY sorts by an aggregate (``SUM(x)``, or a select alias
+	  of one), the sort column of a Filesort or the order of a Temporary Table's groups;
+	- ``"differs"``: GROUP BY and ORDER BY name different columns;
+	- ``"distinct"``: a Temporary Table query with no GROUP BY whose SELECT is DISTINCT;
+	- ``"none"``: no such clause at all;
+	- ``"expression"``: anything else (a function, FIELD(), CASE, arithmetic or a parameter
+	  around an item, a select alias, a text column, mixed directions), or no evidence."""
 	if evidence is None:
-		return False
+		return "expression"
 	tokens = [tok for tok in _SQL_TOKEN_RE.findall(query or "") if not _COMMENT_RE.match(tok)]
 	order, group = _clause_items(tokens, "order"), _clause_items(tokens, "group")
+	aggregates = _aggregate_aliases(tokens)
+	if any(_aggregate_item(item, aggregates) for item in order or []):
+		return "aggregate"
 	main, other = (group, order) if ftype == "Temporary Table" else (order, group)
 	if not main:
-		return False
+		first = next((i for i, tok in enumerate(tokens) if tok.lower() == "select"), None)
+		distinct = first is not None and first + 1 < len(tokens) and tokens[first + 1].lower() in ("distinct", "distinctrow")
+		return "distinct" if ftype == "Temporary Table" and distinct else "none"
 	columns = {col.lower(): col for col in evidence.column_types}
 	aliases = _select_aliases(tokens)
 	names: list[str] = []
 	directions: set[str] = set()
 	for item in main:
 		if not item or not _NAME_RE.fullmatch(item[0]):
-			return False
+			return "expression"
 		j = _chain_end(item, 0)
 		rest = [tok.lower() for tok in item[j + 1 :]]
 		if rest not in ([], ["asc"], ["desc"]):
-			return False
+			return "expression"
 		qualifier, name = _ref_key(item, 0, j)
 		col = columns.get(name)
 		if (
 			(qualifier and qualifiers is not None and qualifier not in qualifiers) or col is None
-			or name in aliases or col in evidence.text_columns or col in evidence.unindexable_columns
+			or name in aliases or col in evidence.text_columns or _unindexable(evidence, col)
 		):
-			return False
+			return "expression"
 		names.append(name)
 		directions.add(rest[0] if rest else "asc")
 	if len(directions) > 1:
-		return False
+		return "expression"
 	other_names = [_ref_key(item, 0, _chain_end(item, 0))[1] for item in other if item and _NAME_RE.fullmatch(item[0])]
-	return not other or other_names == names
+	return "" if not other or other_names == names else "differs"
 
 
 def _function_names(kinds: set[str]) -> list[str]:
@@ -1006,9 +1094,11 @@ def _shape_why(kinds: set[str]) -> str:
 	return _SHAPE_WHY["unsure"]
 
 
-def _shape_no_code_reason(shapes: Mapping[str, set[str]], checks: list[str]) -> str:
-	"""NO_CODE text when the filter leaves no column an index could narrow on: the filter
-	shape, the columns Optimus could not read, and any Check fields left."""
+def _shape_no_code_reason(shapes: Mapping[str, set[str]], checks: list[str]) -> tuple[str, bool]:
+	"""``(text, unknown)`` for a NO_CODE when the filter leaves no column an index could
+	narrow on: the filter shape, the columns Optimus could not read, and any Check fields
+	left. ``unknown`` is True when part of the filter could not be read, so the text is no
+	verdict on the index."""
 	known = {col: kinds for col, kinds in shapes.items() if kinds != {"unsure"}}
 	unsure = [col for col, kinds in shapes.items() if kinds == {"unsure"}]
 	explain = "Check the query with EXPLAIN to see which index it needs."
@@ -1016,7 +1106,7 @@ def _shape_no_code_reason(shapes: Mapping[str, set[str]], checks: list[str]) -> 
 		return (
 			"Optimus could not read how this query combines its filters (it may be cut short, wrapped in "
 			f"brackets, a UNION or a derived table), so it gives no index code. {explain}"
-		)
+		), True
 	parts: list[str] = []
 	if known:
 		parts.append(
@@ -1031,7 +1121,7 @@ def _shape_no_code_reason(shapes: Mapping[str, set[str]], checks: list[str]) -> 
 		parts.append(f"{', '.join(checks)} are Check fields, which match too many rows for an index to narrow.")
 	if unsure:
 		parts.append(f"So Optimus gives no index code. {explain}")
-		return " ".join(parts)
+		return " ".join(parts), True
 	parts.append("So an index would not help, and Optimus gives no index code.")
 	if known:
 		parts.append(
@@ -1040,25 +1130,27 @@ def _shape_no_code_reason(shapes: Mapping[str, set[str]], checks: list[str]) -> 
 		)
 	else:
 		parts.append("Filter on a more selective field as well, and check the result with EXPLAIN.")
-	return " ".join(parts)
+	return " ".join(parts), False
 
 
-def _shape_text(query: str, col: str) -> str:
-	"""Why an index that already exists does not help, from the query's shape."""
-	ref = r"(?:`[^`]+`\.|\w+\.)?`?" + re.escape(col) + r"`?"
-	shapes: list[str] = []
-	if re.search(ref + r"\s+(?:not\s+)?like\b", query or "", re.IGNORECASE):
-		shapes.append(f"a LIKE on {col}, which cannot use an index when its pattern starts with a wildcard")
-	function = re.search(r"\b([a-z_]+)\s*\(\s*" + ref + r"\s*[,)]", query or "", re.IGNORECASE)
-	if function and function.group(1).lower() not in _AGGREGATES:
-		shapes.append(f"the function {function.group(1).upper()}() wrapped around {col}")
-	if re.search(r"\bwhere\b.*\bor\b", query or "", re.IGNORECASE | re.DOTALL):
-		shapes.append("an OR between conditions")
-	what = "; ".join(shapes) if shapes else _SHAPE_GENERIC
-	return (
-		f"The cost comes from how the query filters: {what}. Rewrite the filter so the existing "
-		"index can be used, and check the result with EXPLAIN."
-	)
+def _existing_tail(query: str, shapes: Mapping[str, set[str]]) -> str:
+	"""What to check when the index exists already (U4). It names only the filter shapes
+	the scan found on the query's other columns, never a list of shapes the query may not
+	have; a filter with none looks index-friendly. A table card or a Missing Index finding
+	has no query, so it is never told to rewrite a filter."""
+	known = {col: kinds for col, kinds in shapes.items() if kinds != {"unsure"}}
+	unsure = [col for col, kinds in shapes.items() if kinds == {"unsure"}]
+	check = "check the query with EXPLAIN to see which index it uses and how many rows it reads"
+	if known:
+		return (
+			f"The cost comes from how the query filters: {'; '.join(_shape_phrases(known))}. Rewrite the filter "
+			"so an index can be used, and check the result with EXPLAIN."
+		)
+	if unsure:
+		return f"Optimus could not read how the query filters on {', '.join(unsure)}, so {check}."
+	if query:
+		return f"The query's filter looks index-friendly, so {check}."
+	return "Check the slow queries on this column with EXPLAIN to see which index they use and how many rows they read."
 
 
 def _explain_index_names(explain_row) -> list[tuple[str, bool]]:
@@ -1082,6 +1174,14 @@ def _explain_index_names(explain_row) -> list[tuple[str, bool]]:
 	return out
 
 
+def _reserved(evidence: TableEvidence, cols) -> list[str]:
+	"""The columns of ``cols`` that are MariaDB reserved words, on MariaDB only: Postgres
+	``add_index`` quotes every identifier (E3)."""
+	if evidence.dialect == "postgres":
+		return []
+	return [c for c in cols if c.lower() in MARIADB_RESERVED_WORDS]
+
+
 def _column_problem(evidence: TableEvidence, cols: list[str]) -> str | None:
 	by_lower = {c.lower(): c for c in evidence.column_types}
 	for col in cols:
@@ -1101,7 +1201,7 @@ def _column_problem(evidence: TableEvidence, cols: list[str]) -> str | None:
 				f'Column "{col}" of table "{evidence.table}" is not a field of DocType "{evidence.doctype}", '
 				"so Frappe does not manage it and Optimus gives no index code."
 			)
-	reserved = [c for c in cols if c.lower() in MARIADB_RESERVED_WORDS]
+	reserved = _reserved(evidence, cols)
 	if reserved:
 		return (
 			f'Column "{reserved[0]}" is a reserved word in MariaDB, and frappe.db.add_index writes column '
@@ -1110,45 +1210,47 @@ def _column_problem(evidence: TableEvidence, cols: list[str]) -> str | None:
 	return None
 
 
-def _existing_index_problem(evidence: TableEvidence, cols: list[str], explain_row, query: str) -> str | None:
-	"""NO_CODE when a recipe column is unique, when an existing index already starts with
-	the whole recipe column list, or when the LEADING column already leads an index, has
-	Search Index ticked, or leads an index EXPLAIN names. A later column with an index of
-	its own does not make the composite useless (fix round 1, I3). A trailing creation /
-	modified is not checked: Frappe indexes creation on every non-child table
-	(mariadb/schema.py:36-39; owner decision D5)."""
-	checked = [c for c in cols if c.lower() not in TRAILING_METADATA_OK]
-	for col in checked:
-		field = evidence.fields.get(col)
-		if (field is not None and field.unique) or any(ix.unique and ix.columns[:1] == (col,) for ix in evidence.indexes):
-			return f'Column "{col}" is already unique, so the database already has an index on it. {_shape_text(query, col)}'
-	lead = cols[0]
+def _existing_index_problem(
+	evidence: TableEvidence, cols: list[str], explain_row, query: str, shapes: Mapping[str, set[str]],
+) -> str | None:
+	"""NO_CODE when the FINAL recipe (``cols``, bare names) exists already (C1). A recipe of
+	several columns is refused only when an existing index already starts with all of them:
+	its first column leading an index of its own, or one EXPLAIN names, says nothing about
+	the composite, so the verdict never depends on the order of the query's predicates. A
+	single-column recipe is refused when that column is unique on its own (a Unique field or
+	a one-column unique index; a composite unique index it leads is just an index it leads,
+	C6), leads an existing index under any name, or leads an index EXPLAIN names. Search
+	Index is never proof (C2): on Postgres a Search Index is named after the bare field and
+	index names are schema-wide, so only the first table with that field name gets one; the
+	table's real index list decides. creation and modified never stand alone in a recipe
+	(``apply_metadata_rule``), so Frappe's own creation index never refuses one (D5)."""
 	whole = tuple(cols)
-	covering = next((ix for ix in evidence.indexes if ix.columns[: len(whole)] == whole), None)
-	if covering is not None:
+	tail = _existing_tail(query, shapes)
+	if len(whole) > 1:
+		covering = next((ix for ix in evidence.indexes if ix.columns[: len(whole)] == whole), None)
+		if covering is None:
+			return None
 		return (
 			f'The index "{covering.name}" on table "{evidence.table}" already starts with {_cols_text(whole)}, '
-			f"so this index exists already and a new one would not help. {_shape_text(query, lead)}"
+			f"so this index exists already and a new one would not help. {tail}"
 		)
-	led = next((ix for ix in evidence.indexes if ix.columns[:1] == (lead,)), None)
+	col = whole[0]
+	field = evidence.fields.get(col)
+	if (field is not None and field.unique) or any(ix.unique and ix.columns == (col,) for ix in evidence.indexes):
+		return f'Column "{col}" is already unique, so the database already has an index on it. {tail}'
+	led = next((ix for ix in evidence.indexes if ix.columns[:1] == (col,)), None)
 	if led is not None:
 		return (
-			f'Column "{lead}" already leads the index "{led.name}" on table "{evidence.table}", so a new '
-			f"index would not help. {_shape_text(query, lead)}"
-		)
-	field = evidence.fields.get(lead)
-	if field is not None and field.search_index:
-		return (
-			f'Column "{lead}" already has Search Index ticked, so Frappe keeps an index on it and a new '
-			f"one would not help. {_shape_text(query, lead)}"
+			f'Column "{col}" already leads the index "{led.name}" on table "{evidence.table}", so a new '
+			f"index would not help. {tail}"
 		)
 	for name, used in _explain_index_names(explain_row):
 		named = next((ix for ix in evidence.indexes if ix.name == name), None)
-		if (named is not None and named.columns[:1] == (lead,)) or name in (lead, f"{lead}_index"):
+		if (named is not None and named.columns[:1] == (col,)) or name in (col, f"{col}_index"):
 			how = "uses" if used else "can use"
 			return (
-				f'EXPLAIN shows the database {how} the index "{name}" on column "{lead}", so a new index '
-				f"would not help. {_shape_text(query, lead)}"
+				f'EXPLAIN shows the database {how} the index "{name}" on column "{col}", so a new index '
+				f"would not help. {tail}"
 			)
 	return None
 
@@ -1174,12 +1276,15 @@ def _index_columns(evidence: TableEvidence, cols: list[str]) -> tuple[list[str],
 	final: list[str] = []
 	dropped: list[tuple[str, str]] = []
 	for i, col in enumerate(cols):
-		if col in evidence.unindexable_columns:
+		if _unindexable(evidence, col):
 			if i == 0:
-				dtype = evidence.column_types.get(col, "")
+				field = evidence.fields.get(col)
+				what = (
+					"is a JSON field" if field is not None and field.fieldtype == "JSON"
+					else f"has the type {evidence.column_types.get(col, '')}"
+				)
 				return [], [], (
-					f'Column "{col}" has the type {dtype}, which a plain index cannot cover, '
-					"so Optimus gives no index code."
+					f'Column "{col}" {what}, which a plain index cannot cover, so Optimus gives no index code.'
 				)
 			dropped.append((col, "a type a plain index cannot cover"))
 			continue
@@ -1211,8 +1316,22 @@ def _index_columns(evidence: TableEvidence, cols: list[str]) -> tuple[list[str],
 	return final, dropped, None
 
 
-def _no_code(doctype: str, cols, reason: str) -> IndexAdvice:
-	return IndexAdvice(route=ROUTE_NO_CODE, doctype=doctype, table=f"tab{doctype}", columns=tuple(cols), reason=reason)
+def _no_code(doctype: str, cols, reason: str, *, unknown: bool = False) -> IndexAdvice:
+	return IndexAdvice(
+		route=ROUTE_NO_CODE, doctype=doctype, table=f"tab{doctype}", columns=tuple(cols), reason=reason,
+		unknown=unknown,
+	)
+
+
+def _no_evidence(doctype: str, cols) -> IndexAdvice:
+	"""NO_CODE for a table Optimus has no evidence for (E6): not the table of a DocType on
+	this site (a core table such as tabSessions, tabSeries or tabSingles, a virtual DocType, a
+	removed one) or one whose evidence could not be read. No verdict on the index."""
+	return _no_code(doctype, cols, (
+		f'Optimus has no information about table "tab{doctype}": it is not the table of a DocType on this '
+		"site (a core table such as tabSessions or tabSeries, a virtual DocType or a removed one), or Optimus "
+		"could not read it. So it gives no index code. Check the slow queries on it with EXPLAIN."
+	), unknown=True)
 
 
 def _search_index_reason(doctype: str, field: str, evidence: TableEvidence, custom_field: bool) -> str:
@@ -1311,18 +1430,29 @@ def _route(doctype: str, final: list[str], dropped, evidence: TableEvidence, tra
 	if plain_single and mariadb:
 		entry = {"doctype": doctype, "search_index_field": base[0], "db": "mariadb"}
 		app_label = f'the "{evidence.app}" app' if evidence.app else "another app"
-		reason = (
-			f'DocType "{doctype}" belongs to {app_label}, so do not edit it. Your app\'s ensure_indexes() '
-			f'function creates the index "{base[0]}_index" on "{base[0]}" once, unless that column already has '
-			"an index of its own, and then sets Search Index on the field with a Property Setter, so Frappe's "
-			"schema sync keeps the index."
+		does = (
+			f'Your app\'s ensure_indexes() function creates the index "{base[0]}_index" on "{base[0]}" once, '
+			"unless that column already has an index of its own, and then sets Search Index on the field with a "
+			"Property Setter, so Frappe's schema sync keeps the index."
 		)
+		if tracked_apps or evidence.app in FRAMEWORK_APPS:
+			reason = f'DocType "{doctype}" belongs to {app_label}, so do not edit it. {does}'
+		else:
+			# Empty Tracked Apps: no app counts as the developer's own (cycle-1 R-minor), so
+			# that a non-framework app is someone else's is a guess, never a fact (E1).
+			yours = f'"{evidence.app}" is your app' if evidence.app else "the DocType belongs to your app"
+			reason = (
+				f'DocType "{doctype}" belongs to {app_label}. {does} If {yours}, tick Search Index on the field '
+				"instead; set Tracked Apps in Optimus Settings so Optimus can tell."
+			)
 	else:
 		entry = {"doctype": doctype, "columns": list(final), "index_name": optimus_index_name(doctype, base)}
 		if any("(" in c for c in final):
 			entry["db"] = "mariadb"  # a text prefix: Postgres would index the whole value
-		elif not mariadb and len(final) == 1:
-			entry["db"] = "postgres"  # MariaDB schema sync drops an undeclared single-column index
+		elif not mariadb and (len(final) == 1 or any(c.lower() in MARIADB_RESERVED_WORDS for c in base)):
+			# MariaDB schema sync drops an undeclared single-column index, and MariaDB add_index
+			# writes column names unquoted, so a reserved word fails to build there (E3)
+			entry["db"] = "postgres"
 		elif mariadb and _key_bytes(evidence, final) > POSTGRES_MAX_INDEX_ROW_BYTES:
 			entry["db"] = "mariadb"  # wider than a Postgres index row can hold
 		reason = (
@@ -1358,7 +1488,8 @@ def advise(
 	temporary table a Filesort or Temporary Table index removes). When that sort-first
 	recipe gives no code or loses its plain sort column (a prefix, the column cap), the
 	recipe without ``serves`` is given instead. A recipe made only of Check fields, or
-	with nothing left, is NO_CODE."""
+	with nothing left, is NO_CODE. The existing-index checks run on the final recipe, after
+	columns were left out (``_existing_index_problem``)."""
 	kwargs = {
 		"evidence": evidence, "tracked_apps": tracked_apps, "explain_row": explain_row, "query": query,
 		"unusable": unusable, "comparisons": comparisons,
@@ -1399,19 +1530,20 @@ def _advise(
 	if not cols and not shapes:
 		return None
 	if evidence is None:
-		return _no_code(doctype, cols or list(shapes), (
-			f'Optimus could not read DocType "{doctype}" or the columns of its table while building this '
-			"report (the DocType may not exist on this site), so it gives no index code. Check the query "
-			"with EXPLAIN on a site where the DocType exists."
-		))
+		return _no_evidence(doctype, cols or list(shapes))
 	# a name the table does not have (a fragment of a query cut short) is never shown
 	shapes = {col: kinds for col, kinds in shapes.items() if col in evidence.fields}
 	if not cols or all(_is_check_field(evidence, col) for col in cols):
-		return _no_code(doctype, cols + list(shapes), _shape_no_code_reason(shapes, cols))
-	problem = _column_problem(evidence, cols) or _existing_index_problem(evidence, cols, explain_row, query)
+		reason, unknown = _shape_no_code_reason(shapes, cols)
+		return _no_code(doctype, cols + list(shapes), reason, unknown=unknown)
+	problem = _column_problem(evidence, cols)
 	if problem:
 		return _no_code(doctype, cols, problem)
 	final, dropped, problem = _index_columns(evidence, cols)
+	if problem:
+		return _no_code(doctype, cols, problem)
+	# the existing-index checks look at the FINAL recipe, after columns were left out (C1)
+	problem = _existing_index_problem(evidence, [c.split("(", 1)[0] for c in final], explain_row, query, shapes)
 	if problem:
 		return _no_code(doctype, cols, problem)
 	shape_dropped = [(col, _shape_why(kinds)) for col, kinds in shapes.items()]
@@ -1423,33 +1555,50 @@ def _is_check_field(evidence: TableEvidence, col: str) -> bool:
 	return field is not None and field.fieldtype == "Check"
 
 
+def _sort_cause(ftype: str, problem: str) -> str:
+	"""The sentence naming why the sort (Filesort) or the temporary table stays (C7)."""
+	filesort = ftype == "Filesort"
+	does, stays = ("sorts", "the sort stays") if filesort else ("groups", "the temporary table stays")
+	if problem == "aggregate":
+		return f"The query sorts {'' if filesort else 'its groups '}by an aggregate, which no index can return in order, so {stays}."
+	if problem == "differs":
+		return (
+			"The query groups by other columns than it sorts by" if filesort
+			else "The query sorts by other columns than it groups by"
+		) + f", so {stays}."
+	if problem == "distinct":
+		return "The temporary table comes from the query's DISTINCT, which this index does not cover, so it stays."
+	return (
+		f"The query {does} by an expression, a select alias, a text column or in mixed directions, which no "
+		f"index can return in order, so {stays}."
+	)
+
+
 def _lead_for(
 	ftype: str,
 	labelled: list[tuple[str, str]],
 	advice: IndexAdvice,
 	*,
-	plain_sort: bool = True,
+	sort_problem: str = "",
 	ranged: str | None = None,
 	multi: tuple[str, ...] = (),
 ) -> str:
 	"""The finding type's opening sentence. For Filesort / Temporary Table it never claims
 	the sort or the temporary table goes when the index cannot remove it: the sort is not
-	on a bare column (``plain_sort`` False), the sort column follows a range condition
-	(``ranged``), or a kept filter matches several values (``multi``)."""
+	on bare columns (``sort_problem``, see ``_sort_problem``, which also names the cause),
+	the sort column follows a range condition (``ranged``), or a kept filter matches several
+	values (``multi``)."""
 	if advice.route == ROUTE_NO_CODE:
 		return ""
 	kept = {c.split("(", 1)[0] for c in advice.columns}
 	labels = {label for label, col in labelled if col in kept}
 	sort_label = {"Filesort": "ORDER BY", "Temporary Table": "GROUP BY"}.get(ftype)
 	if sort_label:
-		does, stays = ("sorts", "the sort stays") if ftype == "Filesort" else ("groups", "the temporary table stays")
-		expression = (
-			_FILTER_LEAD + f" The query {does} by an expression, a select alias, a text column or in mixed "
-			f"directions, which no index can return in order, so {stays}."
-		)
+		stays = "the sort stays" if ftype == "Filesort" else "the temporary table stays"
+		expression = _FILTER_LEAD + " " + _sort_cause(ftype, sort_problem)
 		if sort_label in labels:
 			kept_multi = [col for col in multi if col in kept]
-			if not plain_sort:
+			if sort_problem:
 				return expression
 			if kept_multi:
 				column, still = (
@@ -1463,7 +1612,7 @@ def _lead_for(
 			sort_cols = [col for label, col in labelled if label == sort_label]
 			# a sort column the parser could name that is no Frappe metadata column
 			if any(col.lower() not in FRAPPE_METADATA_COLUMNS for col in sort_cols):
-				if not plain_sort:
+				if sort_problem:
 					return expression
 				if ranged:
 					column = "sort" if ftype == "Filesort" else "grouping"
@@ -1471,16 +1620,19 @@ def _lead_for(
 						_FILTER_LEAD + f" The {column} column comes after the range condition on {ranged}, so this "
 						f"index cannot return the rows in order and {stays}."
 					)
-	if ftype == "Filesort" and "ORDER BY" not in labels:
-		return (
-			_FILTER_LEAD + " The sort column is a Frappe metadata column or an aggregate, which this index "
-			"cannot cover, so the sort stays."
-		)
-	if ftype == "Temporary Table" and "GROUP BY" not in labels:
-		return (
-			_FILTER_LEAD + " The grouping column is a Frappe metadata column, which Optimus never indexes, "
-			"so the temporary table stays."
-		)
+		if sort_label not in labels:
+			# the sort or group column is not in the index: name why (C7)
+			column = "sort" if ftype == "Filesort" else "grouping"
+			if sort_problem in ("aggregate", "distinct"):
+				return expression
+			if any(label == sort_label and col.lower() in FRAPPE_METADATA_COLUMNS for label, col in labelled):
+				return (
+					_FILTER_LEAD + f" The {column} column is a Frappe metadata column, which Optimus never indexes, "
+					f"so {stays}."
+				)
+			if sort_problem in ("expression", "differs"):
+				return expression
+			return _FILTER_LEAD + f" This index does not cover the {column}, so {stays}."
 	return _TYPE_LEADS.get(ftype, "")
 
 
@@ -1506,7 +1658,7 @@ def advise_finding(
 		return _no_code(doctype, (), (
 			f"This query is longer than {MAX_QUERY_CHARS} characters, so Optimus does not parse it for "
 			"index advice. Check it with EXPLAIN."
-		))
+		), unknown=True)
 	table, labelled = _index_target(ftype, detail, parser or parse_query)
 	doctype = doctype_of(table)
 	if doctype is None:
@@ -1514,12 +1666,19 @@ def advise_finding(
 	evidence = evidence_lookup(f"tab{doctype}")
 	unusable = comparisons = None
 	serves = ""
-	plain_sort = True
+	sort_problem = ""
 	multi: tuple[str, ...] = ()
 	if query:
 		# top_queries keeps QUERY_TEXT_LIMIT characters, so a Slow Query that long may be cut
 		truncated = ftype == "Slow Query" and len(query) >= QUERY_TEXT_LIMIT
-		qualifiers = _target_qualifiers(query, table)
+		qualifiers = _target_qualifiers(query, table, getattr(parser, "aliases", None))
+		if evidence is not None and labelled and _union_branches(query, qualifiers) > 1:
+			# one branch's filter is not the query's: never advise from one branch (E7)
+			return _no_code(doctype, _clean_columns([col for _label, col in labelled]), (
+				f'Optimus could not read how this query filters: it is a UNION that filters "tab{doctype}" in '
+				"more than one branch, and one index may not serve them all. So it gives no index code. Check "
+				"each branch with EXPLAIN."
+			), unknown=True)
 		unusable, usable = _scan_where(query, labelled, qualifiers, truncated=truncated)
 		comparisons = {}
 		for label, col in labelled:  # filters come first, then the sort or group columns
@@ -1530,9 +1689,9 @@ def advise_finding(
 				comparisons.setdefault(col, "eq" if label == "JOIN" else usable.get(col, "range"))
 		multi = tuple(col for col, kind in comparisons.items() if kind == "in")
 		if ftype in _SERVES:
-			plain_sort = _plain_sort(query, ftype, qualifiers, evidence)
+			sort_problem = _sort_problem(query, ftype, qualifiers, evidence)
 			# rows matching several values (IN, IS NULL OR =) never come back in one sorted run
-			serves = _SERVES[ftype] if plain_sort and not multi else ""
+			serves = _SERVES[ftype] if not sort_problem and not multi else ""
 	advice = advise(
 		table, [col for _label, col in labelled], evidence=evidence,
 		tracked_apps=tracked_apps, explain_row=detail.get("explain_row"), query=query, unusable=unusable,
@@ -1541,7 +1700,7 @@ def advise_finding(
 	if advice is None:
 		return None
 	ranged = next((col for col, kind in (comparisons or {}).items() if kind == "range"), None)
-	return replace(advice, lead=_lead_for(ftype, labelled, advice, plain_sort=plain_sort, ranged=ranged, multi=multi))
+	return replace(advice, lead=_lead_for(ftype, labelled, advice, sort_problem=sort_problem, ranged=ranged, multi=multi))
 
 
 def advise_table(
@@ -1587,10 +1746,12 @@ def finding_text(advice: IndexAdvice, *, install: bool = True) -> str:
 
 def card_note(advice: IndexAdvice) -> str:
 	"""Prose for the table card's note, which sits under the card's code block (the
-	advice's own ``code``, shown only when there is code; owner decision D3)."""
+	advice's own ``code``, shown only when there is code; owner decision D3). A no-code
+	note opens with "Do not add this index." only when that is a verdict; when Optimus
+	could not tell (``advice.unknown``) it opens with the neutral ``NO_VERDICT`` (U2, E6)."""
 	entry = advice.entry or {}
 	if advice.route == ROUTE_NO_CODE:
-		parts = ["Do not add this index.", advice.reason]
+		parts = [NO_VERDICT if advice.unknown else "Do not add this index.", advice.reason]
 	elif advice.route == ROUTE_SEARCH_INDEX or entry.get("search_index_field"):
 		parts = [
 			"One column: bench migrate drops a single-column index that its field does not declare, so "

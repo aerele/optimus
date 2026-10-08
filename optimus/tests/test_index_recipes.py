@@ -178,8 +178,10 @@ class TestRoutes:
 		assert "Replace your_app with the name of your app" in ir.finding_text(advice)
 
 	def test_a_doctype_with_no_known_app_says_another_app(self):
+		"""With Tracked Apps set, an app outside it is another app's (E1: with Tracked Apps
+		empty the note is conditional, test_index_advice_correctness)."""
 		ev = _ev(app="", fields={"po_no": F("Data")})
-		advice = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(ev))
+		advice = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(ev), tracked_apps=("myapp",))
 		assert 'belongs to another app, so do not edit it' in ir.finding_text(advice)
 
 	def test_the_property_setter_route_says_it_builds_the_index_first(self):
@@ -290,20 +292,23 @@ class TestIndexNames:
 
 class TestNoCode:
 	def test_a_column_that_leads_an_index_with_another_name_gives_no_code(self):
-		"""Review Focus 3 (E-I1, P9a)."""
+		"""Review Focus 3 (E-I1, P9a), for a single-column recipe: a recipe of several
+		columns is refused only by an index that starts with all of them (C1)."""
 		ev = _ev(fields=_ALL, indexes=[("idx_si_customer_custom", ["customer", "company"], False)])
-		advice = ir.advise_finding(_explain("Full Table Scan", _TWO), evidence_lookup=_lookup(ev))
+		q = "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND docstatus = ?"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(ev))
 		assert advice.route == ir.ROUTE_NO_CODE and advice.code is None
 		text = ir.finding_text(advice)
 		assert 'already leads the index "idx_si_customer_custom"' in text
-		assert "The cost comes from how the query filters" in text
+		assert "The query's filter looks index-friendly" in text
 		assert not text.startswith("Index the")
 
-	def test_search_index_ticked_gives_no_code(self):
+	def test_search_index_ticked_is_no_proof_of_an_index(self):
+		"""C2: the table's real indexes decide, never the Search Index flag."""
 		ev = _ev(fields={**_ALL, "customer": F("Link", search_index=True)})
 		advice = ir.advise_finding(_missing("customer"), evidence_lookup=_lookup(ev))
-		assert advice.route == ir.ROUTE_NO_CODE
-		assert "already has Search Index ticked" in ir.finding_text(advice)
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES
+		assert "Search Index ticked" not in ir.finding_text(advice)
 
 	def test_explain_possible_keys_names_an_index_on_the_column(self):
 		row = {"type": "ALL", "possible_keys": "customer_index", "key": None}
@@ -348,7 +353,7 @@ class TestNoCode:
 	def test_an_unindexable_leading_column_gives_no_code(self):
 		ev = _ev(fields={"payload": F("JSON")})
 		advice = ir.advise_finding(_missing("payload"), evidence_lookup=_lookup(ev))
-		assert 'has the type json, which a plain index cannot cover' in ir.finding_text(advice)
+		assert 'Column "payload" is a JSON field, which a plain index cannot cover' in ir.finding_text(advice)
 
 	def test_a_key_over_3072_bytes_gives_no_code(self):
 		ev = _ev(fields={"long_code": F("Data", length=1000)})
@@ -365,7 +370,8 @@ class TestNoCode:
 	def test_no_evidence_gives_no_code(self):
 		advice = ir.advise_finding(_missing("po_no"), evidence_lookup=lambda table: None)
 		assert advice.route == ir.ROUTE_NO_CODE
-		assert 'Optimus could not read DocType "Sales Invoice"' in ir.finding_text(advice)
+		assert advice.unknown
+		assert 'Optimus has no information about table "tabSales Invoice"' in ir.finding_text(advice)
 
 	def test_link_search_with_or_and_like_names_the_shapes(self):
 		"""Fix round 2: the real link-search shape. Every column but disabled sits inside an
@@ -902,7 +908,7 @@ class TestRangeAndSort:
 		"""ORDER BY idx (Frappe metadata) gives no sort column, so the range filter stays."""
 		advice = _r4("Filesort", f"{self._WHERE} ORDER BY `idx`")
 		assert advice.columns == ("company", "posting_date")
-		assert "The sort column is a Frappe metadata column or an aggregate" in ir.finding_text(advice)
+		assert "The sort column is a Frappe metadata column, which Optimus never indexes" in ir.finding_text(advice)
 
 	def test_a_metadata_sort_column_never_leads_the_index(self):
 		"""creation may only trail a business column; with no equality column before it the
@@ -1191,7 +1197,7 @@ class TestExplainColumns:
 		q = "SELECT customer, sum(amount) as total FROM `tabSales Invoice` WHERE company = ? GROUP BY customer ORDER BY total DESC"
 		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(ev))
 		assert advice.entry == {"doctype": "Sales Invoice", "search_index_field": "company", "db": "mariadb"}
-		assert "The sort column is a Frappe metadata column or an aggregate" in ir.finding_text(advice)
+		assert "The query sorts by an aggregate, which no index can return in order" in ir.finding_text(advice)
 
 	def test_dropped_sort_column_is_not_claimed_by_the_lead(self):
 		"""P9c: idx is a metadata column, so the lead must not promise a sort index."""

@@ -7,6 +7,7 @@ the recipes are idempotent, the query parser is memoised and capped, and table c
 are advised after the hide-framework-tables filter."""
 
 import copy
+import html as _html
 import json
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -69,7 +70,7 @@ def test_failures_are_logged_once_after_the_recipes_ran(monkeypatch):
 	)
 	with patch("optimus.settings.get_ignored_apps", return_value=()):
 		html = renderer.render_raw(doc, recordings=[])
-	assert recipe_enrichment.RECIPE_FAILED_HINT in html
+	assert recipe_enrichment.RECIPE_FAILED_HINT in _html.unescape(html)  # the note quotes the log line
 	assert lines.count("optimus: index advice failed for 1 finding(s) or table(s) in one render") == 1
 
 
@@ -210,7 +211,7 @@ def test_a_failed_card_recipe_is_shown_and_logged(monkeypatch):
 	}
 	with patch("optimus.settings.get_ignored_apps", return_value=()):
 		html = renderer.render_raw(_render_doc(tables=[table]), recordings=[])
-	assert recipe_enrichment.RECIPE_FAILED_CARD_NOTE in html
+	assert recipe_enrichment.RECIPE_FAILED_CARD_NOTE in _html.unescape(html)  # the note quotes the log line
 	assert lines == ["optimus: index advice failed for 1 finding(s) or table(s) in one render"]
 
 

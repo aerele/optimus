@@ -302,3 +302,54 @@ def test_export_reads_tracked_apps_like_the_report(env):
 	)
 	assert card.code != card_untracked.code
 	assert out["table_breakdown"][0]["recommended_index"]["code"] == card.code
+
+
+# --- T12: one shared advice step (M4), the report's titles, one parse per query (PF2) ------
+
+
+def test_export_and_report_share_one_advice_step(env):
+	"""M4: the export dict is recipe_enrichment.export_advice's, the one the report uses."""
+	row = _missing_index()
+	env(findings=[row])
+	(finding,) = api.export_session(session_uuid=SESSION_UUID)["findings"]
+	report = {"finding_type": row.finding_type, "technical_detail": json.loads(row.technical_detail_json)}
+	advice, failed = recipe_enrichment.export_advice(report, evidence_lookup=lambda table: _evidence())
+	assert not failed and finding["index_advice"] == advice
+
+
+def test_a_no_code_export_carries_the_reports_title_and_description(env, monkeypatch):
+	"""U1: the export never pairs a no-code advice with the stored "Add index" title."""
+	import dataclasses
+
+	from optimus.renderer.recipe_enrichment import IndexEvidence
+
+	indexed = dataclasses.replace(_evidence(), indexes=(IndexEvidence("po_no", ("po_no",), False),))
+	row = _missing_index()
+	row.title = "Add index on tabSales Invoice(po_no)"
+	row.customer_description = "Ask your developer to add this index in a database migration."
+	env(findings=[row])
+	monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", lambda table: indexed)
+	(finding,) = api.export_session(session_uuid=SESSION_UUID)["findings"]
+	report = {
+		"finding_type": row.finding_type, "title": row.title, "customer_description": row.customer_description,
+		"technical_detail": json.loads(row.technical_detail_json),
+	}
+	recipe_enrichment.apply_finding_recipes([report], evidence_lookup=lambda table: indexed)
+	assert finding["index_advice"]["route"] == index_recipes.ROUTE_NO_CODE
+	assert finding["title"] == report["title"] == "Index on tabSales Invoice(po_no): no new index recommended"
+	assert finding["customer_description"] == report["customer_description"]
+	assert "action_title" not in finding  # a render-only key
+
+
+def test_an_export_parses_each_query_once(env, monkeypatch):
+	"""PF2: the export passes a per-export parser, so two findings on one query parse it
+	once, aliases included."""
+	parsed, aliased = [], []
+	real_parse, real_aliases = index_recipes.parse_query, index_recipes.table_aliases
+	monkeypatch.setattr(index_recipes, "parse_query", lambda q: parsed.append(q) or real_parse(q))
+	monkeypatch.setattr(index_recipes, "table_aliases", lambda q: aliased.append(q) or real_aliases(q))
+	query = "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND posting_date > ?"
+	detail = {"table": "tabSales Invoice", "normalized_query": query}
+	env(findings=[_finding(1, "Full Table Scan", detail), _finding(2, "Low Filter Ratio", detail)])
+	api.export_session(session_uuid=SESSION_UUID)
+	assert parsed == [query] and aliased == [query]

@@ -216,7 +216,8 @@ def test_card_never_renders_an_add_index_call_without_index_name(evidence):
 	assert len(calls) == 4
 	assert all("index_name=" in args for args in calls), calls
 	assert out.count('<pre class="sql-snip">') == 2
-	assert "Do not add this index. Optimus could not read DocType \"Gone DocType\"" in out
+	assert "Do not add this index. Optimus has no information" not in out
+	assert f'{index_recipes.NO_VERDICT} Optimus has no information about table "tabGone DocType"' in out
 
 
 def test_gated_hot_line_shows_note_and_hides_stored_ai(evidence):
@@ -404,3 +405,140 @@ def test_token_total_counts_findings_of_ignored_apps(evidence):
 	with patch("optimus.settings.get_ignored_apps", return_value=("myapp",)):
 		out = _html.unescape(renderer.render_raw(_doc([row]), recordings=[]))
 	assert "old-ai-advice" not in out and "AI suggestions used <strong>30</strong> tokens" in out
+
+
+# --- T12 (U1/E2/A2, U2/U3, PF2): the finding's own text agrees with its advice ----------
+
+_MI_TITLE = "Add index on tabSales Invoice(customer)"
+_MI_DESC = (
+	"Adding an index to the **customer** column of the **tabSales Invoice** table would speed up 5 queries in "
+	"this session, saving roughly 300ms total. Ask your developer to add this index in a database migration."
+)
+_FTS_DESC = (
+	"A query had to read every row of the **tabSales Invoice** table (1000 rows examined) because no index could "
+	"help. This kind of query gets dramatically slower as the table grows. Adding an appropriate index is usually "
+	"the fix."
+)
+
+
+@pytest.fixture
+def indexed(evidence, monkeypatch):
+	"""tabSales Invoice with an index that customer already leads."""
+	import dataclasses
+
+	from optimus.renderer.recipe_enrichment import IndexEvidence
+
+	tables = dict(evidence)
+	tables["tabSales Invoice"] = dataclasses.replace(
+		evidence["tabSales Invoice"], indexes=(IndexEvidence("customer", ("customer",), False),),
+	)
+	monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", lambda table: tables.get(table))
+	return tables
+
+
+def _titled(ftype, detail, title, desc):
+	row = _row(ftype, detail)
+	row.title, row.customer_description = title, desc
+	return row
+
+
+def _mi_customer():
+	detail = {"table": "tabSales Invoice", "column": "customer", "callsite": _CALLSITE, "suggested_ddl": _RAW_DDL}
+	return _titled("Missing Index", detail, _MI_TITLE, _MI_DESC)
+
+
+def _plan_titles(out):
+	return re.findall(r'<p class="title">(.*?)</p>', out, flags=re.S)
+
+
+def test_a_no_code_missing_index_has_a_neutral_title_description_and_plan_step(indexed):
+	row = _mi_customer()
+	stored = (row.title, row.customer_description, row.technical_detail_json)
+	out = _render(_doc([row]))
+	assert "Index on tabSales Invoice(customer): no new index recommended" in out
+	assert _MI_TITLE not in out and "in a database migration" not in out
+	assert "Add a database index" not in out
+	assert recipe_enrichment.NO_INDEX_ACTION_TITLE in _plan_titles(out)
+	assert "Optimus does not recommend a new index on it" in out
+	assert (row.title, row.customer_description, row.technical_detail_json) == stored  # stored JSON unchanged
+
+
+def test_a_routed_missing_index_points_at_how_to_fix(evidence):
+	out = _render(_doc([_mi_customer()]))
+	assert _MI_TITLE in out and "Add a database index" in _plan_titles(out)
+	assert "Ask your developer to add this index using the code and steps under How to fix." in out
+	assert "in a database migration" not in out
+
+
+def test_a_no_code_explain_finding_drops_the_index_fix_sentence(indexed):
+	detail = {"table": "tabSales Invoice", "normalized_query": "SELECT name FROM `tabSales Invoice` WHERE customer = ?",
+		"callsite": _CALLSITE}
+	out = _render(_doc([_titled("Full Table Scan", detail, "Full table scan on tabSales Invoice", _FTS_DESC)]))
+	assert "Adding an appropriate index is usually the fix." not in out
+	assert recipe_enrichment.NO_INDEX_NOTE in out
+	assert "This kind of query gets dramatically slower as the table grows." in out
+
+
+def test_a_routed_explain_finding_keeps_its_description(evidence):
+	detail = {"table": "tabSales Invoice", "normalized_query": "SELECT name FROM `tabSales Invoice` WHERE customer = ?",
+		"callsite": _CALLSITE}
+	out = _render(_doc([_titled("Full Table Scan", detail, "Full table scan on tabSales Invoice", _FTS_DESC)]))
+	assert "Adding an appropriate index is usually the fix." in out
+	assert recipe_enrichment.NO_INDEX_NOTE not in out
+
+
+def test_a_failed_missing_index_is_neutral_and_says_what_to_do(evidence, monkeypatch):
+	def boom(*a, **kw):
+		raise RuntimeError("recipe bug")
+
+	monkeypatch.setattr(index_recipes, "advise_finding", boom)
+	out = _render(_doc([_mi_customer()]))
+	assert "Index on tabSales Invoice(customer): no new index recommended" in out
+	assert "Add a database index" not in out
+	assert recipe_enrichment.RECIPE_FAILED_HINT in out
+	assert 'send the bench log line "optimus: index advice failed" to the Optimus maintainers' in out
+	assert "EXPLAIN yourself" in recipe_enrichment.RECIPE_FAILED_HINT
+
+
+def test_a_failed_card_gives_a_neutral_verdict_and_a_next_step(evidence, monkeypatch):
+	def boom(*a, **kw):
+		raise RuntimeError("card bug")
+
+	monkeypatch.setattr(index_recipes, "advise_table", boom)
+	out = _render(_doc([], [_table()]))
+	note = recipe_enrichment.RECIPE_FAILED_CARD_NOTE
+	assert note.startswith(index_recipes.NO_VERDICT) and "Do not add this index" not in note
+	assert 'send the bench log line "optimus: index advice failed"' in note
+	assert f"Optimus index advice:</em> {note}" in out
+
+
+def test_the_display_overrides_are_idempotent(indexed):
+	import copy
+
+	lookup = recipe_enrichment.make_evidence_lookup()
+	findings = [
+		{"finding_type": "Missing Index", "title": _MI_TITLE, "customer_description": _MI_DESC,
+			"technical_detail": {"table": "tabSales Invoice", "column": "customer"}},
+		{"finding_type": "Missing Index", "title": "Add index on tabSales Invoice(po_no)", "customer_description": _MI_DESC,
+			"technical_detail": {"table": "tabSales Invoice", "column": "po_no"}},
+		{"finding_type": "Full Table Scan", "title": "Full table scan on tabSales Invoice", "customer_description": _FTS_DESC,
+			"technical_detail": {"table": "tabSales Invoice", "normalized_query": "SELECT name FROM `tabSales Invoice` WHERE customer = ?"}},
+	]
+	recipe_enrichment.apply_finding_recipes(findings, evidence_lookup=lookup)
+	once = copy.deepcopy(findings)
+	recipe_enrichment.apply_finding_recipes(findings, evidence_lookup=lookup)
+	assert findings == once
+	assert findings[0]["action_title"] == recipe_enrichment.NO_INDEX_ACTION_TITLE
+	assert "action_title" not in findings[1] and "action_title" not in findings[2]
+
+
+def test_a_render_parses_each_query_once_for_its_aliases(evidence, monkeypatch):
+	"""PF2: the alias map is memoised per query in the render's parser."""
+	calls = []
+	real = index_recipes.table_aliases
+	monkeypatch.setattr(index_recipes, "table_aliases", lambda q: calls.append(q) or real(q))
+	detail = {"table": "tabSales Invoice", "normalized_query": "SELECT name FROM `tabSales Invoice` WHERE customer = ?",
+		"callsite": _CALLSITE}
+	rows = [_row(ftype, dict(detail)) for ftype in ("Full Table Scan", "Low Filter Ratio", "Filesort")]
+	_render(_doc(rows))
+	assert calls == [detail["normalized_query"]]

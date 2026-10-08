@@ -1513,7 +1513,9 @@ def _build_action_plan(
 	out: list[dict] = []
 	for i, f in enumerate(ranked, start=1):
 		ftype = f.get("finding_type") or ""
-		verb = _action_verb_for(ftype)
+		# A render-only label wins: a Missing Index with no index code is never "Add a
+		# database index" (recipe_enrichment.apply_finding_recipes, U1).
+		verb = f.get("action_title") or _action_verb_for(ftype)
 		title = verb or (f.get("title") or "Investigate this finding")
 		desc = (f.get("customer_description") or "").strip()
 		if not desc:

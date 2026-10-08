@@ -15,9 +15,12 @@ existing indexes once per table per render (owner decision A2). It,
 ``make_refresh_check`` (Optimus Settings, through ``ai_fix``, imported lazily) and
 ``log_recipe_failures`` (one bench-log line) are the only functions that touch Frappe.
 
-Index advice that raises leaves a neutral note (``RECIPE_FAILED_HINT`` /
+Index advice that raises leaves a neutral note with a next step (``RECIPE_FAILED_HINT`` /
 ``RECIPE_FAILED_CARD_NOTE``) and is counted, and a Hot Line gate that raises fails
-closed (O-I1). Running the recipes twice leaves the same dicts as running them once.
+closed (O-I1). ``export_advice`` is the one advice step the report and the export share,
+and ``finding_display`` makes an index finding's title and description agree with its
+advice in the render dict (stored text is baked at analyze time). Running the recipes
+twice leaves the same dicts as running them once.
 """
 
 from __future__ import annotations
@@ -208,24 +211,71 @@ def count_ai_tokens(findings: list[dict], tables: list[dict]) -> int:
 
 # What ``best_effort`` gives back when the index advisor raised (the report and the export).
 RECIPE_FAILED = object()
-RECIPE_FAILED_HINT = "Optimus could not build index advice for this finding."
-RECIPE_FAILED_CARD_NOTE = "Optimus could not build index advice for this table."
+# A failure is no verdict on the index, so the notes say what to do next (U2, U3). The
+# quoted text is how log_recipe_failures' bench-log line starts.
+_FAILED_NEXT = (
+	'if it keeps happening, send the bench log line "optimus: index advice failed" to the Optimus maintainers.'
+)
+RECIPE_FAILED_HINT = (
+	f"Optimus could not build index advice for this finding. Check the query with EXPLAIN yourself; {_FAILED_NEXT}"
+)
+RECIPE_FAILED_CARD_NOTE = (
+	f"{index_recipes.NO_VERDICT} It could not build index advice for this table. Check the slow queries on this "
+	f"table with EXPLAIN yourself; {_FAILED_NEXT}"
+)
+
+# The finding's own text when its index advice gives no code or failed (U1/E2/A2). The
+# analyzers bake "Add index on ..." and "Ask your developer to add this index in a database
+# migration" into the stored title and description at analyze time; the render dict (and
+# the export) get these instead, and the stored JSON keeps the analyzer's text.
+NO_INDEX_TITLE = "Index on {table}({column}): no new index recommended"
+NO_INDEX_DESCRIPTION = (
+	"Queries in this session filtered on the **{column}** column of the **{table}** table. Optimus does not "
+	"recommend a new index on it: How to fix says why and what to check instead."
+)
+NO_INDEX_NOTE = "Optimus gives no index code for this query: How to fix says why and what to check instead."
+# The action plan's step label for a no-code Missing Index, instead of "Add a database index".
+NO_INDEX_ACTION_TITLE = "Check the query with EXPLAIN"
+_MIGRATION_PHRASE = "in a database migration"
+_HOW_TO_FIX_PHRASE = "using the code and steps under How to fix"
+# The explain_flags sentences that promise an index fixes the finding.
+_INDEX_FIX_SENTENCES: tuple[str, ...] = (
+	"Adding an appropriate index is usually the fix.",
+	"Adding an index that covers the ORDER BY clause usually fixes it.",
+	"Usually fixable by adding or reshaping an index so the filter is applied at the index level instead of "
+	"per-row.",
+)
+
+
+class _QueryParser:
+	"""A per-render (or per-export) ``parse(query)`` for the advisor, memoised on the query
+	text (a query can back several findings) and never run on a query over
+	``index_recipes.MAX_QUERY_CHARS`` (the advisor explains those instead). ``aliases(query)``
+	memoises the alias map, a second sql_metadata parse of the same text (PF2: it took 42 to
+	69 percent of the recipe stage when it ran once per finding)."""
+
+	def __init__(self) -> None:
+		self._parsed: dict[str, dict] = {}
+		self._aliases: dict[str, dict] = {}
+
+	def __call__(self, query: str) -> dict:
+		if len(query or "") > index_recipes.MAX_QUERY_CHARS:
+			return {}
+		if query not in self._parsed:
+			self._parsed[query] = index_recipes.parse_query(query)
+		return self._parsed[query]
+
+	def aliases(self, query: str) -> dict:
+		if len(query or "") > index_recipes.MAX_QUERY_CHARS:
+			return {}
+		if query not in self._aliases:
+			self._aliases[query] = index_recipes.table_aliases(query)
+		return self._aliases[query]
 
 
 def make_query_parser() -> Callable[[str], dict]:
-	"""A per-render ``parse(query)`` for the advisor: memoised on the query text (a query
-	can back several findings), and never run on a query over
-	``index_recipes.MAX_QUERY_CHARS`` (the advisor explains those instead)."""
-	cache: dict[str, dict] = {}
-
-	def parse(query: str) -> dict:
-		if len(query or "") > index_recipes.MAX_QUERY_CHARS:
-			return {}
-		if query not in cache:
-			cache[query] = index_recipes.parse_query(query)
-		return cache[query]
-
-	return parse
+	"""A fresh ``_QueryParser``: one per render and one per export."""
+	return _QueryParser()
 
 
 def log_recipe_failures(count: int, *, where: str = "render") -> None:
@@ -245,6 +295,88 @@ def log_recipe_failures(count: int, *, where: str = "render") -> None:
 	best_effort(_write, None)
 
 
+def export_advice(
+	finding: dict,
+	*,
+	evidence_lookup: Callable[[str], TableEvidence | None],
+	tracked_apps: tuple[str, ...] = (),
+	parser: Callable[[str], dict] | None = None,
+) -> tuple[dict | None, bool]:
+	"""``(advice, failed)`` for one index-family finding, the one advice step the report
+	and the export share, so the export equals the report (M4). ``advice`` is the export's
+	``index_advice`` dict (``route``, ``doctype``, ``table``, ``columns``, ``index_name``,
+	``text`` and ``code``; the report shows ``text`` as the fix hint and ``code`` as the
+	suggested index), or None when the advisor has nothing to say. ``failed`` is True when
+	the advisor raised: ``advice`` is then the failure shape (route no_code, the
+	``RECIPE_FAILED_HINT`` text, no code), and the caller counts it for one log line."""
+	advice = best_effort(
+		lambda: index_recipes.advise_finding(
+			finding, evidence_lookup=evidence_lookup, tracked_apps=tuple(tracked_apps or ()), parser=parser,
+		),
+		RECIPE_FAILED,
+	)
+	if advice is RECIPE_FAILED:
+		detail = finding.get("technical_detail")
+		table = str(detail.get("table") or "") if isinstance(detail, dict) else ""
+		doctype = index_recipes.doctype_of(table)
+		return {
+			"route": index_recipes.ROUTE_NO_CODE,
+			"doctype": doctype,
+			"table": f"tab{doctype}" if doctype else None,
+			"columns": [],
+			"index_name": None,
+			"text": RECIPE_FAILED_HINT,
+			"code": None,
+		}, True
+	if advice is None:
+		return None, False
+	return {
+		"route": advice.route,
+		"doctype": advice.doctype,
+		"table": advice.table,
+		"columns": list(advice.columns),
+		"index_name": (advice.entry or {}).get("index_name"),
+		"text": index_recipes.finding_text(advice),
+		"code": advice.code,
+	}, False
+
+
+def finding_display(finding: dict, advice: dict | None) -> dict:
+	"""The ``title`` and ``customer_description`` an index-family finding shows next to
+	``advice`` (``export_advice``'s dict), only the keys that change (U1/E2/A2). Pure; the
+	stored row is never touched. With no code (no_code, or a failed advisor):
+
+	- a Missing Index gets "Index on <table>(<column>): no new index recommended" and a
+	  neutral line instead of "Add index on ..." and "Ask your developer to add this index";
+	- an EXPLAIN-family finding loses the sentence that promises an index fixes it and
+	  gains ``NO_INDEX_NOTE``.
+
+	With code, a Missing Index points at the code and steps under How to fix instead of "a
+	database migration". Applying it to its own output changes nothing."""
+	ftype = finding.get("finding_type") or ""
+	if advice is None or ftype not in INDEX_FINDING_TYPES:
+		return {}
+	description = str(finding.get("customer_description") or "")
+	if advice.get("route") != index_recipes.ROUTE_NO_CODE:
+		if ftype == "Missing Index" and _MIGRATION_PHRASE in description:
+			return {"customer_description": description.replace(_MIGRATION_PHRASE, _HOW_TO_FIX_PHRASE)}
+		return {}
+	if ftype == "Missing Index":
+		detail = finding.get("technical_detail")
+		detail = detail if isinstance(detail, dict) else {}
+		table = str(detail.get("table") or "").strip().strip("`")
+		column = str(detail.get("column") or "").strip().strip("`")
+		if not table or not column:
+			return {}
+		return {
+			"title": NO_INDEX_TITLE.format(table=table, column=column),
+			"customer_description": NO_INDEX_DESCRIPTION.format(table=table, column=column),
+		}
+	for sentence in _INDEX_FIX_SENTENCES:
+		description = description.replace(sentence, "")
+	return {"customer_description": _with_note(" ".join(description.split()), NO_INDEX_NOTE)}
+
+
 def apply_finding_recipes(
 	findings: list[dict],
 	*,
@@ -254,7 +386,9 @@ def apply_finding_recipes(
 	parser: Callable[[str], dict] | None = None,
 ) -> dict:
 	"""Fill each render dict's recipe slots in place and return ``{"failed": n}``, the
-	index advice that raised. Running it twice leaves the same dicts as running it once."""
+	index advice that raised. An index-family finding's title, description and action-plan
+	label follow its advice (``finding_display``; ``action_title`` is the render-only label
+	for a no-code Missing Index). Running it twice leaves the same dicts as running it once."""
 	stats = {"failed": 0}
 	scope = tuple(tracked_apps or ())
 	for f in findings or []:
@@ -266,21 +400,17 @@ def apply_finding_recipes(
 		ftype = f.get("finding_type") or ""
 		if ftype in INDEX_FINDING_TYPES:
 			f["llm_fix"] = None
-			advice = best_effort(
-				lambda: index_recipes.advise_finding(
-					f, evidence_lookup=evidence_lookup, tracked_apps=scope, parser=parser,
-				),
-				RECIPE_FAILED,
-			)
+			advice, failed = export_advice(f, evidence_lookup=evidence_lookup, tracked_apps=scope, parser=parser)
 			# Raw analyzer DDL never reaches the report, whatever the advice turned out to be.
 			detail.pop("suggested_ddl", None)
-			if advice is RECIPE_FAILED:
-				detail["fix_hint"] = RECIPE_FAILED_HINT
-				stats["failed"] += 1
-			elif advice is not None:
-				detail["fix_hint"] = index_recipes.finding_text(advice)
-				if advice.code:
-					detail["suggested_ddl"] = advice.code
+			stats["failed"] += failed
+			if advice is not None:
+				detail["fix_hint"] = advice["text"]
+				if advice["code"]:
+					detail["suggested_ddl"] = advice["code"]
+			f.update(finding_display(f, advice))
+			if ftype == "Missing Index" and advice is not None and advice["route"] == index_recipes.ROUTE_NO_CODE:
+				f["action_title"] = NO_INDEX_ACTION_TITLE
 		elif ftype == "Redundant Call":
 			if f.get("llm_fix") and ai_grounding.analyzed_before_callsite_fix(f):
 				detail["validation_note"] = _with_note(
