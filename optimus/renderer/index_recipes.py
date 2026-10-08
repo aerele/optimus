@@ -12,9 +12,10 @@ disagree. It reads only the evidence ``recipe_enrichment`` collects for the tabl
   is text: tick Search Index.
 - ``ensure_indexes``: any other index that can be built. The code is one idempotent
   ``ensure_indexes()`` for the developer's app, run from hooks.py ``after_install``,
-  ``after_sync`` and ``after_migrate``. Each entry checks its table, its columns and its
-  index first, and a failing entry writes an Error Log row instead of stopping bench
-  migrate.
+  ``after_sync`` and ``after_migrate``. Each entry checks its database (an entry that is
+  only right on MariaDB or Postgres says so in ``"db"``), its table, its columns and its
+  index first; a failing entry rolls back only its own writes and writes an Error Log row
+  instead of stopping bench migrate.
 - ``no_code``: an explanation and no code.
 
 Frappe v16.18 facts relied on: MariaDB schema sync drops a single-column index its
@@ -52,6 +53,9 @@ ADVISED_FINDING_TYPES: frozenset[str] = INDEX_FINDING_TYPES | {"Slow Query"}
 TEXT_INDEX_PREFIX = 255
 MAX_INDEX_COLUMNS = 4
 MARIADB_MAX_KEY_BYTES = 3072
+# A Postgres btree index row holds at most about 2704 bytes (a third of an 8 KB page);
+# a longer value is refused when the row is written, not when the index is created.
+POSTGRES_MAX_INDEX_ROW_BYTES = 2704
 VARCHAR_DEFAULT_LENGTH = 140
 BYTES_PER_CHAR = 4
 FIXED_WIDTH_BYTES = 8
@@ -135,18 +139,28 @@ _ENSURE_FUNCTION = '''def ensure_indexes():
 	"""Create each index in INDEXES once. One failed entry never stops the others."""
 	for entry in INDEXES:
 		try:
+			# commit what ran before this entry, so the rollback below undoes only this entry
+			frappe.db.commit()
 			_ensure_index(entry)
 			frappe.db.commit()
 		except Exception:
-			frappe.db.rollback()
-			frappe.log_error(
-				title=f"Index for {entry['doctype']} was not created: "
-				f"{entry.get('index_name') or entry.get('search_index_field')}"
-			)
+			with contextlib.suppress(Exception):
+				frappe.db.rollback()
+				frappe.log_error(title=_title(entry, "was not created"))
+
+
+def _title(entry, what):
+	key = entry.get("index_name") or entry.get("search_index_field")
+	return f"Index for {entry['doctype']} {what}: {key}"[:140]
 
 
 def _ensure_index(entry):
 	doctype = entry["doctype"]
+	if entry.get("db", frappe.db.db_type) != frappe.db.db_type:
+		title = _title(entry, f"skipped on {frappe.db.db_type}, the entry is for {entry['db']}")
+		if not frappe.db.exists("Error Log", {"method": title}):
+			frappe.log_error(title=title)
+		return
 	if not frappe.db.table_exists(doctype, cached=False):
 		return
 	field = entry.get("search_index_field")
@@ -159,7 +173,7 @@ def _ensure_index(entry):
 		):
 			from frappe.custom.doctype.property_setter.property_setter import make_property_setter
 
-			make_property_setter(doctype, field, "search_index", 1, "Check")
+			make_property_setter(doctype, field, "search_index", 1, "Check", validate_fields_for_doctype=False)
 		if not frappe.db.has_index(f"tab{doctype}", f"{field}_index"):
 			frappe.db.updatedb(doctype)
 		return
@@ -375,36 +389,45 @@ def _column_problem(evidence: TableEvidence, cols: list[str]) -> str | None:
 
 
 def _existing_index_problem(evidence: TableEvidence, cols: list[str], explain_row, query: str) -> str | None:
-	"""NO_CODE when a recipe column is unique, already leads an index, has Search Index
-	ticked, or leads an index EXPLAIN names. A trailing creation / modified is not
-	checked: Frappe indexes creation on every non-child table (mariadb/schema.py:36-39)."""
+	"""NO_CODE when a recipe column is unique, when an existing index already starts with
+	the whole recipe column list, or when the LEADING column already leads an index, has
+	Search Index ticked, or leads an index EXPLAIN names. A later column with an index of
+	its own does not make the composite useless (fix round 1, I3). A trailing creation /
+	modified is not checked: Frappe indexes creation on every non-child table
+	(mariadb/schema.py:36-39; owner decision D5)."""
 	checked = [c for c in cols if c.lower() not in TRAILING_METADATA_OK]
 	for col in checked:
 		field = evidence.fields.get(col)
 		if (field is not None and field.unique) or any(ix.unique and ix.columns[:1] == (col,) for ix in evidence.indexes):
 			return f'Column "{col}" is already unique, so the database already has an index on it. {_shape_text(query, col)}'
-	for col in checked:
-		led = next((ix for ix in evidence.indexes if ix.columns[:1] == (col,)), None)
-		if led is not None:
-			return (
-				f'Column "{col}" already leads the index "{led.name}" on table "{evidence.table}", so a new '
-				f"index would not help. {_shape_text(query, col)}"
-			)
-		field = evidence.fields.get(col)
-		if field is not None and field.search_index:
-			return (
-				f'Column "{col}" already has Search Index ticked, so Frappe keeps an index on it and a new '
-				f"one would not help. {_shape_text(query, col)}"
-			)
+	lead = cols[0]
+	whole = tuple(cols)
+	covering = next((ix for ix in evidence.indexes if ix.columns[: len(whole)] == whole), None)
+	if covering is not None:
+		return (
+			f'The index "{covering.name}" on table "{evidence.table}" already starts with {_cols_text(whole)}, '
+			f"so this index exists already and a new one would not help. {_shape_text(query, lead)}"
+		)
+	led = next((ix for ix in evidence.indexes if ix.columns[:1] == (lead,)), None)
+	if led is not None:
+		return (
+			f'Column "{lead}" already leads the index "{led.name}" on table "{evidence.table}", so a new '
+			f"index would not help. {_shape_text(query, lead)}"
+		)
+	field = evidence.fields.get(lead)
+	if field is not None and field.search_index:
+		return (
+			f'Column "{lead}" already has Search Index ticked, so Frappe keeps an index on it and a new '
+			f"one would not help. {_shape_text(query, lead)}"
+		)
 	for name, used in _explain_index_names(explain_row):
 		named = next((ix for ix in evidence.indexes if ix.name == name), None)
-		for col in checked:
-			if (named is not None and named.columns[:1] == (col,)) or name in (col, f"{col}_index"):
-				how = "uses" if used else "can use"
-				return (
-					f'EXPLAIN shows the database {how} the index "{name}" on column "{col}", so a new index '
-					f"would not help. {_shape_text(query, col)}"
-				)
+		if (named is not None and named.columns[:1] == (lead,)) or name in (lead, f"{lead}_index"):
+			how = "uses" if used else "can use"
+			return (
+				f'EXPLAIN shows the database {how} the index "{name}" on column "{lead}", so a new index '
+				f"would not help. {_shape_text(query, lead)}"
+			)
 	return None
 
 
@@ -451,7 +474,14 @@ def _index_columns(evidence: TableEvidence, cols: list[str]) -> tuple[list[str],
 			final.append(f"{col}({TEXT_INDEX_PREFIX})")
 			continue
 		final.append(col)
-	if not postgres:
+	if postgres:
+		width = _key_bytes(evidence, final)
+		if width > POSTGRES_MAX_INDEX_ROW_BYTES:
+			return [], [], (
+				f"An index on {_cols_text(final)} could be {width} bytes wide, over the "
+				f"{POSTGRES_MAX_INDEX_ROW_BYTES}-byte Postgres index row limit, so Optimus gives no index code."
+			)
+	else:
 		while len(final) > 1 and _key_bytes(evidence, final) > MARIADB_MAX_KEY_BYTES:
 			dropped.append((final.pop().split("(", 1)[0], "the index would pass the 3072-byte MariaDB key limit"))
 		width = _key_bytes(evidence, final)
@@ -527,8 +557,6 @@ def _ensure_caveats(evidence: TableEvidence, base: tuple[str, ...], app_name: st
 			"after one of these columns, which removes another table's Search Index of that name until that "
 			"table syncs again (a Frappe issue); check pg_indexes after bench migrate."
 		)
-	if app_name == UNKNOWN_APP:
-		out.append("Replace your_app with the name of your app in the file path and in hooks.py.")
 	return tuple(out)
 
 
@@ -552,7 +580,7 @@ def _route(doctype: str, final: list[str], dropped, evidence: TableEvidence, tra
 	else:
 		app_name = UNKNOWN_APP
 	if plain_single and mariadb:
-		entry = {"doctype": doctype, "search_index_field": base[0]}
+		entry = {"doctype": doctype, "search_index_field": base[0], "db": "mariadb"}
 		app_label = f'the "{evidence.app}" app' if evidence.app else "another app"
 		reason = (
 			f'DocType "{doctype}" belongs to {app_label}, so do not edit it. Your app\'s ensure_indexes() '
@@ -561,6 +589,10 @@ def _route(doctype: str, final: list[str], dropped, evidence: TableEvidence, tra
 		)
 	else:
 		entry = {"doctype": doctype, "columns": list(final), "index_name": optimus_index_name(doctype, base)}
+		if any("(" in c for c in final):
+			entry["db"] = "mariadb"  # a text prefix: Postgres would index the whole value
+		elif not mariadb and len(final) == 1:
+			entry["db"] = "postgres"  # MariaDB schema sync drops an undeclared single-column index
 		reason = (
 			f'Your app\'s ensure_indexes() function creates the index "{entry["index_name"]}" on '
 			f"{_cols_text(base)} once. It skips the index when it already exists or when the table or a column "
@@ -661,19 +693,26 @@ def advise_table(
 	return advise(table, list(columns or []), evidence=evidence_lookup(f"tab{doctype}"), tracked_apps=tracked_apps)
 
 
-def _install_text(app_name: str, *, where: str = "below") -> str:
-	return (
-		f"Save the code {where} as {app_name}/{app_name}/{HOOK_MODULE}.py and add "
+def _install_text(advice: IndexAdvice) -> str:
+	"""How to install the code, which the report shows above the prose (finding and card)."""
+	app_name = advice.app_name
+	text = (
+		f"Save the code above as {app_name}/{app_name}/{HOOK_MODULE}.py and add "
 		f'"{app_name}.{HOOK_MODULE}.ensure_indexes" to the {_HOOK_EVENTS_TEXT} lists in hooks.py, '
-		"keeping entries already there."
+		"keeping entries already there. If that file already exists, add only this entry to its "
+		f"INDEXES list: {json.dumps(advice.entry)}."
 	)
+	if app_name == UNKNOWN_APP:
+		text += " Replace your_app with the name of your app in the file path and in hooks.py."
+	return text
 
 
-def finding_text(advice: IndexAdvice) -> str:
-	"""Prose for the finding's fix-hint slot."""
+def finding_text(advice: IndexAdvice, *, install: bool = True) -> str:
+	"""Prose for the finding's fix-hint slot. ``install=False`` leaves out how to save
+	the code, for the Slow Query AI prompt, which carries no code."""
 	parts = [advice.lead, advice.reason]
-	if advice.route == ROUTE_ENSURE_INDEXES:
-		parts.append(_install_text(advice.app_name))
+	if install and advice.route == ROUTE_ENSURE_INDEXES:
+		parts.append(_install_text(advice))
 	parts += list(advice.caveats)
 	return " ".join(p for p in parts if p)
 
@@ -693,7 +732,7 @@ def card_note(advice: IndexAdvice) -> str:
 	else:
 		parts = [advice.reason]
 	if advice.route == ROUTE_ENSURE_INDEXES:
-		parts.append(_install_text(advice.app_name, where="above"))
+		parts.append(_install_text(advice))
 	parts += list(advice.caveats)
 	return " ".join(p for p in parts if p)
 
@@ -710,6 +749,7 @@ def ensure_indexes_code(entries: list[dict], *, app_name: str = UNKNOWN_APP) -> 
 		f"# In {app}/hooks.py run it after install, right after the install's fixture sync and after\n"
 		"# every migrate (add it to these lists when hooks.py already defines them):\n"
 		+ hook_lines
-		+ "import frappe\n\n"
+		+ "import contextlib\n\nimport frappe\n\n"
+		'# An entry with "db" runs only on that database (frappe.db.db_type).\n'
 		"INDEXES = [\n" + body + "]\n\n\n" + _ENSURE_FUNCTION
 	)

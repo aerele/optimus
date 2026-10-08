@@ -55,4 +55,7 @@ def test_the_payload_builder_attaches_the_advice_for_slow_query():
 	payload = analyze._ai_payload_for_finding(row, {}, evidence_lookup=lambda table: evidence)
 	assert payload["index_advice"]["route"] == "ensure_indexes"
 	assert payload["index_advice"]["columns"] == ["customer", "status"]
-	assert "after_install, after_sync and after_migrate" in payload["index_advice"]["text"]
+	text = payload["index_advice"]["text"]
+	assert "never drops an index that spans several columns" in text
+	# fix round 1 item 7: the prompt carries no code, so it gets no instruction to save it
+	assert "Save the code" not in text and "If that file already exists" not in text

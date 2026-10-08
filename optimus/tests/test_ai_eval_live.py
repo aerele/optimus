@@ -220,6 +220,23 @@ def test_main_passes_the_stored_key_only_as_api_key():
 
 
 
+def test_run_case_finds_the_index_types_in_an_older_checkout(corpus, monkeypatch):
+	"""A --optimus-src checkout from before the PR #71 fix wave has the index type set in
+	fix_recipes, not analyzers.base; one from before PR-L1 has neither."""
+	from optimus.analyzers import base
+	from optimus.renderer import fix_recipes
+
+	live = load("live")
+	case = dict(load("_corpus").case_by_name("3q1dsfrmti", corpus), finding_type="Missing Index")
+	fake, calls = _fake_ai_fix()
+	assert live.run_case(case, fake)["outcome"] == "recipe"
+	monkeypatch.delattr(base, "INDEX_FINDING_TYPES")
+	monkeypatch.setattr(fix_recipes, "INDEX_FINDING_TYPES", frozenset({"Missing Index"}), raising=False)
+	assert live.run_case(case, fake)["outcome"] == "recipe"
+	monkeypatch.delattr(fix_recipes, "INDEX_FINDING_TYPES")
+	assert live.run_case(case, fake)["outcome"] == "gated" and not calls
+
+
 def test_run_case_gates_pre_l5_redundant_calls_with_the_real_gate(corpus):
 	from optimus import ai_fix
 	from optimus.renderer import fix_recipes

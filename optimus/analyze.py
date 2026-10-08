@@ -2166,7 +2166,7 @@ def _attach_index_advice(payload: dict, evidence_lookup, tracked_apps: tuple[str
 			"route": advice.route,
 			"doctype": advice.doctype,
 			"columns": list(advice.columns),
-			"text": index_recipes.finding_text(advice),
+			"text": index_recipes.finding_text(advice, install=False),
 		}
 
 

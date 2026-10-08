@@ -107,8 +107,8 @@ def _missing_index(ddl=_RAW_DDL, **kw):
 def test_missing_index_on_another_apps_field_gets_its_ensure_indexes_entry(evidence):
 	out = _render(_doc([_missing_index()]))
 	assert "ALTER TABLE" not in out
-	assert '{"doctype": "Sales Invoice", "search_index_field": "po_no"}' in out
-	assert 'make_property_setter(doctype, field, "search_index", 1, "Check")' in out
+	assert '{"doctype": "Sales Invoice", "search_index_field": "po_no", "db": "mariadb"}' in out
+	assert 'make_property_setter(doctype, field, "search_index", 1, "Check", validate_fields_for_doctype=False)' in out
 	assert 'belongs to the "erpnext" app, so do not edit it' in out
 
 
@@ -140,7 +140,7 @@ def test_table_card_composite_with_text_column_gets_the_prefix_and_the_name(evid
 	})
 	out = _render(_doc([], [table]))
 	name = index_recipes.optimus_index_name("Sales Invoice", ("customer", "remarks"))
-	entry = {"doctype": "Sales Invoice", "columns": ["customer", "remarks(255)"], "index_name": name}
+	entry = {"doctype": "Sales Invoice", "columns": ["customer", "remarks(255)"], "index_name": name, "db": "mariadb"}
 	assert json.dumps(entry) in out
 	assert 'frappe.db.add_index(doctype, columns, index_name=entry["index_name"])' in out
 
@@ -157,7 +157,7 @@ def test_single_column_card_keeps_its_recommendation(evidence):
 	assert "filtered together in <strong>3</strong> of 4 reads" in out
 	assert "SHOW INDEX FROM `tabSales Invoice`" in out
 	assert "One column: bench migrate drops a single-column index" in out
-	assert '{"doctype": "Sales Invoice", "search_index_field": "customer"}' in out
+	assert '{"doctype": "Sales Invoice", "search_index_field": "customer", "db": "mariadb"}' in out
 
 
 def test_write_hot_single_column_card_is_never_called_low_risk(evidence):

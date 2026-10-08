@@ -6,6 +6,7 @@ A1 and A2). Evidence decides: an already indexed, unique, missing or reserved co
 gives no code; a single column on a field the developer controls gets Search Index;
 everything else gets one explicitly named, idempotent ensure_indexes() entry."""
 
+import json
 import re
 
 from optimus.renderer import index_recipes as ir
@@ -110,8 +111,8 @@ class TestRoutes:
 	def test_another_apps_single_column_gets_a_property_setter_entry(self):
 		advice = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(_SI))
 		assert advice.route == ir.ROUTE_ENSURE_INDEXES
-		assert advice.entry == {"doctype": "Sales Invoice", "search_index_field": "po_no"}
-		assert '{"doctype": "Sales Invoice", "search_index_field": "po_no"}' in advice.code
+		assert advice.entry == {"doctype": "Sales Invoice", "search_index_field": "po_no", "db": "mariadb"}
+		assert '{"doctype": "Sales Invoice", "search_index_field": "po_no", "db": "mariadb"}' in advice.code
 		assert 'belongs to the "erpnext" app, so do not edit it' in ir.finding_text(advice)
 
 	def test_empty_tracked_apps_never_makes_a_third_party_app_own(self):
@@ -219,7 +220,7 @@ class TestIndexNames:
 class TestNoCode:
 	def test_a_column_that_leads_an_index_with_another_name_gives_no_code(self):
 		"""Review Focus 3 (E-I1, P9a)."""
-		ev = _ev(fields=_ALL, indexes=[("idx_si_customer_custom", ["customer", "status"], False)])
+		ev = _ev(fields=_ALL, indexes=[("idx_si_customer_custom", ["customer", "company"], False)])
 		advice = ir.advise_finding(_explain("Full Table Scan", _TWO), evidence_lookup=_lookup(ev))
 		assert advice.route == ir.ROUTE_NO_CODE and advice.code is None
 		text = ir.finding_text(advice)
@@ -301,9 +302,9 @@ class TestNoCode:
 			"item_group": F("Link"), "customer_code": F("Small Text"),
 		})
 		q = (
-			"select `tabItem`.`name` from `tabItem` where `tabItem`.`disabled` = ? and (`tabItem`.`item_name` like ? "
+			"select `tabItem`.`name` from `tabItem` where (`tabItem`.`item_name` like ? "
 			"or `tabItem`.`description` like ? or `tabItem`.`item_group` like ? or `tabItem`.`customer_code` like ?) "
-			"order by `tabItem`.`idx` desc limit ?"
+			"and `tabItem`.`disabled` = ? order by `tabItem`.`idx` desc limit ?"
 		)
 		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabItem"), evidence_lookup=_lookup(ev))
 		text = ir.finding_text(advice)
@@ -317,11 +318,83 @@ class TestNoCode:
 		assert "the function IFNULL() wrapped around status" in ir.finding_text(advice)
 
 	def test_a_trailing_creation_never_counts_as_already_indexed(self):
-		ev = _ev(fields=_ALL, indexes=[("creation", ["creation"], False)])
+		"""D5: Frappe indexes creation on every non-child table; a trailing creation is the
+		sort column, not an equality filter, so even a unique index on it is no reason to
+		refuse the recipe."""
 		q = "SELECT name FROM `tabSales Invoice` WHERE customer = ? ORDER BY creation DESC"
-		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(ev))
-		assert advice.route == ir.ROUTE_ENSURE_INDEXES
-		assert advice.entry["columns"] == ["customer", "creation"]
+		for unique in (False, True):
+			ev = _ev(fields=_ALL, indexes=[("creation", ["creation"], unique)])
+			advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(ev))
+			assert advice.route == ir.ROUTE_ENSURE_INDEXES, ir.finding_text(advice)
+			assert advice.entry["columns"] == ["customer", "creation"]
+
+	def test_a_later_column_with_its_own_index_does_not_block_the_composite(self):
+		"""Fix round 1 I3: only the LEADING column's index decides; real ERPNext Sales
+		Invoice has Search Index on customer and posting_date, and (company, posting_date)
+		still serves WHERE company = ? ORDER BY posting_date."""
+		ev = _ev(
+			fields={**_ALL, "customer": F("Link", search_index=True), "posting_date": F("Date", search_index=True)},
+			indexes=[("customer", ["customer"], False), ("posting_date", ["posting_date"], False)],
+		)
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? ORDER BY posting_date DESC"
+		row = {"type": "ALL", "possible_keys": "posting_date", "key": "posting_date"}
+		for explain_row in (None, row):
+			advice = ir.advise_finding(_explain("Filesort", q, explain_row=explain_row), evidence_lookup=_lookup(ev))
+			assert advice.route == ir.ROUTE_ENSURE_INDEXES, ir.finding_text(advice)
+			assert advice.entry == {
+				"doctype": "Sales Invoice", "columns": ["company", "posting_date"],
+				"index_name": ir.optimus_index_name("Sales Invoice", ("company", "posting_date")),
+			}
+
+	def test_a_recipe_an_existing_index_already_starts_with_gives_no_code(self):
+		"""Fix round 1 I3: an existing composite that starts with the whole recipe list."""
+		ev = _ev(fields=_ALL, indexes=[("idx_company_date_status", ["company", "posting_date", "status"], False)])
+		advice = ir.advise_table("tabSales Invoice", ["company", "posting_date"], evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_NO_CODE and advice.code is None
+		assert (
+			'The index "idx_company_date_status" on table "tabSales Invoice" already starts with '
+			"(company, posting_date)" in ir.card_note(advice)
+		)
+
+
+class TestPostgresRowWidth:
+	"""Fix round 1 item 9: a Postgres btree row holds at most about 2704 bytes."""
+
+	def test_a_postgres_index_that_could_pass_the_row_limit_gives_no_code(self):
+		ev = _ev(dialect="postgres", fields={"code_a": F("Data", length=400), "code_b": F("Data", length=400)})
+		advice = ir.advise_table("tabSales Invoice", ["code_a", "code_b"], evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_NO_CODE
+		assert "could be 3200 bytes wide, over the 2704-byte Postgres index row limit" in ir.card_note(advice)
+		ev = _ev(dialect="postgres", fields={"long_code": F("Data", length=700)})
+		advice = ir.advise_table("tabSales Invoice", ["long_code"], evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_NO_CODE
+
+	def test_a_postgres_index_under_the_row_limit_is_an_entry(self):
+		ev = _ev(dialect="postgres", fields={"code_a": F("Data", length=300), "customer": F("Link")})
+		advice = ir.advise_table("tabSales Invoice", ["code_a", "customer"], evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["code_a", "customer"]
+
+
+class TestDatabaseStamp:
+	"""Fix round 1 I2: an entry that is only right on one database says which one."""
+
+	def test_entries_tied_to_one_database_name_it(self):
+		ev = _ev(app="myapp", fields={"remarks": F("Small Text"), "customer": F("Link")})
+		prefixed = ir.advise_table("tabSales Invoice", ["customer", "remarks"], evidence_lookup=_lookup(ev))
+		assert prefixed.entry["columns"] == ["customer", "remarks(255)"] and prefixed.entry["db"] == "mariadb"
+		setter = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(_SI))
+		assert setter.entry["db"] == "mariadb"
+		pg = _ev(app="myapp", dialect="postgres", fields={"po_no": F("Data")})
+		single = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(pg), tracked_apps=("myapp",))
+		assert single.entry["db"] == "postgres"
+		for advice in (prefixed, setter, single):
+			assert json.dumps(advice.entry) in advice.code
+
+	def test_a_plain_composite_runs_on_any_database(self):
+		for dialect in ("mariadb", "postgres"):
+			ev = _ev(dialect=dialect, fields=_ALL)
+			advice = ir.advise_finding(_explain("Full Table Scan", _TWO), evidence_lookup=_lookup(ev))
+			assert advice.route == ir.ROUTE_ENSURE_INDEXES and "db" not in advice.entry
 
 
 class TestCaveats:
@@ -364,20 +437,20 @@ class TestExplainColumns:
 	def test_temporary_table_drops_leading_metadata(self):
 		q = "SELECT customer, count(*) FROM `tabSales Invoice` WHERE docstatus = ? GROUP BY customer"
 		advice = ir.advise_finding(_explain("Temporary Table", q), evidence_lookup=_lookup(_SI))
-		assert advice.entry == {"doctype": "Sales Invoice", "search_index_field": "customer"}
+		assert advice.entry == {"doctype": "Sales Invoice", "search_index_field": "customer", "db": "mariadb"}
 		assert ir.finding_text(advice).startswith("Index the filter and GROUP BY columns")
 
 	def test_alias_table_resolves_to_the_single_doctype_table(self):
 		q = "SELECT si.name FROM `tabSales Invoice` si WHERE si.customer = ?"
 		advice = ir.advise_finding(_explain("Low Filter Ratio", q, table="si"), evidence_lookup=_lookup(_SI))
-		assert advice.entry == {"doctype": "Sales Invoice", "search_index_field": "customer"}
+		assert advice.entry == {"doctype": "Sales Invoice", "search_index_field": "customer", "db": "mariadb"}
 
 	def test_order_by_an_aggregate_alias_is_not_indexed(self):
 		"""P9b: ORDER BY total, total = sum(amount), parses as ORDER BY amount."""
 		ev = _ev(fields={**_ALL, "amount": F("Data")})
 		q = "SELECT customer, sum(amount) as total FROM `tabSales Invoice` WHERE company = ? GROUP BY customer ORDER BY total DESC"
 		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(ev))
-		assert advice.entry == {"doctype": "Sales Invoice", "search_index_field": "company"}
+		assert advice.entry == {"doctype": "Sales Invoice", "search_index_field": "company", "db": "mariadb"}
 		assert "The sort column is a Frappe metadata column or an aggregate" in ir.finding_text(advice)
 
 	def test_dropped_sort_column_is_not_claimed_by_the_lead(self):
@@ -439,6 +512,29 @@ class TestCardNote:
 	def test_card_note_for_no_code(self):
 		advice = ir.advise_table("tabSales Invoice", ["po_number"], evidence_lookup=_lookup(_SI))
 		assert ir.card_note(advice).startswith("Do not add this index.")
+
+	def test_an_existing_module_gets_only_the_new_entry(self):
+		"""Fix round 1 I4: a developer who already has optimus_indexes.py adds one entry."""
+		for advice in (
+			ir.advise_finding(_explain("Full Table Scan", _TWO), evidence_lookup=_lookup(_SI)),
+			ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(_SI)),
+		):
+			line = f"If that file already exists, add only this entry to its INDEXES list: {json.dumps(advice.entry)}"
+			assert line in ir.finding_text(advice) and line in ir.card_note(advice)
+
+	def test_the_finding_and_the_card_point_at_the_code_above_them(self):
+		"""Fix round 1 item 7: the report shows the code block before the prose."""
+		advice = ir.advise_finding(_explain("Full Table Scan", _TWO), evidence_lookup=_lookup(_SI))
+		for text in (ir.finding_text(advice), ir.card_note(advice)):
+			assert "Save the code above as your_app/your_app/optimus_indexes.py" in text and "below" not in text
+
+	def test_the_prompt_text_has_no_save_instruction(self):
+		"""Fix round 1 item 7: the Slow Query prompt carries no code, so nothing to save."""
+		advice = ir.advise_finding(_explain("Full Table Scan", _TWO), evidence_lookup=_lookup(_SI))
+		text = ir.finding_text(advice, install=False)
+		assert advice.entry["index_name"] in text
+		for gone in ("Save the code", "If that file already exists", "Replace your_app"):
+			assert gone not in text
 
 	def test_no_card_note_points_at_a_call_above(self):
 		for advice in _every_advice():
