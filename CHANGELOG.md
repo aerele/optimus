@@ -17,17 +17,24 @@ versions may contain breaking changes see migration notes below).
   Unique flag and type, the real column types, the table's existing indexes and the
   finding's EXPLAIN key first, and never takes the Search Index flag as proof of an index
   (on Postgres a Search Index is named after the bare field, schema-wide, so only one
-  table gets it). A recipe of several columns gets no code only when an existing index
-  starts with all of its columns, so the verdict never depends on predicate order; a
-  one-column recipe also when its column is unique on its own, leads an index or is the
-  index EXPLAIN names. A missing column, a MariaDB reserved word on MariaDB (Postgres
+  table gets it). A recipe's equality columns are put in one fixed order (business
+  columns, Check fields, creation and modified, then a column that cannot lead, each by
+  name), so the same filter in any predicate order gives one recipe and one index name. A
+  recipe of several columns gets no code when an existing index starts with its equality
+  columns in any order and then its range or sort columns in order (ERPNext's GL Entry and
+  Stock Ledger Entry composites are no longer duplicated), when an equality column is
+  unique on its own, or when only Check fields follow an existing index's equality
+  prefix; a one-column recipe also when its column is unique on its own, leads an index or
+  is the index EXPLAIN names. A missing column, a MariaDB reserved word on MariaDB (Postgres
   quotes names; such an entry is Postgres-only), a JSON field (MariaDB reports it as
   longtext, so the field type decides), a leading text column on Postgres, a first column
   alone wider than the key limit (3072 bytes; 2704 on Postgres), a query over 4 KB (Missing
   Index excepted), or a query shape an index cannot use (OR, a leading-wildcard LIKE, a
   function, CASE or arithmetic around the column) gets an explanation and no code. A query
-  Optimus cannot read, a UNION that filters the table in more than one branch, and a table
-  Optimus has no information about (tabSessions, tabSeries, a removed DocType) say so, and
+  Optimus cannot read, a UNION that filters the table in more than one branch, a WHERE
+  column the SQL parser did not report (an unquoted `account`, `user`, `type`, `date` and
+  others, or an unqualified column of a query on several tables), and a table Optimus has
+  no information about (tabSessions, tabSeries, a removed DocType) say so, and
   a card then opens with "Optimus cannot say whether this index would help." instead of
   "Do not add this index.". For an existing index the text names only a filter shape the
   query has, and a card or Missing Index finding is never told to rewrite a filter. A
@@ -102,9 +109,11 @@ versions may contain breaking changes see migration notes below).
   is "Index on <table>(<column>): no new index recommended" with the step "Check the query
   with EXPLAIN", an EXPLAIN-family finding with no code drops "Adding an appropriate index
   is usually the fix", and a Missing Index with code points at the steps under How to fix.
-  Stored findings keep the analyzer's text. A Filesort or Temporary Table finding names
-  why the sort or temporary table stays: an aggregate ORDER BY, a GROUP BY and ORDER BY
-  that differ, a DISTINCT, a metadata column. With Tracked Apps empty, a non-framework
+  Stored findings keep the analyzer's text; advice that is no verdict gets a neutral
+  "cannot say" line instead. A Filesort or Temporary Table finding names why the sort or
+  temporary table stays: an aggregate ORDER BY, a GROUP BY and ORDER BY that differ, a
+  DISTINCT, a column of another table, no ORDER BY or GROUP BY on this table, a metadata
+  column. With Tracked Apps empty, a non-framework
   app's Property Setter entry says "if <app> is your app, tick Search Index on the field
   instead; set Tracked Apps" rather than "do not edit it".
 
@@ -117,7 +126,9 @@ versions may contain breaking changes see migration notes below).
   Index-family findings carry `index_advice` and, when advice exists, a `fix_hint`
   taken from the report text (otherwise the stored hint stays and `index_advice` is null),
   and the report's `title` and `customer_description` (a no-code Missing Index is not
-  titled "Add index on ..."); a table's `recommended_index` gains `requested_columns`.
+  titled "Add index on ..."); `index_advice` has an `unknown` flag (no verdict: Optimus
+  could not tell, or the advisor failed); a table's `recommended_index` gains
+  `requested_columns`.
 
 ### Upgrade notes
 

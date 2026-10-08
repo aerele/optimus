@@ -234,6 +234,12 @@ NO_INDEX_DESCRIPTION = (
 	"recommend a new index on it: How to fix says why and what to check instead."
 )
 NO_INDEX_NOTE = "Optimus gives no index code for this query: How to fix says why and what to check instead."
+# The same when the advice is no verdict (``unknown``: Optimus could not tell, or failed).
+NO_INDEX_UNKNOWN_DESCRIPTION = (
+	"Queries in this session filtered on the **{column}** column of the **{table}** table. Optimus cannot say "
+	"whether a new index on it would help: How to fix says what to check."
+)
+NO_INDEX_UNKNOWN_NOTE = "Optimus cannot say whether an index would help this query: How to fix says what to check."
 # The action plan's step label for a no-code Missing Index, instead of "Add a database index".
 NO_INDEX_ACTION_TITLE = "Check the query with EXPLAIN"
 _MIGRATION_PHRASE = "in a database migration"
@@ -308,7 +314,9 @@ def export_advice(
 	``text`` and ``code``; the report shows ``text`` as the fix hint and ``code`` as the
 	suggested index), or None when the advisor has nothing to say. ``failed`` is True when
 	the advisor raised: ``advice`` is then the failure shape (route no_code, the
-	``RECIPE_FAILED_HINT`` text, no code), and the caller counts it for one log line."""
+	``RECIPE_FAILED_HINT`` text, no code), and the caller counts it for one log line.
+	``unknown`` is True when the advice is no verdict on the index (``IndexAdvice.unknown``,
+	or a failure), so the finding's description stays neutral."""
 	advice = best_effort(
 		lambda: index_recipes.advise_finding(
 			finding, evidence_lookup=evidence_lookup, tracked_apps=tuple(tracked_apps or ()), parser=parser,
@@ -327,6 +335,7 @@ def export_advice(
 			"index_name": None,
 			"text": RECIPE_FAILED_HINT,
 			"code": None,
+			"unknown": True,
 		}, True
 	if advice is None:
 		return None, False
@@ -338,6 +347,7 @@ def export_advice(
 		"index_name": (advice.entry or {}).get("index_name"),
 		"text": index_recipes.finding_text(advice),
 		"code": advice.code,
+		"unknown": advice.unknown,
 	}, False
 
 
@@ -351,6 +361,10 @@ def finding_display(finding: dict, advice: dict | None) -> dict:
 	- an EXPLAIN-family finding loses the sentence that promises an index fixes it and
 	  gains ``NO_INDEX_NOTE``.
 
+	When the advice is no verdict (``advice["unknown"]``: Optimus could not tell, or the
+	advisor failed) the line and the note say Optimus cannot say whether an index would
+	help, never that it recommends none.
+
 	With code, a Missing Index points at the code and steps under How to fix instead of "a
 	database migration". Applying it to its own output changes nothing."""
 	ftype = finding.get("finding_type") or ""
@@ -361,6 +375,7 @@ def finding_display(finding: dict, advice: dict | None) -> dict:
 		if ftype == "Missing Index" and _MIGRATION_PHRASE in description:
 			return {"customer_description": description.replace(_MIGRATION_PHRASE, _HOW_TO_FIX_PHRASE)}
 		return {}
+	unknown = bool(advice.get("unknown"))
 	if ftype == "Missing Index":
 		detail = finding.get("technical_detail")
 		detail = detail if isinstance(detail, dict) else {}
@@ -368,13 +383,15 @@ def finding_display(finding: dict, advice: dict | None) -> dict:
 		column = str(detail.get("column") or "").strip().strip("`")
 		if not table or not column:
 			return {}
+		line = NO_INDEX_UNKNOWN_DESCRIPTION if unknown else NO_INDEX_DESCRIPTION
 		return {
 			"title": NO_INDEX_TITLE.format(table=table, column=column),
-			"customer_description": NO_INDEX_DESCRIPTION.format(table=table, column=column),
+			"customer_description": line.format(table=table, column=column),
 		}
 	for sentence in _INDEX_FIX_SENTENCES:
 		description = description.replace(sentence, "")
-	return {"customer_description": _with_note(" ".join(description.split()), NO_INDEX_NOTE)}
+	note = NO_INDEX_UNKNOWN_NOTE if unknown else NO_INDEX_NOTE
+	return {"customer_description": _with_note(" ".join(description.split()), note)}
 
 
 def apply_finding_recipes(

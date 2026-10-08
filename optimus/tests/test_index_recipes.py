@@ -677,10 +677,10 @@ class TestSingleColumnOr:
 
 	def test_an_or_on_one_column_is_a_plain_use(self):
 		for where, cols in (
-			("(`po_no` IS NULL OR `po_no`=?) AND `customer`=?", ("po_no", "customer")),
-			("(`status`=? OR `status`=?) AND `company`=?", ("status", "company")),
-			("(`status` IN (?) OR `status` IS NULL) AND `company`=?", ("status", "company")),
-			("(`status`=? /* a comment */ OR `status`=?) AND `company`=?", ("status", "company")),
+			("(`po_no` IS NULL OR `po_no`=?) AND `customer`=?", ("customer", "po_no")),  # canonical order
+			("(`status`=? OR `status`=?) AND `company`=?", ("company", "status")),
+			("(`status` IN (?) OR `status` IS NULL) AND `company`=?", ("company", "status")),
+			("(`status`=? /* a comment */ OR `status`=?) AND `company`=?", ("company", "status")),
 		):
 			q = f"SELECT `name` FROM `tabSales Invoice` WHERE {where}"
 			advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI))
@@ -820,7 +820,7 @@ class TestExpressions:
 		assert _r4("Full Table Scan", "`posting_date` > ? - INTERVAL ? DAY AND `company`=?").columns == ("company", "posting_date")
 		assert _r4("Full Table Scan", "`posting_date` <= CURRENT_DATE AND `company`=?").columns == ("company", "posting_date")
 		assert _r4("Full Table Scan", "`posting_date` <= CURDATE() AND `company`=?").columns == ("company", "posting_date")
-		assert _r4("Full Table Scan", "`status` = NULL AND `company`=?").columns == ("status", "company")
+		assert _r4("Full Table Scan", "`status` = NULL AND `company`=?").columns == ("company", "status")
 
 
 class TestCaseFrame:
@@ -857,8 +857,9 @@ class TestIndexDesign:
 	def test_equality_columns_lead(self):
 		assert _r4("Full Table Scan", "`posting_date` BETWEEN ? AND ? AND `company`=?").columns == ("company", "posting_date")
 		assert _r4("Full Table Scan", "`po_no` IS NOT NULL AND `company`=?").columns == ("company", "po_no")
-		assert _r4("Full Table Scan", "`po_no` IS NULL AND `company`=?").columns == ("po_no", "company")
-		assert _r4("Full Table Scan", "`status` IN (?) AND `company`=?").columns == ("status", "company")
+		# the equality block (=, IS NULL, IN) is in one canonical order, by name (review-t12 item 1)
+		assert _r4("Full Table Scan", "`po_no` IS NULL AND `company`=?").columns == ("company", "po_no")
+		assert _r4("Full Table Scan", "`status` IN (?) AND `company`=?").columns == ("company", "status")
 		assert _r4("Full Table Scan", "`posting_date` > ? AND ? = `company`").columns == ("company", "posting_date")
 		item = _lookup(_ev("Item", fields={"disabled": F("Check"), "item_group": F("Link")}))
 		q = "SELECT `name` FROM `tabItem` WHERE `disabled`<>? AND `item_group`=?"
@@ -937,7 +938,7 @@ class TestRangeAndSort:
 	def test_an_equality_on_the_sort_column_stays_first(self):
 		advice = _r4("Filesort", "`customer`=? AND `posting_date` > ? ORDER BY `customer`, `modified`")
 		assert advice.columns == ("customer", "modified")
-		assert _r4("Filesort", "`customer`=? AND `company`=? ORDER BY `customer`").columns == ("customer", "company")
+		assert _r4("Filesort", "`customer`=? AND `company`=? ORDER BY `customer`").columns == ("company", "customer")
 
 
 class TestSortGate:
@@ -1105,9 +1106,16 @@ class TestPostgresRowWidth:
 
 	def test_a_postgres_leading_column_over_the_row_limit_gives_no_code(self):
 		ev = _ev(dialect="postgres", fields={"long_code": F("Data", length=700), "customer": F("Link")})
-		advice = ir.advise_table("tabSales Invoice", ["long_code", "customer"], evidence_lookup=_lookup(ev))
+		advice = ir.advise_table("tabSales Invoice", ["long_code"], evidence_lookup=_lookup(ev))
 		assert advice.route == ir.ROUTE_NO_CODE
 		assert "could be 2800 bytes wide, over the 2704-byte Postgres index row limit" in ir.card_note(advice)
+		# with another column, the one too wide to lead goes last and is left out (review-t12 item 1)
+		for cols in (["long_code", "customer"], ["customer", "long_code"]):
+			advice = ir.advise_table("tabSales Invoice", cols, evidence_lookup=_lookup(ev))
+			assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["customer"]
+			assert "Optimus left out long_code (the index would pass the 2704-byte Postgres index row limit)" in (
+				ir.card_note(advice)
+			)
 
 	def test_a_postgres_index_under_the_row_limit_is_an_entry(self):
 		ev = _ev(dialect="postgres", fields={"code_a": F("Data", length=300), "customer": F("Link")})

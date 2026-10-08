@@ -24,13 +24,17 @@ rules a column out. The advisor picks one route:
   first and a ``search_index`` Property Setter only after that, so a failed build leaves
   nothing that a later sync of the DocType would retry outside the guard. Index builds wait
   at most 300 seconds for a table lock.
-- ``no_code``: an explanation and no code. The index exists already when an existing
-  index starts with the whole final recipe; a one-column recipe is also refused when its
-  column is unique on its own, leads an index, or leads an index EXPLAIN names. The table's
-  real index list decides, never the Search Index flag. A no_code that only says Optimus
-  could not tell (``unknown``: no evidence for the table, an unread filter, a UNION that
-  filters the table in more than one branch, a query too long to parse) is no verdict, so a
-  table card never says "Do not add this index." for it.
+- ``no_code``: an explanation and no code. The equality columns of a recipe are put in
+  one fixed order, so the same filter in any predicate order gives one recipe and one
+  index name. The index exists already when an existing index starts with the recipe's
+  equality columns in any order, then its range or sort columns in order; a recipe is
+  also refused when an equality column is unique on its own, or when only Check fields
+  follow an existing index's equality prefix, and a one-column recipe when its column
+  leads an index or the index EXPLAIN names. The table's real index list decides, never
+  the Search Index flag. A no_code that only says Optimus could not tell (``unknown``: no
+  evidence for the table, an unread filter, a column the SQL parser did not report, a UNION
+  that filters the table in more than one branch, a query too long to parse) is no verdict,
+  so a table card never says "Do not add this index." for it.
 
 Frappe v16.18 facts relied on: MariaDB schema sync drops a single-column index its
 DocField does not declare but never one that spans several columns or covers a text
@@ -408,14 +412,21 @@ def _unindexable(evidence: TableEvidence, col: str) -> bool:
 	return col in evidence.unindexable_columns or (field is not None and field.fieldtype == "JSON")
 
 
-def _clean_columns(columns, *, cap: bool = True) -> list[str]:
+def _clean_columns(columns, *, cap: bool = True, keep_creation: bool = False) -> list[str]:
 	"""Valid, de-duplicated column names. A text prefix the advisor itself wrote
 	(``remarks(255)``) is read back as its bare column, so advising a card's own advice
-	again gives the same advice."""
+	again gives the same advice. ``keep_creation`` keeps creation and modified wherever
+	they are (other metadata columns still go): the caller orders the columns first and
+	applies ``apply_metadata_rule`` after, so their place in the query never decides."""
 	out: list[str] = []
 	seen: set[str] = set()
 	names = [_PREFIX_SUFFIX_RE.sub("", c) for c in columns or [] if isinstance(c, str)]
-	for col in apply_metadata_rule([c for c in names if _IDENT_RE.fullmatch(c)]):
+	valid = [c for c in names if _IDENT_RE.fullmatch(c)]
+	if keep_creation:
+		kept = [c for c in valid if c.lower() not in FRAPPE_METADATA_COLUMNS or c.lower() in TRAILING_METADATA_OK]
+	else:
+		kept = apply_metadata_rule(valid)
+	for col in kept:
 		if col.lower() in seen:
 			continue
 		seen.add(col.lower())
@@ -868,11 +879,21 @@ def table_aliases(query: str) -> dict:
 	return found if isinstance(found, dict) else {}
 
 
+# Words sql_metadata can report as a table alias (a UNION ALL query gives {"WHERE": table}).
+_NOT_ALIASES: frozenset[str] = _WHERE_ENDS | frozenset({
+	"where", "on", "join", "inner", "left", "right", "outer", "cross", "natural", "straight_join", "using",
+	"as", "select", "from", "all", "distinct", "set", "values", "and", "or",
+})
+
+
 def _target_qualifiers(query: str, table: str, aliases: Callable[[str], dict] | None = None) -> frozenset[str]:
 	"""The target table's name and its aliases. ``aliases(query)`` gives the alias map
-	(``table_aliases``, or a per-render memo of it)."""
+	(``table_aliases``, or a per-render memo of it); an SQL keyword is never an alias."""
 	found = (aliases or table_aliases)(query)
-	return frozenset({table} | {alias for alias, real in (found or {}).items() if real == table})
+	return frozenset({table} | {
+		alias for alias, real in (found or {}).items()
+		if real == table and str(alias).lower() not in _NOT_ALIASES
+	})
 
 
 def _union_branches(query: str, qualifiers) -> int:
@@ -894,6 +915,48 @@ def _union_branches(query: str, qualifiers) -> int:
 		1 for branch in branches
 		if any(tok.lower() == "where" for tok in branch) and any(tok.strip('`"').lower() in names for tok in branch)
 	)
+
+
+# Names that are also SQL words: one counts as a column only right before a comparison.
+_SQL_WORDS: frozenset[str] = (
+	_VALUE_WORDS | _GROUPING_WORDS | _OR_WORDS | _AND_WORDS
+	| frozenset({"not", "null", "escape", "collate", "div", "mod", "regexp", "rlike", "sounds"})
+)
+_COMPARED_BY: frozenset[str] = _COMPARISONS | frozenset({"is", "in", "not", "between"}) | _LIKE_WORDS
+
+
+def _where_columns(query: str, qualifiers, columns: Mapping[str, str], *, truncated: bool = False) -> set[str]:
+	"""Lowercase target-table columns the main query's WHERE clause names, read by the
+	token scan: a name chain that is no call, qualified by the target table or one of its
+	aliases or not at all, and a real column of the table; a name that is also an SQL word
+	(DATE, BINARY, ...) only right before a comparison. A ``(SELECT ...)`` group is skipped,
+	and an unscannable clause gives the empty set."""
+	tokens = _where_tokens(query, truncated=truncated)
+	if not tokens:
+		return set()
+	pairs = _bracket_pairs(tokens)
+	out: set[str] = set()
+	i = 0
+	while i < len(tokens):
+		tok = tokens[i]
+		if tok == "(":
+			close = pairs.get(i, len(tokens))
+			inner = tokens[i + 1].lower() if i + 1 < close else ""
+			i = close + 1 if inner in ("select", "with") else i + 1
+			continue
+		if not _NAME_RE.fullmatch(tok):
+			i += 1
+			continue
+		j = _chain_end(tokens, i)
+		after = tokens[j + 1].lower() if j + 1 < len(tokens) else ""
+		qualifier, name = _ref_key(tokens, i, j)
+		if (
+			after != "(" and name in columns and (qualifiers is None or not qualifier or qualifier in qualifiers)
+			and (name not in _SQL_WORDS or after in _COMPARED_BY)
+		):
+			out.add(name)
+		i = j + 1
+	return out
 
 
 def _index_order(
@@ -1012,6 +1075,7 @@ def _sort_problem(query: str, ftype: str, qualifiers, evidence: TableEvidence | 
 	- ``"differs"``: GROUP BY and ORDER BY name different columns;
 	- ``"distinct"``: a Temporary Table query with no GROUP BY whose SELECT is DISTINCT;
 	- ``"none"``: no such clause at all;
+	- ``"other_table"``: an item is a column of another table of the query;
 	- ``"expression"``: anything else (a function, FIELD(), CASE, arithmetic or a parameter
 	  around an item, a select alias, a text column, mixed directions), or no evidence."""
 	if evidence is None:
@@ -1038,11 +1102,10 @@ def _sort_problem(query: str, ftype: str, qualifiers, evidence: TableEvidence | 
 		if rest not in ([], ["asc"], ["desc"]):
 			return "expression"
 		qualifier, name = _ref_key(item, 0, j)
+		if qualifier and qualifiers is not None and qualifier not in qualifiers:
+			return "other_table"
 		col = columns.get(name)
-		if (
-			(qualifier and qualifiers is not None and qualifier not in qualifiers) or col is None
-			or name in aliases or col in evidence.text_columns or _unindexable(evidence, col)
-		):
+		if col is None or name in aliases or col in evidence.text_columns or _unindexable(evidence, col):
 			return "expression"
 		names.append(name)
 		directions.add(rest[0] if rest else "asc")
@@ -1133,7 +1196,7 @@ def _shape_no_code_reason(shapes: Mapping[str, set[str]], checks: list[str]) -> 
 	return " ".join(parts), False
 
 
-def _existing_tail(query: str, shapes: Mapping[str, set[str]]) -> str:
+def _existing_tail(query: str, shapes: Mapping[str, set[str]], columns: int = 1) -> str:
 	"""What to check when the index exists already (U4). It names only the filter shapes
 	the scan found on the query's other columns, never a list of shapes the query may not
 	have; a filter with none looks index-friendly. A table card or a Missing Index finding
@@ -1150,7 +1213,8 @@ def _existing_tail(query: str, shapes: Mapping[str, set[str]]) -> str:
 		return f"Optimus could not read how the query filters on {', '.join(unsure)}, so {check}."
 	if query:
 		return f"The query's filter looks index-friendly, so {check}."
-	return "Check the slow queries on this column with EXPLAIN to see which index they use and how many rows they read."
+	which = "this column" if columns == 1 else "these columns"
+	return f"Check the slow queries on {which} with EXPLAIN to see which index they use and how many rows they read."
 
 
 def _explain_index_names(explain_row) -> list[tuple[str, bool]]:
@@ -1210,38 +1274,95 @@ def _column_problem(evidence: TableEvidence, cols: list[str]) -> str | None:
 	return None
 
 
+def _unique_alone(evidence: TableEvidence, col: str) -> bool:
+	"""True when ``col`` is unique on its own: a Unique field or a one-column unique index
+	(a composite unique index it leads is only an index it leads, C6)."""
+	field = evidence.fields.get(col)
+	return (field is not None and field.unique) or any(ix.unique and ix.columns == (col,) for ix in evidence.indexes)
+
+
+def _serves(index_columns: tuple[str, ...], equality: tuple[str, ...], rest: tuple[str, ...]) -> bool:
+	"""True when an index on ``index_columns`` serves a recipe of ``equality`` columns (any
+	order: an equality filter uses a leading column set the same way in every order)
+	followed by ``rest`` (the range or sort columns, which must follow in order)."""
+	k = len(equality)
+	return set(index_columns[:k]) == set(equality) and tuple(index_columns[k : k + len(rest)]) == tuple(rest)
+
+
 def _existing_index_problem(
-	evidence: TableEvidence, cols: list[str], explain_row, query: str, shapes: Mapping[str, set[str]],
+	evidence: TableEvidence,
+	cols: list[str],
+	equality: set[str],
+	explain_row,
+	query: str,
+	shapes: Mapping[str, set[str]],
 ) -> str | None:
-	"""NO_CODE when the FINAL recipe (``cols``, bare names) exists already (C1). A recipe of
-	several columns is refused only when an existing index already starts with all of them:
-	its first column leading an index of its own, or one EXPLAIN names, says nothing about
-	the composite, so the verdict never depends on the order of the query's predicates. A
-	single-column recipe is refused when that column is unique on its own (a Unique field or
-	a one-column unique index; a composite unique index it leads is just an index it leads,
-	C6), leads an existing index under any name, or leads an index EXPLAIN names. Search
-	Index is never proof (C2): on Postgres a Search Index is named after the bare field and
-	index names are schema-wide, so only the first table with that field name gets one; the
-	table's real index list decides. creation and modified never stand alone in a recipe
+	"""NO_CODE when the FINAL recipe (``cols``, bare names; ``equality`` names its columns
+	compared by =, IN or IS NULL, every column of a table card) exists already or cannot
+	help. A recipe of several columns is refused only for the recipe as a whole (C1): its
+	first column leading an index of its own, or the one EXPLAIN names, says nothing about
+	the composite. It is refused when
+
+	- an equality column is unique on its own: the database finds its rows through that
+	  index (a range or sort column stays exempt: ``ORDER BY username`` needs the composite);
+	- an existing index serves it: it starts with the equality columns in any order, then
+	  the range or sort columns in order, so ``(posting_date, company)`` serves
+	  ``company = ? AND posting_date = ?`` (the equality block is put in one order by
+	  ``_canonical``, so the verdict, the columns and the index name never depend on the
+	  order of the query's predicates);
+	- the only columns beyond an existing index's equality prefix are Check fields, which
+	  match too many rows for an index to narrow (the advisor's own Check rule).
+
+	A single-column recipe is refused when its column is unique on its own, leads an
+	existing index under any name, or leads an index EXPLAIN names. Search Index is never
+	proof (C2): on Postgres a Search Index is named after the bare field and index names are
+	schema-wide, so only the first table with that field name gets one; the table's real
+	index list decides. creation and modified never stand alone in a recipe
 	(``apply_metadata_rule``), so Frappe's own creation index never refuses one (D5)."""
 	whole = tuple(cols)
-	tail = _existing_tail(query, shapes)
+	tail = _existing_tail(query, shapes, len(whole))
+	table = evidence.table
 	if len(whole) > 1:
-		covering = next((ix for ix in evidence.indexes if ix.columns[: len(whole)] == whole), None)
-		if covering is None:
-			return None
-		return (
-			f'The index "{covering.name}" on table "{evidence.table}" already starts with {_cols_text(whole)}, '
-			f"so this index exists already and a new one would not help. {tail}"
-		)
+		k = 0
+		while k < len(whole) and whole[k] in equality:
+			k += 1
+		eq, rest = whole[:k], whole[k:]
+		unique = next((col for col in eq if _unique_alone(evidence, col)), None)
+		if unique is not None:
+			return (
+				f'Column "{unique}" is already unique, so the database finds the rows through its index and a '
+				f"new index would not help. {tail}"
+			)
+		covering = next((ix for ix in evidence.indexes if _serves(ix.columns, eq, rest)), None)
+		if covering is not None:
+			starts = tuple(covering.columns[: len(whole)])
+			same = "" if starts == whole else " (the same equality columns in another order)"
+			return (
+				f'The index "{covering.name}" on table "{table}" already starts with {_cols_text(starts)}{same}, '
+				f"so this index exists already and a new one would not help. {tail}"
+			)
+		plain = [col for col in eq if not _is_check_field(evidence, col)]
+		checks = [col for col in eq if _is_check_field(evidence, col)]
+		if plain and checks and not rest:
+			prefix = next((ix for ix in evidence.indexes if set(ix.columns[: len(plain)]) == set(plain)), None)
+			if prefix is not None:
+				what = (
+					f"{checks[0]} is a Check field, which matches" if len(checks) == 1
+					else f"{', '.join(checks)} are Check fields, which match"
+				)
+				return (
+					f'The index "{prefix.name}" on table "{table}" already starts with '
+					f"{_cols_text(prefix.columns[: len(plain)])}, and {what} too many rows for an index to narrow, "
+					f"so a new index would not help. {tail}"
+				)
+		return None
 	col = whole[0]
-	field = evidence.fields.get(col)
-	if (field is not None and field.unique) or any(ix.unique and ix.columns == (col,) for ix in evidence.indexes):
+	if _unique_alone(evidence, col):
 		return f'Column "{col}" is already unique, so the database already has an index on it. {tail}'
 	led = next((ix for ix in evidence.indexes if ix.columns[:1] == (col,)), None)
 	if led is not None:
 		return (
-			f'Column "{col}" already leads the index "{led.name}" on table "{evidence.table}", so a new '
+			f'Column "{col}" already leads the index "{led.name}" on table "{table}", so a new '
 			f"index would not help. {tail}"
 		)
 	for name, used in _explain_index_names(explain_row):
@@ -1521,12 +1642,14 @@ def _advise(
 		col: set(kinds) for col, kinds in (unusable or {}).items()
 		if isinstance(col, str) and _IDENT_RE.fullmatch(col) and col.lower() not in FRAPPE_METADATA_COLUMNS
 	}
-	cols = _clean_columns([c for c in columns or [] if c not in (unusable or {})], cap=False)
+	cols = _clean_columns([c for c in columns or [] if c not in (unusable or {})], cap=False, keep_creation=True)
 	order_dropped: list[tuple[str, str]] = []
 	if comparisons:
 		cols, order_dropped = _index_order(cols, comparisons, serves=serves)
-		cols = apply_metadata_rule(cols)  # creation / modified never lead after reordering either
-	cols = cols[:MAX_INDEX_COLUMNS]
+	k = _equality_count(cols, comparisons)
+	equality = set(cols[:k])
+	# creation / modified never lead, after the reordering either
+	cols = apply_metadata_rule(_canonical(cols, k, evidence))[:MAX_INDEX_COLUMNS]
 	if not cols and not shapes:
 		return None
 	if evidence is None:
@@ -1543,16 +1666,61 @@ def _advise(
 	if problem:
 		return _no_code(doctype, cols, problem)
 	# the existing-index checks look at the FINAL recipe, after columns were left out (C1)
-	problem = _existing_index_problem(evidence, [c.split("(", 1)[0] for c in final], explain_row, query, shapes)
+	problem = _existing_index_problem(
+		evidence, [c.split("(", 1)[0] for c in final], equality, explain_row, query, shapes,
+	)
 	if problem:
 		return _no_code(doctype, cols, problem)
 	shape_dropped = [(col, _shape_why(kinds)) for col, kinds in shapes.items()]
 	return _route(doctype, final, shape_dropped + order_dropped + dropped, evidence, tuple(tracked_apps or ()))
 
 
-def _is_check_field(evidence: TableEvidence, col: str) -> bool:
-	field = evidence.fields.get(col)
+def _is_check_field(evidence: TableEvidence | None, col: str) -> bool:
+	field = evidence.fields.get(col) if evidence is not None else None
 	return field is not None and field.fieldtype == "Check"
+
+
+def _equality_count(cols: list[str], comparisons: Mapping[str, str] | None) -> int:
+	"""How many leading columns of ``cols`` (in ``_index_order``'s order) form the equality
+	block: compared by =, IN or IS NULL. A table card has no query, so every column does."""
+	if not comparisons:
+		return len(cols)
+	k = 0
+	while k < len(cols) and comparisons.get(cols[k], "eq") in ("eq", "in"):
+		k += 1
+	return k
+
+
+def _cannot_lead(evidence: TableEvidence | None, col: str) -> bool:
+	"""True for a column ``_index_columns`` refuses as the first column: a type no plain
+	index covers, a text column on Postgres, or one wider alone than the key limit."""
+	if evidence is None:
+		return False
+	if _unindexable(evidence, col):
+		return True
+	postgres = evidence.dialect == "postgres"
+	if col in evidence.text_columns:
+		if postgres:
+			return True
+		col = f"{col}({TEXT_INDEX_PREFIX})"
+	limit = POSTGRES_MAX_INDEX_ROW_BYTES if postgres else MARIADB_MAX_KEY_BYTES
+	return _key_bytes(evidence, [col]) > limit
+
+
+def _canonical(cols: list[str], k: int, evidence: TableEvidence | None) -> list[str]:
+	"""``cols`` with its equality block (the first ``k`` columns) in one fixed order, so the
+	same filter written in any predicate order gives one recipe and one index name (an
+	equality filter uses a leading column set the same way in every order). The order:
+	business columns, then Check fields (they never lead a useful index), then creation and
+	modified (which never lead, ``apply_metadata_rule``), then columns that cannot lead an
+	index (``_cannot_lead``: ``_index_columns`` leaves them out when another column leads,
+	so their name never decides between no code and a recipe), each group by name. The
+	range or sort columns after the block keep their order."""
+
+	def key(col: str) -> tuple:
+		return (_cannot_lead(evidence, col), col.lower() in TRAILING_METADATA_OK, _is_check_field(evidence, col), col.lower())
+
+	return sorted(cols[:k], key=key) + cols[k:]
 
 
 def _sort_cause(ftype: str, problem: str) -> str:
@@ -1568,6 +1736,20 @@ def _sort_cause(ftype: str, problem: str) -> str:
 		) + f", so {stays}."
 	if problem == "distinct":
 		return "The temporary table comes from the query's DISTINCT, which this index does not cover, so it stays."
+	if problem == "other_table":
+		return (
+			"The query sorts by a column of another table, which an index on this table cannot return in order, "
+			"so the sort stays." if filesort
+			else "The query groups by a column of another table, which an index on this table cannot cover, so "
+			"the temporary table stays."
+		)
+	if problem == "none":
+		return (
+			"The query has no ORDER BY on this table, so the sort comes from elsewhere in the query (a GROUP BY, "
+			"a join or a derived table) and may stay." if filesort
+			else "The query has no GROUP BY or DISTINCT on this table, so the temporary table comes from elsewhere "
+			"in the query (a join, a sort on another table, a UNION or a derived table) and may stay."
+		)
 	return (
 		f"The query {does} by an expression, a select alias, a text column or in mixed directions, which no "
 		f"index can return in order, so {stays}."
@@ -1623,7 +1805,7 @@ def _lead_for(
 		if sort_label not in labels:
 			# the sort or group column is not in the index: name why (C7)
 			column = "sort" if ftype == "Filesort" else "grouping"
-			if sort_problem in ("aggregate", "distinct"):
+			if sort_problem in ("aggregate", "distinct", "other_table", "none"):
 				return expression
 			if any(label == sort_label and col.lower() in FRAPPE_METADATA_COLUMNS for label, col in labelled):
 				return (
@@ -1672,13 +1854,32 @@ def advise_finding(
 		# top_queries keeps QUERY_TEXT_LIMIT characters, so a Slow Query that long may be cut
 		truncated = ftype == "Slow Query" and len(query) >= QUERY_TEXT_LIMIT
 		qualifiers = _target_qualifiers(query, table, getattr(parser, "aliases", None))
-		if evidence is not None and labelled and _union_branches(query, qualifiers) > 1:
+		if evidence is not None and _union_branches(query, qualifiers) > 1:
 			# one branch's filter is not the query's: never advise from one branch (E7)
 			return _no_code(doctype, _clean_columns([col for _label, col in labelled]), (
 				f'Optimus could not read how this query filters: it is a UNION that filters "tab{doctype}" in '
 				"more than one branch, and one index may not serve them all. So it gives no index code. Check "
 				"each branch with EXPLAIN."
 			), unknown=True)
+		if evidence is not None:
+			# sql_metadata leaves out a bare column named like an SQL word (account, user, type,
+			# date, ...) and every unqualified column of a query on several tables: advice
+			# without it would be partial, and an index on the rest could look like it exists
+			# already, so say Optimus could not read it
+			parsed = {col.lower() for label, col in labelled if label in ("WHERE", "JOIN")}
+			names = {col.lower(): col for col in evidence.column_types}
+			dropped = sorted(
+				names[name] for name in _where_columns(query, qualifiers, names, truncated=truncated)
+				if name not in parsed and name not in FRAPPE_METADATA_COLUMNS
+			)
+			if dropped:
+				return _no_code(doctype, _clean_columns([col for _label, col in labelled] + dropped), (
+					f"Optimus could not read the filter on {', '.join(dropped)}: the SQL parser it uses did not "
+					"report those columns (it leaves out some unquoted names such as account, user, type and "
+					"date, and an unqualified column of a query on several tables), so advice built without them "
+					"would be partial. So it gives no index code. Check the query with EXPLAIN to see which index "
+					"it needs."
+				), unknown=True)
 		unusable, usable = _scan_where(query, labelled, qualifiers, truncated=truncated)
 		comparisons = {}
 		for label, col in labelled:  # filters come first, then the sort or group columns
