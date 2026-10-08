@@ -97,6 +97,71 @@ class TestMeasuredGate:
 		assert note.startswith("Most of this line's time is spent inside a function it calls,")
 
 
+class TestStatementShapes:
+	"""Carried from the Task 4 review: the statement parser on continuation lines,
+	decorators, ``raise ... from ...`` and gettext's ``_``."""
+
+	@pytest.mark.parametrize("line,calls,callee", [
+		# a continuation line that starts by closing the previous line's brackets
+		("\t) + foo(x)", True, "foo"),
+		("\t\t]) + get_rows(a)", True, "get_rows"),
+		("\t\t}] - discount(d)", True, "discount"),
+		# a fragment that stays unparseable still counts as calling, unnamed
+		("\t\t}, as_dict=compute_flag(d))", True, None),
+		("\t\t)", False, None),
+		# a decorator line is parsed without its @
+		("@decorator(arg)", True, "decorator"),
+		("\t@frappe.whitelist()", True, "frappe.whitelist"),
+		("@property", False, None),
+		# raise: only the raised exception's constructor is skipped, never its cause
+		("raise Foo(x) from bar(y)", True, "bar"),
+		("raise Foo from bar(y)", True, "bar"),
+		("raise Foo(get_message(d)) from err", True, "get_message"),
+		("raise Foo(x) from err", False, None),
+		# gettext's _ is a translation lookup, never the callee that holds the time
+		("raise frappe.ValidationError(_('Bad row'))", False, None),
+		("msg = _('Row {0} is invalid')", False, None),
+		("msg = _(build_message(d))", True, "build_message"),
+		("frappe.throw(_('Bad row'))", True, "frappe.throw"),
+		("_ = foo()", True, "foo"),
+	])
+	def test_statement_calls(self, line, calls, callee):
+		assert tuple(g.statement_calls(line)) == (calls, callee)
+
+	@pytest.mark.parametrize("per_hit_us", [float("nan"), "abc", None, "", [], {}])
+	def test_an_unmeasured_per_hit_time_never_gates(self, per_hit_us):
+		assert g.hot_line_gate(_hot_line("\t\tx = foo(1)", per_hit_us=per_hit_us)) is None
+
+	def test_a_numeric_string_per_hit_time_is_measured(self):
+		assert "inside foo," in g.hot_line_gate(_hot_line("\t\tx = foo(1)", per_hit_us="5000"))
+
+	@pytest.mark.parametrize("callee,tracked,phase2_offered", [
+		# Tracked Apps unset: Phase 1 only names user-code descendants, so any app is yours
+		("otherapp.utils.get_rate", (), True),
+		("myapp.utils.get_rate", (), True),
+		# Tracked Apps set: only a tracked app is yours, any other app is not the developer's
+		("otherapp.utils.get_rate", ("myapp",), False),
+		("myapp.utils.get_rate", ("myapp",), True),
+		# framework and stdlib are never yours, either way
+		("erpnext.stock.utils.get_bin", (), False),
+		("erpnext.stock.utils.get_bin", ("myapp",), False),
+		("json.loads", ("myapp",), False),
+	])
+	def test_phase1_callee_scope_follows_tracked_apps(self, callee, tracked, phase2_offered):
+		note = g.hot_line_gate(
+			_hot_line("x = get_rate(d)", phase1_hint={"next_hot_callee": callee}), tracked_apps=tracked,
+		)
+		assert f"inside {callee}," in note
+		assert ("Re-run Phase 2 with " + callee + " picked" in note) is phase2_offered
+		assert ("is standard library, framework or third-party code" in note) is not phase2_offered
+
+	def test_a_phase1_method_on_self_stays_conditional_with_tracked_apps(self):
+		note = g.hot_line_gate(
+			_hot_line("self.set_rate(d)", phase1_hint={"next_hot_callee": "self.set_rate"}), tracked_apps=("myapp",),
+		)
+		assert "If self.set_rate is defined in your app, re-run Phase 2 with it picked" in note
+
+
 class TestCalleeAdvice:
 	def test_a_stdlib_callee_is_never_sent_to_phase_2(self):
 		"""P13: the Phase 2 picker cannot pick json.loads."""

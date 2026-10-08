@@ -532,6 +532,9 @@ UNSTAMPED_REDUNDANT_CALL_NOTE = (
 
 _BUILTIN_NAMES: frozenset[str] = frozenset(dir(builtins))
 _WRAP = "_optimus_wrap_"
+# gettext's ``_`` (Frappe's translate), installed into builtins by gettext.install: a
+# translation lookup, never the callee that holds a line's time.
+_GETTEXT = "_"
 _NO_CALL_HEADER_RE = re.compile(r"^(?:(?:else|finally|try)\s*:|except\b|case\b)")
 _OPENERS = {"(": ")", "[": "]", "{": "}"}
 _OWN_RECEIVERS = frozenset({"self", "cls", "super"})
@@ -628,20 +631,21 @@ class StatementCalls(NamedTuple):
 
 def statement_calls(line: str) -> StatementCalls:
 	"""Whether the statement on ``line`` calls something other than a Python builtin, and
-	the first such callee, outermost first. A ``raise X(...)`` constructor is skipped, so
-	``raise X(foo())`` names ``foo``. A fragment Python cannot parse counts as calling,
-	with no name, when it holds a parenthesis."""
+	the first such callee, outermost first. A ``raise X(...)`` constructor is skipped (only
+	the raised exception, never its ``from`` cause), so ``raise X(foo())`` names ``foo``
+	and ``raise X(a) from bar(y)`` names ``bar``; gettext's ``_`` is skipped like a
+	builtin. A fragment Python cannot parse counts as calling, with no name, when it
+	holds a parenthesis."""
 	tree = _parse_statement(line)
 	if tree is None:
 		return StatementCalls("(" in _strip_comment(line), None)
-	skip = set()
-	for node in ast.walk(tree):
-		if isinstance(node, ast.Raise):
-			skip |= {id(part) for part in (node.exc, node.cause) if isinstance(part, ast.Call)}
+	skip = {
+		id(node.exc) for node in ast.walk(tree) if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+	}
 	for node in ast.walk(tree):
 		if not isinstance(node, ast.Call) or id(node) in skip:
 			continue
-		if isinstance(node.func, ast.Name) and (node.func.id in _BUILTIN_NAMES or node.func.id == _WRAP):
+		if isinstance(node.func, ast.Name) and (node.func.id in _BUILTIN_NAMES or node.func.id in (_WRAP, _GETTEXT)):
 			continue
 		name = call_name(node.func)
 		return StatementCalls(True, name if name and _SAFE_NAME_RE.match(name) else None)

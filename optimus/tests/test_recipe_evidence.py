@@ -160,6 +160,29 @@ def test_a_job_timeout_escapes_fresh(site, monkeypatch):
 	assert caught.value is not original and caught.value.__context__ is None
 
 
+def test_a_job_timeout_inside_get_meta_restores_the_mute_flag(site, monkeypatch):
+	"""Task 1 Minor: the deadline escapes fresh, and the caller's mute flag and message
+	log are exactly as they were."""
+	import frappe
+
+	original = _JobTimeout("deadline")
+
+	def interrupted(doctype, *args, **kwargs):
+		site.meta_calls.append((doctype, site.flags.mute_messages))
+		site.local.message_log.append({"message": "half-written"})
+		raise original
+
+	site.flags.mute_messages = "caller value"
+	monkeypatch.setattr(safe_call, "job_timeout_types", lambda: (_JobTimeout,))
+	monkeypatch.setattr(frappe, "get_meta", interrupted, raising=False)
+	with pytest.raises(_JobTimeout) as caught:
+		enrich.make_evidence_lookup()("tabSales Invoice")
+	assert caught.value is not original and caught.value.__context__ is None
+	assert site.meta_calls == [("Sales Invoice", True)]
+	assert site.flags.mute_messages == "caller value"
+	assert site.local.message_log == [{"message": "earlier"}]
+
+
 @pytest.mark.parametrize("dialect,data_type,text", [
 	(MariaDBDialect(), "text", True),
 	(MariaDBDialect(), "longtext", True),
