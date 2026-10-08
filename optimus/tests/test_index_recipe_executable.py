@@ -48,7 +48,7 @@ class _Site:
 	def __init__(
 		self, *, tables=("Sales Invoice",), columns=None, indexes=None, property_setters=(), fail_on=(),
 		db_type="mariadb", setter_error=False, invalid_other_fields=False, log_error_fails=False,
-		rollback_fails=0, sql_fails=None, lock_wait=86400, in_migrate=True,
+		rollback_fails=0, sql_fails=None, lock_wait=86400, in_migrate=True, build_error=RuntimeError,
 	):
 		self.tables = set(tables)
 		self.columns = {
@@ -59,6 +59,7 @@ class _Site:
 		self.indexes = {key: (tuple(cols), False) for key, cols in (indexes or {}).items()}
 		self.property_setters = set(property_setters)  # (doc_type, field_name, property, value)
 		self.fail_on = set(fail_on)
+		self.build_error = build_error
 		self.db_type = db_type
 		self.setter_error = setter_error
 		self.invalid_other_fields = invalid_other_fields
@@ -170,7 +171,7 @@ class _Site:
 		self._end(commit=True)  # Frappe commits before the DDL
 		self._stmt("add_index")
 		if index_name in self.fail_on:
-			self._fail(RuntimeError("(1071, 'Specified key was too long; max key length is 3072 bytes')"))
+			self._fail(self.build_error("(1071, 'Specified key was too long; max key length is 3072 bytes')"))
 		self.calls.append(("add_index", doctype, list(fields), index_name))
 		self.ddl_lock.append((index_name, self._lock_in_force()))
 		self.indexes.setdefault((table, index_name), (tuple(f.split("(", 1)[0] for f in fields), False))
@@ -295,7 +296,7 @@ def _syncs(site):
 
 
 def _title(key, what, doctype="Sales Invoice"):
-	return f"ensure_indexes: {key} on {doctype} {what}"
+	return f"ensure_indexes: {key} {what} on {doctype}"
 
 
 def test_a_composite_is_created_once_under_its_short_name(monkeypatch):
@@ -533,7 +534,7 @@ def test_an_entry_for_another_database_is_skipped_and_logged_once(monkeypatch, e
 	assert _run([entry], site, monkeypatch, times=2) == []
 	assert not _setters(site) and not _syncs(site)
 	key = entry.get("index_name") or entry.get("search_index_field")
-	title = _title(key, f"skipped on {site_db}, the entry is for {entry['db']}")
+	title = _title(key, f"skipped on {site_db} (the entry is for {entry['db']})")
 	assert site.errors == [title]
 	assert site.error_rows[title]["reference_doctype"] == "DocType"
 	assert site.error_rows[title]["reference_name"] == "Sales Invoice"
@@ -544,14 +545,15 @@ def test_the_skip_note_is_looked_up_by_indexed_columns(monkeypatch):
 	reference_doctype and reference_name; v15 indexes the first, v16 the second."""
 	site = _Site(db_type="postgres")
 	_run([_PO_NO], site, monkeypatch, times=2)
-	title = _title("po_no", "skipped on postgres, the entry is for mariadb")
+	title = _title("po_no", "skipped on postgres (the entry is for mariadb)")
 	expected = {"reference_doctype": "DocType", "reference_name": "Sales Invoice", "method": title}
 	assert site.error_log_filters == [expected, expected]
 
 
 def test_frappe_indexes_a_reference_column_of_error_log():
-	"""PF4: the lookup's reference filter reads an index on this Frappe (v16 indexes
-	reference_name, v15 reference_doctype)."""
+	"""PF4: on MariaDB the lookup's reference filter reads an index on this Frappe (v16
+	indexes reference_name, v15 reference_doctype). On Postgres the Search Index is named
+	after the bare field, schema-wide, so Error Log may not get it (docs say so)."""
 	frappe = pytest.importorskip("frappe")
 	path = Path(getattr(frappe, "__file__", "") or ".").parent / "core" / "doctype" / "error_log" / "error_log.json"
 	if not path.is_file():
@@ -577,15 +579,16 @@ def test_an_entry_for_this_database_runs(monkeypatch):
 def test_the_error_log_title_starts_with_the_index_and_names_the_error(monkeypatch):
 	site = _Site(fail_on={_SI_NAME})
 	_run([{"doctype": "Sales Invoice", "columns": ["customer", "status"], "index_name": _SI_NAME}], site, monkeypatch)
-	title = f"ensure_indexes: {_SI_NAME} on Sales Invoice was not created (RuntimeError)"
+	title = f"ensure_indexes: {_SI_NAME} was not created (RuntimeError) on Sales Invoice"
 	assert site.errors == [title]
 	assert site.error_rows[title]["reference_doctype"] == "DocType"
 	assert site.error_rows[title]["reference_name"] == "Sales Invoice"
 
 
-def test_a_long_doctype_name_keeps_the_index_name_in_its_error_log_title(monkeypatch):
+def test_a_long_doctype_name_keeps_the_index_name_and_the_error_type_in_its_title(monkeypatch):
 	"""Error Log.method is Data(140) on v15: the title is cut to 140 characters from the
-	end, so the index name, which comes first, always survives."""
+	end. The index name grows with the DocType's slug, so the key and the error type come
+	first and only the DocType (also in reference_name) can be cut."""
 	doctype = "Purchase Taxes and Charges Template Detail Override For Regio"
 	assert len(doctype) == 61
 	name = ir.optimus_index_name(doctype, ("customer", "status"))
@@ -594,7 +597,31 @@ def test_a_long_doctype_name_keeps_the_index_name_in_its_error_log_title(monkeyp
 	title = _title(name, "was not created (RuntimeError)", doctype)
 	assert len(title) > 140
 	assert site.errors == [title[:140]]
-	assert site.errors[0].startswith(f"ensure_indexes: {name} on ")
+	assert site.errors[0].startswith(f"ensure_indexes: {name} was not created (RuntimeError) on ")
+
+
+class CharacterLengthExceededError(Exception):
+	"""A long Frappe error class name, for the worst-case title."""
+
+
+def test_the_longest_key_and_a_long_error_type_both_survive_the_cut(monkeypatch):
+	"""The worst case: a 64-character field (MariaDB's column limit) on a 61-character
+	DocType, failing with a long error class name, and the same entry skipped on Postgres."""
+	doctype = "Purchase Taxes and Charges Template Detail Override For Regio"
+	field = "f" * 64
+	entry = {"doctype": doctype, "search_index_field": field, "db": "mariadb"}
+	site = _Site(
+		tables=(doctype,), columns={doctype: (field,)}, fail_on={f"{field}_index"},
+		build_error=CharacterLengthExceededError,
+	)
+	_run([entry], site, monkeypatch)
+	[title] = site.errors
+	assert len(title) <= 140
+	assert title.startswith(f"ensure_indexes: {field} was not created (CharacterLengthExceededError)")
+	site = _Site(db_type="postgres", tables=(doctype,), columns={doctype: (field,)})
+	_run([entry], site, monkeypatch)
+	[title] = site.errors
+	assert title.startswith(f"ensure_indexes: {field} skipped on postgres (the entry is for mariadb)")
 
 
 def test_a_failing_error_log_never_stops_the_next_entry(monkeypatch):

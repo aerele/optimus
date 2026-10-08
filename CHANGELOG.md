@@ -40,9 +40,11 @@ versions may contain breaking changes see migration notes below).
   index Frappe had named `<field>` re-ran the sync on every migrate. A failed entry rolls back,
   writes its Error Log row and commits it, then rolls back again, each step on its own, so a
   failed log write never leaves a Postgres transaction aborted for the next `after_migrate`
-  hook. The row's title starts with the index (or field) name, then the DocType and the error
-  type, so the 140-character cut keeps the name. The once-only "skipped on this database" row is looked
-  up by Error Log's indexed reference columns, not by a scan of the unindexed title. Index
+  hook. The row's title starts with the index (or field) name and the error type and ends
+  with the DocType, so the 140-character cut can shorten only the DocType. The once-only
+  "skipped on this database" row is looked up by Error Log's reference columns, which MariaDB
+  indexes, not by a scan of the unindexed title; on Postgres Frappe's Search Index names are
+  schema-wide, so Error Log may have no such index and the lookup can scan it. Index
   builds wait at most 300 seconds for a table lock (an install has no cap), and the old
   setting comes back afterwards. An entry without a `db` stamp carries the Postgres caveat
   too.

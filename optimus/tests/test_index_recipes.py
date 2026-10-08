@@ -1389,3 +1389,18 @@ def test_the_docs_say_how_to_remove_an_entry_and_that_the_guards_are_silent():
 	doc = (Path(ir.__file__).resolve().parents[2] / "docs" / "AI-FIXING.md").read_text(encoding="utf-8")
 	assert '"Sales Invoice-po_no-search_index"' in doc and "bench remove-app" in doc
 	assert "skips it without an Error Log row" in doc
+
+
+def test_the_docs_show_the_title_order_and_limit_the_indexed_lookup_to_mariadb():
+	"""T11 fix round 1: the title example has the key and the error type before the
+	DocType; the "never reads the whole Error Log" claim is MariaDB's, because Postgres
+	names a Search Index after the bare field, schema-wide."""
+	from pathlib import Path
+
+	root = Path(ir.__file__).resolve().parents[2]
+	doc = " ".join((root / "docs" / "AI-FIXING.md").read_text(encoding="utf-8").split())
+	log = " ".join((root / "CHANGELOG.md").read_text(encoding="utf-8").split())
+	assert "`ensure_indexes: idx_sales_invoice_04c198b9 was not created (OperationalError) on Sales Invoice`" in doc
+	assert "so on MariaDB it never reads the whole Error Log table on every migrate" in doc
+	assert "Frappe names a Search Index after the bare field name and index names are schema-wide" in doc
+	assert "which MariaDB indexes" in log and "schema-wide" in log

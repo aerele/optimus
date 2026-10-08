@@ -40,8 +40,11 @@ finds only an index whose one column is the field (mariadb/database.py:383-411),
 check Frappe's own sync makes before it adds ``<field>_index`` (mariadb/schema.py:88-92);
 ``add_index`` writes no Property Setter during install or migrate (mariadb/database.py:428)
 and commits before its DDL, on Postgres too (database.py:451-457); only v16 migrate caps
-``lock_wait_timeout`` (migrate.py:214-221) and install never does; and Error Log indexes
-``reference_name`` on v16 and ``reference_doctype`` on v15, never ``method``.
+``lock_wait_timeout`` (migrate.py:214-221) and install never does; and on MariaDB Error Log
+indexes ``reference_name`` on v16 and ``reference_doctype`` on v15, never ``method``. On
+Postgres a Search Index is named after the bare field and index names are schema-wide
+(postgres/schema.py:124 on v16, :115 on v15), so Error Log gets that index only when no other
+table took the name first.
 """
 
 from __future__ import annotations
@@ -221,15 +224,18 @@ def _rollback():
 
 
 def _title(entry, what):
+	# the key and what happened first: a cut to 140 characters (Error Log.method) can only
+	# shorten the DocType, which reference_name also holds
 	key = entry.get("index_name") or entry.get("search_index_field")
-	return f"ensure_indexes: {key} on {entry['doctype']} {what}"[:140]
+	return f"ensure_indexes: {key} {what} on {entry['doctype']}"[:140]
 
 
 def _ensure_index(entry):
 	doctype = entry["doctype"]
 	if entry.get("db", frappe.db.db_type) != frappe.db.db_type:
-		title = _title(entry, f"skipped on {frappe.db.db_type}, the entry is for {entry['db']}")
-		# one row per entry: the reference columns are indexed, the title (method) is not
+		title = _title(entry, f"skipped on {frappe.db.db_type} (the entry is for {entry['db']})")
+		# one row per entry, looked up by the reference columns: MariaDB indexes one of them,
+		# never the title (method); on Postgres Frappe may not have indexed either
 		reference = {"reference_doctype": "DocType", "reference_name": doctype}
 		if not frappe.db.exists("Error Log", {**reference, "method": title}):
 			frappe.log_error(title=title, **reference)
