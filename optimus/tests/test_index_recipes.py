@@ -297,19 +297,23 @@ class TestNoCode:
 		assert 'Optimus could not read DocType "Sales Invoice"' in ir.finding_text(advice)
 
 	def test_link_search_with_or_and_like_names_the_shapes(self):
+		"""Fix round 2: the real link-search shape. Every column but disabled sits inside an
+		OR group and is compared by LIKE ?, which no composite index can use; disabled is a
+		Check field, so an index would not help."""
 		ev = _ev("Item", fields={
 			"disabled": F("Check"), "item_name": F("Data", search_index=True), "description": F("Text Editor"),
 			"item_group": F("Link"), "customer_code": F("Small Text"),
 		})
 		q = (
-			"select `tabItem`.`name` from `tabItem` where (`tabItem`.`item_name` like ? "
+			"select `tabItem`.`name` from `tabItem` where `tabItem`.`disabled` = ? and (`tabItem`.`item_name` like ? "
 			"or `tabItem`.`description` like ? or `tabItem`.`item_group` like ? or `tabItem`.`customer_code` like ?) "
-			"and `tabItem`.`disabled` = ? order by `tabItem`.`idx` desc limit ?"
+			"order by `tabItem`.`idx` desc limit ?"
 		)
 		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabItem"), evidence_lookup=_lookup(ev))
 		text = ir.finding_text(advice)
-		assert advice.route == ir.ROUTE_NO_CODE and "item_name" in text
+		assert advice.route == ir.ROUTE_NO_CODE and advice.code is None and "item_name" in text
 		assert "a LIKE on item_name" in text and "an OR between conditions" in text
+		assert "disabled is a Check field" in text and "an index would not help" in text
 
 	def test_ifnull_around_an_indexed_column_names_the_function(self):
 		ev = _ev(fields={**_ALL, "status": F("Select", search_index=True)})
@@ -357,17 +361,79 @@ class TestNoCode:
 		)
 
 
+class TestPredicateShape:
+	"""Fix round 2: a column compared only inside an OR group, or only by a LIKE whose
+	pattern may start with a wildcard (a normalized LIKE ? hides it), cannot be used by a
+	composite index, so it is left out and named."""
+
+	def test_an_or_group_keeps_only_the_and_columns(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND (status = ? OR docstatus = ?)"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI))
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.columns == ("company",)
+		assert "Optimus left out status (compared only inside an OR between conditions)" in ir.finding_text(advice)
+
+	def test_a_like_parameter_is_left_out(self):
+		for like in ("LIKE ?", "NOT LIKE ?", "like %(txt)s", "LIKE '%voice'"):
+			q = f"SELECT name FROM `tabSales Invoice` WHERE customer = ? AND po_no {like} AND status = ?"
+			advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI))
+			assert advice.columns == ("customer", "status"), like
+			assert "Optimus left out po_no (compared by a LIKE whose pattern can start with a wildcard)" in (
+				ir.finding_text(advice)
+			)
+
+	def test_a_visible_prefix_like_can_use_the_index(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND po_no LIKE 'PO-%'"
+		assert ir._unusable_where_columns(q, [("WHERE", "customer"), ("WHERE", "po_no")]) == {}
+
+	def test_a_top_level_or_leaves_nothing_to_index(self):
+		for q in (
+			"SELECT name FROM `tabSales Invoice` WHERE customer = ? OR status = ?",
+			"SELECT name FROM `tabSales Invoice` WHERE customer = ? AND status = ? OR company = ?",
+		):
+			advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI))
+			assert advice.route == ir.ROUTE_NO_CODE, q
+			text = ir.finding_text(advice)
+			assert "an OR between conditions" in text and "an index would not help" in text
+
+	def test_between_and_plain_conditions_are_kept(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND posting_date BETWEEN ? AND ? AND status = ?"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI))
+		assert advice.columns == ("company", "posting_date", "status")
+
+	def test_a_sort_column_is_not_a_filter(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND (status = ? OR company = ?) ORDER BY posting_date"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI))
+		assert advice.columns == ("customer", "posting_date")
+
+	def test_a_filter_the_scan_cannot_place_is_left_out(self):
+		"""Fail closed: a WHERE column the token scan cannot find in the main WHERE clause."""
+		shapes = ir._unusable_where_columns(
+			"SELECT name FROM `tabSales Invoice` WHERE customer = ?", [("WHERE", "customer"), ("WHERE", "status")],
+		)
+		assert shapes == {"status": {"unsure"}}
+		assert ir._unusable_where_columns("SELECT name FROM `tabX` WHERE (a = ?", [("WHERE", "a")]) == {"a": {"unsure"}}
+		# a name used only as a function is no use of that column
+		q = "SELECT name FROM `tabX` WHERE company = ? AND year(posting_date) = ?"
+		assert ir._unusable_where_columns(q, [("WHERE", "company"), ("WHERE", "year")]) == {"year": {"unsure"}}
+
+
 class TestPostgresRowWidth:
 	"""Fix round 1 item 9: a Postgres btree row holds at most about 2704 bytes."""
 
-	def test_a_postgres_index_that_could_pass_the_row_limit_gives_no_code(self):
+	def test_a_postgres_index_is_trimmed_to_the_row_limit(self):
+		"""Fix round 2: trailing columns are left out until the row fits, as on MariaDB."""
 		ev = _ev(dialect="postgres", fields={"code_a": F("Data", length=400), "code_b": F("Data", length=400)})
 		advice = ir.advise_table("tabSales Invoice", ["code_a", "code_b"], evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["code_a"]
+		assert "Optimus left out code_b (the index would pass the 2704-byte Postgres index row limit)" in (
+			ir.card_note(advice)
+		)
+
+	def test_a_postgres_leading_column_over_the_row_limit_gives_no_code(self):
+		ev = _ev(dialect="postgres", fields={"long_code": F("Data", length=700), "customer": F("Link")})
+		advice = ir.advise_table("tabSales Invoice", ["long_code", "customer"], evidence_lookup=_lookup(ev))
 		assert advice.route == ir.ROUTE_NO_CODE
-		assert "could be 3200 bytes wide, over the 2704-byte Postgres index row limit" in ir.card_note(advice)
-		ev = _ev(dialect="postgres", fields={"long_code": F("Data", length=700)})
-		advice = ir.advise_table("tabSales Invoice", ["long_code"], evidence_lookup=_lookup(ev))
-		assert advice.route == ir.ROUTE_NO_CODE
+		assert "could be 2800 bytes wide, over the 2704-byte Postgres index row limit" in ir.card_note(advice)
 
 	def test_a_postgres_index_under_the_row_limit_is_an_entry(self):
 		ev = _ev(dialect="postgres", fields={"code_a": F("Data", length=300), "customer": F("Link")})
@@ -389,6 +455,12 @@ class TestDatabaseStamp:
 		assert single.entry["db"] == "postgres"
 		for advice in (prefixed, setter, single):
 			assert json.dumps(advice.entry) in advice.code
+
+	def test_a_mariadb_composite_too_wide_for_a_postgres_row_is_mariadb_only(self):
+		"""Fix round 2: 2800 bytes fits the 3072-byte MariaDB key but not a Postgres row."""
+		ev = _ev(fields={"code_a": F("Data", length=350), "code_b": F("Data", length=350)})
+		advice = ir.advise_table("tabSales Invoice", ["code_a", "code_b"], evidence_lookup=_lookup(ev))
+		assert advice.entry["columns"] == ["code_a", "code_b"] and advice.entry["db"] == "mariadb"
 
 	def test_a_plain_composite_runs_on_any_database(self):
 		for dialect in ("mariadb", "postgres"):

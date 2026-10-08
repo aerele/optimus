@@ -34,7 +34,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections import defaultdict
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -321,6 +322,174 @@ def _clean_columns(columns) -> list[str]:
 	return out[:MAX_INDEX_COLUMNS]
 
 
+# --- predicate shape -------------------------------------------------------------
+# sql_metadata (the table-breakdown parser) lists a query's WHERE columns but not how
+# they combine, and Frappe's normalize_query turns every literal into ?, so a LIKE
+# pattern is never visible (frappe/recorder.py:154-179). A conservative token scan of the
+# main query's WHERE clause decides which WHERE columns a composite index can use: a
+# column compared only inside an OR group, or only by a LIKE whose pattern is a parameter
+# or starts with a wildcard, cannot be used. Fail closed: a WHERE column the scan cannot
+# place (an unbalanced bracket or quote, no top-level WHERE, a column it cannot find) is
+# treated as unusable.
+
+_SQL_TOKEN_RE = re.compile(
+	r"`[^`]*`|'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.)*\"|%\([A-Za-z_]\w*\)s|%s"
+	r"|[A-Za-z_][A-Za-z0-9_$]*|\|\||&&|\S"
+)
+_NAME_RE = re.compile(r"^(?:`[^`]*`|[A-Za-z_][A-Za-z0-9_$]*)$")
+_WHERE_ENDS: frozenset[str] = frozenset({
+	"group", "order", "limit", "having", "union", "for", "lock", "window", "into", "procedure",
+})
+_OR_WORDS: frozenset[str] = frozenset({"or", "xor", "||"})
+_AND_WORDS: frozenset[str] = frozenset({"and", "&&"})
+_SHAPE_WHY: dict[str, str] = {
+	"or": "compared only inside an OR between conditions",
+	"like": "compared by a LIKE whose pattern can start with a wildcard",
+	"unsure": "a filter Optimus could not place with certainty",
+}
+
+
+def _where_tokens(query: str) -> list[str] | None:
+	"""The tokens of the main query's WHERE clause ([] when it has none), or None when the
+	query cannot be scanned with certainty (an unbalanced bracket or quote)."""
+	tokens = _SQL_TOKEN_RE.findall(query or "")
+	depth = 0
+	for tok in tokens:
+		if tok in ("`", "'", '"'):
+			return None
+		depth += {"(": 1, ")": -1}.get(tok, 0)
+		if depth < 0:
+			return None
+	if depth:
+		return None
+	start = None
+	for i, tok in enumerate(tokens):
+		depth += {"(": 1, ")": -1}.get(tok, 0)
+		if depth or tok in ("(", ")"):
+			continue
+		low = tok.lower()
+		if start is None and low == "where":
+			start = i + 1
+		elif start is not None and low in _WHERE_ENDS:
+			return tokens[start:i]
+	return tokens[start:] if start is not None else []
+
+
+def _conjuncts(tokens: list[str]) -> list[list[str]] | None:
+	"""The pieces of a WHERE clause between its top-level ANDs, or None when an OR sits at
+	its top level (AND binds tighter, so no piece is then sure to apply). The AND of a
+	BETWEEN also splits: harmless, because a nested OR stays inside its brackets, so a
+	finer split never moves a column out of an OR group."""
+	parts: list[list[str]] = [[]]
+	depth = 0
+	for tok in tokens:
+		low = tok.lower()
+		depth += {"(": 1, ")": -1}.get(tok, 0)
+		if depth == 0 and tok not in ("(", ")"):
+			if low in _OR_WORDS:
+				return None
+			if low in _AND_WORDS:
+				parts.append([])
+				continue
+		parts[-1].append(tok)
+	return [part for part in parts if part]
+
+
+def _column_refs(tokens: list[str]) -> list[tuple[str, int]]:
+	"""``(lowercase column, index of the token after it)`` for each name that is not a
+	function call; a dotted reference (``tabX.col``, ``alias.col``) counts by its last part."""
+	out: list[tuple[str, int]] = []
+	i = 0
+	while i < len(tokens):
+		if not _NAME_RE.match(tokens[i]):
+			i += 1
+			continue
+		j = i
+		while j + 2 < len(tokens) and tokens[j + 1] == "." and _NAME_RE.match(tokens[j + 2]):
+			j += 2
+		if not (j + 1 < len(tokens) and tokens[j + 1] == "("):
+			out.append((tokens[j].strip("`").lower(), j + 1))
+		i = j + 1
+	return out
+
+
+def _wildcard_like(tokens: list[str], at: int) -> bool:
+	"""True when ``tokens[at:]`` starts with ``[NOT] LIKE <pattern>`` and the pattern may
+	start with a wildcard: a parameter (normalized queries hide every literal), anything
+	but a string literal, or a literal that starts with % or _."""
+	if at < len(tokens) and tokens[at].lower() == "not":
+		at += 1
+	if at >= len(tokens) or tokens[at].lower() != "like":
+		return False
+	pattern = tokens[at + 1] if at + 1 < len(tokens) else ""
+	if pattern[:1] in ("'", '"') and len(pattern) > 1:
+		return pattern[1:2] in ("%", "_")
+	return True
+
+
+def _unusable_where_columns(query: str, labelled) -> dict[str, set[str]]:
+	"""``{column: kinds}`` for each WHERE column of ``labelled`` that a composite index
+	cannot use; a kind is ``"or"``, ``"like"`` or ``"unsure"`` (see the section comment)."""
+	where_cols: list[str] = []
+	for label, col in labelled or []:
+		if label == "WHERE" and col not in where_cols:
+			where_cols.append(col)
+	if not where_cols:
+		return {}
+	tokens = _where_tokens(query)
+	if tokens is None:
+		return {col: {"unsure"} for col in where_cols}
+	conjuncts = _conjuncts(tokens)
+	if conjuncts is None:
+		return {col: {"or"} for col in where_cols}
+	usable: set[str] = set()
+	kinds: dict[str, set[str]] = defaultdict(set)
+	for part in conjuncts:
+		has_or = any(tok.lower() in _OR_WORDS for tok in part)
+		for name, after in _column_refs(part):
+			like = _wildcard_like(part, after)
+			if has_or:
+				kinds[name].add("or")
+			if like:
+				kinds[name].add("like")
+			if not has_or and not like:
+				usable.add(name)
+	return {col: set(kinds.get(col.lower()) or {"unsure"}) for col in where_cols if col.lower() not in usable}
+
+
+def _shape_phrases(shapes: Mapping[str, set[str]]) -> list[str]:
+	like = [col for col, kinds in shapes.items() if "like" in kinds]
+	ored = [col for col, kinds in shapes.items() if "or" in kinds]
+	unsure = [col for col, kinds in shapes.items() if kinds == {"unsure"}]
+	out: list[str] = []
+	if like:
+		out.append(f"a LIKE on {', '.join(like)}, which cannot use an index when its pattern starts with a wildcard")
+	if ored:
+		out.append(f"an OR between conditions on {', '.join(ored)}")
+	if unsure:
+		out.append(f"a filter on {', '.join(unsure)} that Optimus could not place with certainty")
+	return out
+
+
+def _shape_why(kinds: set[str]) -> str:
+	return _SHAPE_WHY["or" if "or" in kinds else "like" if "like" in kinds else "unsure"]
+
+
+def _shape_no_code_reason(shapes: Mapping[str, set[str]], checks: list[str]) -> str:
+	"""NO_CODE when the predicate shape leaves no column an index could narrow on."""
+	rest = ""
+	if len(checks) == 1:
+		rest = f" {checks[0]} is a Check field, which matches too many rows for an index to narrow."
+	elif checks:
+		rest = f" {', '.join(checks)} are Check fields, which match too many rows for an index to narrow."
+	return (
+		f"The cost comes from the shape of the filter: {'; '.join(_shape_phrases(shapes))}. A composite "
+		f"index cannot use those columns.{rest} So an index would not help, and Optimus gives no index "
+		"code. Rewrite the filter (an exact match instead of a LIKE, or one query per OR branch) and "
+		"check the result with EXPLAIN."
+	)
+
+
 def _shape_text(query: str, col: str) -> str:
 	"""Why an index that already exists does not help, from the query's shape."""
 	ref = r"(?:`[^`]+`\.|\w+\.)?`?" + re.escape(col) + r"`?"
@@ -475,21 +644,17 @@ def _index_columns(evidence: TableEvidence, cols: list[str]) -> tuple[list[str],
 			continue
 		final.append(col)
 	if postgres:
-		width = _key_bytes(evidence, final)
-		if width > POSTGRES_MAX_INDEX_ROW_BYTES:
-			return [], [], (
-				f"An index on {_cols_text(final)} could be {width} bytes wide, over the "
-				f"{POSTGRES_MAX_INDEX_ROW_BYTES}-byte Postgres index row limit, so Optimus gives no index code."
-			)
+		limit, limit_name, may = POSTGRES_MAX_INDEX_ROW_BYTES, "Postgres index row", "could"
 	else:
-		while len(final) > 1 and _key_bytes(evidence, final) > MARIADB_MAX_KEY_BYTES:
-			dropped.append((final.pop().split("(", 1)[0], "the index would pass the 3072-byte MariaDB key limit"))
-		width = _key_bytes(evidence, final)
-		if width > MARIADB_MAX_KEY_BYTES:
-			return [], [], (
-				f"An index on {_cols_text(final)} would be {width} bytes wide, over the 3072-byte MariaDB key "
-				"limit, so Optimus gives no index code."
-			)
+		limit, limit_name, may = MARIADB_MAX_KEY_BYTES, "MariaDB key", "would"
+	while len(final) > 1 and _key_bytes(evidence, final) > limit:
+		dropped.append((final.pop().split("(", 1)[0], f"the index would pass the {limit}-byte {limit_name} limit"))
+	width = _key_bytes(evidence, final)
+	if width > limit:
+		return [], [], (
+			f"An index on {_cols_text(final)} {may} be {width} bytes wide, over the {limit}-byte {limit_name} "
+			"limit, so Optimus gives no index code."
+		)
 	return final, dropped, None
 
 
@@ -593,6 +758,8 @@ def _route(doctype: str, final: list[str], dropped, evidence: TableEvidence, tra
 			entry["db"] = "mariadb"  # a text prefix: Postgres would index the whole value
 		elif not mariadb and len(final) == 1:
 			entry["db"] = "postgres"  # MariaDB schema sync drops an undeclared single-column index
+		elif mariadb and _key_bytes(evidence, final) > POSTGRES_MAX_INDEX_ROW_BYTES:
+			entry["db"] = "mariadb"  # wider than a Postgres index row can hold
 		reason = (
 			f'Your app\'s ensure_indexes() function creates the index "{entry["index_name"]}" on '
 			f"{_cols_text(base)} once. It skips the index when it already exists or when the table or a column "
@@ -614,28 +781,46 @@ def advise(
 	tracked_apps: tuple[str, ...] = (),
 	explain_row=None,
 	query: str = "",
+	unusable: Mapping[str, set[str]] | None = None,
 ) -> IndexAdvice | None:
 	"""The advice for indexing ``columns`` of ``table``, or None when there is nothing
-	to advise (not a DocType table, no usable column)."""
+	to advise (not a DocType table, no usable column). ``unusable`` names the columns
+	the query's predicate shape keeps an index from using (``_unusable_where_columns``):
+	they are left out and named, and when nothing but Check fields is left the advice is
+	NO_CODE."""
 	doctype = doctype_of(table)
 	if doctype is None:
 		return None
-	cols = _clean_columns(columns)
-	if not cols:
+	shapes = {
+		col: set(kinds) for col, kinds in (unusable or {}).items()
+		if isinstance(col, str) and _IDENT_RE.fullmatch(col) and col.lower() not in FRAPPE_METADATA_COLUMNS
+	}
+	cols = _clean_columns([c for c in columns or [] if c not in (unusable or {})])
+	if not cols and not shapes:
 		return None
+	if not cols:
+		return _no_code(doctype, list(shapes), _shape_no_code_reason(shapes, []))
 	if evidence is None:
 		return _no_code(doctype, cols, (
 			f'Optimus could not read DocType "{doctype}" or the columns of its table while building this '
 			"report (the DocType may not exist on this site), so it gives no index code. Check the query "
 			"with EXPLAIN on a site where the DocType exists."
 		))
+	if shapes and all(_is_check_field(evidence, col) for col in cols):
+		return _no_code(doctype, cols + list(shapes), _shape_no_code_reason(shapes, cols))
 	problem = _column_problem(evidence, cols) or _existing_index_problem(evidence, cols, explain_row, query)
 	if problem:
 		return _no_code(doctype, cols, problem)
 	final, dropped, problem = _index_columns(evidence, cols)
 	if problem:
 		return _no_code(doctype, cols, problem)
-	return _route(doctype, final, dropped, evidence, tuple(tracked_apps or ()))
+	shape_dropped = [(col, _shape_why(kinds)) for col, kinds in shapes.items()]
+	return _route(doctype, final, shape_dropped + dropped, evidence, tuple(tracked_apps or ()))
+
+
+def _is_check_field(evidence: TableEvidence, col: str) -> bool:
+	field = evidence.fields.get(col)
+	return field is not None and field.fieldtype == "Check"
 
 
 def _lead_for(ftype: str, labelled: list[tuple[str, str]], advice: IndexAdvice) -> str:
@@ -673,10 +858,11 @@ def advise_finding(
 	doctype = doctype_of(table)
 	if doctype is None:
 		return None
+	query = str(detail.get("normalized_query") or "")
 	advice = advise(
 		table, [col for _label, col in labelled], evidence=evidence_lookup(f"tab{doctype}"),
-		tracked_apps=tracked_apps, explain_row=detail.get("explain_row"),
-		query=str(detail.get("normalized_query") or ""),
+		tracked_apps=tracked_apps, explain_row=detail.get("explain_row"), query=query,
+		unusable=_unusable_where_columns(query, labelled) if query else None,
 	)
 	if advice is None:
 		return None
