@@ -223,26 +223,30 @@ def test_main_passes_the_stored_key_only_as_api_key():
 def test_run_case_finds_the_index_types_in_an_older_checkout(corpus, monkeypatch):
 	"""A --optimus-src checkout from before the PR #71 fix wave has the index type set in
 	fix_recipes, not analyzers.base; one from before PR-L1 has neither."""
-	from optimus.analyzers import base
-	from optimus.renderer import fix_recipes
+	import sys
+	import types
 
+	from optimus.analyzers import base
+
+	# fix_recipes.py is gone from this tree; stand in for the older checkout's module.
+	fix_recipes = types.ModuleType("optimus.renderer.fix_recipes")
+	monkeypatch.setitem(sys.modules, "optimus.renderer.fix_recipes", fix_recipes)
 	live = load("live")
 	case = dict(load("_corpus").case_by_name("3q1dsfrmti", corpus), finding_type="Missing Index")
 	fake, calls = _fake_ai_fix()
 	assert live.run_case(case, fake)["outcome"] == "recipe"
 	monkeypatch.delattr(base, "INDEX_FINDING_TYPES")
-	monkeypatch.setattr(fix_recipes, "INDEX_FINDING_TYPES", frozenset({"Missing Index"}), raising=False)
+	fix_recipes.INDEX_FINDING_TYPES = frozenset({"Missing Index"})
 	assert live.run_case(case, fake)["outcome"] == "recipe"
-	monkeypatch.delattr(fix_recipes, "INDEX_FINDING_TYPES")
+	delattr(fix_recipes, "INDEX_FINDING_TYPES")
 	assert live.run_case(case, fake)["outcome"] == "gated" and not calls
 
 
 def test_run_case_gates_pre_l5_redundant_calls_with_the_real_gate(corpus):
-	from optimus import ai_fix
-	from optimus.renderer import fix_recipes
+	from optimus import ai_fix, ai_grounding
 
 	live = load("live")
 	case = load("_corpus").case_by_name("3q1efl686s", corpus)
 	fake, calls = _fake_ai_fix(gate=ai_fix.llm_gate_note)
 	record = live.run_case(case, fake)
-	assert record["outcome"] == "gated" and record["gate_note"] == fix_recipes.PRE_L5_REDUNDANT_CALL_NOTE and not calls
+	assert record["outcome"] == "gated" and record["gate_note"] == ai_grounding.PRE_L5_REDUNDANT_CALL_NOTE and not calls

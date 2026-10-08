@@ -32,7 +32,6 @@ optimus/renderer/
                            # `from optimus.renderer import X` still works)
   _internal.py             # the legacy bulk content (~4,400 LOC,
                            # was 4,958 before the v0.10.0 extractions)
-  fix_recipes.py           # AI eligibility helpers (moved to optimus/ai_grounding.py by Task 4)
   index_recipes.py         # the one index advisor (findings and table cards) + ensure_indexes() generator
   recipe_enrichment.py     # per-render evidence lookup and recipe/stale-note render glue
   README.md                # this file

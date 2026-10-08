@@ -34,8 +34,8 @@ def _finding(ftype, detail=None):
 	}
 
 
-def _hot(content, file=_USER_FILE):
-	return _finding("Hot Line", {"file": file, "lineno": 9, "line_content": content})
+def _hot(content, file=_USER_FILE, per_hit_us=0.0):
+	return _finding("Hot Line", {"file": file, "lineno": 9, "line_content": content, "per_hit_us": per_hit_us})
 
 
 class _FakeDB:
@@ -76,7 +76,7 @@ class TestGateNote:
 			assert ai_fix.llm_gate_note(_hot("total = total + flt(r.qty)")) is None
 			assert "framework code" in ai_fix.llm_gate_note(_finding("Framework N+1"))
 			assert "without the AI" in ai_fix.llm_gate_note(_finding("Missing Index"))
-			assert "inside super().validate" in ai_fix.llm_gate_note(_hot("super().validate()"))
+			assert "inside super().validate" in ai_fix.llm_gate_note(_hot("super().validate()", per_hit_us=132809.5))
 			assert ai_fix.llm_gate_note(_finding("Memory Pressure")) is not None
 
 
@@ -96,7 +96,7 @@ class TestAutoSuggestPath:
 
 	def test_auto_suggest_skips_gated_hot_lines(self):
 		sent = self._run([
-			_hot("super().validate()"),
+			_hot("super().validate()", per_hit_us=132809.5),
 			_hot("x = 1", file="/home/b/apps/erpnext/erpnext/controllers/selling_controller.py"),
 			_hot("total = total + flt(row.qty) * flt(row.rate)"),
 		])
@@ -107,8 +107,8 @@ class TestBackfillPath:
 	def test_backfill_skips_framework_n_plus_one_and_gated_hot_lines(self):
 		rows = [
 			_row("fw", "Framework N+1"),
-			_row("hl_gated", "Hot Line", {"file": _USER_FILE, "line_content": "self.run_all()"}),
-			_row("hl_ok", "Hot Line", {"file": _USER_FILE, "line_content": "n = len(rows)"}),
+			_row("hl_gated", "Hot Line", {"file": _USER_FILE, "line_content": "self.run_all()", "per_hit_us": 5000.0}),
+			_row("hl_ok", "Hot Line", {"file": _USER_FILE, "line_content": "n = len(rows)", "per_hit_us": 5000.0}),
 			_row("n1", "N+1 Query"),
 		]
 		doc = SimpleNamespace(findings=rows)
@@ -125,7 +125,7 @@ class TestSuggestFixGuard:
 	@pytest.mark.parametrize("finding", [
 		{"finding_type": "Framework N+1", "technical_detail": {}},
 		{"finding_type": "Missing Index", "technical_detail": {"table": "tabX", "column": "a"}},
-		{"finding_type": "Hot Line", "technical_detail": {"file": _USER_FILE, "line_content": "super().validate()"}},
+		{"finding_type": "Hot Line", "technical_detail": {"file": _USER_FILE, "line_content": "super().validate()", "per_hit_us": 132809.5}},
 	])
 	def test_refuses_before_any_provider_or_http_call(self, finding, monkeypatch):
 		calls = []

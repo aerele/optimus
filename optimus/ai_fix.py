@@ -240,17 +240,6 @@ def is_finding_type_excluded(finding_type: str | None) -> bool:
 	return finding_type in (excluded or ())
 
 
-_INDEX_TYPE_NOTE = (
-	"Index advice is built by Optimus from the DocType metadata, without the AI. "
-	"See the recipe on this finding in the report."
-)
-_FRAMEWORK_N1_NOTE = (
-	"A Framework N+1 finding points at a loop inside framework code, which your app "
-	"cannot change, so Optimus does not ask the AI about it."
-)
-_NOT_ELIGIBLE_NOTE = "This finding type does not carry enough code or SQL context for an AI suggestion."
-
-
 def _app_scope() -> tuple[tuple[str, ...], frozenset[str] | None]:
 	"""The site's Tracked Apps and installed apps, the same inputs the report
 	uses to tell your code from framework code. Ordinary settings failures fall
@@ -278,22 +267,20 @@ def llm_gate_note(finding: dict) -> str | None:
 	(``technical_detail``), a row-shaped dict (``technical_detail_json``) or
 	a ``gate_input(row)`` dict."""
 	ftype = finding.get("finding_type") or ""
-	from optimus.renderer import fix_recipes
-
 	if ftype not in AI_ELIGIBLE_FINDING_TYPES:
 		if ftype in INDEX_FINDING_TYPES:
-			return _INDEX_TYPE_NOTE
+			return ai_grounding.INDEX_TYPE_NOTE
 		if ftype == "Framework N+1":
-			return _FRAMEWORK_N1_NOTE
-		return _NOT_ELIGIBLE_NOTE
+			return ai_grounding.FRAMEWORK_N1_NOTE
+		return ai_grounding.NOT_ELIGIBLE_NOTE
 	if ftype == "Redundant Call":
-		if fix_recipes.analyzed_before_callsite_fix(finding):
-			return fix_recipes.PRE_L5_REDUNDANT_CALL_NOTE
+		if ai_grounding.analyzed_before_callsite_fix(finding):
+			return ai_grounding.PRE_L5_REDUNDANT_CALL_NOTE
 		return None
 	if ftype != "Hot Line":
 		return None
 	tracked, installed = _app_scope()
-	return fix_recipes.hot_line_gate(finding, tracked_apps=tracked, installed_apps=installed)
+	return ai_grounding.hot_line_gate(finding, tracked_apps=tracked, installed_apps=installed)
 
 
 def _resolve_timeout_seconds() -> int:

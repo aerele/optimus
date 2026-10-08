@@ -221,7 +221,7 @@ def test_card_never_renders_an_add_index_call_without_index_name(evidence):
 def test_gated_hot_line_shows_note_and_hides_stored_ai(evidence):
 	hot = _row("Hot Line", {
 		"file": "apps/myapp/myapp/controllers.py", "lineno": 30, "dotted_path": "myapp.controllers.X.validate",
-		"line_content": "super().validate()",
+		"line_content": "super().validate()", "per_hit_us": 132809.5,
 	}, llm=dict(_OLD_AI, suggestion="**Fix**\n\nskip-the-super-call"))
 	out = _render(_doc([hot]))
 	assert "Most of this line's time is spent inside super().validate" in out

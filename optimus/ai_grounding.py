@@ -10,14 +10,22 @@
   tree, with the line of every fact, so the prompt keeps only facts about lines it still
   shows after its budget trims the window.
 - ``format_loop_facts``: those facts as sentences for the shown lines.
+- ``hot_line_gate``: why a Hot Line gets no AI call, decided by Phase 2's measured time
+  per hit (owner decision A4) or Phase 1's named callee.
+- ``analyzed_before_callsite_fix``: Redundant Call findings built by the older stack walk.
 """
 
 from __future__ import annotations
 
 import ast
+import builtins
+import json
 import re
+import sys
 import textwrap
 from typing import NamedTuple
+
+from optimus.analyzers.base import FRAMEWORK_APPS, is_framework_callsite
 
 LOOP_FACT_TYPES: frozenset[str] = frozenset({"N+1 Query", "Redundant Call", "Hot Line"})
 # Repetition of these types can come from a loop in a caller outside the window (P7).
@@ -490,3 +498,253 @@ def format_loop_facts(facts: dict, *, first_line: int, last_line: int, caller_hi
 	else:
 		parts.append(f"The profiler sees no database write inside {scope} in the code shown.")
 	return " ".join(parts)
+
+
+INDEX_TYPE_NOTE = (
+	"Index advice is built by Optimus from the DocType metadata, without the AI. "
+	"See the recipe on this finding in the report."
+)
+FRAMEWORK_N1_NOTE = (
+	"A Framework N+1 finding points at a loop inside framework code, which your app "
+	"cannot change, so Optimus does not ask the AI about it."
+)
+NOT_ELIGIBLE_NOTE = "This finding type does not carry enough code or SQL context for an AI suggestion."
+
+# A line whose Phase 2 time per hit reaches this, and whose statement calls a
+# non-builtin, spends its time inside that callee (owner decision A4).
+HOT_LINE_CALLEE_US = 1000.0
+
+# The corrected redundant_calls analyzer writes technical_detail[CALLSITE_WALK_KEY] =
+# CALLSITE_WALK_FIXED into every Redundant Call finding it builds (Task 6 moves the
+# two constants to optimus/analyzers/base.py).
+CALLSITE_WALK_KEY = "callsite_walk"
+CALLSITE_WALK_FIXED = "outermost_first"
+
+PRE_L5_REDUNDANT_CALL_NOTE = (
+	"This Redundant Call finding was analyzed before the callsite fix, so its line may point at "
+	"the outer hook call instead of the loop, and an AI suggestion made for it may change the "
+	"wrong loop. Optimus no longer asks the AI about it: re-record the flow to get a corrected "
+	"finding."
+)
+
+_BUILTIN_NAMES: frozenset[str] = frozenset(dir(builtins))
+_WRAP = "_optimus_wrap_"
+_NO_CALL_HEADER_RE = re.compile(r"^(?:(?:else|finally|try)\s*:|except\b|case\b)")
+_OPENERS = {"(": ")", "[": "]", "{": "}"}
+_OWN_RECEIVERS = frozenset({"self", "cls", "super"})
+
+
+def finding_detail(finding: dict) -> dict:
+	"""``technical_detail`` of a render dict, or the parsed ``technical_detail_json`` of a
+	row-shaped dict; ``{}`` when unreadable."""
+	detail = finding.get("technical_detail")
+	if isinstance(detail, dict):
+		return detail
+	try:
+		parsed = json.loads(finding.get("technical_detail_json") or "{}")
+	except (TypeError, ValueError):
+		return {}
+	return parsed if isinstance(parsed, dict) else {}
+
+
+def _strip_comment(line: str) -> str:
+	in_str: str | None = None
+	for i, ch in enumerate(line):
+		if in_str:
+			if ch == in_str and line[i - 1 : i] != "\\":
+				in_str = None
+			continue
+		if ch in ("'", '"'):
+			in_str = ch
+		elif ch == "#":
+			return line[:i]
+	return line
+
+
+def _closers(src: str) -> str:
+	"""The brackets that close what ``src`` opened (strings skipped), or "" when ``src``
+	ends inside a string."""
+	stack: list[str] = []
+	quote: str | None = None
+	i = 0
+	while i < len(src):
+		if quote:
+			if src[i] == "\\":
+				i += 2
+				continue
+			if src.startswith(quote, i):
+				i += len(quote)
+				quote = None
+				continue
+			i += 1
+			continue
+		if src.startswith(('"""', "'''"), i):
+			quote = src[i : i + 3]
+			i += 3
+			continue
+		ch = src[i]
+		if ch in ("'", '"'):
+			quote = ch
+		elif ch in _OPENERS:
+			stack.append(_OPENERS[ch])
+		elif stack and ch == stack[-1]:
+			stack.pop()
+		i += 1
+	return "" if quote else "".join(reversed(stack))
+
+
+def _parse_statement(line: str) -> ast.Module | None:
+	"""The statement on one physical line, parsed: the line itself, the line with its
+	open brackets closed, a block header with a body, or a continuation line wrapped
+	in a call (``_WRAP``). None for a header that calls nothing or an unparseable line."""
+	src = _strip_comment(line).strip()
+	if not src or _NO_CALL_HEADER_RE.match(src):
+		return None
+	if src.startswith("elif "):
+		src = src[2:]
+	elif src.startswith("match ") and src.endswith(":"):
+		src = src[len("match ") : -1]
+	elif src.startswith("@"):
+		src = src[1:]
+	src = src.lstrip(")]} ")
+	closed = src + _closers(src)
+	candidates = [src, closed, closed + " pass" if closed.endswith(":") else closed + ": pass"]
+	candidates += [f"{_WRAP}({closed.rstrip(',')})", f"{_WRAP}({closed})"]
+	for candidate in candidates:
+		try:
+			return ast.parse(candidate)
+		except (SyntaxError, ValueError):
+			continue
+	return None
+
+
+class StatementCalls(NamedTuple):
+	calls: bool
+	callee: str | None
+
+
+def statement_calls(line: str) -> StatementCalls:
+	"""Whether the statement on ``line`` calls something other than a Python builtin, and
+	the first such callee, outermost first. A ``raise X(...)`` constructor is skipped, so
+	``raise X(foo())`` names ``foo``. A fragment Python cannot parse counts as calling,
+	with no name, when it holds a parenthesis."""
+	tree = _parse_statement(line)
+	if tree is None:
+		return StatementCalls("(" in _strip_comment(line), None)
+	skip = set()
+	for node in ast.walk(tree):
+		if isinstance(node, ast.Raise):
+			skip |= {id(part) for part in (node.exc, node.cause) if isinstance(part, ast.Call)}
+	for node in ast.walk(tree):
+		if not isinstance(node, ast.Call) or id(node) in skip:
+			continue
+		if isinstance(node.func, ast.Name) and (node.func.id in _BUILTIN_NAMES or node.func.id == _WRAP):
+			continue
+		name = call_name(node.func)
+		return StatementCalls(True, name if name and _SAFE_NAME_RE.match(name) else None)
+	return StatementCalls(False, None)
+
+
+def _short_path(filename: str) -> str:
+	norm = filename.replace("\\", "/")
+	if "/apps/" in norm:
+		return norm.rsplit("/apps/", 1)[1]
+	if norm.startswith("apps/"):
+		return norm[len("apps/") :]
+	return norm.rsplit("/", 1)[-1]
+
+
+def _per_hit_us(detail: dict) -> float:
+	try:
+		value = float(detail.get("per_hit_us") or 0)
+	except (TypeError, ValueError):
+		return 0.0
+	return value if value == value else 0.0  # NaN is not a measurement
+
+
+def _callee_scope(name: str, *, tracked_apps: tuple[str, ...], from_phase1: bool) -> str:
+	"""``"library"`` (stdlib, framework or a known third-party library: Phase 2 cannot
+	point at a line of the developer's app inside it), ``"yours"`` (a function of the
+	developer's app) or ``"unknown"`` (a method of this class or a parent, a bare name)."""
+	root = re.split(r"[.(\[]", name, maxsplit=1)[0]
+	if root in _OWN_RECEIVERS:
+		return "unknown"
+	if (
+		root in _BUILTIN_NAMES or root in sys.stdlib_module_names or root in FRAMEWORK_APPS
+		or is_framework_callsite(f"{root}/", None, None)
+	):
+		return "library"
+	if tracked_apps and root in tracked_apps:
+		return "yours"
+	if from_phase1:
+		# Phase 1 names only user-code descendants; with Tracked Apps set, any other app is
+		# not the developer's.
+		return "library" if tracked_apps else "yours"
+	return "unknown"
+
+
+def _callee_note(callee: str | None, scope: str) -> str:
+	if not callee:
+		return (
+			"Most of this line's time is spent inside a function it calls, so Optimus does not ask the AI "
+			"about the line itself. Find that call in the source: re-run Phase 2 with it picked if it is in "
+			"your app, otherwise call it less often."
+		)
+	head = (
+		f"Most of this line's time is spent inside {callee}, which the line calls, so Optimus does not ask "
+		"the AI about the line itself."
+	)
+	less = "call it less often, for example once before the loop, through a cached value, or in one batched call."
+	if scope == "yours":
+		return f"{head} Re-run Phase 2 with {callee} picked to see which of its lines is slow, or {less}"
+	if scope == "library":
+		return (
+			f"{head} {callee} is standard library, framework or third-party code, so a Phase 2 run cannot "
+			f"point at a line of your app inside it: {less}"
+		)
+	return f"{head} If {callee} is defined in your app, re-run Phase 2 with it picked to see which of its lines is slow; otherwise {less}"
+
+
+def hot_line_gate(
+	finding: dict,
+	*,
+	tracked_apps: tuple[str, ...] = (),
+	installed_apps: frozenset[str] | None = None,
+) -> str | None:
+	"""Why a Hot Line must not go to the AI, as a report-ready note, or None.
+
+	Gated when the line sits in framework or library code (the report's own
+	``is_framework_callsite``), when Phase 1 named the hot callee, or when Phase 2
+	measured ``per_hit_us >= HOT_LINE_CALLEE_US`` and the line's statement calls a
+	non-builtin (owner decision A4)."""
+	if (finding.get("finding_type") or "") != "Hot Line":
+		return None
+	detail = finding_detail(finding)
+	callsite = detail.get("callsite") if isinstance(detail.get("callsite"), dict) else {}
+	filename = str(callsite.get("filename") or detail.get("file") or "")
+	if filename and is_framework_callsite(filename, tracked_apps or None, installed_apps):
+		return (
+			f"This line is in framework or library code ({_short_path(filename)}), which your app "
+			"cannot change, so Optimus does not ask the AI about it. Follow the call chain above to "
+			"the first line in your own app and reduce how often that path runs."
+		)
+	hint = detail.get("phase1_hint") if isinstance(detail.get("phase1_hint"), dict) else {}
+	named = str(hint.get("next_hot_callee") or "").strip()
+	scope_apps = tuple(tracked_apps or ())
+	if named:
+		return _callee_note(named, _callee_scope(named, tracked_apps=scope_apps, from_phase1=True))
+	if _per_hit_us(detail) < HOT_LINE_CALLEE_US:
+		return None
+	shape = statement_calls(str(detail.get("line_content") or ""))
+	if not shape.calls:
+		return None
+	scope = _callee_scope(shape.callee, tracked_apps=scope_apps, from_phase1=False) if shape.callee else "unknown"
+	return _callee_note(shape.callee, scope)
+
+
+def analyzed_before_callsite_fix(finding: dict) -> bool:
+	"""True for a Redundant Call finding (render dict or row-shaped dict) whose technical
+	detail lacks the fixed analyzer's callsite stamp."""
+	if (finding.get("finding_type") or "") != "Redundant Call":
+		return False
+	return finding_detail(finding).get(CALLSITE_WALK_KEY) != CALLSITE_WALK_FIXED

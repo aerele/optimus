@@ -11,10 +11,9 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from optimus import ai_fix, analyze
+from optimus import ai_fix, ai_grounding, analyze
 from optimus.analyzers import redundant_calls
 from optimus.analyzers.base import AnalyzeContext
-from optimus.renderer import fix_recipes
 
 _CALLSITE = {"filename": "apps/myapp/myapp/x.py", "lineno": 9, "function": "f"}
 _UNSTAMPED = {"fn_name": "get_doc", "callsite": _CALLSITE}
@@ -28,7 +27,7 @@ def _rc(detail):
 class TestPreL5Gate:
 	def test_unstamped_redundant_call_is_gated_with_the_re_record_note(self):
 		note = ai_fix.llm_gate_note(_rc(_UNSTAMPED))
-		assert note == fix_recipes.PRE_L5_REDUNDANT_CALL_NOTE
+		assert note == ai_grounding.PRE_L5_REDUNDANT_CALL_NOTE
 		assert "analyzed before the callsite fix" in note and "re-record the flow" in note
 
 	def test_stamped_redundant_call_is_eligible_in_both_shapes(self):
@@ -64,7 +63,7 @@ def test_fresh_analyzer_output_reaches_the_ai():
 	findings = redundant_calls.analyze([recording], AnalyzeContext(session_uuid="t", docname="t")).findings
 	rc = [f for f in findings if f["finding_type"] == "Redundant Call"]
 	assert len(rc) == 1
-	assert json.loads(rc[0]["technical_detail_json"])["callsite_walk"] == fix_recipes.CALLSITE_WALK_FIXED
+	assert json.loads(rc[0]["technical_detail_json"])["callsite_walk"] == ai_grounding.CALLSITE_WALK_FIXED
 	assert ai_fix.llm_gate_note(rc[0]) is None
 
 
@@ -105,6 +104,6 @@ def test_refresh_backfill_skips_pre_fix_redundant_calls():
 
 
 def test_only_redundant_call_findings_can_be_pre_fix():
-	assert fix_recipes.analyzed_before_callsite_fix(_rc(_UNSTAMPED)) is True
-	assert fix_recipes.analyzed_before_callsite_fix(_rc(_STAMPED)) is False
-	assert fix_recipes.analyzed_before_callsite_fix({"finding_type": "N+1 Query", "technical_detail": {}}) is False
+	assert ai_grounding.analyzed_before_callsite_fix(_rc(_UNSTAMPED)) is True
+	assert ai_grounding.analyzed_before_callsite_fix(_rc(_STAMPED)) is False
+	assert ai_grounding.analyzed_before_callsite_fix({"finding_type": "N+1 Query", "technical_detail": {}}) is False

@@ -42,10 +42,10 @@ def test_safe_call_imports_nothing_from_optimus():
 	assert {m for m in _imported_modules(_PKG / "safe_call.py") if m.startswith(("optimus", "."))} == set()
 
 
-def test_fix_recipes_no_longer_imports_ai_fix():
-	src = (_PKG / "renderer" / "fix_recipes.py").read_text(encoding="utf-8")
-	assert "optimus.ai_fix" not in _imported_modules(_PKG / "renderer" / "fix_recipes.py")
-	assert "from optimus.ai_fix" not in src
+def test_ai_fix_never_imports_the_renderer():
+	"""M-I3: the cycle stays broken; the AI layer reads ai_grounding, never the renderer."""
+	assert {m for m in _imported_modules(_PKG / "ai_fix.py") if m.startswith("optimus.renderer")} == set()
+	assert {m for m in _imported_modules(_PKG / "ai_grounding.py") if m.startswith(("optimus.renderer", "optimus.ai_fix"))} == set()
 
 
 def test_best_effort_returns_the_value_or_the_default():

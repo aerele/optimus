@@ -20,9 +20,10 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
+from optimus import ai_grounding
 from optimus.analyzers.base import INDEX_FINDING_TYPES
 from optimus.dbdialect import get_dialect
-from optimus.renderer import fix_recipes, index_recipes
+from optimus.renderer import index_recipes
 from optimus.safe_call import best_effort
 
 
@@ -181,14 +182,14 @@ def apply_finding_recipes(
 				detail["fix_hint"] = index_recipes.finding_text(advice)
 				if advice.code:
 					detail["suggested_ddl"] = advice.code
-		elif ftype == "Redundant Call" and fix_recipes.analyzed_before_callsite_fix(f):
+		elif ftype == "Redundant Call" and ai_grounding.analyzed_before_callsite_fix(f):
 			existing = str(detail.get("validation_note") or "").strip()
-			detail["validation_note"] = f"{existing} {fix_recipes.PRE_L5_REDUNDANT_CALL_NOTE}".strip()
+			detail["validation_note"] = f"{existing} {ai_grounding.PRE_L5_REDUNDANT_CALL_NOTE}".strip()
 		elif ftype == "Framework N+1":
 			f["llm_fix"] = None
 		elif ftype == "Hot Line":
 			note = best_effort(
-				lambda: fix_recipes.hot_line_gate(f, tracked_apps=scope, installed_apps=installed_apps), None,
+				lambda: ai_grounding.hot_line_gate(f, tracked_apps=scope, installed_apps=installed_apps), None,
 			)
 			if note:
 				detail["fix_hint"] = note
