@@ -6,14 +6,6 @@
 from optimus.renderer import fix_recipes as fr
 
 
-def test_duplicate_columns_do_not_make_a_durable_composite():
-	assert fr.table_card_columns("tabInvoice", ["customer", "customer"], meta_lookup=lambda dt: None) is None
-
-
-def test_non_identifier_column_cannot_be_emitted_as_code():
-	assert fr.table_card_columns("tabInvoice", ["customer\n", "status"], meta_lookup=lambda dt: None) is None
-
-
 def test_loop_receiver_is_a_variant_even_without_arguments():
 	facts = fr.loop_facts(["def f(docs):", "\tfor doc in docs:", "\t\tdoc.reload()"], 3)
 	assert facts["depends_on_loop_vars"] == ["doc"]

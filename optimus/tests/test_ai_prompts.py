@@ -128,18 +128,16 @@ def test_raw_ddl_only_in_never_sentences():
 				assert "Never" in s or "never" in s, (name, s)
 
 
-def test_index_recipe_is_the_three_row_table():
-	rules = P.INDEX_RULES
-	assert "on_doctype_update()" in rules
-	assert "Property Setter" in rules and "search_index = 1" in rules
-	assert "patch" in rules and "Custom Field" in rules
-	assert "after_migrate" not in P.SYSTEM_PROMPT
-	assert P.INDEX_RULES in P.SYSTEM_PROMPT
+def test_the_prompt_has_no_index_recipe_of_its_own():
+	"""P15: index advice is the profiler's (optimus/renderer/index_recipes.py), passed as a
+	fact for Slow Query; the prompt no longer teaches patches or on_doctype_update."""
+	assert not hasattr(P, "INDEX_RULES")
+	assert "on_doctype_update" not in P.SYSTEM_PROMPT and "INDEXES" not in P.SYSTEM_PROMPT
+	assert "profiler's index advice" in P._OUTPUT
 
 
-def test_metadata_column_rule_allows_trailing_creation():
-	assert "trailing `creation`" in P.INDEX_RULES
-	assert "alone or first" in P.INDEX_RULES
+def test_metadata_index_rule_text_still_forbids_a_leading_metadata_column():
+	assert "alone or first" in P.RULE_TEXT["metadata-index"]
 
 
 def test_every_enqueue_passes_enqueue_after_commit():

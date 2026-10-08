@@ -2044,7 +2044,7 @@ class TestPromptBlocksWired:
 
 	def test_blocks_are_in_the_system_prompt(self):
 		system, _ = ai_fix._build_messages({"finding_type": "Slow Query", "title": "x"})
-		for block in (ai_prompts.FRAPPE_REVIEW_RULES, ai_prompts.FRAPPE_DEV_IDIOMS, ai_prompts.INDEX_RULES):
+		for block in (ai_prompts.FRAPPE_REVIEW_RULES, ai_prompts.FRAPPE_DEV_IDIOMS):
 			assert block in system
 
 	def test_system_prompt_within_char_budget(self):

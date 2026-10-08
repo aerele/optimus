@@ -1,20 +1,21 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Render-time recipes (recipe_enrichment wired into render_raw): recipes fill
-the existing fix-hint / code / table-card slots, retired AI output is gone and
-raw DDL never reaches the report. Tasks 6a and 9a append the pre-fix
-Redundant Call note and the report text-edit tests to this file."""
+"""Render-time recipes (recipe_enrichment wired into render_raw): one advisor and one
+evidence lookup fill the finding's fix-hint / code slots and the table card, retired AI
+output is gone and raw DDL never reaches the report."""
 
 import html as _html
 import json
+import re
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from optimus import renderer
-from optimus.renderer import fix_recipes, recipe_enrichment
+from optimus.renderer import index_recipes, recipe_enrichment
+from optimus.renderer.recipe_enrichment import FieldEvidence, TableEvidence
 
 _CALLSITE = {"filename": "apps/myapp/myapp/api.py", "lineno": 12, "function": "load"}
 _RAW_DDL = "ALTER TABLE `tabSales Invoice` ADD INDEX IF NOT EXISTS `po_no_index` (`po_no`);"
@@ -65,17 +66,37 @@ def _render(doc):
 		return _html.unescape(renderer.render_raw(doc, recordings=[]))
 
 
-@pytest.fixture
-def erpnext_meta(monkeypatch):
-	import frappe
+def _field(fieldtype):
+	return FieldEvidence(fieldtype, 0, False, False, False)
 
-	meta = SimpleNamespace(custom=0, fields=[
-		SimpleNamespace(fieldname="po_no", fieldtype="Data", is_custom_field=0),
-		SimpleNamespace(fieldname="remarks", fieldtype="Small Text", is_custom_field=0),
-		SimpleNamespace(fieldname="customer", fieldtype="Link", is_custom_field=0),
-	])
-	monkeypatch.setattr(frappe, "get_meta", lambda dt, *a, **kw: meta, raising=False)
-	monkeypatch.setattr(frappe, "get_doctype_app", lambda dt: "erpnext", raising=False)
+
+def _evidence_for(doctype, fields):
+	types = {"name": "varchar", "creation": "datetime"}
+	for name, field in fields.items():
+		types[name] = {"Small Text": "text", "Date": "date"}.get(field.fieldtype, "varchar")
+	return TableEvidence(
+		table=f"tab{doctype}", doctype=doctype, app="erpnext", is_custom_doctype=False, dialect="mariadb",
+		fields=fields, column_types=types,
+		text_columns=frozenset(c for c, t in types.items() if t == "text"), unindexable_columns=frozenset(),
+		indexes=(),
+	)
+
+
+@pytest.fixture
+def evidence(monkeypatch):
+	"""Per-table evidence (A2): Sales Invoice and GL Entry belong to erpnext; every
+	listed column exists with its Frappe type and no index yet."""
+	tables = {
+		"tabSales Invoice": _evidence_for("Sales Invoice", {
+			"po_no": _field("Data"), "remarks": _field("Small Text"), "customer": _field("Link"),
+			"posting_date": _field("Date"), "status": _field("Select"),
+		}),
+		"tabGL Entry": _evidence_for("GL Entry", {
+			"against_voucher_type": _field("Link"), "against_voucher": _field("Dynamic Link"),
+		}),
+	}
+	monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", lambda table: tables.get(table))
+	return tables
 
 
 def _missing_index(ddl=_RAW_DDL, **kw):
@@ -83,23 +104,21 @@ def _missing_index(ddl=_RAW_DDL, **kw):
 	return _row("Missing Index", detail, **kw)
 
 
-def test_missing_index_shows_property_setter_recipe_not_raw_ddl(erpnext_meta):
+def test_missing_index_on_another_apps_field_gets_its_ensure_indexes_entry(evidence):
 	out = _render(_doc([_missing_index()]))
 	assert "ALTER TABLE" not in out
-	assert (
-		'make_property_setter("Sales Invoice", "po_no", "search_index", "1", "Check", for_doctype=False)'
-		in out
-	)
-	assert 'set search_index to 1 on its "po_no" field' in out
+	assert '{"doctype": "Sales Invoice", "search_index_field": "po_no"}' in out
+	assert 'make_property_setter(doctype, field, "search_index", 1, "Check")' in out
+	assert 'belongs to the "erpnext" app, so do not edit it' in out
 
 
-def test_postgres_ddl_never_rendered(erpnext_meta):
+def test_postgres_ddl_never_rendered(evidence):
 	pg = 'CREATE INDEX IF NOT EXISTS "tabSales Invoice_po_no_index" ON "public"."tabSales Invoice" ("po_no");'
 	out = _render(_doc([_missing_index(ddl=pg)]))
 	assert "CREATE INDEX" not in out
 
 
-def test_legacy_session_regenerates_clean(erpnext_meta):
+def test_legacy_session_regenerates_clean(evidence):
 	framework_n1 = _row(
 		"Framework N+1", {"callsite": _CALLSITE, "fix_hint": "Batch the calls."},
 		llm=dict(_OLD_AI, suggestion="**Fix**\n\npatch-frappe-core"),
@@ -113,26 +132,93 @@ def test_legacy_session_regenerates_clean(erpnext_meta):
 	assert "ALTER TABLE" not in out
 
 
-def test_table_card_composite_with_text_column_gets_the_prefix(erpnext_meta):
+def test_table_card_composite_with_text_column_gets_the_prefix_and_the_name(evidence):
+	"""D3: the card shows the advisor's own ensure_indexes() code, entry and name included."""
 	table = _table(recommended_index={
 		"columns": ["customer", "remarks"], "doctype": "Sales Invoice",
 		"together_count": 3, "read_count": 4, "also_filtered": [],
 	})
 	out = _render(_doc([], [table]))
-	assert 'frappe.db.add_index("Sales Invoice", ["customer", "remarks(255)"])' in out
+	name = index_recipes.optimus_index_name("Sales Invoice", ("customer", "remarks"))
+	entry = {"doctype": "Sales Invoice", "columns": ["customer", "remarks(255)"], "index_name": name}
+	assert json.dumps(entry) in out
+	assert 'frappe.db.add_index(doctype, columns, index_name=entry["index_name"])' in out
 
 
-def test_table_card_single_column_falls_back_to_candidates(erpnext_meta):
+def test_single_column_card_keeps_its_recommendation(evidence):
+	"""P6: the single-column recommendation is kept, so the card keeps together_count,
+	its SHOW INDEX hint and its route note."""
 	table = _table(recommended_index={
 		"columns": ["customer"], "doctype": "Sales Invoice",
 		"together_count": 3, "read_count": 4, "also_filtered": [],
 	})
 	out = _render(_doc([], [table]))
-	assert 'frappe.db.add_index("Sales Invoice", ["customer"])' not in out
-	assert "Index candidates - to speed up reads" in out
+	assert "Index candidate - to speed up reads" in out
+	assert "filtered together in <strong>3</strong> of 4 reads" in out
+	assert "SHOW INDEX FROM `tabSales Invoice`" in out
+	assert "One column: bench migrate drops a single-column index" in out
+	assert '{"doctype": "Sales Invoice", "search_index_field": "customer"}' in out
 
 
-def test_gated_hot_line_shows_note_and_hides_stored_ai(erpnext_meta):
+def test_write_hot_single_column_card_is_never_called_low_risk(evidence):
+	"""P6: GL Entry kept its recommendation, so the write-hot warning shows."""
+	table = _table(
+		table="tabGL Entry", is_write_hot=True, write_count=0,
+		recommended_index={
+			"columns": ["against_voucher"], "doctype": "GL Entry",
+			"together_count": 3, "read_count": 4, "also_filtered": [],
+		},
+	)
+	out = _render(_doc([], [table]))
+	assert "normally write-hot in production" in out
+	assert "adding an index here is low-risk" not in out
+
+
+def test_finding_and_card_on_the_same_columns_name_the_same_index(evidence):
+	"""D-I2: the card no longer says "patch" while the finding says something else."""
+	lookup = recipe_enrichment.make_evidence_lookup()
+	finding = {"finding_type": "Full Table Scan", "technical_detail": {
+		"table": "tabSales Invoice",
+		"normalized_query": "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND status = ?",
+	}}
+	table = {"table": "tabSales Invoice", "recommended_index": {
+		"columns": ["customer", "status"], "doctype": "Sales Invoice",
+		"together_count": 3, "read_count": 4, "also_filtered": [],
+	}}
+	recipe_enrichment.apply_finding_recipes([finding], evidence_lookup=lookup)
+	recipe_enrichment.apply_table_recipes([table], evidence_lookup=lookup)
+	name = index_recipes.optimus_index_name("Sales Invoice", ("customer", "status"))
+	rec = table["recommended_index"]
+	assert name in finding["technical_detail"]["suggested_ddl"]
+	assert rec["index_name"] == name and name in rec["route_note"]
+	assert rec["code"] == finding["technical_detail"]["suggested_ddl"]
+	assert rec["route"] == index_recipes.ROUTE_ENSURE_INDEXES
+	assert "patch" not in rec["route_note"]
+
+
+def test_card_never_renders_an_add_index_call_without_index_name(evidence):
+	"""D3: the card's code line is the advisor's code or nothing; it never shows a
+	nameless frappe.db.add_index(...) call (P1), and a card with no code has no code line."""
+	cards = [
+		_table(),
+		_table(table="tabGL Entry", recommended_index={
+			"columns": ["against_voucher"], "doctype": "GL Entry",
+			"together_count": 3, "read_count": 4, "also_filtered": [],
+		}),
+		_table(table="tabGone DocType", recommended_index={
+			"columns": ["customer", "status"], "doctype": "Gone DocType",
+			"together_count": 3, "read_count": 4, "also_filtered": [],
+		}),
+	]
+	out = _render(_doc([], cards))
+	calls = re.findall(r"frappe\.db\.add_index\(([^)]*)\)", out)
+	assert len(calls) == 2
+	assert all("index_name=" in args for args in calls), calls
+	assert out.count('<pre class="sql-snip">') == 2
+	assert "Do not add this index. Optimus could not read DocType \"Gone DocType\"" in out
+
+
+def test_gated_hot_line_shows_note_and_hides_stored_ai(evidence):
 	hot = _row("Hot Line", {
 		"file": "apps/myapp/myapp/controllers.py", "lineno": 30, "dotted_path": "myapp.controllers.X.validate",
 		"line_content": "super().validate()",
@@ -142,7 +228,7 @@ def test_gated_hot_line_shows_note_and_hides_stored_ai(erpnext_meta):
 	assert "skip-the-super-call" not in out
 
 
-def test_pure_python_hot_line_keeps_its_ai_fix(erpnext_meta):
+def test_pure_python_hot_line_keeps_its_ai_fix(evidence):
 	hot = _row("Hot Line", {
 		"file": "apps/myapp/myapp/controllers.py", "lineno": 30, "dotted_path": "myapp.controllers.X.total",
 		"line_content": "total = total + flt(row.qty) * flt(row.rate)",
@@ -155,42 +241,9 @@ def test_recipe_failure_fails_closed(monkeypatch):
 	def boom(*a, **kw):
 		raise RuntimeError("recipe bug")
 
-	monkeypatch.setattr(fix_recipes, "index_recipe", boom)
+	monkeypatch.setattr(index_recipes, "advise_finding", boom)
 	out = _render(_doc([_missing_index()]))
 	assert "ALTER TABLE" not in out
-
-
-def test_meta_lookup_is_memoised_and_shaped(monkeypatch):
-	import frappe
-
-	calls = []
-	meta = SimpleNamespace(custom=0, fields=[
-		SimpleNamespace(fieldname="po_no", fieldtype="Data", is_custom_field=0),
-		SimpleNamespace(fieldname="x_cf", fieldtype="Data", is_custom_field=1),
-	])
-	monkeypatch.setattr(frappe, "get_meta", lambda dt, *a, **kw: calls.append(dt) or meta, raising=False)
-	monkeypatch.setattr(frappe, "get_doctype_app", lambda dt: "myapp", raising=False)
-	lookup = recipe_enrichment.make_meta_lookup(installed_apps=frozenset({"frappe", "myapp"}))
-	first = lookup("Sales Invoice")
-	assert lookup("Sales Invoice") is first
-	assert calls == ["Sales Invoice"]
-	assert first == {
-		"module_app": "myapp", "is_own_app": True, "is_custom_doctype": False,
-		"fields": {
-			"po_no": {"fieldtype": "Data", "is_custom_field": False},
-			"x_cf": {"fieldtype": "Data", "is_custom_field": True},
-		},
-	}
-
-
-def test_meta_lookup_returns_none_when_get_meta_raises(monkeypatch):
-	import frappe
-
-	def missing(dt, *a, **kw):
-		raise frappe.DoesNotExistError(dt)
-
-	monkeypatch.setattr(frappe, "get_meta", missing, raising=False)
-	assert recipe_enrichment.make_meta_lookup()("Gone DocType") is None
 
 
 
@@ -204,13 +257,13 @@ def _rc_doc(detail):
 	return _doc([_row("Redundant Call", dict(detail), llm=dict(_OLD_AI, suggestion="**Fix**\n\nhoist-it"))])
 
 
-def test_pre_fix_redundant_call_shows_the_re_record_note(erpnext_meta):
+def test_pre_fix_redundant_call_shows_the_re_record_note(evidence):
 	out = _render(_rc_doc(_RC_DETAIL))
 	assert "analyzed before the callsite fix" in out and "re-record the flow" in out
 	assert "hoist-it" in out  # the stored suggestion stays visible, with the caveat
 
 
-def test_stamped_redundant_call_has_no_note(erpnext_meta):
+def test_stamped_redundant_call_has_no_note(evidence):
 	out = _render(_rc_doc(dict(_RC_DETAIL, callsite_walk="outermost_first")))
 	assert "analyzed before the callsite fix" not in out
 
@@ -228,14 +281,15 @@ def _current_prompt_version():
 	return ai_prompts.PROMPT_VERSION
 
 
-def test_table_card_never_names_customize_form(erpnext_meta):
+def test_table_card_never_names_customize_form(evidence):
 	out = _render(_doc([], [_table()]))
-	assert 'frappe.db.add_index("Sales Invoice", ["customer", "posting_date"])' in out
+	name = index_recipes.optimus_index_name("Sales Invoice", ("customer", "posting_date"))
+	assert json.dumps({"doctype": "Sales Invoice", "columns": ["customer", "posting_date"], "index_name": name}) in out
 	assert "Customize" not in out
-	assert "set search_index with a Property Setter for another app's DocType" in out
+	assert f"Your app's ensure_indexes() function creates the index \"{name}\"" in out
 
 
-def test_finding_card_code_block_is_labelled_suggested_index(erpnext_meta):
+def test_finding_card_code_block_is_labelled_suggested_index(evidence):
 	out = _render(_doc([_missing_index()]))
 	assert "Suggested DDL" not in out
 	assert "Suggested index" in out
@@ -246,16 +300,16 @@ def _ai_row(**llm):
 	return _row("N+1 Query", {"callsite": _CALLSITE}, llm=blob)
 
 
-def test_older_prompt_version_gets_the_stale_note(erpnext_meta):
+def test_older_prompt_version_gets_the_stale_note(evidence):
 	out = _render(_doc([_ai_row(prompt_version=_current_prompt_version() - 1)]))
 	assert "batch-the-query" in out and _STALE in out
 
 
-def test_legacy_suggestion_without_prompt_version_gets_the_stale_note(erpnext_meta):
+def test_legacy_suggestion_without_prompt_version_gets_the_stale_note(evidence):
 	out = _render(_doc([_ai_row()]))
 	assert "batch-the-query" in out and _STALE in out
 
 
-def test_current_prompt_version_has_no_stale_note(erpnext_meta):
+def test_current_prompt_version_has_no_stale_note(evidence):
 	out = _render(_doc([_ai_row(prompt_version=_current_prompt_version())]))
 	assert "batch-the-query" in out and _STALE not in out

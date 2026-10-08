@@ -9,8 +9,11 @@
     `frappe.db.add_index` patch + caveats);
 """
 
+import html as _html
 import json
 import types
+
+import pytest
 
 # --------------------------------------------------------------------------
 # table_breakdown co-occurrence → recommended_index
@@ -145,18 +148,41 @@ def _table_entry(**kw):
 	return base
 
 
+@pytest.fixture
+def evidence(monkeypatch):
+	from optimus.renderer import recipe_enrichment
+	from optimus.renderer.recipe_enrichment import FieldEvidence, TableEvidence
+
+	def table(doctype, columns):
+		fields = {c: FieldEvidence("Link", 0, False, False, False) for c in columns}
+		return TableEvidence(
+			table=f"tab{doctype}", doctype=doctype, app="erpnext", is_custom_doctype=False, dialect="mariadb",
+			fields=fields, column_types={"name": "varchar", **{c: "varchar" for c in columns}},
+			text_columns=frozenset(), unindexable_columns=frozenset(), indexes=(),
+		)
+
+	tables = {
+		"tabSales Invoice": table("Sales Invoice", ["customer", "posting_date", "status"]),
+		"tabGL Entry": table("GL Entry", ["against_voucher_type", "against_voucher_no"]),
+	}
+	monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", lambda t: tables.get(t))
+
+
 class TestRenderedIndexCandidatePanel:
-	def test_renders_recommendation_and_patch(self):
+	def test_renders_recommendation_and_patch(self, evidence):
 		from optimus import renderer
+		from optimus.renderer import index_recipes
 
 		html = renderer.render_raw(_doc([_table_entry()]), recordings=[])
+		name = index_recipes.optimus_index_name("Sales Invoice", ("customer", "posting_date"))
+		entry = {"doctype": "Sales Invoice", "columns": ["customer", "posting_date"], "index_name": name}
 		assert "Index candidate" in html
-		assert 'frappe.db.add_index("Sales Invoice", ["customer", "posting_date"])' in html
+		assert json.dumps(entry) in _html.unescape(html)
 		assert "SHOW INDEX FROM" in html
-		assert "A single-column index belongs on the field instead" in html
+		assert "ensure_indexes() function creates the index" in html
 		assert "Other columns this session filtered on" in html and "status" in html
 
-	def test_write_hot_warning(self):
+	def test_write_hot_warning(self, evidence):
 		from optimus import renderer
 
 		html = renderer.render_raw(_doc([_table_entry(
@@ -188,7 +214,7 @@ class TestRenderedIndexCandidatePanel:
 		assert "Index advice" not in html
 		assert "claude-sonnet-4-6" not in html and "already covers it" not in html
 
-	def test_single_column_recommendation_falls_back_to_candidates(self):
+	def test_single_column_recommendation_keeps_its_card(self, evidence):
 		from optimus import renderer
 
 		entry = _table_entry(recommended_index={
@@ -196,5 +222,5 @@ class TestRenderedIndexCandidatePanel:
 			"together_count": 3, "read_count": 4, "also_filtered": [],
 		})
 		html = renderer.render_raw(_doc([entry]), recordings=[])
-		assert "Index candidates - to speed up reads" in html
-		assert 'frappe.db.add_index("Sales Invoice", ["customer"])' not in html
+		assert "Index candidate - to speed up reads" in html
+		assert "One column: bench migrate drops a single-column index" in html

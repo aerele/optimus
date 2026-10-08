@@ -91,25 +91,6 @@ FRAPPE_DEV_IDIOMS = (
 	"query selects no child-table fields.\n\n"
 )
 
-# The durable index recipe (design spec section 4.4). Schema sync drops a
-# single-column index that no DocField or Property Setter declares; composite
-# indexes survive it.
-INDEX_RULES = (
-	"INDEXES\n"
-	"- Never raw `ALTER TABLE` / `CREATE INDEX`. Never Customize Form: it has no index option.\n"
-	"- Your own app's DocType: one column, tick Search Index on the field in the DocType; "
-	"several columns, `frappe.db.add_index(\"DocType\", [\"a\", \"b\"])` in "
-	"`on_doctype_update()` of that DocType's module.\n"
-	"- Another app's DocType: one column, a Property Setter `search_index = 1` (fixture or "
-	"`make_property_setter`); several columns, `frappe.db.add_index` in an idempotent patch.\n"
-	"- A Custom Field: one column, tick its Search Index; several columns, a patch.\n"
-	"- Column order: equality filters, then ranges, then the ORDER BY column; a trailing "
-	"`creation` for the default sort is fine. Never index a Frappe metadata column alone or "
-	"first (`name`, `creation`, `modified`, `owner`, `docstatus`, `parent`, `idx`, ...) or a "
-	"framework table (`tabDocType`, `tabSingles`, ...).\n"
-	"- If no index helps, say so and change the query shape instead.\n\n"
-)
-
 FIX_HEADINGS = ("Diagnosis", "Fix", "Why it works", "Verify")
 
 _OUTPUT = (
@@ -117,15 +98,15 @@ _OUTPUT = (
 	"words:\n"
 	"**Diagnosis**: 1 to 2 sentences naming the cause and its line number in the shown source.\n"
 	"**Fix**: one ```diff block (`-` = shown code, `+` = replacement), or no code when the "
-	"code was not shown. An index fix names the recipe from INDEXES; code is optional.\n"
+	"code was not shown. An index change follows the profiler's index advice when the message gives one; code is optional.\n"
 	"**Why it works**: 1 to 2 sentences.\n"
 	"**Verify**: 1 line: re-profile the same flow and name the number that should drop.\n"
 	"Do not restate the finding's title or numbers.\n\n"
 )
 
 # Worked examples show shape and discipline only. Example 1 keeps get_list
-# (permission semantics) and a per-group default order; Example 2 is an index
-# answer with no diff.
+# (permission semantics) and a per-group default order; Example 2 follows the
+# profiler's index advice with no diff.
 _EXAMPLES = (
 	"EXAMPLE 1 (N+1 in shown code; `get_list` stays `get_list`)\n"
 	"**Diagnosis**: line 31 runs `frappe.get_list(\"Item\", ...)` once per group, one query "
@@ -144,12 +125,12 @@ _EXAMPLES = (
 	"**Why it works**: one permission-checked query replaces one per group, and each group "
 	"keeps the default sort order.\n"
 	"**Verify**: the `tabItem` query count for this action drops from one per group to 1.\n\n"
-	"EXAMPLE 2 (index finding on another app's DocType; no code needed)\n"
+	"EXAMPLE 2 (Slow Query with the profiler's index advice; no code needed)\n"
 	"**Diagnosis**: `WHERE customer = ? ORDER BY creation DESC` on `tabSales Invoice` has no "
 	"usable index, so every call reads the whole table and sorts it.\n"
-	"**Fix**: add a composite index `(customer, creation)` with "
-	"`frappe.db.add_index(\"Sales Invoice\", [\"customer\", \"creation\"])` in a patch of "
-	"your app.\n"
+	"**Fix**: follow the profiler's index advice: add its entry for `(customer, creation)` to "
+	"your app's `ensure_indexes()`, which hooks.py runs as `after_install`, `after_sync` and "
+	"`after_migrate`.\n"
 	"**Why it works**: the index finds one customer's rows already in `creation` order, so "
 	"the scan and the sort disappear.\n"
 	"**Verify**: EXPLAIN shows the new index and no `Using filesort`; the query time drops.\n\n"
@@ -161,7 +142,7 @@ _SELF_CHECK = (
 )
 
 SYSTEM_PROMPT = (
-	_ROLE + _GROUNDING + FRAPPE_REVIEW_RULES + FRAPPE_DEV_IDIOMS + INDEX_RULES + _OUTPUT + _EXAMPLES + _SELF_CHECK
+	_ROLE + _GROUNDING + FRAPPE_REVIEW_RULES + FRAPPE_DEV_IDIOMS + _OUTPUT + _EXAMPLES + _SELF_CHECK
 )
 
 # ------------------------------------------------ per-type hints (USER message)
@@ -170,8 +151,8 @@ FINDING_TYPE_HINTS = {
 	"N+1 Query": "One query runs per row of an outer loop. Lift it out and batch it into one "
 	"`(\"in\", names)` query plus a dict keyed by the join column; keep `get_list` if the "
 	"loop used `get_list`.",
-	"Slow Query": "One SQL statement is slow. Add the right index (see INDEXES), make the "
-	"WHERE usable by an existing index, or touch fewer rows and columns.",
+	"Slow Query": "One SQL statement is slow. Follow the profiler's index advice when the message "
+	"gives one, make the WHERE usable by an existing index, or touch fewer rows and columns.",
 	"Redundant Call": "The same lookup runs many times with the same arguments. Hoist it out "
 	"of the loop, or cache it: `frappe.get_cached_value` / `frappe.get_cached_doc` for "
 	"document data, `@request_cache` for a repeated pure function. A repeated "
@@ -261,9 +242,9 @@ RULE_TEXT = {
 	"no-op-diff": "The diff changes nothing (removed and added lines are identical).",
 	"raw-sql": "New code must not call `frappe.db.sql` / `frappe.db.multisql` ({detail}); use "
 	"`frappe.get_list` / `frappe.get_all` / `frappe.db.get_values` / `frappe.qb`.",
-	"raw-ddl": "Indexes are never raw `ALTER TABLE` / `CREATE INDEX`: use the field's Search Index, a "
-	"`search_index` Property Setter, or `frappe.db.add_index(\"DocType\", [cols])` in "
-	"`on_doctype_update()` of your own DocType or in a patch.",
+	"raw-ddl": "Indexes are never raw `ALTER TABLE` / `CREATE INDEX`: follow the profiler's index advice "
+	"(the field's Search Index, or an entry in your app's `ensure_indexes()` that hooks.py runs as "
+	"`after_install`, `after_sync` and `after_migrate`).",
 	"sql-format-injection": "SQL values must be parameters (`%(name)s` with a dict), not f-strings, "
 	"`.format`, `%` or `+` ({detail}).",
 	"manual-commit": "Remove `frappe.db.commit()` / `frappe.db.rollback()`; Frappe commits the request.",
@@ -300,10 +281,10 @@ RULE_TEXT = {
 	"set-user-admin": "Do not switch to Administrator with `frappe.set_user(\"Administrator\")`; keep the "
 	"caller's permissions.",
 	# action="note": the profiler note appended by ai_guardrails.apply_fallback.
-	"customize-form-index": "Customize Form has no Search Index option in Frappe v16. Index one "
-	"column of your own DocType with its Search Index checkbox, one column of another app's "
-	"DocType with a `search_index` Property Setter, and several columns with "
-	"`frappe.db.add_index(...)` in `on_doctype_update()` of your own DocType or in a patch.",
+	"customize-form-index": "Customize Form has no Search Index option in Frappe v16. Follow the "
+	"profiler's index advice: the Search Index checkbox of your own DocType's field or of a Custom "
+	"Field, otherwise an entry in your app's `ensure_indexes()` that hooks.py runs as `after_install`, "
+	"`after_sync` and `after_migrate`.",
 	"context-truncated": "the model saw only part of the prompt because its context window is "
 	"smaller than the prompt. Raise it (Ollama: OLLAMA_CONTEXT_LENGTH or a Modelfile PARAMETER "
 	"num_ctx) and set the same value in Optimus Settings > Context window (tokens).",

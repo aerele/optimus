@@ -30,7 +30,7 @@ from urllib.parse import urljoin, urlsplit
 import requests
 
 from optimus import ai_budget, ai_guardrails, ai_prompts, safe_call
-from optimus.analyzers.base import humanize_duration_ms
+from optimus.analyzers.base import INDEX_FINDING_TYPES, humanize_duration_ms
 
 
 class AiFixError(Exception):
@@ -81,7 +81,7 @@ class AiFixError(Exception):
 
 # Index-family findings (Missing Index, Full Table Scan, Filesort, Temporary
 # Table, Low Filter Ratio) get a deterministic recipe from
-# optimus.renderer.fix_recipes instead of an LLM answer, and Framework N+1
+# optimus.renderer.index_recipes instead of an LLM answer, and Framework N+1
 # findings point at a loop inside framework code the app cannot change, so
 # none of them reaches the LLM. A Hot Line and a Redundant Call are further
 # gated per finding by ``llm_gate_note``.
@@ -281,7 +281,7 @@ def llm_gate_note(finding: dict) -> str | None:
 	from optimus.renderer import fix_recipes
 
 	if ftype not in AI_ELIGIBLE_FINDING_TYPES:
-		if ftype in fix_recipes.INDEX_FINDING_TYPES:
+		if ftype in INDEX_FINDING_TYPES:
 			return _INDEX_TYPE_NOTE
 		if ftype == "Framework N+1":
 			return _FRAMEWORK_N1_NOTE
@@ -2180,6 +2180,20 @@ def _window_lines(window: list[dict]) -> str:
 	)
 
 
+_INDEX_ADVICE_HEAD = (
+	"Index advice computed by the profiler from the DocType metadata and the table's indexes "
+	"(follow it for any index change):"
+)
+
+
+def _index_advice_text(advice: dict) -> str:
+	columns = ", ".join(str(c) for c in advice.get("columns") or []) or "none"
+	return (
+		f"Route: {advice.get('route')}. DocType: {advice.get('doctype')}. Columns: {columns}.\n"
+		f"{advice.get('text') or ''}"
+	).strip()
+
+
 _LOOP_FACT_TYPES: frozenset[str] = frozenset({"N+1 Query", "Redundant Call", "Hot Line"})
 
 
@@ -2292,6 +2306,9 @@ def _build_fix_request(
 		))
 	if detail.get("normalized_query"):
 		tail.append((2, "Query (normalized):\n" + block("sql", _truncate(detail["normalized_query"], _MAX_QUERY_CHARS), "sql")))
+	advice = finding.get("index_advice")
+	if ftype == "Slow Query" and isinstance(advice, dict) and advice.get("text"):
+		tail.append((1, _INDEX_ADVICE_HEAD + "\n" + block("index-advice", ai_budget.clip(_index_advice_text(advice), 1600))))
 	if detail.get("explain_row"):
 		tail.append((4, "EXPLAIN row:\n" + block("explain", _truncate(detail["explain_row"], 800))))
 	examples = detail.get("example_queries") or []

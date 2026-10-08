@@ -1,17 +1,18 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Render-time glue for the deterministic fix recipes.
+"""Render-time glue for the deterministic recipes.
 
-Writes ``fix_recipes`` output into slots the report template already renders
-(a finding's ``technical_detail.fix_hint`` prose and ``suggested_ddl`` code
-block, a table card's ``recommended_index.columns``), hides AI output the
-report no longer shows (index-family and Framework N+1 ``llm_fix``, table
-``ai_index``, the stored fix of a gated Hot Line) and fails closed: an
-index-family finding without a recipe loses the analyzer's raw
-``ALTER TABLE`` / ``CREATE INDEX`` text. Stored JSON is never modified.
+Writes ``index_recipes`` advice into slots the report template already renders (a
+finding's ``technical_detail.fix_hint`` prose and ``suggested_ddl`` code block, a table
+card's ``recommended_index``), hides AI output the report no longer shows (index-family
+and Framework N+1 ``llm_fix``, table ``ai_index``, the stored fix of a gated Hot Line)
+and fails closed: an index-family finding never shows the analyzer's raw ``ALTER TABLE``
+/ ``CREATE INDEX`` text. Stored JSON is never modified.
 
-``make_meta_lookup`` is the only function that touches Frappe.
+``make_evidence_lookup`` is the only function that touches Frappe: it reads DocField
+flags, the DocType's app, real column types and existing indexes once per table per
+render (owner decision A2).
 """
 
 from __future__ import annotations
@@ -19,8 +20,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
+from optimus.analyzers.base import INDEX_FINDING_TYPES
 from optimus.dbdialect import get_dialect
-from optimus.renderer import fix_recipes
+from optimus.renderer import fix_recipes, index_recipes
 from optimus.safe_call import best_effort
 
 
@@ -98,7 +100,7 @@ def _read_table_evidence(table: str) -> TableEvidence | None:
 	not exist (checked BEFORE get_meta, P8) or its columns cannot be read."""
 	import frappe
 
-	doctype = fix_recipes._doctype_of(table)
+	doctype = index_recipes.doctype_of(table)
 	if doctype is None:
 		return None
 	if not frappe.db.exists("DocType", doctype):
@@ -153,57 +155,15 @@ def make_evidence_lookup() -> Callable[[str], TableEvidence | None]:
 	return lookup
 
 
-def _read_meta(
-	doctype: str, *, tracked_apps: tuple[str, ...], installed_apps: frozenset[str] | None,
-) -> dict | None:
-	import frappe
-
-	meta = best_effort(lambda: frappe.get_meta(doctype), None)
-	if meta is None:
-		return None
-	app = best_effort(lambda: frappe.get_doctype_app(doctype), "") or ""
-	fields: dict[str, dict] = {}
-	for df in getattr(meta, "fields", None) or []:
-		name = getattr(df, "fieldname", None)
-		if name:
-			fields[name] = {
-				"fieldtype": getattr(df, "fieldtype", "") or "",
-				"is_custom_field": bool(getattr(df, "is_custom_field", 0)),
-			}
-	return {
-		"module_app": app,
-		"is_own_app": fix_recipes.is_own_app(app, tracked_apps=tracked_apps, installed_apps=installed_apps),
-		"is_custom_doctype": bool(getattr(meta, "custom", 0)),
-		"fields": fields,
-	}
-
-
-def make_meta_lookup(
-	*, tracked_apps: tuple[str, ...] = (), installed_apps: frozenset[str] | None = None,
-) -> Callable[[str], dict | None]:
-	"""A per-render ``meta_lookup(doctype)`` for ``fix_recipes`` (memoised;
-	returns None when the DocType cannot be read; ordinary failures return None; job timeouts propagate)."""
-	cache: dict[str, dict | None] = {}
-	scope = tuple(tracked_apps or ())
-
-	def lookup(doctype: str) -> dict | None:
-		if doctype not in cache:
-			cache[doctype] = best_effort(
-				lambda: _read_meta(doctype, tracked_apps=scope, installed_apps=installed_apps), None,
-			)
-		return cache[doctype]
-
-	return lookup
-
-
 def apply_finding_recipes(
 	findings: list[dict],
 	*,
-	meta_lookup: Callable[[str], dict | None],
+	evidence_lookup: Callable[[str], TableEvidence | None],
 	tracked_apps: tuple[str, ...] = (),
 	installed_apps: frozenset[str] | None = None,
 ) -> None:
-	"""Mutate render dicts in place (see the module docstring)."""
+	"""Fill each render dict's recipe slots in place (see the module docstring)."""
+	scope = tuple(tracked_apps or ())
 	for f in findings or []:
 		if not isinstance(f, dict):
 			continue
@@ -211,14 +171,16 @@ def apply_finding_recipes(
 		if not isinstance(detail, dict):
 			continue
 		ftype = f.get("finding_type") or ""
-		if ftype in fix_recipes.INDEX_FINDING_TYPES:
+		if ftype in INDEX_FINDING_TYPES:
 			f["llm_fix"] = None
-			recipe = best_effort(lambda: fix_recipes.index_recipe(f, meta_lookup=meta_lookup), None)
+			advice = best_effort(
+				lambda: index_recipes.advise_finding(f, evidence_lookup=evidence_lookup, tracked_apps=scope), None,
+			)
 			detail.pop("suggested_ddl", None)
-			if recipe:
-				detail["fix_hint"] = recipe["text"]
-				if recipe.get("code"):
-					detail["suggested_ddl"] = recipe["code"]
+			if advice is not None:
+				detail["fix_hint"] = index_recipes.finding_text(advice)
+				if advice.code:
+					detail["suggested_ddl"] = advice.code
 		elif ftype == "Redundant Call" and fix_recipes.analyzed_before_callsite_fix(f):
 			existing = str(detail.get("validation_note") or "").strip()
 			detail["validation_note"] = f"{existing} {fix_recipes.PRE_L5_REDUNDANT_CALL_NOTE}".strip()
@@ -226,9 +188,7 @@ def apply_finding_recipes(
 			f["llm_fix"] = None
 		elif ftype == "Hot Line":
 			note = best_effort(
-				lambda: fix_recipes.hot_line_gate(
-					f, tracked_apps=tuple(tracked_apps or ()), installed_apps=installed_apps,
-				), None,
+				lambda: fix_recipes.hot_line_gate(f, tracked_apps=scope, installed_apps=installed_apps), None,
 			)
 			if note:
 				detail["fix_hint"] = note
@@ -236,11 +196,17 @@ def apply_finding_recipes(
 
 
 def apply_table_recipes(
-	table_breakdown: list[dict], *, meta_lookup: Callable[[str], dict | None],
+	table_breakdown: list[dict],
+	*,
+	evidence_lookup: Callable[[str], TableEvidence | None],
+	tracked_apps: tuple[str, ...] = (),
 ) -> None:
-	"""Drop ``ai_index`` from every table entry and replace each card's
-	``recommended_index.columns`` with the durable column list (or drop the
-	recommendation so the card falls back to its candidate list)."""
+	"""Drop ``ai_index`` from every table entry and run each card's
+	``recommended_index`` through the same advisor as the findings. The recommendation
+	is kept, single column included (P6), and gains ``route``, ``route_note`` (the
+	card's note), ``code`` and ``index_name``; it is dropped only when the advisor has
+	nothing to say (no DocType table, no usable column)."""
+	scope = tuple(tracked_apps or ())
 	for t in table_breakdown or []:
 		if not isinstance(t, dict):
 			continue
@@ -248,15 +214,21 @@ def apply_table_recipes(
 		rec = t.get("recommended_index")
 		if not isinstance(rec, dict) or not rec.get("columns"):
 			continue
-		cols = best_effort(
-			lambda: fix_recipes.table_card_columns(
-				t.get("table") or "", list(rec.get("columns") or []), meta_lookup=meta_lookup,
-			), None,
+		advice = best_effort(
+			lambda: index_recipes.advise_table(
+				t.get("table") or "", list(rec.get("columns") or []), evidence_lookup=evidence_lookup,
+				tracked_apps=scope,
+			),
+			None,
 		)
-		if cols is None:
+		if advice is None:
 			t.pop("recommended_index", None)
-		else:
-			rec["columns"] = cols
+			continue
+		rec["columns"] = list(advice.columns)
+		rec["route"] = advice.route
+		rec["route_note"] = index_recipes.card_note(advice)
+		rec["code"] = advice.code
+		rec["index_name"] = (advice.entry or {}).get("index_name")
 
 
 def mark_outdated_ai_fixes(findings: list[dict], *, current_version: int | None = None) -> None:

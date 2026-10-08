@@ -418,6 +418,18 @@ def is_write_hot_table(name) -> bool:
 	return bool(name) and str(name).strip().strip("`").lower() in _WRITE_HOT_TABLES_LOWER
 
 
+# The finding types whose fix is an index: explain_flags emits the four EXPLAIN ones,
+# index_suggestions emits Missing Index. Their advice is deterministic
+# (optimus/renderer/index_recipes.py) and never comes from the AI.
+INDEX_FINDING_TYPES: frozenset[str] = frozenset({
+	"Missing Index",
+	"Full Table Scan",
+	"Filesort",
+	"Temporary Table",
+	"Low Filter Ratio",
+})
+
+
 def _last_app_segment(norm: str) -> str | None:
 	"""The ``<app>`` in a real ``apps/<app>/`` segment, or None.
 

@@ -2035,6 +2035,7 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 		(r.get("uuid") or ""): r for r in (recordings or []) if r.get("uuid")
 	}
 	actions_by_idx = {a["idx"]: a for a in (getattr(context, "actions", None) or []) if "idx" in a}
+	evidence_lookup, tracked = _ai_evidence_scope()
 	started = time.monotonic()
 	failures = 0
 	skipped_for_time = 0
@@ -2072,6 +2073,8 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 				ns, file_cache, phase2_index=phase2_index,
 				recordings_by_uuid=recordings_by_uuid,
 				actions_by_idx=actions_by_idx,
+				evidence_lookup=evidence_lookup,
+				tracked_apps=tracked,
 			))
 			f["llm_fix_json"] = json.dumps(result, default=str)
 
@@ -2102,6 +2105,8 @@ def _ai_payload_for_finding(
 	phase2_index: dict | None = None,
 	recordings_by_uuid: dict | None = None,
 	actions_by_idx: dict | None = None,
+	evidence_lookup=None,
+	tracked_apps: tuple[str, ...] = (),
 ) -> dict:
 	"""Build the dict ``ai_fix.suggest_fix`` expects from a finding-like object
 	(an ``Optimus Finding`` child row or a ``SimpleNamespace`` shaped like one).
@@ -2113,7 +2118,8 @@ def _ai_payload_for_finding(
 	``actions_by_idx`` are given and the finding has an ``action_ref``, the top-N
 	slowest queries from that action's recording are attached as
 	``technical_detail.example_queries`` (verbatim SQL evidence), unless already
-	set by a SQL red-flag analyzer."""
+	set by a SQL red-flag analyzer. A Slow Query also carries the deterministic
+	index advice (``index_advice``) when ``evidence_lookup`` is given (P15)."""
 	payload = renderer._finding_to_dict(child, file_cache=file_cache)
 	callsite = (payload.get("technical_detail") or {}).get("callsite") or {}
 	if callsite.get("filename") and callsite.get("lineno") is not None:
@@ -2134,6 +2140,9 @@ def _ai_payload_for_finding(
 				"hits": hot.get("hits") or 0,
 			}
 
+	if (payload.get("finding_type") or "") == "Slow Query" and evidence_lookup is not None:
+		_attach_index_advice(payload, evidence_lookup, tracked_apps)
+
 	_maybe_attach_recorded_queries(
 		payload,
 		action_ref=getattr(child, "action_ref", None) or (child.get("action_ref") if isinstance(child, dict) else None),
@@ -2141,6 +2150,37 @@ def _ai_payload_for_finding(
 		actions_by_idx=actions_by_idx,
 	)
 	return payload
+
+
+def _attach_index_advice(payload: dict, evidence_lookup, tracked_apps: tuple[str, ...]) -> None:
+	"""``payload["index_advice"]`` from the same advisor the report uses (P15)."""
+	from optimus import safe_call
+	from optimus.renderer import index_recipes
+
+	advice = safe_call.best_effort(
+		lambda: index_recipes.advise_finding(payload, evidence_lookup=evidence_lookup, tracked_apps=tracked_apps),
+		None,
+	)
+	if advice is not None:
+		payload["index_advice"] = {
+			"route": advice.route,
+			"doctype": advice.doctype,
+			"columns": list(advice.columns),
+			"text": index_recipes.finding_text(advice),
+		}
+
+
+def _ai_evidence_scope() -> tuple:
+	"""``(evidence_lookup, tracked_apps)`` for one AI run's Slow Query advice."""
+	from optimus import safe_call
+	from optimus.renderer import recipe_enrichment
+
+	def _tracked() -> tuple[str, ...]:
+		from optimus.settings import get_config
+
+		return tuple(getattr(get_config(), "tracked_apps", ()) or ())
+
+	return recipe_enrichment.make_evidence_lookup(), safe_call.best_effort(_tracked, ())
 
 
 def _ai_grounding_window(filename: str, lineno, file_cache: dict) -> list[dict] | None:
@@ -2285,6 +2325,7 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 
 	file_cache: dict = {}
 	phase2_index = _phase2_index_for(doc)
+	evidence_lookup, tracked = _ai_evidence_scope()
 	started = time.monotonic()
 	for idx, r in enumerate(chosen):
 		if time.monotonic() - started > time_budget:
@@ -2292,7 +2333,9 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 			break
 
 		def _suggest(r=r):
-			result = ai_fix.suggest_fix(_ai_payload_for_finding(r, file_cache, phase2_index=phase2_index))
+			result = ai_fix.suggest_fix(_ai_payload_for_finding(
+				r, file_cache, phase2_index=phase2_index, evidence_lookup=evidence_lookup, tracked_apps=tracked,
+			))
 			blob = json.dumps(result, default=str)
 			frappe.db.set_value("Optimus Finding", r.name, "llm_fix_json", blob)
 			r.llm_fix_json = blob

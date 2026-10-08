@@ -36,6 +36,31 @@ GOLDEN_PATH = Path(__file__).parent / "fixtures" / "renderer_structure.json"
 _REGENERATE_ENV = "REGENERATE_RENDERER_SNAPSHOT"
 
 
+@pytest.fixture(autouse=True)
+def _index_evidence(monkeypatch):
+	"""Deterministic index evidence: the snapshot's index finding and table card keep
+	their code block and card on every machine."""
+	from optimus.renderer import recipe_enrichment
+	from optimus.renderer.recipe_enrichment import FieldEvidence, TableEvidence
+
+	def field(fieldtype):
+		return FieldEvidence(fieldtype, 0, False, False, False)
+
+	evidence = TableEvidence(
+		table="tabSales Invoice", doctype="Sales Invoice", app="erpnext", is_custom_doctype=False,
+		dialect="mariadb",
+		fields={"customer": field("Link"), "status": field("Select"), "posting_date": field("Date")},
+		column_types={
+			"name": "varchar", "creation": "datetime", "customer": "varchar", "status": "varchar",
+			"posting_date": "date",
+		},
+		text_columns=frozenset(), unindexable_columns=frozenset(), indexes=(),
+	)
+	monkeypatch.setattr(
+		recipe_enrichment, "_read_table_evidence", lambda table: evidence if table == "tabSales Invoice" else None,
+	)
+
+
 # --------------------------------------------------------------------------
 # Fixture covers as many of the 14 conditional sections as practical
 # --------------------------------------------------------------------------

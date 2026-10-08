@@ -8,7 +8,7 @@ from functools import partial
 import pytest
 
 from optimus import ai_fix, analyze
-from optimus.renderer import fix_recipes, recipe_enrichment, source
+from optimus.renderer import fix_recipes, index_recipes, recipe_enrichment, source
 from optimus.tests.test_ai_loop_facts import _finding
 
 pytestmark = pytest.mark.rq
@@ -29,17 +29,17 @@ def test_new_boundaries_preserve_a_fresh_job_timeout(monkeypatch, path):
 		monkeypatch.setattr(fix_recipes, "loop_facts", interrupted)
 		call = partial(ai_fix._loop_facts_text, _finding())
 	elif path == "metadata":
-		monkeypatch.setattr(recipe_enrichment, "_read_meta", interrupted)
-		call = partial(recipe_enrichment.make_meta_lookup(), "Invoice")
+		monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", interrupted)
+		call = partial(recipe_enrichment.make_evidence_lookup(), "tabInvoice")
 	elif path == "finding":
-		monkeypatch.setattr(fix_recipes, "index_recipe", interrupted)
+		monkeypatch.setattr(index_recipes, "advise_finding", interrupted)
 		call = partial(recipe_enrichment.apply_finding_recipes,
-			[{"finding_type": "Missing Index", "technical_detail": {}}], meta_lookup=lambda dt: None,
+			[{"finding_type": "Missing Index", "technical_detail": {}}], evidence_lookup=lambda table: None,
 		)
 	elif path == "table":
-		monkeypatch.setattr(fix_recipes, "table_card_columns", interrupted)
+		monkeypatch.setattr(index_recipes, "advise_table", interrupted)
 		call = partial(recipe_enrichment.apply_table_recipes,
-			[{"table": "tabInvoice", "recommended_index": {"columns": ["customer"]}}], meta_lookup=lambda dt: None,
+			[{"table": "tabInvoice", "recommended_index": {"columns": ["customer"]}}], evidence_lookup=lambda table: None,
 		)
 	else:
 		monkeypatch.setattr(source, "_source_lines", interrupted)

@@ -172,7 +172,7 @@ from optimus.renderer.line_drilldown import (
 from optimus.renderer.recipe_enrichment import (
 	apply_finding_recipes,
 	apply_table_recipes,
-	make_meta_lookup,
+	make_evidence_lookup,
 	mark_outdated_ai_fixes,
 )
 from optimus.renderer.source import (
@@ -590,19 +590,20 @@ def render(
 	if not _ai_findings_on:
 		for _f in all_findings:
 			_f["llm_fix"] = None
-	# deterministic index recipes fill the existing fix-hint / code /
-	# table-card slots, retired AI output (index-family and Framework N+1
-	# suggestions, table ``ai_index``) is hidden and gated Hot Lines get their
-	# note. Render time, so regenerating an older session picks it up.
+	# deterministic index advice fills the existing fix-hint / code / table-card
+	# slots from ONE advisor and one per-render evidence lookup, retired AI output
+	# (index-family and Framework N+1 suggestions, table ``ai_index``) is hidden and
+	# gated Hot Lines get their note. Render time, so regenerating an older session
+	# picks it up.
 	_installed_apps = installed_apps_allowlist()
-	_meta_lookup = make_meta_lookup(
-		tracked_apps=render_config["tracked_apps"], installed_apps=_installed_apps,
-	)
+	_evidence_lookup = make_evidence_lookup()
 	apply_finding_recipes(
-		all_findings, meta_lookup=_meta_lookup,
+		all_findings, evidence_lookup=_evidence_lookup,
 		tracked_apps=render_config["tracked_apps"], installed_apps=_installed_apps,
 	)
-	apply_table_recipes(table_breakdown, meta_lookup=_meta_lookup)
+	apply_table_recipes(
+		table_breakdown, evidence_lookup=_evidence_lookup, tracked_apps=render_config["tracked_apps"],
+	)
 	mark_outdated_ai_fixes(all_findings)
 
 	# v0.6.x: drop framework/internal db tables from the "Time spent per
