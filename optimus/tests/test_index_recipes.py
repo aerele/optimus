@@ -732,11 +732,13 @@ class TestTopLevelSameColumnOr:
 		where = "`po_no` IS NULL OR `po_no`=? ORDER BY `posting_date` DESC"
 		assert _r4("Full Table Scan", where).columns == ("po_no",)
 		advice = _r4("Filesort", where)
-		assert advice.columns == ("po_no", "posting_date")
-		# bounded corrective: po_no matches two values (NULL and ?), so the rows do not come back sorted
+		# po_no matches two values (NULL and ?), so the rows do not come back sorted and the sort
+		# column would only widen the index (review-t12 M8)
+		assert advice.columns == ("po_no",)
 		text = ir.finding_text(advice)
 		assert "already sorted" not in text and "removes the sort" not in text
-		assert "The filter on po_no matches more than one value, so the database still sorts the rows" in text
+		assert "The filter on po_no matches more than one value, so this index cannot return the rows in order" in text
+		assert "Optimus left out posting_date (an index cannot return these rows in order" in text
 
 	def test_other_top_level_ors_still_count_as_or(self):
 		labelled = [("WHERE", "status"), ("WHERE", "customer"), ("WHERE", "company")]
@@ -1071,7 +1073,7 @@ class TestMultiValueEquality:
 		advice = _r4("Filesort", "(`po_no` IS NULL OR `po_no`=?) AND `posting_date` > ? ORDER BY `modified` DESC")
 		assert advice.columns == ("po_no", "posting_date")
 		advice = _r4("Filesort", "`po_no` IS NULL OR `po_no`=? ORDER BY `creation` DESC")
-		assert advice.columns == ("po_no", "creation")
+		assert advice.columns == ("po_no",)  # the sort column cannot be served (review-t12 M8)
 		assert "already sorted" not in ir.finding_text(advice)
 
 
@@ -1106,16 +1108,15 @@ class TestPostgresRowWidth:
 
 	def test_a_postgres_leading_column_over_the_row_limit_gives_no_code(self):
 		ev = _ev(dialect="postgres", fields={"long_code": F("Data", length=700), "customer": F("Link")})
-		advice = ir.advise_table("tabSales Invoice", ["long_code"], evidence_lookup=_lookup(ev))
+		# a card keeps the analyzer's most-used-first order (review-t12 M6)
+		advice = ir.advise_table("tabSales Invoice", ["long_code", "customer"], evidence_lookup=_lookup(ev))
 		assert advice.route == ir.ROUTE_NO_CODE
 		assert "could be 2800 bytes wide, over the 2704-byte Postgres index row limit" in ir.card_note(advice)
-		# with another column, the one too wide to lead goes last and is left out (review-t12 item 1)
-		for cols in (["long_code", "customer"], ["customer", "long_code"]):
-			advice = ir.advise_table("tabSales Invoice", cols, evidence_lookup=_lookup(ev))
-			assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["customer"]
-			assert "Optimus left out long_code (the index would pass the 2704-byte Postgres index row limit)" in (
-				ir.card_note(advice)
-			)
+		advice = ir.advise_table("tabSales Invoice", ["customer", "long_code"], evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["customer"]
+		assert "Optimus left out long_code (the index would pass the 2704-byte Postgres index row limit)" in (
+			ir.card_note(advice)
+		)
 
 	def test_a_postgres_index_under_the_row_limit_is_an_entry(self):
 		ev = _ev(dialect="postgres", fields={"code_a": F("Data", length=300), "customer": F("Link")})

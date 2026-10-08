@@ -24,13 +24,14 @@ rules a column out. The advisor picks one route:
   first and a ``search_index`` Property Setter only after that, so a failed build leaves
   nothing that a later sync of the DocType would retry outside the guard. Index builds wait
   at most 300 seconds for a table lock.
-- ``no_code``: an explanation and no code. The equality columns of a recipe are put in
+- ``no_code``: an explanation and no code. A finding recipe's equality columns are put in
   one fixed order, so the same filter in any predicate order gives one recipe and one
-  index name. The index exists already when an existing index starts with the recipe's
-  equality columns in any order, then its range or sort columns in order; a recipe is
-  also refused when an equality column is unique on its own, or when only Check fields
-  follow an existing index's equality prefix, and a one-column recipe when its column
-  leads an index or the index EXPLAIN names. The table's real index list decides, never
+  index name (a table card keeps the analyzer's most-used-first order). The index exists
+  already when an existing index starts with the recipe's equality columns in any order,
+  then its range or sort columns in order; a recipe is also refused when an equality
+  column is unique on its own or a unique index's columns are all equality columns, or
+  when an existing index serves every column but its Check fields, and a one-column
+  recipe when its column leads an index or the index EXPLAIN names. The table's real index list decides, never
   the Search Index flag. A no_code that only says Optimus could not tell (``unknown``: no
   evidence for the table, an unread filter, a column the SQL parser did not report, a UNION
   that filters the table in more than one branch, a query too long to parse) is no verdict,
@@ -164,8 +165,8 @@ _TYPE_LEADS: dict[str, str] = {
 		"Index the filter and GROUP BY columns so the grouping reads the index instead of a temporary table."
 	),
 	"Low Filter Ratio": (
-		"Index the most selective filter column first so fewer rows are read, "
-		"then confirm with EXPLAIN that the new index is used."
+		"An index on these filter columns lets the database skip most of the rows it now reads; "
+		"confirm with EXPLAIN that the new index is used."
 	),
 }
 _FILTER_LEAD = _TYPE_LEADS["Full Table Scan"]
@@ -285,7 +286,9 @@ class IndexAdvice:
 	``ensure_indexes()`` entry for ``ROUTE_ENSURE_INDEXES``. ``unknown`` marks a
 	``ROUTE_NO_CODE`` that is no verdict on the index, only a sign that Optimus could not
 	tell (no evidence for the table, a filter it could not read, a query too long to parse),
-	so a table card never says "Do not add this index." for it (U2, E6)."""
+	so a table card never says "Do not add this index." for it (U2, E6). ``served`` marks a
+	``ROUTE_NO_CODE`` because an existing index already serves the recipe, so ``advise`` never
+	trades it for a weaker recipe without the sort."""
 
 	route: str
 	doctype: str
@@ -297,6 +300,7 @@ class IndexAdvice:
 	app_name: str = UNKNOWN_APP
 	lead: str = ""
 	unknown: bool = False
+	served: bool = False
 
 	@property
 	def code(self) -> str | None:
@@ -959,6 +963,58 @@ def _where_columns(query: str, qualifiers, columns: Mapping[str, str], *, trunca
 	return out
 
 
+_JOIN_SIDES: frozenset[str] = frozenset({"left", "right", "inner", "cross", "full", "natural"})
+
+
+def _from_clause(query: str) -> list[tuple[str, str]] | None:
+	"""``[(table, how)]`` for the main query's FROM clause (the first one outside brackets),
+	in order: ``table`` is the lowercase unquoted name, "(derived)" for a subquery, and
+	``how`` is "from" for the first table, then "left", "right", "cross", "full", "natural"
+	or "inner" (a plain JOIN, STRAIGHT_JOIN or a comma). None when there is no FROM."""
+	tokens = [tok for tok in _SQL_TOKEN_RE.findall(query or "") if not _COMMENT_RE.match(tok)]
+	depth = 0
+	start = None
+	for i, tok in enumerate(tokens):
+		depth += {"(": 1, ")": -1}.get(tok, 0)
+		if not depth and tok.lower() == "from":
+			start = i + 1
+			break
+	if start is None:
+		return None
+	out: list[tuple[str, str]] = []
+	how, side, expect = "from", "", True
+	depth = 0
+	for i in range(start, len(tokens)):
+		tok = tokens[i]
+		if tok == "(":
+			if not depth and expect:
+				out.append(("(derived)", how))
+				expect = False
+			depth += 1
+			continue
+		if tok == ")":
+			depth -= 1
+			continue
+		if depth:
+			continue
+		low = tok.lower()
+		nxt = tokens[i + 1].lower() if i + 1 < len(tokens) else ""
+		if low == "where" or low in _CLAUSE_ENDS:
+			break
+		if low == ",":
+			how, side, expect = "inner", "", True
+		elif low in _JOIN_SIDES and nxt in ("join", "outer"):
+			side = low
+		elif low in ("join", "straight_join"):
+			how, side, expect = side or "inner", "", True
+		elif low == "." and out and i + 1 < len(tokens):
+			out[-1] = (tokens[i + 1].strip('`"').lower(), out[-1][1])  # db.table: the table
+		elif expect and _NAME_RE.fullmatch(tok) and low not in ("outer", "lateral"):
+			out.append((tok.strip('`"').lower(), how))
+			expect = False
+	return out
+
+
 def _index_order(
 	cols: list[str], comparisons: Mapping[str, str], *, serves: str = "",
 ) -> tuple[list[str], list[tuple[str, str]]]:
@@ -967,12 +1023,18 @@ def _index_order(
 	column, one index serving both) cannot share an index with a sort column after it:
 	when the index ``serves`` a sort or a grouping (Filesort, Temporary Table) the range
 	filter is left out, otherwise one range column follows the equality columns and the
-	rest is left out. Each left-out column comes with the reason."""
+	rest is left out. A sort or group column the index cannot serve (no ``serves``: a filter
+	matches several values, or the sort is no plain column list) is left out too, since it
+	would only widen the index (M8); a range-filtered sort column (``"rsort"``) then still
+	counts as the range it is. Each left-out column comes with the reason."""
 	eq = [col for col in cols if comparisons.get(col, "eq") in ("eq", "in")]
-	ranges = [col for col in cols if comparisons.get(col) == "range"]
-	sorts = [col for col in cols if comparisons.get(col) == "sort"]
+	ranges = [col for col in cols if comparisons.get(col) == "range" or (not serves and comparisons.get(col) == "rsort")]
+	sorts = [col for col in cols if comparisons.get(col) == "sort" or (serves and comparisons.get(col) == "rsort")]
 	if not ranges:
-		return eq + sorts, []
+		if serves or not sorts:
+			return eq + sorts, []
+		why = "an index cannot return these rows in order, so the column would add nothing"
+		return eq, [(col, why) for col in sorts]
 	if serves and sorts:
 		return eq + sorts, [
 			(col, f"the range filter on {col} cannot also use this index, which removes {serves} instead")
@@ -1310,8 +1372,11 @@ def _existing_index_problem(
 	  ``company = ? AND posting_date = ?`` (the equality block is put in one order by
 	  ``_canonical``, so the verdict, the columns and the index name never depend on the
 	  order of the query's predicates);
-	- the only columns beyond an existing index's equality prefix are Check fields, which
-	  match too many rows for an index to narrow (the advisor's own Check rule).
+	- a unique index's columns are all equality columns: it returns at most one row (M3);
+	- an existing index serves every column but the Check fields (the non-Check equality
+	  columns in any order, then the range or sort columns in order), which match too many
+	  rows for an index to narrow (the advisor's own Check rule; M1: Frappe's creation index
+	  serves ``creation > ? AND is_return = ?``).
 
 	A single-column recipe is refused when its column is unique on its own, leads an
 	existing index under any name, or leads an index EXPLAIN names. Search Index is never
@@ -1333,6 +1398,14 @@ def _existing_index_problem(
 				f'Column "{unique}" is already unique, so the database finds the rows through its index and a '
 				f"new index would not help. {tail}"
 			)
+		# a unique index whose columns the equality filter all fixes returns at most one row (M3)
+		pinned = next((ix for ix in evidence.indexes if ix.unique and ix.columns and set(ix.columns) <= set(eq)), None)
+		if pinned is not None:
+			return (
+				f'The unique index "{pinned.name}" on table "{table}" covers {_cols_text(pinned.columns)}, which '
+				"this query compares with known values, so the database finds the rows through it and a new index "
+				f"would not help. {tail}"
+			)
 		covering = next((ix for ix in evidence.indexes if _serves(ix.columns, eq, rest)), None)
 		if covering is not None:
 			starts = tuple(covering.columns[: len(whole)])
@@ -1341,10 +1414,12 @@ def _existing_index_problem(
 				f'The index "{covering.name}" on table "{table}" already starts with {_cols_text(starts)}{same}, '
 				f"so this index exists already and a new one would not help. {tail}"
 			)
-		plain = [col for col in eq if not _is_check_field(evidence, col)]
+		plain = tuple(col for col in eq if not _is_check_field(evidence, col))
 		checks = [col for col in eq if _is_check_field(evidence, col)]
-		if plain and checks and not rest:
-			prefix = next((ix for ix in evidence.indexes if set(ix.columns[: len(plain)]) == set(plain)), None)
+		if checks and (plain or rest):
+			# an existing index serves every other column (the range or sort tail too, as
+			# Frappe's creation index serves creation > ?), and Check fields add nothing (M1)
+			prefix = next((ix for ix in evidence.indexes if _serves(ix.columns, plain, rest)), None)
 			if prefix is not None:
 				what = (
 					f"{checks[0]} is a Check field, which matches" if len(checks) == 1
@@ -1352,8 +1427,8 @@ def _existing_index_problem(
 				)
 				return (
 					f'The index "{prefix.name}" on table "{table}" already starts with '
-					f"{_cols_text(prefix.columns[: len(plain)])}, and {what} too many rows for an index to narrow, "
-					f"so a new index would not help. {tail}"
+					f"{_cols_text(prefix.columns[: len(plain) + len(rest)])}, and {what} too many rows for an index "
+					f"to narrow, so a new index would not help. {tail}"
 				)
 		return None
 	col = whole[0]
@@ -1604,11 +1679,13 @@ def advise(
 	"""The advice for indexing ``columns`` of ``table``, or None when there is nothing
 	to advise (not a DocType table, no usable column). ``unusable`` names the columns
 	the query's predicate shape keeps an index from using (``_scan_where``): they are
-	left out and named. ``comparisons`` (``{column: "eq" | "in" | "range" | "sort"}``)
+	left out and named. ``comparisons`` (``{column: "eq" | "in" | "range" | "sort" | "rsort"}``,
+	``"rsort"`` a sort column that is also range-filtered)
 	puts the columns in index order (``_index_order``; ``serves`` names the sort or the
 	temporary table a Filesort or Temporary Table index removes). When that sort-first
 	recipe gives no code or loses its plain sort column (a prefix, the column cap), the
-	recipe without ``serves`` is given instead. A recipe made only of Check fields, or
+	recipe without ``serves`` is given instead, unless an existing index already serves it
+	(a weaker recipe without the sort would not help either). A recipe made only of Check fields, or
 	with nothing left, is NO_CODE. The existing-index checks run on the final recipe, after
 	columns were left out (``_existing_index_problem``)."""
 	kwargs = {
@@ -1616,10 +1693,11 @@ def advise(
 		"unusable": unusable, "comparisons": comparisons,
 	}
 	advice = _advise(table, columns, serves=serves, **kwargs)
-	if serves:
-		sorts = [col for col, kind in (comparisons or {}).items() if kind == "sort"]
+	if serves and not (advice is not None and advice.served):
+		sorts = [col for col, kind in (comparisons or {}).items() if kind in ("sort", "rsort")]
 		if advice is None or advice.route == ROUTE_NO_CODE or not any(col in advice.columns for col in sorts):
-			advice = _advise(table, columns, serves="", **kwargs)
+			# a retry left with nothing to index (the sort column was all) keeps the first verdict
+			advice = _advise(table, columns, serves="", **kwargs) or advice
 	return advice
 
 
@@ -1648,8 +1726,12 @@ def _advise(
 		cols, order_dropped = _index_order(cols, comparisons, serves=serves)
 	k = _equality_count(cols, comparisons)
 	equality = set(cols[:k])
+	if comparisons:
+		# a finding's equality block in one order; a card keeps the analyzer's most-used-first
+		# order, which its frozen text promises (M6)
+		cols = _canonical(cols, k, evidence)
 	# creation / modified never lead, after the reordering either
-	cols = apply_metadata_rule(_canonical(cols, k, evidence))[:MAX_INDEX_COLUMNS]
+	cols = apply_metadata_rule(cols)[:MAX_INDEX_COLUMNS]
 	if not cols and not shapes:
 		return None
 	if evidence is None:
@@ -1670,7 +1752,7 @@ def _advise(
 		evidence, [c.split("(", 1)[0] for c in final], equality, explain_row, query, shapes,
 	)
 	if problem:
-		return _no_code(doctype, cols, problem)
+		return replace(_no_code(doctype, cols, problem), served=True)
 	shape_dropped = [(col, _shape_why(kinds)) for col, kinds in shapes.items()]
 	return _route(doctype, final, shape_dropped + order_dropped + dropped, evidence, tuple(tracked_apps or ()))
 
@@ -1796,6 +1878,12 @@ def _lead_for(
 			if any(col.lower() not in FRAPPE_METADATA_COLUMNS for col in sort_cols):
 				if sort_problem:
 					return expression
+				kept_multi = [col for col in multi if col in kept]
+				if kept_multi:
+					return (
+						_FILTER_LEAD + f" The filter on {kept_multi[0]} matches more than one value, so this index "
+						f"cannot return the rows in order and {stays}."
+					)
 				if ranged:
 					column = "sort" if ftype == "Filesort" else "grouping"
 					return (
@@ -1861,17 +1949,33 @@ def advise_finding(
 				"more than one branch, and one index may not serve them all. So it gives no index code. Check "
 				"each branch with EXPLAIN."
 			), unknown=True)
-		if evidence is not None:
+		source = _from_clause(query) or []
+		target = table.strip().strip("`").lower()
+		if len(source) > 1 and source[0][0] == target and all(how == "left" for _name, how in source[1:]):
+			# the FROM table of a LEFT JOIN chain is read first: its ON columns are probe values,
+			# never compared with a known value, so an index on them cannot narrow it (M2)
+			where = {col.lower() for label, col in labelled if label == "WHERE"}
+			labelled = [(label, col) for label, col in labelled if label != "JOIN" or col.lower() in where]
+		dropped: list[str] = []
+		if evidence is not None and target in (name for name, _how in source):
 			# sql_metadata leaves out a bare column named like an SQL word (account, user, type,
-			# date, ...) and every unqualified column of a query on several tables: advice
-			# without it would be partial, and an index on the rest could look like it exists
-			# already, so say Optimus could not read it
+			# date, ...) and every unqualified column of a query on several tables (a subquery
+			# counts). The scan reads the main WHERE, so only a table of the main FROM is checked,
+			# never one that appears only in a subquery (M4).
 			parsed = {col.lower() for label, col in labelled if label in ("WHERE", "JOIN")}
 			names = {col.lower(): col for col in evidence.column_types}
 			dropped = sorted(
 				names[name] for name in _where_columns(query, qualifiers, names, truncated=truncated)
 				if name not in parsed and name not in FRAPPE_METADATA_COLUMNS
 			)
+		if dropped and [name for name, _how in source] == [target]:
+			# the only table of the main FROM owns every unqualified column: advise them
+			labelled = [*labelled, *(("WHERE", col) for col in dropped)]
+		elif dropped:
+			# another table could own them; say so only when the filter shape would let an
+			# index use one of them (M5), otherwise its shape keeps it out of the recipe anyway
+			usable = _scan_where(query, [("WHERE", col) for col in dropped], qualifiers, truncated=truncated)[1]
+			dropped = [col for col in dropped if col in usable]
 			if dropped:
 				return _no_code(doctype, _clean_columns([col for _label, col in labelled] + dropped), (
 					f"Optimus could not read the filter on {', '.join(dropped)}: the SQL parser it uses did not "
@@ -1884,8 +1988,9 @@ def advise_finding(
 		comparisons = {}
 		for label, col in labelled:  # filters come first, then the sort or group columns
 			if label in ("ORDER BY", "GROUP BY"):
-				if comparisons.get(col) != "eq":  # an equality-filtered sort column stays an equality column
-					comparisons[col] = "sort"
+				current = comparisons.get(col)
+				if current != "eq":  # an equality-filtered sort column stays an equality column
+					comparisons[col] = "rsort" if current == "range" else "sort"
 			else:
 				comparisons.setdefault(col, "eq" if label == "JOIN" else usable.get(col, "range"))
 		multi = tuple(col for col, kind in comparisons.items() if kind == "in")

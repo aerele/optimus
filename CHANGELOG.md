@@ -17,15 +17,19 @@ versions may contain breaking changes see migration notes below).
   Unique flag and type, the real column types, the table's existing indexes and the
   finding's EXPLAIN key first, and never takes the Search Index flag as proof of an index
   (on Postgres a Search Index is named after the bare field, schema-wide, so only one
-  table gets it). A recipe's equality columns are put in one fixed order (business
+  table gets it). A finding recipe's equality columns are put in one fixed order (business
   columns, Check fields, creation and modified, then a column that cannot lead, each by
-  name), so the same filter in any predicate order gives one recipe and one index name. A
-  recipe of several columns gets no code when an existing index starts with its equality
-  columns in any order and then its range or sort columns in order (ERPNext's GL Entry and
-  Stock Ledger Entry composites are no longer duplicated), when an equality column is
-  unique on its own, or when only Check fields follow an existing index's equality
-  prefix; a one-column recipe also when its column is unique on its own, leads an index or
-  is the index EXPLAIN names. A missing column, a MariaDB reserved word on MariaDB (Postgres
+  name), so the same filter in any predicate order gives one recipe and one index name; a
+  table card keeps the analyzer's most-used-first order. A recipe of several columns gets
+  no code when an existing index starts with its equality columns in any order and then
+  its range or sort columns in order (ERPNext's GL Entry and Stock Ledger Entry composites
+  are no longer duplicated), when an equality column is unique on its own or a unique
+  index's columns are all among its equality columns, or when an existing index serves
+  every column but its Check fields (Frappe's creation index serves `creation > ? AND
+  is_return = ?`); a one-column recipe also when its column is unique on its own, leads an
+  index or is the index EXPLAIN names. A sort column the index cannot return in order is
+  left out rather than appended, a sort recipe an existing index serves is never traded
+  for a weaker one, and the FROM table of a LEFT JOIN never gets its own ON columns. A missing column, a MariaDB reserved word on MariaDB (Postgres
   quotes names; such an entry is Postgres-only), a JSON field (MariaDB reports it as
   longtext, so the field type decides), a leading text column on Postgres, a first column
   alone wider than the key limit (3072 bytes; 2704 on Postgres), a query over 4 KB (Missing
@@ -33,7 +37,9 @@ versions may contain breaking changes see migration notes below).
   function, CASE or arithmetic around the column) gets an explanation and no code. A query
   Optimus cannot read, a UNION that filters the table in more than one branch, a WHERE
   column the SQL parser did not report (an unquoted `account`, `user`, `type`, `date` and
-  others, or an unqualified column of a query on several tables), and a table Optimus has
+  others, or an unqualified column of a query on several tables, when the filter shape lets
+  an index use it; the only table of the main FROM gets such a column advised instead),
+  and a table Optimus has
   no information about (tabSessions, tabSeries, a removed DocType) say so, and
   a card then opens with "Optimus cannot say whether this index would help." instead of
   "Do not add this index.". For an existing index the text names only a filter shape the
