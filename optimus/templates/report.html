@@ -2074,7 +2074,7 @@
       <div class="fix-caution">The profiler couldn&rsquo;t show the AI this finding&rsquo;s source code (or SQL) - treat the suggestion below as directional guidance, not a verified code fix.</div>
       {% endif %}
       <div class="fix-body">{{ f.llm_fix.suggestion_html | safe }}</div>
-      <div class="fix-foot">Machine-generated{% if f.llm_fix.generated_at %} &middot; {{ fmt_dt(f.llm_fix.generated_at) }}{% endif %} - review before applying.{% if f.llm_fix.outdated %} Generated with an earlier version of the AI reviewer; use Refresh AI suggestions to update.{% endif %}</div>
+      <div class="fix-foot">Machine-generated{% if f.llm_fix.generated_at %} &middot; {{ fmt_dt(f.llm_fix.generated_at) }}{% endif %} - review before applying.{% if f.llm_fix.outdated %} Generated with an earlier version of the AI reviewer{% if f.llm_fix.refreshable %}; use Refresh AI suggestions to update{% endif %}.{% endif %}</div>
     </div>
     {% endif %}
 

@@ -176,7 +176,7 @@ def test_post_l1_disposition_of_every_original_case(tracked_apps):
 	from optimus import ai_fix, ai_grounding
 
 	kinds = {
-		"pre-L5": lambda note: note == ai_grounding.PRE_L5_REDUNDANT_CALL_NOTE,
+		"pre-L5": lambda note: note == ai_grounding.UNSTAMPED_REDUNDANT_CALL_NOTE,
 		"framework": lambda note: note.startswith("This line is in framework or library code"),
 		"callee": lambda note: note.startswith("Most of this line's time is spent inside super().validate"),
 	}

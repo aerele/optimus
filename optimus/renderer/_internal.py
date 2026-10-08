@@ -172,7 +172,9 @@ from optimus.renderer.line_drilldown import (
 from optimus.renderer.recipe_enrichment import (
 	apply_finding_recipes,
 	apply_table_recipes,
+	count_ai_tokens,
 	make_evidence_lookup,
+	make_refresh_check,
 	mark_outdated_ai_fixes,
 )
 from optimus.renderer.source import (
@@ -586,6 +588,8 @@ def render(
 			_f["customer_description"] = _finalize_prose(
 				_f["customer_description"], _large_duration_threshold_ms
 			)
+	# Tokens the stored AI output cost, counted before anything is hidden below.
+	_ai_fix_tokens = count_ai_tokens(all_findings, table_breakdown)
 	if not _ai_findings_on:
 		for _f in all_findings:
 			_f["llm_fix"] = None
@@ -603,7 +607,7 @@ def render(
 	apply_table_recipes(
 		table_breakdown, evidence_lookup=_evidence_lookup, tracked_apps=render_config["tracked_apps"],
 	)
-	mark_outdated_ai_fixes(all_findings)
+	mark_outdated_ai_fixes(all_findings, refresh_check=make_refresh_check())
 
 	# v0.6.x: drop framework/internal db tables from the "Time spent per
 	# database table" section schema/meta (DocType/DocField/…), user-
@@ -990,6 +994,7 @@ def render(
 		# `.count` → the template omits the section.
 		"doc_event_breakdown": doc_event_breakdown,
 		"analyzer_warnings": analyzer_warnings,
+		"ai_fix_tokens": _ai_fix_tokens,
 		"truncation_banner": truncation_banner,
 		"findings_by_app": findings_by_app,
 		"observational_findings_by_app": observational_findings_by_app,

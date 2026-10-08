@@ -10,9 +10,10 @@ and Framework N+1 ``llm_fix``, table ``ai_index``, the stored fix of a gated Hot
 and fails closed: an index-family finding never shows the analyzer's raw ``ALTER TABLE``
 / ``CREATE INDEX`` text. Stored JSON is never modified.
 
-``make_evidence_lookup`` is the only function that touches Frappe: it reads DocField
-flags, the DocType's app, real column types and existing indexes once per table per
-render (owner decision A2).
+``make_evidence_lookup`` reads DocField flags, the DocType's app, real column types and
+existing indexes once per table per render (owner decision A2). It and
+``make_refresh_check`` (Optimus Settings, through ``ai_fix``, imported lazily) are the
+only functions that touch Frappe.
 """
 
 from __future__ import annotations
@@ -156,6 +157,50 @@ def make_evidence_lookup() -> Callable[[str], TableEvidence | None]:
 	return lookup
 
 
+def _with_note(existing, note: str) -> str:
+	"""``existing`` text (a list is joined) with ``note`` appended once: running the
+	recipes twice leaves one copy."""
+	if isinstance(existing, list):
+		existing = " ".join(str(item) for item in existing if item)
+	text = str(existing or "").strip()
+	return text if note in text else f"{text} {note}".strip()
+
+
+def make_refresh_check() -> Callable[[dict], bool]:
+	"""``check(finding)``: True when Refresh AI suggestions would regenerate the
+	finding's suggestion (AI fixes are available, the finding passes the eligibility
+	gate and its type is not excluded). Only then does the outdated footer name it."""
+	from optimus import ai_fix
+
+	available = best_effort(lambda: ai_fix.is_available(section="findings"), False)
+
+	# A distinctive name: test_ai_log_audit.py matches AI helpers by callee name.
+	def _refreshable(finding: dict) -> bool:
+		if not available:
+			return False
+		if ai_fix.is_finding_type_excluded(finding.get("finding_type")):
+			return False
+		return ai_fix.llm_gate_note(finding) is None
+
+	return _refreshable
+
+
+def count_ai_tokens(findings: list[dict], tables: list[dict]) -> int:
+	"""Tokens every stored AI output of this session cost, read BEFORE the report hides
+	retired output (index-family, Framework N+1, gated Hot Line, table ``ai_index``),
+	because those tokens were spent all the same."""
+	total = 0
+	for item, key in [*((f, "llm_fix") for f in findings or []), *((t, "ai_index") for t in tables or [])]:
+		blob = item.get(key) if isinstance(item, dict) else None
+		tokens = blob.get("tokens") if isinstance(blob, dict) else None
+		if isinstance(tokens, dict):
+			try:
+				total += int(tokens.get("total_tokens") or 0)
+			except (TypeError, ValueError):
+				continue
+	return total
+
+
 def apply_finding_recipes(
 	findings: list[dict],
 	*,
@@ -182,11 +227,14 @@ def apply_finding_recipes(
 				detail["fix_hint"] = index_recipes.finding_text(advice)
 				if advice.code:
 					detail["suggested_ddl"] = advice.code
-		elif ftype == "Redundant Call" and ai_grounding.analyzed_before_callsite_fix(f):
-			existing = str(detail.get("validation_note") or "").strip()
-			detail["validation_note"] = f"{existing} {ai_grounding.PRE_L5_REDUNDANT_CALL_NOTE}".strip()
+		elif ftype == "Redundant Call":
+			if f.get("llm_fix") and ai_grounding.analyzed_before_callsite_fix(f):
+				detail["validation_note"] = _with_note(
+					detail.get("validation_note"), ai_grounding.UNSTAMPED_REDUNDANT_CALL_NOTE,
+				)
 		elif ftype == "Framework N+1":
 			f["llm_fix"] = None
+			detail["fix_hint"] = _with_note(detail.get("fix_hint"), ai_grounding.FRAMEWORK_N1_NOTE)
 		elif ftype == "Hot Line":
 			note = best_effort(
 				lambda: ai_grounding.hot_line_gate(f, tracked_apps=scope, installed_apps=installed_apps), None,
@@ -232,11 +280,13 @@ def apply_table_recipes(
 		rec["index_name"] = (advice.entry or {}).get("index_name")
 
 
-def mark_outdated_ai_fixes(findings: list[dict], *, current_version: int | None = None) -> None:
-	"""Set ``llm_fix["outdated"]`` on every rendered AI suggestion: True when it
-	was generated with an older prompt version than ``current_version``
-	(default ``ai_prompts.PROMPT_VERSION``), or with none recorded (before
-	prompt versions existed)."""
+def mark_outdated_ai_fixes(
+	findings: list[dict], *, current_version: int | None = None, refresh_check: Callable[[dict], bool] | None = None,
+) -> None:
+	"""On every rendered AI suggestion set, in place, ``llm_fix["outdated"]`` (made with
+	an older prompt version than ``current_version``, default
+	``ai_prompts.PROMPT_VERSION``, or with none recorded) and ``llm_fix["refreshable"]``
+	(``refresh_check(finding)`` says Refresh AI suggestions would redo it)."""
 	if current_version is None:
 		from optimus.ai_prompts import PROMPT_VERSION as current_version
 	for f in findings or []:
@@ -246,3 +296,6 @@ def mark_outdated_ai_fixes(findings: list[dict], *, current_version: int | None 
 		version = fix.get("prompt_version")
 		current = isinstance(version, int) and not isinstance(version, bool) and version >= current_version
 		fix["outdated"] = not current
+		fix["refreshable"] = bool(
+			not current and refresh_check is not None and best_effort(lambda: refresh_check(f), False)
+		)

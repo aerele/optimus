@@ -42,7 +42,14 @@ from optimus.analyzers import (
 	table_breakdown,
 	top_queries,
 )
-from optimus.analyzers.base import _DUR_SEP, SEVERITY_ORDER, AnalyzeContext, dur, is_error_log_hook_query
+from optimus.analyzers.base import (
+	_DUR_SEP,
+	INDEX_FINDING_TYPES,
+	SEVERITY_ORDER,
+	AnalyzeContext,
+	dur,
+	is_error_log_hook_query,
+)
 from optimus.dbdialect import get_dialect
 
 # v0.3.0: per-analyzer wall-clock budget. If the cumulative analyze
@@ -986,6 +993,50 @@ def _log_ai_step_failure(title: str, exc: BaseException, session_uuid: str | Non
 	from optimus.ai_fix import log_ai_failure
 
 	log_ai_failure(title, exc, session_uuid=session_uuid, **context)
+
+
+def _ai_selection(items, ai_fix, *, type_of, gate) -> tuple[list, int, int]:
+	"""(eligible items, gated count, excluded count). The operator's per-type exclusion
+	runs first, then the eligibility gate. Only types that can reach the AI, index
+	findings and Framework N+1 count as gated (O-I2); infrastructure types never do."""
+	counted = ai_fix.AI_ELIGIBLE_FINDING_TYPES | INDEX_FINDING_TYPES | {"Framework N+1"}
+	eligible, gated, excluded = [], 0, 0
+	for item in items:
+		ftype = type_of(item)
+		if ai_fix.is_finding_type_excluded(ftype):
+			excluded += int(ftype in ai_fix.AI_ELIGIBLE_FINDING_TYPES)
+			continue
+		if gate(item) is not None:
+			gated += int(ftype in counted)
+			continue
+		eligible.append(item)
+	return eligible, gated, excluded
+
+
+def _note_ai_selection(context, gated: int, excluded: int) -> None:
+	"""Analyzer notes for the auto-suggest step's gated and excluded findings."""
+	if gated:
+		context.warnings.append(
+			f"AI auto-suggest: {gated} finding(s) get deterministic advice or a note from Optimus "
+			"instead of an AI suggestion (see each finding)."
+		)
+	if excluded:
+		context.warnings.append(
+			f"AI auto-suggest: {excluded} finding(s) skipped because their type is excluded in "
+			"Optimus Settings (ai_excluded_finding_types)."
+		)
+
+
+def _fix_is_current(row) -> bool:
+	"""True when ``row`` already holds a suggestion made with the current prompt version."""
+	from optimus.ai_prompts import PROMPT_VERSION
+
+	try:
+		fix = json.loads(getattr(row, "llm_fix_json", None) or "null")
+	except (TypeError, ValueError):
+		return False
+	version = fix.get("prompt_version") if isinstance(fix, dict) else None
+	return isinstance(version, int) and not isinstance(version, bool) and version >= PROMPT_VERSION
 
 
 def _deserialize_tree(uuid: str, tree_blob):
@@ -2006,15 +2057,11 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 		)
 		return
 
-	eligible = [
-		f for f in findings
-		if ai_fix.llm_gate_note(f) is None
-	]
-	# v0.9.0: per-type opt-out (Critical Risk #2). Filter BEFORE the loop so
-	# the operator's exclusion list short-circuits payload-building too, not
-	# just the network send.
-	eligible = [f for f in eligible if not ai_fix.is_finding_type_excluded(f.get("finding_type"))]
+	eligible, gated, excluded = _ai_selection(
+		findings, ai_fix, type_of=lambda f: f.get("finding_type") or "", gate=ai_fix.llm_gate_note,
+	)
 	if not eligible:
+		_note_ai_selection(context, gated, excluded)
 		return
 	eligible.sort(key=lambda f: (
 		SEVERITY_ORDER.get(f.get("severity") or "Low", 3),
@@ -2069,14 +2116,19 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 				technical_detail_json=f.get("technical_detail_json") or "{}",
 				llm_fix_json=None,
 			)
-			result = ai_fix.suggest_fix(_ai_payload_for_finding(
-				ns, file_cache, phase2_index=phase2_index,
-				recordings_by_uuid=recordings_by_uuid,
-				actions_by_idx=actions_by_idx,
-				evidence_lookup=evidence_lookup,
-				tracked_apps=tracked,
-			))
-			f["llm_fix_json"] = json.dumps(result, default=str)
+			skipped = False
+			try:
+				result = ai_fix.suggest_fix(_ai_payload_for_finding(
+					ns, file_cache, phase2_index=phase2_index,
+					recordings_by_uuid=recordings_by_uuid, actions_by_idx=actions_by_idx,
+					evidence_lookup=evidence_lookup, tracked_apps=tracked,
+				))
+			except ai_fix.AiFixError as e:
+				if e.kind not in ai_fix.AI_SKIP_KINDS:
+					raise
+				skipped = True
+			if not skipped:
+				f["llm_fix_json"] = json.dumps(result, default=str)
 
 		_, step_failed = _run_ai_step(
 			_suggest, title="optimus ai auto-suggest",
@@ -2096,6 +2148,7 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 			f"AI auto-suggest: {skipped_for_time} finding(s) skipped hit the "
 			f"{AI_AUTO_SUGGEST_TIME_BUDGET_SECONDS}s budget for AI suggestions."
 		)
+	_note_ai_selection(context, gated, excluded)
 
 
 def _ai_payload_for_finding(
@@ -2291,10 +2344,17 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	``cap``: max findings this run. None uses Optimus Settings'
 	``ai_auto_suggest_max``; 0 means no cap (as many as fit ``time_budget``).
 	Best-effort and time-budgeted (callers run in a web request). Returns
-	``{"added", "failed", "skipped_time", "total_pending"}``, where
-	``total_pending`` is the count targeted before the cap.
+	``{"added", "failed", "skipped_time", "total_pending", "gated", "excluded",
+	"skipped_ineligible"}``, where ``total_pending`` is the count targeted before the
+	cap, ``gated`` the findings that get deterministic advice or a note instead,
+	``excluded`` the ones whose type Optimus Settings excludes and
+	``skipped_ineligible`` the ones ``suggest_fix`` refused with a skip kind
+	(``ai_fix.AI_SKIP_KINDS``). Missing or outdated suggestions go first.
 	"""
-	out = {"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0}
+	out = {
+		"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0,
+		"gated": 0, "excluded": 0, "skipped_ineligible": 0,
+	}
 	_mark_ai_spend_session(getattr(doc, "session_uuid", None))
 
 	from optimus import ai_fix
@@ -2303,15 +2363,19 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 		return out
 
 	rows = list(getattr(doc, "findings", None) or [])
-	chosen = [
-		r for r in rows
-		if ai_fix.llm_gate_note(ai_fix.gate_input(r)) is None
-		and (regenerate_all or not ((getattr(r, "llm_fix_json", None) or "").strip()))
-	]
+	selected, out["gated"], out["excluded"] = _ai_selection(
+		rows, ai_fix,
+		type_of=lambda r: getattr(r, "finding_type", "") or "",
+		gate=lambda r: ai_fix.llm_gate_note(ai_fix.gate_input(r)),
+	)
+	chosen = [r for r in selected if regenerate_all or not ((getattr(r, "llm_fix_json", None) or "").strip())]
 	out["total_pending"] = len(chosen)
 	if not chosen:
 		return out
+	# Missing or outdated suggestions first, so repeated Refreshes reach every finding
+	# (R-I1), then the usual severity and impact order.
 	chosen.sort(key=lambda r: (
+		_fix_is_current(r),
 		SEVERITY_ORDER.get(getattr(r, "severity", None) or "Low", 3),
 		-(getattr(r, "estimated_impact_ms", 0) or 0),
 	))
@@ -2334,9 +2398,18 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 			break
 
 		def _suggest(r=r):
-			result = ai_fix.suggest_fix(_ai_payload_for_finding(
-				r, file_cache, phase2_index=phase2_index, evidence_lookup=evidence_lookup, tracked_apps=tracked,
-			))
+			skipped = False
+			try:
+				result = ai_fix.suggest_fix(_ai_payload_for_finding(
+					r, file_cache, phase2_index=phase2_index, evidence_lookup=evidence_lookup, tracked_apps=tracked,
+				))
+			except ai_fix.AiFixError as e:
+				if e.kind not in ai_fix.AI_SKIP_KINDS:
+					raise
+				skipped = True
+			if skipped:
+				out["skipped_ineligible"] += 1
+				return
 			blob = json.dumps(result, default=str)
 			frappe.db.set_value("Optimus Finding", r.name, "llm_fix_json", blob)
 			r.llm_fix_json = blob

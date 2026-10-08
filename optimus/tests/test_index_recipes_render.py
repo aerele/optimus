@@ -272,14 +272,6 @@ def test_stamped_redundant_call_has_no_note(evidence):
 
 # --- report.html text edits (PR-L1's frozen-template text exception) ---------
 
-_STALE = "Generated with an earlier version of the AI reviewer; use Refresh AI suggestions to update."
-
-
-def _current_prompt_version():
-	from optimus import ai_prompts
-
-	return ai_prompts.PROMPT_VERSION
-
 
 def test_table_card_never_names_customize_form(evidence):
 	out = _render(_doc([], [_table()]))
@@ -295,21 +287,90 @@ def test_finding_card_code_block_is_labelled_suggested_index(evidence):
 	assert "Suggested index" in out
 
 
+# --- report.html text edits (the sanctioned footer and notes) -----------------
+
+_STALE_NEUTRAL = "Generated with an earlier version of the AI reviewer."
+_STALE_REFRESH = "Generated with an earlier version of the AI reviewer; use Refresh AI suggestions to update."
+
+
+def _current_prompt_version():
+	from optimus import ai_prompts
+
+	return ai_prompts.PROMPT_VERSION
+
+
 def _ai_row(**llm):
 	blob = dict(_OLD_AI, suggestion="**Fix**\n\nbatch-the-query", **llm)
 	return _row("N+1 Query", {"callsite": _CALLSITE}, llm=blob)
 
 
-def test_older_prompt_version_gets_the_stale_note(evidence):
+@pytest.fixture
+def ai_available(monkeypatch):
+	from optimus import ai_fix
+
+	monkeypatch.setattr(ai_fix, "is_available", lambda section=None: True)
+
+
+def test_older_prompt_version_says_refresh_when_refresh_would_redo_it(evidence, ai_available):
 	out = _render(_doc([_ai_row(prompt_version=_current_prompt_version() - 1)]))
-	assert "batch-the-query" in out and _STALE in out
+	assert "batch-the-query" in out and _STALE_REFRESH in out
 
 
-def test_legacy_suggestion_without_prompt_version_gets_the_stale_note(evidence):
+def test_stale_note_is_neutral_when_ai_is_not_available(evidence, monkeypatch):
+	from optimus import ai_fix
+
+	monkeypatch.setattr(ai_fix, "is_available", lambda section=None: False)
 	out = _render(_doc([_ai_row()]))
-	assert "batch-the-query" in out and _STALE in out
+	assert _STALE_NEUTRAL in out and "Refresh AI suggestions" not in out
 
 
-def test_current_prompt_version_has_no_stale_note(evidence):
+def test_stale_note_is_neutral_for_a_gated_row(evidence, ai_available):
+	out = _render(_rc_doc(_RC_DETAIL))
+	assert "hoist-it" in out and _STALE_NEUTRAL in out
+	assert "use Refresh AI suggestions" not in out
+
+
+def test_current_prompt_version_has_no_stale_note(evidence, ai_available):
 	out = _render(_doc([_ai_row(prompt_version=_current_prompt_version())]))
-	assert "batch-the-query" in out and _STALE not in out
+	assert "batch-the-query" in out and "earlier version of the AI reviewer" not in out
+
+
+def test_unstamped_note_needs_a_stored_suggestion(evidence):
+	row = _row("Redundant Call", dict(_RC_DETAIL))
+	out = _render(_doc([row]))
+	assert "analyzed before the callsite fix" not in out
+
+
+def test_finding_notes_are_added_once():
+	from optimus import ai_grounding
+
+	findings = [
+		{"finding_type": "Redundant Call", "llm_fix": {"suggestion_html": "x"},
+		 "technical_detail": {"fn_name": "get_doc", "validation_note": ["captured note"]}},
+		{"finding_type": "Framework N+1", "technical_detail": {"fix_hint": "Batch the calls."}},
+	]
+	for _ in range(2):
+		recipe_enrichment.apply_finding_recipes(findings, evidence_lookup=lambda table: None)
+	assert findings[0]["technical_detail"]["validation_note"] == (
+		"captured note " + ai_grounding.UNSTAMPED_REDUNDANT_CALL_NOTE
+	)
+	assert findings[1]["technical_detail"]["fix_hint"] == "Batch the calls. " + ai_grounding.FRAMEWORK_N1_NOTE
+
+
+def test_framework_n_plus_one_shows_why_there_is_no_ai_fix(evidence):
+	"""O-I3."""
+	row = _row("Framework N+1", {"callsite": _CALLSITE, "fix_hint": "Batch the calls."}, llm=_OLD_AI)
+	out = _render(_doc([row]))
+	assert "points at a loop inside framework code" in out and "old-ai-advice" not in out
+
+
+def test_token_total_counts_suggestions_the_report_hides(evidence):
+	"""Deployment minor: tokens were spent even for retired index and Framework N+1 output."""
+	rows = [
+		_missing_index(llm=dict(_OLD_AI, tokens={"total_tokens": 100})),
+		_row("Framework N+1", {"callsite": _CALLSITE}, llm=dict(_OLD_AI, tokens={"total_tokens": 50})),
+		_row("N+1 Query", {"callsite": _CALLSITE}, llm=dict(_OLD_AI, tokens={"total_tokens": 30})),
+	]
+	table = _table(ai_index={"suggestion": "x", "tokens": {"total_tokens": 20}})
+	out = _render(_doc(rows, [table]))
+	assert "AI suggestions used <strong>200</strong> tokens" in out

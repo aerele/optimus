@@ -520,7 +520,7 @@ HOT_LINE_CALLEE_US = 1000.0
 CALLSITE_WALK_KEY = "callsite_walk"
 CALLSITE_WALK_FIXED = "outermost_first"
 
-PRE_L5_REDUNDANT_CALL_NOTE = (
+UNSTAMPED_REDUNDANT_CALL_NOTE = (
 	"This Redundant Call finding was analyzed before the callsite fix, so its line may point at "
 	"the outer hook call instead of the loop, and an AI suggestion made for it may change the "
 	"wrong loop. Optimus no longer asks the AI about it: re-record the flow to get a corrected "

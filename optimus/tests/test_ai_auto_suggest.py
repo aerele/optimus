@@ -300,7 +300,10 @@ class TestRunAiBackfillCore:
 		p1, p2, p3 = _patches(_cfg(ai_auto_suggest=False))
 		with p1, p2, p3, patch.object(analyze, "frappe", _fake_frappe()) as fk:
 			out = analyze._run_ai_backfill(doc, cap=0)
-		assert out == {"added": 2, "failed": 0, "skipped_time": 0, "total_pending": 2}
+		assert out == {
+			"added": 2, "failed": 0, "skipped_time": 0, "total_pending": 2,
+			"gated": 0, "excluded": 0, "skipped_ineligible": 0,
+		}
 		assert sorted(w[1] for w in fk.db.writes) == ["F1", "F3"]
 		assert json.loads(rows[0].llm_fix_json)["suggestion"] == "**Fix**\n\ndo X"
 		# Already-suggested / ineligible rows untouched.
@@ -313,7 +316,10 @@ class TestRunAiBackfillCore:
 		p1, p2, p3 = _patches(_cfg(), available=False)
 		with p1, p2, p3, patch.object(analyze, "frappe", _fake_frappe()) as fk:
 			out = analyze._run_ai_backfill(doc, cap=0)
-		assert out == {"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0}
+		assert out == {
+			"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0,
+			"gated": 0, "excluded": 0, "skipped_ineligible": 0,
+		}
 		assert fk.db.writes == []
 
 	def test_counts_per_finding_failures(self):
@@ -348,7 +354,10 @@ class TestRunAiBackfillCore:
 		p1, p2, p3 = _patches(_cfg())
 		with p1, p2, p3, patch.object(analyze, "frappe", _fake_frappe()) as fk:
 			out = analyze._run_ai_backfill(doc, cap=0)
-		assert out == {"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0}
+		assert out == {
+			"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0,
+			"gated": 0, "excluded": 0, "skipped_ineligible": 0,
+		}
 		assert fk.db.writes == []
 
 	def test_regenerate_all_overwrites_existing(self):

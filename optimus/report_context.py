@@ -975,9 +975,13 @@ def build_report_context(session_doc: Any, ctx: dict) -> dict:
 		if isinstance(_tok, dict):
 			_ai_tokens_total += int(_tok.get("total_tokens") or 0)
 
-	for _bucket in ctx.get("findings_by_app", []) or []:
-		for _f in (_bucket.get("findings") if isinstance(_bucket, dict) else []) or []:
-			_add_tokens(_f.get("llm_fix") if isinstance(_f, dict) else None)
+	if "ai_fix_tokens" in ctx:
+		# The renderer's sum, taken before retired AI output was hidden.
+		_ai_tokens_total = int(ctx.get("ai_fix_tokens") or 0)
+	else:
+		for _bucket in ctx.get("findings_by_app", []) or []:
+			for _f in (_bucket.get("findings") if isinstance(_bucket, dict) else []) or []:
+				_add_tokens(_f.get("llm_fix") if isinstance(_f, dict) else None)
 	_steps_tokens = int(getattr(session_doc, "ai_steps_tokens", 0) or 0)
 	_ai_tokens_total += _steps_tokens
 	return {

@@ -38,9 +38,14 @@ class AiFixError(Exception):
 	this into ``frappe.throw`` so the message is shown to the operator.
 	``status_code`` carries the provider's HTTP status when the error came
 	from an HTTP response, so callers can react to it (the temperature retry
-	fires only on a 400 or 422). ``kind`` classifies the failure
-	(``"config"``, ``"transport"``, ``"timeout"``, ``"bad_response"`` here;
-	later releases fill the rest). ``usage`` carries token usage already billed before an empty-response failure.
+	fires only on a 400 or 422).
+	``kind`` classifies the failure: ``"config"`` (Optimus Settings cannot serve the
+	call: AI off, no model, no key, a context window too small), ``"not_eligible"``
+	(the eligibility gate or the per-type exclusion refused the finding; no request was
+	built), ``"transport"`` (the request did not complete), ``"timeout"`` (no answer in
+	time), ``"bad_response"`` (an error status or an unusable body) and ``"unknown"``.
+	Callers treat the kinds in ``AI_SKIP_KINDS`` as skips, not failures.
+	``usage`` carries token usage already billed before an empty-response failure.
 
 	The message must never contain the API key: it is shown to the operator
 	and written to the Error Log. An HTTP-status error from ``_http_post``
@@ -64,6 +69,11 @@ class AiFixError(Exception):
 			if key in ("prompt_tokens", "completion_tokens", "total_tokens")
 			and type(value) is int and value >= 0
 		} if usage is not None else None
+
+
+# Failures a caller counts as "skipped", not "failed": nothing went wrong with the
+# provider, the finding or the settings simply do not allow a request (P10).
+AI_SKIP_KINDS: frozenset[str] = frozenset({"config", "not_eligible"})
 
 
 # Findings that carry enough code / SQL context for the LLM to reason about
@@ -275,7 +285,7 @@ def llm_gate_note(finding: dict) -> str | None:
 		return ai_grounding.NOT_ELIGIBLE_NOTE
 	if ftype == "Redundant Call":
 		if ai_grounding.analyzed_before_callsite_fix(finding):
-			return ai_grounding.PRE_L5_REDUNDANT_CALL_NOTE
+			return ai_grounding.UNSTAMPED_REDUNDANT_CALL_NOTE
 		return None
 	if ftype != "Hot Line":
 		return None
@@ -343,7 +353,14 @@ def suggest_fix(finding: dict, *, timeout: int | None = None) -> dict:
 	reported usage. ``timeout`` caps the whole first-call-plus-re-ask budget
 	(default: the configured request timeout). Raises ``AiFixError``."""
 	if is_finding_type_excluded(finding.get("finding_type")):
-		raise AiFixError("excluded by ai_excluded_finding_types", kind="config")
+		from frappe import _
+
+		raise AiFixError(
+			_("No AI suggestion for this finding: its type {0} is excluded by ai_excluded_finding_types in Optimus Settings.").format(
+				finding.get("finding_type")
+			),
+			kind="not_eligible",
+		)
 	gate_note = llm_gate_note(finding)
 	if gate_note:
 		from frappe import _

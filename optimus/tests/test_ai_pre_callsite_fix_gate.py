@@ -27,7 +27,7 @@ def _rc(detail):
 class TestPreL5Gate:
 	def test_unstamped_redundant_call_is_gated_with_the_re_record_note(self):
 		note = ai_fix.llm_gate_note(_rc(_UNSTAMPED))
-		assert note == ai_grounding.PRE_L5_REDUNDANT_CALL_NOTE
+		assert note == ai_grounding.UNSTAMPED_REDUNDANT_CALL_NOTE
 		assert "analyzed before the callsite fix" in note and "re-record the flow" in note
 
 	def test_stamped_redundant_call_is_eligible_in_both_shapes(self):

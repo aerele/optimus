@@ -114,3 +114,14 @@ def test_refill_allows_a_write_sharee(env):
 	sharee = "sharee@example.com"
 	_, h = env(user=sharee, perms={("read", DOCNAME, sharee): True, ("write", DOCNAME, sharee): True})
 	assert api.refill_ai_suggestions(session_uuid=SESSION_UUID)["ok"] is True
+
+
+def test_refill_reports_gated_and_excluded_counts(env):
+	_, h = env()
+	h.backfill.return_value = {
+		"added": 1, "failed": 0, "skipped_time": 0, "total_pending": 1,
+		"gated": 2, "excluded": 1, "skipped_ineligible": 0,
+	}
+	out = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
+	assert (out["fixes"]["gated"], out["fixes"]["excluded"], out["fixes"]["skipped_ineligible"]) == (2, 1, 0)
+	assert "indexes" not in out

@@ -249,4 +249,4 @@ def test_run_case_gates_pre_l5_redundant_calls_with_the_real_gate(corpus):
 	case = load("_corpus").case_by_name("3q1efl686s", corpus)
 	fake, calls = _fake_ai_fix(gate=ai_fix.llm_gate_note)
 	record = live.run_case(case, fake)
-	assert record["outcome"] == "gated" and record["gate_note"] == ai_grounding.PRE_L5_REDUNDANT_CALL_NOTE and not calls
+	assert record["outcome"] == "gated" and record["gate_note"] == ai_grounding.UNSTAMPED_REDUNDANT_CALL_NOTE and not calls

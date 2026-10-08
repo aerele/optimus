@@ -1041,11 +1041,56 @@ def download_pdf(session_uuid: str) -> dict:
 	return {"file_url": url}
 
 
+def _export_index_advice(findings: list[dict], tables) -> None:
+	"""Owner decision D6: an export carries the deterministic index advice the report
+	shows, never the analyzer's stored raw DDL (``suggested_ddl``) or the retired index AI
+	output (a table's ``ai_index``; finding ``llm_fix_json`` is never exported). Mutates in
+	place. Each index-family finding gains ``index_advice`` (``route``, ``doctype``,
+	``table``, ``columns``, ``index_name``, ``text`` and ``code``, the report's fix-hint
+	prose and code), or None when the advisor has nothing to say or fails; each table's
+	``recommended_index`` goes through the same advisor. One per-export evidence lookup
+	(memoised per table) serves both, as in the report."""
+	from optimus.analyzers.base import INDEX_FINDING_TYPES
+	from optimus.renderer import index_recipes, recipe_enrichment
+	from optimus.safe_call import best_effort
+	from optimus.settings import get_config
+
+	tracked = best_effort(lambda: tuple(getattr(get_config(), "tracked_apps", ()) or ()), ())
+	lookup = recipe_enrichment.make_evidence_lookup()
+	for f in findings:
+		detail = f.get("technical_detail")
+		if f.get("finding_type") in INDEX_FINDING_TYPES:
+			advice = best_effort(
+				lambda: index_recipes.advise_finding(f, evidence_lookup=lookup, tracked_apps=tracked), None,
+			)
+			f["index_advice"] = None if advice is None else {
+				"route": advice.route,
+				"doctype": advice.doctype,
+				"table": advice.table,
+				"columns": list(advice.columns),
+				"index_name": (advice.entry or {}).get("index_name"),
+				"text": index_recipes.finding_text(advice),
+				"code": advice.code,
+			}
+		if isinstance(detail, dict):
+			detail.pop("suggested_ddl", None)
+	tables = [t for t in (tables if isinstance(tables, list) else []) if isinstance(t, dict)]
+	for t in tables:
+		t.pop("ai_index", None)
+	best_effort(
+		lambda: recipe_enrichment.apply_table_recipes(tables, evidence_lookup=lookup, tracked_apps=tracked), None,
+	)
+
+
 @frappe.whitelist()
 def export_session(session_uuid: str) -> dict:
 	"""Export an Optimus Session as a structured JSON blob for programmatic
 	consumption (no HTML parsing): the full session with all child rows, top
 	queries, table breakdown and finding technical details.
+
+	Index advice is the report's deterministic advice (``index_advice`` on each
+	index-family finding, the table's ``recommended_index``); the analyzer's raw DDL and
+	the retired index AI output are not exported (owner decision D6).
 
 	Permission: recording user or System Manager only (mirrors the report
 	download gate); other users get a permission error.
@@ -1082,6 +1127,23 @@ def export_session(session_uuid: str) -> dict:
 			return json.loads(value)
 		except Exception:
 			return []
+
+	findings = [
+		{
+			"idx": f.idx,
+			"finding_type": f.finding_type,
+			"severity": f.severity,
+			"title": f.title,
+			"customer_description": f.customer_description,
+			"technical_detail": _parse_json_field(f.technical_detail_json),
+			"estimated_impact_ms": f.estimated_impact_ms,
+			"affected_count": f.affected_count,
+			"action_ref": f.action_ref,
+		}
+		for f in (doc.findings or [])
+	]
+	table_breakdown = _parse_json_field(doc.table_breakdown_json)
+	_export_index_advice(findings, table_breakdown)
 
 	return {
 		"schema_version": 1,
@@ -1125,22 +1187,9 @@ def export_session(session_uuid: str) -> dict:
 			}
 			for a in (doc.actions or [])
 		],
-		"findings": [
-			{
-				"idx": f.idx,
-				"finding_type": f.finding_type,
-				"severity": f.severity,
-				"title": f.title,
-				"customer_description": f.customer_description,
-				"technical_detail": _parse_json_field(f.technical_detail_json),
-				"estimated_impact_ms": f.estimated_impact_ms,
-				"affected_count": f.affected_count,
-				"action_ref": f.action_ref,
-			}
-			for f in (doc.findings or [])
-		],
+		"findings": findings,
 		"top_queries": _parse_json_field(doc.top_queries_json),
-		"table_breakdown": _parse_json_field(doc.table_breakdown_json),
+		"table_breakdown": table_breakdown,
 		# v0.3.0 top-level aggregates
 		"hot_frames": _parse_json_field(getattr(doc, "hot_frames_json", None)),
 		"session_time_breakdown": _parse_json_field(
@@ -1436,6 +1485,12 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 	Each step is gated by its per-section toggle; a toggle-off step is skipped, not errored.
 	``_ai_session_gate`` runs once at the top (permission, Ready status, AI configured, per-user
 	limit).
+
+	The response is ``{ok, session_uuid, fixes, steps, regenerated}``. ``fixes`` counts
+	``added``, ``failed``, ``skipped_time``, ``gated`` (findings that get deterministic
+	advice or a note instead), ``excluded`` (types excluded in Optimus Settings) and
+	``skipped_ineligible``; ``skipped`` is ``"toggle_off"`` when findings are off. There
+	is no ``indexes`` key: index advice is deterministic and never refreshed by AI.
 	"""
 	ref = _ai_session_gate(session_uuid, section=None, action="refill_ai_suggestions")
 
@@ -1455,15 +1510,10 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 		update_modified=False,
 	)
 
-	fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None}
+	fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None, "gated": 0, "excluded": 0, "skipped_ineligible": 0}
 	if cfg.ai_suggest_findings:
 		counts = _analyze_mod._run_ai_backfill(doc, cap=0, regenerate_all=True)
-		fixes = {
-			"added": counts.get("added", 0),
-			"failed": counts.get("failed", 0),
-			"skipped_time": counts.get("skipped_time", 0),
-			"skipped": None,
-		}
+		fixes.update({key: counts.get(key, 0) for key in ("added", "failed", "skipped_time", "gated", "excluded", "skipped_ineligible")})
 	else:
 		fixes["skipped"] = "toggle_off"
 
