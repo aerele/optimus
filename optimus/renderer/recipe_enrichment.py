@@ -16,10 +16,141 @@ index-family finding without a recipe loses the analyzer's raw
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 
+from optimus.dbdialect import get_dialect
 from optimus.renderer import fix_recipes
 from optimus.safe_call import best_effort
+
+
+@dataclass(frozen=True)
+class FieldEvidence:
+	"""One DocField's index-relevant flags (Custom Fields included)."""
+
+	fieldtype: str
+	length: int
+	search_index: bool
+	unique: bool
+	is_custom_field: bool
+
+
+@dataclass(frozen=True)
+class IndexEvidence:
+	"""One existing index: its name, its columns in key order, and uniqueness."""
+
+	name: str
+	columns: tuple[str, ...]
+	unique: bool
+
+
+@dataclass(frozen=True)
+class TableEvidence:
+	"""What the index advisor may rely on for one ``tab*`` table (owner decision A2):
+	DocField flags by fieldname, the DocType's app, the real column types and the
+	indexes the database already has."""
+
+	table: str
+	doctype: str
+	app: str
+	is_custom_doctype: bool
+	dialect: str
+	fields: Mapping[str, FieldEvidence]
+	column_types: Mapping[str, str]
+	text_columns: frozenset[str]
+	unindexable_columns: frozenset[str]
+	indexes: tuple[IndexEvidence, ...]
+
+
+def _int(value) -> int:
+	try:
+		return int(value or 0)
+	except (TypeError, ValueError):
+		return 0
+
+
+def _get_meta_quietly(doctype: str):
+	"""``frappe.get_meta(doctype)`` with messages muted, restoring the caller's flag.
+	A failure leaves no new ``message_log`` entry behind, so Regenerate Reports never
+	shows a red "DocType ... not found" dialog for a table read only to build advice
+	(P8; frappe/utils/messages.py:61-63, :114-118)."""
+	import frappe
+
+	log = getattr(frappe.local, "message_log", None)
+	before = len(log) if isinstance(log, list) else None
+	muted = getattr(frappe.flags, "mute_messages", None)
+	frappe.flags.mute_messages = True
+	ok = False
+	try:
+		meta = frappe.get_meta(doctype)
+		ok = True
+	finally:
+		frappe.flags.mute_messages = muted
+		if not ok and before is not None:
+			current = getattr(frappe.local, "message_log", None)
+			if isinstance(current, list) and len(current) > before:
+				del current[before:]
+	return meta
+
+
+def _read_table_evidence(table: str) -> TableEvidence | None:
+	"""Evidence for ``table``, or None when it is not a DocType table, its DocType does
+	not exist (checked BEFORE get_meta, P8) or its columns cannot be read."""
+	import frappe
+
+	doctype = fix_recipes._doctype_of(table)
+	if doctype is None:
+		return None
+	if not frappe.db.exists("DocType", doctype):
+		return None
+	meta = _get_meta_quietly(doctype)
+	dialect = get_dialect()
+	column_types = dict(dialect.column_types(table) or {})
+	if not column_types:
+		return None
+	app = best_effort(lambda: frappe.get_doctype_app(doctype), "") or ""
+	fields: dict[str, FieldEvidence] = {}
+	for df in getattr(meta, "fields", None) or []:
+		name = getattr(df, "fieldname", None)
+		if name:
+			fields[name] = FieldEvidence(
+				fieldtype=str(getattr(df, "fieldtype", "") or ""),
+				length=_int(getattr(df, "length", 0)),
+				search_index=bool(getattr(df, "search_index", 0)),
+				unique=bool(getattr(df, "unique", 0)),
+				is_custom_field=bool(getattr(df, "is_custom_field", 0)),
+			)
+	indexes = tuple(
+		IndexEvidence(name=str(ix.name), columns=tuple(ix.columns or ()), unique=bool(ix.unique))
+		for ix in dialect.existing_indexes(table) or []
+	)
+	return TableEvidence(
+		table=table,
+		doctype=doctype,
+		app=str(app),
+		is_custom_doctype=bool(getattr(meta, "custom", 0)),
+		dialect=str(getattr(dialect, "name", "mariadb")),
+		fields=fields,
+		column_types=column_types,
+		text_columns=frozenset(c for c, t in column_types.items() if dialect.is_text_type(t)),
+		unindexable_columns=frozenset(c for c, t in column_types.items() if dialect.unindexable(t)),
+		indexes=indexes,
+	)
+
+
+def make_evidence_lookup() -> Callable[[str], TableEvidence | None]:
+	"""A per-render ``evidence_lookup(table)``: memoised per table (misses included), so
+	each table costs its queries once per render. Ordinary failures give None; an RQ
+	job timeout escapes as a fresh instance."""
+	cache: dict[str, TableEvidence | None] = {}
+
+	def lookup(table: str) -> TableEvidence | None:
+		key = str(table or "").strip().strip("`")
+		if key not in cache:
+			cache[key] = best_effort(lambda: _read_table_evidence(key), None)
+		return cache[key]
+
+	return lookup
 
 
 def _read_meta(

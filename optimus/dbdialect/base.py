@@ -164,3 +164,8 @@ class Dialect(ABC):
 		"""True when a plain b-tree index can't be suggested for this type
 		(json / geometry and friends)."""
 		return False
+
+	def is_text_type(self, data_type: str) -> bool:
+		"""True for a column the index advice treats as text: MariaDB indexes it only
+		with a key-length prefix, Postgres stores the whole value in the index."""
+		return self.prefix_required(data_type)

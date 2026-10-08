@@ -247,3 +247,7 @@ class PostgresDialect(Dialect):
 
 	def unindexable(self, data_type: str) -> bool:
 		return (data_type or "").lower() in _UNINDEXABLE_TYPES
+
+	def is_text_type(self, data_type: str) -> bool:
+		# Frappe's text fieldtypes are all "text" on Postgres (frappe/database/postgres/database.py:131-166).
+		return (data_type or "").lower() == "text"
