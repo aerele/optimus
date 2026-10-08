@@ -723,6 +723,16 @@ def walk_callsite_str(stack: list | None) -> str | None:
 	return f"{frame.get('filename', '?')}:{frame.get('lineno', '?')}"
 
 
+# Redundant Call findings carry technical_detail[CALLSITE_WALK_KEY] = CALLSITE_WALK_FIXED.
+# The value names the order walk_callsite receives the sidecar stack in: capture records
+# it innermost-first and redundant_calls reverses it to outermost-first before walking.
+# A finding without this exact value was built by the older walk, which passed the
+# innermost-first stack unreversed, so its callsite may be the outer hook. Stored findings
+# carry the value, so it never changes.
+CALLSITE_WALK_KEY = "callsite_walk"
+CALLSITE_WALK_FIXED = "outermost_first"
+
+
 # ---------------------------------------------------------------------------
 # Filename display helper (v0.5.1)
 # ---------------------------------------------------------------------------

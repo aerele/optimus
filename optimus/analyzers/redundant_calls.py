@@ -11,14 +11,19 @@ identifier_raw (the renderer uses identifier_raw).
 """
 
 import json
+import re
 from collections import Counter, defaultdict
 
 from optimus.analyzers.base import (
+	CALLSITE_WALK_FIXED,
+	CALLSITE_WALK_KEY,
 	AnalyzerResult,
 	installed_apps_allowlist,
 	is_framework_callsite,
 	walk_callsite,
 )
+
+_WINDOWS_ABS_RE = re.compile(r"^[A-Za-z]:/")
 
 DEFAULT_REDUNDANT_HIGH_MULTIPLIER = 5
 
@@ -106,6 +111,32 @@ def _to_hashable(value):
 	return value
 
 
+def _apps_relative_stack(stack: list) -> list:
+	"""``stack`` with absolute bench paths cut to ``<app>/...`` and absolute frames outside
+	the bench apps dropped, as frappe/recorder.py:97 does for SQL stacks
+	(``TRACEBACK_PATH_PATTERN = ".*/apps/"``). Without it a bench under
+	``/home/frappe/frappe-bench`` puts ``frappe/`` in every path, walk_callsite skips every
+	frame and the finding is lost (P4). Relative and Server Script frames pass through."""
+	out = []
+	for frame in stack or []:
+		if not isinstance(frame, dict):
+			continue
+		filename = str(frame.get("filename") or "").replace("\\", "/")
+		if "/apps/" in filename:
+			out.append(dict(frame, filename=filename.rsplit("/apps/", 1)[1]))
+		elif filename.startswith("/") or _WINDOWS_ABS_RE.match(filename):
+			continue
+		else:
+			out.append(frame)
+	return out
+
+
+def _callsite_key(callsite: dict | None) -> tuple | None:
+	if not callsite:
+		return None
+	return (callsite.get("filename"), callsite.get("lineno"))
+
+
 def analyze(recordings: list, context) -> AnalyzerResult:
 	# Read settings once for this analyze pass avoids N cache
 	# lookups for an N-bucket analysis.
@@ -187,22 +218,24 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			drop_cross_request_spread += 1
 			continue
 
-		# v0.5.2: callsite-based filtering. Use the first occurrence's
-		# stack as the representative (all occurrences of the same
-		# (fn_name, identifier) are by definition from the same cache
-		# key and we flag them BECAUSE they all fire from the same
-		# repeated loop so first-occurrence stack is canonical).
-		first_stack = occurrences[0][2]
-		if not first_stack:
+		# P14: walk every occurrence's own stack (cut to apps-relative paths, P4) and
+		# anchor the bucket on the callsite most of them share (ties: the first seen),
+		# with the action and the identifier of the occurrences there. The first
+		# occurrence alone could point at a non-loop line, the wrong action, or a
+		# framework frame. Cache sidecars store innermost-first stacks; the walker
+		# expects outermost-first, so the selected frame is the caller of the lookup.
+		walked = [
+			(action_idx, raw, walk_callsite(list(reversed(_apps_relative_stack(stack)))))
+			for action_idx, raw, stack in occurrences
+			if stack
+		]
+		if not walked:
 			# Recording captured before v0.5.2 OR stack capture failed.
-			# Drop the finding rather than emit a hashed-cache-key-
-			# with-no-context row that the user can't act on.
 			drop_no_caller_stack += 1
 			continue
-
-		# Cache sidecars store innermost-first stacks; the walker expects
-		# outermost-first, so the selected frame is the caller of the lookup.
-		callsite = walk_callsite(list(reversed(first_stack)))
+		top_key = Counter(_callsite_key(cs) for _action, _raw, cs in walked).most_common(1)[0][0]
+		anchored = [(a, r, cs) for a, r, cs in walked if _callsite_key(cs) == top_key]
+		callsite = anchored[0][2]
 		if callsite is None or is_framework_callsite(
 			callsite.get("filename") or "", tracked_apps=tracked_apps, installed_apps=installed_apps
 		):
@@ -240,10 +273,10 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 		# Action ref = the action containing the most occurrences
 		# (already computed in action_counts above as part of the
 		# per-action threshold check).
-		top_action_idx, _ = action_counts.most_common(1)[0]
+		top_action_idx = Counter(a for a, _raw, _cs in anchored).most_common(1)[0][0]
 
 		identifier_safe = safe_key
-		identifier_raw = occurrences[0][1]
+		identifier_raw = anchored[0][1]
 
 		findings.append({
 			"finding_type": "Redundant Call",
@@ -260,7 +293,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 				fn_name, max_in_any_action, callsite=callsite
 			),
 			"technical_detail_json": json.dumps({
-				"callsite_walk": "outermost_first",
+				CALLSITE_WALK_KEY: CALLSITE_WALK_FIXED,
 				"fn_name": fn_name,
 				"identifier_safe": (
 					list(identifier_safe) if isinstance(identifier_safe, tuple) else identifier_safe

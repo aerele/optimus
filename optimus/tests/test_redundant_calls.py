@@ -7,6 +7,7 @@ can't act on framework loops). The fixture builder defaults to a user-code
 stack so most tests exercise the core aggregation logic."""
 
 import json
+from pathlib import Path
 
 from optimus.analyzers import redundant_calls
 from optimus.analyzers.base import AnalyzeContext
@@ -511,3 +512,81 @@ def test_corpus_anchor_cache_get_inside_erpnext_is_suppressed_3q1gf7r9lq():
 	result = redundant_calls.analyze([recording], ctx)
 	assert [f for f in result.findings if f["finding_type"] == "Redundant Call"] == []
 	assert any("Frappe framework code" in w for w in ctx.warnings)
+
+
+# ---------------------------------------------------------------------------
+# P4 / P14: absolute bench paths, and the bucket's most frequent callsite
+# ---------------------------------------------------------------------------
+
+_BENCH = "/home/frappe/frappe-bench/apps"
+
+
+def _single_finding(sidecar):
+	recording = {"uuid": "rec-1", "calls": [], "pyi_session": None, "sidecar": sidecar}
+	ctx = AnalyzeContext(session_uuid="t", docname="t")
+	rc = [f for f in redundant_calls.analyze([recording], ctx).findings if f["finding_type"] == "Redundant Call"]
+	assert len(rc) == 1, ctx.warnings
+	return rc[0]
+
+
+def test_absolute_bench_paths_keep_the_user_loop():
+	"""P4: on /home/frappe/frappe-bench every absolute path held 'frappe/', so every
+	frame was skipped and the finding was dropped as framework code."""
+	stack = [  # innermost first, absolute co_filename paths, as capture records them
+		{"filename": "/usr/lib/python3.14/contextlib.py", "lineno": 81, "function": "inner"},
+		{"filename": f"{_BENCH}/frappe/frappe/model/document.py", "lineno": 900, "function": "get_doc"},
+		{"filename": f"{_BENCH}/myapp/myapp/controllers/bulk.py", "lineno": 42, "function": "do_import"},
+		{"filename": f"{_BENCH}/frappe/frappe/app.py", "lineno": 120, "function": "application"},
+	]
+	rc = _single_finding([
+		_sidecar_entry("get_doc", ("Item", "X"), ("Item", "h"), caller_stack=stack) for _ in range(8)
+	])
+	assert json.loads(rc["technical_detail_json"])["callsite"] == {
+		"filename": "myapp/myapp/controllers/bulk.py", "lineno": 42, "function": "do_import",
+	}
+
+
+def test_relative_and_server_script_frames_pass_through():
+	stack = [{"filename": "<serverscript>: my_script", "lineno": 3, "function": "<module>"}, *_USER_CALLER_STACK]
+	assert redundant_calls._apps_relative_stack(stack) == stack
+
+
+def test_the_bucket_is_anchored_on_its_most_frequent_callsite():
+	"""P14: two early calls from a non-loop line in action 0 no longer decide where the
+	finding points; the eight from the loop line in action 1 do."""
+	once = [{"filename": "apps/myapp/myapp/setup.py", "lineno": 5, "function": "prepare"}, *_USER_CALLER_STACK[1:]]
+	loop = [{"filename": "apps/myapp/myapp/rows.py", "lineno": 24, "function": "check_rows"}, *_USER_CALLER_STACK[1:]]
+	recordings = [
+		{"uuid": "r0", "calls": [], "pyi_session": None, "sidecar": [
+			_sidecar_entry("get_doc", ["User", "first"], ("User", "h"), caller_stack=once) for _ in range(2)
+		]},
+		{"uuid": "r1", "calls": [], "pyi_session": None, "sidecar": [
+			_sidecar_entry("get_doc", ["User", "loop"], ("User", "h"), caller_stack=loop) for _ in range(8)
+		]},
+	]
+	ctx = AnalyzeContext(session_uuid="t", docname="t")
+	rc = [f for f in redundant_calls.analyze(recordings, ctx).findings if f["finding_type"] == "Redundant Call"]
+	assert len(rc) == 1
+	detail = json.loads(rc[0]["technical_detail_json"])
+	assert (detail["callsite"]["filename"], detail["callsite"]["lineno"]) == ("apps/myapp/myapp/rows.py", 24)
+	assert rc[0]["action_ref"] == "1"
+	assert detail["identifier_raw"] == ["User", "loop"]
+
+
+def test_a_first_call_through_erpnext_no_longer_drops_the_finding():
+	"""P14: the first occurrence went through ERPNext; the repeating loop is the user's."""
+	via_erpnext = [{"filename": "apps/erpnext/erpnext/stock/utils.py", "lineno": 30, "function": "get_bin"}, *_USER_CALLER_STACK[1:]]
+	sidecar = [_sidecar_entry("get_doc", ("Item", "X"), ("Item", "h"), caller_stack=via_erpnext)]
+	sidecar += [_sidecar_entry("get_doc", ("Item", "X"), ("Item", "h")) for _ in range(7)]
+	rc = _single_finding(sidecar)
+	assert json.loads(rc["technical_detail_json"])["callsite"]["filename"] == "apps/myapp/controllers/bulk.py"
+
+
+def test_the_stamp_constants_live_in_analyzers_base():
+	from optimus import ai_grounding
+	from optimus.analyzers import base
+
+	assert ai_grounding.CALLSITE_WALK_KEY is base.CALLSITE_WALK_KEY
+	assert ai_grounding.CALLSITE_WALK_FIXED is base.CALLSITE_WALK_FIXED == "outermost_first"
+	src = Path(redundant_calls.__file__).read_text(encoding="utf-8")
+	assert '"outermost_first"' not in src and "CALLSITE_WALK_FIXED" in src

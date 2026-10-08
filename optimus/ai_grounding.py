@@ -25,7 +25,12 @@ import sys
 import textwrap
 from typing import NamedTuple
 
-from optimus.analyzers.base import FRAMEWORK_APPS, is_framework_callsite
+from optimus.analyzers.base import (
+	CALLSITE_WALK_FIXED,
+	CALLSITE_WALK_KEY,
+	FRAMEWORK_APPS,
+	is_framework_callsite,
+)
 
 LOOP_FACT_TYPES: frozenset[str] = frozenset({"N+1 Query", "Redundant Call", "Hot Line"})
 # Repetition of these types can come from a loop in a caller outside the window (P7).
@@ -513,12 +518,6 @@ NOT_ELIGIBLE_NOTE = "This finding type does not carry enough code or SQL context
 # A line whose Phase 2 time per hit reaches this, and whose statement calls a
 # non-builtin, spends its time inside that callee (owner decision A4).
 HOT_LINE_CALLEE_US = 1000.0
-
-# The corrected redundant_calls analyzer writes technical_detail[CALLSITE_WALK_KEY] =
-# CALLSITE_WALK_FIXED into every Redundant Call finding it builds (Task 6 moves the
-# two constants to optimus/analyzers/base.py).
-CALLSITE_WALK_KEY = "callsite_walk"
-CALLSITE_WALK_FIXED = "outermost_first"
 
 UNSTAMPED_REDUNDANT_CALL_NOTE = (
 	"This Redundant Call finding was analyzed before the callsite fix, so its line may point at "
