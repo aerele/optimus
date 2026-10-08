@@ -423,9 +423,10 @@ class TestPredicateShape:
 			assert "an OR between conditions" in text and "an index would not help" in text
 
 	def test_between_and_plain_conditions_are_kept(self):
+		"""Fix round 4: equality columns first, the BETWEEN range column last."""
 		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND posting_date BETWEEN ? AND ? AND status = ?"
 		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI))
-		assert advice.columns == ("company", "posting_date", "status")
+		assert advice.columns == ("company", "status", "posting_date")
 
 	def test_a_sort_column_is_not_a_filter(self):
 		q = "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND (status = ? OR company = ?) ORDER BY posting_date"
@@ -439,6 +440,8 @@ class TestPredicateShape:
 		)
 		assert shapes == {"status": {"unsure"}}
 		assert ir._unusable_where_columns("SELECT name FROM `tabX` WHERE (a = ?", [("WHERE", "a")]) == {"a": {"unsure"}}
+		# a clause that ends on an operator was cut short, whatever cut it
+		assert ir._unusable_where_columns("SELECT name FROM `tabX` WHERE a = ? AND", [("WHERE", "a")]) == {"a": {"unsure"}}
 		# a name used only as a function is no use of that column
 		q = "SELECT name FROM `tabX` WHERE company = ? AND year(posting_date) = ?"
 		assert ir._unusable_where_columns(q, [("WHERE", "company"), ("WHERE", "year")]) == {"year": {"unsure"}}
@@ -487,7 +490,11 @@ class TestFunctionWrapped:
 
 	def test_not_brackets_and_the_regexp_family(self):
 		advice = self._advise("Full Table Scan", "`company`=? AND NOT (`status`=? OR `status`=?)")
-		assert advice.columns == ("company",) and "the function NOT()" in ir.finding_text(advice)
+		assert advice.columns == ("company",)
+		assert "Optimus left out status (compared inside a NOT (...), which an index" in ir.finding_text(advice)
+		assert "NOT()" not in ir.finding_text(advice)
+		advice = self._advise("Full Table Scan", "NOT (`status`=? OR `status`=?)")
+		assert "a NOT (...) around status" in advice.reason
 		for op in ("ILIKE ?", "RLIKE ?", "REGEXP ?", "NOT REGEXP ?", "REGEXP '^A'"):
 			advice = self._advise("Full Table Scan", f"`company`=? AND `customer` {op}")
 			assert advice.columns == ("company",), op
@@ -545,6 +552,11 @@ class TestUnreadableQueries:
 		assert "an OR between conditions on customer" in first and "status" not in first
 		assert "Optimus could not read how the query filters on status." in rest
 		assert "tabSales" not in advice.reason and " I," not in advice.reason and " I." not in advice.reason
+		# fix round 4: Optimus cannot say an index would not help when it could not read a filter
+		assert "an index would not help" not in advice.reason
+		assert advice.reason.endswith(
+			"So Optimus gives no index code. Check the query with EXPLAIN to see which index it needs."
+		)
 
 
 class TestQualifiersAndSubqueries:
@@ -618,6 +630,175 @@ class TestCheckOnly:
 		):
 			assert advice.route == ir.ROUTE_NO_CODE
 			assert "is_return is a Check field" in advice.reason and "an index would not help" in advice.reason
+
+
+_ROUND4_FIELDS = {
+	**_ALL, "grand_total": F("Int"), "outstanding_amount": F("Int"), "due_date": F("Date"),
+	"is_return": F("Check"), "customer_name": F("Data"),
+}
+_SII = _ev("Sales Invoice Item", fields={
+	"item_code": F("Link"), "qty": F("Int"), "delivered_qty": F("Int"), "against_sales_order": F("Link"),
+})
+_R4 = _lookup(_ev(fields=_ROUND4_FIELDS), _SII)
+
+
+def _r4(ftype, where, *, table="tabSales Invoice"):
+	q = f"SELECT `name` FROM `{table}` WHERE {where}"
+	return ir.advise_finding(_explain(ftype, q, table=table), evidence_lookup=_R4)
+
+
+class TestTopLevelSameColumnOr:
+	"""Fix round 4 (A): Frappe writes a lone "is not set" filter as a bare top-level OR."""
+
+	def test_a_top_level_or_on_one_column_is_a_plain_use(self):
+		where = "`po_no` IS NULL OR `po_no`=? ORDER BY `posting_date` DESC"
+		assert _r4("Full Table Scan", where).columns == ("po_no",)
+		assert _r4("Filesort", where).columns == ("po_no", "posting_date")
+
+	def test_other_top_level_ors_still_count_as_or(self):
+		labelled = [("WHERE", "status"), ("WHERE", "customer"), ("WHERE", "company")]
+		for where in ("`status`=? OR `customer`=?", "`status`=? AND `company`=? OR `status`=?", "`status`=? OR `status` LIKE ?"):
+			shapes = ir._unusable_where_columns(f"SELECT `name` FROM `tabSales Invoice` WHERE {where}", labelled)
+			assert shapes["status"] == {"or"}, where
+
+
+class TestSlowQueryCut:
+	"""Fix round 4 (B): a Slow Query keeps only its first 500 characters (top_queries), so its
+	WHERE clause counts only when the clause reached its end keyword."""
+
+	@staticmethod
+	def _cut(tail: str, at: str, offset: int) -> str:
+		def query(pad):
+			return f"select `name` as `{'x' * pad}` {tail}"
+		pad = ir.QUERY_TEXT_LIMIT - query(0).index(at) - offset
+		cut = query(pad)[: ir.QUERY_TEXT_LIMIT]
+		assert len(cut) == ir.QUERY_TEXT_LIMIT
+		return cut
+
+	def _advise(self, cut):
+		finding = {"finding_type": "Slow Query", "technical_detail": {"normalized_query": cut}}
+		return ir.advise_finding(finding, evidence_lookup=_R4)
+
+	def test_a_cut_inside_the_order_by_keeps_the_whole_where_clause(self):
+		tail = (
+			"FROM `tabSales Invoice` WHERE `tabSales Invoice`.`company`=? AND `tabSales Invoice`.`customer`=? "
+			"ORDER BY `tabSales Invoice`.`posting_date` DESC LIMIT ?"
+		)
+		advice = self._advise(self._cut(tail, "ORDER BY `tabSales Invoice`", 15))
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.columns == ("company", "customer")
+
+	def test_a_cut_inside_a_column_name_gives_honest_no_code(self):
+		tail = "from `tabSales Invoice` where company = ? and customer_name = ? order by posting_date desc limit ?"
+		advice = self._advise(self._cut(tail, "customer_name", 8))
+		assert advice.route == ir.ROUTE_NO_CODE
+		text = ir.finding_text(advice, install=False)
+		assert text.startswith("Optimus could not read how this query combines its filters")
+		assert "has no column" not in text
+
+	def test_a_cut_just_before_a_top_level_or_gives_honest_no_code(self):
+		tail = "from `tabSales Invoice` where company = ? and customer = ? or status = ? order by posting_date"
+		advice = self._advise(self._cut(tail, "or status", 0))
+		assert advice.route == ir.ROUTE_NO_CODE
+		assert ir.finding_text(advice, install=False).startswith("Optimus could not read")
+
+	def test_a_short_slow_query_needs_no_end_keyword(self):
+		finding = {"finding_type": "Slow Query", "technical_detail": {
+			"normalized_query": "SELECT `name` FROM `tabSales Invoice` WHERE `company`=? AND `customer`=?",
+		}}
+		assert ir.advise_finding(finding, evidence_lookup=_R4).columns == ("company", "customer")
+
+
+class TestExpressions:
+	"""Fix round 4 (C): arithmetic on a column, or a comparison with another column of the
+	same row, cannot use an index on it."""
+
+	def test_arithmetic_on_a_column_is_left_out(self):
+		advice = _r4("Full Table Scan", "`grand_total` - `outstanding_amount` > ? AND `company`=?")
+		assert advice.columns == ("company",)
+		assert "Optimus left out grand_total (compared through arithmetic, which an index on the column cannot use)" in (
+			ir.finding_text(advice)
+		)
+		advice = _r4("Full Table Scan", "`grand_total` - `outstanding_amount` > ?")
+		assert advice.route == ir.ROUTE_NO_CODE and "arithmetic on grand_total" in advice.reason
+
+	def test_a_column_compared_with_another_column_is_left_out(self):
+		advice = _r4("Full Table Scan", "`qty` > `delivered_qty` AND `item_code`=?", table="tabSales Invoice Item")
+		assert advice.columns == ("item_code",)
+
+	def test_joins_value_arithmetic_and_literal_words_stay_usable(self):
+		q = (
+			"select si.name from `tabSales Invoice` si, `tabSales Invoice Item` sii "
+			"where sii.against_sales_order = si.name and sii.item_code = ?"
+		)
+		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabSales Invoice Item"), evidence_lookup=_R4)
+		assert advice.columns == ("against_sales_order", "item_code")
+		assert _r4("Full Table Scan", "`posting_date` > ? - INTERVAL ? DAY AND `company`=?").columns == ("company", "posting_date")
+		assert _r4("Full Table Scan", "`posting_date` <= CURRENT_DATE AND `company`=?").columns == ("company", "posting_date")
+		assert _r4("Full Table Scan", "`posting_date` <= CURDATE() AND `company`=?").columns == ("company", "posting_date")
+		assert _r4("Full Table Scan", "`status` = NULL AND `company`=?").columns == ("status", "company")
+
+
+class TestCaseFrame:
+	"""Fix round 4 (D): a column inside CASE ... END cannot use an index on it."""
+
+	def test_every_case_form_is_a_frame(self):
+		for where, cols, left_out in (
+			("`company`=? AND (CASE WHEN `customer`=? THEN ? ELSE ? END)=?", ("company",), "customer"),
+			("`company`=? AND CASE WHEN `status`=? AND `customer`=? THEN ? ELSE ? END = ?", ("company",), "status"),
+			("`company`=? AND `customer`=? AND CASE WHEN `status`=? OR `po_no`=? THEN ? ELSE ? END = ?", ("company", "customer"), "status"),
+			("`company`=? AND CASE `status` WHEN ? THEN ? ELSE ? END = ?", ("company",), "status"),
+			("`company`=? AND CASE WHEN `status`=? THEN CASE WHEN `customer`=? THEN ? END END = ?", ("company",), "customer"),
+		):
+			advice = _r4("Full Table Scan", where)
+			assert advice.columns == cols, where
+			text = ir.finding_text(advice)
+			assert "Optimus left out " in text, where
+			assert f"{left_out} (compared inside a CASE expression, which an index on the column cannot use)" in text, where
+
+	def test_a_value_side_case_leaves_the_column_plain(self):
+		assert _r4("Full Table Scan", "`company`=? AND `status` = CASE WHEN ? THEN ? ELSE ? END").columns == ("company", "status")
+		where = "`company`=? AND CASE WHEN `status`=? THEN CASE WHEN `customer`=? THEN ? END END = `posting_date`"
+		assert _r4("Full Table Scan", where).columns == ("company", "posting_date")
+
+	def test_a_lone_case_filter_gives_no_code(self):
+		advice = _r4("Full Table Scan", "CASE WHEN `status`=? THEN ? ELSE ? END = ?")
+		assert advice.route == ir.ROUTE_NO_CODE and "a CASE expression around status" in advice.reason
+
+
+class TestIndexDesign:
+	"""Fix round 4: equality columns first, then at most one range or <> column, then the
+	sort or group column; a column after a range column cannot use the index."""
+
+	def test_equality_columns_lead(self):
+		assert _r4("Full Table Scan", "`posting_date` BETWEEN ? AND ? AND `company`=?").columns == ("company", "posting_date")
+		assert _r4("Full Table Scan", "`po_no` IS NOT NULL AND `company`=?").columns == ("company", "po_no")
+		assert _r4("Full Table Scan", "`po_no` IS NULL AND `company`=?").columns == ("po_no", "company")
+		assert _r4("Full Table Scan", "`status` IN (?) AND `company`=?").columns == ("status", "company")
+		assert _r4("Full Table Scan", "`posting_date` > ? AND ? = `company`").columns == ("company", "posting_date")
+		item = _lookup(_ev("Item", fields={"disabled": F("Check"), "item_group": F("Link")}))
+		q = "SELECT `name` FROM `tabItem` WHERE `disabled`<>? AND `item_group`=?"
+		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabItem"), evidence_lookup=item)
+		assert advice.columns == ("item_group", "disabled")
+
+	def test_a_join_column_counts_as_equality(self):
+		q = (
+			"select sii.name from `tabSales Invoice Item` sii join `tabSales Invoice` si "
+			"on si.name = sii.against_sales_order where sii.qty > ?"
+		)
+		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabSales Invoice Item"), evidence_lookup=_R4)
+		assert advice.columns == ("against_sales_order", "qty")
+
+	def test_only_one_range_column_is_kept(self):
+		advice = _r4("Full Table Scan", "`posting_date` > ? AND `due_date` < ? AND `company`=?")
+		assert advice.columns == ("company", "posting_date")
+		assert "Optimus left out due_date (it comes after the range condition on posting_date" in ir.finding_text(advice)
+
+	def test_a_sort_after_a_range_is_left_out_and_said(self):
+		advice = _r4("Filesort", "`company`=? AND `posting_date` > ? ORDER BY `customer`")
+		assert advice.columns == ("company", "posting_date")
+		text = ir.finding_text(advice)
+		assert "The sort column comes after the range condition on posting_date" in text
+		assert "Optimus left out customer (it comes after the range condition on posting_date" in text
 
 
 class TestPostgresRowWidth:

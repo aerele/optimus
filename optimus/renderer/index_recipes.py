@@ -6,9 +6,10 @@
 ``advise`` is the one advisor for both surfaces. It reads only the evidence
 ``recipe_enrichment`` collects for the table (DocField flags, real column types, existing
 indexes). A finding also has its query, so its columns first pass the predicate-shape
-check (OR, wildcard LIKE, a function around the column); a table card has no query and
-gets no such check, so the two can differ when a query's filter shape rules a column
-out. The advisor picks one route:
+check (OR, wildcard LIKE, a function, CASE or arithmetic around the column) and are put
+in index order (equality columns, then one range column, then the sort column); a table
+card has no query and gets neither, so the two can differ when a query's filter shape
+rules a column out. The advisor picks one route:
 
 - ``search_index``: one non-text column of a field the developer controls (an app in
   Tracked Apps, a Custom Field, or a DocType created in the UI) on MariaDB. The advice
@@ -42,7 +43,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from optimus.analyzers.base import FRAPPE_METADATA_COLUMNS, INDEX_FINDING_TYPES, is_write_hot_table
+from optimus.analyzers.base import (
+	FRAPPE_METADATA_COLUMNS,
+	INDEX_FINDING_TYPES,
+	QUERY_TEXT_LIMIT,
+	is_write_hot_table,
+)
 from optimus.safe_call import best_effort
 
 if TYPE_CHECKING:
@@ -314,7 +320,7 @@ def _index_target(ftype: str, detail: dict, parse) -> tuple[str, list[tuple[str,
 	return _explain_columns(ftype, table, str(detail.get("normalized_query") or ""), parse)
 
 
-def _clean_columns(columns) -> list[str]:
+def _clean_columns(columns, *, cap: bool = True) -> list[str]:
 	out: list[str] = []
 	seen: set[str] = set()
 	for col in apply_metadata_rule([c for c in columns or [] if isinstance(c, str) and _IDENT_RE.fullmatch(c)]):
@@ -322,23 +328,30 @@ def _clean_columns(columns) -> list[str]:
 			continue
 		seen.add(col.lower())
 		out.append(col)
-	return out[:MAX_INDEX_COLUMNS]
+	return out[:MAX_INDEX_COLUMNS] if cap else out
 
 
 # --- predicate shape -------------------------------------------------------------
 # sql_metadata (the table-breakdown parser) lists a query's WHERE columns but not how
 # they combine, and Frappe's normalize_query turns every literal into ?, so a LIKE
 # pattern is never visible (frappe/recorder.py:154-179). A conservative token scan of the
-# main query's WHERE clause decides which WHERE columns a composite index can use. A
-# column is usable when at least one top-level AND piece compares it plainly: not inside
-# a function call (IFNULL(), YEAR(), DATE(), LOWER(), NOT (...), any name( ... ), not
-# inside a bracket level that has an OR (unless every branch of that OR compares the
-# same one column by =, IS NULL or IN), and not by a LIKE / ILIKE / RLIKE / REGEXP whose
-# pattern may start with a wildcard. A dotted reference counts only when its qualifier
-# is the target table or one of its aliases, and a (SELECT ...) group is skipped whole.
-# Fail closed: a WHERE column the scan cannot place (an unbalanced bracket or quote, a
-# clause that ends on an operator because the query was cut short, no top-level WHERE, a
-# column it cannot find) is treated as unusable ("unsure").
+# main query's WHERE clause decides which WHERE columns a composite index can use and how
+# (equality or range). A column is usable when at least one top-level AND piece compares
+# it plainly:
+# - not inside a function call (IFNULL(), YEAR(), DATE(), LOWER(), NOT (...), any
+#   name( ... ) or a CASE ... END expression;
+# - not inside a bracket level that has an OR, unless every branch of that OR compares
+#   the same one column by =, IS NULL or IN (also at the top level: Frappe writes a lone
+#   "is not set" filter as a bare `col IS NULL OR col = ?`);
+# - not by a LIKE / ILIKE / RLIKE / REGEXP whose pattern may start with a wildcard;
+# - not next to an arithmetic operator, and not compared with another column of the
+#   same table.
+# A dotted reference counts only when its qualifier is the target table or one of its
+# aliases, and a (SELECT ...) group is skipped whole. Fail closed: a WHERE column the scan
+# cannot place is treated as unusable ("unsure"): an unbalanced bracket or quote, a
+# clause that ends on an operator, a Slow Query (cut at QUERY_TEXT_LIMIT characters)
+# whose WHERE clause did not reach its end keyword, no top-level WHERE, a column it
+# cannot find.
 
 _SQL_TOKEN_RE = re.compile(
 	r"`[^`]*`|'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.)*\"|/\*.*?\*/|--[^\n]*|#[^\n]*"
@@ -368,20 +381,56 @@ _DANGLING: frozenset[str] = frozenset({
 	"and", "or", "xor", "not", "like", "ilike", "rlike", "regexp", "in", "is", "between", "=", "<", ">",
 	"<>", "!=", "<=", ">=", "<=>", ",", ".", "&&", "||", "where",
 })
+_ARITHMETIC: frozenset[str] = frozenset({"+", "-", "*", "/", "%", "div", "mod", "^", "&", "|"})
+_COMPARISONS: frozenset[str] = frozenset({"=", "<", ">", "<=", ">=", "<>", "!=", "<=>"})
+_EQUALITY: frozenset[str] = frozenset({"=", "<=>"})
+# A bare word on the other side of a comparison that is a value or a keyword, not a column.
+_VALUE_WORDS: frozenset[str] = frozenset({
+	"null", "true", "false", "unknown", "binary", "date", "time", "timestamp", "interval", "any", "all",
+	"some", "case", "when", "then", "else", "end", "not", "exists", "select",
+})
+_VALUE_WORD_PREFIXES: tuple[str, ...] = ("current_", "localtime", "utc_")
 _SHAPE_WHY: dict[str, str] = {
 	"or": "compared only inside an OR between conditions",
 	"like": "compared by a LIKE whose pattern can start with a wildcard",
 	"function": "compared through the function {name}(), which an index on the column cannot use",
+	"NOT": "compared inside a NOT (...), which an index on the column cannot use",
+	"CASE": "compared inside a CASE expression, which an index on the column cannot use",
+	"expression": "compared through arithmetic, which an index on the column cannot use",
 	"unsure": "a filter Optimus could not place with certainty",
 }
 _FUNCTION = "function:"  # a kind "function:IFNULL" records the innermost call's name
 
 
-def _where_tokens(query: str) -> list[str] | None:
+def _where_end(tokens: list[str]) -> int | None:
+	"""Index of the keyword that ends the main query's WHERE clause, or None when there
+	is no top-level WHERE or the text stops before the clause ends."""
+	depth = 0
+	start = None
+	for i, tok in enumerate(tokens):
+		depth += {"(": 1, ")": -1}.get(tok, 0)
+		if depth or tok in ("(", ")"):
+			continue
+		low = tok.lower()
+		if start is None and low == "where":
+			start = i
+		elif start is not None and low in _WHERE_ENDS:
+			return i
+	return None
+
+
+def _where_tokens(query: str, *, truncated: bool = False) -> list[str] | None:
 	"""The tokens of the main query's WHERE clause ([] when it has none), or None when the
 	query cannot be scanned with certainty (an unbalanced bracket or quote, or a clause
-	that ends on an operator because the query was cut short)."""
+	that ends on an operator because the query was cut short). A ``truncated`` query
+	(possibly cut at QUERY_TEXT_LIMIT characters) counts only when its WHERE clause reached
+	its end keyword, and only the text before that keyword is checked."""
 	tokens = [tok for tok in _SQL_TOKEN_RE.findall(query or "") if not _COMMENT_RE.match(tok)]
+	if truncated:
+		stop = _where_end(tokens)
+		if stop is None:
+			return None
+		tokens = tokens[:stop]
 	depth = 0
 	for tok in tokens:
 		if tok in ("`", "'", '"'):
@@ -412,26 +461,6 @@ def _where_tokens(query: str) -> list[str] | None:
 	return clause
 
 
-def _conjuncts(tokens: list[str]) -> list[list[str]] | None:
-	"""The pieces of a WHERE clause between its top-level ANDs, or None when an OR sits at
-	its top level (AND binds tighter, so no piece is then sure to apply). The AND of a
-	BETWEEN also splits: harmless, because a nested OR stays inside its brackets, so a
-	finer split never moves a column out of an OR group."""
-	parts: list[list[str]] = [[]]
-	depth = 0
-	for tok in tokens:
-		low = tok.lower()
-		depth += {"(": 1, ")": -1}.get(tok, 0)
-		if depth == 0 and tok not in ("(", ")"):
-			if low in _OR_WORDS:
-				return None
-			if low in _AND_WORDS:
-				parts.append([])
-				continue
-		parts[-1].append(tok)
-	return [part for part in parts if part]
-
-
 def _bracket_pairs(tokens: list[str]) -> dict[int, int]:
 	"""``{index of "(": index of its ")"}`` (the tokens are balanced)."""
 	stack: list[int] = []
@@ -444,12 +473,83 @@ def _bracket_pairs(tokens: list[str]) -> dict[int, int]:
 	return pairs
 
 
+def _is_case(tok: str) -> bool:
+	return tok.lower() == "case" and _BARE_NAME_RE.match(tok) is not None
+
+
+def _case_close(tokens: list[str], i: int, end: int, pairs: dict[int, int]) -> int:
+	"""Index of the END that closes the CASE at ``i`` (bracket groups jumped over), or
+	``end`` when there is none."""
+	depth = 0
+	k = i
+	while k < end:
+		tok = tokens[k]
+		if tok == "(":
+			k = pairs.get(k, end) + 1
+			continue
+		if _BARE_NAME_RE.match(tok):
+			low = tok.lower()
+			if low == "case":
+				depth += 1
+			elif low == "end":
+				depth -= 1
+				if depth == 0:
+					return k
+		k += 1
+	return end
+
+
+def _group_close(tokens: list[str], i: int, end: int, pairs: dict[int, int]) -> int | None:
+	"""Index that closes the bracket or CASE group opening at ``i``, or None."""
+	if tokens[i] == "(":
+		return pairs.get(i, end)
+	if _is_case(tokens[i]):
+		return _case_close(tokens, i, end, pairs)
+	return None
+
+
+def _conjuncts(tokens: list[str]) -> list[list[str]] | None:
+	"""The pieces of a WHERE clause between its top-level ANDs (bracket and CASE groups
+	kept whole), or None when an OR sits at its top level (AND binds tighter, so no piece
+	is then sure to apply) unless every branch of that OR compares the same one column,
+	which makes the whole clause one piece. The AND of a BETWEEN also splits: harmless,
+	because a nested OR stays inside its group, so a finer split never moves a column out
+	of an OR group."""
+	pairs = _bracket_pairs(tokens)
+	parts: list[list[str]] = [[]]
+	i = 0
+	while i < len(tokens):
+		close = _group_close(tokens, i, len(tokens), pairs)
+		if close is not None:
+			parts[-1] += tokens[i : close + 1]
+			i = close + 1
+			continue
+		low = tokens[i].lower()
+		if low in _OR_WORDS:
+			has_or, key = _level_or(tokens, 0, len(tokens), pairs)
+			return [tokens] if has_or and key is not None else None
+		if low in _AND_WORDS:
+			parts.append([])
+		else:
+			parts[-1].append(tokens[i])
+		i += 1
+	return [part for part in parts if part]
+
+
 def _chain_end(tokens: list[str], i: int) -> int:
 	"""Index of the last name of the dotted reference that starts at ``i``."""
 	j = i
 	while j + 2 < len(tokens) and tokens[j + 1] == "." and _NAME_RE.match(tokens[j + 2]):
 		j += 2
 	return j
+
+
+def _chain_start(tokens: list[str], j: int) -> int:
+	"""Index of the first name of the dotted reference that ends at ``j``."""
+	i = j
+	while i >= 2 and tokens[i - 1] == "." and _NAME_RE.match(tokens[i - 2]):
+		i -= 2
+	return i
 
 
 def _ref_key(tokens: list[str], i: int, j: int) -> tuple[str, str]:
@@ -479,15 +579,17 @@ def _single_column_branch(tokens: list[str], start: int, end: int, pairs: dict[i
 
 
 def _level_or(tokens: list[str], start: int, end: int, pairs: dict[int, int]):
-	"""``(True, key | None)`` when ``tokens[start:end]`` has an OR at its own bracket level;
-	``key`` is the ``(qualifier, column)`` every OR branch compares, when they all compare
-	the same one column plainly. ``(False, None)`` without an OR."""
+	"""``(True, key | None)`` when ``tokens[start:end]`` has an OR at its own level (bracket
+	and CASE groups skipped); ``key`` is the ``(qualifier, column)`` every OR branch
+	compares, when they all compare the same one column plainly. ``(False, None)``
+	without an OR."""
 	branches: list[tuple[int, int]] = []
 	first = start
 	i = start
 	while i < end:
-		if tokens[i] == "(":
-			i = pairs.get(i, end) + 1
+		close = _group_close(tokens, i, end, pairs)
+		if close is not None:
+			i = close + 1
 			continue
 		if tokens[i].lower() in _OR_WORDS:
 			branches.append((first, i))
@@ -517,12 +619,58 @@ def _wildcard_like(tokens: list[str], at: int) -> bool:
 	return True
 
 
-def _conjunct_refs(tokens: list[str], qualifiers) -> list[tuple[str, set[str]]]:
-	"""``(lowercase column, kinds)`` for each column reference in one AND piece; empty
-	kinds is a plain use. A reference qualified by another table (``acc.company``) and
-	everything inside a ``(SELECT ...)`` group is skipped."""
+def _column_partner(tokens: list[str], a: int, b: int, qualifiers) -> bool:
+	"""True when ``tokens[a..b]`` is a column of the target table: a name chain that is
+	not a call and not a value word (NULL, CURRENT_DATE, ...), whose qualifier is empty or
+	a target qualifier. A join condition to another table is no partner."""
+	if not _NAME_RE.match(tokens[a]) or (b + 1 < len(tokens) and tokens[b + 1] == "("):
+		return False
+	if a == b and _BARE_NAME_RE.match(tokens[a]):
+		low = tokens[a].lower()
+		if low in _VALUE_WORDS or low.startswith(_VALUE_WORD_PREFIXES):
+			return False
+	qualifier, _name = _ref_key(tokens, a, b)
+	return qualifiers is None or not qualifier or qualifier in qualifiers
+
+
+def _is_expression(tokens: list[str], i: int, j: int, qualifiers) -> bool:
+	"""True when the reference ``tokens[i..j]`` sits next to an arithmetic operator or is
+	compared with another column of the target table."""
+	before = tokens[i - 1].lower() if i > 0 else ""
+	after = tokens[j + 1].lower() if j + 1 < len(tokens) else ""
+	if before in _ARITHMETIC or after in _ARITHMETIC:
+		return True
+	if after in _COMPARISONS and j + 2 < len(tokens):
+		if _column_partner(tokens, j + 2, _chain_end(tokens, j + 2), qualifiers):
+			return True
+	if before in _COMPARISONS and i >= 2 and _NAME_RE.match(tokens[i - 2]):
+		return _column_partner(tokens, _chain_start(tokens, i - 2), i - 2, qualifiers)
+	return False
+
+
+def _comparison(tokens: list[str], i: int, j: int) -> str:
+	"""``"eq"`` when the plain reference ``tokens[i..j]`` is compared by =, <=>, IN or
+	IS NULL, else ``"range"`` (<, >, BETWEEN, <>, NOT ..., IS NOT NULL, a prefix LIKE, or
+	a shape the scan does not know, which is never treated as equality)."""
+	after = [tok.lower() for tok in tokens[j + 1 : j + 3]]
+	first = after[0] if after else ""
+	if first in _EQUALITY or first == "in":
+		return "eq"
+	if first == "is":
+		return "eq" if after[1:] == ["null"] else "range"
+	if not first or first in _AND_WORDS:
+		before = tokens[i - 1].lower() if i > 0 else ""
+		return "eq" if before in _EQUALITY else "range"
+	return "range"
+
+
+def _conjunct_refs(tokens: list[str], qualifiers) -> list[tuple[str, set[str], str]]:
+	"""``(lowercase column, kinds, comparison)`` for each column reference in one AND
+	piece; empty kinds is a plain use, compared ``"eq"`` or ``"range"``. A reference
+	qualified by another table (``acc.company``) and everything inside a ``(SELECT ...)``
+	group is skipped."""
 	pairs = _bracket_pairs(tokens)
-	out: list[tuple[str, set[str]]] = []
+	out: list[tuple[str, set[str], str]] = []
 
 	def walk(start: int, end: int, frames: list[tuple[str | None, bool, tuple | None]]) -> None:
 		i = start
@@ -536,6 +684,11 @@ def _conjunct_refs(tokens: list[str], qualifiers) -> list[tuple[str, set[str]]]:
 					call = prev.upper() if _BARE_NAME_RE.match(prev) and prev.lower() not in _GROUPING_WORDS else None
 					has_or, or_key = _level_or(tokens, i + 1, close, pairs)
 					walk(i + 1, close, [*frames, (call, has_or, or_key)])
+				i = close + 1
+				continue
+			if _is_case(tok):
+				close = _case_close(tokens, i, end, pairs)
+				walk(i + 1, close, [*frames, ("CASE", False, None)])
 				i = close + 1
 				continue
 			if not _NAME_RE.match(tok):
@@ -555,40 +708,51 @@ def _conjunct_refs(tokens: list[str], qualifiers) -> list[tuple[str, set[str]]]:
 					kinds.add("or")
 				if not call and _wildcard_like(tokens, j + 1):
 					kinds.add("like")
-				out.append((name, kinds))
+				if _is_expression(tokens, i, j, qualifiers):
+					kinds.add("expression")
+				out.append((name, kinds, "" if kinds else _comparison(tokens, i, j)))
 			i = j + 1
 
-	top_or, top_key = _level_or(tokens, 0, len(tokens), pairs)
-	walk(0, len(tokens), [(None, top_or, top_key)])
+	walk(0, len(tokens), [])
 	return out
 
 
-def _unusable_where_columns(query: str, labelled, qualifiers=None) -> dict[str, set[str]]:
-	"""``{column: kinds}`` for each WHERE column of ``labelled`` that a composite index
-	cannot use; a kind is ``"or"``, ``"like"``, ``"function:<NAME>"`` or ``"unsure"`` (see
-	the section comment). ``qualifiers`` (the target table and its aliases) limits which
-	dotted references count; None counts every one."""
+def _scan_where(query: str, labelled, qualifiers=None, *, truncated: bool = False):
+	"""``(unusable, comparisons)`` for the WHERE columns of ``labelled``: ``unusable`` is
+	``{column: kinds}`` for each column a composite index cannot use (a kind is ``"or"``,
+	``"like"``, ``"function:<NAME>"``, ``"expression"`` or ``"unsure"``, see the section
+	comment), ``comparisons`` is ``{column: "eq" | "range"}`` for the usable ones."""
 	where_cols: list[str] = []
 	for label, col in labelled or []:
 		if label == "WHERE" and col not in where_cols:
 			where_cols.append(col)
 	if not where_cols:
-		return {}
-	tokens = _where_tokens(query)
+		return {}, {}
+	tokens = _where_tokens(query, truncated=truncated)
 	if tokens is None:
-		return {col: {"unsure"} for col in where_cols}
+		return {col: {"unsure"} for col in where_cols}, {}
 	conjuncts = _conjuncts(tokens)
 	if conjuncts is None:
-		return {col: {"or"} for col in where_cols}
-	usable: set[str] = set()
+		return {col: {"or"} for col in where_cols}, {}
+	usable: dict[str, str] = {}
 	kinds: dict[str, set[str]] = defaultdict(set)
 	for part in conjuncts:
-		for name, ref_kinds in _conjunct_refs(part, qualifiers):
+		for name, ref_kinds, comparison in _conjunct_refs(part, qualifiers):
 			if ref_kinds:
 				kinds[name] |= ref_kinds
-			else:
-				usable.add(name)
-	return {col: set(kinds.get(col.lower()) or {"unsure"}) for col in where_cols if col.lower() not in usable}
+			elif usable.get(name) != "eq":
+				usable[name] = comparison
+	unusable = {
+		col: set(kinds.get(col.lower()) or {"unsure"}) for col in where_cols if col.lower() not in usable
+	}
+	return unusable, {col: usable[col.lower()] for col in where_cols if col.lower() in usable}
+
+
+def _unusable_where_columns(query: str, labelled, qualifiers=None, *, truncated: bool = False) -> dict[str, set[str]]:
+	"""``{column: kinds}`` for each WHERE column of ``labelled`` that a composite index
+	cannot use (``_scan_where``). ``qualifiers`` (the target table and its aliases) limits
+	which dotted references count; None counts every one."""
+	return _scan_where(query, labelled, qualifiers, truncated=truncated)[0]
 
 
 def _target_qualifiers(query: str, table: str) -> frozenset[str]:
@@ -603,8 +767,29 @@ def _target_qualifiers(query: str, table: str) -> frozenset[str]:
 	return frozenset({table} | {alias for alias, real in (found or {}).items() if real == table})
 
 
+def _index_order(cols: list[str], comparisons: Mapping[str, str]) -> tuple[list[str], list[tuple[str, str]]]:
+	"""Recipe columns in index order: equality columns first, then at most one range
+	column, then the sort or group columns. A column after a range column cannot use the
+	index, so it is left out with the reason."""
+	eq = [col for col in cols if comparisons.get(col, "eq") == "eq"]
+	ranges = [col for col in cols if comparisons.get(col) == "range"]
+	sorts = [col for col in cols if comparisons.get(col) == "sort"]
+	if not ranges:
+		return eq + sorts, []
+	why = f"it comes after the range condition on {ranges[0]}, so the index cannot use it"
+	return eq + ranges[:1], [(col, why) for col in ranges[1:] + sorts]
+
+
 def _function_names(kinds: set[str]) -> list[str]:
 	return sorted(kind[len(_FUNCTION) :] for kind in kinds if kind.startswith(_FUNCTION))
+
+
+def _function_phrase(name: str, col: str) -> str:
+	if name == "NOT":
+		return f"a NOT (...) around {col}"
+	if name == "CASE":
+		return f"a CASE expression around {col}"
+	return f"the function {name}() wrapped around {col}"
 
 
 def _shape_phrases(shapes: Mapping[str, set[str]]) -> list[str]:
@@ -616,19 +801,24 @@ def _shape_phrases(shapes: Mapping[str, set[str]]) -> list[str]:
 	if ored:
 		out.append(f"an OR between conditions on {', '.join(ored)}")
 	for col, kinds in shapes.items():
-		out += [f"the function {name}() wrapped around {col}" for name in _function_names(kinds)]
+		names = _function_names(kinds)
+		out += [_function_phrase(name, col) for name in names]
+		if "expression" in kinds and not names:
+			out.append(f"arithmetic on {col}")
 	return out
 
 
 def _shape_why(kinds: set[str]) -> str:
-	"""Why one column was left out, by precedence: or, like, function, unsure."""
+	"""Why one column was left out, by precedence: or, like, function, expression, unsure."""
 	if "or" in kinds:
 		return _SHAPE_WHY["or"]
 	if "like" in kinds:
 		return _SHAPE_WHY["like"]
 	names = _function_names(kinds)
 	if names:
-		return _SHAPE_WHY["function"].format(name=names[0])
+		return _SHAPE_WHY.get(names[0]) or _SHAPE_WHY["function"].format(name=names[0])
+	if "expression" in kinds:
+		return _SHAPE_WHY["expression"]
 	return _SHAPE_WHY["unsure"]
 
 
@@ -637,11 +827,11 @@ def _shape_no_code_reason(shapes: Mapping[str, set[str]], checks: list[str]) -> 
 	shape, the columns Optimus could not read, and any Check fields left."""
 	known = {col: kinds for col, kinds in shapes.items() if kinds != {"unsure"}}
 	unsure = [col for col, kinds in shapes.items() if kinds == {"unsure"}]
+	explain = "Check the query with EXPLAIN to see which index it needs."
 	if not known and not checks:
 		return (
 			"Optimus could not read how this query combines its filters (it may be cut short, wrapped in "
-			"brackets, a UNION or a derived table), so it gives no index code. Check the query with EXPLAIN "
-			"to see which index it needs."
+			f"brackets, a UNION or a derived table), so it gives no index code. {explain}"
 		)
 	parts: list[str] = []
 	if known:
@@ -655,11 +845,14 @@ def _shape_no_code_reason(shapes: Mapping[str, set[str]], checks: list[str]) -> 
 		parts.append(f"{checks[0]} is a Check field, which matches too many rows for an index to narrow.")
 	elif checks:
 		parts.append(f"{', '.join(checks)} are Check fields, which match too many rows for an index to narrow.")
+	if unsure:
+		parts.append(f"So Optimus gives no index code. {explain}")
+		return " ".join(parts)
 	parts.append("So an index would not help, and Optimus gives no index code.")
 	if known:
 		parts.append(
 			"Rewrite the filter (an exact match instead of a LIKE, the bare column instead of a function "
-			"around it, or one query per OR branch) and check the result with EXPLAIN."
+			"or arithmetic around it, or one query per OR branch) and check the result with EXPLAIN."
 		)
 	else:
 		parts.append("Filter on a more selective field as well, and check the result with EXPLAIN.")
@@ -958,12 +1151,14 @@ def advise(
 	explain_row=None,
 	query: str = "",
 	unusable: Mapping[str, set[str]] | None = None,
+	comparisons: Mapping[str, str] | None = None,
 ) -> IndexAdvice | None:
 	"""The advice for indexing ``columns`` of ``table``, or None when there is nothing
 	to advise (not a DocType table, no usable column). ``unusable`` names the columns
-	the query's predicate shape keeps an index from using (``_unusable_where_columns``):
-	they are left out and named. A recipe made only of Check fields, or with nothing
-	left, is NO_CODE."""
+	the query's predicate shape keeps an index from using (``_scan_where``): they are
+	left out and named. ``comparisons`` (``{column: "eq" | "range" | "sort"}``) puts the
+	columns in index order (``_index_order``). A recipe made only of Check fields, or with
+	nothing left, is NO_CODE."""
 	doctype = doctype_of(table)
 	if doctype is None:
 		return None
@@ -971,7 +1166,11 @@ def advise(
 		col: set(kinds) for col, kinds in (unusable or {}).items()
 		if isinstance(col, str) and _IDENT_RE.fullmatch(col) and col.lower() not in FRAPPE_METADATA_COLUMNS
 	}
-	cols = _clean_columns([c for c in columns or [] if c not in (unusable or {})])
+	cols = _clean_columns([c for c in columns or [] if c not in (unusable or {})], cap=False)
+	order_dropped: list[tuple[str, str]] = []
+	if comparisons:
+		cols, order_dropped = _index_order(cols, comparisons)
+	cols = cols[:MAX_INDEX_COLUMNS]
 	if not cols and not shapes:
 		return None
 	if evidence is None:
@@ -991,7 +1190,7 @@ def advise(
 	if problem:
 		return _no_code(doctype, cols, problem)
 	shape_dropped = [(col, _shape_why(kinds)) for col, kinds in shapes.items()]
-	return _route(doctype, final, shape_dropped + dropped, evidence, tuple(tracked_apps or ()))
+	return _route(doctype, final, shape_dropped + order_dropped + dropped, evidence, tuple(tracked_apps or ()))
 
 
 def _is_check_field(evidence: TableEvidence, col: str) -> bool:
@@ -999,11 +1198,22 @@ def _is_check_field(evidence: TableEvidence, col: str) -> bool:
 	return field is not None and field.fieldtype == "Check"
 
 
-def _lead_for(ftype: str, labelled: list[tuple[str, str]], advice: IndexAdvice) -> str:
+def _lead_for(ftype: str, labelled: list[tuple[str, str]], advice: IndexAdvice, comparisons=None) -> str:
 	if advice.route == ROUTE_NO_CODE:
 		return ""
 	kept = {c.split("(", 1)[0] for c in advice.columns}
 	labels = {label for label, col in labelled if col in kept}
+	ranged = next((c for c in advice.columns if (comparisons or {}).get(c) == "range"), None)
+	if ftype == "Filesort" and "ORDER BY" not in labels and ranged:
+		return (
+			_FILTER_LEAD + f" The sort column comes after the range condition on {ranged}, so this index "
+			"cannot return the rows in order and the sort stays."
+		)
+	if ftype == "Temporary Table" and "GROUP BY" not in labels and ranged:
+		return (
+			_FILTER_LEAD + f" The grouping column comes after the range condition on {ranged}, so the "
+			"temporary table stays."
+		)
 	if ftype == "Filesort" and "ORDER BY" not in labels:
 		return (
 			_FILTER_LEAD + " The sort column is a Frappe metadata column or an aggregate, which this index "
@@ -1035,14 +1245,23 @@ def advise_finding(
 	if doctype is None:
 		return None
 	query = str(detail.get("normalized_query") or "")
-	unusable = _unusable_where_columns(query, labelled, _target_qualifiers(query, table)) if query else None
+	unusable = comparisons = None
+	if query:
+		# top_queries keeps QUERY_TEXT_LIMIT characters, so a Slow Query that long may be cut
+		truncated = ftype == "Slow Query" and len(query) >= QUERY_TEXT_LIMIT
+		unusable, usable = _scan_where(query, labelled, _target_qualifiers(query, table), truncated=truncated)
+		comparisons = {
+			col: "sort" if label in ("ORDER BY", "GROUP BY") else "eq" if label == "JOIN" else usable.get(col, "range")
+			for label, col in labelled
+		}
 	advice = advise(
 		table, [col for _label, col in labelled], evidence=evidence_lookup(f"tab{doctype}"),
 		tracked_apps=tracked_apps, explain_row=detail.get("explain_row"), query=query, unusable=unusable,
+		comparisons=comparisons,
 	)
 	if advice is None:
 		return None
-	return replace(advice, lead=_lead_for(ftype, labelled, advice))
+	return replace(advice, lead=_lead_for(ftype, labelled, advice, comparisons))
 
 
 def advise_table(

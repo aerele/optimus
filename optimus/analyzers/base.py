@@ -418,6 +418,10 @@ def is_write_hot_table(name) -> bool:
 	return bool(name) and str(name).strip().strip("`").lower() in _WRITE_HOT_TABLES_LOWER
 
 
+# top_queries keeps at most this many characters of a query (its Slow Query findings
+# carry that text); the index advisor treats a query this long as possibly cut short.
+QUERY_TEXT_LIMIT = 500
+
 # The finding types whose fix is an index: explain_flags emits the four EXPLAIN ones,
 # index_suggestions emits Missing Index. Their advice is deterministic
 # (optimus/renderer/index_recipes.py) and never comes from the AI.
