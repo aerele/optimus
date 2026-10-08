@@ -1016,22 +1016,17 @@ def _ai_selection(items, ai_fix, *, type_of, gate) -> tuple[list, int, int]:
 
 
 def _note_ai_selection(context, gated: int, excluded: int) -> None:
-	"""Analyzer notes for the auto-suggest step's gated and excluded findings."""
-	from frappe import _
-
+	"""Analyzer notes for the auto-suggest step's gated and excluded findings. Stored on
+	the session and rendered into the report, so plain prose like the other warnings."""
 	if gated:
 		context.warnings.append(
-			_(
-				"AI auto-suggest: {0} finding(s) get advice or a note from Optimus, or no AI suggestion "
-				"by design (see each finding)."
-			).format(gated)
+			f"AI auto-suggest: {gated} finding(s) get advice or a note from Optimus, or no AI "
+			"suggestion by design (see each finding)."
 		)
 	if excluded:
 		context.warnings.append(
-			_(
-				"AI auto-suggest: {0} finding(s) skipped because their type is excluded in "
-				"Optimus Settings (ai_excluded_finding_types)."
-			).format(excluded)
+			f"AI auto-suggest: {excluded} finding(s) skipped because their type is excluded in "
+			"Optimus Settings (ai_excluded_finding_types)."
 		)
 
 
