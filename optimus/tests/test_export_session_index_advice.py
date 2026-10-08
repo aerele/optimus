@@ -72,7 +72,7 @@ def env(monkeypatch):
 	permission gates, and per-table evidence for tabSales Invoice."""
 	seen = SimpleNamespace(lookups=0)
 
-	def _make(*, findings=(), tables=(), user=OWNER, roles=("Optimus User",), can_read=True):
+	def _make(*, findings=(), tables=(), user=OWNER, roles=("Optimus User",), can_read=True, tracked=()):
 		doc = fake_session_doc(
 			user=OWNER, title="Checkout flow", status="Ready", started_at=None, stopped_at=None,
 			total_duration_ms=100, total_requests=1, total_queries=5, total_query_time_ms=80,
@@ -91,7 +91,7 @@ def env(monkeypatch):
 		fake.db.get_value = lambda *a, as_dict=False, **k: session_row() if as_dict else lookup(*a, **k)
 		install(monkeypatch, fake)
 		monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda *a, **k: None)
-		monkeypatch.setattr("optimus.settings.get_config", lambda: SimpleNamespace(tracked_apps=()))
+		monkeypatch.setattr("optimus.settings.get_config", lambda: SimpleNamespace(tracked_apps=tracked))
 		evidence = {"tabSales Invoice": _evidence()}
 
 		def read(table):
@@ -105,10 +105,10 @@ def env(monkeypatch):
 	return _make
 
 
-def _report_advice(finding_row):
+def _report_advice(finding_row, tracked=()):
 	"""The advice the report computes for the same finding, with the same evidence."""
 	f = {"finding_type": finding_row.finding_type, "technical_detail": json.loads(finding_row.technical_detail_json)}
-	return index_recipes.advise_finding(f, evidence_lookup=lambda table: _evidence(), tracked_apps=())
+	return index_recipes.advise_finding(f, evidence_lookup=lambda table: _evidence(), tracked_apps=tracked)
 
 
 def test_export_drops_raw_ddl_and_retired_index_ai(env):
@@ -216,3 +216,49 @@ def test_a_system_manager_may_export_another_users_session(env):
 	env(findings=[_missing_index()], user=admin, roles=("System Manager",))
 	out = api.export_session(session_uuid=SESSION_UUID)
 	assert out["findings"][0]["index_advice"] is not None
+
+
+def test_index_finding_fix_hint_is_the_report_text_never_the_stored_hint(env):
+	"""The export's fix_hint is the report's text, so a no_code advice never sits next to
+	the analyzer's stored "Add an index" hint."""
+	stored = "Add an index on the WHERE/JOIN columns of this query."
+	query = "select `name` from `tabSales Invoice` where `customer` like ?"
+	detail = {"table": "tabSales Invoice", "normalized_query": query, "explain_row": {"type": "ALL"}, "fix_hint": stored}
+	row = _finding(1, "Full Table Scan", detail)
+	env(findings=[row])
+	(finding,) = api.export_session(session_uuid=SESSION_UUID)["findings"]
+	report = {"finding_type": "Full Table Scan", "technical_detail": json.loads(row.technical_detail_json)}
+	recipe_enrichment.apply_finding_recipes([report], evidence_lookup=lambda table: _evidence())
+	assert finding["index_advice"]["route"] == index_recipes.ROUTE_NO_CODE
+	assert finding["technical_detail"]["fix_hint"] == finding["index_advice"]["text"]
+	assert finding["technical_detail"]["fix_hint"] == report["technical_detail"]["fix_hint"]
+	assert stored not in json.dumps(finding)
+
+
+def test_index_finding_without_advice_keeps_the_stored_hint_as_the_report_does(env):
+	detail = {"table": "information_schema.tables", "fix_hint": "Add an index on the WHERE/JOIN columns of this query."}
+	env(findings=[_finding(1, "Full Table Scan", detail)])
+	(finding,) = api.export_session(session_uuid=SESSION_UUID)["findings"]
+	assert finding["index_advice"] is None
+	assert finding["technical_detail"]["fix_hint"] == detail["fix_hint"]
+
+
+def test_export_reads_tracked_apps_like_the_report(env):
+	"""With erpnext tracked, the advice differs from the untracked one; the export matches
+	the report's advice for the tracked scope, finding and card alike."""
+	row = _missing_index()
+	tracked, untracked = _report_advice(row, ("erpnext",)), _report_advice(row)
+	assert (tracked.route, tracked.code) != (untracked.route, untracked.code)
+	env(findings=[row], tables=[_table()], tracked=("erpnext",))
+	out = api.export_session(session_uuid=SESSION_UUID)
+	assert out["findings"][0]["index_advice"]["route"] == tracked.route
+	assert out["findings"][0]["index_advice"]["code"] == tracked.code
+	card = index_recipes.advise_table(
+		"tabSales Invoice", ["customer", "posting_date"], evidence_lookup=lambda table: _evidence(),
+		tracked_apps=("erpnext",),
+	)
+	card_untracked = index_recipes.advise_table(
+		"tabSales Invoice", ["customer", "posting_date"], evidence_lookup=lambda table: _evidence(),
+	)
+	assert card.code != card_untracked.code
+	assert out["table_breakdown"][0]["recommended_index"]["code"] == card.code

@@ -232,3 +232,11 @@ def test_duplicate_case_records_are_refused(corpus):
 def test_invalid_owner_label_stays_unlabelled(corpus, label, reason):
 	run = _one_case_run({"3q1nfc4d2l": {"label": label, "reason": reason}})
 	assert load("report").score(run, corpus, semgrep_rules="")[0]["label"] is None
+
+
+def test_the_unstamped_label_matches_the_real_gate_note():
+	from optimus import ai_grounding
+
+	rep = load("report")
+	assert rep.UNSTAMPED_NOTE in ai_grounding.UNSTAMPED_REDUNDANT_CALL_NOTE.lower()
+	assert not hasattr(rep, "PRE_L5_NOTE")

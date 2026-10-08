@@ -266,7 +266,7 @@ function _refill_ai_call(frm) {
 			const gated = (fx.gated || 0) + (fx.skipped_ineligible || 0);
 			if (gated) {
 				frappe.show_alert({
-					message: __("{0} finding(s) get advice or a note from Optimus instead of an AI suggestion.", [gated]),
+					message: __("{0} finding(s) get advice or a note from Optimus, or no AI suggestion by design.", [gated]),
 					indicator: "blue",
 				});
 			}

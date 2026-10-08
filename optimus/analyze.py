@@ -997,14 +997,16 @@ def _log_ai_step_failure(title: str, exc: BaseException, session_uuid: str | Non
 
 def _ai_selection(items, ai_fix, *, type_of, gate) -> tuple[list, int, int]:
 	"""(eligible items, gated count, excluded count). The operator's per-type exclusion
-	runs first, then the eligibility gate. Only types that can reach the AI, index
-	findings and Framework N+1 count as gated (O-I2); infrastructure types never do."""
+	runs first and counts only a type that could reach the AI; any other excluded type
+	falls through to the eligibility gate, which refuses it anyway. Only types that can
+	reach the AI, index findings and Framework N+1 count as gated (O-I2); infrastructure
+	types never do."""
 	counted = ai_fix.AI_ELIGIBLE_FINDING_TYPES | INDEX_FINDING_TYPES | {"Framework N+1"}
 	eligible, gated, excluded = [], 0, 0
 	for item in items:
 		ftype = type_of(item)
-		if ai_fix.is_finding_type_excluded(ftype):
-			excluded += int(ftype in ai_fix.AI_ELIGIBLE_FINDING_TYPES)
+		if ftype in ai_fix.AI_ELIGIBLE_FINDING_TYPES and ai_fix.is_finding_type_excluded(ftype):
+			excluded += 1
 			continue
 		if gate(item) is not None:
 			gated += int(ftype in counted)
@@ -1015,15 +1017,21 @@ def _ai_selection(items, ai_fix, *, type_of, gate) -> tuple[list, int, int]:
 
 def _note_ai_selection(context, gated: int, excluded: int) -> None:
 	"""Analyzer notes for the auto-suggest step's gated and excluded findings."""
+	from frappe import _
+
 	if gated:
 		context.warnings.append(
-			f"AI auto-suggest: {gated} finding(s) get deterministic advice or a note from Optimus "
-			"instead of an AI suggestion (see each finding)."
+			_(
+				"AI auto-suggest: {0} finding(s) get advice or a note from Optimus, or no AI suggestion "
+				"by design (see each finding)."
+			).format(gated)
 		)
 	if excluded:
 		context.warnings.append(
-			f"AI auto-suggest: {excluded} finding(s) skipped because their type is excluded in "
-			"Optimus Settings (ai_excluded_finding_types)."
+			_(
+				"AI auto-suggest: {0} finding(s) skipped because their type is excluded in "
+				"Optimus Settings (ai_excluded_finding_types)."
+			).format(excluded)
 		)
 
 
@@ -2346,10 +2354,10 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	Best-effort and time-budgeted (callers run in a web request). Returns
 	``{"added", "failed", "skipped_time", "total_pending", "gated", "excluded",
 	"skipped_ineligible"}``, where ``total_pending`` is the count targeted before the
-	cap, ``gated`` the findings that get deterministic advice or a note instead,
-	``excluded`` the ones whose type Optimus Settings excludes and
-	``skipped_ineligible`` the ones ``suggest_fix`` refused with a skip kind
-	(``ai_fix.AI_SKIP_KINDS``). Missing or outdated suggestions go first.
+	cap, ``gated`` the findings that get advice or a note from Optimus, or no AI
+	suggestion by design, ``excluded`` the AI-eligible ones whose type Optimus Settings
+	excludes and ``skipped_ineligible`` the ones ``suggest_fix`` refused with a skip
+	kind (``ai_fix.AI_SKIP_KINDS``). Missing or outdated suggestions go first.
 	"""
 	out = {
 		"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0,

@@ -44,7 +44,8 @@ class AiFixError(Exception):
 	(the eligibility gate or the per-type exclusion refused the finding; no request was
 	built), ``"transport"`` (the request did not complete), ``"timeout"`` (no answer in
 	time), ``"bad_response"`` (an error status or an unusable body) and ``"unknown"``.
-	Callers treat the kinds in ``AI_SKIP_KINDS`` as skips, not failures.
+	Callers treat only ``"not_eligible"`` (``AI_SKIP_KINDS``) as a skip; every other
+	kind, ``"config"`` included, is a failure: logged and counted.
 	``usage`` carries token usage already billed before an empty-response failure.
 
 	The message must never contain the API key: it is shown to the operator
@@ -71,9 +72,11 @@ class AiFixError(Exception):
 		} if usage is not None else None
 
 
-# Failures a caller counts as "skipped", not "failed": nothing went wrong with the
-# provider, the finding or the settings simply do not allow a request (P10).
-AI_SKIP_KINDS: frozenset[str] = frozenset({"config", "not_eligible"})
+# Failures a caller counts as "skipped", not "failed": the eligibility gate or the
+# per-type exclusion refused the finding and no request was built (P10). A "config"
+# error (no model or key, a context window too small, a provider context-limit 400)
+# is a FAILURE: it is logged and counted, so the operator sees what to fix.
+AI_SKIP_KINDS: frozenset[str] = frozenset({"not_eligible"})
 
 
 # Findings that carry enough code / SQL context for the LLM to reason about

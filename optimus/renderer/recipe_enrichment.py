@@ -186,9 +186,10 @@ def make_refresh_check() -> Callable[[dict], bool]:
 
 
 def count_ai_tokens(findings: list[dict], tables: list[dict]) -> int:
-	"""Tokens every stored AI output of this session cost, read BEFORE the report hides
-	retired output (index-family, Framework N+1, gated Hot Line, table ``ai_index``),
-	because those tokens were spent all the same."""
+	"""Tokens every stored AI output of this session cost. The renderer reads them BEFORE
+	it drops findings (no callsite, Function Not Invoked, Ignored Apps) or hides retired
+	output (index-family, Framework N+1, gated Hot Line, table ``ai_index``), because
+	those tokens were spent all the same."""
 	total = 0
 	for item, key in [*((f, "llm_fix") for f in findings or []), *((t, "ai_index") for t in tables or [])]:
 		blob = item.get(key) if isinstance(item, dict) else None

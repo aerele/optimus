@@ -12,6 +12,9 @@ import pytest
 
 from optimus import ai_fix, ai_prompts, analyze
 
+# The real suggest_fix, captured before any fixture replaces it.
+_REAL_SUGGEST = ai_fix.suggest_fix
+
 
 class _FakeDB:
 	def __init__(self):
@@ -97,7 +100,7 @@ def test_excluded_types_are_never_sent_and_gated_ones_are_counted(backfill):
 	assert (out["excluded"], out["gated"], out["failed"], out["total_pending"]) == (1, 1, 0, 1)
 
 
-@pytest.mark.parametrize("kind,failed,skipped", [("not_eligible", 0, 1), ("config", 0, 1), ("transport", 1, 0)])
+@pytest.mark.parametrize("kind,failed,skipped", [("not_eligible", 0, 1), ("config", 1, 0), ("transport", 1, 0)])
 def test_skip_kinds_are_not_failures(backfill, monkeypatch, kind, failed, skipped):
 	logged = []
 
@@ -118,7 +121,7 @@ def test_an_excluded_type_raises_not_eligible():
 			ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x"})
 	assert caught.value.kind == "not_eligible"
 	assert "excluded by ai_excluded_finding_types" in str(caught.value)
-	assert ai_fix.AI_SKIP_KINDS == frozenset({"config", "not_eligible"})
+	assert ai_fix.AI_SKIP_KINDS == frozenset({"not_eligible"})
 
 
 def test_auto_suggest_notes_gated_and_excluded_counts(monkeypatch):
@@ -138,7 +141,7 @@ def test_auto_suggest_notes_gated_and_excluded_counts(monkeypatch):
 	     patch("optimus.ai_fix.is_available", return_value=True), \
 	     patch("optimus.ai_fix.suggest_fix", side_effect=lambda payload, **kw: {"suggestion": "x", "model": "m"}):
 		analyze._enrich_findings_with_ai_suggestions(ctx)
-	assert any("2 finding(s) get deterministic advice or a note from Optimus" in w for w in ctx.warnings)
+	assert any("2 finding(s) get advice or a note from Optimus, or no AI suggestion by design" in w for w in ctx.warnings)
 	assert any("1 finding(s) skipped because their type is excluded" in w for w in ctx.warnings)
 
 
@@ -155,8 +158,79 @@ def test_auto_suggest_notes_the_counts_when_nothing_is_eligible():
 	     patch("optimus.ai_fix.suggest_fix", side_effect=AssertionError("nothing is eligible")):
 		analyze._enrich_findings_with_ai_suggestions(ctx)
 	assert ctx.warnings == [
-		"AI auto-suggest: 2 finding(s) get deterministic advice or a note from Optimus "
-		"instead of an AI suggestion (see each finding).",
+		"AI auto-suggest: 2 finding(s) get advice or a note from Optimus, or no AI suggestion "
+		"by design (see each finding).",
 		"AI auto-suggest: 1 finding(s) skipped because their type is excluded in "
 		"Optimus Settings (ai_excluded_finding_types).",
 	]
+
+
+def test_an_excluded_type_the_ai_never_sees_is_counted_by_the_gate(backfill):
+	"""Only an AI-eligible type counts as excluded; an excluded index type is still the
+	gate's (it gets the deterministic advice either way)."""
+	rows = [_row("idx", "Missing Index"), _row("n1")]
+	with patch("optimus.settings.get_config", return_value=_cfg(ai_excluded_finding_types=("Missing Index",))):
+		out = analyze._run_ai_backfill(_doc(rows), cap=0, regenerate_all=True)
+	assert (out["excluded"], out["gated"], out["total_pending"]) == (0, 1, 1)
+	assert backfill.sent == ["n1"]
+
+
+def test_the_exclusion_wins_over_the_gate(backfill):
+	"""An excluded, unstamped Redundant Call is counted once, as excluded."""
+	rows = [_row("rc", "Redundant Call", detail=json.dumps({"fn_name": "get_doc"}))]
+	with patch("optimus.settings.get_config", return_value=_cfg(ai_excluded_finding_types=("Redundant Call",))):
+		out = analyze._run_ai_backfill(_doc(rows), cap=0, regenerate_all=True)
+	assert (out["excluded"], out["gated"]) == (1, 0)
+	assert backfill.sent == []
+
+
+def test_a_context_window_too_small_is_a_logged_failure(backfill, monkeypatch):
+	"""Controller ruling C2: kind "config" (here the pre-HTTP window check) is a failure,
+	never a silent skip."""
+	logged = []
+	monkeypatch.setattr(ai_fix, "suggest_fix", _REAL_SUGGEST)
+	monkeypatch.setattr(analyze, "_log_ai_step_failure", lambda title, *a, **k: logged.append(title))
+	monkeypatch.setattr(ai_fix, "_provider_config", lambda: {
+		"name": "OpenAI-compatible", "model": "m", "base_url": "http://x/v1", "protocol": "openai", "needs_key": False,
+	})
+	monkeypatch.setattr(ai_fix, "_context_tokens", lambda provider: 512)
+	monkeypatch.setattr(ai_fix, "_resolve_display_threshold_ms", lambda: 1000.0)
+	with patch("optimus.settings.get_config", return_value=_cfg()):
+		out = analyze._run_ai_backfill(_doc([_row("n1")]), cap=0)
+	assert (out["failed"], out["skipped_ineligible"], out["added"]) == (1, 0, 0)
+	assert logged == ["optimus ai backfill"]
+
+
+def _one_n_plus_one_ctx():
+	return SimpleNamespace(
+		session_uuid="u", docname=None, warnings=[], actions=[],
+		findings=[{
+			"finding_type": "N+1 Query", "severity": "High", "title": "t", "customer_description": "d",
+			"estimated_impact_ms": 100, "affected_count": 1, "action_ref": "0", "technical_detail_json": "{}",
+		}],
+	)
+
+
+def test_auto_suggest_counts_a_config_error_as_a_failure(monkeypatch):
+	ctx = _one_n_plus_one_ctx()
+	monkeypatch.setattr(analyze, "_phase2_index_for", lambda doc: {})
+	monkeypatch.setattr(analyze, "_log_ai_step_failure", lambda *a, **k: None)
+	with patch("optimus.settings.get_config", return_value=_cfg()), \
+	     patch("optimus.ai_fix.is_available", return_value=True), \
+	     patch("optimus.ai_fix.suggest_fix", side_effect=ai_fix.AiFixError("window too small", kind="config")):
+		analyze._enrich_findings_with_ai_suggestions(ctx)
+	assert "llm_fix_json" not in ctx.findings[0]
+	assert any("1 finding(s) couldn't get a suggestion" in w for w in ctx.warnings)
+
+
+def test_auto_suggest_treats_not_eligible_as_a_skip(monkeypatch):
+	logged = []
+	ctx = _one_n_plus_one_ctx()
+	monkeypatch.setattr(analyze, "_phase2_index_for", lambda doc: {})
+	monkeypatch.setattr(analyze, "_log_ai_step_failure", lambda title, *a, **k: logged.append(title))
+	with patch("optimus.settings.get_config", return_value=_cfg()), \
+	     patch("optimus.ai_fix.is_available", return_value=True), \
+	     patch("optimus.ai_fix.suggest_fix", side_effect=ai_fix.AiFixError("gated", kind="not_eligible")):
+		analyze._enrich_findings_with_ai_suggestions(ctx)
+	assert "llm_fix_json" not in ctx.findings[0]
+	assert logged == [] and not any("couldn't get a suggestion" in w for w in ctx.warnings)

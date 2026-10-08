@@ -1047,7 +1047,8 @@ def _export_index_advice(findings: list[dict], tables) -> None:
 	output (a table's ``ai_index``; finding ``llm_fix_json`` is never exported). Mutates in
 	place. Each index-family finding gains ``index_advice`` (``route``, ``doctype``,
 	``table``, ``columns``, ``index_name``, ``text`` and ``code``, the report's fix-hint
-	prose and code), or None when the advisor has nothing to say or fails; each table's
+	prose and code), or None when the advisor has nothing to say or fails; with advice, its
+	``technical_detail.fix_hint`` is that same text, as in the report; each table's
 	``recommended_index`` goes through the same advisor. One per-export evidence lookup
 	(memoised per table) serves both, as in the report."""
 	from optimus.analyzers.base import INDEX_FINDING_TYPES
@@ -1063,15 +1064,20 @@ def _export_index_advice(findings: list[dict], tables) -> None:
 			advice = best_effort(
 				lambda: index_recipes.advise_finding(f, evidence_lookup=lookup, tracked_apps=tracked), None,
 			)
+			text = None if advice is None else index_recipes.finding_text(advice)
 			f["index_advice"] = None if advice is None else {
 				"route": advice.route,
 				"doctype": advice.doctype,
 				"table": advice.table,
 				"columns": list(advice.columns),
 				"index_name": (advice.entry or {}).get("index_name"),
-				"text": index_recipes.finding_text(advice),
+				"text": text,
 				"code": advice.code,
 			}
+			if advice is not None and isinstance(detail, dict):
+				# The report's prose in the report's slot: the analyzer's stored hint ("Add an
+				# index on ...") must never sit next to a no_code advice.
+				detail["fix_hint"] = text
 		if isinstance(detail, dict):
 			detail.pop("suggested_ddl", None)
 	tables = [t for t in (tables if isinstance(tables, list) else []) if isinstance(t, dict)]
@@ -1487,10 +1493,11 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 	limit).
 
 	The response is ``{ok, session_uuid, fixes, steps, regenerated}``. ``fixes`` counts
-	``added``, ``failed``, ``skipped_time``, ``gated`` (findings that get deterministic
-	advice or a note instead), ``excluded`` (types excluded in Optimus Settings) and
-	``skipped_ineligible``; ``skipped`` is ``"toggle_off"`` when findings are off. There
-	is no ``indexes`` key: index advice is deterministic and never refreshed by AI.
+	``added``, ``failed``, ``skipped_time``, ``gated`` (findings that get advice or a note
+	from Optimus, or no AI suggestion by design), ``excluded`` (AI-eligible types excluded
+	in Optimus Settings) and ``skipped_ineligible``; ``skipped`` is ``"toggle_off"`` when
+	findings are off. There is no ``indexes`` key: index advice is deterministic and never
+	refreshed by AI.
 	"""
 	ref = _ai_session_gate(session_uuid, section=None, action="refill_ai_suggestions")
 

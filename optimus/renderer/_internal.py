@@ -364,6 +364,9 @@ def render(
 		_finding_to_dict(f, _finding_file_cache)
 		for f in (session_doc.findings or [])
 	]
+	# Tokens every stored AI fix cost, counted before any filter or hide step below drops
+	# a finding (the tables' retired index-AI tokens are added where the tables are read).
+	_ai_fix_tokens = count_ai_tokens(all_findings, [])
 	# v0.6.x: SQL "red flag" findings carry no callsite derive a
 	# representative one (the hottest user-app frame that ran the offending
 	# query) from the recordings so their smoking-gun block can render too.
@@ -588,8 +591,8 @@ def render(
 			_f["customer_description"] = _finalize_prose(
 				_f["customer_description"], _large_duration_threshold_ms
 			)
-	# Tokens the stored AI output cost, counted before anything is hidden below.
-	_ai_fix_tokens = count_ai_tokens(all_findings, table_breakdown)
+	# The tables' retired index-AI output cost tokens too, counted before it is hidden below.
+	_ai_fix_tokens += count_ai_tokens([], table_breakdown)
 	if not _ai_findings_on:
 		for _f in all_findings:
 			_f["llm_fix"] = None

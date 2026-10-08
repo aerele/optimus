@@ -374,3 +374,32 @@ def test_token_total_counts_suggestions_the_report_hides(evidence):
 	table = _table(ai_index={"suggestion": "x", "tokens": {"total_tokens": 20}})
 	out = _render(_doc(rows, [table]))
 	assert "AI suggestions used <strong>200</strong> tokens" in out
+
+
+def test_stale_note_is_neutral_for_an_excluded_type(evidence, ai_available, monkeypatch):
+	"""Refresh never redoes an excluded type (P10), so its footer must not name Refresh."""
+	from optimus import ai_fix
+
+	monkeypatch.setattr(ai_fix, "is_finding_type_excluded", lambda ftype: ftype == "N+1 Query")
+	out = _render(_doc([_ai_row()]))
+	assert "batch-the-query" in out and _STALE_NEUTRAL in out
+	assert "use Refresh AI suggestions" not in out
+
+
+def test_token_total_counts_findings_the_render_filters_out(evidence):
+	"""A finding without a callsite and a Function Not Invoked finding are dropped from
+	the report, but their stored suggestions' tokens were spent."""
+	rows = [
+		_row("N+1 Query", {}, llm=dict(_OLD_AI, tokens={"total_tokens": 40})),
+		_row("Function Not Invoked", {"callsite": _CALLSITE}, llm=dict(_OLD_AI, tokens={"total_tokens": 25})),
+		_row("N+1 Query", {"callsite": _CALLSITE}, llm=dict(_OLD_AI, tokens={"total_tokens": 30})),
+	]
+	out = _render(_doc(rows))
+	assert "AI suggestions used <strong>95</strong> tokens" in out
+
+
+def test_token_total_counts_findings_of_ignored_apps(evidence):
+	row = _row("N+1 Query", {"callsite": _CALLSITE}, llm=dict(_OLD_AI, tokens={"total_tokens": 30}))
+	with patch("optimus.settings.get_ignored_apps", return_value=("myapp",)):
+		out = _html.unescape(renderer.render_raw(_doc([row]), recordings=[]))
+	assert "old-ai-advice" not in out and "AI suggestions used <strong>30</strong> tokens" in out

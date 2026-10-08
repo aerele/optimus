@@ -120,8 +120,8 @@ def test_refill_reports_gated_and_excluded_counts(env):
 	_, h = env()
 	h.backfill.return_value = {
 		"added": 1, "failed": 0, "skipped_time": 0, "total_pending": 1,
-		"gated": 2, "excluded": 1, "skipped_ineligible": 0,
+		"gated": 2, "excluded": 1, "skipped_ineligible": 3,
 	}
 	out = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
-	assert (out["fixes"]["gated"], out["fixes"]["excluded"], out["fixes"]["skipped_ineligible"]) == (2, 1, 0)
+	assert (out["fixes"]["gated"], out["fixes"]["excluded"], out["fixes"]["skipped_ineligible"]) == (2, 1, 3)
 	assert "indexes" not in out
