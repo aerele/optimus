@@ -316,10 +316,16 @@ class TestNoCode:
 		assert "disabled is a Check field" in text and "an index would not help" in text
 
 	def test_ifnull_around_an_indexed_column_names_the_function(self):
+		"""Fix round 3: IFNULL(status, ?) cannot use any index on status, even its Search
+		Index, so status is left out with the function named and customer is indexed."""
 		ev = _ev(fields={**_ALL, "status": F("Select", search_index=True)})
 		q = "SELECT name FROM `tabSales Invoice` WHERE ifnull(status, ?) != ? and customer = ?"
 		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(ev))
-		assert "the function IFNULL() wrapped around status" in ir.finding_text(advice)
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.columns == ("customer",)
+		assert (
+			"Optimus left out status (compared through the function IFNULL(), which an index on the column "
+			"cannot use)" in ir.finding_text(advice)
+		)
 
 	def test_a_trailing_creation_never_counts_as_already_indexed(self):
 		"""D5: Frappe indexes creation on every non-child table; a trailing creation is the
@@ -381,6 +387,27 @@ class TestPredicateShape:
 				ir.finding_text(advice)
 			)
 
+	def test_a_sort_on_the_like_column_is_no_plain_use_of_it(self):
+		"""Fix round 3: the ORDER BY after the WHERE clause is not part of the filter."""
+		q = "SELECT `name` FROM `tabSales Invoice` WHERE `customer_name` LIKE ? ORDER BY `customer_name`"
+		assert ir._unusable_where_columns(q, [("WHERE", "customer_name")]) == {"customer_name": {"like"}}
+
+	def test_comments_are_not_part_of_the_filter(self):
+		for q in (
+			"SELECT `name` FROM `tabSales Invoice` WHERE `company`=? /* or `customer`=? */ AND `status`=?",
+			"SELECT `name` FROM `tabSales Invoice` WHERE `company`=? -- don't or this\n AND `status`=?",
+		):
+			advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI))
+			assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.columns == ("company", "status"), q
+
+	def test_double_quoted_postgres_identifiers_are_names(self):
+		q = (
+			'select "name" from "tabSales Invoice" where "company" = %s and ("status" = %s or "customer" = %s) '
+			'order by "posting_date"'
+		)
+		shapes = ir._unusable_where_columns(q, [("WHERE", "company"), ("WHERE", "status"), ("WHERE", "customer")])
+		assert shapes == {"status": {"or"}, "customer": {"or"}}
+
 	def test_a_visible_prefix_like_can_use_the_index(self):
 		q = "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND po_no LIKE 'PO-%'"
 		assert ir._unusable_where_columns(q, [("WHERE", "customer"), ("WHERE", "po_no")]) == {}
@@ -415,6 +442,182 @@ class TestPredicateShape:
 		# a name used only as a function is no use of that column
 		q = "SELECT name FROM `tabX` WHERE company = ? AND year(posting_date) = ?"
 		assert ir._unusable_where_columns(q, [("WHERE", "company"), ("WHERE", "year")]) == {"year": {"unsure"}}
+
+
+class TestFunctionWrapped:
+	"""Fix round 3: a column compared only inside a function call (IFNULL(), YEAR(),
+	DATE(), LOWER(), NOT (...)) cannot use an index on it."""
+
+	_EV = _ev(fields={**_ALL, "customer_name": F("Data")})
+
+	def _advise(self, ftype, where):
+		q = f"SELECT `name` FROM `tabSales Invoice` WHERE {where}"
+		return ir.advise_finding(_explain(ftype, q), evidence_lookup=_lookup(self._EV))
+
+	def test_an_ifnull_filter_is_left_out_and_the_rest_is_kept(self):
+		advice = self._advise("Filesort", "IFNULL(`status`,?)<>? AND `customer`=? ORDER BY `posting_date` DESC")
+		assert advice.columns == ("customer", "posting_date")
+		assert "Optimus left out status (compared through the function IFNULL()" in ir.finding_text(advice)
+
+	def test_a_lone_ifnull_filter_gives_no_code(self):
+		advice = self._advise("Full Table Scan", "IFNULL(`status`,?)<>?")
+		assert advice.route == ir.ROUTE_NO_CODE
+		text = ir.finding_text(advice)
+		assert "the function IFNULL() wrapped around status" in text and "an index would not help" in text
+
+	def test_a_not_like_through_ifnull_keeps_the_other_filter(self):
+		advice = self._advise("Full Table Scan", "IFNULL(`customer_name`,?) NOT LIKE ? AND `company`=?")
+		assert advice.columns == ("company",)
+		assert "compared through the function IFNULL()" in ir.finding_text(advice)
+
+	def test_year_and_date_get_no_exemption(self):
+		advice = self._advise("Full Table Scan", "YEAR(`posting_date`)=? AND `company`=?")
+		assert advice.columns == ("company",) and "the function YEAR()" in ir.finding_text(advice)
+		advice = self._advise("Full Table Scan", "DATE(`posting_date`)=? AND `customer`=?")
+		assert advice.columns == ("customer",) and "the function DATE()" in ir.finding_text(advice)
+
+	def test_a_like_inside_a_call_is_named_by_the_call(self):
+		advice = self._advise("Full Table Scan", "IF(`customer_name` LIKE ?, ?, ?)=? AND `company`=?")
+		assert advice.columns == ("company",)
+		assert "Optimus left out customer_name (compared through the function IF()" in ir.finding_text(advice)
+
+	def test_a_function_on_the_value_side_keeps_the_column(self):
+		advice = self._advise("Full Table Scan", "`posting_date` BETWEEN ? AND DATE_ADD(?, INTERVAL ? DAY) AND `company`=?")
+		assert "posting_date" in advice.columns and "company" in advice.columns
+
+	def test_not_brackets_and_the_regexp_family(self):
+		advice = self._advise("Full Table Scan", "`company`=? AND NOT (`status`=? OR `status`=?)")
+		assert advice.columns == ("company",) and "the function NOT()" in ir.finding_text(advice)
+		for op in ("ILIKE ?", "RLIKE ?", "REGEXP ?", "NOT REGEXP ?", "REGEXP '^A'"):
+			advice = self._advise("Full Table Scan", f"`company`=? AND `customer` {op}")
+			assert advice.columns == ("company",), op
+
+	def test_the_innermost_call_is_named(self):
+		advice = self._advise("Full Table Scan", "IFNULL(LOWER(`customer_name`), ?)=? AND `company`=?")
+		assert advice.columns == ("company",)
+		assert "Optimus left out customer_name (compared through the function LOWER()" in ir.finding_text(advice)
+
+
+class TestUnreadableQueries:
+	"""Fix round 3: a query the scan cannot read gives honest text, never parser fragments."""
+
+	_EV = _ev(fields=_ALL)
+
+	@staticmethod
+	def _cut_query(at: str, offset: int) -> str:
+		"""A Slow Query whose 500-character cut lands ``offset`` characters into ``at``."""
+		def query(pad):
+			return (
+				f"SELECT `tabSales Invoice`.`name` AS `{'x' * pad}` FROM `tabSales Invoice` WHERE "
+				"`tabSales Invoice`.`company`=? AND `tabSales Invoice`.`customer`=? AND "
+				"`tabSales Invoice`.`status` IN (?) ORDER BY `tabSales Invoice`.`posting_date` DESC"
+			)
+		pad = 500 - query(0).index(at) - offset
+		return query(pad)[:500]
+
+	def test_a_slow_query_cut_inside_its_where_gives_honest_no_code(self):
+		for at, offset in (("`tabSales Invoice`.`customer`", 12), ("`tabSales Invoice`.`customer`", 0)):
+			cut = self._cut_query(at, offset)
+			assert len(cut) == 500 and "ORDER BY" not in cut
+			finding = {"finding_type": "Slow Query", "technical_detail": {"normalized_query": cut}}
+			advice = ir.advise_finding(finding, evidence_lookup=_lookup(self._EV))
+			assert advice.route == ir.ROUTE_NO_CODE, cut[-40:]
+			text = ir.finding_text(advice, install=False)
+			assert "Optimus could not read how this query combines its filters" in text
+			assert "EXPLAIN" in text and "tabSales" not in text
+
+	def test_a_union_of_bracketed_selects_gives_honest_no_code(self):
+		q = (
+			"(SELECT `name` FROM `tabSales Invoice` WHERE `company`=? AND `customer`=?) UNION "
+			"(SELECT `name` FROM `tabSales Invoice` WHERE `company`=? AND `status`=?)"
+		)
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(self._EV))
+		assert advice.route == ir.ROUTE_NO_CODE
+		assert ir.finding_text(advice).startswith("Optimus could not read how this query combines its filters")
+
+	def test_unsure_columns_stay_out_of_the_cannot_use_sentence(self):
+		advice = ir.advise(
+			"tabSales Invoice", ["customer"], evidence=self._EV,
+			unusable={"customer": {"or"}, "status": {"unsure"}, "tabSales": {"unsure"}, "I": {"unsure"}},
+		)
+		assert advice.route == ir.ROUTE_NO_CODE
+		first, rest = advice.reason.split("A composite index cannot use those columns.", 1)
+		assert "an OR between conditions on customer" in first and "status" not in first
+		assert "Optimus could not read how the query filters on status." in rest
+		assert "tabSales" not in advice.reason and " I," not in advice.reason and " I." not in advice.reason
+
+
+class TestQualifiersAndSubqueries:
+	"""Fix round 3: a dotted reference counts only for the target table or its aliases,
+	and a (SELECT ...) group neither uses nor taints the outer columns."""
+
+	_GL = _ev("GL Entry", fields={
+		"company": F("Link"), "party": F("Dynamic Link"), "account": F("Link"), "voucher_no": F("Dynamic Link"),
+	})
+
+	def test_another_tables_column_of_the_same_name_does_not_count(self):
+		for q in (
+			"select gle.name from `tabGL Entry` gle inner join `tabAccount` acc on acc.name = gle.account "
+			"where (gle.company = ? or gle.party = ?) and acc.company = ?",
+			"select `tabGL Entry`.name from `tabGL Entry` inner join `tabAccount` on `tabAccount`.name = "
+			"`tabGL Entry`.account where (`tabGL Entry`.company = ? or `tabGL Entry`.party = ?) and "
+			"`tabAccount`.company = ?",
+		):
+			advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabGL Entry"), evidence_lookup=_lookup(self._GL))
+			assert advice.columns == ("account",), q
+			assert "Optimus left out company (compared only inside an OR between conditions)" in ir.finding_text(advice)
+
+	def test_a_subquery_neither_uses_nor_taints_the_outer_columns(self):
+		q = (
+			"SELECT `tabGL Entry`.`name` FROM `tabGL Entry` WHERE (`tabGL Entry`.`company`=? OR `tabGL Entry`.`party`=?) "
+			"AND `tabGL Entry`.`voucher_no` IN (SELECT `name` FROM `tabSales Invoice` WHERE `company`=?)"
+		)
+		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabGL Entry"), evidence_lookup=_lookup(self._GL))
+		assert "company" not in advice.columns and "voucher_no" in advice.columns
+		q = (
+			"SELECT `tabSales Invoice`.`name` FROM `tabSales Invoice` WHERE `tabSales Invoice`.`company`=? AND "
+			"`tabSales Invoice`.`customer` IN (SELECT `tabCustomer`.`name` FROM `tabCustomer` "
+			"WHERE `tabCustomer`.`disabled`=? OR `tabCustomer`.`is_frozen`=?)"
+		)
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI))
+		assert advice.columns == ("company", "customer")
+
+
+class TestSingleColumnOr:
+	"""Fix round 3: an OR whose every branch compares the same one column is a plain use."""
+
+	def test_an_or_on_one_column_is_a_plain_use(self):
+		for where, cols in (
+			("(`po_no` IS NULL OR `po_no`=?) AND `customer`=?", ("po_no", "customer")),
+			("(`status`=? OR `status`=?) AND `company`=?", ("status", "company")),
+			("(`status` IN (?) OR `status` IS NULL) AND `company`=?", ("status", "company")),
+			("(`status`=? /* a comment */ OR `status`=?) AND `company`=?", ("status", "company")),
+		):
+			q = f"SELECT `name` FROM `tabSales Invoice` WHERE {where}"
+			advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI))
+			assert advice.columns == cols, where
+
+	def test_an_or_across_two_columns_still_taints_both(self):
+		for where in (
+			"(`po_no` IS NULL OR `customer`=?) AND `company`=?",
+			"((`po_no`=? AND `customer`=?) OR `status`=?) AND `company`=?",
+		):
+			q = f"SELECT `name` FROM `tabSales Invoice` WHERE {where}"
+			advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI))
+			assert advice.columns == ("company",), where
+
+
+class TestCheckOnly:
+	def test_a_check_only_recipe_gives_no_code(self):
+		"""Fix round 3: every recipe of Check fields only, not just after the shape scan."""
+		ev = _ev(fields={**_ALL, "is_return": F("Check")})
+		q = "SELECT `name` FROM `tabSales Invoice` WHERE `is_return`=?"
+		for advice in (
+			ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(ev)),
+			ir.advise_table("tabSales Invoice", ["is_return"], evidence_lookup=_lookup(ev)),
+		):
+			assert advice.route == ir.ROUTE_NO_CODE
+			assert "is_return is a Check field" in advice.reason and "an index would not help" in advice.reason
 
 
 class TestPostgresRowWidth:

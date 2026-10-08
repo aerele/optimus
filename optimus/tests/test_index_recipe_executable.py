@@ -222,6 +222,8 @@ def test_a_failing_entry_rolls_back_only_its_own_writes(monkeypatch):
 	assert "Website Theme saved by an earlier hook" in site.committed
 	assert _SETTER_WRITE not in site.committed + site.pending
 	assert site.errors == ["Index for Sales Invoice was not created: po_no"]
+	# the Error Log row is written after the rollback, so the rollback cannot discard it
+	assert "Error Log Index for Sales Invoice was not created: po_no" in site.pending + site.committed
 
 
 def test_each_entry_commits_its_own_writes(monkeypatch):
