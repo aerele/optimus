@@ -181,7 +181,6 @@ from optimus.renderer.source import (
 	_BoundedFileCache,
 	_path_within_bench,
 	_read_source_snippet,
-	_read_source_window,
 	_resolve_source_path,
 )
 
@@ -1397,11 +1396,6 @@ def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jo
 # _action_entry_callsite, _resolve_frame_key_to_callsite) moved to
 # optimus/renderer/source_resolution.py. Re-imported at the top of this
 # module so call sites resolve unchanged.
-
-
-# (_read_source_window duplicate definition removed the function now
-# lives in optimus/renderer/source.py and is re-imported at the top of
-# this file.)
 
 
 # ---------------------------------------------------------------------------

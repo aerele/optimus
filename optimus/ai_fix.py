@@ -29,7 +29,7 @@ from urllib.parse import urljoin, urlsplit
 
 import requests
 
-from optimus import ai_budget, ai_guardrails, ai_prompts, safe_call
+from optimus import ai_budget, ai_grounding, ai_guardrails, ai_prompts, safe_call
 from optimus.analyzers.base import INDEX_FINDING_TYPES, humanize_duration_ms
 
 
@@ -2194,32 +2194,38 @@ def _index_advice_text(advice: dict) -> str:
 	).strip()
 
 
-_LOOP_FACT_TYPES: frozenset[str] = frozenset({"N+1 Query", "Redundant Call", "Hot Line"})
+_LOOP_FACTS_HEAD = (
+	"Loop facts computed by the profiler (lines and names inside the block come from the source shown):"
+)
 
 
-def _loop_facts_text(finding: dict) -> str:
-	"""Profiler-computed loop facts for the user message (fix_recipes.loop_facts
-	over the source window), or "" when the type is not loop-shaped or the
-	window is missing, gapped or has no target row. Identifiers only, no values."""
-	if (finding.get("finding_type") or "") not in _LOOP_FACT_TYPES:
+def _loop_facts_text(finding: dict, rows: list[dict] | None = None) -> str:
+	"""Profiler-computed loop facts for the shown ``rows`` (default: the finding's whole
+	window), or "" when the type is not loop-shaped or the rows are missing, gapped or have
+	no target. Uses the facts analyze computed from the whole file when the finding carries
+	them, else parses the window. Identifiers only, no values (A3, P12)."""
+	ftype = finding.get("finding_type") or ""
+	if ftype not in ai_grounding.LOOP_FACT_TYPES:
 		return ""
 	detail = finding.get("technical_detail") or {}
 	callsite = detail.get("callsite") or {}
-	window = finding.get("source_window") or callsite.get("source_snippet") or []
-	rows = [r for r in window if isinstance(r, dict) and isinstance(r.get("lineno"), int)]
+	if rows is None:
+		rows = finding.get("source_window") or callsite.get("source_snippet") or []
+	rows = [r for r in rows if isinstance(r, dict) and isinstance(r.get("lineno"), int)]
 	if not rows or any(b["lineno"] != a["lineno"] + 1 for a, b in zip(rows, rows[1:], strict=False)):
 		return ""
-	target = next((i for i, r in enumerate(rows) if r.get("is_target")), None)
-	if target is None:
-		target = next((i for i, r in enumerate(rows) if r["lineno"] == callsite.get("lineno")), None)
+	target = next((r["lineno"] for r in rows if r.get("is_target")), None)
+	if target is None and callsite.get("lineno") in {r["lineno"] for r in rows}:
+		target = callsite.get("lineno")
 	if target is None:
 		return ""
-	from optimus.renderer import fix_recipes
-
-	facts = safe_call.best_effort(
-		lambda: fix_recipes.loop_facts([str(r.get("content") or "") for r in rows], target + 1), {},
+	facts = finding.get("loop_facts")
+	if not isinstance(facts, dict) or not facts:
+		facts = safe_call.best_effort(lambda: ai_grounding.loop_facts_from_window(rows, target), {})
+	return ai_grounding.format_loop_facts(
+		facts, first_line=rows[0]["lineno"], last_line=rows[-1]["lineno"],
+		caller_hint=ftype in ai_grounding.CALLER_HINT_TYPES,
 	)
-	return fix_recipes.format_loop_facts(facts, line_offset=rows[0]["lineno"] - 1)
 
 
 def _build_fix_request(
@@ -2319,9 +2325,6 @@ def _build_fix_request(
 		tail.append((6, "Note:\n" + block("validation", str(detail["validation_note"]))))
 
 	window = finding.get("source_window") or callsite.get("source_snippet") or []
-	loop_text = _loop_facts_text(finding)
-	if loop_text:
-		tail.append((1, loop_text))
 	content, shown = "", []
 	for max_lines in (*_WINDOW_STEPS, 4, 2, 1, 0):
 		trimmed = ai_budget.trim_window(window, max_lines=max_lines)
@@ -2338,7 +2341,9 @@ def _build_fix_request(
 			)
 		else:
 			source = ""
-		content = ai_budget.assemble([*fixed, (0, source), *tail], budget)
+		loop_text = _loop_facts_text(finding, trimmed)
+		loop_part = (1, _LOOP_FACTS_HEAD + "\n" + block("loop-facts", loop_text)) if loop_text else (1, "")
+		content = ai_budget.assemble([*fixed, (0, source), *tail, loop_part], budget)
 		shown = [str(row.get("content", "")) for row in trimmed]
 		if ai_budget.text_size(content) <= budget or not trimmed:
 			break

@@ -29,7 +29,7 @@ from frappe.recorder import (
 )
 from frappe.utils.scheduler import is_scheduler_disabled
 
-from optimus import renderer, safe_commit, session
+from optimus import ai_grounding, renderer, safe_call, safe_commit, session
 from optimus.analyzers import (
 	call_tree,
 	explain_flags,
@@ -2123,9 +2123,15 @@ def _ai_payload_for_finding(
 	payload = renderer._finding_to_dict(child, file_cache=file_cache)
 	callsite = (payload.get("technical_detail") or {}).get("callsite") or {}
 	if callsite.get("filename") and callsite.get("lineno") is not None:
-		window = _ai_grounding_window(callsite["filename"], callsite["lineno"], file_cache)
-		if window:
-			payload["source_window"] = window
+		grounding = _ai_grounding_window(callsite["filename"], callsite["lineno"], file_cache)
+		if grounding is not None:
+			payload["source_window"] = grounding.rows
+			if (payload.get("finding_type") or "") in ai_grounding.LOOP_FACT_TYPES:
+				# Facts come from the WHOLE file's tree, so a loop outside the window
+				# is still seen; the prompt formats only those about shown lines (A3, P12).
+				payload["loop_facts"] = safe_call.best_effort(
+					lambda: ai_grounding.loop_facts_from_tree(grounding.tree, int(callsite["lineno"])), {},
+				)
 
 	fn = (callsite.get("function") or "").strip()
 	fname = (callsite.get("filename") or "").strip()
@@ -2154,7 +2160,6 @@ def _ai_payload_for_finding(
 
 def _attach_index_advice(payload: dict, evidence_lookup, tracked_apps: tuple[str, ...]) -> None:
 	"""``payload["index_advice"]`` from the same advisor the report uses (P15)."""
-	from optimus import safe_call
 	from optimus.renderer import index_recipes
 
 	advice = safe_call.best_effort(
@@ -2172,7 +2177,6 @@ def _attach_index_advice(payload: dict, evidence_lookup, tracked_apps: tuple[str
 
 def _ai_evidence_scope() -> tuple:
 	"""``(evidence_lookup, tracked_apps)`` for one AI run's Slow Query advice."""
-	from optimus import safe_call
 	from optimus.renderer import recipe_enrichment
 
 	def _tracked() -> tuple[str, ...]:
@@ -2183,31 +2187,28 @@ def _ai_evidence_scope() -> tuple:
 	return recipe_enrichment.make_evidence_lookup(), safe_call.best_effort(_tracked, ())
 
 
-def _ai_grounding_window(filename: str, lineno, file_cache: dict) -> list[dict] | None:
-	"""Prefer a complete enclosing function; retain the bounded fallback window.
-
-	Unreadable source gives no window. A job timeout escapes as a fresh timeout.
-	"""
-	from optimus import ai_fix, safe_call
-	from optimus.renderer import fix_recipes
+def _ai_grounding_window(filename: str, lineno, file_cache: dict) -> ai_grounding.GroundingWindow | None:
+	"""The prompt's source window (the enclosing function when it fits 80 lines, else 24
+	lines either side) plus the whole file's parsed tree, or None when the source cannot
+	be read. A job timeout escapes as a fresh timeout."""
+	from optimus import ai_fix
 	from optimus.renderer import source as _source
 
 	guard = safe_call.InterruptGuard()
-	window = None
+	grounding = None
 	try:
 		with guard:
 			lines = _source._source_lines(filename, cache=file_cache)
 			if lines and not isinstance(lineno, bool):
-				window = fix_recipes.enclosing_function_window(
-					lines, int(lineno),
-					before=ai_fix._SOURCE_LINES_BEFORE, after=ai_fix._SOURCE_LINES_AFTER,
-					max_line_chars=_source._SNIPPET_TRUNCATE_CHARS,
+				grounding = ai_grounding.grounding_window(
+					lines, int(lineno), ai_fix._SOURCE_LINES_BEFORE, ai_fix._SOURCE_LINES_AFTER,
+					max_lines=ai_fix._MAX_SOURCE_WINDOW_LINES, max_line_chars=_source._SNIPPET_TRUNCATE_CHARS,
 				)
 	except Exception:
-		pass
+		grounding = None
 	if guard.pending():
 		raise guard.interrupt()
-	return window or None
+	return grounding if grounding is not None and grounding.rows else None
 
 
 _AI_EXAMPLE_QUERIES_MAX = 3

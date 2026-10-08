@@ -37,8 +37,8 @@ optimus/renderer/
   recipe_enrichment.py     # per-render evidence lookup and recipe/stale-note render glue
   README.md                # this file
   source.py                # source-file I/O + _BoundedFileCache (LRU)
-                           # _path_within_bench, _resolve_source_path,
-                           #    _read_source_snippet, _read_source_window
+                           # _path_within_bench, _resolve_source_path, _read_source_snippet
+                           # (the AI window lives in optimus/ai_grounding.py)
   syntax.py                # Pygments highlighting + diff-block wrapper
                            # _ensure_pygments, _highlight_*, _highlight_diff_html
   time_format.py           # duration + datetime formatting

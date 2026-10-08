@@ -2,15 +2,14 @@
 # For license information, please see license.txt
 
 """The AI fix prompt is grounded on the whole enclosing function when it fits
-80 lines (fix_recipes.enclosing_function_window), else on the historical
+80 lines (ai_grounding.grounding_window), else on the historical
 +/-24-line window, which is also what unparseable, module-level or oversized
 code gets. The fallback preserves the previous window size."""
 
 import json
 import types
 
-from optimus import analyze
-from optimus.renderer import fix_recipes
+from optimus import ai_grounding, analyze
 
 
 def _row(filename, lineno, function, finding_type="Redundant Call"):
@@ -37,6 +36,8 @@ def test_uses_whole_enclosing_function(tmp_path):
 	window = analyze._ai_payload_for_finding(_row(str(src), 6, "small_fn"), {})["source_window"]
 	assert [r["lineno"] for r in window] == [4, 5, 6, 7]
 	assert [r["lineno"] for r in window if r["is_target"]] == [6]
+	payload = analyze._ai_payload_for_finding(_row(str(src), 6, "small_fn"), {})
+	assert payload["loop_facts"]["loops"][0]["line"] == 5  # from the whole file's tree
 
 
 def test_too_big_function_falls_back_to_49_lines(tmp_path):
@@ -86,6 +87,5 @@ def test_decorators_and_the_outer_function_are_included():
 		"\t\t\treturn frappe.get_doc('Item', d)",
 		"\t\tinner()",
 	]
-	window = fix_recipes.enclosing_function_window(lines, 5)
-	assert [r["lineno"] for r in window] == [1, 2, 3, 4, 5, 6]
-	assert fix_recipes.enclosing_function_window(lines, 99) == []
+	assert [r["lineno"] for r in ai_grounding.grounding_window(lines, 5, 24, 24).rows] == [1, 2, 3, 4, 5, 6]
+	assert ai_grounding.grounding_window(lines, 99, 24, 24).rows == []

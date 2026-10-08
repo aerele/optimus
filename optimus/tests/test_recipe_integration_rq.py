@@ -7,8 +7,8 @@ from functools import partial
 
 import pytest
 
-from optimus import ai_fix, analyze
-from optimus.renderer import fix_recipes, index_recipes, recipe_enrichment, source
+from optimus import ai_fix, ai_grounding, analyze
+from optimus.renderer import index_recipes, recipe_enrichment, source
 from optimus.tests.test_ai_loop_facts import _finding
 
 pytestmark = pytest.mark.rq
@@ -26,7 +26,7 @@ def test_new_boundaries_preserve_a_fresh_job_timeout(monkeypatch, path):
 		monkeypatch.setattr("optimus.settings.get_config", interrupted)
 		call = ai_fix._app_scope
 	elif path == "loop":
-		monkeypatch.setattr(fix_recipes, "loop_facts", interrupted)
+		monkeypatch.setattr(ai_grounding, "loop_facts_from_window", interrupted)
 		call = partial(ai_fix._loop_facts_text, _finding())
 	elif path == "metadata":
 		monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", interrupted)

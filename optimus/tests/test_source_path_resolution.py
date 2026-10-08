@@ -58,18 +58,22 @@ class TestResolveSourcePath:
 
 
 class TestReadersUseTheResolver:
-	def test_read_source_window_works_on_app_relative_path(self):
-		window = renderer._read_source_window(_APP_REL, 1, before=2, after=5)
-		assert window, "source window must be readable via the app-relative path"
-		# line 1 is the target.
-		assert any(row.get("is_target") and row.get("lineno") == 1 for row in window)
+	def test_the_grounding_window_reads_an_app_relative_path(self):
+		from optimus import ai_grounding
+		from optimus.renderer import source
+
+		window = ai_grounding.grounding_window(source._source_lines(_APP_REL), 1, 2, 5)
+		assert window.rows, "source window must be readable via the app-relative path"
+		assert any(row.get("is_target") and row.get("lineno") == 1 for row in window.rows)
 
 	def test_read_source_snippet_works_on_app_relative_path(self):
 		snippet = renderer._read_source_snippet(_APP_REL, 5)
 		assert snippet and any(row.get("lineno") == 5 for row in snippet)
 
 	def test_unreadable_path_still_returns_none(self):
-		assert renderer._read_source_window("nope/nope_xyzq.py", 3) is None
+		from optimus.renderer import source
+
+		assert source._source_lines("nope/nope_xyzq.py") is None
 		assert renderer._read_source_snippet("<string>", 3) is None
 
 
