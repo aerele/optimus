@@ -19,6 +19,7 @@ Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutExc
 
 @pytest.mark.parametrize("path", [
 	"scope", "loop", "facts", "metadata", "finding", "table", "grounding", "gate", "gate_recipe", "log", "touch",
+	"acquire", "holder", "release",
 ])
 def test_new_boundaries_preserve_a_fresh_job_timeout(monkeypatch, tmp_path, path):
 	original = Timeout("fake deadline")
@@ -70,6 +71,22 @@ def test_new_boundaries_preserve_a_fresh_job_timeout(monkeypatch, tmp_path, path
 
 		monkeypatch.setattr(frappe, "cache", SimpleNamespace(get_value=interrupted, set_value=interrupted), raising=False)
 		call = partial(analyze._touch_singleflight, "A")
+	elif path in ("acquire", "holder", "release"):
+		# T10 fix round 1: the single-flight gate, the janitor's holder check and the release.
+		import frappe
+
+		from optimus.tests.singleflight_fakes import FlagCache
+
+		cache = FlagCache("OTHER", ttl=10)
+		cache.get_value = interrupted
+		monkeypatch.setattr(frappe, "cache", cache, raising=False)
+		monkeypatch.setattr(frappe, "conf", {}, raising=False)
+		monkeypatch.setattr(analyze, "is_scheduler_disabled", lambda: False)
+		call = {
+			"acquire": partial(analyze._acquire_singleflight, "A", "PS-A", None),
+			"holder": partial(analyze.is_singleflight_holder, "A"),
+			"release": partial(analyze._release_singleflight, "A"),
+		}[path]
 	else:
 		monkeypatch.setattr(source, "_source_lines", interrupted)
 		call = partial(analyze._ai_grounding_window, "fake.py", 1, {})

@@ -19,7 +19,7 @@ import frappe
 import pytest
 
 from optimus import analyze
-from optimus.tests.singleflight_fakes import SITE, FakeRedis, flag_key
+from optimus.tests.singleflight_fakes import SITE, FakeRedis, connection_error, flag_key
 
 TTL = analyze._SINGLEFLIGHT_TTL_SECONDS
 
@@ -149,6 +149,7 @@ def env(request, monkeypatch):
 	jobs: dict = {}
 	lines: list = []
 	enqueued: list = []
+	sleeps: list = []
 
 	def logger(name=None, *args, **kwargs):
 		def at(level):
@@ -166,7 +167,7 @@ def env(request, monkeypatch):
 	monkeypatch.setattr(analyze, "safe_commit", lambda: None)
 	monkeypatch.setattr(analyze, "_publish_progress", lambda *a, **k: None)
 	monkeypatch.setattr(analyze, "time", SimpleNamespace(
-		time=lambda: server.now, monotonic=lambda: server.now, sleep=lambda seconds: None,
+		time=lambda: server.now, monotonic=lambda: server.now, sleep=sleeps.append,
 	))
 	monkeypatch.setattr(analyze, "_heartbeat_noted", set(), raising=False)
 
@@ -175,7 +176,7 @@ def env(request, monkeypatch):
 		local.cache = jobs.setdefault(name, {})
 
 	return SimpleNamespace(
-		server=server, local=local, in_job=in_job, lines=lines, enqueued=enqueued,
+		server=server, local=local, in_job=in_job, lines=lines, enqueued=enqueued, sleeps=sleeps,
 		holder=lambda: server.peek(flag_key()), ttl=lambda: server.ttl(flag_key()),
 	)
 
@@ -256,6 +257,9 @@ def test_a_stale_job_cache_entry_never_decides_the_holder(env):
 	stale()
 	assert analyze._acquire_singleflight("A", "PS-A", None) is False  # B holds it: wait
 	assert env.holder() == "B" and env.ttl() == TTL - 10
+	# One line, from the touch above; a session waiting at the gate is not a failed or
+	# yielding heartbeat (read stale, the acquire would touch, yield and log).
+	assert len(env.lines) == 1
 
 
 def test_the_helpers_never_leave_the_flag_in_the_job_cache(env):
@@ -287,6 +291,71 @@ def test_a_busy_flag_re_enqueues_and_is_left_alone(env):
 	assert analyze._acquire_singleflight("B", "PS-B", None) is False
 	assert len(env.enqueued) == 1 and env.enqueued[0]["session_uuid"] == "B"
 	assert env.holder() == "A"
+
+
+def test_a_holder_whose_flag_is_taken_during_its_acquire_waits(env):
+	"""Fix round 1, window 3: A's earlier job holds the flag and A's retry reaches the gate.
+	Between acquire's read ("A") and the touch's read, the flag lapses and B takes it. The
+	touch yields, so A must wait like any busy session instead of running beside B."""
+	env.in_job("A-1")
+	assert analyze._acquire_singleflight("A", "PS-A", None) is True
+	env.server.advance(200)
+	env.in_job("A-2")
+	reads = []
+
+	def lapse_before_the_touch_read(command):
+		if command == "get":
+			reads.append(command)
+			if len(reads) == 2:  # the touch's read, right after acquire's read said "A"
+				env.server.advance(TTL)
+				env.server.put(flag_key(), "B", ex=TTL)
+
+	env.server.before = lapse_before_the_touch_read
+	proceeded = analyze._acquire_singleflight("A", "PS-A", None)
+	env.server.before = None
+	assert proceeded is False
+	assert env.holder() == "B"
+	assert [k["session_uuid"] for k in env.enqueued] == ["A"]
+
+
+def test_a_holder_whose_own_refresh_fails_waits(env):
+	"""The touch on acquire's own-holder path fails: A cannot confirm it holds the flag, so
+	it re-enqueues and tries again instead of proceeding."""
+	env.in_job("A-1")
+	assert analyze._acquire_singleflight("A", "PS-A", None) is True
+	env.in_job("A-2")
+
+	def down_on_expire(command):
+		if command == "expire":
+			raise connection_error()("redis down")
+
+	env.server.before = down_on_expire
+	proceeded = analyze._acquire_singleflight("A", "PS-A", None)
+	env.server.before = None
+	assert proceeded is False
+	assert env.holder() == "A"
+	assert [k["session_uuid"] for k in env.enqueued] == ["A"]
+	assert len(env.lines) == 1 and "ConnectionError" in env.lines[0][2]
+
+
+def test_a_flag_freed_after_the_set_nx_waits_one_cycle(env):
+	"""Fix round 1, A1: the SET NX fails while B holds the flag and B releases before A's
+	read. A re-enqueues and waits one throttle cycle; it does not take the flag through
+	the touch (the old "free or ours" condition did)."""
+	env.server.put(flag_key(), "B", ex=TTL)
+	env.in_job("A")
+
+	def release_before_the_read(command):
+		if command == "get":
+			env.server.unlink(flag_key())
+
+	env.server.before = release_before_the_read
+	proceeded = analyze._acquire_singleflight("A", "PS-A", None)
+	env.server.before = None
+	assert proceeded is False
+	assert env.holder() is None
+	assert [k["session_uuid"] for k in env.enqueued] == ["A"]
+	assert env.sleeps == [analyze._SINGLEFLIGHT_THROTTLE_SECONDS]
 
 
 def test_a_flag_that_lapses_during_the_refresh_is_taken_back(env):
@@ -416,7 +485,7 @@ def test_a_failing_heartbeat_logs_one_line_naming_the_error(env):
 	assert analyze._acquire_singleflight("A", "PS-A", None) is True
 
 	def down(command):
-		raise ConnectionError("redis down")
+		raise connection_error()("redis down")
 
 	env.server.before = down
 	analyze._touch_singleflight("A")

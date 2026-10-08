@@ -102,6 +102,16 @@ class FakeRedis:
 			return entry[1] - self.now
 
 
+def connection_error() -> type[Exception]:
+	"""redis-py's ConnectionError (what a dropped Redis raises; RedisWrapper swallows it in
+	some calls), or the builtin where redis is not installed."""
+	try:
+		from redis.exceptions import ConnectionError as RedisConnectionError
+	except ImportError:
+		return ConnectionError
+	return RedisConnectionError
+
+
 def flag_key() -> bytes:
 	"""The flag's key as Frappe's ``make_key`` builds it for ``SITE``."""
 	return f"{SITE}|{analyze._SINGLEFLIGHT_KEY}".encode()

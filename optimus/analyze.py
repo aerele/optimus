@@ -260,7 +260,8 @@ def _read_singleflight_holder():
 	whose flag lapsed still saw itself as the holder, and on v15 a run never saw its own
 	flag and never released it. Drop the key from the job's cache, then read with
 	``expires=True``, which does not store the answer back (portable: only v16 has
-	``use_local_cache=False``). Outside a job ``frappe.local.cache`` may not exist."""
+	``use_local_cache=False``). Frappe sets ``frappe.local.cache`` for every request and
+	job, and its own ``get_value`` needs it; the ``getattr`` guard only helps test doubles."""
 	local_cache = getattr(frappe.local, "cache", None)
 	if local_cache is not None:
 		local_cache.pop(_singleflight_redis_key(), None)
@@ -291,7 +292,7 @@ def _note_heartbeat_problem(session_uuid: str, problem: str) -> None:
 	safe_call.best_effort(_write, None)
 
 
-def _touch_singleflight(session_uuid: str) -> None:
+def _touch_singleflight(session_uuid: str) -> bool:
 	"""Refresh the single-flight flag's TTL while this session holds it, or take it back
 	when it lapsed and nobody took it. Never writes over another session's flag (taken
 	after a lapse, or held while this run degraded past its wait deadline): that session
@@ -300,8 +301,10 @@ def _touch_singleflight(session_uuid: str) -> None:
 	EXPIRE and the take-back a SET NX, so neither can replace another session's value. One
 	window is left: if this flag lapses and another session takes it between the read and
 	the EXPIRE, the EXPIRE renews that session's TTL (never its value). A touch that fails
-	or finds another session's flag logs one line per run (O4). Best-effort: a cache
-	hiccup never fails analyze; an RQ job timeout escapes as a fresh instance."""
+	or finds another session's flag logs one line per run (O4). Returns True only when
+	this session holds the flag after the touch (fix round 1: acquire proceeds on that
+	alone). Best-effort: a cache hiccup never fails analyze, it returns False; an RQ job
+	timeout escapes as a fresh instance."""
 
 	def _touch() -> bool:
 		if _read_singleflight_holder() == session_uuid and frappe.cache.expire(
@@ -318,20 +321,19 @@ def _touch_singleflight(session_uuid: str) -> None:
 	if held is False:
 		_note_heartbeat_problem(
 			session_uuid,
-			"another session holds the single-flight flag, so this run's heartbeat leaves it "
-			"alone; two analyses may overlap",
+			"another session holds the single-flight flag, so this run's heartbeat left it "
+			"alone and this run no longer holds it",
 		)
+	return held is True
 
 
 def is_singleflight_holder(session_uuid: str) -> bool:
 	"""True iff ``session_uuid`` currently holds the single-flight flag, read from Redis
 	(T10). The flag is heartbeated throughout analyze, so its presence is a reliable
 	liveness signal (the janitor consults it before failing a long-running Analyzing row,
-	since no DB write happens mid-analyze)."""
-	try:
-		return _read_singleflight_holder() == session_uuid
-	except Exception:
-		return False
+	since no DB write happens mid-analyze). A cache error reads as False; an RQ job
+	timeout escapes as a fresh instance."""
+	return safe_call.best_effort(lambda: _read_singleflight_holder() == session_uuid, False)
 
 
 def _release_singleflight(session_uuid: str) -> None:
@@ -339,13 +341,15 @@ def _release_singleflight(session_uuid: str) -> None:
 	so a TTL-expired-then-reacquired flag belonging to another session isn't clobbered.
 	Not atomic: a flag that lapses and is taken in the instant between the read and the
 	delete is still deleted, which needs this run to have gone a whole TTL without a
-	heartbeat first. Also ends the run's one-line heartbeat note (O4). Best-effort."""
+	heartbeat first. Also ends the run's one-line heartbeat note (O4). Best-effort: a
+	cache error is ignored; an RQ job timeout escapes as a fresh instance."""
 	_heartbeat_noted.discard(session_uuid)
-	try:
+
+	def _release() -> None:
 		if _read_singleflight_holder() == session_uuid:
 			frappe.cache.delete_value(_SINGLEFLIGHT_KEY)
-	except Exception:
-		pass
+
+	safe_call.best_effort(_release, None)
 
 
 def _acquire_singleflight(session_uuid: str, docname: str, deadline) -> bool:
@@ -372,16 +376,21 @@ def _acquire_singleflight(session_uuid: str, docname: str, deadline) -> bool:
 	if max_wait <= 0:
 		return True  # single-flight disabled by config
 
+	guard = safe_call.InterruptGuard()
 	try:
-		if _take_singleflight(session_uuid):
-			return True  # it was free; SET NX lets only one of two racing sessions take it
-		holder = _read_singleflight_holder()
+		with guard:
+			if _take_singleflight(session_uuid):
+				return True  # it was free; SET NX lets only one of two racing sessions take it
+			holder = _read_singleflight_holder()
 	except Exception:
 		return True  # cache unavailable degrade to pre-M2 behavior
+	if guard.pending():
+		raise guard.interrupt()  # an RQ job timeout still stops the job, fresh
 
-	if holder == session_uuid:
-		# Already ours (our own self-re-enqueue): refresh its TTL and go.
-		_touch_singleflight(session_uuid)
+	if holder == session_uuid and _touch_singleflight(session_uuid):
+		# Already ours (our own self-re-enqueue) and still ours after the refresh: go. If
+		# the touch found another holder (the flag lapsed and was taken since the read) or
+		# failed, wait like any busy session.
 		return True
 
 	# Busy with a different session (a flag freed since the SET NX is taken on the next

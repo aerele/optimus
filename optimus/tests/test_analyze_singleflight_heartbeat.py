@@ -19,7 +19,7 @@ from unittest.mock import patch
 import pytest
 
 from optimus import analyze, safe_call
-from optimus.tests.singleflight_fakes import FlagCache
+from optimus.tests.singleflight_fakes import FlagCache, connection_error
 
 
 def _finding(i):
@@ -280,8 +280,62 @@ def test_a_cache_hiccup_never_fails_the_touch(monkeypatch, _quiet_heartbeat_log)
 	import frappe
 
 	def broken(*args, **kwargs):
-		raise ConnectionError("redis down")
+		raise connection_error()("redis down")
 
 	monkeypatch.setattr(frappe, "cache", SimpleNamespace(get_value=broken, set_value=broken), raising=False)
 	analyze._touch_singleflight("A")  # no exception
 	assert len(_quiet_heartbeat_log) == 1 and "ConnectionError" in _quiet_heartbeat_log[0]
+
+
+@pytest.mark.parametrize("call,where,holder", [
+	("acquire", "set", None),  # the SET NX
+	("acquire", "get_value", "B"),  # the read after a refused SET NX
+	("holder", "get_value", "A"),  # the janitor's liveness check
+	("release", "get_value", "A"),
+	("release", "delete_value", "A"),
+])
+def test_a_job_timeout_in_the_gate_check_or_release_escapes_fresh(monkeypatch, call, where, holder):
+	"""Fix round 1: acquire, is_singleflight_holder and release swallow an ordinary cache
+	error, but an RQ job timeout still stops the job, as a fresh instance."""
+	import frappe
+
+	original = _JobTimeout("deadline")
+	cache = FlagCache(holder, ttl=10)
+
+	def interrupted(*args, **kwargs):
+		raise original
+
+	setattr(cache, where, interrupted)
+	monkeypatch.setattr(safe_call, "job_timeout_types", lambda: (_JobTimeout,))
+	monkeypatch.setattr(frappe, "cache", cache, raising=False)
+	monkeypatch.setattr(frappe, "conf", {}, raising=False)
+	monkeypatch.setattr(analyze, "is_scheduler_disabled", lambda: False)
+	run = {
+		"acquire": lambda: analyze._acquire_singleflight("A", "PS-A", None),
+		"holder": lambda: analyze.is_singleflight_holder("A"),
+		"release": lambda: analyze._release_singleflight("A"),
+	}[call]
+	with pytest.raises(_JobTimeout) as caught:
+		run()
+	assert caught.value is not original
+	assert caught.value.__context__ is None and caught.value.__cause__ is None
+
+
+@pytest.mark.parametrize("call", ["acquire", "holder", "release"])
+def test_an_ordinary_cache_error_in_the_gate_check_or_release_is_swallowed(monkeypatch, call):
+	import frappe
+
+	def broken(*args, **kwargs):
+		raise connection_error()("redis down")
+
+	monkeypatch.setattr(frappe, "cache", SimpleNamespace(
+		make_key=lambda key: key, get_value=broken, set=broken, delete_value=broken,
+	), raising=False)
+	monkeypatch.setattr(frappe, "conf", {}, raising=False)
+	monkeypatch.setattr(analyze, "is_scheduler_disabled", lambda: False)
+	result = {
+		"acquire": lambda: analyze._acquire_singleflight("A", "PS-A", None),
+		"holder": lambda: analyze.is_singleflight_holder("A"),
+		"release": lambda: analyze._release_singleflight("A"),
+	}[call]()
+	assert result == {"acquire": True, "holder": False, "release": None}[call]

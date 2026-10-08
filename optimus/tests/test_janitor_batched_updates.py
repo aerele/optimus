@@ -193,7 +193,7 @@ class TestSweepStuckAnalyzing:
 		janitor._sweep_stuck_analyzing()
 		_, _, fields = stub._set_value_calls[0]
 		note = fields["analyzer_warnings"]
-		assert "a lapsed analyze heartbeat" in note
+		assert "its analyze heartbeat lapsed (the optimus log names a failed or yielded heartbeat)" in note
 		assert "timed out" in note and "crashed" in note and "optimus.analyze.run(" in note
 
 	def test_no_set_value_when_no_stuck_rows(self, monkeypatch):
