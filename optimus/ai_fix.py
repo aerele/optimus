@@ -29,7 +29,7 @@ from urllib.parse import urljoin, urlsplit
 
 import requests
 
-from optimus import ai_budget, ai_guardrails, ai_prompts
+from optimus import ai_budget, ai_guardrails, ai_prompts, safe_call
 from optimus.analyzers.base import humanize_duration_ms
 
 
@@ -256,11 +256,10 @@ def _app_scope() -> tuple[tuple[str, ...], frozenset[str] | None]:
 	uses to tell your code from framework code. Ordinary settings failures fall
 	back to the default scope; job timeouts propagate."""
 	from optimus.analyzers.base import installed_apps_allowlist
-	from optimus.renderer import fix_recipes
 	from optimus.settings import get_config
 
-	tracked = fix_recipes._best_effort(lambda: tuple(getattr(get_config(), "tracked_apps", ()) or ()), ())
-	return tracked, fix_recipes._best_effort(installed_apps_allowlist, None)
+	tracked = safe_call.best_effort(lambda: tuple(getattr(get_config(), "tracked_apps", ()) or ()), ())
+	return tracked, safe_call.best_effort(installed_apps_allowlist, None)
 
 
 def gate_input(row) -> dict:
@@ -1344,104 +1343,21 @@ def _log_http_error(
 
 
 def _job_timeout_types() -> tuple[type[BaseException], ...]:
-	"""RQ's job-timeout exception classes (subclasses of ``Exception``), or ``()``
-	when rq is not importable (pure unit-test runs)."""
-	try:
-		from rq.timeouts import BaseTimeoutException
-	except Exception:
-		return ()
-	return (BaseTimeoutException,)
+	"""``safe_call.job_timeout_types`` under the name this module's call sites use
+	(tests patch it here)."""
+	return safe_call.job_timeout_types()
 
 
-class _InterruptGuard:
-	"""The one record-then-raise-after-the-``try`` idiom of this module::
+class _InterruptGuard(safe_call.InterruptGuard):
+	"""``safe_call.InterruptGuard`` reading the RQ timeout types through this module's
+	``_job_timeout_types``, so ai_fix's call sites and the tests that patch that name
+	stay in step. ``__slots__ = ()`` keeps instances without a ``__dict__``
+	(``test_ai_interrupt_guard.py`` checks that the guard holds no traceback)."""
 
-		guard = _InterruptGuard()          # base=True: also non-Exception ones
-		try:
-			with guard:
-				...                          # the guarded work
-		except Exception:
-			...                          # the site's own handling
-		if guard.pending():
-			raise guard.interrupt()
+	__slots__ = ()
 
-	Leaving the ``with`` block, the guard swallows and records:
-
-	- an RQ job timeout (``_job_timeout_types``): only its type and args;
-	  it is raised again as a FRESH instance of that type, with no chain and
-	  none of the frames it interrupted (the job must still stop, and those
-	  frames can hold the key or unscrubbed text);
-	- with ``base=True``, an interrupt that is not an ``Exception``
-	  (``SystemExit`` from a gunicorn worker timeout, ``KeyboardInterrupt``,
-	  a gevent ``Timeout``): it is raised again as the SAME instance (gevent
-	  matches its timeout by identity) with its traceback, ``__context__`` and
-	  ``__cause__`` cleared, so Sentry's WSGI middleware never ships the
-	  interrupted frames' locals.
-
-	Anything else goes through to the site's own ``except``. The site raises
-	``interrupt()`` itself, after the ``try``, where no exception is being handled, so it chains
-	nothing (unless the site itself was called while one was being handled).
-	Clear any local holding unscrubbed text before calling it: the site's own
-	frame travels with what it raises. ``note(exc)`` records a timeout that was
-	passed in rather than raised (``log_ai_failure``). The guard never holds a
-	traceback. ``error_log_mask`` keeps its own copy: it must work where this
-	module cannot be imported."""
-
-	__slots__ = ("_base", "_timeout", "_escaping")
-
-	def __init__(self, *, base: bool = False):
-		self._base = base
-		self._timeout: tuple[type[BaseException], tuple] | None = None
-		self._escaping: BaseException | None = None
-
-	def __enter__(self) -> _InterruptGuard:
-		return self
-
-	def __exit__(self, exc_type, exc, tb) -> bool:
-		if exc is None:
-			return False
-		if self._record_timeout(exc):
-			return True
-		if self._base and not isinstance(exc, Exception):
-			self._escaping = exc
-			return True
-		return False
-
-	def _record_timeout(self, exc) -> bool:
-		timeout_types = _job_timeout_types()
-		if timeout_types and isinstance(exc, timeout_types):
-			self._timeout = (type(exc), exc.args)
-			return True
-		return False
-
-	def note(self, exc: BaseException | None) -> None:
-		"""Record ``exc`` when it is an RQ job timeout, so it is raised again,
-		fresh. Never raises."""
-		try:
-			if exc is not None:
-				self._record_timeout(exc)
-		except Exception:
-			pass
-
-	def pending(self) -> bool:
-		"""True when the guard recorded an interrupt to raise again."""
-		return self._timeout is not None or self._escaping is not None
-
-	def interrupt(self) -> BaseException | None:
-		"""What the guard recorded, ready to raise (see the class), or None;
-		the guard forgets it. The site raises it itself, so no frame of the
-		guard travels with it."""
-		escaping, self._escaping = self._escaping, None
-		if escaping is not None:
-			escaping.__traceback__ = None
-			escaping.__context__ = None
-			escaping.__cause__ = None
-			escaping.__suppress_context__ = True
-			return escaping
-		timeout, self._timeout = self._timeout, None
-		if timeout is not None:
-			return timeout[0](*timeout[1])
-		return None
+	def _timeout_types(self) -> tuple[type[BaseException], ...]:
+		return _job_timeout_types()
 
 
 def _response_detail(resp, auth=None) -> str:
@@ -2286,7 +2202,7 @@ def _loop_facts_text(finding: dict) -> str:
 		return ""
 	from optimus.renderer import fix_recipes
 
-	facts = fix_recipes._best_effort(
+	facts = safe_call.best_effort(
 		lambda: fix_recipes.loop_facts([str(r.get("content") or "") for r in rows], target + 1), {},
 	)
 	return fix_recipes.format_loop_facts(facts, line_offset=rows[0]["lineno"] - 1)

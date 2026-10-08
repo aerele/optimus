@@ -2148,11 +2148,11 @@ def _ai_grounding_window(filename: str, lineno, file_cache: dict) -> list[dict] 
 
 	Unreadable source gives no window. A job timeout escapes as a fresh timeout.
 	"""
-	from optimus import ai_fix
+	from optimus import ai_fix, safe_call
 	from optimus.renderer import fix_recipes
 	from optimus.renderer import source as _source
 
-	guard = ai_fix._InterruptGuard()
+	guard = safe_call.InterruptGuard()
 	window = None
 	try:
 		with guard:

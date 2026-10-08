@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from optimus.renderer import fix_recipes
+from optimus.safe_call import best_effort
 
 
 def _read_meta(
@@ -26,10 +27,10 @@ def _read_meta(
 ) -> dict | None:
 	import frappe
 
-	meta = fix_recipes._best_effort(lambda: frappe.get_meta(doctype), None)
+	meta = best_effort(lambda: frappe.get_meta(doctype), None)
 	if meta is None:
 		return None
-	app = fix_recipes._best_effort(lambda: frappe.get_doctype_app(doctype), "") or ""
+	app = best_effort(lambda: frappe.get_doctype_app(doctype), "") or ""
 	fields: dict[str, dict] = {}
 	for df in getattr(meta, "fields", None) or []:
 		name = getattr(df, "fieldname", None)
@@ -56,7 +57,7 @@ def make_meta_lookup(
 
 	def lookup(doctype: str) -> dict | None:
 		if doctype not in cache:
-			cache[doctype] = fix_recipes._best_effort(
+			cache[doctype] = best_effort(
 				lambda: _read_meta(doctype, tracked_apps=scope, installed_apps=installed_apps), None,
 			)
 		return cache[doctype]
@@ -81,7 +82,7 @@ def apply_finding_recipes(
 		ftype = f.get("finding_type") or ""
 		if ftype in fix_recipes.INDEX_FINDING_TYPES:
 			f["llm_fix"] = None
-			recipe = fix_recipes._best_effort(lambda: fix_recipes.index_recipe(f, meta_lookup=meta_lookup), None)
+			recipe = best_effort(lambda: fix_recipes.index_recipe(f, meta_lookup=meta_lookup), None)
 			detail.pop("suggested_ddl", None)
 			if recipe:
 				detail["fix_hint"] = recipe["text"]
@@ -93,7 +94,7 @@ def apply_finding_recipes(
 		elif ftype == "Framework N+1":
 			f["llm_fix"] = None
 		elif ftype == "Hot Line":
-			note = fix_recipes._best_effort(
+			note = best_effort(
 				lambda: fix_recipes.hot_line_gate(
 					f, tracked_apps=tuple(tracked_apps or ()), installed_apps=installed_apps,
 				), None,
@@ -116,7 +117,7 @@ def apply_table_recipes(
 		rec = t.get("recommended_index")
 		if not isinstance(rec, dict) or not rec.get("columns"):
 			continue
-		cols = fix_recipes._best_effort(
+		cols = best_effort(
 			lambda: fix_recipes.table_card_columns(
 				t.get("table") or "", list(rec.get("columns") or []), meta_lookup=meta_lookup,
 			), None,

@@ -38,6 +38,7 @@ from optimus.analyzers.base import (
 	is_framework_callsite,
 	is_write_hot_table,
 )
+from optimus.safe_call import best_effort
 
 INDEX_FINDING_TYPES: frozenset[str] = frozenset({
 	"Missing Index",
@@ -141,24 +142,8 @@ def _doctype_of(table: str) -> str | None:
 	return name[3:]
 
 
-def _best_effort(fn: Callable, default):
-	"""Fallback for an ordinary input failure, preserving fresh job timeouts."""
-	from optimus.ai_fix import _InterruptGuard
-
-	guard = _InterruptGuard()
-	value = default
-	try:
-		with guard:
-			value = fn()
-	except Exception:
-		pass
-	if guard.pending():
-		raise guard.interrupt()
-	return value
-
-
 def _safe_meta(meta_lookup: Callable[[str], dict | None], doctype: str) -> dict | None:
-	meta = _best_effort(lambda: meta_lookup(doctype), None)
+	meta = best_effort(lambda: meta_lookup(doctype), None)
 	return meta if isinstance(meta, dict) else None
 
 
@@ -169,7 +154,7 @@ def _explain_columns(ftype: str, table: str, query: str) -> tuple[str, list[str]
 		return table, []
 	from optimus.analyzers.table_breakdown import _parse_query
 
-	parsed = _best_effort(lambda: _parse_query(query), {})
+	parsed = best_effort(lambda: _parse_query(query), {})
 	by_table = parsed.get("index_cols") or {}
 	key = table if table in by_table else next(
 		(t for t in by_table if t.lower() == str(table).lower()), None,
