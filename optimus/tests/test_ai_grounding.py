@@ -167,6 +167,39 @@ class TestLoopChain:
 		assert "uses no variable that changes in that loop" in text
 		assert "The result of frappe.db.get_value is not used." in text
 
+	def test_a_stored_key_or_attribute_the_call_reads_changes_in_the_loop(self):
+		"""Fix round 1, F2: status_updater's args['detail_id'] = ... then .format(**args), and
+		batch.py's self.batch_id = ... then frappe.db.exists('Batch', self.batch_id)."""
+		lines = [
+			"def update_children(self, args):",
+			"\tfor d in self.get_all_children():",
+			"\t\targs['detail_id'] = d.get(args['join_field'])",
+			"\t\tfrappe.db.sql(\"update `tab{target_dt}` set qty = 1 where name = '{detail_id}'\".format(**args))",
+		]
+		assert "uses variables that change in that loop: args." in _text(lines, 4)
+		batch = [
+			"def autoname(self):",
+			"\twhile not self.batch_id:",
+			"\t\tself.batch_id = get_name_from_hash()",
+			"\t\tif frappe.db.exists('Batch', self.batch_id):",
+			"\t\t\tself.batch_id = None",
+		]
+		assert "uses variables that change in that loop: self." in _text(batch, 4)
+
+	def test_a_stored_path_counts_only_when_the_call_reads_an_overlapping_one(self):
+		"""F2: paths overlap when one is a prefix of the other; a computed key matches any key."""
+		def text(store, read, op="="):
+			lines = ["def f(rows, cache):", "\tfor r in rows:", f"\t\t{store} {op} r", f"\t\tfrappe.get_doc('Item', {read})"]
+			return _text(lines, 4)
+
+		assert "change in that loop: cache." in text("cache[r.name]", "cache['x']")
+		assert "change in that loop: cache." in text("cache['x']", "cache")
+		assert "change in that loop: cache." in text("cache['n']", "cache['n']", "+=")
+		assert "uses no variable that changes" in text("cache['a']", "cache['b']")
+		assert "uses no variable that changes" in text("cache.total", "cache.company")
+		# Only the stored path counts, not the paths the target reads on the way.
+		assert "uses no variable that changes" in text("cache[r.idx].qty", "cache[0].rate")
+
 	def test_a_subscript_receiver_write_is_seen(self):
 		"""P11c."""
 		lines = ["def save_rows(self):", "\tfor i in range(len(self.items)):",
@@ -185,6 +218,23 @@ class TestLoopChain:
 			"\t\tfrappe.db.sql(\"INSERT INTO `tabLog` VALUES ('%s')\" % n)",
 		]
 		assert "frappe.db.sql(DELETE), frappe.db.sql(INSERT), frappe.db.sql(UPDATE)" in _text(lines, 3)
+
+	def test_a_query_builder_write_chain_is_seen(self):
+		"""Fix round 1, F6: frappe.qb update, insert and delete chains that end in .run()."""
+		lines = [
+			"def close(names):",
+			"\tfor n in names:",
+			"\t\tfrappe.get_doc('Item', n)",
+			"\t\tfrappe.qb.update(item).set(item.disabled, 1).where(item.name == n).run()",
+			"\t\tqb.into(log).insert((n, 'closed')).run()",
+			"\t\tfrappe.qb.from_(bin_).delete().where(bin_.item_code == n).run()",
+			"\t\tfrappe.qb.from_(bin_).select(bin_.name).where(bin_.item_code == n).run()",
+			"\t\tfrappe.qb.update(item).set(item.disabled, 0)",
+		]
+		assert _facts(lines, 3)["loops"][0]["writes"] == [
+			["frappe.qb.update", 4], ["frappe.qb.into", 5], ["frappe.qb.from_().delete", 6],
+		]
+		assert "writes through: frappe.qb.from_().delete, frappe.qb.into, frappe.qb.update." in _text(lines, 3)
 
 	def test_async_for_with_match(self):
 		"""E-I4: async and match shapes."""
@@ -258,6 +308,18 @@ class TestFormatting:
 	def test_no_shown_loop_gives_no_facts(self):
 		assert _text(NESTED, 4, first=4) == ""
 
+	def test_a_variable_bound_on_a_line_not_shown_gets_no_invariant_claim(self):
+		"""Fix round 1, F3: no "uses no variable that changes" when the binding is not shown."""
+		lines = ["def f(rows):", "\tkey = None", "\tfor r in rows:", "\t\tfrappe.get_doc('Item', key)",
+			"\t\tkey = r.next_key"]
+		assert "uses variables that change in that loop: key." in _text(lines, 4)
+		text = _text(lines, 4, last=4)
+		assert text.startswith("The marked line runs inside the for loop on line 3.")
+		assert "uses no variable" not in text and "key" not in text
+		# A hidden binding the call does not use leaves the invariant claim in place.
+		lines = ["def f(rows):", "\tfor r in rows:", "\t\tfrappe.get_doc('Item', 'fixed')", "\t\tother = r.x"]
+		assert "uses no variable that changes in that loop" in _text(lines, 3, last=3)
+
 	def test_writes_on_lines_not_shown_are_left_out(self):
 		assert "no database write" in _text(DEMO_ORDER, 7, last=8)
 
@@ -265,3 +327,20 @@ class TestFormatting:
 		rows = [{"lineno": 40 + i, "content": text, "is_target": i == 3} for i, text in enumerate(DEMO_ORDER[:5])]
 		facts = g.loop_facts_from_window(rows, 43)
 		assert facts["loops"][0]["line"] == 42 and facts["call_line"] == 43
+
+	def test_a_window_inside_a_loop_body_with_no_def_is_unknown(self):
+		"""Fix round 1, F1: a window that starts inside a body cannot see a loop header above it."""
+		lines = ["\t\tx = 1", "\t\tfrappe.db.get_value('Item', x)", "\t\ty = 2"]
+		rows = [{"lineno": 10 + i, "content": text, "is_target": i == 1} for i, text in enumerate(lines)]
+		assert g.loop_facts_from_window(rows, 11) == {}
+		# A def in the window that does not hold the line does not count.
+		lines = ["\t\tdef helper():", "\t\t\treturn 1", "\t\tfrappe.db.get_value('Item', x)"]
+		rows = [{"lineno": 10 + i, "content": text, "is_target": i == 2} for i, text in enumerate(lines)]
+		assert g.loop_facts_from_window(rows, 12) == {}
+
+	def test_a_window_holding_the_function_or_lambda_can_say_not_in_a_loop(self):
+		lines = ["def get_user(name):", "\treturn frappe.get_doc('User', name)"]
+		rows = [{"lineno": 10 + i, "content": text, "is_target": i == 1} for i, text in enumerate(lines)]
+		assert g.loop_facts_from_window(rows, 11) == {"in_loop": False}
+		rows = [{"lineno": 20, "content": "\t\tkey = lambda r: frappe.get_doc('Item', r)", "is_target": True}]
+		assert g.loop_facts_from_window(rows, 20) == {"in_loop": False}

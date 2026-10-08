@@ -10,13 +10,14 @@ import pytest
 from optimus import ai_fix, ai_grounding, analyze
 from optimus.renderer import index_recipes, recipe_enrichment, source
 from optimus.tests.test_ai_loop_facts import _finding
+from optimus.tests.test_ai_payload_grounding_window import _row
 
 pytestmark = pytest.mark.rq
 Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
 
 
-@pytest.mark.parametrize("path", ["scope", "loop", "metadata", "finding", "table", "grounding"])
-def test_new_boundaries_preserve_a_fresh_job_timeout(monkeypatch, path):
+@pytest.mark.parametrize("path", ["scope", "loop", "facts", "metadata", "finding", "table", "grounding"])
+def test_new_boundaries_preserve_a_fresh_job_timeout(monkeypatch, tmp_path, path):
 	original = Timeout("fake deadline")
 
 	def interrupted(*args, **kwargs):
@@ -28,6 +29,12 @@ def test_new_boundaries_preserve_a_fresh_job_timeout(monkeypatch, path):
 	elif path == "loop":
 		monkeypatch.setattr(ai_grounding, "loop_facts_from_window", interrupted)
 		call = partial(ai_fix._loop_facts_text, _finding())
+	elif path == "facts":
+		# Fix round 1, F4: the whole-file facts analyze computes for a readable N+1 Query.
+		src = tmp_path / "mod.py"
+		src.write_text("def f(rows):\n\tfor r in rows:\n\t\tfrappe.get_doc('Item', r)\n")
+		monkeypatch.setattr(ai_grounding, "loop_facts_from_tree", interrupted)
+		call = partial(analyze._ai_payload_for_finding, _row(str(src), 3, "f", finding_type="N+1 Query"), {})
 	elif path == "metadata":
 		monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", interrupted)
 		call = partial(recipe_enrichment.make_evidence_lookup(), "tabInvoice")

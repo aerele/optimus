@@ -210,14 +210,102 @@ def _loop_bindings(loop: ast.AST) -> list[tuple[str, int]]:
 	return sorted(out, key=lambda item: (item[1], item[0]))
 
 
-def _loop_writes(loop: ast.AST) -> list[tuple[str, int]]:
-	"""(call, line) for every write the profiler can name inside ``loop``'s passes."""
-	hits: set[tuple[str, int]] = set()
+def _path(node: ast.AST) -> tuple[str, ...] | None:
+	"""``self.batch_id`` -> ("self", ".batch_id"); ``args["x"]`` -> ("args", "['x']");
+	a subscript with a computed key is "[]" (any key). None without a Name base."""
+	parts: list[str] = []
+	while isinstance(node, (ast.Attribute, ast.Subscript)):
+		if isinstance(node, ast.Attribute):
+			parts.append("." + node.attr)
+		else:
+			parts.append(f"[{node.slice.value!r}]" if isinstance(node.slice, ast.Constant) else "[]")
+		node = node.value
+	return (node.id, *reversed(parts)) if isinstance(node, ast.Name) else None
+
+
+def _overlaps(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
+	"""One path is a prefix of the other (``args`` / ``args['x']``)."""
+	return all(
+		x == y or ("[]" in (x, y) and x.startswith("[") and y.startswith("[")) for x, y in zip(a, b, strict=False)
+	)
+
+
+def _read_paths(call: ast.Call, parent: dict) -> set[tuple[str, ...]]:
+	"""The longest attribute / subscript path over each name the call reads."""
+	out: set[tuple[str, ...]] = set()
+	for root in [call.func, *call.args, *(keyword.value for keyword in call.keywords)]:
+		for name in (n for n in ast.walk(root) if isinstance(n, ast.Name)):
+			top = name
+			while isinstance(parent.get(top), (ast.Attribute, ast.Subscript)) and parent[top].value is top:
+				top = parent[top]
+			path = _path(top)
+			if path:
+				out.add(path)
+	return out
+
+
+def _stored_paths(loop: ast.AST) -> set[tuple[tuple[str, ...], int]]:
+	"""(path, line) for every attribute or subscript a pass of ``loop`` assigns."""
+	out: set[tuple[tuple[str, ...], int]] = set()
 	for part in _per_iteration(loop):
 		if isinstance(part, _SCOPES):
 			continue
 		for node in (part, *_own_walk(part)):
-			if not isinstance(node, ast.Call):
+			targets = node.targets if isinstance(node, ast.Assign) else (
+				[node.target] if isinstance(node, (ast.AugAssign, ast.AnnAssign)) else []
+			)
+			for target in targets:
+				for sub in ast.walk(target):
+					if isinstance(sub, (ast.Attribute, ast.Subscript)) and isinstance(sub.ctx, ast.Store):
+						path = _path(sub)
+						if path:
+							out.add((path, node.lineno))
+	return out
+
+
+def _qb_write(call: ast.Call) -> tuple[str | None, list[ast.Call]]:
+	"""The write a query-builder chain that ends in ``.run()`` makes, rooted in
+	``frappe.qb`` or ``qb``: ``frappe.qb.update``, ``frappe.qb.into`` or
+	``frappe.qb.from_().delete``, plus the calls the chain is made of. ``(None, [])``
+	for any other call (a ``select`` chain reads)."""
+	if not (isinstance(call.func, ast.Attribute) and call.func.attr == "run"):
+		return None, []
+	attrs: list[str] = []
+	inner: list[ast.Call] = []
+	node: ast.AST = call.func
+	while isinstance(node, (ast.Attribute, ast.Call)):
+		if isinstance(node, ast.Attribute):
+			attrs.append(node.attr)
+			node = node.value
+		else:
+			inner.append(node)
+			node = node.func
+	if not isinstance(node, ast.Name):
+		return None, []
+	chain = [node.id, *reversed(attrs)]
+	start = 1 if chain[0] == "qb" else 2 if chain[:2] == ["frappe", "qb"] else 0
+	verb = chain[start] if start and len(chain) > start else ""
+	if verb in ("update", "into"):
+		return f"frappe.qb.{verb}", inner
+	if verb == "from_" and "delete" in chain[start + 1 :]:
+		return "frappe.qb.from_().delete", inner
+	return None, []
+
+
+def _loop_writes(loop: ast.AST) -> list[tuple[str, int]]:
+	"""(call, line) for every write the profiler can name inside ``loop``'s passes."""
+	hits: set[tuple[str, int]] = set()
+	in_chain: set[ast.AST] = set()  # calls already named as part of a query-builder write
+	for part in _per_iteration(loop):
+		if isinstance(part, _SCOPES):
+			continue
+		for node in (part, *_own_walk(part)):
+			if not isinstance(node, ast.Call) or node in in_chain:
+				continue
+			qb_write, chain = _qb_write(node)
+			if qb_write:
+				hits.add((qb_write, node.lineno))
+				in_chain.update(chain)
 				continue
 			name = call_name(node.func) or ""
 			last = node.func.attr if isinstance(node.func, ast.Attribute) else name
@@ -281,6 +369,7 @@ def loop_facts_from_tree(tree: ast.AST | None, target_lineno) -> dict:
 		if isinstance(holder, ast.Await):
 			holder = parent.get(holder)
 	name = call_name(call.func) if call is not None else None
+	reads = _read_paths(call, parent) if call is not None else set()
 	return {
 		"in_loop": True,
 		"call": name if name and _SAFE_NAME_RE.match(name) else None,
@@ -291,12 +380,20 @@ def loop_facts_from_tree(tree: ast.AST | None, target_lineno) -> dict:
 			{
 				"kind": _kind(loop),
 				"line": loop.lineno,
-				"bound": [list(item) for item in _loop_bindings(loop)],
+				"bound": [list(item) for item in _loop_bindings_read(loop, reads)],
 				"writes": [list(item) for item in _loop_writes(loop)],
 			}
 			for loop in loops
 		],
 	}
+
+
+def _loop_bindings_read(loop: ast.AST, reads: set[tuple[str, ...]]) -> list[tuple[str, int]]:
+	"""``_loop_bindings`` plus the base name of a stored path the call reads
+	(``args["id"] = ...`` then ``.format(**args)``); ``self.total += ...`` leaves a
+	call that reads ``self.company`` alone (P11b)."""
+	extra = {(path[0], line) for path, line in _stored_paths(loop) if any(_overlaps(path, r) for r in reads)}
+	return sorted(set(_loop_bindings(loop)) | extra, key=lambda item: (item[1], item[0]))
 
 
 def _shift(facts: dict, offset: int) -> dict:
@@ -317,7 +414,8 @@ def _shift(facts: dict, offset: int) -> dict:
 
 def loop_facts_from_window(rows: list[dict], target_lineno: int) -> dict:
 	"""``loop_facts_from_tree`` over the window itself, for a finding that carries no
-	precomputed facts; a window that does not parse on its own gives ``{}``."""
+	precomputed facts; a window that does not parse on its own gives ``{}``, and so does
+	"not in a loop" when no function or lambda holding the line starts in the window."""
 	usable = [r for r in rows or [] if isinstance(r, dict) and isinstance(r.get("lineno"), int)]
 	if not usable or isinstance(target_lineno, bool) or not isinstance(target_lineno, int):
 		return {}
@@ -326,7 +424,17 @@ def loop_facts_from_window(rows: list[dict], target_lineno: int) -> dict:
 		tree = ast.parse(textwrap.dedent("\n".join(str(r.get("content") or "") for r in usable)))
 	except (SyntaxError, ValueError):
 		return {}
-	return _shift(loop_facts_from_tree(tree, target_lineno - first + 1), first - 1)
+	local = target_lineno - first + 1
+	facts = loop_facts_from_tree(tree, local)
+	# A window that starts inside a body cannot see a loop header above it: "not in a
+	# loop" holds only when the function or lambda holding the line starts in the window.
+	if facts.get("in_loop") is False and not any(
+		isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+		and node.lineno <= local <= (node.end_lineno or node.lineno)
+		for node in ast.walk(tree)
+	):
+		return {}
+	return _shift(facts, first - 1)
 
 
 def _shown(line, first_line: int, last_line: int) -> bool:
@@ -336,7 +444,8 @@ def _shown(line, first_line: int, last_line: int) -> bool:
 def format_loop_facts(facts: dict, *, first_line: int, last_line: int, caller_hint: bool = False) -> str:
 	"""Sentences about ``facts`` for the source lines ``first_line``..``last_line`` the
 	prompt still shows. A loop whose header is not shown, and a variable or a write on a
-	line not shown, are left out; nothing is said when no loop is shown (P12).
+	line not shown, are left out (and a call whose variable changes only on a line not
+	shown is not called invariant); nothing is said when no loop is shown (P12).
 	``caller_hint`` adds that a line in no loop may repeat because a caller loops (P7)."""
 	if not isinstance(facts, dict) or not facts:
 		return ""
@@ -363,10 +472,12 @@ def format_loop_facts(facts: dict, *, first_line: int, last_line: int, caller_hi
 		uses = set(facts.get("uses") or [])
 		for loop in loops:
 			names = sorted({name for name, line in loop.get("bound") or [] if _shown(line, first_line, last_line)} & uses)
+			hidden = {name for name, line in loop.get("bound") or [] if not _shown(line, first_line, last_line)} & uses
 			where = "that loop" if len(loops) == 1 else f"the loop on line {loop['line']}"
 			if names:
 				parts.append(f"The call {call} uses variables that change in {where}: {', '.join(names)}.")
-			else:
+			elif not hidden:
+				# Only when no used name changes on a line the prompt no longer shows.
 				parts.append(f"The call {call} uses no variable that changes in {where}.")
 		if facts.get("result_used") is True:
 			parts.append(f"The result of {call} is used.")
