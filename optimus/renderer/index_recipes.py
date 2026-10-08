@@ -70,6 +70,9 @@ VARCHAR_DEFAULT_LENGTH = 140
 BYTES_PER_CHAR = 4
 FIXED_WIDTH_BYTES = 8
 TRAILING_METADATA_OK: frozenset[str] = frozenset({"creation", "modified"})
+# The query parser is superlinear (cycle 1: 216 ms at 19 KB): a longer query gets an
+# explanation instead of a parse.
+MAX_QUERY_CHARS = 4096
 HOOK_MODULE = "optimus_indexes"
 UNKNOWN_APP = "your_app"
 # The hooks.py lists ensure_indexes() is registered in (owner decision D4): after_sync
@@ -1411,11 +1414,20 @@ def advise_finding(
 	if ftype not in ADVISED_FINDING_TYPES:
 		return None
 	detail = _detail(finding)
+	query = str(detail.get("normalized_query") or "")
+	if ftype != "Missing Index" and len(query) > MAX_QUERY_CHARS:
+		# The parser is superlinear (cycle 1: 216 ms at 19 KB); fail closed to an explanation.
+		doctype = doctype_of(str(detail.get("table") or ""))
+		if doctype is None:
+			return None
+		return _no_code(doctype, (), (
+			f"This query is longer than {MAX_QUERY_CHARS} characters, so Optimus does not parse it for "
+			"index advice. Check it with EXPLAIN."
+		))
 	table, labelled = _index_target(ftype, detail, parser or parse_query)
 	doctype = doctype_of(table)
 	if doctype is None:
 		return None
-	query = str(detail.get("normalized_query") or "")
 	evidence = evidence_lookup(f"tab{doctype}")
 	unusable = comparisons = None
 	serves = ""

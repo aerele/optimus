@@ -16,7 +16,9 @@ pytestmark = pytest.mark.rq
 Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
 
 
-@pytest.mark.parametrize("path", ["scope", "loop", "facts", "metadata", "finding", "table", "grounding"])
+@pytest.mark.parametrize("path", [
+	"scope", "loop", "facts", "metadata", "finding", "table", "grounding", "gate", "gate_recipe",
+])
 def test_new_boundaries_preserve_a_fresh_job_timeout(monkeypatch, tmp_path, path):
 	original = Timeout("fake deadline")
 
@@ -47,6 +49,13 @@ def test_new_boundaries_preserve_a_fresh_job_timeout(monkeypatch, tmp_path, path
 		monkeypatch.setattr(index_recipes, "advise_table", interrupted)
 		call = partial(recipe_enrichment.apply_table_recipes,
 			[{"table": "tabInvoice", "recommended_index": {"columns": ["customer"]}}], evidence_lookup=lambda table: None,
+		)
+	elif path in ("gate", "gate_recipe"):
+		# Task 7: the gate fails closed on an ordinary error, but a deadline still stops the job.
+		monkeypatch.setattr(ai_grounding, "hot_line_gate", interrupted)
+		hot_line = {"finding_type": "Hot Line", "technical_detail": {"file": "apps/myapp/myapp/x.py"}}
+		call = partial(ai_fix.llm_gate_note, hot_line) if path == "gate" else partial(
+			recipe_enrichment.apply_finding_recipes, [hot_line], evidence_lookup=lambda table: None,
 		)
 	else:
 		monkeypatch.setattr(source, "_source_lines", interrupted)

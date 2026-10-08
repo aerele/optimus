@@ -50,7 +50,7 @@ _FAKE_RESULT = {"suggestion": "**Fix**\n\ndo X", "model": "m", "provider": "Open
 
 def _patches(cfg, *, available=True, suggest=None):
 	"""Common patch context: config + ai_fix.is_available + ai_fix.suggest_fix."""
-	suggest = suggest if suggest is not None else (lambda payload: dict(_FAKE_RESULT))
+	suggest = suggest if suggest is not None else (lambda payload, **kwargs: dict(_FAKE_RESULT))
 	return (
 		patch("optimus.settings.get_config", return_value=cfg),
 		patch("optimus.ai_fix.is_available", return_value=available),
@@ -158,7 +158,7 @@ class TestSelectionAndPersistence:
 		# First eligible finding errors; the second still gets a suggestion.
 		calls = {"n": 0}
 
-		def _suggest(payload):
+		def _suggest(payload, **kwargs):
 			calls["n"] += 1
 			if calls["n"] == 1:
 				raise RuntimeError("provider blew up")
@@ -325,7 +325,7 @@ class TestRunAiBackfillCore:
 	def test_counts_per_finding_failures(self):
 		calls = {"n": 0}
 
-		def _suggest(payload):
+		def _suggest(payload, **kwargs):
 			calls["n"] += 1
 			if calls["n"] == 1:
 				raise RuntimeError("provider blew up")
@@ -392,7 +392,7 @@ class TestRunAiBackfillCore:
 		# F1 errors during re-eval → its old suggestion must survive; F2 ok.
 		calls = {"n": 0}
 
-		def _suggest(payload):
+		def _suggest(payload, **kwargs):
 			calls["n"] += 1
 			if calls["n"] == 1:
 				raise RuntimeError("provider blew up")

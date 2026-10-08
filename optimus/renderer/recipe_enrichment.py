@@ -11,9 +11,13 @@ and fails closed: an index-family finding never shows the analyzer's raw ``ALTER
 / ``CREATE INDEX`` text. Stored JSON is never modified.
 
 ``make_evidence_lookup`` reads DocField flags, the DocType's app, real column types and
-existing indexes once per table per render (owner decision A2). It and
-``make_refresh_check`` (Optimus Settings, through ``ai_fix``, imported lazily) are the
-only functions that touch Frappe.
+existing indexes once per table per render (owner decision A2). It,
+``make_refresh_check`` (Optimus Settings, through ``ai_fix``, imported lazily) and
+``log_recipe_failures`` (one bench-log line) are the only functions that touch Frappe.
+
+Index advice that raises leaves a neutral note (``RECIPE_FAILED_HINT`` /
+``RECIPE_FAILED_CARD_NOTE``) and is counted, and a Hot Line gate that raises fails
+closed (O-I1). Running the recipes twice leaves the same dicts as running them once.
 """
 
 from __future__ import annotations
@@ -202,14 +206,55 @@ def count_ai_tokens(findings: list[dict], tables: list[dict]) -> int:
 	return total
 
 
+_RECIPE_FAILED = object()
+RECIPE_FAILED_HINT = "Optimus could not build index advice for this finding."
+RECIPE_FAILED_CARD_NOTE = "Optimus could not build index advice for this table."
+
+
+def make_query_parser() -> Callable[[str], dict]:
+	"""A per-render ``parse(query)`` for the advisor: memoised on the query text (a query
+	can back several findings), and never run on a query over
+	``index_recipes.MAX_QUERY_CHARS`` (the advisor explains those instead)."""
+	cache: dict[str, dict] = {}
+
+	def parse(query: str) -> dict:
+		if len(query or "") > index_recipes.MAX_QUERY_CHARS:
+			return {}
+		if query not in cache:
+			cache[query] = index_recipes.parse_query(query)
+		return cache[query]
+
+	return parse
+
+
+def log_recipe_failures(count: int) -> None:
+	"""One bench-log line for index advice that raised during a render (O-I1). Called
+	after the recipes ran, never inside an ``except``. A logger failure is ignored; an
+	RQ job timeout escapes as a fresh instance."""
+	if not count:
+		return
+
+	def _write() -> None:
+		import frappe
+
+		frappe.logger("optimus").warning(
+			f"optimus: index advice failed for {count} finding(s) or table(s) in one render"
+		)
+
+	best_effort(_write, None)
+
+
 def apply_finding_recipes(
 	findings: list[dict],
 	*,
 	evidence_lookup: Callable[[str], TableEvidence | None],
 	tracked_apps: tuple[str, ...] = (),
 	installed_apps: frozenset[str] | None = None,
-) -> None:
-	"""Fill each render dict's recipe slots in place (see the module docstring)."""
+	parser: Callable[[str], dict] | None = None,
+) -> dict:
+	"""Fill each render dict's recipe slots in place and return ``{"failed": n}``, the
+	index advice that raised. Running it twice leaves the same dicts as running it once."""
+	stats = {"failed": 0}
 	scope = tuple(tracked_apps or ())
 	for f in findings or []:
 		if not isinstance(f, dict):
@@ -221,10 +266,17 @@ def apply_finding_recipes(
 		if ftype in INDEX_FINDING_TYPES:
 			f["llm_fix"] = None
 			advice = best_effort(
-				lambda: index_recipes.advise_finding(f, evidence_lookup=evidence_lookup, tracked_apps=scope), None,
+				lambda: index_recipes.advise_finding(
+					f, evidence_lookup=evidence_lookup, tracked_apps=scope, parser=parser,
+				),
+				_RECIPE_FAILED,
 			)
+			# Raw analyzer DDL never reaches the report, whatever the advice turned out to be.
 			detail.pop("suggested_ddl", None)
-			if advice is not None:
+			if advice is _RECIPE_FAILED:
+				detail["fix_hint"] = RECIPE_FAILED_HINT
+				stats["failed"] += 1
+			elif advice is not None:
 				detail["fix_hint"] = index_recipes.finding_text(advice)
 				if advice.code:
 					detail["suggested_ddl"] = advice.code
@@ -237,12 +289,15 @@ def apply_finding_recipes(
 			f["llm_fix"] = None
 			detail["fix_hint"] = _with_note(detail.get("fix_hint"), ai_grounding.FRAMEWORK_N1_NOTE)
 		elif ftype == "Hot Line":
+			# A gate that raises fails closed: no stored AI fix, a neutral note (O-I1).
 			note = best_effort(
-				lambda: ai_grounding.hot_line_gate(f, tracked_apps=scope, installed_apps=installed_apps), None,
+				lambda: ai_grounding.hot_line_gate(f, tracked_apps=scope, installed_apps=installed_apps),
+				ai_grounding.GATE_CHECK_FAILED_NOTE,
 			)
 			if note:
 				detail["fix_hint"] = note
 				f["llm_fix"] = None
+	return stats
 
 
 def apply_table_recipes(
@@ -250,12 +305,13 @@ def apply_table_recipes(
 	*,
 	evidence_lookup: Callable[[str], TableEvidence | None],
 	tracked_apps: tuple[str, ...] = (),
-) -> None:
-	"""Drop ``ai_index`` from every table entry and run each card's
-	``recommended_index`` through the same advisor as the findings. The recommendation
-	is kept, single column included (P6), and gains ``route``, ``route_note`` (the
-	card's note), ``code`` and ``index_name``; it is dropped only when the advisor has
-	nothing to say (no DocType table, no usable column)."""
+) -> dict:
+	"""Drop ``ai_index`` from every table entry and run each card's ``recommended_index``
+	through the same advisor as the findings, in place; return ``{"failed": n}``. The
+	recommendation is kept, single column included (P6), and gains ``route``,
+	``route_note`` (the card's note), ``code`` and ``index_name``; it is dropped only when
+	the advisor has nothing to say (no DocType table, no usable column)."""
+	stats = {"failed": 0}
 	scope = tuple(tracked_apps or ())
 	for t in table_breakdown or []:
 		if not isinstance(t, dict):
@@ -269,8 +325,12 @@ def apply_table_recipes(
 				t.get("table") or "", list(rec.get("columns") or []), evidence_lookup=evidence_lookup,
 				tracked_apps=scope,
 			),
-			None,
+			_RECIPE_FAILED,
 		)
+		if advice is _RECIPE_FAILED:
+			rec.update({"route": index_recipes.ROUTE_NO_CODE, "route_note": RECIPE_FAILED_CARD_NOTE, "code": None, "index_name": None})
+			stats["failed"] += 1
+			continue
 		if advice is None:
 			t.pop("recommended_index", None)
 			continue
@@ -279,6 +339,7 @@ def apply_table_recipes(
 		rec["route_note"] = index_recipes.card_note(advice)
 		rec["code"] = advice.code
 		rec["index_name"] = (advice.entry or {}).get("index_name")
+	return stats
 
 
 def mark_outdated_ai_fixes(

@@ -86,7 +86,7 @@ class TestAutoSuggestPath:
 		sent = []
 		with patch("optimus.settings.get_config", return_value=_cfg()), \
 		     patch("optimus.ai_fix.is_available", return_value=True), \
-		     patch("optimus.ai_fix.suggest_fix", side_effect=lambda p: sent.append(p["finding_type"]) or dict(_RESULT)):
+		     patch("optimus.ai_fix.suggest_fix", side_effect=lambda p, **kw: sent.append(p["finding_type"]) or dict(_RESULT)):
 			analyze._enrich_findings_with_ai_suggestions(ctx)
 		return sent
 
@@ -114,7 +114,7 @@ class TestBackfillPath:
 		doc = SimpleNamespace(findings=rows)
 		with patch("optimus.settings.get_config", return_value=_cfg()), \
 		     patch("optimus.ai_fix.is_available", return_value=True), \
-		     patch("optimus.ai_fix.suggest_fix", side_effect=lambda p: dict(_RESULT)), \
+		     patch("optimus.ai_fix.suggest_fix", side_effect=lambda p, **kw: dict(_RESULT)), \
 		     patch.object(analyze, "frappe", _fake_frappe()) as fk:
 			out = analyze._run_ai_backfill(doc, cap=0)
 		assert sorted(fk.db.writes) == ["hl_ok", "n1"]

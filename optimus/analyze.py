@@ -209,6 +209,18 @@ _SINGLEFLIGHT_THROTTLE_SECONDS = 5.0
 # pre-M2 behavior (proceed anyway) rather than waiting forever.
 _SINGLEFLIGHT_MAX_WAIT_SECONDS = 600
 
+# P5: every provider call of the analyze-time AI step, and the humanize call in
+# _persist, is capped here, and the single-flight flag is touched before each call, so
+# two heartbeats are never further apart than one call: 240 s < the 300 s TTL.
+AI_CALL_TIMEOUT_CAP_SECONDS = _SINGLEFLIGHT_TTL_SECONDS - 60
+
+
+def _ai_call_timeout() -> int:
+	"""The configured AI request timeout, capped at ``AI_CALL_TIMEOUT_CAP_SECONDS``."""
+	from optimus import ai_fix
+
+	return min(int(ai_fix._resolve_timeout_seconds()), AI_CALL_TIMEOUT_CAP_SECONDS)
+
 
 def _apply_nice() -> None:
 	"""Best-effort lower this process's CPU priority so a heavy analyze yields to
@@ -874,6 +886,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 				pass
 
 		_publish_progress(80, "Writing session data", session_uuid)
+		_touch_singleflight(session_uuid)  # P5: _persist's humanize call is capped below the TTL too
 		_persist(docname, context, recordings, analyze_elapsed_ms)
 
 		_touch_singleflight(session_uuid)  # M2 heartbeat before the render phase
@@ -2094,6 +2107,8 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 		if time.monotonic() - started > AI_AUTO_SUGGEST_TIME_BUDGET_SECONDS:
 			skipped_for_time = total - idx
 			break
+		# P5: heartbeat before every AI call; the call is capped below the flag's TTL.
+		_touch_singleflight(context.session_uuid)
 		# Live progress per finding the floating widget / form headline
 		# show movement during the (potentially minute-long) LLM round
 		# trips instead of a frozen "Analyzing 78%". Range 78→80 leads into
@@ -2125,7 +2140,7 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 					ns, file_cache, phase2_index=phase2_index,
 					recordings_by_uuid=recordings_by_uuid, actions_by_idx=actions_by_idx,
 					evidence_lookup=evidence_lookup, tracked_apps=tracked,
-				))
+				), timeout=_ai_call_timeout())
 			except ai_fix.AiFixError as e:
 				if e.kind not in ai_fix.AI_SKIP_KINDS:
 					raise
@@ -2648,7 +2663,9 @@ def _build_humanized_notes_html(
 	if not actions:
 		return ""
 	steps_md, step_failed = _run_ai_step(
-		lambda: ai_fix.humanize_steps(actions, session_title=session_title, usage_out=usage_out),
+		lambda: ai_fix.humanize_steps(
+			actions, session_title=session_title, usage_out=usage_out, timeout=_ai_call_timeout(),
+		),
 		title="optimus humanize_steps",
 		session_uuid=getattr(frappe.local, "_optimus_spend_session", None),
 	)

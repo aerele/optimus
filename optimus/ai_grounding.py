@@ -514,6 +514,10 @@ FRAMEWORK_N1_NOTE = (
 	"cannot change, so Optimus does not ask the AI about it."
 )
 NOT_ELIGIBLE_NOTE = "This finding type does not carry enough code or SQL context for an AI suggestion."
+GATE_CHECK_FAILED_NOTE = (
+	"Optimus could not check this Hot Line, so it does not ask the AI about it. Look at what the "
+	"line calls and how often it runs."
+)
 
 # A line whose Phase 2 time per hit reaches this, and whose statement calls a
 # non-builtin, spends its time inside that callee (owner decision A4).

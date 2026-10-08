@@ -293,7 +293,12 @@ def llm_gate_note(finding: dict) -> str | None:
 	if ftype != "Hot Line":
 		return None
 	tracked, installed = _app_scope()
-	return ai_grounding.hot_line_gate(finding, tracked_apps=tracked, installed_apps=installed)
+	# A gate that raises fails CLOSED (no AI call, a neutral note), so analyze's and
+	# Refresh's selection never abort on it; an RQ job timeout still escapes fresh (O-I1).
+	return safe_call.best_effort(
+		lambda: ai_grounding.hot_line_gate(finding, tracked_apps=tracked, installed_apps=installed),
+		ai_grounding.GATE_CHECK_FAILED_NOTE,
+	)
 
 
 def _resolve_timeout_seconds() -> int:
@@ -404,7 +409,12 @@ def suggest_fix(finding: dict, *, timeout: int | None = None) -> dict:
 	return result
 
 
-def humanize_steps(actions: list[dict], *, session_title: str | None = None, usage_out: dict | None = None) -> str:
+def humanize_steps(
+	actions: list[dict], *, session_title: str | None = None, usage_out: dict | None = None, timeout: int | None = None,
+) -> str:
+	"""Turn the captured ``actions`` into numbered "Steps to Reproduce" Markdown.
+	``timeout`` is the provider call's timeout (default: the configured request
+	timeout). Raises ``AiFixError``."""
 	from frappe import _
 
 	if not actions:
@@ -417,7 +427,7 @@ def humanize_steps(actions: list[dict], *, session_title: str | None = None, usa
 	_check_context_fits(system, _context_tokens(provider), messages=messages, out_tokens=_output_tokens(provider))
 	text = _dispatch_call(
 		provider, system, messages, usage_out=usage_out,
-		metadata=_aerele_call_metadata(provider, "Steps to Reproduce"),
+		metadata=_aerele_call_metadata(provider, "Steps to Reproduce"), timeout=timeout,
 	)
 	text = (text or "").strip()
 	if not text:

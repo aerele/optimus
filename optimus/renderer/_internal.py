@@ -173,7 +173,9 @@ from optimus.renderer.recipe_enrichment import (
 	apply_finding_recipes,
 	apply_table_recipes,
 	count_ai_tokens,
+	log_recipe_failures,
 	make_evidence_lookup,
+	make_query_parser,
 	make_refresh_check,
 	mark_outdated_ai_fixes,
 )
@@ -603,12 +605,10 @@ def render(
 	# picks it up.
 	_installed_apps = installed_apps_allowlist()
 	_evidence_lookup = make_evidence_lookup()
-	apply_finding_recipes(
+	_finding_recipe_stats = apply_finding_recipes(
 		all_findings, evidence_lookup=_evidence_lookup,
 		tracked_apps=render_config["tracked_apps"], installed_apps=_installed_apps,
-	)
-	apply_table_recipes(
-		table_breakdown, evidence_lookup=_evidence_lookup, tracked_apps=render_config["tracked_apps"],
+		parser=make_query_parser(),
 	)
 	mark_outdated_ai_fixes(all_findings, refresh_check=make_refresh_check())
 
@@ -628,6 +628,12 @@ def render(
 				continue
 			_kept_tb.append(_t)
 		table_breakdown = _kept_tb
+	# Table cards are advised after the hide filter, so hidden framework tables cost no
+	# evidence queries (cycle 1: the recipe stage grew with session size).
+	_table_recipe_stats = apply_table_recipes(
+		table_breakdown, evidence_lookup=_evidence_lookup, tracked_apps=render_config["tracked_apps"],
+	)
+	log_recipe_failures(_finding_recipe_stats["failed"] + _table_recipe_stats["failed"])
 
 	# Sort all findings: highest severity first, then highest impact.
 	all_findings.sort(
