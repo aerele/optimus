@@ -525,3 +525,18 @@ def test_a_shape_with_an_unread_column_is_no_definite_verdict():
 	known = ir.advise("tabSales Invoice", ["customer"], evidence=_SI, query="SELECT 1", unusable={"customer": {"like"}})
 	assert known.route == ir.ROUTE_NO_CODE and not known.unknown
 
+
+def test_the_docs_and_changelog_carry_the_t12_texts():
+	"""The docs quote the texts the report shows, so they stay in step with the code."""
+	from pathlib import Path
+
+	from optimus.renderer import recipe_enrichment
+
+	root = Path(ir.__file__).resolve().parents[2]
+	doc = " ".join((root / "docs" / "AI-FIXING.md").read_text(encoding="utf-8").split())
+	log = " ".join((root / "CHANGELOG.md").read_text(encoding="utf-8").split())
+	title = recipe_enrichment.NO_INDEX_TITLE.format(table="<table>", column="<column>")
+	for text in (doc, log):
+		assert title in text and ir.NO_VERDICT in text
+		assert '"optimus: index advice failed"' in text
+	assert recipe_enrichment.NO_INDEX_ACTION_TITLE in doc and "if <app> is your app" in doc

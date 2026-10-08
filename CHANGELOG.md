@@ -14,13 +14,24 @@ versions may contain breaking changes see migration notes below).
 
 - Build index advice from analyzer evidence, without an AI call. One advisor serves
   index findings and per-table cards, so they always agree. It reads each field's
-  Search Index and Unique flags, the real column types, the table's existing indexes
-  and the finding's EXPLAIN key first: an already indexed, unique, missing or
-  reserved-word column, a leading text column on Postgres, a first column alone wider than the key
-  limit (3072 bytes; 2704 on Postgres), a query over 4 KB (Missing Index excepted), or a query shape an index cannot use
-  (OR, a leading-wildcard LIKE, a function, CASE or arithmetic around the column) gets
-  an explanation and no code; a query Optimus cannot read says so. A trailing
-  `creation` or `modified` column never makes a recipe "no code". Trailing columns of a wide key are left out until it fits, and the note names them.
+  Unique flag and type, the real column types, the table's existing indexes and the
+  finding's EXPLAIN key first, and never takes the Search Index flag as proof of an index
+  (on Postgres a Search Index is named after the bare field, schema-wide, so only one
+  table gets it). A recipe of several columns gets no code only when an existing index
+  starts with all of its columns, so the verdict never depends on predicate order; a
+  one-column recipe also when its column is unique on its own, leads an index or is the
+  index EXPLAIN names. A missing column, a MariaDB reserved word on MariaDB (Postgres
+  quotes names; such an entry is Postgres-only), a JSON field (MariaDB reports it as
+  longtext, so the field type decides), a leading text column on Postgres, a first column
+  alone wider than the key limit (3072 bytes; 2704 on Postgres), a query over 4 KB (Missing
+  Index excepted), or a query shape an index cannot use (OR, a leading-wildcard LIKE, a
+  function, CASE or arithmetic around the column) gets an explanation and no code. A query
+  Optimus cannot read, a UNION that filters the table in more than one branch, and a table
+  Optimus has no information about (tabSessions, tabSeries, a removed DocType) say so, and
+  a card then opens with "Optimus cannot say whether this index would help." instead of
+  "Do not add this index.". For an existing index the text names only a filter shape the
+  query has, and a card or Missing Index finding is never told to rewrite a filter. A
+  trailing `creation` or `modified` column never makes a recipe "no code". Trailing columns of a wide key are left out until it fits, and the note names them.
   Columns are ordered equality first, then either one range column or the sort/group
   columns, not both; a Filesort or Temporary Table index serves the sort and says the
   range filter cannot also use it. A single non-text column of a field you control on MariaDB
@@ -79,8 +90,23 @@ versions may contain breaking changes see migration notes below).
   only if the renewal confirms it still does. A heartbeat that fails or finds another
   session's flag writes one `optimus` log line per run, and the janitor's note on a stuck
   Analyzing session names a lapsed analyze heartbeat as a possible cause.
-- A finding or card whose index advice cannot be built shows a plain note, and the
-  failure is counted in the bench log.
+- A finding or card whose index advice cannot be built shows a neutral note with a next
+  step (check the query with EXPLAIN; if it keeps happening, send the bench log line
+  "optimus: index advice failed" to the Optimus maintainers), and the failure is counted
+  in the bench log. The report and the export share one advice step, and one parser per
+  render or export memoises each query's alias map, so a query behind several findings is
+  parsed once (that second parse took 42 to 69 percent of the recipe stage).
+- An index finding's title, description and action-plan step follow its advice, at render
+  time and in the export, because the analyzers bake "Add index on ..." and "add this
+  index in a database migration" in before any advice exists: a Missing Index with no code
+  is "Index on <table>(<column>): no new index recommended" with the step "Check the query
+  with EXPLAIN", an EXPLAIN-family finding with no code drops "Adding an appropriate index
+  is usually the fix", and a Missing Index with code points at the steps under How to fix.
+  Stored findings keep the analyzer's text. A Filesort or Temporary Table finding names
+  why the sort or temporary table stays: an aggregate ORDER BY, a GROUP BY and ORDER BY
+  that differ, a DISTINCT, a metadata column. With Tracked Apps empty, a non-framework
+  app's Property Setter entry says "if <app> is your app, tick Search Index on the field
+  instead; set Tracked Apps" rather than "do not edit it".
 
 ### API
 
@@ -89,7 +115,9 @@ versions may contain breaking changes see migration notes below).
   `optimus.api.ai_capabilities` always reports `indexes: false`.
 - `optimus.api.export_session` no longer exports `suggested_ddl` or `ai_index`.
   Index-family findings carry `index_advice` and, when advice exists, a `fix_hint`
-  taken from the report text (otherwise the stored hint stays and `index_advice` is null); a table's `recommended_index` gains `requested_columns`.
+  taken from the report text (otherwise the stored hint stays and `index_advice` is null),
+  and the report's `title` and `customer_description` (a no-code Missing Index is not
+  titled "Add index on ..."); a table's `recommended_index` gains `requested_columns`.
 
 ### Upgrade notes
 
