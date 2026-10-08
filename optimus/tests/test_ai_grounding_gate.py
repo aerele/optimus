@@ -124,6 +124,14 @@ class TestStatementShapes:
 		("msg = _(build_message(d))", True, "build_message"),
 		("frappe.throw(_('Bad row'))", True, "frappe.throw"),
 		("_ = foo()", True, "foo"),
+		# frappe._ is the same lookup, and .format on what it returned is a str method
+		("raise frappe.ValidationError(frappe._('Bad'))", False, None),
+		("msg = frappe._('Row {0} is invalid')", False, None),
+		("msg = _('Row {0}').format(i)", False, None),
+		("msg = frappe._('Row {0}').format(i)", False, None),
+		("msg = _('Row {0}').format(get_row(d))", True, "get_row"),
+		# only a str method on a translated text is skipped
+		("x = frappe.get_doc(d).format(y)", True, "frappe.get_doc().format"),
 	])
 	def test_statement_calls(self, line, calls, callee):
 		assert tuple(g.statement_calls(line)) == (calls, callee)

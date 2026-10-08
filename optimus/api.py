@@ -1047,8 +1047,10 @@ def _export_index_advice(findings: list[dict], tables) -> None:
 	output (a table's ``ai_index``; finding ``llm_fix_json`` is never exported). Mutates in
 	place. Each index-family finding gains ``index_advice`` (``route``, ``doctype``,
 	``table``, ``columns``, ``index_name``, ``text`` and ``code``, the report's fix-hint
-	prose and code), or None when the advisor has nothing to say or fails; with advice, its
-	``technical_detail.fix_hint`` is that same text, as in the report; each table's
+	prose and code), or None when the advisor has nothing to say; with advice, its
+	``technical_detail.fix_hint`` is that same text, as in the report. When the advisor
+	raises, the finding carries the report's failure note (``RECIPE_FAILED_HINT``, route
+	no_code, no code) and the failures are logged once, as a render logs them. Each table's
 	``recommended_index`` goes through the same advisor. One per-export evidence lookup
 	(memoised per table) serves both, as in the report."""
 	from optimus.analyzers.base import INDEX_FINDING_TYPES
@@ -1058,23 +1060,41 @@ def _export_index_advice(findings: list[dict], tables) -> None:
 
 	tracked = best_effort(lambda: tuple(getattr(get_config(), "tracked_apps", ()) or ()), ())
 	lookup = recipe_enrichment.make_evidence_lookup()
+	failed = 0
 	for f in findings:
 		detail = f.get("technical_detail")
 		if f.get("finding_type") in INDEX_FINDING_TYPES:
 			advice = best_effort(
-				lambda: index_recipes.advise_finding(f, evidence_lookup=lookup, tracked_apps=tracked), None,
+				lambda: index_recipes.advise_finding(f, evidence_lookup=lookup, tracked_apps=tracked),
+				recipe_enrichment.RECIPE_FAILED,
 			)
-			text = None if advice is None else index_recipes.finding_text(advice)
-			f["index_advice"] = None if advice is None else {
-				"route": advice.route,
-				"doctype": advice.doctype,
-				"table": advice.table,
-				"columns": list(advice.columns),
-				"index_name": (advice.entry or {}).get("index_name"),
-				"text": text,
-				"code": advice.code,
-			}
-			if advice is not None and isinstance(detail, dict):
+			if advice is recipe_enrichment.RECIPE_FAILED:
+				# The report's failure note, as the report shows it (O-I1).
+				failed += 1
+				table = str(detail.get("table") or "") if isinstance(detail, dict) else ""
+				doctype = index_recipes.doctype_of(table)
+				text = recipe_enrichment.RECIPE_FAILED_HINT
+				f["index_advice"] = {
+					"route": index_recipes.ROUTE_NO_CODE,
+					"doctype": doctype,
+					"table": f"tab{doctype}" if doctype else None,
+					"columns": [],
+					"index_name": None,
+					"text": text,
+					"code": None,
+				}
+			else:
+				text = None if advice is None else index_recipes.finding_text(advice)
+				f["index_advice"] = None if advice is None else {
+					"route": advice.route,
+					"doctype": advice.doctype,
+					"table": advice.table,
+					"columns": list(advice.columns),
+					"index_name": (advice.entry or {}).get("index_name"),
+					"text": text,
+					"code": advice.code,
+				}
+			if text is not None and isinstance(detail, dict):
 				# The report's prose in the report's slot: the analyzer's stored hint ("Add an
 				# index on ...") must never sit next to a no_code advice.
 				detail["fix_hint"] = text
@@ -1083,9 +1103,11 @@ def _export_index_advice(findings: list[dict], tables) -> None:
 	tables = [t for t in (tables if isinstance(tables, list) else []) if isinstance(t, dict)]
 	for t in tables:
 		t.pop("ai_index", None)
-	best_effort(
+	table_stats = best_effort(
 		lambda: recipe_enrichment.apply_table_recipes(tables, evidence_lookup=lookup, tracked_apps=tracked), None,
 	)
+	failed += (table_stats or {}).get("failed", 0)
+	recipe_enrichment.log_recipe_failures(failed, where="export")
 
 
 @frappe.whitelist()

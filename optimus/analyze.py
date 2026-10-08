@@ -241,14 +241,22 @@ def _apply_nice() -> None:
 
 
 def _touch_singleflight(session_uuid: str) -> None:
-	"""(Re)assert ownership of the single-flight flag and refresh its TTL.
-	Best-effort: a cache hiccup must never fail analyze."""
-	try:
-		frappe.cache.set_value(
-			_SINGLEFLIGHT_KEY, session_uuid, expires_in_sec=_SINGLEFLIGHT_TTL_SECONDS
-		)
-	except Exception:
-		pass
+	"""Refresh the single-flight flag's TTL while this session holds it, or take it back
+	when it lapsed and nobody took it. Never overwrites another session's flag (taken
+	after a lapse, or held while this run degraded past its wait deadline): that session
+	is the one the janitor and the next waiter must see, so a degraded run no longer
+	refreshes the flag at all. The get-then-set is not atomic: another session can take
+	the flag between the two calls and be overwritten once, which is no worse than
+	before (the flag is best-effort, never a lock). Best-effort: a cache hiccup never
+	fails analyze; an RQ job timeout escapes as a fresh instance."""
+
+	def _touch() -> None:
+		holder = frappe.cache.get_value(_SINGLEFLIGHT_KEY)
+		if holder and holder != session_uuid:
+			return
+		frappe.cache.set_value(_SINGLEFLIGHT_KEY, session_uuid, expires_in_sec=_SINGLEFLIGHT_TTL_SECONDS)
+
+	safe_call.best_effort(_touch, None)
 
 
 def is_singleflight_holder(session_uuid: str) -> bool:

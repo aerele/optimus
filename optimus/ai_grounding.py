@@ -532,9 +532,10 @@ UNSTAMPED_REDUNDANT_CALL_NOTE = (
 
 _BUILTIN_NAMES: frozenset[str] = frozenset(dir(builtins))
 _WRAP = "_optimus_wrap_"
-# gettext's ``_`` (Frappe's translate), installed into builtins by gettext.install: a
-# translation lookup, never the callee that holds a line's time.
-_GETTEXT = "_"
+# gettext's ``_`` (Frappe's translate, also called as ``frappe._``), installed into
+# builtins by gettext.install: a translation lookup, never the callee that holds a line's
+# time; nor is ``.format`` called on the text it returned (a str method).
+_GETTEXT_CALLEES: frozenset[str] = frozenset({"_", "frappe._"})
 _NO_CALL_HEADER_RE = re.compile(r"^(?:(?:else|finally|try)\s*:|except\b|case\b)")
 _OPENERS = {"(": ")", "[": "]", "{": "}"}
 _OWN_RECEIVERS = frozenset({"self", "cls", "super"})
@@ -624,6 +625,16 @@ def _parse_statement(line: str) -> ast.Module | None:
 	return None
 
 
+def _is_gettext(func: ast.AST) -> bool:
+	"""True for ``_`` / ``frappe._`` and for ``.format`` on the text one of them returned."""
+	if call_name(func) in _GETTEXT_CALLEES:
+		return True
+	return (
+		isinstance(func, ast.Attribute) and func.attr == "format" and isinstance(func.value, ast.Call)
+		and call_name(func.value.func) in _GETTEXT_CALLEES
+	)
+
+
 class StatementCalls(NamedTuple):
 	calls: bool
 	callee: str | None
@@ -633,9 +644,9 @@ def statement_calls(line: str) -> StatementCalls:
 	"""Whether the statement on ``line`` calls something other than a Python builtin, and
 	the first such callee, outermost first. A ``raise X(...)`` constructor is skipped (only
 	the raised exception, never its ``from`` cause), so ``raise X(foo())`` names ``foo``
-	and ``raise X(a) from bar(y)`` names ``bar``; gettext's ``_`` is skipped like a
-	builtin. A fragment Python cannot parse counts as calling, with no name, when it
-	holds a parenthesis."""
+	and ``raise X(a) from bar(y)`` names ``bar``; gettext's ``_`` (or ``frappe._``) and
+	``.format`` on the text it returned are skipped like builtins. A fragment Python
+	cannot parse counts as calling, with no name, when it holds a parenthesis."""
 	tree = _parse_statement(line)
 	if tree is None:
 		return StatementCalls("(" in _strip_comment(line), None)
@@ -645,7 +656,9 @@ def statement_calls(line: str) -> StatementCalls:
 	for node in ast.walk(tree):
 		if not isinstance(node, ast.Call) or id(node) in skip:
 			continue
-		if isinstance(node.func, ast.Name) and (node.func.id in _BUILTIN_NAMES or node.func.id in (_WRAP, _GETTEXT)):
+		if isinstance(node.func, ast.Name) and (node.func.id in _BUILTIN_NAMES or node.func.id == _WRAP):
+			continue
+		if _is_gettext(node.func):
 			continue
 		name = call_name(node.func)
 		return StatementCalls(True, name if name and _SAFE_NAME_RE.match(name) else None)

@@ -156,15 +156,55 @@ def test_one_evidence_read_per_table(env):
 	assert env.seen.lookups == 1
 
 
-def test_advice_failure_exports_null_and_never_the_raw_ddl(env, monkeypatch):
+def test_advice_failure_exports_what_the_report_shows(env, monkeypatch):
+	"""Task 7 fix round 1: the export uses the report's failure note, never the stored hint
+	or raw DDL, and the failure is logged once like a render's."""
+	import frappe
+
 	def boom(*a, **kw):
 		raise RuntimeError("recipe bug")
 
+	lines = []
+	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(warning=lines.append), raising=False)
 	monkeypatch.setattr(index_recipes, "advise_finding", boom)
-	env(findings=[_missing_index()])
+	row = _missing_index()
+	env(findings=[row])
 	(finding,) = api.export_session(session_uuid=SESSION_UUID)["findings"]
-	assert finding["index_advice"] is None
-	assert "suggested_ddl" not in finding["technical_detail"]
+	report = {"finding_type": row.finding_type, "technical_detail": json.loads(row.technical_detail_json)}
+	recipe_enrichment.apply_finding_recipes([report], evidence_lookup=lambda table: _evidence())
+	assert finding["technical_detail"]["fix_hint"] == report["technical_detail"]["fix_hint"]
+	assert finding["technical_detail"]["fix_hint"] == recipe_enrichment.RECIPE_FAILED_HINT
+	assert finding["index_advice"] == {
+		"route": index_recipes.ROUTE_NO_CODE, "doctype": "Sales Invoice", "table": "tabSales Invoice",
+		"columns": [], "index_name": None, "text": recipe_enrichment.RECIPE_FAILED_HINT, "code": None,
+	}
+	assert "suggested_ddl" not in finding["technical_detail"] and "suggested_ddl" not in report["technical_detail"]
+	assert lines == ["optimus: index advice failed for 1 finding(s) or table(s) in one export"]
+
+
+def test_a_failing_card_advisor_is_counted_in_the_export_log(env, monkeypatch):
+	import frappe
+
+	def boom(*a, **kw):
+		raise RuntimeError("card bug")
+
+	lines = []
+	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(warning=lines.append), raising=False)
+	monkeypatch.setattr(index_recipes, "advise_table", boom)
+	env(tables=[_table()])
+	(table,) = api.export_session(session_uuid=SESSION_UUID)["table_breakdown"]
+	assert table["recommended_index"]["route_note"] == recipe_enrichment.RECIPE_FAILED_CARD_NOTE
+	assert lines == ["optimus: index advice failed for 1 finding(s) or table(s) in one export"]
+
+
+def test_an_export_without_failures_logs_nothing(env, monkeypatch):
+	import frappe
+
+	lines = []
+	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(warning=lines.append), raising=False)
+	env(findings=[_missing_index()], tables=[_table()])
+	api.export_session(session_uuid=SESSION_UUID)
+	assert lines == []
 
 
 def test_a_failing_table_advisor_still_drops_ai_index(env, monkeypatch):

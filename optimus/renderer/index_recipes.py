@@ -82,6 +82,7 @@ HOOK_EVENTS: tuple[str, ...] = ("after_install", "after_sync", "after_migrate")
 _HOOK_EVENTS_TEXT = "after_install, after_sync and after_migrate"
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PREFIX_SUFFIX_RE = re.compile(r"\(\d+\)$")  # an index prefix length, as in remarks(255)
 _APP_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _TAB_TABLE_RE = re.compile(r"^tab[A-Za-z0-9 _\-]+$")
 _VARCHAR_TYPES: frozenset[str] = frozenset({"varchar", "char", "character varying", "character"})
@@ -326,9 +327,13 @@ def _index_target(ftype: str, detail: dict, parse) -> tuple[str, list[tuple[str,
 
 
 def _clean_columns(columns, *, cap: bool = True) -> list[str]:
+	"""Valid, de-duplicated column names. A text prefix the advisor itself wrote
+	(``remarks(255)``) is read back as its bare column, so advising a card's own advice
+	again gives the same advice."""
 	out: list[str] = []
 	seen: set[str] = set()
-	for col in apply_metadata_rule([c for c in columns or [] if isinstance(c, str) and _IDENT_RE.fullmatch(c)]):
+	names = [_PREFIX_SUFFIX_RE.sub("", c) for c in columns or [] if isinstance(c, str)]
+	for col in apply_metadata_rule([c for c in names if _IDENT_RE.fullmatch(c)]):
 		if col.lower() in seen:
 			continue
 		seen.add(col.lower())

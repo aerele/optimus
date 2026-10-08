@@ -4,6 +4,7 @@
 """Fresh job deadlines survive the new recipe and eligibility boundaries."""
 
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,7 +18,7 @@ Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutExc
 
 
 @pytest.mark.parametrize("path", [
-	"scope", "loop", "facts", "metadata", "finding", "table", "grounding", "gate", "gate_recipe",
+	"scope", "loop", "facts", "metadata", "finding", "table", "grounding", "gate", "gate_recipe", "log", "touch",
 ])
 def test_new_boundaries_preserve_a_fresh_job_timeout(monkeypatch, tmp_path, path):
 	original = Timeout("fake deadline")
@@ -57,6 +58,18 @@ def test_new_boundaries_preserve_a_fresh_job_timeout(monkeypatch, tmp_path, path
 		call = partial(ai_fix.llm_gate_note, hot_line) if path == "gate" else partial(
 			recipe_enrichment.apply_finding_recipes, [hot_line], evidence_lookup=lambda table: None,
 		)
+	elif path == "log":
+		# Task 7 fix round 1: the bench-log line for failed index advice.
+		import frappe
+
+		monkeypatch.setattr(frappe, "logger", interrupted, raising=False)
+		call = partial(recipe_enrichment.log_recipe_failures, 1)
+	elif path == "touch":
+		# Task 7 fix round 1: the single-flight heartbeat's Redis call.
+		import frappe
+
+		monkeypatch.setattr(frappe, "cache", SimpleNamespace(get_value=interrupted, set_value=interrupted), raising=False)
+		call = partial(analyze._touch_singleflight, "A")
 	else:
 		monkeypatch.setattr(source, "_source_lines", interrupted)
 		call = partial(analyze._ai_grounding_window, "fake.py", 1, {})

@@ -206,7 +206,8 @@ def count_ai_tokens(findings: list[dict], tables: list[dict]) -> int:
 	return total
 
 
-_RECIPE_FAILED = object()
+# What ``best_effort`` gives back when the index advisor raised (the report and the export).
+RECIPE_FAILED = object()
 RECIPE_FAILED_HINT = "Optimus could not build index advice for this finding."
 RECIPE_FAILED_CARD_NOTE = "Optimus could not build index advice for this table."
 
@@ -227,10 +228,10 @@ def make_query_parser() -> Callable[[str], dict]:
 	return parse
 
 
-def log_recipe_failures(count: int) -> None:
-	"""One bench-log line for index advice that raised during a render (O-I1). Called
-	after the recipes ran, never inside an ``except``. A logger failure is ignored; an
-	RQ job timeout escapes as a fresh instance."""
+def log_recipe_failures(count: int, *, where: str = "render") -> None:
+	"""One bench-log line for index advice that raised during one render or export
+	(``where``, O-I1). Called after the recipes ran, never inside an ``except``. A logger
+	failure is ignored; an RQ job timeout escapes as a fresh instance."""
 	if not count:
 		return
 
@@ -238,7 +239,7 @@ def log_recipe_failures(count: int) -> None:
 		import frappe
 
 		frappe.logger("optimus").warning(
-			f"optimus: index advice failed for {count} finding(s) or table(s) in one render"
+			f"optimus: index advice failed for {count} finding(s) or table(s) in one {where}"
 		)
 
 	best_effort(_write, None)
@@ -269,11 +270,11 @@ def apply_finding_recipes(
 				lambda: index_recipes.advise_finding(
 					f, evidence_lookup=evidence_lookup, tracked_apps=scope, parser=parser,
 				),
-				_RECIPE_FAILED,
+				RECIPE_FAILED,
 			)
 			# Raw analyzer DDL never reaches the report, whatever the advice turned out to be.
 			detail.pop("suggested_ddl", None)
-			if advice is _RECIPE_FAILED:
+			if advice is RECIPE_FAILED:
 				detail["fix_hint"] = RECIPE_FAILED_HINT
 				stats["failed"] += 1
 			elif advice is not None:
@@ -309,8 +310,10 @@ def apply_table_recipes(
 	"""Drop ``ai_index`` from every table entry and run each card's ``recommended_index``
 	through the same advisor as the findings, in place; return ``{"failed": n}``. The
 	recommendation is kept, single column included (P6), and gains ``route``,
-	``route_note`` (the card's note), ``code`` and ``index_name``; it is dropped only when
-	the advisor has nothing to say (no DocType table, no usable column)."""
+	``route_note`` (the card's note), ``code``, ``index_name`` and ``requested_columns``
+	(the analyzer's columns; ``columns`` becomes the advice's); it is dropped only when
+	the advisor has nothing to say (no DocType table, no usable column). Running it twice
+	leaves the same cards as running it once."""
 	stats = {"failed": 0}
 	scope = tuple(tracked_apps or ())
 	for t in table_breakdown or []:
@@ -320,14 +323,19 @@ def apply_table_recipes(
 		rec = t.get("recommended_index")
 		if not isinstance(rec, dict) or not rec.get("columns"):
 			continue
+		# The analyzer's columns, kept on the first pass: ``columns`` becomes the advice's,
+		# so a second pass advises the same request and still names a column the advice
+		# left out (a Postgres text column, the key width limit).
+		requested = rec.get("requested_columns")
+		if not isinstance(requested, list):
+			requested = rec["requested_columns"] = list(rec.get("columns") or [])
 		advice = best_effort(
 			lambda: index_recipes.advise_table(
-				t.get("table") or "", list(rec.get("columns") or []), evidence_lookup=evidence_lookup,
-				tracked_apps=scope,
+				t.get("table") or "", list(requested), evidence_lookup=evidence_lookup, tracked_apps=scope,
 			),
-			_RECIPE_FAILED,
+			RECIPE_FAILED,
 		)
-		if advice is _RECIPE_FAILED:
+		if advice is RECIPE_FAILED:
 			rec.update({"route": index_recipes.ROUTE_NO_CODE, "route_note": RECIPE_FAILED_CARD_NOTE, "code": None, "index_name": None})
 			stats["failed"] += 1
 			continue
