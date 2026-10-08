@@ -14,6 +14,7 @@ leaves it so analyze can be retried.
 import html
 import json
 import os
+import pickle
 import re
 import time
 from collections import OrderedDict
@@ -208,6 +209,12 @@ _SINGLEFLIGHT_THROTTLE_SECONDS = 5.0
 # Hard ceiling on how long a session waits for the flag before degrading to the
 # pre-M2 behavior (proceed anyway) rather than waiting forever.
 _SINGLEFLIGHT_MAX_WAIT_SECONDS = 600
+# The flag is written with a raw SET NX EX (T10), pickled the way RedisWrapper.get_value
+# reads it back. 5 is frappe v16's DEFAULT_PICKLE_PROTOCOL; v15's get_value loads any protocol.
+_SINGLEFLIGHT_PICKLE_PROTOCOL = 5
+# Sessions whose current run already logged a failed or yielding heartbeat (O4): one
+# optimus log line per run. _release_singleflight, which every run ends with, clears it.
+_heartbeat_noted: set[str] = set()
 
 # P5: every provider call of the analyze-time AI step, and the humanize call in
 # _persist, is capped here, and the single-flight flag is touched before each call, so
@@ -240,42 +247,102 @@ def _apply_nice() -> None:
 			pass
 
 
+def _singleflight_redis_key():
+	"""The flag's site-prefixed Redis key, for the raw SET and EXPIRE that the wrapper does
+	not prefix itself."""
+	return frappe.cache.make_key(_SINGLEFLIGHT_KEY)
+
+
+def _read_singleflight_holder():
+	"""The flag's holder as Redis has it now (T10, PF1). ``RedisWrapper.get_value``
+	answers from ``frappe.local.cache`` once the key is in it, and that dict lives for the
+	whole RQ job, so a second read in one analyze returned the first read's value: a run
+	whose flag lapsed still saw itself as the holder, and on v15 a run never saw its own
+	flag and never released it. Drop the key from the job's cache, then read with
+	``expires=True``, which does not store the answer back (portable: only v16 has
+	``use_local_cache=False``). Outside a job ``frappe.local.cache`` may not exist."""
+	local_cache = getattr(frappe.local, "cache", None)
+	if local_cache is not None:
+		local_cache.pop(_singleflight_redis_key(), None)
+	return frappe.cache.get_value(_SINGLEFLIGHT_KEY, expires=True)
+
+
+def _take_singleflight(session_uuid: str) -> bool:
+	"""Take the flag only if it is free, in one atomic ``SET NX EX`` (T10, PF5): of two
+	sessions taking it at once, exactly one gets it. Like every flag write here it skips
+	``frappe.local.cache``; ``_read_singleflight_holder`` never trusts that cache."""
+	value = pickle.dumps(session_uuid, protocol=_SINGLEFLIGHT_PICKLE_PROTOCOL)
+	return bool(frappe.cache.set(_singleflight_redis_key(), value, nx=True, ex=_SINGLEFLIGHT_TTL_SECONDS))
+
+
+def _note_heartbeat_problem(session_uuid: str, problem: str) -> None:
+	"""One ``optimus`` log line per analyze run when a heartbeat fails or finds another
+	session's flag (O4). Such a run no longer holds the flag, so the janitor can fail its
+	Analyzing row while it still runs; this line says why. Logged at ERROR because
+	Frappe's loggers drop lower levels on a production site. Never raises, except an RQ
+	job timeout."""
+	if session_uuid in _heartbeat_noted:
+		return
+	_heartbeat_noted.add(session_uuid)
+
+	def _write() -> None:
+		frappe.logger("optimus").error(f"optimus: analyze {session_uuid}: {problem}")
+
+	safe_call.best_effort(_write, None)
+
+
 def _touch_singleflight(session_uuid: str) -> None:
 	"""Refresh the single-flight flag's TTL while this session holds it, or take it back
-	when it lapsed and nobody took it. Never overwrites another session's flag (taken
+	when it lapsed and nobody took it. Never writes over another session's flag (taken
 	after a lapse, or held while this run degraded past its wait deadline): that session
-	is the one the janitor and the next waiter must see, so a degraded run no longer
-	refreshes the flag at all. The get-then-set is not atomic: another session can take
-	the flag between the two calls and be overwritten once, which is no worse than
-	before (the flag is best-effort, never a lock). Best-effort: a cache hiccup never
-	fails analyze; an RQ job timeout escapes as a fresh instance."""
+	is the one the janitor and the next waiter must see, so a degraded run leaves it
+	alone. Every check reads Redis, not the job-local cache (T10). The refresh is an
+	EXPIRE and the take-back a SET NX, so neither can replace another session's value. One
+	window is left: if this flag lapses and another session takes it between the read and
+	the EXPIRE, the EXPIRE renews that session's TTL (never its value). A touch that fails
+	or finds another session's flag logs one line per run (O4). Best-effort: a cache
+	hiccup never fails analyze; an RQ job timeout escapes as a fresh instance."""
 
-	def _touch() -> None:
-		holder = frappe.cache.get_value(_SINGLEFLIGHT_KEY)
-		if holder and holder != session_uuid:
-			return
-		frappe.cache.set_value(_SINGLEFLIGHT_KEY, session_uuid, expires_in_sec=_SINGLEFLIGHT_TTL_SECONDS)
+	def _touch() -> bool:
+		if _read_singleflight_holder() == session_uuid and frappe.cache.expire(
+			_singleflight_redis_key(), _SINGLEFLIGHT_TTL_SECONDS,
+		):
+			return True
+		# Free, ours but lapsed before the EXPIRE, or another session's: SET NX takes
+		# only a free flag.
+		return _take_singleflight(session_uuid)
 
-	safe_call.best_effort(_touch, None)
+	held = safe_call.best_effort(_touch, None, on_error=lambda error_type: _note_heartbeat_problem(
+		session_uuid, f"the single-flight heartbeat failed ({error_type}); the flag may lapse",
+	))
+	if held is False:
+		_note_heartbeat_problem(
+			session_uuid,
+			"another session holds the single-flight flag, so this run's heartbeat leaves it "
+			"alone; two analyses may overlap",
+		)
 
 
 def is_singleflight_holder(session_uuid: str) -> bool:
-	"""True iff ``session_uuid`` currently holds the single-flight flag. The flag
-	is heartbeated throughout analyze, so its presence is a reliable liveness
-	signal (the janitor consults it before failing a long-running Analyzing row,
+	"""True iff ``session_uuid`` currently holds the single-flight flag, read from Redis
+	(T10). The flag is heartbeated throughout analyze, so its presence is a reliable
+	liveness signal (the janitor consults it before failing a long-running Analyzing row,
 	since no DB write happens mid-analyze)."""
 	try:
-		return frappe.cache.get_value(_SINGLEFLIGHT_KEY) == session_uuid
+		return _read_singleflight_holder() == session_uuid
 	except Exception:
 		return False
 
 
 def _release_singleflight(session_uuid: str) -> None:
-	"""Release the flag, but only if we still hold it (compare-then-delete), so a
-	TTL-expired-then-reacquired flag belonging to another session isn't
-	clobbered. Best-effort."""
+	"""Release the flag, but only if Redis says we still hold it (compare-then-delete),
+	so a TTL-expired-then-reacquired flag belonging to another session isn't clobbered.
+	Not atomic: a flag that lapses and is taken in the instant between the read and the
+	delete is still deleted, which needs this run to have gone a whole TTL without a
+	heartbeat first. Also ends the run's one-line heartbeat note (O4). Best-effort."""
+	_heartbeat_noted.discard(session_uuid)
 	try:
-		if frappe.cache.get_value(_SINGLEFLIGHT_KEY) == session_uuid:
+		if _read_singleflight_holder() == session_uuid:
 			frappe.cache.delete_value(_SINGLEFLIGHT_KEY)
 	except Exception:
 		pass
@@ -306,16 +373,19 @@ def _acquire_singleflight(session_uuid: str, docname: str, deadline) -> bool:
 		return True  # single-flight disabled by config
 
 	try:
-		holder = frappe.cache.get_value(_SINGLEFLIGHT_KEY)
+		if _take_singleflight(session_uuid):
+			return True  # it was free; SET NX lets only one of two racing sessions take it
+		holder = _read_singleflight_holder()
 	except Exception:
 		return True  # cache unavailable degrade to pre-M2 behavior
 
-	if not holder or holder == session_uuid:
-		# Free, or already ours (our own self-re-enqueue / heartbeat) take it.
+	if holder == session_uuid:
+		# Already ours (our own self-re-enqueue): refresh its TTL and go.
 		_touch_singleflight(session_uuid)
 		return True
 
-	# Busy with a different session. Respect the wait deadline, else degrade.
+	# Busy with a different session (a flag freed since the SET NX is taken on the next
+	# try). Respect the wait deadline, else degrade.
 	if deadline is None:
 		deadline = time.time() + max_wait
 	if time.time() >= deadline:

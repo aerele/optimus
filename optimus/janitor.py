@@ -414,7 +414,7 @@ def _sweep_stuck_analyzing():
 		{"name": ("in", [r["name"] for r in stuck])},
 		{
 			"status": "Failed",
-			"analyzer_warnings": "Analyze job timed out or crashed. Manually retry from a Frappe console: optimus.analyze.run('<session_uuid>')",
+			"analyzer_warnings": "Analyze job timed out, crashed or showed a lapsed analyze heartbeat (see the optimus log). Manually retry from a Frappe console: optimus.analyze.run('<session_uuid>')",
 		},
 	)
 	safe_commit()

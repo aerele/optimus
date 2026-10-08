@@ -54,6 +54,14 @@ versions may contain breaking changes see migration notes below).
   `AiFixError` is a skip; `config` and every other kind is a logged, counted failure.
   The analyze-time AI step touches the single-flight flag before every call, only
   while it holds it, and caps each call at 240 seconds (below the flag's lifetime).
+- Read the analyze single-flight flag from Redis on every check, not from the RQ job's
+  `frappe.local.cache`, which kept the first value read for the whole job. A run whose
+  flag lapsed no longer writes over or deletes the next session's flag, and on Frappe v15
+  a finished run frees the flag instead of making the next analyze wait up to 5 minutes.
+  The flag is taken with one atomic `SET NX EX`, so two analyses starting together no
+  longer both take it, and renewed with `EXPIRE`. A heartbeat that fails or finds another
+  session's flag writes one `optimus` log line per run, and the janitor's note on a stuck
+  Analyzing session names a lapsed analyze heartbeat as a possible cause.
 - A finding or card whose index advice cannot be built shows a plain note, and the
   failure is counted in the bench log.
 

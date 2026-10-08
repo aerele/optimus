@@ -184,6 +184,18 @@ class TestSweepStuckAnalyzing:
 		assert fields["status"] == "Failed"
 		assert "analyzer_warnings" in fields
 
+	def test_the_failed_note_names_a_lapsed_heartbeat(self, monkeypatch):
+		"""O4: a run whose flag lapsed looks stuck to this sweep, so the note names that
+		cause next to a timeout or a crash."""
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [{"name": "PS-A", "session_uuid": "u-a"}]
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stuck_analyzing()
+		_, _, fields = stub._set_value_calls[0]
+		note = fields["analyzer_warnings"]
+		assert "a lapsed analyze heartbeat" in note
+		assert "timed out" in note and "crashed" in note and "optimus.analyze.run(" in note
+
 	def test_no_set_value_when_no_stuck_rows(self, monkeypatch):
 		stub = _install_frappe_stub(monkeypatch)
 		stub._get_all_return["Optimus Session"] = []

@@ -5,7 +5,9 @@
 step and right before _persist, and every call is capped below the flag's TTL, so the
 flag cannot lapse while one analyze still runs (virtual clock, worst case: every call
 uses its whole timeout, up to the 600 s maximum configured). A touch never takes the
-flag from another session (Task 7 fix round 1)."""
+flag from another session (Task 7 fix round 1). The cache double is ``FlagCache`` (T10):
+the touch refreshes with EXPIRE and takes a free flag with SET NX; the job-local cache
+is covered in test_analyze_singleflight_redis.py."""
 
 import ast
 import inspect
@@ -17,6 +19,7 @@ from unittest.mock import patch
 import pytest
 
 from optimus import analyze, safe_call
+from optimus.tests.singleflight_fakes import FlagCache
 
 
 def _finding(i):
@@ -27,6 +30,7 @@ def _finding(i):
 	}
 
 
+_TTL = analyze._SINGLEFLIGHT_TTL_SECONDS
 _PAYLOAD_SECONDS = 30.0  # building one finding's payload (source window, evidence reads)
 _AI_CFG = SimpleNamespace(
 	ai_enabled=True, ai_suggest_findings=True, ai_auto_suggest=True, ai_auto_suggest_max=0,
@@ -123,39 +127,32 @@ class _JobTimeout(Exception):
 	"""Stands in for rq's JobTimeoutException (rq is not importable on the CI stub run)."""
 
 
-class _Cache:
-	"""frappe.cache with the single-flight key in ``store``; ``writes`` lists every value
-	written to that key."""
-
-	def __init__(self, holder=None):
-		self.store = {analyze._SINGLEFLIGHT_KEY: holder} if holder else {}
-		self.writes = []
-
-	def get_value(self, key, *args, **kwargs):
-		return self.store.get(key)
-
-	def set_value(self, key, value, *args, expires_in_sec=None, **kwargs):
-		if key == analyze._SINGLEFLIGHT_KEY:
-			self.writes.append((value, expires_in_sec))
-		self.store[key] = value
-
-	def delete_value(self, key, *args, **kwargs):
-		self.store.pop(key, None)
-
-
-@pytest.mark.parametrize("holder,writes", [
-	("A", [("A", analyze._SINGLEFLIGHT_TTL_SECONDS)]),  # ours: the TTL is refreshed
-	(None, [("A", analyze._SINGLEFLIGHT_TTL_SECONDS)]),  # lapsed and free: taken back
-	("B", []),  # another session's: left alone
-])
-def test_a_touch_refreshes_only_a_flag_this_session_may_hold(monkeypatch, holder, writes):
+@pytest.fixture(autouse=True)
+def _quiet_heartbeat_log(monkeypatch):
+	"""Each test starts a fresh run for the one-line heartbeat note (O4) and records the
+	``optimus`` log lines instead of writing them."""
 	import frappe
 
-	cache = _Cache(holder)
+	lines = []
+	monkeypatch.setattr(analyze, "_heartbeat_noted", set(), raising=False)
+	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(
+		warning=lines.append, info=lines.append, error=lines.append, debug=lines.append,
+	), raising=False)
+	return lines
+
+
+@pytest.mark.parametrize("holder,after", [
+	("A", ("A", _TTL)),  # ours: the TTL is refreshed
+	(None, ("A", _TTL)),  # lapsed and free: taken back
+	("B", ("B", 10)),  # another session's: left alone, TTL too
+])
+def test_a_touch_refreshes_only_a_flag_this_session_may_hold(monkeypatch, holder, after):
+	import frappe
+
+	cache = FlagCache(holder, ttl=10)
 	monkeypatch.setattr(frappe, "cache", cache, raising=False)
 	analyze._touch_singleflight("A")
-	assert cache.writes == writes
-	assert cache.store.get(analyze._SINGLEFLIGHT_KEY) == (holder or "A")
+	assert (cache.holder, cache.ttl) == after
 
 
 def test_after_a_lapse_the_ai_loop_never_steals_another_sessions_flag(monkeypatch):
@@ -163,7 +160,7 @@ def test_after_a_lapse_the_ai_loop_never_steals_another_sessions_flag(monkeypatc
 	leave B's flag alone."""
 	import frappe
 
-	cache = _Cache("B")
+	cache = FlagCache("B", ttl=10)
 	monkeypatch.setattr(frappe, "cache", cache, raising=False)
 	monkeypatch.setattr(analyze, "_ai_payload_for_finding", lambda *a, **k: {"finding_type": "N+1 Query"})
 	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
@@ -175,7 +172,7 @@ def test_after_a_lapse_the_ai_loop_never_steals_another_sessions_flag(monkeypatc
 	     patch("optimus.ai_fix.suggest_fix", side_effect=lambda p, **k: sent.append(p) or {"suggestion": "x"}):
 		analyze._enrich_findings_with_ai_suggestions(ctx)
 	assert len(sent) == 3  # the AI step itself still ran
-	assert cache.store[analyze._SINGLEFLIGHT_KEY] == "B" and cache.writes == []
+	assert (cache.holder, cache.ttl) == ("B", 10)
 
 
 def _drive_run(monkeypatch, *, cache, scheduler_disabled, deadline=None, configured=600, n=3, build=0.0, touch=None):
@@ -238,33 +235,34 @@ def _drive_run(monkeypatch, *, cache, scheduler_disabled, deadline=None, configu
 	return clock
 
 
-def test_a_degraded_run_never_takes_the_flag_from_its_holder(monkeypatch):
+def test_a_degraded_run_never_takes_the_flag_from_its_holder(monkeypatch, _quiet_heartbeat_log):
 	"""Past its wait deadline, A runs anyway while OTHER holds the flag: none of A's
 	heartbeats (before the EXPLAIN burst, the AI loop, before _persist and the render)
-	may overwrite OTHER's flag, and A's release leaves it too."""
-	cache = _Cache("OTHER")
+	may overwrite OTHER's flag or refresh its TTL, A's release leaves it too, and the run
+	logs one line that it yielded (O4)."""
+	cache = FlagCache("OTHER", ttl=10)
 	_drive_run(monkeypatch, cache=cache, scheduler_disabled=False, deadline=-1.0)
-	assert cache.store[analyze._SINGLEFLIGHT_KEY] == "OTHER"
-	assert cache.writes == []
+	assert (cache.holder, cache.ttl) == ("OTHER", 10)
+	assert len(_quiet_heartbeat_log) == 1 and "another session" in _quiet_heartbeat_log[0]
 
 
 @pytest.mark.parametrize("configured", [60, 180, 600])
 def test_the_whole_run_keeps_every_heartbeat_gap_under_the_ttl(monkeypatch, configured):
 	beats = []
 	clock = _drive_run(
-		monkeypatch, cache=_Cache(), scheduler_disabled=True, configured=configured, n=6,
+		monkeypatch, cache=FlagCache(), scheduler_disabled=True, configured=configured, n=6,
 		build=_PAYLOAD_SECONDS, touch=beats.append,
 	)
 	beats.append(clock.now)  # the run ended (its finally releases the flag)
 	assert max(b - a for a, b in zip(beats, beats[1:], strict=False)) < analyze._SINGLEFLIGHT_TTL_SECONDS
 
 
-@pytest.mark.parametrize("where", ["get_value", "set_value"])
-def test_a_job_timeout_in_the_redis_call_escapes_fresh(monkeypatch, where):
+@pytest.mark.parametrize("where,holder", [("get_value", None), ("set", None), ("expire", "A")])
+def test_a_job_timeout_in_the_redis_call_escapes_fresh(monkeypatch, where, holder):
 	import frappe
 
 	original = _JobTimeout("deadline")
-	cache = _Cache()
+	cache = FlagCache(holder, ttl=10)
 
 	def interrupted(*args, **kwargs):
 		raise original
@@ -278,7 +276,7 @@ def test_a_job_timeout_in_the_redis_call_escapes_fresh(monkeypatch, where):
 	assert caught.value.__context__ is None and caught.value.__cause__ is None
 
 
-def test_a_cache_hiccup_never_fails_the_touch(monkeypatch):
+def test_a_cache_hiccup_never_fails_the_touch(monkeypatch, _quiet_heartbeat_log):
 	import frappe
 
 	def broken(*args, **kwargs):
@@ -286,3 +284,4 @@ def test_a_cache_hiccup_never_fails_the_touch(monkeypatch):
 
 	monkeypatch.setattr(frappe, "cache", SimpleNamespace(get_value=broken, set_value=broken), raising=False)
 	analyze._touch_singleflight("A")  # no exception
+	assert len(_quiet_heartbeat_log) == 1 and "ConnectionError" in _quiet_heartbeat_log[0]

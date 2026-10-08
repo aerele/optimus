@@ -17,20 +17,7 @@ import frappe
 import pytest
 
 from optimus import analyze
-
-
-class FakeCache:
-	def __init__(self, initial=None):
-		self.store = dict(initial or {})
-
-	def get_value(self, k):
-		return self.store.get(k)
-
-	def set_value(self, k, v, expires_in_sec=None):
-		self.store[k] = v
-
-	def delete_value(self, k):
-		self.store.pop(k, None)
+from optimus.tests.singleflight_fakes import FlagCache
 
 
 class FakeDB:
@@ -47,7 +34,7 @@ class FakeDB:
 @pytest.fixture
 def sf_env(monkeypatch):
 	"""Wire the single-flight helper's collaborators with fakes."""
-	cache = FakeCache()
+	cache = FlagCache()
 	db = FakeDB()
 	enqueued = []
 
