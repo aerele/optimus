@@ -651,12 +651,15 @@ def _is_expression(tokens: list[str], i: int, j: int, qualifiers) -> bool:
 
 
 def _comparison(tokens: list[str], i: int, j: int) -> str:
-	"""``"eq"`` when the plain reference ``tokens[i..j]`` is compared by =, <=>, IN or
-	IS NULL, else ``"range"`` (<, >, BETWEEN, <>, NOT ..., IS NOT NULL, a prefix LIKE, or
-	a shape the scan does not know, which is never treated as equality)."""
+	"""``"eq"`` when the plain reference ``tokens[i..j]`` is compared by =, <=> or IS NULL,
+	``"in"`` for IN (...) (equality on several values), else ``"range"`` (<, >, BETWEEN,
+	<>, NOT ..., IS NOT NULL, a prefix LIKE, or a shape the scan does not know, which is
+	never treated as equality)."""
 	after = [tok.lower() for tok in tokens[j + 1 : j + 3]]
 	first = after[0] if after else ""
-	if first in _EQUALITY or first == "in":
+	if first == "in":
+		return "in"
+	if first in _EQUALITY:
 		return "eq"
 	if first == "is":
 		return "eq" if after[1:] == ["null"] else "range"
@@ -668,9 +671,9 @@ def _comparison(tokens: list[str], i: int, j: int) -> str:
 
 def _conjunct_refs(tokens: list[str], qualifiers) -> list[tuple[str, set[str], str]]:
 	"""``(lowercase column, kinds, comparison)`` for each column reference in one AND
-	piece; empty kinds is a plain use, compared ``"eq"`` or ``"range"``. A reference
-	qualified by another table (``acc.company``) and everything inside a ``(SELECT ...)``
-	group is skipped."""
+	piece; empty kinds is a plain use, compared ``"eq"``, ``"in"`` (several values: IN, or
+	a same-column ``IS NULL OR =``) or ``"range"``. A reference qualified by another table
+	(``acc.company``) and everything inside a ``(SELECT ...)`` group is skipped."""
 	pairs = _bracket_pairs(tokens)
 	out: list[tuple[str, set[str], str]] = []
 
@@ -712,10 +715,13 @@ def _conjunct_refs(tokens: list[str], qualifiers) -> list[tuple[str, set[str], s
 					kinds.add("like")
 				if _is_expression(tokens, i, j, qualifiers):
 					kinds.add("expression")
-				out.append((name, kinds, "" if kinds else _comparison(tokens, i, j)))
+				multi = any(has_or and or_key == (qualifier, name) for _call, has_or, or_key in frames)
+				out.append((name, kinds, "" if kinds else "in" if multi else _comparison(tokens, i, j)))
 			i = j + 1
 
-	walk(0, len(tokens), [])
+	# the top level has an OR only when every branch compares one column (_conjuncts)
+	top_or, top_key = _level_or(tokens, 0, len(tokens), pairs)
+	walk(0, len(tokens), [(None, top_or, top_key)])
 	return out
 
 
@@ -723,7 +729,7 @@ def _scan_where(query: str, labelled, qualifiers=None, *, truncated: bool = Fals
 	"""``(unusable, comparisons)`` for the WHERE columns of ``labelled``: ``unusable`` is
 	``{column: kinds}`` for each column a composite index cannot use (a kind is ``"or"``,
 	``"like"``, ``"function:<NAME>"``, ``"expression"`` or ``"unsure"``, see the section
-	comment), ``comparisons`` is ``{column: "eq" | "range"}`` for the usable ones."""
+	comment), ``comparisons`` is ``{column: "eq" | "in" | "range"}`` for the usable ones."""
 	where_cols: list[str] = []
 	for label, col in labelled or []:
 		if label == "WHERE" and col not in where_cols:
@@ -738,11 +744,12 @@ def _scan_where(query: str, labelled, qualifiers=None, *, truncated: bool = Fals
 		return {col: {"or"} for col in where_cols}, {}
 	usable: dict[str, str] = {}
 	kinds: dict[str, set[str]] = defaultdict(set)
+	rank = {"eq": 0, "in": 1, "range": 2}  # the most selective plain use wins
 	for part in conjuncts:
 		for name, ref_kinds, comparison in _conjunct_refs(part, qualifiers):
 			if ref_kinds:
 				kinds[name] |= ref_kinds
-			elif usable.get(name) != "eq":
+			elif name not in usable or rank[comparison] < rank[usable[name]]:
 				usable[name] = comparison
 	unusable = {
 		col: set(kinds.get(col.lower()) or {"unsure"}) for col in where_cols if col.lower() not in usable
@@ -778,18 +785,109 @@ def _index_order(
 	when the index ``serves`` a sort or a grouping (Filesort, Temporary Table) the range
 	filter is left out, otherwise one range column follows the equality columns and the
 	rest is left out. Each left-out column comes with the reason."""
-	eq = [col for col in cols if comparisons.get(col, "eq") == "eq"]
+	eq = [col for col in cols if comparisons.get(col, "eq") in ("eq", "in")]
 	ranges = [col for col in cols if comparisons.get(col) == "range"]
 	sorts = [col for col in cols if comparisons.get(col) == "sort"]
 	if not ranges:
 		return eq + sorts, []
-	if serves and sorts and apply_metadata_rule(eq + sorts) == eq + sorts:  # creation never alone or first
+	if serves and sorts:
 		return eq + sorts, [
 			(col, f"the range filter on {col} cannot also use this index, which removes {serves} instead")
 			for col in ranges
 		]
 	why = f"it comes after the range condition on {ranges[0]}, so the index cannot use it"
 	return eq + ranges[:1], [(col, why) for col in ranges[1:] + sorts]
+
+
+_CLAUSE_ENDS: frozenset[str] = frozenset({
+	"limit", "for", "lock", "union", "having", "order", "group", "window", "offset", "into", "procedure",
+	"with",
+})
+
+
+def _clause_items(tokens: list[str], keyword: str) -> list[list[str]] | None:
+	"""The comma-separated items of the main query's ``<keyword> BY`` clause (ORDER BY or
+	GROUP BY at depth 0), [] when the query has none."""
+	depth = 0
+	start = None
+	for i, tok in enumerate(tokens):
+		depth += {"(": 1, ")": -1}.get(tok, 0)
+		if depth or tok in ("(", ")"):
+			continue
+		low = tok.lower()
+		if start is None:
+			if low == keyword and i + 1 < len(tokens) and tokens[i + 1].lower() == "by":
+				start = i + 2
+		elif low in _CLAUSE_ENDS and i > start:
+			return _split_items(tokens[start:i])
+	return _split_items(tokens[start:]) if start is not None else []
+
+
+def _split_items(tokens: list[str]) -> list[list[str]]:
+	items: list[list[str]] = [[]]
+	depth = 0
+	for tok in tokens:
+		depth += {"(": 1, ")": -1}.get(tok, 0)
+		if tok == "," and not depth:
+			items.append([])
+		else:
+			items[-1].append(tok)
+	return items
+
+
+def _select_aliases(tokens: list[str]) -> set[str]:
+	"""Lowercase names given with AS in the main query's select list."""
+	aliases: set[str] = set()
+	depth = 0
+	for i, tok in enumerate(tokens):
+		depth += {"(": 1, ")": -1}.get(tok, 0)
+		if depth:
+			continue
+		if tok.lower() == "from":
+			break
+		if tok.lower() == "as" and i + 1 < len(tokens) and _NAME_RE.match(tokens[i + 1]):
+			aliases.add(tokens[i + 1].strip('`"').lower())
+	return aliases
+
+
+def _plain_sort(query: str, ftype: str, qualifiers, evidence: TableEvidence | None) -> bool:
+	"""True when every ORDER BY (Filesort) or GROUP BY (Temporary Table) item is a bare
+	column of the target table: one name, qualified by the table or an alias or not at
+	all, ASC or DESC, all in one direction, a real column (not a select alias) that an
+	index can order by (not text, not JSON). A function, FIELD(), CASE, arithmetic or a
+	parameter around a sort item, or a GROUP BY / ORDER BY pair that differs, gives
+	False: an index on the column cannot then return the rows in order."""
+	if evidence is None:
+		return False
+	tokens = [tok for tok in _SQL_TOKEN_RE.findall(query or "") if not _COMMENT_RE.match(tok)]
+	order, group = _clause_items(tokens, "order"), _clause_items(tokens, "group")
+	main, other = (group, order) if ftype == "Temporary Table" else (order, group)
+	if not main:
+		return False
+	columns = {col.lower(): col for col in evidence.column_types}
+	aliases = _select_aliases(tokens)
+	names: list[str] = []
+	directions: set[str] = set()
+	for item in main:
+		if not item or not _NAME_RE.match(item[0]):
+			return False
+		j = _chain_end(item, 0)
+		rest = [tok.lower() for tok in item[j + 1 :]]
+		if rest not in ([], ["asc"], ["desc"]):
+			return False
+		qualifier, name = _ref_key(item, 0, j)
+		col = columns.get(name)
+		if (
+			(qualifier and qualifiers is not None and qualifier not in qualifiers) or col is None
+			or name in aliases or col in evidence.text_columns or col in evidence.unindexable_columns
+		):
+			return False
+		names.append(name)
+		directions.add(rest[0] if rest else "asc")
+	if len(directions) > 1:
+		return False
+	other_names = [_ref_key(item, 0, _chain_end(item, 0))[1] for item in other if item and _NAME_RE.match(item[0])]
+	return not other or other_names == names
 
 
 def _function_names(kinds: set[str]) -> list[str]:
@@ -1169,10 +1267,36 @@ def advise(
 	"""The advice for indexing ``columns`` of ``table``, or None when there is nothing
 	to advise (not a DocType table, no usable column). ``unusable`` names the columns
 	the query's predicate shape keeps an index from using (``_scan_where``): they are
-	left out and named. ``comparisons`` (``{column: "eq" | "range" | "sort"}``) puts the
-	columns in index order (``_index_order``; ``serves`` names the sort or the temporary
-	table a Filesort or Temporary Table index removes). A recipe made only of Check
-	fields, or with nothing left, is NO_CODE."""
+	left out and named. ``comparisons`` (``{column: "eq" | "in" | "range" | "sort"}``)
+	puts the columns in index order (``_index_order``; ``serves`` names the sort or the
+	temporary table a Filesort or Temporary Table index removes). When that sort-first
+	recipe gives no code or loses its plain sort column (a prefix, the column cap), the
+	recipe without ``serves`` is given instead. A recipe made only of Check fields, or
+	with nothing left, is NO_CODE."""
+	kwargs = {
+		"evidence": evidence, "tracked_apps": tracked_apps, "explain_row": explain_row, "query": query,
+		"unusable": unusable, "comparisons": comparisons,
+	}
+	advice = _advise(table, columns, serves=serves, **kwargs)
+	if serves:
+		sorts = [col for col, kind in (comparisons or {}).items() if kind == "sort"]
+		if advice is None or advice.route == ROUTE_NO_CODE or not any(col in advice.columns for col in sorts):
+			advice = _advise(table, columns, serves="", **kwargs)
+	return advice
+
+
+def _advise(
+	table: str,
+	columns,
+	*,
+	evidence: TableEvidence | None,
+	tracked_apps: tuple[str, ...],
+	explain_row,
+	query: str,
+	unusable: Mapping[str, set[str]] | None,
+	comparisons: Mapping[str, str] | None,
+	serves: str,
+) -> IndexAdvice | None:
 	doctype = doctype_of(table)
 	if doctype is None:
 		return None
@@ -1184,6 +1308,7 @@ def advise(
 	order_dropped: list[tuple[str, str]] = []
 	if comparisons:
 		cols, order_dropped = _index_order(cols, comparisons, serves=serves)
+		cols = apply_metadata_rule(cols)  # creation / modified never lead after reordering either
 	cols = cols[:MAX_INDEX_COLUMNS]
 	if not cols and not shapes:
 		return None
@@ -1212,11 +1337,54 @@ def _is_check_field(evidence: TableEvidence, col: str) -> bool:
 	return field is not None and field.fieldtype == "Check"
 
 
-def _lead_for(ftype: str, labelled: list[tuple[str, str]], advice: IndexAdvice) -> str:
+def _lead_for(
+	ftype: str,
+	labelled: list[tuple[str, str]],
+	advice: IndexAdvice,
+	*,
+	plain_sort: bool = True,
+	ranged: str | None = None,
+	multi: tuple[str, ...] = (),
+) -> str:
+	"""The finding type's opening sentence. For Filesort / Temporary Table it never claims
+	the sort or the temporary table goes when the index cannot remove it: the sort is not
+	on a bare column (``plain_sort`` False), the sort column follows a range condition
+	(``ranged``), or a kept filter matches several values (``multi``)."""
 	if advice.route == ROUTE_NO_CODE:
 		return ""
 	kept = {c.split("(", 1)[0] for c in advice.columns}
 	labels = {label for label, col in labelled if col in kept}
+	sort_label = {"Filesort": "ORDER BY", "Temporary Table": "GROUP BY"}.get(ftype)
+	if sort_label:
+		does, stays = ("sorts", "the sort stays") if ftype == "Filesort" else ("groups", "the temporary table stays")
+		expression = (
+			_FILTER_LEAD + f" The query {does} by an expression, a select alias, a text column or in mixed "
+			f"directions, which no index can return in order, so {stays}."
+		)
+		if sort_label in labels:
+			kept_multi = [col for col in multi if col in kept]
+			if not plain_sort:
+				return expression
+			if kept_multi:
+				column, still = (
+					("sort", "sorts the rows") if ftype == "Filesort" else ("GROUP BY", "groups them in a temporary table")
+				)
+				return (
+					f"Index the filter columns followed by the {column} column so fewer rows are read. The filter "
+					f"on {kept_multi[0]} matches more than one value, so the database still {still}."
+				)
+		else:
+			sort_cols = [col for label, col in labelled if label == sort_label]
+			# a sort column the parser could name that is no Frappe metadata column
+			if any(col.lower() not in FRAPPE_METADATA_COLUMNS for col in sort_cols):
+				if not plain_sort:
+					return expression
+				if ranged:
+					column = "sort" if ftype == "Filesort" else "grouping"
+					return (
+						_FILTER_LEAD + f" The {column} column comes after the range condition on {ranged}, so this "
+						f"index cannot return the rows in order and {stays}."
+					)
 	if ftype == "Filesort" and "ORDER BY" not in labels:
 		return (
 			_FILTER_LEAD + " The sort column is a Frappe metadata column or an aggregate, which this index "
@@ -1248,11 +1416,16 @@ def advise_finding(
 	if doctype is None:
 		return None
 	query = str(detail.get("normalized_query") or "")
+	evidence = evidence_lookup(f"tab{doctype}")
 	unusable = comparisons = None
+	serves = ""
+	plain_sort = True
+	multi: tuple[str, ...] = ()
 	if query:
 		# top_queries keeps QUERY_TEXT_LIMIT characters, so a Slow Query that long may be cut
 		truncated = ftype == "Slow Query" and len(query) >= QUERY_TEXT_LIMIT
-		unusable, usable = _scan_where(query, labelled, _target_qualifiers(query, table), truncated=truncated)
+		qualifiers = _target_qualifiers(query, table)
+		unusable, usable = _scan_where(query, labelled, qualifiers, truncated=truncated)
 		comparisons = {}
 		for label, col in labelled:  # filters come first, then the sort or group columns
 			if label in ("ORDER BY", "GROUP BY"):
@@ -1260,14 +1433,20 @@ def advise_finding(
 					comparisons[col] = "sort"
 			else:
 				comparisons.setdefault(col, "eq" if label == "JOIN" else usable.get(col, "range"))
+		multi = tuple(col for col, kind in comparisons.items() if kind == "in")
+		if ftype in _SERVES:
+			plain_sort = _plain_sort(query, ftype, qualifiers, evidence)
+			# rows matching several values (IN, IS NULL OR =) never come back in one sorted run
+			serves = _SERVES[ftype] if plain_sort and not multi else ""
 	advice = advise(
-		table, [col for _label, col in labelled], evidence=evidence_lookup(f"tab{doctype}"),
+		table, [col for _label, col in labelled], evidence=evidence,
 		tracked_apps=tracked_apps, explain_row=detail.get("explain_row"), query=query, unusable=unusable,
-		comparisons=comparisons, serves=_SERVES.get(ftype, ""),
+		comparisons=comparisons, serves=serves,
 	)
 	if advice is None:
 		return None
-	return replace(advice, lead=_lead_for(ftype, labelled, advice))
+	ranged = next((col for col, kind in (comparisons or {}).items() if kind == "range"), None)
+	return replace(advice, lead=_lead_for(ftype, labelled, advice, plain_sort=plain_sort, ranged=ranged, multi=multi))
 
 
 def advise_table(

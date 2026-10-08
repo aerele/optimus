@@ -634,7 +634,8 @@ class TestCheckOnly:
 
 _ROUND4_FIELDS = {
 	**_ALL, "grand_total": F("Int"), "outstanding_amount": F("Int"), "due_date": F("Date"),
-	"is_return": F("Check"), "customer_name": F("Data"),
+	"is_return": F("Check"), "customer_name": F("Data"), "meta": F("JSON"), "order": F("Data"),
+	"territory": F("Link"),
 }
 _SII = _ev("Sales Invoice Item", fields={
 	"item_code": F("Link"), "qty": F("Int"), "delivered_qty": F("Int"), "against_sales_order": F("Link"),
@@ -653,7 +654,12 @@ class TestTopLevelSameColumnOr:
 	def test_a_top_level_or_on_one_column_is_a_plain_use(self):
 		where = "`po_no` IS NULL OR `po_no`=? ORDER BY `posting_date` DESC"
 		assert _r4("Full Table Scan", where).columns == ("po_no",)
-		assert _r4("Filesort", where).columns == ("po_no", "posting_date")
+		advice = _r4("Filesort", where)
+		assert advice.columns == ("po_no", "posting_date")
+		# bounded corrective: po_no matches two values (NULL and ?), so the rows do not come back sorted
+		text = ir.finding_text(advice)
+		assert "already sorted" not in text and "removes the sort" not in text
+		assert "The filter on po_no matches more than one value, so the database still sorts the rows" in text
 
 	def test_other_top_level_ors_still_count_as_or(self):
 		labelled = [("WHERE", "status"), ("WHERE", "customer"), ("WHERE", "company")]
@@ -855,6 +861,157 @@ class TestRangeAndSort:
 		advice = _r4("Filesort", "`customer`=? AND `posting_date` > ? ORDER BY `customer`, `modified`")
 		assert advice.columns == ("customer", "modified")
 		assert _r4("Filesort", "`customer`=? AND `company`=? ORDER BY `customer`").columns == ("customer", "company")
+
+
+class TestSortGate:
+	"""Bounded corrective to round 5: the sort-over-range recipe applies only when every
+	ORDER BY / GROUP BY item is a bare column of the table, indexable and sortable, in one
+	direction, with no multi-value equality filter; otherwise the round-4 recipe stays
+	(equality columns, then one range column) and the text never claims the sort goes."""
+
+	@staticmethod
+	def _no_sort_claim(advice):
+		text = ir.finding_text(advice)
+		assert "removes the sort" not in text and "removes the temporary table" not in text, text
+		assert "already sorted" not in text and "instead of a temporary table" not in text, text
+		return text
+
+	def test_an_expression_sort_keeps_the_range(self):
+		advice = _r4("Filesort", "`due_date` < ? ORDER BY FIELD(`status`, ?, ?)")
+		assert advice.columns == ("due_date",)
+		assert "The query sorts by an expression" in self._no_sort_claim(advice)
+		advice = _r4("Filesort", "`company`=? AND `due_date` < ? ORDER BY IFNULL(`grand_total`, ?) DESC")
+		assert advice.columns == ("company", "due_date")
+		self._no_sort_claim(advice)
+		advice = _r4("Filesort", "`posting_date` > ? ORDER BY `grand_total` + `outstanding_amount`")
+		assert advice.columns == ("posting_date",)
+		self._no_sort_claim(advice)
+
+	def test_an_expression_sort_without_a_range_never_claims_the_sort_goes(self):
+		advice = _r4("Filesort", "`company`=? ORDER BY FIELD(`status`, ?, ?)")
+		assert "The query sorts by an expression" in self._no_sort_claim(advice)
+
+	def test_an_expression_grouping_keeps_the_range(self):
+		advice = _r4("Temporary Table", "`due_date` < ? GROUP BY DATE(`posting_date`)")
+		assert advice.columns == ("due_date",)
+		self._no_sort_claim(advice)
+		q = (
+			"SELECT DATE(`creation`) AS d, COUNT(*) FROM `tabSales Invoice` WHERE `company`=? "
+			"AND `posting_date` BETWEEN ? AND ? GROUP BY DATE(`creation`)"
+		)
+		advice = ir.advise_finding(_explain("Temporary Table", q), evidence_lookup=_R4)
+		assert advice.columns == ("company", "posting_date")
+		self._no_sort_claim(advice)
+
+	def test_a_text_sort_column_keeps_the_range(self):
+		advice = _r4("Filesort", "`posting_date` > ? ORDER BY `remarks`")
+		assert advice.columns == ("posting_date",)
+		assert "a text column" in self._no_sort_claim(advice)
+		pg = _lookup(_ev(dialect="postgres", fields=_ROUND4_FIELDS, extra_types={"modified": "timestamp"}))
+		q = "SELECT `name` FROM `tabSales Invoice` WHERE `company`=? AND `posting_date` > ? ORDER BY `remarks`"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=pg)
+		assert advice.columns == ("company", "posting_date")
+		self._no_sort_claim(advice)
+
+	def test_a_select_alias_sort_keeps_the_range(self):
+		q = (
+			"select name, grand_total - outstanding_amount as paid from `tabSales Invoice` "
+			"where company = ? and posting_date > ? order by paid desc"
+		)
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_R4)
+		assert advice.columns == ("company", "posting_date")
+		self._no_sort_claim(advice)
+		# an implicit alias (no AS) is no column of the table either
+		q = (
+			"select name, grand_total - outstanding_amount paid from `tabSales Invoice` "
+			"where company = ? and posting_date > ? order by paid desc"
+		)
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_R4)
+		assert advice.columns == ("company", "posting_date")
+		self._no_sort_claim(advice)
+		# an alias that shadows a real column: ORDER BY names the alias, not the column
+		q = (
+			"select name, grand_total - outstanding_amount as customer from `tabSales Invoice` "
+			"where company = ? and posting_date > ? order by customer desc"
+		)
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_R4)
+		assert "customer" not in advice.columns
+		self._no_sort_claim(advice)
+
+	def test_a_sort_column_the_recipe_cannot_hold_keeps_the_range(self):
+		for sort in ("`is_return`", "`meta`", "`order`"):
+			advice = _r4("Filesort", f"`posting_date` > ? ORDER BY {sort}")
+			assert advice.columns == ("posting_date",), sort
+			self._no_sort_claim(advice)
+		assert "The query sorts by an expression" in ir.finding_text(_r4("Filesort", "`posting_date` > ? ORDER BY `meta`"))
+
+	def test_an_order_by_only_inside_a_subquery_keeps_the_range(self):
+		q = (
+			"SELECT `name` FROM `tabSales Invoice` WHERE `company`=? AND `due_date` > ? AND EXISTS "
+			"(SELECT `name` FROM `tabSales Invoice` ORDER BY `customer`)"
+		)
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_R4)
+		assert "due_date" in advice.columns and "customer" not in advice.columns
+		self._no_sort_claim(advice)
+
+	def test_no_evidence_gives_no_code_for_a_sort_finding(self):
+		q = "SELECT `name` FROM `tabSales Invoice` WHERE `company`=? AND `posting_date` > ? ORDER BY `customer`"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=lambda table: None)
+		assert advice.route == ir.ROUTE_NO_CODE
+
+	def test_mixed_directions_and_a_different_order_keep_the_range(self):
+		advice = _r4("Filesort", "`company`=? AND `posting_date` > ? ORDER BY `customer` ASC, `po_no` DESC")
+		assert advice.columns == ("company", "posting_date")
+		self._no_sort_claim(advice)
+		advice = _r4("Temporary Table", "`company`=? AND `posting_date` > ? GROUP BY `customer` ORDER BY SUM(`grand_total`) DESC")
+		assert advice.columns == ("company", "posting_date")
+		self._no_sort_claim(advice)
+
+	def test_the_column_cap_never_contradicts_the_text(self):
+		where = "`company`=? AND `customer`=? AND `status`=? AND `territory`=? AND `posting_date` > ? ORDER BY `po_no`"
+		advice = _r4("Filesort", where)
+		assert advice.columns == ("company", "customer", "status", "territory")
+		text = self._no_sort_claim(advice)
+		assert "The sort column comes after the range condition on posting_date" in text
+
+	def test_a_bare_qualified_sort_still_wins_over_the_range(self):
+		q = "select si.name from `tabSales Invoice` si where si.company = ? and si.posting_date > ? order by si.customer desc"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_R4)
+		assert advice.columns == ("company", "customer")
+		assert "which removes the sort instead" in ir.finding_text(advice)
+
+
+class TestMultiValueEquality:
+	"""Bounded corrective: IN (...) and a same-column IS NULL OR = keep their equality
+	place, but rows matching several values do not come back sorted."""
+
+	def test_an_in_filter_keeps_the_range_and_the_sort_claim_goes(self):
+		advice = _r4("Filesort", "`status` IN (?) AND `posting_date` > ? ORDER BY `modified`")
+		assert advice.columns == ("status", "posting_date")
+		text = ir.finding_text(advice)
+		assert "removes the sort" not in text and "already sorted" not in text
+		advice = _r4("Filesort", "(`po_no` IS NULL OR `po_no`=?) AND `posting_date` > ? ORDER BY `modified` DESC")
+		assert advice.columns == ("po_no", "posting_date")
+		advice = _r4("Filesort", "`po_no` IS NULL OR `po_no`=? ORDER BY `creation` DESC")
+		assert advice.columns == ("po_no", "creation")
+		assert "already sorted" not in ir.finding_text(advice)
+
+
+def test_the_most_selective_plain_use_wins():
+	q = "SELECT `name` FROM `tabSales Invoice` WHERE `status` = ? AND `status` IN (?) AND `company` > ?"
+	labelled = [("WHERE", "status"), ("WHERE", "company")]
+	assert ir._scan_where(q, labelled)[1] == {"status": "eq", "company": "range"}
+
+
+class TestMetadataNeverLeads:
+	"""Bounded corrective: creation / modified never lead, after index ordering too."""
+
+	def test_creation_equality_never_leads(self):
+		advice = _r4("Full Table Scan", "`company` > ? AND `creation` = ?")
+		assert advice.columns and advice.columns[0] not in ("creation", "modified")
+		advice = _r4("Filesort", "`po_no` <> ? AND `creation` = ? ORDER BY `modified`")
+		assert advice.columns and advice.columns[0] not in ("creation", "modified")
+		assert advice.columns == ("po_no",)
 
 
 class TestPostgresRowWidth:
