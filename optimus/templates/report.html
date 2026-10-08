@@ -3469,8 +3469,8 @@
     {# v0.7.x Phase J.2.5: DB tables read from report_data.db.tables.
        The adapter spreads each original table dict so the rich index-
        recommendation block keeps reading recommended_index /
-       index_candidates / is_meta_table / framework_cols_filtered /
-       ai_index without translation. #}
+       index_candidates / is_meta_table / framework_cols_filtered
+       without translation. #}
     {% if report_data.db and report_data.db.tables %}
       {% set written = report_data.db.tables | selectattr("write_count") | sort(attribute="write_count", reverse=True) | list %}
       {% if written %}
@@ -3563,16 +3563,6 @@
             {% endif %}
             {% if t.get("framework_cols_filtered") %}
               <div class="note-text">Also filtered on Frappe metadata columns ({% for fc in t.framework_cols_filtered %}<code>{{ fc }}</code>{% if not loop.last %}, {% endif %}{% endfor %}) - never indexed (Frappe writes them on every save, or they're auto-indexed).</div>
-            {% endif %}
-            {% if t.get("ai_index") and t.ai_index.suggestion_html %}
-              <div class="fix-box" style="margin-top: 10px;">
-                <div class="fix-head">
-                  <span>Index advice</span>
-                  <span class="ai-tag">AI{% if t.ai_index.model %} &middot; {{ t.ai_index.model }}{% endif %}{% if t.ai_index.tokens and t.ai_index.tokens.total_tokens %} &middot; {{ t.ai_index.tokens.total_tokens }} tokens{% endif %}</span>
-                </div>
-                <div class="fix-body">{{ t.ai_index.suggestion_html | safe }}</div>
-                <div class="fix-foot">Machine-generated{% if t.ai_index.generated_at %} &middot; {{ fmt_dt(t.ai_index.generated_at) }}{% endif %} - verify against <code>SHOW INDEX</code> before applying.</div>
-              </div>
             {% endif %}
 
           {% elif t.index_candidates %}

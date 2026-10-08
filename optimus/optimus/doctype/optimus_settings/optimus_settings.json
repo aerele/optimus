@@ -540,7 +540,7 @@
    "description": "This setting no longer does anything. Index advice (the recipes on Missing Index, Full Table Scan, Filesort, Temporary Table and Low Filter Ratio findings and the per-table index cards) is built by Optimus from the analyzer's data and the DocType metadata, without the AI, so nothing about your tables is sent to the AI provider for it. The field is kept only so existing sites migrate cleanly.",
    "fieldname": "ai_suggest_indexes",
    "fieldtype": "Check",
-   "label": "Index recommendations (DB-tables breakdown)",
+   "label": "Index recommendations (DB-tables breakdown, retired)",
    "read_only": 1
   },
   {

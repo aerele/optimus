@@ -12,31 +12,72 @@ versions may contain breaking changes see migration notes below).
 
 ### Changed
 
-- Build index advice from analyzer evidence and DocType metadata without an AI
-  call. Recipes select Search Index, a Property Setter, or a durable
-  `frappe.db.add_index` patch or hook according to field type and ownership.
-  Raw analyzer DDL is replaced in reports; single-column non-text table cards
-  fall back to their candidate list.
-- Retire the index-only AI prompt, helpers and refresh step. The existing
-  index-AI Settings field is read-only and has no effect. Refresh AI suggestions
-  updates eligible finding fixes and humanized steps, then renders once.
-- Limit AI finding fixes to N+1 Query, Slow Query, Redundant Call and Hot Line.
-  Framework Hot Lines and lines dominated by a non-trivial callee get an
-  explanatory note. Framework N+1 and index findings do not call the model.
-- Correct the Redundant Call sidecar stack direction and stamp new findings.
-  Older unstamped findings require re-recording before another AI suggestion;
-  their stored suggestion stays visible with a warning when the report is
-  regenerated.
-- Ground finding prompts in the enclosing function when it fits within 80
-  lines, otherwise retain the bounded source window. Add AST-derived loop
-  facts about dependencies, result use and observed writes. Prompt version 4
-  marks older displayed suggestions as outdated after report regeneration.
+- Build index advice from analyzer evidence, without an AI call. One advisor serves
+  index findings and per-table cards, so they always agree. It reads each field's
+  Search Index and Unique flags, the real column types, the table's existing indexes
+  and the finding's EXPLAIN key first: an already indexed, unique, missing or
+  reserved-word column, a key over 3072 bytes (about 2704 on Postgres), a leading
+  text column on Postgres, a query over 4 KB, or a query shape an index cannot use
+  (OR, a leading-wildcard LIKE, a function, CASE or arithmetic around the column) gets
+  an explanation and no code; a query Optimus cannot read says so. A trailing
+  `creation` or `modified` column never makes a recipe "no code". Columns are ordered
+  equality, then range, then sort, and a Filesort over a range filter says the range
+  cannot use the index. A single non-text column of a field you control on MariaDB
+  (an app in Tracked Apps, a Custom Field or a DocType created in the UI) gets "tick
+  Search Index". Every other index becomes one entry of a generated, idempotent
+  `ensure_indexes()` for your app, registered on `after_install`, `after_sync` and
+  `after_migrate`: a short, table-unique `index_name`, a `db` stamp per entry,
+  `table_exists`, `has_column` and `has_index` guards, a commit per entry, a
+  `search_index` Property Setter for another app's single column, an Error Log row
+  instead of a failed migrate, and "if the file exists, add only this entry" guidance.
+- Retire the index-only AI prompt, helpers and refresh step, and the system prompt's
+  own index rules. Slow Query prompts carry the deterministic advice as data. The
+  index-AI Settings field is read-only, has no effect and is labelled "retired".
+- Limit AI finding fixes to N+1 Query, Slow Query, Redundant Call and Hot Line. A Hot
+  Line goes to the AI unless it sits in framework code, Phase 1 named its callee, or
+  Phase 2 measured at least 1000 microseconds per hit on a line that calls a
+  non-builtin; a gate that raises fails closed. Framework N+1 and index findings do
+  not call the model, and the report says why.
+- Correct the Redundant Call walk: sidecar stack paths are cut to apps-relative form
+  (absolute bench paths no longer hide user code), each finding is anchored on its most
+  frequent callsite, and new findings are stamped. Older unstamped findings keep a
+  stored suggestion with a re-record note and are not sent to the AI.
+- Ground finding prompts in the enclosing function when it fits within 80 lines,
+  otherwise 24 lines either side. Loop facts come from the whole file's AST (the loop
+  chain, comprehension and while shapes, subscript and formatted-SQL writes, a caller
+  hint for a line in no loop), cover only lines the trimmed prompt still shows and sit
+  inside a data block. Prompt version 4 marks older displayed suggestions as outdated.
+- Refresh AI suggestions puts missing or outdated suggestions first, skips excluded
+  types and reports gated and excluded counts in its toast. Only a `not_eligible`
+  `AiFixError` is a skip; `config` and every other kind is a logged, counted failure.
+  The analyze-time AI step touches the single-flight flag before every call, only
+  while it holds it, and caps each call at 240 seconds (below the flag's lifetime).
+- A finding or card whose index advice cannot be built shows a plain note, and the
+  failure is counted in the bench log.
+
+### API
+
+- `optimus.api.refill_ai_suggestions` no longer returns an `indexes` result; its
+  `fixes` gains `gated`, `excluded` and `skipped_ineligible`.
+  `optimus.api.ai_capabilities` always reports `indexes: false`.
+- `optimus.api.export_session` no longer exports `suggested_ddl` or `ai_index`.
+  Index-family findings carry `index_advice` and a `fix_hint` taken from the report
+  text; a table's `recommended_index` gains `requested_columns`.
 
 ### Upgrade notes
 
-- Regenerate Reports updates deterministic advice and the older-suggestion
-  notices without changing stored suggestion JSON. Re-record flows with older
-  Redundant Call findings to obtain corrected callsites.
+- Regenerate Reports rebuilds index advice and the older-suggestion notices without
+  changing stored suggestion JSON. Index-family, Framework N+1 and gated Hot Line AI
+  suggestions and the table index-AI advice of earlier versions are hidden; their
+  tokens still count in the report's AI token total.
+- To apply index advice, save the generated `optimus_indexes.py` in your app and add
+  its `ensure_indexes` to `after_install`, `after_sync` and `after_migrate` in
+  hooks.py. If the file exists, add only the new entry to its `INDEXES` list. A
+  fixture-shipped Custom Field is indexed right after fixtures sync on install.
+- On Postgres, Frappe's schema sync can drop a Search Index named after a column of a
+  new composite index on another table until that table syncs again (a Frappe issue);
+  check `pg_indexes` after `bench migrate`.
+- Re-record flows with older Redundant Call findings to obtain corrected callsites.
 - This change does not move AI work out of analysis or add a persistence
   checkpoint before optional AI calls. Those changes remain follow-up work.
 

@@ -222,9 +222,6 @@ _MAX_STEPS_ACTIONS = 60
 _MAX_STEPS_USER_CHARS = 8000
 
 
-
-
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -433,8 +430,6 @@ def humanize_steps(
 	if not text:
 		raise AiFixError(_("The AI provider returned an empty response."), kind="bad_response")
 	return text
-
-
 
 
 def _had_concrete_context(finding: dict) -> bool:
@@ -702,178 +697,6 @@ def _provider_config() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Output guardrail never let an "index a metadata column" recommendation
-# through, even if the model ignored the system prompt. Frappe metadata
-# columns (`name`, `idx`, `parent`, `creation`, `modified`, `docstatus`, …)
-# are written on every save (or already indexed), so indexing them is a
-# write-cost trap; the profiler never suggests it anywhere including here.
-# ---------------------------------------------------------------------------
-
-# "add an index on <col>", "Search Index … <col>", "index the <col> column",
-# "ADD INDEX (`<col>`)" captures the column token that follows the
-# index-action phrase, skipping connector words ("on", "the", …). The hit is
-# discarded if it's negated ("do NOT index …") see `_NEGATION_RE`.
-_INDEX_ADVICE_RE = re.compile(
-	r"(?:add\s+(?:an?\s+)?index|search\s+index|index)\b"
-	r"[\s(]*(?:(?:on|the|a|an|for|to|of|column|field)\s+)*"
-	r"[`'\"]?(?P<col>[A-Za-z_][\w]*)",
-	re.IGNORECASE,
-)
-_NEGATION_RE = re.compile(r"(?:not|n['’]t|never|avoid|without|no need to|don['’]t)\W*$", re.IGNORECASE)
-
-
-def _metadata_columns() -> frozenset:
-	"""The Frappe standard-metadata column set, from the analyzer base
-	module (single source of truth). Empty set if unimportable the
-	guardrail then simply does nothing."""
-	try:
-		from optimus.analyzers.base import FRAPPE_METADATA_COLUMNS
-		return FRAPPE_METADATA_COLUMNS
-	except Exception:
-		return frozenset()
-
-
-# ---------------------------------------------------------------------------
-# Output guardrail: raw `frappe.db.sql(...)` in suggested fix code
-# ---------------------------------------------------------------------------
-# The system prompt at the top of this module tells the LLM "never hand-built
-# SQL strings" and lists ``frappe.get_all`` / ``frappe.get_list`` /
-# ``frappe.db.get_value`` / ``frappe.db.get_values`` / ``frappe.qb`` as the
-# idiomatic alternatives. The few-shot examples reinforce that. But a
-# sufficiently confident model still occasionally leaks raw SQL into its
-# proposed fix code and the system-prompt instruction alone is a soft
-# nudge with no backstop.
-#
-# This guardrail mirrors ``_flag_metadata_column_index_advice``: detect the
-# anti-pattern in the LLM's output, append a clearly-marked profiler note,
-# never rewrite (markdown is fragile). The note is advisory, not blocking
-# a fix that legitimately needs raw SQL (DDL, vendor-specific MariaDB
-# extensions) can be acted on with the operator's judgement.
-
-# ``frappe.db.sql(…, "SELECT …"…)``. The literal can be a regular string,
-# f-string, or raw string; the verb that follows is case-insensitive. The
-# verbs covered are the ones a model is most likely to suggest as a "fix"
-# (DDL like CREATE / ALTER is intentionally outside the scope those are
-# legit administrative paths and the prompt already rarely produces them).
-_RAW_SQL_IN_FIX_RE = re.compile(
-	# ``[a-z]{0,2}`` allows any string prefix (f / r / b / rb / br / fr …);
-	# ``["\']{1,3}`` covers single- AND triple-quoted literals (the common shape
-	# for a multi-line "fix" query). ``WITH`` catches CTE-led SELECTs.
-	r'frappe\.db\.sql\s*\(\s*[a-z]{0,2}["\']{1,3}\s*'
-	r'(?:WITH|SELECT|INSERT|UPDATE|DELETE|REPLACE)\b',
-	re.IGNORECASE,
-)
-
-# Multi-line opener: ``frappe.db.sql("""`` (triple-quoted query whose verb is on
-# a later line). A multi-line frappe.db.sql is essentially always a hand-built
-# query, so flag the opener regardless of the (off-line) verb.
-_RAW_SQL_OPENER_RE = re.compile(
-	r'frappe\.db\.sql\s*\(\s*[a-z]{0,2}(?:"""|\'\'\')',
-	re.IGNORECASE,
-)
-
-# Markdown code-fence detector. Group 1 captures the info-string
-# (``diff`` / ``python`` / ``py`` / empty for un-tagged fences).
-_CODE_FENCE_RE = re.compile(r'^```(\w*)\s*$')
-
-
-def _flag_raw_sql_in_fix(text: str) -> str:
-	"""If the model's proposed fix contains a raw ``frappe.db.sql(...)`` with a
-	SELECT / INSERT / UPDATE / DELETE / REPLACE literal, append a correction
-	note (never rewrites); returns the text unchanged when clean.
-
-	Scope: only inside markdown code fences (prose mentions are ignored); inside
-	a ``diff`` block only addition (``+``) lines count (removal lines are the
-	before-code). Only ``frappe.db.sql`` is detected; DDL verbs (CREATE / ALTER /
-	DROP) are excluded since raw DDL is sometimes the right answer.
-	"""
-	if not text:
-		return text
-
-	flagged = False
-	in_fence = False
-	fence_kind = ""
-	for line in text.splitlines():
-		fence_match = _CODE_FENCE_RE.match(line.strip())
-		if fence_match:
-			if not in_fence:
-				in_fence = True
-				fence_kind = (fence_match.group(1) or "").lower()
-			else:
-				in_fence = False
-				fence_kind = ""
-			continue
-		if not in_fence:
-			continue
-
-		# Inside a code block. Diff blocks restrict scanning to addition
-		# lines; non-diff blocks scan every line.
-		if fence_kind == "diff":
-			if not line.startswith("+") or line.startswith("+++"):
-				continue
-			# Strip the leading "+" so the regex sees actual code, not
-			# the diff-marker prefix.
-			line_to_scan = line[1:]
-		else:
-			line_to_scan = line
-
-		# Two detectors: the verb-anchored one (single-line ``frappe.db.sql("SELECT
-		# …")``) and a multi-line OPENER (``frappe.db.sql("""`` with the SQL verb
-		# on a following line the common multi-line shape this line-by-line scan
-		# would otherwise miss).
-		if _RAW_SQL_IN_FIX_RE.search(line_to_scan) or _RAW_SQL_OPENER_RE.search(line_to_scan):
-			flagged = True
-			break
-
-	if not flagged:
-		return text
-
-	return text.rstrip() + (
-		"\n\n> **Profiler note:** the fix above includes a raw "
-		"`frappe.db.sql(\"SELECT …\")` call. The recommended Frappe pattern "
-		"is `frappe.get_all` / `frappe.get_list` / `frappe.db.get_value` / "
-		"`frappe.db.get_values` (Document API for typical reads) or "
-		"`frappe.qb` (query builder for joins / aggregations / dynamic "
-		"conditions). Use raw SQL only when none of those API surfaces fit "
-		"(rare e.g. DDL, vendor-specific MariaDB extensions)."
-	)
-
-
-def _flag_metadata_column_index_advice(text: str) -> str:
-	"""If the model recommended indexing a Frappe metadata column, append a
-	correction note. We don't rewrite the body (markdown is fragile) we
-	add a clearly-marked profiler note so the reader doesn't act on it."""
-	meta = _metadata_columns()
-	if not meta or not text:
-		return text
-	hits = []
-	for m in _INDEX_ADVICE_RE.finditer(text):
-		col = m.group("col").strip("`'\"() ").lower()
-		if col not in meta or col in hits:
-			continue
-		# Skip negated mentions ("do NOT index `modified`") no correction needed.
-		if _NEGATION_RE.search(text[max(0, m.start() - 16):m.start()]):
-			continue
-		hits.append(col)
-	if not hits:
-		return text
-	cols = ", ".join(f"`{c}`" for c in hits)
-	plural = len(hits) > 1
-	return text.rstrip() + (
-		"\n\n> **Profiler note:** disregard any suggestion above to index "
-		+ cols
-		+ (" these are Frappe framework-managed columns" if plural
-		   else " that is a Frappe framework-managed column")
-		+ " (Frappe writes "
-		+ ("them" if plural else "it")
-		+ " on every save, or "
-		+ ("they're" if plural else "it's")
-		+ " already indexed). Index a business column from the WHERE / JOIN "
-		"instead, or change the query shape."
-	)
-
-
-# ---------------------------------------------------------------------------
 # Prompt construction (pure)
 # ---------------------------------------------------------------------------
 
@@ -928,8 +751,6 @@ def _build_steps_messages(
 		text = ai_budget.clip(text, limit - 80) + "\n…(truncated)"
 	content = ai_budget.data_block("actions", text)
 	return system, [{"role": "user", "content": content}]
-
-
 
 
 def _build_messages(
@@ -2187,8 +2008,6 @@ def _require_configured(provider: dict) -> None:
 		raise AiFixError(_("No AI model is configured. Set Model under Optimus Settings > AI Fix Suggestions."), kind="config")
 	if not provider.get("base_url"):
 		raise AiFixError(_("No AI base URL is configured. Set Base URL under Optimus Settings > AI Fix Suggestions."), kind="config")
-
-
 
 
 def _window_lines(window: list[dict]) -> str:

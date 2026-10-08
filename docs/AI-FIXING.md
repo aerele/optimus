@@ -34,7 +34,7 @@ There are three outbound request shapes. Each table lists every distinct field t
 
 Triggered by the session's **Refresh AI suggestions** action or auto-suggest at analyze time. Built by `ai_fix._build_fix_request` in `optimus/ai_fix.py`.
 
-**System prompt** (static, 6.9 KB, about 2,150 conservatively estimated tokens): Frappe framework rules for the proposed code, caching and data-layer idioms, the durable index recipe, grounding rules and the output format (Diagnosis / Fix / Why it works / Verify). It is byte-identical for every finding, so providers can reuse its prefix. Anthropic requests include one cache breakpoint; caching still depends on the model's minimum prefix size.
+**System prompt** (static, about 6.1 KB, about 1,850 conservatively estimated tokens): Frappe framework rules for the proposed code, caching and data-layer idioms, grounding rules and the output format (Diagnosis / Fix / Why it works / Verify). It is byte-identical for every finding, so providers can reuse its prefix. Anthropic requests include one cache breakpoint; caching still depends on the model's minimum prefix size.
 
 **User message** (per-finding, sized to the model's context window; 18,000 budget-unit cap):
 
@@ -51,7 +51,8 @@ Every value captured from your site (title, callsite, source, SQL, EXPLAIN, hot 
 | `callsite.lineno` | technical_detail_json | 3–5 chars | Line number. |
 | `callsite.function` | technical_detail_json | 20–60 chars | Function name from your code. |
 | **`source_window`** | `analyze._ai_grounding_window` | **1-2 KB typical** | The whole enclosing function, including decorators, when it fits in 80 lines; otherwise 24 lines before and after the callsite. The request budget can shorten it further. Verbatim comments, strings and names are included, with a 200-character cap per source line. **This is the largest field in a typical request.** |
-| loop facts | computed from `source_window` | bounded by the request budget | N+1 Query, Redundant Call and Hot Line only: whether the callsite is in a loop, which loop variables its call uses, whether the result is used and which writes the profiler can identify. Identifiers only, no values. |
+| loop facts | `ai_grounding.loop_facts_from_tree` over the whole source file's AST | bounded by the request budget | N+1 Query, Redundant Call and Hot Line only: the loops around the callsite (innermost first, comprehensions and `while` included), which variables of each loop its call uses, whether its result is used and the writes the profiler can name (subscript and formatted-SQL writes among them). They are computed after the budget trims the window and cover only lines the trimmed prompt still shows. Identifiers only, no values, inside a data block (fenced). A line in no loop of its function gets a caller hint, for N+1 Query and Redundant Call, that a caller may loop. |
+| index advice | `index_recipes.advise_finding` | 200-1,600 chars | Slow Query only: the profiler's deterministic index advice (route, DocType, columns and explanation), inside a data block. |
 | `phase2_hotline` | Phase 2 line-profile | 100–400 chars | When available, the hottest single line from line-profiling (line number, content, total ms, hit count). |
 | `technical_detail.function` | technical_detail_json | 30–80 chars | Hot function name (for Slow-Hot-Path-type findings). |
 | `technical_detail.cumulative_ms` | technical_detail_json | ~5 chars | Time in that function. |
@@ -86,9 +87,86 @@ Up to `_MAX_STEPS_ACTIONS = 60` actions, sent inside one data block and limited 
 
 ### 2.3 Index suggestion (removed)
 
-Index advice for Missing Index, Full Table Scan, Filesort, Temporary Table and Low Filter Ratio findings, and for the per-table index cards, is built by Optimus itself (`optimus/renderer/fix_recipes.py`) from the analyzer's data and DocType metadata. This path sends nothing to the AI provider. Eligible Slow Query and N+1 Query suggestions can still include query context and index advice.
+Index advice for Missing Index, Full Table Scan, Filesort, Temporary Table and Low Filter Ratio findings, and for the per-table index cards, is built by Optimus itself (`optimus/renderer/index_recipes.py`, one advisor for both, so a finding and a card never disagree) from the DocType metadata, the real column types and the table's existing indexes. This path sends nothing to the AI provider; a Slow Query prompt carries the same advice as data.
 
-The recipes use a DocField's Search Index flag for a standard field in your app, a Property Setter for another app's field, and the Custom Field or custom DocType editor for custom metadata. Composite and text-column indexes use `frappe.db.add_index` in a patch or, for your own standard DocType, `on_doctype_update` plus a one-time patch. Text columns use a prefix on MariaDB. Single-column non-text table cards fall back to their candidate list because an index added only by a patch would not survive schema synchronization.
+**Evidence comes first.** Before any code, the advisor checks the lead column of the recipe against the table's existing indexes, its Search Index flag, its Unique flag and the `key` in the finding's EXPLAIN row. A trailing `creation` or `modified` column is exempt: Frappe indexes it, but that never turns a recipe into "no code". An existing index that already starts with the whole recipe column list also gives no code.
+
+- **No code** when the lead column already leads an index (under any name), has Search Index ticked, is unique, or EXPLAIN names an index on it; when the column does not exist (or differs in case), is not a field, is a MariaDB reserved word, cannot be indexed (JSON), is a leading text column on Postgres, or when the key would pass 3072 bytes on MariaDB or a Postgres btree row would pass about 2704 bytes (a long varchar). A query longer than 4 KB is not parsed. The report says why, and for an existing index names the likely query shape that cannot use it.
+- **Shapes that give no code** because an index on the column could not be used: an `OR` between conditions, a `LIKE` with a leading wildcard, a function around the column (`IFNULL`, `YEAR`, `DATE`, the rewrite of `!=` into `IFNULL(col, ?) <> ?`), a `CASE` expression, arithmetic, or the column compared with another column. A query Optimus cannot read (cut at 500 characters, a UNION, a derived table) gets "Optimus could not read this query" text and the EXPLAIN advice, never a claim that an index would not help. About a dozen scanner gaps are recorded as residuals; each fails closed (no code) and never produces a wrong migration.
+- **Column order** is equality columns, then one range column, then the sort or group column. For Filesort and Temporary Table findings a sort over a range filter on another column recommends (equality columns, sort column) and says the range filter cannot use that index. This applies only when every sort or group item is a bare column of the target table in the same direction; an `IN` or `IS NULL OR =` filter still sorts and does not claim "already sorted". `creation` and `modified` never lead.
+- **Tick Search Index** for one non-text column of a field you control on MariaDB: your app's DocType (an app in Tracked Apps; with Tracked Apps empty no installed app counts as yours), a Custom Field, or a DocType created in the UI. Frappe's schema sync then owns the index.
+- **`ensure_indexes()`** for everything else: composites, a text column (a 255-character prefix on MariaDB), another app's field, and any index on Postgres. Save the module below in your app and register it on `after_install`, `after_sync` and `after_migrate` in hooks.py. `after_sync` runs right after the install's fixture sync, so a fixture-shipped Custom Field is indexed on a fresh install too. If the file already exists, add only the new entry to its `INDEXES` list. Each entry is committed on its own (the previous work is committed first, so a failed entry rolls back only itself), checks the table, its columns and the index first, and a failure writes an Error Log row and moves on, so it never blocks `bench migrate`. Entries carry a `db` stamp (`mariadb` or `postgres`) and are skipped, with one Error Log row, on the other database. For another app's single column the entry sets a `search_index` Property Setter once and syncs the table, so Frappe's schema sync keeps that index. Index names are `idx_<doctype>_<hash>`: at most 53 characters and unique across the schema (Postgres index names are schema-wide).
+- **When advice cannot be built**, the finding or card says "Optimus could not build index advice for this finding (or table)", the failure is counted and written once to the bench log, and the export carries the same note. It never blocks the render.
+
+```python
+# your_app/your_app/optimus_indexes.py
+# In your_app/hooks.py run it after install, right after the install's fixture sync and after
+# every migrate (add it to these lists when hooks.py already defines them):
+#   after_install = ["your_app.optimus_indexes.ensure_indexes"]
+#   after_sync = ["your_app.optimus_indexes.ensure_indexes"]
+#   after_migrate = ["your_app.optimus_indexes.ensure_indexes"]
+import contextlib
+
+import frappe
+
+# An entry with "db" runs only on that database (frappe.db.db_type).
+INDEXES = [
+	{"doctype": "Sales Invoice", "columns": ["customer", "posting_date"], "db": "mariadb", "index_name": "idx_sales_invoice_1d3b8654"},
+	{"doctype": "Sales Invoice", "search_index_field": "po_no", "db": "mariadb"},
+]
+
+
+def ensure_indexes():
+	"""Create each index in INDEXES once. One failed entry never stops the others."""
+	for entry in INDEXES:
+		try:
+			# commit what ran before this entry, so the rollback below undoes only this entry
+			frappe.db.commit()
+			_ensure_index(entry)
+			frappe.db.commit()
+		except Exception:
+			with contextlib.suppress(Exception):
+				frappe.db.rollback()
+				frappe.log_error(title=_title(entry, "was not created"))
+
+
+def _title(entry, what):
+	key = entry.get("index_name") or entry.get("search_index_field")
+	return f"Index for {entry['doctype']} {what}: {key}"[:140]
+
+
+def _ensure_index(entry):
+	doctype = entry["doctype"]
+	if entry.get("db", frappe.db.db_type) != frappe.db.db_type:
+		title = _title(entry, f"skipped on {frappe.db.db_type}, the entry is for {entry['db']}")
+		if not frappe.db.exists("Error Log", {"method": title}):
+			frappe.log_error(title=title)
+		return
+	if not frappe.db.table_exists(doctype, cached=False):
+		return
+	field = entry.get("search_index_field")
+	if field:
+		if not frappe.db.has_column(doctype, field):
+			return
+		if not frappe.db.exists(
+			"Property Setter",
+			{"doc_type": doctype, "field_name": field, "property": "search_index", "value": "1"},
+		):
+			from frappe.custom.doctype.property_setter.property_setter import make_property_setter
+
+			make_property_setter(doctype, field, "search_index", 1, "Check", validate_fields_for_doctype=False)
+		if not frappe.db.has_index(f"tab{doctype}", f"{field}_index"):
+			frappe.db.updatedb(doctype)
+		return
+	columns = entry["columns"]
+	if not all(frappe.db.has_column(doctype, column.split("(", 1)[0]) for column in columns):
+		return
+	if frappe.db.has_index(f"tab{doctype}", entry["index_name"]):
+		return
+	frappe.db.add_index(doctype, columns, index_name=entry["index_name"])
+```
+
+On Postgres, building an index blocks writes to the table, so add indexes on write-hot tables in a maintenance window; Frappe's schema sync can also drop a Search Index named after a column of a composite index on another table until that table syncs again (a Frappe issue).
 
 ### 2.4 Connectivity probe (Optimus Settings → AI → "Test connection" button)
 
@@ -155,7 +233,7 @@ The code guardrails apply to finding fixes in every rendered block, regardless o
 
 ## 5. Eligible finding types
 
-These four finding types are the only ones for which Optimus builds an AI payload. Infrastructure, frontend and call-tree findings lack enough code or SQL context. Index findings receive deterministic recipes; Framework N+1 findings refer to framework code the app cannot change. A Hot Line is also skipped when it calls another non-trivial function or sits in framework code. The report shows an explanation instead.
+These four finding types are the only ones for which Optimus builds an AI payload. Infrastructure, frontend and call-tree findings lack enough code or SQL context. Index findings receive deterministic recipes; Framework N+1 findings refer to framework code the app cannot change. A Hot Line is also skipped when it sits in framework code, when Phase 1 named the function that holds its time, or when Phase 2 measured at least 1,000 microseconds per hit (`per_hit_us`) on a line that calls a non-builtin (`ai_grounding.HOT_LINE_CALLEE_US`). The report shows an explanation instead. If the gate itself raises, it fails closed: no AI call, and a neutral note that the check could not run.
 
 - Hot Line
 - N+1 Query
@@ -168,7 +246,7 @@ The exact set lives in `optimus/ai_fix.py::AI_ELIGIBLE_FINDING_TYPES`. A test (`
 
 ### 5.1 Per-type opt-out (`ai_excluded_finding_types`)
 
-`Optimus Settings → AI → Privacy & Operations → Excluded finding types` is a multi-line list. Each line names one of the four types above (exact match, case-sensitive). Lines starting with `#` are comments. Listed types are skipped in **both** auto-suggest and on-demand calls no payload is built, no request is sent, the on-demand button surfaces a clear "excluded by Optimus Settings" message.
+`Optimus Settings → AI → Privacy & Operations → Excluded finding types` is a multi-line list. Each line names one of the four types above (exact match, case-sensitive). Lines starting with `#` are comments. Listed types are skipped in **both** auto-suggest and on-demand calls no payload is built, no request is sent, Refresh AI suggestions counts them as excluded in its toast, and the analyze-time step adds an analyzer note.
 
 Use this when the SQL or source for a particular finding category embeds business logic you don't want flowing to a hosted provider:
 
@@ -180,6 +258,14 @@ N+1 Query
 ```
 
 The list is empty by default. The exclusion list is **additive**: types not listed continue to flow normally.
+
+### 5.2 Errors, Refresh AI suggestions and the analyze-time step
+
+`ai_fix.AiFixError` carries a `kind`: `config` (Optimus Settings cannot serve the call: AI off, no model or key, a context window too small), `not_eligible` (the gate or the per-type exclusion refused the finding and no request was built), `transport`, `timeout`, `bad_response` and `unknown`. **Only `not_eligible` counts as a skip** (`AI_SKIP_KINDS`); every other kind, `config` included, is a failure that is logged to the Error Log and counted.
+
+`optimus.api.refill_ai_suggestions` returns, in its `fixes` result, `added`, `failed`, `skipped_time`, `skipped`, `gated` (findings that get advice or a note from Optimus, or no AI suggestion by design), `excluded` (AI-eligible types excluded in Optimus Settings) and `skipped_ineligible`. The old `indexes` result is removed: `optimus.api.ai_capabilities` always reports `indexes: false`. Missing and outdated suggestions are refreshed first, so repeated refreshes make every eligible finding current.
+
+The analyze-time step touches the single-flight flag (the Redis key that stops two analyses from overlapping) before every AI call, and only while it still holds that flag, so it never takes over another session's flag. Each call's timeout is capped at 240 seconds, below the flag's 300-second lifetime, so two heartbeats are never further apart than the flag lives.
 
 ---
 
@@ -289,6 +375,8 @@ The "safe report" HTML file Optimus produces (the dev-shop interchange format) *
 - AI fix suggestions, if any, are **baked into the report** at analyze time. The HTML embeds the suggestion text as static markup; opening the report locally never triggers an AI call.
 - The dev shop doesn't need an API key / provider configured to read the report they need it only if they want to **regenerate** suggestions on their own bench.
 
+The JSON export (`optimus.api.export_session`) carries no raw DDL and no `ai_index`. Each index-family finding gains `index_advice` (`route`, `doctype`, `table`, `columns`, `index_name`, `text`, `code`), its `technical_detail.fix_hint` is the same text the report shows, and a table's `recommended_index` carries `requested_columns` (the columns the analyzer asked for, before the advisor changed them). The permission check is unchanged.
+
 This means: if you're worried about a profile shared with a third party leaking your code to their LLM provider, the answer is "the profile itself doesn't." But it also means: AI suggestions baked into the report carry the same content the LLM produced review those before sharing if they paraphrase sensitive logic.
 
 ---
@@ -297,7 +385,9 @@ This means: if you're worried about a profile shared with a third party leaking 
 
 | Concern | File | Symbol |
 |---|---|---|
-| Deterministic recipes and AI gates | `optimus/renderer/fix_recipes.py` | `index_recipe`, `hot_line_gate`, `loop_facts` |
+| Index advice (findings and table cards) | `optimus/renderer/index_recipes.py`, `optimus/renderer/recipe_enrichment.py` | `advise`, `advise_finding`, `advise_table`, `ensure_indexes_code`, `make_evidence_lookup` |
+| AI grounding and eligibility | `optimus/ai_grounding.py` | `grounding_window`, `loop_facts_from_tree`, `format_loop_facts`, `hot_line_gate` |
+| Best-effort calls and job timeouts | `optimus/safe_call.py` | `best_effort`, `InterruptGuard` |
 | Eligible-types frozenset | `optimus/ai_fix.py` | `AI_ELIGIBLE_FINDING_TYPES` |
 | Provider matrix | `optimus/ai_fix.py` | `_PROVIDER_DEFAULTS` |
 | Payload builders | `optimus/ai_fix.py` | `_build_fix_request` (`_build_messages` wrapper), `_build_steps_messages` |

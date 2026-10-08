@@ -25,7 +25,6 @@ from optimus.permissions import may_act_on_session
 ALLOWED_ROLES = {"System Manager", "Optimus User", "Administrator"}
 
 
-
 # Per-user rate limits (optimus.ratelimit), keyed by endpoint name and counted by the endpoint
 # right after its gate passes (the gates themselves never count). A site can override any entry
 # in site_config, for example "optimus_rate_limits": {"refill_ai_suggestions": [12, 3600]}.
@@ -1440,12 +1439,6 @@ def ai_capabilities() -> dict:
 	}
 
 
-
-
-
-
-
-
 def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 	"""Validation-free rewrite of the session's "Steps to Reproduce" via the
 	configured LLM. Caller is responsible for the permission / status / AI-
@@ -1497,11 +1490,6 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 	)
 	safe_commit()
 	return {"updated": True, "reason": None}
-
-
-
-
-
 
 
 @frappe.whitelist(methods=["POST"])

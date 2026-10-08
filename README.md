@@ -202,8 +202,12 @@ Suggestions → Use the LLM for**:
 
 - **Fix suggestions on findings**: enables eligible finding fixes through
   **Refresh AI suggestions** and the automatic pass during analysis.
-- **Index recommendations**: retired. The report builds index advice from
-  analyzer data and DocType metadata, without calling the AI.
+- **Index recommendations**: retired. The report builds index advice from the
+  DocType metadata, the real column types and the table's existing indexes,
+  without calling the AI: tick Search Index for one column of a field you
+  control on MariaDB, otherwise one generated `ensure_indexes()` for your app,
+  registered on `after_install`, `after_sync` and `after_migrate` (see
+  [`docs/AI-FIXING.md`](./docs/AI-FIXING.md) section 2.3).
 - **Humanized "Steps to Reproduce"**: rewrites the auto-captured
   action list into a friendly flow ("Open Sales Invoice list, click
   New, …").
@@ -213,6 +217,10 @@ re-rendered reports omit its stored AI block. Deterministic index advice
 is independent of the AI controls. See
 [`docs/AI-FIXING.md`](./docs/AI-FIXING.md) for the per-pathway data
 inventory and local-LLM recipes.
+
+**Refresh AI suggestions** regenerates missing and outdated suggestions first and says
+how many findings got deterministic advice or a note instead (gated), and how many
+were skipped because their type is excluded.
 
 ### Baseline comparison
 
@@ -617,7 +625,7 @@ sections. The index setting is read-only and has no effect.
 | Field | Default | Purpose |
 |---|---|---|
 | **Fix suggestions on findings** | ✓ on | Eligible finding fixes through Refresh AI suggestions and the automatic pass. |
-| **Index recommendations (DB-tables breakdown)** | read-only | No effect: index advice is deterministic and never uses the AI. |
+| **Index recommendations (DB-tables breakdown, retired)** | read-only | No effect: index advice is deterministic and never uses the AI. |
 | **Humanized "Steps to Reproduce"** | ✓ on | LLM rewrites the auto-captured action list into a friendly flow at analyze time (and on demand). Falls back to the raw action list on any failure. |
 
 #### Automatic Suggestions section
@@ -631,7 +639,7 @@ sections. The index setting is read-only and has no effect.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Excluded finding types** | _empty_ | One finding type per line. Those types are skipped in both auto-suggest and on-demand the payload is never built (no data ever sent for them). Exact-match, case-sensitive. `#` comments. Canonical names: `Hot Line`, `N+1 Query`, `Redundant Call`, `Slow Query`. Index findings and Framework N+1 never call the AI. |
+| **Excluded finding types** | _empty_ | One finding type per line. Those types are skipped in both auto-suggest and on-demand the payload is never built (no data ever sent for them). Exact-match, case-sensitive. `#` comments. Canonical names: `Hot Line`, `N+1 Query`, `Redundant Call`, `Slow Query`. Index findings and Framework N+1 never call the AI. Refresh AI suggestions reports how many findings it skipped this way. |
 | **Request timeout (seconds)** | `60` | HTTP timeout for outbound LLM calls. `60s` fits hosted providers (Anthropic / OpenAI reply in 2–10s typically). For local LLMs (Ollama / LM Studio / vLLM) first-token cold-start can exceed 60s start at `180` and tune once warm-call P99 is known. Clamped to `10–600`. |
 
 ---

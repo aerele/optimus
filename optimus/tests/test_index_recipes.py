@@ -1264,3 +1264,17 @@ def test_no_raw_ddl_customize_form_or_dash_in_any_advice():
 		blob = ir.finding_text(advice) + ir.card_note(advice) + (advice.code or "")
 		for bad in _FORBIDDEN:
 			assert bad not in blob, (bad, blob)
+
+
+def test_the_docs_show_the_generated_module_verbatim():
+	"""docs/AI-FIXING.md section 2.3 is where a table card without a finding points."""
+	from pathlib import Path
+
+	entries = [
+		{"doctype": "Sales Invoice", "columns": ["customer", "posting_date"], "db": "mariadb",
+		 "index_name": ir.optimus_index_name("Sales Invoice", ("customer", "posting_date"))},
+		{"doctype": "Sales Invoice", "search_index_field": "po_no", "db": "mariadb"},
+	]
+	doc = (Path(ir.__file__).resolve().parents[2] / "docs" / "AI-FIXING.md").read_text(encoding="utf-8")
+	assert entries[0]["index_name"] == "idx_sales_invoice_1d3b8654"
+	assert ir.ensure_indexes_code(entries, app_name="your_app") in doc

@@ -12,7 +12,12 @@ import os
 from optimus import ai_fix, ai_guardrails, ai_prompts, analyze, api
 
 _GONE = {
-	ai_fix: ("suggest_index", "_build_index_messages", "_MAX_INDEX_SAMPLE_QUERIES", "_MAX_INDEX_USER_CHARS"),
+	ai_fix: (
+		"suggest_index", "_build_index_messages", "_MAX_INDEX_SAMPLE_QUERIES", "_MAX_INDEX_USER_CHARS",
+		# M-I1: the index-AI output guardrails had no caller left once suggest_index was removed.
+		"_INDEX_ADVICE_RE", "_NEGATION_RE", "_metadata_columns", "_RAW_SQL_IN_FIX_RE",
+		"_RAW_SQL_OPENER_RE", "_CODE_FENCE_RE", "_flag_raw_sql_in_fix", "_flag_metadata_column_index_advice",
+	),
 	ai_prompts: ("INDEX_SYSTEM_PROMPT", "INDEX_HEADINGS"),
 	ai_guardrails: ("verify_index",),
 	analyze: (
@@ -56,4 +61,21 @@ def test_ai_suggest_indexes_setting_is_read_only_and_says_so():
 		fields = json.load(fh)["fields"]
 	field = next(f for f in fields if f["fieldname"] == "ai_suggest_indexes")
 	assert field.get("read_only") == 1
+	assert field["label"] == "Index recommendations (DB-tables breakdown, retired)"
 	assert field["description"].startswith("This setting no longer does anything.")
+
+
+def test_report_template_has_no_dead_ai_index_block():
+	"""D1: the table card's ai_index block was dead (the renderer pops ai_index); it is gone."""
+	path = os.path.join(os.path.dirname(ai_fix.__file__), "templates", "report.html")
+	with open(path, encoding="utf-8") as fh:
+		text = fh.read()
+	assert "ai_index" not in text
+
+
+def test_report_template_adds_no_new_safe_sink():
+	"""D1: deleting the block removed one `| safe`; the count must not grow past the audited baseline."""
+	path = os.path.join(os.path.dirname(ai_fix.__file__), "templates", "report.html")
+	with open(path, encoding="utf-8") as fh:
+		now = fh.read().count("| safe")
+	assert now == 18  # 19 at 719f3dd minus the deleted ai_index block
