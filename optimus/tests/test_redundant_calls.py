@@ -590,3 +590,83 @@ def test_the_stamp_constants_live_in_analyzers_base():
 	assert ai_grounding.CALLSITE_WALK_FIXED is base.CALLSITE_WALK_FIXED == "outermost_first"
 	src = Path(redundant_calls.__file__).read_text(encoding="utf-8")
 	assert '"outermost_first"' not in src and "CALLSITE_WALK_FIXED" in src
+
+
+# ---------------------------------------------------------------------------
+# Task 6 fix round 1
+# ---------------------------------------------------------------------------
+
+
+def _stack_at(path, lineno, function="fn"):
+	return [{"filename": path, "lineno": lineno, "function": function}, *_USER_CALLER_STACK[1:]]
+
+
+def _rec(uuid, entries):
+	return {"uuid": uuid, "calls": [], "pyi_session": None, "sidecar": entries}
+
+
+def _calls(n, stack, ident="x"):
+	return [_sidecar_entry("get_doc", ["User", ident], ("User", "h"), caller_stack=stack) for _ in range(n)]
+
+
+def _analyze_one(recordings):
+	ctx = AnalyzeContext(session_uuid="t", docname="t")
+	rc = [f for f in redundant_calls.analyze(recordings, ctx).findings if f["finding_type"] == "Redundant Call"]
+	assert len(rc) == 1, ctx.warnings
+	return rc[0], json.loads(rc[0]["technical_detail_json"])["callsite"]
+
+
+def test_action_ref_comes_from_the_anchored_occurrences_only():
+	a = _stack_at("apps/myapp/myapp/a.py", 10)
+	b = _stack_at("apps/myapp/myapp/b.py", 20)
+	recs = [_rec("r0", _calls(8, b)), _rec("r1", _calls(5, a)), _rec("r2", _calls(5, a))]
+	rc, cs = _analyze_one(recs)
+	assert cs["filename"] == "apps/myapp/myapp/a.py"
+	assert rc["action_ref"] == "1"
+
+
+def test_a_tie_between_callsites_goes_to_the_first_seen_in_either_order():
+	a = _stack_at("apps/myapp/myapp/a.py", 10)
+	b = _stack_at("apps/myapp/myapp/b.py", 20)
+	rc, cs = _analyze_one([_rec("r0", _calls(8, a)), _rec("r1", _calls(8, b))])
+	assert cs["filename"] == "apps/myapp/myapp/a.py" and rc["action_ref"] == "0"
+	rc, cs = _analyze_one([_rec("r0", _calls(8, b)), _rec("r1", _calls(8, a))])
+	assert cs["filename"] == "apps/myapp/myapp/b.py" and rc["action_ref"] == "0"
+
+
+def test_the_path_is_cut_at_the_last_apps_segment():
+	stack = [{"filename": "/home/apps/frappe-bench/apps/myapp/myapp/x.py", "lineno": 1, "function": "f"}]
+	assert redundant_calls._apps_relative_stack(stack)[0]["filename"] == "myapp/myapp/x.py"
+
+
+def test_windows_paths_are_cut_too():
+	stack = [{"filename": "C:\\bench\\apps\\myapp\\myapp\\x.py", "lineno": 1, "function": "f"}]
+	assert redundant_calls._apps_relative_stack(stack)[0]["filename"] == "myapp/myapp/x.py"
+
+
+def test_absolute_frames_outside_apps_are_user_code_unless_library_or_stdlib():
+	keep = {"filename": "/srv/dev/myapp/myapp/x.py", "lineno": 1, "function": "f"}
+	std = {"filename": "/usr/lib/python3.14/json/__init__.py", "lineno": 2, "function": "g"}
+	site = {"filename": "/opt/venv/lib/python3.14/site-packages/requests/api.py", "lineno": 3, "function": "h"}
+	dist = {"filename": "/usr/lib/python3/dist-packages/x.py", "lineno": 4, "function": "i"}
+	assert redundant_calls._apps_relative_stack([std, site, dist, keep]) == [keep]
+	bare_site = {"filename": "/opt/venv/site-packages/x.py", "lineno": 5, "function": "j"}
+	bare_dist = {"filename": "/opt/dist-packages/x.py", "lineno": 6, "function": "k"}
+	assert redundant_calls._apps_relative_stack([bare_site, bare_dist, keep]) == [keep]
+
+
+def test_an_editable_installed_app_outside_the_bench_keeps_its_finding():
+	stack = [
+		{"filename": "/srv/dev/myapp/myapp/x.py", "lineno": 7, "function": "loop"},
+		{"filename": f"{_BENCH}/frappe/frappe/app.py", "lineno": 120, "function": "application"},
+	]
+	_rc, cs = _analyze_one([_rec("r0", _calls(8, stack))])
+	assert cs["filename"] == "/srv/dev/myapp/myapp/x.py"
+
+
+def test_a_more_frequent_framework_callsite_does_not_suppress_a_user_loop():
+	erp = _stack_at("apps/erpnext/erpnext/stock/utils.py", 30, "get_bin")
+	user = _stack_at("apps/myapp/myapp/rows.py", 24, "check_rows")
+	rc, cs = _analyze_one([_rec("r0", _calls(9, erp)), _rec("r1", _calls(8, user))])
+	assert cs["filename"] == "apps/myapp/myapp/rows.py"
+	assert rc["action_ref"] == "1"

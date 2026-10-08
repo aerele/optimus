@@ -111,12 +111,22 @@ def _to_hashable(value):
 	return value
 
 
+_LIBRARY_MARKERS = ("/site-packages/", "/dist-packages/", "/lib/python", "/Lib/")
+
+
+def _is_library_path(filename: str) -> bool:
+	"""True for installed libraries and the Python stdlib. Any other absolute frame
+	(an editable-installed app outside the bench) is user code and is kept."""
+	return any(marker in filename for marker in _LIBRARY_MARKERS)
+
+
 def _apps_relative_stack(stack: list) -> list:
 	"""``stack`` with absolute bench paths cut to ``<app>/...`` and absolute frames outside
 	the bench apps dropped, as frappe/recorder.py:97 does for SQL stacks
 	(``TRACEBACK_PATH_PATTERN = ".*/apps/"``). Without it a bench under
 	``/home/frappe/frappe-bench`` puts ``frappe/`` in every path, walk_callsite skips every
-	frame and the finding is lost (P4). Relative and Server Script frames pass through."""
+	frame and the finding is lost (P4). Relative and Server Script frames pass through,
+	as do absolute frames that are neither under /apps/ nor library or stdlib code."""
 	out = []
 	for frame in stack or []:
 		if not isinstance(frame, dict):
@@ -124,7 +134,7 @@ def _apps_relative_stack(stack: list) -> list:
 		filename = str(frame.get("filename") or "").replace("\\", "/")
 		if "/apps/" in filename:
 			out.append(dict(frame, filename=filename.rsplit("/apps/", 1)[1]))
-		elif filename.startswith("/") or _WINDOWS_ABS_RE.match(filename):
+		elif (filename.startswith("/") or _WINDOWS_ABS_RE.match(filename)) and _is_library_path(filename):
 			continue
 		else:
 			out.append(frame)
@@ -233,8 +243,18 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			# Recording captured before v0.5.2 OR stack capture failed.
 			drop_no_caller_stack += 1
 			continue
-		top_key = Counter(_callsite_key(cs) for _action, _raw, cs in walked).most_common(1)[0][0]
-		anchored = [(a, r, cs) for a, r, cs in walked if _callsite_key(cs) == top_key]
+		# A user loop is never outvoted by a more frequent framework callsite: when any
+		# occurrence resolves to non-framework code, only those vote.
+		actionable = [
+			w for w in walked
+			if w[2] is not None
+			and not is_framework_callsite(
+				w[2].get("filename") or "", tracked_apps=tracked_apps, installed_apps=installed_apps
+			)
+		]
+		votes = actionable or walked
+		top_key = Counter(_callsite_key(cs) for _action, _raw, cs in votes).most_common(1)[0][0]
+		anchored = [(a, r, cs) for a, r, cs in votes if _callsite_key(cs) == top_key]
 		callsite = anchored[0][2]
 		if callsite is None or is_framework_callsite(
 			callsite.get("filename") or "", tracked_apps=tracked_apps, installed_apps=installed_apps
