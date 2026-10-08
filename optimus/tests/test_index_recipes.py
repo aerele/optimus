@@ -182,6 +182,77 @@ class TestRoutes:
 		advice = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(ev))
 		assert 'belongs to another app, so do not edit it' in ir.finding_text(advice)
 
+	def test_the_property_setter_route_says_it_builds_the_index_first(self):
+		"""D1: the entry builds po_no_index itself, then declares Search Index on the
+		field; it no longer syncs the table."""
+		advice = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(_SI))
+		text = ir.finding_text(advice)
+		assert 'creates the index "po_no_index" on "po_no" once' in text
+		assert "then sets Search Index on the field with a Property Setter" in text
+		assert "syncs the table" not in text and "updatedb" not in advice.code
+
+	def test_a_custom_field_created_in_code_gets_search_index_in_its_dict(self):
+		"""D5: a Custom Field your app creates with create_custom_fields()."""
+		ev = _ev(fields={"po_no": F("Data", custom=True)})
+		advice = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(ev))
+		assert (
+			'If your app creates it in code, add "search_index": 1 to the field\'s dict in your '
+			"create_custom_fields() call."
+		) in ir.finding_text(advice)
+
+	def test_a_trailing_newline_never_passes_as_an_app_name(self):
+		"""S1: ``$`` matches before a trailing newline, so ``.match`` let "myapp\\n"
+		through and the generated header split into a broken comment line."""
+		advice = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(_SI), tracked_apps=("myapp\n",))
+		assert advice.app_name == ir.UNKNOWN_APP
+		code = ir.ensure_indexes_code([advice.entry], app_name="myapp\n")
+		assert code.startswith("# your_app/your_app/optimus_indexes.py\n")
+		compile(code, "optimus_indexes.py", "exec")
+		own = _ev(app="myapp\n", fields=_ALL)
+		advice = ir.advise_finding(_explain("Full Table Scan", _TWO), evidence_lookup=_lookup(own), tracked_apps=("myapp\n",))
+		assert advice.app_name == ir.UNKNOWN_APP
+
+	def test_a_trailing_newline_never_passes_as_a_table_name(self):
+		"""S1: the outer strip() leaves a newline that sits inside the backticks."""
+		assert ir.doctype_of("`tabSales Invoice`") == "Sales Invoice"
+		assert ir.doctype_of("`tabSales Invoice\n`") is None
+
+
+class TestPostgresCaveatOnEveryEntryThatRunsThere:
+	"""D4: an entry without a db stamp runs on both databases, so it carries the
+	Postgres DROP INDEX caveat and a "why it stays" text for both."""
+
+	def test_an_unstamped_mariadb_composite_carries_the_postgres_caveat(self):
+		advice = ir.advise_finding(_explain("Full Table Scan", _TWO), evidence_lookup=_lookup(_SI))
+		assert "db" not in advice.entry
+		text = ir.finding_text(advice)
+		assert "DROP INDEX IF EXISTS" in text
+		assert "never drops an index that spans several columns" in text
+		assert "drops only indexes named after a bare field name" in text
+
+	def test_an_unstamped_postgres_composite_also_explains_mariadb(self):
+		ev = _ev(dialect="postgres", fields=_ALL)
+		advice = ir.advise_finding(_explain("Full Table Scan", _TWO), evidence_lookup=_lookup(ev))
+		assert "db" not in advice.entry
+		text = ir.finding_text(advice)
+		assert "DROP INDEX IF EXISTS" in text and "never drops an index that spans several columns" in text
+
+	def test_a_mariadb_only_entry_has_no_postgres_text(self):
+		ev = _ev(app="myapp", fields={"remarks": F("Small Text")})
+		prefix = ir.advise_finding(_missing("remarks"), evidence_lookup=_lookup(ev), tracked_apps=("myapp",))
+		setter = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(_SI))
+		for advice in (prefix, setter):
+			assert advice.entry["db"] == "mariadb"
+			text = ir.finding_text(advice)
+			assert "DROP INDEX" not in text and "bare field name" not in text
+
+	def test_a_postgres_only_entry_has_no_mariadb_text(self):
+		ev = _ev(app="myapp", dialect="postgres", fields={"po_no": F("Data")})
+		advice = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(ev), tracked_apps=("myapp",))
+		assert advice.entry["db"] == "postgres"
+		text = ir.finding_text(advice)
+		assert "DROP INDEX IF EXISTS" in text and "spans several columns" not in text
+
 
 class TestIndexNames:
 	def test_names_are_short_stable_and_table_unique(self):
@@ -1236,6 +1307,36 @@ class TestGeneratedCode:
 			assert line in code.splitlines(), line
 		assert [code.index(line) for line in lines] == sorted(code.index(line) for line in lines)
 
+	def test_every_commit_sits_inside_a_try_statement(self):
+		"""The pinned Frappe Semgrep rule frappe-manual-commit allows a commit only inside a
+		try/except statement; this mirrors it where semgrep is not installed."""
+		import ast
+
+		tree = ast.parse(ir.ensure_indexes_code([{"doctype": "X", "search_index_field": "a", "db": "mariadb"}]))
+		parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+		commits = [
+			node for node in ast.walk(tree)
+			if isinstance(node, ast.Call) and ast.unparse(node.func) == "frappe.db.commit"
+		]
+		assert len(commits) >= 3
+		for node in commits:
+			while node in parents and not isinstance(node, ast.Try):
+				node = parents[node]
+			assert isinstance(node, ast.Try) and node.handlers
+
+	def test_a_hook_set_as_a_string_becomes_a_list_with_ensure_indexes_last(self):
+		"""D2: most apps set after_install or after_migrate as a string; pasting a list
+		under it replaces it (or is replaced). The comment and the install text show the
+		two-item form, the existing string first."""
+		code = ir.ensure_indexes_code([{"doctype": "X", "search_index_field": "a"}], app_name="myapp")
+		pair = '["<the string already there>", "myapp.optimus_indexes.ensure_indexes"]'
+		assert f"#   after_migrate = {pair}" in code.splitlines()
+		assert "as the last item of each list" in code
+		advice = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(_SI), tracked_apps=("myapp",))
+		for text in (ir.finding_text(advice), ir.card_note(advice)):
+			assert 'as the last item of the after_install, after_sync and after_migrate lists' in text
+			assert f"after_migrate = {pair}" in text
+
 
 def _every_advice():
 	evidences = [
@@ -1277,3 +1378,14 @@ def test_the_docs_show_the_generated_module_verbatim():
 	assert "db" not in composite.entry and single.entry["db"] == "mariadb"
 	doc = (Path(ir.__file__).resolve().parents[2] / "docs" / "AI-FIXING.md").read_text(encoding="utf-8")
 	assert ir.ensure_indexes_code(entries, app_name="your_app") in doc
+
+
+def test_the_docs_say_how_to_remove_an_entry_and_that_the_guards_are_silent():
+	"""D6, O3d: removing an index or entry (the idx_* index and the
+	"<DocType>-<field>-search_index" Property Setter), and the guards that skip
+	without an Error Log row."""
+	from pathlib import Path
+
+	doc = (Path(ir.__file__).resolve().parents[2] / "docs" / "AI-FIXING.md").read_text(encoding="utf-8")
+	assert '"Sales Invoice-po_no-search_index"' in doc and "bench remove-app" in doc
+	assert "skips it without an Error Log row" in doc

@@ -20,7 +20,10 @@ rules a column out. The advisor picks one route:
   ``after_sync`` and ``after_migrate``. Each entry checks its database (an entry that is
   only right on MariaDB or Postgres says so in ``"db"``), its table, its columns and its
   index first; a failing entry rolls back only its own writes and writes an Error Log row
-  instead of stopping bench migrate.
+  instead of stopping bench migrate. Another app's single column gets its index built
+  first and a ``search_index`` Property Setter only after that, so a failed build leaves
+  nothing that a later sync of the DocType would retry outside the guard. Index builds wait
+  at most 300 seconds for a table lock.
 - ``no_code``: an explanation and no code.
 
 Frappe v16.18 facts relied on: MariaDB schema sync drops a single-column index its
@@ -31,7 +34,14 @@ field name and drops by that name (postgres/schema.py:124, :183); frappe.db.add_
 writes column names unquoted on MariaDB (mariadb/database.py:420-425) and strips a
 prefix on Postgres (postgres/database.py:400); on install, after_install runs before
 fixtures are synced and after_sync right after them (installer.py:332-345), and on
-migrate after_migrate runs after them (migrate.py:165-197).
+migrate after_migrate runs after them (migrate.py:165-197). The generated module also
+relies on these, the same on v15: MariaDB ``get_column_index(table, field, unique=False)``
+finds only an index whose one column is the field (mariadb/database.py:383-411), the
+check Frappe's own sync makes before it adds ``<field>_index`` (mariadb/schema.py:88-92);
+``add_index`` writes no Property Setter during install or migrate (mariadb/database.py:428)
+and commits before its DDL, on Postgres too (database.py:451-457); only v16 migrate caps
+``lock_wait_timeout`` (migrate.py:214-221) and install never does; and Error Log indexes
+``reference_name`` on v16 and ``reference_doctype`` on v15, never ``method``.
 """
 
 from __future__ import annotations
@@ -154,29 +164,75 @@ _SHAPE_GENERIC = (
 
 _ENSURE_FUNCTION = '''def ensure_indexes():
 	"""Create each index in INDEXES once. One failed entry never stops the others."""
-	for entry in INDEXES:
-		try:
-			# commit what ran before this entry, so the rollback below undoes only this entry
-			frappe.db.commit()
-			_ensure_index(entry)
-			frappe.db.commit()
-		except Exception:
-			with contextlib.suppress(Exception):
-				frappe.db.rollback()
-				frappe.log_error(title=_title(entry, "was not created"))
+	previous = None
+	try:
+		# commit what ran before, so a rollback below undoes only this function's own work
+		frappe.db.commit()
+		previous = _lock_wait()
+	except Exception:
+		_rollback()
+	try:
+		for entry in INDEXES:
+			try:
+				# commit what ran before this entry, so the rollback below undoes only this entry
+				frappe.db.commit()
+				_ensure_index(entry)
+				frappe.db.commit()
+			except Exception as error:
+				_rollback()
+				with contextlib.suppress(Exception):
+					frappe.log_error(
+						title=_title(entry, f"was not created ({type(error).__name__})"),
+						reference_doctype="DocType",
+						reference_name=entry["doctype"],
+					)
+					frappe.db.commit()
+				# a failed Error Log write must not leave a failed transaction for the next hook
+				_rollback()
+	finally:
+		if previous is not None:
+			try:
+				_lock_wait(previous)
+			except Exception:
+				_rollback()
+
+
+def _lock_wait(value=None):
+	"""Cap how long this connection waits for a table lock at 300 seconds and return the old
+	setting, so an index build on a busy table gives up instead of holding every later query
+	on that table behind it. Called with that old setting, put it back."""
+	if frappe.db.db_type == "mariadb":
+		read, cap = "select @@session.lock_wait_timeout", 300
+		write = "set session lock_wait_timeout = %s"
+	elif frappe.db.db_type == "postgres":
+		read, cap = "select current_setting('lock_timeout')", "300s"
+		write = "select set_config('lock_timeout', %s, false)"
+	else:
+		return None
+	previous = frappe.db.sql(read)[0][0] if value is None else None
+	frappe.db.sql(write, (cap if value is None else value,))
+	return previous
+
+
+def _rollback():
+	# on Postgres a failed statement aborts the transaction until it is rolled back
+	with contextlib.suppress(Exception):
+		frappe.db.rollback()
 
 
 def _title(entry, what):
 	key = entry.get("index_name") or entry.get("search_index_field")
-	return f"Index for {entry['doctype']} {what}: {key}"[:140]
+	return f"ensure_indexes: {key} on {entry['doctype']} {what}"[:140]
 
 
 def _ensure_index(entry):
 	doctype = entry["doctype"]
 	if entry.get("db", frappe.db.db_type) != frappe.db.db_type:
 		title = _title(entry, f"skipped on {frappe.db.db_type}, the entry is for {entry['db']}")
-		if not frappe.db.exists("Error Log", {"method": title}):
-			frappe.log_error(title=title)
+		# one row per entry: the reference columns are indexed, the title (method) is not
+		reference = {"reference_doctype": "DocType", "reference_name": doctype}
+		if not frappe.db.exists("Error Log", {**reference, "method": title}):
+			frappe.log_error(title=title, **reference)
 		return
 	if not frappe.db.table_exists(doctype, cached=False):
 		return
@@ -184,6 +240,11 @@ def _ensure_index(entry):
 	if field:
 		if not frappe.db.has_column(doctype, field):
 			return
+		# the index first: a failed build leaves no Property Setter that a later sync of
+		# this DocType would act on outside this guard
+		if not frappe.db.get_column_index(f"tab{doctype}", field, unique=False):
+			frappe.db.add_index(doctype, [field], index_name=f"{field}_index")
+		# then Search Index on the field, so Frappe's schema sync keeps the index
 		if not frappe.db.exists(
 			"Property Setter",
 			{"doc_type": doctype, "field_name": field, "property": "search_index", "value": "1"},
@@ -191,8 +252,6 @@ def _ensure_index(entry):
 			from frappe.custom.doctype.property_setter.property_setter import make_property_setter
 
 			make_property_setter(doctype, field, "search_index", 1, "Check", validate_fields_for_doctype=False)
-		if not frappe.db.has_index(f"tab{doctype}", f"{field}_index"):
-			frappe.db.updatedb(doctype)
 		return
 	columns = entry["columns"]
 	if not all(frappe.db.has_column(doctype, column.split("(", 1)[0]) for column in columns):
@@ -230,7 +289,7 @@ class IndexAdvice:
 def doctype_of(table: str) -> str | None:
 	"""``"Sales Invoice"`` for ``tabSales Invoice`` (backticks allowed), else None."""
 	name = str(table or "").strip().strip("`")
-	if not _TAB_TABLE_RE.match(name):
+	if not _TAB_TABLE_RE.fullmatch(name):
 		return None
 	return name[3:]
 
@@ -485,7 +544,7 @@ def _bracket_pairs(tokens: list[str]) -> dict[int, int]:
 
 
 def _is_case(tok: str) -> bool:
-	return tok.lower() == "case" and _BARE_NAME_RE.match(tok) is not None
+	return tok.lower() == "case" and _BARE_NAME_RE.fullmatch(tok) is not None
 
 
 def _case_close(tokens: list[str], i: int, end: int, pairs: dict[int, int]) -> int:
@@ -498,7 +557,7 @@ def _case_close(tokens: list[str], i: int, end: int, pairs: dict[int, int]) -> i
 		if tok == "(":
 			k = pairs.get(k, end) + 1
 			continue
-		if _BARE_NAME_RE.match(tok):
+		if _BARE_NAME_RE.fullmatch(tok):
 			low = tok.lower()
 			if low == "case":
 				depth += 1
@@ -550,7 +609,7 @@ def _conjuncts(tokens: list[str]) -> list[list[str]] | None:
 def _chain_end(tokens: list[str], i: int) -> int:
 	"""Index of the last name of the dotted reference that starts at ``i``."""
 	j = i
-	while j + 2 < len(tokens) and tokens[j + 1] == "." and _NAME_RE.match(tokens[j + 2]):
+	while j + 2 < len(tokens) and tokens[j + 1] == "." and _NAME_RE.fullmatch(tokens[j + 2]):
 		j += 2
 	return j
 
@@ -558,7 +617,7 @@ def _chain_end(tokens: list[str], i: int) -> int:
 def _chain_start(tokens: list[str], j: int) -> int:
 	"""Index of the first name of the dotted reference that ends at ``j``."""
 	i = j
-	while i >= 2 and tokens[i - 1] == "." and _NAME_RE.match(tokens[i - 2]):
+	while i >= 2 and tokens[i - 1] == "." and _NAME_RE.fullmatch(tokens[i - 2]):
 		i -= 2
 	return i
 
@@ -572,18 +631,18 @@ def _ref_key(tokens: list[str], i: int, j: int) -> tuple[str, str]:
 def _single_column_branch(tokens: list[str], start: int, end: int, pairs: dict[int, int]):
 	"""The ``(qualifier, column)`` that ``tokens[start:end]`` compares by ``= value``,
 	``IS NULL`` or ``IN (values)``, else None."""
-	if start >= end or not _NAME_RE.match(tokens[start]):
+	if start >= end or not _NAME_RE.fullmatch(tokens[start]):
 		return None
 	j = _chain_end(tokens, start)
 	rest = [tok.lower() for tok in tokens[j + 1 : end]]
 	key = _ref_key(tokens, start, j)
-	if len(rest) == 2 and rest[0] == "=" and _VALUE_RE.match(tokens[j + 2]):
+	if len(rest) == 2 and rest[0] == "=" and _VALUE_RE.fullmatch(tokens[j + 2]):
 		return key
 	if rest == ["is", "null"]:
 		return key
 	if (
 		len(rest) >= 3 and rest[:2] == ["in", "("] and pairs.get(j + 2) == end - 1
-		and all(_VALUE_RE.match(tok) or tok == "," for tok in tokens[j + 3 : end - 1])
+		and all(_VALUE_RE.fullmatch(tok) or tok == "," for tok in tokens[j + 3 : end - 1])
 	):
 		return key
 	return None
@@ -634,9 +693,9 @@ def _column_partner(tokens: list[str], a: int, b: int, qualifiers) -> bool:
 	"""True when ``tokens[a..b]`` is a column of the target table: a name chain that is
 	not a call and not a value word (NULL, CURRENT_DATE, ...), whose qualifier is empty or
 	a target qualifier. A join condition to another table is no partner."""
-	if not _NAME_RE.match(tokens[a]) or (b + 1 < len(tokens) and tokens[b + 1] == "("):
+	if not _NAME_RE.fullmatch(tokens[a]) or (b + 1 < len(tokens) and tokens[b + 1] == "("):
 		return False
-	if a == b and _BARE_NAME_RE.match(tokens[a]):
+	if a == b and _BARE_NAME_RE.fullmatch(tokens[a]):
 		low = tokens[a].lower()
 		if low in _VALUE_WORDS or low.startswith(_VALUE_WORD_PREFIXES):
 			return False
@@ -654,7 +713,7 @@ def _is_expression(tokens: list[str], i: int, j: int, qualifiers) -> bool:
 	if after in _COMPARISONS and j + 2 < len(tokens):
 		if _column_partner(tokens, j + 2, _chain_end(tokens, j + 2), qualifiers):
 			return True
-	if before in _COMPARISONS and i >= 2 and _NAME_RE.match(tokens[i - 2]):
+	if before in _COMPARISONS and i >= 2 and _NAME_RE.fullmatch(tokens[i - 2]):
 		return _column_partner(tokens, _chain_start(tokens, i - 2), i - 2, qualifiers)
 	return False
 
@@ -695,7 +754,7 @@ def _conjunct_refs(tokens: list[str], qualifiers) -> list[tuple[str, set[str], s
 				prev = tokens[i - 1] if i > 0 else ""
 				inner = tokens[i + 1].lower() if i + 1 < close else ""
 				if inner not in ("select", "with"):
-					call = prev.upper() if _BARE_NAME_RE.match(prev) and prev.lower() not in _GROUPING_WORDS else None
+					call = prev.upper() if _BARE_NAME_RE.fullmatch(prev) and prev.lower() not in _GROUPING_WORDS else None
 					has_or, or_key = _level_or(tokens, i + 1, close, pairs)
 					walk(i + 1, close, [*frames, (call, has_or, or_key)])
 				i = close + 1
@@ -705,7 +764,7 @@ def _conjunct_refs(tokens: list[str], qualifiers) -> list[tuple[str, set[str], s
 				walk(i + 1, close, [*frames, ("CASE", False, None)])
 				i = close + 1
 				continue
-			if not _NAME_RE.match(tok):
+			if not _NAME_RE.fullmatch(tok):
 				i += 1
 				continue
 			j = _chain_end(tokens, i)
@@ -854,7 +913,7 @@ def _select_aliases(tokens: list[str]) -> set[str]:
 			continue
 		if tok.lower() == "from":
 			break
-		if tok.lower() == "as" and i + 1 < len(tokens) and _NAME_RE.match(tokens[i + 1]):
+		if tok.lower() == "as" and i + 1 < len(tokens) and _NAME_RE.fullmatch(tokens[i + 1]):
 			aliases.add(tokens[i + 1].strip('`"').lower())
 	return aliases
 
@@ -878,7 +937,7 @@ def _plain_sort(query: str, ftype: str, qualifiers, evidence: TableEvidence | No
 	names: list[str] = []
 	directions: set[str] = set()
 	for item in main:
-		if not item or not _NAME_RE.match(item[0]):
+		if not item or not _NAME_RE.fullmatch(item[0]):
 			return False
 		j = _chain_end(item, 0)
 		rest = [tok.lower() for tok in item[j + 1 :]]
@@ -895,7 +954,7 @@ def _plain_sort(query: str, ftype: str, qualifiers, evidence: TableEvidence | No
 		directions.add(rest[0] if rest else "asc")
 	if len(directions) > 1:
 		return False
-	other_names = [_ref_key(item, 0, _chain_end(item, 0))[1] for item in other if item and _NAME_RE.match(item[0])]
+	other_names = [_ref_key(item, 0, _chain_end(item, 0))[1] for item in other if item and _NAME_RE.fullmatch(item[0])]
 	return not other or other_names == names
 
 
@@ -1155,7 +1214,9 @@ def _search_index_reason(doctype: str, field: str, evidence: TableEvidence, cust
 		return (
 			f'The "{field}" field of "{doctype}" is a Custom Field. Open that Custom Field, tick "Search Index" '
 			"and save: Frappe adds the index when the Custom Field is saved and keeps it. If your app ships "
-			"the Custom Field as a fixture, export the fixture again so it carries search_index 1."
+			"the Custom Field as a fixture, export the fixture again so it carries search_index 1. If your "
+			'app creates it in code, add "search_index": 1 to the field\'s dict in your '
+			"create_custom_fields() call."
 		)
 	if evidence.is_custom_doctype:
 		return (
@@ -1169,11 +1230,18 @@ def _search_index_reason(doctype: str, field: str, evidence: TableEvidence, cust
 	)
 
 
-def _why_kept(evidence: TableEvidence, final: list[str]) -> str:
-	if evidence.dialect == "postgres":
+def _why_kept(db: str | None, final: list[str]) -> str:
+	"""Why Frappe's schema sync keeps the index, for each database the entry runs on
+	(``db`` is the entry's stamp; an entry without one runs on both)."""
+	if db == "postgres":
 		return (
 			"Frappe's schema sync on Postgres drops only indexes named after a bare field name, so this "
 			"explicitly named index stays."
+		)
+	if db is None:
+		return (
+			"Frappe's schema sync keeps it on both databases: on MariaDB it never drops an index that spans "
+			"several columns, and on Postgres it drops only indexes named after a bare field name."
 		)
 	if len(final) > 1:
 		return "Frappe's schema sync never drops an index that spans several columns, so it stays."
@@ -1197,14 +1265,16 @@ def _caveats(evidence: TableEvidence, dropped: list[tuple[str, str]]) -> tuple[s
 	return tuple(out)
 
 
-def _ensure_caveats(evidence: TableEvidence, base: tuple[str, ...], app_name: str, columns_entry: bool) -> tuple[str, ...]:
+def _ensure_caveats(evidence: TableEvidence, base: tuple[str, ...], entry: dict) -> tuple[str, ...]:
 	out: list[str] = []
+	columns_entry = "columns" in entry
 	if columns_entry and any((evidence.fields.get(c) is not None and evidence.fields[c].is_custom_field) for c in base):
 		out.append(
 			"One of these columns is a Custom Field: a fixture-shipped Custom Field is indexed right after "
 			"fixtures sync on install (after_sync)."
 		)
-	if evidence.dialect == "postgres":
+	# every entry that can run on Postgres, an unstamped one profiled on MariaDB too (D4)
+	if columns_entry and entry.get("db") != "mariadb":
 		out.append(
 			"On Postgres, when Frappe syncs this DocType it can run DROP INDEX IF EXISTS on an index named "
 			"after one of these columns, which removes another table's Search Index of that name until that "
@@ -1226,9 +1296,9 @@ def _route(doctype: str, final: list[str], dropped, evidence: TableEvidence, tra
 			route=ROUTE_SEARCH_INDEX, doctype=doctype, table=evidence.table, columns=tuple(final),
 			reason=_search_index_reason(doctype, base[0], evidence, custom_field), caveats=caveats,
 		)
-	if own and _APP_RE.match(evidence.app or ""):
+	if own and _APP_RE.fullmatch(evidence.app or ""):
 		app_name = evidence.app
-	elif len(tracked_apps) == 1 and _APP_RE.match(tracked_apps[0]):
+	elif len(tracked_apps) == 1 and _APP_RE.fullmatch(tracked_apps[0]):
 		app_name = tracked_apps[0]
 	else:
 		app_name = UNKNOWN_APP
@@ -1237,8 +1307,9 @@ def _route(doctype: str, final: list[str], dropped, evidence: TableEvidence, tra
 		app_label = f'the "{evidence.app}" app' if evidence.app else "another app"
 		reason = (
 			f'DocType "{doctype}" belongs to {app_label}, so do not edit it. Your app\'s ensure_indexes() '
-			f'function sets Search Index on its "{base[0]}" field with a Property Setter when none exists and '
-			"syncs the table, so Frappe's schema sync then creates the index and keeps it."
+			f'function creates the index "{base[0]}_index" on "{base[0]}" once, unless that column already has '
+			"an index of its own, and then sets Search Index on the field with a Property Setter, so Frappe's "
+			"schema sync keeps the index."
 		)
 	else:
 		entry = {"doctype": doctype, "columns": list(final), "index_name": optimus_index_name(doctype, base)}
@@ -1252,11 +1323,11 @@ def _route(doctype: str, final: list[str], dropped, evidence: TableEvidence, tra
 			f'Your app\'s ensure_indexes() function creates the index "{entry["index_name"]}" on '
 			f"{_cols_text(base)} once. It skips the index when it already exists or when the table or a column "
 			"is missing, and it writes an Error Log entry instead of stopping bench migrate when the index "
-			f"cannot be built. {_why_kept(evidence, final)}"
+			f"cannot be built. {_why_kept(entry.get('db'), final)}"
 		)
 	return IndexAdvice(
 		route=ROUTE_ENSURE_INDEXES, doctype=doctype, table=evidence.table, columns=tuple(final), reason=reason,
-		caveats=caveats + _ensure_caveats(evidence, base, app_name, "columns" in entry), entry=entry,
+		caveats=caveats + _ensure_caveats(evidence, base, entry), entry=entry,
 		app_name=app_name,
 	)
 
@@ -1477,14 +1548,21 @@ def advise_table(
 	return advise(table, list(columns or []), evidence=evidence_lookup(f"tab{doctype}"), tracked_apps=tracked_apps)
 
 
+def _string_hook_pair(hook: str) -> str:
+	"""A hooks.py value set as a string, turned into a list with ensure_indexes last (D2):
+	a list pasted under the string would replace it, or be replaced by it."""
+	return f'["<the string already there>", "{hook}"]'
+
+
 def _install_text(advice: IndexAdvice) -> str:
 	"""How to install the code, which the report shows above the prose (finding and card)."""
 	app_name = advice.app_name
+	hook = f"{app_name}.{HOOK_MODULE}.ensure_indexes"
 	text = (
-		f"Save the code above as {app_name}/{app_name}/{HOOK_MODULE}.py and add "
-		f'"{app_name}.{HOOK_MODULE}.ensure_indexes" to the {_HOOK_EVENTS_TEXT} lists in hooks.py, '
-		"keeping entries already there. If that file already exists, add only this entry to its "
-		f"INDEXES list: {json.dumps(advice.entry)}."
+		f"Save the code above as {app_name}/{app_name}/{HOOK_MODULE}.py. If that file already exists, add only "
+		f"this entry to its INDEXES list: {json.dumps(advice.entry)}. In hooks.py add \"{hook}\" as the last "
+		f"item of the {_HOOK_EVENTS_TEXT} lists. When hooks.py sets one of them as a string, make it a list "
+		f"that keeps that string first, for example after_migrate = {_string_hook_pair(hook)}."
 	)
 	if app_name == UNKNOWN_APP:
 		text += " Replace your_app with the name of your app in the file path and in hooks.py."
@@ -1524,15 +1602,17 @@ def card_note(advice: IndexAdvice) -> str:
 def ensure_indexes_code(entries: list[dict], *, app_name: str = UNKNOWN_APP) -> str:
 	"""The developer's ``<app>/<app>/optimus_indexes.py``: the hooks.py lines as comments,
 	then ``INDEXES`` (one JSON literal per entry) and ``ensure_indexes()``."""
-	app = app_name if _APP_RE.match(app_name or "") else UNKNOWN_APP
+	app = app_name if _APP_RE.fullmatch(app_name or "") else UNKNOWN_APP
 	hook = f"{app}.{HOOK_MODULE}.ensure_indexes"
 	body = "".join(f"\t{json.dumps(entry)},\n" for entry in entries)
 	hook_lines = "".join(f'#   {event} = ["{hook}"]\n' for event in HOOK_EVENTS)
 	return (
 		f"# {app}/{app}/{HOOK_MODULE}.py\n"
 		f"# In {app}/hooks.py run it after install, right after the install's fixture sync and after\n"
-		"# every migrate (add it to these lists when hooks.py already defines them):\n"
+		"# every migrate. Add it as the last item of each list:\n"
 		+ hook_lines
+		+ "# When hooks.py sets one of them as a string, make it a list that keeps that string first:\n"
+		f"#   after_migrate = {_string_hook_pair(hook)}\n"
 		+ "import contextlib\n\nimport frappe\n\n"
 		'# An entry with "db" runs only on that database (frappe.db.db_type).\n'
 		"INDEXES = [\n" + body + "]\n\n\n" + _ENSURE_FUNCTION

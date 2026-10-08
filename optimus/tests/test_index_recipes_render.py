@@ -212,7 +212,8 @@ def test_card_never_renders_an_add_index_call_without_index_name(evidence):
 	]
 	out = _render(_doc([], cards))
 	calls = re.findall(r"frappe\.db\.add_index\(([^)]*)\)", out)
-	assert len(calls) == 2
+	# two modules, each with the columns route's call and the Property Setter route's own build (D1)
+	assert len(calls) == 4
 	assert all("index_name=" in args for args in calls), calls
 	assert out.count('<pre class="sql-snip">') == 2
 	assert "Do not add this index. Optimus could not read DocType \"Gone DocType\"" in out

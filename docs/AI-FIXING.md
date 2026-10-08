@@ -95,16 +95,18 @@ Index advice for Missing Index, Full Table Scan, Filesort, Temporary Table and L
 - **Shapes that give no code** because an index on the column could not be used: an `OR` between conditions, a `LIKE` with a leading wildcard, a function around the column (`IFNULL`, `YEAR`, `DATE`, the rewrite of `!=` into `IFNULL(col, ?) <> ?`), a `CASE` expression, arithmetic, or the column compared with another column. A query Optimus cannot read (cut at 500 characters, a UNION, a derived table) gets "Optimus could not read how this query combines its filters" text and the EXPLAIN advice, never a claim that an index would not help. About a dozen scanner gaps are recorded as residuals; each fails closed (no code) and never produces a wrong migration.
 - **Column order** is equality columns first, then either one range column or the sort/group columns, not both. For a Filesort or Temporary Table finding whose index serves the sort or grouping, the sort/group columns win: the index is (equality columns, sort columns) and the note says the range filter cannot also use it. Otherwise one range column follows the equality columns and the sort columns are left out, with the reason. The sort wins only when every sort or group item is a bare column of the target table in the same direction; an `IN` or `IS NULL OR =` filter still sorts and does not claim "already sorted". `creation` and `modified` never lead.
 - **Tick Search Index** for one non-text column of a field you control on MariaDB: your app's DocType (an app in Tracked Apps; with Tracked Apps empty no installed app counts as yours), a Custom Field, or a DocType created in the UI. Frappe's schema sync then owns the index.
-- **`ensure_indexes()`** for everything else: composites, a text column (a 255-character prefix on MariaDB), another app's field, and any index on Postgres. Save the module below in your app and register it on `after_install`, `after_sync` and `after_migrate` in hooks.py. `after_sync` runs right after the install's fixture sync, so a fixture-shipped Custom Field is indexed on a fresh install too. If the file already exists, add only the new entry to its `INDEXES` list. Each entry is committed on its own (the previous work is committed first, so a failed entry rolls back only itself), checks the table, its columns and the index first, and a failure writes an Error Log row and moves on, so it never blocks `bench migrate`. An entry gets a `db` stamp (`mariadb` or `postgres`) when it is right on only one database: a Property Setter entry, a text-prefix entry, a Postgres single column, or a MariaDB key wider than 2704 bytes. A stamped entry is skipped, with one Error Log row, on the other database; a plain MariaDB composite has no stamp. For another app's single column on MariaDB the entry sets a `search_index` Property Setter once and syncs the table, so Frappe's schema sync keeps that index. Index names are `idx_<doctype>_<hash>`: at most 53 characters and unique across the schema (Postgres index names are schema-wide).
+- **`ensure_indexes()`** for everything else: composites, a text column (a 255-character prefix on MariaDB), another app's field, and any index on Postgres. Save the module below in your app and register it on `after_install`, `after_sync` and `after_migrate` in hooks.py, as the last item of each list, so your own hooks (which may create the fields it indexes) run first. Many apps set these hooks as a string: a list pasted under that string replaces it, or is replaced by it, so make it a list that keeps the string first (`after_migrate = ["<the string already there>", "your_app.optimus_indexes.ensure_indexes"]`). `after_sync` runs right after the install's fixture sync, so a fixture-shipped Custom Field is indexed on a fresh install too. If the file already exists, add only the new entry to its `INDEXES` list. Each entry is committed on its own (the previous work is committed first, so a failed entry rolls back only itself), checks the table, its columns and the index first, and a failure writes an Error Log row and moves on, so it never blocks `bench migrate`. The failure handling is three separate steps: roll back, write the Error Log row and commit it, roll back again. On Postgres one failed statement aborts the whole transaction, so the last rollback makes sure that a failed Error Log write never leaves the next `after_migrate` hook (another app's) facing an aborted transaction, and a rollback that raises never costs the row. The row's title starts with the index name (the field for a Property Setter entry), then the DocType and the error type (`ensure_indexes: idx_sales_invoice_04c198b9 on Sales Invoice was not created (OperationalError)`), so the 140-character cut on v15 never loses that name; the row keeps the traceback and links to the DocType (Reference DocType `DocType`). An entry gets a `db` stamp (`mariadb` or `postgres`) when it is right on only one database: a Property Setter entry, a text-prefix entry, a Postgres single column, or a MariaDB key wider than 2704 bytes. A stamped entry is skipped, with one Error Log row, on the other database; the check for that row filters on the reference columns, which Error Log indexes (`reference_name` on v16, `reference_doctype` on v15), never on the unindexed title alone, so it never reads the whole Error Log table on every migrate. A plain composite has no stamp and runs on both databases, so it carries the Postgres caveat below too. For another app's single column on MariaDB the entry builds `<field>_index` first, unless the column already has a single-column index of its own under any name (`frappe.db.get_column_index`, the check Frappe's own sync makes before it adds `<field>_index`), and only then writes the `search_index` Property Setter, so Frappe's schema sync keeps that index. That order matters: a Property Setter written before a build that then fails would make the next sync of that DocType (a migrate of the owner app, a Custom Field insert, a Customize Form save) build the index outside this guard and fail there. It never calls `updatedb`, so a later migrate runs no DDL at all once the index exists. `ensure_indexes()` caps the connection's lock wait at 300 seconds while it runs (MariaDB `lock_wait_timeout`, Postgres `lock_timeout`) and puts the old value back afterwards: an install has no cap (only a v16 migrate sets 300 seconds), and an index build that waits for a lock on a busy table holds every later query on that table behind it. Index names are `idx_<doctype>_<hash>`: at most 53 characters and unique across the schema (Postgres index names are schema-wide).
 - **When advice cannot be built**, the finding or card says "Optimus could not build index advice for this finding (or table)", the failure is counted and written once to the bench log, and the export carries the same note. It never blocks the render.
 
 ```python
 # your_app/your_app/optimus_indexes.py
 # In your_app/hooks.py run it after install, right after the install's fixture sync and after
-# every migrate (add it to these lists when hooks.py already defines them):
+# every migrate. Add it as the last item of each list:
 #   after_install = ["your_app.optimus_indexes.ensure_indexes"]
 #   after_sync = ["your_app.optimus_indexes.ensure_indexes"]
 #   after_migrate = ["your_app.optimus_indexes.ensure_indexes"]
+# When hooks.py sets one of them as a string, make it a list that keeps that string first:
+#   after_migrate = ["<the string already there>", "your_app.optimus_indexes.ensure_indexes"]
 import contextlib
 
 import frappe
@@ -118,29 +120,75 @@ INDEXES = [
 
 def ensure_indexes():
 	"""Create each index in INDEXES once. One failed entry never stops the others."""
-	for entry in INDEXES:
-		try:
-			# commit what ran before this entry, so the rollback below undoes only this entry
-			frappe.db.commit()
-			_ensure_index(entry)
-			frappe.db.commit()
-		except Exception:
-			with contextlib.suppress(Exception):
-				frappe.db.rollback()
-				frappe.log_error(title=_title(entry, "was not created"))
+	previous = None
+	try:
+		# commit what ran before, so a rollback below undoes only this function's own work
+		frappe.db.commit()
+		previous = _lock_wait()
+	except Exception:
+		_rollback()
+	try:
+		for entry in INDEXES:
+			try:
+				# commit what ran before this entry, so the rollback below undoes only this entry
+				frappe.db.commit()
+				_ensure_index(entry)
+				frappe.db.commit()
+			except Exception as error:
+				_rollback()
+				with contextlib.suppress(Exception):
+					frappe.log_error(
+						title=_title(entry, f"was not created ({type(error).__name__})"),
+						reference_doctype="DocType",
+						reference_name=entry["doctype"],
+					)
+					frappe.db.commit()
+				# a failed Error Log write must not leave a failed transaction for the next hook
+				_rollback()
+	finally:
+		if previous is not None:
+			try:
+				_lock_wait(previous)
+			except Exception:
+				_rollback()
+
+
+def _lock_wait(value=None):
+	"""Cap how long this connection waits for a table lock at 300 seconds and return the old
+	setting, so an index build on a busy table gives up instead of holding every later query
+	on that table behind it. Called with that old setting, put it back."""
+	if frappe.db.db_type == "mariadb":
+		read, cap = "select @@session.lock_wait_timeout", 300
+		write = "set session lock_wait_timeout = %s"
+	elif frappe.db.db_type == "postgres":
+		read, cap = "select current_setting('lock_timeout')", "300s"
+		write = "select set_config('lock_timeout', %s, false)"
+	else:
+		return None
+	previous = frappe.db.sql(read)[0][0] if value is None else None
+	frappe.db.sql(write, (cap if value is None else value,))
+	return previous
+
+
+def _rollback():
+	# on Postgres a failed statement aborts the transaction until it is rolled back
+	with contextlib.suppress(Exception):
+		frappe.db.rollback()
 
 
 def _title(entry, what):
 	key = entry.get("index_name") or entry.get("search_index_field")
-	return f"Index for {entry['doctype']} {what}: {key}"[:140]
+	return f"ensure_indexes: {key} on {entry['doctype']} {what}"[:140]
 
 
 def _ensure_index(entry):
 	doctype = entry["doctype"]
 	if entry.get("db", frappe.db.db_type) != frappe.db.db_type:
 		title = _title(entry, f"skipped on {frappe.db.db_type}, the entry is for {entry['db']}")
-		if not frappe.db.exists("Error Log", {"method": title}):
-			frappe.log_error(title=title)
+		# one row per entry: the reference columns are indexed, the title (method) is not
+		reference = {"reference_doctype": "DocType", "reference_name": doctype}
+		if not frappe.db.exists("Error Log", {**reference, "method": title}):
+			frappe.log_error(title=title, **reference)
 		return
 	if not frappe.db.table_exists(doctype, cached=False):
 		return
@@ -148,6 +196,11 @@ def _ensure_index(entry):
 	if field:
 		if not frappe.db.has_column(doctype, field):
 			return
+		# the index first: a failed build leaves no Property Setter that a later sync of
+		# this DocType would act on outside this guard
+		if not frappe.db.get_column_index(f"tab{doctype}", field, unique=False):
+			frappe.db.add_index(doctype, [field], index_name=f"{field}_index")
+		# then Search Index on the field, so Frappe's schema sync keeps the index
 		if not frappe.db.exists(
 			"Property Setter",
 			{"doc_type": doctype, "field_name": field, "property": "search_index", "value": "1"},
@@ -155,8 +208,6 @@ def _ensure_index(entry):
 			from frappe.custom.doctype.property_setter.property_setter import make_property_setter
 
 			make_property_setter(doctype, field, "search_index", 1, "Check", validate_fields_for_doctype=False)
-		if not frappe.db.has_index(f"tab{doctype}", f"{field}_index"):
-			frappe.db.updatedb(doctype)
 		return
 	columns = entry["columns"]
 	if not all(frappe.db.has_column(doctype, column.split("(", 1)[0]) for column in columns):
@@ -166,7 +217,11 @@ def _ensure_index(entry):
 	frappe.db.add_index(doctype, columns, index_name=entry["index_name"])
 ```
 
-On Postgres, building an index blocks writes to the table, so add indexes on write-hot tables in a maintenance window; Frappe's schema sync can also drop a Search Index named after a column of a composite index on another table until that table syncs again (a Frappe issue).
+On Postgres, building an index blocks writes to the table, so add indexes on write-hot tables in a maintenance window; Frappe's schema sync can also drop a Search Index named after a column of a composite index on another table until that table syncs again (a Frappe issue). Every entry that can run on Postgres carries this caveat, a plain composite profiled on MariaDB included.
+
+**Silent skips.** When an entry's table or one of its columns does not exist yet (a DocType or a Custom Field that is not synced on this site), `ensure_indexes()` skips it without an Error Log row and tries again on the next migrate. A missing Error Log row therefore does not prove the index exists: check ``SHOW INDEX FROM `tabSales Invoice` `` on MariaDB or `pg_indexes` on Postgres.
+
+**Removing an index or an entry.** Delete the entry from `INDEXES` first, or the next migrate builds the index again. Then drop the index: an `idx_*` index by its name, and for a Property Setter entry delete the Property Setter named `"Sales Invoice-po_no-search_index"` (`<DocType>-<field>-search_index`) and drop `<field>_index`, or let Frappe drop it the next time it syncs that DocType. `bench remove-app` removes neither: the Property Setter belongs to no module and the indexes belong to another app's table, so do the same by hand when you uninstall the app that holds `optimus_indexes.py`.
 
 ### 2.4 Connectivity probe (Optimus Settings → AI → "Test connection" button)
 

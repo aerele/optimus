@@ -25,13 +25,27 @@ versions may contain breaking changes see migration notes below).
   columns, not both; a Filesort or Temporary Table index serves the sort and says the
   range filter cannot also use it. A single non-text column of a field you control on MariaDB
   (an app in Tracked Apps, a Custom Field or a DocType created in the UI) gets "tick
-  Search Index". Every other index becomes one entry of a generated, idempotent
-  `ensure_indexes()` for your app, registered on `after_install`, `after_sync` and
-  `after_migrate`: a short, table-unique `index_name`, a `db` stamp on an entry that is
-  right on only one database,
-  `table_exists`, `has_column` and `has_index` guards, a commit per entry, a
-  `search_index` Property Setter for another app's single column on MariaDB, an Error Log row
-  instead of a failed migrate, and "if the file exists, add only this entry" guidance.
+  Search Index"; a Custom Field your app creates in code gets `"search_index": 1` in its
+  `create_custom_fields()` dict. Every other index becomes one entry of a generated, idempotent
+  `ensure_indexes()` for your app, registered as the last item of `after_install`, `after_sync`
+  and `after_migrate` (a hook set as a string becomes a list that keeps the string first, since
+  a pasted list would replace it): a short, table-unique `index_name`, a `db` stamp on an entry
+  that is right on only one database,
+  `table_exists`, `has_column` and `has_index` guards, a commit per entry, an Error Log row
+  instead of a failed migrate, and "if the file exists, add only this entry" guidance. For
+  another app's single column on MariaDB the entry builds `<field>_index` itself, unless the
+  column already has a single-column index of its own, and only then writes the `search_index`
+  Property Setter. It never calls `updatedb`: a setter committed before a failed build made the
+  owner app's next DocType sync retry the build outside the guard and fail the migrate, and an
+  index Frappe had named `<field>` re-ran the sync on every migrate. A failed entry rolls back,
+  writes its Error Log row and commits it, then rolls back again, each step on its own, so a
+  failed log write never leaves a Postgres transaction aborted for the next `after_migrate`
+  hook. The row's title starts with the index (or field) name, then the DocType and the error
+  type, so the 140-character cut keeps the name. The once-only "skipped on this database" row is looked
+  up by Error Log's indexed reference columns, not by a scan of the unindexed title. Index
+  builds wait at most 300 seconds for a table lock (an install has no cap), and the old
+  setting comes back afterwards. An entry without a `db` stamp carries the Postgres caveat
+  too.
 - Retire the index-only AI prompt, helpers and refresh step, and the system prompt's
   own index rules. Slow Query prompts carry the deterministic advice as data. The
   index-AI Settings field is read-only, has no effect and is labelled "retired".
@@ -82,9 +96,13 @@ versions may contain breaking changes see migration notes below).
   suggestions and the table index-AI advice of earlier versions are hidden; their
   tokens still count in the report's AI token total.
 - To apply index advice, save the generated `optimus_indexes.py` in your app and add
-  its `ensure_indexes` to `after_install`, `after_sync` and `after_migrate` in
-  hooks.py. If the file exists, add only the new entry to its `INDEXES` list. A
-  fixture-shipped Custom Field is indexed right after fixtures sync on install.
+  its `ensure_indexes` as the last item of `after_install`, `after_sync` and
+  `after_migrate` in hooks.py, turning a hook set as a string into a list that keeps the
+  string first. If the file exists, add only the new entry to its `INDEXES` list. A
+  fixture-shipped Custom Field is indexed right after fixtures sync on install. To remove
+  an entry, delete it from `INDEXES`, drop its index, and for a Property Setter entry
+  delete the `<DocType>-<field>-search_index` Property Setter; `bench remove-app` removes
+  neither (docs/AI-FIXING.md section 2.3).
 - On Postgres, Frappe's schema sync can drop a Search Index named after a column of a
   new composite index on another table until that table syncs again (a Frappe issue);
   check `pg_indexes` after `bench migrate`.
