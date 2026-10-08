@@ -639,7 +639,7 @@ _ROUND4_FIELDS = {
 _SII = _ev("Sales Invoice Item", fields={
 	"item_code": F("Link"), "qty": F("Int"), "delivered_qty": F("Int"), "against_sales_order": F("Link"),
 })
-_R4 = _lookup(_ev(fields=_ROUND4_FIELDS), _SII)
+_R4 = _lookup(_ev(fields=_ROUND4_FIELDS, extra_types={"modified": "datetime"}), _SII)
 
 
 def _r4(ftype, where, *, table="tabSales Invoice"):
@@ -715,8 +715,9 @@ class TestExpressions:
 	def test_arithmetic_on_a_column_is_left_out(self):
 		advice = _r4("Full Table Scan", "`grand_total` - `outstanding_amount` > ? AND `company`=?")
 		assert advice.columns == ("company",)
-		assert "Optimus left out grand_total (compared through arithmetic, which an index on the column cannot use)" in (
-			ir.finding_text(advice)
+		assert (
+			"Optimus left out grand_total (compared with another column or through arithmetic, which an index on "
+			"the column cannot use)" in ir.finding_text(advice)
 		)
 		advice = _r4("Full Table Scan", "`grand_total` - `outstanding_amount` > ?")
 		assert advice.route == ir.ROUTE_NO_CODE and "arithmetic on grand_total" in advice.reason
@@ -724,6 +725,7 @@ class TestExpressions:
 	def test_a_column_compared_with_another_column_is_left_out(self):
 		advice = _r4("Full Table Scan", "`qty` > `delivered_qty` AND `item_code`=?", table="tabSales Invoice Item")
 		assert advice.columns == ("item_code",)
+		assert "Optimus left out qty (compared with another column or through arithmetic" in ir.finding_text(advice)
 
 	def test_joins_value_arithmetic_and_literal_words_stay_usable(self):
 		q = (
@@ -793,12 +795,66 @@ class TestIndexDesign:
 		assert advice.columns == ("company", "posting_date")
 		assert "Optimus left out due_date (it comes after the range condition on posting_date" in ir.finding_text(advice)
 
-	def test_a_sort_after_a_range_is_left_out_and_said(self):
-		advice = _r4("Filesort", "`company`=? AND `posting_date` > ? ORDER BY `customer`")
+
+
+class TestRangeAndSort:
+	"""Fix round 5: a Filesort or Temporary Table finding is about the sort or the
+	grouping, so with a range filter on another column the index takes the equality
+	columns and the sort or group column, and the range filter is left out. A range on
+	the sort column itself is one index for both. A Full Table Scan keeps the range."""
+
+	_WHERE = "`company`=? AND `posting_date` BETWEEN ? AND ?"
+
+	def test_a_filesort_with_a_range_filter_indexes_the_sort(self):
+		advice = _r4("Filesort", f"{self._WHERE} ORDER BY `modified` DESC")
+		assert advice.columns == ("company", "modified")
+		text = ir.finding_text(advice)
+		assert text.startswith("Index the filter columns followed by the sort column")
+		assert (
+			"Optimus left out posting_date (the range filter on posting_date cannot also use this index, which "
+			"removes the sort instead)" in text
+		)
+
+	def test_a_range_on_the_sort_column_is_one_index_for_both(self):
+		advice = _r4("Filesort", f"{self._WHERE} ORDER BY `posting_date` DESC")
 		assert advice.columns == ("company", "posting_date")
 		text = ir.finding_text(advice)
-		assert "The sort column comes after the range condition on posting_date" in text
-		assert "Optimus left out customer (it comes after the range condition on posting_date" in text
+		assert text.startswith("Index the filter columns followed by the sort column") and "left out" not in text
+
+	def test_a_sort_column_the_index_cannot_hold_keeps_the_range(self):
+		"""ORDER BY idx (Frappe metadata) gives no sort column, so the range filter stays."""
+		advice = _r4("Filesort", f"{self._WHERE} ORDER BY `idx`")
+		assert advice.columns == ("company", "posting_date")
+		assert "The sort column is a Frappe metadata column or an aggregate" in ir.finding_text(advice)
+
+	def test_a_metadata_sort_column_never_leads_the_index(self):
+		"""creation may only trail a business column; with no equality column before it the
+		range filter stays and the sort is left to Frappe's own creation index."""
+		advice = _r4("Filesort", "`po_no` <> ? ORDER BY `creation` DESC")
+		assert advice.columns == ("po_no",)
+		advice = _r4("Filesort", "`po_no` <> ? AND `company`=? ORDER BY `creation` DESC")
+		assert advice.columns == ("company", "creation")
+
+	def test_a_full_table_scan_keeps_the_range_column(self):
+		assert _r4("Full Table Scan", self._WHERE).columns == ("company", "posting_date")
+		# an index that serves no sort keeps the range column and leaves the sort column out
+		order = {"company": "eq", "posting_date": "range", "modified": "sort"}
+		cols, dropped = ir._index_order(["company", "posting_date", "modified"], order)
+		assert cols == ["company", "posting_date"]
+		assert dropped == [("modified", "it comes after the range condition on posting_date, so the index cannot use it")]
+
+	def test_a_temporary_table_with_a_range_filter_indexes_the_group(self):
+		advice = _r4("Temporary Table", "`company`=? AND `posting_date` > ? GROUP BY `customer`")
+		assert advice.columns == ("company", "customer")
+		assert (
+			"Optimus left out posting_date (the range filter on posting_date cannot also use this index, which "
+			"removes the temporary table instead)" in ir.finding_text(advice)
+		)
+
+	def test_an_equality_on_the_sort_column_stays_first(self):
+		advice = _r4("Filesort", "`customer`=? AND `posting_date` > ? ORDER BY `customer`, `modified`")
+		assert advice.columns == ("customer", "modified")
+		assert _r4("Filesort", "`customer`=? AND `company`=? ORDER BY `customer`").columns == ("customer", "company")
 
 
 class TestPostgresRowWidth:

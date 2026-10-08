@@ -140,6 +140,8 @@ _TYPE_LEADS: dict[str, str] = {
 	),
 }
 _FILTER_LEAD = _TYPE_LEADS["Full Table Scan"]
+# What an index on the sort or group column removes, for the finding types about it.
+_SERVES: dict[str, str] = {"Filesort": "the sort", "Temporary Table": "the temporary table"}
 _SHAPE_GENERIC = (
 	"a LIKE pattern that starts with a wildcard, a function or IFNULL wrapped around the column, "
 	"an OR between conditions, or a filter that matches most of the table's rows"
@@ -300,8 +302,8 @@ def _explain_columns(ftype: str, table: str, query: str, parse) -> tuple[str, li
 	if key is None:
 		return table, []
 	out: list[tuple[str, str]] = []
-	seen: set[str] = set()
 	for labels in _CLAUSES_BY_TYPE.get(ftype, (("WHERE", "JOIN"),)):
+		seen: set[str] = set()  # per clause group: a filter column can also be the sort column
 		for label, col in by_table.get(key) or []:
 			if label not in labels or col in seen:
 				continue
@@ -396,7 +398,7 @@ _SHAPE_WHY: dict[str, str] = {
 	"function": "compared through the function {name}(), which an index on the column cannot use",
 	"NOT": "compared inside a NOT (...), which an index on the column cannot use",
 	"CASE": "compared inside a CASE expression, which an index on the column cannot use",
-	"expression": "compared through arithmetic, which an index on the column cannot use",
+	"expression": "compared with another column or through arithmetic, which an index on the column cannot use",
 	"unsure": "a filter Optimus could not place with certainty",
 }
 _FUNCTION = "function:"  # a kind "function:IFNULL" records the innermost call's name
@@ -767,15 +769,25 @@ def _target_qualifiers(query: str, table: str) -> frozenset[str]:
 	return frozenset({table} | {alias for alias, real in (found or {}).items() if real == table})
 
 
-def _index_order(cols: list[str], comparisons: Mapping[str, str]) -> tuple[list[str], list[tuple[str, str]]]:
-	"""Recipe columns in index order: equality columns first, then at most one range
-	column, then the sort or group columns. A column after a range column cannot use the
-	index, so it is left out with the reason."""
+def _index_order(
+	cols: list[str], comparisons: Mapping[str, str], *, serves: str = "",
+) -> tuple[list[str], list[tuple[str, str]]]:
+	"""Recipe columns in index order: equality columns first, then the sort or group
+	columns. A range column (a sort column that is also range-filtered counts as the sort
+	column, one index serving both) cannot share an index with a sort column after it:
+	when the index ``serves`` a sort or a grouping (Filesort, Temporary Table) the range
+	filter is left out, otherwise one range column follows the equality columns and the
+	rest is left out. Each left-out column comes with the reason."""
 	eq = [col for col in cols if comparisons.get(col, "eq") == "eq"]
 	ranges = [col for col in cols if comparisons.get(col) == "range"]
 	sorts = [col for col in cols if comparisons.get(col) == "sort"]
 	if not ranges:
 		return eq + sorts, []
+	if serves and sorts and apply_metadata_rule(eq + sorts) == eq + sorts:  # creation never alone or first
+		return eq + sorts, [
+			(col, f"the range filter on {col} cannot also use this index, which removes {serves} instead")
+			for col in ranges
+		]
 	why = f"it comes after the range condition on {ranges[0]}, so the index cannot use it"
 	return eq + ranges[:1], [(col, why) for col in ranges[1:] + sorts]
 
@@ -1152,13 +1164,15 @@ def advise(
 	query: str = "",
 	unusable: Mapping[str, set[str]] | None = None,
 	comparisons: Mapping[str, str] | None = None,
+	serves: str = "",
 ) -> IndexAdvice | None:
 	"""The advice for indexing ``columns`` of ``table``, or None when there is nothing
 	to advise (not a DocType table, no usable column). ``unusable`` names the columns
 	the query's predicate shape keeps an index from using (``_scan_where``): they are
 	left out and named. ``comparisons`` (``{column: "eq" | "range" | "sort"}``) puts the
-	columns in index order (``_index_order``). A recipe made only of Check fields, or with
-	nothing left, is NO_CODE."""
+	columns in index order (``_index_order``; ``serves`` names the sort or the temporary
+	table a Filesort or Temporary Table index removes). A recipe made only of Check
+	fields, or with nothing left, is NO_CODE."""
 	doctype = doctype_of(table)
 	if doctype is None:
 		return None
@@ -1169,7 +1183,7 @@ def advise(
 	cols = _clean_columns([c for c in columns or [] if c not in (unusable or {})], cap=False)
 	order_dropped: list[tuple[str, str]] = []
 	if comparisons:
-		cols, order_dropped = _index_order(cols, comparisons)
+		cols, order_dropped = _index_order(cols, comparisons, serves=serves)
 	cols = cols[:MAX_INDEX_COLUMNS]
 	if not cols and not shapes:
 		return None
@@ -1198,22 +1212,11 @@ def _is_check_field(evidence: TableEvidence, col: str) -> bool:
 	return field is not None and field.fieldtype == "Check"
 
 
-def _lead_for(ftype: str, labelled: list[tuple[str, str]], advice: IndexAdvice, comparisons=None) -> str:
+def _lead_for(ftype: str, labelled: list[tuple[str, str]], advice: IndexAdvice) -> str:
 	if advice.route == ROUTE_NO_CODE:
 		return ""
 	kept = {c.split("(", 1)[0] for c in advice.columns}
 	labels = {label for label, col in labelled if col in kept}
-	ranged = next((c for c in advice.columns if (comparisons or {}).get(c) == "range"), None)
-	if ftype == "Filesort" and "ORDER BY" not in labels and ranged:
-		return (
-			_FILTER_LEAD + f" The sort column comes after the range condition on {ranged}, so this index "
-			"cannot return the rows in order and the sort stays."
-		)
-	if ftype == "Temporary Table" and "GROUP BY" not in labels and ranged:
-		return (
-			_FILTER_LEAD + f" The grouping column comes after the range condition on {ranged}, so the "
-			"temporary table stays."
-		)
 	if ftype == "Filesort" and "ORDER BY" not in labels:
 		return (
 			_FILTER_LEAD + " The sort column is a Frappe metadata column or an aggregate, which this index "
@@ -1250,18 +1253,21 @@ def advise_finding(
 		# top_queries keeps QUERY_TEXT_LIMIT characters, so a Slow Query that long may be cut
 		truncated = ftype == "Slow Query" and len(query) >= QUERY_TEXT_LIMIT
 		unusable, usable = _scan_where(query, labelled, _target_qualifiers(query, table), truncated=truncated)
-		comparisons = {
-			col: "sort" if label in ("ORDER BY", "GROUP BY") else "eq" if label == "JOIN" else usable.get(col, "range")
-			for label, col in labelled
-		}
+		comparisons = {}
+		for label, col in labelled:  # filters come first, then the sort or group columns
+			if label in ("ORDER BY", "GROUP BY"):
+				if comparisons.get(col) != "eq":  # an equality-filtered sort column stays an equality column
+					comparisons[col] = "sort"
+			else:
+				comparisons.setdefault(col, "eq" if label == "JOIN" else usable.get(col, "range"))
 	advice = advise(
 		table, [col for _label, col in labelled], evidence=evidence_lookup(f"tab{doctype}"),
 		tracked_apps=tracked_apps, explain_row=detail.get("explain_row"), query=query, unusable=unusable,
-		comparisons=comparisons,
+		comparisons=comparisons, serves=_SERVES.get(ftype, ""),
 	)
 	if advice is None:
 		return None
-	return replace(advice, lead=_lead_for(ftype, labelled, advice, comparisons))
+	return replace(advice, lead=_lead_for(ftype, labelled, advice))
 
 
 def advise_table(
