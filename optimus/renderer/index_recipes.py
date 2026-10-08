@@ -7,7 +7,8 @@
 ``recipe_enrichment`` collects for the table (DocField flags, real column types, existing
 indexes). A finding also has its query, so its columns first pass the predicate-shape
 check (OR, wildcard LIKE, a function, CASE or arithmetic around the column) and are put
-in index order (equality columns, then one range column, then the sort column); a table
+in index order (equality columns first, then either one range column or the sort/group
+columns, not both); a table
 card has no query and gets neither, so the two can differ when a query's filter shape
 rules a column out. The advisor picks one route:
 

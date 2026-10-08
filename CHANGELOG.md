@@ -16,19 +16,21 @@ versions may contain breaking changes see migration notes below).
   index findings and per-table cards, so they always agree. It reads each field's
   Search Index and Unique flags, the real column types, the table's existing indexes
   and the finding's EXPLAIN key first: an already indexed, unique, missing or
-  reserved-word column, a key over 3072 bytes (about 2704 on Postgres), a leading
-  text column on Postgres, a query over 4 KB, or a query shape an index cannot use
+  reserved-word column, a leading text column on Postgres, a first column alone wider than the key
+  limit (3072 bytes; 2704 on Postgres), a query over 4 KB (Missing Index excepted), or a query shape an index cannot use
   (OR, a leading-wildcard LIKE, a function, CASE or arithmetic around the column) gets
   an explanation and no code; a query Optimus cannot read says so. A trailing
-  `creation` or `modified` column never makes a recipe "no code". Columns are ordered
-  equality, then range, then sort, and a Filesort over a range filter says the range
-  cannot use the index. A single non-text column of a field you control on MariaDB
+  `creation` or `modified` column never makes a recipe "no code". Trailing columns of a wide key are left out until it fits, and the note names them.
+  Columns are ordered equality first, then either one range column or the sort/group
+  columns, not both; a Filesort or Temporary Table index serves the sort and says the
+  range filter cannot also use it. A single non-text column of a field you control on MariaDB
   (an app in Tracked Apps, a Custom Field or a DocType created in the UI) gets "tick
   Search Index". Every other index becomes one entry of a generated, idempotent
   `ensure_indexes()` for your app, registered on `after_install`, `after_sync` and
-  `after_migrate`: a short, table-unique `index_name`, a `db` stamp per entry,
+  `after_migrate`: a short, table-unique `index_name`, a `db` stamp on an entry that is
+  right on only one database,
   `table_exists`, `has_column` and `has_index` guards, a commit per entry, a
-  `search_index` Property Setter for another app's single column, an Error Log row
+  `search_index` Property Setter for another app's single column on MariaDB, an Error Log row
   instead of a failed migrate, and "if the file exists, add only this entry" guidance.
 - Retire the index-only AI prompt, helpers and refresh step, and the system prompt's
   own index rules. Slow Query prompts carry the deterministic advice as data. The
@@ -61,8 +63,8 @@ versions may contain breaking changes see migration notes below).
   `fixes` gains `gated`, `excluded` and `skipped_ineligible`.
   `optimus.api.ai_capabilities` always reports `indexes: false`.
 - `optimus.api.export_session` no longer exports `suggested_ddl` or `ai_index`.
-  Index-family findings carry `index_advice` and a `fix_hint` taken from the report
-  text; a table's `recommended_index` gains `requested_columns`.
+  Index-family findings carry `index_advice` and, when advice exists, a `fix_hint`
+  taken from the report text (otherwise the stored hint stays and `index_advice` is null); a table's `recommended_index` gains `requested_columns`.
 
 ### Upgrade notes
 
