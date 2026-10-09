@@ -58,18 +58,22 @@ class TestResolveSourcePath:
 
 
 class TestReadersUseTheResolver:
-	def test_read_source_window_works_on_app_relative_path(self):
-		window = renderer._read_source_window(_APP_REL, 1, before=2, after=5)
-		assert window, "source window must be readable via the app-relative path"
-		# line 1 is the target.
-		assert any(row.get("is_target") and row.get("lineno") == 1 for row in window)
+	def test_the_grounding_window_reads_an_app_relative_path(self):
+		from optimus import ai_grounding
+		from optimus.renderer import source
+
+		window = ai_grounding.grounding_window(source._source_lines(_APP_REL), 1, 2, 5)
+		assert window.rows, "source window must be readable via the app-relative path"
+		assert any(row.get("is_target") and row.get("lineno") == 1 for row in window.rows)
 
 	def test_read_source_snippet_works_on_app_relative_path(self):
 		snippet = renderer._read_source_snippet(_APP_REL, 5)
 		assert snippet and any(row.get("lineno") == 5 for row in snippet)
 
 	def test_unreadable_path_still_returns_none(self):
-		assert renderer._read_source_window("nope/nope_xyzq.py", 3) is None
+		from optimus.renderer import source
+
+		assert source._source_lines("nope/nope_xyzq.py") is None
 		assert renderer._read_source_snippet("<string>", 3) is None
 
 
@@ -263,3 +267,34 @@ class TestAiPayloadRecordedQueries:
 			actions_by_idx=actions_by_idx,
 		)
 		assert "example_queries" not in (payload["technical_detail"] or {})
+
+
+def test_source_lines_split_like_python_does(tmp_path):
+	"""Universal newlines in, then "\\n" only; one trailing empty entry dropped."""
+	from optimus.renderer import source
+
+	path = tmp_path / "m.py"
+	path.write_bytes("a = 1\r\nb = '\u2028'\x0c\rc = 3\x1d\nd = 4\n".encode())
+	assert source._source_lines(str(path)) == ["a = 1", "b = '\u2028'\x0c", "c = 3\x1d", "d = 4"]
+	path.write_bytes(b"x = 1\n\n")
+	assert source._source_lines(str(path)) == ["x = 1", ""]
+	path.write_bytes(b"x = 1")
+	assert source._source_lines(str(path)) == ["x = 1"]
+	path.write_bytes(b"")
+	assert source._source_lines(str(path)) == []
+
+
+def test_every_source_reader_uses_the_newline_only_splitter(tmp_path, monkeypatch):
+	"""F6: the Server Script body and the out-of-bench decorator fallback split like the file reader."""
+	from optimus import server_script_source
+	from optimus.renderer import source, source_resolution
+
+	assert source.split_source_lines("a\r\nb\x0c\rc\u2028d\n") == ["a", "b\x0c", "c\u2028d"]
+	monkeypatch.setattr(
+		server_script_source, "get_server_script_record", lambda name, cache=None: {"script": "a = 1\x0c\r\nb = 2\n"},
+	)
+	assert server_script_source.get_server_script_lines("x") == ["a = 1\x0c", "b = 2"]
+	path = tmp_path / "d.py"
+	path.write_text("x = 1\x0c\n@deco\ndef target():\n\tpass\n", encoding="utf-8")
+	monkeypatch.setattr(source_resolution, "_source_lines", lambda *a, **k: None)
+	assert source_resolution._skip_decorators_to_def(str(path), 2, "target") == 3

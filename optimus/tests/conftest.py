@@ -288,6 +288,17 @@ def _reset_dbdialect_cache():
 	yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_log_line_dedupe():
+	"""safe_call.log_error_line skips a repeated line for a minute; each test starts clean."""
+	try:
+		from optimus import safe_call
+		safe_call._RECENT_LINES.clear()
+	except Exception:
+		pass
+	yield
+
+
 def load_fixture(name: str) -> dict:
 	"""Load a JSON fixture from tests/fixtures/<name>.json."""
 	path = os.path.join(FIXTURES_DIR, f"{name}.json")

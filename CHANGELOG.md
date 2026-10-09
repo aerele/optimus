@@ -8,6 +8,270 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.68] - 2026-10-02
+
+### Changed
+
+- Make index-advice and gate failures diagnosable. The `optimus: index advice failed` log
+  line now names `(finding type or table: error type)` pairs (deduped, at most 10) and, like
+  the new `optimus: hot-line gate failed: <type>` and `optimus: evidence read failed for
+  <table>: <type>` lines, is written at ERROR, the lowest level a production site keeps. A
+  table whose evidence read raised says Optimus could not read it, not that it has no
+  DocType. The auto-analyze warnings and the Refresh toasts say what happened and where to
+  look (Error Log titles `optimus ai auto-suggest` and `optimus ai backfill`), name the
+  setting "Excluded finding types", point at AI > Refresh AI suggestions, and no longer count
+  index findings as "not sent to the AI". AI-FIXING 6.5 has a runbook table for the new
+  signals.
+- Build index advice from analyzer evidence, without an AI call. One advisor serves
+  index findings and per-table cards, so they always agree. It reads each field's
+  Unique flag and type, the real column types, the table's existing indexes and the
+  finding's EXPLAIN key first, and never takes the Search Index flag as proof of an index
+  (on Postgres a Search Index is named after the bare field, schema-wide, so only one
+  table gets it). A finding recipe's equality columns are put in one fixed order (business
+  columns, Check fields, creation and modified, then a column that cannot lead, each by
+  name), so the same filter in any predicate order gives one recipe and one index name; a
+  table card keeps the analyzer's most-used-first order. A recipe of several columns gets
+  no code when an existing index starts with its equality columns in any order and then
+  its range or sort columns in order (ERPNext's GL Entry and Stock Ledger Entry composites
+  are no longer duplicated), when an equality column is unique on its own or a unique
+  index's columns are all among its equality columns, or when an existing index serves
+  every column but its Check fields (Frappe's creation index serves `creation > ? AND
+  is_return = ?`; the text says a Check field usually matches most rows and names the
+  index that helps a query for the rare value, since Optimus cannot see the values); a one-column recipe also when its column is unique on its own, leads an
+  index or is the index EXPLAIN names. A lookup by `name` (the primary key), or by
+  `parent` on a child table whose real index list has an index that `parent` leads
+  (MariaDB adds one to every child table, Postgres none), gets no code, but only when the
+  key is compared with a value (`?`, a literal, an IN list or subquery, or another table's
+  column the query fixes to a value): a join condition such as `pr_item.parent = pr.name`
+  is no lookup, since the database may read either table first. A recipe wider than four
+  columns keeps the columns of an existing index first, then by field type, Check fields
+  last, and names the rest; if that would leave out every column of an index the query
+  fixes that is unique, or whose lead column ranks by field type at least as well as the
+  weakest kept column (GL Entry's voucher_detail_no_index), there is no code, since a new
+  index cannot narrow the rows further (a Select index left out behind Link columns may
+  match many rows, so the recipe stays). `!=`, `<>`
+  and `NOT` never narrow an index. A sort column the index cannot return in order is left
+  out rather than appended, but a captured `IN (?)` (Frappe's recorder collapses every IN
+  list to one placeholder) may be one value, so it keeps the sort with a hedged lead. An
+  existing sort-serving index on a Filesort finding was rejected by the optimizer, so the
+  range recipe is given and names that index, unless the query has a LIMIT; that kept
+  verdict names the range recipe and needs an index that returns the rows in the order of
+  the whole ORDER BY. The capture-time EXPLAIN is no evidence: MariaDB's possible_keys
+  never lists an index that only serves ORDER BY, and a Postgres plan node names only the
+  index it used. A sort recipe that keeps only some sort columns (the cap left the rest
+  out) gives way to the recipe without the sort, and no lead says the rows come back
+  sorted unless every sort column is in the index or fixed by the filter. A Filesort
+  recipe of sort columns only, for a query with no LIMIT and no filter it narrows, gets no
+  code, since the database rarely walks a whole index instead of sorting. A column the table only feeds into a LEFT JOIN that
+  the WHERE keeps a LEFT JOIN is no index candidate. A missing column, a MariaDB reserved word on MariaDB (Postgres
+  quotes names; such an entry is Postgres-only), a JSON field (MariaDB reports it as
+  longtext, so the field type decides), a leading text column on Postgres, a first column
+  alone wider than the key limit (3072 bytes; 2704 on Postgres), a query over 4 KB (Missing
+  Index excepted), or a query shape an index cannot use (OR, a leading-wildcard LIKE, a
+  function, CASE or arithmetic around the column) gets an explanation and no code. A query
+  Optimus cannot read, a UNION that filters the table in more than one branch, a WHERE
+  column the SQL parser did not report (an unquoted `account`, `user`, `type`, `date` and
+  others, or an unqualified column of a query on several tables, when the filter shape lets
+  an index use it; the only table of the main FROM gets such a column advised instead, and
+  its ORDER BY or GROUP BY columns the parser left out too, in the clause's order),
+  and a table Optimus has
+  no information about (tabSessions, tabSeries, a removed DocType) say so, and
+  a card then opens with "Optimus cannot say whether this index would help." instead of
+  "Do not add this index.". For an existing index the text names only a filter shape the
+  query has, and a card or Missing Index finding is never told to rewrite a filter. A
+  trailing `creation` or `modified` column never makes a recipe "no code". Trailing columns of a wide key are left out until it fits, and the note names them.
+  Columns are ordered equality first, then either one range column or the sort/group
+  columns, not both; a Filesort or Temporary Table index serves the sort and says the
+  range filter cannot also use it, except a Filesort query with no LIMIT, which reads every
+  row it matches, so the range filter wins and the note says the sort stays. A single non-text column of a field you control on MariaDB
+  (an app in Tracked Apps, a Custom Field or a DocType created in the UI) gets "tick
+  Search Index"; a Custom Field your app creates in code gets `"search_index": 1` in its
+  `create_custom_fields()` dict. Every other index becomes one entry of a generated, idempotent
+  `ensure_indexes()` for your app, registered as the last item of `after_install`, `after_sync`
+  and `after_migrate` (a hook set as a string becomes a list that keeps the string first, since
+  a pasted list would replace it): a short, table-unique `index_name`, a `db` stamp on an entry
+  that is right on only one database,
+  `table_exists`, `has_column` and `has_index` guards, a commit per entry, an Error Log row
+  instead of a failed migrate, and "if the file exists, add only this entry" guidance. For
+  another app's single column on MariaDB the entry builds `<field>_index` itself, unless the
+  column already has a single-column index of its own, and only then writes the `search_index`
+  Property Setter. It never calls `updatedb`: a setter committed before a failed build made the
+  owner app's next DocType sync retry the build outside the guard and fail the migrate, and an
+  index Frappe had named `<field>` re-ran the sync on every migrate. A failed entry rolls back,
+  writes its Error Log row and commits it, then rolls back again, each step on its own, so a
+  failed log write never leaves a Postgres transaction aborted for the next `after_migrate`
+  hook. The row's title starts with the index (or field) name and the error type and ends
+  with the DocType, so the 140-character cut can shorten only the DocType. The once-only
+  "skipped on this database" row is looked up by Error Log's reference columns, which MariaDB
+  indexes, not by a scan of the unindexed title; on Postgres Frappe's Search Index names are
+  schema-wide, so Error Log may have no such index and the lookup can scan it. Index
+  builds wait at most 300 seconds for a table lock (an install has no cap), and the old
+  setting comes back afterwards. An entry without a `db` stamp carries the Postgres caveat
+  too.
+- Retire the index-only AI prompt, helpers and refresh step, and the system prompt's
+  own index rules. Slow Query prompts carry the deterministic advice as data. The
+  index-AI Settings field is read-only, has no effect and is labelled "retired".
+- Limit AI finding fixes to N+1 Query, Slow Query, Redundant Call and Hot Line. A Hot
+  Line goes to the AI unless it sits in framework code, Phase 1 named its callee, or
+  Phase 2 measured at least 1000 microseconds per hit on a line that calls a
+  non-builtin; a gate that raises fails closed. Framework N+1 and index findings do
+  not call the model, and the report says why.
+- Correct the Redundant Call walk: sidecar stack paths are cut to apps-relative form
+  (absolute bench paths no longer hide user code) at the bench's apps dir, the `/apps/`
+  followed by `<app>/<app>/`, so an `apps` package inside an app keeps its path. Each
+  finding is anchored on its most frequent callsite that loops on its own (reaches the
+  threshold within one action), else its most frequent callsite, a user one before a
+  framework one, so a per-request line that outnumbers a loop no longer hides it. Its
+  count, title and severity count only that callsite's calls, which must reach the
+  threshold within one action on their own: one user call beside an ERPNext loop no
+  longer reports the loop's 31 calls as its own, and the loop is suppressed as framework
+  code. When no callsite loops, nothing is blamed on framework code; a callsite whose
+  calls reach the threshold only across requests gets the per-request note.
+  Optimus's own calls are skipped (its settings read on every recorded query became
+  a false "Redundant cache lookup" on the user's query line). New findings are stamped.
+  Older unstamped findings keep a stored suggestion with a re-record note and are not
+  sent to the AI.
+- Ground finding prompts in the enclosing function when it fits within 80 lines,
+  otherwise 24 lines either side. Loop facts come from the whole file's AST (the loop
+  chain, comprehension and while shapes, subscript and formatted-SQL writes, a caller
+  hint for a line in no loop), cover only lines the trimmed prompt still shows and sit
+  inside a data block. Prompt version 4 marks older displayed suggestions as outdated.
+  A container changed in place by `update`, `append`, `setdefault` and the like counts
+  as a variable that changes in the loop when the call reads it (not a query-builder
+  receiver, and `doc.append("items", row)` changes only `doc.items`). The file is parsed
+  once per run and shared by its findings. Source lines split on `\n` only, as Python
+  numbers them, so a form feed or U+2028 in a file no longer shifts every later line.
+- Hot Line gate: the opener of a multi-line call (`total = sum(`, `if any(`) that
+  reaches the per-hit threshold counts as calling something unnamed, since its callee is
+  on a line the gate does not see, so it is gated instead of sent to the AI. A line
+  whose call runs once per item of its own comprehension or generator (in the element,
+  a filter or a later iterable, not the first iterable or an argument beside it) gets a
+  note that the line runs its own loop over its items and the time is that loop, with
+  no item count, instead of blaming the call inside it.
+- Refresh AI suggestions puts missing or outdated suggestions first, skips excluded
+  types and reports gated and excluded counts in its toast. Only a `not_eligible`
+  `AiFixError` is a skip; `config` and every other kind is a logged, counted failure.
+  The analyze-time AI step touches the single-flight flag before every call, only
+  while it holds it, and caps each call at 240 seconds (below the flag's lifetime).
+- Read the analyze single-flight flag from Redis on every check, not from the RQ job's
+  `frappe.local.cache`, which kept the first value read for the whole job. A run whose
+  flag lapsed no longer writes over or deletes the next session's flag, and on Frappe v15
+  a finished run frees the flag instead of making the next analyze wait up to 5 minutes.
+  The flag is taken with one atomic `SET NX EX`, so two analyses starting together no
+  longer both take it, and renewed with `EXPIRE`; a session that already held it goes on
+  only if the renewal confirms it still does. A heartbeat that fails or finds another
+  session's flag writes one `optimus` log line per run, and the janitor's note on a stuck
+  Analyzing session names a lapsed analyze heartbeat as a possible cause.
+- A finding or card whose index advice cannot be built shows a neutral note with a next
+  step (check the query with EXPLAIN; if it keeps happening, send the bench log line
+  "optimus: index advice failed" to the Optimus maintainers), and the failure is counted
+  in the bench log. The report and the export share one advice step, and one parser per
+  render or export memoises each query's alias map, so a query behind several findings is
+  parsed once (that second parse took 42 to 69 percent of the recipe stage).
+- An index finding's title, description and action-plan step follow its advice, at render
+  time and in the export, because the analyzers bake "Add index on ..." and "add this
+  index in a database migration" in before any advice exists: a Missing Index with no code
+  is "Index on <table>(<column>): no new index recommended" with the step "Check the query
+  with EXPLAIN", an EXPLAIN-family finding with no code drops "Adding an appropriate index
+  is usually the fix", and a Missing Index with code points at the steps under How to fix.
+  Stored findings keep the analyzer's text; advice that is no verdict gets a neutral
+  "cannot say" line instead. A Filesort or Temporary Table finding names why the sort or
+  temporary table stays: an aggregate ORDER BY, a GROUP BY and ORDER BY that differ, a
+  DISTINCT, a column of another table, no ORDER BY or GROUP BY on this table, a metadata
+  column. With Tracked Apps empty, a non-framework
+  app's Property Setter entry says "if <app> is your app, tick Search Index on the field
+  instead; set Tracked Apps" rather than "do not edit it".
+- Read index evidence and word index advice with more care. An index list that comes back
+  empty for a table with columns is a failed read (every DocType table has a primary key,
+  and the database adapters turned a failed `SHOW INDEX` into an empty list, so the advice
+  could give code for an index that already existed): the report says Optimus could not
+  read the table's details and the bench log gets `optimus: evidence read failed for
+  <table>: EmptyIndexList`. A job timeout in a column or index read is no longer read as an
+  empty list: it escapes the report render and the export (analyze's analyzer loop and its
+  report step, which Regenerate Reports also runs, still catch every exception, log it and
+  go on). On Postgres a table's whole evidence read runs under a savepoint, so a failed
+  statement no longer aborts the render's transaction. The FROM-clause reader no longer takes a
+  qualified ON column (`ON gl.voucher_no = p.name`) for a table name, which kept a joined
+  table out of the check for columns the SQL parser dropped and gave a false "already leads
+  an index" on joined GL Entry queries; they now say Optimus could not read the filter. A
+  list-view query on a Check field that sorts with a LIMIT (`is_return = ? ORDER BY
+  creation DESC LIMIT ?`) gets `(is_return, creation)` again, with a note when the field is
+  compared with `=`, instead of a false "already serves this filter and sort", and an index
+  that serves only the range or sort column is never said to serve a filter of Check
+  fields. A self-join (the table read more than once in the main FROM) gets no code and
+  says Optimus could not read how the query filters. A `!=`, `<>` or `NOT` filter on its
+  own, a bare `NOT col = ?` included (so `NOT name = ?` is no lookup by name), gets the
+  Check-style hedge ("if the rows this query looks for are rare, an index on (project) can
+  help") instead of "an index would not help". An anti-join (`LEFT JOIN ... WHERE c.name
+  IS NULL`) stays a LEFT JOIN, so its joining column is no index candidate, and with no
+  other filter left the finding says Optimus found no filter an index could use instead of
+  keeping the analyzer's "Add an index" hint. A sort or group recipe whose equality column
+  only a join binds (`si JOIN tabCustomer c ON c.name = si.customer WHERE c.territory = ?
+  ORDER BY si.posting_date`) gets no code and says Optimus could not read how the query
+  sorts, never that the rows come back sorted. The texts name only the filter shapes and
+  the sort cause the query has, with only their rewrites, never call one column a
+  composite, and on a card or a Missing Index finding speak of the slow queries; a card
+  whose no-code only hedges on Check fields opens with "Optimus cannot say whether this
+  index would help.". A Filesort or Temporary Table lead whose index keeps the sort or the
+  temporary table opens "This index narrows the filter, but", and the finding loses
+  "Adding an index that covers the ORDER BY clause usually fixes it" and its "Avoid the
+  filesort" step, with a note that the index does not remove the sort (or may not, when
+  the sort comes from elsewhere in the query). A Missing Index with no verdict is titled "Index on <table>(<column>):
+  Optimus cannot say".
+
+- Operability fixes for the index advice. The Hot Line gate note tells the reader to send
+  the `optimus: hot-line gate failed` log line. The generated `ensure_indexes()` writes one
+  line when the index fails and its Error Log row cannot be written either, and on Postgres
+  commits right after it restores the lock timeout, so a later hook's rollback cannot leave
+  the 300 s cap on. The runbook names the 300 s lock wait as a cause. Evidence-read
+  failures past the first 10 tables get one "and N more tables" line. A loop-facts or AI-path
+  index-advice crash leaves one deduplicated log line. The recipe-failure and analyze
+  heartbeat lines go through `safe_call.log_error_line`, and a run that never held the
+  single-flight flag says it "does not hold it". The Refresh AI suggestions toast no longer
+  says "Nothing to refresh." when calls failed. One shared `cut_at_bench_apps` helper in
+  `analyzers/base.py` replaces three path cuts. AI-FIXING section 9 lists the split modules.
+  A malformed hand-edited `INDEXES` entry (no `doctype`, a typo'd key, not a dict) no longer
+  fails `bench migrate` from inside the failure handler: the Error Log row falls back to a
+  title without the entry. A join column pinned only by an `IN` list or subquery counts as
+  join-bound for a sort recipe (no verdict instead of "the rows come back already sorted").
+
+### API
+
+- `optimus.api.refill_ai_suggestions` no longer returns an `indexes` result; its
+  `fixes` gains `gated`, `excluded` and `skipped_ineligible`.
+  `optimus.api.ai_capabilities` always reports `indexes: false`.
+- `optimus.api.export_session` no longer exports `suggested_ddl` or `ai_index`.
+  Index-family findings carry `index_advice` and, when advice exists, a `fix_hint`
+  taken from the report text (otherwise the stored hint stays and `index_advice` is null),
+  and the report's `title` and `customer_description` (a no-code Missing Index is not
+  titled "Add index on ..."); `index_advice` has an `unknown` flag (no verdict: Optimus
+  could not tell, or the advisor failed) and a `sort_stays` value (`"stays"` or `"may
+  stay"` when a Filesort or Temporary Table code leaves the sort or the temporary table in
+  place, or may, else `""`); a table's
+  `recommended_index` gains `requested_columns`.
+
+### Upgrade notes
+
+- Regenerate Reports rebuilds index advice and the older-suggestion notices without
+  changing stored suggestion JSON. Index-family, Framework N+1 and gated Hot Line AI
+  suggestions and the table index-AI advice of earlier versions are hidden; their
+  tokens still count in the report's AI token total.
+- To apply index advice, save the generated `optimus_indexes.py` in your app and add
+  its `ensure_indexes` as the last item of `after_install`, `after_sync` and
+  `after_migrate` in hooks.py, turning a hook set as a string into a list that keeps the
+  string first. If the file exists, add only the new entry to its `INDEXES` list. A
+  fixture-shipped Custom Field is indexed right after fixtures sync on install. To remove
+  an entry, delete it from `INDEXES`, drop its index, and for a Property Setter entry
+  delete the `<DocType>-<field>-search_index` Property Setter; `bench --site <site>
+  uninstall-app` (and later `bench remove-app`) removes neither, and a `before_uninstall`
+  hook can drop them (docs/AI-FIXING.md section 2.3).
+- On Postgres, Frappe's schema sync can drop a Search Index named after a column of a
+  new composite index on another table until that table syncs again (a Frappe issue);
+  check `pg_indexes` after `bench migrate`.
+- Re-record flows with older Redundant Call findings to obtain corrected callsites.
+- This change does not move AI work out of analysis or add a persistence
+  checkpoint before optional AI calls. Those changes remain follow-up work.
+
 ## [0.12.67] - 2026-10-02
 
 ### Changed

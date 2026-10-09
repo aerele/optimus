@@ -50,7 +50,7 @@ _FAKE_RESULT = {"suggestion": "**Fix**\n\ndo X", "model": "m", "provider": "Open
 
 def _patches(cfg, *, available=True, suggest=None):
 	"""Common patch context: config + ai_fix.is_available + ai_fix.suggest_fix."""
-	suggest = suggest if suggest is not None else (lambda payload: dict(_FAKE_RESULT))
+	suggest = suggest if suggest is not None else (lambda payload, **kwargs: dict(_FAKE_RESULT))
 	return (
 		patch("optimus.settings.get_config", return_value=cfg),
 		patch("optimus.ai_fix.is_available", return_value=available),
@@ -135,7 +135,7 @@ class TestSelectionAndPersistence:
 		findings = [
 			_finding("Slow Query", "Low", 9999, title="low-but-huge"),
 			_finding("N+1 Query", "High", 100, title="the-high-one"),
-			_finding("Missing Index", "Medium", 5000, title="med"),
+			_finding("N+1 Query", "Medium", 5000, title="med"),
 		]
 		ctx = _ctx(findings)
 		p1, p2, p3 = _patches(_cfg(ai_auto_suggest_max=1))
@@ -147,7 +147,7 @@ class TestSelectionAndPersistence:
 
 	def test_cap_zero_means_all_eligible(self):
 		findings = [_finding("N+1 Query", "High", 500), _finding("Slow Query", "Medium", 200),
-		            _finding("Missing Index", "Low", 50)]
+		            _finding("N+1 Query", "Low", 50)]
 		ctx = _ctx(findings)
 		p1, p2, p3 = _patches(_cfg(ai_auto_suggest_max=0))
 		with p1, p2, p3:
@@ -158,7 +158,7 @@ class TestSelectionAndPersistence:
 		# First eligible finding errors; the second still gets a suggestion.
 		calls = {"n": 0}
 
-		def _suggest(payload):
+		def _suggest(payload, **kwargs):
 			calls["n"] += 1
 			if calls["n"] == 1:
 				raise RuntimeError("provider blew up")
@@ -273,7 +273,7 @@ class TestBackfillAiSuggestions:
 		rows = [
 			_row("low", "Slow Query", "Low", 9999),
 			_row("high", "N+1 Query", "High", 100),
-			_row("med", "Missing Index", "Medium", 5000),
+			_row("med", "N+1 Query", "Medium", 5000),
 		]
 		doc = SimpleNamespace(findings=rows)
 		p1, p2, p3 = _patches(_cfg(ai_auto_suggest_max=1))
@@ -291,7 +291,7 @@ class TestRunAiBackfillCore:
 		rows = [
 			_row("F1", "N+1 Query", "High", 500),
 			_row("F2", "Slow Query", "Medium", 200, llm_fix_json='{"suggestion":"already"}'),
-			_row("F3", "Missing Index", "Low", 50),
+			_row("F3", "N+1 Query", "Low", 50),
 			_row("F4", "Memory Pressure", "High", 9),  # ineligible type
 		]
 		doc = SimpleNamespace(findings=rows)
@@ -300,7 +300,10 @@ class TestRunAiBackfillCore:
 		p1, p2, p3 = _patches(_cfg(ai_auto_suggest=False))
 		with p1, p2, p3, patch.object(analyze, "frappe", _fake_frappe()) as fk:
 			out = analyze._run_ai_backfill(doc, cap=0)
-		assert out == {"added": 2, "failed": 0, "skipped_time": 0, "total_pending": 2}
+		assert out == {
+			"added": 2, "failed": 0, "skipped_time": 0, "total_pending": 2,
+			"gated": 0, "excluded": 0, "skipped_ineligible": 0,
+		}
 		assert sorted(w[1] for w in fk.db.writes) == ["F1", "F3"]
 		assert json.loads(rows[0].llm_fix_json)["suggestion"] == "**Fix**\n\ndo X"
 		# Already-suggested / ineligible rows untouched.
@@ -313,13 +316,16 @@ class TestRunAiBackfillCore:
 		p1, p2, p3 = _patches(_cfg(), available=False)
 		with p1, p2, p3, patch.object(analyze, "frappe", _fake_frappe()) as fk:
 			out = analyze._run_ai_backfill(doc, cap=0)
-		assert out == {"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0}
+		assert out == {
+			"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0,
+			"gated": 0, "excluded": 0, "skipped_ineligible": 0,
+		}
 		assert fk.db.writes == []
 
 	def test_counts_per_finding_failures(self):
 		calls = {"n": 0}
 
-		def _suggest(payload):
+		def _suggest(payload, **kwargs):
 			calls["n"] += 1
 			if calls["n"] == 1:
 				raise RuntimeError("provider blew up")
@@ -348,7 +354,10 @@ class TestRunAiBackfillCore:
 		p1, p2, p3 = _patches(_cfg())
 		with p1, p2, p3, patch.object(analyze, "frappe", _fake_frappe()) as fk:
 			out = analyze._run_ai_backfill(doc, cap=0)
-		assert out == {"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0}
+		assert out == {
+			"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0,
+			"gated": 0, "excluded": 0, "skipped_ineligible": 0,
+		}
 		assert fk.db.writes == []
 
 	def test_regenerate_all_overwrites_existing(self):
@@ -383,7 +392,7 @@ class TestRunAiBackfillCore:
 		# F1 errors during re-eval → its old suggestion must survive; F2 ok.
 		calls = {"n": 0}
 
-		def _suggest(payload):
+		def _suggest(payload, **kwargs):
 			calls["n"] += 1
 			if calls["n"] == 1:
 				raise RuntimeError("provider blew up")

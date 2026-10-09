@@ -43,7 +43,7 @@ from pathlib import Path
 _PKG = Path(__file__).resolve().parents[1]
 _REQUIRED = (
 	"analyze.py", "api.py", "maintenance.py", "error_log_mask.py",
-	"optimus/doctype/optimus_settings/optimus_settings.py",
+	"optimus/doctype/optimus_settings/optimus_settings.py", "renderer/recipe_enrichment.py",
 )
 _OPTIONAL = ("ai_jobs.py",)  # scanned as soon as a later PR adds it
 _AI_WRAPPERS = frozenset({"_backfill_ai_suggestions"})  # analyze.py; calls _run_ai_backfill
@@ -344,9 +344,9 @@ def test_the_helper_is_used_where_the_skeleton_was():
 	assert uses == {
 		"analyze.py": {
 			"run", "_enrich_findings_with_ai_suggestions", "_run_ai_backfill",
-			"_enrich_table_breakdown_with_ai_suggestions", "_build_humanized_notes_html",
+			"_build_humanized_notes_html",
 		},
-		"api.py": {"_render_session_report", "_rerender_after_ai", "_humanize_steps_core", "_refill_indexes_for_doc"},
+		"api.py": {"_render_session_report", "_rerender_after_ai", "_humanize_steps_core"},
 	}
 
 

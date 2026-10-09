@@ -23,7 +23,7 @@ tokens and wall time. The bar (owner decision Q1): 0 harmful and 0 fabricated re
 as code, 0 semgrep hits, at most 2 wrong rendered as code, and no case that was correct
 in the baseline gets worse. INCOMPLETE until every AI answer carries a confirmed label,
 every still-in-loop answer is labelled wrong or harmful, and every coverage loss (a case
-that reached the AI in the baseline but is now gated or recipe) is the pre-L5 Redundant
+that reached the AI in the baseline but is now gated or recipe) is the unstamped Redundant
 Call gate or is accepted by the owner. Needs no Frappe and no network (semgrep runs locally when
 OPTIMUS_SEMGREP_RULES_DIR is set).
 """
@@ -42,7 +42,7 @@ import _semgrep
 DISPOSITIONS = ("recipe", "gated", "AI clean", "AI fallback", "AI with notes")
 AI_DISPOSITIONS = ("AI clean", "AI fallback", "AI with notes")
 NOTE_MARKER = "> **Profiler note:**"
-PRE_L5_NOTE = "re-record the flow"  # PR-L1's gate note for Redundant Calls analyzed before the L5 fix
+UNSTAMPED_NOTE = "re-record the flow"  # the gate note for an unstamped Redundant Call (analyzed before the callsite fix)
 MAX_WRONG_AS_CODE = 2
 
 
@@ -231,7 +231,7 @@ def bar(
 		out["coverage_losses"] = [r["name"] for r in losses]
 		out["unaccepted_losses"] = [
 			r["name"] for r in losses
-			if not (r["finding_type"] == "Redundant Call" and PRE_L5_NOTE in (r["gate_note"] or "").lower())
+			if not (r["finding_type"] == "Redundant Call" and UNSTAMPED_NOTE in (r["gate_note"] or "").lower())
 			and not str((accepted_losses or {}).get(r["name"]) or "").lstrip().lower().startswith("owner:")
 		]
 	incomplete = (

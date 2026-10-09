@@ -36,6 +36,31 @@ GOLDEN_PATH = Path(__file__).parent / "fixtures" / "renderer_structure.json"
 _REGENERATE_ENV = "REGENERATE_RENDERER_SNAPSHOT"
 
 
+@pytest.fixture(autouse=True)
+def _index_evidence(monkeypatch):
+	"""Deterministic index evidence: the snapshot's index finding and table card keep
+	their code block and card on every machine."""
+	from optimus.renderer import recipe_enrichment
+	from optimus.renderer.recipe_enrichment import FieldEvidence, TableEvidence
+
+	def field(fieldtype):
+		return FieldEvidence(fieldtype, 0, False, False, False)
+
+	evidence = TableEvidence(
+		table="tabSales Invoice", doctype="Sales Invoice", app="erpnext", is_custom_doctype=False,
+		dialect="mariadb",
+		fields={"customer": field("Link"), "status": field("Select"), "posting_date": field("Date")},
+		column_types={
+			"name": "varchar", "creation": "datetime", "customer": "varchar", "status": "varchar",
+			"posting_date": "date",
+		},
+		text_columns=frozenset(), unindexable_columns=frozenset(), indexes=(),
+	)
+	monkeypatch.setattr(
+		recipe_enrichment, "_read_table_evidence", lambda table: evidence if table == "tabSales Invoice" else None,
+	)
+
+
 # --------------------------------------------------------------------------
 # Fixture covers as many of the 14 conditional sections as practical
 # --------------------------------------------------------------------------
@@ -53,6 +78,7 @@ def _finding(
 	action_ref: str = "0",
 	title: str | None = None,
 	llm_fix_json: str | None = None,
+	detail_extra: dict | None = None,
 ) -> SimpleNamespace:
 	detail = {
 		"callsite": {
@@ -62,6 +88,7 @@ def _finding(
 			"source_snippet": _snippet(),
 		}
 	}
+	detail.update(detail_extra or {})
 	return SimpleNamespace(
 		finding_type=finding_type,
 		severity=severity,
@@ -165,6 +192,42 @@ def _snapshot_doc() -> SimpleNamespace:
 			action_ref="0",
 			title="Slow Query at invoice.py:120",
 		),
+		# an index-family finding whose recipe fills the "Suggested index"
+		# code block, and an AI suggestion from an older prompt version (fix box
+		# with the stale-suggestion caveat in its footer).
+		_finding(
+			"Full Table Scan",
+			"Medium",
+			150.0,
+			4,
+			action_ref="0",
+			title="Full Table Scan on tabSales Invoice",
+			detail_extra={
+				"callsite": {"filename": "/abs/myapp/api/orders.py", "lineno": 88, "function": "list_orders"},
+				"table": "tabSales Invoice",
+				"normalized_query": "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND status = ?",
+			},
+		),
+		_finding(
+			"N+1 Query",
+			"High",
+			250.0,
+			12,
+			action_ref="0",
+			title="N+1 Query (older AI suggestion) at invoice.py:41",
+			llm_fix_json=json.dumps({
+				"suggestion": "**Diagnosis**: one query per row.\n\n**Fix**\n\nFetch the rows once before the loop.",
+				"model": "qwen3-coder:30b",
+				"provider": "OpenAI-compatible",
+				"generated_at": "2026-05-22T00:00:01",
+				"source_available": True,
+				"prompt_version": 1,
+			}),
+			detail_extra={
+				"callsite": {"filename": "/abs/myapp/forms/order.py", "lineno": 57, "function": "validate"},
+			},
+		),
+
 	]
 	actions = [
 		_action(0, duration_ms=900.0),
@@ -196,6 +259,28 @@ def _snapshot_doc() -> SimpleNamespace:
 			"total_ms": 320.0,
 			"is_write_hot": False,
 		},
+		# a composite recommendation renders the index card and its
+		# reworded "put that in a patch" note.
+		{
+			"table": "tabSales Invoice",
+			"doctype": "Sales Invoice",
+			"read_count": 4,
+			"write_count": 0,
+			"total_ms": 50.0,
+			"consolidated_time_ms": 50.0,
+			"is_write_hot": False,
+			"index_candidates": [{"column": "customer", "sources": ["WHERE"], "hits": 4}],
+			"recommended_index": {
+				"columns": ["customer", "posting_date"],
+				"doctype": "Sales Invoice",
+				"together_count": 3,
+				"read_count": 4,
+				"also_filtered": [],
+			},
+			"framework_cols_filtered": [],
+			"is_meta_table": False,
+		},
+
 	]
 	return SimpleNamespace(
 		name="PS-snap",
