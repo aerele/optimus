@@ -488,13 +488,20 @@ class TestUncoveredBranches:
 		)
 		text = _text(one)
 		assert one.route == ir.ROUTE_NO_CODE and not one.unknown
-		assert "is_return is a Check field, which matches too many rows for an index to narrow." in text
+		assert (  # bounded corrective R1: hedged, Optimus cannot see the value distribution
+			"is_return is a Check field, which usually matches most of the table's rows; if this query looks for "
+			"the rare value, an index on (is_return) can help."
+		) in text
+		assert "would not help" not in text
 		assert "Filter on a more selective field as well, and check the result with EXPLAIN." in text
 		two = ir.advise_finding(
 			_explain("Full Table Scan", "SELECT name FROM `tabSales Invoice` WHERE is_return = ? AND disabled = ?"),
 			evidence_lookup=_lookup(ev),
 		)
-		assert "disabled, is_return are Check fields, which match too many rows for an index to narrow." in _text(two)
+		assert (
+			"disabled, is_return are Check fields, which usually match most of the table's rows; if this query looks "
+			"for the rare values, an index on (disabled, is_return) can help."
+		) in _text(two)
 
 	@pytest.mark.parametrize("where,phrase", [
 		("customer LIKE ?", "a LIKE on customer, which cannot use an index when its pattern starts with a wildcard"),
@@ -588,6 +595,11 @@ def test_the_docs_and_changelog_carry_the_t12_texts():
 	# fix round 5: a left-out index refuses when unique or ranked as well as the weakest kept column
 	assert "at least as well as the weakest column the new index would keep" in doc
 	assert "at least as well as the weakest kept column" in log
+	# bounded corrective: the hedged Check wording, the partial sort, the sort-only recipe
+	assert "if this query looks for the rare value, an index on (is_return, posting_date) can help" in doc
+	assert "usually matches most rows" in log and "keeps only some sort columns" in log
+	assert "rarely walks a whole index instead of sorting when the query has no LIMIT" in doc
+	assert "rarely walks a whole index instead of sorting" in log
 	assert "the sort columns keep the clause's order" in doc and "in the clause's order" in log
 
 
@@ -637,7 +649,7 @@ class TestPermutedCoverage:
 		q = "SELECT name FROM `tabStock Ledger Entry` WHERE `voucher_no` = ? AND `voucher_type` = ? AND `is_cancelled` = ?"
 		text = _text(ir.advise_finding(_explain("Full Table Scan", q, table="tabStock Ledger Entry"), evidence_lookup=_lookup(_SLE)))
 		assert 'The index "voucher_no_voucher_type_index" on table "tabStock Ledger Entry" already starts with (voucher_no, voucher_type)' in text
-		assert "is_cancelled is a Check field, which matches too many rows for an index to narrow" in text
+		assert "is_cancelled is a Check field, which usually matches most of the table's rows, so Optimus gives no" in text
 
 	def test_a_check_field_with_a_sort_after_it_still_gets_code(self):
 		q = "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND is_return = ? ORDER BY posting_date"
@@ -1280,7 +1292,7 @@ class TestNotEqualIsNoRange:
 		q = f"SELECT name FROM `tabSales Invoice` WHERE company = ? AND status {op}"
 		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI4))
 		assert advice.columns == ("company",), _text(advice)
-		assert "Optimus left out status (compared only by !=, <> or NOT, which matches most of the table's rows)" in _text(advice)
+		assert "Optimus left out status (compared only by !=, <> or NOT, which usually matches most of the table's rows)" in _text(advice)
 
 	def test_a_value_side_not_equal_is_a_not_comparison(self):
 		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND ? != status"
@@ -1981,3 +1993,222 @@ class TestSortColumnsOfTheOnlyTable:
 		)
 		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI4))
 		assert advice.columns == ("company",) and "left out grand_total" not in _text(advice), _text(advice)
+
+
+# --- bounded corrective (after the final T12 review): R1 Check wording, R2 partial sort, R3 sort only ---
+
+
+_SI_R = _with_index(
+	_ev(fields={**_ALL, "is_return": F("Check"), "disabled": F("Check"), "due_date": F("Date")}),
+	("posting_date_index", ["posting_date"], False),
+)
+
+
+class TestCheckWordingIsHedged:
+	"""R1: Optimus cannot see how a Check field's values are spread, so the Check texts say
+	"usually" and name the index that helps a query for the rare value. The verdict stays."""
+
+	def test_the_check_rule_names_the_index_for_the_rare_value(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE is_return = ? AND posting_date BETWEEN ? AND ?"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI_R))
+		text = _text(advice)
+		assert advice.route == ir.ROUTE_NO_CODE and not advice.unknown, text
+		assert (
+			'The index "posting_date_index" on table "tabSales Invoice" already starts with (posting_date), and '
+			"is_return is a Check field, which usually matches most of the table's rows, so Optimus gives no index "
+			"code; if this query looks for the rare value, an index on (is_return, posting_date) can help."
+		) in text
+		assert "would not help" not in text and "too many rows" not in text
+
+	def test_the_plural_check_rule(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE is_return = ? AND disabled = ? AND posting_date > ?"
+		text = _text(ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI_R)))
+		assert (
+			"disabled, is_return are Check fields, which usually match most of the table's rows, so Optimus gives no "
+			"index code; if this query looks for the rare values, an index on (disabled, is_return, posting_date) can help."
+		) in text
+
+	def test_the_purchase_invoice_on_hold_lookup(self):
+		ev = _with_index(_ev("Purchase Invoice", fields={"on_hold": F("Check"), "release_date": F("Date")}),
+			("release_date_index", ["release_date"], False))
+		q = "select name from `tabPurchase Invoice` where on_hold = 1 and release_date IS NOT NULL and release_date > CURDATE()"
+		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabPurchase Invoice"), evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_NO_CODE, _text(advice)
+		assert "if this query looks for the rare value, an index on (on_hold, release_date) can help" in _text(advice)
+
+	def test_a_shape_with_a_check_field_never_says_would_not_help(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE is_return = ? AND customer LIKE ?"
+		text = _text(ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI_R)))
+		assert "The cost comes from the shape of the filter: a LIKE on customer" in text
+		assert "an index on (is_return) can help. So Optimus gives no index code." in text
+		assert "would not help" not in text
+
+	def test_a_shape_alone_keeps_its_verdict(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE customer LIKE ?"
+		text = _text(ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI_R)))
+		assert "So an index would not help, and Optimus gives no index code." in text
+
+	def test_a_not_comparison_is_hedged_too(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE status != ?"
+		text = _text(ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI_R)))
+		assert "a !=, <> or NOT comparison on status, which usually matches most of the table's rows" in text
+
+
+_GL_R = _ev("GL Entry", fields={
+	"voucher_type": F("Link"), "voucher_no": F("Dynamic Link"), "account": F("Link"), "debit": F("Int"), "credit": F("Int"),
+}, indexes=[("voucher_type_voucher_no_index", ["voucher_type", "voucher_no"], False)])
+_SLE_R = _ev("Stock Ledger Entry", fields={
+	"voucher_type": F("Link"), "voucher_no": F("Dynamic Link"), "item_code": F("Link"), "warehouse": F("Link"),
+	"actual_qty": F("Int"),
+}, indexes=[("voucher_no_voucher_type_index", ["voucher_no", "voucher_type"], False)])
+
+
+class TestPartialSortRecipe:
+	"""R2: a recipe that keeps only some sort or group columns never returns the rows in the
+	query's order, so the recipe without the sort is the advice, and no lead says the rows
+	come back sorted or the grouping reads the index."""
+
+	@pytest.mark.parametrize("ev,q,index", [
+		(_GL_R, "select account, debit, credit from `tabGL Entry` where voucher_type=? and voucher_no=? "
+			"order by account asc, debit asc, credit asc", "voucher_type_voucher_no_index"),
+		(_SLE_R, "select item_code, warehouse, actual_qty from `tabStock Ledger Entry` where voucher_type = ? and "
+			"voucher_no = ? order by item_code, warehouse, actual_qty", "voucher_no_voucher_type_index"),
+	])
+	def test_a_capped_sort_gives_the_filter_verdict(self, ev, q, index):
+		advice = ir.advise_finding(_explain("Filesort", q, table=ev.table), evidence_lookup=_lookup(ev))
+		text = _text(advice)
+		assert advice.route == ir.ROUTE_NO_CODE, text
+		assert f'The index "{index}" on table "{ev.table}" already starts with' in text
+		assert "already sorted" not in text
+		assert "An index that returns these rows in the query's order would need every sort column (" in text
+		assert ") here, so the sort stays." in text or "here, so the sort stays." in text
+
+	def test_the_note_names_the_sort_and_the_left_out_columns(self):
+		q = (
+			"select account, debit, credit from `tabGL Entry` where voucher_type=? and voucher_no=? "
+			"order by account asc, debit asc, credit asc"
+		)
+		text = _text(ir.advise_finding(_explain("Filesort", q, table="tabGL Entry"), evidence_lookup=_lookup(_GL_R)))
+		assert (
+			"An index that returns these rows in the query's order would need every sort column (account, debit, "
+			"credit), and Optimus leaves out credit here, so the sort stays."
+		) in text
+
+	def test_a_kept_range_sort_column_never_claims_the_order(self):
+		ev = _ev(fields={**_ALL, "due_date": F("Date")})
+		q = (
+			"SELECT name FROM `tabSales Invoice` WHERE company = ? AND customer = ? AND status = ? AND posting_date > ? "
+			"ORDER BY posting_date, due_date"
+		)
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(ev))
+		assert advice.entry["columns"] == ["company", "customer", "status", "posting_date"], _text(advice)
+		assert "already sorted" not in advice.lead
+		assert "This index does not cover every sort column (due_date), so the sort stays." in advice.lead
+		# the lead says it; the no-code note is only for a retry that gives no code
+		assert "in the query's order would need" not in _text(advice)
+
+	def test_a_capped_grouping_names_the_temporary_table(self):
+		q = (
+			"select account, sum(debit) from `tabGL Entry` where voucher_type=? and voucher_no=? "
+			"group by account, debit, credit"
+		)
+		text = _text(ir.advise_finding(_explain("Temporary Table", q, table="tabGL Entry"), evidence_lookup=_lookup(_GL_R)))
+		assert (
+			"would need every grouping column (account, debit, credit), and Optimus leaves out credit here, so the "
+			"temporary table stays."
+		) in text, text
+
+	def test_a_refused_sort_recipe_gets_no_cut_note(self):
+		"""The sort-first recipe gave no code (its index exists), so nothing was cut."""
+		ev = _with_index(_SI, ("posting_date_index", ["posting_date"], False))
+		q = "SELECT name FROM `tabSales Invoice` WHERE docstatus = ? AND posting_date <= ? ORDER BY posting_date"
+		assert "in the query's order would need" not in _text(ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(ev)))
+
+	def test_a_grouping_with_a_metadata_column_never_claims_the_index(self):
+		ev = _ev("Stock Reconciliation Item", fields={"item_code": F("Link"), "warehouse": F("Link")},
+			extra_types=_CHILD_TYPES, indexes=[("parent", ["parent"], False)])
+		q = (
+			"SELECT parent, COUNT(*) as records FROM `tabStock Reconciliation Item` WHERE item_code = ? and docstatus = 1 "
+			"GROUP By item_code, warehouse, parent HAVING records > 1"
+		)
+		advice = ir.advise_finding(_explain("Temporary Table", q, table="tabStock Reconciliation Item"), evidence_lookup=_lookup(ev))
+		assert "reads the index" not in advice.lead, advice.lead
+		assert "This index does not cover every grouping column (warehouse, parent), so the temporary table stays." in advice.lead
+
+	def test_a_whole_sort_still_claims_the_order(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? ORDER BY posting_date, customer"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI))
+		assert advice.entry["columns"] == ["company", "posting_date", "customer"]
+		assert advice.lead == ir._TYPE_LEADS["Filesort"]
+
+	def test_an_equality_fixed_sort_column_needs_no_index_column(self):
+		"""docstatus is fixed by the filter and never indexed (a metadata column), so it does
+		not change the order the index returns."""
+		ev = _ev(fields=_ALL, extra_types={"docstatus": "int"})
+		q = "SELECT name FROM `tabSales Invoice` WHERE docstatus = ? AND company = ? ORDER BY docstatus, posting_date"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(ev))
+		assert advice.entry["columns"] == ["company", "posting_date"], _text(advice)
+		assert advice.lead == ir._TYPE_LEADS["Filesort"], advice.lead
+
+
+class TestSortOnlyRecipeNeedsLimit:
+	"""R3: an index that holds only the sort columns helps a query with no LIMIT and no filter
+	it narrows only if the database walks the whole index, which it rarely does."""
+
+	_ST = _ev("Share Transfer", fields={"date": F("Date"), "from_shareholder": F("Link"), "to_shareholder": F("Link")})
+	_Q = (
+		"SELECT * FROM `tabShare Transfer` WHERE ((DATE(date) <= ? AND from_shareholder = ? ) OR (DATE(date) <= ? AND "
+		"to_shareholder = ? )) AND docstatus = 1 ORDER BY date"
+	)
+	_VIDEO = _ev("Video", fields={"view_count": F("Int"), "publish_date": F("Date")})
+
+	def _advise(self, q, ev, table):
+		return ir.advise_finding(_explain("Filesort", q, table=table), evidence_lookup=_lookup(ev))
+
+	def test_share_transfer_gives_no_code(self):
+		advice = self._advise(self._Q, self._ST, "tabShare Transfer")
+		text = _text(advice)
+		assert advice.route == ir.ROUTE_NO_CODE and not advice.unknown, text
+		assert (
+			"MariaDB rarely walks a whole index instead of sorting when the query has no LIMIT; add a LIMIT or a "
+			"narrowing filter first."
+		) in text
+
+	def test_video_gives_no_code(self):
+		q = (
+			"SELECT publish_date, title, view_count FROM `tabVideo` WHERE view_count is not null and publish_date "
+			"between ? and ? ORDER BY view_count desc"
+		)
+		advice = self._advise(q, self._VIDEO, "tabVideo")
+		assert advice.route == ir.ROUTE_NO_CODE and "rarely walks a whole index" in _text(advice), _text(advice)
+
+	def test_postgres_names_postgres(self):
+		ev = dataclasses.replace(self._ST, dialect="postgres", column_types={**self._ST.column_types, "date": "date"})
+		advice = self._advise(self._Q, ev, "tabShare Transfer")
+		assert "Postgres rarely walks a whole index" in _text(advice), _text(advice)
+
+	@pytest.mark.parametrize("q,table,columns", [
+		(_Q + " LIMIT ?", "tabShare Transfer", ("date",)),
+		("SELECT name FROM `tabVideo` WHERE view_count > ? ORDER BY view_count desc", "tabVideo", ("view_count",)),
+		("SELECT name FROM `tabVideo` WHERE view_count IS NOT NULL AND view_count < ? ORDER BY view_count", "tabVideo",
+			("view_count",)),
+	])
+	def test_a_limit_or_a_narrowing_range_keeps_the_code(self, q, table, columns):
+		ev = self._ST if table == "tabShare Transfer" else self._VIDEO
+		advice = self._advise(q, ev, table)
+		assert advice.route != ir.ROUTE_NO_CODE and advice.columns == columns, _text(advice)
+
+	def test_a_temporary_table_is_not_this_rule(self):
+		q = "SELECT customer, COUNT(name) FROM `tabSales Invoice` GROUP BY customer"
+		advice = ir.advise_finding(_explain("Temporary Table", q), evidence_lookup=_lookup(_SI))
+		assert advice is None or "rarely walks a whole index" not in _text(advice)
+
+	def test_only_a_bare_is_not_null_piece_is_no_narrowing(self):
+		quals = frozenset({"tabVideo"})
+		assert ir._only_not_null("SELECT name FROM `tabVideo` WHERE view_count IS NOT NULL AND a = ?", quals, "view_count")
+		assert not ir._only_not_null("SELECT name FROM `tabVideo` WHERE view_count IS NOT NULL AND view_count > ?", quals, "view_count")
+		assert not ir._only_not_null("SELECT name FROM `tabVideo` WHERE a = ?", quals, "view_count")
+		assert not ir._only_not_null("SELECT name FROM `tabVideo` WHERE (view_count IS NOT NULL OR a = ?)", quals, "view_count")
+		assert not ir._only_not_null(
+			"SELECT name FROM `tabVideo` WHERE view_count IS NOT NULL AND (view_count > ? OR a = ?)", quals, "view_count",
+		)

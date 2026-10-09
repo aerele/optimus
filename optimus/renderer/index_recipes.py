@@ -512,7 +512,7 @@ _SHAPE_WHY: dict[str, str] = {
 	"NOT": "compared inside a NOT (...), which an index on the column cannot use",
 	"CASE": "compared inside a CASE expression, which an index on the column cannot use",
 	"expression": "compared with another column or through arithmetic, which an index on the column cannot use",
-	"not": "compared only by !=, <> or NOT, which matches most of the table's rows",
+	"not": "compared only by !=, <> or NOT, which usually matches most of the table's rows",
 	"unsure": "a filter Optimus could not place with certainty",
 }
 _FUNCTION = "function:"  # a kind "function:IFNULL" records the innermost call's name
@@ -1421,7 +1421,7 @@ def _shape_phrases(shapes: Mapping[str, set[str]]) -> list[str]:
 		out.append(f"an OR between conditions on {', '.join(ored)}")
 	nots = [col for col, kinds in shapes.items() if "not" in kinds and not kinds & {"or", "like"}]
 	if nots:
-		out.append(f"a !=, <> or NOT comparison on {', '.join(nots)}, which matches most of the table's rows")
+		out.append(f"a !=, <> or NOT comparison on {', '.join(nots)}, which usually matches most of the table's rows")
 	for col, kinds in shapes.items():
 		names = _function_names(kinds)
 		out += [_function_phrase(name, col) for name in names]
@@ -1447,6 +1447,18 @@ def _shape_why(kinds: set[str]) -> str:
 	return _SHAPE_WHY["unsure"]
 
 
+def _check_rarity(checks) -> str:
+	"""What Optimus can say about Check fields: most rows usually share one value, which it
+	cannot see (R1), so the text never states it as a fact."""
+	if len(checks) == 1:
+		return f"{checks[0]} is a Check field, which usually matches most of the table's rows"
+	return f"{', '.join(checks)} are Check fields, which usually match most of the table's rows"
+
+
+def _values(checks) -> str:
+	return "value" if len(checks) == 1 else "values"
+
+
 def _shape_no_code_reason(shapes: Mapping[str, set[str]], checks: list[str]) -> tuple[str, bool]:
 	"""``(text, unknown)`` for a NO_CODE when the filter leaves no column an index could
 	narrow on: the filter shape, the columns Optimus could not read, and any Check fields
@@ -1468,14 +1480,14 @@ def _shape_no_code_reason(shapes: Mapping[str, set[str]], checks: list[str]) -> 
 		)
 	if unsure:
 		parts.append(f"Optimus could not read how the query filters on {', '.join(unsure)}.")
-	if len(checks) == 1:
-		parts.append(f"{checks[0]} is a Check field, which matches too many rows for an index to narrow.")
-	elif checks:
-		parts.append(f"{', '.join(checks)} are Check fields, which match too many rows for an index to narrow.")
+	if checks:
+		# Optimus cannot see how the values are spread, so the rare value keeps its index (R1)
+		parts.append(f"{_check_rarity(checks)}; if this query looks for the rare {_values(checks)}, an index on "
+			f"{_cols_text(checks)} can help.")
 	if unsure:
 		parts.append(f"So Optimus gives no index code. {explain}")
 		return " ".join(parts), True
-	parts.append("So an index would not help, and Optimus gives no index code.")
+	parts.append("So Optimus gives no index code." if checks else "So an index would not help, and Optimus gives no index code.")
 	if known:
 		parts.append(
 			"Rewrite the filter (an exact match instead of a LIKE, the bare column instead of a function "
@@ -1649,14 +1661,11 @@ def _existing_index_problem(
 			# Frappe's creation index serves creation > ?), and Check fields add nothing (M1)
 			prefix = next((ix for ix in evidence.indexes if _serves(ix.columns, plain, rest)), None)
 			if prefix is not None:
-				what = (
-					f"{checks[0]} is a Check field, which matches" if len(checks) == 1
-					else f"{', '.join(checks)} are Check fields, which match"
-				)
 				return (
 					f'The index "{prefix.name}" on table "{table}" already starts with '
-					f"{_cols_text(prefix.columns[: len(plain) + len(rest)])}, and {what} too many rows for an index "
-					f"to narrow, so a new index would not help. {tail}"
+					f"{_cols_text(prefix.columns[: len(plain) + len(rest)])}, and {_check_rarity(checks)}, so Optimus "
+					f"gives no index code; if this query looks for the rare {_values(checks)}, an index on "
+					f"{_cols_text(whole)} can help. {tail}"
 				), prefix.name
 		return None, ""
 	col = whole[0]
@@ -1930,7 +1939,11 @@ def advise(
 	advice = _advise(table, columns, serves=serves, **kwargs)
 	if serves:
 		sorts = [col for col, kind in (comparisons or {}).items() if kind in ("sort", "rsort")]
-		if advice is None or advice.route == ROUTE_NO_CODE or not any(col in advice.columns for col in sorts):
+		kept = {c.split("(", 1)[0] for c in advice.columns} if advice is not None else set()
+		# a recipe that keeps only some sort columns (the cap or the key width left the rest out)
+		# never returns the rows in the query's order (R2)
+		if advice is None or advice.route == ROUTE_NO_CODE or not all(col in kept for col in sorts):
+			cut_sort = advice is not None and advice.route != ROUTE_NO_CODE
 			retry = _advise(table, columns, serves="", **kwargs)
 			served_by = advice.served_by if advice is not None else ""
 			if served_by and _served_evidence(query):
@@ -1941,10 +1954,36 @@ def advise(
 				# optimizer (or added after the capture), so the recipe without the sort is the
 				# advice, and it names that index (round 4, item 3)
 				advice = replace(retry, caveats=(_unused_index_note(advice, serves), *retry.caveats))
+			elif cut_sort and retry is not None and retry.route == ROUTE_NO_CODE:
+				# the filter's index exists already; say why the sort or the temporary table stays (R2)
+				missing = ", ".join(col for col in sorts if col not in kept)
+				column = "sort" if serves == "the sort" else "grouping"
+				advice = replace(retry, caveats=(*retry.caveats, (
+					f"An index that returns these rows in the query's order would need every {column} column "
+					f"({', '.join(sorts)}), and Optimus leaves out {missing} here, so {serves} stays."
+				)))
 			else:
 				# a retry left with nothing to index (the sort column was all) keeps the first verdict
 				advice = retry or advice
 	return advice
+
+
+def _only_not_null(query: str, qualifiers, col: str) -> bool:
+	"""True when every AND piece of the main WHERE that names ``col`` (of the target table) is
+	``col IS NOT NULL``, which narrows no index in practice (R3), and at least one does."""
+	tokens = _where_tokens(query)
+	conjuncts = _conjuncts(tokens) if tokens else None
+	found = False
+	for part in conjuncts or []:
+		if not any(name == col.lower() for name, *_rest in _conjunct_refs(part, qualifiers)):
+			continue
+		if not _NAME_RE.fullmatch(part[0]):
+			return False
+		j = _chain_end(part, 0)
+		if _ref_key(part, 0, j)[1] != col.lower() or [tok.lower() for tok in part[j + 1 :]] != ["is", "not", "null"]:
+			return False
+		found = True
+	return found
 
 
 def _has_limit(query: str) -> bool:
@@ -2239,13 +2278,16 @@ def _lead_for(
 	ranged: str | None = None,
 	multi: tuple[str, ...] = (),
 	maybe: tuple[str, ...] = (),
+	fixed: frozenset[str] = frozenset(),
 ) -> str:
 	"""The finding type's opening sentence. For Filesort / Temporary Table it never claims
 	the sort or the temporary table goes when the index cannot remove it: the sort is not
 	on bare columns (``sort_problem``, see ``_sort_problem``, which also names the cause),
 	the sort column follows a range condition (``ranged``), or a kept filter matches several
 	values (``multi``). A kept collapsed ``IN (?)`` (``maybe``) may hold one value or many, so
-	the claim that the rows come back in order is hedged."""
+	the claim that the rows come back in order is hedged. The claim needs every sort or group
+	column in the index, or fixed by an equality filter (``fixed``); a metadata column such as
+	parent is never indexed (R2)."""
 	if advice.route == ROUTE_NO_CODE:
 		return ""
 	kept = {c.split("(", 1)[0] for c in advice.columns}
@@ -2266,6 +2308,10 @@ def _lead_for(
 					f"Index the filter columns followed by the {column} column so fewer rows are read. The filter "
 					f"on {kept_multi[0]} matches more than one value, so the database still {still}."
 				)
+			missing = [col for label, col in labelled if label == sort_label and col not in kept and col not in fixed]
+			if missing:
+				column = "sort" if ftype == "Filesort" else "grouping"
+				return _FILTER_LEAD + f" This index does not cover every {column} column ({', '.join(missing)}), so {stays}."
 			kept_maybe = [col for col in maybe if col in kept]
 			if kept_maybe:
 				return (
@@ -2449,8 +2495,25 @@ def advise_finding(
 	)
 	if advice is None:
 		return None
+	if ftype == "Filesort" and advice.route != ROUTE_NO_CODE and comparisons and not _has_limit(query):
+		bare = [c.split("(", 1)[0] for c in advice.columns]
+		if all(
+			comparisons.get(col) == "sort" or (comparisons.get(col) == "rsort" and _only_not_null(query, qualifiers, col))
+			for col in bare
+		):
+			# an index of sort columns only, for a query with no LIMIT and no filter it narrows (R3)
+			db = "Postgres" if evidence is not None and evidence.dialect == "postgres" else "MariaDB"
+			return _no_code(doctype, bare, (
+				f"An index on {_cols_text(bare)} would hold only the query's sort "
+				f"{'column' if len(bare) == 1 else 'columns'}, and the query has no LIMIT and no filter that index "
+				f"could narrow. {db} rarely walks a whole index instead of sorting when the query has no LIMIT; add a "
+				"LIMIT or a narrowing filter first. So Optimus gives no index code."
+			))
 	ranged = next((col for col, kind in (comparisons or {}).items() if kind == "range"), None)
-	lead = _lead_for(ftype, labelled, advice, sort_problem=sort_problem, ranged=ranged, multi=multi, maybe=maybe)
+	fixed = frozenset(col for col, kind in (comparisons or {}).items() if kind == "eq")
+	lead = _lead_for(
+		ftype, labelled, advice, sort_problem=sort_problem, ranged=ranged, multi=multi, maybe=maybe, fixed=fixed,
+	)
 	return replace(advice, lead=lead)
 
 

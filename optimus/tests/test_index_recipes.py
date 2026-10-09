@@ -390,7 +390,9 @@ class TestNoCode:
 		text = ir.finding_text(advice)
 		assert advice.route == ir.ROUTE_NO_CODE and advice.code is None and "item_name" in text
 		assert "a LIKE on item_name" in text and "an OR between conditions" in text
-		assert "disabled is a Check field" in text and "an index would not help" in text
+		# bounded corrective R1: with a Check field in the mix the verdict is hedged, never "would not help"
+		assert "disabled is a Check field, which usually matches most of the table's rows" in text
+		assert "So Optimus gives no index code." in text and "would not help" not in text
 
 	def test_ifnull_around_an_indexed_column_names_the_function(self):
 		"""Fix round 3: IFNULL(status, ?) cannot use any index on status, even its Search
@@ -706,7 +708,9 @@ class TestCheckOnly:
 			ir.advise_table("tabSales Invoice", ["is_return"], evidence_lookup=_lookup(ev)),
 		):
 			assert advice.route == ir.ROUTE_NO_CODE
-			assert "is_return is a Check field" in advice.reason and "an index would not help" in advice.reason
+			# bounded corrective R1: the rare value may still use an index, so the text says so
+			assert "is_return is a Check field, which usually matches most of the table's rows" in advice.reason
+			assert "an index on (is_return) can help" in advice.reason and "would not help" not in advice.reason
 
 
 _ROUND4_FIELDS = {

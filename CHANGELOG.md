@@ -26,7 +26,8 @@ versions may contain breaking changes see migration notes below).
   are no longer duplicated), when an equality column is unique on its own or a unique
   index's columns are all among its equality columns, or when an existing index serves
   every column but its Check fields (Frappe's creation index serves `creation > ? AND
-  is_return = ?`); a one-column recipe also when its column is unique on its own, leads an
+  is_return = ?`; the text says a Check field usually matches most rows and names the
+  index that helps a query for the rare value, since Optimus cannot see the values); a one-column recipe also when its column is unique on its own, leads an
   index or is the index EXPLAIN names. A lookup by `name` (the primary key), or by
   `parent` on a child table whose real index list has an index that `parent` leads
   (MariaDB adds one to every child table, Postgres none), gets no code, but only when the
@@ -47,7 +48,11 @@ versions may contain breaking changes see migration notes below).
   verdict names the range recipe and needs an index that returns the rows in the order of
   the whole ORDER BY. The capture-time EXPLAIN is no evidence: MariaDB's possible_keys
   never lists an index that only serves ORDER BY, and a Postgres plan node names only the
-  index it used. A column the table only feeds into a LEFT JOIN that
+  index it used. A sort recipe that keeps only some sort columns (the cap left the rest
+  out) gives way to the recipe without the sort, and no lead says the rows come back
+  sorted unless every sort column is in the index or fixed by the filter. A Filesort
+  recipe of sort columns only, for a query with no LIMIT and no filter it narrows, gets no
+  code, since the database rarely walks a whole index instead of sorting. A column the table only feeds into a LEFT JOIN that
   the WHERE keeps a LEFT JOIN is no index candidate. A missing column, a MariaDB reserved word on MariaDB (Postgres
   quotes names; such an entry is Postgres-only), a JSON field (MariaDB reports it as
   longtext, so the field type decides), a leading text column on Postgres, a first column
