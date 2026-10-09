@@ -24,13 +24,22 @@ versions may contain breaking changes see migration notes below).
   `quota`, `not_found` and `config` (`AI_FATAL_KINDS`) and is the one list of
   failures that need the operator first; `context` is not fatal, so one
   oversized prompt never stops the other findings.
+- A content-moderation refusal is a new, non-fatal `refused` kind: a 400 or
+  403 whose reply says the input was flagged (OpenRouter's moderation 403,
+  with `flagged_input`) or Azure's `content_filter`. A flagged prompt was
+  `auth` (fatal) on a 403; any other 401 or 403 stays `auth`.
 - AI failure messages are translated, say what happened and what to do next.
   A context failure names the cause and, for a hosted provider, no longer
   points at Ollama settings. A timeout names the request's whole budget in
-  whole seconds, not the fraction a retry had left. The provider's reply
+  whole seconds, not the fraction a retry or a guardrail re-ask had left. A
+  connect timeout is a reachability (`transport`) failure, not a slow model. A
+  rejected request names the Base URL only for a provider whose Base URL you
+  set. The provider's reply
   follows as "The provider replied: ...", without the old ".:" join. An
   unexpected error names only its type, and its Error Log row records where it
-  happened as plain `file:line:function` frames.
+  happened as plain `file:line:function` frames. A transport failure's row
+  keeps only the error types (`ConnectionError (NameResolutionError)`), never
+  the message, which can quote a URL that carries a key.
 - The guardrail re-ask reuses the parameter changes its first call needed
   (temperature dropped, `max_completion_tokens`), so it no longer repeats a
   rejected request. Nothing is kept from one suggestion to the next.
@@ -79,7 +88,8 @@ versions may contain breaking changes see migration notes below).
   model token limit", and the `context_length_exceeded` and
   `exceed_context_size_error` codes. They are no longer sent through the
   parameter retries. `max_tokens` is renamed to `max_completion_tokens` only
-  when the reply says the parameter is not supported, not for a value error
+  when the reply says the parameter is not supported (or carries the
+  `unsupported_parameter` code and names `max_tokens`), not for a value error
   such as "max_tokens is too large".
 
 ### Upgrade notes

@@ -47,7 +47,8 @@ class AiFixError(Exception):
 	``"not_eligible"`` (the eligibility gate or the per-type exclusion refused the
 	finding; no request was built), ``"auth"``, ``"quota"``, ``"rate_limited"``,
 	``"not_found"``, ``"server"`` and ``"bad_request"`` (an HTTP error status,
-	classified by ``_classify_http_error``), ``"transport"`` (the request did not
+	classified by ``_classify_http_error``), ``"refused"`` (the provider's content
+	moderation refused this prompt), ``"transport"`` (the request did not
 	complete), ``"timeout"`` (no answer in time), ``"bad_response"`` (a redirect
 	instead of a reply, or an unusable body), ``"internal"`` (an unexpected error
 	while sending or processing) and ``"unknown"``.
@@ -106,8 +107,9 @@ AI_SKIP_KINDS: frozenset[str] = frozenset({"not_eligible"})
 
 # The kinds ``AiFixError.fatal`` is True for: the next call fails the same way
 # until the operator acts (``auth``: the key; ``quota``: credit; ``not_found``:
-# the model or Base URL; ``config``: Optimus Settings). ``context`` is not here:
-# one prompt that does not fit says nothing about the next finding's prompt.
+# the model or Base URL; ``config``: Optimus Settings). ``context`` and
+# ``refused`` are not here: one prompt that does not fit, or that moderation
+# refuses, says nothing about the next finding's prompt.
 AI_FATAL_KINDS: frozenset[str] = frozenset({"auth", "quota", "not_found", "config"})
 
 
@@ -1311,8 +1313,8 @@ def _log_http_error(
 	"""Log one HTTP-layer failure through ``log_ai_failure``: provider, call
 	site, HTTP status, the provider's own error identifier when it sent one
 	(``provider_error``, see ``_provider_error_code``) and a short detail
-	(for a transport error, its type and message, scrubbed; for an
-	unexpected error, its type and plain frames). Never the prompt, the
+	(for a transport error, its type and the type of the error it wraps,
+	never its message; for an unexpected error, its type and plain frames). Never the prompt, the
 	source code, the headers or the response body. The session reference
 	comes from the per-worker spend marker the caller set
 	(``analyze._mark_ai_spend_session``), the same one
@@ -1505,16 +1507,25 @@ def _classify_http_error(
 	A billing URL in a rate-limit message is not evidence of exhausted credit.
 	Context errors take precedence over parameter-retry and quota matching; they
 	are ``context``, not ``config``: this prompt did not fit, the next one may.
-	``hosted`` (the request went to a hosted provider's own endpoint,
-	``_is_hosted_endpoint``) picks the context advice.
+	A 400 or 403 whose reply says content moderation flagged the prompt
+	(``_MODERATION_RE``, ``_MODERATION_CODES``) is ``refused``, not fatal: one
+	flagged prompt says nothing about the next. Any other 401 or 403 is ``auth``,
+	and its message never carries the reply. ``hosted`` (the request went to a
+	hosted provider's own endpoint, ``_is_hosted_endpoint``) picks the advice.
 	"""
 	from frappe import _
 
 	codes = set(provider_error.split(":"))
-	if status in (401, 403):
+	refused = status in (400, 403) and bool(_MODERATION_RE.search(detail) or _MODERATION_CODES.intersection(codes))
+	if status == 401 or (status == 403 and not refused):
 		return HttpErrorClassification("auth", _("The AI provider rejected the API key. Check it in Optimus Settings."), "")
 	if status in _PARAM_RETRY_STATUSES and (_CONTEXT_LIMIT_RE.search(detail) or _CONTEXT_CODES.intersection(codes)):
 		return HttpErrorClassification("context", _context_message(hosted=hosted), detail)
+	if refused:
+		return HttpErrorClassification("refused", _(
+			"The AI provider's content moderation refused this prompt (HTTP {0}). Other prompts are still sent; "
+			"if it keeps happening for one finding type, add that type to Excluded finding types in Optimus Settings."
+		).format(status), detail)
 	if (
 		status == 402 or _QUOTA_CODES.intersection(codes)
 		or (status == 400 and "credit balance" in detail.lower() and "too low" in detail.lower())
@@ -1532,6 +1543,11 @@ def _classify_http_error(
 		return HttpErrorClassification(
 			"server", _("The AI provider returned a server error (HTTP {0}). Try again in a few minutes.").format(status), detail,
 		)
+	if hosted:
+		# A hosted provider's Base URL is built in (the field is hidden).
+		return HttpErrorClassification("bad_request", _(
+			"The AI provider rejected the request (HTTP {0}). Check the Model under Optimus Settings > AI Fix Suggestions."
+		).format(status), detail)
 	return HttpErrorClassification("bad_request", _(
 		"The AI provider rejected the request (HTTP {0}). Check the Model and the Base URL under "
 		"Optimus Settings > AI Fix Suggestions."
@@ -1637,13 +1653,20 @@ def _http_post(
 		try:
 			with guard:
 				resp = requests.post(target, headers=headers, json=body, timeout=(min(10, remaining), remaining), auth=auth, allow_redirects=False)
+		except requests.exceptions.ConnectTimeout as e:
+			# Not a slow model: connecting is capped at 10 seconds, so it is
+			# a reachability failure, whatever the request timeout.
+			failed_kind = "transport"
+			error_name = type(e).__name__
+			detail = _error_types(e)
 		except requests.exceptions.Timeout:
 			failed_kind = "timeout"
 			detail = "timeout"
 		except requests.exceptions.RequestException as e:
 			failed_kind = "transport"
 			error_name = type(e).__name__
-			detail = f"{type(e).__name__}: {e}"
+			# Types only: the message can quote the URL, and so a key in it.
+			detail = _error_types(e)
 		except Exception as e:
 			failed_kind = "internal"
 			error_name = type(e).__name__
@@ -1692,7 +1715,7 @@ def _http_post(
 		)
 	elif status >= 400:
 		classified = _classify_http_error(
-			status, "" if status in (401, 403) else _response_detail(resp, auth),
+			status, "" if status == 401 else _response_detail(resp, auth),
 			provider_error=_provider_error_code(resp, auth), url=_shown_url(url, auth) if status == 404 else "",
 			hosted=_is_hosted_endpoint(url),
 		)
@@ -1740,6 +1763,20 @@ def _http_post(
 		_log_http_error(provider, where, status, detail, exc=failure, auth=auth, session_uuid=session_uuid)
 		raise failure
 	return data
+
+
+def _error_types(exc: BaseException) -> str:
+	"""``exc``'s type and the type of the low-level error requests wrapped in it
+	(urllib3's ``reason``, else its first argument), for example ``ConnectionError
+	(NameResolutionError)``. Never a message: a requests error can quote the request
+	URL, and so a key in it, and this text is bound in ``_http_post``'s frame. Only
+	attribute reads, so it is safe inside an ``except`` block."""
+	name = type(exc).__name__
+	inner = exc.args[0] if exc.args else None
+	inner = getattr(inner, "reason", None) or inner
+	if isinstance(inner, BaseException):
+		return f"{name} ({type(inner).__name__})"
+	return name
 
 
 def _timeout_failure(budget: float) -> AiFixError:
@@ -1953,9 +1990,10 @@ def _call_anthropic(
 	base_url: str, api_key: str, model: str, system: str, messages: list[dict],
 	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
 	timeout: int | None = None, meta_out: dict | None = None, session_uuid: str | None = None,
-	record_spend: bool = True,
+	record_spend: bool = True, budget: float | None = None,
 ) -> str:
-	"""One Anthropic Messages call. ``usage_out`` receives the reply's reported usage, and when
+	"""One Anthropic Messages call. ``budget`` is the whole call's budget a timeout
+	message names (``_http_post``). ``usage_out`` receives the reply's reported usage, and when
 	the caller passed one this billed reply is charged once to the ambient session
 	(``_record_session_spend``), unless the call is explicitly attributed (a non-empty
 	``session_uuid``, or ``record_spend`` False): its caller then records the spend itself.
@@ -1973,7 +2011,10 @@ def _call_anthropic(
 		"system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
 		"messages": messages,
 	}
-	data = _http_post(url, headers, body, provider="anthropic", where="messages", auth=auth, timeout=timeout, session_uuid=session_uuid)
+	data = _http_post(
+		url, headers, body, provider="anthropic", where="messages", auth=auth, timeout=timeout,
+		session_uuid=session_uuid, budget=budget,
+	)
 	usage = _usage_from_anthropic(data)
 	if usage_out is not None:
 		usage_out.update(usage)
@@ -2012,16 +2053,21 @@ def _param_rung(exc: AiFixError, body: dict) -> str | None:
 	``temperature`` is dropped whenever the reply names it: without it the model
 	uses its default, which every model accepts. ``max_tokens`` becomes
 	``max_completion_tokens`` only when the reply says the parameter itself is
-	not supported (``_MAX_TOKENS_UNSUPPORTED_RE``), never for a value error such
-	as "max_tokens is too large": the renamed parameter carries the same value.
+	not supported (``_MAX_TOKENS_UNSUPPORTED_RE``, or the provider's
+	``unsupported_parameter`` code while the reply names ``max_tokens``: the wording
+	may sit past the 300-character cap), never for a value error such as
+	"max_tokens is too large": the renamed parameter carries the same value.
 	"""
 	if exc.kind != "bad_request" or exc.status_code not in _PARAM_RETRY_STATUSES:
 		return None
 	text = _error_text(exc)
+	codes = set((getattr(exc, "_optimus_provider_error", "") or "").split(":"))
 	for parameter in ("temperature", "max_tokens"):
 		if parameter not in body or parameter not in text:
 			continue
-		if parameter == "max_tokens" and not _MAX_TOKENS_UNSUPPORTED_RE.search(text):
+		if parameter == "max_tokens" and not (
+			_MAX_TOKENS_UNSUPPORTED_RE.search(text) or "unsupported_parameter" in codes
+		):
 			continue
 		return parameter
 	return None
@@ -2035,16 +2081,22 @@ def _adapt_body(body: dict, rung: str) -> None:
 		body["max_completion_tokens"] = body.pop("max_tokens")
 
 
-def _post_with_param_ladder(url, headers, body, *, auth=None, timeout=None, session_uuid=None, adapted=None) -> dict:
+def _post_with_param_ladder(
+	url, headers, body, *, auth=None, timeout=None, session_uuid=None, adapted=None, budget=None,
+) -> dict:
 	"""At most three posts, sharing one budget; only the final rejection is logged.
+	``timeout`` is the time these posts share; ``budget`` is the whole call's budget
+	a timeout message names (default: ``timeout``), so a re-ask that only had what
+	was left of it still names the configured budget.
 
 	``adapted`` is the call chain's memo (a list the caller keeps for one
 	``suggest_fix``: its first call and its re-ask): the parameter changes an
 	earlier post of the chain needed are applied before the first post, and each
 	new one is added, so a re-ask never repeats a rejected post. It is never
 	shared between calls: another call may go to another model."""
-	budget = timeout or _resolve_timeout_seconds()
-	deadline = time.monotonic() + budget
+	timeout = timeout or _resolve_timeout_seconds()
+	budget = budget or timeout
+	deadline = time.monotonic() + timeout
 	body = dict(body)
 	for rung in adapted or ():
 		_adapt_body(body, rung)
@@ -2113,10 +2165,12 @@ def _call_openai_chat(
 	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
 	metadata: dict | None = None, timeout: int | None = None, meta_out: dict | None = None,
 	session_uuid: str | None = None, record_spend: bool = True, adapted_params: list | None = None,
+	budget: float | None = None,
 ) -> str:
 	"""One OpenAI-compatible chat completion (through the parameter ladder). ``usage_out`` and
 	``record_spend`` work as in ``_call_anthropic``: one ambient charge per billed reply, none for
 	an explicitly attributed call. ``adapted_params`` is the call chain's parameter memo
+	and ``budget`` the whole call's budget a timeout message names
 	(``_post_with_param_ladder``)."""
 	url = base_url.rstrip("/") + "/chat/completions"
 	headers = {"content-type": "application/json"}
@@ -2135,6 +2189,7 @@ def _call_openai_chat(
 		body["metadata"] = metadata
 	data = _post_with_param_ladder(
 		url, headers, body, auth=auth, timeout=timeout, session_uuid=session_uuid, adapted=adapted_params,
+		budget=budget,
 	)
 	usage = _usage_from_openai(data)
 	if usage_out is not None:
@@ -2254,6 +2309,7 @@ def _dispatch_call(
 	session_uuid: str | None = None,
 	record_spend: bool = True,
 	adapted_params: list | None = None,
+	budget: float | None = None,
 ) -> str:
 	"""Send one chat completion through the provider's protocol handler. The API
 	key is fetched here into a local named ``api_key`` (never into ``provider``).
@@ -2261,7 +2317,8 @@ def _dispatch_call(
 	call, whose spend its caller records itself (``analyze._add_ai_spend``);
 	otherwise the billed reply is charged to the ambient session
 	(``_record_session_spend``). ``adapted_params`` (OpenAI-compatible only) is the
-	call chain's parameter memo (``_post_with_param_ladder``)."""
+	call chain's parameter memo (``_post_with_param_ladder``). ``budget`` is the whole
+	call's time budget a timeout message names (default: ``timeout``)."""
 	api_key = _get_api_key(provider.get("needs_key", True))
 	if provider.get("needs_key") and not api_key:
 		from frappe import _
@@ -2272,12 +2329,12 @@ def _dispatch_call(
 		return _call_anthropic(
 			provider["base_url"], api_key, provider["model"], system, messages,
 			max_tokens=out, usage_out=usage_out, timeout=timeout, meta_out=meta_out, session_uuid=session_uuid,
-			record_spend=record_spend,
+			record_spend=record_spend, budget=budget,
 		)
 	return _call_openai_chat(
 		provider["base_url"], api_key, provider["model"], system, messages,
 		max_tokens=out, usage_out=usage_out, metadata=metadata, timeout=timeout, meta_out=meta_out, session_uuid=session_uuid,
-		record_spend=record_spend, adapted_params=adapted_params,
+		record_spend=record_spend, adapted_params=adapted_params, budget=budget,
 	)
 
 
@@ -2312,7 +2369,8 @@ def _complete_with_guardrails(
 	breaks strictly fewer block rules. ``session_uuid`` and ``record_spend`` go to
 	both calls (``_dispatch_call``), so each billed reply is charged at most once.
 	Both calls share one parameter memo (``adapted``): the re-ask starts from the
-	request the first call's parameter ladder ended with."""
+	request the first call's parameter ladder ended with. The re-ask gets what is
+	left of ``timeout``, but a timeout message still names ``timeout`` itself."""
 	ctx = _context_tokens(provider)
 	out = _output_tokens(provider)
 	meta: dict = {}
@@ -2366,6 +2424,7 @@ def _complete_with_guardrails(
 					max_tokens=ai_budget.reask_output_tokens(out, fit_usage["completion_tokens"]),
 					meta_out=reask_meta, session_uuid=session_uuid, record_spend=record_spend,
 					adapted_params=adapted,
+					budget=timeout,
 				)
 			except Exception as e:
 				reask_error = e  # record only; act after the try (no log or raise while it is active)
@@ -2627,6 +2686,18 @@ _MAX_TOKENS_UNSUPPORTED_RE = re.compile(
 	r"|\bmax_tokens\W{0,4}(?:is |are )?(?:not supported|unsupported)",
 	re.I,
 )
+# A reply that says content moderation flagged the prompt: OpenRouter's 403
+# carries ``metadata.flagged_input`` (its ModerationErrorMetadata) and names
+# moderation; other providers say the input, prompt or content "was flagged".
+# Narrow on purpose: "your account has been flagged" is an account problem
+# (``auth``), not this prompt.
+_MODERATION_RE = re.compile(
+	r"moderation|flagged_input"
+	r"|\b(?:input|prompt|content|request|message)s? (?:was|were|is|are|has been|have been) flagged\b",
+	re.I,
+)
+# Azure OpenAI's content-filter rejection (HTTP 400, code ``content_filter``).
+_MODERATION_CODES = frozenset({"content_filter"})
 _QUOTA_CODES = frozenset({
 	"insufficient_quota", "billing_hard_limit_reached", "billing_not_active",
 	"exceeded_current_quota_error",  # Moonshot / Kimi: balance exhausted or account suspended (HTTP 429)

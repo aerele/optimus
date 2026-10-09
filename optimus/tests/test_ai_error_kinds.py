@@ -33,6 +33,11 @@ class Reply:
 		return self.payload
 
 
+class NonJson(Reply):
+	def json(self):
+		raise ValueError("fake: not JSON")
+
+
 def _rejected(message, status=400):
 	return Reply(status, {"error": {"message": message, "type": "invalid_request_error"}})
 
@@ -111,7 +116,7 @@ _REAL_BODIES = [
 	("anthropic 529", 529, {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}, "server", False),
 	("azure 429", 429, {"error": {"code": "429", "message": "Requests to the ChatCompletions_Create Operation under Azure OpenAI API version 2024-02-01 have exceeded token rate limit of your current OpenAI S0 pricing tier. Please retry after 6 seconds. Please go here: https://aka.ms/oai/quotaincrease if you would like to further increase the default rate limit."}}, "rate_limited", False),
 	("azure 404 deployment", 404, {"error": {"code": "DeploymentNotFound", "message": "The API deployment for this resource does not exist."}}, "not_found", True),
-	("azure 400 content_filter", 400, {"error": {"message": "The response was filtered due to the prompt triggering Azure OpenAI's content management policy.", "type": None, "param": "prompt", "code": "content_filter", "status": 400}}, "bad_request", False),
+	("azure 400 content_filter", 400, {"error": {"message": "The response was filtered due to the prompt triggering Azure OpenAI's content management policy.", "type": None, "param": "prompt", "code": "content_filter", "status": 400}}, "refused", False),
 	("moonshot 429 quota", 429, {"error": {"message": "Your account org-x<ak-y> is suspended, please check your plan and billing details", "type": "exceeded_current_quota_error"}}, "quota", True),
 	("moonshot 429 token quota", 429, {"error": {"message": "You exceeded your current token quota: 0, please check your account balance", "type": "exceeded_current_quota_error"}}, "quota", True),
 	("moonshot 429 rate", 429, {"error": {"message": "Your account org-x<ak-y> request reached organization max RPM: 3, please try again after 1 seconds", "type": "rate_limit_reached_error"}}, "rate_limited", False),
@@ -140,21 +145,88 @@ def test_real_provider_bodies_get_their_kind(wire, label, status, body, kind, fa
 		assert str(caught.value).startswith("The prompt did not fit the model's context window.")
 
 
-@pytest.mark.parametrize("field,code", [("code", "context_length_exceeded"), ("type", "exceed_context_size_error")])
-def test_a_context_error_code_alone_is_enough(wire, field, code):
+@pytest.mark.parametrize("error,kind", [
+	# OpenAI's joined type:code (invalid_request_error:context_length_exceeded)
+	({"type": "invalid_request_error", "code": "context_length_exceeded"}, "context"),
+	({"type": "exceed_context_size_error"}, "context"),
+	({"type": "invalid_request_error", "code": "billing_hard_limit_reached"}, "quota"),
+])
+def test_a_machine_code_alone_is_enough(wire, error, kind):
 	"""The reply shown is cut at 300 characters, so a long message hides a code
-	that follows it: the validated machine code still says what happened."""
-	wire.install(Reply(400, {"error": {"message": "Request rejected. " + "fake filler " * 40, field: code}}))
+	that follows it: the validated machine code still says what happened, also
+	when it is one half of a ``type:code`` pair."""
+	wire.install(Reply(400, {"error": {"message": "Request rejected. " + "fake filler " * 40, **error}}))
 	with pytest.raises(ai_fix.AiFixError) as caught:
 		ai_fix._http_post(_LOCAL, {}, {}, provider="openai", where="test")
-	assert caught.value.kind == "context"
+	assert caught.value.kind == kind
+
+
+@pytest.mark.parametrize("status,body,kind", [
+	# OpenAI: one message string too long, not the context window
+	(400, {"error": {"message": "Invalid 'messages[1].content': string too long. Expected a string with maximum length 1048576, but got a string with length 2000000 instead.", "type": "invalid_request_error", "param": "messages[1].content", "code": "string_above_max_length"}}, "bad_request"),
+	# Anthropic: the output cap, not the context window
+	(400, {"type": "error", "error": {"type": "invalid_request_error", "message": "max_tokens: 100000 > 64000, which is the maximum allowed number of output tokens for claude-sonnet-4-6"}}, "bad_request"),
+	# a field named context..., not a context limit
+	(400, {"type": "error", "error": {"type": "invalid_request_error", "message": "context_management: Extra inputs are not permitted"}}, "bad_request"),
+	(400, {"error": {"message": "max_tokens 100000 exceeds the output token limit (8192) of this model", "type": "invalid_request_error"}}, "bad_request"),
+	# only a request-validation status (400, 422) is a context failure
+	(500, {"error": {"message": "upstream failed: This model's maximum context length is 8192 tokens"}}, "server"),
+])
+def test_replies_that_only_look_like_a_context_limit(wire, status, body, kind):
+	wire.install(Reply(status, body))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._http_post(_LOCAL, {}, {}, provider="openai", where="test")
+	assert caught.value.kind == kind
+
+
+# OpenRouter's moderation error: HTTP 403 with ``metadata.reasons`` and
+# ``metadata.flagged_input`` (its documented ModerationErrorMetadata). The
+# message wording is not documented, so two plausible ones are used.
+_MODERATION = [
+	(403, {"error": {"code": 403, "message": "Request blocked by content policy", "metadata": {"reasons": ["harassment"], "flagged_input": "fake...input", "provider_name": "OpenAI", "model_slug": "openai/gpt-4o"}}}),
+	(403, {"error": {"code": 403, "message": "openai/gpt-4o requires moderation on OpenAI. Your input was flagged for \"harassment\"."}}),
+	(400, {"error": {"message": "Your prompt was flagged as potentially violating our usage policy.", "type": "invalid_request_error"}}),
+	(403, {"error": {"code": 403, "message": "Blocked by the provider's moderation: harassment"}}),
+]
+
+
+@pytest.mark.parametrize("status,body", _MODERATION)
+def test_a_moderation_refusal_is_not_fatal(wire, marked, status, body):
+	wire.install(Reply(status, body))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._http_post(_LOCAL, {}, {}, provider="openai", where="test")
+	assert caught.value.kind == "refused" and not caught.value.fatal
+	assert str(caught.value).startswith(f"[t]The AI provider's content moderation refused this prompt (HTTP {status}).")
+	assert "Excluded finding types" in str(caught.value)
+
+
+def test_a_moderation_refusal_never_enters_the_parameter_ladder(wire):
+	wire.install(_rejected("Your input was flagged by moderation: it mentions temperature and max_tokens"))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._call_openai_chat("https://p.invalid/v1", "", "custom", "system", [], max_tokens=512)
+	assert caught.value.kind == "refused" and len(wire.posts) == 1
+
+
+@pytest.mark.parametrize("status,body", [
+	(403, {"error": {"message": "Your account has been flagged for suspicious activity. fake-detail", "type": "access_denied"}}),
+	(403, {"error": {"message": "You do not have access to this model. fake-detail"}}),
+	(401, {"error": {"message": "Invalid key; moderation is unavailable. fake-detail"}}),
+	# a 401 is the key, whatever the reply carries
+	(401, {"error": {"message": "fake-detail", "code": "content_filter"}}),
+])
+def test_a_genuine_auth_failure_stays_fatal_and_body_free(wire, status, body):
+	wire.install(Reply(status, body))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._http_post(_LOCAL, {}, {}, provider="openai", where="test")
+	assert caught.value.kind == "auth" and caught.value.fatal
+	assert "fake-detail" not in str(caught.value)
 
 
 @pytest.mark.parametrize("kind,fatal", [
 	("auth", True), ("quota", True), ("not_found", True), ("config", True),
 	("context", False), ("rate_limited", False), ("server", False), ("bad_request", False),
 	("transport", False), ("timeout", False), ("bad_response", False), ("internal", False),
-	("unknown", False), ("not_eligible", False),
+	("unknown", False), ("not_eligible", False), ("refused", False),
 ])
 def test_fatal_is_the_one_answer_for_every_kind(kind, fatal):
 	assert ai_fix.AiFixError("x", kind=kind).fatal is fatal
@@ -187,6 +259,15 @@ def test_an_answer_reserve_no_prompt_fits_beside_is_config():
 	assert caught.value.kind == "config"
 
 
+def test_the_chat_template_counts_toward_what_every_prompt_needs():
+	"""A window that holds the system prompt and the answer reserve but not the
+	chat template around them fits no prompt either."""
+	window = ai_fix.ai_budget.estimate_tokens(ai_prompts.SYSTEM_PROMPT) + 4000 + ai_fix.ai_budget.TEMPLATE_TOKENS // 2
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._check_context_fits(ai_prompts.SYSTEM_PROMPT, window, messages=[{"content": "x"}], out_tokens=4000)
+	assert caught.value.kind == "config"
+
+
 def test_one_prompt_too_big_for_a_large_enough_window_is_context(marked):
 	with pytest.raises(ai_fix.AiFixError) as caught:
 		ai_fix._check_context_fits(
@@ -216,6 +297,7 @@ def test_a_provider_context_rejection_names_the_cause_and_fits_the_provider(wire
 	assert caught.value.kind == "context" and not caught.value.fatal
 	assert message.startswith("[t]The prompt did not fit the model's context window.")
 	assert ("Ollama" in message) is local
+	assert ("[t]Choose a model with a larger context window" in message) is not local
 	assert "prompt is too long: 215000 tokens" in message
 
 
@@ -282,6 +364,35 @@ def test_parameter_names_echoed_in_another_error_do_not_rename(wire):
 	assert caught.value.kind == "bad_request"
 	assert len(wire.posts) == 2 and len(wire.logs) == 1
 	assert "max_tokens" in wire.posts[1][1]["json"] and "temperature" not in wire.posts[1][1]["json"]
+
+
+def test_unsupported_parameter_wording_must_name_max_tokens_itself(wire):
+	wire.install(_rejected("Unsupported parameter: 'tools'. The request had max_tokens=512."))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._call_openai_chat("https://p.invalid/v1", "", "custom", "system", [], max_tokens=512)
+	assert caught.value.kind == "bad_request" and len(wire.posts) == 1
+
+
+def test_an_unsupported_parameter_code_renames_when_the_wording_is_past_the_cap(wire):
+	wire.install(
+		Reply(400, {"error": {
+			"type": "invalid_request_error", "param": "max_tokens", "code": "unsupported_parameter",
+			"details": "x" * 260,
+			"message": "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
+		}}),
+		Reply(),
+	)
+	assert ai_fix._call_openai_chat("https://p.invalid/v1", "", "custom", "system", [], max_tokens=512) == "answer"
+	assert wire.posts[1][1]["json"]["max_completion_tokens"] == 512 and len(wire.posts) == 2
+
+
+def test_an_unsupported_parameter_code_alone_does_not_rename_an_unnamed_parameter(wire):
+	wire.install(Reply(400, {"error": {
+		"type": "invalid_request_error", "param": "tools", "code": "unsupported_parameter", "message": "Unsupported parameter: 'tools'.",
+	}}))
+	with pytest.raises(ai_fix.AiFixError):
+		ai_fix._call_openai_chat("https://p.invalid/v1", "", "custom", "system", [], max_tokens=512)
+	assert len(wire.posts) == 1
 
 
 def test_temperature_is_dropped_before_max_tokens_is_renamed(wire):
@@ -374,6 +485,43 @@ def test_a_spent_budget_names_the_whole_budget(wire, marked):
 	assert str(caught.value).startswith("[t]The AI provider didn't respond within 60 seconds.")
 
 
+def test_a_redirect_that_spends_the_ladders_budget_names_the_whole_budget(wire, marked):
+	wire.use_clock()
+	wire.install(
+		(_rejected("Unsupported value: 'temperature' does not support 0.1"), 25),
+		(Reply(307, {}, headers={"location": "/v2/chat/completions"}), 40),
+	)
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._call_openai_chat("https://p.invalid/v1", "", "custom", "system", [], timeout=60)
+	assert caught.value.kind == "timeout" and len(wire.posts) == 2
+	assert str(caught.value).startswith("[t]The AI provider didn't respond within 60 seconds.")
+
+
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+def test_a_reask_timeout_names_the_calls_whole_budget(wire, monkeypatch, protocol):
+	from optimus.tests import test_ai_fix as base
+
+	g = base.TestGuardedCompletion
+	_fake_provider(monkeypatch, protocol=protocol)
+	first = _answer(g._RAW) if protocol == "openai" else Reply(payload={"content": [{"type": "text", "text": g._RAW}]})
+	wire.use_clock()
+	wire.install((first, 20), (ai_fix.requests.exceptions.ReadTimeout("fake"), 0))
+	out = ai_fix.suggest_fix(dict(g._FINDING), timeout=60)
+	assert out["guardrail"]["reasked"] is True
+	rows = [str(kw["exc"]) for _, kw in wire.logs if kw.get("exc") is not None]
+	assert rows and all("didn't respond within 60 seconds" in row for row in rows)
+
+
+def test_a_connect_timeout_is_a_reachability_failure(wire, marked):
+	wire.install(ai_fix.requests.exceptions.ConnectTimeout("fake connect timed out"))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._http_post(_LOCAL, {}, {}, provider="openai", where="test", timeout=120)
+	message = str(caught.value)
+	assert caught.value.kind == "transport" and caught.value.__context__ is None
+	assert message.startswith("[t]Couldn't reach the AI provider (ConnectTimeout).")
+	assert "Request timeout" not in message and "fake connect" not in message
+
+
 @pytest.mark.parametrize("budget,shown", [(59.6, "60"), (60, "60"), (0.2, "1")])
 def test_a_timeout_budget_is_shown_in_whole_seconds(budget, shown):
 	failure = ai_fix._timeout_failure(budget)
@@ -408,6 +556,63 @@ def test_the_provider_reply_follows_the_message_without_a_stray_colon(wire, mark
 	assert "[t]The provider replied: " in message
 
 
+def _max_retry_error():
+	from urllib3.exceptions import MaxRetryError, NameResolutionError
+
+	return MaxRetryError(None, "/v1?key=fake-secret", reason=NameResolutionError("llm.invalid", None, "fake-secret"))
+
+
+@pytest.mark.parametrize("error,detail", [
+	(ai_fix.requests.exceptions.ConnectionError("fake-url?key=fake-secret"), "ConnectionError"),
+	(ai_fix.requests.exceptions.ConnectionError(ValueError("fake-secret")), "ConnectionError (ValueError)"),
+	# what requests really wraps: urllib3's MaxRetryError, whose reason is the low-level error
+	(ai_fix.requests.exceptions.ConnectionError(_max_retry_error()), "ConnectionError (NameResolutionError)"),
+	(ai_fix.requests.exceptions.ConnectTimeout("fake-secret"), "ConnectTimeout"),
+])
+def test_a_transport_failure_keeps_only_error_types(wire, error, detail):
+	"""A requests error's message can carry the URL, and so a key in it: only the
+	types reach the row's detail, and no frame local ever holds the message."""
+	wire.install(error)
+	with pytest.raises(ai_fix.AiFixError):
+		ai_fix._http_post(_LOCAL, {}, {}, provider="openai", where="test")
+	(provider, where, status, logged), _ = wire.logs[0]
+	assert logged == detail
+
+
+@pytest.mark.parametrize("status,payload,start", [
+	(500, {"error": {"message": "fake-reply"}}, "[t]The AI provider returned a server error (HTTP 500). Try again in a few minutes."),
+	(400, {"error": {"message": "fake-reply"}}, "[t]The AI provider rejected the request (HTTP 400). Check the Model"),
+])
+def test_status_messages_are_translated_with_a_next_step(wire, marked, status, payload, start):
+	wire.install(Reply(status, payload))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._http_post(_LOCAL, {}, {}, provider="openai", where="test")
+	assert str(caught.value).startswith(start)
+
+
+@pytest.mark.parametrize("url,base_url", [(_LOCAL, True), (_HOSTED, False)])
+def test_a_rejected_request_names_only_settings_the_provider_has(wire, marked, url, base_url):
+	"""A hosted provider's Base URL is fixed (the field is hidden), so its advice names the Model only."""
+	wire.install(Reply(400, {"error": {"message": "fake-reply"}}))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._http_post(url, {}, {}, provider="openai", where="test")
+	assert caught.value.kind == "bad_request"
+	assert str(caught.value).startswith("[t]The AI provider rejected the request (HTTP 400). Check the Model")
+	assert ("Base URL" in str(caught.value)) is base_url
+
+
+@pytest.mark.parametrize("reply,start", [
+	(NonJson(200, {}), "[t]The AI provider returned an unexpected (non-JSON) response."),
+	(Reply(200, ["fake", "list"]), "[t]The AI provider returned an unexpected response (not a JSON object)."),
+])
+def test_an_unusable_reply_is_translated_with_a_next_step(wire, marked, reply, start):
+	wire.install(reply)
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._http_post(_LOCAL, {}, {}, provider="openai", where="test")
+	assert caught.value.kind == "bad_response"
+	assert str(caught.value).startswith(start) and "[t]Try again later" in str(caught.value)
+
+
 def test_an_internal_failure_records_where_it_happened_but_not_what_it_said(wire, monkeypatch, marked):
 	_fake_provider(monkeypatch)
 
@@ -426,6 +631,10 @@ def test_an_internal_failure_records_where_it_happened_but_not_what_it_said(wire
 	assert __file__ in row
 	for text in (str(failure), row):
 		assert "fake-secret-detail" not in text
+
+
+def test_a_reported_zero_is_kept_as_a_count():
+	assert ai_fix._billed_usage({"prompt_tokens": 0, "total_tokens": 0}) == {"prompt_tokens": 0, "total_tokens": 0}
 
 
 def test_billed_usage_is_filtered_once_for_every_failure():

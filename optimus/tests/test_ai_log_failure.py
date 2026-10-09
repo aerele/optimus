@@ -661,7 +661,8 @@ class TestHttpFailurePath:
 		assert ei.value.kind == "transport"
 		assert ei.value.__context__ is None and ei.value.__cause__ is None
 		assert len(logs) == 1 and logs[0]["title"] == "optimus ai_fix"
-		assert "detail=ConnectionError: HTTPConnectionPool" in logs[0]["message"]
+		# types only: a requests message can quote the URL, and so a key in it
+		assert "detail=ConnectionError\n" in logs[0]["message"] and "HTTPConnectionPool" not in logs[0]["message"]
 		# a caller logging the same error again writes nothing more (K16)
 		ai_fix.log_ai_failure("optimus ai backfill", ei.value)
 		assert len(logs) == 1
@@ -2307,7 +2308,7 @@ class TestTheCallersContextJoinsTheRow:
 		assert len(logs) == 1
 		row = frappe.db.rows["ERR-0001"]["error"]
 		assert row.startswith(logs[0]["message"])  # the generic lines stay first
-		assert "detail=ConnectionError: refused" in row
+		assert "detail=ConnectionError\n" in row and "refused" not in row
 		assert "\n\noptimus ai backfill\nsession_uuid=uuid-1\nfinding_type=n_plus_one" in row
 		assert frappe.db.set_values == [("Error Log", "ERR-0001", "error", False)]
 		assert breadcrumbs == []
