@@ -477,6 +477,12 @@ def test_a_heartbeat_that_finds_another_holder_logs_one_line_per_run(env):
 	env.in_job("B-again")
 	assert analyze._acquire_singleflight("B", "PS-B", 0.0) is True
 	analyze._touch_singleflight("B")
+	assert len(env.lines) == 1  # the same text within a minute is one line (log_error_line)
+	from optimus import safe_call
+
+	safe_call._RECENT_LINES.clear()  # a minute later
+	analyze._heartbeat_noted.clear()
+	analyze._touch_singleflight("B")
 	assert len(env.lines) == 2
 
 

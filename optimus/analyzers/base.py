@@ -439,6 +439,32 @@ INDEX_FINDING_TYPES: frozenset[str] = frozenset({
 })
 
 
+# ``<app>/<app>/``: what follows the bench's apps dir (apps/<app>/<app>/<module>/...).
+_BENCH_APP_RE = re.compile(r"([^/]+)/\1/")
+
+
+def cut_at_bench_apps(filename: str) -> str | None:
+	"""The part of a ``/``-separated ``filename`` after the bench's ``apps/`` dir, or None
+	when it has none. The last ``/apps/`` followed by ``<app>/<app>/`` (the bench layout)
+	wins, else the last ``/apps/``. The plain last ``/apps/`` can be an ``apps`` package
+	inside the app (``.../apps/myapp/myapp/apps/x.py`` would become ``x.py``, an unknown app
+	root). A leading ``apps/`` counts as the bench dir. The one cut the call-tree app root,
+	the redundant-call stack and the AI file labels share."""
+	if filename.startswith("apps/"):
+		filename = "/" + filename
+	tails = []
+	at = filename.find("/apps/")
+	while at != -1:
+		tails.append(filename[at + len("/apps/"):])
+		at = filename.find("/apps/", at + 1)  # overlapping: an app named ``apps``
+	if not tails:
+		return None
+	for tail in reversed(tails):
+		if _BENCH_APP_RE.match(tail):
+			return tail
+	return tails[-1]
+
+
 def _last_app_segment(norm: str) -> str | None:
 	"""The ``<app>`` in a real ``apps/<app>/`` segment, or None.
 
@@ -448,13 +474,12 @@ def _last_app_segment(norm: str) -> str | None:
 	A mid-path ``/apps/`` in a RELATIVE path is a user subpackage, so
 	``myapp/apps/foo.py`` returns None (caller falls back to the top segment).
 	"""
-	if norm.startswith("apps/"):
-		tail = norm[len("apps/"):]
-	elif norm.startswith("/") and "/apps/" in norm:
-		# Absolute bench path: the LAST '/apps/' boundary = the real bench apps dir
-		# even when an ancestor directory is also called 'apps'.
-		tail = norm.rsplit("/apps/", 1)[1]
-	else:
+	if not (norm.startswith("apps/") or norm.startswith("/")):
+		return None
+	# Absolute bench path: the real bench apps dir even when an ancestor directory is also
+	# called 'apps' or the app has an ``apps`` package.
+	tail = cut_at_bench_apps(norm)
+	if tail is None:
 		return None
 	first = tail.split("/", 1)[0]
 	return first or None

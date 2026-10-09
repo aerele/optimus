@@ -29,6 +29,7 @@ from optimus.analyzers.base import (
 	CALLSITE_WALK_FIXED,
 	CALLSITE_WALK_KEY,
 	FRAMEWORK_APPS,
+	cut_at_bench_apps,
 	is_framework_callsite,
 )
 
@@ -570,7 +571,8 @@ FRAMEWORK_N1_NOTE = (
 NOT_ELIGIBLE_NOTE = "This finding type does not carry enough code or SQL context for an AI suggestion."
 GATE_CHECK_FAILED_NOTE = (
 	"Optimus could not check this Hot Line, so it does not ask the AI about it. Look at what the "
-	"line calls and how often it runs."
+	"line calls and how often it runs. If it keeps happening, send the bench log line "
+	"\"optimus: hot-line gate failed\" to the Optimus maintainers."
 )
 
 # A line whose Phase 2 time per hit reaches this, and whose statement calls a
@@ -781,11 +783,8 @@ def _own_loop_note(callee: str) -> str:
 
 def _short_path(filename: str) -> str:
 	norm = filename.replace("\\", "/")
-	if "/apps/" in norm:
-		return norm.rsplit("/apps/", 1)[1]
-	if norm.startswith("apps/"):
-		return norm[len("apps/") :]
-	return norm.rsplit("/", 1)[-1]
+	cut = cut_at_bench_apps(norm)
+	return cut if cut is not None else norm.rsplit("/", 1)[-1]
 
 
 def _per_hit_us(detail: dict) -> float:

@@ -244,13 +244,16 @@ function _refill_ai_call(frm) {
 			const parts = [];
 			if (fx.added) parts.push(__("{0} fix(es)", [fx.added]));
 			if (st.updated) parts.push(__("steps rewritten"));
+			const failed = fx.failed || 0;
+			// a "nothing to refresh" toast would contradict the failed-calls alert below
 			const msg = parts.length
 				? __("Refreshed: {0}.", [parts.join(", ")])
-				: __("Nothing to refresh.");
-			const failed = fx.failed || 0;
+				: failed
+					? ""
+					: __("Nothing to refresh.");
 			const skipped = fx.skipped_time || 0;
 			const indicator = failed ? "red" : parts.length ? "green" : "orange";
-			frappe.show_alert({ message: msg, indicator: indicator });
+			if (msg) frappe.show_alert({ message: msg, indicator: indicator });
 			if (failed) {
 				frappe.show_alert({
 					message: __("{0} call(s) failed, old suggestions kept (see Error Log, title optimus ai backfill).", [failed]),

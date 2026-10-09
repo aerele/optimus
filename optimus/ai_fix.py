@@ -2061,7 +2061,10 @@ def _loop_facts_text(finding: dict, rows: list[dict] | None = None) -> str:
 		return ""
 	facts = finding.get("loop_facts")
 	if not isinstance(facts, dict) or not facts:
-		facts = safe_call.best_effort(lambda: ai_grounding.loop_facts_from_window(rows, target), {})
+		facts = safe_call.best_effort(
+			lambda: ai_grounding.loop_facts_from_window(rows, target), {},
+			on_error=lambda kind: safe_call.log_error_line(f"optimus: AI loop facts failed: {kind}"),
+		)
 	return ai_grounding.format_loop_facts(
 		facts, first_line=rows[0]["lineno"], last_line=rows[-1]["lineno"],
 		caller_hint=ftype in ai_grounding.CALLER_HINT_TYPES,

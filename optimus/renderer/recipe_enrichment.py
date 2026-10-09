@@ -183,8 +183,19 @@ class _EvidenceLookup:
 	def read_failed(self, table: str) -> bool:
 		return str(table or "").strip().strip("`") in self._failed
 
+	def log_unlisted_failures(self) -> None:
+		"""One summary line when more tables failed than the log lists, so the advice text
+		for table 11 and later, which cites the evidence-read line, has a line to find.
+		Called once after the recipes ran, never inside an ``except``."""
+		unlisted = len(self._failed) - MAX_LOGGED_EVIDENCE_FAILURES
+		if unlisted > 0:
+			log_error_line(
+				f"optimus: evidence read failed for {unlisted} more tables "
+				f"(only the first {MAX_LOGGED_EVIDENCE_FAILURES} are listed above)"
+			)
 
-def make_evidence_lookup() -> Callable[[str], TableEvidence | None]:
+
+def make_evidence_lookup() -> _EvidenceLookup:
 	"""A fresh ``_EvidenceLookup``: one per render, export and AI run."""
 	return _EvidenceLookup()
 
@@ -342,13 +353,7 @@ def log_recipe_failures(count: int, *, where: str = "render", errors=()) -> None
 		shown = ", ".join(f"{label}: {kind}" for label, kind in pairs[:MAX_LOGGED_RECIPE_ERRORS])
 		more = len(pairs) - MAX_LOGGED_RECIPE_ERRORS
 		line += f" ({shown}{f', and {more} more' if more > 0 else ''})"
-
-	def _write() -> None:
-		import frappe
-
-		frappe.logger("optimus").error(line)
-
-	best_effort(_write, None)
+	log_error_line(line)
 
 
 def export_advice(

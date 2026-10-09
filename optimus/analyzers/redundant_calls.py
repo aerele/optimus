@@ -19,14 +19,13 @@ from optimus.analyzers.base import (
 	CALLSITE_WALK_FIXED,
 	CALLSITE_WALK_KEY,
 	AnalyzerResult,
+	cut_at_bench_apps,
 	installed_apps_allowlist,
 	is_framework_callsite,
 	walk_callsite,
 )
 
 _WINDOWS_ABS_RE = re.compile(r"^[A-Za-z]:/")
-# ``<app>/<app>/``: what follows the bench's apps dir (apps/<app>/<app>/<module>/...).
-_BENCH_APP_RE = re.compile(r"([^/]+)/\1/")
 
 DEFAULT_REDUNDANT_HIGH_MULTIPLIER = 5
 
@@ -123,22 +122,6 @@ def _is_library_path(filename: str) -> bool:
 	return any(marker in filename for marker in _LIBRARY_MARKERS)
 
 
-def _cut_at_bench_apps(filename: str) -> str:
-	"""The part of ``filename`` after the bench's ``/apps/`` dir: the last ``/apps/``
-	followed by ``<app>/<app>/`` (the bench layout), else the last ``/apps/``. The plain
-	last ``/apps/`` can be an ``apps`` package inside the app
-	(``.../apps/myapp/myapp/apps/x.py`` would become ``x.py``, an unknown app root)."""
-	tails = []
-	at = filename.find("/apps/")
-	while at != -1:
-		tails.append(filename[at + len("/apps/"):])
-		at = filename.find("/apps/", at + 1)  # overlapping: an app named ``apps``
-	for tail in reversed(tails):
-		if _BENCH_APP_RE.match(tail):
-			return tail
-	return tails[-1]
-
-
 def _relative_frames(stack: list):
 	"""Yield ``stack``'s frames as ``_apps_relative_stack`` keeps them, lazily."""
 	for frame in stack or []:
@@ -146,7 +129,7 @@ def _relative_frames(stack: list):
 			continue
 		filename = str(frame.get("filename") or "").replace("\\", "/")
 		if "/apps/" in filename:
-			yield dict(frame, filename=_cut_at_bench_apps(filename))
+			yield dict(frame, filename=cut_at_bench_apps(filename))
 		elif (filename.startswith("/") or _WINDOWS_ABS_RE.match(filename)) and _is_library_path(filename):
 			continue
 		else:

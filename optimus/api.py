@@ -1094,6 +1094,7 @@ def _export_index_advice(findings: list[dict], tables) -> None:
 	)
 	failed += (table_stats or {}).get("failed", 0)
 	recipe_enrichment.log_recipe_failures(failed, where="export", errors=errors)
+	lookup.log_unlisted_failures()
 
 
 @frappe.whitelist()

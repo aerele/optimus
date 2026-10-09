@@ -284,7 +284,7 @@ def _take_singleflight(session_uuid: str) -> bool:
 
 def _note_heartbeat_problem(session_uuid: str, problem: str) -> None:
 	"""One ``optimus`` log line per analyze run when a heartbeat fails or finds another
-	session's flag (O4). Such a run no longer holds the flag, so the janitor can fail its
+	session's flag (O4). Such a run does not hold the flag, so the janitor can fail its
 	Analyzing row while it still runs; this line says why. Logged at ERROR because
 	Frappe's loggers drop lower levels on a production site. Never raises, except an RQ
 	job timeout."""
@@ -292,10 +292,7 @@ def _note_heartbeat_problem(session_uuid: str, problem: str) -> None:
 		return
 	_heartbeat_noted.add(session_uuid)
 
-	def _write() -> None:
-		frappe.logger("optimus").error(f"optimus: analyze {session_uuid}: {problem}")
-
-	safe_call.best_effort(_write, None)
+	safe_call.log_error_line(f"optimus: analyze {session_uuid}: {problem}")
 
 
 def _touch_singleflight(session_uuid: str) -> bool:
@@ -328,7 +325,7 @@ def _touch_singleflight(session_uuid: str) -> bool:
 		_note_heartbeat_problem(
 			session_uuid,
 			"another session holds the single-flight flag, so this run's heartbeat left it "
-			"alone and this run no longer holds it",
+			"alone and this run does not hold it",
 		)
 	return held is True
 
@@ -2297,6 +2294,7 @@ def _ai_payload_for_finding(
 					lambda: ai_grounding.loop_facts_from_tree(
 						grounding.tree, int(callsite["lineno"]), parent=grounding.parent,
 					), {},
+					on_error=lambda kind: safe_call.log_error_line(f"optimus: AI loop facts failed: {kind}"),
 				)
 
 	fn = (callsite.get("function") or "").strip()
@@ -2331,6 +2329,7 @@ def _attach_index_advice(payload: dict, evidence_lookup, tracked_apps: tuple[str
 	advice = safe_call.best_effort(
 		lambda: index_recipes.advise_finding(payload, evidence_lookup=evidence_lookup, tracked_apps=tracked_apps),
 		None,
+		on_error=lambda kind: safe_call.log_error_line(f"optimus: AI index advice failed: {kind}"),
 	)
 	if advice is not None:
 		payload["index_advice"] = {

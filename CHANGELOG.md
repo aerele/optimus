@@ -219,6 +219,18 @@ versions may contain breaking changes see migration notes below).
   the sort comes from elsewhere in the query). A Missing Index with no verdict is titled "Index on <table>(<column>):
   Optimus cannot say".
 
+- Operability fixes for the index advice. The Hot Line gate note tells the reader to send
+  the `optimus: hot-line gate failed` log line. The generated `ensure_indexes()` writes one
+  line when the index fails and its Error Log row cannot be written either, and on Postgres
+  commits right after it restores the lock timeout, so a later hook's rollback cannot leave
+  the 300 s cap on. The runbook names the 300 s lock wait as a cause. Evidence-read
+  failures past the first 10 tables get one "and N more tables" line. A loop-facts or AI-path
+  index-advice crash leaves one deduplicated log line. The recipe-failure and analyze
+  heartbeat lines go through `safe_call.log_error_line`, and a run that never held the
+  single-flight flag says it "does not hold it". The Refresh AI suggestions toast no longer
+  says "Nothing to refresh." when calls failed. One shared `cut_at_bench_apps` helper in
+  `analyzers/base.py` replaces three path cuts. AI-FIXING section 9 lists the split modules.
+
 ### API
 
 - `optimus.api.refill_ai_suggestions` no longer returns an `indexes` result; its
@@ -246,8 +258,9 @@ versions may contain breaking changes see migration notes below).
   string first. If the file exists, add only the new entry to its `INDEXES` list. A
   fixture-shipped Custom Field is indexed right after fixtures sync on install. To remove
   an entry, delete it from `INDEXES`, drop its index, and for a Property Setter entry
-  delete the `<DocType>-<field>-search_index` Property Setter; `bench remove-app` removes
-  neither (docs/AI-FIXING.md section 2.3).
+  delete the `<DocType>-<field>-search_index` Property Setter; `bench --site <site>
+  uninstall-app` (and later `bench remove-app`) removes neither, and a `before_uninstall`
+  hook can drop them (docs/AI-FIXING.md section 2.3).
 - On Postgres, Frappe's schema sync can drop a Search Index named after a column of a
   new composite index on another table until that table syncs again (a Frappe issue);
   check `pg_indexes` after `bench migrate`.

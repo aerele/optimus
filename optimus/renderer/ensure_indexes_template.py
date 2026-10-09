@@ -41,19 +41,23 @@ _ENSURE_FUNCTION = '''def ensure_indexes():
 				frappe.db.commit()
 			except Exception as error:
 				_rollback()
-				with contextlib.suppress(Exception):
-					frappe.log_error(
-						title=_title(entry, f"was not created ({type(error).__name__})"),
-						reference_doctype="DocType",
-						reference_name=entry["doctype"],
-					)
+				title = _title(entry, f"was not created ({type(error).__name__})")
+				try:
+					frappe.log_error(title=title, reference_doctype="DocType", reference_name=entry["doctype"])
 					frappe.db.commit()
+				except Exception:
+					# the Error Log row failed too: migrate's output is the only record left
+					with contextlib.suppress(Exception):
+						sys.stderr.write(f"optimus_indexes: {title}; the Error Log row could not be written either\\n")
 				# a failed Error Log write must not leave a failed transaction for the next hook
 				_rollback()
 	finally:
 		if previous is not None:
 			try:
 				_lock_wait(previous)
+				# on Postgres the restore is part of the open transaction: commit it now, or a
+				# later hook's rollback would undo it and the 300 s cap would stay for the session
+				frappe.db.commit()
 			except Exception:
 				_rollback()
 
@@ -154,7 +158,7 @@ def ensure_indexes_code(entries: list[dict], *, app_name: str = UNKNOWN_APP) -> 
 		+ hook_lines
 		+ "# When hooks.py sets one of them as a string, make it a list that keeps that string first:\n"
 		f"#   after_migrate = {_string_hook_pair(hook)}\n"
-		+ "import contextlib\n\nimport frappe\n\n"
+		+ "import contextlib\nimport sys\n\nimport frappe\n\n"
 		'# An entry with "db" runs only on that database (frappe.db.db_type).\n'
 		"INDEXES = [\n" + body + "]\n\n\n" + _ENSURE_FUNCTION
 	)

@@ -638,6 +638,7 @@ def render(
 	log_recipe_failures(
 		_finding_recipe_stats["failed"] + _table_recipe_stats["failed"], errors=_recipe_errors,
 	)
+	_evidence_lookup.log_unlisted_failures()
 
 	# Sort all findings: highest severity first, then highest impact.
 	all_findings.sort(

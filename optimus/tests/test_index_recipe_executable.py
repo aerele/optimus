@@ -702,3 +702,44 @@ def test_no_lock_setting_is_touched_on_another_database(monkeypatch):
 	entry = {"doctype": "Sales Invoice", "columns": ["customer", "status"], "index_name": _SI_NAME}
 	assert _run([entry], site, monkeypatch) == [("add_index", "Sales Invoice", ["customer", "status"], _SI_NAME)]
 	assert not [c for c in site.calls if c[0] == "sql"] and site.errors == []
+
+
+@pytest.mark.parametrize("entries", [1, 0])
+def test_postgres_lock_timeout_restore_survives_a_later_hooks_rollback(monkeypatch, entries):
+	"""W2 (c3res/pg_restore_rollback.py): set_config is transactional on Postgres, so an
+	uncommitted restore is undone by a later after_migrate hook that rolls back its own
+	failed work, and the 300 s cap would stay for the rest of the session. The module
+	commits right after the restore."""
+	entry = {"doctype": "Sales Invoice", "columns": ["customer", "status"], "index_name": _SI_NAME}
+	site = _Site(db_type="postgres")
+	ensure_indexes = _load([entry][:entries], site, monkeypatch)
+	site.write("EARLIER hook")
+	ensure_indexes()
+	site.write("LATER hook attempt")
+	site.rollback()  # the later hook failed and rolled back its own work
+	site.commit()
+	assert site.lock_timeout == "0"
+
+
+def test_a_failed_error_log_write_leaves_one_line_on_the_console(monkeypatch, capsys):
+	"""P2 (c3ops/p4.py): the index fails and its Error Log row cannot be written either, so
+	migrate's output is the only place left to name the index and the error type."""
+	entry = {"doctype": "Sales Invoice", "columns": ["customer", "status"], "index_name": _SI_NAME}
+	site = _Site(fail_on={_SI_NAME}, log_error_fails=True)
+	assert _migrate([entry], site, monkeypatch) is None
+	out = capsys.readouterr().err
+	assert _SI_NAME in out and "RuntimeError" in out and "Error Log" in out
+	assert len(out.strip().splitlines()) == 1
+
+
+def test_a_written_error_log_row_prints_nothing(monkeypatch, capsys):
+	entry = {"doctype": "Sales Invoice", "columns": ["customer", "status"], "index_name": _SI_NAME}
+	site = _Site(fail_on={_SI_NAME})
+	assert _migrate([entry], site, monkeypatch) is None
+	assert capsys.readouterr().err == "" and len(site.errors) == 1
+
+
+def test_the_ps_route_entry_is_stamped_mariadb():
+	"""PG has no get_column_index, so the Property Setter entry must never run there."""
+	code = ir.ensure_indexes_code([_PO_NO], app_name="myapp")
+	assert '{"doctype": "Sales Invoice", "search_index_field": "po_no", "db": "mariadb"}' in code
