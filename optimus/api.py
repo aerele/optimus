@@ -1488,9 +1488,10 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 	limit).
 
 	The response is ``{ok, session_uuid, fixes, steps, regenerated}``. ``fixes`` counts
-	``added``, ``failed``, ``skipped_time``, ``gated`` (findings that get advice or a note
-	from Optimus, or no AI suggestion by design), ``excluded`` (AI-eligible types excluded
-	in Optimus Settings) and ``skipped_ineligible``; ``skipped`` is ``"toggle_off"`` when
+	``added``, ``failed``, ``skipped_time``, ``gated`` (AI-eligible findings and
+	Framework N+1 that the report answers with Optimus's own advice or a note; index
+	findings are not counted), ``excluded`` (AI-eligible types listed under Excluded finding
+	types in Optimus Settings) and ``skipped_ineligible``; ``skipped`` is ``"toggle_off"`` when
 	findings are off. There is no ``indexes`` key: index advice is deterministic and never
 	refreshed by AI.
 	"""

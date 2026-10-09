@@ -185,3 +185,21 @@ def test_a_failed_read_does_not_rewrite_other_no_code_reasons(lines, monkeypatch
 	finding = {"finding_type": "Full Table Scan", "technical_detail": {"table": "tabSales Invoice", "normalized_query": query}}
 	advice = index_recipes.advise_finding(finding, evidence_lookup=lookup)
 	assert "is longer than" in advice.reason and "could not read the details" not in advice.reason
+
+
+def test_the_dedupe_is_per_site(lines, monkeypatch):
+	import frappe
+
+	monkeypatch.setattr(frappe, "local", SimpleNamespace(site="a.local"), raising=False)
+	safe_call.log_error_line("optimus: x")
+	safe_call.log_error_line("optimus: x")
+	monkeypatch.setattr(frappe, "local", SimpleNamespace(site="b.local"), raising=False)
+	safe_call.log_error_line("optimus: x")
+	assert lines == ["optimus: x", "optimus: x"]
+
+
+def test_the_dedupe_table_is_bounded(lines):
+	for i in range(safe_call._RECENT_LINES_CAP + 1):
+		safe_call.log_error_line(f"optimus: line {i}")
+	assert len(lines) == safe_call._RECENT_LINES_CAP + 1
+	assert len(safe_call._RECENT_LINES) <= safe_call._RECENT_LINES_CAP

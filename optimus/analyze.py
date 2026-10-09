@@ -2472,8 +2472,8 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	``{"added", "failed", "skipped_time", "total_pending", "gated", "excluded",
 	"skipped_ineligible"}``, where ``total_pending`` is the count targeted before the
 	cap, ``gated`` the AI-eligible findings (and Framework N+1) the report answers with
-	Optimus's own advice or a note instead (index findings are not counted), ``excluded`` the AI-eligible ones whose type Optimus Settings
-	excludes and ``skipped_ineligible`` the ones ``suggest_fix`` refused with a skip
+	Optimus's own advice or a note instead (index findings are not counted),
+	``excluded`` the AI-eligible ones whose type Optimus Settings excludes and ``skipped_ineligible`` the ones ``suggest_fix`` refused with a skip
 	kind (``ai_fix.AI_SKIP_KINDS``). Missing or outdated suggestions go first.
 	"""
 	out = {
