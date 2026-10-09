@@ -2288,7 +2288,9 @@ def _ai_payload_for_finding(
 				# Facts come from the WHOLE file's tree, so a loop outside the window
 				# is still seen; the prompt formats only those about shown lines (A3, P12).
 				payload["loop_facts"] = safe_call.best_effort(
-					lambda: ai_grounding.loop_facts_from_tree(grounding.tree, int(callsite["lineno"])), {},
+					lambda: ai_grounding.loop_facts_from_tree(
+						grounding.tree, int(callsite["lineno"]), parent=grounding.parent,
+					), {},
 				)
 
 	fn = (callsite.get("function") or "").strip()
@@ -2358,9 +2360,17 @@ def _ai_grounding_window(filename: str, lineno, file_cache: dict) -> ai_groundin
 		with guard:
 			lines = _source._source_lines(filename, cache=file_cache)
 			if lines and not isinstance(lineno, bool):
+				# The whole-file tree and parent map are built once per file per run (PF3);
+				# the entry is valid only for the very list of lines it was parsed from.
+				ast_key = ("optimus_ast", filename)
+				entry = file_cache[ast_key] if ast_key in file_cache else None
+				if entry is None or entry[0] is not lines:
+					entry = (lines, *ai_grounding.parse_source(lines))
+					file_cache[ast_key] = entry
 				grounding = ai_grounding.grounding_window(
 					lines, int(lineno), ai_fix._SOURCE_LINES_BEFORE, ai_fix._SOURCE_LINES_AFTER,
 					max_lines=ai_fix._MAX_SOURCE_WINDOW_LINES, max_line_chars=_source._SNIPPET_TRUNCATE_CHARS,
+					parsed=(entry[1], entry[2]),
 				)
 	except Exception:
 		grounding = None

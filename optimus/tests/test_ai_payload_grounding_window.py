@@ -89,3 +89,59 @@ def test_decorators_and_the_outer_function_are_included():
 	]
 	assert [r["lineno"] for r in ai_grounding.grounding_window(lines, 5, 24, 24).rows] == [1, 2, 3, 4, 5, 6]
 	assert ai_grounding.grounding_window(lines, 99, 24, 24).rows == []
+
+
+def test_grounding_window_reads_through_the_real_helpers_and_parses_once(tmp_path, monkeypatch):
+	"""T3 + PF3: analyze._ai_grounding_window over the real _source_lines and
+	grounding_window; two findings of one file share a single whole-file parse."""
+	src = tmp_path / "mod.py"
+	src.write_text(
+		"def f(items):\n\tfor d in items:\n\t\ta = frappe.get_doc('A', d)\n\t\tb = frappe.get_doc('B', d)\n"
+	)
+	parses = []
+	real_parse = ai_grounding.ast.parse
+	monkeypatch.setattr(ai_grounding.ast, "parse", lambda *a, **k: parses.append(1) or real_parse(*a, **k))
+	cache = {}
+	first = analyze._ai_grounding_window(str(src), 3, cache)
+	second = analyze._ai_grounding_window(str(src), 4, cache)
+	assert [r["lineno"] for r in first.rows] == [1, 2, 3, 4]
+	assert [r["lineno"] for r in second.rows if r["is_target"]] == [4]
+	assert first.tree is second.tree and first.parent is second.parent
+	assert len(parses) == 1
+
+
+def test_a_changed_line_list_in_the_cache_is_parsed_again(tmp_path):
+	src = tmp_path / "mod.py"
+	src.write_text("def f():\n\treturn 1\n")
+	cache = {}
+	first = analyze._ai_grounding_window(str(src), 2, cache)
+	cache[str(src)] = ["def g():", "\treturn 2"]
+	second = analyze._ai_grounding_window(str(src), 2, cache)
+	assert second.tree is not first.tree and second.rows[0]["content"] == "def g():"
+
+
+def test_the_parse_failure_of_a_file_is_remembered_too(tmp_path, monkeypatch):
+	src = tmp_path / "srv.py"
+	src.write_text("return 1 +\n" * 3)
+	parses = []
+	real_parse = ai_grounding.ast.parse
+	monkeypatch.setattr(ai_grounding.ast, "parse", lambda *a, **k: parses.append(1) or real_parse(*a, **k))
+	cache = {}
+	analyze._ai_grounding_window(str(src), 1, cache)
+	analyze._ai_grounding_window(str(src), 2, cache)
+	assert len(parses) == 1
+
+
+def test_form_feed_and_unicode_separators_keep_python_line_numbers(tmp_path):
+	"""E4: str.splitlines would split on the form feed and U+2028 and shift every line."""
+	src = tmp_path / "ff.py"
+	src.write_text(
+		"import frappe\n\x0c\ndef f(xs):\n\tnote = 'a\u2028b'\n\tfor x in xs:\n"
+		"\t\tfrappe.db.get_value('A', x)\n",
+		encoding="utf-8",
+	)
+	window = analyze._ai_grounding_window(str(src), 6, {})
+	assert [r["lineno"] for r in window.rows if r["is_target"]] == [6]
+	target = next(r for r in window.rows if r["is_target"])
+	assert "frappe.db.get_value" in target["content"]
+	assert ai_grounding.loop_facts_from_tree(window.tree, 6, parent=window.parent)["loops"][0]["line"] == 5

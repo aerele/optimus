@@ -267,3 +267,18 @@ class TestAiPayloadRecordedQueries:
 			actions_by_idx=actions_by_idx,
 		)
 		assert "example_queries" not in (payload["technical_detail"] or {})
+
+
+def test_source_lines_split_like_python_does(tmp_path):
+	"""E4: universal newlines in, then "\\n" only; one trailing empty entry dropped."""
+	from optimus.renderer import source
+
+	path = tmp_path / "m.py"
+	path.write_bytes("a = 1\r\nb = '\u2028'\x0c\rc = 3\x1d\nd = 4\n".encode())
+	assert source._source_lines(str(path)) == ["a = 1", "b = '\u2028'\x0c", "c = 3\x1d", "d = 4"]
+	path.write_bytes(b"x = 1\n\n")
+	assert source._source_lines(str(path)) == ["x = 1", ""]
+	path.write_bytes(b"x = 1")
+	assert source._source_lines(str(path)) == ["x = 1"]
+	path.write_bytes(b"")
+	assert source._source_lines(str(path)) == []

@@ -190,8 +190,13 @@ def _source_lines(filename: str, *, cache: dict | None = None) -> list[str] | No
 		lines = get_server_script_lines(resolved[1], cache=cache)
 	else:
 		try:
+			# Python's own line rule: universal newlines in, then "\n" only. str.splitlines
+			# also splits on \f, \v, \x1c-\x1e, \x85 and U+2028/9, which shifts every later
+			# line number away from the AST's.
 			with open(resolved, encoding="utf-8") as fh:
-				lines = fh.read().splitlines()
+				lines = fh.read().split("\n")
+			if lines and lines[-1] == "":
+				lines.pop()
 		except Exception:
 			lines = None
 	if cache is not None:

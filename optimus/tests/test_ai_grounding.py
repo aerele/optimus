@@ -286,6 +286,65 @@ class TestLoopChain:
 			"\t\tcallbacks.append(lambda: r.db_update())"]
 		assert _facts(lines, 4)["loops"][0]["writes"] == []
 
+	@pytest.mark.parametrize("header,names", [
+		("for a, b in pairs:", ["a", "b"]),
+		("for first, *rest in groups:", ["first", "rest"]),
+		("for (a, [b, c]), d in nested:", ["a", "b", "c", "d"]),
+		("with open_it() as (a, b):", ["a", "b"]),
+		("with open_it() as [a, *rest]:", ["a", "rest"]),
+	])
+	def test_tuple_and_starred_targets_bind_every_name(self, header, names):
+		"""T1: each name of a tuple, list or starred target is a loop binding."""
+		lines = ["def f(pairs):"]
+		if header.startswith("with"):
+			lines += ["\tfor _x in pairs:", "\t\t" + header, "\t\t\tfrappe.get_doc('Item', " + ", ".join(names) + ")"]
+			target = 4
+		else:
+			lines += ["\t" + header, "\t\tfrappe.get_doc('Item', " + ", ".join(names) + ")"]
+			target = 3
+		facts = _facts(lines, target)
+		bound = {name for name, _line in facts["loops"][0]["bound"]}
+		assert set(names) <= bound
+		assert f"change in that loop: {', '.join(sorted(names))}." in _text(lines, target)
+
+	def test_a_call_in_the_first_comprehension_iterable_runs_once(self):
+		"""T2: the first iterable runs once; the second generator's iterable runs per pass."""
+		first = ["def f(a):", "\treturn [x for x in frappe.get_all('Item')]"]
+		assert _facts(first, 2) == {"in_loop": False}
+		second = ["def f(a):", "\treturn [y for x in a for y in frappe.get_all('Item', x)]"]
+		facts = _facts(second, 2)
+		assert facts["in_loop"] is True and facts["call"] == "frappe.get_all"
+
+	@pytest.mark.parametrize("mutation", [
+		"filters.update({'item_code': d.item_code})", "filters.setdefault('item_code', d.item_code)",
+		"filters.pop('x', None)", "filters.clear()", "filters.add(d)", "filters.discard(d)",
+		"filters.remove(d)", "filters.extend([d])", "filters.insert(0, d)", "filters.append(d)",
+	])
+	def test_in_place_mutation_binds_the_name_the_call_reads(self, mutation):
+		"""C5: the name is not rebound, yet its value differs on every pass."""
+		lines = ["def f(items):", "\tfilters = {}", "\tfor d in items:", "\t\t" + mutation,
+			"\t\tfrappe.db.get_value('Bin', filters, 'qty')"]
+		facts = _facts(lines, 5)
+		assert ["filters", 4] in facts["loops"][0]["bound"]
+		text = _text(lines, 5)
+		assert "variables that change in that loop: filters." in text
+		assert "uses no variable" not in text
+
+	def test_mutating_a_name_the_call_does_not_read_binds_nothing(self):
+		lines = ["def f(items):", "\tseen = []", "\tfor d in items:", "\t\tseen.append(d)",
+			"\t\tfrappe.db.get_value('Bin', d, 'qty')"]
+		assert ["seen", 4] not in _facts(lines, 5)["loops"][0]["bound"]
+
+	def test_a_mutated_attribute_path_binds_its_base_when_read(self):
+		lines = ["def f(self, items):", "\tfor d in items:", "\t\tself.conditions.append(d)",
+			"\t\tfrappe.db.sql(' and '.join(self.conditions))"]
+		assert ["self", 3] in _facts(lines, 4)["loops"][0]["bound"]
+
+	def test_a_mutating_method_name_outside_the_list_binds_nothing(self):
+		lines = ["def f(items):", "\tq = Query()", "\tfor d in items:", "\t\tq.where(d)",
+			"\t\tfrappe.db.sql(q.get_sql())"]
+		assert ["q", 4] not in _facts(lines, 5)["loops"][0]["bound"]
+
 	def test_unknown_targets(self):
 		assert g.loop_facts_from_tree(ast.parse("x = 1"), 5) == {}
 		assert g.loop_facts_from_tree(None, 1) == {}
@@ -344,3 +403,20 @@ class TestFormatting:
 		assert g.loop_facts_from_window(rows, 11) == {"in_loop": False}
 		rows = [{"lineno": 20, "content": "\t\tkey = lambda r: frappe.get_doc('Item', r)", "is_target": True}]
 		assert g.loop_facts_from_window(rows, 20) == {"in_loop": False}
+
+
+class TestParseOnce:
+	LINES = ["def f(items):", "\tfor d in items:", "\t\tfrappe.db.get_value('Item', d, 'x')"]
+
+	def test_parsed_is_used_instead_of_parsing_again(self, monkeypatch):
+		parsed = g.parse_source(self.LINES)
+		monkeypatch.setattr(g.ast, "parse", lambda *a, **k: pytest.fail("parsed again"))
+		window = g.grounding_window(self.LINES, 3, 2, 2, parsed=parsed)
+		assert window.tree is parsed[0] and window.parent is parsed[1]
+		assert g.loop_facts_from_tree(window.tree, 3, parent=window.parent)["in_loop"] is True
+
+	def test_parse_source_gives_the_tree_and_parent_map_or_nothing(self):
+		tree, parent = g.parse_source(self.LINES)
+		assert isinstance(tree, ast.Module) and parent[tree.body[0]] is tree
+		assert g.parse_source(["return 1 +"]) == (None, None)
+		assert g.grounding_window(self.LINES, 3, 1, 1).parent is not None

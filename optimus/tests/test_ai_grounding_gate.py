@@ -97,6 +97,66 @@ class TestMeasuredGate:
 		assert note.startswith("Most of this line's time is spent inside a function it calls,")
 
 
+class TestMultiLineOpeners:
+	"""R3: the opener of a multi-line call to a builtin names no callee on its own line, so
+	closing it yields builtins only; the callee is on a line this one does not show."""
+
+	@pytest.mark.parametrize("line", [
+		"\t\ttotal = sum(", "\t\tif any(", "\t\treturn all(", "\t\tout = dict(", "\t\twhile any(", "\t\tx = len([",
+	])
+	def test_a_builtin_opener_counts_as_calling_without_a_name(self, line):
+		assert tuple(g.statement_calls(line)) == (True, None)
+		note = g.hot_line_gate(_hot_line(line, per_hit_us=5000.0))
+		assert note.startswith("Most of this line's time is spent inside a function it calls,")
+
+	def test_a_cheap_opener_still_reaches_the_ai(self):
+		assert g.hot_line_gate(_hot_line("\t\ttotal = sum(", per_hit_us=3.0)) is None
+
+	@pytest.mark.parametrize("line", ["\t\tx = [", "\t\tcfg = {", "\t\trows = ["])
+	def test_a_literal_opener_calls_nothing(self, line):
+		assert tuple(g.statement_calls(line)) == (False, None)
+
+	@pytest.mark.parametrize("line", ["total = sum(foo(", "x = dict(get_a(), b=["])
+	def test_a_named_callee_on_the_opener_line_is_still_named(self, line):
+		assert g.statement_calls(line).callee in ("foo", "get_a")
+
+	def test_a_complete_builtin_call_is_still_free(self):
+		assert tuple(g.statement_calls("\t\tn = len(rows)")) == (False, None)
+
+
+class TestOwnLoopNote:
+	"""C8: a line with its own comprehension or generator spends its time in that loop."""
+
+	def test_a_comprehension_line_says_it_runs_its_own_loop(self):
+		note = g.hot_line_gate(_hot_line(
+			"\t\tnames = [frappe.db.get_value('Item', i, 'x') for i in ids]", per_hit_us=9000.0, hits=250,
+		))
+		assert note.startswith("This line runs its own loop (a comprehension or generator) over 250 items")
+		assert "its time is that loop as a whole" in note
+		assert "frappe.db.get_value for each item" in note and "not that call alone" in note
+		assert "Most of this line's time is spent inside" not in note
+
+	def test_a_generator_argument_and_missing_hits(self):
+		note = g.hot_line_gate(_hot_line("\t\ttotal = sum(fetch(i) for i in ids)", per_hit_us=9000.0))
+		assert "over its items" in note and "fetch for each item" in note
+
+	def test_a_call_free_comprehension_is_still_not_gated(self):
+		assert g.hot_line_gate(_hot_line("\t\txs = [i for i in ids]", per_hit_us=9000.0)) is None
+
+	def test_a_plain_call_line_keeps_the_callee_note(self):
+		note = g.hot_line_gate(_hot_line("\t\tx = fetch(ids)", per_hit_us=9000.0, hits=250))
+		assert note.startswith("Most of this line's time is spent inside fetch,")
+
+	def test_the_note_has_no_dash_or_backticks(self):
+		note = g.hot_line_gate(_hot_line("\t\txs = [f(i) for i in ids]", per_hit_us=9000.0))
+		assert "\u2014" not in note and "\u2013" not in note and "`" not in note
+
+	@pytest.mark.parametrize("hits", [True, 0, -3, "12", None])
+	def test_an_unusable_hits_value_is_not_quoted(self, hits):
+		note = g.hot_line_gate(_hot_line("\t\txs = [f(i) for i in ids]", per_hit_us=9000.0, hits=hits))
+		assert "over its items" in note
+
+
 class TestStatementShapes:
 	"""Carried from the Task 4 review: the statement parser on continuation lines,
 	decorators, ``raise ... from ...`` and gettext's ``_``."""

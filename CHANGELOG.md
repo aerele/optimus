@@ -126,6 +126,15 @@ versions may contain breaking changes see migration notes below).
   chain, comprehension and while shapes, subscript and formatted-SQL writes, a caller
   hint for a line in no loop), cover only lines the trimmed prompt still shows and sit
   inside a data block. Prompt version 4 marks older displayed suggestions as outdated.
+  A container changed in place by `update`, `append`, `setdefault` and the like counts
+  as a variable that changes in the loop when the call reads it. The file is parsed
+  once per run and shared by its findings. Source lines split on `\n` only, as Python
+  numbers them, so a form feed or U+2028 in a file no longer shifts every later line.
+- Hot Line gate: the opener of a multi-line call (`total = sum(`, `if any(`) that
+  reaches the per-hit threshold counts as calling something unnamed, since its callee is
+  on a line the gate does not see, so it is gated instead of sent to the AI. A line
+  with its own comprehension or generator gets a note that the line runs its own loop
+  and the time is that loop, instead of blaming the call inside it.
 - Refresh AI suggestions puts missing or outdated suggestions first, skips excluded
   types and reports gated and excluded counts in its toast. Only a `not_eligible`
   `AiFixError` is a skip; `config` and every other kind is a logged, counted failure.

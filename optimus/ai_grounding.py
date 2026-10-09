@@ -45,6 +45,9 @@ _WRITE_ATTRS: frozenset[str] = frozenset({
 	"save", "insert", "submit", "cancel", "db_set", "delete", "set_value", "delete_doc",
 	"db_insert", "db_update", "commit", "rollback", "bulk_update", "set_single_value",
 })
+_MUTATING_ATTRS: frozenset[str] = frozenset({
+	"update", "append", "extend", "insert", "setdefault", "pop", "clear", "add", "remove", "discard",
+})
 _READ_SQL_VERBS: frozenset[str] = frozenset({"SELECT", "SHOW", "WITH", "EXPLAIN", "DESC", "DESCRIBE"})
 _SQL_VERB_RE = re.compile(r"^\s*([A-Za-z]{1,12})\b")
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z_][\w.()\[\]]*$")
@@ -63,6 +66,26 @@ class GroundingWindow(NamedTuple):
 	start: int
 	end: int
 	tree: ast.Module | None
+	parent: dict | None = None
+
+
+def _parent_map(tree: ast.AST) -> dict:
+	parent: dict[ast.AST, ast.AST] = {}
+	for node in ast.walk(tree):
+		for child in ast.iter_child_nodes(node):
+			parent[child] = node
+	return parent
+
+
+def parse_source(lines: list[str]) -> tuple[ast.Module | None, dict | None]:
+	"""The whole file's ``(tree, parent map)``, or ``(None, None)`` when it does not parse.
+	A caller that reads many findings of one file keeps this and passes it back as
+	``parsed=`` so the file is parsed once (PF3)."""
+	try:
+		tree = ast.parse("\n".join(str(x) for x in (lines or [])))
+	except (SyntaxError, ValueError):
+		return None, None
+	return tree, _parent_map(tree)
 
 
 def grounding_window(
@@ -73,22 +96,21 @@ def grounding_window(
 	max_lines: int = 80,
 	*,
 	max_line_chars: int | None = None,
+	parsed: tuple[ast.Module | None, dict | None] | None = None,
 ) -> GroundingWindow:
 	"""The source window the AI fix prompt shows for ``target_lineno`` (1-based in
 	``path_lines``): the largest enclosing function (decorators included) that fits
 	``max_lines``, else ``target - before`` .. ``target + after`` clamped to the file,
 	which is also the answer when the file does not parse or the line is in no function.
-	A line longer than ``max_line_chars`` is cut and ends with "..."."""
+	A line longer than ``max_line_chars`` is cut and ends with "...". ``parsed`` is the
+	file's ``parse_source`` result when the caller already has it."""
 	lines = [str(x) for x in (path_lines or [])]
 	n = len(lines)
 	if isinstance(target_lineno, bool) or not isinstance(target_lineno, int) or not 1 <= target_lineno <= n:
 		return GroundingWindow([], 0, 0, None)
 	start = max(1, target_lineno - max(0, before))
 	end = min(n, target_lineno + max(0, after))
-	try:
-		tree = ast.parse("\n".join(lines))
-	except (SyntaxError, ValueError):
-		tree = None
+	tree, parent = parsed if parsed is not None else parse_source(lines)
 	if tree is not None:
 		spans = []
 		for node in ast.walk(tree):
@@ -105,7 +127,7 @@ def grounding_window(
 		if max_line_chars and len(content) > max_line_chars:
 			content = content[:max_line_chars] + "..."
 		rows.append({"lineno": lineno, "content": content, "is_target": lineno == target_lineno})
-	return GroundingWindow(rows, start, end, tree)
+	return GroundingWindow(rows, start, end, tree, parent)
 
 
 def call_name(func: ast.AST) -> str | None:
@@ -276,6 +298,22 @@ def _stored_paths(loop: ast.AST) -> set[tuple[tuple[str, ...], int]]:
 	return out
 
 
+def _mutated_paths(loop: ast.AST) -> set[tuple[tuple[str, ...], int]]:
+	"""(path, line) for every container a pass of ``loop`` changes in place through a
+	method (``filters.update(...)``, ``conditions.append(...)``): the name is not
+	rebound, yet its value differs on each pass (C5)."""
+	out: set[tuple[tuple[str, ...], int]] = set()
+	for part in _per_iteration(loop):
+		if isinstance(part, _SCOPES):
+			continue
+		for node in (part, *_own_walk(part)):
+			if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in _MUTATING_ATTRS:
+				path = _path(node.func.value)
+				if path:
+					out.add((path, node.lineno))
+	return out
+
+
 def _qb_write(call: ast.Call) -> tuple[str | None, list[ast.Call]]:
 	"""The write a query-builder chain that ends in ``.run()`` makes, rooted in
 	``frappe.qb`` or ``qb``: ``frappe.qb.update``, ``frappe.qb.into`` or
@@ -331,7 +369,7 @@ def _loop_writes(loop: ast.AST) -> list[tuple[str, int]]:
 	return sorted((h for h in hits if _SAFE_NAME_RE.match(h[0])), key=lambda h: (h[1], h[0]))
 
 
-def loop_facts_from_tree(tree: ast.AST | None, target_lineno) -> dict:
+def loop_facts_from_tree(tree: ast.AST | None, target_lineno, *, parent: dict | None = None) -> dict:
 	"""Facts about the loops that run ``target_lineno`` (1-based, in the file ``tree``
 	was parsed from) on every pass, innermost first, up to the enclosing function or class.
 
@@ -339,13 +377,11 @@ def loop_facts_from_tree(tree: ast.AST | None, target_lineno) -> dict:
 	enclosing function runs the line on every pass; otherwise ``{"in_loop": True,
 	"call", "call_line", "uses", "result_used", "loops": [{"kind", "line", "bound",
 	"writes"}]}``. ``bound`` and ``writes`` are ``[name, line]`` pairs; identifiers only,
-	never values."""
+	never values. ``parent`` is the tree's parent map when the caller kept it (PF3)."""
 	if tree is None or isinstance(target_lineno, bool) or not isinstance(target_lineno, int) or target_lineno < 1:
 		return {}
-	parent: dict[ast.AST, ast.AST] = {}
-	for node in ast.walk(tree):
-		for child in ast.iter_child_nodes(node):
-			parent[child] = node
+	if parent is None:
+		parent = _parent_map(tree)
 	spanning = [
 		n for n in ast.walk(tree)
 		if isinstance(n, ast.Call) and n.lineno <= target_lineno <= (n.end_lineno or n.lineno)
@@ -405,7 +441,10 @@ def _loop_bindings_read(loop: ast.AST, reads: set[tuple[str, ...]]) -> list[tupl
 	"""``_loop_bindings`` plus the base name of a stored path the call reads
 	(``args["id"] = ...`` then ``.format(**args)``); ``self.total += ...`` leaves a
 	call that reads ``self.company`` alone (P11b)."""
-	extra = {(path[0], line) for path, line in _stored_paths(loop) if any(_overlaps(path, r) for r in reads)}
+	extra = {
+		(path[0], line) for path, line in (*_stored_paths(loop), *_mutated_paths(loop))
+		if any(_overlaps(path, r) for r in reads)
+	}
 	return sorted(set(_loop_bindings(loop)) | extra, key=lambda item: (item[1], item[0]))
 
 
@@ -646,7 +685,9 @@ def statement_calls(line: str) -> StatementCalls:
 	the raised exception, never its ``from`` cause), so ``raise X(foo())`` names ``foo``
 	and ``raise X(a) from bar(y)`` names ``bar``; gettext's ``_`` (or ``frappe._``) and
 	``.format`` on the text it returned are skipped like builtins. A fragment Python
-	cannot parse counts as calling, with no name, when it holds a parenthesis."""
+	cannot parse counts as calling, with no name, when it holds a parenthesis; so does an
+	opener whose call continues on the next lines (``total = sum(``), because its callee
+	or its arguments are on lines this one does not show (R3)."""
 	tree = _parse_statement(line)
 	if tree is None:
 		return StatementCalls("(" in _strip_comment(line), None)
@@ -662,7 +703,28 @@ def statement_calls(line: str) -> StatementCalls:
 			continue
 		name = call_name(node.func)
 		return StatementCalls(True, name if name and _SAFE_NAME_RE.match(name) else None)
+	if ")" in _closers(_strip_comment(line).strip().lstrip(")]} ")):
+		return StatementCalls(True, None)
 	return StatementCalls(False, None)
+
+
+def _has_own_loop(line: str) -> bool:
+	"""True when the statement on ``line`` holds a comprehension or generator expression:
+	the line runs a loop of its own (C8)."""
+	tree = _parse_statement(line)
+	return tree is not None and any(isinstance(node, _COMPS) for node in ast.walk(tree))
+
+
+def _own_loop_note(detail: dict, callee: str | None) -> str:
+	hits = detail.get("hits")
+	items = f"{hits} items" if isinstance(hits, int) and not isinstance(hits, bool) and hits > 0 else "its items"
+	text = (
+		f"This line runs its own loop (a comprehension or generator) over {items}, and its time is that "
+		"loop as a whole, so Optimus does not ask the AI about the line itself."
+	)
+	if callee:
+		text += f" The loop calls {callee} for each item, but the time is the whole loop, not that call alone."
+	return text + " Look at what the loop does for each item and how many items it covers."
 
 
 def _short_path(filename: str) -> str:
@@ -758,6 +820,9 @@ def hot_line_gate(
 	shape = statement_calls(str(detail.get("line_content") or ""))
 	if not shape.calls:
 		return None
+	content = str(detail.get("line_content") or "")
+	if _has_own_loop(content):
+		return _own_loop_note(detail, shape.callee)
 	scope = _callee_scope(shape.callee, tracked_apps=scope_apps, from_phase1=False) if shape.callee else "unknown"
 	return _callee_note(shape.callee, scope)
 
