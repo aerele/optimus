@@ -34,7 +34,7 @@ def test_new_boundaries_preserve_a_fresh_job_timeout(monkeypatch, tmp_path, path
 		monkeypatch.setattr(ai_grounding, "loop_facts_from_window", interrupted)
 		call = partial(ai_fix._loop_facts_text, _finding())
 	elif path == "facts":
-		# Fix round 1, F4: the whole-file facts analyze computes for a readable N+1 Query.
+		# the whole-file facts analyze computes for a readable N+1 Query.
 		src = tmp_path / "mod.py"
 		src.write_text("def f(rows):\n\tfor r in rows:\n\t\tfrappe.get_doc('Item', r)\n")
 		monkeypatch.setattr(ai_grounding, "loop_facts_from_tree", interrupted)
@@ -53,26 +53,26 @@ def test_new_boundaries_preserve_a_fresh_job_timeout(monkeypatch, tmp_path, path
 			[{"table": "tabInvoice", "recommended_index": {"columns": ["customer"]}}], evidence_lookup=lambda table: None,
 		)
 	elif path in ("gate", "gate_recipe"):
-		# Task 7: the gate fails closed on an ordinary error, but a deadline still stops the job.
+		# The gate fails closed on an ordinary error, but a deadline still stops the job.
 		monkeypatch.setattr(ai_grounding, "hot_line_gate", interrupted)
 		hot_line = {"finding_type": "Hot Line", "technical_detail": {"file": "apps/myapp/myapp/x.py"}}
 		call = partial(ai_fix.llm_gate_note, hot_line) if path == "gate" else partial(
 			recipe_enrichment.apply_finding_recipes, [hot_line], evidence_lookup=lambda table: None,
 		)
 	elif path == "log":
-		# Task 7 fix round 1: the bench-log line for failed index advice.
+		# the bench-log line for failed index advice.
 		import frappe
 
 		monkeypatch.setattr(frappe, "logger", interrupted, raising=False)
 		call = partial(recipe_enrichment.log_recipe_failures, 1)
 	elif path == "touch":
-		# Task 7 fix round 1: the single-flight heartbeat's Redis call.
+		# the single-flight heartbeat's Redis call.
 		import frappe
 
 		monkeypatch.setattr(frappe, "cache", SimpleNamespace(get_value=interrupted, set_value=interrupted), raising=False)
 		call = partial(analyze._touch_singleflight, "A")
 	elif path in ("acquire", "holder", "release"):
-		# T10 fix round 1: the single-flight gate, the janitor's holder check and the release.
+		# the single-flight gate, the janitor's holder check and the release.
 		import frappe
 
 		from optimus.tests.singleflight_fakes import FlagCache

@@ -185,7 +185,7 @@ class TestSweepStuckAnalyzing:
 		assert "analyzer_warnings" in fields
 
 	def test_the_failed_note_names_a_lapsed_heartbeat(self, monkeypatch):
-		"""O4: a run whose flag lapsed looks stuck to this sweep, so the note names that
+		"""A run whose flag lapsed looks stuck to this sweep, so the note names that
 		cause next to a timeout or a crash."""
 		stub = _install_frappe_stub(monkeypatch)
 		stub._get_all_return["Optimus Session"] = [{"name": "PS-A", "session_uuid": "u-a"}]

@@ -222,7 +222,7 @@ def test_main_passes_the_stored_key_only_as_api_key():
 
 def test_run_case_finds_the_index_types_in_an_older_checkout(corpus, monkeypatch):
 	"""A --optimus-src checkout from before the PR #71 fix wave has the index type set in
-	fix_recipes, not analyzers.base; one from before PR-L1 has neither."""
+	fix_recipes, not analyzers.base; an older one has neither."""
 	import sys
 	import types
 

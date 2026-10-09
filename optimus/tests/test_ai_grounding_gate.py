@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""ai_grounding.hot_line_gate (owner decision A4): a Hot Line gets no AI call when it
+"""ai_grounding.hot_line_gate: a Hot Line gets no AI call when it
 sits in framework code, when Phase 1 named the callee that holds its time, or when
 Phase 2 measured at least HOT_LINE_CALLEE_US per hit and the line's statement calls a
 non-builtin. The note names the right callee and advises a Phase 2 re-run only for a
@@ -33,7 +33,7 @@ class TestMeasuredGate:
 		("\t\t\tself.set_rate(d)", 4000.0, "self.set_rate"),
 	])
 	def test_a_costly_call_is_gated_and_named(self, content, per_hit, callee):
-		"""P13: these went to the AI or were misnamed with the name-list gate."""
+		"""These went to the AI or were misnamed with the name-list gate."""
 		note = g.hot_line_gate(_hot_line(content, per_hit_us=per_hit))
 		assert note.startswith(f"Most of this line's time is spent inside {callee},")
 
@@ -55,7 +55,7 @@ class TestMeasuredGate:
 		assert g.hot_line_gate(_hot_line("\t\tself.run()", per_hit_us=g.HOT_LINE_CALLEE_US - 0.01)) is None
 
 	def test_multi_line_call_opener_over_the_threshold_is_gated(self):
-		"""Review Focus 4 (E-I2): the opener of a multi-line call."""
+		"""The opener of a multi-line call."""
 		note = g.hot_line_gate(_hot_line("\t\tresult = frappe.get_all(", per_hit_us=700000.0))
 		assert note.startswith("Most of this line's time is spent inside frappe.get_all,")
 
@@ -98,7 +98,7 @@ class TestMeasuredGate:
 
 
 class TestMultiLineOpeners:
-	"""R3: the opener of a multi-line call to a builtin names no callee on its own line, so
+	"""The opener of a multi-line call to a builtin names no callee on its own line, so
 	closing it yields builtins only; the callee is on a line this one does not show."""
 
 	@pytest.mark.parametrize("line", [
@@ -141,7 +141,7 @@ class TestMultiLineOpeners:
 
 
 class TestOwnLoopNote:
-	"""C8: a line whose callee runs once per item of its own comprehension or generator
+	"""A line whose callee runs once per item of its own comprehension or generator
 	spends its time in that loop. No count is quoted: ``hits`` counts line executions
 	over the whole run, not items."""
 
@@ -189,7 +189,7 @@ class TestOwnLoopNote:
 
 
 class TestStatementShapes:
-	"""Carried from the Task 4 review: the statement parser on continuation lines,
+	"""The statement parser on continuation lines,
 	decorators, ``raise ... from ...`` and gettext's ``_``."""
 
 	@pytest.mark.parametrize("line,calls,callee", [
@@ -263,7 +263,7 @@ class TestStatementShapes:
 
 class TestCalleeAdvice:
 	def test_a_stdlib_callee_is_never_sent_to_phase_2(self):
-		"""P13: the Phase 2 picker cannot pick json.loads."""
+		"""The Phase 2 picker cannot pick json.loads."""
 		note = g.hot_line_gate(_hot_line("\t\tdata = json.loads(blob)", per_hit_us=250000.0))
 		assert "json.loads is standard library, framework or third-party code" in note
 		assert "re-run phase 2" not in note.lower() and "call it less often" in note

@@ -1,10 +1,10 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""The evidence the index advisor reads (A2): DocField flags, the DocType's app, real
+"""The evidence the index advisor reads: DocField flags, the DocType's app, real
 column types and existing indexes, read once per table per render. A table without a
 DocType is skipped before get_meta, and a failed get_meta leaves no "not found"
-message behind (P8, Frappe utils/messages.py:61-63, :114-118)."""
+message behind (Frappe utils/messages.py:61-63, :114-118)."""
 
 from types import SimpleNamespace
 
@@ -161,7 +161,7 @@ def test_a_job_timeout_escapes_fresh(site, monkeypatch):
 
 
 def test_a_job_timeout_inside_get_meta_restores_the_mute_flag(site, monkeypatch):
-	"""Task 1 Minor: the deadline escapes fresh, and the caller's mute flag and message
+	"""The deadline escapes fresh, and the caller's mute flag and message
 	log are exactly as they were."""
 	import frappe
 

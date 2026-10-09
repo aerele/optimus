@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""safe_call: the one leaf home of the interrupt guard and best_effort (M-I3).
+"""safe_call: the one leaf home of the interrupt guard and best_effort.
 
 It imports nothing from Optimus, so the renderer, the AI layer and analyze share it
 without importing one another; ai_fix keeps its old names as aliases."""
@@ -43,7 +43,7 @@ def test_safe_call_imports_nothing_from_optimus():
 
 
 def test_ai_fix_never_imports_the_renderer():
-	"""M-I3: the cycle stays broken; the AI layer reads ai_grounding, never the renderer."""
+	"""The cycle stays broken; the AI layer reads ai_grounding, never the renderer."""
 	assert {m for m in _imported_modules(_PKG / "ai_fix.py") if m.startswith("optimus.renderer")} == set()
 	assert {m for m in _imported_modules(_PKG / "ai_grounding.py") if m.startswith(("optimus.renderer", "optimus.ai_fix"))} == set()
 

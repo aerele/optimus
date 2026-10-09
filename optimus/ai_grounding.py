@@ -11,7 +11,7 @@
   shows after its budget trims the window.
 - ``format_loop_facts``: those facts as sentences for the shown lines.
 - ``hot_line_gate``: why a Hot Line gets no AI call, decided by Phase 2's measured time
-  per hit (owner decision A4) or Phase 1's named callee.
+  per hit or Phase 1's named callee.
 - ``analyzed_before_callsite_fix``: Redundant Call findings built by the older stack walk.
 """
 
@@ -34,7 +34,7 @@ from optimus.analyzers.base import (
 )
 
 LOOP_FACT_TYPES: frozenset[str] = frozenset({"N+1 Query", "Redundant Call", "Hot Line"})
-# Repetition of these types can come from a loop in a caller outside the window (P7).
+# Repetition of these types can come from a loop in a caller outside the window.
 CALLER_HINT_TYPES: frozenset[str] = frozenset({"N+1 Query", "Redundant Call"})
 
 _DB_CALL_SUFFIXES: tuple[str, ...] = (
@@ -81,7 +81,7 @@ def _parent_map(tree: ast.AST) -> dict:
 def parse_source(lines: list[str]) -> tuple[ast.Module | None, dict | None]:
 	"""The whole file's ``(tree, parent map)``, or ``(None, None)`` when it does not parse.
 	A caller that reads many findings of one file keeps this and passes it back as
-	``parsed=`` so the file is parsed once (PF3)."""
+	``parsed=`` so the file is parsed once."""
 	try:
 		tree = ast.parse("\n".join(str(x) for x in (lines or [])))
 	except (SyntaxError, ValueError):
@@ -302,7 +302,7 @@ def _stored_paths(loop: ast.AST) -> set[tuple[tuple[str, ...], int]]:
 def _mutated_paths(loop: ast.AST) -> set[tuple[tuple[str, ...], int]]:
 	"""(path, line) for every container a pass of ``loop`` changes in place through a
 	method (``filters.update(...)``, ``conditions.append(...)``): the name is not
-	rebound, yet its value differs on each pass (C5). Not counted: a query-builder
+	rebound, yet its value differs on each pass. Not counted: a query-builder
 	receiver (``frappe.qb.update(T)`` builds a query), and a Frappe document's
 	``doc.append("items", row)``, which changes only that child table, so its path is
 	``doc.items`` (``doc[]`` for a computed fieldname) and ``doc.company`` stays what it was."""
@@ -393,7 +393,7 @@ def loop_facts_from_tree(tree: ast.AST | None, target_lineno, *, parent: dict | 
 	enclosing function runs the line on every pass; otherwise ``{"in_loop": True,
 	"call", "call_line", "uses", "result_used", "loops": [{"kind", "line", "bound",
 	"writes"}]}``. ``bound`` and ``writes`` are ``[name, line]`` pairs; identifiers only,
-	never values. ``parent`` is the tree's parent map when the caller kept it (PF3)."""
+	never values. ``parent`` is the tree's parent map when the caller kept it."""
 	if tree is None or isinstance(target_lineno, bool) or not isinstance(target_lineno, int) or target_lineno < 1:
 		return {}
 	if parent is None:
@@ -456,7 +456,7 @@ def loop_facts_from_tree(tree: ast.AST | None, target_lineno, *, parent: dict | 
 def _loop_bindings_read(loop: ast.AST, reads: set[tuple[str, ...]]) -> list[tuple[str, int]]:
 	"""``_loop_bindings`` plus the base name of a stored path the call reads
 	(``args["id"] = ...`` then ``.format(**args)``); ``self.total += ...`` leaves a
-	call that reads ``self.company`` alone (P11b)."""
+	call that reads ``self.company`` alone."""
 	extra = {
 		(path[0], line) for path, line in (*_stored_paths(loop), *_mutated_paths(loop))
 		if any(_overlaps(path, r) for r in reads)
@@ -513,8 +513,8 @@ def format_loop_facts(facts: dict, *, first_line: int, last_line: int, caller_hi
 	"""Sentences about ``facts`` for the source lines ``first_line``..``last_line`` the
 	prompt still shows. A loop whose header is not shown, and a variable or a write on a
 	line not shown, are left out (and a call whose variable changes only on a line not
-	shown is not called invariant); nothing is said when no loop is shown (P12).
-	``caller_hint`` adds that a line in no loop may repeat because a caller loops (P7)."""
+	shown is not called invariant); nothing is said when no loop is shown.
+	``caller_hint`` adds that a line in no loop may repeat because a caller loops."""
 	if not isinstance(facts, dict) or not facts:
 		return ""
 	if facts.get("in_loop") is False:
@@ -576,7 +576,7 @@ GATE_CHECK_FAILED_NOTE = (
 )
 
 # A line whose Phase 2 time per hit reaches this, and whose statement calls a
-# non-builtin, spends its time inside that callee (owner decision A4).
+# non-builtin, spends its time inside that callee.
 HOT_LINE_CALLEE_US = 1000.0
 
 UNSTAMPED_REDUNDANT_CALL_NOTE = (
@@ -709,7 +709,7 @@ def statement_calls(line: str) -> StatementCalls:
 	``.format`` on the text it returned are skipped like builtins. A fragment Python
 	cannot parse counts as calling, with no name, when it holds a parenthesis; so does an
 	opener whose call continues on the next lines (``total = sum(``), because its callee
-	or its arguments are on lines this one does not show (R3)."""
+	or its arguments are on lines this one does not show."""
 	tree = _parse_statement(line)
 	if tree is None:
 		return StatementCalls("(" in _strip_comment(line), None)
@@ -849,7 +849,7 @@ def hot_line_gate(
 	Gated when the line sits in framework or library code (the report's own
 	``is_framework_callsite``), when Phase 1 named the hot callee, or when Phase 2
 	measured ``per_hit_us >= HOT_LINE_CALLEE_US`` and the line's statement calls a
-	non-builtin (owner decision A4)."""
+	non-builtin."""
 	if (finding.get("finding_type") or "") != "Hot Line":
 		return None
 	detail = finding_detail(finding)

@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Shared in-memory Redis for the analyze single-flight tests (T10, PF1).
+"""Shared in-memory Redis for the analyze single-flight tests.
 
 Not a test module (no ``test_`` prefix), so pytest does not collect it. ``FakeRedis``
 stands in for the Redis server behind ``frappe.cache``: GET, SET with NX and EX, SETEX,

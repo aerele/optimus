@@ -3,7 +3,7 @@
 
 """Redundant Call findings analyzed before the L5 callsite fix may point at the outer
 hook instead of the loop. The fixed analyzer stamps what it builds
-(technical_detail["callsite_walk"] = "outermost_first", owner decision D-STAMP); a
+(technical_detail["callsite_walk"] = "outermost_first"); a
 Redundant Call finding without that exact stamp never reaches the AI ("re-record the
 flow"). Stamped findings and every other finding type are unaffected."""
 

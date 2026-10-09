@@ -73,7 +73,7 @@ class AiFixError(Exception):
 
 
 # Failures a caller counts as "skipped", not "failed": the eligibility gate or the
-# per-type exclusion refused the finding and no request was built (P10). A "config"
+# per-type exclusion refused the finding and no request was built. A "config"
 # error (no model or key, a context window too small, a provider context-limit 400)
 # is a FAILURE: it is logged and counted, so the operator sees what to fix.
 AI_SKIP_KINDS: frozenset[str] = frozenset({"not_eligible"})
@@ -294,7 +294,7 @@ def llm_gate_note(finding: dict) -> str | None:
 		return None
 	tracked, installed = _app_scope()
 	# A gate that raises fails CLOSED (no AI call, a neutral note), so analyze's and
-	# Refresh's selection never abort on it; an RQ job timeout still escapes fresh (O-I1).
+	# Refresh's selection never abort on it; an RQ job timeout still escapes fresh.
 	return safe_call.best_effort(
 		lambda: ai_grounding.hot_line_gate(finding, tracked_apps=tracked, installed_apps=installed),
 		ai_grounding.GATE_CHECK_FAILED_NOTE,
@@ -2043,7 +2043,7 @@ def _loop_facts_text(finding: dict, rows: list[dict] | None = None) -> str:
 	"""Profiler-computed loop facts for the shown ``rows`` (default: the finding's whole
 	window), or "" when the type is not loop-shaped or the rows are missing, gapped or have
 	no target. Uses the facts analyze computed from the whole file when the finding carries
-	them, else parses the window. Identifiers only, no values (A3, P12)."""
+	them, else parses the window. Identifiers only, no values."""
 	ftype = finding.get("finding_type") or ""
 	if ftype not in ai_grounding.LOOP_FACT_TYPES:
 		return ""

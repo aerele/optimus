@@ -2,8 +2,8 @@
 # For license information, please see license.txt
 
 """ai_grounding: the one source-window helper, and the loop chain around a callsite
-from the whole file's AST (owner decision A3), formatted only for the lines the prompt
-still shows (P12)."""
+from the whole file's AST, formatted only for the lines the prompt
+still shows."""
 
 import ast
 
@@ -70,7 +70,7 @@ class TestGroundingWindow:
 		assert [r["lineno"] for r in g.grounding_window(lines, 5, 24, 24).rows] == list(range(1, 7))
 
 	def test_an_80_line_function_is_whole_and_81_falls_back(self):
-		"""E-I4: the max_lines boundary."""
+		"""The max_lines boundary."""
 		fits = ["def f():"] + ["\tx = 1"] * 79
 		window = g.grounding_window(fits + ["", "y = 2"], 40, 24, 24)
 		assert (window.start, window.end) == (1, 80)
@@ -79,7 +79,7 @@ class TestGroundingWindow:
 		assert (window.start, window.end) == (16, 64)
 
 	def test_the_fallback_uses_before_and_after_as_given(self):
-		"""E-I4: an asymmetric fallback."""
+		"""An asymmetric fallback."""
 		window = g.grounding_window(["value = 0"] * 121, 61, 10, 30)
 		assert (window.start, window.end, len(window.rows)) == (51, 91, 41)
 
@@ -126,7 +126,7 @@ class TestLoopChain:
 		assert "Inside this loop the code also writes through: item.save." in _text(DEMO_ORDER, 7)
 
 	def test_nested_loops_report_the_whole_chain(self):
-		"""E-I3: the outer loop's variable is reported, not only the innermost loop's."""
+		"""The outer loop's variable is reported, not only the innermost loop's."""
 		assert _text(NESTED, 4) == (
 			"The marked line runs inside the for loop on line 3, which runs inside the for loop on line 2. "
 			"The call frappe.db.get_value uses variables that change in the loop on line 3: row. "
@@ -136,7 +136,7 @@ class TestLoopChain:
 		)
 
 	def test_a_walrus_while_header_is_in_the_loop(self):
-		"""P11a."""
+		"""A while header that assigns with := runs on every pass, so it is part of the loop."""
 		lines = [
 			"def drain():",
 			"\twhile (row := frappe.db.get_value('Queue', {'status': 'Open'}, 'name')):",
@@ -147,20 +147,20 @@ class TestLoopChain:
 		assert ["frappe.db.set_value", 3] in facts["loops"][0]["writes"]
 
 	def test_the_element_line_of_a_multi_line_comprehension(self):
-		"""P11a."""
+		"""The element line of a comprehension spread over several lines is inside its loop."""
 		lines = ["def names(codes):", "\treturn [", "\t\tfrappe.db.get_value('Item', d, 'item_name')",
 			"\t\tfor d in codes", "\t]"]
 		assert "uses variables that change in that loop: d." in _text(lines, 3)
 		assert _facts(lines, 3)["loops"][0]["kind"] == "comprehension"
 
 	def test_a_comprehension_inside_a_for_loop_keeps_the_outer_loop(self):
-		"""P11a: the statement holding a comprehension no longer hides the for loop."""
+		"""The statement holding a comprehension no longer hides the for loop."""
 		lines = ["def f(orders):", "\tfor o in orders:",
 			"\t\tnames = [frappe.db.get_value('Item', d.item_code, 'item_name') for d in o.items]"]
 		assert [(loop["kind"], loop["line"]) for loop in _facts(lines, 3)["loops"]] == [("comprehension", 3), ("for", 2)]
 
 	def test_an_attribute_target_binds_no_name(self):
-		"""P11b: self.total += d.amount does not make self loop-variant."""
+		"""self.total += d.amount does not make self loop-variant."""
 		lines = ["def total(self):", "\tfor d in self.items:", "\t\tself.total += d.amount",
 			"\t\tfrappe.db.get_value('Company', self.company, 'default_currency')"]
 		text = _text(lines, 4)
@@ -168,7 +168,7 @@ class TestLoopChain:
 		assert "The result of frappe.db.get_value is not used." in text
 
 	def test_a_stored_key_or_attribute_the_call_reads_changes_in_the_loop(self):
-		"""Fix round 1, F2: status_updater's args['detail_id'] = ... then .format(**args), and
+		"""status_updater's args['detail_id'] = ... then .format(**args), and
 		batch.py's self.batch_id = ... then frappe.db.exists('Batch', self.batch_id)."""
 		lines = [
 			"def update_children(self, args):",
@@ -201,14 +201,14 @@ class TestLoopChain:
 		assert "uses no variable that changes" in text("cache[r.idx].qty", "cache[0].rate")
 
 	def test_a_subscript_receiver_write_is_seen(self):
-		"""P11c."""
+		"""A write through a subscripted receiver (self.items[i].db_update()) counts as a write in the loop."""
 		lines = ["def save_rows(self):", "\tfor i in range(len(self.items)):",
 			"\t\tfrappe.get_doc('Item', self.items[i].item_code)", "\t\tself.items[i].db_update()"]
 		text = _text(lines, 3)
 		assert "self.items[].db_update" in text and "in that loop: i." in text
 
 	def test_formatted_sql_writes_are_seen(self):
-		"""P11c: f-string, .format and % SQL writes."""
+		"""f-string, .format and % SQL writes."""
 		lines = [
 			"def mark(names):",
 			"\tfor n in names:",
@@ -220,7 +220,7 @@ class TestLoopChain:
 		assert "frappe.db.sql(DELETE), frappe.db.sql(INSERT), frappe.db.sql(UPDATE)" in _text(lines, 3)
 
 	def test_a_query_builder_write_chain_is_seen(self):
-		"""Fix round 1, F6: frappe.qb update, insert and delete chains that end in .run()."""
+		"""frappe.qb update, insert and delete chains that end in .run()."""
 		lines = [
 			"def close(names):",
 			"\tfor n in names:",
@@ -237,7 +237,7 @@ class TestLoopChain:
 		assert "writes through: frappe.qb.from_().delete, frappe.qb.into, frappe.qb.update." in _text(lines, 3)
 
 	def test_async_for_with_match(self):
-		"""E-I4: async and match shapes."""
+		"""async and match shapes."""
 		lines = ["async def f(rows):", "\tasync for r in rows:", "\t\tmatch r.kind:", "\t\t\tcase 'item':",
 			"\t\t\t\tawait frappe.get_doc('Item', r.name)"]
 		facts = _facts(lines, 5)
@@ -245,7 +245,7 @@ class TestLoopChain:
 		assert "in that loop: r." in _text(lines, 5)
 
 	def test_a_generator_yield_uses_the_result(self):
-		"""E-I4: generator shape."""
+		"""Generator shape."""
 		lines = ["def rows(names):", "\tfor n in names:", "\t\tyield frappe.get_doc('Item', n)"]
 		assert _facts(lines, 3)["result_used"] is True
 
@@ -294,7 +294,7 @@ class TestLoopChain:
 		("with open_it() as [a, *rest]:", ["a", "rest"]),
 	])
 	def test_tuple_and_starred_targets_bind_every_name(self, header, names):
-		"""T1: each name of a tuple, list or starred target is a loop binding."""
+		"""Each name of a tuple, list or starred target is a loop binding."""
 		lines = ["def f(pairs):"]
 		if header.startswith("with"):
 			lines += ["\tfor _x in pairs:", "\t\t" + header, "\t\t\tfrappe.get_doc('Item', " + ", ".join(names) + ")"]
@@ -308,7 +308,7 @@ class TestLoopChain:
 		assert f"change in that loop: {', '.join(sorted(names))}." in _text(lines, target)
 
 	def test_a_call_in_the_first_comprehension_iterable_runs_once(self):
-		"""T2: the first iterable runs once; the second generator's iterable runs per pass."""
+		"""The first iterable runs once; the second generator's iterable runs per pass."""
 		first = ["def f(a):", "\treturn [x for x in frappe.get_all('Item')]"]
 		assert _facts(first, 2) == {"in_loop": False}
 		second = ["def f(a):", "\treturn [y for x in a for y in frappe.get_all('Item', x)]"]
@@ -321,7 +321,7 @@ class TestLoopChain:
 		"filters.remove(d)", "filters.extend([d])", "filters.insert(0, d)", "filters.append(d)",
 	])
 	def test_in_place_mutation_binds_the_name_the_call_reads(self, mutation):
-		"""C5: the name is not rebound, yet its value differs on every pass."""
+		"""The name is not rebound, yet its value differs on every pass."""
 		lines = ["def f(items):", "\tfilters = {}", "\tfor d in items:", "\t\t" + mutation,
 			"\t\tfrappe.db.get_value('Bin', filters, 'qty')"]
 		facts = _facts(lines, 5)
@@ -414,13 +414,13 @@ class TestLoopChain:
 
 class TestFormatting:
 	def test_not_in_a_loop_gets_the_caller_hint_only_when_asked(self):
-		"""P7: the loop may be in a caller that is not shown."""
+		"""The loop may be in a caller that is not shown."""
 		lines = ["def get_user(name):", "\treturn frappe.get_doc('User', name)"]
 		assert "The repetition may come from a caller that is not shown" in _text(lines, 2, caller_hint=True)
 		assert "caller" not in _text(lines, 2)
 
 	def test_a_loop_header_above_the_shown_lines_is_left_out(self):
-		"""P12: only facts about lines still shown."""
+		"""Only facts about lines still shown."""
 		text = _text(NESTED, 4, first=3)
 		assert text.startswith("The marked line runs inside the for loop on line 3.")
 		assert "line 2" not in text and "inv" not in text
@@ -429,7 +429,7 @@ class TestFormatting:
 		assert _text(NESTED, 4, first=4) == ""
 
 	def test_a_variable_bound_on_a_line_not_shown_gets_no_invariant_claim(self):
-		"""Fix round 1, F3: no "uses no variable that changes" when the binding is not shown."""
+		"""No "uses no variable that changes" when the binding is not shown."""
 		lines = ["def f(rows):", "\tkey = None", "\tfor r in rows:", "\t\tfrappe.get_doc('Item', key)",
 			"\t\tkey = r.next_key"]
 		assert "uses variables that change in that loop: key." in _text(lines, 4)
@@ -449,7 +449,7 @@ class TestFormatting:
 		assert facts["loops"][0]["line"] == 42 and facts["call_line"] == 43
 
 	def test_a_window_inside_a_loop_body_with_no_def_is_unknown(self):
-		"""Fix round 1, F1: a window that starts inside a body cannot see a loop header above it."""
+		"""A window that starts inside a body cannot see a loop header above it."""
 		lines = ["\t\tx = 1", "\t\tfrappe.db.get_value('Item', x)", "\t\ty = 2"]
 		rows = [{"lineno": 10 + i, "content": text, "is_target": i == 1} for i, text in enumerate(lines)]
 		assert g.loop_facts_from_window(rows, 11) == {}

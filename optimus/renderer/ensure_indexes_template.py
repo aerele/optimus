@@ -15,7 +15,7 @@ import re
 
 HOOK_MODULE = "optimus_indexes"
 UNKNOWN_APP = "your_app"
-# The hooks.py lists ensure_indexes() is registered in (owner decision D4): after_sync
+# The hooks.py lists ensure_indexes() is registered in: after_sync
 # runs right after the install's fixture sync, so a fixture-shipped Custom Field is
 # indexed on a fresh install too.
 HOOK_EVENTS: tuple[str, ...] = ("after_install", "after_sync", "after_migrate")
@@ -139,7 +139,7 @@ def optimus_index_name(doctype: str, base_cols) -> str:
 
 
 def _string_hook_pair(hook: str) -> str:
-	"""A hooks.py value set as a string, turned into a list with ensure_indexes last (D2):
+	"""A hooks.py value set as a string, turned into a list with ensure_indexes last:
 	a list pasted under the string would replace it, or be replaced by it."""
 	return f'["<the string already there>", "{hook}"]'
 

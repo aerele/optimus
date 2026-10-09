@@ -209,14 +209,14 @@ _SINGLEFLIGHT_THROTTLE_SECONDS = 5.0
 # Hard ceiling on how long a session waits for the flag before degrading to the
 # pre-M2 behavior (proceed anyway) rather than waiting forever.
 _SINGLEFLIGHT_MAX_WAIT_SECONDS = 600
-# The flag is written with a raw SET NX EX (T10), pickled the way RedisWrapper.get_value
+# The flag is written with a raw SET NX EX, pickled the way RedisWrapper.get_value
 # reads it back. 5 is frappe v16's DEFAULT_PICKLE_PROTOCOL; v15's get_value loads any protocol.
 _SINGLEFLIGHT_PICKLE_PROTOCOL = 5
-# Sessions whose current run already logged a failed or yielding heartbeat (O4): one
+# Sessions whose current run already logged a failed or yielding heartbeat: one
 # optimus log line per run. _release_singleflight, which every run ends with, clears it.
 _heartbeat_noted: set[str] = set()
 
-# P5: every provider call of the analyze-time AI step, and the humanize call in
+# Every provider call of the analyze-time AI step, and the humanize call in
 # _persist, is capped here, and the single-flight flag is touched before each call, so
 # two heartbeats are never further apart than one call: 240 s < the 300 s TTL.
 AI_CALL_TIMEOUT_CAP_SECONDS = _SINGLEFLIGHT_TTL_SECONDS - 60
@@ -254,7 +254,7 @@ def _singleflight_redis_key():
 
 
 def _read_singleflight_holder():
-	"""The flag's holder as Redis has it now (T10, PF1). ``RedisWrapper.get_value``
+	"""The flag's holder as Redis has it now. ``RedisWrapper.get_value``
 	answers from ``frappe.local.cache`` once the key is in it, and that dict lives for the
 	whole RQ job, so a second read in one analyze returned the first read's value: a run
 	whose flag lapsed still saw itself as the holder, and on v15 a run never saw its own
@@ -269,7 +269,7 @@ def _read_singleflight_holder():
 
 
 def _take_singleflight(session_uuid: str) -> bool:
-	"""Take the flag only if it is free, in one atomic ``SET NX EX`` (T10, PF5): of two
+	"""Take the flag only if it is free, in one atomic ``SET NX EX``: of two
 	sessions taking it at once, exactly one gets it. Like every flag write here it skips
 	``frappe.local.cache``; ``_read_singleflight_holder`` never trusts that cache."""
 	value = pickle.dumps(session_uuid, protocol=_SINGLEFLIGHT_PICKLE_PROTOCOL)
@@ -284,7 +284,7 @@ def _take_singleflight(session_uuid: str) -> bool:
 
 def _note_heartbeat_problem(session_uuid: str, problem: str) -> None:
 	"""One ``optimus`` log line per analyze run when a heartbeat fails or finds another
-	session's flag (O4). Such a run does not hold the flag, so the janitor can fail its
+	session's flag. Such a run does not hold the flag, so the janitor can fail its
 	Analyzing row while it still runs; this line says why. Logged at ERROR because
 	Frappe's loggers drop lower levels on a production site. Never raises, except an RQ
 	job timeout."""
@@ -300,13 +300,12 @@ def _touch_singleflight(session_uuid: str) -> bool:
 	when it lapsed and nobody took it. Never writes over another session's flag (taken
 	after a lapse, or held while this run degraded past its wait deadline): that session
 	is the one the janitor and the next waiter must see, so a degraded run leaves it
-	alone. Every check reads Redis, not the job-local cache (T10). The refresh is an
+	alone. Every check reads Redis, not the job-local cache. The refresh is an
 	EXPIRE and the take-back a SET NX, so neither can replace another session's value. One
 	window is left: if this flag lapses and another session takes it between the read and
 	the EXPIRE, the EXPIRE renews that session's TTL (never its value). A touch that fails
-	or finds another session's flag logs one line per run (O4). Returns True only when
-	this session holds the flag after the touch (fix round 1: acquire proceeds on that
-	alone). Best-effort: a cache hiccup never fails analyze, it returns False; an RQ job
+	or finds another session's flag logs one line per run. Returns True only when
+	this session holds the flag after the touch. Best-effort: a cache hiccup never fails analyze, it returns False; an RQ job
 	timeout escapes as a fresh instance."""
 
 	def _touch() -> bool:
@@ -331,8 +330,7 @@ def _touch_singleflight(session_uuid: str) -> bool:
 
 
 def is_singleflight_holder(session_uuid: str) -> bool:
-	"""True iff ``session_uuid`` currently holds the single-flight flag, read from Redis
-	(T10). The flag is heartbeated throughout analyze, so its presence is a reliable
+	"""True iff ``session_uuid`` currently holds the single-flight flag, read from Redis. The flag is heartbeated throughout analyze, so its presence is a reliable
 	liveness signal (the janitor consults it before failing a long-running Analyzing row,
 	since no DB write happens mid-analyze). A cache error reads as False; an RQ job
 	timeout escapes as a fresh instance."""
@@ -344,7 +342,7 @@ def _release_singleflight(session_uuid: str) -> None:
 	so a TTL-expired-then-reacquired flag belonging to another session isn't clobbered.
 	Not atomic: a flag that lapses and is taken in the instant between the read and the
 	delete is still deleted, which needs this run to have gone a whole TTL without a
-	heartbeat first. Also ends the run's one-line heartbeat note (O4). Best-effort: a
+	heartbeat first. Also ends the run's one-line heartbeat note. Best-effort: a
 	cache error is ignored; an RQ job timeout escapes as a fresh instance."""
 	_heartbeat_noted.discard(session_uuid)
 
@@ -976,7 +974,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 				pass
 
 		_publish_progress(80, "Writing session data", session_uuid)
-		_touch_singleflight(session_uuid)  # P5: _persist's humanize call is capped below the TTL too
+		_touch_singleflight(session_uuid)  # _persist's humanize call is capped below the TTL too
 		_persist(docname, context, recordings, analyze_elapsed_ms)
 
 		_touch_singleflight(session_uuid)  # M2 heartbeat before the render phase
@@ -1104,7 +1102,7 @@ def _ai_selection(items, ai_fix, *, type_of, gate) -> tuple[list, int, int]:
 	falls through to the eligibility gate, which refuses it anyway. Only types that can
 	reach the AI and Framework N+1 count as gated; infrastructure types never do, and neither
 	do index findings: every session has them, each shows Optimus's own advice, and counting
-	them made the note fire on every session (O5)."""
+	them made the note fire on every session."""
 	counted = ai_fix.AI_ELIGIBLE_FINDING_TYPES | {"Framework N+1"}
 	eligible, gated, excluded = [], 0, 0
 	for item in items:
@@ -2197,7 +2195,7 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 		if time.monotonic() - started > AI_AUTO_SUGGEST_TIME_BUDGET_SECONDS:
 			skipped_for_time = total - idx
 			break
-		# P5: heartbeat before every AI call; the call is capped below the flag's TTL.
+		# Heartbeat before every AI call; the call is capped below the flag's TTL.
 		_touch_singleflight(context.session_uuid)
 		# Live progress per finding the floating widget / form headline
 		# show movement during the (potentially minute-long) LLM round
@@ -2280,7 +2278,7 @@ def _ai_payload_for_finding(
 	slowest queries from that action's recording are attached as
 	``technical_detail.example_queries`` (verbatim SQL evidence), unless already
 	set by a SQL red-flag analyzer. A Slow Query also carries the deterministic
-	index advice (``index_advice``) when ``evidence_lookup`` is given (P15)."""
+	index advice (``index_advice``) when ``evidence_lookup`` is given."""
 	payload = renderer._finding_to_dict(child, file_cache=file_cache)
 	callsite = (payload.get("technical_detail") or {}).get("callsite") or {}
 	if callsite.get("filename") and callsite.get("lineno") is not None:
@@ -2289,7 +2287,7 @@ def _ai_payload_for_finding(
 			payload["source_window"] = grounding.rows
 			if (payload.get("finding_type") or "") in ai_grounding.LOOP_FACT_TYPES:
 				# Facts come from the WHOLE file's tree, so a loop outside the window
-				# is still seen; the prompt formats only those about shown lines (A3, P12).
+				# is still seen; the prompt formats only those about shown lines.
 				payload["loop_facts"] = safe_call.best_effort(
 					lambda: ai_grounding.loop_facts_from_tree(
 						grounding.tree, int(callsite["lineno"]), parent=grounding.parent,
@@ -2323,7 +2321,7 @@ def _ai_payload_for_finding(
 
 
 def _attach_index_advice(payload: dict, evidence_lookup, tracked_apps: tuple[str, ...]) -> None:
-	"""``payload["index_advice"]`` from the same advisor the report uses (P15)."""
+	"""``payload["index_advice"]`` from the same advisor the report uses."""
 	from optimus.renderer import index_recipes
 
 	advice = safe_call.best_effort(
@@ -2364,7 +2362,7 @@ def _ai_grounding_window(filename: str, lineno, file_cache: dict) -> ai_groundin
 		with guard:
 			lines = _source._source_lines(filename, cache=file_cache)
 			if lines and not isinstance(lineno, bool):
-				# The whole-file tree and parent map are built once per file per run (PF3). A
+				# The whole-file tree and parent map are built once per file per run. A
 				# small LRU keeps only the last few files' trees; an entry is valid only for
 				# the very list of lines it was parsed from.
 				memo_key = ("optimus_ast",)
@@ -2497,8 +2495,8 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	out["total_pending"] = len(chosen)
 	if not chosen:
 		return out
-	# Missing or outdated suggestions first, so repeated Refreshes reach every finding
-	# (R-I1), then the usual severity and impact order.
+	# Missing or outdated suggestions first, so repeated Refreshes reach every finding,
+	# then the usual severity and impact order.
 	chosen.sort(key=lambda r: (
 		_fix_is_current(r),
 		SEVERITY_ORDER.get(getattr(r, "severity", None) or "Low", 3),

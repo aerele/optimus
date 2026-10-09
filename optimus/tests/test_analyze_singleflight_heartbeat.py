@@ -1,11 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""P5: the single-flight flag is touched before every AI call of the analyze-time AI
+"""The single-flight flag is touched before every AI call of the analyze-time AI
 step and right before _persist, and every call is capped below the flag's TTL, so the
 flag cannot lapse while one analyze still runs (virtual clock, worst case: every call
 uses its whole timeout, up to the 600 s maximum configured). A touch never takes the
-flag from another session (Task 7 fix round 1). The cache double is ``FlagCache`` (T10):
+flag from another session. The cache double is ``FlagCache``:
 the touch refreshes with EXPIRE and takes a free flag with SET NX; the job-local cache
 is covered in test_analyze_singleflight_redis.py."""
 
@@ -120,7 +120,7 @@ def test_humanize_steps_sends_its_timeout_to_the_provider(monkeypatch):
 	assert post.last.timeout == analyze.AI_CALL_TIMEOUT_CAP_SECONDS
 
 
-# --- Task 7 fix round 1: a touch never takes another session's flag ---------------------
+# --- a touch never takes another session's flag ---------------------
 
 
 class _JobTimeout(Exception):
@@ -129,7 +129,7 @@ class _JobTimeout(Exception):
 
 @pytest.fixture(autouse=True)
 def _quiet_heartbeat_log(monkeypatch):
-	"""Each test starts a fresh run for the one-line heartbeat note (O4) and records the
+	"""Each test starts a fresh run for the one-line heartbeat note and records the
 	``optimus`` log lines instead of writing them."""
 	import frappe
 
@@ -239,7 +239,7 @@ def test_a_degraded_run_never_takes_the_flag_from_its_holder(monkeypatch, _quiet
 	"""Past its wait deadline, A runs anyway while OTHER holds the flag: none of A's
 	heartbeats (before the EXPLAIN burst, the AI loop, before _persist and the render)
 	may overwrite OTHER's flag or refresh its TTL, A's release leaves it too, and the run
-	logs one line that it yielded (O4)."""
+	logs one line that it yielded."""
 	cache = FlagCache("OTHER", ttl=10)
 	_drive_run(monkeypatch, cache=cache, scheduler_disabled=False, deadline=-1.0)
 	assert (cache.holder, cache.ttl) == ("OTHER", 10)
@@ -295,7 +295,7 @@ def test_a_cache_hiccup_never_fails_the_touch(monkeypatch, _quiet_heartbeat_log)
 	("release", "delete_value", "A"),
 ])
 def test_a_job_timeout_in_the_gate_check_or_release_escapes_fresh(monkeypatch, call, where, holder):
-	"""Fix round 1: acquire, is_singleflight_holder and release swallow an ordinary cache
+	"""acquire, is_singleflight_holder and release swallow an ordinary cache
 	error, but an RQ job timeout still stops the job, as a fresh instance."""
 	import frappe
 

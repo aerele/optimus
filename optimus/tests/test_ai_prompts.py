@@ -129,7 +129,7 @@ def test_raw_ddl_only_in_never_sentences():
 
 
 def test_the_prompt_has_no_index_recipe_of_its_own():
-	"""P15: index advice is the profiler's (optimus/renderer/index_recipes.py), passed as a
+	"""Index advice is the profiler's (optimus/renderer/index_recipes.py), passed as a
 	fact for Slow Query; the prompt no longer teaches patches or on_doctype_update."""
 	assert not hasattr(P, "INDEX_RULES")
 	assert "on_doctype_update" not in P.SYSTEM_PROMPT and "INDEXES" not in P.SYSTEM_PROMPT

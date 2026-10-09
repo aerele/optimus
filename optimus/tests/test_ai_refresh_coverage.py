@@ -2,7 +2,7 @@
 # For license information, please see license.txt
 
 """Refresh AI suggestions and the analyze-time AI step: what is selected, in what order,
-and what is counted (P10, R-I1, O-I2)."""
+and what is counted."""
 
 import json
 from types import SimpleNamespace
@@ -70,7 +70,7 @@ def _doc(rows):
 
 
 def test_three_refreshes_make_every_finding_current(backfill):
-	"""Review Focus 5 (R-I1): nine eligible findings, three fit one refresh."""
+	"""Nine eligible findings, three fit one refresh."""
 	rows = [_row(f"F{i}", impact=100.0 - i, version=3) for i in range(9)]
 	with patch("optimus.settings.get_config", return_value=_cfg()):
 		for _ in range(3):
@@ -92,7 +92,7 @@ def test_missing_and_outdated_fixes_go_first(backfill):
 
 
 def test_excluded_types_are_never_sent_and_gated_ones_are_counted(backfill):
-	"""P10: the backfill used to send excluded types, so each Refresh logged an error."""
+	"""The backfill used to send excluded types, so each Refresh logged an error."""
 	rows = [_row("sq", "Slow Query"), _row("n1"), _row("idx", "Missing Index"), _row("mem", "Memory Pressure")]
 	with patch("optimus.settings.get_config", return_value=_cfg(ai_excluded_finding_types=("Slow Query",))):
 		out = analyze._run_ai_backfill(_doc(rows), cap=0, regenerate_all=True)
@@ -168,7 +168,7 @@ def test_auto_suggest_notes_the_counts_when_nothing_is_eligible():
 def test_an_excluded_type_the_ai_never_sees_is_counted_by_the_gate(backfill):
 	"""Only an AI-eligible type counts as excluded; an excluded index type is still the
 	gate's (it gets the deterministic advice either way), but index findings are not counted
-	as gated: every session has them, so the note would fire on every session (O5)."""
+	as gated: every session has them, so the note would fire on every session."""
 	rows = [_row("idx", "Missing Index"), _row("n1")]
 	with patch("optimus.settings.get_config", return_value=_cfg(ai_excluded_finding_types=("Missing Index",))):
 		out = analyze._run_ai_backfill(_doc(rows), cap=0, regenerate_all=True)
@@ -186,7 +186,7 @@ def test_the_exclusion_wins_over_the_gate(backfill):
 
 
 def test_a_context_window_too_small_is_a_logged_failure(backfill, monkeypatch):
-	"""Controller ruling C2: kind "config" (here the pre-HTTP window check) is a failure,
+	"""Kind "config" (here the pre-HTTP window check) is a failure,
 	never a silent skip."""
 	logged = []
 	monkeypatch.setattr(ai_fix, "suggest_fix", _REAL_SUGGEST)

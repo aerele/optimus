@@ -445,7 +445,7 @@ def test_the_docs_and_changelog_quote_these_texts():
 		assert "`sort_stays`" in text and "if the rows this query looks for are rare" in text
 		assert "`is_return = ? ORDER BY creation DESC LIMIT ?`" in text
 	assert recipe_enrichment.SORT_STAYS_NOTES["Filesort"] in doc
-	# fix round 1: export keys, the timeout claim, the self-join, the join-bound sort, "may not"
+	# export keys, the timeout claim, the self-join, the join-bound sort, "may not"
 	assert "`code`, `unknown`: no verdict" in doc and '`"may stay"` when it may' in doc
 	assert "it escapes the report render (`render_raw`) and the export (`export_session`)" in doc
 	assert "analyzer loop and its report step" in log and "escapes the report render and the export" in log

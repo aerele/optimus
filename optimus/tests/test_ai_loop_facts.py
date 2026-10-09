@@ -2,8 +2,8 @@
 # For license information, please see license.txt
 
 """Loop facts reach the user message for N+1 Query / Redundant Call / Hot Line only,
-are computed for the window lines still shown, sit inside a data block (P12), and a
-line in no loop of its function gets the caller hint for N+1 and Redundant Call (P7)."""
+are computed for the window lines still shown, sit inside a data block, and a
+line in no loop of its function gets the caller hint for N+1 and Redundant Call."""
 
 import ast
 
@@ -57,7 +57,7 @@ def test_gapped_or_targetless_window_gives_nothing():
 
 
 def test_the_facts_sit_inside_a_data_block():
-	"""P12: the identifiers no longer bypass the untrusted-data fence."""
+	"""The identifiers no longer bypass the untrusted-data fence."""
 	content = ai_fix._build_messages(_finding())[1][-1]["content"]
 	head, after = content.split(ai_fix._LOOP_FACTS_HEAD, 1)
 	first, rest = after.split("\n", 2)[1], after.split("\n", 2)[2]
@@ -72,7 +72,7 @@ def test_slow_query_gets_no_loop_facts():
 
 
 def test_facts_follow_the_trimmed_window():
-	"""P12: when the budget trims the loop header out of the window, no loop fact is sent."""
+	"""When the budget trims the loop header out of the window, no loop fact is sent."""
 	lines = ["def f(items):", "\tfor d in items:"] + [f"\t\tx_{i} = '{'a' * 140}'" for i in range(76)]
 	lines += ["\t\tfrappe.db.get_value('Item', d, 'name')", "\t\tpass"]
 	window = [{"lineno": i + 1, "content": text, "is_target": i + 1 == 79} for i, text in enumerate(lines)]
@@ -87,7 +87,7 @@ def test_facts_follow_the_trimmed_window():
 
 
 def test_whole_file_facts_cover_a_window_that_does_not_parse_alone():
-	"""A3: a window cut inside a try block does not parse on its own; the facts analyze
+	"""A window cut inside a try block does not parse on its own; the facts analyze
 	computed from the whole file still reach the prompt."""
 	lines = [
 		"def bg_recheck_users(doc_name=None):",
@@ -114,7 +114,7 @@ def test_carried_facts_need_the_callsite_line_in_the_rows():
 
 
 def test_a_line_in_no_loop_gets_the_caller_hint_for_n_plus_one_only():
-	"""P7."""
+	"""A line in no loop may repeat because a caller loops, which is said for N+1 Query and Redundant Call only."""
 	window = [
 		{"lineno": 10, "content": "def get_user(name):", "is_target": False},
 		{"lineno": 11, "content": "\treturn frappe.get_doc('User', name)", "is_target": True},

@@ -1,9 +1,8 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""index_recipes: the one index advisor for findings and table cards (owner decisions
-A1 and A2). Evidence decides: an already indexed, unique, missing or reserved column
-gives no code; a single column on a field the developer controls gets Search Index;
+"""index_recipes: the one index advisor for findings and table cards.
+Evidence decides: an already indexed, unique, missing or reserved column gives no code; a single column on a field the developer controls gets Search Index;
 everything else gets one explicitly named, idempotent ensure_indexes() entry."""
 
 import json
@@ -183,14 +182,14 @@ class TestRoutes:
 		assert "Replace your_app with the name of your app" in ir.finding_text(advice)
 
 	def test_a_doctype_with_no_known_app_says_another_app(self):
-		"""With Tracked Apps set, an app outside it is another app's (E1: with Tracked Apps
+		"""With Tracked Apps set, an app outside it is another app's (with Tracked Apps
 		empty the note is conditional, test_index_advice_correctness)."""
 		ev = _ev(app="", fields={"po_no": F("Data")})
 		advice = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(ev), tracked_apps=("myapp",))
 		assert 'belongs to another app, so do not edit it' in ir.finding_text(advice)
 
 	def test_the_property_setter_route_says_it_builds_the_index_first(self):
-		"""D1: the entry builds po_no_index itself, then declares Search Index on the
+		"""The entry builds po_no_index itself, then declares Search Index on the
 		field; it no longer syncs the table."""
 		advice = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(_SI))
 		text = ir.finding_text(advice)
@@ -199,7 +198,7 @@ class TestRoutes:
 		assert "syncs the table" not in text and "updatedb" not in advice.code
 
 	def test_a_custom_field_created_in_code_gets_search_index_in_its_dict(self):
-		"""D5: a Custom Field your app creates with create_custom_fields()."""
+		"""A Custom Field your app creates with create_custom_fields()."""
 		ev = _ev(fields={"po_no": F("Data", custom=True)})
 		advice = ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(ev))
 		assert (
@@ -226,7 +225,7 @@ class TestRoutes:
 
 
 class TestPostgresCaveatOnEveryEntryThatRunsThere:
-	"""D4: an entry without a db stamp runs on both databases, so it carries the
+	"""An entry without a db stamp runs on both databases, so it carries the
 	Postgres DROP INDEX caveat and a "why it stays" text for both."""
 
 	def test_an_unstamped_mariadb_composite_carries_the_postgres_caveat(self):
@@ -271,7 +270,7 @@ class TestIndexNames:
 		assert ir.optimus_index_name("Sales Invoice", cols) != ir.optimus_index_name("Sales-Invoice", cols)
 
 	def test_two_doctypes_with_the_same_columns_on_postgres_get_different_names(self):
-		"""Review Focus 2 (C-I1, P1): Postgres index names are schema-wide."""
+		"""Postgres index names are schema-wide."""
 		fields = {"company": F("Link"), "posting_date": F("Date")}
 		lookup = _lookup(
 			_ev("Sales Invoice", dialect="postgres", fields=fields),
@@ -285,7 +284,7 @@ class TestIndexNames:
 		assert "company_posting_date_index" not in a.code + b.code
 
 	def test_a_long_four_column_mariadb_index_stays_under_64_characters(self):
-		"""P1: Frappe's own name for these four columns is 65 characters."""
+		"""Frappe's own name for these four columns is 65 characters."""
 		fields = {c: F("Link") for c in ("serial_and_batch_bundle", "warehouse", "posting_time")}
 		fields["posting_date"] = F("Date")
 		ev = _ev("Stock Ledger Entry", fields=fields)
@@ -297,8 +296,8 @@ class TestIndexNames:
 
 class TestNoCode:
 	def test_a_column_that_leads_an_index_with_another_name_gives_no_code(self):
-		"""Review Focus 3 (E-I1, P9a), for a single-column recipe: a recipe of several
-		columns is refused only by an index that starts with all of them (C1)."""
+		"""For a single-column recipe: a recipe of several
+		columns is refused only by an index that starts with all of them."""
 		ev = _ev(fields=_ALL, indexes=[("idx_si_customer_custom", ["customer", "company"], False)])
 		q = "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND docstatus = ?"
 		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(ev))
@@ -309,7 +308,7 @@ class TestNoCode:
 		assert not text.startswith("Index the")
 
 	def test_search_index_ticked_is_no_proof_of_an_index(self):
-		"""C2: the table's real indexes decide, never the Search Index flag."""
+		"""The table's real indexes decide, never the Search Index flag."""
 		ev = _ev(fields={**_ALL, "customer": F("Link", search_index=True)})
 		advice = ir.advise_finding(_missing("customer"), evidence_lookup=_lookup(ev))
 		assert advice.route == ir.ROUTE_ENSURE_INDEXES
@@ -379,7 +378,7 @@ class TestNoCode:
 		assert 'Optimus has no information about table "tabSales Invoice"' in ir.finding_text(advice)
 
 	def test_link_search_with_or_and_like_names_the_shapes(self):
-		"""Fix round 2: the real link-search shape. Every column but disabled sits inside an
+		"""The real link-search shape. Every column but disabled sits inside an
 		OR group and is compared by LIKE ?, which no composite index can use; disabled is a
 		Check field, so an index would not help."""
 		ev = _ev("Item", fields={
@@ -395,12 +394,12 @@ class TestNoCode:
 		text = ir.finding_text(advice)
 		assert advice.route == ir.ROUTE_NO_CODE and advice.code is None and "item_name" in text
 		assert "a LIKE on item_name" in text and "an OR between conditions" in text
-		# bounded corrective R1: with a Check field in the mix the verdict is hedged, never "would not help"
+		# with a Check field in the mix the verdict is hedged, never "would not help"
 		assert "disabled is a Check field, which usually matches most of the table's rows" in text
 		assert "So Optimus gives no index code." in text and "would not help" not in text
 
 	def test_ifnull_around_an_indexed_column_names_the_function(self):
-		"""Fix round 3: IFNULL(status, ?) cannot use any index on status, even its Search
+		"""IFNULL(status, ?) cannot use any index on status, even its Search
 		Index, so status is left out with the function named and customer is indexed."""
 		ev = _ev(fields={**_ALL, "status": F("Select", search_index=True)})
 		q = "SELECT name FROM `tabSales Invoice` WHERE ifnull(status, ?) != ? and customer = ?"
@@ -412,7 +411,7 @@ class TestNoCode:
 		)
 
 	def test_a_trailing_creation_never_counts_as_already_indexed(self):
-		"""D5: Frappe indexes creation on every non-child table; a trailing creation is the
+		"""Frappe indexes creation on every non-child table; a trailing creation is the
 		sort column, not an equality filter, so even a unique index on it is no reason to
 		refuse the recipe."""
 		q = "SELECT name FROM `tabSales Invoice` WHERE customer = ? ORDER BY creation DESC"
@@ -423,7 +422,7 @@ class TestNoCode:
 			assert advice.entry["columns"] == ["customer", "creation"]
 
 	def test_a_later_column_with_its_own_index_does_not_block_the_composite(self):
-		"""Fix round 1 I3: only the LEADING column's index decides; real ERPNext Sales
+		"""Only the LEADING column's index decides; real ERPNext Sales
 		Invoice has Search Index on customer and posting_date, and (company, posting_date)
 		still serves WHERE company = ? ORDER BY posting_date."""
 		ev = _ev(
@@ -441,7 +440,7 @@ class TestNoCode:
 			}
 
 	def test_a_recipe_an_existing_index_already_starts_with_gives_no_code(self):
-		"""Fix round 1 I3: an existing composite that starts with the whole recipe list."""
+		"""An existing composite that starts with the whole recipe list."""
 		ev = _ev(fields=_ALL, indexes=[("idx_company_date_status", ["company", "posting_date", "status"], False)])
 		advice = ir.advise_table("tabSales Invoice", ["company", "posting_date"], evidence_lookup=_lookup(ev))
 		assert advice.route == ir.ROUTE_NO_CODE and advice.code is None
@@ -452,7 +451,7 @@ class TestNoCode:
 
 
 class TestPredicateShape:
-	"""Fix round 2: a column compared only inside an OR group, or only by a LIKE whose
+	"""A column compared only inside an OR group, or only by a LIKE whose
 	pattern may start with a wildcard (a normalized LIKE ? hides it), cannot be used by a
 	composite index, so it is left out and named."""
 
@@ -472,7 +471,7 @@ class TestPredicateShape:
 			)
 
 	def test_a_sort_on_the_like_column_is_no_plain_use_of_it(self):
-		"""Fix round 3: the ORDER BY after the WHERE clause is not part of the filter."""
+		"""The ORDER BY after the WHERE clause is not part of the filter."""
 		q = "SELECT `name` FROM `tabSales Invoice` WHERE `customer_name` LIKE ? ORDER BY `customer_name`"
 		assert _unusable_where_columns(q, [("WHERE", "customer_name")]) == {"customer_name": {"like"}}
 
@@ -507,7 +506,7 @@ class TestPredicateShape:
 			assert "an OR between conditions" in text and "an index would not help" in text
 
 	def test_between_and_plain_conditions_are_kept(self):
-		"""Fix round 4: equality columns first, the BETWEEN range column last."""
+		"""Equality columns first, the BETWEEN range column last."""
 		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND posting_date BETWEEN ? AND ? AND status = ?"
 		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI))
 		assert advice.columns == ("company", "status", "posting_date")
@@ -532,7 +531,7 @@ class TestPredicateShape:
 
 
 class TestFunctionWrapped:
-	"""Fix round 3: a column compared only inside a function call (IFNULL(), YEAR(),
+	"""A column compared only inside a function call (IFNULL(), YEAR(),
 	DATE(), LOWER(), NOT (...)) cannot use an index on it."""
 
 	_EV = _ev(fields={**_ALL, "customer_name": F("Data")})
@@ -590,7 +589,7 @@ class TestFunctionWrapped:
 
 
 class TestUnreadableQueries:
-	"""Fix round 3: a query the scan cannot read gives honest text, never parser fragments."""
+	"""A query the scan cannot read gives honest text, never parser fragments."""
 
 	_EV = _ev(fields=_ALL)
 
@@ -636,7 +635,7 @@ class TestUnreadableQueries:
 		assert "an OR between conditions on customer" in first and "status" not in first
 		assert "Optimus could not read how the query filters on status." in rest
 		assert "tabSales" not in advice.reason and " I," not in advice.reason and " I." not in advice.reason
-		# fix round 4: Optimus cannot say an index would not help when it could not read a filter
+		# Optimus cannot say an index would not help when it could not read a filter
 		assert "an index would not help" not in advice.reason
 		assert advice.reason.endswith(
 			"So Optimus gives no index code. Check the query with EXPLAIN to see which index it needs."
@@ -644,7 +643,7 @@ class TestUnreadableQueries:
 
 
 class TestQualifiersAndSubqueries:
-	"""Fix round 3: a dotted reference counts only for the target table or its aliases,
+	"""A dotted reference counts only for the target table or its aliases,
 	and a (SELECT ...) group neither uses nor taints the outer columns."""
 
 	_GL = _ev("GL Entry", fields={
@@ -680,7 +679,7 @@ class TestQualifiersAndSubqueries:
 
 
 class TestSingleColumnOr:
-	"""Fix round 3: an OR whose every branch compares the same one column is a plain use."""
+	"""An OR whose every branch compares the same one column is a plain use."""
 
 	def test_an_or_on_one_column_is_a_plain_use(self):
 		for where, cols in (
@@ -705,7 +704,7 @@ class TestSingleColumnOr:
 
 class TestCheckOnly:
 	def test_a_check_only_recipe_gives_no_code(self):
-		"""Fix round 3: every recipe of Check fields only, not just after the shape scan."""
+		"""Every recipe of Check fields only, not just after the shape scan."""
 		ev = _ev(fields={**_ALL, "is_return": F("Check")})
 		q = "SELECT `name` FROM `tabSales Invoice` WHERE `is_return`=?"
 		for advice in (
@@ -713,7 +712,7 @@ class TestCheckOnly:
 			ir.advise_table("tabSales Invoice", ["is_return"], evidence_lookup=_lookup(ev)),
 		):
 			assert advice.route == ir.ROUTE_NO_CODE
-			# bounded corrective R1: the rare value may still use an index, so the text says so
+			# the rare value may still use an index, so the text says so
 			assert "is_return is a Check field, which usually matches most of the table's rows" in advice.reason
 			assert "an index on (is_return) can help" in advice.reason and "would not help" not in advice.reason
 
@@ -735,14 +734,14 @@ def _r4(ftype, where, *, table="tabSales Invoice"):
 
 
 class TestTopLevelSameColumnOr:
-	"""Fix round 4 (A): Frappe writes a lone "is not set" filter as a bare top-level OR."""
+	"""Frappe writes a lone "is not set" filter as a bare top-level OR."""
 
 	def test_a_top_level_or_on_one_column_is_a_plain_use(self):
 		where = "`po_no` IS NULL OR `po_no`=? ORDER BY `posting_date` DESC"
 		assert _r4("Full Table Scan", where).columns == ("po_no",)
 		advice = _r4("Filesort", where)
 		# po_no matches two values (NULL and ?), so the rows do not come back sorted and the sort
-		# column would only widen the index (review-t12 M8)
+		# column would only widen the index
 		assert advice.columns == ("po_no",)
 		text = ir.finding_text(advice)
 		assert "already sorted" not in text and "removes the sort" not in text
@@ -757,7 +756,7 @@ class TestTopLevelSameColumnOr:
 
 
 class TestSlowQueryCut:
-	"""Fix round 4 (B): a Slow Query keeps only its first 500 characters (top_queries), so its
+	"""A Slow Query keeps only its first 500 characters (top_queries), so its
 	WHERE clause counts only when the clause reached its end keyword."""
 
 	@staticmethod
@@ -803,7 +802,7 @@ class TestSlowQueryCut:
 
 
 class TestExpressions:
-	"""Fix round 4 (C): arithmetic on a column, or a comparison with another column of the
+	"""Arithmetic on a column, or a comparison with another column of the
 	same row, cannot use an index on it."""
 
 	def test_arithmetic_on_a_column_is_left_out(self):
@@ -835,7 +834,7 @@ class TestExpressions:
 
 
 class TestCaseFrame:
-	"""Fix round 4 (D): a column inside CASE ... END cannot use an index on it."""
+	"""A column inside CASE ... END cannot use an index on it."""
 
 	def test_every_case_form_is_a_frame(self):
 		for where, cols, left_out in (
@@ -863,20 +862,20 @@ class TestCaseFrame:
 
 
 class TestIndexDesign:
-	"""Fix round 4: equality columns first, then at most one range or <> column, then the
+	"""Equality columns first, then at most one range or <> column, then the
 	sort or group column; a column after a range column cannot use the index."""
 
 	def test_equality_columns_lead(self):
 		assert _r4("Full Table Scan", "`posting_date` BETWEEN ? AND ? AND `company`=?").columns == ("company", "posting_date")
 		assert _r4("Full Table Scan", "`po_no` IS NOT NULL AND `company`=?").columns == ("company", "po_no")
-		# the equality block (=, IS NULL, IN) is in one canonical order, by name (review-t12 item 1)
+		# the equality block (=, IS NULL, IN) is in one canonical order, by name
 		assert _r4("Full Table Scan", "`po_no` IS NULL AND `company`=?").columns == ("company", "po_no")
 		assert _r4("Full Table Scan", "`status` IN (?) AND `company`=?").columns == ("company", "status")
 		assert _r4("Full Table Scan", "`posting_date` > ? AND ? = `company`").columns == ("company", "posting_date")
 		item = _lookup(_ev("Item", fields={"disabled": F("Check"), "item_group": F("Link")}))
 		q = "SELECT `name` FROM `tabItem` WHERE `disabled`<>? AND `item_group`=?"
 		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabItem"), evidence_lookup=item)
-		# <> never narrows an index (review-t12 round 3, item 1a)
+		# <> never narrows an index
 		assert advice.columns == ("item_group",)
 		assert "Optimus left out disabled (compared only by !=, <> or NOT" in ir.finding_text(advice)
 
@@ -896,7 +895,7 @@ class TestIndexDesign:
 
 
 class TestRangeAndSort:
-	"""Fix round 5: a Filesort or Temporary Table finding is about the sort or the
+	"""A Filesort or Temporary Table finding is about the sort or the
 	grouping, so with a range filter on another column the index takes the equality
 	columns and the sort or group column, and the range filter is left out. A range on
 	the sort column itself is one index for both. A Full Table Scan keeps the range."""
@@ -904,7 +903,7 @@ class TestRangeAndSort:
 	_WHERE = "`company`=? AND `posting_date` BETWEEN ? AND ?"
 
 	def test_a_filesort_with_a_range_filter_indexes_the_sort(self):
-		# with a LIMIT; without one the range filter wins (bounded corrective follow-up)
+		# with a LIMIT; without one the range filter wins
 		advice = _r4("Filesort", f"{self._WHERE} ORDER BY `modified` DESC LIMIT ?")
 		assert advice.columns == ("company", "modified")
 		text = ir.finding_text(advice)
@@ -940,7 +939,7 @@ class TestRangeAndSort:
 		order = {"company": "eq", "posting_date": "range", "modified": "sort"}
 		cols, dropped = ir._index_order(["company", "posting_date", "modified"], order)
 		assert cols == ["company", "posting_date"]
-		# bounded corrective follow-up: a left-out sort column says the sort stays
+		# a left-out sort column says the sort stays
 		assert dropped == [(
 			"modified", "it comes after the range condition on posting_date, so the index cannot return the rows in "
 			"order and the sort stays",
@@ -961,7 +960,7 @@ class TestRangeAndSort:
 
 
 class TestSortGate:
-	"""Bounded corrective to round 5: the sort-over-range recipe applies only when every
+	"""The sort-over-range recipe applies only when every
 	ORDER BY / GROUP BY item is a bare column of the table, indexable and sortable, in one
 	direction, with no multi-value equality filter; otherwise the round-4 recipe stays
 	(equality columns, then one range column) and the text never claims the sort goes."""
@@ -1081,11 +1080,11 @@ class TestSortGate:
 
 
 class TestMultiValueEquality:
-	"""Bounded corrective: IN (...) and a same-column IS NULL OR = keep their equality
+	"""IN (...) and a same-column IS NULL OR = keep their equality
 	place, but rows matching several values do not come back sorted."""
 
 	def test_an_in_filter_keeps_the_range_and_the_sort_claim_goes(self):
-		# a collapsed IN (?) may be one value: the sort is kept and the lead hedges (round 3)
+		# a collapsed IN (?) may be one value: the sort is kept and the lead hedges
 		advice = _r4("Filesort", "`status` IN (?) AND `posting_date` > ? ORDER BY `modified` LIMIT ?")
 		assert advice.columns == ("status", "modified")
 		assert "if the IN list on status has more than one value, the sort stays" in advice.lead
@@ -1096,7 +1095,7 @@ class TestMultiValueEquality:
 		advice = _r4("Filesort", "(`po_no` IS NULL OR `po_no`=?) AND `posting_date` > ? ORDER BY `modified` DESC")
 		assert advice.columns == ("po_no", "posting_date")
 		advice = _r4("Filesort", "`po_no` IS NULL OR `po_no`=? ORDER BY `creation` DESC")
-		assert advice.columns == ("po_no",)  # the sort column cannot be served (review-t12 M8)
+		assert advice.columns == ("po_no",)  # the sort column cannot be served
 		assert "already sorted" not in ir.finding_text(advice)
 
 
@@ -1107,7 +1106,7 @@ def test_the_most_selective_plain_use_wins():
 
 
 class TestMetadataNeverLeads:
-	"""Bounded corrective: creation / modified never lead, after index ordering too."""
+	"""Creation / modified never lead, after index ordering too."""
 
 	def test_creation_equality_never_leads(self):
 		advice = _r4("Full Table Scan", "`company` > ? AND `creation` = ?")
@@ -1118,10 +1117,10 @@ class TestMetadataNeverLeads:
 
 
 class TestPostgresRowWidth:
-	"""Fix round 1 item 9: a Postgres btree row holds at most about 2704 bytes."""
+	"""A Postgres btree row holds at most about 2704 bytes."""
 
 	def test_a_postgres_index_is_trimmed_to_the_row_limit(self):
-		"""Fix round 2: trailing columns are left out until the row fits, as on MariaDB."""
+		"""Trailing columns are left out until the row fits, as on MariaDB."""
 		ev = _ev(dialect="postgres", fields={"code_a": F("Data", length=400), "code_b": F("Data", length=400)})
 		advice = ir.advise_table("tabSales Invoice", ["code_a", "code_b"], evidence_lookup=_lookup(ev))
 		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["code_a"]
@@ -1131,7 +1130,7 @@ class TestPostgresRowWidth:
 
 	def test_a_postgres_leading_column_over_the_row_limit_gives_no_code(self):
 		ev = _ev(dialect="postgres", fields={"long_code": F("Data", length=700), "customer": F("Link")})
-		# a card keeps the analyzer's most-used-first order (review-t12 M6)
+		# a card keeps the analyzer's most-used-first order
 		advice = ir.advise_table("tabSales Invoice", ["long_code", "customer"], evidence_lookup=_lookup(ev))
 		assert advice.route == ir.ROUTE_NO_CODE
 		assert "could be 2800 bytes wide, over the 2704-byte Postgres index row limit" in ir.card_note(advice)
@@ -1148,7 +1147,7 @@ class TestPostgresRowWidth:
 
 
 class TestDatabaseStamp:
-	"""Fix round 1 I2: an entry that is only right on one database says which one."""
+	"""An entry that is only right on one database says which one."""
 
 	def test_entries_tied_to_one_database_name_it(self):
 		ev = _ev(app="myapp", fields={"remarks": F("Small Text"), "customer": F("Link")})
@@ -1163,7 +1162,7 @@ class TestDatabaseStamp:
 			assert json.dumps(advice.entry) in advice.code
 
 	def test_a_mariadb_composite_too_wide_for_a_postgres_row_is_mariadb_only(self):
-		"""Fix round 2: 2800 bytes fits the 3072-byte MariaDB key but not a Postgres row."""
+		"""2800 bytes fits the 3072-byte MariaDB key but not a Postgres row."""
 		ev = _ev(fields={"code_a": F("Data", length=350), "code_b": F("Data", length=350)})
 		advice = ir.advise_table("tabSales Invoice", ["code_a", "code_b"], evidence_lookup=_lookup(ev))
 		assert advice.entry["columns"] == ["code_a", "code_b"] and advice.entry["db"] == "mariadb"
@@ -1190,7 +1189,7 @@ class TestCaveats:
 		assert "maintenance window" in text
 
 	def test_a_custom_field_composite_is_indexed_after_fixtures_sync(self):
-		"""D4: after_sync runs right after the install's fixture sync, so a fixture-shipped
+		"""after_sync runs right after the install's fixture sync, so a fixture-shipped
 		Custom Field is indexed on a fresh install too; no residual is left to explain."""
 		ev = _ev(fields={**_ALL, "status": F("Data", custom=True)})
 		advice = ir.advise_finding(_explain("Full Table Scan", _TWO), evidence_lookup=_lookup(ev))
@@ -1224,7 +1223,7 @@ class TestExplainColumns:
 		assert advice.entry == {"doctype": "Sales Invoice", "search_index_field": "customer", "db": "mariadb"}
 
 	def test_order_by_an_aggregate_alias_is_not_indexed(self):
-		"""P9b: ORDER BY total, total = sum(amount), parses as ORDER BY amount."""
+		"""ORDER BY total, total = sum(amount), parses as ORDER BY amount."""
 		ev = _ev(fields={**_ALL, "amount": F("Data")})
 		q = "SELECT customer, sum(amount) as total FROM `tabSales Invoice` WHERE company = ? GROUP BY customer ORDER BY total DESC"
 		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(ev))
@@ -1232,7 +1231,7 @@ class TestExplainColumns:
 		assert ir._NARROWS + "the query sorts by an aggregate, which no index can return in order" in ir.finding_text(advice)
 
 	def test_dropped_sort_column_is_not_claimed_by_the_lead(self):
-		"""P9c: idx is a metadata column, so the lead must not promise a sort index."""
+		"""idx is a metadata column, so the lead must not promise a sort index."""
 		ev = _ev("Sales Invoice Item", fields={"item_code": F("Link")})
 		q = "SELECT * FROM `tabSales Invoice Item` WHERE item_code = ? ORDER BY idx"
 		advice = ir.advise_finding(_explain("Filesort", q, table="tabSales Invoice Item"), evidence_lookup=_lookup(ev))
@@ -1270,7 +1269,7 @@ class TestColumns:
 
 
 class TestCardNote:
-	"""D3: the card shows the advice's own code (``rec.code``) above this note, or no
+	"""The card shows the advice's own code (``rec.code``) above this note, or no
 	code line at all, so the note never refers to a hard-coded add_index call."""
 
 	def test_card_and_finding_come_from_the_same_advice(self):
@@ -1292,7 +1291,7 @@ class TestCardNote:
 		assert ir.card_note(advice).startswith("Do not add this index.")
 
 	def test_an_existing_module_gets_only_the_new_entry(self):
-		"""Fix round 1 I4: a developer who already has optimus_indexes.py adds one entry."""
+		"""A developer who already has optimus_indexes.py adds one entry."""
 		for advice in (
 			ir.advise_finding(_explain("Full Table Scan", _TWO), evidence_lookup=_lookup(_SI)),
 			ir.advise_finding(_missing("po_no"), evidence_lookup=_lookup(_SI)),
@@ -1301,13 +1300,13 @@ class TestCardNote:
 			assert line in ir.finding_text(advice) and line in ir.card_note(advice)
 
 	def test_the_finding_and_the_card_point_at_the_code_above_them(self):
-		"""Fix round 1 item 7: the report shows the code block before the prose."""
+		"""The report shows the code block before the prose."""
 		advice = ir.advise_finding(_explain("Full Table Scan", _TWO), evidence_lookup=_lookup(_SI))
 		for text in (ir.finding_text(advice), ir.card_note(advice)):
 			assert "Save the code above as your_app/your_app/optimus_indexes.py" in text and "below" not in text
 
 	def test_the_prompt_text_has_no_save_instruction(self):
-		"""Fix round 1 item 7: the Slow Query prompt carries no code, so nothing to save."""
+		"""The Slow Query prompt carries no code, so nothing to save."""
 		advice = ir.advise_finding(_explain("Full Table Scan", _TWO), evidence_lookup=_lookup(_SI))
 		text = ir.finding_text(advice, install=False)
 		assert advice.entry["index_name"] in text
@@ -1333,7 +1332,7 @@ class TestGeneratedCode:
 		assert "import os" not in code
 
 	def test_hooks_lines_name_all_three_hooks(self):
-		"""D4: after_install, after_sync (right after the install's fixture sync) and
+		"""after_install, after_sync (right after the install's fixture sync) and
 		after_migrate, in that order."""
 		code = ir.ensure_indexes_code([{"doctype": "X", "search_index_field": "a"}], app_name="myapp")
 		lines = [
@@ -1363,7 +1362,7 @@ class TestGeneratedCode:
 			assert isinstance(node, ast.Try) and node.handlers
 
 	def test_a_hook_set_as_a_string_becomes_a_list_with_ensure_indexes_last(self):
-		"""D2: most apps set after_install or after_migrate as a string; pasting a list
+		"""Most apps set after_install or after_migrate as a string; pasting a list
 		under it replaces it (or is replaced). The comment and the install text show the
 		two-item form, the existing string first."""
 		code = ir.ensure_indexes_code([{"doctype": "X", "search_index_field": "a"}], app_name="myapp")
@@ -1419,7 +1418,7 @@ def test_the_docs_show_the_generated_module_verbatim():
 
 
 def test_the_docs_say_how_to_remove_an_entry_and_that_the_guards_are_silent():
-	"""D6, O3d: removing an index or entry (the idx_* index and the
+	"""Removing an index or entry (the idx_* index and the
 	"<DocType>-<field>-search_index" Property Setter), and the guards that skip
 	without an Error Log row."""
 	from pathlib import Path
@@ -1430,7 +1429,7 @@ def test_the_docs_say_how_to_remove_an_entry_and_that_the_guards_are_silent():
 
 
 def test_the_docs_show_the_title_order_and_limit_the_indexed_lookup_to_mariadb():
-	"""T11 fix round 1: the title example has the key and the error type before the
+	"""The title example has the key and the error type before the
 	DocType; the "never reads the whole Error Log" claim is MariaDB's, because Postgres
 	names a Search Index after the bare field, schema-wide."""
 	from pathlib import Path

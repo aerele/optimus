@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""T10 (PF1, PF5, O4): the single-flight helpers read the flag from Redis, never from the
+"""The single-flight helpers read the flag from Redis, never from the
 job's ``frappe.local.cache``.
 
 Frappe's ``RedisWrapper.get_value`` answers from ``frappe.local.cache`` once a key is in it,
@@ -294,7 +294,7 @@ def test_a_busy_flag_re_enqueues_and_is_left_alone(env):
 
 
 def test_a_holder_whose_flag_is_taken_during_its_acquire_waits(env):
-	"""Fix round 1, window 3: A's earlier job holds the flag and A's retry reaches the gate.
+	"""A's earlier job holds the flag and A's retry reaches the gate.
 	Between acquire's read ("A") and the touch's read, the flag lapses and B takes it. The
 	touch yields, so A must wait like any busy session instead of running beside B."""
 	env.in_job("A-1")
@@ -339,7 +339,7 @@ def test_a_holder_whose_own_refresh_fails_waits(env):
 
 
 def test_a_flag_freed_after_the_set_nx_waits_one_cycle(env):
-	"""Fix round 1, A1: the SET NX fails while B holds the flag and B releases before A's
+	"""The SET NX fails while B holds the flag and B releases before A's
 	read. A re-enqueues and waits one throttle cycle; it does not take the flag through
 	the touch (the old "free or ours" condition did)."""
 	env.server.put(flag_key(), "B", ex=TTL)
@@ -412,7 +412,7 @@ def test_an_expire_that_lands_on_the_new_holders_flag_keeps_its_value(env):
 
 
 def test_two_racing_acquires_let_exactly_one_session_through(env, monkeypatch):
-	"""PF5: two sessions reach the gate at the same moment: neither sends its second Redis
+	"""Two sessions reach the gate at the same moment: neither sends its second Redis
 	command until both have sent their first (a check-then-set gate reads a free flag twice
 	and lets both through). Exactly one proceeds and the other re-enqueues."""
 	monkeypatch.setattr(frappe, "local", threading.local(), raising=False)
@@ -458,7 +458,7 @@ def test_two_racing_acquires_let_exactly_one_session_through(env, monkeypatch):
 	assert [k["session_uuid"] for k in env.enqueued] == [u for u in ("A", "B") if u != winner]
 
 
-# --- O4: a heartbeat that fails or yields writes one optimus log line per run -------------
+# --- a heartbeat that fails or yields writes one optimus log line per run -------------
 
 
 def test_a_heartbeat_that_finds_another_holder_logs_one_line_per_run(env):

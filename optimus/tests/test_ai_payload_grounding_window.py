@@ -92,7 +92,7 @@ def test_decorators_and_the_outer_function_are_included():
 
 
 def test_grounding_window_reads_through_the_real_helpers_and_parses_once(tmp_path, monkeypatch):
-	"""T3 + PF3: analyze._ai_grounding_window over the real _source_lines and
+	"""analyze._ai_grounding_window over the real _source_lines and
 	grounding_window; two findings of one file share a single whole-file parse."""
 	src = tmp_path / "mod.py"
 	src.write_text(
@@ -133,7 +133,7 @@ def test_the_parse_failure_of_a_file_is_remembered_too(tmp_path, monkeypatch):
 
 
 def test_form_feed_and_unicode_separators_keep_python_line_numbers(tmp_path):
-	"""E4: str.splitlines would split on the form feed and U+2028 and shift every line."""
+	"""str.splitlines would split on the form feed and U+2028 and shift every line."""
 	src = tmp_path / "ff.py"
 	src.write_text(
 		"import frappe\n\x0c\ndef f(xs):\n\tnote = 'a\u2028b'\n\tfor x in xs:\n"

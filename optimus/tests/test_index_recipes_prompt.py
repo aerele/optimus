@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""P15: the system prompt no longer teaches its own index recipe; a Slow Query prompt
+"""The system prompt no longer teaches its own index recipe; a Slow Query prompt
 carries the profiler's deterministic advice instead, inside a data block."""
 
 import json
@@ -57,5 +57,5 @@ def test_the_payload_builder_attaches_the_advice_for_slow_query():
 	assert payload["index_advice"]["columns"] == ["customer", "status"]
 	text = payload["index_advice"]["text"]
 	assert "never drops an index that spans several columns" in text
-	# fix round 1 item 7: the prompt carries no code, so it gets no instruction to save it
+	# the prompt carries no code, so it gets no instruction to save it
 	assert "Save the code" not in text and "If that file already exists" not in text

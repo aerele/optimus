@@ -1,11 +1,11 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Cycle-2 corrections to the index advisor (T12): which existing-index checks apply to
-which recipe (C1, C6), Search Index is no proof of an index (C2), JSON fields (C4), the
-lead's named cause (C7), reserved words on Postgres (E3), tables Optimus knows nothing
-about (E6), UNION queries (E7), the empty Tracked Apps wording (E1), the existing-index
-tail text (U4), the card verdicts (U2) and the branches T3 found untested."""
+"""Corrections to the index advisor: which existing-index checks apply to
+which recipe, Search Index is no proof of an index, JSON fields, the
+lead's named cause, reserved words on Postgres, tables Optimus knows nothing
+about, UNION queries, the empty Tracked Apps wording, the existing-index
+tail text, the card verdicts and the branches that had no test."""
 
 import dataclasses
 
@@ -30,7 +30,7 @@ def _text(advice):
 	return ir.finding_text(advice)
 
 
-# --- C1: the lead-column checks apply only to a single-column recipe ----------------------
+# --- the lead-column checks apply only to a single-column recipe ----------------------
 
 
 class TestLeadChecksOnlyForOneColumn:
@@ -43,7 +43,7 @@ class TestLeadChecksOnlyForOneColumn:
 		return ir.advise_finding(_explain(ftype, query, explain_row=explain_row), evidence_lookup=_lookup(ev or self._SI_IX))
 
 	def test_a_list_view_sort_on_an_indexed_filter_gets_its_composite(self):
-		"""c2corr/p1_lead_indexed q1: customer leads customer_index and EXPLAIN uses it, yet
+		"""Customer leads customer_index and EXPLAIN uses it, yet
 		(customer, creation) is what removes the filesort."""
 		q = (
 			"SELECT `tabSales Invoice`.`name` FROM `tabSales Invoice` WHERE `tabSales Invoice`.`customer` = ? "
@@ -78,7 +78,7 @@ class TestLeadChecksOnlyForOneColumn:
 		((("idx_customer_status", ["customer", "status"], False),), ir.ROUTE_NO_CODE),
 	])
 	def test_the_verdict_does_not_depend_on_predicate_order(self, ftype, existing, route):
-		"""c2corr/p1c and review-t12 item 1: both predicate orders give one verdict, one
+		"""Both predicate orders give one verdict, one
 		column order and one index name, with or without an existing composite in either
 		order."""
 		ev = _with_index(_ev(fields={**_ALL, "status": F("Select", search_index=True)}), *existing)
@@ -123,12 +123,12 @@ class TestLeadChecksOnlyForOneColumn:
 		assert advice.route == ir.ROUTE_NO_CODE and 'already leads the index "customer_index"' in _text(advice)
 
 
-# --- C2: Search Index is not proof that an index exists -------------------------------------
+# --- Search Index is not proof that an index exists -------------------------------------
 
 
 class TestSearchIndexIsNoProof:
 	def _pg_queue(self):
-		"""c2corr/p4: live optimus-pg.local, status has Search Index but no index (the bare
+		"""On Postgres, status has Search Index but no index (the bare
 		name "status" belongs to tabPrepared Report)."""
 		return TableEvidence(
 			table="tabEmail Queue Recipient", doctype="Email Queue Recipient", app="frappe", is_custom_doctype=False,
@@ -159,7 +159,7 @@ class TestSearchIndexIsNoProof:
 		assert advice.route == ir.ROUTE_NO_CODE and 'already leads the index "customer"' in _text(advice)
 
 
-# --- C4: a JSON field is unindexable whatever information_schema calls it ------------------
+# --- a JSON field is unindexable whatever information_schema calls it ------------------
 
 
 class TestJsonFields:
@@ -181,7 +181,7 @@ class TestJsonFields:
 		assert "Optimus left out meta (a type a plain index cannot cover)" in ir.card_note(advice)
 
 
-# --- C6: "already unique" only for a single-column unique index -----------------------------
+# --- "already unique" only for a single-column unique index -----------------------------
 
 
 class TestUnique:
@@ -198,7 +198,7 @@ class TestUnique:
 		assert 'Column "po_no" is already unique' in _text(advice)
 
 	def test_a_unique_range_column_does_not_block_a_composite(self):
-		"""review-t12 item 2: a unique EQUALITY column refuses the composite, a range or sort
+		"""A unique EQUALITY column refuses the composite, a range or sort
 		column never does."""
 		ev = _ev(fields={**_ALL, "status": F("Select", unique=True)})
 		advice = ir.advise_finding(
@@ -208,7 +208,7 @@ class TestUnique:
 		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["customer", "status"]
 
 
-# --- C7: the lead names the right cause ---------------------------------------------------
+# --- the lead names the right cause ---------------------------------------------------
 
 
 _C7 = _ev(fields={**_ALL, "grand_total": F("Int")})
@@ -274,7 +274,7 @@ class TestLeadCause:
 		assert ir._NARROWS + "the grouping column is a Frappe metadata column, which Optimus never indexes" in lead
 
 
-# --- E3: the MariaDB reserved-word check is MariaDB's -------------------------------------
+# --- the MariaDB reserved-word check is MariaDB's -------------------------------------
 
 
 class TestReservedWords:
@@ -297,7 +297,7 @@ class TestReservedWords:
 		assert advice.route == ir.ROUTE_NO_CODE and "is a reserved word in MariaDB" in _text(advice)
 
 
-# --- E6: a table Optimus has no information about ------------------------------------------
+# --- a table Optimus has no information about ------------------------------------------
 
 
 class TestUnknownTable:
@@ -319,7 +319,7 @@ class TestUnknownTable:
 		assert not card.unknown and ir.card_note(card).startswith("Do not add this index.")
 
 
-# --- E7: a UNION that filters the table in more than one branch -----------------------------
+# --- a UNION that filters the table in more than one branch -----------------------------
 
 
 class TestUnion:
@@ -392,11 +392,11 @@ class TestUnion:
 		assert ir._union_branches(q, frozenset({"tabSales Invoice"})) == 1
 
 
-# --- E1: empty Tracked Apps never states "do not edit it" as a fact ----------------------
+# --- empty Tracked Apps never states "do not edit it" as a fact ----------------------
 
 
 class TestEmptyTrackedAppsWording:
-	"""RULING E1: with Tracked Apps empty no app counts as the developer's own, so a
+	"""With Tracked Apps empty no app counts as the developer's own, so a
 	non-framework app's DocType gets the Property Setter route with a conditional note."""
 
 	def test_empty_tracked_apps_says_if_it_is_your_app(self):
@@ -425,7 +425,7 @@ class TestEmptyTrackedAppsWording:
 		assert "set Tracked Apps" not in _text(advice)
 
 
-# --- U4: the existing-index tail names only what the scan found -----------------------------
+# --- the existing-index tail names only what the scan found -----------------------------
 
 
 _INDEXED = _with_index(_SI, ("customer_index", ["customer"], False))
@@ -472,7 +472,7 @@ class TestExistingIndexTail:
 		assert "Optimus could not read how the query filters on status, so check the query with EXPLAIN" in _text(advice)
 
 
-# --- T3: feature branches that had no test ------------------------------------------------
+# --- feature branches that had no test ------------------------------------------------
 
 
 class TestUncoveredBranches:
@@ -488,7 +488,7 @@ class TestUncoveredBranches:
 		)
 		text = _text(one)
 		assert one.route == ir.ROUTE_NO_CODE and not one.unknown
-		assert (  # bounded corrective R1: hedged, Optimus cannot see the value distribution
+		assert (  # hedged, Optimus cannot see the value distribution
 			"is_return is a Check field, which usually matches most of the table's rows; if this query looks for "
 			"the rare value, an index on (is_return) can help."
 		) in text
@@ -516,7 +516,7 @@ class TestUncoveredBranches:
 		assert phrase in _text(advice), _text(advice)
 
 	def test_a_first_column_of_the_wrong_type_gives_no_code(self):
-		"""A card keeps the analyzer's order (M6), so its leading JSON column gives no code; a
+		"""A card keeps the analyzer's order, so its leading JSON column gives no code; a
 		later one is left out."""
 		ev = _ev(fields={**_ALL, "payload": F("JSON")})
 		for cols in (["payload"], ["payload", "customer"]):
@@ -575,27 +575,27 @@ def test_the_docs_and_changelog_carry_the_t12_texts():
 		assert title in text and ir.NO_VERDICT in text
 		assert '"optimus: index advice failed"' in text
 	assert recipe_enrichment.NO_INDEX_ACTION_TITLE in doc and "if <app> is your app" in doc
-	# fix round 1: the equality block's order, coverage in any order, the parser-dropped columns
+	# the equality block's order, coverage in any order, the parser-dropped columns
 	assert "`(posting_date, company)` serves `company = ? AND posting_date = ?`" in doc
 	assert "one fixed order" in doc and "one fixed order" in log
 	assert "did not report" in doc and "did not report" in log
 	assert "`unknown` flag" in doc and "`unknown` flag" in log
-	# fix round 2: cards keep their order, the unique subset, the Check rule's tail
+	# cards keep their order, the unique subset, the Check rule's tail
 	assert "most-used-first" in doc and "most-used-first" in log
 	assert "UNIQUE `(po_no, customer)`" in doc and "creation > ? AND is_return = ?" in doc
-	# fix round 3: the served verdict needs evidence, IN (?), the evidence cap, keys
+	# the served verdict needs evidence, IN (?), the evidence cap, keys
 	assert "keeps that \"already serves\" verdict" in doc and "normalize_query" in doc
 	assert "an existing index already finds these rows" in doc and "by `name` (the primary key)" in doc
 	assert "`IN (?)`" in log and "rejected by the optimizer" in log
-	# fix round 4: keys need a value, the parent index must exist, EXPLAIN is no evidence, the cap
+	# keys need a value, the parent index must exist, EXPLAIN is no evidence, the cap
 	assert "is a join condition, never a lookup" in doc and "`mariadb/schema.py`" in doc
 	assert "join condition such as `pr_item.parent = pr.name`" in log and "Postgres none" in log
 	assert "`possible_keys` never lists an index that only serves the ORDER BY" in doc
 	assert "possible_keys never lists an index that only serves ORDER BY" in log
-	# fix round 5: a left-out index refuses when unique or ranked as well as the weakest kept column
+	# a left-out index refuses when unique or ranked as well as the weakest kept column
 	assert "at least as well as the weakest column the new index would keep" in doc
 	assert "at least as well as the weakest kept column" in log
-	# bounded corrective: the hedged Check wording, the partial sort, the sort-only recipe
+	# the hedged Check wording, the partial sort, the sort-only recipe
 	assert "if this query looks for the rare value, an index on (is_return, posting_date) can help" in doc
 	assert "usually matches most rows" in log and "keeps only some sort columns" in log
 	assert "rarely walks a whole index instead of sorting when the query has no LIMIT" in doc
@@ -605,7 +605,7 @@ def test_the_docs_and_changelog_carry_the_t12_texts():
 
 
 
-# --- fix round 1, item 1: an existing index covers a recipe in any equality order ----------
+# --- an existing index covers a recipe in any equality order ----------
 
 
 _SLE = _ev("Stock Ledger Entry", fields={
@@ -627,7 +627,7 @@ _GL = _ev("GL Entry", fields={
 
 
 class TestPermutedCoverage:
-	"""review-t12 item 1: real ERPNext ledger shapes (review-t12/ledger_real.py)."""
+	"""Real ERPNext ledger shapes."""
 
 	@pytest.mark.parametrize("ftype", ["Full Table Scan", "Low Filter Ratio", "Slow Query"])
 	@pytest.mark.parametrize("table,where", [
@@ -692,7 +692,7 @@ class TestPermutedCoverage:
 		assert other.route == ir.ROUTE_ENSURE_INDEXES and other.entry["columns"] == ["company", "status", "posting_date"]
 
 	def test_a_card_is_one_unordered_equality_set_for_coverage(self):
-		"""Coverage reads a card's columns as one equality set; its own order stays (M6)."""
+		"""Coverage reads a card's columns as one equality set; its own order stays."""
 		ev = _with_index(_SI, ("idx_cs", ["company", "status", "posting_date"], False))
 		for cols in (["status", "company"], ["company", "status"]):
 			card = ir.advise_table("tabSales Invoice", cols, evidence_lookup=_lookup(ev))
@@ -723,7 +723,7 @@ class TestPermutedCoverage:
 		assert advice.entry["columns"] == ["company", "status", "is_return", "creation"]
 
 
-# --- fix round 1, item 2: a unique equality column makes a composite pointless --------------
+# --- a unique equality column makes a composite pointless --------------
 
 
 _USER = _ev("User", app="frappe", fields={
@@ -754,7 +754,7 @@ class TestUniqueEqualityColumn:
 		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["user_type", "username"]
 
 
-# --- fix round 1, item 3: a column the SQL parser drops is never silently left out ---------
+# --- a column the SQL parser drops is never silently left out ---------
 
 
 _DROPPED = ("account", "user", "role", "date", "type", "comment", "language", "source", "data", "level")
@@ -767,7 +767,7 @@ class TestParserDroppedColumns:
 
 	@pytest.mark.parametrize("name", _DROPPED)
 	def test_a_dropped_column_of_the_only_table_is_advised(self, name):
-		"""M4: the only table of the main FROM owns every unqualified column."""
+		"""The only table of the main FROM owns every unqualified column."""
 		q = f"SELECT name FROM `tabSales Invoice` WHERE {name} = ? AND party = ?"
 		for ftype in ("Full Table Scan", "Slow Query"):
 			advice = ir.advise_finding(_explain(ftype, q), evidence_lookup=_lookup(self._ev()))
@@ -855,7 +855,7 @@ class TestParserDroppedColumns:
 		assert not advice.unknown, _text(advice)
 
 
-# --- fix round 1, items 4-7 ----------------------------------------------------------------
+# --- wording for sorts, unions and failed advice ----------------------------------------------------------------
 
 
 def test_a_filesort_grouped_by_other_columns_says_so():
@@ -891,7 +891,7 @@ def test_a_sort_on_another_tables_column_says_so():
 
 
 def test_the_real_explain_flags_fix_sentences_are_removed():
-	"""review-t12 item 4: the descriptions explain_flags really writes (not copies) lose the
+	"""The descriptions explain_flags really writes (not copies) lose the
 	sentence that promises an index fixes them."""
 	from types import SimpleNamespace
 
@@ -942,7 +942,7 @@ def test_failed_and_unknown_advice_get_a_neutral_description():
 	assert gone["unknown"] is True
 
 
-# --- fix round 2 (review-t12 battery3): never emit code that does not help ---------------
+# --- never emit code that does not help ---------------
 
 
 def _with_creation(ev):
@@ -950,7 +950,7 @@ def _with_creation(ev):
 
 
 class TestCheckRuleWithATail:
-	"""M1: the Check rule also counts the range or sort tail the existing index serves."""
+	"""The Check rule also counts the range or sort tail the existing index serves."""
 
 	def test_a_creation_range_with_a_check_field_gives_no_code(self):
 		ev = _with_creation(_ev(fields={**_ALL, "is_return": F("Check")}))
@@ -987,7 +987,7 @@ _ITEM = _ev("Item", fields={"sales_uom": F("Link"), "disabled": F("Check"), "has
 
 
 class TestDrivingTableJoinColumns:
-	"""M2: the FROM table of a LEFT JOIN chain is read first, so its ON columns are probe
+	"""The FROM table of a LEFT JOIN chain is read first, so its ON columns are probe
 	values, never compared with a known value."""
 
 	def test_a_left_join_driving_table_with_check_filters_gives_no_code(self):
@@ -1026,7 +1026,7 @@ class TestDrivingTableJoinColumns:
 
 
 class TestUniqueSubset:
-	"""M3: a unique index whose columns the equality filter all fixes returns at most one row."""
+	"""A unique index whose columns the equality filter all fixes returns at most one row."""
 
 	@pytest.mark.parametrize("where", ["po_no = ? AND customer = ? AND company = ?", "company = ? AND customer = ? AND po_no = ?"])
 	def test_a_unique_composite_inside_the_equality_set_gives_no_code(self, where):
@@ -1053,7 +1053,7 @@ _GL_PLAIN = _ev("GL Entry", fields={"account": F("Link"), "company": F("Link"), 
 
 
 class TestDroppedColumnScope:
-	"""M4, M5: the trigger runs only for the main FROM; the only table there owns its
+	"""The trigger runs only for the main FROM; the only table there owns its
 	unqualified columns; a column the filter shape rules out never fires it."""
 
 	def test_the_qb_subquery_shape_is_advised(self):
@@ -1132,7 +1132,7 @@ class TestDroppedColumnScope:
 		assert not advice.unknown, _text(advice)
 
 	def test_a_function_named_like_a_column_is_no_column(self):
-		"""M7: YEAR(...) on tabFiscal Year, which has a year column, is a call."""
+		"""YEAR(...) on tabFiscal Year, which has a year column, is a call."""
 		ev = _ev("Fiscal Year", fields={"year": F("Data"), "year_start_date": F("Date"), "disabled": F("Check"),
 			"company": F("Link")})
 		q = (
@@ -1145,7 +1145,7 @@ class TestDroppedColumnScope:
 
 
 class TestUnservableSortTail:
-	"""M8: a sort column the index cannot return in order is left out."""
+	"""A sort column the index cannot return in order is left out."""
 
 	def test_battery3_301(self):
 		ev = _with_index(_SI, ("idx_cc", ["company", "customer"], False))
@@ -1185,9 +1185,9 @@ class TestUnservableSortTail:
 		assert advice.entry["columns"] == ["is_cancelled", "creation"], _text(advice)
 
 	def test_a_sort_recipe_an_existing_index_serves_needs_evidence_to_stand(self):
-		"""battery3 [303]: the existing (company, due_date) serves the sort, yet the Filesort
+		"""The existing (company, due_date) serves the sort, yet the Filesort
 		says the optimizer chose another plan, so the range recipe is the advice; with LIMIT the
-		served verdict stands and names that range recipe (round 3, item 1)."""
+		served verdict stands and names that range recipe."""
 		ev = _with_index(_ev(fields={**_ALL, "due_date": F("Date")}), ("idx_cd", ["company", "due_date"], False))
 		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND posting_date > ? ORDER BY due_date"
 		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(ev))
@@ -1212,7 +1212,7 @@ class TestUnservableSortTail:
 		assert "status" not in advice.columns
 
 
-# --- fix round 2, M6: cards keep the analyzer's order; the LFR lead makes no order claim ----
+# --- cards keep the analyzer's order; the LFR lead makes no order claim ----
 
 
 def test_a_card_keeps_the_analyzers_most_used_first_order():
@@ -1228,7 +1228,7 @@ def test_the_low_filter_ratio_lead_makes_no_selectivity_claim():
 	assert lead.startswith("An index on these filter columns lets the database skip most of the rows it now reads")
 
 
-# --- fix round 3 (review-t12 battery4, c1_diff23) ------------------------------------------
+# --- served verdicts need evidence ------------------------------------------
 
 
 _FS = "Using where; Using filesort"
@@ -1236,8 +1236,8 @@ _SI4 = _ev(fields={**_ALL, "due_date": F("Date"), "is_return": F("Check"), "gran
 
 
 class TestServedNeedsEvidence:
-	"""Item 1: an existing sort-serving index on a Filesort finding was rejected by the
-	optimizer unless the query has a LIMIT (round 4, item 3: a capture-time EXPLAIN is no
+	"""An existing sort-serving index on a Filesort finding was rejected by the
+	optimizer unless the query has a LIMIT (a capture-time EXPLAIN is no
 	evidence)."""
 
 	def test_battery4_401_the_rejected_composite_gives_the_range_recipe(self):
@@ -1262,9 +1262,9 @@ class TestServedNeedsEvidence:
 		),
 	])
 	def test_battery4_403_a_kept_served_verdict_names_the_range_alternative(self, q, row):
-		"""Round 4, item 3: only LIMIT keeps the served verdict. A capture-time EXPLAIN that
+		"""Only LIMIT keeps the served verdict. A capture-time EXPLAIN that
 		does not list the index is no evidence: MariaDB's possible_keys never lists an index
-		that only serves the ORDER BY (battery5 [501]), so [403] without LIMIT now gets the
+		that only serves the ORDER BY, so a Filesort without LIMIT now gets the
 		range recipe (TestServedNeedsLimit)."""
 		ev = _with_index(_SI4, ("due_date_index", ["due_date"], False))
 		advice = ir.advise_finding(_explain("Filesort", q, explain_row=row), evidence_lookup=_lookup(ev))
@@ -1396,7 +1396,7 @@ class TestCapByEvidence:
 		assert "Optimus left out credit, debit (an index here holds at most 4 columns)" in _text(advice)
 
 	def test_battery4_413_a_left_out_index_as_selective_as_the_kept_gives_no_code(self):
-		"""Round 5: voucher_detail_no (Data) ranks with the kept Link columns, so its own index
+		"""voucher_detail_no (Data) ranks with the kept Link columns, so its own index
 		already narrows the rows as well as the capped recipe could, which cannot help."""
 		q = (
 			"SELECT name FROM `tabGL Entry` WHERE `company`=? AND `account`=? AND `voucher_type`=? AND `voucher_no`=? "
@@ -1491,7 +1491,7 @@ class TestPrimaryKeyAndParent:
 		q = "SELECT name FROM `tabSales Invoice Item` WHERE `parent`=? AND `item_code`=?"
 		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabSales Invoice Item"), evidence_lookup=_lookup(ev))
 		assert advice.route == ir.ROUTE_NO_CODE, _text(advice)
-		# round 4, item 2: the text names the real index, not a claim about every child table
+		# the text names the real index, not a claim about every child table
 		assert 'finds its rows by parent, which the index "parent" on table "tabSales Invoice Item" serves' in _text(advice)
 
 	@pytest.mark.parametrize("q", [
@@ -1503,7 +1503,7 @@ class TestPrimaryKeyAndParent:
 		'and (reference_type is null or reference_type in ("", "Sales Order", "Purchase Order"))',
 	])
 	def test_c1_41_42_45_journal_entry_account_by_parent(self, q):
-		"""Round 4, item 2: the evidence carries the parent index MariaDB gives every child
+		"""The evidence carries the parent index MariaDB gives every child
 		table; without it the parent rule no longer fires (TestParentIndexMustExist)."""
 		ev = _ev("Journal Entry Account", fields={"account": F("Link"), "party": F("Dynamic Link"), "reference_type": F("Link")},
 			extra_types={"parent": "varchar", "parenttype": "varchar", "parentfield": "varchar"},
@@ -1517,7 +1517,7 @@ class TestPrimaryKeyAndParent:
 		assert "primary key" not in _text(advice)
 
 
-# --- fix round 4: keys need a value, the parent index must exist, served evidence, the cap ---
+# --- keys need a value, the parent index must exist, served evidence, the cap ---
 
 
 _CHILD_TYPES = {"parent": "varchar", "parenttype": "varchar", "parentfield": "varchar"}
@@ -1534,7 +1534,7 @@ _PR_JOIN = (
 
 
 class TestKeyLookupNeedsAValue:
-	"""Round 4, item 1: name or parent compared with another table's column is a join
+	"""Name or parent compared with another table's column is a join
 	condition, never a key lookup; only a value (?, a literal, an IN list or subquery) is."""
 
 	def test_the_purchase_receipt_comma_join_gets_its_filter_index(self):
@@ -1663,7 +1663,7 @@ class TestKeyLookupNeedsAValue:
 
 
 class TestParentIndexMustExist:
-	"""Round 4, item 2: Frappe adds index parent(parent) to a child table on MariaDB only
+	"""Frappe adds index parent(parent) to a child table on MariaDB only
 	(mariadb/schema.py), never on Postgres (postgres/schema.py); the real index list decides."""
 
 	_Q = "SELECT name FROM `tabSales Invoice Item` WHERE `parent`=? AND `item_code`=?"
@@ -1674,7 +1674,7 @@ class TestParentIndexMustExist:
 
 	@pytest.mark.parametrize("dialect", ["mariadb", "postgres"])
 	def test_without_a_parent_index_the_filter_gets_code(self, dialect):
-		"""battery5 [505]: a Postgres child table has no parent index."""
+		"""A Postgres child table has no parent index."""
 		q = self._Q if dialect == "mariadb" else 'SELECT "name" FROM "tabSales Invoice Item" WHERE "parent" = ? AND "item_code" = ?'
 		advice = ir.advise_finding(
 			_explain("Full Table Scan", q, table="tabSales Invoice Item"), evidence_lookup=_lookup(self._child(dialect)),
@@ -1716,7 +1716,7 @@ class TestParentIndexMustExist:
 
 
 def test_a_served_verdict_needs_the_sort_in_the_refused_recipe():
-	"""Round 4, item 5 (c1): the JE join drops the unqualified ORDER BY posting_date, so the
+	"""The JE join drops the unqualified ORDER BY posting_date, so the
 	refused recipe is (company) alone, and company_index never serves the sort."""
 	ev = _with_index(_ev("Journal Entry", fields={"company": F("Link"), "posting_date": F("Date")}),
 		("company_index", ["company"], False))
@@ -1731,7 +1731,7 @@ def test_a_served_verdict_needs_the_sort_in_the_refused_recipe():
 def test_a_served_verdict_stands_for_an_index_that_serves_the_whole_sort():
 	"""c1 SLE: Optimus's recipe holds four columns and leaves out creation, yet ERPNext's
 	(item_code, warehouse, posting_datetime, creation) returns the rows in the order of the
-	whole ORDER BY, so with LIMIT the served verdict stands (round 4, item 5)."""
+	whole ORDER BY, so with LIMIT the served verdict stands."""
 	sle = _with_index(_ev("Stock Ledger Entry", fields={
 		"item_code": F("Link"), "warehouse": F("Link"), "is_cancelled": F("Check"), "posting_datetime": F("Date"),
 	}), ("iwpc", ["item_code", "warehouse", "posting_datetime", "creation"], False))
@@ -1752,7 +1752,7 @@ def test_a_unique_index_the_filter_fixes_serves_any_sort():
 
 
 class TestServedNeedsLimit:
-	"""Round 4, item 3: MariaDB possible_keys never lists an index that only serves ORDER BY,
+	"""MariaDB possible_keys never lists an index that only serves ORDER BY,
 	and a Postgres plan node names only the index it used, so a capture-time EXPLAIN is no
 	evidence; only LIMIT keeps the served verdict, and otherwise the range recipe names the
 	sort-serving index."""
@@ -1806,7 +1806,7 @@ _SI_CAP = _ev(fields={
 
 
 class TestCapRefusesOnlyForAUniqueIndex:
-	"""Round 4, items 4 and 5, refined in round 5: leaving out every column of an index the
+	"""Leaving out every column of an index the
 	query fixes gives no code when that index is unique, or when its lead column ranks by
 	field type at least as well as the weakest kept column (the cap's own rank); a Select
 	index left out behind Link columns keeps the capped recipe. The verdict never claims a
@@ -1906,12 +1906,12 @@ class TestCapRefusesOnlyForAUniqueIndex:
 		assert advice.route == ir.ROUTE_NO_CODE and advice.served_by == "", text
 		assert "already serves this filter and sort" not in text and "in order" not in text
 		assert 'The unique index "voucher_ref"' in text
-		# the first verdict gave no code, so no sort-first recipe was cut (bounded corrective R2)
+		# the first verdict gave no code, so no sort-first recipe was cut
 		assert "would need every sort column" not in text
 
 
 class TestSortColumnsOfTheOnlyTable:
-	"""Round 4, item 6: a WHERE subquery makes sql_metadata drop every unqualified column, the
+	"""A WHERE subquery makes sql_metadata drop every unqualified column, the
 	outer ORDER BY or GROUP BY too; the only table of the main FROM owns them."""
 
 	def test_battery5_516_the_qb_subquery_keeps_its_sort(self):
@@ -1988,7 +1988,7 @@ class TestSortColumnsOfTheOnlyTable:
 		assert ir._clause_columns(q, "group", quals, names) == []
 
 	def test_an_aggregated_sort_column_is_not_merged(self):
-		"""As the parser's own ORDER BY columns (P9b): the query sorts by the aggregate, so the
+		"""As the parser's own ORDER BY columns: the query sorts by the aggregate, so the
 		column is no sort column at all, not one left out."""
 		q = (
 			"SELECT customer, SUM(grand_total) AS grand_total FROM `tabSales Invoice` WHERE company = ? AND EXISTS "
@@ -1998,7 +1998,7 @@ class TestSortColumnsOfTheOnlyTable:
 		assert advice.columns == ("company",) and "left out grand_total" not in _text(advice), _text(advice)
 
 
-# --- bounded corrective (after the final T12 review): R1 Check wording, R2 partial sort, R3 sort only ---
+# --- Check wording, partial sorts, sort-only indexes ---
 
 
 _SI_R = _with_index(
@@ -2008,7 +2008,7 @@ _SI_R = _with_index(
 
 
 class TestCheckWordingIsHedged:
-	"""R1: Optimus cannot see how a Check field's values are spread, so the Check texts say
+	"""Optimus cannot see how a Check field's values are spread, so the Check texts say
 	"usually" and name the index that helps a query for the rare value. The verdict stays."""
 
 	def test_the_check_rule_names_the_index_for_the_rare_value(self):
@@ -2071,7 +2071,7 @@ _SLE_R = _ev("Stock Ledger Entry", fields={
 
 
 class TestPartialSortRecipe:
-	"""R2: a recipe that keeps only some sort or group columns never returns the rows in the
+	"""A recipe that keeps only some sort or group columns never returns the rows in the
 	query's order, so the recipe without the sort is the advice, and no lead says the rows
 	come back sorted or the grouping reads the index."""
 
@@ -2161,7 +2161,7 @@ class TestPartialSortRecipe:
 
 
 class TestSortOnlyRecipeNeedsLimit:
-	"""R3: an index that holds only the sort columns helps a query with no LIMIT and no filter
+	"""An index that holds only the sort columns helps a query with no LIMIT and no filter
 	it narrows only if the database walks the whole index, which it rarely does."""
 
 	_ST = _ev("Share Transfer", fields={"date": F("Date"), "from_shareholder": F("Link"), "to_shareholder": F("Link")})
@@ -2224,10 +2224,10 @@ class TestSortOnlyRecipeNeedsLimit:
 
 
 class TestRangeBeatsSortWithoutLimit:
-	"""Bounded corrective follow-up: without a LIMIT the query reads every matching row, so a
+	"""Without a LIMIT the query reads every matching row, so a
 	usable range filter on another column beats an index that only returns the rows in
-	order; the range recipe is the advice and the caveat says the sort stays. R3's no-code
-	stays for a query with no usable filter (Share Transfer, Video)."""
+	order; the range recipe is the advice and the caveat says the sort stays. The no-code
+	verdict stays for a query with no usable filter (Share Transfer, Video)."""
 
 	_STAYS = "it comes after the range condition on posting_date, so the index cannot return the rows in order and the sort stays"
 

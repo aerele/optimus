@@ -3,7 +3,7 @@
 
 """export_session carries the deterministic index advice the report shows, never the
 analyzer's stored raw DDL or the retired index AI output, and its permission gates are
-unchanged (owner decision D6)."""
+unchanged."""
 
 import json
 from types import SimpleNamespace
@@ -159,7 +159,7 @@ def test_one_evidence_read_per_table(env):
 
 
 def test_advice_failure_exports_what_the_report_shows(env, monkeypatch):
-	"""Task 7 fix round 1: the export uses the report's failure note, never the stored hint
+	"""The export uses the report's failure note, never the stored hint
 	or raw DDL, and the failure is logged once like a render's."""
 	import frappe
 
@@ -307,11 +307,11 @@ def test_export_reads_tracked_apps_like_the_report(env):
 	assert out["table_breakdown"][0]["recommended_index"]["code"] == card.code
 
 
-# --- T12: one shared advice step (M4), the report's titles, one parse per query (PF2) ------
+# --- one shared advice step, the report's titles, one parse per query ------
 
 
 def test_export_and_report_share_one_advice_step(env):
-	"""M4: the export dict is recipe_enrichment.export_advice's, the one the report uses."""
+	"""The export dict is recipe_enrichment.export_advice's, the one the report uses."""
 	row = _missing_index()
 	env(findings=[row])
 	(finding,) = api.export_session(session_uuid=SESSION_UUID)["findings"]
@@ -321,7 +321,7 @@ def test_export_and_report_share_one_advice_step(env):
 
 
 def test_a_no_code_export_carries_the_reports_title_and_description(env, monkeypatch):
-	"""U1: the export never pairs a no-code advice with the stored "Add index" title."""
+	"""The export never pairs a no-code advice with the stored "Add index" title."""
 	import dataclasses
 
 	from optimus.renderer.recipe_enrichment import IndexEvidence
@@ -345,7 +345,7 @@ def test_a_no_code_export_carries_the_reports_title_and_description(env, monkeyp
 
 
 def test_an_export_parses_each_query_once(env, monkeypatch):
-	"""PF2: the export passes a per-export parser, so two findings on one query parse it
+	"""The export passes a per-export parser, so two findings on one query parse it
 	once, aliases included."""
 	parsed, aliased = [], []
 	real_parse, real_aliases = index_recipes.parse_query, index_recipes.table_aliases

@@ -34,7 +34,7 @@ class IndexEvidence:
 
 @dataclass(frozen=True)
 class TableEvidence:
-	"""What the index advisor may rely on for one ``tab*`` table (owner decision A2):
+	"""What the index advisor may rely on for one ``tab*`` table:
 	DocField flags by fieldname, the DocType's app, the real column types and the
 	indexes the database already has."""
 

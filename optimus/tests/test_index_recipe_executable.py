@@ -37,7 +37,7 @@ class _Site:
 	"""frappe.db for the generated module, plus make_property_setter and log_error.
 
 	Writes are transactional as in Frappe: ``commit`` keeps the pending writes,
-	``rollback`` discards only them, and ``add_index`` commits before its DDL (F1, F12).
+	``rollback`` discards only them, and ``add_index`` commits before its DDL.
 	On Postgres a failed statement aborts the transaction: every later statement raises
 	until a rollback, and a commit then only rolls back. ``log_error`` refuses a title
 	over 140 characters, as Error Log.method (Data) does on v15. ``get_column_index``
@@ -308,7 +308,7 @@ def test_a_composite_is_created_once_under_its_short_name(monkeypatch):
 
 
 def test_fixture_custom_field_not_synced_yet_skips_quietly(monkeypatch):
-	"""Review Focus 1 (R-I2, D-I1): a composite on a fixture-shipped Custom Field, on a
+	"""A composite on a fixture-shipped Custom Field, on a
 	site where migrate has not added the column yet."""
 	site = _Site()
 	entry = {"doctype": "Sales Invoice", "columns": ["cf_ref", "status"], "index_name": "idx_sales_invoice_0000000a"}
@@ -342,11 +342,11 @@ def test_a_failing_entry_is_logged_and_the_next_one_still_runs(monkeypatch):
 	assert ("rollback",) in site.calls
 
 
-# --- another app's single column: the index first, then the Property Setter (D1/R2) ---
+# --- another app's single column: the index first, then the Property Setter ---
 
 
 def test_another_apps_field_gets_its_index_then_one_property_setter(monkeypatch):
-	"""D1: the entry builds ``<field>_index`` itself, under the entry's guard, and only
+	"""The entry builds ``<field>_index`` itself, under the entry's guard, and only
 	then declares Search Index on the field, so Frappe's schema sync keeps the index. It
 	never calls updatedb (whose ALTER commits the setter first and runs unguarded on
 	every later sync of the DocType once the build failed)."""
@@ -361,7 +361,7 @@ def test_another_apps_field_gets_its_index_then_one_property_setter(monkeypatch)
 
 
 def test_a_failed_build_leaves_no_property_setter_behind(monkeypatch):
-	"""D1 (c2dep S2): a lock wait timeout on the build. No setter is written, so no later
+	"""A lock wait timeout on the build. No setter is written, so no later
 	DocType sync, Custom Field insert or Customize Form save retries the build outside
 	this guard; the next migrate tries again here."""
 	site = _Site(fail_on={"po_no_index"})
@@ -376,7 +376,7 @@ def test_a_failed_build_leaves_no_property_setter_behind(monkeypatch):
 
 @pytest.mark.parametrize("existing", ["po_no", "po_no_index", "si_po"])
 def test_a_column_that_has_its_own_index_under_any_name_is_not_built_again(monkeypatch, existing):
-	"""D1/R2 (c2dep S1): a table created with Search Index names the index ``po_no``,
+	"""A table created with Search Index names the index ``po_no``,
 	not ``po_no_index``. Any single-column index on the column counts, so nothing is
 	built or synced on any migrate; the setter is written once."""
 	site = _Site(indexes={(_SI, existing): ("po_no",)})
@@ -386,7 +386,7 @@ def test_a_column_that_has_its_own_index_under_any_name_is_not_built_again(monke
 
 
 def test_a_setter_left_by_an_older_failed_run_gets_its_index(monkeypatch):
-	"""P2: the Property Setter row was committed by an older module before its failed
+	"""The Property Setter row was committed by an older module before its failed
 	ALTER; this one builds the index and writes no second setter."""
 	site = _Site(property_setters={("Sales Invoice", "po_no", "search_index", "1")})
 	assert _run([_PO_NO], site, monkeypatch) == [("add_index", "Sales Invoice", ["po_no"], "po_no_index")]
@@ -402,7 +402,7 @@ def test_another_property_setter_on_the_field_does_not_count(monkeypatch):
 
 
 def test_the_property_setter_skips_validating_the_doctypes_other_fields(monkeypatch):
-	"""Fix round 1 I1: like Frappe's own Property Setter sync (modules/utils.py:196-203),
+	"""Like Frappe's own Property Setter sync (modules/utils.py:196-203),
 	another field's validation problem never blocks this setter."""
 	site = _Site(invalid_other_fields=True)
 	_run([_PO_NO], site, monkeypatch)
@@ -424,7 +424,7 @@ def test_run_by_hand_outside_migrate_it_still_converges(monkeypatch):
 
 @pytest.mark.parametrize("order", ["composite first", "single first"])
 def test_a_composite_and_a_single_entry_on_one_column_converge_in_either_order(monkeypatch, order):
-	"""R2 (c2res/converge.py, c2perf/ensure_migrate.py): two pieces of advice from one
+	"""Two pieces of advice from one
 	report. The first migrate builds both indexes in either order (get_column_index, like
 	Frappe's own check before it adds ``<field>_index``, counts only a single-column
 	index); every later migrate runs no DDL, no updatedb, and Frappe's own sync between
@@ -444,7 +444,7 @@ def test_a_composite_and_a_single_entry_on_one_column_converge_in_either_order(m
 
 
 def test_a_column_leading_another_apps_composite_gets_its_own_index_once(monkeypatch):
-	"""c2dep S4: on the deploy site po_no already leads a composite of another app.
+	"""On a deployed site po_no already leads a composite of another app.
 	The entry builds po_no_index once and then converges."""
 	site = _Site(indexes={(_SI, "po_no_customer_index"): ("po_no", "customer")})
 	ensure_indexes = _load([_PO_NO], site, monkeypatch)
@@ -455,11 +455,11 @@ def test_a_column_leading_another_apps_composite_gets_its_own_index_once(monkeyp
 	assert not site.sync_ddl and not _syncs(site)
 
 
-# --- transactions (fix round 1 I1, the per-entry commit, R1/O3a) ---------------------
+# --- transactions (the per-entry commit, a failed Error Log write) ---------------------
 
 
 def test_a_failing_entry_rolls_back_only_its_own_writes(monkeypatch):
-	"""Fix round 1 I1: an earlier after_migrate hook (or migrate itself) left writes
+	"""An earlier after_migrate hook (or migrate itself) left writes
 	pending; the failing entry's rollback must not discard them."""
 	site = _Site(setter_error=True)
 	site.pending += ["Installed Applications updated", "Website Theme saved by an earlier hook"]
@@ -483,7 +483,7 @@ def test_each_entry_commits_its_own_writes(monkeypatch):
 
 @pytest.mark.parametrize("db_type", ["mariadb", "postgres"])
 def test_a_rollback_that_raises_never_costs_the_error_log_row(monkeypatch, db_type):
-	"""O3a: the rollback and the Error Log write are separate suppress blocks, so a
+	"""The rollback and the Error Log write are separate suppress blocks, so a
 	rollback that raises (a lost connection that comes back) still leaves the row."""
 	site = _Site(db_type=db_type, fail_on={_SI_NAME}, rollback_fails=1)
 	entry = {"doctype": "Sales Invoice", "columns": ["customer", "status"], "index_name": _SI_NAME}
@@ -496,7 +496,7 @@ def test_a_rollback_that_raises_never_costs_the_error_log_row(monkeypatch, db_ty
 @pytest.mark.parametrize("failing_last", [True, False])
 @pytest.mark.parametrize("db_type", ["postgres", "mariadb"])
 def test_a_failed_error_log_write_never_fails_the_migrate(monkeypatch, db_type, failing_last):
-	"""R1 (c2res/pg_leak.py): the entry fails, then its Error Log insert fails with a
+	"""The entry fails, then its Error Log insert fails with a
 	database error. On Postgres that aborts the transaction; the final rollback clears
 	it, so the next after_migrate hook still runs, whichever entry fails."""
 	a = {"doctype": "Sales Invoice", "columns": ["customer", "status"], "index_name": _SI_NAME}
@@ -509,7 +509,7 @@ def test_a_failed_error_log_write_never_fails_the_migrate(monkeypatch, db_type, 
 
 @pytest.mark.parametrize("db_type", ["postgres", "mariadb"])
 def test_a_failed_skip_note_never_fails_the_migrate(monkeypatch, db_type):
-	"""R1, the db-mismatch branch: the "skipped on" Error Log write fails on the last
+	"""The db-mismatch branch: the "skipped on" Error Log write fails on the last
 	entry; the next hook still runs."""
 	other = "postgres" if db_type == "mariadb" else "mariadb"
 	entry = {"doctype": "Sales Invoice", "columns": ["po_no"], "index_name": "idx_sales_invoice_0000000c", "db": other}
@@ -518,7 +518,7 @@ def test_a_failed_skip_note_never_fails_the_migrate(monkeypatch, db_type):
 	assert "LATER hook" in site.committed
 
 
-# --- one database per entry (fix round 1 I2) and its one Error Log row (PF4) -------------
+# --- one database per entry and its one Error Log row -------------
 
 
 @pytest.mark.parametrize(
@@ -541,7 +541,7 @@ def test_an_entry_for_another_database_is_skipped_and_logged_once(monkeypatch, e
 
 
 def test_the_skip_note_is_looked_up_by_indexed_columns(monkeypatch):
-	"""PF4: Error Log.method has no index, so the once-only lookup also filters on
+	"""Error Log.method has no index, so the once-only lookup also filters on
 	reference_doctype and reference_name; v15 indexes the first, v16 the second."""
 	site = _Site(db_type="postgres")
 	_run([_PO_NO], site, monkeypatch, times=2)
@@ -551,7 +551,7 @@ def test_the_skip_note_is_looked_up_by_indexed_columns(monkeypatch):
 
 
 def test_frappe_indexes_a_reference_column_of_error_log():
-	"""PF4: on MariaDB the lookup's reference filter reads an index on this Frappe (v16
+	"""On MariaDB the lookup's reference filter reads an index on this Frappe (v16
 	indexes reference_name, v15 reference_doctype). On Postgres the Search Index is named
 	after the bare field, schema-wide, so Error Log may not get it (docs say so)."""
 	frappe = pytest.importorskip("frappe")
@@ -573,7 +573,7 @@ def test_an_entry_for_this_database_runs(monkeypatch):
 	assert (_SI, "po_no_index") in site.indexes and site.errors == []
 
 
-# --- the Error Log row (fix round 1 item 5, O3b, O3c) ------------------------------------
+# --- the Error Log row ------------------------------------
 
 
 def test_the_error_log_title_starts_with_the_index_and_names_the_error(monkeypatch):
@@ -633,12 +633,12 @@ def test_a_failing_error_log_never_stops_the_next_entry(monkeypatch):
 	assert _run(entries, site, monkeypatch) == [("add_index", "Sales Invoice", ["customer", "status"], _SI_NAME)]
 
 
-# --- the lock wait (D3) ------------------------------------------------------------------
+# --- the lock wait ------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("lock_wait", [86400, 0])
 def test_mariadb_builds_wait_at_most_300_seconds_and_the_old_value_comes_back(monkeypatch, lock_wait):
-	"""D3: install has no lock_wait_timeout cap (only v16 migrate sets 300 s), so an
+	"""Install has no lock_wait_timeout cap (only v16 migrate sets 300 s), so an
 	ADD INDEX on a busy table would queue every query on it for up to a day. A server
 	set to 0 (never wait) gets its 0 back."""
 	site = _Site(fail_on={"idx_sales_invoice_0000000f"}, lock_wait=lock_wait)
@@ -656,7 +656,7 @@ def test_mariadb_builds_wait_at_most_300_seconds_and_the_old_value_comes_back(mo
 
 
 def test_postgres_builds_wait_at_most_300_seconds_even_after_a_failed_entry(monkeypatch):
-	"""D3 on Postgres: lock_timeout for the session (a SET LOCAL would end at the commit
+	"""On Postgres: lock_timeout for the session (a SET LOCAL would end at the commit
 	before each build), committed before the first entry, so a failing entry's rollback
 	does not undo it; the old value comes back with the host's commit."""
 	a = {"doctype": "Sales Invoice", "columns": ["customer", "status"], "index_name": _SI_NAME}
@@ -679,7 +679,7 @@ def test_postgres_builds_wait_at_most_300_seconds_even_after_a_failed_entry(monk
 	],
 )
 def test_the_lock_wait_setting_can_never_fail_the_run(monkeypatch, db_type, fails):
-	"""D3: reading, setting or restoring the setting can fail (a missing privilege, a
+	"""Reading, setting or restoring the setting can fail (a missing privilege, a
 	proxy); the entries still run, the earlier hook's work is kept, and on Postgres the
 	failed statement leaves no aborted transaction for the next hook."""
 	entry = {"doctype": "Sales Invoice", "columns": ["customer", "status"], "index_name": _SI_NAME}
@@ -706,7 +706,7 @@ def test_no_lock_setting_is_touched_on_another_database(monkeypatch):
 
 @pytest.mark.parametrize("entries", [1, 0])
 def test_postgres_lock_timeout_restore_survives_a_later_hooks_rollback(monkeypatch, entries):
-	"""W2 (c3res/pg_restore_rollback.py): set_config is transactional on Postgres, so an
+	"""set_config is transactional on Postgres, so an
 	uncommitted restore is undone by a later after_migrate hook that rolls back its own
 	failed work, and the 300 s cap would stay for the rest of the session. The module
 	commits right after the restore."""
@@ -722,7 +722,7 @@ def test_postgres_lock_timeout_restore_survives_a_later_hooks_rollback(monkeypat
 
 
 def test_a_failed_error_log_write_leaves_one_line_on_the_console(monkeypatch, capsys):
-	"""P2 (c3ops/p4.py): the index fails and its Error Log row cannot be written either, so
+	"""The index fails and its Error Log row cannot be written either, so
 	migrate's output is the only place left to name the index and the error type."""
 	entry = {"doctype": "Sales Invoice", "columns": ["customer", "status"], "index_name": _SI_NAME}
 	site = _Site(fail_on={_SI_NAME}, log_error_fails=True)

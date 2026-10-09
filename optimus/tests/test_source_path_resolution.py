@@ -270,7 +270,7 @@ class TestAiPayloadRecordedQueries:
 
 
 def test_source_lines_split_like_python_does(tmp_path):
-	"""E4: universal newlines in, then "\\n" only; one trailing empty entry dropped."""
+	"""Universal newlines in, then "\\n" only; one trailing empty entry dropped."""
 	from optimus.renderer import source
 
 	path = tmp_path / "m.py"

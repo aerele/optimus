@@ -11,13 +11,13 @@ and fails closed: an index-family finding never shows the analyzer's raw ``ALTER
 / ``CREATE INDEX`` text. Stored JSON is never modified.
 
 ``make_evidence_lookup`` reads DocField flags, the DocType's app, real column types and
-existing indexes once per table per render (owner decision A2). It,
+existing indexes once per table per render. It,
 ``make_refresh_check`` (Optimus Settings, through ``ai_fix``, imported lazily) and
 ``log_recipe_failures`` (one bench-log line) are the only functions that touch Frappe.
 
 Index advice that raises leaves a neutral note with a next step (``RECIPE_FAILED_HINT`` /
 ``RECIPE_FAILED_CARD_NOTE``) and is counted, and a Hot Line gate that raises fails
-closed (O-I1). ``export_advice`` is the one advice step the report and the export share,
+closed. ``export_advice`` is the one advice step the report and the export share,
 and ``finding_display`` makes an index finding's title and description agree with its
 advice in the render dict (stored text is baked at analyze time). Running the recipes
 twice leaves the same dicts as running them once.
@@ -47,7 +47,7 @@ def _get_meta_quietly(doctype: str):
 	"""``frappe.get_meta(doctype)`` with messages muted, restoring the caller's flag.
 	A failure leaves no new ``message_log`` entry behind, so Regenerate Reports never
 	shows a red "DocType ... not found" dialog for a table read only to build advice
-	(P8; frappe/utils/messages.py:61-63, :114-118)."""
+	(frappe/utils/messages.py:61-63, :114-118)."""
 	import frappe
 
 	log = getattr(frappe.local, "message_log", None)
@@ -79,7 +79,7 @@ _evidence_savepoints = itertools.count()
 
 def _read_table_evidence(table: str) -> TableEvidence | None:
 	"""Evidence for ``table``, or None when it is not a DocType table, its DocType does
-	not exist (checked BEFORE get_meta, P8) or its columns cannot be read. An index list
+	not exist (checked BEFORE get_meta) or its columns cannot be read. An index list
 	that came back empty raises ``EmptyIndexList``. On Postgres the whole read runs under a
 	savepoint: one failed statement there aborts the whole transaction, so a failed
 	``exists``, ``get_meta`` or catalog read rolls back to the savepoint and the rest of
@@ -161,7 +161,7 @@ MAX_LOGGED_EVIDENCE_FAILURES = 10
 class _EvidenceLookup:
 	"""A per-render ``evidence_lookup(table)``: memoised per table (misses included), so
 	each table costs its queries once per render. Ordinary failures give None and write one
-	bench-log line per table (O2); ``read_failed(table)`` tells such a failure from a table
+	bench-log line per table; ``read_failed(table)`` tells such a failure from a table
 	that has no evidence (no DocType on this site), so the advice can say which. An RQ job
 	timeout escapes as a fresh instance."""
 
@@ -247,7 +247,7 @@ def count_ai_tokens(findings: list[dict], tables: list[dict]) -> int:
 
 # What ``best_effort`` gives back when the index advisor raised (the report and the export).
 RECIPE_FAILED = object()
-# A failure is no verdict on the index, so the notes say what to do next (U2, U3). The
+# A failure is no verdict on the index, so the notes say what to do next. The
 # quoted text is how log_recipe_failures' bench-log line starts.
 _FAILED_NEXT = (
 	'if it keeps happening, send the bench log line "optimus: index advice failed" to the Optimus maintainers.'
@@ -260,7 +260,7 @@ RECIPE_FAILED_CARD_NOTE = (
 	f"table with EXPLAIN yourself; {_FAILED_NEXT}"
 )
 
-# The finding's own text when its index advice gives no code or failed (U1/E2/A2). The
+# The finding's own text when its index advice gives no code or failed. The
 # analyzers bake "Add index on ..." and "Ask your developer to add this index in a database
 # migration" into the stored title and description at analyze time; the render dict (and
 # the export) get these instead, and the stored JSON keeps the analyzer's text.
@@ -309,7 +309,7 @@ class _QueryParser:
 	"""A per-render (or per-export) ``parse(query)`` for the advisor, memoised on the query
 	text (a query can back several findings) and never run on a query over
 	``index_recipes.MAX_QUERY_CHARS`` (the advisor explains those instead). ``aliases(query)``
-	memoises the alias map, a second sql_metadata parse of the same text (PF2: it took 42 to
+	memoises the alias map, a second sql_metadata parse of the same text (it took 42 to
 	69 percent of the recipe stage when it ran once per finding)."""
 
 	def __init__(self) -> None:
@@ -341,7 +341,7 @@ MAX_LOGGED_RECIPE_ERRORS = 10
 
 def log_recipe_failures(count: int, *, where: str = "render", errors=()) -> None:
 	"""One bench-log line, at ERROR (Frappe drops lower levels on a production site), for
-	index advice that raised during one render or export (``where``, O-I1). ``errors`` are the
+	index advice that raised during one render or export (``where``). ``errors`` are the
 	``(finding type or table, error type)`` pairs, deduped and capped, so the line says what
 	failed. Called after the recipes ran, never inside an ``except``. A logger failure is
 	ignored; an RQ job timeout escapes as a fresh instance."""
@@ -365,7 +365,7 @@ def export_advice(
 	errors: list | None = None,
 ) -> tuple[dict | None, bool]:
 	"""``(advice, failed)`` for one index-family finding, the one advice step the report
-	and the export share, so the export equals the report (M4). ``advice`` is the export's
+	and the export share, so the export equals the report. ``advice`` is the export's
 	``index_advice`` dict (``route``, ``doctype``, ``table``, ``columns``, ``index_name``,
 	``text`` and ``code``; the report shows ``text`` as the fix hint and ``code`` as the
 	suggested index), or None when the advisor has nothing to say. ``failed`` is True when
@@ -417,7 +417,7 @@ def export_advice(
 
 def finding_display(finding: dict, advice: dict | None) -> dict:
 	"""The ``title`` and ``customer_description`` an index-family finding shows next to
-	``advice`` (``export_advice``'s dict), only the keys that change (U1/E2/A2). Pure; the
+	``advice`` (``export_advice``'s dict), only the keys that change. Pure; the
 	stored row is never touched. With no code (no_code, or a failed advisor):
 
 	- a Missing Index gets "Index on <table>(<column>): no new index recommended" and a
@@ -519,7 +519,7 @@ def apply_finding_recipes(
 			f["llm_fix"] = None
 			detail["fix_hint"] = _with_note(detail.get("fix_hint"), ai_grounding.FRAMEWORK_N1_NOTE)
 		elif ftype == "Hot Line":
-			# A gate that raises fails closed: no stored AI fix, a neutral note (O-I1).
+			# A gate that raises fails closed: no stored AI fix, a neutral note.
 			note = best_effort(
 				lambda: ai_grounding.hot_line_gate(f, tracked_apps=scope, installed_apps=installed_apps),
 				ai_grounding.GATE_CHECK_FAILED_NOTE,
@@ -540,7 +540,7 @@ def apply_table_recipes(
 ) -> dict:
 	"""Drop ``ai_index`` from every table entry and run each card's ``recommended_index``
 	through the same advisor as the findings, in place; return ``{"failed": n}``. The
-	recommendation is kept, single column included (P6), and gains ``route``,
+	recommendation is kept, single column included, and gains ``route``,
 	``route_note`` (the card's note), ``code``, ``index_name`` and ``requested_columns``
 	(the analyzer's columns; ``columns`` becomes the advice's); it is dropped only when
 	the advisor has nothing to say (no DocType table, no usable column). Running it twice

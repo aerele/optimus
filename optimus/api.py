@@ -1041,11 +1041,11 @@ def download_pdf(session_uuid: str) -> dict:
 
 
 def _export_index_advice(findings: list[dict], tables) -> None:
-	"""Owner decision D6: an export carries the deterministic index advice the report
+	"""An export carries the deterministic index advice the report
 	shows, never the analyzer's stored raw DDL (``suggested_ddl``) or the retired index AI
 	output (a table's ``ai_index``; finding ``llm_fix_json`` is never exported). Mutates in
 	place. Each index-family finding gains ``index_advice`` from
-	``recipe_enrichment.export_advice``, the advice step the report runs too (M4):
+	``recipe_enrichment.export_advice``, the advice step the report runs too:
 	``route``, ``doctype``, ``table``, ``columns``, ``index_name``, ``text`` and ``code``,
 	the report's fix-hint prose and code, ``unknown`` (no verdict: Optimus could not
 	tell, or the advisor failed) and ``sort_stays`` ("stays" or "may stay" when a Filesort or
@@ -1057,7 +1057,7 @@ def _export_index_advice(findings: list[dict], tables) -> None:
 	failure note (``RECIPE_FAILED_HINT``, route no_code, no code) and the failures are
 	logged once, as a render logs them. Each table's ``recommended_index`` goes through the
 	same advisor. One per-export evidence lookup (memoised per table) and one per-export
-	query parser (memoised per query, PF2) serve both, as in the report."""
+	query parser (memoised per query) serve both, as in the report."""
 	from optimus.analyzers.base import INDEX_FINDING_TYPES
 	from optimus.renderer import recipe_enrichment
 	from optimus.safe_call import best_effort
@@ -1105,7 +1105,7 @@ def export_session(session_uuid: str) -> dict:
 
 	Index advice is the report's deterministic advice (``index_advice`` on each
 	index-family finding, the table's ``recommended_index``); the analyzer's raw DDL and
-	the retired index AI output are not exported (owner decision D6).
+	the retired index AI output are not exported.
 
 	Permission: recording user or System Manager only (mirrors the report
 	download gate); other users get a permission error.

@@ -630,7 +630,7 @@ def render(
 			_kept_tb.append(_t)
 		table_breakdown = _kept_tb
 	# Table cards are advised after the hide filter, so hidden framework tables cost no
-	# evidence queries (cycle 1: the recipe stage grew with session size).
+	# evidence queries (the recipe stage grew with session size).
 	_table_recipe_stats = apply_table_recipes(
 		table_breakdown, evidence_lookup=_evidence_lookup, tracked_apps=render_config["tracked_apps"],
 		errors=_recipe_errors,
@@ -1519,7 +1519,7 @@ def _build_action_plan(
 	for i, f in enumerate(ranked, start=1):
 		ftype = f.get("finding_type") or ""
 		# A render-only label wins: a Missing Index with no index code is never "Add a
-		# database index" (recipe_enrichment.apply_finding_recipes, U1).
+		# database index" (recipe_enrichment.apply_finding_recipes).
 		verb = f.get("action_title") or _action_verb_for(ftype)
 		title = verb or (f.get("title") or "Investigate this finding")
 		desc = (f.get("customer_description") or "").strip()

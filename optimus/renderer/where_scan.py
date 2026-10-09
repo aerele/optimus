@@ -374,7 +374,7 @@ def _valued(tokens: list[str], i: int, j: int, pairs: dict[int, int], pinned=fro
 	"""True when the plain reference ``tokens[i..j]`` is compared with a value: = or <=> a
 	placeholder, a literal or a ``(SELECT ...)`` (on either side), or IN a list of them or a
 	subquery. A comparison with a column, such as the join condition ``pr_item.parent =
-	pr.name``, is none (round 4, item 1), unless that column is in ``pinned``: another AND
+	pr.name``, is none, unless that column is in ``pinned``: another AND
 	piece compares it with a value, so the database carries that value over
 	(``mpa.parent = mp.name AND mp.name = ?`` finds mpa's rows by parent)."""
 	after = tokens[j + 1].lower() if j + 1 < len(tokens) else ""
@@ -495,7 +495,7 @@ def _scan_where(query: str, labelled, qualifiers=None, *, truncated: bool = Fals
 	``"like"``, ``"function:<NAME>"``, ``"expression"`` or ``"unsure"``, see the section
 	comment), ``comparisons`` is ``{column: "eq" | "in" | "range"}`` for the usable ones and
 	``valued`` the same for the equality uses compared with a value, never with a column
-	(``_valued``: a key lookup needs one, round 4 item 1)."""
+	(``_valued``: a key lookup needs one)."""
 	where_cols: list[str] = []
 	for label, col in labelled or []:
 		if label == "WHERE" and col not in where_cols:

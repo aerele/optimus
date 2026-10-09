@@ -141,7 +141,7 @@ def _apps_relative_stack(stack: list) -> list:
 	the bench apps dropped, as frappe/recorder.py:97 does for SQL stacks
 	(``TRACEBACK_PATH_PATTERN = ".*/apps/"``). Without it a bench under
 	``/home/frappe/frappe-bench`` puts ``frappe/`` in every path, walk_callsite skips every
-	frame and the finding is lost (P4). Relative and Server Script frames pass through,
+	frame and the finding is lost. Relative and Server Script frames pass through,
 	as do absolute frames that are neither under /apps/ nor library or stdlib code."""
 	return list(_relative_frames(stack))
 
@@ -276,7 +276,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			drop_cross_request_spread += 1
 			continue
 
-		# P14: walk every occurrence's own stack (cut to apps-relative paths, P4) and
+		# Walk every occurrence's own stack (cut to apps-relative paths) and
 		# anchor the bucket on the callsite most of them share (ties: the first seen),
 		# with the action and the identifier of the occurrences there. The first
 		# occurrence alone could point at a non-loop line, the wrong action, or a
@@ -296,7 +296,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 		# loops on its own wins over a more frequent one that does not. But a user
 		# callsite that is no loop itself (one user call beside 30 from an ERPNext loop)
 		# must not take the bucket either: the bucket is then anchored among callsites of
-		# any kind, so a framework loop is suppressed as one (C3).
+		# any kind, so a framework loop is suppressed as one.
 		actionable = [
 			w for w in walked
 			if w[2] is not None
@@ -309,7 +309,7 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			anchored = _anchored(walked, threshold)
 		callsite = anchored[0][2]
 
-		# C3: the finding is the anchored callsite's loop, so its count, loop size,
+		# The finding is the anchored callsite's loop, so its count, loop size,
 		# severity and title come from the anchored occurrences alone, and they must
 		# reach the threshold on their own, within one action, as the bucket did.
 		count = len(anchored)

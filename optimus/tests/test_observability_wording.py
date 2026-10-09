@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""T15: the failure log lines name the error type and log at ERROR (a production site drops
+"""The failure log lines name the error type and log at ERROR (a production site drops
 lower levels), a gate or evidence-read crash leaves one line, the warnings and toasts say
 where to look, and the runbook covers the signals."""
 

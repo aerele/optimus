@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Recipe failures are visible and counted (O-I1), a broken Hot Line gate fails closed
+"""Recipe failures are visible and counted, a broken Hot Line gate fails closed
 (in the renderer and in ai_fix.llm_gate_note, so analyze and Refresh never abort on it),
 the recipes are idempotent, the query parser is memoised and capped, and table cards
 are advised after the hide-framework-tables filter."""
@@ -246,7 +246,7 @@ def test_table_recipes_skip_tables_the_report_hides(monkeypatch):
 	assert "tabDocType" not in looked_up and "tabSales Invoice" in looked_up
 
 
-# Carried from Task 4: a gate that raises must fail CLOSED everywhere it is asked.
+# A gate that raises must fail CLOSED everywhere it is asked.
 
 
 class _JobTimeout(Exception):

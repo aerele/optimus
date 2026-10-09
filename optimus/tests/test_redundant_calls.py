@@ -515,7 +515,7 @@ def test_corpus_anchor_cache_get_inside_erpnext_is_suppressed_3q1gf7r9lq():
 
 
 # ---------------------------------------------------------------------------
-# P4 / P14: absolute bench paths, and the bucket's most frequent callsite
+# Absolute bench paths, and the bucket's most frequent callsite
 # ---------------------------------------------------------------------------
 
 _BENCH = "/home/frappe/frappe-bench/apps"
@@ -530,7 +530,7 @@ def _single_finding(sidecar):
 
 
 def test_absolute_bench_paths_keep_the_user_loop():
-	"""P4: on /home/frappe/frappe-bench every absolute path held 'frappe/', so every
+	"""On /home/frappe/frappe-bench every absolute path held 'frappe/', so every
 	frame was skipped and the finding was dropped as framework code."""
 	stack = [  # innermost first, absolute co_filename paths, as capture records them
 		{"filename": "/usr/lib/python3.14/contextlib.py", "lineno": 81, "function": "inner"},
@@ -552,7 +552,7 @@ def test_relative_and_server_script_frames_pass_through():
 
 
 def test_the_bucket_is_anchored_on_its_most_frequent_callsite():
-	"""P14: two early calls from a non-loop line in action 0 no longer decide where the
+	"""Two early calls from a non-loop line in action 0 no longer decide where the
 	finding points; the eight from the loop line in action 1 do."""
 	once = [{"filename": "apps/myapp/myapp/setup.py", "lineno": 5, "function": "prepare"}, *_USER_CALLER_STACK[1:]]
 	loop = [{"filename": "apps/myapp/myapp/rows.py", "lineno": 24, "function": "check_rows"}, *_USER_CALLER_STACK[1:]]
@@ -574,7 +574,7 @@ def test_the_bucket_is_anchored_on_its_most_frequent_callsite():
 
 
 def test_a_first_call_through_erpnext_no_longer_drops_the_finding():
-	"""P14: the first occurrence went through ERPNext; the repeating loop is the user's."""
+	"""The first occurrence went through ERPNext; the repeating loop is the user's."""
 	via_erpnext = [{"filename": "apps/erpnext/erpnext/stock/utils.py", "lineno": 30, "function": "get_bin"}, *_USER_CALLER_STACK[1:]]
 	sidecar = [_sidecar_entry("get_doc", ("Item", "X"), ("Item", "h"), caller_stack=via_erpnext)]
 	sidecar += [_sidecar_entry("get_doc", ("Item", "X"), ("Item", "h")) for _ in range(7)]
@@ -593,7 +593,7 @@ def test_the_stamp_constants_live_in_analyzers_base():
 
 
 # ---------------------------------------------------------------------------
-# Task 6 fix round 1
+# Anchored occurrences and path cuts
 # ---------------------------------------------------------------------------
 
 
@@ -673,7 +673,7 @@ def test_a_more_frequent_framework_callsite_does_not_suppress_a_user_loop():
 
 
 # ---------------------------------------------------------------------------
-# T13 (cycle 2): Optimus's own settings reads, anchored counts, bench-shaped cut
+# Optimus's own settings reads, anchored counts, bench-shaped cut
 # ---------------------------------------------------------------------------
 
 _HOME = "/home/frappe/frappe-bench"
@@ -750,7 +750,7 @@ def _callsite_of(finding):
 
 
 def test_optimus_own_settings_reads_are_not_a_redundant_call():
-	"""A1: the snapshot gave 4 findings; the cache lookup of optimus_settings_cached
+	"""The snapshot gave 4 findings; the cache lookup of optimus_settings_cached
 	(585 times, blamed on common.py:25) was Optimus's own read. Exactly it goes."""
 	own = [
 		_sidecar_entry("cache_get", "optimus_settings_cached", "605996ade876", _OPTIMUS_SETTINGS_READ)
@@ -828,7 +828,7 @@ def _company(stack):
 
 
 def test_one_user_call_in_an_erpnext_loop_is_no_finding_in_either_order():
-	"""C3 (c2corr/p6_rc_anchor.py, p6b.py): one user call anchored a "31 times" High
+	"""One user call anchored a "31 times" High
 	finding counted over all 31 occurrences. The repetition is ERPNext's, so the bucket
 	is suppressed as framework code, as it was before the non-framework vote."""
 	erp = [_company(_ERP_VIA) for _ in range(30)]
@@ -839,7 +839,7 @@ def test_one_user_call_in_an_erpnext_loop_is_no_finding_in_either_order():
 
 
 def test_a_user_loop_beside_a_bigger_erpnext_loop_is_counted_alone():
-	"""C3: 8 user-loop calls plus 9 ERPNext calls in one action is a finding counted 8,
+	"""8 user-loop calls plus 9 ERPNext calls in one action is a finding counted 8,
 	not 17: title, description, count, affected_count and severity all use the anchored
 	callsite's occurrences."""
 	user = _stack_at("apps/myapp/myapp/rows.py", 24, "check_rows")
@@ -857,7 +857,7 @@ def test_a_user_loop_beside_a_bigger_erpnext_loop_is_counted_alone():
 
 
 def test_the_anchored_callsite_must_reach_the_threshold_within_one_action():
-	"""C3: the bucket reaches the threshold in action 0 (2 ERPNext + 3 user calls), but
+	"""The bucket reaches the threshold in action 0 (2 ERPNext + 3 user calls), but
 	the anchored user line runs only 3 times per action: a per-request call, not a loop."""
 	user = _stack_at("apps/myapp/myapp/rows.py", 24, "check_rows")
 	erp = _stack_at("apps/erpnext/erpnext/stock/utils.py", 30, "get_bin")
@@ -869,7 +869,7 @@ def test_the_anchored_callsite_must_reach_the_threshold_within_one_action():
 
 
 def test_a_per_request_user_call_beside_an_erpnext_loop_is_suppressed_as_framework():
-	"""C3: the user line runs 3 times in each of two actions (no loop); the bucket's
+	"""The user line runs 3 times in each of two actions (no loop); the bucket's
 	loop is ERPNext's 10 calls, so it is suppressed as framework code."""
 	user = _stack_at("apps/myapp/myapp/rows.py", 24, "check_rows")
 	erp = _stack_at("apps/erpnext/erpnext/stock/utils.py", 30, "get_bin")
@@ -891,7 +891,7 @@ def _entry(stack, fn=None):
 
 
 def test_a_user_loop_is_found_beside_a_more_frequent_per_request_user_line():
-	"""Fix round 1: the anchor is the most frequent callsite that loops on its own (the
+	"""The anchor is the most frequent callsite that loops on its own (the
 	threshold within one action), not the most frequent overall. The per-request hook
 	line outnumbers the loop in every case, so it took the bucket and failed the recheck,
 	and the loop was lost."""
@@ -914,7 +914,7 @@ def test_a_user_loop_is_found_beside_a_more_frequent_per_request_user_line():
 
 
 def test_the_user_loop_wins_over_a_per_request_user_line_and_a_bigger_erpnext_loop():
-	"""Fix round 1: among user callsites the loop is chosen before the fallback, so a
+	"""Among user callsites the loop is chosen before the fallback, so a
 	bigger ERPNext loop does not outvote it."""
 	erp = _stack_at("apps/erpnext/erpnext/stock/utils.py", 30, "get_bin")
 	recs = [[_company(_HOOK) for _ in range(2)] for _ in range(6)]
@@ -926,7 +926,7 @@ def test_the_user_loop_wins_over_a_per_request_user_line_and_a_bigger_erpnext_lo
 
 
 def test_a_framework_loop_beside_a_more_frequent_per_request_user_line_is_framework():
-	"""Fix round 1: the user line runs twice in each of 6 actions (12, no loop); ERPNext
+	"""The user line runs twice in each of 6 actions (12, no loop); ERPNext
 	loops 10 times in action 0. The fallback anchor is the looping callsite, so the
 	bucket is suppressed as framework code, not reported as a per-request call."""
 	erp = _stack_at("apps/erpnext/erpnext/stock/utils.py", 30, "get_bin")
@@ -948,7 +948,7 @@ def test_a_user_loop_of_exactly_the_threshold_beside_more_erpnext_calls_is_a_fin
 
 
 def test_no_loop_at_any_callsite_is_not_blamed_on_framework_code():
-	"""Fix round 1: ERPNext once per request (20 requests) plus a user line 4 times in
+	"""ERPNext once per request (20 requests) plus a user line 4 times in
 	action 0 reach the threshold in action 0 only together. No line loops, so no
 	framework loop is claimed: the most frequent callsite runs once per request, and the
 	cross-request warning says so."""
@@ -963,7 +963,7 @@ def test_no_loop_at_any_callsite_is_not_blamed_on_framework_code():
 
 
 def test_two_user_lines_that_reach_the_threshold_only_together_are_no_finding():
-	"""C3: 3 calls from each of two user lines in one action. Neither line is a loop of
+	"""3 calls from each of two user lines in one action. Neither line is a loop of
 	5; the drop is silent, since nothing was summed across requests."""
 	a = _stack_at("apps/myapp/myapp/a.py", 10)
 	b = _stack_at("apps/myapp/myapp/b.py", 20)
@@ -1005,7 +1005,7 @@ def test_a_per_request_framework_call_is_reported_as_cross_request_spread():
 
 
 def test_the_cut_keeps_an_inner_apps_package_of_the_app():
-	"""E5: the last /apps/ was an `apps` package inside the app; the bench's apps dir is
+	"""The last /apps/ was an `apps` package inside the app; the bench's apps dir is
 	the /apps/ followed by <app>/<app>/."""
 	stack = [{"filename": "/home/f/bench/apps/myapp/myapp/apps/x.py", "lineno": 1, "function": "f"}]
 	assert redundant_calls._apps_relative_stack(stack)[0]["filename"] == "myapp/myapp/apps/x.py"
@@ -1014,7 +1014,7 @@ def test_the_cut_keeps_an_inner_apps_package_of_the_app():
 
 
 def test_the_last_bench_shaped_apps_dir_wins():
-	"""E5: of two /apps/<a>/<a>/ candidates the last is kept, as the plain rule keeps the
+	"""Of two /apps/<a>/<a>/ candidates the last is kept, as the plain rule keeps the
 	last /apps/; an app named apps still resolves."""
 	cases = {
 		"/home/apps/x/x/bench/apps/myapp/myapp/y.py": "myapp/myapp/y.py",
@@ -1031,7 +1031,7 @@ def test_the_last_bench_shaped_apps_dir_wins():
 
 
 def test_an_inner_apps_package_keeps_its_finding():
-	"""E5: the cut to x.py made the loop's app root `x.py`; it is myapp's code."""
+	"""The cut to x.py made the loop's app root `x.py`; it is myapp's code."""
 	stack = [
 		{"filename": f"{_HOME}/apps/myapp/myapp/apps/x.py", "lineno": 7, "function": "loop"},
 		*_DOC_EVENT_TAIL,

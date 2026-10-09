@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""T18 (PR #71 cycle 3): operability, deployment and docs fixes. The failure lines still
+"""Operability, deployment and docs fixes. The failure lines still
 go through ``safe_call.log_error_line``, the texts point at the log line to send, and the
 docs and the file map say what the code does."""
 

@@ -84,7 +84,7 @@ def _evidence_for(doctype, fields):
 
 @pytest.fixture
 def evidence(monkeypatch):
-	"""Per-table evidence (A2): Sales Invoice and GL Entry belong to erpnext; every
+	"""Per-table evidence: Sales Invoice and GL Entry belong to erpnext; every
 	listed column exists with its Frappe type and no index yet."""
 	tables = {
 		"tabSales Invoice": _evidence_for("Sales Invoice", {
@@ -133,7 +133,7 @@ def test_legacy_session_regenerates_clean(evidence):
 
 
 def test_table_card_composite_with_text_column_gets_the_prefix_and_the_name(evidence):
-	"""D3: the card shows the advisor's own ensure_indexes() code, entry and name included."""
+	"""The card shows the advisor's own ensure_indexes() code, entry and name included."""
 	table = _table(recommended_index={
 		"columns": ["customer", "remarks"], "doctype": "Sales Invoice",
 		"together_count": 3, "read_count": 4, "also_filtered": [],
@@ -146,7 +146,7 @@ def test_table_card_composite_with_text_column_gets_the_prefix_and_the_name(evid
 
 
 def test_single_column_card_keeps_its_recommendation(evidence):
-	"""P6: the single-column recommendation is kept, so the card keeps together_count,
+	"""The single-column recommendation is kept, so the card keeps together_count,
 	its SHOW INDEX hint and its route note."""
 	table = _table(recommended_index={
 		"columns": ["customer"], "doctype": "Sales Invoice",
@@ -161,7 +161,7 @@ def test_single_column_card_keeps_its_recommendation(evidence):
 
 
 def test_write_hot_single_column_card_is_never_called_low_risk(evidence):
-	"""P6: GL Entry kept its recommendation, so the write-hot warning shows."""
+	"""GL Entry kept its recommendation, so the write-hot warning shows."""
 	table = _table(
 		table="tabGL Entry", is_write_hot=True, write_count=0,
 		recommended_index={
@@ -175,7 +175,7 @@ def test_write_hot_single_column_card_is_never_called_low_risk(evidence):
 
 
 def test_finding_and_card_on_the_same_columns_name_the_same_index(evidence):
-	"""D-I2: the card no longer says "patch" while the finding says something else."""
+	"""The card no longer says "patch" while the finding says something else."""
 	lookup = recipe_enrichment.make_evidence_lookup()
 	finding = {"finding_type": "Full Table Scan", "technical_detail": {
 		"table": "tabSales Invoice",
@@ -197,8 +197,8 @@ def test_finding_and_card_on_the_same_columns_name_the_same_index(evidence):
 
 
 def test_card_never_renders_an_add_index_call_without_index_name(evidence):
-	"""D3: the card's code line is the advisor's code or nothing; it never shows a
-	nameless frappe.db.add_index(...) call (P1), and a card with no code has no code line."""
+	"""The card's code line is the advisor's code or nothing; it never shows a
+	nameless frappe.db.add_index(...) call, and a card with no code has no code line."""
 	cards = [
 		_table(),
 		_table(table="tabGL Entry", recommended_index={
@@ -212,7 +212,7 @@ def test_card_never_renders_an_add_index_call_without_index_name(evidence):
 	]
 	out = _render(_doc([], cards))
 	calls = re.findall(r"frappe\.db\.add_index\(([^)]*)\)", out)
-	# two modules, each with the columns route's call and the Property Setter route's own build (D1)
+	# two modules, each with the columns route's call and the Property Setter route's own build
 	assert len(calls) == 4
 	assert all("index_name=" in args for args in calls), calls
 	assert out.count('<pre class="sql-snip">') == 2
@@ -272,7 +272,7 @@ def test_stamped_redundant_call_has_no_note(evidence):
 
 
 
-# --- report.html text edits (PR-L1's frozen-template text exception) ---------
+# --- report.html text edits (the frozen template's text-only exception) ---------
 
 
 def test_table_card_never_names_customize_form(evidence):
@@ -360,7 +360,7 @@ def test_finding_notes_are_added_once():
 
 
 def test_framework_n_plus_one_shows_why_there_is_no_ai_fix(evidence):
-	"""O-I3."""
+	"""A Framework N+1 report row says why it has no AI fix instead of showing the retired AI advice."""
 	row = _row("Framework N+1", {"callsite": _CALLSITE, "fix_hint": "Batch the calls."}, llm=_OLD_AI)
 	out = _render(_doc([row]))
 	assert "points at a loop inside framework code" in out and "old-ai-advice" not in out
@@ -379,7 +379,7 @@ def test_token_total_counts_suggestions_the_report_hides(evidence):
 
 
 def test_stale_note_is_neutral_for_an_excluded_type(evidence, ai_available, monkeypatch):
-	"""Refresh never redoes an excluded type (P10), so its footer must not name Refresh."""
+	"""Refresh never redoes an excluded type, so its footer must not name Refresh."""
 	from optimus import ai_fix
 
 	monkeypatch.setattr(ai_fix, "is_finding_type_excluded", lambda ftype: ftype == "N+1 Query")
@@ -407,7 +407,7 @@ def test_token_total_counts_findings_of_ignored_apps(evidence):
 	assert "old-ai-advice" not in out and "AI suggestions used <strong>30</strong> tokens" in out
 
 
-# --- T12 (U1/E2/A2, U2/U3, PF2): the finding's own text agrees with its advice ----------
+# --- the finding's own text agrees with its advice ----------
 
 _MI_TITLE = "Add index on tabSales Invoice(customer)"
 _MI_DESC = (
@@ -534,7 +534,7 @@ def test_the_display_overrides_are_idempotent(indexed):
 
 
 def test_a_render_parses_each_query_once_for_its_aliases(evidence, monkeypatch):
-	"""PF2: the alias map is memoised per query in the render's parser."""
+	"""The alias map is memoised per query in the render's parser."""
 	calls = []
 	real = index_recipes.table_aliases
 	monkeypatch.setattr(index_recipes, "table_aliases", lambda q: calls.append(q) or real(q))

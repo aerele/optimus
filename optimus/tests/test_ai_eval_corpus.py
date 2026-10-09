@@ -151,10 +151,10 @@ def test_scripts_stay_out_of_every_test_runner():
 
 
 
-# PR-L1: what happens to each of the 15 original cases once the gates land (verified
+# What happens to each of the 15 original cases once the grounding gates land (verified
 # against the committed fixture; the same set with and without Tracked Apps).
 POST_L1_GATED = {
-	# Redundant Call without the D-STAMP stamp (analyzed before the callsite fix)
+	# Redundant Call without the callsite_walk stamp (analyzed before the callsite fix)
 	"3q1efl686s": "pre-L5", "3q1fsdhl5p": "pre-L5", "3q1gf7r9lq": "pre-L5", "3q1qg8btng": "pre-L5",
 	# Hot Line inside ERPNext code
 	"5qi7eha1pf": "framework", "5qiej4vhmk": "framework", "5qih2paean": "framework", "5qij9o50so": "framework",
@@ -166,7 +166,7 @@ POST_L1_AI = {"3q1dsfrmti", "3q1j3utnoa", "3q1ln8bv2o", "3q1nfc4d2l", "5qimkr12p
 
 @pytest.mark.parametrize("tracked_apps", [(), ("ugly_code",)])
 def test_post_l1_disposition_of_every_original_case(tracked_apps):
-	"""9 of the 15 original cases are gated after PR-L1 (4 pre-L5 Redundant Call, 4
+	"""9 of the 15 original cases are gated after the gates (4 pre-L5 Redundant Call, 4
 	framework Hot Lines, 1 callee Hot Line); the 4 N+1 cases and the 2 pure-Python Hot
 	Lines still reach the AI. A change here changes the eval's coverage: update it only
 	with the owner's acceptance (master "Coverage")."""
