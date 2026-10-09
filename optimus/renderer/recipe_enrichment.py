@@ -25,7 +25,6 @@ twice leaves the same dicts as running them once.
 
 from __future__ import annotations
 
-import contextlib
 import itertools
 from collections.abc import Callable, Mapping
 
@@ -34,7 +33,7 @@ from optimus.analyzers.base import INDEX_FINDING_TYPES
 from optimus.dbdialect import get_dialect
 from optimus.renderer import index_recipes
 from optimus.renderer.index_evidence import FieldEvidence, IndexEvidence, TableEvidence
-from optimus.safe_call import best_effort, log_error_line
+from optimus.safe_call import InterruptGuard, best_effort, log_error_line
 
 
 def _int(value) -> int:
@@ -84,7 +83,8 @@ def _read_table_evidence(table: str) -> TableEvidence | None:
 	that came back empty raises ``EmptyIndexList``. On Postgres the whole read runs under a
 	savepoint: one failed statement there aborts the whole transaction, so a failed
 	``exists``, ``get_meta`` or catalog read rolls back to the savepoint and the rest of
-	the render can still query."""
+	the render can still query. A job timeout raised while rolling back is raised again,
+	fresh."""
 	if index_recipes.doctype_of(table) is None:
 		return None
 	dialect = get_dialect()
@@ -96,13 +96,21 @@ def _read_table_evidence(table: str) -> TableEvidence | None:
 	frappe.db.savepoint(savepoint)
 	try:
 		evidence = _read_evidence(table, dialect)
-	except Exception:
-		# a rollback that fails must not hide why the read failed
-		with contextlib.suppress(Exception):
+		frappe.db.release_savepoint(savepoint)
+		return evidence
+	except Exception as error:
+		failure = error
+	# Outside the except, so nothing chains: a rollback that fails must not hide why the read
+	# failed, but a job timeout raised while rolling back must still stop the job.
+	guard = InterruptGuard()
+	try:
+		with guard:
 			frappe.db.rollback(save_point=savepoint)
-		raise
-	frappe.db.release_savepoint(savepoint)
-	return evidence
+	except Exception:
+		pass
+	if guard.pending():
+		raise guard.interrupt()
+	raise failure
 
 
 def _read_evidence(table: str, dialect) -> TableEvidence | None:
@@ -264,10 +272,16 @@ NO_INDEX_UNKNOWN_NOTE = "Optimus cannot say whether an index would help this que
 # place, instead of "Avoid the filesort" or "Avoid the temporary table".
 NO_INDEX_ACTION_TITLE = "Check the query with EXPLAIN"
 # The note a Filesort or Temporary Table finding gets when its index keeps the sort or the
-# temporary table (the advice's ``sort_stays``), in place of the promise that an index fixes it.
+# temporary table (the advice's ``sort_stays`` is "stays"), in place of the promise that an
+# index fixes it; when the sort comes from elsewhere in the query and only may stay ("may
+# stay"), the note says so.
 SORT_STAYS_NOTES: dict[str, str] = {
 	"Filesort": "The index under How to fix does not remove the sort: How to fix says why.",
 	"Temporary Table": "The index under How to fix does not remove the temporary table: How to fix says why.",
+}
+SORT_MAY_STAY_NOTES: dict[str, str] = {
+	"Filesort": "The index under How to fix may not remove the sort: How to fix says why.",
+	"Temporary Table": "The index under How to fix may not remove the temporary table: How to fix says why.",
 }
 _MIGRATION_PHRASE = "in a database migration"
 _HOW_TO_FIX_PHRASE = "using the code and steps under How to fix"
@@ -355,8 +369,9 @@ def export_advice(
 	``unknown`` is True when the advice is no verdict on the index (``IndexAdvice.unknown``,
 	or a failure), so the finding's description stays neutral. A failure appends
 	``(finding type, error type)`` to ``errors`` for the caller's one log line.
-	``sort_stays`` is True when a Filesort or Temporary Table finding's code leaves the sort
-	or the temporary table in place (``IndexAdvice.sort_stays``)."""
+	``sort_stays`` is "stays" when a Filesort or Temporary Table finding's code leaves the
+	sort or the temporary table in place, "may stay" when it may, else ""
+	(``IndexAdvice.sort_stays``)."""
 	advice = best_effort(
 		lambda: index_recipes.advise_finding(
 			finding, evidence_lookup=evidence_lookup, tracked_apps=tuple(tracked_apps or ()), parser=parser,
@@ -378,7 +393,7 @@ def export_advice(
 			"text": RECIPE_FAILED_HINT,
 			"code": None,
 			"unknown": True,
-			"sort_stays": False,
+			"sort_stays": "",
 		}, True
 	if advice is None:
 		return None, False
@@ -412,7 +427,8 @@ def finding_display(finding: dict, advice: dict | None) -> dict:
 	With code, a Missing Index points at the code and steps under How to fix instead of "a
 	database migration", and a Filesort or Temporary Table whose index leaves the sort or
 	the temporary table in place (``advice["sort_stays"]``) loses the sentence that promises
-	an index fixes it and gains ``SORT_STAYS_NOTES``. Applying it to its own output changes
+	an index fixes it and gains ``SORT_STAYS_NOTES`` (``SORT_MAY_STAY_NOTES`` when it only
+	may stay). Applying it to its own output changes
 	nothing."""
 	ftype = finding.get("finding_type") or ""
 	if advice is None or ftype not in INDEX_FINDING_TYPES:
@@ -422,9 +438,10 @@ def finding_display(finding: dict, advice: dict | None) -> dict:
 		if ftype == "Missing Index" and _MIGRATION_PHRASE in description:
 			return {"customer_description": description.replace(_MIGRATION_PHRASE, _HOW_TO_FIX_PHRASE)}
 		if ftype in SORT_STAYS_NOTES and advice.get("sort_stays"):
+			notes = SORT_MAY_STAY_NOTES if advice["sort_stays"] == "may stay" else SORT_STAYS_NOTES
 			for sentence in _INDEX_FIX_SENTENCES:
 				description = description.replace(sentence, "")
-			return {"customer_description": _with_note(" ".join(description.split()), SORT_STAYS_NOTES[ftype])}
+			return {"customer_description": _with_note(" ".join(description.split()), notes[ftype])}
 		return {}
 	unknown = bool(advice.get("unknown"))
 	if ftype == "Missing Index":

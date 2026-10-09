@@ -58,6 +58,7 @@ class TestFromClause:
 		),
 		("SELECT name FROM db1.`tabSales Invoice` si WHERE si.customer = ?", ["tabsales invoice"]),
 		("SELECT x FROM db1.tabA a, db2.tabB WHERE a.y = ?", ["taba", "tabb"]),
+		('SELECT x FROM t17.public."tabA" a JOIN `tabB` b ON b.x = a.y WHERE 1', ["taba", "tabb"]),
 	])
 	def test_only_a_name_right_after_the_table_is_qualified(self, query, tables):
 		assert ir._from_clause(query) == tables
@@ -172,20 +173,35 @@ _ACC = _ev("Account", app="erpnext", fields={
 
 
 class TestSelfJoin:
+	"""A query that reads the target table more than once gives no verdict: a filter or a key
+	on one reference says nothing about the other, and Optimus cannot tell which reference
+	the finding is about."""
+
+	_NO_PARENT_INDEX = dataclasses.replace(_ACC, indexes=(IndexEvidence("PRIMARY", ("name",), True),))
+
 	@pytest.mark.parametrize("query", [
+		"SELECT a.name, p.account_type FROM `tabAccount` a JOIN `tabAccount` p ON a.parent_account = p.name WHERE a.name = ?",
+		"SELECT a.name FROM `tabAccount` a JOIN `tabAccount` p ON a.parent_account = p.name WHERE a.name = ? AND p.company = ?",
+		"SELECT a.name FROM `tabAccount` a JOIN `tabAccount` p ON p.name = a.parent_account WHERE a.name = ? AND p.name = ?",
 		"SELECT a.name FROM `tabAccount` a JOIN `tabAccount` p ON a.parent_account = p.name WHERE p.name = ? "
 		"AND a.account_type = ?",
+		"SELECT a.name FROM `tabAccount` a, `tabAccount` p WHERE a.lft >= p.lft AND a.rgt <= p.rgt AND p.name = ?",
 		"SELECT a.name FROM `tabAccount` a, `tabAccount` p WHERE a.lft >= p.lft AND a.rgt <= p.rgt AND p.name = ? "
 		"AND a.account_currency = ?",
 	])
-	def test_a_name_lookup_on_one_alias_is_no_lookup_for_the_other(self, query):
-		advice = ir.advise_finding(_explain("Full Table Scan", query, table="tabAccount"), evidence_lookup=_lookup(_ACC))
-		assert "by name, the primary key" not in _text(advice)
+	@pytest.mark.parametrize("ftype", ["Full Table Scan", "Filesort"])
+	def test_a_self_join_is_no_verdict(self, query, ftype):
+		advice = ir.advise_finding(_explain(ftype, query, table="tabAccount"), evidence_lookup=_lookup(self._NO_PARENT_INDEX))
+		assert advice.route == ir.ROUTE_NO_CODE and advice.unknown and advice.code is None, _text(advice)
+		assert _text(advice) == (
+			'Optimus could not read how this query filters: it reads "tabAccount" more than once (a self-join). '
+			"So it gives no index code. Check the query with EXPLAIN."
+		)
 
 	def test_a_name_lookup_without_a_self_join_stays(self):
-		q = "SELECT a.name FROM `tabAccount` a WHERE a.name = ? AND a.account_type = ?"
+		q = "SELECT a.name FROM `tabAccount` a WHERE a.name = ? AND a.company = ?"
 		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabAccount"), evidence_lookup=_lookup(_ACC))
-		assert "The query finds its row by name, the primary key" in _text(advice)
+		assert "The query finds its row by name, the primary key" in _text(advice) and not advice.unknown
 
 	def test_a_second_alias_in_a_subquery_is_no_self_join(self):
 		q = (
@@ -212,6 +228,7 @@ class TestNotEqualIsHedged:
 			"looks for are rare, an index on (project) can help."
 		) in text
 		assert "composite" not in text and "would not help" not in text and "Rewrite the filter" not in text
+		assert "shape of the filter" not in text and "cannot serve that filter" not in text
 
 	def test_two_not_equal_columns(self):
 		q = "SELECT name FROM `tabStock Entry` WHERE project <> ? AND purpose != ?"
@@ -234,9 +251,17 @@ _ANTI = "SELECT si.name FROM `tabSales Invoice` si LEFT JOIN `tabCustomer` c ON 
 
 
 class TestAntiJoin:
-	def test_an_is_null_filter_on_the_joined_table_keeps_the_probe(self):
-		advice = ir.advise_finding(_explain("Full Table Scan", _ANTI + "c.name IS NULL"), evidence_lookup=_lookup(_SI_C, _CU))
-		assert advice is None or "customer" not in advice.columns, _text(advice)
+	@pytest.mark.parametrize("where", ["c.name IS NULL", "c.name IS NULL AND si.docstatus = ?"])
+	def test_an_anti_join_with_no_filter_left_is_no_verdict(self, where):
+		"""Leaving out the probe leaves nothing to index: no verdict, never the analyzer's own
+		"Add an index on the WHERE/JOIN columns" hint."""
+		advice = ir.advise_finding(_explain("Full Table Scan", _ANTI + where), evidence_lookup=_lookup(_SI_C, _CU))
+		assert advice.route == ir.ROUTE_NO_CODE and advice.unknown and advice.code is None, _text(advice)
+		assert _text(advice) == (
+			'Optimus could not find a filter on "tabSales Invoice" that an index could use: the query uses customer '
+			"only to look up rows of another table through a LEFT JOIN. So it gives no index code. Check the query "
+			"with EXPLAIN."
+		)
 
 	def test_an_is_null_filter_beside_a_target_filter(self):
 		advice = ir.advise_finding(
@@ -366,6 +391,28 @@ class TestSortLeads:
 		assert advice.lead.startswith(f"This index narrows the filter, but {end}"), advice.lead
 		assert "stops reading the whole table" not in advice.lead and advice.sort_stays
 
+	def test_an_unattributed_sort_column_still_names_its_cause(self):
+		"""On a query of two tables the SQL parser does not attribute the unqualified ORDER BY
+		remarks to the table, yet the scan still finds that it is a text column."""
+		q = (
+			"SELECT si.name FROM `tabSales Invoice` si JOIN `tabCustomer` c ON c.name = si.customer "
+			"WHERE si.company = ? ORDER BY remarks LIMIT 5"
+		)
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SH, _CU_J))
+		assert advice.route != ir.ROUTE_NO_CODE, _text(advice)
+		assert advice.lead == (
+			"This index narrows the filter, but the query sorts by a text column, which Optimus does not index for a "
+			"sort, so the sort stays."
+		)
+
+	def test_a_kept_sort_column_with_an_expression_sort_stays(self):
+		"""posting_date is both the range filter and (inside lower()) the sort, so the recipe keeps
+		it, but the index cannot return the rows in that order."""
+		q = "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND posting_date > ? ORDER BY lower(posting_date) LIMIT 5"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SH))
+		assert "posting_date" in advice.columns and advice.sort_stays == "stays", _text(advice)
+		assert advice.lead.startswith("This index narrows the filter, but the query sorts by an expression")
+
 	def test_a_lead_that_removes_the_sort_says_so(self):
 		q = "SELECT name FROM `tabSales Invoice` WHERE customer = ? ORDER BY posting_date LIMIT 5"
 		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SH))
@@ -398,4 +445,111 @@ def test_the_docs_and_changelog_quote_these_texts():
 		assert "`sort_stays`" in text and "if the rows this query looks for are rare" in text
 		assert "`is_return = ? ORDER BY creation DESC LIMIT ?`" in text
 	assert recipe_enrichment.SORT_STAYS_NOTES["Filesort"] in doc
+	# fix round 1: export keys, the timeout claim, the self-join, the join-bound sort, "may not"
+	assert "`code`, `unknown`: no verdict" in doc and '`"may stay"` when it may' in doc
+	assert "it escapes the report render (`render_raw`) and the export (`export_session`)" in doc
+	assert "analyzer loop and its report step" in log and "escapes the report render and the export" in log
+	assert "reads the table more than once (a self-join" in doc and "self-join (the table read more than once" in log
+	assert "only a join binds" in doc and "only a join binds" in log
+	assert '"may not remove"' in doc and "a bare `NOT col = ?`" in doc and "a bare `NOT col = ?`" in log
 	assert "if the slow queries look for the rare value" in doc and "WHERE c.name IS NULL" in doc
+
+
+# --- the Check note needs an equality, not a collapsed IN (?) ---------------------------
+
+
+def test_the_check_note_needs_an_equality_not_a_collapsed_in_list():
+	q = "SELECT name FROM `tabSales Invoice` WHERE is_return IN (?) ORDER BY creation DESC LIMIT ?"
+	advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI_CHECK))
+	assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["is_return", "creation"]
+	assert "if the IN list on is_return has more than one value" in advice.lead
+	assert not any("first rows in order" in c for c in advice.caveats)
+
+
+# --- a bare NOT negates its comparison -------------------------------------------------
+
+_SI_NOT = _ev(fields={"customer": F("Link"), "status": F("Select"), "company": F("Link")})
+
+
+class TestBareNot:
+	@pytest.mark.parametrize("where", ["customer = ? AND NOT name = ?", "NOT name = ? AND customer = ?",
+		"customer = ? AND NOT `tabSales Invoice`.`name` = ?"])
+	def test_a_negated_name_is_no_key_lookup(self, where):
+		advice = ir.advise_finding(_explain("Full Table Scan", f"SELECT name FROM `tabSales Invoice` WHERE {where}"),
+			evidence_lookup=_lookup(_SI_NOT))
+		assert "by name, the primary key" not in _text(advice)
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.columns == ("customer",), _text(advice)
+
+	def test_a_negated_column_is_a_not_comparison(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND NOT status = ?"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI_NOT))
+		assert advice.columns == ("customer",)
+		assert "Optimus left out status (compared only by !=, <> or NOT" in _text(advice)
+
+	def test_a_plain_name_lookup_stays(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND name = ?"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI_NOT))
+		assert "by name, the primary key" in _text(advice)
+
+
+# --- a sort recipe whose equality column only a join binds -----------------------------
+
+_SI_J = _ev(fields={"customer": F("Link"), "company": F("Link"), "posting_date": F("Date")})
+_CU_J = _ev("Customer", fields={"territory": F("Link"), "customer_group": F("Link")})
+
+
+class TestJoinBoundSort:
+	@pytest.mark.parametrize("query", [
+		"SELECT si.name FROM `tabSales Invoice` si JOIN `tabCustomer` c ON c.name = si.customer "
+		"WHERE c.territory = ? ORDER BY si.posting_date LIMIT ?",
+		"SELECT si.name FROM `tabSales Invoice` si, `tabCustomer` c WHERE c.name = si.customer "
+		"AND c.territory = ? ORDER BY si.posting_date LIMIT ?",
+	])
+	def test_a_join_bound_equality_before_the_sort_is_no_verdict(self, query):
+		"""si.customer takes every customer of the territory, so (customer, posting_date) cannot
+		return the rows in order: never "the rows come back already sorted"."""
+		advice = ir.advise_finding(_explain("Filesort", query), evidence_lookup=_lookup(_SI_J, _CU_J))
+		assert advice.route == ir.ROUTE_NO_CODE and advice.unknown, _text(advice)
+		assert "already sorted" not in _text(advice)
+		assert _text(advice) == (
+			"Optimus could not read how this query sorts: the index would put customer before the sort column, "
+			"and customer takes its values from a join with another table, not from a value the query gives, so "
+			"the index may not return the rows in order. So it gives no index code. Check the query with EXPLAIN."
+		)
+
+	def test_a_value_bound_equality_keeps_its_sort_recipe(self):
+		q = (
+			"SELECT si.name FROM `tabSales Invoice` si LEFT JOIN `tabCustomer` c ON c.name = si.customer "
+			"WHERE si.company = ? ORDER BY si.posting_date LIMIT ?"
+		)
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI_J, _CU_J))
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["company", "posting_date"], _text(advice)
+		assert "already sorted" in advice.lead
+
+	def test_a_join_bound_recipe_that_dropped_the_sort_keeps_its_code(self):
+		"""No LIMIT and a usable range: the recipe without the sort is the advice, so no column
+		comes before a sort column and the code stands."""
+		q = (
+			"SELECT si.name FROM `tabSales Invoice` si JOIN `tabCustomer` c ON c.name = si.customer "
+			"WHERE c.territory = ? AND si.posting_date > ? ORDER BY si.company"
+		)
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI_J, _CU_J))
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["customer", "posting_date"], _text(advice)
+
+	def test_a_join_bound_filter_without_a_sort_keeps_its_code(self):
+		q = "SELECT si.name FROM `tabSales Invoice` si JOIN `tabCustomer` c ON c.name = si.customer WHERE c.territory = ?"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI_J, _CU_J))
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.columns == ("customer",), _text(advice)
+
+
+# --- a sort that only may stay ---------------------------------------------------------
+
+
+def test_a_sort_from_elsewhere_only_may_stay():
+	q = "SELECT customer, COUNT(name) FROM `tabSales Invoice` WHERE status = ? GROUP BY customer"
+	advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SH))
+	assert advice.route == ir.ROUTE_ENSURE_INDEXES and "and may stay." in advice.lead, advice.lead
+	assert advice.sort_stays == "may stay"
+	other = ir.advise_finding(_explain("Filesort", "SELECT name FROM `tabSales Invoice` WHERE customer = ? ORDER BY "
+		"lower(po_no) LIMIT 5"), evidence_lookup=_lookup(_SH))
+	assert other.sort_stays == "stays"

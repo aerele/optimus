@@ -168,7 +168,8 @@ class PostgresDialect(Dialect):
 
 	def existing_indexes(self, table: str) -> list:
 		"""``[IndexInfo(...)]`` from the catalog. Empty on an ordinary error; an RQ job timeout
-		is raised again, since the job must stop."""
+		is raised again for the caller (a report render or an export lets it stop the job;
+		analyze's analyzer loop catches every exception)."""
 		try:
 			rows = self._safe_sql(_PG_INDEX_SQL, (table, _db_schema()), as_dict=True) or []
 		except Exception as exc:
@@ -191,7 +192,7 @@ class PostgresDialect(Dialect):
 
 	def column_types(self, table: str) -> dict:
 		"""``{column: data_type_lower}``. Empty on an ordinary error; an RQ job timeout is
-		raised again."""
+		raised again for the caller."""
 		try:
 			rows = self._safe_sql(
 				"""

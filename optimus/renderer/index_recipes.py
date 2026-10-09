@@ -38,9 +38,10 @@ rules a column out. The advisor picks one route:
   by evidence (``_cap``). !=, <> and NOT never narrow an index. A sort-serving index on a
   Filesort finding is one the optimizer rejected, unless the query has a LIMIT
   (``_served_evidence``). The table's real index list decides, never the Search Index
-  flag. A no_code that only says Optimus could not tell (``unknown``: no
-  evidence for the table, an unread filter, a column the SQL parser did not report, a UNION
-  that filters the table in more than one branch, a query too long to parse) is no verdict,
+  flag. A no_code that only says Optimus could not tell (``unknown``: no evidence for the
+  table, an unread filter, a column the SQL parser did not report, a UNION that filters the
+  table in more than one branch, a self-join, a sort recipe whose equality column only a
+  join binds, an anti-join with no filter left, a query too long to parse) is no verdict,
   so a table card never says "Do not add this index." for it.
 
 Frappe v16.18 facts relied on: MariaDB schema sync drops a single-column index its
@@ -213,9 +214,9 @@ class IndexAdvice:
 	the existing index behind a ``ROUTE_NO_CODE`` that says the index exists already, so
 	``advise`` can weigh it against a recipe without the sort; on a sort recipe it is set
 	only for an index that returns the rows in the query's order (``_serves_sort``).
-	``sort_stays`` is True on a Filesort or Temporary Table finding's code that leaves the
-	sort or the temporary table in place (its ``lead`` says why), so the finding's own text
-	never promises that the index fixes it."""
+	``sort_stays`` is ``"stays"`` on a Filesort or Temporary Table finding's code that leaves
+	the sort or the temporary table in place, ``"may stay"`` when it may (its ``lead`` says
+	why), else "", so the finding's own text never promises that the index fixes it."""
 
 	route: str
 	doctype: str
@@ -229,7 +230,7 @@ class IndexAdvice:
 	unknown: bool = False
 	served_by: str = ""
 	no_evidence: bool = False
-	sort_stays: bool = False
+	sort_stays: str = ""
 
 	@property
 	def code(self) -> str | None:
@@ -1675,8 +1676,12 @@ def _advise(
 	shape_dropped = [(col, _shape_why(kinds)) for col, kinds in shapes.items()]
 	advice = _route(doctype, final, shape_dropped + order_dropped + dropped, evidence, tuple(tracked_apps or ()))
 	checks = [col for col in bare if col in equality and _is_check_field(evidence, col)]
-	if serves and checks and _has_limit(query) and all(col in checks for col in bare if col in equality):
-		# a recipe led by Check fields alone: say why it still helps a sorted LIMIT query
+	if (
+		serves and checks and _has_limit(query) and all(col in checks for col in bare if col in equality)
+		and all((comparisons or {}).get(col) == "eq" for col in checks)
+	):
+		# a recipe led by Check fields alone, each compared with one value (a collapsed IN (?)
+		# may hold both): say why it still helps a sorted LIMIT query
 		its = "its" if len(checks) == 1 else "their"
 		advice = replace(advice, caveats=(*advice.caveats, (
 			f"{_check_rarity(checks)}; this index still returns the query's first rows in order for any of {its} values."
@@ -1851,10 +1856,11 @@ def _lead_for(
 	multi: tuple[str, ...] = (),
 	maybe: tuple[str, ...] = (),
 	fixed: frozenset[str] = frozenset(),
-) -> tuple[str, bool]:
+) -> tuple[str, str]:
 	"""``(lead, sort stays)``: the finding type's opening sentence, and for a Filesort or
 	Temporary Table finding whether the advised index leaves the sort or the temporary table
-	in place. The lead never claims the sort or the temporary table goes when the index
+	in place: ``"stays"``, ``"may stay"`` (the query has no ORDER BY, GROUP BY or DISTINCT on
+	this table, so the sort comes from elsewhere in the query) or "". The lead never claims the sort or the temporary table goes when the index
 	cannot remove it: the sort is not on bare columns (``sort_problem``, see
 	``_sort_problem``, which also names the cause), the sort column follows a range condition
 	(``ranged``), or a kept filter matches several values (``multi``). Such a lead opens "This
@@ -1864,19 +1870,20 @@ def _lead_for(
 	the sort. The claim needs every sort or group column in the index, or fixed by an
 	equality filter (``fixed``); a metadata column such as parent is never indexed (R2)."""
 	if advice.route == ROUTE_NO_CODE:
-		return "", False
+		return "", ""
 	kept = {c.split("(", 1)[0] for c in advice.columns}
 	labels = {label for label, col in labelled if col in kept}
 	sort_label = {"Filesort": "ORDER BY", "Temporary Table": "GROUP BY"}.get(ftype)
 	if not sort_label:
-		return _TYPE_LEADS.get(ftype, ""), False
+		return _TYPE_LEADS.get(ftype, ""), ""
 	stays = "the sort stays" if ftype == "Filesort" else "the temporary table stays"
 	column = "sort" if ftype == "Filesort" else "grouping"
 	expression = _NARROWS + _sort_cause(ftype, sort_problem)
+	cause = "may stay" if sort_problem == "none" else "stays"
 	if sort_label in labels:
 		kept_multi = [col for col in multi if col in kept]
 		if sort_problem:
-			return expression, True
+			return expression, cause
 		if kept_multi:
 			heading, still = (
 				("sort", "sorts the rows") if ftype == "Filesort" else ("GROUP BY", "groups them in a temporary table")
@@ -1884,47 +1891,47 @@ def _lead_for(
 			return (
 				f"Index the filter columns followed by the {heading} column so fewer rows are read. The filter "
 				f"on {kept_multi[0]} matches more than one value, so the database still {still}."
-			), True
+			), "stays"
 		missing = [col for label, col in labelled if label == sort_label and col not in kept and col not in fixed]
 		if missing:
-			return _NARROWS + f"it does not cover every {column} column ({', '.join(missing)}), so {stays}.", True
+			return _NARROWS + f"it does not cover every {column} column ({', '.join(missing)}), so {stays}.", "stays"
 		kept_maybe = [col for col in maybe if col in kept]
 		if kept_maybe:
-			return _TYPE_LEADS[ftype][:-1] + f"; if the IN list on {kept_maybe[0]} has more than one value, {stays}.", False
-		return _TYPE_LEADS[ftype], False
+			return _TYPE_LEADS[ftype][:-1] + f"; if the IN list on {kept_maybe[0]} has more than one value, {stays}.", ""
+		return _TYPE_LEADS[ftype], ""
 	sort_cols = [col for label, col in labelled if label == sort_label]
 	# a sort column the parser could name that is no Frappe metadata column
 	if any(col.lower() not in FRAPPE_METADATA_COLUMNS for col in sort_cols):
 		if sort_problem:
-			return expression, True
+			return expression, cause
 		kept_multi = [col for col in multi if col in kept]
 		if kept_multi:
 			return _NARROWS + (
 				f"the filter on {kept_multi[0]} matches more than one value, so it cannot return the rows in order and "
 				f"{stays}."
-			), True
+			), "stays"
 		if ranged:
 			return _NARROWS + (
 				f"the {column} column comes after the range condition on {ranged}, so it cannot return the rows in "
 				f"order and {stays}."
-			), True
+			), "stays"
 	# the sort or group column is not in the index: name why (C7)
 	if sort_problem in ("aggregate", "distinct", "other_table", "none"):
-		return expression, True
+		return expression, cause
 	metadata = [col for label, col in labelled if label == sort_label and col.lower() in FRAPPE_METADATA_COLUMNS]
 	trailing = [col for col in metadata if col.lower() in TRAILING_METADATA_OK]
 	if trailing:
 		return _NARROWS + (
 			f"the {column} column {trailing[0]} can only follow an equality filter column in an index, and this "
 			f"query has none, so {stays}."
-		), True
+		), "stays"
 	if metadata:
 		return _NARROWS + (
 			f"the {column} column is a Frappe metadata column, which Optimus never indexes, so {stays}."
-		), True
+		), "stays"
 	if sort_problem in _ITEM_PROBLEMS | {"differs"}:
-		return expression, True
-	return _NARROWS + f"it does not cover the {column}, so {stays}.", True
+		return expression, cause
+	return _NARROWS + f"it does not cover the {column}, so {stays}.", "stays"
 
 
 def advise_finding(
@@ -1970,6 +1977,9 @@ def _advise_finding(
 		return None
 	evidence = evidence_lookup(f"tab{doctype}")
 	unusable = comparisons = None
+	valued: Mapping[str, str] = {}
+	source: list[str] = []
+	probe_cut: list[str] = []
 	serves = ""
 	sort_problem = ""
 	multi: tuple[str, ...] = ()
@@ -1987,12 +1997,22 @@ def _advise_finding(
 			), unknown=True)
 		source = _from_clause(query) or []
 		target = table.strip().strip("`").lower()
+		if evidence is not None and source.count(target) > 1:
+			# a self-join reads the table twice, and a filter or a key on one reference says
+			# nothing about the other, so Optimus cannot tell which reference the finding is about
+			return _no_code(doctype, _clean_columns([col for _label, col in labelled]), (
+				f'Optimus could not read how this query filters: it reads "tab{doctype}" more than once (a '
+				"self-join). So it gives no index code. Check the query with EXPLAIN."
+			), unknown=True)
 		probes = _join_probes(query, qualifiers, target)
 		if probes:
 			# a column the table only feeds into a LEFT JOIN that the WHERE leaves a LEFT JOIN is
 			# a probe value, never compared with a known value, so an index on it cannot narrow
 			# this table (M2, item 4)
 			where = {col.lower() for label, col in labelled if label == "WHERE"}
+			probe_cut = [
+				col for label, col in labelled if label == "JOIN" and col.lower() in probes and col.lower() not in where
+			]
 			labelled = [
 				(label, col) for label, col in labelled
 				if label != "JOIN" or col.lower() not in probes or col.lower() in where
@@ -2053,9 +2073,7 @@ def _advise_finding(
 					comparisons[col] = "rsort" if current == "range" else "sort"
 			else:
 				comparisons.setdefault(col, "eq" if label == "JOIN" else usable.get(col, "range"))
-		# a self-join reads the table twice, and a key compared with a value pins only the
-		# reference that names it (p.name = ? finds p's row, never a's rows)
-		lookup = "" if source.count(target) > 1 else _key_lookup(valued, evidence)
+		lookup = _key_lookup(valued, evidence)
 		if lookup:
 			return _no_code(doctype, _clean_columns([col for _label, col in labelled]), lookup)
 		# only an IN column that can stay in the index's equality block counts (item 2b): a
@@ -2077,7 +2095,26 @@ def _advise_finding(
 		comparisons=comparisons, serves=serves, removes=_SERVES.get(ftype, ""),
 	)
 	if advice is None:
-		return None
+		if evidence is None or not probe_cut:
+			return None
+		# leaving out the LEFT JOIN probe left nothing to index: no verdict, and never the
+		# analyzer's own "add an index on the WHERE/JOIN columns" hint
+		return _no_code(doctype, (), (
+			f'Optimus could not find a filter on "tab{doctype}" that an index could use: the query uses '
+			f"{', '.join(probe_cut)} only to look up rows of another table through a LEFT JOIN. So it gives no "
+			"index code. Check the query with EXPLAIN."
+		), unknown=True)
+	joined = _join_bound_before_sort(advice, comparisons, valued) if serves and len(source) > 1 else []
+	if joined:
+		# the column takes many values from the join, so its index cannot return the rows in order
+		verb, column = ("sorts", "sort") if ftype == "Filesort" else ("groups", "group")
+		takes = "takes its values" if len(joined) == 1 else "take their values"
+		return _no_code(doctype, [c.split("(", 1)[0] for c in advice.columns], (
+			f"Optimus could not read how this query {verb}: the index would put {', '.join(joined)} before the "
+			f"{column} column, and {', '.join(joined)} {takes} from a join with another table, not from a value the "
+			"query gives, so the index may not return the rows in order. So it gives no index code. Check the "
+			"query with EXPLAIN."
+		), unknown=True)
 	if ftype == "Filesort" and advice.route != ROUTE_NO_CODE and comparisons and not _has_limit(query):
 		bare = [c.split("(", 1)[0] for c in advice.columns]
 		if all(
@@ -2098,6 +2135,22 @@ def _advise_finding(
 		ftype, labelled, advice, sort_problem=sort_problem, ranged=ranged, multi=multi, maybe=maybe, fixed=fixed,
 	)
 	return replace(advice, lead=lead, sort_stays=sort_stays)
+
+
+def _join_bound_before_sort(
+	advice: IndexAdvice, comparisons: Mapping[str, str] | None, valued: Mapping[str, str],
+) -> list[str]:
+	"""The equality columns of a code recipe that also holds a sort or group column, whose only
+	equality is a join (an ON clause, or a WHERE comparison with another table's column),
+	never a value: such a column takes every value the join brings, so the index cannot
+	return the rows in the sort's order. [] when there is none."""
+	if advice.route == ROUTE_NO_CODE:
+		return []
+	bare = [c.split("(", 1)[0] for c in advice.columns]
+	kinds = comparisons or {}
+	if not any(kinds.get(col) in ("sort", "rsort") for col in bare):
+		return []
+	return [col for col in bare if kinds.get(col) in _EQUALITY_KINDS and col not in valued]
 
 
 def advise_table(

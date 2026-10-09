@@ -85,7 +85,8 @@ class MariaDBDialect(Dialect):
 
 	def existing_indexes(self, table: str) -> list:
 		"""``SHOW INDEX FROM `table`` → ``[IndexInfo(...)]``. Empty on an ordinary error or an
-		unsafe name; an RQ job timeout is raised again, since the job must stop."""
+		unsafe name; an RQ job timeout is raised again for the caller (a report render or an
+		export lets it stop the job; analyze's analyzer loop catches every exception)."""
 		if not _is_safe_table_name(table):
 			return []
 		import frappe
@@ -126,7 +127,7 @@ class MariaDBDialect(Dialect):
 
 	def column_types(self, table: str) -> dict:
 		"""``{column: data_type_lower}`` for the table's columns. Empty on an ordinary error; an
-		RQ job timeout is raised again."""
+		RQ job timeout is raised again for the caller."""
 		import frappe
 
 		try:

@@ -1048,8 +1048,9 @@ def _export_index_advice(findings: list[dict], tables) -> None:
 	``recipe_enrichment.export_advice``, the advice step the report runs too (M4):
 	``route``, ``doctype``, ``table``, ``columns``, ``index_name``, ``text`` and ``code``,
 	the report's fix-hint prose and code, ``unknown`` (no verdict: Optimus could not
-	tell, or the advisor failed) and ``sort_stays`` (a Filesort or Temporary Table code that
-	leaves the sort or the temporary table in place), or None when the advisor has nothing to say. With
+	tell, or the advisor failed) and ``sort_stays`` ("stays" or "may stay" when a Filesort or
+	Temporary Table code leaves the sort or the temporary table in place, or may, else ""),
+	or None when the advisor has nothing to say. With
 	advice, its ``technical_detail.fix_hint`` is that same text, and its ``title`` and
 	``customer_description`` are the report's (``finding_display``: no "Add index" title
 	next to a no-code advice). When the advisor raises, the finding carries the report's

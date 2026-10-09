@@ -135,7 +135,7 @@ def test_export_carries_the_report_advice_for_an_index_finding(env):
 		"text": index_recipes.finding_text(advice),
 		"code": advice.code,
 		"unknown": False,
-		"sort_stays": False,
+		"sort_stays": "",
 	}
 	assert finding["index_advice"]["route"] == index_recipes.ROUTE_ENSURE_INDEXES
 	assert "make_property_setter(" in finding["index_advice"]["code"]
@@ -179,7 +179,7 @@ def test_advice_failure_exports_what_the_report_shows(env, monkeypatch):
 	assert finding["index_advice"] == {
 		"route": index_recipes.ROUTE_NO_CODE, "doctype": "Sales Invoice", "table": "tabSales Invoice",
 		"columns": [], "index_name": None, "text": recipe_enrichment.RECIPE_FAILED_HINT, "code": None,
-		"unknown": True, "sort_stays": False,
+		"unknown": True, "sort_stays": "",
 	}
 	assert "suggested_ddl" not in finding["technical_detail"] and "suggested_ddl" not in report["technical_detail"]
 	assert lines == ["optimus: index advice failed for 1 finding(s) or table(s) in one export (Missing Index: RuntimeError)"]
@@ -356,3 +356,23 @@ def test_an_export_parses_each_query_once(env, monkeypatch):
 	env(findings=[_finding(1, "Full Table Scan", detail), _finding(2, "Low Filter Ratio", detail)])
 	api.export_session(session_uuid=SESSION_UUID)
 	assert parsed == [query] and aliased == [query]
+
+
+class _JobTimeout(Exception):
+	"""Stands in for rq's JobTimeoutException."""
+
+
+def test_a_job_timeout_in_an_evidence_read_escapes_the_export(env, monkeypatch):
+	from optimus import safe_call
+
+	env(findings=[_missing_index()])
+	original = _JobTimeout("deadline")
+
+	def interrupted(table):
+		raise original
+
+	monkeypatch.setattr(safe_call, "job_timeout_types", lambda: (_JobTimeout,))
+	monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", interrupted)
+	with pytest.raises(_JobTimeout) as caught:
+		api.export_session(session_uuid=SESSION_UUID)
+	assert caught.value is not original and caught.value.__context__ is None

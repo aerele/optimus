@@ -186,27 +186,37 @@ versions may contain breaking changes see migration notes below).
   and the database adapters turned a failed `SHOW INDEX` into an empty list, so the advice
   could give code for an index that already existed): the report says Optimus could not
   read the table's details and the bench log gets `optimus: evidence read failed for
-  <table>: EmptyIndexList`. A job timeout in a column or index read now stops the job, and
-  on Postgres a table's whole evidence read runs under a savepoint, so a failed statement
-  no longer aborts the render's transaction. The FROM-clause reader no longer takes a
+  <table>: EmptyIndexList`. A job timeout in a column or index read is no longer read as an
+  empty list: it escapes the report render and the export (analyze's analyzer loop and its
+  report step, which Regenerate Reports also runs, still catch every exception, log it and
+  go on). On Postgres a table's whole evidence read runs under a savepoint, so a failed
+  statement no longer aborts the render's transaction. The FROM-clause reader no longer takes a
   qualified ON column (`ON gl.voucher_no = p.name`) for a table name, which kept a joined
   table out of the check for columns the SQL parser dropped and gave a false "already leads
   an index" on joined GL Entry queries; they now say Optimus could not read the filter. A
   list-view query on a Check field that sorts with a LIMIT (`is_return = ? ORDER BY
-  creation DESC LIMIT ?`) gets `(is_return, creation)` again, with a note, instead of a
-  false "already serves this filter and sort", and an index that serves only the range or
-  sort column is never said to serve a filter of Check fields. A self-join is never read as
-  a key lookup. A `!=`, `<>` or `NOT` filter on its own gets the Check-style hedge ("if the
-  rows this query looks for are rare, an index on (project) can help") instead of "an index
-  would not help". An anti-join (`LEFT JOIN ... WHERE c.name IS NULL`) stays a LEFT JOIN,
-  so its joining column is no index candidate. The texts name only the filter shapes and
+  creation DESC LIMIT ?`) gets `(is_return, creation)` again, with a note when the field is
+  compared with `=`, instead of a false "already serves this filter and sort", and an index
+  that serves only the range or sort column is never said to serve a filter of Check
+  fields. A self-join (the table read more than once in the main FROM) gets no code and
+  says Optimus could not read how the query filters. A `!=`, `<>` or `NOT` filter on its
+  own, a bare `NOT col = ?` included (so `NOT name = ?` is no lookup by name), gets the
+  Check-style hedge ("if the rows this query looks for are rare, an index on (project) can
+  help") instead of "an index would not help". An anti-join (`LEFT JOIN ... WHERE c.name
+  IS NULL`) stays a LEFT JOIN, so its joining column is no index candidate, and with no
+  other filter left the finding says Optimus found no filter an index could use instead of
+  keeping the analyzer's "Add an index" hint. A sort or group recipe whose equality column
+  only a join binds (`si JOIN tabCustomer c ON c.name = si.customer WHERE c.territory = ?
+  ORDER BY si.posting_date`) gets no code and says Optimus could not read how the query
+  sorts, never that the rows come back sorted. The texts name only the filter shapes and
   the sort cause the query has, with only their rewrites, never call one column a
   composite, and on a card or a Missing Index finding speak of the slow queries; a card
   whose no-code only hedges on Check fields opens with "Optimus cannot say whether this
   index would help.". A Filesort or Temporary Table lead whose index keeps the sort or the
   temporary table opens "This index narrows the filter, but", and the finding loses
   "Adding an index that covers the ORDER BY clause usually fixes it" and its "Avoid the
-  filesort" step. A Missing Index with no verdict is titled "Index on <table>(<column>):
+  filesort" step, with a note that the index does not remove the sort (or may not, when
+  the sort comes from elsewhere in the query). A Missing Index with no verdict is titled "Index on <table>(<column>):
   Optimus cannot say".
 
 ### API
@@ -219,8 +229,9 @@ versions may contain breaking changes see migration notes below).
   taken from the report text (otherwise the stored hint stays and `index_advice` is null),
   and the report's `title` and `customer_description` (a no-code Missing Index is not
   titled "Add index on ..."); `index_advice` has an `unknown` flag (no verdict: Optimus
-  could not tell, or the advisor failed) and a `sort_stays` flag (a Filesort or Temporary
-  Table code that leaves the sort or the temporary table in place); a table's
+  could not tell, or the advisor failed) and a `sort_stays` value (`"stays"` or `"may
+  stay"` when a Filesort or Temporary Table code leaves the sort or the temporary table in
+  place, or may, else `""`); a table's
   `recommended_index` gains `requested_columns`.
 
 ### Upgrade notes

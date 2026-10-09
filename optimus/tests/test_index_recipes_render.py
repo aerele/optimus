@@ -597,7 +597,7 @@ def test_the_export_carries_whether_the_sort_stays(evidence):
 		"table": "tabSales Invoice",
 		"normalized_query": "SELECT name FROM `tabSales Invoice` WHERE customer = ? ORDER BY posting_date LIMIT 5",
 	}}, evidence_lookup=lookup)
-	assert stays["sort_stays"] is True and removes["sort_stays"] is False
+	assert stays["sort_stays"] == "stays" and removes["sort_stays"] == ""
 
 
 def test_the_sort_stays_overrides_are_idempotent(evidence):
@@ -622,3 +622,34 @@ def test_a_missing_index_with_no_verdict_says_optimus_cannot_say(evidence):
 	out = _render(_doc([_titled("Missing Index", detail, "Add index on tabSessions(user)", _MI_DESC)]))
 	assert "Index on tabSessions(user): Optimus cannot say" in out
 	assert "no new index recommended" not in out and "Add index on tabSessions(user)" not in out
+
+
+def test_a_sort_that_only_may_stay_gets_a_hedged_note(evidence):
+	"""No ORDER BY on this table: the sort comes from elsewhere and may stay, so the note
+	never says the index does not remove it."""
+	q = "SELECT customer, COUNT(name) FROM `tabSales Invoice` WHERE status = ? GROUP BY customer"
+	out = _render(_doc([_filesort(q)]))
+	assert recipe_enrichment.SORT_MAY_STAY_NOTES["Filesort"] in out
+	assert recipe_enrichment.SORT_STAYS_NOTES["Filesort"] not in out
+	assert "Adding an index that covers the ORDER BY clause usually fixes it." not in out
+
+
+class _JobTimeout(Exception):
+	"""Stands in for rq's JobTimeoutException."""
+
+
+def test_a_job_timeout_in_an_evidence_read_escapes_the_render(evidence, monkeypatch):
+	"""render_raw lets a job deadline out, fresh; analyze's own report step catches every
+	exception around it (frozen), which the docs say."""
+	from optimus import safe_call
+
+	original = _JobTimeout("deadline")
+
+	def interrupted(table):
+		raise original
+
+	monkeypatch.setattr(safe_call, "job_timeout_types", lambda: (_JobTimeout,))
+	monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", interrupted)
+	with pytest.raises(_JobTimeout) as caught:
+		_render(_doc([_mi_customer()]))
+	assert caught.value is not original and caught.value.__context__ is None

@@ -274,8 +274,9 @@ class _PostgresDb:
 
 	db_type = "postgres"
 
-	def __init__(self, fail=None):
+	def __init__(self, fail=None, rollback_error=None):
 		self.fail = fail
+		self.rollback_error = rollback_error
 		self.calls = []
 
 	def savepoint(self, name):
@@ -286,6 +287,8 @@ class _PostgresDb:
 
 	def rollback(self, save_point=None, **kwargs):
 		self.calls.append(("rollback", save_point))
+		if self.rollback_error is not None:
+			raise self.rollback_error
 
 	def exists(self, doctype, name=None, *args, **kwargs):
 		if self.fail == "exists":
@@ -331,3 +334,27 @@ def test_on_mariadb_the_read_takes_no_savepoint(site):
 
 	assert not hasattr(frappe.db, "savepoint")  # the fake would raise if the read asked for one
 	assert enrich.make_evidence_lookup()("tabSales Invoice") is not None
+
+
+def test_on_postgres_a_failed_rollback_keeps_the_read_failure(site, logged, monkeypatch):
+	"""A rollback that raises an ordinary error must not hide why the read failed."""
+	import frappe
+
+	monkeypatch.setattr(frappe, "db", _PostgresDb(fail="exists", rollback_error=ConnectionError("connection lost")))
+	site.dialect.name = "postgres"
+	lookup = enrich.make_evidence_lookup()
+	assert lookup("tabSales Invoice") is None and lookup.read_failed("tabSales Invoice")
+	assert logged == ["optimus: evidence read failed for tabSales Invoice: RuntimeError"]
+
+
+def test_on_postgres_a_job_timeout_in_the_rollback_escapes_fresh(site, monkeypatch):
+	"""A job timeout raised while rolling back to the savepoint must still stop the job."""
+	import frappe
+
+	original = _JobTimeout("deadline")
+	monkeypatch.setattr(safe_call, "job_timeout_types", lambda: (_JobTimeout,))
+	monkeypatch.setattr(frappe, "db", _PostgresDb(fail="exists", rollback_error=original))
+	site.dialect.name = "postgres"
+	with pytest.raises(_JobTimeout) as caught:
+		enrich.make_evidence_lookup()("tabSales Invoice")
+	assert caught.value is not original and caught.value.__context__ is None

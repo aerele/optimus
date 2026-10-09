@@ -338,7 +338,10 @@ def _comparison(tokens: list[str], i: int, j: int) -> str:
 	(normalize_query turns IN (?, ?, ?) into IN (?)), so it may hold one value; ``"not"``
 	for !=, <> or NOT ..., which match most rows and never narrow an index; else
 	``"range"`` (<, >, BETWEEN, IS NOT NULL, a prefix LIKE, or a shape the scan does not
-	know, which is never treated as equality)."""
+	know, which is never treated as equality). A bare NOT right before the reference negates
+	the whole comparison (``NOT name = ?`` is ``name != ?``), so it is ``"not"`` too."""
+	if i > 0 and tokens[i - 1].lower() == "not":
+		return "not"
 	after = [tok.lower() for tok in tokens[j + 1 : j + 3]]
 	first = after[0] if after else ""
 	if first == "in":
