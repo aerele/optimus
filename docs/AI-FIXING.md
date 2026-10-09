@@ -333,7 +333,11 @@ The list is empty by default. The exclusion list is **additive**: types not list
 
 ### 5.2 Errors, Refresh AI suggestions and the analyze-time step
 
-`ai_fix.AiFixError` carries a `kind`: `config` (Optimus Settings cannot serve the call: AI off, no model or key, a context window too small), `not_eligible` (the gate or the per-type exclusion refused the finding and no request was built), `auth`, `quota`, `rate_limited`, `not_found`, `server` and `bad_request` (an HTTP error status, classified as described under "Request failures and retries" in section 6), `transport`, `timeout`, `bad_response`, `internal` (an unexpected error while sending or processing) and `unknown`. A context-limit rejection is `config`. **Only `not_eligible` counts as a skip** (`AI_SKIP_KINDS`); every other kind, `config` included, is a failure that is logged to the Error Log and counted.
+`ai_fix.AiFixError` carries a `kind`: `config` (Optimus Settings cannot serve any call: AI off, no model, key or Base URL, an unknown provider, a context window too small for any Optimus prompt), `context` (this one prompt did not fit the model's context window: Optimus refused it before sending, or the provider rejected it), `not_eligible` (the gate or the per-type exclusion refused the finding and no request was built), `auth`, `quota`, `rate_limited`, `not_found`, `server` and `bad_request` (an HTTP error status, classified as described under "Request failures and retries" in section 6), `transport`, `timeout`, `bad_response`, `internal` (an unexpected error while sending or processing) and `unknown`. **Only `not_eligible` counts as a skip** (`AI_SKIP_KINDS`); every other kind, `config` and `context` included, is a failure that is logged to the Error Log and counted.
+
+`AiFixError.fatal` is True for `auth`, `quota`, `not_found` and `config` (`AI_FATAL_KINDS`): the next call fails the same way until the operator changes the key, the credit, the model or Base URL, or the settings. It is the only list of such kinds, so code that stops a run early on a failure reads `fatal` and keeps no list of its own. `context` is not fatal: one prompt that does not fit says nothing about the next finding's prompt. `rate_limited`, `server`, `transport`, `timeout`, `bad_request`, `bad_response`, `internal` and `unknown` are not fatal either.
+
+Each failure message says what happened and what to do next, and it is translated. A context failure names the cause ("The prompt did not fit the model's context window") and, for a hosted provider, points at a model with a larger window; for your own model server it gives the server's context setting (Ollama: `OLLAMA_CONTEXT_LENGTH` or `num_ctx`). A timeout names the request's whole time budget in seconds. When the provider sent a reply, it follows the message as "The provider replied: ...", scrubbed and cut at 300 characters. An unexpected error names only its type; its Error Log row adds where it happened, as plain `file:line:function` frames, never what it said.
 
 `optimus.api.refill_ai_suggestions` returns, in its `fixes` result, `added`, `failed`, `skipped_time`, `skipped`, `gated` (AI-eligible findings and Framework N+1 that the report answers with Optimus's own advice or a note; index findings are not counted), `excluded` (AI-eligible types under Excluded finding types in Optimus Settings) and `skipped_ineligible`. The old `indexes` result is removed: `optimus.api.ai_capabilities` always reports `indexes: false`. Missing and outdated suggestions are refreshed first, so repeated refreshes make every eligible finding current.
 
@@ -411,12 +415,22 @@ Default `ai_request_timeout_seconds = 60` is fine for hosted providers (Anthropi
 ### Request failures and retries
 
 Optimus classifies authentication, missing endpoint/model, exhausted quota,
-rate limit, context/configuration, server, transport, timeout and malformed
-response failures separately. Error Logs retain status and validated error
+rate limit, context, configuration, server, transport, timeout and malformed
+response failures separately (section 5.2 lists the kinds and which are
+fatal). A context-limit rejection is recognised from the wording of OpenAI,
+Anthropic, Moonshot, llama.cpp and vLLM replies and from the provider's
+`context_length_exceeded` or `exceed_context_size_error` code; Moonshot's
+`exceeded_current_quota_error` (a spent balance or a suspended account) is a
+quota failure, not a rate limit. Error Logs retain status and validated error
 codes, never the provider response body. A validation rejection (HTTP 400 or
-422) may trigger removal of `temperature` or replacement of `max_tokens` with
-`max_completion_tokens`, each at most once. There are at most three validation attempts for
-this parameter adaptation; each can follow the permitted redirects. Context-limit and quota failures never use it;
+422) may trigger removal of `temperature` when the reply names it, or
+replacement of `max_tokens` with `max_completion_tokens` when the reply says
+`max_tokens` itself is not supported (a value error such as "max_tokens is
+too large" is not retried), each at most once. There are at most three validation attempts for
+this parameter adaptation; each can follow the permitted redirects. A guardrail re-ask
+starts from the parameters the first call ended with, so it does not repeat a
+rejected request; nothing is remembered from one suggestion to the next.
+Context-limit and quota failures never use it;
 network failures are not automatically retried.
 
 Parameter retries and permitted redirects use the remaining request budget.
@@ -443,7 +457,7 @@ move optional AI work out of analysis or make refresh asynchronous.
 - **"the suggested code was removed because it was cut off at the output limit".** The answer hit its token budget. A larger context window raises the budget (up to 1,024 tokens).
 - **"the suggested code was removed because it broke these Frappe rules: ..."** The model's code broke a block rule it was told about and the one follow-up turn did not fix it; the note quotes each rule (the first two, then "And N more"; section 4.1 lists them all). Review the diagnosis and treat the fix as a direction.
 - **"change the suggested code before you apply it: ..."** The code is kept, but it breaks a convention the profiler only advises on (a dynamic import, index advice led by a metadata column). Apply the listed changes when you copy the code.
-- **HTTP 400 mentioning the context length.** Same fix as the first item.
+- **"The prompt did not fit the model's context window."** One prompt was too large for the window: Optimus refused it before sending, or the provider rejected it (its reply follows the message). On your own model server, raise its window and the Context window (tokens) setting together; on a hosted provider, choose a model with a larger window. It is a `context` failure: counted and logged, not fatal, so the other findings are still asked.
 
 Signals from index advice, the Hot Line gate and Refresh AI suggestions. The `optimus` lines are in `logs/optimus.log`; they are written at ERROR because Frappe's production loggers drop anything lower. Each says why in one place, so you can answer without a debugger:
 

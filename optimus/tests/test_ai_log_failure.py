@@ -2285,9 +2285,15 @@ class TestTheCallersContextJoinsTheRow:
 	written."""
 
 	def _http_failure(self, monkeypatch):
+		import frappe
+
 		def _refused(*a, **k):
 			raise requests.exceptions.ConnectionError("refused")
 		monkeypatch.setattr(requests, "post", _refused)
+		# The transport message is translated. Without a site, Frappe's _() logs
+		# "Unable to load translations" through frappe.logger; these tests count
+		# only Optimus's own breadcrumbs.
+		monkeypatch.setattr(frappe, "_", lambda message, *a, **k: message, raising=False)
 		with pytest.raises(ai_fix.AiFixError) as ei:
 			_call()
 		return ei.value

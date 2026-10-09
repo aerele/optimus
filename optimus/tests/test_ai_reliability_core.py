@@ -74,8 +74,9 @@ def wire(monkeypatch):
 		(429, {"error": {"code": "insufficient_quota"}}, "quota", True),
 		(429, {"error": {"message": "rate limit; see /account/billing"}}, "rate_limited", False),
 		(400, {"error": {"message": "Your credit balance is too low"}}, "quota", True),
-		(400, {"error": {"message": "maximum context length; max_tokens"}}, "config", True),
-		(422, {"error": {"message": "maximum context length; max_tokens"}}, "config", True),
+		# one prompt too big: a failure, not fatal (the next finding's prompt may fit)
+		(400, {"error": {"message": "maximum context length; max_tokens"}}, "context", False),
+		(422, {"error": {"message": "maximum context length; max_tokens"}}, "context", False),
 		(400, {"error": {"message": "invalid option"}}, "bad_request", False),
 		(422, {}, "bad_request", False),
 		(500, {}, "server", False),
@@ -122,7 +123,7 @@ def test_context_failure_never_enters_parameter_retry(wire):
 	wire.install(Reply(400, {"error": {"message": "maximum context length: max_tokens temperature"}}))
 	with pytest.raises(ai_fix.AiFixError) as caught:
 		ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [])
-	assert caught.value.kind == "config"
+	assert caught.value.kind == "context"
 	assert len(wire.posts) == len(wire.logs) == 1
 
 

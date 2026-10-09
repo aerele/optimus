@@ -17,6 +17,23 @@ versions may contain breaking changes see migration notes below).
   within a shared request budget. Network failures are not retried. Known
   reasoning models keep the provider-aware output cap; inline thinking is
   removed before an answer is processed.
+- A prompt that does not fit the model's context window is a `context`
+  failure, before sending or from the provider; it was `config`. A window too
+  small for any Optimus prompt stays `config`, and an unknown provider is now
+  `config` (it was `unknown`). `AiFixError.fatal` stays True for `auth`,
+  `quota`, `not_found` and `config` (`AI_FATAL_KINDS`) and is the one list of
+  failures that need the operator first; `context` is not fatal, so one
+  oversized prompt never stops the other findings.
+- AI failure messages are translated, say what happened and what to do next.
+  A context failure names the cause and, for a hosted provider, no longer
+  points at Ollama settings. A timeout names the request's whole budget in
+  whole seconds, not the fraction a retry had left. The provider's reply
+  follows as "The provider replied: ...", without the old ".:" join. An
+  unexpected error names only its type, and its Error Log row records where it
+  happened as plain `file:line:function` frames.
+- The guardrail re-ask reuses the parameter changes its first call needed
+  (temperature dropped, `max_completion_tokens`), so it no longer repeats a
+  rejected request. Nothing is kept from one suggestion to the next.
 - Regenerate Reports uses stored answers and does not call the model. Report
   regeneration and step humanization read recording JSON without loading
   Python trees or sidecars. Use Refresh AI suggestions for new answers.
@@ -54,6 +71,16 @@ versions may contain breaking changes see migration notes below).
   dropped silently, and an RQ job timeout during it stops the job.
 - Count a Refresh AI suggestions run with one atomic increment, committed
   before the refresh calls the provider, instead of a read-modify-write.
+- Treat Moonshot/Kimi's HTTP 429 `exceeded_current_quota_error` (a spent
+  balance or a suspended account) as exhausted quota, not a rate limit to wait
+  out.
+- Recognise more context-limit replies: Anthropic's "prompt is too long" and
+  "input length and `max_tokens` exceed context limit", Moonshot's "exceeded
+  model token limit", and the `context_length_exceeded` and
+  `exceed_context_size_error` codes. They are no longer sent through the
+  parameter retries. `max_tokens` is renamed to `max_completion_tokens` only
+  when the reply says the parameter is not supported, not for a value error
+  such as "max_tokens is too large".
 
 ### Upgrade notes
 
