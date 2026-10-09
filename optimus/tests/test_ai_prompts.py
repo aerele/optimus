@@ -235,3 +235,17 @@ def test_is_current_is_the_one_currency_rule():
 	assert ai_prompts.is_current({"prompt_version": v - 1}, current_version=v - 1)
 	for bad in ({}, {"prompt_version": v - 1}, {"prompt_version": True}, {"prompt_version": "4"}, None, True, "4"):
 		assert not ai_prompts.is_current(bad)
+
+
+def test_fix_is_current_ignores_a_bare_json_number():
+	from types import SimpleNamespace
+
+	from optimus import analyze
+
+	def row(raw):
+		return SimpleNamespace(llm_fix_json=raw)
+
+	v = ai_prompts.PROMPT_VERSION
+	assert analyze._fix_is_current(row(f'{{"prompt_version": {v}}}'))
+	for raw in (str(v), "7", "null", "[]", "not json", None, ""):
+		assert not analyze._fix_is_current(row(raw))

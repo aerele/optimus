@@ -1139,7 +1139,7 @@ def _fix_is_current(row) -> bool:
 		fix = json.loads(getattr(row, "llm_fix_json", None) or "null")
 	except (TypeError, ValueError):
 		return False
-	return is_current(fix)
+	return is_current(fix if isinstance(fix, dict) else None)
 
 
 def _deserialize_tree(uuid: str, tree_blob):
