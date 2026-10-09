@@ -32,7 +32,8 @@ versions may contain breaking changes see migration notes below).
   A context failure names the cause and, for a hosted provider, no longer
   points at Ollama settings. A timeout names the request's whole budget in
   whole seconds, not the fraction a retry or a guardrail re-ask had left. A
-  connect timeout that had the full 10 seconds to connect is a reachability
+  connect timeout that had the full 10 seconds to connect (as the first
+  request of a 10-second Request timeout does) is a reachability
   (`transport`) failure, not a slow model; one that had less of the request's
   budget left (a parameter retry, a redirect, a re-ask) is a `timeout`. A
   rejected request names the Base URL only for a provider whose Base URL you
@@ -188,7 +189,9 @@ versions may contain breaking changes see migration notes below).
   counted it as added. The write now starts after the provider call's read
   view is gone, is tried again from a rollback when the database ends the
   whole transaction (`frappe.QueryDeadlockError`, at most three tries; the
-  provider is never asked again), and `added` counts only committed answers.
+  provider is never asked again), and `added` counts only committed answers
+  (an error raised after the COMMIT, by an `after_commit` callback, is
+  checked by reading the answer back, so a saved answer still counts).
   A billed reply that turned out unusable is charged at once. No transaction
   stays open across a provider call, so the Steps to Reproduce call no longer
   runs while the refresh holds the session row.

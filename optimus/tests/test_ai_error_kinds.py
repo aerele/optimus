@@ -713,3 +713,25 @@ def test_an_odd_base_url_is_never_hosted(url):
 	"""A value that is not a string, an empty one, or one ``urlsplit`` refuses (an unclosed IPv6
 	bracket raises ValueError) reads as a bring-your-own endpoint."""
 	assert ai_fix._is_hosted_endpoint(url) is False
+
+
+@pytest.mark.parametrize("timeout", [10, 11, 60])
+def test_a_connect_timeout_under_the_real_clock_is_transport_from_the_smallest_request_timeout(marked, monkeypatch, timeout):
+	"""Settings clamps Request timeout to at least 10 seconds. At exactly 10 the first post has a
+	hair less than 10 seconds left by the time it is sent (the clock moved since the deadline was
+	set), yet it had the whole connect cap: an unreachable host is ``transport``, not ``timeout``.
+	The real clock, through the parameter ladder (OpenAI-compatible) and a plain post (Anthropic)."""
+	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **k: True)
+	sent = []
+
+	def post(url, **kw):
+		sent.append(kw["timeout"][0])
+		raise ai_fix.requests.exceptions.ConnectTimeout("fake connect timed out")
+
+	monkeypatch.setattr(ai_fix.requests, "post", post)
+	with pytest.raises(ai_fix.AiFixError) as ladder:
+		ai_fix._post_with_param_ladder(_LOCAL, {}, {"model": "m"}, timeout=timeout)
+	with pytest.raises(ai_fix.AiFixError) as plain:
+		ai_fix._http_post(_LOCAL, {}, {}, provider="anthropic", where="messages", timeout=timeout)
+	assert ladder.value.kind == plain.value.kind == "transport"
+	assert len(sent) == 2 and all(9.9 < cap <= 10 for cap in sent)

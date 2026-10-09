@@ -2861,16 +2861,27 @@ def _write_ai_answer(docname: str, finding: str, blob: str | None, tokens: int, 
 	provider is never asked again. Any other failure, or the last attempt's, is rolled back and
 	logged once after the ``try`` (``attempts``, and the ``tokens`` that are then not recorded),
 	the answer is not saved, and the caller counts the finding as failed. When the counter had
-	logged its own row for a failed attempt (``savepoint_rollback=failed``) and a retry then
-	committed, ``outcome=committed on attempt N`` is appended to that row, so it does not read as
-	lost tokens. An RQ job timeout leaves as a fresh instance."""
+	logged its own rows for failed attempts (``savepoint_rollback=failed``) and a retry then
+	committed, ``outcome=committed on attempt N`` is appended to each of those rows, so none
+	reads as lost tokens.
+
+	``safe_commit`` can raise after the SQL COMMIT has succeeded (an ``after_commit`` callback
+	that fails, a Redis timeout). When the final commit raises anything but a whole-transaction
+	rollback, the Finding's ``llm_fix_json`` is read again (a fresh query after the rollback,
+	``_answer_committed``): when it is this answer, the answer and its spend are committed, so
+	it returns True and the error is logged with ``outcome=committed ...``. A billed failure
+	(``blob`` None) has no answer to read back: its row says the error came after the COMMIT
+	and the tokens may be recorded. An RQ job timeout leaves as a fresh instance."""
 	from optimus.ai_fix import _LOGGED_ATTR, log_ai_failure
 
-	error = logged = None
+	error = None
+	logged: list = []  # every counter error the counter logged itself, one row each
 	attempt = 0
+	committing = False  # the error, if any, came from the final commit
 	while attempt < AI_WRITE_ATTEMPTS:
 		attempt += 1
 		error = None
+		committing = False
 		guard = safe_call.InterruptGuard()
 		try:
 			with guard:
@@ -2879,28 +2890,49 @@ def _write_ai_answer(docname: str, finding: str, blob: str | None, tokens: int, 
 				_add_ai_spend(docname, tokens)
 				if blob is not None:
 					frappe.db.set_value("Optimus Finding", finding, "llm_fix_json", blob)
+				committing = True
 				safe_commit()
 		except Exception as exc:
 			error = exc
 		if guard.pending():
-			error = logged = None
+			error = None
+			logged.clear()
 			raise guard.interrupt()
 		if error is None:
 			break
 		if getattr(error, _LOGGED_ATTR, False):
-			logged = error
+			logged.append(error)
 		safe_call.best_effort(lambda: frappe.db.rollback(), None)
 		if not _whole_transaction_rolled_back(error):
 			break
 	reference = {"session_uuid": session_uuid, "docname": docname, "finding": finding}
-	if error is None:
-		if logged is not None:
-			log_ai_failure("optimus ai backfill", logged, **reference, outcome=f"committed on attempt {attempt}")
-		logged = None
+	after_commit = error is not None and committing and not _whole_transaction_rolled_back(error)
+	if error is None or (after_commit and blob is not None and _answer_committed(finding, blob)):
+		if error is not None:
+			log_ai_failure(
+				"optimus ai backfill", error, **reference,
+				outcome="committed: the error came after the COMMIT, and the answer and its tokens are saved",
+			)
+		for counter_error in logged:
+			log_ai_failure("optimus ai backfill", counter_error, **reference, outcome=f"committed on attempt {attempt}")
+		error = None
+		logged.clear()
 		return True
+	if after_commit:
+		reference["outcome"] = "unknown: the error came from the COMMIT, so these tokens may well be recorded"
 	log_ai_failure("optimus ai backfill", error, **reference, attempts=attempt, tokens=tokens)
-	error = logged = None
+	error = None
+	logged.clear()
 	return False
+
+
+def _answer_committed(finding: str, blob: str) -> bool:
+	"""True when the Finding's committed ``llm_fix_json`` is ``blob`` (it carries its own
+	``generated_at``, so an earlier answer never matches). A fresh read after the caller's
+	rollback, never a cached value; False when it cannot be read. An RQ job timeout escapes fresh."""
+	return safe_call.best_effort(
+		lambda: frappe.db.get_value("Optimus Finding", finding, "llm_fix_json") == blob, False,
+	) is True
 
 
 def _run_ai_backfill(doc, *, cap: int | None = None,

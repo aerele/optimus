@@ -42,10 +42,16 @@ class _TxnDb:
 	rolls every pending write back (the server ended the transaction) and drops the savepoint, so
 	``rollback(save_point=)`` then fails as MariaDB's 1305 does; a "statement" failure leaves both."""
 
-	def __init__(self, *, fail_updates=None, fail_writes=None, fail_commit_of=None):
+	def __init__(
+		self, *, fail_updates=None, fail_writes=None, fail_commit_of=None, fail_after_commit=(),
+		deadlock_commits=False,
+	):
 		self.fail_updates = dict(fail_updates or {})  # n-th counter UPDATE -> "whole" | "statement"
 		self.fail_writes = dict(fail_writes or {})  # n-th Finding write -> "whole" | "other"
 		self.fail_commit_of = fail_commit_of  # the first COMMIT that would make this finding durable fails
+		# the n-th COMMIT succeeds, then an after_commit callback raises (Frappe runs them after the SQL COMMIT)
+		self.fail_after_commit = set(fail_after_commit)
+		self.deadlock_commits = deadlock_commits  # every COMMIT with writes is chosen as a deadlock victim
 		self.updates = self.writes = self.commits = 0
 		self.pending_tokens, self.pending = 0, {}
 		self.tokens, self.answers = 0, {}
@@ -53,6 +59,7 @@ class _TxnDb:
 		self.rollbacks = 0
 		self.charged = []
 		self.view_open = self.changed_since_view = False
+		self.fresh_reads = 0
 
 	def savepoint(self, name):
 		self.savepoint_alive = True
@@ -109,6 +116,9 @@ class _TxnDb:
 
 	def commit(self):
 		self.commits += 1
+		if self.deadlock_commits and self.open_writes:
+			self._end()
+			raise _Deadlock("(1213) Deadlock found when trying to get lock; the transaction was rolled back")
 		self.view_open = self.changed_since_view = False
 		if self.fail_commit_of is not None and self.fail_commit_of in self.pending:
 			self.fail_commit_of = None
@@ -116,6 +126,14 @@ class _TxnDb:
 		self.tokens += self.pending_tokens
 		self.answers.update(self.pending)
 		self.pending_tokens, self.pending = 0, {}
+		if self.commits in self.fail_after_commit:
+			raise ConnectionError("Timeout reading from socket (an after_commit callback)")
+
+	def get_value(self, doctype, name, field, *args, **kwargs):
+		"""A fresh read of what is committed."""
+		assert (doctype, field) == ("Optimus Finding", "llm_fix_json") and not kwargs.get("cache")
+		self.fresh_reads += 1
+		return self.answers.get(name)
 
 	@property
 	def open_writes(self):
@@ -390,3 +408,74 @@ def test_an_unattributed_refresh_commits_its_ambient_charges_before_it_returns(r
 	assert (out["added"], out["failed"]) == (0, 1)
 	assert db.charged == [("uuid-1", "session_uuid")]
 	assert db.tokens == _TOKENS and not db.open_writes
+
+
+def test_every_failed_counter_row_learns_that_a_retry_committed(refresh):
+	"""Two whole-transaction failures at the counter (two rows saying savepoint_rollback=failed),
+	then a commit on attempt 3: each of those rows gets the outcome, not only the last."""
+	db = _TxnDb(fail_updates={1: "whole", 2: "whole"})
+	refresh.install(db, _answers(1))
+	out = refresh.run()
+	assert out["added"] == 1 and db.tokens == _TOKENS
+	spend_rows = [log for log in refresh.logs if log[0] == "optimus ai spend"]
+	outcomes = [log[2].get("outcome") for log in refresh.logs if log[0] == "optimus ai backfill"]
+	assert len(spend_rows) == 2 and outcomes == ["committed on attempt 3"] * 2
+
+
+def _final_commit_of(n_findings_before):
+	"""The number of the COMMIT that makes a finding's write durable: each finding's write commits
+	twice (the provider call's read view first), so finding k's write ends with the (2k + 2)-th."""
+	return 2 * n_findings_before + 2
+
+
+def test_an_error_after_the_commit_still_counts_the_committed_answer(refresh):
+	"""An after_commit callback that raises (a redis timeout) makes ``safe_commit`` raise although
+	the answer and its spend are committed. A fresh read of the Finding finds the answer, so it
+	counts as added, and the row says it was saved, not that its tokens were lost."""
+	db = _TxnDb(fail_after_commit={_final_commit_of(1)})
+	refresh.install(db, _answers(3))
+	out = refresh.run()
+	assert (out["added"], out["failed"]) == (3, 0)
+	assert sorted(db.answers) == ["F0", "F1", "F2"] and db.tokens == 3 * _TOKENS
+	assert refresh.rows[1].llm_fix_json == db.answers["F1"] and db.fresh_reads == 1
+	[(title, error, context, active)] = refresh.logs
+	assert (title, error, context["finding"], active) == ("optimus ai backfill", "ConnectionError", "F1", None)
+	assert context["outcome"].startswith("committed") and "tokens" not in context and "attempts" not in context
+
+
+def test_an_error_before_the_commit_is_still_a_failure_without_a_read(refresh):
+	db = _TxnDb(fail_writes={1: "other"})
+	refresh.install(db, _answers(1))
+	out = refresh.run()
+	assert (out["added"], out["failed"]) == (0, 1) and db.fresh_reads == 0
+
+
+def test_an_error_after_the_commit_of_a_billed_failure_says_the_tokens_may_be_recorded(refresh):
+	"""A billed failure writes only its spend, so there is no answer to read back: its row says the
+	error came after the COMMIT and the tokens may well be recorded."""
+	db = _TxnDb(fail_after_commit={_final_commit_of(0)})
+	refresh.install(db, [_Reply("<think>unfinished")])
+	out = refresh.run()
+	assert (out["added"], out["failed"]) == (0, 1) and db.tokens == _TOKENS
+	[context] = [log[2] for log in refresh.logs if "outcome" in log[2]]
+	assert "may" in context["outcome"] and context["tokens"] == _TOKENS
+
+
+def test_an_error_after_a_retrys_commit_also_clears_the_earlier_counter_row(refresh):
+	db = _TxnDb(fail_updates={1: "whole"}, fail_after_commit={2})
+	refresh.install(db, _answers(1))
+	out = refresh.run()
+	assert out["added"] == 1 and db.tokens == _TOKENS
+	outcomes = sorted(log[2]["outcome"].split(":")[0] for log in refresh.logs if log[0] == "optimus ai backfill")
+	assert outcomes == ["committed", "committed on attempt 2"]
+
+
+def test_a_deadlock_at_the_commit_is_not_taken_for_an_error_after_it(refresh):
+	"""A COMMIT that the database answers with a deadlock rolled everything back: nothing to read
+	back, and the row says the tokens were not recorded (no "may be recorded" outcome)."""
+	db = _TxnDb(deadlock_commits=True)
+	refresh.install(db, [_Reply("<think>unfinished")])
+	out = refresh.run()
+	assert (out["added"], out["failed"]) == (0, 1) and db.tokens == 0 and db.fresh_reads == 0
+	[context] = [log[2] for log in refresh.logs if "attempts" in log[2]]
+	assert context["attempts"] == analyze.AI_WRITE_ATTEMPTS and "outcome" not in context

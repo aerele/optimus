@@ -1740,7 +1740,8 @@ def _http_post(
 			# With the full connect cap it is not a slow model but a reachability failure,
 			# whatever the request timeout. With less (a later post of the parameter ladder, a
 			# redirect hop, a re-ask), the call's budget ran out while connecting: a timeout.
-			failed_kind = "transport" if connect_timeout >= _CONNECT_TIMEOUT_CAP else "timeout"
+			full_cap = connect_timeout >= _CONNECT_TIMEOUT_CAP - _CONNECT_CAP_SLACK
+			failed_kind = "transport" if full_cap else "timeout"
 		except requests.exceptions.Timeout:
 			failed_kind = "timeout"
 			detail = "timeout"
@@ -1896,6 +1897,10 @@ def _request_failure(kind: str, error_name: str, budget: float) -> AiFixError:
 _MAX_REDIRECTS = 3
 # Seconds one connection attempt may take (less when less of the request's budget is left).
 _CONNECT_TIMEOUT_CAP = 10
+# A connect cap this close to _CONNECT_TIMEOUT_CAP is the full cap: the clock moves between the
+# deadline and the post, so a 10-second Request timeout (the least Settings allows) sends its first
+# post a cap a few microseconds short of 10.
+_CONNECT_CAP_SLACK = 0.05
 # The port a URL scheme means when the URL names none.
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
