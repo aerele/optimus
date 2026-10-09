@@ -27,16 +27,25 @@ versions may contain breaking changes see migration notes below).
   index's columns are all among its equality columns, or when an existing index serves
   every column but its Check fields (Frappe's creation index serves `creation > ? AND
   is_return = ?`); a one-column recipe also when its column is unique on its own, leads an
-  index or is the index EXPLAIN names. A lookup by `name` (the primary key) or by a child
-  table's `parent` gets no code. A recipe wider than four columns keeps the columns of an
-  existing index first, then by field type, Check fields last, and names the rest; if an
-  index that already finds these rows would be left out, there is no code. `!=`, `<>`
+  index or is the index EXPLAIN names. A lookup by `name` (the primary key), or by
+  `parent` on a child table whose real index list has an index that `parent` leads
+  (MariaDB adds one to every child table, Postgres none), gets no code, but only when the
+  key is compared with a value (`?`, a literal, an IN list or subquery, or another table's
+  column the query fixes to a value): a join condition such as `pr_item.parent = pr.name`
+  is no lookup, since the database may read either table first. A recipe wider than four
+  columns keeps the columns of an existing index first, then by field type, Check fields
+  last, and names the rest; if that would leave out every column of a unique index the
+  query fixes, there is no code (a non-unique one may match many rows, so the recipe
+  stays). `!=`, `<>`
   and `NOT` never narrow an index. A sort column the index cannot return in order is left
   out rather than appended, but a captured `IN (?)` (Frappe's recorder collapses every IN
   list to one placeholder) may be one value, so it keeps the sort with a hedged lead. An
   existing sort-serving index on a Filesort finding was rejected by the optimizer, so the
-  range recipe is given, unless LIMIT or the capture-time EXPLAIN says otherwise, and that
-  kept verdict names the range recipe. A column the table only feeds into a LEFT JOIN that
+  range recipe is given and names that index, unless the query has a LIMIT; that kept
+  verdict names the range recipe and needs an index that returns the rows in the order of
+  the whole ORDER BY. The capture-time EXPLAIN is no evidence: MariaDB's possible_keys
+  never lists an index that only serves ORDER BY, and a Postgres plan node names only the
+  index it used. A column the table only feeds into a LEFT JOIN that
   the WHERE keeps a LEFT JOIN is no index candidate. A missing column, a MariaDB reserved word on MariaDB (Postgres
   quotes names; such an entry is Postgres-only), a JSON field (MariaDB reports it as
   longtext, so the field type decides), a leading text column on Postgres, a first column
@@ -46,7 +55,8 @@ versions may contain breaking changes see migration notes below).
   Optimus cannot read, a UNION that filters the table in more than one branch, a WHERE
   column the SQL parser did not report (an unquoted `account`, `user`, `type`, `date` and
   others, or an unqualified column of a query on several tables, when the filter shape lets
-  an index use it; the only table of the main FROM gets such a column advised instead),
+  an index use it; the only table of the main FROM gets such a column advised instead, and
+  its ORDER BY or GROUP BY columns the parser left out too, in the clause's order),
   and a table Optimus has
   no information about (tabSessions, tabSeries, a removed DocType) say so, and
   a card then opens with "Optimus cannot say whether this index would help." instead of
