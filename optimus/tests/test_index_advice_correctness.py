@@ -585,7 +585,9 @@ def test_the_docs_and_changelog_carry_the_t12_texts():
 	assert "join condition such as `pr_item.parent = pr.name`" in log and "Postgres none" in log
 	assert "`possible_keys` never lists an index that only serves the ORDER BY" in doc
 	assert "possible_keys never lists an index that only serves ORDER BY" in log
-	assert "a unique index the query fixes" in doc and "a unique index the query fixes" in log
+	# fix round 5: a left-out index refuses when unique or ranked as well as the weakest kept column
+	assert "at least as well as the weakest column the new index would keep" in doc
+	assert "at least as well as the weakest kept column" in log
 	assert "the sort columns keep the clause's order" in doc and "in the clause's order" in log
 
 
@@ -1380,17 +1382,19 @@ class TestCapByEvidence:
 		assert advice.entry["columns"] == ["account", "cost_center", "voucher_no", "voucher_type"], _text(advice)
 		assert "Optimus left out credit, debit (an index here holds at most 4 columns)" in _text(advice)
 
-	def test_battery4_413_a_left_out_non_unique_index_keeps_the_capped_recipe(self):
-		"""Round 4, item 4: voucher_detail_no_index is not unique, so Optimus cannot know it
-		already finds these rows; the capped recipe stays and names the left-out column (only a
-		left-out unique index gives no code, TestCapRefusesOnlyForAUniqueIndex)."""
+	def test_battery4_413_a_left_out_index_as_selective_as_the_kept_gives_no_code(self):
+		"""Round 5: voucher_detail_no (Data) ranks with the kept Link columns, so its own index
+		already narrows the rows as well as the capped recipe could, which cannot help."""
 		q = (
 			"SELECT name FROM `tabGL Entry` WHERE `company`=? AND `account`=? AND `voucher_type`=? AND `voucher_no`=? "
 			"AND `voucher_detail_no`=?"
 		)
 		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabGL Entry"), evidence_lookup=_lookup(_GL4))
-		assert advice.entry["columns"] == ["account", "company", "voucher_no", "voucher_type"], _text(advice)
-		assert "Optimus left out voucher_detail_no (an index here holds at most 4 columns)" in _text(advice)
+		assert advice.route == ir.ROUTE_NO_CODE and not advice.unknown, _text(advice)
+		assert (
+			'The index "voucher_detail_no_index" on table "tabGL Entry" covers (voucher_detail_no), which this query '
+			"compares with known values"
+		) in _text(advice)
 
 	def test_without_indexes_check_fields_go_first_out(self):
 		ev = _ev(fields={**_ALL, "is_return": F("Check"), "due_date": F("Date"), "territory": F("Link")})
@@ -1789,9 +1793,11 @@ _SI_CAP = _ev(fields={
 
 
 class TestCapRefusesOnlyForAUniqueIndex:
-	"""Round 4, items 4 and 5: leaving out a non-unique index's columns keeps the capped
-	recipe (Optimus cannot know that index's selectivity); only a unique one already finds
-	the row, and that verdict never claims a sort."""
+	"""Round 4, items 4 and 5, refined in round 5: leaving out every column of an index the
+	query fixes gives no code when that index is unique, or when its lead column ranks by
+	field type at least as well as the weakest kept column (the cap's own rank); a Select
+	index left out behind Link columns keeps the capped recipe. The verdict never claims a
+	sort."""
 
 	def test_battery5_507_a_left_out_select_index_keeps_the_capped_recipe(self):
 		ev = _with_index(_SI_CAP, *((f"{c}_index", [c], False) for c in ("status", "customer", "company", "project", "cost_center")))
@@ -1815,6 +1821,68 @@ class TestCapRefusesOnlyForAUniqueIndex:
 		assert (
 			'The unique index "voucher_ref" on table "tabSales Invoice" already finds these rows by (voucher_ref)'
 		) in _text(advice)
+
+	def test_a_left_out_unique_index_refuses_whatever_its_type(self):
+		"""(a): a unique Select index ranks below the kept Link columns, yet returns one row."""
+		ev = _with_index(
+			_SI_CAP, ("idx_cc", ["company", "customer"], False), ("idx_pc", ["project", "cost_center"], False),
+			("status_unique", ["status"], True),
+		)
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND customer = ? AND project = ? AND cost_center = ? AND status = ?"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_NO_CODE, _text(advice)
+		assert 'The unique index "status_unique"' in _text(advice)
+
+	def test_a_left_out_index_as_selective_as_the_weakest_kept_column_refuses(self):
+		"""(b): due_date and posting_date (Date) tie; posting_date is left out, and the kept
+		due_date ranks no better, so posting_date_index narrows the rows as well."""
+		ev = _with_index(
+			_SI_CAP, ("idx_cc", ["company", "customer"], False), ("project_index", ["project"], False),
+			("posting_date_index", ["posting_date"], False), ("due_date_index", ["due_date"], False),
+		)
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND customer = ? AND project = ? AND posting_date = ? AND due_date = ?"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_NO_CODE, _text(advice)
+		assert 'The index "posting_date_index" on table "tabSales Invoice" covers (posting_date)' in _text(advice)
+
+	def test_the_left_out_indexs_lead_column_decides(self):
+		"""(status, territory) is left out whole; its lead status is a Select field, which ranks
+		below the kept Link columns, so the capped recipe stays."""
+		ev = _with_index(
+			_SI_CAP, ("idx_cc", ["company", "customer"], False), ("idx_pc", ["project", "cost_center"], False),
+			("idx_st", ["status", "territory"], False),
+		)
+		q = (
+			"SELECT name FROM `tabSales Invoice` WHERE company = ? AND customer = ? AND project = ? AND cost_center = ? "
+			"AND status = ? AND territory = ?"
+		)
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(ev))
+		assert advice.entry["columns"] == ["company", "cost_center", "customer", "project"], _text(advice)
+		assert "Optimus left out status, territory (an index here holds at most 4 columns)" in _text(advice)
+
+	def test_a_left_out_column_that_is_no_field_ranks_last(self):
+		"""creation has no DocField, so the cap's rank puts it after every typed column, and
+		Frappe's creation index left out behind Link columns keeps the capped recipe."""
+		ev = _with_index(
+			_SI_CAP, ("idx_cc", ["company", "customer"], False), ("idx_pc", ["project", "cost_center"], False),
+			("creation", ["creation"], False),
+		)
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND customer = ? AND project = ? AND cost_center = ? AND creation = ?"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(ev))
+		assert advice.entry["columns"] == ["company", "cost_center", "customer", "project"], _text(advice)
+
+	def test_the_real_gl_voucher_detail_no_lookup_gives_no_code_and_no_sort_claim(self):
+		"""c1: the left-out Data column voucher_detail_no has its own index, which narrows the rows
+		as well as the Link columns a new index would keep."""
+		q = (
+			"select name, posting_date from `tabGL Entry` where company=? and account=? and voucher_type=? and "
+			"voucher_no=? and voucher_detail_no=? and is_cancelled = 0 order by posting_date desc limit 1"
+		)
+		for ftype in ("Full Table Scan", "Filesort"):
+			advice = ir.advise_finding(_explain(ftype, q, table="tabGL Entry"), evidence_lookup=_lookup(_GL4))
+			text = _text(advice)
+			assert advice.route == ir.ROUTE_NO_CODE and advice.served_by == "", text
+			assert '"voucher_detail_no_index"' in text and "already serves this filter and sort" not in text
 
 	def test_a_cap_found_verdict_never_claims_the_sort(self):
 		"""c1: GL voucher_detail_no = ? ... ORDER BY posting_date DESC LIMIT 1 read "already

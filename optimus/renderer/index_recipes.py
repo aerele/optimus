@@ -2032,20 +2032,34 @@ def _advise(
 	if evidence is None:
 		return _no_evidence(doctype, cols or list(shapes))
 	if capped:
-		# never leave out every column of a unique index the query fixes: it finds at most one
-		# row (item 3). A non-unique one may match many rows (a Select column), so the capped
-		# recipe stays (round 4, item 4); the verdict is about the filter only, never the sort,
-		# so it names no sort-serving index (item 5)
-		found = next((
+		# never leave out every column of an index the query fixes when it narrows the rows at
+		# least as well as the capped recipe could: a unique one finds at most one row (item 3),
+		# and one whose lead column ranks by field type at least as well as the weakest kept
+		# column (the cap's own rank) is as selective as any column the recipe keeps (round 5).
+		# A Select index left out behind Link columns may match many rows, so the capped recipe
+		# stays (round 4, item 4). The verdict is about the filter only, never the sort, so it
+		# names no sort-serving index (item 5)
+		cut = [
 			ix for ix in evidence.indexes
-			if ix.unique and ix.columns and set(ix.columns) <= equality and not set(ix.columns) & set(cols)
-		), None)
-		if found is not None:
+			if ix.columns and set(ix.columns) <= equality and not set(ix.columns) & set(cols)
+		]
+		unique = next((ix for ix in cut if ix.unique), None)
+		if unique is not None:
 			return _no_code(doctype, cols, (
-				f'The unique index "{found.name}" on table "{evidence.table}" already finds these rows by '
-				f"{_cols_text(found.columns)}, which this query compares with known values, so it returns at most "
+				f'The unique index "{unique.name}" on table "{evidence.table}" already finds these rows by '
+				f"{_cols_text(unique.columns)}, which this query compares with known values, so it returns at most "
 				f"one row, and an index here holds at most {MAX_INDEX_COLUMNS} columns, so Optimus gives no index "
 				"code. Check the query with EXPLAIN to see which index it uses."
+			))
+		weakest = max((_type_rank(evidence, col) for col in cols), default=0)
+		found = next((ix for ix in cut if _type_rank(evidence, ix.columns[0]) <= weakest), None)
+		if found is not None:
+			return _no_code(doctype, cols, (
+				f'The index "{found.name}" on table "{evidence.table}" covers {_cols_text(found.columns)}, which this '
+				f"query compares with known values. An index here holds at most {MAX_INDEX_COLUMNS} columns, so a new "
+				"one would leave that out, and by field type it narrows the rows at least as well as the columns a "
+				"new index would keep, so Optimus gives no index code. Check the query with EXPLAIN to see which "
+				"index it uses."
 			))
 		order_dropped = order_dropped + [
 			(col, f"an index here holds at most {MAX_INDEX_COLUMNS} columns") for col in capped
@@ -2106,6 +2120,13 @@ _TYPE_RANK: dict[str, int] = {
 }
 
 
+def _type_rank(evidence: TableEvidence, col: str) -> int:
+	"""``_TYPE_RANK`` of the column's field type (lower narrows an equality filter better); 4
+	for a type it does not list or a column that is no field."""
+	field = evidence.fields.get(col)
+	return _TYPE_RANK.get(field.fieldtype, 4) if field is not None else 4
+
+
 def _cap(cols: list[str], equality: set[str], evidence: TableEvidence | None) -> tuple[list[str], list[str]]:
 	"""``(kept, left out)`` for the ``MAX_INDEX_COLUMNS`` cap. A finding's equality block
 	wider than the cap keeps, by evidence and never by name (item 3): first the columns of
@@ -2122,9 +2143,7 @@ def _cap(cols: list[str], equality: set[str], evidence: TableEvidence | None) ->
 	width = {col: max((len(ix.columns) for ix in full if col in ix.columns), default=0) for col in block}
 
 	def key(col: str) -> tuple:
-		field = evidence.fields.get(col)
-		rank = _TYPE_RANK.get(field.fieldtype, 4) if field is not None else 4
-		return (0 if width[col] else 1, -width[col], rank, col.lower())
+		return (0 if width[col] else 1, -width[col], _type_rank(evidence, col), col.lower())
 
 	keep = set(sorted(block, key=key)[:MAX_INDEX_COLUMNS])
 	return [col for col in block if col in keep], [col for col in cols if col not in keep]

@@ -34,9 +34,11 @@ versions may contain breaking changes see migration notes below).
   column the query fixes to a value): a join condition such as `pr_item.parent = pr.name`
   is no lookup, since the database may read either table first. A recipe wider than four
   columns keeps the columns of an existing index first, then by field type, Check fields
-  last, and names the rest; if that would leave out every column of a unique index the
-  query fixes, there is no code (a non-unique one may match many rows, so the recipe
-  stays). `!=`, `<>`
+  last, and names the rest; if that would leave out every column of an index the query
+  fixes that is unique, or whose lead column ranks by field type at least as well as the
+  weakest kept column (GL Entry's voucher_detail_no_index), there is no code, since a new
+  index cannot narrow the rows further (a Select index left out behind Link columns may
+  match many rows, so the recipe stays). `!=`, `<>`
   and `NOT` never narrow an index. A sort column the index cannot return in order is left
   out rather than appended, but a captured `IN (?)` (Frappe's recorder collapses every IN
   list to one placeholder) may be one value, so it keeps the sort with a hedged lead. An
