@@ -755,7 +755,7 @@ def test_the_ps_route_entry_is_stamped_mariadb():
 ])
 def test_a_malformed_entry_never_fails_the_migrate_or_stops_the_next_entry(monkeypatch, bad, db_type, lock_wait):
 	"""A hand-edited INDEXES list: the failure handler itself must not raise on an entry
-	that has no "doctype" (final verification, malformed.py)."""
+	that has no "doctype", a typo'd key or is not a dict, or one bad entry would fail migrate."""
 	good = {"doctype": "Sales Invoice", "columns": ["customer", "status"], "index_name": _SI_NAME}
 	site = _Site(db_type=db_type, lock_wait=lock_wait)
 	frappe = ModuleType("frappe")
