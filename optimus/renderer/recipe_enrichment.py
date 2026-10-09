@@ -161,7 +161,8 @@ MAX_LOGGED_EVIDENCE_FAILURES = 10
 class _EvidenceLookup:
 	"""A per-render ``evidence_lookup(table)``: memoised per table (misses included), so
 	each table costs its queries once per render. Ordinary failures give None and write one
-	bench-log line per table; ``read_failed(table)`` tells such a failure from a table
+	bench-log line per table for the first 10 tables, then ``log_unlisted_failures`` writes
+	one summary line for the rest; ``read_failed(table)`` tells such a failure from a table
 	that has no evidence (no DocType on this site), so the advice can say which. An RQ job
 	timeout escapes as a fresh instance."""
 
@@ -189,8 +190,9 @@ class _EvidenceLookup:
 		Called once after the recipes ran, never inside an ``except``."""
 		unlisted = len(self._failed) - MAX_LOGGED_EVIDENCE_FAILURES
 		if unlisted > 0:
+			noun = "table" if unlisted == 1 else "tables"
 			log_error_line(
-				f"optimus: evidence read failed for {unlisted} more tables "
+				f"optimus: evidence read failed for {unlisted} more {noun} "
 				f"(only the first {MAX_LOGGED_EVIDENCE_FAILURES} are listed above)"
 			)
 

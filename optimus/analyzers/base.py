@@ -468,8 +468,10 @@ def cut_at_bench_apps(filename: str) -> str | None:
 def _last_app_segment(norm: str) -> str | None:
 	"""The ``<app>`` in a real ``apps/<app>/`` segment, or None.
 
-	Boundary-anchored: on an absolute path the LAST ``/apps/`` wins (so a bench
-	nested under a folder also named ``apps`` still resolves the real app); a
+	Boundary-anchored: on an absolute path the bench layout wins (the last ``/apps/``
+	followed by ``<app>/<app>/``, see ``cut_at_bench_apps``), else the LAST ``/apps/``, so a
+	bench nested under a folder also named ``apps``, or an app with an ``apps`` package, still
+	resolves the real app; a
 	name merely ending in ``apps`` (``webapps/module.py``) is not the bench dir.
 	A mid-path ``/apps/`` in a RELATIVE path is a user subpackage, so
 	``myapp/apps/foo.py`` returns None (caller falls back to the top segment).

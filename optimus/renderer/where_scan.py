@@ -401,10 +401,11 @@ def _valued(tokens: list[str], i: int, j: int, pairs: dict[int, int], pinned=fro
 	return _value_token(tokens[i - 2])
 
 
-def _pinned(conjuncts: list[list[str]]) -> frozenset[tuple[str, str]]:
+def _pinned(conjuncts: list[list[str]], *, single_only: bool = False) -> frozenset[tuple[str, str]]:
 	"""``_ref_key`` of every column reference, of any table, that an AND piece of its own
 	compares with a value: ``ref = value``, ``value = ref`` or ``ref IN (values or a
-	subquery)``."""
+	subquery)``. ``single_only`` keeps the ``=`` forms: an IN list or a subquery may hold
+	many values, which a sort cannot see through."""
 	out: set[tuple[str, str]] = set()
 	for part in conjuncts:
 		if not part:
@@ -413,6 +414,8 @@ def _pinned(conjuncts: list[list[str]]) -> frozenset[tuple[str, str]]:
 		if _NAME_RE.fullmatch(part[0]) and not part[0].startswith('"'):
 			j = _chain_end(part, 0)
 			after = part[j + 1].lower() if j + 1 < len(part) else ""
+			if single_only and after == "in":
+				continue
 			whole = (
 				j + 3 == len(part) if after in _EQUALITY or (after == "in" and part[j + 2 : j + 3] != ["("])
 				else after == "in" and pairs.get(j + 2) == len(part) - 1
@@ -489,13 +492,14 @@ def _conjunct_refs(tokens: list[str], qualifiers, pinned=frozenset()) -> list[tu
 	return out
 
 
-def _scan_where(query: str, labelled, qualifiers=None, *, truncated: bool = False):
+def _scan_where(query: str, labelled, qualifiers=None, *, truncated: bool = False, single_pins_only: bool = False):
 	"""``(unusable, comparisons, valued)`` for the WHERE columns of ``labelled``: ``unusable``
 	is ``{column: kinds}`` for each column a composite index cannot use (a kind is ``"or"``,
 	``"like"``, ``"function:<NAME>"``, ``"expression"`` or ``"unsure"``, see the section
 	comment), ``comparisons`` is ``{column: "eq" | "in" | "range"}`` for the usable ones and
 	``valued`` the same for the equality uses compared with a value, never with a column
-	(``_valued``: a key lookup needs one)."""
+	(``_valued``: a key lookup needs one). ``single_pins_only`` counts a column of another
+	table as pinned only by ``=``, never by IN or a subquery (the join-bound sort check)."""
 	where_cols: list[str] = []
 	for label, col in labelled or []:
 		if label == "WHERE" and col not in where_cols:
@@ -512,7 +516,7 @@ def _scan_where(query: str, labelled, qualifiers=None, *, truncated: bool = Fals
 	valued: dict[str, str] = {}
 	kinds: dict[str, set[str]] = defaultdict(set)
 	rank = {"eq": 0, "in1": 1, "in": 1, "range": 2}  # the most selective plain use wins
-	pinned = _pinned(conjuncts)
+	pinned = _pinned(conjuncts, single_only=single_pins_only)
 	for part in conjuncts:
 		for name, ref_kinds, comparison, by_value in _conjunct_refs(part, qualifiers, pinned):
 			if ref_kinds:

@@ -517,6 +517,26 @@ class TestJoinBoundSort:
 			"the index may not return the rows in order. So it gives no index code. Check the query with EXPLAIN."
 		)
 
+	@pytest.mark.parametrize("pin", ["c.name IN (?)", "c.name IN (SELECT parent FROM `tabCustomer Group Item` WHERE x = ?)"])
+	@pytest.mark.parametrize("joins", [
+		"`tabSales Invoice` si, `tabCustomer` c WHERE si.customer = c.name AND {pin}",
+		"`tabSales Invoice` si JOIN `tabCustomer` c ON c.name = si.customer WHERE si.customer = c.name AND {pin}",
+	])
+	def test_a_join_column_pinned_by_an_in_list_or_subquery_is_still_join_bound(self, joins, pin):
+		"""The partner column may hold many values, so the sort cannot be returned in order."""
+		q = "SELECT si.name FROM " + joins.format(pin=pin) + " ORDER BY si.posting_date LIMIT 20"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI_J, _CU_J))
+		assert advice.route == ir.ROUTE_NO_CODE and advice.unknown, _text(advice)
+		assert "already sorted" not in _text(advice)
+
+	def test_a_join_column_pinned_to_one_value_keeps_its_sort_recipe(self):
+		q = (
+			"SELECT si.name FROM `tabSales Invoice` si, `tabCustomer` c WHERE si.customer = c.name AND c.name = ? "
+			"ORDER BY si.posting_date LIMIT 20"
+		)
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI_J, _CU_J))
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["customer", "posting_date"], _text(advice)
+
 	def test_a_value_bound_equality_keeps_its_sort_recipe(self):
 		q = (
 			"SELECT si.name FROM `tabSales Invoice` si LEFT JOIN `tabCustomer` c ON c.name = si.customer "

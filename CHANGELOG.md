@@ -230,6 +230,10 @@ versions may contain breaking changes see migration notes below).
   single-flight flag says it "does not hold it". The Refresh AI suggestions toast no longer
   says "Nothing to refresh." when calls failed. One shared `cut_at_bench_apps` helper in
   `analyzers/base.py` replaces three path cuts. AI-FIXING section 9 lists the split modules.
+  A malformed hand-edited `INDEXES` entry (no `doctype`, a typo'd key, not a dict) no longer
+  fails `bench migrate` from inside the failure handler: the Error Log row falls back to a
+  title without the entry. A join column pinned only by an `IN` list or subquery counts as
+  join-bound for a sort recipe (no verdict instead of "the rows come back already sorted").
 
 ### API
 

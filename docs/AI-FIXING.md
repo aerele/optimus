@@ -140,9 +140,15 @@ def ensure_indexes():
 				frappe.db.commit()
 			except Exception as error:
 				_rollback()
-				title = _title(entry, f"was not created ({type(error).__name__})")
+				# a hand-edited entry can lack a "doctype" or not be a dict: the handler itself must
+				# not raise, or one bad entry would fail the migrate and skip the entries after it
+				title = f"ensure_indexes: an entry was not created ({type(error).__name__})"
+				reference = {}
+				with contextlib.suppress(Exception):
+					title = _title(entry, f"was not created ({type(error).__name__})")
+					reference = {"reference_doctype": "DocType", "reference_name": entry["doctype"]}
 				try:
-					frappe.log_error(title=title, reference_doctype="DocType", reference_name=entry["doctype"])
+					frappe.log_error(title=title, **reference)
 					frappe.db.commit()
 				except Exception:
 					# the Error Log row failed too: migrate's output is the only record left

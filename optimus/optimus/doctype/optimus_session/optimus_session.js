@@ -245,13 +245,13 @@ function _refill_ai_call(frm) {
 			if (fx.added) parts.push(__("{0} fix(es)", [fx.added]));
 			if (st.updated) parts.push(__("steps rewritten"));
 			const failed = fx.failed || 0;
-			// a "nothing to refresh" toast would contradict the failed-calls alert below
+			const skipped = fx.skipped_time || 0;
+			// a "nothing to refresh" toast would contradict the failed-calls and skipped alerts below
 			const msg = parts.length
 				? __("Refreshed: {0}.", [parts.join(", ")])
-				: failed
+				: failed || skipped
 					? ""
 					: __("Nothing to refresh.");
-			const skipped = fx.skipped_time || 0;
 			const indicator = failed ? "red" : parts.length ? "green" : "orange";
 			if (msg) frappe.show_alert({ message: msg, indicator: indicator });
 			if (failed) {

@@ -2133,7 +2133,12 @@ def _advise_finding(
 			f"{', '.join(probe_cut)} only to look up rows of another table through a LEFT JOIN. So it gives no "
 			"index code. Check the query with EXPLAIN."
 		), unknown=True)
-	joined = _join_bound_before_sort(advice, comparisons, valued) if serves and len(source) > 1 else []
+	joined = []
+	if serves and len(source) > 1:
+		# a column joined to a table column that an IN list or subquery pins takes many values,
+		# which a sort cannot see through: only a single value (=) counts as one
+		single = _scan_where(query, labelled, qualifiers, truncated=truncated, single_pins_only=True)[2]
+		joined = _join_bound_before_sort(advice, comparisons, single)
 	if joined:
 		# the column takes many values from the join, so its index cannot return the rows in order
 		verb, column = ("sorts", "sort") if ftype == "Filesort" else ("groups", "group")

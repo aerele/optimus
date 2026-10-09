@@ -53,7 +53,7 @@ def test_the_refresh_toast_says_nothing_to_refresh_only_when_nothing_failed():
 	js = _read("optimus", "optimus", "doctype", "optimus_session", "optimus_session.js")
 	start = js.index("const failed = fx.failed || 0;")
 	assert start < js.index("Nothing to refresh.")
-	assert ": failed" in js[start:js.index("Nothing to refresh.")]
+	assert ": failed || skipped" in js[start:js.index("Nothing to refresh.")]
 
 
 def test_evidence_failures_past_the_cap_get_one_summary_line(lines, monkeypatch):
@@ -67,6 +67,15 @@ def test_evidence_failures_past_the_cap_get_one_summary_line(lines, monkeypatch)
 	assert lines[recipe_enrichment.MAX_LOGGED_EVIDENCE_FAILURES:] == [
 		"optimus: evidence read failed for 3 more tables (only the first 10 are listed above)",
 	]
+
+
+def test_the_summary_line_says_one_more_table_for_one(lines, monkeypatch):
+	monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", _boom)
+	lookup = recipe_enrichment.make_evidence_lookup()
+	for i in range(recipe_enrichment.MAX_LOGGED_EVIDENCE_FAILURES + 1):
+		lookup(f"tabT{i}")
+	lookup.log_unlisted_failures()
+	assert lines[-1] == "optimus: evidence read failed for 1 more table (only the first 10 are listed above)"
 
 
 def test_no_summary_line_when_every_failure_was_listed(lines, monkeypatch):

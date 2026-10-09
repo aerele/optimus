@@ -743,3 +743,32 @@ def test_the_ps_route_entry_is_stamped_mariadb():
 	"""PG has no get_column_index, so the Property Setter entry must never run there."""
 	code = ir.ensure_indexes_code([_PO_NO], app_name="myapp")
 	assert '{"doctype": "Sales Invoice", "search_index_field": "po_no", "db": "mariadb"}' in code
+
+
+@pytest.mark.parametrize("lock_wait", [86400, 300])  # v15 (no cap) and v16 migrate (300 s)
+@pytest.mark.parametrize("db_type", ["mariadb", "postgres"])
+@pytest.mark.parametrize("bad", [
+	{"columns": ["po_no"], "index_name": "idx_x"},  # no doctype
+	"Sales Invoice",  # not a dict
+	{"doc_type": "Sales Invoice", "columns": ["po_no"], "index_name": "idx_y"},  # typo'd key
+	None,
+])
+def test_a_malformed_entry_never_fails_the_migrate_or_stops_the_next_entry(monkeypatch, bad, db_type, lock_wait):
+	"""A hand-edited INDEXES list: the failure handler itself must not raise on an entry
+	that has no "doctype" (final verification, malformed.py)."""
+	good = {"doctype": "Sales Invoice", "columns": ["customer", "status"], "index_name": _SI_NAME}
+	site = _Site(db_type=db_type, lock_wait=lock_wait)
+	frappe = ModuleType("frappe")
+	frappe.db, frappe.flags, frappe.log_error = site, site.flags, site.log_error
+	monkeypatch.setitem(sys.modules, "frappe", frappe)
+	code = ir.ensure_indexes_code([good], app_name="myapp")
+	code = code.replace("INDEXES = [\n", f"INDEXES = [\n\t{bad!r},\n", 1)
+	namespace = {}
+	exec(compile(code, "optimus_indexes.py", "exec"), namespace)
+	site.write("EARLIER hook")
+	namespace["ensure_indexes"]()
+	site.write("LATER hook")
+	site.commit()
+	assert (_SI, _SI_NAME) in site.indexes
+	assert "EARLIER hook" in site.committed and "LATER hook" in site.committed
+	assert site.aborted is False
