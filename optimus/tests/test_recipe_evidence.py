@@ -194,3 +194,140 @@ def test_a_job_timeout_inside_get_meta_restores_the_mute_flag(site, monkeypatch)
 ])
 def test_text_type_classification(dialect, data_type, text):
 	assert dialect.is_text_type(data_type) is text
+
+
+# --- an index read that came back empty is a failed read -------------------------------
+# Every DocType table has a primary key on name, so a table with columns and no index at
+# all means the index read failed: the dialect turns an ordinary SQL error into an empty
+# list. Advice built on that list would give code for an index that may exist already.
+
+
+@pytest.fixture
+def logged(monkeypatch):
+	out = []
+	monkeypatch.setattr(enrich, "log_error_line", out.append)
+	return out
+
+
+def test_an_empty_index_list_on_a_table_with_columns_is_a_failed_read(site, logged):
+	site.dialect.indexes = []
+	lookup = enrich.make_evidence_lookup()
+	assert lookup("tabSales Invoice") is None
+	assert lookup.read_failed("tabSales Invoice")
+	assert logged == ["optimus: evidence read failed for tabSales Invoice: EmptyIndexList"]
+
+
+def test_a_failed_index_read_never_gives_code(site, logged):
+	from optimus.renderer import index_recipes
+
+	site.dialect.indexes = []
+	lookup = enrich.make_evidence_lookup()
+	advice = index_recipes.advise_finding(
+		{"finding_type": "Missing Index", "technical_detail": {"table": "tabSales Invoice", "column": "customer"}},
+		evidence_lookup=lookup,
+	)
+	assert advice.route == index_recipes.ROUTE_NO_CODE and advice.code is None
+	assert "could not read the details" in advice.reason
+
+
+class _ShowIndexFails:
+	"""A MariaDB frappe.db whose SHOW INDEX raises ``exc`` (a lock wait, a lost connection,
+	an RQ job timeout) and whose information_schema read works."""
+
+	db_type = "mariadb"
+
+	def __init__(self, exc):
+		self.exc = exc
+
+	def exists(self, doctype, name=None, *args, **kwargs):
+		return name if doctype == "DocType" and name == "Sales Invoice" else None
+
+	def sql(self, query, values=None, as_dict=False, **kwargs):
+		if " ".join(str(query).split()).startswith("SHOW INDEX"):
+			raise self.exc
+		return [{"column_name": "name", "data_type": "varchar"}, {"column_name": "customer", "data_type": "varchar"}]
+
+
+def test_a_real_mariadb_index_read_that_raises_is_a_failed_read(site, logged, monkeypatch):
+	import frappe
+
+	monkeypatch.setattr(frappe, "db", _ShowIndexFails(RuntimeError("(1205, 'Lock wait timeout exceeded')")))
+	monkeypatch.setattr(enrich, "get_dialect", lambda: MariaDBDialect())
+	lookup = enrich.make_evidence_lookup()
+	assert lookup("tabSales Invoice") is None and lookup.read_failed("tabSales Invoice")
+
+
+def test_a_job_timeout_in_the_real_index_read_escapes_fresh(site, monkeypatch):
+	import frappe
+
+	original = _JobTimeout("deadline")
+	monkeypatch.setattr(safe_call, "job_timeout_types", lambda: (_JobTimeout,))
+	monkeypatch.setattr(frappe, "db", _ShowIndexFails(original))
+	monkeypatch.setattr(enrich, "get_dialect", lambda: MariaDBDialect())
+	with pytest.raises(_JobTimeout) as caught:
+		enrich.make_evidence_lookup()("tabSales Invoice")
+	assert caught.value is not original and caught.value.__context__ is None
+
+
+class _PostgresDb:
+	"""A Postgres frappe.db that records savepoint calls; ``fail`` names the call that raises."""
+
+	db_type = "postgres"
+
+	def __init__(self, fail=None):
+		self.fail = fail
+		self.calls = []
+
+	def savepoint(self, name):
+		self.calls.append(("savepoint", name))
+
+	def release_savepoint(self, name):
+		self.calls.append(("release", name))
+
+	def rollback(self, save_point=None, **kwargs):
+		self.calls.append(("rollback", save_point))
+
+	def exists(self, doctype, name=None, *args, **kwargs):
+		if self.fail == "exists":
+			raise RuntimeError("current transaction is aborted")
+		return name if doctype == "DocType" and name == "Sales Invoice" else None
+
+
+@pytest.mark.parametrize("fail", ["exists", "get_meta"])
+def test_on_postgres_a_failed_read_rolls_back_to_its_savepoint(site, logged, monkeypatch, fail):
+	"""On Postgres one failed statement aborts the whole transaction, so the whole read runs
+	under a savepoint and a failure rolls back to it before the read counts as failed."""
+	import frappe
+
+	db = _PostgresDb(fail=fail)
+	monkeypatch.setattr(frappe, "db", db)
+	site.dialect.name = "postgres"
+	if fail == "get_meta":
+		monkeypatch.setattr(frappe, "get_meta", _boom_meta, raising=False)
+	lookup = enrich.make_evidence_lookup()
+	assert lookup("tabSales Invoice") is None and lookup.read_failed("tabSales Invoice")
+	(opened,) = [name for call, name in db.calls if call == "savepoint"]
+	assert db.calls[-1] == ("rollback", opened) and ("release", opened) not in db.calls
+
+
+def _boom_meta(*args, **kwargs):
+	raise RuntimeError("get_meta failed")
+
+
+def test_on_postgres_a_good_read_releases_its_savepoint(site, monkeypatch):
+	import frappe
+
+	db = _PostgresDb()
+	monkeypatch.setattr(frappe, "db", db)
+	site.dialect.name = "postgres"
+	evidence = enrich.make_evidence_lookup()("tabSales Invoice")
+	assert evidence is not None and evidence.dialect == "postgres"
+	(opened,) = [name for call, name in db.calls if call == "savepoint"]
+	assert db.calls == [("savepoint", opened), ("release", opened)]
+
+
+def test_on_mariadb_the_read_takes_no_savepoint(site):
+	import frappe
+
+	assert not hasattr(frappe.db, "savepoint")  # the fake would raise if the read asked for one
+	assert enrich.make_evidence_lookup()("tabSales Invoice") is not None

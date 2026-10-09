@@ -493,7 +493,8 @@ def test_a_failed_missing_index_is_neutral_and_says_what_to_do(evidence, monkeyp
 
 	monkeypatch.setattr(index_recipes, "advise_finding", boom)
 	out = _render(_doc([_mi_customer()]))
-	assert "Index on tabSales Invoice(customer): no new index recommended" in out
+	# a failure is no verdict on the index
+	assert "Index on tabSales Invoice(customer): Optimus cannot say" in out and "no new index recommended" not in out
 	assert "Add a database index" not in out
 	assert recipe_enrichment.RECIPE_FAILED_HINT in out
 	assert 'send the bench log line "optimus: index advice failed" to the Optimus maintainers' in out
@@ -542,3 +543,82 @@ def test_a_render_parses_each_query_once_for_its_aliases(evidence, monkeypatch):
 	rows = [_row(ftype, dict(detail)) for ftype in ("Full Table Scan", "Low Filter Ratio", "Filesort")]
 	_render(_doc(rows))
 	assert calls == [detail["normalized_query"]]
+
+
+# --- a routed Filesort or Temporary Table whose index keeps the sort --------------------
+
+_FS_DESC = (
+	"A query against **tabSales Invoice** had to sort its results without the help of an index. For small result "
+	"sets this is fine, but on large data it slows the query down significantly. Adding an index that covers the "
+	"ORDER BY clause usually fixes it."
+)
+
+
+def _filesort(query):
+	detail = {"table": "tabSales Invoice", "normalized_query": query, "callsite": _CALLSITE}
+	return _titled("Filesort", detail, "Filesort on tabSales Invoice", _FS_DESC)
+
+
+def test_a_routed_filesort_that_keeps_the_sort_never_promises_to_fix_it(evidence):
+	row = _filesort("SELECT name FROM `tabSales Invoice` WHERE customer = ? ORDER BY lower(po_no) LIMIT 5")
+	stored = (row.title, row.customer_description)
+	out = _render(_doc([row]))
+	assert "Adding an index that covers the ORDER BY clause usually fixes it." not in out
+	assert recipe_enrichment.SORT_STAYS_NOTES["Filesort"] in out
+	assert "Avoid the filesort" not in _plan_titles(out)
+	assert recipe_enrichment.NO_INDEX_ACTION_TITLE in _plan_titles(out)
+	assert "<pre" in out.split("Filesort on tabSales Invoice", 1)[1]  # the code is still shown
+	assert (row.title, row.customer_description) == stored
+
+
+def test_a_routed_filesort_that_removes_the_sort_keeps_its_text(evidence):
+	query = "SELECT name FROM `tabSales Invoice` WHERE customer = ? ORDER BY posting_date LIMIT 5"
+	out = _render(_doc([_filesort(query)]))
+	assert "Adding an index that covers the ORDER BY clause usually fixes it." in out
+	assert recipe_enrichment.SORT_STAYS_NOTES["Filesort"] not in out
+	assert "Avoid the filesort" in _plan_titles(out)
+
+
+def test_a_routed_temporary_table_that_keeps_it_says_so(evidence):
+	q = "SELECT customer, COUNT(name) FROM `tabSales Invoice` WHERE status = ? GROUP BY customer ORDER BY COUNT(name)"
+	detail = {"table": "tabSales Invoice", "normalized_query": q, "callsite": _CALLSITE}
+	out = _render(_doc([_titled("Temporary Table", detail, "Temporary table on tabSales Invoice", "d")]))
+	assert recipe_enrichment.SORT_STAYS_NOTES["Temporary Table"] in out
+	assert "Avoid the temporary table" not in _plan_titles(out)
+
+
+def test_the_export_carries_whether_the_sort_stays(evidence):
+	lookup = recipe_enrichment.make_evidence_lookup()
+	stays, _ = recipe_enrichment.export_advice({"finding_type": "Filesort", "technical_detail": {
+		"table": "tabSales Invoice",
+		"normalized_query": "SELECT name FROM `tabSales Invoice` WHERE customer = ? ORDER BY lower(po_no) LIMIT 5",
+	}}, evidence_lookup=lookup)
+	removes, _ = recipe_enrichment.export_advice({"finding_type": "Filesort", "technical_detail": {
+		"table": "tabSales Invoice",
+		"normalized_query": "SELECT name FROM `tabSales Invoice` WHERE customer = ? ORDER BY posting_date LIMIT 5",
+	}}, evidence_lookup=lookup)
+	assert stays["sort_stays"] is True and removes["sort_stays"] is False
+
+
+def test_the_sort_stays_overrides_are_idempotent(evidence):
+	import copy
+
+	finding = {"finding_type": "Filesort", "title": "Filesort on tabSales Invoice", "customer_description": _FS_DESC,
+		"technical_detail": {"table": "tabSales Invoice",
+			"normalized_query": "SELECT name FROM `tabSales Invoice` WHERE customer = ? ORDER BY lower(po_no) LIMIT 5"}}
+	lookup = recipe_enrichment.make_evidence_lookup()
+	recipe_enrichment.apply_finding_recipes([finding], evidence_lookup=lookup)
+	once = copy.deepcopy(finding)
+	recipe_enrichment.apply_finding_recipes([finding], evidence_lookup=lookup)
+	assert finding == once and finding["action_title"] == recipe_enrichment.NO_INDEX_ACTION_TITLE
+	assert finding["customer_description"].count(recipe_enrichment.SORT_STAYS_NOTES["Filesort"]) == 1
+
+
+# --- a Missing Index Optimus cannot judge has a neutral title ---------------------------
+
+
+def test_a_missing_index_with_no_verdict_says_optimus_cannot_say(evidence):
+	detail = {"table": "tabSessions", "column": "user", "callsite": _CALLSITE}
+	out = _render(_doc([_titled("Missing Index", detail, "Add index on tabSessions(user)", _MI_DESC)]))
+	assert "Index on tabSessions(user): Optimus cannot say" in out
+	assert "no new index recommended" not in out and "Add index on tabSessions(user)" not in out

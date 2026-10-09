@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 
+from optimus import safe_call
 from optimus.analyzers.base import TAB_TABLE_RE
 from optimus.dbdialect.base import (
 	Dialect,
@@ -83,14 +84,17 @@ class MariaDBDialect(Dialect):
 	# -- Index introspection --------------------------------------------
 
 	def existing_indexes(self, table: str) -> list:
-		"""``SHOW INDEX FROM `table`` → ``[IndexInfo(...)]``. Empty on any error or unsafe name."""
+		"""``SHOW INDEX FROM `table`` → ``[IndexInfo(...)]``. Empty on an ordinary error or an
+		unsafe name; an RQ job timeout is raised again, since the job must stop."""
 		if not _is_safe_table_name(table):
 			return []
 		import frappe
 
 		try:
 			rows = frappe.db.sql(f"SHOW INDEX FROM `{table}`", as_dict=True) or []
-		except Exception:
+		except Exception as exc:
+			if isinstance(exc, safe_call.job_timeout_types()):
+				raise
 			return []
 
 		by_name: dict[str, dict] = {}
@@ -121,7 +125,8 @@ class MariaDBDialect(Dialect):
 		return out
 
 	def column_types(self, table: str) -> dict:
-		"""``{column: data_type_lower}`` for the table's columns."""
+		"""``{column: data_type_lower}`` for the table's columns. Empty on an ordinary error; an
+		RQ job timeout is raised again."""
 		import frappe
 
 		try:
@@ -134,7 +139,9 @@ class MariaDBDialect(Dialect):
 				(table,),
 				as_dict=True,
 			) or []
-		except Exception:
+		except Exception as exc:
+			if isinstance(exc, safe_call.job_timeout_types()):
+				raise
 			return {}
 
 		out: dict = {}

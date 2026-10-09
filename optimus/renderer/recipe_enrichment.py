@@ -25,6 +25,8 @@ twice leaves the same dicts as running them once.
 
 from __future__ import annotations
 
+import contextlib
+import itertools
 from collections.abc import Callable, Mapping
 
 from optimus import ai_grounding
@@ -66,18 +68,50 @@ def _get_meta_quietly(doctype: str):
 	return meta
 
 
+class EmptyIndexList(Exception):
+	"""A table with columns came back with no index at all. Every DocType table has a
+	primary key on name, so the index read failed: the dialect turns an ordinary SQL error
+	into an empty list. Advice built on that list would give code for an index that may
+	exist already, so the read counts as failed (its name is the log line's error type)."""
+
+
+_evidence_savepoints = itertools.count()
+
+
 def _read_table_evidence(table: str) -> TableEvidence | None:
 	"""Evidence for ``table``, or None when it is not a DocType table, its DocType does
-	not exist (checked BEFORE get_meta, P8) or its columns cannot be read."""
+	not exist (checked BEFORE get_meta, P8) or its columns cannot be read. An index list
+	that came back empty raises ``EmptyIndexList``. On Postgres the whole read runs under a
+	savepoint: one failed statement there aborts the whole transaction, so a failed
+	``exists``, ``get_meta`` or catalog read rolls back to the savepoint and the rest of
+	the render can still query."""
+	if index_recipes.doctype_of(table) is None:
+		return None
+	dialect = get_dialect()
+	if getattr(dialect, "name", "") != "postgres":
+		return _read_evidence(table, dialect)
+	import frappe
+
+	savepoint = f"optimus_evidence_{next(_evidence_savepoints)}"
+	frappe.db.savepoint(savepoint)
+	try:
+		evidence = _read_evidence(table, dialect)
+	except Exception:
+		# a rollback that fails must not hide why the read failed
+		with contextlib.suppress(Exception):
+			frappe.db.rollback(save_point=savepoint)
+		raise
+	frappe.db.release_savepoint(savepoint)
+	return evidence
+
+
+def _read_evidence(table: str, dialect) -> TableEvidence | None:
 	import frappe
 
 	doctype = index_recipes.doctype_of(table)
-	if doctype is None:
-		return None
 	if not frappe.db.exists("DocType", doctype):
 		return None
 	meta = _get_meta_quietly(doctype)
-	dialect = get_dialect()
 	column_types = dict(dialect.column_types(table) or {})
 	if not column_types:
 		return None
@@ -97,6 +131,8 @@ def _read_table_evidence(table: str) -> TableEvidence | None:
 		IndexEvidence(name=str(ix.name), columns=tuple(ix.columns or ()), unique=bool(ix.unique))
 		for ix in dialect.existing_indexes(table) or []
 	)
+	if not indexes:
+		raise EmptyIndexList(table)
 	return TableEvidence(
 		table=table,
 		doctype=doctype,
@@ -210,6 +246,8 @@ RECIPE_FAILED_CARD_NOTE = (
 # migration" into the stored title and description at analyze time; the render dict (and
 # the export) get these instead, and the stored JSON keeps the analyzer's text.
 NO_INDEX_TITLE = "Index on {table}({column}): no new index recommended"
+# The title when the advice is no verdict: "no new index recommended" would be one.
+NO_INDEX_UNKNOWN_TITLE = "Index on {table}({column}): Optimus cannot say"
 NO_INDEX_DESCRIPTION = (
 	"Queries in this session filtered on the **{column}** column of the **{table}** table. Optimus does not "
 	"recommend a new index on it: How to fix says why and what to check instead."
@@ -221,8 +259,16 @@ NO_INDEX_UNKNOWN_DESCRIPTION = (
 	"whether a new index on it would help: How to fix says what to check."
 )
 NO_INDEX_UNKNOWN_NOTE = "Optimus cannot say whether an index would help this query: How to fix says what to check."
-# The action plan's step label for a no-code Missing Index, instead of "Add a database index".
+# The action plan's step label for a no-code Missing Index, instead of "Add a database index",
+# and for a Filesort or Temporary Table whose index leaves the sort or the temporary table in
+# place, instead of "Avoid the filesort" or "Avoid the temporary table".
 NO_INDEX_ACTION_TITLE = "Check the query with EXPLAIN"
+# The note a Filesort or Temporary Table finding gets when its index keeps the sort or the
+# temporary table (the advice's ``sort_stays``), in place of the promise that an index fixes it.
+SORT_STAYS_NOTES: dict[str, str] = {
+	"Filesort": "The index under How to fix does not remove the sort: How to fix says why.",
+	"Temporary Table": "The index under How to fix does not remove the temporary table: How to fix says why.",
+}
 _MIGRATION_PHRASE = "in a database migration"
 _HOW_TO_FIX_PHRASE = "using the code and steps under How to fix"
 # The explain_flags sentences that promise an index fixes the finding.
@@ -308,7 +354,9 @@ def export_advice(
 	``RECIPE_FAILED_HINT`` text, no code), and the caller counts it for one log line.
 	``unknown`` is True when the advice is no verdict on the index (``IndexAdvice.unknown``,
 	or a failure), so the finding's description stays neutral. A failure appends
-	``(finding type, error type)`` to ``errors`` for the caller's one log line."""
+	``(finding type, error type)`` to ``errors`` for the caller's one log line.
+	``sort_stays`` is True when a Filesort or Temporary Table finding's code leaves the sort
+	or the temporary table in place (``IndexAdvice.sort_stays``)."""
 	advice = best_effort(
 		lambda: index_recipes.advise_finding(
 			finding, evidence_lookup=evidence_lookup, tracked_apps=tuple(tracked_apps or ()), parser=parser,
@@ -330,6 +378,7 @@ def export_advice(
 			"text": RECIPE_FAILED_HINT,
 			"code": None,
 			"unknown": True,
+			"sort_stays": False,
 		}, True
 	if advice is None:
 		return None, False
@@ -342,6 +391,7 @@ def export_advice(
 		"text": index_recipes.finding_text(advice),
 		"code": advice.code,
 		"unknown": advice.unknown,
+		"sort_stays": advice.sort_stays,
 	}, False
 
 
@@ -356,11 +406,14 @@ def finding_display(finding: dict, advice: dict | None) -> dict:
 	  gains ``NO_INDEX_NOTE``.
 
 	When the advice is no verdict (``advice["unknown"]``: Optimus could not tell, or the
-	advisor failed) the line and the note say Optimus cannot say whether an index would
-	help, never that it recommends none.
+	advisor failed) the title, the line and the note say Optimus cannot say whether an index
+	would help, never that it recommends none.
 
 	With code, a Missing Index points at the code and steps under How to fix instead of "a
-	database migration". Applying it to its own output changes nothing."""
+	database migration", and a Filesort or Temporary Table whose index leaves the sort or
+	the temporary table in place (``advice["sort_stays"]``) loses the sentence that promises
+	an index fixes it and gains ``SORT_STAYS_NOTES``. Applying it to its own output changes
+	nothing."""
 	ftype = finding.get("finding_type") or ""
 	if advice is None or ftype not in INDEX_FINDING_TYPES:
 		return {}
@@ -368,6 +421,10 @@ def finding_display(finding: dict, advice: dict | None) -> dict:
 	if advice.get("route") != index_recipes.ROUTE_NO_CODE:
 		if ftype == "Missing Index" and _MIGRATION_PHRASE in description:
 			return {"customer_description": description.replace(_MIGRATION_PHRASE, _HOW_TO_FIX_PHRASE)}
+		if ftype in SORT_STAYS_NOTES and advice.get("sort_stays"):
+			for sentence in _INDEX_FIX_SENTENCES:
+				description = description.replace(sentence, "")
+			return {"customer_description": _with_note(" ".join(description.split()), SORT_STAYS_NOTES[ftype])}
 		return {}
 	unknown = bool(advice.get("unknown"))
 	if ftype == "Missing Index":
@@ -378,8 +435,9 @@ def finding_display(finding: dict, advice: dict | None) -> dict:
 		if not table or not column:
 			return {}
 		line = NO_INDEX_UNKNOWN_DESCRIPTION if unknown else NO_INDEX_DESCRIPTION
+		title = NO_INDEX_UNKNOWN_TITLE if unknown else NO_INDEX_TITLE
 		return {
-			"title": NO_INDEX_TITLE.format(table=table, column=column),
+			"title": title.format(table=table, column=column),
 			"customer_description": line.format(table=table, column=column),
 		}
 	for sentence in _INDEX_FIX_SENTENCES:
@@ -400,7 +458,8 @@ def apply_finding_recipes(
 	"""Fill each render dict's recipe slots in place and return ``{"failed": n}``, the
 	index advice that raised. An index-family finding's title, description and action-plan
 	label follow its advice (``finding_display``; ``action_title`` is the render-only label
-	for a no-code Missing Index). ``errors`` collects ``(finding type, error type)`` for each
+	for a no-code Missing Index, and for a Filesort or Temporary Table whose index keeps the
+	sort or the temporary table). ``errors`` collects ``(finding type, error type)`` for each
 	failure (the caller's one log line). Running it twice leaves the same dicts as running it once."""
 	stats = {"failed": 0}
 	scope = tuple(tracked_apps or ())
@@ -424,7 +483,10 @@ def apply_finding_recipes(
 				if advice["code"]:
 					detail["suggested_ddl"] = advice["code"]
 			f.update(finding_display(f, advice))
-			if ftype == "Missing Index" and advice is not None and advice["route"] == index_recipes.ROUTE_NO_CODE:
+			if advice is not None and (
+				(ftype == "Missing Index" and advice["route"] == index_recipes.ROUTE_NO_CODE)
+				or (ftype in SORT_STAYS_NOTES and advice["route"] != index_recipes.ROUTE_NO_CODE and advice["sort_stays"])
+			):
 				f["action_title"] = NO_INDEX_ACTION_TITLE
 		elif ftype == "Redundant Call":
 			if f.get("llm_fix") and ai_grounding.analyzed_before_callsite_fix(f):

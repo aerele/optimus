@@ -135,6 +135,7 @@ def test_export_carries_the_report_advice_for_an_index_finding(env):
 		"text": index_recipes.finding_text(advice),
 		"code": advice.code,
 		"unknown": False,
+		"sort_stays": False,
 	}
 	assert finding["index_advice"]["route"] == index_recipes.ROUTE_ENSURE_INDEXES
 	assert "make_property_setter(" in finding["index_advice"]["code"]
@@ -178,7 +179,7 @@ def test_advice_failure_exports_what_the_report_shows(env, monkeypatch):
 	assert finding["index_advice"] == {
 		"route": index_recipes.ROUTE_NO_CODE, "doctype": "Sales Invoice", "table": "tabSales Invoice",
 		"columns": [], "index_name": None, "text": recipe_enrichment.RECIPE_FAILED_HINT, "code": None,
-		"unknown": True,
+		"unknown": True, "sort_stays": False,
 	}
 	assert "suggested_ddl" not in finding["technical_detail"] and "suggested_ddl" not in report["technical_detail"]
 	assert lines == ["optimus: index advice failed for 1 finding(s) or table(s) in one export (Missing Index: RuntimeError)"]

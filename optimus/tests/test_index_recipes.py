@@ -632,7 +632,7 @@ class TestUnreadableQueries:
 			unusable={"customer": {"or"}, "status": {"unsure"}, "tabSales": {"unsure"}, "I": {"unsure"}},
 		)
 		assert advice.route == ir.ROUTE_NO_CODE
-		first, rest = advice.reason.split("A composite index cannot use those columns.", 1)
+		first, rest = advice.reason.split("An index on customer cannot serve that filter.", 1)
 		assert "an OR between conditions on customer" in first and "status" not in first
 		assert "Optimus could not read how the query filters on status." in rest
 		assert "tabSales" not in advice.reason and " I," not in advice.reason and " I." not in advice.reason
@@ -746,7 +746,7 @@ class TestTopLevelSameColumnOr:
 		assert advice.columns == ("po_no",)
 		text = ir.finding_text(advice)
 		assert "already sorted" not in text and "removes the sort" not in text
-		assert "The filter on po_no matches more than one value, so this index cannot return the rows in order" in text
+		assert ir._NARROWS + "the filter on po_no matches more than one value, so it cannot return the rows in order" in text
 		assert "Optimus left out posting_date (an index cannot return these rows in order" in text
 
 	def test_other_top_level_ors_still_count_as_or(self):
@@ -924,7 +924,7 @@ class TestRangeAndSort:
 		"""ORDER BY idx (Frappe metadata) gives no sort column, so the range filter stays."""
 		advice = _r4("Filesort", f"{self._WHERE} ORDER BY `idx`")
 		assert advice.columns == ("company", "posting_date")
-		assert "The sort column is a Frappe metadata column, which Optimus never indexes" in ir.finding_text(advice)
+		assert ir._NARROWS + "the sort column is a Frappe metadata column, which Optimus never indexes" in ir.finding_text(advice)
 
 	def test_a_metadata_sort_column_never_leads_the_index(self):
 		"""creation may only trail a business column; with no equality column before it the
@@ -976,7 +976,7 @@ class TestSortGate:
 	def test_an_expression_sort_keeps_the_range(self):
 		advice = _r4("Filesort", "`due_date` < ? ORDER BY FIELD(`status`, ?, ?)")
 		assert advice.columns == ("due_date",)
-		assert "The query sorts by an expression" in self._no_sort_claim(advice)
+		assert ir._NARROWS + "the query sorts by an expression" in self._no_sort_claim(advice)
 		advice = _r4("Filesort", "`company`=? AND `due_date` < ? ORDER BY IFNULL(`grand_total`, ?) DESC")
 		assert advice.columns == ("company", "due_date")
 		self._no_sort_claim(advice)
@@ -986,7 +986,7 @@ class TestSortGate:
 
 	def test_an_expression_sort_without_a_range_never_claims_the_sort_goes(self):
 		advice = _r4("Filesort", "`company`=? ORDER BY FIELD(`status`, ?, ?)")
-		assert "The query sorts by an expression" in self._no_sort_claim(advice)
+		assert ir._NARROWS + "the query sorts by an expression" in self._no_sort_claim(advice)
 
 	def test_an_expression_grouping_keeps_the_range(self):
 		advice = _r4("Temporary Table", "`due_date` < ? GROUP BY DATE(`posting_date`)")
@@ -1040,7 +1040,9 @@ class TestSortGate:
 			advice = _r4("Filesort", f"`posting_date` > ? ORDER BY {sort}")
 			assert advice.columns == ("posting_date",), sort
 			self._no_sort_claim(advice)
-		assert "The query sorts by an expression" in ir.finding_text(_r4("Filesort", "`posting_date` > ? ORDER BY `meta`"))
+		assert ir._NARROWS + "the query sorts by a column a plain index cannot cover (JSON)" in ir.finding_text(
+			_r4("Filesort", "`posting_date` > ? ORDER BY `meta`"),
+		)
 
 	def test_an_order_by_only_inside_a_subquery_keeps_the_range(self):
 		q = (
@@ -1069,7 +1071,7 @@ class TestSortGate:
 		advice = _r4("Filesort", where)
 		assert advice.columns == ("company", "customer", "status", "territory")
 		text = self._no_sort_claim(advice)
-		assert "The sort column comes after the range condition on posting_date" in text
+		assert ir._NARROWS + "the sort column comes after the range condition on posting_date" in text
 
 	def test_a_bare_qualified_sort_still_wins_over_the_range(self):
 		q = "select si.name from `tabSales Invoice` si where si.company = ? and si.posting_date > ? order by si.customer desc limit ?"
@@ -1227,7 +1229,7 @@ class TestExplainColumns:
 		q = "SELECT customer, sum(amount) as total FROM `tabSales Invoice` WHERE company = ? GROUP BY customer ORDER BY total DESC"
 		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(ev))
 		assert advice.entry == {"doctype": "Sales Invoice", "search_index_field": "company", "db": "mariadb"}
-		assert "The query sorts by an aggregate, which no index can return in order" in ir.finding_text(advice)
+		assert ir._NARROWS + "the query sorts by an aggregate, which no index can return in order" in ir.finding_text(advice)
 
 	def test_dropped_sort_column_is_not_claimed_by_the_lead(self):
 		"""P9c: idx is a metadata column, so the lead must not promise a sort index."""

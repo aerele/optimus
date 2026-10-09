@@ -226,7 +226,7 @@ class TestLeadCause:
 				f"GROUP BY customer ORDER BY {order}"
 			)
 			lead = _c7("Filesort", q).lead
-			assert "The query sorts by an aggregate, which no index can return in order, so the sort stays." in lead, lead
+			assert ir._NARROWS + "the query sorts by an aggregate, which no index can return in order, so the sort stays." in lead, lead
 			assert "metadata" not in lead
 
 	def test_a_grouping_sorted_by_an_aggregate_names_the_aggregate(self):
@@ -236,7 +236,7 @@ class TestLeadCause:
 				f"GROUP BY customer ORDER BY {order}"
 			)
 			lead = _c7("Temporary Table", q).lead
-			assert "The query sorts its groups by an aggregate" in lead and "so the temporary table stays" in lead, lead
+			assert ir._NARROWS + "the query sorts its groups by an aggregate" in lead and "so the temporary table stays" in lead, lead
 			assert "groups by an expression" not in lead
 
 	def test_an_implicit_aggregate_alias_counts_as_an_aggregate(self):
@@ -244,7 +244,7 @@ class TestLeadCause:
 			"SELECT customer, sum(grand_total) total, count(name) FROM `tabSales Invoice` WHERE company = ? "
 			"GROUP BY customer ORDER BY total DESC"
 		)
-		assert "The query sorts by an aggregate" in _c7("Filesort", q).lead
+		assert ir._NARROWS + "the query sorts by an aggregate" in _c7("Filesort", q).lead
 		assert ir._aggregate_aliases(ir._SQL_TOKEN_RE.findall(q)) == {"total"}
 
 	def test_a_grouping_with_a_range_sorted_by_an_aggregate_names_the_aggregate(self):
@@ -254,24 +254,24 @@ class TestLeadCause:
 		)
 		advice = _c7("Temporary Table", q)
 		assert advice.columns == ("company", "posting_date")
-		assert "The query sorts its groups by an aggregate" in advice.lead
+		assert ir._NARROWS + "the query sorts its groups by an aggregate" in advice.lead
 
 	def test_a_grouping_sorted_by_another_column_says_so(self):
 		q = "SELECT customer FROM `tabSales Invoice` WHERE company = ? GROUP BY customer ORDER BY posting_date"
 		lead = _c7("Temporary Table", q).lead
-		assert "The query sorts by other columns than it groups by, so the temporary table stays." in lead, lead
+		assert ir._NARROWS + "the query sorts by other columns than it groups by, so the temporary table stays." in lead, lead
 
 	def test_distinct_without_group_by_names_the_distinct(self):
 		lead = _c7("Temporary Table", "SELECT DISTINCT customer FROM `tabSales Invoice` WHERE company = ?").lead
-		assert "The temporary table comes from the query's DISTINCT, which this index does not cover" in lead, lead
+		assert ir._NARROWS + "the temporary table comes from the query's DISTINCT, which this index does not cover" in lead, lead
 		assert "metadata" not in lead
 
 	def test_a_metadata_sort_column_is_named_as_one(self):
 		lead = _c7("Filesort", "SELECT name FROM `tabSales Invoice` WHERE company = ? ORDER BY idx DESC").lead
-		assert "The sort column is a Frappe metadata column, which Optimus never indexes, so the sort stays." in lead
+		assert ir._NARROWS + "the sort column is a Frappe metadata column, which Optimus never indexes, so the sort stays." in lead
 		assert "aggregate" not in lead
 		lead = _c7("Temporary Table", "SELECT count(*) FROM `tabSales Invoice` WHERE company = ? GROUP BY docstatus").lead
-		assert "The grouping column is a Frappe metadata column, which Optimus never indexes" in lead
+		assert ir._NARROWS + "the grouping column is a Frappe metadata column, which Optimus never indexes" in lead
 
 
 # --- E3: the MariaDB reserved-word check is MariaDB's -------------------------------------
@@ -861,7 +861,7 @@ class TestParserDroppedColumns:
 def test_a_filesort_grouped_by_other_columns_says_so():
 	q = "SELECT customer FROM `tabSales Invoice` WHERE company = ? GROUP BY customer ORDER BY posting_date"
 	lead = _c7("Filesort", q).lead
-	assert "The query groups by other columns than it sorts by, so the sort stays." in lead, lead
+	assert ir._NARROWS + "the query groups by other columns than it sorts by, so the sort stays." in lead, lead
 
 
 def test_a_union_without_labelled_columns_is_unread():
@@ -879,15 +879,15 @@ _JOINED = (
 def test_a_temporary_table_without_a_group_by_never_blames_the_grouping():
 	lead = _c7("Temporary Table", _JOINED.format(tail="ORDER BY sii.item_code")).lead
 	assert "grouping" not in lead and "groups by" not in lead, lead
-	assert "The query has no GROUP BY or DISTINCT on this table" in lead
+	assert ir._NARROWS + "the query has no GROUP BY or DISTINCT on this table" in lead
 
 
 def test_a_sort_on_another_tables_column_says_so():
 	lead = _c7("Filesort", _JOINED.format(tail="ORDER BY sii.item_code")).lead
-	assert "The query sorts by a column of another table, which an index on this table cannot return in order" in lead
+	assert ir._NARROWS + "the query sorts by a column of another table, which an index on this table cannot return in order" in lead
 	assert "expression" not in lead
 	lead = _c7("Temporary Table", _JOINED.format(tail="GROUP BY sii.item_code")).lead
-	assert "The query groups by a column of another table" in lead, lead
+	assert ir._NARROWS + "the query groups by a column of another table" in lead, lead
 
 
 def test_the_real_explain_flags_fix_sentences_are_removed():
@@ -1160,7 +1160,7 @@ class TestUnservableSortTail:
 		text = _text(advice)
 		assert advice.entry["columns"] == ["company", "customer"]
 		assert "Optimus left out posting_date (an index cannot return these rows in order" in text
-		assert "The filter on customer matches more than one value, so this index cannot return the rows in order" in advice.lead
+		assert ir._NARROWS + "the filter on customer matches more than one value, so it cannot return the rows in order" in advice.lead
 
 	def test_a_refused_sort_recipe_is_kept_when_the_retry_has_nothing_left(self):
 		"""posting_date is both the range and the sort: the sort-first recipe (posting_date) is
@@ -1303,7 +1303,7 @@ class TestNotEqualIsNoRange:
 	def test_a_not_comparison_alone_gives_its_shape_no_code(self):
 		q = "SELECT name FROM `tabSales Invoice` WHERE status != ?"
 		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI4))
-		assert advice.route == ir.ROUTE_NO_CODE and "a !=, <> or NOT comparison on status" in _text(advice)
+		assert advice.route == ir.ROUTE_NO_CODE and "A !=, <> or NOT comparison on status" in _text(advice)
 
 	def test_a_not_comparison_on_a_missing_column_names_the_column(self):
 		"""c1: i.is_exempt != 1 on a table without that column is a column problem, never
@@ -1369,7 +1369,7 @@ class TestCollapsedIn:
 		q = "SELECT name FROM `tabSales Invoice` WHERE posting_date > ? ORDER BY creation DESC"
 		lead = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI4)).lead
 		assert "which Optimus never indexes" not in lead
-		assert "The sort column creation can only follow an equality filter column in an index" in lead
+		assert ir._NARROWS + "the sort column creation can only follow an equality filter column in an index" in lead
 
 
 _GL4 = _ev("GL Entry", fields={
@@ -2054,7 +2054,11 @@ class TestCheckWordingIsHedged:
 	def test_a_not_comparison_is_hedged_too(self):
 		q = "SELECT name FROM `tabSales Invoice` WHERE status != ?"
 		text = _text(ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI_R)))
-		assert "a !=, <> or NOT comparison on status, which usually matches most of the table's rows" in text
+		assert (
+			"A !=, <> or NOT comparison on status usually matches most of the table's rows; if the rows this query "
+			"looks for are rare, an index on (status) can help."
+		) in text
+		assert "would not help" not in text
 
 
 _GL_R = _ev("GL Entry", fields={
@@ -2106,7 +2110,7 @@ class TestPartialSortRecipe:
 		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(ev))
 		assert advice.entry["columns"] == ["company", "customer", "status", "posting_date"], _text(advice)
 		assert "already sorted" not in advice.lead
-		assert "This index does not cover every sort column (due_date), so the sort stays." in advice.lead
+		assert ir._NARROWS + "it does not cover every sort column (due_date), so the sort stays." in advice.lead
 		# the lead says it; the no-code note is only for a retry that gives no code
 		assert "in the query's order would need" not in _text(advice)
 
@@ -2136,7 +2140,9 @@ class TestPartialSortRecipe:
 		)
 		advice = ir.advise_finding(_explain("Temporary Table", q, table="tabStock Reconciliation Item"), evidence_lookup=_lookup(ev))
 		assert "reads the index" not in advice.lead, advice.lead
-		assert "This index does not cover every grouping column (warehouse, parent), so the temporary table stays." in advice.lead
+		assert (
+			ir._NARROWS + "it does not cover every grouping column (warehouse, parent), so the temporary table stays."
+		) in advice.lead
 
 	def test_a_whole_sort_still_claims_the_order(self):
 		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? ORDER BY posting_date, customer"

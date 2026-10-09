@@ -107,6 +107,31 @@ class TestIntrospection:
 		assert PostgresDialect().column_types("tabGL Entry") == {
 			"party": "character varying", "amount": "numeric"}
 
+	def test_a_job_timeout_escapes_the_catalog_reads(self, monkeypatch):
+		"""An ordinary error gives the empty default; an RQ job timeout must stop the job."""
+		from optimus import safe_call
+
+		class _JobTimeout(Exception):
+			pass
+
+		monkeypatch.setattr(safe_call, "job_timeout_types", lambda: (_JobTimeout,))
+
+		def deadline(*a, **k):
+			raise _JobTimeout("deadline")
+
+		_install_db(monkeypatch, deadline)
+		with pytest.raises(_JobTimeout):
+			PostgresDialect().existing_indexes("tabUser")
+		with pytest.raises(_JobTimeout):
+			PostgresDialect().column_types("tabUser")
+
+		def boom(*a, **k):
+			raise RuntimeError("relation does not exist")
+
+		_install_db(monkeypatch, boom)
+		assert PostgresDialect().existing_indexes("tabUser") == []
+		assert PostgresDialect().column_types("tabUser") == {}
+
 	def test_index_ddl_is_create_index_no_prefix(self):
 		d = PostgresDialect()
 		assert d.index_ddl("tabUser", "email", False) == (
