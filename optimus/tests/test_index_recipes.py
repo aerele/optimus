@@ -27,6 +27,11 @@ _FORBIDDEN = ("ALTER TABLE", "CREATE INDEX", "Customize Form", "\u2014", "\u2013
 _HOOKS = "after_install, after_sync and after_migrate"
 
 
+def _unusable_where_columns(query, labelled, qualifiers=None, *, truncated=False):
+	"""``{column: kinds}`` of the WHERE columns a composite index cannot use."""
+	return ir._scan_where(query, labelled, qualifiers, truncated=truncated)[0]
+
+
 def F(fieldtype="Data", *, length=0, search_index=False, unique=False, custom=False):
 	return FieldEvidence(fieldtype, length, search_index, unique, custom)
 
@@ -469,7 +474,7 @@ class TestPredicateShape:
 	def test_a_sort_on_the_like_column_is_no_plain_use_of_it(self):
 		"""Fix round 3: the ORDER BY after the WHERE clause is not part of the filter."""
 		q = "SELECT `name` FROM `tabSales Invoice` WHERE `customer_name` LIKE ? ORDER BY `customer_name`"
-		assert ir._unusable_where_columns(q, [("WHERE", "customer_name")]) == {"customer_name": {"like"}}
+		assert _unusable_where_columns(q, [("WHERE", "customer_name")]) == {"customer_name": {"like"}}
 
 	def test_comments_are_not_part_of_the_filter(self):
 		for q in (
@@ -484,12 +489,12 @@ class TestPredicateShape:
 			'select "name" from "tabSales Invoice" where "company" = %s and ("status" = %s or "customer" = %s) '
 			'order by "posting_date"'
 		)
-		shapes = ir._unusable_where_columns(q, [("WHERE", "company"), ("WHERE", "status"), ("WHERE", "customer")])
+		shapes = _unusable_where_columns(q, [("WHERE", "company"), ("WHERE", "status"), ("WHERE", "customer")])
 		assert shapes == {"status": {"or"}, "customer": {"or"}}
 
 	def test_a_visible_prefix_like_can_use_the_index(self):
 		q = "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND po_no LIKE 'PO-%'"
-		assert ir._unusable_where_columns(q, [("WHERE", "customer"), ("WHERE", "po_no")]) == {}
+		assert _unusable_where_columns(q, [("WHERE", "customer"), ("WHERE", "po_no")]) == {}
 
 	def test_a_top_level_or_leaves_nothing_to_index(self):
 		for q in (
@@ -514,16 +519,16 @@ class TestPredicateShape:
 
 	def test_a_filter_the_scan_cannot_place_is_left_out(self):
 		"""Fail closed: a WHERE column the token scan cannot find in the main WHERE clause."""
-		shapes = ir._unusable_where_columns(
+		shapes = _unusable_where_columns(
 			"SELECT name FROM `tabSales Invoice` WHERE customer = ?", [("WHERE", "customer"), ("WHERE", "status")],
 		)
 		assert shapes == {"status": {"unsure"}}
-		assert ir._unusable_where_columns("SELECT name FROM `tabX` WHERE (a = ?", [("WHERE", "a")]) == {"a": {"unsure"}}
+		assert _unusable_where_columns("SELECT name FROM `tabX` WHERE (a = ?", [("WHERE", "a")]) == {"a": {"unsure"}}
 		# a clause that ends on an operator was cut short, whatever cut it
-		assert ir._unusable_where_columns("SELECT name FROM `tabX` WHERE a = ? AND", [("WHERE", "a")]) == {"a": {"unsure"}}
+		assert _unusable_where_columns("SELECT name FROM `tabX` WHERE a = ? AND", [("WHERE", "a")]) == {"a": {"unsure"}}
 		# a name used only as a function is no use of that column
 		q = "SELECT name FROM `tabX` WHERE company = ? AND year(posting_date) = ?"
-		assert ir._unusable_where_columns(q, [("WHERE", "company"), ("WHERE", "year")]) == {"year": {"unsure"}}
+		assert _unusable_where_columns(q, [("WHERE", "company"), ("WHERE", "year")]) == {"year": {"unsure"}}
 
 
 class TestFunctionWrapped:
@@ -747,7 +752,7 @@ class TestTopLevelSameColumnOr:
 	def test_other_top_level_ors_still_count_as_or(self):
 		labelled = [("WHERE", "status"), ("WHERE", "customer"), ("WHERE", "company")]
 		for where in ("`status`=? OR `customer`=?", "`status`=? AND `company`=? OR `status`=?", "`status`=? OR `status` LIKE ?"):
-			shapes = ir._unusable_where_columns(f"SELECT `name` FROM `tabSales Invoice` WHERE {where}", labelled)
+			shapes = _unusable_where_columns(f"SELECT `name` FROM `tabSales Invoice` WHERE {where}", labelled)
 			assert shapes["status"] == {"or"}, where
 
 

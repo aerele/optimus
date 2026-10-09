@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 
+from optimus.analyzers.base import TAB_TABLE_RE
 from optimus.dbdialect.base import (
 	Dialect,
 	IndexInfo,
@@ -30,8 +31,7 @@ _TEXT_INDEX_PREFIX_LENGTH = 255  # index_suggestions.TEXT_INDEX_PREFIX_LENGTH
 
 # MariaDB can't parameterise an identifier in ``SHOW INDEX FROM ?``: the table
 # name is interpolated, so it must pass this whitelist first (index_suggestions
-# ._SAFE_TAB_TABLE_RE / _SAFE_INFOSCHEMA_RE / _is_safe_table_name).
-_SAFE_TAB_TABLE_RE = re.compile(r"^tab[A-Za-z0-9 _\-]+$")
+# .TAB_TABLE_RE / _SAFE_INFOSCHEMA_RE / _is_safe_table_name).
 _SAFE_INFOSCHEMA_RE = re.compile(r"^information_schema\.[A-Za-z0-9_]+$")
 
 
@@ -40,7 +40,7 @@ def _is_safe_table_name(name) -> bool:
 		return False
 	if any(c in name for c in ("`", "'", '"', ";", "\\", "\n", "\r", "\x00")):
 		return False
-	return bool(_SAFE_TAB_TABLE_RE.match(name) or _SAFE_INFOSCHEMA_RE.match(name))
+	return bool(TAB_TABLE_RE.fullmatch(name) or _SAFE_INFOSCHEMA_RE.match(name))
 
 
 class MariaDBDialect(Dialect):

@@ -17,6 +17,7 @@ from collections import Counter, defaultdict
 from optimus.analyzers.base import (
 	FRAPPE_METADATA_COLUMNS,
 	SEVERITY_ORDER,
+	TAB_TABLE_RE,
 	AnalyzerResult,
 	dur,
 	is_error_log_hook_query,
@@ -169,13 +170,12 @@ _NEVER_SUGGEST_COLUMNS = FRAPPE_METADATA_COLUMNS
 #      legitimately introspects.
 # Anything else is rejected outright and the index-introspection helper
 # returns an empty set (its "I couldn't read indexes" fall-through).
-_SAFE_TAB_TABLE_RE = re.compile(r"^tab[A-Za-z0-9 _\-]+$")
 _SAFE_INFOSCHEMA_RE = re.compile(r"^information_schema\.[A-Za-z0-9_]+$")
 
 
 def _is_safe_table_name(name) -> bool:
 	"""True iff ``name`` is a table-name shape the indexer may inspect via raw
-	SQL (see ``_SAFE_TAB_TABLE_RE`` / ``_SAFE_INFOSCHEMA_RE``). Any other shape
+	SQL (see ``TAB_TABLE_RE`` / ``_SAFE_INFOSCHEMA_RE``). Any other shape
 	(SQL-injection attempt, stray space, backtick, semicolon, …) returns False
 	so the caller falls back to its empty set."""
 	if not isinstance(name, str) or not name:
@@ -184,7 +184,7 @@ def _is_safe_table_name(name) -> bool:
 	# the regexes wouldn't match them make the intent obvious to readers.
 	if any(c in name for c in ("`", "'", '"', ";", "\\", "\n", "\r", "\x00")):
 		return False
-	return bool(_SAFE_TAB_TABLE_RE.match(name) or _SAFE_INFOSCHEMA_RE.match(name))
+	return bool(TAB_TABLE_RE.fullmatch(name) or _SAFE_INFOSCHEMA_RE.match(name))
 
 
 def _get_indexed_columns(table: str) -> set[str]:

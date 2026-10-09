@@ -258,9 +258,9 @@ def _app_scope() -> tuple[tuple[str, ...], frozenset[str] | None]:
 	pre-existing gap parked as a follow-up); a timeout raised in this function's own
 	``best_effort`` still escapes."""
 	from optimus.analyzers.base import installed_apps_allowlist
-	from optimus.settings import get_config
+	from optimus.settings import read_tracked_apps
 
-	tracked = safe_call.best_effort(lambda: tuple(getattr(get_config(), "tracked_apps", ()) or ()), ())
+	tracked = read_tracked_apps()
 	return tracked, safe_call.best_effort(installed_apps_allowlist, None)
 
 

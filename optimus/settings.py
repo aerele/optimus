@@ -842,6 +842,16 @@ def get_tracked_apps() -> tuple[str, ...]:
 		return ()
 
 
+def read_tracked_apps() -> tuple[str, ...]:
+	"""The Tracked Apps as a tuple, ``()`` when settings cannot be read. Unlike
+	``get_tracked_apps`` it goes through ``safe_call.best_effort``, so a job timeout still
+	propagates. The one reader behind the index-advice export, the AI fix scope and the
+	AI Slow Query advice."""
+	from optimus import safe_call
+
+	return safe_call.best_effort(lambda: tuple(getattr(get_config(), "tracked_apps", ()) or ()), ())
+
+
 def get_ignored_apps() -> tuple[str, ...]:
 	"""Exclusion list: apps whose findings are dropped from the report entirely
 	(both Findings and Observations sections). Empty tuple means none dropped."""

@@ -79,12 +79,11 @@ from optimus.analyzers.base import (
 	FRAPPE_METADATA_COLUMNS,
 	INDEX_FINDING_TYPES,
 	QUERY_TEXT_LIMIT,
+	TAB_TABLE_RE,
 	is_write_hot_table,
 )
+from optimus.renderer.index_evidence import TableEvidence
 from optimus.safe_call import best_effort
-
-if TYPE_CHECKING:
-	from optimus.renderer.recipe_enrichment import TableEvidence
 
 ROUTE_SEARCH_INDEX = "search_index"
 ROUTE_ENSURE_INDEXES = "ensure_indexes"
@@ -111,12 +110,11 @@ UNKNOWN_APP = "your_app"
 # runs right after the install's fixture sync, so a fixture-shipped Custom Field is
 # indexed on a fresh install too.
 HOOK_EVENTS: tuple[str, ...] = ("after_install", "after_sync", "after_migrate")
-_HOOK_EVENTS_TEXT = "after_install, after_sync and after_migrate"
+_HOOK_EVENTS_TEXT = ", ".join(HOOK_EVENTS[:-1]) + f" and {HOOK_EVENTS[-1]}"
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PREFIX_SUFFIX_RE = re.compile(r"\(\d+\)$")  # an index prefix length, as in remarks(255)
 _APP_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-_TAB_TABLE_RE = re.compile(r"^tab[A-Za-z0-9 _\-]+$")
 _VARCHAR_TYPES: frozenset[str] = frozenset({"varchar", "char", "character varying", "character"})
 _AGGREGATES = ("sum", "count", "avg", "min", "max", "group_concat")
 
@@ -321,7 +319,7 @@ class IndexAdvice:
 def doctype_of(table: str) -> str | None:
 	"""``"Sales Invoice"`` for ``tabSales Invoice`` (backticks allowed), else None."""
 	name = str(table or "").strip().strip("`")
-	if not _TAB_TABLE_RE.fullmatch(name):
+	if not TAB_TABLE_RE.fullmatch(name):
 		return None
 	return name[3:]
 
@@ -961,13 +959,6 @@ def _scan_where(query: str, labelled, qualifiers=None, *, truncated: bool = Fals
 		{col: usable[col.lower()] for col in where_cols if col.lower() in usable},
 		{col: valued[col.lower()] for col in where_cols if col.lower() in valued},
 	)
-
-
-def _unusable_where_columns(query: str, labelled, qualifiers=None, *, truncated: bool = False) -> dict[str, set[str]]:
-	"""``{column: kinds}`` for each WHERE column of ``labelled`` that a composite index
-	cannot use (``_scan_where``). ``qualifiers`` (the target table and its aliases) limits
-	which dotted references count; None counts every one."""
-	return _scan_where(query, labelled, qualifiers, truncated=truncated)[0]
 
 
 def table_aliases(query: str) -> dict:

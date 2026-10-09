@@ -227,3 +227,11 @@ def test_example_code_is_semgrep_clean():
 	assert sum(r.units for r in scanned.values()) >= 1  # Example 1's diff was scanned
 	assert sum(r.unparsed for r in scanned.values()) == 0
 	assert {k: [h["rule"] for h in r.hits] for k, r in scanned.items() if r.hits} == {}
+
+
+def test_is_current_is_the_one_currency_rule():
+	v = ai_prompts.PROMPT_VERSION
+	assert ai_prompts.is_current({"prompt_version": v}) and ai_prompts.is_current(v + 1)
+	assert ai_prompts.is_current({"prompt_version": v - 1}, current_version=v - 1)
+	for bad in ({}, {"prompt_version": v - 1}, {"prompt_version": True}, {"prompt_version": "4"}, None, True, "4"):
+		assert not ai_prompts.is_current(bad)

@@ -26,6 +26,11 @@ from typing import Any
 
 from optimus.error_log_mask import HOOK_FRAME_SUFFIX
 
+# The one shape of a Frappe DocType table name (``tab<DocType name>``) that raw SQL, the
+# index advisor and the index generator may interpolate or emit. Use ``.fullmatch()``:
+# ``$`` would let a trailing newline through.
+TAB_TABLE_RE = re.compile(r"tab[A-Za-z0-9 _\-]+")
+
 # ---------------------------------------------------------------------------
 # Shared constants and helpers (Round 2 fixes #19 + #20)
 # ---------------------------------------------------------------------------

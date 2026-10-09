@@ -26,51 +26,13 @@ twice leaves the same dicts as running them once.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 
 from optimus import ai_grounding
 from optimus.analyzers.base import INDEX_FINDING_TYPES
 from optimus.dbdialect import get_dialect
 from optimus.renderer import index_recipes
+from optimus.renderer.index_evidence import FieldEvidence, IndexEvidence, TableEvidence
 from optimus.safe_call import best_effort, log_error_line
-
-
-@dataclass(frozen=True)
-class FieldEvidence:
-	"""One DocField's index-relevant flags (Custom Fields included)."""
-
-	fieldtype: str
-	length: int
-	search_index: bool
-	unique: bool
-	is_custom_field: bool
-
-
-@dataclass(frozen=True)
-class IndexEvidence:
-	"""One existing index: its name, its columns in key order, and uniqueness."""
-
-	name: str
-	columns: tuple[str, ...]
-	unique: bool
-
-
-@dataclass(frozen=True)
-class TableEvidence:
-	"""What the index advisor may rely on for one ``tab*`` table (owner decision A2):
-	DocField flags by fieldname, the DocType's app, the real column types and the
-	indexes the database already has."""
-
-	table: str
-	doctype: str
-	app: str
-	is_custom_doctype: bool
-	dialect: str
-	fields: Mapping[str, FieldEvidence]
-	column_types: Mapping[str, str]
-	text_columns: frozenset[str]
-	unindexable_columns: frozenset[str]
-	indexes: tuple[IndexEvidence, ...]
 
 
 def _int(value) -> int:
@@ -544,14 +506,13 @@ def mark_outdated_ai_fixes(
 	an older prompt version than ``current_version``, default
 	``ai_prompts.PROMPT_VERSION``, or with none recorded) and ``llm_fix["refreshable"]``
 	(``refresh_check(finding)`` says Refresh AI suggestions would redo it)."""
-	if current_version is None:
-		from optimus.ai_prompts import PROMPT_VERSION as current_version
+	from optimus.ai_prompts import is_current
+
 	for f in findings or []:
 		fix = f.get("llm_fix") if isinstance(f, dict) else None
 		if not isinstance(fix, dict):
 			continue
-		version = fix.get("prompt_version")
-		current = isinstance(version, int) and not isinstance(version, bool) and version >= current_version
+		current = is_current(fix, current_version)
 		fix["outdated"] = not current
 		fix["refreshable"] = bool(
 			not current and refresh_check is not None and best_effort(lambda: refresh_check(f), False)

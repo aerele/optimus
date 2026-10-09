@@ -1133,14 +1133,13 @@ def _note_ai_selection(context, gated: int, excluded: int) -> None:
 
 def _fix_is_current(row) -> bool:
 	"""True when ``row`` already holds a suggestion made with the current prompt version."""
-	from optimus.ai_prompts import PROMPT_VERSION
+	from optimus.ai_prompts import is_current
 
 	try:
 		fix = json.loads(getattr(row, "llm_fix_json", None) or "null")
 	except (TypeError, ValueError):
 		return False
-	version = fix.get("prompt_version") if isinstance(fix, dict) else None
-	return isinstance(version, int) and not isinstance(version, bool) and version >= PROMPT_VERSION
+	return is_current(fix)
 
 
 def _deserialize_tree(uuid: str, tree_blob):
@@ -2339,13 +2338,9 @@ def _attach_index_advice(payload: dict, evidence_lookup, tracked_apps: tuple[str
 def _ai_evidence_scope() -> tuple:
 	"""``(evidence_lookup, tracked_apps)`` for one AI run's Slow Query advice."""
 	from optimus.renderer import recipe_enrichment
+	from optimus.settings import read_tracked_apps
 
-	def _tracked() -> tuple[str, ...]:
-		from optimus.settings import get_config
-
-		return tuple(getattr(get_config(), "tracked_apps", ()) or ())
-
-	return recipe_enrichment.make_evidence_lookup(), safe_call.best_effort(_tracked, ())
+	return recipe_enrichment.make_evidence_lookup(), read_tracked_apps()
 
 
 _AI_AST_MEMO_MAX = 4  # whole-file trees kept per run

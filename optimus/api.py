@@ -1059,9 +1059,9 @@ def _export_index_advice(findings: list[dict], tables) -> None:
 	from optimus.analyzers.base import INDEX_FINDING_TYPES
 	from optimus.renderer import recipe_enrichment
 	from optimus.safe_call import best_effort
-	from optimus.settings import get_config
+	from optimus.settings import read_tracked_apps
 
-	tracked = best_effort(lambda: tuple(getattr(get_config(), "tracked_apps", ()) or ()), ())
+	tracked = read_tracked_apps()
 	lookup = recipe_enrichment.make_evidence_lookup()
 	parser = recipe_enrichment.make_query_parser()
 	failed = 0
