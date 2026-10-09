@@ -1237,7 +1237,11 @@ def _index_order(
 			for col in ranges
 		]
 	why = f"it comes after the range condition on {ranges[0]}, so the index cannot use it"
-	return eq + ranges[:1], [(col, why) for col in ranges[1:] + sorts]
+	stays = (
+		f"it comes after the range condition on {ranges[0]}, so the index cannot return the rows in order and "
+		f"{removes or 'the sort'} stays"
+	)
+	return eq + ranges[:1], [(col, why) for col in ranges[1:]] + [(col, stays) for col in sorts]
 
 
 _CLAUSE_ENDS: frozenset[str] = frozenset({
@@ -1940,10 +1944,19 @@ def advise(
 	if serves:
 		sorts = [col for col, kind in (comparisons or {}).items() if kind in ("sort", "rsort")]
 		kept = {c.split("(", 1)[0] for c in advice.columns} if advice is not None else set()
+		# without a LIMIT the query reads every row it matches, so a usable range filter on
+		# another column beats an index that only returns the rows in order (Filesort only); a
+		# metadata column Optimus never indexes (docstatus < 2) is no such filter
+		ranged = [
+			col for col, kind in (comparisons or {}).items()
+			if kind == "range" and col not in (unusable or {})
+			and col.lower() not in FRAPPE_METADATA_COLUMNS - TRAILING_METADATA_OK
+		]
+		range_first = serves == "the sort" and bool(ranged) and not _has_limit(query)
 		# a recipe that keeps only some sort columns (the cap or the key width left the rest out)
 		# never returns the rows in the query's order (R2)
-		if advice is None or advice.route == ROUTE_NO_CODE or not all(col in kept for col in sorts):
-			cut_sort = advice is not None and advice.route != ROUTE_NO_CODE
+		if advice is None or advice.route == ROUTE_NO_CODE or range_first or not all(col in kept for col in sorts):
+			cut_sort = advice is not None and advice.route != ROUTE_NO_CODE and not all(col in kept for col in sorts)
 			retry = _advise(table, columns, serves="", **kwargs)
 			served_by = advice.served_by if advice is not None else ""
 			if served_by and _served_evidence(query):
@@ -1961,6 +1974,13 @@ def advise(
 				advice = replace(retry, caveats=(*retry.caveats, (
 					f"An index that returns these rows in the query's order would need every {column} column "
 					f"({', '.join(sorts)}), and Optimus leaves out {missing} here, so {serves} stays."
+				)))
+			elif range_first and retry is not None and retry.route == ROUTE_NO_CODE:
+				# the range filter's index exists already; say why the sort stays
+				advice = replace(retry, caveats=(*retry.caveats, (
+					f"The query has no LIMIT, so it reads every row the range filter on {ranged[0]} matches, and the "
+					"database usually reads fewer rows through that filter than through an index that returns them "
+					f"in order, so {serves} stays."
 				)))
 			else:
 				# a retry left with nothing to index (the sort column was all) keeps the first verdict

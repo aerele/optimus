@@ -72,7 +72,8 @@ versions may contain breaking changes see migration notes below).
   trailing `creation` or `modified` column never makes a recipe "no code". Trailing columns of a wide key are left out until it fits, and the note names them.
   Columns are ordered equality first, then either one range column or the sort/group
   columns, not both; a Filesort or Temporary Table index serves the sort and says the
-  range filter cannot also use it. A single non-text column of a field you control on MariaDB
+  range filter cannot also use it, except a Filesort query with no LIMIT, which reads every
+  row it matches, so the range filter wins and the note says the sort stays. A single non-text column of a field you control on MariaDB
   (an app in Tracked Apps, a Custom Field or a DocType created in the UI) gets "tick
   Search Index"; a Custom Field your app creates in code gets `"search_index": 1` in its
   `create_custom_fields()` dict. Every other index becomes one entry of a generated, idempotent

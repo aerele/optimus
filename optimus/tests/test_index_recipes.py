@@ -899,7 +899,8 @@ class TestRangeAndSort:
 	_WHERE = "`company`=? AND `posting_date` BETWEEN ? AND ?"
 
 	def test_a_filesort_with_a_range_filter_indexes_the_sort(self):
-		advice = _r4("Filesort", f"{self._WHERE} ORDER BY `modified` DESC")
+		# with a LIMIT; without one the range filter wins (bounded corrective follow-up)
+		advice = _r4("Filesort", f"{self._WHERE} ORDER BY `modified` DESC LIMIT ?")
 		assert advice.columns == ("company", "modified")
 		text = ir.finding_text(advice)
 		assert text.startswith("Index the filter columns followed by the sort column")
@@ -934,7 +935,11 @@ class TestRangeAndSort:
 		order = {"company": "eq", "posting_date": "range", "modified": "sort"}
 		cols, dropped = ir._index_order(["company", "posting_date", "modified"], order)
 		assert cols == ["company", "posting_date"]
-		assert dropped == [("modified", "it comes after the range condition on posting_date, so the index cannot use it")]
+		# bounded corrective follow-up: a left-out sort column says the sort stays
+		assert dropped == [(
+			"modified", "it comes after the range condition on posting_date, so the index cannot return the rows in "
+			"order and the sort stays",
+		)]
 
 	def test_a_temporary_table_with_a_range_filter_indexes_the_group(self):
 		advice = _r4("Temporary Table", "`company`=? AND `posting_date` > ? GROUP BY `customer`")
@@ -945,7 +950,7 @@ class TestRangeAndSort:
 		)
 
 	def test_an_equality_on_the_sort_column_stays_first(self):
-		advice = _r4("Filesort", "`customer`=? AND `posting_date` > ? ORDER BY `customer`, `modified`")
+		advice = _r4("Filesort", "`customer`=? AND `posting_date` > ? ORDER BY `customer`, `modified` LIMIT ?")
 		assert advice.columns == ("customer", "modified")
 		assert _r4("Filesort", "`customer`=? AND `company`=? ORDER BY `customer`").columns == ("company", "customer")
 
@@ -1062,7 +1067,7 @@ class TestSortGate:
 		assert "The sort column comes after the range condition on posting_date" in text
 
 	def test_a_bare_qualified_sort_still_wins_over_the_range(self):
-		q = "select si.name from `tabSales Invoice` si where si.company = ? and si.posting_date > ? order by si.customer desc"
+		q = "select si.name from `tabSales Invoice` si where si.company = ? and si.posting_date > ? order by si.customer desc limit ?"
 		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_R4)
 		assert advice.columns == ("company", "customer")
 		assert "which removes the sort instead" in ir.finding_text(advice)
@@ -1074,7 +1079,7 @@ class TestMultiValueEquality:
 
 	def test_an_in_filter_keeps_the_range_and_the_sort_claim_goes(self):
 		# a collapsed IN (?) may be one value: the sort is kept and the lead hedges (round 3)
-		advice = _r4("Filesort", "`status` IN (?) AND `posting_date` > ? ORDER BY `modified`")
+		advice = _r4("Filesort", "`status` IN (?) AND `posting_date` > ? ORDER BY `modified` LIMIT ?")
 		assert advice.columns == ("status", "modified")
 		assert "if the IN list on status has more than one value, the sort stays" in advice.lead
 		advice = _r4("Filesort", "`status` IN (?, ?) AND `posting_date` > ? ORDER BY `modified`")

@@ -600,6 +600,7 @@ def test_the_docs_and_changelog_carry_the_t12_texts():
 	assert "usually matches most rows" in log and "keeps only some sort columns" in log
 	assert "rarely walks a whole index instead of sorting when the query has no LIMIT" in doc
 	assert "rarely walks a whole index instead of sorting" in log
+	assert "A Filesort query with no `LIMIT` is the exception" in doc and "except a Filesort query with no LIMIT" in log
 	assert "the sort columns keep the clause's order" in doc and "in the clause's order" in log
 
 
@@ -1905,6 +1906,8 @@ class TestCapRefusesOnlyForAUniqueIndex:
 		assert advice.route == ir.ROUTE_NO_CODE and advice.served_by == "", text
 		assert "already serves this filter and sort" not in text and "in order" not in text
 		assert 'The unique index "voucher_ref"' in text
+		# the first verdict gave no code, so no sort-first recipe was cut (bounded corrective R2)
+		assert "would need every sort column" not in text
 
 
 class TestSortColumnsOfTheOnlyTable:
@@ -1922,7 +1925,7 @@ class TestSortColumnsOfTheOnlyTable:
 	def test_a_scalar_subquery_keeps_the_sort_and_its_range_note(self):
 		q = (
 			"SELECT `name` FROM `tabSales Invoice` WHERE `customer`=? AND `grand_total` > (SELECT AVG(`amount`) "
-			"FROM `tabSales Invoice Item`) ORDER BY `posting_date` DESC"
+			"FROM `tabSales Invoice Item`) ORDER BY `posting_date` DESC LIMIT ?"
 		)
 		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI4))
 		assert advice.entry["columns"] == ["customer", "posting_date"], _text(advice)
@@ -2212,3 +2215,78 @@ class TestSortOnlyRecipeNeedsLimit:
 		assert not ir._only_not_null(
 			"SELECT name FROM `tabVideo` WHERE view_count IS NOT NULL AND (view_count > ? OR a = ?)", quals, "view_count",
 		)
+
+
+class TestRangeBeatsSortWithoutLimit:
+	"""Bounded corrective follow-up: without a LIMIT the query reads every matching row, so a
+	usable range filter on another column beats an index that only returns the rows in
+	order; the range recipe is the advice and the caveat says the sort stays. R3's no-code
+	stays for a query with no usable filter (Share Transfer, Video)."""
+
+	_STAYS = "it comes after the range condition on posting_date, so the index cannot return the rows in order and the sort stays"
+
+	def test_battery_41_gives_the_range_recipe(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE posting_date > ? ORDER BY due_date"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI4))
+		text = _text(advice)
+		assert advice.route != ir.ROUTE_NO_CODE and advice.columns == ("posting_date",), text
+		assert f"Optimus left out due_date ({self._STAYS})" in text
+		assert "the sort stays" in advice.lead and "rarely walks a whole index" not in text
+
+	def test_an_equality_column_keeps_the_range_too(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND posting_date > ? ORDER BY due_date"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI4))
+		assert advice.entry["columns"] == ["company", "posting_date"], _text(advice)
+
+	def test_with_a_limit_the_sort_still_wins(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND posting_date > ? ORDER BY due_date LIMIT ?"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI4))
+		assert advice.entry["columns"] == ["company", "due_date"], _text(advice)
+
+	def test_an_existing_range_index_names_the_sort_that_stays(self):
+		ev = _with_index(_SI4, ("posting_date_index", ["posting_date"], False))
+		q = "SELECT name FROM `tabSales Invoice` WHERE posting_date > ? ORDER BY due_date"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(ev))
+		text = _text(advice)
+		assert advice.route == ir.ROUTE_NO_CODE and 'already leads the index "posting_date_index"' in text, text
+		assert (
+			"The query has no LIMIT, so it reads every row the range filter on posting_date matches, and the database "
+			"usually reads fewer rows through that filter than through an index that returns them in order, so the "
+			"sort stays."
+		) in text
+
+	def test_an_unusable_range_is_no_range(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE DATE(posting_date) > ? ORDER BY due_date"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI4))
+		assert advice.route == ir.ROUTE_NO_CODE and "rarely walks a whole index" in _text(advice), _text(advice)
+
+	def test_a_temporary_table_still_indexes_the_group(self):
+		q = "SELECT customer, COUNT(name) FROM `tabSales Invoice` WHERE company = ? AND posting_date > ? GROUP BY customer"
+		advice = ir.advise_finding(_explain("Temporary Table", q), evidence_lookup=_lookup(_SI4))
+		assert advice.entry["columns"] == ["company", "customer"], _text(advice)
+
+	def test_a_left_out_group_column_says_the_temporary_table_stays(self):
+		q = "SELECT customer, COUNT(name) FROM `tabSales Invoice` WHERE company IN (?, ?) AND posting_date > ? GROUP BY customer"
+		text = _text(ir.advise_finding(_explain("Temporary Table", q), evidence_lookup=_lookup(_SI4)))
+		assert (
+			"Optimus left out customer (it comes after the range condition on posting_date, so the index cannot return "
+			"the rows in order and the temporary table stays)"
+		) in text, text
+
+	def test_a_metadata_range_is_no_range_optimus_indexes(self):
+		"""c1 Supplier Quotation: docstatus < 2 is a filter Optimus never indexes, so the sort
+		recipe (supplier, creation) stands."""
+		ev = _with_index(_ev("Supplier Quotation", fields={"supplier": F("Link")}, extra_types={"docstatus": "int"}),
+			("supplier_index", ["supplier"], False))
+		q = (
+			"select `tabSupplier Quotation`.name from `tabSupplier Quotation` where `tabSupplier Quotation`.docstatus < 2 "
+			"and `tabSupplier Quotation`.supplier = ? order by `tabSupplier Quotation`.creation desc"
+		)
+		advice = ir.advise_finding(_explain("Filesort", q, table="tabSupplier Quotation"), evidence_lookup=_lookup(ev))
+		assert advice.entry["columns"] == ["supplier", "creation"], _text(advice)
+		assert "range filter on docstatus" not in _text(advice)
+
+	def test_a_creation_range_after_an_equality_column_still_wins(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND creation > ? ORDER BY due_date"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI4))
+		assert advice.entry["columns"] == ["company", "creation"], _text(advice)
