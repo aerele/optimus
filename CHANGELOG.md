@@ -107,9 +107,16 @@ versions may contain breaking changes see migration notes below).
   non-builtin; a gate that raises fails closed. Framework N+1 and index findings do
   not call the model, and the report says why.
 - Correct the Redundant Call walk: sidecar stack paths are cut to apps-relative form
-  (absolute bench paths no longer hide user code), each finding is anchored on its most
-  frequent callsite, and new findings are stamped. Older unstamped findings keep a
-  stored suggestion with a re-record note and are not sent to the AI.
+  (absolute bench paths no longer hide user code) at the bench's apps dir, the `/apps/`
+  followed by `<app>/<app>/`, so an `apps` package inside an app keeps its path. Each
+  finding is anchored on its most frequent callsite, a user one before a framework one,
+  and its count, title and severity count only that callsite's calls, which must reach
+  the threshold within one action on their own: one user call beside an ERPNext loop no
+  longer reports the loop's 31 calls as its own, and the loop is suppressed as framework
+  code. Optimus's own calls are skipped (its settings read on every recorded query became
+  a false "Redundant cache lookup" on the user's query line). New findings are stamped.
+  Older unstamped findings keep a stored suggestion with a re-record note and are not
+  sent to the AI.
 - Ground finding prompts in the enclosing function when it fits within 80 lines,
   otherwise 24 lines either side. Loop facts come from the whole file's AST (the loop
   chain, comprehension and while shapes, subscript and formatted-SQL writes, a caller

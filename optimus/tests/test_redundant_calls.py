@@ -670,3 +670,276 @@ def test_a_more_frequent_framework_callsite_does_not_suppress_a_user_loop():
 	rc, cs = _analyze_one([_rec("r0", _calls(9, erp)), _rec("r1", _calls(8, user))])
 	assert cs["filename"] == "apps/myapp/myapp/rows.py"
 	assert rc["action_ref"] == "1"
+
+
+# ---------------------------------------------------------------------------
+# T13 (cycle 2): Optimus's own settings reads, anchored counts, bench-shaped cut
+# ---------------------------------------------------------------------------
+
+_HOME = "/home/frappe/frappe-bench"
+
+
+def _bench(app_path, lineno, function):
+	return {"filename": f"{_HOME}/apps/{app_path}", "lineno": lineno, "function": function}
+
+
+# The tail every real frame chain below shares: Frappe's doc-event runner and the save.
+_DOC_EVENT_TAIL = [
+	_bench("frappe/frappe/model/document.py", 1563, "runner"),
+	_bench("frappe/frappe/model/document.py", 1581, "composer"),
+	_bench("frappe/frappe/model/document.py", 1184, "run_method"),
+	_bench("frappe/frappe/model/document.py", 518, "save"),
+	{"filename": "/usr/lib/python3.14/socketserver.py", "lineno": 697, "function": "process_request_thread"},
+]
+
+# The real shape of Optimus's per-query settings read (recordings snapshot on
+# optimus.local): every recorded SQL call reads Optimus Settings from the cache
+# inside the recorder hook, so the sidecar logs a cache_get whose innermost frames
+# are Optimus's and whose first frame outside frappe/ and optimus/ is the user's
+# query line (ugly_code common.py:25 here).
+_OPTIMUS_SETTINGS_READ = [
+	_bench("optimus/optimus/settings.py", 750, "get_config"),
+	_bench("optimus/optimus/__init__.py", 200, "_read_extras"),
+	_bench("optimus/optimus/__init__.py", 228, "_profiler_register"),
+	_bench("frappe/frappe/recorder.py", 84, "record_sql"),
+	_bench("ugly_code/ugly_code/python/common.py", 25, "_check_user_exists"),
+	_bench("ugly_code/ugly_code/python/common.py", 15, "_run_validations"),
+	_bench("ugly_code/ugly_code/python/common.py", 9, "looped_validate"),
+	*_DOC_EVENT_TAIL,
+]
+
+
+def _real_genuine_sidecar():
+	"""The three genuine loops of the same snapshot, with their real stacks."""
+	user_doc = [
+		_bench("ugly_code/ugly_code/python/common.py", 24, "_check_user_exists"),
+		_bench("ugly_code/ugly_code/python/common.py", 15, "_run_validations"),
+		_bench("ugly_code/ugly_code/python/common.py", 9, "looped_validate"),
+		*_DOC_EVENT_TAIL,
+	]
+
+	def perm(line):
+		return [
+			_bench("frappe/frappe/__init__.py", 609, "has_permission"),
+			_bench("ugly_code/ugly_code/python/common.py", line, "_verify_permissions"),
+			_bench("ugly_code/ugly_code/python/common.py", 198, "_run_post_checks"),
+			_bench("ugly_code/ugly_code/python/common.py", 11, "looped_validate"),
+			*_DOC_EVENT_TAIL,
+		]
+
+	side = [_sidecar_entry("get_doc", ["User", "Administrator"], ["User", "e7d3e769f3f5"], user_doc) for _ in range(230)]
+	for line, ptype in ((205, "read"), (206, "write")):
+		side += [
+			_sidecar_entry(
+				"has_permission", ["User", "Administrator", ptype], ["User", "e7d3e769f3f5", ptype], perm(line)
+			)
+			for _ in range(120)
+		]
+	return side
+
+
+def _findings(recordings):
+	ctx = AnalyzeContext(session_uuid="t", docname="t")
+	rc = [f for f in redundant_calls.analyze(recordings, ctx).findings if f["finding_type"] == "Redundant Call"]
+	return rc, ctx
+
+
+def _callsite_of(finding):
+	cs = json.loads(finding["technical_detail_json"])["callsite"]
+	return cs["filename"], cs["lineno"]
+
+
+def test_optimus_own_settings_reads_are_not_a_redundant_call():
+	"""A1: the snapshot gave 4 findings; the cache lookup of optimus_settings_cached
+	(585 times, blamed on common.py:25) was Optimus's own read. Exactly it goes."""
+	own = [
+		_sidecar_entry("cache_get", "optimus_settings_cached", "605996ade876", _OPTIMUS_SETTINGS_READ)
+		for _ in range(585)
+	]
+	genuine = _real_genuine_sidecar()
+	rc, _ctx = _findings([_rec("r0", own + genuine)])
+	assert sorted(_callsite_of(f) for f in rc) == [
+		("ugly_code/ugly_code/python/common.py", 24),
+		("ugly_code/ugly_code/python/common.py", 205),
+		("ugly_code/ugly_code/python/common.py", 206),
+	]
+	assert not any("optimus_settings_cached" in f["technical_detail_json"] for f in rc)
+
+
+def _own_read(*frames):
+	return _sidecar_entry("cache_get", "k", "h", [*frames, *_OPTIMUS_SETTINGS_READ[3:]])
+
+
+def test_an_optimus_read_behind_frappe_or_library_frames_is_still_optimus_own():
+	"""The rule is the innermost frame outside frappe/ (library and stdlib frames are
+	dropped first), not the innermost frame."""
+	frappe_cache = _bench("frappe/frappe/utils/redis_wrapper.py", 90, "get_value")
+	stdlib = {"filename": "/usr/lib/python3.14/functools.py", "lineno": 1, "function": "wrapper"}
+	settings = _bench("optimus/optimus/settings.py", 750, "get_config")
+	rc, _ctx = _findings([_rec("r0", [_own_read(frappe_cache, stdlib, settings) for _ in range(60)])])
+	assert rc == []
+
+
+def test_optimus_frames_in_other_path_shapes_are_optimus_own():
+	for path in ("apps/optimus/optimus/settings.py", "optimus/settings.py", f"{_HOME}/apps/optimus/.wt/x/optimus/settings.py"):
+		frame = {"filename": path, "lineno": 750, "function": "get_config"}
+		rc, _ctx = _findings([_rec("r0", [_own_read(frame) for _ in range(60)])])
+		assert rc == [], path
+
+
+def test_a_user_loop_reached_through_an_optimus_frame_further_out_is_kept():
+	"""Only the INNERMOST frame outside frappe/ decides: a user line inside, with an
+	Optimus frame further out, is the user's call."""
+	stack = [
+		_bench("frappe/frappe/utils/redis_wrapper.py", 90, "get_value"),
+		_bench("myapp/myapp/rows.py", 24, "check_rows"),
+		_bench("optimus/optimus/hooks_callbacks.py", 280, "before_request"),
+		*_DOC_EVENT_TAIL,
+	]
+	rc, _ctx = _findings([_rec("r0", [_sidecar_entry("cache_get", "k", "h", stack) for _ in range(60)])])
+	assert [_callsite_of(f) for f in rc] == [("myapp/myapp/rows.py", 24)]
+
+
+def test_optimus_own_is_decided_by_the_app_root_not_a_substring():
+	"""The skip matches the app root (the prototype's /apps/optimus/ or optimus/ start),
+	so an app merely named like Optimus is not skipped here."""
+	assert redundant_calls._is_optimus_own([_bench("myoptimus/myoptimus/rows.py", 24, "f")]) is False
+	assert redundant_calls._is_optimus_own([_bench("myapp/myapp/optimus/x.py", 24, "f")]) is False
+	assert redundant_calls._is_optimus_own([_bench("frappe/frappe/x.py", 1, "f")]) is False
+	assert redundant_calls._is_optimus_own([]) is False
+	# A frame without a filename is skipped, as walk_callsite skips it.
+	nameless = {"filename": "", "lineno": 1, "function": "?"}
+	assert redundant_calls._is_optimus_own([nameless, _bench("optimus/optimus/settings.py", 750, "f")]) is True
+
+
+_ERP_VIA = [
+	{"filename": "apps/erpnext/erpnext/accounts/party.py", "lineno": 610, "function": "get_party_account"},
+	{"filename": "apps/erpnext/erpnext/controllers/accounts_controller.py", "lineno": 300, "function": "validate"},
+	*_USER_CALLER_STACK[1:],
+]
+_USER_HOOK = [{"filename": "apps/myapp/myapp/hooks_impl.py", "lineno": 12, "function": "si_validate"}, *_USER_CALLER_STACK[1:]]
+
+
+def _company(stack):
+	return _sidecar_entry("get_doc", ["Company", "Acme"], ("Company", "h"), caller_stack=stack)
+
+
+def test_one_user_call_in_an_erpnext_loop_is_no_finding_in_either_order():
+	"""C3 (c2corr/p6_rc_anchor.py, p6b.py): one user call anchored a "31 times" High
+	finding counted over all 31 occurrences. The repetition is ERPNext's, so the bucket
+	is suppressed as framework code, as it was before the non-framework vote."""
+	erp = [_company(_ERP_VIA) for _ in range(30)]
+	for side in (erp + [_company(_USER_HOOK)], [_company(_USER_HOOK)] + erp):
+		rc, ctx = _findings([_rec("r0", side)])
+		assert rc == []
+		assert any("Frappe framework code" in w for w in ctx.warnings), ctx.warnings
+
+
+def test_a_user_loop_beside_a_bigger_erpnext_loop_is_counted_alone():
+	"""C3: 8 user-loop calls plus 9 ERPNext calls in one action is a finding counted 8,
+	not 17: title, description, count, affected_count and severity all use the anchored
+	callsite's occurrences."""
+	user = _stack_at("apps/myapp/myapp/rows.py", 24, "check_rows")
+	erp = _stack_at("apps/erpnext/erpnext/stock/utils.py", 30, "get_bin")
+	for n_erp in (9, 30):
+		side = [_company(erp) for _ in range(n_erp)] + [_company(user) for _ in range(8)]
+		rc, ctx = _findings([_rec("r0", side)])
+		assert len(rc) == 1, ctx.warnings
+		f = rc[0]
+		detail = json.loads(f["technical_detail_json"])
+		assert f["title"].endswith("(8 times)")
+		assert "**8 times**" in f["customer_description"]
+		assert (detail["count"], f["affected_count"], detail["distinct_actions"]) == (8, 8, 1)
+		assert f["severity"] == "Medium"  # 8 < 5 x 5; 38 occurrences would read High
+
+
+def test_the_anchored_callsite_must_reach_the_threshold_within_one_action():
+	"""C3: the bucket reaches the threshold in action 0 (2 ERPNext + 3 user calls), but
+	the anchored user line runs only 3 times per action: a per-request call, not a loop."""
+	user = _stack_at("apps/myapp/myapp/rows.py", 24, "check_rows")
+	erp = _stack_at("apps/erpnext/erpnext/stock/utils.py", 30, "get_bin")
+	r0 = [_company(erp) for _ in range(2)] + [_company(user) for _ in range(3)]
+	r1 = [_company(user) for _ in range(3)]
+	rc, ctx = _findings([_rec("r0", r0), _rec("r1", r1)])
+	assert rc == []
+	assert any("summing across multiple requests" in w for w in ctx.warnings), ctx.warnings
+
+
+def test_a_per_request_user_call_beside_an_erpnext_loop_is_suppressed_as_framework():
+	"""C3: the user line runs 3 times in each of two actions (no loop); the bucket's
+	loop is ERPNext's 10 calls, so it is suppressed as framework code."""
+	user = _stack_at("apps/myapp/myapp/rows.py", 24, "check_rows")
+	erp = _stack_at("apps/erpnext/erpnext/stock/utils.py", 30, "get_bin")
+	r0 = [_company(erp) for _ in range(10)] + [_company(user) for _ in range(3)]
+	r1 = [_company(user) for _ in range(3)]
+	rc, ctx = _findings([_rec("r0", r0), _rec("r1", r1)])
+	assert rc == []
+	assert any("Frappe framework code" in w for w in ctx.warnings), ctx.warnings
+	assert not any("summing across multiple requests" in w for w in ctx.warnings), ctx.warnings
+
+
+def test_two_user_lines_that_reach_the_threshold_only_together_are_no_finding():
+	"""C3: 3 calls from each of two user lines in one action. Neither line is a loop of
+	5; the drop is silent, since nothing was summed across requests."""
+	a = _stack_at("apps/myapp/myapp/a.py", 10)
+	b = _stack_at("apps/myapp/myapp/b.py", 20)
+	rc, ctx = _findings([_rec("r0", _calls(3, a) + _calls(3, b))])
+	assert rc == []
+	assert not any("summing across multiple requests" in w for w in ctx.warnings), ctx.warnings
+	assert not any("Frappe framework code" in w for w in ctx.warnings), ctx.warnings
+
+
+def test_a_bucket_below_the_threshold_is_dropped_without_a_warning():
+	"""The bucket checks run before the anchored ones: 4 calls in one action are
+	under the threshold of 5, not a cross-request spread."""
+	rc, ctx = _findings([_rec("r0", _calls(4, _USER_CALLER_STACK))])
+	assert rc == [] and ctx.warnings == []
+
+
+def test_a_per_request_framework_call_is_reported_as_cross_request_spread():
+	"""The bucket's spread check runs before the walk: one werkzeug-side lookup per
+	request is a per-request call (the v0.5.2 production case), whatever its callsite."""
+	werkzeug = [
+		{"filename": "/opt/venv/lib/python3.14/site-packages/werkzeug/serving.py", "lineno": 370, "function": "run_wsgi"},
+		*_USER_CALLER_STACK[1:],
+	]
+	recs = [_rec(f"r{i}", [_sidecar_entry("cache_get", "k", "h", werkzeug)]) for i in range(60)]
+	rc, ctx = _findings(recs)
+	assert rc == []
+	assert any("summing across multiple requests" in w for w in ctx.warnings), ctx.warnings
+	assert not any("Frappe framework code" in w for w in ctx.warnings), ctx.warnings
+
+
+def test_the_cut_keeps_an_inner_apps_package_of_the_app():
+	"""E5: the last /apps/ was an `apps` package inside the app; the bench's apps dir is
+	the /apps/ followed by <app>/<app>/."""
+	stack = [{"filename": "/home/f/bench/apps/myapp/myapp/apps/x.py", "lineno": 1, "function": "f"}]
+	assert redundant_calls._apps_relative_stack(stack)[0]["filename"] == "myapp/myapp/apps/x.py"
+	win = [{"filename": "C:\\bench\\apps\\myapp\\myapp\\apps\\x.py", "lineno": 1, "function": "f"}]
+	assert redundant_calls._apps_relative_stack(win)[0]["filename"] == "myapp/myapp/apps/x.py"
+
+
+def test_the_last_bench_shaped_apps_dir_wins():
+	"""E5: of two /apps/<a>/<a>/ candidates the last is kept, as the plain rule keeps the
+	last /apps/; an app named apps still resolves."""
+	cases = {
+		"/home/apps/x/x/bench/apps/myapp/myapp/y.py": "myapp/myapp/y.py",
+		"/srv/bench/apps/apps/apps/y.py": "apps/apps/y.py",
+		"/h/apps/apps/myapp/myapp/y.py": "myapp/myapp/y.py",  # a bench dir named apps
+		"/srv/bench/apps/myapp/myapp/apps/sub/subpkg/x.py": "myapp/myapp/apps/sub/subpkg/x.py",
+		"/home/apps/bench/apps/myapp/x.py": "myapp/x.py",
+		"/srv/bench/apps/x.py": "x.py",
+	}
+	for path, cut in cases.items():
+		stack = [{"filename": path, "lineno": 1, "function": "f"}]
+		assert redundant_calls._apps_relative_stack(stack)[0]["filename"] == cut, path
+
+
+def test_an_inner_apps_package_keeps_its_finding():
+	"""E5: the cut to x.py made the loop's app root `x.py`; it is myapp's code."""
+	stack = [
+		{"filename": f"{_HOME}/apps/myapp/myapp/apps/x.py", "lineno": 7, "function": "loop"},
+		*_DOC_EVENT_TAIL,
+	]
+	_rc, cs = _analyze_one([_rec("r0", _calls(8, stack))])
+	assert cs["filename"] == "myapp/myapp/apps/x.py"
