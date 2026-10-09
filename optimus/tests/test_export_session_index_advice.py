@@ -166,7 +166,7 @@ def test_advice_failure_exports_what_the_report_shows(env, monkeypatch):
 		raise RuntimeError("recipe bug")
 
 	lines = []
-	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(warning=lines.append), raising=False)
+	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(error=lines.append), raising=False)
 	monkeypatch.setattr(index_recipes, "advise_finding", boom)
 	row = _missing_index()
 	env(findings=[row])
@@ -181,7 +181,7 @@ def test_advice_failure_exports_what_the_report_shows(env, monkeypatch):
 		"unknown": True,
 	}
 	assert "suggested_ddl" not in finding["technical_detail"] and "suggested_ddl" not in report["technical_detail"]
-	assert lines == ["optimus: index advice failed for 1 finding(s) or table(s) in one export"]
+	assert lines == ["optimus: index advice failed for 1 finding(s) or table(s) in one export (Missing Index: RuntimeError)"]
 
 
 def test_a_failing_card_advisor_is_counted_in_the_export_log(env, monkeypatch):
@@ -191,19 +191,19 @@ def test_a_failing_card_advisor_is_counted_in_the_export_log(env, monkeypatch):
 		raise RuntimeError("card bug")
 
 	lines = []
-	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(warning=lines.append), raising=False)
+	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(error=lines.append), raising=False)
 	monkeypatch.setattr(index_recipes, "advise_table", boom)
 	env(tables=[_table()])
 	(table,) = api.export_session(session_uuid=SESSION_UUID)["table_breakdown"]
 	assert table["recommended_index"]["route_note"] == recipe_enrichment.RECIPE_FAILED_CARD_NOTE
-	assert lines == ["optimus: index advice failed for 1 finding(s) or table(s) in one export"]
+	assert lines == ["optimus: index advice failed for 1 finding(s) or table(s) in one export (tabSales Invoice: RuntimeError)"]
 
 
 def test_an_export_without_failures_logs_nothing(env, monkeypatch):
 	import frappe
 
 	lines = []
-	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(warning=lines.append), raising=False)
+	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(error=lines.append), raising=False)
 	env(findings=[_missing_index()], tables=[_table()])
 	api.export_session(session_uuid=SESSION_UUID)
 	assert lines == []

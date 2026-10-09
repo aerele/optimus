@@ -138,3 +138,30 @@ def best_effort(
 	if error_type is not None and on_error is not None:
 		on_error(error_type)
 	return value
+
+
+_RECENT_LINES: dict[str, float] = {}
+_RECENT_LINES_CAP = 64
+
+
+def log_error_line(message: str, *, dedupe_seconds: float = 60.0) -> None:
+	"""One ``frappe.logger("optimus")`` line at ERROR (Frappe drops lower levels on a
+	production site), skipped when the same text was logged in the last ``dedupe_seconds``
+	so a failure that repeats per finding writes one line. It never raises (an RQ job
+	timeout excepted) and must be called outside any ``except``."""
+	import time
+
+	now = time.monotonic()
+	last = _RECENT_LINES.get(message)
+	if last is not None and now - last < dedupe_seconds:
+		return
+	if len(_RECENT_LINES) >= _RECENT_LINES_CAP:
+		_RECENT_LINES.clear()
+	_RECENT_LINES[message] = now
+
+	def _write() -> None:
+		import frappe
+
+		frappe.logger("optimus").error(message)
+
+	best_effort(_write, None)

@@ -12,6 +12,16 @@ versions may contain breaking changes see migration notes below).
 
 ### Changed
 
+- Make index-advice and gate failures diagnosable. The `optimus: index advice failed` log
+  line now names `(finding type or table: error type)` pairs (deduped, at most 10) and, like
+  the new `optimus: hot-line gate failed: <type>` and `optimus: evidence read failed for
+  <table>: <type>` lines, is written at ERROR, the lowest level a production site keeps. A
+  table whose evidence read raised says Optimus could not read it, not that it has no
+  DocType. The auto-analyze warnings and the Refresh toasts say what happened and where to
+  look (Error Log titles `optimus ai auto-suggest` and `optimus ai backfill`), name the
+  setting "Excluded finding types", point at AI > Refresh AI suggestions, and no longer count
+  index findings as "not sent to the AI". AI-FIXING 6.5 has a runbook table for the new
+  signals.
 - Build index advice from analyzer evidence, without an AI call. One advisor serves
   index findings and per-table cards, so they always agree. It reads each field's
   Unique flag and type, the real column types, the table's existing indexes and the

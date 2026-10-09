@@ -97,7 +97,7 @@ def test_excluded_types_are_never_sent_and_gated_ones_are_counted(backfill):
 	with patch("optimus.settings.get_config", return_value=_cfg(ai_excluded_finding_types=("Slow Query",))):
 		out = analyze._run_ai_backfill(_doc(rows), cap=0, regenerate_all=True)
 	assert backfill.sent == ["n1"]
-	assert (out["excluded"], out["gated"], out["failed"], out["total_pending"]) == (1, 1, 0, 1)
+	assert (out["excluded"], out["gated"], out["failed"], out["total_pending"]) == (1, 0, 0, 1)
 
 
 @pytest.mark.parametrize("kind,failed,skipped", [("not_eligible", 0, 1), ("config", 1, 0), ("transport", 1, 0)])
@@ -120,7 +120,7 @@ def test_an_excluded_type_raises_not_eligible():
 		with pytest.raises(ai_fix.AiFixError) as caught:
 			ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x"})
 	assert caught.value.kind == "not_eligible"
-	assert "excluded by ai_excluded_finding_types" in str(caught.value)
+	assert "listed under Excluded finding types" in str(caught.value)
 	assert ai_fix.AI_SKIP_KINDS == frozenset({"not_eligible"})
 
 
@@ -141,8 +141,8 @@ def test_auto_suggest_notes_gated_and_excluded_counts(monkeypatch):
 	     patch("optimus.ai_fix.is_available", return_value=True), \
 	     patch("optimus.ai_fix.suggest_fix", side_effect=lambda payload, **kw: {"suggestion": "x", "model": "m"}):
 		analyze._enrich_findings_with_ai_suggestions(ctx)
-	assert any("2 finding(s) get advice or a note from Optimus, or no AI suggestion by design" in w for w in ctx.warnings)
-	assert any("1 finding(s) skipped because their type is excluded" in w for w in ctx.warnings)
+	assert any("1 finding(s) were not sent to the AI: the report shows" in w for w in ctx.warnings)
+	assert any("1 finding(s) skipped because their type is listed under Excluded finding types" in w for w in ctx.warnings)
 
 
 def test_auto_suggest_notes_the_counts_when_nothing_is_eligible():
@@ -158,20 +158,21 @@ def test_auto_suggest_notes_the_counts_when_nothing_is_eligible():
 	     patch("optimus.ai_fix.suggest_fix", side_effect=AssertionError("nothing is eligible")):
 		analyze._enrich_findings_with_ai_suggestions(ctx)
 	assert ctx.warnings == [
-		"AI auto-suggest: 2 finding(s) get advice or a note from Optimus, or no AI suggestion "
-		"by design (see each finding).",
-		"AI auto-suggest: 1 finding(s) skipped because their type is excluded in "
-		"Optimus Settings (ai_excluded_finding_types).",
+		"AI auto-suggest: 1 finding(s) were not sent to the AI: the report shows "
+		"Optimus's own advice or a note on each.",
+		"AI auto-suggest: 1 finding(s) skipped because their type is listed under "
+		"Excluded finding types in Optimus Settings.",
 	]
 
 
 def test_an_excluded_type_the_ai_never_sees_is_counted_by_the_gate(backfill):
 	"""Only an AI-eligible type counts as excluded; an excluded index type is still the
-	gate's (it gets the deterministic advice either way)."""
+	gate's (it gets the deterministic advice either way), but index findings are not counted
+	as gated: every session has them, so the note would fire on every session (O5)."""
 	rows = [_row("idx", "Missing Index"), _row("n1")]
 	with patch("optimus.settings.get_config", return_value=_cfg(ai_excluded_finding_types=("Missing Index",))):
 		out = analyze._run_ai_backfill(_doc(rows), cap=0, regenerate_all=True)
-	assert (out["excluded"], out["gated"], out["total_pending"]) == (0, 1, 1)
+	assert (out["excluded"], out["gated"], out["total_pending"]) == (0, 0, 1)
 	assert backfill.sent == ["n1"]
 
 

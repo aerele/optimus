@@ -309,6 +309,7 @@ class IndexAdvice:
 	lead: str = ""
 	unknown: bool = False
 	served_by: str = ""
+	no_evidence: bool = False
 
 	@property
 	def code(self) -> str | None:
@@ -1754,11 +1755,32 @@ def _index_columns(evidence: TableEvidence, cols: list[str]) -> tuple[list[str],
 	return final, dropped, None
 
 
-def _no_code(doctype: str, cols, reason: str, *, unknown: bool = False) -> IndexAdvice:
+def _no_code(doctype: str, cols, reason: str, *, unknown: bool = False, no_evidence: bool = False) -> IndexAdvice:
 	return IndexAdvice(
 		route=ROUTE_NO_CODE, doctype=doctype, table=f"tab{doctype}", columns=tuple(cols), reason=reason,
-		unknown=unknown,
+		unknown=unknown, no_evidence=no_evidence,
 	)
+
+
+def _read_failed_reason(doctype: str) -> str:
+	"""The reason for a table whose evidence READ raised (O2), not one with no DocType on
+	this site: the table may well exist, so the text must not say it does not."""
+	return (
+		f"Optimus could not read the details of table \"tab{doctype}\" (an error while it read the "
+		"columns and indexes). So it gives no index code. Check the slow queries on it with EXPLAIN; if it "
+		"keeps happening, send the bench log line \"optimus: evidence read failed\" to the Optimus maintainers."
+	)
+
+
+def _with_read_failure(advice: IndexAdvice | None, evidence_lookup) -> IndexAdvice | None:
+	"""``advice`` with the read-failure reason when it is the no-evidence advice for a table
+	whose evidence read raised (the lookup says so through ``read_failed``)."""
+	if advice is None or not advice.no_evidence:
+		return advice
+	read_failed = getattr(evidence_lookup, "read_failed", None)
+	if read_failed is None or not read_failed(f"tab{advice.doctype}"):
+		return advice
+	return replace(advice, reason=_read_failed_reason(advice.doctype))
 
 
 def _no_evidence(doctype: str, cols) -> IndexAdvice:
@@ -1769,7 +1791,7 @@ def _no_evidence(doctype: str, cols) -> IndexAdvice:
 		f'Optimus has no information about table "tab{doctype}": it is not the table of a DocType on this '
 		"site (a core table such as tabSessions or tabSeries, a virtual DocType or a removed one), or Optimus "
 		"could not read it. So it gives no index code. Check the slow queries on it with EXPLAIN."
-	), unknown=True)
+	), unknown=True, no_evidence=True)
 
 
 def _search_index_reason(doctype: str, field: str, evidence: TableEvidence, custom_field: bool) -> str:
@@ -2388,7 +2410,21 @@ def advise_finding(
 	parser: Callable[[str], dict] | None = None,
 ) -> IndexAdvice | None:
 	"""The advice for an index-family or Slow Query finding (render dict or row-shaped
-	dict), or None when there is nothing to advise."""
+	dict), or None when there is nothing to advise. A table whose evidence read raised
+	says so (``_with_read_failure``), not that it has no DocType."""
+	return _with_read_failure(
+		_advise_finding(finding, evidence_lookup=evidence_lookup, tracked_apps=tracked_apps, parser=parser),
+		evidence_lookup,
+	)
+
+
+def _advise_finding(
+	finding: dict,
+	*,
+	evidence_lookup: Callable[[str], TableEvidence | None],
+	tracked_apps: tuple[str, ...] = (),
+	parser: Callable[[str], dict] | None = None,
+) -> IndexAdvice | None:
 	ftype = finding.get("finding_type") or ""
 	if ftype not in ADVISED_FINDING_TYPES:
 		return None
@@ -2544,7 +2580,8 @@ def advise_table(
 	doctype = doctype_of(table)
 	if doctype is None:
 		return None
-	return advise(table, list(columns or []), evidence=evidence_lookup(f"tab{doctype}"), tracked_apps=tracked_apps)
+	advice = advise(table, list(columns or []), evidence=evidence_lookup(f"tab{doctype}"), tracked_apps=tracked_apps)
+	return _with_read_failure(advice, evidence_lookup)
 
 
 def _string_hook_pair(hook: str) -> str:

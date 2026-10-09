@@ -50,7 +50,7 @@ def test_failures_are_logged_once_after_the_recipes_ran(monkeypatch):
 	import frappe
 
 	lines = []
-	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(warning=lines.append), raising=False)
+	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(error=lines.append), raising=False)
 	monkeypatch.setattr(index_recipes, "advise_finding", _boom)
 	row = SimpleNamespace(  # shaped like test_index_recipes_render's rows, so the card renders
 		finding_type="Missing Index", severity="High", title="Missing Index finding", customer_description="d",
@@ -71,7 +71,7 @@ def test_failures_are_logged_once_after_the_recipes_ran(monkeypatch):
 	with patch("optimus.settings.get_ignored_apps", return_value=()):
 		html = renderer.render_raw(doc, recordings=[])
 	assert recipe_enrichment.RECIPE_FAILED_HINT in _html.unescape(html)  # the note quotes the log line
-	assert lines.count("optimus: index advice failed for 1 finding(s) or table(s) in one render") == 1
+	assert lines.count("optimus: index advice failed for 1 finding(s) or table(s) in one render (Missing Index: RuntimeError)") == 1
 
 
 def test_a_broken_hot_line_gate_fails_closed(monkeypatch):
@@ -201,7 +201,7 @@ def test_a_failed_card_recipe_is_shown_and_logged(monkeypatch):
 	import frappe
 
 	lines = []
-	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(warning=lines.append), raising=False)
+	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(error=lines.append), raising=False)
 	monkeypatch.setattr(index_recipes, "advise_table", _boom)
 	table = {
 		"table": "tabSales Invoice", "consolidated_time_ms": 50.0, "queries": 5, "read_count": 4, "write_count": 0,
@@ -212,14 +212,14 @@ def test_a_failed_card_recipe_is_shown_and_logged(monkeypatch):
 	with patch("optimus.settings.get_ignored_apps", return_value=()):
 		html = renderer.render_raw(_render_doc(tables=[table]), recordings=[])
 	assert recipe_enrichment.RECIPE_FAILED_CARD_NOTE in _html.unescape(html)  # the note quotes the log line
-	assert lines == ["optimus: index advice failed for 1 finding(s) or table(s) in one render"]
+	assert lines == ["optimus: index advice failed for 1 finding(s) or table(s) in one render (tabSales Invoice: RuntimeError)"]
 
 
 def test_no_failure_writes_no_log_line(monkeypatch):
 	import frappe
 
 	lines = []
-	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(warning=lines.append), raising=False)
+	monkeypatch.setattr(frappe, "logger", lambda *a, **k: SimpleNamespace(error=lines.append), raising=False)
 	recipe_enrichment.log_recipe_failures(0)
 	assert lines == []
 	recipe_enrichment.log_recipe_failures(2)
@@ -298,7 +298,7 @@ def test_a_broken_gate_never_aborts_the_analyze_ai_step(monkeypatch):
 		analyze._enrich_findings_with_ai_suggestions(ctx)
 	assert sent == ["N+1 Query"]
 	assert findings[0]["llm_fix_json"] is None and findings[1]["llm_fix_json"]
-	assert any(w.startswith("AI auto-suggest: 1 finding(s) get advice or a note") for w in ctx.warnings)
+	assert any(w.startswith("AI auto-suggest: 1 finding(s) were not sent to the AI") for w in ctx.warnings)
 
 
 def test_a_broken_gate_never_aborts_the_refresh(monkeypatch):

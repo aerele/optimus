@@ -605,10 +605,11 @@ def render(
 	# picks it up.
 	_installed_apps = installed_apps_allowlist()
 	_evidence_lookup = make_evidence_lookup()
+	_recipe_errors: list = []
 	_finding_recipe_stats = apply_finding_recipes(
 		all_findings, evidence_lookup=_evidence_lookup,
 		tracked_apps=render_config["tracked_apps"], installed_apps=_installed_apps,
-		parser=make_query_parser(),
+		parser=make_query_parser(), errors=_recipe_errors,
 	)
 	mark_outdated_ai_fixes(all_findings, refresh_check=make_refresh_check())
 
@@ -632,8 +633,11 @@ def render(
 	# evidence queries (cycle 1: the recipe stage grew with session size).
 	_table_recipe_stats = apply_table_recipes(
 		table_breakdown, evidence_lookup=_evidence_lookup, tracked_apps=render_config["tracked_apps"],
+		errors=_recipe_errors,
 	)
-	log_recipe_failures(_finding_recipe_stats["failed"] + _table_recipe_stats["failed"])
+	log_recipe_failures(
+		_finding_recipe_stats["failed"] + _table_recipe_stats["failed"], errors=_recipe_errors,
+	)
 
 	# Sort all findings: highest severity first, then highest impact.
 	all_findings.sort(

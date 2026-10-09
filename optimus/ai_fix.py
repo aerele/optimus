@@ -253,7 +253,10 @@ def is_finding_type_excluded(finding_type: str | None) -> bool:
 def _app_scope() -> tuple[tuple[str, ...], frozenset[str] | None]:
 	"""The site's Tracked Apps and installed apps, the same inputs the report
 	uses to tell your code from framework code. Ordinary settings failures fall
-	back to the default scope; job timeouts propagate."""
+	back to the default scope. A job timeout inside ``get_config`` or
+	``installed_apps_allowlist`` is swallowed by them (they catch it themselves, a
+	pre-existing gap parked as a follow-up); a timeout raised in this function's own
+	``best_effort`` still escapes."""
 	from optimus.analyzers.base import installed_apps_allowlist
 	from optimus.settings import get_config
 
@@ -295,6 +298,7 @@ def llm_gate_note(finding: dict) -> str | None:
 	return safe_call.best_effort(
 		lambda: ai_grounding.hot_line_gate(finding, tracked_apps=tracked, installed_apps=installed),
 		ai_grounding.GATE_CHECK_FAILED_NOTE,
+		on_error=lambda kind: safe_call.log_error_line(f"optimus: hot-line gate failed: {kind}"),
 	)
 
 
@@ -361,7 +365,7 @@ def suggest_fix(finding: dict, *, timeout: int | None = None) -> dict:
 		from frappe import _
 
 		raise AiFixError(
-			_("No AI suggestion for this finding: its type {0} is excluded by ai_excluded_finding_types in Optimus Settings.").format(
+			_("No AI suggestion for this finding: its type {0} is listed under Excluded finding types in Optimus Settings.").format(
 				finding.get("finding_type")
 			),
 			kind="not_eligible",

@@ -32,7 +32,7 @@ from optimus import ai_grounding
 from optimus.analyzers.base import INDEX_FINDING_TYPES
 from optimus.dbdialect import get_dialect
 from optimus.renderer import index_recipes
-from optimus.safe_call import best_effort
+from optimus.safe_call import best_effort, log_error_line
 
 
 @dataclass(frozen=True)
@@ -149,19 +149,38 @@ def _read_table_evidence(table: str) -> TableEvidence | None:
 	)
 
 
-def make_evidence_lookup() -> Callable[[str], TableEvidence | None]:
+MAX_LOGGED_EVIDENCE_FAILURES = 10
+
+
+class _EvidenceLookup:
 	"""A per-render ``evidence_lookup(table)``: memoised per table (misses included), so
-	each table costs its queries once per render. Ordinary failures give None; an RQ
-	job timeout escapes as a fresh instance."""
-	cache: dict[str, TableEvidence | None] = {}
+	each table costs its queries once per render. Ordinary failures give None and write one
+	bench-log line per table (O2); ``read_failed(table)`` tells such a failure from a table
+	that has no evidence (no DocType on this site), so the advice can say which. An RQ job
+	timeout escapes as a fresh instance."""
 
-	def lookup(table: str) -> TableEvidence | None:
+	def __init__(self) -> None:
+		self._cache: dict[str, TableEvidence | None] = {}
+		self._failed: set[str] = set()
+
+	def __call__(self, table: str) -> TableEvidence | None:
 		key = str(table or "").strip().strip("`")
-		if key not in cache:
-			cache[key] = best_effort(lambda: _read_table_evidence(key), None)
-		return cache[key]
+		if key not in self._cache:
+			def _failed(error_type: str) -> None:
+				self._failed.add(key)
+				if len(self._failed) <= MAX_LOGGED_EVIDENCE_FAILURES:
+					log_error_line(f"optimus: evidence read failed for {key}: {error_type}")
 
-	return lookup
+			self._cache[key] = best_effort(lambda: _read_table_evidence(key), None, on_error=_failed)
+		return self._cache[key]
+
+	def read_failed(self, table: str) -> bool:
+		return str(table or "").strip().strip("`") in self._failed
+
+
+def make_evidence_lookup() -> Callable[[str], TableEvidence | None]:
+	"""A fresh ``_EvidenceLookup``: one per render, export and AI run."""
+	return _EvidenceLookup()
 
 
 def _with_note(existing, note: str) -> str:
@@ -284,19 +303,28 @@ def make_query_parser() -> Callable[[str], dict]:
 	return _QueryParser()
 
 
-def log_recipe_failures(count: int, *, where: str = "render") -> None:
-	"""One bench-log line for index advice that raised during one render or export
-	(``where``, O-I1). Called after the recipes ran, never inside an ``except``. A logger
-	failure is ignored; an RQ job timeout escapes as a fresh instance."""
+MAX_LOGGED_RECIPE_ERRORS = 10
+
+
+def log_recipe_failures(count: int, *, where: str = "render", errors=()) -> None:
+	"""One bench-log line, at ERROR (Frappe drops lower levels on a production site), for
+	index advice that raised during one render or export (``where``, O-I1). ``errors`` are the
+	``(finding type or table, error type)`` pairs, deduped and capped, so the line says what
+	failed. Called after the recipes ran, never inside an ``except``. A logger failure is
+	ignored; an RQ job timeout escapes as a fresh instance."""
 	if not count:
 		return
+	pairs = list(dict.fromkeys((str(label or "?"), str(kind or "?")) for label, kind in errors or ()))
+	line = f"optimus: index advice failed for {count} finding(s) or table(s) in one {where}"
+	if pairs:
+		shown = ", ".join(f"{label}: {kind}" for label, kind in pairs[:MAX_LOGGED_RECIPE_ERRORS])
+		more = len(pairs) - MAX_LOGGED_RECIPE_ERRORS
+		line += f" ({shown}{f', and {more} more' if more > 0 else ''})"
 
 	def _write() -> None:
 		import frappe
 
-		frappe.logger("optimus").warning(
-			f"optimus: index advice failed for {count} finding(s) or table(s) in one {where}"
-		)
+		frappe.logger("optimus").error(line)
 
 	best_effort(_write, None)
 
@@ -307,6 +335,7 @@ def export_advice(
 	evidence_lookup: Callable[[str], TableEvidence | None],
 	tracked_apps: tuple[str, ...] = (),
 	parser: Callable[[str], dict] | None = None,
+	errors: list | None = None,
 ) -> tuple[dict | None, bool]:
 	"""``(advice, failed)`` for one index-family finding, the one advice step the report
 	and the export share, so the export equals the report (M4). ``advice`` is the export's
@@ -316,12 +345,15 @@ def export_advice(
 	the advisor raised: ``advice`` is then the failure shape (route no_code, the
 	``RECIPE_FAILED_HINT`` text, no code), and the caller counts it for one log line.
 	``unknown`` is True when the advice is no verdict on the index (``IndexAdvice.unknown``,
-	or a failure), so the finding's description stays neutral."""
+	or a failure), so the finding's description stays neutral. A failure appends
+	``(finding type, error type)`` to ``errors`` for the caller's one log line."""
 	advice = best_effort(
 		lambda: index_recipes.advise_finding(
 			finding, evidence_lookup=evidence_lookup, tracked_apps=tuple(tracked_apps or ()), parser=parser,
 		),
 		RECIPE_FAILED,
+		on_error=lambda kind: errors.append((str(finding.get("finding_type") or "finding"), kind))
+		if errors is not None else None,
 	)
 	if advice is RECIPE_FAILED:
 		detail = finding.get("technical_detail")
@@ -401,11 +433,13 @@ def apply_finding_recipes(
 	tracked_apps: tuple[str, ...] = (),
 	installed_apps: frozenset[str] | None = None,
 	parser: Callable[[str], dict] | None = None,
+	errors: list | None = None,
 ) -> dict:
 	"""Fill each render dict's recipe slots in place and return ``{"failed": n}``, the
 	index advice that raised. An index-family finding's title, description and action-plan
 	label follow its advice (``finding_display``; ``action_title`` is the render-only label
-	for a no-code Missing Index). Running it twice leaves the same dicts as running it once."""
+	for a no-code Missing Index). ``errors`` collects ``(finding type, error type)`` for each
+	failure (the caller's one log line). Running it twice leaves the same dicts as running it once."""
 	stats = {"failed": 0}
 	scope = tuple(tracked_apps or ())
 	for f in findings or []:
@@ -417,7 +451,9 @@ def apply_finding_recipes(
 		ftype = f.get("finding_type") or ""
 		if ftype in INDEX_FINDING_TYPES:
 			f["llm_fix"] = None
-			advice, failed = export_advice(f, evidence_lookup=evidence_lookup, tracked_apps=scope, parser=parser)
+			advice, failed = export_advice(
+				f, evidence_lookup=evidence_lookup, tracked_apps=scope, parser=parser, errors=errors,
+			)
 			# Raw analyzer DDL never reaches the report, whatever the advice turned out to be.
 			detail.pop("suggested_ddl", None)
 			stats["failed"] += failed
@@ -441,6 +477,7 @@ def apply_finding_recipes(
 			note = best_effort(
 				lambda: ai_grounding.hot_line_gate(f, tracked_apps=scope, installed_apps=installed_apps),
 				ai_grounding.GATE_CHECK_FAILED_NOTE,
+				on_error=lambda kind: log_error_line(f"optimus: hot-line gate failed: {kind}"),
 			)
 			if note:
 				detail["fix_hint"] = note
@@ -453,6 +490,7 @@ def apply_table_recipes(
 	*,
 	evidence_lookup: Callable[[str], TableEvidence | None],
 	tracked_apps: tuple[str, ...] = (),
+	errors: list | None = None,
 ) -> dict:
 	"""Drop ``ai_index`` from every table entry and run each card's ``recommended_index``
 	through the same advisor as the findings, in place; return ``{"failed": n}``. The
@@ -460,7 +498,8 @@ def apply_table_recipes(
 	``route_note`` (the card's note), ``code``, ``index_name`` and ``requested_columns``
 	(the analyzer's columns; ``columns`` becomes the advice's); it is dropped only when
 	the advisor has nothing to say (no DocType table, no usable column). Running it twice
-	leaves the same cards as running it once."""
+	leaves the same cards as running it once. ``errors`` collects ``(table, error type)`` for
+	each failure."""
 	stats = {"failed": 0}
 	scope = tuple(tracked_apps or ())
 	for t in table_breakdown or []:
@@ -481,6 +520,7 @@ def apply_table_recipes(
 				t.get("table") or "", list(requested), evidence_lookup=evidence_lookup, tracked_apps=scope,
 			),
 			RECIPE_FAILED,
+			on_error=lambda kind: errors.append((str(t.get("table") or "table"), kind)) if errors is not None else None,
 		)
 		if advice is RECIPE_FAILED:
 			rec.update({"route": index_recipes.ROUTE_NO_CODE, "route_note": RECIPE_FAILED_CARD_NOTE, "code": None, "index_name": None})

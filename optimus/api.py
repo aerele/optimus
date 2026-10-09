@@ -1065,11 +1065,12 @@ def _export_index_advice(findings: list[dict], tables) -> None:
 	lookup = recipe_enrichment.make_evidence_lookup()
 	parser = recipe_enrichment.make_query_parser()
 	failed = 0
+	errors: list = []
 	for f in findings:
 		detail = f.get("technical_detail")
 		if f.get("finding_type") in INDEX_FINDING_TYPES:
 			advice, advice_failed = recipe_enrichment.export_advice(
-				f, evidence_lookup=lookup, tracked_apps=tracked, parser=parser,
+				f, evidence_lookup=lookup, tracked_apps=tracked, parser=parser, errors=errors,
 			)
 			failed += advice_failed
 			f["index_advice"] = advice
@@ -1084,10 +1085,13 @@ def _export_index_advice(findings: list[dict], tables) -> None:
 	for t in tables:
 		t.pop("ai_index", None)
 	table_stats = best_effort(
-		lambda: recipe_enrichment.apply_table_recipes(tables, evidence_lookup=lookup, tracked_apps=tracked), None,
+		lambda: recipe_enrichment.apply_table_recipes(
+			tables, evidence_lookup=lookup, tracked_apps=tracked, errors=errors,
+		),
+		None,
 	)
 	failed += (table_stats or {}).get("failed", 0)
-	recipe_enrichment.log_recipe_failures(failed, where="export")
+	recipe_enrichment.log_recipe_failures(failed, where="export", errors=errors)
 
 
 @frappe.whitelist()

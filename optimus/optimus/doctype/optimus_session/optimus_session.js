@@ -253,26 +253,26 @@ function _refill_ai_call(frm) {
 			frappe.show_alert({ message: msg, indicator: indicator });
 			if (failed) {
 				frappe.show_alert({
-					message: __("{0} call(s) failed old suggestions kept (see Error Log).", [failed]),
+					message: __("{0} call(s) failed, old suggestions kept (see Error Log, title optimus ai backfill).", [failed]),
 					indicator: "red",
 				});
 			}
 			if (skipped) {
 				frappe.show_alert({
-					message: __("{0} skipped (time budget) run it again for the rest.", [skipped]),
+					message: __("{0} skipped (time budget). Run it again for the rest.", [skipped]),
 					indicator: "orange",
 				});
 			}
 			const gated = (fx.gated || 0) + (fx.skipped_ineligible || 0);
 			if (gated) {
 				frappe.show_alert({
-					message: __("{0} finding(s) get advice or a note from Optimus, or no AI suggestion by design.", [gated]),
+					message: __("{0} finding(s) were not sent to the AI. Their own advice or note is in the report.", [gated]),
 					indicator: "blue",
 				});
 			}
 			if (fx.excluded) {
 				frappe.show_alert({
-					message: __("{0} finding(s) skipped: their type is excluded in Optimus Settings.", [fx.excluded]),
+					message: __("{0} finding(s) skipped: their type is listed under Excluded finding types in Optimus Settings.", [fx.excluded]),
 					indicator: "orange",
 				});
 			}
@@ -280,7 +280,7 @@ function _refill_ai_call(frm) {
 		},
 		error: () => {
 			frappe.show_alert({
-				message: __("The AI refresh request failed see the error popup for details."),
+				message: __("The AI refresh request failed. See the error popup for details."),
 				indicator: "red",
 			});
 		},

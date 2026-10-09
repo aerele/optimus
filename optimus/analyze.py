@@ -965,9 +965,9 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		if step_failed:
 			try:
 				context.warnings.append(
-					"AI auto-suggest was skipped after an unexpected error "
-					"use 'Generate AI fixes' on the session form to fill them in. "
-					"(see error log)"
+					"AI auto-suggest was skipped after an unexpected error. "
+					"Use AI > Refresh AI suggestions on the session form to fill them in "
+					"(see Error Log, title \"optimus ai auto-suggest (outer)\")."
 				)
 			except Exception:
 				pass
@@ -1099,9 +1099,10 @@ def _ai_selection(items, ai_fix, *, type_of, gate) -> tuple[list, int, int]:
 	"""(eligible items, gated count, excluded count). The operator's per-type exclusion
 	runs first and counts only a type that could reach the AI; any other excluded type
 	falls through to the eligibility gate, which refuses it anyway. Only types that can
-	reach the AI, index findings and Framework N+1 count as gated (O-I2); infrastructure
-	types never do."""
-	counted = ai_fix.AI_ELIGIBLE_FINDING_TYPES | INDEX_FINDING_TYPES | {"Framework N+1"}
+	reach the AI and Framework N+1 count as gated; infrastructure types never do, and neither
+	do index findings: every session has them, each shows Optimus's own advice, and counting
+	them made the note fire on every session (O5)."""
+	counted = ai_fix.AI_ELIGIBLE_FINDING_TYPES | {"Framework N+1"}
 	eligible, gated, excluded = [], 0, 0
 	for item in items:
 		ftype = type_of(item)
@@ -1120,13 +1121,13 @@ def _note_ai_selection(context, gated: int, excluded: int) -> None:
 	the session and rendered into the report, so plain prose like the other warnings."""
 	if gated:
 		context.warnings.append(
-			f"AI auto-suggest: {gated} finding(s) get advice or a note from Optimus, or no AI "
-			"suggestion by design (see each finding)."
+			f"AI auto-suggest: {gated} finding(s) were not sent to the AI: the report shows "
+			"Optimus's own advice or a note on each."
 		)
 	if excluded:
 		context.warnings.append(
-			f"AI auto-suggest: {excluded} finding(s) skipped because their type is excluded in "
-			"Optimus Settings (ai_excluded_finding_types)."
+			f"AI auto-suggest: {excluded} finding(s) skipped because their type is listed under "
+			"Excluded finding types in Optimus Settings."
 		)
 
 
@@ -2155,8 +2156,8 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 
 	if not ai_fix.is_available(section="findings"):
 		context.warnings.append(
-			"AI auto-suggest is on but the AI provider isn't fully configured "
-			"no suggestions were generated (see Optimus Settings ▸ AI Fix Suggestions)."
+			"AI auto-suggest is on but the AI provider isn't fully configured, "
+			"so no suggestions were generated (see Optimus Settings ▸ AI Fix Suggestions)."
 		)
 		return
 
@@ -2246,12 +2247,12 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 	if failures:
 		context.warnings.append(
 			f"AI auto-suggest: {failures} finding(s) couldn't get a suggestion "
-			"(provider error / timeout see error log)."
+			"(provider error or timeout). See Error Log, title \"optimus ai auto-suggest\"."
 		)
 	if skipped_for_time:
 		context.warnings.append(
-			f"AI auto-suggest: {skipped_for_time} finding(s) skipped hit the "
-			f"{AI_AUTO_SUGGEST_TIME_BUDGET_SECONDS}s budget for AI suggestions."
+			f"AI auto-suggest: {skipped_for_time} finding(s) skipped: they hit the "
+			f"{AI_AUTO_SUGGEST_TIME_BUDGET_SECONDS}s budget for AI suggestions. Run AI > Refresh AI suggestions for the rest."
 		)
 	_note_ai_selection(context, gated, excluded)
 
@@ -2470,8 +2471,8 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	Best-effort and time-budgeted (callers run in a web request). Returns
 	``{"added", "failed", "skipped_time", "total_pending", "gated", "excluded",
 	"skipped_ineligible"}``, where ``total_pending`` is the count targeted before the
-	cap, ``gated`` the findings that get advice or a note from Optimus, or no AI
-	suggestion by design, ``excluded`` the AI-eligible ones whose type Optimus Settings
+	cap, ``gated`` the AI-eligible findings (and Framework N+1) the report answers with
+	Optimus's own advice or a note instead (index findings are not counted), ``excluded`` the AI-eligible ones whose type Optimus Settings
 	excludes and ``skipped_ineligible`` the ones ``suggest_fix`` refused with a skip
 	kind (``ai_fix.AI_SKIP_KINDS``). Missing or outdated suggestions go first.
 	"""
@@ -2557,7 +2558,7 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 def _backfill_ai_suggestions(doc) -> bool:
 	"""Auto-suggest-gated AI backfill: run ``_run_ai_backfill`` only when Optimus
 	Settings has ``ai_enabled`` and ``ai_auto_suggest``. Returns True if any
-	suggestion was added. The explicit "Generate AI fixes" button bypasses this
+	suggestion was added. The explicit AI > Refresh AI suggestions action bypasses this
 	gate by calling ``_run_ai_backfill`` directly."""
 	try:
 		from optimus.settings import get_config

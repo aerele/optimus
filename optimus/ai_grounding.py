@@ -561,7 +561,7 @@ def format_loop_facts(facts: dict, *, first_line: int, last_line: int, caller_hi
 
 INDEX_TYPE_NOTE = (
 	"Index advice is built by Optimus from the DocType metadata, without the AI. "
-	"See the recipe on this finding in the report."
+	"See the index advice on this finding in the report."
 )
 FRAMEWORK_N1_NOTE = (
 	"A Framework N+1 finding points at a loop inside framework code, which your app "
