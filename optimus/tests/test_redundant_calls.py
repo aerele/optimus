@@ -810,6 +810,9 @@ def test_optimus_own_is_decided_by_the_app_root_not_a_substring():
 	# A frame without a filename is skipped, as walk_callsite skips it.
 	nameless = {"filename": "", "lineno": 1, "function": "?"}
 	assert redundant_calls._is_optimus_own([nameless, _bench("optimus/optimus/settings.py", 750, "f")]) is True
+	# Only frappe/ frames are passed over: an ERPNext frame inside an Optimus one decides.
+	erp_inside = [_bench("erpnext/erpnext/x.py", 1, "f"), _bench("optimus/optimus/settings.py", 750, "f")]
+	assert redundant_calls._is_optimus_own(erp_inside) is False
 
 
 _ERP_VIA = [
@@ -878,6 +881,87 @@ def test_a_per_request_user_call_beside_an_erpnext_loop_is_suppressed_as_framewo
 	assert not any("summing across multiple requests" in w for w in ctx.warnings), ctx.warnings
 
 
+_HOOK = _stack_at("apps/myapp/myapp/hooks_impl.py", 12, "si_validate")
+_LOOP = _stack_at("apps/myapp/myapp/rows.py", 24, "check_rows")
+_PERM = {"fn_name": "has_permission", "identifier_raw": ["Sales Invoice", "SI-1", "read"], "identifier_safe": ("Sales Invoice", "h", "read")}
+
+
+def _entry(stack, fn=None):
+	return dict(_PERM, caller_stack=stack) if fn == "has_permission" else _company(stack)
+
+
+def test_a_user_loop_is_found_beside_a_more_frequent_per_request_user_line():
+	"""Fix round 1: the anchor is the most frequent callsite that loops on its own (the
+	threshold within one action), not the most frequent overall. The per-request hook
+	line outnumbers the loop in every case, so it took the bucket and failed the recheck,
+	and the loop was lost."""
+	cases = [  # (fn, per-request hook calls per action, actions, loop calls, loop action)
+		("get_doc", 2, 6, 8, 3),
+		("get_doc", 4, 3, 6, 1),
+		("has_permission", 9, 3, 20, 0),
+		("get_doc", 2, 6, 5, 2),  # a loop of exactly the threshold
+	]
+	for fn, per, actions, n_loop, loop_at in cases:
+		recs = [[_entry(_HOOK, fn) for _ in range(per)] for _ in range(actions)]
+		recs[loop_at] += [_entry(_LOOP, fn) for _ in range(n_loop)]
+		rc, ctx = _findings([_rec(f"r{i}", side) for i, side in enumerate(recs)])
+		assert len(rc) == 1, (fn, ctx.warnings)
+		detail = json.loads(rc[0]["technical_detail_json"])
+		assert _callsite_of(rc[0]) == ("apps/myapp/myapp/rows.py", 24), fn
+		assert rc[0]["title"].endswith(f"({n_loop} times)"), fn
+		assert (detail["count"], detail["distinct_actions"]) == (n_loop, 1), fn  # the bucket spans every action
+		assert rc[0]["action_ref"] == str(loop_at), fn
+
+
+def test_the_user_loop_wins_over_a_per_request_user_line_and_a_bigger_erpnext_loop():
+	"""Fix round 1: among user callsites the loop is chosen before the fallback, so a
+	bigger ERPNext loop does not outvote it."""
+	erp = _stack_at("apps/erpnext/erpnext/stock/utils.py", 30, "get_bin")
+	recs = [[_company(_HOOK) for _ in range(2)] for _ in range(6)]
+	recs[0] += [_company(erp) for _ in range(10)]
+	recs[3] += [_company(_LOOP) for _ in range(8)]
+	rc, ctx = _findings([_rec(f"r{i}", side) for i, side in enumerate(recs)])
+	assert [_callsite_of(f) for f in rc] == [("apps/myapp/myapp/rows.py", 24)], ctx.warnings
+	assert rc[0]["action_ref"] == "3"
+
+
+def test_a_framework_loop_beside_a_more_frequent_per_request_user_line_is_framework():
+	"""Fix round 1: the user line runs twice in each of 6 actions (12, no loop); ERPNext
+	loops 10 times in action 0. The fallback anchor is the looping callsite, so the
+	bucket is suppressed as framework code, not reported as a per-request call."""
+	erp = _stack_at("apps/erpnext/erpnext/stock/utils.py", 30, "get_bin")
+	recs = [[_company(_HOOK) for _ in range(2)] for _ in range(6)]
+	recs[0] += [_company(erp) for _ in range(10)]
+	rc, ctx = _findings([_rec(f"r{i}", side) for i, side in enumerate(recs)])
+	assert rc == []
+	assert any("Frappe framework code" in w for w in ctx.warnings), ctx.warnings
+	assert not any("summing across multiple requests" in w for w in ctx.warnings), ctx.warnings
+
+
+def test_a_user_loop_of_exactly_the_threshold_beside_more_erpnext_calls_is_a_finding():
+	erp = _stack_at("apps/erpnext/erpnext/stock/utils.py", 30, "get_bin")
+	rc, ctx = _findings([_rec("r0", [_company(erp) for _ in range(9)] + [_company(_LOOP) for _ in range(5)])])
+	assert len(rc) == 1, ctx.warnings
+	assert _callsite_of(rc[0]) == ("apps/myapp/myapp/rows.py", 24)
+	assert json.loads(rc[0]["technical_detail_json"])["count"] == 5
+	assert rc[0]["title"].endswith("(5 times)")
+
+
+def test_no_loop_at_any_callsite_is_not_blamed_on_framework_code():
+	"""Fix round 1: ERPNext once per request (20 requests) plus a user line 4 times in
+	action 0 reach the threshold in action 0 only together. No line loops, so no
+	framework loop is claimed: the most frequent callsite runs once per request, and the
+	cross-request warning says so."""
+	erp = _stack_at("apps/erpnext/erpnext/stock/utils.py", 30, "get_bin")
+	for requests in (20, 5):  # 5: the ERPNext line's calls exactly reach the threshold
+		recs = [[_company(erp)] for _ in range(requests)]
+		recs[0] += [_company(_HOOK) for _ in range(4)]
+		rc, ctx = _findings([_rec(f"r{i}", side) for i, side in enumerate(recs)])
+		assert rc == []
+		assert not any("Frappe framework code" in w for w in ctx.warnings), ctx.warnings
+		assert any("summing across multiple requests" in w for w in ctx.warnings), (requests, ctx.warnings)
+
+
 def test_two_user_lines_that_reach_the_threshold_only_together_are_no_finding():
 	"""C3: 3 calls from each of two user lines in one action. Neither line is a loop of
 	5; the drop is silent, since nothing was summed across requests."""
@@ -894,6 +978,16 @@ def test_a_bucket_below_the_threshold_is_dropped_without_a_warning():
 	under the threshold of 5, not a cross-request spread."""
 	rc, ctx = _findings([_rec("r0", _calls(4, _USER_CALLER_STACK))])
 	assert rc == [] and ctx.warnings == []
+
+
+def test_two_per_request_lines_are_reported_as_cross_request_spread():
+	"""The bucket's spread check: two user lines once each in 3 requests (6 calls, 2 per
+	action) are per-request calls, though neither line alone reaches the threshold."""
+	a = _stack_at("apps/myapp/myapp/a.py", 10)
+	b = _stack_at("apps/myapp/myapp/b.py", 20)
+	rc, ctx = _findings([_rec(f"r{i}", _calls(1, a) + _calls(1, b)) for i in range(3)])
+	assert rc == []
+	assert any("summing across multiple requests" in w for w in ctx.warnings), ctx.warnings
 
 
 def test_a_per_request_framework_call_is_reported_as_cross_request_spread():
@@ -927,6 +1021,7 @@ def test_the_last_bench_shaped_apps_dir_wins():
 		"/srv/bench/apps/apps/apps/y.py": "apps/apps/y.py",
 		"/h/apps/apps/myapp/myapp/y.py": "myapp/myapp/y.py",  # a bench dir named apps
 		"/srv/bench/apps/myapp/myapp/apps/sub/subpkg/x.py": "myapp/myapp/apps/sub/subpkg/x.py",
+		"/srv/bench/apps/myapp/myapp/apps/foo/bar/bar/x.py": "myapp/myapp/apps/foo/bar/bar/x.py",
 		"/home/apps/bench/apps/myapp/x.py": "myapp/x.py",
 		"/srv/bench/apps/x.py": "x.py",
 	}

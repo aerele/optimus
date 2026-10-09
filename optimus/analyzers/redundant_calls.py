@@ -194,13 +194,16 @@ def _callsite_key(callsite: dict | None) -> tuple | None:
 	return (callsite.get("filename"), callsite.get("lineno"))
 
 
-def _anchored(votes: list) -> list:
-	"""The occurrences at the most frequent callsite among ``votes`` (ties: the first
-	seen); [] when there are no votes."""
-	if not votes:
-		return []
-	top_key = Counter(_callsite_key(cs) for _action, _raw, cs in votes).most_common(1)[0][0]
-	return [w for w in votes if _callsite_key(w[2]) == top_key]
+def _anchored(votes: list, threshold: int) -> list:
+	"""The occurrences at the most frequent callsite among ``votes`` that loops on its
+	own (reaches ``threshold`` within one action), else at the most frequent callsite
+	(ties: the first seen); [] when there are no votes. A per-request line that
+	outnumbers a loop elsewhere must not take the bucket and hide the loop."""
+	by_site: dict = {}
+	for w in votes:
+		by_site.setdefault(_callsite_key(w[2]), []).append(w)
+	looping = [occ for occ in by_site.values() if _max_in_any_action(occ) >= threshold]
+	return max(looping or by_site.values(), key=len, default=[])
 
 
 def _max_in_any_action(occurrences: list) -> int:
@@ -306,10 +309,11 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			drop_no_caller_stack += 1
 			continue
 		# A user loop is never outvoted by a more frequent framework callsite: when any
-		# occurrence resolves to non-framework code, only those vote. But a user callsite
-		# that is no loop itself (one user call beside 30 from an ERPNext loop) must not
-		# take the bucket either: the bucket is then anchored on its most frequent
-		# callsite of any kind, so a framework loop is suppressed as one (C3).
+		# occurrence resolves to non-framework code, only those vote, and a callsite that
+		# loops on its own wins over a more frequent one that does not. But a user
+		# callsite that is no loop itself (one user call beside 30 from an ERPNext loop)
+		# must not take the bucket either: the bucket is then anchored among callsites of
+		# any kind, so a framework loop is suppressed as one (C3).
 		actionable = [
 			w for w in walked
 			if w[2] is not None
@@ -317,10 +321,26 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 				w[2].get("filename") or "", tracked_apps=tracked_apps, installed_apps=installed_apps
 			)
 		]
-		anchored = _anchored(actionable)
+		anchored = _anchored(actionable, threshold)
 		if _max_in_any_action(anchored) < threshold:
-			anchored = _anchored(walked)
+			anchored = _anchored(walked, threshold)
 		callsite = anchored[0][2]
+
+		# C3: the finding is the anchored callsite's loop, so its count, loop size,
+		# severity and title come from the anchored occurrences alone, and they must
+		# reach the threshold on their own, within one action, as the bucket did.
+		count = len(anchored)
+		action_counts = Counter(a for a, _raw, _cs in anchored)
+		max_in_any_action = action_counts.most_common(1)[0][1]
+		if max_in_any_action < threshold:
+			# No callsite loops on its own: the bucket reached the threshold only by
+			# summing callsites or requests. No framework loop is claimed either. The
+			# anchored callsite is reported as the bucket-level checks report a bucket:
+			# a per-request call when its calls reach the threshold across requests,
+			# else nothing.
+			if count >= threshold:
+				drop_cross_request_spread += 1
+			continue
 		if callsite is None or is_framework_callsite(
 			callsite.get("filename") or "", tracked_apps=tracked_apps, installed_apps=installed_apps
 		):
@@ -334,18 +354,6 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 			# those isn't actionable for application developers.
 			# Same rationale as the Framework N+1 filter.
 			drop_framework_callsite += 1
-			continue
-
-		# C3: the finding is the anchored callsite's loop, so its count, loop size,
-		# severity and title come from the anchored occurrences alone, and they must
-		# reach the threshold on their own, within one action, as the bucket did.
-		count = len(anchored)
-		if count < threshold:
-			continue
-		action_counts = Counter(a for a, _raw, _cs in anchored)
-		max_in_any_action = action_counts.most_common(1)[0][1]
-		if max_in_any_action < threshold:
-			drop_cross_request_spread += 1
 			continue
 
 		# Callsite IS user code (or at least contains a user frame).
