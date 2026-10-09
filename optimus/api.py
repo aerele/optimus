@@ -1487,15 +1487,11 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 	cfg = get_config()
 	doc = frappe.get_doc("Optimus Session", ref.docname)
 
-	# Count this refresh (cumulative; only ever increases). Portable read-modify-write off
-	# the already-loaded doc; update_modified=False so the counter bump doesn't touch `modified`.
-	# Refresh is user-initiated and rate-limited, so the non-atomic increment is acceptable
-	# (PR-2 makes it atomic).
-	frappe.db.set_value(
-		"Optimus Session", doc.name, "ai_refresh_count",
-		(getattr(doc, "ai_refresh_count", 0) or 0) + 1,
-		update_modified=False,
-	)
+	# Count this refresh (cumulative; only ever increases): one atomic SQL increment that leaves
+	# `modified` alone, committed on its own before any provider call so the session row is not
+	# held locked for the whole refresh. A failed bump is logged and the refresh goes on.
+	_analyze_mod._bump_ai_refresh_count(doc.name)
+	safe_commit()
 
 	fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None, "gated": 0, "excluded": 0, "skipped_ineligible": 0}
 	if cfg.ai_suggest_findings:

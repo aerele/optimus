@@ -10,7 +10,7 @@ raises before any helper runs.
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import DEFAULT, MagicMock
 
 import pytest
 
@@ -49,11 +49,18 @@ def env(monkeypatch):
 		install(monkeypatch, fake)
 		monkeypatch.setattr(ai_fix, "is_available", lambda section=None: available)
 		monkeypatch.setattr("optimus.settings.get_config", lambda: cfg or _cfg())
+		order = []
 		helpers = SimpleNamespace(
-			backfill=MagicMock(return_value={"added": 3, "failed": 0, "skipped_time": 1, "total_pending": 4}),
+			backfill=MagicMock(
+				side_effect=lambda *a, **k: order.append("backfill") or DEFAULT,
+				return_value={"added": 3, "failed": 0, "skipped_time": 1, "total_pending": 4},
+			),
 			humanize=MagicMock(return_value={"updated": True, "reason": None}),
 			render=MagicMock(return_value={"regenerated": True, "recordings_available": 0, "actions_total": 0}),
+			order=order,
 		)
+		monkeypatch.setattr("optimus.analyze._bump_ai_refresh_count", lambda docname: order.append(("bump", docname)))
+		monkeypatch.setattr(api, "safe_commit", lambda: order.append("commit"))
 		monkeypatch.setattr("optimus.analyze._run_ai_backfill", helpers.backfill)
 		monkeypatch.setattr(api, "_humanize_steps_core", helpers.humanize)
 		monkeypatch.setattr(api, "_render_session_report", helpers.render)
@@ -74,7 +81,9 @@ def test_refill_runs_both_ai_steps_for_a_plain_owner(env):
 	assert h.backfill.call_args.kwargs == {"cap": 0, "regenerate_all": True}
 	assert h.humanize.call_args.kwargs == {"title": "Checkout flow"}
 	h.render.assert_called_once_with(DOCNAME)
-	assert fake.spies.set_value[0][0][:3] == ("Optimus Session", DOCNAME, "ai_refresh_count")
+	# one atomic bump, committed on its own before any provider call (no read-modify-write)
+	assert h.order[:3] == [("bump", DOCNAME), "commit", "backfill"]
+	assert not [args for args, _kw in fake.spies.set_value if "ai_refresh_count" in args]
 
 
 def test_refill_skips_sections_whose_toggle_is_off(env):
@@ -92,7 +101,7 @@ def test_refill_fails_fast_when_provider_missing(env):
 		api.refill_ai_suggestions(session_uuid=SESSION_UUID)
 	assert "aren't configured" in str(exc.value)
 	assert h.backfill.call_count == h.humanize.call_count == h.render.call_count == 0
-	assert fake.spies.set_value == []
+	assert fake.spies.set_value == [] and h.order == []
 
 
 def test_refill_requires_ready_status(env):

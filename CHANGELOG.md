@@ -22,7 +22,16 @@ versions may contain breaking changes see migration notes below).
   Python trees or sidecars. Use Refresh AI suggestions for new answers.
 - Add shared selection of missing and outdated suggestions, explicit session
   attribution, and portable atomic usage/counter helpers for background work.
-  Counter failures propagate so a caller can roll back its result transaction.
+  A counter increment runs in a savepoint inside the caller's transaction: a
+  failed increment is rolled back alone and logged, and the answer it paid for
+  is kept. It is raised only when the whole transaction is already gone.
+- Count each AI call's tokens once, into one session. A call without explicit
+  attribution is charged to the session being analyzed or refreshed; a caller
+  that attributes a call explicitly records its tokens itself
+  (`analyze._add_ai_spend`), and that call is never charged to another session.
+  The Steps to Reproduce rewrite is charged whether or not its caller asks for
+  the usage (`humanize_steps(usage_out=None)` used to skip the charge), and a
+  failed rewrite reports only its own tokens.
 
 ### Fixed
 
@@ -34,6 +43,15 @@ versions may contain breaking changes see migration notes below).
 - Phase 2 report regeneration uses the internal render helper without a
   second HTTP permission/rate-limit gate. The 24-hour analysis health metric
   uses the session stop time, independent of later AI updates.
+- Keep the Steps to Reproduce tokens in a session's AI Tokens Spent. Analyze
+  added them, then saved the session with the count it had loaded earlier, so
+  every analyzed session lost them. Any save of a session now keeps the stored
+  AI Tokens Spent and AI Refresh Count.
+- Record AI token spend with portable SQL that also runs on Postgres. A failed
+  spend update writes an Error Log row (`optimus ai spend`) instead of being
+  dropped silently, and an RQ job timeout during it stops the job.
+- Count a Refresh AI suggestions run with one atomic increment, committed
+  before the refresh calls the provider, instead of a read-modify-write.
 
 ### Upgrade notes
 
@@ -41,6 +59,8 @@ versions may contain breaking changes see migration notes below).
   pending follow-up changes. Refresh remains synchronous in this change.
 - Request read timeouts measure socket inactivity, not a strict wall-clock
   deadline. Worker time limits remain necessary.
+- No migration. Steps to Reproduce tokens already lost on earlier sessions
+  are not restored.
 
 ## [0.12.68] - 2026-10-02
 

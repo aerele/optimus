@@ -384,7 +384,14 @@ def suggest_fix(
 	Returns ``{suggestion, model, provider, generated_at, source_available,
 	prompt_version, guardrail, finish_reason}`` plus ``tokens`` when the provider
 	reported usage. ``timeout`` caps the whole first-call-plus-re-ask budget
-	(default: the configured request timeout). Raises ``AiFixError``."""
+	(default: the configured request timeout). Raises ``AiFixError``; a failure
+	after a billed reply carries that reply's ``usage``.
+
+	Spend: without ``session_uuid`` or ``docname`` every billed reply (the first
+	call and a re-ask) is charged once to the worker's ambient session
+	(``_record_session_spend``). With either one the call is explicitly attributed
+	and nothing is charged here: the caller adds ``tokens`` (or a failure's
+	``usage``) to its session once, with ``analyze._add_ai_spend``."""
 	if is_finding_type_excluded(finding.get("finding_type")):
 		from frappe import _
 
@@ -417,6 +424,7 @@ def suggest_fix(
 		usage=usage,
 		metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type=finding.get("finding_type")),
 		session_uuid=session_uuid,
+		record_spend=not (session_uuid or docname),
 		started_at=time.monotonic(),
 		timeout=int(timeout or _resolve_timeout_seconds()),
 	), usage)
@@ -442,7 +450,15 @@ def humanize_steps(
 	"""Turn the captured ``actions`` into numbered "Steps to Reproduce" Markdown.
 	``timeout`` is the provider call's timeout (default: the configured request
 	timeout). ``session_uuid`` and ``docname`` attribute the call explicitly
-	(``_session_call_metadata``). Raises ``AiFixError``."""
+	(``_session_call_metadata``). Raises ``AiFixError``.
+
+	Each call collects its usage in a fresh dict: ``usage_out`` (when given)
+	receives that call's reported usage, after a success and after a billed
+	failure, and a failure carries only that call's usage, never what a reused
+	``usage_out`` held before. Spend follows ``suggest_fix``: an unattributed
+	call is charged once to the ambient session, an attributed one is the
+	caller's to record. ``usage_out`` no longer decides whether the call is
+	charged (it did before 0.12.69, when ``None`` skipped the charge)."""
 	from frappe import _
 
 	if not actions:
@@ -453,12 +469,16 @@ def humanize_steps(
 		actions, session_title, threshold_ms=_resolve_display_threshold_ms(), context_tokens=_context_tokens(provider)
 	)
 	_check_context_fits(system, _context_tokens(provider), messages=messages, out_tokens=_output_tokens(provider))
-	usage = {} if usage_out is None else usage_out
-	text = _with_usage_on_failure(lambda: _dispatch_call(
-		provider, system, messages, usage_out=usage,
-		metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type="Steps to Reproduce"),
-		timeout=timeout, session_uuid=session_uuid,
-	), usage)
+	usage: dict = {}
+	try:
+		text = _with_usage_on_failure(lambda: _dispatch_call(
+			provider, system, messages, usage_out=usage,
+			metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type="Steps to Reproduce"),
+			timeout=timeout, session_uuid=session_uuid, record_spend=not (session_uuid or docname),
+		), usage)
+	finally:
+		if usage_out is not None:
+			usage_out.update(usage)
 	text = (text or "").strip()
 	if not text:
 		raise AiFixError(_("The AI provider returned an empty response."), kind="bad_response", usage=usage)
@@ -1727,24 +1747,38 @@ def _usage_from_anthropic(data: dict | None) -> dict:
 
 
 def _record_session_spend(total_tokens) -> None:
-	"""Best-effort: add this call's tokens to the active session's cumulative
-	``Optimus Session.ai_tokens_spent``. The session uuid comes from
-	``frappe.local._optimus_spend_session`` (set by the caller before any AI
-	call); ``None`` (e.g. the settings probe) is a no-op."""
-	try:
-		import frappe
+	"""Charge one provider call's ``total_tokens`` to the worker's ambient session: the
+	``Optimus Session.ai_tokens_spent`` of the session ``frappe.local._optimus_spend_session``
+	names (``analyze._mark_ai_spend_session``). No marker (the settings probe clears it) or no
+	tokens is a no-op.
 
-		su = getattr(frappe.local, "_optimus_spend_session", None)
-		n = int(total_tokens or 0)
-		if su and n > 0:
-			frappe.db.sql(
-				"update `tabOptimus Session` "
-				"set ai_tokens_spent = coalesce(ai_tokens_spent, 0) + %s "
-				"where session_uuid = %s",
-				(n, su),
-			)
+	The one spend source per provider call: the protocol handlers call it once for each billed
+	reply, and only for a call WITHOUT explicit attribution (no ``session_uuid`` or ``docname``
+	from the caller of ``suggest_fix`` / ``humanize_steps``, so ``record_spend`` stayed True). An
+	explicitly attributed call is never charged here: its caller adds the tokens to its own
+	session with ``analyze._add_ai_spend``, so no call is counted twice or charged to another
+	session. A thin wrapper over that same counter (``analyze._increment_session_counter``,
+	matched on ``session_uuid``): portable SQL in a savepoint, a failure rolled back to it and
+	logged after the ``try`` while the reply is kept, an RQ job timeout raised again fresh."""
+	session_uuid = None
+	guard = _InterruptGuard()
+	try:
+		with guard:
+			import frappe
+
+			session_uuid = getattr(frappe.local, "_optimus_spend_session", None)
 	except Exception:
-		pass
+		session_uuid = None
+	if guard.pending():
+		raise guard.interrupt()
+	tokens = _token_count(total_tokens)
+	if not isinstance(session_uuid, str) or not session_uuid or not tokens:
+		return
+	from optimus import analyze
+
+	analyze._increment_session_counter(
+		session_uuid, "ai_tokens_spent", tokens, by="session_uuid", title="optimus ai spend",
+	)
 
 
 def _session_call_metadata(provider, *, session_uuid, docname, finding_type=None) -> dict | None:
@@ -1767,7 +1801,12 @@ def _call_anthropic(
 	base_url: str, api_key: str, model: str, system: str, messages: list[dict],
 	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
 	timeout: int | None = None, meta_out: dict | None = None, session_uuid: str | None = None,
+	record_spend: bool = True,
 ) -> str:
+	"""One Anthropic Messages call. ``usage_out`` receives the reply's reported usage, and when
+	the caller passed one this billed reply is charged once to the ambient session
+	(``_record_session_spend``), unless the call is explicitly attributed (``session_uuid``
+	given or ``record_spend`` False): its caller then records the spend itself."""
 	url = base_url.rstrip("/") + "/v1/messages"
 	headers = {
 		"content-type": "application/json",
@@ -1785,7 +1824,8 @@ def _call_anthropic(
 	usage = _usage_from_anthropic(data)
 	if usage_out is not None:
 		usage_out.update(usage)
-		_record_session_spend(usage_out.get("total_tokens"))
+		if record_spend and session_uuid is None:
+			_record_session_spend(usage["total_tokens"])
 	if meta_out is not None:
 		meta_out["prompt_tokens_reported"] = any(_usage_block(data).get(k) is not None for k in (
 			"input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
@@ -1896,8 +1936,11 @@ def _call_openai_chat(
 	base_url: str, api_key: str, model: str, system: str, messages: list[dict],
 	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
 	metadata: dict | None = None, timeout: int | None = None, meta_out: dict | None = None,
-	session_uuid: str | None = None,
+	session_uuid: str | None = None, record_spend: bool = True,
 ) -> str:
+	"""One OpenAI-compatible chat completion (through the parameter ladder). ``usage_out`` and
+	``record_spend`` work as in ``_call_anthropic``: one ambient charge per billed reply, none for
+	an explicitly attributed call."""
 	url = base_url.rstrip("/") + "/chat/completions"
 	headers = {"content-type": "application/json"}
 	auth = _ApiKeyAuth("authorization", api_key, prefix="Bearer ") if api_key else None
@@ -1917,7 +1960,8 @@ def _call_openai_chat(
 	usage = _usage_from_openai(data)
 	if usage_out is not None:
 		usage_out.update(usage)
-		_record_session_spend(usage_out.get("total_tokens"))
+		if record_spend and session_uuid is None:
+			_record_session_spend(usage["total_tokens"])
 	first = _first_choice(data)
 	if meta_out is not None:
 		meta_out["prompt_tokens_reported"] = _usage_block(data).get("prompt_tokens") is not None
@@ -2007,9 +2051,14 @@ def _dispatch_call(
 	max_tokens: int | None = None,
 	meta_out: dict | None = None,
 	session_uuid: str | None = None,
+	record_spend: bool = True,
 ) -> str:
 	"""Send one chat completion through the provider's protocol handler. The API
-	key is fetched here into a local named ``api_key`` (never into ``provider``)."""
+	key is fetched here into a local named ``api_key`` (never into ``provider``).
+	``record_spend`` False (or a ``session_uuid``) marks an explicitly attributed
+	call, whose spend its caller records itself (``analyze._add_ai_spend``);
+	otherwise the billed reply is charged to the ambient session
+	(``_record_session_spend``)."""
 	api_key = _get_api_key(provider.get("needs_key", True))
 	if provider.get("needs_key") and not api_key:
 		from frappe import _
@@ -2020,10 +2069,12 @@ def _dispatch_call(
 		return _call_anthropic(
 			provider["base_url"], api_key, provider["model"], system, messages,
 			max_tokens=out, usage_out=usage_out, timeout=timeout, meta_out=meta_out, session_uuid=session_uuid,
+			record_spend=record_spend,
 		)
 	return _call_openai_chat(
 		provider["base_url"], api_key, provider["model"], system, messages,
 		max_tokens=out, usage_out=usage_out, metadata=metadata, timeout=timeout, meta_out=meta_out, session_uuid=session_uuid,
+		record_spend=record_spend,
 	)
 
 
@@ -2044,6 +2095,7 @@ def _complete_with_guardrails(
 	started_at: float,
 	timeout: int,
 	session_uuid: str | None = None,
+	record_spend: bool = True,
 ) -> tuple[str, dict, str | None]:
 	"""First call, verification, at most one re-ask, fallback.
 
@@ -2054,12 +2106,14 @@ def _complete_with_guardrails(
 	not cut off, a block rule is broken (advise and note rules never re-ask), less
 	than half the time budget is used and the re-ask fits the context window. The
 	rewrite is adopted only when it keeps the four headings, is not cut off and
-	breaks strictly fewer block rules."""
+	breaks strictly fewer block rules. ``session_uuid`` and ``record_spend`` go to
+	both calls (``_dispatch_call``), so each billed reply is charged at most once."""
 	ctx = _context_tokens(provider)
 	out = _output_tokens(provider)
 	meta: dict = {}
 	text = _dispatch_call(
-		provider, system, messages, usage_out=usage, metadata=metadata, timeout=timeout, max_tokens=out, meta_out=meta, session_uuid=session_uuid
+		provider, system, messages, usage_out=usage, metadata=metadata, timeout=timeout, max_tokens=out, meta_out=meta,
+		session_uuid=session_uuid, record_spend=record_spend,
 	)
 	text = (text or "").strip()
 	if not text:
@@ -2104,7 +2158,7 @@ def _complete_with_guardrails(
 					metadata=metadata,
 					timeout=max(1, int(timeout - elapsed)),
 					max_tokens=ai_budget.reask_output_tokens(out, fit_usage["completion_tokens"]),
-					meta_out=reask_meta, session_uuid=session_uuid,
+					meta_out=reask_meta, session_uuid=session_uuid, record_spend=record_spend,
 				)
 			except Exception as e:
 				reask_error = e  # record only; act after the try (no log or raise while it is active)

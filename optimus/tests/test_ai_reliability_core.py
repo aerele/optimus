@@ -282,3 +282,58 @@ def test_post_response_failures_preserve_usage_without_raw_exception_text(wire, 
 	assert caught.value.usage["total_tokens"] == 7
 	assert "fake-sensitive-reply" not in str(caught.value)
 	assert caught.value.__context__ is None
+
+
+def _use_fake_provider(monkeypatch):
+	monkeypatch.setattr(ai_fix, "_provider_config", lambda: {
+		"name": "fake", "protocol": "openai", "base_url": "https://fake.invalid/v1", "model": "fake",
+		"needs_key": False, "context_tokens": 128000,
+	})
+	monkeypatch.setattr(ai_fix, "_resolve_display_threshold_ms", lambda: 1000)
+	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a: "")
+	monkeypatch.setattr(ai_fix, "is_finding_type_excluded", lambda *a: False)
+
+
+def test_a_typed_failure_after_a_billed_reply_still_carries_the_usage(wire, monkeypatch):
+	_use_fake_provider(monkeypatch)
+
+	def failed(*a, **kw):
+		raise ai_fix.AiFixError("fake typed failure", kind="bad_response")  # raised with no usage
+
+	monkeypatch.setattr(ai_fix.ai_guardrails, "verify_fix", failed)
+	wire.install(Reply(payload={"choices": [{"message": {"content": "answer"}}], "usage": {"total_tokens": 7}}))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix.suggest_fix({"finding_type": "N+1 Query"})
+	assert caught.value.kind == "bad_response" and str(caught.value) == "fake typed failure"
+	assert caught.value.usage["total_tokens"] == 7
+
+
+@pytest.mark.parametrize("content", [[], {"type": "text", "text": "not a list"}, None])
+def test_an_anthropic_reply_without_text_keeps_its_usage(wire, content):
+	wire.install(Reply(payload={"content": content, "usage": {"input_tokens": 5, "output_tokens": 2}}))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._call_anthropic("https://provider.invalid", "", "claude", "system", [])
+	assert caught.value.kind == "bad_response"
+	assert caught.value.usage == {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+
+
+@pytest.mark.parametrize("entry", ["fix", "steps"])
+def test_a_logged_rq_timeout_keeps_its_log_marker_through_usage_handling(wire, monkeypatch, entry):
+	Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
+	original = Timeout("fake timeout")
+	ai_fix._mark_logged(original, "fake-log-row")
+	_use_fake_provider(monkeypatch)
+
+	def dispatch(*a, **kw):
+		raise original
+
+	monkeypatch.setattr(ai_fix, "_dispatch_call", dispatch)
+	with pytest.raises(Timeout) as caught:
+		if entry == "fix":
+			ai_fix.suggest_fix({"finding_type": "N+1 Query"})
+		else:
+			ai_fix.humanize_steps([{"label": "fake"}])
+	assert caught.value is not original and caught.value.__context__ is None
+	# the row is already written: a caller's log_ai_failure appends to it instead of a second row
+	assert getattr(caught.value, ai_fix._LOGGED_ATTR, False) is True
+	assert getattr(caught.value, ai_fix._LOGGED_ROW_ATTR, None) == "fake-log-row"

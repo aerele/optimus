@@ -1704,8 +1704,9 @@ def _persist(
 		# v0.13: capture the humanizer's token usage here so the steps tokens
 		# show in the report and roll into the session's cumulative spend on
 		# the auto-analyze path too not only after a manual "Refresh AI
-		# suggestions". (usage_out non-None also arms _record_session_spend at
-		# the ai_fix chokepoint, since the analyze run set the spend marker.)
+		# suggestions". (The ai_fix chokepoint also charges the call to the
+		# session's ai_tokens_spent, since the analyze run set the spend marker;
+		# doc.save below keeps that count: _keep_session_counters.)
 		_steps_usage: dict = {}
 		notes_html = _build_humanized_notes_html(
 			recordings, session_title=(doc.title or None), usage_out=_steps_usage
@@ -2456,40 +2457,131 @@ def _phase2_index_for(doc_or_docname) -> dict:
 
 
 _SESSION_COUNTER_FIELDS = frozenset({"ai_tokens_spent", "ai_refresh_count"})
+# The columns a counter matches the session on: ``name`` for a caller that knows the docname,
+# ``session_uuid`` for ai_fix's per-call recorder, which only has the worker's spend marker.
+_SESSION_COUNTER_KEYS = frozenset({"name", "session_uuid"})
+_COUNTER_SAVEPOINT = "optimus_ai_counter"
 
 
-def _session_increment_query(docname: str, fieldname: str, n: int):
-	"""One portable SQL increment, never a stale read-modify-write."""
-	if fieldname not in _SESSION_COUNTER_FIELDS or type(n) is not int or n < 0:
+def _session_increment_query(key: str, fieldname: str, n: int, *, by: str = "name"):
+	"""``UPDATE tabOptimus Session SET f = COALESCE(f, 0) + n WHERE <by> = key``: one portable
+	(MariaDB and Postgres) statement, never a stale read-modify-write, ``modified`` untouched.
+	``by`` is ``"name"`` or ``"session_uuid"``. Another field or column, an empty key or a count
+	that is not a non-negative int raises ValueError."""
+	if (
+		fieldname not in _SESSION_COUNTER_FIELDS or by not in _SESSION_COUNTER_KEYS
+		or type(n) is not int or n < 0 or not isinstance(key, str) or not key
+	):
 		raise ValueError("Invalid session counter increment")
 	from frappe.query_builder.functions import Coalesce
 
 	table = frappe.qb.DocType("Optimus Session")
 	field = table[fieldname]
-	return frappe.qb.update(table).set(field, Coalesce(field, 0) + n).where(table.name == docname)
+	return frappe.qb.update(table).set(field, Coalesce(field, 0) + n).where(table[by] == key)
 
 
-def _increment_session_counter(docname: str, fieldname: str, n: int) -> None:
-	"""Participate in the caller's result transaction without committing it.
+def _increment_session_counter(
+	key: str, fieldname: str, n: int, *, by: str = "name", title: str = "optimus ai counter",
+) -> None:
+	"""Add ``n`` to one session counter in the caller's transaction, inside a savepoint.
 
-	An accounting failure must abort that transaction, otherwise an answer
-	could be saved without its usage. The caller owns rollback and logging.
-	"""
-	from optimus.ai_fix import _InterruptGuard
+	It never commits: the increment commits or rolls back with the caller's own writes. A count
+	of 0 or an empty ``key`` is a no-op that runs no SQL. When the UPDATE fails, only the counter
+	is rolled back (to the savepoint), the failure is logged once through
+	``ai_fix.log_ai_failure`` after the ``try`` (``title``, the session, the field and the amount)
+	and nothing is raised, so the billed answer the caller is about to save is kept. When the
+	rollback to the savepoint fails too, the transaction is already gone (a MariaDB deadlock rolls
+	it back whole) and the caller's writes with it: the counter error is logged and raised again.
+	An RQ job timeout always leaves as a fresh instance. The savepoint is released after a
+	successful UPDATE.
 
-	guard = _InterruptGuard()
-	with guard:
-		_session_increment_query(docname, fieldname, n).run()
+	Rules for a caller that records spend itself (``_add_ai_spend``, as the background refresh
+	engine will):
+
+	- never call the AI provider inside the transaction that holds the counter: the UPDATE keeps
+	  the session row locked until that transaction ends;
+	- write in one short transaction: this counter first, then the Finding row, then commit (the
+	  parent row before the child, the order ``Document.save`` locks them in);
+	- retry only that short transaction, and only on a serialization failure or a deadlock
+	  (40001, 1213, 1020, 1205); never retry the provider call."""
+	if not key or not n:
+		return
+	query = _session_increment_query(key, fieldname, n, by=by)
+	from optimus.ai_fix import log_ai_failure
+
+	error = None
+	guard = safe_call.InterruptGuard()
+	try:
+		with guard:
+			frappe.db.savepoint(_COUNTER_SAVEPOINT)
+			query.run()
+			frappe.db.release_savepoint(_COUNTER_SAVEPOINT)
+	except Exception as exc:
+		error = exc
 	if guard.pending():
 		raise guard.interrupt()
+	if error is None:
+		return
+	rollback_error = None
+	guard = safe_call.InterruptGuard()
+	try:
+		with guard:
+			frappe.db.rollback(save_point=_COUNTER_SAVEPOINT)
+	except Exception as exc:
+		rollback_error = exc
+	if guard.pending():
+		error = rollback_error = None
+		raise guard.interrupt()
+	reference = {"docname": key} if by == "name" else {"session_uuid": key}
+	log_ai_failure(
+		title, error, **reference, field=fieldname, amount=n,
+		savepoint_rollback="done" if rollback_error is None else "failed: " + type(rollback_error).__name__,
+	)
+	if rollback_error is not None:
+		raise error
 
 
-def _add_ai_spend(docname: str, tokens: int) -> None:
-	_increment_session_counter(docname, "ai_tokens_spent", tokens)
+def _add_ai_spend(docname: str, tokens) -> None:
+	"""Add one AI call's ``tokens`` (a count, or a usage dict's ``total_tokens``) to the session's
+	cumulative ``ai_tokens_spent``, in the caller's transaction (``_increment_session_counter``).
+
+	Only for a caller that attributed its calls explicitly (``suggest_fix`` or ``humanize_steps``
+	with ``session_uuid`` or ``docname``): ai_fix records nothing for those calls, so the caller
+	adds each call's tokens here exactly once, from the result's ``tokens`` or from a failure's
+	``usage``. A call without explicit attribution is already charged to the worker's ambient
+	session by ``ai_fix._record_session_spend``; adding it here too would count it twice. A count
+	that is not a non-negative int (``ai_fix._token_count``) or no ``docname`` is a no-op."""
+	from optimus.ai_fix import _token_count
+
+	if isinstance(tokens, dict):
+		tokens = tokens.get("total_tokens")
+	_increment_session_counter(docname, "ai_tokens_spent", _token_count(tokens), title="optimus ai spend")
 
 
 def _bump_ai_refresh_count(docname: str) -> None:
-	_increment_session_counter(docname, "ai_refresh_count", 1)
+	"""Count one AI refresh on the session (``ai_refresh_count`` + 1), atomically, in the caller's
+	transaction (``_increment_session_counter``). No-op without a ``docname``. A caller commits
+	the bump on its own, before the refresh calls the provider, so the session row is not held
+	locked during the refresh (``api.refill_ai_suggestions``)."""
+	_increment_session_counter(docname, "ai_refresh_count", 1, title="optimus ai refresh count")
+
+
+def _keep_session_counters(doc) -> None:
+	"""Keep the stored AI counters on ``doc`` before a session save writes its row.
+
+	``_increment_session_counter`` adds to ``ai_tokens_spent`` and ``ai_refresh_count`` in SQL
+	without touching ``modified``, so a document loaded before an increment would write the old
+	counts back on save (every analyze lost its Steps to Reproduce tokens this way), and Frappe's
+	modified check cannot notice. The stored values come from the copy ``Document.save`` has just
+	read with ``for_update=True`` (``check_if_latest``, Frappe v15 and v16), so no increment can
+	land between that read and the write. The Optimus Session controller calls this from
+	``before_validate``, which runs on every save (``ignore_validate`` included), so every save
+	path keeps them: analyze, Phase 2, the Desk form. A new document keeps its own values."""
+	previous = doc.get_doc_before_save()
+	if previous is None:
+		return
+	for fieldname in _SESSION_COUNTER_FIELDS:
+		setattr(doc, fieldname, getattr(previous, fieldname, None))
 
 
 def _row_get(row, key, default=None):

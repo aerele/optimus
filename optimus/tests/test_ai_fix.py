@@ -998,49 +998,47 @@ class TestIsAvailableSection:
 # --------------------------------------------------------------------------
 
 
-class _FakeDB:
-	def __init__(self):
-		self.calls = []
+def _counter_spy(monkeypatch):
+	from optimus import analyze
 
-	def sql(self, query, values=None):
-		self.calls.append((query, values))
+	seen = []
+	monkeypatch.setattr(
+		analyze, "_increment_session_counter",
+		lambda key, field, n, *, by="name", title="": seen.append((key, field, n, by)),
+	)
+	return seen
 
 
 class TestRecordSessionSpend:
 	def test_increments_active_session(self, monkeypatch):
 		import frappe
 
-		fake = _FakeDB()
-		monkeypatch.setattr(frappe, "db", fake, raising=False)
+		seen = _counter_spy(monkeypatch)
 		monkeypatch.setattr(
 			frappe, "local", SimpleNamespace(_optimus_spend_session="uuid-1"), raising=False
 		)
 		ai_fix._record_session_spend(150)
-		assert len(fake.calls) == 1
-		query, values = fake.calls[0]
-		assert "ai_tokens_spent" in query and "session_uuid" in query
-		assert values == (150, "uuid-1")
+		# the shared, portable counter (savepoint, log and continue), matched on session_uuid
+		assert seen == [("uuid-1", "ai_tokens_spent", 150, "session_uuid")]
 
 	def test_noop_without_active_session(self, monkeypatch):
 		import frappe
 
-		fake = _FakeDB()
-		monkeypatch.setattr(frappe, "db", fake, raising=False)
+		seen = _counter_spy(monkeypatch)
 		monkeypatch.setattr(frappe, "local", SimpleNamespace(), raising=False)
 		ai_fix._record_session_spend(150)
-		assert fake.calls == []
+		assert seen == []
 
 	def test_noop_on_zero_or_missing_tokens(self, monkeypatch):
 		import frappe
 
-		fake = _FakeDB()
-		monkeypatch.setattr(frappe, "db", fake, raising=False)
+		seen = _counter_spy(monkeypatch)
 		monkeypatch.setattr(
 			frappe, "local", SimpleNamespace(_optimus_spend_session="uuid-1"), raising=False
 		)
 		ai_fix._record_session_spend(0)
 		ai_fix._record_session_spend(None)
-		assert fake.calls == []
+		assert seen == []
 
 
 class TestCallChokepointRecordsSpend:

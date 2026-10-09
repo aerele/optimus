@@ -1,5 +1,9 @@
-"""Atomic, portable usage updates and explicit attribution for refresh workers."""
+"""Session AI counters: portable atomic increments in a savepoint (a failure is logged and the
+answer kept), one spend source per provider call (explicit attribution or the ambient session,
+never both) and session saves that keep the stored counts."""
 
+import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -30,44 +34,323 @@ def test_counter_rejects_non_counter_fields_and_invalid_counts(field, n):
 		analyze._session_increment_query("fake-doc", field, n)
 
 
-def test_counters_do_not_commit_and_database_failures_cannot_be_ignored(monkeypatch):
-	seen = []
+@pytest.mark.parametrize("dialect,quote", [("mariadb", "`"), ("postgres", '"')])
+def test_ambient_counter_query_matches_the_session_uuid(monkeypatch, dialect, quote):
+	qb = pytest.importorskip("frappe.query_builder.utils", exc_type=ImportError).get_query_builder(dialect)
+	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(qb=qb))
+	sql = analyze._session_increment_query("fake-uuid", "ai_tokens_spent", 42, by="session_uuid").get_sql()
+	q = quote
+	assert sql.endswith(f" WHERE {q}session_uuid{q}='fake-uuid'")
 
-	def query(doc, field, n):
-		seen.append((doc, field, n))
-		return SimpleNamespace(run=lambda: seen.append("update"))
 
-	monkeypatch.setattr(analyze, "_session_increment_query", query)
-	# No commit/rollback method: ownership belongs to the result transaction.
-	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(db=SimpleNamespace()))
+@pytest.mark.parametrize("key,by", [("", "name"), (None, "name"), ("fake-doc", "modified"), ("fake-doc", "owner")])
+def test_counter_query_rejects_an_empty_key_or_another_column(key, by):
+	with pytest.raises(ValueError):
+		analyze._session_increment_query(key, "ai_tokens_spent", 1, by=by)
+
+
+class _CounterDb:
+	"""``frappe.db`` stand-in recording the savepoint protocol of one counter."""
+
+	def __init__(self, *, run_error=None, rollback_error=None):
+		self.calls, self.logs = [], []
+		self.run_error, self.rollback_error = run_error, rollback_error
+
+	def savepoint(self, name):
+		self.calls.append(("savepoint", name))
+
+	def release_savepoint(self, name):
+		self.calls.append(("release", name))
+
+	def rollback(self, *, save_point=None, **kw):
+		self.calls.append(("rollback", save_point))
+		if self.rollback_error is not None:
+			raise self.rollback_error
+
+	def query(self, key, field, n, *, by="name"):
+		def run():
+			self.calls.append(("update", key, field, n, by))
+			if self.run_error is not None:
+				raise self.run_error
+
+		return SimpleNamespace(run=run)
+
+
+@pytest.fixture
+def counter_db(monkeypatch):
+	def install(**kw):
+		db = _CounterDb(**kw)
+		monkeypatch.setattr(analyze, "frappe", SimpleNamespace(db=db))
+		monkeypatch.setattr(analyze, "_session_increment_query", db.query)
+
+		def log(title, exc=None, **context):
+			db.logs.append((title, exc, context, sys.exc_info()[0]))
+			return True
+
+		monkeypatch.setattr(ai_fix, "log_ai_failure", log)
+		return db
+
+	return install
+
+
+def test_counter_runs_in_a_released_savepoint_without_committing(counter_db):
+	db = counter_db()
 	analyze._add_ai_spend("fake-doc", 12)
 	analyze._bump_ai_refresh_count("fake-doc")
-	assert seen == [
-		("fake-doc", "ai_tokens_spent", 12),
-		"update",
-		("fake-doc", "ai_refresh_count", 1),
-		"update",
+	sp = analyze._COUNTER_SAVEPOINT
+	assert db.calls == [
+		("savepoint", sp), ("update", "fake-doc", "ai_tokens_spent", 12, "name"), ("release", sp),
+		("savepoint", sp), ("update", "fake-doc", "ai_refresh_count", 1, "name"), ("release", sp),
 	]
-
-	def failed(*a):
-		raise RuntimeError("fake transaction failure")
-
-	monkeypatch.setattr(analyze, "_session_increment_query", failed)
-	with pytest.raises(RuntimeError):
-		analyze._add_ai_spend("fake-doc", 3)
+	assert db.logs == []
 
 
-def test_counter_rq_timeout_is_fresh(monkeypatch):
+def test_counter_failure_rolls_back_only_the_counter_logs_once_and_keeps_the_answer(counter_db):
+	error = RuntimeError("fake lock wait timeout")
+	db = counter_db(run_error=error)
+	analyze._add_ai_spend("fake-doc", 12)  # returns: the caller's billed answer is kept
+	sp = analyze._COUNTER_SAVEPOINT
+	assert db.calls == [("savepoint", sp), ("update", "fake-doc", "ai_tokens_spent", 12, "name"), ("rollback", sp)]
+	assert len(db.logs) == 1
+	title, exc, context, active = db.logs[0]
+	assert title == "optimus ai spend" and exc is error
+	assert active is None  # logged after the try, never inside the except
+	assert context == {"docname": "fake-doc", "field": "ai_tokens_spent", "amount": 12, "savepoint_rollback": "done"}
+
+
+def test_counter_reraises_when_the_savepoint_rollback_itself_fails(counter_db):
+	error = RuntimeError("fake deadlock")
+	db = counter_db(run_error=error, rollback_error=RuntimeError("fake savepoint does not exist"))
+	with pytest.raises(RuntimeError) as caught:
+		analyze._bump_ai_refresh_count("fake-doc")
+	assert caught.value is error
+	assert [log[0] for log in db.logs] == ["optimus ai refresh count"]
+	assert db.logs[0][2]["savepoint_rollback"] == "failed: RuntimeError" and db.logs[0][3] is None
+
+
+@pytest.mark.parametrize("stage", ["update", "rollback"])
+def test_counter_rq_timeout_is_fresh(counter_db, stage):
 	Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
 	original = Timeout("fake timeout")
-
-	def failed(*a):
-		raise original
-
-	monkeypatch.setattr(analyze, "_session_increment_query", failed)
+	if stage == "update":
+		db = counter_db(run_error=original)
+	else:
+		db = counter_db(run_error=RuntimeError("fake failure"), rollback_error=original)
 	with pytest.raises(Timeout) as caught:
 		analyze._add_ai_spend("fake-doc", 3)
-	assert caught.value is not original and caught.value.__context__ is None
+	assert caught.value is not original
+	assert caught.value.__context__ is None and caught.value.__cause__ is None
+	assert db.logs == []
+
+
+@pytest.mark.parametrize(
+	"docname,tokens",
+	[("", 5), (None, 5), ("fake-doc", 0), ("fake-doc", None), ("fake-doc", "abc"), ("fake-doc", -3),
+	 ("fake-doc", True), ("fake-doc", 2**40)],
+)
+def test_no_tokens_or_no_session_is_a_no_op_without_sql(counter_db, docname, tokens):
+	db = counter_db()
+	analyze._add_ai_spend(docname, tokens)
+	assert db.calls == [] and db.logs == []
+
+
+def test_spend_takes_a_usage_dict_total(counter_db):
+	db = counter_db()
+	analyze._add_ai_spend("fake-doc", {"prompt_tokens": 4, "completion_tokens": 5, "total_tokens": 9})
+	assert ("update", "fake-doc", "ai_tokens_spent", 9, "name") in db.calls
+
+
+def test_refresh_count_without_a_docname_is_a_no_op(counter_db):
+	db = counter_db()
+	analyze._bump_ai_refresh_count("")
+	analyze._bump_ai_refresh_count(None)
+	assert db.calls == []
+
+
+# --- one spend source -------------------------------------------------------------------
+
+_PROVIDER = {
+	"name": "fake", "protocol": "openai", "base_url": "https://fake.invalid/v1", "model": "fake",
+	"needs_key": False, "context_tokens": 128000,
+}
+_ANSWER = "## Diagnosis\nRepeated work.\n## Fix\nBatch the call.\n## Why it works\nFewer calls.\n## Verify\nProfile again."
+
+
+class _Reply:
+	def __init__(self, content, total, status=200, protocol="openai"):
+		self.status_code = status
+		self.payload = {
+			"choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+			"usage": {"prompt_tokens": total - 1, "completion_tokens": 1, "total_tokens": total},
+		} if protocol == "openai" else {
+			"content": [{"type": "text", "text": content}], "stop_reason": "end_turn",
+			"usage": {"input_tokens": total - 1, "output_tokens": 1},
+		}
+		self.text = json.dumps(self.payload)
+		self.headers = {}
+
+	def json(self):
+		return self.payload
+
+
+@pytest.fixture
+def provider(monkeypatch):
+	import frappe
+
+	monkeypatch.setattr(frappe.local, "_optimus_spend_session", "uuid-A", raising=False)
+	monkeypatch.setattr(ai_fix, "_provider_config", lambda: dict(_PROVIDER))
+	monkeypatch.setattr(ai_fix, "_resolve_display_threshold_ms", lambda: 1000)
+	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a: "")
+	monkeypatch.setattr(ai_fix, "_current_key_or_empty", lambda: "")
+	monkeypatch.setattr(ai_fix, "is_finding_type_excluded", lambda *a, **k: False)
+	monkeypatch.setattr(ai_fix, "_log_http_error", lambda *a, **k: None)
+	monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: False)  # one provider call per entry
+	posts = []
+
+	def install(*replies):
+		pending = iter(replies)
+
+		def post(url, **kw):
+			posts.append(kw["json"])
+			reply = next(pending)
+			if isinstance(reply, BaseException):
+				raise reply
+			return reply
+
+		monkeypatch.setattr(ai_fix.requests, "post", post)
+
+	def use(protocol):
+		monkeypatch.setattr(ai_fix, "_provider_config", lambda: dict(_PROVIDER, protocol=protocol))
+
+	return SimpleNamespace(install=install, posts=posts, use=use)
+
+
+@pytest.fixture
+def charged(monkeypatch, provider):
+	"""Every session counter increment, as (key, field, amount, matched column)."""
+	seen = []
+
+	def counter(key, field, n, *, by="name", title=""):
+		seen.append((key, field, n, by))
+
+	monkeypatch.setattr(analyze, "_increment_session_counter", counter)
+	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **k: True)
+	return seen
+
+
+def _ask(entry, **attribution):
+	if entry == "fix":
+		return ai_fix.suggest_fix({"finding_type": "N+1 Query"}, **attribution)
+	return ai_fix.humanize_steps([{"label": "fake"}], **attribution)
+
+
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+@pytest.mark.parametrize("entry", ["fix", "steps"])
+def test_an_unattributed_call_charges_the_ambient_session_once(provider, charged, entry, protocol):
+	provider.use(protocol)
+	provider.install(_Reply(_ANSWER if entry == "fix" else "1. step", 7, protocol=protocol))
+	_ask(entry)
+	assert charged == [("uuid-A", "ai_tokens_spent", 7, "session_uuid")]
+
+
+@pytest.mark.parametrize(
+	"attribution",
+	[{"session_uuid": "uuid-B", "docname": "SESS-B"}, {"session_uuid": "uuid-B"}, {"docname": "SESS-B"}],
+)
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+@pytest.mark.parametrize("entry", ["fix", "steps"])
+def test_explicit_attribution_never_charges_the_ambient_session(provider, charged, entry, attribution, protocol):
+	provider.use(protocol)
+	provider.install(_Reply(_ANSWER if entry == "fix" else "1. step", 7, protocol=protocol))
+	_ask(entry, **attribution)
+	assert len(provider.posts) == 1 and charged == []
+
+
+def test_an_explicit_caller_records_its_spend_once_into_its_own_session(provider, charged):
+	provider.install(_Reply(_ANSWER, 7))
+	result = ai_fix.suggest_fix({"finding_type": "N+1 Query"}, session_uuid="uuid-B", docname="SESS-B")
+	analyze._add_ai_spend("SESS-B", result["tokens"]["total_tokens"])
+	assert charged == [("SESS-B", "ai_tokens_spent", 7, "name")]
+
+
+def test_an_explicit_billed_failure_carries_its_usage_and_charges_nothing(provider, charged):
+	provider.install(_Reply("<think>unfinished", 9))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix.suggest_fix({"finding_type": "N+1 Query"}, session_uuid="uuid-B", docname="SESS-B")
+	assert caught.value.usage["total_tokens"] == 9 and charged == []
+
+
+def test_an_internal_call_with_an_explicit_session_never_charges_the_ambient_one(provider, charged):
+	provider.install(_Reply("ok", 42), _Reply("ok", 5))
+	ai_fix._dispatch_call(dict(_PROVIDER), "system", [], usage_out={}, session_uuid="uuid-B")
+	assert charged == []
+	ai_fix._dispatch_call(dict(_PROVIDER), "system", [], usage_out={})
+	assert charged == [("uuid-A", "ai_tokens_spent", 5, "session_uuid")]
+
+
+@pytest.mark.parametrize("attribution", [{}, {"docname": "SESS-B"}])
+def test_each_billed_call_of_a_reask_is_charged_once(provider, charged, monkeypatch, attribution):
+	violation = ai_fix.ai_guardrails.Violation
+	verdicts = iter([[violation("invented-api")], []])
+	monkeypatch.setattr(ai_fix.ai_guardrails, "verify_fix", lambda text, **k: next(verdicts))
+	monkeypatch.setattr(ai_fix.ai_guardrails, "reaskable", lambda found: list(found))
+	monkeypatch.setattr(ai_fix.ai_budget, "reask_fits", lambda *a, **k: True)
+	monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: True)
+	provider.install(_Reply(_ANSWER, 7), _Reply(_ANSWER, 11))
+	result = ai_fix.suggest_fix({"finding_type": "N+1 Query"}, **attribution)
+	assert len(provider.posts) == 2 and result["tokens"]["total_tokens"] == 18
+	# unattributed: both replies charged to the ambient session; attributed: neither (the caller's)
+	assert [amount for _key, _field, amount, _by in charged] == ([] if attribution else [7, 11])
+
+
+def test_humanize_reports_each_call_once_through_a_reused_usage_out(provider, charged):
+	import requests
+
+	usage_out = {}
+	provider.install(_Reply("1. step", 7), _Reply("   ", 11), requests.exceptions.ConnectionError("down"))
+	assert ai_fix.humanize_steps([{"label": "fake"}], usage_out=usage_out) == "1. step"
+	assert usage_out["total_tokens"] == 7
+	with pytest.raises(ai_fix.AiFixError) as empty:
+		ai_fix.humanize_steps([{"label": "fake"}], usage_out=usage_out)
+	assert empty.value.usage["total_tokens"] == 11 and usage_out["total_tokens"] == 11
+	with pytest.raises(ai_fix.AiFixError) as down:
+		ai_fix.humanize_steps([{"label": "fake"}], usage_out=usage_out)
+	assert down.value.usage is None  # nothing billed by this call, whatever the caller's dict holds
+	assert [amount for _key, _field, amount, _by in charged] == [7, 11]
+
+
+def test_humanize_without_usage_out_still_charges_an_unattributed_call(provider, charged):
+	provider.install(_Reply("1. step", 9))
+	ai_fix.humanize_steps([{"label": "fake"}])
+	assert charged == [("uuid-A", "ai_tokens_spent", 9, "session_uuid")]
+
+
+def test_the_ambient_recorder_is_a_thin_wrapper_over_the_session_counter(charged):
+	ai_fix._record_session_spend(150)
+	assert charged == [("uuid-A", "ai_tokens_spent", 150, "session_uuid")]
+
+
+@pytest.mark.parametrize("tokens", [0, None, -1, "abc", True])
+def test_the_ambient_recorder_ignores_a_call_without_tokens(charged, tokens):
+	ai_fix._record_session_spend(tokens)
+	assert charged == []
+
+
+def test_the_ambient_recorder_without_a_marker_is_a_no_op(charged, monkeypatch):
+	import frappe
+
+	monkeypatch.setattr(frappe.local, "_optimus_spend_session", None, raising=False)
+	ai_fix._record_session_spend(150)
+	assert charged == []
+
+
+def test_a_failed_spend_counter_keeps_the_billed_answer(provider, counter_db):
+	db = counter_db(run_error=RuntimeError("fake lock wait timeout"))
+	provider.install(_Reply(_ANSWER, 7))
+	result = ai_fix.suggest_fix({"finding_type": "N+1 Query"})
+	assert result["suggestion"].startswith("## Diagnosis")
+	assert ("update", "uuid-A", "ai_tokens_spent", 7, "session_uuid") in db.calls
+	assert [(log[0], log[2].get("session_uuid")) for log in db.logs] == [("optimus ai spend", "uuid-A")]
 
 
 @pytest.mark.parametrize("entry", ["fix", "steps"])
@@ -100,6 +383,8 @@ def test_public_call_explicit_session_reaches_protocol(monkeypatch, entry):
 			[{"label": "fake"}], session_uuid="fake-session", docname="fake-doc", timeout=17
 		)
 	assert seen[0]["session_uuid"] == "fake-session" and seen[0]["timeout"] == 17
+	# the explicit caller records this call's spend itself (analyze._add_ai_spend)
+	assert seen[0]["record_spend"] is False
 
 
 def test_health_window_uses_stopped_at_not_ai_modified(monkeypatch):
@@ -115,3 +400,71 @@ def test_health_window_uses_stopped_at_not_ai_modified(monkeypatch):
 	)
 	api._session_perf_24h()
 	assert '"stopped_at"' in queries[0] and '"modified"' not in queries[0]
+
+
+# --- a session save never writes stale counters back -------------------------------------
+
+
+def test_a_save_keeps_the_stored_counters_and_its_own_other_fields():
+	stored = SimpleNamespace(ai_tokens_spent=42, ai_refresh_count=3, notes="stored notes")
+	doc = SimpleNamespace(ai_tokens_spent=0, ai_refresh_count=1, notes="new notes", get_doc_before_save=lambda: stored)
+	analyze._keep_session_counters(doc)
+	assert (doc.ai_tokens_spent, doc.ai_refresh_count, doc.notes) == (42, 3, "new notes")
+
+
+def test_a_new_session_keeps_its_own_counters():
+	doc = SimpleNamespace(ai_tokens_spent=5, ai_refresh_count=0, get_doc_before_save=lambda: None)
+	analyze._keep_session_counters(doc)
+	assert (doc.ai_tokens_spent, doc.ai_refresh_count) == (5, 0)
+
+
+_SAVE_STEPS_WITH_DB_OR_META = (
+	"check_if_locked", "_set_defaults", "check_permission", "set_user_and_timestamp", "set_docstatus",
+	"set_parent_in_children", "set_name_in_children", "validate_higher_perm_levels", "_validate_links",
+	"_validate", "update_children", "reset_computed_child_tables", "run_post_save_methods", "reset_seen",
+	"set_title_field", "validate_update_after_submit",
+)
+
+
+@pytest.mark.parametrize("ignore_validate", [False, True])
+def test_an_increment_after_get_doc_survives_a_real_session_save(monkeypatch, ignore_validate):
+	"""The live loss: ``analyze._persist`` loads the session, the humanize call adds its tokens in
+	SQL, then ``doc.save()`` wrote the loaded (older) count back. Drives Frappe's own
+	``Document.save`` (``check_if_latest`` reads the row ``for_update`` before ``before_validate``);
+	only the steps that need a database or DocType meta are stubbed."""
+	pytest.importorskip("frappe.model.document", exc_type=ImportError)
+	DocStatus = pytest.importorskip("frappe.model.docstatus", exc_type=ImportError).DocStatus
+	import frappe
+
+	from optimus.optimus.doctype.optimus_session.optimus_session import OptimusSession
+
+	for name in _SAVE_STEPS_WITH_DB_OR_META:
+		monkeypatch.setattr(OptimusSession, name, lambda self, *a, **k: None, raising=False)
+	monkeypatch.setattr(OptimusSession, "_non_computed_table_fieldnames", property(lambda self: {}), raising=False)
+	monkeypatch.setattr(OptimusSession, "meta", property(lambda self: SimpleNamespace(issingle=False)), raising=False)
+
+	def run_method(self, method, *a, **k):
+		hook = getattr(type(self), method, None)
+		if callable(hook):
+			hook(self)
+
+	monkeypatch.setattr(OptimusSession, "run_method", run_method)
+	written, loads = [], []
+	monkeypatch.setattr(OptimusSession, "db_update", lambda self: written.append(
+		{f: self.__dict__.get(f) for f in ("ai_tokens_spent", "ai_refresh_count", "notes")}
+	))
+	stored = SimpleNamespace(
+		name="SESS-1", modified="2026-10-10 10:00:00", docstatus=DocStatus(0), ai_tokens_spent=10, ai_refresh_count=0,
+	)
+	monkeypatch.setattr(frappe, "get_doc", lambda *a, **kw: loads.append((a, kw)) or stored)
+	doc = object.__new__(OptimusSession)
+	doc.__dict__.update(
+		doctype="Optimus Session", name="SESS-1", modified="2026-10-10 10:00:00",
+		_original_modified="2026-10-10 10:00:00", docstatus=DocStatus(0),
+		flags=frappe._dict(ignore_validate=ignore_validate),
+		ai_tokens_spent=10, ai_refresh_count=0, notes="analyzed notes",
+	)
+	stored.ai_tokens_spent, stored.ai_refresh_count = 52, 1  # humanize tokens; a refresh
+	doc.save(ignore_permissions=True)
+	assert loads == [(("Optimus Session", "SESS-1"), {"for_update": True})]
+	assert written == [{"ai_tokens_spent": 52, "ai_refresh_count": 1, "notes": "analyzed notes"}]
