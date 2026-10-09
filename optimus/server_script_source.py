@@ -92,7 +92,9 @@ def get_server_script_lines(scrubbed_name: str, *, cache: dict | None = None) ->
 	body = record.get("script") or ""
 	if not body:
 		return None
-	return body.splitlines()
+	from optimus.renderer.source import split_source_lines
+
+	return split_source_lines(body)
 
 
 def desk_url(scrubbed_name: str, *, cache: dict | None = None) -> str:

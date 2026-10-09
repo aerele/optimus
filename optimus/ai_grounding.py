@@ -301,16 +301,31 @@ def _stored_paths(loop: ast.AST) -> set[tuple[tuple[str, ...], int]]:
 def _mutated_paths(loop: ast.AST) -> set[tuple[tuple[str, ...], int]]:
 	"""(path, line) for every container a pass of ``loop`` changes in place through a
 	method (``filters.update(...)``, ``conditions.append(...)``): the name is not
-	rebound, yet its value differs on each pass (C5)."""
+	rebound, yet its value differs on each pass (C5). Not counted: a query-builder
+	receiver (``frappe.qb.update(T)`` builds a query), and a Frappe document's
+	``doc.append("items", row)``, which changes only that child table, so its path is
+	``doc.items`` (``doc[]`` for a computed fieldname) and ``doc.company`` stays what it was."""
 	out: set[tuple[tuple[str, ...], int]] = set()
 	for part in _per_iteration(loop):
 		if isinstance(part, _SCOPES):
 			continue
 		for node in (part, *_own_walk(part)):
-			if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in _MUTATING_ATTRS:
-				path = _path(node.func.value)
-				if path:
-					out.add((path, node.lineno))
+			if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+				continue
+			if node.func.attr not in _MUTATING_ATTRS:
+				continue
+			path = _path(node.func.value)
+			if not path or path[0] == "qb" or path[:2] == ("frappe", ".qb"):
+				continue
+			first = node.args[0] if node.args else None
+			literal = isinstance(first, ast.Constant) and isinstance(first.value, str)
+			if node.func.attr in ("append", "extend", "insert") and len(node.args) >= 2 and (
+				literal or node.func.attr != "insert"
+			):
+				# list.append / list.extend take one argument: two are a Frappe document's
+				# (fieldname, row). A computed fieldname is any child table.
+				path = (*path, "." + first.value if literal else "[]")
+			out.add((path, node.lineno))
 	return out
 
 
@@ -691,6 +706,28 @@ def statement_calls(line: str) -> StatementCalls:
 	tree = _parse_statement(line)
 	if tree is None:
 		return StatementCalls("(" in _strip_comment(line), None)
+	node = _first_call(tree)
+	if node is not None:
+		name = call_name(node.func)
+		return StatementCalls(True, name if name and _SAFE_NAME_RE.match(name) else None)
+	# An opener whose call continues on the next lines: the bare line (comments and all, as
+	# Python reads it) does not parse, but its closed form does and holds only builtins.
+	if ")" in _closers(_strip_comment(line).strip().lstrip(")]} ")) and not _parses(line.strip()):
+		return StatementCalls(True, None)
+	return StatementCalls(False, None)
+
+
+def _parses(src: str) -> bool:
+	try:
+		ast.parse(src)
+	except (SyntaxError, ValueError):
+		return False
+	return True
+
+
+def _first_call(tree: ast.Module) -> ast.Call | None:
+	"""The first call outermost first that is not a builtin, a ``raise`` constructor or
+	gettext (see ``statement_calls``)."""
 	skip = {
 		id(node.exc) for node in ast.walk(tree) if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
 	}
@@ -701,30 +738,34 @@ def statement_calls(line: str) -> StatementCalls:
 			continue
 		if _is_gettext(node.func):
 			continue
-		name = call_name(node.func)
-		return StatementCalls(True, name if name and _SAFE_NAME_RE.match(name) else None)
-	if ")" in _closers(_strip_comment(line).strip().lstrip(")]} ")):
-		return StatementCalls(True, None)
-	return StatementCalls(False, None)
+		return node
+	return None
 
 
-def _has_own_loop(line: str) -> bool:
-	"""True when the statement on ``line`` holds a comprehension or generator expression:
-	the line runs a loop of its own (C8)."""
+def _per_item_call(line: str) -> str | None:
+	"""The callee ``statement_calls`` names for ``line`` when that call runs once per item
+	of a comprehension or generator on the line (in its element, key or value, a filter,
+	or the iterable of a second or later generator), else None. A call in the first
+	iterable runs once, and one in an argument beside the comprehension is not repeated."""
 	tree = _parse_statement(line)
-	return tree is not None and any(isinstance(node, _COMPS) for node in ast.walk(tree))
+	node = _first_call(tree) if tree is not None else None
+	if node is None:
+		return None
+	for comp in (n for n in ast.walk(tree) if isinstance(n, _COMPS)):
+		for part in _per_iteration(comp):
+			if any(inner is node for inner in ast.walk(part)):
+				name = call_name(node.func)
+				return name if name and _SAFE_NAME_RE.match(name) else None
+	return None
 
 
-def _own_loop_note(detail: dict, callee: str | None) -> str:
-	hits = detail.get("hits")
-	items = f"{hits} items" if isinstance(hits, int) and not isinstance(hits, bool) and hits > 0 else "its items"
-	text = (
-		f"This line runs its own loop (a comprehension or generator) over {items}, and its time is that "
-		"loop as a whole, so Optimus does not ask the AI about the line itself."
+def _own_loop_note(callee: str) -> str:
+	return (
+		"This line runs its own loop (a comprehension or generator) over its items, and its time is that "
+		f"loop as a whole, so Optimus does not ask the AI about the line itself. The loop calls {callee} "
+		"for each item, but the time is the whole loop, not that call alone. Look at what the loop does "
+		"for each item and how many items it covers."
 	)
-	if callee:
-		text += f" The loop calls {callee} for each item, but the time is the whole loop, not that call alone."
-	return text + " Look at what the loop does for each item and how many items it covers."
 
 
 def _short_path(filename: str) -> str:
@@ -820,9 +861,9 @@ def hot_line_gate(
 	shape = statement_calls(str(detail.get("line_content") or ""))
 	if not shape.calls:
 		return None
-	content = str(detail.get("line_content") or "")
-	if _has_own_loop(content):
-		return _own_loop_note(detail, shape.callee)
+	per_item = _per_item_call(str(detail.get("line_content") or ""))
+	if per_item:
+		return _own_loop_note(per_item)
 	scope = _callee_scope(shape.callee, tracked_apps=scope_apps, from_phase1=False) if shape.callee else "unknown"
 	return _callee_note(shape.callee, scope)
 

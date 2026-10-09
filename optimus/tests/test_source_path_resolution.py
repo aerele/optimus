@@ -282,3 +282,19 @@ def test_source_lines_split_like_python_does(tmp_path):
 	assert source._source_lines(str(path)) == ["x = 1"]
 	path.write_bytes(b"")
 	assert source._source_lines(str(path)) == []
+
+
+def test_every_source_reader_uses_the_newline_only_splitter(tmp_path, monkeypatch):
+	"""F6: the Server Script body and the out-of-bench decorator fallback split like the file reader."""
+	from optimus import server_script_source
+	from optimus.renderer import source, source_resolution
+
+	assert source.split_source_lines("a\r\nb\x0c\rc\u2028d\n") == ["a", "b\x0c", "c\u2028d"]
+	monkeypatch.setattr(
+		server_script_source, "get_server_script_record", lambda name, cache=None: {"script": "a = 1\x0c\r\nb = 2\n"},
+	)
+	assert server_script_source.get_server_script_lines("x") == ["a = 1\x0c", "b = 2"]
+	path = tmp_path / "d.py"
+	path.write_text("x = 1\x0c\n@deco\ndef target():\n\tpass\n", encoding="utf-8")
+	monkeypatch.setattr(source_resolution, "_source_lines", lambda *a, **k: None)
+	assert source_resolution._skip_decorators_to_def(str(path), 2, "target") == 3

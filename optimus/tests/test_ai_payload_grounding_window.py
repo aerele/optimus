@@ -145,3 +145,27 @@ def test_form_feed_and_unicode_separators_keep_python_line_numbers(tmp_path):
 	target = next(r for r in window.rows if r["is_target"])
 	assert "frappe.db.get_value" in target["content"]
 	assert ai_grounding.loop_facts_from_tree(window.tree, 6, parent=window.parent)["loops"][0]["line"] == 5
+
+
+def test_the_tree_memo_keeps_only_the_last_few_files(tmp_path):
+	"""F4: a long run does not keep every file's tree and parent map alive."""
+	cache = {}
+	for i in range(analyze._AI_AST_MEMO_MAX + 3):
+		src = tmp_path / f"m{i}.py"
+		src.write_text("def f():\n\treturn 1\n")
+		analyze._ai_grounding_window(str(src), 2, cache)
+	memo = cache[("optimus_ast",)]
+	assert len(memo) == analyze._AI_AST_MEMO_MAX
+	assert str(tmp_path / "m0.py") not in memo and str(tmp_path / f"m{analyze._AI_AST_MEMO_MAX + 2}.py") in memo
+
+
+def test_two_findings_of_one_file_build_the_parent_map_once(tmp_path, monkeypatch):
+	src = tmp_path / "mod.py"
+	src.write_text("def f(items):\n\tfor d in items:\n\t\tfrappe.get_doc('A', d)\n\t\tfrappe.get_doc('B', d)\n")
+	built = []
+	real = ai_grounding._parent_map
+	monkeypatch.setattr(ai_grounding, "_parent_map", lambda tree: built.append(1) or real(tree))
+	cache = {}
+	for line in (3, 4):
+		analyze._ai_payload_for_finding(_row(str(src), line, "f", finding_type="N+1 Query"), cache)
+	assert len(built) == 1

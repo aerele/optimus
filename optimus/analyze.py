@@ -2347,6 +2347,9 @@ def _ai_evidence_scope() -> tuple:
 	return recipe_enrichment.make_evidence_lookup(), safe_call.best_effort(_tracked, ())
 
 
+_AI_AST_MEMO_MAX = 4  # whole-file trees kept per run
+
+
 def _ai_grounding_window(filename: str, lineno, file_cache: dict) -> ai_grounding.GroundingWindow | None:
 	"""The prompt's source window (the enclosing function when it fits 80 lines, else 24
 	lines either side) plus the whole file's parsed tree, or None when the source cannot
@@ -2360,13 +2363,19 @@ def _ai_grounding_window(filename: str, lineno, file_cache: dict) -> ai_groundin
 		with guard:
 			lines = _source._source_lines(filename, cache=file_cache)
 			if lines and not isinstance(lineno, bool):
-				# The whole-file tree and parent map are built once per file per run (PF3);
-				# the entry is valid only for the very list of lines it was parsed from.
-				ast_key = ("optimus_ast", filename)
-				entry = file_cache[ast_key] if ast_key in file_cache else None
+				# The whole-file tree and parent map are built once per file per run (PF3). A
+				# small LRU keeps only the last few files' trees; an entry is valid only for
+				# the very list of lines it was parsed from.
+				memo_key = ("optimus_ast",)
+				memo = file_cache[memo_key] if memo_key in file_cache else None
+				if memo is None:
+					memo = file_cache[memo_key] = OrderedDict()
+				entry = memo.get(filename)
 				if entry is None or entry[0] is not lines:
-					entry = (lines, *ai_grounding.parse_source(lines))
-					file_cache[ast_key] = entry
+					entry = memo[filename] = (lines, *ai_grounding.parse_source(lines))
+				memo.move_to_end(filename)
+				while len(memo) > _AI_AST_MEMO_MAX:
+					memo.popitem(last=False)
 				grounding = ai_grounding.grounding_window(
 					lines, int(lineno), ai_fix._SOURCE_LINES_BEFORE, ai_fix._SOURCE_LINES_AFTER,
 					max_lines=ai_fix._MAX_SOURCE_WINDOW_LINES, max_line_chars=_source._SNIPPET_TRUNCATE_CHARS,

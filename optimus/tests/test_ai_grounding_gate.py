@@ -120,25 +120,58 @@ class TestMultiLineOpeners:
 	def test_a_named_callee_on_the_opener_line_is_still_named(self, line):
 		assert g.statement_calls(line).callee in ("foo", "get_a")
 
+	@pytest.mark.parametrize("line", [
+		'sep = len("\\\\")  # windows (legacy',
+		"n = len(rows)  # (see below",
+		"n = len(rows)  # [",
+	])
+	def test_a_comment_cannot_turn_a_complete_line_into_an_opener(self, line):
+		"""F5: only a line Python cannot parse as it stands, but can once closed, is an opener."""
+		assert tuple(g.statement_calls(line)) == (False, None)
+		assert g.hot_line_gate(_hot_line(line, per_hit_us=9000.0)) is None
+
+	def test_an_opener_with_a_comment_is_still_an_opener(self):
+		assert tuple(g.statement_calls("total = sum(  # all rows")) == (True, None)
+
 	def test_a_complete_builtin_call_is_still_free(self):
 		assert tuple(g.statement_calls("\t\tn = len(rows)")) == (False, None)
 
 
 class TestOwnLoopNote:
-	"""C8: a line with its own comprehension or generator spends its time in that loop."""
+	"""C8: a line whose callee runs once per item of its own comprehension or generator
+	spends its time in that loop. No count is quoted: ``hits`` counts line executions
+	over the whole run, not items."""
 
-	def test_a_comprehension_line_says_it_runs_its_own_loop(self):
+	def test_a_per_item_call_says_the_line_runs_its_own_loop(self):
 		note = g.hot_line_gate(_hot_line(
 			"\t\tnames = [frappe.db.get_value('Item', i, 'x') for i in ids]", per_hit_us=9000.0, hits=250,
 		))
-		assert note.startswith("This line runs its own loop (a comprehension or generator) over 250 items")
+		assert note.startswith("This line runs its own loop (a comprehension or generator) over its items")
 		assert "its time is that loop as a whole" in note
 		assert "frappe.db.get_value for each item" in note and "not that call alone" in note
-		assert "Most of this line's time is spent inside" not in note
+		assert "250" not in note and "Most of this line's time is spent inside" not in note
 
-	def test_a_generator_argument_and_missing_hits(self):
-		note = g.hot_line_gate(_hot_line("\t\ttotal = sum(fetch(i) for i in ids)", per_hit_us=9000.0))
-		assert "over its items" in note and "fetch for each item" in note
+	@pytest.mark.parametrize("line", [
+		"\t\ttotal = sum(fetch(i) for i in ids)",
+		"\t\txs = {i: fetch(i) for i in ids}",
+		"\t\txs = {fetch(i): i for i in ids}",
+		"\t\txs = [i for i in ids if fetch(i)]",
+		"\t\txs = [y for x in ids for y in fetch(x)]",
+	])
+	def test_every_per_item_part_counts(self, line):
+		assert "fetch for each item" in g.hot_line_gate(_hot_line(line, per_hit_us=9000.0))
+
+	@pytest.mark.parametrize("line", [
+		"\t\tnames = [d.name for d in frappe.get_all('Item', filters=f)]",
+		"\t\trows = frappe.get_all('Item', filters={'name': ['in', [d.x for d in docs]]})",
+		"\t\tframe.db.sql(q, tuple(d.name for d in docs))",
+		"\t\tvals = [d.x for d in fetch(ids)]",
+	])
+	def test_a_call_outside_the_per_item_parts_keeps_the_callee_note(self, line):
+		"""The callee runs once: the first iterable, or an argument beside the comprehension."""
+		note = g.hot_line_gate(_hot_line(line, per_hit_us=9000.0, hits=250))
+		assert note.startswith("Most of this line's time is spent inside ")
+		assert "own loop" not in note
 
 	def test_a_call_free_comprehension_is_still_not_gated(self):
 		assert g.hot_line_gate(_hot_line("\t\txs = [i for i in ids]", per_hit_us=9000.0)) is None
@@ -150,11 +183,6 @@ class TestOwnLoopNote:
 	def test_the_note_has_no_dash_or_backticks(self):
 		note = g.hot_line_gate(_hot_line("\t\txs = [f(i) for i in ids]", per_hit_us=9000.0))
 		assert "\u2014" not in note and "\u2013" not in note and "`" not in note
-
-	@pytest.mark.parametrize("hits", [True, 0, -3, "12", None])
-	def test_an_unusable_hits_value_is_not_quoted(self, hits):
-		note = g.hot_line_gate(_hot_line("\t\txs = [f(i) for i in ids]", per_hit_us=9000.0, hits=hits))
-		assert "over its items" in note
 
 
 class TestStatementShapes:

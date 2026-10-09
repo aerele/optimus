@@ -330,6 +330,67 @@ class TestLoopChain:
 		assert "variables that change in that loop: filters." in text
 		assert "uses no variable" not in text
 
+	def test_a_document_append_of_a_child_row_binds_only_that_table(self):
+		"""F3a (payment_entry.py:3464): pe.append("references", ...) does not change pe.company."""
+		lines = ["def f(pe, rows):", "\tfor row in rows:", "\t\tpe.append('references', {'a': row})",
+			"\t\tc = frappe.get_cached_value('Company', pe.company, 'cost_center')"]
+		text = _text(lines, 4)
+		assert ["pe", 3] not in _facts(lines, 4)["loops"][0]["bound"]
+		assert "loop: pe" not in text and ", pe" not in text
+
+	@pytest.mark.parametrize("call", ["self.append('taxes', {'a': d})", "self.extend('taxes', [d])"])
+	def test_self_append_of_a_child_row_and_a_company_lookup(self, call):
+		lines = ["def f(self):", "\tfor d in self.get('items'):", "\t\t" + call,
+			"\t\tabbr = frappe.get_cached_value('Company', self.company, 'abbr')"]
+		assert ["self", 3] not in _facts(lines, 4)["loops"][0]["bound"]
+
+	def test_a_document_append_with_a_computed_fieldname_binds_no_attribute(self):
+		"""meta.py:474: self.append(fieldname, d) leaves self.name alone."""
+		lines = ["def f(self, tables):", "\tfor fieldname in tables:", "\t\tself.append(fieldname, {'a': 1})",
+			"\t\tfrappe.get_all('X', filters={'parent': self.name})"]
+		assert ["self", 3] not in _facts(lines, 4)["loops"][0]["bound"]
+
+	def test_a_document_append_binds_the_table_when_the_call_reads_it(self):
+		lines = ["def f(self):", "\tfor d in self.get('items'):", "\t\tself.append('taxes', {'a': d})",
+			"\t\tfrappe.db.sql('x', self.taxes)"]
+		assert ["self", 3] in _facts(lines, 4)["loops"][0]["bound"]
+
+	def test_a_query_builder_receiver_is_not_a_mutation(self):
+		"""F3b: frappe.qb.update(T) builds a query."""
+		for update in ("frappe.qb.update(T).set(T.qty, 0).where(T.name == 'x').run()",):
+			lines = ["def f(rows):", "\tT = frappe.qb.DocType('Bin')", "\tfor d in rows:", "\t\t" + update]
+			assert all(name != "frappe" for name, _ in _facts(lines, 4)["loops"][0]["bound"])
+		lines = ["def f(rows):", "\tfor d in rows:", "\t\tq = qb.update(T)", "\t\tfrappe.db.sql(qb.update(T).get_sql())"]
+		assert all(name != "qb" for name, _ in _facts(lines, 4)["loops"][0]["bound"])
+
+	def test_task_list_append_beside_a_subscript_read_stays_a_true_positive(self):
+		"""task.py:255: a plain list append changes the list the call reads."""
+		lines = ["def f(tasks):", "\ttask_list = []", "\tfor t in tasks:", "\t\ttask_list.append(t)",
+			"\t\tfrappe.get_doc('Task', task_list[count])"]
+		assert ["task_list", 4] in _facts(lines, 5)["loops"][0]["bound"]
+
+	def test_a_two_argument_insert_or_pop_is_still_a_container_change(self):
+		lines = ["def f(items):", "\tseen = []", "\tfor d in items:", "\t\tseen.insert(0, d)",
+			"\t\tfrappe.db.get_value('Bin', seen, 'qty')"]
+		assert ["seen", 4] in _facts(lines, 5)["loops"][0]["bound"]
+
+	def test_a_positional_insert_keeps_the_whole_receiver(self):
+		"""insert(index, x) is a list insert, not a child-table row: only a string fieldname narrows it."""
+		lines = ["def f(self, items):", "\tfor i, d in enumerate(items):", "\t\tself.insert(i, d)",
+			"\t\tfrappe.get_cached_value('Company', self.company, 'abbr')"]
+		assert ["self", 3] in _facts(lines, 4)["loops"][0]["bound"]
+
+	def test_a_mutation_inside_a_lambda_is_not_a_pass_of_the_loop(self):
+		"""F7: _own_walk stops at lambdas and nested functions."""
+		lines = ["def f(items):", "\tfilters = {}", "\tfor d in items:",
+			"\t\tcb.append(lambda: filters.update({'x': d}))", "\t\tfrappe.db.get_value('Bin', filters, 'qty')"]
+		assert ["filters", 4] not in _facts(lines, 5)["loops"][0]["bound"]
+
+	def test_setdefault_then_a_read_through_get_binds(self):
+		lines = ["def f(items):", "\tfilters = {}", "\tfor d in items:", "\t\tfilters.setdefault('x', d)",
+			"\t\tfrappe.db.get_value('Bin', 'n', filters.get('x'))"]
+		assert ["filters", 4] in _facts(lines, 5)["loops"][0]["bound"]
+
 	def test_mutating_a_name_the_call_does_not_read_binds_nothing(self):
 		lines = ["def f(items):", "\tseen = []", "\tfor d in items:", "\t\tseen.append(d)",
 			"\t\tfrappe.db.get_value('Bin', d, 'qty')"]
@@ -414,6 +475,17 @@ class TestParseOnce:
 		window = g.grounding_window(self.LINES, 3, 2, 2, parsed=parsed)
 		assert window.tree is parsed[0] and window.parent is parsed[1]
 		assert g.loop_facts_from_tree(window.tree, 3, parent=window.parent)["in_loop"] is True
+
+	def test_the_parent_map_is_built_once_for_two_findings_of_one_file(self, monkeypatch):
+		"""F7: parent= is passed on, so the second finding does not rebuild it."""
+		built = []
+		real = g._parent_map
+		monkeypatch.setattr(g, "_parent_map", lambda tree: built.append(1) or real(tree))
+		parsed = g.parse_source(self.LINES)
+		for line in (3, 3):
+			window = g.grounding_window(self.LINES, line, 2, 2, parsed=parsed)
+			g.loop_facts_from_tree(window.tree, line, parent=window.parent)
+		assert len(built) == 1
 
 	def test_parse_source_gives_the_tree_and_parent_map_or_nothing(self):
 		tree, parent = g.parse_source(self.LINES)
