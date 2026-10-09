@@ -129,7 +129,12 @@ versions may contain breaking changes see migration notes below).
   MariaDB 11.8 raises by default; Frappe raises both as
   `frappe.QueryDeadlockError`), and only to a caller that records spend
   itself, which tries its short write again: a per-call charge keeps the
-  reply.
+  reply. An explicitly attributed call's Error Log rows are filed under its
+  own session (a `docname` alone is enough), never under the session the
+  worker served last; only an unattributed call's rows use that one. A billed
+  call stopped by an RQ job timeout leaves `suggest_fix` / `humanize_steps`
+  with its `usage` on the fresh timeout, and only there: the caller reads it
+  from the exception it catches.
 - Count each AI call's tokens once, into one session. A call without explicit
   attribution is charged to the session being analyzed or refreshed; a caller
   that attributes a call explicitly records its tokens itself

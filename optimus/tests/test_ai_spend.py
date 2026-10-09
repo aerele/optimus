@@ -622,3 +622,159 @@ def test_an_increment_after_get_doc_survives_a_real_session_save(monkeypatch, ig
 	doc.save(ignore_permissions=True)
 	assert loads == [(("Optimus Session", "SESS-1"), {"for_update": True})]
 	assert written == [{"ai_tokens_spent": 52, "ai_refresh_count": 1, "notes": "analyzed notes"}]
+
+
+# --- whose Error Log row: the call's own session, never a stale ambient one ---------------
+
+
+class _Rejected:
+	def __init__(self, status, message):
+		self.status_code = status
+		self.headers = {}
+		self.payload = {"error": {"type": "invalid_request_error", "message": message}}
+		self.text = json.dumps(self.payload)
+
+	def json(self):
+		return self.payload
+
+
+@pytest.fixture
+def http_rows(monkeypatch, provider):
+	"""Every row the HTTP layer writes, as (title, session_uuid, docname); the worker's ambient
+	spend marker names session A (the ``provider`` fixture), a stale one for an explicit call."""
+	seen = []
+	monkeypatch.setattr(ai_fix, "_log_http_error", _REAL_LOG_HTTP_ERROR)
+	monkeypatch.setattr(
+		ai_fix, "log_ai_failure",
+		lambda title, exc=None, **kw: seen.append((title, kw.get("session_uuid"), kw.get("docname"))) or True,
+	)
+	monkeypatch.setattr(analyze, "_increment_session_counter", lambda *a, **k: None)
+	return seen
+
+
+_FAILURES = {
+	"server": lambda protocol: [_Reply("x", 1, status=500, protocol=protocol)],
+	"transport": lambda protocol: [__import__("requests").exceptions.ConnectionError("down")],
+	# OpenAI-compatible only: the parameter ladder logs its final rejection itself
+	"ladder": lambda protocol: [
+		_Rejected(400, "Unsupported parameter: 'temperature'"), _Rejected(400, "The model is not available"),
+	],
+}
+
+
+@pytest.mark.parametrize("failure,protocol", [
+	("server", "openai"), ("server", "anthropic"), ("transport", "openai"), ("transport", "anthropic"),
+	("ladder", "openai"),
+])
+@pytest.mark.parametrize("entry", ["fix", "steps"])
+@pytest.mark.parametrize("attribution,row", [
+	({}, ("uuid-A", None)),  # unattributed: the session the worker is processing
+	({"session_uuid": "uuid-B"}, ("uuid-B", None)),
+	({"docname": "SESS-B"}, (None, "SESS-B")),  # docname only: filed under B, never under stale A
+	({"session_uuid": "uuid-B", "docname": "SESS-B"}, ("uuid-B", "SESS-B")),
+])
+def test_an_http_failure_row_is_filed_under_the_calls_own_session(
+	provider, http_rows, entry, failure, protocol, attribution, row,
+):
+	provider.use(protocol)
+	provider.install(*_FAILURES[failure](protocol))
+	with pytest.raises(ai_fix.AiFixError):
+		_ask(entry, **attribution)
+	assert http_rows == [("optimus ai_fix", *row)]
+
+
+def test_an_explicit_call_never_borrows_the_ambient_session_for_its_row(provider, http_rows):
+	"""``record_spend`` False marks an explicit call: with no session or docname of its own, its
+	row has no session rather than the worker's last one."""
+	provider.install(_Reply("x", 1, status=500))
+	with pytest.raises(ai_fix.AiFixError):
+		ai_fix._dispatch_call(dict(_PROVIDER), "system", [], usage_out={}, record_spend=False)
+	assert http_rows == [("optimus ai_fix", None, None)]
+
+
+def test_the_ambient_and_the_explicit_session_differ_and_each_row_follows_its_call(provider, http_rows):
+	provider.install(_Reply("x", 1, status=500), _Reply("x", 1, status=500))
+	with pytest.raises(ai_fix.AiFixError):
+		ai_fix.suggest_fix({"finding_type": "N+1 Query"}, docname="SESS-B")
+	with pytest.raises(ai_fix.AiFixError):
+		ai_fix.suggest_fix({"finding_type": "N+1 Query"})
+	assert http_rows == [("optimus ai_fix", None, "SESS-B"), ("optimus ai_fix", "uuid-A", None)]
+
+
+# --- the .usage boundary ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("entry", ["fix", "steps"])
+def test_usage_rides_a_fresh_timeout_only_to_the_public_entry(provider, monkeypatch, entry):
+	"""A billed call interrupted by an RQ job timeout leaves ``suggest_fix`` / ``humanize_steps`` as
+	a fresh timeout that carries the call's ``.usage``; any further re-wrap (a shared interrupt guard,
+	``log_ai_failure`` raising it again) builds another fresh instance without it. A caller that
+	records spend itself must read ``.usage`` from the exception it catches directly."""
+	from optimus import safe_call
+
+	Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
+
+	def interrupted(*a, usage=None, usage_out=None, **kw):
+		(usage if usage is not None else usage_out).update(
+			{"prompt_tokens": 50, "completion_tokens": 5, "total_tokens": 55},
+		)
+		raise Timeout("fake timeout")
+
+	monkeypatch.setattr(ai_fix, "_complete_with_guardrails", interrupted)
+	monkeypatch.setattr(ai_fix, "_dispatch_call", interrupted)
+	with pytest.raises(Timeout) as caught:
+		_ask(entry, session_uuid="uuid-B", docname="SESS-B")
+	assert caught.value.usage["total_tokens"] == 55
+	assert caught.value.__context__ is None and caught.value.__cause__ is None
+	guard = safe_call.InterruptGuard()
+	try:
+		with guard:
+			raise caught.value
+	except Exception:
+		pass
+	again = guard.interrupt()
+	assert type(again) is Timeout and getattr(again, "usage", None) is None
+
+
+def test_a_failed_reask_row_is_filed_under_the_calls_own_session(provider, http_rows, monkeypatch):
+	violation = ai_fix.ai_guardrails.Violation
+	monkeypatch.setattr(ai_fix.ai_guardrails, "verify_fix", lambda text, **k: [violation("invented-api")])
+	monkeypatch.setattr(ai_fix.ai_guardrails, "reaskable", lambda found: list(found))
+	monkeypatch.setattr(ai_fix.ai_budget, "reask_fits", lambda *a, **k: True)
+	monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: True)
+	provider.install(_Reply(_ANSWER, 7), _Reply("x", 1, status=500))
+	ai_fix.suggest_fix({"finding_type": "N+1 Query"}, docname="SESS-B")  # the first answer is kept
+	assert http_rows == [("optimus ai_fix", None, "SESS-B")]
+
+
+def test_the_ladders_own_timeout_row_is_filed_under_the_calls_own_session(provider, http_rows, monkeypatch):
+	clock = SimpleNamespace(now=0.0)
+	monkeypatch.setattr(ai_fix, "time", SimpleNamespace(monotonic=lambda: clock.now))
+
+	def post(url, **kw):
+		clock.now += 10_000.0  # the whole budget goes on this one rejected post
+		return _Rejected(400, "Unsupported parameter: 'temperature'")
+
+	monkeypatch.setattr(ai_fix.requests, "post", post)
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix.suggest_fix({"finding_type": "N+1 Query"}, docname="SESS-B")
+	assert caught.value.kind == "timeout"
+	assert http_rows == [("optimus ai_fix", None, "SESS-B")]
+
+
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+def test_an_internal_call_with_only_a_docname_is_explicit_for_charge_and_row(provider, charged, monkeypatch, protocol):
+	"""A docname alone attributes a call, as a session_uuid does: no ambient charge, and a failure
+	row filed under that docname, even when ``record_spend`` is left at its default."""
+	provider.use(protocol)
+	provider.install(_Reply("ok", 5, protocol=protocol), _Reply("x", 1, status=500, protocol=protocol))
+	ai_fix._dispatch_call(dict(_PROVIDER, protocol=protocol), "system", [], usage_out={}, docname="SESS-B")
+	assert charged == []
+	rows = []
+	monkeypatch.setattr(ai_fix, "_log_http_error", _REAL_LOG_HTTP_ERROR)
+	monkeypatch.setattr(
+		ai_fix, "log_ai_failure", lambda title, exc=None, **kw: rows.append((kw["session_uuid"], kw["docname"])) or True,
+	)
+	with pytest.raises(ai_fix.AiFixError):
+		ai_fix._dispatch_call(dict(_PROVIDER, protocol=protocol), "system", [], usage_out={}, docname="SESS-B")
+	assert rows == [(None, "SESS-B")]
