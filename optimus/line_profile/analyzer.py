@@ -501,7 +501,11 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 	publish the failed event, re-raise so RQ logs it. Once ``_persist_run`` has
 	committed the run as Ready, nothing after it can flip it to Failed: a re-render
 	that fails or is interrupted leaves the run Ready with a warning (use Regenerate
-	Reports), and an RQ job timeout still stops the job.
+	Reports), and an RQ job timeout still stops the job, raised fresh. ``_persist_run``
+	commits inside, so an error that leaves it after its COMMIT (an ``after_commit``
+	callback that raised, an RQ job timeout before the commit was noted) is not taken for a
+	failure before it: after the rollback, the run's status is read again from the database
+	(``_committed_ready``), and a committed Ready run is kept, with the same warning.
 	"""
 	if not _FRAPPE_AVAILABLE:
 		raise RuntimeError("frappe not importable, run under bench")
@@ -525,6 +529,7 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 		owner = None
 
 	persisted = False
+	interrupt = safe_call.InterruptGuard()
 	try:
 		_publish("phase_2_run_analyzing", {
 			"session_uuid": session_uuid,
@@ -599,10 +604,17 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 		})
 
 	except Exception as exc:
+		if not persisted:
+			try:
+				frappe.db.rollback()
+			except Exception:
+				pass
+			# _persist_run commits inside: an error after its COMMIT must not fail a Ready run
+			persisted = _committed_ready(parent_docname, run_uuid)
 		if persisted:
-			# Only an RQ job timeout in the re-render gets here (it is the one error that
-			# leaves it). The run is committed Ready: keep it, say the report may be stale,
-			# let the form reload, and let the timeout stop the job.
+			# An RQ job timeout in the re-render, or an error that left _persist_run after its
+			# COMMIT. The run is committed Ready: keep it, say the report may be stale, let the
+			# form reload, and let the error end the job (a timeout raised fresh, below).
 			_append_run_warning(parent_docname, run_uuid, _RERENDER_INCOMPLETE_WARNING)
 			_publish("phase_2_run_ready", {
 				"session_uuid": session_uuid,
@@ -610,19 +622,39 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 				"parent": parent_docname,
 				"user": owner,
 			})
+			interrupt.note(exc)
+			if not interrupt.pending():
+				raise
+		else:
+			_mark_run_failed(parent_docname, run_uuid, str(exc), traceback.format_exc())
+			_publish("phase_2_run_failed", {
+				"session_uuid": session_uuid,
+				"run_uuid": run_uuid,
+				"error": str(exc),
+				"user": owner,
+			})
 			raise
-		try:
-			frappe.db.rollback()
-		except Exception:
-			pass
-		_mark_run_failed(parent_docname, run_uuid, str(exc), traceback.format_exc())
-		_publish("phase_2_run_failed", {
-			"session_uuid": session_uuid,
-			"run_uuid": run_uuid,
-			"error": str(exc),
-			"user": owner,
-		})
-		raise
+	if interrupt.pending():
+		raise interrupt.interrupt()
+
+
+def _committed_ready(parent_docname: str, run_uuid: str) -> bool:
+	"""True when the database holds this run as Ready. ``_persist_run`` commits inside, so an
+	error can leave it after its COMMIT (an ``after_commit`` callback that raised, an RQ job
+	timeout before ``run_analyze`` noted the commit): such a run is Ready, not failed. A fresh
+	query (``frappe.get_all``, after the caller's rollback), never the in-memory row; False when
+	the row is gone or cannot be read. An RQ job timeout escapes fresh."""
+
+	def _read() -> bool:
+		rows = frappe.get_all(
+			"Optimus Phase Two Run",
+			filters={"parent": parent_docname, "run_uuid": run_uuid},
+			fields=["status"],
+			limit=1,
+		)
+		return bool(rows) and rows[0].get("status") == "Ready"
+
+	return bool(safe_call.best_effort(_read, False))
 
 
 def _find_run_row(session_uuid: str, run_uuid: str):

@@ -29,6 +29,7 @@ class _Db:
 		self.events, self.session = events, session
 		self.rows = {"RUN-ROW": json.dumps(warnings if warnings is not None else ["earlier"])}
 		self.writes = []
+		self.status = "Analyzing"  # the run row's committed status
 
 	def get_value(self, doctype, filters, fieldname=None, **kw):
 		return self.session
@@ -48,7 +49,7 @@ class _Frappe:
 
 	def get_all(self, doctype, filters=None, fields=None, limit=None, **k):
 		assert doctype == "Optimus Phase Two Run" and filters == {"parent": "PS-1", "run_uuid": "run1"}
-		return [{"name": "RUN-ROW", "warnings_json": self.db.rows["RUN-ROW"]}]
+		return [{"name": "RUN-ROW", "warnings_json": self.db.rows["RUN-ROW"], "status": self.db.status}]
 
 	def publish_realtime(self, *a, **k):
 		pass
@@ -223,3 +224,61 @@ def test_a_warnings_value_that_is_not_a_list_is_replaced(env):
 	env.render_with(RuntimeError("x"))
 	lp.run_analyze("u1", "run1")
 	assert _warnings(env) == [WARNING]
+
+
+def _commit_ready_then(env, error):
+	"""``_persist_run`` commits the run as Ready, then ``error`` leaves it: an ``after_commit``
+	callback that failed (Frappe runs them after the SQL COMMIT), or an RQ job timeout that
+	arrived before ``run_analyze`` noted the commit."""
+
+	def persist(*a):
+		env.events.append("persist_run")
+		env.fake.db.status = "Ready"
+		raise error
+
+	env.mp.setattr(lp, "_persist_run", persist)
+
+
+def test_a_failure_after_the_runs_commit_keeps_it_ready(env):
+	_commit_ready_then(env, ConnectionError("Timeout reading from socket (after_commit callback)"))
+	with pytest.raises(ConnectionError):
+		lp.run_analyze("u1", "run1")
+	assert not any(e.startswith("mark_failed") or e == "phase_2_run_failed" for e in env.events)
+	assert env.events[-1] == "phase_2_run_ready"
+	assert _warnings(env) == ["earlier", WARNING]  # the re-render never ran: Regenerate Reports
+
+
+def test_an_rq_timeout_right_after_the_commit_keeps_ready_and_stops_the_job_fresh(env):
+	original = _JobTimeout("expired")
+	_commit_ready_then(env, original)
+	with pytest.raises(_JobTimeout) as caught:
+		lp.run_analyze("u1", "run1")
+	assert caught.value is not original and caught.value.args == original.args
+	assert caught.value.__context__ is None and caught.value.__cause__ is None
+	assert not any(e.startswith("mark_failed") for e in env.events)
+	assert "phase_2_run_ready" in env.events and _warnings(env) == ["earlier", WARNING]
+
+
+def test_the_status_is_read_again_after_the_rollback(env):
+	"""The status check is a fresh read of what is committed, not the in-memory row."""
+	_commit_ready_then(env, RuntimeError("after the commit"))
+	reads = []
+	get_all = env.fake.get_all
+
+	def recording_get_all(*a, **k):
+		reads.append((list(env.events), k.get("fields")))
+		return get_all(*a, **k)
+
+	env.fake.get_all = recording_get_all
+	with pytest.raises(RuntimeError):
+		lp.run_analyze("u1", "run1")
+	events_then, fields = reads[0]
+	assert "rollback" in events_then and fields == ["status"]
+
+
+def test_a_status_that_cannot_be_read_marks_the_run_failed_as_before(env):
+	_commit_ready_then(env, RuntimeError("after the commit"))
+	env.fake.get_all = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db gone"))
+	with pytest.raises(RuntimeError):
+		lp.run_analyze("u1", "run1")
+	assert "mark_failed:after the commit" in env.events

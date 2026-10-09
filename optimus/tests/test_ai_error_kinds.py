@@ -522,6 +522,22 @@ def test_a_connect_timeout_is_a_reachability_failure(wire, marked):
 	assert "Request timeout" not in message and "fake connect" not in message
 
 
+@pytest.mark.parametrize("timeout,kind", [(120, "transport"), (10, "transport"), (9, "timeout"), (2, "timeout")])
+def test_a_connect_timeout_is_a_reachability_failure_only_under_the_full_connect_cap(wire, marked, timeout, kind):
+	"""Connecting is capped at 10 seconds. When less than that was left of the budget (a later
+	post of the parameter ladder, a redirect hop, a re-ask), a connect timeout means the budget
+	ran out, not that the provider is unreachable."""
+	wire.use_clock()
+	wire.install(ai_fix.requests.exceptions.ConnectTimeout("fake connect timed out"))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._http_post(_LOCAL, {}, {}, provider="openai", where="test", timeout=timeout, budget=60)
+	assert caught.value.kind == kind and caught.value.__context__ is None
+	assert wire.posts[0][1]["timeout"][0] == min(10, timeout)
+	if kind == "timeout":
+		assert "didn't respond within 60 seconds" in str(caught.value)
+		assert "fake connect" not in str(caught.value)
+
+
 @pytest.mark.parametrize("budget,shown", [(59.6, "60"), (60, "60"), (0.2, "1")])
 def test_a_timeout_budget_is_shown_in_whole_seconds(budget, shown):
 	failure = ai_fix._timeout_failure(budget)

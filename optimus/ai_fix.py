@@ -1720,16 +1720,18 @@ def _http_post(
 		failed_kind: str | None = None
 		error_name = ""
 		unexpected_frames: list[str] = []
+		connect_timeout = min(_CONNECT_TIMEOUT_CAP, remaining)
 		guard = _InterruptGuard(base=True)
 		try:
 			with guard:
-				resp = requests.post(target, headers=headers, json=body, timeout=(min(10, remaining), remaining), auth=auth, allow_redirects=False)
+				resp = requests.post(target, headers=headers, json=body, timeout=(connect_timeout, remaining), auth=auth, allow_redirects=False)
 		except requests.exceptions.ConnectTimeout as e:
-			# Not a slow model: connecting is capped at 10 seconds, so it is
-			# a reachability failure, whatever the request timeout.
-			failed_kind = "transport"
 			error_name = type(e).__name__
 			detail = _error_types(e)
+			# With the full connect cap it is not a slow model but a reachability failure,
+			# whatever the request timeout. With less (a later post of the parameter ladder, a
+			# redirect hop, a re-ask), the call's budget ran out while connecting: a timeout.
+			failed_kind = "transport" if connect_timeout >= _CONNECT_TIMEOUT_CAP else "timeout"
 		except requests.exceptions.Timeout:
 			failed_kind = "timeout"
 			detail = "timeout"
@@ -1883,6 +1885,8 @@ def _request_failure(kind: str, error_name: str, budget: float) -> AiFixError:
 
 # How many same-origin 307 / 308 redirects _http_post follows for one request.
 _MAX_REDIRECTS = 3
+# Seconds one connection attempt may take (less when less of the request's budget is left).
+_CONNECT_TIMEOUT_CAP = 10
 # The port a URL scheme means when the URL names none.
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 

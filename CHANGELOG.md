@@ -32,7 +32,9 @@ versions may contain breaking changes see migration notes below).
   A context failure names the cause and, for a hosted provider, no longer
   points at Ollama settings. A timeout names the request's whole budget in
   whole seconds, not the fraction a retry or a guardrail re-ask had left. A
-  connect timeout is a reachability (`transport`) failure, not a slow model. A
+  connect timeout that had the full 10 seconds to connect is a reachability
+  (`transport`) failure, not a slow model; one that had less of the request's
+  budget left (a parameter retry, a redirect, a re-ask) is a `timeout`. A
   rejected request names the Base URL only for a provider whose Base URL you
   set. The provider's reply
   follows as "The provider replied: ...", without the old ".:" join. An
@@ -150,7 +152,10 @@ versions may contain breaking changes see migration notes below).
   it, the run stays Ready with the warning "The report re-render did not
   finish. Use Regenerate Reports on this session to refresh it."; the job
   timeout still stops the job, and the run's Redis state is dropped before the
-  re-render instead of after it. A session deleted while its Phase 2 run was
+  re-render instead of after it. The same holds for an error that leaves the
+  save after its COMMIT (an `after_commit` callback that fails, a job timeout
+  in that instant): the run's status is read again from the database, and a
+  committed Ready run keeps its status and gets the warning. A session deleted while its Phase 2 run was
   being analyzed leaves one line in the `optimus` log instead of nothing.
 - Keep reported token usage when a response is unusable or later validation
   fails. Preserve fresh RQ timeouts and the existing failure-log marker.
