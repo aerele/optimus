@@ -28,6 +28,69 @@ def test_counter_query_adds_in_database_with_null_coalescing(monkeypatch, dialec
 	assert "modified" not in sql
 
 
+class _Sql:
+	"""A column, an expression or a condition that renders itself as a plain string."""
+
+	def __init__(self, sql):
+		self.sql = sql
+
+	def __add__(self, other):
+		return _Sql(f"{self.sql}+{other}")
+
+	def __eq__(self, other):
+		return _Sql(f"{self.sql}='{other}'")
+
+	__hash__ = None
+
+
+class _FakeUpdate:
+	def __init__(self, table):
+		self.table, self.assignment, self.condition = table, None, None
+
+	def set(self, field, value):
+		self.assignment = f"{field.sql}={value.sql}"
+		return self
+
+	def where(self, condition):
+		self.condition = condition.sql
+		return self
+
+	def get_sql(self):
+		return f"UPDATE `tab{self.table}` SET {self.assignment} WHERE {self.condition}"
+
+
+class _FakeTable:
+	def __init__(self, name):
+		self.name = name
+
+	def __getitem__(self, field):
+		return _Sql(f"`{field}`")
+
+
+def _plain_string_qb(monkeypatch):
+	"""A query builder that needs no Frappe: it renders the MariaDB statement as a plain string,
+	so the counter statement is checked under the CI stub too (where the real builder is not
+	importable and the parametrized tests above skip)."""
+	functions = type(sys)("frappe.query_builder.functions")
+	functions.Coalesce = lambda field, default: _Sql(f"COALESCE({field.sql},{default})")
+	monkeypatch.setitem(sys.modules, "frappe.query_builder", type(sys)("frappe.query_builder"))
+	monkeypatch.setitem(sys.modules, "frappe.query_builder.functions", functions)
+	monkeypatch.setattr(
+		analyze, "frappe", SimpleNamespace(qb=SimpleNamespace(DocType=_FakeTable, update=lambda t: _FakeUpdate(t.name)))
+	)
+
+
+def test_counter_statement_as_a_plain_string_without_the_real_query_builder(monkeypatch):
+	_plain_string_qb(monkeypatch)
+	assert analyze._session_increment_query("fake-doc", "ai_tokens_spent", 42).get_sql() == (
+		"UPDATE `tabOptimus Session` SET `ai_tokens_spent`=COALESCE(`ai_tokens_spent`,0)+42 WHERE `name`='fake-doc'"
+	)
+	assert analyze._session_increment_query("fake-uuid", "ai_refresh_count", 1, by="session_uuid").get_sql() == (
+		"UPDATE `tabOptimus Session` SET `ai_refresh_count`=COALESCE(`ai_refresh_count`,0)+1 "
+		"WHERE `session_uuid`='fake-uuid'"
+	)
+
+
 @pytest.mark.parametrize(
 	"field,n", [("status", 1), ("ai_tokens_spent", -1), ("ai_tokens_spent", True), ("ai_tokens_spent", "3")]
 )

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from optimus import ai_fix, api
+from optimus import ai_fix, api, safe_call
 from optimus import analyze as _analyze
 from optimus.tests.gate_fakes import (
 	DOCNAME,
@@ -36,14 +36,14 @@ def _must_not_run(*args, **kwargs):
 	raise AssertionError("regenerate_reports must not re-run analyze")
 
 
-def _env(monkeypatch, *, status="Ready", user=OWNER, perms=None, fetch_raises=False, backfill_raises=False, conf=None):
+def _env(monkeypatch, *, status="Ready", user=OWNER, perms=None, fetch_raises=False, conf=None):
 	doc = fake_session_doc(actions=[SimpleNamespace(recording_uuid="rec-1"), SimpleNamespace(recording_uuid="")])
 	fake = make_fake_frappe(
 		user=user, sessions={SESSION_UUID: session_row(status=status)},
 		perms=owner_perms() if perms is None else perms, docs={DOCNAME: doc}, conf=conf,
 	)
 	install(monkeypatch, fake)
-	seen = SimpleNamespace(fetched=[], backfilled=[], rendered=[], cleared=[], logged=[], memos=[])
+	seen = SimpleNamespace(fetched=[], rendered=[], cleared=[], logged=[], memos=[])
 
 	def fetch(doc, memo=None):
 		seen.memos.append(memo)
@@ -52,17 +52,11 @@ def _env(monkeypatch, *, status="Ready", user=OWNER, perms=None, fetch_raises=Fa
 		seen.fetched.append([a.recording_uuid for a in doc.actions if a.recording_uuid])
 		return [{"uuid": "rec-1"}]
 
-	def backfill(d):
-		if backfill_raises:
-			raise RuntimeError("llm down")
-		seen.backfilled.append(d.name)
-
 	install_module(monkeypatch, "optimus.analyze", SimpleNamespace(
 		_run_ai_step=_analyze._run_ai_step,
 		_fetch_recordings=_must_not_run,
 		load_recordings_light=fetch,
 		_load_recordings_bundle=lambda d: None,
-		_backfill_ai_suggestions=backfill,
 		_render_and_attach_reports=lambda name, recs: seen.rendered.append((name, len(recs))),
 	))
 	install_module(monkeypatch, "optimus.pdf_export", SimpleNamespace(clear_cached_pdf=lambda u: seen.cleared.append(u)))
@@ -89,7 +83,6 @@ def test_render_session_report_is_render_only_by_default(monkeypatch):
 	out = api._render_session_report(DOCNAME)
 	assert out == {"regenerated": True, "recordings_available": 1, "actions_total": 2}
 	assert seen.fetched == [["rec-1"]]
-	assert seen.backfilled == []
 	assert seen.rendered == [(DOCNAME, 1)]
 	assert seen.cleared == [SESSION_UUID]
 
@@ -113,7 +106,7 @@ def test_render_helper_no_longer_accepts_an_ai_side_effect(monkeypatch):
 	_, seen = _env(monkeypatch)
 	with pytest.raises(TypeError):
 		api._render_session_report(DOCNAME, ai_backfill=True)
-	assert seen.backfilled == seen.rendered == []
+	assert seen.rendered == []
 
 
 def test_expired_recordings_render_with_an_empty_list(monkeypatch):
@@ -124,17 +117,10 @@ def test_expired_recordings_render_with_an_empty_list(monkeypatch):
 	assert seen.logged == [("optimus regenerate_reports fetch", "RuntimeError", None)]
 
 
-def test_backfill_failure_still_renders(monkeypatch):
-	_, seen = _env(monkeypatch, backfill_raises=True)
-	api._render_session_report(DOCNAME)
-	assert seen.rendered == [(DOCNAME, 1)]
-	assert seen.logged == [] and seen.backfilled == []
-
-
-def test_rerender_after_ai_success_never_backfills(monkeypatch):
+def test_rerender_after_ai_success_renders_once(monkeypatch):
 	_, seen = _env(monkeypatch)
 	assert api._rerender_after_ai(_ref()) is True
-	assert seen.backfilled == [] and seen.rendered == [(DOCNAME, 1)]
+	assert seen.rendered == [(DOCNAME, 1)]
 
 
 def test_rerender_after_ai_reports_failure_instead_of_raising(monkeypatch):
@@ -156,8 +142,52 @@ def test_regenerate_reports_never_spends_tokens(monkeypatch):
 		"regenerated": True, "session_uuid": SESSION_UUID, "docname": DOCNAME,
 		"recordings_available": 1, "actions_total": 2,
 	}
-	assert seen.backfilled == []
 	assert fake.spies.enqueue == []
+
+
+def _provider_trap(monkeypatch):
+	"""Make every way to reach the AI provider raise: the two suggestion entry points, the
+	refresh engine, and the HTTP post itself."""
+	import requests
+
+	from optimus import analyze as analyze_module
+
+	def trap(*args, **kwargs):
+		raise AssertionError("regenerate reports must not reach the AI provider")
+
+	for owner, name in (
+		(ai_fix, "suggest_fix"), (ai_fix, "humanize_steps"), (ai_fix, "_http_post"), (requests, "post"),
+		(analyze_module, "_run_ai_backfill"), (api, "_humanize_steps_core"),
+	):
+		monkeypatch.setattr(owner, name, trap, raising=False)
+
+
+@pytest.mark.parametrize("status", ["Ready", "Failed"])
+def test_regenerate_reports_never_reaches_the_ai_provider(monkeypatch, status):
+	_, seen = _env(monkeypatch, status=status)
+	_provider_trap(monkeypatch)
+	out = api.regenerate_reports(session_uuid=SESSION_UUID)
+	assert out["regenerated"] is True and seen.rendered == [(DOCNAME, 1)]
+
+
+def test_a_phase_2_rerender_never_reaches_the_ai_provider(monkeypatch):
+	fake, seen = _env(monkeypatch)
+	_provider_trap(monkeypatch)
+	from optimus.line_profile import analyzer as lp_analyzer
+
+	monkeypatch.setattr(lp_analyzer, "frappe", fake)
+	assert lp_analyzer._regenerate_parent_reports(SESSION_UUID) is True
+	assert seen.rendered == [(DOCNAME, 1)]
+
+
+def test_the_provider_trap_is_armed(monkeypatch):
+	"""Guards the trap itself: a call to any trapped entry point raises."""
+	import requests
+
+	_provider_trap(monkeypatch)
+	for call in (ai_fix.suggest_fix, ai_fix.humanize_steps, requests.post, ai_fix._http_post):
+		with pytest.raises(AssertionError):
+			call()
 
 
 def test_regenerate_reports_allows_failed_sessions(monkeypatch):
@@ -222,7 +252,8 @@ class _JobTimeout(Exception):
 @pytest.mark.parametrize("stage", ["fetch", "pdf", "render", "rollback"])
 def test_report_helpers_propagate_job_timeouts_without_the_failed_frames(monkeypatch, stage):
 	fake, seen = _env(monkeypatch)
-	monkeypatch.setattr(ai_fix, "_job_timeout_types", lambda: (_JobTimeout,))
+	# the one source every guard reads (ai_fix._job_timeout_types delegates to it)
+	monkeypatch.setattr(safe_call, "job_timeout_types", lambda: (_JobTimeout,))
 	original = _JobTimeout("job expired")
 
 	def interrupted(*args, **kwargs):

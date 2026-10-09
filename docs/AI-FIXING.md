@@ -333,7 +333,7 @@ The list is empty by default. The exclusion list is **additive**: types not list
 
 ### 5.2 Errors, Refresh AI suggestions and the analyze-time step
 
-`ai_fix.AiFixError` carries a `kind`: `config` (Optimus Settings cannot serve any call: AI off, no model, key or Base URL, an unknown provider, a context window too small for any Optimus prompt), `context` (this one prompt did not fit the model's context window: Optimus refused it before sending, or the provider rejected it), `not_eligible` (the gate or the per-type exclusion refused the finding and no request was built), `auth`, `quota`, `rate_limited`, `not_found`, `server` and `bad_request` (an HTTP error status, classified as described under "Request failures and retries" in section 6), `refused` (the provider's content moderation refused this prompt: an HTTP 400 or 403 whose reply says the input was flagged, or Azure's `content_filter`), `transport`, `timeout`, `bad_response`, `internal` (an unexpected error while sending or processing) and `unknown`. **Only `not_eligible` counts as a skip** (`AI_SKIP_KINDS`); every other kind, `config` and `context` included, is a failure that is logged to the Error Log and counted.
+`ai_fix.AiFixError` carries a `kind`: `config` (Optimus Settings cannot serve any call: AI off, no model, key or Base URL, an unknown provider, a context window too small for any Optimus prompt), `context` (this one prompt did not fit the model's context window: Optimus refused it before sending, or the provider rejected it), `not_eligible` (the gate or the per-type exclusion refused the finding and no request was built), `auth`, `quota`, `rate_limited`, `not_found`, `server` and `bad_request` (an HTTP error status, classified as described in section 5.3, "Request failures and retries"), `refused` (the provider's content moderation refused this prompt: an HTTP 400 or 403 whose reply says the input was flagged, or Azure's `content_filter`), `transport`, `timeout`, `bad_response`, `internal` (an unexpected error while sending or processing) and `unknown`. **Only `not_eligible` counts as a skip** (`AI_SKIP_KINDS`); every other kind, `config` and `context` included, is a failure that is logged to the Error Log and counted.
 
 `AiFixError.fatal` is True for `auth`, `quota`, `not_found` and `config` (`AI_FATAL_KINDS`): the next call fails the same way until the operator changes the key, the credit, the model or Base URL, or the settings. It is the only list of such kinds, so code that stops a run early on a failure reads `fatal` and keeps no list of its own. `context` and `refused` are not fatal: one prompt that does not fit, or that moderation refuses, says nothing about the next finding's prompt. A 403 counts as `auth` unless its reply is such a moderation refusal. `rate_limited`, `server`, `transport`, `timeout`, `bad_request`, `bad_response`, `internal` and `unknown` are not fatal either.
 
@@ -354,6 +354,23 @@ Order: missing, outdated, then current. Inside each, severity (High first, a bla
 **Token spend and refresh count.** A session's AI Tokens Spent (`ai_tokens_spent`) and AI Refresh Count (`ai_refresh_count`) change only through one atomic SQL increment each (`analyze._increment_session_counter`), which never touches `modified`. Every provider call that reports usage is counted once, into one session. A call without explicit attribution (analyze, Refresh AI suggestions, the Steps to Reproduce rewrite) is charged as its reply arrives to the session the worker is processing (`ai_fix._record_session_spend`, keyed by the spend marker), whether or not its caller asked for the usage. A caller that passes `session_uuid` or `docname` to `suggest_fix` or `humanize_steps` is never charged there: it adds each call's tokens to its own session once, with `analyze._add_ai_spend`, from the result's `tokens` or a failure's `usage`. An increment runs in a savepoint inside the caller's transaction and never commits by itself. If it fails, only the increment is rolled back, one Error Log row titled `optimus ai spend` (or `optimus ai refresh count`) records the session, the field and the amount, and the answer that was paid for is still saved; a lock error on the increment therefore drops that call's tokens, and the Error Log row records them. If the database has already rolled the whole transaction back (a MariaDB deadlock), the error is raised again to a caller that records spend itself, so it can retry its short write; a per-call charge during analyze or Refresh keeps the reply instead, since it has no write of its own to retry. Refresh AI suggestions counts itself with one increment that it commits before calling the provider. Any save of the session (analyze, Phase 2, the Desk form) keeps the stored counters, read with `for_update` as the save starts, so a save never writes back an older count.
 
 The analyze-time step touches the single-flight flag (the Redis key that stops two analyses from overlapping) before every AI call, and only while it still holds that flag, so it never takes over another session's flag. Each call's timeout is capped at 240 seconds, below the flag's 300-second lifetime, so two heartbeats are never further apart than the flag lives. Every check reads the flag from Redis, not from the job's `frappe.local.cache` (that cache lives for the whole RQ job, so a cached holder goes stale): the flag is taken only when free with one atomic `SET NX EX`, a heartbeat renews it with `EXPIRE` (a session that already held the flag starts only if that renewal confirms it still does), and a run releases it only while Redis still names it the holder. A heartbeat that fails or finds another session's flag writes one `optimus` log line per run at ERROR, and the janitor's note on a stuck Analyzing session names a lapsed analyze heartbeat as a possible cause.
+
+### 5.3 Request failures and retries
+
+Optimus classifies authentication, missing endpoint/model, exhausted quota, rate limit, context, configuration, server, transport, timeout and malformed response failures separately (section 5.2 lists the kinds and which are fatal; the runbook table in section 6.5 says what to do for each). A context-limit rejection is recognised from the wording of OpenAI, Anthropic, Moonshot, llama.cpp and vLLM replies and from the provider's `context_length_exceeded` or `exceed_context_size_error` code; Moonshot's `exceeded_current_quota_error` (a spent balance or a suspended account) is a quota failure, not a rate limit. A validation rejection (HTTP 400 or 422) may trigger removal of `temperature` when the reply names it, or replacement of `max_tokens` with `max_completion_tokens` when the reply says `max_tokens` itself is not supported, or the provider's `unsupported_parameter` code comes with a reply that names `max_tokens` (a value error such as "max_tokens is too large" is not retried), each at most once. There are at most three validation attempts for this parameter adaptation; each can follow the permitted redirects. A guardrail re-ask starts from the parameters the first call ended with, so it does not repeat a rejected request; nothing is remembered from one suggestion to the next. Context-limit and quota failures never use it; network failures are not automatically retried.
+
+Parameter retries and permitted redirects use the remaining request budget. Each connection attempt is limited to 10 seconds, or the remaining budget when shorter. The read timeout uses the remaining budget. The HTTP library's read timeout measures socket inactivity, not a strict overall wall-clock limit; background worker limits remain necessary. A guardrail repair request also uses the remaining completion budget. Reasoning models retain the same provider-aware output cap. Leading inline thinking blocks are removed (at most three, and only at the start of the reply), and unfinished thinking is an unusable response. Reported tokens stay attached to a failure after a billed response, including a validation failure.
+
+**The Error Log row of a failed call.** Search the Error Log for the title `optimus ai_fix`: that is the title of every row the HTTP layer writes for a provider failure, whichever step asked. The step that asked (`optimus ai backfill` for Refresh AI suggestions, `optimus ai auto-suggest` for analyze) and its finding or session are added inside that row, not as a second row. A failure that happens after the reply arrived (an answer with no text or only reasoning, an unexpected error while processing it) is logged by the step itself, under the step's own title (`optimus ai backfill`, `optimus ai auto-suggest`), so search for `optimus ai` to see both. The row opens with the lines that tell you what to do, then the technical detail:
+
+- `kind=` is the failure kind (section 5.2) and `fatal=` says whether the next call fails the same way until you act (`True`) or the failure is about this call (`False`). `hint=` is one fixed sentence for the kind; the table in section 6.5 gives the full action.
+- `provider=`, `where=`, `status=` and, when the provider sent a code, `provider_error=`. Never the reply body, the prompt or the key.
+- `tokens=` appears when the failed call was still billed (the provider answered, and the reply was then unusable); these tokens are added to the session's AI Tokens Spent.
+- `attempts=` and `dropped=` appear on the failure of a call that went through the parameter retries: the requests it took (1 to 3) and the parameters changed (`temperature` removed, `max_tokens` renamed to `max_completion_tokens`, or `none`). A model that needs a changed parameter on every call shows `attempts=2` or `3` and takes that many times as long per call. A call that succeeds after a change writes no row, so there the change shows only as latency.
+
+Regenerate Reports renders stored data and saved AI suggestions without calling the AI provider and without re-running the analyzer. Refresh AI suggestions (available when the session is Ready) remains the action for new AI answers. Both report regeneration and step humanization can load the saved recording JSON without deserializing its Python trees or sidecars. This release supplies helpers for the upcoming background engine; it does not yet move optional AI work out of analysis or make refresh asynchronous.
+
+**Phase 2 and AI suggestions.** A Phase 2 (line-profile) run adds Hot Line findings to the session, then re-renders the report from stored data. It no longer asks the AI for fixes for those new findings (an earlier release did, through the Regenerate Reports path, when the AI suggestions default was on). Run AI > Refresh AI suggestions on the Ready session to fill them in. If the re-render itself fails or is interrupted, the run stays Ready with the warning "The report re-render did not finish. Use Regenerate Reports on this session to refresh it."; the failure is in the Error Log under `phase 2 re-render failed`.
 
 ---
 
@@ -422,53 +439,33 @@ Default `ai_request_timeout_seconds = 60` is fine for hosted providers (Anthropi
 
 ---
 
-### Request failures and retries
-
-Optimus classifies authentication, missing endpoint/model, exhausted quota,
-rate limit, context, configuration, server, transport, timeout and malformed
-response failures separately (section 5.2 lists the kinds and which are
-fatal). A context-limit rejection is recognised from the wording of OpenAI,
-Anthropic, Moonshot, llama.cpp and vLLM replies and from the provider's
-`context_length_exceeded` or `exceed_context_size_error` code; Moonshot's
-`exceeded_current_quota_error` (a spent balance or a suspended account) is a
-quota failure, not a rate limit. Error Logs retain status and validated error
-codes, never the provider response body. A validation rejection (HTTP 400 or
-422) may trigger removal of `temperature` when the reply names it, or
-replacement of `max_tokens` with `max_completion_tokens` when the reply says
-`max_tokens` itself is not supported, or the provider's `unsupported_parameter`
-code comes with a reply that names `max_tokens` (a value error such as
-"max_tokens is too large" is not retried), each at most once. There are at most three validation attempts for
-this parameter adaptation; each can follow the permitted redirects. A guardrail re-ask
-starts from the parameters the first call ended with, so it does not repeat a
-rejected request; nothing is remembered from one suggestion to the next.
-Context-limit and quota failures never use it;
-network failures are not automatically retried.
-
-Parameter retries and permitted redirects use the remaining request budget.
-Each connection attempt is limited to 10 seconds, or the remaining budget
-when shorter. The read timeout uses the remaining budget. The HTTP library's
-read timeout measures socket inactivity, not a strict overall wall-clock
-limit; background worker limits remain necessary. A guardrail repair request
-also uses the remaining completion budget. Reasoning models retain the same
-provider-aware output cap. Leading inline thinking blocks are removed, and
-unfinished thinking is an unusable response. Reported tokens stay attached to
-a failure after a billed response, including a validation failure.
-
-Regenerate Reports renders stored data and saved AI suggestions without
-calling the provider. Refresh AI suggestions remains the action for new AI
-answers. Both report regeneration and step humanization can load the saved
-recording JSON without deserializing its Python trees or sidecars. This
-release supplies helpers for the upcoming background engine; it does not yet
-move optional AI work out of analysis or make refresh asynchronous.
-
 ### 6.5 Troubleshooting
 
-- **"The model's context window (N tokens) is too small for the Optimus prompt."** The window cannot hold the system prompt plus a minimal answer (about 3,100 tokens). Raise the server's window and the Context window (tokens) setting together.
+- **"The model's context window (N tokens) is too small for the Optimus prompt."** The window cannot hold the system prompt plus a minimal answer (about 2,760 tokens for a fix suggestion, 2,168 for the Steps to Reproduce rewrite). Raise the server's window and the Context window (tokens) setting together.
 - **A suggestion ends with "the model saw only part of the prompt".** The server reported far fewer prompt tokens than Optimus sent, which is what Ollama does when its real `num_ctx` is smaller than the prompt (it drops tokens silently). Set `OLLAMA_CONTEXT_LENGTH` (or `num_ctx`) and the Context window (tokens) setting to the same value.
 - **"the suggested code was removed because it was cut off at the output limit".** The answer hit its token budget. A larger context window raises the budget (up to 1,024 tokens).
 - **"the suggested code was removed because it broke these Frappe rules: ..."** The model's code broke a block rule it was told about and the one follow-up turn did not fix it; the note quotes each rule (the first two, then "And N more"; section 4.1 lists them all). Review the diagnosis and treat the fix as a direction.
 - **"change the suggested code before you apply it: ..."** The code is kept, but it breaks a convention the profiler only advises on (a dynamic import, index advice led by a metadata column). Apply the listed changes when you copy the code.
 - **"The prompt did not fit the model's context window."** One prompt was too large for the window: Optimus refused it before sending, or the provider rejected it (its reply follows the message). On your own model server, raise its window and the Context window (tokens) setting together; on a hosted provider, choose a model with a larger window. It is a `context` failure: counted and logged, not fatal, so the other findings are still asked.
+
+**Error Log rows from the AI: what `kind=` means and what to do.** Every Error Log row for a failed AI call opens with `kind=`, `fatal=` and `hint=` (section 5.3). `fatal` is `yes` when the next call fails the same way until you act, so a run that stops early stops on these. `not_eligible` is a skip, not an error, and writes no row.
+
+| `kind=` | Fatal | Symptom | What to do |
+| --- | --- | --- | --- |
+| `kind=config` | yes | Optimus Settings cannot serve any AI call: AI is off, no Model, key or Base URL, an unknown provider, or a context window too small for any Optimus prompt. | Open Optimus Settings > AI Fix Suggestions, fix the setting the message names, then run AI > Refresh AI suggestions. |
+| `kind=auth` | yes | The provider refused the API key (HTTP 401, or a 403 that is not a moderation refusal). | Replace the key in Optimus Settings with one that belongs to the selected provider. Every call fails until you do. |
+| `kind=quota` | yes | The account has no credit or quota left (HTTP 402; a 429 with `insufficient_quota`, `billing_not_active` or Moonshot's `exceeded_current_quota_error`; "credit balance is too low"). | Add credit or raise the limit at the provider, then Refresh AI suggestions. |
+| `kind=not_found` | yes | The Model or the Base URL does not exist at the provider (HTTP 404). | Check the Model name and the Base URL in Optimus Settings. For Azure, the Model is the deployment name. |
+| `kind=context` | no | One prompt did not fit the model's context window, refused before sending or rejected by the provider. The other findings are still asked. | Hosted provider: choose a Model with a larger window. Your own model server: raise its window (Ollama: `OLLAMA_CONTEXT_LENGTH` or `num_ctx`) and the Context window (tokens) setting together. |
+| `kind=refused` | no | The provider's content moderation refused this one prompt (a 400 or 403 whose reply says the input was flagged, or Azure's `content_filter`). | Nothing to change in the settings; the finding gets no AI suggestion. Add its type to Excluded finding types if it keeps happening. |
+| `kind=rate_limited` | no | The provider is throttling requests (HTTP 429 for request or token rate). | Wait a few minutes and Refresh AI suggestions again; it picks up the findings still missing. |
+| `kind=server` | no | The provider had a server error (HTTP 5xx, or 529 overloaded). | Try again in a few minutes. |
+| `kind=bad_request` | no | The provider rejected the request (HTTP 400 or 422) for a reason that is not context, quota or moderation, after the parameter retries. | Check the Model and the Base URL. `attempts=` and `dropped=` in the row show what Optimus already tried. |
+| `kind=transport` | no | The provider could not be reached: DNS, refused connection, TLS, or a connect timeout (connecting is capped at 10 seconds). | Check the network, proxy and Base URL from the server that runs the worker. |
+| `kind=timeout` | no | The provider did not answer within the request timeout. | Raise Request timeout (seconds) in Optimus Settings (section 6.4 suggests values), or try again. |
+| `kind=bad_response` | no | The provider answered, but the reply is unusable: not JSON, no text, only reasoning, or a redirect instead of a reply. `tokens=` shows what was billed. | A redirect: set the Base URL to the final URL it redirects to. Otherwise try again, use a non-reasoning model and check that the Base URL is the provider's API address. |
+| `kind=internal` | no | An unexpected error in Optimus while sending the request or processing the reply. The row lists `file:line:function` frames, never what the error said. | Send the row (it holds no reply text and no key) to the Optimus maintainers. |
+| `kind=unknown` | no | A failure no rule classified. | Read the message in the row and the provider's reply it quotes. |
 
 Signals from index advice, the Hot Line gate and Refresh AI suggestions. The `optimus` lines are in `logs/optimus.log`; they are written at ERROR because Frappe's production loggers drop anything lower. Each says why in one place, so you can answer without a debugger:
 
@@ -480,7 +477,7 @@ Signals from index advice, the Hot Line gate and Refresh AI suggestions. The `op
 | Error Log title `ensure_indexes: <index> was not created (OperationalError)` with error 1205 (lock wait timeout), or a line `optimus_indexes: ensure_indexes: <index> was not created (<ErrorType>) on <DocType>; the Error Log row could not be written either` in the `bench migrate` output | The index build waited the full 300 s for a table lock (a busy table) and gave up; the printed line means the Error Log write failed as well, so the console is the only record. | Run `bench migrate` again in a quiet window (no traffic on that table). |
 | Error Log title `ensure_indexes: <index> skipped on <db> (the entry is for <other db>) on <DocType>` | The entry is stamped for the other database, so this site skips it by design. One row per entry. | Nothing to do on this site. |
 | A Hot Line finding says "Optimus could not check this Hot Line" (`GATE_CHECK_FAILED_NOTE`), with `optimus: hot-line gate failed: <ErrorType>` in the log | The check that decides whether the AI may see the line raised, so the line was not sent (fail closed). | Look at what the line calls and how often it runs. If it keeps happening, send the log line to the Optimus maintainers. |
-| Refresh AI suggestions toast `failed` | The AI call failed; old suggestions were kept. | Open the Error Log and filter on the title `optimus ai backfill`; section 5.2 lists the error kinds. |
+| Refresh AI suggestions toast `failed` | The AI call failed; old suggestions were kept. | Open the Error Log and search for the title `optimus ai_fix` (and `optimus ai backfill`, for a failure while processing a reply). The row's `kind=` and `hint=` say what to do; see the runbook table below. |
 | Refresh toast `gated` ("were not sent to the AI") | Those findings get Optimus's own advice or a note in the report, not an AI suggestion (a gated Hot Line, a Framework N+1, an old Redundant Call). Index findings are not counted. | Nothing to fix; each finding says why. |
 | Refresh toast `excluded` | The finding's type is listed under Excluded finding types in Optimus Settings. | Remove the type from that list to let the AI see it (section 5.1). |
 | A run stays in Analyzing or becomes Failed with "its analyze heartbeat lapsed" | The analyze job stopped renewing its single-flight flag (timeout, crash or a lost Redis key); the janitor then marked the run Failed. | Look for `optimus` heartbeat lines in `logs/optimus.log`, then retry from a console: `optimus.analyze.run('<session_uuid>')`. |

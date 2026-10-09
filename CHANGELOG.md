@@ -45,7 +45,33 @@ versions may contain breaking changes see migration notes below).
   rejected request. Nothing is kept from one suggestion to the next.
 - Regenerate Reports uses stored answers and does not call the model. Report
   regeneration and step humanization read recording JSON without loading
-  Python trees or sidecars. Use Refresh AI suggestions for new answers.
+  Python trees or sidecars. Use Refresh AI suggestions for new answers. Its
+  confirmation now says so: it does not re-run the analyzer and does not call
+  the AI provider, saved AI suggestions are kept, and a Ready session is
+  pointed at AI > Refresh AI suggestions (a Failed session is not, because the
+  button is not shown there). README and AI-FIXING say the same.
+- Phase 2 no longer asks the AI for fixes for the Hot Line findings it adds
+  (its report re-render used to fill missing suggestions when AI suggestions
+  were on by default). Run AI > Refresh AI suggestions on the Ready session to
+  fill them in; the background refresh will queue a missing-only refresh for
+  it.
+- The Error Log row of a failed AI call opens with `kind=`, `fatal=` and a
+  short fixed `hint=` for the kind, adds `tokens=` when the failed call was
+  billed, and, for a call that went through the parameter retries, `attempts=`
+  and `dropped=` (the parameters changed). The warnings and toasts that said to
+  search the Error Log for `optimus ai backfill` or `optimus ai auto-suggest`
+  now name `optimus ai_fix`, the title the HTTP layer gives every provider
+  failure (the step's title is inside the row). AI-FIXING has a section 5.3
+  for these rows and a runbook table in 6.5: every kind, whether it is fatal,
+  the symptom and the action. The reply body is never in a row.
+- The model-window figures in the AI-FIXING troubleshooting entry are
+  current: about 2,760 tokens for a fix suggestion and 2,168 for the Steps to
+  Reproduce rewrite.
+- Internal: the recording readers and Phase 2's re-render use the one
+  capture-then-log helper (`analyze._run_ai_step`) and the shared interrupt
+  guard (`safe_call.InterruptGuard`); an RQ job timeout in a recording read now
+  writes its Error Log row before it stops the job. The unused
+  `_backfill_ai_suggestions` is removed.
 - One selection of the findings an AI refresh asks about
   (`analyze.eligible_findings`; `_run_ai_backfill` now uses it, so there is no
   second copy). A stored answer is `missing` (nothing stored), `current` (an
@@ -76,8 +102,11 @@ versions may contain breaking changes see migration notes below).
   re-render, and shares the bundle shape reader with the full loader, so the
   older bare uuid map is read the same way in both.
 - Add explicit session
-  attribution, and portable atomic usage/counter helpers for background work.
-  A counter increment runs in a savepoint inside the caller's transaction: a
+  attribution (`session_uuid` / `docname` on `suggest_fix` and `humanize_steps`),
+  and portable atomic usage/counter helpers for background work. They are ready
+  but not yet passed by any caller: nothing in this release attributes a call
+  explicitly, so every call is still charged to the session being analyzed or
+  refreshed. A counter increment runs in a savepoint inside the caller's transaction: a
   failed increment is rolled back alone and logged, and the answer it paid for
   is kept; that call's tokens are then missing and the Error Log row records
   them. It is raised only when the whole transaction is already gone, and only
@@ -92,6 +121,13 @@ versions may contain breaking changes see migration notes below).
 
 ### Fixed
 
+- A Phase 2 run that was saved as Ready is never marked Failed afterwards. If
+  the report re-render that follows fails, or the job is interrupted during
+  it, the run stays Ready with the warning "The report re-render did not
+  finish. Use Regenerate Reports on this session to refresh it."; the job
+  timeout still stops the job, and the run's Redis state is dropped before the
+  re-render instead of after it. A session deleted while its Phase 2 run was
+  being analyzed leaves one line in the `optimus` log instead of nothing.
 - Keep reported token usage when a response is unusable or later validation
   fails. Preserve fresh RQ timeouts and the existing failure-log marker.
 - Keep recording-read failure logs outside exception handlers, and propagate

@@ -112,6 +112,42 @@ AI_SKIP_KINDS: frozenset[str] = frozenset({"not_eligible"})
 # refuses, says nothing about the next finding's prompt.
 AI_FATAL_KINDS: frozenset[str] = frozenset({"auth", "quota", "not_found", "config"})
 
+# One short, fixed line per kind for the operator reading an Error Log row (``hint=``). Plain
+# text: it is stored in the row, never translated, and holds nothing from the reply. The runbook
+# in docs/AI-FIXING.md (section 6.5) lists the same kinds with the longer action.
+KIND_HINTS: dict[str, str] = {
+	"config": "Optimus Settings cannot serve any AI call. Check AI Fix Suggestions in Optimus Settings.",
+	"context": "This prompt did not fit the model's context window. Use a model with a larger window.",
+	"not_eligible": "The finding was refused before any request. Not an error.",
+	"auth": "The provider refused the API key. Check the key in Optimus Settings.",
+	"quota": "The provider account is out of credit or quota. Top it up, then refresh.",
+	"rate_limited": "The provider is rate limiting. Wait a few minutes and refresh again.",
+	"not_found": "The Model or Base URL does not exist at the provider. Check both in Optimus Settings.",
+	"server": "The provider had a server error. Try again in a few minutes.",
+	"bad_request": "The provider rejected the request. Check the Model and the Base URL.",
+	"refused": "The provider's content moderation refused this prompt. Other findings are not affected.",
+	"transport": "The provider could not be reached. Check this server's network, proxy and the Base URL.",
+	"timeout": "The provider did not answer in time. Raise Request timeout (seconds) or try again.",
+	"bad_response": "The provider's reply was not usable. Try again; check the Base URL and Model.",
+	"internal": "Unexpected error while sending or processing. The frames below show where.",
+	"unknown": "Unclassified failure. Read the message below.",
+}
+
+
+def _failure_context(exc: BaseException | None) -> dict[str, Any]:
+	"""The ``k=v`` lines an Error Log row for ``exc`` carries when it is an ``AiFixError``:
+	``kind``, ``fatal``, the kind's fixed ``hint`` and, when the failed call was billed,
+	``tokens``. Nothing from the message or the reply. ``{}`` for any other exception."""
+	if not isinstance(exc, AiFixError):
+		return {}
+	context: dict[str, Any] = {
+		"kind": exc.kind, "fatal": exc.fatal, "hint": KIND_HINTS.get(exc.kind, KIND_HINTS["unknown"]),
+	}
+	tokens = (exc.usage or {}).get("total_tokens")
+	if type(tokens) is int and tokens > 0:
+		context["tokens"] = tokens
+	return context
+
 
 # Findings that carry enough code / SQL context for the LLM to reason about
 # a concrete fix. Infra / frontend / "function not invoked" findings are
@@ -196,8 +232,9 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 	# TEMPORARILY DISABLED until Aerele billing + the managed LLM gateway
 	# are production-ready. To re-enable: uncomment this entry AND add
 	# "Aerele" back to the ai_provider Select options (plus its two
-	# descriptions) in optimus_settings.json. The _session_call_metadata
-	# wiring further down is left intact, ready to use.
+	# descriptions) in optimus_settings.json. The session attribution
+	# (``_session_call_metadata``, sent for any provider dict that sets
+	# ``send_session_metadata``) is left intact, ready to use.
 	# "Aerele": {
 	# 	"send_session_metadata": True,
 	# 	"context_tokens": 200000,
@@ -1013,6 +1050,10 @@ def log_ai_failure(
 			else:
 				import frappe
 
+				# what the operator needs first: kind, fatal, hint, tokens (the caller's own
+				# context of the same name wins)
+				for k, v in _failure_context(exc if exc is not None else marks).items():
+					context.setdefault(k, v)
 				lines = [title]
 				try:
 					if session_uuid:
@@ -1310,7 +1351,7 @@ def _mark_logged(exc: BaseException | None, row_name: str | None = None) -> None
 def _log_http_error(
 	provider: str, where: str, status: int | None, detail: str = "",
 	*, exc: BaseException | None = None, provider_error: str = "", auth=None,
-	session_uuid: str | None = None,
+	session_uuid: str | None = None, **extra,
 ) -> None:
 	"""Log one HTTP-layer failure through ``log_ai_failure``: provider, call
 	site, HTTP status, the provider's own error identifier when it sent one
@@ -1325,7 +1366,9 @@ def _log_http_error(
 	caller's own ``log_ai_failure`` for it writes no second row and a failed
 	write still leaves the caller's. ``auth`` (the ``_ApiKeyAuth`` the request
 	was sent with) is what the row is scrubbed of, so logging it reads no key
-	from the database."""
+	from the database. ``extra`` adds more ``k=v`` lines to the row (the parameter ladder's
+	``attempts`` and ``dropped``); the row also carries the failure's ``kind``, ``fatal`` and
+	``hint`` (``log_ai_failure``)."""
 	guard = _InterruptGuard()
 	try:
 		with guard:
@@ -1337,7 +1380,7 @@ def _log_http_error(
 		pass
 	if guard.pending():
 		raise guard.interrupt()
-	context = {"provider": provider, "where": where, "status": status, "detail": detail}
+	context = {"provider": provider, "where": where, "status": status, "detail": detail, **extra}
 	if provider_error:
 		context["provider_error"] = provider_error
 	log_ai_failure("optimus ai_fix", session_uuid=session_uuid, auth=auth, marks=exc, **context)
@@ -1584,6 +1627,7 @@ def _http_post(
 	quiet_statuses: tuple[int, ...] = (),
 	session_uuid: str | None = None,
 	budget: float | None = None,
+	log_extra: dict | None = None,
 ) -> dict:
 	"""POST JSON, return the parsed response dict. Maps transport / HTTP /
 	decode errors to ``AiFixError`` with operator-friendly messages and logs
@@ -1628,6 +1672,9 @@ def _http_post(
 	request is sent from inside an ``except`` block (``test_ai_log_audit.py``
 	rule 4).
 
+	``log_extra`` adds ``k=v`` lines to the Error Log row of a failure of this post (the ladder's
+	``attempts`` and ``dropped``).
+
 	``timeout`` is this request's time budget, shared by its redirect hops.
 	``budget`` is the whole call's budget a timeout message names (default:
 	``timeout``): the parameter ladder passes what it was given while each of
@@ -1646,7 +1693,7 @@ def _http_post(
 		remaining = deadline - time.monotonic()
 		if remaining <= 0:
 			failure = _timeout_failure(budget)
-			_log_http_error(provider, where, None, "timeout", exc=failure, auth=auth, session_uuid=session_uuid)
+			_log_http_error(provider, where, None, "timeout", exc=failure, auth=auth, session_uuid=session_uuid, **(log_extra or {}))
 			raise failure
 		failed_kind: str | None = None
 		error_name = ""
@@ -1692,7 +1739,7 @@ def _http_post(
 			if failed_kind == "internal":
 				# Where it happened, never what it said: plain frames, no message, no locals.
 				detail = error_name + "".join(f"\n  {frame}" for frame in unexpected_frames)
-			_log_http_error(provider, where, None, detail, exc=failure, auth=auth, session_uuid=session_uuid)
+			_log_http_error(provider, where, None, detail, exc=failure, auth=auth, session_uuid=session_uuid, **(log_extra or {}))
 			raise failure
 		if resp.status_code not in (307, 308) or redirects >= _MAX_REDIRECTS:
 			break
@@ -1734,7 +1781,7 @@ def _http_post(
 		# scrubbed machine code so its terminal log keeps the same context.
 		failure._optimus_provider_error = provider_error
 		if status not in quiet_statuses:
-			_log_http_error(provider, where, status, detail, exc=failure, provider_error=provider_error, auth=auth, session_uuid=session_uuid)
+			_log_http_error(provider, where, status, detail, exc=failure, provider_error=provider_error, auth=auth, session_uuid=session_uuid, **(log_extra or {}))
 		raise failure
 
 	data = None
@@ -1762,7 +1809,7 @@ def _http_post(
 			status_code=status, kind="bad_response",
 		)
 	if failure is not None:
-		_log_http_error(provider, where, status, detail, exc=failure, auth=auth, session_uuid=session_uuid)
+		_log_http_error(provider, where, status, detail, exc=failure, auth=auth, session_uuid=session_uuid, **(log_extra or {}))
 		raise failure
 	return data
 
@@ -2086,7 +2133,9 @@ def _adapt_body(body: dict, rung: str) -> None:
 def _post_with_param_ladder(
 	url, headers, body, *, auth=None, timeout=None, session_uuid=None, adapted=None, budget=None,
 ) -> dict:
-	"""At most three posts, sharing one budget; only the final rejection is logged.
+	"""At most three posts, sharing one budget; only the final rejection is logged, with
+	``attempts`` (the posts made) and ``dropped`` (the parameters changed, comma-separated, or
+	``none``: ``temperature`` removed, ``max_tokens`` renamed) in its Error Log row.
 	``timeout`` is the time these posts share; ``budget`` is the whole call's budget
 	a timeout message names (default: ``timeout``), so a re-ask that only had what
 	was left of it still names the configured budget.
@@ -2100,20 +2149,28 @@ def _post_with_param_ladder(
 	budget = budget or timeout
 	deadline = time.monotonic() + timeout
 	body = dict(body)
+	changed: list[str] = []
 	for rung in adapted or ():
 		_adapt_body(body, rung)
+		changed.append(rung)
 	for _attempt in range(3):
+		# what an Error Log row for this post says about the ladder: the posts made so far
+		# (this one included) and the parameters changed before it, "none" when there are none
+		trail = {"attempts": _attempt + 1, "dropped": ",".join(changed) or "none"}
 		remaining = deadline - time.monotonic()
 		if remaining <= 0:
 			failure = _timeout_failure(budget)
-			_log_http_error("openai", "chat/completions", None, "timeout", exc=failure, auth=auth, session_uuid=session_uuid)
+			_log_http_error(
+				"openai", "chat/completions", None, "timeout", exc=failure, auth=auth, session_uuid=session_uuid,
+				**{**trail, "attempts": _attempt},
+			)
 			raise failure
 		failure = None
 		try:
 			return _http_post(
 				url, headers, body, provider="openai", where="chat/completions",
 				auth=auth, timeout=remaining, quiet_statuses=_PARAM_RETRY_STATUSES, session_uuid=session_uuid,
-				budget=budget,
+				budget=budget, log_extra=trail,
 			)
 		except AiFixError as exc:
 			failure = exc
@@ -2123,10 +2180,11 @@ def _post_with_param_ladder(
 				_log_http_error(
 					"openai", "chat/completions", failure.status_code, exc=failure,
 					provider_error=getattr(failure, "_optimus_provider_error", ""),
-					auth=auth, session_uuid=session_uuid,
+					auth=auth, session_uuid=session_uuid, **trail,
 				)
 			raise failure
 		_adapt_body(body, rung)
+		changed.append(rung)
 		if adapted is not None:
 			adapted.append(rung)
 		failure = None

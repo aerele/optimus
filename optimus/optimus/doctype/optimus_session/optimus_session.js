@@ -256,7 +256,7 @@ function _refill_ai_call(frm) {
 			if (msg) frappe.show_alert({ message: msg, indicator: indicator });
 			if (failed) {
 				frappe.show_alert({
-					message: __("{0} call(s) failed, old suggestions kept (see Error Log, title optimus ai backfill).", [failed]),
+					message: __("{0} call(s) failed, old suggestions kept (see Error Log, titles optimus ai_fix or optimus ai backfill).", [failed]),
 					indicator: "red",
 				});
 			}
@@ -907,10 +907,17 @@ function render_regenerate_report_button(frm) {
 	if (!["Ready", "Failed"].includes(frm.doc.status)) return;
 
 	frm.add_custom_button(__("Regenerate Reports"), () => {
+		let message = __(
+			"Re-render the report from stored session data. This does not re-run the analyzer and does not call the AI provider; saved AI suggestions are kept as they are."
+		);
+		// A Failed session has no Refresh AI suggestions button, so only a Ready one is pointed at it.
+		if (frm.doc.status === "Ready") {
+			message += " " + __(
+				"For new or updated AI suggestions use AI > Refresh AI suggestions (available when the session is Ready)."
+			);
+		}
 		frappe.confirm(
-			__(
-				"Re-render the HTML report from stored session data. Saved AI suggestions are retained. Use Refresh AI suggestions to request new answers."
-			),
+			message,
 			() => {
 				frappe.call({
 					method: "optimus.api.regenerate_reports",

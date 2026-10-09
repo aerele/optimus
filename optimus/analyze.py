@@ -73,10 +73,10 @@ ANALYZE_PER_ANALYZER_SOFT_CAP_SECONDS = 60
 # provider can't push the analyze job past the RQ 25-min timeout.
 AI_AUTO_SUGGEST_TIME_BUDGET_SECONDS = 240
 
-# Tighter budget for the same backfill done from api.regenerate_reports
-# that runs synchronously inside a web request, so it must stay well under
-# the gunicorn worker timeout (~120s). Anything not done in this window is
-# left for a re-run of Regenerate Reports (or a full Retry Analyze).
+# Time budget of one synchronous AI > Refresh AI suggestions run
+# (api.refill_ai_suggestions, a web request), so it stays well under the
+# gunicorn worker timeout (~120s). Findings not reached in this window are
+# left for another Refresh.
 AI_BACKFILL_TIME_BUDGET_SECONDS = 60
 
 # v0.3.0: persistence size limits for call_tree_json on Optimus Action.
@@ -2248,7 +2248,7 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 	if failures:
 		context.warnings.append(
 			f"AI auto-suggest: {failures} finding(s) couldn't get a suggestion "
-			"(provider error or timeout). See Error Log, title \"optimus ai auto-suggest\"."
+			"(provider error or timeout). See Error Log, titles \"optimus ai_fix\" (provider failures) or \"optimus ai auto-suggest\"."
 		)
 	if skipped_for_time:
 		context.warnings.append(
@@ -2595,10 +2595,8 @@ def _system_timezone_name() -> str | None:
 	"""The site's System Settings timezone through Frappe's own helper
 	(``frappe.utils.get_system_timezone``; v15 and v16 both have it), or ``None`` when it
 	cannot be read. A job timeout raised while reading it escapes fresh."""
-	from optimus.ai_fix import _InterruptGuard
-
 	name = None
-	guard = _InterruptGuard()
+	guard = safe_call.InterruptGuard()
 	try:
 		with guard:
 			from frappe.utils import get_system_timezone
@@ -2790,8 +2788,6 @@ def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 	requests no recordings. Missing or malformed records are omitted; Redis errors fall
 	back to the bundle.
 	"""
-	from optimus.ai_fix import _InterruptGuard, log_ai_failure
-
 	if uuids is None:
 		uuids = [row_get(action, "recording_uuid") for action in (row_get(doc, "actions") or ())]
 	uuids = list(dict.fromkeys(uuid for uuid in uuids if isinstance(uuid, str) and uuid))
@@ -2799,26 +2795,17 @@ def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 		return []
 	memo = {} if memo is None else memo
 	memo_key = ("recordings", row_get(doc, "name"), row_get(doc, "session_uuid"), row_get(doc, "recordings_file"))
-	result, failure = [], None
+	result = []
 	redis_failed = False
+	session_uuid = row_get(doc, "session_uuid")
 	for uuid in uuids:
 		rec = None
-		guard = _InterruptGuard()
-		try:
-			with guard:
-				if not redis_failed:
-					rec = frappe.cache.hget(RECORDER_REQUEST_HASH, uuid)
-		except Exception as exc:
-			failure = exc
-			redis_failed = True
-		if guard.pending():
-			rec = None
-			raise guard.interrupt()
-		if failure is not None:
-			try:
-				log_ai_failure("optimus recording cache read", failure, session_uuid=row_get(doc, "session_uuid"))
-			finally:
-				failure = None
+		if not redis_failed:
+			# a failed read is logged once (after the try) and the rest come from the bundle
+			rec, redis_failed = _run_ai_step(
+				lambda: frappe.cache.hget(RECORDER_REQUEST_HASH, uuid),
+				title="optimus recording cache read", session_uuid=session_uuid,
+			)
 		if not isinstance(rec, dict) or not rec:
 			if memo_key not in memo:
 				memo[memo_key] = _light_recording_map(doc)
@@ -2920,22 +2907,6 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 		except Exception:
 			pass
 	return out
-
-
-def _backfill_ai_suggestions(doc) -> bool:
-	"""Auto-suggest-gated AI backfill: run ``_run_ai_backfill`` only when Optimus
-	Settings has ``ai_enabled`` and ``ai_auto_suggest``. Returns True if any
-	suggestion was added. The explicit AI > Refresh AI suggestions action bypasses this
-	gate by calling ``_run_ai_backfill`` directly."""
-	try:
-		from optimus.settings import get_config
-		cfg = get_config()
-	except Exception:
-		return False
-	if not (getattr(cfg, "ai_enabled", False) and getattr(cfg, "ai_suggest_findings", True)
-	        and getattr(cfg, "ai_auto_suggest", False)):
-		return False
-	return _run_ai_backfill(doc)["added"] > 0
 
 
 # v0.5.1: auto-generated "Steps to Reproduce" from captured actions. The
@@ -3494,33 +3465,25 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 def _load_recordings_bundle(session_doc):
 	"""Load the persisted recordings snapshot for a session as a parsed bundle
 	dict, for passing to ``_fetch_recordings(recordings_bundle=...)`` once Redis
-	is cleaned up. None when there's no snapshot or it can't be read."""
+	is cleaned up. None when there's no snapshot or it can't be read (the failure
+	is logged once)."""
 	import gzip
-
-	from optimus.ai_fix import _InterruptGuard, log_ai_failure
 
 	url = getattr(session_doc, "recordings_file", None)
 	if not url:
 		return None
-	failure = None
-	guard = _InterruptGuard()
-	try:
-		with guard:
-			file_doc = frappe.get_doc("File", {"file_url": url})
-			with open(file_doc.get_full_path(), "rb") as fh:
-				raw = fh.read()
-			bundle = json.loads(gzip.decompress(raw).decode("utf-8"))
-			return bundle if isinstance(bundle, dict) else None
-	except Exception as exc:
-		failure = exc
-	if guard.pending():
-		raise guard.interrupt()
-	if failure is not None:
-		try:
-			log_ai_failure("optimus load recordings bundle", failure, session_uuid=getattr(session_doc, "session_uuid", None))
-		finally:
-			failure = None
-	return None
+
+	def _read():
+		file_doc = frappe.get_doc("File", {"file_url": url})
+		with open(file_doc.get_full_path(), "rb") as fh:
+			raw = fh.read()
+		bundle = json.loads(gzip.decompress(raw).decode("utf-8"))
+		return bundle if isinstance(bundle, dict) else None
+
+	bundle, _failed = _run_ai_step(
+		_read, title="optimus load recordings bundle", session_uuid=getattr(session_doc, "session_uuid", None),
+	)
+	return bundle
 
 
 def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:

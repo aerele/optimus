@@ -139,7 +139,10 @@ read-only sections:
      but cannot recompute findings.
    - **Regenerate Reports**: re-renders both HTML files from the
      persisted Action/Finding rows. Cheaper than a full re-analyze;
-     useful after an Optimus upgrade that improves the renderer.
+     useful after an Optimus upgrade that improves the renderer. It
+     does not re-run the analyzer and does not call the AI provider;
+     saved AI suggestions are kept as they are. For new or updated
+     suggestions use **AI > Refresh AI suggestions** (Ready sessions).
    - **Phase 2 → Line Profile**: opens the picker dialog (see
      below).
    - **Pin as Baseline** / **Unpin Baseline**: see _Baseline
@@ -189,6 +192,11 @@ Phase 2 has a per-request overhead budget (default 10s; tunable via
 expires mid-request, line profiling disengages so the request finishes
 at natural speed and the run is flagged "partial data". This stops a
 hot-loop pick from freezing the UI.
+
+Phase 2 does not ask the AI for fixes for its new Hot Line findings; run
+**AI > Refresh AI suggestions** on the Ready session to fill them in. If
+the report re-render after a Phase 2 run fails, the run stays Ready with
+a warning; use **Regenerate Reports**.
 
 ### AI fix suggestions (optional)
 

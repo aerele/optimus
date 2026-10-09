@@ -50,7 +50,7 @@ SINK_ATTRS = frozenset({
 	("_lp_capture", "start_line_profile_pass"), ("_lp_capture", "stop_line_profile_pass"),
 	("_lp_capture", "cleanup_run"), ("_lp_analyzer", "run_analyze"),
 	("_analyze_mod", "_run_ai_backfill"),
-	("_analyze_mod", "_backfill_ai_suggestions"), ("_analyze_mod", "_render_and_attach_reports"),
+	("_analyze_mod", "_render_and_attach_reports"),
 	("ai_fix", "suggest_fix"), ("ai_fix", "humanize_steps"), ("ai_fix", "test_connection"),
 })
 SINK_METHODS = frozenset({"save", "insert", "db_set"})

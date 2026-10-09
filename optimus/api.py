@@ -15,7 +15,7 @@ import frappe
 from frappe import _
 from frappe.utils import add_to_date, now_datetime
 
-from optimus import ratelimit, safe_commit, session
+from optimus import ratelimit, safe_call, safe_commit, session
 from optimus.permissions import may_act_on_session
 
 # Roles allowed to call the profiler API. System Manager is always allowed
@@ -1330,7 +1330,7 @@ def _rerender_after_ai(ref: SessionRef, *, memo: dict | None = None) -> bool:
 			raise
 		except Exception:
 			# Undo the failed render before the helper writes its Error Log row.
-			guard = ai_fix._InterruptGuard()
+			guard = safe_call.InterruptGuard()
 			try:
 				with guard:
 					frappe.db.rollback()

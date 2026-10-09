@@ -204,6 +204,21 @@ def test_missing_bundle_and_malformed_entries_are_empty(light):
 	assert analyze.load_recordings_light(light.doc) == []
 
 
+def _logger_that_stops_the_job(seen):
+	"""A ``log_ai_failure`` stand-in that records the call (and whether an exception was being
+	handled) and, like the real one, raises an RQ job timeout again as a fresh instance."""
+	import sys
+
+	def log(title, exc=None, **kw):
+		seen.append((title, sys.exc_info()[0]))
+		guard = ai_fix._InterruptGuard()
+		guard.note(exc)
+		if guard.pending():
+			raise guard.interrupt()
+
+	return log
+
+
 def test_rq_timeout_during_live_read_escapes_fresh(light, monkeypatch):
 	Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
 	original = Timeout("fake timeout")
@@ -211,10 +226,13 @@ def test_rq_timeout_during_live_read_escapes_fresh(light, monkeypatch):
 	def fail(*a):
 		raise original
 
+	seen = []
+	monkeypatch.setattr(ai_fix, "log_ai_failure", _logger_that_stops_the_job(seen))
 	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(cache=SimpleNamespace(hget=fail)))
 	with pytest.raises(Timeout) as caught:
 		analyze.load_recordings_light(light.doc)
 	assert caught.value is not original and caught.value.__context__ is None
+	assert seen == [("optimus recording cache read", None)]
 
 
 def test_cache_failure_is_logged_outside_except_and_bundle_still_works(light, monkeypatch):
@@ -248,16 +266,17 @@ def test_bundle_read_logs_outside_except_and_never_swallows_rq(monkeypatch, inte
 		"frappe",
 		SimpleNamespace(get_doc=failed, log_error=lambda **kw: seen.append(sys.exc_info()[0])),
 	)
-	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: seen.append(sys.exc_info()[0]))
+	logged = []
+	monkeypatch.setattr(ai_fix, "log_ai_failure", _logger_that_stops_the_job(logged))
 	doc = SimpleNamespace(recordings_file="fake-file", session_uuid="fake-session")
 	if interrupt:
 		with pytest.raises(Timeout) as caught:
 			analyze._load_recordings_bundle(doc)
 		assert caught.value is not original and caught.value.__context__ is None
-		assert seen == []
 	else:
 		assert analyze._load_recordings_bundle(doc) is None
-		assert seen == [None]
+	# the row is written outside the handler, for the timeout too; frappe.log_error itself is never called
+	assert logged == [("optimus load recordings bundle", None)] and seen == []
 
 
 def test_selection_handles_malformed_severity():
