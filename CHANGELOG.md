@@ -27,9 +27,17 @@ versions may contain breaking changes see migration notes below).
   index's columns are all among its equality columns, or when an existing index serves
   every column but its Check fields (Frappe's creation index serves `creation > ? AND
   is_return = ?`); a one-column recipe also when its column is unique on its own, leads an
-  index or is the index EXPLAIN names. A sort column the index cannot return in order is
-  left out rather than appended, a sort recipe an existing index serves is never traded
-  for a weaker one, and the FROM table of a LEFT JOIN never gets its own ON columns. A missing column, a MariaDB reserved word on MariaDB (Postgres
+  index or is the index EXPLAIN names. A lookup by `name` (the primary key) or by a child
+  table's `parent` gets no code. A recipe wider than four columns keeps the columns of an
+  existing index first, then by field type, Check fields last, and names the rest; if an
+  index that already finds these rows would be left out, there is no code. `!=`, `<>`
+  and `NOT` never narrow an index. A sort column the index cannot return in order is left
+  out rather than appended, but a captured `IN (?)` (Frappe's recorder collapses every IN
+  list to one placeholder) may be one value, so it keeps the sort with a hedged lead. An
+  existing sort-serving index on a Filesort finding was rejected by the optimizer, so the
+  range recipe is given, unless LIMIT or the capture-time EXPLAIN says otherwise, and that
+  kept verdict names the range recipe. A column the table only feeds into a LEFT JOIN that
+  the WHERE keeps a LEFT JOIN is no index candidate. A missing column, a MariaDB reserved word on MariaDB (Postgres
   quotes names; such an entry is Postgres-only), a JSON field (MariaDB reports it as
   longtext, so the field type decides), a leading text column on Postgres, a first column
   alone wider than the key limit (3072 bytes; 2704 on Postgres), a query over 4 KB (Missing

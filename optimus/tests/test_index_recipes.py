@@ -654,7 +654,7 @@ class TestQualifiersAndSubqueries:
 		):
 			advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabGL Entry"), evidence_lookup=_lookup(self._GL))
 			assert advice.columns == ("account",), q
-			assert "Optimus left out company (compared only inside an OR between conditions)" in ir.finding_text(advice)
+			assert "Optimus left out company, party (compared only inside an OR between conditions)" in ir.finding_text(advice)
 
 	def test_a_subquery_neither_uses_nor_taints_the_outer_columns(self):
 		q = (
@@ -801,8 +801,8 @@ class TestExpressions:
 		advice = _r4("Full Table Scan", "`grand_total` - `outstanding_amount` > ? AND `company`=?")
 		assert advice.columns == ("company",)
 		assert (
-			"Optimus left out grand_total (compared with another column or through arithmetic, which an index on "
-			"the column cannot use)" in ir.finding_text(advice)
+			"Optimus left out grand_total, outstanding_amount (compared with another column or through arithmetic, "
+			"which an index on the column cannot use)" in ir.finding_text(advice)
 		)
 		advice = _r4("Full Table Scan", "`grand_total` - `outstanding_amount` > ?")
 		assert advice.route == ir.ROUTE_NO_CODE and "arithmetic on grand_total" in advice.reason
@@ -810,7 +810,7 @@ class TestExpressions:
 	def test_a_column_compared_with_another_column_is_left_out(self):
 		advice = _r4("Full Table Scan", "`qty` > `delivered_qty` AND `item_code`=?", table="tabSales Invoice Item")
 		assert advice.columns == ("item_code",)
-		assert "Optimus left out qty (compared with another column or through arithmetic" in ir.finding_text(advice)
+		assert "Optimus left out qty, delivered_qty (compared with another column or through arithmetic" in ir.finding_text(advice)
 
 	def test_joins_value_arithmetic_and_literal_words_stay_usable(self):
 		q = (
@@ -840,7 +840,8 @@ class TestCaseFrame:
 			assert advice.columns == cols, where
 			text = ir.finding_text(advice)
 			assert "Optimus left out " in text, where
-			assert f"{left_out} (compared inside a CASE expression, which an index on the column cannot use)" in text, where
+			assert left_out in text.split("Optimus left out ", 1)[1].split(" (compared inside a CASE", 1)[0], where
+			assert "(compared inside a CASE expression, which an index on the column cannot use)" in text, where
 
 	def test_a_value_side_case_leaves_the_column_plain(self):
 		assert _r4("Full Table Scan", "`company`=? AND `status` = CASE WHEN ? THEN ? ELSE ? END").columns == ("company", "status")
@@ -866,7 +867,9 @@ class TestIndexDesign:
 		item = _lookup(_ev("Item", fields={"disabled": F("Check"), "item_group": F("Link")}))
 		q = "SELECT `name` FROM `tabItem` WHERE `disabled`<>? AND `item_group`=?"
 		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabItem"), evidence_lookup=item)
-		assert advice.columns == ("item_group", "disabled")
+		# <> never narrows an index (review-t12 round 3, item 1a)
+		assert advice.columns == ("item_group",)
+		assert "Optimus left out disabled (compared only by !=, <> or NOT" in ir.finding_text(advice)
 
 	def test_a_join_column_counts_as_equality(self):
 		q = (
@@ -1066,7 +1069,11 @@ class TestMultiValueEquality:
 	place, but rows matching several values do not come back sorted."""
 
 	def test_an_in_filter_keeps_the_range_and_the_sort_claim_goes(self):
+		# a collapsed IN (?) may be one value: the sort is kept and the lead hedges (round 3)
 		advice = _r4("Filesort", "`status` IN (?) AND `posting_date` > ? ORDER BY `modified`")
+		assert advice.columns == ("status", "modified")
+		assert "if the IN list on status has more than one value, the sort stays" in advice.lead
+		advice = _r4("Filesort", "`status` IN (?, ?) AND `posting_date` > ? ORDER BY `modified`")
 		assert advice.columns == ("status", "posting_date")
 		text = ir.finding_text(advice)
 		assert "removes the sort" not in text and "already sorted" not in text

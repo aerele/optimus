@@ -576,7 +576,10 @@ def test_the_docs_and_changelog_carry_the_t12_texts():
 	# fix round 2: cards keep their order, the unique subset, the Check rule's tail
 	assert "most-used-first" in doc and "most-used-first" in log
 	assert "UNIQUE `(po_no, customer)`" in doc and "creation > ? AND is_return = ?" in doc
-	assert "never trades it for a weaker recipe" in doc
+	# fix round 3: the served verdict needs evidence, IN (?), the evidence cap, keys
+	assert "keeps that \"already serves\" verdict" in doc and "normalize_query" in doc
+	assert "an existing index already finds these rows" in doc and "by `name` (the primary key)" in doc
+	assert "`IN (?)`" in log and "rejected by the optimizer" in log
 
 
 
@@ -1065,7 +1068,7 @@ class TestDroppedColumnScope:
 			"SELECT si.name, (SELECT COUNT(*) FROM `tabSales Invoice Item` WHERE parent = si.name) AS n "
 			"FROM `tabSales Invoice` si WHERE account = ? AND si.party = ?"
 		)
-		assert ir._from_clause(q) == [("tabsales invoice", "from")]
+		assert ir._from_clause(q) == ["tabsales invoice"]
 		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(ev))
 		assert set(advice.entry["columns"]) == {"account", "party"}, _text(advice)
 
@@ -1159,24 +1162,19 @@ class TestUnservableSortTail:
 		advice = ir.advise_finding(_explain("Filesort", q, table="tabStock Ledger Entry"), evidence_lookup=_lookup(_SLE))
 		assert advice.entry["columns"] == ["is_cancelled", "creation"], _text(advice)
 
-	def test_a_sort_recipe_an_existing_index_serves_is_never_traded_for_a_range_recipe(self):
-		"""battery3 [303] and the real SLE stock query: the existing index serves the equality
-		columns and the sort, so the recipe without the sort (with the range) would not help."""
+	def test_a_sort_recipe_an_existing_index_serves_needs_evidence_to_stand(self):
+		"""battery3 [303]: the existing (company, due_date) serves the sort, yet the Filesort
+		says the optimizer chose another plan, so the range recipe is the advice; with LIMIT the
+		served verdict stands and names that range recipe (round 3, item 1)."""
 		ev = _with_index(_ev(fields={**_ALL, "due_date": F("Date")}), ("idx_cd", ["company", "due_date"], False))
 		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND posting_date > ? ORDER BY due_date"
 		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(ev))
-		assert advice.route == ir.ROUTE_NO_CODE and advice.served
-		assert 'The index "idx_cd" on table "tabSales Invoice" already starts with (company, due_date)' in _text(advice)
-		sle = _with_index(_ev("Stock Ledger Entry", fields={
-			"item_code": F("Link"), "warehouse": F("Link"), "voucher_no": F("Dynamic Link"), "is_cancelled": F("Check"),
-			"posting_datetime": F("Date"),
-		}), ("iwpc", ["item_code", "warehouse", "posting_datetime", "creation"], False))
-		q = (
-			"SELECT name FROM `tabStock Ledger Entry` WHERE item_code = ? AND warehouse = ? AND voucher_no != ? "
-			"AND is_cancelled = ? ORDER BY posting_datetime DESC"
-		)
-		advice = ir.advise_finding(_explain("Filesort", q, table="tabStock Ledger Entry"), evidence_lookup=_lookup(sle))
-		assert advice.route == ir.ROUTE_NO_CODE, _text(advice)
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["company", "posting_date"]
+		advice = ir.advise_finding(_explain("Filesort", q + " LIMIT ?"), evidence_lookup=_lookup(ev))
+		text = _text(advice)
+		assert advice.route == ir.ROUTE_NO_CODE and advice.served_by == "idx_cd"
+		assert "an index on (company, posting_date) for the filter may help instead" in text
+		assert "would not help" not in text
 
 	def test_a_refused_sort_column_keeps_its_verdict_when_nothing_else_is_left(self):
 		"""ORDER BY `order` (a MariaDB reserved word): the sort-first recipe is refused for the
@@ -1206,3 +1204,278 @@ def test_the_low_filter_ratio_lead_makes_no_selectivity_claim():
 	lead = ir.advise_finding(_explain("Low Filter Ratio", q), evidence_lookup=_lookup(_SI)).lead
 	assert "most selective" not in lead and "first" not in lead
 	assert lead.startswith("An index on these filter columns lets the database skip most of the rows it now reads")
+
+
+# --- fix round 3 (review-t12 battery4, c1_diff23) ------------------------------------------
+
+
+_FS = "Using where; Using filesort"
+_SI4 = _ev(fields={**_ALL, "due_date": F("Date"), "is_return": F("Check"), "grand_total": F("Int")})
+
+
+class TestServedNeedsEvidence:
+	"""Item 1: an existing sort-serving index on a Filesort finding was rejected by the
+	optimizer unless LIMIT or the capture-time EXPLAIN says otherwise."""
+
+	def test_battery4_401_the_rejected_composite_gives_the_range_recipe(self):
+		ev = _with_index(_SI4, ("idx_cd", ["company", "due_date"], False), ("company_index", ["company"], False))
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND posting_date BETWEEN ? AND ? ORDER BY due_date"
+		row = {"key": "company_index", "possible_keys": "company_index,idx_cd", "Extra": _FS, "rows": 90000}
+		advice = ir.advise_finding(_explain("Filesort", q, explain_row=row), evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["company", "posting_date"], _text(advice)
+
+	def test_battery4_402_a_listed_single_sort_index_gives_the_range_recipe(self):
+		ev = _with_index(_SI4, ("due_date_index", ["due_date"], False))
+		q = "SELECT name FROM `tabSales Invoice` WHERE posting_date BETWEEN ? AND ? ORDER BY due_date"
+		row = {"key": None, "possible_keys": "due_date_index", "Extra": _FS, "type": "ALL"}
+		advice = ir.advise_finding(_explain("Filesort", q, explain_row=row), evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.columns == ("posting_date",), _text(advice)
+
+	@pytest.mark.parametrize("q,row", [
+		(
+			"SELECT name FROM `tabSales Invoice` WHERE posting_date BETWEEN ? AND ? ORDER BY due_date",
+			{"key": None, "possible_keys": None, "Extra": _FS, "type": "ALL"},
+		),
+		("SELECT name FROM `tabSales Invoice` WHERE posting_date BETWEEN ? AND ? ORDER BY due_date LIMIT ?", None),
+	])
+	def test_battery4_403_a_kept_served_verdict_names_the_range_alternative(self, q, row):
+		ev = _with_index(_SI4, ("due_date_index", ["due_date"], False))
+		advice = ir.advise_finding(_explain("Filesort", q, explain_row=row), evidence_lookup=_lookup(ev))
+		text = _text(advice)
+		assert advice.route == ir.ROUTE_NO_CODE, text
+		assert "would not help" not in text
+		assert 'The index "due_date_index" on table "tabSales Invoice" already serves this filter and sort' in text
+		assert "an index on (posting_date) for the filter may help instead" in text
+
+	def test_only_the_main_querys_limit_counts(self):
+		assert ir._has_limit("SELECT name FROM `tabX` WHERE a = ? ORDER BY b LIMIT ?")
+		assert not ir._has_limit("SELECT name, (SELECT c FROM `tabY` LIMIT 1) AS c FROM `tabX` WHERE a = ? ORDER BY b")
+
+	def test_without_evidence_the_served_verdict_is_not_kept(self):
+		ev = _with_index(_SI4, ("idx_cd", ["company", "due_date"], False))
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND posting_date > ? ORDER BY due_date"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES and advice.entry["columns"] == ["company", "posting_date"]
+
+
+class TestNotEqualIsNoRange:
+	"""Item 1a: !=, <> and NOT never narrow an index."""
+
+	@pytest.mark.parametrize("op", ["!= ?", "<> ?", "NOT IN (?)", "NOT BETWEEN ? AND ?"])
+	def test_a_not_comparison_is_left_out(self, op):
+		q = f"SELECT name FROM `tabSales Invoice` WHERE company = ? AND status {op}"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI4))
+		assert advice.columns == ("company",), _text(advice)
+		assert "Optimus left out status (compared only by !=, <> or NOT, which matches most of the table's rows)" in _text(advice)
+
+	def test_a_value_side_not_equal_is_a_not_comparison(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND ? != status"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI4))
+		assert advice.columns == ("company",) and "Optimus left out status (compared only by !=" in _text(advice)
+
+	def test_a_not_comparison_alone_gives_its_shape_no_code(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE status != ?"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI4))
+		assert advice.route == ir.ROUTE_NO_CODE and "a !=, <> or NOT comparison on status" in _text(advice)
+
+	def test_a_not_comparison_on_a_missing_column_names_the_column(self):
+		"""c1: i.is_exempt != 1 on a table without that column is a column problem, never
+		"could not read"."""
+		q = (
+			"select sum(i.base_net_amount) from `tabSales Invoice Item` i inner join `tabSales Invoice` s on "
+			"i.parent = s.name where s.docstatus = 1 and i.is_exempt != 1 and i.is_zero_rated != 1"
+		)
+		ev = _ev("Sales Invoice Item", fields={"item_code": F("Link")})
+		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabSales Invoice Item"), evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_NO_CODE and not advice.unknown, _text(advice)
+		assert 'has no column "is_exempt"' in _text(advice)
+
+	def test_is_not_null_stays_a_range(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND po_no IS NOT NULL"
+		assert ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI4)).columns == ("company", "po_no")
+
+	def test_the_sle_not_equal_lookup_gives_no_code(self):
+		sle = _with_index(_ev("Stock Ledger Entry", fields={
+			"item_code": F("Link"), "warehouse": F("Link"), "voucher_no": F("Dynamic Link"), "is_cancelled": F("Check"),
+			"posting_datetime": F("Date"),
+		}), ("iwpc", ["item_code", "warehouse", "posting_datetime", "creation"], False))
+		q = (
+			"SELECT name FROM `tabStock Ledger Entry` WHERE item_code = ? AND warehouse = ? AND voucher_no != ? "
+			"AND is_cancelled = ? ORDER BY posting_datetime DESC"
+		)
+		advice = ir.advise_finding(_explain("Filesort", q, table="tabStock Ledger Entry"), evidence_lookup=_lookup(sle))
+		assert advice.route == ir.ROUTE_NO_CODE, _text(advice)
+
+
+class TestCollapsedIn:
+	"""Item 2: Frappe's recorder rewrites IN (?, ?, ?) to IN (?), so IN (?) may be one value."""
+
+	def test_battery4_404_a_collapsed_in_keeps_the_sort_with_a_hedge(self):
+		ev = _with_index(_SI4, ("company_index", ["company"], False))
+		q = "SELECT name FROM `tabSales Invoice` WHERE company = ? AND customer IN (?) ORDER BY posting_date"
+		advice = ir.advise_finding(_explain("Filesort", q, explain_row={"type": "ref", "key": "company_index"}), evidence_lookup=_lookup(ev))
+		assert advice.entry["columns"] == ["company", "customer", "posting_date"], _text(advice)
+		assert "if the IN list on customer has more than one value, the sort stays" in advice.lead
+
+	def test_the_list_view_keeps_creation(self):
+		q = (
+			"SELECT `tabSales Invoice`.`name` FROM `tabSales Invoice` WHERE `tabSales Invoice`.`company` in (?) "
+			"ORDER BY `tabSales Invoice`.`creation` DESC LIMIT ?"
+		)
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI4))
+		assert advice.entry["columns"] == ["company", "creation"], _text(advice)
+		assert "which Optimus never indexes" not in advice.lead
+
+	def test_battery4_407_an_in_on_the_recipe_column_keeps_the_sort(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE status IN (?) ORDER BY posting_date"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI4))
+		assert advice.entry["columns"] == ["status", "posting_date"], _text(advice)
+
+	@pytest.mark.parametrize("where", ["docstatus IN (?, ?)", "ifnull(status, ?) IN (?, ?)"])
+	def test_battery4_405_406_an_in_outside_the_recipe_never_blocks_the_sort(self, where):
+		q = f"SELECT name FROM `tabSales Invoice` WHERE company = ? AND {where} ORDER BY posting_date DESC"
+		advice = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI4))
+		assert advice.entry["columns"] == ["company", "posting_date"], _text(advice)
+		assert "already sorted" in advice.lead
+
+	def test_a_metadata_sort_column_that_cannot_follow_a_filter_is_named_honestly(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE posting_date > ? ORDER BY creation DESC"
+		lead = ir.advise_finding(_explain("Filesort", q), evidence_lookup=_lookup(_SI4)).lead
+		assert "which Optimus never indexes" not in lead
+		assert "The sort column creation can only follow an equality filter column in an index" in lead
+
+
+_GL4 = _ev("GL Entry", fields={
+	"account": F("Link"), "party_type": F("Link"), "party": F("Dynamic Link"), "voucher_type": F("Link"),
+	"voucher_no": F("Dynamic Link"), "posting_date": F("Date"), "is_cancelled": F("Check"), "company": F("Link"),
+	"cost_center": F("Link"), "debit": F("Int"), "credit": F("Int"), "voucher_detail_no": F("Data"),
+}, indexes=[
+	("voucher_no_index", ["voucher_no"], False), ("account_index", ["account"], False),
+	("voucher_type_voucher_no_index", ["voucher_type", "voucher_no"], False), ("company_index", ["company"], False),
+	("cost_center_index", ["cost_center"], False), ("voucher_detail_no_index", ["voucher_detail_no"], False),
+])
+
+
+class TestCapByEvidence:
+	"""Item 3: the four kept columns are chosen by evidence, not by name."""
+
+	def test_battery4_412_the_cap_keeps_the_indexed_columns(self):
+		q = (
+			"SELECT name FROM `tabGL Entry` WHERE `voucher_type`=? AND `voucher_no`=? AND `account`=? AND `cost_center`=? "
+			"AND `debit`=? AND `credit`=?"
+		)
+		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabGL Entry"), evidence_lookup=_lookup(_GL4))
+		assert advice.entry["columns"] == ["account", "cost_center", "voucher_no", "voucher_type"], _text(advice)
+		assert "Optimus left out credit, debit (an index here holds at most 4 columns)" in _text(advice)
+
+	def test_battery4_413_a_left_out_matched_index_gives_no_code(self):
+		q = (
+			"SELECT name FROM `tabGL Entry` WHERE `company`=? AND `account`=? AND `voucher_type`=? AND `voucher_no`=? "
+			"AND `voucher_detail_no`=?"
+		)
+		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabGL Entry"), evidence_lookup=_lookup(_GL4))
+		assert advice.route == ir.ROUTE_NO_CODE, _text(advice)
+		assert 'The index "voucher_detail_no_index" on table "tabGL Entry" already finds these rows' in _text(advice)
+
+	def test_without_indexes_check_fields_go_first_out(self):
+		ev = _ev(fields={**_ALL, "is_return": F("Check"), "due_date": F("Date"), "territory": F("Link")})
+		q = (
+			"SELECT name FROM `tabSales Invoice` WHERE is_return = ? AND status = ? AND company = ? AND customer = ? "
+			"AND territory = ?"
+		)
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(ev))
+		assert "is_return" not in advice.columns and len(advice.columns) == 4, _text(advice)
+		assert "Optimus left out is_return (an index here holds at most 4 columns)" in _text(advice)
+
+
+class TestJoinProbes:
+	"""Item 4: a column the target only feeds into a fixed LEFT JOIN is no index key."""
+
+	def test_battery4_416_a_null_rejecting_where_keeps_the_join_column(self):
+		ev = _with_index(_GL4, ("is_cancelled_dummy", ["party"], False))
+		q = (
+			"SELECT gle.name FROM `tabGL Entry` gle LEFT JOIN `tabAccount` ac ON ac.name = gle.account "
+			"WHERE ac.account_type = ? AND gle.is_cancelled = 0"
+		)
+		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabGL Entry"), evidence_lookup=_lookup(ev))
+		assert "account" in advice.columns, _text(advice)
+
+	def test_the_joined_tables_own_lookup_key_stays(self):
+		"""The WHERE names only the FROM table, so the LEFT JOIN stays one; the joined table's
+		ON column is the key it is looked up by, never a probe."""
+		q = (
+			"SELECT c.name FROM `tabUOM` c LEFT JOIN `tabItem` i ON i.sales_uom = c.name "
+			"WHERE c.enabled = ? AND c.must_be_whole_number = ?"
+		)
+		assert ir._join_probes(q, frozenset({"tabItem", "i"}), "tabitem") == set()
+		q2 = (
+			"SELECT i.name FROM `tabItem` i LEFT JOIN `tabUOM` c ON c.name = i.sales_uom "
+			"WHERE i.disabled = ?"
+		)
+		assert ir._join_probes(q2, frozenset({"tabItem", "i"}), "tabitem") == {"sales_uom"}
+
+	def test_c1_31_a_middle_tables_probe_column_is_no_key(self):
+		ev = _ev("Bank Transaction", fields={"bank_account": F("Link"), "date": F("Date")})
+		q = (
+			"SELECT btp.name FROM `tabBank Transaction Payments` btp LEFT JOIN `tabBank Transaction` bt ON bt.name=btp.parent "
+			"LEFT JOIN `tabBank Account` ba ON ba.name=bt.bank_account WHERE btp.payment_document = ? AND bt.docstatus = 1"
+		)
+		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabBank Transaction"), evidence_lookup=_lookup(ev))
+		assert advice is None or "bank_account" not in advice.columns, _text(advice)
+
+	def test_a_derived_table_left_chain_is_read_too(self):
+		ev = _ev("Bank Transaction", fields={"bank_account": F("Link"), "date": F("Date")})
+		q = (
+			"SELECT total FROM ( SELECT btp.name AS total FROM `tabBank Transaction Payments` btp LEFT JOIN "
+			"`tabBank Transaction` bt ON bt.name=btp.parent LEFT JOIN `tabBank Account` ba ON ba.name=bt.bank_account "
+			"WHERE btp.payment_document = ? AND bt.docstatus = 1 ) temp WHERE total = ?"
+		)
+		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabBank Transaction"), evidence_lookup=_lookup(ev))
+		assert advice is None or "bank_account" not in advice.columns, _text(advice)
+
+
+def test_battery4_410_the_temporary_table_caveat_is_honest():
+	q = (
+		"SELECT customer, SUM(grand_total) FROM `tabSales Invoice` WHERE company = ? GROUP BY customer "
+		"ORDER BY SUM(grand_total) DESC"
+	)
+	text = _text(ir.advise_finding(_explain("Temporary Table", q), evidence_lookup=_lookup(_SI4)))
+	assert "would not remove the temporary table" in text and "would add nothing" not in text
+
+
+class TestPrimaryKeyAndParent:
+	"""Item 6: a lookup by name or by a child row's parent already has its index."""
+
+	def test_battery4_415_a_name_lookup_gives_no_code(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE `name`=? AND `company`=?"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI4))
+		assert advice.route == ir.ROUTE_NO_CODE and not advice.unknown
+		assert "The query finds its row by name, the primary key, so no other index can help." in _text(advice)
+
+	def test_battery4_414_a_child_row_lookup_by_parent_gives_no_code(self):
+		ev = _ev("Sales Invoice Item", fields={"item_code": F("Link"), "warehouse": F("Link")},
+			extra_types={"parent": "varchar", "parenttype": "varchar", "parentfield": "varchar"},
+			indexes=[("parent", ["parent"], False)])
+		q = "SELECT name FROM `tabSales Invoice Item` WHERE `parent`=? AND `item_code`=?"
+		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabSales Invoice Item"), evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_NO_CODE, _text(advice)
+		assert "finds its rows by parent, which Frappe indexes on every child table" in _text(advice)
+
+	@pytest.mark.parametrize("q", [
+		"select sum(debit_in_account_currency) - sum(credit_in_account_currency) from `tabJournal Entry Account` "
+		"where parent=? and account=? and (reference_type is null or reference_type = '')",
+		"select * from `tabJournal Entry Account` where account = ? and docstatus = 1 and parent = ? and "
+		"(reference_type is null or reference_type in ('', 'Sales Order', 'Purchase Order'))",
+		"select debit, credit from `tabJournal Entry Account` where account = ? and party=? and docstatus = 1 and parent = ? "
+		'and (reference_type is null or reference_type in ("", "Sales Order", "Purchase Order"))',
+	])
+	def test_c1_41_42_45_journal_entry_account_by_parent(self, q):
+		ev = _ev("Journal Entry Account", fields={"account": F("Link"), "party": F("Dynamic Link"), "reference_type": F("Link")},
+			extra_types={"parent": "varchar", "parenttype": "varchar", "parentfield": "varchar"})
+		advice = ir.advise_finding(_explain("Full Table Scan", q, table="tabJournal Entry Account"), evidence_lookup=_lookup(ev))
+		assert advice.route == ir.ROUTE_NO_CODE and "by parent" in _text(advice), _text(advice)
+
+	def test_a_name_not_in_subquery_is_no_lookup(self):
+		q = "SELECT name FROM `tabSales Invoice` WHERE name NOT IN (SELECT parent FROM `tabX`) AND company = ?"
+		advice = ir.advise_finding(_explain("Full Table Scan", q), evidence_lookup=_lookup(_SI4))
+		assert "primary key" not in _text(advice)
