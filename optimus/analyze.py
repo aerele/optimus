@@ -2190,6 +2190,8 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 	evidence_lookup, tracked = _ai_evidence_scope()
 	started = time.monotonic()
 	failures = 0
+	# the kind of the first failure ("" for an unexpected error), for the warning below
+	first_failure: str | None = None
 	skipped_for_time = 0
 	total = len(eligible)
 	for idx, f in enumerate(eligible):
@@ -2211,7 +2213,9 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 		except Exception:
 			pass
 
-		def _suggest(f=f):
+		kinds: list[str] = []
+
+		def _suggest(f=f, kinds=kinds):
 			ns = SimpleNamespace(
 				finding_type=f.get("finding_type") or "",
 				severity=f.get("severity") or "Low",
@@ -2232,6 +2236,7 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 				), timeout=_ai_call_timeout())
 			except ai_fix.AiFixError as e:
 				if e.kind not in ai_fix.AI_SKIP_KINDS:
+					kinds.append(e.kind)
 					raise
 				skipped = True
 			if not skipped:
@@ -2244,11 +2249,17 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 		)
 		if step_failed:
 			failures += 1
+			if first_failure is None:
+				first_failure = kinds[0] if kinds else ""
 
 	if failures:
+		if first_failure:
+			cause = f"The first failure was {first_failure}: {ai_fix.KIND_HINTS.get(first_failure, ai_fix.KIND_HINTS['unknown'])}"
+		else:
+			cause = "The first failure was an unexpected error."
 		context.warnings.append(
-			f"AI auto-suggest: {failures} finding(s) couldn't get a suggestion "
-			"(provider error or timeout). See Error Log, titles \"optimus ai_fix\" (provider failures) or \"optimus ai auto-suggest\"."
+			f"AI auto-suggest: {failures} finding(s) couldn't get a suggestion. {cause} "
+			"Search the Error Log for titles starting with \"optimus ai\"; each row says what to do."
 		)
 	if skipped_for_time:
 		context.warnings.append(
@@ -2809,7 +2820,7 @@ def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 			# a failed read is logged once (after the try) and the rest come from the bundle
 			rec, redis_failed = _run_ai_step(
 				lambda: frappe.cache.hget(RECORDER_REQUEST_HASH, uuid),
-				title="optimus recording cache read", session_uuid=session_uuid,
+				title="optimus ai recording cache read", session_uuid=session_uuid,
 			)
 		if not isinstance(rec, dict) or not rec:
 			if memo_key not in memo:
@@ -3206,7 +3217,7 @@ def _build_humanized_notes_html(
 		lambda: ai_fix.humanize_steps(
 			actions, session_title=session_title, usage_out=usage_out, timeout=_ai_call_timeout(),
 		),
-		title="optimus humanize_steps",
+		title="optimus ai humanize_steps",
 		session_uuid=getattr(frappe.local, "_optimus_spend_session", None),
 	)
 	if step_failed:
@@ -3576,7 +3587,7 @@ def _load_recordings_bundle(session_doc):
 		return bundle if isinstance(bundle, dict) else None
 
 	bundle, _failed = _run_ai_step(
-		_read, title="optimus load recordings bundle", session_uuid=getattr(session_doc, "session_uuid", None),
+		_read, title="optimus ai load recordings bundle", session_uuid=getattr(session_doc, "session_uuid", None),
 	)
 	return bundle
 

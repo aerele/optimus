@@ -2154,14 +2154,14 @@ class TestApiLogSites:
 		error = RuntimeError("redis down")
 		monkeypatch.setattr(api_env.analyze, "load_recordings_light", _raising(error))
 		out = api_env.regenerate_reports("uuid-5")
-		assert api_env.calls == [("optimus regenerate_reports fetch", error, {"session_uuid": "uuid-5"})]
+		assert api_env.calls == [("optimus ai regenerate_reports fetch", error, {"session_uuid": "uuid-5"})]
 		assert out["regenerated"] is True and out["recordings_available"] == 0
 
 	def test_humanize_steps_core_fetch_error(self, api_env, monkeypatch):
 		error = RuntimeError("redis down")
 		monkeypatch.setattr(api_env.analyze, "load_recordings_light", _raising(error))
 		out = api_env.api._humanize_steps_core(api_env.doc, title="t")
-		assert api_env.calls == [("optimus humanize_steps fetch", error, {"session_uuid": "uuid-5"})]
+		assert api_env.calls == [("optimus ai humanize_steps fetch", error, {"session_uuid": "uuid-5"})]
 		assert out["updated"] is False and out["reason"]
 
 

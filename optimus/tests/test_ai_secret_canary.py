@@ -508,11 +508,12 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 	sinks, scenario, job_timeout = canary
 	for name, (fn, args_factory) in _ENTRY_POINTS.items():
 		_drive(name, fn, args_factory, sinks, scenario, job_timeout)
-	# Every row still in the transaction is queued again by its rollback
-	# callback (frappe.throw's request rollback, execute_job's rollback).
+		# Each entry point is its own request or job: every row it left in the transaction is
+		# queued again by its rollback callback (frappe.throw's request rollback, execute_job's
+		# rollback). An entry that commits (Refresh's answers, a failed Steps rewrite) leaves none.
+		sinks.entry = f"(rollback after {name})"
+		frappe.db.rollback()
 	rows_written = len(sinks.stack)
-	sinks.entry = "(rollback)"
-	frappe.db.rollback()
 
 	if scenario == "non_latin_key":
 		assert sinks.posts == 0, "a key that cannot be sent must fail before any HTTP call"

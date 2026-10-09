@@ -1285,7 +1285,7 @@ def _render_session_report(docname: str, *, memo: dict | None = None) -> dict:
 	doc = frappe.get_doc("Optimus Session", docname)
 	recordings, step_failed = _analyze_mod._run_ai_step(
 		lambda: _analyze_mod.load_recordings_light(doc, memo=memo),
-		title="optimus regenerate_reports fetch", session_uuid=doc.session_uuid,
+		title="optimus ai regenerate_reports fetch", session_uuid=doc.session_uuid,
 	)
 	if step_failed:
 		recordings = []
@@ -1342,7 +1342,7 @@ def _rerender_after_ai(ref: SessionRef, *, memo: dict | None = None) -> bool:
 			raise
 
 	out, step_failed = _analyze_mod._run_ai_step(
-		_render, title="optimus AI re-render", session_uuid=ref.session_uuid,
+		_render, title="optimus ai re-render", session_uuid=ref.session_uuid,
 	)
 	return not step_failed and bool(out.get("regenerated"))
 
@@ -1425,6 +1425,15 @@ def _humanize_steps_core(doc, *, title: str | None = None, memo: dict | None = N
 	``{"updated": bool, "reason": str|None}`` so the composite endpoint can
 	report per-step outcomes without raising. ``memo`` is a caller-owned dict shared with the
 	re-render, so the persisted recordings are read once (``load_recordings_light``).
+
+	A failed rewrite runs through ``analyze._run_ai_step``: one Error Log row titled
+	``optimus ai humanize_steps`` (the same title as analyze's Steps step), written after the
+	``try``, and ``{"updated": False, "failed": True, "reason": <message>}``: the AI error's own
+	message (translated, with its next step), or a plain one for an unexpected error, for the
+	Refresh toast to show. The transaction is then committed, so an unattributed billed reply's
+	ambient charge is kept even if the re-render after it rolls back. A session with no user
+	actions is not a failure (no ``failed``, no row). An RQ job timeout is logged and leaves
+	fresh.
 	"""
 	from optimus import ai_fix
 	from optimus import analyze as _analyze_mod
@@ -1433,7 +1442,7 @@ def _humanize_steps_core(doc, *, title: str | None = None, memo: dict | None = N
 
 	recordings, step_failed = _analyze_mod._run_ai_step(
 		lambda: _analyze_mod.load_recordings_light(doc, memo=memo),
-		title="optimus humanize_steps fetch", session_uuid=getattr(doc, "session_uuid", None),
+		title="optimus ai humanize_steps fetch", session_uuid=getattr(doc, "session_uuid", None),
 	)
 	if step_failed:
 		recordings = []
@@ -1448,10 +1457,29 @@ def _humanize_steps_core(doc, *, title: str | None = None, memo: dict | None = N
 			),
 		}
 	_steps_usage: dict = {}
-	try:
-		steps_md = ai_fix.humanize_steps(actions, session_title=title, usage_out=_steps_usage)
-	except ai_fix.AiFixError as e:
-		return {"updated": False, "reason": str(e)}
+	reasons: list[str] = []
+
+	def _rewrite():
+		try:
+			return ai_fix.humanize_steps(actions, session_title=title, usage_out=_steps_usage)
+		except ai_fix.AiFixError as e:
+			# the user-facing message (no key, the reply scrubbed and capped), for the toast
+			reasons.append(str(e))
+			raise
+
+	steps_md, step_failed = _analyze_mod._run_ai_step(
+		_rewrite, title="optimus ai humanize_steps", session_uuid=getattr(doc, "session_uuid", None),
+	)
+	if step_failed:
+		safe_call.best_effort(safe_commit, None)
+		return {
+			"updated": False,
+			"failed": True,
+			"reason": reasons[0] if reasons else _(
+				"The Steps to Reproduce rewrite failed with an unexpected error. Search the Error Log "
+				"for titles starting with optimus ai."
+			),
+		}
 
 	frappe.db.set_value(
 		"Optimus Session", doc.name, {

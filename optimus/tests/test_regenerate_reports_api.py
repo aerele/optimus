@@ -114,7 +114,7 @@ def test_expired_recordings_render_with_an_empty_list(monkeypatch):
 	out = api._render_session_report(DOCNAME)
 	assert out["recordings_available"] == 0 and seen.rendered == [(DOCNAME, 0)]
 	# Logged once, with the exception, and outside the except block (no active exception).
-	assert seen.logged == [("optimus regenerate_reports fetch", "RuntimeError", None)]
+	assert seen.logged == [("optimus ai regenerate_reports fetch", "RuntimeError", None)]
 
 
 def test_rerender_after_ai_success_renders_once(monkeypatch):
@@ -131,7 +131,7 @@ def test_rerender_after_ai_reports_failure_instead_of_raising(monkeypatch):
 
 	monkeypatch.setattr(api, "_render_session_report", boom)
 	assert api._rerender_after_ai(_ref()) is False
-	assert seen.logged == [("optimus AI re-render", "RuntimeError", None)]
+	assert seen.logged == [("optimus ai re-render", "RuntimeError", None)]
 	assert len(fake.spies.rollback) == 1
 
 
@@ -292,7 +292,7 @@ def test_report_helpers_propagate_job_timeouts_without_the_failed_frames(monkeyp
 		assert seen.logged == []
 	else:
 		title = {
-			"fetch": "optimus regenerate_reports fetch",
-			"render": "optimus AI re-render", "rollback": "optimus AI re-render",
+			"fetch": "optimus ai regenerate_reports fetch",
+			"render": "optimus ai re-render", "rollback": "optimus ai re-render",
 		}[stage]
 		assert seen.logged == [(title, "_JobTimeout", None)]

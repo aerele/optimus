@@ -132,7 +132,7 @@ def test_a_failed_rerender_keeps_the_run_ready_with_a_warning(env):
 	assert "cleanup_run" in env.events[:env.events.index("render")]
 	assert _warnings(env) == ["earlier", WARNING]
 	# the failure is logged once, with its exception and session, outside any except block
-	assert env.logged == [("phase 2 re-render failed", "RuntimeError", {"session_uuid": "u1"}, None)]
+	assert env.logged == [("optimus ai phase 2 re-render", "RuntimeError", {"session_uuid": "u1"}, None)]
 
 
 def test_an_rq_timeout_in_the_rerender_keeps_ready_and_still_stops_the_job(env):

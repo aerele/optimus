@@ -254,17 +254,26 @@ function _refill_ai_call(frm) {
 			if (st.updated) parts.push(__("steps rewritten"));
 			const failed = fx.failed || 0;
 			const skipped = fx.skipped_time || 0;
+			// the Steps rewrite failed (not "no user actions" or a toggle that is off): say why
+			const stepsFailed = !st.updated && st.failed && st.reason;
 			// a "nothing to refresh" toast would contradict the failed-calls and skipped alerts below
 			const msg = parts.length
 				? __("Refreshed: {0}.", [parts.join(", ")])
-				: failed || skipped
+				: failed || skipped || stepsFailed
 					? ""
 					: __("Nothing to refresh.");
 			const indicator = failed ? "red" : parts.length ? "green" : "orange";
 			if (msg) frappe.show_alert({ message: msg, indicator: indicator });
 			if (failed) {
 				frappe.show_alert({
-					message: __("{0} call(s) failed, old suggestions kept (see Error Log, titles optimus ai_fix or optimus ai backfill).", [failed]),
+					message: __("{0} call(s) failed, old suggestions kept (search the Error Log for titles starting with optimus ai).", [failed]),
+					indicator: "red",
+				});
+			}
+			if (stepsFailed) {
+				// the server's message can quote the provider's reply: shown as text, never as HTML
+				frappe.show_alert({
+					message: __("Steps to Reproduce were not rewritten: {0}", [frappe.utils.escape_html(st.reason)]),
 					indicator: "red",
 				});
 			}

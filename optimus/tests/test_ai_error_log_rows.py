@@ -227,7 +227,7 @@ def test_the_runbook_has_a_row_per_kind_and_marks_the_fatal_ones():
 	for kind, cells in rows.items():
 		assert len(cells) == 4, kind
 		fatal_cell = cells[1]
-		assert (fatal_cell == "yes") == (kind in ai_fix.AI_FATAL_KINDS), kind
+		assert fatal_cell == str(kind in ai_fix.AI_FATAL_KINDS), kind  # the rows' own spelling
 		assert cells[2] and cells[3]
 
 
@@ -246,13 +246,14 @@ _ROOT = Path(__file__).resolve().parents[1]
 ])
 def test_operators_are_told_to_search_for_the_title_a_provider_failure_row_has(path):
 	"""A provider failure is logged by the HTTP layer under the title ``optimus ai_fix``; the step
-	title (``optimus ai backfill``, ``optimus ai auto-suggest``) is appended inside that row. A
-	pointer to the Error Log that names only a step title finds nothing."""
+	title (``optimus ai backfill``, ``optimus ai auto-suggest``) is appended inside that row, and
+	the other AI steps write rows of their own. Every AI title starts with ``optimus ai``: a
+	pointer to the Error Log names that prefix, which finds them all."""
 	# the outer auto-suggest step logs its own unexpected error under its own title
 	pointers = [p for p in _error_log_pointers(path) if ("title" in p or "titled" in p) and "(outer)" not in p]
 	assert pointers
 	for pointer in pointers:
-		assert "optimus ai_fix" in pointer, pointer
+		assert "titles starting with" in pointer and "optimus ai" in pointer, pointer
 
 
 def test_a_provider_failure_row_has_the_title_operators_are_sent_to(logs):

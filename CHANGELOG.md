@@ -56,14 +56,28 @@ versions may contain breaking changes see migration notes below).
   fill them in; the background refresh will queue a missing-only refresh for
   it.
 - The Error Log row of a failed AI call opens with `kind=`, `fatal=` and a
-  short fixed `hint=` for the kind, adds `tokens=` when the failed call was
-  billed, and, for a call that went through the parameter retries, `attempts=`
-  and `dropped=` (the parameters changed). The warnings and toasts that said to
-  search the Error Log for `optimus ai backfill` or `optimus ai auto-suggest`
-  now name `optimus ai_fix`, the title the HTTP layer gives every provider
-  failure (the step's title is inside the row). AI-FIXING has a section 5.3
-  for these rows and a runbook table in 6.5: every kind, whether it is fatal,
-  the symptom and the action. The reply body is never in a row.
+  short fixed `hint=` for the kind and adds `tokens=` when the failed call was
+  billed. A provider failure's row (`optimus ai_fix`) also has the request's
+  `provider=`, `where=` and `status=`, and, for a call that went through the
+  parameter retries, `attempts=` and `dropped=` (the parameters changed); a
+  failure after the reply arrived is the step's row and has no request lines.
+  Every AI Error Log title now starts with `optimus ai`, so one search finds
+  them all: `optimus humanize_steps`, `optimus humanize_steps fetch`,
+  `optimus AI re-render`, `optimus regenerate_reports fetch`, `optimus
+  recording cache read`, `optimus load recordings bundle` and `phase 2
+  re-render failed` are now `optimus ai humanize_steps`, `optimus ai
+  humanize_steps fetch`, `optimus ai re-render`, `optimus ai
+  regenerate_reports fetch`, `optimus ai recording cache read`, `optimus ai
+  load recordings bundle` and `optimus ai phase 2 re-render`. The analyze
+  warning, the Refresh toast and AI-FIXING say to search for titles starting
+  with `optimus ai`, and AI-FIXING section 5.3 lists every title (a test keeps
+  that list equal to the titles the code writes). The runbook table in 6.5
+  gives every kind, its `fatal=` value as the row spells it (`True` or
+  `False`), the symptom and the action. The reply body is never in a row.
+- The analyze-time warning for findings that got no AI suggestion names the
+  first failure's kind and what to do (for example "The first failure was
+  quota: The provider account is out of credit or quota. Top it up, then
+  refresh."), instead of "provider error or timeout" for every failure.
 - The model-window figures in the AI-FIXING troubleshooting entry are
   current: about 2,760 tokens for a fix suggestion and 2,168 for the Steps to
   Reproduce rewrite.
@@ -164,6 +178,12 @@ versions may contain breaking changes see migration notes below).
   A billed reply that turned out unusable is charged at once. No transaction
   stays open across a provider call, so the Steps to Reproduce call no longer
   runs while the refresh holds the session row.
+- A failed Steps to Reproduce rewrite on Refresh AI suggestions now writes an
+  Error Log row (`optimus ai humanize_steps`, as at analyze) and the toast says
+  why ("Steps to Reproduce were not rewritten: ..."); it was silent. The
+  reason is shown as text, never as HTML. An unexpected error there no longer
+  fails the whole refresh after its answers were saved, and the tokens of a
+  billed but unusable reply are committed at once.
 - Only one Refresh AI suggestions runs per session at a time. A second click
   while one runs is answered "A refresh is already running for this session"
   at once, before the refresh is counted or the provider is called; two

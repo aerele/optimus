@@ -763,7 +763,7 @@ def _append_run_warning(parent_docname: str, run_uuid: str, text: str) -> None:
 
 def _regenerate_parent_reports(session_uuid: str) -> bool:
 	"""Re-render saved results from the authorized Phase-2 worker. True when the report was
-	rendered; False when the render failed (one Error Log row, ``phase 2 re-render failed``)
+	rendered; False when the render failed (one Error Log row, ``optimus ai phase 2 re-render``)
 	or the session no longer exists (one neutral ``optimus`` log line, nothing to render).
 	An RQ job timeout is logged and escapes as a fresh instance."""
 	from optimus import analyze as analyze_mod
@@ -783,7 +783,7 @@ def _regenerate_parent_reports(session_uuid: str) -> bool:
 			raise
 
 	rendered, failed = analyze_mod._run_ai_step(
-		_render, title="phase 2 re-render failed", session_uuid=session_uuid,
+		_render, title="optimus ai phase 2 re-render", session_uuid=session_uuid,
 	)
 	if not failed and not rendered:
 		safe_call.log_error_line(

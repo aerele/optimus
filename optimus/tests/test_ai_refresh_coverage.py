@@ -291,3 +291,38 @@ def test_the_backfill_counts_come_from_the_selection(backfill):
 	with patch("optimus.settings.get_config", return_value=_cfg(ai_excluded_finding_types=("Slow Query",))):
 		out = analyze._run_ai_backfill(_doc(rows), cap=0)
 	assert (out["gated"], out["excluded"], out["total_pending"]) == (1, 1, 1)
+
+
+def test_the_auto_suggest_warning_names_the_first_failures_kind_and_hint(monkeypatch):
+	"""The warning said "provider error or timeout" even for a fatal key, quota or settings
+	failure; it now names what the first failure was and what to do."""
+	ctx = _one_n_plus_one_ctx()
+	ctx.findings.append(dict(ctx.findings[0], title="second"))
+	errors = iter([ai_fix.AiFixError("no credit", kind="quota"), ai_fix.AiFixError("slow", kind="timeout")])
+
+	def fail(payload, **kw):
+		raise next(errors)
+
+	monkeypatch.setattr(analyze, "_phase2_index_for", lambda doc: {})
+	monkeypatch.setattr(analyze, "_log_ai_step_failure", lambda *a, **k: None)
+	with patch("optimus.settings.get_config", return_value=_cfg()), \
+	     patch("optimus.ai_fix.is_available", return_value=True), \
+	     patch("optimus.ai_fix.suggest_fix", side_effect=fail):
+		analyze._enrich_findings_with_ai_suggestions(ctx)
+	[warning] = [w for w in ctx.warnings if "couldn't get a suggestion" in w]
+	assert warning.startswith("AI auto-suggest: 2 finding(s) couldn't get a suggestion.")
+	assert "The first failure was quota: " + ai_fix.KIND_HINTS["quota"] in warning
+	assert "provider error or timeout" not in warning
+	assert 'titles starting with \"optimus ai\"' in warning
+
+
+def test_the_auto_suggest_warning_names_an_unexpected_first_failure(monkeypatch):
+	ctx = _one_n_plus_one_ctx()
+	monkeypatch.setattr(analyze, "_phase2_index_for", lambda doc: {})
+	monkeypatch.setattr(analyze, "_log_ai_step_failure", lambda *a, **k: None)
+	with patch("optimus.settings.get_config", return_value=_cfg()), \
+	     patch("optimus.ai_fix.is_available", return_value=True), \
+	     patch("optimus.ai_fix.suggest_fix", side_effect=RuntimeError("boom")):
+		analyze._enrich_findings_with_ai_suggestions(ctx)
+	[warning] = [w for w in ctx.warnings if "couldn't get a suggestion" in w]
+	assert "The first failure was an unexpected error" in warning and "boom" not in warning

@@ -140,14 +140,14 @@ def test_warnings_name_the_setting_the_menu_and_the_error_log_title():
 	source = _read("optimus", "analyze.py")
 	assert "Generate AI fixes\" button" not in source and "use 'Generate AI fixes'" not in source
 	assert "AI > Refresh AI suggestions" in source
-	assert 'titles \\"optimus ai_fix\\" (provider failures) or \\"optimus ai auto-suggest\\"' in source
+	assert 'Search the Error Log for titles starting with \\"optimus ai\\"' in source
 	assert "ai_excluded_finding_types)" not in source
 	assert "Excluded finding types" in source
 
 
 def test_refresh_toasts_say_where_to_look():
 	js = _read("optimus", "optimus", "doctype", "optimus_session", "optimus_session.js")
-	assert "failed, old suggestions kept (see Error Log, titles optimus ai_fix or optimus ai backfill)" in js
+	assert "failed, old suggestions kept (search the Error Log for titles starting with optimus ai)" in js
 	assert "skipped (time budget). Run it again" in js
 	assert "were not sent to the AI. Their own advice or note is in the report." in js
 	assert "Excluded finding types" in js
