@@ -12,6 +12,8 @@ from optimus import ai_fix, analyze, api
 
 pytestmark = pytest.mark.rq
 
+_REAL_LOG_HTTP_ERROR = ai_fix._log_http_error
+
 
 @pytest.mark.parametrize("dialect,quote", [("mariadb", "`"), ("postgres", '"')])
 def test_counter_query_adds_in_database_with_null_coalescing(monkeypatch, dialect, quote):
@@ -85,6 +87,7 @@ def counter_db(monkeypatch):
 
 		def log(title, exc=None, **context):
 			db.logs.append((title, exc, context, sys.exc_info()[0]))
+			ai_fix._mark_logged(exc, "fake-log-row")  # a written row marks the exception, as the real one does
 			return True
 
 		monkeypatch.setattr(ai_fix, "log_ai_failure", log)
@@ -325,6 +328,31 @@ def test_humanize_without_usage_out_still_charges_an_unattributed_call(provider,
 	assert charged == [("uuid-A", "ai_tokens_spent", 9, "session_uuid")]
 
 
+@pytest.mark.parametrize(
+	"attribution", [{"session_uuid": ""}, {"docname": ""}, {"session_uuid": "", "docname": ""}],
+)
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+@pytest.mark.parametrize("entry", ["fix", "steps"])
+def test_an_empty_session_or_docname_is_unattributed(provider, charged, entry, attribution, protocol):
+	provider.use(protocol)
+	provider.install(_Reply(_ANSWER if entry == "fix" else "1. step", 7, protocol=protocol))
+	_ask(entry, **attribution)
+	assert charged == [("uuid-A", "ai_tokens_spent", 7, "session_uuid")]
+
+
+def test_an_internal_call_with_an_empty_session_is_charged_and_logged_to_the_ambient_one(
+	provider, charged, monkeypatch,
+):
+	provider.install(_Reply("ok", 5))
+	ai_fix._dispatch_call(dict(_PROVIDER), "system", [], usage_out={}, session_uuid="")
+	assert charged == [("uuid-A", "ai_tokens_spent", 5, "session_uuid")]
+	rows = []
+	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, **kw: rows.append(kw["session_uuid"]) or True)
+	monkeypatch.setattr(ai_fix, "_log_http_error", _REAL_LOG_HTTP_ERROR)
+	ai_fix._log_http_error("openai", "chat/completions", 500, session_uuid="")
+	assert rows == ["uuid-A"]
+
+
 def test_the_ambient_recorder_is_a_thin_wrapper_over_the_session_counter(charged):
 	ai_fix._record_session_spend(150)
 	assert charged == [("uuid-A", "ai_tokens_spent", 150, "session_uuid")]
@@ -342,6 +370,45 @@ def test_the_ambient_recorder_without_a_marker_is_a_no_op(charged, monkeypatch):
 	monkeypatch.setattr(frappe.local, "_optimus_spend_session", None, raising=False)
 	ai_fix._record_session_spend(150)
 	assert charged == []
+
+
+def test_a_deadlocked_ambient_charge_keeps_the_answer_and_logs_once(provider, counter_db):
+	# MariaDB rolled the whole transaction back: the savepoint is gone, so the counter logs and
+	# raises again. A per-call charge has no short transaction to retry: the reply is kept.
+	db = counter_db(run_error=RuntimeError("fake deadlock"), rollback_error=RuntimeError("fake no savepoint"))
+	provider.install(_Reply(_ANSWER, 7))
+	result = ai_fix.suggest_fix({"finding_type": "N+1 Query"})
+	assert result["suggestion"].startswith("## Diagnosis")
+	assert [(log[0], log[2]["savepoint_rollback"]) for log in db.logs] == [("optimus ai spend", "failed: RuntimeError")]
+
+
+def test_an_unlogged_counter_error_is_logged_once_and_the_reply_kept(charged, monkeypatch):
+	error = RuntimeError("fake unexpected counter failure")
+
+	def counter(*a, **k):
+		raise error
+
+	monkeypatch.setattr(analyze, "_increment_session_counter", counter)
+	rows = []
+	monkeypatch.setattr(
+		ai_fix, "log_ai_failure",
+		lambda title, exc=None, **kw: rows.append((title, exc, kw.get("session_uuid"), sys.exc_info()[0])) or True,
+	)
+	ai_fix._record_session_spend(7)  # returns: the reply that billed these tokens is kept
+	assert rows == [("optimus ai spend", error, "uuid-A", None)]
+
+
+def test_an_rq_timeout_in_the_ambient_charge_leaves_fresh(charged, monkeypatch):
+	Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
+	original = Timeout("fake timeout")
+
+	def counter(*a, **k):
+		raise original
+
+	monkeypatch.setattr(analyze, "_increment_session_counter", counter)
+	with pytest.raises(Timeout) as caught:
+		ai_fix._record_session_spend(7)
+	assert caught.value is not original and caught.value.__context__ is None
 
 
 def test_a_failed_spend_counter_keeps_the_billed_answer(provider, counter_db):
@@ -405,11 +472,35 @@ def test_health_window_uses_stopped_at_not_ai_modified(monkeypatch):
 # --- a session save never writes stale counters back -------------------------------------
 
 
-def test_a_save_keeps_the_stored_counters_and_its_own_other_fields():
+@pytest.mark.parametrize("loaded", [(0, 1), (10_000, 99)])  # stale; larger (a crafted REST save)
+def test_a_save_keeps_the_stored_counters_and_its_own_other_fields(loaded):
 	stored = SimpleNamespace(ai_tokens_spent=42, ai_refresh_count=3, notes="stored notes")
-	doc = SimpleNamespace(ai_tokens_spent=0, ai_refresh_count=1, notes="new notes", get_doc_before_save=lambda: stored)
+	doc = SimpleNamespace(
+		ai_tokens_spent=loaded[0], ai_refresh_count=loaded[1], notes="new notes", get_doc_before_save=lambda: stored,
+	)
 	analyze._keep_session_counters(doc)
 	assert (doc.ai_tokens_spent, doc.ai_refresh_count, doc.notes) == (42, 3, "new notes")
+
+
+def test_every_session_save_runs_the_counter_hook():
+	"""Stub-safe: the controller's ``before_validate`` (it runs on every save, ``ignore_validate``
+	included, after Frappe has read the row ``for_update``) calls ``_keep_session_counters(self)``."""
+	import ast
+	from pathlib import Path
+
+	path = Path(analyze.__file__).parent / "optimus" / "doctype" / "optimus_session" / "optimus_session.py"
+	cls = next(
+		n for n in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+		if isinstance(n, ast.ClassDef) and n.name == "OptimusSession"
+	)
+	hooks = {n.name: n for n in cls.body if isinstance(n, ast.FunctionDef)}
+	assert set(hooks) == {"before_validate"}
+	calls = [
+		n for n in ast.walk(hooks["before_validate"])
+		if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_keep_session_counters"
+	]
+	assert len(calls) == 1
+	assert [a.id for a in calls[0].args if isinstance(a, ast.Name)] == ["self"] and not calls[0].keywords
 
 
 def test_a_new_session_keeps_its_own_counters():

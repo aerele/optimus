@@ -2495,6 +2495,13 @@ def _increment_session_counter(
 	An RQ job timeout always leaves as a fresh instance. The savepoint is released after a
 	successful UPDATE.
 
+	A statement-level failure (a serialization failure 40001, a changed record 1020, a lock wait
+	timeout 1205, and on Postgres a deadlock too) leaves the savepoint usable, so it is absorbed
+	here: ``_add_ai_spend`` never raises it. The trade-off (owner decision D2): a
+	transient lock error on the counter drops that call's spend, and the Error Log row is all that
+	records it. Only an error that has already rolled back the whole transaction (a MariaDB
+	deadlock, 1213) reaches the caller.
+
 	Rules for a caller that records spend itself (``_add_ai_spend``, as the background refresh
 	engine will):
 
@@ -2502,8 +2509,8 @@ def _increment_session_counter(
 	  the session row locked until that transaction ends;
 	- write in one short transaction: this counter first, then the Finding row, then commit (the
 	  parent row before the child, the order ``Document.save`` locks them in);
-	- retry only that short transaction, and only on a serialization failure or a deadlock
-	  (40001, 1213, 1020, 1205); never retry the provider call."""
+	- retry only that short transaction: on the 1213 the counter raises again, or on 40001, 1213,
+	  1020 or 1205 from the Finding write or the commit; never retry the provider call."""
 	if not key or not n:
 		return
 	query = _session_increment_query(key, fieldname, n, by=by)
@@ -2561,8 +2568,10 @@ def _add_ai_spend(docname: str, tokens) -> None:
 def _bump_ai_refresh_count(docname: str) -> None:
 	"""Count one AI refresh on the session (``ai_refresh_count`` + 1), atomically, in the caller's
 	transaction (``_increment_session_counter``). No-op without a ``docname``. A caller commits
-	the bump on its own, before the refresh calls the provider, so the session row is not held
-	locked during the refresh (``api.refill_ai_suggestions``)."""
+	the bump on its own, before the refresh calls the provider, so the bump itself does not hold
+	the session row during the refresh (``api.refill_ai_suggestions``). The synchronous refresh
+	still locks the row again with each call's ambient spend charge until its backfill commits;
+	the background refresh (#73/#74) removes that."""
 	_increment_session_counter(docname, "ai_refresh_count", 1, title="optimus ai refresh count")
 
 

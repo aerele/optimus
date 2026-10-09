@@ -1254,7 +1254,7 @@ def _log_http_error(
 		with guard:
 			import frappe
 
-			if session_uuid is None:
+			if not session_uuid:
 				session_uuid = getattr(frappe.local, "_optimus_spend_session", None)
 	except Exception:
 		pass
@@ -1759,7 +1759,13 @@ def _record_session_spend(total_tokens) -> None:
 	session with ``analyze._add_ai_spend``, so no call is counted twice or charged to another
 	session. A thin wrapper over that same counter (``analyze._increment_session_counter``,
 	matched on ``session_uuid``): portable SQL in a savepoint, a failure rolled back to it and
-	logged after the ``try`` while the reply is kept, an RQ job timeout raised again fresh."""
+	logged after the ``try`` while the reply is kept, an RQ job timeout raised again fresh.
+
+	The counter raises again only when the rollback to its savepoint fails (the whole transaction
+	is already gone: a MariaDB deadlock), after it has logged the error. A per-call charge has no
+	short transaction to retry, so that error ends here and the reply is still returned: its
+	tokens are lost and the Error Log row says so. An error the counter did not log is logged
+	here once, after the ``try``. Never raises, except an RQ job timeout (fresh)."""
 	session_uuid = None
 	guard = _InterruptGuard()
 	try:
@@ -1776,9 +1782,20 @@ def _record_session_spend(total_tokens) -> None:
 		return
 	from optimus import analyze
 
-	analyze._increment_session_counter(
-		session_uuid, "ai_tokens_spent", tokens, by="session_uuid", title="optimus ai spend",
-	)
+	failure = None
+	guard = _InterruptGuard()
+	try:
+		with guard:
+			analyze._increment_session_counter(
+				session_uuid, "ai_tokens_spent", tokens, by="session_uuid", title="optimus ai spend",
+			)
+	except Exception as exc:
+		failure = exc
+	if guard.pending():
+		raise guard.interrupt()
+	if failure is not None and not getattr(failure, _LOGGED_ATTR, False):
+		log_ai_failure("optimus ai spend", failure, session_uuid=session_uuid, field="ai_tokens_spent", amount=tokens)
+	failure = None
 
 
 def _session_call_metadata(provider, *, session_uuid, docname, finding_type=None) -> dict | None:
@@ -1805,8 +1822,9 @@ def _call_anthropic(
 ) -> str:
 	"""One Anthropic Messages call. ``usage_out`` receives the reply's reported usage, and when
 	the caller passed one this billed reply is charged once to the ambient session
-	(``_record_session_spend``), unless the call is explicitly attributed (``session_uuid``
-	given or ``record_spend`` False): its caller then records the spend itself."""
+	(``_record_session_spend``), unless the call is explicitly attributed (a non-empty
+	``session_uuid``, or ``record_spend`` False): its caller then records the spend itself.
+	An empty ``session_uuid`` or ``docname`` counts as none, here and in the public entries."""
 	url = base_url.rstrip("/") + "/v1/messages"
 	headers = {
 		"content-type": "application/json",
@@ -1824,7 +1842,7 @@ def _call_anthropic(
 	usage = _usage_from_anthropic(data)
 	if usage_out is not None:
 		usage_out.update(usage)
-		if record_spend and session_uuid is None:
+		if record_spend and not session_uuid:
 			_record_session_spend(usage["total_tokens"])
 	if meta_out is not None:
 		meta_out["prompt_tokens_reported"] = any(_usage_block(data).get(k) is not None for k in (
@@ -1960,7 +1978,7 @@ def _call_openai_chat(
 	usage = _usage_from_openai(data)
 	if usage_out is not None:
 		usage_out.update(usage)
-		if record_spend and session_uuid is None:
+		if record_spend and not session_uuid:
 			_record_session_spend(usage["total_tokens"])
 	first = _first_choice(data)
 	if meta_out is not None:
@@ -2055,7 +2073,7 @@ def _dispatch_call(
 ) -> str:
 	"""Send one chat completion through the provider's protocol handler. The API
 	key is fetched here into a local named ``api_key`` (never into ``provider``).
-	``record_spend`` False (or a ``session_uuid``) marks an explicitly attributed
+	``record_spend`` False (or a non-empty ``session_uuid``) marks an explicitly attributed
 	call, whose spend its caller records itself (``analyze._add_ai_spend``);
 	otherwise the billed reply is charged to the ambient session
 	(``_record_session_spend``)."""

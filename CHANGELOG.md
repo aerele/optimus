@@ -24,7 +24,9 @@ versions may contain breaking changes see migration notes below).
   attribution, and portable atomic usage/counter helpers for background work.
   A counter increment runs in a savepoint inside the caller's transaction: a
   failed increment is rolled back alone and logged, and the answer it paid for
-  is kept. It is raised only when the whole transaction is already gone.
+  is kept; that call's tokens are then missing and the Error Log row records
+  them. It is raised only when the whole transaction is already gone, and only
+  to a caller that records spend itself: a per-call charge keeps the reply.
 - Count each AI call's tokens once, into one session. A call without explicit
   attribution is charged to the session being analyzed or refreshed; a caller
   that attributes a call explicitly records its tokens itself

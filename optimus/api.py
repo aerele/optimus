@@ -1488,8 +1488,10 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 	doc = frappe.get_doc("Optimus Session", ref.docname)
 
 	# Count this refresh (cumulative; only ever increases): one atomic SQL increment that leaves
-	# `modified` alone, committed on its own before any provider call so the session row is not
-	# held locked for the whole refresh. A failed bump is logged and the refresh goes on.
+	# `modified` alone, committed on its own before any provider call, so the bump no longer holds
+	# the session row. Each call's ambient spend charge below still locks the row again until the
+	# backfill commits (until the background refresh, #73/#74). A failed bump is logged and the
+	# refresh goes on.
 	_analyze_mod._bump_ai_refresh_count(doc.name)
 	safe_commit()
 
