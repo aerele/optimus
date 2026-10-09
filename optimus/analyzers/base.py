@@ -47,6 +47,7 @@ def row_get(row, key, default=None):
 	accessor for code that takes either shape (child rows, finding dicts)."""
 	return row.get(key, default) if isinstance(row, dict) else getattr(row, key, default)
 
+
 # The default "render durations in seconds above (ms)" threshold, used when the
 # Optimus Settings / site-config value is unset. Single source for every Python
 # resolver and formatter default below (the client-side picker in

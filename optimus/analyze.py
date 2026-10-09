@@ -2591,24 +2591,44 @@ def _keep_session_counters(doc) -> None:
 		setattr(doc, fieldname, getattr(previous, fieldname, None))
 
 
-def _system_timezone_name() -> str:
+def _system_timezone_name() -> str | None:
 	"""The site's System Settings timezone through Frappe's own helper
-	(``frappe.utils.get_system_timezone``; v15 and v16 both have it), or ``"UTC"`` when it
+	(``frappe.utils.get_system_timezone``; v15 and v16 both have it), or ``None`` when it
 	cannot be read. A job timeout raised while reading it escapes fresh."""
 	from optimus.ai_fix import _InterruptGuard
 
-	name = "UTC"
+	name = None
 	guard = _InterruptGuard()
 	try:
 		with guard:
 			from frappe.utils import get_system_timezone
 
-			name = str(get_system_timezone() or "UTC")
+			name = str(get_system_timezone() or "") or None
 	except Exception:
-		name = "UTC"
+		name = None
 	if guard.pending():
 		raise guard.interrupt()
 	return name
+
+
+def _system_zone():
+	"""The site's timezone as a ``tzinfo``. When it cannot be read or is not a known zone,
+	UTC, with one line in the bench log (written after the ``try``, never inside an ``except``)."""
+	from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+	zone = None
+	name = _system_timezone_name()
+	if name:
+		try:
+			zone = ZoneInfo(name)
+		except (ZoneInfoNotFoundError, ValueError, OSError):
+			zone = None
+	if zone is None:
+		safe_call.log_error_line(
+			"optimus: the System Settings timezone could not be read, so a naive requested_at is read as UTC"
+		)
+		return timezone.utc
+	return zone
 
 
 def _requested_cutoff(requested_at) -> float:
@@ -2620,7 +2640,11 @@ def _requested_cutoff(requested_at) -> float:
 	is how Frappe stores a Datetime field (a ``requested_at`` read from a document, or built
 	with ``frappe.utils.now_datetime()``). Any other type (``date``, a number, bytes) raises
 	``TypeError`` and an unreadable string raises ``ValueError``: a request time that
-	silently became "no cutoff" would bill every answer again."""
+	silently became "no cutoff" would bill every answer again.
+
+	A naive time inside the repeated hour when daylight saving ends resolves to its first
+	occurrence, so the cutoff can be up to an hour early. That only skips an answer generated
+	in that hour; it never asks again for one."""
 	if requested_at is None or requested_at == "":
 		return 0.0
 	if isinstance(requested_at, str):
@@ -2633,13 +2657,7 @@ def _requested_cutoff(requested_at) -> float:
 	else:
 		raise TypeError(f"requested_at must be a datetime or an ISO 8601 string, not {type(requested_at).__name__}")
 	if parsed.tzinfo is None:
-		from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-		try:
-			zone = ZoneInfo(_system_timezone_name())
-		except (ZoneInfoNotFoundError, ValueError, OSError):
-			zone = timezone.utc
-		parsed = parsed.replace(tzinfo=zone)
+		parsed = parsed.replace(tzinfo=_system_zone())
 	try:
 		return parsed.timestamp()
 	except (OverflowError, OSError, ValueError):
@@ -2677,7 +2695,9 @@ class AiSelection(list):
 	plus ``gated`` and ``excluded``, the counts :func:`_ai_selection` found among ALL the rows
 	given (not only the chosen ones). ``gated`` counts the AI-eligible findings (and Framework
 	N+1) the report answers with Optimus's own advice or a note; ``excluded`` counts the
-	AI-eligible findings whose type Optimus Settings excludes."""
+	AI-eligible findings whose type Optimus Settings excludes. Read ``.gated`` and ``.excluded``
+	BEFORE slicing, sorting or filtering the result: those operations return a plain ``list``
+	without them."""
 
 	gated: int = 0
 	excluded: int = 0
@@ -2735,6 +2755,10 @@ def _refresh_order_key(row, state: str, generated: float) -> tuple:
 	"""The order Refresh asks in: state (missing, outdated, current), severity, larger impact,
 	older answer."""
 	severity = row_get(row, "severity")
+	# A blank severity ranks as Low, like the report and the analyze-time order; anything else
+	# unrecognised goes last.
+	if severity is None or severity == "":
+		severity = "Low"
 	rank = SEVERITY_ORDER.get(severity, UNKNOWN_SEVERITY_RANK) if isinstance(severity, str) else UNKNOWN_SEVERITY_RANK
 	return (_FIX_STATE_RANK[state], rank, -_impact_ms(row), generated)
 

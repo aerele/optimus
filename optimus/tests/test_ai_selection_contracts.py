@@ -82,7 +82,9 @@ def system_tz(monkeypatch):
 		(answer(prompt_version=str(V)), "outdated"),
 		(answer(prompt_version=None), "outdated"),
 		(json.dumps({"suggestion": "x"}), "outdated"),
-		(answer(error="boom"), "outdated"),
+		(answer(error="boom"), "current"),
+		(answer(suggestion=5), "outdated"),
+		(answer(suggestion=["x"]), "outdated"),
 		(answer(suggestion="  "), "outdated"),
 		(answer(suggestion=[]), "outdated"),
 		(answer(guardrail={"fallback": True}), "current"),
@@ -109,6 +111,8 @@ def test_fix_state_honours_a_given_version_floor():
 		{"suggestion": "x", "prompt_version": str(V)},
 		{"suggestion": "x"},
 		{"suggestion": "x", "prompt_version": V, "guardrail": {"fallback": True}},
+		{"suggestion": "x", "prompt_version": V, "error": "boom"},
+		{"suggestion": "x", "prompt_version": V - 1, "error": "boom"},
 	],
 )
 def test_the_report_and_refresh_agree_on_a_shown_answer(fix):
@@ -134,13 +138,13 @@ def test_a_version_is_current_does_not_accept_is_outdated(version):
 	assert pick([row("x", answer(prompt_version=version))]) == ["x"]
 
 
-def test_error_and_empty_records_are_retried_but_a_fallback_answer_is_not():
+def test_empty_records_are_retried_but_a_fallback_or_error_keyed_answer_is_not():
 	rows = [
-		row("error", answer(error="boom")),
 		row("empty", answer(suggestion="")),
+		row("error-key", answer(error="boom")),
 		row("fallback", answer(guardrail={"fallback": True})),
 	]
-	assert pick(rows) == ["error", "empty"]
+	assert pick(rows) == ["empty"]
 
 
 @pytest.mark.parametrize("stored", ["{", "[]", '"answer"', "null"])
@@ -172,15 +176,18 @@ def test_order_is_state_then_severity_then_impact_then_age():
 	]
 
 
-def test_a_missing_or_unknown_severity_sorts_after_every_known_one():
+def test_a_blank_severity_ranks_as_low_and_an_unrecognised_one_goes_last():
 	rows = [
-		row("none", severity=None),
 		row("junk", severity="Urgent"),
 		row("list", severity=[]),
+		row("none", severity=None),
+		row("empty", severity=""),
 		row("low", severity="Low"),
+		row("high", severity="High"),
 	]
-	assert pick(rows)[0] == "low"
-	assert set(pick(rows)[1:]) == {"none", "junk", "list"}
+	got = pick(rows)
+	assert got[0] == "high" and got[1:4] == ["none", "empty", "low"]
+	assert set(got[4:]) == {"junk", "list"}
 
 
 def test_a_bigger_impact_goes_first_and_a_bad_impact_counts_as_zero():
@@ -309,12 +316,30 @@ def test_a_bad_stored_time_never_hides_work():
 	assert pick(rows, requested_at="2026-01-01T00:00:00Z") == ["junk", "int", "list"]
 
 
-def test_the_system_timezone_comes_from_frappe(monkeypatch):
-	utils = pytest.importorskip("frappe.utils")
-	if not hasattr(utils, "get_system_timezone"):
-		pytest.skip("frappe stub without get_system_timezone")
-	monkeypatch.setattr(utils, "get_system_timezone", lambda: "Asia/Kolkata")
+def test_the_system_timezone_comes_from_frappes_helper(monkeypatch):
+	import sys
+	import types
+
+	fake = types.ModuleType("frappe.utils")
+	fake.get_system_timezone = lambda: "Asia/Kolkata"
+	monkeypatch.setitem(sys.modules, "frappe.utils", fake)
 	assert analyze._system_timezone_name() == "Asia/Kolkata"
+	fake.get_system_timezone = lambda: ""
+	assert analyze._system_timezone_name() is None
+
+
+def test_an_unreadable_system_timezone_falls_back_to_utc_with_one_log_line_outside_an_except(monkeypatch):
+	import sys
+
+	lines = []
+	monkeypatch.setattr(analyze.safe_call, "log_error_line", lambda m, **k: lines.append((m, sys.exc_info()[0])))
+	monkeypatch.setattr(analyze, "_system_timezone_name", lambda: None)
+	assert analyze._system_zone() is dt.timezone.utc
+	monkeypatch.setattr(analyze, "_system_timezone_name", lambda: "Not/AZone")
+	assert analyze._system_zone() is dt.timezone.utc
+	assert len(lines) == 2 and all("timezone" in m and active is None for m, active in lines)
+	monkeypatch.setattr(analyze, "_system_timezone_name", lambda: "Asia/Kolkata")
+	assert str(analyze._system_zone()) == "Asia/Kolkata" and len(lines) == 2
 
 
 # ---- the light recording loader keeps only the recordings ---------------------------------------
@@ -369,6 +394,14 @@ def test_the_memo_holds_only_the_recording_dicts_never_the_parsed_bundle(light):
 	del light.raw[:]
 	gc.collect()
 	assert [ref() for ref in light.heavy] == [None, None]
+
+
+def test_a_new_recordings_file_on_the_same_session_is_read_again(light):
+	memo = {}
+	analyze.load_recordings_light(light.doc, ["fake-a"], memo=memo)
+	light.doc.recordings_file = "fake-file-2"
+	analyze.load_recordings_light(light.doc, ["fake-a"], memo=memo)
+	assert light.loads == ["fake-doc", "fake-doc"]
 
 
 def test_a_second_call_with_the_memo_does_not_read_the_file_again(light):

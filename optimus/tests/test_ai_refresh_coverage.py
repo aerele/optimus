@@ -249,7 +249,7 @@ def test_a_missing_only_refresh_and_eligible_findings_agree_on_what_is_missing(b
 	assert expected == ["blank"] and backfill.sent == ["blank"]
 
 
-def test_a_newer_answer_is_not_asked_again_and_a_float_version_is(backfill):
+def test_a_full_regenerate_asks_every_finding_missing_first_outdated_float_before_current_newer(backfill):
 	rows = [
 		_row("newer", version=ai_prompts.PROMPT_VERSION + 1),
 		_row("float", version=float(ai_prompts.PROMPT_VERSION)),
