@@ -50,6 +50,9 @@ SINK_ATTRS = frozenset({
 	("_lp_capture", "start_line_profile_pass"), ("_lp_capture", "stop_line_profile_pass"),
 	("_lp_capture", "cleanup_run"), ("_lp_analyzer", "run_analyze"),
 	("_analyze_mod", "_run_ai_backfill"),
+	# the session counters write the session row in SQL (they replaced a frappe.db.set_value sink)
+	("_analyze_mod", "_bump_ai_refresh_count"), ("_analyze_mod", "_add_ai_spend"),
+	("_analyze_mod", "_increment_session_counter"),
 	("_analyze_mod", "_render_and_attach_reports"),
 	("ai_fix", "suggest_fix"), ("ai_fix", "humanize_steps"), ("ai_fix", "test_connection"),
 })
@@ -298,3 +301,25 @@ def test_desk_js_reaches_post_only_endpoints_through_frappe_call():
 			assert refs.count(name) == via_call.count(name), (
 				f"{path.name}: {name} is referenced outside frappe.call({{method: ...}})"
 			)
+
+
+
+@pytest.mark.parametrize("statement", [
+	"_analyze_mod._bump_ai_refresh_count(doc.name)",
+	"_analyze_mod._add_ai_spend(doc.name, 10**9)",
+	"_analyze_mod._increment_session_counter(doc.name, 'ai_tokens_spent', 5)",
+])
+def test_an_ungated_endpoint_that_only_bumps_a_session_counter_is_caught(statement):
+	"""The counters write the session row with their own SQL, so an endpoint that bumps one
+	without the session gate must fail the audit like a ``frappe.db.set_value`` would."""
+	tree = ast.parse(API_PATH.read_text())
+	assert audit(tree) == []
+	tree.body.extend(ast.parse(
+		'@frappe.whitelist(methods=["POST"])\n'
+		"def bump_it(session_uuid: str) -> dict:\n"
+		"\tfrom optimus import analyze as _analyze_mod\n"
+		"\tdoc = frappe.get_doc('Optimus Session', {'session_uuid': session_uuid})\n"
+		f"\t{statement}\n"
+		"\treturn {}\n"
+	).body)
+	assert [p for p in audit(tree) if p.startswith("bump_it")]

@@ -142,7 +142,8 @@ read-only sections:
      useful after an Optimus upgrade that improves the renderer. It
      does not re-run the analyzer and does not call the AI provider;
      saved AI suggestions are kept as they are. For new or updated
-     suggestions use **AI > Refresh AI suggestions** (Ready sessions).
+     suggestions use **AI > Refresh AI suggestions** (Ready sessions,
+     with AI enabled).
    - **Phase 2 → Line Profile**: opens the picker dialog (see
      below).
    - **Pin as Baseline** / **Unpin Baseline**: see _Baseline

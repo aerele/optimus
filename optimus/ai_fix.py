@@ -127,7 +127,7 @@ KIND_HINTS: dict[str, str] = {
 	"bad_request": "The provider rejected the request. Check the Model and the Base URL.",
 	"refused": "The provider's content moderation refused this prompt. Other findings are not affected.",
 	"transport": "The provider could not be reached. Check this server's network, proxy and the Base URL.",
-	"timeout": "The provider did not answer in time. Raise Request timeout (seconds) or try again.",
+	"timeout": "The provider did not answer in time. Raise Request timeout (seconds) under Privacy & Operations, or try again.",
 	"bad_response": "The provider's reply was not usable. Try again; check the Base URL and Model.",
 	"internal": "Unexpected error while sending or processing. The frames below show where.",
 	"unknown": "Unclassified failure. Read the message below.",
@@ -575,7 +575,10 @@ def humanize_steps(
 			usage_out.update(usage)
 	text = (text or "").strip()
 	if not text:
-		raise AiFixError(_("The AI provider returned an empty response."), kind="bad_response", usage=usage)
+		raise AiFixError(_(
+			"The AI provider returned an empty response. Try again; if it keeps happening, choose another "
+			"Model under Optimus Settings > AI Fix Suggestions."
+		), kind="bad_response", usage=usage)
 	return text
 
 
@@ -1595,6 +1598,12 @@ def _classify_http_error(
 		or (status == 400 and "credit balance" in detail.lower() and "too low" in detail.lower())
 	):
 		return HttpErrorClassification("quota", _("The AI provider has insufficient credit or quota. Check your provider balance before retrying."), detail)
+	if status == 404 and hosted:
+		# A hosted provider's Base URL is built in (the field is hidden): only the Model can be wrong.
+		return HttpErrorClassification("not_found", _(
+			"The AI provider returned 404 (Not Found) for {0}. Check that the Model under Optimus Settings > "
+			"AI Fix Suggestions is a valid model name for this provider."
+		).format(url), detail)
 	if status == 404:
 		return HttpErrorClassification("not_found", _(
 			"The AI provider returned 404 (Not Found) for {0}. Check that the Model in Optimus Settings "
@@ -1860,7 +1869,7 @@ def _timeout_failure(budget: float) -> AiFixError:
 
 	return AiFixError(_(
 		"The AI provider didn't respond within {0} seconds. Try again later; if the model is often this slow, "
-		"raise Request timeout (seconds) under Optimus Settings > AI Fix Suggestions."
+		"raise Request timeout (seconds) under Optimus Settings > AI Fix Suggestions > Privacy & Operations."
 	).format(max(1, round(budget))), kind="timeout")
 
 
@@ -2111,7 +2120,10 @@ def _call_anthropic(
 			return _text_or_empty(blocks[0].get("text"))
 	from frappe import _
 
-	raise AiFixError(_("The AI provider's response didn't contain any text."), kind="bad_response", usage=usage)
+	raise AiFixError(_(
+		"The AI provider's response didn't contain any text. Try again; if it keeps happening, choose another "
+		"Model under Optimus Settings > AI Fix Suggestions."
+	), kind="bad_response", usage=usage)
 
 
 def _text_or_empty(text) -> str:
@@ -2302,7 +2314,10 @@ def _call_openai_chat(
 		return _strip_leading_think(content, usage=usage)
 	from frappe import _
 
-	raise AiFixError(_("The AI provider's response didn't contain any text."), kind="bad_response", usage=usage)
+	raise AiFixError(_(
+		"The AI provider's response didn't contain any text. Try again; if it keeps happening, choose another "
+		"Model under Optimus Settings > AI Fix Suggestions."
+	), kind="bad_response", usage=usage)
 
 
 def _reask_enabled() -> bool:
@@ -2481,7 +2496,10 @@ def _complete_with_guardrails(
 	if not text:
 		from frappe import _
 
-		raise AiFixError(_("The AI provider returned an empty response."), kind="bad_response", usage=dict(usage))
+		raise AiFixError(_(
+			"The AI provider returned an empty response. Try again; if it keeps happening, choose another "
+			"Model under Optimus Settings > AI Fix Suggestions."
+		), kind="bad_response", usage=dict(usage))
 	first_usage = dict(usage)
 	if meta.get("prompt_tokens_reported") is False:
 		first_usage.pop("prompt_tokens", None)  # normalized zero is not a reported zero

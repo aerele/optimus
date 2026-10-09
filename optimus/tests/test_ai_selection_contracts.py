@@ -457,3 +457,43 @@ def test_there_is_one_row_accessor():
 	assert row_get({"a": 1}, "a") == 1 and row_get(SimpleNamespace(a=2), "a") == 2
 	assert row_get({}, "a", 9) == 9 and row_get(SimpleNamespace(), "a", 9) == 9
 	assert ai_fix.gate_input({"finding_type": "T"}) == ai_fix.gate_input(SimpleNamespace(finding_type="T"))
+
+
+# ---- the guards around reading a time --------------------------------------------------------------
+
+
+class _FakeTimeout(Exception):
+	"""Stands for rq's job timeout (``safe_call.job_timeout_types`` is pointed at it)."""
+
+
+class _BrokenOffset(dt.tzinfo):
+	"""A ``tzinfo`` whose offset Python refuses (24 hours or more)."""
+
+	def utcoffset(self, when):
+		return dt.timedelta(hours=25)
+
+	def dst(self, when):
+		return None
+
+
+def test_a_failing_timezone_helper_reads_as_no_timezone_and_a_timeout_leaves_fresh(monkeypatch):
+	import sys
+	import types
+
+	fake = types.ModuleType("frappe.utils")
+	fake.get_system_timezone = lambda: (_ for _ in ()).throw(RuntimeError("System Settings unreadable"))
+	monkeypatch.setitem(sys.modules, "frappe.utils", fake)
+	assert analyze._system_timezone_name() is None
+	monkeypatch.setattr(analyze.safe_call, "job_timeout_types", lambda: (_FakeTimeout,))
+	original = _FakeTimeout("expired")
+	fake.get_system_timezone = lambda: (_ for _ in ()).throw(original)
+	with pytest.raises(_FakeTimeout) as caught:
+		analyze._system_timezone_name()
+	assert caught.value is not original and caught.value.args == ("expired",)
+	assert caught.value.__context__ is None and caught.value.__cause__ is None
+
+
+def test_a_request_time_that_cannot_be_turned_into_a_timestamp_is_a_value_error():
+	with pytest.raises(ValueError, match="out of range") as caught:
+		analyze._requested_cutoff(dt.datetime(2026, 1, 1, tzinfo=_BrokenOffset()))
+	assert caught.value.__cause__ is None and caught.value.__suppress_context__

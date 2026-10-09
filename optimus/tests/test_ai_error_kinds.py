@@ -662,3 +662,54 @@ def test_billed_usage_is_filtered_once_for_every_failure():
 	with pytest.raises(ai_fix.AiFixError) as caught:
 		ai_fix._with_usage_on_failure(failed, usage)
 	assert caught.value.usage == ai_fix.AiFixError("x", usage=usage).usage == {"total_tokens": 5}
+
+
+
+# --- messages: a next step on every unusable reply, the right Settings place --------------
+
+_CHOOSE_MODEL = "Try again; if it keeps happening, choose another Model under Optimus Settings > AI Fix Suggestions."
+
+
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+def test_a_reply_without_text_says_what_to_do(wire, marked, monkeypatch, protocol):
+	_fake_provider(monkeypatch, protocol=protocol)
+	payload = {"choices": [{"message": {"content": None}}]} if protocol == "openai" else {"content": []}
+	wire.install(Reply(200, payload))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix._dispatch_call(ai_fix._provider_config(), "s", [], usage_out={})
+	assert caught.value.kind == "bad_response"
+	assert str(caught.value) == "[t]The AI provider's response didn't contain any text. " + _CHOOSE_MODEL
+
+
+@pytest.mark.parametrize("entry", ["fix", "steps"])
+def test_an_empty_reply_says_what_to_do(wire, marked, monkeypatch, entry):
+	_fake_provider(monkeypatch)
+	wire.install(Reply(200, {"choices": [{"message": {"content": "   "}}]}))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		if entry == "fix":
+			ai_fix.suggest_fix({"finding_type": "N+1 Query"})
+		else:
+			ai_fix.humanize_steps([{"label": "fake"}])
+	assert caught.value.kind == "bad_response"
+	assert str(caught.value) == "[t]The AI provider returned an empty response. " + _CHOOSE_MODEL
+
+
+def test_a_hosted_not_found_names_the_model_and_never_the_base_url(marked):
+	hosted = ai_fix._classify_http_error(404, "", url="https://api.openai.com/v1/chat/completions", hosted=True)
+	own = ai_fix._classify_http_error(404, "", url="http://localhost:11434/v1/chat/completions", hosted=False)
+	assert hosted.kind == own.kind == "not_found"
+	assert "Model under Optimus Settings > AI Fix Suggestions" in hosted.message
+	assert "Base URL" not in hosted.message and "/v1" not in hosted.message.split("for ", 1)[1].split(". ", 1)[1]
+	assert "Base URL" in own.message and "'/v1' path segment" in own.message
+
+
+def test_the_timeout_message_names_where_request_timeout_lives(marked):
+	message = str(ai_fix._timeout_failure(60))
+	assert "Request timeout (seconds) under Optimus Settings > AI Fix Suggestions > Privacy & Operations." in message
+
+
+@pytest.mark.parametrize("url", [None, 123, "", b"https://api.openai.com/v1", "http://[::1", "not a url"])
+def test_an_odd_base_url_is_never_hosted(url):
+	"""A value that is not a string, an empty one, or one ``urlsplit`` refuses (an unclosed IPv6
+	bracket raises ValueError) reads as a bring-your-own endpoint."""
+	assert ai_fix._is_hosted_endpoint(url) is False

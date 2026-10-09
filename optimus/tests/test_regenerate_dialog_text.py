@@ -32,13 +32,25 @@ def test_the_dialog_says_what_regenerate_does_and_does_not_do():
 		assert f'__("{sentence}' in text or sentence in text, sentence
 
 
-def test_the_pointer_to_refresh_is_for_ready_sessions_only():
+def test_the_pointer_to_refresh_is_for_ready_sessions_with_ai_enabled_only():
 	text = _confirm_text()
-	pointer = "For new or updated AI suggestions use AI > Refresh AI suggestions (available when the session is Ready)."
+	pointer = "For new or updated AI suggestions use AI > Refresh AI suggestions (available when AI is enabled and the session is Ready)."
 	assert pointer in text
 	index = text.index(pointer)
-	# the pointer sits behind a Ready check, so a Failed session is not sent to a button it does not have
-	assert re.search(r'frm\.doc\.status\s*===?\s*"Ready"', text[:index][-300:])
+	# the pointer sits behind a Ready check and the AI switch, so neither a Failed session nor a
+	# site with AI off is sent to a button it does not have
+	guard = text[:index][-300:]
+	assert re.search(r'frm\.doc\.status\s*===?\s*"Ready"', guard)
+	assert "frm._optimus_ai_enabled" in guard
+
+
+def test_the_ai_switch_the_pointer_reads_is_the_one_the_ai_button_uses():
+	"""``render_ai_buttons`` asks ``ai_capabilities`` whether the master AI switch is on; it
+	records the answer on the form (False until it is known, and on a non-Ready session)."""
+	body = re.sub(r"\s+", " ", _function_body("render_ai_buttons"))
+	reset = body.index("frm._optimus_ai_enabled = false;")
+	assert reset < body.index("if (frm.is_new()) return;")
+	assert "frm._optimus_ai_enabled = true;" in body[body.index("if (!c.enabled) return;"):]
 
 
 def test_the_dialog_text_is_translatable():

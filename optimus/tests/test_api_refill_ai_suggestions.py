@@ -252,3 +252,10 @@ def test_the_form_shows_a_busy_refresh_as_a_notice_and_stops():
 	busy = body.index("if (m.busy) {")
 	assert body.index("return;", busy) < body.index("const fx = m.fixes", busy)
 	assert '__("A refresh is already running for this session.' in body[busy:busy + 400]
+
+
+def test_refill_with_fix_suggestions_off_skips_the_backfill(env):
+	fake, h = env(cfg=_cfg(ai_suggest_findings=False))
+	out = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
+	assert h.backfill.call_count == 0 and out["fixes"]["skipped"] == "toggle_off"
+	assert h.humanize.call_count == 1 and _FLAG not in fake.cache.store

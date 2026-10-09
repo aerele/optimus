@@ -282,3 +282,14 @@ def test_a_status_that_cannot_be_read_marks_the_run_failed_as_before(env):
 	with pytest.raises(RuntimeError):
 		lp.run_analyze("u1", "run1")
 	assert "mark_failed:after the commit" in env.events
+
+
+def test_a_rollback_that_fails_never_hides_the_runs_failure(env):
+	def broken_rollback(**kw):
+		raise RuntimeError("connection gone")
+
+	env.fake.db.rollback = broken_rollback
+	env.mp.setattr(capture, "read_all_samples", lambda r: (_ for _ in ()).throw(RuntimeError("redis gone")))
+	with pytest.raises(RuntimeError, match="redis gone"):
+		lp.run_analyze("u1", "run1")
+	assert "mark_failed:redis gone" in env.events and env.events[-1] == "phase_2_run_failed"

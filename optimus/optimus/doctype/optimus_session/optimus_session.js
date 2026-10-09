@@ -69,6 +69,8 @@ function optimus_fmt_ms(ms, decimals) {
 // whether the button appears at all; per-section toggles are honored
 // inside the server endpoint (a toggle-off section is skipped silently).
 function render_ai_buttons(frm) {
+	// Whether the AI button is offered (read by the Regenerate Reports dialog's pointer to it).
+	frm._optimus_ai_enabled = false;
 	if (frm.is_new()) return;
 	if (frm.doc.status !== "Ready") return;
 	frappe.call({
@@ -76,6 +78,7 @@ function render_ai_buttons(frm) {
 		callback: (r) => {
 			const c = (r && r.message) || {};
 			if (!c.enabled) return; // master switch off → no AI button
+			frm._optimus_ai_enabled = true;
 			render_ai_refill_button(frm);
 		},
 		// Read failed (e.g. not configured / no perm) → render nothing.
@@ -927,10 +930,10 @@ function render_regenerate_report_button(frm) {
 		let message = __(
 			"Re-render the report from stored session data. This does not re-run the analyzer and does not call the AI provider; saved AI suggestions are kept as they are."
 		);
-		// A Failed session has no Refresh AI suggestions button, so only a Ready one is pointed at it.
-		if (frm.doc.status === "Ready") {
+		// The Refresh AI suggestions button exists only on a Ready session with AI enabled.
+		if (frm.doc.status === "Ready" && frm._optimus_ai_enabled) {
 			message += " " + __(
-				"For new or updated AI suggestions use AI > Refresh AI suggestions (available when the session is Ready)."
+				"For new or updated AI suggestions use AI > Refresh AI suggestions (available when AI is enabled and the session is Ready)."
 			);
 		}
 		frappe.confirm(

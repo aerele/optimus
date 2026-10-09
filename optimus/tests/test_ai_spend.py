@@ -778,3 +778,52 @@ def test_an_internal_call_with_only_a_docname_is_explicit_for_charge_and_row(pro
 	with pytest.raises(ai_fix.AiFixError):
 		ai_fix._dispatch_call(dict(_PROVIDER, protocol=protocol), "system", [], usage_out={}, docname="SESS-B")
 	assert rows == [(None, "SESS-B")]
+
+
+class _UnreadableLocal:
+	"""``frappe.local`` whose attributes cannot be read (``error`` is raised on every read)."""
+
+	def __init__(self, error):
+		object.__setattr__(self, "error", error)
+
+	def __getattr__(self, name):
+		raise object.__getattribute__(self, "error")
+
+
+class _FakeTimeout(Exception):
+	"""Stands for rq's job timeout (``safe_call.job_timeout_types`` is pointed at it)."""
+
+
+def test_an_unreadable_spend_marker_files_the_row_without_a_session(monkeypatch):
+	import frappe
+
+	rows = []
+	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, **kw: rows.append(kw["session_uuid"]) or True)
+	monkeypatch.setattr(frappe, "local", _UnreadableLocal(RuntimeError("no request context")))
+	_REAL_LOG_HTTP_ERROR("openai", "chat/completions", 500)
+	assert rows == [None]
+
+
+def test_a_timeout_while_reading_the_spend_marker_leaves_fresh(monkeypatch):
+	import frappe
+
+	from optimus import safe_call
+
+	monkeypatch.setattr(safe_call, "job_timeout_types", lambda: (_FakeTimeout,))
+	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **k: pytest.fail("no row after a timeout"))
+	original = _FakeTimeout("expired")
+	monkeypatch.setattr(frappe, "local", _UnreadableLocal(original))
+	for read in (lambda: _REAL_LOG_HTTP_ERROR("openai", "chat/completions", 500), lambda: ai_fix._record_session_spend(7)):
+		with pytest.raises(_FakeTimeout) as caught:
+			read()
+		assert caught.value is not original and caught.value.__context__ is None
+
+
+def test_an_unreadable_spend_marker_charges_nothing(monkeypatch):
+	import frappe
+
+	seen = []
+	monkeypatch.setattr(analyze, "_increment_session_counter", lambda *a, **k: seen.append(a))
+	monkeypatch.setattr(frappe, "local", _UnreadableLocal(RuntimeError("no request context")))
+	ai_fix._record_session_spend(7)
+	assert seen == []

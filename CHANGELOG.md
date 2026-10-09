@@ -36,8 +36,11 @@ versions may contain breaking changes see migration notes below).
   (`transport`) failure, not a slow model; one that had less of the request's
   budget left (a parameter retry, a redirect, a re-ask) is a `timeout`. A
   rejected request names the Base URL only for a provider whose Base URL you
-  set. The provider's reply
-  follows as "The provider replied: ...", without the old ".:" join. An
+  set, and a hosted provider's 404 names only the Model (its Base URL is
+  built in). A reply with no text, or an empty one, says to try again or
+  choose another Model. A timeout says where Request timeout (seconds) lives:
+  Optimus Settings > AI Fix Suggestions > Privacy & Operations. The provider's
+  reply follows as "The provider replied: ...", without the old ".:" join. An
   unexpected error names only its type, and its Error Log row records where it
   happened as plain `file:line:function` frames. A transport failure's row
   keeps only the error types (`ConnectionError (NameResolutionError)`), never
@@ -50,8 +53,9 @@ versions may contain breaking changes see migration notes below).
   Python trees or sidecars. Use Refresh AI suggestions for new answers. Its
   confirmation now says so: it does not re-run the analyzer and does not call
   the AI provider, saved AI suggestions are kept, and a Ready session is
-  pointed at AI > Refresh AI suggestions (a Failed session is not, because the
-  button is not shown there). README and AI-FIXING say the same.
+  pointed at AI > Refresh AI suggestions when AI is enabled (a Failed session,
+  or a site with AI off, is not, because the button is not shown there).
+  README and AI-FIXING say the same.
 - Phase 2 no longer asks the AI for fixes for the Hot Line findings it adds
   (its report re-render used to fill missing suggestions when AI suggestions
   were on by default). Run AI > Refresh AI suggestions on the Ready session to
