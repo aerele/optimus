@@ -103,14 +103,19 @@ versions may contain breaking changes see migration notes below).
   older bare uuid map is read the same way in both.
 - Add explicit session
   attribution (`session_uuid` / `docname` on `suggest_fix` and `humanize_steps`),
-  and portable atomic usage/counter helpers for background work. They are ready
-  but not yet passed by any caller: nothing in this release attributes a call
-  explicitly, so every call is still charged to the session being analyzed or
-  refreshed. A counter increment runs in a savepoint inside the caller's transaction: a
+  and portable atomic usage/counter helpers for background work. Refresh AI
+  suggestions now attributes its fix calls explicitly and records each call's
+  tokens with its answer (see Fixed); analyze and the Steps to Reproduce
+  rewrite are still charged to the session being analyzed or refreshed. A
+  counter increment runs in a savepoint inside the caller's transaction: a
   failed increment is rolled back alone and logged, and the answer it paid for
   is kept; that call's tokens are then missing and the Error Log row records
-  them. It is raised only when the whole transaction is already gone, and only
-  to a caller that records spend itself: a per-call charge keeps the reply.
+  them. It is raised only when the whole transaction is already gone (a
+  MariaDB deadlock, 1213, or 1020 "Record has changed since last read", which
+  MariaDB 11.8 raises by default; Frappe raises both as
+  `frappe.QueryDeadlockError`), and only to a caller that records spend
+  itself, which tries its short write again: a per-call charge keeps the
+  reply.
 - Count each AI call's tokens once, into one session. A call without explicit
   attribution is charged to the session being analyzed or refreshed; a caller
   that attributes a call explicitly records its tokens itself
@@ -145,6 +150,28 @@ versions may contain breaking changes see migration notes below).
   dropped silently, and an RQ job timeout during it stops the job.
 - Count a Refresh AI suggestions run with one atomic increment, committed
   before the refresh calls the provider, instead of a read-modify-write.
+- Refresh AI suggestions writes each answer and the tokens of the call that
+  made it in one short transaction, committed before it asks about the next
+  finding. On MariaDB 11.8 (`innodb_snapshot_isolation` is on by default), a
+  write to the session row by anything else during a refresh (a Phase 2 run
+  finishing, a Desk save) made the next spend charge fail with 1020 ("Record
+  has changed since last read"), which rolls back the whole transaction: every
+  answer of that refresh not yet committed was lost, and the toast still
+  counted it as added. The write now starts after the provider call's read
+  view is gone, is tried again from a rollback when the database ends the
+  whole transaction (`frappe.QueryDeadlockError`, at most three tries; the
+  provider is never asked again), and `added` counts only committed answers.
+  A billed reply that turned out unusable is charged at once. No transaction
+  stays open across a provider call, so the Steps to Reproduce call no longer
+  runs while the refresh holds the session row.
+- Only one Refresh AI suggestions runs per session at a time. A second click
+  while one runs is answered "A refresh is already running for this session"
+  at once, before the refresh is counted or the provider is called; two
+  overlapping refreshes billed every finding twice and overwrote each other's
+  answers. The flag is a Redis key (`optimus:ai_refresh:<session_uuid>`, taken
+  with `SET NX EX`) that only the refresh holding it releases; it expires on
+  its own after the longest a refresh can run, and a Redis failure lets the
+  refresh run without it.
 - Treat Moonshot/Kimi's HTTP 429 `exceeded_current_quota_error` (a spent
   balance or a suspended account) as exhausted quota, not a rate limit to wait
   out.

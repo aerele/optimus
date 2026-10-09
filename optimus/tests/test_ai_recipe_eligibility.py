@@ -14,6 +14,13 @@ import pytest
 
 from optimus import ai_fix, analyze
 
+
+@pytest.fixture(autouse=True)
+def _commit_on_the_fake_db(monkeypatch):
+	"""``_run_ai_backfill`` commits each answer through ``analyze.safe_commit``; send that commit
+	to whatever ``analyze.frappe`` a test installs."""
+	monkeypatch.setattr(analyze, "safe_commit", lambda: analyze.frappe.db.commit())
+
 _USER_FILE = "/home/b/apps/myapp/myapp/order.py"
 _RESULT = {"suggestion": "**Fix**\n\ndo X", "model": "m", "provider": "OpenAI-compatible",
            "generated_at": "2026-09-24T00:00:00+00:00"}

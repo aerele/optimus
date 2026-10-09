@@ -18,6 +18,13 @@ from optimus import ai_fix, ai_grounding, analyze, renderer, safe_call
 from optimus.renderer import index_recipes, recipe_enrichment
 
 
+@pytest.fixture(autouse=True)
+def _commit_on_the_fake_db(monkeypatch):
+	"""``_run_ai_backfill`` commits each answer through ``analyze.safe_commit``; send that commit
+	to whatever ``analyze.frappe`` a test installs."""
+	monkeypatch.setattr(analyze, "safe_commit", lambda: analyze.frappe.db.commit())
+
+
 def _boom(*args, **kwargs):
 	raise RuntimeError("recipe bug")
 

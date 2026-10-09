@@ -2493,22 +2493,26 @@ def _increment_session_counter(
 	An RQ job timeout always leaves as a fresh instance. The savepoint is released after a
 	successful UPDATE.
 
-	A statement-level failure (a serialization failure 40001, a changed record 1020, a lock wait
-	timeout 1205, and on Postgres a deadlock too) leaves the savepoint usable, so it is absorbed
-	here: ``_add_ai_spend`` never raises it. The trade-off (owner decision D2): a
-	transient lock error on the counter drops that call's spend, and the Error Log row is all that
-	records it. Only an error that has already rolled back the whole transaction (a MariaDB
-	deadlock, 1213) reaches the caller.
+	A statement-level failure (a serialization failure 40001, a lock wait timeout 1205, and on
+	Postgres a deadlock too) leaves the savepoint usable, so it is absorbed here: ``_add_ai_spend``
+	never raises it. The trade-off (owner decision D2): a transient lock error on the counter drops
+	that call's spend, and the Error Log row is all that records it. Only an error that has already
+	rolled back the whole transaction reaches the caller: a MariaDB deadlock (1213), or 1020
+	("Record has changed since last read"), which MariaDB 11.8 raises by default
+	(``innodb_snapshot_isolation``) when this transaction's read view is older than another
+	transaction's commit of the session row, and which also ends the whole transaction. Frappe
+	raises both as ``frappe.QueryDeadlockError``.
 
-	Rules for a caller that records spend itself (``_add_ai_spend``, as the background refresh
-	engine will):
+	Rules for a caller that records spend itself (``_add_ai_spend``: ``_write_ai_answer`` for
+	Refresh AI suggestions, and the background refresh engine):
 
 	- never call the AI provider inside the transaction that holds the counter: the UPDATE keeps
 	  the session row locked until that transaction ends;
 	- write in one short transaction: this counter first, then the Finding row, then commit (the
 	  parent row before the child, the order ``Document.save`` locks them in);
-	- retry only that short transaction: on the 1213 the counter raises again, or on 40001, 1213,
-	  1020 or 1205 from the Finding write or the commit; never retry the provider call."""
+	- retry only that short transaction, after a full rollback, on ``frappe.QueryDeadlockError``
+	  (1213 or 1020 on MariaDB, a deadlock on Postgres) from the counter, the Finding write or the
+	  commit; never retry the provider call."""
 	if not key or not n:
 		return
 	query = _session_increment_query(key, fieldname, n, by=by)
@@ -2567,9 +2571,9 @@ def _bump_ai_refresh_count(docname: str) -> None:
 	"""Count one AI refresh on the session (``ai_refresh_count`` + 1), atomically, in the caller's
 	transaction (``_increment_session_counter``). No-op without a ``docname``. A caller commits
 	the bump on its own, before the refresh calls the provider, so the bump itself does not hold
-	the session row during the refresh (``api.refill_ai_suggestions``). The synchronous refresh
-	still locks the row again with each call's ambient spend charge until its backfill commits;
-	the background refresh (#73/#74) removes that."""
+	the session row during the refresh (``api.refill_ai_suggestions``). The refresh then locks
+	the row only inside each answer's short write (``_write_ai_answer``), never across a
+	provider call."""
 	_increment_session_counter(docname, "ai_refresh_count", 1, title="optimus ai refresh count")
 
 
@@ -2722,7 +2726,8 @@ def eligible_findings(rows, cfg, *, regenerate_all=False, requested_at=None, inc
 
 	Order: missing, then outdated, then current; inside each, severity (High first; a missing
 	or unknown severity last), then the larger ``estimated_impact_ms``, then the older answer.
-	``_run_ai_backfill`` sorts with the same key."""
+	``_run_ai_backfill`` asks in exactly this order: it takes the list as returned, only cut to
+	its cap."""
 	from optimus import ai_fix
 
 	cutoff = _requested_cutoff(requested_at)
@@ -2815,6 +2820,78 @@ def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 	return result
 
 
+# How many times one answer's short write (its spend, the Finding row, the commit) is tried in all
+# when the database rolled the whole transaction back (``frappe.QueryDeadlockError``).
+AI_WRITE_ATTEMPTS = 3
+
+
+def _whole_transaction_rolled_back(exc) -> bool:
+	"""True when ``exc`` is ``frappe.QueryDeadlockError``: the database ended the whole transaction
+	(MariaDB: a deadlock, 1213, or 1020 "Record has changed since last read" under
+	``innodb_snapshot_isolation``, on by default since 11.8; Postgres: a deadlock), so a short write
+	can start again from a rollback. Frappe raises it for those codes on v15 and v16."""
+	deadlock = getattr(frappe, "QueryDeadlockError", None)
+	return isinstance(deadlock, type) and isinstance(exc, deadlock)
+
+
+def _write_ai_answer(docname: str, finding: str, blob: str | None, tokens: int, *, session_uuid=None) -> bool:
+	"""Write one finding's AI answer and the spend of the call that made it in one short
+	transaction, and commit it. True once it committed.
+
+	The order is the counter rule's (``_increment_session_counter``): the session's spend first
+	(``_add_ai_spend``, ``tokens``), then the Finding row (``blob``, its ``llm_fix_json``; None for a
+	billed failure, which records only its spend), then ``safe_commit``. The answer and its spend
+	commit together or not at all. It first commits what the caller's transaction holds (reads
+	and, on Postgres, an Error Log row: every earlier answer is already committed), so the write
+	starts without a read view from before the provider call, which a 1020 needs.
+
+	When the database rolls the whole transaction back (``_whole_transaction_rolled_back``), the
+	write is rolled back and tried again from the start, ``AI_WRITE_ATTEMPTS`` times in all; the
+	provider is never asked again. Any other failure, or the last attempt's, is rolled back and
+	logged once after the ``try`` (``attempts``, and the ``tokens`` that are then not recorded),
+	the answer is not saved, and the caller counts the finding as failed. When the counter had
+	logged its own row for a failed attempt (``savepoint_rollback=failed``) and a retry then
+	committed, ``outcome=committed on attempt N`` is appended to that row, so it does not read as
+	lost tokens. An RQ job timeout leaves as a fresh instance."""
+	from optimus.ai_fix import _LOGGED_ATTR, log_ai_failure
+
+	error = logged = None
+	attempt = 0
+	while attempt < AI_WRITE_ATTEMPTS:
+		attempt += 1
+		error = None
+		guard = safe_call.InterruptGuard()
+		try:
+			with guard:
+				if attempt == 1:
+					safe_commit()
+				_add_ai_spend(docname, tokens)
+				if blob is not None:
+					frappe.db.set_value("Optimus Finding", finding, "llm_fix_json", blob)
+				safe_commit()
+		except Exception as exc:
+			error = exc
+		if guard.pending():
+			error = logged = None
+			raise guard.interrupt()
+		if error is None:
+			break
+		if getattr(error, _LOGGED_ATTR, False):
+			logged = error
+		safe_call.best_effort(lambda: frappe.db.rollback(), None)
+		if not _whole_transaction_rolled_back(error):
+			break
+	reference = {"session_uuid": session_uuid, "docname": docname, "finding": finding}
+	if error is None:
+		if logged is not None:
+			log_ai_failure("optimus ai backfill", logged, **reference, outcome=f"committed on attempt {attempt}")
+		logged = None
+		return True
+	log_ai_failure("optimus ai backfill", error, **reference, attempts=attempt, tokens=tokens)
+	error = logged = None
+	return False
+
+
 def _run_ai_backfill(doc, *, cap: int | None = None,
                      time_budget: float = AI_BACKFILL_TIME_BUDGET_SECONDS,
                      regenerate_all: bool = False) -> dict:
@@ -2826,6 +2903,14 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	suggestion kept on a mid-run failure, since writes happen only on success).
 	Requires ``ai_fix.is_available()`` (returns all-zeros otherwise).
 
+	Each call is attributed to the session explicitly (``session_uuid`` and ``docname``), so ai_fix
+	charges nothing; each answer and its spend (a billed failure's too) are then written and
+	committed in one short transaction (``_write_ai_answer``), before the next provider call.
+	No transaction stays open across a provider call, a database rollback can never take an
+	earlier answer with it, and ``added`` counts only committed answers. A ``doc`` without a
+	``name`` cannot be written to by name: its calls stay unattributed (charged to the worker's
+	ambient session by ai_fix) and only the answers go through the short write.
+
 	``cap``: max findings this run. None uses Optimus Settings'
 	``ai_auto_suggest_max``; 0 means no cap (as many as fit ``time_budget``).
 	Best-effort and time-budgeted (callers run in a web request). Returns
@@ -2835,7 +2920,8 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	Optimus's own advice or a note instead (index findings are not counted),
 	``excluded`` the AI-eligible ones whose type Optimus Settings excludes and ``skipped_ineligible`` the ones ``suggest_fix`` refused with a skip
 	kind (``ai_fix.AI_SKIP_KINDS``). Which findings, and in what order (missing, outdated, then
-	current; severity, impact, age), is :func:`eligible_findings`, the one selection.
+	current; severity, impact, age), is :func:`eligible_findings`, the one selection. It ends
+	with a commit, so the step after it (the Steps call) never runs inside its transaction.
 	"""
 	out = {
 		"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0,
@@ -2867,6 +2953,9 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	if cap and cap > 0:
 		chosen = chosen[:cap]
 
+	session_uuid = getattr(doc, "session_uuid", None) or None
+	docname = getattr(doc, "name", None) or None
+	attribution = {"session_uuid": session_uuid, "docname": docname} if docname else {}
 	file_cache: dict = {}
 	phase2_index = _phase2_index_for(doc)
 	evidence_lookup, tracked = _ai_evidence_scope()
@@ -2875,37 +2964,43 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 		if time.monotonic() - started > time_budget:
 			out["skipped_time"] = len(chosen) - idx
 			break
+		finding = getattr(r, "name", "") or ""
+		asked = {"skipped": False, "usage": None}
 
-		def _suggest(r=r):
-			skipped = False
+		def _ask(r=r, asked=asked):
 			try:
-				result = ai_fix.suggest_fix(_ai_payload_for_finding(
+				return ai_fix.suggest_fix(_ai_payload_for_finding(
 					r, file_cache, phase2_index=phase2_index, evidence_lookup=evidence_lookup, tracked_apps=tracked,
-				))
+				), **attribution)
 			except ai_fix.AiFixError as e:
+				# a failure after a billed reply still cost its tokens: the write below records them
+				asked["usage"] = e.usage
 				if e.kind not in ai_fix.AI_SKIP_KINDS:
 					raise
-				skipped = True
-			if skipped:
-				out["skipped_ineligible"] += 1
-				return
-			blob = json.dumps(result, default=str)
-			frappe.db.set_value("Optimus Finding", r.name, "llm_fix_json", blob)
+				asked["skipped"] = True
+			return None
+
+		result, ask_failed = _run_ai_step(
+			_ask, title="optimus ai backfill", session_uuid=session_uuid, finding=finding,
+		)
+		if asked["skipped"]:
+			out["skipped_ineligible"] += 1
+			continue
+		blob = json.dumps(result, default=str) if not ask_failed and isinstance(result, dict) else None
+		usage = result.get("tokens") if blob is not None else asked["usage"]
+		# an unattributed call was charged to the ambient session by ai_fix already
+		tokens = ai_fix._token_count(usage.get("total_tokens")) if attribution and isinstance(usage, dict) else 0
+		saved = (blob is not None or tokens > 0) and _write_ai_answer(
+			docname, finding, blob, tokens, session_uuid=session_uuid,
+		)
+		if blob is not None and saved:
 			r.llm_fix_json = blob
 			out["added"] += 1
-
-		_, step_failed = _run_ai_step(
-			_suggest, title="optimus ai backfill",
-			session_uuid=getattr(doc, "session_uuid", None),
-			finding=getattr(r, "name", "") or "",
-		)
-		if step_failed:
+		elif blob is not None or ask_failed:
 			out["failed"] += 1
-	if out["added"]:
-		try:
-			safe_commit()
-		except Exception:
-			pass
+	# Nothing of this refresh stays open, whatever happened above: the Steps call that follows
+	# must never run while this transaction holds the session row.
+	safe_call.best_effort(safe_commit, None)
 	return out
 
 

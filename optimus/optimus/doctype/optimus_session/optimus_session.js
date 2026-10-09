@@ -239,6 +239,14 @@ function _refill_ai_call(frm) {
 		freeze_message: __("Refreshing AI suggestions & re-rendering the report…"),
 		callback: (r) => {
 			const m = (r && r.message) || {};
+			if (m.busy) {
+				// another refresh of this session is still running: nothing was counted or billed
+				frappe.show_alert({
+					message: __("A refresh is already running for this session. Wait for it to finish, then reload the form."),
+					indicator: "orange",
+				});
+				return;
+			}
 			const fx = m.fixes || {};
 			const st = m.steps || {};
 			const parts = [];

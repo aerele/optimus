@@ -11,9 +11,18 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from optimus import ai_fix, ai_grounding, analyze
 from optimus.analyzers import redundant_calls
 from optimus.analyzers.base import AnalyzeContext
+
+
+@pytest.fixture(autouse=True)
+def _commit_on_the_fake_db(monkeypatch):
+	"""``_run_ai_backfill`` commits each answer through ``analyze.safe_commit``; send that commit
+	to whatever ``analyze.frappe`` a test installs."""
+	monkeypatch.setattr(analyze, "safe_commit", lambda: analyze.frappe.db.commit())
 
 _CALLSITE = {"filename": "apps/myapp/myapp/x.py", "lineno": 9, "function": "f"}
 _UNSTAMPED = {"fn_name": "get_doc", "callsite": _CALLSITE}

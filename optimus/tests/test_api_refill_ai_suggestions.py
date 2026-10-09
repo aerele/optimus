@@ -149,3 +149,106 @@ def test_each_refill_starts_a_fresh_memo(env):
 	first = h.humanize.call_args.kwargs["memo"]
 	api.refill_ai_suggestions(session_uuid=SESSION_UUID)
 	assert h.humanize.call_args.kwargs["memo"] is not first
+
+
+# --- one refresh per session at a time -----------------------------------------------------
+
+_FLAG = "site|optimus:ai_refresh:" + SESSION_UUID
+
+
+def test_an_overlapping_refresh_of_the_same_session_is_refused_without_billing(env):
+	"""Two Refreshes of one session ran side by side once the bump stopped holding the session
+	row: both billed every finding and overwrote each other's answers. A second click while the
+	first runs is answered at once, before the refresh is counted or the provider is called."""
+	fake, h = env()
+	inner = {}
+
+	def backfill(*a, **k):
+		h.order.append("backfill")
+		inner["out"] = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
+		return {"added": 1, "failed": 0, "skipped_time": 0}
+
+	h.backfill.side_effect = backfill
+	out = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
+	assert out["ok"] is True
+	second = inner["out"]
+	assert second["ok"] is False and second["busy"] is True and second["session_uuid"] == SESSION_UUID
+	assert "already running for this session" in second["message"]
+	# the second click counted nothing and called nothing: one bump, one backfill, one Steps call
+	assert [step for step in h.order if step != "commit"] == [("bump", DOCNAME), "backfill"]
+	assert h.humanize.call_count == 1 and h.render.call_count == 1
+	assert _FLAG not in fake.cache.store  # released by the refresh that held it
+
+
+def test_the_flag_is_taken_atomically_with_a_ttl_and_released_after_the_refresh(env):
+	fake, h = env()
+	api.refill_ai_suggestions(session_uuid=SESSION_UUID)
+	[take] = [c for c in fake.cache.calls if c[0] == "set"]
+	_, key, token, nx, ttl = take
+	assert key == _FLAG and nx is True and isinstance(token, str) and len(token) >= 16
+	# the longest a refresh can run: its 60 s fix budget, a fix call and a Steps call at the
+	# Request timeout, and a minute for the write and the re-render
+	assert ttl == 60 + 2 * ai_fix._resolve_timeout_seconds() + 60
+	assert ("delete", _FLAG) in fake.cache.calls and _FLAG not in fake.cache.store
+
+
+def test_the_flag_is_released_when_the_refresh_fails(env):
+	fake, h = env()
+	h.backfill.side_effect = RuntimeError("boom")
+	with pytest.raises(RuntimeError):
+		api.refill_ai_suggestions(session_uuid=SESSION_UUID)
+	assert _FLAG not in fake.cache.store
+	h.backfill.side_effect = None
+	assert api.refill_ai_suggestions(session_uuid=SESSION_UUID)["ok"] is True  # the next click runs
+
+
+def test_a_refresh_never_releases_another_refreshs_flag(env):
+	"""The flag expired while this refresh ran and another refresh took it: the release reads the
+	holder back from Redis and leaves another token alone."""
+	fake, h = env()
+
+	def backfill(*a, **k):
+		fake.cache.store[_FLAG] = b"another-refresh"
+		return {"added": 0, "failed": 0, "skipped_time": 0}
+
+	h.backfill.side_effect = backfill
+	api.refill_ai_suggestions(session_uuid=SESSION_UUID)
+	assert fake.cache.store[_FLAG] == b"another-refresh"
+
+
+def test_a_cache_failure_never_blocks_the_refresh(env, monkeypatch):
+	fake, h = env()
+
+	def broken(*a, **k):
+		raise ConnectionError("redis down")
+
+	monkeypatch.setattr(fake.cache, "set", broken)
+	out = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
+	assert out["ok"] is True and h.backfill.call_count == 1
+	assert not [c for c in fake.cache.calls if c[0] in ("get", "delete")]  # nothing taken, nothing to release
+
+
+def test_a_refused_refresh_counts_nothing(env):
+	fake, h = env()
+	fake.cache.store[_FLAG] = b"the-first-refresh"
+	out = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
+	assert out["busy"] is True
+	assert h.order == [] and h.backfill.call_count == h.humanize.call_count == h.render.call_count == 0
+	assert fake.cache.store[_FLAG] == b"the-first-refresh"
+
+
+def test_the_flag_key_is_registered_and_documented():
+	from optimus import redis_keys
+
+	assert redis_keys.ai_refresh_inflight(SESSION_UUID) == "optimus:ai_refresh:" + SESSION_UUID
+	assert "optimus:ai_refresh:<session_uuid>" in redis_keys.KEY_PATTERNS
+
+
+def test_the_form_shows_a_busy_refresh_as_a_notice_and_stops():
+	from pathlib import Path
+
+	js = (Path(api.__file__).parent / "optimus" / "doctype" / "optimus_session" / "optimus_session.js").read_text()
+	body = js[js.index("function _refill_ai_call("):]
+	busy = body.index("if (m.busy) {")
+	assert body.index("return;", busy) < body.index("const fx = m.fixes", busy)
+	assert '__("A refresh is already running for this session.' in body[busy:busy + 400]

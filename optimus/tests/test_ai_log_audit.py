@@ -310,7 +310,8 @@ def test_ai_step_returns_only_a_boolean_failure_flag():
 def test_the_ai_steps_log_through_the_one_helper():
 	# The capture-then-log skeleton lives in analyze._run_ai_step alone (the recording readers
 	# use it too). The session counter also logs a failed increment itself and carries on (the
-	# billed answer is kept). All log calls stay
+	# billed answer is kept), and the answer's short write logs once after its retries (or adds
+	# the retry's outcome to the counter's row). All log calls stay
 	# outside exception handlers. The helper's handler only records the error:
 	# its log call is after the try.
 	callers = {}
@@ -320,7 +321,9 @@ def test_the_ai_steps_log_through_the_one_helper():
 			for name in calls & {"log_ai_failure", "_log_ai_step_failure"}:
 				callers.setdefault(name, set()).add(f"{mod}:{fn.name}")
 	assert callers == {
-		"log_ai_failure": {"analyze.py:_log_ai_step_failure", "analyze.py:_increment_session_counter"},
+		"log_ai_failure": {
+			"analyze.py:_log_ai_step_failure", "analyze.py:_increment_session_counter", "analyze.py:_write_ai_answer",
+		},
 		"_log_ai_step_failure": {"analyze.py:_run_ai_step"},
 	}
 	helper = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "_run_ai_step")

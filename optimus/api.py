@@ -9,13 +9,14 @@ Endpoints the floating widget and custom integrations call. Decorated with
 
 import html
 import time
+import uuid
 from dataclasses import dataclass
 
 import frappe
 from frappe import _
 from frappe.utils import add_to_date, now_datetime
 
-from optimus import ratelimit, safe_call, safe_commit, session
+from optimus import ratelimit, redis_keys, safe_call, safe_commit, session
 from optimus.permissions import may_act_on_session
 
 # Roles allowed to call the profiler API. System Manager is always allowed
@@ -1465,6 +1466,64 @@ def _humanize_steps_core(doc, *, title: str | None = None, memo: dict | None = N
 	return {"updated": True, "reason": None}
 
 
+def _refresh_flight_ttl() -> int:
+	"""How long a Refresh holds its session's flag at most: its fix-call budget
+	(``analyze.AI_BACKFILL_TIME_BUDGET_SECONDS``, checked before each call), one more fix call and
+	the Steps call at the configured Request timeout, and a minute for the writes and the
+	re-render. A worker killed mid-refresh leaves the flag to expire after that."""
+	from optimus import ai_fix
+	from optimus import analyze as _analyze_mod
+
+	return int(_analyze_mod.AI_BACKFILL_TIME_BUDGET_SECONDS + 2 * ai_fix._resolve_timeout_seconds() + 60)
+
+
+def _take_refresh_flight(session_uuid: str) -> tuple[bool, str | None]:
+	"""Take the session's Refresh flag (``redis_keys.ai_refresh_inflight``) only if it is free, in
+	one atomic ``SET NX EX``, so of two overlapping refreshes of one session exactly one runs: two
+	would bill every finding twice and overwrite each other's answers. Returns ``(True, token)``
+	when taken (the token names this refresh as the holder), ``(False, None)`` when another
+	refresh holds it, and ``(True, None)`` when Redis could not be asked: a cache failure never
+	blocks a refresh (as with analyze's single-flight); it leaves one ``optimus`` log line. The
+	key goes through ``frappe.cache.make_key``, so the flag is per site. An RQ job timeout
+	escapes fresh."""
+	token = uuid.uuid4().hex
+
+	def _take() -> bool:
+		key = frappe.cache.make_key(redis_keys.ai_refresh_inflight(session_uuid))
+		# A raw SET is the only way to get NX; frappe.cache.get_value would also answer from the
+		# request's frappe.local.cache.
+		return bool(frappe.cache.set(  # nosemgrep: frappe-cache-breaks-multitenancy
+			key, token, nx=True, ex=_refresh_flight_ttl(),
+		))
+
+	taken = safe_call.best_effort(_take, None, on_error=lambda error_type: safe_call.log_error_line(
+		f"optimus: the Refresh AI suggestions flag could not be taken ({error_type}); the refresh runs without it"
+	))
+	if taken is None:
+		return True, None
+	return (True, token) if taken else (False, None)
+
+
+def _release_refresh_flight(session_uuid: str, token: str | None) -> None:
+	"""Release the session's Refresh flag, but only while Redis still holds this refresh's
+	``token``: a raw ``GET`` (never ``frappe.local.cache``), then a delete. Not atomic, like
+	analyze's single-flight: a flag that expired and was taken by another refresh in the instant
+	between the read and the delete is deleted too, which needs this refresh to have outlived the
+	TTL first. Nothing to do without a token. Best effort; an RQ job timeout escapes fresh."""
+	if not token:
+		return
+
+	def _release() -> None:
+		key = frappe.cache.make_key(redis_keys.ai_refresh_inflight(session_uuid))
+		held = frappe.cache.get(key)  # nosemgrep: frappe-cache-breaks-multitenancy
+		if isinstance(held, bytes):
+			held = held.decode("utf-8", "replace")
+		if held == token:
+			frappe.cache.delete(key)
+
+	safe_call.best_effort(_release, None)
+
+
 @frappe.whitelist(methods=["POST"])
 def refill_ai_suggestions(session_uuid: str) -> dict:
 	"""Single-button entry point: re-fills every AI-generated report section in one round-trip:
@@ -1473,56 +1532,71 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 
 	Each step is gated by its per-section toggle; a toggle-off step is skipped, not errored.
 	``_ai_session_gate`` runs once at the top (permission, Ready status, AI configured, per-user
-	limit).
+	limit). Then one refresh per session at a time (``_take_refresh_flight``): while another
+	refresh of the same session runs, the call returns ``{ok: False, busy: True, session_uuid,
+	message}`` at once, before the refresh is counted or the provider is called. The flag is
+	released in a ``finally``.
 
 	The response is ``{ok, session_uuid, fixes, steps, regenerated}``. ``fixes`` counts
 	``added``, ``failed``, ``skipped_time``, ``gated`` (AI-eligible findings and
 	Framework N+1 that the report answers with Optimus's own advice or a note; index
 	findings are not counted), ``excluded`` (AI-eligible types listed under Excluded finding
 	types in Optimus Settings) and ``skipped_ineligible``; ``skipped`` is ``"toggle_off"`` when
-	findings are off. There is no ``indexes`` key: index advice is deterministic and never
-	refreshed by AI.
+	findings are off. ``steps`` is ``_humanize_steps_core``'s result (``failed`` True with the
+	error message as ``reason`` when the rewrite failed). There is no ``indexes`` key: index
+	advice is deterministic and never refreshed by AI.
 	"""
 	ref = _ai_session_gate(session_uuid, section=None, action="refill_ai_suggestions")
 
-	from optimus import analyze as _analyze_mod
-	from optimus.settings import get_config
+	taken, flight = _take_refresh_flight(ref.session_uuid)
+	if not taken:
+		return {
+			"ok": False,
+			"busy": True,
+			"session_uuid": ref.session_uuid,
+			"message": _("A refresh is already running for this session. Wait for it to finish, then reload the form."),
+		}
+	try:
+		from optimus import analyze as _analyze_mod
+		from optimus.settings import get_config
 
-	cfg = get_config()
-	doc = frappe.get_doc("Optimus Session", ref.docname)
-
-	# Count this refresh (cumulative; only ever increases): one atomic SQL increment that leaves
-	# `modified` alone, committed on its own before any provider call, so the bump no longer holds
-	# the session row. Each call's ambient spend charge below still locks the row again until the
-	# backfill commits (until the background refresh, #73/#74). A failed bump is logged and the
-	# refresh goes on.
-	_analyze_mod._bump_ai_refresh_count(doc.name)
-	safe_commit()
-
-	# One memo through the Steps call and the re-render: the persisted recordings are read once.
-	recordings_memo: dict = {}
-	fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None, "gated": 0, "excluded": 0, "skipped_ineligible": 0}
-	if cfg.ai_suggest_findings:
-		counts = _analyze_mod._run_ai_backfill(doc, cap=0, regenerate_all=True)
-		fixes.update({key: counts.get(key, 0) for key in ("added", "failed", "skipped_time", "gated", "excluded", "skipped_ineligible")})
-	else:
-		fixes["skipped"] = "toggle_off"
-
-	steps = {"updated": False, "reason": None}
-	if cfg.ai_humanize_steps:
-		# Re-fetch the doc: the backfill above may have mutated rows.
+		cfg = get_config()
 		doc = frappe.get_doc("Optimus Session", ref.docname)
-		steps = _humanize_steps_core(doc, title=ref.title or None, memo=recordings_memo)
-	else:
-		steps["reason"] = "toggle_off"
 
-	return {
-		"ok": True,
-		"session_uuid": ref.session_uuid,
-		"fixes": fixes,
-		"steps": steps,
-		"regenerated": _rerender_after_ai(ref, memo=recordings_memo),
-	}
+		# Count this refresh (cumulative; only ever increases): one atomic SQL increment that leaves
+		# `modified` alone, committed on its own before any provider call, so the bump no longer holds
+		# the session row. Each answer then commits with its spend in its own short write, so no
+		# provider call runs while this request holds the row. A failed bump is logged and the
+		# refresh goes on.
+		_analyze_mod._bump_ai_refresh_count(doc.name)
+		safe_commit()
+
+		# One memo through the Steps call and the re-render: the persisted recordings are read once.
+		recordings_memo: dict = {}
+		fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None, "gated": 0, "excluded": 0, "skipped_ineligible": 0}
+		if cfg.ai_suggest_findings:
+			counts = _analyze_mod._run_ai_backfill(doc, cap=0, regenerate_all=True)
+			fixes.update({key: counts.get(key, 0) for key in ("added", "failed", "skipped_time", "gated", "excluded", "skipped_ineligible")})
+		else:
+			fixes["skipped"] = "toggle_off"
+
+		steps = {"updated": False, "reason": None}
+		if cfg.ai_humanize_steps:
+			# Re-fetch the doc: the backfill above may have mutated rows.
+			doc = frappe.get_doc("Optimus Session", ref.docname)
+			steps = _humanize_steps_core(doc, title=ref.title or None, memo=recordings_memo)
+		else:
+			steps["reason"] = "toggle_off"
+
+		return {
+			"ok": True,
+			"session_uuid": ref.session_uuid,
+			"fixes": fixes,
+			"steps": steps,
+			"regenerated": _rerender_after_ai(ref, memo=recordings_memo),
+		}
+	finally:
+		_release_refresh_flight(ref.session_uuid, flight)
 
 
 @frappe.whitelist()
