@@ -124,6 +124,9 @@ class TestMultiLineOpeners:
 		'sep = len("\\\\")  # windows (legacy',
 		"n = len(rows)  # (see below",
 		"n = len(rows)  # [",
+		'if len("\\\\"):  # (legacy',
+		"if ready:  # (see below",
+		"x = [  # (legacy",
 	])
 	def test_a_comment_cannot_turn_a_complete_line_into_an_opener(self, line):
 		"""F5: only a line Python cannot parse as it stands, but can once closed, is an opener."""

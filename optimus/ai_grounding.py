@@ -610,15 +610,20 @@ def finding_detail(finding: dict) -> dict:
 
 def _strip_comment(line: str) -> str:
 	in_str: str | None = None
-	for i, ch in enumerate(line):
+	i = 0
+	while i < len(line):
+		ch = line[i]
 		if in_str:
-			if ch == in_str and line[i - 1 : i] != "\\":
+			if ch == "\\":
+				i += 2  # an escaped character, so "\\" ends at its second quote
+				continue
+			if ch == in_str:
 				in_str = None
-			continue
-		if ch in ("'", '"'):
+		elif ch in ("'", '"'):
 			in_str = ch
 		elif ch == "#":
 			return line[:i]
+		i += 1
 	return line
 
 
@@ -712,7 +717,7 @@ def statement_calls(line: str) -> StatementCalls:
 		return StatementCalls(True, name if name and _SAFE_NAME_RE.match(name) else None)
 	# An opener whose call continues on the next lines: the bare line (comments and all, as
 	# Python reads it) does not parse, but its closed form does and holds only builtins.
-	if ")" in _closers(_strip_comment(line).strip().lstrip(")]} ")) and not _parses(line.strip()):
+	if ")" in _closers(_strip_comment(line).strip().lstrip(")]} ")) and not _parses_complete(line.strip()):
 		return StatementCalls(True, None)
 	return StatementCalls(False, None)
 
@@ -723,6 +728,12 @@ def _parses(src: str) -> bool:
 	except (SyntaxError, ValueError):
 		return False
 	return True
+
+
+def _parses_complete(src: str) -> bool:
+	"""``src`` is a whole statement as it stands, or a block header that a body completes
+	(the body goes on a new line so a trailing comment cannot swallow it)."""
+	return _parses(src) or _parses(src + "\n\tpass")
 
 
 def _first_call(tree: ast.Module) -> ast.Call | None:

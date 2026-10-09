@@ -169,3 +169,25 @@ def test_two_findings_of_one_file_build_the_parent_map_once(tmp_path, monkeypatc
 	for line in (3, 4):
 		analyze._ai_payload_for_finding(_row(str(src), line, "f", finding_type="N+1 Query"), cache)
 	assert len(built) == 1
+
+
+def test_the_tree_memo_is_a_true_lru(tmp_path, monkeypatch):
+	"""Visit A B C D A E: the revisit of A keeps it, so E evicts B; only B parses again."""
+	parsed = []
+	real = ai_grounding.parse_source
+	monkeypatch.setattr(ai_grounding, "parse_source", lambda lines: parsed.append(lines[0]) or real(lines))
+	files = {}
+	for name in "ABCDE":
+		files[name] = tmp_path / f"{name}.py"
+		files[name].write_text(f"# {name}\ndef f():\n\treturn 1\n")
+	cache = {}
+
+	def visit(names):
+		parsed.clear()
+		for name in names:
+			analyze._ai_grounding_window(str(files[name]), 3, cache)
+		return list(parsed)
+
+	assert visit("ABCDAE") == ["# A", "# B", "# C", "# D", "# E"]
+	assert visit("A") == []
+	assert visit("B") == ["# B"]
