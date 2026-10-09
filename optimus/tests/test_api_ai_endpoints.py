@@ -209,19 +209,26 @@ def test_ai_capabilities_reports_the_toggles_without_writing(monkeypatch):
 def core(monkeypatch):
 	fake = make_fake_frappe()
 	install(monkeypatch, fake)
-	commits, logged = [], []
+	commits, logged, memos = [], [], []
 	monkeypatch.setattr(api, "safe_commit", lambda: commits.append(True))
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, exc=None, **kw: logged.append(title))
 	install_module(monkeypatch, "optimus.analyze", SimpleNamespace(
 		_run_ai_step=_analyze._run_ai_step,
 		_mark_ai_spend_session=lambda session_uuid: None,
-		load_recordings_light=lambda d: [{"uuid": a.recording_uuid} for a in d.actions],
+		load_recordings_light=lambda d, memo=None: memos.append(memo) or [{"uuid": a.recording_uuid} for a in d.actions],
 		_load_recordings_bundle=lambda d: None,
 		_actions_for_humanizer=lambda recordings: [{"method": "POST", "path": "/api/method/x"}] if recordings else [],
 		_assemble_humanized_notes=lambda md: "NOTES\n" + md,
 	))
 	doc = fake_session_doc(actions=[SimpleNamespace(recording_uuid="rec-1")])
-	return SimpleNamespace(fake=fake, commits=commits, logged=logged, doc=doc)
+	return SimpleNamespace(fake=fake, commits=commits, logged=logged, doc=doc, memos=memos)
+
+
+def test_humanize_core_passes_its_memo_to_the_recording_loader(core, monkeypatch):
+	monkeypatch.setattr(ai_fix, "humanize_steps", lambda *a, **k: "1. Open it")
+	memo = {}
+	api._humanize_steps_core(core.doc, memo=memo)
+	assert core.memos == [memo]
 
 
 def test_humanize_core_persists_the_notes_and_the_tokens(core, monkeypatch):

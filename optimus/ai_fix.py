@@ -30,7 +30,7 @@ from urllib.parse import urljoin, urlsplit
 import requests
 
 from optimus import ai_budget, ai_grounding, ai_guardrails, ai_prompts, safe_call
-from optimus.analyzers.base import INDEX_FINDING_TYPES, humanize_duration_ms
+from optimus.analyzers.base import INDEX_FINDING_TYPES, humanize_duration_ms, row_get
 
 
 class AiFixError(Exception):
@@ -325,8 +325,10 @@ def _app_scope() -> tuple[tuple[str, ...], frozenset[str] | None]:
 def gate_input(row) -> dict:
 	"""The dict ``llm_gate_note`` reads, built from an Optimus Finding row (or
 	any object with its attributes)."""
-	get = row.get if isinstance(row, dict) else lambda key, default=None: getattr(row, key, default)
-	return {"finding_type": get("finding_type") or "", "technical_detail_json": get("technical_detail_json") or "{}"}
+	return {
+		"finding_type": row_get(row, "finding_type") or "",
+		"technical_detail_json": row_get(row, "technical_detail_json") or "{}",
+	}
 
 
 def llm_gate_note(finding: dict) -> str | None:

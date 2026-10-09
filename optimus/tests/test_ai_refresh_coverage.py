@@ -235,3 +235,52 @@ def test_auto_suggest_treats_not_eligible_as_a_skip(monkeypatch):
 		analyze._enrich_findings_with_ai_suggestions(ctx)
 	assert "llm_fix_json" not in ctx.findings[0]
 	assert logged == [] and not any("couldn't get a suggestion" in w for w in ctx.warnings)
+
+
+def test_a_missing_only_refresh_and_eligible_findings_agree_on_what_is_missing(backfill):
+	"""One definition: only a blank answer is missing. Corrupt text is outdated, so a missing-only
+	run leaves it, and so does ``eligible_findings(include_outdated=False)``."""
+	rows = [_row("blank"), _row("corrupt"), _row("old", version=1), _row("fresh", version=ai_prompts.PROMPT_VERSION)]
+	rows[0].llm_fix_json = "  "
+	rows[1].llm_fix_json = "{not json"
+	with patch("optimus.settings.get_config", return_value=_cfg()):
+		expected = [r.name for r in analyze.eligible_findings(rows, _cfg(), include_outdated=False)]
+		analyze._run_ai_backfill(_doc(rows), cap=0)
+	assert expected == ["blank"] and backfill.sent == ["blank"]
+
+
+def test_a_newer_answer_is_not_asked_again_and_a_float_version_is(backfill):
+	rows = [
+		_row("newer", version=ai_prompts.PROMPT_VERSION + 1),
+		_row("float", version=float(ai_prompts.PROMPT_VERSION)),
+		_row("blank"),
+	]
+	with patch("optimus.settings.get_config", return_value=_cfg()):
+		analyze._run_ai_backfill(_doc(rows), cap=0, regenerate_all=True)
+	assert backfill.sent == ["blank", "float", "newer"]
+
+
+def test_the_backfill_orders_by_severity_impact_then_age_like_eligible_findings(backfill):
+	def aged(name, generated, severity="High", impact=10.0):
+		r = _row(name, impact=impact, version=1)
+		r.severity = severity
+		r.llm_fix_json = json.dumps({"suggestion": "s", "prompt_version": 1, "generated_at": generated})
+		return r
+
+	rows = [
+		aged("young", "2026-01-03T00:00:00+00:00"),
+		aged("old", "2026-01-01T00:00:00+00:00"),
+		aged("low", "2026-01-01T00:00:00+00:00", severity="Low"),
+		aged("big", "2026-01-05T00:00:00+00:00", impact=99.0),
+	]
+	with patch("optimus.settings.get_config", return_value=_cfg()):
+		by_function = [r.name for r in analyze.eligible_findings(rows, _cfg(), regenerate_all=True)]
+		analyze._run_ai_backfill(_doc(rows), cap=0, regenerate_all=True, time_budget=10_000)
+	assert backfill.sent == by_function == ["big", "old", "young", "low"]
+
+
+def test_the_backfill_counts_come_from_the_selection(backfill):
+	rows = [_row("ok"), _row("fw", "Framework N+1"), _row("sq", "Slow Query")]
+	with patch("optimus.settings.get_config", return_value=_cfg(ai_excluded_finding_types=("Slow Query",))):
+		out = analyze._run_ai_backfill(_doc(rows), cap=0)
+	assert (out["gated"], out["excluded"], out["total_pending"]) == (1, 1, 1)

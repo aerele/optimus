@@ -237,15 +237,15 @@ def test_is_current_is_the_one_currency_rule():
 		assert not ai_prompts.is_current(bad)
 
 
-def test_fix_is_current_ignores_a_bare_json_number():
-	from types import SimpleNamespace
+def test_a_bool_version_is_never_current_even_against_a_floor_of_one():
+	assert not ai_prompts.is_current({"prompt_version": True}, 1)
+	assert ai_prompts.is_current({"prompt_version": 1}, 1)
 
-	from optimus import analyze
 
-	def row(raw):
-		return SimpleNamespace(llm_fix_json=raw)
-
+def test_fix_state_ignores_a_bare_json_number():
 	v = ai_prompts.PROMPT_VERSION
-	assert analyze._fix_is_current(row(f'{{"prompt_version": {v}}}'))
-	for raw in (str(v), "7", "null", "[]", "not json", None, ""):
-		assert not analyze._fix_is_current(row(raw))
+	assert ai_prompts.fix_state(f'{{"suggestion": "s", "prompt_version": {v}}}')[0] == "current"
+	for raw in (str(v), "7", "null", "[]", "not json"):
+		assert ai_prompts.fix_state(raw)[0] == "outdated"
+	for raw in (None, "", "  "):
+		assert ai_prompts.fix_state(raw)[0] == "missing"

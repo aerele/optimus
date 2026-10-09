@@ -79,8 +79,8 @@ def test_refill_runs_both_ai_steps_for_a_plain_owner(env):
 	assert "indexes" not in out
 	assert out["regenerated"] is True
 	assert h.backfill.call_args.kwargs == {"cap": 0, "regenerate_all": True}
-	assert h.humanize.call_args.kwargs == {"title": "Checkout flow"}
-	h.render.assert_called_once_with(DOCNAME)
+	assert set(h.humanize.call_args.kwargs) == {"title", "memo"} and h.humanize.call_args.kwargs["title"] == "Checkout flow"
+	h.render.assert_called_once_with(DOCNAME, memo=h.humanize.call_args.kwargs["memo"])
 	# one atomic bump, committed on its own before any provider call (no read-modify-write)
 	assert h.order[:3] == [("bump", DOCNAME), "commit", "backfill"]
 	assert not [args for args, _kw in fake.spies.set_value if "ai_refresh_count" in args]
@@ -134,3 +134,18 @@ def test_refill_reports_gated_and_excluded_counts(env):
 	out = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
 	assert (out["fixes"]["gated"], out["fixes"]["excluded"], out["fixes"]["skipped_ineligible"]) == (2, 1, 3)
 	assert "indexes" not in out
+
+
+def test_refill_shares_one_recordings_memo_between_the_steps_and_the_rerender(env):
+	_, h = env()
+	api.refill_ai_suggestions(session_uuid=SESSION_UUID)
+	memo = h.humanize.call_args.kwargs["memo"]
+	assert isinstance(memo, dict) and h.render.call_args.kwargs["memo"] is memo
+
+
+def test_each_refill_starts_a_fresh_memo(env):
+	_, h = env()
+	api.refill_ai_suggestions(session_uuid=SESSION_UUID)
+	first = h.humanize.call_args.kwargs["memo"]
+	api.refill_ai_suggestions(session_uuid=SESSION_UUID)
+	assert h.humanize.call_args.kwargs["memo"] is not first

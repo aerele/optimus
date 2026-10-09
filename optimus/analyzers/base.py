@@ -38,6 +38,14 @@ TAB_TABLE_RE = re.compile(r"tab[A-Za-z0-9 _\-]+")
 # analyzer when sorting its findings list. Moved here from per-module
 # copies to keep the ordering consistent across the pipeline.
 SEVERITY_ORDER: dict[str, int] = {"High": 0, "Medium": 1, "Low": 2}
+# Where a missing or unrecognised severity sorts: after every known one.
+UNKNOWN_SEVERITY_RANK: int = len(SEVERITY_ORDER)
+
+
+def row_get(row, key, default=None):
+	"""``row[key]`` for a dict and ``getattr(row, key)`` for a document row: the one
+	accessor for code that takes either shape (child rows, finding dicts)."""
+	return row.get(key, default) if isinstance(row, dict) else getattr(row, key, default)
 
 # The default "render durations in seconds above (ms)" threshold, used when the
 # Optimus Settings / site-config value is unset. Single source for every Python

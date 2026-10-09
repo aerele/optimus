@@ -46,7 +46,34 @@ versions may contain breaking changes see migration notes below).
 - Regenerate Reports uses stored answers and does not call the model. Report
   regeneration and step humanization read recording JSON without loading
   Python trees or sidecars. Use Refresh AI suggestions for new answers.
-- Add shared selection of missing and outdated suggestions, explicit session
+- One selection of the findings Refresh AI suggestions asks about
+  (`analyze.eligible_findings`; `_run_ai_backfill` now uses it, so there is no
+  second copy). A stored answer is `missing` (nothing stored), `current` (a
+  usable answer made with this prompt version or a newer one, the same rule
+  as the report's "earlier version" footer: a newer answer is never asked
+  again or downgraded, a float, boolean or string version is outdated) or
+  `outdated` (unparseable, an older version, an error record or no suggestion
+  text). An answer whose code the guardrail removed is a usable, current
+  answer, so a Refresh does not bill it again; "Regenerate all" does. Order:
+  missing, then outdated, then current; inside each, High severity first (an
+  unknown severity last), then the larger impact, then the older answer.
+  It returns a list that also carries `gated` and `excluded`, the counts
+  `refill_ai_suggestions` reports. One difference you may notice: corrupt
+  stored text is now outdated in both paths (a missing-only run leaves it,
+  "Regenerate all" redoes it), and a missing-only run no longer disagrees with
+  the selection about it.
+- The resume time of `eligible_findings(requested_at=)` is read the way Frappe
+  stores it: a naive datetime is in the site's System Settings timezone, an
+  aware one keeps its offset (it was read as UTC, which skewed the cutoff by
+  the site's UTC offset). A value of another type, or a string that is not a
+  date, raises instead of silently meaning "no cutoff". Stored `generated_at`
+  times are UTC.
+- Reading recordings for report regeneration and the Steps rewrite keeps only
+  the recordings in memory (about 78 MB for a 1 GB bundle on a real site, from
+  1.06 GB), reads the bundle once per Refresh across the Steps rewrite and the
+  re-render, and shares the bundle shape reader with the full loader, so the
+  older bare uuid map is read the same way in both.
+- Add explicit session
   attribution, and portable atomic usage/counter helpers for background work.
   A counter increment runs in a savepoint inside the caller's transaction: a
   failed increment is rolled back alone and logged, and the answer it paid for

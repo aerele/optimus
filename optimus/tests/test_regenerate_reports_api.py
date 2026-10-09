@@ -43,9 +43,10 @@ def _env(monkeypatch, *, status="Ready", user=OWNER, perms=None, fetch_raises=Fa
 		perms=owner_perms() if perms is None else perms, docs={DOCNAME: doc}, conf=conf,
 	)
 	install(monkeypatch, fake)
-	seen = SimpleNamespace(fetched=[], backfilled=[], rendered=[], cleared=[], logged=[])
+	seen = SimpleNamespace(fetched=[], backfilled=[], rendered=[], cleared=[], logged=[], memos=[])
 
-	def fetch(doc):
+	def fetch(doc, memo=None):
+		seen.memos.append(memo)
 		if fetch_raises:
 			raise RuntimeError("redis gone")
 		seen.fetched.append([a.recording_uuid for a in doc.actions if a.recording_uuid])
@@ -93,6 +94,21 @@ def test_render_session_report_is_render_only_by_default(monkeypatch):
 	assert seen.cleared == [SESSION_UUID]
 
 
+def test_the_render_helper_passes_the_callers_memo_to_the_loader(monkeypatch):
+	_, seen = _env(monkeypatch)
+	memo = {}
+	api._render_session_report(DOCNAME, memo=memo)
+	api._render_session_report(DOCNAME)
+	assert seen.memos[0] is memo and seen.memos[1] is None
+
+
+def test_rerender_after_ai_passes_the_memo_on(monkeypatch):
+	_, seen = _env(monkeypatch)
+	memo = {}
+	assert api._rerender_after_ai(_ref(), memo=memo) is True
+	assert seen.memos == [memo]
+
+
 def test_render_helper_no_longer_accepts_an_ai_side_effect(monkeypatch):
 	_, seen = _env(monkeypatch)
 	with pytest.raises(TypeError):
@@ -124,7 +140,7 @@ def test_rerender_after_ai_success_never_backfills(monkeypatch):
 def test_rerender_after_ai_reports_failure_instead_of_raising(monkeypatch):
 	fake, seen = _env(monkeypatch)
 
-	def boom(docname, *, ai_backfill=False):
+	def boom(docname, *, ai_backfill=False, memo=None):
 		raise RuntimeError("disk full")
 
 	monkeypatch.setattr(api, "_render_session_report", boom)

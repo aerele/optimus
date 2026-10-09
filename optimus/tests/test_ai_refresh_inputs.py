@@ -52,8 +52,8 @@ def test_selection_uses_missing_then_outdated_and_keeps_current():
 	]
 
 
-@pytest.mark.parametrize("stored", [None, "", "{", "[]", '"answer"'])
-def test_unusable_json_is_missing(stored):
+@pytest.mark.parametrize("stored", [None, "", "  \n"])
+def test_nothing_stored_is_missing(stored):
 	assert names(analyze.eligible_findings([row("missing", stored)], config(), include_outdated=False)) == [
 		"missing"
 	]
@@ -66,10 +66,12 @@ def test_unusable_json_is_missing(stored):
 		'{"error": "failed"}',
 		answer(suggestion=[]),
 		answer(prompt_version="bad"),
-		answer(guardrail={"fallback": True}),
+		"{",
+		"[]",
+		'"answer"',
 	],
 )
-def test_failed_empty_and_fallback_records_are_outdated_not_missing(stored):
+def test_failed_empty_and_unparseable_records_are_outdated_not_missing(stored):
 	r = row("outdated", stored)
 	assert analyze.eligible_findings([r], config()) == [r]
 	assert analyze.eligible_findings([r], config(), include_outdated=False) == []

@@ -32,7 +32,7 @@ from frappe.recorder import (
 )
 from frappe.utils.scheduler import is_scheduler_disabled
 
-from optimus import ai_grounding, renderer, safe_call, safe_commit, session
+from optimus import ai_grounding, ai_prompts, renderer, safe_call, safe_commit, session
 from optimus.analyzers import (
 	call_tree,
 	explain_flags,
@@ -49,9 +49,11 @@ from optimus.analyzers.base import (
 	_DUR_SEP,
 	INDEX_FINDING_TYPES,
 	SEVERITY_ORDER,
+	UNKNOWN_SEVERITY_RANK,
 	AnalyzeContext,
 	dur,
 	is_error_log_hook_query,
+	row_get,
 )
 from optimus.dbdialect import get_dialect
 
@@ -1098,8 +1100,9 @@ def _log_ai_step_failure(title: str, exc: BaseException, session_uuid: str | Non
 	log_ai_failure(title, exc, session_uuid=session_uuid, **context)
 
 
-def _ai_selection(items, ai_fix, *, type_of, gate) -> tuple[list, int, int]:
-	"""(eligible items, gated count, excluded count). The operator's per-type exclusion
+def _ai_selection(items, ai_fix, *, type_of, gate, cfg=None) -> tuple[list, int, int]:
+	"""(eligible items, gated count, excluded count). ``cfg`` is the Optimus Settings
+	object to read the exclusion list from (``None`` reads Settings). The operator's per-type exclusion
 	runs first and counts only a type that could reach the AI; any other excluded type
 	falls through to the eligibility gate, which refuses it anyway. Only types that can
 	reach the AI and Framework N+1 count as gated; infrastructure types never do, and neither
@@ -1109,7 +1112,7 @@ def _ai_selection(items, ai_fix, *, type_of, gate) -> tuple[list, int, int]:
 	eligible, gated, excluded = [], 0, 0
 	for item in items:
 		ftype = type_of(item)
-		if ftype in ai_fix.AI_ELIGIBLE_FINDING_TYPES and ai_fix.is_finding_type_excluded(ftype):
+		if ftype in ai_fix.AI_ELIGIBLE_FINDING_TYPES and ai_fix.is_finding_type_excluded(ftype, cfg=cfg):
 			excluded += 1
 			continue
 		if gate(item) is not None:
@@ -1132,17 +1135,6 @@ def _note_ai_selection(context, gated: int, excluded: int) -> None:
 			f"AI auto-suggest: {excluded} finding(s) skipped because their type is listed under "
 			"Excluded finding types in Optimus Settings."
 		)
-
-
-def _fix_is_current(row) -> bool:
-	"""True when ``row`` already holds a suggestion made with the current prompt version."""
-	from optimus.ai_prompts import is_current
-
-	try:
-		fix = json.loads(getattr(row, "llm_fix_json", None) or "null")
-	except (TypeError, ValueError):
-		return False
-	return is_current(fix if isinstance(fix, dict) else None)
 
 
 def _deserialize_tree(uuid: str, tree_blob):
@@ -1224,6 +1216,17 @@ def _deserialize_tree(uuid: str, tree_blob):
 	return pyi_session
 
 
+def _bundle_entries(bundle) -> dict:
+	"""The ``uuid -> entry`` map of a persisted recordings bundle: the full bundle
+	(``{"recordings": {...}}``) or the legacy bare map. ``{}`` for anything else. The one
+	reader of the bundle's shape, shared by :func:`_rehydrate_from_bundle` and
+	:func:`load_recordings_light`."""
+	if not isinstance(bundle, dict):
+		return {}
+	entries = bundle.get("recordings")
+	return entries if isinstance(entries, dict) else bundle
+
+
 def _rehydrate_from_bundle(recordings_bundle, uuid: str):
 	"""Rebuild a recording dict (rec + pyi_session + sidecar) from a persisted
 	bundle entry, mirroring the live-Redis read path. Returns the rec dict, or
@@ -1235,12 +1238,7 @@ def _rehydrate_from_bundle(recordings_bundle, uuid: str):
 	re-attached (not part of the live rec shape)."""
 	import base64
 
-	if not isinstance(recordings_bundle, dict):
-		return None
-	recs = recordings_bundle.get("recordings")
-	if not isinstance(recs, dict):
-		recs = recordings_bundle
-	entry = recs.get(uuid)
+	entry = _bundle_entries(recordings_bundle).get(uuid)
 	if not isinstance(entry, dict):
 		return None
 	rec = entry.get("rec")
@@ -2593,12 +2591,66 @@ def _keep_session_counters(doc) -> None:
 		setattr(doc, fieldname, getattr(previous, fieldname, None))
 
 
-def _row_get(row, key, default=None):
-	return row.get(key, default) if isinstance(row, dict) else getattr(row, key, default)
+def _system_timezone_name() -> str:
+	"""The site's System Settings timezone through Frappe's own helper
+	(``frappe.utils.get_system_timezone``; v15 and v16 both have it), or ``"UTC"`` when it
+	cannot be read. A job timeout raised while reading it escapes fresh."""
+	from optimus.ai_fix import _InterruptGuard
+
+	name = "UTC"
+	guard = _InterruptGuard()
+	try:
+		with guard:
+			from frappe.utils import get_system_timezone
+
+			name = str(get_system_timezone() or "UTC")
+	except Exception:
+		name = "UTC"
+	if guard.pending():
+		raise guard.interrupt()
+	return name
 
 
-def _ai_timestamp(value) -> float:
-	"""Legacy naive dates are UTC; corrupt/missing dates sort before known ones."""
+def _requested_cutoff(requested_at) -> float:
+	"""The resume cutoff, as a POSIX timestamp, for the ``requested_at`` of
+	:func:`eligible_findings`; ``0.0`` (no cutoff) for ``None`` or an empty string.
+
+	A ``datetime`` or an ISO 8601 string (``Z`` and numeric offsets accepted). An aware value
+	keeps its own offset. A NAIVE value is read in the site's System Settings timezone, which
+	is how Frappe stores a Datetime field (a ``requested_at`` read from a document, or built
+	with ``frappe.utils.now_datetime()``). Any other type (``date``, a number, bytes) raises
+	``TypeError`` and an unreadable string raises ``ValueError``: a request time that
+	silently became "no cutoff" would bill every answer again."""
+	if requested_at is None or requested_at == "":
+		return 0.0
+	if isinstance(requested_at, str):
+		try:
+			parsed = datetime.fromisoformat(requested_at.strip().replace("Z", "+00:00"))
+		except ValueError:
+			raise ValueError(f"requested_at is not an ISO 8601 date and time: {requested_at!r}") from None
+	elif isinstance(requested_at, datetime):
+		parsed = requested_at
+	else:
+		raise TypeError(f"requested_at must be a datetime or an ISO 8601 string, not {type(requested_at).__name__}")
+	if parsed.tzinfo is None:
+		from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+		try:
+			zone = ZoneInfo(_system_timezone_name())
+		except (ZoneInfoNotFoundError, ValueError, OSError):
+			zone = timezone.utc
+		parsed = parsed.replace(tzinfo=zone)
+	try:
+		return parsed.timestamp()
+	except (OverflowError, OSError, ValueError):
+		raise ValueError(f"requested_at is out of range: {requested_at!r}") from None
+
+
+def _generated_timestamp(fix) -> float:
+	"""When a stored answer was made, as a POSIX timestamp. ``suggest_fix`` writes an aware
+	UTC time; a legacy NAIVE time is UTC too (not the system timezone). ``0.0`` when it is
+	absent or unreadable, which sorts the answer as the oldest and never skips it."""
+	value = fix.get("generated_at") if isinstance(fix, dict) else None
 	if not isinstance(value, (str, datetime)):
 		return 0.0
 	try:
@@ -2608,75 +2660,121 @@ def _ai_timestamp(value) -> float:
 		return 0.0
 
 
-def eligible_findings(rows, cfg, *, regenerate_all=False, requested_at=None, include_outdated=True) -> list:
-	"""Select refresh work consistently, preserving each original child row.
+def _impact_ms(row) -> float:
+	"""A finding's impact for sorting: ``0.0`` when it is absent, not a number or not finite."""
+	try:
+		impact = float(row_get(row, "estimated_impact_ms", 0) or 0)
+	except (TypeError, ValueError, OverflowError):
+		return 0.0
+	return impact if math.isfinite(impact) else 0.0
 
-	Missing answers precede obsolete answers, then (for an explicit full
-	refresh) current answers. Resuming a run skips answers generated since its
-	request time. Selection never reads Settings again for the exclusion list.
-	"""
-	from optimus import ai_fix, ai_prompts
 
-	selected = []
-	cutoff = _ai_timestamp(requested_at)
-	for row in rows:
-		finding = ai_fix.gate_input(row)
-		if ai_fix.is_finding_type_excluded(finding["finding_type"], cfg=cfg) or ai_fix.llm_gate_note(finding):
+_FIX_STATE_RANK = {ai_prompts.FIX_MISSING: 0, ai_prompts.FIX_OUTDATED: 1, ai_prompts.FIX_CURRENT: 2}
+
+
+class AiSelection(list):
+	"""What :func:`eligible_findings` returns: the chosen rows, in order, as a plain list,
+	plus ``gated`` and ``excluded``, the counts :func:`_ai_selection` found among ALL the rows
+	given (not only the chosen ones). ``gated`` counts the AI-eligible findings (and Framework
+	N+1) the report answers with Optimus's own advice or a note; ``excluded`` counts the
+	AI-eligible findings whose type Optimus Settings excludes."""
+
+	gated: int = 0
+	excluded: int = 0
+
+
+def eligible_findings(rows, cfg, *, regenerate_all=False, requested_at=None, include_outdated=True) -> AiSelection:
+	"""The findings an AI refresh should (re)ask about, in the order to ask, each as the
+	original child row, plus the gated and excluded counts (:class:`AiSelection`).
+
+	Both Refresh paths use it (``_run_ai_backfill`` today, the background refresh later), so
+	they cannot disagree. Rows are first narrowed by :func:`_ai_selection` (the Excluded
+	finding types in ``cfg``, then ``ai_fix.llm_gate_note``); ``cfg=None`` reads Optimus
+	Settings. Then each row's stored answer is classified by ``ai_prompts.fix_state``, the
+	one definition shared with the report:
+
+	- ``missing`` (nothing stored) is always chosen;
+	- ``outdated`` (unparseable, an older or non-integer ``prompt_version``, an error record or
+	  no suggestion text; NOT a newer version, NOT a guardrail-fallback answer) is chosen when
+	  ``include_outdated`` or ``regenerate_all``;
+	- ``current`` is chosen only when ``regenerate_all``.
+
+	``requested_at`` (see :func:`_requested_cutoff`) resumes an interrupted run: a stored
+	answer generated at or after it is skipped, missing rows never are.
+
+	Order: missing, then outdated, then current; inside each, severity (High first; a missing
+	or unknown severity last), then the larger ``estimated_impact_ms``, then the older answer.
+	``_run_ai_backfill`` sorts with the same key."""
+	from optimus import ai_fix
+
+	cutoff = _requested_cutoff(requested_at)
+	eligible, gated, excluded = _ai_selection(
+		rows or (), ai_fix,
+		type_of=lambda r: ai_fix.gate_input(r)["finding_type"],
+		gate=lambda r: ai_fix.llm_gate_note(ai_fix.gate_input(r)),
+		cfg=cfg,
+	)
+	chosen = []
+	for row in eligible:
+		state, fix = ai_prompts.fix_state(row_get(row, "llm_fix_json"))
+		if state == ai_prompts.FIX_CURRENT and not regenerate_all:
 			continue
-		stored = _row_get(row, "llm_fix_json")
-		try:
-			stored = json.loads(stored) if isinstance(stored, str) else None
-		except (ValueError, TypeError):
-			stored = None
-		generated = _ai_timestamp(stored.get("generated_at")) if isinstance(stored, dict) else 0.0
-		if not isinstance(stored, dict):
-			bucket = 0
-		else:
-			suggestion = stored.get("suggestion")
-			guardrail = stored.get("guardrail")
-			outdated = (
-				not isinstance(suggestion, str) or not suggestion.strip() or bool(stored.get("error"))
-				or stored.get("prompt_version") != ai_prompts.PROMPT_VERSION
-				or (isinstance(guardrail, dict) and bool(guardrail.get("fallback")))
-			)
-			bucket = 1 if outdated else 2
-		if (bucket == 1 and not include_outdated and not regenerate_all) or (bucket == 2 and not regenerate_all):
+		if state == ai_prompts.FIX_OUTDATED and not (include_outdated or regenerate_all):
 			continue
-		if bucket and cutoff and generated >= cutoff:
+		generated = _generated_timestamp(fix)
+		if state != ai_prompts.FIX_MISSING and cutoff and generated >= cutoff:
 			continue
-		try:
-			impact = float(_row_get(row, "estimated_impact_ms", 0) or 0)
-		except (TypeError, ValueError, OverflowError):
-			impact = 0.0
-		if not math.isfinite(impact):
-			impact = 0.0
-		severity = _row_get(row, "severity")
-		key = (bucket, generated, SEVERITY_ORDER.get(severity, 3) if isinstance(severity, str) else 3, -impact)
-		selected.append((key, row))
-	return [row for _, row in sorted(selected, key=lambda pair: pair[0])]
+		chosen.append((_refresh_order_key(row, state, generated), row))
+	chosen.sort(key=lambda pair: pair[0])
+	out = AiSelection(row for _, row in chosen)
+	out.gated, out.excluded = gated, excluded
+	return out
+
+
+def _refresh_order_key(row, state: str, generated: float) -> tuple:
+	"""The order Refresh asks in: state (missing, outdated, current), severity, larger impact,
+	older answer."""
+	severity = row_get(row, "severity")
+	rank = SEVERITY_ORDER.get(severity, UNKNOWN_SEVERITY_RANK) if isinstance(severity, str) else UNKNOWN_SEVERITY_RANK
+	return (_FIX_STATE_RANK[state], rank, -_impact_ms(row), generated)
 
 
 def action_recording_map(actions) -> dict:
 	"""``action_ref`` is a zero-based position, unlike Frappe's one-based idx."""
-	return {i: {"recording_uuid": _row_get(action, "recording_uuid")} for i, action in enumerate(actions or ())}
+	return {i: {"recording_uuid": row_get(action, "recording_uuid")} for i, action in enumerate(actions or ())}
+
+
+def _light_recording_map(doc) -> dict:
+	"""``{uuid: rec}`` of the session's persisted bundle, with nothing else kept: the parsed
+	bundle (96% trees and sidecars) is a local of this function, so it is freed on return."""
+	entries = _bundle_entries(_load_recordings_bundle(doc))
+	return {
+		uuid: entry["rec"]
+		for uuid, entry in entries.items()
+		if isinstance(entry, dict) and isinstance(entry.get("rec"), dict)
+	}
 
 
 def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 	"""Load only recorder JSON, without deserializing trees or sidecars.
 
-	A slice's caller-owned memo parses the persisted bundle at most once per
-	session/file. An explicitly empty UUID list requests no recordings. Missing
-	or malformed records are omitted; Redis errors fall back to the bundle.
+	A caller-owned ``memo`` dict reads the persisted bundle at most once per
+	session/file, however many calls share it (a refresh's slices, the Steps call and the
+	re-render). The memo keeps only ``{uuid: rec}``, never the parsed bundle, so it holds
+	about the size of the recordings and not the trees. The result copies each recording
+	without its ``pyi_session``, ``sidecar`` and ``tree_b64``. An explicitly empty UUID list
+	requests no recordings. Missing or malformed records are omitted; Redis errors fall
+	back to the bundle.
 	"""
 	from optimus.ai_fix import _InterruptGuard, log_ai_failure
 
 	if uuids is None:
-		uuids = [_row_get(action, "recording_uuid") for action in (_row_get(doc, "actions") or ())]
+		uuids = [row_get(action, "recording_uuid") for action in (row_get(doc, "actions") or ())]
 	uuids = list(dict.fromkeys(uuid for uuid in uuids if isinstance(uuid, str) and uuid))
 	if not uuids:
 		return []
 	memo = {} if memo is None else memo
-	memo_key = ("recordings", _row_get(doc, "name"), _row_get(doc, "session_uuid"), _row_get(doc, "recordings_file"))
+	memo_key = ("recordings", row_get(doc, "name"), row_get(doc, "session_uuid"), row_get(doc, "recordings_file"))
 	result, failure = [], None
 	redis_failed = False
 	for uuid in uuids:
@@ -2694,16 +2792,13 @@ def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
 			raise guard.interrupt()
 		if failure is not None:
 			try:
-				log_ai_failure("optimus recording cache read", failure, session_uuid=_row_get(doc, "session_uuid"))
+				log_ai_failure("optimus recording cache read", failure, session_uuid=row_get(doc, "session_uuid"))
 			finally:
 				failure = None
 		if not isinstance(rec, dict) or not rec:
 			if memo_key not in memo:
-				memo[memo_key] = _load_recordings_bundle(doc)
-			bundle = memo[memo_key]
-			recordings = bundle.get("recordings") if isinstance(bundle, dict) else None
-			entry = recordings.get(uuid) if isinstance(recordings, dict) else None
-			rec = entry.get("rec") if isinstance(entry, dict) else None
+				memo[memo_key] = _light_recording_map(doc)
+			rec = memo[memo_key].get(uuid)
 		if isinstance(rec, dict) and rec:
 			result.append({key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}})
 	return result
@@ -2728,7 +2823,8 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	cap, ``gated`` the AI-eligible findings (and Framework N+1) the report answers with
 	Optimus's own advice or a note instead (index findings are not counted),
 	``excluded`` the AI-eligible ones whose type Optimus Settings excludes and ``skipped_ineligible`` the ones ``suggest_fix`` refused with a skip
-	kind (``ai_fix.AI_SKIP_KINDS``). Missing or outdated suggestions go first.
+	kind (``ai_fix.AI_SKIP_KINDS``). Which findings, and in what order (missing, outdated, then
+	current; severity, impact, age), is :func:`eligible_findings`, the one selection.
 	"""
 	out = {
 		"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0,
@@ -2741,23 +2837,16 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	if not ai_fix.is_available(section="findings"):
 		return out
 
-	rows = list(getattr(doc, "findings", None) or [])
-	selected, out["gated"], out["excluded"] = _ai_selection(
-		rows, ai_fix,
-		type_of=lambda r: getattr(r, "finding_type", "") or "",
-		gate=lambda r: ai_fix.llm_gate_note(ai_fix.gate_input(r)),
+	# The one selection Refresh uses (eligible_findings): a missing-only run asks about
+	# findings with nothing stored, regenerate_all about every eligible one, missing first, then
+	# outdated, then current, so repeated Refreshes reach every finding.
+	chosen = eligible_findings(
+		list(getattr(doc, "findings", None) or []), None, regenerate_all=regenerate_all, include_outdated=False,
 	)
-	chosen = [r for r in selected if regenerate_all or not ((getattr(r, "llm_fix_json", None) or "").strip())]
+	out["gated"], out["excluded"] = chosen.gated, chosen.excluded
 	out["total_pending"] = len(chosen)
 	if not chosen:
 		return out
-	# Missing or outdated suggestions first, so repeated Refreshes reach every finding,
-	# then the usual severity and impact order.
-	chosen.sort(key=lambda r: (
-		_fix_is_current(r),
-		SEVERITY_ORDER.get(getattr(r, "severity", None) or "Low", 3),
-		-(getattr(r, "estimated_impact_ms", 0) or 0),
-	))
 	if cap is None:
 		try:
 			from optimus.settings import get_config

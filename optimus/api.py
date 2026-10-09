@@ -1262,7 +1262,7 @@ def retry_analyze(session_uuid: str) -> dict:
 	}
 
 
-def _render_session_report(docname: str) -> dict:
+def _render_session_report(docname: str, *, memo: dict | None = None) -> dict:
 	"""Re-render the session's HTML report from stored data and re-attach it.
 
 	Not whitelisted and ungated: every caller must already have passed ``_session_action_gate``
@@ -1272,7 +1272,9 @@ def _render_session_report(docname: str) -> dict:
 
 	Recordings are best-effort: if they expired from Redis (and no bundle is attached) the
 	per-query drill-down renders empty and every persisted section stays intact. Clears the cached
-	PDF. Returns ``{"regenerated": True, "recordings_available": int, "actions_total": int}``; a
+	PDF. ``memo`` is a caller-owned dict shared with the other steps of one run (``refill_ai_suggestions``
+	passes one through its Steps and re-render calls): the persisted recordings are then read once.
+	Returns ``{"regenerated": True, "recordings_available": int, "actions_total": int}``; a
 	render failure raises. Failures are logged after their ``try`` block, never inside the
 	``except`` (a log call inside an ``except`` lets Sentry attach the active frame's locals).
 	"""
@@ -1281,7 +1283,7 @@ def _render_session_report(docname: str) -> dict:
 
 	doc = frappe.get_doc("Optimus Session", docname)
 	recordings, step_failed = _analyze_mod._run_ai_step(
-		lambda: _analyze_mod.load_recordings_light(doc),
+		lambda: _analyze_mod.load_recordings_light(doc, memo=memo),
 		title="optimus regenerate_reports fetch", session_uuid=doc.session_uuid,
 	)
 	if step_failed:
@@ -1308,21 +1310,22 @@ def _render_session_report(docname: str) -> dict:
 	}
 
 
-def _rerender_after_ai(ref: SessionRef) -> bool:
+def _rerender_after_ai(ref: SessionRef, *, memo: dict | None = None) -> bool:
 	"""Re-render after an AI endpoint persisted (and committed) its results.
 
 	A render failure must not turn saved, already-billed work into an error response: it is rolled
 	back, logged through the AI log chokepoint (after the ``try``, not inside the ``except``) and
 	reported as ``regenerated: False`` (the user can click Regenerate Reports). Never calls the
 	whitelisted ``regenerate_reports``, so no second gate or rate limit runs after the LLM spend.
-	RQ job timeouts still escape as fresh instances and stop the worker job.
+	RQ job timeouts still escape as fresh instances and stop the worker job. ``memo`` is passed on to
+	``_render_session_report``.
 	"""
 	from optimus import ai_fix
 	from optimus import analyze as _analyze_mod
 
 	def _render():
 		try:
-			return _render_session_report(ref.docname)
+			return _render_session_report(ref.docname, memo=memo)
 		except ai_fix._job_timeout_types():
 			raise
 		except Exception:
@@ -1414,12 +1417,13 @@ def ai_capabilities() -> dict:
 	}
 
 
-def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
+def _humanize_steps_core(doc, *, title: str | None = None, memo: dict | None = None) -> dict:
 	"""Validation-free rewrite of the session's "Steps to Reproduce" via the
 	configured LLM. Caller is responsible for the permission / status / AI-
 	available / toggle gates and for the final re-render. Returns
 	``{"updated": bool, "reason": str|None}`` so the composite endpoint can
-	report per-step outcomes without raising.
+	report per-step outcomes without raising. ``memo`` is a caller-owned dict shared with the
+	re-render, so the persisted recordings are read once (``load_recordings_light``).
 	"""
 	from optimus import ai_fix
 	from optimus import analyze as _analyze_mod
@@ -1427,7 +1431,7 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 	_analyze_mod._mark_ai_spend_session(getattr(doc, "session_uuid", None))
 
 	recordings, step_failed = _analyze_mod._run_ai_step(
-		lambda: _analyze_mod.load_recordings_light(doc),
+		lambda: _analyze_mod.load_recordings_light(doc, memo=memo),
 		title="optimus humanize_steps fetch", session_uuid=getattr(doc, "session_uuid", None),
 	)
 	if step_failed:
@@ -1495,6 +1499,8 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 	_analyze_mod._bump_ai_refresh_count(doc.name)
 	safe_commit()
 
+	# One memo through the Steps call and the re-render: the persisted recordings are read once.
+	recordings_memo: dict = {}
 	fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None, "gated": 0, "excluded": 0, "skipped_ineligible": 0}
 	if cfg.ai_suggest_findings:
 		counts = _analyze_mod._run_ai_backfill(doc, cap=0, regenerate_all=True)
@@ -1506,7 +1512,7 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 	if cfg.ai_humanize_steps:
 		# Re-fetch the doc: the backfill above may have mutated rows.
 		doc = frappe.get_doc("Optimus Session", ref.docname)
-		steps = _humanize_steps_core(doc, title=ref.title or None)
+		steps = _humanize_steps_core(doc, title=ref.title or None, memo=recordings_memo)
 	else:
 		steps["reason"] = "toggle_off"
 
@@ -1515,7 +1521,7 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 		"session_uuid": ref.session_uuid,
 		"fixes": fixes,
 		"steps": steps,
-		"regenerated": _rerender_after_ai(ref),
+		"regenerated": _rerender_after_ai(ref, memo=recordings_memo),
 	}
 
 
