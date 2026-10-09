@@ -273,7 +273,13 @@ def _take_singleflight(session_uuid: str) -> bool:
 	sessions taking it at once, exactly one gets it. Like every flag write here it skips
 	``frappe.local.cache``; ``_read_singleflight_holder`` never trusts that cache."""
 	value = pickle.dumps(session_uuid, protocol=_SINGLEFLIGHT_PICKLE_PROTOCOL)
-	return bool(frappe.cache.set(_singleflight_redis_key(), value, nx=True, ex=_SINGLEFLIGHT_TTL_SECONDS))
+	# A raw SET is the only way to get NX; the key comes from frappe.cache.make_key, so it
+	# carries the site prefix that set_value would add, and the flag stays per site.
+	return bool(
+		frappe.cache.set(  # nosemgrep: frappe-cache-breaks-multitenancy
+			_singleflight_redis_key(), value, nx=True, ex=_SINGLEFLIGHT_TTL_SECONDS
+		)
+	)
 
 
 def _note_heartbeat_problem(session_uuid: str, problem: str) -> None:
