@@ -10,7 +10,7 @@ in ai_fix.py.
 These tests guard that disabled state so the option can't reappear by
 accident. To re-enable, restore the provider entry + Select option (see the
 comment in ai_fix.py) and flip these assertions back. The
-``_aerele_call_metadata`` wiring stays intact (covered by test_ai_fix.py);
+data-driven ``_session_call_metadata`` wiring stays intact (covered by test_ai_fix.py);
 only the selectable provider is switched off.
 """
 

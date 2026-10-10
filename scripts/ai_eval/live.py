@@ -127,13 +127,20 @@ def run_case(case: dict, ai_fix, *, source_lines: list[str] | None = None, api_k
 	key, used only to scrub it)."""
 	record = {"name": case["name"], "finding_type": case["finding_type"], "outcome": None,
 		"result": None, "error": None, "elapsed_s": 0.0}
-	try:
-		from optimus.renderer import fix_recipes  # added by PR-L1
-	except ImportError:
-		fix_recipes = None
+	from optimus.analyzers import base as analyzers_base
+
+	# In analyzers.base since the PR #71 fix wave; an older --optimus-src checkout keeps it
+	# in fix_recipes (added by PR-L1), and one from before PR-L1 has neither.
+	index_types = getattr(analyzers_base, "INDEX_FINDING_TYPES", None)
+	if index_types is None:
+		try:
+			from optimus.renderer import fix_recipes
+		except ImportError:
+			fix_recipes = None
+		index_types = getattr(fix_recipes, "INDEX_FINDING_TYPES", ())
 	finding = _corpus.build_finding(case, source_lines=source_lines)
 	ftype = case["finding_type"]
-	if fix_recipes is not None and ftype in getattr(fix_recipes, "INDEX_FINDING_TYPES", ()):
+	if ftype in index_types:
 		record["outcome"] = "recipe"
 		return record
 	gate = getattr(ai_fix, "llm_gate_note", None)  # added by PR-L1

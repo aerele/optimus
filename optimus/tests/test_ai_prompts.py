@@ -7,8 +7,7 @@ Every Frappe fact the prompt teaches is pinned here, so a later edit cannot
 silently reintroduce a wrong one (Customize Form indexes, raw DDL, frappe.cache(),
 isinstance type checks, enqueue without enqueue_after_commit). Also pins the
 static-prefix contract (one byte-identical SYSTEM_PROMPT) and its size.
-INDEX_SYSTEM_PROMPT (the table-card index path) is not part of prompt v2: it keeps
-the develop text until PR-L1 deletes that path, so it is not pinned here.
+Index advice is deterministic and has no model prompt.
 """
 
 import re
@@ -42,8 +41,8 @@ def _examples():
 
 
 # ---------------------------------------------------------------- shape
-def test_prompt_version_is_3():
-	assert P.PROMPT_VERSION == 3
+def test_prompt_version_is_4():
+	assert P.PROMPT_VERSION == 4
 
 
 def test_system_prompt_fits_the_char_budget():
@@ -102,7 +101,7 @@ def test_no_em_or_en_dashes_or_sweep_artifacts(name):
 
 
 def test_hints_and_rule_text_have_no_dashes():
-	for text in list(P.FINDING_TYPE_HINTS.values()) + list(P.POSTGRES_EXPLAIN_HINTS.values()) + list(
+	for text in list(P.FINDING_TYPE_HINTS.values()) + list(
 		P.RULE_TEXT.values()
 	):
 		assert "\u2014" not in text and "\u2013" not in text
@@ -129,18 +128,16 @@ def test_raw_ddl_only_in_never_sentences():
 				assert "Never" in s or "never" in s, (name, s)
 
 
-def test_index_recipe_is_the_three_row_table():
-	rules = P.INDEX_RULES
-	assert "on_doctype_update()" in rules
-	assert "Property Setter" in rules and "search_index = 1" in rules
-	assert "patch" in rules and "Custom Field" in rules
-	assert "after_migrate" not in P.SYSTEM_PROMPT
-	assert P.INDEX_RULES in P.SYSTEM_PROMPT
+def test_the_prompt_has_no_index_recipe_of_its_own():
+	"""Index advice is the profiler's (optimus/renderer/index_recipes.py), passed as a
+	fact for Slow Query; the prompt no longer teaches patches or on_doctype_update."""
+	assert not hasattr(P, "INDEX_RULES")
+	assert "on_doctype_update" not in P.SYSTEM_PROMPT and "INDEXES" not in P.SYSTEM_PROMPT
+	assert "profiler's index advice" in P._OUTPUT
 
 
-def test_metadata_column_rule_allows_trailing_creation():
-	assert "trailing `creation`" in P.INDEX_RULES
-	assert "alone or first" in P.INDEX_RULES
+def test_metadata_index_rule_text_still_forbids_a_leading_metadata_column():
+	assert "alone or first" in P.RULE_TEXT["metadata-index"]
 
 
 def test_every_enqueue_passes_enqueue_after_commit():
@@ -207,7 +204,7 @@ def test_redundant_call_hint_keeps_permission_check():
 
 def test_hints_cover_exactly_the_eligible_types():
 	assert set(P.FINDING_TYPE_HINTS) == set(ai_fix.AI_ELIGIBLE_FINDING_TYPES)
-	assert set(P.POSTGRES_EXPLAIN_HINTS) <= set(P.FINDING_TYPE_HINTS)
+	assert not hasattr(P, "POSTGRES_EXPLAIN_HINTS")
 	for h in P.FINDING_TYPE_HINTS.values():
 		assert "Customize Form" not in h and "ALTER TABLE" not in h
 
@@ -230,3 +227,25 @@ def test_example_code_is_semgrep_clean():
 	assert sum(r.units for r in scanned.values()) >= 1  # Example 1's diff was scanned
 	assert sum(r.unparsed for r in scanned.values()) == 0
 	assert {k: [h["rule"] for h in r.hits] for k, r in scanned.items() if r.hits} == {}
+
+
+def test_is_current_is_the_one_currency_rule():
+	v = ai_prompts.PROMPT_VERSION
+	assert ai_prompts.is_current({"prompt_version": v}) and ai_prompts.is_current(v + 1)
+	assert ai_prompts.is_current({"prompt_version": v - 1}, current_version=v - 1)
+	for bad in ({}, {"prompt_version": v - 1}, {"prompt_version": True}, {"prompt_version": "4"}, None, True, "4"):
+		assert not ai_prompts.is_current(bad)
+
+
+def test_a_bool_version_is_never_current_even_against_a_floor_of_one():
+	assert not ai_prompts.is_current({"prompt_version": True}, 1)
+	assert ai_prompts.is_current({"prompt_version": 1}, 1)
+
+
+def test_fix_state_ignores_a_bare_json_number():
+	v = ai_prompts.PROMPT_VERSION
+	assert ai_prompts.fix_state(f'{{"suggestion": "s", "prompt_version": {v}}}')[0] == "current"
+	for raw in (str(v), "7", "null", "[]", "not json"):
+		assert ai_prompts.fix_state(raw)[0] == "outdated"
+	for raw in (None, "", "  "):
+		assert ai_prompts.fix_state(raw)[0] == "missing"

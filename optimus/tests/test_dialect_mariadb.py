@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import types
 
+import pytest
+
 from optimus.dbdialect.mariadb import MariaDBDialect
 
 
@@ -71,6 +73,42 @@ class TestExistingIndexes:
 		_install_db(monkeypatch, lambda q, *a, **k: called.append(q) or [])
 		assert MariaDBDialect().existing_indexes("tabUser; DROP TABLE x") == []
 		assert called == []
+
+
+class _JobTimeout(Exception):
+	"""Stands in for rq's JobTimeoutException."""
+
+
+class TestJobTimeoutsEscape:
+	"""An ordinary SQL error still gives the empty default, but an RQ job timeout must stop
+	the job, so the index and column reads raise it again."""
+
+	@pytest.fixture
+	def deadline(self, monkeypatch):
+		from optimus import safe_call
+
+		monkeypatch.setattr(safe_call, "job_timeout_types", lambda: (_JobTimeout,))
+
+		def boom(*a, **k):
+			raise _JobTimeout("deadline")
+
+		_install_db(monkeypatch, boom)
+
+	def test_the_index_read_raises_a_job_timeout(self, deadline):
+		with pytest.raises(_JobTimeout):
+			MariaDBDialect().existing_indexes("tabUser")
+
+	def test_the_column_read_raises_a_job_timeout(self, deadline):
+		with pytest.raises(_JobTimeout):
+			MariaDBDialect().column_types("tabUser")
+
+	def test_an_ordinary_error_still_gives_the_empty_default(self, monkeypatch):
+		def boom(*a, **k):
+			raise RuntimeError("Lock wait timeout exceeded")
+
+		_install_db(monkeypatch, boom)
+		assert MariaDBDialect().existing_indexes("tabUser") == []
+		assert MariaDBDialect().column_types("tabUser") == {}
 
 
 class TestColumnTypesAndDdl:

@@ -657,9 +657,9 @@ def _log_line(line: str) -> None:
 	lower levels on a production site). It holds counts, exception type
 	names or fixed text, never row text. An RQ job timeout leaves as a fresh
 	instance; other logging exceptions are swallowed."""
-	from optimus.ai_fix import _InterruptGuard
+	from optimus import safe_call
 
-	guard = _InterruptGuard()
+	guard = safe_call.InterruptGuard()
 	try:
 		with guard:
 			frappe.logger("optimus").error(line)

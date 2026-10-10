@@ -64,11 +64,13 @@ function optimus_fmt_ms(ms, decimals) {
 // Single AI button: "Refresh AI suggestions". Replaces five legacy
 // buttons (Suggest a fix / Generate AI fixes / Re-evaluate AI fixes /
 // Humanize Steps / Suggest an index). One server endpoint
-// (api.refill_ai_suggestions) runs all three operations per-section
+// (api.refill_ai_suggestions) runs both AI operations per-section
 // and re-renders the report once. The master AI switch still gates
 // whether the button appears at all; per-section toggles are honored
 // inside the server endpoint (a toggle-off section is skipped silently).
 function render_ai_buttons(frm) {
+	// Whether the AI button is offered (read by the Regenerate Reports dialog's pointer to it).
+	frm._optimus_ai_enabled = false;
 	if (frm.is_new()) return;
 	if (frm.doc.status !== "Ready") return;
 	frappe.call({
@@ -76,6 +78,7 @@ function render_ai_buttons(frm) {
 		callback: (r) => {
 			const c = (r && r.message) || {};
 			if (!c.enabled) return; // master switch off → no AI button
+			frm._optimus_ai_enabled = true;
 			render_ai_refill_button(frm);
 		},
 		// Read failed (e.g. not configured / no perm) → render nothing.
@@ -222,13 +225,7 @@ function render_ai_refill_button(frm) {
 		() => {
 			frappe.confirm(
 				__(
-					"Refresh every AI-generated section of the report? " +
-						"This re-runs fix suggestions on findings, the " +
-						"humanized Steps to Reproduce and index advice " +
-						"for tables with a candidate then re-renders " +
-						"the report once. Calls the configured LLM for " +
-						"each, so it can take a bit. If it doesn't " +
-						"finish in one pass, run it again."
+					"Refresh every AI-generated section of the report? This re-runs fix suggestions on findings and the humanized Steps to Reproduce, then re-renders the report once. It calls the configured AI for each item, so it can take a while. If it does not finish in one pass, run it again."
 				),
 				() => _refill_ai_call(frm)
 			);
@@ -245,29 +242,60 @@ function _refill_ai_call(frm) {
 		freeze_message: __("Refreshing AI suggestions & re-rendering the report…"),
 		callback: (r) => {
 			const m = (r && r.message) || {};
+			if (m.busy) {
+				// another refresh of this session is still running: nothing was counted or billed
+				frappe.show_alert({
+					message: __("A refresh is already running for this session. Wait for it to finish, then reload the form."),
+					indicator: "orange",
+				});
+				return;
+			}
 			const fx = m.fixes || {};
-			const ix = m.indexes || {};
 			const st = m.steps || {};
 			const parts = [];
 			if (fx.added) parts.push(__("{0} fix(es)", [fx.added]));
 			if (st.updated) parts.push(__("steps rewritten"));
-			if (ix.added) parts.push(__("{0} index suggestion(s)", [ix.added]));
+			const failed = fx.failed || 0;
+			const skipped = fx.skipped_time || 0;
+			// the Steps rewrite failed (not "no user actions" or a toggle that is off): say why
+			const stepsFailed = !st.updated && st.failed && st.reason;
+			// a "nothing to refresh" toast would contradict the failed-calls and skipped alerts below
 			const msg = parts.length
 				? __("Refreshed: {0}.", [parts.join(", ")])
-				: __("Nothing to refresh.");
-			const failed = (fx.failed || 0) + (ix.failed || 0);
-			const skipped = (fx.skipped_time || 0) + (ix.skipped || 0);
+				: failed || skipped || stepsFailed
+					? ""
+					: __("Nothing to refresh.");
 			const indicator = failed ? "red" : parts.length ? "green" : "orange";
-			frappe.show_alert({ message: msg, indicator: indicator });
+			if (msg) frappe.show_alert({ message: msg, indicator: indicator });
 			if (failed) {
 				frappe.show_alert({
-					message: __("{0} call(s) failed old suggestions kept (see Error Log).", [failed]),
+					message: __("{0} call(s) failed, old suggestions kept (search the Error Log for titles starting with optimus ai).", [failed]),
+					indicator: "red",
+				});
+			}
+			if (stepsFailed) {
+				// the server's message can quote the provider's reply: shown as text, never as HTML
+				frappe.show_alert({
+					message: __("Steps to Reproduce were not rewritten: {0}", [frappe.utils.escape_html(st.reason)]),
 					indicator: "red",
 				});
 			}
 			if (skipped) {
 				frappe.show_alert({
-					message: __("{0} skipped (time budget) run it again for the rest.", [skipped]),
+					message: __("{0} skipped (time budget). Run it again for the rest.", [skipped]),
+					indicator: "orange",
+				});
+			}
+			const gated = (fx.gated || 0) + (fx.skipped_ineligible || 0);
+			if (gated) {
+				frappe.show_alert({
+					message: __("{0} finding(s) were not sent to the AI. Their own advice or note is in the report.", [gated]),
+					indicator: "blue",
+				});
+			}
+			if (fx.excluded) {
+				frappe.show_alert({
+					message: __("{0} finding(s) skipped: their type is listed under Excluded finding types in Optimus Settings.", [fx.excluded]),
 					indicator: "orange",
 				});
 			}
@@ -275,7 +303,7 @@ function _refill_ai_call(frm) {
 		},
 		error: () => {
 			frappe.show_alert({
-				message: __("The AI refresh request failed see the error popup for details."),
+				message: __("The AI refresh request failed. See the error popup for details."),
 				indicator: "red",
 			});
 		},
@@ -899,23 +927,23 @@ function render_regenerate_report_button(frm) {
 	if (!["Ready", "Failed"].includes(frm.doc.status)) return;
 
 	frm.add_custom_button(__("Regenerate Reports"), () => {
+		let message = __(
+			"Re-render the report from stored session data. This does not re-run the analyzer and does not call the AI provider; saved AI suggestions are kept as they are."
+		);
+		// The Refresh AI suggestions button exists only on a Ready session with AI enabled.
+		if (frm.doc.status === "Ready" && frm._optimus_ai_enabled) {
+			message += " " + __(
+				"For new or updated AI suggestions use AI > Refresh AI suggestions (available when AI is enabled and the session is Ready)."
+			);
+		}
 		frappe.confirm(
-			__(
-				"Re-render the HTML report from stored session data. This "
-				+ "does NOT re-run the analyzer. Note: if \"Suggest AI fixes "
-				+ "in the report by default\" is enabled, this also asks the "
-				+ "LLM for fixes for any findings that don't have one yet "
-				+ "which can take a while."
-			),
+			message,
 			() => {
 				frappe.call({
 					method: "optimus.api.regenerate_reports",
 					args: { session_uuid: frm.doc.session_uuid },
 					freeze: true,
-					freeze_message: __(
-						"Regenerating the report… (this can take a while if "
-						+ "AI fix suggestions are enabled)"
-					),
+					freeze_message: __("Regenerating the report…"),
 					callback: (r) => {
 						const data = (r && r.message) || {};
 						if (data.regenerated) {

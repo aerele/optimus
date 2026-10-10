@@ -9,13 +9,14 @@ Endpoints the floating widget and custom integrations call. Decorated with
 
 import html
 import time
+import uuid
 from dataclasses import dataclass
 
 import frappe
 from frappe import _
 from frappe.utils import add_to_date, now_datetime
 
-from optimus import ratelimit, safe_commit, session
+from optimus import ratelimit, redis_keys, safe_call, safe_commit, session
 from optimus.permissions import may_act_on_session
 
 # Roles allowed to call the profiler API. System Manager is always allowed
@@ -23,7 +24,6 @@ from optimus.permissions import may_act_on_session
 # on install via install.after_install. Adding Administrator explicitly
 # because frappe.get_roles("Administrator") doesn't include "System Manager".
 ALLOWED_ROLES = {"System Manager", "Optimus User", "Administrator"}
-
 
 
 # Per-user rate limits (optimus.ratelimit), keyed by endpoint name and counted by the endpoint
@@ -921,7 +921,7 @@ def _session_perf_24h() -> dict:
 			Avg(s.analyze_duration_ms).as_("avg_ms"),
 			Max(s.analyze_duration_ms).as_("max_ms"),
 		)
-		.where((s.status == "Ready") & (s.modified > cutoff))
+		.where((s.status == "Ready") & (s.stopped_at > cutoff))
 	).run(as_dict=True)
 	agg = rows[0] if rows else {}
 	return {
@@ -1041,11 +1041,72 @@ def download_pdf(session_uuid: str) -> dict:
 	return {"file_url": url}
 
 
+def _export_index_advice(findings: list[dict], tables) -> None:
+	"""An export carries the deterministic index advice the report
+	shows, never the analyzer's stored raw DDL (``suggested_ddl``) or the retired index AI
+	output (a table's ``ai_index``; finding ``llm_fix_json`` is never exported). Mutates in
+	place. Each index-family finding gains ``index_advice`` from
+	``recipe_enrichment.export_advice``, the advice step the report runs too:
+	``route``, ``doctype``, ``table``, ``columns``, ``index_name``, ``text`` and ``code``,
+	the report's fix-hint prose and code, ``unknown`` (no verdict: Optimus could not
+	tell, or the advisor failed) and ``sort_stays`` ("stays" or "may stay" when a Filesort or
+	Temporary Table code leaves the sort or the temporary table in place, or may, else ""),
+	or None when the advisor has nothing to say. With
+	advice, its ``technical_detail.fix_hint`` is that same text, and its ``title`` and
+	``customer_description`` are the report's (``finding_display``: no "Add index" title
+	next to a no-code advice). When the advisor raises, the finding carries the report's
+	failure note (``RECIPE_FAILED_HINT``, route no_code, no code) and the failures are
+	logged once, as a render logs them. Each table's ``recommended_index`` goes through the
+	same advisor. One per-export evidence lookup (memoised per table) and one per-export
+	query parser (memoised per query) serve both, as in the report."""
+	from optimus.analyzers.base import INDEX_FINDING_TYPES
+	from optimus.renderer import recipe_enrichment
+	from optimus.safe_call import best_effort
+	from optimus.settings import read_tracked_apps
+
+	tracked = read_tracked_apps()
+	lookup = recipe_enrichment.make_evidence_lookup()
+	parser = recipe_enrichment.make_query_parser()
+	failed = 0
+	errors: list = []
+	for f in findings:
+		detail = f.get("technical_detail")
+		if f.get("finding_type") in INDEX_FINDING_TYPES:
+			advice, advice_failed = recipe_enrichment.export_advice(
+				f, evidence_lookup=lookup, tracked_apps=tracked, parser=parser, errors=errors,
+			)
+			failed += advice_failed
+			f["index_advice"] = advice
+			if advice is not None and isinstance(detail, dict):
+				# The report's prose in the report's slot: the analyzer's stored hint ("Add an
+				# index on ...") must never sit next to a no_code advice.
+				detail["fix_hint"] = advice["text"]
+			f.update(recipe_enrichment.finding_display(f, advice))
+		if isinstance(detail, dict):
+			detail.pop("suggested_ddl", None)
+	tables = [t for t in (tables if isinstance(tables, list) else []) if isinstance(t, dict)]
+	for t in tables:
+		t.pop("ai_index", None)
+	table_stats = best_effort(
+		lambda: recipe_enrichment.apply_table_recipes(
+			tables, evidence_lookup=lookup, tracked_apps=tracked, errors=errors,
+		),
+		None,
+	)
+	failed += (table_stats or {}).get("failed", 0)
+	recipe_enrichment.log_recipe_failures(failed, where="export", errors=errors)
+	lookup.log_unlisted_failures()
+
+
 @frappe.whitelist()
 def export_session(session_uuid: str) -> dict:
 	"""Export an Optimus Session as a structured JSON blob for programmatic
 	consumption (no HTML parsing): the full session with all child rows, top
 	queries, table breakdown and finding technical details.
+
+	Index advice is the report's deterministic advice (``index_advice`` on each
+	index-family finding, the table's ``recommended_index``); the analyzer's raw DDL and
+	the retired index AI output are not exported.
 
 	Permission: recording user or System Manager only (mirrors the report
 	download gate); other users get a permission error.
@@ -1082,6 +1143,23 @@ def export_session(session_uuid: str) -> dict:
 			return json.loads(value)
 		except Exception:
 			return []
+
+	findings = [
+		{
+			"idx": f.idx,
+			"finding_type": f.finding_type,
+			"severity": f.severity,
+			"title": f.title,
+			"customer_description": f.customer_description,
+			"technical_detail": _parse_json_field(f.technical_detail_json),
+			"estimated_impact_ms": f.estimated_impact_ms,
+			"affected_count": f.affected_count,
+			"action_ref": f.action_ref,
+		}
+		for f in (doc.findings or [])
+	]
+	table_breakdown = _parse_json_field(doc.table_breakdown_json)
+	_export_index_advice(findings, table_breakdown)
 
 	return {
 		"schema_version": 1,
@@ -1125,22 +1203,9 @@ def export_session(session_uuid: str) -> dict:
 			}
 			for a in (doc.actions or [])
 		],
-		"findings": [
-			{
-				"idx": f.idx,
-				"finding_type": f.finding_type,
-				"severity": f.severity,
-				"title": f.title,
-				"customer_description": f.customer_description,
-				"technical_detail": _parse_json_field(f.technical_detail_json),
-				"estimated_impact_ms": f.estimated_impact_ms,
-				"affected_count": f.affected_count,
-				"action_ref": f.action_ref,
-			}
-			for f in (doc.findings or [])
-		],
+		"findings": findings,
 		"top_queries": _parse_json_field(doc.top_queries_json),
-		"table_breakdown": _parse_json_field(doc.table_breakdown_json),
+		"table_breakdown": table_breakdown,
 		# v0.3.0 top-level aggregates
 		"hot_frames": _parse_json_field(getattr(doc, "hot_frames_json", None)),
 		"session_time_breakdown": _parse_json_field(
@@ -1198,19 +1263,19 @@ def retry_analyze(session_uuid: str) -> dict:
 	}
 
 
-def _render_session_report(docname: str, *, ai_backfill: bool = False) -> dict:
+def _render_session_report(docname: str, *, memo: dict | None = None) -> dict:
 	"""Re-render the session's HTML report from stored data and re-attach it.
 
 	Not whitelisted and ungated: every caller must already have passed ``_session_action_gate``
 	(or run as trusted server code). Other Optimus modules may call it; the leading underscore
-	means "not an HTTP endpoint", not "private to this module". ``ai_backfill=True`` first fills
-	missing AI fix suggestions when "Suggest AI fixes by default" is on; only the whitelisted
-	``regenerate_reports`` passes it until that path is removed, so a re-render never calls the
-	LLM. AI endpoints use the default False: they have just generated what they wanted.
+	means "not an HTTP endpoint". Rendering uses saved AI answers and never
+	calls the provider or loads recording trees.
 
 	Recordings are best-effort: if they expired from Redis (and no bundle is attached) the
 	per-query drill-down renders empty and every persisted section stays intact. Clears the cached
-	PDF. Returns ``{"regenerated": True, "recordings_available": int, "actions_total": int}``; a
+	PDF. ``memo`` is a caller-owned dict shared with the other steps of one run (``refill_ai_suggestions``
+	passes one through its Steps and re-render calls): the persisted recordings are then read once.
+	Returns ``{"regenerated": True, "recordings_available": int, "actions_total": int}``; a
 	render failure raises. Failures are logged after their ``try`` block, never inside the
 	``except`` (a log call inside an ``except`` lets Sentry attach the active frame's locals).
 	"""
@@ -1218,23 +1283,12 @@ def _render_session_report(docname: str, *, ai_backfill: bool = False) -> dict:
 	from optimus import analyze as _analyze_mod
 
 	doc = frappe.get_doc("Optimus Session", docname)
-	recording_uuids = [
-		a.recording_uuid for a in (doc.actions or []) if getattr(a, "recording_uuid", None)
-	]
 	recordings, step_failed = _analyze_mod._run_ai_step(
-		lambda: list(_analyze_mod._fetch_recordings(
-			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
-		)),
-		title="optimus regenerate_reports fetch", session_uuid=doc.session_uuid,
+		lambda: _analyze_mod.load_recordings_light(doc, memo=memo),
+		title="optimus ai regenerate_reports fetch", session_uuid=doc.session_uuid,
 	)
 	if step_failed:
 		recordings = []
-
-	if ai_backfill:
-		_analyze_mod._run_ai_step(
-			lambda: _analyze_mod._backfill_ai_suggestions(doc),
-			title="optimus regenerate ai backfill", session_uuid=doc.session_uuid,
-		)
 
 	interrupt = None
 
@@ -1257,26 +1311,27 @@ def _render_session_report(docname: str, *, ai_backfill: bool = False) -> dict:
 	}
 
 
-def _rerender_after_ai(ref: SessionRef) -> bool:
+def _rerender_after_ai(ref: SessionRef, *, memo: dict | None = None) -> bool:
 	"""Re-render after an AI endpoint persisted (and committed) its results.
 
 	A render failure must not turn saved, already-billed work into an error response: it is rolled
 	back, logged through the AI log chokepoint (after the ``try``, not inside the ``except``) and
 	reported as ``regenerated: False`` (the user can click Regenerate Reports). Never calls the
 	whitelisted ``regenerate_reports``, so no second gate or rate limit runs after the LLM spend.
-	RQ job timeouts still escape as fresh instances and stop the worker job.
+	RQ job timeouts still escape as fresh instances and stop the worker job. ``memo`` is passed on to
+	``_render_session_report``.
 	"""
 	from optimus import ai_fix
 	from optimus import analyze as _analyze_mod
 
 	def _render():
 		try:
-			return _render_session_report(ref.docname)
+			return _render_session_report(ref.docname, memo=memo)
 		except ai_fix._job_timeout_types():
 			raise
 		except Exception:
 			# Undo the failed render before the helper writes its Error Log row.
-			guard = ai_fix._InterruptGuard()
+			guard = safe_call.InterruptGuard()
 			try:
 				with guard:
 					frappe.db.rollback()
@@ -1287,7 +1342,7 @@ def _rerender_after_ai(ref: SessionRef) -> bool:
 			raise
 
 	out, step_failed = _analyze_mod._run_ai_step(
-		_render, title="optimus AI re-render", session_uuid=ref.session_uuid,
+		_render, title="optimus ai re-render", session_uuid=ref.session_uuid,
 	)
 	return not step_failed and bool(out.get("regenerated"))
 
@@ -1302,8 +1357,8 @@ def regenerate_reports(session_uuid: str) -> dict:
 	Failed sessions; any other status is refused with the long-standing message that names
 	retry_analyze (pinned by the real-bench integration test). Permission:
 	``_session_action_gate`` (the owner, a System Manager or a user the session is shared with for
-	editing); then the per-user limit. Until the AI path is removed from regenerate it still
-	backfills missing AI fix suggestions first when "Suggest AI fixes by default" is on.
+	editing); then the per-user limit. Uses saved AI answers without making new
+	provider calls. Use Refresh AI suggestions to request new answers.
 	"""
 	ref = _session_action_gate(
 		session_uuid,
@@ -1312,7 +1367,7 @@ def regenerate_reports(session_uuid: str) -> dict:
 		status_hint=_("regenerate_reports requires the session to be in a terminal state (Ready or Failed); this one is '{0}'. Wait for analyze to finish, or use retry_analyze to restart a stuck pipeline."),
 	)
 	ratelimit.enforce_user_rate_limit("regenerate_reports", **_ACTION_LIMITS["regenerate_reports"])
-	out = _render_session_report(ref.docname, ai_backfill=True)
+	out = _render_session_report(ref.docname)
 	return {
 		"regenerated": bool(out.get("regenerated")),
 		"session_uuid": ref.session_uuid,
@@ -1350,45 +1405,44 @@ def ai_capabilities() -> dict:
 	"""The per-section LLM toggles, for the Optimus Session form to decide
 	which AI buttons to show. Any logged-in profiler user no Profiler
 	Settings read permission needed (the server still enforces the toggles).
-	Returns ``{enabled, findings, indexes, humanize}`` (all bools)."""
+	Returns ``{enabled, findings, indexes, humanize}`` (all bools);
+	``indexes`` is always False since index advice stopped using the AI."""
 	_require_profiler_user()
 	from optimus.settings import get_config
 	cfg = get_config()
 	return {
 		"enabled": bool(getattr(cfg, "ai_enabled", False)),
 		"findings": bool(getattr(cfg, "ai_suggest_findings", True)),
-		"indexes": bool(getattr(cfg, "ai_suggest_indexes", True)),
+		"indexes": False,
 		"humanize": bool(getattr(cfg, "ai_humanize_steps", True)),
 	}
 
 
-
-
-
-
-
-
-def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
+def _humanize_steps_core(doc, *, title: str | None = None, memo: dict | None = None) -> dict:
 	"""Validation-free rewrite of the session's "Steps to Reproduce" via the
 	configured LLM. Caller is responsible for the permission / status / AI-
 	available / toggle gates and for the final re-render. Returns
 	``{"updated": bool, "reason": str|None}`` so the composite endpoint can
-	report per-step outcomes without raising.
+	report per-step outcomes without raising. ``memo`` is a caller-owned dict shared with the
+	re-render, so the persisted recordings are read once (``load_recordings_light``).
+
+	A failed rewrite runs through ``analyze._run_ai_step``: one Error Log row titled
+	``optimus ai humanize_steps`` (the same title as analyze's Steps step), written after the
+	``try``, and ``{"updated": False, "failed": True, "reason": <message>}``: the AI error's own
+	message (translated, with its next step), or a plain one for an unexpected error, for the
+	Refresh toast to show. The transaction is then committed, so an unattributed billed reply's
+	ambient charge is kept even if the re-render after it rolls back. A session with no user
+	actions is not a failure (no ``failed``, no row). An RQ job timeout is logged and leaves
+	fresh.
 	"""
 	from optimus import ai_fix
 	from optimus import analyze as _analyze_mod
 
 	_analyze_mod._mark_ai_spend_session(getattr(doc, "session_uuid", None))
 
-	recording_uuids = [
-		a.recording_uuid for a in (doc.actions or [])
-		if getattr(a, "recording_uuid", None)
-	]
 	recordings, step_failed = _analyze_mod._run_ai_step(
-		lambda: list(_analyze_mod._fetch_recordings(
-			recording_uuids, recordings_bundle=_analyze_mod._load_recordings_bundle(doc)
-		)),
-		title="optimus humanize_steps fetch", session_uuid=getattr(doc, "session_uuid", None),
+		lambda: _analyze_mod.load_recordings_light(doc, memo=memo),
+		title="optimus ai humanize_steps fetch", session_uuid=getattr(doc, "session_uuid", None),
 	)
 	if step_failed:
 		recordings = []
@@ -1403,16 +1457,35 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 			),
 		}
 	_steps_usage: dict = {}
-	try:
-		steps_md = ai_fix.humanize_steps(actions, session_title=title, usage_out=_steps_usage)
-	except ai_fix.AiFixError as e:
-		return {"updated": False, "reason": str(e)}
+	reasons: list[str] = []
+
+	def _rewrite():
+		try:
+			return ai_fix.humanize_steps(actions, session_title=title, usage_out=_steps_usage)
+		except ai_fix.AiFixError as e:
+			# the user-facing message (no key, the reply scrubbed and capped), for the toast
+			reasons.append(str(e))
+			raise
+
+	steps_md, step_failed = _analyze_mod._run_ai_step(
+		_rewrite, title="optimus ai humanize_steps", session_uuid=getattr(doc, "session_uuid", None),
+	)
+	if step_failed:
+		safe_call.best_effort(safe_commit, None)
+		return {
+			"updated": False,
+			"failed": True,
+			"reason": reasons[0] if reasons else _(
+				"The Steps to Reproduce rewrite failed with an unexpected error. Search the Error Log "
+				"for titles starting with optimus ai."
+			),
+		}
 
 	frappe.db.set_value(
 		"Optimus Session", doc.name, {
 			"notes": _analyze_mod._assemble_humanized_notes(steps_md),
 			# Tokens for this Steps-to-Reproduce humanization. The report's
-			# session total rolls it in alongside fix + index suggestions
+			# session total rolls it in alongside finding fix suggestions
 			# (notes is markdown, so the count needs its own field).
 			"ai_steps_tokens": int(_steps_usage.get("total_tokens") or 0),
 		},
@@ -1421,120 +1494,137 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 	return {"updated": True, "reason": None}
 
 
-
-
-
-def _refill_indexes_for_doc(doc) -> dict:
-	"""Walk the session's table breakdown and run the per-table index AI
-	helper for every table that has a heuristic ``recommended_index`` but
-	no ``ai_index`` yet. Returns ``{"added": N, "failed": N, "skipped": N}``.
-	Caller is responsible for permission / status / AI-available gates and
-	for the final re-render.
-	"""
-	import json as _json
-
+def _refresh_flight_ttl() -> int:
+	"""How long a Refresh holds its session's flag at most: its fix-call budget
+	(``analyze.AI_BACKFILL_TIME_BUDGET_SECONDS``, checked before each call), one more fix call and
+	the Steps call at the configured Request timeout, and a minute for the writes and the
+	re-render. A worker killed mid-refresh leaves the flag to expire after that."""
+	from optimus import ai_fix
 	from optimus import analyze as _analyze_mod
 
-	try:
-		breakdown = _json.loads(doc.table_breakdown_json or "[]")
-	except Exception:
-		breakdown = []
+	return int(_analyze_mod.AI_BACKFILL_TIME_BUDGET_SECONDS + 2 * ai_fix._resolve_timeout_seconds() + 60)
 
-	eligible = [
-		t for t in (breakdown or [])
-		if isinstance(t, dict)
-		and (t.get("recommended_index") or {}).get("columns")
-		and not t.get("ai_index")
-	]
-	added = failed = skipped = 0
-	for t in eligible:
-		table_name = t.get("table")
-		if not table_name:
-			skipped += 1
-			continue
-		# One title for every table (the table goes in the message), so the
-		# Error Log groups these rows instead of creating one title per table.
-		out, step_failed = _analyze_mod._run_ai_step(
-			lambda table_name=table_name: _analyze_mod._run_table_index_ai_backfill(doc, table_name=table_name),
-			title="optimus refill_indexes", session_uuid=getattr(doc, "session_uuid", None), table=table_name,
-		)
-		if step_failed:
-			failed += 1
-			continue
-		if out.get("ok"):
-			added += 1
-		else:
-			# Helper returned a reason (e.g. provider missing for one call)
-			# treat as skipped, not failed, since the doc state is unchanged.
-			skipped += 1
-	return {"added": added, "failed": failed, "skipped": skipped}
+
+def _take_refresh_flight(session_uuid: str) -> tuple[bool, str | None]:
+	"""Take the session's Refresh flag (``redis_keys.ai_refresh_inflight``) only if it is free, in
+	one atomic ``SET NX EX``, so of two overlapping refreshes of one session exactly one runs: two
+	would bill every finding twice and overwrite each other's answers. Returns ``(True, token)``
+	when taken (the token names this refresh as the holder), ``(False, None)`` when another
+	refresh holds it, and ``(True, None)`` when Redis could not be asked: a cache failure never
+	blocks a refresh (as with analyze's single-flight); it leaves one ``optimus`` log line. The
+	key goes through ``frappe.cache.make_key``, so the flag is per site. An RQ job timeout
+	escapes fresh."""
+	token = uuid.uuid4().hex
+
+	def _take() -> bool:
+		key = frappe.cache.make_key(redis_keys.ai_refresh_inflight(session_uuid))
+		# A raw SET is the only way to get NX; frappe.cache.get_value would also answer from the
+		# request's frappe.local.cache.
+		return bool(frappe.cache.set(  # nosemgrep: frappe-cache-breaks-multitenancy
+			key, token, nx=True, ex=_refresh_flight_ttl(),
+		))
+
+	taken = safe_call.best_effort(_take, None, on_error=lambda error_type: safe_call.log_error_line(
+		f"optimus: the Refresh AI suggestions flag could not be taken ({error_type}); the refresh runs without it"
+	))
+	if taken is None:
+		return True, None
+	return (True, token) if taken else (False, None)
+
+
+def _release_refresh_flight(session_uuid: str, token: str | None) -> None:
+	"""Release the session's Refresh flag, but only while Redis still holds this refresh's
+	``token``: a raw ``GET`` (never ``frappe.local.cache``), then a delete. Not atomic, like
+	analyze's single-flight: a flag that expired and was taken by another refresh in the instant
+	between the read and the delete is deleted too, which needs this refresh to have outlived the
+	TTL first. Nothing to do without a token. Best effort; an RQ job timeout escapes fresh."""
+	if not token:
+		return
+
+	def _release() -> None:
+		key = frappe.cache.make_key(redis_keys.ai_refresh_inflight(session_uuid))
+		held = frappe.cache.get(key)  # nosemgrep: frappe-cache-breaks-multitenancy
+		if isinstance(held, bytes):
+			held = held.decode("utf-8", "replace")
+		if held == token:
+			frappe.cache.delete(key)
+
+	safe_call.best_effort(_release, None)
 
 
 @frappe.whitelist(methods=["POST"])
 def refill_ai_suggestions(session_uuid: str) -> dict:
 	"""Single-button entry point: re-fills every AI-generated report section in one round-trip:
-	(1) overwrite every eligible finding's fix suggestion, (2) rewrite Steps to Reproduce, (3) run
-	the per-table index helper for tables with a candidate but no AI advice, (4) one final
-	re-render.
+	(1) overwrite every eligible finding's fix suggestion, (2) rewrite Steps to Reproduce,
+	(3) one final re-render.
 
 	Each step is gated by its per-section toggle; a toggle-off step is skipped, not errored.
 	``_ai_session_gate`` runs once at the top (permission, Ready status, AI configured, per-user
-	limit).
+	limit). Then one refresh per session at a time (``_take_refresh_flight``): while another
+	refresh of the same session runs, the call returns ``{ok: False, busy: True, session_uuid,
+	message}`` at once, before the refresh is counted or the provider is called. The flag is
+	released in a ``finally``.
+
+	The response is ``{ok, session_uuid, fixes, steps, regenerated}``. ``fixes`` counts
+	``added``, ``failed``, ``skipped_time``, ``gated`` (AI-eligible findings and
+	Framework N+1 that the report answers with Optimus's own advice or a note; index
+	findings are not counted), ``excluded`` (AI-eligible types listed under Excluded finding
+	types in Optimus Settings) and ``skipped_ineligible``; ``skipped`` is ``"toggle_off"`` when
+	findings are off. ``steps`` is ``_humanize_steps_core``'s result (``failed`` True with the
+	error message as ``reason`` when the rewrite failed). There is no ``indexes`` key: index
+	advice is deterministic and never refreshed by AI.
 	"""
 	ref = _ai_session_gate(session_uuid, section=None, action="refill_ai_suggestions")
 
-	from optimus import analyze as _analyze_mod
-	from optimus.settings import get_config
-
-	cfg = get_config()
-	doc = frappe.get_doc("Optimus Session", ref.docname)
-
-	# Count this refresh (cumulative; only ever increases). Portable read-modify-write off
-	# the already-loaded doc; update_modified=False so the counter bump doesn't touch `modified`.
-	# Refresh is user-initiated and rate-limited, so the non-atomic increment is acceptable
-	# (PR-2 makes it atomic).
-	frappe.db.set_value(
-		"Optimus Session", doc.name, "ai_refresh_count",
-		(getattr(doc, "ai_refresh_count", 0) or 0) + 1,
-		update_modified=False,
-	)
-
-	fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None}
-	if cfg.ai_suggest_findings:
-		counts = _analyze_mod._run_ai_backfill(doc, cap=0, regenerate_all=True)
-		fixes = {
-			"added": counts.get("added", 0),
-			"failed": counts.get("failed", 0),
-			"skipped_time": counts.get("skipped_time", 0),
-			"skipped": None,
+	taken, flight = _take_refresh_flight(ref.session_uuid)
+	if not taken:
+		return {
+			"ok": False,
+			"busy": True,
+			"session_uuid": ref.session_uuid,
+			"message": _("A refresh is already running for this session. Wait for it to finish, then reload the form."),
 		}
-	else:
-		fixes["skipped"] = "toggle_off"
+	try:
+		from optimus import analyze as _analyze_mod
+		from optimus.settings import get_config
 
-	steps = {"updated": False, "reason": None}
-	if cfg.ai_humanize_steps:
-		# Re-fetch the doc: the backfill above may have mutated rows.
+		cfg = get_config()
 		doc = frappe.get_doc("Optimus Session", ref.docname)
-		steps = _humanize_steps_core(doc, title=ref.title or None)
-	else:
-		steps["reason"] = "toggle_off"
 
-	indexes = {"added": 0, "failed": 0, "skipped": 0, "skipped_reason": None}
-	if cfg.ai_suggest_indexes:
-		doc = frappe.get_doc("Optimus Session", ref.docname)
-		indexes = _refill_indexes_for_doc(doc)
-		indexes["skipped_reason"] = None
-	else:
-		indexes["skipped_reason"] = "toggle_off"
+		# Count this refresh (cumulative; only ever increases): one atomic SQL increment that leaves
+		# `modified` alone, committed on its own before any provider call, so the bump no longer holds
+		# the session row. Each answer then commits with its spend in its own short write, so no
+		# provider call runs while this request holds the row. A failed bump is logged and the
+		# refresh goes on.
+		_analyze_mod._bump_ai_refresh_count(doc.name)
+		safe_commit()
 
-	return {
-		"ok": True,
-		"session_uuid": ref.session_uuid,
-		"fixes": fixes,
-		"steps": steps,
-		"indexes": indexes,
-		"regenerated": _rerender_after_ai(ref),
-	}
+		# One memo through the Steps call and the re-render: the persisted recordings are read once.
+		recordings_memo: dict = {}
+		fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None, "gated": 0, "excluded": 0, "skipped_ineligible": 0}
+		if cfg.ai_suggest_findings:
+			counts = _analyze_mod._run_ai_backfill(doc, cap=0, regenerate_all=True)
+			fixes.update({key: counts.get(key, 0) for key in ("added", "failed", "skipped_time", "gated", "excluded", "skipped_ineligible")})
+		else:
+			fixes["skipped"] = "toggle_off"
+
+		steps = {"updated": False, "reason": None}
+		if cfg.ai_humanize_steps:
+			# Re-fetch the doc: the backfill above may have mutated rows.
+			doc = frappe.get_doc("Optimus Session", ref.docname)
+			steps = _humanize_steps_core(doc, title=ref.title or None, memo=recordings_memo)
+		else:
+			steps["reason"] = "toggle_off"
+
+		return {
+			"ok": True,
+			"session_uuid": ref.session_uuid,
+			"fixes": fixes,
+			"steps": steps,
+			"regenerated": _rerender_after_ai(ref, memo=recordings_memo),
+		}
+	finally:
+		_release_refresh_flight(ref.session_uuid, flight)
 
 
 @frappe.whitelist()

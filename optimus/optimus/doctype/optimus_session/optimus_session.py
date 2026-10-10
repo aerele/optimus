@@ -5,7 +5,10 @@ from frappe.model.document import Document
 
 
 class OptimusSession(Document):
-	# Phase 0 scaffold only.
-	# Lifecycle methods (validate, on_update, on_trash) will be added in
-	# Phase 1 alongside the session API and Redis state tracking.
-	pass
+	def before_validate(self):
+		# The AI counters (ai_tokens_spent, ai_refresh_count) only change through SQL
+		# increments: keep the stored values so a save never writes back counts older than
+		# the row's (analyze._keep_session_counters). Runs on every save.
+		from optimus.analyze import _keep_session_counters
+
+		_keep_session_counters(self)

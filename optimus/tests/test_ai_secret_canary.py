@@ -93,7 +93,6 @@ _FINDING = {
 	"finding_type": "N+1 Query", "severity": "High", "title": "Customer lookup in a loop",
 	"technical_detail": {"normalized_query": PII_SQL, "example_queries": [PII_SQL]},
 }
-_TABLE_PAYLOAD = {"table": "tabCustomer", "doctype": "Customer", "sample_queries": [PII_SQL]}
 _ACTIONS = [{"label": f"Open Customer {PII}", "cmd": "frappe.desk.form.load.getdoc", "duration_ms": 12}]
 
 
@@ -138,18 +137,12 @@ def _entry(module, name: str, args_factory, *, unwrap: bool = False):
 _ENTRY_POINTS = {
 	"ai_fix.suggest_fix": _entry(ai_fix, "suggest_fix", lambda: ((json.loads(json.dumps(_FINDING)),), {})),
 	"ai_fix.humanize_steps": _entry(ai_fix, "humanize_steps", lambda: (([dict(x) for x in _ACTIONS],), {"session_title": "t"})),
-	"ai_fix.suggest_index": _entry(ai_fix, "suggest_index", lambda: ((dict(_TABLE_PAYLOAD),), {})),
 	"ai_fix.test_connection": _entry(ai_fix, "test_connection", lambda: ((), {})),
 	"analyze._enrich_findings_with_ai_suggestions": _entry(
 		analyze, "_enrich_findings_with_ai_suggestions", lambda: ((_ctx(),), {"recordings": []})),
 	"analyze._run_ai_backfill": _entry(analyze, "_run_ai_backfill", lambda: ((_session_doc(),), {"cap": 0})),
-	"analyze._enrich_table_breakdown_with_ai_suggestions": _entry(
-		analyze, "_enrich_table_breakdown_with_ai_suggestions", lambda: ((_ctx(), []), {})),
 	"analyze._build_humanized_notes_html": _entry(
 		analyze, "_build_humanized_notes_html", lambda: (([],), {"session_title": "t"})),
-	"analyze._run_table_index_ai_backfill": _entry(
-		analyze, "_run_table_index_ai_backfill", lambda: ((_session_doc(),), {"table_name": "tabCustomer"})),
-	"api._refill_indexes_for_doc": _entry(api, "_refill_indexes_for_doc", lambda: ((_session_doc(),), {})),
 	"api._humanize_steps_core": _entry(api, "_humanize_steps_core", lambda: ((_session_doc(),), {"title": "t"})),
 }
 
@@ -373,6 +366,11 @@ def _scenario_post(scenario, sinks, job_timeout):
 			raise requests.exceptions.ConnectionError(
 				"HTTPConnectionPool(host='llm.invalid', port=443): Max retries exceeded"
 			)
+		if scenario == "connection_error_key":
+			# A Base URL that carries the key: requests quotes the URL in its message.
+			raise requests.exceptions.ConnectionError(
+				f"HTTPSConnectionPool(host='llm.invalid', port=443): Max retries exceeded with url: /v1?key={KEY}"
+			)
 		if scenario == "unicode_encode_error":
 			value = next(iter(v for k, v in wire_headers.items() if k.lower() in ("authorization", "x-api-key")))
 			raise UnicodeEncodeError("latin-1", value, 0, 1, "ordinal not in range(256)")
@@ -453,7 +451,6 @@ def canary(monkeypatch, request):
 	# Keep the analyze helpers off the source-reading / Redis paths: the payload
 	# builders return the PII-bearing inputs directly.
 	monkeypatch.setattr(analyze, "_ai_payload_for_finding", lambda *a, **k: json.loads(json.dumps(_FINDING)))
-	monkeypatch.setattr(analyze, "_ai_payload_for_table", lambda *a, **k: dict(_TABLE_PAYLOAD))
 	monkeypatch.setattr(analyze, "_actions_for_humanizer", lambda *a, **k: [dict(x) for x in _ACTIONS])
 	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
 	monkeypatch.setattr(analyze, "_fetch_recordings", lambda *a, **k: [])
@@ -491,7 +488,7 @@ def _drive(name, fn, args_factory, sinks, scenario, job_timeout):
 
 
 _SCENARIOS = (
-	"connection_error", "unicode_encode_error", "http_401", "http_400_echo", "http_404_echo",
+	"connection_error", "connection_error_key", "unicode_encode_error", "http_401", "http_400_echo", "http_404_echo",
 	"http_500_echo", "non_dict_json", "non_latin_key", "rq_timeout", "developer_mode", "scrub_raises",
 	"system_exit", "malformed_usage", "non_str_text",
 )
@@ -511,11 +508,12 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 	sinks, scenario, job_timeout = canary
 	for name, (fn, args_factory) in _ENTRY_POINTS.items():
 		_drive(name, fn, args_factory, sinks, scenario, job_timeout)
-	# Every row still in the transaction is queued again by its rollback
-	# callback (frappe.throw's request rollback, execute_job's rollback).
+		# Each entry point is its own request or job: every row it left in the transaction is
+		# queued again by its rollback callback (frappe.throw's request rollback, execute_job's
+		# rollback). An entry that commits (Refresh's answers, a failed Steps rewrite) leaves none.
+		sinks.entry = f"(rollback after {name})"
+		frappe.db.rollback()
 	rows_written = len(sinks.stack)
-	sinks.entry = "(rollback)"
-	frappe.db.rollback()
 
 	if scenario == "non_latin_key":
 		assert sinks.posts == 0, "a key that cannot be sent must fail before any HTTP call"
@@ -564,7 +562,7 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 		assert any(PII in t for _, t in sinks.escaped), "no escaped dump held the prompt: it would prove nothing"
 	if scenario == "malformed_usage":
 		assert sinks.escaped == [], f"malformed usage broke a good reply: {[e for e, _ in sinks.escaped]}"
-		for ep in ("ai_fix.suggest_fix", "ai_fix.humanize_steps", "ai_fix.suggest_index"):
+		for ep in ("ai_fix.suggest_fix", "ai_fix.humanize_steps"):
 			assert any(e == ep and SUGGESTION_MARK in t for e, t in sinks.returned), f"{ep}: the suggestion was lost"
 	if scenario == "non_str_text":
 		# Only AI errors (and the endpoints' frappe.throw) left the entry
@@ -584,6 +582,8 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 	if scenario == "scrub_raises":
 		assert ECHO_MARK not in returned, "a body that could not be scrubbed must be dropped"
 		assert any("details withheld" in t for _, t, _ in sinks.stored), "a failed scrub must still write a row"
+	if scenario == "connection_error_key":
+		assert "Couldn't reach the AI provider (ConnectionError)" in returned, "the transport path never ran"
 	if scenario == "unicode_encode_error":
 		# The catch-all names the error type. Without an auth header to encode,
 		# the fake would raise something else and the scenario would test nothing.

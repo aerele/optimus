@@ -139,7 +139,11 @@ read-only sections:
      but cannot recompute findings.
    - **Regenerate Reports**: re-renders both HTML files from the
      persisted Action/Finding rows. Cheaper than a full re-analyze;
-     useful after an Optimus upgrade that improves the renderer.
+     useful after an Optimus upgrade that improves the renderer. It
+     does not re-run the analyzer and does not call the AI provider;
+     saved AI suggestions are kept as they are. For new or updated
+     suggestions use **AI > Refresh AI suggestions** (Ready sessions,
+     with AI enabled).
    - **Phase 2 → Line Profile**: opens the picker dialog (see
      below).
    - **Pin as Baseline** / **Unpin Baseline**: see _Baseline
@@ -190,6 +194,11 @@ expires mid-request, line profiling disengages so the request finishes
 at natural speed and the run is flagged "partial data". This stops a
 hot-loop pick from freezing the UI.
 
+Phase 2 does not ask the AI for fixes for its new Hot Line findings; run
+**AI > Refresh AI suggestions** on the Ready session to fill them in. If
+the report re-render after a Phase 2 run fails, the run stays Ready with
+a warning; use **Regenerate Reports**.
+
 ### AI fix suggestions (optional)
 
 Optimus can call an LLM (Anthropic, OpenAI, Kimi, DeepSeek, or any OpenAI-
@@ -197,22 +206,30 @@ compatible endpoint including local ones like Ollama or LM Studio) to
 suggest concrete fixes for each finding. Off by default no traffic
 leaves your bench until you enable it.
 
-Three feature toggles, all under **Optimus Settings → AI Fix
+Feature controls, all under **Optimus Settings → AI Fix
 Suggestions → Use the LLM for**:
 
-- **Fix suggestions on findings**: adds a "Suggest a fix (AI)" button
-  per finding and an auto-suggest pass during analyze (when the
-  auto-suggest checkbox below is on).
-- **Index recommendations**: adds a "Suggest an index (AI)" button to
-  the per-table breakdown.
+- **Fix suggestions on findings**: enables eligible finding fixes through
+  **Refresh AI suggestions** and the automatic pass during analysis.
+- **Index recommendations**: retired. The report builds index advice from the
+  DocType metadata, the real column types and the table's existing indexes,
+  without calling the AI: tick Search Index for one column of a field you
+  control on MariaDB, otherwise one generated `ensure_indexes()` for your app,
+  registered on `after_install`, `after_sync` and `after_migrate` (see
+  [`docs/AI-FIXING.md`](./docs/AI-FIXING.md) section 2.3).
 - **Humanized "Steps to Reproduce"**: rewrites the auto-captured
   action list into a friendly flow ("Open Sales Invoice list, click
   New, …").
 
-Turning any one of these off is a hard disable the button is hidden,
-the API refuses and re-rendered reports omit the AI block. See
+Turning an active AI section off disables generation for that section;
+re-rendered reports omit its stored AI block. Deterministic index advice
+is independent of the AI controls. See
 [`docs/AI-FIXING.md`](./docs/AI-FIXING.md) for the per-pathway data
 inventory and local-LLM recipes.
+
+**Refresh AI suggestions** regenerates missing and outdated suggestions first and says
+how many findings got deterministic advice or a note instead (gated), and how many
+were skipped because their type is excluded.
 
 ### Baseline comparison
 
@@ -611,14 +628,13 @@ Off by default no traffic leaves your bench until you turn it on.
 
 #### Use the LLM for (section toggles)
 
-Three independent on/off switches. Turning any one off is a **hard
-disable**: the section is never auto-generated, the matching button is
-hidden, the API refuses and re-rendered reports omit the block.
+The findings and humanized-steps switches control their respective AI
+sections. The index setting is read-only and has no effect.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Fix suggestions on findings** | ✓ on | "Suggest a fix (AI)" / "Generate AI fixes" / "Re-evaluate AI fixes" buttons on findings. |
-| **Index recommendations (DB-tables breakdown)** | ✓ on | "Suggest an index (AI)" button in the per-table breakdown. |
+| **Fix suggestions on findings** | ✓ on | Eligible finding fixes through Refresh AI suggestions and the automatic pass. |
+| **Index recommendations (DB-tables breakdown, retired)** | read-only | No effect: index advice is deterministic and never uses the AI. |
 | **Humanized "Steps to Reproduce"** | ✓ on | LLM rewrites the auto-captured action list into a friendly flow at analyze time (and on demand). Falls back to the raw action list on any failure. |
 
 #### Automatic Suggestions section
@@ -632,7 +648,7 @@ hidden, the API refuses and re-rendered reports omit the block.
 
 | Field | Default | Purpose |
 |---|---|---|
-| **Excluded finding types** | _empty_ | One finding type per line. Those types are skipped in both auto-suggest and on-demand the payload is never built (no data ever sent for them). Exact-match, case-sensitive. `#` comments. Canonical names: `Filesort`, `Framework N+1`, `Full Table Scan`, `Hot Line`, `Low Filter Ratio`, `Missing Index`, `N+1 Query`, `Redundant Call`, `Slow Query`, `Temporary Table`. |
+| **Excluded finding types** | _empty_ | One finding type per line. Those types are skipped in both auto-suggest and on-demand the payload is never built (no data ever sent for them). Exact-match, case-sensitive. `#` comments. Canonical names: `Hot Line`, `N+1 Query`, `Redundant Call`, `Slow Query`. Index findings and Framework N+1 never call the AI. Refresh AI suggestions reports how many findings it skipped this way. |
 | **Request timeout (seconds)** | `60` | HTTP timeout for outbound LLM calls. `60s` fits hosted providers (Anthropic / OpenAI reply in 2–10s typically). For local LLMs (Ollama / LM Studio / vLLM) first-token cold-start can exceed 60s start at `180` and tune once warm-call P99 is known. Clamped to `10–600`. |
 
 ---

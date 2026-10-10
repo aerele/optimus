@@ -13,6 +13,7 @@ list stays in the per-action breakdown.
 import json
 
 from optimus.analyzers.base import (
+	QUERY_TEXT_LIMIT,
 	AnalyzerResult,
 	dur,
 	installed_apps_allowlist,
@@ -79,7 +80,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 				continue
 			all_queries.append(
 				{
-					"normalized_query": (call.get("normalized_query") or call.get("query") or "")[:500],
+					"normalized_query": (call.get("normalized_query") or call.get("query") or "")[:QUERY_TEXT_LIMIT],
 					# v0.7.x M5: renamed from ``duration_ms`` to disambiguate
 				# from action.duration_ms (per-request wall) and
 				# t.duration_ms (consolidated per-table). This is the

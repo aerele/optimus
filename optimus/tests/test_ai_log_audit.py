@@ -43,10 +43,10 @@ from pathlib import Path
 _PKG = Path(__file__).resolve().parents[1]
 _REQUIRED = (
 	"analyze.py", "api.py", "maintenance.py", "error_log_mask.py",
-	"optimus/doctype/optimus_settings/optimus_settings.py",
+	"optimus/doctype/optimus_settings/optimus_settings.py", "renderer/recipe_enrichment.py", "line_profile/analyzer.py",
 )
 _OPTIONAL = ("ai_jobs.py",)  # scanned as soon as a later PR adds it
-_AI_WRAPPERS = frozenset({"_backfill_ai_suggestions"})  # analyze.py; calls _run_ai_backfill
+_AI_WRAPPERS: frozenset[str] = frozenset()  # names of non-step functions that count as AI code (none today)
 _BASE_LOGGERS = frozenset({"log_error", "log_ai_failure"})
 _SENDERS = frozenset({"_http_post", "_call_openai_chat", "_call_anthropic"})  # ai_fix.py
 _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -308,10 +308,12 @@ def test_ai_step_returns_only_a_boolean_failure_flag():
 
 
 def test_the_ai_steps_log_through_the_one_helper():
-	# The capture-then-log skeleton lives in analyze._run_ai_step alone: in
-	# analyze.py and api.py nothing else calls log_ai_failure (only
-	# _log_ai_step_failure, which _run_ai_step calls after its try). And the
-	# helper's handler only records the error: its log call is after the try.
+	# The capture-then-log skeleton lives in analyze._run_ai_step alone (the recording readers
+	# use it too). The session counter also logs a failed increment itself and carries on (the
+	# billed answer is kept), and the answer's short write logs once after its retries (or adds
+	# the retry's outcome to the counter's row). All log calls stay
+	# outside exception handlers. The helper's handler only records the error:
+	# its log call is after the try.
 	callers = {}
 	for mod in ("analyze.py", "api.py"):
 		for fn in _functions(_tree(mod)):
@@ -319,7 +321,9 @@ def test_the_ai_steps_log_through_the_one_helper():
 			for name in calls & {"log_ai_failure", "_log_ai_step_failure"}:
 				callers.setdefault(name, set()).add(f"{mod}:{fn.name}")
 	assert callers == {
-		"log_ai_failure": {"analyze.py:_log_ai_step_failure"},
+		"log_ai_failure": {
+			"analyze.py:_log_ai_step_failure", "analyze.py:_increment_session_counter", "analyze.py:_write_ai_answer",
+		},
 		"_log_ai_step_failure": {"analyze.py:_run_ai_step"},
 	}
 	helper = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "_run_ai_step")
@@ -344,9 +348,9 @@ def test_the_helper_is_used_where_the_skeleton_was():
 	assert uses == {
 		"analyze.py": {
 			"run", "_enrich_findings_with_ai_suggestions", "_run_ai_backfill",
-			"_enrich_table_breakdown_with_ai_suggestions", "_build_humanized_notes_html",
+			"_build_humanized_notes_html", "load_recordings_light", "_load_recordings_bundle",
 		},
-		"api.py": {"_render_session_report", "_rerender_after_ai", "_humanize_steps_core", "_refill_indexes_for_doc"},
+		"api.py": {"_render_session_report", "_rerender_after_ai", "_humanize_steps_core"},
 	}
 
 
