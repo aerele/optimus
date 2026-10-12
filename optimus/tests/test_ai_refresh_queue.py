@@ -1,5 +1,6 @@
 """Queue loss delays a SQL intent; it cannot erase or execute it inline."""
 
+from copy import deepcopy
 from importlib import import_module
 from types import SimpleNamespace
 
@@ -337,3 +338,368 @@ def test_an_http_admission_never_retries_a_lock_wait_timeout_anywhere(queue, mon
 			docname="fake-session-doc", session_uuid="fake-session", requested_by="fake-owner"
 		)
 	assert len(inserts) == 1 and not queue.sent
+
+
+# F2: recovery without the scheduler, the sweep, cancellation and settings.
+
+
+class _QueryTimeoutError(Exception):
+	"""``frappe.QueryTimeoutError(e)`` around a lock wait timeout."""
+
+
+class _QueryDeadlockError(Exception):
+	"""``frappe.QueryDeadlockError(e)`` around a deadlock."""
+
+
+class _DriverError(Exception):
+	"""PyMySQL's shape: ``args == (code, message)``."""
+
+
+def _lock_wait():
+	return _QueryTimeoutError(_DriverError(1205, "fake lock wait timeout"))
+
+
+@pytest.fixture
+def admitting(queue, monkeypatch):
+	"""``start_refresh`` with a listening worker, an enabled provider and an allowed user."""
+	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda: True)
+	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
+	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: True)
+	monkeypatch.setattr(queue.jobs.time, "sleep", lambda seconds: None)
+	return queue
+
+
+@pytest.fixture
+def rows(queue, monkeypatch):
+	"""Every Error Log write as (title, exception, context)."""
+	logged = []
+	monkeypatch.setattr(
+		ai_fix, "log_ai_failure", lambda title, exc=None, **kw: logged.append((title, exc, kw))
+	)
+	return logged
+
+
+def _start(queue):
+	return queue.jobs.start_refresh(
+		docname="fake-session-doc", session_uuid="fake-session", requested_by="fake-owner"
+	)
+
+
+def _crash(queue, lease_until=30):
+	"""The fixture run, claimed and mid-call at 10-11, by a worker that died."""
+	journal = queue.journal
+	with journal.db.transaction():
+		journal.mod.claim(
+			"fake-run", docname="fake-session-doc", slice_no=0, worker_token="dead", now=10, lease_seconds=20
+		)
+		attempt = journal.mod.begin_attempt(
+			"fake-run",
+			docname="fake-session-doc",
+			worker_token="dead",
+			kind="fix",
+			target="fake-finding",
+			input_hash="fake",
+			now=11,
+		)
+	journal.run["lease_until"] = lease_until
+	return attempt
+
+
+def test_a_refresh_click_recovers_a_crashed_run_without_the_scheduler(admitting, monkeypatch, rows):
+	"""A2: optimus.local runs with pause_scheduler; a worker killed mid-call left its run
+	running and the session reserved, so every later Refresh answered already_running. The
+	click itself now takes the expired run over and starts the new one."""
+	queue = admitting
+
+	def never():
+		raise AssertionError("recovery must not wait for the scheduler")
+
+	monkeypatch.setattr(queue.jobs, "recover_pending", never)
+	attempt = _crash(queue)
+	out = _start(queue)
+	assert out["status"] == "queued" and out["refresh"]["run_id"] != "fake-run"
+	assert len(queue.sent) == 1 and queue.sent[0][1]["run_id"] == out["refresh"]["run_id"]
+	old = queue.journal.db.rows[queue.journal.mod.RUN]["fake-run"]
+	assert old["state"] == "interrupted" and old["end_reason"] == "lease_expired"
+	assert queue.journal.db.rows[queue.journal.mod.ATTEMPT][attempt["name"]]["state"] == "uncertain"
+	assert not rows
+
+
+def test_a_click_attaches_to_a_live_run(admitting):
+	queue = admitting
+	_crash(queue, lease_until=500)
+	out = _start(queue)
+	assert out["status"] == "already_running" and out["refresh"]["run_id"] == "fake-run"
+	assert out["refresh"]["state"] == "running" and out["refresh"]["stalled"] is False
+	assert not queue.sent
+
+
+def test_a_takeover_of_an_inconsistent_run_writes_one_row_naming_it(admitting, rows):
+	queue = admitting
+	attempt = _crash(queue)
+	del queue.journal.db.rows[queue.journal.mod.ATTEMPT][attempt["name"]]
+	assert _start(queue)["status"] == "queued"
+	[(title, exc, context)] = rows
+	assert title == "optimus AI refresh recovery" and context["run_id"] == "fake-run"
+	assert context["docname"] == "fake-session-doc" and "attempt" in str(exc)
+
+
+@pytest.mark.parametrize(
+	"values,reason",
+	[({"lease_until": 40}, "lease_expired"), ({"lease_until": 900, "deadline": 45}, "deadline")],
+)
+def test_progress_shows_a_run_that_can_no_longer_progress_as_interrupted(queue, values, reason):
+	"""A2: derived from the lease and the deadline, before any recovery has written it."""
+	run = {**queue.journal.run, "state": "running", **values}
+	out = queue.jobs.public_state(run)
+	assert out["state"] == "interrupted" and out["stalled"] is True and out["end_reason"] == reason
+	live = queue.jobs.public_state({**queue.journal.run, "state": "running", "lease_until": 900})
+	assert live["state"] == "running" and live["stalled"] is False and live["end_reason"] == ""
+	ended = queue.jobs.public_state({**queue.journal.run, "state": "complete", "lease_until": 0})
+	assert ended["state"] == "complete" and ended["stalled"] is False
+
+
+def _three_runs(queue):
+	"""poison and victim: expired leases; lost: a committed intent that never reached RQ."""
+	journal = queue.journal
+	journal.db.rows[journal.mod.RUN].clear()
+	for name, session, values in (
+		("poison", "sess-p", {"state": "running", "worker_token": "w0", "lease_until": 10}),
+		("victim", "sess-v", {"state": "running", "worker_token": "w1", "lease_until": 20}),
+		("lost", "sess-q", {"state": "queued", "lease_until": 1800, "dispatch_pending": 1}),
+	):
+		journal.db.rows[journal.mod.RUN][name] = {
+			**journal.run,
+			"name": name,
+			"run_id": name,
+			"session_name": session,
+			"active_session": session,
+			"dispatched_at_epoch": 0,
+			**values,
+		}
+		journal.db.rows["Optimus Session"][session] = {
+			"name": session,
+			"session_uuid": "fake-" + session,
+			"status": "Ready",
+			"ai_tokens_spent": 0,
+			"ai_refresh_count": 0,
+		}
+	return journal.db.rows[journal.mod.RUN]
+
+
+@pytest.mark.parametrize("variant", ["lock_wait", "inconsistent", "unexpected"])
+def test_one_bad_row_never_stops_the_recovery_sweep(queue, monkeypatch, rows, variant):
+	"""O1 / E1 / R1: the sweep raised at its first bad row (a corrupt run, or a session row a
+	dead transaction held past a lock wait timeout) on every tick, so no lease, deadline or
+	lost dispatch was recovered anywhere on the site. Each row is now on its own."""
+	monkeypatch.setattr(queue.jobs.frappe, "get_all", queue.journal.db.get_all, raising=False)
+	monkeypatch.setattr(queue.jobs.time, "sleep", lambda seconds: None)
+	runs = _three_runs(queue)
+	events = []
+	real = queue.journal.mod.interrupt
+
+	def interrupt(run_id, **kw):
+		events.append(run_id)
+		if run_id == "poison" and variant == "lock_wait":
+			raise _lock_wait()
+		if run_id == "poison" and variant == "unexpected":
+			raise RuntimeError("fake storage failure")
+		return real(run_id, **kw)
+
+	monkeypatch.setattr(queue.journal.mod, "interrupt", interrupt)
+	dispatch = queue.journal.mod.prepare_dispatch
+	monkeypatch.setattr(
+		queue.journal.mod,
+		"prepare_dispatch",
+		lambda run_id, **kw: (events.append(run_id), dispatch(run_id, **kw))[1],
+	)
+	logged = ai_fix.log_ai_failure
+	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: (events.append("log"), logged(*a, **kw)))
+	if variant == "inconsistent":
+		runs["poison"]["active_attempt"] = "attempt-row-missing"
+	counts = queue.jobs.recover_pending()
+	runs = queue.journal.db.rows[queue.journal.mod.RUN]  # a rolled-back row restores the rows
+	assert runs["victim"]["state"] == "interrupted" and runs["victim"]["active_session"] is None
+	assert [kw["run_id"] for _, kw in queue.sent] == ["lost"]
+	if variant == "lock_wait":
+		assert runs["poison"]["state"] == "running" and not rows
+		assert counts == {"interrupted": 1, "dispatched": 1, "busy": 1, "failed": 0}
+		assert events.count("poison") == 1  # NOWAIT, never retried
+	elif variant == "inconsistent":
+		assert runs["poison"]["state"] == "interrupted" and runs["poison"]["active_session"] is None
+		assert counts == {"interrupted": 2, "dispatched": 1, "busy": 0, "failed": 0}
+		[(title, exc, context)] = rows
+		assert context["run_id"] == "poison" and "attempt" in str(exc)
+	else:
+		assert runs["poison"]["state"] == "running"
+		assert counts == {"interrupted": 1, "dispatched": 1, "busy": 0, "failed": 1}
+		[(title, exc, context)] = rows
+		assert title == "optimus AI refresh recovery" and type(exc) is RuntimeError
+		assert context["run_id"] == "poison" and context["docname"] == "sess-p"
+		assert events.index("log") > max(i for i, e in enumerate(events) if e != "log")
+
+
+def test_the_sweep_takes_every_session_row_with_nowait(queue, monkeypatch):
+	monkeypatch.setattr(queue.jobs.frappe, "get_all", queue.journal.db.get_all, raising=False)
+	_three_runs(queue)
+	current = queue.journal.db.get_value
+	waits = set()
+
+	def spy(table, name, *a, for_update=False, wait=True, **kw):
+		if table == "Optimus Session" and for_update:
+			waits.add(wait)
+		return current(table, name, *a, for_update=for_update, **kw)
+
+	monkeypatch.setattr(queue.journal.db, "get_value", spy)
+	assert queue.jobs.recover_pending()["interrupted"] == 2
+	assert waits == {False}
+
+
+def test_a_failed_candidate_read_never_stops_the_other_passes(queue, monkeypatch, rows):
+	runs = _three_runs(queue)
+
+	def get_all(table, *, filters, **kw):
+		if "lease_until" in filters:
+			raise RuntimeError("fake read failure")
+		return queue.journal.db.get_all(table, filters=filters, **kw)
+
+	monkeypatch.setattr(queue.jobs.frappe, "get_all", get_all, raising=False)
+	runs["victim"]["deadline"] = 30
+	counts = queue.jobs.recover_pending()
+	runs = queue.journal.db.rows[queue.journal.mod.RUN]
+	assert runs["victim"]["state"] == "interrupted" and len(queue.sent) == 1
+	assert counts["failed"] == 1 and [type(exc) for _, exc, _ in rows] == [RuntimeError]
+
+
+def test_an_http_admission_leaves_a_busy_dispatch_pending_after_one_wait(admitting, monkeypatch, rows):
+	"""C1: the admission has committed; its dispatch waits for the session row once, then
+	leaves the intent pending (the sweep or a later click sends it) instead of waiting two
+	more lock timeouts or failing the response."""
+	queue = admitting
+	queue.journal.db.rows[queue.journal.mod.RUN] = {}
+	current = queue.journal.db.get_value
+	locks = []
+
+	def held(table, name, *a, for_update=False, **kw):
+		if table == "Optimus Session" and for_update:
+			locks.append(name)
+			if len(locks) > 1:  # the admission got it; the dispatch does not
+				raise _lock_wait()
+		return current(table, name, *a, for_update=for_update, **kw)
+
+	monkeypatch.setattr(queue.journal.db, "get_value", held)
+	out = _start(queue)
+	assert out["status"] == "queued" and out["refresh"]["state"] == "queued"
+	assert len(locks) == 2 and not queue.sent and not rows
+	run = next(iter(queue.journal.db.rows[queue.journal.mod.RUN].values()))
+	assert run["dispatch_pending"] == 1
+
+
+def _cancel(queue, docname="fake-session-doc", run_id="fake-run"):
+	return queue.jobs.cancel_refresh(run_id, docname=docname, requested_by="fake-owner")
+
+
+def test_cancel_answers_with_the_cancelled_progress(queue, rows):
+	out = _cancel(queue)
+	assert out["status"] == "cancelled" and out["refresh"]["state"] == "cancelled"
+	assert queue.journal.run["cancelled_by"] == "fake-owner" and not rows
+
+
+def test_cancel_of_another_sessions_run_changes_nothing_and_raises_nothing(queue, rows):
+	"""S1 / C2: the caller authorized one session; a run id of another session is refused
+	under the session lock, exactly like a run that does not exist."""
+	queue.journal.db.rows["Optimus Session"]["other-session-doc"] = {
+		**queue.journal.db.rows["Optimus Session"]["fake-session-doc"],
+		"name": "other-session-doc",
+	}
+	before = deepcopy(queue.journal.db.rows)
+	assert _cancel(queue, docname="other-session-doc") == {"status": "refused", "reason": "not_running"}
+	assert _cancel(queue, run_id="missing-run") == {"status": "refused", "reason": "not_running"}
+	assert queue.journal.db.rows == before and not rows
+
+
+def test_cancel_waits_for_a_held_session_row_once_then_answers_busy(queue, monkeypatch, rows):
+	"""C1: an HTTP cancel waited up to three lock timeouts and then raised."""
+	monkeypatch.setattr(queue.jobs.time, "sleep", lambda seconds: None)
+	current = queue.journal.db.get_value
+	waits = []
+
+	def held(table, name, *a, for_update=False, **kw):
+		if table == "Optimus Session" and for_update:
+			waits.append(name)
+			raise _lock_wait()
+		return current(table, name, *a, for_update=for_update, **kw)
+
+	monkeypatch.setattr(queue.journal.db, "get_value", held)
+	assert _cancel(queue) == {"status": "refused", "reason": "busy"}
+	assert waits == ["fake-session-doc"] and queue.journal.run["state"] == "queued" and not rows
+
+
+def test_cancel_still_retries_a_deadlock(queue, monkeypatch):
+	monkeypatch.setattr(queue.jobs.time, "sleep", lambda seconds: None)
+	real = queue.journal.mod.cancel
+	calls = []
+
+	def deadlocked_once(*a, **kw):
+		calls.append(True)
+		if len(calls) == 1:
+			raise _QueryDeadlockError(_DriverError(1213, "fake deadlock"))
+		return real(*a, **kw)
+
+	monkeypatch.setattr(queue.journal.mod, "cancel", deadlocked_once)
+	assert _cancel(queue)["status"] == "cancelled" and len(calls) == 2
+
+
+def test_cancel_force_releases_a_corrupt_run_with_one_row(queue, rows):
+	"""E2: a corrupt run could not be cancelled, so it held its session and a site-cap slot
+	until someone repaired the journal by hand."""
+	queue.journal.run.update(
+		state="running", worker_token="x", lease_until=999, active_session="SOMETHING-ELSE"
+	)
+	out = _cancel(queue)
+	assert out["status"] == "cancelled" and queue.journal.run["active_session"] is None
+	[(title, exc, context)] = rows
+	assert title == "optimus AI refresh recovery" and context["run_id"] == "fake-run"
+	assert "reservation" in str(exc) and context["docname"] == "fake-session-doc"
+
+
+@pytest.mark.parametrize(
+	"name,value",
+	[
+		("optimus_ai_slice_seconds", "120"),
+		("optimus_ai_refresh_max_seconds", "900"),
+		("optimus_ai_max_active_refreshes", " 3 "),
+	],
+)
+def test_settings_written_by_set_config_without_p_are_read_as_numbers(admitting, name, value):
+	"""D5: ``bench set-config`` without ``-p`` stores the string "120"; every admission then
+	raised (or, for the slice length, every dispatch failed)."""
+	queue = admitting
+	queue.journal.db.rows[queue.journal.mod.RUN] = {}
+	queue.jobs.frappe.conf[name] = value
+	out = _start(queue)
+	assert out["status"] == "queued" and len(queue.sent) == 1 and not queue.logs
+	if name == "optimus_ai_refresh_max_seconds":
+		assert next(iter(queue.journal.db.rows[queue.journal.mod.RUN].values()))["deadline"] == 950
+
+
+@pytest.mark.parametrize(
+	"name,value",
+	[
+		("optimus_ai_slice_seconds", "2 minutes"),
+		("optimus_ai_slice_seconds", 5),
+		("optimus_ai_slice_seconds", True),
+		("optimus_ai_refresh_max_seconds", 1.5),
+		("optimus_ai_max_active_refreshes", "0"),
+	],
+)
+def test_an_invalid_setting_refuses_before_admission_and_names_the_fix(admitting, name, value):
+	"""R5: an invalid slice length was admitted, reserved the session and then failed every
+	dispatch until its queued lease ran out."""
+	queue = admitting
+	queue.journal.db.rows[queue.journal.mod.RUN] = {}
+	queue.jobs.frappe.conf[name] = value
+	with pytest.raises(ValueError) as caught:
+		_start(queue)
+	assert name in str(caught.value) and "set-config -p" in str(caught.value)
+	assert not queue.journal.db.rows[queue.journal.mod.RUN] and not queue.sent

@@ -8,7 +8,9 @@ contact a provider, enqueue a job or use Redis as the source of truth. The
 caller starts each one in a fresh transaction and passes the run's session
 name, so the first statement is the lock on that Session row; an existing run
 then locks its Run and Attempt, in that order. Admission locks the Session,
-then (user refreshes only) the Control row with NOWAIT. A caller commits a
+then (user refreshes only) the Control row with NOWAIT, and takes over an
+expired run of its session in the same transaction, so recovery does not wait
+for the scheduler. A caller commits a
 calling attempt before sending HTTP, then commits its result and outcome
 together, adding the reported usage to the session counter in the same
 transaction. That counter is #72's log-and-continue (D2): a statement-level
@@ -27,6 +29,8 @@ ATTEMPT = "Optimus AI Refresh Attempt"
 CONTROL = "Optimus AI Refresh Control"
 ACTIVE = frozenset({"queued", "running"})
 TERMINAL = frozenset({"complete", "stopped", "cancelled", "interrupted"})
+# Slices in a row that could not begin any item before the run stops with ``no_progress``.
+IDLE_SLICE_LIMIT = 3
 
 
 class JournalUnavailable(RuntimeError):
@@ -111,8 +115,8 @@ def _timestamp(value):
 	return type(value) in (int, float) and 0 <= value < 253402214400
 
 
-def _read(table, name, *, lock=False):
-	return frappe.db.get_value(table, name, "*", as_dict=True, for_update=lock)
+def _read(table, name, *, lock=False, wait=True):
+	return frappe.db.get_value(table, name, "*", as_dict=True, for_update=lock, wait=wait)
 
 
 def _update(table, row, **values):
@@ -148,7 +152,7 @@ def _insert_new(table, name, **values):
 	return None
 
 
-def _locked(run_id, docname):
+def _locked(run_id, docname, *, wait=True, force=False):
 	"""Lock the run's session row, then the run row, as the transaction's first statements.
 
 	``docname`` is the run's session, resolved by the caller before this transaction (the
@@ -156,16 +160,35 @@ def _locked(run_id, docname):
 	the session lock would turn it into a 1020 on MariaDB 11.8 (snapshot isolation) once the
 	lock holder commits a change to that row. Every path locks session, run and attempt in
 	that order. A run of another session is reported as missing, so a caller bound to one
-	session can never act on another session's run."""
+	session can never act on another session's run.
+
+	``wait=False`` takes both rows with NOWAIT: a row another transaction holds raises a
+	lock-unavailable error at once. A reservation naming another session raises, unless
+	``force`` (cancel and recovery, which release it: ``_release``)."""
 	if not isinstance(docname, str) or not docname:
 		return None, None
-	parent = _read("Optimus Session", docname, lock=True)
-	run = _read(RUN, run_id, lock=True)
+	parent = _read("Optimus Session", docname, lock=True, wait=wait)
+	run = _read(RUN, run_id, lock=True, wait=wait)
 	if not run or run.get("session_name") != docname:
 		return parent, None
-	if run.get("active_session") not in (None, "", docname):
+	if not force and run.get("active_session") not in (None, "", docname):
 		raise JournalUnavailable("Refresh journal reservation is inconsistent")
 	return parent, run
+
+
+def expired(run, now):
+	"""True when an active run can no longer progress: its lease (a worker's, or the queued
+	delivery's) or its total deadline has passed. A late worker is already fenced; the run is
+	ended as interrupted by its session's next admission or by the recovery sweep."""
+	return bool(
+		run
+		and run.get("state") in ACTIVE
+		and ((run.get("lease_until") or 0) <= now or (run.get("deadline") or 0) <= now)
+	)
+
+
+def expiry_reason(run, now):
+	return "lease_expired" if (run.get("lease_until") or 0) <= now else "deadline"
 
 
 def admit(
@@ -204,6 +227,13 @@ def admit(
 	indexes deadlocked other sessions' workers. The unique ``active_session`` key is the
 	authority for one active run per session: an INSERT that hits it is ``already_running``
 	(with ``run`` None when this transaction could not see that run).
+
+	Lazy takeover (A2): a run that holds the reservation but whose lease or deadline has
+	passed (``expired``) is ended in this transaction, as the recovery sweep would end it:
+	interrupted, its Calling attempt uncertain (never sent again), its reservation released
+	(``_release``; an inconsistent row is force-released). The admission then goes on, so a
+	crashed worker never needs the scheduler or a manual cancel. The taken-over run counts no
+	refresh; it comes back as ``taken_over``.
 	"""
 	if scope not in {"all", "fixes_missing"} or (regenerate_all and scope != "all"):
 		raise ValueError("Invalid refresh scope")
@@ -248,6 +278,27 @@ def admit(
 	previous = _read(RUN, resume_from, lock=True) if resume_from else None
 	# Plain reads from here on: every lock above comes first (see the docstring).
 	current = frappe.db.get_value(RUN, {"active_session": docname}, "*", as_dict=True)
+	taken_over = None
+	if current and expired(current, now):
+		# Locked after the plain read, by primary key: every writer of this run locks this
+		# session first, which this transaction holds, so the row cannot change in between
+		# (no 1020 on MariaDB 11.8; an older Postgres snapshot fails with 40001 and retries).
+		if previous and previous["name"] == current["name"]:
+			locked = previous  # resuming the expired run itself: it must be ended first
+		else:
+			locked = _read(RUN, current["name"], lock=True)
+		current = locked if locked and locked.get("active_session") == docname else None
+		if current and expired(current, now):
+			taken_over = _release(
+				parent,
+				current,
+				docname,
+				state="interrupted",
+				reason=expiry_reason(current, now),
+				now=now,
+				count=False,
+			)
+			current = None
 	if current:
 		return {"status": "already_running", "run": current}
 	retry_no = 0
@@ -341,6 +392,8 @@ def admit(
 		# Changing the mutex row makes an older admission fail serialization on it and
 		# retry, instead of missing the new active reservation.
 		_update(CONTROL, control, generation=(control.get("generation") or 0) + 1)
+	if taken_over is not None:
+		return {"status": "queued", "run": run, "taken_over": taken_over}
 	return {"status": "queued", "run": run}
 
 
@@ -549,8 +602,8 @@ def settle_attempt(
 	return True
 
 
-def _finish_locked(parent, run, *, state, reason, now):
-	if not run.get("completion_counted"):
+def _finish_locked(parent, run, *, state, reason, now, count=True):
+	if count and not run.get("completion_counted"):
 		if parent and run["scope"] == "all" and run.get("completed"):
 			from optimus.analyze import _bump_ai_refresh_count
 
@@ -578,12 +631,25 @@ def finish(run_id, *, docname, worker_token, now, reason):
 	if run.get("active_attempt"):
 		raise RuntimeError("Cannot finish with an unsettled provider call")
 	return _finish_locked(
-		parent, run, state="complete" if reason == "complete" else "stopped", reason=reason, now=now
+		parent,
+		run,
+		state="complete" if reason == "complete" else "stopped",
+		reason=reason,
+		now=now,
+		# The provider was switched off under the run (E7): not a refresh the session asked for.
+		count=reason != "disabled",
 	)
 
 
-def _mark_uncertain(run, reason):
+def _mark_uncertain(run, reason, *, force=False):
+	"""The run's open Calling attempt becomes uncertain: never sent again, its usage unknown.
+
+	An attempt the run cannot vouch for (missing, another run's or another worker's) raises,
+	unless ``force``. Then only this run's own Calling attempt is written; for a missing row
+	or another run's, the run itself counts an uncertain call of unknown usage. Returns True
+	when the attempt was inconsistent."""
 	name = run.get("active_attempt")
+	inconsistent = False
 	if name:
 		attempt = _read(ATTEMPT, name, lock=True)
 		if (
@@ -591,9 +657,14 @@ def _mark_uncertain(run, reason):
 			or attempt.get("run_id") != run["name"]
 			or attempt.get("worker_token") != run.get("worker_token")
 		):
-			raise JournalUnavailable("Refresh journal attempt is inconsistent")
-		if attempt and attempt["state"] == "calling":
-			_update(ATTEMPT, attempt, state="uncertain", error_kind=reason)
+			if not force:
+				raise JournalUnavailable("Refresh journal attempt is inconsistent")
+			inconsistent = True
+			if attempt and attempt.get("run_id") != run["name"]:
+				attempt = None
+		if not attempt or attempt["state"] == "calling":
+			if attempt:
+				_update(ATTEMPT, attempt, state="uncertain", error_kind=reason)
 			_update(
 				RUN,
 				run,
@@ -601,23 +672,48 @@ def _mark_uncertain(run, reason):
 				usage_incomplete=(run.get("usage_incomplete") or 0) + 1,
 			)
 	_update(RUN, run, active_attempt=None)
+	return inconsistent
 
 
-def interrupt(run_id, *, docname, now, reason):
-	"""Recover an expired worker without automatically repeating its call."""
-	parent, run = _locked(run_id, docname)
-	if (
-		not run
-		or run["state"] not in ACTIVE
-		or ((run.get("lease_until") or 0) > now and run["deadline"] > now)
-	):
+def _release(parent, run, docname, *, state, reason, now, count=True):
+	"""End an active run: its open call uncertain, its session reservation released.
+
+	An inconsistent row is force-released (E2) rather than holding its session, and a site
+	cap slot, until the journal is repaired by hand. Release fails open, spend fails closed:
+	a reservation naming another session is cleared, an attempt that is not this run's is
+	never written (the run counts an uncertain call of unknown usage instead) and no refresh
+	is counted. The run comes back with ``inconsistent`` naming what was wrong, for the
+	caller's one Error Log row."""
+	problems = []
+	if run.get("active_session") not in (None, "", docname) or run.get("session_name") != docname:
+		problems.append("reservation")
+	if _mark_uncertain(run, reason, force=True):
+		problems.append("attempt")
+	_finish_locked(parent, run, state=state, reason=reason, now=now, count=count and not problems)
+	if problems:
+		run["inconsistent"] = " and ".join(problems)
+	return run
+
+
+def interrupt(run_id, *, docname, now, reason, wait=True):
+	"""Recover an expired run without automatically repeating its call.
+
+	``wait=False`` (the recovery sweep) takes the session row with NOWAIT, so a row held by a
+	dead or slow transaction raises a lock-unavailable error at once instead of stalling the
+	sweep for a lock wait timeout. An inconsistent run is force-released (``_release``)."""
+	parent, run = _locked(run_id, docname, wait=wait, force=True)
+	if not expired(run, now):
 		return None
-	_mark_uncertain(run, reason)
-	return _finish_locked(parent, run, state="interrupted", reason=reason, now=now)
+	return _release(parent, run, docname, state="interrupted", reason=reason, now=now)
 
 
-def continue_run(run_id, *, docname, worker_token, now, queued_seconds=1800):
-	"""Write the next slice's dispatch intent before the queue sees it."""
+def continue_run(run_id, *, docname, worker_token, now, queued_seconds=1800, progressed=True):
+	"""Write the next slice's dispatch intent before the queue sees it.
+
+	The dispatch throttle restarts with the slice, so a quick yield is dispatched at once
+	instead of waiting for the sweep (R3). A slice that could not begin any item
+	(``progressed`` False) adds to the run's idle streak; ``IDLE_SLICE_LIMIT`` such slices in
+	a row stop the run with ``no_progress`` instead of respinning until its deadline (O5)."""
 	parent, run = _locked(run_id, docname)
 	if not _owns(run, worker_token, now):
 		return None
@@ -625,6 +721,10 @@ def continue_run(run_id, *, docname, worker_token, now, queued_seconds=1800):
 		raise RuntimeError("Cannot continue with an unsettled provider call")
 	if run["deadline"] <= now:
 		return _finish_locked(parent, run, state="stopped", reason="deadline", now=now)
+	idle = 0 if progressed else (run.get("idle_slices") or 0) + 1
+	if idle >= IDLE_SLICE_LIMIT:
+		_update(RUN, run, idle_slices=idle)
+		return _finish_locked(parent, run, state="stopped", reason="no_progress", now=now)
 	_update(
 		RUN,
 		run,
@@ -633,6 +733,8 @@ def continue_run(run_id, *, docname, worker_token, now, queued_seconds=1800):
 		worker_token=None,
 		lease_until=now + queued_seconds,
 		dispatch_pending=1,
+		dispatched_at_epoch=0,
+		idle_slices=idle,
 		heartbeat=now,
 	)
 	return run
@@ -640,13 +742,13 @@ def continue_run(run_id, *, docname, worker_token, now, queued_seconds=1800):
 
 def cancel(run_id, *, docname, now, cancelled_by=None):
 	"""Cancel the durable intent even when Redis is down. Caller authorizes the session;
-	a run of another session is not cancelled."""
-	parent, run = _locked(run_id, docname)
+	a run of another session, or one no longer active, is not cancelled (None) and nothing
+	changes. An inconsistent run is force-released (``_release``)."""
+	parent, run = _locked(run_id, docname, force=True)
 	if not run or run["state"] not in ACTIVE:
 		return None
-	_mark_uncertain(run, "cancelled")
 	_update(RUN, run, cancelled_by=cancelled_by)
-	return _finish_locked(parent, run, state="cancelled", reason="cancelled", now=now)
+	return _release(parent, run, docname, state="cancelled", reason="cancelled", now=now)
 
 
 def abandon(run_id, *, docname, worker_token, now):
@@ -658,14 +760,15 @@ def abandon(run_id, *, docname, worker_token, now):
 	return _finish_locked(parent, run, state="interrupted", reason="worker_interrupted", now=now)
 
 
-def prepare_dispatch(run_id, *, docname, now):
+def prepare_dispatch(run_id, *, docname, now, wait=True):
 	"""Throttle delivery of a committed SQL intent; claiming acknowledges it.
 
 	Keep the intent pending until a worker claims it, including when Redis
 	accepts the job but the enqueue acknowledgement or its transaction is lost.
 	The deterministic RQ id saves queue space; claim is the execution fence.
+	``wait=False`` (the recovery sweep) takes the session row with NOWAIT.
 	"""
-	parent, run = _locked(run_id, docname)
+	parent, run = _locked(run_id, docname, wait=wait)
 	if not parent or not run or run["state"] != "queued" or not run.get("dispatch_pending"):
 		return None
 	if (run.get("lease_until") or 0) <= now or run["deadline"] <= now:

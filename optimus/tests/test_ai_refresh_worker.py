@@ -92,7 +92,9 @@ def test_replayed_rq_delivery_sends_and_accounts_each_item_once(worker):
 )
 def test_provider_failure_limits_survive_the_real_journal(worker, kind, expected):
 	def fail():
-		raise ai_fix.AiFixError("fake provider error", kind=kind)
+		# A failure after the request was sent, as the call boundary reports it: usage
+		# unknown (an error raised before any call is a known zero, C3).
+		raise ai_fix.AiFixError("fake provider error", kind=kind, usage_complete=False)
 
 	worker.send_hook = fail
 	worker.jobs.run_ai_refresh_slice("fake-run", 0)
@@ -418,3 +420,134 @@ def test_cleanup_failure_does_not_replace_a_provider_interrupt(worker, monkeypat
 	assert error.value.__context__ is None and error.value.__cause__ is None
 	assert len(worker.calls) == 1
 	assert worker.jobs.frappe.local.optimus_analyzing is False
+
+
+def test_a_run_whose_item_never_begins_stops_instead_of_respinning(worker):
+	"""O5: each slice selected the item again, could not begin it and yielded; with the
+	continuation now dispatched at once that was a hot loop until the deadline."""
+	worker.valid = False
+	for slice_no in range(3):
+		worker.jobs.run_ai_refresh_slice("fake-run", slice_no)
+	run = worker.journal.run
+	assert run["state"] == "stopped" and run["end_reason"] == "no_progress"
+	assert run["active_session"] is None and run["attempted"] == 0
+	assert not worker.calls and worker.queued == ["fake-run", "fake-run"]
+
+
+def test_switching_ai_off_mid_run_stops_it_without_counting_a_refresh(worker, monkeypatch):
+	"""E7 / C4: the run ended complete and bumped the session's refresh count."""
+	worker.count = 3
+	select = worker.jobs._next_item
+
+	def next_item(run, memo):
+		if worker.calls:
+			raise worker.jobs.StopRefresh("disabled")
+		return select(run, memo)
+
+	monkeypatch.setattr(worker.jobs, "_next_item", next_item)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	run = worker.journal.run
+	assert run["state"] == "stopped" and run["end_reason"] == "disabled" and run["completed"] == 1
+	assert worker.journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 0
+
+
+def test_when_both_settlement_writes_fail_the_final_row_carries_tokens_and_outcome(worker, monkeypatch, rows):
+	"""R4 / C3: the error escapes to the worker cleanup, which makes the attempt uncertain;
+	that last row says what the reported tokens became."""
+	worker.count = 1
+
+	def outage(*a, **kw):
+		raise OSError("fake storage outage")
+
+	monkeypatch.setattr(worker.journal.mod, "settle_attempt", outage)
+	with pytest.raises(worker.jobs.RefreshSliceFailed):
+		worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	[(title, exc, context)] = [row for row in rows if row[0] == "optimus AI refresh worker"]
+	assert type(exc) is OSError and context["tokens"] == 7
+	assert context["outcome"] == "not committed after try 1; the attempt is now uncertain"
+	run = worker.journal.db.rows[worker.journal.mod.RUN]["fake-run"]
+	assert run["state"] == "interrupted" and run["uncertain"] == 1 and run["tokens_reported"] == 0
+
+
+def test_when_the_cleanup_also_fails_the_final_row_leaves_the_attempt_to_recovery(worker, monkeypatch, rows):
+	worker.count = 1
+
+	def outage(*a, **kw):
+		raise OSError("fake storage outage")
+
+	monkeypatch.setattr(worker.journal.mod, "settle_attempt", outage)
+	monkeypatch.setattr(worker.journal.mod, "abandon", outage)
+	with pytest.raises(worker.jobs.RefreshSliceFailed):
+		worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	[(title, exc, context)] = [row for row in rows if row[0] == "optimus AI refresh worker"]
+	assert context["tokens"] == 7 and context["outcome"] == "not committed after try 1"
+
+
+def test_a_begin_that_used_up_the_budget_sends_nothing(worker, monkeypatch):
+	"""M35: the deadline is checked again after the send intent commits; a call started
+	below the reserve could not settle before the deadline fences it."""
+	worker.count = 1
+	worker.journal.run["deadline"] = 60
+	begin = worker.journal.mod.begin_attempt
+
+	def slow(*a, **kw):
+		out = begin(*a, **kw)
+		worker.clock[0] = 47  # 60 - 47 - 5 = 8 seconds left, under min(15, 10)
+		return out
+
+	monkeypatch.setattr(worker.journal.mod, "begin_attempt", slow)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert not worker.calls and worker.journal.run["end_reason"] == "deadline"
+	[attempt] = worker.journal.db.rows[worker.journal.mod.ATTEMPT].values()
+	assert attempt["state"] == "skipped" and attempt["error_kind"] == "deadline"
+	assert attempt["settled"] == 1 and attempt["usage_complete"] == 1
+	assert worker.journal.run["usage_incomplete"] == 0
+
+
+def test_a_refusal_before_any_http_call_is_a_known_zero_in_the_run(worker, monkeypatch):
+	"""C3: a prompt refused before sending counted as incomplete usage, which inflated the
+	release-monitoring signal for usage the provider never billed."""
+
+	def refuse(*a, **kw):
+		raise ai_fix.AiFixError("fake: the prompt does not fit", kind="context")
+
+	sent = []
+	for name, value in {
+		"is_finding_type_excluded": lambda finding_type: False,
+		"llm_gate_note": lambda finding: None,
+		"_provider_config": lambda: {"model": "m", "base_url": "https://fake.invalid", "name": "p"},
+		"_require_configured": lambda provider: None,
+		"_context_tokens": lambda provider: 1000,
+		"_output_tokens": lambda provider: 100,
+		"_resolve_display_threshold_ms": lambda: 1000.0,
+		"_build_fix_request": lambda *a, **kw: ("system", [], []),
+		"_is_hosted_endpoint": lambda url: False,
+		"_check_context_fits": refuse,
+		"_complete_with_guardrails": lambda *a, **kw: sent.append(True),
+	}.items():
+		monkeypatch.setattr(ai_fix, name, value)
+	select = worker.jobs._next_item
+
+	def next_item(run, memo):
+		item = select(run, memo)
+		if item is None:
+			return None
+
+		def send(timeout):
+			return ai_fix.suggest_fix(
+				{"finding_type": "N+1 Query"},
+				timeout=timeout,
+				session_uuid="fake-session",
+				docname="fake-session-doc",
+			)
+
+		return worker.jobs.PreparedItem(
+			item.kind, item.target, item.input_hash, send, item.valid, item.persist
+		)
+
+	monkeypatch.setattr(worker.jobs, "_next_item", next_item)
+	worker.count = 2
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert not sent and worker.journal.run["attempted"] == 2
+	assert worker.journal.run["usage_incomplete"] == 0
+	assert all(a["usage_complete"] == 1 for a in worker.journal.db.rows[worker.journal.mod.ATTEMPT].values())

@@ -224,7 +224,10 @@ class SQLDatabase:
 		filters = {"name": filters} if isinstance(filters, str) else filters
 		where, params = [], []
 		for key, value in filters.items():
-			if isinstance(value, (list, tuple)):
+			if isinstance(value, (list, tuple)) and value[0] == "<=":
+				where.append(self.quoted(key) + " <= %s")
+				params.append(value[1])
+			elif isinstance(value, (list, tuple)):
 				assert value[0] == "in" and value[1]
 				where.append(self.quoted(key) + " IN (" + ",".join(["%s"] * len(value[1])) + ")")
 				params.extend(value[1])
@@ -379,6 +382,7 @@ class Facade:
 		self.primary = primary
 		self.qb = _QueryBuilder(self)
 		self.conf, self.local, self.flags = {}, SimpleNamespace(), SimpleNamespace()
+		self.enqueued = []
 		for name, cls in ERRORS.items():
 			setattr(self, name, cls)
 
@@ -392,6 +396,15 @@ class Facade:
 
 	def get_doc(self, values):
 		return SimpleNamespace(insert=lambda **kw: self.db.insert(values))
+
+	def get_all(self, doctype, *, filters, fields, limit_page_length=0, **kw):
+		"""``frappe.get_all``: a plain read (the recovery sweep's candidates)."""
+		return self.db.get_values(
+			doctype, filters, fields, as_dict=True, order_by=None, limit=limit_page_length or None
+		)
+
+	def enqueue(self, method, **kw):
+		self.enqueued.append((method, kw))
 
 
 @pytest.fixture
@@ -509,14 +522,14 @@ def sql(monkeypatch):
 			db.connection.close()
 
 
-def admit(name="run-a", parent="parent-a", cap=5, scope="all", user="fake-user"):
+def admit(name="run-a", parent="parent-a", cap=5, scope="all", user="fake-user", now=10):
 	return store.admit(
 		run_id=name,
 		docname=parent,
 		session_uuid="fake-" + parent,
 		requested_by=user,
 		scope=scope,
-		now=10,
+		now=now,
 		max_seconds=3600,
 		site_cap=cap,
 		user_cap=5,
@@ -687,8 +700,8 @@ def test_an_admission_waiting_on_its_session_still_counts_a_run_admitted_meanwhi
 	paused, resume = threading.Event(), threading.Event()
 	real_read = store._read
 
-	def read(table, name, *, lock=False):
-		row = real_read(table, name, lock=lock)
+	def read(table, name, **kw):
+		row = real_read(table, name, **kw)
 		if threading.current_thread().name == "admission-b" and table == "Optimus Session":
 			if not paused.is_set():
 				paused.set()
@@ -732,8 +745,8 @@ def test_a_concurrent_duplicate_delivery_is_a_no_op_not_a_snapshot_conflict(sql,
 	locked, release = threading.Event(), threading.Event()
 	real_locked = store._locked
 
-	def pausing(run_id, docname):
-		out = real_locked(run_id, docname)
+	def pausing(run_id, docname, **kw):
+		out = real_locked(run_id, docname, **kw)
 		if threading.current_thread().name == "first" and not locked.is_set():
 			locked.set()
 			assert release.wait(10)
@@ -847,8 +860,8 @@ def test_admission_never_deadlocks_another_sessions_worker(sql, monkeypatch, tra
 	locked, release = threading.Event(), threading.Event()
 	real_locked = store._locked
 
-	def pausing(run_id, docname):
-		out = real_locked(run_id, docname)
+	def pausing(run_id, docname, **kw):
+		out = real_locked(run_id, docname, **kw)
 		if threading.current_thread().name == "worker-b" and not locked.is_set():
 			locked.set()
 			assert release.wait(10)
@@ -1078,7 +1091,7 @@ def test_an_http_admission_waits_for_a_held_session_row_once_then_answers_busy(s
 	timeout on retries. The wait is shortened to one second on this connection."""
 	monkeypatch.setattr(ai_jobs, "_check_run", lambda run, **kw: None)
 	monkeypatch.setattr(ai_jobs, "_workers_listening", lambda: True)
-	monkeypatch.setattr(ai_jobs, "_dispatch_pending", lambda run_id, docname: True)
+	monkeypatch.setattr(ai_jobs, "_dispatch_pending", lambda run_id, docname, **kw: True)
 	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: True)
 	writer = sql.connect()
 	writer.get_value("Optimus Session", "parent-a", "status", for_update=True)
@@ -1123,3 +1136,153 @@ def test_a_settlement_waiting_on_a_session_writer_keeps_the_answer(sql):
 	assert value(sql, store.RUN, "run-a", "completed") == 1
 	assert value(sql, "Optimus Session", "parent-a", "ai_tokens_spent") == 12
 	assert not sql.logged
+
+
+def test_an_admission_takes_over_an_expired_run_in_its_own_transaction(sql):
+	"""A2: a worker killed mid-call left its run running; the next click (here at t=400,
+	past the 311 lease) ends it interrupted with its call uncertain and admits the new run,
+	with no scheduler. #72's real counter is not bumped for the interrupted run (Q1)."""
+	claimed()
+	attempt = begun()
+	sql.primary.set_value(store.RUN, "run-a", {"completed": 2}, update_modified=False)
+	sql.primary.commit()
+	out = ai_jobs._retry_sql(lambda: admit("run-b", now=400), retry_lock_waits=False)
+	assert out["status"] == "queued" and out["taken_over"]["name"] == "run-a"
+	assert value(sql, store.RUN, "run-a", "state") == "interrupted"
+	assert value(sql, store.RUN, "run-a", "end_reason") == "lease_expired"
+	assert value(sql, store.RUN, "run-a", "active_session") is None
+	assert value(sql, store.ATTEMPT, attempt["name"], "state") == "uncertain"
+	assert value(sql, store.RUN, "run-b", "active_session") == "parent-a"
+	assert value(sql, "Optimus Session", "parent-a", "ai_refresh_count") == 0
+	assert not sql.logged
+
+
+def test_a_late_settlement_and_a_takeover_serialize_on_the_session_row(sql, monkeypatch):
+	"""The dead worker was only slow: its late, known outcome holds the session row while a
+	click takes the run over. The click waits, then sees the settled attempt: the tokens
+	count once, the stale answer is not written, the run ends interrupted and the new run is
+	admitted. No 1020 on MariaDB 11.8 (the session lock comes first); Postgres retries the
+	serialization failure the settlement's counter update causes."""
+	claimed()
+	attempt = begun()
+	locked, release = threading.Event(), threading.Event()
+	real_locked = store._locked
+
+	def pausing(run_id, docname, **kw):
+		out = real_locked(run_id, docname, **kw)
+		if threading.current_thread().name == "late-worker" and not locked.is_set():
+			locked.set()
+			assert release.wait(10)
+		return out
+
+	monkeypatch.setattr(store, "_locked", pausing)
+
+	def persist():
+		sql.facade.db.sql(f"UPDATE {sql.facade.db.table('answer')} SET body = 'stale' WHERE name = 'row-00'")
+
+	def late():
+		return store.settle_attempt(
+			"run-a",
+			attempt["name"],
+			docname="parent-a",
+			worker_token="worker-a",
+			outcome="succeeded",
+			tokens=7,
+			usage_complete=True,
+			now=400,
+			persist=persist,
+		)
+
+	worker, settled = in_thread(sql, "late-worker", lambda: ai_jobs._retry_sql(late))
+	assert locked.wait(10)
+	click, admitted = in_thread(
+		sql, "click", lambda: ai_jobs._retry_sql(lambda: admit("run-b", now=401), retry_lock_waits=False)
+	)
+	wait_until_blocked(sql)
+	release.set()
+	worker.join(30)
+	click.join(30)
+	assert "error" not in settled and settled["value"] is True
+	assert "error" not in admitted and admitted["value"]["status"] == "queued"
+	assert admitted["db"].conflicts == (["40001"] if BACKEND == "postgres" else [])
+	assert value(sql, store.ATTEMPT, attempt["name"], "state") == "discarded"
+	assert value(sql, store.RUN, "run-a", "state") == "interrupted"
+	assert value(sql, store.RUN, "run-a", "uncertain") == 0
+	assert value(sql, "Optimus Session", "parent-a", "ai_tokens_spent") == 7
+	assert value(sql, "answer", "row-00", "body") == ""
+	assert value(sql, store.RUN, "run-b", "active_session") == "parent-a"
+
+
+def test_the_sweep_skips_a_session_a_dead_transaction_holds(sql, monkeypatch):
+	"""R1: a dead worker host's transaction can hold a session row until wait_timeout; each
+	sweep row waited a whole lock timeout and then aborted the sweep. The sweep's NOWAIT
+	lock is refused at once: that run waits for a later sweep, the others are recovered."""
+	claimed("run-a", "parent-a", "worker-a")
+	claimed("run-b", "parent-b", "worker-b")
+	monkeypatch.setattr(ai_jobs, "_now", lambda: 1000.0)
+	holder = sql.connect()
+	holder.get_value("Optimus Session", "parent-a", "status", for_update=True)
+	sweep, out = in_thread(sql, "sweep", ai_jobs.recover_pending)
+	waited = not ends_without_waiting(sql, sweep)
+	holder.commit()
+	sweep.join(30)
+	assert not waited, "the sweep waited for a lock a dead transaction held"
+	assert "error" not in out
+	assert out["value"] == {"interrupted": 1, "dispatched": 0, "busy": 1, "failed": 0}
+	assert out["db"].conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
+	assert value(sql, store.RUN, "run-b", "state") == "interrupted"
+	assert value(sql, store.RUN, "run-a", "state") == "running"
+	assert not sql.logged
+	assert ai_jobs.recover_pending()["interrupted"] == 1
+	assert value(sql, store.RUN, "run-a", "state") == "interrupted"
+
+
+def _short_lock_wait(sql):
+	contender = sql.connect()
+	contender.sql(
+		"SET SESSION innodb_lock_wait_timeout=1" if BACKEND == "mariadb" else "SET lock_timeout = '1s'"
+	)
+	contender.commit()
+	return contender
+
+
+def test_an_http_cancel_waits_for_a_held_session_row_once_then_answers_busy(sql):
+	"""C1: the cancel endpoint's wait is bounded by one lock wait timeout, like admission."""
+	claimed()
+	writer = sql.connect()
+	writer.get_value("Optimus Session", "parent-a", "status", for_update=True)
+	contender = _short_lock_wait(sql)
+	with sql.using(contender):
+		out = ai_jobs.cancel_refresh("run-a", docname="parent-a", requested_by="fake-user")
+	assert out == {"status": "refused", "reason": "busy"}
+	assert contender.conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
+	writer.commit()
+	assert value(sql, store.RUN, "run-a", "state") == "running"
+
+
+def test_an_http_dispatch_waits_once_and_leaves_the_intent_pending(sql, monkeypatch):
+	"""C1: after the admission commits, its dispatch finds the session row held (here by a
+	Desk save): it waits one lock timeout, then answers queued and leaves the committed
+	intent for the sweep or the next click, never failing the response."""
+	monkeypatch.setattr(ai_jobs, "_check_run", lambda run, **kw: None)
+	monkeypatch.setattr(ai_jobs, "_workers_listening", lambda: True)
+	monkeypatch.setattr(ai_jobs, "_call_timeout", lambda: 60)
+	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: True)
+	writer = sql.connect()
+	dispatch = ai_jobs._dispatch_pending
+
+	def after_commit(run_id, docname, **kw):
+		writer.get_value("Optimus Session", docname, "status", for_update=True)
+		return dispatch(run_id, docname, **kw)
+
+	monkeypatch.setattr(ai_jobs, "_dispatch_pending", after_commit)
+	contender = _short_lock_wait(sql)
+	with sql.using(contender):
+		out = ai_jobs.start_refresh(
+			docname="parent-a", session_uuid="fake-parent-a", requested_by="fake-user"
+		)
+	writer.commit()
+	assert out["status"] == "queued"
+	assert contender.conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
+	assert not sql.facade.enqueued and not sql.logged
+	assert value(sql, store.RUN, out["refresh"]["run_id"], "dispatch_pending") == 1

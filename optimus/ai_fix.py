@@ -38,6 +38,7 @@ class Usage(dict):
 
 	The attributes stay out of the provider-compatible numeric mapping. Missing
 	usage is unknown, including when the normalized count happens to be zero.
+	No attempted completion (a refusal before any HTTP call) is a known zero.
 	"""
 
 	def __init__(self):
@@ -47,7 +48,7 @@ class Usage(dict):
 
 	@property
 	def complete(self):
-		return self.calls > 0 and self.known_calls == self.calls
+		return self.known_calls == self.calls
 
 	def begin(self):
 		self.calls += 1
@@ -101,8 +102,10 @@ class AiFixError(Exception):
 		super().__init__(message)
 		self.status_code = status_code
 		self.kind = kind
+		# No usage attached: raised before any call, a known zero. The call boundary
+		# (_with_usage_on_failure) sets what the attempted calls reported.
 		self.usage_complete = (
-			bool(getattr(usage, "complete", False)) if usage_complete is None else usage_complete is True
+			bool(getattr(usage, "complete", usage is None)) if usage_complete is None else usage_complete is True
 		)
 		self.usage = _billed_usage(usage) if usage is not None else None
 
@@ -2042,8 +2045,11 @@ def _response_usage(data, protocol):
 			known = False
 	else:
 		usage.update(_usage_from_anthropic(data))
+		# A cache field Anthropic sends as null was not used: no missing count.
 		known = all(_valid_reported_count(u.get(k)) for k in ("input_tokens", "output_tokens")) and all(
-			_valid_reported_count(u[k]) for k in ("cache_creation_input_tokens", "cache_read_input_tokens") if k in u
+			_valid_reported_count(u[k])
+			for k in ("cache_creation_input_tokens", "cache_read_input_tokens")
+			if u.get(k) is not None
 		)
 	usage.observe(known)
 	return usage
