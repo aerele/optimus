@@ -346,3 +346,39 @@ def test_input_recheck_takes_its_row_locks_before_any_plain_read(work):
 	locking = [c[2] for c in work.journal.db.calls]
 	assert False in locking and locking == sorted(locking, reverse=True)
 	assert ("Optimus Finding", "finding-1", True) in work.journal.db.calls
+
+
+def _begin(work, item):
+	with work.journal.db.transaction():
+		return work.jobs._begin_attempt(
+			work.journal.run, item, run_id="fake-run", docname="fake-session-doc", worker_token="worker"
+		)
+
+
+def test_the_send_intent_transaction_takes_every_lock_before_its_first_plain_read(work):
+	"""F-4: in the transaction that writes the Calling attempt, the Finding row is locked
+	before the requester's plain User read opens the read view (no 1020 on MariaDB 11.8
+	when a Finding writer that skips the session lock commits in between)."""
+	item = work.jobs._next_item(work.journal.run, {})
+	work.journal.db.calls.clear()
+	assert _begin(work, item)["state"] == "calling"
+	calls = work.journal.db.calls
+	first_plain = next(i for i, c in enumerate(calls) if not c[2])
+	assert calls.index(("Optimus Finding", "finding-1", True)) < first_plain
+	assert all(c[2] for c in calls[:first_plain])
+
+
+def test_the_send_intent_transaction_still_ends_a_run_that_must_stop(work):
+	item = work.jobs._next_item(work.journal.run, {})
+	work.journal.db.rows["User"]["fake-owner"]["enabled"] = 0
+	with pytest.raises(work.jobs.StopRefresh) as caught:
+		_begin(work, item)
+	assert caught.value.reason == "permission"
+	assert work.journal.run["attempted"] == 0
+
+
+def test_the_send_intent_transaction_yields_on_a_changed_input(work):
+	item = work.jobs._next_item(work.journal.run, {})
+	work.row["title"] = "changed input"
+	assert _begin(work, item) is None
+	assert work.journal.run["attempted"] == 0

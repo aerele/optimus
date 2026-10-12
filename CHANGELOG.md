@@ -24,11 +24,15 @@ versions may contain breaking changes see migration notes below).
   snapshot conflict (1020) and the raw codes. Settlement follows
   `_write_ai_answer`: three tries, a read-back of the attempt's settled bit
   (unknown when it cannot be read), and an outcome line on every row. The rows
-  say when the failed-outcome write recorded the tokens. The engine takes no gap-locking
-  reads. Every transaction locks the session row first, a duplicate attempt or
-  reservation is caught by its unique key, and the requester's User row is never
-  locked. A user refresh takes the site mutex only after its session, and a busy
-  mutex is a `busy` refusal. Analyze-time runs never take the mutex.
+  say when the failed-outcome write recorded the tokens. The engine takes no
+  gap-locking reads on the journal tables. The recheck's Phase 2 read is a
+  `FOR UPDATE` by filter, so it can make another session's Phase 2 insert wait.
+  Every transaction locks the session row first and takes all its locks before
+  its first plain read. A duplicate attempt or reservation is caught by its
+  unique key, and the requester's User row is never locked. A user refresh takes
+  the site mutex only after its session. A busy mutex, or a session row held
+  past one lock wait timeout, is a `busy` refusal. Analyze-time runs never take
+  the mutex.
 - Keep interrupted calls with an unknown outcome as uncertain. Automatic
   recovery delivers queued work but never repeats an uncertain provider call.
   Explicit resumes preserve the selection cursor and have a bounded chain.
@@ -45,8 +49,9 @@ versions may contain breaking changes see migration notes below).
   Existing refresh behavior remains synchronous. The wiring follow-up must
   land before release; profiling isolation is completed there.
 - Normal deployment migration installs three internal DocTypes and seeds the
-  admission mutex. A missing journal table fails every admission, and a missing
-  mutex row refuses user refreshes. AI Quality runs
+  admission mutex. A missing journal table fails every admission. A missing
+  mutex row fails a user refresh closed with `JournalUnavailable`, whose message
+  names the repair (`bench --site <site> execute optimus.patches.v0_12_0.initialize_ai_refresh_store.execute`). AI Quality runs
   the journal checks on MariaDB 10.6, MariaDB 11.8 and PostgreSQL. See
   [background engine details](docs/AI-REFRESH.md) for transactions, queue
   requirements and the remaining deployment work.

@@ -276,23 +276,10 @@ def _drive(run_id, docname, slice_no, worker_token):
 		# transaction. MariaDB may otherwise keep a pre-call snapshot alive.
 		_transaction(lambda: None)
 
-		def begin():
-			store._locked(run_id, docname)
-			_check_run(run, locked=True)
-			if not item.valid():
-				return None
-			return store.begin_attempt(
-				run_id,
-				docname=docname,
-				worker_token=worker_token,
-				kind=item.kind,
-				target=item.target,
-				input_hash=item.input_hash,
-				now=_now(),
-			)
-
 		try:
-			attempt = _retry_sql(begin)
+			attempt = _retry_sql(
+				lambda: _begin_attempt(run, item, run_id=run_id, docname=docname, worker_token=worker_token)
+			)
 		except StopRefresh as exc:
 			reason = exc.reason
 		if reason:
@@ -523,6 +510,31 @@ def _attempt_settled(attempt_id):
 	return state if isinstance(state, bool) else None
 
 
+def _begin_attempt(run, item, *, run_id, docname, worker_token):
+	"""The send-intent transaction: write the Calling attempt, or None to yield.
+
+	Every lock comes before the first plain read: the session and run (``store._locked``),
+	then the item's rows and the Phase 2 rows (``item.valid()``, which rechecks the input
+	and runs ``_check_run``), and only then the requester's plain User read. A read view
+	opened earlier would turn the Finding lock into a 1020 on MariaDB 11.8 when a Finding
+	writer that skips the session lock (#72's write of a zero-token answer) committed in
+	between. When the input is no longer valid, ``_check_run`` raises ``StopRefresh`` if the
+	run itself must end; otherwise the slice yields."""
+	store._locked(run_id, docname)
+	if not item.valid():
+		_check_run(run, locked=True)
+		return None
+	return store.begin_attempt(
+		run_id,
+		docname=docname,
+		worker_token=worker_token,
+		kind=item.kind,
+		target=item.target,
+		input_hash=item.input_hash,
+		now=_now(),
+	)
+
+
 def _end(run_id, docname, worker_token, reason):
 	return _retry_sql(
 		lambda: store.finish(run_id, docname=docname, worker_token=worker_token, now=_now(), reason=reason)
@@ -543,7 +555,10 @@ def _check_run(run, *, locked=False):
 	With ``locked`` the session and Phase 2 rows are read with locks, and both locking reads
 	come before the first plain read, so a read view opened by a plain read never precedes a
 	lock (a 1020 on MariaDB 11.8). The requester's User row is a plain read: a lock on it
-	would block the user's own User writes while the journal locks are held."""
+	would block the user's own User writes while the journal locks are held. The Phase 2
+	read is a FOR UPDATE by filter, the engine's one gap-locking read (not on a journal
+	table): on MariaDB another session's Phase 2 insert can wait for this short
+	transaction."""
 	from optimus.permissions import may_act_on_session
 
 	parent = frappe.db.get_value("Optimus Session", run["session_name"], "*", as_dict=True, for_update=locked)
@@ -630,7 +645,8 @@ def _attempts(run):
 def _valid_item(run, doc, row, fingerprint):
 	# The caller already locks Session before Run/Attempt. Current reads here
 	# must not consult a pre-wait MariaDB snapshot when another actor changed it.
-	# The Finding row is locked before _check_run's plain reads open a read view.
+	# The Finding row is locked before _check_run's plain reads open a read view; the
+	# caller (_begin_attempt, settle_attempt) has locked the session and run first.
 	parent = frappe.db.get_value("Optimus Session", run["session_name"], "*", as_dict=True, for_update=True)
 	if not parent or parent.get("modified") != doc.get("modified"):
 		return False

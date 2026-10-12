@@ -25,6 +25,11 @@ since last read") when another transaction changed that row in between.
 Because the locks come first, that cannot happen here. Each transition names
 its session, and a run of another session is treated as missing.
 
+No read of the journal tables takes a gap lock. The worker's recheck does read
+the session's Phase 2 rows with a `FOR UPDATE` by filter. On MariaDB that locks
+a range of that child table's parent index, so another session's Phase 2
+insert can wait until this short transaction ends.
+
 Admission locks the session row first. When another writer holds that row for
 a whole lock wait timeout, the admission answers `busy` instead of trying again.
 Only a user refresh (`scope` all, the only scope with caps) then takes the site
@@ -144,8 +149,10 @@ Fresh installation seeds the same mutex. Deploy code/schema before enabling
 callers; restart web and workers together through the normal deployment process.
 Do not route work to a worker running older code. A missing journal is an error,
 never permission to run without concurrency controls. A missing mutex row
-refuses user refreshes, whose caps need it. Analyze-time runs need only the
-session lock and the unique reservation.
+fails a user refresh closed: admission raises `JournalUnavailable`, because the
+caps need the mutex. The error names the repair, which seeds the row again:
+`bench --site <site> execute optimus.patches.v0_12_0.initialize_ai_refresh_store.execute`. The seed is idempotent. Analyze-time runs need only the session
+lock and the unique reservation.
 
 | Site configuration | Default | Accepted values |
 | --- | --- | --- |

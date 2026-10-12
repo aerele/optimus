@@ -240,7 +240,10 @@ def admit(
 		if busy:
 			return {"status": "refused", "reason": "busy"}
 		if not control:
-			raise JournalUnavailable("AI refresh storage is not initialized")
+			raise JournalUnavailable(
+				"AI refresh storage is not initialized; repair: bench --site <site> execute "
+				"optimus.patches.v0_12_0.initialize_ai_refresh_store.execute"
+			)
 	# The run being resumed belongs to this session, so its row is locked after the session.
 	previous = _read(RUN, resume_from, lock=True) if resume_from else None
 	# Plain reads from here on: every lock above comes first (see the docstring).
