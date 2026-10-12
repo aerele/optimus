@@ -15,7 +15,7 @@ pytestmark = pytest.mark.rq
 def worker(journal, monkeypatch):
 	jobs = import_module("optimus.ai_jobs")
 	clock = [20.0]
-	calls, written, queued, logs = [], [], [], []
+	calls, written, queued, logs, rows = [], [], [], [], []
 
 	def transaction(fn):
 		with journal.db.transaction():
@@ -29,7 +29,13 @@ def worker(journal, monkeypatch):
 	monkeypatch.setattr(jobs, "_call_timeout", lambda: 10)
 	monkeypatch.setattr(jobs, "_check_run", lambda run, **kw: None)
 	monkeypatch.setattr(jobs, "_dispatch_pending", lambda run_id, docname: queued.append(run_id))
-	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: logs.append(type(a[1]).__name__))
+
+	def log_row(title, exc=None, **context):
+		rows.append((title, context))
+		if exc is not None:
+			logs.append(type(exc).__name__)
+
+	monkeypatch.setattr(ai_fix, "log_ai_failure", log_row)
 	monkeypatch.setattr(
 		jobs, "frappe", SimpleNamespace(db=SimpleNamespace(rollback=lambda: None), local=SimpleNamespace())
 	)
@@ -41,6 +47,7 @@ def worker(journal, monkeypatch):
 		clock=clock,
 		queued=queued,
 		logs=logs,
+		rows=rows,
 		count=5,
 		send_hook=None,
 		persist_hook=None,
@@ -589,3 +596,111 @@ def test_a_slice_that_answered_an_item_is_not_idle_when_the_next_cannot_begin(wo
 	run = worker.journal.run
 	assert len(worker.calls) == 1 and run["completed"] == 1
 	assert run["state"] == "queued" and run["slice_no"] == 1 and run["idle_slices"] == 0
+
+
+# --- release-blocking signals (O4): one Error Log row each, at the moment it happens -----------
+
+
+def _signal_rows(worker, title):
+	return [context for t, context in worker.rows if t == title]
+
+
+def test_a_normal_run_writes_no_signal_row(worker):
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert not [t for t, _ in worker.rows if t.startswith("optimus ai refresh d")]
+
+
+def test_an_answer_rejected_by_its_input_check_is_a_discarded_row(worker):
+	worker.count = 1
+	worker.persist_hook = lambda: False
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	[row] = _signal_rows(worker, "optimus ai refresh discarded")
+	attempt = next(iter(worker.journal.db.rows[worker.journal.mod.ATTEMPT]))
+	assert row == {
+		"docname": "fake-session-doc",
+		"run_id": "fake-run",
+		"signal": "discarded",
+		"reason": "input_changed",
+		"attempt": attempt,
+		"kind": "fix",
+	}
+
+
+def test_an_answer_from_a_fenced_worker_is_a_discarded_row(worker):
+	def cancel():
+		with worker.journal.db.transaction():
+			worker.journal.mod.cancel("fake-run", docname="fake-session-doc", now=21)
+
+	worker.send_hook = cancel
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	[row] = _signal_rows(worker, "optimus ai refresh discarded")
+	assert row["reason"] == "fenced" and row["kind"] == "fix" and row["run_id"] == "fake-run"
+	assert worker.journal.run["tokens_reported"] == 7  # the usage is still kept
+
+
+def test_a_failed_call_is_not_a_discarded_answer(worker):
+	def fail():
+		raise ai_fix.AiFixError("fake", kind="server")
+
+	worker.send_hook = fail
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert not _signal_rows(worker, "optimus ai refresh discarded")
+
+
+def test_a_delivery_of_a_slice_already_claimed_is_a_duplicate_blocked_row(worker):
+	worker.send_hook = lambda: worker.clock.__setitem__(0, worker.clock[0] + 31)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert not _signal_rows(worker, "optimus ai refresh duplicate blocked")
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)  # RQ delivers slice 0 again
+	[row] = _signal_rows(worker, "optimus ai refresh duplicate blocked")
+	assert row == {
+		"docname": "fake-session-doc",
+		"run_id": "fake-run",
+		"signal": "duplicate_blocked",
+		"reason": "already_claimed",
+		"slice_no": 0,
+	}
+	assert len(worker.calls) == 1
+
+
+def test_a_second_send_of_an_attempted_item_is_a_duplicate_blocked_row(worker, monkeypatch):
+	"""The unique attempt key stops a second call for the same item of the same run."""
+	worker.count = 1
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)  # finding-0 attempted and settled
+	assert len(worker.calls) == 1 and worker.journal.run["state"] == "complete"
+	run = worker.journal.run
+	run.update(state="running", worker_token="worker-x", lease_until=999, active_session="fake-session-doc")
+	original = worker.jobs._next_item
+
+	def again(run, memo):
+		return original(run, memo) or worker.jobs.PreparedItem(
+			"fix", "finding-0", "fake-hash", lambda t: 1 / 0, lambda: True, lambda r: True
+		)
+
+	monkeypatch.setattr(worker.jobs, "_next_item", again)
+	worker.rows.clear()
+	run.update(state="queued", slice_no=1, lease_until=1800, dispatch_pending=1)
+	worker.jobs.run_ai_refresh_slice("fake-run", 1)
+	[row] = _signal_rows(worker, "optimus ai refresh duplicate blocked")
+	assert row["reason"] == "already_attempted" and row["kind"] == "fix" and row["run_id"] == "fake-run"
+	assert len(worker.calls) == 1  # no second provider call
+
+
+def test_a_retried_transaction_leaves_one_signal_row_not_two(worker, monkeypatch):
+	"""A try that is rolled back and repeated must not log what its first run recorded."""
+	worker.send_hook = lambda: worker.clock.__setitem__(0, worker.clock[0] + 31)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	real = worker.journal.mod.claim
+	tries = []
+
+	def claim_twice(*a, signals=None, **kw):
+		tries.append(True)
+		result = real(*a, signals=signals, **kw)
+		if len(tries) == 1:
+			raise _Conflict(_DriverError(1213, "fake deadlock"))  # rolled back after it recorded
+		return result
+
+	monkeypatch.setattr(worker.journal.mod, "claim", claim_twice)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)  # a replayed delivery of slice 0
+	assert len(tries) == 2
+	assert len(_signal_rows(worker, "optimus ai refresh duplicate blocked")) == 1

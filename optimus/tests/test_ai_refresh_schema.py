@@ -38,7 +38,14 @@ def test_cumulative_session_usage_can_hold_the_sum_of_valid_provider_counts():
 	path = ROOT / "optimus" / "doctype" / "optimus_session" / "optimus_session.json"
 	fields = {f["fieldname"]: f for f in json.loads(path.read_text())["fields"]}
 	assert fields["ai_tokens_spent"]["fieldtype"] == "Long Int"
-	assert fields["ai_steps_tokens"]["fieldtype"] == "Long Int"
+
+
+def test_the_steps_token_field_keeps_its_32_bit_type():
+	"""D3: widening it rebuilds the Session table (MariaDB COPY, Postgres rewrite) for a count one
+	reply cannot reach, and makes the column nullable. The engine clamps the value instead."""
+	path = ROOT / "optimus" / "doctype" / "optimus_session" / "optimus_session.json"
+	fields = {f["fieldname"]: f for f in json.loads(path.read_text())["fields"]}
+	assert fields["ai_steps_tokens"]["fieldtype"] == "Int"
 
 
 def test_fresh_install_calls_the_same_seed_as_upgrade(monkeypatch):
@@ -77,7 +84,9 @@ def test_admission_seed_is_idempotent(monkeypatch):
 		return SimpleNamespace(insert=lambda **kw: rows.append(values))
 
 	monkeypatch.setattr(
-		patch, "frappe", SimpleNamespace(db=SimpleNamespace(exists=lambda *a: bool(rows)), get_doc=doc)
+		patch,
+		"frappe",
+		SimpleNamespace(db=SimpleNamespace(exists=lambda *a: bool(rows), db_type="mariadb"), get_doc=doc),
 	)
 	patch.execute()
 	patch.execute()
@@ -124,3 +133,112 @@ def test_the_run_journal_records_the_selections_gated_and_excluded_counts():
 		assert fields[name]["fieldtype"] == "Int" and fields[name]["read_only"] == 1, name
 		assert fields[name]["default"] == "0" and name in doc["field_order"], name
 	assert [f["fieldname"] for f in doc["fields"]] == [n for n in doc["field_order"]]
+
+
+# --- D2: both journal tables keep their indexes on PostgreSQL ---------------------------------
+
+
+def _index_patch(monkeypatch, *, db_type, indexes):
+	"""The patch against a fake ``frappe``: ``indexes`` maps a table to its index definitions."""
+	from importlib import import_module
+	from types import SimpleNamespace
+
+	patch = import_module("optimus.patches.v0_12_0.initialize_ai_refresh_store")
+	created = []
+
+	def fields(doctype):
+		folder = doctype.lower().replace(" ", "_")
+		doc = json.loads((ROOT / "optimus" / "doctype" / folder / (folder + ".json")).read_text())
+		return [SimpleNamespace(**{"unique": 0, "search_index": 0, **f}) for f in doc["fields"]]
+
+	def sql(query, values):
+		assert "pg_indexes" in query and values[0] == "public"
+		return [(definition,) for definition in indexes.get(values[1], [])]
+
+	db = SimpleNamespace(
+		db_type=db_type,
+		db_schema="public",
+		sql=sql,
+		add_index=lambda doctype, columns, index_name: created.append((doctype, columns, index_name)),
+	)
+	monkeypatch.setattr(
+		patch, "frappe", SimpleNamespace(db=db, get_meta=lambda d: SimpleNamespace(fields=fields(d)))
+	)
+	return patch, created
+
+
+def _definition(column, table="tabOptimus AI Refresh Run"):
+	return f'CREATE INDEX {column} ON public."{table}" USING btree ({column})'
+
+
+def test_the_attempt_table_gets_the_session_index_frappe_skipped(monkeypatch):
+	run = "tabOptimus AI Refresh Run"
+	patch, created = _index_patch(
+		monkeypatch,
+		db_type="postgres",
+		indexes={
+			run: [_definition(c) for c in ("session_name", "requested_by", "state", "resume_from")],
+			"tabOptimus AI Refresh Attempt": [_definition("run_id", "tabOptimus AI Refresh Attempt")],
+		},
+	)
+	patch.ensure_indexes()
+	assert created == [
+		(
+			"Optimus AI Refresh Attempt",
+			["session_name"],
+			"tabOptimus AI Refresh Attempt_session_name_index",
+		)
+	]
+
+
+def test_the_run_table_gets_it_when_frappe_gave_the_name_to_the_attempt_table(monkeypatch):
+	attempt = "tabOptimus AI Refresh Attempt"
+	patch, created = _index_patch(
+		monkeypatch,
+		db_type="postgres",
+		indexes={
+			"tabOptimus AI Refresh Run": [_definition(c) for c in ("requested_by", "state", "resume_from")],
+			attempt: [_definition("run_id", attempt), _definition("session_name", attempt)],
+		},
+	)
+	patch.ensure_indexes()
+	assert [(c[0], c[1]) for c in created] == [("Optimus AI Refresh Run", ["session_name"])]
+
+
+def test_the_indexes_are_created_once_and_a_rerun_does_nothing(monkeypatch):
+	patch, created = _index_patch(monkeypatch, db_type="postgres", indexes={})
+	patch.ensure_indexes()
+	wanted = {(c[0], c[1][0]) for c in created}
+	assert wanted == {
+		("Optimus AI Refresh Run", "session_name"),
+		("Optimus AI Refresh Run", "requested_by"),
+		("Optimus AI Refresh Run", "state"),
+		("Optimus AI Refresh Run", "resume_from"),
+		("Optimus AI Refresh Attempt", "run_id"),
+		("Optimus AI Refresh Attempt", "session_name"),
+	}
+	# every name is the table's own, so two tables can never claim one name
+	assert len({c[2] for c in created}) == len(created) and all(c[2].startswith("tab") for c in created)
+
+
+def test_mariadb_is_left_alone(monkeypatch):
+	patch, created = _index_patch(monkeypatch, db_type="mariadb", indexes={})
+	patch.ensure_indexes()
+	assert created == []
+
+
+def test_the_seed_runs_after_the_model_sync():
+	"""D6: the mutex row needs its table, so the patch must be after the schema is synced."""
+	lines = (ROOT / "patches.txt").read_text().splitlines()
+	name = "optimus.patches.v0_12_0.initialize_ai_refresh_store"
+	assert lines.count(name) == 1
+	assert "[post_model_sync]" in lines and lines.index("[post_model_sync]") < lines.index(name)
+	assert "[pre_model_sync]" not in lines[lines.index("[post_model_sync]") :]
+
+
+def test_the_seed_patch_creates_the_indexes_too(monkeypatch):
+	"""Install, upgrade and every migrate run ``execute``: the indexes must come with the seed."""
+	patch, created = _index_patch(monkeypatch, db_type="postgres", indexes={})
+	patch.frappe.db.exists = lambda *a: True  # the mutex row is already seeded
+	patch.execute()
+	assert ("Optimus AI Refresh Attempt", ["session_name"]) in [(c[0], c[1]) for c in created]

@@ -243,16 +243,22 @@ def _unsettled_context(unsettled, released):
 def _drive(run_id, docname, slice_no, worker_token):
 	started = time.monotonic()
 	seconds, call_limit = slice_seconds(), _call_timeout()
-	run = _retry_sql(
-		lambda: store.claim(
+	signals = []
+
+	def claim():
+		signals.clear()  # a try that is rolled back and repeated leaves nothing behind
+		return store.claim(
 			run_id,
 			docname=docname,
 			slice_no=slice_no,
 			worker_token=worker_token,
 			now=_now(),
 			lease_seconds=seconds + call_limit + 180,
+			signals=signals,
 		)
-	)
+
+	run = _retry_sql(claim)
+	_log_signals(signals, run_id, docname)
 	if not run:
 		return
 	memo, items = {}, 0  # the slice's scratch dict (``_next_item``)
@@ -296,12 +302,17 @@ def _drive(run_id, docname, slice_no, worker_token):
 		# transaction. MariaDB may otherwise keep a pre-call snapshot alive.
 		_transaction(lambda: None)
 
-		try:
-			attempt = _retry_sql(
-				lambda: _begin_attempt(run, item, run_id=run_id, docname=docname, worker_token=worker_token)
+		def begin():
+			signals.clear()
+			return _begin_attempt(
+				run, item, run_id=run_id, docname=docname, worker_token=worker_token, signals=signals
 			)
+
+		try:
+			attempt = _retry_sql(begin)
 		except StopRefresh as exc:
 			reason = exc.reason
+		_log_signals(signals, run_id, docname)
 		if reason:
 			_end(run_id, docname, worker_token, reason)
 			return
@@ -368,6 +379,7 @@ def _drive(run_id, docname, slice_no, worker_token):
 		_transaction(lambda: None)  # close any provider/logging transaction
 
 		def settle(*, final=outcome, persist=True, error_kind=kind):
+			signals.clear()
 			return store.settle_attempt(
 				run_id,
 				attempt["name"],
@@ -379,6 +391,7 @@ def _drive(run_id, docname, slice_no, worker_token):
 				now=_now(),
 				error_kind=error_kind,
 				persist=(lambda: item.persist(result)) if persist else None,
+				signals=signals,
 			)
 
 		def save(operation, fallback=None):
@@ -403,7 +416,27 @@ def _drive(run_id, docname, slice_no, worker_token):
 		if guard.pending():
 			item = result = failure = None
 			raise guard.interrupt()
+		_log_signals(signals, run_id, docname)
 		items += 1
+
+
+def _log_signals(signals, run_id, docname):
+	"""Write one Error Log row for each release-blocking signal the store recorded, after the
+	transaction that recorded it has ended (O4). ``discarded``: an answer was dropped because
+	its attempt is stale or fenced. ``duplicate_blocked``: the journal stopped a second send
+	or a second delivery. Each row carries the session, the run and the signal's own context
+	(``attempt``, ``kind``, ``slice_no``, ``reason``). Never raises."""
+	if not signals:
+		return
+	for entry in signals:
+		if entry["signal"] == "discarded":
+			ai_fix.log_ai_failure("optimus ai refresh discarded", docname=docname, run_id=run_id, **entry)
+		else:
+			ai_fix.log_ai_failure(
+				"optimus ai refresh duplicate blocked", docname=docname, run_id=run_id, **entry
+			)
+	signals.clear()
+	_transaction(lambda: None)  # keep the rows: the next read must not start inside this transaction
 
 
 # On an error ``_settle`` raises: ``(tokens, outcome)``, for the worker cleanup's last row.
@@ -545,7 +578,7 @@ def _attempt_settled(attempt_id):
 	return state if isinstance(state, bool) else None
 
 
-def _begin_attempt(run, item, *, run_id, docname, worker_token):
+def _begin_attempt(run, item, *, run_id, docname, worker_token, signals=None):
 	"""The send-intent transaction: write the Calling attempt, or None to yield.
 
 	Every lock comes before the first plain read: the session and run (``store.lock_run``),
@@ -567,6 +600,7 @@ def _begin_attempt(run, item, *, run_id, docname, worker_token):
 		target=item.target,
 		input_hash=item.input_hash,
 		now=_now(),
+		signals=signals,
 	)
 
 
@@ -872,9 +906,12 @@ def _steps_item(run, doc, memo):
 	def persist(result):
 		if not valid():
 			return False
-		_touch_session(
-			doc.name, notes=result["notes"], ai_steps_tokens=result["tokens"].get("total_tokens", 0)
-		)
+		# ``ai_steps_tokens`` is a 32-bit Int, as in #72: one reply's total cannot reach it, but
+		# provider counts are bounded per field (``ai_fix._MAX_TOKEN_COUNT``), so their sum could.
+		# The full count is in ``ai_tokens_spent`` and the attempt; this display figure is clamped
+		# so an absurd reply can never make the Steps save fail.
+		tokens = min(result["tokens"].get("total_tokens", 0), ai_fix._MAX_TOKEN_COUNT)
+		_touch_session(doc.name, notes=result["notes"], ai_steps_tokens=tokens)
 		return True
 
 	return PreparedItem("steps", doc.name, fingerprint, send, valid, persist)

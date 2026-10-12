@@ -326,6 +326,21 @@ def test_steps_postprocessing_failure_keeps_reported_usage(work, monkeypatch):
 	assert caught.value.usage["total_tokens"] == 7 and caught.value.usage_complete is True
 
 
+@pytest.mark.parametrize(
+	"total,stored", [(7, 7), (2**31 - 1, 2**31 - 1), (3 * (2**31 - 1) + 5, 2**31 - 1)]
+)
+def test_the_steps_token_count_is_clamped_to_the_32_bit_field(work, monkeypatch, total, stored):
+	"""D3: the field stays an Int; a sum of valid provider counts that exceeds it is stored clamped."""
+	work.journal.run.update(include_fixes=0, include_steps=1)
+	monkeypatch.setattr(analyze, "_actions_for_humanizer", lambda recordings: [{"label": "fake action"}])
+	item = work.jobs._next_item(work.journal.run, {})
+	touched = []
+	monkeypatch.setattr(work.jobs, "_touch_session", lambda name, **values: touched.append(values))
+	with work.journal.db.transaction():
+		assert item.persist({"notes": "fake notes", "tokens": {"total_tokens": total}}) is True
+	assert touched == [{"notes": "fake notes", "ai_steps_tokens": stored}]
+
+
 def test_locked_recheck_reads_the_requester_without_locking_the_user_row(work):
 	"""A FOR UPDATE on tabUser blocked the requester's own User writes (last_active) under the
 	session, run and attempt locks, and added a cross-table lock order. A plain read is enough
