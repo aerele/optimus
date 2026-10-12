@@ -1,11 +1,15 @@
 # Background AI refresh engine
 
-The engine is an internal foundation. No UI, API, analyzer or scheduler calls
-it yet. Install the refresh wiring follow-up before releasing the feature.
+The engine is an internal foundation. Nothing starts a refresh yet: no UI, API
+endpoint, analyzer or scheduler calls `start_refresh`, `cancel_refresh` or
+`recover_pending`. The one touch point is #72's synchronous Refresh, which asks
+`live_run` and refuses while the engine holds the session (see "One path at a
+time"). The refresh wiring follow-up must land before the feature is released.
 That follow-up moves optional AI work after saved profiling results, connects
 progress/cancellation, schedules recovery and replaces report attachments
 safely. The security follow-up adds the recording, provider URL, source and
-privacy restrictions. This document describes the engine that is implemented.
+privacy restrictions. This document describes the engine that is implemented
+and how to operate it. The operator runbook is "Operating the engine" below.
 
 ## Durable state and duplicate delivery
 
@@ -243,6 +247,9 @@ Every Error Log row the engine writes has a title that starts with
 | `optimus ai refresh discarded` | A release-blocking signal: a paid answer was not saved because its attempt is stale or fenced. |
 | `optimus ai refresh duplicate blocked` | A release-blocking signal: the journal stopped a second send or a second delivery. |
 
+What state each title leaves the run in, and what to do, is in "Operating the
+engine".
+
 The session counters keep #72's `optimus ai spend` and `optimus ai refresh count`,
 and a Phase 2 index failure keeps `optimus ai phase 2 context`.
 
@@ -256,8 +263,16 @@ Do not route work to a worker running older code. A missing journal is an error,
 never permission to run without concurrency controls. A missing mutex row
 fails a user refresh closed: admission raises `JournalUnavailable`, because the
 caps need the mutex. The error names the repair, which seeds the row again:
-`bench --site <site> execute optimus.patches.v0_12_0.initialize_ai_refresh_store.execute`. The seed is idempotent. Analyze-time runs need only the session
-lock and the unique reservation.
+`bench --site <site> execute optimus.patches.v0_12_0.initialize_ai_refresh_store.execute`.
+The seed is idempotent. Analyze-time runs need only the session lock and the
+unique reservation.
+
+On Postgres, Frappe names an index after its column alone, and index names are
+unique per schema. The Run and Attempt tables both index `session_name`, so the
+second table to be created used to get no index. The same patch (run by install,
+upgrade and every migrate) creates any journal index that is missing, under the
+name `<table>_<column>_index`, and leaves the table that already has one alone.
+MariaDB names indexes per table and is not touched.
 
 | Site configuration | Default | Accepted values |
 | --- | --- | --- |
@@ -292,6 +307,196 @@ RQ's timeout is slice budget plus AI timeout plus 300 seconds; the SQL running
 lease uses a 180-second margin. Queued leases last 1800 seconds. Socket read
 timeouts measure inactivity, so worker time limits remain necessary.
 
+## Operating the engine
+
+The three journal DocTypes have no permissions, so they have no Desk list or
+report, even for a System Manager. Read them from the console or with SQL. The
+queries below only read; the repair command further down is the one thing that
+writes. Table names are `tab` plus the DocType name. The SQL is MariaDB's
+(backticks); on Postgres use double quotes. A run's `lease_until`, `deadline`
+and the other `*_epoch` columns are seconds since the epoch.
+
+```
+bench --site <site> console
+>>> frappe.get_all("Optimus AI Refresh Run", filters={"session_name": "<session name>"},
+...     fields=["name", "state", "end_reason", "breaker_kind", "cancelled_by", "tokens_reported",
+...             "usage_incomplete", "uncertain", "lease_until", "deadline"], order_by="creation desc")
+>>> frappe.get_all("Optimus AI Refresh Attempt", filters={"run_id": "<run id>"},
+...     fields=["kind", "target_name", "state", "error_kind", "tokens_reported", "usage_complete", "settled"])
+```
+
+```sql
+-- active runs, and whether they have expired (run in: bench --site <site> mariadb)
+SELECT name, session_name, requested_by, state, slice_no, dispatch_pending,
+       lease_until <= UNIX_TIMESTAMP() OR deadline <= UNIX_TIMESTAMP() AS expired
+FROM `tabOptimus AI Refresh Run` WHERE active_session IS NOT NULL;
+
+-- the last Error Log rows the engine wrote
+SELECT creation, method, reference_name, LEFT(error, 300) AS error
+FROM `tabError Log` WHERE method LIKE 'optimus ai refresh%' ORDER BY creation DESC LIMIT 50;
+
+-- a session's attempts that nobody will repeat: their usage is unknown until a later reply
+SELECT run_id, kind, target_name, error_kind FROM `tabOptimus AI Refresh Attempt`
+WHERE session_name = '<session name>' AND state = 'uncertain';
+```
+
+### What you see, and what to do
+
+| You see | It means | What to do |
+| --- | --- | --- |
+| **Stuck**: a run is `queued` or `running` and `public_state` says `stalled`, or the query above shows `expired` | The worker died or lost its lease (`lease_until`), or the total `deadline` passed. Nothing is writing the run. | Nothing is lost and nothing needs cancelling. The session's next admission takes the run over and ends it as `interrupted` (`end_reason` `lease_expired` or `deadline`), its open call becomes `uncertain`. To clear sessions without a click, run `bench --site <site> execute optimus.ai_jobs.recover_pending`; it prints the counts `interrupted`, `dispatched`, `busy` and `failed`, and handles up to 100 runs per pass, so run it again while a count is 100. No scheduler runs the sweep yet. |
+| **Queued, never starts**: a run stays `queued` with `dispatch_pending` 1 | The slice never reached a worker: no worker listens on the queue (`optimus_ai_queue`), or Redis is down. | Start a worker for that queue. The next click on the same run, or the sweep, sends the slice again, at most once per 30 seconds. See the `optimus ai refresh enqueue` row. |
+| **Uncertain**: attempts with `state` `uncertain`, a run with `uncertain` above 0, or `end_reason` `uncertain` (the only items left were skipped because an uncertain attempt with the same input exists) | A call may have reached the provider and its outcome was never recorded. It is never repeated automatically; its usage is unknown. | Check the provider's usage page for the window. A new refresh skips the item while its input is unchanged. Only a deliberate retry of uncertain work (`retry_uncertain`) sends it again, and that can be billed twice. |
+| **Cancelled**: `state` `cancelled`, `end_reason` `cancelled`, `cancelled_by` names the user | A user stopped it. A call already in flight is not interrupted: its reply is paid for, its tokens are counted, and its answer is discarded (a `discarded` row, `reason=fenced`). | None. A cancelled run can be resumed once. |
+| **Expired**: `state` `interrupted`, `end_reason` `lease_expired` or `deadline` | See Stuck. | A run ended this way can be resumed once. |
+| **Incomplete usage**: `usage_incomplete` above 0 on the run, `usage_complete` 0 on an attempt | The provider's usage was missing, contradictory or unknown for that call, so the reported tokens may undercount. | Do not trust the run's token total for those attempts; compare with the provider's bill. |
+| **Busy**: a click answers `{"status": "refused", "reason": "busy"}` | Another transaction holds the session row for a whole lock wait, or another admission holds the site mutex. Nothing was started or counted. | Try again. If it stays busy, look for a long or dead transaction on that Optimus Session row (`SHOW PROCESSLIST` on MariaDB, `pg_stat_activity` on Postgres). |
+| **Already running**: a click answers `{"status": "already_running", ...}` | The session has a live run; the answer carries its progress. | Nothing: the click attached to it. |
+| **Refused**: `refresh_running`, `disabled`, `no_worker`, `queue_unavailable`, `not_ready`, `site_cap`, `user_cap`, `not_resumable`, `already_resumed`, `retry_limit` | `refresh_running`: #72's Refresh holds the session. `disabled`: AI is off. `no_worker`: no worker listens on the queue. `queue_unavailable`: Redis could not say. `not_ready`: the session is not Ready. `site_cap`, `user_cap`: the caps are reached. The last three refuse a resume. | Fix the cause named; none of them counts or bills. Three other cases raise instead of answering: `StopRefresh` with the reason `not_ready`, `permission` (the requester has no access) or `phase2` (a Phase 2 run is in progress), and an error naming a site setting that is not a valid whole number (see Configuration). |
+| **Journal unavailable**: the error `AI refresh storage is not initialized` | The admission mutex row is missing (a rollback, or a failed install). A user refresh fails closed. | Run the repair command below. |
+| **Inconsistent**: the error `Refresh journal ... is inconsistent` | A run's reservation or attempt row disagrees with the run. | Cancel the run: that releases it, its open call counts as uncertain with unknown usage, and one `optimus ai refresh release` row names the problem. A takeover or the sweep does the same for an expired run. |
+
+### Values you will find in the journal
+
+| Column | Values |
+| --- | --- |
+| Run `state` | `queued`, `running`, then `complete`, `stopped`, `cancelled` or `interrupted`. Only `queued` and `running` hold the session. |
+| Run `end_reason` | `complete`; `uncertain` (nothing left but uncertain items); `breaker` (see `breaker_kind`); `deadline` (the total time was spent); `no_progress` (three slices in a row began no item); `disabled` (AI switched off mid-run); `not_ready`, `permission`, `phase2` (the session, the requester's access or a Phase 2 run changed); `history_limit` (more than 10000 attempts to weigh); `cancelled`; `lease_expired` and `deadline` (a run interrupted by a takeover or the sweep); `worker_interrupted` (the worker failed and its cleanup ended the run). |
+| Run `breaker_kind` | The failure kind that stopped the run: `auth`, `quota`, `not_found` or `config` at once, or the kind of the third failure in a row (for example `rate_limited`, `timeout`, `server`, `transport`). `context` and `refused` never set it. |
+| Run `cancelled_by` | The user id (normally the email) that cancelled; empty otherwise. |
+| Attempt `state` | `calling`, then `succeeded`, `failed`, `skipped`, `uncertain` or `discarded`. `error_kind` is the failure kind (`not_eligible` or `deadline` for a skipped item). |
+
+### Error Log title to state
+
+| Title | The run is | What to do |
+| --- | --- | --- |
+| `optimus ai refresh worker` | `interrupted` with `end_reason` `worker_interrupted`, its open call `uncertain` (a failure before the claim leaves it `queued`; when the cleanup itself failed, see `cleanup`) | Read the row for the cause. The row's `tokens` and `outcome` say whether the call's usage is recorded. |
+| `optimus ai refresh cleanup` | Still `running` with its call open until the lease expires | Wait for the lease, or click Refresh: the takeover ends it. |
+| `optimus ai refresh item` | Going on, unless this is the third in a row or a fatal kind | The row's `kind`, `fatal` and `hint` say what to fix (AI-FIXING section 6.5). |
+| `optimus ai refresh result storage` | Going on, or interrupted when both writes failed | Its `outcome` says: `committed on try N`, `recorded by fallback` (the tokens are saved, the answer is not), `not committed after try N`, or `unknown` (the tokens may well be recorded). |
+| `optimus ai refresh enqueue` | `queued`, intent pending | Redis or the queue is down; the intent is sent again by the next click or sweep. |
+| `optimus ai refresh worker availability` | None started | New admissions answer `queue_unavailable` until Redis answers. |
+| `optimus ai refresh recovery` | Other rows of the sweep were done | The row names the run; the next sweep or admission tries again. |
+| `optimus ai refresh release` | `cancelled` or `interrupted`, its open call `uncertain` with unknown usage | A journal row was inconsistent and the run was released rather than hold its session; the row names which row. Inspect the Attempt rows of the run. |
+| `optimus ai refresh selection`, `optimus ai refresh evidence` | Going on | The counts were zero, or the prompts went without index advice. |
+| `optimus ai refresh discarded`, `optimus ai refresh duplicate blocked` | Going on | See the signals below. |
+
+### The release-blocking signals
+
+Three things must be visible before the feature is released: a second provider
+call that was prevented, a stale answer that was dropped, and a charge that
+does not add up. Each of the first two is one Error Log row, written when it
+happens (after the transaction that decided it ends), with `docname` (the
+session), `run_id`, and `attempt` and `kind` where there is one.
+
+- `optimus ai refresh duplicate blocked` (`signal=duplicate_blocked`): `reason=already_claimed`
+  means RQ delivered a slice that was already claimed or already over, and the
+  SQL claim refused it (`slice_no` is the delivered slice). `reason=already_attempted`
+  means a second send of an item the run had already attempted was stopped by
+  the attempt's unique key. No provider call was made either way. The first is
+  ordinary when RQ redelivers; the second should not happen, because the
+  selection skips attempted items, so treat each one as a bug to find.
+- `optimus ai refresh discarded` (`signal=discarded`): a successful reply was
+  not saved. `reason=fenced`: the worker no longer owns the run (cancelled,
+  interrupted, or its lease or deadline passed). `reason=session_changed`: the
+  session left Ready. `reason=input_changed`: the finding, or the session for a
+  Steps answer, changed during the call. `reason=settled`: the attempt already
+  had an outcome. The tokens are still counted for the first three, unless the run or the
+  attempt row is missing or another worker's (then nothing is written); a few after
+  cancels and edits are normal, a steady stream means workers lose their lease
+  mid-call (check worker load and the AI request timeout).
+- A charge that does not add up: run the reconciliation below.
+
+### Reconciling the charge
+
+Three numbers describe one session's AI tokens: the session's `ai_tokens_spent`,
+the runs' `tokens_reported`, and the increments #72's counter logged as dropped
+(`optimus ai spend`, each with `amount=`; a statement-level counter failure
+drops the increment but the outcome still commits). The query lists, for every
+session that has a run, the counter, the journal's total, the dropped amounts
+and `other_sources = spent + dropped - journal_tokens`. That is the tokens from
+everything the journal does not see: the analyze-time suggestions, the Steps
+rewrite and #72's own Refresh.
+
+```sql
+-- reconcile (MariaDB)
+SELECT s.name AS session, COALESCE(s.ai_tokens_spent, 0) AS spent, j.tokens AS journal_tokens,
+       COALESCE(d.amount, 0) AS dropped_increments,
+       COALESCE(s.ai_tokens_spent, 0) + COALESCE(d.amount, 0) - j.tokens AS other_sources
+FROM `tabOptimus Session` s
+JOIN (SELECT session_name, SUM(tokens_reported) AS tokens
+      FROM `tabOptimus AI Refresh Run` GROUP BY session_name) j ON j.session_name = s.name
+LEFT JOIN (SELECT reference_name,
+                  SUM(CAST(REGEXP_SUBSTR(REGEXP_SUBSTR(error, 'amount=[0-9]+'), '[0-9]+') AS UNSIGNED)) AS amount
+           FROM `tabError Log` WHERE method = 'optimus ai spend' AND reference_doctype = 'Optimus Session'
+           GROUP BY reference_name) d ON d.reference_name = s.name
+ORDER BY other_sources;
+```
+
+```sql
+-- reconcile (PostgreSQL)
+SELECT s.name AS session, COALESCE(s.ai_tokens_spent, 0) AS spent, j.tokens AS journal_tokens,
+       COALESCE(d.amount, 0) AS dropped_increments,
+       COALESCE(s.ai_tokens_spent, 0) + COALESCE(d.amount, 0) - j.tokens AS other_sources
+FROM "tabOptimus Session" s
+JOIN (SELECT session_name, SUM(tokens_reported) AS tokens
+      FROM "tabOptimus AI Refresh Run" GROUP BY session_name) j ON j.session_name = s.name
+LEFT JOIN (SELECT reference_name,
+                  SUM(CAST(substring(error from 'amount=([0-9]+)') AS bigint)) AS amount
+           FROM "tabError Log" WHERE method = 'optimus ai spend' AND reference_doctype = 'Optimus Session'
+           GROUP BY reference_name) d ON d.reference_name = s.name
+ORDER BY other_sources;
+```
+
+Read `other_sources`: **negative** means the session counter holds fewer tokens
+than the journal reported and no `optimus ai spend` row explains it. That is a
+lost charge: look for `optimus ai refresh result storage` rows with `outcome`
+`not committed` or `unknown` for that session, and for runs ended by a failed
+cleanup. **Zero** is a session whose AI use was all through the engine. **Above
+zero** is another source's tokens; the engine cannot tell it apart from a
+double count, so for a session you have only used through the engine, a
+positive value is a double charge. The journal also checks itself: this query
+returns no row when every run's `tokens_reported` equals the sum of its
+attempts.
+
+```sql
+-- self-check (MariaDB)
+SELECT r.name AS run, r.tokens_reported, a.tokens AS attempts_tokens
+FROM `tabOptimus AI Refresh Run` r
+JOIN (SELECT run_id, SUM(tokens_reported) AS tokens FROM `tabOptimus AI Refresh Attempt` GROUP BY run_id) a
+  ON a.run_id = r.name
+WHERE a.tokens <> r.tokens_reported;
+```
+
+### Repair, rollback and the settings
+
+- **Repair.** `bench --site <site> execute optimus.patches.v0_12_0.initialize_ai_refresh_store.execute`
+  seeds the admission mutex row if it is missing, and on Postgres creates any
+  journal index that is missing. It is idempotent and is also what install,
+  upgrade and every `bench migrate` run. It cannot create the tables: that is
+  `bench migrate`.
+- **Rollback.** A release without the journal makes Frappe delete its DocType
+  records (`remove_orphan_doctypes`) and `bench trim-database` then drops their
+  tables. Do not run `trim-database` during a rollback you may undo: it drops
+  the uncertain attempts that keep an unknown provider call from being sent
+  again.
+- **Settings.** `bench set-config` stores a string unless it is given `-p`. A
+  string of digits is accepted as its number, but set numbers with
+  `bench --site <site> set-config -p <key> <value>`. An out-of-range or
+  non-numeric value makes an admission raise an error that names the setting.
+
+## Data retention
+
+Nothing deletes the journal. A Run and its Attempts stay after the run ends,
+after the session is swept by the retention janitor and after the session is
+deleted. Each Run holds `requested_by`, and a cancelled one `cancelled_by`: user
+ids, normally email addresses, that therefore outlive the session's own
+retention. The rows hold no prompts, answers or credentials, only identities,
+hashes, states and counts. Uncertain attempts must not be pruned while their
+session exists, because that would erase the protection against repeating an
+unknown call. The retention work of the security follow-up (#75) owns pruning
+and the treatment of those ids; nothing here implements it.
+
 ## Validation and remaining acceptance
 
 Automated tests cover duplicate delivery, stale workers, cancellation during
@@ -304,13 +509,12 @@ them like a Frappe site. It builds the tables with Frappe's DDL rules
 (indexes, unique columns, defaults) and raises errors the way
 `frappe.db.sql` and `Document.insert` do. It also runs #72's real session
 counters. The checks include regression probes for the deadlocks and 1020
-conflicts above, on every leg. They do not replace Frappe document-hook or
-end-user acceptance tests.
+conflicts above, on every leg, and they run the reconciliation query of the
+runbook as written. The Postgres role must be a superuser (CI's `POSTGRES_USER`
+is): one test sets `deadlock_timeout`. They do not replace Frappe document-hook
+or end-user acceptance tests.
 
 The wiring follow-up owns scheduled recovery, report replacement and UI/API
-compatibility. Journal history cleanup belongs to the privacy/retention work
-in the security follow-up. Until then, journal history is retained; uncertain
-attempts must not be pruned while their parent exists, because that would erase
-the protection against silently repeating an unknown call. Final model
-evaluations and both-database end-user/deployment acceptance remain release
-requirements, not results established by these unit tests.
+compatibility. Journal retention is described under "Data retention". Final
+model evaluations and both-database end-user/deployment acceptance remain
+release requirements, not results established by these unit tests.

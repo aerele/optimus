@@ -8,81 +8,142 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.70] - 2026-10-03
+## [0.12.70] - 2026-10-12
 
 ### Internal
 
-- Add the background AI refresh engine and private SQL run/attempt journal.
-  A send intent commits before the provider call. The answer and outcome
+- Add the background AI refresh engine (`optimus/ai_jobs.py`, `optimus/ai_refresh_store.py`)
+  and its private SQL journal: three DocTypes (Optimus AI Refresh Run, Attempt
+  and Control) with no Desk or REST permissions. A send intent commits before
+  the provider call. The answer, the attempt's outcome and the run's counters
   commit together, in the same short transaction that adds the reported usage
-  to the session through #72's log-and-continue counter. A failed increment is
+  to the session through #72's log-and-continue counter; a failed increment is
   logged and the run's `tokens_reported` keeps the count. Duplicate deliveries
   cannot repeat a claimed slice, and cancelled or expired workers cannot
-  overwrite newer results.
-- Handle SQL conflicts the way Frappe raises them. Retries recognise
-  `frappe.QueryDeadlockError` and `frappe.QueryTimeoutError`, MariaDB 11.8's
-  snapshot conflict (1020) and the raw codes. Settlement follows
-  `_write_ai_answer`: three tries, a read-back of the attempt's settled bit
-  (unknown when it cannot be read), and an outcome line on every row. The rows
-  say when the failed-outcome write recorded the tokens. The engine takes no
-  gap-locking reads on the journal tables. The recheck's Phase 2 read is a
-  `FOR UPDATE` by filter, so it can make another session's Phase 2 insert wait.
-  Every transaction locks the session row first and takes all its locks before
-  its first plain read. A duplicate attempt or reservation is caught by its
-  unique key, and the requester's User row is never locked. A user refresh takes
-  the site mutex only after its session. A busy mutex, or a session row held
-  past one lock wait timeout, is a `busy` refusal. Analyze-time runs never take
-  the mutex.
-- Keep interrupted calls with an unknown outcome as uncertain. Automatic
-  recovery delivers queued work but never repeats an uncertain provider call.
-  Explicit resumes preserve the selection cursor and have a bounded chain.
+  overwrite newer results. Nothing starts a refresh yet.
+- Handle SQL conflicts the way Frappe raises them. A deadlock, lock wait,
+  snapshot conflict (MariaDB 11.8's 1020) or serialization failure, raw or as
+  `frappe.QueryDeadlockError` / `QueryTimeoutError`, is retried as a whole short
+  transaction, at most three in all. Settlement follows `_write_ai_answer`: three
+  tries, a read-back of the attempt's settled bit (unknown when it cannot be
+  read), and an `outcome=` on every Error Log row; the rows say when the
+  failed-outcome write recorded the tokens. Every journal transaction locks the
+  session row first and takes all its locks before its first plain read. A
+  duplicate attempt or reservation is caught by its unique key, and the
+  requester's User row is never locked. The journal's own reads take no gap
+  lock; the recheck's `FOR UPDATE` read of the session's Phase 2 rows can make
+  another session's Phase 2 insert wait. A user refresh takes the site mutex
+  (NOWAIT) only after its session; a busy mutex, or a session row held past one
+  lock wait timeout, answers `busy`. Analyze-time runs never take the mutex.
+- Keep interrupted calls with an unknown outcome as uncertain. Recovery
+  delivers queued work but never repeats an uncertain provider call. Explicit
+  resumes keep the original selection time, cap and sections, count the cap
+  over the whole chain, and are limited to three in a chain.
 - Recover without the scheduler. An admission takes over its session's run
   whose lease or deadline has passed, in its own transaction, and progress shows
-  such a run as interrupted. The recovery sweep isolates each row, skips a
+  such a run as interrupted (`stalled`). A queued run past its lease cannot be
+  claimed by a late delivery. The recovery sweep isolates each row, skips a
   session row another transaction holds (NOWAIT) and returns its counts. A
   cancel, the sweep or a takeover releases a run whose journal rows are
-  inconsistent and writes one Error Log row for it, also when the admission
-  that took it over is refused. Cancel is bound to its session and waits for a
-  lock once; the dispatch after an admission takes its lock with NOWAIT, and a
-  later click sends an intent it left pending. A continuation is dispatched at
-  once; three slices without progress, or a provider switched off mid-run, stop
-  the run. Settings stored as digit strings are accepted and every setting, the
-  queue name included, is checked before admission. A refusal before any
-  request is a known zero usage, proven by the call count.
-- Add durable progress, SQL cancellation, site/user admission limits, bounded
-  job slices and provider failure limits. Redis coordinates queue delivery;
-  progress and accounting remain in SQL.
-- Distinguish known zero token usage from missing or contradictory usage,
-  preserve reported usage on processing failures, and widen the stored step
-  token count. Keep RQ timeouts fresh, including when worker cleanup fails.
-- Follow #72's contracts. The refresh is counted once, when it is accepted
-  (a resume is a click), and no ending counts it. Only `ai_fix.AI_FATAL_KINDS`
-  stop a run at once; a rate limit joins the three-in-a-row streak; `context` and
+  inconsistent and writes one Error Log row for it.
+- Add durable progress, SQL cancellation, site and per-user admission limits,
+  bounded job slices and provider failure limits. Redis coordinates queue
+  delivery; progress and accounting stay in SQL. A slice is dispatched at once
+  when it continues; three slices in a row that begin no item, or a provider
+  switched off mid-run, stop the run. Settings stored as digit strings are
+  accepted, and every setting, the queue name included, is checked before
+  admission.
+- Distinguish known zero token usage (a refusal before any request, proven by
+  the call count) from missing or contradictory usage, keep reported usage on
+  processing failures, and keep RQ timeouts fresh, including when worker
+  cleanup fails.
+- Follow #72's contracts. The refresh is counted once, when it is accepted (a
+  resume is a click), and no ending counts it. Only `ai_fix.AI_FATAL_KINDS` stop
+  a run at once; a rate limit joins the three-in-a-row streak; `context` and
   `refused` are recorded under their own kind and never feed it; the skip kinds
   are `ai_fix.AI_SKIP_KINDS`. The engine and #72's Refresh each refuse while the
-  other holds the session. The engine's Error Log titles start with
-  `optimus ai refresh` and carry the session and run. The run keeps the
-  selection's gated and excluded counts, background fix prompts get the Slow
-  Query evidence the synchronous Refresh gets, and the cap is cumulative over a
-  resume chain.
+  other holds the session. The run keeps the selection's gated and excluded
+  counts, and background fix prompts get the Phase 2 and Slow Query evidence the
+  synchronous Refresh gets.
+- Write every engine Error Log row under a title that starts with
+  `optimus ai refresh` (worker, cleanup, item, result storage, enqueue, worker
+  availability, recovery, release, selection, evidence), carrying the session
+  and the run. Two release-blocking signals are one row each, written when they
+  happen: `optimus ai refresh discarded` (a paid answer was dropped because its
+  attempt is stale or fenced) and `optimus ai refresh duplicate blocked` (the
+  journal stopped a second send or delivery). The runbook in
+  [docs/AI-REFRESH.md](docs/AI-REFRESH.md) maps each title to a state and gives
+  a read-only query that reconciles a session's `ai_tokens_spent` with the
+  journal and the `optimus ai spend` rows.
+- A failure while reading the Phase 2 line data for the fix prompts
+  (`analyze._phase2_index_for`) is no longer silent: it writes one
+  `optimus ai phase 2 context` row with the session, and the prompts go
+  without that context.
 - Change the stored answer shape. A fix answer in `llm_fix_json`, written by
   `suggest_fix` for the synchronous Refresh, analyze's auto-suggest and the
   engine alike, now always has `usage_complete`, and has `tokens` when the usage
   is complete even at zero tokens. `fix_state` ignores both keys, so stored
   answers from before still read as they did.
+- Create a journal index on PostgreSQL that Frappe skipped. Frappe names an
+  index after its column and PostgreSQL index names are unique per schema, so
+  the second of the Run and Attempt tables never got its `session_name` index.
+  The seed patch now creates any missing journal index as
+  `<table>_<column>_index`. MariaDB is unchanged.
+
+### API
+
+The engine's functions are internal (module `optimus.ai_jobs`); no whitelisted
+endpoint calls them yet.
+
+- `start_refresh(...)` answers `{"status": "queued", "refresh": <progress>}` for
+  a new run, `{"status": "already_running", "refresh": <progress>}` when the
+  session has a live run, or `{"status": "refused", "reason": ...}`. The
+  reasons: `busy` (the session row or the site mutex is held), `site_cap`,
+  `user_cap`, `refresh_running` (#72's Refresh holds the session; with a
+  `message`), `disabled`, `no_worker`, `queue_unavailable`, `not_ready`, and
+  for a resume `not_resumable`, `already_resumed`, `retry_limit`. A session
+  that is not Ready, a requester without access, or a Phase 2 run in progress
+  raises `StopRefresh` (its `reason` is `not_ready`, `permission` or `phase2`)
+  before admission. An unusable site setting raises an error naming it. A user refresh with no mutex row
+  raises `JournalUnavailable`, whose message names the repair command.
+- `cancel_refresh(run_id, *, docname, requested_by)` answers
+  `{"status": "cancelled", "refresh": <progress>}` or
+  `{"status": "refused", "reason": "busy" | "not_running"}`.
+- The progress dict (`public_state`) adds `stalled` (the lease or deadline has
+  passed; `state` then reads `interrupted`), `gated` and `excluded`, beside the
+  counts, `usage`, `end_reason` and `breaker_kind`.
+- `recover_pending()` returns `{"interrupted", "dispatched", "busy", "failed"}`.
+  `live_run(docname)` returns the session's live run or None.
+- `suggest_fix(..., usage_out=)` is the one additive keyword on a #72 helper:
+  a `Usage` that becomes the call's usage, so the caller counts every attempted
+  call. Without it nothing changes.
+- `api.refill_ai_suggestions` (#72's Refresh) now answers
+  `{"ok": False, "busy": True, "message": ...}`, without counting or billing,
+  while the engine holds the session.
 
 ### Upgrade notes
 
-- This engine is not yet connected to the UI, API, analyzer or scheduler.
-  Existing refresh behavior remains synchronous. The wiring follow-up must
-  land before release; profiling isolation is completed there.
-- Normal deployment migration installs three internal DocTypes and seeds the
-  admission mutex; every later migrate seeds it again if it is missing. A missing journal table fails every admission. A missing
-  mutex row fails a user refresh closed with `JournalUnavailable`, whose message
-  names the repair (`bench --site <site> execute optimus.patches.v0_12_0.initialize_ai_refresh_store.execute`). AI Quality runs
-  the journal checks on MariaDB 10.6, MariaDB 11.8 and PostgreSQL. See
+- Nothing calls the engine yet: existing refresh behavior stays synchronous.
+  The wiring follow-up must land before release; profiling isolation is
+  completed there.
+- Normal deployment migration installs the three internal DocTypes. The seed
+  (`optimus.patches.v0_12_0.initialize_ai_refresh_store`, in `[post_model_sync]`)
+  adds the admission mutex and, on PostgreSQL, any missing journal index; install
+  runs it too, and every later `bench migrate` runs it again. A missing journal
+  table fails every admission; a missing mutex row fails a user refresh closed.
+  The repair is `bench --site <site> execute optimus.patches.v0_12_0.initialize_ai_refresh_store.execute`.
+- Do not run `bench trim-database` during a rollback you may undo: it drops the
+  journal tables, and with them the uncertain attempts that keep an unknown
+  provider call from being sent again.
+- No existing column changes type: `ai_steps_tokens` stays a 32-bit Int (the
+  engine clamps what it stores), so no Optimus Session table rebuild.
+- Data retention: the journal is not pruned. Each run keeps `requested_by` (and
+  `cancelled_by`), user ids that outlive the session's own retention sweep, until
+  the privacy follow-up (#75) decides retention.
+- AI Quality runs the journal checks on MariaDB 10.6, MariaDB 11.8 and
+  PostgreSQL 16; the PostgreSQL role must be a superuser. See
   [background engine details](docs/AI-REFRESH.md) for transactions, queue
-  requirements and the remaining deployment work.
+  requirements, the runbook and the remaining deployment work.
 
 ## [0.12.69] - 2026-10-03
 

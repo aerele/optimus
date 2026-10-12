@@ -1591,3 +1591,109 @@ def test_both_journal_tables_keep_their_session_index(sql, monkeypatch):
 	again = (_indexed_columns(sql.primary, run), _indexed_columns(sql.primary, attempt))
 	assert again == after
 	assert len(created) <= 1  # the second run created nothing
+
+
+# --- O4: the runbook's reconciliation query, run as written ------------------------------------
+
+_DOCS = Path(__file__).resolve().parents[2] / "docs"
+
+
+def _runbook_sql(marker):
+	"""The fenced SQL block of AI-REFRESH.md whose first line is ``-- <marker>``."""
+	text = (_DOCS / "AI-REFRESH.md").read_text(encoding="utf-8")
+	blocks = re.findall(r"```sql\n(-- " + re.escape(marker) + r"\n.*?)```", text, re.S)
+	assert len(blocks) == 1, marker
+	return blocks[0]
+
+
+def test_the_reconciliation_query_separates_a_gap_from_other_sources(sql):
+	"""A session's ``ai_tokens_spent`` against what the journal reported and the increments the
+	counter logged as dropped (``optimus ai spend``). Seeded: a reconciled session, a session
+	whose counter lost 30 tokens with no row, and one with another source's tokens. The query
+	is the runbook's own text, with only the table names mapped to the test's tables."""
+	primary = sql.primary
+	log = primary.tables["Optimus Session"].removesuffix("session") + "errorlog"
+	primary.tables["Error Log"] = log
+	text = "varchar(140)"
+	body = "longtext" if BACKEND == "mariadb" else "text"
+	primary.sql(
+		f"create table {primary.quoted(log)} (name varchar(140) primary key, method {text}, "
+		f"reference_doctype {text}, reference_name {text}, error {body})"
+		+ (" CHARACTER SET=utf8mb4 COLLATE=utf8mb4_unicode_ci" if BACKEND == "mariadb" else "")
+	)
+	try:
+		spent = {"parent-a": 110, "parent-b": 90, "parent-c": 150}
+		for name, tokens in spent.items():
+			primary.set_value("Optimus Session", name, {"ai_tokens_spent": tokens})
+		for run_id, session, tokens in (
+			("r-a1", "parent-a", 70),
+			("r-a2", "parent-a", 50),
+			("r-b1", "parent-b", 120),
+			("r-c1", "parent-c", 100),
+		):
+			primary.insert(
+				{
+					"doctype": store.RUN,
+					"name": run_id,
+					"run_id": run_id,
+					"session_name": session,
+					"tokens_reported": tokens,
+				}
+			)
+		for i, (title, session, error) in enumerate(
+			(
+				(
+					"optimus ai spend",
+					"parent-a",
+					"optimus ai spend\nfield=ai_tokens_spent\namount=10\nTraceback",
+				),
+				("optimus ai refresh count", "parent-a", "optimus ai refresh count\namount=1"),
+				("optimus ai spend", "parent-x", "optimus ai spend\namount=999"),
+			)
+		):
+			primary.sql(
+				f"insert into {primary.quoted(log)} values (%s, %s, 'Optimus Session', %s, %s)",
+				[f"e{i}", title, session, error],
+			)
+		primary.commit()
+		query = _runbook_sql("reconcile (MariaDB)" if BACKEND == "mariadb" else "reconcile (PostgreSQL)")
+		for doctype, table in primary.tables.items():
+			query = query.replace("tab" + doctype, table)
+		rows = {r["session"]: r for r in primary.sql(query.replace("%", "%%"))}
+		primary.rollback()
+		assert set(rows) == {"parent-a", "parent-b", "parent-c"}
+		assert [
+			int(rows["parent-a"][k])
+			for k in ("spent", "journal_tokens", "dropped_increments", "other_sources")
+		] == [
+			110,
+			120,
+			10,
+			0,
+		]
+		assert int(rows["parent-b"]["other_sources"]) == -30  # the gap nothing explains
+		assert int(rows["parent-c"]["other_sources"]) == 50  # another source's tokens
+		# the self-check finds the run whose attempts do not add up to its total, and only it
+		for run_id, attempt, tokens in (("r-a1", "at-1", 70), ("r-a2", "at-2", 20), ("r-a2", "at-3", 20)):
+			primary.insert(
+				{
+					"doctype": store.ATTEMPT,
+					"name": attempt,
+					"attempt_id": attempt,
+					"run_id": run_id,
+					"tokens_reported": tokens,
+				}
+			)
+		primary.commit()
+		check = _runbook_sql("self-check (MariaDB)")
+		if BACKEND == "postgres":
+			check = check.replace("`", '"')
+		for doctype, table in primary.tables.items():
+			check = check.replace("tab" + doctype, table)
+		assert [r["run"] for r in primary.sql(check)] == ["r-a2"]
+		primary.rollback()
+	finally:
+		primary.rollback()
+		primary.sql("DROP TABLE " + primary.quoted(log))
+		primary.commit()
+		del primary.tables["Error Log"]
