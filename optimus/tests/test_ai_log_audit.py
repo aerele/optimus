@@ -45,7 +45,7 @@ _REQUIRED = (
 	"analyze.py", "api.py", "maintenance.py", "error_log_mask.py",
 	"optimus/doctype/optimus_settings/optimus_settings.py", "renderer/recipe_enrichment.py", "line_profile/analyzer.py",
 )
-_OPTIONAL = ("ai_jobs.py",)  # scanned as soon as a later PR adds it
+_OPTIONAL = ("ai_jobs.py", "ai_refresh_store.py")  # scanned as soon as a later PR adds them
 _AI_WRAPPERS: frozenset[str] = frozenset()  # names of non-step functions that count as AI code (none today)
 _BASE_LOGGERS = frozenset({"log_error", "log_ai_failure"})
 _SENDERS = frozenset({"_http_post", "_call_openai_chat", "_call_anthropic"})  # ai_fix.py
@@ -323,7 +323,6 @@ def test_the_ai_steps_log_through_the_one_helper():
 	assert callers == {
 		"log_ai_failure": {
 			"analyze.py:_log_ai_step_failure", "analyze.py:_increment_session_counter", "analyze.py:_write_ai_answer",
-			"analyze.py:_phase2_index_for",
 		},
 		"_log_ai_step_failure": {"analyze.py:_run_ai_step"},
 	}
@@ -350,6 +349,7 @@ def test_the_helper_is_used_where_the_skeleton_was():
 		"analyze.py": {
 			"run", "_enrich_findings_with_ai_suggestions", "_run_ai_backfill",
 			"_build_humanized_notes_html", "load_recordings_light", "_load_recordings_bundle",
+			"_phase2_index_for",
 		},
 		"api.py": {"_render_session_report", "_rerender_after_ai", "_humanize_steps_core"},
 	}

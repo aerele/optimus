@@ -84,11 +84,21 @@ def test_replayed_rq_delivery_sends_and_accounts_each_item_once(worker):
 	assert len(worker.calls) == 5 and len(worker.written) == 5
 	assert worker.journal.run["state"] == "complete"
 	assert worker.journal.run["tokens_reported"] == 35
-	assert worker.journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 1
+	# Q1: a run's ending counts nothing; the admission counted the refresh.
+	assert worker.journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 0
 
 
 @pytest.mark.parametrize(
-	"kind,expected", [("auth", 1), ("quota", 1), ("rate_limited", 1), ("timeout", 3), ("server", 3)]
+	"kind,expected",
+	[
+		("auth", 1),
+		("quota", 1),
+		("not_found", 1),
+		("config", 1),
+		("rate_limited", 3),
+		("timeout", 3),
+		("server", 3),
+	],
 )
 def test_provider_failure_limits_survive_the_real_journal(worker, kind, expected):
 	def fail():
@@ -98,6 +108,7 @@ def test_provider_failure_limits_survive_the_real_journal(worker, kind, expected
 	worker.jobs.run_ai_refresh_slice("fake-run", 0)
 	assert len(worker.calls) == expected and not worker.written
 	assert worker.journal.run["end_reason"] == "breaker"
+	assert worker.journal.run["breaker_kind"] == kind
 	assert worker.journal.run["usage_incomplete"] == expected
 
 
@@ -460,7 +471,7 @@ def test_when_both_settlement_writes_fail_the_final_row_carries_tokens_and_outco
 	monkeypatch.setattr(worker.journal.mod, "settle_attempt", outage)
 	with pytest.raises(worker.jobs.RefreshSliceFailed):
 		worker.jobs.run_ai_refresh_slice("fake-run", 0)
-	[(title, exc, context)] = [row for row in rows if row[0] == "optimus AI refresh worker"]
+	[(title, exc, context)] = [row for row in rows if row[0] == "optimus ai refresh worker"]
 	assert type(exc) is OSError and context["tokens"] == 7
 	assert context["outcome"] == "not committed after try 1; the attempt is now uncertain"
 	run = worker.journal.db.rows[worker.journal.mod.RUN]["fake-run"]
@@ -477,7 +488,7 @@ def test_when_the_cleanup_also_fails_the_final_row_leaves_the_attempt_to_recover
 	monkeypatch.setattr(worker.journal.mod, "abandon", outage)
 	with pytest.raises(worker.jobs.RefreshSliceFailed):
 		worker.jobs.run_ai_refresh_slice("fake-run", 0)
-	[(title, exc, context)] = [row for row in rows if row[0] == "optimus AI refresh worker"]
+	[(title, exc, context)] = [row for row in rows if row[0] == "optimus ai refresh worker"]
 	assert context["tokens"] == 7 and context["outcome"] == "not committed after try 1"
 
 
@@ -543,6 +554,11 @@ def test_a_refusal_before_any_http_call_is_a_known_zero_in_the_run(worker, monke
 	worker.jobs.run_ai_refresh_slice("fake-run", 0)
 	assert not sent and worker.journal.run["attempted"] == 2
 	assert worker.journal.run["usage_incomplete"] == 0
+	# recorded under its own kind (not internal), and never feeding the streak
+	assert {a["error_kind"] for a in worker.journal.db.rows[worker.journal.mod.ATTEMPT].values()} == {
+		"context"
+	}
+	assert worker.journal.run["consecutive_failures"] == 0 and not worker.journal.run.get("breaker_kind")
 	assert all(a["usage_complete"] == 1 for a in worker.journal.db.rows[worker.journal.mod.ATTEMPT].values())
 
 

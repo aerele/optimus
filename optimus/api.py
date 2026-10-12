@@ -1552,6 +1552,22 @@ def _release_refresh_flight(session_uuid: str, token: str | None) -> None:
 	safe_call.best_effort(_release, None)
 
 
+def _refresh_flight_held(session_uuid: str) -> bool:
+	"""True while a Refresh holds the session's flag (``redis_keys.ai_refresh_inflight``), read
+	fresh with a raw ``GET`` (never ``frappe.local.cache``, as ``_release_refresh_flight``).
+	The background engine's admission reads it (``ai_jobs.start_refresh``) so it does not start
+	beside a running Refresh. Redis not answering is not a hold: a cache failure never blocks a
+	refresh, as in ``_take_refresh_flight``. An RQ job timeout escapes fresh."""
+
+	def _held() -> bool:
+		key = frappe.cache.make_key(redis_keys.ai_refresh_inflight(session_uuid))
+		return bool(frappe.cache.get(key))  # nosemgrep: frappe-cache-breaks-multitenancy
+
+	return bool(safe_call.best_effort(_held, False, on_error=lambda error_type: safe_call.log_error_line(
+		f"optimus: the Refresh AI suggestions flag could not be read ({error_type}); the refresh runs without it"
+	)))
+
+
 @frappe.whitelist(methods=["POST"])
 def refill_ai_suggestions(session_uuid: str) -> dict:
 	"""Single-button entry point: re-fills every AI-generated report section in one round-trip:
@@ -1575,6 +1591,28 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 	advice is deterministic and never refreshed by AI.
 	"""
 	ref = _ai_session_gate(session_uuid, section=None, action="refill_ai_suggestions")
+
+	# One path at a time: while the background engine holds the session (its reservation, read
+	# fresh), this Refresh refuses, before it is counted or the provider is called (Q3).
+	from optimus import ai_jobs
+
+	if safe_call.best_effort(
+		lambda: ai_jobs.live_run(ref.docname),
+		None,
+		on_error=lambda error_type: safe_call.log_error_line(
+			f"optimus: the background AI refresh of a session could not be looked up ({error_type}); "
+			"the refresh runs without that check"
+		),
+	):
+		return {
+			"ok": False,
+			"busy": True,
+			"session_uuid": ref.session_uuid,
+			"message": _(
+				"A background AI refresh is already running for this session. "
+				"Wait for it to finish or cancel it, then reload the form."
+			),
+		}
 
 	taken, flight = _take_refresh_flight(ref.session_uuid)
 	if not taken:

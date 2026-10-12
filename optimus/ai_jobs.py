@@ -27,7 +27,9 @@ from optimus import ai_fix, safe_call, safe_commit
 from optimus import ai_refresh_store as store
 
 _JOB_METHOD = "optimus.ai_jobs.run_ai_refresh_slice"
-_SKIP_KINDS = frozenset({"excluded", "no_input", "not_eligible"})
+# The failure kinds the journal records under their own name; any other becomes ``internal``.
+# The skip kinds are #72's (``ai_fix.AI_SKIP_KINDS``), as are the kinds that stop a run at once
+# (``AI_FATAL_KINDS``, read by the store); ``context`` and ``refused`` are per-prompt kinds.
 _ERROR_KINDS = frozenset(
 	{
 		"auth",
@@ -42,7 +44,9 @@ _ERROR_KINDS = frozenset(
 		"bad_response",
 		"internal",
 		"unknown",
-		*_SKIP_KINDS,
+		"context",
+		"refused",
+		*ai_fix.AI_SKIP_KINDS,
 	}
 )
 
@@ -100,7 +104,7 @@ def _call_timeout():
 
 def _transaction(operation):
 	"""A short owned transaction, with fresh interrupts after rollback."""
-	guard = ai_fix._InterruptGuard(base=True)
+	guard = safe_call.InterruptGuard(base=True)
 	failure = result = None
 	try:
 		with guard:
@@ -133,7 +137,7 @@ def _session_of(run_id):
 	"""The run's session, read and committed in its own short transaction.
 
 	The reference is immutable, so every later journal transaction can lock that session
-	row as its first statement (``store._locked``) instead of reading the run first."""
+	row as its first statement (``store.lock_run``) instead of reading the run first."""
 	return _transaction(lambda: (_read_run(run_id) or {}).get("session_name"))
 
 
@@ -156,7 +160,7 @@ def _retry_sql(operation, *, retry_lock_waits=True):
 	"""
 	_transaction(lambda: None)
 	for attempt in range(3):
-		guard = ai_fix._InterruptGuard(base=True)
+		guard = safe_call.InterruptGuard(base=True)
 		failure = None
 		try:
 			with guard:
@@ -187,7 +191,7 @@ def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
 	):
 		raise ValueError("Invalid AI refresh delivery")
 	worker_token = uuid.uuid4().hex
-	guard = ai_fix._InterruptGuard(base=True)
+	guard = safe_call.InterruptGuard(base=True)
 	failure = docname = None
 	previous = getattr(frappe.local, "optimus_analyzing", False)
 	frappe.local.optimus_analyzing = True
@@ -220,10 +224,16 @@ def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
 			with guard:
 				if failure is not None:
 					ai_fix.log_ai_failure(
-						"optimus AI refresh worker", failure, **_unsettled_context(unsettled, released)
+						"optimus ai refresh worker",
+						failure,
+						docname=docname,
+						run_id=run_id,
+						**_unsettled_context(unsettled, released),
 					)
 				if cleanup_error is not None:
-					ai_fix.log_ai_failure("optimus AI refresh recovery", cleanup_error)
+					ai_fix.log_ai_failure(
+						"optimus ai refresh cleanup", cleanup_error, docname=docname, run_id=run_id
+					)
 				_transaction(lambda: None)  # preserve scrubbed logs before RQ rolls back
 		except Exception as exc:
 			log_failure_type = type(exc).__name__
@@ -261,10 +271,10 @@ def _drive(run_id, docname, slice_no, worker_token):
 	)
 	if not run:
 		return
-	memo, items = {}, 0
+	memo, items = {}, 0  # the slice's scratch dict (``_next_item``)
 	while True:
 		run = _read_run(run_id)
-		if not store._owns(run, worker_token, _now()):
+		if not store.owns(run, worker_token, _now()):
 			return
 		if run.get("breaker_kind"):
 			_end(run_id, docname, worker_token, "breaker")
@@ -337,7 +347,7 @@ def _drive(run_id, docname, slice_no, worker_token):
 			_end(run_id, docname, worker_token, "deadline")
 			return
 		result = failure = None
-		guard = ai_fix._InterruptGuard()
+		guard = safe_call.InterruptGuard()
 		try:
 			result = item.send(min(call_limit, remaining))
 		except Exception as exc:
@@ -354,11 +364,22 @@ def _drive(run_id, docname, slice_no, worker_token):
 			if failure is not None
 			else (result or {}).get("usage_complete", False)
 		)
-		outcome = "skipped" if kind in _SKIP_KINDS else "failed" if failure is not None else "succeeded"
+		outcome = (
+			"skipped" if kind in ai_fix.AI_SKIP_KINDS else "failed" if failure is not None else "succeeded"
+		)
 		if guard.pending():
 			outcome, kind = "uncertain", "timeout"
 		if failure is not None and outcome == "failed":
-			ai_fix.log_ai_failure("optimus AI refresh item", failure, session_uuid=run["session_uuid"])
+			ai_fix.log_ai_failure(
+				"optimus ai refresh item",
+				failure,
+				session_uuid=run["session_uuid"],
+				docname=docname,
+				run_id=run_id,
+				attempt=attempt["name"],
+				kind=kind,
+				item=item.kind,
+			)
 		failure = None
 		_transaction(lambda: None)  # close any provider/logging transaction
 
@@ -389,7 +410,7 @@ def _drive(run_id, docname, slice_no, worker_token):
 
 		# A successful provider reply can fail local validation/storage. The fallback then
 		# saves its known cost and a failed outcome without trying that answer again.
-		storage_guard = ai_fix._InterruptGuard(base=True)
+		storage_guard = safe_call.InterruptGuard(base=True)
 		with storage_guard:
 			save(settle, fallback=lambda: settle(final="failed", persist=False, error_kind="internal"))
 		if storage_guard.pending():
@@ -401,7 +422,6 @@ def _drive(run_id, docname, slice_no, worker_token):
 		items += 1
 
 
-_SETTLE_TITLE = "optimus AI refresh result storage"
 # On an error ``_settle`` raises: ``(tokens, outcome)``, for the worker cleanup's last row.
 _UNSETTLED_ATTR = "_optimus_refresh_unsettled"
 _COMMITTED_AFTER_ERROR = "committed: the error came after the COMMIT; the outcome and its tokens are saved"
@@ -475,7 +495,7 @@ def _settle(operation, *, run_id, docname, attempt_id, tokens, session_uuid=None
 		fb_error = fb_logged = None
 	error = logged = None
 	for exc, context in rows:
-		ai_fix.log_ai_failure(_SETTLE_TITLE, exc, **reference, **context)
+		ai_fix.log_ai_failure("optimus ai refresh result storage", exc, **reference, **context)
 	rows = None
 	if raised is not None:
 		safe_call.best_effort(lambda: setattr(raised, _UNSETTLED_ATTR, (tokens, unsettled)), None)
@@ -510,7 +530,7 @@ def _write_outcome(operation, attempt_id):
 	while tries < AI_WRITE_ATTEMPTS:
 		tries += 1
 		error = None
-		guard = ai_fix._InterruptGuard(base=True)
+		guard = safe_call.InterruptGuard(base=True)
 		try:
 			with guard:
 				if tries == 1:
@@ -544,14 +564,14 @@ def _attempt_settled(attempt_id):
 def _begin_attempt(run, item, *, run_id, docname, worker_token):
 	"""The send-intent transaction: write the Calling attempt, or None to yield.
 
-	Every lock comes before the first plain read: the session and run (``store._locked``),
+	Every lock comes before the first plain read: the session and run (``store.lock_run``),
 	then the item's rows and the Phase 2 rows (``item.valid()``, which rechecks the input
 	and runs ``_check_run``), and only then the requester's plain User read. A read view
 	opened earlier would turn the Finding lock into a 1020 on MariaDB 11.8 when a Finding
 	writer that skips the session lock (#72's write of a zero-token answer) committed in
 	between. When the input is no longer valid, ``_check_run`` raises ``StopRefresh`` if the
 	run itself must end; otherwise the slice yields."""
-	store._locked(run_id, docname)
+	store.lock_run(run_id, docname)
 	if not item.valid():
 		_check_run(run, locked=True)
 		return None
@@ -657,10 +677,27 @@ def _signature(doc, row=None):
 	return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _chain(run):
+	"""The names of ``run`` and of the runs it resumed, newest first. Bounded by the retry
+	limit; a cycle in corrupt data ends the walk."""
+	names, name = [], run["name"]
+	while name and name not in names and len(names) < 5:
+		names.append(name)
+		name = (
+			run.get("resume_from") if len(names) == 1 else frappe.db.get_value(store.RUN, name, "resume_from")
+		)
+	return names
+
+
 def _attempts(run):
-	fields = ["kind", "target_name", "input_hash", "state"]
-	tried = frappe.get_all(
-		store.ATTEMPT, filters={"run_id": run["name"]}, fields=fields, limit_page_length=10001
+	"""``(tried, uncertain, fixes_spent)``: this run's attempts, the session's uncertain
+	attempts as ``(kind, target, input_hash)`` keys, and the fix attempts of the whole resume
+	chain, which is what the item cap limits (E3): a resume continues the same refresh, so it
+	does not get the cap again."""
+	fields = ["run_id", "kind", "target_name", "input_hash", "state"]
+	chain = _chain(run)
+	attempts = frappe.get_all(
+		store.ATTEMPT, filters={"run_id": ["in", chain]}, fields=fields, limit_page_length=10001
 	)
 	uncertain = []
 	if not run.get("retry_uncertain"):
@@ -670,9 +707,11 @@ def _attempts(run):
 			fields=fields,
 			limit_page_length=10001,
 		)
-	if len(tried) > 10000 or len(uncertain) > 10000:
+	if len(attempts) > 10000 or len(uncertain) > 10000:
 		raise StopRefresh("history_limit")
-	return tried, {(a["kind"], a["target_name"], a["input_hash"]) for a in uncertain}
+	tried = [a for a in attempts if a["run_id"] == run["name"]]
+	fixes_spent = sum(a["kind"] == "fix" for a in attempts)
+	return tried, {(a["kind"], a["target_name"], a["input_hash"]) for a in uncertain}, fixes_spent
 
 
 def _valid_item(run, doc, row, fingerprint):
@@ -681,7 +720,14 @@ def _valid_item(run, doc, row, fingerprint):
 	# The Finding row is locked before _check_run's plain reads open a read view; the
 	# caller (_begin_attempt, settle_attempt) has locked the session and run first.
 	parent = frappe.db.get_value("Optimus Session", run["session_name"], "*", as_dict=True, for_update=True)
-	if not parent or parent.get("modified") != doc.get("modified"):
+	if not parent:
+		return False
+	# A fix item is guarded by its fingerprint (the finding's own fields and the session's
+	# recordings) and the Finding row lock, so an unrelated save of the session during the HTTP
+	# call (E4: a Desk edit, a counter, a Phase 2 save) does not discard a paid answer. The
+	# Steps item rewrites the session's ``notes``, which the Desk form edits, so any session
+	# save since the item was prepared makes it stale.
+	if row is None and parent.get("modified") != doc.get("modified"):
 		return False
 	current = None
 	if row is not None:
@@ -704,13 +750,20 @@ def _valid_item(run, doc, row, fingerprint):
 
 
 def _build_payload(row, file_cache, grounding, *, principal):
-	"""One source/recording boundary, scoped to the requesting principal."""
+	"""The fix prompt's payload for one finding: the shared builder (``analyze``) with the same
+	grounding as the synchronous Refresh. ``principal`` (the requesting user) is reserved for
+	PR-4, which scopes the source and recording reads to it; nothing reads it yet, the worker's
+	access having been checked for that user by ``_check_run``."""
 	from optimus import analyze
 
 	return analyze._ai_payload_for_finding(row, file_cache, **grounding)
 
 
 def _grounding(doc, row, memo):
+	"""The fix prompt's grounding for one finding, the same inputs as the synchronous Refresh
+	(``analyze._run_ai_backfill``): the Phase 2 hottest-line index and the Slow Query index
+	evidence (#16). The slice's ``memo`` builds each once, not once per finding (#14): a Phase 2
+	index failure is logged once per slice, with the session, and the slice goes on without it."""
 	from optimus import analyze
 
 	actions = analyze.action_recording_map(doc.get("actions") or [])
@@ -719,11 +772,23 @@ def _grounding(doc, row, memo):
 	except (TypeError, ValueError):
 		action = {}
 	uuid = action.get("recording_uuid")
-	recordings = analyze.load_recordings_light(doc, [uuid] if uuid else [], memo=memo)
+	recordings = analyze.load_recordings_light(
+		doc, [uuid] if uuid else [], memo=memo.setdefault("recordings", {})
+	)
+	if "phase2_index" not in memo:
+		memo["phase2_index"] = analyze._phase2_index_for(doc)
+	if "evidence" not in memo:
+		scope, failed = analyze._run_ai_step(
+			analyze._ai_evidence_scope, title="optimus ai refresh evidence", docname=doc.get("name")
+		)
+		memo["evidence"] = (None, ()) if failed else scope
+	evidence_lookup, tracked_apps = memo["evidence"]
 	return {
-		"phase2_index": analyze._phase2_index_for(doc),
+		"phase2_index": memo["phase2_index"],
 		"recordings_by_uuid": {rec["uuid"]: rec for rec in recordings if rec.get("uuid")},
 		"actions_by_idx": actions,
+		"evidence_lookup": evidence_lookup,
+		"tracked_apps": tracked_apps,
 	}
 
 
@@ -784,7 +849,9 @@ def _steps_item(run, doc, memo):
 	from optimus import analyze
 
 	fingerprint = _signature(doc)
-	actions = analyze._actions_for_humanizer(analyze.load_recordings_light(doc, memo=memo))
+	actions = analyze._actions_for_humanizer(
+		analyze.load_recordings_light(doc, memo=memo.setdefault("recordings", {}))
+	)
 	if not actions:
 		return None
 
@@ -824,6 +891,13 @@ def _steps_item(run, doc, memo):
 
 
 def _next_item(run, memo):
+	"""The next item to send, or None when nothing is left; raises ``StopRefresh`` when the run
+	must end. It publishes the run's progress before it returns.
+
+	``memo`` is the slice's own scratch dict, one per ``_drive`` call, shared by every item of
+	the slice: the source-file cache (``source``), the Phase 2 index and the Slow Query evidence
+	(built once, ``_grounding``), and ``recordings``, the one entry that is #72's recordings-only
+	memo (``analyze.load_recordings_light``), kept apart so it holds nothing else."""
 	from optimus import analyze
 	from optimus.settings import get_config
 
@@ -831,7 +905,7 @@ def _next_item(run, memo):
 		# Switched off mid-run: nothing more can be sent, which is not a complete refresh (E7).
 		raise StopRefresh("disabled")
 	doc = frappe.get_doc("Optimus Session", run["session_name"])
-	tried, uncertain = _attempts(run)
+	tried, uncertain, fixes_spent = _attempts(run)
 	names = {(a["kind"], a["target_name"]) for a in tried}
 	rows = []
 	if run.get("include_fixes") and ai_fix.is_available(section="findings"):
@@ -843,8 +917,12 @@ def _next_item(run, memo):
 			include_outdated=run["scope"] == "all",
 		)
 	rows = [row for row in rows if ("fix", row.name) not in names]
-	remaining = max(0, run["cap"] - sum(a["kind"] == "fix" for a in tried)) if run.get("cap") else len(rows)
-	blocked = {row.name for row in rows if ("fix", row.name, _signature(doc, row)) in uncertain}
+	remaining = max(0, run["cap"] - fixes_spent) if run.get("cap") else len(rows)
+	# Hash only the rows an uncertain attempt names (E5): none, on the usual run.
+	maybe = {target for kind, target, _ in uncertain if kind == "fix"}
+	blocked = {
+		row.name for row in rows if row.name in maybe and ("fix", row.name, _signature(doc, row)) in uncertain
+	}
 	step_state = run.get("steps_state") or "not_requested"
 	steps = bool(run.get("include_steps") and step_state != "carried" and ("steps", doc.name) not in names)
 	if steps and not ai_fix.is_available(section="humanize"):
@@ -858,7 +936,7 @@ def _next_item(run, memo):
 			and not notes.startswith((analyze._AUTO_NOTES_PREAMBLE, analyze._HUMANIZED_NOTES_PREAMBLE))
 		):
 			step_state, steps = "kept", False
-		elif ("steps", doc.name, _signature(doc)) in uncertain:
+		elif uncertain and ("steps", doc.name, _signature(doc)) in uncertain:
 			step_state, steps = "uncertain", False
 	blocked_count = min(remaining, len(blocked)) + int(step_state == "uncertain")
 
@@ -890,7 +968,7 @@ def _next_item(run, memo):
 
 
 def _dispatch_pending(run_id, docname, *, nowait=False):
-	"""Hand a committed slice intent to RQ (``_deliver``) and log a failed enqueue.
+	"""Hand a committed slice intent to RQ (``_send_slice``) and log a failed enqueue.
 
 	True once enqueued. False when nothing is due (claimed, ended or throttled) or the
 	enqueue failed (logged; the intent stays pending). ``nowait`` (an HTTP request: the
@@ -898,51 +976,56 @@ def _dispatch_pending(run_id, docname, *, nowait=False):
 	and never retries, so a click waits one lock timeout at most (C1, F4); a busy row
 	answers None, logs no row and leaves the intent pending, for the session's next click
 	(``_resend_pending``), a takeover or the sweep."""
-	sent, failure = _deliver(run_id, docname, nowait=nowait)
-	if failure is not None:
-		ai_fix.log_ai_failure("optimus AI refresh enqueue", failure, docname=docname, run_id=run_id)
-		failure = None
-		_transaction(lambda: None)
+	from optimus.analyze import _run_ai_step
+
+	sent, failed = _run_ai_step(
+		lambda: _send_slice(run_id, docname, nowait=nowait),
+		title="optimus ai refresh enqueue",
+		docname=docname,
+		run_id=run_id,
+	)
+	if failed:
+		_transaction(lambda: None)  # keep the logged row; the intent stays pending
+		return False
 	return sent
 
 
-def _deliver(run_id, docname, *, nowait=False):
-	"""``(sent, failure)`` for one pending slice: its ordinary failure is returned, not raised
-	or logged; an RQ job timeout leaves as a fresh instance. ``sent`` is None when a
-	``nowait`` lock was not granted (``_dispatch_pending``)."""
-	guard = ai_fix._InterruptGuard(base=True)
-	failure = None
+def _send_slice(run_id, docname, *, nowait=False):
+	"""Enqueue one pending slice: True once sent, False when nothing is due (claimed, ended or
+	throttled), None when a ``nowait`` lock was not granted. Any other failure is raised."""
 	try:
-		with guard:
-			run = _retry_sql(
-				lambda: store.prepare_dispatch(run_id, docname=docname, now=_now(), wait=not nowait),
-				retry_lock_waits=not nowait,
+		run = _retry_sql(
+			lambda: store.prepare_dispatch(run_id, docname=docname, now=_now(), wait=not nowait),
+			retry_lock_waits=not nowait,
+		)
+		if not run:
+			return False
+		enqueue = getattr(frappe.enqueue, "__wrapped__", frappe.enqueue)
+		_transaction(
+			lambda: enqueue(
+				_JOB_METHOD,
+				queue=ai_queue(),
+				timeout=slice_seconds() + _call_timeout() + 300,
+				is_async=True,
+				enqueue_after_commit=True,
+				deduplicate=True,
+				job_id=f"optimus-ai-{run_id}-{run['slice_no']}",
+				run_id=run_id,
+				slice_no=run["slice_no"],
 			)
-			if not run:
-				return False, None
-			enqueue = getattr(frappe.enqueue, "__wrapped__", frappe.enqueue)
-			_transaction(
-				lambda: enqueue(
-					_JOB_METHOD,
-					queue=ai_queue(),
-					timeout=slice_seconds() + _call_timeout() + 300,
-					is_async=True,
-					enqueue_after_commit=True,
-					deduplicate=True,
-					job_id=f"optimus-ai-{run_id}-{run['slice_no']}",
-					run_id=run_id,
-					slice_no=run["slice_no"],
-				)
-			)
-			return True, None
+		)
+		return True
 	except Exception as exc:
-		failure = exc
-	if guard.pending():
-		failure = None
-		raise guard.interrupt()
-	if nowait and store.is_lock_unavailable(failure):
-		return None, None
-	return False, failure
+		if nowait and store.is_lock_unavailable(exc):
+			return None
+		raise
+
+
+def _deliver(run_id, docname, *, nowait=False):
+	"""``(sent, failure)`` for one pending slice (``_send_slice``): its ordinary failure is
+	returned, not raised or logged, so the sweep can classify it and log it once with the
+	rest; an RQ job timeout leaves as a fresh instance (``_isolated``)."""
+	return _isolated(lambda: _send_slice(run_id, docname, nowait=nowait))
 
 
 def ai_queue():
@@ -960,21 +1043,18 @@ def ai_queue():
 	return value
 
 
-def _workers_listening():
+def _workers_listening(docname=None):
 	"""Unknown Redis state refuses new admission, without guessing it is empty."""
 	from frappe.utils.background_jobs import get_queue, get_workers
 
-	guard = ai_fix._InterruptGuard(base=True)
-	failure = None
-	try:
-		with guard:
-			return bool(get_workers(queue=get_queue(ai_queue())))
-	except Exception as exc:
-		failure = exc
-	if guard.pending():
-		raise guard.interrupt()
-	ai_fix.log_ai_failure("optimus AI worker availability", failure)
-	return None
+	from optimus.analyze import _run_ai_step
+
+	listening, failed = _run_ai_step(
+		lambda: bool(get_workers(queue=get_queue(ai_queue()))),
+		title="optimus ai refresh worker availability",
+		docname=docname,
+	)
+	return None if failed else listening
 
 
 def start_refresh(
@@ -1015,9 +1095,24 @@ def start_refresh(
 	site_cap = _setting_int("optimus_ai_max_active_refreshes", 2, 1, 1000)
 	slice_seconds()
 	ai_queue()
-	workers = _workers_listening()
+	if _refresh_flag_held(session_uuid):
+		# Q3: #72's synchronous Refresh holds this session; it refuses a click while this
+		# engine's reservation is held, and the engine refuses while its flag is. Nothing is
+		# counted or billed.
+		from frappe import _
+
+		return {
+			"status": "refused",
+			"reason": "refresh_running",
+			"message": _(
+				"A Refresh AI suggestions is already running for this session. "
+				"Wait for it to finish, then try again."
+			),
+		}
+	workers = _workers_listening(docname)
 	if workers is not True:
 		return {"status": "refused", "reason": "no_worker" if workers is False else "queue_unavailable"}
+	gated, excluded = _selection_counts(docname, include_fixes, resume_from)
 	run_id = uuid.uuid4().hex
 	out = _retry_sql(
 		lambda: store.admit(
@@ -1036,6 +1131,8 @@ def start_refresh(
 			regenerate_all=regenerate_all,
 			resume_from=resume_from,
 			retry_uncertain=retry_uncertain,
+			gated=gated,
+			excluded=excluded,
 		),
 		retry_lock_waits=False,
 	)
@@ -1058,6 +1155,54 @@ def start_refresh(
 	if out.get("run"):
 		return {"status": out["status"], "refresh": public_state(out["run"])}
 	return out
+
+
+def _refresh_flag_held(session_uuid):
+	"""True while #72's synchronous Refresh holds this session's flag
+	(``redis_keys.ai_refresh_inflight``), read fresh from Redis (``api._refresh_flight_held``).
+	Redis not answering is not a hold: a cache failure never blocks a refresh (as there)."""
+	from optimus import api
+
+	return api._refresh_flight_held(session_uuid)
+
+
+def live_run(docname):
+	"""The session's live engine run (active, lease and deadline not passed), or None.
+
+	Read in a fresh transaction, after the caller's read view is closed, so it answers from
+	the current committed state, never from a view opened earlier in the request. For #72's
+	synchronous Refresh (``api.refill_ai_suggestions``), which refuses while this run holds
+	the session (Q3). A run whose lease or deadline passed is dead: the next admission takes it
+	over, and it does not block the Refresh."""
+	_transaction(lambda: None)
+	run = _transaction(lambda: frappe.db.get_value(store.RUN, {"active_session": docname}, "*", as_dict=True))
+	if run and run.get("state") in store.ACTIVE and not store.expired(run, _now()):
+		return run
+	return None
+
+
+def _selection_counts(docname, include_fixes, resume_from=None):
+	"""``(gated, excluded)``: the findings the selection leaves out, as #71's Refresh toasts
+	report them (``AiSelection.gated`` and ``.excluded``), taken at admission and kept on the
+	run for the page. Both are zero when no fix is asked for (a resume asks what the run it
+	continues asked). Best effort: a failure is logged and the run goes on without the counts."""
+	if resume_from:
+		include_fixes = bool(frappe.db.get_value(store.RUN, resume_from, "include_fixes"))
+	if not include_fixes or not ai_fix.is_available(section="findings"):
+		return 0, 0
+
+	def count():
+		from optimus import analyze
+		from optimus.settings import get_config
+
+		doc = frappe.get_doc("Optimus Session", docname)
+		chosen = analyze.eligible_findings(doc.get("findings") or [], get_config())
+		return chosen.gated, chosen.excluded
+
+	from optimus.analyze import _run_ai_step
+
+	counts, failed = _run_ai_step(count, title="optimus ai refresh selection", docname=docname)
+	return (0, 0) if failed else counts
 
 
 def _resend_pending(run, docname, now):
@@ -1083,7 +1228,7 @@ def _note_released(run, docname):
 	if not run or not run.get("inconsistent"):
 		return
 	ai_fix.log_ai_failure(
-		"optimus AI refresh recovery",
+		"optimus ai refresh release",
 		store.JournalUnavailable(f"Refresh journal {run['inconsistent']} is inconsistent"),
 		docname=docname,
 		run_id=run["name"],
@@ -1167,7 +1312,7 @@ def recover_pending():
 	for run, session in released:
 		_note_released(run, session)
 	for run_id, session, exc in failures:
-		ai_fix.log_ai_failure("optimus AI refresh recovery", exc, docname=session, run_id=run_id)
+		ai_fix.log_ai_failure("optimus ai refresh recovery", exc, docname=session, run_id=run_id)
 	if failures:
 		failures = None
 		_transaction(lambda: None)
@@ -1177,7 +1322,7 @@ def recover_pending():
 def _isolated(operation):
 	"""``(result, failure)``: an ordinary failure is returned rather than raised, so one bad
 	row cannot stop the sweep; an RQ job timeout still leaves as a fresh instance."""
-	guard = ai_fix._InterruptGuard(base=True)
+	guard = safe_call.InterruptGuard(base=True)
 	result = failure = None
 	try:
 		with guard:
@@ -1207,7 +1352,7 @@ def cancel_refresh(run_id, *, docname, requested_by):
 	``busy`` when the session row stayed locked for one lock wait timeout. An HTTP request
 	waits once (C1); deadlocks and snapshot or serialization conflicts are still retried. A
 	run with an inconsistent journal row is force-released, with one Error Log row (E2)."""
-	guard = ai_fix._InterruptGuard(base=True)
+	guard = safe_call.InterruptGuard(base=True)
 	run = failure = None
 	try:
 		with guard:
@@ -1259,6 +1404,8 @@ def public_state(run, now=None):
 		"uncertain": count("uncertain"),
 		"blocked_uncertain": count("blocked_uncertain"),
 		"attempted": count("attempted"),
+		"gated": count("gated_count"),
+		"excluded": count("excluded_count"),
 		"not_reached": max(0, count("total_items") - count("attempted")),
 		"usage": {
 			"tokens_reported": count("tokens_reported"),

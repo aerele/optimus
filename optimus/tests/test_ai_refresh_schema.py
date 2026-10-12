@@ -30,7 +30,7 @@ def test_active_session_and_attempt_identities_are_unique():
 	assert run["active_session"]["unique"] == 1 and not run["active_session"].get("reqd")
 	assert run["run_id"]["unique"] == attempt["attempt_id"]["unique"] == 1
 	assert run["tokens_reported"]["fieldtype"] == attempt["tokens_reported"]["fieldtype"] == "Long Int"
-	assert "settled" in attempt and "usage_complete" in attempt and "completion_counted" in run
+	assert "settled" in attempt and "usage_complete" in attempt and "completion_counted" not in run
 	assert "dispatch_pending" in run and "slice_no" in run and "worker_token" in run
 
 
@@ -113,3 +113,14 @@ def test_the_run_journal_records_its_idle_slices():
 	fields = {f["fieldname"]: f for f in doc["fields"]}
 	assert fields["idle_slices"]["fieldtype"] == "Int" and fields["idle_slices"]["read_only"] == 1
 	assert "idle_slices" in doc["field_order"]
+
+
+def test_the_run_journal_records_the_selections_gated_and_excluded_counts():
+	"""Item 5: #71's two Refresh toasts need the counts of the selection; the run keeps them."""
+	path = ROOT / "optimus" / "doctype" / "optimus_ai_refresh_run" / "optimus_ai_refresh_run.json"
+	doc = json.loads(path.read_text())
+	fields = {f["fieldname"]: f for f in doc["fields"]}
+	for name in ("gated_count", "excluded_count"):
+		assert fields[name]["fieldtype"] == "Int" and fields[name]["read_only"] == 1, name
+		assert fields[name]["default"] == "0" and name in doc["field_order"], name
+	assert [f["fieldname"] for f in doc["fields"]] == [n for n in doc["field_order"]]
