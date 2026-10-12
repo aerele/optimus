@@ -102,10 +102,8 @@ class AiFixError(Exception):
 		super().__init__(message)
 		self.status_code = status_code
 		self.kind = kind
-		# No usage attached: raised before any call, a known zero. The call boundary
-		# (_with_usage_on_failure) sets what the attempted calls reported.
 		self.usage_complete = (
-			bool(getattr(usage, "complete", usage is None)) if usage_complete is None else usage_complete is True
+			bool(getattr(usage, "complete", False)) if usage_complete is None else usage_complete is True
 		)
 		self.usage = _billed_usage(usage) if usage is not None else None
 
@@ -490,6 +488,7 @@ def _resolve_display_threshold_ms() -> float:
 def suggest_fix(
 	finding: dict, *, timeout: int | None = None,
 	session_uuid: str | None = None, docname: str | None = None,
+	usage_out: Usage | None = None,
 ) -> dict:
 	"""Ask the configured LLM for a fix for ``finding``.
 
@@ -506,7 +505,12 @@ def suggest_fix(
 	``usage``) to its session once, with ``analyze._add_ai_spend``. An RQ job
 	timeout leaves as a fresh instance that carries the billed ``usage`` too, but
 	only to this boundary (``_with_usage_on_failure``): read it from the exception
-	caught here, since any later re-wrap drops it."""
+	caught here, since any later re-wrap drops it.
+
+	``usage_out`` (additive, for the background refresh engine; None keeps the behaviour
+	above): a fresh ``Usage`` that becomes this call's usage, so the caller's own
+	``_with_usage_on_failure`` boundary counts every attempted call. A refusal before any
+	request leaves it at no call, which proves a known zero."""
 	if is_finding_type_excluded(finding.get("finding_type")):
 		from frappe import _
 
@@ -533,7 +537,7 @@ def suggest_fix(
 		system, ctx, messages=messages, out_tokens=_output_tokens(provider),
 		hosted=_is_hosted_endpoint(provider.get("base_url")),
 	)
-	usage = Usage()
+	usage = usage_out if isinstance(usage_out, Usage) else Usage()
 	text, guardrail, finish = _with_usage_on_failure(lambda: _complete_with_guardrails(
 		provider,
 		system,

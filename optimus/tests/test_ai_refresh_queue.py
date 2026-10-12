@@ -157,7 +157,10 @@ def test_missing_worker_refuses_admission_without_creating_a_run(queue, monkeypa
 	assert not queue.journal.db.rows[queue.journal.mod.RUN] and not queue.sent
 
 
-def test_existing_refresh_is_visible_even_when_provider_or_queue_is_unavailable(queue, monkeypatch):
+@pytest.mark.parametrize("redis", ["up", "down"])
+def test_existing_refresh_is_visible_even_when_provider_or_queue_is_unavailable(queue, monkeypatch, redis):
+	"""Attaching never needs a worker or Redis, and never changes its answer. The fixture run
+	is a committed intent that never reached RQ: the click re-sends it, best effort (F1)."""
 	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
 	monkeypatch.setattr(ai_fix, "is_available", lambda: False)
 
@@ -165,11 +168,20 @@ def test_existing_refresh_is_visible_even_when_provider_or_queue_is_unavailable(
 		raise AssertionError("existing progress must not require Redis")
 
 	monkeypatch.setattr(queue.jobs, "_workers_listening", unavailable)
+	if redis == "down":
+
+		def fail(*a, **kw):
+			raise ConnectionError("fake Redis down")
+
+		monkeypatch.setattr(queue.jobs.frappe.enqueue, "__wrapped__", fail)
 	out = queue.jobs.start_refresh(
 		docname="fake-session-doc", session_uuid="fake-session", requested_by="fake-owner"
 	)
 	assert out["status"] == "already_running" and out["refresh"]["run_id"] == "fake-run"
-	assert len(queue.journal.db.rows[queue.journal.mod.RUN]) == 1 and not queue.sent
+	assert len(queue.journal.db.rows[queue.journal.mod.RUN]) == 1
+	assert [kw["slice_no"] for _, kw in queue.sent] == ([0] if redis == "up" else [])
+	assert queue.logs == ([] if redis == "up" else ["ConnectionError"])
+	assert queue.journal.run["dispatch_pending"] == 1
 
 
 def test_start_commits_reservation_before_enqueuing(queue, monkeypatch):
@@ -571,18 +583,18 @@ def test_a_failed_candidate_read_never_stops_the_other_passes(queue, monkeypatch
 	assert counts["failed"] == 1 and [type(exc) for _, exc, _ in rows] == [RuntimeError]
 
 
-def test_an_http_admission_leaves_a_busy_dispatch_pending_after_one_wait(admitting, monkeypatch, rows):
-	"""C1: the admission has committed; its dispatch waits for the session row once, then
-	leaves the intent pending (the sweep or a later click sends it) instead of waiting two
-	more lock timeouts or failing the response."""
+def test_an_http_admission_leaves_a_busy_dispatch_pending_without_waiting(admitting, monkeypatch, rows):
+	"""C1 / F4: the admission already waited for the session row; its dispatch takes the row
+	with NOWAIT, so one click waits one lock timeout at most. A busy row leaves the committed
+	intent pending for the session's next click or a takeover, without failing the response."""
 	queue = admitting
 	queue.journal.db.rows[queue.journal.mod.RUN] = {}
 	current = queue.journal.db.get_value
 	locks = []
 
-	def held(table, name, *a, for_update=False, **kw):
+	def held(table, name, *a, for_update=False, wait=True, **kw):
 		if table == "Optimus Session" and for_update:
-			locks.append(name)
+			locks.append(wait)
 			if len(locks) > 1:  # the admission got it; the dispatch does not
 				raise _lock_wait()
 		return current(table, name, *a, for_update=for_update, **kw)
@@ -590,7 +602,7 @@ def test_an_http_admission_leaves_a_busy_dispatch_pending_after_one_wait(admitti
 	monkeypatch.setattr(queue.journal.db, "get_value", held)
 	out = _start(queue)
 	assert out["status"] == "queued" and out["refresh"]["state"] == "queued"
-	assert len(locks) == 2 and not queue.sent and not rows
+	assert locks == [True, False] and not queue.sent and not rows
 	run = next(iter(queue.journal.db.rows[queue.journal.mod.RUN].values()))
 	assert run["dispatch_pending"] == 1
 
@@ -703,3 +715,105 @@ def test_an_invalid_setting_refuses_before_admission_and_names_the_fix(admitting
 		_start(queue)
 	assert name in str(caught.value) and "set-config -p" in str(caught.value)
 	assert not queue.journal.db.rows[queue.journal.mod.RUN] and not queue.sent
+
+
+def test_an_invalid_queue_setting_is_rejected_by_name_before_admission(admitting, monkeypatch):
+	"""F5 (probe U1): an invalid queue name was a queue_unavailable refusal whose log row did
+	not name the setting; it is rejected like the other settings."""
+	queue = admitting
+	queue.journal.db.rows[queue.journal.mod.RUN] = {}
+	queue.jobs.frappe.conf["optimus_ai_queue"] = "Bad Queue!"
+	with pytest.raises(ValueError) as caught:
+		_start(queue)
+	assert "optimus_ai_queue" in str(caught.value) and "set-config" in str(caught.value)
+	assert not queue.journal.db.rows[queue.journal.mod.RUN] and not queue.sent
+
+
+def _pending(queue, dispatched_at):
+	queue.journal.run.update(state="queued", dispatch_pending=1, dispatched_at_epoch=dispatched_at)
+
+
+def test_a_click_resends_a_committed_intent_that_never_reached_a_worker(admitting, monkeypatch, rows):
+	"""F1: a lost dispatch (a busy session row, a Redis blip) left the run queued with no job
+	for the whole 1800 s queued lease, since the sweep is not scheduled. The next click
+	re-sends it: NOWAIT, best effort; the claim stays the fence and the job id deduplicates."""
+	queue = admitting
+	_pending(queue, dispatched_at=10)  # 40 s ago: past the 30 s throttle
+	current = queue.journal.db.get_value
+	waits = []
+
+	def spy(table, name, *a, for_update=False, wait=True, **kw):
+		if table == "Optimus Session" and for_update:
+			waits.append(wait)
+		return current(table, name, *a, for_update=for_update, **kw)
+
+	monkeypatch.setattr(queue.journal.db, "get_value", spy)
+
+	def never():
+		raise AssertionError("attaching never asks the workers")
+
+	monkeypatch.setattr(queue.jobs, "_workers_listening", never)
+	out = _start(queue)
+	assert out["status"] == "already_running" and out["refresh"]["run_id"] == "fake-run"
+	assert [kw["job_id"] for _, kw in queue.sent] == ["optimus-ai-fake-run-0"]
+	assert waits == [False] and not rows
+	assert queue.journal.run["dispatched_at_epoch"] == 50 and queue.journal.run["dispatch_pending"] == 1
+
+
+@pytest.mark.parametrize("dispatched_at", [30, 50])
+def test_a_click_within_the_throttle_takes_no_lock(admitting, monkeypatch, dispatched_at):
+	"""The gate is the plain read: a polling click inside the 30 s throttle sends nothing and
+	locks nothing."""
+	queue = admitting
+	_pending(queue, dispatched_at=dispatched_at)
+	locks = []
+	current = queue.journal.db.get_value
+
+	def spy(table, name, *a, for_update=False, **kw):
+		if for_update:
+			locks.append(table)
+		return current(table, name, *a, for_update=for_update, **kw)
+
+	monkeypatch.setattr(queue.journal.db, "get_value", spy)
+	assert _start(queue)["status"] == "already_running"
+	assert not queue.sent and not locks
+
+
+@pytest.mark.parametrize("trouble", ["busy", "unexpected", "raised"])
+def test_a_resend_that_fails_never_changes_the_attach_answer(admitting, monkeypatch, rows, trouble):
+	queue = admitting
+	_pending(queue, dispatched_at=0)
+
+	def refuse(*a, **kw):
+		raise _lock_wait() if trouble == "busy" else RuntimeError("fake storage failure")
+
+	if trouble == "raised":  # even past the dispatch's own failure handling
+		monkeypatch.setattr(queue.jobs, "_dispatch_pending", refuse)
+	else:
+		monkeypatch.setattr(queue.journal.mod, "prepare_dispatch", refuse)
+	out = _start(queue)
+	assert out["status"] == "already_running" and out["refresh"]["run_id"] == "fake-run"
+	assert not queue.sent
+	assert [type(exc) for _, exc, _ in rows] == ([RuntimeError] if trouble == "unexpected" else [])
+
+
+def test_a_forced_release_in_a_refused_admission_still_writes_its_row(admitting, rows):
+	"""F3 (probe D1): the takeover of an inconsistent expired run commits even when the
+	admission is then refused, so its one recovery row must be written too."""
+	queue = admitting
+	attempt = _crash(queue)
+	del queue.journal.db.rows[queue.journal.mod.ATTEMPT][attempt["name"]]
+	queue.journal.db.rows[queue.journal.mod.RUN]["other"] = {
+		**queue.journal.run,
+		"name": "other",
+		"run_id": "other",
+		"session_name": "other-session",
+		"active_session": "other-session",
+		"state": "running",
+		"lease_until": 900,
+	}
+	queue.jobs.frappe.conf["optimus_ai_max_active_refreshes"] = 1
+	assert _start(queue) == {"status": "refused", "reason": "site_cap"}
+	assert queue.journal.db.rows[queue.journal.mod.RUN]["fake-run"]["state"] == "interrupted"
+	[(title, exc, context)] = rows
+	assert title == "optimus AI refresh recovery" and context["run_id"] == "fake-run"

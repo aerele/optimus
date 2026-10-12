@@ -92,9 +92,7 @@ def test_replayed_rq_delivery_sends_and_accounts_each_item_once(worker):
 )
 def test_provider_failure_limits_survive_the_real_journal(worker, kind, expected):
 	def fail():
-		# A failure after the request was sent, as the call boundary reports it: usage
-		# unknown (an error raised before any call is a known zero, C3).
-		raise ai_fix.AiFixError("fake provider error", kind=kind, usage_complete=False)
+		raise ai_fix.AiFixError("fake provider error", kind=kind)
 
 	worker.send_hook = fail
 	worker.jobs.run_ai_refresh_slice("fake-run", 0)
@@ -534,12 +532,7 @@ def test_a_refusal_before_any_http_call_is_a_known_zero_in_the_run(worker, monke
 			return None
 
 		def send(timeout):
-			return ai_fix.suggest_fix(
-				{"finding_type": "N+1 Query"},
-				timeout=timeout,
-				session_uuid="fake-session",
-				docname="fake-session-doc",
-			)
+			return worker.jobs._suggest_fix({"finding_type": "N+1 Query"}, timeout=timeout, run=run)
 
 		return worker.jobs.PreparedItem(
 			item.kind, item.target, item.input_hash, send, item.valid, item.persist
@@ -551,3 +544,32 @@ def test_a_refusal_before_any_http_call_is_a_known_zero_in_the_run(worker, monke
 	assert not sent and worker.journal.run["attempted"] == 2
 	assert worker.journal.run["usage_incomplete"] == 0
 	assert all(a["usage_complete"] == 1 for a in worker.journal.db.rows[worker.journal.mod.ATTEMPT].values())
+
+
+def test_a_failure_from_outside_the_usage_boundary_is_unknown_usage(worker, monkeypatch):
+	"""F2 (probe U2): the HTTP layer's own timeout failure reaching the engine without a call
+	count is a sent call of unknown usage, never a known zero of 0 tokens."""
+	import frappe
+
+	monkeypatch.setattr(frappe, "_", lambda text, *a, **kw: text)
+
+	def timed_out():
+		raise ai_fix._timeout_failure(10)
+
+	worker.count = 1
+	worker.send_hook = timed_out
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	[attempt] = worker.journal.db.rows[worker.journal.mod.ATTEMPT].values()
+	assert attempt["usage_complete"] == 0 and attempt["tokens_reported"] == 0
+	assert worker.journal.run["usage_incomplete"] == 1
+
+
+def test_a_slice_that_answered_an_item_is_not_idle_when_the_next_cannot_begin(worker):
+	"""F6 (mutant Q1): only a slice that began no item adds to the idle streak; a healthy run
+	whose next input changed must not drift towards no_progress."""
+	worker.count = 2
+	worker.send_hook = lambda: setattr(worker, "valid", False)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	run = worker.journal.run
+	assert len(worker.calls) == 1 and run["completed"] == 1
+	assert run["state"] == "queued" and run["slice_no"] == 1 and run["idle_slices"] == 0

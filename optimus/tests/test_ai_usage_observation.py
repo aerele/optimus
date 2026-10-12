@@ -175,16 +175,59 @@ def test_no_completion_attempted_is_a_known_zero():
 	assert usage.complete is False
 
 
-def test_a_refusal_before_sending_reports_a_known_zero(provider, monkeypatch):
+def test_a_refusal_before_sending_reports_a_known_zero_through_usage_out(provider, monkeypatch):
+	"""C3: the caller's own Usage proves nothing was sent (no call begun). The error alone
+	proves nothing, so on its own it stays unknown usage (F2)."""
+
 	def refuse(*a, **kw):
 		raise ai_fix.AiFixError("fake: the prompt does not fit", kind="context")
 
 	sent = []
 	monkeypatch.setattr(ai_fix, "_check_context_fits", refuse)
 	monkeypatch.setattr(ai_fix.requests, "post", lambda *a, **kw: sent.append(True))
+	usage = ai_fix.Usage()
 	with pytest.raises(ai_fix.AiFixError) as caught:
-		ai_fix.suggest_fix({"finding_type": "N+1 Query"}, session_uuid="fake-session")
-	assert not sent and caught.value.usage is None and caught.value.usage_complete is True
+		ai_fix.suggest_fix({"finding_type": "N+1 Query"}, session_uuid="fake-session", usage_out=usage)
+	assert not sent and usage.calls == 0 and usage.complete is True
+	assert caught.value.usage is None and caught.value.usage_complete is False
+
+
+def test_an_error_without_a_call_count_is_unknown_usage(monkeypatch):
+	"""F2: the HTTP layer builds its failures before any boundary has counted the calls; a
+	known zero at birth let a sent, failed call reach the journal as complete usage."""
+	import frappe
+
+	monkeypatch.setattr(frappe, "_", lambda text, *a, **kw: text)
+	assert ai_fix._timeout_failure(10).usage_complete is False
+	assert ai_fix.AiFixError("fake server error", kind="server").usage_complete is False
+
+
+@pytest.mark.parametrize("failure", [None, "timeout"])
+def test_usage_out_counts_every_call_suggest_fix_attempts(provider, monkeypatch, failure):
+	"""The additive ``usage_out`` keyword hands the call's own Usage to the background engine,
+	which wraps the call in its own boundary (C3)."""
+	import requests
+
+	provider.install({"total_tokens": 7})
+	monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: False)  # one call, counted once
+	if failure:
+
+		def timed_out(*a, **kw):
+			raise requests.exceptions.Timeout("fake timeout")
+
+		monkeypatch.setattr(ai_fix.requests, "post", timed_out)
+		monkeypatch.setattr(ai_fix, "_log_http_error", lambda *a, **kw: None)
+	usage = ai_fix.Usage()
+	if failure:
+		with pytest.raises(ai_fix.AiFixError):
+			ai_fix.suggest_fix({"finding_type": "N+1 Query"}, session_uuid="fake-session", usage_out=usage)
+		assert usage.calls == 1 and usage.complete is False
+	else:
+		result = ai_fix.suggest_fix(
+			{"finding_type": "N+1 Query"}, session_uuid="fake-session", usage_out=usage
+		)
+		assert usage.calls == 1 and usage.complete is True and usage["total_tokens"] == 7
+		assert result["tokens"] is usage and result["usage_complete"] is True
 
 
 def test_a_refusal_inside_the_call_boundary_before_sending_reports_a_known_zero(provider, monkeypatch):

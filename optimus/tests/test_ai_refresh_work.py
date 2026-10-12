@@ -390,3 +390,20 @@ def test_selection_stops_the_run_when_ai_is_switched_off(work, monkeypatch):
 	with pytest.raises(work.jobs.StopRefresh) as caught:
 		work.jobs._next_item(work.journal.run, {})
 	assert caught.value.reason == "disabled" and not work.sends
+
+
+@pytest.mark.parametrize("sent", [False, True])
+def test_the_fix_send_counts_its_calls_in_the_engines_own_usage_boundary(work, monkeypatch, sent):
+	"""C3 / F2: a failure is a known zero only when the call count proves nothing was sent;
+	one after a begun call, with no usage reported, stays unknown."""
+
+	def suggest_fix(payload, *, usage_out=None, **kw):
+		if sent and usage_out is not None:
+			usage_out.begin()
+		raise ai_fix.AiFixError("fake failure", kind="timeout" if sent else "context")
+
+	monkeypatch.setattr(ai_fix, "suggest_fix", suggest_fix)
+	item = work.jobs._next_item(work.journal.run, {})
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		item.send(10)
+	assert caught.value.usage_complete is (not sent)

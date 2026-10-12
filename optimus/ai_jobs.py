@@ -745,9 +745,7 @@ def _fix_item(run, doc, row, memo):
 		return _valid_item(run, doc, row, fingerprint)
 
 	def send(timeout):
-		return ai_fix.suggest_fix(
-			payload, timeout=timeout, session_uuid=run["session_uuid"], docname=run["session_name"]
-		)
+		return _suggest_fix(payload, timeout=timeout, run=run)
 
 	def persist(result):
 		if not valid():
@@ -762,6 +760,24 @@ def _fix_item(run, doc, row, memo):
 		return True
 
 	return PreparedItem("fix", row.name, fingerprint, send, valid, persist)
+
+
+def _suggest_fix(payload, *, timeout, run):
+	"""The fix item's provider call, inside the engine's own usage boundary, as the Steps
+	call is (C3, F2). ``suggest_fix`` counts each call it begins in this ``Usage``
+	(``usage_out``), so a failure is a known zero only when the count proves nothing was
+	sent; any other failure without reported usage stays unknown."""
+	usage = ai_fix.Usage()
+	return ai_fix._with_usage_on_failure(
+		lambda: ai_fix.suggest_fix(
+			payload,
+			timeout=timeout,
+			session_uuid=run["session_uuid"],
+			docname=run["session_name"],
+			usage_out=usage,
+		),
+		usage,
+	)
 
 
 def _steps_item(run, doc, memo):
@@ -873,15 +889,16 @@ def _next_item(run, memo):
 	return None
 
 
-def _dispatch_pending(run_id, docname, *, wait=True, retry_lock_waits=True):
+def _dispatch_pending(run_id, docname, *, nowait=False):
 	"""Hand a committed slice intent to RQ (``_deliver``) and log a failed enqueue.
 
 	True once enqueued. False when nothing is due (claimed, ended or throttled) or the
-	enqueue failed (logged; the intent stays pending). None when the session row stayed
-	locked and the caller does not wait again (``retry_lock_waits=False``: an HTTP request
-	waits one lock timeout at most, C1): no row is logged and the committed intent stays
-	pending for the sweep or the session's next admission."""
-	sent, failure = _deliver(run_id, docname, wait=wait, retry_lock_waits=retry_lock_waits)
+	enqueue failed (logged; the intent stays pending). ``nowait`` (an HTTP request: the
+	admission already waited for the session row, or an attach) takes that row with NOWAIT
+	and never retries, so a click waits one lock timeout at most (C1, F4); a busy row
+	answers None, logs no row and leaves the intent pending, for the session's next click
+	(``_resend_pending``), a takeover or the sweep."""
+	sent, failure = _deliver(run_id, docname, nowait=nowait)
 	if failure is not None:
 		ai_fix.log_ai_failure("optimus AI refresh enqueue", failure, docname=docname, run_id=run_id)
 		failure = None
@@ -889,17 +906,17 @@ def _dispatch_pending(run_id, docname, *, wait=True, retry_lock_waits=True):
 	return sent
 
 
-def _deliver(run_id, docname, *, wait=True, retry_lock_waits=True):
+def _deliver(run_id, docname, *, nowait=False):
 	"""``(sent, failure)`` for one pending slice: its ordinary failure is returned, not raised
-	or logged; an RQ job timeout leaves as a fresh instance. ``sent`` is None when a lock the
-	caller will not wait for again was not granted (``_dispatch_pending``)."""
+	or logged; an RQ job timeout leaves as a fresh instance. ``sent`` is None when a
+	``nowait`` lock was not granted (``_dispatch_pending``)."""
 	guard = ai_fix._InterruptGuard(base=True)
 	failure = None
 	try:
 		with guard:
 			run = _retry_sql(
-				lambda: store.prepare_dispatch(run_id, docname=docname, now=_now(), wait=wait),
-				retry_lock_waits=retry_lock_waits,
+				lambda: store.prepare_dispatch(run_id, docname=docname, now=_now(), wait=not nowait),
+				retry_lock_waits=not nowait,
 			)
 			if not run:
 				return False, None
@@ -923,7 +940,7 @@ def _deliver(run_id, docname, *, wait=True, retry_lock_waits=True):
 	if guard.pending():
 		failure = None
 		raise guard.interrupt()
-	if not retry_lock_waits and store.is_lock_unavailable(failure):
+	if nowait and store.is_lock_unavailable(failure):
 		return None, None
 	return False, failure
 
@@ -931,7 +948,15 @@ def _deliver(run_id, docname, *, wait=True, retry_lock_waits=True):
 def ai_queue():
 	value = frappe.conf.get("optimus_ai_queue", "long")
 	if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,39}", value):
-		raise ValueError("Invalid AI refresh queue configuration")
+		from frappe import _
+
+		raise ValueError(
+			_(
+				"Invalid site configuration {0}: use a queue name of 1 to 40 lowercase letters, digits, "
+				"underscores or hyphens that starts with a letter, for example "
+				"bench --site <site> set-config {0} long"
+			).format("optimus_ai_queue")
+		)
 	return value
 
 
@@ -980,17 +1005,19 @@ def start_refresh(
 	now = _now()
 	current = frappe.db.get_value(store.RUN, {"active_session": docname}, "*", as_dict=True)
 	if current and current.get("state") in store.ACTIVE and not store.expired(current, now):
+		_resend_pending(current, docname, now)
 		return {"status": "already_running", "refresh": public_state(current, now=now)}
 	if not ai_fix.is_available():
 		return {"status": "refused", "reason": "disabled"}
-	workers = _workers_listening()
-	if workers is not True:
-		return {"status": "refused", "reason": "no_worker" if workers is False else "queue_unavailable"}
 	# Every setting is read before admission (R5): a run admitted with an unusable slice
 	# length could never be dispatched and held its session until the queued lease expired.
 	max_seconds = _setting_int("optimus_ai_refresh_max_seconds", 3600, 60, 86400)
 	site_cap = _setting_int("optimus_ai_max_active_refreshes", 2, 1, 1000)
 	slice_seconds()
+	ai_queue()
+	workers = _workers_listening()
+	if workers is not True:
+		return {"status": "refused", "reason": "no_worker" if workers is False else "queue_unavailable"}
 	run_id = uuid.uuid4().hex
 	out = _retry_sql(
 		lambda: store.admit(
@@ -1012,7 +1039,8 @@ def start_refresh(
 		),
 		retry_lock_waits=False,
 	)
-	_note_released(out.get("taken_over"), docname)
+	# A takeover commits with every answer, a refusal included (F3).
+	_note_released(out.pop("taken_over", None), docname)
 	if out["status"] == "already_running" and not out.get("run"):
 		# The unique reservation refused the insert, but that run was not visible to the
 		# admission's snapshot (Postgres): read it again in a fresh transaction.
@@ -1023,12 +1051,31 @@ def start_refresh(
 			return {"status": "refused", "reason": "busy"}
 		out = {"status": "already_running", "run": current}
 	if out["status"] == "queued":
-		# An HTTP request: the session row is waited for once; a busy one leaves the
-		# committed intent pending instead of failing the response (C1).
-		_dispatch_pending(run_id, docname, retry_lock_waits=False)
+		# The admission already waited for the session row: the dispatch takes it with
+		# NOWAIT, so the click waits once (C1, F4). A busy row leaves the committed intent
+		# pending for the next click (``_resend_pending``) instead of failing the response.
+		_dispatch_pending(run_id, docname, nowait=True)
 	if out.get("run"):
 		return {"status": out["status"], "refresh": public_state(out["run"])}
 	return out
+
+
+def _resend_pending(run, docname, now):
+	"""On attach, send again a committed slice intent that never reached a worker (F1): a
+	busy dispatch or a Redis failure left it pending, and the sweep is not scheduled.
+
+	Best effort. The gate is the plain read: a queued run with a pending intent past the
+	dispatch interval, so a polling click takes no lock. The send takes the session row with
+	NOWAIT. A busy row, a failed enqueue (``_dispatch_pending`` logs it) or any other error
+	leaves the intent pending and never changes the attach answer. The worker's claim stays
+	the fence and the deterministic job id deduplicates a job RQ still holds."""
+	if (
+		run.get("state") != "queued"
+		or not run.get("dispatch_pending")
+		or (run.get("dispatched_at_epoch") or 0) > now - store.DISPATCH_INTERVAL
+	):
+		return
+	_isolated(lambda: _dispatch_pending(run["name"], docname, nowait=True))
 
 
 def _note_released(run, docname):
@@ -1070,7 +1117,11 @@ def recover_pending():
 		("deadline", {"state": active, "deadline": ["<=", now]}, "deadline asc"),
 		(
 			None,
-			{"state": "queued", "dispatch_pending": 1, "dispatched_at_epoch": ["<=", now - 30]},
+			{
+				"state": "queued",
+				"dispatch_pending": 1,
+				"dispatched_at_epoch": ["<=", now - store.DISPATCH_INTERVAL],
+			},
 			"dispatched_at_epoch asc",
 		),
 	)
@@ -1091,7 +1142,7 @@ def recover_pending():
 		for row in rows or ():
 			name, session = row["name"], row["session_name"]
 			if reason is None:
-				sent, failure = _deliver(name, session, wait=False, retry_lock_waits=False)
+				sent, failure = _deliver(name, session, nowait=True)
 				outcome = "dispatched" if sent else "busy" if sent is None else None
 			else:
 				run, failure = _isolated(
