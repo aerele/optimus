@@ -17,6 +17,11 @@ name: AI Quality
 #             test selected by -k "semgrep or rq" (module names and the rq / semgrep
 #             markers) with REQUIRE_SEMGREP=1, so a missing tool fails instead of
 #             skipping. Also lints scripts/ (ci.yml lints optimus/ only).
+#   sql-journal  Runs optimus/tests/test_ai_refresh_sql.py, the refresh journal's
+#             transactions, on real databases, one matrix leg each: MariaDB 10.6
+#             (snapshot isolation off), MariaDB 11.8 (innodb_snapshot_isolation on, the
+#             default of Frappe v16's CI) and PostgreSQL 16. The Postgres role must be
+#             a superuser (CI's POSTGRES_USER is): one test sets deadlock_timeout.
 on:
   pull_request:
     branches: ['**']

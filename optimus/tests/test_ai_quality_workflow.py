@@ -73,3 +73,14 @@ def test_sql_journal_is_exercised_on_both_database_engines(workflow):
 	):
 		assert needle in job, needle
 	assert 'continue-on-error' not in job
+
+
+def test_the_header_lists_every_job(workflow):
+	"""D6: the comment block at the top names each job, so a reader of the file finds them all."""
+	header = workflow.split("\non:\n", 1)[0]
+	jobs = re.findall(r"^  ([a-z][a-z0-9-]*):\n    name:", workflow.split("\njobs:\n", 1)[1], re.M)
+	assert jobs == ["semgrep", "ai-tests", "sql-journal"]
+	for job in jobs:
+		assert re.search(rf"^#   {re.escape(job)}\s", header, re.M), job
+	listed = header.split("sql-journal", 1)[1]
+	assert "MariaDB 10.6" in listed and "MariaDB 11.8" in listed and "PostgreSQL 16" in listed
