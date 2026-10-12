@@ -154,7 +154,7 @@ def journal(monkeypatch):
 		"active_session": "fake-session-doc",
 		"slice_no": 0,
 		"worker_token": None,
-		"lease_until": 0,
+		"lease_until": 1800,  # a live queued lease: an expired run is not claimed
 		"deadline": 3600,
 		"attempted": 0,
 		"completed": 0,
@@ -1526,3 +1526,23 @@ def test_a_refused_admission_still_reports_the_run_it_released(journal):
 	assert out["status"] == "refused" and out["reason"] == "site_cap"
 	assert out["taken_over"]["name"] == "fake-run" and out["taken_over"]["inconsistent"] == "attempt"
 	assert journal.db.rows[journal.mod.RUN]["fake-run"]["state"] == "interrupted"
+
+
+@pytest.mark.parametrize(
+	"values", [{"lease_until": 300}, {"lease_until": 5000, "deadline": 300}], ids=["lease", "deadline"]
+)
+def test_a_late_delivery_cannot_claim_a_run_that_expired(journal, values):
+	"""F1: one dead-run rule. A queued run whose lease or deadline has passed is dead (progress
+	says interrupted, the Refresh is not held off by it), so a late queue delivery must not
+	revive it: nothing is written, and the next admission takes it over."""
+	journal.run.update(values)
+	before = deepcopy(journal.run)
+	assert claim(journal, now=400) is None
+	assert journal.run == before
+	out = admit(journal, now=400)
+	assert out["status"] == "queued" and out["taken_over"]["name"] == "fake-run"
+
+
+def test_a_live_queued_run_is_still_claimed_at_its_last_moment(journal):
+	journal.run.update(lease_until=401, deadline=3600)
+	assert claim(journal, now=400)["state"] == "running"

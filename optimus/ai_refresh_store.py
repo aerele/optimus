@@ -461,7 +461,11 @@ def owns(run, worker_token, now):
 
 
 def claim(run_id, *, docname, slice_no, worker_token, now, lease_seconds):
-	"""Claim a queued slice once. Replaying even the same token is a no-op."""
+	"""Claim a queued slice once. Replaying even the same token is a no-op.
+
+	A run whose queued lease or deadline has passed (``expired``) is dead, whatever the queue
+	delivers late: it is not claimed, so it cannot be revived beside a path that treated it as
+	dead. The session's next admission or the recovery sweep ends it."""
 	parent, run = lock_run(run_id, docname)
 	if (
 		not parent
@@ -469,6 +473,7 @@ def claim(run_id, *, docname, slice_no, worker_token, now, lease_seconds):
 		or not run.get("active_session")
 		or run["state"] != "queued"
 		or run["slice_no"] != slice_no
+		or expired(run, now)
 	):
 		return None
 	if not worker_token or lease_seconds <= 0 or run["deadline"] <= now or parent["status"] != "Ready":

@@ -28,27 +28,11 @@ from optimus import ai_refresh_store as store
 
 _JOB_METHOD = "optimus.ai_jobs.run_ai_refresh_slice"
 # The failure kinds the journal records under their own name; any other becomes ``internal``.
-# The skip kinds are #72's (``ai_fix.AI_SKIP_KINDS``), as are the kinds that stop a run at once
-# (``AI_FATAL_KINDS``, read by the store); ``context`` and ``refused`` are per-prompt kinds.
-_ERROR_KINDS = frozenset(
-	{
-		"auth",
-		"not_found",
-		"quota",
-		"config",
-		"rate_limited",
-		"timeout",
-		"transport",
-		"server",
-		"bad_request",
-		"bad_response",
-		"internal",
-		"unknown",
-		"context",
-		"refused",
-		*ai_fix.AI_SKIP_KINDS,
-	}
-)
+# They are #72's: every kind ``ai_fix`` classifies (``KIND_HINTS`` has one line for each, and
+# holds the skip and fatal kinds), so a kind #72 adds is recorded as itself and, when it is
+# fatal, stops the run at once. The engine adds no kind of its own.
+_ENGINE_ONLY_KINDS = frozenset()
+_ERROR_KINDS = frozenset(ai_fix.KIND_HINTS) | _ENGINE_ONLY_KINDS
 
 
 class RefreshSliceFailed(RuntimeError):
@@ -759,7 +743,7 @@ def _build_payload(row, file_cache, grounding, *, principal):
 	return analyze._ai_payload_for_finding(row, file_cache, **grounding)
 
 
-def _grounding(doc, row, memo):
+def _grounding(doc, row, memo, run_id=None):
 	"""The fix prompt's grounding for one finding, the same inputs as the synchronous Refresh
 	(``analyze._run_ai_backfill``): the Phase 2 hottest-line index and the Slow Query index
 	evidence (#16). The slice's ``memo`` builds each once, not once per finding (#14): a Phase 2
@@ -779,7 +763,10 @@ def _grounding(doc, row, memo):
 		memo["phase2_index"] = analyze._phase2_index_for(doc)
 	if "evidence" not in memo:
 		scope, failed = analyze._run_ai_step(
-			analyze._ai_evidence_scope, title="optimus ai refresh evidence", docname=doc.get("name")
+			analyze._ai_evidence_scope,
+			title="optimus ai refresh evidence",
+			docname=doc.get("name"),
+			run_id=run_id,
 		)
 		memo["evidence"] = (None, ()) if failed else scope
 	evidence_lookup, tracked_apps = memo["evidence"]
@@ -803,7 +790,10 @@ def _touch_session(name, **values):
 def _fix_item(run, doc, row, memo):
 	fingerprint = _signature(doc, row)
 	payload = _build_payload(
-		row, memo.setdefault("source", {}), _grounding(doc, row, memo), principal=run["requested_by"]
+		row,
+		memo.setdefault("source", {}),
+		_grounding(doc, row, memo, run["name"]),
+		principal=run["requested_by"],
 	)
 
 	def valid():
