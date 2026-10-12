@@ -72,9 +72,21 @@ def _now():
 
 
 def _setting_int(name, default, minimum, maximum):
+	"""A whole-number site setting. ``bench set-config`` stores a string unless it is given
+	``-p``, so a string of digits is read as its number (D5); anything else out of range
+	raises, naming the setting and the command that sets it."""
 	value = frappe.conf.get(name, default)
+	if type(value) is str and len(value) <= 12 and value.strip().isascii() and value.strip().isdecimal():
+		value = int(value.strip())
 	if type(value) is not int or not minimum <= value <= maximum:
-		raise ValueError("Invalid AI refresh configuration")
+		from frappe import _
+
+		raise ValueError(
+			_(
+				"Invalid site configuration {0}: use a whole number from {1} to {2}, for example "
+				"bench --site <site> set-config -p {0} {3}"
+			).format(name, minimum, maximum, default)
+		)
 	return value
 
 
@@ -191,12 +203,13 @@ def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
 	if failure is not None or guard.pending():
 		# A failure before claim is harmless; after send the committed intent
 		# becomes uncertain. If SQL itself is down it stays Calling until recovery.
-		cleanup_error = None
+		cleanup_error = released = None
+		unsettled = getattr(failure, _UNSETTLED_ATTR, None)
 		try:
 			with guard:
 				frappe.db.rollback()
 				if docname:
-					_retry_sql(
+					released = _retry_sql(
 						lambda: store.abandon(run_id, docname=docname, worker_token=worker_token, now=_now())
 					)
 		except Exception as exc:
@@ -206,7 +219,9 @@ def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
 		try:
 			with guard:
 				if failure is not None:
-					ai_fix.log_ai_failure("optimus AI refresh worker", failure)
+					ai_fix.log_ai_failure(
+						"optimus AI refresh worker", failure, **_unsettled_context(unsettled, released)
+					)
 				if cleanup_error is not None:
 					ai_fix.log_ai_failure("optimus AI refresh recovery", cleanup_error)
 				_transaction(lambda: None)  # preserve scrubbed logs before RQ rolls back
@@ -218,6 +233,17 @@ def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
 		raise RefreshSliceFailed(
 			f"AI refresh worker failed ({failure_type}); log persistence failure ({log_failure_type or 'none'})"
 		)
+
+
+def _unsettled_context(unsettled, released):
+	"""``tokens`` and ``outcome`` for the worker's last row when the outcome write gave up
+	(R4): ``_settle``'s outcome, and that the cleanup left the open attempt uncertain."""
+	if not unsettled:
+		return {}
+	tokens, outcome = unsettled
+	if released and outcome != _UNKNOWN:
+		outcome += "; the attempt is now uncertain"
+	return {"tokens": tokens, "outcome": outcome}
 
 
 def _drive(run_id, docname, slice_no, worker_token):
@@ -286,7 +312,7 @@ def _drive(run_id, docname, slice_no, worker_token):
 			_end(run_id, docname, worker_token, reason)
 			return
 		if not attempt:
-			_yield(run_id, docname, worker_token)
+			_yield(run_id, docname, worker_token, progressed=items > 0)
 			return
 		remaining = int(run["deadline"] - _now() - 5)
 		if remaining < min(15, call_limit):
@@ -376,6 +402,8 @@ def _drive(run_id, docname, slice_no, worker_token):
 
 
 _SETTLE_TITLE = "optimus AI refresh result storage"
+# On an error ``_settle`` raises: ``(tokens, outcome)``, for the worker cleanup's last row.
+_UNSETTLED_ATTR = "_optimus_refresh_unsettled"
 _COMMITTED_AFTER_ERROR = "committed: the error came after the COMMIT; the outcome and its tokens are saved"
 _RECORDED = "recorded: the attempt's outcome and its tokens are saved (read back after the error)"
 _UNKNOWN = "unknown: the outcome could not be read back after the error, so these tokens may well be recorded"
@@ -409,7 +437,8 @@ def _settle(operation, *, run_id, docname, attempt_id, tokens, session_uuid=None
 	  transaction is gone) and each write's failure (with ``tries`` and ``tokens``). When the
 	  fallback recorded the tokens, the first write's rows say ``recorded by fallback``, so a
 	  reconciler never adds them twice.
-	- When neither write saved an outcome, the last error is raised. The usage counter is
+	- When neither write saved an outcome, the last error is raised, carrying the tokens and
+	  that outcome (``_UNSETTLED_ATTR``) for the worker cleanup's last row. The usage counter is
 	  log-and-continue (#72, D2): a statement-level counter failure is logged by the counter
 	  and the write still commits, so the journal's ``tokens_reported`` is the source for
 	  reconciling the session's ``ai_tokens_spent``.
@@ -422,7 +451,7 @@ def _settle(operation, *, run_id, docname, attempt_id, tokens, session_uuid=None
 		raised = None
 	elif fallback is None:
 		rows = _rows(logged, error, _failed(settled, tries), tries=tries, tokens=tokens)
-		raised = error
+		raised, unsettled = error, _failed(settled, tries)
 	else:
 		fb_result, fb_error, fb_logged, fb_tries, fb_settled = _write_outcome(fallback, attempt_id)
 		if fb_error is None and fb_result:
@@ -442,12 +471,14 @@ def _settle(operation, *, run_id, docname, attempt_id, tokens, session_uuid=None
 				rows = _rows(logged, error, _failed(final, tries), tries=tries, tokens=tokens)
 				rows += _rows(fb_logged, fb_error, _failed(final, fb_tries), tries=fb_tries, tokens=tokens)
 				raised = fb_error if fb_error is not None else error
+				unsettled = _failed(final, fb_tries if fb_error is not None else tries)
 		fb_error = fb_logged = None
 	error = logged = None
 	for exc, context in rows:
 		ai_fix.log_ai_failure(_SETTLE_TITLE, exc, **reference, **context)
 	rows = None
 	if raised is not None:
+		safe_call.best_effort(lambda: setattr(raised, _UNSETTLED_ATTR, (tokens, unsettled)), None)
 		raise raised
 	return True
 
@@ -541,9 +572,11 @@ def _end(run_id, docname, worker_token, reason):
 	)
 
 
-def _yield(run_id, docname, worker_token):
+def _yield(run_id, docname, worker_token, *, progressed=True):
 	run = _retry_sql(
-		lambda: store.continue_run(run_id, docname=docname, worker_token=worker_token, now=_now())
+		lambda: store.continue_run(
+			run_id, docname=docname, worker_token=worker_token, now=_now(), progressed=progressed
+		)
 	)
 	if run and run["state"] == "queued":
 		_dispatch_pending(run_id, docname)
@@ -778,6 +811,9 @@ def _next_item(run, memo):
 	from optimus import analyze
 	from optimus.settings import get_config
 
+	if not ai_fix.is_available():
+		# Switched off mid-run: nothing more can be sent, which is not a complete refresh (E7).
+		raise StopRefresh("disabled")
 	doc = frappe.get_doc("Optimus Session", run["session_name"])
 	tried, uncertain = _attempts(run)
 	names = {(a["kind"], a["target_name"]) for a in tried}
@@ -837,14 +873,36 @@ def _next_item(run, memo):
 	return None
 
 
-def _dispatch_pending(run_id, docname):
+def _dispatch_pending(run_id, docname, *, wait=True, retry_lock_waits=True):
+	"""Hand a committed slice intent to RQ (``_deliver``) and log a failed enqueue.
+
+	True once enqueued. False when nothing is due (claimed, ended or throttled) or the
+	enqueue failed (logged; the intent stays pending). None when the session row stayed
+	locked and the caller does not wait again (``retry_lock_waits=False``: an HTTP request
+	waits one lock timeout at most, C1): no row is logged and the committed intent stays
+	pending for the sweep or the session's next admission."""
+	sent, failure = _deliver(run_id, docname, wait=wait, retry_lock_waits=retry_lock_waits)
+	if failure is not None:
+		ai_fix.log_ai_failure("optimus AI refresh enqueue", failure, docname=docname, run_id=run_id)
+		failure = None
+		_transaction(lambda: None)
+	return sent
+
+
+def _deliver(run_id, docname, *, wait=True, retry_lock_waits=True):
+	"""``(sent, failure)`` for one pending slice: its ordinary failure is returned, not raised
+	or logged; an RQ job timeout leaves as a fresh instance. ``sent`` is None when a lock the
+	caller will not wait for again was not granted (``_dispatch_pending``)."""
 	guard = ai_fix._InterruptGuard(base=True)
 	failure = None
 	try:
 		with guard:
-			run = _retry_sql(lambda: store.prepare_dispatch(run_id, docname=docname, now=_now()))
+			run = _retry_sql(
+				lambda: store.prepare_dispatch(run_id, docname=docname, now=_now(), wait=wait),
+				retry_lock_waits=retry_lock_waits,
+			)
 			if not run:
-				return False
+				return False, None
 			enqueue = getattr(frappe.enqueue, "__wrapped__", frappe.enqueue)
 			_transaction(
 				lambda: enqueue(
@@ -859,17 +917,15 @@ def _dispatch_pending(run_id, docname):
 					slice_no=run["slice_no"],
 				)
 			)
+			return True, None
 	except Exception as exc:
 		failure = exc
 	if guard.pending():
 		failure = None
 		raise guard.interrupt()
-	if failure is not None:
-		ai_fix.log_ai_failure("optimus AI refresh enqueue", failure)
-		failure = None
-		_transaction(lambda: None)
-		return False
-	return True
+	if not retry_lock_waits and store.is_lock_unavailable(failure):
+		return None, None
+	return False, failure
 
 
 def ai_queue():
@@ -918,15 +974,23 @@ def start_refresh(
 		raise ValueError("Invalid AI refresh identity")
 	_check_run({"session_name": docname, "session_uuid": session_uuid, "requested_by": requested_by})
 	# Attaching only reads progress. Redis or a disabled provider must not hide
-	# an existing run; admission below still serializes any competing new run.
+	# an existing run; admission below still serializes any competing new run. A run
+	# whose lease or deadline has passed is no longer attached to: the admission takes
+	# it over (A2), so a crashed worker needs neither the scheduler nor a manual cancel.
+	now = _now()
 	current = frappe.db.get_value(store.RUN, {"active_session": docname}, "*", as_dict=True)
-	if current and current.get("state") in store.ACTIVE:
-		return {"status": "already_running", "refresh": public_state(current)}
+	if current and current.get("state") in store.ACTIVE and not store.expired(current, now):
+		return {"status": "already_running", "refresh": public_state(current, now=now)}
 	if not ai_fix.is_available():
 		return {"status": "refused", "reason": "disabled"}
 	workers = _workers_listening()
 	if workers is not True:
 		return {"status": "refused", "reason": "no_worker" if workers is False else "queue_unavailable"}
+	# Every setting is read before admission (R5): a run admitted with an unusable slice
+	# length could never be dispatched and held its session until the queued lease expired.
+	max_seconds = _setting_int("optimus_ai_refresh_max_seconds", 3600, 60, 86400)
+	site_cap = _setting_int("optimus_ai_max_active_refreshes", 2, 1, 1000)
+	slice_seconds()
 	run_id = uuid.uuid4().hex
 	out = _retry_sql(
 		lambda: store.admit(
@@ -936,8 +1000,8 @@ def start_refresh(
 			requested_by=requested_by,
 			scope=scope,
 			now=_now(),
-			max_seconds=_setting_int("optimus_ai_refresh_max_seconds", 3600, 60, 86400),
-			site_cap=_setting_int("optimus_ai_max_active_refreshes", 2, 1, 1000),
+			max_seconds=max_seconds,
+			site_cap=site_cap,
 			user_cap=2,
 			cap=cap,
 			include_fixes=include_fixes,
@@ -948,6 +1012,7 @@ def start_refresh(
 		),
 		retry_lock_waits=False,
 	)
+	_note_released(out.get("taken_over"), docname)
 	if out["status"] == "already_running" and not out.get("run"):
 		# The unique reservation refused the insert, but that run was not visible to the
 		# admission's snapshot (Postgres): read it again in a fresh transaction.
@@ -958,50 +1023,120 @@ def start_refresh(
 			return {"status": "refused", "reason": "busy"}
 		out = {"status": "already_running", "run": current}
 	if out["status"] == "queued":
-		_dispatch_pending(run_id, docname)
+		# An HTTP request: the session row is waited for once; a busy one leaves the
+		# committed intent pending instead of failing the response (C1).
+		_dispatch_pending(run_id, docname, retry_lock_waits=False)
 	if out.get("run"):
 		return {"status": out["status"], "refresh": public_state(out["run"])}
 	return out
 
 
+def _note_released(run, docname):
+	"""One Error Log row for a run force-released with an inconsistent journal row (E2)."""
+	if not run or not run.get("inconsistent"):
+		return
+	ai_fix.log_ai_failure(
+		"optimus AI refresh recovery",
+		store.JournalUnavailable(f"Refresh journal {run['inconsistent']} is inconsistent"),
+		docname=docname,
+		run_id=run["name"],
+		outcome="released; its open call is uncertain and its usage unknown",
+	)
+	_transaction(lambda: None)
+
+
 def recover_pending():
-	"""Bounded scheduler sweep. Never repeat an uncertain provider operation.
+	"""Bounded recovery sweep: an accelerator. An expired run is also taken over by its
+	session's next admission (``store.admit``), so recovery works with the scheduler paused.
+	Never repeats an uncertain provider operation.
 
 	A SQL lease expiry fences the old worker even if RQ still lists it. Late
 	known usage may settle, but its answer cannot replace a newer generation.
-	"""
+
+	Three independent passes: expired leases, spent deadlines, then committed intents that
+	never reached a worker. Each row is its own short transaction and takes its session row
+	with NOWAIT, so a row a dead or slow transaction holds is skipped at once (``busy``; the
+	next sweep or admission tries again) instead of stalling the sweep (R1). A failing row
+	or candidate read never stops the rest (O1): each failure is logged once, after the
+	passes, with its ``run_id``; a force-released inconsistent run gets one row too.
+
+	Returns the counts: ``interrupted``, ``dispatched``, ``busy`` and ``failed``."""
 	now = _now()
-	expired = frappe.get_all(
-		store.RUN,
-		filters={"state": ["in", sorted(store.ACTIVE)], "lease_until": ["<=", now]},
-		fields=["name", "session_name"],
-		order_by="lease_until asc",
-		limit_page_length=100,
+	counts = dict.fromkeys(("interrupted", "dispatched", "busy", "failed"), 0)
+	failures, released = [], []
+	active = ["in", sorted(store.ACTIVE)]
+	passes = (
+		("lease_expired", {"state": active, "lease_until": ["<=", now]}, "lease_until asc"),
+		("deadline", {"state": active, "deadline": ["<=", now]}, "deadline asc"),
+		(
+			None,
+			{"state": "queued", "dispatch_pending": 1, "dispatched_at_epoch": ["<=", now - 30]},
+			"dispatched_at_epoch asc",
+		),
 	)
-	for row in expired:
-		_retry_sql(
-			lambda: store.interrupt(row["name"], docname=row["session_name"], now=now, reason="lease_expired")
+	for reason, filters, order_by in passes:
+		rows, failure = _isolated(
+			lambda: _transaction(
+				lambda: frappe.get_all(
+					store.RUN,
+					filters=filters,
+					fields=["name", "session_name"],
+					order_by=order_by,
+					limit_page_length=100,
+				)
+			)
 		)
-	budget = frappe.get_all(
-		store.RUN,
-		filters={"state": ["in", sorted(store.ACTIVE)], "deadline": ["<=", now]},
-		fields=["name", "session_name"],
-		order_by="deadline asc",
-		limit_page_length=100,
-	)
-	for row in budget:
-		_retry_sql(
-			lambda: store.interrupt(row["name"], docname=row["session_name"], now=now, reason="deadline")
-		)
-	pending = frappe.get_all(
-		store.RUN,
-		filters={"state": "queued", "dispatch_pending": 1, "dispatched_at_epoch": ["<=", now - 30]},
-		fields=["name", "session_name"],
-		order_by="dispatched_at_epoch asc",
-		limit_page_length=100,
-	)
-	for row in pending:
-		_dispatch_pending(row["name"], row["session_name"])
+		if failure is not None:
+			failures.append((None, None, failure))
+		for row in rows or ():
+			name, session = row["name"], row["session_name"]
+			if reason is None:
+				sent, failure = _deliver(name, session, wait=False, retry_lock_waits=False)
+				outcome = "dispatched" if sent else "busy" if sent is None else None
+			else:
+				run, failure = _isolated(
+					lambda: _retry_sql(
+						lambda: store.interrupt(name, docname=session, now=now, reason=reason, wait=False),
+						retry_lock_waits=False,
+					)
+				)
+				if failure is not None and store.is_lock_unavailable(failure):
+					failure = None
+					outcome = "busy"
+				else:
+					outcome = "interrupted" if run else None
+				if run and run.get("inconsistent"):
+					released.append((run, session))
+			if failure is not None:
+				failures.append((name, session, failure))
+			elif outcome:
+				counts[outcome] += 1
+	failure = None
+	counts["failed"] = len(failures)
+	for run, session in released:
+		_note_released(run, session)
+	for run_id, session, exc in failures:
+		ai_fix.log_ai_failure("optimus AI refresh recovery", exc, docname=session, run_id=run_id)
+	if failures:
+		failures = None
+		_transaction(lambda: None)
+	return counts
+
+
+def _isolated(operation):
+	"""``(result, failure)``: an ordinary failure is returned rather than raised, so one bad
+	row cannot stop the sweep; an RQ job timeout still leaves as a fresh instance."""
+	guard = ai_fix._InterruptGuard(base=True)
+	result = failure = None
+	try:
+		with guard:
+			result = operation()
+	except Exception as exc:
+		failure = exc
+	if guard.pending():
+		result = failure = None
+		raise guard.interrupt()
+	return result, failure
 
 
 def refresh_state(docname):
@@ -1013,20 +1148,52 @@ def refresh_state(docname):
 
 
 def cancel_refresh(run_id, *, docname, requested_by):
-	"""Caller authorizes the session ``docname``; a run of another session is not cancelled.
-	SQL cancellation works without Redis."""
-	run = _retry_sql(lambda: store.cancel(run_id, docname=docname, now=_now(), cancelled_by=requested_by))
-	return public_state(run) if run else None
+	"""Cancel a run of the session ``docname``, which the caller authorizes. SQL cancellation
+	works without Redis.
+
+	``{"status": "cancelled", "refresh": ...}``, or a refusal: ``not_running`` when the run
+	is not an active run of this session (another session's run changes nothing, S1), and
+	``busy`` when the session row stayed locked for one lock wait timeout. An HTTP request
+	waits once (C1); deadlocks and snapshot or serialization conflicts are still retried. A
+	run with an inconsistent journal row is force-released, with one Error Log row (E2)."""
+	guard = ai_fix._InterruptGuard(base=True)
+	run = failure = None
+	try:
+		with guard:
+			run = _retry_sql(
+				lambda: store.cancel(run_id, docname=docname, now=_now(), cancelled_by=requested_by),
+				retry_lock_waits=False,
+			)
+	except Exception as exc:
+		failure = exc
+	if guard.pending():
+		run = failure = None
+		raise guard.interrupt()
+	if failure is not None:
+		if not store.is_lock_unavailable(failure):
+			raise failure
+		failure = None
+		return {"status": "refused", "reason": "busy"}
+	if not run:
+		return {"status": "refused", "reason": "not_running"}
+	_note_released(run, docname)
+	return {"status": "cancelled", "refresh": public_state(run)}
 
 
-def public_state(run):
-	"""A counts-only view; SQL remains readable during a Redis outage."""
+def public_state(run, now=None):
+	"""A counts-only view; SQL remains readable during a Redis outage.
+
+	An active run whose lease or deadline has passed shows as it will be recorded:
+	``interrupted``, with ``stalled`` True and the expiry as its ``end_reason``, before any
+	recovery has written it (A2). The session's next admission takes it over."""
 
 	def count(key):
 		value = run.get(key) or 0
 		return value if type(value) is int and value >= 0 else 0
 
-	state = run.get("state")
+	now = _now() if now is None else now
+	stalled = store.expired(run, now)
+	state = "interrupted" if stalled else run.get("state")
 	state = state if state in store.ACTIVE | store.TERMINAL else "unknown"
 	return {
 		"run_id": run["name"],
@@ -1046,7 +1213,8 @@ def public_state(run):
 			"tokens_reported": count("tokens_reported"),
 			"incomplete_attempts": count("usage_incomplete"),
 		},
-		"end_reason": run.get("end_reason") or "",
+		"end_reason": store.expiry_reason(run, now) if stalled else run.get("end_reason") or "",
+		"stalled": stalled,
 		"breaker_kind": run.get("breaker_kind") or "",
 		"render_pending": bool(run.get("render_pending")),
 		"steps_state": run.get("steps_state") or "",

@@ -69,6 +69,8 @@ app_include_css = f"/assets/optimus/css/floating_widget.css?v={_widget_css_v}"
 
 after_install = "optimus.install.after_install"
 before_uninstall = "optimus.install.before_uninstall"
+# Seeds the AI refresh admission mutex again if a rollback removed it (idempotent).
+after_migrate = ["optimus.install.after_migrate"]
 
 # Boot session
 # ------------

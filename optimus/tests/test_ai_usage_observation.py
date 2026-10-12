@@ -77,6 +77,17 @@ def test_openai_usage_presence_is_not_inferred_from_normalized_zero(provider, ra
 		({"input_tokens": 0, "output_tokens": 0}, True, 0),
 		({"input_tokens": 4, "output_tokens": 3, "cache_read_input_tokens": 10}, True, 17),
 		({"input_tokens": 4, "output_tokens": 3, "cache_read_input_tokens": "bad"}, False, 7),
+		# T8: Anthropic sends a cache field it did not use as null; that is no missing count.
+		(
+			{
+				"input_tokens": 4,
+				"output_tokens": 3,
+				"cache_creation_input_tokens": None,
+				"cache_read_input_tokens": None,
+			},
+			True,
+			7,
+		),
 	],
 )
 def test_anthropic_usage_accounts_for_cache_components(provider, raw, known, total):
@@ -154,3 +165,33 @@ def test_failed_reask_preserves_first_spend_and_distinguishes_pre_send_failure(p
 	result = ai_fix.suggest_fix({"finding_type": "N+1 Query"}, session_uuid="fake-session")
 	assert len(calls) == 2 and result["tokens"]["total_tokens"] == 7
 	assert result["usage_complete"] is (not sent)
+
+
+def test_no_completion_attempted_is_a_known_zero():
+	"""C3: a refusal before any HTTP call cost nothing, which is known."""
+	usage = ai_fix.Usage()
+	assert usage.complete is True and usage.calls == 0
+	usage.begin()
+	assert usage.complete is False
+
+
+def test_a_refusal_before_sending_reports_a_known_zero(provider, monkeypatch):
+	def refuse(*a, **kw):
+		raise ai_fix.AiFixError("fake: the prompt does not fit", kind="context")
+
+	sent = []
+	monkeypatch.setattr(ai_fix, "_check_context_fits", refuse)
+	monkeypatch.setattr(ai_fix.requests, "post", lambda *a, **kw: sent.append(True))
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix.suggest_fix({"finding_type": "N+1 Query"}, session_uuid="fake-session")
+	assert not sent and caught.value.usage is None and caught.value.usage_complete is True
+
+
+def test_a_refusal_inside_the_call_boundary_before_sending_reports_a_known_zero(provider, monkeypatch):
+	def refuse(*a, **kw):
+		raise ai_fix.AiFixError("fake: budget spent before sending", kind="timeout")
+
+	monkeypatch.setattr(ai_fix, "_dispatch_call", refuse)
+	with pytest.raises(ai_fix.AiFixError) as caught:
+		ai_fix.suggest_fix({"finding_type": "N+1 Query"}, session_uuid="fake-session")
+	assert caught.value.usage_complete is True

@@ -382,3 +382,11 @@ def test_the_send_intent_transaction_yields_on_a_changed_input(work):
 	work.row["title"] = "changed input"
 	assert _begin(work, item) is None
 	assert work.journal.run["attempted"] == 0
+
+
+def test_selection_stops_the_run_when_ai_is_switched_off(work, monkeypatch):
+	"""E7 / C4: with the provider off nothing was selected, so the run ended complete."""
+	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: False)
+	with pytest.raises(work.jobs.StopRefresh) as caught:
+		work.jobs._next_item(work.journal.run, {})
+	assert caught.value.reason == "disabled" and not work.sends

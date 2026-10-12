@@ -55,7 +55,8 @@
   "breaker_kind",
   "seq",
   "retry_no",
-  "blocked_uncertain"
+  "blocked_uncertain",
+  "idle_slices"
  ],
  "fields": [
   {
@@ -342,6 +343,13 @@
    "fieldname": "blocked_uncertain",
    "fieldtype": "Int",
    "label": "Blocked Uncertain",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "idle_slices",
+   "fieldtype": "Int",
+   "label": "Idle Slices",
    "read_only": 1,
    "default": "0"
   }

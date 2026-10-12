@@ -82,3 +82,34 @@ def test_admission_seed_is_idempotent(monkeypatch):
 	patch.execute()
 	patch.execute()
 	assert len(rows) == 1 and rows[0]["scope"] == "site"
+
+
+def test_every_migrate_seeds_the_admission_mutex_again(monkeypatch):
+	"""D4: the patch runs once. A rollback that dropped the journal tables, then a redeploy,
+	left the mutex row missing with the patch already logged as done, so every user refresh
+	failed closed for good."""
+	from importlib import import_module
+	from types import SimpleNamespace
+
+	from optimus import hooks, install
+
+	patch = import_module("optimus.patches.v0_12_0.initialize_ai_refresh_store")
+	assert "optimus.install.after_migrate" in hooks.after_migrate
+	seen, tables = [], {"Optimus AI Refresh Control"}
+	monkeypatch.setattr(patch, "execute", lambda: seen.append(True))
+	monkeypatch.setattr(
+		install, "frappe", SimpleNamespace(db=SimpleNamespace(table_exists=lambda doctype: doctype in tables))
+	)
+	install.after_migrate()
+	assert seen == [True]
+	tables.clear()  # the journal is not installed: admission stays closed, migrate goes on
+	install.after_migrate()
+	assert seen == [True]
+
+
+def test_the_run_journal_records_its_idle_slices():
+	path = ROOT / "optimus" / "doctype" / "optimus_ai_refresh_run" / "optimus_ai_refresh_run.json"
+	doc = json.loads(path.read_text())
+	fields = {f["fieldname"]: f for f in doc["fields"]}
+	assert fields["idle_slices"]["fieldtype"] == "Int" and fields["idle_slices"]["read_only"] == 1
+	assert "idle_slices" in doc["field_order"]

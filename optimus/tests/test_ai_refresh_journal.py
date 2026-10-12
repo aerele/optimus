@@ -503,6 +503,7 @@ def test_admission_changes_the_mutex_row_so_postgres_rejects_an_older_snapshot(j
 
 
 def test_admission_attaches_to_an_existing_run_without_creating_another(journal):
+	journal.run["lease_until"] = 1800  # a live queued run (an expired one is taken over)
 	out = admit(journal)
 	assert out["status"] == "already_running" and out["run"]["name"] == "fake-run"
 	assert len(journal.db.rows[journal.mod.RUN]) == 1
@@ -676,8 +677,10 @@ def test_corrupt_active_pointer_cannot_mutate_another_runs_attempt(journal):
 	claim(journal)
 	attempt = begin(journal)
 	journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["run_id"] = "other-run"
-	with pytest.raises(journal.mod.JournalUnavailable), journal.db.transaction():
-		journal.mod.cancel("fake-run", docname="fake-session-doc", now=12)
+	with journal.db.transaction():
+		out = journal.mod.cancel("fake-run", docname="fake-session-doc", now=12)
+	# E2: the run is force-released; the other run's attempt is never written.
+	assert out["inconsistent"] == "attempt" and out["active_session"] is None
 	assert journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["state"] == "calling"
 
 
@@ -1048,3 +1051,292 @@ def test_a_lock_wait_timeout_on_the_session_row_is_a_busy_refusal(journal, monke
 	monkeypatch.setattr(journal.db, "get_value", held)
 	assert admit(journal) == {"status": "refused", "reason": "busy"}
 	assert waits == ["fake-session-doc"] and not journal.db.rows[journal.mod.RUN]
+
+
+# F2: recovery without the scheduler, forced release, dispatch and progress.
+
+
+def _crashed(journal, **values):
+	"""The fixture run, claimed at 10 (lease until 310) and mid-call, by a worker that died.
+	It had already answered two findings."""
+	claim(journal)
+	attempt = begin(journal)
+	journal.run.update(completed=2, **values)
+	return attempt
+
+
+@pytest.mark.parametrize(
+	"values,reason",
+	[({}, "lease_expired"), ({"lease_until": 5000, "deadline": 350}, "deadline")],
+	ids=["lease", "deadline"],
+)
+def test_an_admission_takes_over_an_expired_run_in_its_own_transaction(journal, values, reason):
+	"""A2: crash recovery must not depend on the (unscheduled) sweep. An admission that finds
+	its session reserved by a run whose lease or deadline has passed ends that run as
+	interrupted, its open call uncertain, and admits the new run in the same transaction."""
+	attempt = _crashed(journal, **values)
+	journal.db.locks.clear()
+	out = admit(journal, now=400)
+	assert out["status"] == "queued" and out["run"]["name"] == "new-run"
+	old = journal.db.rows[journal.mod.RUN]["fake-run"]
+	assert old["state"] == "interrupted" and old["end_reason"] == reason
+	assert old["active_session"] is None and old["worker_token"] is None
+	assert old["uncertain"] == 1 and old["usage_incomplete"] == 1 and not old.get("active_attempt")
+	called = journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]
+	assert called["state"] == "uncertain" and not called.get("settled")
+	assert out["taken_over"]["name"] == "fake-run" and not out["taken_over"].get("inconsistent")
+	# Q1: the interrupted run is not a refresh the session counts; the new click is.
+	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 0
+	# Every lock: the session, the site mutex, then the stale run and its attempt.
+	assert journal.db.locks == [
+		("Optimus Session", "fake-session-doc"),
+		(journal.mod.CONTROL, "site"),
+		(journal.mod.RUN, "fake-run"),
+		(journal.mod.ATTEMPT, attempt["name"]),
+	]
+
+
+def test_a_takeover_rolls_back_with_an_admission_that_fails(journal, monkeypatch):
+	_crashed(journal)
+
+	def fail(values):
+		raise RuntimeError("fake storage failure")
+
+	monkeypatch.setattr(journal.db, "insert", fail)
+	with pytest.raises(RuntimeError):
+		admit(journal, now=400)
+	old = journal.db.rows[journal.mod.RUN]["fake-run"]
+	assert old["state"] == "running" and old["active_session"] == "fake-session-doc"
+
+
+def test_an_admission_attaches_to_a_live_run_and_never_takes_it_over(journal):
+	attempt = _crashed(journal)
+	out = admit(journal, now=300)
+	assert out["status"] == "already_running" and out["run"]["name"] == "fake-run"
+	assert "taken_over" not in out
+	assert journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["state"] == "calling"
+	assert list(journal.db.rows[journal.mod.RUN]) == ["fake-run"]
+
+
+def test_resuming_an_expired_run_takes_it_over_first(journal):
+	_crashed(journal, requested_at_epoch=1, retry_no=0)
+	out = admit(journal, now=400, resume_from="fake-run")
+	assert out["status"] == "queued" and out["run"]["resume_from"] == "fake-run"
+	assert out["run"]["retry_no"] == 1 and out["run"]["requested_at_epoch"] == 1
+	assert journal.db.rows[journal.mod.RUN]["fake-run"]["state"] == "interrupted"
+
+
+@pytest.mark.parametrize("corrupt", ["missing", "another run's"])
+def test_a_takeover_force_releases_a_run_whose_open_attempt_is_inconsistent(journal, corrupt):
+	"""E2: the row it cannot vouch for is never written; the run counts an uncertain call of
+	unknown usage (spend fails closed) and the session is released (release fails open)."""
+	attempt = _crashed(journal)
+	attempts = journal.db.rows[journal.mod.ATTEMPT]
+	if corrupt == "missing":
+		del attempts[attempt["name"]]
+	else:
+		attempts[attempt["name"]]["run_id"] = "other-run"
+	before = deepcopy(attempts)
+	out = admit(journal, now=400)
+	assert out["status"] == "queued" and out["taken_over"]["inconsistent"] == "attempt"
+	assert journal.db.rows[journal.mod.ATTEMPT] == before
+	old = journal.db.rows[journal.mod.RUN]["fake-run"]
+	assert old["state"] == "interrupted" and old["active_session"] is None
+	assert old["uncertain"] == 1 and old["usage_incomplete"] == 1
+	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 0
+
+
+@pytest.mark.parametrize("operation", ["cancel", "interrupt"])
+@pytest.mark.parametrize("corrupt", ["reservation", "attempt"])
+def test_cancel_and_recovery_force_release_an_inconsistent_run(journal, operation, corrupt):
+	"""E2: a corrupt row could neither be cancelled nor recovered, so it held its session and
+	a site-cap slot for good. It is released now; its spend stays unknown."""
+	attempt = _crashed(journal)
+	if corrupt == "reservation":
+		journal.run["active_session"] = "other-session"
+	else:
+		del journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]
+	with journal.db.transaction():
+		if operation == "cancel":
+			out = journal.mod.cancel(
+				"fake-run", docname="fake-session-doc", now=400, cancelled_by="fake-owner"
+			)
+		else:
+			out = journal.mod.interrupt(
+				"fake-run", docname="fake-session-doc", now=400, reason="lease_expired"
+			)
+	assert out["inconsistent"] == corrupt and out["active_session"] is None
+	assert out["state"] == ("cancelled" if operation == "cancel" else "interrupted")
+	assert out["uncertain"] == 1 and out["usage_incomplete"] == 1
+	session = journal.db.rows["Optimus Session"]["fake-session-doc"]
+	assert session["ai_tokens_spent"] == 0 and session["ai_refresh_count"] == 0
+	if corrupt == "reservation":
+		assert journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["state"] == "uncertain"
+
+
+def test_a_consistent_cancel_reports_nothing_inconsistent(journal):
+	_crashed(journal)
+	with journal.db.transaction():
+		out = journal.mod.cancel("fake-run", docname="fake-session-doc", now=12)
+	assert out["state"] == "cancelled" and not out.get("inconsistent")
+
+
+@pytest.mark.parametrize("operation", ["interrupt", "prepare_dispatch"])
+def test_the_sweep_takes_the_session_row_without_waiting(journal, monkeypatch, operation):
+	"""R1: a dead transaction can hold a session row for hours; the sweep's NOWAIT read is
+	refused at once (the caller counts it busy) instead of waiting a lock timeout per run."""
+	journal.run.update(state="running", lease_until=5, dispatch_pending=1, dispatched_at_epoch=0)
+	if operation == "prepare_dispatch":
+		journal.run.update(state="queued", lease_until=1800)
+	current = journal.db.get_value
+	waits = []
+
+	def held(table, name, *a, for_update=False, wait=True, **kw):
+		if for_update:
+			waits.append((table, wait))
+		if table == "Optimus Session" and for_update and not wait:
+			raise LockUnavailable(DriverError(1205, "fake NOWAIT conflict"))
+		return current(table, name, *a, for_update=for_update, **kw)
+
+	monkeypatch.setattr(journal.db, "get_value", held)
+	with pytest.raises(LockUnavailable), journal.db.transaction():
+		if operation == "interrupt":
+			journal.mod.interrupt(
+				"fake-run", docname="fake-session-doc", now=50, reason="lease_expired", wait=False
+			)
+		else:
+			journal.mod.prepare_dispatch("fake-run", docname="fake-session-doc", now=50, wait=False)
+	assert waits == [("Optimus Session", False)]
+
+
+def test_a_continuation_is_dispatched_at_once_however_soon_it_follows(journal):
+	"""R3 / C2 / P5: the 30 s throttle is per slice. A yield seconds after the slice was
+	dispatched was held back, and only the unscheduled sweep could deliver it."""
+	journal.run.update(lease_until=1800, dispatch_pending=1, dispatched_at_epoch=0)
+	with journal.db.transaction():
+		assert journal.mod.prepare_dispatch("fake-run", docname="fake-session-doc", now=10)
+	claim(journal, now=11)
+	with journal.db.transaction():
+		assert journal.mod.continue_run(
+			"fake-run", docname="fake-session-doc", worker_token="worker-a", now=15
+		)
+	with journal.db.transaction():
+		assert journal.mod.prepare_dispatch("fake-run", docname="fake-session-doc", now=16)
+	assert journal.run["slice_no"] == 1 and journal.run["dispatched_at_epoch"] == 16
+
+
+def _idle_slice(journal, slice_no, *, progressed=False):
+	with journal.db.transaction():
+		journal.mod.claim(
+			"fake-run",
+			docname="fake-session-doc",
+			slice_no=slice_no,
+			worker_token=f"worker-{slice_no}",
+			now=20 + slice_no,
+			lease_seconds=300,
+		)
+	with journal.db.transaction():
+		return journal.mod.continue_run(
+			"fake-run",
+			docname="fake-session-doc",
+			worker_token=f"worker-{slice_no}",
+			now=20 + slice_no,
+			progressed=progressed,
+		)
+
+
+def test_a_run_that_cannot_begin_any_item_stops_after_three_idle_slices(journal):
+	"""O5: a slice that could not begin its item yields; the next slice selects the same item
+	again. Three such slices in a row end the run instead of respinning until its deadline."""
+	assert _idle_slice(journal, 0)["state"] == "queued"
+	assert _idle_slice(journal, 1)["state"] == "queued"
+	out = _idle_slice(journal, 2)
+	assert out["state"] == "stopped" and out["end_reason"] == "no_progress"
+	assert out["active_session"] is None and not out.get("dispatch_pending")
+
+
+def test_a_slice_that_made_progress_resets_the_idle_streak(journal):
+	_idle_slice(journal, 0)
+	_idle_slice(journal, 1)
+	_idle_slice(journal, 2, progressed=True)
+	_idle_slice(journal, 3)
+	assert _idle_slice(journal, 4)["state"] == "queued"
+	assert journal.run["idle_slices"] == 2
+
+
+def test_a_run_stopped_because_ai_was_switched_off_counts_no_refresh(journal):
+	"""E7 / C4: ending as complete told the user the refresh finished, and counted it."""
+	claim(journal)
+	journal.run["completed"] = 2
+	with journal.db.transaction():
+		out = journal.mod.finish(
+			"fake-run", docname="fake-session-doc", worker_token="worker-a", now=12, reason="disabled"
+		)
+	assert out["state"] == "stopped" and out["end_reason"] == "disabled"
+	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 0
+
+
+def test_finish_refuses_while_a_provider_call_is_unsettled(journal):
+	"""M15: ending the run would release the session while a paid answer is still owed."""
+	attempt = _crashed(journal)
+	with pytest.raises(RuntimeError, match="unsettled"), journal.db.transaction():
+		journal.mod.finish(
+			"fake-run", docname="fake-session-doc", worker_token="worker-a", now=12, reason="complete"
+		)
+	assert journal.run["state"] == "running" and journal.run["active_session"] == "fake-session-doc"
+	assert journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["state"] == "calling"
+
+
+def test_a_late_known_outcome_moves_the_call_out_of_uncertain(journal):
+	"""M11: recovery counted the call uncertain and its usage incomplete; the original
+	worker's late, known outcome replaces both, so nothing is counted twice."""
+	attempt = _crashed(journal)
+	with journal.db.transaction():
+		journal.mod.interrupt("fake-run", docname="fake-session-doc", now=400, reason="lease_expired")
+	assert journal.run["uncertain"] == 1 and journal.run["usage_incomplete"] == 1
+	with journal.db.transaction():
+		assert journal.mod.settle_attempt(
+			"fake-run",
+			attempt["name"],
+			docname="fake-session-doc",
+			worker_token="worker-a",
+			outcome="failed",
+			tokens=5,
+			usage_complete=True,
+			now=401,
+		)
+	assert journal.run["uncertain"] == 0 and journal.run["usage_incomplete"] == 0
+	assert journal.run["failed"] == 1 and journal.run["tokens_reported"] == 5
+
+
+def test_a_takeover_force_releases_another_sessions_run_holding_this_reservation(journal):
+	"""E2: a corrupt run of another session holds this session's reservation; it is released
+	(the admission goes on), reported as inconsistent and counts no refresh."""
+	_crashed(journal)
+	journal.db.rows["Optimus Session"]["other-session-doc"] = {
+		**journal.db.rows["Optimus Session"]["fake-session-doc"],
+		"name": "other-session-doc",
+	}
+	journal.run["session_name"] = "other-session-doc"
+	out = admit(journal, now=400)
+	assert out["status"] == "queued" and out["taken_over"]["inconsistent"] == "reservation"
+	assert journal.db.rows[journal.mod.RUN]["fake-run"]["active_session"] is None
+
+
+def test_a_reservation_released_since_the_plain_read_is_not_reported_as_running(journal, monkeypatch):
+	"""The takeover locks the run it read and checks it again: a reservation released in
+	between (the plain read was older than the lock) is free, not already running."""
+	_crashed(journal)
+	older = deepcopy(journal.run)
+	journal.run.update(state="cancelled", active_session=None)
+	current = journal.db.get_value
+
+	def snapshot(table, name, *a, for_update=False, **kw):
+		if table == journal.mod.RUN and isinstance(name, dict) and not for_update:
+			return deepcopy(older)
+		return current(table, name, *a, for_update=for_update, **kw)
+
+	monkeypatch.setattr(journal.db, "get_value", snapshot)
+	out = admit(journal, now=400)
+	assert out["status"] == "queued" and "taken_over" not in out
+	assert journal.db.rows[journal.mod.RUN]["fake-run"]["state"] == "cancelled"

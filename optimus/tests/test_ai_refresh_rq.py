@@ -75,3 +75,35 @@ def test_a_job_timeout_inside_a_journal_lock_or_insert_escapes_fresh(monkeypatch
 		call()
 	assert caught.value is not original
 	assert caught.value.__context__ is None and caught.value.__cause__ is None
+
+
+@pytest.mark.parametrize("entry", ["recovery sweep", "cancel"])
+def test_a_job_timeout_escapes_the_failure_isolation_fresh(monkeypatch, entry):
+	"""The sweep keeps one row's ordinary failure from stopping the rest, and cancel turns a
+	lock wait into a busy refusal; an RQ timeout in either must still stop the job, fresh."""
+	from optimus import ai_refresh_store as store
+
+	JobTimeoutException = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
+	original = JobTimeoutException("fake job timeout")
+
+	def interrupted(*a, **kw):
+		raise original
+
+	monkeypatch.setattr(
+		ai_jobs,
+		"frappe",
+		SimpleNamespace(
+			get_all=lambda *a, **kw: [{"name": "fake-run", "session_name": "fake-doc"}],
+			db=SimpleNamespace(rollback=lambda: None),
+		),
+	)
+	monkeypatch.setattr(ai_jobs, "_transaction", lambda operation: operation())
+	monkeypatch.setattr(store, "interrupt", interrupted)
+	monkeypatch.setattr(store, "cancel", interrupted)
+	with pytest.raises(JobTimeoutException) as caught:
+		if entry == "cancel":
+			ai_jobs.cancel_refresh("fake-run", docname="fake-doc", requested_by="fake-user")
+		else:
+			ai_jobs.recover_pending()
+	assert caught.value is not original
+	assert caught.value.__context__ is None and caught.value.__cause__ is None
