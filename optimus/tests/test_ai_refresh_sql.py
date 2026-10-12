@@ -1070,3 +1070,28 @@ def test_completion_and_nullable_reservation_allow_a_later_run(sql):
 	assert ai_jobs._retry_sql(lambda: admit("run-b"))["status"] == "queued"
 	assert value(sql, store.RUN, "run-a", "active_session") is None
 	assert value(sql, store.RUN, "run-b", "active_session") == "parent-a"
+
+
+def test_an_http_admission_waits_for_a_held_session_row_once_then_answers_busy(sql, monkeypatch):
+	"""F-5: a user refresh blocked on its session row waits one lock wait timeout, then
+	answers busy without a second attempt, so a web request never outlives the server's
+	timeout on retries. The wait is shortened to one second on this connection."""
+	monkeypatch.setattr(ai_jobs, "_check_run", lambda run, **kw: None)
+	monkeypatch.setattr(ai_jobs, "_workers_listening", lambda: True)
+	monkeypatch.setattr(ai_jobs, "_dispatch_pending", lambda run_id, docname: True)
+	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: True)
+	writer = sql.connect()
+	writer.get_value("Optimus Session", "parent-a", "status", for_update=True)
+	contender = sql.connect()
+	contender.sql(
+		"SET SESSION innodb_lock_wait_timeout=1" if BACKEND == "mariadb" else "SET lock_timeout = '1s'"
+	)
+	contender.commit()
+	with sql.using(contender):
+		out = ai_jobs.start_refresh(
+			docname="parent-a", session_uuid="fake-parent-a", requested_by="fake-user"
+		)
+	assert out == {"status": "refused", "reason": "busy"}
+	assert contender.conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
+	writer.commit()
+	assert value(sql, store.RUN, "run-a", "name") is None

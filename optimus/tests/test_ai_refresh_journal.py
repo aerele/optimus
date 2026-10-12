@@ -1021,3 +1021,30 @@ def test_begin_raises_any_insert_failure_that_is_not_a_duplicate(journal, monkey
 			now=11,
 		)
 	assert journal.run["attempted"] == 0
+
+
+@pytest.mark.parametrize(
+	"error",
+	[
+		LockUnavailable(DriverError(1205, "fake lock wait timeout")),
+		DriverError(1205, "fake raw lock wait timeout"),
+		type("LockNotAvailable", (Exception,), {"pgcode": "55P03"})("fake postgres lock_timeout"),
+	],
+	ids=["frappe-wrapped", "raw", "postgres"],
+)
+def test_a_lock_wait_timeout_on_the_session_row_is_a_busy_refusal(journal, monkeypatch, error):
+	"""F-5: an HTTP admission waits for its session row once; a lock wait timeout there is
+	the Q4 busy refusal, so the caller never waits a second timeout."""
+	journal.db.rows[journal.mod.RUN] = {}
+	current = journal.db.get_value
+	waits = []
+
+	def held(table, name, *a, for_update=False, **kw):
+		if table == "Optimus Session" and for_update:
+			waits.append(name)
+			raise error
+		return current(table, name, *a, for_update=for_update, **kw)
+
+	monkeypatch.setattr(journal.db, "get_value", held)
+	assert admit(journal) == {"status": "refused", "reason": "busy"}
+	assert waits == ["fake-session-doc"] and not journal.db.rows[journal.mod.RUN]

@@ -87,8 +87,8 @@ def is_retryable_conflict(exc) -> bool:
 
 
 def is_lock_unavailable(exc) -> bool:
-	"""True when a NOWAIT locking read found the row locked (MariaDB 1205, Postgres 55P03),
-	raw or wrapped by Frappe as ``QueryTimeoutError``."""
+	"""True when a lock was not granted: a NOWAIT conflict or a lock wait timeout (MariaDB
+	1205, Postgres 55P03), raw or wrapped by Frappe as ``QueryTimeoutError``."""
 	codes = _driver_codes(exc)
 	if codes & _LOCK_UNAVAILABLE_CODES:
 		return True
@@ -227,7 +227,11 @@ def admit(
 		raise ValueError("Invalid refresh identity")
 	if resume_from and (not isinstance(resume_from, str) or len(resume_from) > 140):
 		raise ValueError("Invalid refresh resume identity")
-	parent = _read("Optimus Session", docname, lock=True)
+	parent, busy = _lock_or_busy(lambda: _read("Optimus Session", docname, lock=True))
+	if busy:
+		# Another writer held the session row for a whole lock wait timeout: the HTTP caller
+		# answers busy instead of waiting a second timeout (F-5).
+		return {"status": "refused", "reason": "busy"}
 	if not parent or parent.get("session_uuid") != session_uuid or parent["status"] != "Ready":
 		return {"status": "refused", "reason": "not_ready"}
 	control = None
@@ -339,12 +343,21 @@ def admit(
 
 def _lock_site_mutex():
 	"""``(control row, busy)``: the site mutex locked with NOWAIT, or ``busy`` when another
-	admission holds it (MariaDB 1205, Postgres 55P03, raw or as Frappe's QueryTimeoutError).
-	Any other failure is raised; an RQ job timeout leaves as a fresh instance."""
+	admission holds it."""
+	return _lock_or_busy(
+		lambda: frappe.db.get_value(CONTROL, "site", "*", as_dict=True, for_update=True, wait=False)
+	)
+
+
+def _lock_or_busy(read):
+	"""``(row, busy)``: the locking ``read()``, or ``busy`` when its lock was not granted (a
+	NOWAIT conflict or a lock wait timeout: MariaDB 1205, Postgres 55P03, raw or as Frappe's
+	QueryTimeoutError). Any other failure is raised; an RQ job timeout leaves as a fresh
+	instance."""
 	guard = safe_call.InterruptGuard()
 	try:
 		with guard:
-			return frappe.db.get_value(CONTROL, "site", "*", as_dict=True, for_update=True, wait=False), False
+			return read(), False
 	except Exception as exc:
 		if not is_lock_unavailable(exc):
 			raise

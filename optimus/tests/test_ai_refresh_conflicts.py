@@ -237,3 +237,29 @@ def test_settle_starts_the_write_in_a_fresh_transaction(sql_retry):
 
 	assert ai_jobs._settle(operation, run_id="fake-run", docname="fake-doc", attempt_id="fake", tokens=0)
 	assert sql_retry == ["commit", "operation", "commit"]
+
+
+@pytest.mark.parametrize(
+	"exc,calls",
+	[
+		(RETRIED["frappe-wrapped 1205"], 1),
+		(RETRIED["frappe-wrapped 55P03"], 1),
+		(RETRIED["mariadb lock wait 1205"], 1),
+		(RETRIED["frappe-wrapped 1213"], 3),
+		(RETRIED["frappe-wrapped 1020"], 3),
+		(RETRIED["postgres serialization 40001"], 3),
+		(RETRIED["frappe-wrapped 40P01"], 3),
+	],
+)
+def test_retry_sql_can_leave_lock_wait_timeouts_to_the_caller(sql_retry, exc, calls):
+	"""An HTTP admission does not wait a second lock wait timeout; deadlocks, 1020 and
+	serialization failures are still retried."""
+	tried = []
+
+	def operation():
+		tried.append(True)
+		raise exc
+
+	with pytest.raises(type(exc)):
+		ai_jobs._retry_sql(operation, retry_lock_waits=False)
+	assert len(tried) == calls

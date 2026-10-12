@@ -125,7 +125,7 @@ def _session_of(run_id):
 	return _transaction(lambda: (_read_run(run_id) or {}).get("session_name"))
 
 
-def _retry_sql(operation):
+def _retry_sql(operation, *, retry_lock_waits=True):
 	"""Run one journal operation in its own short transaction; retry SQL conflicts only.
 
 	The caller's transaction is committed first, so the operation's first statement (the
@@ -137,6 +137,10 @@ def _retry_sql(operation):
 	again, at most three transactions in all, with a short delay. Anything else is raised
 	at once. The operation never contacts a provider, so a retry never repeats a call. A
 	busy admission mutex is a refusal returned by ``store.admit``, not a conflict.
+
+	``retry_lock_waits=False`` (an HTTP admission) raises a lock wait timeout (MariaDB 1205,
+	Postgres 55P03) at once instead of waiting another timeout; deadlocks, snapshot and
+	serialization conflicts are still retried. Worker and settlement paths retry it.
 	"""
 	_transaction(lambda: None)
 	for attempt in range(3):
@@ -150,7 +154,11 @@ def _retry_sql(operation):
 		if guard.pending():
 			operation = failure = None
 			raise guard.interrupt()
-		if not store.is_retryable_conflict(failure) or attempt == 2:
+		if (
+			not store.is_retryable_conflict(failure)
+			or (not retry_lock_waits and store.is_lock_unavailable(failure))
+			or attempt == 2
+		):
 			raise failure
 		failure = None
 		time.sleep(0.02 * (attempt + 1))
@@ -880,7 +888,8 @@ def start_refresh(
 			regenerate_all=regenerate_all,
 			resume_from=resume_from,
 			retry_uncertain=retry_uncertain,
-		)
+		),
+		retry_lock_waits=False,
 	)
 	if out["status"] == "already_running" and not out.get("run"):
 		# The unique reservation refused the insert, but that run was not visible to the
