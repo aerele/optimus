@@ -1340,3 +1340,20 @@ def test_a_reservation_released_since_the_plain_read_is_not_reported_as_running(
 	out = admit(journal, now=400)
 	assert out["status"] == "queued" and "taken_over" not in out
 	assert journal.db.rows[journal.mod.RUN]["fake-run"]["state"] == "cancelled"
+
+
+def test_a_refused_admission_still_reports_the_run_it_released(journal):
+	"""F3: the takeover commits with the refusal, so the caller still gets ``taken_over``."""
+	attempt = _crashed(journal)
+	del journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]
+	journal.db.rows[journal.mod.RUN]["other"] = {
+		**journal.run,
+		"name": "other",
+		"active_session": "other-session",
+		"state": "running",
+		"lease_until": 900,
+	}
+	out = admit(journal, now=400, site_cap=1)
+	assert out["status"] == "refused" and out["reason"] == "site_cap"
+	assert out["taken_over"]["name"] == "fake-run" and out["taken_over"]["inconsistent"] == "attempt"
+	assert journal.db.rows[journal.mod.RUN]["fake-run"]["state"] == "interrupted"

@@ -1237,10 +1237,12 @@ def test_the_sweep_skips_a_session_a_dead_transaction_holds(sql, monkeypatch):
 	assert value(sql, store.RUN, "run-a", "state") == "interrupted"
 
 
-def _short_lock_wait(sql):
+def _short_lock_wait(sql, seconds=1):
 	contender = sql.connect()
 	contender.sql(
-		"SET SESSION innodb_lock_wait_timeout=1" if BACKEND == "mariadb" else "SET lock_timeout = '1s'"
+		f"SET SESSION innodb_lock_wait_timeout={seconds}"
+		if BACKEND == "mariadb"
+		else f"SET lock_timeout = '{seconds}s'"
 	)
 	contender.commit()
 	return contender
@@ -1260,14 +1262,22 @@ def test_an_http_cancel_waits_for_a_held_session_row_once_then_answers_busy(sql)
 	assert value(sql, store.RUN, "run-a", "state") == "running"
 
 
-def test_an_http_dispatch_waits_once_and_leaves_the_intent_pending(sql, monkeypatch):
-	"""C1: after the admission commits, its dispatch finds the session row held (here by a
-	Desk save): it waits one lock timeout, then answers queued and leaves the committed
-	intent for the sweep or the next click, never failing the response."""
+def _http_ready(monkeypatch):
 	monkeypatch.setattr(ai_jobs, "_check_run", lambda run, **kw: None)
 	monkeypatch.setattr(ai_jobs, "_workers_listening", lambda: True)
 	monkeypatch.setattr(ai_jobs, "_call_timeout", lambda: 60)
 	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: True)
+
+
+def _click():
+	return ai_jobs.start_refresh(docname="parent-a", session_uuid="fake-parent-a", requested_by="fake-user")
+
+
+def test_an_http_dispatch_never_waits_and_leaves_the_intent_pending(sql, monkeypatch):
+	"""C1 / F4: after the admission commits, its dispatch finds the session row held (here by
+	a Desk save). The admission already waited, so the dispatch takes the row with NOWAIT,
+	answers queued and leaves the committed intent for the session's next click."""
+	_http_ready(monkeypatch)
 	writer = sql.connect()
 	dispatch = ai_jobs._dispatch_pending
 
@@ -1276,13 +1286,89 @@ def test_an_http_dispatch_waits_once_and_leaves_the_intent_pending(sql, monkeypa
 		return dispatch(run_id, docname, **kw)
 
 	monkeypatch.setattr(ai_jobs, "_dispatch_pending", after_commit)
-	contender = _short_lock_wait(sql)
-	with sql.using(contender):
-		out = ai_jobs.start_refresh(
-			docname="parent-a", session_uuid="fake-parent-a", requested_by="fake-user"
-		)
+	thread, out = in_thread(sql, "click", _click)
+	waited = not ends_without_waiting(sql, thread)
 	writer.commit()
-	assert out["status"] == "queued"
-	assert contender.conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
+	thread.join(30)
+	assert not waited, "the dispatch waited for the session row after the admission"
+	assert "error" not in out and out["value"]["status"] == "queued"
+	assert out["db"].conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
 	assert not sql.facade.enqueued and not sql.logged
-	assert value(sql, store.RUN, out["refresh"]["run_id"], "dispatch_pending") == 1
+	assert value(sql, store.RUN, out["value"]["refresh"]["run_id"], "dispatch_pending") == 1
+
+
+def test_a_click_resends_a_committed_intent_its_dispatch_left_pending(sql, monkeypatch):
+	"""F1 (probe D3): the first click's dispatch found the session row busy; a later click
+	re-sends the pending intent once the 30 s throttle allows, instead of only attaching for
+	the whole 1800 s queued lease (the sweep is not scheduled)."""
+	_http_ready(monkeypatch)
+	clock = [100.0]
+	monkeypatch.setattr(ai_jobs, "_now", lambda: clock[0])
+	writer = sql.connect()
+	dispatch = ai_jobs._dispatch_pending
+	held = [True]
+
+	def after_commit(run_id, docname, **kw):
+		if held[0]:
+			writer.get_value("Optimus Session", docname, "status", for_update=True)
+		return dispatch(run_id, docname, **kw)
+
+	monkeypatch.setattr(ai_jobs, "_dispatch_pending", after_commit)
+	with sql.using(_short_lock_wait(sql)):
+		first = _click()
+	writer.commit()
+	held[0] = False
+	assert first["status"] == "queued" and not sql.facade.enqueued
+	run_id = first["refresh"]["run_id"]
+	clock[0] = 160.0
+	again = _click()
+	assert again["status"] == "already_running" and again["refresh"]["run_id"] == run_id
+	assert [kw["job_id"] for _, kw in sql.facade.enqueued] == [f"optimus-ai-{run_id}-0"]
+	clock[0] = 170.0  # inside the 30 s throttle: attaching only
+	assert _click()["status"] == "already_running" and len(sql.facade.enqueued) == 1
+	assert value(sql, store.RUN, run_id, "dispatch_pending") == 1
+	assert not sql.logged
+
+
+def test_one_refresh_click_waits_for_one_lock_timeout_at_most(sql, monkeypatch):
+	"""F4 (probe D4): the admission gets its session row just before its lock timeout; the
+	dispatch then finds the row held again. It refuses at once instead of waiting a second
+	timeout, so the click stays well inside the web server's timeout."""
+	_http_ready(monkeypatch)
+	first, second = sql.connect(), sql.connect()
+	first.get_value("Optimus Session", "parent-a", "status", for_update=True)
+	threading.Timer(1.7, first.commit).start()
+	dispatch = ai_jobs._dispatch_pending
+
+	def after_commit(run_id, docname, **kw):
+		second.get_value("Optimus Session", docname, "status", for_update=True)
+		return dispatch(run_id, docname, **kw)
+
+	monkeypatch.setattr(ai_jobs, "_dispatch_pending", after_commit)
+	contender = _short_lock_wait(sql, seconds=2)
+	started = time.monotonic()
+	with sql.using(contender):
+		out = _click()
+	elapsed = time.monotonic() - started
+	second.commit()
+	assert out["status"] == "queued"
+	assert elapsed < 3.0, elapsed  # one 2 s lock timeout at most, not two
+	assert contender.conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
+
+
+def test_a_forced_release_in_a_refused_admission_writes_its_row(sql, monkeypatch):
+	"""F3 (probe D1): the takeover of an inconsistent expired run commits with a site_cap
+	refusal; its one recovery row is written too."""
+	_http_ready(monkeypatch)
+	claimed("run-a", "parent-a", "worker-a")
+	attempt = begun()
+	sql.primary.sql(f"DELETE FROM {sql.primary.table(store.ATTEMPT)} WHERE name = %s", [attempt["name"]])
+	sql.primary.commit()
+	assert ai_jobs._retry_sql(lambda: admit("run-b", "parent-b", now=900))["status"] == "queued"
+	sql.facade.conf["optimus_ai_max_active_refreshes"] = 1
+	monkeypatch.setattr(ai_jobs, "_now", lambda: 1000.0)
+	assert _click() == {"status": "refused", "reason": "site_cap"}
+	assert value(sql, store.RUN, "run-a", "state") == "interrupted"
+	assert value(sql, store.RUN, "run-a", "usage_incomplete") == 1
+	[(title, _exc, context)] = [row for row in sql.logged if row[0] == "optimus AI refresh recovery"]
+	assert context["run_id"] == "run-a" and context["docname"] == "parent-a"

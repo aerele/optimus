@@ -31,6 +31,8 @@ ACTIVE = frozenset({"queued", "running"})
 TERMINAL = frozenset({"complete", "stopped", "cancelled", "interrupted"})
 # Slices in a row that could not begin any item before the run stops with ``no_progress``.
 IDLE_SLICE_LIMIT = 3
+# Seconds before a slice's pending dispatch intent may be sent to RQ again.
+DISPATCH_INTERVAL = 30
 
 
 class JournalUnavailable(RuntimeError):
@@ -233,7 +235,8 @@ def admit(
 	interrupted, its Calling attempt uncertain (never sent again), its reservation released
 	(``_release``; an inconsistent row is force-released). The admission then goes on, so a
 	crashed worker never needs the scheduler or a manual cancel. The taken-over run counts no
-	refresh; it comes back as ``taken_over``.
+	refresh; it comes back as ``taken_over`` with every answer, a refusal included, since the
+	takeover commits with it.
 	"""
 	if scope not in {"all", "fixes_missing"} or (regenerate_all and scope != "all"):
 		raise ValueError("Invalid refresh scope")
@@ -307,15 +310,15 @@ def admit(
 		if not previous or previous["session_name"] != docname or previous["scope"] != scope:
 			raise ValueError("Invalid refresh resume parent")
 		if previous["state"] not in {"stopped", "cancelled", "interrupted"}:
-			return {"status": "refused", "reason": "not_resumable"}
+			return _answer(taken_over, status="refused", reason="not_resumable")
 		if frappe.db.get_value(RUN, {"resume_from": resume_from}, "name"):
-			return {"status": "refused", "reason": "already_resumed"}
+			return _answer(taken_over, status="refused", reason="already_resumed")
 		retry_no = previous.get("retry_no", 0)
 		if type(retry_no) is not int or retry_no < 0:
 			raise JournalUnavailable("Refresh journal retry count is inconsistent")
 		retry_no += 1
 		if retry_no > 3:
-			return {"status": "refused", "reason": "retry_limit"}
+			return _answer(taken_over, status="refused", reason="retry_limit")
 		requested_at_epoch = previous.get("requested_at_epoch")
 		cap = previous.get("cap", cap)
 		if (
@@ -344,9 +347,9 @@ def admit(
 			limit=site_cap + 1,
 		)
 		if len(active) >= site_cap:
-			return {"status": "refused", "reason": "site_cap"}
+			return _answer(taken_over, status="refused", reason="site_cap")
 		if sum(row["requested_by"] == requested_by for row in active) >= user_cap:
-			return {"status": "refused", "reason": "user_cap"}
+			return _answer(taken_over, status="refused", reason="user_cap")
 	run = _insert_new(
 		RUN,
 		run_id,
@@ -386,15 +389,20 @@ def admit(
 		total_items=0,
 	)
 	if run is None:
-		return {"status": "already_running", "run": None}
+		return _answer(taken_over, status="already_running", run=None)
 	if control is not None:
 		# PostgreSQL REPEATABLE READ does not refresh even a locking SELECT's snapshot.
 		# Changing the mutex row makes an older admission fail serialization on it and
 		# retry, instead of missing the new active reservation.
 		_update(CONTROL, control, generation=(control.get("generation") or 0) + 1)
+	return _answer(taken_over, status="queued", run=run)
+
+
+def _answer(taken_over, **out):
+	"""An admission's answer, with the run it took over (``taken_over``) when there was one."""
 	if taken_over is not None:
-		return {"status": "queued", "run": run, "taken_over": taken_over}
-	return {"status": "queued", "run": run}
+		out["taken_over"] = taken_over
+	return out
 
 
 def _lock_site_mutex():
@@ -774,7 +782,7 @@ def prepare_dispatch(run_id, *, docname, now, wait=True):
 	if (run.get("lease_until") or 0) <= now or run["deadline"] <= now:
 		return None
 	previous = run.get("dispatched_at_epoch") or 0
-	if previous and now - previous < 30:
+	if previous and now - previous < DISPATCH_INTERVAL:
 		return None
 	_update(RUN, run, dispatched_at_epoch=now)
 	return run
