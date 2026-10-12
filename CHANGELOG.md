@@ -36,6 +36,17 @@ versions may contain breaking changes see migration notes below).
 - Keep interrupted calls with an unknown outcome as uncertain. Automatic
   recovery delivers queued work but never repeats an uncertain provider call.
   Explicit resumes preserve the selection cursor and have a bounded chain.
+- Recover without the scheduler. An admission takes over its session's run
+  whose lease or deadline has passed, in its own transaction, and progress shows
+  such a run as interrupted. The recovery sweep isolates each row, skips a
+  session row another transaction holds (NOWAIT) and returns its counts. Cancel,
+  the sweep and a takeover release a run with inconsistent journal rows, with
+  one Error Log row. Cancel is bound to its session and, like the dispatch after
+  an admission, waits for a lock once. A continuation is dispatched at once;
+  three slices without progress, or a provider switched off mid-run, stop the
+  run. Settings stored as digit strings are accepted and every setting is
+  checked before admission. A refusal before any request is a known zero
+  usage.
 - Add durable progress, SQL cancellation, site/user admission limits, bounded
   job slices and provider failure limits. Redis coordinates queue delivery;
   progress and accounting remain in SQL.
@@ -49,7 +60,7 @@ versions may contain breaking changes see migration notes below).
   Existing refresh behavior remains synchronous. The wiring follow-up must
   land before release; profiling isolation is completed there.
 - Normal deployment migration installs three internal DocTypes and seeds the
-  admission mutex. A missing journal table fails every admission. A missing
+  admission mutex; every later migrate seeds it again if it is missing. A missing journal table fails every admission. A missing
   mutex row fails a user refresh closed with `JournalUnavailable`, whose message
   names the repair (`bench --site <site> execute optimus.patches.v0_12_0.initialize_ai_refresh_store.execute`). AI Quality runs
   the journal checks on MariaDB 10.6, MariaDB 11.8 and PostgreSQL. See

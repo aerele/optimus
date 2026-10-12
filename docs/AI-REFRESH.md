@@ -61,11 +61,13 @@ A lock wait timeout (MariaDB 1205, or Postgres 55P03 when `lock_timeout` is set)
 is not retried by an admission, which is an HTTP request. It answers `busy`, so
 the request waits at most one `innodb_lock_wait_timeout`, well inside the web
 server's timeout. Deadlocks, 1020 and serialization failures are still retried
-there. Worker transitions and settlement do retry a lock wait timeout. One such
-operation can wait up to three timeouts. A settlement that gives up and then
-writes its failed outcome is two operations, so it can wait up to six.
-Cancellation still retries a lock wait timeout too; its HTTP endpoint lands with
-the wiring follow-up.
+there. Cancellation and the dispatch an admission makes after its commit are
+HTTP paths too: each waits one timeout at most. A busy cancellation answers
+`busy`; a busy dispatch leaves the committed intent pending, and the response
+still says `queued`. Worker transitions and settlement do retry a lock wait
+timeout. One such operation can wait up to three timeouts. A settlement that
+gives up and then writes its failed outcome is two operations, so it can wait
+up to six.
 
 The worker commits a Calling attempt before contacting a provider, then
 releases journal/session locks during HTTP. The answer, the attempt outcome and
@@ -96,13 +98,16 @@ written once both writes have ended, and each carries an `outcome=`. That
 includes the counter's own rows and each write's failure, with `tries` and
 `tokens`. When the second write recorded the tokens, the first write's rows say
 `recorded by fallback`. A reconciler reading the Error Log therefore never adds
-those tokens twice.
+those tokens twice. When both writes fail, the error reaches the worker
+cleanup, which makes the attempt uncertain; its last row carries `tokens=` and
+`outcome=` too.
 
 RQ delivery is asynchronous, after commit, through Frappe's original enqueue
 function. Each run/slice has a deterministic job ID; SQL claim is the execution
 fence even if delivery is duplicated. A committed dispatch intent survives
 Redis failure and remains pending until a worker claims it. Recovery can
-redeliver it, at most once per 30 seconds per run. There is no inline fallback.
+redeliver it, at most once per 30 seconds per slice: a continuation is
+dispatched at once, however soon its slice yields. There is no inline fallback.
 
 ## Failure, cancellation and recovery
 
@@ -113,8 +118,19 @@ cannot receive a stale answer. Reported usage from a late answer is still
 accounted once, even when cancellation prevents saving the answer.
 
 A lost worker leaves its Calling attempt uncertain. Expired leases and total
-deadlines fence results immediately; the recovery sweep records interruption
-and releases admission. An unknown outcome is never automatically retried.
+deadlines fence results immediately. Recovery does not need the scheduler: the
+session's next admission takes over a run whose lease or deadline has passed.
+In the same transaction it ends that run as interrupted, makes its open call
+uncertain and admits the new run. Progress already shows such a run as
+interrupted (`stalled`). The recovery sweep does the same for every session and
+redelivers lost dispatches, but it only speeds recovery up. Each row is its own
+transaction and takes its session row with NOWAIT, so a row a dead transaction
+holds is skipped (`busy`), and one failing row never stops the others. A run
+whose journal rows are inconsistent is released by a cancel, the sweep or a
+takeover instead of holding its session: its open call counts as uncertain with
+unknown usage, and one Error Log row names it. Cancellation names its session;
+another session's run is refused (`not_running`) and nothing changes. An
+unknown outcome is never automatically retried.
 Later known usage can reconcile the attempt. A new run skips an uncertain
 attempt with the same input unless the caller explicitly requests retry of
 uncertain work, which may incur another provider charge.
@@ -130,9 +146,13 @@ and guardrail re-ask behavior still applies inside a call.
 
 Authentication, endpoint-not-found, quota, configuration and rate-limit errors
 stop the run immediately. Three consecutive other failures also stop it;
-success resets that streak. Known reported tokens are kept for unusable
+success resets that streak. Three slices in a row that could not begin any item
+stop it with `no_progress`, and a provider switched off mid-run stops it with
+`disabled`; neither counts as a refresh. Known reported tokens are kept for unusable
 responses or failed local writes. Missing or contradictory usage is explicitly
-incomplete, including reported zero versus an absent report. Usage is
+incomplete, including reported zero versus an absent report. A refusal before
+any request is a known zero, and a cache count Anthropic reports as null is
+not a missing one. Usage is
 informational; Optimus has no prepaid token wallet and cannot reconcile an
 unknown provider bill without a later known response.
 
@@ -145,7 +165,8 @@ unavailable, the committed Calling intent remains for later recovery.
 ## Configuration and deployment
 
 Normal Frappe migration installs the journal schema and its admission mutex.
-Fresh installation seeds the same mutex. Deploy code/schema before enabling
+Fresh installation seeds the same mutex, and every migrate seeds it again if it
+is missing (`after_migrate`). Deploy code/schema before enabling
 callers; restart web and workers together through the normal deployment process.
 Do not route work to a worker running older code. A missing journal is an error,
 never permission to run without concurrency controls. A missing mutex row
@@ -161,7 +182,11 @@ lock and the unique reservation.
 | `optimus_ai_refresh_max_seconds` | 3600 | Integer, 60 to 86400 |
 | `optimus_ai_max_active_refreshes` | 2 | Integer, 1 to 1000 |
 
-Invalid configuration is rejected. A custom queue needs a listening worker.
+Every setting is checked before admission, and invalid configuration is
+rejected with the setting's name. A string of digits counts as its number,
+which is what `bench set-config` stores without `-p`; set them with
+`bench --site <site> set-config -p <key> <value>`. A custom queue needs a
+listening worker.
 Manual runs additionally have a per-requester cap of two. Analyze-time
 `fixes_missing` runs reserve their own session but do not consume the manual
 site/user cap. The item cap applies even to Regenerate all; zero means unlimited
