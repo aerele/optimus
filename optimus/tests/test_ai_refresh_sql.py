@@ -22,8 +22,9 @@ The facade gives the journal what a Frappe site gives it, on v15 and v16:
 ``OPTIMUS_TEST_SQL`` selects mariadb or postgres; a configured backend never skips.
 ``OPTIMUS_TEST_SQL_SNAPSHOT=1`` states that the MariaDB server runs with
 ``innodb_snapshot_isolation=ON`` (the default since MariaDB 11.8), and a test checks it.
-``OPTIMUS_TEST_SQL_PORT`` overrides the port of the fixed, fake CI credentials. Every table
-is uniquely named and owned by the test.
+``OPTIMUS_TEST_SQL_PORT`` overrides the port of the fixed, fake CI credentials. On Postgres
+that role must be a superuser, as CI's ``POSTGRES_USER`` is: one test sets
+``deadlock_timeout``. Every table is uniquely named and owned by the test.
 """
 
 import json
@@ -1040,41 +1041,97 @@ def test_a_counter_statement_failure_keeps_the_answer_and_logs_the_dropped_spend
 	assert context["savepoint_rollback"] == "done"
 
 
+def _deadlock_timeout(db, setting):
+	"""``SET deadlock_timeout`` on one Postgres connection. Only a superuser may set it; CI's
+	``POSTGRES_USER`` is one, so a refusal is a misconfigured service: fail, never skip."""
+	try:
+		db.sql(f"SET deadlock_timeout = '{setting}'")
+	except Exception as exc:
+		db.rollback()
+		pytest.fail(
+			f"Postgres refused SET deadlock_timeout ({type(exc).__name__}): the journal test role "
+			"must be a superuser, as CI's POSTGRES_USER is",
+			pytrace=False,
+		)
+	db.commit()
+
+
+def _until_waiting(sql, backend_id):
+	"""Until that one connection waits for a row lock. Any other waiter in the database (a
+	transient one included) must not count: the order of the waits decides the victim."""
+	query = (
+		"SELECT COUNT(*) AS n FROM information_schema.PROCESSLIST WHERE ID = %s AND COMMAND = 'Query' "
+		"AND INFO LIKE '%%FOR UPDATE%%'"
+		if BACKEND == "mariadb"
+		else "SELECT COUNT(*) AS n FROM pg_stat_activity WHERE pid = %s AND wait_event_type = 'Lock'"
+	)
+	if not hasattr(sql, "probe"):
+		sql.probe = sql.connect()
+	for _ in range(1000):
+		waiting = sql.probe.sql(query, [backend_id])[0]["n"]
+		sql.probe.commit()
+		if waiting:
+			return
+		time.sleep(0.01)
+	raise AssertionError("the connection never waited for the lock")
+
+
 def test_a_deadlock_during_settlement_is_retried_and_charged_once(sql):
-	"""A whole-transaction rollback in the middle of the settlement (the answer row is held by
-	a heavier transaction that then wants the session row): ``_settle`` rolls back and writes
-	again, the settled bit and the counter charge exactly once, and no provider is involved."""
+	"""A whole-transaction rollback in the middle of the settlement: a heavier transaction holds
+	the answer row and waits for the session row the settlement holds. Whichever side the
+	database aborts, the session is charged once and the answer stored once; no provider is
+	involved.
+
+	The settlement is made the victim on both databases, so the test also proves that
+	``_settle`` rolls back and writes again. The rival waits for the session row first, and the
+	settlement's request for the answer row then closes the cycle. MariaDB rolls back the
+	lighter transaction: the rival changed 39 rows, the settlement none yet. Postgres aborts the
+	backend whose ``deadlock_timeout`` runs out first while the cycle exists: the settlement's
+	1 s starts when its request closes the cycle, the rival's 10 s started earlier. With equal
+	timers the first waiter checks first, which now and then made the rival the victim."""
 	claimed()
 	attempt = begun()
-	rival = sql.connect()
+	rival, settling = sql.connect(), sql.connect()
+	if BACKEND == "postgres":
+		_deadlock_timeout(rival, "10s")
+		_deadlock_timeout(settling, "1s")
+	rival_id = rival.sql(
+		"SELECT CONNECTION_ID() AS id" if BACKEND == "mariadb" else "SELECT pg_backend_pid() AS id"
+	)[0]["id"]
 	answer = rival.table("answer")
 	rival.sql(f"UPDATE {answer} SET body = 'rival' WHERE name <> 'row-00'")  # the heavier side
 	rival.sql(f"SELECT name FROM {answer} WHERE name = 'row-00' FOR UPDATE")
-	persisted = []
+	holding, persisted, rival_errors = threading.Event(), [], []
 
 	def persist():
 		persisted.append(True)
+		if len(persisted) == 1:
+			holding.set()  # the settlement holds the session row...
+			_until_waiting(sql, rival_id)  # ...and the rival waits for it before the cycle closes
 		sql.facade.db.sql(f"UPDATE {sql.facade.db.table('answer')} SET body = 'engine' WHERE name = 'row-00'")
 
 	def run_rival():
-		wait_until_blocked(sql)  # the settlement waits on the answer row
-		try:
-			rival.get_value("Optimus Session", "parent-a", "name", for_update=True)
-		except Exception as exc:
-			persisted.append(exc)
+		if holding.wait(10):
+			try:
+				rival.get_value("Optimus Session", "parent-a", "name", for_update=True)
+			except Exception as exc:
+				rival_errors.append(exc)
 		rival.commit()
 
 	thread = threading.Thread(target=run_rival)
 	thread.start()
-	with sql.using(sql.connect()) as db:
+	with sql.using(settling) as db:
 		assert save(sql, attempt, persist=persist) is True
 	thread.join(30)
-	assert db.conflicts and db.conflicts[0] in (1213, "40P01")
-	assert persisted[:2] == [True, True]
+	# Whichever side was aborted: one charge, one stored answer, one settled outcome.
 	assert value(sql, "answer", "row-00", "body") == "engine"
 	assert value(sql, store.ATTEMPT, attempt["name"], "settled") == 1
 	assert value(sql, store.RUN, "run-a", "completed") == 1
 	assert value(sql, "Optimus Session", "parent-a", "ai_tokens_spent") == 7
+	# The settlement was the victim (see the docstring), so it was rolled back and retried.
+	assert not rival_errors, rival_errors
+	assert db.conflicts == [1213 if BACKEND == "mariadb" else "40P01"]
+	assert persisted == [True, True]
 
 
 def test_completion_and_nullable_reservation_allow_a_later_run(sql):
