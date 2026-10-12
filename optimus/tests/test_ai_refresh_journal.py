@@ -1,4 +1,8 @@
-"""Durable refresh transitions: duplicates, stale owners and atomic accounting."""
+"""Durable refresh transitions: duplicates, stale owners, lock order and accounting.
+
+The session counters are #72's log-and-continue counters (D2): a statement-level failure is
+absorbed by the counter itself, so only a failure that ended the whole transaction reaches
+the journal, and the fakes below raise to stand for that one."""
 
 from contextlib import contextmanager
 from copy import deepcopy
@@ -6,6 +10,21 @@ from importlib import import_module
 from types import SimpleNamespace
 
 import pytest
+
+
+class DriverError(Exception):
+	"""PyMySQL's error shape: ``args == (code, message)``."""
+
+
+class DuplicateEntryError(NameError):
+	"""``Document.insert`` raises ``frappe.DuplicateEntryError(doctype, name, e)`` for a
+	duplicate primary key and ``frappe.UniqueValidationError`` for a unique column."""
+
+
+UNIQUE = {
+	"Optimus AI Refresh Run": ("run_id", "active_session"),
+	"Optimus AI Refresh Attempt": ("attempt_id",),
+}
 
 
 class Database:
@@ -24,6 +43,8 @@ class Database:
 			}
 		}
 		self.locks = []
+		self.calls = []  # every read: (table, name or filters, locking)
+		self.duplicates = 0
 		self.active = False
 
 	@contextmanager
@@ -40,6 +61,7 @@ class Database:
 			self.active = False
 
 	def get_value(self, table, name, fields="name", *, as_dict=False, for_update=False, **kw):
+		self.calls.append((table, name, bool(for_update)))
 		if for_update:
 			assert self.active, "a row lock needs a live transaction"
 			self.locks.append((table, name))
@@ -65,7 +87,13 @@ class Database:
 		assert self.active
 		table, name = values["doctype"], values["name"]
 		rows = self.rows.setdefault(table, {})
-		assert name not in rows, "duplicate journal identity"
+		duplicate = name in rows or any(
+			values.get(field) is not None and any(r.get(field) == values[field] for r in rows.values())
+			for field in UNIQUE.get(table, ())
+		)
+		if duplicate:
+			self.duplicates += 1
+			raise DuplicateEntryError(table, name, DriverError(1062, "fake duplicate entry"))
 		rows[name] = deepcopy(values)
 
 	def increment(self, name, field, value):
@@ -94,6 +122,7 @@ class Database:
 		return [{key: row.get(key) for key in fields} for row in rows]
 
 	def get_values(self, table, filters, fields, *, for_update=False, limit=0, **kw):
+		self.calls.append((table, filters, bool(for_update)))
 		if for_update:
 			assert self.active
 		return self.get_all(table, filters=filters, fields=fields, limit_page_length=limit)
@@ -143,13 +172,26 @@ def journal(monkeypatch):
 
 def claim(journal, worker="worker-a", now=10):
 	with journal.db.transaction():
-		return journal.mod.claim("fake-run", slice_no=0, worker_token=worker, now=now, lease_seconds=300)
+		return journal.mod.claim(
+			"fake-run",
+			docname="fake-session-doc",
+			slice_no=0,
+			worker_token=worker,
+			now=now,
+			lease_seconds=300,
+		)
 
 
 def begin(journal, worker="worker-a", name="fake-finding"):
 	with journal.db.transaction():
 		return journal.mod.begin_attempt(
-			"fake-run", worker_token=worker, kind="fix", target=name, input_hash="fake-hash", now=11
+			"fake-run",
+			docname="fake-session-doc",
+			worker_token=worker,
+			kind="fix",
+			target=name,
+			input_hash="fake-hash",
+			now=11,
 		)
 
 
@@ -163,7 +205,14 @@ def test_duplicate_delivery_cannot_claim_even_with_the_same_worker_token(journal
 def test_claim_locks_parent_before_run_and_rejects_stale_slice(journal):
 	with journal.db.transaction():
 		assert (
-			journal.mod.claim("fake-run", slice_no=1, worker_token="worker-a", now=10, lease_seconds=300)
+			journal.mod.claim(
+				"fake-run",
+				docname="fake-session-doc",
+				slice_no=1,
+				worker_token="worker-a",
+				now=10,
+				lease_seconds=300,
+			)
 			is None
 		)
 	assert journal.db.locks == [("Optimus Session", "fake-session-doc"), (journal.mod.RUN, "fake-run")]
@@ -191,6 +240,7 @@ def test_duplicate_outcome_counts_usage_and_completion_once(journal):
 			journal.mod.settle_attempt(
 				"fake-run",
 				attempt["name"],
+				docname="fake-session-doc",
 				worker_token="worker-a",
 				outcome="succeeded",
 				tokens=17,
@@ -201,7 +251,7 @@ def test_duplicate_outcome_counts_usage_and_completion_once(journal):
 	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_tokens_spent"] == 17
 
 
-def test_result_and_usage_roll_back_together(journal, monkeypatch):
+def test_a_counter_failure_that_ends_the_transaction_rolls_the_result_back(journal, monkeypatch):
 	claim(journal)
 	attempt = begin(journal)
 	writes = journal.db.rows.setdefault("fake-result", {})
@@ -217,6 +267,7 @@ def test_result_and_usage_roll_back_together(journal, monkeypatch):
 		journal.mod.settle_attempt(
 			"fake-run",
 			attempt["name"],
+			docname="fake-session-doc",
 			worker_token="worker-a",
 			outcome="succeeded",
 			tokens=17,
@@ -233,7 +284,7 @@ def test_unknown_interrupted_call_is_not_requeued(journal):
 	claim(journal)
 	attempt = begin(journal)
 	with journal.db.transaction():
-		journal.mod.interrupt("fake-run", now=400, reason="worker_lost")
+		journal.mod.interrupt("fake-run", docname="fake-session-doc", now=400, reason="worker_lost")
 	assert journal.run["state"] == "interrupted" and journal.run["active_session"] is None
 	assert journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["state"] == "uncertain"
 	assert journal.run["uncertain"] == 1 and journal.run["usage_incomplete"] == 1
@@ -244,12 +295,13 @@ def test_late_known_outcome_can_account_but_cannot_write_stale_answer(journal):
 	claim(journal)
 	attempt = begin(journal)
 	with journal.db.transaction():
-		journal.mod.interrupt("fake-run", now=400, reason="worker_lost")
+		journal.mod.interrupt("fake-run", docname="fake-session-doc", now=400, reason="worker_lost")
 	written = []
 	with journal.db.transaction():
 		journal.mod.settle_attempt(
 			"fake-run",
 			attempt["name"],
+			docname="fake-session-doc",
 			worker_token="worker-a",
 			outcome="succeeded",
 			tokens=17,
@@ -272,6 +324,7 @@ def test_expiry_fences_answer_even_before_recovery_observes_the_crash(journal, e
 		journal.mod.settle_attempt(
 			"fake-run",
 			attempt["name"],
+			docname="fake-session-doc",
 			worker_token="worker-a",
 			outcome="succeeded",
 			tokens=7,
@@ -285,6 +338,7 @@ def test_expiry_fences_answer_even_before_recovery_observes_the_crash(journal, e
 		assert (
 			journal.mod.begin_attempt(
 				"fake-run",
+				docname="fake-session-doc",
 				worker_token="worker-a",
 				kind="fix",
 				target="another-finding",
@@ -295,7 +349,9 @@ def test_expiry_fences_answer_even_before_recovery_observes_the_crash(journal, e
 		)
 
 
-def test_completion_counter_is_atomic_and_idempotent(journal, monkeypatch):
+def test_a_completion_count_failure_that_ends_the_transaction_keeps_the_run_and_counts_once(
+	journal, monkeypatch
+):
 	claim(journal)
 	journal.run["completed"] = 1
 
@@ -305,11 +361,15 @@ def test_completion_counter_is_atomic_and_idempotent(journal, monkeypatch):
 	with monkeypatch.context() as patch:
 		patch.setattr("optimus.analyze._bump_ai_refresh_count", failed)
 		with pytest.raises(RuntimeError), journal.db.transaction():
-			journal.mod.finish("fake-run", worker_token="worker-a", now=12, reason="complete")
+			journal.mod.finish(
+				"fake-run", docname="fake-session-doc", worker_token="worker-a", now=12, reason="complete"
+			)
 	assert journal.db.rows[journal.mod.RUN]["fake-run"]["completion_counted"] == 0
 	for _ in range(2):
 		with journal.db.transaction():
-			journal.mod.finish("fake-run", worker_token="worker-a", now=12, reason="complete")
+			journal.mod.finish(
+				"fake-run", docname="fake-session-doc", worker_token="worker-a", now=12, reason="complete"
+			)
 	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 1
 
 
@@ -331,6 +391,7 @@ def test_invalid_usage_cannot_be_recorded_as_known(journal, tokens, complete):
 		journal.mod.settle_attempt(
 			"fake-run",
 			attempt["name"],
+			docname="fake-session-doc",
 			worker_token="worker-a",
 			outcome="succeeded",
 			tokens=tokens,
@@ -349,6 +410,7 @@ def test_parent_leaving_ready_discards_result_but_retains_reported_usage(journal
 		journal.mod.settle_attempt(
 			"fake-run",
 			attempt["name"],
+			docname="fake-session-doc",
 			worker_token="worker-a",
 			outcome="succeeded",
 			tokens=11,
@@ -363,12 +425,21 @@ def test_parent_leaving_ready_discards_result_but_retains_reported_usage(journal
 def test_continuation_fences_old_slice_and_preserves_budget(journal):
 	claim(journal)
 	with journal.db.transaction():
-		assert journal.mod.continue_run("fake-run", worker_token="worker-a", now=12)
+		assert journal.mod.continue_run(
+			"fake-run", docname="fake-session-doc", worker_token="worker-a", now=12
+		)
 	assert journal.run["slice_no"] == 1 and journal.run["state"] == "queued"
 	assert journal.run["deadline"] == 3600 and journal.run["dispatch_pending"] == 1
 	assert claim(journal) is None
 	with journal.db.transaction():
-		assert journal.mod.claim("fake-run", slice_no=1, worker_token="worker-b", now=13, lease_seconds=300)
+		assert journal.mod.claim(
+			"fake-run",
+			docname="fake-session-doc",
+			slice_no=1,
+			worker_token="worker-b",
+			now=13,
+			lease_seconds=300,
+		)
 	assert begin(journal) is None
 
 
@@ -376,14 +447,14 @@ def test_continuation_never_repeats_an_unsettled_call(journal):
 	claim(journal)
 	begin(journal)
 	with pytest.raises(RuntimeError), journal.db.transaction():
-		journal.mod.continue_run("fake-run", worker_token="worker-a", now=12)
+		journal.mod.continue_run("fake-run", docname="fake-session-doc", worker_token="worker-a", now=12)
 
 
 def test_cancellation_releases_admission_without_repeating_or_losing_usage(journal):
 	claim(journal)
 	attempt = begin(journal)
 	with journal.db.transaction():
-		journal.mod.cancel("fake-run", now=12)
+		journal.mod.cancel("fake-run", docname="fake-session-doc", now=12)
 	assert journal.run["state"] == "cancelled" and journal.run["active_session"] is None
 	assert journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["state"] == "uncertain"
 	assert claim(journal) is None
@@ -409,11 +480,13 @@ def admit(journal, **kwargs):
 		return journal.mod.admit(**{**defaults, **kwargs})
 
 
-def test_admission_serializes_caps_before_parent_lock(journal):
+def test_admission_locks_the_session_before_the_site_mutex(journal):
+	"""Q4: the session row first, so an admission waiting on its own session never holds the
+	site mutex and stalls every other session's admission."""
 	journal.db.rows[journal.mod.RUN] = {}
 	out = admit(journal)
 	assert out["status"] == "queued"
-	assert journal.db.locks[:2] == [(journal.mod.CONTROL, "site"), ("Optimus Session", "fake-session-doc")]
+	assert journal.db.locks[:2] == [("Optimus Session", "fake-session-doc"), (journal.mod.CONTROL, "site")]
 	run = journal.db.rows[journal.mod.RUN]["new-run"]
 	assert run["dispatch_pending"] == 1 and run["deadline"] == 3610
 	assert run["active_session"] == "fake-session-doc" and run["requested_by"] == "fake-owner"
@@ -424,7 +497,7 @@ def test_admission_changes_the_mutex_row_so_postgres_rejects_an_older_snapshot(j
 	assert admit(journal)["status"] == "queued"
 	assert journal.db.rows[journal.mod.CONTROL]["site"]["generation"] == 1
 	with journal.db.transaction():
-		journal.mod.cancel("new-run", now=12)
+		journal.mod.cancel("new-run", docname="fake-session-doc", now=12)
 	assert admit(journal, run_id="second-run")["status"] == "queued"
 	assert journal.db.rows[journal.mod.CONTROL]["site"]["generation"] == 2
 
@@ -477,30 +550,104 @@ def test_absent_admission_mutex_fails_closed(journal):
 	assert len(journal.db.rows[journal.mod.RUN]) == 1
 
 
-def test_admission_counts_current_rows_even_with_an_older_transaction_snapshot(journal, monkeypatch):
+def test_admission_reads_runs_only_after_its_locks_and_never_locks_them_by_filter(journal):
+	"""The capacity count and the reservation probe are plain reads taken after the session and
+	site mutex locks: the read view opens after every admission that could change the count
+	has committed (admissions serialize on the mutex, and Postgres's older snapshot fails on
+	the mutex row the winner changed). A FOR UPDATE by filter took next-key locks on the
+	state and active_session indexes and deadlocked another session's finishing worker."""
 	journal.db.rows[journal.mod.RUN] = {
 		f"other-{i}": {
 			**journal.run,
 			"name": f"other-{i}",
 			"active_session": f"other-session-{i}",
-			"requested_by": "fake-owner",
+			"requested_by": "other-owner",
 		}
 		for i in range(2)
 	}
-	current = journal.db.get_values
+	journal.db.calls.clear()
+	assert admit(journal, site_cap=2) == {"status": "refused", "reason": "site_cap"}
+	run_reads = [c for c in journal.db.calls if c[0] == journal.mod.RUN]
+	assert run_reads and not [c for c in run_reads if c[2]]
+	control = journal.db.calls.index((journal.mod.CONTROL, "site", True))
+	assert control < journal.db.calls.index(run_reads[0])
 
-	def snapshot_or_current(*a, for_update=False, **kw):
-		return current(*a, for_update=True, **kw) if for_update else []
 
-	monkeypatch.setattr(journal.db, "get_values", snapshot_or_current)
-	monkeypatch.setattr(journal.mod.frappe, "get_all", lambda *a, **kw: [])
-	assert admit(journal) == {"status": "refused", "reason": "site_cap"}
+def test_analyze_time_admission_never_touches_the_site_mutex(journal):
+	journal.db.rows[journal.mod.RUN] = {}
+	journal.db.calls.clear()
+	assert admit(journal, scope="fixes_missing")["status"] == "queued"
+	assert not [c for c in journal.db.calls if c[0] == journal.mod.CONTROL]
+	assert journal.db.rows[journal.mod.CONTROL]["site"].get("generation") is None
+
+
+class LockUnavailable(Exception):
+	"""What Frappe raises for a NOWAIT conflict: ``QueryTimeoutError(e)`` around 1205."""
+
+
+@pytest.mark.parametrize(
+	"error",
+	[
+		LockUnavailable(DriverError(1205, "fake lock wait timeout")),
+		DriverError(1205, "fake raw lock wait timeout"),
+	],
+	ids=["frappe-wrapped", "raw"],
+)
+def test_a_held_site_mutex_is_a_busy_refusal_not_an_error(journal, monkeypatch, error):
+	journal.db.rows[journal.mod.RUN] = {}
+	current = journal.db.get_value
+
+	def nowait(table, name, *a, wait=True, **kw):
+		if table == journal.mod.CONTROL:
+			assert wait is False, "the site mutex is taken with NOWAIT"
+			raise error
+		return current(table, name, *a, **kw)
+
+	monkeypatch.setattr(journal.db, "get_value", nowait)
+	assert admit(journal) == {"status": "refused", "reason": "busy"}
+	assert not journal.db.rows[journal.mod.RUN]
+
+
+def test_a_site_mutex_failure_that_is_not_contention_is_raised(journal, monkeypatch):
+	journal.db.rows[journal.mod.RUN] = {}
+	current = journal.db.get_value
+
+	def broken(table, name, *a, **kw):
+		if table == journal.mod.CONTROL:
+			raise RuntimeError("fake storage failure")
+		return current(table, name, *a, **kw)
+
+	monkeypatch.setattr(journal.db, "get_value", broken)
+	with pytest.raises(RuntimeError):
+		admit(journal)
+	assert not journal.db.rows[journal.mod.RUN]
+
+
+@pytest.mark.parametrize("scope", ["all", "fixes_missing"])
+def test_the_unique_reservation_detects_a_run_the_snapshot_missed(journal, monkeypatch, scope):
+	"""On Postgres a waiting admission's snapshot can predate the run another admission of
+	the same session committed; the unique active_session key still refuses the second run."""
+	journal.run.update(scope=scope)
+	current = journal.db.get_value
+
+	def snapshot(table, name, *a, for_update=False, **kw):
+		if table == journal.mod.RUN and isinstance(name, dict) and not for_update:
+			return None
+		return current(table, name, *a, for_update=for_update, **kw)
+
+	monkeypatch.setattr(journal.db, "get_value", snapshot)
+	assert admit(journal, scope=scope) == {"status": "already_running", "run": None}
+	assert list(journal.db.rows[journal.mod.RUN]) == ["fake-run"]
+	assert journal.db.duplicates == 1
+	assert journal.db.rows[journal.mod.CONTROL]["site"].get("generation") is None
 
 
 def test_empty_refresh_does_not_count_as_an_updated_session(journal):
 	claim(journal)
 	with journal.db.transaction():
-		journal.mod.finish("fake-run", worker_token="worker-a", now=12, reason="complete")
+		journal.mod.finish(
+			"fake-run", docname="fake-session-doc", worker_token="worker-a", now=12, reason="complete"
+		)
 	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 0
 	assert journal.run["completion_counted"] == 1
 
@@ -512,6 +659,7 @@ def test_stale_input_rejection_keeps_usage_but_not_completed_count(journal):
 		journal.mod.settle_attempt(
 			"fake-run",
 			attempt["name"],
+			docname="fake-session-doc",
 			worker_token="worker-a",
 			outcome="succeeded",
 			tokens=17,
@@ -529,7 +677,7 @@ def test_corrupt_active_pointer_cannot_mutate_another_runs_attempt(journal):
 	attempt = begin(journal)
 	journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["run_id"] = "other-run"
 	with pytest.raises(journal.mod.JournalUnavailable), journal.db.transaction():
-		journal.mod.cancel("fake-run", now=12)
+		journal.mod.cancel("fake-run", docname="fake-session-doc", now=12)
 	assert journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["state"] == "calling"
 
 
@@ -542,22 +690,25 @@ def test_corrupt_session_reservation_cannot_be_claimed(journal):
 def test_dispatch_reservation_is_throttled_and_cannot_resurrect_finished_run(journal):
 	journal.run.update(lease_until=1800, dispatch_pending=1, dispatched_at_epoch=0)
 	with journal.db.transaction():
-		assert journal.mod.prepare_dispatch("fake-run", now=50)
+		assert journal.mod.prepare_dispatch("fake-run", docname="fake-session-doc", now=50)
 	with journal.db.transaction():
-		assert journal.mod.prepare_dispatch("fake-run", now=51) is None
+		assert journal.mod.prepare_dispatch("fake-run", docname="fake-session-doc", now=51) is None
 	assert journal.run["dispatch_pending"] == 1
 	claim(journal, now=52)
 	with journal.db.transaction():
-		assert journal.mod.prepare_dispatch("fake-run", now=100) is None
+		assert journal.mod.prepare_dispatch("fake-run", docname="fake-session-doc", now=100) is None
 
 
 def test_explicit_worker_abandon_marks_unknown_without_waiting_for_lease(journal):
 	claim(journal)
 	attempt = begin(journal)
 	with journal.db.transaction():
-		assert journal.mod.abandon("fake-run", worker_token="worker-b", now=12) is None
+		assert (
+			journal.mod.abandon("fake-run", docname="fake-session-doc", worker_token="worker-b", now=12)
+			is None
+		)
 	with journal.db.transaction():
-		assert journal.mod.abandon("fake-run", worker_token="worker-a", now=12)
+		assert journal.mod.abandon("fake-run", docname="fake-session-doc", worker_token="worker-a", now=12)
 	assert journal.run["state"] == "interrupted"
 	assert journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["state"] == "uncertain"
 
@@ -572,6 +723,7 @@ def test_breaker_is_committed_with_attempt_accounting(journal, kind, stop):
 		journal.mod.settle_attempt(
 			"fake-run",
 			attempt["name"],
+			docname="fake-session-doc",
 			worker_token="worker-a",
 			outcome="failed",
 			tokens=0,
@@ -591,6 +743,7 @@ def test_three_failures_stop_across_slice_boundaries(journal):
 			journal.mod.settle_attempt(
 				"fake-run",
 				attempt["name"],
+				docname="fake-session-doc",
 				worker_token="worker-a",
 				outcome="failed",
 				tokens=0,
@@ -610,6 +763,7 @@ def test_success_resets_failure_streak_and_marks_render_owed(journal):
 		journal.mod.settle_attempt(
 			"fake-run",
 			attempt["name"],
+			docname="fake-session-doc",
 			worker_token="worker-a",
 			outcome="succeeded",
 			tokens=0,
@@ -622,7 +776,7 @@ def test_success_resets_failure_streak_and_marks_render_owed(journal):
 def test_deadline_expiry_releases_a_queued_reservation_before_its_queue_lease(journal):
 	journal.run.update(deadline=40, lease_until=1800)
 	with journal.db.transaction():
-		journal.mod.interrupt("fake-run", now=50, reason="deadline")
+		journal.mod.interrupt("fake-run", docname="fake-session-doc", now=50, reason="deadline")
 	assert journal.run["state"] == "interrupted" and journal.run["active_session"] is None
 
 
@@ -656,7 +810,7 @@ def test_resume_preserves_original_selection_time_and_has_a_bounded_retry_count(
 	out = admit(journal, resume_from="old-run")
 	assert out["run"]["requested_at_epoch"] == 1 and out["run"]["retry_no"] == 3
 	with journal.db.transaction():
-		journal.mod.cancel("new-run", now=12)
+		journal.mod.cancel("new-run", docname="fake-session-doc", now=12)
 	assert admit(journal, run_id="newer-run", resume_from="new-run") == {
 		"status": "refused",
 		"reason": "retry_limit",
@@ -696,7 +850,7 @@ def test_resuming_an_older_run_again_cannot_reset_the_retry_chain(journal):
 	journal.run.update(state="interrupted", active_session=None, requested_at_epoch=1, retry_no=0)
 	assert admit(journal, resume_from="fake-run")["status"] == "queued"
 	with journal.db.transaction():
-		journal.mod.cancel("new-run", now=12)
+		journal.mod.cancel("new-run", docname="fake-session-doc", now=12)
 	assert admit(journal, run_id="another-run", resume_from="fake-run") == {
 		"status": "refused",
 		"reason": "already_resumed",
@@ -719,3 +873,151 @@ def test_resume_carries_saved_steps_and_the_unfinished_report(journal, steps_sta
 	assert out["steps_state"] == "carried" and out["render_pending"] == 1
 	assert out["include_steps"] == 1
 	assert out["completed"] == 0 and out["tokens_reported"] == 0
+
+
+def _settle_setup(journal):
+	claim(journal)
+	return begin(journal)["name"]
+
+
+TRANSITIONS = {
+	"claim": (
+		lambda journal: None,
+		lambda m, doc, _: m.claim(
+			"fake-run", docname=doc, slice_no=0, worker_token="worker-b", now=10, lease_seconds=300
+		),
+	),
+	"begin_attempt": (
+		claim,
+		lambda m, doc, _: m.begin_attempt(
+			"fake-run", docname=doc, worker_token="worker-a", kind="fix", target="t", input_hash="h", now=11
+		),
+	),
+	"settle_attempt": (
+		_settle_setup,
+		lambda m, doc, attempt: m.settle_attempt(
+			"fake-run",
+			attempt,
+			docname=doc,
+			worker_token="worker-a",
+			outcome="succeeded",
+			tokens=3,
+			usage_complete=True,
+			now=12,
+		),
+	),
+	"finish": (
+		claim,
+		lambda m, doc, _: m.finish(
+			"fake-run", docname=doc, worker_token="worker-a", now=12, reason="complete"
+		),
+	),
+	"interrupt": (
+		claim,
+		lambda m, doc, _: m.interrupt("fake-run", docname=doc, now=400, reason="lease_expired"),
+	),
+	"continue_run": (
+		claim,
+		lambda m, doc, _: m.continue_run("fake-run", docname=doc, worker_token="worker-a", now=12),
+	),
+	"cancel": (claim, lambda m, doc, _: m.cancel("fake-run", docname=doc, now=12)),
+	"abandon": (claim, lambda m, doc, _: m.abandon("fake-run", docname=doc, worker_token="worker-a", now=12)),
+	"prepare_dispatch": (
+		lambda journal: journal.run.update(lease_until=1800, dispatch_pending=1, dispatched_at_epoch=0),
+		lambda m, doc, _: m.prepare_dispatch("fake-run", docname=doc, now=50),
+	),
+	"checkpoint": (
+		claim,
+		lambda m, doc, _: m.checkpoint(
+			"fake-run", docname=doc, worker_token="worker-a", now=12, total_items=3
+		),
+	),
+}
+
+
+@pytest.mark.parametrize("name", TRANSITIONS)
+def test_every_transition_opens_its_transaction_with_the_session_lock(journal, name):
+	"""No plain read precedes the locks: on MariaDB 11.8 a read view opened before the
+	session lock turns a lock on a row the holder changed into 1020 (snapshot isolation)."""
+	setup, transition = TRANSITIONS[name]
+	attempt = setup(journal)
+	journal.db.calls.clear()
+	with journal.db.transaction():
+		assert transition(journal.mod, "fake-session-doc", attempt)
+	assert journal.db.calls[:2] == [
+		("Optimus Session", "fake-session-doc", True),
+		(journal.mod.RUN, "fake-run", True),
+	]
+
+
+@pytest.mark.parametrize("name", TRANSITIONS)
+def test_a_transition_for_another_session_changes_nothing(journal, name):
+	setup, transition = TRANSITIONS[name]
+	attempt = setup(journal)
+	journal.db.rows["Optimus Session"]["other-session-doc"] = {
+		**journal.db.rows["Optimus Session"]["fake-session-doc"],
+		"name": "other-session-doc",
+	}
+	before = deepcopy(journal.db.rows)
+	with journal.db.transaction():
+		assert not transition(journal.mod, "other-session-doc", attempt)
+	assert journal.db.rows == before
+
+
+def test_an_open_attempt_blocks_a_call_for_any_other_target(journal):
+	claim(journal)
+	assert begin(journal, name="first-finding")
+	assert begin(journal, name="second-finding") is None
+	assert journal.run["attempted"] == 1
+	assert len(journal.db.rows[journal.mod.ATTEMPT]) == 1
+
+
+def test_a_settled_target_is_never_called_again_in_the_same_run(journal):
+	"""The unique attempt key, not a locking pre-read, rejects the repeat: the INSERT hits
+	the existing key and that means already attempted."""
+	attempt = _settle_setup(journal)
+	with journal.db.transaction():
+		assert journal.mod.settle_attempt(
+			"fake-run",
+			attempt,
+			docname="fake-session-doc",
+			worker_token="worker-a",
+			outcome="failed",
+			tokens=0,
+			usage_complete=True,
+			now=12,
+		)
+	settled = deepcopy(journal.db.rows[journal.mod.ATTEMPT][attempt])
+	assert begin(journal) is None
+	assert journal.db.duplicates == 1
+	assert journal.run["attempted"] == 1 and not journal.run.get("active_attempt")
+	assert journal.db.rows[journal.mod.ATTEMPT][attempt] == settled
+
+
+def test_begin_inserts_the_attempt_without_a_locking_read_of_its_key(journal):
+	"""A locking read of a key that does not exist yet takes a gap lock on MariaDB
+	(REPEATABLE READ); two runs beginning together then deadlock on each other's INSERT."""
+	claim(journal)
+	journal.db.calls.clear()
+	attempt = begin(journal)
+	assert attempt and not [c for c in journal.db.calls if c[0] == journal.mod.ATTEMPT]
+
+
+def test_begin_raises_any_insert_failure_that_is_not_a_duplicate(journal, monkeypatch):
+	claim(journal)
+
+	def fail(values):
+		raise RuntimeError("fake storage failure")
+
+	monkeypatch.setattr(journal.db, "insert", fail)
+	with pytest.raises(RuntimeError), journal.db.transaction():
+		journal.mod.begin_attempt(
+			"fake-run",
+			docname="fake-session-doc",
+			worker_token="worker-a",
+			kind="fix",
+			target="t",
+			input_hash="h",
+			now=11,
+		)
+	assert journal.run["attempted"] == 0

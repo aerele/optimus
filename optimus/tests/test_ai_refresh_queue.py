@@ -46,13 +46,13 @@ def queue(journal, monkeypatch):
 
 
 def test_dispatch_runs_only_after_commit_and_bypasses_capture(queue):
-	assert queue.jobs._dispatch_pending("fake-run") is True
+	assert queue.jobs._dispatch_pending("fake-run", "fake-session-doc") is True
 	method, kw = queue.sent[0]
 	assert method == "optimus.ai_jobs.run_ai_refresh_slice"
 	assert kw["run_id"] == "fake-run" and kw["slice_no"] == 0
 	assert kw["deduplicate"] is True and kw["timeout"] == 480
 	assert queue.journal.run["dispatch_pending"] == 1
-	assert queue.jobs._dispatch_pending("fake-run") is False
+	assert queue.jobs._dispatch_pending("fake-run", "fake-session-doc") is False
 	assert len(queue.sent) == 1
 
 
@@ -61,17 +61,24 @@ def test_redis_error_keeps_intent_and_reports_failure(queue, monkeypatch):
 		raise ConnectionError("fake Redis down")
 
 	monkeypatch.setattr(queue.jobs.frappe.enqueue, "__wrapped__", fail)
-	assert queue.jobs._dispatch_pending("fake-run") is False
+	assert queue.jobs._dispatch_pending("fake-run", "fake-session-doc") is False
 	assert queue.journal.run["state"] == "queued" and queue.journal.run["dispatch_pending"] == 1
 	assert queue.logs == ["ConnectionError"] and not queue.sent
 
 
 def test_worker_claim_is_the_only_delivery_acknowledgement(queue):
-	queue.jobs._dispatch_pending("fake-run")
+	queue.jobs._dispatch_pending("fake-run", "fake-session-doc")
 	with queue.journal.db.transaction():
-		queue.journal.mod.claim("fake-run", slice_no=0, worker_token="worker", now=51, lease_seconds=300)
+		queue.journal.mod.claim(
+			"fake-run",
+			docname="fake-session-doc",
+			slice_no=0,
+			worker_token="worker",
+			now=51,
+			lease_seconds=300,
+		)
 	assert queue.journal.run["dispatch_pending"] == 0
-	assert queue.jobs._dispatch_pending("fake-run") is False
+	assert queue.jobs._dispatch_pending("fake-run", "fake-session-doc") is False
 
 
 def test_after_commit_enqueue_failure_also_preserves_intent(queue, monkeypatch):
@@ -82,7 +89,7 @@ def test_after_commit_enqueue_failure_also_preserves_intent(queue, monkeypatch):
 		queue.callbacks.append(fail)
 
 	monkeypatch.setattr(queue.jobs.frappe.enqueue, "__wrapped__", enqueue)
-	assert queue.jobs._dispatch_pending("fake-run") is False
+	assert queue.jobs._dispatch_pending("fake-run", "fake-session-doc") is False
 	assert queue.journal.run["dispatch_pending"] == 1 and queue.logs == ["ConnectionError"]
 
 
@@ -105,9 +112,22 @@ def test_public_progress_never_returns_internal_tokens_or_job_metadata(queue):
 
 def test_recovery_expires_a_lost_provider_call_without_requeueing_it(queue, monkeypatch):
 	with queue.journal.db.transaction():
-		queue.journal.mod.claim("fake-run", slice_no=0, worker_token="worker", now=10, lease_seconds=20)
+		queue.journal.mod.claim(
+			"fake-run",
+			docname="fake-session-doc",
+			slice_no=0,
+			worker_token="worker",
+			now=10,
+			lease_seconds=20,
+		)
 		attempt = queue.journal.mod.begin_attempt(
-			"fake-run", worker_token="worker", kind="fix", target="fake-finding", input_hash="fake", now=11
+			"fake-run",
+			docname="fake-session-doc",
+			worker_token="worker",
+			kind="fix",
+			target="fake-finding",
+			input_hash="fake",
+			now=11,
 		)
 	monkeypatch.setattr(queue.jobs.frappe, "get_all", queue.journal.db.get_all, raising=False)
 	queue.jobs.recover_pending()
@@ -227,3 +247,31 @@ def test_nonserialization_errors_are_not_retried_as_admissions(queue):
 	with pytest.raises(ValueError):
 		queue.jobs._retry_sql(fail)
 	assert len(calls) == 1
+
+
+@pytest.mark.parametrize("still_active", [True, False])
+def test_a_reservation_the_admission_could_not_see_is_read_again(queue, monkeypatch, still_active):
+	"""The unique active_session key refused the insert but this transaction's snapshot could
+	not see that run (Postgres): it is read again, fresh, or reported busy once it ended."""
+	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda: True)
+	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
+	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
+	monkeypatch.setattr(queue.journal.mod, "admit", lambda **kw: {"status": "already_running", "run": None})
+	reads = []
+	current = queue.journal.db.get_value
+
+	def get_value(table, name, *a, **kw):
+		reads.append(table)
+		if len(reads) == 1 or not still_active:
+			return None
+		return current(table, name, *a, **kw)
+
+	monkeypatch.setattr(queue.journal.db, "get_value", get_value)
+	out = queue.jobs.start_refresh(
+		docname="fake-session-doc", session_uuid="fake-session", requested_by="fake-owner"
+	)
+	if still_active:
+		assert out["status"] == "already_running" and out["refresh"]["run_id"] == "fake-run"
+	else:
+		assert out == {"status": "refused", "reason": "busy"}
+	assert not queue.sent

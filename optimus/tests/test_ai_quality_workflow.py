@@ -60,10 +60,16 @@ def test_rq_dependent_test_modules_carry_the_rq_marker():
 
 
 def test_sql_journal_is_exercised_on_both_database_engines(workflow):
+	"""MariaDB 10.6 (snapshot isolation off), MariaDB 11.8 (``innodb_snapshot_isolation`` on
+	by default, as on Frappe v16's CI: 1020 conflicts) and Postgres, each a leg of its own."""
+	job = workflow.split('  sql-journal:\n', 1)[1]
 	for needle in (
-		'  sql-journal:\n', 'database: [mariadb, postgres]', 'image: mariadb:10.6', 'image: postgres:16',
-		'OPTIMUS_TEST_SQL: ${{ matrix.database }}', 'PyMySQL==1.1.2', 'psycopg2-binary==2.9.12',
-		'python -m pytest optimus/tests/test_ai_refresh_sql.py',
+		'image: mariadb:${{ matrix.mariadb }}', 'image: postgres:16',
+		"- leg: mariadb 10.6\n            database: mariadb\n            mariadb: '10.6'\n            snapshot: '0'",
+		"- leg: mariadb 11.8\n            database: mariadb\n            mariadb: '11.8'\n            snapshot: '1'",
+		"- leg: postgres 16\n            database: postgres",
+		'OPTIMUS_TEST_SQL: ${{ matrix.database }}', 'OPTIMUS_TEST_SQL_SNAPSHOT: ${{ matrix.snapshot }}',
+		'PyMySQL==1.1.2', 'psycopg2-binary==2.9.12', 'python -m pytest optimus/tests/test_ai_refresh_sql.py',
 	):
-		assert needle in workflow
-	assert 'continue-on-error' not in workflow.split('  sql-journal:\n', 1)[1]
+		assert needle in job, needle
+	assert 'continue-on-error' not in job

@@ -4,15 +4,23 @@
 """SQL journal for optional AI refresh work.
 
 These operations participate in the caller's transaction. They never commit,
-contact a provider, enqueue a job or use Redis as the source of truth. An
-existing run locks its Session, Run and Attempt in that order. Admission also
-serializes capacity with the Control row. A caller commits a calling attempt
-before sending HTTP, then commits its result and reported usage together.
+contact a provider, enqueue a job or use Redis as the source of truth. The
+caller starts each one in a fresh transaction and passes the run's session
+name, so the first statement is the lock on that Session row; an existing run
+then locks its Run and Attempt, in that order. Admission locks the Session,
+then (user refreshes only) the Control row with NOWAIT. A caller commits a
+calling attempt before sending HTTP, then commits its result and outcome
+together, adding the reported usage to the session counter in the same
+transaction. That counter is #72's log-and-continue (D2): a statement-level
+failure of it is logged and the outcome still commits, so the run's
+``tokens_reported`` is the source for reconciling the session's total.
 """
 
 import hashlib
 
 import frappe
+
+from optimus import safe_call
 
 RUN = "Optimus AI Refresh Run"
 ATTEMPT = "Optimus AI Refresh Attempt"
@@ -23,6 +31,79 @@ TERMINAL = frozenset({"complete", "stopped", "cancelled", "interrupted"})
 
 class JournalUnavailable(RuntimeError):
 	"""Fail closed when a deployment lacks the authoritative journal/mutex."""
+
+
+# Driver codes of a conflict that ended the statement or the whole transaction, so a short
+# journal transaction can start again from a rollback: MariaDB deadlock 1213, lock wait
+# timeout 1205 (also a NOWAIT conflict) and 1020 "Record has changed since last read"
+# (innodb_snapshot_isolation, on by default since MariaDB 11.8); Postgres serialization
+# failure 40001, deadlock 40P01 and lock not available 55P03.
+_RETRY_CODES = frozenset({1213, 1205, 1020, "40001", "40P01", "55P03"})
+_LOCK_UNAVAILABLE_CODES = frozenset({1205, "55P03"})
+_DUPLICATE_CODES = frozenset({1062, "23505"})
+
+
+def _driver_codes(exc):
+	"""The driver error codes on ``exc`` and on the driver errors Frappe wrapped it around.
+
+	``Database.sql`` raises ``QueryDeadlockError(e)`` / ``QueryTimeoutError(e)`` from ``e``
+	and ``Document.insert`` raises ``DuplicateEntryError(doctype, name, e)``, so the driver
+	error is one of the args (and the cause). PyMySQL keeps the code in ``args[0]``,
+	psycopg2 in ``pgcode``."""
+	codes, seen, stack = set(), set(), [exc]
+	while stack and len(seen) < 8:
+		layer = stack.pop()
+		if not isinstance(layer, BaseException) or id(layer) in seen:
+			continue
+		seen.add(id(layer))
+		pgcode = getattr(layer, "pgcode", None)
+		if isinstance(pgcode, str) and pgcode:
+			codes.add(pgcode)
+		args = getattr(layer, "args", ())
+		if args and type(args[0]) is int:
+			codes.add(args[0])
+		stack.extend(arg for arg in args if isinstance(arg, BaseException))
+		stack.append(layer.__cause__)
+	return codes
+
+
+def _frappe_error(exc, name):
+	cls = getattr(frappe, name, None)
+	return isinstance(cls, type) and isinstance(exc, cls)
+
+
+def is_retryable_conflict(exc) -> bool:
+	"""True when a short journal transaction may be rolled back and tried again: a
+	deadlock, a lock wait, a snapshot or serialization conflict, raw or as Frappe wraps it.
+
+	``frappe.QueryDeadlockError`` always is (the database ended the whole transaction, as
+	``analyze._whole_transaction_rolled_back`` treats it). ``frappe.QueryTimeoutError`` is
+	when it wraps a lock conflict, or no driver error at all; a Postgres statement timeout
+	(57014) is not a conflict. Never a reason to repeat a provider call."""
+	codes = _driver_codes(exc)
+	if _frappe_error(exc, "QueryDeadlockError") or codes & _RETRY_CODES:
+		return True
+	return _frappe_error(exc, "QueryTimeoutError") and not codes
+
+
+def is_lock_unavailable(exc) -> bool:
+	"""True when a NOWAIT locking read found the row locked (MariaDB 1205, Postgres 55P03),
+	raw or wrapped by Frappe as ``QueryTimeoutError``."""
+	codes = _driver_codes(exc)
+	if codes & _LOCK_UNAVAILABLE_CODES:
+		return True
+	return _frappe_error(exc, "QueryTimeoutError") and not codes
+
+
+def is_duplicate_key(exc) -> bool:
+	"""True when an INSERT hit an existing key (MariaDB 1062, Postgres 23505), raw or as
+	``Document.insert`` raises it (``DuplicateEntryError``, ``UniqueValidationError``)."""
+	codes = _driver_codes(exc)
+	if codes & _DUPLICATE_CODES:
+		return True
+	return not codes and (
+		_frappe_error(exc, "DuplicateEntryError") or _frappe_error(exc, "UniqueValidationError")
+	)
 
 
 def _timestamp(value):
@@ -47,17 +128,42 @@ def _insert(table, name, **values):
 	return row
 
 
-def _locked(run_id):
-	# The parent reference is immutable. Read it first so every path uses the
-	# same lock order, including cancellation and late usage reconciliation.
-	docname = frappe.db.get_value(RUN, run_id, "session_name")
-	if not docname:
+def _insert_new(table, name, **values):
+	"""Insert a row whose key must be new, or return None when a unique key already holds it.
+
+	The unique key is the check: there is no locking read of the key first, because a locking
+	read of a key that does not exist takes a gap lock on MariaDB (REPEATABLE READ), and two
+	transactions holding gap locks then deadlock on each other's INSERT. On Postgres the
+	duplicate ends the transaction; the caller writes nothing more and commits (a rollback).
+	Any other failure is raised; an RQ job timeout leaves as a fresh instance."""
+	guard = safe_call.InterruptGuard()
+	try:
+		with guard:
+			return _insert(table, name, **values)
+	except Exception as exc:
+		if not is_duplicate_key(exc):
+			raise
+	if guard.pending():
+		raise guard.interrupt()
+	return None
+
+
+def _locked(run_id, docname):
+	"""Lock the run's session row, then the run row, as the transaction's first statements.
+
+	``docname`` is the run's session, resolved by the caller before this transaction (the
+	reference is immutable), so no plain read precedes the locks. A read view opened before
+	the session lock would turn it into a 1020 on MariaDB 11.8 (snapshot isolation) once the
+	lock holder commits a change to that row. Every path locks session, run and attempt in
+	that order. A run of another session is reported as missing, so a caller bound to one
+	session can never act on another session's run."""
+	if not isinstance(docname, str) or not docname:
 		return None, None
 	parent = _read("Optimus Session", docname, lock=True)
 	run = _read(RUN, run_id, lock=True)
-	if run and run["session_name"] != docname:
-		raise RuntimeError("Refresh journal parent changed")
-	if run and run.get("active_session") not in (None, "", docname):
+	if not run or run.get("session_name") != docname:
+		return parent, None
+	if run.get("active_session") not in (None, "", docname):
 		raise JournalUnavailable("Refresh journal reservation is inconsistent")
 	return parent, run
 
@@ -81,11 +187,23 @@ def admit(
 	requested_at_epoch=None,
 	retry_uncertain=False,
 ):
-	"""Reserve a session and enforce caps under a single short SQL mutex.
+	"""Reserve a session and, for a user refresh, enforce the site/user caps.
 
-	Caller checks permissions, provider configuration, Phase 2 and workers
-	before admission. Analyze-time enrichment reserves only its own session;
-	user refreshes also take site/user capacity. No queue call happens here.
+	Caller checks permissions, provider configuration, Phase 2 and workers before admission,
+	and starts a fresh transaction (``ai_jobs._retry_sql``). No queue call happens here.
+
+	Lock order (Q4): the session row first, then, only for ``scope == "all"`` (the only scope
+	with caps), the site mutex with NOWAIT; a held mutex is a ``busy`` refusal, never a wait
+	and never an error. An admission waiting on its own session therefore never holds the
+	mutex. Analyze-time ``fixes_missing`` runs never take it.
+
+	Every read of other runs is a plain read after those locks, so its read view opens after
+	every admission that could change the count has committed: admissions with caps serialize
+	on the mutex, and on Postgres an older snapshot fails on the mutex row the winner changed
+	(40001), which the caller retries. No FOR UPDATE by filter: next-key locks on the run
+	indexes deadlocked other sessions' workers. The unique ``active_session`` key is the
+	authority for one active run per session: an INSERT that hits it is ``already_running``
+	(with ``run`` None when this transaction could not see that run).
 	"""
 	if scope not in {"all", "fixes_missing"} or (regenerate_all and scope != "all"):
 		raise ValueError("Invalid refresh scope")
@@ -107,26 +225,32 @@ def admit(
 		for value in (run_id, docname, session_uuid, requested_by)
 	):
 		raise ValueError("Invalid refresh identity")
-	control = frappe.db.get_value(CONTROL, "site", "*", as_dict=True, for_update=True, wait=False)
-	if not control:
-		raise JournalUnavailable("AI refresh storage is not initialized")
+	if resume_from and (not isinstance(resume_from, str) or len(resume_from) > 140):
+		raise ValueError("Invalid refresh resume identity")
 	parent = _read("Optimus Session", docname, lock=True)
 	if not parent or parent.get("session_uuid") != session_uuid or parent["status"] != "Ready":
 		return {"status": "refused", "reason": "not_ready"}
-	current = frappe.db.get_value(RUN, {"active_session": docname}, "*", as_dict=True, for_update=True)
+	control = None
+	if scope == "all":
+		control, busy = _lock_site_mutex()
+		if busy:
+			return {"status": "refused", "reason": "busy"}
+		if not control:
+			raise JournalUnavailable("AI refresh storage is not initialized")
+	# The run being resumed belongs to this session, so its row is locked after the session.
+	previous = _read(RUN, resume_from, lock=True) if resume_from else None
+	# Plain reads from here on: every lock above comes first (see the docstring).
+	current = frappe.db.get_value(RUN, {"active_session": docname}, "*", as_dict=True)
 	if current:
 		return {"status": "already_running", "run": current}
 	retry_no = 0
 	steps_state, render_pending = "not_requested", 0
 	if resume_from:
-		if not isinstance(resume_from, str) or len(resume_from) > 140:
-			raise ValueError("Invalid refresh resume identity")
-		previous = _read(RUN, resume_from, lock=True)
 		if not previous or previous["session_name"] != docname or previous["scope"] != scope:
 			raise ValueError("Invalid refresh resume parent")
 		if previous["state"] not in {"stopped", "cancelled", "interrupted"}:
 			return {"status": "refused", "reason": "not_resumable"}
-		if frappe.db.get_value(RUN, {"resume_from": resume_from}, "name", for_update=True):
+		if frappe.db.get_value(RUN, {"resume_from": resume_from}, "name"):
 			return {"status": "refused", "reason": "already_resumed"}
 		retry_no = previous.get("retry_no", 0)
 		if type(retry_no) is not int or retry_no < 0:
@@ -154,26 +278,18 @@ def admit(
 			steps_state = "carried"
 		render_pending = int(bool(previous.get("render_pending")))
 	if scope == "all":
-		# Current reads are essential on MariaDB: the HTTP permission/config
-		# checks may have opened an older REPEATABLE READ snapshot before this
-		# request waited for admission. A plain SELECT could miss the winner.
 		active = frappe.db.get_values(
 			RUN,
 			{"scope": "all", "state": ["in", sorted(ACTIVE)]},
 			["requested_by"],
 			as_dict=True,
-			for_update=True,
 			limit=site_cap + 1,
 		)
 		if len(active) >= site_cap:
 			return {"status": "refused", "reason": "site_cap"}
 		if sum(row["requested_by"] == requested_by for row in active) >= user_cap:
 			return {"status": "refused", "reason": "user_cap"}
-	# PostgreSQL REPEATABLE READ does not refresh even a locking SELECT's
-	# snapshot. Changing the mutex row makes an older waiting transaction fail
-	# serialization and retry, instead of missing the new active reservation.
-	_update(CONTROL, control, generation=(control.get("generation") or 0) + 1)
-	run = _insert(
+	run = _insert_new(
 		RUN,
 		run_id,
 		run_id=run_id,
@@ -211,7 +327,30 @@ def admit(
 		usage_incomplete=0,
 		total_items=0,
 	)
+	if run is None:
+		return {"status": "already_running", "run": None}
+	if control is not None:
+		# PostgreSQL REPEATABLE READ does not refresh even a locking SELECT's snapshot.
+		# Changing the mutex row makes an older admission fail serialization on it and
+		# retry, instead of missing the new active reservation.
+		_update(CONTROL, control, generation=(control.get("generation") or 0) + 1)
 	return {"status": "queued", "run": run}
+
+
+def _lock_site_mutex():
+	"""``(control row, busy)``: the site mutex locked with NOWAIT, or ``busy`` when another
+	admission holds it (MariaDB 1205, Postgres 55P03, raw or as Frappe's QueryTimeoutError).
+	Any other failure is raised; an RQ job timeout leaves as a fresh instance."""
+	guard = safe_call.InterruptGuard()
+	try:
+		with guard:
+			return frappe.db.get_value(CONTROL, "site", "*", as_dict=True, for_update=True, wait=False), False
+	except Exception as exc:
+		if not is_lock_unavailable(exc):
+			raise
+	if guard.pending():
+		raise guard.interrupt()
+	return None, True
 
 
 def _owns(run, worker_token, now):
@@ -225,9 +364,9 @@ def _owns(run, worker_token, now):
 	)
 
 
-def claim(run_id, *, slice_no, worker_token, now, lease_seconds):
+def claim(run_id, *, docname, slice_no, worker_token, now, lease_seconds):
 	"""Claim a queued slice once. Replaying even the same token is a no-op."""
-	parent, run = _locked(run_id)
+	parent, run = _locked(run_id, docname)
 	if (
 		not parent
 		or not run
@@ -256,19 +395,17 @@ def attempt_name(run_id, kind, target):
 	return hashlib.sha256(f"{run_id}\0{kind}\0{target}".encode()).hexdigest()[:40]
 
 
-def begin_attempt(run_id, *, worker_token, kind, target, input_hash, now):
+def begin_attempt(run_id, *, docname, worker_token, kind, target, input_hash, now):
 	"""Persist the send intent before HTTP. Returning None forbids a new call."""
 	if kind not in {"fix", "steps"} or not isinstance(target, str) or not target:
 		raise ValueError("Invalid refresh target")
-	parent, run = _locked(run_id)
+	parent, run = _locked(run_id, docname)
 	if not parent or parent["status"] != "Ready" or not _owns(run, worker_token, now):
 		return None
 	if run["deadline"] <= now or run.get("active_attempt") or run.get("breaker_kind"):
 		return None
 	name = attempt_name(run_id, kind, target)
-	if _read(ATTEMPT, name, lock=True):
-		return None
-	attempt = _insert(
+	attempt = _insert_new(
 		ATTEMPT,
 		name,
 		attempt_id=name,
@@ -284,18 +421,39 @@ def begin_attempt(run_id, *, worker_token, kind, target, input_hash, now):
 		usage_complete=0,
 		settled=0,
 	)
+	if attempt is None:
+		return None  # this target was already attempted in this run
 	_update(RUN, run, active_attempt=name, attempted=run["attempted"] + 1, heartbeat=now)
 	return attempt
 
 
+def attempt_settled(attempt_id):
+	"""The attempt's ``settled`` bit as committed (a plain read; the caller starts fresh)."""
+	return bool(frappe.db.get_value(ATTEMPT, attempt_id, "settled"))
+
+
 def settle_attempt(
-	run_id, attempt_id, *, worker_token, outcome, tokens, usage_complete, now, persist=None, error_kind=""
+	run_id,
+	attempt_id,
+	*,
+	docname,
+	worker_token,
+	outcome,
+	tokens,
+	usage_complete,
+	now,
+	persist=None,
+	error_kind="",
 ):
-	"""Save an outcome, its result and usage in one transaction, at most once.
+	"""Save an outcome and its result, at most once, and add its usage to the session.
 
 	The original worker may reconcile a known late outcome after cancellation
 	or expiry. It may count its reported usage, but cannot write a stale answer.
 	``persist`` is a database-only result write, never a provider call or commit.
+	The usage goes to ``analyze._add_ai_spend`` in this transaction: a failure that
+	ends the whole transaction rolls everything back (the caller retries), while a
+	statement-level counter failure is logged by the counter and the outcome commits
+	without it (#72, D2). ``tokens_reported`` always records the tokens.
 	"""
 	if (
 		outcome not in {"succeeded", "failed", "skipped", "uncertain"}
@@ -304,7 +462,7 @@ def settle_attempt(
 		or type(usage_complete) is not bool
 	):
 		raise ValueError("Invalid refresh outcome")
-	parent, run = _locked(run_id)
+	parent, run = _locked(run_id, docname)
 	if not run:
 		return False
 	attempt = _read(ATTEMPT, attempt_id, lock=True)
@@ -396,9 +554,9 @@ def _finish_locked(parent, run, *, state, reason, now):
 	return run
 
 
-def finish(run_id, *, worker_token, now, reason):
-	"""Completion accounting and terminal state are inseparable SQL writes."""
-	parent, run = _locked(run_id)
+def finish(run_id, *, docname, worker_token, now, reason):
+	"""Write the terminal state and release the session reservation."""
+	parent, run = _locked(run_id, docname)
 	if not _owns(run, worker_token, now):
 		return None
 	if run.get("active_attempt"):
@@ -429,9 +587,9 @@ def _mark_uncertain(run, reason):
 	_update(RUN, run, active_attempt=None)
 
 
-def interrupt(run_id, *, now, reason):
+def interrupt(run_id, *, docname, now, reason):
 	"""Recover an expired worker without automatically repeating its call."""
-	parent, run = _locked(run_id)
+	parent, run = _locked(run_id, docname)
 	if (
 		not run
 		or run["state"] not in ACTIVE
@@ -442,9 +600,9 @@ def interrupt(run_id, *, now, reason):
 	return _finish_locked(parent, run, state="interrupted", reason=reason, now=now)
 
 
-def continue_run(run_id, *, worker_token, now, queued_seconds=1800):
+def continue_run(run_id, *, docname, worker_token, now, queued_seconds=1800):
 	"""Write the next slice's dispatch intent before the queue sees it."""
-	parent, run = _locked(run_id)
+	parent, run = _locked(run_id, docname)
 	if not _owns(run, worker_token, now):
 		return None
 	if run.get("active_attempt"):
@@ -464,9 +622,10 @@ def continue_run(run_id, *, worker_token, now, queued_seconds=1800):
 	return run
 
 
-def cancel(run_id, *, now, cancelled_by=None):
-	"""Cancel the durable intent even when Redis is down. Caller authorizes it."""
-	parent, run = _locked(run_id)
+def cancel(run_id, *, docname, now, cancelled_by=None):
+	"""Cancel the durable intent even when Redis is down. Caller authorizes the session;
+	a run of another session is not cancelled."""
+	parent, run = _locked(run_id, docname)
 	if not run or run["state"] not in ACTIVE:
 		return None
 	_mark_uncertain(run, "cancelled")
@@ -474,23 +633,23 @@ def cancel(run_id, *, now, cancelled_by=None):
 	return _finish_locked(parent, run, state="cancelled", reason="cancelled", now=now)
 
 
-def abandon(run_id, *, worker_token, now):
+def abandon(run_id, *, docname, worker_token, now):
 	"""An escaping worker failure immediately leaves an honest terminal state."""
-	parent, run = _locked(run_id)
+	parent, run = _locked(run_id, docname)
 	if not run or run["state"] != "running" or not worker_token or run.get("worker_token") != worker_token:
 		return None
 	_mark_uncertain(run, "worker_interrupted")
 	return _finish_locked(parent, run, state="interrupted", reason="worker_interrupted", now=now)
 
 
-def prepare_dispatch(run_id, *, now):
+def prepare_dispatch(run_id, *, docname, now):
 	"""Throttle delivery of a committed SQL intent; claiming acknowledges it.
 
 	Keep the intent pending until a worker claims it, including when Redis
 	accepts the job but the enqueue acknowledgement or its transaction is lost.
 	The deterministic RQ id saves queue space; claim is the execution fence.
 	"""
-	parent, run = _locked(run_id)
+	parent, run = _locked(run_id, docname)
 	if not parent or not run or run["state"] != "queued" or not run.get("dispatch_pending"):
 		return None
 	if (run.get("lease_until") or 0) <= now or run["deadline"] <= now:
@@ -502,11 +661,11 @@ def prepare_dispatch(run_id, *, now):
 	return run
 
 
-def checkpoint(run_id, *, worker_token, now, **values):
+def checkpoint(run_id, *, docname, worker_token, now, **values):
 	"""Publish bounded progress only while the slice owns this generation."""
 	if set(values) - {"total_items", "steps_state", "blocked_uncertain"}:
 		raise ValueError("Invalid refresh progress fields")
-	parent, run = _locked(run_id)
+	parent, run = _locked(run_id, docname)
 	if not parent or parent["status"] != "Ready" or not _owns(run, worker_token, now):
 		return None
 	_update(RUN, run, heartbeat=now, **values)
