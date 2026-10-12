@@ -545,7 +545,7 @@ def test_analyze_time_runs_use_only_the_session_reservation(journal):
 
 def test_absent_admission_mutex_fails_closed(journal):
 	journal.db.rows[journal.mod.CONTROL] = {}
-	with pytest.raises(journal.mod.JournalUnavailable):
+	with pytest.raises(journal.mod.JournalUnavailable, match="initialize_ai_refresh_store.execute"):
 		admit(journal)
 	assert len(journal.db.rows[journal.mod.RUN]) == 1
 
