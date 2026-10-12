@@ -249,6 +249,7 @@ def test_settlement_gives_up_after_the_third_conflict_and_keeps_the_known_usage(
 	assert "answers" not in worker.journal.db.rows
 	[(title, exc, context)] = rows
 	assert type(exc) is _Conflict and context["tries"] == 3 and context["tokens"] == 7
+	assert context["outcome"] == "not committed after try 3; recorded by fallback"
 	assert context["run_id"] == "fake-run" and context["docname"] == "fake-session-doc"
 
 
@@ -281,12 +282,15 @@ def test_an_error_before_the_commit_that_is_no_conflict_is_not_retried(worker, m
 	assert "answers" not in worker.journal.db.rows
 	[(title, exc, context)] = rows
 	assert type(exc) is OSError and context["tries"] == 1 and context["tokens"] == 7
+	assert context["outcome"] == "not committed after try 1; recorded by fallback"
 
 
 @pytest.mark.parametrize("recovers", [True, False])
 def test_every_counter_row_the_counter_logged_gets_an_outcome(worker, monkeypatch, rows, recovers):
 	"""The session counter logs its own row (``savepoint_rollback=failed``) and raises when the
-	whole transaction is gone; that row must not read as lost tokens once a retry commits."""
+	whole transaction is gone; that row must not read as lost tokens once a retry commits, and
+	when the answer's write gives up and the failed-outcome write then records the tokens,
+	every row says so, so a reconciler never adds them a second time."""
 	worker.count = 1
 	failures = 1 if recovers else 3
 	errors = []
@@ -308,9 +312,39 @@ def test_every_counter_row_the_counter_logged_gets_an_outcome(worker, monkeypatc
 		assert outcomes == ["committed on try 2"]
 		assert db.rows[worker.journal.mod.RUN]["fake-run"]["completed"] == 1
 	else:
-		assert outcomes == ["not committed after try 3"] * 3
+		assert outcomes == ["not committed after try 3; recorded by fallback"] * 3
+		assert [context["tokens"] for title, exc, context in rows if exc is errors[-1]] == [7]
 		assert db.rows[worker.journal.mod.RUN]["fake-run"]["failed"] == 1
 	assert db.rows["Optimus Session"]["fake-session-doc"]["ai_tokens_spent"] == 7
+
+
+def test_a_fallback_that_finds_the_outcome_already_saved_attributes_it_to_the_first_write(
+	worker, monkeypatch, rows
+):
+	"""The first write committed but its COMMIT raised and the read-back failed: the
+	failed-outcome write then finds the attempt settled (a no-op), so the rows say the
+	outcome is saved, never that the fallback recorded the tokens."""
+	worker.count = 1
+	failed = _settle_failing(
+		worker, monkeypatch, failures=1, committed=True, error=lambda: OSError("fake after_commit failure")
+	)
+	real = worker.journal.mod.attempt_settled
+	reads = []
+
+	def first_read_fails(attempt_id):
+		reads.append(attempt_id)
+		if len(reads) == 1:
+			raise ConnectionError("fake lost connection")
+		return real(attempt_id)
+
+	monkeypatch.setattr(worker.journal.mod, "attempt_settled", first_read_fails)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert len(worker.calls) == 1 and len(failed) == 1 and len(reads) == 2
+	run = worker.journal.db.rows[worker.journal.mod.RUN]["fake-run"]
+	assert run["completed"] == 1 and run["failed"] == 0 and run["tokens_reported"] == 7
+	assert worker.journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_tokens_spent"] == 7
+	[(title, exc, context)] = rows
+	assert type(exc) is OSError and context["outcome"].startswith("recorded")
 
 
 def test_worker_uses_the_capture_suppression_flag_and_restores_it(worker):

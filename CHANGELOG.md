@@ -22,8 +22,9 @@ versions may contain breaking changes see migration notes below).
 - Handle SQL conflicts the way Frappe raises them. Retries recognise
   `frappe.QueryDeadlockError` and `frappe.QueryTimeoutError`, MariaDB 11.8's
   snapshot conflict (1020) and the raw codes. Settlement follows
-  `_write_ai_answer`: three tries, a read-back of the attempt's settled bit, and
-  an outcome line on each logged counter row. The engine takes no gap-locking
+  `_write_ai_answer`: three tries, a read-back of the attempt's settled bit
+  (unknown when it cannot be read), and an outcome line on every row. The rows
+  say when the failed-outcome write recorded the tokens. The engine takes no gap-locking
   reads. Every transaction locks the session row first, a duplicate attempt or
   reservation is caught by its unique key, and the requester's User row is never
   locked. A user refresh takes the site mutex only after its session, and a busy

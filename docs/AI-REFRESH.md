@@ -79,12 +79,19 @@ whatever the worker's transaction holds, so no read view from before the call
 remains. A conflict, including a whole-transaction rollback, is rolled back and
 the write tried again, three tries in all. The attempt's `settled` bit makes a
 repeated write a no-op, so neither the provider call nor the usage increment
-repeats. After any other failure, the `settled` bit is read again in a fresh
-query. When it is set, the outcome is saved even though the COMMIT reported an
-error. A write that did not commit is logged once, with its tries and tokens,
-and the outcome is then recorded as failed without the answer. Every counter
-row that the counter logged gets an `outcome=` line, so none reads as lost
-tokens by mistake.
+repeats. Settlement also retries a lock wait timeout and a Postgres
+serialization failure, which #72's write does not. Only this write takes
+locking reads, and its `settled` bit makes a retry safe. After any other
+failure, the `settled` bit is read again in a fresh query. When it is set, the
+outcome is saved even though the COMMIT reported an error. When it cannot be
+read, the outcome is logged as unknown: its tokens may well be recorded, as #72
+says. When the answer's write did not commit, a second write records the
+outcome as failed with the known tokens and without the answer. Every row is
+written once both writes have ended, and each carries an `outcome=`. That
+includes the counter's own rows and each write's failure, with `tries` and
+`tokens`. When the second write recorded the tokens, the first write's rows say
+`recorded by fallback`. A reconciler reading the Error Log therefore never adds
+those tokens twice.
 
 RQ delivery is asynchronous, after commit, through Frappe's original enqueue
 function. Each run/slice has a deterministic job ID; SQL claim is the execution
