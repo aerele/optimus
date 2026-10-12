@@ -13,20 +13,68 @@ Three private SQL DocTypes store the site admission mutex, refresh runs and
 provider attempts. They grant no ordinary Desk/REST permissions. Records hold
 identities, input hashes, fixed states and counts, never prompts, provider
 responses or credentials. An active session reservation is unique; terminal
-runs release it. Admission locks the site mutex, then the session. Other
-transitions lock the session, run and attempt in that order.
+runs release it.
 
-The mutex is updated on every successful admission. This also fences an older
-PostgreSQL REPEATABLE READ snapshot. Definite serialization, deadlock and lock
-conflicts retry at most three SQL transactions, with bounded delay. Admission
-uses NOWAIT on the site mutex. These retries never send HTTP.
+Every journal transaction starts fresh and its first statement locks the
+session row. The caller passes the run's session name, read earlier in its own
+transaction, so no plain read comes before that lock. Then the transition locks
+the run and the attempt, in that order. All other reads come after the locks.
+On MariaDB 11.8, `innodb_snapshot_isolation` is on by default. With it, a lock
+taken after a read view has opened fails with error 1020 ("Record has changed
+since last read") when another transaction changed that row in between.
+Because the locks come first, that cannot happen here. Each transition names
+its session, and a run of another session is treated as missing.
+
+Admission locks the session row first. Only a user refresh (`scope` all, the
+only scope with caps) then takes the site mutex, with NOWAIT. When another
+admission holds the mutex, the answer is a `busy` refusal at once, never a wait
+or an error. An admission that waits on its own session therefore never holds
+the mutex, and analyze-time `fixes_missing` runs never take it. The capacity
+count is a plain read after those locks. Admissions with caps serialize on the
+mutex, and each one updates the mutex row. An older PostgreSQL REPEATABLE READ
+snapshot then fails on that row (40001) and is retried, so the caps stay exact
+on both databases. Admission takes no lock on a range of runs: such next-key
+locks deadlocked other sessions' workers. The unique reservation decides
+`already_running`: an insert that hits it is refused, even when the admission's
+snapshot could not see the other run.
+
+A new attempt is an INSERT on its unique key, with no read of that key first.
+A locking read of a missing key takes a gap lock on MariaDB, and two runs
+beginning at once then deadlocked. A duplicate key means the item was already
+attempted in this run, so no second call is sent.
+
+SQL conflicts are retried as whole short transactions, at most three in all,
+with a short delay. These are deadlocks, lock waits, snapshot conflicts and
+serialization failures, raw or as Frappe wraps them. On MariaDB that means
+1213, 1205 and 1020, and Frappe's `QueryDeadlockError` and
+`QueryTimeoutError`. On Postgres it means 40001, 40P01 and 55P03. A Postgres
+statement timeout (57014) is not retried. A retry never sends HTTP. A lock wait
+timeout can repeat up to three times, which bounds the wait at three times
+`innodb_lock_wait_timeout`.
 
 The worker commits a Calling attempt before contacting a provider, then
-releases journal/session locks during HTTP. Answer persistence, usage, attempt
-outcome and run counters share one transaction. Each settlement is idempotent;
-retrying an ambiguous SQL commit acknowledgement does not repeat the provider
-request or usage increment. Completion accounting also shares its transaction
-with release of the session reservation.
+releases journal/session locks during HTTP. The answer, the attempt outcome and
+the run counters commit in one short transaction. That transaction also adds
+the reported tokens to the session's `ai_tokens_spent` through #72's counter.
+That counter is log-and-continue (D2). If its own statement fails, only the
+increment is rolled back and logged (`optimus ai spend`), and the outcome
+commits without it. The run's `tokens_reported` always keeps the count, so it
+is the source for reconciling the session total. The completion count
+(`ai_refresh_count`) works the same way. Its failure is logged
+(`optimus ai refresh count`), and the terminal state and the release of the
+reservation still commit.
+
+Settlement follows #72's `_write_ai_answer` discipline. The first try commits
+whatever the worker's transaction holds, so no read view from before the call
+remains. A conflict, including a whole-transaction rollback, is rolled back and
+the write tried again, three tries in all. The attempt's `settled` bit makes a
+repeated write a no-op, so neither the provider call nor the usage increment
+repeats. After any other failure, the `settled` bit is read again in a fresh
+query. When it is set, the outcome is saved even though the COMMIT reported an
+error. A write that did not commit is logged once, with its tries and tokens,
+and the outcome is then recorded as failed without the answer. Every counter
+row that the counter logged gets an `outcome=` line, so none reads as lost
+tokens by mistake.
 
 RQ delivery is asynchronous, after commit, through Frappe's original enqueue
 function. Each run/slice has a deterministic job ID; SQL claim is the execution
@@ -78,7 +126,9 @@ Normal Frappe migration installs the journal schema and its admission mutex.
 Fresh installation seeds the same mutex. Deploy code/schema before enabling
 callers; restart web and workers together through the normal deployment process.
 Do not route work to a worker running older code. A missing journal is an error,
-never permission to run without concurrency controls.
+never permission to run without concurrency controls. A missing mutex row
+refuses user refreshes, whose caps need it. Analyze-time runs need only the
+session lock and the unique reservation.
 
 | Site configuration | Default | Accepted values |
 | --- | --- | --- |
@@ -104,12 +154,17 @@ timeouts measure inactivity, so worker time limits remain necessary.
 ## Validation and remaining acceptance
 
 Automated tests cover duplicate delivery, stale workers, cancellation during
-HTTP, input/permission changes, durable send intent, atomic rollback, lost commit
-acknowledgement, unknown outcomes, failure limits, queue loss, resume limits and
-secret-safe interrupts. AI Quality runs real MariaDB and PostgreSQL transaction
-checks on disposable test-owned tables. Those checks exercise real row locks
-and isolation through a narrow database adapter; they do not replace Frappe
-document-hook or end-user acceptance tests.
+HTTP, input/permission changes, durable send intent, settlement retries, lost
+commit acknowledgement, unknown outcomes, failure limits, queue loss, resume
+limits and secret-safe interrupts. AI Quality runs real transaction checks on
+three databases: MariaDB 10.6, MariaDB 11.8 (snapshot isolation on) and
+PostgreSQL 16. The tables are disposable and test-owned. The adapter shapes
+them like a Frappe site. It builds the tables with Frappe's DDL rules
+(indexes, unique columns, defaults) and raises errors the way
+`frappe.db.sql` and `Document.insert` do. It also runs #72's real session
+counters. The checks include regression probes for the deadlocks and 1020
+conflicts above, on every leg. They do not replace Frappe document-hook or
+end-user acceptance tests.
 
 The wiring follow-up owns scheduled recovery, report replacement and UI/API
 compatibility. Journal history cleanup belongs to the privacy/retention work

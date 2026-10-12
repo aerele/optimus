@@ -13,9 +13,21 @@ versions may contain breaking changes see migration notes below).
 ### Internal
 
 - Add the background AI refresh engine and private SQL run/attempt journal.
-  A send intent commits before the provider call; the answer, reported usage
-  and outcome commit together. Duplicate deliveries cannot repeat a claimed
-  slice, and cancelled or expired workers cannot overwrite newer results.
+  A send intent commits before the provider call. The answer and outcome
+  commit together, in the same short transaction that adds the reported usage
+  to the session through #72's log-and-continue counter. A failed increment is
+  logged and the run's `tokens_reported` keeps the count. Duplicate deliveries
+  cannot repeat a claimed slice, and cancelled or expired workers cannot
+  overwrite newer results.
+- Handle SQL conflicts the way Frappe raises them. Retries recognise
+  `frappe.QueryDeadlockError` and `frappe.QueryTimeoutError`, MariaDB 11.8's
+  snapshot conflict (1020) and the raw codes. Settlement follows
+  `_write_ai_answer`: three tries, a read-back of the attempt's settled bit, and
+  an outcome line on each logged counter row. The engine takes no gap-locking
+  reads. Every transaction locks the session row first, a duplicate attempt or
+  reservation is caught by its unique key, and the requester's User row is never
+  locked. A user refresh takes the site mutex only after its session, and a busy
+  mutex is a `busy` refusal. Analyze-time runs never take the mutex.
 - Keep interrupted calls with an unknown outcome as uncertain. Automatic
   recovery delivers queued work but never repeats an uncertain provider call.
   Explicit resumes preserve the selection cursor and have a bounded chain.
@@ -32,7 +44,9 @@ versions may contain breaking changes see migration notes below).
   Existing refresh behavior remains synchronous. The wiring follow-up must
   land before release; profiling isolation is completed there.
 - Normal deployment migration installs three internal DocTypes and seeds the
-  admission mutex. Missing storage refuses new work. See
+  admission mutex. A missing journal table fails every admission, and a missing
+  mutex row refuses user refreshes. AI Quality runs
+  the journal checks on MariaDB 10.6, MariaDB 11.8 and PostgreSQL. See
   [background engine details](docs/AI-REFRESH.md) for transactions, queue
   requirements and the remaining deployment work.
 
