@@ -163,7 +163,6 @@ def journal(monkeypatch):
 		"skipped": 0,
 		"tokens_reported": 0,
 		"usage_incomplete": 0,
-		"completion_counted": 0,
 	}
 	db.rows[mod.RUN] = {run["name"]: run}
 	db.rows[mod.CONTROL] = {"site": {"name": "site", "scope": "site"}}
@@ -349,28 +348,149 @@ def test_expiry_fences_answer_even_before_recovery_observes_the_crash(journal, e
 		)
 
 
-def test_a_completion_count_failure_that_ends_the_transaction_keeps_the_run_and_counts_once(
-	journal, monkeypatch
-):
+def _count(journal):
+	return journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"]
+
+
+def _end(journal, how):
+	"""End the claimed fixture run (two answers done, a call open for some endings) one way."""
+	mod, db = journal.mod, journal.db
+	journal.run["completed"] = 2
+	with db.transaction():
+		if how in {"complete", "breaker", "deadline", "disabled", "uncertain"}:
+			mod.finish("fake-run", docname="fake-session-doc", worker_token="worker-a", now=12, reason=how)
+		elif how == "cancel":
+			mod.cancel("fake-run", docname="fake-session-doc", now=12)
+		elif how == "interrupt":
+			mod.interrupt("fake-run", docname="fake-session-doc", now=400, reason="lease_expired")
+		elif how == "abandon":
+			mod.abandon("fake-run", docname="fake-session-doc", worker_token="worker-a", now=12)
+		else:
+			assert how == "no_progress"
+			journal.run["idle_slices"] = mod.IDLE_SLICE_LIMIT - 1
+			mod.continue_run(
+				"fake-run", docname="fake-session-doc", worker_token="worker-a", now=12, progressed=False
+			)
+	assert journal.run["state"] != "running"
+
+
+@pytest.mark.parametrize(
+	"how",
+	[
+		"complete",
+		"breaker",
+		"deadline",
+		"disabled",
+		"uncertain",
+		"cancel",
+		"interrupt",
+		"abandon",
+		"no_progress",
+	],
+)
+def test_no_ending_of_a_run_counts_a_refresh(journal, how):
+	"""Q1 (K1): the refresh is counted once, when it is accepted, and never when it ends:
+	not complete, not stopped, cancelled, interrupted, abandoned or idle, whatever it had done."""
 	claim(journal)
-	journal.run["completed"] = 1
+	_end(journal, how)
+	assert _count(journal) == 0
 
-	def failed(*a):
-		raise RuntimeError("fake completion accounting failure")
 
-	with monkeypatch.context() as patch:
-		patch.setattr("optimus.analyze._bump_ai_refresh_count", failed)
-		with pytest.raises(RuntimeError), journal.db.transaction():
-			journal.mod.finish(
-				"fake-run", docname="fake-session-doc", worker_token="worker-a", now=12, reason="complete"
-			)
-	assert journal.db.rows[journal.mod.RUN]["fake-run"]["completion_counted"] == 0
-	for _ in range(2):
-		with journal.db.transaction():
-			journal.mod.finish(
-				"fake-run", docname="fake-session-doc", worker_token="worker-a", now=12, reason="complete"
-			)
-	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 1
+def test_the_finish_of_a_run_has_no_counting_keyword(journal):
+	"""The interim ``count=`` keyword of the finish is gone with the finish's own count."""
+	import inspect
+
+	for name in ("_finish_locked", "_release"):
+		assert "count" not in inspect.signature(getattr(journal.mod, name)).parameters
+
+
+def test_a_user_refresh_counts_once_when_it_is_accepted(journal):
+	journal.db.rows[journal.mod.RUN] = {}
+	assert admit(journal)["status"] == "queued"
+	assert _count(journal) == 1
+
+
+def test_a_resume_is_a_click_and_counts_once_more(journal):
+	journal.db.rows[journal.mod.RUN] = {}
+	admit(journal)
+	with journal.db.transaction():
+		journal.mod.cancel("new-run", docname="fake-session-doc", now=12)
+	assert admit(journal, run_id="resumed", resume_from="new-run")["status"] == "queued"
+	assert _count(journal) == 2
+
+
+def test_an_analyze_time_run_is_not_a_click_and_counts_nothing(journal):
+	journal.db.rows[journal.mod.RUN] = {}
+	assert admit(journal, scope="fixes_missing")["status"] == "queued"
+	assert _count(journal) == 0
+
+
+def _refuse_cap(journal, reason):
+	journal.db.rows[journal.mod.RUN] = {
+		f"other-{i}": {
+			**journal.run,
+			"name": f"other-{i}",
+			"active_session": f"other-session-{i}",
+			"requested_by": "other-owner" if reason == "site_cap" else "fake-owner",
+		}
+		for i in range(2)
+	}
+	return {"site_cap": 2 if reason == "site_cap" else 4, "user_cap": 2}
+
+
+@pytest.mark.parametrize(
+	"refusal",
+	["site_cap", "user_cap", "already_running", "not_ready", "busy", "not_resumable", "retry_limit"],
+)
+def test_a_refused_admission_never_counts(journal, refusal, monkeypatch):
+	"""Q1 (K1): busy, a cap, an attach, a session that is not Ready and an unresumable or
+	exhausted resume are refusals; none of them is a click."""
+	kwargs = {}
+	if refusal in {"site_cap", "user_cap"}:
+		kwargs = _refuse_cap(journal, refusal)
+	elif refusal == "already_running":
+		journal.run["lease_until"] = 1800  # live
+	elif refusal == "not_ready":
+		journal.db.rows["Optimus Session"]["fake-session-doc"]["status"] = "Analyzing"
+	elif refusal == "busy":
+		journal.db.rows[journal.mod.RUN] = {}
+		current = journal.db.get_value
+
+		def nowait(table, name, *a, **kw):
+			if table == journal.mod.CONTROL:
+				raise DriverError(1205, "fake lock wait timeout")
+			return current(table, name, *a, **kw)
+
+		monkeypatch.setattr(journal.db, "get_value", nowait)
+	else:
+		journal.db.rows[journal.mod.RUN] = {
+			"old-run": {
+				**journal.run,
+				"name": "old-run",
+				"state": "running" if refusal == "not_resumable" else "interrupted",
+				"active_session": None,
+				"requested_at_epoch": 1,
+				"retry_no": 3 if refusal == "retry_limit" else 0,
+			}
+		}
+		kwargs = {"resume_from": "old-run"}
+	out = admit(journal, **kwargs)
+	assert out["status"] in {"refused", "already_running"}
+	assert _count(journal) == 0
+
+
+def test_a_bump_that_ends_the_transaction_rolls_the_admission_back(journal, monkeypatch):
+	"""The bump is in the admission's transaction: if #72's counter lets a whole-transaction
+	failure through, the reservation is not left behind uncounted."""
+	journal.db.rows[journal.mod.RUN] = {}
+
+	def failed(name):
+		raise RuntimeError("fake counter failure that ended the transaction")
+
+	monkeypatch.setattr("optimus.analyze._bump_ai_refresh_count", failed)
+	with pytest.raises(RuntimeError):
+		admit(journal)
+	assert journal.db.rows[journal.mod.RUN] == {} and _count(journal) == 0
 
 
 def test_invalid_queued_reservation_cannot_be_claimed(journal):
@@ -643,16 +763,6 @@ def test_the_unique_reservation_detects_a_run_the_snapshot_missed(journal, monke
 	assert journal.db.rows[journal.mod.CONTROL]["site"].get("generation") is None
 
 
-def test_empty_refresh_does_not_count_as_an_updated_session(journal):
-	claim(journal)
-	with journal.db.transaction():
-		journal.mod.finish(
-			"fake-run", docname="fake-session-doc", worker_token="worker-a", now=12, reason="complete"
-		)
-	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 0
-	assert journal.run["completion_counted"] == 1
-
-
 def test_stale_input_rejection_keeps_usage_but_not_completed_count(journal):
 	claim(journal)
 	attempt = begin(journal)
@@ -717,7 +827,17 @@ def test_explicit_worker_abandon_marks_unknown_without_waiting_for_lease(journal
 
 
 @pytest.mark.parametrize(
-	"kind,stop", [("auth", True), ("quota", True), ("rate_limited", True), ("timeout", False)]
+	"kind,stop",
+	[
+		("auth", True),
+		("quota", True),
+		("not_found", True),
+		("config", True),
+		("rate_limited", False),
+		("timeout", False),
+		("context", False),
+		("refused", False),
+	],
 )
 def test_breaker_is_committed_with_attempt_accounting(journal, kind, stop):
 	claim(journal)
@@ -734,8 +854,58 @@ def test_breaker_is_committed_with_attempt_accounting(journal, kind, stop):
 			now=12,
 			error_kind=kind,
 		)
-	assert journal.run["consecutive_failures"] == 1
+	# context and refused are about one prompt: recorded under their own kind, never in the streak.
+	assert journal.run["consecutive_failures"] == (0 if kind in {"context", "refused"} else 1)
 	assert bool(journal.run.get("breaker_kind")) is stop
+	assert journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["error_kind"] == kind
+	assert journal.run["failed"] == 1
+
+
+def _fail(journal, name, kind):
+	attempt = begin(journal, name=name)
+	with journal.db.transaction():
+		journal.mod.settle_attempt(
+			"fake-run",
+			attempt["name"],
+			docname="fake-session-doc",
+			worker_token="worker-a",
+			outcome="failed",
+			tokens=0,
+			usage_complete=False,
+			now=12,
+			error_kind=kind,
+		)
+
+
+def test_per_prompt_failures_never_stop_the_run_however_many(journal):
+	claim(journal)
+	for i in range(6):
+		_fail(journal, f"finding-{i}", "context" if i % 2 else "refused")
+	assert not journal.run.get("breaker_kind") and journal.run["failed"] == 6
+
+
+def test_a_per_prompt_failure_leaves_the_streak_where_it_was(journal):
+	"""Two timeouts, a context failure, then a third timeout: still three of the counted kind
+	in a row (the per-prompt failure neither adds nor resets)."""
+	claim(journal)
+	for i, kind in enumerate(["timeout", "timeout", "context"]):
+		_fail(journal, f"finding-{i}", kind)
+	assert not journal.run.get("breaker_kind") and journal.run["consecutive_failures"] == 2
+	_fail(journal, "finding-3", "timeout")
+	assert journal.run["breaker_kind"] == "timeout"
+
+
+def test_the_breaker_reads_the_fatal_kinds_from_the_one_list(journal, monkeypatch):
+	"""Q2: the store keeps no list of its own; a kind added to ``AI_FATAL_KINDS`` stops the run
+	at once, and a kind removed from it only joins the streak."""
+	from optimus import ai_fix
+
+	claim(journal)
+	monkeypatch.setattr(ai_fix, "AI_FATAL_KINDS", frozenset({"server"}))
+	_fail(journal, "finding-0", "auth")
+	assert not journal.run.get("breaker_kind")
+	_fail(journal, "finding-1", "server")
+	assert journal.run["breaker_kind"] == "server"
 
 
 def test_three_failures_stop_across_slice_boundaries(journal):
@@ -1085,8 +1255,8 @@ def test_an_admission_takes_over_an_expired_run_in_its_own_transaction(journal, 
 	called = journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]
 	assert called["state"] == "uncertain" and not called.get("settled")
 	assert out["taken_over"]["name"] == "fake-run" and not out["taken_over"].get("inconsistent")
-	# Q1: the interrupted run is not a refresh the session counts; the new click is.
-	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 0
+	# Q1: the taken-over run adds nothing; the new click is counted once.
+	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 1
 	# Every lock: the session, the site mutex, then the stale run and its attempt.
 	assert journal.db.locks == [
 		("Optimus Session", "fake-session-doc"),
@@ -1143,7 +1313,7 @@ def test_a_takeover_force_releases_a_run_whose_open_attempt_is_inconsistent(jour
 	old = journal.db.rows[journal.mod.RUN]["fake-run"]
 	assert old["state"] == "interrupted" and old["active_session"] is None
 	assert old["uncertain"] == 1 and old["usage_incomplete"] == 1
-	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 0
+	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 1
 
 
 @pytest.mark.parametrize("operation", ["cancel", "interrupt"])
@@ -1264,8 +1434,8 @@ def test_a_slice_that_made_progress_resets_the_idle_streak(journal):
 	assert journal.run["idle_slices"] == 2
 
 
-def test_a_run_stopped_because_ai_was_switched_off_counts_no_refresh(journal):
-	"""E7 / C4: ending as complete told the user the refresh finished, and counted it."""
+def test_a_run_stopped_because_ai_was_switched_off_ends_stopped_with_its_reason(journal):
+	"""E7 / C4: ending as complete told the user the refresh finished."""
 	claim(journal)
 	journal.run["completed"] = 2
 	with journal.db.transaction():
@@ -1273,7 +1443,6 @@ def test_a_run_stopped_because_ai_was_switched_off_counts_no_refresh(journal):
 			"fake-run", docname="fake-session-doc", worker_token="worker-a", now=12, reason="disabled"
 		)
 	assert out["state"] == "stopped" and out["end_reason"] == "disabled"
-	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 0
 
 
 def test_finish_refuses_while_a_provider_call_is_unsettled(journal):

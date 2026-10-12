@@ -17,7 +17,7 @@ from optimus import ai_fix
 _PKG = Path(__file__).resolve().parents[1]
 _DOCS = _PKG.parent / "docs" / "AI-FIXING.md"
 _JS = _PKG / "optimus" / "doctype" / "optimus_session" / "optimus_session.js"
-_MODULES = ("analyze.py", "api.py", "ai_fix.py", "maintenance.py", "line_profile/analyzer.py")
+_MODULES = ("analyze.py", "api.py", "ai_fix.py", "maintenance.py", "line_profile/analyzer.py", "ai_jobs.py")
 PREFIX = "optimus ai"
 
 

@@ -26,7 +26,6 @@
   "include_steps",
   "include_fixes",
   "retry_uncertain",
-  "completion_counted",
   "dispatch_pending",
   "render_pending",
   "cap",
@@ -56,7 +55,9 @@
   "seq",
   "retry_no",
   "blocked_uncertain",
-  "idle_slices"
+  "idle_slices",
+  "gated_count",
+  "excluded_count"
  ],
  "fields": [
   {
@@ -139,13 +140,6 @@
    "fieldname": "retry_uncertain",
    "fieldtype": "Check",
    "label": "Retry Uncertain",
-   "read_only": 1,
-   "default": "0"
-  },
-  {
-   "fieldname": "completion_counted",
-   "fieldtype": "Check",
-   "label": "Completion Counted",
    "read_only": 1,
    "default": "0"
   },
@@ -350,6 +344,20 @@
    "fieldname": "idle_slices",
    "fieldtype": "Int",
    "label": "Idle Slices",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "gated_count",
+   "fieldtype": "Int",
+   "label": "Gated Count",
+   "read_only": 1,
+   "default": "0"
+  },
+  {
+   "fieldname": "excluded_count",
+   "fieldtype": "Int",
+   "label": "Excluded Count",
    "read_only": 1,
    "default": "0"
   }

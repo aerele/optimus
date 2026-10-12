@@ -43,6 +43,9 @@ def queue(journal, monkeypatch):
 	monkeypatch.setattr(jobs, "_now", lambda: 50)
 	monkeypatch.setattr(jobs, "_call_timeout", lambda: 60)
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: logs.append(type(a[1]).__name__))
+	# The selection counts and the Refresh flag have their own tests (test_ai_refresh_contracts).
+	monkeypatch.setattr(jobs, "_selection_counts", lambda *a, **kw: (0, 0))
+	monkeypatch.setattr(jobs, "_refresh_flag_held", lambda session_uuid: False)
 	return SimpleNamespace(jobs=jobs, journal=journal, sent=sent, logs=logs, callbacks=callbacks)
 
 
@@ -147,7 +150,7 @@ def test_recovery_delivers_a_committed_intent_that_never_reached_redis(queue, mo
 
 def test_missing_worker_refuses_admission_without_creating_a_run(queue, monkeypatch):
 	queue.journal.db.rows[queue.journal.mod.RUN] = {}
-	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda: False)
+	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda docname=None: False)
 	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
 	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
 	out = queue.jobs.start_refresh(
@@ -186,7 +189,7 @@ def test_existing_refresh_is_visible_even_when_provider_or_queue_is_unavailable(
 
 def test_start_commits_reservation_before_enqueuing(queue, monkeypatch):
 	queue.journal.db.rows[queue.journal.mod.RUN] = {}
-	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda: True)
+	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda docname=None: True)
 	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
 	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
 	out = queue.jobs.start_refresh(
@@ -217,7 +220,7 @@ def test_recovery_enforces_total_budget_even_if_queue_lease_is_still_alive(queue
 def test_admission_honors_the_planned_site_configuration_names(queue, monkeypatch):
 	queue.journal.db.rows[queue.journal.mod.RUN] = {}
 	queue.jobs.frappe.conf.update(optimus_ai_refresh_max_seconds=900, optimus_ai_max_active_refreshes=1)
-	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda: True)
+	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda docname=None: True)
 	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
 	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
 	queue.jobs.start_refresh(
@@ -266,7 +269,7 @@ def test_nonserialization_errors_are_not_retried_as_admissions(queue):
 def test_a_reservation_the_admission_could_not_see_is_read_again(queue, monkeypatch, still_active):
 	"""The unique active_session key refused the insert but this transaction's snapshot could
 	not see that run (Postgres): it is read again, fresh, or reported busy once it ended."""
-	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda: True)
+	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda docname=None: True)
 	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
 	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
 	monkeypatch.setattr(queue.journal.mod, "admit", lambda **kw: {"status": "already_running", "run": None})
@@ -301,7 +304,7 @@ def test_an_http_admission_waits_for_its_session_row_once_then_answers_busy(queu
 		pass
 
 	queue.journal.db.rows[queue.journal.mod.RUN] = {}
-	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda: True)
+	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda docname=None: True)
 	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
 	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
 	monkeypatch.setattr(queue.jobs.time, "sleep", lambda seconds: None)
@@ -334,7 +337,7 @@ def test_an_http_admission_never_retries_a_lock_wait_timeout_anywhere(queue, mon
 		pass
 
 	queue.journal.db.rows[queue.journal.mod.RUN] = {}
-	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda: True)
+	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda docname=None: True)
 	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
 	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
 	monkeypatch.setattr(queue.jobs.time, "sleep", lambda seconds: None)
@@ -374,7 +377,7 @@ def _lock_wait():
 @pytest.fixture
 def admitting(queue, monkeypatch):
 	"""``start_refresh`` with a listening worker, an enabled provider and an allowed user."""
-	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda: True)
+	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda docname=None: True)
 	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
 	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: True)
 	monkeypatch.setattr(queue.jobs.time, "sleep", lambda seconds: None)
@@ -452,7 +455,7 @@ def test_a_takeover_of_an_inconsistent_run_writes_one_row_naming_it(admitting, r
 	del queue.journal.db.rows[queue.journal.mod.ATTEMPT][attempt["name"]]
 	assert _start(queue)["status"] == "queued"
 	[(title, exc, context)] = rows
-	assert title == "optimus AI refresh recovery" and context["run_id"] == "fake-run"
+	assert title == "optimus ai refresh release" and context["run_id"] == "fake-run"
 	assert context["docname"] == "fake-session-doc" and "attempt" in str(exc)
 
 
@@ -546,7 +549,7 @@ def test_one_bad_row_never_stops_the_recovery_sweep(queue, monkeypatch, rows, va
 		assert runs["poison"]["state"] == "running"
 		assert counts == {"interrupted": 1, "dispatched": 1, "busy": 0, "failed": 1}
 		[(title, exc, context)] = rows
-		assert title == "optimus AI refresh recovery" and type(exc) is RuntimeError
+		assert title == "optimus ai refresh recovery" and type(exc) is RuntimeError
 		assert context["run_id"] == "poison" and context["docname"] == "sess-p"
 		assert events.index("log") > max(i for i, e in enumerate(events) if e != "log")
 
@@ -671,7 +674,7 @@ def test_cancel_force_releases_a_corrupt_run_with_one_row(queue, rows):
 	out = _cancel(queue)
 	assert out["status"] == "cancelled" and queue.journal.run["active_session"] is None
 	[(title, exc, context)] = rows
-	assert title == "optimus AI refresh recovery" and context["run_id"] == "fake-run"
+	assert title == "optimus ai refresh release" and context["run_id"] == "fake-run"
 	assert "reservation" in str(exc) and context["docname"] == "fake-session-doc"
 
 
@@ -816,7 +819,7 @@ def test_a_forced_release_in_a_refused_admission_still_writes_its_row(admitting,
 	assert _start(queue) == {"status": "refused", "reason": "site_cap"}
 	assert queue.journal.db.rows[queue.journal.mod.RUN]["fake-run"]["state"] == "interrupted"
 	[(title, exc, context)] = rows
-	assert title == "optimus AI refresh recovery" and context["run_id"] == "fake-run"
+	assert title == "optimus ai refresh release" and context["run_id"] == "fake-run"
 
 
 @pytest.mark.parametrize(

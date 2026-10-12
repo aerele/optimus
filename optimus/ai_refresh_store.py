@@ -22,7 +22,7 @@ import hashlib
 
 import frappe
 
-from optimus import safe_call
+from optimus import ai_fix, safe_call
 
 RUN = "Optimus AI Refresh Run"
 ATTEMPT = "Optimus AI Refresh Attempt"
@@ -31,6 +31,11 @@ ACTIVE = frozenset({"queued", "running"})
 TERMINAL = frozenset({"complete", "stopped", "cancelled", "interrupted"})
 # Slices in a row that could not begin any item before the run stops with ``no_progress``.
 IDLE_SLICE_LIMIT = 3
+# Failures about one prompt, which say nothing about the next finding's: the prompt did not fit
+# the model's context window, or moderation refused it. Recorded under their own kind, and
+# neither stop the run at once (they are not ``ai_fix.AI_FATAL_KINDS``) nor count toward the
+# three-in-a-row stop.
+PER_PROMPT_KINDS = frozenset({"context", "refused"})
 # Seconds before a slice's pending dispatch intent may be sent to RQ again.
 DISPATCH_INTERVAL = 30
 
@@ -154,7 +159,7 @@ def _insert_new(table, name, **values):
 	return None
 
 
-def _locked(run_id, docname, *, wait=True, force=False):
+def lock_run(run_id, docname, *, wait=True, force=False):
 	"""Lock the run's session row, then the run row, as the transaction's first statements.
 
 	``docname`` is the run's session, resolved by the caller before this transaction (the
@@ -211,6 +216,8 @@ def admit(
 	resume_from=None,
 	requested_at_epoch=None,
 	retry_uncertain=False,
+	gated=0,
+	excluded=0,
 ):
 	"""Reserve a session and, for a user refresh, enforce the site/user caps.
 
@@ -234,9 +241,16 @@ def admit(
 	passed (``expired``) is ended in this transaction, as the recovery sweep would end it:
 	interrupted, its Calling attempt uncertain (never sent again), its reservation released
 	(``_release``; an inconsistent row is force-released). The admission then goes on, so a
-	crashed worker never needs the scheduler or a manual cancel. The taken-over run counts no
-	refresh; it comes back as ``taken_over`` with every answer, a refusal included, since the
-	takeover commits with it.
+	crashed worker never needs the scheduler or a manual cancel. The taken-over run comes back as
+	``taken_over`` with every answer, a refusal included, since the takeover commits with it.
+
+	``gated`` and ``excluded`` are the selection's counts (``AiSelection``), taken by the caller
+	at admission and kept on the run for the page's toasts.
+
+	Refresh count (Q1): a user refresh (``scope == "all"``, a resume included) adds one to the
+	session's ``ai_refresh_count`` here, once the reservation is inserted, and nowhere else.
+	The finish of a run never counts, whatever its ending. Analyze-time ``fixes_missing`` runs
+	are not a click and count nothing.
 	"""
 	if scope not in {"all", "fixes_missing"} or (regenerate_all and scope != "all"):
 		raise ValueError("Invalid refresh scope")
@@ -248,6 +262,7 @@ def admit(
 		or not 60 <= max_seconds <= 86400
 		or type(cap) is not int
 		or not 0 <= cap < 2**31
+		or any(type(n) is not int or not 0 <= n < 2**31 for n in (gated, excluded))
 		or any(
 			type(flag) is not bool for flag in (include_fixes, include_steps, regenerate_all, retry_uncertain)
 		)
@@ -293,13 +308,7 @@ def admit(
 		current = locked if locked and locked.get("active_session") == docname else None
 		if current and expired(current, now):
 			taken_over = _release(
-				parent,
-				current,
-				docname,
-				state="interrupted",
-				reason=expiry_reason(current, now),
-				now=now,
-				count=False,
+				current, docname, state="interrupted", reason=expiry_reason(current, now), now=now
 			)
 			current = None
 	if current:
@@ -368,7 +377,6 @@ def admit(
 		dispatch_pending=1,
 		dispatched_at_epoch=0,
 		seq=0,
-		completion_counted=0,
 		cap=cap,
 		include_fixes=int(include_fixes),
 		include_steps=int(include_steps),
@@ -387,9 +395,18 @@ def admit(
 		tokens_reported=0,
 		usage_incomplete=0,
 		total_items=0,
+		gated_count=gated,
+		excluded_count=excluded,
 	)
 	if run is None:
 		return _answer(taken_over, status="already_running", run=None)
+	if scope == "all":
+		# One bump per accepted user refresh, a resume included (Q1), in the transaction that
+		# reserves the session: a refused admission never counts. #72's counter is
+		# savepoint-wrapped and log-and-continue, like its Refresh click.
+		from optimus.analyze import _bump_ai_refresh_count
+
+		_bump_ai_refresh_count(docname)
 	if control is not None:
 		# PostgreSQL REPEATABLE READ does not refresh even a locking SELECT's snapshot.
 		# Changing the mutex row makes an older admission fail serialization on it and
@@ -430,7 +447,9 @@ def _lock_or_busy(read):
 	return None, True
 
 
-def _owns(run, worker_token, now):
+def owns(run, worker_token, now):
+	"""True when ``worker_token`` is the live owner of the running ``run`` (public: the worker
+	checks it between items)."""
 	return bool(
 		worker_token
 		and run
@@ -443,7 +462,7 @@ def _owns(run, worker_token, now):
 
 def claim(run_id, *, docname, slice_no, worker_token, now, lease_seconds):
 	"""Claim a queued slice once. Replaying even the same token is a no-op."""
-	parent, run = _locked(run_id, docname)
+	parent, run = lock_run(run_id, docname)
 	if (
 		not parent
 		or not run
@@ -476,8 +495,8 @@ def begin_attempt(run_id, *, docname, worker_token, kind, target, input_hash, no
 	"""Persist the send intent before HTTP. Returning None forbids a new call."""
 	if kind not in {"fix", "steps"} or not isinstance(target, str) or not target:
 		raise ValueError("Invalid refresh target")
-	parent, run = _locked(run_id, docname)
-	if not parent or parent["status"] != "Ready" or not _owns(run, worker_token, now):
+	parent, run = lock_run(run_id, docname)
+	if not parent or parent["status"] != "Ready" or not owns(run, worker_token, now):
 		return None
 	if run["deadline"] <= now or run.get("active_attempt") or run.get("breaker_kind"):
 		return None
@@ -539,7 +558,7 @@ def settle_attempt(
 		or type(usage_complete) is not bool
 	):
 		raise ValueError("Invalid refresh outcome")
-	parent, run = _locked(run_id, docname)
+	parent, run = lock_run(run_id, docname)
 	if not run:
 		return False
 	attempt = _read(ATTEMPT, attempt_id, lock=True)
@@ -548,7 +567,7 @@ def settle_attempt(
 	if attempt.get("settled") or attempt["state"] not in {"calling", "uncertain"}:
 		return False
 	can_write = bool(
-		parent and parent["status"] == "Ready" and run["deadline"] > now and _owns(run, worker_token, now)
+		parent and parent["status"] == "Ready" and run["deadline"] > now and owns(run, worker_token, now)
 	)
 	final = "discarded" if outcome == "succeeded" and not can_write else outcome
 	if outcome == "succeeded" and can_write and persist is not None:
@@ -581,14 +600,14 @@ def settle_attempt(
 	counts["uncertain"] -= int(was_uncertain)
 	counts[counter] += 1
 	streak = run.get("consecutive_failures") or 0
-	if final == "failed":
+	if final == "failed" and error_kind not in PER_PROMPT_KINDS:
 		streak += 1
 	elif final == "succeeded":
 		streak = 0
 	breaker = run.get("breaker_kind") or ""
-	if final == "failed" and (
-		error_kind in {"auth", "not_found", "quota", "config", "rate_limited"} or streak >= 3
-	):
+	# Q2, #72's rule: stop at once only when the operator must act (``AI_FATAL_KINDS``);
+	# any other failure, a rate limit included, counts toward three in a row.
+	if final == "failed" and (error_kind in ai_fix.AI_FATAL_KINDS or streak >= 3):
 		breaker = error_kind or "internal"
 	_update(
 		RUN,
@@ -610,13 +629,9 @@ def settle_attempt(
 	return True
 
 
-def _finish_locked(parent, run, *, state, reason, now, count=True):
-	if count and not run.get("completion_counted"):
-		if parent and run["scope"] == "all" and run.get("completed"):
-			from optimus.analyze import _bump_ai_refresh_count
-
-			_bump_ai_refresh_count(parent["name"])
-		_update(RUN, run, completion_counted=1)
+def _finish_locked(run, *, state, reason, now):
+	"""Write the terminal state and release the reservation. It counts nothing: the refresh
+	was counted once, when it was accepted (``admit``)."""
 	_update(
 		RUN,
 		run,
@@ -633,19 +648,13 @@ def _finish_locked(parent, run, *, state, reason, now, count=True):
 
 def finish(run_id, *, docname, worker_token, now, reason):
 	"""Write the terminal state and release the session reservation."""
-	parent, run = _locked(run_id, docname)
-	if not _owns(run, worker_token, now):
+	_, run = lock_run(run_id, docname)
+	if not owns(run, worker_token, now):
 		return None
 	if run.get("active_attempt"):
 		raise RuntimeError("Cannot finish with an unsettled provider call")
 	return _finish_locked(
-		parent,
-		run,
-		state="complete" if reason == "complete" else "stopped",
-		reason=reason,
-		now=now,
-		# The provider was switched off under the run (E7): not a refresh the session asked for.
-		count=reason != "disabled",
+		run, state="complete" if reason == "complete" else "stopped", reason=reason, now=now
 	)
 
 
@@ -683,21 +692,20 @@ def _mark_uncertain(run, reason, *, force=False):
 	return inconsistent
 
 
-def _release(parent, run, docname, *, state, reason, now, count=True):
+def _release(run, docname, *, state, reason, now):
 	"""End an active run: its open call uncertain, its session reservation released.
 
 	An inconsistent row is force-released (E2) rather than holding its session, and a site
 	cap slot, until the journal is repaired by hand. Release fails open, spend fails closed:
 	a reservation naming another session is cleared, an attempt that is not this run's is
-	never written (the run counts an uncertain call of unknown usage instead) and no refresh
-	is counted. The run comes back with ``inconsistent`` naming what was wrong, for the
-	caller's one Error Log row."""
+	never written (the run counts an uncertain call of unknown usage instead). The run comes
+	back with ``inconsistent`` naming what was wrong, for the caller's one Error Log row."""
 	problems = []
 	if run.get("active_session") not in (None, "", docname) or run.get("session_name") != docname:
 		problems.append("reservation")
 	if _mark_uncertain(run, reason, force=True):
 		problems.append("attempt")
-	_finish_locked(parent, run, state=state, reason=reason, now=now, count=count and not problems)
+	_finish_locked(run, state=state, reason=reason, now=now)
 	if problems:
 		run["inconsistent"] = " and ".join(problems)
 	return run
@@ -709,10 +717,10 @@ def interrupt(run_id, *, docname, now, reason, wait=True):
 	``wait=False`` (the recovery sweep) takes the session row with NOWAIT, so a row held by a
 	dead or slow transaction raises a lock-unavailable error at once instead of stalling the
 	sweep for a lock wait timeout. An inconsistent run is force-released (``_release``)."""
-	parent, run = _locked(run_id, docname, wait=wait, force=True)
+	_, run = lock_run(run_id, docname, wait=wait, force=True)
 	if not expired(run, now):
 		return None
-	return _release(parent, run, docname, state="interrupted", reason=reason, now=now)
+	return _release(run, docname, state="interrupted", reason=reason, now=now)
 
 
 def continue_run(run_id, *, docname, worker_token, now, queued_seconds=1800, progressed=True):
@@ -722,17 +730,17 @@ def continue_run(run_id, *, docname, worker_token, now, queued_seconds=1800, pro
 	instead of waiting for the sweep (R3). A slice that could not begin any item
 	(``progressed`` False) adds to the run's idle streak; ``IDLE_SLICE_LIMIT`` such slices in
 	a row stop the run with ``no_progress`` instead of respinning until its deadline (O5)."""
-	parent, run = _locked(run_id, docname)
-	if not _owns(run, worker_token, now):
+	_, run = lock_run(run_id, docname)
+	if not owns(run, worker_token, now):
 		return None
 	if run.get("active_attempt"):
 		raise RuntimeError("Cannot continue with an unsettled provider call")
 	if run["deadline"] <= now:
-		return _finish_locked(parent, run, state="stopped", reason="deadline", now=now)
+		return _finish_locked(run, state="stopped", reason="deadline", now=now)
 	idle = 0 if progressed else (run.get("idle_slices") or 0) + 1
 	if idle >= IDLE_SLICE_LIMIT:
 		_update(RUN, run, idle_slices=idle)
-		return _finish_locked(parent, run, state="stopped", reason="no_progress", now=now)
+		return _finish_locked(run, state="stopped", reason="no_progress", now=now)
 	_update(
 		RUN,
 		run,
@@ -752,20 +760,20 @@ def cancel(run_id, *, docname, now, cancelled_by=None):
 	"""Cancel the durable intent even when Redis is down. Caller authorizes the session;
 	a run of another session, or one no longer active, is not cancelled (None) and nothing
 	changes. An inconsistent run is force-released (``_release``)."""
-	parent, run = _locked(run_id, docname, force=True)
+	_, run = lock_run(run_id, docname, force=True)
 	if not run or run["state"] not in ACTIVE:
 		return None
 	_update(RUN, run, cancelled_by=cancelled_by)
-	return _release(parent, run, docname, state="cancelled", reason="cancelled", now=now)
+	return _release(run, docname, state="cancelled", reason="cancelled", now=now)
 
 
 def abandon(run_id, *, docname, worker_token, now):
 	"""An escaping worker failure immediately leaves an honest terminal state."""
-	parent, run = _locked(run_id, docname)
+	_, run = lock_run(run_id, docname)
 	if not run or run["state"] != "running" or not worker_token or run.get("worker_token") != worker_token:
 		return None
 	_mark_uncertain(run, "worker_interrupted")
-	return _finish_locked(parent, run, state="interrupted", reason="worker_interrupted", now=now)
+	return _finish_locked(run, state="interrupted", reason="worker_interrupted", now=now)
 
 
 def prepare_dispatch(run_id, *, docname, now, wait=True):
@@ -776,7 +784,7 @@ def prepare_dispatch(run_id, *, docname, now, wait=True):
 	The deterministic RQ id saves queue space; claim is the execution fence.
 	``wait=False`` (the recovery sweep) takes the session row with NOWAIT.
 	"""
-	parent, run = _locked(run_id, docname, wait=wait)
+	parent, run = lock_run(run_id, docname, wait=wait)
 	if not parent or not run or run["state"] != "queued" or not run.get("dispatch_pending"):
 		return None
 	if (run.get("lease_until") or 0) <= now or run["deadline"] <= now:
@@ -792,8 +800,8 @@ def checkpoint(run_id, *, docname, worker_token, now, **values):
 	"""Publish bounded progress only while the slice owns this generation."""
 	if set(values) - {"total_items", "steps_state", "blocked_uncertain"}:
 		raise ValueError("Invalid refresh progress fields")
-	parent, run = _locked(run_id, docname)
-	if not parent or parent["status"] != "Ready" or not _owns(run, worker_token, now):
+	parent, run = lock_run(run_id, docname)
+	if not parent or parent["status"] != "Ready" or not owns(run, worker_token, now):
 		return None
 	_update(RUN, run, heartbeat=now, **values)
 	return run

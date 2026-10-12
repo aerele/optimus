@@ -259,3 +259,44 @@ def test_refill_with_fix_suggestions_off_skips_the_backfill(env):
 	out = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
 	assert h.backfill.call_count == 0 and out["fixes"]["skipped"] == "toggle_off"
 	assert h.humanize.call_count == 1 and _FLAG not in fake.cache.store
+
+
+# --- one path at a time: the background engine (Q3) ---------------------------------------
+
+
+def test_a_live_background_run_refuses_the_refresh_before_it_counts_or_bills(env, monkeypatch):
+	"""Q3: while the background engine holds the session, the click is answered at once: not
+	counted, no flag taken, no provider call."""
+	from optimus import ai_jobs
+
+	fake, h = env()
+	looked = []
+	monkeypatch.setattr(ai_jobs, "live_run", lambda docname: looked.append(docname) or {"name": "run-1"})
+	out = api.refill_ai_suggestions(session_uuid=SESSION_UUID)
+	assert out["ok"] is False and out["busy"] is True and out["session_uuid"] == SESSION_UUID
+	assert "background AI refresh is already running" in out["message"]
+	assert looked == [DOCNAME]
+	assert h.order == [] and h.backfill.call_count == h.humanize.call_count == h.render.call_count == 0
+	assert not [c for c in fake.cache.calls if c[0] in ("set", "get", "delete")]
+
+
+def test_no_background_run_leaves_the_refresh_as_it_was(env, monkeypatch):
+	from optimus import ai_jobs
+
+	_, h = env()
+	monkeypatch.setattr(ai_jobs, "live_run", lambda docname: None)
+	assert api.refill_ai_suggestions(session_uuid=SESSION_UUID)["ok"] is True
+	assert h.order[:3] == [("bump", DOCNAME), "commit", "backfill"]
+
+
+def test_a_failed_background_run_lookup_never_blocks_the_refresh(env, monkeypatch):
+	"""As a cache failure never blocks it: the journal may not be installed on this site."""
+	from optimus import ai_jobs
+
+	def broken(docname):
+		raise RuntimeError("fake: the journal table is missing")
+
+	_, h = env()
+	monkeypatch.setattr(ai_jobs, "live_run", broken)
+	assert api.refill_ai_suggestions(session_uuid=SESSION_UUID)["ok"] is True
+	assert h.backfill.call_count == 1

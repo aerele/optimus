@@ -523,7 +523,7 @@ def sql(monkeypatch):
 			db.connection.close()
 
 
-def admit(name="run-a", parent="parent-a", cap=5, scope="all", user="fake-user", now=10):
+def admit(name="run-a", parent="parent-a", cap=5, scope="all", user="fake-user", now=10, **kw):
 	return store.admit(
 		run_id=name,
 		docname=parent,
@@ -538,6 +538,7 @@ def admit(name="run-a", parent="parent-a", cap=5, scope="all", user="fake-user",
 		include_fixes=True,
 		include_steps=False,
 		regenerate_all=False,
+		**kw,
 	)
 
 
@@ -744,7 +745,7 @@ def test_a_concurrent_duplicate_delivery_is_a_no_op_not_a_snapshot_conflict(sql,
 	statement is that lock, so on MariaDB 11.8 the run row the first changed is no 1020."""
 	ai_jobs._retry_sql(admit)
 	locked, release = threading.Event(), threading.Event()
-	real_locked = store._locked
+	real_locked = store.lock_run
 
 	def pausing(run_id, docname, **kw):
 		out = real_locked(run_id, docname, **kw)
@@ -753,7 +754,7 @@ def test_a_concurrent_duplicate_delivery_is_a_no_op_not_a_snapshot_conflict(sql,
 			assert release.wait(10)
 		return out
 
-	monkeypatch.setattr(store, "_locked", pausing)
+	monkeypatch.setattr(store, "lock_run", pausing)
 
 	def deliver(token):
 		return lambda: ai_jobs._retry_sql(
@@ -859,7 +860,7 @@ def test_admission_never_deadlocks_another_sessions_worker(sql, monkeypatch, tra
 	sql.primary.set_value(store.RUN, "run-b", {"completed": 1}, update_modified=False)
 	sql.primary.commit()
 	locked, release = threading.Event(), threading.Event()
-	real_locked = store._locked
+	real_locked = store.lock_run
 
 	def pausing(run_id, docname, **kw):
 		out = real_locked(run_id, docname, **kw)
@@ -868,7 +869,7 @@ def test_admission_never_deadlocks_another_sessions_worker(sql, monkeypatch, tra
 			assert release.wait(10)
 		return out
 
-	monkeypatch.setattr(store, "_locked", pausing)
+	monkeypatch.setattr(store, "lock_run", pausing)
 	operations = {
 		"finish": lambda: store.finish(
 			"run-b", docname="parent-b", worker_token="worker-b", now=12, reason="complete"
@@ -894,7 +895,8 @@ def test_admission_never_deadlocks_another_sessions_worker(sql, monkeypatch, tra
 	for out in (done, admitted):
 		assert 1213 not in out["db"].conflicts and "40P01" not in out["db"].conflicts
 	if transition == "finish":
-		# One refresh, counted once by #72's real counter.
+		# One refresh, counted once by #72's real counter when it was admitted (Q1); the
+		# finish added nothing.
 		assert value(sql, "Optimus Session", "parent-b", "ai_refresh_count") == 1
 
 
@@ -1147,7 +1149,7 @@ def test_an_http_admission_waits_for_a_held_session_row_once_then_answers_busy(s
 	answers busy without a second attempt, so a web request never outlives the server's
 	timeout on retries. The wait is shortened to one second on this connection."""
 	monkeypatch.setattr(ai_jobs, "_check_run", lambda run, **kw: None)
-	monkeypatch.setattr(ai_jobs, "_workers_listening", lambda: True)
+	monkeypatch.setattr(ai_jobs, "_workers_listening", lambda docname=None: True)
 	monkeypatch.setattr(ai_jobs, "_dispatch_pending", lambda run_id, docname, **kw: True)
 	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: True)
 	writer = sql.connect()
@@ -1198,7 +1200,7 @@ def test_a_settlement_waiting_on_a_session_writer_keeps_the_answer(sql):
 def test_an_admission_takes_over_an_expired_run_in_its_own_transaction(sql):
 	"""A2: a worker killed mid-call left its run running; the next click (here at t=400,
 	past the 311 lease) ends it interrupted with its call uncertain and admits the new run,
-	with no scheduler. #72's real counter is not bumped for the interrupted run (Q1)."""
+	with no scheduler. #72's real counter counts the new click once and the interrupted run not at all (Q1)."""
 	claimed()
 	attempt = begun()
 	sql.primary.set_value(store.RUN, "run-a", {"completed": 2}, update_modified=False)
@@ -1210,7 +1212,9 @@ def test_an_admission_takes_over_an_expired_run_in_its_own_transaction(sql):
 	assert value(sql, store.RUN, "run-a", "active_session") is None
 	assert value(sql, store.ATTEMPT, attempt["name"], "state") == "uncertain"
 	assert value(sql, store.RUN, "run-b", "active_session") == "parent-a"
-	assert value(sql, "Optimus Session", "parent-a", "ai_refresh_count") == 0
+	assert (
+		value(sql, "Optimus Session", "parent-a", "ai_refresh_count") == 2
+	)  # each click once; the takeover adds none
 	assert not sql.logged
 
 
@@ -1223,7 +1227,7 @@ def test_a_late_settlement_and_a_takeover_serialize_on_the_session_row(sql, monk
 	claimed()
 	attempt = begun()
 	locked, release = threading.Event(), threading.Event()
-	real_locked = store._locked
+	real_locked = store.lock_run
 
 	def pausing(run_id, docname, **kw):
 		out = real_locked(run_id, docname, **kw)
@@ -1232,7 +1236,7 @@ def test_a_late_settlement_and_a_takeover_serialize_on_the_session_row(sql, monk
 			assert release.wait(10)
 		return out
 
-	monkeypatch.setattr(store, "_locked", pausing)
+	monkeypatch.setattr(store, "lock_run", pausing)
 
 	def persist():
 		sql.facade.db.sql(f"UPDATE {sql.facade.db.table('answer')} SET body = 'stale' WHERE name = 'row-00'")
@@ -1321,8 +1325,10 @@ def test_an_http_cancel_waits_for_a_held_session_row_once_then_answers_busy(sql)
 
 def _http_ready(monkeypatch):
 	monkeypatch.setattr(ai_jobs, "_check_run", lambda run, **kw: None)
-	monkeypatch.setattr(ai_jobs, "_workers_listening", lambda: True)
+	monkeypatch.setattr(ai_jobs, "_workers_listening", lambda docname=None: True)
 	monkeypatch.setattr(ai_jobs, "_call_timeout", lambda: 60)
+	monkeypatch.setattr(ai_jobs, "_selection_counts", lambda *a, **kw: (0, 0))
+	monkeypatch.setattr(ai_jobs, "_refresh_flag_held", lambda session_uuid: False)
 	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: True)
 
 
@@ -1427,5 +1433,50 @@ def test_a_forced_release_in_a_refused_admission_writes_its_row(sql, monkeypatch
 	assert _click() == {"status": "refused", "reason": "site_cap"}
 	assert value(sql, store.RUN, "run-a", "state") == "interrupted"
 	assert value(sql, store.RUN, "run-a", "usage_incomplete") == 1
-	[(title, _exc, context)] = [row for row in sql.logged if row[0] == "optimus AI refresh recovery"]
+	[(title, _exc, context)] = [row for row in sql.logged if row[0] == "optimus ai refresh release"]
 	assert context["run_id"] == "run-a" and context["docname"] == "parent-a"
+
+
+def test_a_refresh_is_counted_once_when_it_is_accepted_by_the_real_counter(sql):
+	"""Q1: #72's real counter (a savepoint-wrapped SQL increment) adds one in the admission's
+	own transaction, a resume adds one more, and no ending of a run adds any."""
+	claimed()
+	assert value(sql, "Optimus Session", "parent-a", "ai_refresh_count") == 1
+	ai_jobs._retry_sql(
+		lambda: store.finish("run-a", docname="parent-a", worker_token="worker-a", now=14, reason="complete")
+	)
+	assert value(sql, "Optimus Session", "parent-a", "ai_refresh_count") == 1
+	out = ai_jobs._retry_sql(lambda: admit("run-b", now=20))
+	assert out["status"] == "queued"
+	assert value(sql, "Optimus Session", "parent-a", "ai_refresh_count") == 2
+	ai_jobs._retry_sql(lambda: store.cancel("run-b", docname="parent-a", now=21))
+	out = ai_jobs._retry_sql(lambda: admit("run-c", now=22, resume_from="run-b"))
+	assert out["status"] == "queued" and out["run"]["retry_no"] == 1
+	assert value(sql, "Optimus Session", "parent-a", "ai_refresh_count") == 3
+	ai_jobs._retry_sql(lambda: store.cancel("run-c", docname="parent-a", now=23))
+	assert value(sql, "Optimus Session", "parent-a", "ai_refresh_count") == 3
+	assert not sql.logged
+
+
+def test_a_refused_admission_counts_nothing_by_the_real_counter(sql):
+	claimed()
+	refused = ai_jobs._retry_sql(lambda: admit("run-b", "parent-b", cap=1))
+	assert refused == {"status": "refused", "reason": "site_cap"}
+	assert value(sql, "Optimus Session", "parent-b", "ai_refresh_count") == 0
+	attached = ai_jobs._retry_sql(lambda: admit("run-c", now=12))
+	assert attached["status"] == "already_running"
+	assert value(sql, "Optimus Session", "parent-a", "ai_refresh_count") == 1
+
+
+def test_an_analyze_time_run_counts_no_refresh_by_the_real_counter(sql):
+	assert ai_jobs._retry_sql(lambda: admit("run-a", scope="fixes_missing"))["status"] == "queued"
+	assert value(sql, "Optimus Session", "parent-a", "ai_refresh_count") == 0
+
+
+def test_the_selections_counts_are_stored_on_the_run(sql):
+	"""Item 5: ``gated_count`` and ``excluded_count`` are Int columns of the Run DocType."""
+	out = ai_jobs._retry_sql(lambda: admit("run-a", gated=3, excluded=2))
+	assert out["run"]["gated_count"] == 3
+	assert value(sql, store.RUN, "run-a", "gated_count") == 3
+	assert value(sql, store.RUN, "run-a", "excluded_count") == 2
+	assert ai_jobs.public_state(sql.primary.get_value(store.RUN, "run-a", "*", as_dict=True))["gated"] == 3
