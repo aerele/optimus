@@ -105,7 +105,14 @@ def work(journal, monkeypatch):
 
 	monkeypatch.setattr(jobs, "_transaction", transaction)
 	with journal.db.transaction():
-		journal.mod.claim("fake-run", slice_no=0, worker_token="worker", now=10, lease_seconds=300)
+		journal.mod.claim(
+			"fake-run",
+			docname="fake-session-doc",
+			slice_no=0,
+			worker_token="worker",
+			now=10,
+			lease_seconds=300,
+		)
 	return env
 
 
@@ -230,19 +237,17 @@ def test_presave_phase2_check_uses_a_current_read_after_waiting_for_parent(work,
 		assert item.valid() is False
 
 
-def test_presave_user_disable_check_uses_a_current_read(work, monkeypatch):
+def test_presave_user_disable_check_is_the_first_plain_read_after_the_locks(work):
+	"""The requester is read without a lock, so its read must open the read view: every
+	journal transaction starts fresh (``_retry_sql``, ``_settle``) and locks first, so the
+	User read is current when it runs and a user disabled before it stops the save."""
 	item = work.jobs._next_item(work.journal.run, {})
 	work.journal.db.rows["User"]["fake-owner"]["enabled"] = 0
-	current = work.journal.db.get_value
-
-	def snapshot(table, *a, for_update=False, **kw):
-		if table == "User" and not for_update:
-			return 1
-		return current(table, *a, for_update=for_update, **kw)
-
-	monkeypatch.setattr(work.journal.db, "get_value", snapshot)
+	work.journal.db.calls.clear()
 	with work.journal.db.transaction():
 		assert item.valid() is False
+	first_plain = next(c for c in work.journal.db.calls if not c[2])
+	assert first_plain == ("User", "fake-owner", False)
 
 
 def test_progress_counts_targets_and_exposes_prior_uncertainty(work):
@@ -319,3 +324,25 @@ def test_steps_postprocessing_failure_keeps_reported_usage(work, monkeypatch):
 	with pytest.raises(ai_fix.AiFixError) as caught:
 		item.send(10)
 	assert caught.value.usage["total_tokens"] == 7 and caught.value.usage_complete is True
+
+
+def test_locked_recheck_reads_the_requester_without_locking_the_user_row(work):
+	"""A FOR UPDATE on tabUser blocked the requester's own User writes (last_active) under the
+	session, run and attempt locks, and added a cross-table lock order. A plain read is enough
+	for an enabled check; all locking reads come first, so the read view opens after them."""
+	work.journal.db.calls.clear()
+	with work.journal.db.transaction():
+		work.jobs._check_run(work.journal.run, locked=True)
+	assert [c for c in work.journal.db.calls if c[0] == "User"] == [("User", "fake-owner", False)]
+	locking = [c[2] for c in work.journal.db.calls]
+	assert locking == sorted(locking, reverse=True)
+
+
+def test_input_recheck_takes_its_row_locks_before_any_plain_read(work):
+	item = work.jobs._next_item(work.journal.run, {})
+	work.journal.db.calls.clear()
+	with work.journal.db.transaction():
+		assert item.valid()
+	locking = [c[2] for c in work.journal.db.calls]
+	assert False in locking and locking == sorted(locking, reverse=True)
+	assert ("Optimus Finding", "finding-1", True) in work.journal.db.calls

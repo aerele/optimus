@@ -168,16 +168,31 @@ jobs:
           fi
 
   sql-journal:
-    name: AI journal (${{ matrix.database }})
+    name: AI journal (${{ matrix.leg }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        database: [mariadb, postgres]
+        include:
+          # Snapshot isolation off: a lock never fails because a read view is older.
+          - leg: mariadb 10.6
+            database: mariadb
+            mariadb: '10.6'
+            snapshot: '0'
+          # innodb_snapshot_isolation is on by default since 11.8 (Frappe v16's CI database):
+          # a locking read of a row changed after the read view fails with 1020.
+          - leg: mariadb 11.8
+            database: mariadb
+            mariadb: '11.8'
+            snapshot: '1'
+          - leg: postgres 16
+            database: postgres
+            mariadb: '10.6'
+            snapshot: '0'
     services:
       mariadb:
-        image: mariadb:10.6
+        image: mariadb:${{ matrix.mariadb }}
         env:
           MARIADB_ROOT_PASSWORD: optimus_test
           MARIADB_DATABASE: optimus_test
@@ -214,5 +229,6 @@ jobs:
       - name: Check journal transactions on a real database
         env:
           OPTIMUS_TEST_SQL: ${{ matrix.database }}
+          OPTIMUS_TEST_SQL_SNAPSHOT: ${{ matrix.snapshot }}
           PYTHONDONTWRITEBYTECODE: '1'
         run: python -m pytest optimus/tests/test_ai_refresh_sql.py -q -p no:cacheprovider

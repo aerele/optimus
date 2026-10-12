@@ -6,7 +6,10 @@
 No public endpoint lives here. Callers must authorize admission and polling.
 The worker rechecks authorization and inputs before sending and saving each
 item. A Calling record commits before HTTP, without a journal or Session row
-lock spanning the request. Result, usage and outcome share one SQL transaction.
+lock spanning the request. Result and outcome commit in one short SQL transaction
+that also adds the usage to the session counter; the counter is log-and-continue
+(#72, D2), so the journal's ``tokens_reported`` is the reconciliation source.
+SQL conflicts are retried as whole short transactions, never as provider calls.
 """
 
 import hashlib
@@ -20,7 +23,7 @@ from datetime import datetime, timezone
 
 import frappe
 
-from optimus import ai_fix, safe_commit
+from optimus import ai_fix, safe_call, safe_commit
 from optimus import ai_refresh_store as store
 
 _JOB_METHOD = "optimus.ai_jobs.run_ai_refresh_slice"
@@ -114,13 +117,28 @@ def _read_run(run_id):
 	return frappe.db.get_value(store.RUN, run_id, "*", as_dict=True)
 
 
-def _retry_sql(operation):
-	"""Retry definite rollback conflicts only, at most three short transactions.
+def _session_of(run_id):
+	"""The run's session, read and committed in its own short transaction.
 
-	Admission uses NOWAIT on its shared mutex. PostgreSQL can also reject an
-	older snapshot after that mutex changed. Neither case warrants retrying a
-	provider call or changing the site's transaction isolation level.
+	The reference is immutable, so every later journal transaction can lock that session
+	row as its first statement (``store._locked``) instead of reading the run first."""
+	return _transaction(lambda: (_read_run(run_id) or {}).get("session_name"))
+
+
+def _retry_sql(operation):
+	"""Run one journal operation in its own short transaction; retry SQL conflicts only.
+
+	The caller's transaction is committed first, so the operation's first statement (the
+	locking read of the session row) opens the transaction. A read view opened before it
+	would turn that lock into a 1020 on MariaDB 11.8 once the lock holder commits.
+
+	A conflict (``store.is_retryable_conflict``: a deadlock, a lock wait, a snapshot or
+	serialization conflict, raw or as Frappe wraps it) rolls back and runs the operation
+	again, at most three transactions in all, with a short delay. Anything else is raised
+	at once. The operation never contacts a provider, so a retry never repeats a call. A
+	busy admission mutex is a refusal returned by ``store.admit``, not a conflict.
 	"""
+	_transaction(lambda: None)
 	for attempt in range(3):
 		guard = ai_fix._InterruptGuard(base=True)
 		failure = None
@@ -132,10 +150,7 @@ def _retry_sql(operation):
 		if guard.pending():
 			operation = failure = None
 			raise guard.interrupt()
-		retryable = getattr(failure, "pgcode", None) in {"40001", "40P01", "55P03"} or (
-			failure.args and type(failure.args[0]) is int and failure.args[0] in {1205, 1213}
-		)
-		if not retryable or attempt == 2:
+		if not store.is_retryable_conflict(failure) or attempt == 2:
 			raise failure
 		failure = None
 		time.sleep(0.02 * (attempt + 1))
@@ -153,12 +168,14 @@ def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
 		raise ValueError("Invalid AI refresh delivery")
 	worker_token = uuid.uuid4().hex
 	guard = ai_fix._InterruptGuard(base=True)
-	failure = None
+	failure = docname = None
 	previous = getattr(frappe.local, "optimus_analyzing", False)
 	frappe.local.optimus_analyzing = True
 	try:
 		with guard:
-			_drive(run_id, slice_no, worker_token)
+			docname = _session_of(run_id)
+			if docname:
+				_drive(run_id, docname, slice_no, worker_token)
 	except Exception as exc:
 		failure = exc
 	finally:
@@ -170,7 +187,10 @@ def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
 		try:
 			with guard:
 				frappe.db.rollback()
-				_retry_sql(lambda: store.abandon(run_id, worker_token=worker_token, now=_now()))
+				if docname:
+					_retry_sql(
+						lambda: store.abandon(run_id, docname=docname, worker_token=worker_token, now=_now())
+					)
 		except Exception as exc:
 			cleanup_error = exc
 		failure_type = type(failure).__name__
@@ -192,12 +212,13 @@ def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
 		)
 
 
-def _drive(run_id, slice_no, worker_token):
+def _drive(run_id, docname, slice_no, worker_token):
 	started = time.monotonic()
 	seconds, call_limit = slice_seconds(), _call_timeout()
 	run = _retry_sql(
 		lambda: store.claim(
 			run_id,
+			docname=docname,
 			slice_no=slice_no,
 			worker_token=worker_token,
 			now=_now(),
@@ -212,14 +233,14 @@ def _drive(run_id, slice_no, worker_token):
 		if not store._owns(run, worker_token, _now()):
 			return
 		if run.get("breaker_kind"):
-			_end(run_id, worker_token, "breaker")
+			_end(run_id, docname, worker_token, "breaker")
 			return
 		remaining = int(run["deadline"] - _now() - 5)
 		if remaining < min(15, call_limit):
-			_end(run_id, worker_token, "deadline")
+			_end(run_id, docname, worker_token, "deadline")
 			return
 		if items and time.monotonic() - started >= seconds:
-			_yield(run_id, worker_token)
+			_yield(run_id, docname, worker_token)
 			return
 		reason, item = None, None
 		try:
@@ -228,31 +249,33 @@ def _drive(run_id, slice_no, worker_token):
 		except StopRefresh as exc:
 			reason = exc.reason
 		if reason:
-			_end(run_id, worker_token, reason)
+			_end(run_id, docname, worker_token, reason)
 			return
 		if item is None:
 			latest = _read_run(run_id)
 			_end(
 				run_id,
+				docname,
 				worker_token,
 				"uncertain" if latest and latest.get("blocked_uncertain") else "complete",
 			)
 			return
 		remaining = int(run["deadline"] - _now() - 5)
 		if remaining < min(15, call_limit):
-			_end(run_id, worker_token, "deadline")
+			_end(run_id, docname, worker_token, "deadline")
 			return
 		# Finish the input/config read view, then recheck in the locked intent
 		# transaction. MariaDB may otherwise keep a pre-call snapshot alive.
 		_transaction(lambda: None)
 
 		def begin():
-			store._locked(run_id)
+			store._locked(run_id, docname)
 			_check_run(run, locked=True)
 			if not item.valid():
 				return None
 			return store.begin_attempt(
 				run_id,
+				docname=docname,
 				worker_token=worker_token,
 				kind=item.kind,
 				target=item.target,
@@ -265,10 +288,10 @@ def _drive(run_id, slice_no, worker_token):
 		except StopRefresh as exc:
 			reason = exc.reason
 		if reason:
-			_end(run_id, worker_token, reason)
+			_end(run_id, docname, worker_token, reason)
 			return
 		if not attempt:
-			_yield(run_id, worker_token)
+			_yield(run_id, docname, worker_token)
 			return
 		remaining = int(run["deadline"] - _now() - 5)
 		if remaining < min(15, call_limit):
@@ -276,15 +299,21 @@ def _drive(run_id, slice_no, worker_token):
 				lambda: store.settle_attempt(
 					run_id,
 					attempt["name"],
+					docname=docname,
 					worker_token=worker_token,
 					outcome="skipped",
 					tokens=0,
 					usage_complete=True,
 					now=_now(),
 					error_kind="deadline",
-				)
+				),
+				run_id=run_id,
+				docname=docname,
+				attempt_id=attempt["name"],
+				tokens=0,
+				session_uuid=run["session_uuid"],
 			)
-			_end(run_id, worker_token, "deadline")
+			_end(run_id, docname, worker_token, "deadline")
 			return
 		result = failure = None
 		guard = ai_fix._InterruptGuard()
@@ -316,6 +345,7 @@ def _drive(run_id, slice_no, worker_token):
 			return store.settle_attempt(
 				run_id,
 				attempt["name"],
+				docname=docname,
 				worker_token=worker_token,
 				outcome=final,
 				tokens=tokens,
@@ -325,78 +355,160 @@ def _drive(run_id, slice_no, worker_token):
 				persist=(lambda: item.persist(result)) if persist else None,
 			)
 
+		def save(operation):
+			return _settle(
+				operation,
+				run_id=run_id,
+				docname=docname,
+				attempt_id=attempt["name"],
+				tokens=tokens,
+				session_uuid=run["session_uuid"],
+			)
+
 		storage_error = None
 		storage_guard = ai_fix._InterruptGuard(base=True)
 		try:
 			with storage_guard:
-				_settle(settle)
+				save(settle)
 		except Exception as exc:
 			storage_error = exc
 		if storage_guard.pending():
 			item = result = storage_error = None
 			raise storage_guard.interrupt()
 		if storage_error is not None:
-			# A successful provider reply can fail local validation/storage. Save
-			# its known cost and a failed outcome without trying that answer again.
-			ai_fix.log_ai_failure(
-				"optimus AI refresh result storage", storage_error, session_uuid=run["session_uuid"]
-			)
+			# A successful provider reply can fail local validation/storage (_settle logged
+			# it). Save its known cost and a failed outcome without trying that answer again.
 			storage_error = None
-			_transaction(lambda: None)
-			_settle(lambda: settle(final="failed", persist=False, error_kind="internal"))
+			save(lambda: settle(final="failed", persist=False, error_kind="internal"))
 		if guard.pending():
 			item = result = failure = None
 			raise guard.interrupt()
 		items += 1
 
 
-def _settle(operation):
-	"""Retry only the SQL outcome, once, including an ambiguous COMMIT reply.
+_SETTLE_TITLE = "optimus AI refresh result storage"
 
-	The attempt's settled bit makes both rolled-back and already-committed
-	cases safe. This function never invokes the provider again.
-	"""
-	failure = None
-	for _ in range(2):
+
+def _settle(operation, *, run_id, docname, attempt_id, tokens, session_uuid=None):
+	"""Commit one attempt's outcome, its answer and its usage in one short transaction.
+
+	The discipline is ``analyze._write_ai_answer``'s (#72), mirrored rather than reused: the
+	engine's write is ``store.settle_attempt``, which locks the session, run and attempt,
+	decides whether the answer may still be written (owner, deadline, input recheck) and
+	records the outcome, where ``_write_ai_answer`` writes one Finding row and its spend.
+
+	- The first try commits what the caller's transaction holds, so the write starts without
+	  a read view from before the provider call (the 1020 trap on MariaDB 11.8).
+	- A conflict (``store.is_retryable_conflict``) is rolled back and the write tried again
+	  from the start, ``analyze.AI_WRITE_ATTEMPTS`` tries in all. That is #72's
+	  ``frappe.QueryDeadlockError`` plus the lock conflicts of the locking reads only this
+	  write takes (a lock wait, a Postgres serialization failure). Trying again is safe: the
+	  attempt's ``settled`` bit turns a second outcome into a no-op, and the provider is
+	  never asked again.
+	- Any other failure, or the last try's, is rolled back, and the attempt's ``settled`` bit
+	  is read again in a fresh query: when it is set the outcome is committed (the error came
+	  after the COMMIT, from an ``after_commit`` callback or a lost reply), so the write counts
+	  as done and the error is logged with ``outcome=committed ...``.
+	- The session counter logs its own row when it fails and the whole transaction is gone
+	  (``savepoint_rollback=failed``); each such row gets an ``outcome=`` line once the write
+	  ends (committed on try N, or not committed), so none reads as lost tokens by mistake.
+	- A write that did not commit is logged once after the ``try`` (``tries``, the ``tokens``
+	  it did not record) and its error is raised; the caller then records the outcome
+	  without the answer. The usage counter is log-and-continue (#72, D2): a statement-level
+	  counter failure is logged by the counter and the write still commits, so the journal's
+	  ``tokens_reported`` is the source for reconciling the session's ``ai_tokens_spent``.
+
+	An RQ job timeout leaves as a fresh instance. Returns True once an outcome is saved."""
+	from optimus.analyze import AI_WRITE_ATTEMPTS
+
+	error, logged, tries = None, [], 0
+	while tries < AI_WRITE_ATTEMPTS:
+		tries += 1
+		error = None
 		guard = ai_fix._InterruptGuard(base=True)
-		succeeded = False
 		try:
 			with guard:
+				if tries == 1:
+					_transaction(lambda: None)
 				_transaction(operation)
-				succeeded = True
 		except Exception as exc:
-			failure = exc
+			error = exc
 		if guard.pending():
-			operation = failure = None
+			operation = error = None
+			logged.clear()
 			raise guard.interrupt()
-		if succeeded:
-			if failure is not None:
-				ai_fix.log_ai_failure("optimus AI refresh accounting recovered", failure)
-				failure = None
-				_transaction(lambda: None)
-			return
-		raise_after_retry = failure
-	raise raise_after_retry
+		if error is None:
+			break
+		if getattr(error, ai_fix._LOGGED_ATTR, False):
+			logged.append(error)
+		if not store.is_retryable_conflict(error):
+			break
+	settled = error is None or _attempt_settled(attempt_id)
+	outcome = f"committed on try {tries}" if settled else f"not committed after try {tries}"
+	reference = {"session_uuid": session_uuid, "docname": docname, "run_id": run_id, "attempt": attempt_id}
+	for counter_error in logged:
+		if counter_error is not error:
+			ai_fix.log_ai_failure(_SETTLE_TITLE, counter_error, **reference, outcome=outcome)
+	logged.clear()
+	if error is None:
+		return True
+	if settled:
+		ai_fix.log_ai_failure(
+			_SETTLE_TITLE,
+			error,
+			**reference,
+			outcome="committed: the error came after the COMMIT; the outcome and its tokens are saved",
+		)
+		error = None
+		return True
+	ai_fix.log_ai_failure(_SETTLE_TITLE, error, **reference, outcome=outcome, tries=tries, tokens=tokens)
+	raise error
 
 
-def _end(run_id, worker_token, reason):
-	return _retry_sql(lambda: store.finish(run_id, worker_token=worker_token, now=_now(), reason=reason))
+def _attempt_settled(attempt_id):
+	"""True when the attempt's committed ``settled`` bit is set: a fresh read after the
+	rollback, False when it cannot be read. An RQ job timeout leaves as a fresh instance."""
+	return (
+		safe_call.best_effort(lambda: _transaction(lambda: bool(store.attempt_settled(attempt_id))), False)
+		is True
+	)
 
 
-def _yield(run_id, worker_token):
-	run = _retry_sql(lambda: store.continue_run(run_id, worker_token=worker_token, now=_now()))
+def _end(run_id, docname, worker_token, reason):
+	return _retry_sql(
+		lambda: store.finish(run_id, docname=docname, worker_token=worker_token, now=_now(), reason=reason)
+	)
+
+
+def _yield(run_id, docname, worker_token):
+	run = _retry_sql(
+		lambda: store.continue_run(run_id, docname=docname, worker_token=worker_token, now=_now())
+	)
 	if run and run["state"] == "queued":
-		_dispatch_pending(run_id)
+		_dispatch_pending(run_id, docname)
 
 
 def _check_run(run, *, locked=False):
+	"""Recheck the session, the requester and Phase 2 activity; raise ``StopRefresh``.
+
+	With ``locked`` the session and Phase 2 rows are read with locks, and both locking reads
+	come before the first plain read, so a read view opened by a plain read never precedes a
+	lock (a 1020 on MariaDB 11.8). The requester's User row is a plain read: a lock on it
+	would block the user's own User writes while the journal locks are held."""
 	from optimus.permissions import may_act_on_session
 
 	parent = frappe.db.get_value("Optimus Session", run["session_name"], "*", as_dict=True, for_update=locked)
 	if not parent or parent.get("status") != "Ready" or parent.get("session_uuid") != run["session_uuid"]:
 		raise StopRefresh("not_ready")
+	phase2 = frappe.db.get_values(
+		"Optimus Phase Two Run",
+		{"parent": parent["name"], "status": ["in", ["Recording", "Analyzing"]]},
+		["name"],
+		limit=1,
+		for_update=locked,
+	)
 	user = run.get("requested_by")
-	if not user or user == "Guest" or not frappe.db.get_value("User", user, "enabled", for_update=locked):
+	if not user or user == "Guest" or not frappe.db.get_value("User", user, "enabled"):
 		raise StopRefresh("permission")
 	if user != "Administrator" and not {"System Manager", "Optimus User"}.intersection(
 		frappe.get_roles(user)
@@ -409,13 +521,7 @@ def _check_run(run, *, locked=False):
 		can_write=bool(frappe.has_permission("Optimus Session", "write", parent["name"], user=user)),
 	):
 		raise StopRefresh("permission")
-	if frappe.db.get_values(
-		"Optimus Phase Two Run",
-		{"parent": parent["name"], "status": ["in", ["Recording", "Analyzing"]]},
-		["name"],
-		limit=1,
-		for_update=locked,
-	):
+	if phase2:
 		raise StopRefresh("phase2")
 	return parent
 
@@ -475,15 +581,9 @@ def _attempts(run):
 def _valid_item(run, doc, row, fingerprint):
 	# The caller already locks Session before Run/Attempt. Current reads here
 	# must not consult a pre-wait MariaDB snapshot when another actor changed it.
+	# The Finding row is locked before _check_run's plain reads open a read view.
 	parent = frappe.db.get_value("Optimus Session", run["session_name"], "*", as_dict=True, for_update=True)
 	if not parent or parent.get("modified") != doc.get("modified"):
-		return False
-	reason = None
-	try:
-		_check_run(run, locked=True)
-	except StopRefresh as exc:
-		reason = exc.reason
-	if reason:
 		return False
 	current = None
 	if row is not None:
@@ -495,6 +595,13 @@ def _valid_item(run, doc, row, fingerprint):
 			or current.get("parentfield") != "findings"
 		):
 			return False
+	reason = None
+	try:
+		_check_run(run, locked=True)
+	except StopRefresh as exc:
+		reason = exc.reason
+	if reason:
+		return False
 	return _signature(parent, current) == fingerprint
 
 
@@ -642,6 +749,7 @@ def _next_item(run, memo):
 		return _retry_sql(
 			lambda: store.checkpoint(
 				run["name"],
+				docname=run["session_name"],
 				worker_token=run["worker_token"],
 				now=_now(),
 				total_items=run["attempted"] + min(remaining, len(rows)) + int(steps),
@@ -664,12 +772,12 @@ def _next_item(run, memo):
 	return None
 
 
-def _dispatch_pending(run_id):
+def _dispatch_pending(run_id, docname):
 	guard = ai_fix._InterruptGuard(base=True)
 	failure = None
 	try:
 		with guard:
-			run = _retry_sql(lambda: store.prepare_dispatch(run_id, now=_now()))
+			run = _retry_sql(lambda: store.prepare_dispatch(run_id, docname=docname, now=_now()))
 			if not run:
 				return False
 			enqueue = getattr(frappe.enqueue, "__wrapped__", frappe.enqueue)
@@ -774,8 +882,17 @@ def start_refresh(
 			retry_uncertain=retry_uncertain,
 		)
 	)
+	if out["status"] == "already_running" and not out.get("run"):
+		# The unique reservation refused the insert, but that run was not visible to the
+		# admission's snapshot (Postgres): read it again in a fresh transaction.
+		current = _transaction(
+			lambda: frappe.db.get_value(store.RUN, {"active_session": docname}, "*", as_dict=True)
+		)
+		if not current:
+			return {"status": "refused", "reason": "busy"}
+		out = {"status": "already_running", "run": current}
 	if out["status"] == "queued":
-		_dispatch_pending(run_id)
+		_dispatch_pending(run_id, docname)
 	if out.get("run"):
 		return {"status": out["status"], "refresh": public_state(out["run"])}
 	return out
@@ -791,30 +908,34 @@ def recover_pending():
 	expired = frappe.get_all(
 		store.RUN,
 		filters={"state": ["in", sorted(store.ACTIVE)], "lease_until": ["<=", now]},
-		fields=["name"],
+		fields=["name", "session_name"],
 		order_by="lease_until asc",
 		limit_page_length=100,
 	)
 	for row in expired:
-		_retry_sql(lambda: store.interrupt(row["name"], now=now, reason="lease_expired"))
+		_retry_sql(
+			lambda: store.interrupt(row["name"], docname=row["session_name"], now=now, reason="lease_expired")
+		)
 	budget = frappe.get_all(
 		store.RUN,
 		filters={"state": ["in", sorted(store.ACTIVE)], "deadline": ["<=", now]},
-		fields=["name"],
+		fields=["name", "session_name"],
 		order_by="deadline asc",
 		limit_page_length=100,
 	)
 	for row in budget:
-		_retry_sql(lambda: store.interrupt(row["name"], now=now, reason="deadline"))
+		_retry_sql(
+			lambda: store.interrupt(row["name"], docname=row["session_name"], now=now, reason="deadline")
+		)
 	pending = frappe.get_all(
 		store.RUN,
 		filters={"state": "queued", "dispatch_pending": 1, "dispatched_at_epoch": ["<=", now - 30]},
-		fields=["name"],
+		fields=["name", "session_name"],
 		order_by="dispatched_at_epoch asc",
 		limit_page_length=100,
 	)
 	for row in pending:
-		_dispatch_pending(row["name"])
+		_dispatch_pending(row["name"], row["session_name"])
 
 
 def refresh_state(docname):
@@ -825,9 +946,10 @@ def refresh_state(docname):
 	return public_state(run) if run else None
 
 
-def cancel_refresh(run_id, *, requested_by):
-	"""Caller authorizes the run's parent. SQL cancellation works without Redis."""
-	run = _retry_sql(lambda: store.cancel(run_id, now=_now(), cancelled_by=requested_by))
+def cancel_refresh(run_id, *, docname, requested_by):
+	"""Caller authorizes the session ``docname``; a run of another session is not cancelled.
+	SQL cancellation works without Redis."""
+	run = _retry_sql(lambda: store.cancel(run_id, docname=docname, now=_now(), cancelled_by=requested_by))
 	return public_state(run) if run else None
 
 
