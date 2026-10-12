@@ -127,7 +127,11 @@ def test_the_skip_and_fatal_kinds_have_one_source():
 	"""Q2: no copy of #72's lists in the engine."""
 	source = (_PKG / "ai_refresh_store.py").read_text() + (_PKG / "ai_jobs.py").read_text()
 	assert "ai_fix.AI_FATAL_KINDS" in source and "ai_fix.AI_SKIP_KINDS" in source
-	assert ai_jobs._ERROR_KINDS >= ai_fix.AI_SKIP_KINDS | {"context", "refused", "rate_limited"}
+	assert ai_jobs._ERROR_KINDS >= ai_fix.AI_SKIP_KINDS | ai_fix.AI_FATAL_KINDS | {
+		"context",
+		"refused",
+		"rate_limited",
+	}
 	assert not ai_fix.AI_FATAL_KINDS & store.PER_PROMPT_KINDS
 
 
@@ -345,7 +349,7 @@ def test_a_failed_evidence_scope_is_logged_and_the_prompt_goes_without_advice(wo
 	work.jobs._next_item(work.journal.run, memo)
 	assert [g["evidence_lookup"] for g in seen] == [None, None]
 	assert [r[0] for r in rows] == ["optimus ai refresh evidence"]
-	assert rows[0][1]["docname"] == "fake-session-doc"
+	assert rows[0][1]["docname"] == "fake-session-doc" and rows[0][1]["run_id"] == "fake-run"
 
 
 def test_the_recordings_memo_keeps_only_recordings(work, monkeypatch):
@@ -570,13 +574,25 @@ def test_every_engine_title_is_lowercase_and_listed_in_both_docs():
 def test_every_engine_row_names_its_session_and_run():
 	"""K2: ``docname`` and ``run_id`` on every row the engine writes (the settlement rows
 	and the sweep's pass them through one ``reference`` / the row's own keywords)."""
+	# Written before any run exists (so no run_id): they carry the session only.
+	# (``optimus ai phase 2 context`` is #72's shared title, written by analyze, so it is not
+	# scanned here and has the session but no run.)
+	before_a_run = {"optimus ai refresh worker availability", "optimus ai refresh selection"}
 	missing = []
 	for name, call in _log_calls("ai_jobs.py"):
 		keys = {kw.arg for kw in call.keywords}
 		if name == "log_ai_failure" and call.args and isinstance(call.args[0], ast.Constant):
-			has_splat = any(kw.arg is None for kw in call.keywords)
-			if not (has_splat or {"docname", "run_id"} <= keys):
-				missing.append((call.args[0].value, call.lineno))
+			title = call.args[0].value
+		elif name == "_run_ai_step":
+			title = next((kw.value.value for kw in call.keywords if kw.arg == "title"), None)
+		else:
+			continue
+		if not isinstance(title, str):
+			continue
+		needed = {"docname"} if title in before_a_run else {"docname", "run_id"}
+		has_splat = any(kw.arg is None for kw in call.keywords)
+		if not (has_splat or needed <= keys):
+			missing.append((title, call.lineno))
 	assert not missing, missing
 
 
@@ -700,3 +716,49 @@ def test_the_docs_describe_the_refresh_count_as_one_bump_at_acceptance():
 	flat = " ".join(text.split())
 	assert "counted once per accepted user refresh" in flat and "No ending of a run counts" in flat
 	assert "completion_counted" not in flat and "still counts as a refresh" not in flat
+
+
+# --- the kinds are #72's (F4) -------------------------------------------------------------
+
+
+def test_the_recorded_kinds_are_derived_from_ai_fix_plus_named_engine_only_kinds():
+	assert ai_jobs._ERROR_KINDS == frozenset(ai_fix.KIND_HINTS) | ai_jobs._ENGINE_ONLY_KINDS
+	assert "internal" in ai_jobs._ERROR_KINDS  # the fallback is itself a kind
+
+
+@pytest.mark.parametrize("kind", sorted(ai_fix.KIND_HINTS))
+def test_every_ai_fix_kind_is_recorded_under_its_own_name(worker, kind):
+	"""A kind #72 adds to ``KIND_HINTS`` is covered here without a change to the engine: it is
+	never recorded as ``internal``, and a fatal one stops the run at once."""
+
+	def fail():
+		raise ai_fix.AiFixError("fake", kind=kind)
+
+	worker.count = 4
+	worker.send_hook = fail
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	attempts = _attempts(worker)
+	assert {a["error_kind"] for a in attempts} == {kind}
+	if kind in ai_fix.AI_FATAL_KINDS:
+		assert len(attempts) == 1 and worker.journal.run["breaker_kind"] == kind
+	elif kind in ai_fix.AI_SKIP_KINDS | store.PER_PROMPT_KINDS:  # never trip the breaker
+		assert len(attempts) == 4 and not worker.journal.run.get("breaker_kind")
+	else:  # three in a row
+		assert len(attempts) == 3 and worker.journal.run["breaker_kind"] == kind
+
+
+# --- the cap over the longest resume chain (F3) -------------------------------------------
+
+
+def test_the_cap_counts_a_full_chain_of_three_resumes(work):
+	"""The retry limit allows 3 resumes, 4 runs; the first run's attempts still count."""
+	work.journal.run["cap"] = 7
+	_chain(work, "run-3", "run-2", "run-1")
+	_spent(work, "run-1", 2)
+	_spent(work, "run-2", 2)
+	_spent(work, "run-3", 2)
+	_spent(work, work.journal.run["name"], 1)
+	assert work.jobs._chain(work.journal.run) == ["fake-run", "run-3", "run-2", "run-1"]
+	assert work.jobs._next_item(work.journal.run, {}) is None
+	work.journal.run["cap"] = 8
+	assert work.jobs._next_item(work.journal.run, {}).kind == "fix"

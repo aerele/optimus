@@ -848,3 +848,15 @@ def test_a_click_on_a_run_with_nothing_to_send_takes_no_lock(admitting, monkeypa
 	monkeypatch.setattr(queue.journal.db, "get_value", spy)
 	assert _start(queue)["status"] == "already_running"
 	assert not queue.sent and not locks
+
+
+def test_a_click_never_re_sends_the_slice_of_an_expired_run(admitting):
+	"""F1: an expired queued run is dead, whatever its pending intent: the click takes it over
+	(a new run, its own slice) instead of re-sending the old slice to a worker that could not
+	claim it."""
+	queue = admitting
+	queue.journal.run.update(lease_until=40, dispatch_pending=1, dispatched_at_epoch=0)  # now is 50
+	out = _start(queue)
+	assert out["status"] == "queued" and out["refresh"]["run_id"] != "fake-run"
+	assert [kw["run_id"] for _, kw in queue.sent] == [out["refresh"]["run_id"]]
+	assert queue.journal.run["state"] == "interrupted"

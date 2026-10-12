@@ -1480,3 +1480,22 @@ def test_the_selections_counts_are_stored_on_the_run(sql):
 	assert value(sql, store.RUN, "run-a", "gated_count") == 3
 	assert value(sql, store.RUN, "run-a", "excluded_count") == 2
 	assert ai_jobs.public_state(sql.primary.get_value(store.RUN, "run-a", "*", as_dict=True))["gated"] == 3
+
+
+def test_a_late_delivery_cannot_revive_a_run_the_refresh_treats_as_dead(sql, monkeypatch):
+	"""F1: a queued run whose 1800 s lease lapsed (deadline not passed) is dead to ``live_run``,
+	so #72's Refresh may run; the queue's late delivery must not claim it and send a call beside
+	the Refresh. The next admission takes it over."""
+	assert ai_jobs._retry_sql(admit)["status"] == "queued"  # now=10: lease 1810, deadline 3610
+	monkeypatch.setattr(ai_jobs, "_now", lambda: 1900)
+	assert ai_jobs.live_run("parent-a") is None
+	late = ai_jobs._retry_sql(
+		lambda: store.claim(
+			"run-a", docname="parent-a", slice_no=0, worker_token="late", now=1900, lease_seconds=300
+		)
+	)
+	assert late is None
+	assert value(sql, store.RUN, "run-a", "state") == "queued"
+	out = ai_jobs._retry_sql(lambda: admit("run-b", now=1900), retry_lock_waits=False)
+	assert out["status"] == "queued" and out["taken_over"]["name"] == "run-a"
+	assert value(sql, store.RUN, "run-a", "state") == "interrupted"

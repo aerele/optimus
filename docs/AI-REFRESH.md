@@ -135,7 +135,9 @@ it was prepared makes it stale. Reported usage from a late answer is still
 accounted once, even when cancellation prevents saving the answer.
 
 A lost worker leaves its Calling attempt uncertain. Expired leases and total
-deadlines fence results immediately. Recovery does not need the scheduler: the
+deadlines fence results immediately, and a queued run past its lease or deadline
+is dead too: a late queue delivery cannot claim it, so it cannot be revived
+beside a path that treated it as dead. Recovery does not need the scheduler: the
 session's next admission takes over a run whose lease or deadline has passed.
 In the same transaction it ends that run as interrupted, makes its open call
 uncertain and admits the new run. Progress already shows such a run as
