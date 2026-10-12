@@ -25,11 +25,13 @@ since last read") when another transaction changed that row in between.
 Because the locks come first, that cannot happen here. Each transition names
 its session, and a run of another session is treated as missing.
 
-Admission locks the session row first. Only a user refresh (`scope` all, the
-only scope with caps) then takes the site mutex, with NOWAIT. When another
-admission holds the mutex, the answer is a `busy` refusal at once, never a wait
-or an error. An admission that waits on its own session therefore never holds
-the mutex, and analyze-time `fixes_missing` runs never take it. The capacity
+Admission locks the session row first. When another writer holds that row for
+a whole lock wait timeout, the admission answers `busy` instead of trying again.
+Only a user refresh (`scope` all, the only scope with caps) then takes the site
+mutex, with NOWAIT. When another admission holds the mutex, the answer is a
+`busy` refusal at once, never a wait or an error. An admission that waits on its
+own session therefore never holds the mutex, and analyze-time `fixes_missing`
+runs never take it. The capacity
 count is a plain read after those locks. Admissions with caps serialize on the
 mutex, and each one updates the mutex row. An older PostgreSQL REPEATABLE READ
 snapshot then fails on that row (40001) and is retried, so the caps stay exact
@@ -48,9 +50,17 @@ with a short delay. These are deadlocks, lock waits, snapshot conflicts and
 serialization failures, raw or as Frappe wraps them. On MariaDB that means
 1213, 1205 and 1020, and Frappe's `QueryDeadlockError` and
 `QueryTimeoutError`. On Postgres it means 40001, 40P01 and 55P03. A Postgres
-statement timeout (57014) is not retried. A retry never sends HTTP. A lock wait
-timeout can repeat up to three times, which bounds the wait at three times
-`innodb_lock_wait_timeout`.
+statement timeout (57014) is not retried. A retry never sends HTTP.
+
+A lock wait timeout (MariaDB 1205, or Postgres 55P03 when `lock_timeout` is set)
+is not retried by an admission, which is an HTTP request. It answers `busy`, so
+the request waits at most one `innodb_lock_wait_timeout`, well inside the web
+server's timeout. Deadlocks, 1020 and serialization failures are still retried
+there. Worker transitions and settlement do retry a lock wait timeout. One such
+operation can wait up to three timeouts. A settlement that gives up and then
+writes its failed outcome is two operations, so it can wait up to six.
+Cancellation still retries a lock wait timeout too; its HTTP endpoint lands with
+the wiring follow-up.
 
 The worker commits a Calling attempt before contacting a provider, then
 releases journal/session locks during HTTP. The answer, the attempt outcome and

@@ -275,3 +275,65 @@ def test_a_reservation_the_admission_could_not_see_is_read_again(queue, monkeypa
 	else:
 		assert out == {"status": "refused", "reason": "busy"}
 	assert not queue.sent
+
+
+def test_an_http_admission_waits_for_its_session_row_once_then_answers_busy(queue, monkeypatch):
+	"""F-5: a held session row costs the HTTP caller one lock wait timeout, then busy; no
+	second attempt waits again (a worker transition still retries lock waits)."""
+
+	class QueryTimeoutError(Exception):
+		pass
+
+	class DriverError(Exception):
+		pass
+
+	queue.journal.db.rows[queue.journal.mod.RUN] = {}
+	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda: True)
+	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
+	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
+	monkeypatch.setattr(queue.jobs.time, "sleep", lambda seconds: None)
+	current = queue.journal.db.get_value
+	waits = []
+
+	def held(table, name, *a, for_update=False, **kw):
+		if table == "Optimus Session" and for_update:
+			waits.append(name)
+			raise QueryTimeoutError(DriverError(1205, "fake lock wait timeout"))
+		return current(table, name, *a, for_update=for_update, **kw)
+
+	monkeypatch.setattr(queue.journal.db, "get_value", held)
+	out = queue.jobs.start_refresh(
+		docname="fake-session-doc", session_uuid="fake-session", requested_by="fake-owner"
+	)
+	assert out == {"status": "refused", "reason": "busy"}
+	assert waits == ["fake-session-doc"]
+	assert not queue.journal.db.rows[queue.journal.mod.RUN] and not queue.sent
+
+
+def test_an_http_admission_never_retries_a_lock_wait_timeout_anywhere(queue, monkeypatch):
+	"""F-5: a lock wait timeout outside the session and mutex locks (here the reservation
+	INSERT) is raised after one attempt instead of waiting two more timeouts."""
+
+	class QueryTimeoutError(Exception):
+		pass
+
+	class DriverError(Exception):
+		pass
+
+	queue.journal.db.rows[queue.journal.mod.RUN] = {}
+	monkeypatch.setattr(queue.jobs, "_workers_listening", lambda: True)
+	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
+	monkeypatch.setattr(ai_fix, "is_available", lambda: True)
+	monkeypatch.setattr(queue.jobs.time, "sleep", lambda seconds: None)
+	inserts = []
+
+	def waited(values):
+		inserts.append(values["name"])
+		raise QueryTimeoutError(DriverError(1205, "fake lock wait timeout"))
+
+	monkeypatch.setattr(queue.journal.db, "insert", waited)
+	with pytest.raises(QueryTimeoutError):
+		queue.jobs.start_refresh(
+			docname="fake-session-doc", session_uuid="fake-session", requested_by="fake-owner"
+		)
+	assert len(inserts) == 1 and not queue.sent
