@@ -363,9 +363,10 @@ def _drive(run_id, docname, slice_no, worker_token):
 				persist=(lambda: item.persist(result)) if persist else None,
 			)
 
-		def save(operation):
+		def save(operation, fallback=None):
 			return _settle(
 				operation,
+				fallback=fallback,
 				run_id=run_id,
 				docname=docname,
 				attempt_id=attempt["name"],
@@ -373,21 +374,14 @@ def _drive(run_id, docname, slice_no, worker_token):
 				session_uuid=run["session_uuid"],
 			)
 
-		storage_error = None
+		# A successful provider reply can fail local validation/storage. The fallback then
+		# saves its known cost and a failed outcome without trying that answer again.
 		storage_guard = ai_fix._InterruptGuard(base=True)
-		try:
-			with storage_guard:
-				save(settle)
-		except Exception as exc:
-			storage_error = exc
+		with storage_guard:
+			save(settle, fallback=lambda: settle(final="failed", persist=False, error_kind="internal"))
 		if storage_guard.pending():
-			item = result = storage_error = None
+			item = result = None
 			raise storage_guard.interrupt()
-		if storage_error is not None:
-			# A successful provider reply can fail local validation/storage (_settle logged
-			# it). Save its known cost and a failed outcome without trying that answer again.
-			storage_error = None
-			save(lambda: settle(final="failed", persist=False, error_kind="internal"))
 		if guard.pending():
 			item = result = failure = None
 			raise guard.interrupt()
@@ -395,9 +389,12 @@ def _drive(run_id, docname, slice_no, worker_token):
 
 
 _SETTLE_TITLE = "optimus AI refresh result storage"
+_COMMITTED_AFTER_ERROR = "committed: the error came after the COMMIT; the outcome and its tokens are saved"
+_RECORDED = "recorded: the attempt's outcome and its tokens are saved (read back after the error)"
+_UNKNOWN = "unknown: the outcome could not be read back after the error, so these tokens may well be recorded"
 
 
-def _settle(operation, *, run_id, docname, attempt_id, tokens, session_uuid=None):
+def _settle(operation, *, run_id, docname, attempt_id, tokens, session_uuid=None, fallback=None):
 	"""Commit one attempt's outcome, its answer and its usage in one short transaction.
 
 	The discipline is ``analyze._write_ai_answer``'s (#72), mirrored rather than reused: the
@@ -416,20 +413,82 @@ def _settle(operation, *, run_id, docname, attempt_id, tokens, session_uuid=None
 	- Any other failure, or the last try's, is rolled back, and the attempt's ``settled`` bit
 	  is read again in a fresh query: when it is set the outcome is committed (the error came
 	  after the COMMIT, from an ``after_commit`` callback or a lost reply), so the write counts
-	  as done and the error is logged with ``outcome=committed ...``.
-	- The session counter logs its own row when it fails and the whole transaction is gone
-	  (``savepoint_rollback=failed``); each such row gets an ``outcome=`` line once the write
-	  ends (committed on try N, or not committed), so none reads as lost tokens by mistake.
-	- A write that did not commit is logged once after the ``try`` (``tries``, the ``tokens``
-	  it did not record) and its error is raised; the caller then records the outcome
-	  without the answer. The usage counter is log-and-continue (#72, D2): a statement-level
-	  counter failure is logged by the counter and the write still commits, so the journal's
-	  ``tokens_reported`` is the source for reconciling the session's ``ai_tokens_spent``.
+	  as done and the error is logged with ``outcome=committed ...``. When it cannot be read,
+	  the outcome is unknown and its tokens may well be recorded (#72's wording).
+	- When the write did not commit and a ``fallback`` is given (the failed-outcome write:
+	  the known usage without the answer), it runs next, with the same discipline.
+	- Every row is written once both writes ended, with an ``outcome=``: the session
+	  counter's own rows (it logs one, ``savepoint_rollback=failed``, when the whole
+	  transaction is gone) and each write's failure (with ``tries`` and ``tokens``). When the
+	  fallback recorded the tokens, the first write's rows say ``recorded by fallback``, so a
+	  reconciler never adds them twice.
+	- When neither write saved an outcome, the last error is raised. The usage counter is
+	  log-and-continue (#72, D2): a statement-level counter failure is logged by the counter
+	  and the write still commits, so the journal's ``tokens_reported`` is the source for
+	  reconciling the session's ``ai_tokens_spent``.
 
 	An RQ job timeout leaves as a fresh instance. Returns True once an outcome is saved."""
+	reference = {"session_uuid": session_uuid, "docname": docname, "run_id": run_id, "attempt": attempt_id}
+	_result, error, logged, tries, settled = _write_outcome(operation, attempt_id)
+	if error is None or settled is True:
+		rows = _rows(logged, error, f"committed on try {tries}", error_outcome=_COMMITTED_AFTER_ERROR)
+		raised = None
+	elif fallback is None:
+		rows = _rows(logged, error, _failed(settled, tries), tries=tries, tokens=tokens)
+		raised = error
+	else:
+		fb_result, fb_error, fb_logged, fb_tries, fb_settled = _write_outcome(fallback, attempt_id)
+		if fb_error is None and fb_result:
+			# The failed-outcome write recorded the tokens: the answer's write did not commit.
+			first = f"not committed after try {tries}; recorded by fallback"
+			rows = _rows(logged, error, first, tries=tries, tokens=tokens)
+			rows += _rows(fb_logged, None, f"committed on try {fb_tries}")
+			raised = None
+		else:
+			# A no-op fallback (the attempt was already settled) or a failed one: the state
+			# read back now tells whether the outcome and its tokens are saved.
+			final = _attempt_settled(attempt_id) if fb_error is None else fb_settled
+			if final is True:
+				rows = _rows(logged, error, _RECORDED, tokens=tokens) + _rows(fb_logged, fb_error, _RECORDED)
+				raised = None
+			else:
+				rows = _rows(logged, error, _failed(final, tries), tries=tries, tokens=tokens)
+				rows += _rows(fb_logged, fb_error, _failed(final, fb_tries), tries=fb_tries, tokens=tokens)
+				raised = fb_error if fb_error is not None else error
+		fb_error = fb_logged = None
+	error = logged = None
+	for exc, context in rows:
+		ai_fix.log_ai_failure(_SETTLE_TITLE, exc, **reference, **context)
+	rows = None
+	if raised is not None:
+		raise raised
+	return True
+
+
+def _failed(settled, tries):
+	return _UNKNOWN if settled is None else f"not committed after try {tries}"
+
+
+def _rows(logged, error, outcome, *, error_outcome=None, **context):
+	"""One write's Error Log rows: each counter error the counter logged (``outcome``), then
+	the write's own error, with ``context``."""
+	rows = [(exc, {"outcome": outcome}) for exc in logged if exc is not error]
+	if error is not None:
+		rows.append((error, {"outcome": error_outcome or outcome, **context}))
+	return rows
+
+
+def _write_outcome(operation, attempt_id):
+	"""One settlement write, tried up to ``analyze.AI_WRITE_ATTEMPTS`` times.
+
+	Returns ``(result, error, logged, tries, settled)``: the operation's result, the last
+	error (None once it committed), the counter errors the counter logged itself, the tries
+	made, and the attempt's state: True once committed or read back as settled, False when
+	read back as not settled, None when it could not be read."""
 	from optimus.analyze import AI_WRITE_ATTEMPTS
 
-	error, logged, tries = None, [], 0
+	result = error = None
+	logged, tries = [], 0
 	while tries < AI_WRITE_ATTEMPTS:
 		tries += 1
 		error = None
@@ -438,48 +497,30 @@ def _settle(operation, *, run_id, docname, attempt_id, tokens, session_uuid=None
 			with guard:
 				if tries == 1:
 					_transaction(lambda: None)
-				_transaction(operation)
+				result = _transaction(operation)
 		except Exception as exc:
 			error = exc
 		if guard.pending():
-			operation = error = None
+			operation = error = result = None
 			logged.clear()
 			raise guard.interrupt()
 		if error is None:
 			break
 		if getattr(error, ai_fix._LOGGED_ATTR, False):
 			logged.append(error)
+		# Retries more than #72's _write_ai_answer (lock waits, Postgres 40001): only this
+		# write takes locking reads, and its settled bit makes a repeat a no-op.
 		if not store.is_retryable_conflict(error):
 			break
-	settled = error is None or _attempt_settled(attempt_id)
-	outcome = f"committed on try {tries}" if settled else f"not committed after try {tries}"
-	reference = {"session_uuid": session_uuid, "docname": docname, "run_id": run_id, "attempt": attempt_id}
-	for counter_error in logged:
-		if counter_error is not error:
-			ai_fix.log_ai_failure(_SETTLE_TITLE, counter_error, **reference, outcome=outcome)
-	logged.clear()
-	if error is None:
-		return True
-	if settled:
-		ai_fix.log_ai_failure(
-			_SETTLE_TITLE,
-			error,
-			**reference,
-			outcome="committed: the error came after the COMMIT; the outcome and its tokens are saved",
-		)
-		error = None
-		return True
-	ai_fix.log_ai_failure(_SETTLE_TITLE, error, **reference, outcome=outcome, tries=tries, tokens=tokens)
-	raise error
+	settled = True if error is None else _attempt_settled(attempt_id)
+	return result, error, logged, tries, settled
 
 
 def _attempt_settled(attempt_id):
-	"""True when the attempt's committed ``settled`` bit is set: a fresh read after the
-	rollback, False when it cannot be read. An RQ job timeout leaves as a fresh instance."""
-	return (
-		safe_call.best_effort(lambda: _transaction(lambda: bool(store.attempt_settled(attempt_id))), False)
-		is True
-	)
+	"""The attempt's committed ``settled`` bit, read in a fresh query after the rollback:
+	True or False, or None when it cannot be read. An RQ job timeout leaves fresh."""
+	state = safe_call.best_effort(lambda: _transaction(lambda: bool(store.attempt_settled(attempt_id))), None)
+	return state if isinstance(state, bool) else None
 
 
 def _end(run_id, docname, worker_token, reason):

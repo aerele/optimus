@@ -1095,3 +1095,31 @@ def test_an_http_admission_waits_for_a_held_session_row_once_then_answers_busy(s
 	assert contender.conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
 	writer.commit()
 	assert value(sql, store.RUN, "run-a", "name") is None
+
+
+def test_a_settlement_waiting_on_a_session_writer_keeps_the_answer(sql):
+	"""F-2: the settlement waits on a session row that a writer (#72's counter, a Desk save)
+	then commits. Postgres raises a raw serialization failure (40001) on the session lock;
+	settlement retries it (a superset of #72's rule) and keeps the paid answer. MariaDB
+	needs no retry: the lock is the transaction's first statement."""
+	claimed()
+	attempt = begun()
+	writer = sql.connect()
+	writer.sql(
+		f"UPDATE {writer.table('Optimus Session')} SET {writer.quoted('ai_tokens_spent')} = "
+		f"COALESCE({writer.quoted('ai_tokens_spent')}, 0) + 5 WHERE name = 'parent-a'"
+	)
+
+	def persist():
+		sql.facade.db.sql(f"UPDATE {sql.facade.db.table('answer')} SET body = 'engine' WHERE name = 'row-00'")
+
+	thread, out = in_thread(sql, "settle", lambda: save(sql, attempt, persist=persist))
+	wait_until_blocked(sql)
+	writer.commit()
+	thread.join(30)
+	assert "error" not in out and out["value"] is True
+	assert out["db"].conflicts == (["40001"] if BACKEND == "postgres" else [])
+	assert value(sql, "answer", "row-00", "body") == "engine"
+	assert value(sql, store.RUN, "run-a", "completed") == 1
+	assert value(sql, "Optimus Session", "parent-a", "ai_tokens_spent") == 12
+	assert not sql.logged
