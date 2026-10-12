@@ -39,14 +39,16 @@ versions may contain breaking changes see migration notes below).
 - Recover without the scheduler. An admission takes over its session's run
   whose lease or deadline has passed, in its own transaction, and progress shows
   such a run as interrupted. The recovery sweep isolates each row, skips a
-  session row another transaction holds (NOWAIT) and returns its counts. Cancel,
-  the sweep and a takeover release a run with inconsistent journal rows, with
-  one Error Log row. Cancel is bound to its session and, like the dispatch after
-  an admission, waits for a lock once. A continuation is dispatched at once;
-  three slices without progress, or a provider switched off mid-run, stop the
-  run. Settings stored as digit strings are accepted and every setting is
-  checked before admission. A refusal before any request is a known zero
-  usage.
+  session row another transaction holds (NOWAIT) and returns its counts. A
+  cancel, the sweep or a takeover releases a run whose journal rows are
+  inconsistent and writes one Error Log row for it, also when the admission
+  that took it over is refused. Cancel is bound to its session and waits for a
+  lock once; the dispatch after an admission takes its lock with NOWAIT, and a
+  later click sends an intent it left pending. A continuation is dispatched at
+  once; three slices without progress, or a provider switched off mid-run, stop
+  the run. Settings stored as digit strings are accepted and every setting, the
+  queue name included, is checked before admission. A refusal before any
+  request is a known zero usage, proven by the call count.
 - Add durable progress, SQL cancellation, site/user admission limits, bounded
   job slices and provider failure limits. Redis coordinates queue delivery;
   progress and accounting remain in SQL.

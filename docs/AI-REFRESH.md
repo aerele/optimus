@@ -61,10 +61,11 @@ A lock wait timeout (MariaDB 1205, or Postgres 55P03 when `lock_timeout` is set)
 is not retried by an admission, which is an HTTP request. It answers `busy`, so
 the request waits at most one `innodb_lock_wait_timeout`, well inside the web
 server's timeout. Deadlocks, 1020 and serialization failures are still retried
-there. Cancellation and the dispatch an admission makes after its commit are
-HTTP paths too: each waits one timeout at most. A busy cancellation answers
-`busy`; a busy dispatch leaves the committed intent pending, and the response
-still says `queued`. Worker transitions and settlement do retry a lock wait
+there. Cancellation is an HTTP path too and waits one timeout at most; a busy
+cancellation answers `busy`. The dispatch an admission makes after its commit
+takes the session row with NOWAIT, since the admission already waited, so one
+click waits one timeout at most. A busy dispatch leaves the committed intent
+pending, and the response still says `queued`. Worker transitions and settlement do retry a lock wait
 timeout. One such operation can wait up to three timeouts. A settlement that
 gives up and then writes its failed outcome is two operations, so it can wait
 up to six.
@@ -105,9 +106,13 @@ cleanup, which makes the attempt uncertain; its last row carries `tokens=` and
 RQ delivery is asynchronous, after commit, through Frappe's original enqueue
 function. Each run/slice has a deterministic job ID; SQL claim is the execution
 fence even if delivery is duplicated. A committed dispatch intent survives
-Redis failure and remains pending until a worker claims it. Recovery can
-redeliver it, at most once per 30 seconds per slice: a continuation is
-dispatched at once, however soon its slice yields. There is no inline fallback.
+Redis failure and remains pending until a worker claims it. The session's next
+click sends it again, best effort: a click that attaches to a queued run whose
+intent is still pending takes the session row with NOWAIT and enqueues it, and
+neither a busy row nor an enqueue failure changes the click's answer. The sweep
+does the same for every session. Either sends a slice at most once per 30
+seconds; a continuation is dispatched at once, however soon its slice yields.
+There is no inline fallback.
 
 ## Failure, cancellation and recovery
 
@@ -147,12 +152,14 @@ and guardrail re-ask behavior still applies inside a call.
 Authentication, endpoint-not-found, quota, configuration and rate-limit errors
 stop the run immediately. Three consecutive other failures also stop it;
 success resets that streak. Three slices in a row that could not begin any item
-stop it with `no_progress`, and a provider switched off mid-run stops it with
-`disabled`; neither counts as a refresh. Known reported tokens are kept for unusable
+stop it with `no_progress`; a run that answered items before that still counts
+as a refresh under the current rule. A provider switched off mid-run stops it
+with `disabled`, which counts no refresh. Known reported tokens are kept for unusable
 responses or failed local writes. Missing or contradictory usage is explicitly
 incomplete, including reported zero versus an absent report. A refusal before
-any request is a known zero, and a cache count Anthropic reports as null is
-not a missing one. Usage is
+any request is a known zero, proven by the call count: the engine counts every
+call it begins, and a failure without that proof is unknown usage. A cache
+count Anthropic reports as null is not a missing one. Usage is
 informational; Optimus has no prepaid token wallet and cannot reconcile an
 unknown provider bill without a later known response.
 
@@ -182,11 +189,11 @@ lock and the unique reservation.
 | `optimus_ai_refresh_max_seconds` | 3600 | Integer, 60 to 86400 |
 | `optimus_ai_max_active_refreshes` | 2 | Integer, 1 to 1000 |
 
-Every setting is checked before admission, and invalid configuration is
-rejected with the setting's name. A string of digits counts as its number,
-which is what `bench set-config` stores without `-p`; set them with
-`bench --site <site> set-config -p <key> <value>`. A custom queue needs a
-listening worker.
+Every setting, the queue name included, is checked before admission, and
+invalid configuration is rejected with the setting's name. A string of digits
+counts as its number, which is what `bench set-config` stores without `-p`; set
+the numbers with `bench --site <site> set-config -p <key> <value>`. A custom
+queue needs a listening worker.
 Manual runs additionally have a per-requester cap of two. Analyze-time
 `fixes_missing` runs reserve their own session but do not consume the manual
 site/user cap. The item cap applies even to Regenerate all; zero means unlimited
