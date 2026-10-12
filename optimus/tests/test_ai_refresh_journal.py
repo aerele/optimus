@@ -225,6 +225,167 @@ def test_pre_send_attempt_is_durable_and_unique(journal):
 	assert journal.run["attempted"] == 1
 
 
+def test_a_second_send_of_the_same_item_reports_a_duplicate_blocked_signal(journal):
+	claim(journal)
+	attempt = begin(journal)
+	with journal.db.transaction():
+		journal.mod.settle_attempt(
+			"fake-run",
+			attempt["name"],
+			docname="fake-session-doc",
+			worker_token="worker-a",
+			outcome="succeeded",
+			tokens=1,
+			usage_complete=True,
+			now=11,
+		)
+	signals = []
+	with journal.db.transaction():
+		assert (
+			journal.mod.begin_attempt(
+				"fake-run",
+				docname="fake-session-doc",
+				worker_token="worker-a",
+				kind="fix",
+				target="fake-finding",
+				input_hash="fake-hash",
+				now=11,
+				signals=signals,
+			)
+			is None
+		)
+	assert [(s["signal"], s["reason"], s["kind"]) for s in signals] == [
+		("duplicate_blocked", "already_attempted", "fix")
+	]
+
+
+def test_a_late_answer_for_an_interrupted_run_reports_a_discarded_signal_per_reason(journal):
+	claim(journal)
+	attempt = begin(journal)
+	with journal.db.transaction():
+		journal.mod.interrupt("fake-run", docname="fake-session-doc", now=400, reason="worker_lost")
+	reasons = []
+	for _ in range(2):
+		signals = []
+		with journal.db.transaction():
+			journal.mod.settle_attempt(
+				"fake-run",
+				attempt["name"],
+				docname="fake-session-doc",
+				worker_token="worker-a",
+				outcome="succeeded",
+				tokens=17,
+				usage_complete=True,
+				now=401,
+				signals=signals,
+			)
+		reasons.append([(s["signal"], s["reason"]) for s in signals])
+	# the first settles the attempt as discarded (the run is over); the second finds it settled
+	assert reasons == [[("discarded", "fenced")], [("discarded", "settled")]]
+
+
+def test_a_reply_for_an_attempt_the_worker_does_not_hold_is_a_fenced_signal_and_changes_nothing(journal):
+	claim(journal)
+	attempt = begin(journal)
+	signals = []
+	with journal.db.transaction():
+		assert not journal.mod.settle_attempt(
+			"fake-run",
+			attempt["name"],
+			docname="fake-session-doc",
+			worker_token="worker-b",
+			outcome="succeeded",
+			tokens=17,
+			usage_complete=True,
+			now=12,
+			signals=signals,
+		)
+	assert [(s["signal"], s["reason"]) for s in signals] == [("discarded", "fenced")]
+	assert journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["state"] == "calling"
+	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_tokens_spent"] == 0
+
+
+@pytest.mark.parametrize("outcome", ["failed", "skipped", "uncertain"])
+def test_an_outcome_without_an_answer_reports_no_signal(journal, outcome):
+	claim(journal)
+	attempt = begin(journal)
+	with journal.db.transaction():
+		journal.mod.interrupt("fake-run", docname="fake-session-doc", now=400, reason="worker_lost")
+	signals = []
+	with journal.db.transaction():
+		journal.mod.settle_attempt(
+			"fake-run",
+			attempt["name"],
+			docname="fake-session-doc",
+			worker_token="worker-a",
+			outcome=outcome,
+			tokens=5,
+			usage_complete=True,
+			now=401,
+			signals=signals,
+		)
+	assert signals == []
+
+
+def test_a_session_that_left_ready_reports_a_session_changed_signal(journal):
+	claim(journal)
+	attempt = begin(journal)
+	journal.db.rows["Optimus Session"]["fake-session-doc"]["status"] = "Analyzing"
+	signals = []
+	with journal.db.transaction():
+		journal.mod.settle_attempt(
+			"fake-run",
+			attempt["name"],
+			docname="fake-session-doc",
+			worker_token="worker-a",
+			outcome="succeeded",
+			tokens=11,
+			usage_complete=True,
+			now=12,
+			signals=signals,
+		)
+	assert [(s["signal"], s["reason"], s["kind"]) for s in signals] == [
+		("discarded", "session_changed", "fix")
+	]
+
+
+def test_a_reply_naming_another_sessions_run_is_a_fenced_signal(journal):
+	claim(journal)
+	attempt = begin(journal)
+	signals = []
+	with journal.db.transaction():
+		assert not journal.mod.settle_attempt(
+			"fake-run",
+			attempt["name"],
+			docname="other-session",
+			worker_token="worker-a",
+			outcome="succeeded",
+			tokens=11,
+			usage_complete=True,
+			now=12,
+			signals=signals,
+		)
+	assert [(s["signal"], s["reason"]) for s in signals] == [("discarded", "fenced")]
+
+
+def test_a_delivery_of_a_slice_not_yet_due_is_not_a_duplicate_signal(journal):
+	signals = []
+	with journal.db.transaction():
+		assert (
+			journal.mod.claim(
+				"fake-run",
+				docname="fake-session-doc",
+				slice_no=1,
+				worker_token="worker-a",
+				now=10,
+				lease_seconds=300,
+				signals=signals,
+			)
+			is None
+		)
+	assert signals == []
+
+
 def test_stale_owner_cannot_start_a_call(journal):
 	claim(journal)
 	assert begin(journal, "worker-b") is None

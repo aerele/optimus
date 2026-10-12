@@ -159,6 +159,14 @@ def _insert_new(table, name, **values):
 	return None
 
 
+def _signal(signals, signal, reason, **context):
+	"""Record a release-blocking signal for the caller to log once its transaction has ended
+	(O4). ``signals`` is an optional list the caller owns and clears before each try: a try
+	that is rolled back and repeated must not leave rows behind."""
+	if signals is not None:
+		signals.append({"signal": signal, "reason": reason, **context})
+
+
 def lock_run(run_id, docname, *, wait=True, force=False):
 	"""Lock the run's session row, then the run row, as the transaction's first statements.
 
@@ -460,13 +468,23 @@ def owns(run, worker_token, now):
 	)
 
 
-def claim(run_id, *, docname, slice_no, worker_token, now, lease_seconds):
+def claim(run_id, *, docname, slice_no, worker_token, now, lease_seconds, signals=None):
 	"""Claim a queued slice once. Replaying even the same token is a no-op.
 
 	A run whose queued lease or deadline has passed (``expired``) is dead, whatever the queue
 	delivers late: it is not claimed, so it cannot be revived beside a path that treated it as
 	dead. The session's next admission or the recovery sweep ends it."""
 	parent, run = lock_run(run_id, docname)
+	if (
+		run
+		and run.get("active_session")
+		and not expired(run, now)
+		and slice_no <= (run["slice_no"] or 0)
+		and (run["state"] != "queued" or run["slice_no"] != slice_no)
+	):
+		# A delivery of a slice that was already claimed (or is already over): the SQL claim
+		# is the fence, so no second worker runs it, and this is the only trace of it.
+		_signal(signals, "duplicate_blocked", "already_claimed", slice_no=slice_no)
 	if (
 		not parent
 		or not run
@@ -496,7 +514,7 @@ def attempt_name(run_id, kind, target):
 	return hashlib.sha256(f"{run_id}\0{kind}\0{target}".encode()).hexdigest()[:40]
 
 
-def begin_attempt(run_id, *, docname, worker_token, kind, target, input_hash, now):
+def begin_attempt(run_id, *, docname, worker_token, kind, target, input_hash, now, signals=None):
 	"""Persist the send intent before HTTP. Returning None forbids a new call."""
 	if kind not in {"fix", "steps"} or not isinstance(target, str) or not target:
 		raise ValueError("Invalid refresh target")
@@ -523,7 +541,9 @@ def begin_attempt(run_id, *, docname, worker_token, kind, target, input_hash, no
 		settled=0,
 	)
 	if attempt is None:
-		return None  # this target was already attempted in this run
+		# this target was already attempted in this run: the unique key blocked a second send
+		_signal(signals, "duplicate_blocked", "already_attempted", attempt=name, kind=kind)
+		return None
 	_update(RUN, run, active_attempt=name, attempted=run["attempted"] + 1, heartbeat=now)
 	return attempt
 
@@ -545,6 +565,7 @@ def settle_attempt(
 	now,
 	persist=None,
 	error_kind="",
+	signals=None,
 ):
 	"""Save an outcome and its result, at most once, and add its usage to the session.
 
@@ -563,21 +584,31 @@ def settle_attempt(
 		or type(usage_complete) is not bool
 	):
 		raise ValueError("Invalid refresh outcome")
+	answer = outcome == "succeeded"
 	parent, run = lock_run(run_id, docname)
 	if not run:
+		if answer:
+			_signal(signals, "discarded", "fenced", attempt=attempt_id)
 		return False
 	attempt = _read(ATTEMPT, attempt_id, lock=True)
 	if not attempt or attempt.get("run_id") != run_id or attempt.get("worker_token") != worker_token:
+		if answer:
+			_signal(signals, "discarded", "fenced", attempt=attempt_id)
 		return False
 	if attempt.get("settled") or attempt["state"] not in {"calling", "uncertain"}:
+		if answer:
+			_signal(signals, "discarded", "settled", attempt=attempt_id, kind=attempt["kind"])
 		return False
-	can_write = bool(
-		parent and parent["status"] == "Ready" and run["deadline"] > now and owns(run, worker_token, now)
-	)
-	final = "discarded" if outcome == "succeeded" and not can_write else outcome
-	if outcome == "succeeded" and can_write and persist is not None:
+	session_ready = bool(parent and parent["status"] == "Ready")
+	owner = bool(run["deadline"] > now and owns(run, worker_token, now))
+	can_write = session_ready and owner
+	final = "discarded" if answer and not can_write else outcome
+	reason = "fenced" if answer and not owner else "session_changed"
+	if answer and can_write and persist is not None:
 		if persist() is False:
-			final = "discarded"
+			final, reason = "discarded", "input_changed"
+	if final == "discarded":
+		_signal(signals, "discarded", reason, attempt=attempt_id, kind=attempt["kind"])
 	if tokens and parent:
 		from optimus.analyze import _add_ai_spend
 

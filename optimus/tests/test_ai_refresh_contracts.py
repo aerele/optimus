@@ -556,6 +556,8 @@ def test_the_engine_is_in_the_title_audit():
 		"optimus ai refresh release",
 		"optimus ai refresh selection",
 		"optimus ai refresh evidence",
+		"optimus ai refresh discarded",
+		"optimus ai refresh duplicate blocked",
 	}
 
 

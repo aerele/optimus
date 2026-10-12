@@ -1499,3 +1499,95 @@ def test_a_late_delivery_cannot_revive_a_run_the_refresh_treats_as_dead(sql, mon
 	out = ai_jobs._retry_sql(lambda: admit("run-b", now=1900), retry_lock_waits=False)
 	assert out["status"] == "queued" and out["taken_over"]["name"] == "run-a"
 	assert value(sql, store.RUN, "run-a", "state") == "interrupted"
+
+
+# --- D2: both journal tables keep a session_name index ----------------------------------------
+
+
+def _indexed_columns(db, table):
+	"""``{column: number of indexes whose only column it is}`` for one table, from the catalog."""
+	if BACKEND == "mariadb":
+		rows = db.sql(f"SHOW INDEX FROM {db.quoted(table)}")
+		columns = {}
+		for row in rows:
+			if row["Seq_in_index"] == 1 and not any(
+				r["Key_name"] == row["Key_name"] and r["Seq_in_index"] == 2 for r in rows
+			):
+				columns[row["Column_name"]] = columns.get(row["Column_name"], 0) + 1
+		return columns
+	columns = {}
+	for row in db.sql(
+		"SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND tablename = %s", [table]
+	):
+		match = re.search(r'\("?([a-z_]+)"?\)$', row["indexdef"].strip())
+		if match:
+			columns[match.group(1)] = columns.get(match.group(1), 0) + 1
+	return columns
+
+
+def _index_patch_on(sql, monkeypatch):
+	"""The index patch run against the facade's real catalog. Only the names move: the
+	facade's tables carry a test prefix, so the patch's ``tab...`` table names are mapped
+	to them and the index names it picks are prefixed (index names are schema-global)."""
+	from importlib import import_module
+
+	patch = import_module("optimus.patches.v0_12_0.initialize_ai_refresh_store")
+	tables = {"tab" + doctype: sql.primary.tables[doctype] for doctype in patch.JOURNAL_DOCTYPES}
+	prefix = sql.primary.tables[store.RUN].removesuffix("run")
+	created = []
+
+	def fields(doctype):
+		folder = doctype.lower().replace(" ", "_")
+		doc = json.loads((_DOCTYPES / folder / (folder + ".json")).read_text())
+		return [SimpleNamespace(**{"unique": 0, "search_index": 0, **f}) for f in doc["fields"]]
+
+	def add_index(doctype, columns, index_name):
+		created.append(index_name)
+		table = sql.primary.tables[doctype]
+		sql.primary.sql(f'CREATE INDEX IF NOT EXISTS "{prefix + index_name}" ON "{table}" ("{columns[0]}")')
+		sql.primary.commit()
+
+	db = SimpleNamespace(
+		db_type=BACKEND,
+		db_schema="public",
+		sql=lambda query, values: (
+			[tuple(r.values()) for r in sql.primary.sql(query, [values[0], tables[values[1]]])]
+			if BACKEND == "postgres"
+			else pytest.fail("MariaDB must not read the catalog")
+		),
+		add_index=add_index,
+	)
+	monkeypatch.setattr(
+		patch, "frappe", SimpleNamespace(db=db, get_meta=lambda d: SimpleNamespace(fields=fields(d)))
+	)
+	return patch, created
+
+
+def test_both_journal_tables_keep_their_session_index(sql, monkeypatch):
+	"""D2: Frappe names a PostgreSQL index after its column, so the second table to claim
+	``session_name`` got none. After the patch both have one, and a second run changes nothing.
+	MariaDB names indexes per table: both have one before the patch, and it adds none."""
+	run, attempt = sql.primary.tables[store.RUN], sql.primary.tables[store.ATTEMPT]
+	before = (_indexed_columns(sql.primary, run), _indexed_columns(sql.primary, attempt))
+	if BACKEND == "postgres":
+		# the collision, as Frappe's own DDL leaves it: exactly one of the two has the index
+		assert [c.get("session_name", 0) for c in before] in ([1, 0], [0, 1])
+	else:
+		assert [c.get("session_name", 0) for c in before] == [1, 1]
+	patch, created = _index_patch_on(sql, monkeypatch)
+	patch.ensure_indexes()
+	after = (_indexed_columns(sql.primary, run), _indexed_columns(sql.primary, attempt))
+	assert [c["session_name"] for c in after] == [1, 1]
+	assert all(
+		c.get(k)
+		for c, cols in zip(after, (("requested_by", "state", "resume_from"), ("run_id",)), strict=True)
+		for k in cols
+	)
+	if BACKEND == "postgres":
+		assert len(created) == 1 and "session_name" in created[0]
+	else:
+		assert created == [] and after == before
+	patch.ensure_indexes()
+	again = (_indexed_columns(sql.primary, run), _indexed_columns(sql.primary, attempt))
+	assert again == after
+	assert len(created) <= 1  # the second run created nothing

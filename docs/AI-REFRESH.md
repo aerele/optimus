@@ -240,6 +240,8 @@ Every Error Log row the engine writes has a title that starts with
 | `optimus ai refresh release` | A run with an inconsistent journal row was force-released (takeover, cancel or sweep). |
 | `optimus ai refresh selection` | The gated and excluded counts could not be taken; the run started with zero. |
 | `optimus ai refresh evidence` | The Slow Query evidence could not be read; the prompts went without index advice. |
+| `optimus ai refresh discarded` | A release-blocking signal: a paid answer was not saved because its attempt is stale or fenced. |
+| `optimus ai refresh duplicate blocked` | A release-blocking signal: the journal stopped a second send or a second delivery. |
 
 The session counters keep #72's `optimus ai spend` and `optimus ai refresh count`,
 and a Phase 2 index failure keeps `optimus ai phase 2 context`.
