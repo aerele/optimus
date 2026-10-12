@@ -817,3 +817,31 @@ def test_a_forced_release_in_a_refused_admission_still_writes_its_row(admitting,
 	assert queue.journal.db.rows[queue.journal.mod.RUN]["fake-run"]["state"] == "interrupted"
 	[(title, exc, context)] = rows
 	assert title == "optimus AI refresh recovery" and context["run_id"] == "fake-run"
+
+
+@pytest.mark.parametrize(
+	"values",
+	[
+		# A claim clears the pending flag; it stays set here so the state check alone must keep
+		# this click off the session row.
+		{"state": "running", "worker_token": "worker", "dispatch_pending": 1, "dispatched_at_epoch": 0},
+		{"state": "queued", "dispatch_pending": 0, "dispatched_at_epoch": 0},
+	],
+	ids=["running", "claimed"],
+)
+def test_a_click_on_a_run_with_nothing_to_send_takes_no_lock(admitting, monkeypatch, values):
+	"""The gate's state and pending checks keep a polling click lock-free: ``prepare_dispatch``
+	would refuse such a run too, but only after taking the session row with NOWAIT."""
+	queue = admitting
+	queue.journal.run.update(lease_until=1800, **values)
+	locks = []
+	current = queue.journal.db.get_value
+
+	def spy(table, name, *a, for_update=False, **kw):
+		if for_update:
+			locks.append(table)
+		return current(table, name, *a, for_update=for_update, **kw)
+
+	monkeypatch.setattr(queue.journal.db, "get_value", spy)
+	assert _start(queue)["status"] == "already_running"
+	assert not queue.sent and not locks
