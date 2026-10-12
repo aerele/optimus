@@ -48,3 +48,30 @@ def test_missing_phase2_context_is_reported_without_breaking_enrichment(monkeypa
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: logs.append(type(a[1]).__name__))
 	assert analyze._phase2_index_for(SimpleNamespace()) == {}
 	assert logs == ["ValueError"]
+
+
+@pytest.mark.parametrize("helper", ["attempt insert", "site mutex"])
+def test_a_job_timeout_inside_a_journal_lock_or_insert_escapes_fresh(monkeypatch, helper):
+	"""The duplicate-key and busy-mutex handlers catch ordinary errors only: an RQ timeout
+	during the attempt INSERT or the NOWAIT mutex read must stop the job, raised again as a
+	fresh instance, never read as "already attempted" or "busy"."""
+	from optimus import ai_refresh_store as store
+
+	JobTimeoutException = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
+	original = JobTimeoutException("fake job timeout")
+
+	def interrupted(*a, **kw):
+		raise original
+
+	if helper == "attempt insert":
+		monkeypatch.setattr(store, "_insert", interrupted)
+
+		def call():
+			return store._insert_new(store.ATTEMPT, "fake-attempt", attempt_id="fake-attempt")
+	else:
+		monkeypatch.setattr(store, "frappe", SimpleNamespace(db=SimpleNamespace(get_value=interrupted)))
+		call = store._lock_site_mutex
+	with pytest.raises(JobTimeoutException) as caught:
+		call()
+	assert caught.value is not original
+	assert caught.value.__context__ is None and caught.value.__cause__ is None
