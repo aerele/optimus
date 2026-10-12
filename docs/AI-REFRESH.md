@@ -77,10 +77,18 @@ the reported tokens to the session's `ai_tokens_spent` through #72's counter.
 That counter is log-and-continue (D2). If its own statement fails, only the
 increment is rolled back and logged (`optimus ai spend`), and the outcome
 commits without it. The run's `tokens_reported` always keeps the count, so it
-is the source for reconciling the session total. The completion count
-(`ai_refresh_count`) works the same way. Its failure is logged
-(`optimus ai refresh count`), and the terminal state and the release of the
-reservation still commit.
+is the source for reconciling the session total.
+
+The refresh count (`ai_refresh_count`) is counted once per accepted user
+refresh, when the admission inserts its reservation, through #72's counter
+(savepoint, log and continue: a failed increment is logged as
+`optimus ai refresh count` and the admission still commits). A resume is a
+click and counts once more. A refused admission (`busy`, a cap, `already_running`,
+a session that is not Ready, an unresumable or exhausted resume, or a Refresh
+running beside it) counts nothing, and so does an analyze-time `fixes_missing`
+run, which is no click. No ending of a run counts anything, whatever it had
+answered: not complete, stopped, cancelled, interrupted, abandoned, idle or
+disabled.
 
 Settlement follows #72's `_write_ai_answer` discipline. The first try commits
 whatever the worker's transaction holds, so no read view from before the call
@@ -119,7 +127,11 @@ There is no inline fallback.
 Runs move through queued/running to complete, stopped, cancelled or interrupted.
 The worker rechecks the requester, session readiness, Phase 2 activity and
 input signature before sending and before saving. A changed or deleted input
-cannot receive a stale answer. Reported usage from a late answer is still
+cannot receive a stale answer. A fix answer is guarded by the finding's own
+fingerprint and the Finding row lock, so an unrelated save of the session
+during the call (a Desk edit, a counter, a Phase 2 save) does not discard it;
+the Steps answer rewrites the session's notes, so any save of the session since
+it was prepared makes it stale. Reported usage from a late answer is still
 accounted once, even when cancellation prevents saving the answer.
 
 A lost worker leaves its Calling attempt uncertain. Expired leases and total
@@ -141,20 +153,29 @@ attempt with the same input unless the caller explicitly requests retry of
 uncertain work, which may incur another provider charge.
 
 Explicit resumes preserve the original selection time, cap and included
-sections. Saved Steps are carried forward without another call or usage/count
-increment; an unfinished report remains marked for regeneration. There are at
+sections. The cap is cumulative over the resume chain: the fix attempts of the
+run and of every run it resumed count against it, so a resume continues the
+same refresh and does not grant the cap again. Saved Steps are carried forward
+without another call or usage increment; an unfinished report remains marked
+for regeneration. There are at
 most three resumes in a chain, and a prior run can be
 resumed only once. A deliberate new refresh is a new request, subject to
 permission/rate/admission controls in the wiring layer. There is no automatic
 provider retry after transport failure; the existing bounded parameter-repair
 and guardrail re-ask behavior still applies inside a call.
 
-Authentication, endpoint-not-found, quota, configuration and rate-limit errors
-stop the run immediately. Three consecutive other failures also stop it;
-success resets that streak. Three slices in a row that could not begin any item
-stop it with `no_progress`; a run that answered items before that still counts
-as a refresh under the current rule. A provider switched off mid-run stops it
-with `disabled`, which counts no refresh. Known reported tokens are kept for unusable
+The failure rules are #72's. An authentication, endpoint-not-found, quota or
+configuration error (`ai_fix.AI_FATAL_KINDS`) stops the run at once, because
+the next call would fail the same way until the operator acts. Any other
+failure, a rate limit included, counts toward three in a row, which also stop
+it; a success resets that streak. A prompt that does not fit the model's
+context window (`context`) or that the provider refuses (`refused`) is recorded
+under its own kind and never feeds the streak: it says nothing about the next
+finding's prompt. A finding refused before any request (`not_eligible`, from
+`ai_fix.AI_SKIP_KINDS`) is skipped, not failed. The engine keeps no list of
+its own: it reads those two. Three slices in a row that could not begin any
+item stop the run with `no_progress`. A provider switched off mid-run stops it
+with `disabled`. Known reported tokens are kept for unusable
 responses or failed local writes. Missing or contradictory usage is explicitly
 incomplete, including reported zero versus an absent report. A refusal before
 any request is a known zero, proven by the call count: the engine counts every
@@ -168,6 +189,58 @@ refresh still works when the provider is disabled or worker discovery is down.
 New admissions require a listening worker. Worker interrupts remain interrupts
 after cleanup; logs use the shared scrubbed AI logging path. If SQL is entirely
 unavailable, the committed Calling intent remains for later recovery.
+
+## One path at a time
+
+The synchronous Refresh (`api.refill_ai_suggestions`) and this engine must not
+run on one session together: both would bill every finding and overwrite each
+other's answers. Each refuses while the other holds the session, and a refusal
+counts and bills nothing.
+
+- The engine reads #72's Refresh flag (`optimus:ai_refresh:<session_uuid>`)
+  fresh from Redis, with a raw GET, before it admits. While it is held, the
+  answer is `{"status": "refused", "reason": "refresh_running"}` with a
+  message. A run that already exists is still shown (attach), not refused.
+- The Refresh looks up the session's live engine run (`ai_jobs.live_run`, read
+  in a fresh transaction) before it takes its flag, counts itself or calls the
+  provider. While one is live, it answers `{"ok": False, "busy": True}` with a
+  message. A run whose lease or deadline has passed is dead and does not hold
+  the session. A lookup that fails never blocks the Refresh, as a cache
+  failure does not.
+
+The two checks are separate reads, so a click on each path in the same
+millisecond can still start both. The window is narrow and the engine is not
+wired yet; the wiring follow-up removes the synchronous path and its flag.
+
+## Selection, grounding and the Error Log
+
+The run keeps the selection's `gated` and `excluded` counts
+(`AiSelection.gated` and `.excluded`, #71's two Refresh toasts), taken once at
+admission, and progress returns them. A background fix prompt gets the same
+grounding as the synchronous Refresh: the Phase 2 hottest-line index and the
+Slow Query index evidence. Both are built once per slice, not once per finding;
+a failure of either is logged once with the session and the slice goes on
+without it.
+
+Every Error Log row the engine writes has a title that starts with
+`optimus ai refresh` and carries `docname` (the session) and, where there is one,
+`run_id` and `attempt`. Search the Error Log for `optimus ai`.
+
+| Title | When |
+| --- | --- |
+| `optimus ai refresh worker` | A slice failed. Carries `tokens` and `outcome` when the outcome write gave up. |
+| `optimus ai refresh cleanup` | The cleanup of a failed slice failed, so its call stays for recovery. |
+| `optimus ai refresh item` | One item's provider call failed. Carries `attempt`, `kind` and `item` (`fix` or `steps`). |
+| `optimus ai refresh result storage` | An answer or outcome write failed; the settlement rows carry `tries`, `tokens` and `outcome`. |
+| `optimus ai refresh enqueue` | A slice could not be handed to RQ; the intent stays pending. |
+| `optimus ai refresh worker availability` | Redis could not say whether a worker listens; new admissions are refused. |
+| `optimus ai refresh recovery` | A row of the recovery sweep failed. |
+| `optimus ai refresh release` | A run with an inconsistent journal row was force-released (takeover, cancel or sweep). |
+| `optimus ai refresh selection` | The gated and excluded counts could not be taken; the run started with zero. |
+| `optimus ai refresh evidence` | The Slow Query evidence could not be read; the prompts went without index advice. |
+
+The session counters keep #72's `optimus ai spend` and `optimus ai refresh count`,
+and a Phase 2 index failure keeps `optimus ai phase 2 context`.
 
 ## Configuration and deployment
 
@@ -196,8 +269,16 @@ the numbers with `bench --site <site> set-config -p <key> <value>`. A custom
 queue needs a listening worker.
 Manual runs additionally have a per-requester cap of two. Analyze-time
 `fixes_missing` runs reserve their own session but do not consume the manual
-site/user cap. The item cap applies even to Regenerate all; zero means unlimited
-within the run deadline and bounded history limit.
+site/user cap. The item cap applies even to Regenerate all, and across a resume
+chain; zero means unlimited within the run deadline and bounded history limit.
+
+Slices run on the `optimus_ai_queue` queue, `long` by default, which analysis
+shares. A run holds one worker for up to a slice at a time, and the site cap
+allows two manual runs, so a site with one worker has its profiled-flow
+analyses wait behind a slice. Give the queue a worker of its own
+(`optimus_ai_queue`, with a worker started for it) on a site that refreshes
+often. Analyze-time `fixes_missing` runs are not capped per site; the wiring
+follow-up decides that.
 
 The default slice budget is 120 seconds. A slice processes at least one item
 when its remaining total budget permits, then queues a continuation. Each call

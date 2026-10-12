@@ -55,6 +55,21 @@ versions may contain breaking changes see migration notes below).
 - Distinguish known zero token usage from missing or contradictory usage,
   preserve reported usage on processing failures, and widen the stored step
   token count. Keep RQ timeouts fresh, including when worker cleanup fails.
+- Follow #72's contracts. The refresh is counted once, when it is accepted
+  (a resume is a click), and no ending counts it. Only `ai_fix.AI_FATAL_KINDS`
+  stop a run at once; a rate limit joins the three-in-a-row streak; `context` and
+  `refused` are recorded under their own kind and never feed it; the skip kinds
+  are `ai_fix.AI_SKIP_KINDS`. The engine and #72's Refresh each refuse while the
+  other holds the session. The engine's Error Log titles start with
+  `optimus ai refresh` and carry the session and run. The run keeps the
+  selection's gated and excluded counts, background fix prompts get the Slow
+  Query evidence the synchronous Refresh gets, and the cap is cumulative over a
+  resume chain.
+- Change the stored answer shape. A fix answer in `llm_fix_json`, written by
+  `suggest_fix` for the synchronous Refresh, analyze's auto-suggest and the
+  engine alike, now always has `usage_complete`, and has `tokens` when the usage
+  is complete even at zero tokens. `fix_state` ignores both keys, so stored
+  answers from before still read as they did.
 
 ### Upgrade notes
 
