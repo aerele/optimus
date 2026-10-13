@@ -210,6 +210,50 @@ def test_a_job_timeout_that_cut_the_call_escapes_fresh_when_both_outcome_writes_
 	assert len(worker.calls) == 1
 
 
+def test_a_job_timeout_that_cut_the_call_escapes_fresh_when_the_next_commit_fails(worker, monkeypatch):
+	"""The job timeout cut the provider call, then the commit that closes the call's transaction
+	failed (the connection was lost). The job stopped with ``RefreshSliceFailed``, so the
+	timeout was lost. It must stop with the timeout, raised again fresh once the worker
+	cleanup's rows are written, each while no exception is being handled."""
+	JobTimeoutException = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
+	original = JobTimeoutException("fake: the job timed out during the provider call")
+	worker.count = 1
+	cut, failed, rows = [], [], []
+
+	def send():
+		cut.append(True)
+		raise original
+
+	transaction = worker.jobs._transaction
+
+	def first_commit_after_the_cut_fails(operation):
+		if cut and not failed:
+			failed.append(True)
+			raise OSError("fake: the connection was lost at the commit")
+		return transaction(operation)
+
+	def log(title, exc=None, **context):
+		rows.append((title, exc, context, sys.exc_info()[1]))
+
+	worker.send_hook = send
+	monkeypatch.setattr(worker.jobs, "_transaction", first_commit_after_the_cut_fails)
+	monkeypatch.setattr(ai_fix, "log_ai_failure", log)
+	with pytest.raises(JobTimeoutException) as caught:
+		worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert caught.value is not original
+	assert caught.value.__context__ is None and caught.value.__cause__ is None
+	assert failed and len(worker.calls) == 1
+	assert [r[0] for r in rows] == [
+		"optimus ai refresh worker",
+		"optimus ai refresh uncertain",
+		"optimus ai refresh ended",
+	]
+	assert type(rows[0][1]) is OSError and [r for r in rows if r[3] is not None] == []
+	[attempt] = worker.journal.db.rows[worker.journal.mod.ATTEMPT].values()
+	run = worker.journal.db.rows[worker.journal.mod.RUN]["fake-run"]
+	assert attempt["state"] == "uncertain" and run["state"] == "interrupted"
+
+
 def test_an_ordinary_failure_of_both_outcome_writes_still_stops_the_slice_as_before(worker, monkeypatch):
 	"""Without a job timeout, both writes failing stops the slice with ``RefreshSliceFailed``."""
 	worker.count = 1
