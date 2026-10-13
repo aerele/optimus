@@ -269,7 +269,7 @@ def test_retry_sql_can_leave_lock_wait_timeouts_to_the_caller(sql_retry, exc, ca
 	"exc", [RETRIED["frappe-wrapped 1205"], RETRIED["postgres serialization 40001"]], ids=["1205", "40001"]
 )
 def test_settlement_also_retries_lock_waits_and_serialization_failures(sql_retry, exc):
-	"""F-2: settlement retries more than #72's ``_write_ai_answer`` (whole-transaction rollbacks
+	"""Settlement retries more than #72's ``_write_ai_answer`` (whole-transaction rollbacks
 	only): its locking reads can time out waiting (1205) or, on Postgres, find the session row
 	changed after the snapshot (40001), and the settled bit makes trying again safe. A narrower
 	rule would drop the paid answer."""
@@ -301,7 +301,7 @@ def unreadable(sql_retry, monkeypatch):
 
 @pytest.mark.parametrize("with_fallback", [False, True])
 def test_an_unreadable_outcome_is_logged_as_unknown_not_as_lost(unreadable, with_fallback):
-	"""F-1 (b), #72's semantics: when the attempt's state cannot be read back after an error,
+	"""#72's semantics: when the attempt's state cannot be read back after an error,
 	its tokens may well be recorded, so the row says unknown rather than "not committed"."""
 
 	def fail():
