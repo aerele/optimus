@@ -35,9 +35,13 @@ def ensure_indexes():
 	``<table>_<column>_index``. It is created only when no index covers the column, so the
 	table that did get Frappe's index gets no second one. Frappe's later schema syncs leave
 	the extra index alone: it sees an index on the column and has nothing to add. MariaDB
-	names an index per table, so it has no collision and nothing is done there."""
+	names an index per table, so it has no collision and nothing is done there.
+
+	Frappe v15's PostgreSQL database has no ``db_schema``: the schema is then read from the
+	site config, as Frappe v15 reads it, and is "public" when the config names none."""
 	if frappe.db.db_type != "postgres":
 		return
+	schema = getattr(frappe.db, "db_schema", None) or frappe.conf.get("db_schema") or "public"
 	for doctype in JOURNAL_DOCTYPES:
 		table = "tab" + doctype
 		columns = [
@@ -49,7 +53,7 @@ def ensure_indexes():
 			row[0]
 			for row in frappe.db.sql(
 				"SELECT indexdef FROM pg_indexes WHERE schemaname = %s AND tablename = %s",
-				(frappe.db.db_schema, table),
+				(schema, table),
 			)
 		]
 		for column in columns:
