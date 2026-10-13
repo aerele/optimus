@@ -146,6 +146,18 @@ def test_slice_yields_after_an_item_and_old_delivery_cannot_repeat_it(worker):
 	assert len(worker.calls) == 2 and worker.journal.run["tokens_reported"] == 14
 
 
+def test_a_worker_on_postgres_sets_no_lock_bound(worker):
+	"""The HTTP lock bound is not the worker's: its claim, sends, settlements and ending keep
+	the server's setting and retry a lock wait."""
+	statements = []
+	worker.journal.db.db_type = "postgres"
+	worker.jobs.frappe.db.db_type = "postgres"
+	worker.jobs.frappe.db.sql = lambda query, values=(): statements.append(query)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert worker.journal.run["state"] == "complete" and len(worker.calls) == 5
+	assert statements == [] and not [c for c in worker.journal.db.calls if c[0] == "SQL"]
+
+
 def test_deadline_prevents_another_provider_call(worker):
 	worker.journal.run["deadline"] = 29
 	worker.jobs.run_ai_refresh_slice("fake-run", 0)

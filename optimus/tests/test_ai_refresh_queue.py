@@ -705,6 +705,85 @@ def test_cancel_force_releases_a_corrupt_run_with_one_row(queue, rows):
 	assert "reservation" in str(exc) and context["docname"] == "fake-session-doc"
 
 
+# --- the lock wait of an HTTP request on Postgres ------------------------------------------------
+
+_HTTP_BOUND = (("SET LOCAL lock_timeout = %s", ("30s",)), True)
+
+
+def _statements(queue):
+	"""The statements sent with ``frappe.db.sql``, each with whether it opened its transaction."""
+	return [call[1:] for call in queue.journal.db.calls if call[0] == "SQL"]
+
+
+def _bound_then_lock(queue):
+	"""True when every lock bound is followed at once by the session row's lock."""
+	calls = queue.journal.db.calls
+	return all(
+		calls[i + 1] == ("Optimus Session", "fake-session-doc", True)
+		for i, call in enumerate(calls)
+		if call[0] == "SQL"
+	)
+
+
+@pytest.mark.parametrize("path", ["click", "cancel"])
+def test_on_postgres_an_http_transaction_bounds_its_lock_waits_first(admitting, path):
+	"""Postgres waits for a row lock for as long as it takes unless ``lock_timeout`` is set, and
+	Frappe sets none: a click or a cancel on a session row a dead transaction holds hung until the
+	web server killed it, and its backend went on waiting. The admission and the cancellation set
+	the bound for their own transaction, as its first statement, before the session lock."""
+	queue = admitting
+	queue.journal.db.db_type = "postgres"
+	if path == "click":
+		queue.journal.db.rows[queue.journal.mod.RUN] = {}
+		assert _start(queue)["status"] == "queued"
+	else:
+		assert _cancel(queue)["status"] == "cancelled"
+	assert _statements(queue) == [_HTTP_BOUND]
+	assert _bound_then_lock(queue)
+
+
+def test_each_try_of_an_http_admission_sets_its_bound_again(admitting, monkeypatch):
+	"""``SET LOCAL`` ends with its transaction: a try that is rolled back and repeated sets it
+	again, first."""
+	queue = admitting
+	queue.journal.db.rows[queue.journal.mod.RUN] = {}
+	queue.journal.db.db_type = "postgres"
+	admit = queue.journal.mod.admit
+	tries = []
+
+	def deadlocked_once(**kw):
+		tries.append(True)
+		if len(tries) == 1:
+			raise _QueryDeadlockError(_DriverError(1213, "fake deadlock"))
+		return admit(**kw)
+
+	monkeypatch.setattr(queue.journal.mod, "admit", deadlocked_once)
+	assert _start(queue)["status"] == "queued"
+	assert len(tries) == 2 and _statements(queue) == [_HTTP_BOUND, _HTTP_BOUND]
+
+
+def test_on_mariadb_an_http_transaction_keeps_the_servers_lock_wait(admitting):
+	"""MariaDB's wait is the server's ``innodb_lock_wait_timeout``: a session-level SET would
+	outlive the transaction on the pooled connection, so the engine sends none."""
+	queue = admitting
+	queue.journal.db.rows[queue.journal.mod.RUN] = {}
+	out = _start(queue)
+	assert out["status"] == "queued"
+	assert _cancel(queue, run_id=out["refresh"]["run_id"])["status"] == "cancelled"
+	assert _statements(queue) == []
+
+
+def test_no_worker_or_sweep_transaction_on_postgres_sets_a_lock_bound(queue, monkeypatch):
+	"""Only the two HTTP transactions are bounded: the sweep, a dispatch and every worker
+	transition keep the server's setting and retry a lock wait."""
+	queue.journal.db.db_type = "postgres"
+	monkeypatch.setattr(queue.jobs.frappe, "get_all", queue.journal.db.get_all, raising=False)
+	assert queue.jobs._dispatch_pending("fake-run", "fake-session-doc") is True
+	_crash(queue)
+	assert queue.jobs.recover_pending()["interrupted"] == 1
+	assert _statements(queue) == []
+
+
 @pytest.mark.parametrize(
 	"name,value",
 	[
