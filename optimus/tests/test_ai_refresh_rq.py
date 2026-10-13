@@ -165,6 +165,64 @@ def test_a_job_timeout_during_the_outcome_write_keeps_the_known_tokens_and_escap
 	assert len(worker.calls) == 1
 
 
+def test_a_job_timeout_that_cut_the_call_escapes_fresh_when_both_outcome_writes_fail(worker, monkeypatch):
+	"""The job timeout cut the provider call, and the outcome write and its fallback then both
+	failed with ordinary errors. The job stopped with ``RefreshSliceFailed``, so the timeout
+	was lost. It must stop with the timeout, raised again fresh once every row is written, each
+	while no exception is being handled."""
+	JobTimeoutException = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
+	original = JobTimeoutException("fake: the job timed out during the provider call")
+	worker.count = 1
+
+	def cut():
+		raise original
+
+	writes, rows = [], []
+
+	def fail(*a, **kw):
+		writes.append(kw["outcome"])
+		raise OSError("fake: the outcome write failed")
+
+	def log(title, exc=None, **context):
+		rows.append((title, exc, context, sys.exc_info()[1]))
+
+	worker.send_hook = cut
+	monkeypatch.setattr(worker.journal.mod, "settle_attempt", fail)
+	monkeypatch.setattr(ai_fix, "log_ai_failure", log)
+	with pytest.raises(JobTimeoutException) as caught:
+		worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert caught.value is not original
+	assert caught.value.__context__ is None and caught.value.__cause__ is None
+	assert writes == ["uncertain", "uncertain"] and len(worker.calls) == 1
+	assert [r[0] for r in rows] == [
+		"optimus ai refresh result storage",
+		"optimus ai refresh result storage",
+		"optimus ai refresh worker",
+		"optimus ai refresh uncertain",
+		"optimus ai refresh ended",
+	]
+	assert [r for r in rows if r[3] is not None] == []
+	assert type(rows[2][1]) is OSError and "the attempt is now uncertain" in rows[2][2]["outcome"]
+	[attempt] = worker.journal.db.rows[worker.journal.mod.ATTEMPT].values()
+	run = worker.journal.db.rows[worker.journal.mod.RUN]["fake-run"]
+	assert attempt["state"] == "uncertain" and run["state"] == "interrupted"
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert len(worker.calls) == 1
+
+
+def test_an_ordinary_failure_of_both_outcome_writes_still_stops_the_slice_as_before(worker, monkeypatch):
+	"""Without a job timeout, both writes failing stops the slice with ``RefreshSliceFailed``."""
+	worker.count = 1
+
+	def fail(*a, **kw):
+		raise OSError("fake: the outcome write failed")
+
+	monkeypatch.setattr(worker.journal.mod, "settle_attempt", fail)
+	with pytest.raises(ai_jobs.RefreshSliceFailed):
+		worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert worker.journal.db.rows[worker.journal.mod.RUN]["fake-run"]["state"] == "interrupted"
+
+
 def test_the_outcome_write_raises_a_job_timeout_again_fresh(monkeypatch):
 	"""The outcome write's own guard: a timeout inside the settlement transaction is never
 	read as a committed or a failed write."""

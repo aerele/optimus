@@ -212,6 +212,7 @@ def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
 		# becomes uncertain. If SQL itself is down it stays Calling until recovery.
 		cleanup_error = released = None
 		unsettled = getattr(failure, _UNSETTLED_ATTR, None)
+		cut = getattr(failure, _CUT_ATTR, None)
 		try:
 			with guard:
 				frappe.db.rollback()
@@ -244,6 +245,8 @@ def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
 		failure = cleanup_error = None
 		if guard.pending():
 			raise guard.interrupt()
+		if isinstance(cut, safe_call.InterruptGuard) and cut.pending():
+			raise cut.interrupt()  # the job timeout that cut the provider call (``_CUT_ATTR``)
 		raise RefreshSliceFailed(
 			f"AI refresh worker failed ({failure_type}); log persistence failure ({log_failure_type or 'none'})"
 		)
@@ -443,15 +446,22 @@ def _drive(run_id, docname, slice_no, worker_token):
 		# other outcome is saved as it was: an uncertain call stays uncertain (never sent
 		# again), a fatal kind still stops the run and a skip stays a skip.
 		storage_guard = safe_call.InterruptGuard(base=True)
-		with storage_guard:
-			save(
-				settle,
-				fallback=lambda: settle(
-					final="failed" if outcome == "succeeded" else outcome,
-					persist=False,
-					error_kind=kind or "internal",
-				),
-			)
+		try:
+			with storage_guard:
+				save(
+					settle,
+					fallback=lambda: settle(
+						final="failed" if outcome == "succeeded" else outcome,
+						persist=False,
+						error_kind=kind or "internal",
+					),
+				)
+		except Exception as exc:
+			# Neither write saved an outcome: the worker cleanup writes its rows, then raises the
+			# job timeout that cut the call, when one did, instead of this error.
+			if guard.pending():
+				safe_call.best_effort(lambda failure=exc: setattr(failure, _CUT_ATTR, guard), None)
+			raise
 		if storage_guard.pending():
 			item = result = None
 			raise storage_guard.interrupt()
@@ -487,6 +497,9 @@ def _log_signals(signals, run_id, docname):
 
 # On an error ``_settle`` raises: ``(tokens, outcome)``, for the worker cleanup's last row.
 _UNSETTLED_ATTR = "_optimus_refresh_unsettled"
+# On an error ``_drive`` raises after the job timeout cut the provider call: that call's guard,
+# so the worker cleanup raises the timeout again, fresh, once its rows are written.
+_CUT_ATTR = "_optimus_refresh_cut_by_timeout"
 _COMMITTED_AFTER_ERROR = "committed: the error came after the COMMIT; the outcome and its tokens are saved"
 _RECORDED = "recorded: the attempt's outcome and its tokens are saved (read back after the error)"
 _UNKNOWN = "unknown: the outcome could not be read back after the error, so these tokens may well be recorded"
