@@ -300,7 +300,7 @@ def test_a_reply_for_an_attempt_the_worker_does_not_hold_is_a_fenced_signal_and_
 			now=12,
 			signals=signals,
 		)
-	assert [(s["signal"], s["reason"]) for s in signals] == [("discarded", "fenced")]
+	assert [(s["signal"], s["reason"], s["tokens"]) for s in signals] == [("discarded", "fenced", 17)]
 	assert journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["state"] == "calling"
 	assert journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_tokens_spent"] == 0
 
@@ -365,7 +365,26 @@ def test_a_reply_naming_another_sessions_run_is_a_fenced_signal(journal):
 			now=12,
 			signals=signals,
 		)
-	assert [(s["signal"], s["reason"]) for s in signals] == [("discarded", "fenced")]
+	assert [(s["signal"], s["reason"], s["tokens"]) for s in signals] == [("discarded", "fenced", 11)]
+
+
+def test_a_redelivery_to_an_expired_running_run_is_not_a_duplicate_signal(journal):
+	claim(journal)
+	signals = []
+	with journal.db.transaction():
+		assert (
+			journal.mod.claim(
+				"fake-run",
+				docname="fake-session-doc",
+				slice_no=0,
+				worker_token="worker-b",
+				now=journal.run["lease_until"] + 1,
+				lease_seconds=300,
+				signals=signals,
+			)
+			is None
+		)
+	assert signals == []
 
 
 def test_a_delivery_of_a_slice_not_yet_due_is_not_a_duplicate_signal(journal):

@@ -364,6 +364,19 @@ def _drive(run_id, docname, slice_no, worker_token):
 		)
 		if guard.pending():
 			outcome, kind = "uncertain", "timeout"
+		if tokens > ai_fix._MAX_TOKEN_COUNT:
+			ai_fix.log_ai_failure(
+				"optimus ai refresh item",
+				docname=docname,
+				run_id=run_id,
+				attempt=attempt["name"],
+				item=item.kind,
+				tokens=tokens,
+				outcome=(
+					f"clamped: the count is above {ai_fix._MAX_TOKEN_COUNT}, so the session counter "
+					"ignores it; the run and the attempt keep it"
+				),
+			)
 		if failure is not None and outcome == "failed":
 			ai_fix.log_ai_failure(
 				"optimus ai refresh item",
@@ -908,8 +921,9 @@ def _steps_item(run, doc, memo):
 			return False
 		# ``ai_steps_tokens`` is a 32-bit Int, as in #72: one reply's total cannot reach it, but
 		# provider counts are bounded per field (``ai_fix._MAX_TOKEN_COUNT``), so their sum could.
-		# The full count is in ``ai_tokens_spent`` and the attempt; this display figure is clamped
-		# so an absurd reply can never make the Steps save fail.
+		# This display figure is clamped so an absurd reply can never make the Steps save fail.
+		# A total above the bound never reaches ``ai_tokens_spent`` either (``_token_count``
+		# reads it as 0); only the run and the attempt keep it, and ``_drive`` logs one row.
 		tokens = min(result["tokens"].get("total_tokens", 0), ai_fix._MAX_TOKEN_COUNT)
 		_touch_session(doc.name, notes=result["notes"], ai_steps_tokens=tokens)
 		return True

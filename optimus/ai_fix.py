@@ -1990,8 +1990,8 @@ def _same_origin_redirect(current: str, resp) -> str | None:
 	return None
 
 
-# Bound each provider-supplied count. Sums and cumulative session usage use
-# Long Int columns so adding valid counts does not overflow a 32-bit field.
+# Bound each provider-supplied count. ``ai_tokens_spent`` is a Long Int, so adding bounded
+# counts cannot overflow it; a single call's total above the bound is read as 0 here.
 _MAX_TOKEN_COUNT = 2**31 - 1
 
 
