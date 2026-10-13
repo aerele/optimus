@@ -1115,10 +1115,19 @@ def start_refresh(
 
 	This commits its own short transactions. Analyze may call it only after
 	persisting the profiling result. A missing worker never selects inline work.
+
+	A session that is not Ready, a requester without access or a Phase 2 run in progress is a
+	refusal (``not_ready``, ``permission``, ``phase2``), answered before any progress is shown.
 	"""
 	if any(not isinstance(v, str) or not v or len(v) > 140 for v in (docname, session_uuid, requested_by)):
 		raise ValueError("Invalid AI refresh identity")
-	_check_run({"session_name": docname, "session_uuid": session_uuid, "requested_by": requested_by})
+	reason = None
+	try:
+		_check_run({"session_name": docname, "session_uuid": session_uuid, "requested_by": requested_by})
+	except StopRefresh as exc:
+		reason = exc.reason
+	if reason:
+		return {"status": "refused", "reason": reason}
 	# Attaching only reads progress. Redis or a disabled provider must not hide
 	# an existing run; admission below still serializes any competing new run. A run
 	# whose lease or deadline has passed is no longer attached to: the admission takes

@@ -225,8 +225,8 @@ class SQLDatabase:
 		filters = {"name": filters} if isinstance(filters, str) else filters
 		where, params = [], []
 		for key, value in filters.items():
-			if isinstance(value, (list, tuple)) and value[0] == "<=":
-				where.append(self.quoted(key) + " <= %s")
+			if isinstance(value, (list, tuple)) and value[0] in ("<=", ">"):
+				where.append(self.quoted(key) + " " + value[0] + " %s")
 				params.append(value[1])
 			elif isinstance(value, (list, tuple)):
 				assert value[0] == "in" and value[1]
@@ -523,7 +523,7 @@ def sql(monkeypatch):
 			db.connection.close()
 
 
-def admit(name="run-a", parent="parent-a", cap=5, scope="all", user="fake-user", now=10, **kw):
+def admit(name="run-a", parent="parent-a", cap=5, scope="all", user="fake-user", now=10, user_cap=5, **kw):
 	return store.admit(
 		run_id=name,
 		docname=parent,
@@ -533,7 +533,7 @@ def admit(name="run-a", parent="parent-a", cap=5, scope="all", user="fake-user",
 		now=now,
 		max_seconds=3600,
 		site_cap=cap,
-		user_cap=5,
+		user_cap=user_cap,
 		cap=20,
 		include_fixes=True,
 		include_steps=False,
@@ -1499,6 +1499,65 @@ def test_a_late_delivery_cannot_revive_a_run_the_refresh_treats_as_dead(sql, mon
 	out = ai_jobs._retry_sql(lambda: admit("run-b", now=1900), retry_lock_waits=False)
 	assert out["status"] == "queued" and out["taken_over"]["name"] == "run-a"
 	assert value(sql, store.RUN, "run-a", "state") == "interrupted"
+
+
+def _crashed_workers(user_b="fake-user"):
+	"""User refreshes on parent-a and parent-b, claimed at 11 (leases until 311) by workers
+	that were then killed. Nothing ends them: no click on their sessions, no sweep."""
+	assert claimed("run-a", "parent-a", "worker-a")
+	assert ai_jobs._retry_sql(lambda: admit("run-b", "parent-b", user=user_b))["status"] == "queued"
+	assert ai_jobs._retry_sql(
+		lambda: store.claim(
+			"run-b", docname="parent-b", slice_no=0, worker_token="worker-b", now=11, lease_seconds=300
+		)
+	)
+
+
+def test_runs_of_other_sessions_that_can_no_longer_call_hold_no_site_cap_slot(sql, monkeypatch):
+	"""Two crashed workers held both slots of a site cap of 2 until the sweep (not scheduled)
+	or a click on each of their sessions: every other session was refused. A run whose lease
+	or deadline has passed can neither claim nor begin a call, so it holds no slot; a live one
+	still does."""
+	_crashed_workers(user_b="other-user")
+	live = ai_jobs._retry_sql(lambda: admit("run-c", "parent-c", cap=2, user="third-user", now=300))
+	assert live == {"status": "refused", "reason": "site_cap"}
+	out = ai_jobs._retry_sql(lambda: admit("run-c", "parent-c", cap=2, user="third-user", now=1000))
+	assert out["status"] == "queued" and "taken_over" not in out
+	assert value(sql, store.RUN, "run-a", "state") == "running"
+	assert value(sql, store.RUN, "run-b", "state") == "running"
+
+
+def test_the_http_admission_ignores_runs_that_can_no_longer_call(sql, monkeypatch):
+	_crashed_workers(user_b="other-user")
+	_http_ready(monkeypatch)
+	monkeypatch.setattr(ai_jobs, "_now", lambda: 1000.0)
+	out = ai_jobs.start_refresh(docname="parent-c", session_uuid="fake-parent-c", requested_by="third-user")
+	assert out["status"] == "queued"
+	assert value(sql, store.RUN, out["refresh"]["run_id"], "active_session") == "parent-c"
+
+
+def test_runs_of_a_user_that_can_no_longer_call_hold_no_user_cap_slot(sql):
+	_crashed_workers()
+	live = ai_jobs._retry_sql(lambda: admit("run-c", "parent-c", cap=10, user_cap=2, now=300))
+	assert live == {"status": "refused", "reason": "user_cap"}
+	out = ai_jobs._retry_sql(lambda: admit("run-c", "parent-c", cap=10, user_cap=2, now=1000))
+	assert out["status"] == "queued"
+
+
+def test_a_dead_run_of_a_deleted_session_holds_no_cap_slot(sql):
+	"""No admission on a deleted session can take its run over (``not_ready`` comes first),
+	and the sweep is not scheduled: the reservation stays, but holds no slot once its lease
+	has passed."""
+	assert claimed("run-a", "parent-a", "worker-a")
+	sql.primary.sql(f"DELETE FROM {sql.primary.table('Optimus Session')} WHERE name = 'parent-a'")
+	sql.primary.commit()
+	assert ai_jobs._retry_sql(lambda: admit("run-x", "parent-a", cap=1, now=1000)) == {
+		"status": "refused",
+		"reason": "not_ready",
+	}
+	out = ai_jobs._retry_sql(lambda: admit("run-b", "parent-b", cap=1, user="other-user", now=1000))
+	assert out["status"] == "queued"
+	assert value(sql, store.RUN, "run-a", "active_session") == "parent-a"
 
 
 # --- D2: both journal tables keep a session_name index ----------------------------------------

@@ -179,10 +179,15 @@ def lock_run(run_id, docname, *, wait=True, force=False):
 
 	``wait=False`` takes both rows with NOWAIT: a row another transaction holds raises a
 	lock-unavailable error at once. A reservation naming another session raises, unless
-	``force`` (cancel and recovery, which release it: ``_release``)."""
+	``force`` (cancel and recovery, which release it: ``_release``).
+
+	A ``run_id`` that is not a non-empty string of at most 140 characters names no run, and
+	the Run table is not read: a filter in its place would be a locking read by filter."""
 	if not isinstance(docname, str) or not docname:
 		return None, None
 	parent = _read("Optimus Session", docname, lock=True, wait=wait)
+	if not isinstance(run_id, str) or not run_id or len(run_id) > 140:
+		return parent, None
 	run = _read(RUN, run_id, lock=True, wait=wait)
 	if not run or run.get("session_name") != docname:
 		return parent, None
@@ -244,6 +249,11 @@ def admit(
 	indexes deadlocked other sessions' workers. The unique ``active_session`` key is the
 	authority for one active run per session: an INSERT that hits it is ``already_running``
 	(with ``run`` None when this transaction could not see that run).
+
+	The caps count live runs only: active, with lease and deadline not passed. A run that is
+	``expired`` can neither claim a slice nor begin a call, so it holds no slot, even while it
+	still holds its own session's reservation until that session's next admission or the
+	sweep ends it. Every run that can still call a provider is counted.
 
 	Lazy takeover (A2): a run that holds the reservation but whose lease or deadline has
 	passed (``expired``) is ended in this transaction, as the recovery sweep would end it:
@@ -358,7 +368,13 @@ def admit(
 	if scope == "all":
 		active = frappe.db.get_values(
 			RUN,
-			{"scope": "all", "state": ["in", sorted(ACTIVE)]},
+			# the complement of ``expired``: a dead run of another session holds no slot
+			{
+				"scope": "all",
+				"state": ["in", sorted(ACTIVE)],
+				"lease_until": [">", now],
+				"deadline": [">", now],
+			},
 			["requested_by"],
 			as_dict=True,
 			limit=site_cap + 1,
