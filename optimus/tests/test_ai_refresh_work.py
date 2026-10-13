@@ -1,9 +1,10 @@
 """Worker inputs are tied to the initiating user and current SQL state."""
 
 import json
+import sys
 from copy import deepcopy
 from importlib import import_module
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -61,6 +62,8 @@ def work(journal, monkeypatch):
 		can_write=False,
 		roles=["Optimus User"],
 		child_loads=0,
+		user_permissions={},  # ``get_user_permissions(user)``: none
+		hooks={},  # ``frappe.get_hooks("has_permission")``: no hook for a session
 	)
 
 	def get_doc(table, name=None):
@@ -83,8 +86,12 @@ def work(journal, monkeypatch):
 			get_all=journal.db.get_all,
 			has_permission=permission,
 			get_roles=lambda user: env.roles,
+			get_hooks=lambda hook: env.hooks if hook == "has_permission" else [],
 		),
 	)
+	user_permission = ModuleType("frappe.core.doctype.user_permission.user_permission")
+	user_permission.get_user_permissions = lambda user=None: env.user_permissions
+	monkeypatch.setitem(sys.modules, user_permission.__name__, user_permission)
 	monkeypatch.setattr(jobs, "_now", lambda: 20)
 	monkeypatch.setattr("optimus.settings.get_config", lambda: SimpleNamespace(ai_excluded_finding_types=[]))
 	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: True)
@@ -179,25 +186,59 @@ def test_the_access_checks_read_no_child_table(work, locked):
 	"""Given a name, Frappe v15 loads the whole session (every child table, call trees
 	included) for each of the two checks, and two of the item's rechecks run inside the locked
 	send and save transactions. Frappe v16 loads no child table unless the user has User
-	Permissions. The checks get the session built from the row the recheck has just read."""
+	Permissions. With no User Permission and no permission hook, the checks get the session
+	built from the row the recheck has just read: every field of it, the session's own Link to
+	its user included, which a User Permission check would read."""
+	work.parent["user"] = "fake-owner"
 	seen = _v15_has_permission(work, lambda ptype, doc, user: True)
 	with work.journal.db.transaction():
 		work.jobs._check_run(work.journal.run, locked=locked)
 	assert work.child_loads == 0 and len(seen) == 2
 	for doc in seen:
-		assert doc["doctype"] == "Optimus Session" and doc["name"] == work.parent["name"]
-		assert doc["owner"] == "fake-owner" and doc["session_uuid"] == "fake-session"
-		assert "findings" not in doc
+		assert doc["doctype"] == "Optimus Session" and "findings" not in doc
+		assert all(doc.get(key) == value for key, value in work.parent.items())
+		assert doc["user"] == "fake-owner" and doc["owner"] == "fake-owner"
 
 
+@pytest.mark.parametrize(
+	"user_permissions,hooks",
+	[
+		({"Company": [{"doc": "fake-company"}]}, {}),
+		({}, {"Optimus Session": ["fake_app.permissions.session_has_permission"]}),
+		({}, {"*": ["fake_app.permissions.has_permission"]}),
+	],
+	ids=["user-permissions", "session-hook", "every-doctype-hook"],
+)
+def test_the_access_checks_get_the_name_when_frappe_reads_more_than_the_row(work, user_permissions, hooks):
+	"""A User Permission check also reads the Link fields of every child row, and a permission
+	hook may read anything: then the checks get the session's name, and Frappe loads the
+	document its own way (v15: whole; v16: lazily), exactly as before."""
+	work.user_permissions, work.hooks = user_permissions, hooks
+	seen = _v15_has_permission(work, lambda ptype, doc, user: True)
+	work.jobs._check_run(work.journal.run)
+	assert work.child_loads == 2 and len(seen) == 2
+	assert all(doc.get("findings") for doc in seen)
+
+
+def test_a_hook_for_another_doctype_keeps_the_row(work):
+	work.hooks = {"File": ["optimus.permissions.file_has_permission"], "Note": ["fake_app.note"]}
+	seen = _v15_has_permission(work, lambda ptype, doc, user: True)
+	work.jobs._check_run(work.journal.run)
+	assert work.child_loads == 0 and len(seen) == 2
+
+
+@pytest.mark.parametrize("given", ["row", "name"])
 @pytest.mark.parametrize(
 	"grant,allowed",
 	[("owner", True), ("read share", False), ("write share", True), ("role", True), ("none", False)],
 )
-def test_the_access_checks_keep_the_owner_share_and_role_rules(work, grant, allowed):
+def test_the_access_checks_keep_the_owner_share_and_role_rules(work, grant, allowed, given):
 	"""The checks decide from the document's ``owner`` and ``name``, which the row carries: the
 	owner may act, and so may a user with write (a write share, or the System Manager role);
-	a read share alone may not, and nor may a user with no access."""
+	a read share alone may not, and nor may a user with no access. The answer is the same
+	whether the checks get the row or the name."""
+	if given == "name":
+		work.user_permissions = {"Company": [{"doc": "fake-company"}]}
 	shared = {"read share": {"read"}, "write share": {"read", "write"}}.get(grant, set())
 
 	def decide(ptype, doc, user):
