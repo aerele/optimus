@@ -167,19 +167,36 @@ def _retry_sql(operation, *, retry_lock_waits=True):
 
 
 def _bound_http_lock_wait():
-	"""On Postgres, end this transaction's row lock waits after ``HTTP_LOCK_WAIT_SECONDS``: the
-	first statement of an HTTP admission or cancellation.
+	"""On Postgres, end this transaction's row lock waits after ``HTTP_LOCK_WAIT_SECONDS`` at
+	most: the first statements of an HTTP admission or cancellation.
 
 	Postgres waits for a row lock for as long as it takes unless ``lock_timeout`` is set, and
 	Frappe sets none, so a click on a session row that a dead or slow transaction holds would
-	wait until the web server killed the request, and its backend would go on waiting. ``SET
-	LOCAL`` ends with this transaction, so the pooled connection keeps its own setting, and it
-	takes no snapshot, so the session lock is still the first read. A lock not granted in time
-	raises 55P03, which both paths answer as ``busy``. MariaDB gets no SET: a session-level one
-	would outlive the transaction on the pooled connection, so the server's
-	``innodb_lock_wait_timeout`` applies. Worker paths retry a lock wait and set nothing."""
-	if frappe.db.db_type == "postgres":
-		frappe.db.sql("SET LOCAL lock_timeout = %s", (f"{HTTP_LOCK_WAIT_SECONDS}s",))
+	wait until the web server killed the request, and its backend would go on waiting. The
+	current limit is read first: a stricter one of the role, the database or the server is kept;
+	otherwise ``SET LOCAL`` sets the bound, which ends with this transaction, so the pooled
+	connection keeps its own setting. ``SHOW`` and ``SET`` take no snapshot (a SELECT would), so
+	the session lock is still the first read. A lock not granted in time raises 55P03, which both
+	paths answer as ``busy``. MariaDB gets no statement: a session-level one would outlive the
+	transaction on the pooled connection, so the server's ``innodb_lock_wait_timeout`` applies.
+	Worker paths retry a lock wait and set nothing."""
+	if frappe.db.db_type != "postgres":
+		return
+	rows = frappe.db.sql("SHOW lock_timeout", as_dict=True)
+	current = _pg_milliseconds(rows[0].get("lock_timeout")) if rows else None
+	if current and current <= HTTP_LOCK_WAIT_SECONDS * 1000:
+		return
+	frappe.db.sql("SET LOCAL lock_timeout = %s", (f"{HTTP_LOCK_WAIT_SECONDS}s",))
+
+
+_PG_TIME_UNITS = {"ms": 1, "s": 1000, "min": 60_000, "h": 3_600_000, "d": 86_400_000}
+
+
+def _pg_milliseconds(value):
+	"""A Postgres time setting as ``SHOW`` prints it (``0``, ``250ms``, ``2s``, ``1min``) in
+	milliseconds, or None when it cannot be read."""
+	match = re.fullmatch(r"(\d+)(ms|s|min|h|d)?", str(value).strip())
+	return int(match[1]) * _PG_TIME_UNITS[match[2] or "ms"] if match else None
 
 
 def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:

@@ -72,10 +72,12 @@ for one lock wait at most, well inside the web server's timeout. On MariaDB
 that is the server's `innodb_lock_wait_timeout`; the engine sets nothing there,
 because a session-level setting would outlive the transaction on the pooled
 connection. Postgres has no limit unless `lock_timeout` is set, and Frappe sets
-none, so the admission's transaction sets 30 seconds (`HTTP_LOCK_WAIT_SECONDS`
-in `optimus/ai_jobs.py`) for itself as its first statement
-(`SET LOCAL lock_timeout`, which takes no snapshot and ends with the
-transaction). Deadlocks, 1020 and serialization failures are still retried
+none, so the admission's transaction waits at most 30 seconds
+(`HTTP_LOCK_WAIT_SECONDS` in `optimus/ai_jobs.py`): its first statement reads
+the current limit (`SHOW lock_timeout`), and when there is none, or a longer
+one, it sets 30 seconds for itself (`SET LOCAL lock_timeout`, which ends with
+the transaction); a stricter setting of the role, the database or the server
+is kept. Neither statement takes a snapshot. Deadlocks, 1020 and serialization failures are still retried
 there. Cancellation is an HTTP path too, with the same bound; a busy
 cancellation answers `busy`. The dispatch an admission makes after its commit
 takes the session row with NOWAIT, since the admission already waited, so one
@@ -372,7 +374,7 @@ WHERE session_name = '<session name>' AND state = 'uncertain';
 | **Cancelled**: `state` `cancelled`, `end_reason` `cancelled`, `cancelled_by` names the user | A user stopped it. A call already in flight is not interrupted: its reply is paid for, its tokens are counted, and its answer is discarded (a `discarded` row, `reason=fenced`). | None. A cancelled run can be resumed once. |
 | **Expired**: `state` `interrupted`, `end_reason` `lease_expired` or `deadline` | See Stuck. | A run ended this way can be resumed once. |
 | **Incomplete usage**: `usage_incomplete` above 0 on the run, `usage_complete` 0 on an attempt | The provider's usage was missing, contradictory or unknown for that call, so the reported tokens may undercount. | Do not trust the run's token total for those attempts; compare with the provider's bill. |
-| **Busy**: a click answers `{"status": "refused", "reason": "busy"}` | Another transaction holds the session row for a whole lock wait (the server's `innodb_lock_wait_timeout` on MariaDB, 30 seconds on Postgres), or another admission holds the site mutex. Nothing was started or counted. | Try again. If it stays busy, look for a long or dead transaction on that Optimus Session row (`SHOW PROCESSLIST` on MariaDB, `pg_stat_activity` on Postgres). |
+| **Busy**: a click answers `{"status": "refused", "reason": "busy"}` | Another transaction holds the session row for a whole lock wait (the server's `innodb_lock_wait_timeout` on MariaDB; on Postgres 30 seconds at most, or a stricter `lock_timeout` setting), or another admission holds the site mutex. Nothing was started or counted. | Try again. If it stays busy, look for a long or dead transaction on that Optimus Session row (`SHOW PROCESSLIST` on MariaDB, `pg_stat_activity` on Postgres). |
 | **Already running**: a click answers `{"status": "already_running", ...}` | The session has a live run; the answer carries its progress. | Nothing: the click attached to it. |
 | **Refused**: `refresh_running`, `disabled`, `no_worker`, `queue_unavailable`, `not_ready`, `permission`, `phase2`, `site_cap`, `user_cap`, `not_resumable`, `already_resumed`, `retry_limit` | `refresh_running`: #72's Refresh holds the session. `disabled`: AI is off. `no_worker`: no worker listens on the queue. `queue_unavailable`: Redis could not say. `not_ready`: the session is not Ready. `permission`: the requester has no access to the session. `phase2`: a Phase 2 run is in progress. `site_cap`, `user_cap`: the site, or this requester, already has as many live user refreshes as the cap allows. A live run is `queued` or `running` with its lease and deadline not passed, so a run whose worker died or whose deadline passed holds no slot. The last three refuse a resume. | Fix the cause named; none of them counts or bills. An error naming a site setting that is not a valid whole number raises instead of answering (see Configuration). |
 | **Journal unavailable**: the error `AI refresh storage is not initialized` | The admission mutex row is missing (a rollback, or a failed install). A user refresh fails closed. | Run the repair command below. |
