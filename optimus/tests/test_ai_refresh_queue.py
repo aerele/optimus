@@ -447,6 +447,27 @@ def test_a_refresh_click_recovers_a_crashed_run_without_the_scheduler(admitting,
 	]
 
 
+def test_a_click_with_ai_switched_off_is_refused_and_starts_nothing(admitting, monkeypatch, rows):
+	"""With no live run to attach to, a provider that is off refuses the click before any
+	setting, queue or journal is touched: nothing is reserved, counted or sent."""
+	queue = admitting
+	queue.journal.db.rows[queue.journal.mod.RUN] = {}
+	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: False)
+	assert _start(queue) == {"status": "refused", "reason": "disabled"}
+	assert queue.journal.db.rows[queue.journal.mod.RUN] == {} and not queue.sent and not rows
+	assert queue.journal.db.rows["Optimus Session"]["fake-session-doc"]["ai_refresh_count"] == 0
+
+
+def test_refresh_state_shows_the_sessions_run_and_nothing_for_another_session(queue):
+	"""``refresh_state`` is read only: the progress of the session's run, counts only, or None
+	when the session has none."""
+	out = queue.jobs.refresh_state("fake-session-doc")
+	assert out == queue.jobs.public_state(queue.journal.run)
+	assert out["run_id"] == "fake-run" and out["state"] == "queued"
+	assert queue.jobs.refresh_state("other-session-doc") is None
+	assert not queue.sent and not queue.journal.db.locks
+
+
 def test_a_click_attaches_to_a_live_run(admitting):
 	queue = admitting
 	_crash(queue, lease_until=500)
@@ -675,6 +696,20 @@ def test_cancel_waits_for_a_held_session_row_once_then_answers_busy(queue, monke
 	monkeypatch.setattr(queue.journal.db, "get_value", held)
 	assert _cancel(queue) == {"status": "refused", "reason": "busy"}
 	assert waits == ["fake-session-doc"] and queue.journal.run["state"] == "queued" and not rows
+
+
+def test_a_cancel_that_fails_for_another_reason_raises_instead_of_answering_busy(queue, monkeypatch, rows):
+	"""Only a lock that was not granted is ``busy``: any other failure of the cancellation is
+	raised to the caller, and the run is left as it was."""
+	monkeypatch.setattr(queue.jobs.time, "sleep", lambda seconds: None)
+
+	def fail(*a, **kw):
+		raise RuntimeError("fake storage failure")
+
+	monkeypatch.setattr(queue.journal.mod, "cancel", fail)
+	with pytest.raises(RuntimeError, match="fake storage failure"):
+		_cancel(queue)
+	assert queue.journal.run["state"] == "queued" and not rows
 
 
 def test_cancel_still_retries_a_deadlock(queue, monkeypatch):

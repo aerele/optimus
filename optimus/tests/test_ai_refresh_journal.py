@@ -1893,3 +1893,85 @@ def test_a_call_already_made_uncertain_by_a_cancel_reports_no_second_signal(jour
 	signals = []
 	assert _settle_uncertain(journal, attempt, signals)
 	assert signals == []
+
+
+# --- the guards of each transition: deadline, lease and a Ready session -----------------------
+
+
+def _claimed(journal, lease_seconds=300):
+	with journal.db.transaction():
+		return journal.mod.claim(
+			"fake-run",
+			docname="fake-session-doc",
+			slice_no=0,
+			worker_token="worker-a",
+			now=10,
+			lease_seconds=lease_seconds,
+		)
+
+
+@pytest.mark.parametrize("now,state", [(3599, "queued"), (3600, "stopped"), (3700, "stopped")])
+def test_a_continuation_at_or_past_the_deadline_stops_the_run(journal, now, state):
+	"""The deadline is 3600: a slice that yields at that moment or later ends the run with
+	``deadline`` instead of queueing another slice."""
+	assert _claimed(journal, lease_seconds=5000)
+	with journal.db.transaction():
+		run = journal.mod.continue_run(
+			"fake-run", docname="fake-session-doc", worker_token="worker-a", now=now
+		)
+	assert run["state"] == state
+	if state == "stopped":
+		assert run["end_reason"] == "deadline" and run["active_session"] is None
+	else:
+		assert run["slice_no"] == 1 and run["dispatch_pending"] == 1
+
+
+@pytest.mark.parametrize(
+	"lease_until,now,due",
+	[(5000, 3599, True), (5000, 3600, False), (1800, 1799, True), (1800, 1800, False)],
+	ids=["before-the-deadline", "at-the-deadline", "before-the-lease", "at-the-lease"],
+)
+def test_a_dispatch_is_never_sent_once_the_queued_lease_or_the_deadline_passed(
+	journal, lease_until, now, due
+):
+	"""A run whose queued lease or deadline (3600) has passed is dead: its intent is not sent."""
+	journal.run.update(dispatch_pending=1, dispatched_at_epoch=0, lease_until=lease_until)
+	with journal.db.transaction():
+		out = journal.mod.prepare_dispatch("fake-run", docname="fake-session-doc", now=now)
+	assert bool(out) is due
+	assert journal.run["dispatched_at_epoch"] == (now if due else 0)
+
+
+@pytest.mark.parametrize("status", ["Analyzing", "Recording", "Failed"])
+def test_no_transition_of_a_worker_runs_while_its_session_is_not_ready(journal, status):
+	"""A session that left Ready (a new analyze, a Phase 2 recording, a failure): no slice is
+	claimed, no call is begun and no progress is published."""
+	session = journal.db.rows["Optimus Session"]["fake-session-doc"]
+	session["status"] = status
+	assert _claimed(journal) is None and journal.run["state"] == "queued"
+	session["status"] = "Ready"
+	assert _claimed(journal)
+	session["status"] = status
+	assert begin(journal) is None and journal.run["attempted"] == 0
+	with journal.db.transaction():
+		assert (
+			journal.mod.checkpoint(
+				"fake-run", docname="fake-session-doc", worker_token="worker-a", now=12, total_items=5
+			)
+			is None
+		)
+	assert journal.run.get("total_items") is None
+
+
+@pytest.mark.parametrize("worker,lease_seconds", [("", 300), (None, 300), ("worker-a", 0), ("worker-a", -1)])
+def test_a_claim_needs_a_worker_and_a_lease(journal, worker, lease_seconds):
+	with journal.db.transaction():
+		out = journal.mod.claim(
+			"fake-run",
+			docname="fake-session-doc",
+			slice_no=0,
+			worker_token=worker,
+			now=10,
+			lease_seconds=lease_seconds,
+		)
+	assert out is None and journal.run["state"] == "queued" and journal.run["worker_token"] is None

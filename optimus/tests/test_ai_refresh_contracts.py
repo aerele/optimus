@@ -710,9 +710,16 @@ def test_the_payload_builder_says_the_principal_is_reserved():
 
 
 def test_the_changelog_documents_the_stored_answer_shape():
+	"""In the newest release's section: the first ``## [`` heading, whatever its version."""
 	text = (_PKG.parent / "CHANGELOG.md").read_text(encoding="utf-8")
-	section = text.split("## [0.12.70]", 1)[1].split("\n## [", 1)[0] if "## [0.12.70]" in text else ""
+	section = text.split("\n## [", 2)[1]
 	assert "usage_complete" in section and "llm_fix_json" in section
+
+
+def test_the_changelog_lists_refresh_state_with_the_engines_functions():
+	text = (_PKG.parent / "CHANGELOG.md").read_text(encoding="utf-8")
+	section = text.split("\n## [", 2)[1]
+	assert "`refresh_state(docname)`" in section
 
 
 def test_the_docs_describe_the_refresh_count_as_one_bump_at_acceptance():
@@ -725,8 +732,8 @@ def test_the_docs_describe_the_refresh_count_as_one_bump_at_acceptance():
 # --- the kinds are #72's (F4) -------------------------------------------------------------
 
 
-def test_the_recorded_kinds_are_derived_from_ai_fix_plus_named_engine_only_kinds():
-	assert ai_jobs._ERROR_KINDS == frozenset(ai_fix.KIND_HINTS) | ai_jobs._ENGINE_ONLY_KINDS
+def test_the_recorded_kinds_are_ai_fixs_own():
+	assert ai_jobs._ERROR_KINDS == frozenset(ai_fix.KIND_HINTS)
 	assert "internal" in ai_jobs._ERROR_KINDS  # the fallback is itself a kind
 
 

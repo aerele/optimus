@@ -1022,3 +1022,21 @@ def test_a_run_that_ends_normally_writes_no_ended_row(worker, monkeypatch, reaso
 	assert worker.journal.run["end_reason"] == reason
 	assert not _titled(worker, "optimus ai refresh ended")
 	assert not _titled(worker, "optimus ai refresh uncertain")
+
+
+@pytest.mark.parametrize("reason", ["permission", "phase2", "not_ready"])
+def test_a_run_whose_send_intent_finds_it_must_stop_ends_without_a_call(worker, monkeypatch, reason):
+	"""The item's input changed, and the send-intent transaction's recheck finds the run must
+	stop (access lost, a Phase 2 run started, the session left Ready): the run ends with that
+	reason, before any call, instead of yielding to try again."""
+	worker.valid = False
+
+	def recheck(run, *, locked=False):
+		if locked:
+			raise worker.jobs.StopRefresh(reason)
+
+	monkeypatch.setattr(worker.jobs, "_check_run", recheck)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	run = worker.journal.db.rows[worker.journal.mod.RUN]["fake-run"]  # the recheck rolled back a copy in
+	assert not worker.calls and run["attempted"] == 0 and not worker.queued
+	assert run["state"] == "stopped" and run["end_reason"] == reason and run["active_session"] is None

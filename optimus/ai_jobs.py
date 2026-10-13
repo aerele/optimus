@@ -34,8 +34,7 @@ HTTP_LOCK_WAIT_SECONDS = 30
 # They are #72's: every kind ``ai_fix`` classifies (``KIND_HINTS`` has one line for each, and
 # holds the skip and fatal kinds), so a kind #72 adds is recorded as itself and, when it is
 # fatal, stops the run at once. The engine adds no kind of its own.
-_ENGINE_ONLY_KINDS = frozenset()
-_ERROR_KINDS = frozenset(ai_fix.KIND_HINTS) | _ENGINE_ONLY_KINDS
+_ERROR_KINDS = frozenset(ai_fix.KIND_HINTS)
 
 
 class RefreshSliceFailed(RuntimeError):

@@ -131,6 +131,8 @@ asks `live_run`, below).
   counts, `usage`, `end_reason` and `breaker_kind`.
 - `recover_pending()` returns `{"interrupted", "dispatched", "busy", "failed"}`.
   `live_run(docname)` returns the session's live run or None.
+  `refresh_state(docname)` returns the progress dict of the session's newest run,
+  or None; it only reads, and the caller checks access to the session.
 - `suggest_fix(..., usage_out=)` is the one additive keyword on a #72 helper:
   a `Usage` that becomes the call's usage, so the caller counts every attempted
   call. Without it nothing changes.
