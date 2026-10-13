@@ -22,7 +22,10 @@ runs release it.
 Every journal transaction starts fresh and its first statement locks the
 session row. The caller passes the run's session name, read earlier in its own
 transaction, so no plain read comes before that lock. Then the transition locks
-the run and the attempt, in that order. All other reads come after the locks.
+the run and the attempt, in that order. The other reads come after the locks,
+except that an admission's takeover reads the active run first and then locks it
+by key (safe: every writer of that run locks the session row first, which the
+admission holds).
 On MariaDB 11.8, `innodb_snapshot_isolation` is on by default. With it, a lock
 taken after a read view has opened fails with error 1020 ("Record has changed
 since last read") when another transaction changed that row in between.
@@ -331,6 +334,9 @@ SELECT name, session_name, requested_by, state, slice_no, dispatch_pending,
        lease_until <= UNIX_TIMESTAMP() OR deadline <= UNIX_TIMESTAMP() AS expired
 FROM `tabOptimus AI Refresh Run` WHERE active_session IS NOT NULL;
 
+-- the same on Postgres (bench --site <site> postgres): quote the table, and use
+--   lease_until <= extract(epoch from now()) OR deadline <= extract(epoch from now()) AS expired
+
 -- the last Error Log rows the engine wrote
 SELECT creation, method, reference_name, LEFT(error, 300) AS error
 FROM `tabError Log` WHERE method LIKE 'optimus ai refresh%' ORDER BY creation DESC LIMIT 50;
@@ -344,7 +350,7 @@ WHERE session_name = '<session name>' AND state = 'uncertain';
 
 | You see | It means | What to do |
 | --- | --- | --- |
-| **Stuck**: a run is `queued` or `running` and `public_state` says `stalled`, or the query above shows `expired` | The worker died or lost its lease (`lease_until`), or the total `deadline` passed. Nothing is writing the run. | Nothing is lost and nothing needs cancelling. The session's next admission takes the run over and ends it as `interrupted` (`end_reason` `lease_expired` or `deadline`), its open call becomes `uncertain`. To clear sessions without a click, run `bench --site <site> execute optimus.ai_jobs.recover_pending`; it prints the counts `interrupted`, `dispatched`, `busy` and `failed`, and handles up to 100 runs per pass, so run it again while a count is 100. No scheduler runs the sweep yet. |
+| **Stuck**: a run is `queued` or `running` and `public_state` says `stalled`, or the query above shows `expired` | The worker died or lost its lease (`lease_until`), or the total `deadline` passed. Nothing is writing the run. | Nothing is lost and nothing needs cancelling. The session's next admission takes the run over and ends it as `interrupted` (`end_reason` `lease_expired` or `deadline`), its open call becomes `uncertain`. To clear sessions without a click, run `bench --site <site> execute optimus.ai_jobs.recover_pending`; it prints the counts `interrupted`, `dispatched`, `busy` and `failed`, and handles up to 100 runs per pass, so run it again until `interrupted` and `dispatched` are 0. No scheduler runs the sweep yet. |
 | **Queued, never starts**: a run stays `queued` with `dispatch_pending` 1 | The slice never reached a worker: no worker listens on the queue (`optimus_ai_queue`), or Redis is down. | Start a worker for that queue. The next click on the same run, or the sweep, sends the slice again, at most once per 30 seconds. See the `optimus ai refresh enqueue` row. |
 | **Uncertain**: attempts with `state` `uncertain`, a run with `uncertain` above 0, or `end_reason` `uncertain` (the only items left were skipped because an uncertain attempt with the same input exists) | A call may have reached the provider and its outcome was never recorded. It is never repeated automatically; its usage is unknown. | Check the provider's usage page for the window. A new refresh skips the item while its input is unchanged. Only a deliberate retry of uncertain work (`retry_uncertain`) sends it again, and that can be billed twice. |
 | **Cancelled**: `state` `cancelled`, `end_reason` `cancelled`, `cancelled_by` names the user | A user stopped it. A call already in flight is not interrupted: its reply is paid for, its tokens are counted, and its answer is discarded (a `discarded` row, `reason=fenced`). | None. A cancelled run can be resumed once. |
@@ -373,7 +379,7 @@ WHERE session_name = '<session name>' AND state = 'uncertain';
 | `optimus ai refresh worker` | `interrupted` with `end_reason` `worker_interrupted`, its open call `uncertain` (a failure before the claim leaves it `queued`; when the cleanup itself failed, see `cleanup`) | Read the row for the cause. The row's `tokens` and `outcome` say whether the call's usage is recorded. |
 | `optimus ai refresh cleanup` | Still `running` with its call open until the lease expires | Wait for the lease, or click Refresh: the takeover ends it. |
 | `optimus ai refresh item` | Going on, unless this is the third in a row or a fatal kind | The row's `kind`, `fatal` and `hint` say what to fix (AI-FIXING section 6.5). |
-| `optimus ai refresh result storage` | Going on, or interrupted when both writes failed | Its `outcome` says: `committed on try N`, `recorded by fallback` (the tokens are saved, the answer is not), `not committed after try N`, or `unknown` (the tokens may well be recorded). |
+| `optimus ai refresh result storage` | Going on, or interrupted when both writes failed | Its `outcome` says: `committed on try N`, `committed: the error came after the COMMIT ...` or `recorded: ...` (the outcome and its tokens are saved; the write's error is still logged), `recorded by fallback` (the tokens are saved, the answer is not), `not committed after try N`, or `unknown` (the tokens may well be recorded). |
 | `optimus ai refresh enqueue` | `queued`, intent pending | Redis or the queue is down; the intent is sent again by the next click or sweep. |
 | `optimus ai refresh worker availability` | None started | New admissions answer `queue_unavailable` until Redis answers. |
 | `optimus ai refresh recovery` | Other rows of the sweep were done | The row names the run; the next sweep or admission tries again. |
@@ -400,10 +406,14 @@ session), `run_id`, and `attempt` and `kind` where there is one.
   not saved. `reason=fenced`: the worker no longer owns the run (cancelled,
   interrupted, or its lease or deadline passed). `reason=session_changed`: the
   session left Ready. `reason=input_changed`: the finding, or the session for a
-  Steps answer, changed during the call. `reason=settled`: the attempt already
-  had an outcome. The tokens are still counted for the first three, unless the run or the
-  attempt row is missing or another worker's (then nothing is written); a few after
-  cancels and edits are normal, a steady stream means workers lose their lease
+  Steps answer, changed during the call, or the requester lost access, or a Phase 2 run
+  started. `reason=settled`: the attempt already
+  had an outcome. The tokens are still counted, except for a `fenced` reply whose run or
+  attempt row is missing or belongs to another worker. That cannot happen
+  without the journal rows being edited by hand. Such a row carries `tokens=`
+  and is the only record of them: they are not charged, because without the
+  attempt row nothing stops a second charge when a lost COMMIT acknowledgement
+  makes settlement fall back. A few rows after cancels and edits are normal, a steady stream means workers lose their lease
   mid-call (check worker load and the AI request timeout).
 - A charge that does not add up: run the reconciliation below.
 
@@ -429,6 +439,7 @@ JOIN (SELECT session_name, SUM(tokens_reported) AS tokens
 LEFT JOIN (SELECT reference_name,
                   SUM(CAST(REGEXP_SUBSTR(REGEXP_SUBSTR(error, 'amount=[0-9]+'), '[0-9]+') AS UNSIGNED)) AS amount
            FROM `tabError Log` WHERE method = 'optimus ai spend' AND reference_doctype = 'Optimus Session'
+             AND error LIKE '%savepoint_rollback=done%'
            GROUP BY reference_name) d ON d.reference_name = s.name
 ORDER BY other_sources;
 ```
@@ -444,18 +455,33 @@ JOIN (SELECT session_name, SUM(tokens_reported) AS tokens
 LEFT JOIN (SELECT reference_name,
                   SUM(CAST(substring(error from 'amount=([0-9]+)') AS bigint)) AS amount
            FROM "tabError Log" WHERE method = 'optimus ai spend' AND reference_doctype = 'Optimus Session'
+             AND error LIKE '%savepoint_rollback=done%'
            GROUP BY reference_name) d ON d.reference_name = s.name
 ORDER BY other_sources;
 ```
 
+Only `savepoint_rollback=done` rows count as dropped: the counter rolled back to
+its savepoint and the outcome committed without the increment. A
+`savepoint_rollback=failed` row means the whole transaction was gone and the
+settlement was retried, so those tokens were charged on the retry.
+
 Read `other_sources`: **negative** means the session counter holds fewer tokens
-than the journal reported and no `optimus ai spend` row explains it. That is a
-lost charge: look for `optimus ai refresh result storage` rows with `outcome`
-`not committed` or `unknown` for that session, and for runs ended by a failed
-cleanup. **Zero** is a session whose AI use was all through the engine. **Above
-zero** is another source's tokens; the engine cannot tell it apart from a
-double count, so for a session you have only used through the engine, a
-positive value is a double charge. The journal also checks itself: this query
+than the journal reported and no `optimus ai spend` row explains it. Settlement
+saves the counter, the attempt and the run in one transaction, so a failed
+settlement does not cause this. Look for a spend row that was pruned (below), a
+reply whose count is above 2147483647 (the counter ignores it; the engine logs an
+`optimus ai refresh item` row with `outcome` `clamped`), a `discarded` row with
+`reason=fenced` and `tokens=` (an attempt row that was edited or deleted), or an
+overwrite of `ai_tokens_spent` by hand. **Zero** is a session whose AI use was
+all through the engine. **Above zero** is another source's tokens; the query
+cannot tell it apart from a double count, so for a session you have only used
+through the engine a positive value is a double charge.
+
+Frappe prunes the Error Log after 14 days (`default_log_clearing_doctypes`), and
+with it the spend rows and the two signal rows. The journal is never pruned.
+Reconcile within that window, or raise the Error Log retention in Log Settings.
+
+The journal also checks itself: the query below
 returns no row when every run's `tokens_reported` equals the sum of its
 attempts.
 

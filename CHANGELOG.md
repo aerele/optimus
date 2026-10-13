@@ -28,7 +28,8 @@ versions may contain breaking changes see migration notes below).
   tries, a read-back of the attempt's settled bit (unknown when it cannot be
   read), and an `outcome=` on every Error Log row; the rows say when the
   failed-outcome write recorded the tokens. Every journal transaction locks the
-  session row first and takes all its locks before its first plain read. A
+  session row first and takes its locks before its first plain read, except an
+  admission's takeover, which reads the active run and then locks it by key. A
   duplicate attempt or reservation is caught by its unique key, and the
   requester's User row is never locked. The journal's own reads take no gap
   lock; the recheck's `FOR UPDATE` read of the session's Phase 2 rows can make
@@ -71,7 +72,9 @@ versions may contain breaking changes see migration notes below).
   and the run. Two release-blocking signals are one row each, written when they
   happen: `optimus ai refresh discarded` (a paid answer was dropped because its
   attempt is stale or fenced) and `optimus ai refresh duplicate blocked` (the
-  journal stopped a second send or delivery). The runbook in
+  journal stopped a second send or delivery). A token count above 2147483647 (which
+  the session counter ignores) is logged as an `optimus ai refresh item` row before
+  the Steps display figure is clamped. The runbook in
   [docs/AI-REFRESH.md](docs/AI-REFRESH.md) maps each title to a state and gives
   a read-only query that reconciles a session's `ai_tokens_spent` with the
   journal and the `optimus ai spend` rows.
@@ -93,7 +96,8 @@ versions may contain breaking changes see migration notes below).
 ### API
 
 The engine's functions are internal (module `optimus.ai_jobs`); no whitelisted
-endpoint calls them yet.
+endpoint starts, cancels or recovers a run yet (only `api.refill_ai_suggestions`
+asks `live_run`, below).
 
 - `start_refresh(...)` answers `{"status": "queued", "refresh": <progress>}` for
   a new run, `{"status": "already_running", "refresh": <progress>}` when the
