@@ -1645,9 +1645,15 @@ def test_the_reconciliation_query_separates_a_gap_from_other_sources(sql):
 				(
 					"optimus ai spend",
 					"parent-a",
-					"optimus ai spend\nfield=ai_tokens_spent\namount=10\nTraceback",
+					"optimus ai spend\nfield=ai_tokens_spent\namount=10\nsavepoint_rollback=done\nTraceback",
 				),
 				("optimus ai refresh count", "parent-a", "optimus ai refresh count\namount=1"),
+				# the whole transaction was gone and the settlement was retried and charged
+				(
+					"optimus ai spend",
+					"parent-a",
+					"optimus ai spend\namount=25\nsavepoint_rollback=failed: OperationalError",
+				),
 				("optimus ai spend", "parent-x", "optimus ai spend\namount=999"),
 			)
 		):
@@ -1697,3 +1703,38 @@ def test_the_reconciliation_query_separates_a_gap_from_other_sources(sql):
 		primary.sql("DROP TABLE " + primary.quoted(log))
 		primary.commit()
 		del primary.tables["Error Log"]
+
+
+def test_the_active_runs_query_flags_an_expired_run_on_every_database(sql):
+	"""F-2: the runbook's first query as written on MariaDB, and its Postgres form from the
+	runbook's own comment. Epochs are seconds, as the engine stores them."""
+	primary = sql.primary
+	for run_id, session, lease, active in (
+		("r-dead", "parent-a", 5.0, "parent-a"),
+		("r-live", "parent-b", 9e10, "parent-b"),
+		("r-done", "parent-c", 0.0, None),
+	):
+		primary.insert(
+			{
+				"doctype": store.RUN,
+				"name": run_id,
+				"run_id": run_id,
+				"session_name": session,
+				"active_session": active,
+				"state": "running",
+				"lease_until": lease,
+				"deadline": 9e10,
+			}
+		)
+	primary.commit()
+	text = (_DOCS / "AI-REFRESH.md").read_text(encoding="utf-8")
+	query = _runbook_sql("active runs, and whether they have expired (run in: bench --site <site> mariadb)")
+	query = query.split(";")[0]
+	if BACKEND == "postgres":
+		now = re.search(r"--   lease_until <= (extract\(epoch from now\(\)\)) OR", text).group(1)
+		query = query.replace("UNIX_TIMESTAMP()", now).replace("`", '"')
+	for doctype, table in primary.tables.items():
+		query = query.replace("tab" + doctype, table)
+	rows = {r["name"]: bool(r["expired"]) for r in primary.sql(query.replace("%", "%%"))}
+	primary.rollback()
+	assert rows == {"r-dead": True, "r-live": False}
