@@ -257,6 +257,8 @@ Every Error Log row the engine writes has a title that starts with
 | `optimus ai refresh evidence` | The Slow Query evidence could not be read; the prompts went without index advice. |
 | `optimus ai refresh discarded` | A release-blocking signal: a paid answer was not saved because its attempt is stale or fenced. |
 | `optimus ai refresh duplicate blocked` | A release-blocking signal: the journal stopped a second send or a second delivery. |
+| `optimus ai refresh uncertain` | A call's outcome is unknown: the job timeout cut it, or a takeover, the sweep, a cancel or the worker cleanup found it still Calling. Carries `attempt` and `reason`. It is never sent again and its usage may be missing. |
+| `optimus ai refresh ended` | A run ended `interrupted` (`reason` `lease_expired`, `deadline` or `worker_interrupted`) or stopped for `no_progress`, `history_limit`, `disabled`, `phase2` or `permission`. Carries `state` and `reason`. |
 
 What state each title leaves the run in, and what to do, is in "Operating the
 engine".
@@ -394,6 +396,8 @@ WHERE session_name = '<session name>' AND state = 'uncertain';
 | `optimus ai refresh release` | `cancelled` or `interrupted`, its open call `uncertain` with unknown usage | A journal row was inconsistent and the run was released rather than hold its session; the row names which row. Inspect the Attempt rows of the run. |
 | `optimus ai refresh selection`, `optimus ai refresh evidence` | Going on | The counts were zero, or the prompts went without index advice. |
 | `optimus ai refresh discarded`, `optimus ai refresh duplicate blocked` | Going on | See the signals below. |
+| `optimus ai refresh uncertain` | The attempt named by `attempt` is `uncertain`. The run is `cancelled` (`reason` `cancelled`; the call's late reply can still settle it) or `interrupted` (the job timeout, a takeover, the sweep or the worker cleanup) | Check the provider's usage page for the call's window: its tokens may be missing from the run. A new refresh skips the item while its input is unchanged (see Uncertain above). |
+| `optimus ai refresh ended` | `interrupted`, or `stopped` with the row's `reason` | `interrupted`: see Stuck and Expired above; a run can be resumed once. `no_progress`: three slices in a row could begin no item, because its input changed before each send or the journal refused the send (a `duplicate blocked` row); `history_limit`: more than 10000 attempts to weigh; `disabled`: AI was switched off; `phase2`, `permission`: a Phase 2 run started or the requester lost access. Fix the cause, then refresh again. |
 
 ### The release-blocking signals
 

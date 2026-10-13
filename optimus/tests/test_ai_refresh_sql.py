@@ -1197,25 +1197,50 @@ def test_a_settlement_waiting_on_a_session_writer_keeps_the_answer(sql):
 	assert not sql.logged
 
 
-def test_an_admission_takes_over_an_expired_run_in_its_own_transaction(sql):
+def test_an_admission_takes_over_an_expired_run_in_its_own_transaction(sql, monkeypatch):
 	"""A2: a worker killed mid-call left its run running; the next click (here at t=400,
 	past the 311 lease) ends it interrupted with its call uncertain and admits the new run,
-	with no scheduler. #72's real counter counts the new click once and the interrupted run not at all (Q1)."""
+	with no scheduler. #72's real counter counts the new click once and the interrupted run not at all (Q1).
+	The call made uncertain and the interrupted run are one Error Log row each, written after
+	the takeover committed."""
 	claimed()
 	attempt = begun()
 	sql.primary.set_value(store.RUN, "run-a", {"completed": 2}, update_modified=False)
 	sql.primary.commit()
-	out = ai_jobs._retry_sql(lambda: admit("run-b", now=400), retry_lock_waits=False)
-	assert out["status"] == "queued" and out["taken_over"]["name"] == "run-a"
+	_http_ready(monkeypatch)
+	monkeypatch.setattr(ai_jobs, "_now", lambda: 400.0)
+	committed, probe = [], sql.connect()
+	real_log = ai_fix.log_ai_failure
+
+	def log(title, exc=None, **context):
+		# what another connection sees when the row is written: the takeover is committed
+		committed.append(probe.get_value(store.ATTEMPT, attempt["name"], "state"))
+		probe.commit()
+		return real_log(title, exc, **context)
+
+	monkeypatch.setattr(ai_fix, "log_ai_failure", log)
+	out = _click()
+	assert out["status"] == "queued"
+	run_b = out["refresh"]["run_id"]
 	assert value(sql, store.RUN, "run-a", "state") == "interrupted"
 	assert value(sql, store.RUN, "run-a", "end_reason") == "lease_expired"
 	assert value(sql, store.RUN, "run-a", "active_session") is None
 	assert value(sql, store.ATTEMPT, attempt["name"], "state") == "uncertain"
-	assert value(sql, store.RUN, "run-b", "active_session") == "parent-a"
+	assert value(sql, store.RUN, run_b, "active_session") == "parent-a"
 	assert (
 		value(sql, "Optimus Session", "parent-a", "ai_refresh_count") == 2
 	)  # each click once; the takeover adds none
-	assert not sql.logged
+	assert [(title, context) for title, _exc, context in sql.logged] == [
+		(
+			"optimus ai refresh uncertain",
+			{"docname": "parent-a", "run_id": "run-a", "attempt": attempt["name"], "reason": "lease_expired"},
+		),
+		(
+			"optimus ai refresh ended",
+			{"docname": "parent-a", "run_id": "run-a", "state": "interrupted", "reason": "lease_expired"},
+		),
+	]
+	assert committed == ["uncertain", "uncertain"]
 
 
 def test_a_late_settlement_and_a_takeover_serialize_on_the_session_row(sql, monkeypatch):
@@ -1293,9 +1318,14 @@ def test_the_sweep_skips_a_session_a_dead_transaction_holds(sql, monkeypatch):
 	assert out["db"].conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
 	assert value(sql, store.RUN, "run-b", "state") == "interrupted"
 	assert value(sql, store.RUN, "run-a", "state") == "running"
-	assert not sql.logged
+	assert [(title, context["run_id"]) for title, _exc, context in sql.logged] == [
+		("optimus ai refresh ended", "run-b")
+	]
 	assert ai_jobs.recover_pending()["interrupted"] == 1
 	assert value(sql, store.RUN, "run-a", "state") == "interrupted"
+	assert [(title, context["run_id"]) for title, _exc, context in sql.logged][1:] == [
+		("optimus ai refresh ended", "run-a")
+	]
 
 
 def _short_lock_wait(sql, seconds=1):

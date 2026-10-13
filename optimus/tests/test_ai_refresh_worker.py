@@ -886,3 +886,127 @@ def test_an_ordinary_count_logs_no_clamp_row(worker):
 	worker.tokens = 2**31 - 1
 	worker.jobs.run_ai_refresh_slice("fake-run", 0)
 	assert not [c for t, c in worker.rows if "clamped" in c.get("outcome", "")]
+
+
+# --- one row when a call becomes uncertain or a run ends abnormally -------------------------
+
+
+def _titled(worker, title):
+	return [context for t, context in worker.rows if t == title]
+
+
+def _no_open_transaction_while_logging(worker, monkeypatch):
+	"""Each row is written after the transaction that decided it ended."""
+	log = ai_fix.log_ai_failure
+	open_at = []
+
+	def checked(title, exc=None, **context):
+		open_at.append(worker.journal.db.active)
+		return log(title, exc, **context)
+
+	monkeypatch.setattr(ai_fix, "log_ai_failure", checked)
+	return open_at
+
+
+def test_a_worker_failure_after_the_send_writes_one_uncertain_row_and_one_ended_row(worker, monkeypatch):
+	worker.count = 1
+	open_at = _no_open_transaction_while_logging(worker, monkeypatch)
+
+	def outage(*a, **kw):
+		raise OSError("fake storage outage")
+
+	monkeypatch.setattr(worker.journal.mod, "settle_attempt", outage)
+	with pytest.raises(worker.jobs.RefreshSliceFailed):
+		worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	[attempt] = worker.journal.db.rows[worker.journal.mod.ATTEMPT].values()
+	assert _titled(worker, "optimus ai refresh uncertain") == [
+		{
+			"docname": "fake-session-doc",
+			"run_id": "fake-run",
+			"attempt": attempt["name"],
+			"reason": "worker_interrupted",
+		}
+	]
+	assert _titled(worker, "optimus ai refresh ended") == [
+		{
+			"docname": "fake-session-doc",
+			"run_id": "fake-run",
+			"state": "interrupted",
+			"reason": "worker_interrupted",
+		}
+	]
+	assert open_at and not any(open_at)
+
+
+def test_a_call_the_job_timeout_cut_writes_one_uncertain_row(worker, monkeypatch):
+	"""The worker settles the call as uncertain itself before the timeout stops the job; the
+	cleanup then finds no open call, so there is one uncertain row, not two."""
+	JobTimeoutException = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
+	worker.count = 1
+	open_at = _no_open_transaction_while_logging(worker, monkeypatch)
+
+	def timeout():
+		raise JobTimeoutException("fake: the job timeout fired during the provider call")
+
+	worker.send_hook = timeout
+	with pytest.raises(JobTimeoutException):
+		worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	[attempt] = worker.journal.db.rows[worker.journal.mod.ATTEMPT].values()
+	assert [(c["attempt"], c["reason"]) for c in _titled(worker, "optimus ai refresh uncertain")] == [
+		(attempt["name"], "timeout")
+	]
+	assert [c["reason"] for c in _titled(worker, "optimus ai refresh ended")] == ["worker_interrupted"]
+	assert open_at and not any(open_at)
+
+
+@pytest.mark.parametrize("reason", ["disabled", "history_limit", "phase2", "permission"])
+def test_a_run_that_stops_for_a_reason_an_operator_must_see_writes_one_ended_row(worker, monkeypatch, reason):
+	worker.count = 3
+	select = worker.jobs._next_item
+	open_at = _no_open_transaction_while_logging(worker, monkeypatch)
+
+	def next_item(run, memo):
+		if worker.calls:
+			raise worker.jobs.StopRefresh(reason)
+		return select(run, memo)
+
+	monkeypatch.setattr(worker.jobs, "_next_item", next_item)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert worker.journal.run["end_reason"] == reason
+	assert _titled(worker, "optimus ai refresh ended") == [
+		{"docname": "fake-session-doc", "run_id": "fake-run", "state": "stopped", "reason": reason}
+	]
+	assert not _titled(worker, "optimus ai refresh uncertain") and not any(open_at)
+
+
+def test_a_run_that_stops_without_progress_writes_one_ended_row(worker):
+	worker.valid = False
+	for slice_no in range(3):
+		worker.jobs.run_ai_refresh_slice("fake-run", slice_no)
+	assert worker.journal.run["end_reason"] == "no_progress"
+	assert _titled(worker, "optimus ai refresh ended") == [
+		{"docname": "fake-session-doc", "run_id": "fake-run", "state": "stopped", "reason": "no_progress"}
+	]
+
+
+@pytest.mark.parametrize("reason", ["complete", "deadline", "breaker", "not_ready"])
+def test_a_run_that_ends_normally_writes_no_ended_row(worker, monkeypatch, reason):
+	worker.count = 1
+	if reason == "deadline":
+		worker.journal.run["deadline"] = 29
+	elif reason == "breaker":
+
+		def fail():
+			raise ai_fix.AiFixError("fake provider error", kind="auth")
+
+		worker.send_hook = fail
+	elif reason == "not_ready":
+
+		def next_item(run, memo):
+			raise worker.jobs.StopRefresh("not_ready")
+
+		monkeypatch.setattr(worker.jobs, "_next_item", next_item)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert worker.journal.run["end_reason"] == reason
+	assert not _titled(worker, "optimus ai refresh ended")
+	assert not _titled(worker, "optimus ai refresh uncertain")

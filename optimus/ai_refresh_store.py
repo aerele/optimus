@@ -160,9 +160,10 @@ def _insert_new(table, name, **values):
 
 
 def _signal(signals, signal, reason, **context):
-	"""Record a release-blocking signal for the caller to log once its transaction has ended
-	(O4). ``signals`` is an optional list the caller owns and clears before each try: a try
-	that is rolled back and repeated must not leave rows behind."""
+	"""Record a row for the caller to log once its transaction has ended: a release-blocking
+	signal (``discarded``, ``duplicate_blocked``) or a call settled as ``uncertain``.
+	``signals`` is an optional list the caller owns and clears before each try: a try that is
+	rolled back and repeated must not leave rows behind."""
 	if signals is not None:
 		signals.append({"signal": signal, "reason": reason, **context})
 
@@ -636,6 +637,10 @@ def settle_attempt(
 
 		_add_ai_spend(parent["name"], tokens)
 	was_uncertain = attempt["state"] == "uncertain"
+	if final == "uncertain" and not was_uncertain:
+		# its outcome is unknown and it is never sent again: one row, so the operator can check
+		# the provider's usage (a cancel or a takeover that made it uncertain wrote its own)
+		_signal(signals, "uncertain", error_kind, attempt=attempt_id)
 	incomplete = not usage_complete
 	_update(
 		ATTEMPT,
@@ -722,7 +727,8 @@ def _mark_uncertain(run, reason, *, force=False):
 	An attempt the run cannot vouch for (missing, another run's or another worker's) raises,
 	unless ``force``. Then only this run's own Calling attempt is written; for a missing row
 	or another run's, the run itself counts an uncertain call of unknown usage. Returns True
-	when the attempt was inconsistent."""
+	when the attempt was inconsistent. The run names the Calling attempt it made uncertain in
+	``uncertain_attempt``, for the caller's one Error Log row."""
 	name = run.get("active_attempt")
 	inconsistent = False
 	if name:
@@ -740,6 +746,7 @@ def _mark_uncertain(run, reason, *, force=False):
 		if not attempt or attempt["state"] == "calling":
 			if attempt:
 				_update(ATTEMPT, attempt, state="uncertain", error_kind=reason)
+				run["uncertain_attempt"] = name
 			_update(
 				RUN,
 				run,
@@ -757,7 +764,8 @@ def _release(run, docname, *, state, reason, now):
 	cap slot, until the journal is repaired by hand. Release fails open, spend fails closed:
 	a reservation naming another session is cleared, an attempt that is not this run's is
 	never written (the run counts an uncertain call of unknown usage instead). The run comes
-	back with ``inconsistent`` naming what was wrong, for the caller's one Error Log row."""
+	back with ``inconsistent`` naming what was wrong and ``uncertain_attempt`` naming the call
+	it made uncertain, for the caller's Error Log rows (``ai_jobs._log_ending``)."""
 	problems = []
 	if run.get("active_session") not in (None, "", docname) or run.get("session_name") != docname:
 		problems.append("reservation")

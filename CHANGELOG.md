@@ -72,7 +72,11 @@ versions may contain breaking changes see migration notes below).
 - Write every engine Error Log row under a title that starts with
   `optimus ai refresh` (worker, cleanup, item, result storage, enqueue, worker
   availability, recovery, release, selection, evidence), carrying the session
-  and the run. Two release-blocking signals are one row each, written when they
+  and the run. A call that becomes uncertain (`optimus ai refresh uncertain`,
+  with the attempt and the reason) and a run that ends interrupted or stops for
+  `no_progress`, `history_limit`, `disabled`, `phase2` or `permission`
+  (`optimus ai refresh ended`) are one row each, written after the transaction
+  that decided it. Two release-blocking signals are one row each, written when they
   happen: `optimus ai refresh discarded` (a paid answer was dropped because its
   attempt is stale or fenced) and `optimus ai refresh duplicate blocked` (the
   journal stopped a second send or delivery). A token count above 2147483647 (which

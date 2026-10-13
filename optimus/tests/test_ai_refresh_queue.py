@@ -42,7 +42,11 @@ def queue(journal, monkeypatch):
 	monkeypatch.setattr(jobs, "_transaction", transaction)
 	monkeypatch.setattr(jobs, "_now", lambda: 50)
 	monkeypatch.setattr(jobs, "_call_timeout", lambda: 60)
-	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: logs.append(type(a[1]).__name__))
+	monkeypatch.setattr(
+		ai_fix,
+		"log_ai_failure",
+		lambda title, exc=None, **kw: logs.append(type(exc).__name__) if exc is not None else None,
+	)
 	# The selection counts and the Refresh flag have their own tests (test_ai_refresh_contracts).
 	monkeypatch.setattr(jobs, "_selection_counts", lambda *a, **kw: (0, 0))
 	monkeypatch.setattr(jobs, "_refresh_flag_held", lambda session_uuid: False)
@@ -437,7 +441,10 @@ def test_a_refresh_click_recovers_a_crashed_run_without_the_scheduler(admitting,
 	old = queue.journal.db.rows[queue.journal.mod.RUN]["fake-run"]
 	assert old["state"] == "interrupted" and old["end_reason"] == "lease_expired"
 	assert queue.journal.db.rows[queue.journal.mod.ATTEMPT][attempt["name"]]["state"] == "uncertain"
-	assert not rows
+	assert [(title, exc, context.get("attempt")) for title, exc, context in rows] == [
+		("optimus ai refresh uncertain", None, attempt["name"]),
+		("optimus ai refresh ended", None, None),
+	]
 
 
 def test_a_click_attaches_to_a_live_run(admitting):
@@ -454,9 +461,11 @@ def test_a_takeover_of_an_inconsistent_run_writes_one_row_naming_it(admitting, r
 	attempt = _crash(queue)
 	del queue.journal.db.rows[queue.journal.mod.ATTEMPT][attempt["name"]]
 	assert _start(queue)["status"] == "queued"
-	[(title, exc, context)] = rows
+	[(title, exc, context)] = [row for row in rows if row[0] == "optimus ai refresh release"]
 	assert title == "optimus ai refresh release" and context["run_id"] == "fake-run"
 	assert context["docname"] == "fake-session-doc" and "attempt" in str(exc)
+	# no attempt row was there to make uncertain: the release row says the call is
+	assert [row[0] for row in rows] == ["optimus ai refresh release", "optimus ai refresh ended"]
 
 
 @pytest.mark.parametrize(
@@ -536,20 +545,22 @@ def test_one_bad_row_never_stops_the_recovery_sweep(queue, monkeypatch, rows, va
 	runs = queue.journal.db.rows[queue.journal.mod.RUN]  # a rolled-back row restores the rows
 	assert runs["victim"]["state"] == "interrupted" and runs["victim"]["active_session"] is None
 	assert [kw["run_id"] for _, kw in queue.sent] == ["lost"]
+	ended = sorted(context["run_id"] for title, _, context in rows if title == "optimus ai refresh ended")
+	others = [row for row in rows if row[0] != "optimus ai refresh ended"]
 	if variant == "lock_wait":
-		assert runs["poison"]["state"] == "running" and not rows
+		assert runs["poison"]["state"] == "running" and not others and ended == ["victim"]
 		assert counts == {"interrupted": 1, "dispatched": 1, "busy": 1, "failed": 0}
 		assert events.count("poison") == 1  # NOWAIT, never retried
 	elif variant == "inconsistent":
 		assert runs["poison"]["state"] == "interrupted" and runs["poison"]["active_session"] is None
 		assert counts == {"interrupted": 2, "dispatched": 1, "busy": 0, "failed": 0}
-		[(title, exc, context)] = rows
-		assert context["run_id"] == "poison" and "attempt" in str(exc)
+		[(title, exc, context)] = others
+		assert context["run_id"] == "poison" and "attempt" in str(exc) and ended == ["poison", "victim"]
 	else:
 		assert runs["poison"]["state"] == "running"
 		assert counts == {"interrupted": 1, "dispatched": 1, "busy": 0, "failed": 1}
-		[(title, exc, context)] = rows
-		assert title == "optimus ai refresh recovery" and type(exc) is RuntimeError
+		[(title, exc, context)] = others
+		assert title == "optimus ai refresh recovery" and type(exc) is RuntimeError and ended == ["victim"]
 		assert context["run_id"] == "poison" and context["docname"] == "sess-p"
 		assert events.index("log") > max(i for i, e in enumerate(events) if e != "log")
 
@@ -583,7 +594,10 @@ def test_a_failed_candidate_read_never_stops_the_other_passes(queue, monkeypatch
 	counts = queue.jobs.recover_pending()
 	runs = queue.journal.db.rows[queue.journal.mod.RUN]
 	assert runs["victim"]["state"] == "interrupted" and len(queue.sent) == 1
-	assert counts["failed"] == 1 and [type(exc) for _, exc, _ in rows] == [RuntimeError]
+	assert counts["failed"] == 1 and [(title, type(exc)) for title, exc, _ in rows] == [
+		("optimus ai refresh ended", type(None)),
+		("optimus ai refresh recovery", RuntimeError),
+	]
 
 
 def test_an_http_admission_leaves_a_busy_dispatch_pending_without_waiting(admitting, monkeypatch, rows):
@@ -852,8 +866,9 @@ def test_a_forced_release_in_a_refused_admission_still_writes_its_row(admitting,
 	queue.jobs.frappe.conf["optimus_ai_max_active_refreshes"] = 1
 	assert _start(queue) == {"status": "refused", "reason": "site_cap"}
 	assert queue.journal.db.rows[queue.journal.mod.RUN]["fake-run"]["state"] == "interrupted"
-	[(title, exc, context)] = rows
+	[(title, exc, context)] = [row for row in rows if row[0] == "optimus ai refresh release"]
 	assert title == "optimus ai refresh release" and context["run_id"] == "fake-run"
+	assert [row[0] for row in rows] == ["optimus ai refresh release", "optimus ai refresh ended"]
 
 
 @pytest.mark.parametrize(
@@ -894,3 +909,95 @@ def test_a_click_never_re_sends_the_slice_of_an_expired_run(admitting):
 	assert out["status"] == "queued" and out["refresh"]["run_id"] != "fake-run"
 	assert [kw["run_id"] for _, kw in queue.sent] == [out["refresh"]["run_id"]]
 	assert queue.journal.run["state"] == "interrupted"
+
+
+# --- one row when a call becomes uncertain or a run ends abnormally -------------------------
+
+
+@pytest.fixture
+def ended_rows(queue, monkeypatch):
+	"""Every Error Log write as (title, context), with whether a journal transaction was open."""
+	logged = []
+
+	def log(title, exc=None, **context):
+		logged.append((title, context, queue.journal.db.active))
+
+	monkeypatch.setattr(ai_fix, "log_ai_failure", log)
+	return logged
+
+
+def _titled(logged, title):
+	return [context for t, context, *_ in logged if t == title]
+
+
+def test_a_takeover_of_a_crashed_call_writes_one_uncertain_row_and_one_ended_row(admitting, ended_rows):
+	"""A crashed worker's open call became uncertain (its usage unknown, never sent again) and
+	its run ended interrupted with no Error Log row at all. Each is one row, written after the
+	takeover committed."""
+	queue = admitting
+	attempt = _crash(queue)
+	assert _start(queue)["status"] == "queued"
+	assert _titled(ended_rows, "optimus ai refresh uncertain") == [
+		{
+			"docname": "fake-session-doc",
+			"run_id": "fake-run",
+			"attempt": attempt["name"],
+			"reason": "lease_expired",
+		}
+	]
+	assert _titled(ended_rows, "optimus ai refresh ended") == [
+		{
+			"docname": "fake-session-doc",
+			"run_id": "fake-run",
+			"state": "interrupted",
+			"reason": "lease_expired",
+		}
+	]
+	assert len(ended_rows) == 2 and not any(active for *_, active in ended_rows)
+
+
+def test_a_takeover_of_a_run_with_no_open_call_writes_only_the_ended_row(admitting, ended_rows):
+	queue = admitting
+	queue.journal.run.update(lease_until=40)  # a queued run that never reached a worker; now is 50
+	assert _start(queue)["status"] == "queued"
+	assert [t for t, *_ in ended_rows] == ["optimus ai refresh ended"]
+	assert _titled(ended_rows, "optimus ai refresh ended")[0]["reason"] == "lease_expired"
+
+
+def test_the_sweep_writes_the_rows_of_each_run_it_ends(queue, monkeypatch, ended_rows):
+	attempt = _crash(queue)
+	monkeypatch.setattr(queue.jobs.frappe, "get_all", queue.journal.db.get_all, raising=False)
+	assert queue.jobs.recover_pending()["interrupted"] == 1
+	assert _titled(ended_rows, "optimus ai refresh uncertain") == [
+		{
+			"docname": "fake-session-doc",
+			"run_id": "fake-run",
+			"attempt": attempt["name"],
+			"reason": "lease_expired",
+		}
+	]
+	assert [c["reason"] for c in _titled(ended_rows, "optimus ai refresh ended")] == ["lease_expired"]
+	assert len(ended_rows) == 2 and not any(active for *_, active in ended_rows)
+
+
+def test_a_cancel_during_a_call_writes_one_uncertain_row(queue, ended_rows):
+	"""The call in flight is uncertain until its late reply settles it; a cancel is not an
+	abnormal end, so it writes no ended row."""
+	attempt = _crash(queue, lease_until=900)
+	assert _cancel(queue)["status"] == "cancelled"
+	assert ended_rows == [
+		(
+			"optimus ai refresh uncertain",
+			{
+				"docname": "fake-session-doc",
+				"run_id": "fake-run",
+				"attempt": attempt["name"],
+				"reason": "cancelled",
+			},
+			False,
+		)
+	]
+
+
+def test_a_cancel_with_no_open_call_writes_no_row(queue, ended_rows):
+	assert _cancel(queue)["status"] == "cancelled" and ended_rows == []

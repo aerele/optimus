@@ -1827,3 +1827,58 @@ def test_a_run_id_of_140_characters_still_names_its_run(journal):
 	with journal.db.transaction():
 		_, run = journal.mod.lock_run(name, "fake-session-doc")
 	assert run["name"] == name
+
+
+def test_a_release_names_the_calling_attempt_it_made_uncertain(journal):
+	"""The caller writes one ``optimus ai refresh uncertain`` row for it, after the commit."""
+	attempt = _crashed(journal)
+	out = admit(journal, now=400)
+	assert out["taken_over"]["uncertain_attempt"] == attempt["name"]
+
+
+@pytest.mark.parametrize("before", ["uncertain", "settled", "missing"])
+def test_a_release_names_no_attempt_it_did_not_make_uncertain(journal, before):
+	attempt = _crashed(journal)
+	row = journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]
+	if before == "uncertain":
+		row["state"] = "uncertain"
+	elif before == "settled":
+		row.update(state="failed", settled=1)
+	else:
+		del journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]
+	out = admit(journal, now=400)
+	assert out["status"] == "queued" and "uncertain_attempt" not in out["taken_over"]
+
+
+def _settle_uncertain(journal, attempt, signals, now=12):
+	with journal.db.transaction():
+		return journal.mod.settle_attempt(
+			"fake-run",
+			attempt["name"],
+			docname="fake-session-doc",
+			worker_token="worker-a",
+			outcome="uncertain",
+			tokens=0,
+			usage_complete=False,
+			now=now,
+			error_kind="timeout",
+			signals=signals,
+		)
+
+
+def test_a_call_settled_as_uncertain_reports_one_uncertain_signal(journal):
+	claim(journal)
+	attempt = begin(journal)
+	signals = []
+	assert _settle_uncertain(journal, attempt, signals)
+	assert signals == [{"signal": "uncertain", "reason": "timeout", "attempt": attempt["name"]}]
+
+
+def test_a_call_already_made_uncertain_by_a_cancel_reports_no_second_signal(journal):
+	claim(journal)
+	attempt = begin(journal)
+	with journal.db.transaction():
+		journal.mod.cancel("fake-run", docname="fake-session-doc", now=12)
+	signals = []
+	assert _settle_uncertain(journal, attempt, signals)
+	assert signals == []
