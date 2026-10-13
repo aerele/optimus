@@ -370,6 +370,95 @@ def test_a_fallback_that_finds_the_outcome_already_saved_attributes_it_to_the_fi
 	assert type(exc) is OSError and context["outcome"].startswith("recorded")
 
 
+def _first_write_fails(worker, monkeypatch):
+	"""Every item's first settlement write fails with an ordinary error (not a conflict, so it
+	is not tried again); the fallback write, a fresh transaction, goes through. Returns the
+	``(outcome, error_kind)`` each fallback wrote."""
+	real = worker.journal.mod.settle_attempt
+	seen, written = set(), []
+
+	def settle(run_id, attempt_id, **kw):
+		if attempt_id not in seen:
+			seen.add(attempt_id)
+			raise OSError("fake: the first settlement write failed")
+		written.append((kw["outcome"], kw["error_kind"]))
+		return real(run_id, attempt_id, **kw)
+
+	monkeypatch.setattr(worker.journal.mod, "settle_attempt", settle)
+	return written
+
+
+def _attempt_outcomes(worker):
+	return [
+		(a["state"], a["error_kind"]) for a in worker.journal.db.rows[worker.journal.mod.ATTEMPT].values()
+	]
+
+
+def test_a_fallback_keeps_an_uncertain_call_uncertain(worker, monkeypatch):
+	"""The job timed out during the provider call, so the call's outcome is unknown. When the
+	first write of that outcome failed, the fallback recorded a definite failure, which a
+	resume or a new refresh would then send again."""
+	JobTimeoutException = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
+	worker.count = 1
+
+	def timeout():
+		raise JobTimeoutException("fake: the job timeout fired during the provider call")
+
+	worker.send_hook = timeout
+	written = _first_write_fails(worker, monkeypatch)
+	with pytest.raises(JobTimeoutException):
+		worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	run = worker.journal.db.rows[worker.journal.mod.RUN]["fake-run"]
+	assert written == [("uncertain", "timeout")]
+	assert _attempt_outcomes(worker) == [("uncertain", "timeout")]
+	assert run["uncertain"] == 1 and run["failed"] == 0 and run["usage_incomplete"] == 1
+
+
+@pytest.mark.parametrize(
+	"kind,state", [("context", "failed"), ("refused", "failed"), ("not_eligible", "skipped")]
+)
+def test_a_fallback_keeps_the_kind_of_a_per_prompt_failure_or_a_skip(worker, monkeypatch, kind, state):
+	"""Q2: a per-prompt failure is recorded under its own kind and never feeds the three-in-a-
+	row stop, and a skip stays a skip. The fallback relabelled each as an ``internal``
+	failure, so three of them stopped the run."""
+	worker.count = 3
+
+	def fail():
+		raise ai_fix.AiFixError("fake provider error", kind=kind)
+
+	worker.send_hook = fail
+	written = _first_write_fails(worker, monkeypatch)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	run = worker.journal.db.rows[worker.journal.mod.RUN]["fake-run"]
+	assert written == [(state, kind)] * 3 and _attempt_outcomes(worker) == [(state, kind)] * 3
+	assert len(worker.calls) == 3 and run["end_reason"] == "complete" and not run.get("breaker_kind")
+	assert run["consecutive_failures"] == 0
+
+
+@pytest.mark.parametrize("kind", sorted(ai_fix.AI_FATAL_KINDS))
+def test_a_fallback_keeps_a_fatal_kind_stopping_the_run_at_once(worker, monkeypatch, kind):
+	worker.count = 5
+
+	def fail():
+		raise ai_fix.AiFixError("fake provider error", kind=kind)
+
+	worker.send_hook = fail
+	written = _first_write_fails(worker, monkeypatch)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	run = worker.journal.db.rows[worker.journal.mod.RUN]["fake-run"]
+	assert written == [("failed", kind)] and len(worker.calls) == 1
+	assert run["end_reason"] == "breaker" and run["breaker_kind"] == kind
+
+
+def test_a_fallback_after_a_successful_reply_records_a_failure_without_the_answer(worker, monkeypatch):
+	worker.count = 1
+	written = _first_write_fails(worker, monkeypatch)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	run = worker.journal.db.rows[worker.journal.mod.RUN]["fake-run"]
+	assert written == [("failed", "internal")] and _attempt_outcomes(worker) == [("failed", "internal")]
+	assert not worker.written and run["completed"] == 0 and run["tokens_reported"] == 7
+
+
 def test_worker_uses_the_capture_suppression_flag_and_restores_it(worker):
 	seen = []
 	worker.send_hook = lambda: seen.append(getattr(worker.jobs.frappe.local, "optimus_analyzing", False))
