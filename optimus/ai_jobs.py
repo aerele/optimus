@@ -218,6 +218,7 @@ def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
 					ai_fix.log_ai_failure(
 						"optimus ai refresh cleanup", cleanup_error, docname=docname, run_id=run_id
 					)
+				_log_ending(released, docname)  # the interrupted run, and the call it left uncertain
 				_transaction(lambda: None)  # preserve scrubbed logs before RQ rolls back
 		except Exception as exc:
 			log_failure_type = type(exc).__name__
@@ -435,24 +436,28 @@ def _drive(run_id, docname, slice_no, worker_token):
 		if storage_guard.pending():
 			item = result = None
 			raise storage_guard.interrupt()
+		# before a pending job timeout stops the job: the call it cut is one ``uncertain`` row
+		_log_signals(signals, run_id, docname)
 		if guard.pending():
 			item = result = failure = None
 			raise guard.interrupt()
-		_log_signals(signals, run_id, docname)
 		items += 1
 
 
 def _log_signals(signals, run_id, docname):
-	"""Write one Error Log row for each release-blocking signal the store recorded, after the
-	transaction that recorded it has ended (O4). ``discarded``: an answer was dropped because
-	its attempt is stale or fenced. ``duplicate_blocked``: the journal stopped a second send
-	or a second delivery. Each row carries the session, the run and the signal's own context
-	(``attempt``, ``kind``, ``slice_no``, ``reason``). Never raises."""
+	"""Write one Error Log row for each row the store recorded, after the transaction that
+	recorded it has ended (O4). ``discarded``: an answer was dropped because its attempt is
+	stale or fenced. ``duplicate_blocked``: the journal stopped a second send or a second
+	delivery. Each row carries the session, the run and the signal's own context
+	(``attempt``, ``kind``, ``slice_no``, ``reason``). ``uncertain``: a call was settled with
+	an unknown outcome (``_log_uncertain``). Never raises."""
 	if not signals:
 		return
 	for entry in signals:
 		if entry["signal"] == "discarded":
 			ai_fix.log_ai_failure("optimus ai refresh discarded", docname=docname, run_id=run_id, **entry)
+		elif entry["signal"] == "uncertain":
+			_log_uncertain(docname, run_id, entry["attempt"], entry["reason"])
 		else:
 			ai_fix.log_ai_failure(
 				"optimus ai refresh duplicate blocked", docname=docname, run_id=run_id, **entry
@@ -645,9 +650,11 @@ def _begin_attempt(run, item, *, run_id, docname, worker_token, signals=None):
 
 
 def _end(run_id, docname, worker_token, reason):
-	return _retry_sql(
+	run = _retry_sql(
 		lambda: store.finish(run_id, docname=docname, worker_token=worker_token, now=_now(), reason=reason)
 	)
+	_note_ending(run, docname)
+	return run
 
 
 def _yield(run_id, docname, worker_token, *, progressed=True):
@@ -658,6 +665,8 @@ def _yield(run_id, docname, worker_token, *, progressed=True):
 	)
 	if run and run["state"] == "queued":
 		_dispatch_pending(run_id, docname)
+	else:
+		_note_ending(run, docname)
 
 
 def _check_run(run, *, locked=False):
@@ -1214,7 +1223,7 @@ def start_refresh(
 		retry_lock_waits=False,
 	)
 	# A takeover commits with every answer, a refusal included (F3).
-	_note_released(out.pop("taken_over", None), docname)
+	_note_ending(out.pop("taken_over", None), docname)
 	if out["status"] == "already_running" and not out.get("run"):
 		# The unique reservation refused the insert, but that run was not visible to the
 		# admission's snapshot (Postgres): read it again in a fresh transaction.
@@ -1300,18 +1309,57 @@ def _resend_pending(run, docname, now):
 	_isolated(lambda: _dispatch_pending(run["name"], docname, nowait=True))
 
 
-def _note_released(run, docname):
-	"""One Error Log row for a run force-released with an inconsistent journal row (E2)."""
-	if not run or not run.get("inconsistent"):
-		return
+# End reasons an operator must see: one ``optimus ai refresh ended`` row each, as for every run
+# that ends ``interrupted``. A run that completed, spent its time, stopped on its breaker or on
+# uncertain items, lost its Ready session or was cancelled writes none.
+_LOGGED_END_REASONS = frozenset({"no_progress", "history_limit", "disabled", "phase2", "permission"})
+
+
+def _log_uncertain(docname, run_id, attempt, reason):
+	"""One ``optimus ai refresh uncertain`` row: a call whose outcome is unknown, so it is never
+	sent again and its usage may be missing from the run (check the provider's usage)."""
 	ai_fix.log_ai_failure(
-		"optimus ai refresh release",
-		store.JournalUnavailable(f"Refresh journal {run['inconsistent']} is inconsistent"),
-		docname=docname,
-		run_id=run["name"],
-		outcome="released; its open call is uncertain and its usage unknown",
+		"optimus ai refresh uncertain", docname=docname, run_id=run_id, attempt=attempt, reason=reason
 	)
-	_transaction(lambda: None)
+
+
+def _log_ending(run, docname):
+	"""The Error Log rows of a run that a committed transaction ended or released, written
+	after it: ``optimus ai refresh release`` when an inconsistent journal row was
+	force-released, ``optimus ai refresh uncertain`` when its open Calling attempt became
+	uncertain, and ``optimus ai refresh ended`` when it ended ``interrupted`` or for a reason
+	in ``_LOGGED_END_REASONS``. True when a row was written, for the caller to commit."""
+	if not run:
+		return False
+	written = False
+	if run.get("inconsistent"):
+		ai_fix.log_ai_failure(
+			"optimus ai refresh release",
+			store.JournalUnavailable(f"Refresh journal {run['inconsistent']} is inconsistent"),
+			docname=docname,
+			run_id=run["name"],
+			outcome="released; its open call is uncertain and its usage unknown",
+		)
+		written = True
+	if run.get("uncertain_attempt"):
+		_log_uncertain(docname, run["name"], run["uncertain_attempt"], run.get("end_reason"))
+		written = True
+	if run.get("state") == "interrupted" or run.get("end_reason") in _LOGGED_END_REASONS:
+		ai_fix.log_ai_failure(
+			"optimus ai refresh ended",
+			docname=docname,
+			run_id=run["name"],
+			state=run.get("state"),
+			reason=run.get("end_reason"),
+		)
+		written = True
+	return written
+
+
+def _note_ending(run, docname):
+	"""``_log_ending``, then keep its rows."""
+	if _log_ending(run, docname):
+		_transaction(lambda: None)
 
 
 def recover_pending():
@@ -1327,12 +1375,13 @@ def recover_pending():
 	with NOWAIT, so a row a dead or slow transaction holds is skipped at once (``busy``; the
 	next sweep or admission tries again) instead of stalling the sweep (R1). A failing row
 	or candidate read never stops the rest (O1): each failure is logged once, after the
-	passes, with its ``run_id``; a force-released inconsistent run gets one row too.
+	passes, with its ``run_id``. Each run it ends gets its rows then too (``_log_ending``):
+	``ended``, ``uncertain`` for its open call, ``release`` when it was inconsistent.
 
 	Returns the counts: ``interrupted``, ``dispatched``, ``busy`` and ``failed``."""
 	now = _now()
 	counts = dict.fromkeys(("interrupted", "dispatched", "busy", "failed"), 0)
-	failures, released = [], []
+	failures, ended = [], []
 	active = ["in", sorted(store.ACTIVE)]
 	passes = (
 		("lease_expired", {"state": active, "lease_until": ["<=", now]}, "lease_until asc"),
@@ -1378,19 +1427,20 @@ def recover_pending():
 					outcome = "busy"
 				else:
 					outcome = "interrupted" if run else None
-				if run and run.get("inconsistent"):
-					released.append((run, session))
+				if run:
+					ended.append((run, session))
 			if failure is not None:
 				failures.append((name, session, failure))
 			elif outcome:
 				counts[outcome] += 1
 	failure = None
 	counts["failed"] = len(failures)
-	for run, session in released:
-		_note_released(run, session)
+	written = False
+	for run, session in ended:
+		written = _log_ending(run, session) or written
 	for run_id, session, exc in failures:
 		ai_fix.log_ai_failure("optimus ai refresh recovery", exc, docname=session, run_id=run_id)
-	if failures:
+	if written or failures:
 		failures = None
 		_transaction(lambda: None)
 	return counts
@@ -1449,7 +1499,7 @@ def cancel_refresh(run_id, *, docname, requested_by):
 		return {"status": "refused", "reason": "busy"}
 	if not run:
 		return {"status": "refused", "reason": "not_running"}
-	_note_released(run, docname)
+	_note_ending(run, docname)
 	return {"status": "cancelled", "refresh": public_state(run)}
 
 
