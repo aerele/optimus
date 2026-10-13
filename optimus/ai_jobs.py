@@ -411,7 +411,6 @@ def _drive(run_id, docname, slice_no, worker_token):
 				item=item.kind,
 			)
 		failure = None
-		_transaction(lambda: None)  # close any provider/logging transaction
 
 		def settle(*, final=outcome, persist=True, error_kind=kind):
 			signals.clear()
@@ -447,6 +446,7 @@ def _drive(run_id, docname, slice_no, worker_token):
 		storage_guard = safe_call.InterruptGuard(base=True)
 		try:
 			with storage_guard:
+				_transaction(lambda: None)  # close any provider/logging transaction
 				save(
 					settle,
 					fallback=lambda: settle(
@@ -456,8 +456,9 @@ def _drive(run_id, docname, slice_no, worker_token):
 					),
 				)
 		except Exception as exc:
-			# Neither write saved an outcome: the worker cleanup writes its rows, then raises the
-			# job timeout that cut the call, when one did, instead of this error.
+			# No outcome was saved (that commit or both writes failed): the worker cleanup writes
+			# its rows, then raises the job timeout that cut the call, when one did, instead of
+			# this error.
 			if guard.pending():
 				safe_call.best_effort(lambda failure=exc: setattr(failure, _CUT_ATTR, guard), None)
 			raise
