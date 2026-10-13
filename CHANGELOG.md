@@ -26,8 +26,10 @@ versions may contain breaking changes see migration notes below).
   `frappe.QueryDeadlockError` / `QueryTimeoutError`, is retried as a whole short
   transaction, at most three in all. Settlement follows `_write_ai_answer`: three
   tries, a read-back of the attempt's settled bit (unknown when it cannot be
-  read), and an `outcome=` on every Error Log row; the rows say when the
-  failed-outcome write recorded the tokens. Every journal transaction locks the
+  read), and an `outcome=` on every Error Log row; the rows say when the second
+  write recorded the tokens. That write keeps the outcome and its kind (only an
+  answer that could not be saved becomes a failure), so an uncertain call stays
+  uncertain and a fatal kind still stops the run. Every journal transaction locks the
   session row first and takes its locks before its first plain read, except an
   admission's takeover, which reads the active run and then locks it by key. A
   duplicate attempt or reservation is caught by its unique key, and the
@@ -57,7 +59,8 @@ versions may contain breaking changes see migration notes below).
 - Distinguish known zero token usage (a refusal before any request, proven by
   the call count) from missing or contradictory usage, keep reported usage on
   processing failures, and keep RQ timeouts fresh, including when worker
-  cleanup fails.
+  cleanup fails. A timeout that cuts an outcome write leaves one row with the
+  reply's known tokens.
 - Follow #72's contracts. The refresh is counted once, when it is accepted (a
   resume is a click), and no ending counts it. Only `ai_fix.AI_FATAL_KINDS` stop
   a run at once; a rate limit joins the three-in-a-row streak; `context` and

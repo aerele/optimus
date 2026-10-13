@@ -110,15 +110,21 @@ locking reads, and its `settled` bit makes a retry safe. After any other
 failure, the `settled` bit is read again in a fresh query. When it is set, the
 outcome is saved even though the COMMIT reported an error. When it cannot be
 read, the outcome is logged as unknown: its tokens may well be recorded, as #72
-says. When the answer's write did not commit, a second write records the
-outcome as failed with the known tokens and without the answer. Every row is
+says. When the first write did not commit, a second write records the outcome
+with the known tokens and without the answer: an answer that could not be saved
+becomes a failure, and any other outcome (a failure, a skip, an uncertain call)
+is written again as it was, with its kind, so an uncertain call stays uncertain
+and a fatal kind still stops the run. Every row is
 written once both writes have ended, and each carries an `outcome=`. That
 includes the counter's own rows and each write's failure, with `tries` and
 `tokens`. When the second write recorded the tokens, the first write's rows say
 `recorded by fallback`. A reconciler reading the Error Log therefore never adds
 those tokens twice. When both writes fail, the error reaches the worker
 cleanup, which makes the attempt uncertain; its last row carries `tokens=` and
-`outcome=` too.
+`outcome=` too. When the RQ job timeout fires during the writes, before an
+outcome is saved, one `optimus ai refresh result storage` row carries `tokens=`
+and `outcome=unknown: the job timed out during the outcome write; the attempt
+is now uncertain`, and the timeout still stops the job.
 
 RQ delivery is asynchronous, after commit, through Frappe's original enqueue
 function. Each run/slice has a deterministic job ID; SQL claim is the execution
@@ -381,7 +387,7 @@ WHERE session_name = '<session name>' AND state = 'uncertain';
 | `optimus ai refresh worker` | `interrupted` with `end_reason` `worker_interrupted`, its open call `uncertain` (a failure before the claim leaves it `queued`; when the cleanup itself failed, see `cleanup`) | Read the row for the cause. The row's `tokens` and `outcome` say whether the call's usage is recorded. |
 | `optimus ai refresh cleanup` | Still `running` with its call open until the lease expires | Wait for the lease, or click Refresh: the takeover ends it. |
 | `optimus ai refresh item` | Going on, unless this is the third in a row or a fatal kind | The row's `kind`, `fatal` and `hint` say what to fix (AI-FIXING section 6.5). |
-| `optimus ai refresh result storage` | Going on, or interrupted when both writes failed | Its `outcome` says: `committed on try N`, `committed: the error came after the COMMIT ...` or `recorded: ...` (the outcome and its tokens are saved; the write's error is still logged), `recorded by fallback` (the tokens are saved, the answer is not), `not committed after try N`, or `unknown` (the tokens may well be recorded). |
+| `optimus ai refresh result storage` | Going on, or interrupted when both writes failed | Its `outcome` says: `committed on try N`, `committed: the error came after the COMMIT ...` or `recorded: ...` (the outcome and its tokens are saved; the write's error is still logged), `recorded by fallback` (the tokens are saved, the answer is not), `not committed after try N`, or `unknown` (the tokens may well be recorded; `unknown: the job timed out during the outcome write ...` when the job timeout cut the write). |
 | `optimus ai refresh enqueue` | `queued`, intent pending | Redis or the queue is down; the intent is sent again by the next click or sweep. |
 | `optimus ai refresh worker availability` | None started | New admissions answer `queue_unavailable` until Redis answers. |
 | `optimus ai refresh recovery` | Other rows of the sweep were done | The row names the run; the next sweep or admission tries again. |

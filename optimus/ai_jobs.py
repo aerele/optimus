@@ -419,10 +419,19 @@ def _drive(run_id, docname, slice_no, worker_token):
 			)
 
 		# A successful provider reply can fail local validation/storage. The fallback then
-		# saves its known cost and a failed outcome without trying that answer again.
+		# saves its known cost and a failed outcome without trying that answer again. Any
+		# other outcome is saved as it was: an uncertain call stays uncertain (never sent
+		# again), a fatal kind still stops the run and a skip stays a skip.
 		storage_guard = safe_call.InterruptGuard(base=True)
 		with storage_guard:
-			save(settle, fallback=lambda: settle(final="failed", persist=False, error_kind="internal"))
+			save(
+				settle,
+				fallback=lambda: settle(
+					final="failed" if outcome == "succeeded" else outcome,
+					persist=False,
+					error_kind=kind or "internal",
+				),
+			)
 		if storage_guard.pending():
 			item = result = None
 			raise storage_guard.interrupt()
@@ -457,6 +466,7 @@ _UNSETTLED_ATTR = "_optimus_refresh_unsettled"
 _COMMITTED_AFTER_ERROR = "committed: the error came after the COMMIT; the outcome and its tokens are saved"
 _RECORDED = "recorded: the attempt's outcome and its tokens are saved (read back after the error)"
 _UNKNOWN = "unknown: the outcome could not be read back after the error, so these tokens may well be recorded"
+_TIMED_OUT = "unknown: the job timed out during the outcome write; the attempt is now uncertain"
 
 
 def _settle(operation, *, run_id, docname, attempt_id, tokens, session_uuid=None, fallback=None):
@@ -480,8 +490,9 @@ def _settle(operation, *, run_id, docname, attempt_id, tokens, session_uuid=None
 	  after the COMMIT, from an ``after_commit`` callback or a lost reply), so the write counts
 	  as done and the error is logged with ``outcome=committed ...``. When it cannot be read,
 	  the outcome is unknown and its tokens may well be recorded (#72's wording).
-	- When the write did not commit and a ``fallback`` is given (the failed-outcome write:
-	  the known usage without the answer), it runs next, with the same discipline.
+	- When the write did not commit and a ``fallback`` is given (the outcome and the known
+	  usage without the answer: a reply's outcome becomes a failure, any other outcome and
+	  its kind are kept), it runs next, with the same discipline.
 	- Every row is written once both writes ended, with an ``outcome=``: the session
 	  counter's own rows (it logs one, ``savepoint_rollback=failed``, when the whole
 	  transaction is gone) and each write's failure (with ``tries`` and ``tokens``). When the
@@ -492,38 +503,54 @@ def _settle(operation, *, run_id, docname, attempt_id, tokens, session_uuid=None
 	  log-and-continue (#72, D2): a statement-level counter failure is logged by the counter
 	  and the write still commits, so the journal's ``tokens_reported`` is the source for
 	  reconciling the session's ``ai_tokens_spent``.
+	- An RQ job timeout during the writes, before an outcome is saved, writes one row with
+	  ``tokens`` and ``outcome=unknown: the job timed out during the outcome write ...``,
+	  after the ``try``, and leaves as a fresh instance.
 
 	An RQ job timeout leaves as a fresh instance. Returns True once an outcome is saved."""
 	reference = {"session_uuid": session_uuid, "docname": docname, "run_id": run_id, "attempt": attempt_id}
-	_result, error, logged, tries, settled = _write_outcome(operation, attempt_id)
-	if error is None or settled is True:
-		rows = _rows(logged, error, f"committed on try {tries}", error_outcome=_COMMITTED_AFTER_ERROR)
-		raised = None
-	elif fallback is None:
-		rows = _rows(logged, error, _failed(settled, tries), tries=tries, tokens=tokens)
-		raised, unsettled = error, _failed(settled, tries)
-	else:
-		fb_result, fb_error, fb_logged, fb_tries, fb_settled = _write_outcome(fallback, attempt_id)
-		if fb_error is None and fb_result:
-			# The failed-outcome write recorded the tokens: the answer's write did not commit.
-			first = f"not committed after try {tries}; recorded by fallback"
-			rows = _rows(logged, error, first, tries=tries, tokens=tokens)
-			rows += _rows(fb_logged, None, f"committed on try {fb_tries}")
-			raised = None
+	rows, raised, unsettled = (), None, None
+	guard = safe_call.InterruptGuard(base=True)
+	with guard:
+		_result, error, logged, tries, settled = _write_outcome(operation, attempt_id)
+		if error is None or settled is True:
+			rows = _rows(logged, error, f"committed on try {tries}", error_outcome=_COMMITTED_AFTER_ERROR)
+		elif fallback is None:
+			rows = _rows(logged, error, _failed(settled, tries), tries=tries, tokens=tokens)
+			raised, unsettled = error, _failed(settled, tries)
 		else:
-			# A no-op fallback (the attempt was already settled) or a failed one: the state
-			# read back now tells whether the outcome and its tokens are saved.
-			final = _attempt_settled(attempt_id) if fb_error is None else fb_settled
-			if final is True:
-				rows = _rows(logged, error, _RECORDED, tokens=tokens) + _rows(fb_logged, fb_error, _RECORDED)
-				raised = None
+			fb_result, fb_error, fb_logged, fb_tries, fb_settled = _write_outcome(fallback, attempt_id)
+			if fb_error is None and fb_result:
+				# The fallback recorded the outcome and the tokens: the first write did not commit.
+				first = f"not committed after try {tries}; recorded by fallback"
+				rows = _rows(logged, error, first, tries=tries, tokens=tokens)
+				rows += _rows(fb_logged, None, f"committed on try {fb_tries}")
 			else:
-				rows = _rows(logged, error, _failed(final, tries), tries=tries, tokens=tokens)
-				rows += _rows(fb_logged, fb_error, _failed(final, fb_tries), tries=fb_tries, tokens=tokens)
-				raised = fb_error if fb_error is not None else error
-				unsettled = _failed(final, fb_tries if fb_error is not None else tries)
-		fb_error = fb_logged = None
-	error = logged = None
+				# A no-op fallback (the attempt was already settled) or a failed one: the state
+				# read back now tells whether the outcome and its tokens are saved.
+				final = _attempt_settled(attempt_id) if fb_error is None else fb_settled
+				if final is True:
+					rows = _rows(logged, error, _RECORDED, tokens=tokens)
+					rows += _rows(fb_logged, fb_error, _RECORDED)
+				else:
+					rows = _rows(logged, error, _failed(final, tries), tries=tries, tokens=tokens)
+					rows += _rows(
+						fb_logged, fb_error, _failed(final, fb_tries), tries=fb_tries, tokens=tokens
+					)
+					raised = fb_error if fb_error is not None else error
+					unsettled = _failed(final, fb_tries if fb_error is not None else tries)
+			fb_error = fb_logged = None
+		error = logged = None
+	if guard.pending():
+		# The job timed out before an outcome was saved (a write, a retry or a read-back waited
+		# on locks): the worker cleanup has no failure to carry the reply's known tokens, so
+		# this one row does. The cleanup then makes the open attempt uncertain.
+		rows = raised = error = logged = fb_error = fb_logged = None
+		ai_fix.log_ai_failure(
+			"optimus ai refresh result storage", **reference, tokens=tokens, outcome=_TIMED_OUT
+		)
+		safe_call.best_effort(lambda: _transaction(lambda: None), None)
+		raise guard.interrupt()
 	for exc, context in rows:
 		ai_fix.log_ai_failure("optimus ai refresh result storage", exc, **reference, **context)
 	rows = None
