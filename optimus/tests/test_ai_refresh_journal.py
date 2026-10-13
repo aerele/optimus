@@ -30,6 +30,8 @@ UNIQUE = {
 class Database:
 	"""Transactional rows; lock calls are observed, never treated as no-ops."""
 
+	db_type = "mariadb"  # ``frappe.db.db_type``; a test sets "postgres"
+
 	def __init__(self):
 		self.rows = {
 			"Optimus Session": {
@@ -46,11 +48,13 @@ class Database:
 		self.calls = []  # every read: (table, name or filters, locking)
 		self.duplicates = 0
 		self.active = False
+		self.began = 0  # the index in ``calls`` where the live transaction began
 
 	@contextmanager
 	def transaction(self):
 		assert not self.active
 		self.active = True
+		self.began = len(self.calls)
 		before = deepcopy(self.rows)
 		try:
 			yield
@@ -82,6 +86,13 @@ class Database:
 	def set_value(self, table, name, values, *, update_modified=False):
 		assert self.active
 		self.rows[table][name].update(values)
+
+	def sql(self, query, values=()):
+		"""A statement that returns no rows, recorded as ``("SQL", (query, values), first)``:
+		``first`` when it is the first statement of its transaction."""
+		assert self.active, "a statement needs a live transaction"
+		self.calls.append(("SQL", (query, tuple(values)), len(self.calls) == self.began))
+		return []
 
 	def insert(self, values):
 		assert self.active

@@ -161,6 +161,7 @@ class SQLDatabase:
 
 	def __init__(self, connection, tables, backend):
 		self.connection, self.tables, self.backend = connection, tables, backend
+		self.db_type = backend  # ``frappe.db.db_type``
 		self.conflicts = []  # the driver code of every failed statement
 
 	def quoted(self, value):
@@ -1144,28 +1145,53 @@ def test_completion_and_nullable_reservation_allow_a_later_run(sql):
 	assert value(sql, store.RUN, "run-b", "active_session") == "parent-a"
 
 
+def _bounded_contender(sql, monkeypatch, seconds=1):
+	"""A connection for one HTTP request whose row lock waits end after ``seconds``. On MariaDB
+	that is the server's ``innodb_lock_wait_timeout``, set on this connection to stand in for
+	the server's value. On Postgres the connection is left as Frappe leaves it (``lock_timeout``
+	0: no limit) and the bound is the engine's own (``HTTP_LOCK_WAIT_SECONDS``)."""
+	contender = sql.connect()
+	if BACKEND == "mariadb":
+		contender.sql(f"SET SESSION innodb_lock_wait_timeout={seconds}")
+	else:
+		monkeypatch.setattr(ai_jobs, "HTTP_LOCK_WAIT_SECONDS", seconds)
+	contender.commit()
+	return contender
+
+
+def _held_session(sql, release_after=20):
+	"""A connection holding the session row's lock. A request with no lock bound would wait for
+	it for ever on Postgres, so the holder lets go after ``release_after`` seconds: such a
+	request then fails its test instead of hanging the suite (``_release`` ends the hold)."""
+	writer = sql.connect()
+	writer.get_value("Optimus Session", "parent-a", "status", for_update=True)
+	writer.release = threading.Timer(release_after, writer.commit)
+	writer.release.start()
+	return writer
+
+
+def _release(writer):
+	writer.release.cancel()
+	writer.commit()
+
+
 def test_an_http_admission_waits_for_a_held_session_row_once_then_answers_busy(sql, monkeypatch):
-	"""F-5: a user refresh blocked on its session row waits one lock wait timeout, then
-	answers busy without a second attempt, so a web request never outlives the server's
-	timeout on retries. The wait is shortened to one second on this connection."""
+	"""A user refresh blocked on its session row waits one lock wait timeout, then answers busy
+	without a second attempt, so a web request never outlives the server's timeout on retries.
+	The wait is shortened to one second."""
 	monkeypatch.setattr(ai_jobs, "_check_run", lambda run, **kw: None)
 	monkeypatch.setattr(ai_jobs, "_workers_listening", lambda docname=None: True)
 	monkeypatch.setattr(ai_jobs, "_dispatch_pending", lambda run_id, docname, **kw: True)
 	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: True)
-	writer = sql.connect()
-	writer.get_value("Optimus Session", "parent-a", "status", for_update=True)
-	contender = sql.connect()
-	contender.sql(
-		"SET SESSION innodb_lock_wait_timeout=1" if BACKEND == "mariadb" else "SET lock_timeout = '1s'"
-	)
-	contender.commit()
+	writer = _held_session(sql)
+	contender = _bounded_contender(sql, monkeypatch)
 	with sql.using(contender):
 		out = ai_jobs.start_refresh(
 			docname="parent-a", session_uuid="fake-parent-a", requested_by="fake-user"
 		)
+	_release(writer)
 	assert out == {"status": "refused", "reason": "busy"}
 	assert contender.conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
-	writer.commit()
 	assert value(sql, store.RUN, "run-a", "name") is None
 
 
@@ -1328,29 +1354,112 @@ def test_the_sweep_skips_a_session_a_dead_transaction_holds(sql, monkeypatch):
 	]
 
 
-def _short_lock_wait(sql, seconds=1):
-	contender = sql.connect()
-	contender.sql(
-		f"SET SESSION innodb_lock_wait_timeout={seconds}"
-		if BACKEND == "mariadb"
-		else f"SET lock_timeout = '{seconds}s'"
-	)
-	contender.commit()
-	return contender
-
-
-def test_an_http_cancel_waits_for_a_held_session_row_once_then_answers_busy(sql):
-	"""C1: the cancel endpoint's wait is bounded by one lock wait timeout, like admission."""
+def test_an_http_cancel_waits_for_a_held_session_row_once_then_answers_busy(sql, monkeypatch):
+	"""The cancel endpoint's wait is bounded by one lock wait timeout, like admission."""
 	claimed()
-	writer = sql.connect()
-	writer.get_value("Optimus Session", "parent-a", "status", for_update=True)
-	contender = _short_lock_wait(sql)
+	writer = _held_session(sql)
+	contender = _bounded_contender(sql, monkeypatch)
 	with sql.using(contender):
 		out = ai_jobs.cancel_refresh("run-a", docname="parent-a", requested_by="fake-user")
+	_release(writer)
 	assert out == {"status": "refused", "reason": "busy"}
 	assert contender.conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
-	writer.commit()
 	assert value(sql, store.RUN, "run-a", "state") == "running"
+
+
+def _recording(db):
+	"""Every statement ``db`` runs, with its commits as "COMMIT", in order."""
+	statements = []
+	run, commit = db.sql, db.commit
+
+	def recorded(query, values=()):
+		statements.append(query)
+		return run(query, values)
+
+	def committed():
+		statements.append("COMMIT")
+		commit()
+
+	db.sql, db.commit = recorded, committed
+	return statements
+
+
+@pytest.mark.parametrize("path", ["click", "cancel"])
+def test_an_http_request_on_a_held_session_row_waits_once_and_leaves_nothing_waiting(sql, monkeypatch, path):
+	"""Postgres waits for a row lock for as long as it takes unless ``lock_timeout`` is set, and
+	Frappe sets none: a click or a cancel on a session row another transaction held waited until
+	that transaction ended, or until the web server killed the request while its backend went on
+	waiting. The admission and the cancellation now bound their own wait on Postgres, set first
+	in their transaction (``SET LOCAL``): the request answers busy, no backend is left waiting
+	for the row, and the connection keeps its own setting. MariaDB keeps the server's timeout
+	and gets no SET."""
+	_http_ready(monkeypatch)
+	if path == "cancel":
+		claimed()
+	writer = sql.connect()
+	writer.get_value("Optimus Session", "parent-a", "status", for_update=True)
+	contender = _bounded_contender(sql, monkeypatch)
+	statements = _recording(contender)
+	out = {}
+
+	def request():
+		sql.facade.db = contender
+		try:
+			if path == "click":
+				out["value"] = _click()
+			else:
+				out["value"] = ai_jobs.cancel_refresh("run-a", docname="parent-a", requested_by="fake-user")
+		except Exception as exc:
+			out["error"] = exc
+
+	thread = threading.Thread(target=request, name=path)
+	thread.start()
+	thread.join(15)
+	waiting = thread.is_alive()
+	waiters = _lock_waiters(sql)  # the writer still holds the row
+	writer.commit()
+	thread.join(30)
+	assert not waiting, "the request still waited for the session row after 15 s"
+	assert out == {"value": {"status": "refused", "reason": "busy"}}
+	assert contender.conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
+	assert waiters == 0
+	sets = [i for i, query in enumerate(statements) if query.upper().startswith("SET")]
+	if BACKEND == "mariadb":
+		assert sets == []
+	else:
+		[i] = sets
+		assert statements[i] == "SET LOCAL lock_timeout = %s" and statements[i - 1] == "COMMIT"
+		assert "FOR UPDATE" in statements[i + 1]
+		assert contender.table("Optimus Session") in statements[i + 1]
+		assert contender.sql("SHOW lock_timeout")[0]["lock_timeout"] == "0"
+	contender.commit()
+
+
+def test_the_lock_bound_opens_no_read_view_before_the_session_lock(sql, monkeypatch):
+	"""``SET`` takes no snapshot on Postgres, so the session lock stays the admission's first
+	read: a change committed to the session row between the two is no serialization failure
+	(40001). MariaDB gets no SET."""
+	_http_ready(monkeypatch)
+	contender, writer = sql.connect(), sql.connect()
+	run = contender.sql
+	sets = []
+
+	def change_after_a_set(query, values=()):
+		out = run(query, values)
+		if query.upper().startswith("SET"):
+			sets.append(query)
+			writer.set_value("Optimus Session", "parent-a", {"title": "changed after the SET"})
+			writer.commit()
+		return out
+
+	contender.sql = change_after_a_set
+	with sql.using(contender):
+		out = _click()
+	assert out["status"] == "queued" and contender.conflicts == []
+	assert sets == ([] if BACKEND == "mariadb" else ["SET LOCAL lock_timeout = %s"])
+	assert value(sql, "Optimus Session", "parent-a", "title") == (
+		None if BACKEND == "mariadb" else "changed after the SET"
+	)
 
 
 def _http_ready(monkeypatch):
@@ -1407,7 +1516,7 @@ def test_a_click_resends_a_committed_intent_its_dispatch_left_pending(sql, monke
 		return dispatch(run_id, docname, **kw)
 
 	monkeypatch.setattr(ai_jobs, "_dispatch_pending", after_commit)
-	with sql.using(_short_lock_wait(sql)):
+	with sql.using(_bounded_contender(sql, monkeypatch)):
 		first = _click()
 	writer.commit()
 	held[0] = False
@@ -1438,14 +1547,12 @@ def test_one_refresh_click_waits_for_one_lock_timeout_at_most(sql, monkeypatch):
 		return dispatch(run_id, docname, **kw)
 
 	monkeypatch.setattr(ai_jobs, "_dispatch_pending", after_commit)
-	contender = _short_lock_wait(sql, seconds=2)
-	started = time.monotonic()
+	contender = _bounded_contender(sql, monkeypatch, seconds=2)
 	with sql.using(contender):
 		out = _click()
-	elapsed = time.monotonic() - started
 	second.commit()
 	assert out["status"] == "queued"
-	assert elapsed < 3.0, elapsed  # one 2 s lock timeout at most, not two
+	# one wait: the admission's lock was granted; the dispatch's NOWAIT is the only conflict
 	assert contender.conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
 
 

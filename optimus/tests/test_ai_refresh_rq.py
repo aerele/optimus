@@ -98,7 +98,7 @@ def test_a_job_timeout_escapes_the_failure_isolation_fresh(monkeypatch, entry):
 		"frappe",
 		SimpleNamespace(
 			get_all=lambda *a, **kw: [{"name": "fake-run", "session_name": "fake-doc"}],
-			db=SimpleNamespace(rollback=lambda: None),
+			db=SimpleNamespace(rollback=lambda: None, db_type="mariadb"),
 		),
 	)
 	monkeypatch.setattr(ai_jobs, "_transaction", lambda operation: operation())

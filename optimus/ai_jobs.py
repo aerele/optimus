@@ -27,6 +27,9 @@ from optimus import ai_fix, safe_call, safe_commit
 from optimus import ai_refresh_store as store
 
 _JOB_METHOD = "optimus.ai_jobs.run_ai_refresh_slice"
+# Seconds an HTTP admission or cancellation waits for a row lock on Postgres before it answers
+# ``busy`` (``_bound_http_lock_wait``). MariaDB keeps the server's ``innodb_lock_wait_timeout``.
+HTTP_LOCK_WAIT_SECONDS = 30
 # The failure kinds the journal records under their own name; any other becomes ``internal``.
 # They are #72's: every kind ``ai_fix`` classifies (``KIND_HINTS`` has one line for each, and
 # holds the skip and fatal kinds), so a kind #72 adds is recorded as itself and, when it is
@@ -162,6 +165,22 @@ def _retry_sql(operation, *, retry_lock_waits=True):
 			raise failure
 		failure = None
 		time.sleep(0.02 * (attempt + 1))
+
+
+def _bound_http_lock_wait():
+	"""On Postgres, end this transaction's row lock waits after ``HTTP_LOCK_WAIT_SECONDS``: the
+	first statement of an HTTP admission or cancellation.
+
+	Postgres waits for a row lock for as long as it takes unless ``lock_timeout`` is set, and
+	Frappe sets none, so a click on a session row that a dead or slow transaction holds would
+	wait until the web server killed the request, and its backend would go on waiting. ``SET
+	LOCAL`` ends with this transaction, so the pooled connection keeps its own setting, and it
+	takes no snapshot, so the session lock is still the first read. A lock not granted in time
+	raises 55P03, which both paths answer as ``busy``. MariaDB gets no SET: a session-level one
+	would outlive the transaction on the pooled connection, so the server's
+	``innodb_lock_wait_timeout`` applies. Worker paths retry a lock wait and set nothing."""
+	if frappe.db.db_type == "postgres":
+		frappe.db.sql("SET LOCAL lock_timeout = %s", (f"{HTTP_LOCK_WAIT_SECONDS}s",))
 
 
 def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
@@ -1200,8 +1219,10 @@ def start_refresh(
 		return {"status": "refused", "reason": "no_worker" if workers is False else "queue_unavailable"}
 	gated, excluded = _selection_counts(docname, include_fixes, resume_from)
 	run_id = uuid.uuid4().hex
-	out = _retry_sql(
-		lambda: store.admit(
+
+	def admission():
+		_bound_http_lock_wait()
+		return store.admit(
 			run_id=run_id,
 			docname=docname,
 			session_uuid=session_uuid,
@@ -1219,9 +1240,9 @@ def start_refresh(
 			retry_uncertain=retry_uncertain,
 			gated=gated,
 			excluded=excluded,
-		),
-		retry_lock_waits=False,
-	)
+		)
+
+	out = _retry_sql(admission, retry_lock_waits=False)
 	# A takeover commits with every answer, a refusal included (F3).
 	_note_ending(out.pop("taken_over", None), docname)
 	if out["status"] == "already_running" and not out.get("run"):
@@ -1479,14 +1500,16 @@ def cancel_refresh(run_id, *, docname, requested_by):
 	``busy`` when the session row stayed locked for one lock wait timeout. An HTTP request
 	waits once (C1); deadlocks and snapshot or serialization conflicts are still retried. A
 	run with an inconsistent journal row is force-released, with one Error Log row (E2)."""
+
+	def cancellation():
+		_bound_http_lock_wait()
+		return store.cancel(run_id, docname=docname, now=_now(), cancelled_by=requested_by)
+
 	guard = safe_call.InterruptGuard(base=True)
 	run = failure = None
 	try:
 		with guard:
-			run = _retry_sql(
-				lambda: store.cancel(run_id, docname=docname, now=_now(), cancelled_by=requested_by),
-				retry_lock_waits=False,
-			)
+			run = _retry_sql(cancellation, retry_lock_waits=False)
 	except Exception as exc:
 		failure = exc
 	if guard.pending():

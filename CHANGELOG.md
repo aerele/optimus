@@ -37,7 +37,10 @@ versions may contain breaking changes see migration notes below).
   lock; the recheck's `FOR UPDATE` read of the session's Phase 2 rows can make
   another session's Phase 2 insert wait. A user refresh takes the site mutex
   (NOWAIT) only after its session; a busy mutex, or a session row held past one
-  lock wait timeout, answers `busy`. Analyze-time runs never take the mutex.
+  lock wait timeout, answers `busy`. On PostgreSQL, which has no lock wait limit
+  unless one is set, an admission or a cancellation sets 30 seconds for its own
+  transaction (`SET LOCAL lock_timeout`); MariaDB keeps the server's
+  `innodb_lock_wait_timeout`. Analyze-time runs never take the mutex.
 - Keep interrupted calls with an unknown outcome as uncertain. Recovery
   delivers queued work but never repeats an uncertain provider call. Explicit
   resumes keep the original selection time, cap and sections, count the cap
