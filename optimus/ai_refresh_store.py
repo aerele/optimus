@@ -588,12 +588,18 @@ def settle_attempt(
 	parent, run = lock_run(run_id, docname)
 	if not run:
 		if answer:
-			_signal(signals, "discarded", "fenced", attempt=attempt_id)
+			# no attempt row to settle, so no idempotency key: the tokens are not charged (a lost
+			# COMMIT acknowledgement would let the fallback charge them again); this row is their
+			# only record
+			_signal(signals, "discarded", "fenced", attempt=attempt_id, tokens=tokens)
 		return False
 	attempt = _read(ATTEMPT, attempt_id, lock=True)
 	if not attempt or attempt.get("run_id") != run_id or attempt.get("worker_token") != worker_token:
 		if answer:
-			_signal(signals, "discarded", "fenced", attempt=attempt_id)
+			# no attempt row to settle, so no idempotency key: the tokens are not charged (a lost
+			# COMMIT acknowledgement would let the fallback charge them again); this row is their
+			# only record
+			_signal(signals, "discarded", "fenced", attempt=attempt_id, tokens=tokens)
 		return False
 	if attempt.get("settled") or attempt["state"] not in {"calling", "uncertain"}:
 		if answer:

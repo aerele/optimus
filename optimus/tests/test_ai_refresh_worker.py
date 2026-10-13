@@ -49,6 +49,7 @@ def worker(journal, monkeypatch):
 		logs=logs,
 		rows=rows,
 		count=5,
+		tokens=7,
 		send_hook=None,
 		persist_hook=None,
 		valid=True,
@@ -68,7 +69,11 @@ def worker(journal, monkeypatch):
 				assert attempts[-1]["state"] == "calling", "send intent must commit first"
 				if env.send_hook:
 					env.send_hook()
-				return {"suggestion": "fake answer", "tokens": {"total_tokens": 7}, "usage_complete": True}
+				return {
+					"suggestion": "fake answer",
+					"tokens": {"total_tokens": env.tokens},
+					"usage_complete": True,
+				}
 
 			def persist(result, name=name):
 				assert journal.db.active
@@ -704,3 +709,91 @@ def test_a_retried_transaction_leaves_one_signal_row_not_two(worker, monkeypatch
 	worker.jobs.run_ai_refresh_slice("fake-run", 0)  # a replayed delivery of slice 0
 	assert len(tries) == 2
 	assert len(_signal_rows(worker, "optimus ai refresh duplicate blocked")) == 1
+
+
+def _fail_answers_after_writing(worker, monkeypatch, failures):
+	"""Make the answer's settlement fail (rolled back, after it recorded its signal) ``failures``
+	times; the failed-outcome fallback and every other call go through."""
+	real = worker.journal.mod.settle_attempt
+	seen = []
+
+	def flaky(*a, **kw):
+		result = real(*a, **kw)
+		if kw.get("outcome") == "succeeded" and len(seen) < failures:
+			seen.append(True)
+			raise _Conflict(_DriverError(1213, "fake deadlock"))
+		return result
+
+	monkeypatch.setattr(worker.journal.mod, "settle_attempt", flaky)
+	return seen
+
+
+def test_a_retried_settlement_leaves_one_discarded_row_not_two(worker, monkeypatch):
+	worker.count = 1
+	worker.persist_hook = lambda: False
+	seen = _fail_answers_after_writing(worker, monkeypatch, 1)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert len(seen) == 1
+	assert len(_signal_rows(worker, "optimus ai refresh discarded")) == 1
+
+
+def test_a_fallback_after_an_uncommitted_discard_logs_no_phantom_row(worker, monkeypatch):
+	"""The answer's write recorded a discard but never committed; the fallback records a failed
+	outcome. Nothing was discarded, so no row."""
+	worker.count = 1
+	worker.persist_hook = lambda: False
+	seen = _fail_answers_after_writing(worker, monkeypatch, 3)
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert len(seen) == 3
+	assert not _signal_rows(worker, "optimus ai refresh discarded")
+
+
+def test_a_retried_begin_leaves_one_duplicate_blocked_row_not_two(worker, monkeypatch):
+	worker.count = 1
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	run = worker.journal.run
+	original = worker.jobs._next_item
+
+	def again(run, memo):
+		return original(run, memo) or worker.jobs.PreparedItem(
+			"fix", "finding-0", "fake-hash", lambda t: 1 / 0, lambda: True, lambda r: True
+		)
+
+	monkeypatch.setattr(worker.jobs, "_next_item", again)
+	real = worker.journal.mod.begin_attempt
+	tries = []
+
+	def flaky(*a, **kw):
+		result = real(*a, **kw)
+		tries.append(True)
+		if len(tries) == 1:
+			raise _Conflict(_DriverError(1213, "fake deadlock"))
+		return result
+
+	monkeypatch.setattr(worker.journal.mod, "begin_attempt", flaky)
+	worker.rows.clear()
+	run.update(
+		state="queued", slice_no=1, lease_until=1800, dispatch_pending=1, active_session="fake-session-doc"
+	)
+	worker.jobs.run_ai_refresh_slice("fake-run", 1)
+	assert len(tries) == 2
+	assert len(_signal_rows(worker, "optimus ai refresh duplicate blocked")) == 1
+
+
+def test_a_count_above_the_int_range_is_logged_before_it_is_clamped(worker):
+	worker.count = 1
+	worker.tokens = 2**31 + 5
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	[row] = [
+		c for t, c in worker.rows if t == "optimus ai refresh item" and "clamped" in c.get("outcome", "")
+	]
+	assert row["tokens"] == 2**31 + 5 and row["docname"] == "fake-session-doc" and row["run_id"] == "fake-run"
+	assert row["item"] == "fix" and row["attempt"]
+	assert worker.journal.run["tokens_reported"] == 2**31 + 5  # the run keeps the full count
+
+
+def test_an_ordinary_count_logs_no_clamp_row(worker):
+	worker.count = 1
+	worker.tokens = 2**31 - 1
+	worker.jobs.run_ai_refresh_slice("fake-run", 0)
+	assert not [c for t, c in worker.rows if "clamped" in c.get("outcome", "")]
