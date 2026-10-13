@@ -1543,18 +1543,36 @@ def _crashed_workers(user_b="fake-user"):
 	)
 
 
-def test_runs_of_other_sessions_that_can_no_longer_call_hold_no_site_cap_slot(sql, monkeypatch):
+@pytest.mark.parametrize(
+	"dead,now", [("worker-died", 1000), ("lease-ends-now", 311), ("deadline-passed", 300)]
+)
+def test_runs_of_other_sessions_that_can_no_longer_call_hold_no_site_cap_slot(sql, dead, now):
 	"""Two crashed workers held both slots of a site cap of 2 until the sweep (not scheduled)
 	or a click on each of their sessions: every other session was refused. A run whose lease
 	or deadline has passed can neither claim nor begin a call, so it holds no slot; a live one
-	still does."""
+	still does, to its last second."""
 	_crashed_workers(user_b="other-user")
-	live = ai_jobs._retry_sql(lambda: admit("run-c", "parent-c", cap=2, user="third-user", now=300))
+	if dead == "deadline-passed":  # a slice delivered after the deadline: its lease is still live
+		for run in ("run-a", "run-b"):
+			sql.primary.set_value(store.RUN, run, {"deadline": 300}, update_modified=False)
+		sql.primary.commit()
+	live = ai_jobs._retry_sql(lambda: admit("run-c", "parent-c", cap=2, user="third-user", now=299))
 	assert live == {"status": "refused", "reason": "site_cap"}
-	out = ai_jobs._retry_sql(lambda: admit("run-c", "parent-c", cap=2, user="third-user", now=1000))
+	out = ai_jobs._retry_sql(lambda: admit("run-c", "parent-c", cap=2, user="third-user", now=now))
 	assert out["status"] == "queued" and "taken_over" not in out
 	assert value(sql, store.RUN, "run-a", "state") == "running"
 	assert value(sql, store.RUN, "run-b", "state") == "running"
+
+
+def test_a_cancel_with_a_filter_for_the_run_id_cancels_nothing(sql):
+	"""A filter in place of the run id became a locking read of the Run table by filter
+	(``WHERE state = 'running' ... FOR UPDATE``) that cancelled the session's run without
+	naming it."""
+	claimed()
+	out = ai_jobs.cancel_refresh({"state": "running"}, docname="parent-a", requested_by="fake-user")
+	assert out == {"status": "refused", "reason": "not_running"}
+	assert value(sql, store.RUN, "run-a", "state") == "running"
+	assert value(sql, store.RUN, "run-a", "active_session") == "parent-a"
 
 
 def test_the_http_admission_ignores_runs_that_can_no_longer_call(sql, monkeypatch):

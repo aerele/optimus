@@ -1001,3 +1001,24 @@ def test_a_cancel_during_a_call_writes_one_uncertain_row(queue, ended_rows):
 
 def test_a_cancel_with_no_open_call_writes_no_row(queue, ended_rows):
 	assert _cancel(queue)["status"] == "cancelled" and ended_rows == []
+
+
+def test_the_rows_of_a_takeover_are_committed_before_the_click_goes_on(admitting, monkeypatch):
+	"""The rows are kept on their own: a later failure of the click (its dispatch, the web
+	request) must not take them with it."""
+	queue = admitting
+	_crash(queue)
+	events = []
+	transaction = queue.jobs._transaction
+
+	def tracked(operation):
+		out = transaction(operation)
+		events.append("commit")
+		return out
+
+	monkeypatch.setattr(queue.jobs, "_transaction", tracked)
+	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, exc=None, **kw: events.append(title))
+	monkeypatch.setattr(queue.jobs, "_dispatch_pending", lambda *a, **kw: events.append("dispatch"))
+	assert _start(queue)["status"] == "queued"
+	rows = [i for i, e in enumerate(events) if e.startswith("optimus ai refresh")]
+	assert len(rows) == 2 and "commit" in events[rows[-1] : events.index("dispatch")]
