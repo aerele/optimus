@@ -59,10 +59,14 @@ def work(journal, monkeypatch):
 		can_read=True,
 		can_write=False,
 		roles=["Optimus User"],
+		child_loads=0,
 	)
 
-	def get_doc(table, name):
+	def get_doc(table, name=None):
+		if isinstance(table, dict):  # ``frappe.get_doc(values)``: a document from values, no read
+			return Doc(deepcopy(table))
 		assert table == "Optimus Session" and name == parent["name"]
+		env.child_loads += 1  # a whole document: every child table is read
 		return Doc(**deepcopy(parent), findings=[Doc(deepcopy(row))])
 
 	def permission(table, kind, doc, *, user):
@@ -150,6 +154,67 @@ def test_invalid_state_or_access_prevents_call(work, change, reason):
 	with pytest.raises(work.jobs.StopRefresh) as caught:
 		work.jobs._check_run(work.journal.run)
 	assert caught.value.reason == reason
+
+
+def _v15_has_permission(work, decide):
+	"""Frappe v15's ``frappe.has_permission`` for one document: given a name, it loads the whole
+	document (``frappe.get_doc``: every child table) before it checks; given a document, it
+	checks that one. ``decide(ptype, doc, user)`` stands for the owner, share and role checks,
+	which read the document's ``owner`` and ``name``. Returns the documents it checked."""
+	seen = []
+
+	def has_permission(doctype, ptype, doc, *, user):
+		if isinstance(doc, str):
+			doc = work.jobs.frappe.get_doc(doctype, doc)
+		seen.append(doc)
+		return decide(ptype, doc, user)
+
+	work.jobs.frappe.has_permission = has_permission
+	return seen
+
+
+@pytest.mark.parametrize("locked", [False, True], ids=["admission", "send and save"])
+def test_the_access_checks_read_no_child_table(work, locked):
+	"""Given a name, Frappe v15 loads the whole session (every child table, call trees
+	included) for each of the two checks, and two of the item's rechecks run inside the locked
+	send and save transactions. Frappe v16 loads no child table unless the user has User
+	Permissions. The checks get the session built from the row the recheck has just read."""
+	seen = _v15_has_permission(work, lambda ptype, doc, user: True)
+	with work.journal.db.transaction():
+		work.jobs._check_run(work.journal.run, locked=locked)
+	assert work.child_loads == 0 and len(seen) == 2
+	for doc in seen:
+		assert doc["doctype"] == "Optimus Session" and doc["name"] == work.parent["name"]
+		assert doc["owner"] == "fake-owner" and doc["session_uuid"] == "fake-session"
+		assert "findings" not in doc
+
+
+@pytest.mark.parametrize(
+	"grant,allowed",
+	[("owner", True), ("read share", False), ("write share", True), ("role", True), ("none", False)],
+)
+def test_the_access_checks_keep_the_owner_share_and_role_rules(work, grant, allowed):
+	"""The checks decide from the document's ``owner`` and ``name``, which the row carries: the
+	owner may act, and so may a user with write (a write share, or the System Manager role);
+	a read share alone may not, and nor may a user with no access."""
+	shared = {"read share": {"read"}, "write share": {"read", "write"}}.get(grant, set())
+
+	def decide(ptype, doc, user):
+		if grant == "role":
+			return True  # System Manager: read and write on every session
+		if grant == "owner":
+			return ptype == "read" and doc["owner"] == user  # Optimus User: read, if owner
+		return ptype in shared and doc["name"] == work.parent["name"]
+
+	if grant != "owner":
+		work.parent["owner"] = "someone-else"
+	_v15_has_permission(work, decide)
+	if allowed:
+		assert work.jobs._check_run(work.journal.run)["name"] == work.parent["name"]
+	else:
+		with pytest.raises(work.jobs.StopRefresh) as caught:
+			work.jobs._check_run(work.journal.run)
+		assert caught.value.reason == "permission"
 
 
 def test_prepared_work_carries_explicit_session_and_principal(work):
@@ -326,9 +391,7 @@ def test_steps_postprocessing_failure_keeps_reported_usage(work, monkeypatch):
 	assert caught.value.usage["total_tokens"] == 7 and caught.value.usage_complete is True
 
 
-@pytest.mark.parametrize(
-	"total,stored", [(7, 7), (2**31 - 1, 2**31 - 1), (3 * (2**31 - 1) + 5, 2**31 - 1)]
-)
+@pytest.mark.parametrize("total,stored", [(7, 7), (2**31 - 1, 2**31 - 1), (3 * (2**31 - 1) + 5, 2**31 - 1)])
 def test_the_steps_token_count_is_clamped_to_the_32_bit_field(work, monkeypatch, total, stored):
 	"""D3: the field stays an Int; a sum of valid provider counts that exceeds it is stored clamped."""
 	work.journal.run.update(include_fixes=0, include_steps=1)

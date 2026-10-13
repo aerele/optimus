@@ -138,8 +138,9 @@ def test_the_run_journal_records_the_selections_gated_and_excluded_counts():
 # --- D2: both journal tables keep their indexes on PostgreSQL ---------------------------------
 
 
-def _index_patch(monkeypatch, *, db_type, indexes):
-	"""The patch against a fake ``frappe``: ``indexes`` maps a table to its index definitions."""
+def _index_patch(monkeypatch, *, db_type, indexes, schema="public"):
+	"""The patch against a fake ``frappe``: ``indexes`` maps a table to its index definitions
+	in the PostgreSQL schema ``schema``."""
 	from importlib import import_module
 	from types import SimpleNamespace
 
@@ -152,7 +153,7 @@ def _index_patch(monkeypatch, *, db_type, indexes):
 		return [SimpleNamespace(**{"unique": 0, "search_index": 0, **f}) for f in doc["fields"]]
 
 	def sql(query, values):
-		assert "pg_indexes" in query and values[0] == "public"
+		assert "pg_indexes" in query and values[0] == schema
 		return [(definition,) for definition in indexes.get(values[1], [])]
 
 	db = SimpleNamespace(
@@ -219,6 +220,19 @@ def test_the_indexes_are_created_once_and_a_rerun_does_nothing(monkeypatch):
 	}
 	# every name is the table's own, so two tables can never claim one name
 	assert len({c[2] for c in created}) == len(created) and all(c[2].startswith("tab") for c in created)
+
+
+@pytest.mark.parametrize("conf,schema", [({}, "public"), ({"db_schema": "fake_tenant"}, "fake_tenant")])
+def test_on_frappe_v15_the_schema_comes_from_the_site_config(monkeypatch, conf, schema):
+	"""Frappe v15's PostgreSQL database has no ``db_schema`` (v16's reads it from the site
+	config): the patch raised AttributeError there, which failed ``install-app`` and
+	``bench migrate``. It reads the site config itself then, as Frappe v15 does, with
+	"public" when it names none."""
+	patch, created = _index_patch(monkeypatch, db_type="postgres", indexes={}, schema=schema)
+	del patch.frappe.db.db_schema
+	patch.frappe.conf = conf
+	patch.ensure_indexes()
+	assert len(created) == 6 and all(c[2].startswith("tab") for c in created)
 
 
 def test_mariadb_is_left_alone(monkeypatch):

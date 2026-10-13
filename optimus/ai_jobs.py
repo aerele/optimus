@@ -717,11 +717,16 @@ def _check_run(run, *, locked=False):
 		frappe.get_roles(user)
 	):
 		raise StopRefresh("permission")
+	# The access checks get the session built from this row, not its name: given a name, Frappe
+	# v15 loads the whole document (every child table) for each check, and two rechecks run in
+	# the locked send and save transactions. The owner, share, role and User Permission checks
+	# read only the session's own fields; no child table of a session has a Link field.
+	session = frappe.get_doc({**parent, "doctype": "Optimus Session"})
 	if not may_act_on_session(
 		user=user,
 		owner=parent.get("owner") or "",
-		can_read=bool(frappe.has_permission("Optimus Session", "read", parent["name"], user=user)),
-		can_write=bool(frappe.has_permission("Optimus Session", "write", parent["name"], user=user)),
+		can_read=bool(frappe.has_permission("Optimus Session", "read", session, user=user)),
+		can_write=bool(frappe.has_permission("Optimus Session", "write", session, user=user)),
 	):
 		raise StopRefresh("permission")
 	if phase2:
