@@ -1175,11 +1175,16 @@ def _bounded_contender(sql, monkeypatch, seconds=1):
 
 
 def _held_session(sql, release_after=20):
-	"""A connection holding the session row's lock. A request with no lock bound would wait for
-	it for ever on Postgres, so the holder lets go after ``release_after`` seconds: such a
-	request then fails its test instead of hanging the suite (``_release`` ends the hold)."""
-	writer = sql.connect()
-	writer.get_value("Optimus Session", "parent-a", "status", for_update=True)
+	"""A connection holding the session row's lock (``_hold``)."""
+	return _hold(sql.connect(), release_after=release_after)
+
+
+def _hold(writer, docname="parent-a", release_after=20):
+	"""``writer`` takes the session row's lock. A request that waits for it with no lock bound
+	(Postgres has none unless one is set) would wait for ever, so the holder lets go after
+	``release_after`` seconds: such a request then fails its test instead of hanging the suite.
+	``_release`` ends the hold."""
+	writer.get_value("Optimus Session", docname, "status", for_update=True)
 	writer.release = threading.Timer(release_after, writer.commit)
 	writer.release.start()
 	return writer
@@ -1565,13 +1570,13 @@ def test_a_click_resends_a_committed_intent_its_dispatch_left_pending(sql, monke
 
 	def after_commit(run_id, docname, **kw):
 		if held[0]:
-			writer.get_value("Optimus Session", docname, "status", for_update=True)
+			_hold(writer, docname)
 		return dispatch(run_id, docname, **kw)
 
 	monkeypatch.setattr(ai_jobs, "_dispatch_pending", after_commit)
 	with sql.using(_bounded_contender(sql, monkeypatch)):
 		first = _click()
-	writer.commit()
+	_release(writer)
 	held[0] = False
 	assert first["status"] == "queued" and not sql.facade.enqueued
 	run_id = first["refresh"]["run_id"]
@@ -1596,14 +1601,14 @@ def test_one_refresh_click_waits_for_one_lock_timeout_at_most(sql, monkeypatch):
 	dispatch = ai_jobs._dispatch_pending
 
 	def after_commit(run_id, docname, **kw):
-		second.get_value("Optimus Session", docname, "status", for_update=True)
+		_hold(second, docname)
 		return dispatch(run_id, docname, **kw)
 
 	monkeypatch.setattr(ai_jobs, "_dispatch_pending", after_commit)
 	contender = _bounded_contender(sql, monkeypatch, seconds=2)
 	with sql.using(contender):
 		out = _click()
-	second.commit()
+	_release(second)
 	assert out["status"] == "queued"
 	# one wait: the admission's lock was granted; the dispatch's NOWAIT is the only conflict
 	assert contender.conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
