@@ -1101,3 +1101,32 @@ def test_the_rows_of_a_takeover_are_committed_before_the_click_goes_on(admitting
 	assert _start(queue)["status"] == "queued"
 	rows = [i for i, e in enumerate(events) if e.startswith("optimus ai refresh")]
 	assert len(rows) == 2 and "commit" in events[rows[-1] : events.index("dispatch")]
+
+
+@pytest.mark.parametrize("outcome", ["ended", "failed"])
+def test_the_rows_of_the_sweep_are_committed_after_the_last_one(queue, monkeypatch, outcome):
+	"""The sweep writes its rows after the passes, the rows of each run it ended and of each
+	failure, and keeps them: ``bench execute`` or the scheduler may roll back what it leaves."""
+	_crash(queue)
+	if outcome == "failed":
+
+		def fail(*a, **kw):
+			raise RuntimeError("fake storage failure")
+
+		monkeypatch.setattr(queue.journal.mod, "interrupt", fail)
+	events = []
+	transaction = queue.jobs._transaction
+
+	def tracked(operation):
+		out = transaction(operation)
+		events.append("commit")
+		return out
+
+	monkeypatch.setattr(queue.jobs, "_transaction", tracked)
+	monkeypatch.setattr(queue.jobs.frappe, "get_all", queue.journal.db.get_all, raising=False)
+	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, exc=None, **kw: events.append(title))
+	counts = queue.jobs.recover_pending()
+	assert counts["interrupted" if outcome == "ended" else "failed"] == 1
+	rows = [i for i, e in enumerate(events) if e.startswith("optimus ai refresh")]
+	assert len(rows) == (2 if outcome == "ended" else 1)
+	assert events[rows[-1] + 1 :] == ["commit"]
