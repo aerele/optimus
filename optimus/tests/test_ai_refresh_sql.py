@@ -172,8 +172,9 @@ class SQLDatabase:
 	def table(self, doctype):
 		return self.quoted(self.tables[doctype])
 
-	def sql(self, query, values=()):
-		"""``Database.sql``: run one statement and raise its error the way Frappe does."""
+	def sql(self, query, values=(), *, as_dict=True):
+		"""``Database.sql``: run one statement and raise its error the way Frappe does. Rows are
+		always dicts, as ``as_dict=True`` gives them."""
 		try:
 			with self.connection.cursor() as cursor:
 				cursor.execute(query, values)
@@ -1386,9 +1387,9 @@ def _recording(db):
 	statements = []
 	run, commit = db.sql, db.commit
 
-	def recorded(query, values=()):
+	def recorded(query, values=(), **kw):
 		statements.append(query)
-		return run(query, values)
+		return run(query, values, **kw)
 
 	def committed():
 		statements.append("COMMIT")
@@ -1437,43 +1438,81 @@ def test_an_http_request_on_a_held_session_row_waits_once_and_leaves_nothing_wai
 	assert out == {"value": {"status": "refused", "reason": "busy"}}
 	assert contender.conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
 	assert waiters == 0
-	sets = [i for i, query in enumerate(statements) if query.upper().startswith("SET")]
+	bound = [i for i, query in enumerate(statements) if query.upper().startswith(("SET", "SHOW"))]
 	if BACKEND == "mariadb":
-		assert sets == []
+		assert bound == []
 	else:
-		[i] = sets
-		assert statements[i] == "SET LOCAL lock_timeout = %s" and statements[i - 1] == "COMMIT"
-		assert "FOR UPDATE" in statements[i + 1]
-		assert contender.table("Optimus Session") in statements[i + 1]
+		i = bound[0]
+		assert statements[i - 1 : i + 2] == ["COMMIT", "SHOW lock_timeout", "SET LOCAL lock_timeout = %s"]
+		assert "FOR UPDATE" in statements[i + 2]
+		assert contender.table("Optimus Session") in statements[i + 2]
+		assert bound == [i, i + 1]
 		assert contender.sql("SHOW lock_timeout")[0]["lock_timeout"] == "0"
 	contender.commit()
 
 
 def test_the_lock_bound_opens_no_read_view_before_the_session_lock(sql, monkeypatch):
-	"""``SET`` takes no snapshot on Postgres, so the session lock stays the admission's first
-	read: a change committed to the session row between the two is no serialization failure
-	(40001). MariaDB gets no SET."""
+	"""``SHOW`` and ``SET`` take no snapshot on Postgres, so the session lock stays the
+	admission's first read: a change committed to the session row right after the bound's first
+	statement is no serialization failure (40001). MariaDB gets neither."""
 	_http_ready(monkeypatch)
 	contender, writer = sql.connect(), sql.connect()
 	run = contender.sql
-	sets = []
+	bound = []
 
-	def change_after_a_set(query, values=()):
-		out = run(query, values)
-		if query.upper().startswith("SET"):
-			sets.append(query)
-			writer.set_value("Optimus Session", "parent-a", {"title": "changed after the SET"})
-			writer.commit()
+	def change_after_the_first(query, values=(), **kw):
+		out = run(query, values, **kw)
+		if query.upper().startswith(("SET", "SHOW")):
+			bound.append(query)
+			if len(bound) == 1:
+				writer.set_value("Optimus Session", "parent-a", {"title": "changed after the SHOW"})
+				writer.commit()
 		return out
 
-	contender.sql = change_after_a_set
+	contender.sql = change_after_the_first
 	with sql.using(contender):
 		out = _click()
 	assert out["status"] == "queued" and contender.conflicts == []
-	assert sets == ([] if BACKEND == "mariadb" else ["SET LOCAL lock_timeout = %s"])
+	assert bound == ([] if BACKEND == "mariadb" else ["SHOW lock_timeout", "SET LOCAL lock_timeout = %s"])
 	assert value(sql, "Optimus Session", "parent-a", "title") == (
-		None if BACKEND == "mariadb" else "changed after the SET"
+		None if BACKEND == "mariadb" else "changed after the SHOW"
 	)
+
+
+def test_a_stricter_lock_wait_setting_is_kept(sql, monkeypatch):
+	"""A ``lock_timeout`` of the role, the database or the server that is stricter than the
+	engine's bound is kept: the request reads it and sets nothing, so it waits that long and not
+	the bound (patched to 60 s here). MariaDB's wait is always the server's."""
+	_http_ready(monkeypatch)
+	writer = _held_session(sql)
+	contender = sql.connect()
+	if BACKEND == "mariadb":
+		contender.sql("SET SESSION innodb_lock_wait_timeout=1")
+	else:
+		contender.sql("SET lock_timeout = '1s'")  # SHOW reads a role's setting the same way
+		monkeypatch.setattr(ai_jobs, "HTTP_LOCK_WAIT_SECONDS", 60)
+	contender.commit()
+	statements = _recording(contender)
+	out = {}
+
+	def request():
+		sql.facade.db = contender
+		try:
+			out["value"] = _click()
+		except Exception as exc:
+			out["error"] = exc
+
+	thread = threading.Thread(target=request, name="click")
+	thread.start()
+	thread.join(15)
+	waiting = thread.is_alive()
+	_release(writer)
+	thread.join(70)
+	assert not waiting, "the request waited longer than the stricter one-second setting"
+	assert out == {"value": {"status": "refused", "reason": "busy"}}
+	assert contender.conflicts == ([1205] if BACKEND == "mariadb" else ["55P03"])
+	assert [q for q in statements if q.upper().startswith("SET")] == []
+	assert statements.count("SHOW lock_timeout") == (0 if BACKEND == "mariadb" else 1)
 
 
 def _http_ready(monkeypatch):

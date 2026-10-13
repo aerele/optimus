@@ -31,6 +31,7 @@ class Database:
 	"""Transactional rows; lock calls are observed, never treated as no-ops."""
 
 	db_type = "mariadb"  # ``frappe.db.db_type``; a test sets "postgres"
+	lock_timeout = "0"  # what Postgres' ``SHOW lock_timeout`` prints; Frappe sets none
 
 	def __init__(self):
 		self.rows = {
@@ -87,11 +88,14 @@ class Database:
 		assert self.active
 		self.rows[table][name].update(values)
 
-	def sql(self, query, values=()):
-		"""A statement that returns no rows, recorded as ``("SQL", (query, values), first)``:
-		``first`` when it is the first statement of its transaction."""
+	def sql(self, query, values=(), *, as_dict=False):
+		"""A statement, recorded as ``("SQL", (query, values), first)``: ``first`` when it is the
+		first statement of its transaction. ``SHOW lock_timeout`` answers ``lock_timeout``; any
+		other statement returns no rows."""
 		assert self.active, "a statement needs a live transaction"
 		self.calls.append(("SQL", (query, tuple(values)), len(self.calls) == self.began))
+		if query == "SHOW lock_timeout":
+			return [{"lock_timeout": self.lock_timeout}] if as_dict else [(self.lock_timeout,)]
 		return []
 
 	def insert(self, values):

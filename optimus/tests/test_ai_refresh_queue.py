@@ -742,7 +742,9 @@ def test_cancel_force_releases_a_corrupt_run_with_one_row(queue, rows):
 
 # --- the lock wait of an HTTP request on Postgres ------------------------------------------------
 
-_HTTP_BOUND = (("SET LOCAL lock_timeout = %s", ("30s",)), True)
+_SHOW = (("SHOW lock_timeout", ()), True)  # the first statement: it takes no snapshot either
+_SET = (("SET LOCAL lock_timeout = %s", ("30s",)), False)
+_HTTP_BOUND = [_SHOW, _SET]
 
 
 def _statements(queue):
@@ -751,30 +753,64 @@ def _statements(queue):
 
 
 def _bound_then_lock(queue):
-	"""True when every lock bound is followed at once by the session row's lock."""
+	"""True when the last statement of every lock bound is followed at once by the session
+	row's lock."""
 	calls = queue.journal.db.calls
 	return all(
 		calls[i + 1] == ("Optimus Session", "fake-session-doc", True)
 		for i, call in enumerate(calls)
-		if call[0] == "SQL"
+		if call[0] == "SQL" and calls[i + 1][0] != "SQL"
 	)
 
 
 @pytest.mark.parametrize("path", ["click", "cancel"])
-def test_on_postgres_an_http_transaction_bounds_its_lock_waits_first(admitting, path):
+@pytest.mark.parametrize(
+	"current,sets",
+	[("0", True), ("1min", True), ("31s", True), ("unreadable", True), ("30s", False), ("2s", False)],
+	ids=["no-limit", "a-minute", "31-seconds", "unreadable", "30-seconds", "2-seconds"],
+)
+def test_on_postgres_an_http_transaction_bounds_its_lock_waits_first(admitting, path, current, sets):
 	"""Postgres waits for a row lock for as long as it takes unless ``lock_timeout`` is set, and
 	Frappe sets none: a click or a cancel on a session row a dead transaction holds hung until the
-	web server killed it, and its backend went on waiting. The admission and the cancellation set
-	the bound for their own transaction, as its first statement, before the session lock."""
+	web server killed it, and its backend went on waiting. The admission and the cancellation read
+	the current limit first and set 30 seconds for their own transaction, before the session
+	lock, when there is no limit, a longer one or one that cannot be read; a stricter limit of
+	the role, the database or the server is kept."""
 	queue = admitting
 	queue.journal.db.db_type = "postgres"
+	queue.journal.db.lock_timeout = current
 	if path == "click":
 		queue.journal.db.rows[queue.journal.mod.RUN] = {}
 		assert _start(queue)["status"] == "queued"
 	else:
 		assert _cancel(queue)["status"] == "cancelled"
-	assert _statements(queue) == [_HTTP_BOUND]
+	assert _statements(queue) == (_HTTP_BOUND if sets else [_SHOW])
 	assert _bound_then_lock(queue)
+
+
+@pytest.mark.parametrize(
+	"text,milliseconds",
+	[
+		("0", 0),
+		("250ms", 250),
+		("1500ms", 1500),
+		("30s", 30_000),
+		("90s", 90_000),
+		("1min", 60_000),
+		("2min", 120_000),
+		("1h", 3_600_000),
+		("1d", 86_400_000),
+		(" 2s ", 2000),
+		("", None),
+		("2 s", None),
+		("1.5s", None),
+		("-1", None),
+		(None, None),
+	],
+)
+def test_a_postgres_time_setting_is_read_as_show_prints_it(queue, text, milliseconds):
+	"""``SHOW lock_timeout`` prints 0, or a whole number with the largest unit that fits."""
+	assert queue.jobs._pg_milliseconds(text) == milliseconds
 
 
 def test_each_try_of_an_http_admission_sets_its_bound_again(admitting, monkeypatch):
@@ -794,7 +830,7 @@ def test_each_try_of_an_http_admission_sets_its_bound_again(admitting, monkeypat
 
 	monkeypatch.setattr(queue.journal.mod, "admit", deadlocked_once)
 	assert _start(queue)["status"] == "queued"
-	assert len(tries) == 2 and _statements(queue) == [_HTTP_BOUND, _HTTP_BOUND]
+	assert len(tries) == 2 and _statements(queue) == _HTTP_BOUND + _HTTP_BOUND
 
 
 def test_on_mariadb_an_http_transaction_keeps_the_servers_lock_wait(admitting):
