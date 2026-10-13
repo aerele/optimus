@@ -1,4 +1,4 @@
-"""The engine against #72's contracts and the owner decisions Q1 to Q3 (F3).
+"""The engine against #72's contracts and the owner decisions Q1 to Q3.
 
 Kinds and the breaker (Q2), the overlap with #72's Refresh (Q3), the selection counts, the
 grounding the fix prompts share with the synchronous Refresh, the cap across a resume, the
@@ -37,7 +37,7 @@ def _attempts(worker):
 
 
 def test_a_not_eligible_reply_is_a_skip_not_a_failure(worker):
-	"""M25: the skip kinds are #72's (``AI_SKIP_KINDS``): the finding was refused before any
+	"""The skip kinds are #72's (``AI_SKIP_KINDS``): the finding was refused before any
 	request. It is recorded skipped, with its kind, and feeds neither the streak nor the breaker."""
 
 	def refuse():
@@ -84,7 +84,7 @@ def test_per_prompt_kinds_are_recorded_under_their_own_name(worker, kind):
 
 @pytest.mark.parametrize("bad", [-5, True, 3.5, "7", None])
 def test_a_reported_token_count_that_is_not_a_plain_count_is_recorded_as_zero(worker, monkeypatch, bad):
-	"""M26: the engine's last check before the store: a negative, boolean or non-integer count
+	"""The engine's last check before the store: a negative, boolean or non-integer count
 	must not reach (and fail) the settlement, nor be charged to the session."""
 	worker.count = 1
 	select = worker.jobs._next_item
@@ -164,7 +164,7 @@ def test_a_running_engine_run_is_attached_to_even_while_the_flag_is_held(admitti
 
 
 def test_a_live_run_is_read_in_a_fresh_transaction_and_an_expired_one_is_not_live(queue, monkeypatch):
-	"""K3's lookup: the caller's read view is closed first, and only a live run holds the
+	"""``live_run``: the caller's read view is closed first, and only a live run holds the
 	session (a dead run is taken over by the next engine click, not waited for)."""
 	opened = []
 	inner = queue.jobs._transaction
@@ -293,7 +293,7 @@ def _prepared_grounding(work, monkeypatch, rows=1):
 
 
 def test_fix_prompts_get_the_slow_query_evidence_the_synchronous_refresh_gets(work, monkeypatch):
-	"""#16: ``_ai_evidence_scope`` supplies ``evidence_lookup`` and ``tracked_apps`` to
+	"""``_ai_evidence_scope`` supplies ``evidence_lookup`` and ``tracked_apps`` to
 	``_ai_payload_for_finding`` in ``_run_ai_backfill``; the background path passes them too."""
 	seen = _prepared_grounding(work, monkeypatch)
 	lookup = object()
@@ -304,7 +304,7 @@ def test_fix_prompts_get_the_slow_query_evidence_the_synchronous_refresh_gets(wo
 
 
 def test_the_slice_builds_its_phase2_index_and_evidence_once(work, monkeypatch):
-	"""#14 / #16: once per slice (the slice's memo), not once per finding."""
+	"""Once per slice (the slice's memo), not once per finding."""
 	seen = _prepared_grounding(work, monkeypatch)
 	built = []
 	monkeypatch.setattr(analyze, "_phase2_index_for", lambda doc: built.append(doc.get("name")) or {"k": 1})
@@ -353,7 +353,7 @@ def test_a_failed_evidence_scope_is_logged_and_the_prompt_goes_without_advice(wo
 
 
 def test_the_recordings_memo_keeps_only_recordings(work, monkeypatch):
-	"""#20: the memo #72 documents as recordings-only is its own dict inside the slice's."""
+	"""The memo #72 documents as recordings-only is its own dict inside the slice's."""
 	_prepared_grounding(work, monkeypatch)
 	captured = []
 	monkeypatch.setattr(
@@ -366,11 +366,11 @@ def test_the_recordings_memo_keeps_only_recordings(work, monkeypatch):
 	assert "source" not in recordings and "phase2_index" not in recordings
 
 
-# --- _valid_item (E4) --------------------------------------------------------------------
+# --- _valid_item --------------------------------------------------------------------
 
 
 def test_an_unrelated_session_save_no_longer_discards_a_paid_fix_answer(work, monkeypatch):
-	"""E4: a fix item is guarded by its fingerprint and the Finding lock, not by the session's
+	"""A fix item is guarded by its fingerprint and the Finding lock, not by the session's
 	``modified``: a counter, a Desk edit or a Phase 2 save during the HTTP call keeps the answer."""
 	monkeypatch.setattr("frappe.utils.now_datetime", lambda: "fake-new-modified")
 	work.parent["modified"] = "t1"
@@ -405,7 +405,7 @@ def test_the_steps_item_still_needs_an_unchanged_session(work, monkeypatch):
 		assert item.valid() is False
 
 
-# --- the cap across a resume (E3) --------------------------------------------------------
+# --- the cap across a resume --------------------------------------------------------
 
 
 def _spent(work, run_id, count, kind="fix", state="succeeded"):
@@ -471,7 +471,7 @@ def test_a_cycle_in_the_chain_ends_the_walk(work):
 	assert work.jobs._chain(work.journal.run) == ["fake-run", "a", "b"]
 
 
-# --- the signature hash (E5) -------------------------------------------------------------
+# --- the signature hash -------------------------------------------------------------
 
 
 def _many(work, monkeypatch, n):
@@ -493,7 +493,7 @@ def _many(work, monkeypatch, n):
 
 
 def test_selection_hashes_only_the_chosen_item_when_nothing_is_uncertain(work, monkeypatch):
-	"""E5: it hashed every row on every call, O(N^2) over a run."""
+	"""It hashed every row on every call, O(N^2) over a run."""
 	_, calls = _many(work, monkeypatch, 60)
 	item = work.jobs._next_item(work.journal.run, {})
 	assert item is not None and len(calls) == 1
@@ -576,7 +576,7 @@ def test_every_engine_title_is_lowercase_and_listed_in_both_docs():
 
 
 def test_every_engine_row_names_its_session_and_run():
-	"""K2: ``docname`` and ``run_id`` on every row the engine writes (the settlement rows
+	"""``docname`` and ``run_id`` on every row the engine writes (the settlement rows
 	and the sweep's pass them through one ``reference`` / the row's own keywords)."""
 	# Written before any run exists (so no run_id): they carry the session only.
 	# (``optimus ai phase 2 context`` is #72's shared title, written by analyze, so it is not
@@ -687,7 +687,7 @@ def test_a_job_timeout_in_the_worker_check_or_the_enqueue_escapes_fresh(queue, m
 	assert caught.value is not original and caught.value.__context__ is None
 
 
-# --- public names, docs (T4, T6, #19) -----------------------------------------------------
+# --- public names, docs -----------------------------------------------------
 
 
 def test_the_engine_calls_only_public_names_of_the_store():
@@ -729,7 +729,7 @@ def test_the_docs_describe_the_refresh_count_as_one_bump_at_acceptance():
 	assert "completion_counted" not in flat and "still counts as a refresh" not in flat
 
 
-# --- the kinds are #72's (F4) -------------------------------------------------------------
+# --- the kinds are #72's -------------------------------------------------------------
 
 
 def test_the_recorded_kinds_are_ai_fixs_own():
@@ -758,7 +758,7 @@ def test_every_ai_fix_kind_is_recorded_under_its_own_name(worker, kind):
 		assert len(attempts) == 3 and worker.journal.run["breaker_kind"] == kind
 
 
-# --- the cap over the longest resume chain (F3) -------------------------------------------
+# --- the cap over the longest resume chain -------------------------------------------
 
 
 def test_the_cap_counts_a_full_chain_of_three_resumes(work):

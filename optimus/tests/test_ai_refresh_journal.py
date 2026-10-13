@@ -1,6 +1,6 @@
 """Durable refresh transitions: duplicates, stale owners, lock order and accounting.
 
-The session counters are #72's log-and-continue counters (D2): a statement-level failure is
+The session counters are #72's log-and-continue counters: a statement-level failure is
 absorbed by the counter itself, so only a failure that ended the whole transaction reaches
 the journal, and the fakes below raise to stand for that one."""
 
@@ -582,7 +582,7 @@ def _end(journal, how):
 	],
 )
 def test_no_ending_of_a_run_counts_a_refresh(journal, how):
-	"""Q1 (K1): the refresh is counted once, when it is accepted, and never when it ends:
+	"""Q1: the refresh is counted once, when it is accepted, and never when it ends:
 	not complete, not stopped, cancelled, interrupted, abandoned or idle, whatever it had done."""
 	claim(journal)
 	_end(journal, how)
@@ -636,7 +636,7 @@ def _refuse_cap(journal, reason):
 	["site_cap", "user_cap", "already_running", "not_ready", "busy", "not_resumable", "retry_limit"],
 )
 def test_a_refused_admission_never_counts(journal, refusal, monkeypatch):
-	"""Q1 (K1): busy, a cap, an attach, a session that is not Ready and an unresumable or
+	"""Q1: busy, a cap, an attach, a session that is not Ready and an unresumable or
 	exhausted resume are refusals; none of them is a click."""
 	kwargs = {}
 	if refusal in {"site_cap", "user_cap"}:
@@ -1044,7 +1044,7 @@ def test_corrupt_active_pointer_cannot_mutate_another_runs_attempt(journal):
 	journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["run_id"] = "other-run"
 	with journal.db.transaction():
 		out = journal.mod.cancel("fake-run", docname="fake-session-doc", now=12)
-	# E2: the run is force-released; the other run's attempt is never written.
+	# The run is force-released; the other run's attempt is never written.
 	assert out["inconsistent"] == "attempt" and out["active_session"] is None
 	assert journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["state"] == "calling"
 
@@ -1461,7 +1461,7 @@ def test_begin_raises_any_insert_failure_that_is_not_a_duplicate(journal, monkey
 	ids=["frappe-wrapped", "raw", "postgres"],
 )
 def test_a_lock_wait_timeout_on_the_session_row_is_a_busy_refusal(journal, monkeypatch, error):
-	"""F-5: an HTTP admission waits for its session row once; a lock wait timeout there is
+	"""An HTTP admission waits for its session row once; a lock wait timeout there is
 	the Q4 busy refusal, so the caller never waits a second timeout."""
 	journal.db.rows[journal.mod.RUN] = {}
 	current = journal.db.get_value
@@ -1478,7 +1478,7 @@ def test_a_lock_wait_timeout_on_the_session_row_is_a_busy_refusal(journal, monke
 	assert waits == ["fake-session-doc"] and not journal.db.rows[journal.mod.RUN]
 
 
-# F2: recovery without the scheduler, forced release, dispatch and progress.
+# Recovery without the scheduler, forced release, dispatch and progress.
 
 
 def _crashed(journal, **values):
@@ -1496,7 +1496,7 @@ def _crashed(journal, **values):
 	ids=["lease", "deadline"],
 )
 def test_an_admission_takes_over_an_expired_run_in_its_own_transaction(journal, values, reason):
-	"""A2: crash recovery must not depend on the (unscheduled) sweep. An admission that finds
+	"""Crash recovery must not depend on the (unscheduled) sweep. An admission that finds
 	its session reserved by a run whose lease or deadline has passed ends that run as
 	interrupted, its open call uncertain, and admits the new run in the same transaction."""
 	attempt = _crashed(journal, **values)
@@ -1553,7 +1553,7 @@ def test_resuming_an_expired_run_takes_it_over_first(journal):
 
 @pytest.mark.parametrize("corrupt", ["missing", "another run's"])
 def test_a_takeover_force_releases_a_run_whose_open_attempt_is_inconsistent(journal, corrupt):
-	"""E2: the row it cannot vouch for is never written; the run counts an uncertain call of
+	"""The row it cannot vouch for is never written; the run counts an uncertain call of
 	unknown usage (spend fails closed) and the session is released (release fails open)."""
 	attempt = _crashed(journal)
 	attempts = journal.db.rows[journal.mod.ATTEMPT]
@@ -1574,7 +1574,7 @@ def test_a_takeover_force_releases_a_run_whose_open_attempt_is_inconsistent(jour
 @pytest.mark.parametrize("operation", ["cancel", "interrupt"])
 @pytest.mark.parametrize("corrupt", ["reservation", "attempt"])
 def test_cancel_and_recovery_force_release_an_inconsistent_run(journal, operation, corrupt):
-	"""E2: a corrupt row could neither be cancelled nor recovered, so it held its session and
+	"""A corrupt row could neither be cancelled nor recovered, so it held its session and
 	a site-cap slot for good. It is released now; its spend stays unknown."""
 	attempt = _crashed(journal)
 	if corrupt == "reservation":
@@ -1608,7 +1608,7 @@ def test_a_consistent_cancel_reports_nothing_inconsistent(journal):
 
 @pytest.mark.parametrize("operation", ["interrupt", "prepare_dispatch"])
 def test_the_sweep_takes_the_session_row_without_waiting(journal, monkeypatch, operation):
-	"""R1: a dead transaction can hold a session row for hours; the sweep's NOWAIT read is
+	"""A dead transaction can hold a session row for hours; the sweep's NOWAIT read is
 	refused at once (the caller counts it busy) instead of waiting a lock timeout per run."""
 	journal.run.update(state="running", lease_until=5, dispatch_pending=1, dispatched_at_epoch=0)
 	if operation == "prepare_dispatch":
@@ -1635,7 +1635,7 @@ def test_the_sweep_takes_the_session_row_without_waiting(journal, monkeypatch, o
 
 
 def test_a_continuation_is_dispatched_at_once_however_soon_it_follows(journal):
-	"""R3 / C2 / P5: the 30 s throttle is per slice. A yield seconds after the slice was
+	"""The 30 s throttle is per slice. A yield seconds after the slice was
 	dispatched was held back, and only the unscheduled sweep could deliver it."""
 	journal.run.update(lease_until=1800, dispatch_pending=1, dispatched_at_epoch=0)
 	with journal.db.transaction():
@@ -1671,7 +1671,7 @@ def _idle_slice(journal, slice_no, *, progressed=False):
 
 
 def test_a_run_that_cannot_begin_any_item_stops_after_three_idle_slices(journal):
-	"""O5: a slice that could not begin its item yields; the next slice selects the same item
+	"""A slice that could not begin its item yields; the next slice selects the same item
 	again. Three such slices in a row end the run instead of respinning until its deadline."""
 	assert _idle_slice(journal, 0)["state"] == "queued"
 	assert _idle_slice(journal, 1)["state"] == "queued"
@@ -1690,7 +1690,7 @@ def test_a_slice_that_made_progress_resets_the_idle_streak(journal):
 
 
 def test_a_run_stopped_because_ai_was_switched_off_ends_stopped_with_its_reason(journal):
-	"""E7 / C4: ending as complete told the user the refresh finished."""
+	"""Ending as complete told the user the refresh finished."""
 	claim(journal)
 	journal.run["completed"] = 2
 	with journal.db.transaction():
@@ -1701,7 +1701,7 @@ def test_a_run_stopped_because_ai_was_switched_off_ends_stopped_with_its_reason(
 
 
 def test_finish_refuses_while_a_provider_call_is_unsettled(journal):
-	"""M15: ending the run would release the session while a paid answer is still owed."""
+	"""Ending the run would release the session while a paid answer is still owed."""
 	attempt = _crashed(journal)
 	with pytest.raises(RuntimeError, match="unsettled"), journal.db.transaction():
 		journal.mod.finish(
@@ -1712,7 +1712,7 @@ def test_finish_refuses_while_a_provider_call_is_unsettled(journal):
 
 
 def test_a_late_known_outcome_moves_the_call_out_of_uncertain(journal):
-	"""M11: recovery counted the call uncertain and its usage incomplete; the original
+	"""Recovery counted the call uncertain and its usage incomplete; the original
 	worker's late, known outcome replaces both, so nothing is counted twice."""
 	attempt = _crashed(journal)
 	with journal.db.transaction():
@@ -1734,7 +1734,7 @@ def test_a_late_known_outcome_moves_the_call_out_of_uncertain(journal):
 
 
 def test_a_takeover_force_releases_another_sessions_run_holding_this_reservation(journal):
-	"""E2: a corrupt run of another session holds this session's reservation; it is released
+	"""A corrupt run of another session holds this session's reservation; it is released
 	(the admission goes on), reported as inconsistent and counts no refresh."""
 	_crashed(journal)
 	journal.db.rows["Optimus Session"]["other-session-doc"] = {
@@ -1767,7 +1767,7 @@ def test_a_reservation_released_since_the_plain_read_is_not_reported_as_running(
 
 
 def test_a_refused_admission_still_reports_the_run_it_released(journal):
-	"""F3: the takeover commits with the refusal, so the caller still gets ``taken_over``."""
+	"""The takeover commits with the refusal, so the caller still gets ``taken_over``."""
 	attempt = _crashed(journal)
 	del journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]
 	journal.db.rows[journal.mod.RUN]["other"] = {
@@ -1787,7 +1787,7 @@ def test_a_refused_admission_still_reports_the_run_it_released(journal):
 	"values", [{"lease_until": 300}, {"lease_until": 5000, "deadline": 300}], ids=["lease", "deadline"]
 )
 def test_a_late_delivery_cannot_claim_a_run_that_expired(journal, values):
-	"""F1: one dead-run rule. A queued run whose lease or deadline has passed is dead (progress
+	"""One dead-run rule. A queued run whose lease or deadline has passed is dead (progress
 	says interrupted, the Refresh is not held off by it), so a late queue delivery must not
 	revive it: nothing is written, and the next admission takes it over."""
 	journal.run.update(values)

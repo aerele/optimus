@@ -745,7 +745,7 @@ def test_duplicate_delivery_from_an_older_snapshot_claims_only_once(sql):
 
 
 def test_a_concurrent_duplicate_delivery_is_a_no_op_not_a_snapshot_conflict(sql, monkeypatch):
-	"""P2 / E5: the second delivery waits on the session lock the first holds. Its first
+	"""The second delivery waits on the session lock the first holds. Its first
 	statement is that lock, so on MariaDB 11.8 the run row the first changed is no 1020."""
 	ai_jobs._retry_sql(admit)
 	locked, release = threading.Event(), threading.Event()
@@ -781,7 +781,7 @@ def test_a_concurrent_duplicate_delivery_is_a_no_op_not_a_snapshot_conflict(sql,
 
 
 def test_a_transition_waiting_on_a_session_writer_is_not_a_snapshot_conflict(sql):
-	"""P2: #72's sync Refresh (or a Desk save) holds the session row while the engine begins
+	"""#72's sync Refresh (or a Desk save) holds the session row while the engine begins
 	an attempt. The engine's transaction opens with the session lock, so the writer's commit
 	is no 1020 on MariaDB 11.8; Postgres retries its serialization failure."""
 	claimed()
@@ -801,7 +801,7 @@ def test_a_transition_waiting_on_a_session_writer_is_not_a_snapshot_conflict(sql
 
 
 def test_two_runs_beginning_attempts_together_never_deadlock(sql, monkeypatch):
-	"""R2 / P1: a locking read of a not-yet-existing attempt key took a gap lock, and two
+	"""A locking read of a not-yet-existing attempt key took a gap lock, and two
 	runs then deadlocked on each other's INSERT. The INSERT alone takes no gap lock."""
 	claimed("run-a", "parent-a", "worker-a")
 	claimed("run-b", "parent-b", "worker-b")
@@ -855,7 +855,7 @@ def history(sql, count=40):
 
 @pytest.mark.parametrize("transition", ["finish", "continue_run", "cancel"])
 def test_admission_never_deadlocks_another_sessions_worker(sql, monkeypatch, transition):
-	"""C1 / P4: the admission's FOR UPDATE reads (the reservation probe, the capacity scan)
+	"""The admission's FOR UPDATE reads (the reservation probe, the capacity scan)
 	locked index ranges that another session's worker needed to finish, continue or be
 	cancelled; the worker was the deadlock victim. The admission now reads other runs
 	without locks."""
@@ -906,7 +906,7 @@ def test_admission_never_deadlocks_another_sessions_worker(sql, monkeypatch, tra
 
 @pytest.mark.parametrize("transition", ["finish", "cancel"])
 def test_an_admission_holds_no_lock_another_sessions_worker_needs(sql, monkeypatch, transition):
-	"""P4: the admission is paused after all its reads, holding every lock it took; another
+	"""The admission is paused after all its reads, holding every lock it took; another
 	session's worker must still end its run without waiting. A FOR UPDATE probe of the
 	reservation or a locking capacity scan held a gap or next-key lock the finishing
 	worker's index update had to wait for."""
@@ -943,7 +943,7 @@ def test_an_admission_holds_no_lock_another_sessions_worker_needs(sql, monkeypat
 
 
 def test_an_admission_waiting_on_its_session_never_holds_the_site_mutex(sql):
-	"""P3: the session row is locked before the site mutex, so another session's admission
+	"""The session row is locked before the site mutex, so another session's admission
 	is never refused (or failed) while this one waits."""
 	writer = sql.connect()
 	writer.get_value("Optimus Session", "parent-a", "status", for_update=True)
@@ -1024,7 +1024,7 @@ def test_totals_above_the_int_range_add_up_in_the_session_counter(sql):
 
 
 def test_a_counter_statement_failure_keeps_the_answer_and_logs_the_dropped_spend(sql):
-	"""#72's D2 trade-off on a real database: the counter's statement fails (BIGINT overflow
+	"""#72's log-and-continue trade-off on a real database: the counter's statement fails (BIGINT overflow
 	here), only the counter is rolled back to its savepoint, the failure is logged once and
 	the answer and the attempt's outcome commit. ``tokens_reported`` keeps the tokens, so the
 	journal stays the source for reconciling the session's ``ai_tokens_spent``."""
@@ -1210,7 +1210,7 @@ def test_an_http_admission_waits_for_a_held_session_row_once_then_answers_busy(s
 
 
 def test_a_settlement_waiting_on_a_session_writer_keeps_the_answer(sql):
-	"""F-2: the settlement waits on a session row that a writer (#72's counter, a Desk save)
+	"""The settlement waits on a session row that a writer (#72's counter, a Desk save)
 	then commits. Postgres raises a raw serialization failure (40001) on the session lock;
 	settlement retries it (a superset of #72's rule) and keeps the paid answer. MariaDB
 	needs no retry: the lock is the transaction's first statement."""
@@ -1238,7 +1238,7 @@ def test_a_settlement_waiting_on_a_session_writer_keeps_the_answer(sql):
 
 
 def test_an_admission_takes_over_an_expired_run_in_its_own_transaction(sql, monkeypatch):
-	"""A2: a worker killed mid-call left its run running; the next click (here at t=400,
+	"""A worker killed mid-call left its run running; the next click (here at t=400,
 	past the 311 lease) ends it interrupted with its call uncertain and admits the new run,
 	with no scheduler. #72's real counter counts the new click once and the interrupted run not at all (Q1).
 	The call made uncertain and the interrupted run are one Error Log row each, written after
@@ -1340,7 +1340,7 @@ def test_a_late_settlement_and_a_takeover_serialize_on_the_session_row(sql, monk
 
 
 def test_the_sweep_skips_a_session_a_dead_transaction_holds(sql, monkeypatch):
-	"""R1: a dead worker host's transaction can hold a session row until wait_timeout; each
+	"""A dead worker host's transaction can hold a session row until wait_timeout; each
 	sweep row waited a whole lock timeout and then aborted the sweep. The sweep's NOWAIT
 	lock is refused at once: that run waits for a later sweep, the others are recovered."""
 	claimed("run-a", "parent-a", "worker-a")
@@ -1490,7 +1490,7 @@ def _click():
 
 
 def test_an_http_dispatch_never_waits_and_leaves_the_intent_pending(sql, monkeypatch):
-	"""C1 / F4: after the admission commits, its dispatch finds the session row held (here by
+	"""After the admission commits, its dispatch finds the session row held (here by
 	a Desk save). The admission already waited, so the dispatch takes the row with NOWAIT,
 	answers queued and leaves the committed intent for the session's next click."""
 	_http_ready(monkeypatch)
@@ -1514,7 +1514,7 @@ def test_an_http_dispatch_never_waits_and_leaves_the_intent_pending(sql, monkeyp
 
 
 def test_a_click_resends_a_committed_intent_its_dispatch_left_pending(sql, monkeypatch):
-	"""F1 (probe D3): the first click's dispatch found the session row busy; a later click
+	"""The first click's dispatch found the session row busy; a later click
 	re-sends the pending intent once the 30 s throttle allows, instead of only attaching for
 	the whole 1800 s queued lease (the sweep is not scheduled)."""
 	_http_ready(monkeypatch)
@@ -1547,7 +1547,7 @@ def test_a_click_resends_a_committed_intent_its_dispatch_left_pending(sql, monke
 
 
 def test_one_refresh_click_waits_for_one_lock_timeout_at_most(sql, monkeypatch):
-	"""F4 (probe D4): the admission gets its session row just before its lock timeout; the
+	"""The admission gets its session row just before its lock timeout; the
 	dispatch then finds the row held again. It refuses at once instead of waiting a second
 	timeout, so the click stays well inside the web server's timeout."""
 	_http_ready(monkeypatch)
@@ -1571,7 +1571,7 @@ def test_one_refresh_click_waits_for_one_lock_timeout_at_most(sql, monkeypatch):
 
 
 def test_a_forced_release_in_a_refused_admission_writes_its_row(sql, monkeypatch):
-	"""F3 (probe D1): the takeover of an inconsistent expired run commits with a site_cap
+	"""The takeover of an inconsistent expired run commits with a site_cap
 	refusal; its one recovery row is written too."""
 	_http_ready(monkeypatch)
 	claimed("run-a", "parent-a", "worker-a")
@@ -1634,7 +1634,7 @@ def test_the_selections_counts_are_stored_on_the_run(sql):
 
 
 def test_a_late_delivery_cannot_revive_a_run_the_refresh_treats_as_dead(sql, monkeypatch):
-	"""F1: a queued run whose 1800 s lease lapsed (deadline not passed) is dead to ``live_run``,
+	"""A queued run whose 1800 s lease lapsed (deadline not passed) is dead to ``live_run``,
 	so #72's Refresh may run; the queue's late delivery must not claim it and send a call beside
 	the Refresh. The next admission takes it over."""
 	assert ai_jobs._retry_sql(admit)["status"] == "queued"  # now=10: lease 1810, deadline 3610
@@ -1729,7 +1729,7 @@ def test_a_dead_run_of_a_deleted_session_holds_no_cap_slot(sql):
 	assert value(sql, store.RUN, "run-a", "active_session") == "parent-a"
 
 
-# --- D2: both journal tables keep a session_name index ----------------------------------------
+# --- both journal tables keep a session_name index ----------------------------------------
 
 
 def _indexed_columns(db, table):
@@ -1792,7 +1792,7 @@ def _index_patch_on(sql, monkeypatch):
 
 
 def test_both_journal_tables_keep_their_session_index(sql, monkeypatch):
-	"""D2: Frappe names a PostgreSQL index after its column, so the second table to claim
+	"""Frappe names a PostgreSQL index after its column, so the second table to claim
 	``session_name`` got none. After the patch both have one, and a second run changes nothing.
 	MariaDB names indexes per table: both have one before the patch, and it adds none."""
 	run, attempt = sql.primary.tables[store.RUN], sql.primary.tables[store.ATTEMPT]
@@ -1821,7 +1821,7 @@ def test_both_journal_tables_keep_their_session_index(sql, monkeypatch):
 	assert len(created) <= 1  # the second run created nothing
 
 
-# --- O4: the runbook's reconciliation query, run as written ------------------------------------
+# --- the runbook's reconciliation query, run as written ------------------------------------
 
 _DOCS = Path(__file__).resolve().parents[2] / "docs"
 
@@ -1934,7 +1934,7 @@ def test_the_reconciliation_query_separates_a_gap_from_other_sources(sql):
 
 
 def test_the_active_runs_query_flags_an_expired_run_on_every_database(sql):
-	"""F-2: the runbook's first query as written on MariaDB, and its Postgres form from the
+	"""The runbook's first query as written on MariaDB, and its Postgres form from the
 	runbook's own comment. Epochs are seconds, as the engine stores them."""
 	primary = sql.primary
 	for run_id, session, lease, active in (

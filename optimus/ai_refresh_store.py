@@ -13,7 +13,7 @@ expired run of its session in the same transaction, so recovery does not wait
 for the scheduler. A caller commits a
 calling attempt before sending HTTP, then commits its result and outcome
 together, adding the reported usage to the session counter in the same
-transaction. That counter is #72's log-and-continue (D2): a statement-level
+transaction. That counter is #72's log-and-continue: a statement-level
 failure of it is logged and the outcome still commits, so the run's
 ``tokens_reported`` is the source for reconciling the session's total.
 """
@@ -256,7 +256,7 @@ def admit(
 	still holds its own session's reservation until that session's next admission or the
 	sweep ends it. Every run that can still call a provider is counted.
 
-	Lazy takeover (A2): a run that holds the reservation but whose lease or deadline has
+	Lazy takeover: a run that holds the reservation but whose lease or deadline has
 	passed (``expired``) is ended in this transaction, as the recovery sweep would end it:
 	interrupted, its Calling attempt uncertain (never sent again), its reservation released
 	(``_release``; an inconsistent row is force-released). The admission then goes on, so a
@@ -297,7 +297,7 @@ def admit(
 	parent, busy = _lock_or_busy(lambda: _read("Optimus Session", docname, lock=True))
 	if busy:
 		# Another writer held the session row for a whole lock wait timeout: the HTTP caller
-		# answers busy instead of waiting a second timeout (F-5).
+		# answers busy instead of waiting a second timeout.
 		return {"status": "refused", "reason": "busy"}
 	if not parent or parent.get("session_uuid") != session_uuid or parent["status"] != "Ready":
 		return {"status": "refused", "reason": "not_ready"}
@@ -592,7 +592,7 @@ def settle_attempt(
 	The usage goes to ``analyze._add_ai_spend`` in this transaction: a failure that
 	ends the whole transaction rolls everything back (the caller retries), while a
 	statement-level counter failure is logged by the counter and the outcome commits
-	without it (#72, D2). ``tokens_reported`` always records the tokens.
+	without it (#72). ``tokens_reported`` always records the tokens.
 	"""
 	if (
 		outcome not in {"succeeded", "failed", "skipped", "uncertain"}
@@ -760,7 +760,7 @@ def _mark_uncertain(run, reason, *, force=False):
 def _release(run, docname, *, state, reason, now):
 	"""End an active run: its open call uncertain, its session reservation released.
 
-	An inconsistent row is force-released (E2) rather than holding its session, and a site
+	An inconsistent row is force-released rather than holding its session, and a site
 	cap slot, until the journal is repaired by hand. Release fails open, spend fails closed:
 	a reservation naming another session is cleared, an attempt that is not this run's is
 	never written (the run counts an uncertain call of unknown usage instead). The run comes
@@ -793,9 +793,9 @@ def continue_run(run_id, *, docname, worker_token, now, queued_seconds=1800, pro
 	"""Write the next slice's dispatch intent before the queue sees it.
 
 	The dispatch throttle restarts with the slice, so a quick yield is dispatched at once
-	instead of waiting for the sweep (R3). A slice that could not begin any item
+	instead of waiting for the sweep. A slice that could not begin any item
 	(``progressed`` False) adds to the run's idle streak; ``IDLE_SLICE_LIMIT`` such slices in
-	a row stop the run with ``no_progress`` instead of respinning until its deadline (O5)."""
+	a row stop the run with ``no_progress`` instead of respinning until its deadline."""
 	_, run = lock_run(run_id, docname)
 	if not owns(run, worker_token, now):
 		return None

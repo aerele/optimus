@@ -167,7 +167,7 @@ def test_missing_worker_refuses_admission_without_creating_a_run(queue, monkeypa
 @pytest.mark.parametrize("redis", ["up", "down"])
 def test_existing_refresh_is_visible_even_when_provider_or_queue_is_unavailable(queue, monkeypatch, redis):
 	"""Attaching never needs a worker or Redis, and never changes its answer. The fixture run
-	is a committed intent that never reached RQ: the click re-sends it, best effort (F1)."""
+	is a committed intent that never reached RQ: the click re-sends it, best effort."""
 	monkeypatch.setattr(queue.jobs, "_check_run", lambda run: None)
 	monkeypatch.setattr(ai_fix, "is_available", lambda: False)
 
@@ -298,7 +298,7 @@ def test_a_reservation_the_admission_could_not_see_is_read_again(queue, monkeypa
 
 
 def test_an_http_admission_waits_for_its_session_row_once_then_answers_busy(queue, monkeypatch):
-	"""F-5: a held session row costs the HTTP caller one lock wait timeout, then busy; no
+	"""A held session row costs the HTTP caller one lock wait timeout, then busy; no
 	second attempt waits again (a worker transition still retries lock waits)."""
 
 	class QueryTimeoutError(Exception):
@@ -331,7 +331,7 @@ def test_an_http_admission_waits_for_its_session_row_once_then_answers_busy(queu
 
 
 def test_an_http_admission_never_retries_a_lock_wait_timeout_anywhere(queue, monkeypatch):
-	"""F-5: a lock wait timeout outside the session and mutex locks (here the reservation
+	"""A lock wait timeout outside the session and mutex locks (here the reservation
 	INSERT) is raised after one attempt instead of waiting two more timeouts."""
 
 	class QueryTimeoutError(Exception):
@@ -359,7 +359,7 @@ def test_an_http_admission_never_retries_a_lock_wait_timeout_anywhere(queue, mon
 	assert len(inserts) == 1 and not queue.sent
 
 
-# F2: recovery without the scheduler, the sweep, cancellation and settings.
+# Recovery without the scheduler, the sweep, cancellation and settings.
 
 
 class _QueryTimeoutError(Exception):
@@ -425,7 +425,7 @@ def _crash(queue, lease_until=30):
 
 
 def test_a_refresh_click_recovers_a_crashed_run_without_the_scheduler(admitting, monkeypatch, rows):
-	"""A2: optimus.local runs with pause_scheduler; a worker killed mid-call left its run
+	"""A site that pauses its scheduler (optimus.local does): a worker killed mid-call left its run
 	running and the session reserved, so every later Refresh answered already_running. The
 	click itself now takes the expired run over and starts the new one."""
 	queue = admitting
@@ -494,7 +494,7 @@ def test_a_takeover_of_an_inconsistent_run_writes_one_row_naming_it(admitting, r
 	[({"lease_until": 40}, "lease_expired"), ({"lease_until": 900, "deadline": 45}, "deadline")],
 )
 def test_progress_shows_a_run_that_can_no_longer_progress_as_interrupted(queue, values, reason):
-	"""A2: derived from the lease and the deadline, before any recovery has written it."""
+	"""Derived from the lease and the deadline, before any recovery has written it."""
 	run = {**queue.journal.run, "state": "running", **values}
 	out = queue.jobs.public_state(run)
 	assert out["state"] == "interrupted" and out["stalled"] is True and out["end_reason"] == reason
@@ -534,7 +534,7 @@ def _three_runs(queue):
 
 @pytest.mark.parametrize("variant", ["lock_wait", "inconsistent", "unexpected"])
 def test_one_bad_row_never_stops_the_recovery_sweep(queue, monkeypatch, rows, variant):
-	"""O1 / E1 / R1: the sweep raised at its first bad row (a corrupt run, or a session row a
+	"""The sweep raised at its first bad row (a corrupt run, or a session row a
 	dead transaction held past a lock wait timeout) on every tick, so no lease, deadline or
 	lost dispatch was recovered anywhere on the site. Each row is now on its own."""
 	monkeypatch.setattr(queue.jobs.frappe, "get_all", queue.journal.db.get_all, raising=False)
@@ -622,7 +622,7 @@ def test_a_failed_candidate_read_never_stops_the_other_passes(queue, monkeypatch
 
 
 def test_an_http_admission_leaves_a_busy_dispatch_pending_without_waiting(admitting, monkeypatch, rows):
-	"""C1 / F4: the admission already waited for the session row; its dispatch takes the row
+	"""The admission already waited for the session row; its dispatch takes the row
 	with NOWAIT, so one click waits one lock timeout at most. A busy row leaves the committed
 	intent pending for the session's next click or a takeover, without failing the response."""
 	queue = admitting
@@ -656,7 +656,7 @@ def test_cancel_answers_with_the_cancelled_progress(queue, rows):
 
 
 def test_cancel_of_another_sessions_run_changes_nothing_and_raises_nothing(queue, rows):
-	"""S1 / C2: the caller authorized one session; a run id of another session is refused
+	"""The caller authorized one session; a run id of another session is refused
 	under the session lock, exactly like a run that does not exist."""
 	queue.journal.db.rows["Optimus Session"]["other-session-doc"] = {
 		**queue.journal.db.rows["Optimus Session"]["fake-session-doc"],
@@ -682,7 +682,7 @@ def test_cancel_with_a_run_id_that_is_not_a_short_string_is_not_running(queue, r
 
 
 def test_cancel_waits_for_a_held_session_row_once_then_answers_busy(queue, monkeypatch, rows):
-	"""C1: an HTTP cancel waited up to three lock timeouts and then raised."""
+	"""An HTTP cancel waited up to three lock timeouts and then raised."""
 	monkeypatch.setattr(queue.jobs.time, "sleep", lambda seconds: None)
 	current = queue.journal.db.get_value
 	waits = []
@@ -728,7 +728,7 @@ def test_cancel_still_retries_a_deadlock(queue, monkeypatch):
 
 
 def test_cancel_force_releases_a_corrupt_run_with_one_row(queue, rows):
-	"""E2: a corrupt run could not be cancelled, so it held its session and a site-cap slot
+	"""A corrupt run could not be cancelled, so it held its session and a site-cap slot
 	until someone repaired the journal by hand."""
 	queue.journal.run.update(
 		state="running", worker_token="x", lease_until=999, active_session="SOMETHING-ELSE"
@@ -828,7 +828,7 @@ def test_no_worker_or_sweep_transaction_on_postgres_sets_a_lock_bound(queue, mon
 	],
 )
 def test_settings_written_by_set_config_without_p_are_read_as_numbers(admitting, name, value):
-	"""D5: ``bench set-config`` without ``-p`` stores the string "120"; every admission then
+	"""``bench set-config`` without ``-p`` stores the string "120"; every admission then
 	raised (or, for the slice length, every dispatch failed)."""
 	queue = admitting
 	queue.journal.db.rows[queue.journal.mod.RUN] = {}
@@ -850,7 +850,7 @@ def test_settings_written_by_set_config_without_p_are_read_as_numbers(admitting,
 	],
 )
 def test_an_invalid_setting_refuses_before_admission_and_names_the_fix(admitting, name, value):
-	"""R5: an invalid slice length was admitted, reserved the session and then failed every
+	"""An invalid slice length was admitted, reserved the session and then failed every
 	dispatch until its queued lease ran out."""
 	queue = admitting
 	queue.journal.db.rows[queue.journal.mod.RUN] = {}
@@ -883,7 +883,7 @@ def test_a_session_or_requester_that_cannot_refresh_is_a_refusal(
 
 
 def test_an_invalid_queue_setting_is_rejected_by_name_before_admission(admitting, monkeypatch):
-	"""F5 (probe U1): an invalid queue name was a queue_unavailable refusal whose log row did
+	"""An invalid queue name was a queue_unavailable refusal whose log row did
 	not name the setting; it is rejected like the other settings."""
 	queue = admitting
 	queue.journal.db.rows[queue.journal.mod.RUN] = {}
@@ -899,7 +899,7 @@ def _pending(queue, dispatched_at):
 
 
 def test_a_click_resends_a_committed_intent_that_never_reached_a_worker(admitting, monkeypatch, rows):
-	"""F1: a lost dispatch (a busy session row, a Redis blip) left the run queued with no job
+	"""A lost dispatch (a busy session row, a Redis blip) left the run queued with no job
 	for the whole 1800 s queued lease, since the sweep is not scheduled. The next click
 	re-sends it: NOWAIT, best effort; the claim stays the fence and the job id deduplicates."""
 	queue = admitting
@@ -963,7 +963,7 @@ def test_a_resend_that_fails_never_changes_the_attach_answer(admitting, monkeypa
 
 
 def test_a_forced_release_in_a_refused_admission_still_writes_its_row(admitting, rows):
-	"""F3 (probe D1): the takeover of an inconsistent expired run commits even when the
+	"""The takeover of an inconsistent expired run commits even when the
 	admission is then refused, so its one recovery row must be written too."""
 	queue = admitting
 	attempt = _crash(queue)
@@ -1014,7 +1014,7 @@ def test_a_click_on_a_run_with_nothing_to_send_takes_no_lock(admitting, monkeypa
 
 
 def test_a_click_never_re_sends_the_slice_of_an_expired_run(admitting):
-	"""F1: an expired queued run is dead, whatever its pending intent: the click takes it over
+	"""An expired queued run is dead, whatever its pending intent: the click takes it over
 	(a new run, its own slice) instead of re-sending the old slice to a worker that could not
 	claim it."""
 	queue = admitting

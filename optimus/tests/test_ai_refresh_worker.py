@@ -545,7 +545,7 @@ def test_cleanup_failure_does_not_replace_a_provider_interrupt(worker, monkeypat
 
 
 def test_a_run_whose_item_never_begins_stops_instead_of_respinning(worker):
-	"""O5: each slice selected the item again, could not begin it and yielded; with the
+	"""Each slice selected the item again, could not begin it and yielded; with the
 	continuation now dispatched at once that was a hot loop until the deadline."""
 	worker.valid = False
 	for slice_no in range(3):
@@ -557,7 +557,7 @@ def test_a_run_whose_item_never_begins_stops_instead_of_respinning(worker):
 
 
 def test_switching_ai_off_mid_run_stops_it_without_counting_a_refresh(worker, monkeypatch):
-	"""E7 / C4: the run ended complete and bumped the session's refresh count."""
+	"""The run ended complete and bumped the session's refresh count."""
 	worker.count = 3
 	select = worker.jobs._next_item
 
@@ -574,7 +574,7 @@ def test_switching_ai_off_mid_run_stops_it_without_counting_a_refresh(worker, mo
 
 
 def test_when_both_settlement_writes_fail_the_final_row_carries_tokens_and_outcome(worker, monkeypatch, rows):
-	"""R4 / C3: the error escapes to the worker cleanup, which makes the attempt uncertain;
+	"""The error escapes to the worker cleanup, which makes the attempt uncertain;
 	that last row says what the reported tokens became."""
 	worker.count = 1
 
@@ -606,7 +606,7 @@ def test_when_the_cleanup_also_fails_the_final_row_leaves_the_attempt_to_recover
 
 
 def test_a_begin_that_used_up_the_budget_sends_nothing(worker, monkeypatch):
-	"""M35: the deadline is checked again after the send intent commits; a call started
+	"""The deadline is checked again after the send intent commits; a call started
 	below the reserve could not settle before the deadline fences it."""
 	worker.count = 1
 	worker.journal.run["deadline"] = 60
@@ -627,7 +627,7 @@ def test_a_begin_that_used_up_the_budget_sends_nothing(worker, monkeypatch):
 
 
 def test_a_refusal_before_any_http_call_is_a_known_zero_in_the_run(worker, monkeypatch):
-	"""C3: a prompt refused before sending counted as incomplete usage, which inflated the
+	"""A prompt refused before sending counted as incomplete usage, which inflated the
 	release-monitoring signal for usage the provider never billed."""
 
 	def refuse(*a, **kw):
@@ -676,7 +676,7 @@ def test_a_refusal_before_any_http_call_is_a_known_zero_in_the_run(worker, monke
 
 
 def test_a_failure_from_outside_the_usage_boundary_is_unknown_usage(worker, monkeypatch):
-	"""F2 (probe U2): the HTTP layer's own timeout failure reaching the engine without a call
+	"""The HTTP layer's own timeout failure reaching the engine without a call
 	count is a sent call of unknown usage, never a known zero of 0 tokens."""
 	import frappe
 
@@ -694,7 +694,7 @@ def test_a_failure_from_outside_the_usage_boundary_is_unknown_usage(worker, monk
 
 
 def test_a_slice_that_answered_an_item_is_not_idle_when_the_next_cannot_begin(worker):
-	"""F6 (mutant Q1): only a slice that began no item adds to the idle streak; a healthy run
+	"""Only a slice that began no item adds to the idle streak; a healthy run
 	whose next input changed must not drift towards no_progress."""
 	worker.count = 2
 	worker.send_hook = lambda: setattr(worker, "valid", False)
@@ -704,7 +704,7 @@ def test_a_slice_that_answered_an_item_is_not_idle_when_the_next_cannot_begin(wo
 	assert run["state"] == "queued" and run["slice_no"] == 1 and run["idle_slices"] == 0
 
 
-# --- release-blocking signals (O4): one Error Log row each, at the moment it happens -----------
+# --- release-blocking signals: one Error Log row each, at the moment it happens -----------
 
 
 def _signal_rows(worker, title):
