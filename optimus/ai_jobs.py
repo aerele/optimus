@@ -747,11 +747,14 @@ def _check_run(run, *, locked=False):
 		frappe.get_roles(user)
 	):
 		raise StopRefresh("permission")
-	# The access checks get the session built from this row, not its name: given a name, Frappe
-	# v15 loads the whole document (every child table) for each check, and two rechecks run in
-	# the locked send and save transactions. The owner, share, role and User Permission checks
-	# read only the session's own fields; no child table of a session has a Link field.
-	session = frappe.get_doc({**parent, "doctype": "Optimus Session"})
+	# Given a name, Frappe v15 loads the whole document (every child table) for each check, and
+	# two of an item's rechecks run in the locked send and save transactions: the checks get the
+	# session built from this row instead, whenever Frappe would answer the same for it.
+	session = (
+		frappe.get_doc({**parent, "doctype": "Optimus Session"})
+		if _the_row_answers_as_the_name(user)
+		else parent["name"]
+	)
 	if not may_act_on_session(
 		user=user,
 		owner=parent.get("owner") or "",
@@ -762,6 +765,19 @@ def _check_run(run, *, locked=False):
 	if phase2:
 		raise StopRefresh("phase2")
 	return parent
+
+
+def _the_row_answers_as_the_name(user):
+	"""True when ``frappe.has_permission`` answers the same, on Frappe v15 and v16, for the
+	session built from its row as for its name. The owner, share and role checks read the
+	session's own fields, which the row carries. A User Permission check also reads every child
+	row's Link fields, and a ``has_permission`` hook (for an Optimus Session or for every
+	doctype) may read anything: with User Permissions or such a hook the name is passed, and
+	Frappe loads the document its own way. Both lookups are Frappe's cached ones."""
+	from frappe.core.doctype.user_permission.user_permission import get_user_permissions
+
+	hooks = frappe.get_hooks("has_permission") or {}
+	return not get_user_permissions(user) and not (hooks.get("Optimus Session") or hooks.get("*"))
 
 
 def _signature(doc, row=None):
