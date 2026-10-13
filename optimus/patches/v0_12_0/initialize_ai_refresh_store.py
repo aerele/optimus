@@ -23,7 +23,7 @@ def execute():
 
 
 def ensure_indexes():
-	"""Give every indexed column of the journal tables an index of its own on PostgreSQL (D2).
+	"""Give every indexed column of the journal tables an index of its own on PostgreSQL.
 
 	Frappe names a PostgreSQL index after its column alone (``CREATE INDEX IF NOT EXISTS
 	"session_name"``), and PostgreSQL index names are unique per schema. The Run and the

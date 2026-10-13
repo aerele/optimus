@@ -394,7 +394,7 @@ def test_steps_postprocessing_failure_keeps_reported_usage(work, monkeypatch):
 
 @pytest.mark.parametrize("total,stored", [(7, 7), (2**31 - 1, 2**31 - 1), (3 * (2**31 - 1) + 5, 2**31 - 1)])
 def test_the_steps_token_count_is_clamped_to_the_32_bit_field(work, monkeypatch, total, stored):
-	"""D3: the field stays an Int; a sum of valid provider counts that exceeds it is stored clamped."""
+	"""The field stays an Int; a sum of valid provider counts that exceeds it is stored clamped."""
 	work.journal.run.update(include_fixes=0, include_steps=1)
 	monkeypatch.setattr(analyze, "_actions_for_humanizer", lambda recordings: [{"label": "fake action"}])
 	item = work.jobs._next_item(work.journal.run, {})
@@ -572,7 +572,7 @@ def _begin(work, item):
 
 
 def test_the_send_intent_transaction_takes_every_lock_before_its_first_plain_read(work):
-	"""F-4: in the transaction that writes the Calling attempt, the Finding row is locked
+	"""In the transaction that writes the Calling attempt, the Finding row is locked
 	before the requester's plain User read opens the read view (no 1020 on MariaDB 11.8
 	when a Finding writer that skips the session lock commits in between)."""
 	item = work.jobs._next_item(work.journal.run, {})
@@ -601,7 +601,7 @@ def test_the_send_intent_transaction_yields_on_a_changed_input(work):
 
 
 def test_selection_stops_the_run_when_ai_is_switched_off(work, monkeypatch):
-	"""E7 / C4: with the provider off nothing was selected, so the run ended complete."""
+	"""With the provider off nothing was selected, so the run ended complete."""
 	monkeypatch.setattr(ai_fix, "is_available", lambda **kw: False)
 	with pytest.raises(work.jobs.StopRefresh) as caught:
 		work.jobs._next_item(work.journal.run, {})
@@ -610,7 +610,7 @@ def test_selection_stops_the_run_when_ai_is_switched_off(work, monkeypatch):
 
 @pytest.mark.parametrize("sent", [False, True])
 def test_the_fix_send_counts_its_calls_in_the_engines_own_usage_boundary(work, monkeypatch, sent):
-	"""C3 / F2: a failure is a known zero only when the call count proves nothing was sent;
+	"""A failure is a known zero only when the call count proves nothing was sent;
 	one after a begun call, with no usage reported, stays unknown."""
 
 	def suggest_fix(payload, *, usage_out=None, **kw):

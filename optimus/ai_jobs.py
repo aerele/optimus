@@ -8,7 +8,7 @@ The worker rechecks authorization and inputs before sending and saving each
 item. A Calling record commits before HTTP, without a journal or Session row
 lock spanning the request. Result and outcome commit in one short SQL transaction
 that also adds the usage to the session counter; the counter is log-and-continue
-(#72, D2), so the journal's ``tokens_reported`` is the reconciliation source.
+(#72), so the journal's ``tokens_reported`` is the reconciliation source.
 SQL conflicts are retried as whole short transactions, never as provider calls.
 """
 
@@ -63,7 +63,7 @@ def _now():
 
 def _setting_int(name, default, minimum, maximum):
 	"""A whole-number site setting. ``bench set-config`` stores a string unless it is given
-	``-p``, so a string of digits is read as its number (D5); anything else out of range
+	``-p``, so a string of digits is read as its number; anything else out of range
 	raises, naming the setting and the command that sets it."""
 	value = frappe.conf.get(name, default)
 	if type(value) is str and len(value) <= 12 and value.strip().isascii() and value.strip().isdecimal():
@@ -252,8 +252,8 @@ def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
 
 
 def _unsettled_context(unsettled, released):
-	"""``tokens`` and ``outcome`` for the worker's last row when the outcome write gave up
-	(R4): ``_settle``'s outcome, and that the cleanup left the open attempt uncertain."""
+	"""``tokens`` and ``outcome`` for the worker's last row when the outcome write gave up:
+	``_settle``'s outcome, and that the cleanup left the open attempt uncertain."""
 	if not unsettled:
 		return {}
 	tokens, outcome = unsettled
@@ -474,7 +474,7 @@ def _drive(run_id, docname, slice_no, worker_token):
 
 def _log_signals(signals, run_id, docname):
 	"""Write one Error Log row for each row the store recorded, after the transaction that
-	recorded it has ended (O4). ``discarded``: an answer was dropped because its attempt is
+	recorded it has ended. ``discarded``: an answer was dropped because its attempt is
 	stale or fenced. ``duplicate_blocked``: the journal stopped a second send or a second
 	delivery. Each row carries the session, the run and the signal's own context
 	(``attempt``, ``kind``, ``slice_no``, ``reason``). ``uncertain``: a call was settled with
@@ -536,7 +536,7 @@ def _settle(operation, *, run_id, docname, attempt_id, tokens, session_uuid=None
 	  reconciler never adds them twice.
 	- When neither write saved an outcome, the last error is raised, carrying the tokens and
 	  that outcome (``_UNSETTLED_ATTR``) for the worker cleanup's last row. The usage counter is
-	  log-and-continue (#72, D2): a statement-level counter failure is logged by the counter
+	  log-and-continue (#72): a statement-level counter failure is logged by the counter
 	  and the write still commits, so the journal's ``tokens_reported`` is the source for
 	  reconciling the session's ``ai_tokens_spent``.
 	- An RQ job timeout during the writes, before an outcome is saved, writes one row with
@@ -795,7 +795,7 @@ def _chain(run):
 def _attempts(run):
 	"""``(tried, uncertain, fixes_spent)``: this run's attempts, the session's uncertain
 	attempts as ``(kind, target, input_hash)`` keys, and the fix attempts of the whole resume
-	chain, which is what the item cap limits (E3): a resume continues the same refresh, so it
+	chain, which is what the item cap limits: a resume continues the same refresh, so it
 	does not get the cap again."""
 	fields = ["run_id", "kind", "target_name", "input_hash", "state"]
 	chain = _chain(run)
@@ -827,7 +827,7 @@ def _valid_item(run, doc, row, fingerprint):
 		return False
 	# A fix item is guarded by its fingerprint (the finding's own fields and the session's
 	# recordings) and the Finding row lock, so an unrelated save of the session during the HTTP
-	# call (E4: a Desk edit, a counter, a Phase 2 save) does not discard a paid answer. The
+	# call (a Desk edit, a counter, a Phase 2 save) does not discard a paid answer. The
 	# Steps item rewrites the session's ``notes``, which the Desk form edits, so any session
 	# save since the item was prepared makes it stale.
 	if row is None and parent.get("modified") != doc.get("modified"):
@@ -865,7 +865,7 @@ def _build_payload(row, file_cache, grounding, *, principal):
 def _grounding(doc, row, memo, run_id=None):
 	"""The fix prompt's grounding for one finding, the same inputs as the synchronous Refresh
 	(``analyze._run_ai_backfill``): the Phase 2 hottest-line index and the Slow Query index
-	evidence (#16). The slice's ``memo`` builds each once, not once per finding (#14): a Phase 2
+	evidence. The slice's ``memo`` builds each once, not once per finding: a Phase 2
 	index failure is logged once per slice, with the session, and the slice goes on without it."""
 	from optimus import analyze
 
@@ -938,7 +938,7 @@ def _fix_item(run, doc, row, memo):
 
 def _suggest_fix(payload, *, timeout, run):
 	"""The fix item's provider call, inside the engine's own usage boundary, as the Steps
-	call is (C3, F2). ``suggest_fix`` counts each call it begins in this ``Usage``
+	call is. ``suggest_fix`` counts each call it begins in this ``Usage``
 	(``usage_out``), so a failure is a known zero only when the count proves nothing was
 	sent; any other failure without reported usage stays unknown."""
 	usage = ai_fix.Usage()
@@ -1015,7 +1015,7 @@ def _next_item(run, memo):
 	from optimus.settings import get_config
 
 	if not ai_fix.is_available():
-		# Switched off mid-run: nothing more can be sent, which is not a complete refresh (E7).
+		# Switched off mid-run: nothing more can be sent, which is not a complete refresh.
 		raise StopRefresh("disabled")
 	doc = frappe.get_doc("Optimus Session", run["session_name"])
 	tried, uncertain, fixes_spent = _attempts(run)
@@ -1031,7 +1031,7 @@ def _next_item(run, memo):
 		)
 	rows = [row for row in rows if ("fix", row.name) not in names]
 	remaining = max(0, run["cap"] - fixes_spent) if run.get("cap") else len(rows)
-	# Hash only the rows an uncertain attempt names (E5): none, on the usual run.
+	# Hash only the rows an uncertain attempt names: none, on the usual run.
 	maybe = {target for kind, target, _ in uncertain if kind == "fix"}
 	blocked = {
 		row.name for row in rows if row.name in maybe and ("fix", row.name, _signature(doc, row)) in uncertain
@@ -1086,7 +1086,7 @@ def _dispatch_pending(run_id, docname, *, nowait=False):
 	True once enqueued. False when nothing is due (claimed, ended or throttled) or the
 	enqueue failed (logged; the intent stays pending). ``nowait`` (an HTTP request: the
 	admission already waited for the session row, or an attach) takes that row with NOWAIT
-	and never retries, so a click waits one lock timeout at most (C1, F4); a busy row
+	and never retries, so a click waits one lock timeout at most; a busy row
 	answers None, logs no row and leaves the intent pending, for the session's next click
 	(``_resend_pending``), a takeover or the sweep."""
 	from optimus.analyze import _run_ai_step
@@ -1203,7 +1203,7 @@ def start_refresh(
 	# Attaching only reads progress. Redis or a disabled provider must not hide
 	# an existing run; admission below still serializes any competing new run. A run
 	# whose lease or deadline has passed is no longer attached to: the admission takes
-	# it over (A2), so a crashed worker needs neither the scheduler nor a manual cancel.
+	# it over, so a crashed worker needs neither the scheduler nor a manual cancel.
 	now = _now()
 	current = frappe.db.get_value(store.RUN, {"active_session": docname}, "*", as_dict=True)
 	if current and current.get("state") in store.ACTIVE and not store.expired(current, now):
@@ -1211,7 +1211,7 @@ def start_refresh(
 		return {"status": "already_running", "refresh": public_state(current, now=now)}
 	if not ai_fix.is_available():
 		return {"status": "refused", "reason": "disabled"}
-	# Every setting is read before admission (R5): a run admitted with an unusable slice
+	# Every setting is read before admission: a run admitted with an unusable slice
 	# length could never be dispatched and held its session until the queued lease expired.
 	max_seconds = _setting_int("optimus_ai_refresh_max_seconds", 3600, 60, 86400)
 	site_cap = _setting_int("optimus_ai_max_active_refreshes", 2, 1, 1000)
@@ -1260,7 +1260,7 @@ def start_refresh(
 		)
 
 	out = _retry_sql(admission, retry_lock_waits=False)
-	# A takeover commits with every answer, a refusal included (F3).
+	# A takeover commits with every answer, a refusal included.
 	_note_ending(out.pop("taken_over", None), docname)
 	if out["status"] == "already_running" and not out.get("run"):
 		# The unique reservation refused the insert, but that run was not visible to the
@@ -1273,7 +1273,7 @@ def start_refresh(
 		out = {"status": "already_running", "run": current}
 	if out["status"] == "queued":
 		# The admission already waited for the session row: the dispatch takes it with
-		# NOWAIT, so the click waits once (C1, F4). A busy row leaves the committed intent
+		# NOWAIT, so the click waits once. A busy row leaves the committed intent
 		# pending for the next click (``_resend_pending``) instead of failing the response.
 		_dispatch_pending(run_id, docname, nowait=True)
 	if out.get("run"):
@@ -1330,7 +1330,7 @@ def _selection_counts(docname, include_fixes, resume_from=None):
 
 
 def _resend_pending(run, docname, now):
-	"""On attach, send again a committed slice intent that never reached a worker (F1): a
+	"""On attach, send again a committed slice intent that never reached a worker: a
 	busy dispatch or a Redis failure left it pending, and the sweep is not scheduled.
 
 	Best effort. The gate is the plain read: a queued run with a pending intent past the
@@ -1411,8 +1411,8 @@ def recover_pending():
 	Three independent passes: expired leases, spent deadlines, then committed intents that
 	never reached a worker. Each row is its own short transaction and takes its session row
 	with NOWAIT, so a row a dead or slow transaction holds is skipped at once (``busy``; the
-	next sweep or admission tries again) instead of stalling the sweep (R1). A failing row
-	or candidate read never stops the rest (O1): each failure is logged once, after the
+	next sweep or admission tries again) instead of stalling the sweep. A failing row
+	or candidate read never stops the rest: each failure is logged once, after the
 	passes, with its ``run_id``. Each run it ends gets its rows then too (``_log_ending``):
 	``ended``, ``uncertain`` for its open call, ``release`` when it was inconsistent.
 
@@ -1513,10 +1513,10 @@ def cancel_refresh(run_id, *, docname, requested_by):
 	works without Redis.
 
 	``{"status": "cancelled", "refresh": ...}``, or a refusal: ``not_running`` when the run
-	is not an active run of this session (another session's run changes nothing, S1), and
+	is not an active run of this session (another session's run changes nothing), and
 	``busy`` when the session row stayed locked for one lock wait timeout. An HTTP request
-	waits once (C1); deadlocks and snapshot or serialization conflicts are still retried. A
-	run with an inconsistent journal row is force-released, with one Error Log row (E2)."""
+	waits once; deadlocks and snapshot or serialization conflicts are still retried. A
+	run with an inconsistent journal row is force-released, with one Error Log row."""
 
 	def cancellation():
 		_bound_http_lock_wait()
@@ -1548,7 +1548,7 @@ def public_state(run, now=None):
 
 	An active run whose lease or deadline has passed shows as it will be recorded:
 	``interrupted``, with ``stalled`` True and the expiry as its ``end_reason``, before any
-	recovery has written it (A2). The session's next admission takes it over."""
+	recovery has written it. The session's next admission takes it over."""
 
 	def count(key):
 		value = run.get(key) or 0

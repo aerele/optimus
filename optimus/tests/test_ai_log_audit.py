@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Static guard (PR-0a): every Error Log write on the AI surface goes through
+"""Static guard: every Error Log write on the AI surface goes through
 ``ai_fix.log_ai_failure``, and none runs while an exception is being handled.
 
 A bare ``frappe.log_error(title=...)`` stores Frappe's with-context traceback,

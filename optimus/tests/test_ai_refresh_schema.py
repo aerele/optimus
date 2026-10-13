@@ -41,7 +41,7 @@ def test_cumulative_session_usage_can_hold_the_sum_of_valid_provider_counts():
 
 
 def test_the_steps_token_field_keeps_its_32_bit_type():
-	"""D3: widening it rebuilds the Session table (MariaDB COPY, Postgres rewrite) for a count one
+	"""Widening it rebuilds the Session table (MariaDB COPY, Postgres rewrite) for a count one
 	reply cannot reach, and makes the column nullable. The engine clamps the value instead."""
 	path = ROOT / "optimus" / "doctype" / "optimus_session" / "optimus_session.json"
 	fields = {f["fieldname"]: f for f in json.loads(path.read_text())["fields"]}
@@ -94,7 +94,7 @@ def test_admission_seed_is_idempotent(monkeypatch):
 
 
 def test_every_migrate_seeds_the_admission_mutex_again(monkeypatch):
-	"""D4: the patch runs once. A rollback that dropped the journal tables, then a redeploy,
+	"""The patch runs once. A rollback that dropped the journal tables, then a redeploy,
 	left the mutex row missing with the patch already logged as done, so every user refresh
 	failed closed for good."""
 	from importlib import import_module
@@ -125,7 +125,7 @@ def test_the_run_journal_records_its_idle_slices():
 
 
 def test_the_run_journal_records_the_selections_gated_and_excluded_counts():
-	"""Item 5: #71's two Refresh toasts need the counts of the selection; the run keeps them."""
+	"""#71's two Refresh toasts need the counts of the selection; the run keeps them."""
 	path = ROOT / "optimus" / "doctype" / "optimus_ai_refresh_run" / "optimus_ai_refresh_run.json"
 	doc = json.loads(path.read_text())
 	fields = {f["fieldname"]: f for f in doc["fields"]}
@@ -135,7 +135,7 @@ def test_the_run_journal_records_the_selections_gated_and_excluded_counts():
 	assert [f["fieldname"] for f in doc["fields"]] == [n for n in doc["field_order"]]
 
 
-# --- D2: both journal tables keep their indexes on PostgreSQL ---------------------------------
+# --- both journal tables keep their indexes on PostgreSQL ---------------------------------
 
 
 def _index_patch(monkeypatch, *, db_type, indexes, schema="public"):
@@ -242,7 +242,7 @@ def test_mariadb_is_left_alone(monkeypatch):
 
 
 def test_the_seed_runs_after_the_model_sync():
-	"""D6: the mutex row needs its table, so the patch must be after the schema is synced."""
+	"""The mutex row needs its table, so the patch must be after the schema is synced."""
 	lines = (ROOT / "patches.txt").read_text().splitlines()
 	name = "optimus.patches.v0_12_0.initialize_ai_refresh_store"
 	assert lines.count(name) == 1
