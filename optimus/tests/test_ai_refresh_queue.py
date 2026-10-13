@@ -633,6 +633,19 @@ def test_cancel_of_another_sessions_run_changes_nothing_and_raises_nothing(queue
 	assert queue.journal.db.rows == before and not rows
 
 
+@pytest.mark.parametrize(
+	"run_id",
+	[{"state": "queued"}, {"active_session": "fake-session-doc"}, None, "", "x" * 141],
+	ids=["filter", "reservation-filter", "none", "empty", "141-characters"],
+)
+def test_cancel_with_a_run_id_that_is_not_a_short_string_is_not_running(queue, rows, run_id):
+	"""A filter in place of the run id cancelled the session's own run without its id, through
+	a locking read by filter. It names no run, like a run that does not exist."""
+	before = deepcopy(queue.journal.db.rows)
+	assert _cancel(queue, run_id=run_id) == {"status": "refused", "reason": "not_running"}
+	assert queue.journal.db.rows == before and not rows
+
+
 def test_cancel_waits_for_a_held_session_row_once_then_answers_busy(queue, monkeypatch, rows):
 	"""C1: an HTTP cancel waited up to three lock timeouts and then raised."""
 	monkeypatch.setattr(queue.jobs.time, "sleep", lambda seconds: None)
@@ -718,6 +731,27 @@ def test_an_invalid_setting_refuses_before_admission_and_names_the_fix(admitting
 		_start(queue)
 	assert name in str(caught.value) and "set-config -p" in str(caught.value)
 	assert not queue.journal.db.rows[queue.journal.mod.RUN] and not queue.sent
+
+
+@pytest.mark.parametrize("reason", ["not_ready", "permission", "phase2"])
+@pytest.mark.parametrize("existing", [False, True], ids=["no-run", "live-run"])
+def test_a_session_or_requester_that_cannot_refresh_is_a_refusal(
+	admitting, monkeypatch, rows, reason, existing
+):
+	"""A session that is not Ready, a requester without access or a Phase 2 run in progress is
+	answered like every other refusal, not raised: nothing is admitted, counted, sent or
+	logged, and a live run's progress is not shown to a requester who may not see it."""
+	queue = admitting
+	if not existing:
+		queue.journal.db.rows[queue.journal.mod.RUN] = {}
+	before = deepcopy(queue.journal.db.rows)
+
+	def stop(run, **kw):
+		raise queue.jobs.StopRefresh(reason)
+
+	monkeypatch.setattr(queue.jobs, "_check_run", stop)
+	assert _start(queue) == {"status": "refused", "reason": reason}
+	assert queue.journal.db.rows == before and not queue.sent and not rows
 
 
 def test_an_invalid_queue_setting_is_rejected_by_name_before_admission(admitting, monkeypatch):

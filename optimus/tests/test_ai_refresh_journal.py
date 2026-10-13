@@ -110,7 +110,9 @@ class Database:
 						return False
 					if value[0] == "<=" and (actual is None or actual > value[1]):
 						return False
-					if value[0] not in {"in", "<="}:
+					if value[0] == ">" and (actual is None or actual <= value[1]):
+						return False
+					if value[0] not in {"in", "<=", ">"}:
 						raise AssertionError("unsupported fake query operator")
 				elif row.get(key) != value:
 					return False
@@ -829,6 +831,68 @@ def test_admission_enforces_site_and_requester_limits(journal, count, site_cap, 
 	out = admit(journal, site_cap=site_cap, user_cap=user_cap)
 	assert out == {"status": "refused", "reason": reason}
 	assert len(journal.db.rows[journal.mod.RUN]) == count
+
+
+def _other_sessions_runs(journal, *, owner="other-owner", count=2, **values):
+	"""Two user refreshes of other sessions, claimed by workers. Nothing has ended them: no
+	click on their sessions, no sweep."""
+	journal.db.rows[journal.mod.RUN] = {
+		f"other-{i}": {
+			**journal.run,
+			"name": f"other-{i}",
+			"run_id": f"other-{i}",
+			"session_name": f"other-session-{i}",
+			"active_session": f"other-session-{i}",
+			"state": "running",
+			"worker_token": f"worker-{i}",
+			"requested_by": owner,
+			**values,
+		}
+		for i in range(count)
+	}
+
+
+@pytest.mark.parametrize(
+	"values",
+	[
+		{"lease_until": 300},
+		{"lease_until": 400},
+		{"lease_until": 5000, "deadline": 400},
+		{"state": "queued", "lease_until": 5000, "deadline": 300},
+	],
+	ids=["worker-died", "lease-ends-now", "deadline-ends-now", "queued-past-deadline"],
+)
+@pytest.mark.parametrize("cap", ["site_cap", "user_cap"])
+def test_a_run_that_can_no_longer_call_holds_no_cap_slot(journal, values, cap):
+	"""A run whose lease or deadline has passed can neither claim a slice nor begin a call, so
+	it holds no slot: two crashed workers (or two runs delivered after their deadline) must
+	not refuse every other session until the sweep or a click on their own sessions ends
+	them. Another session's admission leaves them for those to end."""
+	_other_sessions_runs(journal, owner="fake-owner" if cap == "user_cap" else "other-owner", **values)
+	before = deepcopy(journal.db.rows[journal.mod.RUN])
+	out = admit(journal, now=400, site_cap=2 if cap == "site_cap" else 10, user_cap=2)
+	assert out["status"] == "queued" and "taken_over" not in out
+	assert {name: journal.db.rows[journal.mod.RUN][name] for name in before} == before
+
+
+@pytest.mark.parametrize("field", ["lease_until", "deadline"])
+@pytest.mark.parametrize("cap", ["site_cap", "user_cap"])
+def test_a_run_that_can_still_call_holds_its_slot_to_its_last_second(journal, field, cap):
+	values = {"lease_until": 5000, "deadline": 5000, field: 401}
+	_other_sessions_runs(journal, owner="fake-owner" if cap == "user_cap" else "other-owner", **values)
+	out = admit(journal, now=400, site_cap=2 if cap == "site_cap" else 10, user_cap=2)
+	assert out == {"status": "refused", "reason": cap}
+
+
+def test_the_cap_count_reads_only_live_runs(journal):
+	"""The filter itself excludes the dead runs, so the ``limit`` of the read is spent on live
+	ones and the count stays a plain read."""
+	_other_sessions_runs(journal, lease_until=300)
+	journal.db.calls.clear()
+	admit(journal, now=400)
+	[(table, filters, locking)] = [c for c in journal.db.calls if isinstance(c[1], dict) and "scope" in c[1]]
+	assert table == journal.mod.RUN and not locking
+	assert filters["lease_until"] == [">", 400] and filters["deadline"] == [">", 400]
 
 
 def test_analyze_time_runs_use_only_the_session_reservation(journal):
@@ -1726,3 +1790,40 @@ def test_a_late_delivery_cannot_claim_a_run_that_expired(journal, values):
 def test_a_live_queued_run_is_still_claimed_at_its_last_moment(journal):
 	journal.run.update(lease_until=401, deadline=3600)
 	assert claim(journal, now=400)["state"] == "running"
+
+
+@pytest.mark.parametrize(
+	"run_id",
+	[
+		{"state": "running"},
+		{"session_name": "fake-session-doc"},
+		["fake-run"],
+		None,
+		"",
+		7,
+		"fake-run" + "x" * 133,
+	],
+	ids=["filter", "session-filter", "list", "none", "empty", "int", "141-characters"],
+)
+def test_a_run_id_that_is_not_a_short_string_names_no_run(journal, run_id):
+	"""A filter-shaped run id made the Run read a locking read by filter (next-key locks on
+	MariaDB) and reached the session's own run without naming it. It names no run: the
+	session row is locked as on every path, the Run table is not read, nothing changes."""
+	claim(journal)
+	before = deepcopy(journal.db.rows)
+	journal.db.calls.clear()
+	with journal.db.transaction():
+		parent, run = journal.mod.lock_run(run_id, "fake-session-doc")
+	assert parent["name"] == "fake-session-doc" and run is None
+	assert [c for c in journal.db.calls if c[0] == journal.mod.RUN] == []
+	with journal.db.transaction():
+		assert journal.mod.cancel(run_id, docname="fake-session-doc", now=12) is None
+	assert journal.db.rows == before
+
+
+def test_a_run_id_of_140_characters_still_names_its_run(journal):
+	name = "r" * 140
+	journal.db.rows[journal.mod.RUN] = {name: {**journal.run, "name": name, "run_id": name}}
+	with journal.db.transaction():
+		_, run = journal.mod.lock_run(name, "fake-session-doc")
+	assert run["name"] == name

@@ -103,16 +103,19 @@ asks `live_run`, below).
   a new run, `{"status": "already_running", "refresh": <progress>}` when the
   session has a live run, or `{"status": "refused", "reason": ...}`. The
   reasons: `busy` (the session row or the site mutex is held), `site_cap`,
-  `user_cap`, `refresh_running` (#72's Refresh holds the session; with a
-  `message`), `disabled`, `no_worker`, `queue_unavailable`, `not_ready`, and
-  for a resume `not_resumable`, `already_resumed`, `retry_limit`. A session
-  that is not Ready, a requester without access, or a Phase 2 run in progress
-  raises `StopRefresh` (its `reason` is `not_ready`, `permission` or `phase2`)
-  before admission. An unusable site setting raises an error naming it. A user refresh with no mutex row
-  raises `JournalUnavailable`, whose message names the repair command.
+  `user_cap` (counting live runs only: a run whose lease or deadline has passed
+  holds no slot), `refresh_running` (#72's Refresh holds the session; with a
+  `message`), `disabled`, `no_worker`, `queue_unavailable`, `not_ready` (the
+  session is not Ready), `permission` (the requester has no access), `phase2` (a
+  Phase 2 run is in progress), and for a resume `not_resumable`,
+  `already_resumed`, `retry_limit`. `not_ready`, `permission` and `phase2` are
+  answered before any progress is shown. An unusable site setting raises an
+  error naming it. A user refresh with no mutex row raises
+  `JournalUnavailable`, whose message names the repair command.
 - `cancel_refresh(run_id, *, docname, requested_by)` answers
   `{"status": "cancelled", "refresh": <progress>}` or
-  `{"status": "refused", "reason": "busy" | "not_running"}`.
+  `{"status": "refused", "reason": "busy" | "not_running"}`; a `run_id` that is
+  not a string of 1 to 140 characters names no run (`not_running`).
 - The progress dict (`public_state`) adds `stalled` (the lease or deadline has
   passed; `state` then reads `interrupted`), `gated` and `excluded`, beside the
   counts, `usage`, `end_reason` and `breaker_kind`.
