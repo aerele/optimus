@@ -240,7 +240,10 @@ class SQLDatabase:
 		columns = "*" if fields == ["*"] else ",".join(self.quoted(k) for k in fields)
 		query = "SELECT " + columns + " FROM " + self.table(doctype) + " WHERE " + " AND ".join(where)
 		if order_by:
-			query += " ORDER BY " + self.quoted(order_by) + " DESC"
+			# Frappe's default is the newest first ("creation desc"); a caller may name it
+			column, _, direction = order_by.partition(" ")
+			assert direction.lower() in ("", "desc", "asc")
+			query += " ORDER BY " + self.quoted(column) + " " + (direction.upper() or "DESC")
 		if limit:
 			query += " LIMIT " + str(int(limit))
 		if for_update:
@@ -1135,6 +1138,17 @@ def test_a_deadlock_during_settlement_is_retried_and_charged_once(sql):
 	assert not rival_errors, rival_errors
 	assert db.conflicts == [1213 if BACKEND == "mariadb" else "40P01"]
 	assert persisted == [True, True]
+
+
+def test_refresh_state_answers_the_progress_of_the_sessions_newest_run(sql, monkeypatch):
+	monkeypatch.setattr(ai_jobs, "_now", lambda: 30.0)  # run-b's lease and deadline are ahead
+	assert ai_jobs.refresh_state("parent-a") is None
+	claimed()
+	ai_jobs._retry_sql(lambda: store.cancel("run-a", docname="parent-a", now=12))
+	assert ai_jobs._retry_sql(lambda: admit("run-b", now=20))["status"] == "queued"
+	state = ai_jobs.refresh_state("parent-a")
+	assert state["run_id"] == "run-b" and state["state"] == "queued" and "worker_token" not in state
+	assert ai_jobs.refresh_state("parent-b") is None
 
 
 def test_completion_and_nullable_reservation_allow_a_later_run(sql):

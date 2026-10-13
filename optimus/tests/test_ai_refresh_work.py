@@ -1,5 +1,6 @@
 """Worker inputs are tied to the initiating user and current SQL state."""
 
+import json
 from copy import deepcopy
 from importlib import import_module
 from types import SimpleNamespace
@@ -402,6 +403,143 @@ def test_the_steps_token_count_is_clamped_to_the_32_bit_field(work, monkeypatch,
 	with work.journal.db.transaction():
 		assert item.persist({"notes": "fake notes", "tokens": {"total_tokens": total}}) is True
 	assert touched == [{"notes": "fake notes", "ai_steps_tokens": stored}]
+
+
+def _steps_run(work, monkeypatch, **run):
+	"""A run that asks for Steps only, on a session with one action to describe."""
+	work.journal.run.update(include_fixes=0, include_steps=1, **run)
+	monkeypatch.setattr(analyze, "_actions_for_humanizer", lambda recordings: [{"label": "fake action"}])
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_the_steps_send_returns_its_notes_its_tokens_and_whether_they_are_complete(
+	work, monkeypatch, complete
+):
+	_steps_run(work, monkeypatch)
+	monkeypatch.setattr(analyze, "_assemble_humanized_notes", lambda text: f"assembled {text}")
+
+	def humanize(*a, usage_out, **kw):
+		usage_out.begin()
+		usage_out.observe(complete)
+		usage_out.update(total_tokens=9)
+		return "fake steps"
+
+	monkeypatch.setattr(ai_fix, "humanize_steps", humanize)
+	item = work.jobs._next_item(work.journal.run, {})
+	assert item.kind == "steps"
+	assert item.send(10) == {
+		"notes": "assembled fake steps",
+		"tokens": {"total_tokens": 9},
+		"usage_complete": complete,
+	}
+
+
+def test_a_steps_answer_is_not_saved_over_a_session_saved_since_it_was_prepared(work, monkeypatch):
+	"""The save rechecks the item: a Desk save of the session since the item was prepared
+	makes the answer stale, and the session's notes are left as they are."""
+	_steps_run(work, monkeypatch)
+	work.parent["modified"] = "t1"
+	item = work.jobs._next_item(work.journal.run, {})
+	touched = []
+	monkeypatch.setattr(work.jobs, "_touch_session", lambda name, **values: touched.append(values))
+	work.parent["modified"] = "t2"
+	with work.journal.db.transaction():
+		assert item.persist({"notes": "fake notes", "tokens": {"total_tokens": 3}}) is False
+	assert touched == []
+
+
+def test_steps_switched_off_in_the_settings_are_recorded_and_never_sent(work, monkeypatch):
+	_steps_run(work, monkeypatch)
+	monkeypatch.setattr(ai_fix, "is_available", lambda section=None: section != "humanize")
+	assert work.jobs._next_item(work.journal.run, {}) is None
+	assert work.journal.run["steps_state"] == "toggle_off" and not work.sends
+
+
+@pytest.mark.parametrize("scope,kept", [("fixes_missing", True), ("all", False)])
+def test_notes_a_person_wrote_are_kept_by_an_analyze_time_run_only(work, monkeypatch, scope, kept):
+	"""An analyze-time run never replaces notes a person wrote; a user refresh does."""
+	_steps_run(work, monkeypatch, scope=scope)
+	work.parent["notes"] = "Human authored reproduction notes"
+	item = work.jobs._next_item(work.journal.run, {})
+	if kept:
+		assert item is None and work.journal.run["steps_state"] == "kept"
+	else:
+		assert item.kind == "steps" and work.journal.run["steps_state"] == "pending"
+
+
+@pytest.mark.parametrize("scope,selected", [("all", True), ("fixes_missing", False)])
+def test_an_outdated_answer_is_refreshed_by_a_user_refresh_only(work, scope, selected):
+	"""A stored answer from an older prompt version is outdated: a user refresh replaces it, an
+	analyze-time run only fills findings with no answer."""
+	from optimus import ai_prompts
+
+	work.journal.run.update(scope=scope, requested_at_epoch=1_800_000_000)  # after the answer
+	work.row["llm_fix_json"] = json.dumps(
+		{
+			"suggestion": "an older answer",
+			"prompt_version": ai_prompts.PROMPT_VERSION - 1,
+			"generated_at": "2026-01-02T10:00:00+00:00",
+		}
+	)
+	item = work.jobs._next_item(work.journal.run, {})
+	assert (item is not None and item.target == work.row.name) is selected
+
+
+@pytest.mark.parametrize("count,stops", [(10000, False), (10001, True)])
+@pytest.mark.parametrize("where", ["chain", "uncertain"])
+def test_more_than_ten_thousand_attempts_to_weigh_stop_the_run(work, where, count, stops):
+	"""``history_limit``: one selection weighs at most 10000 attempts of the run's chain and
+	10000 uncertain attempts of its session."""
+	work.journal.db.rows[work.journal.mod.ATTEMPT] = {
+		f"attempt-{i}": {
+			"run_id": "fake-run" if where == "chain" else "older-run",
+			"session_name": work.parent["name"],
+			"kind": "fix",
+			"target_name": f"target-{i}",
+			"input_hash": "fake",
+			"state": "failed" if where == "chain" else "uncertain",
+		}
+		for i in range(count)
+	}
+	if stops:
+		with pytest.raises(work.jobs.StopRefresh) as caught:
+			work.jobs._attempts(work.journal.run)
+		assert caught.value.reason == "history_limit"
+	else:
+		tried, uncertain, _spent = work.jobs._attempts(work.journal.run)
+		assert len(tried) + len(uncertain) == count
+
+
+def test_a_retry_of_uncertain_calls_does_not_weigh_them(work):
+	work.journal.run["retry_uncertain"] = 1
+	work.journal.db.rows[work.journal.mod.ATTEMPT] = {
+		f"attempt-{i}": {
+			"run_id": "older-run",
+			"session_name": work.parent["name"],
+			"kind": "fix",
+			"target_name": f"target-{i}",
+			"input_hash": "fake",
+			"state": "uncertain",
+		}
+		for i in range(10001)
+	}
+	assert work.jobs._attempts(work.journal.run) == ([], set(), 0)
+
+
+@pytest.mark.parametrize(
+	"field,value",
+	[("parent", "other-session-doc"), ("parenttype", "Other Doctype"), ("parentfield", "other_table")],
+)
+def test_a_finding_row_that_is_not_one_of_the_sessions_findings_is_never_answered(work, field, value):
+	"""The locked Finding row must be a row of this session's ``findings`` table, even when its
+	fingerprint matches: an answer is never written to another session's or table's row."""
+	work.row[field] = value
+	item = work.jobs._next_item(work.journal.run, {})
+	assert item.target == work.row.name
+	with work.journal.db.transaction():
+		assert item.valid() is False
+		assert item.persist({"suggestion": "fake answer"}) is False
+	assert work.row["llm_fix_json"] == ""
 
 
 def test_locked_recheck_reads_the_requester_without_locking_the_user_row(work):
