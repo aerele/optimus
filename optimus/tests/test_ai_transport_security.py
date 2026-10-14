@@ -47,7 +47,7 @@ def send(url="https://provider.invalid/v1/chat/completions"):
 
 
 def test_http_interface_is_unchanged():
-	assert tuple(inspect.signature(ai_fix._http_post).parameters) == ("url", "headers", "body", "provider", "where", "timeout", "auth", "quiet_statuses", "session_uuid")
+	assert tuple(inspect.signature(ai_fix._http_post).parameters) == ("url", "headers", "body", "provider", "where", "timeout", "auth", "quiet_statuses", "session_uuid", "docname", "budget", "log_extra")
 
 
 @pytest.mark.parametrize("host", ["10.0.0.5", "provider.invalid", "2130706433"])
@@ -112,7 +112,7 @@ def test_context_error_remains_actionable_without_echo(wire):
 	install(Response(400, "maximum context length exceeded " + PROMPT))
 	with pytest.raises(ai_fix.AiFixError) as caught:
 		send()
-	assert caught.value.kind == "config" and "OLLAMA_CONTEXT_LENGTH" in str(caught.value)
+	assert caught.value.kind == "context" and "OLLAMA_CONTEXT_LENGTH" in str(caught.value)
 	assert PROMPT not in str(caught.value) and len(posts) == 1
 
 
@@ -219,10 +219,11 @@ def test_normal_http_error_does_not_retain_prompt_frames(wire):
 	assert PROMPT in caught.value.detail
 
 
-def test_private_boundary_preserves_timeout_usage_and_logged_marker():
+@pytest.mark.parametrize("tokens", [33, ai_fix.MAX_TOKEN_COUNT + 7])
+def test_private_boundary_preserves_timeout_usage_and_logged_marker(tokens):
 	JobTimeoutException = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
 	interrupt = JobTimeoutException("timeout")
-	interrupt.usage = {"prompt_tokens": 31, "completion_tokens": 2, "total_tokens": 33, "private": PROMPT}
+	interrupt.usage = {"prompt_tokens": tokens - 2, "completion_tokens": 2, "total_tokens": tokens, "private": PROMPT}
 	interrupt.usage_complete = False
 	interrupt.private = PROMPT
 	ai_fix._mark_logged(interrupt, "FAKE-ERROR-ROW")
@@ -232,7 +233,7 @@ def test_private_boundary_preserves_timeout_usage_and_logged_marker():
 	with pytest.raises(JobTimeoutException) as caught:
 		operation()
 	assert caught.value is not interrupt
-	assert caught.value.usage == {"prompt_tokens": 31, "completion_tokens": 2, "total_tokens": 33}
+	assert caught.value.usage == {"prompt_tokens": tokens - 2, "completion_tokens": 2, "total_tokens": tokens}
 	assert caught.value.usage_complete is False
 	assert getattr(caught.value, ai_fix._LOGGED_ATTR) is True
 	assert getattr(caught.value, ai_fix._LOGGED_ROW_ATTR) == "FAKE-ERROR-ROW"

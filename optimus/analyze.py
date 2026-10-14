@@ -648,7 +648,7 @@ def _auto_arm_phase2(docname: str, context) -> None:
 		failure = context = None
 		raise guard.interrupt()
 	if failure is not None:
-		log_ai_failure("optimus auto-arm phase 2", failure)
+		log_ai_failure("optimus ai auto-arm phase 2", failure)
 
 
 def _arm_phase2(docname: str, context) -> None:
@@ -764,7 +764,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 	docname = frappe.db.get_value("Optimus Session", {"session_uuid": session_uuid}, "name")
 	if not docname:
 		frappe.log_error(
-			title="optimus analyze",
+			title="optimus ai analyze",
 			message=f"No Optimus Session found for uuid {session_uuid}",
 		)
 		return
@@ -1004,7 +1004,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 			del frappe.local.optimus_analyzing
 
 	if failure is not None:
-		_log_ai_step_failure("optimus analyze", failure, session_uuid=session_uuid)
+		_log_ai_step_failure("optimus ai analyze", failure, session_uuid=session_uuid)
 		raise failure
 
 	# This is outside the profiling failure handler. Optional admission may
@@ -1193,7 +1193,7 @@ def _deserialize_tree(uuid: str, tree_blob, *, allow_unsigned: bool = False):
 	if guard.pending():
 		tree_blob = verified = payload = None
 		raise guard.interrupt()
-	log_ai_failure("optimus recording tree load", reason=problem)
+	log_ai_failure("optimus ai recording tree load", reason=problem)
 	return None
 
 
@@ -1239,7 +1239,7 @@ def _fetch_recordings(recording_uuids: list[str]):
 			tree_blob = None
 			raise guard.interrupt()
 		if failed:
-			log_ai_failure("optimus recording tree read", reason="tree_read_failed")
+			log_ai_failure("optimus ai recording tree read", reason="tree_read_failed")
 
 		# Load the sidecar argument log (best-effort)
 		sidecar = []
@@ -1255,7 +1255,7 @@ def _fetch_recordings(recording_uuids: list[str]):
 			loaded = sidecar = rec = tree_blob = None
 			raise guard.interrupt()
 		if failed:
-			log_ai_failure("optimus recording sidecar read", reason="sidecar_read_failed")
+			log_ai_failure("optimus ai recording sidecar read", reason="sidecar_read_failed")
 
 		rec["pyi_session"] = pyi_session
 		rec["sidecar"] = sidecar
@@ -2113,8 +2113,13 @@ def ai_payload_for_finding(
 	fn = (callsite.get("function") or "").strip()
 	fname = (callsite.get("filename") or "").strip()
 	if phase2_index and fn and fname:
+		from optimus.server_script_source import extract_script_name, get_server_script_record
+
 		base = fname.replace("\\", "/").rsplit("/", 1)[-1]
-		hot = phase2_index.get((base, fn))
+		script = extract_script_name(fname)
+		# A stored Phase 2 snapshot must not restore source denied by the renderer.
+		allowed = not script or get_server_script_record(script, cache=file_cache) is not None
+		hot = phase2_index.get((base, fn)) if allowed else None
 		if isinstance(hot, dict) and hot.get("lineno") is not None:
 			payload["phase2_hotline"] = {
 				"lineno": hot.get("lineno"),
@@ -3060,7 +3065,7 @@ def _save_report_file(*, docname: str, filename: str, attached_to_field: str, co
 		content = file_doc = None
 		raise guard.interrupt()
 	if failed:
-		log_ai_failure("optimus save recording File", reason="file_write_failed")
+		log_ai_failure("optimus ai save recording File", reason="file_write_failed")
 	return None
 
 
@@ -3120,7 +3125,7 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 		recordings = rec = bundle = payload = None
 		raise guard.interrupt()
 	if failed:
-		log_ai_failure("optimus persist recordings", reason="snapshot_write_failed")
+		log_ai_failure("optimus ai persist recordings", reason="snapshot_write_failed")
 
 
 def _load_recordings_bundle(session_doc):
@@ -3162,7 +3167,7 @@ def _load_recordings_bundle(session_doc):
 	if guard.pending():
 		raise guard.interrupt()
 	if problem:
-		log_ai_failure("optimus load recordings bundle", reason=problem,
+		log_ai_failure("optimus ai load recordings bundle", reason=problem,
 			session_uuid=getattr(session_doc, "session_uuid", None))
 	return None
 

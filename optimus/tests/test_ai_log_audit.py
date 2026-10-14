@@ -326,7 +326,7 @@ def test_the_ai_steps_log_through_the_one_helper():
 			for name in calls & {"log_ai_failure", "_log_ai_step_failure"}:
 				callers.setdefault(name, set()).add(f"{mod}:{fn.name}")
 	assert callers == {
-		"log_ai_failure": {"analyze.py:_increment_session_counter", "analyze.py:_deserialize_tree", "analyze.py:_fetch_recordings", "analyze.py:_save_report_file", "analyze.py:_persist_recordings_file", "analyze.py:_log_ai_step_failure", "analyze.py:load_recordings_light", "analyze.py:_load_recordings_bundle", "analyze.py:phase2_index_for", "analyze.py:queue_analyze_time_ai", "analyze.py:_auto_arm_phase2", "api.py:_cleanup_failed_capture"},
+		"log_ai_failure": {"analyze.py:_increment_session_counter", "analyze.py:_deserialize_tree", "analyze.py:_fetch_recordings", "analyze.py:_save_report_file", "analyze.py:_persist_recordings_file", "analyze.py:_log_ai_step_failure", "analyze.py:_load_recordings_bundle", "analyze.py:queue_analyze_time_ai", "analyze.py:_auto_arm_phase2", "api.py:_cleanup_failed_capture"},
 		"_log_ai_step_failure": {"analyze.py:_run_ai_step", "analyze.py:run"},
 	}
 	helper = next(fn for fn in _functions(_tree("analyze.py")) if fn.name == "_run_ai_step")
@@ -349,7 +349,7 @@ def test_the_helper_is_used_where_the_skeleton_was():
 		for mod in ("analyze.py", "api.py")
 	}
 	assert uses == {
-		"analyze.py": {"load_recordings_light", "_load_recordings_bundle", "phase2_index_for"},
+		"analyze.py": {"load_recordings_light", "phase2_index_for"},
 		"api.py": {"_render_session_report", "ai_refresh_status", "refill_ai_suggestions"},
 	}
 

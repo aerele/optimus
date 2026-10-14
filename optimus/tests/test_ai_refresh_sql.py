@@ -181,7 +181,7 @@ class SQLDatabase:
 		always dicts, as ``as_dict=True`` gives them."""
 		try:
 			with self.connection.cursor() as cursor:
-				cursor.sql(query, values)
+				cursor.execute(query, values)
 				if not cursor.description:
 					return []
 				names = [col[0] for col in cursor.description]
@@ -2229,7 +2229,7 @@ def test_provider_settings_and_credential_share_a_sql_snapshot(sql, monkeypatch)
 	created = []
 	queries = []
 	def read(queries_by_backend, values):
-		query = queries_by_backend[sql.backend]
+		query = queries_by_backend[sql.primary.backend]
 		for original, replacement in names.items():
 			query = query.replace(primary.quoted(original), primary.quoted(replacement))
 		queries.append(query)
@@ -2238,7 +2238,7 @@ def test_provider_settings_and_credential_share_a_sql_snapshot(sql, monkeypatch)
 		for original, columns in (("tabSingles", "doctype VARCHAR(140), field VARCHAR(140), value TEXT"),
 			("__Auth", "doctype VARCHAR(140), name VARCHAR(140), fieldname VARCHAR(140), password TEXT, encrypted INTEGER")):
 			primary.sql("CREATE TABLE " + primary.quoted(names[original]) + " (" + columns + ")"
-				+ (" ENGINE=InnoDB" if sql.backend == "mariadb" else ""))
+				+ (" ENGINE=InnoDB" if sql.primary.backend == "mariadb" else ""))
 			created.append(names[original])
 		for field, value in {"ai_enabled": "1", "ai_provider": "OpenAI-compatible", "ai_base_url": "https://first.invalid/v1", "ai_model": "fake"}.items():
 			primary.sql("INSERT INTO " + primary.quoted(names["tabSingles"]) + " VALUES (%s, %s, %s)", ("Optimus Settings", field, value))
@@ -2279,8 +2279,7 @@ def test_force_stop_cannot_erase_concurrently_claimed_capture_from_old_snapshot(
 	with sql.using(older):
 		assert not ai_jobs._retry_sql(lambda: phase2._force_stop_capture("parent-a", "fake-phase2", "capture-user"))
 	assert sql.primary.get_value(phase2.TABLE, "fake-child", "status") == "Analyzing"
-	if sql.backend == "postgres":
-		assert "40001" in older.conflicts
+	assert older.conflicts == []  # the shared wrapper ends the old snapshot before locking
 
 
 def test_capture_recovery_query_selects_only_actual_or_legacy_recording_actor(sql):
@@ -2296,7 +2295,7 @@ def test_capture_recovery_query_selects_only_actual_or_legacy_recording_actor(sq
 
 
 def test_parent_deletion_and_journal_removal_roll_back_together_and_fence_late_result(sql):
-	claimed(sql)
+	claimed()
 	attempt = ai_jobs._retry_sql(lambda: store.begin_attempt("run-a", docname="parent-a", worker_token="worker-a",
 		kind="fix", target="fake-finding", input_hash="fake-hash", now=12))
 	def delete(fail=False):

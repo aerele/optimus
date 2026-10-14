@@ -1541,7 +1541,7 @@ def _cleanup_deleted_captures(captures):
 	from optimus.line_profile import capture
 	failures = 0
 	for run_uuid, user in captures:
-		guard = ai_fix._InterruptGuard(base=True)
+		guard = safe_call.InterruptGuard(base=True)
 		try:
 			with guard:
 				capture.stop_line_profile_pass(run_uuid, user)
@@ -1553,7 +1553,7 @@ def _cleanup_deleted_captures(captures):
 	if failures:
 		# The parent and journal are already deleted. Never commit inside this
 		# callback or expose captured text/identities in a cleanup breadcrumb.
-		guard = ai_fix._InterruptGuard(base=True)
+		guard = safe_call.InterruptGuard(base=True)
 		try:
 			with guard:
 				frappe.logger("optimus").warning(

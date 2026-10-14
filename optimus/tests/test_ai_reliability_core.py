@@ -290,7 +290,7 @@ def _use_fake_provider(monkeypatch):
 		"needs_key": False, "context_tokens": 128000,
 	})
 	monkeypatch.setattr(ai_fix, "_resolve_display_threshold_ms", lambda: 1000)
-	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a: "")
+	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a, **kw: "")
 	monkeypatch.setattr(ai_fix, "is_finding_type_excluded", lambda *a: False)
 
 

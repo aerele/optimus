@@ -323,3 +323,23 @@ def test_analyze_enrichment_checks_session_owner(scripts):
 	analyze._enrich_findings_with_source_snippets(findings, owner="fake-owner")
 	assert "source_snippet" not in json.loads(findings[0]["technical_detail_json"])["callsite"]
 	assert not scripts["body_reads"]
+
+
+@pytest.mark.parametrize("denied", [None, "fake-actor", "fake-owner"])
+def test_phase2_hotline_obeys_server_script_read_permissions(scripts, denied):
+	import json
+
+	if denied:
+		scripts["allowed"].remove(denied)
+	filename = "<serverscript>: fake_script"
+	child = SimpleNamespace(finding_type="Hot Line", severity="High", title="fake", customer_description="",
+		estimated_impact_ms=1, affected_count=1, action_ref=0, llm_fix_json=None,
+		technical_detail_json=json.dumps({"callsite": {"filename": filename, "lineno": 1, "function": "example"}}))
+	with source.server_script_readers("fake-owner"):
+		payload = analyze.ai_payload_for_finding(child, {}, phase2_index={
+			(filename, "example"): {"lineno": 1, "content": "PRIVATE-PHASE2-SCRIPT", "total_ms": 20, "hits": 1},
+		})
+	assert ("PRIVATE-PHASE2-SCRIPT" in json.dumps(payload)) is (denied is None)
+	assert ("phase2_hotline" in payload) is (denied is None)
+	if denied:
+		assert not scripts["body_reads"]

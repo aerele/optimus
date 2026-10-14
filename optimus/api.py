@@ -1885,7 +1885,7 @@ def _cleanup_failed_capture(run_uuid, user, guard):
 		if failure_type:
 			try:
 				with guard:
-					_ai_fix.log_ai_failure("optimus Phase 2 admission cleanup", RuntimeError(failure_type))
+					_ai_fix.log_ai_failure("optimus ai Phase 2 admission cleanup", RuntimeError(failure_type))
 			except Exception:
 				pass  # The caller still reports the admission failure.
 

@@ -161,7 +161,7 @@ def stop_captures(captures, *, cleanup=False):
 			raise guard.interrupt()
 		if failure_type:
 			failed += 1
-			_log("optimus Phase 2 capture recovery", RuntimeError(failure_type))
+			_log("optimus ai Phase 2 capture recovery", RuntimeError(failure_type))
 	return bool(cleared), failed
 
 

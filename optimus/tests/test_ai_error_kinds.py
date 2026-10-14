@@ -89,7 +89,7 @@ def _fake_provider(monkeypatch, **overrides):
 	}
 	monkeypatch.setattr(ai_fix, "_provider_config", lambda: dict(provider))
 	monkeypatch.setattr(ai_fix, "_resolve_display_threshold_ms", lambda: 1000)
-	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a: "")
+	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a, **kw: "")
 	monkeypatch.setattr(ai_fix, "is_finding_type_excluded", lambda *a, **k: False)
 	monkeypatch.setattr(ai_fix, "_reask_enabled", lambda: True)
 
@@ -297,7 +297,8 @@ def test_a_provider_context_rejection_names_the_cause_and_fits_the_provider(wire
 	assert message.startswith("[t]The prompt did not fit the model's context window.")
 	assert ("Ollama" in message) is local
 	assert ("[t]Choose a model with a larger context window" in message) is not local
-	assert "prompt is too long: 215000 tokens" in message
+	assert "prompt is too long: 215000 tokens" not in message
+	assert "prompt is too long: 215000 tokens" in caught.value.detail
 
 
 @pytest.mark.parametrize("entry", ["fix", "steps"])
@@ -562,11 +563,14 @@ def test_a_transport_failure_is_translated_and_names_only_the_error_type(wire, m
 	(500, {"error": {"message": "fake-reply"}}),
 	(400, {"error": {"message": "maximum context length; fake-reply"}}),
 ])
-def test_the_provider_reply_follows_the_message_without_a_stray_colon(wire, marked, status, payload):
+def test_only_admins_see_the_reply_without_a_stray_colon(wire, marked, monkeypatch, status, payload):
 	wire.install(Reply(status, payload))
 	with pytest.raises(ai_fix.AiFixError) as caught:
 		ai_fix._http_post(_LOCAL, {}, {}, provider="openai", where="test")
-	message = str(caught.value)
+	assert "fake-reply" not in str(caught.value)
+	import frappe
+	monkeypatch.setattr(frappe, "session", SimpleNamespace(user="Administrator"))
+	message = ai_fix.user_message(caught.value)
 	assert ".:" not in message and message.count("fake-reply") == 1
 	assert "[t]The provider replied: " in message
 

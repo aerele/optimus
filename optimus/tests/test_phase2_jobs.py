@@ -708,8 +708,8 @@ def test_force_stop_preserves_input_if_analysis_claims_it(phase2, monkeypatch, r
 	def transaction(operation):
 		with phase2.db.transaction():
 			return operation()
-	monkeypatch.setattr(phase2.mod.ai_jobs, "_transaction", transaction)
-	monkeypatch.setattr(phase2.mod.ai_jobs, "_retry_sql", transaction)
+	monkeypatch.setattr(phase2.mod, "_transaction", transaction)
+	monkeypatch.setattr(phase2.mod, "_retry_sql", transaction)
 	monkeypatch.setattr(phase2.mod, "_capture_candidates", lambda user: [{"parent": "fake-session-doc", "run_uuid": "fake-phase2"}])
 	def active(user, *, fresh=False):
 		assert fresh

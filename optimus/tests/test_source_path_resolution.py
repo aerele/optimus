@@ -296,5 +296,7 @@ def test_every_source_reader_uses_the_newline_only_splitter(tmp_path, monkeypatc
 	assert server_script_source.get_server_script_lines("x") == ["a = 1\x0c", "b = 2"]
 	path = tmp_path / "d.py"
 	path.write_text("x = 1\x0c\n@deco\ndef target():\n\tpass\n", encoding="utf-8")
-	monkeypatch.setattr(source_resolution, "_source_lines", lambda *a, **k: None)
+	monkeypatch.setattr(source, "_path_within_bench", lambda path: True)
 	assert source_resolution._skip_decorators_to_def(str(path), 2, "target") == 3
+	monkeypatch.setattr(source_resolution, "_source_lines", lambda *a, **k: None)
+	assert source_resolution._skip_decorators_to_def(str(path), 2, "target") == 2

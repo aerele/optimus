@@ -241,9 +241,9 @@ _POLLUTION_PRONE_MODULES = frozenset({
 # top-level binding captures whatever was in ``sys.modules["frappe"]``
 # AT IMPORT TIME so if they get imported while a test has installed a
 # stub-frappe (and then the fence restores the real frappe at teardown),
-# their captured reference is now stale. We evict these from
-# ``sys.modules`` when we detect the frappe-swap so the next test
-# re-imports them against the restored real frappe.
+# their captured reference may be stale. The fence restores the bindings of
+# preexisting modules and evicts leaves first imported under the fake, keeping
+# package attributes consistent with sys.modules.
 _FRAPPE_DEPENDENT_LEAVES = frozenset({
 	"optimus.api",
 	"optimus.analyze",
@@ -263,6 +263,28 @@ class _InTestFlags:
 
 	def __getattr__(self, name):
 		raise RuntimeError("Frappe flag is not bound outside a site")
+
+
+@pytest.fixture(autouse=True)
+def _offline_translations():
+	"""Keep real gettext formatting without requiring a site's translation cache."""
+	import frappe
+
+	if getattr(frappe.local, "site", None):
+		yield
+		return
+	try:
+		from frappe import translate
+	except ImportError:
+		yield  # The framework-free facade already supplies an identity translator.
+		return
+	# Avoid changing monkeypatch fixture teardown order for sys.monitoring tests.
+	reader = translate.get_all_translations
+	translate.get_all_translations = lambda lang: {}
+	try:
+		yield
+	finally:
+		translate.get_all_translations = reader
 
 
 @pytest.fixture(autouse=True)
@@ -287,6 +309,7 @@ def _frappe_in_test_flag():
 def _sys_modules_fence():
 	snapshot = dict(sys.modules)
 	original_frappe = sys.modules.get("frappe")
+	bindings = {name: vars(snapshot[name]).get("frappe") for name in _FRAPPE_DEPENDENT_LEAVES if name in snapshot}
 	try:
 		yield
 	finally:
@@ -311,14 +334,29 @@ def _sys_modules_fence():
 			if sys.modules.get(k) is not original_mod:
 				sys.modules[k] = original_mod
 
-		# If frappe was swapped during this test, evict the cached
-		# frappe-dependent leaf modules. They captured the stub at module
-		# top during their import restoring sys.modules doesn't repair
-		# that. Eviction forces a fresh import on next use, which rebinds
-		# their ``import frappe`` to the now-restored real module.
+		# Keep modules held by collected tests and their lazy imports identical.
+		# Reloaded modules may have captured a fake Frappe; restore that binding.
+		# Only leaves first imported under the fake need eviction.
 		if frappe_was_swapped:
 			for leaf in _FRAPPE_DEPENDENT_LEAVES:
-				sys.modules.pop(leaf, None)
+				if leaf in snapshot:
+					if bindings.get(leaf) is not None:
+						snapshot[leaf].frappe = bindings[leaf]
+				else:
+					sys.modules.pop(leaf, None)
+
+		# Python also caches imported submodules as attributes of their package.
+		# Restoring sys.modules alone leaves `from optimus import api` pointing
+		# at a different object from import_module("optimus.api").
+		for name in _FRAPPE_DEPENDENT_LEAVES | _POLLUTION_PRONE_MODULES:
+			parent, _, child = name.rpartition(".")
+			package = sys.modules.get(parent)
+			if package is None:
+				continue
+			if name in sys.modules:
+				setattr(package, child, sys.modules[name])
+			elif child in vars(package):
+				delattr(package, child)
 
 
 @pytest.fixture(autouse=True)

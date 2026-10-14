@@ -193,7 +193,7 @@ def user_message(exc: AiFixError) -> str:
 	if guard.pending():
 		exc = None
 		raise guard.interrupt()
-	return str(exc) + ("\n" + exc.detail if allowed and exc.detail else "")
+	return _with_reply(str(exc), exc.detail) if allowed else str(exc)
 
 
 def _private_ai_frames(function):
@@ -681,11 +681,10 @@ def with_usage_on_failure(call, usage):
 	The ``.usage`` boundary: an RQ job timeout leaves as a FRESH instance of its type that
 	carries the call's billed ``usage`` (and the log marker), so the public entry's caller
 	(``suggest_fix``, ``humanize_steps``) can still record the spend of a call it attributed
-	explicitly. That is as far as it travels: every later re-wrap builds another fresh
-	instance from the type and args alone (``safe_call.InterruptGuard.interrupt``,
-	``log_ai_failure`` raising it again, ``_run_ai_step``), which has neither. A caller that
-	records spend itself reads ``.usage`` from the exception it catches from the public entry,
-	before handing it to any of those.
+	explicitly. AI privacy boundaries retain only numeric usage and the log marker while
+	dropping private frames. Generic ``safe_call.InterruptGuard`` boundaries retain only
+	the type and args. The caller settles usage from the public entry before passing
+	the failure through a generic guard.
 	"""
 	failure = None
 	unexpected_name: str | None = None
@@ -1694,9 +1693,8 @@ class _InterruptGuard(safe_call.InterruptGuard):
 		state = {}
 		usage = getattr(exc, "usage", None)
 		if isinstance(usage, dict):
-			state["usage"] = {key: value for key, value in usage.items() if key in (
-				"prompt_tokens", "completion_tokens", "total_tokens",
-			) and type(value) is int and 0 <= value <= MAX_TOKEN_COUNT}
+			# A re-ask's aggregate can exceed the per-response token bound.
+			state["usage"] = _billed_usage(usage)
 		if hasattr(exc, "usage_complete"):
 			state["usage_complete"] = exc.usage_complete is True
 		if getattr(exc, _LOGGED_ATTR, False) is True:
@@ -1921,7 +1919,7 @@ def _with_reply(message: str, detail: str) -> str:
 
 def _error_text(exc: AiFixError) -> str:
 	"""Internal parameter matching; never use this text in a log or progress record."""
-	return str(exc).lower()
+	return (str(exc) + " " + exc.detail).lower()
 
 
 @_private_ai_frames

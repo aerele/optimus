@@ -11,7 +11,7 @@ Manual refresh selects missing and outdated suggestions by default. The
 confirmation shows the selected count; replacing current suggestions requires
 an explicit checkbox. Refresh and an active Phase 2 pass exclude one another.
 Auto-armed Phase 2 therefore takes precedence over automatic AI, with an
-admission notice on the session. Refresh AI after Phase 2 finishes.
+admission notice on the session. Normal Phase 2 completion attempts automatic missing-only AI admission after saving results and report work; manual Refresh AI remains available.
 
 This is part of a staged integration. Recording/provider/source/privacy
 hardening is included in this stack; final deployment and model acceptance

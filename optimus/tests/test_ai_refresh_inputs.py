@@ -275,8 +275,9 @@ def test_bundle_read_logs_outside_except_and_never_swallows_rq(monkeypatch, inte
 		assert caught.value is not original and caught.value.__context__ is None
 	else:
 		assert analyze._load_recordings_bundle(doc) is None
-	# the row is written outside the handler, for the timeout too; frappe.log_error itself is never called
-	assert logged == [("optimus ai load recordings bundle", None)] and seen == []
+	# Rejected bundles log a fixed reason outside the handler. Interrupts escape unlogged.
+	assert logged == ([] if interrupt else [("optimus ai load recordings bundle", None)])
+	assert seen == []
 
 
 def test_selection_handles_malformed_severity():
