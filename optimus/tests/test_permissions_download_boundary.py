@@ -13,7 +13,7 @@ than substitute a hook-loop replay for the download route.
 
 from importlib import import_module
 from types import MethodType, SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -34,7 +34,7 @@ def test_direct_download_uses_parent_read_despite_file_hook_denial(monkeypatch, 
 	doc = SimpleNamespace(
 		name="synthetic-file", is_private=True, owner="system@example.test",
 		attached_to_doctype="Optimus Session", attached_to_name="synthetic-session",
-		attached_to_field=field, file_url=url,
+		attached_to_field=field, file_url=url, file_name="synthetic-artifact.json.gz",
 	)
 	doc.is_downloadable = MethodType(core.File.is_downloadable, doc)
 	parent = SimpleNamespace(has_permission=Mock(return_value=parent_read))
@@ -52,6 +52,9 @@ def test_direct_download_uses_parent_read_despite_file_hook_denial(monkeypatch, 
 	monkeypatch.setattr(frappe, "get_roles", lambda user: ["Optimus User"])
 	monkeypatch.setattr(frappe, "share", SimpleNamespace(get_shared=lambda *a, **kw: []))
 	monkeypatch.setattr(frappe, "get_doc", get_doc)
+	# Recent v16 releases use a lazy parent; both loaders cross the same storage boundary.
+	if hasattr(frappe, "get_lazy_doc"):
+		monkeypatch.setattr(frappe, "get_lazy_doc", get_doc)
 	lookup = Mock(return_value=[{"name": doc.name}])
 	monkeypatch.setattr(frappe, "get_all", lookup)
 	# Any unexpected attempt to enter the application hook loop is a failure.
@@ -68,7 +71,12 @@ def test_direct_download_uses_parent_read_despite_file_hook_denial(monkeypatch, 
 
 	if parent_read:
 		assert response.download_private_file(url) is deliver.return_value
-		deliver.assert_called_once_with("/files/synthetic-artifact.json.gz")
+		deliver.assert_called_once()
+		# Newer Frappe versions forward the original filename to the response helper.
+		assert deliver.call_args in (
+			call("/files/synthetic-artifact.json.gz"),
+			call("/files/synthetic-artifact.json.gz", filename=doc.file_name),
+		)
 		access_log.assert_called_once()
 	else:
 		with pytest.raises(response.Forbidden):
