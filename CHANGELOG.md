@@ -33,8 +33,10 @@ versions may contain breaking changes see migration notes below).
   session row first and takes its locks before its first plain read, except an
   admission's takeover, which reads the active run and then locks it by key. A
   duplicate attempt or reservation is caught by its unique key, and the
-  requester's User row is never locked. The journal's own reads take no gap
-  lock; the recheck's `FOR UPDATE` read of the session's Phase 2 rows can make
+  requester's User row is never locked. Admission avoids range locks on journal
+  runs, and a new attempt inserts without reading its missing key; other locking
+  reads of missing journal keys can still take gap locks on MariaDB. The recheck's
+  `FOR UPDATE` read of the session's Phase 2 rows can make
   another session's Phase 2 insert wait. A user refresh takes the site mutex
   (NOWAIT) only after its session; a busy mutex, or a session row held past one
   lock wait timeout, answers `busy`. On PostgreSQL, which has no lock wait limit
@@ -76,7 +78,7 @@ versions may contain breaking changes see migration notes below).
 - Write every engine Error Log row under a title that starts with
   `optimus ai refresh` (worker, cleanup, item, result storage, enqueue, worker
   availability, recovery, release, selection, evidence), carrying the session
-  and the run. A call that becomes uncertain (`optimus ai refresh uncertain`,
+  and the run where known; a failed recovery candidate read has neither. A call that becomes uncertain (`optimus ai refresh uncertain`,
   with the attempt and the reason) and a run that ends interrupted or stops for
   `no_progress`, `history_limit`, `disabled`, `phase2` or `permission`
   (`optimus ai refresh ended`) are one row each, written after the transaction
@@ -87,8 +89,9 @@ versions may contain breaking changes see migration notes below).
   the session counter ignores) is logged as an `optimus ai refresh item` row before
   the Steps display figure is clamped. The runbook in
   [docs/AI-REFRESH.md](docs/AI-REFRESH.md) maps each title to a state and gives
-  a read-only query that reconciles a session's `ai_tokens_spent` with the
-  journal and the `optimus ai spend` rows.
+  a read-only query that compares a session's `ai_tokens_spent` with the
+  journal and candidate dropped increments from `optimus ai spend`; settlement
+  outcomes must be checked before treating a candidate as a missing charge.
 - A failure while reading the Phase 2 line data for the fix prompts
   (`analyze._phase2_index_for`) is no longer silent: it writes one
   `optimus ai phase 2 context` row with the session, and the prompts go
@@ -155,8 +158,17 @@ asks `live_run`, below).
 - Do not run `bench trim-database` during a rollback you may undo: it drops the
   journal tables, and with them the uncertain attempts that keep an unknown
   provider call from being sent again.
-- No existing column changes type: `ai_steps_tokens` stays a 32-bit Int (the
-  engine clamps what it stores), so no Optimus Session table rebuild.
+- Upgrading from 0.12.69 keeps `ai_steps_tokens` as a 32-bit Int (the engine
+  clamps what it stores), so this change requires no Optimus Session column-type
+  rebuild. A site that deployed the earlier draft with a nullable Long Int is
+  different: migration narrows that column and can rebuild the table. Back up
+  first and, before migrating, replace its NULLs with zero using the appropriate
+  statement below. Check any values outside the signed 32-bit range before
+  narrowing; the NULL update does not repair those values.
+
+  MariaDB: ``UPDATE `tabOptimus Session` SET ai_steps_tokens = 0 WHERE ai_steps_tokens IS NULL;``
+
+  PostgreSQL: `UPDATE "tabOptimus Session" SET ai_steps_tokens = 0 WHERE ai_steps_tokens IS NULL;`
 - Data retention: the journal is not pruned. Each run keeps `requested_by` (and
   `cancelled_by`), user ids that outlive the session's own retention sweep, until
   the privacy follow-up (#75) decides retention.

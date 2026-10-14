@@ -193,11 +193,11 @@ jobs:
             snapshot: '1'
           - leg: postgres 16
             database: postgres
-            mariadb: '10.6'
+            mariadb: ''
             snapshot: '0'
     services:
       mariadb:
-        image: mariadb:${{ matrix.mariadb }}
+        image: ${{ matrix.database == 'mariadb' && format('mariadb:{0}', matrix.mariadb) || '' }}
         env:
           MARIADB_ROOT_PASSWORD: optimus_test
           MARIADB_DATABASE: optimus_test
@@ -209,7 +209,7 @@ jobs:
           --health-timeout=5s
           --health-retries=10
       postgres:
-        image: postgres:16
+        image: ${{ matrix.database == 'postgres' && 'postgres:16' || '' }}
         env:
           POSTGRES_USER: optimus_test
           POSTGRES_PASSWORD: optimus_test
@@ -230,10 +230,21 @@ jobs:
           python-version: '3.14'
       - name: Install app and SQL validation dependencies
         run: |
-          python -m pip install --quiet -e . pytest hypothesis Faker sql_metadata jsonschema PyMySQL==1.1.2 psycopg2-binary==2.9.12
+          python -m pip install --quiet -e . pytest hypothesis Faker 'sql_metadata~=2.19.0' jsonschema PyMySQL==1.1.2 psycopg2-binary==2.9.12
       - name: Check journal transactions on a real database
         env:
           OPTIMUS_TEST_SQL: ${{ matrix.database }}
           OPTIMUS_TEST_SQL_SNAPSHOT: ${{ matrix.snapshot }}
           PYTHONDONTWRITEBYTECODE: '1'
-        run: python -m pytest optimus/tests/test_ai_refresh_sql.py -q -p no:cacheprovider
+        run: python -m pytest optimus/tests/test_ai_refresh_sql.py -q -rA -p no:cacheprovider
+      - name: Show database service logs on failure
+        if: failure()
+        env:
+          MARIADB_SERVICE_ID: ${{ job.services.mariadb.id }}
+          POSTGRES_SERVICE_ID: ${{ job.services.postgres.id }}
+        run: |
+          for service_id in "$MARIADB_SERVICE_ID" "$POSTGRES_SERVICE_ID"; do
+            if [ -n "$service_id" ]; then
+              docker logs "$service_id"
+            fi
+          done

@@ -6,7 +6,10 @@ Error Log titles and their context, and the public names the engine uses across 
 
 # ruff: noqa: F811  (the imported fixtures are used by name as parameters)
 import ast
+import inspect
+import json
 import re
+import shlex
 from copy import deepcopy
 from importlib import import_module
 from pathlib import Path
@@ -727,6 +730,61 @@ def test_the_docs_describe_the_refresh_count_as_one_bump_at_acceptance():
 	flat = " ".join(text.split())
 	assert "counted once per accepted user refresh" in flat and "No ending of a run counts" in flat
 	assert "completion_counted" not in flat and "still counts as a refresh" not in flat
+
+
+def test_the_runbook_cancel_command_binds_to_the_internal_api():
+	text = (_DOCS / "AI-REFRESH.md").read_text(encoding="utf-8")
+	command = next(line for line in text.splitlines() if line.startswith("bench --site <site> execute optimus.ai_jobs.cancel_refresh"))
+	args = shlex.split(command)
+	assert args[:5] == ["bench", "--site", "<site>", "execute", "optimus.ai_jobs.cancel_refresh"]
+	assert args[5] == "--kwargs" and len(args) == 7
+	kwargs = json.loads(args[6])
+	bound = inspect.signature(ai_jobs.cancel_refresh).bind(**kwargs)
+	assert set(bound.arguments) == {"run_id", "docname", "requested_by"}
+	assert all(isinstance(value, str) and value for value in kwargs.values())
+
+
+@pytest.mark.parametrize("elapsed,allowed", [(29.999, False), (30, True), (30.001, True)])
+def test_the_documented_thirty_second_dispatch_boundary(queue, elapsed, allowed):
+	run = queue.journal.run
+	run.update(dispatch_pending=1, dispatched_at_epoch=100)
+	with queue.journal.db.transaction():
+		out = store.prepare_dispatch("fake-run", docname="fake-session-doc", now=100 + elapsed)
+	assert bool(out) is allowed
+	assert run["dispatched_at_epoch"] == (100 + elapsed if allowed else 100)
+	assert run["dispatch_pending"] == 1  # only a worker claim clears the durable intent
+
+
+@pytest.mark.parametrize("deleted", ["Optimus Finding", "Optimus Session"])
+def test_a_document_deleted_during_the_call_cannot_be_recreated_by_the_reply(work, deleted):
+	"""The runbook promises no stale answer after deletion and keeps known usage in the journal."""
+	run = work.journal.run
+	item = work.jobs._next_item(run, {})
+	with work.journal.db.transaction():
+		attempt = work.jobs._begin_attempt(
+			run, item, run_id=run["name"], docname=work.parent["name"], worker_token="worker"
+		)
+	assert attempt
+	result = item.send(10)
+	name = item.target if deleted == "Optimus Finding" else work.parent["name"]
+	del work.journal.db.rows[deleted][name]
+	with work.journal.db.transaction():
+		assert not item.valid()
+		assert store.settle_attempt(
+			run["name"], attempt["name"], docname=work.parent["name"], worker_token="worker",
+			outcome="succeeded", tokens=7, usage_complete=True, now=21, persist=lambda: item.persist(result),
+		)
+	assert name not in work.journal.db.rows[deleted]
+	assert work.row["llm_fix_json"] == ""
+	attempt = work.journal.db.rows[store.ATTEMPT][attempt["name"]]
+	assert attempt["state"] == "discarded" and attempt["tokens_reported"] == 7
+	assert run["tokens_reported"] == 7 and len(work.sends) == 1
+	with work.journal.db.transaction():
+		assert not store.settle_attempt(
+			run["name"], attempt["name"], docname=work.parent["name"], worker_token="worker",
+			outcome="succeeded", tokens=7, usage_complete=True, now=22, persist=lambda: item.persist(result),
+		)
+	assert run["tokens_reported"] == 7 and len(work.sends) == 1
 
 
 # --- the kinds are #72's -------------------------------------------------------------

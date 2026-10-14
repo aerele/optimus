@@ -1878,10 +1878,36 @@ def _runbook_sql(marker):
 	return blocks[0]
 
 
+def test_the_uncertain_query_exposes_the_provider_usage_window(sql):
+	"""Run the documented query, retaining only this session's uncertain attempts."""
+	for name, session, state in (
+		("unknown-call", "parent-a", "uncertain"),
+		("known-call", "parent-a", "succeeded"),
+		("other-call", "parent-b", "uncertain"),
+	):
+		sql.primary.insert({
+			"doctype": store.ATTEMPT, "name": name, "attempt_id": name,
+			"run_id": "fake-run", "session_name": session, "kind": "fix",
+			"target_name": "fake-finding", "state": state, "started_at_epoch": 100,
+			"finished_at_epoch": 120, "tokens_reported": 7, "error_kind": "timeout",
+		})
+	sql.primary.commit()
+	query = _runbook_sql("uncertain attempts (MariaDB)").replace("<session name>", "parent-a")
+	if BACKEND == "postgres":
+		query = query.replace("`", '"')
+	for doctype, table in sql.primary.tables.items():
+		query = query.replace("tab" + doctype, table)
+	assert sql.primary.sql(query) == [{
+		"run_id": "fake-run", "kind": "fix", "target_name": "fake-finding", "error_kind": "timeout",
+		"started_at_epoch": 100, "finished_at_epoch": 120, "tokens_reported": 7,
+	}]
+
+
 def test_the_reconciliation_query_separates_a_gap_from_other_sources(sql):
 	"""A session's ``ai_tokens_spent`` against what the journal reported and the increments the
 	counter logged as dropped (``optimus ai spend``). Seeded: a reconciled session, a session
-	whose counter lost 30 tokens with no row, and one with another source's tokens. The query
+	whose counter lost 30 tokens with no row, and one with another source's tokens plus a
+	stale dropped-increment candidate from a settlement that later committed. The query
 	is the runbook's own text, with only the table names mapped to the test's tables."""
 	primary = sql.primary
 	log = primary.tables["Optimus Session"].removesuffix("session") + "errorlog"
@@ -1927,6 +1953,11 @@ def test_the_reconciliation_query_separates_a_gap_from_other_sources(sql):
 					"optimus ai spend\namount=25\nsavepoint_rollback=failed: OperationalError",
 				),
 				("optimus ai spend", "parent-x", "optimus ai spend\namount=999"),
+				(
+					"optimus ai spend",
+					"parent-c",
+					"optimus ai spend\namount=10\nsavepoint_rollback=done\noutcome=committed on try 2",
+				),
 			)
 		):
 			primary.sql(
@@ -1950,7 +1981,10 @@ def test_the_reconciliation_query_separates_a_gap_from_other_sources(sql):
 			0,
 		]
 		assert int(rows["parent-b"]["other_sources"]) == -30  # the gap nothing explains
-		assert int(rows["parent-c"]["other_sources"]) == 50  # another source's tokens
+		# The query includes this candidate even though the settlement later committed.
+		# Its raw difference is not proof: the operator must exclude the stale ten tokens.
+		assert int(rows["parent-c"]["dropped_increments"]) == 10
+		assert int(rows["parent-c"]["other_sources"]) == 60  # 50 other-source tokens + 10 stale
 		# the self-check finds the run whose attempts do not add up to its total, and only it
 		for run_id, attempt, tokens in (("r-a1", "at-1", 70), ("r-a2", "at-2", 20), ("r-a2", "at-3", 20)):
 			primary.insert(

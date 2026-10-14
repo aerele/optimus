@@ -19,8 +19,9 @@ identities, input hashes, fixed states and counts, never prompts, provider
 responses or credentials. An active session reservation is unique; terminal
 runs release it.
 
-Every journal transaction starts fresh and its first statement locks the
-session row. The caller passes the run's session name, read earlier in its own
+Every journal transition starts a fresh transaction and its first data read locks
+the session row (Postgres HTTP paths read and set the lock timeout first, below).
+The caller passes the run's session name, read earlier in its own
 transaction, so no plain read comes before that lock. Then the transition locks
 the run and the attempt, in that order. The other reads come after the locks,
 except that an admission's takeover reads the active run first and then locks it
@@ -32,7 +33,9 @@ since last read") when another transaction changed that row in between.
 Because the locks come first, that cannot happen here. Each transition names
 its session, and a run of another session is treated as missing.
 
-No read of the journal tables takes a gap lock. The worker's recheck does read
+Admission avoids range locks on journal runs, and beginning an attempt inserts
+without a locking read of its missing key. Other locking reads by key can still
+take a gap lock on MariaDB when a journal row is missing. The worker's recheck reads
 the session's Phase 2 rows with a `FOR UPDATE` by filter. On MariaDB that locks
 a range of that child table's parent index, so another session's Phase 2
 insert can wait until this short transaction ends.
@@ -47,7 +50,7 @@ runs never take it. The capacity
 count is a plain read after those locks. It counts live runs only: a run whose
 lease or deadline has passed can no longer claim a slice or begin a call, so it
 holds no slot. Admissions with caps serialize on the
-mutex, and each one updates the mutex row. An older PostgreSQL REPEATABLE READ
+mutex, and each accepted admission updates the mutex row. An older PostgreSQL REPEATABLE READ
 snapshot then fails on that row (40001) and is retried, so the caps stay exact
 on both databases. Admission takes no lock on a range of runs: such next-key
 locks deadlocked other sessions' workers. The unique reservation decides
@@ -68,7 +71,8 @@ statement timeout (57014) is not retried. A retry never sends HTTP.
 
 A lock wait timeout (MariaDB 1205, Postgres 55P03) is not retried by an
 admission, which is an HTTP request. It answers `busy`, so the request waits
-for one lock wait at most, well inside the web server's timeout. On MariaDB
+for one lock wait at most. Keep the database wait below the web server's request
+timeout; the engine does not configure that server. On MariaDB
 that is the server's `innodb_lock_wait_timeout`; the engine sets nothing there,
 because a session-level setting would outlive the transaction on the pooled
 connection. Postgres has no limit unless `lock_timeout` is set, and Frappe sets
@@ -91,7 +95,7 @@ The worker commits a Calling attempt before contacting a provider, then
 releases journal/session locks during HTTP. The answer, the attempt outcome and
 the run counters commit in one short transaction. That transaction also adds
 the reported tokens to the session's `ai_tokens_spent` through #72's counter.
-That counter is log-and-continue (D2). If its own statement fails, only the
+That counter is log-and-continue. If its own statement fails, only the
 increment is rolled back and logged (`optimus ai spend`), and the outcome
 commits without it. The run's `tokens_reported` always keeps the count, so it
 is the source for reconciling the session total.
@@ -157,7 +161,7 @@ the Steps answer rewrites the session's notes, so any save of the session since
 it was prepared makes it stale. Reported usage from a late answer is still
 accounted once, even when cancellation prevents saving the answer.
 
-A lost worker leaves its Calling attempt uncertain. Expired leases and total
+Recovery marks a lost worker's Calling attempt uncertain. Expired leases and total
 deadlines fence results immediately, and a queued run past its lease or deadline
 is dead too: a late queue delivery cannot claim it, so it cannot be revived
 beside a path that treated it as dead. Recovery does not need the scheduler: the
@@ -248,24 +252,25 @@ a failure of either is logged once with the session and the slice goes on
 without it.
 
 Every Error Log row the engine writes has a title that starts with
-`optimus ai refresh` and carries `docname` (the session) and, where there is one,
-`run_id` and `attempt`. Search the Error Log for `optimus ai`.
+`optimus ai refresh` and carries `docname` (the session), `run_id` and `attempt`
+where known. A failed recovery candidate read has no session or run yet, so its
+row has neither `docname` nor `run_id`. Search the Error Log for `optimus ai`.
 
 | Title | When |
 | --- | --- |
 | `optimus ai refresh worker` | A slice failed. Carries `tokens` and `outcome` when the outcome write gave up. |
 | `optimus ai refresh cleanup` | The cleanup of a failed slice failed, so its call stays for recovery. |
-| `optimus ai refresh item` | One item's provider call failed. Carries `attempt`, `kind` and `item` (`fix` or `steps`). |
+| `optimus ai refresh item` | One item's provider call failed, or its reported token count exceeds 2147483647 (`outcome=clamped`, with `tokens`). Carries `attempt` and `item` (`fix` or `steps`); failures also carry `kind`. |
 | `optimus ai refresh result storage` | An answer or outcome write failed; the settlement rows carry `tries`, `tokens` and `outcome`. |
 | `optimus ai refresh enqueue` | A slice could not be handed to RQ; the intent stays pending. |
 | `optimus ai refresh worker availability` | Redis could not say whether a worker listens; new admissions are refused. |
-| `optimus ai refresh recovery` | A row of the recovery sweep failed. |
+| `optimus ai refresh recovery` | A recovery row or candidate read failed; a candidate-read failure has no `docname` or `run_id`. |
 | `optimus ai refresh release` | A run with an inconsistent journal row was force-released (takeover, cancel or sweep). |
 | `optimus ai refresh selection` | The gated and excluded counts could not be taken; the run started with zero. |
 | `optimus ai refresh evidence` | The Slow Query evidence could not be read; the prompts went without index advice. |
 | `optimus ai refresh discarded` | A release-blocking signal: a paid answer was not saved because its attempt is stale or fenced. |
 | `optimus ai refresh duplicate blocked` | A release-blocking signal: the journal stopped a second send or a second delivery. |
-| `optimus ai refresh uncertain` | A call's outcome is unknown: the job timeout cut it, or a takeover, the sweep, a cancel or the worker cleanup found it still Calling. Carries `attempt` and `reason`. It is never sent again and its usage may be missing. |
+| `optimus ai refresh uncertain` | A call's outcome is unknown: the job timeout cut it, or a takeover, the sweep, a cancel or the worker cleanup found it still Calling. Carries `attempt` and `reason`. It is never sent again automatically and its usage may be missing. |
 | `optimus ai refresh ended` | A run ended `interrupted` (`reason` `lease_expired`, `deadline` or `worker_interrupted`) or stopped for `no_progress`, `history_limit`, `disabled`, `phase2` or `permission`. Carries `state` and `reason`. |
 
 What state each title leaves the run in, and what to do, is in "Operating the
@@ -307,14 +312,20 @@ invalid configuration is rejected with the setting's name. A string of digits
 counts as its number, which is what `bench set-config` stores without `-p`; set
 the numbers with `bench --site <site> set-config -p <key> <value>`. A custom
 queue needs a listening worker.
+If a setting becomes invalid while a run is queued, the worker can fail before
+claiming it. The run stays queued and repeated deliveries fail the same way;
+it keeps its session reservation until its lease or deadline expires, and a
+manual run also keeps its capacity slot until then. Correct the named setting, then let the next click or recovery sweep
+redeliver the pending slice. A queued lease lasts 1800 seconds unless the run's
+deadline comes first.
 Manual runs additionally have a per-requester cap of two. Analyze-time
 `fixes_missing` runs reserve their own session but do not consume the manual
 site/user cap. The item cap applies even to Regenerate all, and across a resume
 chain; zero means unlimited within the run deadline and bounded history limit.
 
 Slices run on the `optimus_ai_queue` queue, `long` by default, which analysis
-shares. A run holds one worker for up to a slice at a time, and the site cap
-allows two manual runs, so a site with one worker has its profiled-flow
+shares. A run holds one worker until its slice yields; an in-flight call can
+outlast the slice budget. The default site cap allows two manual runs, so a site with one worker has its profiled-flow
 analyses wait behind a slice. Give the queue a worker of its own
 (`optimus_ai_queue`, with a worker started for it) on a site that refreshes
 often. Analyze-time `fixes_missing` runs are not capped per site; the wiring
@@ -327,13 +338,17 @@ with a five-second reserve. A call is not started below `min(15, AI timeout)`.
 RQ's timeout is slice budget plus AI timeout plus 300 seconds; the SQL running
 lease uses a 180-second margin. Queued leases last 1800 seconds. Socket read
 timeouts measure inactivity, so worker time limits remain necessary.
+Keep web and worker hosts synchronized with NTP: leases and deadlines use their
+wall clocks, and clock skew can fence a worker early or delay recovery.
 
 ## Operating the engine
 
 The three journal DocTypes have no permissions, so they have no Desk list or
 report, even for a System Manager. Read them from the console or with SQL. The
-queries below only read; the repair command further down is the one thing that
-writes. Table names are `tab` plus the DocType name. The SQL is MariaDB's
+inspection queries below only read. `recover_pending`, `cancel_refresh`, the
+repair command, `bench migrate`, `bench trim-database` and `bench set-config`
+write state or configuration; the draft-upgrade UPDATE also writes data.
+Table names are `tab` plus the DocType name. The SQL is MariaDB's
 (backticks); on Postgres use double quotes. A run's `lease_until`, `deadline`
 and the other `*_epoch` columns are seconds since the epoch.
 
@@ -343,7 +358,8 @@ bench --site <site> console
 ...     fields=["name", "state", "end_reason", "breaker_kind", "cancelled_by", "tokens_reported",
 ...             "usage_incomplete", "uncertain", "lease_until", "deadline"], order_by="creation desc")
 >>> frappe.get_all("Optimus AI Refresh Attempt", filters={"run_id": "<run id>"},
-...     fields=["kind", "target_name", "state", "error_kind", "tokens_reported", "usage_complete", "settled"])
+...     fields=["kind", "target_name", "state", "error_kind", "started_at_epoch", "finished_at_epoch",
+...             "tokens_reported", "usage_complete", "settled"])
 ```
 
 ```sql
@@ -355,36 +371,54 @@ FROM `tabOptimus AI Refresh Run` WHERE active_session IS NOT NULL;
 -- the same on Postgres (bench --site <site> postgres): quote the table, and use
 --   lease_until <= extract(epoch from now()) OR deadline <= extract(epoch from now()) AS expired
 
--- the last Error Log rows the engine wrote
+-- the last engine and session-spend Error Log rows
 SELECT creation, method, reference_name, LEFT(error, 300) AS error
-FROM `tabError Log` WHERE method LIKE 'optimus ai refresh%' ORDER BY creation DESC LIMIT 50;
+FROM `tabError Log` WHERE method LIKE 'optimus ai refresh%' OR method = 'optimus ai spend'
+ORDER BY creation DESC LIMIT 50;
+```
 
--- a session's attempts that nobody will repeat: their usage is unknown until a later reply
-SELECT run_id, kind, target_name, error_kind FROM `tabOptimus AI Refresh Attempt`
+```sql
+-- uncertain attempts (MariaDB)
+SELECT run_id, kind, target_name, error_kind, started_at_epoch, finished_at_epoch,
+       tokens_reported FROM `tabOptimus AI Refresh Attempt`
 WHERE session_name = '<session name>' AND state = 'uncertain';
 ```
+
+Use the attempt epochs to locate the call in the provider's usage page;
+`tokens_reported` is what the journal knows, not proof of the provider's full charge.
 
 ### What you see, and what to do
 
 | You see | It means | What to do |
 | --- | --- | --- |
-| **Stuck**: a run is `queued` or `running` and `public_state` says `stalled`, or the query above shows `expired` | The worker died or lost its lease (`lease_until`), or the total `deadline` passed. Nothing is writing the run. | Nothing is lost and nothing needs cancelling. The session's next admission takes the run over and ends it as `interrupted` (`end_reason` `lease_expired` or `deadline`), its open call becomes `uncertain`. To clear sessions without a click, run `bench --site <site> execute optimus.ai_jobs.recover_pending`; it prints the counts `interrupted`, `dispatched`, `busy` and `failed`, and handles up to 100 runs per pass, so run it again until `interrupted` and `dispatched` are 0. No scheduler runs the sweep yet. |
-| **Queued, never starts**: a run stays `queued` with `dispatch_pending` 1 | The slice never reached a worker: no worker listens on the queue (`optimus_ai_queue`), or Redis is down. | Start a worker for that queue. The next click on the same run, or the sweep, sends the slice again, at most once per 30 seconds. See the `optimus ai refresh enqueue` row. |
+| **Stuck**: a run is `queued` or `running` and `public_state` says `stalled`, or the query above shows `expired` | The worker died or lost its lease (`lease_until`), or the total `deadline` passed. The expired worker cannot save an answer; a late reply can still settle known usage. | Saved outcomes remain; check any uncertain call before retrying it. No cancellation is required for takeover. The session's next admission takes the run over and ends it as `interrupted` (`end_reason` `lease_expired` or `deadline`), its open call becomes `uncertain`. To clear sessions without a click, run `bench --site <site> execute optimus.ai_jobs.recover_pending`; it prints the counts `interrupted`, `dispatched`, `busy` and `failed`, and handles up to 100 runs per pass, so run it again until `interrupted` and `dispatched` are 0. No scheduler runs the sweep yet. |
+| **Queued, never starts**: a run stays `queued` with `dispatch_pending` 1 | No worker claimed the slice: no worker listens on the queue (`optimus_ai_queue`), Redis is down, or invalid configuration stopped the worker before its claim. | Check worker logs for a named invalid setting and correct it; start a worker for that queue. The next click on the same run, or the sweep, sends the slice again, at most once per 30 seconds. See the `optimus ai refresh enqueue` row. |
 | **Uncertain**: attempts with `state` `uncertain`, a run with `uncertain` above 0, or `end_reason` `uncertain` (the only items left were skipped because an uncertain attempt with the same input exists) | A call may have reached the provider and its outcome was never recorded. It is never repeated automatically; its usage is unknown. | Check the provider's usage page for the window. A new refresh skips the item while its input is unchanged. Only a deliberate retry of uncertain work (`retry_uncertain`) sends it again, and that can be billed twice. |
-| **Cancelled**: `state` `cancelled`, `end_reason` `cancelled`, `cancelled_by` names the user | A user stopped it. A call already in flight is not interrupted: its reply is paid for, its tokens are counted, and its answer is discarded (a `discarded` row, `reason=fenced`). | None. A cancelled run can be resumed once. |
+| **Cancelled**: `state` `cancelled`, `end_reason` `cancelled`, `cancelled_by` names the user | A user stopped it. A call already in flight is not interrupted: its known reported usage can still be settled once, and a successful answer is discarded (a `discarded` row, `reason=fenced`). | None. A cancelled run can be resumed once. |
 | **Expired**: `state` `interrupted`, `end_reason` `lease_expired` or `deadline` | See Stuck. | A run ended this way can be resumed once. |
 | **Incomplete usage**: `usage_incomplete` above 0 on the run, `usage_complete` 0 on an attempt | The provider's usage was missing, contradictory or unknown for that call, so the reported tokens may undercount. | Do not trust the run's token total for those attempts; compare with the provider's bill. |
 | **Busy**: a click answers `{"status": "refused", "reason": "busy"}` | Another transaction holds the session row for a whole lock wait (the server's `innodb_lock_wait_timeout` on MariaDB; on Postgres 30 seconds at most, or a stricter `lock_timeout` setting), or another admission holds the site mutex. Nothing was started or counted. | Try again. If it stays busy, look for a long or dead transaction on that Optimus Session row (`SHOW PROCESSLIST` on MariaDB, `pg_stat_activity` on Postgres). |
 | **Already running**: a click answers `{"status": "already_running", ...}` | The session has a live run; the answer carries its progress. | Nothing: the click attached to it. |
-| **Refused**: `refresh_running`, `disabled`, `no_worker`, `queue_unavailable`, `not_ready`, `permission`, `phase2`, `site_cap`, `user_cap`, `not_resumable`, `already_resumed`, `retry_limit` | `refresh_running`: #72's Refresh holds the session. `disabled`: AI is off. `no_worker`: no worker listens on the queue. `queue_unavailable`: Redis could not say. `not_ready`: the session is not Ready. `permission`: the requester has no access to the session. `phase2`: a Phase 2 run is in progress. `site_cap`, `user_cap`: the site, or this requester, already has as many live user refreshes as the cap allows. A live run is `queued` or `running` with its lease and deadline not passed, so a run whose worker died or whose deadline passed holds no slot. The last three refuse a resume. | Fix the cause named; none of them counts or bills. An error naming a site setting that is not a valid whole number raises instead of answering (see Configuration). |
+| **Refused**: `refresh_running`, `disabled`, `no_worker`, `queue_unavailable`, `not_ready`, `permission`, `phase2`, `site_cap`, `user_cap`, `not_resumable`, `already_resumed`, `retry_limit` | `refresh_running`: #72's Refresh holds the session. `disabled`: AI is off. `no_worker`: no worker listens on the queue. `queue_unavailable`: Redis could not say. `not_ready`: the session is not Ready. `permission`: the requester has no access to the session. `phase2`: a Phase 2 run is in progress. `site_cap`, `user_cap`: the site, or this requester, already has as many live user refreshes as the cap allows. A live run is `queued` or `running` with its lease and deadline not passed, so a dead worker holds its slot only until its lease or deadline expires. The last three refuse a resume. | Fix the cause named; none of them counts or bills. An error naming a site setting that is not a valid whole number raises instead of answering (see Configuration). |
 | **Journal unavailable**: the error `AI refresh storage is not initialized` | The admission mutex row is missing (a rollback, or a failed install). A user refresh fails closed. | Run the repair command below. |
-| **Inconsistent**: the error `Refresh journal ... is inconsistent` | A run's reservation or attempt row disagrees with the run. | Cancel the run: that releases it, its open call counts as uncertain with unknown usage, and one `optimus ai refresh release` row names the problem. A takeover or the sweep does the same for an expired run. |
+| **Inconsistent**: the error `Refresh journal ... is inconsistent` | A run's reservation or attempt row disagrees with the run. | Use the administrator cancellation command below: it releases the run, treats an open call as uncertain with unknown usage, and writes one `optimus ai refresh release` row. A takeover or the sweep does the same for an expired run. |
+
+There is no cancel UI or public endpoint in this engine release. An administrator
+with bench access can cancel a run with the command below. Substitute the Run
+name, its exact Session name and the administrator's user id. `requested_by`
+records who cancelled; it does not authenticate that person. This internal
+function relies on the caller to authorize access, so only use it for a session
+you are authorized to administer. The command writes and commits the cancellation.
+
+```sh
+bench --site <site> execute optimus.ai_jobs.cancel_refresh --kwargs '{"run_id":"<run id>","docname":"<session name>","requested_by":"<administrator user id>"}'
+```
 
 ### Values you will find in the journal
 
 | Column | Values |
 | --- | --- |
-| Run `state` | `queued`, `running`, then `complete`, `stopped`, `cancelled` or `interrupted`. Only `queued` and `running` hold the session. |
+| Run `state` | `queued`, `running`, then `complete`, `stopped`, `cancelled` or `interrupted`. Only `queued` and `running` reserve the session; an expired reservation can be taken over. |
 | Run `end_reason` | `complete`; `uncertain` (nothing left but uncertain items); `breaker` (see `breaker_kind`); `deadline` (the total time was spent); `no_progress` (three slices in a row began no item); `disabled` (AI switched off mid-run); `not_ready`, `permission`, `phase2` (the session, the requester's access or a Phase 2 run changed); `history_limit` (more than 10000 attempts to weigh); `cancelled`; `lease_expired` and `deadline` (a run interrupted by a takeover or the sweep); `worker_interrupted` (the worker failed and its cleanup ended the run). |
 | Run `breaker_kind` | The failure kind that stopped the run: `auth`, `quota`, `not_found` or `config` at once, or the kind of the third failure in a row (for example `rate_limited`, `timeout`, `server`, `transport`). `context` and `refused` never set it. |
 | Run `cancelled_by` | The user id (normally the email) that cancelled; empty otherwise. |
@@ -395,16 +429,16 @@ WHERE session_name = '<session name>' AND state = 'uncertain';
 | Title | The run is | What to do |
 | --- | --- | --- |
 | `optimus ai refresh worker` | `interrupted` with `end_reason` `worker_interrupted`, its open call `uncertain` (a failure before the claim leaves it `queued`; when the cleanup itself failed, see `cleanup`) | Read the row for the cause. The row's `tokens` and `outcome` say whether the call's usage is recorded. |
-| `optimus ai refresh cleanup` | Still `running` with its call open until the lease expires | Wait for the lease, or click Refresh: the takeover ends it. |
-| `optimus ai refresh item` | Going on, unless this is the third in a row or a fatal kind | The row's `kind`, `fatal` and `hint` say what to fix (AI-FIXING section 6.5). |
+| `optimus ai refresh cleanup` | `queued` or `running`; cleanup failed, so an open call can remain Calling until recovery | After the lease or deadline expires, click Refresh or run the sweep: the takeover ends it. A click before expiry attaches to the run. |
+| `optimus ai refresh item` | Going on; a fatal failure or third streak-counted failure stops it. A `clamped` row alone does not stop it. | Failures carry `kind`, `fatal` and `hint` (AI-FIXING section 6.5). For `outcome=clamped`, compare `tokens` with the journal: the session counter ignores a count above 2147483647, and the Steps display is capped at that bound. |
 | `optimus ai refresh result storage` | Going on, or interrupted when both writes failed | Its `outcome` says: `committed on try N`, `committed: the error came after the COMMIT ...` or `recorded: ...` (the outcome and its tokens are saved; the write's error is still logged), `recorded by fallback` (the tokens are saved, the answer is not), `not committed after try N`, or `unknown` (the tokens may well be recorded; `unknown: the job timed out during the outcome write ...` when the job timeout cut the write). |
 | `optimus ai refresh enqueue` | `queued`, intent pending | Redis or the queue is down; the intent is sent again by the next click or sweep. |
 | `optimus ai refresh worker availability` | None started | New admissions answer `queue_unavailable` until Redis answers. |
-| `optimus ai refresh recovery` | Other rows of the sweep were done | The row names the run; the next sweep or admission tries again. |
+| `optimus ai refresh recovery` | Other passes and rows can continue | A per-run failure names the run; a failed candidate read has no session or run id. Fix the reported database failure, then run the sweep again. |
 | `optimus ai refresh release` | `cancelled` or `interrupted`, its open call `uncertain` with unknown usage | A journal row was inconsistent and the run was released rather than hold its session; the row names which row. Inspect the Attempt rows of the run. |
 | `optimus ai refresh selection`, `optimus ai refresh evidence` | Going on | The counts were zero, or the prompts went without index advice. |
-| `optimus ai refresh discarded`, `optimus ai refresh duplicate blocked` | Going on | See the signals below. |
-| `optimus ai refresh uncertain` | The attempt named by `attempt` is `uncertain`. The run is `cancelled` (`reason` `cancelled`; the call's late reply can still settle it) or `interrupted` (the job timeout, a takeover, the sweep or the worker cleanup) | Check the provider's usage page for the call's window: its tokens may be missing from the run. A new refresh skips the item while its input is unchanged (see Uncertain above). |
+| `optimus ai refresh discarded`, `optimus ai refresh duplicate blocked` | Logging does not change state; a discarded late reply can belong to a terminal run | See the signals below. |
+| `optimus ai refresh uncertain` | The attempt named by `attempt` became `uncertain`; a later known reply can settle it. The run normally becomes `cancelled` or `interrupted`; if worker cleanup failed, it can remain `running` until recovery | Check the provider's usage page for the call's window: its tokens may be missing from the run. A new refresh skips the item while its input is unchanged (see Uncertain above). |
 | `optimus ai refresh ended` | `interrupted`, or `stopped` with the row's `reason` | `interrupted`: see Stuck and Expired above; a run can be resumed once. `no_progress`: three slices in a row could begin no item, because its input changed before each send or the journal refused the send (a `duplicate blocked` row); `history_limit`: more than 10000 attempts to weigh; `disabled`: AI was switched off; `phase2`, `permission`: a Phase 2 run started or the requester lost access. Fix the cause, then refresh again. |
 
 ### The release-blocking signals
@@ -440,13 +474,15 @@ session), `run_id`, and `attempt` and `kind` where there is one.
 ### Reconciling the charge
 
 Three numbers describe one session's AI tokens: the session's `ai_tokens_spent`,
-the runs' `tokens_reported`, and the increments #72's counter logged as dropped
+the runs' `tokens_reported`, and the increments #72's counter logged as possibly dropped
 (`optimus ai spend`, each with `amount=`; a statement-level counter failure
-drops the increment but the outcome still commits). The query lists, for every
-session that has a run, the counter, the journal's total, the dropped amounts
-and `other_sources = spent + dropped - journal_tokens`. That is the tokens from
-everything the journal does not see: the analyze-time suggestions, the Steps
-rewrite and #72's own Refresh.
+drops the increment from that transaction). The query lists, for every
+session that has a run, the counter, the journal's total, candidate dropped amounts
+and `other_sources = spent + dropped_increments - journal_tokens`. These are
+triage figures, not proof of a lost or duplicate charge. Confirm the candidate
+amounts against settlement outcomes before interpreting the difference; tokens
+from analyze-time suggestions, the Steps rewrite and #72's own Refresh also
+contribute because those paths do not use the journal.
 
 ```sql
 -- reconcile (MariaDB)
@@ -480,30 +516,42 @@ LEFT JOIN (SELECT reference_name,
 ORDER BY other_sources;
 ```
 
-Only `savepoint_rollback=done` rows count as dropped: the counter rolled back to
-its savepoint and the outcome committed without the increment. A
-`savepoint_rollback=failed` row means the whole transaction was gone and the
-settlement was retried, so those tokens were charged on the retry.
+The query includes only `savepoint_rollback=done` rows as candidates: that counter
+statement rolled back to its savepoint, but the enclosing transaction may later
+have rolled back and retried successfully. Cross-check the same session, run,
+attempt and time window against `optimus ai refresh result storage`, especially
+`outcome=committed on try N`, and the final Attempt row. For example, a failed
+10-token increment followed by a successful settlement retry can leave a `done`
+row even though the session was charged once. Exclude that candidate amount when
+recomputing the difference; do not increment the counter just because the query
+listed it. A `savepoint_rollback=failed` row means rollback to the savepoint failed;
+the enclosing write may be retried, but the tokens are charged only if a later
+write commits its increment. All retries can fail. An `unknown` outcome requires
+checking the journal and provider usage before any manual adjustment.
 
-Read `other_sources`: **negative** means the session counter holds fewer tokens
+After verifying the candidate amounts, read `other_sources`: **negative** means the session counter holds fewer tokens
 than the journal reported and no `optimus ai spend` row explains it. Settlement
 saves the counter, the attempt and the run in one transaction, so a failed
 settlement does not cause this. Look for a spend row that was pruned (below), a
 reply whose count is above 2147483647 (the counter ignores it; the engine logs an
-`optimus ai refresh item` row with `outcome` `clamped`), a `discarded` row with
-`reason=fenced` and `tokens=` (an attempt row that was edited or deleted), or an
-overwrite of `ai_tokens_spent` by hand. **Zero** is a session whose AI use was
-all through the engine. **Above zero** is another source's tokens; the query
-cannot tell it apart from a double count, so for a session you have only used
-through the engine a positive value is a double charge.
+`optimus ai refresh item` row with `outcome` `clamped`), or an
+overwrite of `ai_tokens_spent` by hand. **Zero** means the verified figures balance;
+it does not rule out offsetting errors. **Above zero** can be another source's
+tokens or a double count. For an engine-only session, investigate a positive
+difference after removing stale candidates; the raw query alone proves neither.
 
-Frappe prunes the Error Log after 14 days (`default_log_clearing_doctypes`), and
-with it the spend rows and the two signal rows. The journal is never pruned.
+By default, Frappe prunes the Error Log after 14 days (`default_log_clearing_doctypes`), and
+with it the spend rows, the two signal rows and the job-timeout
+`optimus ai refresh result storage` row. When a timeout cuts the outcome write
+before it commits, that result-storage row can be the only record of the reply's
+known tokens. The journal is never pruned.
 Reconcile within that window, or raise the Error Log retention in Log Settings.
 
 The journal also checks itself: the query below
-returns no row when every run's `tokens_reported` equals the sum of its
-attempts.
+compares runs that have attempt rows: it returns a row when the run's
+`tokens_reported` differs from the sum of its attempts. Its inner join does not
+detect a nonzero run total with no remaining attempt rows; inspect such a run
+separately if the journal has been edited or partially deleted.
 
 ```sql
 -- self-check (MariaDB)
@@ -530,6 +578,10 @@ WHERE a.tokens <> r.tokens_reported;
   string of digits is accepted as its number, but set numbers with
   `bench --site <site> set-config -p <key> <value>`. An out-of-range or
   non-numeric value makes an admission raise an error that names the setting.
+
+If this site ran the earlier draft that used a nullable Long Int for
+`ai_steps_tokens`, follow the draft-site upgrade note in CHANGELOG 0.12.70 before
+migrating. That upgrade narrows the column to Int and can rebuild the Session table.
 
 ## Data retention
 
@@ -559,6 +611,17 @@ conflicts above, on every leg, and they run the reconciliation query of the
 runbook as written. The Postgres role must be a superuser (CI's `POSTGRES_USER`
 is): one test sets `deadlock_timeout`. They do not replace Frappe document-hook
 or end-user acceptance tests.
+
+### CI triage
+
+In the failed AI Quality `sql-journal` matrix leg, read the complete pytest result
+summary (`-rA`), then the **Show database service logs on failure** step. Each leg
+starts only its own database. Connection or health-check failures point to the
+service; assertion failures name the transaction scenario to reproduce with
+`OPTIMUS_TEST_SQL` and `OPTIMUS_TEST_SQL_SNAPSHOT` as set by that leg. If service
+initialization fails before steps can run, use the job's **Initialize containers**
+log. Reproduce only against a disposable database with the fixed test credentials;
+the SQL adapter does not read a site's database configuration.
 
 The wiring follow-up owns scheduled recovery, report replacement and UI/API
 compatibility. Journal retention is described under "Data retention". Final
