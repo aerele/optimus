@@ -6,11 +6,11 @@
 import frappe
 
 from optimus import redis_keys
-from optimus.ai_fix import _InterruptGuard
+from optimus.safe_call import InterruptGuard
 
 
 def execute():
-	guard = _InterruptGuard(base=True)
+	guard = InterruptGuard(base=True)
 	with guard:
 		_seed()
 	if guard.pending():
@@ -22,7 +22,7 @@ def _seed():
 	if not values or "ai_refresh_max_findings" in values:
 		return
 	frappe.db.set_single_value("Optimus Settings", "ai_refresh_max_findings", 20)
-	guard = _InterruptGuard(base=True)
+	guard = InterruptGuard(base=True)
 	cache_failed = False
 	try:
 		with guard:

@@ -73,7 +73,7 @@ def test_profile_is_ready_and_durable_before_any_optional_ai_admission(pipeline,
 		assert pipeline.durable["status"] == "Ready"
 		assert pipeline.durable["findings"] and pipeline.durable["report"]
 		queued.append(name)
-	monkeypatch.setattr(analyze, "_queue_analyze_time_ai", queue, raising=False)
+	monkeypatch.setattr(analyze, "queue_analyze_time_ai", queue, raising=False)
 	analyze.run("fake-session")
 	assert queued == ["fake-doc"] and not pipeline.provider
 
@@ -93,7 +93,7 @@ def test_timeout_in_optional_admission_cannot_mark_profile_failed(pipeline, monk
 	JobTimeoutException = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
 	def timeout(name):
 		raise JobTimeoutException("fake optional admission timeout")
-	monkeypatch.setattr(analyze, "_queue_analyze_time_ai", timeout, raising=False)
+	monkeypatch.setattr(analyze, "queue_analyze_time_ai", timeout, raising=False)
 	with pytest.raises(JobTimeoutException):
 		analyze.run("fake-session")
 	assert pipeline.durable["status"] == "Ready" and pipeline.state["status"] == "Ready"
@@ -110,7 +110,7 @@ def test_auto_admission_uses_the_session_owner_and_independent_section_toggles(m
 	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(db=SimpleNamespace(get_value=lambda *a, **k: row)))
 	calls = []
 	monkeypatch.setattr(ai_jobs, "start_refresh", lambda **kw: calls.append(kw) or {"status": "queued"})
-	analyze._queue_analyze_time_ai("fake-doc")
+	analyze.queue_analyze_time_ai("fake-doc")
 	assert len(calls) == int(fixes or steps)
 	if calls:
 		assert calls[0] == dict(docname="fake-doc", session_uuid="fake-session", requested_by="fake-owner",
@@ -125,7 +125,7 @@ def test_auto_admission_failure_is_logged_without_undoing_the_profile(monkeypatc
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: logs.append(type(a[1]).__name__))
 	monkeypatch.setattr(analyze, "safe_commit", lambda: None)
 	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(db=SimpleNamespace(rollback=lambda: None)))
-	analyze._queue_analyze_time_ai("fake-doc")
+	analyze.queue_analyze_time_ai("fake-doc")
 	assert logs == ["ValueError"]
 
 
@@ -153,5 +153,5 @@ def test_auto_admission_refusal_leaves_an_operator_notice(monkeypatch, reason):
 	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(db=SimpleNamespace(get_value=lambda *a, **k: row)))
 	monkeypatch.setattr(ai_jobs, "start_refresh", lambda **kw: {"status": "refused", "reason": reason})
 	monkeypatch.setattr(ai_jobs, "record_admission_notice", lambda *a, **kw: notices.append((a, kw)), raising=False)
-	analyze._queue_analyze_time_ai("fake-doc")
+	analyze.queue_analyze_time_ai("fake-doc")
 	assert notices == [(("fake-doc",), {"reason": reason})]

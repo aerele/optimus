@@ -444,9 +444,9 @@ def canary(monkeypatch, request):
 		monkeypatch.setattr("optimus.redaction.scrub_secrets", _scrub_fails)
 	# Keep the analyze helpers off the source-reading / Redis paths: the payload
 	# builders return the PII-bearing inputs directly.
-	monkeypatch.setattr(analyze, "_ai_payload_for_finding", lambda *a, **k: json.loads(json.dumps(_FINDING)))
-	monkeypatch.setattr(analyze, "_actions_for_humanizer", lambda *a, **k: [dict(x) for x in _ACTIONS])
-	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
+	monkeypatch.setattr(analyze, "ai_payload_for_finding", lambda *a, **k: json.loads(json.dumps(_FINDING)))
+	monkeypatch.setattr(analyze, "actions_for_humanizer", lambda *a, **k: [dict(x) for x in _ACTIONS])
+	monkeypatch.setattr(analyze, "phase2_index_for", lambda *a, **k: {})
 	monkeypatch.setattr(analyze, "_fetch_recordings", lambda *a, **k: [])
 	monkeypatch.setattr(analyze, "_load_recordings_bundle", lambda *a, **k: None)
 	# A successful AI call (malformed_usage) re-renders the report: not an AI path.

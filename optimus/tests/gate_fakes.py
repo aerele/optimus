@@ -260,10 +260,20 @@ def make_fake_frappe(
 	)
 
 
+def install_handler_context(monkeypatch) -> None:
+	"""Make the framework wrapper recognize a direct call outside HTTP."""
+	import frappe
+
+	# v15's whitelist wrapper also reads the original module's request flags.
+	# These are direct handler tests outside an HTTP request, on every version.
+	monkeypatch.setattr(frappe.local, "flags", SimpleNamespace(in_test=False), raising=False)
+
+
 def install(monkeypatch, fake) -> None:
 	"""Point ``frappe`` at ``fake`` on optimus.api and optimus.ratelimit."""
 	from optimus import api, ratelimit
 
+	install_handler_context(monkeypatch)
 	for module in (api, ratelimit):
 		monkeypatch.setattr(module, "frappe", fake)
 

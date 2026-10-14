@@ -78,7 +78,7 @@ def test_report_failure_is_logged_outside_except_and_returns_a_fixed_user_messag
 	def fail(*a):
 		raise OSError("fake rendering failure")
 	monkeypatch.setattr(report_refresh, "render_report", fail)
-	with pytest.raises(FakeValidationError, match="previous report was kept"):
+	with pytest.raises(FakeValidationError, match="could not be confirmed"):
 		api._render_session_report(DOCNAME)
 	assert seen.logged == [("optimus ai regenerate report", "OSError", None)]
 

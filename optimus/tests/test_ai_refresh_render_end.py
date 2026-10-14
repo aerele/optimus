@@ -4,8 +4,8 @@ from importlib import import_module
 
 import pytest
 
-from optimus.tests.test_ai_refresh_journal import journal as _journal_fixture  # noqa: F401
-from optimus.tests.test_ai_refresh_worker import worker as _worker_fixture  # noqa: F401
+from optimus.tests.fixtures.ai_refresh_journal import journal as _journal_fixture  # noqa: F401
+from optimus.tests.fixtures.ai_refresh_worker import worker as _worker_fixture  # noqa: F401
 
 pytestmark = pytest.mark.rq
 

@@ -10,9 +10,9 @@ from types import SimpleNamespace
 import pytest
 
 from optimus import ai_fix, ai_prompts
-from optimus.tests.test_ai_refresh_journal import journal as _journal_fixture  # noqa: F401
-from optimus.tests.test_ai_refresh_work import Doc
-from optimus.tests.test_ai_refresh_work import work as _work_fixture  # noqa: F401
+from optimus.tests.fixtures.ai_refresh_journal import journal as _journal_fixture  # noqa: F401
+from optimus.tests.fixtures.ai_refresh_work import Doc
+from optimus.tests.fixtures.ai_refresh_work import work as _work_fixture  # noqa: F401
 
 
 def install_rows(work, monkeypatch, rows):
@@ -80,7 +80,7 @@ def steps_item(work, monkeypatch):
 	from optimus import analyze
 	work.journal.run.update(include_steps=1, include_fixes=0)
 	monkeypatch.setattr(analyze, "load_recordings_light", lambda *a, **kw: [{"uuid":"fake-rec"}])
-	monkeypatch.setattr(analyze, "_actions_for_humanizer", lambda *a: [{"method":"POST", "path":"/api/method/fake"}])
+	monkeypatch.setattr(analyze, "actions_for_humanizer", lambda *a: [{"method":"POST", "path":"/api/method/fake"}])
 	monkeypatch.setattr(work.jobs, "_touch_session", lambda name, **values: work.journal.db.set_value("Optimus Session", name, values))
 	return work.jobs._next_item(work.journal.run, {})
 

@@ -25,8 +25,9 @@ from datetime import datetime, timezone
 import frappe
 from frappe import _
 
-from optimus import ai_fix, safe_call, safe_commit
+from optimus import ai_fix, safe_call, safe_commit, sql_work
 from optimus import ai_refresh_store as store
+from optimus import ai_refresh_view as refresh_view
 
 _JOB_METHOD = "optimus.ai_jobs.run_ai_refresh_slice"
 # Seconds an HTTP admission or cancellation waits for a row lock on Postgres before it answers
@@ -87,34 +88,14 @@ def slice_seconds():
 
 
 def _call_timeout():
-	return ai_fix._resolve_timeout_seconds()
+	return ai_fix.request_timeout_seconds()
 
 
 def _transaction(operation):
-	"""A short owned transaction, with fresh interrupts after rollback."""
-	guard = safe_call.InterruptGuard(base=True)
-	failure = result = None
-	try:
-		with guard:
-			result = operation()
-			safe_commit()
-	except Exception as exc:
-		failure = exc
-	if failure is not None or guard.pending():
-		rollback_error = None
-		try:
-			with guard:
-				frappe.db.rollback()
-		except Exception as exc:
-			rollback_error = type(exc).__name__
-		if guard.pending():
-			operation = result = failure = None
-			raise guard.interrupt()
-		if rollback_error:
-			operation = result = failure = None
-			raise RefreshSliceFailed(f"AI refresh transaction rollback failed ({rollback_error})")
-		raise failure
-	return result
+	"""Compatibility seam for the engine's owned SQL transactions."""
+	return sql_work.transaction(
+		operation, commit=safe_commit, rollback=frappe.db.rollback, error_type=RefreshSliceFailed
+	)
 
 
 def _read_run(run_id):
@@ -130,75 +111,20 @@ def _session_of(run_id):
 
 
 def _retry_sql(operation, *, retry_lock_waits=True):
-	"""Run one journal operation in its own short transaction; retry SQL conflicts only.
-
-	The caller's transaction is committed first, so the operation's first statement (the
-	locking read of the session row) opens the transaction. A read view opened before it
-	would turn that lock into a 1020 on MariaDB 11.8 once the lock holder commits.
-
-	A conflict (``store.is_retryable_conflict``: a deadlock, a lock wait, a snapshot or
-	serialization conflict, raw or as Frappe wraps it) rolls back and runs the operation
-	again, at most three transactions in all, with a short delay. Anything else is raised
-	at once. The operation never contacts a provider, so a retry never repeats a call. A
-	busy admission mutex is a refusal returned by ``store.admit``, not a conflict.
-
-	``retry_lock_waits=False`` (an HTTP admission) raises a lock wait timeout (MariaDB 1205,
-	Postgres 55P03) at once instead of waiting another timeout; deadlocks, snapshot and
-	serialization conflicts are still retried. Worker and settlement paths retry it.
-	"""
-	_transaction(lambda: None)
-	for attempt in range(3):
-		guard = safe_call.InterruptGuard(base=True)
-		failure = None
-		try:
-			with guard:
-				return _transaction(operation)
-		except Exception as exc:
-			failure = exc
-		if guard.pending():
-			operation = failure = None
-			raise guard.interrupt()
-		if (
-			not store.is_retryable_conflict(failure)
-			or (not retry_lock_waits and store.is_lock_unavailable(failure))
-			or attempt == 2
-		):
-			raise failure
-		failure = None
-		time.sleep(0.02 * (attempt + 1))
+	return sql_work.retry(
+		operation, transaction=_transaction, framework=store.frappe,
+		retry_lock_waits=retry_lock_waits, sleep=time.sleep,
+	)
 
 
 def _bound_http_lock_wait():
-	"""On Postgres, end this transaction's row lock waits after ``HTTP_LOCK_WAIT_SECONDS`` at
-	most: the first statements of an HTTP admission or cancellation.
-
-	Postgres waits for a row lock for as long as it takes unless ``lock_timeout`` is set, and
-	Frappe sets none, so a click on a session row that a dead or slow transaction holds would
-	wait until the web server killed the request, and its backend would go on waiting. The
-	current limit is read first: a stricter one of the role, the database or the server is kept;
-	otherwise ``SET LOCAL`` sets the bound, which ends with this transaction, so the pooled
-	connection keeps its own setting. ``SHOW`` and ``SET`` take no snapshot (a SELECT would), so
-	the session lock is still the first read. A lock not granted in time raises 55P03, which both
-	paths answer as ``busy``. MariaDB gets no statement: a session-level one would outlive the
-	transaction on the pooled connection, so the server's ``innodb_lock_wait_timeout`` applies.
-	Worker paths retry a lock wait and set nothing."""
-	if frappe.db.db_type != "postgres":
-		return
-	rows = frappe.db.sql("SHOW lock_timeout", as_dict=True)
-	current = _pg_milliseconds(rows[0].get("lock_timeout")) if rows else None
-	if current and current <= HTTP_LOCK_WAIT_SECONDS * 1000:
-		return
-	frappe.db.sql("SET LOCAL lock_timeout = %s", (f"{HTTP_LOCK_WAIT_SECONDS}s",))
+	return sql_work.bound_http_lock_wait(frappe.db, HTTP_LOCK_WAIT_SECONDS)
 
 
-_PG_TIME_UNITS = {"ms": 1, "s": 1000, "min": 60_000, "h": 3_600_000, "d": 86_400_000}
 
 
 def _pg_milliseconds(value):
-	"""A Postgres time setting as ``SHOW`` prints it (``0``, ``250ms``, ``2s``, ``1min``) in
-	milliseconds, or None when it cannot be read."""
-	match = re.fullmatch(r"(\d+)(ms|s|min|h|d)?", str(value).strip())
-	return int(match[1]) * _PG_TIME_UNITS[match[2] or "ms"] if match else None
+	return sql_work.lock_timeout_ms(value)
 
 
 def run_ai_refresh_slice(run_id: str, slice_no: int = 0) -> None:
@@ -405,7 +331,7 @@ def _drive(run_id, docname, slice_no, worker_token):
 		)
 		if guard.pending():
 			outcome, kind = "uncertain", "timeout"
-		if tokens > ai_fix._MAX_TOKEN_COUNT:
+		if tokens > ai_fix.MAX_TOKEN_COUNT:
 			ai_fix.log_ai_failure(
 				"optimus ai refresh item",
 				docname=docname,
@@ -414,7 +340,7 @@ def _drive(run_id, docname, slice_no, worker_token):
 				item=item.kind,
 				tokens=tokens,
 				outcome=(
-					f"clamped: the count is above {ai_fix._MAX_TOKEN_COUNT}, so the session counter "
+					f"clamped: the count is above {ai_fix.MAX_TOKEN_COUNT}, so the session counter "
 					"ignores it; the run and the attempt keep it"
 				),
 			)
@@ -528,7 +454,7 @@ _TIMED_OUT = "unknown: the job timed out during the outcome write; the attempt i
 def _settle(operation, *, run_id, docname, attempt_id, tokens, session_uuid=None, fallback=None):
 	"""Commit one attempt's outcome, its answer and its usage in one short transaction.
 
-	The discipline is ``analyze._write_ai_answer``'s (#72), mirrored rather than reused: the
+	The discipline is ``the journal answer writer``'s (#72), mirrored rather than reused: the
 	engine's write is ``store.settle_attempt``, which locks the session, run and attempt,
 	decides whether the answer may still be written (owner, deadline, input recheck) and
 	records the outcome, where ``_write_ai_answer`` writes one Finding row and its spend.
@@ -925,17 +851,16 @@ def _valid_item(run, doc, row, fingerprint):
 
 def _build_payload(row, file_cache, grounding, *, principal):
 	"""The fix prompt's payload for one finding: the shared builder (``analyze``) with the same
-	grounding as the synchronous Refresh. ``principal`` (the requesting user) is reserved for
+	grounding used by the report analysis. ``principal`` (the requesting user) is reserved for
 	PR-4, which scopes the source and recording reads to it; nothing reads it yet, the worker's
 	access having been checked for that user by ``_check_run``."""
 	from optimus import analyze
 
-	return analyze._ai_payload_for_finding(row, file_cache, **grounding)
+	return analyze.ai_payload_for_finding(row, file_cache, **grounding)
 
 
 def _grounding(doc, row, memo, run_id=None):
-	"""The fix prompt's grounding for one finding, the same inputs as the synchronous Refresh
-	(``analyze._run_ai_backfill``): the Phase 2 hottest-line index and the Slow Query index
+	"""The fix prompt's grounding for one finding: the Phase 2 hottest-line index and the Slow Query index
 	evidence. The slice's ``memo`` builds each once, not once per finding: a Phase 2
 	index failure is logged once per slice, with the session, and the slice goes on without it."""
 	from optimus import analyze
@@ -950,10 +875,10 @@ def _grounding(doc, row, memo, run_id=None):
 		doc, [uuid] if uuid else [], memo=memo.setdefault("recordings", {})
 	)
 	if "phase2_index" not in memo:
-		memo["phase2_index"] = analyze._phase2_index_for(doc)
+		memo["phase2_index"] = analyze.phase2_index_for(doc)
 	if "evidence" not in memo:
 		scope, failed = analyze._run_ai_step(
-			analyze._ai_evidence_scope,
+			analyze.ai_evidence_scope,
 			title="optimus ai refresh evidence",
 			docname=doc.get("name"),
 			run_id=run_id,
@@ -970,11 +895,7 @@ def _grounding(doc, row, memo, run_id=None):
 
 
 def _touch_session(name, **values):
-	from frappe.utils import now_datetime
-
-	frappe.db.set_value(
-		"Optimus Session", name, {"modified": now_datetime(), **values}, update_modified=False
-	)
+	return sql_work.touch_session(frappe.db, name, **values)
 
 
 def _fix_item(run, doc, row, memo):
@@ -1013,7 +934,7 @@ def _suggest_fix(payload, *, timeout, run):
 	(``usage_out``), so a failure is a known zero only when the count proves nothing was
 	sent; any other failure without reported usage stays unknown."""
 	usage = ai_fix.Usage()
-	return ai_fix._with_usage_on_failure(
+	return ai_fix.with_usage_on_failure(
 		lambda: ai_fix.suggest_fix(
 			payload,
 			timeout=timeout,
@@ -1029,7 +950,7 @@ def _steps_item(run, doc, memo):
 	from optimus import analyze
 
 	fingerprint = _signature(doc)
-	actions = analyze._actions_for_humanizer(
+	actions = analyze.actions_for_humanizer(
 		analyze.load_recordings_light(doc, memo=memo.setdefault("recordings", {}))
 	)
 	if not actions:
@@ -1050,9 +971,9 @@ def _steps_item(run, doc, memo):
 				session_uuid=run["session_uuid"],
 				docname=run["session_name"],
 			)
-			return analyze._assemble_humanized_notes(text)
+			return analyze.assemble_humanized_notes(text)
 
-		notes = ai_fix._with_usage_on_failure(render, usage)
+		notes = ai_fix.with_usage_on_failure(render, usage)
 		return {
 			"notes": notes,
 			"tokens": dict(usage),
@@ -1063,11 +984,11 @@ def _steps_item(run, doc, memo):
 		if not valid():
 			return False
 		# ``ai_steps_tokens`` is a 32-bit Int, as in #72: one reply's total cannot reach it, but
-		# provider counts are bounded per field (``ai_fix._MAX_TOKEN_COUNT``), so their sum could.
+		# provider counts are bounded per field (``ai_fix.MAX_TOKEN_COUNT``), so their sum could.
 		# This display figure is clamped so an absurd reply can never make the Steps save fail.
 		# A total above the bound never reaches ``ai_tokens_spent`` either (``_token_count``
 		# reads it as 0); only the run and the attempt keep it, and ``_drive`` logs one row.
-		tokens = min(result["tokens"].get("total_tokens", 0), ai_fix._MAX_TOKEN_COUNT)
+		tokens = min(result["tokens"].get("total_tokens", 0), ai_fix.MAX_TOKEN_COUNT)
 		_touch_session(doc.name, notes=result["notes"], ai_steps_tokens=tokens)
 		return True
 
@@ -1564,43 +1485,11 @@ def active_refresh(docname):
 
 
 def refresh_plan(doc):
-	"""Count the same eligible rows the worker selects, without source or file I/O."""
-	from optimus import analyze
-	from optimus.settings import get_config
-
-	cfg = get_config()
-	fixes = bool(cfg.ai_enabled and cfg.ai_suggest_findings)
-	cutoff = datetime.fromtimestamp(_now(), timezone.utc)
-	rows = doc.get("findings") or []
-	pending = len(analyze.eligible_findings(rows, cfg, requested_at=cutoff)) if fixes else 0
-	total = len(analyze.eligible_findings(rows, cfg, regenerate_all=True, requested_at=cutoff)) if fixes else 0
-	cap = cfg.ai_refresh_max_findings
-	return {
-		"pending": pending, "total": total, "cap": cap,
-		"selected": min(pending, cap) if cap else pending,
-		"selected_all": min(total, cap) if cap else total,
-		"steps": bool(cfg.ai_enabled and cfg.ai_humanize_steps and doc.get("actions")),
-	}
+	return refresh_view.refresh_plan(doc, now=_now())
 
 
 def admission_message(reason):
-	"""Fixed translated explanations, never provider text or exception detail."""
-	if reason == "no_worker":
-		return _("No background worker is listening on the AI queue {0}.").format(ai_queue())
-	return {
-		"queue_unavailable": _("The background queue is unavailable. Try again after it recovers."),
-		"busy": _("The session is busy. Wait a moment and try again."),
-		"not_running": _("This refresh has already ended. Reload its current progress."),
-		"phase2": _("Wait for the active Phase 2 run to finish."),
-		"disabled": _("AI suggestions are disabled or the provider is not configured."),
-		"not_ready": _("The session must be Ready before AI suggestions can run."),
-		"permission": _("The requesting user can no longer update this session."),
-		"site_cap": _("The site already has the maximum number of active AI refreshes."),
-		"user_cap": _("You already have the maximum number of active AI refreshes."),
-		"retry_limit": _("This refresh has reached its resume limit. Start a new refresh to try again."),
-		"already_resumed": _("This run has already been resumed. Reload its current progress."),
-		"not_resumable": _("This run cannot be resumed."),
-	}.get(reason, _("AI enrichment could not start. Search the Error Log for titles starting with optimus ai."))
+	return refresh_view.admission_message(reason, queue=ai_queue() if reason == "no_worker" else None)
 
 
 def record_admission_notice(docname, *, reason):
@@ -1657,46 +1546,4 @@ def cancel_refresh(run_id, *, docname, requested_by):
 
 
 def public_state(run, now=None):
-	"""A counts-only view; SQL remains readable during a Redis outage.
-
-	An active run whose lease or deadline has passed shows as it will be recorded:
-	``interrupted``, with ``stalled`` True and the expiry as its ``end_reason``, before any
-	recovery has written it. The session's next admission takes it over."""
-
-	def count(key):
-		value = run.get(key) or 0
-		return value if type(value) is int and value >= 0 else 0
-
-	now = _now() if now is None else now
-	stalled = store.expired(run, now)
-	state = "interrupted" if stalled else run.get("state")
-	state = state if state in store.ACTIVE | store.TERMINAL else "unknown"
-	return {
-		"run_id": run["name"],
-		"seq": count("seq"),
-		"retry_no": count("retry_no"),
-		"state": state,
-		"scope": run.get("scope"),
-		"count": count("total_items"),
-		"done": count("completed"),
-		"failed": count("failed"),
-		"skipped": count("skipped"),
-		"uncertain": count("uncertain"),
-		"blocked_uncertain": count("blocked_uncertain"),
-		"attempted": count("attempted"),
-		"gated": count("gated_count"),
-		"excluded": count("excluded_count"),
-		"not_reached": max(0, count("total_items") - count("attempted")),
-		"usage": {
-			"tokens_reported": count("tokens_reported"),
-			"incomplete_attempts": count("usage_incomplete"),
-		},
-		"end_reason": store.expiry_reason(run, now) if stalled else run.get("end_reason") or "",
-		"stalled": stalled,
-		"breaker_kind": run.get("breaker_kind") or "",
-		"render_pending": bool(run.get("render_pending")),
-		"steps_state": run.get("steps_state") or "",
-		"requested_at": run.get("requested_at_epoch"),
-		"updated_at": run.get("heartbeat"),
-		"finished_at": run.get("ended_at_epoch"),
-	}
+	return refresh_view.public_state(run, now=_now() if now is None else now)

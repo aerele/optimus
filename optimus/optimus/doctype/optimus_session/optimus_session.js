@@ -236,7 +236,7 @@ function _ai_progress_banner(frm, state) {
 function _ai_end_message(run) {
 	if (run.end_reason === "breaker") return __("Repeated provider errors or a provider limit stopped this run. Check the provider configuration and search the Error Log for titles starting with optimus ai before retrying.");
 	if (run.end_reason === "deadline") return __("The refresh time limit was reached.");
-	if (run.end_reason === "render_failed") return __("Report replacement failed; the previous report was kept.");
+	if (run.end_reason === "render_failed") return __("Report update could not be confirmed. Reload the session; use Regenerate Reports if needed.");
 	if (["uncertain", "lease_expired", "worker_interrupted"].includes(run.end_reason)) return __("An interrupted call may have been billed. It will not be repeated automatically.");
 	if (run.end_reason === "history_limit") return __("Refresh history reached its safety limit. Ask an administrator to review the retained attempts.");
 	if (run.end_reason === "not_ready") return __("The session changed and is no longer Ready for AI work.");
@@ -540,10 +540,11 @@ function render_phase2_button(frm) {
 				args: {run_uuids: batch.map(row => row.run_uuid)},
 				callback(r) {
 					const tally = ((r && r.message) || {}).tallies || {};
+					const refused = (tally.Failed || 0) + (tally.Skipped || 0) + (tally.Refused || 0);
 					frappe.show_alert({
 						message: __("Phase 2: {0} queued or running; {1} refused or failed.",
-							[tally.Analyzing || 0, (tally.Failed || 0) + (tally.Skipped || 0)]),
-						indicator: tally.Failed ? "orange" : "blue",
+							[tally.Analyzing || 0, refused]),
+						indicator: refused ? "orange" : "blue",
 					});
 					_reload_clean_form(frm);
 				},
@@ -560,7 +561,7 @@ function render_phase2_button(frm) {
 					const accepted = r && r.message && r.message.status === "Analyzing";
 					frappe.show_alert({
 						message: accepted ? __("Phase 2 analysis is queued or running. Results will appear when it finishes.")
-							: __("Phase 2 admission was not confirmed. Reload the session to check its status."),
+							: frappe.utils.escape_html((r && r.message && r.message.message) || __("Phase 2 admission was not confirmed. Reload the session to check its status.")),
 						indicator: accepted ? "blue" : "orange",
 					});
 					_reload_clean_form(frm);

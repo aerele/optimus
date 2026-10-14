@@ -416,9 +416,9 @@ def _opt_float(value) -> float | None:
 
 def _best_effort(call, default=None):
 	"""Keep ordinary Settings fallbacks without consuming a worker interrupt."""
-	from optimus.ai_fix import _InterruptGuard
+	from optimus.safe_call import InterruptGuard
 
-	guard = _InterruptGuard(base=True)
+	guard = InterruptGuard(base=True)
 	try:
 		with guard:
 			return call()

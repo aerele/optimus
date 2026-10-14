@@ -143,7 +143,7 @@ let dirty=false,cancel;
 const ctx={__:(text,args=[])=>text.replace(/\{(\d+)\}/g,(_,n)=>args[n]),setTimeout:()=>1,clearTimeout:()=>{},
  frappe:{ui:{form:{on:()=>{}},Dialog:class {constructor(options){this.options=options;dialogs.push(this);}show(){}hide(){}}},
  router:{on:()=>{}},get_route:()=>["Form","Optimus Session","fake-doc"],call:r=>requests.push(r),
- utils:{escape_html:String},show_alert:r=>messages.push(r),msgprint:r=>messages.push(r)}};
+ utils:{escape_html:s=>String(s).replace(/</g,"&lt;").replace(/>/g,"&gt;")},show_alert:r=>messages.push(r),msgprint:r=>messages.push(r)}};
 vm.createContext(ctx);vm.runInContext(fs.readFileSync(process.argv[1],"utf8"),ctx);
 ctx._single_banner=()=>({find:()=>({on:(_event,handler)=>{cancel=handler;}})});
 const frm={doc:{name:"fake-doc",session_uuid:"fake-session",status:"Ready"},is_new:()=>false,is_dirty:()=>dirty,
@@ -152,6 +152,7 @@ const frm={doc:{name:"fake-doc",session_uuid:"fake-session",status:"Ready"},is_n
 ctx.cur_frm=frm;ctx.render_ai_buttons(frm);
 const plan={total:4,pending:0,selected:0,selected_all:4,steps:false,cap:20};
 requests.shift().callback({message:{status:"ok",refresh:null,can_act:true,plan}});
+assert.equal(frm._optimus_ai_enabled,true);
 buttons.get("Refresh AI suggestions")();
 const confirm=dialogs.pop();
 confirm.options.primary_action({regenerate_all:false});assert.equal(requests.length,0);
@@ -177,6 +178,12 @@ dirty=true;resume.options.primary_action({retry_uncertain:true});assert.equal(re
 dirty=false;resume.options.primary_action({retry_uncertain:false});
 const resumed=requests.shift();assert.equal(resumed.args.resume_from,"run-a");
 assert.equal(resumed.args.retry_uncertain,false);
+resumed.callback({message:{ok:true,refresh:{...active,run_id:"run-b"}}});
+cancel();requests.shift().callback({message:{status:"refused",message:"Busy <retry>"}});
+assert.equal(messages.at(-1),"Busy &lt;retry&gt;","escape cancellation refusal text");
+assert.equal(requests[0].method,"optimus.api.ai_refresh_status","refusal still polls authoritative state");
+requests.shift().callback({message:{status:"ok",refresh:{...active,run_id:"run-b"},can_act:false,plan}});
+assert.equal(frm._optimus_ai_enabled,false,"read-only users cannot be offered AI spend from Regenerate Reports");
 '''
 	out = subprocess.run([node, "-e", script, str(source)], text=True, capture_output=True)
 	assert out.returncode == 0, out.stderr

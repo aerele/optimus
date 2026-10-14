@@ -13,9 +13,8 @@ import uuid
 
 import frappe
 
-from optimus import ai_jobs, analyze, renderer, safe_call
+from optimus import ai_jobs, analyze, renderer, safe_call, sql_work
 from optimus import ai_refresh_store as store
-from optimus.ai_jobs import _touch_session
 
 
 class StaleReport(RuntimeError):
@@ -33,15 +32,15 @@ def render_report(docname, recordings=None, *, run_id=None, worker_token=None):
 
 def _render_and_save(docname, recordings, *, run_id, worker_token):
 	# A permission/config read may have opened an old REPEATABLE READ view.
-	ai_jobs._transaction(lambda: None)
+	_transaction(lambda: None)
 	doc = frappe.get_doc("Optimus Session", docname)
 	if recordings is None:
 		recordings = analyze.load_recordings_light(doc)
-	ai_jobs._transaction(lambda: None)
+	_transaction(lambda: None)
 	content = renderer.render_raw(doc, recordings)
 	if not isinstance(content, str) or not content.strip():
 		raise ValueError("Report renderer returned no HTML")
-	ai_jobs._transaction(lambda: None)
+	_transaction(lambda: None)
 
 	def save():
 		parent = frappe.db.get_value("Optimus Session", docname, "*", as_dict=True, for_update=True)
@@ -76,7 +75,7 @@ def _render_and_save(docname, recordings, *, run_id, worker_token):
 		url = file_doc.file_url
 		if not isinstance(url, str) or not url.startswith("/private/files/") or not file_doc.is_private:
 			raise ValueError("Report attachment did not produce a private file")
-		_touch_session(docname, raw_report_file=url, raw_report_pdf_file=None)
+		sql_work.touch_session(frappe.db, docname, raw_report_file=url, raw_report_pdf_file=None)
 		pending = frappe.db.get_values(
 			store.RUN, {"session_name": docname, "render_pending": 1},
 			["name", "seq"], as_dict=True, for_update=True, limit=10001,
@@ -84,7 +83,7 @@ def _render_and_save(docname, recordings, *, run_id, worker_token):
 		if len(pending) > 10000:
 			raise store.JournalUnavailable("Report history exceeds the recovery limit")
 		for previous in pending:
-			store._update(store.RUN, previous, render_pending=0)
+			store.update_run(previous, render_pending=0)
 		phase2_pending = frappe.db.get_values(
 			"Optimus Phase Two Run", {"parent": docname, "analyze_render_pending": 1},
 			["name"], as_dict=True, for_update=True, limit=10001,
@@ -95,7 +94,11 @@ def _render_and_save(docname, recordings, *, run_id, worker_token):
 			frappe.db.set_value("Optimus Phase Two Run", previous["name"],
 				{"analyze_render_pending": 0}, update_modified=False)
 
-	ai_jobs._transaction(save)
+	_transaction(save)
 	return {
 		"regenerated": True, "recordings_available": len(recordings), "actions_total": len(doc.actions or []),
 	}
+
+
+def _transaction(operation):
+	return sql_work.transaction(operation, commit=frappe.db.commit, rollback=frappe.db.rollback)

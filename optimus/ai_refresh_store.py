@@ -22,7 +22,7 @@ import hashlib
 
 import frappe
 
-from optimus import ai_fix, safe_call
+from optimus import ai_fix, safe_call, sql_work
 
 RUN = "Optimus AI Refresh Run"
 ATTEMPT = "Optimus AI Refresh Attempt"
@@ -44,77 +44,16 @@ class JournalUnavailable(RuntimeError):
 	"""Fail closed when a deployment lacks the authoritative journal/mutex."""
 
 
-# Driver codes of a conflict that ended the statement or the whole transaction, so a short
-# journal transaction can start again from a rollback: MariaDB deadlock 1213, lock wait
-# timeout 1205 (also a NOWAIT conflict) and 1020 "Record has changed since last read"
-# (innodb_snapshot_isolation, on by default since MariaDB 11.8); Postgres serialization
-# failure 40001, deadlock 40P01 and lock not available 55P03.
-_RETRY_CODES = frozenset({1213, 1205, 1020, "40001", "40P01", "55P03"})
-_LOCK_UNAVAILABLE_CODES = frozenset({1205, "55P03"})
-_DUPLICATE_CODES = frozenset({1062, "23505"})
-
-
-def _driver_codes(exc):
-	"""The driver error codes on ``exc`` and on the driver errors Frappe wrapped it around.
-
-	``Database.sql`` raises ``QueryDeadlockError(e)`` / ``QueryTimeoutError(e)`` from ``e``
-	and ``Document.insert`` raises ``DuplicateEntryError(doctype, name, e)``, so the driver
-	error is one of the args (and the cause). PyMySQL keeps the code in ``args[0]``,
-	psycopg2 in ``pgcode``."""
-	codes, seen, stack = set(), set(), [exc]
-	while stack and len(seen) < 8:
-		layer = stack.pop()
-		if not isinstance(layer, BaseException) or id(layer) in seen:
-			continue
-		seen.add(id(layer))
-		pgcode = getattr(layer, "pgcode", None)
-		if isinstance(pgcode, str) and pgcode:
-			codes.add(pgcode)
-		args = getattr(layer, "args", ())
-		if args and type(args[0]) is int:
-			codes.add(args[0])
-		stack.extend(arg for arg in args if isinstance(arg, BaseException))
-		stack.append(layer.__cause__)
-	return codes
-
-
-def _frappe_error(exc, name):
-	cls = getattr(frappe, name, None)
-	return isinstance(cls, type) and isinstance(exc, cls)
-
-
 def is_retryable_conflict(exc) -> bool:
-	"""True when a short journal transaction may be rolled back and tried again: a
-	deadlock, a lock wait, a snapshot or serialization conflict, raw or as Frappe wraps it.
-
-	``frappe.QueryDeadlockError`` always is (the database ended the whole transaction, as
-	``analyze._whole_transaction_rolled_back`` treats it). ``frappe.QueryTimeoutError`` is
-	when it wraps a lock conflict, or no driver error at all; a Postgres statement timeout
-	(57014) is not a conflict. Never a reason to repeat a provider call."""
-	codes = _driver_codes(exc)
-	if _frappe_error(exc, "QueryDeadlockError") or codes & _RETRY_CODES:
-		return True
-	return _frappe_error(exc, "QueryTimeoutError") and not codes
+	return sql_work.is_retryable_conflict(exc, framework=frappe)
 
 
 def is_lock_unavailable(exc) -> bool:
-	"""True when a lock was not granted: a NOWAIT conflict or a lock wait timeout (MariaDB
-	1205, Postgres 55P03), raw or wrapped by Frappe as ``QueryTimeoutError``."""
-	codes = _driver_codes(exc)
-	if codes & _LOCK_UNAVAILABLE_CODES:
-		return True
-	return _frappe_error(exc, "QueryTimeoutError") and not codes
+	return sql_work.is_lock_unavailable(exc, framework=frappe)
 
 
 def is_duplicate_key(exc) -> bool:
-	"""True when an INSERT hit an existing key (MariaDB 1062, Postgres 23505), raw or as
-	``Document.insert`` raises it (``DuplicateEntryError``, ``UniqueValidationError``)."""
-	codes = _driver_codes(exc)
-	if codes & _DUPLICATE_CODES:
-		return True
-	return not codes and (
-		_frappe_error(exc, "DuplicateEntryError") or _frappe_error(exc, "UniqueValidationError")
-	)
+	return sql_work.is_duplicate_key(exc, framework=frappe)
 
 
 def _timestamp(value):
@@ -451,24 +390,21 @@ def admit(
 def lock_phase2_parent(docname, *, allow_failed=False):
 	"""Serialize Phase 2 admission with AI through the parent row.
 
-	Every admission updates this row before committing, fencing older PostgreSQL
-	snapshots. The active-run probe is plain: a missing key must not take a gap lock.
+	Every accepted admission's writer updates this row before committing, fencing
+	older PostgreSQL snapshots. Refusals do not change it. The active-run probe is
+	plain: a missing key must not take a gap lock.
 	"""
 	parent = _read("Optimus Session", docname, lock=True)
 	if not parent or parent.get("status") not in ({"Ready", "Failed"} if allow_failed else {"Ready"}):
 		return "not_ready"
 	if frappe.db.get_value(RUN, {"active_session": docname}, "name"):
 		return "ai_refresh"
-	_touch_parent(parent)
 	return None
 
 
 def _touch_parent(parent):
-	from frappe.utils import now_datetime
-
-	# Even automatic AI admission changes the parent. PostgreSQL's old snapshots
-	# must fail on this lock before an opposing Phase 2 admission reads the journal.
-	_update("Optimus Session", parent, modified=now_datetime())
+	# Even automatic admission changes the parent, fencing older PostgreSQL snapshots.
+	parent.update(sql_work.touch_session(frappe.db, parent["name"]))
 
 
 def _answer(taken_over, **out):
@@ -922,3 +858,13 @@ def checkpoint(run_id, *, docname, worker_token, now, **values):
 		return None
 	_update(RUN, run, heartbeat=now, **values)
 	return run
+
+
+def read_row(table, name, *, lock=False, wait=True):
+	"""Read a known row by primary key inside the caller's transaction."""
+	return _read(table, name, lock=lock, wait=wait)
+
+
+def update_run(row, **values):
+	"""Update a locked run and advance its public progress sequence."""
+	return _update(RUN, row, **values)

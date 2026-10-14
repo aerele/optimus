@@ -1290,7 +1290,7 @@ def _render_session_report(docname: str) -> dict:
 	)
 	if failed:
 		frappe.throw(
-			_("Report regeneration failed or the session changed. The previous report was kept. Try again."),
+			_("Report update could not be confirmed. Saved results are retained. Reload the session and use Regenerate Reports if needed."),
 			frappe.ValidationError, title=_("Optimus"),
 		)
 	return out

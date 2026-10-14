@@ -230,7 +230,7 @@ def _ai_call_timeout() -> int:
 	"""The configured AI request timeout, capped at ``AI_CALL_TIMEOUT_CAP_SECONDS``."""
 	from optimus import ai_fix
 
-	return min(int(ai_fix._resolve_timeout_seconds()), AI_CALL_TIMEOUT_CAP_SECONDS)
+	return min(int(ai_fix.request_timeout_seconds()), AI_CALL_TIMEOUT_CAP_SECONDS)
 
 
 def _apply_nice() -> None:
@@ -1029,7 +1029,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 	# This is outside the profiling failure handler. Optional admission may
 	# fail or time out, but the committed Ready result must stay usable.
 	_auto_arm_phase2(docname, context)
-	_queue_analyze_time_ai(docname)
+	queue_analyze_time_ai(docname)
 
 
 # ---------------------------------------------------------------------------
@@ -1037,7 +1037,7 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 # ---------------------------------------------------------------------------
 
 
-def _queue_analyze_time_ai(docname: str) -> None:
+def queue_analyze_time_ai(docname: str) -> None:
 	"""Admit optional work only after the profiling result and report commit.
 
 	Ordinary admission failures are logged; job interrupts still stop this
@@ -2136,7 +2136,7 @@ def _enrich_findings_with_source_snippets(findings: list[dict]) -> None:
 
 
 
-def _ai_payload_for_finding(
+def ai_payload_for_finding(
 	child,
 	file_cache: dict,
 	*,
@@ -2217,7 +2217,7 @@ def _attach_index_advice(payload: dict, evidence_lookup, tracked_apps: tuple[str
 		}
 
 
-def _ai_evidence_scope() -> tuple:
+def ai_evidence_scope() -> tuple:
 	"""``(evidence_lookup, tracked_apps)`` for one AI run's Slow Query advice."""
 	from optimus.renderer import recipe_enrichment
 	from optimus.settings import read_tracked_apps
@@ -2320,7 +2320,7 @@ def _maybe_attach_recorded_queries(
 		payload["technical_detail"] = detail
 
 
-def _phase2_index_for(doc_or_docname) -> dict:
+def phase2_index_for(doc_or_docname) -> dict:
 	"""``renderer._build_line_drilldown_callsite_index`` for a session doc or
 	docname. An ordinary failure writes one Error Log row, with the session
 	(``_run_ai_step``), and uses empty context; job timeouts stop the worker."""
@@ -2853,7 +2853,7 @@ _HUMANIZED_NOTES_PREAMBLE = (
 )
 
 
-def _actions_for_humanizer(recordings: list[dict]) -> list[dict]:
+def actions_for_humanizer(recordings: list[dict]) -> list[dict]:
 	"""Compact per-action dicts (label / cmd / path / method / doctype /
 	duration_ms) for ``ai_fix.humanize_steps``, noise-filtered and capped like
 	the raw auto-notes list."""
@@ -2886,7 +2886,7 @@ def _actions_for_humanizer(recordings: list[dict]) -> list[dict]:
 	return out
 
 
-def _assemble_humanized_notes(steps_markdown: str) -> str:
+def assemble_humanized_notes(steps_markdown: str) -> str:
 	"""The HTML stored in ``doc.notes`` for an AI-humanized "Steps to Reproduce":
 	the preamble plus the LLM's Markdown steps, rendered and sanitized. No raw
 	captured-actions appendix (the per-action breakdown already lists them)."""

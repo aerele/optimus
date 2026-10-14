@@ -1233,7 +1233,7 @@ class TestGuardedCompletion:
 		assert fake.calls[0].body["max_tokens"] == 2048
 
 	def test_over_budget_first_call_skips_reask(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_resolve_timeout_seconds", lambda: 60)
+		monkeypatch.setattr(ai_fix, "request_timeout_seconds", lambda: 60)
 		clock = {"n": 0}
 
 		def fake_monotonic():
@@ -1248,7 +1248,7 @@ class TestGuardedCompletion:
 
 	@pytest.mark.parametrize("elapsed,reasked", [(29.0, True), (30.0, False), (31.0, False)])
 	def test_reask_needs_under_half_the_budget(self, monkeypatch, elapsed, reasked):
-		monkeypatch.setattr(ai_fix, "_resolve_timeout_seconds", lambda: 60)
+		monkeypatch.setattr(ai_fix, "request_timeout_seconds", lambda: 60)
 		clock = {"n": 0}
 
 		def fake_monotonic():
@@ -1261,7 +1261,7 @@ class TestGuardedCompletion:
 		assert out["guardrail"]["reasked"] is reasked
 
 	def test_reask_bounded_by_remaining_budget(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_resolve_timeout_seconds", lambda: 60)
+		monkeypatch.setattr(ai_fix, "request_timeout_seconds", lambda: 60)
 		clock = {"n": 0}
 
 		def fake_monotonic():
@@ -1577,7 +1577,7 @@ class TestRawSqlPolicy:
 
 
 # The 15 real findings, built exactly as the product's refresh path builds them
-# (PR-E's scripts/ai_eval/_corpus.build_finding -> analyze._ai_payload_for_finding).
+# (PR-E's scripts/ai_eval/_corpus.build_finding -> analyze.ai_payload_for_finding).
 _EVAL_CORPUS = load_eval_script("_corpus")
 
 

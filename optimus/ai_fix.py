@@ -425,7 +425,7 @@ def llm_gate_note(finding: dict) -> str | None:
 	)
 
 
-def _resolve_timeout_seconds() -> int:
+def request_timeout_seconds() -> int:
 	"""Return the configured HTTP timeout (seconds) for outbound LLM calls,
 	clamped to ``[10, 600]`` and falling back to :data:`_HTTP_TIMEOUT` when
 	settings can't be read.
@@ -498,18 +498,15 @@ def suggest_fix(
 	(default: the configured request timeout). Raises ``AiFixError``; a failure
 	after a billed reply carries that reply's ``usage``.
 
-	Spend: without ``session_uuid`` or ``docname`` every billed reply (the first
-	call and a re-ask) is charged once to the worker's ambient session
-	(``_record_session_spend``). With either one the call is explicitly attributed
-	and nothing is charged here: the caller adds ``tokens`` (or a failure's
-	``usage``) to its session once, with ``analyze._add_ai_spend``. An RQ job
-	timeout leaves as a fresh instance that carries the billed ``usage`` too, but
-	only to this boundary (``_with_usage_on_failure``): read it from the exception
-	caught here, since any later re-wrap drops it.
+	Usage is returned to the caller; this client never updates session counters.
+	``session_uuid`` and ``docname`` explicitly attribute errors. The refresh
+	journal settles each attempt and charges reported usage once. An RQ timeout
+	leaves as a fresh instance carrying billed ``usage`` only to this boundary;
+	read it here because a later re-wrap drops it.
 
 	``usage_out`` (additive, for the background refresh engine; None keeps the behaviour
 	above): a fresh ``Usage`` that becomes this call's usage, so the caller's own
-	``_with_usage_on_failure`` boundary counts every attempted call. A refusal before any
+	``with_usage_on_failure`` boundary counts every attempted call. A refusal before any
 	request leaves it at no call, which proves a known zero."""
 	if is_finding_type_excluded(finding.get("finding_type")):
 		from frappe import _
@@ -538,7 +535,7 @@ def suggest_fix(
 		hosted=_is_hosted_endpoint(provider.get("base_url")),
 	)
 	usage = usage_out if isinstance(usage_out, Usage) else Usage()
-	text, guardrail, finish = _with_usage_on_failure(lambda: _complete_with_guardrails(
+	text, guardrail, finish = with_usage_on_failure(lambda: _complete_with_guardrails(
 		provider,
 		system,
 		messages,
@@ -548,7 +545,7 @@ def suggest_fix(
 		session_uuid=session_uuid,
 		docname=docname,
 		started_at=time.monotonic(),
-		timeout=int(timeout or _resolve_timeout_seconds()),
+		timeout=int(timeout or request_timeout_seconds()),
 	), usage)
 	result = {
 		"suggestion": text,
@@ -578,12 +575,9 @@ def humanize_steps(
 	Each call collects its usage in a fresh dict: ``usage_out`` (when given)
 	receives that call's reported usage, after a success and after a billed
 	failure, and a failure carries only that call's usage, never what a reused
-	``usage_out`` held before. Spend follows ``suggest_fix``: an unattributed
-	call is charged once to the ambient session, an attributed one is the
-	caller's to record. ``usage_out`` no longer decides whether the call is
-	charged (it did before 0.12.69, when ``None`` skipped the charge). The
-	``.usage`` of a fresh RQ job timeout reaches only this function's caller,
-	as with ``suggest_fix``."""
+	``usage_out`` held before. The caller records reported usage; this function
+	never charges an ambient session. A fresh RQ job timeout's ``.usage`` reaches
+	only this function's caller, as with ``suggest_fix``."""
 	from frappe import _
 
 	if not actions:
@@ -599,7 +593,7 @@ def humanize_steps(
 	)
 	usage = Usage()
 	try:
-		text = _with_usage_on_failure(lambda: _dispatch_call(
+		text = with_usage_on_failure(lambda: _dispatch_call(
 			provider, system, messages, usage_out=usage,
 			metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type="Steps to Reproduce"),
 			timeout=timeout, session_uuid=session_uuid, docname=docname,
@@ -619,7 +613,7 @@ def humanize_steps(
 	return text
 
 
-def _with_usage_on_failure(call, usage):
+def with_usage_on_failure(call, usage):
 	"""Retain reported spend when parsing/validation fails after a response.
 
 	An unexpected exception becomes a ``kind="internal"`` failure that names only
@@ -1029,7 +1023,7 @@ _LOGGED_ROW_ATTR = "_optimus_ai_log_row"
 # The text an AiFixError is logged with in place of its message (see
 # _exception_text): body-free for an HTTP-status error from _http_post (its
 # message carries the provider's reply), the type and plain frames for an
-# unexpected error while processing a reply (_with_usage_on_failure).
+# unexpected error while processing a reply (with_usage_on_failure).
 _LOG_TEXT_ATTR = "_optimus_log_text"
 
 
@@ -1219,7 +1213,7 @@ def _exception_text(exc: BaseException) -> str:
 	and the reply can echo the prompt, so its exception line shows that text
 	instead of the message. The HTTP layer logs such an error itself; this
 	matters when that row could not be written and the caller logs it. An
-	unexpected error while processing a reply (``_with_usage_on_failure``)
+	unexpected error while processing a reply (``with_usage_on_failure``)
 	carries its type and its frames as plain ``file:line:function`` strings,
 	so the row says where it happened although the failure was raised fresh.
 
@@ -1734,7 +1728,7 @@ def _http_post(
 	its posts gets only what is left. Every failure message is built after the
 	``try`` it comes from, so a failure while building it cannot chain the
 	requests exception."""
-	timeout = timeout or _resolve_timeout_seconds()
+	timeout = timeout or request_timeout_seconds()
 	budget = budget or timeout
 	deadline = time.monotonic() + timeout
 	failure: AiFixError | None = None
@@ -1975,7 +1969,7 @@ def _same_origin_redirect(current: str, resp) -> str | None:
 
 # Bound each provider-supplied count. ``ai_tokens_spent`` is a Long Int, so adding bounded
 # counts cannot overflow it; a single call's total above the bound is read as 0 here.
-_MAX_TOKEN_COUNT = 2**31 - 1
+MAX_TOKEN_COUNT = 2**31 - 1
 
 
 def _token_count(value) -> int:
@@ -1994,7 +1988,7 @@ def _token_count(value) -> int:
 		return 0
 	if guard.pending():
 		raise guard.interrupt()
-	return count if 0 <= count <= _MAX_TOKEN_COUNT else 0
+	return count if 0 <= count <= MAX_TOKEN_COUNT else 0
 
 
 def _usage_block(data) -> dict:
@@ -2006,12 +2000,12 @@ def _usage_block(data) -> dict:
 def _valid_reported_count(value):
 	"""Only exact, bounded JSON counts establish a known provider outcome."""
 	if type(value) is int:
-		return 0 <= value <= _MAX_TOKEN_COUNT
+		return 0 <= value <= MAX_TOKEN_COUNT
 	if type(value) is float:
-		return 0 <= value <= _MAX_TOKEN_COUNT and value.is_integer()
+		return 0 <= value <= MAX_TOKEN_COUNT and value.is_integer()
 	if type(value) is str and len(value) <= 32:
 		value = value.strip()
-		return bool(value and value.isascii() and value.isdecimal() and int(value) <= _MAX_TOKEN_COUNT)
+		return bool(value and value.isascii() and value.isdecimal() and int(value) <= MAX_TOKEN_COUNT)
 	return False
 
 
@@ -2208,7 +2202,7 @@ def _post_with_param_ladder(
 
 	``session_uuid`` and ``docname`` say whose session a failure row is filed under
 	(``_log_http_error``)."""
-	timeout = timeout or _resolve_timeout_seconds()
+	timeout = timeout or request_timeout_seconds()
 	budget = budget or timeout
 	deadline = time.monotonic() + timeout
 	body = dict(body)

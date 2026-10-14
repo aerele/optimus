@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from optimus.tests.test_ai_refresh_journal import journal as _journal_fixture  # noqa: F401
+from optimus.tests.fixtures.ai_refresh_journal import journal as _journal_fixture  # noqa: F401
 
 
 @pytest.fixture
@@ -48,8 +48,8 @@ def report(journal, monkeypatch):
 	def transaction(fn):
 		with journal.db.transaction():
 			return fn()
-	monkeypatch.setattr(mod.ai_jobs, "_transaction", transaction)
-	monkeypatch.setattr(mod, "_touch_session", lambda name, **values: journal.db.set_value(
+	monkeypatch.setattr(mod, "_transaction", transaction)
+	monkeypatch.setattr(mod.sql_work, "touch_session", lambda db, name, **values: journal.db.set_value(
 		"Optimus Session", name, {"modified": "rendered-generation", **values}))
 	monkeypatch.setattr(mod.analyze, "load_recordings_light", lambda doc: [])
 	def render(doc, recordings):
@@ -85,6 +85,23 @@ def test_changed_session_during_render_cannot_publish_a_stale_attachment(report)
 def test_valid_render_atomically_replaces_report_and_invalidates_only_pdf_reference(report):
 	out = report.mod.render_report("fake-session-doc")
 	assert out == {"regenerated": True, "recordings_available": 0, "actions_total": 0}
+	parent = report.journal.db.rows["Optimus Session"]["fake-session-doc"]
+	assert parent["raw_report_file"] == "/private/files/new.html"
+	assert parent["raw_report_pdf_file"] is None
+	assert len(report.journal.db.rows["File"]) == 1
+	assert report.fake.local.request == "fake-request"
+
+
+def test_lost_report_commit_acknowledgement_can_leave_the_new_report_saved(report, monkeypatch):
+	transaction = report.mod._transaction
+	def lose_ack(operation):
+		result = transaction(operation)
+		if report.journal.db.rows.get("File"):
+			raise ConnectionError("fake lost commit acknowledgement")
+		return result
+	monkeypatch.setattr(report.mod, "_transaction", lose_ack)
+	with pytest.raises(ConnectionError):
+		report.mod.render_report("fake-session-doc")
 	parent = report.journal.db.rows["Optimus Session"]["fake-session-doc"]
 	assert parent["raw_report_file"] == "/private/files/new.html"
 	assert parent["raw_report_pdf_file"] is None

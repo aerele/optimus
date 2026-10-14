@@ -1847,9 +1847,9 @@ def _backfill_env(monkeypatch):
 	monkeypatch.setattr(analyze, "frappe", frappe)
 	cfg = _settings.OptimusConfig(ai_enabled=True, ai_provider="OpenAI")
 	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
-	monkeypatch.setattr(analyze, "_ai_payload_for_finding",
+	monkeypatch.setattr(analyze, "ai_payload_for_finding",
 	                    lambda *a, **k: {"finding_type": "N+1 Query", "title": "t", "technical_detail": {}})
-	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
+	monkeypatch.setattr(analyze, "phase2_index_for", lambda *a, **k: {})
 	rows = [
 		SimpleNamespace(name=n, finding_type="N+1 Query", severity="High", estimated_impact_ms=1, llm_fix_json=None)
 		for n in ("F1", "F2")

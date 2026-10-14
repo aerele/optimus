@@ -539,6 +539,7 @@ def test_an_increment_after_get_doc_survives_a_real_session_save(monkeypatch, ig
 
 	from optimus.optimus.doctype.optimus_session.optimus_session import OptimusSession
 
+	monkeypatch.setattr(frappe, "flags", frappe._dict(in_test=True))
 	for name in _SAVE_STEPS_WITH_DB_OR_META:
 		monkeypatch.setattr(OptimusSession, name, lambda self, *a, **k: None, raising=False)
 	monkeypatch.setattr(OptimusSession, "_non_computed_table_fieldnames", property(lambda self: {}), raising=False)
@@ -712,7 +713,7 @@ def test_the_ladders_own_timeout_row_is_filed_under_the_calls_own_session(provid
 @pytest.mark.parametrize("protocol", ["openai", "anthropic"])
 def test_an_internal_call_with_only_a_docname_is_explicit_for_charge_and_row(provider, charged, monkeypatch, protocol):
 	"""A docname alone attributes a call, as a session_uuid does: no ambient charge, and a failure
-	row filed under that docname, even when ``record_spend`` is left at its default."""
+	row filed under that docname without borrowing worker state."""
 	provider.use(protocol)
 	provider.install(_Reply("ok", 5, protocol=protocol), _Reply("x", 1, status=500, protocol=protocol))
 	ai_fix._dispatch_call(dict(_PROVIDER, protocol=protocol), "system", [], usage_out={}, docname="SESS-B")

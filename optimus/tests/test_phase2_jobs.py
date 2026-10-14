@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from optimus.tests.test_ai_refresh_journal import Database
+from optimus.tests.fixtures.ai_refresh_journal import Database
 
 pytestmark = pytest.mark.rq
 
@@ -28,7 +28,6 @@ def phase2(monkeypatch):
 	monkeypatch.setattr(mod, "frappe", fake)
 	monkeypatch.setattr(ai_refresh_store, "frappe", fake)
 	monkeypatch.setattr(mod, "_authorized", lambda *a: True)
-	monkeypatch.setattr(mod.ai_jobs, "_touch_session", lambda name: db.set_value("Optimus Session", name, {"modified": "changed"}))
 	return SimpleNamespace(mod=mod, db=db, row=lambda: db.rows[mod.TABLE]["fake-child"])
 
 
@@ -145,19 +144,19 @@ def test_failure_records_fixed_reason_and_keeps_generation_for_fencing(phase2):
 
 @pytest.fixture
 def worker(phase2, monkeypatch):
-	from optimus import ai_jobs
+	from optimus import analyze
 	from optimus.line_profile import analyzer, capture
 	mod, db = phase2.mod, phase2.db
 	now = [100]
 	monkeypatch.setattr(mod, "_now", lambda: now[0], raising=False)
-	def transaction(operation):
+	def transaction(operation, **kwargs):
 		with db.transaction():
 			return operation()
-	monkeypatch.setattr(ai_jobs, "_retry_sql", transaction)
-	monkeypatch.setattr(ai_jobs, "_transaction", transaction)
+	monkeypatch.setattr(mod, "_retry_sql", transaction)
+	monkeypatch.setattr(mod, "_transaction", transaction)
 	db.rollback = lambda: None
 	mod.frappe.local = SimpleNamespace(optimus_analyzing=False)
-	calls = SimpleNamespace(compute=[], persist=[], render=[], cleanup=[], logs=[], events=[])
+	calls = SimpleNamespace(compute=[], persist=[], render=[], cleanup=[], logs=[], events=[], ai=[])
 	monkeypatch.setattr(analyzer, "_compute_run", lambda *a: calls.compute.append(a) or ([], SimpleNamespace(findings=[]), 0), raising=False)
 	monkeypatch.setattr(analyzer, "_persist_run", lambda *a: calls.persist.append(a))
 	def publish(event, payload):
@@ -167,6 +166,7 @@ def worker(phase2, monkeypatch):
 	monkeypatch.setattr(mod, "_render", lambda *a: calls.render.append(a), raising=False)
 	monkeypatch.setattr(mod, "_log", lambda *a: calls.logs.append(a), raising=False)
 	monkeypatch.setattr(capture, "cleanup_run", lambda *a: calls.cleanup.append(a))
+	monkeypatch.setattr(analyze, "queue_analyze_time_ai", lambda *a: calls.ai.append(a))
 	return SimpleNamespace(**vars(phase2), calls=calls, now=now, analyzer=analyzer)
 
 
@@ -181,6 +181,7 @@ def test_worker_duplicate_delivery_never_computes_or_persists_twice(worker):
 	assert len(worker.calls.compute) == len(worker.calls.persist) == 1
 	assert worker.row()["status"] == "Ready"
 	assert not worker.mod.frappe.local.optimus_analyzing
+	assert worker.calls.ai == [("fake-session-doc",)]
 
 
 def test_render_failure_keeps_phase2_findings_ready(worker, monkeypatch):
@@ -231,6 +232,7 @@ def test_hard_timeout_after_results_commit_keeps_ready(worker, monkeypatch):
 		run_worker(worker)
 	assert worker.row()["status"] == "Ready" and worker.row()["analyze_render_pending"] == 1
 	assert len(worker.calls.persist) == 1
+	assert not worker.calls.ai
 
 
 def test_queue_dispatch_failure_leaves_durable_intent(worker, monkeypatch):
@@ -541,3 +543,103 @@ def test_only_fenced_result_transaction_can_change_managed_results(phase2):
 		assert phase2.mod._complete(run, now=102, persist=lambda: phase2.mod.validate_parent_journal(doc))
 	with pytest.raises(Exception, match="Phase 2 analysis state is managed by the server"):
 		phase2.mod.validate_parent_journal(doc)
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_result_commit_acknowledgement_does_not_repeat_compute(worker, monkeypatch, committed):
+	admit(worker)
+	transaction = worker.mod._retry_sql
+	lost = False
+	def lose_ack(operation, **kwargs):
+		nonlocal lost
+		if lost:
+			return transaction(operation, **kwargs)
+		if committed:
+			value = transaction(operation, **kwargs)
+			if worker.row()["status"] == "Ready":
+				lost = True
+				raise ConnectionError("fake lost commit acknowledgement")
+			return value
+		with worker.db.transaction():
+			value = operation()
+			if worker.row()["status"] == "Ready":
+				lost = True
+				raise ConnectionError("fake failure before commit")
+			return value
+	monkeypatch.setattr(worker.mod, "_retry_sql", lose_ack)
+	if committed:
+		run_worker(worker)
+	else:
+		with pytest.raises(worker.mod.Phase2Failed):
+			run_worker(worker)
+	assert lost
+	assert len(worker.calls.compute) == len(worker.calls.persist) == 1
+	assert worker.row()["status"] == ("Ready" if committed else "Failed")
+	assert len(worker.calls.render) == len(worker.calls.cleanup) == int(committed)
+	assert worker.calls.events[-1][0] == ("phase_2_run_ready" if committed else "phase_2_run_failed")
+	run_worker(worker)
+	assert len(worker.calls.compute) == 1
+
+
+def test_refused_or_attached_admission_does_not_touch_parent(phase2):
+	admit(phase2)
+	parent = phase2.db.rows["Optimus Session"]["fake-session-doc"]
+	parent["modified"] = "untouched"
+	assert admit(phase2)["status"] == "already_running"
+	assert parent["modified"] == "untouched"
+	phase2.row()["status"] = "Ready"
+	assert admit(phase2)["reason"] == "not_retryable"
+	assert parent["modified"] == "untouched"
+
+
+def test_busy_admission_bounds_postgres_wait_and_returns_refusal(worker, monkeypatch):
+	from optimus.tests.fixtures.ai_refresh_journal import DriverError
+	worker.db.db_type = "postgres"
+	bounds = []
+	monkeypatch.setattr(worker.mod.sql_work, "bound_http_lock_wait", lambda db: bounds.append(db))
+	def busy(*args, **kwargs):
+		raise DriverError(1205, "fake lock timeout")
+	monkeypatch.setattr(worker.mod, "_admit", busy)
+	out = worker.mod.request("fake-session-doc", "fake-session", "fake-phase2", "fake-owner")
+	assert out["reason"] == "busy" and out["status"] == "Refused"
+	assert bounds == [worker.db]
+	assert not worker.calls.compute and not worker.calls.events
+
+
+@pytest.mark.parametrize("operation", ["dispatch", "recovery"])
+def test_background_scans_never_wait_on_a_busy_parent(worker, monkeypatch, operation):
+	from optimus.tests.fixtures.ai_refresh_journal import DriverError
+	admit(worker)
+	reads = []
+	def busy(table, name, **kwargs):
+		reads.append(kwargs)
+		assert kwargs.get("wait") is False
+		raise DriverError(1205, "fake busy parent")
+	monkeypatch.setattr(worker.mod.store, "read_row", busy)
+	if operation == "dispatch":
+		worker.mod._dispatch(worker.row())
+	else:
+		with pytest.raises(DriverError), worker.db.transaction():
+			worker.mod._recover("fake-session-doc", "fake-phase2", now=2001)
+	assert reads and not worker.calls.compute
+	assert not worker.calls.logs
+	assert worker.row()["status"] == "Analyzing"
+
+
+def test_completed_readback_requires_same_generation_and_worker(phase2):
+	admit(phase2)
+	run = claim(phase2)
+	with phase2.db.transaction():
+		phase2.mod._complete(run, now=102, persist=lambda: None)
+		assert phase2.mod._completed(run)
+		assert not phase2.mod._completed({**run, "analyze_generation": "different"})
+		assert not phase2.mod._completed({**run, "analyze_worker_token": "different"})
+
+
+
+def test_retry_limit_refusal_explains_how_to_recover(worker):
+	worker.row()["analyze_attempts"] = worker.mod.MAX_ATTEMPTS
+	out = worker.mod.request("fake-session-doc", "fake-session", "fake-phase2", "fake-owner")
+	assert out["status"] == "Refused" and out["reason"] == "retry_limit"
+	assert "Record a new" in out["message"]
+	assert not worker.calls.compute

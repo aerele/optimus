@@ -155,18 +155,18 @@ def _drive_run(monkeypatch, *, cache, scheduler_disabled, deadline=None, configu
 	monkeypatch.setattr(analyze, "_get_analyzers", lambda: [])
 	monkeypatch.setattr("optimus.api._read_frontend_data", lambda *a, **k: {"xhr": [], "vitals": []})
 	monkeypatch.setattr(analyze, "_enrich_findings_with_source_snippets", lambda fs: fs.extend(_finding(i) for i in range(n)))
-	monkeypatch.setattr(analyze, "_ai_payload_for_finding", payload)
-	monkeypatch.setattr(analyze, "_phase2_index_for", lambda *a, **k: {})
-	monkeypatch.setattr(analyze, "_actions_for_humanizer", lambda recordings: [{"label": "open"}])
+	monkeypatch.setattr(analyze, "ai_payload_for_finding", payload)
+	monkeypatch.setattr(analyze, "phase2_index_for", lambda *a, **k: {})
+	monkeypatch.setattr(analyze, "actions_for_humanizer", lambda recordings: [{"label": "open"}])
 	monkeypatch.setattr(analyze, "_persist", lambda *a, **k: None)
-	for name in ("_publish_session_event", "_publish_progress", "_queue_analyze_time_ai", "_render_and_attach_reports",
+	for name in ("_publish_session_event", "_publish_progress", "queue_analyze_time_ai", "_render_and_attach_reports",
 	             "_persist_recordings_file", "_cleanup_redis", "_auto_arm_phase2"):
 		monkeypatch.setattr(analyze, name, lambda *a, **k: None)
 	if touch is not None:
 		monkeypatch.setattr(analyze, "_touch_singleflight", lambda uuid: touch(clock.now))
 	with patch("optimus.settings.get_config", return_value=_AI_CFG), \
 	     patch("optimus.ai_fix.is_available", return_value=True), \
-	     patch("optimus.ai_fix._resolve_timeout_seconds", return_value=configured), \
+	     patch("optimus.ai_fix.request_timeout_seconds", return_value=configured), \
 	     patch("optimus.ai_fix.suggest_fix", side_effect=slow_suggest), \
 	     patch("optimus.ai_fix.humanize_steps", side_effect=humanize):
 		analyze.run("A", _singleflight_deadline=deadline)

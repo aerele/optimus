@@ -19,14 +19,14 @@ import pytest
 
 from optimus import ai_fix, ai_jobs, analyze, api
 from optimus import ai_refresh_store as store
-from optimus.tests.test_ai_refresh_journal import journal as _journal_fixture  # noqa: F401
-from optimus.tests.test_ai_refresh_queue import _start, admitting, queue  # noqa: F401
-from optimus.tests.test_ai_refresh_work import Doc, work  # noqa: F401
-from optimus.tests.test_ai_refresh_worker import worker  # noqa: F401
+from optimus.tests.fixtures.ai_refresh_journal import journal as _journal_fixture  # noqa: F401
+from optimus.tests.fixtures.ai_refresh_queue import _start, admitting, queue  # noqa: F401
+from optimus.tests.fixtures.ai_refresh_work import Doc, work  # noqa: F401
+from optimus.tests.fixtures.ai_refresh_worker import worker  # noqa: F401
 
 pytestmark = pytest.mark.rq
 
-_REAL_PHASE2_INDEX = analyze._phase2_index_for  # the work fixture replaces it
+_REAL_PHASE2_INDEX = analyze.phase2_index_for  # the work fixture replaces it
 _REAL_LOG_AI_FAILURE = ai_fix.log_ai_failure  # the queue fixture replaces it
 _PKG = Path(ai_jobs.__file__).resolve().parent
 _DOCS = _PKG.parent / "docs"
@@ -238,7 +238,7 @@ def test_the_public_state_exposes_the_counts(queue):
 
 @pytest.mark.parametrize("bad", [-1, True, 2**31, 1.5, "3"])
 def test_admission_rejects_a_count_that_is_not_a_count(journal, bad):
-	from optimus.tests.test_ai_refresh_journal import admit
+	from optimus.tests.fixtures.ai_refresh_journal import admit
 
 	journal.db.rows[journal.mod.RUN] = {}
 	with pytest.raises(ValueError):
@@ -262,11 +262,11 @@ def _prepared_grounding(work, monkeypatch, rows=1):
 
 
 def test_fix_prompts_get_the_slow_query_evidence_the_synchronous_refresh_gets(work, monkeypatch):
-	"""``_ai_evidence_scope`` supplies ``evidence_lookup`` and ``tracked_apps`` to
-	``_ai_payload_for_finding`` in ``_run_ai_backfill``; the background path passes them too."""
+	"""``ai_evidence_scope`` supplies ``evidence_lookup`` and ``tracked_apps`` to
+	``ai_payload_for_finding`` in ``_run_ai_backfill``; the background path passes them too."""
 	seen = _prepared_grounding(work, monkeypatch)
 	lookup = object()
-	monkeypatch.setattr(analyze, "_ai_evidence_scope", lambda: (lookup, ("fake_app",)))
+	monkeypatch.setattr(analyze, "ai_evidence_scope", lambda: (lookup, ("fake_app",)))
 	work.jobs._next_item(work.journal.run, {})
 	[grounding] = seen
 	assert grounding["evidence_lookup"] is lookup and grounding["tracked_apps"] == ("fake_app",)
@@ -276,8 +276,8 @@ def test_the_slice_builds_its_phase2_index_and_evidence_once(work, monkeypatch):
 	"""Once per slice (the slice's memo), not once per finding."""
 	seen = _prepared_grounding(work, monkeypatch)
 	built = []
-	monkeypatch.setattr(analyze, "_phase2_index_for", lambda doc: built.append(doc.get("name")) or {"k": 1})
-	monkeypatch.setattr(analyze, "_ai_evidence_scope", lambda: built.append("evidence") or (None, ()))
+	monkeypatch.setattr(analyze, "phase2_index_for", lambda doc: built.append(doc.get("name")) or {"k": 1})
+	monkeypatch.setattr(analyze, "ai_evidence_scope", lambda: built.append("evidence") or (None, ()))
 	memo = {}
 	for _ in range(4):
 		work.jobs._next_item(work.journal.run, memo)
@@ -293,9 +293,9 @@ def test_a_failed_phase2_index_is_logged_once_per_slice_with_the_session(work, m
 		raise ValueError("fake corrupt phase 2 data")
 
 	monkeypatch.setattr(analyze.renderer, "_build_line_drilldown_callsite_index", fail)
-	monkeypatch.setattr(analyze, "_phase2_index_for", _REAL_PHASE2_INDEX)
+	monkeypatch.setattr(analyze, "phase2_index_for", _REAL_PHASE2_INDEX)
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, exc=None, **kw: rows.append((title, kw)))
-	monkeypatch.setattr(analyze, "_ai_evidence_scope", lambda: (None, ()))
+	monkeypatch.setattr(analyze, "ai_evidence_scope", lambda: (None, ()))
 	memo = {}
 	for _ in range(3):
 		work.jobs._next_item(work.journal.run, memo)
@@ -312,7 +312,7 @@ def test_a_failed_evidence_scope_is_logged_and_the_prompt_goes_without_advice(wo
 	def fail():
 		raise ValueError("fake evidence failure")
 
-	monkeypatch.setattr(analyze, "_ai_evidence_scope", fail)
+	monkeypatch.setattr(analyze, "ai_evidence_scope", fail)
 	memo = {}
 	work.jobs._next_item(work.journal.run, memo)
 	work.jobs._next_item(work.journal.run, memo)
@@ -363,7 +363,7 @@ def test_the_steps_item_still_needs_an_unchanged_session(work, monkeypatch):
 	"""Steps rewrites ``notes``, which the Desk form edits: any save since it was prepared
 	makes the answer stale."""
 	work.journal.run.update(include_fixes=0, include_steps=1)
-	monkeypatch.setattr(analyze, "_actions_for_humanizer", lambda recordings: [{"label": "fake action"}])
+	monkeypatch.setattr(analyze, "actions_for_humanizer", lambda recordings: [{"label": "fake action"}])
 	work.parent["modified"] = "t1"
 	item = work.jobs._next_item(work.journal.run, {})
 	assert item.kind == "steps"
@@ -489,7 +489,7 @@ def test_selection_hashes_only_the_rows_an_uncertain_attempt_names(work, monkeyp
 
 def test_the_steps_selection_hashes_only_its_own_fingerprint_when_nothing_is_uncertain(work, monkeypatch):
 	work.journal.run.update(include_fixes=0, include_steps=1)
-	monkeypatch.setattr(analyze, "_actions_for_humanizer", lambda recordings: [{"label": "fake action"}])
+	monkeypatch.setattr(analyze, "actions_for_humanizer", lambda recordings: [{"label": "fake action"}])
 	calls = []
 	real = work.jobs._signature
 	monkeypatch.setattr(work.jobs, "_signature", lambda *a, **kw: calls.append(a) or real(*a, **kw))

@@ -44,7 +44,7 @@ _PKG = Path(__file__).resolve().parents[1]
 _REQUIRED = (
 	"analyze.py", "api.py", "maintenance.py", "error_log_mask.py",
 	"optimus/doctype/optimus_settings/optimus_settings.py", "renderer/recipe_enrichment.py", "line_profile/analyzer.py",
-	"ai_jobs.py", "ai_refresh_store.py", "settings.py", "report_refresh.py", "line_profile/jobs.py",
+	"ai_jobs.py", "ai_refresh_store.py", "sql_work.py", "ai_refresh_view.py", "settings.py", "report_refresh.py", "line_profile/jobs.py",
 	"patches/v0_12_0/seed_ai_refresh_max_findings.py",
 )
 _OPTIONAL: tuple[str, ...] = ()  # modules a later PR adds, scanned as soon as they exist
@@ -324,7 +324,7 @@ def test_the_ai_steps_log_through_the_one_helper():
 				callers.setdefault(name, set()).add(f"{mod}:{fn.name}")
 	assert callers == {
 		"log_ai_failure": {
-			"analyze.py:_log_ai_step_failure", "analyze.py:_increment_session_counter", "analyze.py:_queue_analyze_time_ai",
+			"analyze.py:_log_ai_step_failure", "analyze.py:_increment_session_counter", "analyze.py:queue_analyze_time_ai",
 		},
 		"_log_ai_step_failure": {"analyze.py:_run_ai_step"},
 	}
@@ -348,7 +348,7 @@ def test_the_helper_is_used_where_the_skeleton_was():
 		for mod in ("analyze.py", "api.py")
 	}
 	assert uses == {
-		"analyze.py": {"load_recordings_light", "_load_recordings_bundle", "_phase2_index_for"},
+		"analyze.py": {"load_recordings_light", "_load_recordings_bundle", "phase2_index_for"},
 		"api.py": {"_render_session_report", "ai_refresh_status", "refill_ai_suggestions"},
 	}
 

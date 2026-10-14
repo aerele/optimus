@@ -24,6 +24,11 @@ identities, input hashes, fixed states and counts, never prompts, provider
 responses or credentials. An active session reservation is unique; terminal
 runs release it.
 
+Shared transaction, SQL conflict, HTTP wait and interrupt rules live in
+`optimus/sql_work.py`. Public progress and selection summaries live in
+`optimus/ai_refresh_view.py`; the queued entry point remains
+`optimus.ai_jobs.run_ai_refresh_slice` for existing deliveries.
+
 Every journal transition starts a fresh transaction and its first data read locks
 the session row (Postgres HTTP paths read and set the lock timeout first, below).
 The caller passes the run's session name, read earlier in its own
@@ -116,13 +121,13 @@ run, which is no click. No ending of a run counts anything, whatever it had
 answered: not complete, stopped, cancelled, interrupted, abandoned, idle or
 disabled.
 
-Settlement follows #72's `_write_ai_answer` discipline. The first try commits
+Settlement uses the shared `sql_work` transaction discipline. The first try commits
 whatever the worker's transaction holds, so no read view from before the call
 remains. A conflict, including a whole-transaction rollback, is rolled back and
 the write tried again, three tries in all. The attempt's `settled` bit makes a
 repeated write a no-op, so neither the provider call nor the usage increment
 repeats. Settlement also retries a lock wait timeout and a Postgres
-serialization failure, which #72's write does not. Only this write takes
+serialization failure. Only this write takes
 locking reads, and its `settled` bit makes a retry safe. After any other
 failure, the `settled` bit is read again in a fresh query. When it is set, the
 outcome is saved even though the COMMIT reported an error. When it cannot be
@@ -243,7 +248,7 @@ hold the site mutex while waiting for a session.
 The run keeps the selection's `gated` and `excluded` counts
 (`AiSelection.gated` and `.excluded`, #71's two Refresh toasts), taken once at
 admission, and progress returns them. A background fix prompt gets the same
-grounding as the synchronous Refresh: the Phase 2 hottest-line index and the
+grounding as the report analysis: the Phase 2 hottest-line index and the
 Slow Query index evidence. Both are built once per slice, not once per finding;
 a failure of either is logged once with the session and the slice goes on
 without it.
@@ -413,7 +418,7 @@ Use the attempt epochs to locate the call in the provider's usage page;
 | **Incomplete usage**: `usage_incomplete` above 0 on the run, `usage_complete` 0 on an attempt | The provider's usage was missing, contradictory or unknown for that call, so the reported tokens may undercount. | Do not trust the run's token total for those attempts; compare with the provider's bill. |
 | **Busy**: a click answers `{"status": "refused", "reason": "busy"}` | Another transaction holds the session row for a whole lock wait (the server's `innodb_lock_wait_timeout` on MariaDB; on Postgres 30 seconds at most, or a stricter `lock_timeout` setting), or another admission holds the site mutex. Nothing was started or counted. | Try again. If it stays busy, look for a long or dead transaction on that Optimus Session row (`SHOW PROCESSLIST` on MariaDB, `pg_stat_activity` on Postgres). |
 | **Already running**: a click answers `{"status": "already_running", ...}` | The session has a live run; the answer carries its progress. | Nothing: the click attached to it. |
-| **Refused**: `refresh_running`, `disabled`, `no_worker`, `queue_unavailable`, `not_ready`, `permission`, `phase2`, `site_cap`, `user_cap`, `not_resumable`, `already_resumed`, `retry_limit` | `refresh_running`: #72's Refresh holds the session. `disabled`: AI is off. `no_worker`: no worker listens on the queue. `queue_unavailable`: Redis could not say. `not_ready`: the session is not Ready. `permission`: the requester has no access to the session. `phase2`: a Phase 2 run is in progress. `site_cap`, `user_cap`: the site, or this requester, already has as many live user refreshes as the cap allows. A live run is `queued` or `running` with its lease and deadline not passed, so a dead worker holds its slot only until its lease or deadline expires. The last three refuse a resume. | Fix the cause named; none of them counts or bills. An error naming a site setting that is not a valid whole number raises instead of answering (see Configuration). |
+| **Refused**: `disabled`, `no_worker`, `queue_unavailable`, `not_ready`, `permission`, `phase2`, `site_cap`, `user_cap`, `not_resumable`, `already_resumed`, `retry_limit` | `disabled`: AI is off. `no_worker`: no worker listens on the queue. `queue_unavailable`: Redis could not say. `not_ready`: the session is not Ready. `permission`: the requester has no access to the session. `phase2`: a Phase 2 run is in progress. `site_cap`, `user_cap`: the site, or this requester, already has as many live user refreshes as the cap allows. A live run is `queued` or `running` with its lease and deadline not passed, so a dead worker holds its slot only until its lease or deadline expires. The last three refuse a resume. | Fix the cause named; none of them counts or bills. An error naming a site setting that is not a valid whole number raises instead of answering (see Configuration). |
 | **Journal unavailable**: the error `AI refresh storage is not initialized` | The admission mutex row is missing (a rollback, or a failed install). A user refresh fails closed. | Run the repair command below. |
 | **Inconsistent**: the error `Refresh journal ... is inconsistent` | A run's reservation or attempt row disagrees with the run. | Use the administrator cancellation command below: it releases the run, treats an open call as uncertain with unknown usage, and writes one `optimus ai refresh release` row. A takeover or the sweep does the same for an expired run. |
 
@@ -665,6 +670,15 @@ marks the report pending. Regenerate Reports repairs that report without
 repeating analysis. Old queued deliveries are adopted only while their row is
 Analyzing and has no new generation. Replace old workers during deployment;
 an already-running old process does not gain the new ownership checks.
+
+Phase 2 admission bounds PostgreSQL row waits and refuses a busy request without
+retrying that wait. Dispatch and expiry scans use NOWAIT, leaving a busy row for
+the next pass. A refused or attached request leaves the session timestamp alone.
+After an ordinary result-commit error, the worker reads back its exact generation
+and token before reporting failure. A committed result is never recomputed.
+Successful completion queues missing-only automatic AI as the session owner;
+a hard timeout leaves saved results and pending report state for recovery and
+does not enqueue another AI run.
 
 ## Validation and remaining acceptance
 

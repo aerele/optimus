@@ -2,8 +2,8 @@
 
 import pytest
 
-from optimus.tests.test_ai_refresh_journal import admit
-from optimus.tests.test_ai_refresh_journal import journal as _journal_fixture  # noqa: F401
+from optimus.tests.fixtures.ai_refresh_journal import admit
+from optimus.tests.fixtures.ai_refresh_journal import journal as _journal_fixture  # noqa: F401
 
 
 @pytest.mark.parametrize("status", ["Recording", "Analyzing"])
@@ -22,12 +22,12 @@ def test_phase2_lock_refuses_an_active_ai_generation(journal):
 	assert journal.db.locks[:2] == [("Optimus Session", "fake-session-doc")]
 
 
-def test_phase2_lock_changes_parent_to_reject_old_postgres_admission_snapshot(journal):
+def test_phase2_lock_leaves_parent_unchanged_until_admission_writes(journal):
 	journal.db.rows[journal.mod.RUN] = {}
 	with journal.db.transaction():
 		assert journal.mod.lock_phase2_parent("fake-session-doc") is None
 		assert journal.db.active  # caller still owns the locks until its phase-2 row commits
-	assert journal.db.rows["Optimus Session"]["fake-session-doc"].get("modified") is not None
+	assert journal.db.rows["Optimus Session"]["fake-session-doc"].get("modified") is None
 
 
 def test_phase2_lock_refuses_a_parent_that_is_no_longer_ready(journal):

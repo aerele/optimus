@@ -38,7 +38,7 @@ def test_new_boundaries_preserve_a_fresh_job_timeout(monkeypatch, tmp_path, path
 		src = tmp_path / "mod.py"
 		src.write_text("def f(rows):\n\tfor r in rows:\n\t\tfrappe.get_doc('Item', r)\n")
 		monkeypatch.setattr(ai_grounding, "loop_facts_from_tree", interrupted)
-		call = partial(analyze._ai_payload_for_finding, _row(str(src), 3, "f", finding_type="N+1 Query"), {})
+		call = partial(analyze.ai_payload_for_finding, _row(str(src), 3, "f", finding_type="N+1 Query"), {})
 	elif path == "metadata":
 		monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", interrupted)
 		call = partial(recipe_enrichment.make_evidence_lookup(), "tabInvoice")

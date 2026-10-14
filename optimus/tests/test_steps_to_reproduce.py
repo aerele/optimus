@@ -535,10 +535,10 @@ def test_start_dialog_no_longer_asks_for_notes():
 # --------------------------------------------------------------------------
 
 def test_actions_for_humanizer_compacts_recordings():
-	"""_actions_for_humanizer should drop noise, cap and emit the
+	"""actions_for_humanizer should drop noise, cap and emit the
 	compact {label, cmd, path, method, doctype, duration_ms} dicts the
 	humanizer prompt expects."""
-	from optimus.analyze import _actions_for_humanizer
+	from optimus.analyze import actions_for_humanizer
 
 	recordings = [
 		{"cmd": "frappe.realtime.has_permission", "duration": 3, "calls": []},  # noise
@@ -547,7 +547,7 @@ def test_actions_for_humanizer_compacts_recordings():
 		               "action": "Save"}},
 		{"method": "GET", "path": "/api/method/foo.bar", "cmd": None, "duration": 12, "calls": []},
 	]
-	out = _actions_for_humanizer(recordings)
+	out = actions_for_humanizer(recordings)
 	assert len(out) == 2  # the realtime one is filtered
 	first = out[0]
 	assert first["cmd"] == "frappe.desk.form.save.savedocs"
@@ -563,9 +563,9 @@ def test_assemble_humanized_notes_is_just_the_friendly_steps():
 	"""Only the preamble + the rendered Markdown steps no raw
 	"Captured actions" appendix (the per-action breakdown in the report
 	already lists every action with its technical label)."""
-	from optimus.analyze import _assemble_humanized_notes
+	from optimus.analyze import assemble_humanized_notes
 
-	html_out = _assemble_humanized_notes("1. Submit a Delivery Note.\n\n**Summary:** submitting a DN.")
+	html_out = assemble_humanized_notes("1. Submit a Delivery Note.\n\n**Summary:** submitting a DN.")
 	assert "drafted by AI" in html_out
 	assert "Submit a Delivery Note" in html_out
 	assert "Captured actions" not in html_out

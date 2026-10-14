@@ -42,7 +42,7 @@ def test_guarded_reask_reads_key_once_per_completion(monkeypatch, keyless):
 
 
 def test_anthropic_cached_usage_does_not_reclamp_valid_sum():
-    count = ai_fix._MAX_TOKEN_COUNT
+    count = ai_fix.MAX_TOKEN_COUNT
     usage = ai_fix._usage_from_anthropic({"usage": {
         "input_tokens": count, "cache_creation_input_tokens": count,
         "cache_read_input_tokens": count, "output_tokens": 4,

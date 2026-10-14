@@ -52,7 +52,7 @@ def test_the_payload_builder_attaches_the_advice_for_slow_query():
 		estimated_impact_ms=900.0, affected_count=1, action_ref="", llm_fix_json=None,
 		technical_detail_json=json.dumps({"normalized_query": _QUERY}),
 	)
-	payload = analyze._ai_payload_for_finding(row, {}, evidence_lookup=lambda table: evidence)
+	payload = analyze.ai_payload_for_finding(row, {}, evidence_lookup=lambda table: evidence)
 	assert payload["index_advice"]["route"] == "ensure_indexes"
 	assert payload["index_advice"]["columns"] == ["customer", "status"]
 	text = payload["index_advice"]["text"]

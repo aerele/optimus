@@ -10,7 +10,7 @@ from optimus import ai_fix
 pytestmark = pytest.mark.rq
 
 
-@pytest.mark.parametrize("helper", ["_resolve_timeout_seconds", "is_available", "is_finding_type_excluded"])
+@pytest.mark.parametrize("helper", ["request_timeout_seconds", "is_available", "is_finding_type_excluded"])
 def test_settings_failure_does_not_swallow_rq_timeout(monkeypatch, helper):
 	Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
 	original = Timeout("fake timeout")

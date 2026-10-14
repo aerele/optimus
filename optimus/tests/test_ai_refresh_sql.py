@@ -743,11 +743,12 @@ def test_an_admission_waiting_on_its_session_still_counts_a_run_admitted_meanwhi
 def test_phase2_commit_fences_an_older_ai_admission_snapshot(sql):
 	older = sql.connect()
 	older.get_value("Optimus Session", "parent-a", "status")
-	def phase2():
+	def reserve():
 		assert store.lock_phase2_parent("parent-a") is None
 		sql.primary.insert({"doctype": "Optimus Phase Two Run", "name": "phase2-a",
 			"parent": "parent-a", "status": "Recording"})
-	ai_jobs._transaction(phase2)
+		phase2._write({"name": "phase2-a", "parent": "parent-a"}, status="Recording")
+	ai_jobs._transaction(reserve)
 	with sql.using(older):
 		assert ai_jobs._retry_sql(admit) == {"status": "refused", "reason": "phase2"}
 	assert older.conflicts == []  # the public SQL wrapper closes the old snapshot first
@@ -789,6 +790,7 @@ def test_ai_waiting_on_phase2_admission_cannot_start_a_provider_run(sql, scope):
 	wait_until_blocked(sql)
 	try:
 		sql.primary.insert({"doctype": phase2.TABLE, "name": "phase2-a", "parent": "parent-a", "status": "Recording"})
+		phase2._write({"name": "phase2-a", "parent": "parent-a"}, status="Recording")
 	finally:
 		sql.primary.commit()
 		thread.join(30)
@@ -1081,7 +1083,7 @@ def test_totals_above_the_int_range_add_up_in_the_session_counter(sql):
 	"""The largest count ``ai_fix._token_count`` accepts, twice: the session's Long Int total
 	passes 2**31 - 1, and a repeated settlement charges nothing more."""
 	claimed()
-	largest = ai_fix._MAX_TOKEN_COUNT
+	largest = ai_fix.MAX_TOKEN_COUNT
 	for target in ("finding-a", "finding-b"):
 		attempt = begun(target=target)
 		for _ in range(2):
@@ -2171,3 +2173,33 @@ def test_phase2_old_worker_cannot_commit_after_expired_generation_is_replaced(sq
 	assert not ai_jobs._transaction(lambda: phase2._complete(run, now=3001, persist=lambda: writes.append(True)))
 	assert not writes
 	assert sql.primary.get_value(phase2.TABLE, "fake-child", "analyze_generation") == "generation-b"
+
+
+@pytest.mark.parametrize("committed", [False, True])
+def test_phase2_result_commit_readback_uses_durable_generation(sql, monkeypatch, committed):
+	phase2_admit(sql)
+	run = phase2_claim()
+	monkeypatch.setattr(phase2, "_now", lambda: 102)
+	commit = sql.primary.commit
+	lost = False
+	writes = []
+	def lose_ack():
+		nonlocal lost
+		if not lost and sql.primary.get_value(phase2.TABLE, "fake-child", "status") == "Ready":
+			lost = True
+			if committed:
+				commit()
+			raise ConnectionError("fake lost commit acknowledgement")
+		commit()
+	monkeypatch.setattr(sql.primary, "commit", lose_ack)
+	def persist():
+		writes.append(True)
+		sql.primary.set_value("answer", "row-00", {"body": "durable phase2 answer"}, update_modified=False)
+	if committed:
+		assert phase2._save_results(run, persist)
+	else:
+		with pytest.raises(ConnectionError):
+			phase2._save_results(run, persist)
+	assert lost and writes == [True]
+	assert sql.primary.get_value(phase2.TABLE, "fake-child", "status") == ("Ready" if committed else "Analyzing")
+	assert (value(sql, "answer", "row-00", "body") == "durable phase2 answer") is committed

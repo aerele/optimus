@@ -13,7 +13,7 @@ from contextvars import ContextVar
 import frappe
 from frappe import _
 
-from optimus import ai_fix, ai_jobs, safe_call
+from optimus import ai_fix, safe_call, sql_work
 from optimus import ai_refresh_store as store
 
 TABLE = "Optimus Phase Two Run"
@@ -76,9 +76,9 @@ def _now():
 	return time.time()
 
 
-def _locked(docname, run_uuid):
-	parent = store._read("Optimus Session", docname, lock=True)
-	row = frappe.db.get_value(TABLE, {"parent": docname, "run_uuid": run_uuid}, "*", as_dict=True, for_update=True)
+def _locked(docname, run_uuid, *, wait=True):
+	parent = store.read_row("Optimus Session", docname, lock=True, wait=wait)
+	row = frappe.db.get_value(TABLE, {"parent": docname, "run_uuid": run_uuid}, "*", as_dict=True, for_update=True, wait=wait)
 	return parent, row
 
 
@@ -86,7 +86,7 @@ def _write(row, **values):
 	frappe.db.set_value(TABLE, row["name"], values, update_modified=False)
 	row.update(values)
 	# Reject stale Desk saves that loaded the parent before this transition.
-	ai_jobs._touch_session(row["parent"])
+	sql_work.touch_session(frappe.db, row["parent"])
 
 
 def _authorized(parent, user):
@@ -180,9 +180,36 @@ def _fail(run, *, now, reason):
 	return True
 
 
+def _completed(run):
+	"""Read back this worker's committed outcome after a lost acknowledgement."""
+	parent, row = _locked(run["parent"], run["run_uuid"])
+	return bool(parent and parent.get("session_uuid") == run["session_uuid"] and row
+		and row["status"] == "Ready"
+		and row.get("analyze_generation") == run["analyze_generation"]
+		and row.get("analyze_worker_token") == run["analyze_worker_token"])
+
+
+def _save_results(run, persist):
+	guard = safe_call.InterruptGuard(base=True)
+	failure = None
+	try:
+		with guard:
+			return _retry_sql(lambda: _complete(run, now=_now(), persist=persist))
+	except Exception as exc:
+		failure = exc
+	if guard.pending():
+		failure = persist = None
+		raise guard.interrupt()
+	# Do not recompute or retry persistence after an ambiguous ordinary failure.
+	# The exact committed generation is authoritative; a failed read stays failed.
+	if _retry_sql(lambda: _completed(run)):
+		return True
+	raise failure
+
+
 def _log(title, failure):
 	ai_fix.log_ai_failure(title, failure)
-	ai_jobs._transaction(lambda: None)
+	_transaction(lambda: None)
 
 
 def _identity(*values):
@@ -193,21 +220,40 @@ def _identity(*values):
 def request(docname, session_uuid, run_uuid, requested_by, *, from_recording=False):
 	"""Gated callers admit one durable generation; SQL survives queue failure."""
 	_identity(docname, session_uuid, run_uuid, requested_by)
-	ai_jobs._transaction(lambda: None)
-	out = ai_jobs._retry_sql(lambda: _admit(docname, session_uuid, run_uuid, requested_by,
-		generation=uuid.uuid4().hex, now=_now(), from_recording=from_recording))
+	_transaction(lambda: None)
+	def admission():
+		sql_work.bound_http_lock_wait(frappe.db)
+		return _admit(docname, session_uuid, run_uuid, requested_by,
+			generation=uuid.uuid4().hex, now=_now(), from_recording=from_recording)
+	try:
+		out = _retry_sql(admission, retry_lock_waits=False)
+	except Exception as exc:
+		if not store.is_lock_unavailable(exc):
+			raise
+		out = {"status": "refused", "reason": "busy"}
 	if out["status"] in {"queued", "already_running"}:
 		_notify({**out["run"], "session_uuid": session_uuid}, "phase_2_run_analyzing")
 		_dispatch(out["run"])
-	return {
+	response = {
 		"run_uuid": run_uuid, "session_uuid": session_uuid, "ran_inline": False,
 		"status": "Analyzing" if out["status"] in {"queued", "already_running"} else "Refused",
 		"reason": out.get("reason"),
 	}
+	if response["status"] == "Refused":
+		response["message"] = {
+			"busy": _("The session is busy. Wait a moment and retry Phase 2 analysis."),
+			"retry_limit": _("This Phase 2 run has reached its four-attempt limit. Record a new line-profile pass."),
+			"permission": _("Your permission to update this session changed. Recheck session access."),
+			"ai_refresh": _("Wait for the AI refresh to finish or cancel it before retrying Phase 2."),
+			"not_ready": _("The session is no longer Ready. Reload it before retrying Phase 2."),
+			"not_retryable": _("This Phase 2 run cannot be retried in its current state. Reload the session."),
+			"not_found": _("This Phase 2 run is no longer available. Reload the session."),
+		}.get(out.get("reason"), _("Phase 2 analysis could not start. Reload the session to check its status."))
+	return response
 
 
 def _prepare_dispatch(run, *, now):
-	parent, row = _locked(run["parent"], run["run_uuid"])
+	parent, row = _locked(run["parent"], run["run_uuid"], wait=False)
 	if not (parent and row and row["status"] == "Analyzing" and row.get("analyze_dispatch_pending")
 		and not row.get("analyze_worker_token") and row.get("analyze_generation")
 		and row.get("analyze_generation") == run.get("analyze_generation")
@@ -220,7 +266,7 @@ def _prepare_dispatch(run, *, now):
 
 def _enqueue(run):
 	enqueue = getattr(frappe.enqueue, "__wrapped__", frappe.enqueue)
-	ai_jobs._transaction(lambda: enqueue(
+	_transaction(lambda: enqueue(
 		"optimus.line_profile.analyzer.run_analyze", queue="long", timeout=JOB_SECONDS,
 		is_async=True, enqueue_after_commit=True, deduplicate=True,
 		job_id=f"optimus-phase2-{run['analyze_generation']}",
@@ -233,7 +279,7 @@ def _dispatch(run):
 	failure = None
 	try:
 		with guard:
-			pending = ai_jobs._retry_sql(lambda: _prepare_dispatch(run, now=_now()))
+			pending = _retry_sql(lambda: _prepare_dispatch(run, now=_now()), retry_lock_waits=False)
 			if pending:
 				_enqueue(pending)
 	except Exception as exc:
@@ -242,6 +288,8 @@ def _dispatch(run):
 		failure = None
 		raise guard.interrupt()
 	if failure is not None:
+		if store.is_lock_unavailable(failure):
+			return  # Durable intent remains pending for a later scheduler pass.
 		_log("optimus ai phase 2 enqueue", failure)
 
 
@@ -259,6 +307,7 @@ def _legacy_generation(docname, session_uuid, run_uuid):
 
 def run(session_uuid, run_uuid, *, generation=None):
 	"""Worker entry. Analysis is pure work between a committed claim and save."""
+	from optimus.analyze import queue_analyze_time_ai
 	from optimus.line_profile import analyzer, capture
 
 	_identity(session_uuid, run_uuid)
@@ -271,29 +320,30 @@ def run(session_uuid, run_uuid, *, generation=None):
 	try:
 		with guard:
 			docname = frappe.db.get_value("Optimus Session", {"session_uuid": session_uuid}, "name")
-			ai_jobs._transaction(lambda: None)
+			_transaction(lambda: None)
 			if not docname:
 				return
 			if generation is None:
-				generation = ai_jobs._retry_sql(lambda: _legacy_generation(docname, session_uuid, run_uuid))
+				generation = _retry_sql(lambda: _legacy_generation(docname, session_uuid, run_uuid))
 				if not generation:
 					return
-			run_row = ai_jobs._retry_sql(lambda: _claim(docname, run_uuid, generation, uuid.uuid4().hex, now=_now()))
+			run_row = _retry_sql(lambda: _claim(docname, run_uuid, generation, uuid.uuid4().hex, now=_now()))
 			if not run_row:
 				return
 			if run_row["session_uuid"] != session_uuid:
 				raise Phase2Failed("Phase 2 session changed")
 			_notify(run_row, "phase_2_run_analyzing")
 			results, result, total_ms = analyzer._compute_run(docname, run_uuid)
-			ai_jobs._transaction(lambda: None)
-			saved = ai_jobs._retry_sql(lambda: _complete(run_row, now=_now(), persist=lambda: analyzer._persist_run(
+			_transaction(lambda: None)
+			saved = _save_results(run_row, lambda: analyzer._persist_run(
 				docname, run_uuid, results, result, total_ms,
-			)))
+			))
 			if saved:
 				# This is outside the result transaction. Failure cannot revert a
 				# completed generation; even an ambiguous COMMIT is fenced by Ready.
 				_postprocess(run_row)
 				capture.cleanup_run(run_uuid)
+				queue_analyze_time_ai(docname)
 	except Exception as exc:
 		failure = exc
 	finally:
@@ -304,7 +354,7 @@ def run(session_uuid, run_uuid, *, generation=None):
 			with guard:
 				frappe.db.rollback()
 				if run_row:
-					changed = ai_jobs._retry_sql(lambda: _fail(run_row, now=_now(),
+					changed = _retry_sql(lambda: _fail(run_row, now=_now(),
 						reason="input_missing" if isinstance(failure, MissingInput) else "failed"))
 					if changed:
 						_notify(run_row, "phase_2_run_failed")
@@ -360,7 +410,7 @@ def _notify(run, event):
 
 
 def _recover(docname, run_uuid, *, now):
-	_parent, row = _locked(docname, run_uuid)
+	_parent, row = _locked(docname, run_uuid, wait=False)
 	if not row or row["status"] != "Analyzing" or not row.get("analyze_generation"):
 		return False
 	if (row.get("analyze_lease_until") or 0) > now:
@@ -385,11 +435,16 @@ def _recover_pending():
 	rows = frappe.get_all(TABLE, filters={"status": "Analyzing", "analyze_generation": ["is", "set"],
 		"analyze_lease_until": ["<=", now]},
 		fields=["parent", "run_uuid", "analyze_generation", "analyze_requested_by"], order_by="analyze_lease_until asc", limit_page_length=100)
-	ai_jobs._transaction(lambda: None)
+	_transaction(lambda: None)
 	for row in rows:
 		if not row.get("analyze_generation"):
 			continue  # The legacy janitor handles jobs queued before this upgrade.
-		changed = ai_jobs._retry_sql(lambda: _recover(row["parent"], row["run_uuid"], now=_now()))
+		try:
+			changed = _retry_sql(lambda: _recover(row["parent"], row["run_uuid"], now=_now()), retry_lock_waits=False)
+		except Exception as exc:
+			if store.is_lock_unavailable(exc):
+				continue
+			raise
 		if changed:
 			row["session_uuid"] = frappe.db.get_value("Optimus Session", row["parent"], "session_uuid")
 			_notify(row, "phase_2_run_failed")
@@ -397,7 +452,7 @@ def _recover_pending():
 	rows = frappe.get_all(TABLE, filters={"status": "Analyzing", "analyze_dispatch_pending": 1,
 		"analyze_lease_until": [">", now]}, fields=["parent", "run_uuid", "analyze_generation"],
 		order_by="analyze_dispatch_at asc", limit_page_length=100)
-	ai_jobs._transaction(lambda: None)
+	_transaction(lambda: None)
 	for row in rows:
 		_dispatch(row)
 
@@ -417,3 +472,11 @@ def expire_legacy(docname, run_uuid, *, status, cutoff):
 	)
 	_write(row, status="Failed", warnings_json=json.dumps([message]))
 	return True
+
+
+def _transaction(operation):
+	return sql_work.transaction(operation, commit=frappe.db.commit, rollback=frappe.db.rollback)
+
+
+def _retry_sql(operation, *, retry_lock_waits=True):
+	return sql_work.retry(operation, transaction=_transaction, framework=frappe, retry_lock_waits=retry_lock_waits)
