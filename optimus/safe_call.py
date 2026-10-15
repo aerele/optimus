@@ -58,7 +58,7 @@ class InterruptGuard:
 
 	def __init__(self, *, base: bool = False):
 		self._base = base
-		self._timeout: tuple[type[BaseException], tuple] | None = None
+		self._timeout: tuple[type[BaseException], tuple, dict] | None = None
 		self._escaping: BaseException | None = None
 
 	def __enter__(self) -> InterruptGuard:
@@ -82,9 +82,13 @@ class InterruptGuard:
 	def _record_timeout(self, exc) -> bool:
 		timeout_types = self._timeout_types()
 		if timeout_types and isinstance(exc, timeout_types):
-			self._timeout = (type(exc), exc.args)
+			self._timeout = (type(exc), exc.args, self._timeout_state(exc))
 			return True
 		return False
+
+	def _timeout_state(self, exc) -> dict:
+		"""Explicitly allowlisted metadata; never copy arbitrary exception locals."""
+		return {}
 
 	def note(self, exc: BaseException | None) -> None:
 		"""Record ``exc`` when it is an RQ job timeout, so it is raised again,
@@ -99,19 +103,26 @@ class InterruptGuard:
 		"""True when the guard recorded an interrupt to raise again."""
 		return self._timeout is not None or self._escaping is not None
 
+	@staticmethod
+	def detach(exc: BaseException) -> BaseException:
+		"""Drop private frames while preserving a typed failure or interrupt identity."""
+		exc.__traceback__ = None
+		exc.__context__ = None
+		exc.__cause__ = None
+		exc.__suppress_context__ = True
+		return exc
+
 	def interrupt(self) -> BaseException | None:
 		"""What the guard recorded, ready to raise (see the class), or None; the
 		guard forgets it."""
 		escaping, self._escaping = self._escaping, None
 		if escaping is not None:
-			escaping.__traceback__ = None
-			escaping.__context__ = None
-			escaping.__cause__ = None
-			escaping.__suppress_context__ = True
-			return escaping
+			return self.detach(escaping)
 		timeout, self._timeout = self._timeout, None
 		if timeout is not None:
-			return timeout[0](*timeout[1])
+			fresh = timeout[0](*timeout[1])
+			fresh.__dict__.update(timeout[2])
+			return fresh
 		return None
 
 

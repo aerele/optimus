@@ -20,8 +20,11 @@ function without its dependency raises ``RuntimeError``.
 import importlib
 import inspect
 import json
+import pickle
 import sys
 import threading
+from dataclasses import dataclass
+from functools import wraps
 
 from optimus import redis_keys as _redis_keys
 from optimus.line_profile import diff
@@ -36,6 +39,13 @@ try:
 except ImportError:
 	frappe = None  # type: ignore[assignment]
 	_FRAPPE_AVAILABLE = False
+
+try:
+	from frappe import _
+except ImportError:
+	def _(message):
+		return message
+
 
 try:
 	from line_profiler import LineProfiler  # type: ignore[import-not-found]
@@ -79,6 +89,7 @@ def _require_line_profiler() -> None:
 # values from older bench versions resolve unchanged.
 
 SESSION_TTL_SECONDS = 10 * 60  # match phase-1's session TTL
+DATA_TTL_SECONDS = 24 * 60 * 60  # orphaned inputs must not survive indefinitely
 
 
 # ---------------------------------------------------------------------------
@@ -96,18 +107,46 @@ _resolved_fns_by_run: dict[str, list] = {}
 # ---------------------------------------------------------------------------
 
 
+def _interrupt_boundary(fn):
+	"""Discard interrupted capture frames while preserving the worker's stop signal."""
+	@wraps(fn)
+	def guarded(*args, **kwargs):
+		from optimus.ai_fix import _InterruptGuard
+		guard = _InterruptGuard(base=True)
+		with guard:
+			return fn(*args, **kwargs)
+		args = kwargs = None
+		raise guard.interrupt()
+	return guarded
+
+
+def _raise_if_interrupt(exc):
+	"""Pass a timeout through a best-effort catch to its outer interrupt boundary."""
+	from optimus.ai_fix import _job_timeout_types
+	if isinstance(exc, _job_timeout_types()):
+		raise exc
+
+
+@_interrupt_boundary
 def _resolve_attr(dotted_path: str):
 	"""Resolve a dotted path to its underlying function object.
 
 	Mirrors ``picker.resolve_freeform`` but returns just the callable. None
 	on any resolution failure caller decides the surfacing.
 	"""
+	from optimus.renderer.source import _installed_apps
+
+	if not isinstance(dotted_path, str) or len(dotted_path) > 500 or not all(p.isidentifier() for p in dotted_path.split(".")):
+		return None
+	may_import = dotted_path.split(".", 1)[0] in _installed_apps()
 	parts = dotted_path.split(".")
 	module = None
 	module_parts = 0
 	for i in range(len(parts), 0, -1):
 		try:
-			module = importlib.import_module(".".join(parts[:i]))
+			module = importlib.import_module(".".join(parts[:i])) if may_import else sys.modules.get(".".join(parts[:i]))
+			if module is None:
+				continue
 			module_parts = i
 			break
 		except (ImportError, TypeError, ValueError):
@@ -128,18 +167,109 @@ def _resolve_attr(dotted_path: str):
 	return obj
 
 
+@_interrupt_boundary
 def _capture_source_lines(fn) -> list[dict]:
-	"""Snapshot the function's source via ``inspect.getsourcelines`` at
-	start time so the analyzer can render lines even if the file is edited
-	between start and stop. Returns ``[{lineno, content}]``."""
+	"""Snapshot only bounded, permitted on-disk source for the selected callable."""
+	from optimus.renderer import source
+
 	try:
-		source_lines, first_lineno = inspect.getsourcelines(fn)
-	except (OSError, TypeError):
+		code = getattr(inspect.unwrap(fn), "__code__", None)
+		if code is None:
+			return []
+		lines = source._source_lines(code.co_filename)
+		if not lines:
+			return []
+		first_lineno = code.co_firstlineno
+		source_lines = inspect.getblock(lines[first_lineno - 1:])
+	except (OSError, TypeError, ValueError):
 		return []
-	return [
-		{"lineno": first_lineno + i, "content": line.rstrip("\n")}
-		for i, line in enumerate(source_lines)
-	]
+	return [{"lineno": first_lineno + i, "content": line.rstrip("\n")} for i, line in enumerate(source_lines)]
+
+
+class CaptureInputError(ValueError):
+	"""Fixed diagnostic for missing, corrupt or excessive capture input."""
+
+
+MAX_CAPTURE_BYTES = 16 * 1024 * 1024
+MAX_SAMPLE_BATCHES = 10_000
+MAX_SAMPLE_RECORDS = 250_000
+MAX_SOURCE_LINES = 100_000
+
+
+def _bounded_text(value, limit):
+	return isinstance(value, str) and bool(value) and len(value) <= limit and "\x00" not in value
+
+
+def _uint(value, *, positive=False):
+	return type(value) is int and (1 if positive else 0) <= value <= 2**63 - 1
+
+
+def _decode_capture_json(raw):
+	from optimus.ai_fix import _InterruptGuard
+	from optimus.recording_bundle import _constant, _pairs
+
+	if not isinstance(raw, (str, bytes)) or not raw or len(raw) > MAX_CAPTURE_BYTES:
+		raise CaptureInputError("Phase 2 capture input is missing or exceeds its size limit")
+	guard = _InterruptGuard(base=True)
+	invalid = False
+	try:
+		with guard:
+			if isinstance(raw, str) and len(raw.encode("utf-8")) > MAX_CAPTURE_BYTES:
+				invalid = True
+			else:
+				return json.loads(raw, object_pairs_hook=_pairs, parse_constant=_constant)
+	except (ValueError, TypeError, RecursionError):
+		invalid = True
+	if guard.pending():
+		raw = None
+		raise guard.interrupt()
+	if invalid:
+		raw = None
+		raise CaptureInputError("Phase 2 capture input is malformed or exceeds its size limit") from None
+
+
+def _validate_captured_picks(picks):
+	if not isinstance(picks, list) or not 1 <= len(picks) <= MAX_PICKS:
+		raise CaptureInputError("Phase 2 captured picks are missing or malformed")
+	seen, total_lines = set(), 0
+	for pick in picks:
+		if (not isinstance(pick, dict) or not _bounded_text(pick.get("dotted_path"), 500)
+			or not _bounded_text(pick.get("qualname"), 500) or not _bounded_text(pick.get("file"), 4096)
+			or not _uint(pick.get("first_lineno"), positive=True)):
+			raise CaptureInputError("Phase 2 captured function metadata is malformed")
+		if pick["dotted_path"] in seen:
+			raise CaptureInputError("Phase 2 captured functions are duplicated")
+		seen.add(pick["dotted_path"])
+		lines = pick.get("source_lines")
+		if not isinstance(lines, list) or not lines:
+			raise CaptureInputError("Phase 2 source snapshot is missing")
+		total_lines += len(lines)
+		if total_lines > MAX_SOURCE_LINES:
+			raise CaptureInputError("Phase 2 source snapshot exceeds its line limit")
+		previous = 0
+		for line in lines:
+			if (not isinstance(line, dict) or not _uint(line.get("lineno"), positive=True)
+				or line["lineno"] <= previous or not isinstance(line.get("content"), str)
+				or len(line["content"]) > 20_000):
+				raise CaptureInputError("Phase 2 source snapshot is malformed")
+			previous = line["lineno"]
+
+
+def _validate_samples(samples):
+	if not isinstance(samples, list) or len(samples) > MAX_SAMPLE_BATCHES:
+		raise CaptureInputError("Phase 2 sample batches are malformed or excessive")
+	count = 0
+	for batch in samples:
+		if not isinstance(batch, list):
+			raise CaptureInputError("Phase 2 sample batch is malformed")
+		count += len(batch)
+		if count > MAX_SAMPLE_RECORDS:
+			raise CaptureInputError("Phase 2 samples exceed their record limit")
+		for record in batch:
+			if (not isinstance(record, dict) or not _bounded_text(record.get("file"), 4096)
+				or not _bounded_text(record.get("qualname"), 500) or not _uint(record.get("lineno"), positive=True)
+				or not _uint(record.get("hits")) or not _uint(record.get("total_us"))):
+				raise CaptureInputError("Phase 2 sample record is malformed")
 
 
 def aggregate_samples(samples: list[list[dict]], picks: list[dict]) -> list[dict]:
@@ -155,6 +285,8 @@ def aggregate_samples(samples: list[list[dict]], picks: list[dict]) -> list[dict
 	Samples that match no pick are silently dropped, as are lines no longer in
 	the pick's captured source (the start-time source is authoritative).
 	"""
+	_validate_captured_picks(picks)
+	_validate_samples(samples)
 	# Build a lookup: (file, qualname, lineno) → cumulative {hits, total_us}
 	totals: dict[tuple[str, str, int], dict] = {}
 	for batch in samples:
@@ -210,26 +342,47 @@ class CaptureError(Exception):
 	should communicate to the customer (e.g. all picks ineligible)."""
 
 
-def start_line_profile_pass(
-	session_uuid: str,
-	run_uuid: str,
-	user: str,
-	picks: list[dict],
-) -> list[dict]:
-	"""Begin a phase-2 run: resolve picks, capture source snapshots, persist to
-	Redis and set the per-user active flag.
+MAX_PICKS = 100
 
-	Returns the resolved-picks-meta list (with eligibility) for the API to echo
-	to the client. Raises ``CaptureError`` if no picks are eligible.
-	"""
-	_require_frappe()
+
+@dataclass(frozen=True)
+class PreparedCapture:
+	resolved: tuple[dict, ...]
+	picks_json: str
+	source_json: str
+
+
+def validate_picks(picks):
+	if not isinstance(picks, list) or not 1 <= len(picks) <= MAX_PICKS:
+		raise CaptureError(_("Select between 1 and 100 functions to line-profile."))
+	for entry in picks:
+		dotted = entry.get("dotted_path") if isinstance(entry, dict) else None
+		if (not isinstance(dotted, str) or not 1 <= len(dotted) <= 500 or "." not in dotted
+			or not all(part.isidentifier() for part in dotted.split("."))):
+			raise CaptureError(_("Each selected function needs a valid dotted path."))
+		source = entry.get("source", "freeform")
+		if not isinstance(source, str) or source not in {"freeform", "curated", "auto_expand"}:
+			raise CaptureError(_("Each selected function needs a known source label."))
+
+
+@_interrupt_boundary
+def prepare_line_profile_picks(picks: list[dict]) -> PreparedCapture:
+	"""Resolve and snapshot before acquiring SQL admission locks."""
 	_require_line_profiler()
-
 	from optimus.line_profile import picker
 
+	validate_picks(picks)
+	from optimus.renderer.source import _installed_apps
+	installed = _installed_apps()
+	if any(entry["dotted_path"].split(".", 1)[0] not in installed for entry in picks):
+		raise CaptureError(_("Select a function from an installed app."))
 	resolved: list[dict] = []
+	seen = set()
 	for entry in picks:
-		dotted = entry.get("dotted_path") or ""
+		dotted = entry["dotted_path"]
+		if dotted in seen:
+			continue
+		seen.add(dotted)
 		try:
 			meta = picker.resolve_freeform(dotted)
 		except picker.PickerError as exc:
@@ -245,18 +398,22 @@ def start_line_profile_pass(
 
 	eligible = [r for r in resolved if r.get("eligible")]
 	if not eligible:
-		raise CaptureError(
-			"No eligible picks. Resolve errors: "
-			+ "; ".join(r.get("ineligible_reason") or r.get("dotted_path") for r in resolved)
-		)
+		raise CaptureError(_("No selected function has eligible source. Check the selected paths."))
 
 	# Snapshot source for each eligible pick. Stored as a dict keyed by
 	# dotted_path so aggregate_samples can pull lines per pick.
 	source_snapshot: dict[str, list[dict]] = {}
 	picks_meta: list[dict] = []
+	snapshot_bytes = 0
 	for r in eligible:
 		fn = _resolve_attr(r["dotted_path"])
-		source_snapshot[r["dotted_path"]] = _capture_source_lines(fn) if fn else []
+		lines = _capture_source_lines(fn) if fn else []
+		if not lines:
+			raise CaptureError(_("A selected function has no readable source. Choose another function."))
+		snapshot_bytes += len(json.dumps(lines).encode()) + len(r["dotted_path"].encode()) + 8
+		if snapshot_bytes > MAX_CAPTURE_BYTES:
+			raise CaptureError(_("Selected source exceeds the capture size limit. Select fewer functions."))
+		source_snapshot[r["dotted_path"]] = lines
 		picks_meta.append({
 			"dotted_path": r["dotted_path"],
 			"qualname": r["qualname"],
@@ -265,38 +422,103 @@ def start_line_profile_pass(
 			"source": r["source"],
 		})
 
-	# Persist to Redis. The picks + source keys persist for the run's full
-	# lifetime so any worker can resolve them; samples list grows during the
-	# run; the active flag scopes the user.
-	frappe.cache.set_value(_redis_keys.lp_picks(run_uuid), json.dumps(picks_meta))
-	frappe.cache.set_value(_redis_keys.lp_source(run_uuid), json.dumps(source_snapshot))
-	frappe.cache.set_value(_redis_keys.lp_active(user), run_uuid, expires_in_sec=SESSION_TTL_SECONDS)
-
-	return resolved
+	_validate_captured_picks([{**pick, "source_lines": source_snapshot[pick["dotted_path"]]} for pick in picks_meta])
+	picks_json, source_json = json.dumps(picks_meta), json.dumps(source_snapshot)
+	if len(picks_json.encode()) + len(source_json.encode()) > MAX_CAPTURE_BYTES:
+		raise CaptureError(_("Selected source exceeds the capture size limit. Select fewer functions."))
+	return PreparedCapture(tuple(resolved), picks_json, source_json)
 
 
-def stop_line_profile_pass(run_uuid: str, user: str) -> None:
-	"""Clear the active flag so phase-2 hooks stop instrumenting. The Redis
-	picks/source/samples keys persist until ``cleanup_run`` so the analyzer
-	can read them.
+def start_line_profile_pass(
+	session_uuid: str, run_uuid: str, user: str, picks: list[dict] | None = None,
+	*, prepared: PreparedCapture | None = None,
+) -> list[dict]:
+	"""Atomically publish complete input and reserve an unowned active flag.
 
-	Also clears ``frappe.local._lp_active`` so later code in the same request
-	(e.g. the enqueue patch) doesn't see a stale cached flag and leak
-	``_lp_session_id`` into job kwargs.
+	API callers prepare before SQL admission. The legacy picks argument keeps
+	internal callers compatible; no module resolution happens for prepared input.
 	"""
+	from redis.exceptions import WatchError
+
+	from optimus.ai_fix import _InterruptGuard
+
 	_require_frappe()
-	frappe.cache.delete_value(_redis_keys.lp_active(user))
-	# Force-invalidate the per-request is_active cache. Without this,
-	# any code path later in this request (e.g. the enqueue patch) sees
-	# the stale truthy value and treats phase 2 as still active, leaking
-	# _lp_session_id into the analyze job's kwargs.
+	if any(not isinstance(value, str) or not value or len(value) > 140 for value in (session_uuid, run_uuid, user)):
+		raise CaptureError(_("Invalid capture identity."))
+	if prepared is None:
+		prepared = prepare_line_profile_picks(picks)
+	elif picks is not None or not isinstance(prepared, PreparedCapture):
+		raise CaptureError(_("Invalid prepared capture."))
+	active, phase1, pick_key, source_key = [frappe.cache.make_key(key) for key in (
+		_redis_keys.lp_active(user), _redis_keys.session_active(user), _redis_keys.lp_picks(run_uuid), _redis_keys.lp_source(run_uuid))]
+	guard = _InterruptGuard(base=True)
+	conflict = False
 	try:
+		with guard:
+			with frappe.cache.pipeline() as pipe:
+				pipe.watch(active, phase1, pick_key, source_key)
+				if pipe.exists(active, phase1, pick_key, source_key):
+					conflict = True
+				else:
+					pipe.multi()
+					pipe.set(pick_key, pickle.dumps(prepared.picks_json, protocol=4), ex=DATA_TTL_SECONDS)
+					pipe.set(source_key, pickle.dumps(prepared.source_json, protocol=4), ex=DATA_TTL_SECONDS)
+					pipe.set(active, pickle.dumps(run_uuid, protocol=4), ex=SESSION_TTL_SECONDS)
+					pipe.execute()
+	except WatchError:
+		conflict = True
+	finally:
 		frappe.local._lp_active = None
-	except Exception:
-		pass
+		frappe.local._lp_active_user = None
+		frappe.local.cache.pop(active, None)
+	if guard.pending():
+		prepared = picks = None
+		raise guard.interrupt()
+	if conflict:
+		raise CaptureError(_("Capture state changed or a run is already active. Reload and retry."))
+	return list(prepared.resolved)
 
 
-def is_active(user: str) -> str | None:
+def stop_line_profile_pass(run_uuid: str, user: str) -> bool:
+	"""Clear only the expected generation, including Frappe 15/16 byte formats.
+
+	WATCH compares the raw value read from Redis, not the request-local cache.
+	A concurrent start/expiry changes the watched key and cannot be deleted by
+	this stop. No legacy Redis value is unpickled by Optimus.
+	"""
+	from redis.exceptions import WatchError
+
+	from optimus.ai_fix import _InterruptGuard
+
+	_require_frappe()
+	if not isinstance(run_uuid, str) or not run_uuid or not isinstance(user, str) or not user:
+		return False
+	key = frappe.cache.make_key(_redis_keys.lp_active(user))
+	# Frappe 15 uses pickle's default protocol, 16 explicitly uses protocol 5.
+	expected = {pickle.dumps(run_uuid, protocol=protocol) for protocol in (4, 5)}
+	guard = _InterruptGuard(base=True)
+	cleared = False
+	try:
+		with guard:
+			with frappe.cache.pipeline() as pipe:
+				pipe.watch(key)
+				if pipe.get(key) in expected:
+					pipe.multi()
+					pipe.delete(key)
+					pipe.execute()
+					cleared = True
+	except WatchError:
+		pass  # Ownership changed; a later explicit stop may target that run.
+	finally:
+		frappe.local._lp_active = None
+		frappe.local._lp_active_user = None
+		frappe.local.cache.pop(key, None)
+	if guard.pending():
+		raise guard.interrupt()
+	return cleared
+
+
+def is_active(user: str, *, fresh: bool = False) -> str | None:
 	"""Return the active phase-2 run_uuid for the user, or None.
 
 	Hot-path predicate from the phase-2 request hook must be cheap. The
@@ -307,12 +529,15 @@ def is_active(user: str) -> str | None:
 	if not user or user == "Guest":
 		return None
 	cached = getattr(frappe.local, "_lp_active", None)
-	if cached is not None:
+	if not fresh and cached is not None and getattr(frappe.local, "_lp_active_user", None) == user:
 		return cached if cached != "" else None
+	if fresh:
+		frappe.local.cache.pop(frappe.cache.make_key(_redis_keys.lp_active(user)), None)
 	value = frappe.cache.get_value(_redis_keys.lp_active(user))
 	if isinstance(value, bytes):
 		value = value.decode()
 	frappe.local._lp_active = value or ""  # cache empty string for misses
+	frappe.local._lp_active_user = user
 	return value or None
 
 
@@ -386,6 +611,7 @@ def active_profiler_count() -> int:
 		return _active_profiler_count
 
 
+@_interrupt_boundary
 def release_monitoring_tool() -> None:
 	"""Guarantee phase-2 leaves no ``sys.monitoring`` line-trace hook behind.
 
@@ -404,10 +630,12 @@ def release_monitoring_tool() -> None:
 			return
 		mon.set_events(pid, 0)
 		mon.free_tool_id(pid)
-	except Exception:
+	except Exception as exc:
+		_raise_if_interrupt(exc)
 		pass
 
 
+@_interrupt_boundary
 def disengage_monitoring() -> None:
 	"""Zero tool 2's line events but leave the tool registered: stop line-trace
 	overhead without unseating line_profiler.
@@ -429,7 +657,9 @@ def disengage_monitoring() -> None:
 		if mon.get_tool(pid) != "line_profiler":
 			return
 		mon.set_events(pid, 0)
-	except Exception:
+	except Exception as exc:
+		_raise_if_interrupt(exc)
+		_raise_if_interrupt(exc)
 		pass
 
 
@@ -442,34 +672,54 @@ def disengage_monitoring() -> None:
 # never take more than ~budget longer than its natural time; the partial line
 # data still pinpoints the hot line. See feedback_observe_dont_spoil_flow.
 
-
 def mark_budget_hit(run_uuid: str) -> None:
 	"""Record that this run's profiling was cut short by the overhead budget,
 	so analyze can flag the line data as partial. Best-effort."""
 	if not _FRAPPE_AVAILABLE or not run_uuid:
 		return
+	from optimus.ai_fix import _InterruptGuard
+
+	guard = _InterruptGuard(base=True)
 	try:
-		frappe.cache.set_value(_redis_keys.lp_budget_hit(run_uuid), "1", expires_in_sec=3600)
+		with guard:
+			frappe.cache.set_value(_redis_keys.lp_budget_hit(run_uuid), "1", expires_in_sec=3600)
 	except Exception:
 		pass
+
+	if guard.pending():
+		raise guard.interrupt()
 
 
 def budget_was_hit(run_uuid: str) -> bool:
 	if not _FRAPPE_AVAILABLE or not run_uuid:
 		return False
+	from optimus.ai_fix import _InterruptGuard
+
+	guard = _InterruptGuard(base=True)
 	try:
-		return bool(frappe.cache.get_value(_redis_keys.lp_budget_hit(run_uuid)))
+		with guard:
+			return bool(frappe.cache.get_value(_redis_keys.lp_budget_hit(run_uuid)))
 	except Exception:
 		return False
+
+	if guard.pending():
+		raise guard.interrupt()
 
 
 def clear_budget_hit(run_uuid: str) -> None:
 	if not _FRAPPE_AVAILABLE or not run_uuid:
 		return
+	from optimus.ai_fix import _InterruptGuard
+
+	guard = _InterruptGuard(base=True)
 	try:
-		frappe.cache.delete_value(_redis_keys.lp_budget_hit(run_uuid))
+		with guard:
+			frappe.cache.delete_value(_redis_keys.lp_budget_hit(run_uuid))
 	except Exception:
 		pass
+
+	if guard.pending():
+		raise guard.interrupt()
 
 
 def _disengage_run(run_uuid: str) -> None:
@@ -500,6 +750,7 @@ def start_overhead_watchdog(run_uuid: str, budget_seconds):
 	return timer
 
 
+@_interrupt_boundary
 def make_profiler(run_uuid: str):
 	"""Build a fresh ``LineProfiler`` with the run's picks attached. Returns
 	None if line_profiler is unavailable, the run has no resolvable picks,
@@ -509,7 +760,8 @@ def make_profiler(run_uuid: str):
 		return None
 	try:
 		fns = _get_or_resolve_picks(run_uuid)
-	except Exception:
+	except Exception as exc:
+		_raise_if_interrupt(exc)
 		return None
 	if not fns:
 		return None
@@ -517,11 +769,11 @@ def make_profiler(run_uuid: str):
 	for fn in fns:
 		try:
 			profiler.add_function(fn)
-		except Exception:
+		except Exception as exc:
+			_raise_if_interrupt(exc)
 			# A single bad pick shouldn't sink the whole request.
 			continue
 	return profiler
-
 
 def serialize_stats(profiler) -> list[dict]:
 	"""Extract per-line records from a ``LineProfiler`` instance.
@@ -556,25 +808,54 @@ def serialize_stats(profiler) -> list[dict]:
 
 
 def flush_samples(run_uuid: str, samples: list[dict]) -> None:
-	"""RPUSH a per-request batch into the run's samples list. No-op for
-	empty samples to keep the list tight."""
+	"""Bound memory atomically across concurrent request/job completions.
+
+	Overflow or repeated contention marks the entire input incomplete; it must
+	not produce a successful partial report. Never recreate a deleted run.
+	"""
 	if not samples:
 		return
 	_require_frappe()
-	# frappe.cache delegates to the underlying Redis client for list ops.
-	# We use rpush via the redis client when available.
-	try:
-		frappe.cache.rpush(_redis_keys.lp_samples(run_uuid), json.dumps(samples))
-	except AttributeError:
-		# Fallback: keep batches as a JSON-list-of-batches under one key.
-		# Less efficient but works without rpush.
-		key = _redis_keys.lp_samples(run_uuid)
-		raw = frappe.cache.get_value(key) or "[]"
-		if isinstance(raw, bytes):
-			raw = raw.decode()
-		batches = json.loads(raw)
-		batches.append(samples)
-		frappe.cache.set_value(key, json.dumps(batches))
+	from redis.exceptions import WatchError
+
+	from optimus.ai_fix import _InterruptGuard
+
+	_validate_samples([samples])
+	payload = json.dumps(samples).encode("utf-8")
+	sample_key, state_key, source_key = [frappe.cache.make_key(key) for key in (
+		_redis_keys.lp_samples(run_uuid), _redis_keys.lp_sample_state(run_uuid), _redis_keys.lp_source(run_uuid))]
+	guard = _InterruptGuard(base=True)
+	complete = False
+	with guard:
+		for _attempt in range(3):
+			try:
+				with frappe.cache.pipeline() as pipe:
+					pipe.watch(sample_key, state_key, source_key)
+					if not pipe.exists(source_key):
+						return  # expired/deleted input; late flush owns no capture
+					count, raw_bytes = pipe.llen(sample_key), pipe.get(state_key)
+					try:
+						used = int(raw_bytes) if raw_bytes is not None else (0 if count == 0 else -1)
+					except (ValueError, TypeError):
+						used = -1
+					complete = 0 <= used <= MAX_CAPTURE_BYTES - len(payload) and count < MAX_SAMPLE_BATCHES
+					pipe.multi()
+					pipe.set(state_key, str(used + len(payload) if complete else -1).encode(), ex=DATA_TTL_SECONDS)
+					if complete:
+						pipe.rpush(sample_key, payload)
+						pipe.expire(sample_key, DATA_TTL_SECONDS)
+					pipe.execute()
+					break
+			except WatchError:
+				complete = False
+		else:
+			# Raw counter, not a pickled cache value; state_key already uses make_key.
+			frappe.cache.set(state_key, b"-1", ex=DATA_TTL_SECONDS)  # nosemgrep: frappe-cache-breaks-multitenancy
+	if guard.pending():
+		samples = payload = None
+		raise guard.interrupt()
+	if not complete:
+		raise CaptureInputError("Phase 2 sample capture is incomplete or exceeds its limit")
 
 
 # ---------------------------------------------------------------------------
@@ -582,60 +863,73 @@ def flush_samples(run_uuid: str, samples: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 
+@_interrupt_boundary
 def read_all_samples(run_uuid: str) -> list[list[dict]]:
-	"""Drain the per-run samples list. Each element is one per-request batch."""
+	"""Read a bounded snapshot; malformed input is never an empty successful pass."""
 	_require_frappe()
-	try:
-		raw_list = frappe.cache.lrange(_redis_keys.lp_samples(run_uuid), 0, -1) or []
-		batches = []
-		for raw in raw_list:
-			if isinstance(raw, bytes):
-				raw = raw.decode()
-			batches.append(json.loads(raw))
-		return batches
-	except AttributeError:
-		# Fallback to the JSON-list-of-batches stored by flush_samples.
-		raw = frappe.cache.get_value(_redis_keys.lp_samples(run_uuid)) or "[]"
-		if isinstance(raw, bytes):
-			raw = raw.decode()
-		return json.loads(raw)
-
-
-def read_picks_meta(run_uuid: str) -> list[dict]:
-	"""Return the picks list with source_lines populated from the snapshot.
-	Shape matches what ``aggregate_samples`` expects."""
-	_require_frappe()
-	picks_raw = frappe.cache.get_value(_redis_keys.lp_picks(run_uuid)) or "[]"
-	if isinstance(picks_raw, bytes):
-		picks_raw = picks_raw.decode()
-	picks_meta = json.loads(picks_raw)
-
-	source_raw = frappe.cache.get_value(_redis_keys.lp_source(run_uuid)) or "{}"
-	if isinstance(source_raw, bytes):
-		source_raw = source_raw.decode()
-	source_snapshot = json.loads(source_raw)
-
-	return [
-		{**p, "source_lines": source_snapshot.get(p["dotted_path"], [])}
-		for p in picks_meta
-	]
-
-
-def cleanup_run(run_uuid: str) -> None:
-	"""DEL all Redis keys for a run + drop the worker-resident pick cache.
-	Called at the end of analyze.run_analyze (success or failure) and from
-	the janitor for stale runs."""
-	_require_frappe()
-	for key_fn in (
-		_redis_keys.lp_picks,
-		_redis_keys.lp_source,
-		_redis_keys.lp_samples,
-		_redis_keys.lp_budget_hit,
-	):
+	# Raw byte accounting requires GET; make_key retains Frappe's site boundary.
+	state = frappe.cache.get(frappe.cache.make_key(_redis_keys.lp_sample_state(run_uuid)))  # nosemgrep: frappe-cache-breaks-multitenancy
+	if state is not None:
 		try:
-			frappe.cache.delete_value(key_fn(run_uuid))
-		except Exception:
-			# Best-effort janitor will retry. Don't break analyze on
-			# Redis hiccups.
-			pass
-	_resolved_fns_by_run.pop(run_uuid, None)
+			valid = 0 <= int(state) <= MAX_CAPTURE_BYTES
+		except (ValueError, TypeError):
+			valid = False
+		if not valid:
+			raise CaptureInputError("Phase 2 sample capture is incomplete")
+	batches, total_bytes = [], 0
+	for start in range(0, MAX_SAMPLE_BATCHES + 1, 8):
+		end = min(start + 7, MAX_SAMPLE_BATCHES)
+		raw_list = frappe.cache.lrange(_redis_keys.lp_samples(run_uuid), start, end) or []
+		if len(batches) + len(raw_list) > MAX_SAMPLE_BATCHES:
+			raise CaptureInputError("Phase 2 sample batches exceed their limit")
+		for raw in raw_list:
+			if not isinstance(raw, (str, bytes)):
+				raise CaptureInputError("Phase 2 sample batch is malformed")
+			total_bytes += len(raw.encode("utf-8") if isinstance(raw, str) else raw)
+			if total_bytes > MAX_CAPTURE_BYTES:
+				raise CaptureInputError("Phase 2 samples exceed their size limit")
+			batches.append(_decode_capture_json(raw))
+		if len(raw_list) < end - start + 1:
+			break
+	if state is not None and (total_bytes != int(state)
+		or frappe.cache.get(frappe.cache.make_key(_redis_keys.lp_sample_state(run_uuid))) != state):  # nosemgrep: frappe-cache-breaks-multitenancy
+		raise CaptureInputError("Phase 2 samples changed or are incomplete. Retry after capture ends")
+	_validate_samples(batches)
+	return batches
+
+
+@_interrupt_boundary
+def read_picks_meta(run_uuid: str) -> list[dict]:
+	"""A complete source snapshot is required, including for zero samples."""
+	_require_frappe()
+	picks = _decode_capture_json(frappe.cache.get_value(_redis_keys.lp_picks(run_uuid)))
+	sources = _decode_capture_json(frappe.cache.get_value(_redis_keys.lp_source(run_uuid)))
+	if not isinstance(picks, list) or not isinstance(sources, dict) or len(sources) > MAX_PICKS:
+		raise CaptureInputError("Phase 2 source metadata is malformed")
+	out = []
+	for pick in picks:
+		if not isinstance(pick, dict) or not isinstance(pick.get("dotted_path"), str):
+			raise CaptureInputError("Phase 2 captured function metadata is malformed")
+		out.append({**pick, "source_lines": sources.get(pick["dotted_path"])})
+	_validate_captured_picks(out)
+	return out
+
+
+@_interrupt_boundary
+def cleanup_run(run_uuid: str) -> None:
+	"""Delete exact-run input; recovery callers must observe a Redis failure."""
+	_require_frappe()
+	keys = [frappe.cache.make_key(key_fn(run_uuid)) for key_fn in (
+		_redis_keys.lp_picks, _redis_keys.lp_source, _redis_keys.lp_samples,
+		_redis_keys.lp_sample_state, _redis_keys.lp_budget_hit,
+	)]
+	try:
+		# delete_value suppresses connection errors in Frappe. Use raw DEL so
+		# the caller can report/recover a failure instead of claiming cleanup.
+		frappe.cache.delete(*keys)
+	finally:
+		_resolved_fns_by_run.pop(run_uuid, None)
+		local_cache = getattr(frappe.local, "cache", None)
+		if isinstance(local_cache, dict):
+			for key in keys:
+				local_cache.pop(key, None)

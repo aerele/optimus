@@ -152,7 +152,7 @@ def light(monkeypatch):
 		raise AssertionError("light loading must not deserialize a tree")
 
 	monkeypatch.setattr(analyze, "_deserialize_tree", forbid)
-	monkeypatch.setattr(analyze, "_rehydrate_from_bundle", forbid)
+	monkeypatch.setattr(analyze, "_rehydrate_from_bundle", forbid, raising=False)
 	doc = SimpleNamespace(
 		name="fake-doc",
 		session_uuid="fake-session",
@@ -264,19 +264,20 @@ def test_bundle_read_logs_outside_except_and_never_swallows_rq(monkeypatch, inte
 	monkeypatch.setattr(
 		analyze,
 		"frappe",
-		SimpleNamespace(get_doc=failed, log_error=lambda **kw: seen.append(sys.exc_info()[0])),
+		SimpleNamespace(get_all=failed, get_doc=failed, log_error=lambda **kw: seen.append(sys.exc_info()[0])),
 	)
 	logged = []
 	monkeypatch.setattr(ai_fix, "log_ai_failure", _logger_that_stops_the_job(logged))
-	doc = SimpleNamespace(recordings_file="fake-file", session_uuid="fake-session")
+	doc = SimpleNamespace(name="fake-doc", recordings_file="/private/files/fake.json.gz", session_uuid="fake-session")
 	if interrupt:
 		with pytest.raises(Timeout) as caught:
 			analyze._load_recordings_bundle(doc)
 		assert caught.value is not original and caught.value.__context__ is None
 	else:
 		assert analyze._load_recordings_bundle(doc) is None
-	# the row is written outside the handler, for the timeout too; frappe.log_error itself is never called
-	assert logged == [("optimus ai load recordings bundle", None)] and seen == []
+	# Rejected bundles log a fixed reason outside the handler. Interrupts escape unlogged.
+	assert logged == ([] if interrupt else [("optimus ai load recordings bundle", None)])
+	assert seen == []
 
 
 def test_selection_handles_malformed_severity():

@@ -426,20 +426,19 @@ def test_the_returned_recording_is_a_copy_the_memo_keeps_whole(light):
 	assert "mutated" not in again
 
 
-def test_a_legacy_bare_uuid_map_is_read_like_rehydrate_reads_it(light, monkeypatch):
+def test_a_legacy_bare_uuid_map_keeps_only_json_recordings(light, monkeypatch):
 	bare = light.holder["bundle"]["recordings"]
 	monkeypatch.setattr(analyze, "_load_recordings_bundle", lambda doc: bare)
 	assert [r["uuid"] for r in analyze.load_recordings_light(light.doc)] == ["fake-a", "fake-b"]
-	assert analyze._rehydrate_from_bundle(bare, "fake-b")["uuid"] == "fake-b"
+	assert all("pyi_session" not in r and "sidecar" not in r for r in analyze.load_recordings_light(light.doc))
 
 
-def test_light_and_rehydrate_share_one_shape_reader(light, monkeypatch):
+def test_light_recordings_use_the_shared_shape_reader(light, monkeypatch):
 	seen = []
 	real = analyze._bundle_entries
 	monkeypatch.setattr(analyze, "_bundle_entries", lambda bundle: seen.append(bundle) or real(bundle))
 	analyze.load_recordings_light(light.doc)
-	analyze._rehydrate_from_bundle(light.holder["bundle"], "fake-a")
-	assert len(seen) == 2
+	assert len(seen) == 1
 
 
 @pytest.mark.parametrize("bundle", [None, [], "x", {"recordings": []}, {"recordings": {"u": None}}, {"u": {"rec": []}}])

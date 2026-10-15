@@ -88,6 +88,7 @@
   "ai_privacy_section",
   "ai_privacy_description",
   "ai_excluded_finding_types",
+  "ai_send_raw_values",
   "column_break_ai_privacy",
   "ai_request_timeout_seconds"
  ],
@@ -478,7 +479,7 @@
   {
    "fieldname": "ai_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">When enabled, a <b>Suggest a fix (AI)</b> button appears on the Optimus Session form. Clicking it sends the selected finding's context finding type, callsite, a window of surrounding <b>source code</b>, the normalized SQL and EXPLAIN row to the configured LLM and stores the returned fix on the finding (it also shows up in the regenerated HTML report). <b>This sends code and queries to your chosen provider.</b> Point <code>Base URL</code> at a local model (Ollama / LM Studio / vLLM) to keep everything on-box. <a href=\"https://github.com/Aerele-RnD/optimus/blob/main/docs/AI-FIXING.md\" target=\"_blank\">Read the full data-flow documentation</a> what's sent, what isn't and step-by-step local-LLM recipes.</p>"
+   "options": "<p class=\"text-muted small\">Enable optional background AI for eligible findings and Steps to Reproduce. <b>Refresh AI suggestions</b> queues work after profiling is Ready; saved profiling results remain available if AI fails. Requests can include finding titles, metrics, file and function names, source-code windows, schema names and SQL structure. <b>Code and context are sent to your configured provider.</b> A local endpoint keeps requests within the environment you control. <a href=\"https://github.com/aerele/optimus/blob/main/docs/AI-FIXING.md\" target=\"_blank\" rel=\"noopener noreferrer\">Read the data-flow and deployment guide</a> before enabling AI.</p>"
   },
   {
    "default": "0",
@@ -498,7 +499,7 @@
   },
   {
    "depends_on": "eval:doc.ai_enabled && doc.ai_provider == 'OpenAI-compatible'",
-   "description": "The base address of your OpenAI-compatible endpoint (include /v1). For example http://localhost:11434/v1 (Ollama), http://localhost:1234/v1 (LM Studio) or https://openrouter.ai/api/v1. Hosted providers (Anthropic, OpenAI, Kimi, DeepSeek) use their own built-in address, so this box is hidden for them.",
+   "description": "The HTTP(S) base address of your OpenAI-compatible endpoint, including /v1 where required. Loopback and LAN models are allowed. URL credentials, query strings, fragments and literal link-local/metadata addresses are refused. Keys are withheld over non-loopback HTTP by default. Hosted providers use their built-in address.",
    "fieldname": "ai_base_url",
    "fieldtype": "Data",
    "label": "Base URL"
@@ -523,14 +524,14 @@
   },
   {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "The provider's API key, if it needs one. Stored encrypted for this site. Most local endpoints (Ollama, LM Studio, vLLM) do not need a key; hosted ones (OpenAI, Anthropic, Kimi, DeepSeek, OpenRouter, Together, Groq) do.",
+   "description": "Stored encrypted for this site. Local providers may work without a key. Changing the effective provider or endpoint clears an unchanged stored key; enter a new key explicitly for the new destination. A masked value is never sent as the key.",
    "fieldname": "ai_api_key",
    "fieldtype": "Password",
    "label": "API Key"
   },
   {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "Choose which parts of the report are allowed to use the AI. Turning one off disables it completely: that part is never generated automatically, its buttons on the session form are hidden, the API turns down requests for it and re-rendered reports leave it out.",
+   "description": "Choose which sections background AI may generate. Disabling a section prevents new requests for it. Previously saved output is not deleted; regenerate reports to apply current display settings.",
    "fieldname": "ai_sections_break",
    "fieldtype": "Section Break",
    "label": "Use the LLM for"
@@ -538,7 +539,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When off, findings get no AI-suggested fix: nothing is generated during analyze, the \"Suggest a fix (AI)\", \"Generate AI fixes\" and \"Re-evaluate AI fixes\" buttons are hidden, the API turns down requests and re-rendered reports leave out the AI-fix block.",
+   "description": "Allow background fix suggestions on eligible findings. When off, automatic and manual refresh skip fixes and newly rendered reports omit their AI-fix blocks. Deterministic index advice remains available.",
    "fieldname": "ai_suggest_findings",
    "fieldtype": "Check",
    "label": "Fix suggestions on findings"
@@ -560,7 +561,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When ticked, the AI rewrites each session's auto-generated \"Steps to Reproduce\" note into a friendly, readable flow (if the AI call fails, the note falls back to the plain list of captured actions; the per-action breakdown lists them either way). When off, the note stays as the plain action list, the \"Humanize Steps (AI)\" button is hidden and the API turns down requests. An older session that was already humanized keeps its note until it is re-analyzed.",
+   "description": "Allow manual Refresh AI suggestions to rewrite Steps to Reproduce. Provider failure preserves the saved note; captured actions remain available. When off, no new Steps request is sent. Existing notes remain until replaced or the session is analyzed again.",
    "fieldname": "ai_humanize_steps",
    "fieldtype": "Check",
    "label": "Humanized \"Steps to Reproduce\""
@@ -574,7 +575,7 @@
   {
    "default": "1",
    "depends_on": "eval:doc.ai_enabled",
-   "description": "When ticked, analyze automatically asks the AI for a fix on every eligible finding, so the suggestions are already in the report with no need to click \"Suggest a fix (AI)\" for each one. On by default (takes effect only once AI Fix Suggestions is enabled). It spends AI tokens (and a little extra analyze time) on every session that is analyzed, so untick it if you would rather request a suggestion per finding.",
+   "description": "After profiling results are saved as Ready, queue optional AI fixes for eligible findings. This uses provider tokens and requires a background worker. If a Phase 2 pass is armed, finish it before manually refreshing AI. Turn off to request AI only through Refresh AI suggestions.",
    "fieldname": "ai_auto_suggest",
    "fieldtype": "Check",
    "label": "Suggest AI fixes in the report by default"
@@ -587,7 +588,7 @@
   {
    "default": "5",
    "depends_on": "eval:doc.ai_enabled && doc.ai_auto_suggest",
-   "description": "Analyze adds an automatic suggestion to at most this many findings per session, taking the highest-severity, highest-impact ones first. Use 0 for every eligible finding, which can be slow and costly on big sessions. Reference values: Strict: 0  ·  Recommended: 5  ·  Relaxed: 3.",
+   "description": "The automatic background run selects at most this many findings, ordered by severity and impact. Use 0 for all eligible findings within the run deadline, which can cost more on large sessions. Reference values: Strict: 0; Recommended: 5; Relaxed: 3.",
    "fieldname": "ai_auto_suggest_max",
    "read_only_depends_on": "eval:doc.config_profile != \"Custom\"",
    "fieldtype": "Int",
@@ -611,7 +612,7 @@
    "depends_on": "eval:doc.ai_enabled",
    "fieldname": "ai_privacy_description",
    "fieldtype": "HTML",
-   "options": "<p class=\"text-muted small\">Per-type opt-out and the local-LLM timeout. The exclusion list is the only way (short of disabling AI entirely) to keep a specific finding category from ever being built into a payload useful when a particular type embeds business logic you don't want shared with a hosted provider. The timeout knob exists for local LLMs: hosted providers usually answer in seconds, but a cold-start ollama / vLLM run can take well over a minute on first call.</p>"
+   "options": "<p class=\"text-muted small\"><b>Send raw values</b> is off by default: SQL literals and comments are removed, and document names and the session title are omitted from Steps requests. This does not anonymize source code, finding titles or schema names; they can contain business information. Review what your provider retains, exclude sensitive finding types, or leave AI disabled. Index advice is deterministic and does not contact a provider. Settings changes are recorded in the site history.</p>"
   },
   {
    "depends_on": "eval:doc.ai_enabled",
@@ -619,6 +620,14 @@
    "fieldname": "ai_excluded_finding_types",
    "fieldtype": "Small Text",
    "label": "Excluded finding types"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.ai_enabled",
+   "description": "Off by default: captured SQL literals, document names and the session title are omitted from AI requests. Turn on only if sending these business values to the configured provider is acceptable. Sensitive-column redaction still applies. Source code and schema names can still be sent; use type exclusions or disable AI when these are private.",
+   "fieldname": "ai_send_raw_values",
+   "fieldtype": "Check",
+   "label": "Send raw values to the AI provider"
   },
   {
    "depends_on": "eval:doc.ai_enabled",
@@ -638,7 +647,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-05-27 00:00:00.000000",
+ "modified": "2026-10-03 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Optimus",
  "name": "Optimus Settings",
@@ -653,5 +662,6 @@
  ],
  "sort_field": "creation",
  "sort_order": "DESC",
- "states": []
+ "states": [],
+ "track_changes": 1
 }

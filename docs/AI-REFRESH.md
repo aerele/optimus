@@ -11,10 +11,11 @@ Manual refresh selects missing and outdated suggestions by default. The
 confirmation shows the selected count; replacing current suggestions requires
 an explicit checkbox. Refresh and an active Phase 2 pass exclude one another.
 Auto-armed Phase 2 therefore takes precedence over automatic AI, with an
-admission notice on the session. Refresh AI after Phase 2 finishes.
+admission notice on the session. Normal Phase 2 completion attempts automatic missing-only AI admission after saving results and report work; manual Refresh AI remains available.
 
 This is part of a staged integration. Recording/provider/source/privacy
-hardening and final acceptance remain required before release.
+hardening is included in this stack; final deployment and model acceptance
+remain required before release.
 
 ## Durable state and duplicate delivery
 
@@ -712,3 +713,38 @@ The scheduler recovers delivery intents; Regenerate Reports repairs pending atta
 Journal retention is described under "Data retention". Final
 model evaluations and both-database end-user/deployment acceptance remain
 release requirements, not results established by these unit tests.
+
+## Capture admission, bounded inputs and retention
+
+Picks and source snapshots are resolved before SQL locks. Admission atomically
+reserves the caller's capture flag with complete input. The hidden recording user
+is immutable; stops and recovery target that actor and compare the current Redis
+generation. This prevents an old request from stopping a newer capture. Legacy
+rows without an actor use the parent recording user. Force Stop is rate-limited
+and processes at most 100 owned Recording rows per call; repeat after examining
+remaining state. It retains input because a retry may claim a fenced row.
+
+Capture accepts at most 100 picks, 16 MiB of serialized source/input, 100,000
+source lines, 10,000 sample batches and 250,000 sample records. Source files are
+independently limited to 4 MiB. Sample appends use a bounded optimistic transaction
+and a byte counter; overflow, repeated contention or an evicted list becomes an
+explicit incomplete-input failure. New input keys expire after 24 hours and the
+active flag after 10 minutes. Failed analysis can retry only while valid input
+remains. Legacy keys may lack TTLs. Replace all workers on deployment: mixed old
+and new sample writers cannot provide complete accounting and need a new pass.
+
+A deleted Session loses its private AI journal in the same SQL transaction;
+failed deletion restores that history. Late workers cannot save into the deleted
+parent. Exact capture cleanup follows commit and logs counts if Redis fails.
+Uncertain attempts are never pruned from a surviving Session. Restoring a deleted
+profiling record does not resume deleted refresh jobs. Document saves reject
+changes to worker-maintained token/count fields, including stale form overwrites.
+
+The [security policy](../SECURITY.md) covers JSON-only persisted snapshots,
+source/Server Script permissions, provider URL limits, default-off raw-value
+consent and the accepted direct-download limitation. Migration adds the recording
+actor and consent field, enables Settings history and prints endpoint-policy
+guidance without decrypting credentials. Back up before deployment, migrate, then
+replace web, worker and scheduler processes together through normal operations.
+The migration does not repair historical snapshots, Versions or missing capture
+input. Re-record where validation rejects old or corrupt input.

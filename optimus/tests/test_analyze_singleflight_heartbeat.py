@@ -154,7 +154,7 @@ def _drive_run(monkeypatch, *, cache, scheduler_disabled, deadline=None, configu
 	monkeypatch.setattr(analyze, "_enrich_recordings", lambda *a, **k: [])
 	monkeypatch.setattr(analyze, "_get_analyzers", lambda: [])
 	monkeypatch.setattr("optimus.api._read_frontend_data", lambda *a, **k: {"xhr": [], "vitals": []})
-	monkeypatch.setattr(analyze, "_enrich_findings_with_source_snippets", lambda fs: fs.extend(_finding(i) for i in range(n)))
+	monkeypatch.setattr(analyze, "_enrich_findings_with_source_snippets", lambda fs, **kw: fs.extend(_finding(i) for i in range(n)))
 	monkeypatch.setattr(analyze, "ai_payload_for_finding", payload)
 	monkeypatch.setattr(analyze, "phase2_index_for", lambda *a, **k: {})
 	monkeypatch.setattr(analyze, "actions_for_humanizer", lambda recordings: [{"label": "open"}])

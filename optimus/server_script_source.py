@@ -55,31 +55,38 @@ def get_server_script_record(scrubbed_name: str, *, cache: dict | None = None) -
 	replaces non-alphanumerics with ``_``), so the original-cased name the Desk URL
 	needs round-trips. ``cache``, when given, memoizes the result per render.
 	"""
-	if not scrubbed_name:
+	from optimus.ai_fix import _InterruptGuard
+	from optimus.renderer.source import _may_read_server_script
+
+	if not isinstance(scrubbed_name, str) or not scrubbed_name or len(scrubbed_name) > 140:
 		return None
-	if cache is not None and scrubbed_name in cache:
-		return cache[scrubbed_name]
-
-	record: dict | None = None
+	if not _may_read_server_script():
+		return None
+	cache_key = ("server_script", scrubbed_name)
+	if cache is not None and cache_key in cache:
+		record = cache[cache_key]
+		return record if record and _may_read_server_script(record["name"]) else None
+	guard = _InterruptGuard(base=True)
+	record = None
 	try:
-		import frappe
+		with guard:
+			import frappe
 
-		# Match the requested (already-scrubbed) name against every Server
-		# Script by scrubbing each candidate the way Frappe canonically does
-		# (frappe.scrub). Done in Python rather than SQL REPLACE chains so it's
-		# portable across MariaDB/Postgres (no backticks) and exactly correct
-		# the Server Script table is tiny, so the full scan is cheap.
-		target = (scrubbed_name or "").lower()
-		for cand in frappe.get_all("Server Script", fields=["name", "script"]):
-			cname = cand.get("name") or ""
-			if frappe.scrub(cname) == scrubbed_name or cname.lower() == target:
-				record = {"name": cname, "script": cand.get("script") or ""}
-				break
+			# Resolve the lossy scrubbed name using names only. Never fetch every
+			# script body, and require document permission for the matched row.
+			matches = [row["name"] for row in frappe.get_all("Server Script", fields=["name"])
+				if frappe.scrub(row["name"]) == scrubbed_name or row["name"].lower() == scrubbed_name.lower()]
+			if len(matches) == 1 and _may_read_server_script(matches[0]):
+				body = frappe.db.get_value("Server Script", matches[0], "script")
+				if isinstance(body, str) and len(body) <= 4 * 1024 * 1024:
+					record = {"name": matches[0], "script": body}
 	except Exception:
 		record = None
-
+	if guard.pending():
+		record = body = None
+		raise guard.interrupt()
 	if cache is not None:
-		cache[scrubbed_name] = record
+		cache[cache_key] = record
 	return record
 
 

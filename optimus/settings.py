@@ -12,6 +12,7 @@ pre-migration).
 
 from dataclasses import dataclass, field
 
+from optimus.ai_privacy import opted_in
 from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS
 
 # NOTE: frappe is imported lazily inside each function rather than at
@@ -149,6 +150,7 @@ _DEFAULTS = {
 	# behavior-preserving. See docs/AI-FIXING.md for the per-pathway data
 	# inventory and local-LLM recipes.
 	"ai_excluded_finding_types": (),
+	"ai_send_raw_values": False,
 	"ai_request_timeout_seconds": 60,
 }
 
@@ -381,6 +383,7 @@ class OptimusConfig:
 	# tuple (immutable, hashable, safe to cache) of finding-type names.
 	# Timeout default matches the pre-v0.9.0 hardcoded constant.
 	ai_excluded_finding_types: tuple[str, ...] = field(default_factory=tuple)
+	ai_send_raw_values: bool = False
 	ai_request_timeout_seconds: int = 60
 
 
@@ -547,6 +550,7 @@ def _read_doctype_row() -> dict | None:
 		# entry, # comments, blanks stripped). Timeout: 0/None falls through
 		# to _DEFAULTS via _int_with_default.
 		"ai_excluded_finding_types": _parse_skip_list(doc.get("ai_excluded_finding_types")),
+		"ai_send_raw_values": opted_in(doc.get("ai_send_raw_values")),
 		"ai_request_timeout_seconds": int(doc.get("ai_request_timeout_seconds") or 0) or None,
 	}
 
@@ -763,6 +767,7 @@ def _resolve() -> OptimusConfig:
 		# breaks the LLM round-trip; above 600s holds the analyze worker
 		# longer than the time budget is willing to tolerate anyway.
 		ai_excluded_finding_types=tuple(row.get("ai_excluded_finding_types") or ()),
+		ai_send_raw_values=opted_in(row.get("ai_send_raw_values", _DEFAULTS["ai_send_raw_values"])),
 		ai_request_timeout_seconds=max(10, min(600, _int_with_default("ai_request_timeout_seconds"))),
 	)
 
