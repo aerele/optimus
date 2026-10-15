@@ -367,6 +367,7 @@ class OptimusConfig:
 	ai_humanize_steps: bool = True
 	# v0.6.x: per-section "use the LLM for X" toggles. Default on; turning one off is a hard disable.
 	ai_suggest_findings: bool = True
+	# Retired: index advice is deterministic. Retained for existing settings rows.
 	ai_suggest_indexes: bool = True
 	# v0.7.x: Sensitivity Profile name. "Custom" → the threshold fields above
 	# carry the authoritative values; a named preset (Strict/Recommended/
@@ -839,6 +840,16 @@ def get_tracked_apps() -> tuple[str, ...]:
 		return get_config().tracked_apps
 	except Exception:
 		return ()
+
+
+def read_tracked_apps() -> tuple[str, ...]:
+	"""The Tracked Apps as a tuple, ``()`` when settings cannot be read. Unlike
+	``get_tracked_apps`` it goes through ``safe_call.best_effort``, so a job timeout still
+	propagates. The one reader behind the index-advice export, the AI fix scope and the
+	AI Slow Query advice."""
+	from optimus import safe_call
+
+	return safe_call.best_effort(lambda: tuple(getattr(get_config(), "tracked_apps", ()) or ()), ())
 
 
 def get_ignored_apps() -> tuple[str, ...]:

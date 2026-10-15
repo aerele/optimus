@@ -16,9 +16,10 @@ source lines through here. Three responsibilities:
   * Per-render file cache (:class:`_BoundedFileCache`): a 50-entry
     move-to-end LRU dict passed as ``file_cache=`` to cap memory on big codebases.
 
-Both readers (:func:`_read_source_snippet`, :func:`_read_source_window`) share
-the per-line truncation constant (:data:`_SNIPPET_TRUNCATE_CHARS`, 200 chars)
-and go through :func:`_resolve_source_path`. ``frappe`` is lazy-imported so the
+The snippet reader (:func:`_read_source_snippet`) and the AI-fix window (built by
+``optimus.ai_grounding.grounding_window`` over :func:`_source_lines`) share the
+per-line truncation constant (:data:`_SNIPPET_TRUNCATE_CHARS`, 200 chars) and go
+through :func:`_resolve_source_path`. ``frappe`` is lazy-imported so the
 pure-pytest tests don't need a bench.
 """
 
@@ -174,6 +175,17 @@ def _resolve_source_path(filename):
 	return resolved
 
 
+def split_source_lines(text: str) -> list[str]:
+	"""``text`` as Python numbers its lines: ``\\n``, ``\\r\\n`` and ``\\r`` end a line, nothing
+	else does (``str.splitlines`` also splits on \\f, \\v, \\x1c-\\x1e, \\x85 and U+2028/9,
+	which shifts every later line number away from the AST's). One trailing empty entry
+	is dropped, so ``"a\\n"`` is ``["a"]``."""
+	lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+	if lines and lines[-1] == "":
+		lines.pop()
+	return lines
+
+
 def _source_lines(filename: str, *, cache: dict | None = None) -> list[str] | None:
 	"""``filename``'s source lines, or ``None`` if unreadable. The single
 	source-read primitive: resolves the (app-relative) path via
@@ -190,7 +202,7 @@ def _source_lines(filename: str, *, cache: dict | None = None) -> list[str] | No
 	else:
 		try:
 			with open(resolved, encoding="utf-8") as fh:
-				lines = fh.read().splitlines()
+				lines = split_source_lines(fh.read())
 		except Exception:
 			lines = None
 	if cache is not None:
@@ -235,42 +247,3 @@ def _read_source_snippet(
 				content = content[:limit] + "..."
 			snippet.append({"lineno": n, "content": content})
 	return snippet or None
-
-
-def _read_source_window(
-	filename: str,
-	lineno,
-	*,
-	before: int = 12,
-	after: int = 12,
-	cache: dict | None = None,
-	max_line_chars: int | None = None,
-) -> list[dict] | None:
-	"""Return a wider source window around ``(filename, lineno)`` for the AI-fix
-	prompt: a list of ``{lineno, content, is_target}`` covering
-	``lineno - before`` … ``lineno + after`` (clamped). Per-line truncation
-	matches ``_read_source_snippet`` unless ``max_line_chars`` overrides it.
-	Returns ``None`` when unreadable / lineno out of range. ``filename`` is
-	resolved via ``_resolve_source_path`` (Server Script sentinels read from the DocType).
-	"""
-	try:
-		ln = int(lineno)
-	except (TypeError, ValueError):
-		return None
-	if ln <= 0 or not filename:
-		return None
-
-	lines = _source_lines(filename, cache=cache)
-	if not lines:
-		return None
-
-	limit = max_line_chars or _SNIPPET_TRUNCATE_CHARS
-	start = max(1, ln - max(0, before))
-	end = min(len(lines), ln + max(0, after))
-	window: list[dict] = []
-	for n in range(start, end + 1):
-		content = lines[n - 1]
-		if len(content) > limit:
-			content = content[:limit] + "..."
-		window.append({"lineno": n, "content": content, "is_target": n == ln})
-	return window or None

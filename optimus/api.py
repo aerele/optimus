@@ -25,7 +25,6 @@ from optimus.permissions import may_act_on_session
 ALLOWED_ROLES = {"System Manager", "Optimus User", "Administrator"}
 
 
-
 # Per-user rate limits (optimus.ratelimit), keyed by endpoint name and counted by the endpoint
 # right after its gate passes (the gates themselves never count). A site can override any entry
 # in site_config, for example "optimus_rate_limits": {"refill_ai_suggestions": [12, 3600]}.
@@ -1041,11 +1040,72 @@ def download_pdf(session_uuid: str) -> dict:
 	return {"file_url": url}
 
 
+def _export_index_advice(findings: list[dict], tables) -> None:
+	"""An export carries the deterministic index advice the report
+	shows, never the analyzer's stored raw DDL (``suggested_ddl``) or the retired index AI
+	output (a table's ``ai_index``; finding ``llm_fix_json`` is never exported). Mutates in
+	place. Each index-family finding gains ``index_advice`` from
+	``recipe_enrichment.export_advice``, the advice step the report runs too:
+	``route``, ``doctype``, ``table``, ``columns``, ``index_name``, ``text`` and ``code``,
+	the report's fix-hint prose and code, ``unknown`` (no verdict: Optimus could not
+	tell, or the advisor failed) and ``sort_stays`` ("stays" or "may stay" when a Filesort or
+	Temporary Table code leaves the sort or the temporary table in place, or may, else ""),
+	or None when the advisor has nothing to say. With
+	advice, its ``technical_detail.fix_hint`` is that same text, and its ``title`` and
+	``customer_description`` are the report's (``finding_display``: no "Add index" title
+	next to a no-code advice). When the advisor raises, the finding carries the report's
+	failure note (``RECIPE_FAILED_HINT``, route no_code, no code) and the failures are
+	logged once, as a render logs them. Each table's ``recommended_index`` goes through the
+	same advisor. One per-export evidence lookup (memoised per table) and one per-export
+	query parser (memoised per query) serve both, as in the report."""
+	from optimus.analyzers.base import INDEX_FINDING_TYPES
+	from optimus.renderer import recipe_enrichment
+	from optimus.safe_call import best_effort
+	from optimus.settings import read_tracked_apps
+
+	tracked = read_tracked_apps()
+	lookup = recipe_enrichment.make_evidence_lookup()
+	parser = recipe_enrichment.make_query_parser()
+	failed = 0
+	errors: list = []
+	for f in findings:
+		detail = f.get("technical_detail")
+		if f.get("finding_type") in INDEX_FINDING_TYPES:
+			advice, advice_failed = recipe_enrichment.export_advice(
+				f, evidence_lookup=lookup, tracked_apps=tracked, parser=parser, errors=errors,
+			)
+			failed += advice_failed
+			f["index_advice"] = advice
+			if advice is not None and isinstance(detail, dict):
+				# The report's prose in the report's slot: the analyzer's stored hint ("Add an
+				# index on ...") must never sit next to a no_code advice.
+				detail["fix_hint"] = advice["text"]
+			f.update(recipe_enrichment.finding_display(f, advice))
+		if isinstance(detail, dict):
+			detail.pop("suggested_ddl", None)
+	tables = [t for t in (tables if isinstance(tables, list) else []) if isinstance(t, dict)]
+	for t in tables:
+		t.pop("ai_index", None)
+	table_stats = best_effort(
+		lambda: recipe_enrichment.apply_table_recipes(
+			tables, evidence_lookup=lookup, tracked_apps=tracked, errors=errors,
+		),
+		None,
+	)
+	failed += (table_stats or {}).get("failed", 0)
+	recipe_enrichment.log_recipe_failures(failed, where="export", errors=errors)
+	lookup.log_unlisted_failures()
+
+
 @frappe.whitelist()
 def export_session(session_uuid: str) -> dict:
 	"""Export an Optimus Session as a structured JSON blob for programmatic
 	consumption (no HTML parsing): the full session with all child rows, top
 	queries, table breakdown and finding technical details.
+
+	Index advice is the report's deterministic advice (``index_advice`` on each
+	index-family finding, the table's ``recommended_index``); the analyzer's raw DDL and
+	the retired index AI output are not exported.
 
 	Permission: recording user or System Manager only (mirrors the report
 	download gate); other users get a permission error.
@@ -1082,6 +1142,23 @@ def export_session(session_uuid: str) -> dict:
 			return json.loads(value)
 		except Exception:
 			return []
+
+	findings = [
+		{
+			"idx": f.idx,
+			"finding_type": f.finding_type,
+			"severity": f.severity,
+			"title": f.title,
+			"customer_description": f.customer_description,
+			"technical_detail": _parse_json_field(f.technical_detail_json),
+			"estimated_impact_ms": f.estimated_impact_ms,
+			"affected_count": f.affected_count,
+			"action_ref": f.action_ref,
+		}
+		for f in (doc.findings or [])
+	]
+	table_breakdown = _parse_json_field(doc.table_breakdown_json)
+	_export_index_advice(findings, table_breakdown)
 
 	return {
 		"schema_version": 1,
@@ -1125,22 +1202,9 @@ def export_session(session_uuid: str) -> dict:
 			}
 			for a in (doc.actions or [])
 		],
-		"findings": [
-			{
-				"idx": f.idx,
-				"finding_type": f.finding_type,
-				"severity": f.severity,
-				"title": f.title,
-				"customer_description": f.customer_description,
-				"technical_detail": _parse_json_field(f.technical_detail_json),
-				"estimated_impact_ms": f.estimated_impact_ms,
-				"affected_count": f.affected_count,
-				"action_ref": f.action_ref,
-			}
-			for f in (doc.findings or [])
-		],
+		"findings": findings,
 		"top_queries": _parse_json_field(doc.top_queries_json),
-		"table_breakdown": _parse_json_field(doc.table_breakdown_json),
+		"table_breakdown": table_breakdown,
 		# v0.3.0 top-level aggregates
 		"hot_frames": _parse_json_field(getattr(doc, "hot_frames_json", None)),
 		"session_time_breakdown": _parse_json_field(
@@ -1350,22 +1414,17 @@ def ai_capabilities() -> dict:
 	"""The per-section LLM toggles, for the Optimus Session form to decide
 	which AI buttons to show. Any logged-in profiler user no Profiler
 	Settings read permission needed (the server still enforces the toggles).
-	Returns ``{enabled, findings, indexes, humanize}`` (all bools)."""
+	Returns ``{enabled, findings, indexes, humanize}`` (all bools);
+	``indexes`` is always False since index advice stopped using the AI."""
 	_require_profiler_user()
 	from optimus.settings import get_config
 	cfg = get_config()
 	return {
 		"enabled": bool(getattr(cfg, "ai_enabled", False)),
 		"findings": bool(getattr(cfg, "ai_suggest_findings", True)),
-		"indexes": bool(getattr(cfg, "ai_suggest_indexes", True)),
+		"indexes": False,
 		"humanize": bool(getattr(cfg, "ai_humanize_steps", True)),
 	}
-
-
-
-
-
-
 
 
 def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
@@ -1412,7 +1471,7 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 		"Optimus Session", doc.name, {
 			"notes": _analyze_mod._assemble_humanized_notes(steps_md),
 			# Tokens for this Steps-to-Reproduce humanization. The report's
-			# session total rolls it in alongside fix + index suggestions
+			# session total rolls it in alongside finding fix suggestions
 			# (notes is markdown, so the count needs its own field).
 			"ai_steps_tokens": int(_steps_usage.get("total_tokens") or 0),
 		},
@@ -1421,65 +1480,23 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 	return {"updated": True, "reason": None}
 
 
-
-
-
-def _refill_indexes_for_doc(doc) -> dict:
-	"""Walk the session's table breakdown and run the per-table index AI
-	helper for every table that has a heuristic ``recommended_index`` but
-	no ``ai_index`` yet. Returns ``{"added": N, "failed": N, "skipped": N}``.
-	Caller is responsible for permission / status / AI-available gates and
-	for the final re-render.
-	"""
-	import json as _json
-
-	from optimus import analyze as _analyze_mod
-
-	try:
-		breakdown = _json.loads(doc.table_breakdown_json or "[]")
-	except Exception:
-		breakdown = []
-
-	eligible = [
-		t for t in (breakdown or [])
-		if isinstance(t, dict)
-		and (t.get("recommended_index") or {}).get("columns")
-		and not t.get("ai_index")
-	]
-	added = failed = skipped = 0
-	for t in eligible:
-		table_name = t.get("table")
-		if not table_name:
-			skipped += 1
-			continue
-		# One title for every table (the table goes in the message), so the
-		# Error Log groups these rows instead of creating one title per table.
-		out, step_failed = _analyze_mod._run_ai_step(
-			lambda table_name=table_name: _analyze_mod._run_table_index_ai_backfill(doc, table_name=table_name),
-			title="optimus refill_indexes", session_uuid=getattr(doc, "session_uuid", None), table=table_name,
-		)
-		if step_failed:
-			failed += 1
-			continue
-		if out.get("ok"):
-			added += 1
-		else:
-			# Helper returned a reason (e.g. provider missing for one call)
-			# treat as skipped, not failed, since the doc state is unchanged.
-			skipped += 1
-	return {"added": added, "failed": failed, "skipped": skipped}
-
-
 @frappe.whitelist(methods=["POST"])
 def refill_ai_suggestions(session_uuid: str) -> dict:
 	"""Single-button entry point: re-fills every AI-generated report section in one round-trip:
-	(1) overwrite every eligible finding's fix suggestion, (2) rewrite Steps to Reproduce, (3) run
-	the per-table index helper for tables with a candidate but no AI advice, (4) one final
-	re-render.
+	(1) overwrite every eligible finding's fix suggestion, (2) rewrite Steps to Reproduce,
+	(3) one final re-render.
 
 	Each step is gated by its per-section toggle; a toggle-off step is skipped, not errored.
 	``_ai_session_gate`` runs once at the top (permission, Ready status, AI configured, per-user
 	limit).
+
+	The response is ``{ok, session_uuid, fixes, steps, regenerated}``. ``fixes`` counts
+	``added``, ``failed``, ``skipped_time``, ``gated`` (AI-eligible findings and
+	Framework N+1 that the report answers with Optimus's own advice or a note; index
+	findings are not counted), ``excluded`` (AI-eligible types listed under Excluded finding
+	types in Optimus Settings) and ``skipped_ineligible``; ``skipped`` is ``"toggle_off"`` when
+	findings are off. There is no ``indexes`` key: index advice is deterministic and never
+	refreshed by AI.
 	"""
 	ref = _ai_session_gate(session_uuid, section=None, action="refill_ai_suggestions")
 
@@ -1499,15 +1516,10 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 		update_modified=False,
 	)
 
-	fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None}
+	fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None, "gated": 0, "excluded": 0, "skipped_ineligible": 0}
 	if cfg.ai_suggest_findings:
 		counts = _analyze_mod._run_ai_backfill(doc, cap=0, regenerate_all=True)
-		fixes = {
-			"added": counts.get("added", 0),
-			"failed": counts.get("failed", 0),
-			"skipped_time": counts.get("skipped_time", 0),
-			"skipped": None,
-		}
+		fixes.update({key: counts.get(key, 0) for key in ("added", "failed", "skipped_time", "gated", "excluded", "skipped_ineligible")})
 	else:
 		fixes["skipped"] = "toggle_off"
 
@@ -1519,20 +1531,11 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 	else:
 		steps["reason"] = "toggle_off"
 
-	indexes = {"added": 0, "failed": 0, "skipped": 0, "skipped_reason": None}
-	if cfg.ai_suggest_indexes:
-		doc = frappe.get_doc("Optimus Session", ref.docname)
-		indexes = _refill_indexes_for_doc(doc)
-		indexes["skipped_reason"] = None
-	else:
-		indexes["skipped_reason"] = "toggle_off"
-
 	return {
 		"ok": True,
 		"session_uuid": ref.session_uuid,
 		"fixes": fixes,
 		"steps": steps,
-		"indexes": indexes,
 		"regenerated": _rerender_after_ai(ref),
 	}
 

@@ -373,7 +373,6 @@ class TestTheKeyIsReadOncePerCall:
 		with patch("optimus.settings.get_config", return_value=_cfg()):
 			for call in (
 				lambda: ai_fix.humanize_steps([{"label": "open", "cmd": "x", "duration_ms": 5}]),
-				lambda: ai_fix.suggest_index({"table": "tabItem", "candidates": {}}),
 				ai_fix.test_connection,
 			):
 				reads["n"] = 0
@@ -434,10 +433,9 @@ class TestAKeylessProviderIgnoresAnUnsendableKey:
 			out = ai_fix.suggest_fix(dict(_FINDING))
 			probe = ai_fix.test_connection()
 			steps = ai_fix.humanize_steps([{"label": "open", "cmd": "x", "duration_ms": 5}])
-			index = ai_fix.suggest_index({"table": "tabItem", "candidates": {}})
-		assert out["suggestion"].startswith("**Fix**") and steps and index["suggestion"]
+		assert out["suggestion"].startswith("**Fix**") and steps
 		assert probe["ok"] is True
-		assert len(fake.calls) == 4
+		assert len(fake.calls) == 3
 		for call in fake.calls:
 			assert call.auth is None
 			assert "authorization" not in {k.lower() for k in call.wire_headers}

@@ -42,14 +42,14 @@ ALLOWED_ENDPOINT_CALLS = frozenset({("retry_phase2_analyzes_batch", "retry_phase
 SESSION_PARAMS = frozenset({"session_uuid", "run_uuid"})
 SINK_NAMES = frozenset({
 	"safe_commit", "_save_parent_bypassing_perms", "_render_session_report", "_rerender_after_ai",
-	"_enqueue_analyze", "_stop_session", "_humanize_steps_core", "_refill_indexes_for_doc",
+	"_enqueue_analyze", "_stop_session", "_humanize_steps_core",
 })
 SINK_ATTRS = frozenset({
 	("frappe.db", "set_value"), ("frappe.db", "sql"), ("frappe.db", "delete"), ("frappe", "enqueue"),
 	("frappe.cache", "set_value"), ("frappe.cache", "rpush"),
 	("_lp_capture", "start_line_profile_pass"), ("_lp_capture", "stop_line_profile_pass"),
 	("_lp_capture", "cleanup_run"), ("_lp_analyzer", "run_analyze"),
-	("_analyze_mod", "_run_ai_backfill"), ("_analyze_mod", "_run_table_index_ai_backfill"),
+	("_analyze_mod", "_run_ai_backfill"),
 	("_analyze_mod", "_backfill_ai_suggestions"), ("_analyze_mod", "_render_and_attach_reports"),
 	("ai_fix", "suggest_fix"), ("ai_fix", "humanize_steps"), ("ai_fix", "test_connection"),
 })

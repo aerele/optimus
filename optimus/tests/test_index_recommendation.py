@@ -6,26 +6,14 @@
   * `table_breakdown` co-occurrence -> `recommended_index` (a composite, ordered
     by usage frequency, capped, with the doctype derived) + `is_write_hot`;
   * the report's "Index candidate" panel rendering (recommendation + the
-    `frappe.db.add_index` patch + caveats + the AI block);
-  * `ai_fix._build_index_messages` / `ai_fix.suggest_index` (mocked HTTP);
-  * `analyze` helpers (`_table_existing_indexes`, `_table_index_sample_queries`,
-    `_ai_payload_for_table`, the auto-enrich gating);
-  * `analyzers.base.is_write_hot_table`.
+    `frappe.db.add_index` patch + caveats);
 """
 
+import html as _html
 import json
-import os
-import re
 import types
-from unittest.mock import patch
 
 import pytest
-
-# Imported at module top (collection time) so a later test that swaps
-# sys.modules['frappe'] / drops optimus.* can't trigger a *re-import*
-# of analyze.py whose `from frappe.recorder import RECORDER_REQUEST_HASH`
-# blows up under that pollution. The module object stays usable via this name.
-from optimus import analyze as _analyze  # noqa: E402
 
 # --------------------------------------------------------------------------
 # table_breakdown co-occurrence → recommended_index
@@ -160,18 +148,41 @@ def _table_entry(**kw):
 	return base
 
 
+@pytest.fixture
+def evidence(monkeypatch):
+	from optimus.renderer import recipe_enrichment
+	from optimus.renderer.recipe_enrichment import FieldEvidence, TableEvidence
+
+	def table(doctype, columns):
+		fields = {c: FieldEvidence("Link", 0, False, False, False) for c in columns}
+		return TableEvidence(
+			table=f"tab{doctype}", doctype=doctype, app="erpnext", is_custom_doctype=False, dialect="mariadb",
+			fields=fields, column_types={"name": "varchar", **{c: "varchar" for c in columns}},
+			text_columns=frozenset(), unindexable_columns=frozenset(), indexes=(),
+		)
+
+	tables = {
+		"tabSales Invoice": table("Sales Invoice", ["customer", "posting_date", "status"]),
+		"tabGL Entry": table("GL Entry", ["against_voucher_type", "against_voucher_no"]),
+	}
+	monkeypatch.setattr(recipe_enrichment, "_read_table_evidence", lambda t: tables.get(t))
+
+
 class TestRenderedIndexCandidatePanel:
-	def test_renders_recommendation_and_patch(self):
+	def test_renders_recommendation_and_patch(self, evidence):
 		from optimus import renderer
+		from optimus.renderer import index_recipes
 
 		html = renderer.render_raw(_doc([_table_entry()]), recordings=[])
+		name = index_recipes.optimus_index_name("Sales Invoice", ("customer", "posting_date"))
+		entry = {"doctype": "Sales Invoice", "columns": ["customer", "posting_date"], "index_name": name}
 		assert "Index candidate" in html
-		assert 'frappe.db.add_index("Sales Invoice", ["customer", "posting_date"])' in html
+		assert json.dumps(entry) in _html.unescape(html)
 		assert "SHOW INDEX FROM" in html
-		assert "only makes single-column indexes" in html
+		assert "ensure_indexes() function creates the index" in html
 		assert "Other columns this session filtered on" in html and "status" in html
 
-	def test_write_hot_warning(self):
+	def test_write_hot_warning(self, evidence):
 		from optimus import renderer
 
 		html = renderer.render_raw(_doc([_table_entry(
@@ -180,41 +191,7 @@ class TestRenderedIndexCandidatePanel:
 		)]), recordings=[])
 		assert "write-hot core table" in html
 
-	def test_renders_ai_index_block_when_present(self):
-		from optimus import renderer
 
-		entry = _table_entry()
-		entry["ai_index"] = {
-			"suggestion": "**Recommendation**\n\nNothing `idx_customer_date` already covers it.",
-			"model": "claude-sonnet-4-6", "provider": "Anthropic",
-			"generated_at": "2026-05-12T00:00:00+00:00",
-		}
-		html = renderer.render_raw(_doc([entry]), recordings=[])
-		# v0.7.x Phase I: AI index advice renders inside a `.fix-box`
-		# (same component as the AI-fix on findings); "Index advice"
-		# heading + the `AI · model` tag are now in separate spans
-		# instead of the inline-paren form.
-		assert "Index advice" in html and "claude-sonnet-4-6" in html
-		assert "already covers it" in html
-
-	def test_no_ai_index_block_when_indexes_section_toggle_off(self):
-		# v0.6.x per-section hard off: even with ai_index populated on the
-		# table entry, the renderer strips it when ai_suggest_indexes is off.
-		from unittest.mock import patch
-
-		from optimus import renderer, settings
-
-		entry = _table_entry()
-		entry["ai_index"] = {
-			"suggestion": "**Recommendation**\n\nAdd an index.",
-			"model": "claude-sonnet-4-6", "provider": "Anthropic",
-			"generated_at": "2026-05-12T00:00:00+00:00",
-		}
-		with patch("optimus.settings.get_config",
-		           return_value=settings.OptimusConfig(ai_suggest_indexes=False)):
-			html = renderer.render_raw(_doc([entry]), recordings=[])
-		assert "Index advice (AI" not in html
-		assert "claude-sonnet-4-6" not in html
 
 	def test_falls_back_to_flat_list_without_recommendation(self):
 		from optimus import renderer
@@ -224,154 +201,26 @@ class TestRenderedIndexCandidatePanel:
 		assert "Index candidates - to speed up reads" in html
 		assert ">customer</code>" in html
 
+	def test_ai_index_block_is_never_rendered(self):
+		from optimus import renderer
 
-# --------------------------------------------------------------------------
-# ai_fix _build_index_messages / suggest_index
-# --------------------------------------------------------------------------
+		entry = _table_entry()
+		entry["ai_index"] = {
+			"suggestion": "**Recommendation**\n\nNothing `idx_customer_date` already covers it.",
+			"model": "claude-sonnet-4-6", "provider": "Anthropic",
+			"generated_at": "2026-05-12T00:00:00+00:00",
+		}
+		html = renderer.render_raw(_doc([entry]), recordings=[])
+		assert "Index advice" not in html
+		assert "claude-sonnet-4-6" not in html and "already covers it" not in html
 
-class _FakeResp:
-	def __init__(self, status_code=200, payload=None, text=""):
-		self.status_code = status_code
-		self._payload = payload or {}
-		self.text = text
+	def test_single_column_recommendation_keeps_its_card(self, evidence):
+		from optimus import renderer
 
-	def json(self):
-		return self._payload
-
-
-def _post_returning(resp):
-	def _fake_post(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):  # noqa: A002
-		_fake_post.last = types.SimpleNamespace(url=url, headers=headers, body=json, auth=auth)
-		return resp
-	_fake_post.last = None
-	return _fake_post
-
-
-_PROVIDER = {"name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
-             "model": "gpt-4.1-mini", "needs_key": True, "has_key": True}
-
-
-class TestAiSuggestIndex:
-	def test_build_index_messages_shape(self):
-		from optimus import ai_fix
-
-		system, messages = ai_fix._build_index_messages({
-			"table": "tabGL Entry", "doctype": "GL Entry", "read_count": 6, "write_count": 1,
-			"is_write_hot": True,
-			"recommended_index": {"columns": ["against_voucher_type", "against_voucher_no"], "together_count": 3},
-			"candidates": [{"column": "account", "sources": ["WHERE"], "hits": 2}],
-			"framework_cols_filtered": ["delinked"],
-			"existing_indexes": [{"name": "index_against_voucher", "columns": ["against_voucher_type", "against_voucher"], "unique": False}],
-			"sample_queries": ["SELECT name FROM `tabGL Entry` WHERE against_voucher_type = ? AND against_voucher_no = ?"],
+		entry = _table_entry(recommended_index={
+			"columns": ["customer"], "doctype": "Sales Invoice",
+			"together_count": 3, "read_count": 4, "also_filtered": [],
 		})
-		low = system.lower()
-		assert "**recommendation**" in low and "**skip**" in low and "frappe.db.add_index" in system
-		c = messages[0]["content"]
-		assert "tabGL Entry" in c and "GL Entry" in c
-		assert "CURRENT indexes" in c and "index_against_voucher" in c
-		assert "write-hot core table" in c
-		assert "against_voucher_type = ?" in c
-
-	def test_build_index_messages_notes_missing_indexes(self):
-		from optimus import ai_fix
-
-		_, messages = ai_fix._build_index_messages({"table": "tabFoo", "existing_indexes": []})
-		assert "not available" in messages[0]["content"]
-
-	def test_suggest_index_happy_path(self, monkeypatch):
-		import requests
-
-		from optimus import ai_fix
-
-		out_payload = {"choices": [{"message": {"content": "**Recommendation**\n\nAdd `(customer, posting_date)`."}}]}
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, out_payload)))
-		with patch("optimus.ai_fix._provider_config", return_value=dict(_PROVIDER)), \
-		     patch("optimus.ai_fix._get_api_key", return_value="k-fake-test-key"):
-			out = ai_fix.suggest_index({"table": "tabSales Invoice", "doctype": "Sales Invoice"})
-		assert "customer, posting_date" in out["suggestion"]
-		assert out["model"] == "gpt-4.1-mini" and out["provider"] == "OpenAI" and out["generated_at"]
-
-	def test_suggest_index_empty_table_raises(self):
-		from optimus import ai_fix
-
-		with pytest.raises(ai_fix.AiFixError):
-			ai_fix.suggest_index({})
-
-	def test_suggest_index_empty_response_raises(self, monkeypatch):
-		import requests
-
-		from optimus import ai_fix
-
-		monkeypatch.setattr(requests, "post", _post_returning(_FakeResp(200, {"choices": [{"message": {"content": "  "}}]})))
-		with patch("optimus.ai_fix._provider_config", return_value=dict(_PROVIDER)), \
-		     patch("optimus.ai_fix._get_api_key", return_value="k-fake-test-key"):
-			with pytest.raises(ai_fix.AiFixError, match="empty"):
-				ai_fix.suggest_index({"table": "tabFoo"})
-
-
-# --------------------------------------------------------------------------
-# analyze helpers + auto-enrich gating
-# --------------------------------------------------------------------------
-
-class TestAnalyzeIndexHelpers:
-	def test_table_existing_indexes_handles_unreadable_table(self):
-		# In the test env frappe.db is unavailable / the table doesn't exist
-		# the helper must swallow it and return [].
-		assert _analyze._table_existing_indexes("tabDefinitelyNotARealTable") == []
-
-	def test_table_existing_indexes_groups_show_index_rows(self, monkeypatch):
-		rows = [
-			{"Key_name": "PRIMARY", "Seq_in_index": 1, "Column_name": "name", "Non_unique": 0},
-			{"Key_name": "idx_cust_date", "Seq_in_index": 2, "Column_name": "posting_date", "Non_unique": 1},
-			{"Key_name": "idx_cust_date", "Seq_in_index": 1, "Column_name": "customer", "Non_unique": 1},
-		]
-		# _table_existing_indexes now delegates to the dialect adapter, which
-		# reads the global ``frappe.db``: patch that (the dialect tests' shape).
-		import frappe
-		monkeypatch.setattr(
-			frappe, "db",
-			types.SimpleNamespace(sql=lambda *a, **k: rows),
-			raising=False,
-		)
-		out = _analyze._table_existing_indexes("tabSales Invoice")
-		by_name = {i["name"]: i for i in out}
-		assert by_name["PRIMARY"]["columns"] == ["name"] and by_name["PRIMARY"]["unique"] is True
-		# Columns ordered by Seq_in_index.
-		assert by_name["idx_cust_date"]["columns"] == ["customer", "posting_date"]
-		assert by_name["idx_cust_date"]["unique"] is False
-
-	def test_table_index_sample_queries_picks_selects_on_table(self):
-		recs = [{"calls": [
-			{"query": "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND status = ?"},
-			{"query": "SELECT name FROM `tabSales Invoice` WHERE customer = ? AND status = ?"},  # dupe deduped
-			{"query": "UPDATE `tabSales Invoice` SET status = ? WHERE name = ?"},                 # not a SELECT
-			{"query": "SELECT name FROM `tabItem` WHERE item_code = ?"},                          # other table
-		]}]
-		out = _analyze._table_index_sample_queries(recs, "tabSales Invoice", limit=5)
-		assert len(out) == 1 and "tabSales Invoice" in out[0] and "SELECT" in out[0]
-
-	def test_enrich_table_breakdown_noop_when_ai_disabled(self):
-		from optimus.analyzers.base import AnalyzeContext
-
-		ctx = AnalyzeContext(session_uuid="u", docname="d")
-		ctx.aggregate["table_breakdown"] = [_table_entry()]
-		with patch("optimus.settings.get_config",
-		           return_value=types.SimpleNamespace(ai_enabled=False, ai_auto_suggest=True)):
-			_analyze._enrich_table_breakdown_with_ai_suggestions(ctx, recordings=[])
-		assert "ai_index" not in ctx.aggregate["table_breakdown"][0]
-
-	def test_enrich_table_breakdown_adds_ai_index_when_enabled(self, monkeypatch):
-		from optimus import ai_fix
-		from optimus.analyzers.base import AnalyzeContext
-
-		ctx = AnalyzeContext(session_uuid="u", docname="d")
-		ctx.aggregate["table_breakdown"] = [_table_entry(), _table_entry(table="tabGL Entry", is_write_hot=True)]
-		monkeypatch.setattr("optimus.settings.get_config",
-		                    lambda: types.SimpleNamespace(ai_enabled=True, ai_auto_suggest=True))
-		monkeypatch.setattr(ai_fix, "is_available", lambda **kw: True)
-		monkeypatch.setattr(ai_fix, "suggest_index",
-		                    lambda payload: {"suggestion": f"advice for {payload['table']}", "model": "m", "provider": "p", "generated_at": "t"})
-		monkeypatch.setattr(_analyze, "_publish_progress", lambda *a, **k: None)
-		_analyze._enrich_table_breakdown_with_ai_suggestions(ctx, recordings=[])
-		for t in ctx.aggregate["table_breakdown"]:
-			assert t["ai_index"]["suggestion"] == f"advice for {t['table']}"
+		html = renderer.render_raw(_doc([entry]), recordings=[])
+		assert "Index candidate - to speed up reads" in html
+		assert "One column: bench migrate drops a single-column index" in html
