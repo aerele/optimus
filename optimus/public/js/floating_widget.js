@@ -24,7 +24,7 @@
 	// earlier page load. If the build ID in the console / in the
 	// widget's title attribute doesn't match what we think is current,
 	// the user is on cached JS and needs a hard refresh + bench restart.
-	const WIDGET_BUILD_ID = "2026-04-16-hide-when-disabled";
+	const WIDGET_BUILD_ID = "2026-10-18-role-gate-mount";
 
 	// Developer-only diagnostic. Defaults to silent in production so the
 	// browser console isn't spammed on every Desk page. Set
@@ -116,14 +116,13 @@
 			return;
 		}
 
-		// Mount the widget UNCONDITIONALLY for any logged-in user. The
-		// server-side `_require_profiler_user()` check in api.py is the
-		// real permission gate; this client-side check is just a hint
-		// and was causing race-condition bugs because `frappe.user_roles`
-		// may not be populated when this script runs (see desk.js:329
-		// set_globals runs after Desk class construction). We err on the
-		// side of always mounting; users without the role will see a
-		// permission error if they actually click Start.
+		// Skip non-profilers: api.status would 403 and pop an error modal on
+		// every load. frappe.boot is set inline before app_include_js runs.
+		if (!userHasRole()) {
+			_diag("[optimus] user lacks a profiler role, widget will not mount");
+			return;
+		}
+
 		mountWidget();
 		// v0.5.1: one-shot rehydrate on page load. Covers the case
 		// where the user reloaded / navigated back to the Desk while
@@ -873,11 +872,8 @@
 		}
 	}
 
-	// Bootstrap: wait for document.body to exist, then mount the widget
-	// UNCONDITIONALLY. We don't gate on frappe.user_roles or frappe.boot
-	// because those may not be populated when our app_include_js script
-	// runs (Desk.set_globals at desk.js:329 runs later, asynchronously).
-	// The server-side _require_profiler_user check is the real gate.
+	// Bootstrap: wait for document.body to exist, then run init(), which
+	// gates on the enabled flag and the user's roles before mounting.
 	function bootstrap() {
 		_diag("[optimus] bootstrap() called, document.body exists:", !!document.body);
 		if (!document.body) {
