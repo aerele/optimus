@@ -109,7 +109,8 @@ def test_lost_report_commit_acknowledgement_can_leave_the_new_report_saved(repor
 	assert report.fake.local.request == "fake-request"
 
 
-def test_manual_render_cannot_bypass_an_active_ai_reservation(report):
+def test_manual_render_cannot_bypass_an_active_ai_reservation(report, monkeypatch):
+	monkeypatch.setattr(report.mod.ai_jobs, "_now", lambda: 20)
 	report.journal.db.rows[report.journal.mod.RUN]["fake-run"] = report.journal.run
 	with pytest.raises(report.mod.StaleReport):
 		report.mod.render_report("fake-session-doc")
@@ -163,3 +164,28 @@ def test_phase2_render_pending_clears_only_with_report_commit(report, fail):
 	else:
 		report.mod.render_report("fake-session-doc")
 	assert report.journal.db.rows["Optimus Phase Two Run"]["fake-child"]["analyze_render_pending"] == int(fail)
+
+
+@pytest.mark.parametrize("expired_field", ["lease_until", "deadline"])
+def test_manual_report_recovers_expired_ai_without_provider_or_scheduler(report, monkeypatch, expired_field):
+	run = report.journal.run
+	run.update(lease_until=200, deadline=300, render_pending=1)
+	run[expired_field] = 20
+	report.journal.db.rows[report.journal.mod.RUN][run["name"]] = run
+	monkeypatch.setattr(report.mod.ai_jobs, "_now", lambda: 50)
+	assert report.mod.render_report("fake-session-doc")["regenerated"]
+	assert run["state"] == "interrupted" and run["active_session"] is None
+	assert run["render_pending"] == 0
+	assert report.journal.db.rows["Optimus Session"]["fake-session-doc"]["raw_report_file"].endswith("new.html")
+
+
+def test_failed_report_recovery_rolls_back_expired_release(report, monkeypatch):
+	run = report.journal.run
+	run.update(lease_until=20, deadline=300)
+	report.journal.db.rows[report.journal.mod.RUN][run["name"]] = run
+	monkeypatch.setattr(report.mod.ai_jobs, "_now", lambda: 50)
+	report.state.fail_insert = True
+	with pytest.raises(RuntimeError, match="fake file write failed"):
+		report.mod.render_report("fake-session-doc")
+	assert report.journal.db.rows[report.journal.mod.RUN][run["name"]]["active_session"] == "fake-session-doc"
+	assert not report.journal.db.rows.get("File")

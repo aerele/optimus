@@ -187,3 +187,51 @@ assert.equal(frm._optimus_ai_enabled,false,"read-only users cannot be offered AI
 '''
 	out = subprocess.run([node, "-e", script, str(source)], text=True, capture_output=True)
 	assert out.returncode == 0, out.stderr
+
+
+@pytest.mark.parametrize("outcome", ["success", "refused", "error"])
+@pytest.mark.parametrize("return_before_reply", [False, True])
+def test_navigation_during_admission_recovers_polling(outcome, return_before_reply):
+	node = shutil.which("node")
+	if not node:
+		pytest.skip("node not installed")
+	source = Path(__file__).resolve().parents[1] / "optimus/doctype/optimus_session/optimus_session.js"
+	script = r"""
+const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert/strict');
+const requests=[],timers=[],messages=[];let route=['Form','Optimus Session','doc'],onRoute;
+const ctx={__:s=>s,setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout:()=>{},
+ frappe:{ui:{form:{on:()=>{}}},router:{on:(_e,fn)=>onRoute=fn},get_route:()=>route,
+ call:r=>requests.push(r),utils:{escape_html:s=>s},show_alert:r=>messages.push(r),msgprint:r=>messages.push(r)}};
+vm.createContext(ctx);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),ctx);
+ctx._single_banner=()=>({find:()=>({on:()=>{}})});
+let dirty=false;
+const frm={doc:{name:'doc',session_uuid:'uuid',status:'Ready'},is_new:()=>false,is_dirty:()=>dirty,
+ disable_save(){this.save_disabled=true;},enable_save(){this.save_disabled=false;},
+ add_custom_button:()=>{},remove_custom_button:()=>{},reload_doc(){throw Error('unsaved edits lost');}};
+ctx.render_ai_buttons(frm);requests.shift().callback({message:{status:'ok',refresh:null,can_act:true,plan:null}});
+ctx._refill_ai_call(frm,frm._optimus_ai,{});const admission=requests.shift();
+assert.equal(admission.method,'optimus.api.refill_ai_suggestions');
+route=['List','Optimus Session'];onRoute();dirty=true;
+if(process.argv[3]==='true'){
+ route=['Form','Optimus Session','doc'];ctx.render_ai_buttons(frm);
+ assert.equal(requests.length,0,'returning before reply cannot start another request');
+}
+const run={run_id:'r',seq:1,state:'queued',requested_at:1,scope:'all',usage:{}};
+const outcome=process.argv[2];
+if(outcome==='error')admission.error();
+else admission.callback({message:outcome==='success'?{ok:true,refresh:run}:{status:'refused',message:'busy'}});
+assert.equal(frm._optimus_ai.submitting,false,'offscreen callbacks must complete submission bookkeeping');
+if(process.argv[3]!=='true')assert.equal(messages.length,0,'offscreen callbacks must not display messages');
+route=['Form','Optimus Session','doc'];ctx.render_ai_buttons(frm);
+assert.equal(requests.at(-1).method,'optimus.api.ai_refresh_status');
+requests.at(-1).callback({message:{status:'ok',refresh:{...run,state:'complete',seq:2},can_act:true,plan:null}});
+assert.equal(frm.save_disabled,false);assert.equal(dirty,true);
+// A response for a replaced form state must never change the new session.
+dirty=false;ctx._refill_ai_call(frm,frm._optimus_ai,{});const old=requests.at(-1);
+frm.doc={name:'other',session_uuid:'other-uuid',status:'Ready'};route=['Form','Optimus Session','other'];
+ctx.render_ai_buttons(frm);const newer=frm._optimus_ai;
+old.callback({message:{ok:true,refresh:run}});
+assert.equal(frm._optimus_ai,newer);assert.equal(newer.run,null);
+"""
+	out = subprocess.run([node, "-e", script, str(source), outcome, str(return_before_reply).lower()], text=True, capture_output=True)
+	assert out.returncode == 0, out.stderr

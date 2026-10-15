@@ -128,6 +128,28 @@ def file_has_permission(doc, ptype=None, user=None) -> bool | None:
 	return _no_objection()  # passed our gate; let standard checks run
 
 
+def refresh_worker_permissions(user, *, framework):
+	"""Drop only this requester's worker-local permission answers (Frappe 15/16).
+
+	User and User Permission saves invalidate shared Redis, but another process
+	cannot invalidate this worker's local hget or computed role-permission cache.
+	A worker recheck must consult the shared/current state again. No shared cache
+	flush, actor switch, SQL transaction boundary or unrelated cache invalidation.
+	"""
+	local = getattr(framework, "local", None)
+	cache = getattr(local, "cache", None)
+	if cache:
+		for name in ("roles", "user_permissions"):
+			values = cache.get(framework.cache.make_key(name))
+			if values is not None:
+				values.pop(user, None)
+	permissions = getattr(local, "role_permissions", None)
+	if permissions:
+		for key in list(permissions):
+			if key[1] == user:
+				permissions.pop(key)
+
+
 def may_act_on_session(*, user: str, owner: str, can_read: bool, can_write: bool) -> bool:
 	"""Decide whether ``user`` may run an action on an Optimus Session: an AI action, Regenerate
 	Reports, Retry Analyze or a Phase 2 start, stop or retry (design decision D1).

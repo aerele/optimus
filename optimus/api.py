@@ -294,7 +294,7 @@ def _lock_phase2_for_write(docname: str, *, allow_failed: bool = False) -> None:
 
 	# End the permission/configuration snapshot before taking current locks.
 	safe_commit()
-	reason = ai_refresh_store.lock_phase2_parent(docname, allow_failed=allow_failed)
+	reason = ai_refresh_store.lock_phase2_parent(docname, allow_failed=allow_failed, now=time.time())
 	if reason:
 		frappe.db.rollback()
 		frappe.throw(
@@ -1411,7 +1411,7 @@ def refill_ai_suggestions(
 	regenerate_all, retry_uncertain = _refresh_flag(regenerate_all), _refresh_flag(retry_uncertain)
 	if resume_from is not None and (not isinstance(resume_from, str) or not resume_from or len(resume_from) > 140):
 		frappe.throw(_("Invalid refresh run."), frappe.ValidationError)
-	current = ai_jobs.active_refresh(ref.docname)
+	current = ai_jobs.attach_refresh(ref.docname)
 	if current:
 		return {"ok": True, "status": "already_running", "session_uuid": ref.session_uuid, "refresh": current}
 	ratelimit.enforce_user_rate_limit("refill_ai_suggestions", **_AI_LIMITS["refill_ai_suggestions"])

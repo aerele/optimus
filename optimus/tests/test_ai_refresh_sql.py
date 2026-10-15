@@ -758,7 +758,7 @@ def test_phase2_commit_fences_an_older_ai_admission_snapshot(sql):
 	older = sql.connect()
 	older.get_value("Optimus Session", "parent-a", "status")
 	def reserve():
-		assert store.lock_phase2_parent("parent-a") is None
+		assert store.lock_phase2_parent("parent-a", now=50) is None
 		sql.primary.insert({"doctype": "Optimus Phase Two Run", "name": "phase2-a",
 			"parent": "parent-a", "status": "Recording"})
 		phase2._write({"name": "phase2-a", "parent": "parent-a"}, status="Recording")
@@ -773,7 +773,7 @@ def test_ai_admission_fences_an_older_phase2_snapshot(sql):
 	older.get_value("Optimus Session", "parent-a", "status")
 	assert ai_jobs._retry_sql(admit)["status"] == "queued"
 	with sql.using(older):
-		assert ai_jobs._retry_sql(lambda: store.lock_phase2_parent("parent-a")) == "ai_refresh"
+		assert ai_jobs._retry_sql(lambda: store.lock_phase2_parent("parent-a", now=50)) == "ai_refresh"
 
 
 @pytest.mark.parametrize("scope", ["all", "fixes_missing"])
@@ -783,7 +783,7 @@ def test_phase2_waiting_on_ai_admission_cannot_miss_its_reservation(sql, scope):
 	# it does not increment the manual refresh counter.
 	sql.primary.get_value("Optimus Session", "parent-a", "status", for_update=True)
 	thread, waiting = in_thread(
-		sql, "phase2-admission", lambda: ai_jobs._retry_sql(lambda: store.lock_phase2_parent("parent-a"))
+		sql, "phase2-admission", lambda: ai_jobs._retry_sql(lambda: store.lock_phase2_parent("parent-a", now=50))
 	)
 	wait_until_blocked(sql)
 	try:
@@ -799,7 +799,7 @@ def test_phase2_waiting_on_ai_admission_cannot_miss_its_reservation(sql, scope):
 
 @pytest.mark.parametrize("scope", ["all", "fixes_missing"])
 def test_ai_waiting_on_phase2_admission_cannot_start_a_provider_run(sql, scope):
-	assert store.lock_phase2_parent("parent-a") is None
+	assert store.lock_phase2_parent("parent-a", now=50) is None
 	thread, waiting = in_thread(sql, "ai-admission", lambda: ai_jobs._retry_sql(lambda: admit(scope=scope)))
 	wait_until_blocked(sql)
 	try:
@@ -2314,3 +2314,96 @@ def test_parent_deletion_and_journal_removal_roll_back_together_and_fence_late_r
 	assert not ai_jobs._retry_sql(lambda: store.settle_attempt("run-a", attempt["name"], docname="parent-a",
 		worker_token="worker-a", now=13, outcome="succeeded", tokens=100, usage_complete=True,
 		persist=lambda: pytest.fail("late result persisted")))
+
+
+@pytest.mark.parametrize("recovery", ["phase2", "report"])
+def test_expired_ai_recovery_preserves_late_usage_without_stale_answers(sql, recovery):
+	claimed()
+	attempt = begun()
+	def recover():
+		if recovery == "phase2":
+			assert store.lock_phase2_parent("parent-a", now=400) is None
+			sql.primary.insert({"doctype": phase2.TABLE, "name": "phase2-a", "parent": "parent-a", "status": "Recording"})
+			phase2._write({"name": "phase2-a", "parent": "parent-a"}, status="Recording")
+		else:
+			sql.primary.get_value("Optimus Session", "parent-a", "*", for_update=True)
+			assert store.release_expired_reservation("parent-a", now=400) is None
+			store.sql_work.touch_session(sql.primary, "parent-a", raw_report_file="/private/files/repaired.html")
+	ai_jobs._retry_sql(recover)
+	assert value(sql, store.RUN, "run-a", "active_session") is None
+	assert value(sql, store.ATTEMPT, attempt["name"], "state") == "uncertain"
+	def late():
+		return store.settle_attempt("run-a", attempt["name"], docname="parent-a", worker_token="worker-a",
+			outcome="succeeded", tokens=7, usage_complete=True, now=401,
+			persist=lambda: pytest.fail("expired worker replaced results after recovery"))
+	assert ai_jobs._retry_sql(late)
+	assert not ai_jobs._retry_sql(late)
+	assert value(sql, "Optimus Session", "parent-a", "ai_tokens_spent") == 7
+	assert value(sql, store.ATTEMPT, attempt["name"], "state") == "discarded"
+	assert value(sql, store.RUN, "run-a", "state") == "interrupted"
+
+
+def test_expired_release_rolls_back_with_recovery_failure(sql):
+	claimed()
+	attempt = begun()
+	def fail_recovery():
+		assert store.lock_phase2_parent("parent-a", now=400) is None
+		raise RuntimeError("fake recovery write failed")
+	with pytest.raises(RuntimeError, match="fake recovery write failed"):
+		ai_jobs._retry_sql(fail_recovery)
+	assert value(sql, store.RUN, "run-a", "active_session") == "parent-a"
+	assert value(sql, store.ATTEMPT, attempt["name"], "state") == "calling"
+
+
+def test_raw_retry_consent_reads_current_commit_without_touching_caller_snapshot(sql, monkeypatch):
+	"""A real REPEATABLE READ view stays stale across the first HTTP call.
+
+	Only the table name and connection factory are adapted to the disposable
+	fixture. The production fresh-consent SQL executes on another connection.
+	"""
+	import frappe
+
+	from optimus import ai_privacy
+
+	table = sql.primary.quoted(sql.primary.tables["answer"] + "_consent")
+	sql.primary.sql(f"CREATE TABLE {table} (doctype varchar(140), field varchar(140), value varchar(10))")
+	sql.primary.sql(f"INSERT INTO {table} VALUES (%s, %s, '1')", ("Optimus Settings", "ai_send_raw_values"))
+	sql.primary.commit()
+	admin = sql.connect()
+	closed = []
+	class Cursor:
+		def __init__(self, cursor):
+			self.cursor = cursor
+		def execute(self, query, values):
+			self.cursor.execute(query.replace('`tabSingles`', table).replace('"tabSingles"', table), values)
+		def fetchone(self):
+			return self.cursor.fetchone()
+		def close(self):
+			self.cursor.close()
+	class Connection:
+		def __init__(self):
+			self.db = sql.connect()
+		def cursor(self):
+			return Cursor(self.db.connection.cursor())
+		def close(self):
+			# The fixture retains ownership of physical connections for teardown.
+			self.db.rollback()
+			closed.append(True)
+	try:
+		monkeypatch.setattr(frappe, "db", SimpleNamespace(db_type=BACKEND, db_schema="public", get_connection=Connection), raising=False)
+		assert ai_privacy._fresh_raw_values_enabled() is True
+		assert sql.primary.sql(f"SELECT value FROM {table}")[0]["value"] == "1"
+		# A pending caller write must not be accidentally committed by the check.
+		sql.primary.sql(f"UPDATE {sql.primary.table('answer')} SET body='uncommitted' WHERE name='row-00'")
+		admin.sql(f"UPDATE {table} SET value='0'")
+		admin.commit()
+		assert sql.primary.sql(f"SELECT value FROM {table}")[0]["value"] == "1"
+		assert ai_privacy._fresh_raw_values_enabled() is False
+		assert closed == [True, True]
+		assert sql.primary.sql(f"SELECT value FROM {table}")[0]["value"] == "1"
+		assert admin.sql(f"SELECT body FROM {admin.table('answer')} WHERE name='row-00'")[0]["body"] == ""
+	finally:
+		sql.primary.rollback()
+		admin.rollback()
+		sql.primary.sql(f"DROP TABLE {table}")
+		sql.primary.commit()

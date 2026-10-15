@@ -3,6 +3,8 @@
 import json
 import math
 import re
+from contextlib import closing, contextmanager
+from contextvars import ContextVar
 from urllib.parse import urlsplit
 
 import sqlparse
@@ -12,6 +14,7 @@ MAX_QUERY_CHARS = 16_000
 _METHOD = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+"
 _METHOD_PATH = re.compile(r"/api/(?:v\d+/)?method/[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*/?\Z", re.ASCII)
 _DOTTED = re.compile(_METHOD + r"\Z", re.ASCII)
+_raw_request = ContextVar("optimus_raw_request", default=None)
 
 
 def opted_in(value) -> bool:
@@ -74,6 +77,73 @@ def raw_values_enabled() -> bool:
 		return False
 	if guard.pending():
 		raise guard.interrupt()
+
+
+@contextmanager
+def raw_request_scope(send_raw):
+	"""Carry this prompt's consent requirement through every HTTP retry/hop.
+
+	Only a boolean and send marker are retained; no prompt or site data. Reset
+	on every exit so a later private request cannot inherit a raw request's state.
+	"""
+	token = _raw_request.set({"sent": False} if send_raw else None)
+	try:
+		yield
+	finally:
+		_raw_request.reset(token)
+
+
+def _fresh_raw_values_enabled():
+	"""Read committed consent without changing the caller's transaction.
+
+	Frappe's get_connection creates a separate DB-API connection on v15/v16.
+	Its first SELECT sees current commits even if the caller retains an older
+	REPEATABLE READ snapshot. Close it before HTTP; ordinary read/close failures
+	deny a resend, while worker/process interrupts retain their semantics.
+	"""
+	from optimus.ai_fix import _InterruptGuard
+
+	guard = _InterruptGuard(base=True)
+	try:
+		with guard:
+			import frappe
+
+			db = frappe.db
+			if db.db_type not in {"mariadb", "postgres"}:
+				return False
+			with closing(db.get_connection()) as connection, closing(connection.cursor()) as cursor:
+				query = "SELECT value FROM `tabSingles` WHERE doctype = %s AND field = %s"
+				if db.db_type == "postgres":
+					# v16 sets a schema on connect; v15 uses the connection default.
+					schema = getattr(db, "db_schema", None)
+					if schema is not None:
+						cursor.execute("SET search_path TO %s", (schema,))
+					query = query.replace("`", '"')
+				cursor.execute(query, ("Optimus Settings", "ai_send_raw_values"))
+				row = cursor.fetchone()
+				return bool(row) and opted_in(row[0])
+	except Exception:
+		return False
+	if guard.pending():
+		raise guard.interrupt()
+
+
+def raw_retry_allowed():
+	request = _raw_request.get()
+	return request is None or not request["sent"] or _fresh_raw_values_enabled()
+
+
+def before_http_send():
+	"""A redirect, parameter retry or reask discloses the same prompt again."""
+	from optimus.ai_fix import AiFixError
+
+	if not raw_retry_allowed():
+		from frappe import _
+
+		raise AiFixError(_("Raw-value consent changed or could not be read. Retry with current AI settings."), kind="config")
+	request = _raw_request.get()
+	if request is not None:
+		request["sent"] = True
 
 
 def query_text(query, *, send_raw: bool) -> str:

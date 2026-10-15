@@ -691,7 +691,7 @@ def _check_run(run, *, locked=False):
 	read is a FOR UPDATE by filter, the engine's one gap-locking read (not on a journal
 	table): on MariaDB another session's Phase 2 insert can wait for this short
 	transaction."""
-	from optimus.permissions import may_act_on_session
+	from optimus.permissions import may_act_on_session, refresh_worker_permissions
 
 	parent = frappe.db.get_value("Optimus Session", run["session_name"], "*", as_dict=True, for_update=locked)
 	if not parent or parent.get("status") != "Ready" or parent.get("session_uuid") != run["session_uuid"]:
@@ -706,6 +706,7 @@ def _check_run(run, *, locked=False):
 	user = run.get("requested_by")
 	if not user or user == "Guest" or not frappe.db.get_value("User", user, "enabled"):
 		raise StopRefresh("permission")
+	refresh_worker_permissions(user, framework=frappe)
 	if user != "Administrator" and not {"System Manager", "Optimus User"}.intersection(
 		frappe.get_roles(user)
 	):
@@ -1484,6 +1485,20 @@ def refresh_state(docname):
 def active_refresh(docname):
 	run = live_run(docname)
 	return public_state(run) if run else None
+
+
+def attach_refresh(docname):
+	"""Attach a Refresh POST and best-effort redeliver its existing queue intent.
+
+	Status readers use active_refresh; only this command retries delivery. A
+	queue failure cannot hide the SQL run or require new admission settings.
+	"""
+	run = live_run(docname)
+	if not run:
+		return None
+	now = _now()
+	_resend_pending(run, docname, now)
+	return public_state(run, now=now)
 
 
 def refresh_plan(doc):

@@ -412,15 +412,27 @@ function _refill_ai_call(frm, state, options) {
 	if (!_ai_current(frm, state) || state.busy || state.submitting) return;
 	if (frm.is_dirty && frm.is_dirty()) return frappe.msgprint(__("Save or discard your edits before starting an AI refresh."));
 	state.submitting = true;
+	const submission = state.submission = {};
 	state.epoch++; // invalidate a status response sent before this request
 	clearTimeout(state.timer);
 	_ai_hold_save(frm, state);
+	function finish_submission() {
+		if (state.submission !== submission) return false;
+		state.submission = null;
+		state.submitting = false;
+		// Frappe reuses this form after navigation. Finish request bookkeeping
+		// offscreen too, then reconcile with SQL when the user returns.
+		if (!_ai_current(frm, state)) {
+			state.unknown = true;
+			return false;
+		}
+		return true;
+	}
 	frappe.call({
 		method: "optimus.api.refill_ai_suggestions",
 		args: {session_uuid: state.session_uuid, ...options},
 		callback: (r) => {
-			if (!_ai_current(frm, state)) return;
-			state.submitting = false;
+			if (!finish_submission()) return;
 			const data = r && r.message;
 			if (data && data.ok && data.refresh) {
 				_ai_apply_status(frm, state, {refresh: data.refresh, can_act: true, plan: null});
@@ -434,8 +446,7 @@ function _refill_ai_call(frm, state, options) {
 			}
 		},
 		error: () => {
-			if (!_ai_current(frm, state)) return;
-			state.submitting = false;
+			if (!finish_submission()) return;
 			// A lost HTTP response can follow a committed admission. Poll SQL.
 			state.busy = true;
 			_ai_unknown(frm, state);

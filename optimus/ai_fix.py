@@ -579,27 +579,29 @@ def suggest_fix(
 	provider = _provider_config()
 	_require_configured(provider)
 	ctx = _context_tokens(provider)
+	send_raw = ai_privacy.raw_values_enabled()
 	system, messages, shown = _build_fix_request(
 		finding, threshold_ms=_resolve_display_threshold_ms(), context_tokens=ctx, out_tokens=_output_tokens(provider),
-		send_raw=ai_privacy.raw_values_enabled(),
+		send_raw=send_raw,
 	)
 	_check_context_fits(
 		system, ctx, messages=messages, out_tokens=_output_tokens(provider),
 		hosted=_is_hosted_endpoint(provider.get("base_url")),
 	)
 	usage = usage_out if isinstance(usage_out, Usage) else Usage()
-	text, guardrail, finish = with_usage_on_failure(lambda: _complete_with_guardrails(
-		provider,
-		system,
-		messages,
-		shown_lines=shown,
-		usage=usage,
-		metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type=finding.get("finding_type")),
-		session_uuid=session_uuid,
-		docname=docname,
-		started_at=time.monotonic(),
-		timeout=int(timeout or request_timeout_seconds()),
-	), usage)
+	with ai_privacy.raw_request_scope(send_raw):
+		text, guardrail, finish = with_usage_on_failure(lambda: _complete_with_guardrails(
+			provider,
+			system,
+			messages,
+			shown_lines=shown,
+			usage=usage,
+			metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type=finding.get("finding_type")),
+			session_uuid=session_uuid,
+			docname=docname,
+			started_at=time.monotonic(),
+			timeout=int(timeout or request_timeout_seconds()),
+		), usage)
 	result = {
 		"suggestion": text,
 		"model": provider["model"],
@@ -638,9 +640,10 @@ def humanize_steps(
 		raise AiFixError(_("There are no recorded actions to summarise."), kind="config")
 	provider = _provider_config()
 	_require_configured(provider)
+	send_raw = ai_privacy.raw_values_enabled()
 	system, messages = _build_steps_messages(
 		actions, session_title, threshold_ms=_resolve_display_threshold_ms(), context_tokens=_context_tokens(provider),
-		send_raw=ai_privacy.raw_values_enabled(),
+		send_raw=send_raw,
 	)
 	_check_context_fits(
 		system, _context_tokens(provider), messages=messages, out_tokens=_output_tokens(provider),
@@ -648,11 +651,12 @@ def humanize_steps(
 	)
 	usage = Usage()
 	try:
-		text = with_usage_on_failure(lambda: _dispatch_call(
-			provider, system, messages, usage_out=usage,
-			metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type="Steps to Reproduce"),
-			timeout=timeout, session_uuid=session_uuid, docname=docname,
-		), usage)
+		with ai_privacy.raw_request_scope(send_raw):
+			text = with_usage_on_failure(lambda: _dispatch_call(
+				provider, system, messages, usage_out=usage,
+				metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type="Steps to Reproduce"),
+				timeout=timeout, session_uuid=session_uuid, docname=docname,
+			), usage)
 	finally:
 		if usage_out is not None:
 			usage_out.update(usage)
@@ -2007,6 +2011,7 @@ def _http_post(
 			failure = _timeout_failure(budget)
 			_log_http_error(provider, where, None, "timeout", exc=failure, auth=auth, session_uuid=session_uuid, docname=docname, **(log_extra or {}))
 			raise failure
+		ai_privacy.before_http_send()
 		failed_kind: str | None = None
 		error_name = ""
 		unexpected_frames: list[str] = []
@@ -2809,6 +2814,8 @@ def _complete_with_guardrails(
 			_log_reask("skipped-budget")
 		elif not ai_budget.reask_fits(ctx, fit_usage, reask_text, out_tokens=out):
 			_log_reask("skipped-fit")
+		elif not ai_privacy.raw_retry_allowed():
+			_log_reask("skipped-consent")
 		else:
 			reasked = True
 			reask_usage = Usage()

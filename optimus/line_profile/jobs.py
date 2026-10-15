@@ -108,10 +108,11 @@ def _write(row, **values):
 
 
 def _authorized(parent, user):
-	from optimus.permissions import may_act_on_session
+	from optimus.permissions import may_act_on_session, refresh_worker_permissions
 
 	if not user or user == "Guest" or not frappe.db.get_value("User", user, "enabled"):
 		return False
+	refresh_worker_permissions(user, framework=frappe)
 	if user != "Administrator" and not {"System Manager", "Optimus User"}.intersection(frappe.get_roles(user)):
 		return False
 	return may_act_on_session(
@@ -189,7 +190,7 @@ def force_stop_captures(user):
 
 def _admit(docname, session_uuid, run_uuid, requested_by, *, generation, now, from_recording=False):
 	"""Caller commits this reservation before dispatch, under the AI mutex."""
-	reason = store.lock_phase2_parent(docname)
+	reason = store.lock_phase2_parent(docname, now=now)
 	if reason:
 		return {"status": "refused", "reason": reason}
 	parent, row = _locked(docname, run_uuid)
@@ -379,7 +380,7 @@ def _dispatch(run):
 
 def _legacy_generation(docname, session_uuid, run_uuid):
 	"""Adopt only an old queued delivery, never a completed/claimed generation."""
-	reason = store.lock_phase2_parent(docname)
+	reason = store.lock_phase2_parent(docname, now=_now())
 	if reason:
 		return None
 	parent, row = _locked(docname, run_uuid)

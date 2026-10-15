@@ -387,7 +387,25 @@ def admit(
 	return _answer(taken_over, status="queued", run=run)
 
 
-def lock_phase2_parent(docname, *, allow_failed=False):
+def release_expired_reservation(docname, *, now):
+	"""With the parent already locked, release a dead owner or return the live run.
+
+	The plain probe avoids a missing-key gap lock; all writers hold this parent
+	before the run/attempt locks. Recovery uses the same uncertain-call accounting
+	as admission takeover and participates in the caller's transaction.
+	"""
+	run = frappe.db.get_value(RUN, {"active_session": docname}, "*", as_dict=True)
+	if run and expired(run, now):
+		run = _read(RUN, run["name"], lock=True)
+		if not run or run.get("active_session") != docname:
+			return None
+		if expired(run, now):
+			_release(run, docname, state="interrupted", reason=expiry_reason(run, now), now=now)
+			return None
+	return run
+
+
+def lock_phase2_parent(docname, *, now, allow_failed=False):
 	"""Serialize Phase 2 admission with AI through the parent row.
 
 	Every accepted admission's writer updates this row before committing, fencing
@@ -397,7 +415,7 @@ def lock_phase2_parent(docname, *, allow_failed=False):
 	parent = _read("Optimus Session", docname, lock=True)
 	if not parent or parent.get("status") not in ({"Ready", "Failed"} if allow_failed else {"Ready"}):
 		return "not_ready"
-	if frappe.db.get_value(RUN, {"active_session": docname}, "name"):
+	if release_expired_reservation(docname, now=now):
 		return "ai_refresh"
 	return None
 

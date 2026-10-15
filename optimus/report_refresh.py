@@ -58,7 +58,7 @@ def _render_and_save(docname, recordings, *, run_id, worker_token):
 				or run["deadline"] <= ai_jobs._now()):
 				raise StaleReport("Refresh no longer owns report replacement")
 			ai_jobs._check_run(run, locked=True)
-		elif run:
+		elif run and store.release_expired_reservation(docname, now=ai_jobs._now()):
 			raise StaleReport("An active refresh owns report replacement")
 		file_doc = frappe.get_doc({
 			"doctype": "File", "file_name": f"optimus_report_{uuid.uuid4().hex}.html",

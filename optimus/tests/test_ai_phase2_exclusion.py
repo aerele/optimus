@@ -18,14 +18,14 @@ def test_phase2_started_after_precheck_still_refuses_ai_admission(journal, statu
 
 def test_phase2_lock_refuses_an_active_ai_generation(journal):
 	with journal.db.transaction():
-		assert journal.mod.lock_phase2_parent("fake-session-doc") == "ai_refresh"
+		assert journal.mod.lock_phase2_parent("fake-session-doc", now=50) == "ai_refresh"
 	assert journal.db.locks[:2] == [("Optimus Session", "fake-session-doc")]
 
 
 def test_phase2_lock_leaves_parent_unchanged_until_admission_writes(journal):
 	journal.db.rows[journal.mod.RUN] = {}
 	with journal.db.transaction():
-		assert journal.mod.lock_phase2_parent("fake-session-doc") is None
+		assert journal.mod.lock_phase2_parent("fake-session-doc", now=50) is None
 		assert journal.db.active  # caller still owns the locks until its phase-2 row commits
 	assert journal.db.rows["Optimus Session"]["fake-session-doc"].get("modified") is None
 
@@ -34,7 +34,7 @@ def test_phase2_lock_refuses_a_parent_that_is_no_longer_ready(journal):
 	journal.db.rows[journal.mod.RUN] = {}
 	journal.db.rows["Optimus Session"]["fake-session-doc"]["status"] = "Analyzing"
 	with journal.db.transaction():
-		assert journal.mod.lock_phase2_parent("fake-session-doc") == "not_ready"
+		assert journal.mod.lock_phase2_parent("fake-session-doc", now=50) == "not_ready"
 
 
 
@@ -69,3 +69,20 @@ def test_retry_analyze_returns_exact_owned_captures_for_postcommit_stop(journal)
 	with journal.db.transaction():
 		assert journal.mod.prepare_analyze_retry("fake-session-doc", "fake-session", requested_by="fake-owner", now=100, stopped_captures=captures)
 	assert captures == [("one-run", "capture-user"), ("two-run", "legacy-user")]
+
+
+@pytest.mark.parametrize("expired_field", ["lease_until", "deadline"])
+def test_phase2_recovers_expired_ai_and_fences_late_answers(journal, expired_field):
+	with journal.db.transaction():
+		journal.mod.claim("fake-run", docname="fake-session-doc", slice_no=0,
+			worker_token="dead", now=10, lease_seconds=100)
+		attempt = journal.mod.begin_attempt("fake-run", docname="fake-session-doc", worker_token="dead",
+			kind="fix", target="fake-finding", input_hash="fake", now=11)
+	journal.run[expired_field] = 20
+	with journal.db.transaction():
+		assert journal.mod.lock_phase2_parent("fake-session-doc", now=50) is None
+	run = journal.db.rows[journal.mod.RUN]["fake-run"]
+	assert run["state"] == "interrupted" and run["active_session"] is None
+	assert run["worker_token"] is None and run["uncertain"] == 1
+	assert journal.db.rows[journal.mod.ATTEMPT][attempt["name"]]["state"] == "uncertain"
+	assert not journal.mod.owns(run, "dead", 50)
