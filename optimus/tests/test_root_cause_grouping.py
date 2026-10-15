@@ -217,7 +217,8 @@ class TestGrouping:
 
 	def test_subs_carry_compact_payload_only(self):
 		"""sub_findings entries are a compact dict (type, severity, title,
-		description, impact, count), not the full technical_detail or llm_fix."""
+		description, impact, count, plus the drill-down rows a nested finding
+		needs), not the full technical_detail or llm_fix."""
 		shp = _shp(
 			drilldown_leaf_function="_check_user_exists",
 			impact_ms=500.0, severity="High",
@@ -226,8 +227,27 @@ class TestGrouping:
 		result = _group_findings_by_root_cause([shp, hot])
 		primary = result[0]
 		sub = primary["sub_findings"][0]
-		# Compact keys only.
+		# Compact keys only (drill_rows is a short list of label strings, not the
+		# full technical_detail).
 		assert set(sub.keys()) == {
 			"finding_type", "severity", "title",
 			"customer_description", "estimated_impact_ms", "affected_count",
+			"drill_rows",
 		}
+
+	def test_nested_sub_finding_carries_drill_rows(self):
+		"""A demoted sub-finding that is in a nested function carries its own
+		drill-down rows, so its collapsed row can render the nested tree."""
+		primary = _shp(
+			impact_ms=700.0, severity="High",
+			drilldown_leaf_function="_check_user_exists",
+		)
+		sub = _shp(
+			impact_ms=200.0, severity="High", title="secondary",
+			drilldown_leaf_function="_check_user_exists",
+		)
+		result = _group_findings_by_root_cause([primary, sub])
+		assert len(result) == 1
+		subs = result[0]["sub_findings"]
+		assert len(subs) == 1
+		assert subs[0]["drill_rows"] == ["looped_validate", "_check_user_exists:20"]

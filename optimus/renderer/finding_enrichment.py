@@ -56,6 +56,33 @@ def _root_cause_key(finding: dict) -> tuple | None:
 	return (_os.path.basename(fname), fn_name)
 
 
+def _drilldown_display_rows(detail: dict) -> list[str] | None:
+	"""Frame labels (``function`` or ``function:lineno``) for a finding's
+	drill-down tree, matching what the primary card renders: the downward chain
+	prefixed with its root frame, else the ancestry path, else ``None`` when the
+	finding has no nested call path. Used to carry the drill-down onto the compact
+	sub-finding projection (which drops ``technical_detail``).
+	"""
+	if not isinstance(detail, dict):
+		return None
+	callsite = detail.get("callsite") or {}
+	wrapper = callsite.get("original_wrapper") or {}
+	root_fn = (wrapper.get("function") if wrapper else None) or callsite.get("function")
+
+	def _label(frame):
+		fn = frame.get("function") or ""
+		lineno = frame.get("lineno")
+		return f"{fn}:{lineno}" if lineno else fn
+
+	chain = detail.get("drilldown_chain")
+	if isinstance(chain, list) and chain:
+		return [root_fn or ""] + [_label(lv) for lv in chain]
+	ancestry = detail.get("drilldown_ancestry")
+	if ancestry:
+		return [_label(lv) for lv in ancestry]
+	return None
+
+
 def _group_findings_by_root_cause(findings: list[dict]) -> list[dict]:
 	"""Collapse findings sharing a ``(file, function)`` root-cause anchor into
 	one primary card, the rest attached as ``sub_findings``.
@@ -115,6 +142,9 @@ def _group_findings_by_root_cause(findings: list[dict]) -> list[dict]:
 				"customer_description": s.get("customer_description") or "",
 				"estimated_impact_ms": s.get("estimated_impact_ms") or 0,
 				"affected_count": s.get("affected_count") or 0,
+				# A grouped sub-finding is still a finding in a nested function, so
+				# carry its own drill-down rows onto the compact projection.
+				"drill_rows": _drilldown_display_rows(s.get("technical_detail") or {}),
 			}
 			for s in subs
 		]
@@ -268,6 +298,89 @@ def _walk_drilldown_chain(
 	return chain
 
 
+def _find_node_path_in_tree(tree: dict, basename: str, function: str) -> list[dict] | None:
+	"""Like :func:`_find_node_in_tree`, but return the full ancestry path from the
+	tree root down to (and including) the first matching ``(basename, function)``
+	node, or ``None`` when no node matches. Used to show how a finding that sits
+	at a leaf user frame is reached (its nested call path).
+	"""
+	if not isinstance(tree, dict):
+		return None
+	want = (basename or "").strip()
+	want_fn = (function or "").strip()
+	if not want_fn:
+		return None
+	stack: list[tuple[dict, list[dict]]] = [(tree, [tree])]
+	while stack:
+		node, path = stack.pop()
+		if not isinstance(node, dict):
+			continue
+		node_file = (node.get("filename") or "").rsplit("/", 1)[-1]
+		if (node.get("function") or "") == want_fn and (not want or node_file == want):
+			return path
+		for child in reversed(node.get("children") or []):
+			if isinstance(child, dict):
+				stack.append((child, path + [child]))
+	return None
+
+
+def _walk_ancestor_chain(
+	tree: dict,
+	callsite: dict,
+	tracked_apps: tuple[str, ...] = (),
+) -> list[dict]:
+	"""Build the nested call path that *leads to* a finding whose own frame has no
+	deeper user-code descendants (so :func:`_walk_drilldown_chain` came back empty).
+
+	Locates the finding's frame in the ``tree`` and returns the user-app frames on
+	the path from the outermost tracked-app frame down to and including it, so a
+	leaf finding (an N+1 loop body, a redundant call, a framework call made from
+	user code) still shows the nesting it lives in. Framework and synthetic
+	``[other: N]`` frames on the path are skipped. Returns ``[]`` (never a
+	one-frame chain) when the finding is not nested under another user frame, so
+	the caller falls back to the existing placeholder.
+
+	Each entry is ``{filename, lineno, function, cumulative_ms}``; the last is the
+	finding's own frame (the terminal). Malformed input gives ``[]``.
+	"""
+	from optimus.analyzers.base import is_framework_callsite
+	from optimus.renderer.call_tree_renderer import _ct_is_other_frame
+
+	if not isinstance(tree, dict) or not isinstance(callsite, dict):
+		return []
+	filename = callsite.get("filename") or ""
+	function = _strip_doctype_suffix(callsite.get("function") or "")
+	if not function:
+		return []
+	if is_framework_callsite(filename, tracked_apps=tracked_apps or None):
+		return []
+	path = _find_node_path_in_tree(tree, filename.rsplit("/", 1)[-1], function)
+	if not path:
+		return []
+	rows: list[dict] = []
+	for node in path:
+		fn = node.get("function") or ""
+		nfile = node.get("filename") or ""
+		# Skip synthetic frames: the tree's ``<root>`` wrapper and collapse
+		# buckets carry no real filename (is_framework_callsite("") is False, so
+		# they must be dropped here); ``[other: N]`` nodes can't be drilled either.
+		if not fn or not nfile or _ct_is_other_frame(fn):
+			continue
+		if is_framework_callsite(nfile, tracked_apps=tracked_apps or None):
+			continue
+		rows.append({
+			"filename": nfile,
+			"lineno": int(node.get("lineno") or 0),
+			"function": fn,
+			"cumulative_ms": float(node.get("cumulative_ms") or 0),
+		})
+	# The finding's own frame must be the terminal; it must also be nested under at
+	# least one other user frame or there is no call path worth drawing.
+	if len(rows) < 2 or rows[-1]["function"] != function:
+		return []
+	return rows
+
+
 def _attach_drilldown_chains(findings, actions, tracked_apps: tuple[str, ...] = ()) -> None:
 	"""Attach a ``drilldown_chain`` to each finding's ``technical_detail``,
 	mutating findings in place. Tree JSON is parsed once per ``action_idx``
@@ -316,6 +429,16 @@ def _attach_drilldown_chains(findings, actions, tracked_apps: tuple[str, ...] = 
 		# user-code descendants) to decide whether to render a "no
 		# deeper user-code frame" placeholder in place of the chain.
 		detail["drilldown_chain"] = chain
+		# When the finding sits at a leaf user frame (nothing to drill into
+		# below it), it may still live inside a nested call path. Attach that
+		# ancestry so a finding in a nested function always shows its call path
+		# instead of the bare "no deeper user-code frame" placeholder. Only when
+		# it is genuinely nested (>= 2 user frames); leaf-but-top-level findings
+		# keep the placeholder.
+		if not chain:
+			ancestry = _walk_ancestor_chain(tree, callsite, tracked_apps=tracked_apps)
+			if ancestry:
+				detail["drilldown_ancestry"] = ancestry
 		finding["technical_detail"] = detail
 
 
