@@ -366,6 +366,11 @@ def _scenario_post(scenario, sinks, job_timeout):
 			raise requests.exceptions.ConnectionError(
 				"HTTPConnectionPool(host='llm.invalid', port=443): Max retries exceeded"
 			)
+		if scenario == "connection_error_key":
+			# A Base URL that carries the key: requests quotes the URL in its message.
+			raise requests.exceptions.ConnectionError(
+				f"HTTPSConnectionPool(host='llm.invalid', port=443): Max retries exceeded with url: /v1?key={KEY}"
+			)
 		if scenario == "unicode_encode_error":
 			value = next(iter(v for k, v in wire_headers.items() if k.lower() in ("authorization", "x-api-key")))
 			raise UnicodeEncodeError("latin-1", value, 0, 1, "ordinal not in range(256)")
@@ -483,7 +488,7 @@ def _drive(name, fn, args_factory, sinks, scenario, job_timeout):
 
 
 _SCENARIOS = (
-	"connection_error", "unicode_encode_error", "http_401", "http_400_echo", "http_404_echo",
+	"connection_error", "connection_error_key", "unicode_encode_error", "http_401", "http_400_echo", "http_404_echo",
 	"http_500_echo", "non_dict_json", "non_latin_key", "rq_timeout", "developer_mode", "scrub_raises",
 	"system_exit", "malformed_usage", "non_str_text",
 )
@@ -503,11 +508,12 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 	sinks, scenario, job_timeout = canary
 	for name, (fn, args_factory) in _ENTRY_POINTS.items():
 		_drive(name, fn, args_factory, sinks, scenario, job_timeout)
-	# Every row still in the transaction is queued again by its rollback
-	# callback (frappe.throw's request rollback, execute_job's rollback).
+		# Each entry point is its own request or job: every row it left in the transaction is
+		# queued again by its rollback callback (frappe.throw's request rollback, execute_job's
+		# rollback). An entry that commits (Refresh's answers, a failed Steps rewrite) leaves none.
+		sinks.entry = f"(rollback after {name})"
+		frappe.db.rollback()
 	rows_written = len(sinks.stack)
-	sinks.entry = "(rollback)"
-	frappe.db.rollback()
 
 	if scenario == "non_latin_key":
 		assert sinks.posts == 0, "a key that cannot be sent must fail before any HTTP call"
@@ -576,6 +582,8 @@ def test_no_key_or_prompt_leaks_on_any_ai_failure_path(canary):
 	if scenario == "scrub_raises":
 		assert ECHO_MARK not in returned, "a body that could not be scrubbed must be dropped"
 		assert any("details withheld" in t for _, t, _ in sinks.stored), "a failed scrub must still write a row"
+	if scenario == "connection_error_key":
+		assert "Couldn't reach the AI provider (ConnectionError)" in returned, "the transport path never ran"
 	if scenario == "unicode_encode_error":
 		# The catch-all names the error type. Without an auth header to encode,
 		# the fake would raise something else and the scenario would test nothing.

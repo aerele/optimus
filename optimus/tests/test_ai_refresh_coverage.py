@@ -12,6 +12,13 @@ import pytest
 
 from optimus import ai_fix, ai_prompts, analyze
 
+
+@pytest.fixture(autouse=True)
+def _commit_on_the_fake_db(monkeypatch):
+	"""``_run_ai_backfill`` commits each answer through ``analyze.safe_commit``; send that commit
+	to whatever ``analyze.frappe`` a test installs."""
+	monkeypatch.setattr(analyze, "safe_commit", lambda: analyze.frappe.db.commit())
+
 # The real suggest_fix, captured before any fixture replaces it.
 _REAL_SUGGEST = ai_fix.suggest_fix
 
@@ -235,3 +242,87 @@ def test_auto_suggest_treats_not_eligible_as_a_skip(monkeypatch):
 		analyze._enrich_findings_with_ai_suggestions(ctx)
 	assert "llm_fix_json" not in ctx.findings[0]
 	assert logged == [] and not any("couldn't get a suggestion" in w for w in ctx.warnings)
+
+
+def test_a_missing_only_refresh_and_eligible_findings_agree_on_what_is_missing(backfill):
+	"""One definition: only a blank answer is missing. Corrupt text is outdated, so a missing-only
+	run leaves it, and so does ``eligible_findings(include_outdated=False)``."""
+	rows = [_row("blank"), _row("corrupt"), _row("old", version=1), _row("fresh", version=ai_prompts.PROMPT_VERSION)]
+	rows[0].llm_fix_json = "  "
+	rows[1].llm_fix_json = "{not json"
+	with patch("optimus.settings.get_config", return_value=_cfg()):
+		expected = [r.name for r in analyze.eligible_findings(rows, _cfg(), include_outdated=False)]
+		analyze._run_ai_backfill(_doc(rows), cap=0)
+	assert expected == ["blank"] and backfill.sent == ["blank"]
+
+
+def test_a_full_regenerate_asks_every_finding_missing_first_outdated_float_before_current_newer(backfill):
+	rows = [
+		_row("newer", version=ai_prompts.PROMPT_VERSION + 1),
+		_row("float", version=float(ai_prompts.PROMPT_VERSION)),
+		_row("blank"),
+	]
+	with patch("optimus.settings.get_config", return_value=_cfg()):
+		analyze._run_ai_backfill(_doc(rows), cap=0, regenerate_all=True)
+	assert backfill.sent == ["blank", "float", "newer"]
+
+
+def test_the_backfill_orders_by_severity_impact_then_age_like_eligible_findings(backfill):
+	def aged(name, generated, severity="High", impact=10.0):
+		r = _row(name, impact=impact, version=1)
+		r.severity = severity
+		r.llm_fix_json = json.dumps({"suggestion": "s", "prompt_version": 1, "generated_at": generated})
+		return r
+
+	rows = [
+		aged("young", "2026-01-03T00:00:00+00:00"),
+		aged("old", "2026-01-01T00:00:00+00:00"),
+		aged("low", "2026-01-01T00:00:00+00:00", severity="Low"),
+		aged("big", "2026-01-05T00:00:00+00:00", impact=99.0),
+	]
+	with patch("optimus.settings.get_config", return_value=_cfg()):
+		by_function = [r.name for r in analyze.eligible_findings(rows, _cfg(), regenerate_all=True)]
+		analyze._run_ai_backfill(_doc(rows), cap=0, regenerate_all=True, time_budget=10_000)
+	assert backfill.sent == by_function == ["big", "old", "young", "low"]
+
+
+def test_the_backfill_counts_come_from_the_selection(backfill):
+	rows = [_row("ok"), _row("fw", "Framework N+1"), _row("sq", "Slow Query")]
+	with patch("optimus.settings.get_config", return_value=_cfg(ai_excluded_finding_types=("Slow Query",))):
+		out = analyze._run_ai_backfill(_doc(rows), cap=0)
+	assert (out["gated"], out["excluded"], out["total_pending"]) == (1, 1, 1)
+
+
+def test_the_auto_suggest_warning_names_the_first_failures_kind_and_hint(monkeypatch):
+	"""The warning said "provider error or timeout" even for a fatal key, quota or settings
+	failure; it now names what the first failure was and what to do."""
+	ctx = _one_n_plus_one_ctx()
+	ctx.findings.append(dict(ctx.findings[0], title="second"))
+	errors = iter([ai_fix.AiFixError("no credit", kind="quota"), ai_fix.AiFixError("slow", kind="timeout")])
+
+	def fail(payload, **kw):
+		raise next(errors)
+
+	monkeypatch.setattr(analyze, "_phase2_index_for", lambda doc: {})
+	monkeypatch.setattr(analyze, "_log_ai_step_failure", lambda *a, **k: None)
+	with patch("optimus.settings.get_config", return_value=_cfg()), \
+	     patch("optimus.ai_fix.is_available", return_value=True), \
+	     patch("optimus.ai_fix.suggest_fix", side_effect=fail):
+		analyze._enrich_findings_with_ai_suggestions(ctx)
+	[warning] = [w for w in ctx.warnings if "couldn't get a suggestion" in w]
+	assert warning.startswith("AI auto-suggest: 2 finding(s) couldn't get a suggestion.")
+	assert "The first failure was quota: " + ai_fix.KIND_HINTS["quota"] in warning
+	assert "provider error or timeout" not in warning
+	assert 'titles starting with \"optimus ai\"' in warning
+
+
+def test_the_auto_suggest_warning_names_an_unexpected_first_failure(monkeypatch):
+	ctx = _one_n_plus_one_ctx()
+	monkeypatch.setattr(analyze, "_phase2_index_for", lambda doc: {})
+	monkeypatch.setattr(analyze, "_log_ai_step_failure", lambda *a, **k: None)
+	with patch("optimus.settings.get_config", return_value=_cfg()), \
+	     patch("optimus.ai_fix.is_available", return_value=True), \
+	     patch("optimus.ai_fix.suggest_fix", side_effect=RuntimeError("boom")):
+		analyze._enrich_findings_with_ai_suggestions(ctx)
+	[warning] = [w for w in ctx.warnings if "couldn't get a suggestion" in w]
+	assert "The first failure was an unexpected error" in warning and "boom" not in warning

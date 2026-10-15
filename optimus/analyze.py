@@ -13,12 +13,14 @@ leaves it so analyze can be retried.
 
 import html
 import json
+import math
 import os
 import pickle
 import re
 import time
 from collections import OrderedDict
 from dataclasses import asdict
+from datetime import datetime, timezone
 
 import frappe
 import sqlparse
@@ -30,7 +32,7 @@ from frappe.recorder import (
 )
 from frappe.utils.scheduler import is_scheduler_disabled
 
-from optimus import ai_grounding, renderer, safe_call, safe_commit, session
+from optimus import ai_grounding, ai_prompts, renderer, safe_call, safe_commit, session
 from optimus.analyzers import (
 	call_tree,
 	explain_flags,
@@ -47,9 +49,11 @@ from optimus.analyzers.base import (
 	_DUR_SEP,
 	INDEX_FINDING_TYPES,
 	SEVERITY_ORDER,
+	UNKNOWN_SEVERITY_RANK,
 	AnalyzeContext,
 	dur,
 	is_error_log_hook_query,
+	row_get,
 )
 from optimus.dbdialect import get_dialect
 
@@ -69,10 +73,10 @@ ANALYZE_PER_ANALYZER_SOFT_CAP_SECONDS = 60
 # provider can't push the analyze job past the RQ 25-min timeout.
 AI_AUTO_SUGGEST_TIME_BUDGET_SECONDS = 240
 
-# Tighter budget for the same backfill done from api.regenerate_reports
-# that runs synchronously inside a web request, so it must stay well under
-# the gunicorn worker timeout (~120s). Anything not done in this window is
-# left for a re-run of Regenerate Reports (or a full Retry Analyze).
+# Time budget of one synchronous AI > Refresh AI suggestions run
+# (api.refill_ai_suggestions, a web request), so it stays well under the
+# gunicorn worker timeout (~120s). Findings not reached in this window are
+# left for another Refresh.
 AI_BACKFILL_TIME_BUDGET_SECONDS = 60
 
 # v0.3.0: persistence size limits for call_tree_json on Optimus Action.
@@ -1096,8 +1100,9 @@ def _log_ai_step_failure(title: str, exc: BaseException, session_uuid: str | Non
 	log_ai_failure(title, exc, session_uuid=session_uuid, **context)
 
 
-def _ai_selection(items, ai_fix, *, type_of, gate) -> tuple[list, int, int]:
-	"""(eligible items, gated count, excluded count). The operator's per-type exclusion
+def _ai_selection(items, ai_fix, *, type_of, gate, cfg=None) -> tuple[list, int, int]:
+	"""(eligible items, gated count, excluded count). ``cfg`` is the Optimus Settings
+	object to read the exclusion list from (``None`` reads Settings). The operator's per-type exclusion
 	runs first and counts only a type that could reach the AI; any other excluded type
 	falls through to the eligibility gate, which refuses it anyway. Only types that can
 	reach the AI and Framework N+1 count as gated; infrastructure types never do, and neither
@@ -1107,7 +1112,7 @@ def _ai_selection(items, ai_fix, *, type_of, gate) -> tuple[list, int, int]:
 	eligible, gated, excluded = [], 0, 0
 	for item in items:
 		ftype = type_of(item)
-		if ftype in ai_fix.AI_ELIGIBLE_FINDING_TYPES and ai_fix.is_finding_type_excluded(ftype):
+		if ftype in ai_fix.AI_ELIGIBLE_FINDING_TYPES and ai_fix.is_finding_type_excluded(ftype, cfg=cfg):
 			excluded += 1
 			continue
 		if gate(item) is not None:
@@ -1130,17 +1135,6 @@ def _note_ai_selection(context, gated: int, excluded: int) -> None:
 			f"AI auto-suggest: {excluded} finding(s) skipped because their type is listed under "
 			"Excluded finding types in Optimus Settings."
 		)
-
-
-def _fix_is_current(row) -> bool:
-	"""True when ``row`` already holds a suggestion made with the current prompt version."""
-	from optimus.ai_prompts import is_current
-
-	try:
-		fix = json.loads(getattr(row, "llm_fix_json", None) or "null")
-	except (TypeError, ValueError):
-		return False
-	return is_current(fix if isinstance(fix, dict) else None)
 
 
 def _deserialize_tree(uuid: str, tree_blob):
@@ -1222,6 +1216,17 @@ def _deserialize_tree(uuid: str, tree_blob):
 	return pyi_session
 
 
+def _bundle_entries(bundle) -> dict:
+	"""The ``uuid -> entry`` map of a persisted recordings bundle: the full bundle
+	(``{"recordings": {...}}``) or the legacy bare map. ``{}`` for anything else. The one
+	reader of the bundle's shape, shared by :func:`_rehydrate_from_bundle` and
+	:func:`load_recordings_light`."""
+	if not isinstance(bundle, dict):
+		return {}
+	entries = bundle.get("recordings")
+	return entries if isinstance(entries, dict) else bundle
+
+
 def _rehydrate_from_bundle(recordings_bundle, uuid: str):
 	"""Rebuild a recording dict (rec + pyi_session + sidecar) from a persisted
 	bundle entry, mirroring the live-Redis read path. Returns the rec dict, or
@@ -1233,12 +1238,7 @@ def _rehydrate_from_bundle(recordings_bundle, uuid: str):
 	re-attached (not part of the live rec shape)."""
 	import base64
 
-	if not isinstance(recordings_bundle, dict):
-		return None
-	recs = recordings_bundle.get("recordings")
-	if not isinstance(recs, dict):
-		recs = recordings_bundle
-	entry = recs.get(uuid)
+	entry = _bundle_entries(recordings_bundle).get(uuid)
 	if not isinstance(entry, dict):
 		return None
 	rec = entry.get("rec")
@@ -1702,8 +1702,9 @@ def _persist(
 		# v0.13: capture the humanizer's token usage here so the steps tokens
 		# show in the report and roll into the session's cumulative spend on
 		# the auto-analyze path too not only after a manual "Refresh AI
-		# suggestions". (usage_out non-None also arms _record_session_spend at
-		# the ai_fix chokepoint, since the analyze run set the spend marker.)
+		# suggestions". (The ai_fix chokepoint also charges the call to the
+		# session's ai_tokens_spent, since the analyze run set the spend marker;
+		# doc.save below keeps that count: _keep_session_counters.)
 		_steps_usage: dict = {}
 		notes_html = _build_humanized_notes_html(
 			recordings, session_title=(doc.title or None), usage_out=_steps_usage
@@ -2189,6 +2190,8 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 	evidence_lookup, tracked = _ai_evidence_scope()
 	started = time.monotonic()
 	failures = 0
+	# the kind of the first failure ("" for an unexpected error), for the warning below
+	first_failure: str | None = None
 	skipped_for_time = 0
 	total = len(eligible)
 	for idx, f in enumerate(eligible):
@@ -2210,7 +2213,9 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 		except Exception:
 			pass
 
-		def _suggest(f=f):
+		kinds: list[str] = []
+
+		def _suggest(f=f, kinds=kinds):
 			ns = SimpleNamespace(
 				finding_type=f.get("finding_type") or "",
 				severity=f.get("severity") or "Low",
@@ -2231,6 +2236,7 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 				), timeout=_ai_call_timeout())
 			except ai_fix.AiFixError as e:
 				if e.kind not in ai_fix.AI_SKIP_KINDS:
+					kinds.append(e.kind)
 					raise
 				skipped = True
 			if not skipped:
@@ -2243,11 +2249,17 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 		)
 		if step_failed:
 			failures += 1
+			if first_failure is None:
+				first_failure = kinds[0] if kinds else ""
 
 	if failures:
+		if first_failure:
+			cause = f"The first failure was {first_failure}: {ai_fix.KIND_HINTS.get(first_failure, ai_fix.KIND_HINTS['unknown'])}"
+		else:
+			cause = "The first failure was an unexpected error."
 		context.warnings.append(
-			f"AI auto-suggest: {failures} finding(s) couldn't get a suggestion "
-			"(provider error or timeout). See Error Log, title \"optimus ai auto-suggest\"."
+			f"AI auto-suggest: {failures} finding(s) couldn't get a suggestion. {cause} "
+			"Search the Error Log for titles starting with \"optimus ai\"; each row says what to do."
 		)
 	if skipped_for_time:
 		context.warnings.append(
@@ -2453,6 +2465,476 @@ def _phase2_index_for(doc_or_docname) -> dict:
 		return {}
 
 
+_SESSION_COUNTER_FIELDS = frozenset({"ai_tokens_spent", "ai_refresh_count"})
+# The columns a counter matches the session on: ``name`` for a caller that knows the docname,
+# ``session_uuid`` for ai_fix's per-call recorder, which only has the worker's spend marker.
+_SESSION_COUNTER_KEYS = frozenset({"name", "session_uuid"})
+_COUNTER_SAVEPOINT = "optimus_ai_counter"
+
+
+def _session_increment_query(key: str, fieldname: str, n: int, *, by: str = "name"):
+	"""``UPDATE tabOptimus Session SET f = COALESCE(f, 0) + n WHERE <by> = key``: one portable
+	(MariaDB and Postgres) statement, never a stale read-modify-write, ``modified`` untouched.
+	``by`` is ``"name"`` or ``"session_uuid"``. Another field or column, an empty key or a count
+	that is not a non-negative int raises ValueError."""
+	if (
+		fieldname not in _SESSION_COUNTER_FIELDS or by not in _SESSION_COUNTER_KEYS
+		or type(n) is not int or n < 0 or not isinstance(key, str) or not key
+	):
+		raise ValueError("Invalid session counter increment")
+	from frappe.query_builder.functions import Coalesce
+
+	table = frappe.qb.DocType("Optimus Session")
+	field = table[fieldname]
+	return frappe.qb.update(table).set(field, Coalesce(field, 0) + n).where(table[by] == key)
+
+
+def _increment_session_counter(
+	key: str, fieldname: str, n: int, *, by: str = "name", title: str = "optimus ai counter",
+) -> None:
+	"""Add ``n`` to one session counter in the caller's transaction, inside a savepoint.
+
+	It never commits: the increment commits or rolls back with the caller's own writes. A count
+	of 0 or an empty ``key`` is a no-op that runs no SQL. When the UPDATE fails, only the counter
+	is rolled back (to the savepoint), the failure is logged once through
+	``ai_fix.log_ai_failure`` after the ``try`` (``title``, the session, the field and the amount)
+	and nothing is raised, so the billed answer the caller is about to save is kept. When the
+	rollback to the savepoint fails too, the transaction is already gone (a MariaDB deadlock rolls
+	it back whole) and the caller's writes with it: the counter error is logged and raised again.
+	An RQ job timeout always leaves as a fresh instance. The savepoint is released after a
+	successful UPDATE.
+
+	A statement-level failure (a serialization failure 40001, a lock wait timeout 1205, and on
+	Postgres a deadlock too) leaves the savepoint usable, so it is absorbed here: ``_add_ai_spend``
+	never raises it. The trade-off (owner decision D2): a transient lock error on the counter drops
+	that call's spend, and the Error Log row is all that records it. Only an error that has already
+	rolled back the whole transaction reaches the caller: a MariaDB deadlock (1213), or 1020
+	("Record has changed since last read"), which MariaDB 11.8 raises by default
+	(``innodb_snapshot_isolation``) when this transaction's read view is older than another
+	transaction's commit of the session row, and which also ends the whole transaction. Frappe
+	raises both as ``frappe.QueryDeadlockError``.
+
+	Rules for a caller that records spend itself (``_add_ai_spend``: ``_write_ai_answer`` for
+	Refresh AI suggestions, and the background refresh engine):
+
+	- never call the AI provider inside the transaction that holds the counter: the UPDATE keeps
+	  the session row locked until that transaction ends;
+	- write in one short transaction: this counter first, then the Finding row, then commit (the
+	  parent row before the child, the order ``Document.save`` locks them in);
+	- retry only that short transaction, after a full rollback, on ``frappe.QueryDeadlockError``
+	  (1213 or 1020 on MariaDB, a deadlock on Postgres) from the counter, the Finding write or the
+	  commit; never retry the provider call."""
+	if not key or not n:
+		return
+	query = _session_increment_query(key, fieldname, n, by=by)
+	from optimus.ai_fix import log_ai_failure
+
+	error = None
+	guard = safe_call.InterruptGuard()
+	try:
+		with guard:
+			frappe.db.savepoint(_COUNTER_SAVEPOINT)
+			query.run()
+			frappe.db.release_savepoint(_COUNTER_SAVEPOINT)
+	except Exception as exc:
+		error = exc
+	if guard.pending():
+		raise guard.interrupt()
+	if error is None:
+		return
+	rollback_error = None
+	guard = safe_call.InterruptGuard()
+	try:
+		with guard:
+			frappe.db.rollback(save_point=_COUNTER_SAVEPOINT)
+	except Exception as exc:
+		rollback_error = exc
+	if guard.pending():
+		error = rollback_error = None
+		raise guard.interrupt()
+	reference = {"docname": key} if by == "name" else {"session_uuid": key}
+	log_ai_failure(
+		title, error, **reference, field=fieldname, amount=n,
+		savepoint_rollback="done" if rollback_error is None else "failed: " + type(rollback_error).__name__,
+	)
+	if rollback_error is not None:
+		raise error
+
+
+def _add_ai_spend(docname: str, tokens) -> None:
+	"""Add one AI call's ``tokens`` (a count, or a usage dict's ``total_tokens``) to the session's
+	cumulative ``ai_tokens_spent``, in the caller's transaction (``_increment_session_counter``).
+
+	Only for a caller that attributed its calls explicitly (``suggest_fix`` or ``humanize_steps``
+	with ``session_uuid`` or ``docname``): ai_fix records nothing for those calls, so the caller
+	adds each call's tokens here exactly once, from the result's ``tokens`` or from a failure's
+	``usage``. A call without explicit attribution is already charged to the worker's ambient
+	session by ``ai_fix._record_session_spend``; adding it here too would count it twice. A count
+	that is not a non-negative int (``ai_fix._token_count``) or no ``docname`` is a no-op."""
+	from optimus.ai_fix import _token_count
+
+	if isinstance(tokens, dict):
+		tokens = tokens.get("total_tokens")
+	_increment_session_counter(docname, "ai_tokens_spent", _token_count(tokens), title="optimus ai spend")
+
+
+def _bump_ai_refresh_count(docname: str) -> None:
+	"""Count one AI refresh on the session (``ai_refresh_count`` + 1), atomically, in the caller's
+	transaction (``_increment_session_counter``). No-op without a ``docname``. A caller commits
+	the bump on its own, before the refresh calls the provider, so the bump itself does not hold
+	the session row during the refresh (``api.refill_ai_suggestions``). The refresh then locks
+	the row only inside each answer's short write (``_write_ai_answer``), never across a
+	provider call."""
+	_increment_session_counter(docname, "ai_refresh_count", 1, title="optimus ai refresh count")
+
+
+def _keep_session_counters(doc) -> None:
+	"""Keep the stored AI counters on ``doc`` before a session save writes its row.
+
+	``_increment_session_counter`` adds to ``ai_tokens_spent`` and ``ai_refresh_count`` in SQL
+	without touching ``modified``, so a document loaded before an increment would write the old
+	counts back on save (every analyze lost its Steps to Reproduce tokens this way), and Frappe's
+	modified check cannot notice. The stored values come from the copy ``Document.save`` has just
+	read with ``for_update=True`` (``check_if_latest``, Frappe v15 and v16), so no increment can
+	land between that read and the write. The Optimus Session controller calls this from
+	``before_validate``, which runs on every save (``ignore_validate`` included), so every save
+	path keeps them: analyze, Phase 2, the Desk form. A new document keeps its own values."""
+	previous = doc.get_doc_before_save()
+	if previous is None:
+		return
+	for fieldname in _SESSION_COUNTER_FIELDS:
+		setattr(doc, fieldname, getattr(previous, fieldname, None))
+
+
+def _system_timezone_name() -> str | None:
+	"""The site's System Settings timezone through Frappe's own helper
+	(``frappe.utils.get_system_timezone``; v15 and v16 both have it), or ``None`` when it
+	cannot be read. A job timeout raised while reading it escapes fresh."""
+	name = None
+	guard = safe_call.InterruptGuard()
+	try:
+		with guard:
+			from frappe.utils import get_system_timezone
+
+			name = str(get_system_timezone() or "") or None
+	except Exception:
+		name = None
+	if guard.pending():
+		raise guard.interrupt()
+	return name
+
+
+def _system_zone():
+	"""The site's timezone as a ``tzinfo``. When it cannot be read or is not a known zone,
+	UTC, with one line in the bench log (written after the ``try``, never inside an ``except``)."""
+	from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+	zone = None
+	name = _system_timezone_name()
+	if name:
+		try:
+			zone = ZoneInfo(name)
+		except (ZoneInfoNotFoundError, ValueError, OSError):
+			zone = None
+	if zone is None:
+		safe_call.log_error_line(
+			"optimus: the System Settings timezone could not be read, so a naive requested_at is read as UTC"
+		)
+		return timezone.utc
+	return zone
+
+
+def _requested_cutoff(requested_at) -> float:
+	"""The resume cutoff, as a POSIX timestamp, for the ``requested_at`` of
+	:func:`eligible_findings`; ``0.0`` (no cutoff) for ``None`` or an empty string.
+
+	A ``datetime`` or an ISO 8601 string (``Z`` and numeric offsets accepted). An aware value
+	keeps its own offset. A NAIVE value is read in the site's System Settings timezone, which
+	is how Frappe stores a Datetime field (a ``requested_at`` read from a document, or built
+	with ``frappe.utils.now_datetime()``). Any other type (``date``, a number, bytes) raises
+	``TypeError`` and an unreadable string raises ``ValueError``: a request time that
+	silently became "no cutoff" would bill every answer again.
+
+	A naive time inside the repeated hour when daylight saving ends resolves to its first
+	occurrence, so the cutoff can be up to an hour early. That only skips an answer generated
+	in that hour; it never asks again for one."""
+	if requested_at is None or requested_at == "":
+		return 0.0
+	if isinstance(requested_at, str):
+		try:
+			parsed = datetime.fromisoformat(requested_at.strip().replace("Z", "+00:00"))
+		except ValueError:
+			raise ValueError(f"requested_at is not an ISO 8601 date and time: {requested_at!r}") from None
+	elif isinstance(requested_at, datetime):
+		parsed = requested_at
+	else:
+		raise TypeError(f"requested_at must be a datetime or an ISO 8601 string, not {type(requested_at).__name__}")
+	if parsed.tzinfo is None:
+		parsed = parsed.replace(tzinfo=_system_zone())
+	try:
+		return parsed.timestamp()
+	except (OverflowError, OSError, ValueError):
+		raise ValueError(f"requested_at is out of range: {requested_at!r}") from None
+
+
+def _generated_timestamp(fix) -> float:
+	"""When a stored answer was made, as a POSIX timestamp. ``suggest_fix`` writes an aware
+	UTC time; a legacy NAIVE time is UTC too (not the system timezone). ``0.0`` when it is
+	absent or unreadable, which sorts the answer as the oldest and never skips it."""
+	value = fix.get("generated_at") if isinstance(fix, dict) else None
+	if not isinstance(value, (str, datetime)):
+		return 0.0
+	try:
+		parsed = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else value
+		return parsed.replace(tzinfo=timezone.utc).timestamp() if parsed.tzinfo is None else parsed.timestamp()
+	except (ValueError, OverflowError, OSError):
+		return 0.0
+
+
+def _impact_ms(row) -> float:
+	"""A finding's impact for sorting: ``0.0`` when it is absent, not a number or not finite."""
+	try:
+		impact = float(row_get(row, "estimated_impact_ms", 0) or 0)
+	except (TypeError, ValueError, OverflowError):
+		return 0.0
+	return impact if math.isfinite(impact) else 0.0
+
+
+_FIX_STATE_RANK = {ai_prompts.FIX_MISSING: 0, ai_prompts.FIX_OUTDATED: 1, ai_prompts.FIX_CURRENT: 2}
+
+
+class AiSelection(list):
+	"""What :func:`eligible_findings` returns: the chosen rows, in order, as a plain list,
+	plus ``gated`` and ``excluded``, the counts :func:`_ai_selection` found among ALL the rows
+	given (not only the chosen ones). ``gated`` counts the AI-eligible findings (and Framework
+	N+1) the report answers with Optimus's own advice or a note; ``excluded`` counts the
+	AI-eligible findings whose type Optimus Settings excludes. Read ``.gated`` and ``.excluded``
+	BEFORE slicing, sorting or filtering the result: those operations return a plain ``list``
+	without them."""
+
+	gated: int = 0
+	excluded: int = 0
+
+
+def eligible_findings(rows, cfg, *, regenerate_all=False, requested_at=None, include_outdated=True) -> AiSelection:
+	"""The findings an AI refresh should (re)ask about, in the order to ask, each as the
+	original child row, plus the gated and excluded counts (:class:`AiSelection`).
+
+	Both Refresh paths use it (``_run_ai_backfill`` today, the background refresh later), so
+	they cannot disagree. Rows are first narrowed by :func:`_ai_selection` (the Excluded
+	finding types in ``cfg``, then ``ai_fix.llm_gate_note``); ``cfg=None`` reads Optimus
+	Settings. Then each row's stored answer is classified by ``ai_prompts.fix_state``, the
+	one definition shared with the report:
+
+	- ``missing`` (nothing stored) is always chosen;
+	- ``outdated`` (unparseable, an older or non-integer ``prompt_version``, an error record or
+	  no suggestion text; NOT a newer version, NOT a guardrail-fallback answer) is chosen when
+	  ``include_outdated`` or ``regenerate_all``;
+	- ``current`` is chosen only when ``regenerate_all``.
+
+	``requested_at`` (see :func:`_requested_cutoff`) resumes an interrupted run: a stored
+	answer generated at or after it is skipped, missing rows never are.
+
+	Order: missing, then outdated, then current; inside each, severity (High first; a missing
+	or unknown severity last), then the larger ``estimated_impact_ms``, then the older answer.
+	``_run_ai_backfill`` asks in exactly this order: it takes the list as returned, only cut to
+	its cap."""
+	from optimus import ai_fix
+
+	cutoff = _requested_cutoff(requested_at)
+	eligible, gated, excluded = _ai_selection(
+		rows or (), ai_fix,
+		type_of=lambda r: ai_fix.gate_input(r)["finding_type"],
+		gate=lambda r: ai_fix.llm_gate_note(ai_fix.gate_input(r)),
+		cfg=cfg,
+	)
+	chosen = []
+	for row in eligible:
+		state, fix = ai_prompts.fix_state(row_get(row, "llm_fix_json"))
+		if state == ai_prompts.FIX_CURRENT and not regenerate_all:
+			continue
+		if state == ai_prompts.FIX_OUTDATED and not (include_outdated or regenerate_all):
+			continue
+		generated = _generated_timestamp(fix)
+		if state != ai_prompts.FIX_MISSING and cutoff and generated >= cutoff:
+			continue
+		chosen.append((_refresh_order_key(row, state, generated), row))
+	chosen.sort(key=lambda pair: pair[0])
+	out = AiSelection(row for _, row in chosen)
+	out.gated, out.excluded = gated, excluded
+	return out
+
+
+def _refresh_order_key(row, state: str, generated: float) -> tuple:
+	"""The order Refresh asks in: state (missing, outdated, current), severity, larger impact,
+	older answer."""
+	severity = row_get(row, "severity")
+	# A blank severity ranks as Low, like the report and the analyze-time order; anything else
+	# unrecognised goes last.
+	if severity is None or severity == "":
+		severity = "Low"
+	rank = SEVERITY_ORDER.get(severity, UNKNOWN_SEVERITY_RANK) if isinstance(severity, str) else UNKNOWN_SEVERITY_RANK
+	return (_FIX_STATE_RANK[state], rank, -_impact_ms(row), generated)
+
+
+def action_recording_map(actions) -> dict:
+	"""``action_ref`` is a zero-based position, unlike Frappe's one-based idx."""
+	return {i: {"recording_uuid": row_get(action, "recording_uuid")} for i, action in enumerate(actions or ())}
+
+
+def _light_recording_map(doc) -> dict:
+	"""``{uuid: rec}`` of the session's persisted bundle, with nothing else kept: the parsed
+	bundle (96% trees and sidecars) is a local of this function, so it is freed on return."""
+	entries = _bundle_entries(_load_recordings_bundle(doc))
+	return {
+		uuid: entry["rec"]
+		for uuid, entry in entries.items()
+		if isinstance(entry, dict) and isinstance(entry.get("rec"), dict)
+	}
+
+
+def load_recordings_light(doc, uuids=None, *, memo=None) -> list[dict]:
+	"""Load only recorder JSON, without deserializing trees or sidecars.
+
+	A caller-owned ``memo`` dict reads the persisted bundle at most once per
+	session/file, however many calls share it (a refresh's slices, the Steps call and the
+	re-render). The memo keeps only ``{uuid: rec}``, never the parsed bundle, so it holds
+	about the size of the recordings and not the trees. The result copies each recording
+	without its ``pyi_session``, ``sidecar`` and ``tree_b64``. An explicitly empty UUID list
+	requests no recordings. Missing or malformed records are omitted; Redis errors fall
+	back to the bundle.
+	"""
+	if uuids is None:
+		uuids = [row_get(action, "recording_uuid") for action in (row_get(doc, "actions") or ())]
+	uuids = list(dict.fromkeys(uuid for uuid in uuids if isinstance(uuid, str) and uuid))
+	if not uuids:
+		return []
+	memo = {} if memo is None else memo
+	memo_key = ("recordings", row_get(doc, "name"), row_get(doc, "session_uuid"), row_get(doc, "recordings_file"))
+	result = []
+	redis_failed = False
+	session_uuid = row_get(doc, "session_uuid")
+	for uuid in uuids:
+		rec = None
+		if not redis_failed:
+			# a failed read is logged once (after the try) and the rest come from the bundle
+			rec, redis_failed = _run_ai_step(
+				lambda: frappe.cache.hget(RECORDER_REQUEST_HASH, uuid),
+				title="optimus ai recording cache read", session_uuid=session_uuid,
+			)
+		if not isinstance(rec, dict) or not rec:
+			if memo_key not in memo:
+				memo[memo_key] = _light_recording_map(doc)
+			rec = memo[memo_key].get(uuid)
+		if isinstance(rec, dict) and rec:
+			result.append({key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}})
+	return result
+
+
+# How many times one answer's short write (its spend, the Finding row, the commit) is tried in all
+# when the database rolled the whole transaction back (``frappe.QueryDeadlockError``).
+AI_WRITE_ATTEMPTS = 3
+
+
+def _whole_transaction_rolled_back(exc) -> bool:
+	"""True when ``exc`` is ``frappe.QueryDeadlockError``: the database ended the whole transaction
+	(MariaDB: a deadlock, 1213, or 1020 "Record has changed since last read" under
+	``innodb_snapshot_isolation``, on by default since 11.8; Postgres: a deadlock), so a short write
+	can start again from a rollback. Frappe raises it for those codes on v15 and v16."""
+	deadlock = getattr(frappe, "QueryDeadlockError", None)
+	return isinstance(deadlock, type) and isinstance(exc, deadlock)
+
+
+def _write_ai_answer(docname: str, finding: str, blob: str | None, tokens: int, *, session_uuid=None) -> bool:
+	"""Write one finding's AI answer and the spend of the call that made it in one short
+	transaction, and commit it. True once it committed.
+
+	The order is the counter rule's (``_increment_session_counter``): the session's spend first
+	(``_add_ai_spend``, ``tokens``), then the Finding row (``blob``, its ``llm_fix_json``; None for a
+	billed failure, which records only its spend), then ``safe_commit``. The answer and its spend
+	commit together or not at all. It first commits what the caller's transaction holds (reads
+	and, on Postgres, an Error Log row: every earlier answer is already committed), so the write
+	starts without a read view from before the provider call, which a 1020 needs.
+
+	When the database rolls the whole transaction back (``_whole_transaction_rolled_back``), the
+	write is rolled back and tried again from the start, ``AI_WRITE_ATTEMPTS`` times in all; the
+	provider is never asked again. Any other failure, or the last attempt's, is rolled back and
+	logged once after the ``try`` (``attempts``, and the ``tokens`` that are then not recorded),
+	the answer is not saved, and the caller counts the finding as failed. When the counter had
+	logged its own rows for failed attempts (``savepoint_rollback=failed``) and a retry then
+	committed, ``outcome=committed on attempt N`` is appended to each of those rows, so none
+	reads as lost tokens.
+
+	``safe_commit`` can raise after the SQL COMMIT has succeeded (an ``after_commit`` callback
+	that fails, a Redis timeout). When the final commit raises anything but a whole-transaction
+	rollback, the Finding's ``llm_fix_json`` is read again (a fresh query after the rollback,
+	``_answer_committed``): when it is this answer, the answer and its spend are committed, so
+	it returns True and the error is logged with ``outcome=committed ...``. A billed failure
+	(``blob`` None) has no answer to read back: its row says the error came after the COMMIT
+	and the tokens may be recorded. An RQ job timeout leaves as a fresh instance."""
+	from optimus.ai_fix import _LOGGED_ATTR, log_ai_failure
+
+	error = None
+	logged: list = []  # every counter error the counter logged itself, one row each
+	attempt = 0
+	committing = False  # the error, if any, came from the final commit
+	while attempt < AI_WRITE_ATTEMPTS:
+		attempt += 1
+		error = None
+		committing = False
+		guard = safe_call.InterruptGuard()
+		try:
+			with guard:
+				if attempt == 1:
+					safe_commit()
+				_add_ai_spend(docname, tokens)
+				if blob is not None:
+					frappe.db.set_value("Optimus Finding", finding, "llm_fix_json", blob)
+				committing = True
+				safe_commit()
+		except Exception as exc:
+			error = exc
+		if guard.pending():
+			error = None
+			logged.clear()
+			raise guard.interrupt()
+		if error is None:
+			break
+		if getattr(error, _LOGGED_ATTR, False):
+			logged.append(error)
+		safe_call.best_effort(lambda: frappe.db.rollback(), None)
+		if not _whole_transaction_rolled_back(error):
+			break
+	reference = {"session_uuid": session_uuid, "docname": docname, "finding": finding}
+	after_commit = error is not None and committing and not _whole_transaction_rolled_back(error)
+	if error is None or (after_commit and blob is not None and _answer_committed(finding, blob)):
+		if error is not None:
+			log_ai_failure(
+				"optimus ai backfill", error, **reference,
+				outcome="committed: the error came after the COMMIT, and the answer and its tokens are saved",
+			)
+		for counter_error in logged:
+			log_ai_failure("optimus ai backfill", counter_error, **reference, outcome=f"committed on attempt {attempt}")
+		error = None
+		logged.clear()
+		return True
+	if after_commit:
+		reference["outcome"] = "unknown: the error came from the COMMIT, so these tokens may well be recorded"
+	log_ai_failure("optimus ai backfill", error, **reference, attempts=attempt, tokens=tokens)
+	error = None
+	logged.clear()
+	return False
+
+
+def _answer_committed(finding: str, blob: str) -> bool:
+	"""True when the Finding's committed ``llm_fix_json`` is ``blob`` (it carries its own
+	``generated_at``, so an earlier answer never matches). A fresh read after the caller's
+	rollback, never a cached value; False when it cannot be read. An RQ job timeout escapes fresh."""
+	return safe_call.best_effort(
+		lambda: frappe.db.get_value("Optimus Finding", finding, "llm_fix_json") == blob, False,
+	) is True
+
+
 def _run_ai_backfill(doc, *, cap: int | None = None,
                      time_budget: float = AI_BACKFILL_TIME_BUDGET_SECONDS,
                      regenerate_all: bool = False) -> dict:
@@ -2464,6 +2946,14 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	suggestion kept on a mid-run failure, since writes happen only on success).
 	Requires ``ai_fix.is_available()`` (returns all-zeros otherwise).
 
+	Each call is attributed to the session explicitly (``session_uuid`` and ``docname``), so ai_fix
+	charges nothing; each answer and its spend (a billed failure's too) are then written and
+	committed in one short transaction (``_write_ai_answer``), before the next provider call.
+	No transaction stays open across a provider call, a database rollback can never take an
+	earlier answer with it, and ``added`` counts only committed answers. A ``doc`` without a
+	``name`` cannot be written to by name: its calls stay unattributed (charged to the worker's
+	ambient session by ai_fix) and only the answers go through the short write.
+
 	``cap``: max findings this run. None uses Optimus Settings'
 	``ai_auto_suggest_max``; 0 means no cap (as many as fit ``time_budget``).
 	Best-effort and time-budgeted (callers run in a web request). Returns
@@ -2472,7 +2962,9 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	cap, ``gated`` the AI-eligible findings (and Framework N+1) the report answers with
 	Optimus's own advice or a note instead (index findings are not counted),
 	``excluded`` the AI-eligible ones whose type Optimus Settings excludes and ``skipped_ineligible`` the ones ``suggest_fix`` refused with a skip
-	kind (``ai_fix.AI_SKIP_KINDS``). Missing or outdated suggestions go first.
+	kind (``ai_fix.AI_SKIP_KINDS``). Which findings, and in what order (missing, outdated, then
+	current; severity, impact, age), is :func:`eligible_findings`, the one selection. It ends
+	with a commit, so the step after it (the Steps call) never runs inside its transaction.
 	"""
 	out = {
 		"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0,
@@ -2485,23 +2977,16 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	if not ai_fix.is_available(section="findings"):
 		return out
 
-	rows = list(getattr(doc, "findings", None) or [])
-	selected, out["gated"], out["excluded"] = _ai_selection(
-		rows, ai_fix,
-		type_of=lambda r: getattr(r, "finding_type", "") or "",
-		gate=lambda r: ai_fix.llm_gate_note(ai_fix.gate_input(r)),
+	# The one selection Refresh uses (eligible_findings): a missing-only run asks about
+	# findings with nothing stored, regenerate_all about every eligible one, missing first, then
+	# outdated, then current, so repeated Refreshes reach every finding.
+	chosen = eligible_findings(
+		list(getattr(doc, "findings", None) or []), None, regenerate_all=regenerate_all, include_outdated=False,
 	)
-	chosen = [r for r in selected if regenerate_all or not ((getattr(r, "llm_fix_json", None) or "").strip())]
+	out["gated"], out["excluded"] = chosen.gated, chosen.excluded
 	out["total_pending"] = len(chosen)
 	if not chosen:
 		return out
-	# Missing or outdated suggestions first, so repeated Refreshes reach every finding,
-	# then the usual severity and impact order.
-	chosen.sort(key=lambda r: (
-		_fix_is_current(r),
-		SEVERITY_ORDER.get(getattr(r, "severity", None) or "Low", 3),
-		-(getattr(r, "estimated_impact_ms", 0) or 0),
-	))
 	if cap is None:
 		try:
 			from optimus.settings import get_config
@@ -2511,6 +2996,9 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	if cap and cap > 0:
 		chosen = chosen[:cap]
 
+	session_uuid = getattr(doc, "session_uuid", None) or None
+	docname = getattr(doc, "name", None) or None
+	attribution = {"session_uuid": session_uuid, "docname": docname} if docname else {}
 	file_cache: dict = {}
 	phase2_index = _phase2_index_for(doc)
 	evidence_lookup, tracked = _ai_evidence_scope()
@@ -2519,54 +3007,44 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 		if time.monotonic() - started > time_budget:
 			out["skipped_time"] = len(chosen) - idx
 			break
+		finding = getattr(r, "name", "") or ""
+		asked = {"skipped": False, "usage": None}
 
-		def _suggest(r=r):
-			skipped = False
+		def _ask(r=r, asked=asked):
 			try:
-				result = ai_fix.suggest_fix(_ai_payload_for_finding(
+				return ai_fix.suggest_fix(_ai_payload_for_finding(
 					r, file_cache, phase2_index=phase2_index, evidence_lookup=evidence_lookup, tracked_apps=tracked,
-				))
+				), **attribution)
 			except ai_fix.AiFixError as e:
+				# a failure after a billed reply still cost its tokens: the write below records them
+				asked["usage"] = e.usage
 				if e.kind not in ai_fix.AI_SKIP_KINDS:
 					raise
-				skipped = True
-			if skipped:
-				out["skipped_ineligible"] += 1
-				return
-			blob = json.dumps(result, default=str)
-			frappe.db.set_value("Optimus Finding", r.name, "llm_fix_json", blob)
+				asked["skipped"] = True
+			return None
+
+		result, ask_failed = _run_ai_step(
+			_ask, title="optimus ai backfill", session_uuid=session_uuid, finding=finding,
+		)
+		if asked["skipped"]:
+			out["skipped_ineligible"] += 1
+			continue
+		blob = json.dumps(result, default=str) if not ask_failed and isinstance(result, dict) else None
+		usage = result.get("tokens") if blob is not None else asked["usage"]
+		# an unattributed call was charged to the ambient session by ai_fix already
+		tokens = ai_fix._token_count(usage.get("total_tokens")) if attribution and isinstance(usage, dict) else 0
+		saved = (blob is not None or tokens > 0) and _write_ai_answer(
+			docname, finding, blob, tokens, session_uuid=session_uuid,
+		)
+		if blob is not None and saved:
 			r.llm_fix_json = blob
 			out["added"] += 1
-
-		_, step_failed = _run_ai_step(
-			_suggest, title="optimus ai backfill",
-			session_uuid=getattr(doc, "session_uuid", None),
-			finding=getattr(r, "name", "") or "",
-		)
-		if step_failed:
+		elif blob is not None or ask_failed:
 			out["failed"] += 1
-	if out["added"]:
-		try:
-			safe_commit()
-		except Exception:
-			pass
+	# Nothing of this refresh stays open, whatever happened above: the Steps call that follows
+	# must never run while this transaction holds the session row.
+	safe_call.best_effort(safe_commit, None)
 	return out
-
-
-def _backfill_ai_suggestions(doc) -> bool:
-	"""Auto-suggest-gated AI backfill: run ``_run_ai_backfill`` only when Optimus
-	Settings has ``ai_enabled`` and ``ai_auto_suggest``. Returns True if any
-	suggestion was added. The explicit AI > Refresh AI suggestions action bypasses this
-	gate by calling ``_run_ai_backfill`` directly."""
-	try:
-		from optimus.settings import get_config
-		cfg = get_config()
-	except Exception:
-		return False
-	if not (getattr(cfg, "ai_enabled", False) and getattr(cfg, "ai_suggest_findings", True)
-	        and getattr(cfg, "ai_auto_suggest", False)):
-		return False
-	return _run_ai_backfill(doc)["added"] > 0
 
 
 # v0.5.1: auto-generated "Steps to Reproduce" from captured actions. The
@@ -2771,7 +3249,7 @@ def _build_humanized_notes_html(
 		lambda: ai_fix.humanize_steps(
 			actions, session_title=session_title, usage_out=usage_out, timeout=_ai_call_timeout(),
 		),
-		title="optimus humanize_steps",
+		title="optimus ai humanize_steps",
 		session_uuid=getattr(frappe.local, "_optimus_spend_session", None),
 	)
 	if step_failed:
@@ -3125,21 +3603,25 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 def _load_recordings_bundle(session_doc):
 	"""Load the persisted recordings snapshot for a session as a parsed bundle
 	dict, for passing to ``_fetch_recordings(recordings_bundle=...)`` once Redis
-	is cleaned up. None when there's no snapshot or it can't be read."""
+	is cleaned up. None when there's no snapshot or it can't be read (the failure
+	is logged once)."""
 	import gzip
 
 	url = getattr(session_doc, "recordings_file", None)
 	if not url:
 		return None
-	try:
+
+	def _read():
 		file_doc = frappe.get_doc("File", {"file_url": url})
 		with open(file_doc.get_full_path(), "rb") as fh:
 			raw = fh.read()
 		bundle = json.loads(gzip.decompress(raw).decode("utf-8"))
 		return bundle if isinstance(bundle, dict) else None
-	except Exception:
-		frappe.log_error(title="optimus load recordings bundle")
-		return None
+
+	bundle, _failed = _run_ai_step(
+		_read, title="optimus ai load recordings bundle", session_uuid=getattr(session_doc, "session_uuid", None),
+	)
+	return bundle
 
 
 def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:

@@ -82,6 +82,29 @@ class FakeCache:
 		self.ttls[key] = seconds
 		return True
 
+	def set(self, key, value, nx=False, ex=None):
+		"""Redis ``SET``: with ``nx`` only a missing key is written (None otherwise); values are
+		stored as bytes, as Redis returns them."""
+		self.calls.append(("set", key, value, nx, ex))
+		if nx and key in self.store:
+			return None
+		self.store[key] = value.encode() if isinstance(value, str) else value
+		if ex is not None:
+			self.ttls[key] = ex
+		return True
+
+	def get(self, key):
+		self.calls.append(("get", key))
+		return self.store.get(key)
+
+	def delete(self, *keys):
+		self.calls.append(("delete", *keys))
+		removed = 0
+		for key in keys:
+			removed += int(self.store.pop(key, None) is not None)
+			self.ttls.pop(key, None)
+		return removed
+
 
 class FakeDoc(SimpleNamespace):
 	"""Optimus Session stand-in: an attribute bag plus ``append`` for child tables."""

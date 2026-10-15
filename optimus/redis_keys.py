@@ -246,6 +246,16 @@ def user_rate_limit(action: str, user: str, window: int) -> str:
 	return f"optimus:ratelimit:{action}:{window}:{user}"
 
 
+def ai_refresh_inflight(session_uuid: str) -> str:
+	"""Per-session single-flight flag for Refresh AI suggestions (``api.refill_ai_suggestions``).
+	Value: the running refresh's random token (raw string). Taken with ``SET NX EX`` before the
+	refresh counts itself or calls the provider, so a second refresh of the same session is
+	refused while it runs; released in a ``finally`` only while Redis still holds that token.
+	TTL: the longest one refresh can run (``api._refresh_flight_ttl``), so the flag of a killed
+	worker clears itself."""
+	return f"optimus:ai_refresh:{session_uuid}"
+
+
 # ---------------------------------------------------------------------------
 # KEY_PATTERNS used by the audit test + REDIS-SCHEMA.md drift check
 # ---------------------------------------------------------------------------
@@ -285,4 +295,5 @@ KEY_PATTERNS: tuple[str, ...] = (
 	"optimus_settings_cached",
 	"optimus:schema_version",
 	"optimus:ratelimit:<action>:<window>:<user>",
+	"optimus:ai_refresh:<session_uuid>",
 )

@@ -8,6 +8,228 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.69] - 2026-10-03
+
+### Changed
+
+- Classify AI provider errors consistently. Request-validation retries can
+  remove temperature or rename the output-token parameter, at most once each,
+  within a shared request budget. Network failures are not retried. Known
+  reasoning models keep the provider-aware output cap; inline thinking is
+  removed before an answer is processed.
+- A prompt that does not fit the model's context window is a `context`
+  failure, before sending or from the provider; it was `config`. A window too
+  small for any Optimus prompt stays `config`, and an unknown provider is now
+  `config` (it was `unknown`). `AiFixError.fatal` stays True for `auth`,
+  `quota`, `not_found` and `config` (`AI_FATAL_KINDS`) and is the one list of
+  failures that need the operator first; `context` is not fatal, so one
+  oversized prompt never stops the other findings.
+- A content-moderation refusal is a new, non-fatal `refused` kind: a 400 or
+  403 whose reply says the input was flagged (OpenRouter's moderation 403,
+  with `flagged_input`) or Azure's `content_filter`. A flagged prompt was
+  `auth` (fatal) on a 403; any other 401 or 403 stays `auth`.
+- AI failure messages are translated, say what happened and what to do next.
+  A context failure names the cause and, for a hosted provider, no longer
+  points at Ollama settings. A timeout names the request's whole budget in
+  whole seconds, not the fraction a retry or a guardrail re-ask had left. A
+  connect timeout that had the full 10 seconds to connect (as the first
+  request of a 10-second Request timeout does) is a reachability
+  (`transport`) failure, not a slow model; one that had less of the request's
+  budget left (a parameter retry, a redirect, a re-ask) is a `timeout`. A
+  rejected request names the Base URL only for a provider whose Base URL you
+  set, and a hosted provider's 404 names only the Model (its Base URL is
+  built in). A reply with no text, or an empty one, says to try again or
+  choose another Model. A timeout says where Request timeout (seconds) lives:
+  Optimus Settings > AI Fix Suggestions > Privacy & Operations. The provider's
+  reply follows as "The provider replied: ...", without the old ".:" join. An
+  unexpected error names only its type, and its Error Log row records where it
+  happened as plain `file:line:function` frames. A transport failure's row
+  keeps only the error types (`ConnectionError (NameResolutionError)`), never
+  the message, which can quote a URL that carries a key.
+- The guardrail re-ask reuses the parameter changes its first call needed
+  (temperature dropped, `max_completion_tokens`), so it no longer repeats a
+  rejected request. Nothing is kept from one suggestion to the next.
+- Regenerate Reports uses stored answers and does not call the model. Report
+  regeneration and step humanization read recording JSON without loading
+  Python trees or sidecars. Use Refresh AI suggestions for new answers. Its
+  confirmation now says so: it does not re-run the analyzer and does not call
+  the AI provider, saved AI suggestions are kept, and a Ready session is
+  pointed at AI > Refresh AI suggestions when AI is enabled (a Failed session,
+  or a site with AI off, is not, because the button is not shown there).
+  README and AI-FIXING say the same.
+- Phase 2 no longer asks the AI for fixes for the Hot Line findings it adds
+  (its report re-render used to fill missing suggestions when AI suggestions
+  were on by default). Run AI > Refresh AI suggestions on the Ready session to
+  fill them in; the background refresh will queue a missing-only refresh for
+  it.
+- The Error Log row of a failed AI call opens with `kind=`, `fatal=` and a
+  short fixed `hint=` for the kind and adds `tokens=` when the failed call was
+  billed. A provider failure's row (`optimus ai_fix`) also has the request's
+  `provider=`, `where=` and `status=`, and, for a call that went through the
+  parameter retries, `attempts=` and `dropped=` (the parameters changed); a
+  failure after the reply arrived is the step's row and has no request lines.
+  Every AI Error Log title now starts with `optimus ai`, so one search finds
+  them all: `optimus humanize_steps`, `optimus humanize_steps fetch`,
+  `optimus AI re-render`, `optimus regenerate_reports fetch`, `optimus
+  recording cache read`, `optimus load recordings bundle` and `phase 2
+  re-render failed` are now `optimus ai humanize_steps`, `optimus ai
+  humanize_steps fetch`, `optimus ai re-render`, `optimus ai
+  regenerate_reports fetch`, `optimus ai recording cache read`, `optimus ai
+  load recordings bundle` and `optimus ai phase 2 re-render`. The analyze
+  warning, the Refresh toast and AI-FIXING say to search for titles starting
+  with `optimus ai`, and AI-FIXING section 5.3 lists every title (a test keeps
+  that list equal to the titles the code writes). The runbook table in 6.5
+  gives every kind, its `fatal=` value as the row spells it (`True` or
+  `False`), the symptom and the action. The reply body is never in a row.
+- The analyze-time warning for findings that got no AI suggestion names the
+  first failure's kind and what to do (for example "The first failure was
+  quota: The provider account is out of credit or quota. Top it up, then
+  refresh."), instead of "provider error or timeout" for every failure.
+- The model-window figures in the AI-FIXING troubleshooting entry are
+  current: about 2,760 tokens for a fix suggestion and 2,168 for the Steps to
+  Reproduce rewrite.
+- Internal: the recording readers and Phase 2's re-render use the one
+  capture-then-log helper (`analyze._run_ai_step`) and the shared interrupt
+  guard (`safe_call.InterruptGuard`); an RQ job timeout in a recording read now
+  writes its Error Log row before it stops the job. The unused
+  `_backfill_ai_suggestions` is removed.
+- One selection of the findings an AI refresh asks about
+  (`analyze.eligible_findings`; `_run_ai_backfill` now uses it, so there is no
+  second copy). A stored answer is `missing` (nothing stored), `current` (an
+  answer with suggestion text made with this prompt version or a newer one,
+  the same rule as the report's "earlier version" footer; a newer answer is
+  not downgraded, and a float, boolean or string version is outdated) or
+  `outdated` (unparseable, an older version or no suggestion text). An answer
+  whose code the guardrail removed is a usable, current answer. The Refresh AI
+  suggestions button still regenerates every eligible finding
+  (`regenerate_all=True`, so it also overwrites current and newer answers);
+  skipping current answers applies to a selection made without
+  `regenerate_all`, which the background refresh will use. Order: missing,
+  then outdated, then current; inside each, High severity first (a blank
+  severity as Low, an unrecognised one last), then the larger impact, then the
+  older answer. It returns a list that also carries `gated` and `excluded`,
+  the counts `refill_ai_suggestions` reports. Corrupt stored text is now
+  outdated in both paths (a missing-only run leaves it, a full regenerate
+  redoes it).
+- The resume time of `eligible_findings(requested_at=)` is read the way Frappe
+  stores it: a naive datetime is in the site's System Settings timezone, an
+  aware one keeps its offset (it was read as UTC, which skewed the cutoff by
+  the site's UTC offset). A value of another type, or a string that is not a
+  date, raises instead of silently meaning "no cutoff". Stored `generated_at`
+  times are UTC.
+- Reading recordings for report regeneration and the Steps rewrite keeps only
+  the recordings in memory (about 78 MB for a 1 GB bundle on a real site, from
+  1.06 GB), reads the bundle once per Refresh across the Steps rewrite and the
+  re-render, and shares the bundle shape reader with the full loader, so the
+  older bare uuid map is read the same way in both.
+- Add explicit session
+  attribution (`session_uuid` / `docname` on `suggest_fix` and `humanize_steps`),
+  and portable atomic usage/counter helpers for background work. Refresh AI
+  suggestions now attributes its fix calls explicitly and records each call's
+  tokens with its answer (see Fixed); analyze and the Steps to Reproduce
+  rewrite are still charged to the session being analyzed or refreshed. A
+  counter increment runs in a savepoint inside the caller's transaction: a
+  failed increment is rolled back alone and logged, and the answer it paid for
+  is kept; that call's tokens are then missing and the Error Log row records
+  them. It is raised only when the whole transaction is already gone (a
+  MariaDB deadlock, 1213, or 1020 "Record has changed since last read", which
+  MariaDB 11.8 raises by default; Frappe raises both as
+  `frappe.QueryDeadlockError`), and only to a caller that records spend
+  itself, which tries its short write again: a per-call charge keeps the
+  reply. An explicitly attributed call's Error Log rows are filed under its
+  own session (a `docname` alone is enough), never under the session the
+  worker served last; only an unattributed call's rows use that one. A billed
+  call stopped by an RQ job timeout leaves `suggest_fix` / `humanize_steps`
+  with its `usage` on the fresh timeout, and only there: the caller reads it
+  from the exception it catches.
+- Count each AI call's tokens once, into one session. A call without explicit
+  attribution is charged to the session being analyzed or refreshed; a caller
+  that attributes a call explicitly records its tokens itself
+  (`analyze._add_ai_spend`), and that call is never charged to another session.
+  The Steps to Reproduce rewrite is charged whether or not its caller asks for
+  the usage (`humanize_steps(usage_out=None)` used to skip the charge), and a
+  failed rewrite reports only its own tokens.
+
+### Fixed
+
+- A Phase 2 run that was saved as Ready is never marked Failed afterwards. If
+  the report re-render that follows fails, or the job is interrupted during
+  it, the run stays Ready with the warning "The report re-render did not
+  finish. Use Regenerate Reports on this session to refresh it."; the job
+  timeout still stops the job, and the run's Redis state is dropped before the
+  re-render instead of after it. The same holds for an error that leaves the
+  save after its COMMIT (an `after_commit` callback that fails, a job timeout
+  in that instant): the run's status is read again from the database, and a
+  committed Ready run keeps its status and gets the warning. A session deleted while its Phase 2 run was
+  being analyzed leaves one line in the `optimus` log instead of nothing.
+- Keep reported token usage when a response is unusable or later validation
+  fails. Preserve fresh RQ timeouts and the existing failure-log marker.
+- Keep recording-read failure logs outside exception handlers, and propagate
+  RQ timeouts instead of swallowing them. A Redis read failure falls back to
+  the saved recording bundle.
+- Phase 2 report regeneration uses the internal render helper without a
+  second HTTP permission/rate-limit gate. The 24-hour analysis health metric
+  uses the session stop time, independent of later AI updates.
+- Keep the Steps to Reproduce tokens in a session's AI Tokens Spent. Analyze
+  added them, then saved the session with the count it had loaded earlier, so
+  every analyzed session lost them. Any save of a session now keeps the stored
+  AI Tokens Spent and AI Refresh Count.
+- Record AI token spend with portable SQL that also runs on Postgres. A failed
+  spend update writes an Error Log row (`optimus ai spend`) instead of being
+  dropped silently, and an RQ job timeout during it stops the job.
+- Count a Refresh AI suggestions run with one atomic increment, committed
+  before the refresh calls the provider, instead of a read-modify-write.
+- Refresh AI suggestions writes each answer and the tokens of the call that
+  made it in one short transaction, committed before it asks about the next
+  finding. On MariaDB 11.8 (`innodb_snapshot_isolation` is on by default), a
+  write to the session row by anything else during a refresh (a Phase 2 run
+  finishing, a Desk save) made the next spend charge fail with 1020 ("Record
+  has changed since last read"), which rolls back the whole transaction: every
+  answer of that refresh not yet committed was lost, and the toast still
+  counted it as added. The write now starts after the provider call's read
+  view is gone, is tried again from a rollback when the database ends the
+  whole transaction (`frappe.QueryDeadlockError`, at most three tries; the
+  provider is never asked again), and `added` counts only committed answers
+  (an error raised after the COMMIT, by an `after_commit` callback, is
+  checked by reading the answer back, so a saved answer still counts).
+  A billed reply that turned out unusable is charged at once. No transaction
+  stays open across a provider call, so the Steps to Reproduce call no longer
+  runs while the refresh holds the session row.
+- A failed Steps to Reproduce rewrite on Refresh AI suggestions now writes an
+  Error Log row (`optimus ai humanize_steps`, as at analyze) and the toast says
+  why ("Steps to Reproduce were not rewritten: ..."); it was silent. The
+  reason is shown as text, never as HTML. An unexpected error there no longer
+  fails the whole refresh after its answers were saved, and the tokens of a
+  billed but unusable reply are committed at once.
+- Only one Refresh AI suggestions runs per session at a time. A second click
+  while one runs is answered "A refresh is already running for this session"
+  at once, before the refresh is counted or the provider is called; two
+  overlapping refreshes billed every finding twice and overwrote each other's
+  answers. The flag is a Redis key (`optimus:ai_refresh:<session_uuid>`, taken
+  with `SET NX EX`) that only the refresh holding it releases; it expires on
+  its own after the longest a refresh can run, and a Redis failure lets the
+  refresh run without it.
+- Treat Moonshot/Kimi's HTTP 429 `exceeded_current_quota_error` (a spent
+  balance or a suspended account) as exhausted quota, not a rate limit to wait
+  out.
+- Recognise more context-limit replies: Anthropic's "prompt is too long" and
+  "input length and `max_tokens` exceed context limit", Moonshot's "exceeded
+  model token limit", and the `context_length_exceeded` and
+  `exceed_context_size_error` codes. They are no longer sent through the
+  parameter retries. `max_tokens` is renamed to `max_completion_tokens` only
+  when the reply says the parameter is not supported (or carries the
+  `unsupported_parameter` code and names `max_tokens`), not for a value error
+  such as "max_tokens is too large".
+
+### Upgrade notes
+
+- Background refresh jobs and persistence before optional AI work are still
+  pending follow-up changes. Refresh remains synchronous in this change.
+- Request read timeouts measure socket inactivity, not a strict wall-clock
+  deadline. Worker time limits remain necessary.
+- No migration. Steps to Reproduce tokens already lost on earlier sessions
+  are not restored.
+
 ## [0.12.68] - 2026-10-02
 
 ### Changed

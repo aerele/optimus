@@ -69,6 +69,8 @@ function optimus_fmt_ms(ms, decimals) {
 // whether the button appears at all; per-section toggles are honored
 // inside the server endpoint (a toggle-off section is skipped silently).
 function render_ai_buttons(frm) {
+	// Whether the AI button is offered (read by the Regenerate Reports dialog's pointer to it).
+	frm._optimus_ai_enabled = false;
 	if (frm.is_new()) return;
 	if (frm.doc.status !== "Ready") return;
 	frappe.call({
@@ -76,6 +78,7 @@ function render_ai_buttons(frm) {
 		callback: (r) => {
 			const c = (r && r.message) || {};
 			if (!c.enabled) return; // master switch off → no AI button
+			frm._optimus_ai_enabled = true;
 			render_ai_refill_button(frm);
 		},
 		// Read failed (e.g. not configured / no perm) → render nothing.
@@ -239,6 +242,14 @@ function _refill_ai_call(frm) {
 		freeze_message: __("Refreshing AI suggestions & re-rendering the report…"),
 		callback: (r) => {
 			const m = (r && r.message) || {};
+			if (m.busy) {
+				// another refresh of this session is still running: nothing was counted or billed
+				frappe.show_alert({
+					message: __("A refresh is already running for this session. Wait for it to finish, then reload the form."),
+					indicator: "orange",
+				});
+				return;
+			}
 			const fx = m.fixes || {};
 			const st = m.steps || {};
 			const parts = [];
@@ -246,17 +257,26 @@ function _refill_ai_call(frm) {
 			if (st.updated) parts.push(__("steps rewritten"));
 			const failed = fx.failed || 0;
 			const skipped = fx.skipped_time || 0;
+			// the Steps rewrite failed (not "no user actions" or a toggle that is off): say why
+			const stepsFailed = !st.updated && st.failed && st.reason;
 			// a "nothing to refresh" toast would contradict the failed-calls and skipped alerts below
 			const msg = parts.length
 				? __("Refreshed: {0}.", [parts.join(", ")])
-				: failed || skipped
+				: failed || skipped || stepsFailed
 					? ""
 					: __("Nothing to refresh.");
 			const indicator = failed ? "red" : parts.length ? "green" : "orange";
 			if (msg) frappe.show_alert({ message: msg, indicator: indicator });
 			if (failed) {
 				frappe.show_alert({
-					message: __("{0} call(s) failed, old suggestions kept (see Error Log, title optimus ai backfill).", [failed]),
+					message: __("{0} call(s) failed, old suggestions kept (search the Error Log for titles starting with optimus ai).", [failed]),
+					indicator: "red",
+				});
+			}
+			if (stepsFailed) {
+				// the server's message can quote the provider's reply: shown as text, never as HTML
+				frappe.show_alert({
+					message: __("Steps to Reproduce were not rewritten: {0}", [frappe.utils.escape_html(st.reason)]),
 					indicator: "red",
 				});
 			}
@@ -907,23 +927,23 @@ function render_regenerate_report_button(frm) {
 	if (!["Ready", "Failed"].includes(frm.doc.status)) return;
 
 	frm.add_custom_button(__("Regenerate Reports"), () => {
+		let message = __(
+			"Re-render the report from stored session data. This does not re-run the analyzer and does not call the AI provider; saved AI suggestions are kept as they are."
+		);
+		// The Refresh AI suggestions button exists only on a Ready session with AI enabled.
+		if (frm.doc.status === "Ready" && frm._optimus_ai_enabled) {
+			message += " " + __(
+				"For new or updated AI suggestions use AI > Refresh AI suggestions (available when AI is enabled and the session is Ready)."
+			);
+		}
 		frappe.confirm(
-			__(
-				"Re-render the HTML report from stored session data. This "
-				+ "does NOT re-run the analyzer. Note: if \"Suggest AI fixes "
-				+ "in the report by default\" is enabled, this also asks the "
-				+ "LLM for fixes for any findings that don't have one yet "
-				+ "which can take a while."
-			),
+			message,
 			() => {
 				frappe.call({
 					method: "optimus.api.regenerate_reports",
 					args: { session_uuid: frm.doc.session_uuid },
 					freeze: true,
-					freeze_message: __(
-						"Regenerating the report… (this can take a while if "
-						+ "AI fix suggestions are enabled)"
-					),
+					freeze_message: __("Regenerating the report…"),
 					callback: (r) => {
 						const data = (r && r.message) || {};
 						if (data.regenerated) {
