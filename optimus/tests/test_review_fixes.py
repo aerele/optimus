@@ -29,17 +29,6 @@ def _fn_body(src: str, name: str) -> str:
 # --- HIGH-1: steps tokens captured on the auto-analyze path -----------------
 
 
-class TestAutoAnalyzeStepsTokens:
-	def test_build_humanized_notes_threads_usage_out(self):
-		body = _fn_body(_read(_ANALYZE_PATH), "_build_humanized_notes_html")
-		assert "usage_out: dict | None = None" in body
-		assert "usage_out=usage_out" in body  # forwarded to ai_fix.humanize_steps
-
-	def test_persist_records_steps_tokens(self):
-		src = _read(_ANALYZE_PATH)
-		# The _persist caller passes a usage dict and writes ai_steps_tokens.
-		assert "usage_out=_steps_usage" in src
-		assert "doc.ai_steps_tokens = int(_steps_usage" in src
 
 
 # --- HIGH-2: drain phase stays on "Capturing Background Jobs" ----------------
@@ -80,10 +69,6 @@ class TestDrainProgressEndpoint:
 # --- test_ai_connection must not bill the probe to a prior session -----------
 
 
-class TestProbeClearsSpendMarker:
-	def test_ai_connection_clears_marker(self):
-		body = _fn_body(_read(_API_PATH), "test_ai_connection")
-		assert "_mark_ai_spend_session(None)" in body
 
 
 # --- export_session parity --------------------------------------------------

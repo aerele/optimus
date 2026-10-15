@@ -22,7 +22,7 @@ import hashlib
 
 import frappe
 
-from optimus import ai_fix, safe_call
+from optimus import ai_fix, safe_call, sql_work
 
 RUN = "Optimus AI Refresh Run"
 ATTEMPT = "Optimus AI Refresh Attempt"
@@ -44,77 +44,16 @@ class JournalUnavailable(RuntimeError):
 	"""Fail closed when a deployment lacks the authoritative journal/mutex."""
 
 
-# Driver codes of a conflict that ended the statement or the whole transaction, so a short
-# journal transaction can start again from a rollback: MariaDB deadlock 1213, lock wait
-# timeout 1205 (also a NOWAIT conflict) and 1020 "Record has changed since last read"
-# (innodb_snapshot_isolation, on by default since MariaDB 11.8); Postgres serialization
-# failure 40001, deadlock 40P01 and lock not available 55P03.
-_RETRY_CODES = frozenset({1213, 1205, 1020, "40001", "40P01", "55P03"})
-_LOCK_UNAVAILABLE_CODES = frozenset({1205, "55P03"})
-_DUPLICATE_CODES = frozenset({1062, "23505"})
-
-
-def _driver_codes(exc):
-	"""The driver error codes on ``exc`` and on the driver errors Frappe wrapped it around.
-
-	``Database.sql`` raises ``QueryDeadlockError(e)`` / ``QueryTimeoutError(e)`` from ``e``
-	and ``Document.insert`` raises ``DuplicateEntryError(doctype, name, e)``, so the driver
-	error is one of the args (and the cause). PyMySQL keeps the code in ``args[0]``,
-	psycopg2 in ``pgcode``."""
-	codes, seen, stack = set(), set(), [exc]
-	while stack and len(seen) < 8:
-		layer = stack.pop()
-		if not isinstance(layer, BaseException) or id(layer) in seen:
-			continue
-		seen.add(id(layer))
-		pgcode = getattr(layer, "pgcode", None)
-		if isinstance(pgcode, str) and pgcode:
-			codes.add(pgcode)
-		args = getattr(layer, "args", ())
-		if args and type(args[0]) is int:
-			codes.add(args[0])
-		stack.extend(arg for arg in args if isinstance(arg, BaseException))
-		stack.append(layer.__cause__)
-	return codes
-
-
-def _frappe_error(exc, name):
-	cls = getattr(frappe, name, None)
-	return isinstance(cls, type) and isinstance(exc, cls)
-
-
 def is_retryable_conflict(exc) -> bool:
-	"""True when a short journal transaction may be rolled back and tried again: a
-	deadlock, a lock wait, a snapshot or serialization conflict, raw or as Frappe wraps it.
-
-	``frappe.QueryDeadlockError`` always is (the database ended the whole transaction, as
-	``analyze._whole_transaction_rolled_back`` treats it). ``frappe.QueryTimeoutError`` is
-	when it wraps a lock conflict, or no driver error at all; a Postgres statement timeout
-	(57014) is not a conflict. Never a reason to repeat a provider call."""
-	codes = _driver_codes(exc)
-	if _frappe_error(exc, "QueryDeadlockError") or codes & _RETRY_CODES:
-		return True
-	return _frappe_error(exc, "QueryTimeoutError") and not codes
+	return sql_work.is_retryable_conflict(exc, framework=frappe)
 
 
 def is_lock_unavailable(exc) -> bool:
-	"""True when a lock was not granted: a NOWAIT conflict or a lock wait timeout (MariaDB
-	1205, Postgres 55P03), raw or wrapped by Frappe as ``QueryTimeoutError``."""
-	codes = _driver_codes(exc)
-	if codes & _LOCK_UNAVAILABLE_CODES:
-		return True
-	return _frappe_error(exc, "QueryTimeoutError") and not codes
+	return sql_work.is_lock_unavailable(exc, framework=frappe)
 
 
 def is_duplicate_key(exc) -> bool:
-	"""True when an INSERT hit an existing key (MariaDB 1062, Postgres 23505), raw or as
-	``Document.insert`` raises it (``DuplicateEntryError``, ``UniqueValidationError``)."""
-	codes = _driver_codes(exc)
-	if codes & _DUPLICATE_CODES:
-		return True
-	return not codes and (
-		_frappe_error(exc, "DuplicateEntryError") or _frappe_error(exc, "UniqueValidationError")
-	)
+	return sql_work.is_duplicate_key(exc, framework=frappe)
 
 
 def _timestamp(value):
@@ -313,6 +252,13 @@ def admit(
 			)
 	# The run being resumed belongs to this session, so its row is locked after the session.
 	previous = _read(RUN, resume_from, lock=True) if resume_from else None
+	# Phase 2 writers also hold and change the parent. Read these rows before
+	# opening the plain-read snapshot used for capacity and resume checks.
+	if frappe.db.get_values(
+		"Optimus Phase Two Run", {"parent": docname, "status": ["in", ["Recording", "Analyzing"]]},
+		["name"], for_update=True, limit=1,
+	):
+		return {"status": "refused", "reason": "phase2"}
 	# Plain reads from here on: every lock above comes first (see the docstring).
 	current = frappe.db.get_value(RUN, {"active_session": docname}, "*", as_dict=True)
 	taken_over = None
@@ -425,6 +371,7 @@ def admit(
 	)
 	if run is None:
 		return _answer(taken_over, status="already_running", run=None)
+	_touch_parent(parent)
 	if scope == "all":
 		# One bump per accepted user refresh, a resume included (Q1), in the transaction that
 		# reserves the session: a refused admission never counts. #72's counter is
@@ -438,6 +385,26 @@ def admit(
 		# retry, instead of missing the new active reservation.
 		_update(CONTROL, control, generation=(control.get("generation") or 0) + 1)
 	return _answer(taken_over, status="queued", run=run)
+
+
+def lock_phase2_parent(docname, *, allow_failed=False):
+	"""Serialize Phase 2 admission with AI through the parent row.
+
+	Every accepted admission's writer updates this row before committing, fencing
+	older PostgreSQL snapshots. Refusals do not change it. The active-run probe is
+	plain: a missing key must not take a gap lock.
+	"""
+	parent = _read("Optimus Session", docname, lock=True)
+	if not parent or parent.get("status") not in ({"Ready", "Failed"} if allow_failed else {"Ready"}):
+		return "not_ready"
+	if frappe.db.get_value(RUN, {"active_session": docname}, "name"):
+		return "ai_refresh"
+	return None
+
+
+def _touch_parent(parent):
+	# Even automatic admission changes the parent, fencing older PostgreSQL snapshots.
+	parent.update(sql_work.touch_session(frappe.db, parent["name"]))
 
 
 def _answer(taken_over, **out):
@@ -833,6 +800,26 @@ def cancel(run_id, *, docname, now, cancelled_by=None):
 	return _release(run, docname, state="cancelled", reason="cancelled", now=now)
 
 
+def prepare_analyze_retry(docname, session_uuid, *, requested_by, now):
+	"""Fence optional workers and reset a Failed parent in the same transaction."""
+	parent = _read("Optimus Session", docname, lock=True)
+	if not parent or parent.get("session_uuid") != session_uuid or parent.get("status") != "Failed":
+		return False
+	run_id = frappe.db.get_value(RUN, {"active_session": docname}, "name")
+	if run_id:
+		cancel(run_id, docname=docname, now=now, cancelled_by=requested_by)
+	for child in frappe.db.get_values(
+		"Optimus Phase Two Run", {"parent": docname, "status": ["in", ["Recording", "Analyzing"]]},
+		["name"], as_dict=True, for_update=True,
+	):
+		frappe.db.set_value("Optimus Phase Two Run", child["name"], {
+			"status": "Failed", "analyze_dispatch_pending": 0,
+			"warnings_json": '["Phase 2 stopped because profiling analysis was restarted."]',
+		}, update_modified=False)
+	frappe.db.set_value("Optimus Session", docname, {"status": "Stopping", "analyzer_warnings": None})
+	return True
+
+
 def abandon(run_id, *, docname, worker_token, now):
 	"""An escaping worker failure immediately leaves an honest terminal state."""
 	_, run = lock_run(run_id, docname)
@@ -871,3 +858,13 @@ def checkpoint(run_id, *, docname, worker_token, now, **values):
 		return None
 	_update(RUN, run, heartbeat=now, **values)
 	return run
+
+
+def read_row(table, name, *, lock=False, wait=True):
+	"""Read a known row by primary key inside the caller's transaction."""
+	return _read(table, name, lock=lock, wait=wait)
+
+
+def update_run(row, **values):
+	"""Update a locked run and advance its public progress sequence."""
+	return _update(RUN, row, **values)

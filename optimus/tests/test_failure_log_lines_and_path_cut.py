@@ -49,11 +49,6 @@ def test_the_gate_note_names_the_log_line_to_send():
 	)
 
 
-def test_the_refresh_toast_says_nothing_to_refresh_only_when_nothing_failed():
-	js = _read("optimus", "optimus", "doctype", "optimus_session", "optimus_session.js")
-	start = js.index("const failed = fx.failed || 0;")
-	assert start < js.index("Nothing to refresh.")
-	assert ": failed || skipped" in js[start:js.index("Nothing to refresh.")]
 
 
 def test_evidence_failures_past_the_cap_get_one_summary_line(lines, monkeypatch):

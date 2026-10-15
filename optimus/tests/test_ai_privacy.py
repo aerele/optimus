@@ -199,7 +199,7 @@ class TestTimeoutHonored:
 		assert captured[0]["timeout"] == pytest.approx((10, 180), abs=0.1)
 
 	def test_http_post_clamps_below_floor(self, monkeypatch):
-		# _resolve_timeout_seconds clamps below 10 → 10.
+		# request_timeout_seconds clamps below 10 → 10.
 		monkeypatch.setattr(
 			"optimus.settings.get_config",
 			lambda: _cfg(ai_request_timeout_seconds=5),
@@ -219,7 +219,7 @@ class TestTimeoutHonored:
 		assert captured[0]["timeout"] == pytest.approx((10, 10), abs=0.1)
 
 	def test_http_post_clamps_above_ceiling(self, monkeypatch):
-		# _resolve_timeout_seconds clamps above 600 → 600.
+		# request_timeout_seconds clamps above 600 → 600.
 		monkeypatch.setattr(
 			"optimus.settings.get_config",
 			lambda: _cfg(ai_request_timeout_seconds=9999),

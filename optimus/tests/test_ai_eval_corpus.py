@@ -90,7 +90,7 @@ def test_labels_use_the_four_values(corpus):
 
 def test_build_finding_goes_through_the_current_message_builder(corpus):
 	"""The eval sends what the product sends: the finding comes from
-	analyze._ai_payload_for_finding and the message from ai_fix's current builder."""
+	analyze.ai_payload_for_finding and the message from ai_fix's current builder."""
 	from optimus import ai_fix
 
 	ev = load("_corpus")

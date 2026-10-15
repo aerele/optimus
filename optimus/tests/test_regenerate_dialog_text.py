@@ -50,7 +50,9 @@ def test_the_ai_switch_the_pointer_reads_is_the_one_the_ai_button_uses():
 	body = re.sub(r"\s+", " ", _function_body("render_ai_buttons"))
 	reset = body.index("frm._optimus_ai_enabled = false;")
 	assert reset < body.index("if (frm.is_new()) return;")
-	assert "frm._optimus_ai_enabled = true;" in body[body.index("if (!c.enabled) return;"):]
+	status = _function_body("_ai_apply_status")
+	assert "frm._optimus_ai_enabled = state.can_act" in status
+	assert "state.plan.total || state.plan.steps" in status
 
 
 def test_the_dialog_text_is_translatable():

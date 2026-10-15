@@ -9,7 +9,7 @@
         --out <dir outside the repo> --tag before-develop [--optimus-src apps/optimus-before]
 
 For every corpus case it builds the finding exactly as the product's refresh path does
-(scripts/ai_eval/_corpus.build_finding -> analyze._ai_payload_for_finding) and calls
+(scripts/ai_eval/_corpus.build_finding -> analyze.ai_payload_for_finding) and calls
 ai_fix.suggest_fix, the library function the product uses, so the same runner measures
 develop and every later PR. It records the result as returned (suggestion, guardrail
 when present, tokens, finish_reason), wall time and any error, into OUT/run.json after
@@ -220,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
 			raise EvalRefused(f"Optimus Settings excludes {sorted(set(excluded))}; clear it for the eval")
 		provider = ai_fix._resolve_provider()
 		api_key = _stored_key()
-		resolve_timeout = getattr(ai_fix, "_resolve_timeout_seconds", None)
+		resolve_timeout = getattr(ai_fix, "request_timeout_seconds", None) or getattr(ai_fix, "_resolve_timeout_seconds", None)
 		run = {
 			"meta": {
 				"tag": args.tag or os.path.basename(out_dir),

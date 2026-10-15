@@ -41,7 +41,9 @@ DELETED = ("suggest_fix", "backfill_ai_fixes", "humanize_steps", "suggest_index"
 
 # name -> why this whitelisted AI endpoint has no caller in Optimus's own JS. Keep it empty
 # unless an endpoint exists for scripts on purpose; a stale entry fails the test below.
-AI_ENDPOINT_ALLOWLIST: dict[str, str] = {}
+AI_ENDPOINT_ALLOWLIST: dict[str, str] = {
+	"ai_capabilities": "Retained read-only configuration API for existing integrations; Desk now polls progress and selection together.",
+}
 
 _AI_NAMES = frozenset({"ai_fix", "_ai_session_gate", "_AI_LIMITS"})
 
@@ -157,7 +159,7 @@ def probe(monkeypatch):
 			ai_fix, "test_connection",
 			lambda: calls.append(True) or {"ok": True, "message": "Reachable.", "model": "m"},
 		)
-		install_module(monkeypatch, "optimus.analyze", SimpleNamespace(_mark_ai_spend_session=lambda u: marks.append(u)))
+		monkeypatch.setattr(fake, "db", SimpleNamespace(sql=lambda *a, **kw: marks.append(True)))
 		return fake, calls, marks
 
 	return _make
@@ -166,7 +168,7 @@ def probe(monkeypatch):
 def test_system_manager_can_probe(probe):
 	_, calls, marks = probe(("System Manager",))
 	assert api.test_ai_connection() == {"ok": True, "message": "Reachable.", "model": "m"}
-	assert calls == [True] and marks == [None]
+	assert calls == [True] and marks == []
 
 
 def test_non_manager_is_refused_without_probing_or_counting(probe):
@@ -203,112 +205,3 @@ def test_ai_capabilities_reports_the_toggles_without_writing(monkeypatch):
 
 
 # --- _humanize_steps_core (kept: refill_ai_suggestions uses it) ------------------------------
-
-
-@pytest.fixture
-def core(monkeypatch):
-	fake = make_fake_frappe()
-	install(monkeypatch, fake)
-	commits, logged, memos = [], [], []
-	monkeypatch.setattr(api, "safe_commit", lambda: commits.append(True))
-	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda title, exc=None, **kw: logged.append(title))
-	install_module(monkeypatch, "optimus.analyze", SimpleNamespace(
-		_run_ai_step=_analyze._run_ai_step,
-		_mark_ai_spend_session=lambda session_uuid: None,
-		load_recordings_light=lambda d, memo=None: memos.append(memo) or [{"uuid": a.recording_uuid} for a in d.actions],
-		_load_recordings_bundle=lambda d: None,
-		_actions_for_humanizer=lambda recordings: [{"method": "POST", "path": "/api/method/x"}] if recordings else [],
-		_assemble_humanized_notes=lambda md: "NOTES\n" + md,
-	))
-	doc = fake_session_doc(actions=[SimpleNamespace(recording_uuid="rec-1")])
-	return SimpleNamespace(fake=fake, commits=commits, logged=logged, doc=doc, memos=memos)
-
-
-def test_humanize_core_passes_its_memo_to_the_recording_loader(core, monkeypatch):
-	monkeypatch.setattr(ai_fix, "humanize_steps", lambda *a, **k: "1. Open it")
-	memo = {}
-	api._humanize_steps_core(core.doc, memo=memo)
-	assert core.memos == [memo]
-
-
-def test_humanize_core_persists_the_notes_and_the_tokens(core, monkeypatch):
-	def humanize(actions, *, session_title=None, usage_out=None, **kw):
-		assert session_title == "Checkout flow" and actions
-		usage_out["total_tokens"] = 42
-		return "1. Open the Sales Invoice form"
-
-	monkeypatch.setattr(ai_fix, "humanize_steps", humanize)
-	assert api._humanize_steps_core(core.doc, title="Checkout flow") == {"updated": True, "reason": None}
-	((args, _kwargs),) = core.fake.spies.set_value
-	assert args == (
-		"Optimus Session", DOCNAME,
-		{"notes": "NOTES\n1. Open the Sales Invoice form", "ai_steps_tokens": 42},
-	)
-	assert core.commits == [True]
-
-
-def test_humanize_core_logs_an_ai_error_and_returns_it_as_the_reason(core, monkeypatch):
-	"""A failed Steps rewrite on Refresh wrote no Error Log row and its reason never reached the
-	user. Now it writes one row under the step's title and returns the message for the toast; the
-	transaction (an unattributed billed reply's ambient charge) is committed."""
-	def fail(actions, **kw):
-		raise ai_fix.AiFixError("provider said no", kind="bad_response", usage={"total_tokens": 42})
-
-	monkeypatch.setattr(ai_fix, "humanize_steps", fail)
-	assert api._humanize_steps_core(core.doc, title=None) == {
-		"updated": False, "failed": True, "reason": "provider said no",
-	}
-	assert core.logged == ["optimus ai humanize_steps"]
-	assert core.fake.spies.set_value == [] and core.commits == [True]
-
-
-def test_humanize_core_logs_an_unexpected_error_with_a_plain_reason(core, monkeypatch):
-	def crash(actions, **kw):
-		raise ValueError("secret detail from a frame")
-
-	monkeypatch.setattr(ai_fix, "humanize_steps", crash)
-	out = api._humanize_steps_core(core.doc, title=None)
-	assert out["updated"] is False and out["failed"] is True
-	assert "secret detail" not in out["reason"] and "optimus ai" in out["reason"]
-	assert core.logged == ["optimus ai humanize_steps"]
-
-
-def test_humanize_core_with_no_user_actions_is_not_a_failure(core, monkeypatch):
-	monkeypatch.setattr(ai_fix, "humanize_steps", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no call")))
-	doc = fake_session_doc(actions=[])
-	out = api._humanize_steps_core(doc, title=None)
-	assert out["updated"] is False and not out.get("failed") and out["reason"]
-	assert core.logged == []
-
-
-def test_humanize_core_lets_the_fresh_timeout_from_the_log_escape(core, monkeypatch):
-	"""``log_ai_failure`` writes the row of an RQ job timeout, then raises a fresh one so the job
-	stops: the Steps step must not swallow it."""
-
-	class FreshTimeout(Exception):
-		pass
-
-	def log(title, exc=None, **kw):
-		core.logged.append(title)
-		raise FreshTimeout("raised again after the row was written")
-
-	monkeypatch.setattr(ai_fix, "humanize_steps", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("timeout")))
-	monkeypatch.setattr(ai_fix, "log_ai_failure", log)
-	with pytest.raises(FreshTimeout):
-		api._humanize_steps_core(core.doc, title=None)
-	assert core.logged == ["optimus ai humanize_steps"]
-
-
-def test_the_refresh_toast_shows_why_the_steps_were_not_rewritten():
-	from pathlib import Path
-
-	js = (Path(api.__file__).parent / "optimus" / "doctype" / "optimus_session" / "optimus_session.js").read_text()
-	body = js[js.index("function _refill_ai_call("):js.index("// v0.6.0: Phase-2 line-profile picker.")]
-	assert "st.failed" in body
-	shown = body[body.index("if (stepsFailed)"):]
-	shown = shown[:shown.index("});")]
-	# the reason is the server's message, which can quote the provider's reply: escaped, translated wrapper
-	assert "frappe.utils.escape_html(st.reason)" in shown and '__("Steps to Reproduce were not rewritten: {0}' in shown
-	# "Nothing to refresh." must not contradict a failed Steps rewrite
-	nothing = body[body.index("const msg = parts.length"):body.index('__("Nothing to refresh.")')]
-	assert "stepsFailed" in nothing
