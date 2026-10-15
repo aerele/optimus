@@ -33,6 +33,30 @@ from optimus import ai_budget, ai_grounding, ai_guardrails, ai_prompts, safe_cal
 from optimus.analyzers.base import INDEX_FINDING_TYPES, humanize_duration_ms, row_get
 
 
+class Usage(dict):
+	"""Numeric usage plus whether every attempted completion reported its cost.
+
+	The attributes stay out of the provider-compatible numeric mapping. Missing
+	usage is unknown, including when the normalized count happens to be zero.
+	No attempted completion (a refusal before any HTTP call) is a known zero.
+	"""
+
+	def __init__(self):
+		super().__init__()
+		self.calls = 0
+		self.known_calls = 0
+
+	@property
+	def complete(self):
+		return self.known_calls == self.calls
+
+	def begin(self):
+		self.calls += 1
+
+	def observe(self, known):
+		self.known_calls += int(known)
+
+
 class AiFixError(Exception):
 	"""User-facing error from the AI-fix path. The API endpoint converts
 	this into ``frappe.throw`` so the message is shown to the operator.
@@ -73,10 +97,14 @@ class AiFixError(Exception):
 		status_code: int | None = None,
 		kind: str = "unknown",
 		usage: dict | None = None,
+		usage_complete: bool | None = None,
 	):
 		super().__init__(message)
 		self.status_code = status_code
 		self.kind = kind
+		self.usage_complete = (
+			bool(getattr(usage, "complete", False)) if usage_complete is None else usage_complete is True
+		)
 		self.usage = _billed_usage(usage) if usage is not None else None
 
 	@property
@@ -460,6 +488,7 @@ def _resolve_display_threshold_ms() -> float:
 def suggest_fix(
 	finding: dict, *, timeout: int | None = None,
 	session_uuid: str | None = None, docname: str | None = None,
+	usage_out: Usage | None = None,
 ) -> dict:
 	"""Ask the configured LLM for a fix for ``finding``.
 
@@ -476,7 +505,12 @@ def suggest_fix(
 	``usage``) to its session once, with ``analyze._add_ai_spend``. An RQ job
 	timeout leaves as a fresh instance that carries the billed ``usage`` too, but
 	only to this boundary (``_with_usage_on_failure``): read it from the exception
-	caught here, since any later re-wrap drops it."""
+	caught here, since any later re-wrap drops it.
+
+	``usage_out`` (additive, for the background refresh engine; None keeps the behaviour
+	above): a fresh ``Usage`` that becomes this call's usage, so the caller's own
+	``_with_usage_on_failure`` boundary counts every attempted call. A refusal before any
+	request leaves it at no call, which proves a known zero."""
 	if is_finding_type_excluded(finding.get("finding_type")):
 		from frappe import _
 
@@ -503,7 +537,7 @@ def suggest_fix(
 		system, ctx, messages=messages, out_tokens=_output_tokens(provider),
 		hosted=_is_hosted_endpoint(provider.get("base_url")),
 	)
-	usage: dict = {}
+	usage = usage_out if isinstance(usage_out, Usage) else Usage()
 	text, guardrail, finish = _with_usage_on_failure(lambda: _complete_with_guardrails(
 		provider,
 		system,
@@ -526,8 +560,9 @@ def suggest_fix(
 		"prompt_version": ai_prompts.PROMPT_VERSION,
 		"guardrail": guardrail,
 		"finish_reason": finish,
+		"usage_complete": usage.complete,
 	}
-	if usage.get("total_tokens"):
+	if usage.get("total_tokens") or usage.complete:
 		result["tokens"] = usage
 	return result
 
@@ -563,7 +598,7 @@ def humanize_steps(
 		system, _context_tokens(provider), messages=messages, out_tokens=_output_tokens(provider),
 		hosted=_is_hosted_endpoint(provider.get("base_url")),
 	)
-	usage: dict = {}
+	usage = Usage()
 	try:
 		text = _with_usage_on_failure(lambda: _dispatch_call(
 			provider, system, messages, usage_out=usage,
@@ -573,6 +608,9 @@ def humanize_steps(
 	finally:
 		if usage_out is not None:
 			usage_out.update(usage)
+			if isinstance(usage_out, Usage):
+				# This call's completeness, like its counts: nothing a reused usage_out held before.
+				usage_out.calls, usage_out.known_calls = usage.calls, usage.known_calls
 	text = (text or "").strip()
 	if not text:
 		raise AiFixError(_(
@@ -634,6 +672,7 @@ def _with_usage_on_failure(call, usage):
 		))
 	if usage:
 		failure.usage = _billed_usage(usage)
+	failure.usage_complete = bool(getattr(usage, "complete", False))
 	raise failure
 
 
@@ -1951,8 +1990,8 @@ def _same_origin_redirect(current: str, resp) -> str | None:
 	return None
 
 
-# Token counts land in Int columns (Optimus Session.ai_tokens_spent,
-# ai_steps_tokens); a larger reported count is not a real one.
+# Bound each provider-supplied count. ``ai_tokens_spent`` is a Long Int, so adding bounded
+# counts cannot overflow it; a single call's total above the bound is read as 0 here.
 _MAX_TOKEN_COUNT = 2**31 - 1
 
 
@@ -1979,6 +2018,56 @@ def _usage_block(data) -> dict:
 	"""``data["usage"]`` when it is a dict, else ``{}``."""
 	usage = data.get("usage") if isinstance(data, dict) else None
 	return usage if isinstance(usage, dict) else {}
+
+
+def _valid_reported_count(value):
+	"""Only exact, bounded JSON counts establish a known provider outcome."""
+	if type(value) is int:
+		return 0 <= value <= _MAX_TOKEN_COUNT
+	if type(value) is float:
+		return 0 <= value <= _MAX_TOKEN_COUNT and value.is_integer()
+	if type(value) is str and len(value) <= 32:
+		value = value.strip()
+		return bool(value and value.isascii() and value.isdecimal() and int(value) <= _MAX_TOKEN_COUNT)
+	return False
+
+
+def _response_usage(data, protocol):
+	u = _usage_block(data)
+	usage = Usage()
+	usage.begin()
+	if protocol == "openai":
+		usage.update(_usage_from_openai(data))
+		known = _valid_reported_count(u.get("total_tokens")) or all(
+			_valid_reported_count(u.get(k)) for k in ("prompt_tokens", "completion_tokens")
+		)
+		components = usage["prompt_tokens"] + usage["completion_tokens"]
+		if _valid_reported_count(u.get("total_tokens")) and int(u["total_tokens"]) < components:
+			# Preserve the reported components, but mark a contradictory total
+			# incomplete rather than presenting an undercount as exact usage.
+			usage["total_tokens"] = components
+			known = False
+	else:
+		usage.update(_usage_from_anthropic(data))
+		# A cache field Anthropic sends as null was not used: no missing count.
+		known = all(_valid_reported_count(u.get(k)) for k in ("input_tokens", "output_tokens")) and all(
+			_valid_reported_count(u[k])
+			for k in ("cache_creation_input_tokens", "cache_read_input_tokens")
+			if u.get(k) is not None
+		)
+	usage.observe(known)
+	return usage
+
+
+def _accept_usage(usage_out, usage, *, ambient):
+	if usage_out is not None:
+		usage_out.update(usage)
+		if isinstance(usage_out, Usage):
+			usage_out.observe(usage.complete)
+		# An explicitly attributed call (the journal included) is charged by its caller.
+		# Only an unattributed call is charged here, once, to the ambient session.
+		if ambient:
+			_record_session_spend(usage["total_tokens"])
 
 
 def _usage_from_openai(data: dict | None) -> dict:
@@ -2102,15 +2191,14 @@ def _call_anthropic(
 		"system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
 		"messages": messages,
 	}
+	if isinstance(usage_out, Usage):
+		usage_out.begin()
 	data = _http_post(
 		url, headers, body, provider="anthropic", where="messages", auth=auth, timeout=timeout,
 		session_uuid=session_uuid, docname=docname, ambient=ambient, budget=budget,
 	)
-	usage = _usage_from_anthropic(data)
-	if usage_out is not None:
-		usage_out.update(usage)
-		if ambient:
-			_record_session_spend(usage["total_tokens"])
+	usage = _response_usage(data, "anthropic")
+	_accept_usage(usage_out, usage, ambient=ambient)
 	if meta_out is not None:
 		meta_out["prompt_tokens_reported"] = any(_usage_block(data).get(k) is not None for k in (
 			"input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
@@ -2298,15 +2386,14 @@ def _call_openai_chat(
 	# Opt-in endpoints: attribute this call to the originating Optimus Session.
 	if metadata:
 		body["metadata"] = metadata
+	if isinstance(usage_out, Usage):
+		usage_out.begin()
 	data = _post_with_param_ladder(
 		url, headers, body, auth=auth, timeout=timeout, session_uuid=session_uuid, docname=docname,
 		ambient=ambient, adapted=adapted_params, budget=budget,
 	)
-	usage = _usage_from_openai(data)
-	if usage_out is not None:
-		usage_out.update(usage)
-		if ambient:
-			_record_session_spend(usage["total_tokens"])
+	usage = _response_usage(data, "openai")
+	_accept_usage(usage_out, usage, ambient=ambient)
 	first = _first_choice(data)
 	if meta_out is not None:
 		meta_out["prompt_tokens_reported"] = _usage_block(data).get("prompt_tokens") is not None
@@ -2455,6 +2542,9 @@ def _dispatch_call(
 
 
 def _add_usage(total: dict, part: dict) -> None:
+	if isinstance(total, Usage) and isinstance(part, Usage):
+		total.calls += part.calls
+		total.known_calls += part.known_calls
 	for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
 		if part.get(k):
 			total[k] = total.get(k, 0) + part[k]
@@ -2530,7 +2620,7 @@ def _complete_with_guardrails(
 			_log_reask("skipped-fit")
 		else:
 			reasked = True
-			reask_usage: dict = {}
+			reask_usage = Usage()
 			reask_meta: dict = {}
 			rewritten = None
 			reask_error: Exception | None = None

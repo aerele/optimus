@@ -2455,14 +2455,18 @@ def _maybe_attach_recorded_queries(
 
 def _phase2_index_for(doc_or_docname) -> dict:
 	"""``renderer._build_line_drilldown_callsite_index`` for a session doc or
-	docname, or ``{}`` on any error (no phase-2 runs yet, doc gone, etc.)."""
-	try:
+	docname. An ordinary failure writes one Error Log row, with the session
+	(``_run_ai_step``), and uses empty context; job timeouts stop the worker."""
+	docname = doc_or_docname if isinstance(doc_or_docname, str) else getattr(doc_or_docname, "name", None)
+
+	def _build() -> dict:
 		doc = doc_or_docname
 		if isinstance(doc, str):
 			doc = frappe.get_doc("Optimus Session", doc)
 		return renderer._build_line_drilldown_callsite_index(doc) or {}
-	except Exception:
-		return {}
+
+	index, _failed = _run_ai_step(_build, title="optimus ai phase 2 context", docname=docname)
+	return index or {}
 
 
 _SESSION_COUNTER_FIELDS = frozenset({"ai_tokens_spent", "ai_refresh_count"})

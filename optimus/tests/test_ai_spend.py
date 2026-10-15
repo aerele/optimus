@@ -576,7 +576,7 @@ _SAVE_STEPS_WITH_DB_OR_META = (
 	"check_if_locked", "_set_defaults", "check_permission", "set_user_and_timestamp", "set_docstatus",
 	"set_parent_in_children", "set_name_in_children", "validate_higher_perm_levels", "_validate_links",
 	"_validate", "update_children", "reset_computed_child_tables", "run_post_save_methods", "reset_seen",
-	"set_title_field", "validate_update_after_submit",
+	"set_title_field", "validate_update_after_submit", "_restore_masked_fields_from_db",
 )
 
 

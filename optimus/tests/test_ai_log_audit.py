@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Static guard (PR-0a): every Error Log write on the AI surface goes through
+"""Static guard: every Error Log write on the AI surface goes through
 ``ai_fix.log_ai_failure``, and none runs while an exception is being handled.
 
 A bare ``frappe.log_error(title=...)`` stores Frappe's with-context traceback,
@@ -44,8 +44,9 @@ _PKG = Path(__file__).resolve().parents[1]
 _REQUIRED = (
 	"analyze.py", "api.py", "maintenance.py", "error_log_mask.py",
 	"optimus/doctype/optimus_settings/optimus_settings.py", "renderer/recipe_enrichment.py", "line_profile/analyzer.py",
+	"ai_jobs.py", "ai_refresh_store.py",
 )
-_OPTIONAL = ("ai_jobs.py",)  # scanned as soon as a later PR adds it
+_OPTIONAL: tuple[str, ...] = ()  # modules a later PR adds, scanned as soon as they exist
 _AI_WRAPPERS: frozenset[str] = frozenset()  # names of non-step functions that count as AI code (none today)
 _BASE_LOGGERS = frozenset({"log_error", "log_ai_failure"})
 _SENDERS = frozenset({"_http_post", "_call_openai_chat", "_call_anthropic"})  # ai_fix.py
@@ -349,6 +350,7 @@ def test_the_helper_is_used_where_the_skeleton_was():
 		"analyze.py": {
 			"run", "_enrich_findings_with_ai_suggestions", "_run_ai_backfill",
 			"_build_humanized_notes_html", "load_recordings_light", "_load_recordings_bundle",
+			"_phase2_index_for",
 		},
 		"api.py": {"_render_session_report", "_rerender_after_ai", "_humanize_steps_core"},
 	}
@@ -357,6 +359,7 @@ def test_the_helper_is_used_where_the_skeleton_was():
 def test_scanned_modules_and_wrappers_exist():
 	# A renamed module or wrapper would silently weaken the rules: fail loudly.
 	assert all((_PKG / m).exists() for m in _REQUIRED)
+	assert {"ai_jobs.py", "ai_refresh_store.py"} <= set(_REQUIRED)  # the refresh engine
 	names = {fn.name for fn in _functions(_tree("analyze.py"))}
 	assert _AI_WRAPPERS <= names
 
