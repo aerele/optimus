@@ -1,0 +1,250 @@
+name: AI Quality
+
+# Pinned Frappe semgrep rules on the app code, plus the tests that need semgrep or rq.
+#
+# A separate workflow from ci.yml (which this does not touch). semgrep 1.177.0 pins
+# click and pyjwt versions that must never meet the app's dependencies, so it is
+# installed into its own virtualenv and only its CLI is put on PATH. The rules are
+# frappe/semgrep-rules at a pinned commit; scripts/ai_eval/semgrep_rule_map.json
+# carries the same two pins and optimus/tests/test_ai_eval_semgrep.py fails if they
+# drift apart.
+#
+# Jobs:
+#   semgrep   Diff-aware: fails only on findings the change adds (the baseline is the
+#             PR base, the pushed range, or the merge-base with develop). A report-only
+#             full scan follows and never fails the job; it lists the existing debt.
+#   ai-tests  Installs the app, its test deps, rq==2.6.1 and semgrep, then runs every
+#             test selected by -k "semgrep or rq" (module names and the rq / semgrep
+#             markers) with REQUIRE_SEMGREP=1, so a missing tool fails instead of
+#             skipping. Also lints scripts/ (ci.yml lints optimus/ only).
+#   sql-journal  Runs optimus/tests/test_ai_refresh_sql.py, the refresh journal's
+#             transactions, on real databases, one matrix leg each: MariaDB 10.6
+#             (snapshot isolation off), MariaDB 11.8 (innodb_snapshot_isolation on, the
+#             default of Frappe v16's CI) and PostgreSQL 16. The Postgres role must be
+#             a superuser (CI's POSTGRES_USER is): one test sets deadlock_timeout.
+on:
+  pull_request:
+    branches: ['**']
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  SEMGREP_RULES_COMMIT: b101a16e69df049b3fed1478bcc16223e957cca2
+
+jobs:
+  semgrep:
+    name: semgrep
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (full history for the diff baseline)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install pinned semgrep into its own virtualenv
+        run: |
+          python -m venv "$RUNNER_TEMP/semgrep-venv"
+          "$RUNNER_TEMP/semgrep-venv/bin/pip" install --quiet semgrep==1.177.0
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -s "$RUNNER_TEMP/semgrep-venv/bin/semgrep" "$RUNNER_TEMP/bin/semgrep"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch pinned frappe/semgrep-rules (outside the workspace)
+        run: |
+          git clone --quiet https://github.com/frappe/semgrep-rules.git "$RUNNER_TEMP/frappe-semgrep-rules"
+          git -C "$RUNNER_TEMP/frappe-semgrep-rules" checkout --quiet "$SEMGREP_RULES_COMMIT"
+
+      - name: Compute the diff baseline
+        id: base
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base=""
+          case "$EVENT" in
+            pull_request) base="$PR_BASE" ;;
+            push) base="$PUSH_BEFORE" ;;
+          esac
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+              || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            base="$(git merge-base origin/develop HEAD 2>/dev/null || true)"
+          fi
+          if [ "$base" = "$(git rev-parse HEAD)" ]; then
+            base=""
+          fi
+          echo "baseline=$base" >> "$GITHUB_OUTPUT"
+          echo "Diff baseline: ${base:-none; only the report-only full scan runs}"
+
+      - name: Semgrep, new findings only (fails the job)
+        if: steps.base.outputs.baseline != ''
+        env:
+          BASELINE: ${{ steps.base.outputs.baseline }}
+        run: |
+          semgrep scan --config "$RUNNER_TEMP/frappe-semgrep-rules/rules" \
+            --metrics=off --disable-version-check --error \
+            --baseline-commit "$BASELINE" \
+            --exclude tests --exclude tests_integration \
+            optimus/
+
+      - name: Semgrep, full scan (report only)
+        if: always()
+        continue-on-error: true
+        run: |
+          semgrep scan --config "$RUNNER_TEMP/frappe-semgrep-rules/rules" \
+            --metrics=off --disable-version-check --quiet \
+            --exclude tests --exclude tests_integration \
+            --json --output semgrep-full.json optimus/ || true
+          python - >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          import collections, json
+          results = json.load(open("semgrep-full.json")).get("results", [])
+          print(f"## Pinned semgrep, full scan (report only): {len(results)} findings")
+          by_rule = collections.Counter(r["check_id"].rsplit(".", 1)[-1] for r in results)
+          for rule, count in by_rule.most_common():
+              print(f"- {rule}: {count}")
+          EOF
+
+  ai-tests:
+    name: ai-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: 'pyproject.toml'
+
+      - name: Install the app, the test deps and rq
+        # The same install as ci.yml's tests job, plus rq at the version Frappe v16 pins.
+        run: |
+          uv pip install --system -e .
+          uv pip install --system pytest pytest-github-actions-annotate-failures hypothesis Faker pdfplumber pypdf 'sql_metadata~=2.19.0' jsonschema rq==2.6.1 'ruff>=0.6,<1'
+
+      - name: Install pinned semgrep into its own virtualenv
+        run: |
+          python -m venv "$RUNNER_TEMP/semgrep-venv"
+          "$RUNNER_TEMP/semgrep-venv/bin/pip" install --quiet semgrep==1.177.0
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -s "$RUNNER_TEMP/semgrep-venv/bin/semgrep" "$RUNNER_TEMP/bin/semgrep"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch pinned frappe/semgrep-rules (outside the workspace)
+        run: |
+          git clone --quiet https://github.com/frappe/semgrep-rules.git "$RUNNER_TEMP/frappe-semgrep-rules"
+          git -C "$RUNNER_TEMP/frappe-semgrep-rules" checkout --quiet "$SEMGREP_RULES_COMMIT"
+
+      - name: Lint scripts/
+        run: ruff check scripts
+
+      - name: Run the semgrep and rq tests (a missing tool fails, never skips)
+        env:
+          REQUIRE_SEMGREP: '1'
+        run: |
+          set -eo pipefail
+          export OPTIMUS_SEMGREP_RULES_DIR="$RUNNER_TEMP/frappe-semgrep-rules/rules"
+          python -m pytest optimus/tests -k "semgrep or rq" -v -rs 2>&1 | tee ai-tests.log
+          if grep -E "^SKIPPED .*could not import 'rq" ai-tests.log; then
+            echo "::error::an rq test was skipped although rq is installed"
+            exit 1
+          fi
+
+  sql-journal:
+    name: AI journal (${{ matrix.leg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Snapshot isolation off: a lock never fails because a read view is older.
+          - leg: mariadb 10.6
+            database: mariadb
+            mariadb: '10.6'
+            snapshot: '0'
+          # innodb_snapshot_isolation is on by default since 11.8 (Frappe v16's CI database):
+          # a locking read of a row changed after the read view fails with 1020.
+          - leg: mariadb 11.8
+            database: mariadb
+            mariadb: '11.8'
+            snapshot: '1'
+          - leg: postgres 16
+            database: postgres
+            mariadb: ''
+            snapshot: '0'
+    services:
+      mariadb:
+        image: ${{ matrix.database == 'mariadb' && format('mariadb:{0}', matrix.mariadb) || '' }}
+        env:
+          MARIADB_ROOT_PASSWORD: optimus_test
+          MARIADB_DATABASE: optimus_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+      postgres:
+        image: ${{ matrix.database == 'postgres' && 'postgres:16' || '' }}
+        env:
+          POSTGRES_USER: optimus_test
+          POSTGRES_PASSWORD: optimus_test
+          POSTGRES_DB: optimus_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U optimus_test -d optimus_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install app and SQL validation dependencies
+        run: |
+          python -m pip install --quiet -e . pytest hypothesis Faker 'sql_metadata~=2.19.0' jsonschema PyMySQL==1.1.2 psycopg2-binary==2.9.12
+      - name: Check journal transactions on a real database
+        env:
+          OPTIMUS_TEST_SQL: ${{ matrix.database }}
+          OPTIMUS_TEST_SQL_SNAPSHOT: ${{ matrix.snapshot }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -m pytest optimus/tests/test_ai_refresh_sql.py -q -rA -p no:cacheprovider
+      - name: Show database service logs on failure
+        if: failure()
+        env:
+          MARIADB_SERVICE_ID: ${{ job.services.mariadb.id }}
+          POSTGRES_SERVICE_ID: ${{ job.services.postgres.id }}
+        run: |
+          for service_id in "$MARIADB_SERVICE_ID" "$POSTGRES_SERVICE_ID"; do
+            if [ -n "$service_id" ]; then
+              docker logs "$service_id"
+            fi
+          done

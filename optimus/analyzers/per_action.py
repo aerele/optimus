@@ -16,7 +16,7 @@ Label detection strategy:
 
 import json
 
-from optimus.analyzers.base import AnalyzerResult
+from optimus.analyzers.base import AnalyzerResult, is_error_log_hook_query
 
 
 def analyze(recordings: list[dict], context) -> AnalyzerResult:
@@ -25,7 +25,12 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 
 def _build_action(recording: dict) -> dict:
-	calls = recording.get("calls") or []
+	# The Error Log hook's own stored-key read (is_error_log_hook_query) is
+	# left out, as in the session totals, so the rows add up to them.
+	calls = [
+		c for c in recording.get("calls") or []
+		if not (isinstance(c, dict) and is_error_log_hook_query(c.get("stack")))
+	]
 	durations = [c.get("duration", 0) for c in calls]
 	return {
 		"action_label": _label(recording),

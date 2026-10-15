@@ -21,6 +21,8 @@ import sys
 import types
 from unittest import mock
 
+import pytest
+
 
 class _FakeCache:
 	"""Dict-backed ``frappe.cache`` substitute. Exposes the slice of API
@@ -40,16 +42,29 @@ class _FakeCache:
 		self.store.pop(key, None)
 
 
-def _fresh_settings_module():
-	"""Return a fresh import of ``optimus.settings`` so each test's
-	``_CACHE_KEY`` resolution doesn't carry state across tests. Required
-	because the module's `_CACHE_KEY` is computed once at import-time."""
+@pytest.fixture
+def fresh(monkeypatch):
+	"""A fresh import of ``optimus.settings`` so each test's ``_CACHE_KEY``
+	resolution doesn't carry state across tests (the module computes it once
+	at import-time).
+
+	The original module objects come back at teardown, both in
+	``sys.modules`` and as the ``optimus`` package's ``settings`` attribute.
+	Otherwise later tests would see two modules: ``from optimus import
+	settings`` (the attribute) would be the fresh one, while ``from
+	optimus.settings import get_config`` in the code under test (the
+	``sys.modules`` entry) would still be the original, so their patches
+	would miss it."""
+	import optimus
+	import optimus.settings  # noqa: F401  (make sure the original is loaded)
+
+	monkeypatch.setattr(optimus, "settings", sys.modules["optimus.settings"])
 	for mod_name in list(sys.modules):
 		if mod_name == "optimus.settings" or mod_name.startswith("optimus.settings."):
-			del sys.modules[mod_name]
-	import optimus.settings as fresh
+			monkeypatch.delitem(sys.modules, mod_name)
+	import optimus.settings as fresh_module
 
-	return fresh
+	return fresh_module
 
 
 def _stub_frappe(cache: _FakeCache, *, has_doctype: bool = False):
@@ -77,8 +92,7 @@ class TestSettingsEnvelopeWrite:
 	the envelope. Catches a regression that reverts the wrap_value call to
 	bare-dict writes."""
 
-	def test_fresh_write_stores_envelope_not_bare_dict(self):
-		fresh = _fresh_settings_module()
+	def test_fresh_write_stores_envelope_not_bare_dict(self, fresh):
 		cache = _FakeCache()
 		frappe_stub = _stub_frappe(cache)
 
@@ -111,8 +125,7 @@ class TestSettingsEnvelopeReadHappyPath:
 	"""A cache HIT against the new-shape envelope returns a valid
 	OptimusConfig without re-resolving."""
 
-	def test_hit_on_enveloped_value_returns_config(self):
-		fresh = _fresh_settings_module()
+	def test_hit_on_enveloped_value_returns_config(self, fresh):
 		cache = _FakeCache()
 		# Pre-seed the cache with a properly-enveloped value.
 		from optimus.redis_schema import wrap_value
@@ -137,8 +150,7 @@ class TestSettingsEnvelopeLegacyCompat:
 	OptimusConfig, so new readers handle stale legacy values left by old
 	writers."""
 
-	def test_hit_on_legacy_bare_dict_returns_config(self):
-		fresh = _fresh_settings_module()
+	def test_hit_on_legacy_bare_dict_returns_config(self, fresh):
 		cache = _FakeCache()
 		# Pre-seed with a BARE OptimusConfig field dict no envelope, no
 		# ``_v`` key. This is exactly what pre-v0.12.11 writers stored.
@@ -166,8 +178,7 @@ class TestSettingsEnvelopeDriftHandling:
 	schema not yet supported) falls through to ``_resolve`` and stores a
 	fresh new-shape envelope."""
 
-	def test_drift_falls_through_to_resolve(self):
-		fresh = _fresh_settings_module()
+	def test_drift_falls_through_to_resolve(self, fresh):
 		cache = _FakeCache()
 		# Seed with an envelope tagged as schema version 999 a future
 		# version this build doesn't recognise.

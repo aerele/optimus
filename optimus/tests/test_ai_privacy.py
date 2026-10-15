@@ -127,7 +127,7 @@ class TestSuggestFixRefuses:
 		# message, NOT the provider-not-configured message.
 		with pytest.raises(ai_fix.AiFixError) as excinfo:
 			ai_fix.suggest_fix({"finding_type": "Slow Query", "title": "x"})
-		assert "excluded by ai_excluded_finding_types" in str(excinfo.value)
+		assert "listed under Excluded finding types" in str(excinfo.value)
 
 	def test_suggest_fix_no_http_call_when_excluded(self, monkeypatch):
 		# Belt + suspenders: even if the operator's network were intercepted,
@@ -170,8 +170,8 @@ def _capture_post():
 	"""Return (post_fake, captured); the fake stashes its kwargs into captured for assertion."""
 	captured: list[dict] = []
 
-	def _fake(url, headers=None, json=None, timeout=None):
-		captured.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+	def _fake(url, headers=None, json=None, timeout=None, auth=None, allow_redirects=True):
+		captured.append({"url": url, "headers": headers, "json": json, "timeout": timeout, "auth": auth})
 		return _CaptureResp()
 
 	return _fake, captured
@@ -196,10 +196,10 @@ class TestTimeoutHonored:
 			provider="openai",
 			where="test",
 		)
-		assert captured[0]["timeout"] == 180
+		assert captured[0]["timeout"] == pytest.approx((10, 180), abs=0.1)
 
 	def test_http_post_clamps_below_floor(self, monkeypatch):
-		# _resolve_timeout_seconds clamps below 10 → 10.
+		# request_timeout_seconds clamps below 10 → 10.
 		monkeypatch.setattr(
 			"optimus.settings.get_config",
 			lambda: _cfg(ai_request_timeout_seconds=5),
@@ -216,10 +216,10 @@ class TestTimeoutHonored:
 			provider="openai",
 			where="test",
 		)
-		assert captured[0]["timeout"] == 10
+		assert captured[0]["timeout"] == pytest.approx((10, 10), abs=0.1)
 
 	def test_http_post_clamps_above_ceiling(self, monkeypatch):
-		# _resolve_timeout_seconds clamps above 600 → 600.
+		# request_timeout_seconds clamps above 600 → 600.
 		monkeypatch.setattr(
 			"optimus.settings.get_config",
 			lambda: _cfg(ai_request_timeout_seconds=9999),
@@ -236,7 +236,7 @@ class TestTimeoutHonored:
 			provider="openai",
 			where="test",
 		)
-		assert captured[0]["timeout"] == 600
+		assert captured[0]["timeout"] == pytest.approx((10, 600), abs=0.1)
 
 	def test_http_post_falls_back_when_settings_unreadable(self, monkeypatch):
 		# No bench / pure-pytest path fallback to _HTTP_TIMEOUT (60).
@@ -255,7 +255,7 @@ class TestTimeoutHonored:
 			provider="openai",
 			where="test",
 		)
-		assert captured[0]["timeout"] == ai_fix._HTTP_TIMEOUT
+		assert captured[0]["timeout"] == pytest.approx((10, ai_fix._HTTP_TIMEOUT), abs=0.1)
 
 
 # --------------------------------------------------------------------------

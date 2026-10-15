@@ -18,6 +18,7 @@ from __future__ import annotations
 import itertools
 import json
 
+from optimus import safe_call
 from optimus.dbdialect.base import (
 	Dialect,
 	IndexInfo,
@@ -166,9 +167,14 @@ class PostgresDialect(Dialect):
 		return NormalizedPlan(ok=True, tables=_walk_plan(root), raw=plan_json)
 
 	def existing_indexes(self, table: str) -> list:
+		"""``[IndexInfo(...)]`` from the catalog. Empty on an ordinary error; an RQ job timeout
+		is raised again for the caller (a report render or an export lets it stop the job;
+		analyze's analyzer loop catches every exception)."""
 		try:
 			rows = self._safe_sql(_PG_INDEX_SQL, (table, _db_schema()), as_dict=True) or []
-		except Exception:
+		except Exception as exc:
+			if isinstance(exc, safe_call.job_timeout_types()):
+				raise
 			return []
 		by_name: dict[str, dict] = {}
 		for r in rows:
@@ -185,6 +191,8 @@ class PostgresDialect(Dialect):
 		return out
 
 	def column_types(self, table: str) -> dict:
+		"""``{column: data_type_lower}``. Empty on an ordinary error; an RQ job timeout is
+		raised again for the caller."""
 		try:
 			rows = self._safe_sql(
 				"""
@@ -195,7 +203,9 @@ class PostgresDialect(Dialect):
 				(_db_schema(), table),
 				as_dict=True,
 			) or []
-		except Exception:
+		except Exception as exc:
+			if isinstance(exc, safe_call.job_timeout_types()):
+				raise
 			return {}
 		out: dict = {}
 		for r in rows:
@@ -247,3 +257,7 @@ class PostgresDialect(Dialect):
 
 	def unindexable(self, data_type: str) -> bool:
 		return (data_type or "").lower() in _UNINDEXABLE_TYPES
+
+	def is_text_type(self, data_type: str) -> bool:
+		# Frappe's text fieldtypes are all "text" on Postgres (frappe/database/postgres/database.py:131-166).
+		return (data_type or "").lower() == "text"
