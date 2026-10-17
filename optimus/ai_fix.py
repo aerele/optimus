@@ -62,6 +62,7 @@ AI_ELIGIBLE_FINDING_TYPES: frozenset[str] = frozenset({
 	"Low Filter Ratio",
 	"Redundant Call",
 	"Hot Line",
+	"Lock Contention",
 })
 
 # Per-provider protocol + sensible defaults. ``ai_base_url`` / ``ai_model``
@@ -160,6 +161,7 @@ _FINDING_TYPE_HINTS = {
 	"Hook Bottleneck": "A `doc_events` / `before_*` / `after_*` hook is expensive and runs on every save/submit. Fix: make the hook do less (skip when nothing relevant changed check `doc.has_value_changed(...)`), or move heavy work to `frappe.enqueue(...)` so it doesn't block the save.",
 	"Repeated Hot Frame": "The same function shows up many times in the sampled stacks it's called a lot. Fix: reduce call count (batch / cache) or make each call cheaper.",
 	"Hot Line": "A single source line is the dominant time sink inside its function. Fix: optimize that line specifically hoist invariant work out of a loop, replace an O(n²) pattern, avoid a per-iteration DB/cache hit, or use a set/dict for membership tests.",
+	"Lock Contention": "A query at this callsite hit a deadlock or lock-wait timeout and its transaction was rolled back. Fix: lock rows in one consistent order on every code path (e.g. sort names before updating), keep the transaction short by moving slow work (API calls, large loops) out from between the first write and the commit, index the filter columns so fewer rows are locked, and make the operation safe to retry.",
 }
 
 # Postgres phrasings for the four EXPLAIN-based hints. The rest of

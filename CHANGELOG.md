@@ -8,6 +8,26 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.65] - 2026-10-07
+
+### Added
+
+- Capture and surface DB lock contention. A query that hits a deadlock
+  (`QueryDeadlockError`) or a lock-wait timeout (`QueryTimeoutError`) is now
+  recorded and reported as a new High-severity "Lock Contention" finding. The
+  Frappe recorder only logs queries that succeed, so these failed queries were
+  previously invisible to the profiler. An Optimus-side wrapper on
+  `frappe.db.sql` records the contended callsite plus the normalized query (no
+  row data) and re-raises the error unchanged, so Frappe's own retry and
+  suppress behaviour is untouched. Findings are raised only for contention at a
+  callsite in your own code; benign framework-internal races that Frappe catches
+  itself (session touch, change-log write, dashboard refresh) are filtered out.
+  The finding is actionable (it joins the "Fix these first" plan), names the
+  callsite, shows the query and gives a fix hint (short transactions, consistent
+  lock ordering, indexing, retry-safety).
+
+---
+
 ## [0.12.64] - 2026-10-01
 
 ### Internal

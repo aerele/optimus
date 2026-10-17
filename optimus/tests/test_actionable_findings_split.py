@@ -34,6 +34,9 @@ def test_actionable_finding_types_has_concrete_fixes_only():
 		# v0.6.x: Phase-2 line-profile output points at a specific line
 		# of code with a concrete refactor target actionable.
 		"Hot Line",
+		# v0.12.x: DB lock contention at a user callsite (framework races are
+		# filtered out in the analyzer) with a concrete fix hint actionable.
+		"Lock Contention",
 	}
 	assert renderer._ACTIONABLE_FINDING_TYPES == expected_actionable, (
 		"_ACTIONABLE_FINDING_TYPES drifted from the expected set. "

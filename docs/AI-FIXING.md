@@ -143,12 +143,13 @@ For an explicit data-residency choice, use `OpenAI-compatible` pointed at a proc
 
 ## 5. Eligible finding types
 
-These ten finding types are the only ones for which Optimus builds an AI payload. All other types (Slow Hot Path, Hook Bottleneck, Repeated Hot Frame, infra / frontend findings, etc.) are skipped they don't carry enough code/SQL context for the LLM to add value over the profiler's own deterministic suggestions.
+These eleven finding types are the only ones for which Optimus builds an AI payload. All other types (Slow Hot Path, Hook Bottleneck, Repeated Hot Frame, infra / frontend findings, etc.) are skipped they don't carry enough code/SQL context for the LLM to add value over the profiler's own deterministic suggestions.
 
 - Filesort
 - Framework N+1
 - Full Table Scan
 - Hot Line
+- Lock Contention
 - Low Filter Ratio
 - Missing Index
 - N+1 Query
