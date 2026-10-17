@@ -13,6 +13,7 @@ fixture-testable like every other analyzer.
 """
 
 import json
+from collections import Counter
 
 from optimus.analyzers.base import (
 	FRAMEWORK_PREFIXES,
@@ -41,31 +42,48 @@ def _user_callsite(stack) -> dict | None:
 	return frame
 
 
+_KNOWN_KINDS = frozenset({"deadlock", "lock_wait_timeout"})
+
+
 def analyze(recordings, context):
-	"""Bucket user-code lock events by callsite and build one finding each."""
+	"""Bucket user-code lock events by callsite across recordings, one finding each."""
 	buckets: dict = {}
+	truncated = False
 	for action_idx, rec in enumerate(recordings):
 		for ev in rec.get("lock_events") or []:
 			if not isinstance(ev, dict):
 				continue
+			if ev.get("_truncated"):
+				truncated = True
+				continue
+			if ev.get("kind") not in _KNOWN_KINDS:
+				continue  # unknown kind: don't guess a label
 			frame = _user_callsite(ev.get("caller_stack"))
 			if frame is None:
 				continue  # framework-only / benign contention not a finding
-			key = (action_idx, frame.get("filename"), frame.get("lineno"))
+			key = (frame.get("filename"), frame.get("lineno"))
 			bucket = buckets.get(key)
 			if bucket is None:
-				bucket = buckets[key] = {"site": frame, "events": [], "kinds": set()}
+				bucket = buckets[key] = {
+					"site": frame, "events": [], "kinds": set(), "actions": Counter(),
+				}
 			bucket["events"].append(ev)
-			bucket["kinds"].add(ev.get("kind") or "deadlock")
+			bucket["kinds"].add(ev["kind"])
+			bucket["actions"][action_idx] += 1
 
-	findings = [
-		_build_finding(action_idx, bucket)
-		for (action_idx, _f, _l), bucket in buckets.items()
-	]
-	return AnalyzerResult(findings=findings)
+	findings = [_build_finding(bucket) for bucket in buckets.values()]
+	warnings = []
+	if truncated:
+		warnings.append(
+			"Lock Contention: a recording hit the per-recording event cap, so "
+			"later deadlocks or lock-wait timeouts were not counted."
+		)
+	return AnalyzerResult(findings=findings, warnings=warnings)
 
 
-def _build_finding(action_idx: int, bucket: dict) -> dict:
+def _build_finding(bucket: dict) -> dict:
+	# Point at the recording with the most events (ties: earliest).
+	action_idx = min(bucket["actions"].items(), key=lambda kv: (-kv[1], kv[0]))[0]
 	events = bucket["events"]
 	kinds = bucket["kinds"]
 	site = bucket["site"] or {}
@@ -93,9 +111,11 @@ def _build_finding(action_idx: int, bucket: dict) -> dict:
 			else {}
 		),
 		"normalized_query": normalized,
-		"sample_queries": [normalized] if normalized else [],
+		# The card renders example_queries; the failed query is not in the recorder.
+		"example_queries": [normalized] if normalized else [],
 		"lock_kinds": sorted(kinds),
 		"occurrences": count,
+		"affected_actions": sorted(bucket["actions"]),
 		"error": sample_error,
 		"fix_hint": _fix_hint(has_deadlock, where),
 	}

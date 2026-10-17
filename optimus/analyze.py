@@ -1049,7 +1049,7 @@ def _deserialize_tree(uuid: str, tree_blob):
 
 
 def _rehydrate_from_bundle(recordings_bundle, uuid: str):
-	"""Rebuild a recording dict (rec + pyi_session + sidecar) from a persisted
+	"""Rebuild a recording dict (rec + pyi_session + sidecar + lock_events) from a persisted
 	bundle entry, mirroring the live-Redis read path. Returns the rec dict, or
 	None when the bundle lacks this uuid. Accepts either the full bundle
 	(``{"recordings": {...}}``) or the inner uuid->entry map.
@@ -2926,9 +2926,9 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 	Bundle shape::
 
 	    {"schema", "session_uuid", "session_state",
-	     "recordings": {uuid: {rec, sparse, tree_b64, sidecar, infra}}}
+	     "recordings": {uuid: {rec, sparse, tree_b64, sidecar, lock_events, infra}}}
 
-	``rec`` + ``tree`` + ``sidecar`` are what :func:`_rehydrate_from_bundle`
+	``rec`` + ``tree`` + ``sidecar`` + ``lock_events`` are what :func:`_rehydrate_from_bundle`
 	reconstructs; ``sparse`` + ``infra`` + ``session_state`` are captured for
 	future use and not read today. Values are already capture-time redacted; the
 	tree stays as the raw HMAC-signed pickle (base64) so it reloads through the

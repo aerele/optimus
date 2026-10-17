@@ -21,6 +21,7 @@ check is a single attribute lookup and never reads Redis.
 """
 
 import hashlib
+import re
 import sys as _sys
 import time
 
@@ -244,6 +245,31 @@ def _make_wrap(orig, fn_name: str, local_proxy=None):
 # a pathological retry storm from growing the list unbounded.
 LOCK_EVENTS_CAP_PER_RECORDING = 200
 
+# Same path trim as frappe.recorder, so FRAMEWORK_PREFIXES matches app-relative paths.
+_APPS_PATH_PATTERN = re.compile(r".*/apps/")
+_SERVER_SCRIPT_FILE_PREFIX = "<serverscript>"
+
+
+def _app_frames(stack) -> list:
+	"""Keep app and Server Script frames with app-relative filenames, like the recorder."""
+	frames = []
+	for frame in stack or []:
+		filename = (frame.get("filename") or "").replace("\\", "/")
+		if "/apps/" in filename:
+			frames.append({**frame, "filename": _APPS_PATH_PATTERN.sub("", filename)})
+		elif filename.startswith(_SERVER_SCRIPT_FILE_PREFIX):
+			frames.append(dict(frame))
+	return frames
+
+
+def _has_user_frame(frames) -> bool:
+	from optimus.analyzers.base import FRAMEWORK_PREFIXES
+
+	return any(
+		not any(prefix in (f.get("filename") or "") for prefix in FRAMEWORK_PREFIXES)
+		for f in frames
+	)
+
 
 def _lock_event_kind(exc) -> str | None:
 	"""``"deadlock"`` / ``"lock_wait_timeout"`` for a Frappe lock error, else None.
@@ -268,14 +294,19 @@ def _record_lock_event(local_proxy, kind, exc, query, caller_stack) -> None:
 
 	Best-effort: any failure here is swallowed so it can never mask or alter the
 	original DB exception the caller is about to re-raise. The query is stored
-	NORMALIZED (literals stripped) so no row data is persisted; ``caller_stack``
-	is reversed to outermost->innermost to match ``walk_callsite``'s contract."""
+	NORMALIZED (literals stripped) so no row data is persisted. Only app frames
+	are kept, reversed to outermost->innermost for ``walk_callsite``; events with
+	no user frame are skipped so they never use up the cap."""
 	try:
 		events = getattr(local_proxy, "optimus_lock_events", None)
 		if events is None:
 			events = []
 			local_proxy.optimus_lock_events = events
+		frames = _app_frames(caller_stack)
+		if not _has_user_frame(frames):
+			return
 		if len(events) >= LOCK_EVENTS_CAP_PER_RECORDING:
+			local_proxy.optimus_lock_events_truncated = True
 			return
 		normalized = ""
 		if isinstance(query, str):
@@ -290,7 +321,7 @@ def _record_lock_event(local_proxy, kind, exc, query, caller_stack) -> None:
 			# Generic server error text (e.g. "Deadlock found when trying to get
 			# lock; try restarting transaction") carries no row data.
 			"error": str(exc)[:200],
-			"caller_stack": list(reversed(caller_stack or [])),
+			"caller_stack": list(reversed(frames)),
 			"time": time.time(),
 		})
 	except Exception:
@@ -307,12 +338,10 @@ def wrap_db_sql_for_lock_capture(local_proxy) -> None:
 	no DB. Teardown is automatic: the wrap is on the per-request DB instance,
 	which Frappe discards when the request ends.
 
-	Caveat: if later code re-patches ``frappe.local.db.sql`` after this runs (a
-	second ``frappe.recorder.record()`` mid-request, or another app's hook that
-	wraps sql and is ordered after optimus), this interceptor is bypassed for
-	queries issued after that point. Lock capture then under-reports silently
-	rather than erroring. This is inherent to monkey-patching and is the same
-	ordering assumption the recorder itself relies on."""
+	Caveat: a second ``frappe.recorder.record()`` mid-request after this runs
+	saves this wrapper as ``db._sql``, and every later query then recurses
+	(record_sql -> wrapper -> old record_sql -> wrapper) until RecursionError.
+	The recorder has the same hazard with itself, so callers must not re-record."""
 	db = getattr(local_proxy, "db", None)
 	if db is None:
 		return
@@ -398,6 +427,7 @@ def _force_stop_inflight_capture(local_proxy):
 		"optimus_sidecar",
 		"optimus_sidecar_truncated",
 		"optimus_lock_events",
+		"optimus_lock_events_truncated",
 		"_profiler_in_wrap",
 	):
 		try:

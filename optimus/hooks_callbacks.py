@@ -743,10 +743,14 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 	lock_events = getattr(frappe.local, "optimus_lock_events", None)
 	if lock_events:
 		try:
+			# Same in-band truncation marker as the sidecar.
+			payload = list(lock_events)
+			if getattr(frappe.local, "optimus_lock_events_truncated", False):
+				payload.append({"_truncated": True})
 			from optimus import redis_keys
 			frappe.cache.set_value(
 				redis_keys.lock_events(recording_uuid),
-				list(lock_events),
+				payload,
 				expires_in_sec=SESSION_TTL_SECONDS,
 			)
 		except Exception:
@@ -762,6 +766,7 @@ def _clear_capture_locals() -> None:
 		"optimus_sidecar",
 		"optimus_sidecar_truncated",
 		"optimus_lock_events",
+		"optimus_lock_events_truncated",
 		"_profiler_active_session_id",
 		"_profiler_in_wrap",
 	):
