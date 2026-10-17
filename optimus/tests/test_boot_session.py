@@ -153,6 +153,22 @@ class TestWidgetGuard:
 			"hide the widget fail-open shape"
 		)
 
+	def test_widget_checks_role_before_mount(self):
+		"""Non-profilers must not mount: api.status 403s and pops a modal."""
+		import os
+		js_path = os.path.join(
+			os.path.dirname(__file__),
+			"..", "public", "js", "floating_widget.js",
+		)
+		with open(js_path) as f:
+			js = f.read()
+		init_body = js[js.index("function init()"):js.index("function maybeShowOnboardingToast()")]
+		guard = init_body.index("if (!userHasRole())")
+		mount = init_body.index("mountWidget();")
+		assert guard < mount
+		# The guard must bail out, not just log, before mountWidget().
+		assert "return;" in init_body[guard:mount]
+
 
 class TestSessionJsFormatterParity:
 	"""The Desk-side duration formatter (optimus_session.js optimus_fmt_ms) must
