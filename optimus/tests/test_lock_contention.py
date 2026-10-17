@@ -132,12 +132,26 @@ class _FakeLocal:
 	pass
 
 
+_BENCH = "/home/frappe/frappe-bench/apps"
+_RAW_STACK = [  # innermost first, absolute paths, like _capture_caller_stack
+	{"filename": f"{_BENCH}/frappe/frappe/database/database.py", "lineno": 230, "function": "sql"},
+	{"filename": f"{_BENCH}/ugly_code/ugly_code/stock.py", "lineno": 42, "function": "reserve"},
+	{"filename": f"{_BENCH}/ugly_code/ugly_code/api.py", "lineno": 10, "function": "endpoint"},
+	{"filename": "/usr/lib/python3.12/threading.py", "lineno": 1010, "function": "run"},
+]
+
+
+@pytest.fixture
+def bench_stack(monkeypatch):
+	monkeypatch.setattr(capture, "_capture_caller_stack", lambda: list(_RAW_STACK))
+
+
 class _FakeDB:
 	def __init__(self, sql_fn):
 		self.sql = sql_fn
 
 
-def test_wrap_records_deadlock_and_reraises():
+def test_wrap_records_deadlock_and_reraises(bench_stack):
 	import frappe
 
 	hits = {"n": 0}
@@ -195,7 +209,7 @@ def test_wrap_is_idempotent():
 	assert local.db.sql is wrapped_once
 
 
-def test_wrap_records_timeout_kind():
+def test_wrap_records_timeout_kind(bench_stack):
 	import frappe
 
 	def boom(*a, **k):
@@ -251,6 +265,7 @@ def test_lock_contention_finding_renders_in_report():
 	assert "Deadlock on a query" in html   # the finding title
 	assert "jobs.py:316" in html           # the callsite
 	assert "consistent order" in html      # the fix hint
+	assert "UPDATE `tabUser` SET x = ?" in html  # the failed query
 
 
 def test_lock_contention_tldr_hero_has_no_zero_ms_badge():
@@ -269,7 +284,7 @@ def test_lock_contention_tldr_hero_has_no_zero_ms_badge():
 	assert "&middot;" not in headline and "·" not in headline
 
 
-def test_wrap_respects_events_cap():
+def test_wrap_respects_events_cap(bench_stack):
 	import frappe
 
 	def boom(*a, **k):
@@ -282,3 +297,78 @@ def test_wrap_respects_events_cap():
 		with pytest.raises(frappe.QueryDeadlockError):
 			local.db.sql("SELECT 1")
 	assert len(local.optimus_lock_events) == capture.LOCK_EVENTS_CAP_PER_RECORDING
+
+
+# ----- review fixes -------------------------------------------------------
+
+
+def test_bench_under_frappe_home_still_attributes_user_frame(bench_stack):
+	"""Absolute /home/frappe/... paths must not read as framework frames."""
+	import frappe
+
+	def boom(*a, **k):
+		raise frappe.QueryDeadlockError("Deadlock found")
+
+	local = _FakeLocal()
+	local.db = _FakeDB(boom)
+	capture.wrap_db_sql_for_lock_capture(local)
+	with pytest.raises(frappe.QueryDeadlockError):
+		local.db.sql("UPDATE `tabBin` SET qty = 1")
+	stored = local.optimus_lock_events[0]["caller_stack"]
+	assert [f["filename"] for f in stored] == [
+		"ugly_code/ugly_code/api.py", "ugly_code/ugly_code/stock.py", "frappe/frappe/database/database.py",
+	]
+	f = lock_contention.analyze([{"lock_events": local.optimus_lock_events}], _ctx()).findings[0]
+	# Deepest user frame wins over the outer entry point.
+	assert json.loads(f["technical_detail_json"])["callsite"]["function"] == "reserve"
+
+
+def test_framework_only_events_do_not_use_the_cap(monkeypatch):
+	fw = [{"filename": "/home/x/apps/frappe/frappe/sessions.py", "lineno": 1, "function": "update"}]
+	monkeypatch.setattr(capture, "_capture_caller_stack", lambda: fw)
+	local = _FakeLocal()
+	for _ in range(capture.LOCK_EVENTS_CAP_PER_RECORDING + 5):
+		capture._record_lock_event(local, "deadlock", Exception("d"), "SELECT 1", fw)
+	assert getattr(local, "optimus_lock_events", []) == []
+	assert not getattr(local, "optimus_lock_events_truncated", False)
+
+
+def test_cap_sets_truncated_flag(bench_stack):
+	local = _FakeLocal()
+	for _ in range(capture.LOCK_EVENTS_CAP_PER_RECORDING + 1):
+		capture._record_lock_event(local, "deadlock", Exception("d"), "SELECT 1", list(_RAW_STACK))
+	assert local.optimus_lock_events_truncated is True
+
+
+def test_truncation_marker_becomes_warning():
+	result = lock_contention.analyze([{"lock_events": [_event(), {"_truncated": True}]}], _ctx())
+	assert len(result.findings) == 1
+	assert any("event cap" in w for w in result.warnings)
+
+
+def test_same_callsite_across_recordings_is_one_finding():
+	recs = [{"lock_events": [_event()]}, {"lock_events": [_event(), _event()]}, {"lock_events": [_event()]}]
+	findings = lock_contention.analyze(recs, _ctx()).findings
+	assert len(findings) == 1
+	assert findings[0]["affected_count"] == 4
+	assert findings[0]["action_ref"] == "1"  # recording with the most events
+	assert json.loads(findings[0]["technical_detail_json"])["affected_actions"] == [0, 1, 2]
+
+
+def test_unknown_kind_is_skipped_not_labelled_deadlock():
+	rec = {"lock_events": [_event(kind="lock_wait_timeout"), _event(kind=None), _event(kind="weird")]}
+	f = lock_contention.analyze([rec], _ctx()).findings[0]
+	assert f["affected_count"] == 1
+	assert f["title"].startswith("Lock-wait timeout")
+
+
+def test_failed_query_is_in_example_queries():
+	f = lock_contention.analyze([{"lock_events": [_event()]}], _ctx()).findings[0]
+	assert json.loads(f["technical_detail_json"])["example_queries"] == ["UPDATE `tabUser` SET x = ? WHERE name = ?"]
+
+
+def test_lock_contention_is_ai_eligible():
+	from optimus import ai_fix
+
+	assert "Lock Contention" in ai_fix.AI_ELIGIBLE_FINDING_TYPES
+	assert "Lock Contention" in ai_fix._FINDING_TYPE_HINTS
