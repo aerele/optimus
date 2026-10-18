@@ -135,8 +135,17 @@ def test_pdf_normalizer_blocks_authenticated_resource_channels():
 	'<svg><style><!-- comment -->text{fill:url("/private/files/secret.svg")}</style></svg>',
 	'<svg><style><a href="/private/files/secret.svg">text</a></style></svg>',
 	'<svg><style><g/><a href="/private/files/secret.svg">text</a></style></svg>',
+	'<svg><style>&lt;/style&gt;&lt;img src=/private/files/secret.svg&gt;</style></svg>',
+	'<svg><style><![CDATA[</style><img src=/private/files/secret.svg>]]></style></svg>',
+	'<svg><script>&lt;/script&gt;&lt;img src=/private/files/secret.svg&gt;</script></svg>',
+	'<svg><script><![CDATA[</script><img src=/private/files/secret.svg>]]></script></svg>',
 ])
 def test_pdf_normalizer_checks_foreign_style_with_comment_children(content):
+	from bs4 import BeautifulSoup
+
 	from optimus.pdf_export import _safe_pdf_html
 
-	assert "/private/files/secret.svg" not in _safe_pdf_html(content)
+	clean = _safe_pdf_html(content)
+	assert "/private/files/secret.svg" not in clean
+	post = BeautifulSoup(clean, "html5lib")
+	assert not post.find("img")

@@ -130,11 +130,25 @@ def test_two_thousand_answer_report_has_bounded_validation_and_no_side_effects(m
 
 	from optimus import ai_fix
 
+	writes = []
+
 	def forbidden(*args, **kwargs):
+		writes.append(True)
 		raise AssertionError("render attempted a write or provider call")
 
-	for name in ("set_value", "sql", "commit", "insert", "delete"):
-		monkeypatch.setattr(frappe.db, name, forbidden, raising=False)
+	previous_db = frappe.db
+
+	class ReadOnlyDB:
+		def __getattr__(self, name):
+			if name in {"set_value", "sql", "commit", "rollback", "insert", "delete"}:
+				return forbidden
+			try:
+				return getattr(previous_db, name)
+			except RuntimeError:
+				# Real Frappe exposes an unbound LocalProxy outside a site.
+				raise AttributeError(name) from None
+
+	monkeypatch.setattr(frappe, "db", ReadOnlyDB())
 	monkeypatch.setattr(ai_fix, "_http_post", forbidden)
 	# Many AST statements approach the per-answer work envelope; every answer
 	# differs and has exactly 16 KiB, so the char cap admits exactly 16.
@@ -182,3 +196,4 @@ def test_two_thousand_answer_report_has_bounded_validation_and_no_side_effects(m
 	_internal.render(doc, [], generated_at="2026-10-18T00:00:00")
 	assert (checked, limited) == sets
 	assert G._render_budget.get() is None
+	assert not writes

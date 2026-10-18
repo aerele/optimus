@@ -146,7 +146,7 @@ def _safe_pdf_html(content):
 				return True
 		return False
 
-	for tag in soup.find_all(["iframe", "frame", "object", "embed", "link", "base", "audio", "video", "source"]):
+	for tag in soup.find_all(["script", "iframe", "frame", "object", "embed", "link", "base", "audio", "video", "source"]):
 		tag.decompose()
 	for tag in soup.find_all(True):
 		if tag.decomposed:
@@ -165,8 +165,11 @@ def _safe_pdf_html(content):
 		tag.attrs.pop("srcset", None)
 		if tag.has_attr("style") and resource_css(parse_component_value_list(tag["style"])):
 			tag.attrs.pop("style", None)
+		# Foreign style text decodes entities, but bs4 serializes it without
+		# escaping. Frappe's next parse could turn that text into real images.
 		if tag.name == "style" and (
-			tag.string is None or tag.find(True, recursive=False) is not None
+			tag.namespace != "http://www.w3.org/1999/xhtml"
+			or tag.string is None or tag.find(True, recursive=False) is not None
 			or resource_css(parse_component_value_list(str(tag.string)))
 		):
 			tag.decompose()
