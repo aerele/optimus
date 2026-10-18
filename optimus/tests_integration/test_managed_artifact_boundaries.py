@@ -370,6 +370,8 @@ class TestManagedArtifactBoundaries(FrappeTestCase):
 			self.assertFalse(frappe.db.exists("Optimus Session", {"session_uuid": created[0]}))
 			self.assertFalse(session.get_session_meta(created[0]))
 			self.assertFalse(session.get_active_session_for("Administrator"))
+			# v15 set_value with TTL leaves a prior local-cache miss intact.
+			frappe.local.cache.pop(frappe.cache.make_key(key), None)
 			self.assertEqual(frappe.cache.get_value(key), "synthetic-phase-two")
 		finally:
 			frappe.cache.delete_value(key)
