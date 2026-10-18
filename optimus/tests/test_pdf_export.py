@@ -129,3 +129,10 @@ def test_pdf_normalizer_blocks_authenticated_resource_channels():
 	assert not soup.find('iframe')
 	assert 'body{color:blue}' in result
 	assert not soup.find('div').has_attr('style')
+
+
+def test_pdf_normalizer_checks_foreign_style_with_comment_children():
+	from optimus.pdf_export import _safe_pdf_html
+
+	content = '<svg><style><!-- comment -->text{fill:url("/private/files/secret.svg")}</style></svg>'
+	assert "/private/files/secret.svg" not in _safe_pdf_html(content)

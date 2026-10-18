@@ -1380,22 +1380,6 @@ def ai_capabilities() -> dict:
 	}
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _refresh_flag(value) -> bool:
 	if type(value) is bool:
 		return value

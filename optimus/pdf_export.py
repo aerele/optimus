@@ -163,7 +163,9 @@ def _safe_pdf_html(content):
 		tag.attrs.pop("srcset", None)
 		if tag.has_attr("style") and resource_css(parse_component_value_list(tag["style"])):
 			tag.attrs.pop("style", None)
-		if tag.name == "style" and resource_css(parse_component_value_list(tag.string or "")):
+		if tag.name == "style" and (
+			tag.string is None or resource_css(parse_component_value_list(str(tag.string)))
+		):
 			tag.decompose()
 	return strip_meta(str(soup))
 
