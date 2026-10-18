@@ -74,10 +74,31 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, Any]] = {
 		"model": "claude-sonnet-4-6",
 		"needs_key": True,
 	},
+	"Claude": {
+		# Same Anthropic Messages wire path as the "Anthropic" entry above,
+		# offered under the name most users look for. Defaults to a current
+		# Claude model; override with ``ai_model`` in Optimus Settings for a
+		# different one (e.g. claude-opus-5-5 for maximum quality).
+		"protocol": "anthropic",
+		"base_url": "https://api.anthropic.com",
+		"model": "claude-sonnet-5-5",
+		"needs_key": True,
+	},
 	"OpenAI": {
 		"protocol": "openai",
 		"base_url": "https://api.openai.com/v1",
 		"model": "gpt-4.1-mini",
+		"needs_key": True,
+	},
+	"Codex": {
+		# OpenAI's Codex coding models are served over the same OpenAI Chat
+		# Completions wire path, so this reuses ``_call_openai_chat``. Default
+		# to gpt-5-codex; override with ``ai_model`` for a different Codex
+		# model. The model chosen must be one OpenAI exposes on
+		# /chat/completions.
+		"protocol": "openai",
+		"base_url": "https://api.openai.com/v1",
+		"model": "gpt-5-codex",
 		"needs_key": True,
 	},
 	"Kimi (Moonshot)": {
@@ -783,7 +804,7 @@ def _resolve_provider() -> dict:
 	defaults = _PROVIDER_DEFAULTS[name]
 	# The Base URL override applies ONLY to bring-your-own providers (those
 	# with no built-in default endpoint i.e. "OpenAI-compatible"). Hosted
-	# providers (Anthropic / OpenAI / Kimi / DeepSeek) ALWAYS use their default: the
+	# providers (Anthropic / Claude / OpenAI / Codex / Kimi / DeepSeek) ALWAYS use their default: the
 	# Settings field is hidden for them, so a previously-stored value must not
 	# silently override and route calls to a dead host (that stale-value trap
 	# caused a ConnectionError after the field was hidden for hosted providers).
@@ -1401,7 +1422,20 @@ def _call_anthropic(
 		"system": system,
 		"messages": messages,
 	}
-	data = _http_post(url, headers, body, provider="anthropic", where="messages")
+	try:
+		data = _http_post(url, headers, body, provider="anthropic", where="messages")
+	except AiFixError as e:
+		# Current Claude models (Sonnet 5.5 and the Opus/Sonnet 4.7+/5.x family)
+		# reject a non-default `temperature` with a request-validation error,
+		# the way OpenAI's reasoning models do; older ones (e.g.
+		# claude-sonnet-4-6) accept it. Rather than track which model allows it,
+		# retry once without `temperature` on a 400/422 that names the field,
+		# letting the model use its own default. Mirrors `_call_openai_chat`.
+		if "temperature" in body and getattr(e, "status_code", None) in (400, 422) and "temperature" in str(e).lower():
+			body.pop("temperature", None)
+			data = _http_post(url, headers, body, provider="anthropic", where="messages")
+		else:
+			raise
 	if usage_out is not None:
 		usage_out.update(_usage_from_anthropic(data))
 		_record_session_spend(usage_out.get("total_tokens"))

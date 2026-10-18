@@ -488,6 +488,35 @@ class TestAnthropicCall:
 		assert fp.last.headers["anthropic-version"]
 		assert fp.last.body["system"] == "sys"
 
+	def test_retries_without_temperature_on_400_temperature_error(self, monkeypatch):
+		# Current Claude models (e.g. claude-sonnet-5-5, the "Claude" preset's
+		# default) reject a non-default temperature with HTTP 400; retry once
+		# without it, mirroring the OpenAI path.
+		err = '{"type":"error","error":{"type":"invalid_request_error","message":"temperature: unsupported value"}}'
+		fp = _post_sequence(_FakeResp(400, text=err), _FakeResp(200, _ANTHROPIC_OK))
+		monkeypatch.setattr(requests, "post", fp)
+		text = ai_fix._call_anthropic("https://api.anthropic.com", "k", "claude-sonnet-5-5", "s", [{"role": "user", "content": "x"}])
+		assert text == "**Fix**\n\nadd an index"
+		assert len(fp.calls) == 2
+		assert "temperature" in fp.calls[0].body      # first attempt sent it
+		assert "temperature" not in fp.calls[1].body  # retry dropped it
+
+	def test_retries_without_temperature_on_422_temperature_error(self, monkeypatch):
+		err = '{"error":{"message":"temperature is not supported for this model"}}'
+		fp = _post_sequence(_FakeResp(422, text=err), _FakeResp(200, _ANTHROPIC_OK))
+		monkeypatch.setattr(requests, "post", fp)
+		text = ai_fix._call_anthropic("https://api.anthropic.com", "k", "claude-opus-5-5", "s", [{"role": "user", "content": "x"}])
+		assert text == "**Fix**\n\nadd an index"
+		assert len(fp.calls) == 2
+		assert "temperature" not in fp.calls[1].body  # retry dropped it
+
+	def test_non_temperature_400_is_not_retried(self, monkeypatch):
+		fp = _post_sequence(_FakeResp(400, text='{"error":{"message":"max_tokens too large"}}'))
+		monkeypatch.setattr(requests, "post", fp)
+		with pytest.raises(ai_fix.AiFixError):
+			ai_fix._call_anthropic("https://api.anthropic.com", "k", "claude-sonnet-5-5", "s", [{"role": "user", "content": "x"}])
+		assert len(fp.calls) == 1  # no retry for unrelated 400s
+
 
 class TestHttpErrorMapping:
 	def _call(self):
@@ -598,6 +627,43 @@ class TestResolveProvider:
 		           return_value=_cfg(ai_provider="DeepSeek", ai_base_url="https://router.example/v1")):
 			p = ai_fix._resolve_provider()
 		assert p["base_url"] == "https://api.deepseek.com/v1"
+
+	def test_claude_uses_anthropic_protocol_with_current_default(self):
+		# "Claude" is the friendly alias for the Anthropic Messages wire path,
+		# defaulting to a current Claude model.
+		with patch("optimus.settings.get_config", return_value=_cfg(ai_provider="Claude")):
+			p = ai_fix._resolve_provider()
+		assert p["name"] == "Claude"
+		assert p["protocol"] == "anthropic"
+		assert p["base_url"] == "https://api.anthropic.com"
+		assert p["model"] == "claude-sonnet-5-5"
+		assert p["needs_key"] is True
+
+	def test_claude_model_override_honoured(self):
+		# The model field stays editable for hosted providers.
+		with patch("optimus.settings.get_config",
+		           return_value=_cfg(ai_provider="Claude", ai_model="claude-opus-5-5")):
+			p = ai_fix._resolve_provider()
+		assert p["model"] == "claude-opus-5-5"
+
+	def test_codex_uses_openai_protocol_with_codex_default(self):
+		# Codex reuses the OpenAI Chat Completions wire path with OpenAI's
+		# hosted endpoint and a Codex default model.
+		with patch("optimus.settings.get_config", return_value=_cfg(ai_provider="Codex")):
+			p = ai_fix._resolve_provider()
+		assert p["name"] == "Codex"
+		assert p["protocol"] == "openai"
+		assert p["base_url"] == "https://api.openai.com/v1"
+		assert p["model"] == "gpt-5-codex"
+		assert p["needs_key"] is True
+
+	def test_codex_ignores_base_url_override(self):
+		# Hosted provider: a stored ai_base_url must not override its built-in
+		# endpoint (the field is hidden for hosted providers).
+		with patch("optimus.settings.get_config",
+		           return_value=_cfg(ai_provider="Codex", ai_base_url="https://router.example/v1")):
+			p = ai_fix._resolve_provider()
+		assert p["base_url"] == "https://api.openai.com/v1"
 
 	def test_base_url_override_ignored_for_hosted_provider(self):
 		# A hosted provider (Anthropic / OpenAI / Kimi / DeepSeek) ALWAYS uses its default

@@ -8,6 +8,29 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.65] - 2026-10-18
+
+### Added
+
+- Added "Claude" and "Codex" as AI-suggestion providers in Optimus Settings.
+  "Claude" is the Anthropic Messages wire path under the name most users look
+  for, defaulting to `claude-sonnet-5-5`. "Codex" reuses the OpenAI Chat
+  Completions wire path against OpenAI's endpoint, defaulting to `gpt-5-codex`.
+  Both default models are overridable with the Model field. The existing
+  "Anthropic" and "OpenAI" providers are unchanged, so stored settings keep
+  working.
+
+### Fixed
+
+- The Anthropic call path now retries once without `temperature` when the
+  provider rejects a non-default value (HTTP 400/422 naming the field), the
+  same way the OpenAI path already does. Current Claude models (Sonnet 5.5 and
+  the Opus/Sonnet 4.7+/5.x family) reject a custom temperature, so this is what
+  lets the new "Claude" preset and any modern model set on the "Anthropic"
+  provider work instead of failing on the first call.
+
+---
+
 ## [0.12.64] - 2026-10-01
 
 ### Internal
