@@ -12,6 +12,7 @@ running site, no dependence on frappe core's layout).
 
 import inspect
 import os
+import re
 
 import pytest
 
@@ -21,7 +22,9 @@ _DOTTED = "optimus.renderer.render"
 
 
 def _expected_lineno():
-	return inspect.unwrap(renderer.render).__code__.co_firstlineno
+	lines, first = inspect.getsourcelines(inspect.unwrap(renderer.render))
+	# The resolver anchors on the signature, past any decorators.
+	return next(first + i for i, line in enumerate(lines) if re.match(r"(?:async )?def render\(", line))
 
 
 class TestActionDottedEntry:
