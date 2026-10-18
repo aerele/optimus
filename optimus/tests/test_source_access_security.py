@@ -44,7 +44,7 @@ def test_installed_app_read_failure_warns_once_without_exception_text(bench, mon
 	def fail():
 		raise RuntimeError("private database detail")
 	def warning(message, *args):
-		assert sys.exception() is None
+		assert sys.exc_info()[1] is None
 		seen.append(message % args)
 	monkeypatch.setattr(frappe, "get_installed_apps", fail)
 	monkeypatch.setattr(frappe, "logger", lambda name: SimpleNamespace(warning=warning), raising=False)

@@ -13,6 +13,8 @@ running site, no dependence on frappe core's layout).
 import inspect
 import os
 
+import pytest
+
 from optimus import renderer
 
 _DOTTED = "optimus.renderer.render"
@@ -87,6 +89,15 @@ class TestResolveDottedToCode:
 
 
 class TestActionEntryCallsite:
+	@pytest.fixture(autouse=True)
+	def _in_bench_source_root(self, monkeypatch):
+		import frappe.utils
+
+		# This class tests in-bench display paths. An editable app checkout may
+		# live outside the installed framework's bench (including in CI).
+		app_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+		monkeypatch.setattr(frappe.utils, "get_bench_path", lambda: app_root, raising=False)
+
 	def _expect_renderer_py(self, cs):
 		assert cs is not None
 		assert cs["function"] == "render"
@@ -209,7 +220,7 @@ class TestResolveFrameKeyToCallsite:
 # "optimus/" as framework/profiler-own. So use a stdlib module's file
 # (absolute, readable, neither substring) _resolve_source_path passes
 # absolute paths straight through, so the snippet still reads.
-_USER_FRAME_FILE = inspect.__file__
+_USER_FRAME_FILE = os.path.realpath(inspect.__file__)
 
 
 def _rec(calls):

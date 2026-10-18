@@ -490,7 +490,8 @@ def _publish(event: str, payload: dict) -> None:
 	guard = safe_call.InterruptGuard(base=True)
 	try:
 		with guard:
-			frappe.publish_realtime(event, payload, user=payload.get("user"))
+			from optimus.realtime import publish_session_event
+			publish_session_event(event, payload)
 	except Exception:
 		pass
 	if guard.pending():

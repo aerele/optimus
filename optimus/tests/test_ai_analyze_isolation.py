@@ -143,7 +143,7 @@ def test_persistence_writes_deterministic_steps_without_a_provider_call(monkeypa
 	doc.save.assert_called_once_with(ignore_permissions=True)
 
 
-@pytest.mark.parametrize("reason", ["no_worker", "queue_unavailable", "phase2", "disabled"])
+@pytest.mark.parametrize("reason", ["no_worker", "queue_unavailable", "phase2", "disabled", "site_cap", "busy"])
 def test_auto_admission_refusal_leaves_an_operator_notice(monkeypatch, reason):
 	cfg = SimpleNamespace(ai_enabled=True, ai_auto_suggest=True, ai_suggest_findings=True,
 		ai_humanize_steps=False, ai_auto_suggest_max=5)
@@ -155,6 +155,7 @@ def test_auto_admission_refusal_leaves_an_operator_notice(monkeypatch, reason):
 	monkeypatch.setattr(ai_jobs, "record_admission_notice", lambda *a, **kw: notices.append((a, kw)), raising=False)
 	analyze.queue_analyze_time_ai("fake-doc")
 	assert notices == [(("fake-doc",), {"reason": reason})]
+	assert row["status"] == "Ready"
 
 
 def test_recording_failure_uses_scrubbed_logging_outside_the_handler(pipeline, monkeypatch):

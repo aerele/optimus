@@ -116,7 +116,7 @@ def test_context_error_remains_actionable_without_echo(wire):
 	assert PROMPT not in str(caught.value) and len(posts) == 1
 
 
-@pytest.mark.parametrize("location", ["http://provider.invalid/v1", "https://other.invalid/v1", "https://provider.invalid/v1?secret=canary", "https://provider.invalid/v1#private", "?", "#", "/v1/\nnext"])
+@pytest.mark.parametrize("location", ["http://provider.invalid/v1", "https://other.invalid/v1", "https://provider.invalid/v1?secret=canary", "https://provider.invalid/v1#private", "?", "#", "/v1?", "/v1#", "https://provider.invalid/v1?", "https://provider.invalid/v1#", "/v1/\nnext"])
 def test_unsafe_redirect_does_not_get_a_second_request(wire, location):
 	install, posts, _ = wire
 	install(Response(307, location=location), Response())

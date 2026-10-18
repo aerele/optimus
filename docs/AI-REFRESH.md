@@ -53,14 +53,13 @@ insert can wait until this short transaction ends.
 
 Admission locks the session row first. When another writer holds that row for
 a whole lock wait timeout, the admission answers `busy` instead of trying again.
-Only a user refresh (`scope` all, the only scope with caps) then takes the site
-mutex, with NOWAIT. When another admission holds the mutex, the answer is a
+Both user refresh (`scope` all) and analyze-time (`fixes_missing`) admissions then
+take the site mutex, with NOWAIT. When another admission holds the mutex, the answer is a
 `busy` refusal at once, never a wait or an error. An admission that waits on its
-own session therefore never holds the mutex, and analyze-time `fixes_missing`
-runs never take it. The capacity
+own session therefore never holds the mutex. The shared site capacity
 count is a plain read after those locks. It counts live runs only: a run whose
 lease or deadline has passed can no longer claim a slice or begin a call, so it
-holds no slot. Admissions with caps serialize on the
+holds no slot. Both admission scopes serialize on the
 mutex, and each accepted admission updates the mutex row. An older PostgreSQL REPEATABLE READ
 snapshot then fails on that row (40001) and is retried, so the caps stay exact
 on both databases. Admission takes no lock on a range of runs: such next-key
@@ -240,8 +239,8 @@ repeated automatically.
 
 AI and Phase 2 serialize through the Session row. Both admissions change the
 parent, including automatic AI with no refresh-count increment, so PostgreSQL
-rejects an older snapshot before it can miss an opposing admission. Manual AI
-also locks the site capacity row with NOWAIT after its Session. Phase 2 does not
+rejects an older snapshot before it can miss an opposing admission. Both AI scopes
+also lock the site capacity row with NOWAIT after their Session. Phase 2 does not
 hold the site mutex while waiting for a session.
 
 ## Selection, grounding and the Error Log
@@ -321,7 +320,7 @@ queue needs a listening worker.
 If a setting becomes invalid while a run is queued, the worker can fail before
 claiming it. The run stays queued and repeated deliveries fail the same way;
 it keeps its session reservation until its lease or deadline expires, and a
-manual run also keeps its capacity slot until then. Correct the named setting, then let the next click or recovery sweep
+run also keeps its site capacity slot until then. Correct the named setting, then let the next click or recovery sweep
 redeliver the pending slice. A queued lease lasts 1800 seconds unless the run's
 deadline comes first.
 
@@ -338,18 +337,18 @@ Sensitivity profiles do not change the manual cap. **AI model context window (to
 exposes the existing context-fit limit; zero selects the provider/model default.
 Settings cache failures during the seed print a fixed recovery instruction to
 clear the cache after restart.
-Manual runs additionally have a per-requester cap of two. Analyze-time
-`fixes_missing` runs reserve their own session but do not consume the manual
-site/user cap. The item cap applies even to Regenerate all, and across a resume
+Manual and analyze-time `fixes_missing` runs share the site-wide active-run cap.
+Manual runs additionally have a per-requester cap of two; automatic runs do not
+consume that manual allowance. Each run reserves its own session. The item cap applies even to Regenerate all, and across a resume
 chain; zero means unlimited within the run deadline and bounded history limit.
 
 Slices run on the `optimus_ai_queue` queue, `long` by default, which analysis
 shares. A run holds one worker until its slice yields; an in-flight call can
-outlast the slice budget. The default site cap allows two manual runs, so a site with one worker has its profiled-flow
+outlast the slice budget. The default site cap allows two runs across both scopes, so a site with one worker has its profiled-flow
 analyses wait behind a slice. Give the queue a worker of its own
 (`optimus_ai_queue`, with a worker started for it) on a site that refreshes
-often. Analyze-time `fixes_missing` runs are not capped per site; the wiring
-follow-up decides that.
+often. When the shared site cap is full, analyze-time AI is declined with an
+operator notice; the completed profile remains Ready.
 
 The default slice budget is 120 seconds. A slice processes at least one item
 when its remaining total budget permits, then queues a continuation. Each call

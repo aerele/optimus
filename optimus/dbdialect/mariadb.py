@@ -15,6 +15,7 @@ from optimus.dbdialect.base import (
 	InfraSnapshot,
 	NormalizedPlan,
 	PlanTable,
+	prepare_explain_query,
 	to_float,
 	to_int,
 	to_int_or_none,
@@ -59,6 +60,12 @@ class MariaDBDialect(Dialect):
 		import frappe
 
 		try:
+			query = prepare_explain_query(query)
+		except ValueError as exc:
+			return NormalizedPlan(ok=False, reason=str(exc))
+		try:
+			# Recorded SQL, guarded above against compound statements; EXPLAIN cannot bind SQL as a value.
+			# nosemgrep: frappe-sql-format-injection
 			rows = frappe.db.sql(f"EXPLAIN {query}", as_dict=True) or []
 		except Exception:
 			return NormalizedPlan(ok=False, tables=[], raw=[])

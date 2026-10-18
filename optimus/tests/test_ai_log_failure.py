@@ -607,7 +607,8 @@ class TestExceptionText:
 				raise ai_fix.AiFixError(reply)  # noqa: B904 (chained on purpose)
 		except ai_fix.AiFixError as e:
 			exc = e
-		exc.add_note("NOTE-MARKER")
+		# __notes__ is the storage contract; add_note() was added in Python 3.11.
+		exc.__notes__ = ["NOTE-MARKER"]
 		setattr(exc, ai_fix._LOG_TEXT_ATTR, self._LOG_TEXT)
 		text = ai_fix._exception_text(exc)
 		assert text.startswith("Traceback (most recent call last):\n")

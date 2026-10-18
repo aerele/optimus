@@ -94,6 +94,26 @@ class NormalizedPlan:
 	tables: list = field(default_factory=list)   # list[PlanTable]
 	ok: bool = True                              # False → EXPLAIN failed/unsupported; analyzers skip
 	raw: object = None                           # full raw EXPLAIN output for the report
+	reason: str = ""                             # safe, query-free explanation when declined
+
+
+def prepare_explain_query(query: str) -> str:
+	"""Accept one recorded statement, with at most one trailing terminator.
+
+	EXPLAIN only prefixes the first statement in a compound query. Reject every
+	remaining semicolon, including those in strings/comments, rather than guess
+	at quoting rules that vary with the database's configuration. Missing these
+	advisory plans is preferable to replaying a recorded write.
+	"""
+	query = query.strip()
+	if query.endswith(";"):
+		query = query[:-1].rstrip()
+	if not query or ";" in query:
+		raise ValueError(
+			"EXPLAIN skipped: only one SQL statement is supported; semicolons inside "
+			"literals or comments are also declined."
+		)
+	return query
 
 
 @dataclass

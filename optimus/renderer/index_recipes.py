@@ -308,6 +308,13 @@ def _explain_columns(ftype: str, table: str, query: str, parse) -> tuple[str, li
 		tab_tables = [t for t in (parsed.get("tables") or []) if str(t).startswith("tab")]
 		if len(tab_tables) == 1:
 			key = tab_tables[0]
+		elif ftype == "Slow Query" and len(query) >= QUERY_TEXT_LIMIT:
+			# sql_metadata 3 rejects a cut identifier instead of returning partial
+			# metadata. Recover only an unambiguous main table; the bounded WHERE
+			# scan below still decides whether any filter is complete enough to use.
+			sources = _from_clause(query, preserve_case=True) or []
+			if len(sources) == 1 and doctype_of(sources[0]) is not None:
+				key = sources[0]
 	if key is None:
 		return table, []
 	out: list[tuple[str, str]] = []
@@ -457,12 +464,13 @@ def _where_columns(query: str, qualifiers, columns: Mapping[str, str], *, trunca
 _JOIN_SIDES: frozenset[str] = frozenset({"left", "right", "inner", "cross", "full", "natural"})
 
 
-def _from_clause(query: str) -> list[str] | None:
+def _from_clause(query: str, *, preserve_case: bool = False) -> list[str] | None:
 	"""Lowercase unquoted names of the tables in the main query's FROM clause (the first
 	one outside brackets), in order, "(derived)" for a subquery; None when there is none.
 	A "." qualifies only the table name right before it (``db.table``): the qualified
 	columns of a JOIN's ON clause (``ON gl.voucher_no = p.name``) are never table names, or
-	the joined table would drop out of the list."""
+	the joined table would drop out of the list. ``preserve_case`` retains schema spelling
+	when recovering the target of a truncated query."""
 	tokens = [tok for tok in _SQL_TOKEN_RE.findall(query or "") if not _COMMENT_RE.match(tok)]
 	depth = 0
 	start = None
@@ -496,10 +504,12 @@ def _from_clause(query: str) -> list[str] | None:
 		if low in (",", "join", "straight_join"):
 			expect = True
 		elif low == "." and out and named_at == i - 1 and i + 1 < len(tokens):
-			out[-1] = tokens[i + 1].strip('`"').lower()  # db.table: the table
+			name = tokens[i + 1].strip('`"')
+			out[-1] = name if preserve_case else name.lower()  # db.table: the table
 			named_at = i + 1
 		elif expect and _NAME_RE.fullmatch(tok) and low not in _JOIN_SIDES | {"outer", "lateral"}:
-			out.append(tok.strip('`"').lower())
+			name = tok.strip('`"')
+			out.append(name if preserve_case else name.lower())
 			expect = False
 			named_at = i
 	return out
@@ -2033,6 +2043,11 @@ def _advise_finding(
 		# top_queries keeps QUERY_TEXT_LIMIT characters, so a Slow Query that long may be cut
 		truncated = ftype == "Slow Query" and len(query) >= QUERY_TEXT_LIMIT
 		qualifiers = _target_qualifiers(query, table, getattr(parser, "aliases", None))
+		if truncated and _where_tokens(query, truncated=True) is None:
+			return _no_code(doctype, (), (
+				"Optimus could not read how this query combines its filters: the recorded SQL ends before "
+				"the WHERE clause is complete. So it gives no index code. Check the query with EXPLAIN."
+			), unknown=True)
 		if evidence is not None and _union_branches(query, qualifiers) > 1:
 			# one branch's filter is not the query's: never advise from one branch
 			return _no_code(doctype, _clean_columns([col for _label, col in labelled]), (
@@ -2064,6 +2079,9 @@ def _advise_finding(
 			]
 		dropped: list[str] = []
 		names = {col.lower(): col for col in evidence.column_types} if evidence is not None else {}
+		# Parser versions differ in whether they preserve the query's identifier
+		# casing. Use the actual schema spelling for both shape checks and advice.
+		labelled = [(label, names.get(col.lower(), col)) for label, col in labelled]
 		if evidence is not None and target in source:
 			# sql_metadata leaves out a bare column named like an SQL word (account, user, type,
 			# date, ...) and every unqualified column of a query on several tables (a subquery
@@ -2100,7 +2118,7 @@ def _advise_finding(
 				current = comparisons.get(col)
 				if current != "eq":  # an equality-filtered sort column stays an equality column
 					comparisons[col] = "rsort" if current == "range" else "sort"
-			else:
+			elif col not in unusable:
 				comparisons.setdefault(col, "eq" if label == "JOIN" else usable.get(col, "range"))
 		lookup = _key_lookup(valued, evidence)
 		if lookup:
@@ -2115,6 +2133,14 @@ def _advise_finding(
 		maybe = tuple(col for col, kind in in_cols if kind == "in1")
 		if ftype in _SERVES:
 			sort_problem = _sort_problem(query, ftype, qualifiers, evidence)
+			if not sort_problem:
+				# A function/OR in WHERE can prevent filtering by a column without
+				# preventing ORDER BY on that bare column. Parser 3 reports both
+				# uses; the validated sort remains a candidate independently.
+				unusable = {
+					col: kinds for col, kinds in unusable.items()
+					if comparisons.get(col) != "sort"
+				}
 			# rows matching several values (IN, IS NULL OR =) never come back in one sorted run;
 			# a collapsed IN (?) may be one value, so it keeps the sort and the lead hedges
 			serves = _SERVES[ftype] if not sort_problem and not multi else ""
