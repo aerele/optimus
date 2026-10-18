@@ -16,15 +16,23 @@ versions may contain breaking changes see migration notes below).
   (`QueryDeadlockError`) or a lock-wait timeout (`QueryTimeoutError`) is now
   recorded and reported as a new High-severity "Lock Contention" finding. The
   Frappe recorder only logs queries that succeed, so these failed queries were
-  previously invisible to the profiler. An Optimus-side wrapper on
-  `frappe.db.sql` records the contended callsite plus the normalized query (no
+  previously invisible to the profiler. An Optimus-side wrapper on the DB's
+  low-level `_sql` records the contended callsite plus the normalized query (no
   row data) and re-raises the error unchanged, so Frappe's own retry and
-  suppress behaviour is untouched. Findings are raised only for contention at a
-  callsite in your own code; benign framework-internal races that Frappe catches
-  itself (session touch, change-log write, dashboard refresh) are filtered out.
-  The finding is actionable (it joins the "Fix these first" plan), names the
-  callsite, shows the query and gives a fix hint (short transactions, consistent
-  lock ordering, indexing, retry-safety).
+  suppress behaviour is untouched. Wrapping `_sql` (not `sql`) keeps the capture
+  in place when the recorder unpatches and re-patches `sql` mid-request, so it no
+  longer stops silently. Findings are raised only for contention at a callsite in
+  your own code; benign framework-internal races that Frappe catches itself
+  (session touch, change-log write, dashboard refresh), framework-app (ERPNext /
+  HRMS) code and deliberate `NOWAIT` lock probes are filtered out. The finding is
+  actionable (it joins the "Fix these first" plan), names the callsite, lists
+  every distinct contended query (so a multi-statement `doc.save()` points at the
+  right table), surfaces the wall-time the query waited before failing, and gives
+  a fix hint (short transactions, consistent lock ordering, indexing,
+  retry-safety). The callsite stack is walked in full on the failure path so a
+  deep ORM / hook chain can't hide the user frame, and the wait-timeout
+  description names `innodb_lock_wait_timeout` as a MariaDB/MySQL example rather
+  than asserting it on every backend.
 
 ---
 

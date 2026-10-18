@@ -25,6 +25,14 @@ import re
 import sys as _sys
 import time
 
+# A ``FOR UPDATE ... NOWAIT`` / ``LOCK ... NOWAIT`` probe is a DELIBERATE
+# non-blocking lock check (Frappe uses them, e.g. the link-check in delete_doc):
+# failing fast is the designed path, not contention to report. On Postgres such a
+# failure surfaces as QueryTimeoutError, so without this it would become a false
+# "lock-wait timeout" finding. Word-boundary match so a column named ``nowait_x``
+# doesn't trip it.
+_NOWAIT_RE = re.compile(r"\bnowait\b", re.IGNORECASE)
+
 # Optional dependency capture degrades gracefully if pyinstrument is
 # not installed (e.g. air-gapped environments, broken pip cache).
 try:
@@ -42,12 +50,17 @@ except ImportError:
 _CALLER_STACK_MAX_DEPTH = 20
 
 
-def _capture_caller_stack() -> list:
+def _capture_caller_stack(max_depth: int | None = _CALLER_STACK_MAX_DEPTH) -> list:
 	"""Return ``{"filename","lineno","function"}`` dicts for the Python frames
-	above this function (skipping the wrap itself), for redundant-call callsite
-	attribution. Uses ``sys._getframe`` (fast, CPython-specific), depth-bounded at
-	``_CALLER_STACK_MAX_DEPTH``. Returns [] on any failure rather than raising
-	(observability code never breaks the host call).
+	above this function (skipping the wrap itself), for callsite attribution. Uses
+	``sys._getframe`` (fast, CPython-specific). Returns [] on any failure rather
+	than raising (observability code never breaks the host call).
+
+	``max_depth`` bounds the walk. The hot redundant-call path keeps the default
+	20-frame cap to stay cheap; the lock-capture path (only ever walked on the rare
+	deadlock / timeout EXCEPTION, never on the happy path) passes ``None`` for an
+	unbounded walk, so a deep ORM / hook chain can't push the user frame past the
+	cap and get the real contention dropped or misattributed to a framework frame.
 	"""
 	try:
 		# Skip: _capture_caller_stack itself + the wrap function.
@@ -57,7 +70,7 @@ def _capture_caller_stack() -> list:
 
 	stack: list = []
 	try:
-		while frame is not None and len(stack) < _CALLER_STACK_MAX_DEPTH:
+		while frame is not None and (max_depth is None or len(stack) < max_depth):
 			code = frame.f_code
 			stack.append({
 				"filename": code.co_filename,
@@ -289,15 +302,60 @@ def _lock_event_kind(exc) -> str | None:
 	return None
 
 
-def _record_lock_event(local_proxy, kind, exc, query, caller_stack) -> None:
+def _normalize_sql_safe(query) -> str:
+	"""Return ``query`` with literals replaced by ``?``, or "" on ANY failure.
+
+	NOT ``frappe.recorder.normalize_query``: that one catches its own sqlparse
+	errors internally and returns the RAW query (literals intact), so a caller's
+	try/except never sees the failure (see recorder.py). Persisting that raw query
+	would leak row data into the report, breaking the "no row data" guarantee, so
+	we run the same sqlparse normalization here and return "" on failure instead
+	of the raw text. ``query`` is str()-coerced first, since db.sql accepts non-str
+	query objects (query builders) that would otherwise be dropped to ""."""
+	try:
+		import re as _re
+
+		import sqlparse
+
+		text = str(query) if query is not None else ""
+		if not text:
+			return ""
+		parsed = sqlparse.parse(text)[0]
+		for token in parsed.flatten():
+			ttype = str(token.ttype)
+			if "Token.Literal" in ttype:
+				token.value = "?"
+			elif "Comment" in ttype:
+				# Comments can carry row data and are NOT Token.Literal, so frappe's
+				# normalize_query leaves them intact. Drop them here so nothing leaks.
+				token.value = ""
+		return _re.sub(r"( IN )\(\?[\s\n\?,]*\)", r"\1(?)", str(parsed), flags=_re.IGNORECASE)
+	except Exception:
+		# Unparseable / exotic query: store nothing rather than risk raw literals.
+		return ""
+
+
+def _record_lock_event(local_proxy, kind, exc, query, caller_stack, duration_ms=None) -> None:
 	"""Append one lock-contention event to ``local_proxy.optimus_lock_events``.
 
 	Best-effort: any failure here is swallowed so it can never mask or alter the
 	original DB exception the caller is about to re-raise. The query is stored
-	NORMALIZED (literals stripped) so no row data is persisted. Only app frames
-	are kept, reversed to outermost->innermost for ``walk_callsite``; events with
-	no user frame are skipped so they never use up the cap."""
+	NORMALIZED via ``_normalize_sql_safe`` (literals + comments stripped, "" on any
+	parse failure) so no row data is persisted even for an unparseable query. Only
+	app frames are kept (``_app_frames``), reversed to outermost->innermost for
+	``walk_callsite``; an event with no user frame is skipped so it never uses up
+	the cap. ``duration_ms`` is the wall-time the failed query spent before raising
+	(a lock-wait timeout can burn the full innodb_lock_wait_timeout, ~50s), surfaced
+	so the cost is visible. A ``NOWAIT`` probe is skipped: its failure is the
+	caller's designed fast-fail path, not contention worth a finding."""
 	try:
+		normalized = _normalize_sql_safe(query)
+		# Skip a deliberate NOWAIT lock probe (fail-fast by design, not contention).
+		# Checked on the NORMALIZED text, where literals are already stripped to
+		# ``?``, so a row value that happens to be 'nowait' can't trigger a false
+		# skip only the SQL keyword survives normalization.
+		if _NOWAIT_RE.search(normalized):
+			return
 		events = getattr(local_proxy, "optimus_lock_events", None)
 		if events is None:
 			events = []
@@ -308,13 +366,6 @@ def _record_lock_event(local_proxy, kind, exc, query, caller_stack) -> None:
 		if len(events) >= LOCK_EVENTS_CAP_PER_RECORDING:
 			local_proxy.optimus_lock_events_truncated = True
 			return
-		normalized = ""
-		if isinstance(query, str):
-			try:
-				from frappe.recorder import normalize_query
-				normalized = normalize_query(query)
-			except Exception:
-				pass  # leave normalized="" rather than risk persisting raw SQL
 		events.append({
 			"kind": kind,
 			"normalized_query": normalized[:2000],
@@ -322,6 +373,7 @@ def _record_lock_event(local_proxy, kind, exc, query, caller_stack) -> None:
 			# lock; try restarting transaction") carries no row data.
 			"error": str(exc)[:200],
 			"caller_stack": list(reversed(frames)),
+			"duration_ms": round(duration_ms, 2) if duration_ms is not None else None,
 			"time": time.time(),
 		})
 	except Exception:
@@ -329,27 +381,30 @@ def _record_lock_event(local_proxy, kind, exc, query, caller_stack) -> None:
 
 
 def wrap_db_sql_for_lock_capture(local_proxy) -> None:
-	"""Wrap the request-scoped ``frappe.local.db.sql`` to record deadlocks and
+	"""Wrap the request-scoped DB's low-level ``_sql`` to record deadlocks and
 	lock-wait timeouts.
 
-	Call from before_request / before_job AFTER the recorder has patched ``sql``
-	so this interceptor sits outermost (it delegates to whatever ``sql`` currently
-	is record_sql or the original). Idempotent per request; a no-op when there's
-	no DB. Teardown is automatic: the wrap is on the per-request DB instance,
-	which Frappe discards when the request ends.
+	We wrap ``db._sql`` (the underlying executor), NOT ``db.sql``. Frappe's
+	recorder patches ``db.sql`` to ``record_sql`` and, in ``do_not_record`` /
+	``record_queries`` / teardown, UNPATCHES it with ``db.sql = db._sql`` and may
+	re-patch it later. A wrapper living on ``db.sql`` would be silently dropped by
+	the first such swap and never restored, so lock capture would quietly stop for
+	the rest of the request. ``record_sql`` always delegates to ``db._sql`` and the
+	unpatch restores ``db.sql`` TO ``db._sql``, so wrapping ``_sql`` keeps the
+	interceptor in the path across every patch / unpatch cycle.
 
-	Caveat: a second ``frappe.recorder.record()`` mid-request after this runs
-	saves this wrapper as ``db._sql``, and every later query then recurses
-	(record_sql -> wrapper -> old record_sql -> wrapper) until RecursionError.
-	The recorder has the same hazard with itself, so callers must not re-record."""
+	Call from before_request / before_job. Idempotent per request; a no-op when
+	there's no DB or no ``_sql``. Teardown is automatic: the wrap is on the
+	per-request DB instance, which Frappe discards when the request ends."""
 	db = getattr(local_proxy, "db", None)
 	if db is None:
 		return
-	current = getattr(db, "sql", None)
+	current = getattr(db, "_sql", None)
 	if current is None or getattr(current, "_optimus_lock_wrap", False):
 		return
 
 	def wrapped(*args, **kwargs):
+		start = time.monotonic()
 		try:
 			return current(*args, **kwargs)
 		except Exception as exc:
@@ -361,15 +416,22 @@ def wrap_db_sql_for_lock_capture(local_proxy) -> None:
 				kind = _lock_event_kind(exc)
 				if kind:
 					query = args[0] if args else kwargs.get("query")
+					# Unbounded stack walk: this only runs on the rare lock
+					# EXCEPTION, so cost is irrelevant and a deep ORM / hook chain
+					# must not push the user frame past the cap (issue: real
+					# contention dropped / misattributed).
 					_record_lock_event(
-						local_proxy, kind, exc, query, _capture_caller_stack())
+						local_proxy, kind, exc, query,
+						_capture_caller_stack(max_depth=None),
+						duration_ms=(time.monotonic() - start) * 1000.0,
+					)
 			except Exception:
 				pass
 			raise
 
 	wrapped._optimus_lock_wrap = True
 	try:
-		db.sql = wrapped
+		db._sql = wrapped
 	except Exception:
 		# Some DB wrappers may disallow attribute assignment degrade to no
 		# lock capture rather than break the request.

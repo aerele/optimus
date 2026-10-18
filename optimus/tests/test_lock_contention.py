@@ -11,6 +11,7 @@ Two layers:
 """
 
 import json
+import types
 
 import pytest
 
@@ -143,12 +144,23 @@ _RAW_STACK = [  # innermost first, absolute paths, like _capture_caller_stack
 
 @pytest.fixture
 def bench_stack(monkeypatch):
-	monkeypatch.setattr(capture, "_capture_caller_stack", lambda: list(_RAW_STACK))
+	# Accept *a/**k: the lock path calls _capture_caller_stack(max_depth=None).
+	monkeypatch.setattr(capture, "_capture_caller_stack", lambda *a, **k: list(_RAW_STACK))
 
 
 class _FakeDB:
+	"""Mimics a Frappe request DB. ``_sql`` is the underlying executor the lock
+	wrap targets; ``sql`` is a thin shim that delegates to the CURRENT ``_sql``
+	(like ``frappe.recorder.record_sql``), so wrapping ``_sql`` is seen through
+	``sql`` too and survives the recorder swapping ``sql`` out and back."""
+
 	def __init__(self, sql_fn):
-		self.sql = sql_fn
+		self._sql = sql_fn
+
+		def _sql_entry(*a, **k):
+			return self._sql(*a, **k)
+
+		self.sql = _sql_entry
 
 
 def test_wrap_records_deadlock_and_reraises(bench_stack):
@@ -204,9 +216,9 @@ def test_wrap_is_idempotent():
 	local = _FakeLocal()
 	local.db = _FakeDB(lambda *a, **k: "OK")
 	capture.wrap_db_sql_for_lock_capture(local)
-	wrapped_once = local.db.sql
+	wrapped_once = local.db._sql
 	capture.wrap_db_sql_for_lock_capture(local)
-	assert local.db.sql is wrapped_once
+	assert local.db._sql is wrapped_once
 
 
 def test_wrap_records_timeout_kind(bench_stack):
@@ -227,6 +239,118 @@ def test_wrap_no_db_is_noop():
 	local = _FakeLocal()  # no .db attribute
 	capture.wrap_db_sql_for_lock_capture(local)  # must not raise
 	assert not hasattr(local, "optimus_lock_events")
+
+
+def test_caller_stack_unbounded_keeps_deep_user_frame():
+	"""Issue #4: the lock path walks the stack UNBOUNDED (max_depth=None) so a
+	deep ORM / hook chain can't push the user frame past the default 20-frame cap
+	and get the real contention dropped or misattributed."""
+
+	def deep(n):
+		if n > 0:
+			return deep(n - 1)
+		return (
+			capture._capture_caller_stack(),              # default cap (20)
+			capture._capture_caller_stack(max_depth=None),  # unbounded
+		)
+
+	capped, full = deep(40)
+	assert len(capped) <= 20
+	assert len(full) > 20  # the deep frames the cap would have dropped are kept
+
+
+def test_wrap_no_underlying_sql_is_noop():
+	# A DB object without ``_sql`` (exotic wrapper) degrades to no capture.
+	local = _FakeLocal()
+	local.db = types.SimpleNamespace()  # no _sql
+	capture.wrap_db_sql_for_lock_capture(local)  # must not raise
+	assert not hasattr(local, "optimus_lock_events")
+
+
+def test_wrap_survives_recorder_sql_unpatch_and_repatch(bench_stack):
+	"""Issue #10: the recorder swaps ``db.sql`` between ``record_sql`` and
+	``db._sql`` (do_not_record / record_queries / teardown). Because the wrap
+	lives on ``_sql``, lock capture keeps firing across such a swap instead of
+	silently stopping for the rest of the request."""
+	import frappe
+
+	def boom(*a, **k):
+		raise frappe.QueryDeadlockError("Deadlock found")
+
+	local = _FakeLocal()
+	local.db = _FakeDB(boom)
+	capture.wrap_db_sql_for_lock_capture(local)
+
+	# 1) normal recorder-patched path (sql shim -> wrapped _sql)
+	with pytest.raises(frappe.QueryDeadlockError):
+		local.db.sql("UPDATE `tabX` SET a = 1")
+	assert len(local.optimus_lock_events) == 1
+
+	# 2) recorder UNPATCH: db.sql = db._sql (our wrapped _sql). Still captures.
+	local.db.sql = local.db._sql
+	with pytest.raises(frappe.QueryDeadlockError):
+		local.db.sql("UPDATE `tabX` SET a = 2")
+	assert len(local.optimus_lock_events) == 2
+
+	# 3) recorder RE-PATCH with a record_sql-like shim delegating to _sql.
+	def record_sql_like(*a, **k):
+		return local.db._sql(*a, **k)
+
+	local.db.sql = record_sql_like
+	with pytest.raises(frappe.QueryDeadlockError):
+		local.db.sql("UPDATE `tabX` SET a = 3")
+	assert len(local.optimus_lock_events) == 3
+
+
+def test_wrap_skips_nowait_probe(bench_stack):
+	"""Issue #2: a ``NOWAIT`` lock probe's failure is the caller's designed
+	fast-fail path (Frappe uses them, e.g. delete_doc), not contention so it must
+	not be recorded as a finding."""
+	import frappe
+
+	def boom(*a, **k):
+		raise frappe.QueryTimeoutError("could not obtain lock")
+
+	local = _FakeLocal()
+	local.db = _FakeDB(boom)
+	capture.wrap_db_sql_for_lock_capture(local)
+	with pytest.raises(frappe.QueryTimeoutError):
+		local.db.sql("SELECT name FROM `tabX` WHERE name = 'y' FOR UPDATE NOWAIT")
+	assert getattr(local, "optimus_lock_events", []) == []
+
+
+def test_wrap_does_not_skip_data_literal_nowait(bench_stack):
+	"""The NOWAIT skip keys off the SQL KEYWORD (checked after normalization, where
+	literals are stripped), so a genuine deadlock on a query that merely compares a
+	column to the row value 'nowait' is still recorded not false-skipped."""
+	import frappe
+
+	def boom(*a, **k):
+		raise frappe.QueryDeadlockError("Deadlock found")
+
+	local = _FakeLocal()
+	local.db = _FakeDB(boom)
+	capture.wrap_db_sql_for_lock_capture(local)
+	with pytest.raises(frappe.QueryDeadlockError):
+		local.db.sql("UPDATE `tabTask` SET x = 1 WHERE status = 'nowait'")
+	assert len(getattr(local, "optimus_lock_events", [])) == 1
+
+
+def test_wrap_records_duration_ms(bench_stack):
+	"""Issue #5: the wall-time the failed query burned is captured on the event."""
+	import frappe
+
+	def boom(*a, **k):
+		raise frappe.QueryDeadlockError("Deadlock found")
+
+	local = _FakeLocal()
+	local.db = _FakeDB(boom)
+	capture.wrap_db_sql_for_lock_capture(local)
+	with pytest.raises(frappe.QueryDeadlockError):
+		local.db.sql("UPDATE `tabX` SET a = 1")
+	ev = local.optimus_lock_events[0]
+	assert "duration_ms" in ev
+	assert ev["duration_ms"] is not None and ev["duration_ms"] >= 0
 
 
 # ----- render -------------------------------------------------------------
@@ -265,7 +389,15 @@ def test_lock_contention_finding_renders_in_report():
 	assert "Deadlock on a query" in html   # the finding title
 	assert "jobs.py:316" in html           # the callsite
 	assert "consistent order" in html      # the fix hint
-	assert "UPDATE `tabUser` SET x = ?" in html  # the failed query
+	# The contended query must actually render (via example_queries): the card's
+	# "Query (normalized)" block was removed, so a finding that only set
+	# normalized_query would show no SQL at all.
+	assert "Affected queries" in html
+	assert "UPDATE `tabUser` SET x = ?" in html  # the failed query, normalized
+	# Issue #6: Lock Contention is actionable (joins "Fix these first") but has
+	# impact 0, so its action-plan step must NOT render a dangling "est. saving"
+	# label with no number. This is the only finding, so the label must be absent.
+	assert "est. saving" not in html
 
 
 def test_lock_contention_tldr_hero_has_no_zero_ms_badge():
@@ -354,7 +486,6 @@ def test_same_callsite_across_recordings_is_one_finding():
 	assert findings[0]["action_ref"] == "1"  # recording with the most events
 	assert json.loads(findings[0]["technical_detail_json"])["affected_actions"] == [0, 1, 2]
 
-
 def test_unknown_kind_is_skipped_not_labelled_deadlock():
 	rec = {"lock_events": [_event(kind="lock_wait_timeout"), _event(kind=None), _event(kind="weird")]}
 	f = lock_contention.analyze([rec], _ctx()).findings[0]
@@ -372,3 +503,101 @@ def test_lock_contention_is_ai_eligible():
 
 	assert "Lock Contention" in ai_fix.AI_ELIGIBLE_FINDING_TYPES
 	assert "Lock Contention" in ai_fix._FINDING_TYPE_HINTS
+
+
+# ----- query normalization (privacy) --------------------------------------
+
+
+def test_normalize_sql_safe_strips_literals():
+	out = capture._normalize_sql_safe("UPDATE `tabX` SET a = 1 WHERE name = 'SECRET'")
+	assert "SECRET" not in out
+	assert "?" in out and "UPDATE" in out
+
+
+def test_normalize_sql_safe_never_returns_raw_literals():
+	# Even on a statement that doesn't cleanly normalize, the literal must never
+	# survive (frappe.recorder.normalize_query would return the raw text here).
+	out = capture._normalize_sql_safe("GARBAGE 'rowsecret' ;;; not valid")
+	assert "rowsecret" not in out
+
+
+def test_normalize_sql_safe_strips_comment_literals():
+	# Comments can carry row data; frappe's normalize_query leaves them intact
+	# (they're not Token.Literal), so we strip them to honor "no row data".
+	out = capture._normalize_sql_safe("SELECT 1 /* user secretpii@x.com */ FROM `tabX`")
+	assert "secretpii" not in out
+	assert "SELECT" in out
+
+
+def test_normalize_sql_safe_empty_and_none():
+	assert capture._normalize_sql_safe("") == ""
+	assert capture._normalize_sql_safe(None) == ""
+
+
+def test_normalize_sql_safe_coerces_non_str_query():
+	# db.sql accepts non-str query objects (query builders) str()-coerce, then
+	# normalize, so the finding shows the shape instead of a blank query.
+	class _QB:
+		def __str__(self):
+			return "SELECT * FROM `tabX` WHERE id = 42"
+
+	out = capture._normalize_sql_safe(_QB())
+	assert "42" not in out
+	assert "?" in out and "SELECT" in out
+
+
+# ----- analyzer: query list, descriptions, wait duration ------------------
+
+
+def test_finding_lists_all_distinct_queries_at_callsite():
+	"""Issue #7: multiple DISTINCT statements deadlocking at one callsite all
+	appear, not just the first otherwise the developer and the AI fix prompt are
+	pointed at the wrong table."""
+	q1 = "UPDATE `tabA` SET x = ? WHERE name = ?"
+	q2 = "UPDATE `tabB` SET y = ? WHERE name = ?"
+	rec = {"lock_events": [_event(query=q1), _event(query=q2), _event(query=q1)]}
+	f = lock_contention.analyze([rec], _ctx()).findings[0]
+	detail = json.loads(f["technical_detail_json"])
+	# Stored under example_queries the key the report card + AI prompt render;
+	# sample_queries renders nowhere.
+	assert sorted(detail["example_queries"]) == sorted([q1, q2])  # both, deduped
+	assert "sample_queries" not in detail
+	assert detail["normalized_query"] in (q1, q2)
+
+
+def test_deadlock_description_does_not_overclaim_mechanism():
+	"""Issue #3: MariaDB reports a snapshot conflict (err 1020) as a deadlock too,
+	so the description must not assert 'rows in opposite orders' as the only cause."""
+	f = lock_contention.analyze([{"lock_events": [_event(kind="deadlock")]}], _ctx()).findings[0]
+	assert "opposite orders" not in f["customer_description"]
+
+
+def test_timeout_description_is_db_agnostic():
+	"""Issue #3: the lock-wait description names innodb_lock_wait_timeout as a
+	MariaDB/MySQL EXAMPLE, not a fact about every backend (the same
+	QueryTimeoutError also covers a Postgres statement timeout)."""
+	f = lock_contention.analyze(
+		[{"lock_events": [_event(kind="lock_wait_timeout")]}], _ctx()
+	).findings[0]
+	assert "MariaDB/MySQL" in f["customer_description"]
+
+
+def test_finding_surfaces_wait_duration():
+	"""Issue #5: when events carry a duration, the finding exposes the wait time
+	(so the cost of a lock-wait timeout that burned ~50s is not invisible)."""
+	ev = _event(kind="lock_wait_timeout")
+	ev["duration_ms"] = 50000.0
+	f = lock_contention.analyze([{"lock_events": [ev]}], _ctx()).findings[0]
+	detail = json.loads(f["technical_detail_json"])
+	assert detail["max_wait_ms"] == 50000.0
+	assert detail["total_wait_ms"] == 50000.0
+	assert "waited" in f["customer_description"].lower()
+
+
+def test_finding_wait_duration_absent_when_events_lack_it():
+	"""Events without a duration (older recordings) leave the wait fields None and
+	add no wait sentence no crash, no fabricated number."""
+	f = lock_contention.analyze([{"lock_events": [_event()]}], _ctx()).findings[0]
+	detail = json.loads(f["technical_detail_json"])
+	assert detail["max_wait_ms"] is None and detail["total_wait_ms"] is None
+	assert "waited" not in f["customer_description"].lower()

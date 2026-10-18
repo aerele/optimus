@@ -18,9 +18,14 @@ from collections import Counter
 from optimus.analyzers.base import (
 	FRAMEWORK_PREFIXES,
 	AnalyzerResult,
+	humanize_duration_ms,
 	short_filename,
 	walk_callsite,
 )
+
+# A single contended callsite can fail on several distinct statements; show them
+# all but cap so a pathological retry storm can't bloat the finding.
+_MAX_EXAMPLE_QUERIES = 10
 
 
 def _user_callsite(stack) -> dict | None:
@@ -98,11 +103,29 @@ def _build_finding(bucket: dict) -> dict:
 	kind_label = "Deadlock" if has_deadlock else "Lock-wait timeout"
 	where = f"{short_filename(filename)}:{lineno}" if filename else None
 
-	# First non-empty normalized query across the bucket (all share a callsite).
-	normalized = next(
-		(e.get("normalized_query") for e in events if e.get("normalized_query")), ""
-	)
+	# ALL distinct normalized queries at this callsite, not just the first. One
+	# doc.save() can deadlock on several different statements at the same line, so
+	# showing only the first would point the developer (and the AI fix prompt) at
+	# the wrong table. Stored under ``example_queries`` the key the finding card
+	# ("Affected queries") and the AI-fix prompt actually read; ``sample_queries``
+	# is rendered nowhere. Capped so a pathological bucket can't bloat the report.
+	example_queries: list = []
+	seen: set = set()
+	for e in events:
+		q = e.get("normalized_query")
+		if q and q not in seen:
+			seen.add(q)
+			example_queries.append(q)
+	example_queries = example_queries[:_MAX_EXAMPLE_QUERIES]
+	normalized = example_queries[0] if example_queries else ""
 	sample_error = next((e.get("error") for e in events if e.get("error")), "")
+
+	# Wall-time the failed queries burned before raising (a lock-wait timeout can
+	# sit for the full innodb_lock_wait_timeout, ~50s). None when no event carries
+	# a duration (older recordings / the pure-analyzer fixtures).
+	durations = [e.get("duration_ms") for e in events if isinstance(e.get("duration_ms"), (int, float))]
+	total_wait_ms = round(sum(durations), 2) if durations else None
+	max_wait_ms = round(max(durations), 2) if durations else None
 
 	findings_detail = {
 		"callsite": (
@@ -112,10 +135,14 @@ def _build_finding(bucket: dict) -> dict:
 		),
 		"normalized_query": normalized,
 		# The card renders example_queries; the failed query is not in the recorder.
-		"example_queries": [normalized] if normalized else [],
+		# All distinct queries at the callsite (not just the first) so a multi-
+		# statement doc.save() points at the right table.
+		"example_queries": example_queries,
 		"lock_kinds": sorted(kinds),
 		"occurrences": count,
 		"affected_actions": sorted(bucket["actions"]),
+		"total_wait_ms": total_wait_ms,
+		"max_wait_ms": max_wait_ms,
 		"error": sample_error,
 		"fix_hint": _fix_hint(has_deadlock, where),
 	}
@@ -128,10 +155,12 @@ def _build_finding(bucket: dict) -> dict:
 		# (the report sorts severity-first, floating it above timed findings).
 		"severity": "High",
 		"title": _title(kind_label, count, where),
-		"customer_description": _description(has_deadlock, count, where),
+		"customer_description": _description(has_deadlock, count, where, max_wait_ms),
 		"technical_detail_json": json.dumps(findings_detail, default=str),
-		# No measured ms to reclaim: the cost is a failed/retried transaction,
-		# not wall-time on the happy path. Severity carries the ranking.
+		# No measured ms to RECLAIM on the happy path: the cost is a failed /
+		# retried transaction, not wall-time a fix gives back, so this stays 0 and
+		# severity carries the ranking. The wait burned is surfaced in the
+		# description + technical detail instead (total_wait_ms / max_wait_ms).
 		"estimated_impact_ms": 0.0,
 		"affected_count": count,
 		"action_ref": str(action_idx),
@@ -145,21 +174,36 @@ def _title(kind_label: str, count: int, where: str | None) -> str:
 	return f"{kind_label} on a database query{times}"
 
 
-def _description(has_deadlock: bool, count: int, where: str | None) -> str:
+def _description(has_deadlock: bool, count: int, where: str | None, max_wait_ms: float | None = None) -> str:
 	loc = f" at {where}" if where else ""
 	plural = "s" if count > 1 else ""
+	wait = ""
+	if max_wait_ms and max_wait_ms >= 1.0:
+		wait = f" The slowest attempt waited {humanize_duration_ms(max_wait_ms)} before failing."
 	if has_deadlock:
+		# Mechanism is phrased as the COMMON cause, not the only one: the DB layer
+		# also reports a snapshot / optimistic-lock conflict (MariaDB err 1020,
+		# "record changed since last read") as a deadlock, which is not a classic
+		# lock-order cycle, so the old "locking rows in opposite orders" wording
+		# over-claimed.
 		return (
 			f"A database query{loc} hit a deadlock {count} time{plural} during this "
 			"flow. The database picked this transaction as the victim and rolled it "
-			"back to break the lock, so the write failed or had to be retried. Two "
-			"transactions were trying to lock the same rows in opposite orders."
+			"back to break the lock, so the write failed or had to be retried. This "
+			"usually means two transactions locked the same rows in a different "
+			"order, or a row changed underneath the transaction under a strict "
+			f"isolation level.{wait}"
 		)
+	# DB-agnostic: the wait-timeout knob is innodb_lock_wait_timeout on
+	# MariaDB/MySQL but the same QueryTimeoutError also covers a Postgres statement
+	# timeout, so the description names the MariaDB knob as an example, not a fact
+	# about every backend.
 	return (
 		f"A database query{loc} hit a lock-wait timeout {count} time{plural} during "
 		"this flow. The query waited for rows another transaction was holding and "
-		"gave up once it passed innodb_lock_wait_timeout, so the statement failed. "
-		"This points to a long-held lock or heavy contention on those rows."
+		"gave up once it passed the configured lock-wait timeout "
+		"(innodb_lock_wait_timeout on MariaDB/MySQL), so the statement failed. "
+		f"This points to a long-held lock or heavy contention on those rows.{wait}"
 	)
 
 
