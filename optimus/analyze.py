@@ -144,7 +144,8 @@ def _publish_progress(percent: float, description: str, session_uuid: str):
 	"""Emit an optimus_progress update for the floating widget and form UI.
 	Best-effort, never raises."""
 	try:
-		frappe.publish_realtime(
+		from optimus.realtime import publish_session_event
+		publish_session_event(
 			"optimus_progress",
 			{
 				"session_uuid": session_uuid,
@@ -163,7 +164,7 @@ def _publish_session_event(
 	docname: str | None,
 	**extra,
 ) -> None:
-	"""Publish a session-state transition event to the session owner's Desk tabs.
+	"""Publish a state transition to the recording user and authorized open forms.
 
 	Runs in the background analyze job (no request-scoped user), so the user is
 	looked up from the Optimus Session row. Events: optimus_session_analyzing,
@@ -171,17 +172,10 @@ def _publish_session_event(
 	publish failure never derails analyze (the state is durable on the row).
 	"""
 	try:
-		user = None
-		if docname:
-			try:
-				user = frappe.db.get_value(
-					"Optimus Session", docname, "user"
-				)
-			except Exception:
-				user = None
+		from optimus.realtime import publish_session_event
 		payload = {"session_uuid": session_uuid, "docname": docname}
 		payload.update(extra)
-		frappe.publish_realtime(event_name, payload, user=user)
+		publish_session_event(event_name, payload)
 	except Exception:
 		pass
 
@@ -726,7 +720,8 @@ def _arm_phase2(docname: str, context) -> None:
 	# form tell them a pass is armed and what to do next (re-run + Stop),
 	# since arming alone does nothing until the flow re-executes.
 	functions = [r["dotted_path"].rsplit(".", 1)[-1] for r in eligible][:5]
-	frappe.publish_realtime(
+	from optimus.realtime import publish_session_event
+	publish_session_event(
 		"optimus_phase2_armed",
 		{
 			"docname": docname,
@@ -734,7 +729,6 @@ def _arm_phase2(docname: str, context) -> None:
 			"count": len(eligible),
 			"functions": functions,
 		},
-		user=user,
 	)
 
 
@@ -1400,6 +1394,18 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 				call["explain_result"] = []
 				continue
 
+			# Check the original SQL before cache lookup or sqlparse's interpretation
+			# can hide a declined compound query. The adapters enforce this too.
+			from optimus.dbdialect.base import prepare_explain_query
+			try:
+				prepare_explain_query(query)
+			except ValueError as exc:
+				call["explain_result"] = []
+				call["explain_warning"] = str(exc)
+				if str(exc) not in warnings:
+					warnings.append(str(exc))
+				continue
+
 			# Dedupe EXPLAIN by normalized query shape. The recorder
 			# hasn't computed normalized_query yet (mark_duplicates runs
 			# below), so compute a temporary shape key here.
@@ -1430,6 +1436,10 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 				# dicts (run_explain returns ok=False / empty tables on failure,
 				# so the stored shape matches the old empty-list-on-error path).
 				plan = get_dialect().run_explain(call["query"])
+				if plan.reason:
+					call["explain_warning"] = plan.reason
+					if plan.reason not in warnings:
+						warnings.append(plan.reason)
 				result = [asdict(t) for t in plan.tables]
 				call["explain_result"] = result
 				_cap_explain_cache(explain_cache, cache_key, result)

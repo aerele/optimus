@@ -10,8 +10,8 @@ name: CI
 # not dedupe them. Here:
 #   * pull_request (any branch) the merge gate; the only run a feature
 #     branch with an open PR produces.
-#   * push to main only post-merge / trunk signal; the only run a
-#     merge to main produces.
+#   * push to main/develop post-merge / trunk signal; the only run a
+#     merge to either trunk produces.
 # A given commit therefore runs each check exactly once.
 #
 # NB: intentionally NO ``paths-ignore``. These checks are required by the
@@ -30,7 +30,7 @@ on:
   pull_request:
     branches: ['**']
   push:
-    branches: [main]
+    branches: [main, develop]
   workflow_dispatch:
 
 # Cancel a superseded in-flight run when a new commit lands on the same PR
@@ -78,25 +78,23 @@ jobs:
       # config and a large reformat is its own piece of work. Add a
       # ``ruff format --check optimus/`` step here once that lands.
 
-  tests:
-    name: tests
+  tests-matrix:
+    name: tests (Python ${{ matrix.python }}, sql_metadata ${{ matrix.sql_metadata }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.12', '3.14']
+        sql_metadata: ['2.19.0', '3.0.1']
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.14
-        # 3.14 is the only target. It matches the dev bench's interpreter
-        # (Python 3.14.2 locally) and the deployment target for every bench in
-        # scope. The sys.monitoring / line_profiler tool-2 handling that
-        # diverges across Python 3.12+ is exercised natively on 3.14, so
-        # multi-version coverage added CI minutes without adding signal hence
-        # a single version, no matrix (which also keeps the check name a clean
-        # ``CI / tests`` rather than ``tests (Python 3.14)``).
+      - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: ${{ matrix.python }}
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
@@ -111,12 +109,11 @@ jobs:
         # installed the conftest baseline stub satisfies module-top frappe
         # imports at collection time. uv provides build isolation, so no
         # separate pip/wheel/setuptools bootstrap step is needed for the
-        # line_profiler C-extension build. sql_metadata is pinned to the
-        # version Frappe v16 ships (~=2.19.0): the index advisor reads queries
-        # through it, and the 3.x line parses some WHERE clauses differently.
+        # line_profiler C-extension build. Both parser families are exercised:
+        # older Frappe/CI installs use 2.x, while current Frappe v16 uses 3.x.
         run: |
           uv pip install --system -e .
-          uv pip install --system pytest pytest-github-actions-annotate-failures hypothesis Faker pdfplumber pypdf 'sql_metadata~=2.19.0' jsonschema
+          uv pip install --system pytest pytest-github-actions-annotate-failures hypothesis Faker pdfplumber pypdf 'sql_metadata==${{ matrix.sql_metadata }}' jsonschema
 
       - name: Run pytest
         # ``set -eo pipefail`` is required: without it, the ``| tee`` at the
@@ -149,10 +146,22 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-log
+          name: pytest-log-${{ matrix.python }}-${{ matrix.sql_metadata }}
           path: pytest.log
           if-no-files-found: warn
           retention-days: 7
+
+  # Preserve the required CI / tests check while requiring every matrix leg.
+  tests:
+    name: tests
+    if: always()
+    needs: tests-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all supported runtimes
+        env:
+          RESULT: ${{ needs.tests-matrix.result }}
+        run: test "$RESULT" = success
 
   coverage:
     name: coverage

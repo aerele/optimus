@@ -564,11 +564,12 @@ def test_cancellation_releases_admission_without_repeating_or_losing_usage(journ
 	assert claim(journal) is None
 
 
-def test_admission_locks_the_session_before_the_site_mutex(journal):
+@pytest.mark.parametrize("scope", ["all", "fixes_missing"])
+def test_admission_locks_the_session_before_the_site_mutex(journal, scope):
 	"""Q4: the session row first, so an admission waiting on its own session never holds the
 	site mutex and stalls every other session's admission."""
 	journal.db.rows[journal.mod.RUN] = {}
-	out = admit(journal)
+	out = admit(journal, scope=scope)
 	assert out["status"] == "queued"
 	assert journal.db.locks[:2] == [("Optimus Session", "fake-session-doc"), (journal.mod.CONTROL, "site")]
 	run = journal.db.rows[journal.mod.RUN]["new-run"]
@@ -576,13 +577,14 @@ def test_admission_locks_the_session_before_the_site_mutex(journal):
 	assert run["active_session"] == "fake-session-doc" and run["requested_by"] == "fake-owner"
 
 
-def test_admission_changes_the_mutex_row_so_postgres_rejects_an_older_snapshot(journal):
+@pytest.mark.parametrize("scope", ["all", "fixes_missing"])
+def test_admission_changes_the_mutex_row_so_postgres_rejects_an_older_snapshot(journal, scope):
 	journal.db.rows[journal.mod.RUN] = {}
-	assert admit(journal)["status"] == "queued"
+	assert admit(journal, scope=scope)["status"] == "queued"
 	assert journal.db.rows[journal.mod.CONTROL]["site"]["generation"] == 1
 	with journal.db.transaction():
 		journal.mod.cancel("new-run", docname="fake-session-doc", now=12)
-	assert admit(journal, run_id="second-run")["status"] == "queued"
+	assert admit(journal, run_id="second-run", scope=scope)["status"] == "queued"
 	assert journal.db.rows[journal.mod.CONTROL]["site"]["generation"] == 2
 
 
@@ -653,28 +655,46 @@ def test_the_cap_count_reads_only_live_runs(journal):
 	_other_sessions_runs(journal, lease_until=300)
 	journal.db.calls.clear()
 	admit(journal, now=400)
-	[(table, filters, locking)] = [c for c in journal.db.calls if isinstance(c[1], dict) and "scope" in c[1]]
+	[(table, filters, locking)] = [c for c in journal.db.calls if isinstance(c[1], dict) and "lease_until" in c[1]]
 	assert table == journal.mod.RUN and not locking
+	assert "scope" not in filters
 	assert filters["lease_until"] == [">", 400] and filters["deadline"] == [">", 400]
 
 
-def test_analyze_time_runs_use_only_the_session_reservation(journal):
+@pytest.mark.parametrize("existing_scope", ["all", "fixes_missing"])
+@pytest.mark.parametrize("new_scope", ["all", "fixes_missing"])
+def test_both_scopes_share_the_site_capacity(journal, existing_scope, new_scope):
 	journal.db.rows[journal.mod.RUN] = {
 		f"other-{i}": {
 			**journal.run,
 			"name": f"other-{i}",
 			"active_session": f"other-session-{i}",
 			"requested_by": "fake-owner",
+			"scope": existing_scope,
 		}
 		for i in range(2)
 	}
-	assert admit(journal, scope="fixes_missing")["status"] == "queued"
+	assert admit(journal, scope=new_scope) == {"status": "refused", "reason": "site_cap"}
+	assert _count(journal) == 0
 
 
-def test_absent_admission_mutex_fails_closed(journal):
+@pytest.mark.parametrize("new_scope", ["all", "fixes_missing"])
+def test_automatic_runs_do_not_consume_the_manual_requester_allowance(journal, new_scope):
+	_other_sessions_runs(journal, owner="fake-owner", scope="fixes_missing")
+	assert admit(journal, scope=new_scope, site_cap=10, user_cap=1)["status"] == "queued"
+	assert _count(journal) == int(new_scope == "all")
+
+
+def test_automatic_admission_is_not_refused_by_the_manual_requester_cap(journal):
+	_other_sessions_runs(journal, owner="fake-owner", scope="all")
+	assert admit(journal, scope="fixes_missing", site_cap=10, user_cap=1)["status"] == "queued"
+
+
+@pytest.mark.parametrize("scope", ["all", "fixes_missing"])
+def test_absent_admission_mutex_fails_closed(journal, scope):
 	journal.db.rows[journal.mod.CONTROL] = {}
 	with pytest.raises(journal.mod.JournalUnavailable, match="initialize_ai_refresh_store.execute"):
-		admit(journal)
+		admit(journal, scope=scope)
 	assert len(journal.db.rows[journal.mod.RUN]) == 1
 
 
@@ -701,12 +721,12 @@ def test_admission_reads_runs_only_after_its_locks_and_never_locks_them_by_filte
 	assert control < journal.db.calls.index(run_reads[0])
 
 
-def test_analyze_time_admission_never_touches_the_site_mutex(journal):
+def test_analyze_time_admission_updates_the_shared_site_mutex(journal):
 	journal.db.rows[journal.mod.RUN] = {}
 	journal.db.calls.clear()
 	assert admit(journal, scope="fixes_missing")["status"] == "queued"
-	assert not [c for c in journal.db.calls if c[0] == journal.mod.CONTROL]
-	assert journal.db.rows[journal.mod.CONTROL]["site"].get("generation") is None
+	assert [c for c in journal.db.calls if c[0] == journal.mod.CONTROL] == [(journal.mod.CONTROL, "site", True)]
+	assert journal.db.rows[journal.mod.CONTROL]["site"]["generation"] == 1
 
 
 @pytest.mark.parametrize(
@@ -717,7 +737,8 @@ def test_analyze_time_admission_never_touches_the_site_mutex(journal):
 	],
 	ids=["frappe-wrapped", "raw"],
 )
-def test_a_held_site_mutex_is_a_busy_refusal_not_an_error(journal, monkeypatch, error):
+@pytest.mark.parametrize("scope", ["all", "fixes_missing"])
+def test_a_held_site_mutex_is_a_busy_refusal_not_an_error(journal, monkeypatch, error, scope):
 	journal.db.rows[journal.mod.RUN] = {}
 	current = journal.db.get_value
 
@@ -728,7 +749,7 @@ def test_a_held_site_mutex_is_a_busy_refusal_not_an_error(journal, monkeypatch, 
 		return current(table, name, *a, **kw)
 
 	monkeypatch.setattr(journal.db, "get_value", nowait)
-	assert admit(journal) == {"status": "refused", "reason": "busy"}
+	assert admit(journal, scope=scope) == {"status": "refused", "reason": "busy"}
 	assert not journal.db.rows[journal.mod.RUN]
 
 

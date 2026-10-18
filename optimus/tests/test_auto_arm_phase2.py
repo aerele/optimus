@@ -78,7 +78,8 @@ def arm_env(monkeypatch):
 	monkeypatch.setattr(api, "now_datetime", lambda: "2026-05-21 09:00:00")
 	monkeypatch.setattr(api, "_lock_phase2_for_write", lambda docname: state.lock_calls.append(docname))
 	monkeypatch.setattr(api, "_save_parent_bypassing_perms", lambda parent: parent.save())
-	monkeypatch.setattr(frappe, "db", types.SimpleNamespace(rollback=lambda: None))
+	monkeypatch.setattr(frappe, "db", types.SimpleNamespace(rollback=lambda: None,
+		get_value=lambda *a, **k: {"name": "PS-1", "user": state.doc.user}))
 
 	# get_config → phase2_max_runs_per_session cap.
 	import optimus.settings as settings_mod
@@ -143,7 +144,8 @@ class TestAutoArmPhase2:
 		"""On arm, the user gets a realtime alert telling them to re-run + Stop
 		(auto-arm happens async during analyze, off-form)."""
 		analyze._auto_arm_phase2("PS-1", _ctx())
-		assert len(arm_env.published) == 1
+		assert len(arm_env.published) == 2
+		assert arm_env.published[0][0][1]["event_id"] == arm_env.published[1][0][1]["event_id"]
 		args, kwargs = arm_env.published[0]
 		event = args[0] if args else kwargs.get("event")
 		assert event == "optimus_phase2_armed"

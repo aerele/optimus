@@ -172,15 +172,15 @@ def admit(
 	gated=0,
 	excluded=0,
 ):
-	"""Reserve a session and, for a user refresh, enforce the site/user caps.
+	"""Reserve a session within the shared site cap and the manual-requester cap.
 
 	Caller checks permissions, provider configuration, Phase 2 and workers before admission,
 	and starts a fresh transaction (``ai_jobs._retry_sql``). No queue call happens here.
 
-	Lock order (Q4): the session row first, then, only for ``scope == "all"`` (the only scope
-	with caps), the site mutex with NOWAIT; a held mutex is a ``busy`` refusal, never a wait
+	Lock order (Q4): the session row first, then the site mutex with NOWAIT;
+	a held mutex is a ``busy`` refusal, never a wait
 	and never an error. An admission waiting on its own session therefore never holds the
-	mutex. Analyze-time ``fixes_missing`` runs never take it.
+	mutex. Both manual and analyze-time admissions take and update the same mutex.
 
 	Every read of other runs is a plain read after those locks, so its read view opens after
 	every admission that could change the count has committed: admissions with caps serialize
@@ -193,7 +193,9 @@ def admit(
 	The caps count live runs only: active, with lease and deadline not passed. A run that is
 	``expired`` can neither claim a slice nor begin a call, so it holds no slot, even while it
 	still holds its own session's reservation until that session's next admission or the
-	sweep ends it. Every run that can still call a provider is counted.
+	sweep ends it. Every run that can still call a provider consumes site capacity.
+	The per-requester cap continues to count manual ``all`` runs only; automatic work
+	shares the site limit without consuming a user's manual-refresh allowance.
 
 	Lazy takeover: a run that holds the reservation but whose lease or deadline has
 	passed (``expired``) is ended in this transaction, as the recovery sweep would end it:
@@ -240,16 +242,14 @@ def admit(
 		return {"status": "refused", "reason": "busy"}
 	if not parent or parent.get("session_uuid") != session_uuid or parent["status"] != "Ready":
 		return {"status": "refused", "reason": "not_ready"}
-	control = None
-	if scope == "all":
-		control, busy = _lock_site_mutex()
-		if busy:
-			return {"status": "refused", "reason": "busy"}
-		if not control:
-			raise JournalUnavailable(
-				"AI refresh storage is not initialized; repair: bench --site <site> execute "
-				"optimus.patches.v0_12_0.initialize_ai_refresh_store.execute"
-			)
+	control, busy = _lock_site_mutex()
+	if busy:
+		return {"status": "refused", "reason": "busy"}
+	if not control:
+		raise JournalUnavailable(
+			"AI refresh storage is not initialized; repair: bench --site <site> execute "
+			"optimus.patches.v0_12_0.initialize_ai_refresh_store.execute"
+		)
 	# The run being resumed belongs to this session, so its row is locked after the session.
 	previous = _read(RUN, resume_from, lock=True) if resume_from else None
 	# Phase 2 writers also hold and change the parent. Read these rows before
@@ -312,24 +312,24 @@ def admit(
 		if previous.get("steps_state") in {"updated", "carried"}:
 			steps_state = "carried"
 		render_pending = int(bool(previous.get("render_pending")))
-	if scope == "all":
-		active = frappe.db.get_values(
-			RUN,
-			# the complement of ``expired``: a dead run of another session holds no slot
-			{
-				"scope": "all",
-				"state": ["in", sorted(ACTIVE)],
-				"lease_until": [">", now],
-				"deadline": [">", now],
-			},
-			["requested_by"],
-			as_dict=True,
-			limit=site_cap + 1,
-		)
-		if len(active) >= site_cap:
-			return _answer(taken_over, status="refused", reason="site_cap")
-		if sum(row["requested_by"] == requested_by for row in active) >= user_cap:
-			return _answer(taken_over, status="refused", reason="user_cap")
+	active = frappe.db.get_values(
+		RUN,
+		# the complement of ``expired``: a dead run of another session holds no slot
+		{
+			"state": ["in", sorted(ACTIVE)],
+			"lease_until": [">", now],
+			"deadline": [">", now],
+		},
+		["requested_by", "scope"],
+		as_dict=True,
+		limit=site_cap + 1,
+	)
+	if len(active) >= site_cap:
+		return _answer(taken_over, status="refused", reason="site_cap")
+	if scope == "all" and sum(
+		row["scope"] == "all" and row["requested_by"] == requested_by for row in active
+	) >= user_cap:
+		return _answer(taken_over, status="refused", reason="user_cap")
 	run = _insert_new(
 		RUN,
 		run_id,

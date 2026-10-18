@@ -31,8 +31,11 @@ _API_PATH = os.path.join(os.path.dirname(__file__), "..", "api.py")
 # --- retry_analyze ---------------------------------------------------------------------------
 
 
-def _retry_env(monkeypatch, *, status="Failed", conf=None):
-	fake = make_fake_frappe(sessions={SESSION_UUID: session_row(status=status)}, perms=owner_perms(), conf=conf)
+def _retry_env(monkeypatch, *, status="Failed", conf=None, user=OWNER, roles=("Optimus User",)):
+	fake = make_fake_frappe(
+		user=user, roles=roles, sessions={SESSION_UUID: session_row(status=status)},
+		perms=owner_perms(user, write=user != OWNER), conf=conf,
+	)
 	install(monkeypatch, fake)
 	seen = SimpleNamespace(commits=[], enqueued=[], cleared=[], prepared=[])
 	monkeypatch.setattr(api, "safe_commit", lambda: seen.commits.append(True))
@@ -56,6 +59,15 @@ def test_owner_retries_a_failed_session(monkeypatch):
 	assert not fake.spies.set_value
 	assert seen.enqueued == [(SESSION_UUID, DOCNAME)]
 	assert seen.cleared == [SESSION_UUID]
+
+
+@pytest.mark.parametrize("roles", [("Optimus User",), ("System Manager", "Optimus User")])
+def test_retry_analyze_records_the_actual_actor(monkeypatch, roles):
+	actor = "editor@example.com"
+	_, seen = _retry_env(monkeypatch, user=actor, roles=roles)
+	api.retry_analyze(session_uuid=SESSION_UUID)
+	assert seen.prepared == [((DOCNAME, SESSION_UUID), {"requested_by": actor})]
+	assert seen.enqueued == [(SESSION_UUID, DOCNAME)]
 
 
 @pytest.mark.parametrize("status", ["Ready", "Analyzing", "Stopping"])

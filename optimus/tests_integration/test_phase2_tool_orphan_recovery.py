@@ -18,9 +18,9 @@ debugger/profiler) owns it. They manipulate
 from __future__ import annotations
 
 import sys
+import unittest
 
 import frappe
-import pytest
 from frappe.tests.utils import FrappeTestCase
 
 import optimus
@@ -29,7 +29,7 @@ _HAS_MON = hasattr(sys, "monitoring")
 _PID = sys.monitoring.PROFILER_ID if _HAS_MON else None
 
 
-@pytest.mark.skipif(not _HAS_MON, reason="sys.monitoring requires Python 3.12+")
+@unittest.skipUnless(_HAS_MON, "sys.monitoring requires Python 3.12+")
 class TestPhase2ToolOrphanRecovery(FrappeTestCase):
 	"""End-to-end: _startup_probe_tool2 reclaims a leaked tool 2."""
 

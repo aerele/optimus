@@ -510,11 +510,18 @@ def test_the_link_pattern_has_only_bounded_repeats():
 	# ignores it can return any size. An unbounded repeat in the link pattern made
 	# unclosed "[...](" text rescan the rest of the reply from every "[" (60,000
 	# characters took about 35 s). Every repeat must have an upper bound.
-	import re._parser as parser
+	try:
+		import re._parser as parser
+	except ImportError:  # Python 3.10 exposes the same regex AST under this name.
+		import sre_parse as parser
+
+	repeats = (parser.MAX_REPEAT, parser.MIN_REPEAT)
+	if hasattr(parser, "POSSESSIVE_REPEAT"):
+		repeats += (parser.POSSESSIVE_REPEAT,)
 
 	def unbounded(items):
 		for op, arg in items:
-			if op in (parser.MAX_REPEAT, parser.MIN_REPEAT, parser.POSSESSIVE_REPEAT):
+			if op in repeats:
 				if arg[1] == parser.MAXREPEAT:
 					return True
 				if unbounded(arg[2]):
@@ -608,31 +615,35 @@ def test_verify_fix_is_fast(case):
 	assert time.perf_counter() - t < 0.05
 
 
-# Whole-line and multiline rules must agree with the eval scanner.
+# Whole-line and multiline findings have separate app and pinned-scanner contracts.
+# Optimus also blocks parameterized raw SQL; the pinned SQL rule detects interpolation.
 _PARITY = [
     ("moved", ["if bad:", "    frappe.throw('Missing')"],
-     "```diff\n-if bad:\n-    frappe.throw('Missing')\n+frappe.throw('Missing')\n```", set()),
+     "```diff\n-if bad:\n-    frappe.throw('Missing')\n+frappe.throw('Missing')\n```", set(), set()),
     ("reshaped", ["if bad: frappe.throw('Missing')"],
-     "```diff\n-if bad: frappe.throw('Missing')\n+frappe.throw('Missing')\n```", {"untranslated"}),
+     "```diff\n-if bad: frappe.throw('Missing')\n+frappe.throw('Missing')\n```", {"untranslated"}, {"frappe-missing-translate-function-python"}),
     ("quoted", ["frappe.throw('Missing')"],
-     "```python\nfrappe.throw('Missing')\n```", set()),
+     "```python\nfrappe.throw('Missing')\n```", set(), set()),
     ("sql-kept", ["frappe.db.sql(", "    query, values", ")"],
      '```diff\n frappe.db.sql(\n-    query, values\n+    f"select {name}"\n )\n```',
-     {"sql-format-injection", "raw-sql"}),
+     {"sql-format-injection", "raw-sql"}, {"frappe-sql-format-injection"}),
     ("sql-quoted", ["frappe.db.sql(", "    query, values", ")"],
      '```python\nfrappe.db.sql(\n    f"select {name}"\n)\n```',
-     {"sql-format-injection", "raw-sql"}),
+     {"sql-format-injection", "raw-sql"}, {"frappe-sql-format-injection"}),
     ("sql-parameters", ["frappe.db.sql(", '    f"select {name}"', ")"],
-     '```diff\n frappe.db.sql(\n-    f"select {name}"\n+    "select %(name)s", {"name": name}\n )\n```', {"raw-sql"}),
+     '```diff\n frappe.db.sql(\n-    f"select {name}"\n+    "select %(name)s", {"name": name}\n )\n```', {"raw-sql"}, set()),
     ("enqueue-kept", ["def on_submit(self):", "    frappe.enqueue(", '        "app.job", enqueue_after_commit=True', "    )"],
      '```diff\n def on_submit(self):\n     frappe.enqueue(\n-        "app.job", enqueue_after_commit=True\n+        "app.job"\n     )\n```',
-     {"enqueue-without-after-commit"}),
+     {"enqueue-without-after-commit"}, {"frappe-enqueue-without-after-commit"}),
 ]
 
 
-@pytest.mark.parametrize("name,source,body,expected", _PARITY, ids=[c[0] for c in _PARITY])
-def test_introduced_lines_and_node_spans(name, source, body, expected):
+@pytest.mark.parametrize("name,source,body,expected,semgrep_rules", _PARITY, ids=[c[0] for c in _PARITY])
+def test_introduced_lines_and_node_spans(name, source, body, expected, semgrep_rules):
     assert codes(H.format(body), source) == expected
+    if name == "sql-parameters":
+        violations = G.verify_fix(H.format(body), source_lines=source)
+        assert [(v.code, v.action) for v in violations] == [("raw-sql", G.BLOCK)]
     units = load("_semgrep").units(H.format(body), source)
     assert bool(units) == (name not in {"moved", "quoted"})
 
@@ -641,10 +652,10 @@ def test_introduced_lines_and_node_spans(name, source, body, expected):
 def test_introduced_parity_with_pinned_semgrep():
     from optimus.tests.ai_eval_support import require_semgrep
 
-    texts = {name: H.format(body) for name, source, body, expected in _PARITY}
-    sources = {name: source for name, source, body, expected in _PARITY}
+    texts = {name: H.format(body) for name, source, body, expected, semgrep_rules in _PARITY}
+    sources = {name: source for name, source, body, expected, semgrep_rules in _PARITY}
     result = load("_semgrep").scan_texts(texts, require_semgrep(), sources)
-    for name, source, _body, expected in _PARITY:
+    for name, source, _body, expected, semgrep_rules in _PARITY:
         assert result[name].unparsed == 0
-        assert bool(result[name].hits) == bool(expected), name
+        assert {hit["rule"] for hit in result[name].hits} == semgrep_rules, name
         assert codes(texts[name], source) == expected

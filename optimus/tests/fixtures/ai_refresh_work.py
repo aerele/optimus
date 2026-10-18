@@ -15,6 +15,8 @@ from optimus.tests.fixtures.ai_refresh_journal import journal as _journal_fixtur
 
 class Doc(dict):
 	def __getattr__(self, key):
+		if key.startswith("__"):
+			raise AttributeError(key)
 		return self.get(key)
 
 	def as_dict(self):

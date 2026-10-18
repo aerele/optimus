@@ -317,12 +317,27 @@ function render_analyze_progress(frm) {
 // Session form you shouldn't have to stare at a static "Analyzing" status
 // especially when AI fix suggestions are being generated, which can take
 // a while). Cleared + reloaded when the session reaches Ready / Failed.
+function _new_session_event(frm, payload) {
+	if (!payload.event_id) return true;
+	const seen = frm._optimus_realtime_ids || (frm._optimus_realtime_ids = new Set());
+	if (seen.has(payload.event_id)) return false;
+	seen.add(payload.event_id);
+	if (seen.size > 128) seen.delete(seen.values().next().value);
+	return true;
+}
+
 function subscribe_session_progress(frm) {
 	if (frm.is_new()) return;
 	if (frm._progress_subscribed) return;
 	frm._progress_subscribed = true;
 
-	const mine = (p) => p && p.session_uuid === frm.doc.session_uuid;
+	const mine = (p) => p && p.session_uuid === frm.doc.session_uuid && _new_session_event(frm, p);
+	const reload = () => {
+		const session_uuid = frm.doc.session_uuid;
+		setTimeout(() => {
+			if (frm.doc.session_uuid === session_uuid) _reload_clean_form(frm);
+		}, 800);
+	};
 
 	frappe.realtime.on("optimus_progress", (p) => {
 		if (!mine(p)) return;
@@ -342,31 +357,30 @@ function subscribe_session_progress(frm) {
 		if (!mine(p)) return;
 		_progress_banner(frm, null);
 		frappe.show_alert({ message: __("Report ready"), indicator: "green" });
-		setTimeout(() => frm.reload_doc(), 800);
+		reload();
 	});
 	frappe.realtime.on("optimus_session_failed", (p) => {
 		if (!mine(p)) return;
 		_progress_banner(frm, null);
-		setTimeout(() => frm.reload_doc(), 800);
+		reload();
 	});
 	// v0.7.x: auto-arm fires server-side during analyze (off-form). Tell the
 	// user a pass is armed and what to do next; the reload re-runs
 	// render_phase2_button → the in-form banner + Stop button appear.
 	frappe.realtime.on("optimus_phase2_armed", (p) => {
-		if (!p || p.docname !== frm.doc.name) return;
+		if (!p || p.docname !== frm.doc.name || !_new_session_event(frm, p)) return;
 		const fns = (p.functions || []).join(", ");
 		frappe.show_alert(
 			{
 				message: __(
-					"Line profiling armed for {0} hot path(s){1}. Re-run your " +
-					"flow, then click Stop Phase 2 Run to capture the exact lines.",
+					"Line profiling armed for {0} hot path(s){1}. Re-run your flow, then click Stop Phase 2 Run to capture the exact lines.",
 					[p.count || 0, fns ? " (" + frappe.utils.escape_html(fns) + ")" : ""]
 				),
 				indicator: "orange",
 			},
 			12
 		);
-		setTimeout(() => frm.reload_doc(), 800);
+		reload();
 	});
 }
 
@@ -498,8 +512,7 @@ function render_phase2_button(frm) {
 					callback: function () {
 						frappe.show_alert({
 							message: __(
-								"Phase 2 stopped. Analyzing now the report " +
-								"section will refresh when ready."
+								"Phase 2 stopped. Analyzing now the report section will refresh when ready."
 							),
 							indicator: "blue",
 						});
@@ -522,11 +535,7 @@ function render_phase2_button(frm) {
 		_phase2_armed_banner(
 			frm,
 			__(
-				"🔬 Line profiling is armed. Re-run your flow now so the hot " +
-				"path(s) execute again, then click \"Stop Phase 2 Run\" above " +
-				"the report will then pinpoint the exact hot line(s). " +
-				"(Profiling has to re-execute your code; it can't replay the " +
-				"original run.)"
+				"🔬 Line profiling is armed. Re-run your flow now so the hot path(s) execute again, then click \"Stop Phase 2 Run\" above the report will then pinpoint the exact hot line(s). (Profiling has to re-execute your code; it can't replay the original run.)"
 			)
 		);
 	} else {
@@ -593,9 +602,7 @@ function render_phase2_button(frm) {
 	frm.add_custom_button(__("Force Stop Stuck Run"), function () {
 		frappe.confirm(
 			__(
-				"Clear any in-flight phase-2 active flag for your user " +
-				"and mark stuck Recording rows as Failed? Use this if " +
-				"the picker keeps reporting 'phase-2 already active'."
+				"Clear any in-flight phase-2 active flag for your user and mark stuck Recording rows as Failed? Use this if the picker keeps reporting 'phase-2 already active'."
 			),
 			function () {
 				frappe.call({
@@ -635,8 +642,7 @@ function open_phase2_picker(frm) {
 				frappe.msgprint({
 					title: __("line_profiler not installed"),
 					message: __(
-						"Phase 2 needs the line_profiler package. Install it via " +
-						"<code>bench pip install line_profiler</code> and restart."
+						"Phase 2 needs the line_profiler package. Install it via <code>bench pip install line_profiler</code> and restart."
 					),
 					indicator: "red",
 				});
@@ -822,8 +828,7 @@ function show_phase2_dialog(frm, data) {
 			fieldtype: "Section Break",
 			label: __("Hot frames from your apps"),
 			description: __(
-				"Click a row's chevron to expand its nested calls. " +
-				"Tick the boxes you want to line-profile."
+				"Click a row's chevron to expand its nested calls. Tick the boxes you want to line-profile."
 			),
 		});
 		fields.push({
@@ -865,10 +870,7 @@ function show_phase2_dialog(frm, data) {
 		fieldtype: "Small Text",
 		label: __("One dotted path per line"),
 		description: __(
-			"e.g. <code>my_app.tasks.heavy_helper</code>. Paths that " +
-			"can't be imported are rejected before phase 2 starts. Use " +
-			"this when the curated list above doesn't surface the " +
-			"function you want, or to disambiguate a class method."
+			"e.g. <code>my_app.tasks.heavy_helper</code>. Paths that can't be imported are rejected before phase 2 starts. Use this when the curated list above doesn't surface the function you want, or to disambiguate a class method."
 		),
 	});
 	fields.push({
@@ -885,11 +887,7 @@ function show_phase2_dialog(frm, data) {
 		label: __("Auto-expand hot chain (recommended)"),
 		default: auto_expand_default,
 		description: __(
-			"For each curated pick, walks phase-1's call tree downward " +
-			"following the hottest user-code child until it hits an ORM " +
-			"call or framework wrapper. The run instruments the entire " +
-			"chain so you see exactly which descendant line is the time " +
-			"sink no need to re-pick and re-record level by level."
+			"For each curated pick, walks phase-1's call tree downward following the hottest user-code child until it hits an ORM call or framework wrapper. The run instruments the entire chain so you see exactly which descendant line is the time sink no need to re-pick and re-record level by level."
 		),
 	});
 
@@ -991,6 +989,7 @@ function subscribe_phase2_events(frm) {
 		function (event) {
 			frappe.realtime.on(event, function (payload) {
 				if (!payload || payload.session_uuid !== frm.doc.session_uuid) return;
+				if (!_new_session_event(frm, payload)) return;
 				if (event === "phase_2_run_ready") {
 					frappe.show_alert({
 						message: payload.render_pending
@@ -1080,10 +1079,7 @@ function render_regenerate_report_button(frm) {
 							if (total && rec < total) {
 								msg += " "
 									+ __(
-										"Only {0} of {1} recordings were "
-										+ "available (others expired from "
-										+ "Redis); per-query drill-down "
-										+ "may be partial.",
+										"Only {0} of {1} recordings were available (others expired from Redis); per-query drill-down may be partial.",
 										[rec, total],
 									);
 							}

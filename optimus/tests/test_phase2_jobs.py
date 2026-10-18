@@ -456,14 +456,16 @@ def test_worker_uses_current_actor_permissions(monkeypatch, user, enabled, roles
 
 
 def test_realtime_timeout_remains_a_fresh_interrupt(monkeypatch):
+	from optimus import realtime
 	from optimus.line_profile import analyzer
 	Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
 	original = Timeout("fake realtime timeout")
 	def timeout(*a, **kw):
 		raise original
-	monkeypatch.setattr(analyzer, "frappe", SimpleNamespace(publish_realtime=timeout))
+	monkeypatch.setattr(realtime, "frappe", SimpleNamespace(publish_realtime=timeout,
+		db=SimpleNamespace(get_value=lambda *a, **kw: {"name": "fake-doc", "user": "fake-owner"})))
 	with pytest.raises(Timeout) as caught:
-		analyzer._publish("fake-event", {"user": "fake-owner"})
+		analyzer._publish("fake-event", {"parent": "fake-doc", "user": "fake-owner"})
 	assert caught.value is not original and caught.value.__context__ is None
 
 

@@ -2250,6 +2250,8 @@ def _same_origin_redirect(current: str, resp) -> str | None:
 				return None
 			if _URL_CONTROL_RE.search(location.strip(" ")):
 				return None  # urljoin would silently discard some controls.
+			if "?" in location or "#" in location:
+				return None  # Older Python urljoin drops empty query/fragment delimiters.
 			follow = urljoin(current, location.strip())
 			validate_base_url(follow)
 			old, new = urlsplit(current), urlsplit(follow)

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # .github/helper/install.sh
 #
-# Provision a fresh Frappe v16 bench with optimus installed, for the
+# Provision a fresh supported Frappe bench with optimus installed, for the
 # real-bench integration test workflow. Mirrors the well-known pattern
 # used by Frappe / ERPNext / community apps (see
 # frappe/erpnext/.github/helper/install.sh for the canonical reference).
@@ -153,6 +153,7 @@ bench --site "${TEST_SITE}" set-config developer_mode 1
 # numbers / strings / lists / dicts) but NOT lowercase ``true``.
 # Capital T is required for the Python bool literal.
 bench --site "${TEST_SITE}" set-config -p in_test True
+bench --site "${TEST_SITE}" set-config -p allow_tests True
 
 # Optimus's startup probes + monkey-patches run at app import; restart
 # isn't required for ``bench run-tests``, but doing it once flushes any

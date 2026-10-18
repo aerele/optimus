@@ -25,6 +25,7 @@ from optimus.dbdialect.base import (
 	InfraSnapshot,
 	NormalizedPlan,
 	PlanTable,
+	prepare_explain_query,
 	to_int,
 	to_int_or_none,
 )
@@ -121,7 +122,7 @@ class PostgresDialect(Dialect):
 		self._max_connections_cached: int | None = None
 
 	@staticmethod
-	def _safe_sql(*args, **kwargs):
+	def _safe_sql(*args, rollback_on_success=False, **kwargs):
 		"""Run a query under a savepoint and roll back to it on failure.
 
 		CRITICAL on Postgres: a failed query aborts the WHOLE transaction, so
@@ -148,12 +149,21 @@ class PostgresDialect(Dialect):
 			except Exception:
 				pass
 			raise
+		if rollback_on_success:
+			frappe.db.rollback(save_point=sp)
+		# Release after rollback too: a long recording must not retain thousands
+		# of savepoints until its enclosing transaction commits.
 		frappe.db.release_savepoint(sp)
 		return result
 
 	def run_explain(self, query: str) -> NormalizedPlan:
 		try:
-			rows = self._safe_sql(f"EXPLAIN (FORMAT JSON) {query}")
+			query = prepare_explain_query(query)
+		except ValueError as exc:
+			return NormalizedPlan(ok=False, reason=str(exc))
+		try:
+			# Recorded SQL passes the single-statement gate; rollback is extra protection.
+			rows = self._safe_sql(f"EXPLAIN (FORMAT JSON) {query}", rollback_on_success=True)
 		except Exception:
 			return NormalizedPlan(ok=False, tables=[], raw=None)
 		try:

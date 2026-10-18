@@ -69,6 +69,9 @@ def test_real_frappe_role_cache_observes_cross_process_revocation(monkeypatch, w
 	monkeypatch.setattr(frappe.local, "cache", {}, raising=False)
 	monkeypatch.setattr(frappe.local, "role_permissions", {}, raising=False)
 	monkeypatch.setattr(frappe.local, "conf", frappe._dict(db_name="disposable_test"), raising=False)
+	# v15's conf proxy retains the original Local even when another test supplies
+	# a local facade. Bind this fixture's config explicitly for the real wrapper.
+	monkeypatch.setattr(frappe, "conf", frappe._dict(db_name="disposable_test"), raising=False)
 	monkeypatch.setattr(frappe.local, "session", frappe._dict(user=user), raising=False)
 	cache = redis_wrapper.RedisWrapper()
 	monkeypatch.setattr(frappe, "cache", cache, raising=False)

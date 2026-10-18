@@ -521,9 +521,10 @@ def _publish_session_event(
 	user: str,
 	**extra,
 ) -> None:
-	"""Publish a session-state realtime event to all the user's Desk tabs via
-	Frappe's Socket.IO bridge, driving the floating widget without HTTP
-	polling. Event names: optimus_session_{stopping,analyzing,ready,failed}.
+	"""Publish to the recording user's Desk tabs and authorized open forms.
+	The persisted session determines the recipient; ``user`` is retained for
+	call compatibility and may identify a different action actor.
+	Event names: optimus_session_{stopping,analyzing,ready,failed}.
 
 	All events carry ``session_uuid`` and ``docname`` so a widget with
 	multiple open tabs can match the session it tracks. Best-effort: publish
@@ -531,7 +532,8 @@ def _publish_session_event(
 	payload = {"session_uuid": session_uuid, "docname": docname}
 	payload.update(extra)
 	try:
-		frappe.publish_realtime(event_name, payload, user=user)
+		from optimus.realtime import publish_session_event
+		publish_session_event(event_name, payload)
 	except Exception:
 		# Don't log realtime is best-effort, the widget falls back
 		# to its on-visibility-change status fetch.
@@ -1242,7 +1244,7 @@ def retry_analyze(session_uuid: str) -> dict:
 	ratelimit.enforce_user_rate_limit("retry_analyze", **_ACTION_LIMITS["retry_analyze"])
 
 	from optimus import ai_jobs
-	if not ai_jobs.prepare_analyze_retry(ref.docname, ref.session_uuid, requested_by=ref.user):
+	if not ai_jobs.prepare_analyze_retry(ref.docname, ref.session_uuid, requested_by=frappe.session.user):
 		frappe.throw(_("The session changed before Retry Analyze. Reload it and try again."),
 			frappe.ValidationError, title=_("Optimus"))
 
@@ -1814,10 +1816,13 @@ def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: b
 			frappe.ValidationError, title=_("Optimus"))
 	resolved = _persist_phase2_capture(parent, parent_docname, session_uuid, run_uuid, user, prepared)
 
-	frappe.publish_realtime("phase_2_run_recording", {
+	from optimus.realtime import publish_session_event
+	publish_session_event("phase_2_run_recording", {
 		"session_uuid": session_uuid,
+		"docname": parent_docname,
 		"run_uuid": run_uuid,
-	}, user=user)
+		"user": user,
+	})
 
 	return {
 		"run_uuid": run_uuid,
