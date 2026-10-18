@@ -375,7 +375,7 @@ installed on the site.
   are guarded before core can move bytes; URL and content-hash aliases are
   included. Optimus User has no generic Session create permission.
   The File guard performs these alias lookups on all File inserts and updates.
-  Frappe's `content_hash` column has no index, so this adds a catalog lookup
+  Frappe's `content_hash` column has no index, so this adds a File table query
   alongside the framework's existing upload deduplication lookup.
 - The per-user limits on AI and report actions live in Redis. If Redis is
   down the limiter refuses the action (fails closed); Frappe sessions need

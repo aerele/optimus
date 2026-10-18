@@ -131,8 +131,12 @@ def test_pdf_normalizer_blocks_authenticated_resource_channels():
 	assert not soup.find('div').has_attr('style')
 
 
-def test_pdf_normalizer_checks_foreign_style_with_comment_children():
+@pytest.mark.parametrize("content", [
+	'<svg><style><!-- comment -->text{fill:url("/private/files/secret.svg")}</style></svg>',
+	'<svg><style><a href="/private/files/secret.svg">text</a></style></svg>',
+	'<svg><style><g/><a href="/private/files/secret.svg">text</a></style></svg>',
+])
+def test_pdf_normalizer_checks_foreign_style_with_comment_children(content):
 	from optimus.pdf_export import _safe_pdf_html
 
-	content = '<svg><style><!-- comment -->text{fill:url("/private/files/secret.svg")}</style></svg>'
 	assert "/private/files/secret.svg" not in _safe_pdf_html(content)

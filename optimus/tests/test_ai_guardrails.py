@@ -614,8 +614,8 @@ def test_verify_fix_is_fast(case):
 	import statistics
 	import time
 
-	# Measure steady-state work, allowing a lazy import or a scheduling/GC
-	# outlier in one sample. The maximal-report regression separately bounds
+	# Measure steady-state work, allowing one-time initialization in one
+	# sample. The maximal-report regression separately bounds
 	# total wall time, including initialization, across all admitted answers.
 	samples = []
 	for _ in range(3):

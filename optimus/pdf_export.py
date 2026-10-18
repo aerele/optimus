@@ -149,6 +149,8 @@ def _safe_pdf_html(content):
 	for tag in soup.find_all(["iframe", "frame", "object", "embed", "link", "base", "audio", "video", "source"]):
 		tag.decompose()
 	for tag in soup.find_all(True):
+		if tag.decomposed:
+			continue
 		for attr in ("src", "poster", "background", "data", "xlink:href"):
 			if attr in tag.attrs and not (tag.name == "img" and attr == "src" and raster(tag[attr])):
 				if not str(tag[attr]).startswith("#"):
@@ -164,7 +166,8 @@ def _safe_pdf_html(content):
 		if tag.has_attr("style") and resource_css(parse_component_value_list(tag["style"])):
 			tag.attrs.pop("style", None)
 		if tag.name == "style" and (
-			tag.string is None or resource_css(parse_component_value_list(str(tag.string)))
+			tag.string is None or tag.find(True, recursive=False) is not None
+			or resource_css(parse_component_value_list(str(tag.string)))
 		):
 			tag.decompose()
 	return strip_meta(str(soup))
