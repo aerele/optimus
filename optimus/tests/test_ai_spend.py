@@ -237,7 +237,7 @@ def test_refresh_count_without_a_docname_is_a_no_op(counter_db):
 
 _PROVIDER = {
 	"name": "fake", "protocol": "openai", "base_url": "https://fake.invalid/v1", "model": "fake",
-	"needs_key": False, "context_tokens": 128000,
+	"needs_key": False, "context_tokens": 128000, "max_output_tokens": 32768,
 }
 _ANSWER = "## Diagnosis\nRepeated work.\n## Fix\nBatch the call.\n## Why it works\nFewer calls.\n## Verify\nProfile again."
 

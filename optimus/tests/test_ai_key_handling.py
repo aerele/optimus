@@ -27,8 +27,8 @@ def single_completion(monkeypatch):
 
 
 KEY = "sk-live-0123456789abcdefXYZ"
-_OPENAI_OK = {"choices": [{"message": {"content": "**Fix**\n\nuse a join"}}]}
-_ANTHROPIC_OK = {"content": [{"type": "text", "text": "**Fix**\n\nadd an index"}]}
+_OPENAI_OK = {"choices": [{"message": {"content": "**Fix**\n\nuse a join"}, "finish_reason": "stop"}]}
+_ANTHROPIC_OK = {"content": [{"type": "text", "text": "**Fix**\n\nadd an index"}], "stop_reason": "end_turn"}
 
 
 def _store_key(monkeypatch, value):

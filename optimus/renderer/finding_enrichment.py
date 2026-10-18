@@ -10,7 +10,9 @@ imported lazily to avoid renderer import cycles.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import re
 
@@ -19,6 +21,72 @@ import re
 # ``SEVERITY_ORDER`` in ``analyzers.base`` but lives here so the
 # renderer doesn't drag an analyzer import into hot paths.
 _GROUPING_SEVERITY_RANK = {"High": 0, "Medium": 1, "Low": 2}
+
+
+def _action_ref_key(value) -> str:
+	"""Match persisted action indices, including zero; never guess malformed refs."""
+	if isinstance(value, bool) or not isinstance(value, (str, int)):
+		return ""
+	return str(value).strip()
+
+
+def _assign_finding_ids(findings: list[dict], rows) -> None:
+	"""Opaque per-report identities, assigned before filtering or group promotion.
+
+	Stored row names stay private. Legacy rows use their original input position;
+	duplicate names/hash collisions get deterministic suffixes within this report.
+	"""
+	counts: dict[str, int] = {}
+	for idx, (finding, row) in enumerate(zip(findings, rows, strict=True)):
+		name = getattr(row, "name", None)
+		key = (
+			"finding-row-" + hashlib.sha256(name.encode()).hexdigest()[:24]
+			if isinstance(name, str) and name else f"finding-pos-{idx}"
+		)
+		counts[key] = counts.get(key, 0) + 1
+		finding["finding_id"] = key if counts[key] == 1 else f"{key}-{counts[key]}"
+
+
+def _ai_links_by_action(buckets: list[dict]) -> dict[str, list[dict]]:
+	"""Register only final visible answers; the template uses this same render gate.
+
+	The canonical primary and child keep their own identity and action reference.
+	Embedded cards suppress both the answer and its ID. No saved JSON is read here.
+	"""
+	links: dict[str, list[dict]] = {}
+	for bucket in buckets:
+		for primary in bucket.get("findings") or []:
+			for finding in [primary, *(primary.get("sub_findings") or [])]:
+				finding.pop("ai_target_id", None)
+				finding.pop("ai_status_label", None)
+				fix = finding.get("llm_fix")
+				if not isinstance(fix, dict) or not fix.get("suggestion_html") or not finding.get("finding_id"):
+					continue
+				target = "ai-" + finding["finding_id"]
+				status = fix.get("review_status")
+				if not status and fix.get("incomplete"):
+					status = "Incomplete AI response"
+				if not status and fix.get("outdated"):
+					status = "Outdated AI suggestion"
+				finding["ai_target_id"] = target
+				finding["ai_status_label"] = status or "AI suggestion available"
+				ref = _action_ref_key(finding.get("action_ref"))
+				if ref:
+					links.setdefault(ref, []).append({
+						"target_id": target, "title": finding.get("title") or "Finding",
+						"label": "View AI response" if status else "View AI suggestion",
+					})
+	return links
+
+
+def _observed_query_ms(finding: dict):
+	"""A measured query total, kept separate from estimated recoverable impact."""
+	if finding.get("finding_type") not in {"N+1 Query", "Slow Query"}:
+		return None
+	value = (finding.get("technical_detail") or {}).get("total_time_ms")
+	if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
+		return value
+	return None
 
 
 def _root_cause_key(finding: dict) -> tuple | None:
@@ -136,12 +204,18 @@ def _group_findings_by_root_cause(findings: list[dict]) -> list[dict]:
 		# standalone cards elsewhere in the bucket.
 		primary["sub_findings"] = [
 			{
+				"finding_id": s.get("finding_id") or "",
+				"action_ref": s.get("action_ref"),
+				# The final sanitized display view, after settings and policy gates.
+				"llm_fix": s.get("llm_fix"),
 				"finding_type": s.get("finding_type") or "",
 				"severity": s.get("severity") or "Low",
 				"title": s.get("title") or "",
 				"customer_description": s.get("customer_description") or "",
 				"estimated_impact_ms": s.get("estimated_impact_ms") or 0,
 				"affected_count": s.get("affected_count") or 0,
+				"impact_scope_label": (s.get("technical_detail") or {}).get("impact_scope_label"),
+				"observed_query_ms": _observed_query_ms(s),
 				# A grouped sub-finding is still a finding in a nested function, so
 				# carry its own drill-down rows onto the compact projection.
 				"drill_rows": _drilldown_display_rows(s.get("technical_detail") or {}),
@@ -791,6 +865,13 @@ def _markdown_to_safe_html(text) -> str:
 	raw = "" if text is None else str(text)
 	if not raw.strip():
 		return ""
+	from optimus.ai_responses import MARKDOWN_CHARS
+	if len(raw) > MARKDOWN_CHARS:
+		import html as _html
+
+		# Preserve every character without recursive Markdown or regex highlighting.
+		return '<pre tabindex="0" aria-label="AI suggestion, plain text" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:32rem;overflow:auto">' + _html.escape(raw) + '</pre>'
+
 	try:
 		import nh3
 
@@ -958,13 +1039,44 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 	except Exception:
 		raw_llm = {}
 	if isinstance(raw_llm, dict) and (raw_llm.get("suggestion") or "").strip():
+		from optimus.ai_guardrails import FIX_HEADINGS, section, stored_policy_violations
+		from optimus.ai_prompts import response_status
+
+		status = response_status(raw_llm)
+		suggestion = raw_llm["suggestion"]
+		policy_violations = stored_policy_violations(suggestion) if status in (None, "complete") else []
+		policy_codes = [v.code for v in policy_violations]
+		if policy_violations:
+			# The old explanation describes rejected code; keep only its diagnosis
+			# and the update notice. The original answer remains in llm_fix_json.
+			diagnosis = section(suggestion, "Diagnosis", FIX_HEADINGS).strip()
+			if "raw-sql" in policy_codes:
+				notice = "Code withheld because this saved suggestion needs a Frappe API update."
+			elif "permission-behavior-change" in policy_codes:
+				notice = "Code withheld because this saved suggestion changes permission behavior or its preservation could not be verified."
+			elif "unbounded-write" in policy_codes:
+				notice = "Code withheld because this saved suggestion contains an unbounded or unverifiable database write."
+			elif "sql-semantics-dropped" in policy_codes:
+				notice = "Code withheld because this saved suggestion changes a query limit, offset or explicit ordering."
+			elif "unchecked-permission" in policy_codes:
+				notice = "Code withheld because this saved suggestion ignores a permission result."
+			else:
+				notice = "Code withheld because this saved suggestion could not be checked safely."
+			suggestion = diagnosis + "\n\n**Fix**: " + notice
+
 		llm_fix = {
-			"suggestion_html": _markdown_to_safe_html(raw_llm.get("suggestion")),
+			"suggestion_html": _markdown_to_safe_html(suggestion),
+			"sql_policy_outdated": "raw-sql" in policy_codes,
+			"policy_outdated": bool(policy_violations),
+			"policy_codes": policy_codes,
 			"model": raw_llm.get("model") or "",
 			"provider": raw_llm.get("provider") or "",
 			"generated_at": raw_llm.get("generated_at") or "",
 			"source_available": raw_llm.get("source_available", True),
 			"prompt_version": raw_llm.get("prompt_version"),
+			"finish_reason": raw_llm.get("finish_reason"),
+			"completion_status": status,
+			"guardrail": raw_llm.get("guardrail"),
 			# Token usage the provider reported (Aerele managed proxy forwards
 			# the real billed count). None when the suggestion predates this or
 			# the provider returned no usage.
@@ -978,7 +1090,7 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 		"customer_description": child.customer_description or "",
 		"estimated_impact_ms": child.estimated_impact_ms or 0,
 		"affected_count": child.affected_count or 0,
-		"action_ref": child.action_ref or "",
+		"action_ref": _action_ref_key(child.action_ref),
 		"technical_detail": detail,
 		"llm_fix": llm_fix,
 	}
@@ -1144,18 +1256,19 @@ def _strip_doctype_suffix(fn: str) -> str:
 
 
 def _pin_slow_hot_path_to_related_hot_line(findings, *, file_cache: dict | None = None) -> None:
-	"""Pin a Slow Hot Path card to the exact hot line inside its deepest
-	user-code frame.
+	"""Show a related finding's source line inside the deepest user-code frame.
 
 	A self-time hot path whose time is spent in DB calls otherwise shows only the
 	function signature (empty chain, e.g. a job that calls framework directly) or
 	a call-to-a-function line (a chain whose leaf calls framework), because the
 	call tree holds framework internals with no user line for the hot work. The
-	frame's related findings DO carry the real line: the N+1 / hot-line / redundant
-	finding for that same frame stores the offending statement's callsite. Pin the
-	card to the hottest such line (by estimated impact), reusing that finding's
+	frame's related findings carry a concrete line: the N+1 / hot-line / redundant
+	finding for that same frame stores its statement's callsite. Pin the
+	card to the highest-impact related line, reusing that finding's
 	already-resolved snippet + abs path (no path re-resolution here). These come
 	from persisted findings, so the pin survives a report re-render.
+	This is a navigation clue, not attribution of the whole function's time to
+	that statement. The template labels both the header and snippet accordingly.
 
 	A compute-bound leaf with no related finding is left untouched, for
 	``_expand_self_time_snippets`` / ``_retarget_phase1_callsites_to_drilldown_leaf``.
@@ -1226,8 +1339,8 @@ def _pin_slow_hot_path_to_related_hot_line(findings, *, file_cache: dict | None 
 		hot = hot_index.get((af, _strip_doctype_suffix(leaf_fn), _base(leaf_file)))
 		if not hot:
 			continue
-		# Keep the origin function for the "entered through <fn> - pinned here to
-		# the actual hot line" banner; move the card's file:line + snippet +
+		# Keep the origin function for the entry-context banner; move the
+		# card's file:line + snippet +
 		# function to the leaf's hot statement (reusing the source finding's
 		# resolved fields). phase2_lookup_* keeps the Line-Level Drilldown crosslink
 		# aimed at the leaf (its keys use the raw pyinstrument function name).

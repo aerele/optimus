@@ -2516,7 +2516,11 @@ def _impact_ms(row) -> float:
 	return impact if math.isfinite(impact) else 0.0
 
 
-_FIX_STATE_RANK = {ai_prompts.FIX_MISSING: 0, ai_prompts.FIX_OUTDATED: 1, ai_prompts.FIX_CURRENT: 2}
+_FIX_STATE_RANK = {
+	ai_prompts.FIX_MISSING: 0, ai_prompts.FIX_INCOMPLETE: 1,
+	ai_prompts.FIX_OUTDATED: 2, ai_prompts.FIX_CURRENT: 3,
+	ai_prompts.FIX_BLOCKED: 4, ai_prompts.FIX_PROCESSING_LIMITED: 5,
+}
 
 
 class AiSelection(list):
@@ -2543,15 +2547,17 @@ def eligible_findings(rows, cfg, *, regenerate_all=False, requested_at=None, inc
 	one definition shared with the report:
 
 	- ``missing`` (nothing stored) is always chosen;
+	- ``incomplete`` (a cut-off answer) is chosen when ``include_outdated`` or
+	  ``regenerate_all``, so automatic missing-only runs never retry it;
 	- ``outdated`` (unparseable, an older or non-integer ``prompt_version``, an error record or
-	  no suggestion text; NOT a newer version, NOT a guardrail-fallback answer) is chosen when
+	  no suggestion text; NOT a newer version, NOT a non-truncated guardrail fallback) is chosen when
 	  ``include_outdated`` or ``regenerate_all``;
 	- ``current`` is chosen only when ``regenerate_all``.
 
 	``requested_at`` (see :func:`_requested_cutoff`) resumes an interrupted run: a stored
 	answer generated at or after it is skipped, missing rows never are.
 
-	Order: missing, then outdated, then current; inside each, severity (High first; a missing
+	Order: missing, incomplete, outdated, current; inside each, severity (High first; a missing
 	or unknown severity last), then the larger ``estimated_impact_ms``, then the older answer.
 	``_run_ai_backfill`` asks in exactly this order: it takes the list as returned, only cut to
 	its cap."""
@@ -2567,9 +2573,9 @@ def eligible_findings(rows, cfg, *, regenerate_all=False, requested_at=None, inc
 	chosen = []
 	for row in eligible:
 		state, fix = ai_prompts.fix_state(row_get(row, "llm_fix_json"))
-		if state == ai_prompts.FIX_CURRENT and not regenerate_all:
+		if state in (ai_prompts.FIX_CURRENT, ai_prompts.FIX_BLOCKED, ai_prompts.FIX_PROCESSING_LIMITED) and not regenerate_all:
 			continue
-		if state == ai_prompts.FIX_OUTDATED and not (include_outdated or regenerate_all):
+		if state in (ai_prompts.FIX_INCOMPLETE, ai_prompts.FIX_OUTDATED) and not (include_outdated or regenerate_all):
 			continue
 		generated = _generated_timestamp(fix)
 		if state != ai_prompts.FIX_MISSING and cutoff and generated >= cutoff:
@@ -2582,7 +2588,7 @@ def eligible_findings(rows, cfg, *, regenerate_all=False, requested_at=None, inc
 
 
 def _refresh_order_key(row, state: str, generated: float) -> tuple:
-	"""The order Refresh asks in: state (missing, outdated, current), severity, larger impact,
+	"""The order Refresh asks in: state (missing, incomplete, outdated, current), severity, larger impact,
 	older answer."""
 	severity = row_get(row, "severity")
 	# A blank severity ranks as Low, like the report and the analyze-time order; anything else

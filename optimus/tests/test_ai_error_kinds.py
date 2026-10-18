@@ -85,7 +85,7 @@ def marked(monkeypatch):
 def _fake_provider(monkeypatch, **overrides):
 	provider = {
 		"name": "fake", "protocol": "openai", "base_url": "https://fake.invalid/v1", "model": "fake",
-		"needs_key": False, "context_tokens": 128000, **overrides,
+		"needs_key": False, "context_tokens": 128000, "max_output_tokens": 32768, **overrides,
 	}
 	monkeypatch.setattr(ai_fix, "_provider_config", lambda: dict(provider))
 	monkeypatch.setattr(ai_fix, "_resolve_display_threshold_ms", lambda: 1000)
@@ -268,19 +268,21 @@ def test_the_chat_template_counts_toward_what_every_prompt_needs():
 
 
 def test_one_prompt_too_big_for_a_large_enough_window_is_context(marked):
+	window = max(ai_fix.ai_budget.min_context_tokens(ai_prompts.SYSTEM_PROMPT),
+	             ai_fix.ai_budget.estimate_tokens(ai_prompts.SYSTEM_PROMPT) + 600 + ai_fix.ai_budget.TEMPLATE_TOKENS)
 	with pytest.raises(ai_fix.AiFixError) as caught:
 		ai_fix._check_context_fits(
-			ai_prompts.SYSTEM_PROMPT, 3000, messages=[{"content": "x " * 4000}], out_tokens=600,
+			ai_prompts.SYSTEM_PROMPT, window, messages=[{"content": "x " * 4000}], out_tokens=600,
 		)
 	assert caught.value.kind == "context" and not caught.value.fatal
-	assert str(caught.value).startswith("[t]The prompt did not fit the model's context window (3000 tokens).")
+	assert str(caught.value).startswith(f"[t]The prompt did not fit the model's context window ({window} tokens).")
 
 
 @pytest.mark.parametrize("hosted", [False, True])
 def test_the_context_advice_fits_the_provider(hosted):
 	with pytest.raises(ai_fix.AiFixError) as caught:
 		ai_fix._check_context_fits(
-			ai_prompts.SYSTEM_PROMPT, 3000, messages=[{"content": "x " * 4000}], out_tokens=600, hosted=hosted,
+			ai_prompts.SYSTEM_PROMPT, 4000, messages=[{"content": "x " * 4000}], out_tokens=600, hosted=hosted,
 		)
 	assert ("OLLAMA_CONTEXT_LENGTH" in str(caught.value)) is not hosted
 	assert ("Ollama" in str(caught.value)) is not hosted
@@ -412,7 +414,7 @@ def test_each_post_of_the_ladder_gets_the_remaining_budget(wire):
 		(_rejected("Unsupported parameter: 'max_tokens' is not supported with this model."), 30),
 		(Reply(), 1),
 	)
-	assert ai_fix._call_openai_chat("https://p.invalid/v1", "", "custom", "system", [], timeout=60) == "answer"
+	assert ai_fix._call_openai_chat("https://p.invalid/v1", "", "custom", "system", [], timeout=60, max_tokens=4096) == "answer"
 	assert [post[1]["timeout"] for post in wire.posts] == [(10, 60), (10, 35), (5, 5)]
 
 
@@ -469,7 +471,7 @@ def test_a_timeout_names_the_whole_budget_not_what_was_left(wire, marked, first_
 		ai_fix.requests.exceptions.ReadTimeout("fake"),
 	)
 	with pytest.raises(ai_fix.AiFixError) as caught:
-		ai_fix._call_openai_chat("https://p.invalid/v1", "", "custom", "system", [], timeout=60)
+		ai_fix._call_openai_chat("https://p.invalid/v1", "", "custom", "system", [], timeout=60, max_tokens=4096)
 	message = str(caught.value)
 	assert caught.value.kind == "timeout" and caught.value.__context__ is None
 	assert message.startswith("[t]The AI provider didn't respond within 60 seconds.")
@@ -480,7 +482,7 @@ def test_a_spent_budget_names_the_whole_budget(wire, marked):
 	wire.use_clock()
 	wire.install((_rejected("Unsupported value: 'temperature' does not support 0.1"), 61))
 	with pytest.raises(ai_fix.AiFixError) as caught:
-		ai_fix._call_openai_chat("https://p.invalid/v1", "", "custom", "system", [], timeout=60)
+		ai_fix._call_openai_chat("https://p.invalid/v1", "", "custom", "system", [], timeout=60, max_tokens=4096)
 	assert caught.value.kind == "timeout"
 	assert str(caught.value).startswith("[t]The AI provider didn't respond within 60 seconds.")
 
@@ -492,7 +494,7 @@ def test_a_redirect_that_spends_the_ladders_budget_names_the_whole_budget(wire, 
 		(Reply(307, {}, headers={"location": "/v2/chat/completions"}), 40),
 	)
 	with pytest.raises(ai_fix.AiFixError) as caught:
-		ai_fix._call_openai_chat("https://p.invalid/v1", "", "custom", "system", [], timeout=60)
+		ai_fix._call_openai_chat("https://p.invalid/v1", "", "custom", "system", [], timeout=60, max_tokens=4096)
 	assert caught.value.kind == "timeout" and len(wire.posts) == 2
 	assert str(caught.value).startswith("[t]The AI provider didn't respond within 60 seconds.")
 
@@ -503,7 +505,7 @@ def test_a_reask_timeout_names_the_calls_whole_budget(wire, monkeypatch, protoco
 
 	g = base.TestGuardedCompletion
 	_fake_provider(monkeypatch, protocol=protocol)
-	first = _answer(g._RAW) if protocol == "openai" else Reply(payload={"content": [{"type": "text", "text": g._RAW}]})
+	first = _answer(g._RAW) if protocol == "openai" else Reply(payload={"content": [{"type": "text", "text": g._RAW}], "stop_reason": "end_turn"})
 	wire.use_clock()
 	wire.install((first, 20), (ai_fix.requests.exceptions.ReadTimeout("fake"), 0))
 	out = ai_fix.suggest_fix(dict(g._FINDING), timeout=60)
@@ -676,7 +678,7 @@ _CHOOSE_MODEL = "Try again; if it keeps happening, choose another Model under Op
 @pytest.mark.parametrize("protocol", ["openai", "anthropic"])
 def test_a_reply_without_text_says_what_to_do(wire, marked, monkeypatch, protocol):
 	_fake_provider(monkeypatch, protocol=protocol)
-	payload = {"choices": [{"message": {"content": None}}]} if protocol == "openai" else {"content": []}
+	payload = {"choices": [{"message": {"content": None}, "finish_reason": "stop"}]} if protocol == "openai" else {"content": [], "stop_reason": "end_turn"}
 	wire.install(Reply(200, payload))
 	with pytest.raises(ai_fix.AiFixError) as caught:
 		ai_fix._dispatch_call(ai_fix._provider_config(), "s", [], usage_out={})
@@ -687,7 +689,7 @@ def test_a_reply_without_text_says_what_to_do(wire, marked, monkeypatch, protoco
 @pytest.mark.parametrize("entry", ["fix", "steps"])
 def test_an_empty_reply_says_what_to_do(wire, marked, monkeypatch, entry):
 	_fake_provider(monkeypatch)
-	wire.install(Reply(200, {"choices": [{"message": {"content": "   "}}]}))
+	wire.install(Reply(200, {"choices": [{"message": {"content": "   "}, "finish_reason": "stop"}]}))
 	with pytest.raises(ai_fix.AiFixError) as caught:
 		if entry == "fix":
 			ai_fix.suggest_fix({"finding_type": "N+1 Query"})

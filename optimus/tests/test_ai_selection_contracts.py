@@ -88,6 +88,11 @@ def system_tz(monkeypatch):
 		(answer(suggestion="  "), "outdated"),
 		(answer(suggestion=[]), "outdated"),
 		(answer(guardrail={"fallback": True}), "current"),
+		(answer(finish_reason="length"), "incomplete"),
+		(answer(finish_reason="max_tokens"), "incomplete"),
+		(answer(guardrail={"violations": ["truncated"], "fallback": True}), "incomplete"),
+		(answer(guardrail={"violations": None}), "current"),
+		(answer(guardrail=[]), "current"),
 		({"suggestion": "x", "prompt_version": V}, "current"),
 	],
 )
@@ -145,6 +150,25 @@ def test_empty_records_are_retried_but_a_fallback_or_error_keyed_answer_is_not()
 		row("fallback", answer(guardrail={"fallback": True})),
 	]
 	assert pick(rows) == ["empty"]
+
+
+def test_incomplete_answers_are_retried_only_on_manual_refresh_before_its_cutoff():
+	rows = [
+		row("complete", answer()),
+		row("cut-off", answer(finish_reason="length")),
+		row("unclosed", answer(guardrail={"violations": ["truncated"]})),
+		row("just-saved", answer(finish_reason="length", generated_at="2026-01-03T10:00:00Z")),
+		row("missing"),
+	]
+	assert pick(rows, requested_at="2026-01-03T10:00:00Z") == ["missing", "cut-off", "unclosed"]
+	assert pick(rows, include_outdated=False) == ["missing"]
+	from optimus.renderer.recipe_enrichment import mark_outdated_ai_fixes
+
+	findings = [{"llm_fix": json.loads(r.llm_fix_json)} for r in rows[:-1]]
+	mark_outdated_ai_fixes(findings, refresh_check=lambda f: True)
+	assert [f["llm_fix"]["incomplete"] for f in findings] == [False, True, True, True]
+	assert all(not f["llm_fix"]["outdated"] for f in findings)
+	assert [f["llm_fix"]["refreshable"] for f in findings] == [False, True, True, True]
 
 
 @pytest.mark.parametrize("stored", ["{", "[]", '"answer"', "null"])
@@ -496,3 +520,12 @@ def test_a_request_time_that_cannot_be_turned_into_a_timestamp_is_a_value_error(
 	with pytest.raises(ValueError, match="out of range") as caught:
 		analyze._requested_cutoff(dt.datetime(2026, 1, 1, tzinfo=_BrokenOffset()))
 	assert caught.value.__cause__ is None and caught.value.__suppress_context__
+
+
+def test_new_completion_states_preserve_legacy_and_require_manual_recovery():
+	rows = [row("legacy", answer()), row("unknown", answer(completion_status="unknown")),
+	        row("blocked", answer(completion_status="blocked")),
+	        row("review", answer(completion_status="processing_limited"))]
+	assert pick(rows) == ["unknown"]
+	assert pick(rows, include_outdated=False) == []
+	assert set(pick(rows, regenerate_all=True)) == {"legacy", "unknown", "blocked", "review"}

@@ -286,7 +286,7 @@ def test_selection_handles_malformed_severity():
 
 
 
-@pytest.mark.parametrize("cap", [0, 1, 20])
+@pytest.mark.parametrize("cap", [0, 1, 2, 20])
 def test_confirmation_plan_uses_actual_worker_eligibility_and_manual_cap(monkeypatch, cap):
 	from optimus import ai_jobs
 	cfg = config("Slow Query")
@@ -294,11 +294,12 @@ def test_confirmation_plan_uses_actual_worker_eligibility_and_manual_cap(monkeyp
 	cfg.ai_refresh_max_findings = cap
 	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
 	monkeypatch.setattr(ai_jobs, "_now", lambda: 1780000000)
-	findings = [row("missing"), row("outdated", answer(prompt_version=0)), row("current", answer()),
+	findings = [row("missing"), row("incomplete", answer(finish_reason="length")),
+		row("outdated", answer(prompt_version=0)), row("current", answer()),
 		row("recipe", finding_type="Missing Index"), row("excluded", finding_type="Slow Query")]
 	plan = ai_jobs.refresh_plan({"findings": findings, "actions": [{"recording_uuid": "fake"}]})
-	assert plan == {"pending": 2, "total": 3, "cap": cap, "selected": min(2, cap) if cap else 2,
-		"selected_all": min(3, cap) if cap else 3, "steps": True}
+	assert plan == {"pending": 3, "total": 4, "cap": cap, "selected": min(3, cap) if cap else 3,
+		"selected_all": min(4, cap) if cap else 4, "selected_incomplete": 0 if cap == 1 else 1, "steps": True}
 
 
 def test_missing_worker_notice_names_the_queue_to_start(monkeypatch):

@@ -35,6 +35,9 @@ _BAD_LABELS = {"wrong", "harmful", "fabricated"}
 CAUGHT = {
 	"3q1dsfrmti": {"ungrounded", "no-op-diff"},  # fabricated code
 	"3q1j3utnoa": {"ungrounded"},  # fabricated code
+	"3q1efl686s": {"raw-sql"},  # moved SQL is now rejected
+	"3q1fsdhl5p": {"raw-sql"},  # also fixes the wrong loop
+	"3q1qg8btng": {"raw-sql"},  # also fixes the wrong loop
 	"5qid8t8lu5": {"customize-form-index"},  # a wrong Frappe fact, corrected by a note
 }
 
@@ -45,8 +48,6 @@ KNOWN_BLIND_SPOTS = {
 	"5qih2paean": "diff to ERPNext's SalesInvoice.validate adds a `_validated` flag that skips validation",
 	"5qimkr12p6": "changes the returned value (`return out * 2000`)",
 	"3q1ln8bv2o": "grounded, but the query stays inside the loop and get_all changes the ordering",
-	"3q1fsdhl5p": "grounded, but fixes the get_doc loop instead of the has_permission loop",
-	"3q1qg8btng": "grounded, but fixes the get_doc loop instead of the has_permission loop",
 }
 
 
@@ -65,7 +66,7 @@ def test_known_blind_spots_pass_the_verifier():
 
 def test_rest_of_the_corpus_is_clean():
 	rest = sorted(set(BY_NAME) - set(CAUGHT) - set(KNOWN_BLIND_SPOTS))
-	assert len(rest) == 7  # incl. the 3 verbatim hoists
+	assert len(rest) == 6  # SQL hoists are now in CAUGHT
 	assert {n: _corpus_codes(n) for n in rest} == {n: set() for n in rest}
 
 
@@ -81,18 +82,18 @@ def test_owner_labels_agree_with_the_split():
 
 
 # ---------------------------------------------------------------- raw SQL policy (N2)
-def test_hoisted_raw_sql_is_not_flagged_but_new_raw_sql_is():
+def test_hoisted_and_new_raw_sql_are_flagged():
 	hoist = '```diff\n-for i in r:\n-    x = frappe.db.sql("select 1")\n+x = frappe.db.sql("select 1")\n+for i in r:\n```'
 	src = ["for i in r:", '    x = frappe.db.sql("select 1")']
-	assert codes(H.format(hoist), src) == set()
+	assert "raw-sql" in codes(H.format(hoist), src)
 	assert "raw-sql" in codes(H.format("```python\nx = frappe.db.sql(q)\n```"))
 
 
-def test_reshape_into_bind_params_allowed_fstring_blocked():
+def test_parameterised_reshape_and_fstring_are_blocked():
 	src = ["rows = frappe.db.sql(f\"select name from `tabUser` where email='{e}'\")"]
 	ok = "```diff\n-" + src[0] + '\n+rows = frappe.db.sql("select name from `tabUser` where email=%(e)s", {"e": e})\n```'
 	bad = "```diff\n-" + src[0] + "\n+rows = frappe.db.sql(f\"select name from `tabUser` where name='{e}'\")\n```"
-	assert codes(H.format(ok), src) == set()
+	assert codes(H.format(ok), src) == {"raw-sql"}
 	assert "sql-format-injection" in codes(H.format(bad), src)
 
 
@@ -190,11 +191,11 @@ _TIERS = {
 		# D-SEMGREP (owner, cycle 2): the semgrep-mapped codes are block
 		"untranslated", "whitelist-type-hints", "qb-orderby-positional", "single-doctype-value",
 		"modify-not-saved", "child-modify-while-iterating", "module-state", "local-state",
-		"unchecked-permission",
+		"unchecked-permission", "unbounded-write", "unverified-safety", "permission-behavior-change", "sql-semantics-dropped",
 	},
 	"truncated": {"truncated"},
-	"advise": {"dynamic-import", "metadata-index"},
-	"note": {"customize-form-index", "context-truncated", "markdown-image", "external-link", "echoed-data-tag"},
+	"advise": {"dynamic-import", "metadata-index", "loop-query"},
+	"note": {"customize-form-index", "context-truncated", "markdown-image", "external-link", "echoed-data-tag", "unverified-structure"},
 }
 
 
@@ -405,11 +406,11 @@ def test_grounding_and_no_source():
 	assert codes(H.format("```diff\n-  280:     x = 1\n+    x = 2\n```"), ["    x = 1"]) == set()  # lineno copied
 
 
-def test_verbatim_hoist_of_preexisting_fstring_sql_not_blamed():
+def test_verbatim_hoist_of_preexisting_fstring_sql_is_blocked():
 	line = '    x = frappe.db.sql(f"select 1 from `tab{dt}`")'
 	src = ["for i in r:", line]
 	hoist = "```diff\n-for i in r:\n-" + line + "\n+" + line.strip() + "\n+for i in r:\n+    pass\n```"
-	assert codes(H.format(hoist), src) == set()
+	assert "raw-sql" in codes(H.format(hoist), src)
 
 
 # ---------------------------------------------------------------- structure
@@ -563,7 +564,10 @@ def test_note_codes_never_strip_code():
 
 # ---------------------------------------------------------------- contract
 def test_every_emitted_code_is_registered():
+	from optimus import ai_fix_checks
+
 	src = open(G.__file__).read()
+	src += open(ai_fix_checks.__file__).read()
 	emitted = set(re.findall(r'_v\(\s*"([a-z-]+)"', src))
 	assert emitted <= G.CODES, emitted - G.CODES
 	assert emitted | {"context-truncated"} == G.CODES
@@ -619,7 +623,7 @@ _PARITY = [
      '```python\nfrappe.db.sql(\n    f"select {name}"\n)\n```',
      {"sql-format-injection", "raw-sql"}),
     ("sql-parameters", ["frappe.db.sql(", '    f"select {name}"', ")"],
-     '```diff\n frappe.db.sql(\n-    f"select {name}"\n+    "select %(name)s", {"name": name}\n )\n```', set()),
+     '```diff\n frappe.db.sql(\n-    f"select {name}"\n+    "select %(name)s", {"name": name}\n )\n```', {"raw-sql"}),
     ("enqueue-kept", ["def on_submit(self):", "    frappe.enqueue(", '        "app.job", enqueue_after_commit=True', "    )"],
      '```diff\n def on_submit(self):\n     frappe.enqueue(\n-        "app.job", enqueue_after_commit=True\n+        "app.job"\n     )\n```',
      {"enqueue-without-after-commit"}),

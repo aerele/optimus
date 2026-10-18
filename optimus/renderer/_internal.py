@@ -136,6 +136,9 @@ from optimus.renderer.doc_event_renderer import (
 from optimus.renderer.finding_enrichment import (
 	_GROUPING_SEVERITY_RANK,
 	_SQL_REDFLAG_FINDING_TYPES,
+	_action_ref_key,
+	_ai_links_by_action,
+	_assign_finding_ids,
 	_attach_drilldown_chains,
 	_attach_representative_callsites,
 	_expand_self_time_snippets,
@@ -368,6 +371,7 @@ def render(
 		_finding_to_dict(f, _finding_file_cache)
 		for f in (session_doc.findings or [])
 	]
+	_assign_finding_ids(all_findings, session_doc.findings or [])
 	# Tokens every stored AI fix cost, counted before any filter or hide step below drops
 	# a finding (the tables' retired index-AI tokens are added where the tables are read).
 	_ai_fix_tokens = count_ai_tokens(all_findings, [])
@@ -817,6 +821,7 @@ def render(
 	observational_findings_by_app = _bucket_findings_by_app(
 		observational_findings, tracked_apps
 	)
+	_ai_links = _ai_links_by_action(findings_by_app + observational_findings_by_app)
 
 	# v0.6.x: prioritise custom-app rows in each of the 4 main listing
 	# sections (per-action, top-queries, background-jobs, hot-frames).
@@ -855,12 +860,14 @@ def render(
 	# still appear in their respective top-level sections.
 	_findings_by_action_ref: dict[str, list] = {}
 	for _f in actionable_findings:
-		_ref = str(_f.get("action_ref") or "").strip()
+		_ref = _action_ref_key(_f.get("action_ref"))
 		if _ref:
 			_findings_by_action_ref.setdefault(_ref, []).append(_f)
 	for _a in list(actions) + list(actions_framework):
+		_ref = _action_ref_key(_a.get("idx"))
+		_a["ai_suggestion_links"] = _ai_links.get(_ref, [])
 		_a["related_findings"] = _findings_by_action_ref.get(
-			str(_a.get("idx", "")), [],
+			_ref, [],
 		)
 	# v0.7.x: same linkage for RQ Jobs rows. Jobs carry the
 	# original action ``idx`` (set in ``build_background_jobs``) so
@@ -871,8 +878,10 @@ def render(
 		list(background_jobs.get("jobs", []) or [])
 		+ list(background_jobs.get("jobs_framework", []) or [])
 	):
+		_ref = _action_ref_key(_job.get("idx"))
+		_job["ai_suggestion_links"] = _ai_links.get(_ref, [])
 		_job["related_findings"] = _findings_by_action_ref.get(
-			str(_job.get("idx", "")), [],
+			_ref, [],
 		)
 	top_queries, top_queries_framework = _split_by_framework_app(
 		top_queries,

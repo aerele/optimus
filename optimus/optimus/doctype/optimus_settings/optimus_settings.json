@@ -510,7 +510,7 @@
   },
   {
    "depends_on": "eval:doc.ai_enabled",
-   "description": "Leave this blank to use the provider's default model. Examples: claude-sonnet-4-6 (Anthropic), gpt-4.1-mini (OpenAI), kimi-k2-0905-preview (Kimi), deepseek-chat (DeepSeek) or the name of your local model.",
+   "description": "Leave this blank to use the provider's default model. Examples: claude-sonnet-4-6 (Anthropic), gpt-4.1-mini (OpenAI), kimi-k2-0905-preview (Kimi), deepseek-flash (DeepSeek) or the name of your local model.",
    "fieldname": "ai_model",
    "fieldtype": "Data",
    "label": "Model"

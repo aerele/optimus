@@ -334,10 +334,45 @@ def test_current_prompt_version_has_no_stale_note(evidence, ai_available):
 	assert "batch-the-query" in out and "earlier version of the AI reviewer" not in out
 
 
+@pytest.mark.parametrize("available", [False, True])
+@pytest.mark.parametrize("metadata", [{"finish_reason": "length"}, {"guardrail": {"violations": ["truncated"]}}])
+def test_incomplete_suggestion_is_labelled_and_offers_only_an_available_retry(evidence, monkeypatch, available, metadata):
+	from optimus import ai_fix
+
+	monkeypatch.setattr(ai_fix, "is_available", lambda section=None: available)
+	out = _render(_doc([_ai_row(prompt_version=_current_prompt_version(), **metadata)]))
+	assert "Incomplete AI suggestion" in out and "Incomplete response" in out
+	assert "The response was incomplete or its completion could not be confirmed, so unfinished code is not shown." in out
+	assert "earlier version of the AI reviewer" not in out
+	assert ("Use Refresh AI suggestions to retry" in out) == available
+	assert ("Retrying uses provider tokens." in out) == available
+
+
 def test_unstamped_note_needs_a_stored_suggestion(evidence):
 	row = _row("Redundant Call", dict(_RC_DETAIL))
 	out = _render(_doc([row]))
 	assert "analyzed before the callsite fix" not in out
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_saved_sql_hoist_is_withheld_and_refreshable_without_mutation(evidence, monkeypatch, available):
+	from optimus import ai_fix
+	from optimus.tests.test_ai_sql_policy import HOIST, stored
+
+	monkeypatch.setattr(ai_fix, "is_available", lambda section=None: available)
+	monkeypatch.setattr(ai_fix, "_dispatch_call", lambda *a, **kw: pytest.fail("render must not call AI"))
+	row = _row("N+1 Query", {"callsite": _CALLSITE}, llm=stored(HOIST, received_responses=[{"text": "PRIVATE-RESPONSE-SENTINEL"}]))
+	before = row.llm_fix_json
+	out = _render(_doc([row]))
+	assert "Frappe API update needed" in out
+	assert "The original answer is retained" in out
+	assert "the loop repeats unused reads" in out
+	assert "fewer reads" not in out  # old rationale described the rejected patch
+	assert '+    frappe.db.sql("SELECT 1")' not in out
+	assert "PRIVATE-RESPONSE-SENTINEL" not in out
+	assert ("Use Refresh AI suggestions to request an updated fix" in out) == available
+	assert ("refreshing uses provider tokens" in out) == available
+	assert row.llm_fix_json == before
 
 
 def test_finding_notes_are_added_once():
@@ -664,3 +699,21 @@ def test_a_job_timeout_in_an_evidence_read_escapes_the_render(evidence, monkeypa
 	with pytest.raises(_JobTimeout) as caught:
 		_render(_doc([_mi_customer()]))
 	assert caught.value is not original and caught.value.__context__ is None
+
+
+@pytest.mark.parametrize("status,label", [("blocked", "Provider blocked response"), ("unknown", "Completion unconfirmed"), ("processing_limited", "Response needs local review")])
+def test_status_and_retained_text_are_separate_in_report(evidence, ai_available, status, label):
+	out = _render(_doc([_ai_row(prompt_version=_current_prompt_version(), completion_status=status,
+	                            received_responses=[{"text": "PRIVATE-PARTIAL-CODE-NEVER-RENDER"}])]))
+	assert label in out
+	assert "PRIVATE-PARTIAL-CODE-NEVER-RENDER" not in out
+	assert "earlier version of the AI reviewer" not in out
+
+
+def test_legacy_cutoff_note_without_structured_metadata_is_labelled(evidence, ai_available):
+	row = _ai_row(prompt_version=_current_prompt_version())
+	value = json.loads(row.llm_fix_json)
+	value['suggestion'] = 'Diagnosis preserved.\n\n> **Profiler note:** the suggested code was removed because it was cut off at the output limit.'
+	row.llm_fix_json = json.dumps(value)
+	out = _render(_doc([row]))
+	assert "Incomplete AI suggestion" in out

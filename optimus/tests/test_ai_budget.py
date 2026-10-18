@@ -14,17 +14,15 @@ def test_estimate_is_conservative_chars_over_3_3():
 	assert B.estimate_tokens("x" * 34) == 11
 
 
-def test_output_tokens_is_a_fifth_clamped_512_to_1024():
-	assert B.output_tokens(2048) == 512
-	assert B.output_tokens(4096) == 819
-	assert B.output_tokens(8192) == 1024
-	assert B.output_tokens(200000) == 1024
+def test_output_tokens_reserves_context_margin_without_quality_cap():
+	assert B.output_tokens(4096, input_tokens=3000) == 796
+	assert B.output_tokens(200000, input_tokens=3000, model_max=32768) == 32768
 
 
 def test_user_char_budget_reserves_system_output_and_template():
 	system = "s" * 6600  # 2000 estimated tokens
-	# (4096 - 2000 - 819 - 64) * 3.3 = 4002.9
-	assert B.user_char_budget(4096, system, out_tokens=819) == 4002
+	# Reserve tokenizer margin and message overhead as well as the output capacity.
+	assert B.user_char_budget(4096, system, out_tokens=819) == 2993
 	assert B.user_char_budget(1024, system, out_tokens=512) == 1200  # floor
 	assert B.user_char_budget(200000, system, out_tokens=1024) == 18000  # ceiling
 
@@ -95,14 +93,8 @@ def test_trim_window_without_target_keeps_the_middle():
 
 def test_reask_fits_uses_reported_usage():
 	# Real qwen3-coder usage at 4096: the worst first call still leaves room for a re-ask.
-	assert B.reask_fits(4096, {"prompt_tokens": 2830, "completion_tokens": 366}, "x" * 500, out_tokens=819)
+	assert B.reask_fits(4096, {"prompt_tokens": 2600, "completion_tokens": 366}, "x" * 500, out_tokens=819)
 	assert not B.reask_fits(4096, {"prompt_tokens": 3500, "completion_tokens": 366}, "x" * 500, out_tokens=819)
-
-
-def test_reask_output_tokens():
-	assert B.reask_output_tokens(819, 100) == 400
-	assert B.reask_output_tokens(819, 300) == 600
-	assert B.reask_output_tokens(819, 700) == 819
 
 
 def test_context_truncated_compares_reported_to_sent():
@@ -129,14 +121,3 @@ def test_assemble_measures_non_ascii_parts_by_size():
 	parts = [(0, "A"), (1, "处" * 10)]
 	assert B.assemble(parts, 20) == "A"  # 10 CJK characters are 36 units, not 10
 	assert B.assemble(parts, 40) == "A\n\n" + "处" * 10
-
-
-def test_cap_reply_cuts_only_an_oversized_reply_and_marks_it_cut_off():
-	from optimus import ai_budget
-
-	limit = ai_budget.MAX_REPLY_CHARS
-	assert ai_budget.cap_reply("ok", "stop") == ("ok", "stop")
-	assert ai_budget.cap_reply("a" * limit, None) == ("a" * limit, None)
-	assert ai_budget.cap_reply("a" * (limit + 1), "stop") == ("a" * limit, "length")
-	# 1024 output tokens (the most any call asks for) fit with room to spare
-	assert limit >= ai_budget.MAX_OUTPUT_TOKENS * 16

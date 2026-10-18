@@ -68,6 +68,7 @@ def test_logged_reask_timeout_keeps_marker_without_failed_frames(monkeypatch):
         reply = next(replies)
         if isinstance(reply, BaseException):
             raise reply
+        kwargs["meta_out"]["finish_reason"] = "stop"
         return reply
 
     monkeypatch.setattr(ai_fix, "_dispatch_call", dispatch)

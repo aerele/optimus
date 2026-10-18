@@ -7,8 +7,8 @@ not roll back the saved profile. Regenerate Reports renders saved results
 without contacting a provider.
 
 The Desk form shows progress, cancellation, reported usage and uncertainty.
-Manual refresh selects missing and outdated suggestions by default. The
-confirmation shows the selected count; replacing current suggestions requires
+Manual refresh selects missing, incomplete and outdated suggestions by default. Cut-off answers stay eligible for a later manual retry, but never repeat within the same run or during an automatic missing-only refresh. The
+confirmation shows the selected count and how many are incomplete; replacing current suggestions requires
 an explicit checkbox. Refresh and an active Phase 2 pass exclude one another.
 Auto-armed Phase 2 therefore takes precedence over automatic AI, with an
 admission notice on the session. Normal Phase 2 completion attempts automatic missing-only AI admission after saving results and report work; manual Refresh AI remains available.
@@ -748,3 +748,10 @@ guidance without decrypting credentials. Back up before deployment, migrate, the
 replace web, worker and scheduler processes together through normal operations.
 The migration does not repair historical snapshots, Versions or missing capture
 input. Re-record where validation rejects old or corrupt input.
+
+Completion status is distinct from prompt age. New missing/unknown stop reasons are retryable only through manual Refresh, like incomplete responses. Blocked responses and answers exceeding local validation limits are kept by default; the replacement checkbox explicitly includes them. Legacy successful answers without new status metadata remain current. Refresh generates a fresh answer; retained partial responses are not yet used for continuation.
+
+Saved suggestions that add, move or change raw SQL are now locally classified as outdated, even at prompt version 4. Manual Refresh selects these affected answers while preserving other current answers; automatic missing-only runs do not retry them. Regenerated reports label them “Frappe API update needed” and withhold the code. The original stored answer and token usage remain intact. This check never calls the provider.
+
+
+As of v0.12.80 the same local classification also catches reconstructable unbounded writes, ignored/new or behavior-changing permission checks, and lost literal query bounds/order in a paired SQL-to-ORM diff. These answers show “Safety review needed” and are eligible for manual Refresh only. Partial N+1 improvements receive an advisory and stay current. Classification and rendering preserve the original answer and usage, and never call a provider. See [AI-FIXING.md](AI-FIXING.md#visible-frappe-safety-checks-v01280) for the supported shapes and limits.

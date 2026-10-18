@@ -386,9 +386,9 @@ def _scenario_post(scenario, sinks, job_timeout):
 			# list of parts whose text is a dict.
 			if url.endswith("/chat/completions"):
 				content = {"echo": ECHO_MARK} if sinks.posts % 2 else [{"type": "text", "text": {"echo": ECHO_MARK}}]
-				return _reply(200, _json_dumps({"choices": [{"message": {"content": content}}]}))
+				return _reply(200, _json_dumps({"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}))
 			text = {"echo": ECHO_MARK} if sinks.posts % 2 else [ECHO_MARK, "list"]
-			return _reply(200, _json_dumps({"content": [{"type": "text", "text": text}]}))
+			return _reply(200, _json_dumps({"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"}))
 		if scenario == "malformed_usage":
 			# A usable suggestion whose usage block is not what the parsers expect.
 			usage = "x" if sinks.posts % 2 else {
@@ -396,8 +396,8 @@ def _scenario_post(scenario, sinks, job_timeout):
 			}
 			text = f"{SUGGESTION_MARK}: batch the lookup"
 			if url.endswith("/chat/completions"):
-				return _reply(200, _json_dumps({"choices": [{"message": {"content": text}}], "usage": usage}))
-			return _reply(200, _json_dumps({"content": [{"type": "text", "text": text}], "usage": usage}))
+				return _reply(200, _json_dumps({"choices": [{"message": {"content": text}, "finish_reason": "stop"}], "usage": usage}))
+			return _reply(200, _json_dumps({"content": [{"type": "text", "text": text}], "usage": usage, "stop_reason": "end_turn"}))
 		if scenario == "http_400_echo":
 			# OpenAI's error object: the identifier-shaped type reaches the row,
 			# the echoed key in ``code`` and the message never do.

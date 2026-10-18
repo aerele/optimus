@@ -111,7 +111,7 @@ def test_validation_retry_ladder_is_bounded_and_only_logs_final_failure(wire):
 		Reply(422, {"error": {"message": "Unsupported temperature"}}),
 		Reply(),
 	)
-	assert ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", []) == "answer"
+	assert ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [], max_tokens=4096) == "answer"
 	assert len(wire.posts) == 3 and wire.logs == []
 	assert "max_tokens" in wire.posts[0][1]["json"]
 	assert "max_completion_tokens" in wire.posts[1][1]["json"]
@@ -121,7 +121,7 @@ def test_validation_retry_ladder_is_bounded_and_only_logs_final_failure(wire):
 def test_context_failure_never_enters_parameter_retry(wire):
 	wire.install(Reply(400, {"error": {"message": "maximum context length: max_tokens temperature"}}))
 	with pytest.raises(ai_fix.AiFixError) as caught:
-		ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [])
+		ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [], max_tokens=4096)
 	assert caught.value.kind == "context"
 	assert len(wire.posts) == len(wire.logs) == 1
 
@@ -131,7 +131,7 @@ def test_repeated_rejected_parameter_stops_instead_of_looping(wire):
 		*[Reply(400, {"error": {"message": "Unsupported max_tokens; use max_completion_tokens"}})] * 4
 	)
 	with pytest.raises(ai_fix.AiFixError):
-		ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [])
+		ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [], max_tokens=4096)
 	assert len(wire.posts) == 2 and len(wire.logs) == 1
 
 
@@ -145,7 +145,7 @@ def test_repeated_rejected_parameter_stops_instead_of_looping(wire):
 )
 def test_inline_thinking_is_not_reported_as_the_answer(wire, content, finish, expected):
 	wire.install(Reply(payload={"choices": [{"message": {"content": content}, "finish_reason": finish}]}))
-	assert ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", []) == expected
+	assert ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [], max_tokens=4096) == expected
 
 
 def test_truncated_thinking_preserves_reported_usage_on_error(wire):
@@ -158,7 +158,7 @@ def test_truncated_thinking_preserves_reported_usage_on_error(wire):
 		)
 	)
 	with pytest.raises(ai_fix.AiFixError) as caught:
-		ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [])
+		ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [], max_tokens=4096)
 	assert caught.value.kind == "bad_response"
 	assert caught.value.usage["total_tokens"] == 7
 	assert "unfinished" not in str(caught.value)
@@ -170,14 +170,14 @@ def test_truncated_thinking_preserves_reported_usage_on_error(wire):
 		{"choices": {}},
 		{"choices": [None]},
 		{"choices": [{"message": []}]},
-		{"choices": [{"message": {"content": {"bad": "shape"}}}]},
+		{"choices": [{"message": {"content": {"bad": "shape"}}, "finish_reason": "stop"}]},
 	],
 )
 def test_malformed_success_is_typed_and_keeps_usage(wire, payload):
 	payload["usage"] = {"total_tokens": 7}
 	wire.install(Reply(payload=payload))
 	with pytest.raises(ai_fix.AiFixError) as caught:
-		ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [])
+		ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [], max_tokens=4096)
 	assert caught.value.kind == "bad_response"
 	assert caught.value.usage["total_tokens"] == 7
 
@@ -204,7 +204,7 @@ def test_explicit_session_reaches_http_logging(wire):
 	with pytest.raises(ai_fix.AiFixError):
 		ai_fix._call_openai_chat(
 			"https://provider.invalid/v1", "", "custom", "system", [], session_uuid="fake-session"
-		)
+		, max_tokens=4096)
 	assert wire.logs[0][1]["session_uuid"] == "fake-session"
 
 
@@ -220,7 +220,7 @@ def test_retry_uses_remaining_budget_and_never_retries_after_deadline(wire, monk
 
 	monkeypatch.setattr(ai_fix.requests, "post", post)
 	with pytest.raises(ai_fix.AiFixError) as caught:
-		ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [], timeout=10)
+		ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [], timeout=10, max_tokens=4096)
 	assert caught.value.kind == "timeout"
 	assert posts == [(10, 10)]
 
@@ -243,7 +243,7 @@ def test_misleading_stop_does_not_expose_unfinished_or_excessive_thinking(wire, 
 		)
 	)
 	with pytest.raises(ai_fix.AiFixError) as caught:
-		ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [])
+		ai_fix._call_openai_chat("https://provider.invalid/v1", "", "custom", "system", [], max_tokens=4096)
 	assert caught.value.usage["total_tokens"] == 7
 
 
@@ -269,7 +269,7 @@ def test_post_response_failures_preserve_usage_without_raw_exception_text(wire, 
 	wire.install(
 		Reply(
 			payload={
-				"choices": [{"message": {"content": "answer" if entry == "fix" else "  "}}],
+				"choices": [{"message": {"content": "answer" if entry == "fix" else "  "}, "finish_reason": "stop"}],
 				"usage": {"total_tokens": 7},
 			}
 		)
@@ -301,7 +301,7 @@ def test_a_typed_failure_after_a_billed_reply_still_carries_the_usage(wire, monk
 		raise ai_fix.AiFixError("fake typed failure", kind="bad_response")  # raised with no usage
 
 	monkeypatch.setattr(ai_fix.ai_guardrails, "verify_fix", failed)
-	wire.install(Reply(payload={"choices": [{"message": {"content": "answer"}}], "usage": {"total_tokens": 7}}))
+	wire.install(Reply(payload={"choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}], "usage": {"total_tokens": 7}}))
 	with pytest.raises(ai_fix.AiFixError) as caught:
 		ai_fix.suggest_fix({"finding_type": "N+1 Query"})
 	assert caught.value.kind == "bad_response" and str(caught.value) == "fake typed failure"
@@ -312,7 +312,7 @@ def test_a_typed_failure_after_a_billed_reply_still_carries_the_usage(wire, monk
 def test_an_anthropic_reply_without_text_keeps_its_usage(wire, content):
 	wire.install(Reply(payload={"content": content, "usage": {"input_tokens": 5, "output_tokens": 2}}))
 	with pytest.raises(ai_fix.AiFixError) as caught:
-		ai_fix._call_anthropic("https://provider.invalid", "", "claude", "system", [])
+		ai_fix._call_anthropic("https://provider.invalid", "", "claude", "system", [], max_tokens=4096)
 	assert caught.value.kind == "bad_response"
 	assert caught.value.usage == {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
 

@@ -17,42 +17,75 @@ import json
 
 # Loop facts, enclosing-function grounding and deterministic index advice.
 PROMPT_VERSION: int = 4
+# Local safety policy revalidates affected saved code only; unrelated completed fixes stay current.
 
 FIX_MISSING = "missing"
+FIX_INCOMPLETE = "incomplete"
 FIX_OUTDATED = "outdated"
 FIX_CURRENT = "current"
+FIX_BLOCKED = "blocked"
+FIX_PROCESSING_LIMITED = "processing_limited"
 
 
 def is_current(fix_or_version, current_version: int | None = None) -> bool:
 	"""True when a stored AI fix (its dict, or just its ``prompt_version``) was made with
 	``current_version`` (default ``PROMPT_VERSION``) or newer. A missing, non-int or bool
-	version is not current. The one definition shared by ``analyze`` (skip re-asking) and
-	``recipe_enrichment`` (mark outdated), so the two can never disagree."""
+	version is not current. This checks the version only; ``fix_state`` also checks
+	completeness before deciding whether to skip re-asking."""
 	version = fix_or_version.get("prompt_version") if isinstance(fix_or_version, dict) else fix_or_version
 	floor = PROMPT_VERSION if current_version is None else current_version
 	return isinstance(version, int) and not isinstance(version, bool) and version >= floor
+
+
+def is_incomplete(fix: dict) -> bool:
+	"""Recognise stored output cutoffs, including an unclosed code fence caught locally."""
+	if fix.get("completion_status") in ("incomplete", "unknown"):
+		return True
+	finish = fix.get("finish_reason")
+	if isinstance(finish, str) and finish.lower() in ("length", "max_tokens"):
+		return True
+	guardrail = fix.get("guardrail")
+	violations = guardrail.get("violations") if isinstance(guardrail, dict) else None
+	if isinstance(violations, (list, tuple)) and "truncated" in violations:
+		return True
+	# Older rows may predate structured termination metadata. Match our own
+	# generated fallback note, not a missing stop reason alone.
+	suggestion = fix.get("suggestion")
+	return isinstance(suggestion, str) and "\n\n> **Profiler note:** the suggested code was removed because it was cut off at the output limit." in suggestion
+
+
+def response_status(fix: dict) -> str | None:
+	"""Safe display status, including historical markers before status was recorded."""
+	if "completion_status" in fix:
+		status = fix["completion_status"]
+		return status if status in ("complete", "incomplete", "blocked", "unknown", "processing_limited") else "unknown"
+	if fix.get("finish_reason") in ("content_filter", "refusal"):
+		return "blocked"
+	return "incomplete" if is_incomplete(fix) else None
 
 
 def fix_state(stored, current_version: int | None = None) -> tuple[str, dict | None]:
 	"""``(state, fix)`` for a finding's stored ``llm_fix_json`` (its text, or the parsed dict).
 
 	The one definition of what a finding holds, shared by Refresh AI suggestions
-	(``analyze.eligible_findings`` and ``_run_ai_backfill``) and, through ``is_current``,
-	the report's "earlier version" footer:
+	(``analyze.eligible_findings`` and ``_run_ai_backfill``) and the report's status footer:
 
 	- ``missing``: nothing stored (``None``, or empty / whitespace text). Only this state is
 	  filled by a missing-only run.
+	- ``incomplete``: a provider cutoff or truncated guardrail. Manual Refresh retries it;
+	  missing-only automatic runs do not. Its unfinished code remains removed.
 	- ``current``: a usable answer (a non-blank ``suggestion``, exactly what the report shows as a card) that
-	  ``is_current`` accepts. A guardrail-fallback answer (its code removed, a profiler note
-	  appended) is a usable answer, which the report also shows as current, so it is not
+	  ``is_current`` accepts. A non-truncation guardrail-fallback answer (its code removed,
+	  a profiler note appended) is a usable answer, which the report shows as current, so it is not
 	  billed again unless the whole set is regenerated.
 	- ``outdated``: everything else that is stored: unparseable text, JSON that is not an
-	  object, an older, absent or non-integer ``prompt_version``, or no suggestion text. The
+	  object, an older, absent or non-integer ``prompt_version``, or no suggestion text. Proposed code with a reconstructable safety-policy violation
+	  (raw SQL, unbounded writes, permission changes or lost query bounds) is also outdated, without invalidating other answers at the same version. The
 	  report shows no card for a record without suggestion text, so retrying it is not a
 	  disagreement with it. A stray ``error`` key does not matter: suggestion text at the
 	  current version is a current card.
 
-	``fix`` is the parsed object for ``current`` and for an ``outdated`` object, else ``None``."""
+	``fix`` is the parsed object when one was stored, else ``None``."""
 	if stored is None:
 		return FIX_MISSING, None
 	if isinstance(stored, str):
@@ -64,8 +97,22 @@ def fix_state(stored, current_version: int | None = None) -> tuple[str, dict | N
 			return FIX_OUTDATED, None
 	if not isinstance(stored, dict):
 		return FIX_OUTDATED, None
+	status = stored.get("completion_status")
+	if status in (FIX_BLOCKED, FIX_PROCESSING_LIMITED):
+		return status, stored
+	if stored.get("finish_reason") in ("content_filter", "refusal"):
+		return FIX_BLOCKED, stored
+	if "completion_status" in stored and status not in ("complete", "incomplete", "unknown"):
+		return FIX_INCOMPLETE, stored
+	if is_incomplete(stored):
+		return FIX_INCOMPLETE, stored
 	suggestion = stored.get("suggestion")
 	usable = isinstance(suggestion, str) and bool(suggestion.strip())
+	if usable:
+		from optimus.ai_guardrails import stored_policy_violations
+
+		if stored_policy_violations(suggestion):
+			return FIX_OUTDATED, stored
 	return (FIX_CURRENT if usable and is_current(stored, current_version) else FIX_OUTDATED), stored
 
 
@@ -78,8 +125,7 @@ UNTRUSTED_DATA_CLAUSE = (
 # ---------------------------------------------------------------- fix prompt
 _ROLE = (
 	"You are a senior Frappe Framework / ERPNext engineer reviewing one finding from a "
-	"performance profiler. Propose the smallest change that fixes the root cause, written "
-	"the way Frappe core writes code.\n" + UNTRUSTED_DATA_CLAUSE + "\n"
+	"performance profiler. Propose the smallest fix for the root cause following Frappe conventions.\n" + UNTRUSTED_DATA_CLAUSE + "\n"
 )
 
 _GROUNDING = (
@@ -90,30 +136,38 @@ _GROUNDING = (
 	"**Diagnosis** and give a directional fix that starts \"Without seeing the code, the "
 	"likely fix is\".\n"
 	"3. Replacing SQL keeps its meaning: same tables, filters, joins, grouping, fields and "
-	"limit, and no invented filters. `frappe.get_all` / `frappe.get_list` sort by the "
+	"limit, offset and explicit ordering, and no invented filters. `frappe.get_all` / `frappe.get_list` sort by the "
 	"DocType's sort field (usually `creation desc`) unless you pass `order_by`.\n\n"
 )
 
 # FRAPPE_REVIEW_RULES / FRAPPE_DEV_IDIOMS keep their names: the docs refer to them.
 FRAPPE_REVIEW_RULES = (
 	"FRAPPE RULES FOR YOUR `+` LINES\n"
-	"- Reads: `frappe.get_list`, `frappe.get_all`, `frappe.db.get_value`, "
-	"`frappe.db.get_values`, `frappe.qb`. New code never calls `frappe.db.sql` or "
-	"`frappe.db.multisql`, DDL included. `get_list` / `get_all` also take linked fields "
-	"(`\"customer.customer_name\"`) and child fields (`{\"items\": [\"item_code\"]}`), so most "
-	"joins need no SQL. SQL you only move stays as it is; SQL you must keep "
-	"passes values as parameters (`%(name)s` with a dict), never f-strings, `.format`, `%` "
-	"or `+`.\n"
+	"- Reads: `frappe.db.get_value` for a value, `frappe.db.get_values` / `frappe.get_all` "
+	"for rows, `frappe.get_list` for permission-checked rows, `frappe.db.count` for counts, "
+	"`frappe.db.exists` for existence, `frappe.qb` for complex queries. Never add, move or "
+	"change raw SQL (`frappe.db.sql`, `multisql`, `sql_list`, `sql_ddl`, aliases), even to "
+	"hoist or parameterise it. Removed lines and unchanged context may quote SQL. "
+	"`get_list` / `get_all` support linked fields (`\"customer.customer_name\"`) and child "
+	"fields (`{\"items\": [\"item_code\"]}`). Preserve return shape. If equivalence is "
+	"uncertain, give a directional fix without code.\n"
 	"- Permissions: preserve the permission semantics of the call you replace. "
 	"`frappe.get_list` stays `frappe.get_list`; a permission-free read (`get_doc`, "
-	"`db.get_value`, `db.sql`, `get_all`) becomes `get_all` or `frappe.qb`, not `get_list`. "
-	"Never add `ignore_permissions=True` or `allow_guest=True`; use the result of "
-	"`frappe.has_permission(...)` or pass `throw=True`.\n"
-	"- Loops: no DB call per row. Batch reads into one `(\"in\", names)` query plus a dict. "
+	"`db.get_value`, `db.sql`, `get_all`) stays permission-free: `get_value`, `count`, "
+	"`get_all` or `frappe.qb`, not `get_list`. "
+	"Never add `ignore_permissions=True` or `allow_guest=True`. Existing `has_permission` "
+	"calls keep their arguments, throw mode, result use and execution conditions. A discarded "
+	"non-throwing check may move verbatim. Never add `throw=True` to it. Only a new check "
+	"may choose `throw=True`; otherwise use its result.\n"
+	"- Loops: batch per-row reads into one `(\"in\", names)` query plus a dict. "
+	"Remove unused reads only if the source proves no required side effect (locks, liveness, "
+	"existence checks); do not hoist unnecessary work. Preserve try/except and conditional "
+	"execution when moving calls. Show the loop header; cheaper per-row reads still leave N+1. "
 	"Batch plain column writes with `frappe.db.set_value(doctype, {filters}, field, value)` or "
 	"`frappe.db.bulk_update(doctype, {name: {field: value}})`; both skip validation and hooks, "
-	"so fields that need them keep `doc.save()`. Never pass an empty or None name or filter to "
-	"`set_value` / `delete` (it touches every row).\n"
+	"so fields that need them keep `doc.save()`. Never introduce an unfiltered `delete`, "
+	"empty `set_value` selectors, `truncate`, or QB writes without WHERE. "
+	"Use Single DocType helpers for a Single value.\n"
 	"- No `frappe.db.commit()` / `frappe.db.rollback()`, `eval` / `exec` / `safe_exec`, "
 	"monkey-patching or module-level state. Change a signature only by adding a keyword "
 	"argument last with a `None` default.\n"
@@ -148,11 +202,13 @@ FRAPPE_DEV_IDIOMS = (
 FIX_HEADINGS = ("Diagnosis", "Fix", "Why it works", "Verify")
 
 _OUTPUT = (
-	"OUTPUT exactly these four headings, in this order, nothing before or after, 150 to 350 "
-	"words:\n"
+	"OUTPUT exactly these four headings, in this order, nothing before or after. Keep the "
+	"explanation to 80 to 180 words, plus the smallest complete diff:\n"
 	"**Diagnosis**: 1 to 2 sentences naming the cause and its line number in the shown source.\n"
 	"**Fix**: one ```diff block (`-` = shown code, `+` = replacement), or no code when the "
-	"code was not shown. An index change follows the profiler's index advice when the message gives one; code is optional.\n"
+	"code was not shown. Include only changed lines and necessary context, never whole unchanged "
+	"functions. Finish the patch and close its fence before explaining it. An index change "
+	"follows the profiler's index advice when the message gives one; code is optional.\n"
 	"**Why it works**: 1 to 2 sentences.\n"
 	"**Verify**: 1 line: re-profile the same flow and name the number that should drop.\n"
 	"Do not restate the finding's title or numbers.\n\n"
@@ -192,7 +248,7 @@ _EXAMPLES = (
 
 _SELF_CHECK = (
 	"Before answering, check: every `-` and context line is verbatim shown code (or there is "
-	"no code); no new `frappe.db.sql`; permission behaviour unchanged; exactly four headings."
+	"no code); no added or moved raw SQL; permission behaviour unchanged; exactly four headings."
 )
 
 SYSTEM_PROMPT = (
@@ -210,7 +266,9 @@ FINDING_TYPE_HINTS = {
 	"Redundant Call": "The same lookup runs many times with the same arguments. Hoist it out "
 	"of the loop, or cache it: `frappe.get_cached_value` / `frappe.get_cached_doc` for "
 	"document data, `@request_cache` for a repeated pure function. A repeated "
-	"`has_permission` is hoisted once with `throw=True`, never removed.",
+	"`has_permission` keeps its throw mode and result use, never removed. A discarded check "
+	"may be hoisted verbatim. Do not move checks that throw or whose result is used; leave "
+	"them in place, including when the loop is empty.",
 	"Hot Line": "One line dominates its function. Hoist invariant work out of the loop, use a "
 	"dict or set for lookups, and avoid a DB or cache call per iteration.",
 }
@@ -286,16 +344,18 @@ STEPS_SYSTEM_PROMPT = (
 REASK_HEADER = "Your answer broke these rules:\n"
 REASK_FOOTER = (
 	"\nRewrite the whole answer with the same four headings. Keep what was right. If the "
-	"code you need is not in the shown source, remove the diff and give a directional fix. If "
-	"you keep raw SQL on purpose, pass values as parameters and say why in **Diagnosis**."
+	"code or an equivalent Frappe API cannot be established from the shown source, remove "
+	"the diff and give a directional fix."
 )
 
 RULE_TEXT = {
 	"ungrounded": "Diff lines must be copied verbatim from the shown source; these were not: {detail}.",
 	"no-source-diff": "No source was shown, so the fix must not contain `-` or context lines.",
 	"no-op-diff": "The diff changes nothing (removed and added lines are identical).",
-	"raw-sql": "New code must not call `frappe.db.sql` / `frappe.db.multisql` ({detail}); use "
-	"`frappe.get_list` / `frappe.get_all` / `frappe.db.get_values` / `frappe.qb`.",
+	"raw-sql": "Added, moved or changed code must not call `frappe.db.sql` or raw SQL variants "
+	"({detail}). Use `frappe.db.get_value` for a value, `frappe.get_all` / `frappe.get_list` "
+	"for rows, `frappe.db.count` for counts, or `frappe.qb`; preserve semantics. Remove an "
+	"unnecessary read. If equivalence is uncertain, give a directional fix without code.",
 	"raw-ddl": "Indexes are never raw `ALTER TABLE` / `CREATE INDEX`: follow the profiler's index advice "
 	"(the field's Search Index, or an entry in your app's `ensure_indexes()` that hooks.py runs as "
 	"`after_install`, `after_sync` and `after_migrate`).",
@@ -309,7 +369,23 @@ RULE_TEXT = {
 	"qb-orderby-positional": "`.orderby(field, order=frappe.qb.desc)`: `order` must be a keyword.",
 	"ignore-permissions": "Do not add `ignore_permissions=True`.",
 	"allow-guest": "Do not add `allow_guest=True`.",
-	"unchecked-permission": "The result of `frappe.has_permission(...)` is ignored: pass `throw=True`.",
+	"unchecked-permission": "The permission result is ignored. Preserve an existing check's throw mode "
+	"and result use; a discarded check may only move verbatim. Only a newly introduced check may "
+	"choose throw=True; otherwise use its result. Do not change denial behavior to satisfy this rule.",
+	"unbounded-write": "Do not propose a delete/update with empty or absent selection, truncate, or "
+	"an executed Query Builder write without WHERE ({detail}). Keep an explicit bounded selector; "
+	"do not invent one when the source does not establish it. If the original source already "
+	"contains this write, show it as unchanged diff context; do not remove it.",
+	"unverified-safety": "Safety comparison was not possible ({detail}). Show the smallest complete "
+	"grounded diff; use explicit permission arguments. Otherwise give directional advice without code.",
+	"permission-behavior-change": "Preserve permission arguments, throw mode, result use and visible "
+	"execution boundaries ({detail}). An ignored boolean is not an enforced denial. If preservation "
+	"cannot be established, give directional advice without code.",
+	"sql-semantics-dropped": "The replacement {detail}. Preserve the original limit, offset and explicit "
+	"ordering using the equivalent API arguments; do not broaden or change the result. If equivalence "
+	"cannot be established, give directional advice without code.",
+	"loop-query": "The replacement still reads the database per row ({detail}). It may reduce work per "
+	"query, but the N+1 pattern remains; batch the reads where document hooks and semantics permit.",
 	"multitenant-cache": "No `functools.lru_cache` / `@cache` / module-level cache ({detail}): use "
 	"`@request_cache` or `@redis_cache(ttl=...)` from `frappe.utils.caching`, or `frappe.get_cached_value`.",
 	"module-state": "No module-level `x = frappe....` values ({detail}); they leak across sites. "
@@ -345,4 +421,6 @@ RULE_TEXT = {
 	"markdown-image": "an image in the answer was removed; the report never loads remote content.",
 	"external-link": "links outside the Frappe and ERPNext documentation were removed from the answer.",
 	"echoed-data-tag": "the answer echoed captured-data markers; they were removed.",
+	"unverified-structure": "part of the proposed code could not be parsed as a complete Python "
+	"fragment. Its control flow and per-row behavior could not be fully checked; review it locally.",
 }

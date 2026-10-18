@@ -116,7 +116,7 @@ def _logged_context(wire):
 
 
 def _call(model="custom", **kw):
-	return ai_fix._call_openai_chat("https://p.invalid/v1", "", model, "system", [], **kw)
+	return ai_fix._call_openai_chat("https://p.invalid/v1", "", model, "system", [], **kw, max_tokens=4096)
 
 
 def test_a_first_post_failure_says_one_attempt_and_nothing_dropped(wire):

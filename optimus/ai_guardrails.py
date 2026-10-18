@@ -33,11 +33,13 @@ from __future__ import annotations
 
 import ast
 import html
+import io
 import re
 import textwrap
+import tokenize
 from dataclasses import dataclass
 
-from optimus import ai_prompts
+from optimus import ai_prompts, ai_responses
 from optimus.analyzers.base import FRAPPE_METADATA_COLUMNS
 
 FIX_HEADINGS = ("Diagnosis", "Fix", "Why it works", "Verify")
@@ -78,17 +80,23 @@ CODE_ACTIONS: dict[str, str] = {
 	"module-state": BLOCK,
 	"local-state": BLOCK,
 	"unchecked-permission": BLOCK,
+	"unbounded-write": BLOCK,
+	"unverified-safety": BLOCK,
+	"permission-behavior-change": BLOCK,
+	"sql-semantics-dropped": BLOCK,
 	# truncated: never re-asked (the rewrite would be cut off too); code stripped.
 	"truncated": TRUNCATED,
 	# advise: a profiler note only; never re-asked, never strips code (no pinned semgrep rule).
 	"dynamic-import": ADVISE,
 	"metadata-index": ADVISE,
+	"loop-query": ADVISE,
 	# note: an operator note; never re-asked, never strips code.
 	"customize-form-index": NOTE,
 	"context-truncated": NOTE,
 	"markdown-image": NOTE,
 	"external-link": NOTE,
 	"echoed-data-tag": NOTE,
+	"unverified-structure": NOTE,
 }
 CODES: frozenset[str] = frozenset(CODE_ACTIONS)
 
@@ -198,7 +206,7 @@ def _rendered_code(text: str) -> list[str]:
 	from optimus.renderer.finding_enrichment import _markdown_to_safe_html
 
 	out = []
-	for body in re.findall(r"<pre\b[^>]*>(.*?)</pre>", _markdown_to_safe_html(text) or "", re.S | re.I):
+	for body in re.findall(r"<pre\b[^>]{0,4096}>(.*?)</pre>", _markdown_to_safe_html(text) or "", re.S | re.I):
 		body = re.sub(r'<span class="dh-line[^"]*">', "\n", body)  # the diff highlighter: one span per line
 		code = html.unescape(re.sub(r"<[^>]+>", "", body)).replace("\u200b", "")
 		out.append(re.sub(r"<[^>\n]+>", "", code).strip("\n"))  # tag text escaped inside the block
@@ -321,10 +329,12 @@ _RAW_SQL = {
 	"frappe.db.sql_ddl",
 	"frappe.local.db.sql",
 	"frappe.local.db.multisql",
+	"frappe.local.db.sql_list",
+	"frappe.local.db.sql_ddl",
 }
 _CTRL_HOOKS = {"on_submit", "on_cancel", "after_insert", "on_update", "on_update_after_submit"}
 _DDL_RE = re.compile(
-	r"\b(?:ALTER\s+TABLE\b[^;]*\bADD\s+(?:UNIQUE\s+)?(?:INDEX|KEY)|CREATE\s+(?:UNIQUE\s+)?INDEX)\b", re.I
+	r"\b(?:ALTER\s+TABLE\b[^;]{0,4096}\bADD\s+(?:UNIQUE\s+)?(?:INDEX|KEY)|CREATE\s+(?:UNIQUE\s+)?INDEX)\b", re.I
 )
 _PERM_CALLS = ("frappe.get_list(", "has_permission(", "check_permission(", "frappe.client.get_list(")
 _DESERIALIZE = {"pickle.loads", "pickle.load", "cPickle.loads", "marshal.loads", "dill.loads"}
@@ -354,7 +364,7 @@ def _parse(code: str):
 	for cand, off in ((code, 0), ("def _f():\n" + textwrap.indent(code, "    "), 1)):
 		try:
 			return ast.parse(cand), cand, off
-		except SyntaxError:
+		except (SyntaxError, RecursionError):
 			pass
 	return None, "", 0
 
@@ -373,6 +383,46 @@ def _code_units(blocks: list[Block], source_lines: list[str]):
 		yield after, minus
 
 
+def _fragment_changes_sql(after: list[tuple[str, bool]]) -> bool:
+	"""Check call spans in fragments (e.g. an orphan else) that cannot form an AST.
+
+	Tokenization distinguishes comments/strings and handles multi-line arguments.
+	Removing indentation preserves line numbers and avoids fragment indent errors.
+	"""
+	text = "\n".join(line.lstrip() for line, _ in after)
+	aliases = set(re.findall(r"(?m)^(\w+)\s*=\s*frappe\.(?:local\.)?db\s*(?:#.*)?$", text))
+	tokens = []
+	try:
+		for token in tokenize.generate_tokens(io.StringIO(text).readline):
+			if token.type in (tokenize.NAME, tokenize.OP, tokenize.STRING, tokenize.NUMBER):
+				tokens.append(token)
+	except (tokenize.TokenError, IndentationError, SyntaxError):
+		pass  # tokens received before an unfinished expression still cover its opener
+	for i, token in enumerate(tokens):
+		if token.type != tokenize.NAME:
+			continue
+		j, name = i + 1, token.string
+		while j + 1 < len(tokens) and tokens[j].string == "." and tokens[j + 1].type == tokenize.NAME:
+			name += "." + tokens[j + 1].string
+			j += 2
+		head, _, tail = name.rpartition(".")
+		if name not in _RAW_SQL and not (head in aliases and tail in ("sql", "multisql", "sql_list", "sql_ddl")):
+			continue
+		if j >= len(tokens) or tokens[j].string != "(":
+			continue
+		depth, end = 0, len(after)
+		for k in range(j, len(tokens)):
+			part = tokens[k]
+			if part.type == tokenize.OP:
+				depth += (part.string == "(") - (part.string == ")")
+				if depth == 0:
+					end = part.end[0]
+					break
+		if any(new for _, new in after[token.start[0] - 1:end]):
+			return True
+	return False
+
+
 def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 	out: list[Violation] = []
 	for after, minus in _code_units(blocks, source_lines):
@@ -382,30 +432,26 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 			continue
 		tree, parsed, off = _parse(text)
 		if tree is None:  # fallback: line regex over new lines only
+			if _fragment_changes_sql(after):
+				out.append(_v("raw-sql", "unparseable block"))
 			for i in sorted(new_idx):
 				c = after[i][0]
 				if _norm(c) and _norm(c) in minus:
-					continue  # moved line
-				if re.search(r"frappe\s*\.\s*(?:local\s*\.\s*)?db\s*\.\s*(?:multi)?sql(?:_list|_ddl)?\s*\(", c):
-					out.append(_v("raw-sql", "unparseable block"))
+					continue  # other rules still exempt moved lines
 				if re.search(r"frappe\.db\.(?:commit|rollback)\s*\(", c):
 					out.append(_v("manual-commit"))
 			continue
 
-		def introduced(node, _off=off, _new=new_idx, _after=after, _minus=minus) -> bool:
+		def introduced(node, *, include_moved=False, _off=off, _new=new_idx, _after=after, _minus=minus) -> bool:
 			start = getattr(node, "lineno", 0) - 1 - _off
 			end = getattr(node, "end_lineno", start + 1 + _off) - _off
 			# A kept compound statement does not become new when its body changes.
 			if isinstance(node, (ast.For, ast.AsyncFor, ast.While, ast.FunctionDef,
 					ast.AsyncFunctionDef, ast.ClassDef)):
 				end = start + 1
-			return any(i in _new and _norm(_after[i][0]) not in _minus
+			return any(i in _new and (include_moved or _norm(_after[i][0]) not in _minus)
 				for i in range(max(0, start), min(len(_after), end)))
 
-		# Only removed SQL calls can pay for replacement calls. A retained
-		# opener may change its own arguments, without granting another call.
-		prior = "\n".join(minus)
-		reshapes = [len(re.findall(r"frappe\.(?:local\.)?db\.(?:multi)?sql\s*\(", prior))]
 		aliases = {
 			t.id
 			for n in ast.walk(tree)
@@ -417,8 +463,10 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 			if isinstance(n, ast.Call):
 				name = _dotted(n.func)
 				head, _, tail = name.rpartition(".")
-				if name in _RAW_SQL or (head in aliases and tail in ("sql", "multisql", "sql_list")):
-					if introduced(n):
+				if name in _RAW_SQL or (head in aliases and tail in ("sql", "multisql", "sql_list", "sql_ddl")):
+					# Moving a call is still proposed code. A retained opener does
+					# not exempt new arguments; unchanged diff context stays allowed.
+					if introduced(n, include_moved=True):
 						a0 = n.args[0] if n.args else None
 						if isinstance(a0, ast.Constant) and isinstance(a0.value, str):
 							lit = a0.value
@@ -441,10 +489,6 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 							out.append(_v("sql-format-injection", name))
 						if _DDL_RE.search(lit):
 							pass  # raw-ddl comes from check_prose_ddl, which reads every rendered block
-						elif not unsafe and 0 <= n.lineno - 1 - off < len(after) and not after[n.lineno - 1 - off][1]:
-							pass  # this call kept its opener and changed only its arguments
-						elif reshapes[0] > 0 and not unsafe:
-							reshapes[0] -= 1  # a removed SQL call replaced with a parameterised call
 						else:
 							out.append(_v("raw-sql", name))
 				elif name in ("frappe.db.commit", "frappe.db.rollback") and introduced(n):
@@ -495,14 +539,6 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 						out.append(_v("ignore-permissions"))
 					if k.arg == "allow_guest" and isinstance(k.value, ast.Constant) and k.value.value and introduced(n):
 						out.append(_v("allow-guest"))
-			elif (
-				isinstance(n, ast.Expr)
-				and isinstance(n.value, ast.Call)
-				and introduced(n)
-				and _dotted(n.value.func) == "frappe.has_permission"
-				and not any(k.arg == "throw" for k in n.value.keywords)
-			):
-				out.append(_v("unchecked-permission"))
 			elif (
 				isinstance(n, ast.Assign)
 				and introduced(n)
@@ -608,7 +644,7 @@ _TUPLE = re.compile(r"\(\s*`?([A-Za-z_]\w*)`?(?:\s*,\s*`?[A-Za-z_]\w*`?)*\s*\)")
 _BACKTICK = re.compile(r"`([A-Za-z_]\w*)`")
 _ADD_INDEX = re.compile(r"add_index\(\s*['\"][^'\"]+['\"]\s*,\s*[\[(]\s*['\"]([A-Za-z_]\w*)", re.I)
 _DDL_COLS = re.compile(
-	r"(?:ADD\s+(?:UNIQUE\s+)?(?:INDEX|KEY)|CREATE\s+(?:UNIQUE\s+)?INDEX)[^(]*?\(\s*`?([A-Za-z_]\w*)", re.I
+	r"(?:ADD\s+(?:UNIQUE\s+)?(?:INDEX|KEY)|CREATE\s+(?:UNIQUE\s+)?INDEX)[^(]{0,4096}?\(\s*`?([A-Za-z_]\w*)", re.I
 )
 _PROP_SETTER = re.compile(
 	r"make_property_setter\(\s*['\"][^'\"]+['\"]\s*,\s*['\"]([A-Za-z_]\w*)['\"]\s*,\s*['\"]search_index", re.I
@@ -660,8 +696,8 @@ def check_prose_ddl(text: str, blocks: list[Block]) -> list[Violation]:
 _MD_LINK = re.compile(
 	r"(!?)\[([^\]\n]{0,1000})\]\(\s{0,64}<?([^)\s>]{1,2048})>?(?:\s{1,64}\"[^\"\n]{0,1000}\")?\s{0,64}\)"
 )
-_AUTOLINK = re.compile(r"<(https?://[^>\s]+)>")
-_DATA_TAG = re.compile(r"</?data-[0-9a-f]{6}\b[^>]*>", re.I)
+_AUTOLINK = re.compile(r"<(https?://[^>\s]{1,4096})>")
+_DATA_TAG = re.compile(r"</?data-[0-9a-f]{6}\b[^>]{0,4096}>", re.I)
 
 
 def _link_allowed(url: str) -> bool:
@@ -707,6 +743,63 @@ def _truncation(blocks: list[Block], finish_reason: str | None) -> list[Violatio
 	return []
 
 
+def can_validate(text: str) -> bool:
+	"""Bound AST/regex work without changing or discarding the received text.
+
+	Long answers use literal rendering and explicit fences, so Markdown's recursive
+	parser is unnecessary. Complex Markdown remains available for ordinary replies.
+	"""
+	if len(text) <= ai_responses.MARKDOWN_CHARS:
+		return True
+	if len(text) > ai_responses.VALIDATION_CHARS:
+		return False
+	lines = text.splitlines()
+	if any(len(line) > 4096 for line in lines):
+		return False
+	blocks = fenced_blocks(text)
+	if len(blocks) > 64 or sum(sum(len(line) + 1 for line in b.lines) for b in blocks) > 131072:
+		return False
+	inside = {n for b in blocks for n in range(b.start, b.end + 1)}
+	# Avoid ambiguous nested/indented Markdown in the long-answer grammar.
+	return not any(line.startswith((" ", "\t", ">")) and line.strip() for n, line in enumerate(lines) if n not in inside)
+
+
+def stored_sql_violations(text: str) -> list[Violation]:
+	"""Recheck saved proposed code without invalidating unrelated good answers.
+
+	No source is needed for diff additions; removed lines and unchanged context
+	are excluded. A non-diff replacement block is all proposed code. Restrict the
+	check to Fix so quoted original code in Diagnosis does not make it outdated.
+	Use the same bounded parser as generation, without storing or sending text.
+	"""
+	if not isinstance(text, str) or "sql" not in text or not can_validate(text):
+		return []
+	fix = section(text, "Fix", FIX_HEADINGS) or text
+	blocks = fenced_blocks(fix) if len(text) > ai_responses.MARKDOWN_CHARS else rendered_blocks(fix)
+	return _dedupe([v for v in check_code(blocks, []) if v.code == "raw-sql"])
+
+
+def stored_policy_violations(text: str) -> list[Violation]:
+	"""Reclassify only provable new safety violations; no source or provider I/O.
+
+	Historical SQL checks retain their contract. Other comparative checks require
+	before/after evidence in a diff; literal unbounded writes also cover full code.
+	"""
+	if not isinstance(text, str) or not can_validate(text):
+		return []
+	if not re.search(r"sql|delete|set_value|truncate|has_permission|\bqb\b|limit", text, re.I):
+		return []
+	fix = section(text, "Fix", FIX_HEADINGS) or text
+	if not re.search(r"```|~~~|<pre\b|<code\b|(?m:^(?: {4}|\t))", fix, re.I):
+		return []
+	from optimus.ai_fix_checks import check_changes
+
+	blocks = fenced_blocks(fix) if len(text) > ai_responses.MARKDOWN_CHARS else rendered_blocks(fix)
+	out = [v for v in check_code(blocks, []) if v.code == "raw-sql"]
+	out += check_changes(blocks, [], stored=True)
+	return _dedupe([v for v in out if v.action == BLOCK])
+
+
 def verify_fix(text: str, *, source_lines: list[str], finish_reason: str | None = None) -> list[Violation]:
 	"""Every rule the fix answer ``text`` breaks, given the source lines that were
 	shown to the model. A truncated answer returns only the truncation violation."""
@@ -717,9 +810,13 @@ def verify_fix(text: str, *, source_lines: list[str], finish_reason: str | None 
 		return out  # never re-ask a cut-off answer: the re-ask would be cut off too
 	out += check_headings(text)
 	fix = section(text, "Fix", FIX_HEADINGS) or text
-	every = rendered_blocks(text)  # every block the report renders as code, any section
+	every = fenced_blocks(text) if len(text) > ai_responses.MARKDOWN_CHARS else rendered_blocks(text)
 	out += check_grounding(every, source_lines)
 	out += check_code(every, source_lines)  # lines verbatim from the shown source are context
+	from optimus.ai_fix_checks import check_changes
+
+	out += check_changes(every, source_lines)
+	out += stored_policy_violations(text)  # accepted code must also pass the saved-answer gate
 	out += check_prose_ddl(fix, every)
 	out += check_metadata_index(text)
 	out += check_customize_form(text)
@@ -812,6 +909,11 @@ def apply_fallback(text: str, violations: list[Violation]) -> str:
 	the answer was cut off), add one note listing the advise rules when the code is
 	kept, neutralise links, images and echoed data tags, and append one profiler
 	note per problem."""
+	if len(text) > ai_responses.MARKDOWN_CHARS:
+		# This path is rendered literally, never fed back to the Markdown parser.
+		if strips_code(violations):
+			return ai_responses.unavailable_note("incomplete") if any(v.code == "truncated" for v in violations) else "Suggested code withheld because it failed validation. The received answer is retained privately."
+		return text + "".join("\n\nProfiler note: " + _rule_line(v) for v in violations)
 	codes = {v.code for v in violations}
 	notes: list[str] = []
 	stripped = strips_code(violations)

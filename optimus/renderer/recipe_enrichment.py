@@ -588,18 +588,25 @@ def apply_table_recipes(
 def mark_outdated_ai_fixes(
 	findings: list[dict], *, current_version: int | None = None, refresh_check: Callable[[dict], bool] | None = None,
 ) -> None:
-	"""On every rendered AI suggestion set, in place, ``llm_fix["outdated"]`` (made with
-	an older prompt version than ``current_version``, default
-	``ai_prompts.PROMPT_VERSION``, or with none recorded) and ``llm_fix["refreshable"]``
-	(``refresh_check(finding)`` says Refresh AI suggestions would redo it)."""
-	from optimus.ai_prompts import is_current
+	"""Mark rendered answers incomplete or outdated, and offer Refresh only if eligible.
+	The renderer has already replaced suggestion text with sanitized HTML; the shared
+	completeness and version checks operate on its retained answer metadata."""
+	from optimus.ai_prompts import is_current, is_incomplete
 
 	for f in findings or []:
 		fix = f.get("llm_fix") if isinstance(f, dict) else None
 		if not isinstance(fix, dict):
 			continue
-		current = is_current(fix, current_version)
-		fix["outdated"] = not current
+		fix["incomplete"] = is_incomplete(fix)
+		fix["review_status"] = {"blocked": "Provider blocked response", "unknown": "Completion unconfirmed", "processing_limited": "Response needs local review"}.get(fix.get("completion_status"))
+		fix["outdated"] = not fix["incomplete"] and not fix["review_status"] and not is_current(fix, current_version)
+		if fix.get("sql_policy_outdated") and not fix["incomplete"] and not fix["review_status"]:
+			fix["outdated"] = True
+			fix["review_status"] = "Frappe API update needed"
+		elif fix.get("policy_outdated") and not fix["incomplete"] and not fix["review_status"]:
+			fix["outdated"] = True
+			fix["review_status"] = "Safety review needed"
 		fix["refreshable"] = bool(
-			not current and refresh_check is not None and best_effort(lambda: refresh_check(f), False)
+			(fix["incomplete"] or fix["outdated"])
+			and refresh_check is not None and best_effort(lambda: refresh_check(f), False)
 		)

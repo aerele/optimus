@@ -184,6 +184,21 @@ assert.equal(messages.at(-1),"Busy &lt;retry&gt;","escape cancellation refusal t
 assert.equal(requests[0].method,"optimus.api.ai_refresh_status","refusal still polls authoritative state");
 requests.shift().callback({message:{status:"ok",refresh:{...active,run_id:"run-b"},can_act:false,plan}});
 assert.equal(frm._optimus_ai_enabled,false,"read-only users cannot be offered AI spend from Regenerate Reports");
+// An incomplete current answer is included without opting in to replace good answers.
+ctx.render_ai_buttons(frm);
+requests.shift().callback({message:{status:"ok",refresh:{...active,run_id:"run-b",state:"complete",seq:4},can_act:true,
+ plan:{...plan,pending:2,selected:2,selected_incomplete:2}}});
+buttons.get("Refresh AI suggestions")();
+const retry=dialogs.pop(), summary=retry.options.fields.find(f=>f.fieldname==="summary").options;
+assert.match(summary,/Includes 2 incomplete or unconfirmed suggestion/);
+assert.match(summary,/Completed current suggestions, blocked responses and answers awaiting local review will be kept/);
+assert.match(summary,/uses provider tokens/);
+assert.equal(retry.options.fields.find(f=>f.fieldname==="regenerate_all").default,0);
+assert.equal(requests.length,0,"opening the dialog must not spend tokens");
+retry.options.primary_action({regenerate_all:false});
+assert.equal(requests.length,1);
+assert.equal(requests[0].args.regenerate_all,false);
+
 '''
 	out = subprocess.run([node, "-e", script, str(source)], text=True, capture_output=True)
 	assert out.returncode == 0, out.stderr

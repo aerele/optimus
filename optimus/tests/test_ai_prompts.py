@@ -50,7 +50,7 @@ def test_system_prompt_fits_the_char_budget():
 
 
 def test_system_prompt_leaves_room_in_a_4096_window():
-	out = ai_budget.output_tokens(4096)
+	out = ai_budget.MIN_OUTPUT_TOKENS
 	assert ai_budget.min_context_tokens(P.SYSTEM_PROMPT) <= 4096
 	assert ai_budget.user_char_budget(4096, P.SYSTEM_PROMPT, out_tokens=out) >= 3000
 
@@ -177,7 +177,7 @@ def test_data_layer_idioms_present():
 		"frappe.db.set_single_value",
 		"self.db_set(field, value)",
 		"order=frappe.qb.desc",
-		"%(name)s",
+		"frappe.db.count",
 		"frappe.throw(_(",
 		"frappe.db.bulk_update",
 		"unbuffered_cursor",
@@ -198,7 +198,9 @@ def test_permission_rule_preserves_semantics():
 
 def test_redundant_call_hint_keeps_permission_check():
 	h = P.FINDING_TYPE_HINTS["Redundant Call"]
-	assert "throw=True" in h and "never removed" in h
+	assert "throw mode" in h and "never removed" in h
+	assert "empty" in h and "verbatim" in h
+	assert "with `throw=True`" not in h
 	assert "frappe.local" not in h and "frappe.cache()" not in h
 
 

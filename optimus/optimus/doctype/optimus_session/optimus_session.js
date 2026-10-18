@@ -375,17 +375,19 @@ function render_ai_refill_button(frm, state) {
 		if (!_ai_current(frm, state) || state.busy || state.submitting) return;
 		if (frm.is_dirty && frm.is_dirty()) return frappe.msgprint(__("Save or discard your edits before starting an AI refresh."));
 		const plan = state.plan;
-		const description = (all) => frappe.utils.escape_html(__("Current selection: {0} finding(s), plus {1} Steps to Reproduce rewrite. The worker rechecks eligibility; the finding limit for this refresh is {2}. Saved profiling results remain available.",
-			[all ? plan.selected_all : plan.selected, plan.steps ? 1 : 0, plan.cap || __("unlimited")]));
+		const description = (all) => frappe.utils.escape_html(
+			__("Current selection: {0} finding(s), plus {1} Steps to Reproduce rewrite. The worker rechecks eligibility; the finding limit for this refresh is {2}. Saved profiling results remain available.",
+				[all ? plan.selected_all : plan.selected, plan.steps ? 1 : 0, plan.cap || __("unlimited")])
+			+ (all ? "" : " " + __("Includes {0} incomplete or unconfirmed suggestion(s). Completed current suggestions, blocked responses and answers awaiting local review will be kept. This retry uses provider tokens.", [plan.selected_incomplete || 0])));
 		const dialog = new frappe.ui.Dialog({title: __("Refresh AI suggestions"), fields: [
 			{fieldtype: "HTML", fieldname: "summary", options: description(false)},
 			{fieldtype: "Check", fieldname: "regenerate_all", default: 0,
-				label: __("Also replace current suggestions"), onchange: () => {
+				label: __("Also replace current suggestions and responses awaiting review"), onchange: () => {
 					dialog.fields_dict.summary.df.options = description(!!dialog.get_value("regenerate_all"));
 					dialog.refresh_field("summary");
 				}},
 		], primary_action_label: __("Queue refresh"), primary_action: (values) => {
-			if (!values.regenerate_all && !plan.selected && !plan.steps) return frappe.msgprint(__("No missing or outdated suggestions need a refresh."));
+			if (!values.regenerate_all && !plan.selected && !plan.steps) return frappe.msgprint(__("No missing, incomplete or outdated suggestions need a refresh."));
 			dialog.hide();
 			_refill_ai_call(frm, state, {regenerate_all: !!values.regenerate_all});
 		}});
