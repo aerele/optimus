@@ -817,3 +817,35 @@ class AnalyzeContext:
 			self.aggregate.update(result.aggregate)
 		if result.warnings:
 			self.warnings.extend(result.warnings)
+
+
+def phase2_run_display_status(run) -> str:
+	"""The status to DISPLAY for a Phase 2 Run in the rendered report.
+
+	The parent flips a run's stored status to ``Ready`` only AFTER the report is
+	re-rendered (so the form badge and the ``phase_2_run_ready`` popup land
+	together), so at render time a just-finished run is still ``Analyzing`` with
+	its ``results_json`` already persisted. Key the display off that PERSISTED
+	signal, not the stored status:
+
+	* ``Failed`` always wins (a failed run never displays Ready).
+	* a run whose ``results_json`` has been written even an empty ``"[]"`` has
+	  finished analyzing and displays ``Ready``.
+	* otherwise the run is genuinely still in progress show its stored status.
+
+	Both report-building paths (``renderer.line_drilldown._render_line_drilldown_panel``
+	and ``report_context._build_line_drilldown_runs``) call this, so the HTML panel
+	and the structured context never disagree about whether a just-finished run is
+	shown. A worker killed between the results commit and the Ready flip leaves a
+	run Analyzing-with-results the janitor finalizes it, and until then this still
+	displays it as Ready. Pure (no Frappe/DB), so it stays unit-testable."""
+	status = (getattr(run, "status", "") or "").strip()
+	if status == "Failed":
+		return "Failed"
+	results_json = getattr(run, "results_json", None)
+	# A non-empty string means _persist_run committed this run's results; "[]"
+	# (a successful run with no hot lines) counts as finished, unlike an unset /
+	# empty blob which means analysis has not persisted yet.
+	if results_json not in (None, ""):
+		return "Ready"
+	return status or "Analyzing"

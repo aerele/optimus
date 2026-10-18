@@ -2366,10 +2366,17 @@ def retry_phase2_analyze(run_uuid: str) -> dict:
 			"status": "Failed",
 			"error": str(exc),
 		}
+	# run_analyze leaves the row Ready (render OK), Failed (render failed) or, in
+	# the rare vanished-row case, unchanged. Report the ACTUAL persisted status
+	# rather than a hardcoded "Ready", so the caller never sees success for a run
+	# that was left not-Ready.
+	final_status = frappe.db.get_value(
+		"Optimus Phase Two Run", {"run_uuid": run_uuid}, "status"
+	)
 	return {
 		"run_uuid": run_uuid,
 		"session_uuid": session_uuid,
-		"status": "Ready",
+		"status": final_status or "Analyzing",
 	}
 
 

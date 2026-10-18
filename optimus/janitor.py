@@ -504,13 +504,54 @@ def _sweep_stale_phase2_runs():
 	ana_stuck = frappe.db.get_all(
 		"Optimus Phase Two Run",
 		filters={"status": "Analyzing", "modified": ["<", ana_cutoff]},
-		fields=["name", "parent", "run_uuid"],
+		fields=["name", "parent", "run_uuid", "results_json"],
 	)
-	if ana_stuck:
+	# Split the stuck rows. A run whose ``results_json`` is already persisted
+	# FINISHED analyzing the worker died during the finalize (re-render / Ready
+	# flip), so its findings are durable. Marking it Failed would show a red badge
+	# over a populated drill-down and discard the result the user waited for, so
+	# recover it: flip to Ready and enqueue a re-render so the panel lands. Only a
+	# run with NO persisted results is genuinely stuck in analysis Failed that.
+	finalize_stuck = [r for r in ana_stuck if (r.get("results_json") or "") != ""]
+	analyze_stuck = [r for r in ana_stuck if (r.get("results_json") or "") == ""]
+
+	if finalize_stuck:
 		try:
 			frappe.db.set_value(
 				"Optimus Phase Two Run",
-				{"name": ("in", [r["name"] for r in ana_stuck])},
+				{"name": ("in", [r["name"] for r in finalize_stuck])},
+				{"status": "Ready", "ended_at": now_datetime()},
+			)
+			safe_commit()
+		except Exception:
+			frappe.log_error(title="optimus janitor finalize-stuck phase-2 flip")
+		for row in finalize_stuck:
+			# Re-render so the report picks up the phase-2 panel (the worker may
+			# have died before the render ran). Idempotent + harmless if the panel
+			# is already there.
+			try:
+				session_uuid = frappe.db.get_value(
+					"Optimus Session", row["parent"], "session_uuid"
+				)
+				if session_uuid:
+					frappe.enqueue(
+						"optimus.api.regenerate_reports",
+						queue="long",
+						session_uuid=session_uuid,
+					)
+			except Exception:
+				frappe.log_error(title="optimus janitor finalize-stuck phase-2 regenerate")
+			# Redis samples are no longer needed (no re-analysis), so release them.
+			try:
+				_lp_capture.cleanup_run(row["run_uuid"])
+			except Exception:
+				frappe.log_error(title="optimus janitor finalize-stuck phase-2 cleanup")
+
+	if analyze_stuck:
+		try:
+			frappe.db.set_value(
+				"Optimus Phase Two Run",
+				{"name": ("in", [r["name"] for r in analyze_stuck])},
 				{
 					"status": "Failed",
 					"warnings_json": frappe.as_json([
@@ -525,7 +566,7 @@ def _sweep_stale_phase2_runs():
 			safe_commit()
 		except Exception:
 			frappe.log_error(title="optimus janitor stuck phase-2 analyzing")
-		for row in ana_stuck:
+		for row in analyze_stuck:
 			try:
 				_lp_capture.cleanup_run(row["run_uuid"])
 			except Exception:
