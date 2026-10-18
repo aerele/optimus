@@ -19,6 +19,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
 
+from optimus.ai_guardrails import render_validation_budget
 from optimus.analyzers.base import (
 	DEFAULT_DISPLAY_THRESHOLD_MS,
 	SEVERITY_ORDER,
@@ -280,20 +281,8 @@ def _finalize_prose(text: str, threshold_ms: float, *, scan: bool = True) -> str
 	return fmt(text, threshold_ms).replace("—", "-")
 
 
+@render_validation_budget()
 def render(
-	session_doc: Any,
-	recordings: list[dict] | None = None,
-	*,
-	generated_at: str | None = None,
-) -> str:
-	"""Render a report with bounded, memoized saved-answer validation."""
-	from optimus.ai_guardrails import render_validation_budget
-
-	with render_validation_budget():
-		return _render(session_doc, recordings, generated_at=generated_at)
-
-
-def _render(
 	session_doc: Any,
 	recordings: list[dict] | None = None,
 	*,

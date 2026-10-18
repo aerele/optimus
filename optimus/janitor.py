@@ -263,7 +263,7 @@ def _sweep_old_sessions():
 
 	# End candidate selection's snapshot. Each parent owns its transaction;
 	# normal deletion checks links before core removes attached files.
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end selection snapshot before per-parent transactions
 	deleted = 0
 	for row in old:
 		failure = False
