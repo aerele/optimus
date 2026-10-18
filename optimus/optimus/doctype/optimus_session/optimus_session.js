@@ -175,6 +175,7 @@ function _ai_apply_status(frm, state, data) {
 	state.busy = !!run && ["queued", "running"].includes(run.state);
 	state.can_act = !!data.can_act;
 	state.plan = data.plan;
+	state.session_uncertain_count = data.session_uncertain_count || 0;
 	frm._optimus_ai_enabled = state.can_act && !!state.plan && !!(state.plan.total || state.plan.steps);
 	state.delay = 5000;
 	if (state.busy) _ai_hold_save(frm, state);
@@ -205,7 +206,7 @@ function _ai_progress_banner(frm, state) {
 	const usage = run.usage || {};
 	let text = __("AI refresh: {0}. Saved {1}, failed {2}, skipped {3}, uncertain {4}, not reached {5}. Reported tokens: {6}.",
 		[labels[run.state], run.done || 0, run.failed || 0, run.skipped || 0,
-			(run.uncertain || 0) + (run.blocked_uncertain || 0), run.not_reached || 0, usage.tokens_reported || 0]);
+			Math.max(run.uncertain || 0, run.blocked_uncertain || 0), run.not_reached || 0, usage.tokens_reported || 0]);
 	if (usage.incomplete_attempts) text += " " + __("Provider usage is incomplete; these counts are not an exact bill.");
 	if (run.failed) text += " " + __("Saved suggestions are kept. Search the Error Log for titles starting with optimus ai before retrying.");
 	if (run.render_pending) text += " " + __("Saved answers still need a report update. Use Regenerate Reports after the refresh stops.");
@@ -395,6 +396,9 @@ function render_ai_refill_button(frm, state) {
 			+ (all ? "" : " " + __("Includes {0} incomplete or unconfirmed suggestion(s). Completed current suggestions, blocked responses and answers awaiting local review will be kept. This retry uses provider tokens.", [plan.selected_incomplete || 0])));
 		const dialog = new frappe.ui.Dialog({title: __("Refresh AI suggestions"), fields: [
 			{fieldtype: "HTML", fieldname: "summary", options: description(false)},
+			{fieldtype: "Check", fieldname: "retry_uncertain", default: 0,
+				hidden: !state.session_uncertain_count,
+				label: __("Repeat calls with unknown outcomes, accepting possible duplicate provider charges")},
 			{fieldtype: "Check", fieldname: "regenerate_all", default: 0,
 				label: __("Also replace current suggestions and responses awaiting review"), onchange: () => {
 					dialog.fields_dict.summary.df.options = description(!!dialog.get_value("regenerate_all"));
@@ -403,7 +407,7 @@ function render_ai_refill_button(frm, state) {
 		], primary_action_label: __("Queue refresh"), primary_action: (values) => {
 			if (!values.regenerate_all && !plan.selected && !plan.steps) return frappe.msgprint(__("No missing, incomplete or outdated suggestions need a refresh."));
 			dialog.hide();
-			_refill_ai_call(frm, state, {regenerate_all: !!values.regenerate_all});
+			_refill_ai_call(frm, state, {regenerate_all: !!values.regenerate_all, retry_uncertain: !!values.retry_uncertain});
 		}});
 		dialog.show();
 	}, __("AI"));
@@ -412,11 +416,11 @@ function render_ai_refill_button(frm, state) {
 function _ai_resume_dialog(frm, state) {
 	if (!_ai_current(frm, state) || state.busy || state.submitting) return;
 	const run = state.run;
-	const uncertain = (run.uncertain || 0) + (run.blocked_uncertain || 0);
+	const uncertain = run.uncertain || run.blocked_uncertain || state.session_uncertain_count;
 	const dialog = new frappe.ui.Dialog({title: __("Resume AI refresh"), fields: [
 		{fieldtype: "HTML", fieldname: "summary", options: frappe.utils.escape_html(__("Resume the original selection and cap. Already saved answers will be kept."))},
 		{fieldtype: "Check", fieldname: "retry_uncertain", default: 0, hidden: !uncertain,
-			label: __("Repeat uncertain calls, accepting possible duplicate provider charges")},
+			label: __("Repeat calls with unknown outcomes, accepting possible duplicate provider charges")},
 	], primary_action_label: __("Queue resume"), primary_action: (values) => {
 		dialog.hide();
 		_refill_ai_call(frm, state, {resume_from: run.run_id, retry_uncertain: !!values.retry_uncertain});

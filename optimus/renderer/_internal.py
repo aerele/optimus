@@ -286,6 +286,19 @@ def render(
 	*,
 	generated_at: str | None = None,
 ) -> str:
+	"""Render a report with bounded, memoized saved-answer validation."""
+	from optimus.ai_guardrails import render_validation_budget
+
+	with render_validation_budget():
+		return _render(session_doc, recordings, generated_at=generated_at)
+
+
+def _render(
+	session_doc: Any,
+	recordings: list[dict] | None = None,
+	*,
+	generated_at: str | None = None,
+) -> str:
 	"""Render an Optimus Session to standalone HTML (inline CSS, no external
 	assets or JavaScript). Permission gating is the caller's responsibility.
 
@@ -731,14 +744,14 @@ def render(
 	if notes_html:
 		try:
 			from frappe.utils.html_utils import sanitize_html
-			notes_html = sanitize_html(notes_html, always_sanitize=True)
+			notes_html = sanitize_html(notes_html, always_sanitize=True, disallowed_tags=["meta", "link"])
 		except Exception:
 			# If sanitize_html blows up for any reason (unexpected input
 			# type, nh3/bleach internal error), fall back to HTML-escaping
 			# via html.escape so the report NEVER renders unsanitized
 			# user input - safe by default.
 			import html as html_mod
-			notes_html = html_mod.escape(notes_html)
+			notes_html = html_mod.escape(html_mod.unescape(notes_html))
 		# The Steps-to-Reproduce list bakes raw-ms durations at analyze time (e.g.
 		# "Submit Delivery Note: 12418.3 ms") and the AI humanizer writes free-text
 		# durations, so reformat with the prose fallback and strip em dashes. Order
@@ -998,6 +1011,15 @@ def render(
 	# threshold caption to "(&gt;0.20s)" under a custom threshold <= 200 (the ";" in
 	# "&gt;" is not a URL-guard char), the very corruption the render-time path avoids.
 	stored_summary_html = getattr(session_doc, "summary_html", None) or ""
+	if stored_summary_html:
+		try:
+			from frappe.utils.html_utils import sanitize_html
+			stored_summary_html = sanitize_html(
+				stored_summary_html, always_sanitize=True, disallowed_tags=["meta", "link"],
+			)
+		except Exception:
+			import html as html_mod
+			stored_summary_html = html_mod.escape(html_mod.unescape(stored_summary_html))
 	if not summary_html_rendered and stored_summary_html:
 		stored_summary_html = _finalize_prose(
 			stored_summary_html, _large_duration_threshold_ms, scan=False

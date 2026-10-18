@@ -171,11 +171,11 @@ class TestBuildMessages:
 		_, msgs2 = ai_fix._build_messages({"finding_type": "Redundant Call", "title": "x"})
 		assert "verbatim" in msgs2[0]["content"]  # existing permission denial behavior stays unchanged
 
-	def test_query_is_truncated_when_huge(self):
+	def test_over_budget_query_is_omitted_before_parsing(self):
 		f = self._finding()
 		f["technical_detail"]["normalized_query"] = "SELECT " + "x," * 5000 + "1"
 		_, messages, _ = ai_fix._build_fix_request(f, threshold_ms=1000, context_tokens=32768, send_raw=True)
-		assert "(truncated)" in messages[0]["content"]
+		assert "x,x,x,x,x" not in messages[0]["content"]
 
 	def test_handles_minimal_finding_without_detail(self):
 		# A finding with no technical_detail / source window must not crash.

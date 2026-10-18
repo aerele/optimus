@@ -24,6 +24,7 @@ def mock_session(monkeypatch):
 	)
 
 	class FakeFileRow:
+		name = "html-file"
 		def get_content(self):
 			return b"<html><body>fake report</body></html>"
 
@@ -34,10 +35,15 @@ def mock_session(monkeypatch):
 			pass
 
 	class FakeDB:
-		def get_value(self, doctype, filters, field=None, as_dict=False):
+		def get_value(self, doctype, filters, field=None, as_dict=False, **kwargs):
+			if doctype == "File":
+				url = filters.get("file_url")
+				return "html-file" if url == doc.raw_report_file else ("pdf-file" if url and url == doc.raw_report_pdf_file else None)
 			if isinstance(filters, dict) and filters.get("session_uuid") == "uuid-001":
 				return doc.name
 			if doctype == "Optimus Session" and filters == "PS-001":
+				if field == "*":
+					return {**vars(doc), "status": "Ready"}
 				return doc.raw_report_pdf_file if field == "raw_report_pdf_file" else None
 			return None
 
@@ -49,6 +55,9 @@ def mock_session(monkeypatch):
 				setattr(doc, field, value)
 
 		def commit(self):
+			pass
+
+		def rollback(self):
 			pass
 
 	def fake_get_doc(doctype, name=None):
@@ -106,3 +115,17 @@ def test_generation_failure_raises_and_does_not_cache(monkeypatch, mock_session)
 		pdf_export.get_or_generate_pdf("uuid-001")
 
 	assert doc.raw_report_pdf_file is None
+
+
+def test_pdf_normalizer_blocks_authenticated_resource_channels():
+	from bs4 import BeautifulSoup
+	html='''<html><head><meta charset="utf-8"><meta name="PDFKIT-cookie-jar" content="/tmp/forbidden"><style>@import "https://example.invalid/x";</style><style>body{color:blue}</style></head><body><img src="/private/files/secret.png"><img src="data:image/png;base64,aGVsbG8="><img src="data:image/svg+xml;base64,PHN2Zz4="><div style="background:u\\72l('/private/files/secret.png')">text</div><svg><image href="/private/files/secret.png"/></svg><iframe srcdoc="image"></iframe></body></html>'''
+	result=pdf_export._safe_pdf_html(html)
+	soup=BeautifulSoup(result,'html5lib')
+	assert soup.find('meta',charset='utf-8')
+	assert 'pdfkit-' not in result.lower()
+	assert '/private/files/secret.png' not in result
+	assert [image['src'] for image in soup.find_all('img')]==['','data:image/png;base64,aGVsbG8=','']
+	assert not soup.find('iframe')
+	assert 'body{color:blue}' in result
+	assert not soup.find('div').has_attr('style')

@@ -69,25 +69,8 @@ class View:
 				self.repaired = self.tree is not None
 		self.parents = {child: node for node in ast.walk(self.tree) for child in ast.iter_child_nodes(node)} if self.tree else {}
 		self.calls = [n for n in ast.walk(self.tree) if isinstance(n, ast.Call)] if self.tree else []
-		self.bindings = defaultdict(list)
-		if self.tree:
-			for node in ast.walk(self.tree):
-				if isinstance(node, ast.Assign):
-					value = _dotted(node.value)
-					# Conditional aliases are unresolved; do not borrow a binding
-					# from a different function or a later assignment.
-					parent = self.parents.get(node)
-					known = value if value in _DB and isinstance(parent, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef)) else None
-					for target in node.targets:
-						if isinstance(target, ast.Name):
-							self.bindings[self.scope(node), target.id].append(((node.lineno, node.col_offset), known))
-				elif isinstance(node, ast.ImportFrom) and node.module == "frappe":
-					for alias in node.names:
-						value = f"frappe.{alias.name}" if alias.name in {"db", "has_permission"} else None
-						self.bindings[self.scope(node), alias.asname or alias.name].append(((node.lineno, node.col_offset), value))
-				elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.lineno > self.off:
-					for arg in [*node.args.args, *node.args.posonlyargs, *node.args.kwonlyargs]:
-						self.bindings[(*self.scope(node), node.name), arg.arg].append(((-1, -1), None))
+		from optimus.ai_aliases import Aliases
+		self.aliases = Aliases(self.tree) if self.tree else None
 
 
 	def ancestors(self, node):
@@ -102,18 +85,7 @@ class View:
 
 
 	def name(self, call):
-		name = _dotted(call.func)
-		head, sep, tail = name.partition(".")
-		scope = self.scope(call)
-		while True:
-			bindings = self.bindings.get((scope, head))
-			if bindings:
-				prior = [(position, value) for position, value in bindings if position < (call.lineno, call.col_offset)]
-				value = max(prior, default=((0, 0), None), key=lambda item: item[0])[1]
-				return value + (sep + tail if sep else "") if value else name
-			if not scope:
-				return name
-			scope = scope[:-1]
+		return self.aliases.call_name(call, _dotted) if self.aliases else _dotted(call.func)
 
 
 	def changed(self, node, include_moved=False):
@@ -271,26 +243,50 @@ def _permission_changes(before, after):
 
 
 def _denial_changes(before, after):
-	"""Direct condition consumers only; assigned-result dataflow is not proved."""
+	"""Compare visible denial consumers of direct and assigned permission results."""
+	ambiguous = []
 	def branches(view):
 		groups = defaultdict(set)
 		for call in view.calls:
 			if view.name(call) != "frappe.has_permission":
 				continue
-			for node in view.ancestors(call):
-				if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+			assigned = set()
+			parent = view.parents.get(call)
+			if isinstance(parent, ast.Assign) and parent.value is call:
+				assigned = {target.id for target in parent.targets if isinstance(target, ast.Name)}
+			elif isinstance(parent, ast.AnnAssign) and parent.value is call and isinstance(parent.target, ast.Name):
+				assigned = {parent.target.id}
+			if view is after and assigned:
+				bindings = [n for n in ast.walk(view.tree) if isinstance(n, ast.Name)
+					and isinstance(n.ctx, (ast.Store, ast.Del)) and n.id in assigned and view.scope(n) == view.scope(call)]
+				if len(bindings) > len(assigned) and any(view.changed(n, True) for n in bindings):
+					ambiguous.append(_v("unverified-safety", "a permission result has mixed bindings"))
+			# Local result aliases are bounded and scope-local. Any ambiguous reuse
+			# still retains the old consumer as a comparison obligation.
+			for _ in range(16):
+				prior = set(assigned)
+				for node in ast.walk(view.tree):
+					if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Name)
+						and node.value.id in assigned and view.scope(node) == view.scope(call)):
+						assigned.update(t.id for t in node.targets if isinstance(t, ast.Name))
+				if prior == assigned:
 					break
-				if isinstance(node, (ast.If, ast.While)) and call in ast.walk(node.test):
-					for field in ("body", "orelse"):
-						denials = frozenset(_key(n) for statement in getattr(node, field) for n in ast.walk(statement)
-						                    if isinstance(n, (ast.Raise, ast.Return)) or isinstance(n, ast.Call) and view.name(n) == "frappe.throw")
-						groups[(view.scope(call), _key(node.test), field)].add(denials)
+			for node in ast.walk(view.tree):
+				if not isinstance(node, (ast.If, ast.While)) or view.scope(node) != view.scope(call):
+					continue
+				test_nodes = list(ast.walk(node.test))
+				if call not in test_nodes and not any(isinstance(n, ast.Name) and n.id in assigned for n in test_nodes):
+					continue
+				for branch in ("body", "orelse"):
+					denials = frozenset(_key(n) for statement in getattr(node, branch) for n in ast.walk(statement)
+						if isinstance(n, (ast.Raise, ast.Return)) or isinstance(n, ast.Call) and view.name(n) == "frappe.throw")
+					groups[(view.scope(call), _permission(view, call)[:4], _key(node.test), branch)].add(denials)
 		return groups
 	old, new = branches(before), branches(after)
 	if any(not any(denials <= remaining for remaining in new.get(key, ()))
 	       for key, choices in old.items() for denials in choices if denials):
 		return [_v("permission-behavior-change", "removes or changes a visible permission denial branch")]
-	return []
+	return ambiguous
 
 
 def _read(view, call):
@@ -343,7 +339,9 @@ def _loop_replacements(before, after):
 
 
 def _sql_clauses(query):
-	if not isinstance(query, str) or len(query) > 4096:
+	from optimus.sql_budget import within_budget
+
+	if not within_budget(query, max_chars=4096):
 		return None
 	try:
 		statements = sqlparse.parse(query)
@@ -429,9 +427,20 @@ def _check_changes(blocks, source_lines, *, stored=False):
 			out.append(_v("unverified-structure"))
 		if after.tree is None:
 			out.extend(_fragment_checks(after, compare_permissions=is_diff or not stored))
+			if any(new for _, new in after.rows) and any(re.search(
+				r"\b(?:from\s+frappe|import\s+frappe)|=\s*frappe(?:\.[A-Za-z_]\w*)*\s*(?:#.*)?$|\b(?:getattr|setattr|vars)\s*\(\s*frappe|\bfrappe\.__dict__",
+				line) for line, _ in after.rows):
+				out.append(_v("unverified-safety", "unparseable Frappe code"))
 			if any(new and re.search(r"\bfrappe\.|\bhas_permission\s*\(", line) for line, new in after.rows):
 				out.append(_v("unverified-structure"))
 		else:
+			if any(after.changed(node, True) for node in after.aliases.unsupported):
+				out.append(_v("unverified-safety", "dynamic Frappe imports"))
+			for node in ast.walk(after.tree):
+				if not hasattr(node, "lineno") or not after.changed(node, True):
+					continue
+				if after.aliases.dynamic(node) or (isinstance(node, (ast.Name, ast.Attribute)) and after.aliases.ambiguous_policy(node)):
+					out.append(_v("unverified-safety", "dynamic or ambiguous Frappe access"))
 			for call in after.calls:
 				name = after.name(call)
 				if after.changed(call, True):

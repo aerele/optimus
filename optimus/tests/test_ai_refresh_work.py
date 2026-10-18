@@ -345,7 +345,7 @@ def test_the_steps_token_count_is_clamped_to_the_32_bit_field(work, monkeypatch,
 	monkeypatch.setattr(work.jobs, "_touch_session", lambda name, **values: touched.append(values))
 	with work.journal.db.transaction():
 		assert item.persist({"notes": "fake notes", "tokens": {"total_tokens": total}}) is True
-	assert touched == [{"notes": "fake notes", "ai_steps_tokens": stored}]
+	assert touched == [{"notes": "fake notes", "ai_steps_tokens": stored, "auto_notes_sha256": None}]
 
 
 @pytest.mark.parametrize("complete", [True, False])

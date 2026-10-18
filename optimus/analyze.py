@@ -1027,7 +1027,7 @@ def queue_analyze_time_ai(docname: str) -> None:
 		with guard:
 			cfg = get_config()
 			fixes = bool(cfg.ai_enabled and cfg.ai_auto_suggest and cfg.ai_suggest_findings)
-			steps = bool(cfg.ai_enabled and cfg.ai_humanize_steps)
+			steps = bool(cfg.ai_enabled and cfg.ai_auto_suggest and cfg.ai_humanize_steps)
 			if not (fixes or steps):
 				return
 			row = frappe.db.get_value("Optimus Session", docname, "*", as_dict=True)
@@ -1377,12 +1377,15 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 
 			# sqlparse format (idempotent on already-formatted SQL)
 			try:
-				call["query"] = sqlparse.format(
-					query.strip(),
-					keyword_case="upper",
-					reindent=True,
-					strip_comments=True,
-				)
+				from optimus.sql_budget import within_budget
+
+				if within_budget(query):
+					call["query"] = sqlparse.format(
+						query.strip(),
+						keyword_case="upper",
+						reindent=True,
+						strip_comments=True,
+					)
 			except Exception:
 				pass
 
@@ -1656,10 +1659,13 @@ def _persist(
 	# empty → we populate it here. Power users who typed something into
 	# the notes field on the doc form between start and stop get their
 	# text left alone.
+	generated_notes = False
+	doc.auto_notes_sha256 = None
 	if not (doc.notes or "").strip():
 		notes_html = _build_auto_notes_html(recordings)
 		if notes_html:
 			doc.notes = notes_html
+			generated_notes = True
 
 	doc.total_requests = total_requests
 	doc.total_queries = total_queries
@@ -1815,7 +1821,14 @@ def _persist(
 	except Exception:
 		frappe.log_error(title="optimus persist background_jobs")
 
-	doc.save(ignore_permissions=True)
+	from optimus.managed import save_session
+
+	save_session(doc)
+	if generated_notes:
+		from optimus.auto_steps import notes_hash
+		# Hash the actual saved representation, after Frappe sanitizes it.
+		saved_notes = frappe.db.get_value("Optimus Session", docname, "notes")
+		frappe.db.set_value("Optimus Session", docname, "auto_notes_sha256", notes_hash(saved_notes), update_modified=False)
 	safe_commit()
 
 
@@ -3041,7 +3054,9 @@ def _finalize_with_empty_session(docname: str) -> None:
 		"were made, or the session was stopped before any flow was performed.</li>\n"
 		"</ul>"
 	)
-	doc.save(ignore_permissions=True)
+	from optimus.managed import save_session
+
+	save_session(doc)
 	safe_commit()
 
 
@@ -3071,7 +3086,10 @@ def _save_report_file(*, docname: str, filename: str, attached_to_field: str, co
 			try:
 				# Preserve the narrow generated-file extension exception.
 				frappe.local.request = None
-				file_doc.insert(ignore_permissions=True)
+				from optimus.managed import artifact_writer
+
+				with artifact_writer(docname, attached_to_field):
+					file_doc.insert(ignore_permissions=True)
 			finally:
 				frappe.local.request = saved_request
 			return file_doc.file_url

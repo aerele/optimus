@@ -32,7 +32,16 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 
-from optimus import ai_budget, ai_grounding, ai_guardrails, ai_privacy, ai_prompts, ai_responses, safe_call
+from optimus import (
+	ai_budget,
+	ai_grounding,
+	ai_guardrails,
+	ai_privacy,
+	ai_prompts,
+	ai_responses,
+	ai_transport,
+	safe_call,
+)
 from optimus.analyzers.base import INDEX_FINDING_TYPES, humanize_duration_ms, row_get
 
 
@@ -1693,6 +1702,8 @@ def _log_http_error(
 	from the database. ``extra`` adds more ``k=v`` lines to the row (the parameter ladder's
 	``attempts`` and ``dropped``); the row also carries the failure's ``kind``, ``fatal`` and
 	``hint`` (``log_ai_failure``)."""
+	if ai_transport.journaled():
+		return  # the journal writes one attempt-level error after settlement
 	context = {"provider": provider, "where": where, "status": status, "detail": detail, **extra}
 	if provider_error:
 		context["provider_error"] = provider_error
@@ -2048,6 +2059,7 @@ def _http_post(
 			with guard:
 				resp = requests.post(target, headers=headers, json=body, timeout=(connect_timeout, remaining), auth=None if withheld else auth, allow_redirects=False)
 		except requests.exceptions.ConnectTimeout as e:
+			ai_transport.observe("not_sent")
 			error_name = type(e).__name__
 			detail = _error_types(e)
 			# With the full connect cap it is not a slow model but a reachability failure,
@@ -2056,14 +2068,17 @@ def _http_post(
 			full_cap = connect_timeout >= _CONNECT_TIMEOUT_CAP - _CONNECT_CAP_SLACK
 			failed_kind = "transport" if full_cap else "timeout"
 		except requests.exceptions.Timeout:
+			ai_transport.observe("sent_unknown")
 			failed_kind = "timeout"
 			detail = "timeout"
 		except requests.exceptions.RequestException as e:
+			ai_transport.observe(ai_transport.exception_certainty(e))
 			failed_kind = "transport"
 			error_name = type(e).__name__
 			# Types only: the message can quote the URL, and so a key in it.
 			detail = _error_types(e)
 		except Exception as e:
+			ai_transport.observe("sent_unknown")
 			failed_kind = "internal"
 			error_name = type(e).__name__
 			# file:line:function per frame, read straight off the traceback:
@@ -2089,6 +2104,7 @@ def _http_post(
 				detail = error_name + "".join(f"\n  {frame}" for frame in unexpected_frames)
 			_log_http_error(provider, where, None, detail, exc=failure, auth=auth, session_uuid=session_uuid, docname=docname, **(log_extra or {}))
 			raise failure
+		ai_transport.observe(ai_transport.response_certainty(resp.status_code))
 		if resp.status_code not in (307, 308) or redirects >= _MAX_REDIRECTS:
 			break
 		# 307 / 308 keep the method and the body. The key goes again only to

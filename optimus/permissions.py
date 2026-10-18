@@ -107,6 +107,10 @@ def file_has_permission(doc, ptype=None, user=None) -> bool | None:
 	# Only intercept the report + recordings files.
 	if doc.attached_to_field not in _GATED_FIELDS:
 		return _no_objection()
+	# Generated artifacts are replaced only through the profiler's producers.
+	# This check runs before core File.on_trash can remove physical bytes.
+	if ptype in {"write", "delete", "create"}:
+		return False
 
 	user = user or frappe.session.user
 	roles = frappe.get_roles(user)

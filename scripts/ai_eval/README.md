@@ -50,10 +50,11 @@ are excluded. Index DDL still counts as displayed code for owner labelling.
 
 ## Run the reference model
 
-First complete the hotfix merge/release checkpoint and back up the approved test
-site. Use the prescribed reference provider/model and confirm that no API key is
-configured. The runner reads settings without changing them. Do not substitute a
-different provider for an unavailable reference host.
+Obtain owner authorization for the live evaluation and back up the approved test
+site. Use the prescribed reference provider/model with no API key configured;
+paid providers are outside this evaluation. The runner reads settings without
+changing them. Do not substitute a different provider for an unavailable
+reference host. Preparing the stored-answer review set makes no provider calls.
 
 ```sh
 python scripts/ai_eval/live.py --site optimus.local \

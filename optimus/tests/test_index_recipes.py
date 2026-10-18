@@ -318,8 +318,8 @@ class TestNoCode:
 		row = {"type": "ALL", "possible_keys": "customer_index", "key": None}
 		q = "select `name` from `tabSales Invoice` where `customer` = ? and `docstatus` = ?"
 		advice = ir.advise_finding(_explain("Full Table Scan", q, explain_row=row), evidence_lookup=_lookup(_SI))
-		assert advice.route == ir.ROUTE_NO_CODE
-		assert 'EXPLAIN shows the database can use the index "customer_index"' in ir.finding_text(advice)
+		assert advice.route == ir.ROUTE_ENSURE_INDEXES
+		assert 'EXPLAIN shows the database can use' not in ir.finding_text(advice)
 
 	def test_unique_field_gives_no_code(self):
 		ev = _ev(fields={**_ALL, "po_no": F("Data", unique=True)})

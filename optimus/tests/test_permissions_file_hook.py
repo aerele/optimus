@@ -583,7 +583,7 @@ def test_v15_gate_passes_then_core_decides(monkeypatch, user, roles, ptype, pare
 	core = _spy_core(calls, ref_has_permission=lambda ref_ptype, u: ref_ptype in parent_perms)
 	methods = [core, permissions.file_has_permission]
 	assert _has_controller_permissions_v15(doc, ptype, user, methods) is expected
-	assert calls == [(ptype, user)]
+	assert calls == ([] if ptype in {"write", "delete", "create"} else [(ptype, user)])
 
 
 # --- Part D (static guard) ----------------------------------------------------

@@ -15,6 +15,23 @@ class FakeCache:
 	def __init__(self):
 		self.store = {}
 
+	def make_key(self, key):
+		return key
+
+	def pipeline(self):
+		cache = self
+		class Pipeline:
+			def __enter__(self): return self
+			def __exit__(self, *args): pass
+			def watch(self, *keys): pass
+			def exists(self, *keys): return sum(key in cache.store for key in keys)
+			def multi(self): pass
+			def set(self, key, value, ex=None):
+				import pickle
+				cache.store[key] = pickle.loads(value)
+			def execute(self): pass
+		return Pipeline()
+
 	def set_value(self, key, value, expires_in_sec=None):
 		self.store[key] = value
 
@@ -45,6 +62,7 @@ def fake_cache(monkeypatch):
 
 	cache = FakeCache()
 	monkeypatch.setattr(frappe, "cache", cache, raising=False)
+	monkeypatch.setattr(frappe.local, "cache", {}, raising=False)
 
 	# register_recording reads frappe.conf for the per-session cap;
 	# in unit-test mode frappe.local is unbound, so stub conf with a

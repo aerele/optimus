@@ -157,6 +157,15 @@ has_permission = {
 #   deferred-insert queue included; every other row is left as it was. See
 #   optimus/error_log_mask.py.
 doc_events = {
+	"File": {
+		"before_validate": "optimus.managed.protect_file",
+		"before_insert": "optimus.managed.protect_file",
+	},
+	**{doctype: {
+		"before_validate": "optimus.managed.protect_child",
+		"before_insert": "optimus.managed.protect_child",
+		"on_trash": "optimus.managed.protect_child",
+	} for doctype in ("Optimus Action", "Optimus Finding", "Optimus Background Job", "Optimus Phase Two Run")},
 	"User": {
 		"validate": "optimus.install.on_user_role_change",
 	},

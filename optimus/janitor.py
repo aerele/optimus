@@ -261,70 +261,36 @@ def _sweep_old_sessions():
 		except Exception:
 			pass
 
-	# v0.6.x: preload File names for every candidate URL in ONE bulk fetch
-	# (was a per-URL get_value inside the outer loop → O(rows × urls/row)
-	# round-trips). Map url → File doc name; missing entries simply yield
-	# None and the deletion path skips them.
-	all_urls = {
-		u for r in old
-		for u in (r.get("raw_report_file"), r.get("raw_report_pdf_file"), r.get("recordings_file"))
-		if u
-	}
-	file_name_by_url: dict[str, str] = {}
-	if all_urls:
-		try:
-			file_name_by_url = {
-				f["file_url"]: f["name"]
-				for f in frappe.db.get_all(
-					"File",
-					filters={"file_url": ("in", list(all_urls))},
-					fields=["name", "file_url"],
-				)
-			}
-		except Exception:
-			# Defensive: if the bulk fetch fails (DB hiccup, perm), the
-			# loop below still runs it just won't find any File docs to
-			# delete and the orphans-cleanup is a no-op for this pass.
-			file_name_by_url = {}
-
+	# End candidate selection's snapshot. Each parent owns its transaction;
+	# normal deletion checks links before core removes attached files.
+	frappe.db.commit()
 	deleted = 0
 	for row in old:
+		failure = False
 		try:
-			# Delete attached report files first so we don't leave
-			# orphaned File docs behind. v0.6.0 Round 7: dropped the
-			# safe_report_file / safe_report_pdf_file slots single
-			# raw report + lazy PDF.
-			for file_url in (
-				row.get("raw_report_file"),
-				row.get("raw_report_pdf_file"),
-				row.get("recordings_file"),
-			):
-				if not file_url:
-					continue
-				file_doc = file_name_by_url.get(file_url)
-				if file_doc:
-					try:
-						frappe.delete_doc(
-							"File",
-							file_doc,
-							ignore_permissions=True,
-							delete_permanently=True,
-						)
-					except Exception:
-						pass
+			from optimus import sql_work
 
-			frappe.delete_doc(
-				"Optimus Session",
-				row["name"],
-				ignore_permissions=True,
-				delete_permanently=True,
-			)
+			def remove():
+				frappe.delete_doc(
+					"Optimus Session", row["name"], ignore_permissions=True, delete_permanently=True,
+				)
+
+			sql_work.transaction(remove, commit=frappe.db.commit, rollback=frappe.db.rollback)
 			deleted += 1
+		except sql_work.TransactionFailed:
+			raise  # A failed rollback cannot safely share this connection with a sibling.
 		except Exception:
-			frappe.log_error(title=f"optimus retention delete {row['name']}")
+			failure = True
+		if failure:
+			# Rollback completed, including clearing after_commit callbacks. Persist
+			# only a fixed diagnostic, outside the exception's traceback context.
+			sql_work.transaction(
+				lambda: frappe.log_error(title="optimus retention delete",
+					message="Session retention failed; rolled back the parent transaction."),
+				commit=frappe.db.commit, rollback=frappe.db.rollback,
+			)
 
 	if deleted:
-		safe_commit()
 		frappe.logger().info(
 			f"optimus retention janitor deleted {deleted} session(s) "
 			f"older than {retention_days} days"

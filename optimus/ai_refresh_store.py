@@ -568,6 +568,7 @@ def settle_attempt(
 	persist=None,
 	error_kind="",
 	signals=None,
+	send_certainty=None,
 ):
 	"""Save an outcome and its result, at most once, and add its usage to the session.
 
@@ -584,6 +585,7 @@ def settle_attempt(
 		or type(tokens) is not int
 		or tokens < 0
 		or type(usage_complete) is not bool
+		or send_certainty not in {None, "not_sent", "known_response", "sent_unknown"}
 	):
 		raise ValueError("Invalid refresh outcome")
 	answer = outcome == "succeeded"
@@ -636,6 +638,7 @@ def settle_attempt(
 		tokens_reported=tokens,
 		usage_complete=int(not incomplete),
 		error_kind=error_kind,
+		send_certainty=send_certainty,
 	)
 	counter = {
 		"succeeded": "completed",
@@ -648,14 +651,15 @@ def settle_attempt(
 	counts["uncertain"] -= int(was_uncertain)
 	counts[counter] += 1
 	streak = run.get("consecutive_failures") or 0
-	if final == "failed" and error_kind not in PER_PROMPT_KINDS:
+	transport_failure = final == "uncertain" and send_certainty == "sent_unknown" and not was_uncertain
+	if (final == "failed" and error_kind not in PER_PROMPT_KINDS) or transport_failure:
 		streak += 1
 	elif final == "succeeded":
 		streak = 0
 	breaker = run.get("breaker_kind") or ""
 	# Q2, #72's rule: stop at once only when the operator must act (``AI_FATAL_KINDS``);
 	# any other failure, a rate limit included, counts toward three in a row.
-	if final == "failed" and (error_kind in ai_fix.AI_FATAL_KINDS or streak >= 3):
+	if (final == "failed" and error_kind in ai_fix.AI_FATAL_KINDS) or (final == "failed" or transport_failure) and streak >= 3:
 		breaker = error_kind or "internal"
 	_update(
 		RUN,

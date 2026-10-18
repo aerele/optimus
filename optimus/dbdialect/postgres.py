@@ -46,18 +46,24 @@ _savepoint_seq = itertools.count()
 
 # Ordered-column index introspection. ``indkey`` is an int2vector of attnums;
 # unnest it WITH ORDINALITY (via text → int[]) to recover column order. attnum 0
-# = an expression (functional index) → no pg_attribute match → dropped.
+# = an expression. Reject the whole such index rather than promoting later
+# columns across that hole. Only valid, ready, unconditional b-tree keys can
+# prove coverage; INCLUDE columns are not keys.
 _PG_INDEX_SQL = """
 	SELECT i.relname AS index_name, a.attname AS column_name,
-	       k.ord AS seq, ix.indisunique AS is_unique
+	       k.ord AS seq, ix.indisunique AS is_unique,
+	       (ix.indisvalid AND ix.indisready AND ix.indpred IS NULL
+	        AND ix.indexprs IS NULL AND am.amname = 'btree') AS eligible
 	FROM pg_index ix
 	JOIN pg_class t ON t.oid = ix.indrelid
 	JOIN pg_class i ON i.oid = ix.indexrelid
+	JOIN pg_am am ON am.oid = i.relam
 	JOIN pg_namespace n ON n.oid = t.relnamespace
 	CROSS JOIN LATERAL unnest(string_to_array(ix.indkey::text, ' ')::int[])
 	     WITH ORDINALITY AS k(attnum, ord)
-	JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+	LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
 	WHERE t.relname = %s AND n.nspname = %s
+	  AND k.ord <= ix.indnkeyatts
 	ORDER BY i.relname, k.ord
 """
 
@@ -191,13 +197,15 @@ class PostgresDialect(Dialect):
 			name = r.get("index_name")
 			if not name:
 				continue
-			entry = by_name.setdefault(name, {"cols": [], "unique": bool(r.get("is_unique"))})
+			entry = by_name.setdefault(name, {"cols": [], "unique": bool(r.get("is_unique")), "eligible": True})
+			entry["eligible"] &= bool(r.get("eligible"))
 			entry["cols"].append((to_int(r.get("seq")), r.get("column_name")))
 		out: list = []
 		for name, e in by_name.items():
-			cols = [c for _s, c in sorted(e["cols"]) if c]
+			cols = [c for _s, c in sorted(e["cols"])]
 			out.append(IndexInfo(name=name, columns=cols, unique=e["unique"],
-			                     leftmost=(cols[0] if cols else None)))
+			                     leftmost=(cols[0] if cols and e["eligible"] else None),
+			                     eligible=e["eligible"], reason="" if e["eligible"] else "not_full_btree"))
 		return out
 
 	def column_types(self, table: str) -> dict:

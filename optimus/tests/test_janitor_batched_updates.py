@@ -41,6 +41,9 @@ def _install_frappe_stub(monkeypatch):
 		def commit(self):
 			stub._committed += 1
 
+		def rollback(self):
+			pass
+
 		def get_value(self, *args, **kwargs):
 			return None
 
@@ -338,18 +341,11 @@ class TestSweepOldSessionsBulkFileFetch:
 		janitor = _reload_janitor(monkeypatch)
 		janitor._sweep_old_sessions()
 
-		# EXACTLY one get_all call against "File" not 6.
-		file_calls = [c for c in stub._get_all_calls if c[0] == "File"]
-		assert len(file_calls) == 1, (
-			f"expected ONE batched File lookup, got {len(file_calls)}: {file_calls}"
-		)
-		# And the in-list matches every candidate URL.
-		filters = file_calls[0][1]
-		assert set(filters["file_url"][1]) == {
-			"/private/files/r0.html", "/private/files/r0.pdf",
-			"/private/files/r1.html", "/private/files/r1.pdf",
-			"/private/files/r2.html", "/private/files/r2.pdf",
-		}
+		# Core parent deletion checks links before removing attached files.
+		# No File is looked up/deleted by URL ahead of that transaction.
+		assert not [c for c in stub._get_all_calls if c[0] == "File"]
+		assert not [c for c in stub._delete_doc_calls if c[0][0] == "File"]
+		assert stub._committed == 4  # candidate snapshot, then each parent
 		# Session deletion fires per row (that part isn't batched it's a
 		# delete with permissions + lifecycle events).
 		ps_delete_calls = [c for c in stub._delete_doc_calls if c[0][0] == "Optimus Session"]

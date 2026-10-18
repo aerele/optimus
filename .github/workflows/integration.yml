@@ -143,6 +143,7 @@ jobs:
             test_phase2_tool_orphan_recovery
             test_safe_report_self_contained_on_real_bench
             test_janitor_sweeps_actually_delete
+            test_managed_artifact_boundaries
         run: |
           set -uo pipefail
           BENCH_DIR="${RUNNER_TEMP}/frappe-bench"

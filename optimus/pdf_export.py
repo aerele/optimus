@@ -10,11 +10,14 @@ cache. The analyze pipeline is never touched.
 
 import html
 import re
+import uuid
 
 import frappe
 from frappe import _
 
-from optimus import safe_commit
+from optimus import sql_work
+from optimus.artifacts import artifact_file, read_artifact
+from optimus.managed import artifact_writer
 
 # v0.5.2 round 4: wkhtmltopdf uses old QtWebKit which doesn't reliably
 # render collapsed <details> content even under @media print the
@@ -40,14 +43,28 @@ def get_or_generate_pdf(session_uuid: str) -> str:
 	Raises on generation failure; does NOT cache failed generations.
 	"""
 	doc = _load_session(session_uuid)
-	if doc.raw_report_pdf_file:
+	if artifact_file(doc.name, "raw_report_pdf_file", doc.raw_report_pdf_file):
 		return doc.raw_report_pdf_file
-	html = _load_raw_html(doc)
-	pdf_bytes = _html_to_pdf(html)
-	url = _save_pdf_attachment(doc.name, session_uuid, pdf_bytes)
-	frappe.db.set_value("Optimus Session", doc.name, "raw_report_pdf_file", url)
-	safe_commit()
-	return url
+	source = doc.raw_report_file
+	content = _load_raw_html(doc)
+	# End the read snapshot before the slow external renderer. No parent lock
+	# or transaction is held while wkhtmltopdf runs.
+	_transaction(lambda: None)
+	pdf_bytes = _html_to_pdf(content)
+
+	def publish():
+		parent = frappe.db.get_value("Optimus Session", doc.name, "*", as_dict=True, for_update=True)
+		if (not parent or parent.get("session_uuid") != session_uuid
+			or parent.get("status") != "Ready" or parent.get("raw_report_file") != source):
+			frappe.throw(_("The report changed during PDF generation. Please try again."))
+		cached = parent.get("raw_report_pdf_file")
+		if artifact_file(doc.name, "raw_report_pdf_file", cached):
+			return cached
+		url = _save_pdf_attachment(doc.name, session_uuid, pdf_bytes)
+		frappe.db.set_value("Optimus Session", doc.name, "raw_report_pdf_file", url)
+		return url
+
+	return _transaction(publish)
 
 
 def clear_cached_pdf(session_uuid: str) -> None:
@@ -60,23 +77,18 @@ def clear_cached_pdf(session_uuid: str) -> None:
 	)
 	if not docname:
 		return
-	current_url = frappe.db.get_value(
-		"Optimus Session", docname, "raw_report_pdf_file",
-	)
-	if not current_url:
-		return
-	try:
-		# v0.6.x: was get_doc(...).name; switched to a single get_value to
-		# skip loading the full File doc (and its child tables) just to read
-		# one scalar addresses Lens audit "get_doc used only for reading
-		# fields" at this site.
-		file_name = frappe.db.get_value("File", {"file_url": current_url}, "name")
-		if file_name:
-			frappe.delete_doc("File", file_name, force=True, ignore_permissions=True)
-	except Exception:
-		pass
-	frappe.db.set_value("Optimus Session", docname, "raw_report_pdf_file", None)
-	safe_commit()
+	_transaction(lambda: None)
+
+	def clear():
+		parent = frappe.db.get_value("Optimus Session", docname, "*", as_dict=True, for_update=True)
+		if not parent or parent.get("session_uuid") != session_uuid:
+			return
+		file = artifact_file(docname, "raw_report_pdf_file", parent.get("raw_report_pdf_file"))
+		if file:
+			frappe.delete_doc("File", file.name, force=True, ignore_permissions=True)
+		frappe.db.set_value("Optimus Session", docname, "raw_report_pdf_file", None)
+
+	_transaction(clear)
 
 
 def _load_session(session_uuid: str):
@@ -91,13 +103,69 @@ def _load_session(session_uuid: str):
 def _load_raw_html(doc) -> str:
 	if not doc.raw_report_file:
 		frappe.throw(_("This session has no report to convert."))
-	# audit: ok (get_doc kept .get_content() is a doc-instance method
-	# that streams the attached bytes; db.get_value can only return field
-	# values, not file content. Lens flagged this as "get_doc used only
-	# for reading fields" but it isn't reading a field, it's reading the
-	# attached binary).
-	file_row = frappe.get_doc("File", {"file_url": doc.raw_report_file})
-	return file_row.get_content().decode("utf-8")
+	content = read_artifact(doc.name, "raw_report_file", doc.raw_report_file)
+	return content.decode("utf-8") if isinstance(content, bytes) else content
+
+
+def _transaction(operation):
+	return sql_work.transaction(operation, commit=frappe.db.commit, rollback=frappe.db.rollback)
+
+
+def _safe_pdf_html(content):
+	"""Remove pdfkit's option channel and credential-dependent image expansion.
+
+	Frappe 15 parses HTML again before pdfkit reads its meta options. Remove
+	matching raw tags to a fixed point both before and after HTML normalization,
+	including matches hidden in comments, raw-text elements or attribute values.
+	"""
+	from bs4 import BeautifulSoup
+	from tinycss2 import parse_component_value_list
+
+	def strip_meta(value):
+		while True:
+			clean = re.sub(r"<meta\b[^>]*pdfkit-[^>]*>", "", value, flags=re.I)
+			if clean == value:
+				return clean
+			value = clean
+
+	soup = BeautifulSoup(strip_meta(content), "html5lib")
+	# Frappe supplies the requesting user's cookie jar to wkhtmltopdf. Keep
+	# CSS, SVG and other resource channels from fetching authenticated images
+	# after the img-only inliner, too. Raster data images need no credentials.
+	def raster(value):
+		return bool(re.match(r"data:image/(?:png|jpeg|gif|webp|avif);base64,", str(value).strip(), re.I))
+
+	def resource_css(tokens):
+		for token in tokens:
+			if token.type in {"url", "error"} or (
+				token.type == "function" and token.lower_name == "url"
+			) or (token.type == "at-keyword" and token.lower_value == "import"):
+				return True
+			children = getattr(token, "arguments", None) or getattr(token, "content", None)
+			if children and resource_css(children):
+				return True
+		return False
+
+	for tag in soup.find_all(["iframe", "frame", "object", "embed", "link", "base", "audio", "video", "source"]):
+		tag.decompose()
+	for tag in soup.find_all(True):
+		for attr in ("src", "poster", "background", "data", "xlink:href"):
+			if attr in tag.attrs and not (tag.name == "img" and attr == "src" and raster(tag[attr])):
+				if not str(tag[attr]).startswith("#"):
+					if tag.name == "img" and attr == "src":
+						tag[attr] = ""
+					else:
+						tag.attrs.pop(attr, None)
+		if tag.name == "img":
+			tag.attrs.setdefault("src", "")  # Frappe 15 indexes this attribute in its inliner.
+		if tag.name != "a" and "href" in tag.attrs and not str(tag["href"]).startswith("#"):
+			tag.attrs.pop("href", None)
+		tag.attrs.pop("srcset", None)
+		if tag.has_attr("style") and resource_css(parse_component_value_list(tag["style"])):
+			tag.attrs.pop("style", None)
+		if tag.name == "style" and resource_css(parse_component_value_list(tag.string or "")):
+			tag.decompose()
+	return strip_meta(str(soup))
 
 
 def _expand_collapsible_sections(html: str) -> str:
@@ -128,7 +196,7 @@ def _html_to_pdf(html: str) -> bytes:
 	"""
 	import frappe.utils.pdf
 
-	html = _expand_collapsible_sections(html)
+	html = _safe_pdf_html(_expand_collapsible_sections(html))
 
 	options = {
 		"page-size": "A4",
@@ -138,7 +206,6 @@ def _html_to_pdf(html: str) -> bytes:
 		"margin-right": "12mm",
 		"encoding": "UTF-8",
 		"print-media-type": "",
-		"enable-local-file-access": "",
 	}
 	return frappe.utils.pdf.get_pdf(html, options)
 
@@ -148,7 +215,7 @@ def _save_pdf_attachment(docname: str, session_uuid: str, pdf_bytes: bytes) -> s
 
 	Returns the file_url. Raises on failure (caller decides not to cache).
 	"""
-	filename = f"optimus_report_{session_uuid}.pdf"
+	filename = f"optimus_report_{session_uuid}_{uuid.uuid4().hex}.pdf"
 	file_doc = frappe.get_doc({
 		"doctype": "File",
 		"file_name": filename,
@@ -158,5 +225,6 @@ def _save_pdf_attachment(docname: str, session_uuid: str, pdf_bytes: bytes) -> s
 		"is_private": 1,
 		"content": pdf_bytes,
 	})
-	file_doc.insert(ignore_permissions=True)
+	with artifact_writer(docname, "raw_report_pdf_file"):
+		file_doc.insert(ignore_permissions=True)
 	return file_doc.file_url

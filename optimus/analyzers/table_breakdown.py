@@ -223,6 +223,10 @@ def _parse_query(query: str) -> dict:
 	query simply doesn't appear in the breakdown.
 	"""
 	verb = _leading_verb(query)
+	from optimus.sql_budget import within_budget
+
+	if not within_budget(query):
+		return {"tables": [], "verb": verb, "index_cols": {}}
 	try:
 		from sql_metadata import Parser
 

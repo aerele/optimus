@@ -30,6 +30,8 @@ class IndexEvidence:
 	name: str
 	columns: tuple[str, ...]
 	unique: bool
+	eligible: bool = True
+	reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,3 +50,7 @@ class TableEvidence:
 	text_columns: frozenset[str]
 	unindexable_columns: frozenset[str]
 	indexes: tuple[IndexEvidence, ...]
+
+	@property
+	def usable_indexes(self):
+		return tuple(ix for ix in self.indexes if ix.eligible)

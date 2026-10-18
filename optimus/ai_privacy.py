@@ -156,8 +156,9 @@ def query_text(query, *, send_raw: bool) -> str:
 	"""
 	from optimus.ai_fix import _InterruptGuard
 	from optimus.redaction import redact_sql_literals
+	from optimus.sql_budget import within_budget
 
-	if not isinstance(query, str) or not query.strip() or len(query) > MAX_QUERY_CHARS:
+	if not within_budget(query, max_chars=MAX_QUERY_CHARS) or not query.strip():
 		return ""
 	guard = _InterruptGuard(base=True)
 	parts = statements = token = None
