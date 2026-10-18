@@ -64,6 +64,7 @@ when you add a new key; the audit test asserts this table matches
 | `profiler:sidecar:<recording_uuid>` | list[dict] | Frappe pickle | `SESSION_TTL_SECONDS` | Argument-log entries; optional `{"_truncated": True}` tail marker. |
 | `profiler:infra:<recording_uuid>` | dict | Frappe pickle | `SESSION_TTL_SECONDS` | CPU / RAM / DB / RQ delta. |
 | `profiler:resolved_doc:<recording_uuid>` | dict | Frappe pickle | `SESSION_TTL_SECONDS` | A created doc's save-assigned `{doctype, name}`, written by `after_request` and merged onto the recording as `resolved_target_doc` at analyze time. |
+| `profiler:lock_events:<recording_uuid>` | list[dict] | Frappe pickle | `SESSION_TTL_SECONDS` | DB lock-contention events (deadlocks / lock-wait timeouts) captured by `optimus.capture`'s SQL wrapper; read into `rec["lock_events"]` by the lock_contention analyzer. Each entry: `kind`, `normalized_query`, `error`, `caller_stack`, `time`. |
 
 ### 2.3 Frontend metrics (v0.5.0+ split lists)
 

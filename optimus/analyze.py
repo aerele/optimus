@@ -36,6 +36,7 @@ from optimus.analyzers import (
 	frontend_timings,  # v0.5.0
 	index_suggestions,
 	infra_pressure,  # v0.5.0
+	lock_contention,  # v0.12.x
 	n_plus_one,
 	per_action,
 	redundant_calls,
@@ -90,6 +91,7 @@ _BUILTIN_ANALYZERS = [
 	table_breakdown.analyze,
 	call_tree.analyze,        # v0.3.0 must run after per_action
 	redundant_calls.analyze,  # v0.3.0 independent
+	lock_contention.analyze,  # v0.12.x reads rec["lock_events"]
 	infra_pressure.analyze,   # v0.5.0 reads rec["infra"]
 	frontend_timings.analyze, # v0.5.0 reads context.frontend_data
 ]
@@ -1047,7 +1049,7 @@ def _deserialize_tree(uuid: str, tree_blob):
 
 
 def _rehydrate_from_bundle(recordings_bundle, uuid: str):
-	"""Rebuild a recording dict (rec + pyi_session + sidecar) from a persisted
+	"""Rebuild a recording dict (rec + pyi_session + sidecar + lock_events) from a persisted
 	bundle entry, mirroring the live-Redis read path. Returns the rec dict, or
 	None when the bundle lacks this uuid. Accepts either the full bundle
 	(``{"recordings": {...}}``) or the inner uuid->entry map.
@@ -1078,6 +1080,8 @@ def _rehydrate_from_bundle(recordings_bundle, uuid: str):
 	rec["pyi_session"] = _deserialize_tree(uuid, tree_blob)
 	sidecar = entry.get("sidecar")
 	rec["sidecar"] = sidecar if isinstance(sidecar, list) else []
+	lock_events = entry.get("lock_events")
+	rec["lock_events"] = lock_events if isinstance(lock_events, list) else []
 	return rec
 
 
@@ -1130,8 +1134,22 @@ def _fetch_recordings(recording_uuids: list[str], *, recordings_bundle=None):
 			)
 			sidecar = []
 
+		# Load the DB lock-contention events (best-effort)
+		lock_events = []
+		try:
+			loaded = frappe.cache.get_value(_redis_keys.lock_events(uuid))
+			if isinstance(loaded, list):
+				lock_events = loaded
+		except Exception:
+			frappe.log_error(
+				title="optimus analyze",
+				message=f"Failed to load lock events for {uuid}",
+			)
+			lock_events = []
+
 		rec["pyi_session"] = pyi_session
 		rec["sidecar"] = sidecar
+		rec["lock_events"] = lock_events
 		yield rec
 
 
@@ -2908,9 +2926,9 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 	Bundle shape::
 
 	    {"schema", "session_uuid", "session_state",
-	     "recordings": {uuid: {rec, sparse, tree_b64, sidecar, infra}}}
+	     "recordings": {uuid: {rec, sparse, tree_b64, sidecar, lock_events, infra}}}
 
-	``rec`` + ``tree`` + ``sidecar`` are what :func:`_rehydrate_from_bundle`
+	``rec`` + ``tree`` + ``sidecar`` + ``lock_events`` are what :func:`_rehydrate_from_bundle`
 	reconstructs; ``sparse`` + ``infra`` + ``session_state`` are captured for
 	future use and not read today. Values are already capture-time redacted; the
 	tree stays as the raw HMAC-signed pickle (base64) so it reloads through the
@@ -2935,6 +2953,9 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 			sidecar = frappe.cache.get_value(_redis_keys.sidecar(uuid))
 			if isinstance(sidecar, list):
 				entry["sidecar"] = sidecar
+			lock_events = frappe.cache.get_value(_redis_keys.lock_events(uuid))
+			if isinstance(lock_events, list):
+				entry["lock_events"] = lock_events
 			infra_blob = frappe.cache.get_value(_redis_keys.infra(uuid))
 			if isinstance(infra_blob, dict):
 				entry["infra"] = infra_blob
@@ -3013,6 +3034,10 @@ def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:
 			pass
 		try:
 			frappe.cache.delete_value(_redis_keys.sidecar(uuid))
+		except Exception:
+			pass
+		try:
+			frappe.cache.delete_value(_redis_keys.lock_events(uuid))
 		except Exception:
 			pass
 		try:

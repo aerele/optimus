@@ -457,7 +457,10 @@ def _build_action_plan(action_plan, fmt_ms=None) -> list[dict]:
 			# when the template renders it. f-string would coerce Markup to
 			# plain str and lose the safe-flag.
 			"savings_display": Markup("−") + fmt(gain_ms) if gain_ms else "",
-			"savings_label": step.get("gain_label", "") or "",
+			# Gate the LABEL on gain_ms too, not just the number: a 0-impact
+			# actionable finding (e.g. Lock Contention) must not render a dangling
+			# "est. saving" label with no figure beside it.
+			"savings_label": (step.get("gain_label", "") or "") if gain_ms else "",
 			"callsite": step.get("callsite") or "",
 		})
 	return result

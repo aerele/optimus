@@ -119,6 +119,16 @@ def resolved_doc(recording_uuid: str) -> str:
 	return f"profiler:resolved_doc:{recording_uuid}"
 
 
+def lock_events(recording_uuid: str) -> str:
+	"""List of DB lock-contention events captured during a recording: queries
+	that raised ``frappe.QueryDeadlockError`` / ``frappe.QueryTimeoutError`` in
+	``optimus.capture``'s SQL wrapper (the recorder only logs queries that
+	succeed). Frappe-pickled ``list[dict]`` (``kind``, ``normalized_query``,
+	``error``, ``caller_stack``, ``time``); read into ``rec["lock_events"]`` at
+	analyze time. TTL: ``SESSION_TTL_SECONDS``."""
+	return f"profiler:lock_events:{recording_uuid}"
+
+
 # ---------------------------------------------------------------------------
 # Frontend metrics (v0.5.0+ split lists)
 # ---------------------------------------------------------------------------
@@ -262,6 +272,7 @@ KEY_PATTERNS: tuple[str, ...] = (
 	"profiler:sidecar:<recording_uuid>",
 	"profiler:infra:<recording_uuid>",
 	"profiler:resolved_doc:<recording_uuid>",
+	"profiler:lock_events:<recording_uuid>",
 	"profiler:frontend:<session_uuid>:xhr",
 	"profiler:frontend:<session_uuid>:vitals",
 	"profiler:frontend:<session_uuid>",
