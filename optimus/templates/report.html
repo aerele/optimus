@@ -1827,14 +1827,6 @@
     background: var(--bg-tint); padding: 1px 5px;
     border-radius: 2px;
   }
-  .sql-snip {
-    font-family: var(--mono); font-size: 12px;
-    background: #1a1a1a; color: #f4ecd6;
-    padding: 10px 14px; border-radius: 4px;
-    overflow-x: auto; margin: 8px 0; line-height: 1.5;
-    white-space: pre-wrap; word-break: break-word;
-  }
-
   /* Print - drop the nav pills (useless on paper). The TL;DR
      headline is already light-wash on screen, so no override
      needed here. */
@@ -3596,9 +3588,8 @@
          cards BELOW the data table (lifted out of the colspan sub-rows
          the older markup used). Each card carries the table name, the
          read/write summary in mono, the recommendation prose, the
-         dark SQL snippet for any composite DDL and an amber
-         warn-line when writes are present. Only ACTIONABLE tables
-         get cards: a concrete `recommended_index` (LLM-vetted) or
+         concise index advice and an amber warn-line when writes
+         are present. Tables get cards for a `recommended_index` or
          at least one heuristic `index_candidates` column. The
          "nothing to suggest" branches (Frappe meta tables, framework-
          only filters, full-scan reads) are skipped they took space
@@ -3625,16 +3616,19 @@
 
           {% if t.get("recommended_index") %}
             {% set rec = t.recommended_index %}
-            <div class="index-rec-label">Index candidate - to speed up reads</div>
-            <p>The most-used filter on this table was <code>({% for c in rec.columns %}{{ c }}{% if not loop.last %}, {% endif %}{% endfor %})</code> - those columns were filtered together in <strong>{{ rec.together_count }}</strong> of {{ rec.read_count }} read{{ 's' if rec.read_count != 1 else '' }}. A composite index on them, leftmost-first, would help those reads:</p>
-            {% if rec.code %}<pre class="sql-snip">{{ rec.code }}</pre>{% endif %}
-            <p class="note-text"><em>Optimus index advice:</em> {{ rec.route_note }} First run <code>SHOW INDEX FROM `{{ t.table }}`</code>: this may already be covered.</p>
-            {% if t.get("write_count", 0) %}
-              <div class="warn-text">&#9888; {{ t.write_count }} write{% if t.write_count != 1 %}s{% endif %} on this table in this session{% if t.get("is_write_hot") %} - and <code>{{ t.table }}</code> is a write-hot core table (many rows inserted per submitted document in production){% endif %} - every index also slows writes, so add it only if a query in the per-action breakdown that filters this way is actually slow.</div>
-            {% elif t.get("is_write_hot") %}
-              <div class="warn-text">&#9888; No writes in this session, but <code>{{ t.table }}</code> is normally write-hot in production (bulk inserts per submitted document) - be conservative about adding indexes here.</div>
+            <div class="index-rec-label">{{ 'Index review' if rec.route == 'no_code' else 'Index candidate' }}</div>
+            <p><code>({% for c in rec.columns %}{{ c }}{% if not loop.last %}, {% endif %}{% endfor %})</code> - these columns were filtered together in <strong>{{ rec.together_count }}</strong> of {{ rec.read_count }} read{{ 's' if rec.read_count != 1 else '' }}.</p>
+            {% if rec.route == 'no_code' %}
+              <p class="note-text">{{ rec.route_note }}</p>
             {% else %}
-              <div class="note-text">No writes recorded - adding an index here is low-risk.</div>
+              <p class="note-text">Check a slow query's <code>EXPLAIN</code> plan and existing indexes before adding an index. These recorded filters alone do not establish a benefit.</p>
+            {% endif %}
+            {% if rec.route != 'no_code' and t.get("write_count", 0) %}
+              <div class="warn-text">&#9888; {{ t.write_count }} write{% if t.write_count != 1 %}s{% endif %} on this table in this session{% if t.get("is_write_hot") %} - and <code>{{ t.table }}</code> is a write-hot core table (many rows inserted per submitted document in production){% endif %} - every index also slows writes, so add it only if a query in the per-action breakdown that filters this way is actually slow.</div>
+            {% elif rec.route != 'no_code' and t.get("is_write_hot") %}
+              <div class="warn-text">&#9888; No writes in this session, but <code>{{ t.table }}</code> is normally write-hot in production (bulk inserts per submitted document) - be conservative about adding indexes here.</div>
+            {% elif rec.route != 'no_code' %}
+              <div class="note-text">No writes recorded in this session; assess the write cost in production.</div>
             {% endif %}
             {% if rec.also_filtered %}
               <div class="note-text">Other columns this session filtered on (in other / fewer queries) - index each only if its own query is slow: {% for c in rec.also_filtered %}<code>{{ c }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.</div>

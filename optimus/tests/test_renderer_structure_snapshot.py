@@ -38,8 +38,7 @@ _REGENERATE_ENV = "REGENERATE_RENDERER_SNAPSHOT"
 
 @pytest.fixture(autouse=True)
 def _index_evidence(monkeypatch):
-	"""Deterministic index evidence: the snapshot's index finding and table card keep
-	their code block and card on every machine."""
+	"""Deterministic index evidence keeps the finding and table card stable on every machine."""
 	from optimus.renderer import recipe_enrichment
 	from optimus.renderer.recipe_enrichment import FieldEvidence, TableEvidence
 

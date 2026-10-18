@@ -132,32 +132,32 @@ def test_legacy_session_regenerates_clean(evidence):
 	assert "ALTER TABLE" not in out
 
 
-def test_table_card_composite_with_text_column_gets_the_prefix_and_the_name(evidence):
-	"""The card shows the advisor's own ensure_indexes() code, entry and name included."""
+def test_table_card_keeps_candidate_columns_without_installation_code(evidence):
+	"""Keep the advisor's usable columns, without repeating its installation module."""
 	table = _table(recommended_index={
 		"columns": ["customer", "remarks"], "doctype": "Sales Invoice",
 		"together_count": 3, "read_count": 4, "also_filtered": [],
 	})
 	out = _render(_doc([], [table]))
-	name = index_recipes.optimus_index_name("Sales Invoice", ("customer", "remarks"))
-	entry = {"doctype": "Sales Invoice", "columns": ["customer", "remarks(255)"], "index_name": name, "db": "mariadb"}
-	assert json.dumps(entry) in out
-	assert 'frappe.db.add_index(doctype, columns, index_name=entry["index_name"])' in out
+	assert "(customer, remarks(255))" in out
+	assert "filtered together in <strong>3</strong> of 4 reads" in out
+	assert "EXPLAIN" in out and "existing indexes" in out
+	for unwanted in ("ensure_indexes", "INDEXES =", "hooks.py", "frappe.db.add_index", "would help those reads"):
+		assert unwanted not in out
 
 
 def test_single_column_card_keeps_its_recommendation(evidence):
-	"""The single-column recommendation is kept, so the card keeps together_count,
-	its SHOW INDEX hint and its route note."""
+	"""Single-column candidates keep the evidence and validation advice."""
 	table = _table(recommended_index={
 		"columns": ["customer"], "doctype": "Sales Invoice",
 		"together_count": 3, "read_count": 4, "also_filtered": [],
 	})
 	out = _render(_doc([], [table]))
-	assert "Index candidate - to speed up reads" in out
+	assert "Index candidate" in out
 	assert "filtered together in <strong>3</strong> of 4 reads" in out
-	assert "SHOW INDEX FROM `tabSales Invoice`" in out
-	assert "One column: bench migrate drops a single-column index" in out
-	assert '{"doctype": "Sales Invoice", "search_index_field": "customer", "db": "mariadb"}' in out
+	assert "(customer)" in out
+	assert "existing indexes" in out
+	assert "ensure_indexes" not in out
 
 
 def test_write_hot_single_column_card_is_never_called_low_risk(evidence):
@@ -196,9 +196,8 @@ def test_finding_and_card_on_the_same_columns_name_the_same_index(evidence):
 	assert "patch" not in rec["route_note"]
 
 
-def test_card_never_renders_an_add_index_call_without_index_name(evidence):
-	"""The card's code line is the advisor's code or nothing; it never shows a
-	nameless frappe.db.add_index(...) call, and a card with no code has no code line."""
+def test_cards_omit_installation_code_and_keep_unknown_evidence(evidence):
+	"""Candidates stay concise, and unavailable evidence still has a neutral verdict."""
 	cards = [
 		_table(),
 		_table(table="tabGL Entry", recommended_index={
@@ -211,11 +210,9 @@ def test_card_never_renders_an_add_index_call_without_index_name(evidence):
 		}),
 	]
 	out = _render(_doc([], cards))
-	calls = re.findall(r"frappe\.db\.add_index\(([^)]*)\)", out)
-	# two modules, each with the columns route's call and the Property Setter route's own build
-	assert len(calls) == 4
-	assert all("index_name=" in args for args in calls), calls
-	assert out.count('<pre class="sql-snip">') == 2
+	assert "frappe.db.add_index" not in out
+	assert "ensure_indexes" not in out
+	assert '<pre class="sql-snip">' not in out
 	assert "Do not add this index. Optimus has no information" not in out
 	assert f'{index_recipes.NO_VERDICT} Optimus has no information about table "tabGone DocType"' in out
 
@@ -277,10 +274,10 @@ def test_stamped_redundant_call_has_no_note(evidence):
 
 def test_table_card_never_names_customize_form(evidence):
 	out = _render(_doc([], [_table()]))
-	name = index_recipes.optimus_index_name("Sales Invoice", ("customer", "posting_date"))
-	assert json.dumps({"doctype": "Sales Invoice", "columns": ["customer", "posting_date"], "index_name": name}) in out
+	assert "(customer, posting_date)" in out
 	assert "Customize" not in out
-	assert f"Your app's ensure_indexes() function creates the index \"{name}\"" in out
+	assert "ensure_indexes" not in out
+	assert "These recorded filters alone do not establish a benefit." in out
 
 
 def test_finding_card_code_block_is_labelled_suggested_index(evidence):
@@ -436,6 +433,18 @@ def indexed(evidence, monkeypatch):
 	return tables
 
 
+def test_card_preserves_existing_index_verdict_without_recommending_another(indexed):
+	table = _table(recommended_index={
+		"columns": ["customer"], "doctype": "Sales Invoice",
+		"together_count": 3, "read_count": 4, "also_filtered": [],
+	})
+	out = _render(_doc([], [table]))
+	assert ">Index review</div>" in out
+	assert "Do not add this index." in out and 'already leads the index "customer"' in out
+	assert "would help those reads" not in out and "adding an index here is low-risk" not in out
+	assert "ensure_indexes" not in out
+
+
 def _titled(ftype, detail, title, desc):
 	row = _row(ftype, detail)
 	row.title, row.customer_description = title, desc
@@ -510,7 +519,9 @@ def test_a_failed_card_gives_a_neutral_verdict_and_a_next_step(evidence, monkeyp
 	note = recipe_enrichment.RECIPE_FAILED_CARD_NOTE
 	assert note.startswith(index_recipes.NO_VERDICT) and "Do not add this index" not in note
 	assert 'send the bench log line "optimus: index advice failed"' in note
-	assert f"Optimus index advice:</em> {note}" in out
+	assert note in out
+	assert ">Index review</div>" in out
+	assert "would help those reads" not in out
 
 
 def test_the_display_overrides_are_idempotent(indexed):
