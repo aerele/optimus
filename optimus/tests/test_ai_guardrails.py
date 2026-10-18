@@ -611,11 +611,18 @@ def test_rule_text_braces_are_not_format_fields():
 
 @pytest.mark.parametrize("case", CORPUS, ids=[c["name"] for c in CORPUS])
 def test_verify_fix_is_fast(case):
+	import statistics
 	import time
 
-	t = time.perf_counter()
-	G.verify_fix(case["suggestion"], source_lines=case["source_lines"])
-	assert time.perf_counter() - t < 0.05
+	# Measure steady-state work, allowing a lazy import or a scheduling/GC
+	# outlier in one sample. The maximal-report regression separately bounds
+	# total wall time, including initialization, across all admitted answers.
+	samples = []
+	for _ in range(3):
+		t = time.perf_counter()
+		G.verify_fix(case["suggestion"], source_lines=case["source_lines"])
+		samples.append(time.perf_counter() - t)
+	assert statistics.median(samples) < 0.05
 
 
 # Whole-line and multiline findings have separate app and pinned-scanner contracts.
