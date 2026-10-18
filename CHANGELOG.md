@@ -22,6 +22,31 @@ versions may contain breaking changes see migration notes below).
   backfill's network calls). The run flips to "Ready" only after the report is
   attached, in the same step as the popup, so the status the client polls and
   the notification land together.
+- The Ready flip is gated on the re-render succeeding. If the re-render fails
+  the run is marked "Failed" with an actionable message ("Regenerate Reports",
+  or retry the pass) instead of being flipped to Ready over a report that has no
+  Phase 2 panel. The run's Redis keys are always cleaned up afterwards, on both
+  the success and the failure path.
+- Re-running a Phase 2 analyze (retry, or janitor recovery) no longer appends a
+  second copy of that run's findings. `_persist_run` is now idempotent per run:
+  it drops the findings a prior run of the same `run_uuid` left behind before
+  re-appending, so the finding count stays stable across retries. A run whose
+  row has vanished aborts the persist instead of orphaning findings.
+- The Ready / Failed status flips now use a targeted child-row update instead of
+  re-saving the submitted parent session, so a concurrent writer can no longer
+  trigger a timestamp-mismatch that silently lost the flip and left the run
+  stuck "Analyzing".
+- `retry_phase2_analyze` reports the run's actual final status (Ready, Failed or
+  still Analyzing) rather than always claiming "Ready".
+- The report now shows a just-finished run consistently across both surfaces
+  (the drill-down HTML panel and the structured run list): both read one shared
+  rule keyed off the persisted results, so an empty-but-finished run reads as
+  "Ready" instead of freezing at "Analyzing", and the two can no longer disagree.
+- The janitor no longer marks a stuck run "Failed" (a red badge over a populated
+  drill-down) when its results are already persisted. Such a run finished its
+  analysis and only stalled in the finalize, so the janitor recovers it: it
+  flips the run to Ready and enqueues a re-render. Only a run with no persisted
+  results is treated as a genuine analysis failure.
 
 ---
 

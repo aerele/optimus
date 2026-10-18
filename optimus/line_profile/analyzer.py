@@ -591,35 +591,63 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 		})
 		raise
 
-	# The analysis is durably persisted (status still Analyzing). The re-render
-	# and the Ready flip are best-effort: a failure here leaves a recoverable run
-	# (Analyzing + committed findings), never a spurious Failed and never a
-	# duplicate-findings retry, so this is deliberately OUTSIDE the failure-marking
-	# try above.
+	# The analysis is durably persisted (status still Analyzing). The re-render,
+	# the Ready flip and the completion popup are all gated on the render
+	# SUCCEEDING: a failed render must never flip the run to Ready with no report
+	# attached (the whole point of this fix). ``cleanup_run`` always runs so the
+	# run's Redis keys are never leaked, whichever branch we take. This block is
+	# deliberately OUTSIDE the failure-marking try above so a finalize hiccup
+	# leaves a recoverable run, never a duplicate-findings retry.
 	try:
 		# Re-render so the new phase-2 panel + findings appear in the report. The
 		# shared regenerate_reports path commits internally (AI backfill, PDF-cache
 		# clear, render) that is fine here because the run is still Analyzing, so
 		# those commits never flip it to Ready before the report is attached.
-		_regenerate_parent_reports(session_uuid)
+		render_ok = _regenerate_parent_reports(session_uuid)
 
-		# NOW that the report is attached, flip the run to Ready + commit, then fire
-		# the popup so the status the client polls and the notification land at the
-		# same moment never minutes apart.
-		_mark_run_ready(parent_docname, run_uuid)
-		_publish("phase_2_run_ready", {
-			"session_uuid": session_uuid,
-			"run_uuid": run_uuid,
-			"parent": parent_docname,
-			"user": owner,
-		})
-
+		if render_ok:
+			# Report is attached flip to Ready + commit, THEN fire the popup so the
+			# status the client reloads and the notification land at the same moment,
+			# never minutes apart. Only pop when the row was actually flipped (it may
+			# have vanished); honoring the return keeps the event truthful.
+			if _mark_run_ready(parent_docname, run_uuid):
+				_publish("phase_2_run_ready", {
+					"session_uuid": session_uuid,
+					"run_uuid": run_uuid,
+					"parent": parent_docname,
+					"user": owner,
+				})
+			else:
+				_safe_log_error(
+					"optimus phase 2 finalize",
+					f"run {run_uuid} vanished before Ready flip; report rendered, "
+					"status left unchanged",
+				)
+		else:
+			# Findings are durable but the report has no phase-2 panel flipping to
+			# Ready would reproduce the Ready-before-report bug, so mark Failed with
+			# an actionable message instead. The Hot Line findings still show in the
+			# main findings list; "Regenerate Reports" or a Phase 2 retry rebuilds
+			# the drill-down panel.
+			render_fail_msg = (
+				"the report re-render failed. The line-profile findings were saved, "
+				"so click \"Regenerate Reports\" on the session, or retry the Phase 2 "
+				"pass, to rebuild the drill-down panel."
+			)
+			_mark_run_failed(parent_docname, run_uuid, render_fail_msg, "")
+			_publish("phase_2_run_failed", {
+				"session_uuid": session_uuid,
+				"run_uuid": run_uuid,
+				"error": render_fail_msg,
+				"user": owner,
+			})
+	except Exception:
+		_safe_log_error("optimus phase 2 finalize", traceback.format_exc())
+	finally:
 		try:
 			capture.cleanup_run(run_uuid)
 		except Exception:
-			_safe_log_error("optimus phase 2 cleanup_run")
-	except Exception:
-		_safe_log_error("optimus phase 2 finalize")
+			_safe_log_error("optimus phase 2 cleanup_run", traceback.format_exc())
 
 
 def _find_run_row(session_uuid: str, run_uuid: str):
@@ -660,6 +688,52 @@ def _safe_log_error(title: str, message: str | None = None) -> None:
 		pass
 
 
+# Each phase-2 finding is stamped with the run_uuid that produced it (under this
+# underscore-prefixed, non-sensitive key inside ``technical_detail_json``) so a
+# re-run of the SAME run can find and drop its own prior findings before
+# re-appending idempotent persist, no duplicate findings on retry.
+_PHASE2_RUN_TAG = "_phase2_run_uuid"
+
+
+def _tag_phase2_finding(finding: dict, run_uuid: str) -> None:
+	"""Stamp the owning ``run_uuid`` into the finding's ``technical_detail_json``
+	so ``_drop_prior_run_findings`` can recognise and replace it on a retry."""
+	raw = finding.get("technical_detail_json")
+	detail: dict = {}
+	if raw:
+		try:
+			loaded = json.loads(raw)
+			if isinstance(loaded, dict):
+				detail = loaded
+		except (TypeError, ValueError):
+			detail = {}
+	detail[_PHASE2_RUN_TAG] = run_uuid
+	finding["technical_detail_json"] = json.dumps(detail, default=str)
+
+
+def _drop_prior_run_findings(parent, run_uuid: str) -> None:
+	"""Remove findings a PRIOR run of this ``run_uuid`` left on the session so a
+	retry (janitor re-enqueue, ``retry_phase2_analyze``, a worker killed
+	mid-finalize then re-run) replaces its findings rather than appending a second
+	copy. Only this run's rows are dropped phase-1 findings and other phase-2
+	runs' findings carry a different tag (or none) and are preserved."""
+	existing = list(parent.findings or [])
+	kept = []
+	for row in existing:
+		raw = getattr(row, "technical_detail_json", None)
+		owned = False
+		if raw:
+			try:
+				detail = json.loads(raw)
+				owned = isinstance(detail, dict) and detail.get(_PHASE2_RUN_TAG) == run_uuid
+			except (TypeError, ValueError):
+				owned = False
+		if not owned:
+			kept.append(row)
+	if len(kept) != len(existing):
+		parent.findings = kept
+
+
 def _persist_run(
 	parent_docname: str,
 	run_uuid: str,
@@ -675,26 +749,36 @@ def _persist_run(
 	polls and the ``phase_2_run_ready`` popup land together. Committing here makes
 	the findings durable before the slow re-render + AI backfill (a worker kill
 	mid-render no longer loses them) and releases the row locks so we never hold a
-	write lock across the AI backfill's network calls."""
+	write lock across the AI backfill's network calls.
+
+	Idempotent per ``run_uuid``: a re-run drops this run's prior findings before
+	re-appending, so retrying never doubles the finding count. If the run row has
+	vanished we raise rather than append findings with no owning run to mark Ready
+	the caller's failure path then rolls back and marks Failed."""
 	parent = frappe.get_doc("Optimus Session", parent_docname)
 
-	# Update the matching child row in place (results only status stays Analyzing).
-	matched = False
+	# Locate the matching child row. A missing row (session deleted / run_uuid
+	# changed between _find_run_row and here) is fatal: appending findings with no
+	# run to later flip Ready would orphan them, so raise and let run_analyze's
+	# except roll back + mark Failed.
+	matched_child = None
 	for child in (parent.phase_2_runs or []):
 		if child.run_uuid == run_uuid:
-			child.results_json = json.dumps(results_json, default=str)
-			child.warnings_json = json.dumps(result.warnings, default=str)
-			child.total_ms = round(total_ms, 2)
-			matched = True
+			matched_child = child
 			break
-	if not matched:
-		# Row vanished / run_uuid changed between _find_run_row and here (concurrent
-		# edit / retry race). Surface it rather than silently finishing findings
-		# would be appended with no run to mark Ready.
-		_safe_log_error(
-			"optimus phase 2 persist",
-			f"no Phase Two Run {run_uuid} on {parent_docname}; results not stored",
+	if matched_child is None:
+		raise RuntimeError(
+			f"no Phase Two Run {run_uuid} on {parent_docname}; aborting persist"
 		)
+
+	# Update the run row in place (results only status stays Analyzing).
+	matched_child.results_json = json.dumps(results_json, default=str)
+	matched_child.warnings_json = json.dumps(result.warnings, default=str)
+	matched_child.total_ms = round(total_ms, 2)
+
+	# Idempotency: clear any findings a prior run of this run_uuid persisted so a
+	# retry replaces them instead of duplicating.
+	_drop_prior_run_findings(parent, run_uuid)
 
 	# Promote findings into the unified Session.findings table so the
 	# existing finding rendering / filtering picks them up alongside
@@ -708,6 +792,7 @@ def _persist_run(
 		_title = finding.get("title") or ""
 		if len(_title) > 140:
 			finding["title"] = _title[:137].rstrip() + "..."
+		_tag_phase2_finding(finding, run_uuid)
 		parent.append("findings", finding)
 
 	parent.flags.ignore_validate_update_after_submit = True
@@ -719,46 +804,61 @@ def _mark_run_ready(parent_docname: str, run_uuid: str) -> bool:
 	"""Flip the Phase 2 Run to ``Ready`` + set ``ended_at`` and COMMIT, called
 	AFTER the report has been attached so the status the client polls flips in
 	step with the ``phase_2_run_ready`` popup. Returns True when the matching row
-	was found and marked."""
-	parent = frappe.get_doc("Optimus Session", parent_docname)
-	matched = False
-	for child in (parent.phase_2_runs or []):
-		if child.run_uuid == run_uuid:
-			child.status = "Ready"
-			child.ended_at = frappe.utils.now_datetime()
-			matched = True
-			break
-	if not matched:
+	was found and flipped.
+
+	Uses a targeted ``frappe.db.set_value`` on the child row rather than
+	``get_doc`` + ``parent.save()``: the parent Optimus Session is SUBMITTED, and a
+	full save re-runs the modified-timestamp check (which
+	``ignore_validate_update_after_submit`` does NOT bypass), so a concurrent
+	writer landing between load and save would raise ``TimestampMismatchError`` and
+	silently lose the flip leaving the run stuck Analyzing. The direct UPDATE
+	touches only this row and never loads the submitted doc."""
+	name = frappe.db.get_value(
+		"Optimus Phase Two Run",
+		{"parent": parent_docname, "run_uuid": run_uuid},
+		"name",
+	)
+	if not name:
 		_safe_log_error(
 			"optimus phase 2 mark ready",
 			f"no Phase Two Run {run_uuid} on {parent_docname}; left not-Ready",
 		)
 		return False
-	parent.flags.ignore_validate_update_after_submit = True
-	parent.save(ignore_permissions=True)
+	frappe.db.set_value(
+		"Optimus Phase Two Run",
+		name,
+		{"status": "Ready", "ended_at": frappe.utils.now_datetime()},
+	)
 	safe_commit()
 	return True
 
 
 def _mark_run_failed(parent_docname: str, run_uuid: str, error: str, tb: str) -> None:
-	"""Best-effort: set the run row's status to Failed with the error
-	message in warnings_json. Tolerant of missing parent / row so the
-	caller can still re-raise cleanly."""
+	"""Best-effort: flip the run row to Failed with the error in warnings_json via
+	a targeted ``frappe.db.set_value`` (same race-free rationale as
+	``_mark_run_ready``). Tolerant of a missing parent / row so the caller can
+	still re-raise cleanly."""
 	if not parent_docname:
 		return
 	try:
-		parent = frappe.get_doc("Optimus Session", parent_docname)
-		for child in (parent.phase_2_runs or []):
-			if child.run_uuid == run_uuid:
-				child.status = "Failed"
-				child.warnings_json = json.dumps([
-					f"phase 2 analyze failed: {error}",
-					tb,
-				], default=str)
-				child.ended_at = frappe.utils.now_datetime()
-				break
-		parent.flags.ignore_validate_update_after_submit = True
-		parent.save(ignore_permissions=True)
+		name = frappe.db.get_value(
+			"Optimus Phase Two Run",
+			{"parent": parent_docname, "run_uuid": run_uuid},
+			"name",
+		)
+		if not name:
+			return
+		frappe.db.set_value(
+			"Optimus Phase Two Run",
+			name,
+			{
+				"status": "Failed",
+				"warnings_json": json.dumps(
+					[f"phase 2 analyze failed: {error}", tb], default=str
+				),
+				"ended_at": frappe.utils.now_datetime(),
+			},
+		)
 		safe_commit()
 	except Exception:
 		# Truly best-effort don't mask the original exception.
@@ -768,19 +868,25 @@ def _mark_run_failed(parent_docname: str, run_uuid: str, error: str, tb: str) ->
 			pass
 
 
-def _regenerate_parent_reports(session_uuid: str) -> None:
-	"""Trigger re-render of the parent Optimus Session's HTML reports via
-	``api.regenerate_reports(session_uuid)`` (the shared re-render path).
-	"""
+def _regenerate_parent_reports(session_uuid: str) -> bool:
+	"""Re-render the parent Optimus Session's HTML reports via the shared
+	``api.regenerate_reports(session_uuid)`` path so the new phase-2 panel +
+	findings appear. Returns True on success, False if the render raised.
+
+	The caller gates the Ready flip + completion popup on this return: a failed
+	render must never flip the run to Ready with no report attached (the headline
+	invariant this fix exists to protect)."""
 	try:
 		from optimus import api as optimus_api
 
 		optimus_api.regenerate_reports(session_uuid)  # type: ignore[attr-defined]
+		return True
 	except Exception as exc:
-		# Re-render failure is non-fatal: data is persisted, the customer
-		# just needs to click "Regenerate Reports" manually. Surface the
-		# error in the run row for debuggability.
+		# Surface the error with a traceback for debuggability; the caller turns
+		# this False into an actionable Failed state (data is already persisted,
+		# so "Regenerate Reports" or a retry rebuilds the panel).
 		frappe.log_error(
 			title="phase 2 re-render failed",
 			message=f"{session_uuid}: {exc}\n{traceback.format_exc()}",
 		)
+		return False
