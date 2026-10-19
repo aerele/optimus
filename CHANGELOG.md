@@ -36,6 +36,8 @@ versions may contain breaking changes see migration notes below).
 
 ### AI behavior and upgrade
 
+- Check new N+1 suggestions for repeated reads across for/while loops; request
+  a correction or withhold API-only rewrites and unsupported query-count claims.
 - Automatic finding fixes and captured Steps share the automatic-consent toggle.
   Steps rewriting preserves user-written/edited notes and concurrent saves.
 - Record provider-send certainty; block unknown outcomes and legacy timeout rows

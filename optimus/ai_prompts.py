@@ -126,8 +126,8 @@ UNTRUSTED_DATA_CLAUSE = (
 
 # ---------------------------------------------------------------- fix prompt
 _ROLE = (
-	"You are a senior Frappe Framework / ERPNext engineer reviewing one finding from a "
-	"performance profiler. Propose the smallest fix for the root cause following Frappe conventions.\n" + UNTRUSTED_DATA_CLAUSE + "\n"
+	"You are a senior Frappe / ERPNext engineer. Propose the smallest root cause fix "
+	"following Frappe conventions.\n" + UNTRUSTED_DATA_CLAUSE + "\n"
 )
 
 _GROUNDING = (
@@ -161,10 +161,11 @@ FRAPPE_REVIEW_RULES = (
 	"calls keep their arguments, throw mode, result use and execution conditions. A discarded "
 	"non-throwing check may move verbatim. Never add `throw=True` to it. Only a new check "
 	"may choose `throw=True`; otherwise use its result.\n"
-	"- Loops: batch per-row reads into one `(\"in\", names)` query plus a dict. "
-	"Remove unused reads only if the source proves no required side effect (locks, liveness, "
-	"existence checks); do not hoist unnecessary work. Preserve try/except and conditional "
-	"execution when moving calls. Show the loop header; cheaper per-row reads still leave N+1. "
+	"- Loops: show the enclosing for/while header. SQL -> ORM inside that loop still repeats; "
+	"an IN filter alone does not batch. Batch row-dependent reads outside the loop; reuse invariant "
+	"reads only when freshness permits. Remove unused reads only without required locks, liveness "
+	"or existence checks. Preserve try/except, conditions and intentional benchmark load. "
+	"No dummy loops. Claim fewer queries only when the diff demonstrates fewer calls. "
 	"Batch plain column writes with `frappe.db.set_value(doctype, {filters}, field, value)` or "
 	"`frappe.db.bulk_update(doctype, {name: {field: value}})`; both skip validation and hooks, "
 	"so fields that need them keep `doc.save()`. Never introduce an unfiltered `delete`, "
@@ -249,8 +250,8 @@ _EXAMPLES = (
 )
 
 _SELF_CHECK = (
-	"Before answering, check: every `-` and context line is verbatim shown code (or there is "
-	"no code); no added or moved raw SQL; permission behaviour unchanged; exactly four headings."
+	"Check: `-` and context lines verbatim; no new/moved SQL; permissions unchanged; "
+	"N+1 reads actually leave their loop; four headings."
 )
 
 SYSTEM_PROMPT = (
@@ -260,9 +261,14 @@ SYSTEM_PROMPT = (
 # ------------------------------------------------ per-type hints (USER message)
 # One or two sentences each, sent next to the finding's data.
 FINDING_TYPE_HINTS = {
-	"N+1 Query": "One query runs per row of an outer loop. Lift it out and batch it into one "
-	"`(\"in\", names)` query plus a dict keyed by the join column; keep `get_list` if the "
-	"loop used `get_list`.",
+	"N+1 Query": "A database read repeats. Show its enclosing loop in the diff. For changing "
+	"row keys, fetch once outside that loop and use a dict; keep get_list permission semantics. "
+	"For invariant reads, reuse once only if freshness, conditions and exception handling permit; "
+	"remove an unused read only if no required side effect or intentional benchmark load is lost. "
+	"Replacing SQL with get_all at the same position still queries each iteration. An IN filter "
+	"inside that loop or a dummy loop does not prove batching. Never claim N-to-1 without moving "
+	"or eliminating repeated reads. If the caller loop is unseen or equivalence is uncertain, "
+	"give directional advice without code.",
 	"Slow Query": "One SQL statement is slow. Follow the profiler's index advice when the message "
 	"gives one, make the WHERE usable by an existing index, or touch fewer rows and columns.",
 	"Redundant Call": "The same lookup runs many times with the same arguments. Hoist it out "
@@ -274,6 +280,17 @@ FINDING_TYPE_HINTS = {
 	"Hot Line": "One line dominates its function. Hoist invariant work out of the loop, use a "
 	"dict or set for lookups, and avoid a DB or cache call per iteration.",
 }
+
+LOOP_FIX_FALLBACK = (
+	"**Diagnosis**: The proposed rewrite did not establish a reduction in repeated database reads.\n\n"
+	"**Fix**: Review the enclosing loop. Batch row-dependent reads, or reuse an invariant read "
+	"outside that loop only when data freshness, execution conditions and exception handling permit. "
+	"Remove an unused read only after checking required side effects and intentional benchmark load.\n\n"
+	"**Why it works**: An API change or IN filter alone does not establish fewer calls. "
+	"The suggested code and its improvement claim were withheld because the reduction could not be checked.\n\n"
+	"**Verify**: Re-profile the same flow and compare all database calls, including ORM-generated SQL. "
+	"No query-count reduction has been verified."
+)
 
 # ---------------------------------------------------------------- steps prompt
 STEPS_SYSTEM_PROMPT = (
@@ -388,6 +405,13 @@ RULE_TEXT = {
 	"cannot be established, give directional advice without code.",
 	"loop-query": "The replacement still reads the database per row ({detail}). It may reduce work per "
 	"query, but the N+1 pattern remains; batch the reads where document hooks and semantics permit.",
+	"ineffective-loop-fix": "The replacement still reads the database in the repeated loop ({detail}). "
+	"An API change or IN filter inside the same loop does not establish fewer calls. Show the "
+	"enclosing loop and move, batch, cache or safely remove the read; otherwise give direction "
+	"without code or a numerical improvement claim.",
+	"unverified-loop-fix": "The query-count improvement could not be checked ({detail}). Show a "
+	"complete grounded diff including the enclosing loop and the read replacement, or give "
+	"direction without code. Do not claim a measured or N-to-1 reduction.",
 	"multitenant-cache": "No `functools.lru_cache` / `@cache` / module-level cache ({detail}): use "
 	"`@request_cache` or `@redis_cache(ttl=...)` from `frappe.utils.caching`, or `frappe.get_cached_value`.",
 	"module-state": "No module-level `x = frappe....` values ({detail}); they leak across sites. "

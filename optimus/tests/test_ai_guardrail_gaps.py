@@ -275,13 +275,13 @@ def test_permission_repair_is_single_and_keeps_both_paid_answers(monkeypatch, re
 	assert result["guardrail"]["fallback"] is not repaired
 
 
-def test_partial_loop_improvement_does_not_spend_on_repair(monkeypatch):
+def test_partial_loop_improvement_for_other_finding_types_does_not_spend_on_repair(monkeypatch):
 	from optimus.tests.test_ai_fix import TestGuardedCompletion, _post_sequence
 	before = ['for name in names:', '    rows.append(frappe.get_doc("User", name).email)']
 	after = ['for name in names:', '    rows.append(frappe.db.get_value("User", name, "email"))']
 	text = answer(before, after)
 	runner = TestGuardedCompletion()
-	runner._FINDING = {**runner._FINDING, "source_window": [
+	runner._FINDING = {**runner._FINDING, "finding_type": "Slow Query", "source_window": [
 		{"lineno": 1 + i, "content": line, "is_target": i == 1} for i, line in enumerate(before)]}
 	fake = _post_sequence(runner._resp(text))
 	result = runner._run(fake, monkeypatch)

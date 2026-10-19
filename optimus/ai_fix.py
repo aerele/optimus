@@ -607,7 +607,7 @@ def suggest_fix(
 			provider,
 			system,
 			messages,
-			shown_lines=shown, response_out=response_out, send_raw=send_raw,
+			shown_lines=shown, response_out=response_out, send_raw=send_raw, finding_type=finding.get("finding_type"),
 			usage=usage,
 			metadata=_session_call_metadata(provider, session_uuid=session_uuid, docname=docname, finding_type=finding.get("finding_type")),
 			session_uuid=session_uuid,
@@ -2836,6 +2836,7 @@ def _complete_with_guardrails(
 	*,
 	shown_lines: list[str],
 	usage: dict,
+	finding_type: str | None = None,
 	response_out: dict | None = None,
 	send_raw: bool = False,
 	metadata: dict | None = None,
@@ -2887,7 +2888,7 @@ def _complete_with_guardrails(
 		if response_out is not None:
 			response_out.update(completion_status=status, provider_finish_reason=meta.get("provider_finish_reason"))
 		return ai_responses.unavailable_note(status), {"violations": [], "reasked": False, "fallback": True}, finish
-	violations = ai_guardrails.verify_fix(text, source_lines=shown_lines, finish_reason="length" if status == "incomplete" else finish)
+	violations = ai_guardrails.verify_fix(text, source_lines=shown_lines, finish_reason="length" if status == "incomplete" else finish, finding_type=finding_type)
 	to_fix = ai_guardrails.reaskable(violations)
 	reasked = False
 	if to_fix:
@@ -2952,7 +2953,7 @@ def _complete_with_guardrails(
 			rewritten = (rewritten or "").strip()
 			if rewritten and ai_responses.completion_status(reask_meta.get("finish_reason")) == "complete" and ai_guardrails.can_validate(rewritten):
 				rewritten_finish = reask_meta.get("finish_reason")
-				new = ai_guardrails.verify_fix(rewritten, source_lines=shown_lines, finish_reason=rewritten_finish)
+				new = ai_guardrails.verify_fix(rewritten, source_lines=shown_lines, finish_reason=rewritten_finish, finding_type=finding_type)
 				adopt = (
 					not any(v.action == ai_guardrails.TRUNCATED for v in new)
 					and not ai_guardrails.check_headings(rewritten)

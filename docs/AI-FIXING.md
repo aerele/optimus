@@ -319,6 +319,22 @@ Adding a whitelist decorator or editing an argument on a later signature line tr
 
 The rules come in tiers.
 
+Newly generated or manually refreshed **N+1 Query** fixes must show how repeated
+reads change. A SQL-to-ORM rewrite, an IN filter still inside the same loop, or a
+dummy wrapping loop does not establish fewer calls. Such answers trigger the
+existing optional single repair request; if repair is disabled, unavailable or
+unsuccessful, Optimus withholds both the code and its unsupported improvement
+claim. Read replacements whose diff omits the enclosing loop need a complete
+grounded diff or directional advice without code. Other finding types retain
+advisory notes for partial per-query improvements. These are bounded static
+checks, not proof of runtime equivalence or measured query savings. Prompt
+version remains 4: saved answers are not invalidated or automatically regenerated
+by this quality check. Replace existing suggestions explicitly to regenerate them.
+For new N+1 fixes, function references, lambdas and newly extracted query helpers
+require local review or directional advice: static inspection cannot establish
+how often their caller runs. A memo must visibly persist outside the loop and
+must not be reset. Ambiguous loop/header rewrites can be withheld conservatively.
+
 - **Block rules** mean the code is fabricated, unsafe or wrong: code not copied from the shown source, added, moved or changed raw SQL (including parameter-only changes) or any DDL, formatted SQL, a removed permission check or `ignore_permissions` / `allow_guest`, `eval` / `exec`, pickle or marshal loads, shell commands, switching to Administrator, a manual commit, a process-wide cache, `enqueue` without `enqueue_after_commit=True`, the four headings, and every Frappe rule a pinned semgrep rule checks: untranslated messages, untyped whitelisted arguments, a positional `order` in `orderby`, `get_value` on a Single DocType, controller writes that are never saved, child rows changed while iterating, module or request-proxy state, and an unchecked `has_permission`. Optimus sends the model one follow-up turn listing every broken block rule and keeps the rewrite only if it has the four headings and breaks fewer block rules. Code that still breaks a block rule is removed, and a profiler note names each broken rule in plain English (the first two, then how many more). A heading problem alone never removes code.
 - **Advise rules** are conventions no pinned semgrep rule checks: no dynamic imports, and no index led by a Frappe metadata column. They never cost a follow-up turn and never remove code: one profiler note lists them.
 - **Notes** tell you about the answer: Customize Form has no index option, the model saw only part of the prompt, an image or an off-site link was removed, captured-data markers were echoed.
