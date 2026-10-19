@@ -36,6 +36,7 @@ class Aliases(ast.NodeVisitor):
 		self.scopes = [self.root]
 		self.at = {}
 		self.cache = {}
+		self.resolution_work = 0
 		self.unsupported = []
 		self.visit(tree)
 		# Redirect global/nonlocal writes only after all scopes' locals exist.
@@ -221,12 +222,17 @@ class Aliases(ast.NodeVisitor):
 	visit_GeneratorExp = visit_ListComp
 
 	def values(self, node, seen=frozenset(), depth=0):
-		if depth > 100:
-			raise AnalysisLimitExceeded("Static alias resolution depth exceeded")
+		self.resolution_work += 1
+		if depth > 100 or self.resolution_work > 10000:
+			raise AnalysisLimitExceeded("Static alias resolution budget exceeded")
 		if isinstance(node, ast.IfExp):
-			return self.values(node.body, seen, depth + 1) | self.values(node.orelse, seen, depth + 1)
+			return self._bounded(self.values(node.body, seen, depth + 1) | self.values(node.orelse, seen, depth + 1))
 		if isinstance(node, ast.BoolOp):
-			return frozenset().union(*(self.values(value, seen, depth + 1) for value in node.values))
+			out = set()
+			for value in node.values:
+				out.update(self.values(value, seen, depth + 1))
+				self._bounded(out)
+			return frozenset(out)
 		if isinstance(node, ast.Name):
 			scope = self.at.get(node, self.root)
 			while scope:
@@ -243,6 +249,7 @@ class Aliases(ast.NodeVisitor):
 								if isinstance(value, str) or value is None
 								else self.values(value, seen | {key}, depth + 1)
 							)
+							self._bounded(out)
 						self.cache[key] = frozenset(out or {None})
 					return self.cache[key]
 				scope = scope.parent
@@ -257,6 +264,14 @@ class Aliases(ast.NodeVisitor):
 				for value in self.values(node.func, seen, depth + 1)
 			)
 		return frozenset({None})
+
+	@staticmethod
+	def _bounded(values):
+		# Repeated alternative bindings can double the identity set at every
+		# level even in a tiny AST. Never cache or combine an unbounded set.
+		if len(values) > 128:
+			raise AnalysisLimitExceeded("Static alias identity budget exceeded")
+		return frozenset(values)
 
 	def name(self, node):
 		values = self.values(node)

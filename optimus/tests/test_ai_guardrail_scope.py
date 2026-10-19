@@ -226,3 +226,53 @@ def test_worst_case_alias_inputs_stay_within_the_strict_work_budget():
 		text = "**Fix**\n```python\n" + "\n".join(code) + "\n```"
 		assert "unverified-safety" in {v.code for v in G.stored_policy_violations(text)}
 	assert time.perf_counter() - started < 2
+
+
+def test_branching_aliases_are_bounded_without_exponential_identity_sets():
+	import ast
+	import time
+
+	from optimus.ai_aliases import Aliases, AnalysisLimitExceeded
+
+	code = ["b0=frappe"]
+	for i in range(30):
+		code += [f"b{i + 1}=b{i}.left", f"b{i + 1}=b{i}.right"]
+	code += ["b30.sql(query)"]
+	tree = ast.parse("\n".join(code))
+	assert len(list(ast.walk(tree))) < 500
+	resolver = Aliases(tree)
+	started = time.perf_counter()
+	with pytest.raises(AnalysisLimitExceeded):
+		resolver.values(tree.body[-1].value.func)
+	assert max(map(len, resolver.cache.values())) <= 128
+	text = "**Fix**\n```python\n" + "\n".join(code) + "\n```"
+	assert "unverified-safety" in {v.code for v in G.stored_policy_violations(text)}
+	assert "unverified-safety" in {v.code for v in G.verify_fix(text, source_lines=[])}
+	assert time.perf_counter() - started < 2
+
+
+def test_wide_alias_alternatives_stop_before_combining_the_whole_answer():
+	import ast
+
+	from optimus.ai_aliases import Aliases, AnalysisLimitExceeded
+
+	code = "a=" + " or ".join(f"frappe.attr{i}" for i in range(500)) + "\na.sql(query)"
+	tree = ast.parse(code)
+	assert len(list(ast.walk(tree))) < 4000
+	resolver = Aliases(tree)
+	with pytest.raises(AnalysisLimitExceeded):
+		resolver.values(tree.body[-1].value.func)
+	assert not resolver.cache
+
+
+def test_cached_alias_checks_also_charge_the_aggregate_work_budget():
+	import ast
+
+	from optimus.ai_aliases import Aliases, AnalysisLimitExceeded
+
+	tree = ast.parse("a=frappe.db\na.sql(query)")
+	resolver = Aliases(tree)
+	for _ in range(9998):
+		assert resolver.values(tree.body[-1].value.func.value) == {"frappe.db"}
+	with pytest.raises(AnalysisLimitExceeded):
+		resolver.values(tree.body[-1].value.func.value)

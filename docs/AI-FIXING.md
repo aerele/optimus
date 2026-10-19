@@ -695,3 +695,9 @@ A cheaper read that replaces a read inside the same visible loop gets an advisor
 The same reconstructable blocking checks classify saved Fix code locally. Affected answers show “Safety review needed”, retain diagnosis and withhold code and obsolete rationale. Raw-SQL answers retain “Frappe API update needed”. Original response text and usage stay in the private saved finding. Prompt version stays 4; unrelated good answers remain current. Manual Refresh can replace affected answers after the existing cost confirmation; automatic missing-only runs and report regeneration do not retry them. Existing HTML files remain snapshots.
 
 Permission or paired SQL changes supplied as full replacement code require a grounded diff at generation so before/after evidence is available. Stored non-diff permission bodies are not retroactively classified as behavior changes. Parser failures withhold code rather than breaking the report; repaired fragments carry an unverified-structure note. Dynamic permission argument expansion requires explicit arguments. Checks are static and do not prove assigned-result dataflow, arbitrary control flow, or all Frappe conventions.
+
+Static alias analysis also limits logical resolution to 100 nested hops, 10,000
+resolution visits and 128 candidate identities per lookup, in addition to the
+4,000-node / 100-level AST limits. Deep or branching aliases that exceed these
+bounds receive `unverified-safety`; their code is withheld without crashing report
+rendering. These checks execute no suggested code and make no provider requests.
