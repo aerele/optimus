@@ -836,10 +836,11 @@ def _verify_fix(text: str, *, source_lines: list[str], finish_reason: str | None
 
 
 def _html_checked(check, *args, **kwargs):
+	from optimus.ai_aliases import AnalysisLimitExceeded
 	from optimus.ai_code_html import InvalidCodeHTML
 	try:
 		return check(*args, **kwargs)
-	except InvalidCodeHTML:
+	except (InvalidCodeHTML, AnalysisLimitExceeded, RecursionError):
 		return [_v("unverified-safety", "the rendered code structure could not be checked")]
 
 

@@ -10,6 +10,10 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 
+class AnalysisLimitExceeded(ValueError):
+	"""The untrusted code exceeds the static resolver's work/stack budget."""
+
+
 @dataclass(eq=False)
 class Scope:
 	node: ast.AST
@@ -26,7 +30,7 @@ class Aliases(ast.NodeVisitor):
 			node, depth = pending.pop()
 			count += 1
 			if count > 4000 or depth > 100:
-				raise ValueError("Static alias analysis budget exceeded")
+				raise AnalysisLimitExceeded("Static alias analysis budget exceeded")
 			pending.extend((child, depth + 1) for child in ast.iter_child_nodes(node))
 		self.root = self.current = Scope(tree)
 		self.scopes = [self.root]
@@ -216,11 +220,13 @@ class Aliases(ast.NodeVisitor):
 	visit_DictComp = visit_ListComp
 	visit_GeneratorExp = visit_ListComp
 
-	def values(self, node, seen=frozenset()):
+	def values(self, node, seen=frozenset(), depth=0):
+		if depth > 100:
+			raise AnalysisLimitExceeded("Static alias resolution depth exceeded")
 		if isinstance(node, ast.IfExp):
-			return self.values(node.body, seen) | self.values(node.orelse, seen)
+			return self.values(node.body, seen, depth + 1) | self.values(node.orelse, seen, depth + 1)
 		if isinstance(node, ast.BoolOp):
-			return frozenset().union(*(self.values(value, seen) for value in node.values))
+			return frozenset().union(*(self.values(value, seen, depth + 1) for value in node.values))
 		if isinstance(node, ast.Name):
 			scope = self.at.get(node, self.root)
 			while scope:
@@ -235,7 +241,7 @@ class Aliases(ast.NodeVisitor):
 							out.update(
 								{value}
 								if isinstance(value, str) or value is None
-								else self.values(value, seen | {key})
+								else self.values(value, seen | {key}, depth + 1)
 							)
 						self.cache[key] = frozenset(out or {None})
 					return self.cache[key]
@@ -243,12 +249,12 @@ class Aliases(ast.NodeVisitor):
 			return frozenset({node.id if node.id == "frappe" else None})
 		if isinstance(node, ast.Attribute):
 			return frozenset(
-				value + "." + node.attr if value else None for value in self.values(node.value, seen)
+				value + "." + node.attr if value else None for value in self.values(node.value, seen, depth + 1)
 			)
 		if isinstance(node, ast.Call):
 			return frozenset(
 				value + "()" if value and value.startswith("frappe.qb.") else None
-				for value in self.values(node.func, seen)
+				for value in self.values(node.func, seen, depth + 1)
 			)
 		return frozenset({None})
 

@@ -132,3 +132,97 @@ def test_scope_redirects_and_conditional_bindings_cannot_hide_sql(code):
 def test_global_declaration_does_not_shadow_the_implicit_frappe_root():
 	code=['def work():','    global frappe','    frappe.db.sql(query)']
 	assert 'raw-sql' in {v.code for v in violations(['old_work()'],code)}
+
+
+@pytest.mark.parametrize("count,attributes", [(300, 0), (500, 1), (40, 40)])
+def test_logical_alias_depth_is_bounded_below_the_ast_size_limit(count, attributes):
+	import ast
+
+	code = [f"b{i}=b{i + 1}" + ".db" * attributes for i in range(count)]
+	code += [f"b{count}=frappe.db", "b0.sql(query)"]
+	assert len(list(ast.walk(ast.parse("\n".join(code))))) < 4000
+	text = "**Fix**\n```python\n" + "\n".join(code) + "\n```"
+	assert len(text) < 16384
+	for result in (G.stored_policy_violations(text), G.verify_fix(text, source_lines=[])):
+		assert "unverified-safety" in {v.code for v in result}
+		assert G.strips_code(result)
+		assert not G.rendered_blocks(G.apply_fallback(text, result))
+
+
+def test_short_forward_aliases_keep_their_real_identity():
+	code = [f"b{i}=b{i + 1}" for i in range(50)] + ["b50=frappe.db", "b0.sql(query)"]
+	text = "**Fix**\n```python\n" + "\n".join(code) + "\n```"
+	assert {v.code for v in G.stored_policy_violations(text)} == {"raw-sql"}
+
+
+@pytest.mark.parametrize("count,attributes", [(500, 0), (500, 1), (40, 40)])
+def test_alias_limit_fires_before_native_stack_exhaustion(count, attributes):
+	import ast
+	import sys
+
+	from optimus.ai_aliases import Aliases, AnalysisLimitExceeded
+
+	code = [f"b{i}=b{i + 1}" + ".db" * attributes for i in range(count)]
+	tree = ast.parse("\n".join(code + [f"b{count}=frappe.db", "b0.sql(query)"]))
+	resolver = Aliases(tree)
+	depth, frame = 0, sys._getframe()
+	while frame:
+		depth += 1
+		frame = frame.f_back
+	previous = sys.getrecursionlimit()
+	try:
+		sys.setrecursionlimit(depth + 400)
+		with pytest.raises(AnalysisLimitExceeded):
+			resolver.values(tree.body[-1].value.func)
+	finally:
+		sys.setrecursionlimit(previous)
+	assert not resolver.cache  # interrupted resolutions never publish partial identities
+
+
+def test_deep_alias_result_is_withheld_and_memoized_across_report_gates(monkeypatch):
+	import json
+
+	from optimus import ai_prompts as P
+	from optimus.renderer import finding_enrichment
+	from optimus.tests.test_renderer_structure_snapshot import _finding
+
+	code = [f"b{i}=b{i + 1}.db" for i in range(500)] + ["b500=frappe", "b0.sql(query)"]
+	text = "**Fix**\n```python\n" + "\n".join(code) + "\n```"
+	stored = dict(suggestion=text, prompt_version=P.PROMPT_VERSION)
+	calls = []
+	check = G._stored_policy_violations
+	monkeypatch.setattr(G, "_stored_policy_violations", lambda text: calls.append(text) or check(text))
+	with G.render_validation_budget():
+		assert P.fix_state(stored)[0] == P.FIX_OUTDATED
+		finding = finding_enrichment._finding_to_dict(_finding(llm_fix_json=json.dumps(stored)))
+		assert finding["llm_fix"]["policy_codes"] == ["unverified-safety"]
+		assert "b0.sql" not in finding["llm_fix"]["suggestion_html"]
+		assert len(calls) == 1
+
+
+def test_normal_query_builder_chain_through_aliases_remains_allowed():
+	code = ["a=frappe.qb", "b=a.from_(T)", "c=b.select(T.name)", "c" + ".where(T.name == name)" * 20 + ".run()"]
+	text = "**Fix**\n```python\n" + "\n".join(code) + "\n```"
+	assert not G.stored_policy_violations(text)
+
+
+@pytest.mark.parametrize("binding", ["b=a", "b=a if flag else frappe.db", "b=a or frappe.db"])
+def test_cyclic_aliases_remain_ambiguous(binding):
+	import ast
+
+	from optimus.ai_aliases import Aliases
+
+	tree = ast.parse("a=b\n" + binding + "\na.sql(query)")
+	values = Aliases(tree).values(tree.body[-1].value.func.value)
+	assert None in values
+
+
+def test_worst_case_alias_inputs_stay_within_the_strict_work_budget():
+	import time
+
+	started = time.perf_counter()
+	for count, attributes in [(300, 0), (500, 1), (40, 40)]:
+		code = [f"b{i}=b{i + 1}" + ".db" * attributes for i in range(count)] + [f"b{count}=frappe.db", "b0.sql(query)"]
+		text = "**Fix**\n```python\n" + "\n".join(code) + "\n```"
+		assert "unverified-safety" in {v.code for v in G.stored_policy_violations(text)}
+	assert time.perf_counter() - started < 2

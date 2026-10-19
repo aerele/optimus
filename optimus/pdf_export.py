@@ -118,8 +118,9 @@ def _safe_pdf_html(content):
 	matching raw tags to a fixed point both before and after HTML normalization,
 	including matches hidden in comments, raw-text elements or attribute values.
 	"""
-	from bs4 import BeautifulSoup
-	from tinycss2 import parse_component_value_list
+	from bs4 import BeautifulSoup, Doctype
+	from bs4.element import PreformattedString
+	from tinycss2 import parse_component_value_list, serialize
 
 	def strip_meta(value):
 		while True:
@@ -129,6 +130,13 @@ def _safe_pdf_html(content):
 			value = clean
 
 	soup = BeautifulSoup(strip_meta(content), "html5lib")
+	had_doctype = any(isinstance(node, Doctype) for node in soup.contents)
+	# These node types serialize unescaped. Remove malformed declarations and
+	# comments before Frappe reparses them, preserving the report's layout mode.
+	for node in soup.find_all(string=lambda node: isinstance(node, PreformattedString)):
+		node.extract()
+	if had_doctype:
+		soup.insert(0, Doctype("html"))
 	# Frappe supplies the requesting user's cookie jar to wkhtmltopdf. Keep
 	# CSS, SVG and other resource channels from fetching authenticated images
 	# after the img-only inliner, too. Raster data images need no credentials.
@@ -165,14 +173,19 @@ def _safe_pdf_html(content):
 		tag.attrs.pop("srcset", None)
 		if tag.has_attr("style") and resource_css(parse_component_value_list(tag["style"])):
 			tag.attrs.pop("style", None)
-		# Foreign style text decodes entities, but bs4 serializes it without
-		# escaping. Frappe's next parse could turn that text into real images.
-		if tag.name == "style" and (
-			tag.namespace != "http://www.w3.org/1999/xhtml"
-			or tag.string is None or tag.find(True, recursive=False) is not None
-			or resource_css(parse_component_value_list(str(tag.string)))
-		):
-			tag.decompose()
+		if tag.name == "style":
+			if (tag.namespace != "http://www.w3.org/1999/xhtml"
+				or tag.string is None or tag.find(True, recursive=False) is not None):
+				tag.decompose()
+				continue
+			tokens = parse_component_value_list(str(tag.string), skip_comments=True)
+			css = serialize(tokens)
+			# A later parse can change an HTML style into foreign content and
+			# decode entities. Neither raw markup nor encoded markup may survive.
+			if resource_css(tokens) or "<" in css or "&" in css:
+				tag.decompose()
+			else:
+				tag.string.replace_with(css)
 	return strip_meta(str(soup))
 
 

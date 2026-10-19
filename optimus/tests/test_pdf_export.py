@@ -131,6 +131,7 @@ def test_pdf_normalizer_blocks_authenticated_resource_channels():
 	assert not soup.find('div').has_attr('style')
 
 
+@pytest.mark.parametrize("header", [False, True])
 @pytest.mark.parametrize("content", [
 	'<svg><style><!-- comment -->text{fill:url("/private/files/secret.svg")}</style></svg>',
 	'<svg><style><a href="/private/files/secret.svg">text</a></style></svg>',
@@ -140,12 +141,126 @@ def test_pdf_normalizer_blocks_authenticated_resource_channels():
 	'<svg><script>&lt;/script&gt;&lt;img src=/private/files/secret.svg&gt;</script></svg>',
 	'<svg><script><![CDATA[</script><img src=/private/files/secret.svg>]]></script></svg>',
 ])
-def test_pdf_normalizer_checks_foreign_style_with_comment_children(content):
+def test_pdf_normalizer_checks_foreign_style_with_comment_children(content, header):
 	from bs4 import BeautifulSoup
 
 	from optimus.pdf_export import _safe_pdf_html
 
+	if header:
+		content = '<div id="header-html">' + content + '</div>'
 	clean = _safe_pdf_html(content)
 	assert "/private/files/secret.svg" not in clean
 	post = BeautifulSoup(clean, "html5lib")
 	assert not post.find("img")
+	assert not BeautifulSoup(str(post), "html.parser").find("img")
+
+
+@pytest.mark.parametrize("header", [False, True])
+@pytest.mark.parametrize("encoding", ["raw", "&lt;", "&#60;", "&#x3c;"])
+@pytest.mark.parametrize("leaf", ["mglyph", "malignmark"])
+@pytest.mark.parametrize("parent", ["mtext", "mi"])
+@pytest.mark.parametrize("table", ["table", "tbody"])
+def test_pdf_normalizer_stays_safe_across_namespace_changes(leaf, parent, table, encoding, header):
+	from bs4 import BeautifulSoup
+
+	payload = '<img src="/private/files/canary.png">'
+	if encoding != "raw":
+		payload = ("</style>" + payload).replace("<", encoding).replace(">", "&gt;")
+	body = f"<{leaf}><style>{payload}</style></{leaf}>"
+	if table == "tbody":
+		body = "<tbody>" + body + "</tbody>"
+	content = f"<math><{parent}><table>{body}</table></{parent}></math>"
+	if header:
+		content = '<div id="header-html">' + content + '</div>'
+	clean = pdf_export._safe_pdf_html(content)
+	allowed = {tag.name for tag in BeautifulSoup(clean, "html5lib").find_all(True)} | {"html", "head", "body", "tbody"}
+	for parser in ("html5lib", "html.parser"):
+		soup = BeautifulSoup(clean, parser)
+		assert {tag.name for tag in soup.find_all(True)} <= allowed
+		assert not any(tag.get("src") for tag in soup.find_all("img"))
+		assert not soup.find("meta", attrs={"name": lambda value: value and value.lower().startswith("pdfkit-")})
+		assert "<!--" not in str(soup)
+		clean = str(soup)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_pdf_normalizer_keeps_real_report_css_without_raw_markup(legacy):
+	from bs4 import BeautifulSoup
+	from tinycss2 import parse_component_value_list, serialize
+
+	from optimus import renderer
+	from optimus.tests.test_renderer_v3 import _fake_doc
+
+	content = renderer.render_raw(_fake_doc(), [])
+	if legacy:
+		from pathlib import Path
+		content = (Path(__file__).parents[2] / "docs/optimus_raw_report_eb7d4af777c13a4e821529.html").read_text()
+	before = BeautifulSoup(content, "html5lib").find_all("style")
+	after = BeautifulSoup(pdf_export._safe_pdf_html(content), "html5lib").find_all("style")
+	assert len(before) == len(after) > 0
+	for original, sanitized in zip(before, after, strict=True):
+		assert "<" not in str(sanitized.string) and "&" not in str(sanitized.string)
+		assert serialize(parse_component_value_list(str(original.string), skip_comments=True)) == serialize(
+			parse_component_value_list(str(sanitized.string), skip_comments=True)
+		)
+
+
+def test_pdf_normalizer_canonicalizes_declarations_and_keeps_visible_code():
+	from bs4 import BeautifulSoup, Comment, Doctype
+
+	content = '<!DOCTYPE html PUBLIC "example"><!-- -- > <img src=/private/files/canary.png> --><pre>&lt;!-- visible code --&gt;</pre>'
+	clean = pdf_export._safe_pdf_html(content)
+	for parser in ("html5lib", "html.parser"):
+		soup = BeautifulSoup(clean, parser)
+		assert [str(node) for node in soup.contents if isinstance(node, Doctype)] == ["html"]
+		assert not soup.find_all(string=lambda node: isinstance(node, Comment))
+		assert not any(tag.get("src") for tag in soup.find_all("img"))
+		assert soup.pre.get_text() == "<!-- visible code -->"
+		clean = str(soup)
+
+
+def test_pdf_normalizer_withholds_markup_in_css_but_keeps_comment_free_css():
+	from bs4 import BeautifulSoup
+
+	content = '<style>/* <img src=/private/files/canary.png> */body{color:blue}</style>'
+	soup = BeautifulSoup(pdf_export._safe_pdf_html(content), "html5lib")
+	assert soup.style is not None and "body{color:blue}" in str(soup.style.string)
+	assert "<" not in str(soup.style.string)
+	assert not BeautifulSoup(pdf_export._safe_pdf_html('<style>p::before{content:"<img>"}</style>'), "html5lib").find("style")
+
+
+@pytest.mark.parametrize("header", [False, True])
+@pytest.mark.parametrize("payload", [
+	"<!-- -- > <img src=/private/files/canary.png> -->",
+	"<?bogus <img src=/private/files/canary.png>>",
+	'<!DOCTYPE html PUBLIC "<img src=/private/files/canary.png>">',
+])
+def test_pdf_normalizer_removes_raw_declarations(payload, header):
+	from bs4 import BeautifulSoup, Doctype
+	from bs4.element import PreformattedString
+
+	if header:
+		payload = '<div id="header-html">' + payload + '</div>'
+	clean = pdf_export._safe_pdf_html(payload)
+	for parser in ("html5lib", "html.parser"):
+		soup = BeautifulSoup(clean, parser)
+		assert not soup.find("img")
+		assert not soup.find_all(string=lambda node: isinstance(node, PreformattedString) and not isinstance(node, Doctype))
+		assert all(str(node) == "html" for node in soup.contents if isinstance(node, Doctype))
+		clean = str(soup)
+
+
+@pytest.mark.parametrize("prefix", ["", "<!doctype html>"])
+def test_pdf_normalizer_preserves_the_presence_of_a_doctype(prefix):
+	from bs4 import BeautifulSoup, Doctype
+
+	clean = pdf_export._safe_pdf_html(prefix + "<html><body>Legacy report</body></html>")
+	soup = BeautifulSoup(clean, "html5lib")
+	assert [str(node) for node in soup.contents if isinstance(node, Doctype)] == (["html"] if prefix else [])
+
+
+@pytest.mark.parametrize("markup", ["<img>", "&lt;img&gt;", "&#60;img>", "&#x3c;img>"])
+def test_pdf_normalizer_withholds_encoded_markup_in_css(markup):
+	from bs4 import BeautifulSoup
+
+	assert not BeautifulSoup(pdf_export._safe_pdf_html('<style>p::before{content:"' + markup + '"}</style>'), "html5lib").find("style")

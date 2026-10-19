@@ -610,6 +610,9 @@ reused. User-controlled pdfkit meta options are removed on Frappe 15 and 16,
 including after HTML normalization. PDF images must use raster data URLs. External resource attributes, SVG references
 and CSS URL/import channels are removed, preventing the privileged downloader's
 private images or cookies from being used to populate a shared cache.
+Stylesheets are serialized without comments; styles containing markup or entity
+openers are withheld so subsequent framework parses cannot reconstruct resources.
+Declarations are normalized while preserving whether the original had a doctype.
 Notes and legacy stored summaries are sanitized before safe HTML rendering.
 
 Retention commits each parent independently. A failed deletion rolls back its
