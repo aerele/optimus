@@ -176,7 +176,7 @@ def test_sample_counters_and_cleanup_stay_in_the_current_site(env, monkeypatch):
 	assert capture.read_all_samples("same-run") == [batch]
 
 
-def test_repeated_append_contention_marks_only_this_site_incomplete(env):
+def test_atomic_append_avoids_optimistic_contention_and_keeps_site_boundary(env):
 	cache, _ = env
 	cache.set_value(redis_keys.lp_source("fake-run"), "{}")
 	key = cache.make_key(redis_keys.lp_source("fake-run"))
@@ -185,13 +185,11 @@ def test_repeated_append_contention_marks_only_this_site_incomplete(env):
 		conflicts.append(True)
 		cache.versions[key] += 1
 	cache.before_execute = conflict
-	with pytest.raises(capture.CaptureInputError):
-		capture.flush_samples("fake-run", [{"file": "fake.py", "qualname": "example", "lineno": 1, "hits": 1, "total_us": 1}])
-	assert len(conflicts) == 3
-	assert cache.data[cache.make_key(redis_keys.lp_sample_state("fake-run"))] == b"-1"
+	capture.flush_samples("fake-run", [{"file": "fake.py", "qualname": "example", "lineno": 1, "hits": 1, "total_us": 1}])
+	assert not conflicts
+	assert int(cache.data[cache.make_key(redis_keys.lp_sample_state("fake-run"))]) > 0
 	assert all(key.startswith(b"fake-site|") for key in cache.data)
-	with pytest.raises(capture.CaptureInputError):
-		capture.read_all_samples("fake-run")
+	assert len(capture.read_all_samples("fake-run")) == 1
 
 
 def sample_target():

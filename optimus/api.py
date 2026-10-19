@@ -1932,6 +1932,8 @@ def retry_phase2_analyze(run_uuid: str) -> dict:
 def _phase2_admission_result(out: dict) -> dict:
 	if out["status"] == "Refused":
 		messages = {
+			"no_worker": _("Phase 2 needs a worker listening on the long queue. Start a worker and retry analysis."),
+			"queue_unavailable": _("Phase 2 worker availability could not be checked. Check Redis and the long queue worker, then retry analysis."),
 			"ai_refresh": _("Wait for the AI refresh to finish or cancel it before retrying Phase 2."),
 			"not_ready": _("Phase 2 requires a Ready session. Wait for profiling analysis to finish."),
 			"not_retryable": _("This Phase 2 run is no longer retryable. Reload the session."),

@@ -86,6 +86,10 @@ class MissingInput(ValueError):
 	"""Captured Phase 2 data expired or is malformed; do not save empty results."""
 
 
+class InputChanged(ValueError):
+	"""A concurrent capture completion changed the snapshot; retry after it ends."""
+
+
 class Phase2Failed(RuntimeError):
 	"""A fixed, body-free worker error; details use the scrubbed log boundary."""
 
@@ -188,7 +192,7 @@ def force_stop_captures(user):
 		"rows_marked_failed": failed_rows, "cleanup_failed": cleanup_failed}
 
 
-def _admit(docname, session_uuid, run_uuid, requested_by, *, generation, now, from_recording=False):
+def _admit(docname, session_uuid, run_uuid, requested_by, *, generation, now, from_recording=False, workers=True):
 	"""Caller commits this reservation before dispatch, under the AI mutex."""
 	reason = store.lock_phase2_parent(docname, now=now)
 	if reason:
@@ -205,6 +209,12 @@ def _admit(docname, session_uuid, run_uuid, requested_by, *, generation, now, fr
 	attempts = row.get("analyze_attempts") or 0
 	if type(attempts) is not int or not 0 <= attempts < MAX_ATTEMPTS:
 		return {"status": "refused", "reason": "retry_limit"}
+	if workers is not True:
+		if row["status"] != "Failed":
+			message = ("Phase 2 needs a worker listening on the long queue. Start a worker and retry analysis while the captured input is available."
+				if workers is False else "Phase 2 worker availability could not be checked. Check Redis and the long queue worker, then retry analysis.")
+			_write(row, status="Failed", analyze_dispatch_pending=0, warnings_json=json.dumps([message]))
+		return {"status": "refused", "reason": "no_worker" if workers is False else "queue_unavailable"}
 	_write(row, status="Analyzing", analyze_generation=generation, analyze_requested_by=requested_by,
 		analyze_worker_token=None, analyze_attempts=attempts + 1, analyze_lease_until=now + QUEUE_SECONDS,
 		analyze_dispatch_at=0, analyze_dispatch_pending=1)
@@ -257,6 +267,8 @@ def _fail(run, *, now, reason):
 	if not _owns(row, run, now):
 		return False
 	message = (
+		"Phase 2 samples changed during analysis. Wait for capture requests to finish, then retry analysis."
+		if reason == "input_changed" else
 		"Phase 2 input is missing or invalid. Record a new line-profile pass."
 		if reason == "input_missing" else
 		"Phase 2 analysis failed or was interrupted. Retry analysis while its captured input is available."
@@ -306,10 +318,12 @@ def request(docname, session_uuid, run_uuid, requested_by, *, from_recording=Fal
 	"""Gated callers admit one durable generation; SQL survives queue failure."""
 	_identity(docname, session_uuid, run_uuid, requested_by)
 	_transaction(lambda: None)
+	workers = _workers_listening(docname)
+	_transaction(lambda: None)  # Finish any availability log/settings read view before admission locks.
 	def admission():
 		sql_work.bound_http_lock_wait(frappe.db)
 		return _admit(docname, session_uuid, run_uuid, requested_by,
-			generation=uuid.uuid4().hex, now=_now(), from_recording=from_recording)
+			generation=uuid.uuid4().hex, now=_now(), from_recording=from_recording, workers=workers)
 	try:
 		out = _retry_sql(admission, retry_lock_waits=False)
 	except Exception as exc:
@@ -326,6 +340,8 @@ def request(docname, session_uuid, run_uuid, requested_by, *, from_recording=Fal
 	}
 	if response["status"] == "Refused":
 		response["message"] = {
+			"no_worker": _("Phase 2 needs a worker listening on the long queue. Start a worker and retry analysis."),
+			"queue_unavailable": _("Phase 2 worker availability could not be checked. Check Redis and the long queue worker, then retry analysis."),
 			"busy": _("The session is busy. Wait a moment and retry Phase 2 analysis."),
 			"retry_limit": _("This Phase 2 run has reached its four-attempt limit. Record a new line-profile pass."),
 			"permission": _("Your permission to update this session changed. Recheck session access."),
@@ -335,6 +351,16 @@ def request(docname, session_uuid, run_uuid, requested_by, *, from_recording=Fal
 			"not_found": _("This Phase 2 run is no longer available. Reload the session."),
 		}.get(out.get("reason"), _("Phase 2 analysis could not start. Reload the session to check its status."))
 	return response
+
+
+def _workers_listening(docname):
+	from frappe.utils.background_jobs import get_queue, get_workers
+
+	from optimus.analyze import _run_ai_step
+
+	listening, failed = _run_ai_step(lambda: bool(get_workers(queue=get_queue("long"))),
+		title="optimus ai phase 2 worker availability", docname=docname)
+	return None if failed else listening
 
 
 def _prepare_dispatch(run, *, now):
@@ -440,7 +466,7 @@ def run(session_uuid, run_uuid, *, generation=None):
 				frappe.db.rollback()
 				if run_row:
 					changed = _retry_sql(lambda: _fail(run_row, now=_now(),
-						reason="input_missing" if isinstance(failure, MissingInput) else "failed"))
+						reason="input_changed" if isinstance(failure, InputChanged) else "input_missing" if isinstance(failure, MissingInput) else "failed"))
 					if changed:
 						_notify(run_row, "phase_2_run_failed")
 		except Exception as exc:

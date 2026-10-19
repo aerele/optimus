@@ -46,7 +46,7 @@ class CodeText(HTMLParser):
 				self.handle_data("\n")
 			if tag not in _VOID:
 				self.stack.append(tag)
-			if tag == "span" and "dh-line" in dict(attrs).get("class", "").split():
+			if tag == "span" and "dh-line" in (dict(attrs).get("class") or "").split():
 				if self.line is not None:
 					raise InvalidCodeHTML("nested code line")
 				self.line, self.line_depth = [], len(self.stack)

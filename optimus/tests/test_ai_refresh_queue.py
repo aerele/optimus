@@ -190,6 +190,24 @@ def test_start_commits_reservation_before_enqueuing(queue, monkeypatch):
 	assert len(queue.journal.db.rows[queue.journal.mod.RUN]) == 1
 
 
+def test_committed_admission_wakes_session_audience_before_dispatch(queue, monkeypatch):
+	from optimus import realtime
+	queue.journal.db.rows[queue.journal.mod.RUN] = {}
+	monkeypatch.setattr(queue.jobs, '_workers_listening', lambda docname=None: True)
+	monkeypatch.setattr(queue.jobs, '_check_run', lambda run: None)
+	monkeypatch.setattr(ai_fix, 'is_available', lambda: True)
+	events = []
+	def publish(event, payload):
+		assert not queue.journal.db.active
+		assert len(queue.journal.db.rows[queue.journal.mod.RUN]) == 1
+		assert not queue.sent
+		events.append((event, payload))
+	monkeypatch.setattr(realtime, 'publish_session_event', publish)
+	out = queue.jobs.start_refresh(docname='fake-session-doc', session_uuid='fake-session', requested_by='fake-owner')
+	assert out['status'] == 'queued'
+	assert events == [('optimus_ai_refresh_admitted', {'docname': 'fake-session-doc', 'session_uuid': 'fake-session'})]
+
+
 def test_recovery_handles_a_crash_between_admission_commit_and_dispatch(queue, monkeypatch):
 	from optimus.tests.fixtures.ai_refresh_journal import admit
 

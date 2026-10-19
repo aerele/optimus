@@ -1160,14 +1160,21 @@ def _attach_representative_callsites(findings, recordings, *, file_cache: dict |
 			continue
 		(filename, lineno, function), _weight = max(w["tally"].items(), key=lambda kv: kv[1])
 		abs_path = _resolve_source_path(filename)
-		w["finding"]["technical_detail"]["callsite"] = {
-			"filename": _bench_relative_display(abs_path) if abs_path else filename,
+		is_script = isinstance(abs_path, tuple) and abs_path[0] == "server_script"
+		callsite = {
+			"filename": _bench_relative_display(abs_path) if abs_path and not is_script else filename,
 			"_abs": abs_path,
 			"lineno": lineno,
 			"function": function,
-			"source_snippet": _read_source_snippet(abs_path or filename, lineno, cache=file_cache),
+			"source_snippet": _read_source_snippet(filename if is_script else (abs_path or filename), lineno, cache=file_cache),
 			"is_representative": True,
 		}
+		if is_script:
+			from optimus.server_script_source import desk_url
+
+			callsite["_abs"] = desk_url(abs_path[1], cache=file_cache)
+			callsite["_link_kind"] = "desk"
+		w["finding"]["technical_detail"]["callsite"] = callsite
 
 
 def _snippet_row(lines: list[str], idx: int, limit: int) -> dict:

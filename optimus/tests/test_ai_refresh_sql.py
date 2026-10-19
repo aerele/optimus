@@ -2429,7 +2429,8 @@ def test_expired_release_rolls_back_with_recovery_failure(sql):
 	assert value(sql, store.ATTEMPT, attempt["name"], "state") == "calling"
 
 
-def test_raw_retry_consent_reads_current_commit_without_touching_caller_snapshot(sql, monkeypatch):
+@pytest.mark.parametrize("field", ["ai_send_raw_values", "sensitive_sql_columns"])
+def test_fresh_privacy_settings_read_current_commit_without_touching_caller_snapshot(sql, monkeypatch, field):
 	"""A real REPEATABLE READ view stays stale across the first HTTP call.
 
 	Only the table name and connection factory are adapted to the disposable
@@ -2440,8 +2441,9 @@ def test_raw_retry_consent_reads_current_commit_without_touching_caller_snapshot
 	from optimus import ai_privacy
 
 	table = sql.primary.quoted(sql.primary.tables["answer"] + "_consent")
-	sql.primary.sql(f"CREATE TABLE {table} (doctype varchar(140), field varchar(140), value varchar(10))")
-	sql.primary.sql(f"INSERT INTO {table} VALUES (%s, %s, '1')", ("Optimus Settings", "ai_send_raw_values"))
+	sql.primary.sql(f"CREATE TABLE {table} (doctype varchar(140), field varchar(140), value varchar(140))")
+	before, after = ("1", "0") if field == "ai_send_raw_values" else ("private_marker", "another_marker")
+	sql.primary.sql(f"INSERT INTO {table} VALUES (%s, %s, %s)", ("Optimus Settings", field, before))
 	sql.primary.commit()
 	admin = sql.connect()
 	closed = []
@@ -2465,16 +2467,17 @@ def test_raw_retry_consent_reads_current_commit_without_touching_caller_snapshot
 			closed.append(True)
 	try:
 		monkeypatch.setattr(frappe, "db", SimpleNamespace(db_type=BACKEND, db_schema="public", get_connection=Connection), raising=False)
-		assert ai_privacy._fresh_raw_values_enabled() is True
-		assert sql.primary.sql(f"SELECT value FROM {table}")[0]["value"] == "1"
+		read = ai_privacy._fresh_raw_values_enabled if field == "ai_send_raw_values" else ai_privacy._fresh_sensitive_columns
+		assert read() == (True if field == "ai_send_raw_values" else before)
+		assert sql.primary.sql(f"SELECT value FROM {table}")[0]["value"] == before
 		# A pending caller write must not be accidentally committed by the check.
 		sql.primary.sql(f"UPDATE {sql.primary.table('answer')} SET body='uncommitted' WHERE name='row-00'")
-		admin.sql(f"UPDATE {table} SET value='0'")
+		admin.sql(f"UPDATE {table} SET value=%s", (after,))
 		admin.commit()
-		assert sql.primary.sql(f"SELECT value FROM {table}")[0]["value"] == "1"
-		assert ai_privacy._fresh_raw_values_enabled() is False
+		assert sql.primary.sql(f"SELECT value FROM {table}")[0]["value"] == before
+		assert read() == (False if field == "ai_send_raw_values" else after)
 		assert closed == [True, True]
-		assert sql.primary.sql(f"SELECT value FROM {table}")[0]["value"] == "1"
+		assert sql.primary.sql(f"SELECT value FROM {table}")[0]["value"] == before
 		assert admin.sql(f"SELECT body FROM {admin.table('answer')} WHERE name='row-00'")[0]["body"] == ""
 	finally:
 		sql.primary.rollback()
@@ -2496,3 +2499,29 @@ def test_unknown_send_certainty_is_durable_and_trips_the_breaker_once(sql):
  assert value(sql,store.RUN,'run-a','breaker_kind')=='timeout'
  assert value(sql,store.RUN,'run-a','uncertain')==3
  assert begun(target='fourth') is None
+
+
+def test_preparation_skips_commit_without_visible_calling_intent_or_breaker(sql, monkeypatch):
+	run = claimed()
+	monkeypatch.setattr(ai_jobs, '_now', lambda: 20)
+	monkeypatch.setattr(ai_jobs, '_check_run', lambda *a, **kw: None)
+	monkeypatch.setattr(ai_jobs.ai_fix, 'log_ai_failure', lambda *a, **kw: None)
+	observer = sql.connect()
+	original = store.settle_attempt
+	observed = []
+	def settle_without_commit(*a, **kw):
+		observer.commit()
+		states = observer.sql(f"SELECT state FROM {observer.table(store.ATTEMPT)} WHERE run_id=%s", ('run-a',))
+		assert all(row['state'] != 'calling' for row in states)
+		observed.append(True)
+		return original(*a, **kw)
+	monkeypatch.setattr(store, 'settle_attempt', settle_without_commit)
+	def malformed():
+		raise AttributeError('synthetic malformed finding')
+	for n in range(3):
+		assert ai_jobs._prepare_item(run, kind='fix', target=f'bad-{n}', prepare=malformed) is None
+	assert len(observed) == 3
+	assert value(sql, store.RUN, 'run-a', 'skipped') == 3
+	assert value(sql, store.RUN, 'run-a', 'consecutive_failures') == 0
+	assert value(sql, store.RUN, 'run-a', 'tokens_reported') == 0
+	assert not value(sql, store.RUN, 'run-a', 'active_attempt')

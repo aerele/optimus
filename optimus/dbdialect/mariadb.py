@@ -115,28 +115,36 @@ class MariaDBDialect(Dialect):
 			)
 			# Every key part must be an ordinary, full-column, enabled b-tree.
 			# Missing visibility/type metadata is not proof that an index is usable.
-			entry["usable"] &= (
+			usable = (
 				str(r.get("Index_type", "")).upper() == "BTREE"
 				and str(r.get("Ignored", "")).upper() == "NO"
 				and "Sub_part" in r and r["Sub_part"] is None
 				and bool(r.get("Column_name") or r.get("column_name"))
 			)
+			entry["usable"] &= usable
 			try:
 				seq = int(r.get("Seq_in_index") or r.get("seq_in_index") or 0)
 			except (TypeError, ValueError):
 				seq = 0
-			entry["_cols"].append((seq, r.get("Column_name") or r.get("column_name")))
+			entry["_cols"].append((seq, r.get("Column_name") or r.get("column_name"), usable))
 
 		out: list = []
 		for key_name, e in by_name.items():
-			cols = [c for _seq, c in sorted(e["_cols"]) if c]
+			parts = sorted(e["_cols"], key=lambda part: part[0])
+			cols = [c for _seq, c, _usable in parts if c]
+			prefix = []
+			for seq, col, usable in parts:
+				if not usable or seq != len(prefix) + 1:
+					break
+				prefix.append(col)
 			out.append(
 				IndexInfo(
 					name=key_name,
 					columns=cols,
 					unique=bool(e["unique"]),
-					leftmost=(cols[0] if cols and e["usable"] else None),
+					leftmost=(prefix[0] if prefix else None),
 					eligible=e["usable"], reason="" if e["usable"] else "not_full_btree",
+					usable_prefix=tuple(prefix),
 				)
 			)
 		return out

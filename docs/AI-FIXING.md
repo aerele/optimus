@@ -426,11 +426,11 @@ Parameter retries and permitted redirects use the remaining request budget. Each
 - `optimus ai spend` and `optimus ai refresh count`: counter writes and their reconciliation outcomes.
 - `optimus ai recording cache read`, `optimus ai load recordings bundle` and `optimus ai phase 2 context`: unavailable grounding or recording data.
 - `optimus ai admission after analyze`, `optimus ai refresh admission` and `optimus ai refresh status`: automatic admission, manual admission and status-read failures.
-- `optimus ai refresh worker`, `optimus ai refresh cleanup`, `optimus ai refresh item`, `optimus ai refresh result storage`, `optimus ai refresh enqueue`, `optimus ai refresh worker availability`, `optimus ai refresh recovery`, `optimus ai refresh release`, `optimus ai refresh selection`, `optimus ai refresh evidence`, `optimus ai refresh discarded`, `optimus ai refresh duplicate blocked`, `optimus ai refresh uncertain` and `optimus ai refresh ended`: worker transitions, calls, settlement and recovery. See [the engine runbook](AI-REFRESH.md) for each outcome and its action.
+- `optimus ai refresh prepare`, `optimus ai refresh worker`, `optimus ai refresh cleanup`, `optimus ai refresh item`, `optimus ai refresh result storage`, `optimus ai refresh enqueue`, `optimus ai refresh worker availability`, `optimus ai refresh recovery`, `optimus ai refresh release`, `optimus ai refresh selection`, `optimus ai refresh evidence`, `optimus ai refresh discarded`, `optimus ai refresh duplicate blocked`, `optimus ai refresh uncertain` and `optimus ai refresh ended`: worker transitions, calls, settlement and recovery. See [the engine runbook](AI-REFRESH.md) for each outcome and its action.
 - `optimus ai refresh report`, `optimus ai regenerate report` and `optimus ai phase 2 report`: report replacement failed. Saved results remain; reload and use Regenerate Reports. A lost commit acknowledgement can mean the new attachment was already saved.
 - `optimus ai recording tree read`, `optimus ai recording sidecar read`, `optimus ai recording tree load`, `optimus ai save recording File`, `optimus ai persist recordings` and `optimus ai analyze`: recording verification, snapshot persistence and analysis failures.
 - `optimus ai auto-arm phase 2`, `optimus ai Phase 2 admission cleanup` and `optimus ai Phase 2 capture recovery`: optional capture admission or recovery failures.
-- `optimus ai phase 2 enqueue`, `optimus ai phase 2 worker`, `optimus ai phase 2 recovery` and `optimus ai phase 2 queue recovery`: durable Phase 2 dispatch, execution and recovery failures. Retry analysis only for a failed generation; a pending report needs rendering, not repeated analysis.
+- `optimus ai phase 2 worker availability`, `optimus ai phase 2 enqueue`, `optimus ai phase 2 worker`, `optimus ai phase 2 recovery` and `optimus ai phase 2 queue recovery`: durable Phase 2 dispatch, execution and recovery failures. Retry analysis only for a failed generation; a pending report needs rendering, not repeated analysis.
 
 A failure row opens with the lines that tell you what to do, then the technical detail:
 
@@ -719,3 +719,9 @@ with at most 1,048,576 characters allocated by identity extension per resolver.
 Deep or branching aliases that exceed these bounds receive `unverified-safety`;
 their code is withheld without crashing report
 rendering. These checks execute no suggested code and make no provider requests.
+
+Preparation failures are recorded as unsent skips (`optimus ai refresh prepare`), with zero tokens and complete usage. They do not consume the provider-call cap or trip the breaker; subsequent findings and Steps can continue. Shared SQL failures retain worker recovery semantics.
+
+Raw SQL uses current committed `sensitive_sql_columns` rules at the input boundary. If those rules cannot be read, or sensitive-literal redaction fails, the query is omitted. Error Log masking covers schemeless Authorization and oversized quoted header values; when an AI record cannot be scrubbed, its error, title and metadata are withheld together.
+
+Phase 2 requires a worker on the long queue; a stopped capture without an available worker is marked Failed without using an analysis attempt. Start a worker and retry while the captured input remains available. A late concurrent flush asks for a retry; genuinely missing or corrupt input still asks for a new pass. Idle Session forms stop AI status polling; active and unknown runs continue recovery polling.

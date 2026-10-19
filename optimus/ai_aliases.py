@@ -10,6 +10,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 _UNCERTAIN_IMPORT = frozenset({None, "frappe", "frappe.qb"})
+_POLICY_MODULES = frozenset({"operator", "importlib", "builtins", "os", "subprocess", "pickle", "cPickle", "marshal", "dill", "yaml"})
 
 
 class AnalysisLimitExceeded(ValueError):
@@ -107,12 +108,12 @@ class Aliases(ast.NodeVisitor):
 			name = item.asname or item.name.split(".")[0]
 			identity = item.name if item.asname else item.name.split(".")[0]
 			self.current.bindings[name].append(
-				identity if identity in {"frappe", "operator", "importlib", "builtins"} or identity.startswith("frappe.") else None
+				identity if identity in _POLICY_MODULES | {"frappe"} or identity.startswith("frappe.") else None
 			)
 
 	def visit_ImportFrom(self, node):
 		for item in node.names:
-			if item.name == "*" and (node.module in {"frappe", "importlib"} or str(node.module).startswith("frappe.")):
+			if item.name == "*" and (node.module in _POLICY_MODULES | {"frappe"} or str(node.module).startswith("frappe.")):
 				self.unsupported.append(node)
 			identity = f"{node.module}.{item.name}"
 			self.current.bindings[item.asname or item.name].append(
@@ -121,8 +122,7 @@ class Aliases(ast.NodeVisitor):
 				and (
 					node.module == "frappe"
 					or str(node.module).startswith("frappe.")
-					or identity == "operator.attrgetter"
-					or identity in {"importlib.import_module", "importlib.__import__", "builtins.__import__"}
+					or node.module in _POLICY_MODULES
 				)
 				else None
 			)
@@ -258,7 +258,11 @@ class Aliases(ast.NodeVisitor):
 						self.cache[key] = frozenset(out or {None})
 					return self.cache[key]
 				scope = scope.parent
-			return frozenset({node.id if node.id in {"frappe", "__import__", "importlib", "builtins"} else None})
+			if node.id in {"eval", "exec"}:
+				return frozenset({"builtins." + node.id})
+			if node.id == "__builtins__":
+				return frozenset({"builtins"})
+			return frozenset({node.id if node.id in _POLICY_MODULES | {"frappe", "__import__"} else None})
 		if isinstance(node, ast.Attribute):
 			return frozenset(
 				self._extend(value, "." + node.attr) if value else None
@@ -291,6 +295,8 @@ class Aliases(ast.NodeVisitor):
 		if not isinstance(module, ast.Constant) or not isinstance(module.value, str):
 			return _UNCERTAIN_IMPORT
 		name = module.value
+		if name in _POLICY_MODULES:
+			return {name}
 		if loader == "importlib.import_module" and name.startswith("."):
 			package = argument(1, "package")
 			if (isinstance(package, ast.Constant) and isinstance(package.value, str)
@@ -335,15 +341,15 @@ class Aliases(ast.NodeVisitor):
 	def call_name(self, node, dotted):
 		known = self.name(node.func)
 		raw = dotted(node.func)
-		return known or ("@unrelated." + raw if raw == "frappe" or raw.startswith("frappe.") else raw)
+		return known or ("@unrelated." + raw if raw.split(".")[0] in _POLICY_MODULES | {"frappe", "eval", "exec"} else raw)
 
-	def ambiguous_policy(self, node):
+	def ambiguous_policy(self, node, *, sinks=frozenset()):
 		values = self.values(node)
 		return len(values) > 1 and any(
 			value
 			and (
-				value.startswith("frappe.qb.")
-				or value.rsplit(".", 1)[-1]
+				value in sinks or value.startswith("frappe.qb.")
+				or value.startswith("frappe.") and value.rsplit(".", 1)[-1]
 				in {
 					"sql",
 					"multisql",
@@ -368,11 +374,17 @@ class Aliases(ast.NodeVisitor):
 	def dynamic(self, node):
 		def root(value):
 			return any(
-				name and (name == "frappe" or name.startswith("frappe.")) for name in self.values(value)
+				name and (name == "frappe" or name.startswith("frappe.") or name.split(".")[0] in _POLICY_MODULES)
+				for name in self.values(value)
 			)
 
 		if isinstance(node, ast.Attribute) and node.attr == "__dict__":
 			return root(node.value)
+		if isinstance(node, ast.Subscript):
+			return any(name in _POLICY_MODULES or name and name.endswith(".__dict__") and
+				name.split(".")[0] in _POLICY_MODULES for name in self.values(node.value))
+		if isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del)):
+			return any(name in _POLICY_MODULES for name in self.values(node.value))
 		if isinstance(node, ast.Call) and node.args:
 			if isinstance(node.func, ast.Name) and node.func.id in {"getattr", "setattr", "vars"}:
 				return root(node.args[0])

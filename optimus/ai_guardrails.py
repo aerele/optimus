@@ -343,9 +343,21 @@ _DDL_RE = re.compile(
 	r"\b(?:ALTER\s+TABLE\b[^;]{0,4096}\bADD\s+(?:UNIQUE\s+)?(?:INDEX|KEY)|CREATE\s+(?:UNIQUE\s+)?INDEX)\b", re.I
 )
 _PERM_CALLS = ("frappe.get_list(", "has_permission(", "check_permission(", "frappe.client.get_list(")
-_DESERIALIZE = {"pickle.loads", "pickle.load", "cPickle.loads", "marshal.loads", "dill.loads"}
-_SHELL = {"os.system", "os.popen", "os.execv", "os.execl"}
+_DESERIALIZE = {f"{module}.{method}" for module in ("pickle", "cPickle", "marshal", "dill") for method in ("load", "loads", "Unpickler")} | {"yaml.load", "yaml.load_all", "yaml.unsafe_load", "yaml.unsafe_load_all"}
+_SHELL = {f"os.{method}" for method in (
+	"system", "popen", "execv", "execve", "execvp", "execvpe", "execl", "execle", "execlp", "execlpe",
+	"spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe", "posix_spawn", "posix_spawnp",
+)}
 _DYNAMIC_IMPORT = {"__import__", "importlib.import_module"}
+_SUBPROCESS_SINKS = {f"subprocess.{name}" for name in ("Popen", "run", "call", "check_call", "check_output", "getoutput", "getstatusoutput")}
+_SINKS = _DESERIALIZE | _SHELL | _SUBPROCESS_SINKS | {"builtins.eval", "builtins.exec"}
+
+
+def _safe_yaml_loader(node, aliases):
+	loader = next((kw.value for kw in node.keywords if kw.arg == "Loader"), None)
+	if loader is None and len(node.args) >= 2:
+		loader = node.args[1]
+	return loader is not None and aliases.name(loader) in {"yaml.SafeLoader", "yaml.CSafeLoader"}
 
 
 def _dotted(n) -> str:
@@ -465,12 +477,26 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 			out.append(_v("unverified-safety", "the code exceeds the static analysis budget"))
 			continue
 		if any(introduced(node, include_moved=True) for node in aliases.unsupported):
-			out.append(_v("unverified-safety", "dynamic Frappe imports"))
+			out.append(_v("unverified-safety", "dynamic policy-sensitive imports"))
+		parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
 		for n in ast.walk(tree):
 			if introduced(n, include_moved=True) and (
-				aliases.dynamic(n) or isinstance(n, (ast.Name, ast.Attribute)) and aliases.ambiguous_policy(n)
+				aliases.dynamic(n) or isinstance(n, (ast.Name, ast.Attribute)) and aliases.ambiguous_policy(n, sinks=_SINKS)
 			):
-				out.append(_v("unverified-safety", "dynamic or ambiguous Frappe access"))
+				out.append(_v("unverified-safety", "dynamic or ambiguous access to a protected API"))
+			if isinstance(n, (ast.Name, ast.Attribute)) and isinstance(n.ctx, ast.Load) and introduced(n):
+				identity = aliases.name(n)
+				if identity in {"builtins.eval", "builtins.exec"}:
+					out.append(_v("eval-exec", identity))
+				elif identity in _SHELL or identity in _SUBPROCESS_SINKS:
+					out.append(_v("shell-exec", identity))
+				elif identity in _DESERIALIZE:
+					# Safe YAML needs its call arguments; references alone cannot
+					# prove the loader is constrained and are withheld.
+					parent = parents.get(n)
+					if identity not in {"yaml.load", "yaml.load_all"} or not (
+						isinstance(parent, ast.Call) and parent.func is n and _safe_yaml_loader(parent, aliases)):
+						out.append(_v("unsafe-deserialize", identity))
 			if isinstance(n, ast.Call):
 				name = aliases.call_name(n, _dotted)
 				head, _, tail = name.rpartition(".")
@@ -511,7 +537,7 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 						isinstance(kws.get("now"), ast.Constant) and kws["now"].value is True
 					):
 						out.append(_v("enqueue-without-after-commit", name))
-				elif name in ("eval", "exec", "safe_exec", "safe_eval") and introduced(n):
+				elif name in ("eval", "exec", "safe_exec", "safe_eval", "builtins.eval", "builtins.exec") and introduced(n):
 					out.append(_v("eval-exec", name))
 				elif name in ("frappe.db.get_value", "frappe.db.set_value") and introduced(n) and len(n.args) >= 2:
 					a0, a1 = n.args[0], n.args[1]
@@ -526,7 +552,7 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 						last
 					).endswith((".desc", ".asc")):
 						out.append(_v("qb-orderby-positional"))
-				elif name in _DESERIALIZE and introduced(n):
+				elif name in _DESERIALIZE and introduced(n) and not (name in {"yaml.load", "yaml.load_all"} and _safe_yaml_loader(n, aliases)):
 					out.append(_v("unsafe-deserialize", name))
 				elif (name in _SHELL or name.startswith("subprocess.")) and introduced(n):
 					out.append(_v("shell-exec", name))
@@ -798,15 +824,14 @@ def _stored_policy_violations(text: str) -> list[Violation]:
 	"""
 	if not isinstance(text, str) or not can_validate(text):
 		return []
-	if not re.search(r"frappe|sql|delete|set_value|truncate|has_permission|\bqb\b|limit|getattr|setattr|vars|__dict__", text, re.I):
-		return []
 	fix = section(text, "Fix", FIX_HEADINGS) or text
 	if not re.search(r"```|~~~|<pre\b|<code\b|(?m:^(?: {4}|\t))", fix, re.I):
-		return []
+		return check_prose_ddl(fix, [])
 	from optimus.ai_fix_checks import check_changes
 
 	blocks = fenced_blocks(fix) if len(text) > ai_responses.MARKDOWN_CHARS else rendered_blocks(fix)
-	out = [v for v in check_code(blocks, []) if v.code == "raw-sql"]
+	out = [v for v in check_code(blocks, []) if v.code in {"raw-sql", "eval-exec", "unsafe-deserialize", "shell-exec", "unverified-safety"}]
+	out += check_prose_ddl(fix, blocks)
 	out += check_changes(blocks, [], stored=True)
 	return _dedupe([v for v in out if v.action == BLOCK])
 

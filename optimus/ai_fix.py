@@ -3045,10 +3045,11 @@ def _loop_facts_text(finding: dict, rows: list[dict] | None = None) -> str:
 	)
 
 
+@ai_privacy.sql_redaction_scope()
 def _build_fix_request(
 	finding: dict, *, threshold_ms: float, context_tokens: int, out_tokens: int | None = None, send_raw: bool = False,
 ) -> tuple[str, list[dict], list[str]]:
-	"""Build ``(system, [user_message], shown_lines)`` for one finding. Pure.
+	"""Build ``(system, [user_message], shown_lines)`` without provider I/O.
 
 	The user message is assembled from priority parts inside the context budget:
 	priority 0 parts are always sent (the source window shrinks around the target

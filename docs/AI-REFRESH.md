@@ -260,6 +260,7 @@ row has neither `docname` nor `run_id`. Search the Error Log for `optimus ai`.
 
 | Title | When |
 | --- | --- |
+| `optimus ai refresh prepare` | One item could not be prepared. It is recorded as skipped/not_sent with zero tokens; later items continue. |
 | `optimus ai refresh worker` | A slice failed. Carries `tokens` and `outcome` when the outcome write gave up. |
 | `optimus ai refresh cleanup` | The cleanup of a failed slice failed, so its call stays for recovery. |
 | `optimus ai refresh item` | One item's provider call failed, or its reported token count exceeds 2147483647 (`outcome=clamped`, with `tokens`). Carries `attempt` and `item` (`fix` or `steps`); failures also carry `kind`. |
@@ -632,7 +633,9 @@ always precede queue/provider activity.
 
 A status-read failure is unknown, never proof of completion. Desk keeps Save
 held until state becomes known, polls again with backoff, and rejects late
-responses. It releases only the Save hold it acquired. Completion does not
+responses. Idle forms stop polling and wake on the committed refresh-admission
+event, explicit refresh or tab visibility. Hidden tabs defer status reads until
+visible. It releases only the Save hold it acquired. Completion does not
 reload over unsaved edits. Save or discard those edits before reloading to see
 new results; the server may reject an old form's save after background changes.
 
@@ -649,7 +652,10 @@ stale answer.
 
 Stopping or retrying Phase 2 queues analysis on `long`. The response reports
 `Analyzing` and `ran_inline: false`; a disabled scheduler never selects inline
-compute. Batch retry accepts at most five runs and uses each run's per-user
+compute. New analysis requires a worker listening on `long`; missing or unknown
+worker availability refuses admission. A stopped Recording run becomes Failed
+without spending an attempt and retains captured input for retry. Existing Failed
+diagnostics and exhausted retry limits are preserved. Batch retry accepts at most five runs and uses each run's per-user
 limit. A live generation is attached to, not restarted. Completed or Recording
 runs cannot be retried through the analysis retry endpoint.
 
