@@ -1246,10 +1246,8 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 		total_queries_seen += len(calls)
 		if cap and len(calls) > cap:
 			truncated_queries += len(calls) - cap
-			calls = calls[:cap]
-			recording["calls"] = calls
 
-		for call in calls:
+		for i, call in enumerate(calls):
 			query = call.get("query", "")
 			if not query:
 				continue
@@ -1264,6 +1262,10 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 				)
 			except Exception:
 				pass
+
+			# Past the cap: keep the call for counts (formatted so it groups with the rest), skip EXPLAIN.
+			if cap and i >= cap:
+				continue
 
 			# Skip EXPLAIN if already populated
 			if call.get("explain_result"):
@@ -1350,9 +1352,8 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 			f"⚠ TRUNCATED: {truncated_queries} queries "
 			f"({pct}% of the flow) exceeded the {cap}-queries-per-"
 			"recording enrichment cap and were analyzed without "
-			"EXPLAIN / normalization. The report covers the first "
-			f"{cap} queries per recording; the rest are visible in "
-			"Top Queries but not in index-suggestion / full-scan / "
+			"EXPLAIN. They still count in query totals, N+1 and "
+			"Top Queries, but not in index-suggestion / full-scan / "
 			"filter-ratio findings. "
 			"To get full coverage, raise "
 			"<b>Optimus Settings ▸ Max Queries per Recording</b> "

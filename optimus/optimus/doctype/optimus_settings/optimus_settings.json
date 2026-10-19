@@ -215,7 +215,7 @@
   },
   {
    "default": "2000",
-   "description": "Each recording enriches at most this many queries with the full treatment (tidy formatting, a query plan and normalization). Anything past the limit is dropped with a warning. Keep it sensible, since each query adds one database round-trip. Set it to 0 for no limit, which enriches every query but makes analyze time grow with the number of queries, so save that for deep investigations. Reference values: Strict: 0  ·  Recommended: 2000  ·  Relaxed: 1000.",
+   "description": "Each recording runs a query plan (EXPLAIN) on at most this many queries. Queries past the limit still count in totals, N+1 and Top Queries but get no query plan, and the report shows a warning. Keep it sensible, since each query plan adds one database round-trip. Set it to 0 for no limit, which enriches every query but makes analyze time grow with the number of queries, so save that for deep investigations. Reference values: Strict: 0  ·  Recommended: 2000  ·  Relaxed: 1000.",
    "fieldname": "max_queries_per_recording",
    "fieldtype": "Int",
    "label": "Max Queries per Recording",
@@ -621,7 +621,7 @@
  "index_web_pages_for_search": 0,
  "issingle": 1,
  "links": [],
- "modified": "2026-05-27 00:00:00.000000",
+ "modified": "2026-10-19 17:46:27.654227",
  "modified_by": "Administrator",
  "module": "Optimus",
  "name": "Optimus Settings",
