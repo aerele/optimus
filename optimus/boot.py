@@ -1,7 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Boot-session hook: attach ``optimus_enabled`` to ``frappe.boot`` once per
+"""Boot-session hook: attach ``optimus_enabled`` and ``optimus_can_profile`` to ``frappe.boot`` once per
 Desk session init. The floating widget reads it synchronously to decide whether
 to mount, so toggling ``Profiler Enabled`` off hides the widget on the next
 Desk load without a separate settings request.
@@ -25,6 +25,14 @@ def boot_session(bootinfo):
 		bootinfo.optimus_enabled = bool(cfg.enabled)
 	except Exception:
 		bootinfo.optimus_enabled = True
+	# Same role check as the API, so the widget never mounts for a user it would 403.
+	try:
+		import frappe
+
+		from optimus.api import is_profiler_user
+		bootinfo.optimus_can_profile = is_profiler_user(frappe.session.user)
+	except Exception:
+		bootinfo.optimus_can_profile = False
 	try:
 		from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS
 		bootinfo.optimus_large_duration_threshold_ms = (

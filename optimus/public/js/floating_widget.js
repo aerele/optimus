@@ -68,7 +68,6 @@
 	// on busy sites. POLL_INTERVAL_MS is kept as a legacy constant (some
 	// external integrations may reference it) but no timer uses it.
 	const POLL_INTERVAL_MS = 0;
-	const REQUIRED_ROLES = ["System Manager", "Optimus User", "Administrator"];
 
 	let widget = null;
 	let elapsedHandle = null;
@@ -80,22 +79,6 @@
 		started_at: null,
 		display: "inactive", // inactive | recording | stopping | analyzing | ready
 	};
-
-	function userHasRole() {
-		// frappe.user_roles is set by Desk.set_globals(). On initial page
-		// load our app_include_js script may run before set_globals, so
-		// fall back to frappe.boot.user.roles which is populated inline
-		// in the Desk HTML before any script executes.
-		// Administrator is always allowed (matches api._require_profiler_user).
-		if (frappe.session && frappe.session.user === "Administrator") {
-			return true;
-		}
-		const roles =
-			frappe.user_roles
-			|| (frappe.boot && frappe.boot.user && frappe.boot.user.roles)
-			|| [];
-		return REQUIRED_ROLES.some((r) => roles.includes(r));
-	}
 
 	function init() {
 		// v0.5.2 round 4: hide widget entirely when Optimus Settings ▸
@@ -116,9 +99,9 @@
 			return;
 		}
 
-		// Skip non-profilers: api.status would 403 and pop an error modal on
-		// every load. frappe.boot is set inline before app_include_js runs.
-		if (!userHasRole()) {
+		// Skip non-profilers: api.status would 403 and pop an error modal.
+		// boot.py sets the flag with the API's role check; missing means an old cached boot.
+		if (frappe.boot && frappe.boot.optimus_can_profile === false) {
 			_diag("[optimus] user lacks a profiler role, widget will not mount");
 			return;
 		}
