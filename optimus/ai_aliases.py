@@ -9,6 +9,8 @@ import ast
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+_UNCERTAIN_IMPORT = frozenset({None, "frappe", "frappe.qb"})
+
 
 class AnalysisLimitExceeded(ValueError):
 	"""The untrusted code exceeds the static resolver's work/stack budget."""
@@ -281,23 +283,25 @@ class Aliases(ast.NodeVisitor):
 
 		module = argument(0, "name")
 		if any(isinstance(arg, ast.Starred) for arg in node.args) or any(kw.arg is None for kw in node.keywords):
-			return {None, "frappe"}
+			return _UNCERTAIN_IMPORT
 		if loader != "importlib.import_module":
 			level = argument(4, "level")
 			if level is not None and not (isinstance(level, ast.Constant) and level.value == 0):
-				return {None, "frappe"}
+				return _UNCERTAIN_IMPORT
 		if not isinstance(module, ast.Constant) or not isinstance(module.value, str):
-			return {None, "frappe"}
+			return _UNCERTAIN_IMPORT
 		name = module.value
 		if loader == "importlib.import_module" and name.startswith("."):
 			package = argument(1, "package")
 			if (isinstance(package, ast.Constant) and isinstance(package.value, str)
 				and package.value != "frappe" and not package.value.startswith("frappe.")):
 				return {None}
-			return {None, "frappe"}
+			return _UNCERTAIN_IMPORT
 		if name != "frappe" and not name.startswith("frappe."):
 			return {None}
-		uncertain = {None, "frappe", name}
+		# Include the QB namespace: a root-only possibility loses identity at
+		# from_(), allowing a chained unfiltered write to appear unrelated.
+		uncertain = _UNCERTAIN_IMPORT | {name}
 		if loader == "importlib.import_module":
 			return {name}
 		fromlist = argument(3, "fromlist")

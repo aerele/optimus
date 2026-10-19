@@ -193,3 +193,24 @@ def test_importlib_star_import_cannot_hide_a_frappe_loader():
 ])
 def test_known_unrelated_relative_or_absolute_imports_stay_displayable(binding):
 	assert not G.strips_code(G.stored_policy_violations(H.format("```python\n" + binding + '\nf.db.delete("User", {})\n```')))
+
+
+@pytest.mark.parametrize("binding", [
+	'q=importlib.import_module(".qb", "frappe")',
+	'q=__import__("qb", {"__package__": "frappe"}, None, ["x"], 1)',
+	'q=importlib.import_module(".", "frappe.qb")',
+	'q=importlib.import_module(".", package=pkg)',
+	'q=importlib.import_module(module_name)',
+	'q=__import__(module_name)',
+	'q=importlib.import_module("frappe.qb", **options)',
+])
+def test_uncertain_import_cannot_drop_a_query_builder_write_chain(binding):
+	_assert_withheld(binding + '\nq.from_("User").delete().run()', "unverified-safety")
+
+
+def test_known_absolute_query_builder_import_keeps_write_filter_checks():
+	code = 'q=importlib.import_module("frappe.qb")\nq.from_("User").delete()'
+	_assert_withheld(code + '.run()', "unbounded-write")
+	text = H.format("```python\n" + code + '.where(T.name == name).run()\n```')
+	assert not G.strips_code(G.stored_policy_violations(text))
+	assert not G.strips_code(G.verify_fix(text, source_lines=[]))
