@@ -193,7 +193,7 @@ def _get_indexed_columns(table: str) -> set[str]:
 	filter on just that column, so a Missing Index suggestion stays actionable).
 	Returns an empty set on any DB error, conservatively keeping all suggestions.
 	"""
-	return {ix.leftmost for ix in get_dialect().existing_indexes(table) if ix.eligible and ix.leftmost}
+	return {ix.leftmost for ix in get_dialect().existing_indexes(table) if ix.leftmost and (ix.eligible or ix.usable_prefix)}
 
 
 def _get_column_types(table: str) -> dict[str, str]:

@@ -42,9 +42,10 @@ def save_session(doc, *, insert=False):
 		return doc.insert(ignore_permissions=True) if insert else doc.save(ignore_permissions=True)
 
 
-def _deny():
+def _deny(*, artifact=False):
 	frappe.throw(
-		_("Profiling data is managed by Optimus. Edit only the session title and notes."),
+		_("This file is bound to a managed profiling artifact. Use the session's report actions to replace it.")
+		if artifact else _("Profiling data is managed by Optimus. Edit only the session title and notes."),
 		frappe.ValidationError,
 	)
 
@@ -106,7 +107,7 @@ def protect_file(doc, method=None):
 	if previous and all(doc.get(key) == previous.get(key) for key in fields) and doc.get("content") is None:
 		return
 	if _protected_binding(doc) or _protected_binding(previous):
-		_deny()
+		_deny(artifact=True)
 	# An unrelated File can alias a protected blob. Privacy changes in core
 	# propagate by content_hash, so checking only the URL is insufficient.
 	for field in ("file_url", "content_hash"):
@@ -115,9 +116,10 @@ def protect_file(doc, method=None):
 			continue
 		aliases = frappe.get_all(
 			"File",
-			filters={field: ["in", sorted(values)]},
-			fields=["attached_to_doctype", "attached_to_name", "attached_to_field"],
-			limit_page_length=1001,
+			filters={field: ["in", sorted(values)], "attached_to_doctype": SESSION,
+				"attached_to_field": ["in", sorted(ARTIFACT_FIELDS)]},
+			fields=["name"],
+			limit_page_length=1,
 		)
-		if len(aliases) > 1000 or any(_protected_binding(alias) for alias in aliases):
-			_deny()
+		if aliases:
+			_deny(artifact=True)

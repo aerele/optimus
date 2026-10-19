@@ -137,7 +137,7 @@ def _read_evidence(table: str, dialect) -> TableEvidence | None:
 			)
 	indexes = tuple(
 		IndexEvidence(name=str(ix.name), columns=tuple(ix.columns or ()), unique=bool(ix.unique),
-			eligible=bool(ix.eligible), reason=ix.reason)
+			eligible=bool(ix.eligible), reason=ix.reason, usable_prefix=tuple(ix.usable_prefix))
 		for ix in dialect.existing_indexes(table) or []
 	)
 	if not indexes:

@@ -115,3 +115,16 @@ def test_unsupported_indexes_cannot_prove_full_column_coverage(catalog):
 			not indexes[name].eligible for name in {"prefix_customer", "text_status", "ignored_customer"}
 		)
 	assert any(ix.unique and ix.columns == ["name"] for ix in indexes.values())
+
+
+def test_composite_prefix_keeps_full_leading_column_coverage(catalog, monkeypatch):
+	if catalog.backend != 'mariadb':
+		pytest.skip('MariaDB prefix key parts')
+	from optimus.analyzers import index_suggestions
+
+	catalog.sql(f'CREATE INDEX customer_status_prefix ON `{catalog.table}` (customer, status(5))')
+	index = next(ix for ix in catalog.dialect.existing_indexes(catalog.table) if ix.name == 'customer_status_prefix')
+	assert not index.eligible and index.leftmost == 'customer'
+	assert index.usable_prefix == ('customer',)
+	monkeypatch.setattr(index_suggestions, 'get_dialect', lambda: catalog.dialect)
+	assert 'customer' in index_suggestions._get_indexed_columns(catalog.table)

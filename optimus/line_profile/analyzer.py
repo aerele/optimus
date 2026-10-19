@@ -508,18 +508,23 @@ def run_analyze(session_uuid: str, run_uuid: str, generation: str | None = None)
 def _compute_run(parent_docname: str, run_uuid: str):
 	"""Compute outside SQL locks. Missing Redis input is not a successful run."""
 	from optimus.line_profile import capture
-	from optimus.line_profile.jobs import MissingInput
+	from optimus.line_profile.jobs import InputChanged, MissingInput
 
 	try:
 		samples = capture.read_all_samples(run_uuid)
 		picks = capture.read_picks_meta(run_uuid)
+	except capture.CaptureChanged:
+		raise InputChanged() from None
 	except capture.CaptureInputError:
 		raise MissingInput() from None
 	if (not isinstance(samples, list) or not isinstance(picks, list) or not picks
 		or any(not isinstance(batch, list) or any(not isinstance(item, dict) for item in batch) for batch in samples)
 		or any(not isinstance(pick, dict) or not isinstance(pick.get("dotted_path"), str) or not pick["dotted_path"] for pick in picks)):
 		raise MissingInput()
-	results_json = capture.aggregate_samples(samples, picks)
+	try:
+		results_json = capture.aggregate_samples(samples, picks)
+	except capture.CaptureInputError:
+		raise MissingInput() from None
 	call_trees: list[dict] = []
 	guard = safe_call.InterruptGuard(base=True)
 	try:

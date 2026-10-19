@@ -13,6 +13,13 @@ pytestmark = pytest.mark.rq
 PRIVATE = "PRIVATE-CUSTOMER-CANARY"
 
 
+@pytest.fixture(autouse=True)
+def current_sensitive_rules(monkeypatch):
+	# A successful current SQL settings read; failure/refresh semantics are
+	# covered by test_production_review_fixes, independently of consent.
+	monkeypatch.setattr("optimus.ai_privacy._fresh_sensitive_columns", lambda: "")
+
+
 @pytest.fixture
 def privacy():
 	return importlib.import_module("optimus.ai_privacy")

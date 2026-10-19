@@ -250,3 +250,68 @@ assert.equal(frm._optimus_ai,newer);assert.equal(newer.run,null);
 """
 	out = subprocess.run([node, "-e", script, str(source), outcome, str(return_before_reply).lower()], text=True, capture_output=True)
 	assert out.returncode == 0, out.stderr
+
+
+def test_idle_forms_stop_polling_but_busy_and_unknown_states_recover():
+	node = shutil.which('node')
+	if not node:
+		pytest.skip('node not installed')
+	source = Path(__file__).resolve().parents[1] / 'optimus/doctype/optimus_session/optimus_session.js'
+	script = r'''
+const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert/strict');
+for(const status of ['Ready','Failed','Recording','Analyzing']) {
+ const pending=[], timers=[]; let route=['Form','Optimus Session','doc'];
+ const ctx={__:x=>x,setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length},clearTimeout:()=>{},
+ frappe:{ui:{form:{on:()=>{}}},router:{on:()=>{}},get_route:()=>route,call:r=>pending.push(r),
+ utils:{escape_html:String},show_alert:()=>{}}};
+ vm.createContext(ctx);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),ctx);
+ ctx._single_banner=()=>null;
+ const frm={doc:{name:'doc',session_uuid:'session',status},is_new:()=>false,
+ remove_custom_button:()=>{},add_custom_button:()=>{},disable_save:()=>{},enable_save:()=>{}};
+ ctx.render_ai_buttons(frm);assert.equal(pending.length,1);
+ pending.shift().callback({message:{status:'ok',can_act:false,plan:null,refresh:null}});
+ assert.equal(timers.length,0,'idle status must not create a background polling loop');
+ ctx.render_ai_buttons(frm);assert.equal(pending.length,1,'explicit refresh still checks current status');
+ pending.shift().callback({message:{status:'ok',can_act:false,plan:null,refresh:{run_id:'run',seq:1,state:'running',requested_at:1}}});
+ assert.equal(timers.at(-1).ms,5000);timers.at(-1).fn();
+ pending.shift().error();assert.equal(frm._optimus_ai.unknown,true);
+ assert(timers.length>=2,'unknown work must retain recovery polling');
+ route=['List','Optimus Session'];const count=pending.length;timers.at(-1).fn();
+ assert.equal(pending.length,count,'route exit must stop further status reads');
+}
+'''
+	result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True)
+	assert result.returncode == 0, result.stderr
+
+
+def test_admission_event_wakes_idle_form_and_hidden_tab_waits_for_visibility():
+	node = shutil.which('node')
+	if not node:
+		pytest.skip('node not installed')
+	source = Path(__file__).resolve().parents[1] / 'optimus/doctype/optimus_session/optimus_session.js'
+	script = r'''
+const vm=require('node:vm'),fs=require('node:fs'),assert=require('node:assert/strict');
+const requests=[], events=new Map(), domEvents=new Map(), timers=[];
+let route=['Form','Optimus Session','doc'];
+const ctx={__:x=>x,document:{hidden:false,addEventListener:(name,cb)=>domEvents.set(name,cb)},
+ setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length},clearTimeout:()=>{},
+ frappe:{ui:{form:{on:()=>{}}},router:{on:()=>{}},realtime:{on:(name,cb)=>events.set(name,cb)},
+ get_route:()=>route,call:r=>requests.push(r),utils:{escape_html:String},show_alert:()=>{}}};
+vm.createContext(ctx);vm.runInContext(fs.readFileSync(process.argv[1],'utf8'),ctx);
+ctx._single_banner=()=>null;
+const frm={doc:{name:'doc',session_uuid:'session',status:'Ready'},is_new:()=>false,
+ remove_custom_button:()=>{},add_custom_button:()=>{},disable_save(){this.held=true},enable_save(){this.held=false}};
+const reply=run=>requests.shift().callback({message:{status:'ok',can_act:false,plan:null,refresh:run}});
+ctx.render_ai_buttons(frm);reply(null);assert.equal(timers.length,0);
+events.get('optimus_ai_refresh_admitted')({session_uuid:'other'});assert.equal(requests.length,0);
+events.get('optimus_ai_refresh_admitted')({session_uuid:'session'});assert.equal(requests.length,1);
+reply({run_id:'a',seq:1,state:'queued',requested_at:1});assert(frm.held);assert.equal(timers.at(-1).ms,5000);
+ctx.document.hidden=true;timers.at(-1).fn();assert.equal(requests.length,0);
+events.get('optimus_ai_refresh_admitted')({session_uuid:'session'});assert.equal(requests.length,0);
+ctx.document.hidden=false;domEvents.get('visibilitychange')();assert.equal(requests.length,1);
+reply({run_id:'a',seq:2,state:'running',requested_at:1});assert(frm.held);
+route=['List','Optimus Session'];events.get('optimus_ai_refresh_admitted')({session_uuid:'session'});
+assert.equal(requests.length,0);
+'''
+	result = subprocess.run([node, '-e', script, str(source)], capture_output=True, text=True)
+	assert result.returncode == 0, result.stderr

@@ -415,24 +415,15 @@ def _is_ai(maintenance, fields: dict, api_key: str, timeout_types, *, failures: 
 
 
 def _withhold(doc, record: dict, is_ai) -> None:
-	"""Store a fixed, key-free note instead of a record that could not be
-	masked: ``error`` always gets ``WITHHELD``. The title (``method``) gets
-	``WITHHELD_TITLE`` when ``is_ai({"method": title})`` (it holds a frame of
-	Optimus's AI code or the key); otherwise it is kept, cut to its column as
-	v16's ``validate`` cuts it (the full title would have gone in front of
-	the withheld error). ``metadata`` gets ``WITHHELD`` when
-	``is_ai({"metadata": metadata})``, and is kept otherwise. ``is_ai`` is
-	the masking's own check (``_is_ai``) or, where Optimus's modules are not
-	used, the standard-library one."""
+	"""Withhold every unverified text field of a record already identified as AI.
+
+	A title or metadata need not contain an AI frame to contain a rotated key.
+	Callers establish the record's scope before entering this failure path.
+	"""
 	doc.set("error", WITHHELD)
-	title = record.get("method")
-	if isinstance(title, str):
-		if is_ai({"method": title}):
-			doc.set("method", WITHHELD_TITLE)
-		elif len(title) > _TITLE_LIMIT:
-			doc.set("method", title[:_TITLE_LIMIT])
-	metadata = record.get("metadata")
-	if metadata is not None and is_ai({"metadata": metadata}):
+	if record.get("method") is not None:
+		doc.set("method", WITHHELD_TITLE)
+	if record.get("metadata") is not None:
 		doc.set("metadata", WITHHELD)
 
 

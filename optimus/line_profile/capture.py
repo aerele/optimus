@@ -190,6 +190,10 @@ class CaptureInputError(ValueError):
 	"""Fixed diagnostic for missing, corrupt or excessive capture input."""
 
 
+class CaptureChanged(CaptureInputError):
+	"""A concurrent late flush changed this bounded snapshot; retry is safe."""
+
+
 MAX_CAPTURE_BYTES = 16 * 1024 * 1024
 MAX_SAMPLE_BATCHES = 10_000
 MAX_SAMPLE_RECORDS = 250_000
@@ -659,7 +663,6 @@ def disengage_monitoring() -> None:
 		mon.set_events(pid, 0)
 	except Exception as exc:
 		_raise_if_interrupt(exc)
-		_raise_if_interrupt(exc)
 		pass
 
 
@@ -807,54 +810,47 @@ def serialize_stats(profiler) -> list[dict]:
 	return samples
 
 
-def flush_samples(run_uuid: str, samples: list[dict]) -> None:
-	"""Bound memory atomically across concurrent request/job completions.
+# All keys already include Frappe's site prefix. One Redis operation avoids
+# WATCH contention making a valid capture permanently incomplete.
+_APPEND_SAMPLES = """
+if redis.call('EXISTS', KEYS[3]) == 0 then return 0 end
+local count = redis.call('LLEN', KEYS[1])
+local raw = redis.call('GET', KEYS[2])
+local used = tonumber(raw) or (count == 0 and not raw and 0 or -1)
+if ARGV[4] == 'incomplete' or used < 0 or used + string.len(ARGV[1]) > tonumber(ARGV[2]) or count >= tonumber(ARGV[3]) then
+    redis.call('SET', KEYS[2], '-1', 'EX', ARGV[5])
+    return -1
+end
+redis.call('SET', KEYS[2], tostring(used + string.len(ARGV[1])), 'EX', ARGV[5])
+redis.call('RPUSH', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ARGV[5])
+return 1
+"""
 
-	Overflow or repeated contention marks the entire input incomplete; it must
-	not produce a successful partial report. Never recreate a deleted run.
-	"""
+
+def _append_samples(run_uuid, payload, *, incomplete=False):
+	keys = [frappe.cache.make_key(key) for key in (
+		_redis_keys.lp_samples(run_uuid), _redis_keys.lp_sample_state(run_uuid), _redis_keys.lp_source(run_uuid))]
+	return frappe.cache.eval(_APPEND_SAMPLES, 3, *keys, payload, MAX_CAPTURE_BYTES,
+		MAX_SAMPLE_BATCHES, "incomplete" if incomplete else "append", DATA_TTL_SECONDS)
+
+
+@_interrupt_boundary
+def mark_capture_incomplete(run_uuid):
+	"""A teardown failure must never produce an apparently complete partial report."""
+	_require_frappe()
+	_append_samples(run_uuid, b"", incomplete=True)
+
+
+@_interrupt_boundary
+def flush_samples(run_uuid: str, samples: list[dict]) -> None:
+	"""Atomically bound concurrent completions; never recreate deleted input."""
 	if not samples:
 		return
 	_require_frappe()
-	from redis.exceptions import WatchError
-
-	from optimus.ai_fix import _InterruptGuard
-
 	_validate_samples([samples])
 	payload = json.dumps(samples).encode("utf-8")
-	sample_key, state_key, source_key = [frappe.cache.make_key(key) for key in (
-		_redis_keys.lp_samples(run_uuid), _redis_keys.lp_sample_state(run_uuid), _redis_keys.lp_source(run_uuid))]
-	guard = _InterruptGuard(base=True)
-	complete = False
-	with guard:
-		for _attempt in range(3):
-			try:
-				with frappe.cache.pipeline() as pipe:
-					pipe.watch(sample_key, state_key, source_key)
-					if not pipe.exists(source_key):
-						return  # expired/deleted input; late flush owns no capture
-					count, raw_bytes = pipe.llen(sample_key), pipe.get(state_key)
-					try:
-						used = int(raw_bytes) if raw_bytes is not None else (0 if count == 0 else -1)
-					except (ValueError, TypeError):
-						used = -1
-					complete = 0 <= used <= MAX_CAPTURE_BYTES - len(payload) and count < MAX_SAMPLE_BATCHES
-					pipe.multi()
-					pipe.set(state_key, str(used + len(payload) if complete else -1).encode(), ex=DATA_TTL_SECONDS)
-					if complete:
-						pipe.rpush(sample_key, payload)
-						pipe.expire(sample_key, DATA_TTL_SECONDS)
-					pipe.execute()
-					break
-			except WatchError:
-				complete = False
-		else:
-			# Raw counter, not a pickled cache value; state_key already uses make_key.
-			frappe.cache.set(state_key, b"-1", ex=DATA_TTL_SECONDS)  # nosemgrep: frappe-cache-breaks-multitenancy
-	if guard.pending():
-		samples = payload = None
-		raise guard.interrupt()
-	if not complete:
+	if _append_samples(run_uuid, payload) == -1:
 		raise CaptureInputError("Phase 2 sample capture is incomplete or exceeds its limit")
 
 
@@ -891,9 +887,12 @@ def read_all_samples(run_uuid: str) -> list[list[dict]]:
 			batches.append(_decode_capture_json(raw))
 		if len(raw_list) < end - start + 1:
 			break
-	if state is not None and (total_bytes != int(state)
-		or frappe.cache.get(frappe.cache.make_key(_redis_keys.lp_sample_state(run_uuid))) != state):  # nosemgrep: frappe-cache-breaks-multitenancy
-		raise CaptureInputError("Phase 2 samples changed or are incomplete. Retry after capture ends")
+	if state is not None:
+		after = frappe.cache.get(frappe.cache.make_key(_redis_keys.lp_sample_state(run_uuid)))  # nosemgrep: frappe-cache-breaks-multitenancy
+		if after != state:
+			raise CaptureChanged("Phase 2 samples changed. Retry after capture ends")
+		if total_bytes != int(state):
+			raise CaptureInputError("Phase 2 sample byte accounting is incomplete")
 	_validate_samples(batches)
 	return batches
 

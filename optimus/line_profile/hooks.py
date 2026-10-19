@@ -253,6 +253,7 @@ def _finish_capture(profiler, run_uuid, *, flush=True):
 
 	guard = _InterruptGuard(base=True)
 	failure = samples = None
+	detached = False
 	try:
 		with guard:
 			_cancel_watchdog()
@@ -263,21 +264,43 @@ def _finish_capture(profiler, run_uuid, *, flush=True):
 			try:
 				with guard:
 					profiler.disable_by_count()
+					detached = True
 			except ValueError:
-				pass  # line_profiler may already have released tool 2
+				detached = True  # line_profiler may already have released tool 2
 			except Exception as exc:
 				failure = failure or exc
-			if flush and run_uuid and failure is None and not guard.pending():
-				with guard:
-					samples = capture.serialize_stats(profiler)
-					capture.flush_samples(run_uuid, samples)
-		except Exception as exc:
-			failure = failure or exc
 		finally:
 			# Only the last Optimus profiler may free the process-wide tool.
 			with guard:
 				if capture.decr_active_profilers() == 0:
 					capture.release_monitoring_tool()
+					mon = getattr(capture.sys, "monitoring", None)
+					if mon is not None:
+						detached = detached or mon.get_tool(mon.PROFILER_ID) != "line_profiler"
+		# Pre-3.12 uses the C tracer; disable() is an independent fallback
+		# when the count-based wrapper failed. Never free a sibling's tool.
+		if not detached and not guard.pending():
+			try:
+				with guard:
+					profiler.disable()
+					detached = True
+			except Exception as exc:
+				failure = failure or exc
+		if flush and run_uuid and not guard.pending():
+			try:
+				with guard:
+					if not detached:
+						raise RuntimeError("Phase 2 profiler could not be detached")
+					samples = capture.serialize_stats(profiler)
+					capture.flush_samples(run_uuid, samples)
+			except Exception as exc:
+				failure = failure or exc
+				try:
+					with guard:
+						capture.mark_capture_incomplete(run_uuid)
+				except Exception as mark_error:
+					failure = failure or mark_error
+
 	if guard.pending():
 		failure = samples = profiler = None
 		raise guard.interrupt()

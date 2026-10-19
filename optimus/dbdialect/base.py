@@ -124,6 +124,7 @@ class IndexInfo:
 	leftmost: str | None = None    # columns[0] if any the col a b-tree accelerates a single-col filter on
 	eligible: bool = True
 	reason: str = ""
+	usable_prefix: tuple[str, ...] = ()  # Full leading key parts before a prefix/expression part.
 
 
 @dataclass

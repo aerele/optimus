@@ -28,6 +28,7 @@ def phase2(monkeypatch):
 	monkeypatch.setattr(mod, "frappe", fake)
 	monkeypatch.setattr(ai_refresh_store, "frappe", fake)
 	monkeypatch.setattr(mod, "_authorized", lambda *a: True)
+	monkeypatch.setattr(mod, "_workers_listening", lambda *a: True)
 	return SimpleNamespace(mod=mod, db=db, row=lambda: db.rows[mod.TABLE]["fake-child"])
 
 
@@ -63,6 +64,37 @@ def test_retry_cannot_overwrite_recording_or_finished_results(phase2, status):
 def test_stopping_recording_uses_same_durable_queue(phase2):
 	phase2.row()["status"] = "Recording"
 	assert admit(phase2, from_recording=True)["status"] == "queued"
+
+
+@pytest.mark.parametrize('workers', [False, None])
+@pytest.mark.parametrize('status', ['Recording', 'Failed', 'Analyzing'])
+def test_no_worker_refuses_without_stranding_capture_or_spending_attempt(phase2, workers, status):
+	phase2.row()['status'] = status
+	phase2.row()['warnings_json'] = '["Existing input diagnostic"]'
+	out = admit(phase2, from_recording=status == 'Recording', workers=workers)
+	assert out['status'] == 'refused'
+	assert phase2.row()['status'] == 'Failed' and phase2.row()['analyze_attempts'] == 0
+	assert ('Existing input diagnostic' if status == 'Failed' else 'worker') in phase2.row()['warnings_json']
+	if workers is None and status != 'Failed':
+		assert 'could not be checked' in phase2.row()['warnings_json']
+
+
+def test_exhausted_retry_preserves_diagnostic_before_worker_check(phase2):
+	phase2.row().update(analyze_attempts=4, warnings_json='["Input missing: record a new pass"]')
+	assert admit(phase2, workers=False)['reason'] == 'retry_limit'
+	assert phase2.row()['warnings_json'] == '["Input missing: record a new pass"]'
+
+
+def test_late_capture_snapshot_requests_retry_instead_of_new_pass(worker, monkeypatch):
+	admit(worker)
+	def changed(*a):
+		raise worker.mod.InputChanged()
+	monkeypatch.setattr(worker.analyzer, '_compute_run', changed)
+	with pytest.raises(worker.mod.Phase2Failed):
+		run_worker(worker)
+	assert worker.row()['status'] == 'Failed'
+	assert 'retry analysis' in worker.row()['warnings_json']
+	assert 'Record a new' not in worker.row()['warnings_json']
 
 
 def test_duplicate_delivery_including_same_token_cannot_claim_twice(phase2):

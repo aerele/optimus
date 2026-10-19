@@ -15,6 +15,38 @@ _METHOD = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+"
 _METHOD_PATH = re.compile(r"/api/(?:v\d+/)?method/[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*/?\Z", re.ASCII)
 _DOTTED = re.compile(_METHOD + r"\Z", re.ASCII)
 _raw_request = ContextVar("optimus_raw_request", default=None)
+_sql_rules = ContextVar("optimus_sql_rules", default=None)
+
+
+@contextmanager
+def sql_redaction_scope():
+	"""One current-rules read per payload/prompt build, including nested helpers.
+
+	Failures remain cached as failures for this build; the next build starts
+	fresh. No site data or rules survive in a process-global cache.
+	"""
+	if _sql_rules.get() is not None:
+		yield
+		return
+	token = _sql_rules.set({})
+	try:
+		yield
+	finally:
+		_sql_rules.reset(token)
+
+
+def _sensitive_columns():
+	from optimus.settings import _parse_skip_list
+
+	memo = _sql_rules.get()
+	if memo is None:
+		return _parse_skip_list(_fresh_sensitive_columns())
+	if "columns" not in memo:
+		memo["columns"] = None
+		memo["columns"] = _parse_skip_list(_fresh_sensitive_columns())
+	if memo["columns"] is None:
+		raise ValueError("Sensitive SQL rules unavailable for this build")
+	return memo["columns"]
 
 
 def opted_in(value) -> bool:
@@ -165,7 +197,8 @@ def query_text(query, *, send_raw: bool) -> str:
 	try:
 		with guard:
 			if send_raw:
-				return redact_sql_literals(query.strip())
+				columns = _sensitive_columns()
+				return redact_sql_literals(query.strip(), extra_columns=columns, strict=True)
 			parts = []
 			statements = sqlparse.parse(query)
 			for statement in statements:
@@ -187,6 +220,29 @@ def query_text(query, *, send_raw: bool) -> str:
 	if guard.pending():
 		query = parts = statements = statement = token = text = None
 		raise guard.interrupt()
+
+
+def _fresh_sensitive_columns():
+	"""Read committed operator rules; cached config falls back to defaults on error.
+
+	Use a separate connection so a worker's repeatable-read view cannot retain
+	old rules. Errors propagate to query_text's fail-closed boundary.
+	"""
+	import frappe
+
+	db = frappe.db
+	if db.db_type not in {"mariadb", "postgres"}:
+		raise ValueError("Unsupported SQL settings source")
+	with closing(db.get_connection()) as connection, closing(connection.cursor()) as cursor:
+		query = "SELECT value FROM `tabSingles` WHERE doctype = %s AND field = %s"
+		if db.db_type == "postgres":
+			schema = getattr(db, "db_schema", None)
+			if schema is not None:
+				cursor.execute("SET search_path TO %s", (schema,))
+			query = query.replace("`", '"')
+		cursor.execute(query, ("Optimus Settings", "sensitive_sql_columns"))
+		row = cursor.fetchone()
+		return row[0] if row else None
 
 
 def path_without_names(path) -> str:

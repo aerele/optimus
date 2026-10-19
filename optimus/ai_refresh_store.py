@@ -822,14 +822,16 @@ def cancel(run_id, *, docname, now, cancelled_by=None):
 	return _release(run, docname, state="cancelled", reason="cancelled", now=now)
 
 
-def prepare_analyze_retry(docname, session_uuid, *, requested_by, now, stopped_captures=None):
+def prepare_analyze_retry(docname, session_uuid, *, requested_by, now, stopped_captures=None, cancelled_refreshes=None):
 	"""Fence optional workers and reset a Failed parent in the same transaction."""
 	parent = _read("Optimus Session", docname, lock=True)
 	if not parent or parent.get("session_uuid") != session_uuid or parent.get("status") != "Failed":
 		return False
 	run_id = frappe.db.get_value(RUN, {"active_session": docname}, "name")
 	if run_id:
-		cancel(run_id, docname=docname, now=now, cancelled_by=requested_by)
+		cancelled = cancel(run_id, docname=docname, now=now, cancelled_by=requested_by)
+		if cancelled and cancelled_refreshes is not None:
+			cancelled_refreshes.append(cancelled)
 	for child in frappe.db.get_values(
 		"Optimus Phase Two Run", {"parent": docname, "status": ["in", ["Recording", "Analyzing"]]},
 		["name", "run_uuid", "recording_user", "status"], as_dict=True, for_update=True,

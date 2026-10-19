@@ -76,6 +76,23 @@ def test_emits_finding_when_get_doc_threshold_exceeded():
 	assert "apps/myapp/controllers/bulk.py:42" in rc[0]["customer_description"]
 
 
+def test_invalid_threshold_does_not_crash_framework_only_bucket(monkeypatch):
+	from dataclasses import replace
+
+	from optimus import settings
+
+	base = settings.get_config()
+	for threshold in (-1, 0):
+		cfg = replace(base, redundant_doc_threshold=threshold)
+		monkeypatch.setattr(settings, 'get_config', lambda: cfg)
+		recording = {'uuid': 'rec-invalid-threshold', 'calls': [], 'sidecar': [
+			_sidecar_entry('get_doc', ('Item', 'ITEM-X'), ('Item', 'abc123hash'), caller_stack=_FRAMEWORK_CALLER_STACK)], 'pyi_session': None}
+		context = AnalyzeContext(session_uuid='test', docname='test')
+		result = redundant_calls.analyze([recording], context)
+		assert not result.findings
+		assert any('framework' in warning.lower() for warning in context.warnings)
+
+
 def test_no_finding_below_threshold():
 	recording = {
 		"uuid": "rec-1",

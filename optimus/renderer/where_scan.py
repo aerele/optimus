@@ -356,7 +356,7 @@ def _comparison(tokens: list[str], i: int, j: int) -> str:
 		return "eq" if after[1:] == ["null"] else "range"
 	if first in ("!=", "<>", "not"):
 		return "not"
-	if not first or first in _AND_WORDS:
+	if not first or first in _AND_WORDS or first == ")":
 		before = tokens[i - 1].lower() if i > 0 else ""
 		if before in ("!=", "<>"):
 			return "not"
@@ -534,3 +534,39 @@ def _scan_where(query: str, labelled, qualifiers=None, *, truncated: bool = Fals
 		{col: usable[col.lower()] for col in where_cols if col.lower() in usable},
 		{col: valued[col.lower()] for col in where_cols if col.lower() in valued},
 	)
+
+
+def scan_join_filters(query, labelled, qualifiers):
+	"""Apply the predicate-shape rules to main-query ON clauses as well.
+
+	Do not infer equality from a parser's JOIN label: it also labels columns
+	inside functions, arithmetic and disjunctions. USING/ambiguous clauses
+	remain unverified rather than receiving an invented equality predicate.
+	"""
+	columns = [("WHERE", col) for label, col in labelled if label == "JOIN"]
+	if not columns:
+		return {}, {}
+	tokens = [tok for tok in _SQL_TOKEN_RE.findall(query or "") if not _COMMENT_RE.match(tok)]
+	clauses, current, depth = [], None, 0
+	ends = _WHERE_ENDS | {"where", "join", "left", "right", "inner", "outer", "cross", "full", "straight_join"}
+	for token in tokens:
+		low = token.lower()
+		if depth == 0 and low == "on":
+			if current:
+				clauses.append(current)
+			current = []
+			continue
+		if depth == 0 and low in ends:
+			if current:
+				clauses.append(current)
+			current = None
+		if current is not None:
+			current.append(token)
+		depth += {"(": 1, ")": -1}.get(token, 0)
+	if current:
+		clauses.append(current)
+	if depth or not clauses:
+		return {col: {"unsure"} for _label, col in columns}, {}
+	synthetic = "SELECT 1 WHERE " + " AND ".join("(" + " ".join(part) + ")" for part in clauses)
+	unusable, usable, _valued = _scan_where(synthetic, columns, qualifiers)
+	return unusable, usable

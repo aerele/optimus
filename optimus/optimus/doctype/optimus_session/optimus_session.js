@@ -113,6 +113,16 @@ function render_ai_buttons(frm) {
 		frappe.router.on("change", () => {
 			if (frm._optimus_ai && !_ai_current(frm, frm._optimus_ai)) _ai_stop(frm, frm._optimus_ai);
 		});
+		if (frappe.realtime) frappe.realtime.on("optimus_ai_refresh_admitted", (payload) => {
+			const current = frm._optimus_ai;
+			if (current && payload && payload.session_uuid === current.session_uuid && _ai_current(frm, current)) {
+				_ai_poll(frm, current);
+			}
+		});
+		if (typeof document !== "undefined") document.addEventListener("visibilitychange", () => {
+			const current = frm._optimus_ai;
+			if (!document.hidden && current && _ai_current(frm, current)) _ai_poll(frm, current);
+		});
 	}
 	// Frappe may reset Save while refreshing the same form.
 	if (state.busy || state.submitting || state.unknown) _ai_hold_save(frm, state);
@@ -143,6 +153,12 @@ function _ai_unknown(frm, state) {
 
 function _ai_poll(frm, state) {
 	if (!_ai_current(frm, state)) return _ai_stop(frm, state);
+	if (typeof document !== "undefined" && document.hidden) {
+		clearTimeout(state.timer);
+		state.needs_poll = true;
+		return;
+	}
+	state.needs_poll = false;
 	if (state.submitting) return _ai_schedule(frm, state, 5000);
 	const epoch = ++state.epoch;
 	frappe.call({
@@ -195,7 +211,10 @@ function _ai_apply_status(frm, state, data) {
 			indicator: run.state === "complete" ? "green" : "orange"});
 		_reload_clean_form(frm);
 	}
-	_ai_schedule(frm, state, state.busy ? 5000 : 30000);
+	// Refresh/navigation/realtime events check again when the session changes.
+	// Idle forms must not perpetually read the journal in background tabs.
+	if (state.busy) _ai_schedule(frm, state, 5000);
+	else clearTimeout(state.timer);
 }
 
 function _ai_progress_banner(frm, state) {
@@ -254,8 +273,8 @@ function _ai_end_message(run) {
 // per-tick event stacked one bar per tick instead of updating one. This keeps a
 // single element found and removed by `idClass` (which must be unique to this
 // banner) and rewrites its contents in place, returning it so the caller can tag
-// it. Pass html=null to remove it. `extraClasses` are added only when the element
-// is created (e.g. Frappe theme classes); `styler` runs once on a freshly created
+// it. Pass html=null to remove it. `extraClasses` update on reuse so a new state
+// receives the current theme classes; `styler` runs once on a freshly created
 // element whose classes do not carry its colours. The element is prepended to
 // .form-layout, outside .form-message-container, so Frappe's own show_message()
 // clearing on each refresh never removes it.
@@ -274,6 +293,7 @@ function _single_banner(frm, idClass, extraClasses, html, styler) {
 		const $host = root.find(".form-layout").first();
 		($host.length ? $host : root).prepend($b);
 	}
+	$b.attr("class", extraClasses ? idClass + " " + extraClasses : idClass);
 	$b.html(html);
 	return $b;
 }

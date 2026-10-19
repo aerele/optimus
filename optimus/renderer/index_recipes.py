@@ -2117,14 +2117,24 @@ def _advise_finding(
 		if sort_label and evidence is not None and source == [target]:
 			labelled = _recover_sort_clause(query, labelled, sort_label, qualifiers, names)
 		unusable, usable, valued = _scan_where(query, labelled, qualifiers, truncated=truncated)
+		from optimus.renderer.where_scan import scan_join_filters
+
+		join_unusable, join_usable = scan_join_filters(query, labelled, qualifiers)
+		unusable.update({col: kinds for col, kinds in join_unusable.items() if col not in usable})
+		for col, kind in join_usable.items():
+			if col not in usable:
+				usable[col] = kind
+			unusable.pop(col, None)
 		comparisons = {}
-		for label, col in labelled:  # filters come first, then the sort or group columns
+		# Parser recovery can append filters after sort/group columns. Classify
+		# filters first regardless of parser order, then derive their sort role.
+		for label, col in sorted(labelled, key=lambda item: item[0] in ("ORDER BY", "GROUP BY")):
 			if label in ("ORDER BY", "GROUP BY"):
 				current = comparisons.get(col)
 				if current != "eq":  # an equality-filtered sort column stays an equality column
 					comparisons[col] = "rsort" if current == "range" else "sort"
 			elif col not in unusable:
-				comparisons.setdefault(col, "eq" if label == "JOIN" else usable.get(col, "range"))
+				comparisons.setdefault(col, usable.get(col, "range"))
 		lookup = _key_lookup(valued, evidence)
 		if lookup:
 			return _no_code(doctype, _clean_columns([col for _label, col in labelled]), lookup)

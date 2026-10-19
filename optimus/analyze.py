@@ -32,7 +32,7 @@ from frappe.recorder import (
 )
 from frappe.utils.scheduler import is_scheduler_disabled
 
-from optimus import ai_grounding, ai_prompts, renderer, safe_call, safe_commit, session
+from optimus import ai_grounding, ai_privacy, ai_prompts, renderer, safe_call, safe_commit, session
 from optimus.analyzers import (
 	call_tree,
 	explain_flags,
@@ -2095,6 +2095,7 @@ def _enrich_findings_with_source_snippets(findings: list[dict], *, owner: str | 
 
 
 
+@ai_privacy.sql_redaction_scope()
 def ai_payload_for_finding(
 	child,
 	file_cache: dict,
@@ -2273,11 +2274,16 @@ def _maybe_attach_recorded_queries(
 
 	send_raw = ai_privacy.raw_values_enabled() if send_raw is None else send_raw
 	top = []
+	seen_queries = set()
 	for c in sorted(calls, key=lambda c: -(c.get("duration") or c.get("duration_ms") or 0)):
 		dur_ms = c.get("duration") or c.get("duration_ms") or 0
 		if dur_ms < _AI_EXAMPLE_QUERY_MIN_MS:
 			continue
-		q = ai_privacy.query_text(c.get("query") if send_raw else (c.get("normalized_query") or c.get("query")), send_raw=send_raw)
+		raw_query = c.get("query") if send_raw else (c.get("normalized_query") or c.get("query"))
+		if not isinstance(raw_query, str) or raw_query in seen_queries:
+			continue
+		seen_queries.add(raw_query)
+		q = ai_privacy.query_text(raw_query, send_raw=send_raw)
 		if not q or q in top:
 			continue
 		top.append(q)
@@ -2587,10 +2593,16 @@ def eligible_findings(rows, cfg, *, regenerate_all=False, requested_at=None, inc
 	from optimus import ai_fix
 
 	cutoff = _requested_cutoff(requested_at)
+	inputs = {}
+	def gate_input(row):
+		key = id(row)
+		if key not in inputs:
+			inputs[key] = ai_fix.gate_input(row)
+		return inputs[key]
 	eligible, gated, excluded = _ai_selection(
 		rows or (), ai_fix,
-		type_of=lambda r: ai_fix.gate_input(r)["finding_type"],
-		gate=lambda r: ai_fix.llm_gate_note(ai_fix.gate_input(r)),
+		type_of=lambda r: gate_input(r)["finding_type"],
+		gate=lambda r: ai_fix.llm_gate_note(gate_input(r)),
 		cfg=cfg,
 	)
 	chosen = []

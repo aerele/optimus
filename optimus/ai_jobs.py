@@ -60,6 +60,9 @@ class PreparedItem:
 	persist: Callable
 
 
+_PREPARATION_SKIPPED = object()
+
+
 def _now():
 	return time.time()
 
@@ -252,6 +255,9 @@ def _drive(run_id, docname, slice_no, worker_token):
 		if reason:
 			_end(run_id, docname, worker_token, reason)
 			return
+		if item is _PREPARATION_SKIPPED:
+			items += 1
+			continue  # Recheck lease, deadline and slice budget between unsent skips.
 		if item is None:
 			latest = _read_run(run_id)
 			_end(
@@ -839,7 +845,7 @@ def _attempts(run):
 	attempts as ``(kind, target, input_hash)`` keys, and the fix attempts of the whole resume
 	chain, which is what the item cap limits: a resume continues the same refresh, so it
 	does not get the cap again."""
-	fields = ["run_id", "kind", "target_name", "input_hash", "state"]
+	fields = ["run_id", "kind", "target_name", "input_hash", "state", "error_kind", "send_certainty"]
 	chain = _chain(run)
 	attempts = frappe.get_all(
 		store.ATTEMPT, filters={"run_id": ["in", chain]}, fields=fields, limit_page_length=10001
@@ -850,7 +856,9 @@ def _attempts(run):
 	if len(attempts) > 10000 or len(uncertain) > 10000:
 		raise StopRefresh("history_limit")
 	tried = [a for a in attempts if a["run_id"] == run["name"]]
-	fixes_spent = sum(a["kind"] == "fix" for a in attempts)
+	fixes_spent = sum(a["kind"] == "fix" and not (
+		a.get("state") == "skipped" and a.get("error_kind") == "not_eligible" and a.get("send_certainty") == "not_sent"
+	) for a in attempts)
 	return tried, {(a["kind"], a["target_name"], a["input_hash"]) for a in uncertain}, fixes_spent
 
 
@@ -940,12 +948,12 @@ def _touch_session(name, **values):
 	return sql_work.touch_session(frappe.db, name, **values)
 
 
-def _fix_item(run, doc, row, memo):
+def _fix_item(run, doc, row, memo, *, grounding=None):
 	fingerprint = _signature(doc, row)
 	payload = _build_payload(
 		row,
 		memo.setdefault("source", {}),
-		_grounding(doc, row, memo, run["name"]),
+		grounding if grounding is not None else _grounding(doc, row, memo, run["name"]),
 		principal=run["requested_by"],
 	)
 
@@ -1037,6 +1045,46 @@ def _steps_item(run, doc, memo):
 	return PreparedItem("steps", doc.name, fingerprint, send, valid, persist)
 
 
+def _prepare_item(run, *, kind, target, prepare):
+	"""Journal an unsent item-local preparation failure without blocking later work.
+
+	Calling and skipped are written in one transaction: no committed provider
+	intent, unknown spend, breaker increment or consumed provider-call cap.
+	Shared grounding is prepared by the caller outside this boundary.
+	"""
+	guard = safe_call.InterruptGuard(base=True)
+	failure_type = None
+	try:
+		with guard:
+			return prepare()
+	except StopRefresh:
+		raise
+	except Exception as exc:
+		if sql_work.is_database_error(exc, framework=frappe):
+			raise
+		failure_type = type(exc).__name__
+	if guard.pending():
+		raise guard.interrupt()
+	frappe.db.rollback()
+	_check_run(run)
+
+	def skip():
+		store.lock_run(run["name"], run["session_name"])
+		_check_run(run, locked=True, kind=kind)
+		attempt = store.begin_attempt(run["name"], docname=run["session_name"],
+			worker_token=run["worker_token"], kind=kind, target=target,
+			input_hash=hashlib.sha256(b"preparation_failed").hexdigest(), now=_now())
+		if attempt:
+			store.settle_attempt(run["name"], attempt["name"], docname=run["session_name"],
+				worker_token=run["worker_token"], outcome="skipped", tokens=0, usage_complete=True,
+				error_kind="not_eligible", send_certainty="not_sent", now=_now())
+	_retry_sql(skip)
+	ai_fix.log_ai_failure("optimus ai refresh prepare", RuntimeError(failure_type),
+		docname=run["session_name"], run_id=run["name"], item=kind, target=target)
+	_transaction(lambda: None)
+	return None
+
+
 def _next_item(run, memo):
 	"""The next item to send, or None when nothing is left; raises ``StopRefresh`` when the run
 	must end. It publishes the run's progress before it returns.
@@ -1107,12 +1155,18 @@ def _next_item(run, memo):
 	if remaining:
 		for row in rows:
 			if row.name not in blocked:
-				return _fix_item(run, doc, row, memo)
+				grounding = _grounding(doc, row, memo, run["name"])
+				item = _prepare_item(run, kind="fix", target=row.name,
+					prepare=lambda: _fix_item(run, doc, row, memo, grounding=grounding))
+				if item is not None:
+					return item
+				return _PREPARATION_SKIPPED
 	if steps:
-		item = _steps_item(run, doc, memo)
+		item = _prepare_item(run, kind="steps", target=doc.name, prepare=lambda: _steps_item(run, doc, memo))
 		if item is not None:
 			return item
-		step_state, steps = "no_input", False
+		run = _read_run(run["name"])
+		step_state, steps = (run.get("steps_state") if run.get("steps_state") == "skipped" else "no_input"), False
 		progress()
 	return None
 
@@ -1303,6 +1357,14 @@ def start_refresh(
 			return {"status": "refused", "reason": "busy"}
 		out = {"status": "already_running", "run": current}
 	if out["status"] == "queued":
+		# Ready notifications precede automatic admission. Wake idle open forms
+		# only after the durable reservation commits, including other tabs/users.
+		def notify():
+			from optimus.realtime import publish_session_event
+
+			publish_session_event("optimus_ai_refresh_admitted", {"docname": docname, "session_uuid": session_uuid})
+			_transaction(lambda: None)  # Close the audience lookup's read view before dispatch.
+		_isolated(notify)
 		# The admission already waited for the session row: the dispatch takes it with
 		# NOWAIT, so the click waits once. A busy row leaves the committed intent
 		# pending for the next click (``_resend_pending``) instead of failing the response.
@@ -1573,14 +1635,16 @@ def prepare_analyze_retry(docname, session_uuid, *, requested_by):
 	"""Called after the action gate; a stale refresh cannot write into a retry."""
 	_transaction(lambda: None)
 	def reserve():
-		captures = []
+		captures, cancelled = [], []
 		changed = store.prepare_analyze_retry(docname, session_uuid, requested_by=requested_by,
-			now=_now(), stopped_captures=captures)
-		return changed, captures
-	changed, captures = _retry_sql(reserve)
+			now=_now(), stopped_captures=captures, cancelled_refreshes=cancelled)
+		return changed, captures, cancelled
+	changed, captures, cancelled = _retry_sql(reserve)
 	if captures:
 		from optimus.line_profile.jobs import stop_captures
 		stop_captures(captures)
+	for run in cancelled:
+		_isolated(lambda: _note_ending(run, docname))
 	return changed
 
 

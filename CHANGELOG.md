@@ -12,6 +12,20 @@ versions may contain breaking changes see migration notes below).
 
 ### Security and correctness
 
+- Close qualified and aliased execution/deserialization gates; revalidate stored
+  raw index DDL, including inline code. Apply current sensitive SQL rules once
+  per payload build and omit queries on redaction failure. Mask rotated,
+  schemeless and oversized header secrets; withhold all unverified AI log fields.
+- Journal malformed finding preparation as unsent skips without starving later
+  fixes or Steps. Wake idle forms after committed AI admission; pause hidden-tab
+  polling and preserve unsaved notes. Keep Retry Analyze cleanup independent of
+  reconciliation logging failures.
+- Restore Server Script representative snippets and links, reject unusable JOIN
+  index recipes, and classify recovered filters before sort columns. Retain
+  unrelated File uploads while protecting aliases of profiling artifacts.
+- Preserve capture samples after safe teardown recovery; use atomic bounded
+  Redis appends and retry changed snapshots. Workerless Phase 2 refusals retain
+  input and retry diagnostics without using an analysis attempt.
 - Protect Session identities, profiling data, child rows and generated Files from
   generic document writes, including attachment aliases. Remove generic Session
   creation from Optimus User. Title and notes remain editable.
@@ -26,8 +40,9 @@ versions may contain breaking changes see migration notes below).
 - Retain Frappe identities for literal dynamic imports and skip enclosing class
   namespaces when checking nested class bodies, preventing unsafe code from
   being displayed as an unrelated object call.
-- Use only eligible full b-tree keys for index coverage, preserving expression
-  positions and excluding partial, ignored, prefix, invalid and non-btree proofs.
+- Use eligible full b-tree keys and verified full leading key parts for index
+  coverage, preserving expression positions and excluding partial, ignored,
+  invalid and non-btree proofs. A trailing prefix never proves unique coverage.
 - Bound optional SQL parsing and formatting. Prevent Phase 1/2 capture overlap
   with atomic Redis admission. Roll back each failed retention deletion separately.
 - Bound saved-answer validation per report to `RENDER_VALIDATION_CHARS = 262144`
