@@ -77,12 +77,11 @@ def test_widget_has_visibility_listener():
 
 
 def test_widget_role_check():
-	"""Widget must check for Optimus User or System Manager role."""
+	"""Widget must gate on the boot role flag, not its own role list."""
 	with open(WIDGET_JS) as f:
 		src = f.read()
-	assert "System Manager" in src
-	assert "Optimus User" in src
-	assert "userHasRole" in src
+	assert "frappe.boot.optimus_can_profile" in src
+	assert "REQUIRED_ROLES" not in src
 
 
 def test_form_js_has_retry_button():

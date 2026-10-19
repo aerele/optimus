@@ -12,6 +12,8 @@ versions may contain breaking changes see migration notes below).
 
 ### Security and correctness
 
+- Hide the floating widget for users without a profiler role, avoiding a
+  permission-error dialog on Desk load. Keep the API and boot role gate aligned.
 - Close qualified and aliased execution/deserialization gates; revalidate stored
   raw index DDL, including inline code. Apply current sensitive SQL rules once
   per payload build and omit queries on redaction failure. Mask rotated,

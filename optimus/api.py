@@ -55,6 +55,13 @@ def _require_user() -> str:
 	return user
 
 
+def is_profiler_user(user: str) -> bool:
+	"""True when ``user`` may use the profiler. Shared by the API gate and boot."""
+	if user == "Administrator":
+		return True
+	return bool(ALLOWED_ROLES & set(frappe.get_roles(user)))
+
+
 def _require_profiler_user() -> str:
 	"""Return the calling user, or throw if they lack the profiler role.
 
@@ -63,10 +70,7 @@ def _require_profiler_user() -> str:
 	cosmetic).
 	"""
 	user = _require_user()
-	if user == "Administrator":
-		return user
-	roles = set(frappe.get_roles(user))
-	if not (ALLOWED_ROLES & roles):
+	if not is_profiler_user(user):
 		frappe.throw(
 			_("You need the Optimus User or System Manager role to use the profiler."),
 			frappe.PermissionError,

@@ -47,15 +47,24 @@ if ! command -v mariadb >/dev/null 2>&1; then
 fi
 _end
 
-# v0.12.27: wkhtmltopdf was removed from Ubuntu 24.04 (the current
-# ``ubuntu-latest`` runner base), so ``apt-get install wkhtmltopdf``
-# fails with a package-not-found error and trips ``set -e``. The
-# integration suite under ``optimus/tests_integration/`` does NOT
-# exercise PDF rendering (it's a pure-pytest concern covered by
-# ``optimus/tests/test_pdf_export.py``), so we skip the install
-# entirely here. If a future integration test needs PDFs, swap to
-# the explicit Debian package + ``--allow-downgrades`` install used
-# by frappe/erpnext's CI.
+# The managed-artifact integration tests render real PDFs. Ubuntu 24.04 no
+# longer packages wkhtmltopdf; use the upstream patched-Qt build and verify the
+# exact artifact before installing it with its font/X11/OpenSSL dependencies.
+_step "install patched-Qt wkhtmltopdf"
+WKHTMLTOPDF_DEB="$(mktemp --suffix=.deb)"
+trap 'rm -f "${WKHTMLTOPDF_DEB}"' EXIT
+curl --fail --location --retry 3 --silent --show-error \
+	--output "${WKHTMLTOPDF_DEB}" \
+	"https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox_0.12.6.1-3.jammy_amd64.deb"
+printf '%s  %s\n' \
+	'4f723b2691ad8638a9df960e0421d346d7315083e3583a334f33362280ddba15' \
+	"${WKHTMLTOPDF_DEB}" | sha256sum --check --strict
+sudo apt-get update -qq
+sudo apt-get install -qy --no-install-recommends "${WKHTMLTOPDF_DEB}"
+wkhtmltopdf --version | grep -F 'with patched qt'
+rm -f "${WKHTMLTOPDF_DEB}"
+trap - EXIT
+_end
 
 # ---------------------------------------------------------------------------
 # Bench init + optimus app symlink + test site
@@ -130,6 +139,13 @@ _step "pip install -e apps/optimus + test deps"
 ./env/bin/pip install --quiet \
 	pytest pytest-github-actions-annotate-failures \
 	hypothesis Faker pdfplumber pypdf sql_metadata jsonschema
+_end
+
+_step "build framework print assets"
+# get_pdf reads the framework's compiled print CSS through assets.json, even
+# when Optimus's source HTML is self-contained. Build after app registration
+# so asset links are available; keep --skip-assets on init to avoid two builds.
+bench build --app frappe
 _end
 
 _step "bench new-site ${TEST_SITE}"

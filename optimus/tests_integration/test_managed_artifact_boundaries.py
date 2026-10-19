@@ -118,6 +118,14 @@ class TestManagedArtifactBoundaries(FrappeTestCase):
 		self.assertEqual(url, pdf_export.get_or_generate_pdf(parent.session_uuid))
 		pdf = read_artifact(parent.name, "raw_report_pdf_file", url)
 		self.assertTrue(pdf.startswith(b"%PDF"))
+		import io
+
+		from pypdf import PdfReader
+
+		reader = PdfReader(io.BytesIO(pdf))
+		text = " ".join(" ".join(page.extract_text() or "" for page in reader.pages).split())
+		self.assertIn("Synthetic PDF report", text)
+		self.assertIn("Expected report text.", text)
 		name = frappe.db.get_value("File", {"file_url": url, "attached_to_name": parent.name}, "name")
 		self.files.append(name)
 

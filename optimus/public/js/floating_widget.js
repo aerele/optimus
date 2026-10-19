@@ -24,7 +24,7 @@
 	// earlier page load. If the build ID in the console / in the
 	// widget's title attribute doesn't match what we think is current,
 	// the user is on cached JS and needs a hard refresh + bench restart.
-	const WIDGET_BUILD_ID = "2026-04-16-hide-when-disabled";
+	const WIDGET_BUILD_ID = "2026-10-18-role-gate-mount";
 
 	// Developer-only diagnostic. Defaults to silent in production so the
 	// browser console isn't spammed on every Desk page. Set
@@ -68,7 +68,6 @@
 	// on busy sites. POLL_INTERVAL_MS is kept as a legacy constant (some
 	// external integrations may reference it) but no timer uses it.
 	const POLL_INTERVAL_MS = 0;
-	const REQUIRED_ROLES = ["System Manager", "Optimus User", "Administrator"];
 
 	let widget = null;
 	let elapsedHandle = null;
@@ -80,22 +79,6 @@
 		started_at: null,
 		display: "inactive", // inactive | recording | stopping | analyzing | ready
 	};
-
-	function userHasRole() {
-		// frappe.user_roles is set by Desk.set_globals(). On initial page
-		// load our app_include_js script may run before set_globals, so
-		// fall back to frappe.boot.user.roles which is populated inline
-		// in the Desk HTML before any script executes.
-		// Administrator is always allowed (matches api._require_profiler_user).
-		if (frappe.session && frappe.session.user === "Administrator") {
-			return true;
-		}
-		const roles =
-			frappe.user_roles
-			|| (frappe.boot && frappe.boot.user && frappe.boot.user.roles)
-			|| [];
-		return REQUIRED_ROLES.some((r) => roles.includes(r));
-	}
 
 	function init() {
 		// v0.5.2 round 4: hide widget entirely when Optimus Settings ▸
@@ -116,14 +99,13 @@
 			return;
 		}
 
-		// Mount the widget UNCONDITIONALLY for any logged-in user. The
-		// server-side `_require_profiler_user()` check in api.py is the
-		// real permission gate; this client-side check is just a hint
-		// and was causing race-condition bugs because `frappe.user_roles`
-		// may not be populated when this script runs (see desk.js:329
-		// set_globals runs after Desk class construction). We err on the
-		// side of always mounting; users without the role will see a
-		// permission error if they actually click Start.
+		// Skip non-profilers: api.status would 403 and pop an error modal.
+		// boot.py sets the flag with the API's role check; missing means an old cached boot.
+		if (frappe.boot && frappe.boot.optimus_can_profile === false) {
+			_diag("[optimus] user lacks a profiler role, widget will not mount");
+			return;
+		}
+
 		mountWidget();
 		// v0.5.1: one-shot rehydrate on page load. Covers the case
 		// where the user reloaded / navigated back to the Desk while
@@ -885,11 +867,8 @@
 		}
 	}
 
-	// Bootstrap: wait for document.body to exist, then mount the widget
-	// UNCONDITIONALLY. We don't gate on frappe.user_roles or frappe.boot
-	// because those may not be populated when our app_include_js script
-	// runs (Desk.set_globals at desk.js:329 runs later, asynchronously).
-	// The server-side _require_profiler_user check is the real gate.
+	// Bootstrap: wait for document.body to exist, then run init(), which
+	// gates on the enabled flag and the user's roles before mounting.
 	function bootstrap() {
 		_diag("[optimus] bootstrap() called, document.body exists:", !!document.body);
 		if (!document.body) {
