@@ -72,7 +72,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 	for recording in recordings:
 		for call in recording.get("calls") or []:
-			if is_error_log_hook_query(call.get("stack")):
+			if not isinstance(call, dict) or is_error_log_hook_query(call.get("stack")):
 				continue
 			query = call.get("normalized_query") or call.get("query") or ""
 			if not query:

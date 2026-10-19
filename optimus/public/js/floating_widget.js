@@ -353,6 +353,8 @@
 			if (currentState.docname) {
 				frappe.set_route("Form", "Optimus Session", currentState.docname);
 				currentState.display = "inactive";
+				// Opening the completed report releases this widget for a new session.
+				currentState.session_uuid = null;
 				setDisplay("inactive", "Profiler", "");
 			}
 		}
@@ -740,7 +742,7 @@
 			if (principal && principal !== frappe.session.user) return false;
 			if (!principal && (phase2 || data.session_uuid !== currentState.session_uuid)) return false;
 			if (
-				currentState.display !== "inactive" && currentState.session_uuid
+				currentState.session_uuid
 				&& data.session_uuid !== currentState.session_uuid
 			) {
 				return false;

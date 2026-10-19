@@ -1587,7 +1587,10 @@ def analyze(recordings: list, context) -> AnalyzerResult:
 		# "all trees at once" to "one at a time". Covers the pyi-is-None branch
 		# below too. (Guarded by a test that no later analyzer reads pyi_session.)
 		pyi = recording.pop("pyi_session", None)
-		calls = [c for c in recording.get("calls") or [] if not is_error_log_hook_query(c.get("stack"))]
+		calls = [
+			c for c in recording.get("calls") or []
+			if isinstance(c, dict) and not is_error_log_hook_query(c.get("stack"))
+		]
 		# Track SQL time even if no pyi tree
 		sql_total_ms += sum(c.get("duration", 0) for c in calls)
 

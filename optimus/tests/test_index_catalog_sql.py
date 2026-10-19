@@ -1,10 +1,88 @@
 """Real catalog evidence must not turn unusable indexes into coverage proofs."""
 
+import json
 import os
 import uuid
 from types import SimpleNamespace
 
 import pytest
+
+
+@pytest.mark.parametrize("v15_like", [False, True], ids=["v16", "v15"])
+def test_purge_confirms_exact_paths_on_real_like_candidates(catalog, monkeypatch, v15_like):
+	from optimus import maintenance
+
+	c = catalog
+	tables = {"Error Log": c.table + "_logs", "Deleted Document": c.table + "_deleted"}
+	allowed = {"name", "error", "data", "deleted_doctype"}
+	def quote(field):
+		assert field in allowed or field in tables.values()
+		return c.quote + field + c.quote
+
+	candidates = set()
+	def get_all(doctype, *, filters=(), or_filters=(), fields, limit_page_length, limit_start=0, order_by):
+		assert order_by == "name asc"
+		params = []
+		def condition(item):
+			field, op, value = item
+			assert op in {"=", ">", "<=", "like"}
+			if op == "like":
+				if v15_like:
+					value = value.replace("\\", "\\\\")
+				if c.backend == "postgres":
+					op = "ilike"  # Frappe's Postgres LIKE translation.
+			params.append(value)
+			return f"{quote(field)} {op} %s"
+		clauses = [condition(f) for f in filters]
+		if or_filters:
+			clauses.append("(" + " OR ".join(condition(f) for f in or_filters) + ")")
+		rows = c.sql(
+			f"SELECT {','.join(quote(f) for f in fields)} FROM {quote(tables[doctype])}"
+			+ (" WHERE " + " AND ".join(clauses) if clauses else "")
+			+ f" ORDER BY {quote('name')} LIMIT %s OFFSET %s",
+			[*params, limit_page_length, limit_start], as_dict=True,
+		)
+		if or_filters:
+			candidates.update((doctype, r["name"]) for r in rows)
+		return rows
+
+	def delete(doctype, filters):
+		op, names = filters["name"]
+		assert op == "in" and names
+		c.sql(
+			f"DELETE FROM {quote(tables[doctype])} WHERE {quote('name')} IN ({','.join(['%s'] * len(names))})",
+			names,
+		)
+
+	created = []
+	try:
+		for table in tables.values():
+			c.sql(
+				f"CREATE TABLE {quote(table)} (name varchar(50) PRIMARY KEY, error text, data text, deleted_doctype varchar(50))"
+				+ (" CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci" if c.backend == "mariadb" else "")
+			)
+			created.append(table)
+		paths = ["optimus/aiXfix.py", "frappeXprofiler/ai_fix.py", "optimus/AI_FIX.PY",
+			"optimus/ai_fix.py", "frappe_profiler/ai_fix.py"]
+		for table in tables.values():
+			for i, path in enumerate(paths):
+				text = f'File "apps/{path}", line 10'
+				c.sql(f"INSERT INTO {quote(table)} VALUES (%s,%s,%s,%s)",
+					[str(i), text, json.dumps({"error": text}), "Error Log"])
+			c.sql(f"INSERT INTO {quote(table)} VALUES (%s,%s,%s,%s)", ["other", "", "optimus/ai_fix.py", "Note"])
+		monkeypatch.setattr(maintenance, "frappe", SimpleNamespace(get_all=get_all, db=SimpleNamespace(delete=delete)))
+		monkeypatch.setattr(maintenance, "safe_commit", c.connection.commit)
+		monkeypatch.setattr(maintenance, "_BATCH", 2)
+		monkeypatch.setattr(maintenance, "_WINDOW", 3)
+		assert maintenance.purge_ai_error_logs(dry_run=True) == {"error_logs": 2, "deleted_documents": 2}
+		assert candidates == {(doctype, str(i)) for doctype in tables for i in range(5)}
+		assert maintenance.purge_ai_error_logs(dry_run=False) == {"error_logs": 2, "deleted_documents": 2}
+		for table in tables.values():
+			assert {r[0] for r in c.sql(f"SELECT name FROM {quote(table)}")} == {"0", "1", "2", "other"}
+	finally:
+		c.connection.rollback()
+		for table in reversed(created):
+			c.sql(f"DROP TABLE {quote(table)}")
 
 
 @pytest.fixture

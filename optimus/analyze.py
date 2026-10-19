@@ -1363,7 +1363,10 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 		cap = MAX_QUERIES_ENRICHED_PER_RECORDING
 
 	for recording in recordings:
-		calls = recording.get("calls") or []
+		# Normalize entries before enrichment and every downstream analyzer. A
+		# malformed entry must neither abort the session nor consume its SQL cap.
+		calls = [c for c in recording.get("calls") or [] if isinstance(c, dict)]
+		recording["calls"] = calls
 		total_queries_seen += len(calls)
 		if cap and len(calls) > cap:
 			truncated_queries += len(calls) - cap
@@ -1632,7 +1635,7 @@ def _session_query_totals(recordings: list[dict]) -> tuple[int, float]:
 	time_ms = 0
 	for r in recordings:
 		for c in r.get("calls") or []:
-			if isinstance(c, dict) and is_error_log_hook_query(c.get("stack")):
+			if not isinstance(c, dict) or is_error_log_hook_query(c.get("stack")):
 				continue
 			count += 1
 			time_ms += c.get("duration", 0)
