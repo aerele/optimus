@@ -91,6 +91,8 @@ CODE_ACTIONS: dict[str, str] = {
 	"unverified-safety": BLOCK,
 	"permission-behavior-change": BLOCK,
 	"sql-semantics-dropped": BLOCK,
+	"ineffective-loop-fix": BLOCK,
+	"unverified-loop-fix": BLOCK,
 	# truncated: never re-asked (the rewrite would be cut off too); code stripped.
 	"truncated": TRUNCATED,
 	# advise: a profiler note only; never re-asked, never strips code (no pinned semgrep rule).
@@ -809,7 +811,7 @@ def _stored_policy_violations(text: str) -> list[Violation]:
 	return _dedupe([v for v in out if v.action == BLOCK])
 
 
-def _verify_fix(text: str, *, source_lines: list[str], finish_reason: str | None = None) -> list[Violation]:
+def _verify_fix(text: str, *, source_lines: list[str], finish_reason: str | None = None, finding_type: str | None = None) -> list[Violation]:
 	"""Every rule the fix answer ``text`` breaks, given the source lines that were
 	shown to the model. A truncated answer returns only the truncation violation."""
 	text = text or ""
@@ -822,9 +824,12 @@ def _verify_fix(text: str, *, source_lines: list[str], finish_reason: str | None
 	every = fenced_blocks(text) if len(text) > ai_responses.MARKDOWN_CHARS else rendered_blocks(text)
 	out += check_grounding(every, source_lines)
 	out += check_code(every, source_lines)  # lines verbatim from the shown source are context
-	from optimus.ai_fix_checks import check_changes
+	from optimus.ai_fix_checks import check_changes, check_loop_changes
 
 	out += check_changes(every, source_lines)
+	if finding_type == "N+1 Query":
+		fix_blocks = fenced_blocks(fix) if len(text) > ai_responses.MARKDOWN_CHARS else rendered_blocks(fix)
+		out += check_loop_changes(fix_blocks, source_lines)
 	# Generation must get the full check even when called from an active render.
 	out += _stored_policy_violations(text)
 	out += check_prose_ddl(fix, every)
@@ -891,8 +896,8 @@ def render_limited(violations) -> bool:
 	return any(v.code == VALIDATION_LIMITED for v in violations)
 
 
-def verify_fix(text, *, source_lines, finish_reason=None):
-	return _html_checked(_verify_fix, text, source_lines=source_lines, finish_reason=finish_reason)
+def verify_fix(text, *, source_lines, finish_reason=None, finding_type=None):
+	return _html_checked(_verify_fix, text, source_lines=source_lines, finish_reason=finish_reason, finding_type=finding_type)
 
 
 def _dedupe(vs: list[Violation]) -> list[Violation]:
@@ -989,6 +994,10 @@ def apply_fallback(text: str, violations: list[Violation]) -> str:
 	the answer was cut off), add one note listing the advise rules when the code is
 	kept, neutralise links, images and echoed data tags, and append one profiler
 	note per problem."""
+	if any(v.code in {"ineffective-loop-fix", "unverified-loop-fix"} for v in violations):
+		# The old explanation and numerical claim describe rejected code as well.
+		# Retain the received answer privately, but display no unsupported speedup.
+		text = ai_prompts.LOOP_FIX_FALLBACK
 	if len(text) > ai_responses.MARKDOWN_CHARS:
 		# This path is rendered literally, never fed back to the Markdown parser.
 		if strips_code(violations):

@@ -192,6 +192,7 @@ _TIERS = {
 		"untranslated", "whitelist-type-hints", "qb-orderby-positional", "single-doctype-value",
 		"modify-not-saved", "child-modify-while-iterating", "module-state", "local-state",
 		"unchecked-permission", "unbounded-write", "unverified-safety", "permission-behavior-change", "sql-semantics-dropped",
+		"ineffective-loop-fix", "unverified-loop-fix",
 	},
 	"truncated": {"truncated"},
 	"advise": {"dynamic-import", "metadata-index", "loop-query"},

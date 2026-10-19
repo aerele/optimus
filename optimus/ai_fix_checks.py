@@ -10,7 +10,7 @@ import logging
 import re
 import textwrap
 import tokenize
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import sqlparse
 
@@ -19,6 +19,7 @@ from optimus.ai_guardrails import _dotted, _is_diff, _norm, _parse, _v, diff_row
 _DB = {"frappe.db", "frappe.local.db"}
 _READS = {"frappe.get_doc", "frappe.get_last_doc", "frappe.get_value", "frappe.get_all", "frappe.get_list"}
 _READS |= {f"{db}.{method}" for db in _DB for method in ("get_value", "get_values", "get_all", "get_list", "count", "exists")}
+_SQL_READS = {f"{db}.{method}" for db in _DB for method in ("sql", "sql_list", "multisql")}
 _WRITES = {f"{db}.{method}" for db in _DB for method in ("delete", "set_value", "truncate")}
 _MISSING = object()
 
@@ -289,24 +290,45 @@ def _denial_changes(before, after):
 	return ambiguous
 
 
+def _read_name(name):
+	return name in _READS | _SQL_READS or name.startswith("frappe.qb.") and name.endswith(".run")
+
+
 def _read(view, call):
-	name = view.name(call)
-	return name in _READS or name.startswith("frappe.qb.") and name.endswith(".run")
+	return _read_name(view.name(call))
 
 
-def _loop_context(view, call):
+def _loop_contexts(view, call):
+	contexts = []
+	child = call
 	for node in view.ancestors(call):
 		if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
 			break
 		if isinstance(node, (ast.For, ast.AsyncFor)):
 			# Calls in the iterator execute once for this loop.
-			if call in ast.walk(node.iter):
-				continue
-			return (view.scope(call), _key(node.target), _key(node.iter))
+			if child in node.body:
+				contexts.append((view.scope(call), "iter", _key(node.iter)))
+		if isinstance(node, ast.While):
+			if child not in node.orelse:
+				contexts.append((view.scope(call), "while", _key(node.test)))
 		if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-			if call not in ast.walk(node.generators[0].iter):
-				return (view.scope(call), "comprehension", _key(node.generators[0].iter))
-	return None
+			# Generator iterables run once per preceding generator, not per item
+			# of themselves. Elements and filters run once for every generator.
+			comp_contexts = []
+			for generator in node.generators:
+				if call in ast.walk(generator.iter):
+					break
+				comp_contexts.append((view.scope(call), "iter", _key(generator.iter)))
+				if any(call in ast.walk(condition) for condition in generator.ifs):
+					break
+			contexts.extend(reversed(comp_contexts))
+		child = node
+	return tuple(reversed(contexts))
+
+
+def _loop_context(view, call):
+	contexts = _loop_contexts(view, call)
+	return contexts[-1] if contexts else None
 
 
 def _batch_or_memo(view, call):
@@ -336,6 +358,104 @@ def _loop_replacements(before, after):
 		if _read(after, call) and after.changed(call) and _loop_context(after, call) in old and not _batch_or_memo(after, call):
 			return [_v("loop-query", after.name(call))]
 	return []
+
+
+def _loop_reduction(before, after):
+	"""Reject API-only N+1 rewrites; incomplete evidence needs a fuller diff.
+
+	An IN filter in a repeated call does not establish batching. Only an actual
+	move outside the shown loop, a cached read, or a memoized read can do that.
+	This check runs on new N+1 answers only, never historical render selection.
+	"""
+	# A whole-function diff often repeats unchanged reads as +/- lines. Cancel
+	# identical calls with identical loop ancestry before judging replacements.
+	def signature(view, call):
+		return (view.name(call), _key(call), view.scope(call), view.boundary(call), _loop_contexts(view, call))
+	old = [c for c in before.calls if _read(before, c)]
+	new = [c for c in after.calls if _read(after, c)]
+	has_reads = bool(old or new)
+	old_counts = Counter(signature(before, c) for c in old)
+	new_counts = Counter(signature(after, c) for c in new)
+	def changed(view, calls, counts):
+		out = []
+		for call in calls:
+			key = signature(view, call)
+			if counts[key]:
+				counts[key] -= 1
+			else:
+				out.append(call)
+		return out
+	old, new = changed(before, old, new_counts), changed(after, new, old_counts)
+	if not new:
+		if not old and has_reads:
+			return [_v("unverified-loop-fix", "the diff leaves the database reads unchanged")]
+		return []
+	if not old:
+		return [_v("unverified-loop-fix", "show a complete grounded diff for the repeated read")]
+	if before.repaired or after.repaired:
+		return [_v("unverified-loop-fix", "show the enclosing loop and complete read replacement")]
+	chains = {_loop_contexts(before, c) for c in old}
+	contexts = {chain[-1] for chain in chains if chain}
+	scopes = {before.scope(call) for call in old}
+	for call in new:
+		if any(isinstance(node, ast.Lambda) for node in after.ancestors(call)):
+			return [_v("unverified-loop-fix", "a lambda can still execute the read once per item")]
+		# Constructing a document from an explicit dict is not a database read.
+		if after.name(call) == "frappe.get_doc" and len(call.args) == 1 and isinstance(call.args[0], ast.Dict):
+			continue
+		if after.scope(call) not in scopes:
+			return [_v("unverified-loop-fix", "moving a read into a helper does not establish fewer calls")]
+		# A memo guard is distinct from a mere IN-filter batch claim.
+		if _memoized(after, call):
+			continue
+		chain = _loop_contexts(after, call)
+		if contexts.intersection(chain):
+			return [_v("ineffective-loop-fix", after.name(call))]
+		if not contexts or not any(len(chain) < len(prior) and prior[:len(chain)] == chain for prior in chains):
+			return [_v("unverified-loop-fix", "show the same enclosing loop and where its read moves")]
+	return []
+
+
+def _memoized(view, call):
+	assignment = next((n for n in view.ancestors(call) if isinstance(n, ast.Assign)), None)
+	child = call
+	for node in view.ancestors(call):
+		if isinstance(node, (ast.For, ast.AsyncFor, ast.While, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+			break
+		if isinstance(node, ast.If) and isinstance(node.test, ast.Compare) and len(node.test.ops) == 1 and isinstance(node.test.ops[0], ast.NotIn):
+			if child not in node.body:
+				return False
+			if assignment and any(isinstance(t, ast.Subscript) and _key(t.value) == _key(node.test.comparators[0])
+			                      and _key(t.slice) == _key(node.test.left) for t in assignment.targets):
+				memo = node.test.comparators[0]
+				if not isinstance(memo, ast.Name):
+					return False
+				# Require one visible dict initialization before the repeated loop,
+				# with no rebinding, deletion or method mutation inside the loop.
+				bindings = [n for n in ast.walk(view.tree) if isinstance(n, ast.Name)
+				            and isinstance(n.ctx, (ast.Store, ast.Del)) and n.id == memo.id
+				            and view.scope(n) == view.scope(call)]
+				if len(bindings) != 1:
+					return False
+				binding = bindings[0]
+				init = view.parents.get(binding)
+				if not (isinstance(init, ast.Assign) and isinstance(init.value, ast.Dict)
+				        and binding.lineno < call.lineno
+				        and not set(_loop_contexts(view, binding)).intersection(_loop_contexts(view, call))):
+					return False
+				if any(isinstance(n, ast.Subscript) and isinstance(n.ctx, (ast.Store, ast.Del))
+				       and _key(n.value) == _key(memo) and n not in assignment.targets
+				       or isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and _key(n.func.value) == _key(memo)
+				       and n.func.attr not in {"get", "keys", "values", "items", "copy"}
+				       for n in ast.walk(view.tree)):
+					return False
+				if any(isinstance(n, ast.Name) and n.id == memo.id and isinstance(n.ctx, ast.Load)
+				       and isinstance(view.parents.get(n), (ast.Assign, ast.AnnAssign, ast.Call))
+				       for n in ast.walk(view.tree)):
+					return False  # an alias or unknown consumer could reset the memo
+				return True
+		child = node
+	return False
 
 
 def _sql_clauses(query):
@@ -472,6 +592,46 @@ def _check_changes(blocks, source_lines, *, stored=False):
 			if changed_shape and (permission_source or {name for name, _ in sql_source} & {name for name, _ in replacements}):
 				out.append(_v("unverified-safety", "show permission or SQL changes as a grounded diff"))
 	return out
+
+
+def _check_loop_changes(blocks, source_lines):
+	"""N+1 quality check for the Fix section only; safety checks still cover all code."""
+	out = []
+	source = {_norm(line) for line in source_lines}
+	for block in blocks:
+		is_diff = _is_diff(block)
+		rows = diff_rows(block) if is_diff else [("+" if _norm(line) not in source else " ", line) for line in block.lines]
+		after = View([(line, tag == "+") for tag, line in rows if tag != "-"])
+		if after.tree is not None:
+			for node in ast.walk(after.tree):
+				if not isinstance(node, (ast.Name, ast.Attribute)) or not after.changed(node, True):
+					continue
+				parent = after.parents.get(node)
+				if isinstance(parent, ast.Call) and parent.func is node:
+					continue
+				if _read_name(after.aliases.name(node)):
+					out.append(_v("unverified-loop-fix", "passing a read as a function reference does not establish fewer calls"))
+		if is_diff:
+			before = View([(line, tag == "-") for tag, line in rows if tag != "+"])
+			if before.tree is not None and after.tree is not None:
+				out.extend(_loop_reduction(before, after))
+			elif any(new and line.strip() for line, new in after.rows):
+				out.append(_v("unverified-loop-fix", "show a complete parseable diff with its enclosing loop"))
+		elif after.tree is not None and any(_read(after, call) for call in after.calls):
+			out.append(_v("unverified-loop-fix", "show the read replacement as a grounded diff with its enclosing loop"))
+		elif after.tree is None and block.info in {"", "py", "python", "python3"} and any(
+			new and re.search(r"\bfrappe\b|\bqb\b|\.run\s*\(", line) for line, new in after.rows
+		):
+			out.append(_v("unverified-loop-fix", "the proposed read replacement is incomplete or unparseable"))
+	return out
+
+
+def check_loop_changes(blocks, source_lines):
+	try:
+		return _check_loop_changes(blocks, source_lines)
+	except Exception as error:
+		logging.getLogger(__name__).warning("AI loop checker failed: %s", type(error).__name__)
+		return [_v("unverified-loop-fix", "the proposed query-count change could not be checked")]
 
 
 def check_changes(blocks, source_lines, *, stored=False):
