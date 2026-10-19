@@ -176,9 +176,8 @@ class TestMaxQueriesPerRecordingZeroIsUnlimited:
 			f"cap = 0 must not truncate, got {truncation_warnings!r}"
 		)
 
-	def test_positive_cap_still_truncates(self, enrich_env, monkeypatch):
-		"""A positive cap still truncates, guarding against an over-eager
-		rewrite that accidentally unbounds every deployment."""
+	def test_positive_cap_limits_explain_and_keeps_every_call(self, enrich_env, monkeypatch):
+		"""A positive cap still bounds EXPLAIN, but calls past it stay (formatted) so counts are right."""
 		import optimus.settings as settings_mod
 		monkeypatch.setattr(
 			settings_mod, "get_config",
@@ -191,7 +190,11 @@ class TestMaxQueriesPerRecordingZeroIsUnlimited:
 		])
 		warnings = analyze._enrich_recordings([big])
 
-		# Sliced to the cap.
-		assert len(big["calls"]) == 100
+		assert len(big["calls"]) == 250
+		assert len(enrich_env.explain_queries) == 100
+		assert all("explain_result" not in c for c in big["calls"][100:])
+		# Formatted like the enriched calls so both normalize to the same shape.
+		assert all(c["query"].startswith("SELECT *\nFROM") for c in big["calls"])
 		truncation_warnings = [w for w in warnings if "TRUNCATED" in w]
 		assert truncation_warnings, "positive cap must emit a truncation warning"
+		assert "still count in query totals" in truncation_warnings[0]
