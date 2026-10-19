@@ -13,7 +13,6 @@ import sys
 import types
 
 
-
 def _install_frappe_stub(monkeypatch):
 	"""Install a frappe stub with the minimum surface the controller
 	needs msgprint, log_error, cache.delete_value, Document parent

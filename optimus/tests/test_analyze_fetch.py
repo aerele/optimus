@@ -8,7 +8,6 @@ import gzip
 import json
 import pickle
 
-
 from optimus import analyze
 
 

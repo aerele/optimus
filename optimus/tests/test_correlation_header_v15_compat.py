@@ -14,7 +14,6 @@ import sys
 import types
 
 
-
 def _install_frappe_stub_with_local(monkeypatch):
 	"""Install a minimal frappe stub with a configurable ``frappe.local`` so
 	tests can set / omit ``response_headers`` to simulate v16 / v15. Also stubs

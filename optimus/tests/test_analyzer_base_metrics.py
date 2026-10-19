@@ -13,7 +13,6 @@ across every finding card, KPI strip and stat label.
 
 import math
 
-
 from optimus.analyzers.base import percentile
 
 

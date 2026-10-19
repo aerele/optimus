@@ -20,7 +20,6 @@ Shape (added to ``technical_detail_json``)::
 
 import json
 
-
 from optimus.analyzers import explain_flags, n_plus_one
 from optimus.analyzers.base import (
 	POST_FIX_FLOOR_MS,
