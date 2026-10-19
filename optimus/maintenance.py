@@ -91,10 +91,9 @@ _AI_FRAME = "%ai_fix.py%"
 # rename (frappe_profiler): a record with such a frame has its value lines
 # masked (_is_ai_record), and the purge deletes the rows with one.
 _OPTIMUS_AI_FRAME_PATHS = ("optimus/ai_fix.py", "frappe_profiler/ai_fix.py")
-# The purge's frame patterns, so another app's openai_fix.py rows are never
-# deleted (the package prefix excludes them). They hold no LIKE escape, so
-# they work on Frappe v15, whose db_query doubles backslashes, as well as on
-# v16; each "_" is a one-character wildcard.
+# Broad purge candidates, portable across Frappe v15's backslash doubling and
+# v16. LIKE wildcards/collations may match unrelated paths; confirm the exact
+# path in Python before counting or deleting any candidate.
 _OPTIMUS_AI_FRAMES = tuple(f"%{path}%" for path in _OPTIMUS_AI_FRAME_PATHS)
 # Any of these next to an ai_fix.py frame means the row may hold a key.
 _SECRET_MARKERS = ("%Bearer %", "%api_key%", "%x-api-key%")
@@ -903,18 +902,23 @@ def purge_ai_error_logs(dry_run: bool = True) -> dict:
 	dry_run = _dry_run_flag(dry_run)
 	out = {"error_logs": 0, "deleted_documents": 0}
 	targets = (
-		("Error Log", [], [["error", "like", p] for p in _OPTIMUS_AI_FRAMES], "error_logs"),
+		("Error Log", [], "error", "error_logs"),
 		(
 			"Deleted Document",
 			[["deleted_doctype", "=", "Error Log"]],
-			[["data", "like", p] for p in _OPTIMUS_AI_FRAMES],
+			"data",
 			"deleted_documents",
 		),
 	)
-	for doctype, filters, or_filters, key in targets:
-		for rows in _chunks(doctype, filters, or_filters, ["name"], _BATCH):
-			out[key] += len(rows)
-			if not dry_run:
-				frappe.db.delete(doctype, {"name": ("in", [r["name"] for r in rows])})
+	for doctype, filters, field, key in targets:
+		or_filters = [[field, "like", p] for p in _OPTIMUS_AI_FRAMES]
+		for rows in _chunks(doctype, filters, or_filters, ["name", field], _BATCH):
+			names = [
+				r["name"] for r in rows
+				if isinstance(r.get(field), str) and any(path in r[field] for path in _OPTIMUS_AI_FRAME_PATHS)
+			]
+			out[key] += len(names)
+			if names and not dry_run:
+				frappe.db.delete(doctype, {"name": ("in", names)})
 				safe_commit()
 	return out

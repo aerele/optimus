@@ -28,6 +28,18 @@ function widget(user) {
 }
 const owner=widget('owner'),reader=widget('reader'),actor=widget('actor');
 const ready={session_uuid:'session',docname:'doc',recording_user:'owner',event_id:'ready'};
+// An inactive widget can still be bound after a one-shot status refresh.
+const idle=widget('owner');idle.state.session_uuid='session';idle.state.docname='doc';
+for (const name of ['optimus_session_stopping','optimus_session_analyzing','optimus_progress',
+ 'optimus_session_ready','optimus_session_failed','phase_2_run_recording',
+ 'phase_2_run_analyzing','phase_2_run_ready','phase_2_run_failed']) {
+ const before=JSON.stringify(idle.state);
+ idle.handlers[name]({...ready,user:'owner',session_uuid:'other-tab',event_id:'rejected-'+name});
+ assert.equal(JSON.stringify(idle.state),before,`${name} must not replace a bound idle session`);
+ assert.equal(idle.alerts.length,0);assert.equal(idle.displays.length,0);
+}
+idle.handlers.optimus_session_analyzing({...ready,event_id:'same-session'});
+assert.equal(idle.state.display,'analyzing','same-session updates must still wake a bound idle widget');
 reader.handlers.optimus_session_analyzing(ready);
 reader.handlers.optimus_session_ready(ready);
 assert.equal(reader.state.display,'inactive','shared events must not take over an idle widget');
