@@ -8,6 +8,17 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.65] - 2026-10-18
+
+### Fixed
+
+- The floating widget no longer mounts for users without a profiler role
+  (System Manager, Optimus User or Administrator). Before, it mounted for
+  everyone and its `api.status` call returned 403, which popped an error
+  modal on every Desk load for those users.
+
+---
+
 ## [0.12.64] - 2026-10-01
 
 ### Internal
