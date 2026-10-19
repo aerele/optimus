@@ -23,6 +23,9 @@ versions may contain breaking changes see migration notes below).
   Bound alias depth, visits, identity count and string allocations; withhold
   unchecked code instead of crashing. Normalize PDF styles and declarations
   across framework reparses.
+- Retain Frappe identities for literal dynamic imports and skip enclosing class
+  namespaces when checking nested class bodies, preventing unsafe code from
+  being displayed as an unrelated object call.
 - Use only eligible full b-tree keys for index coverage, preserving expression
   positions and excluding partial, ignored, prefix, invalid and non-btree proofs.
 - Bound optional SQL parsing and formatting. Prevent Phase 1/2 capture overlap

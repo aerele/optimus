@@ -105,7 +105,7 @@ class Aliases(ast.NodeVisitor):
 			name = item.asname or item.name.split(".")[0]
 			identity = item.name if item.asname else item.name.split(".")[0]
 			self.current.bindings[name].append(
-				identity if identity in {"frappe", "operator"} or identity.startswith("frappe.") else None
+				identity if identity in {"frappe", "operator", "importlib", "builtins"} or identity.startswith("frappe.") else None
 			)
 
 	def visit_ImportFrom(self, node):
@@ -120,6 +120,7 @@ class Aliases(ast.NodeVisitor):
 					node.module == "frappe"
 					or str(node.module).startswith("frappe.")
 					or identity == "operator.attrgetter"
+					or identity in {"importlib.import_module", "builtins.__import__"}
 				)
 				else None
 			)
@@ -130,12 +131,13 @@ class Aliases(ast.NodeVisitor):
 	def visit_Nonlocal(self, node):
 		self.current.nonlocals.update(node.names)
 
-	def _scope(self, node, body, *, function=False, args=None):
+	def _scope(self, node, body, *, args=None):
 		prior = self.current
 		parent = prior
-		if function:
-			while parent and isinstance(parent.node, ast.ClassDef):
-				parent = parent.parent
+		# Class locals are not an enclosing lexical namespace, including for
+		# nested classes. Bases/defaults/decorators are visited before entering.
+		while parent and isinstance(parent.node, ast.ClassDef):
+			parent = parent.parent
 		self.current = Scope(node, parent)
 		self.scopes.append(self.current)
 		if args:
@@ -177,14 +179,14 @@ class Aliases(ast.NodeVisitor):
 			*([node.returns] if node.returns else []),
 		]:
 			self.visit(item)
-		self._scope(node, node.body, function=True, args=node.args)
+		self._scope(node, node.body, args=node.args)
 
 	visit_AsyncFunctionDef = visit_FunctionDef
 
 	def visit_Lambda(self, node):
 		for item in [*node.args.defaults, *[v for v in node.args.kw_defaults if v]]:
 			self.visit(item)
-		self._scope(node, [node.body], function=True, args=node.args)
+		self._scope(node, [node.body], args=node.args)
 
 	def visit_ClassDef(self, node):
 		self.current.bindings[node.name].append(None)
@@ -216,7 +218,7 @@ class Aliases(ast.NodeVisitor):
 		for generator in rest:
 			body.extend([generator.iter, generator.target, *generator.ifs])
 		body.extend([node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt])
-		self._scope(node, body, function=True)
+		self._scope(node, body)
 
 	visit_SetComp = visit_ListComp
 	visit_DictComp = visit_ListComp
@@ -254,18 +256,49 @@ class Aliases(ast.NodeVisitor):
 						self.cache[key] = frozenset(out or {None})
 					return self.cache[key]
 				scope = scope.parent
-			return frozenset({node.id if node.id == "frappe" else None})
+			return frozenset({node.id if node.id in {"frappe", "__import__", "importlib", "builtins"} else None})
 		if isinstance(node, ast.Attribute):
 			return frozenset(
 				self._extend(value, "." + node.attr) if value else None
 				for value in self.values(node.value, seen, depth + 1)
 			)
 		if isinstance(node, ast.Call):
-			return frozenset(
-				self._extend(value, "()") if value and value.startswith("frappe.qb.") else None
-				for value in self.values(node.func, seen, depth + 1)
-			)
+			out = set()
+			for value in self.values(node.func, seen, depth + 1):
+				if value in {"__import__", "builtins.__import__", "importlib.import_module"}:
+					out.update(self._imported(node, value))
+				else:
+					out.add(self._extend(value, "()") if value and value.startswith("frappe.qb.") else None)
+			return self._bounded(out)
 		return frozenset({None})
+
+	@staticmethod
+	def _imported(node, loader):
+		"""Unknown import arguments cannot prove a later policy call unrelated."""
+		def argument(index, name):
+			return next((kw.value for kw in node.keywords if kw.arg == name),
+				node.args[index] if len(node.args) > index else None)
+
+		module = argument(0, "name")
+		if not isinstance(module, ast.Constant) or not isinstance(module.value, str):
+			return {None, "frappe"}
+		name = module.value
+		if name != "frappe" and not name.startswith("frappe."):
+			return {None}
+		uncertain = {None, "frappe", name}
+		if any(isinstance(arg, ast.Starred) for arg in node.args) or any(kw.arg is None for kw in node.keywords):
+			return uncertain
+		if loader == "importlib.import_module":
+			return {name}
+		level = argument(4, "level")
+		if level is not None and not (isinstance(level, ast.Constant) and level.value == 0):
+			return uncertain
+		fromlist = argument(3, "fromlist")
+		if fromlist is None or isinstance(fromlist, ast.Constant) and not fromlist.value:
+			return {"frappe"}
+		if isinstance(fromlist, (ast.List, ast.Tuple)) and not any(isinstance(item, ast.Starred) for item in fromlist.elts):
+			return {name if fromlist.elts else "frappe"}
+		return uncertain
 
 	def _extend(self, value, suffix):
 		length = len(value) + len(suffix)
