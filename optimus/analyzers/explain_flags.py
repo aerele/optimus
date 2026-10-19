@@ -348,21 +348,6 @@ def _to_int(val) -> int:
 			return 0
 
 
-def _to_float(val):
-	"""Coerce EXPLAIN `filtered` to float. Returns None on failure so the
-	filtered-threshold check can cleanly skip."""
-	if val is None:
-		return None
-	if isinstance(val, bool):
-		return float(val)
-	if isinstance(val, (int, float)):
-		return float(val)
-	try:
-		return float(val)
-	except (TypeError, ValueError):
-		return None
-
-
 def _is_framework_origin(
 	stack: list,
 	tracked_apps: tuple[str, ...] | None = None,

@@ -198,7 +198,7 @@ class TestRqJobActive:
 
 class TestBgWaitForPendingJobs:
 	def _patch_common(self, monkeypatch, *, pending, wait_seconds, scheduler_disabled=False):
-		from optimus import analyze, session
+		from optimus import analyze
 
 		monkeypatch.setattr(analyze.session, "get_pending_jobs", lambda u: set(pending))
 		monkeypatch.setattr(analyze.session, "clear_pending_job", lambda u, j: None)

@@ -3,7 +3,6 @@
 
 """Tests for auto-role-assignment on install."""
 
-import pytest
 
 from optimus import install
 

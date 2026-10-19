@@ -11,7 +11,6 @@ authoritative hook-time path.
 
 import os
 import re
-import sys
 import time
 import types
 

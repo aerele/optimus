@@ -12,7 +12,6 @@ import json
 import sys
 import types
 
-import pytest
 
 from optimus.analyzers import index_suggestions
 

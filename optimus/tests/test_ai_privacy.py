@@ -14,7 +14,6 @@ sync with ``ai_fix.AI_ELIGIBLE_FINDING_TYPES``.
 import sys
 import types
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 

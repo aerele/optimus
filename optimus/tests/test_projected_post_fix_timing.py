@@ -20,7 +20,6 @@ Shape (added to ``technical_detail_json``)::
 
 import json
 
-import pytest
 
 from optimus.analyzers import explain_flags, n_plus_one
 from optimus.analyzers.base import (

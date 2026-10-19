@@ -9,7 +9,6 @@ a broken syntax or a deleted critical hook.
 """
 
 import os
-import re
 import shutil
 import subprocess
 

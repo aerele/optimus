@@ -182,7 +182,6 @@ class TestBannerMarkerPrefix:
 
 	def test_warning_prefix_matches_renderer_check(self):
 		import os
-		import re
 
 		# Read the analyze.py that emits the warning.
 		analyze_path = os.path.join(

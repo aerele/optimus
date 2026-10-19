@@ -8,7 +8,6 @@ skip-list parser (strips blanks and comments) and each analyzer's resolver
 honouring the configured value.
 """
 
-import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
