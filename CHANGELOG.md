@@ -8,6 +8,16 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.66] - 2026-10-19
+
+### Internal
+
+- Removed 28 unused imports from test modules and the dead `_to_float` helper
+  in `analyzers/explain_flags.py` (it was never called; the analyzer coerces
+  the EXPLAIN `filtered` column inline). No behaviour change.
+
+---
+
 ## [0.12.65] - 2026-10-18
 
 ### Fixed
