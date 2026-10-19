@@ -108,12 +108,14 @@ def fix_state(stored, current_version: int | None = None) -> tuple[str, dict | N
 		return FIX_INCOMPLETE, stored
 	suggestion = stored.get("suggestion")
 	usable = isinstance(suggestion, str) and bool(suggestion.strip())
-	if usable:
-		from optimus.ai_guardrails import stored_policy_violations
+	if not (usable and is_current(stored, current_version)):
+		return FIX_OUTDATED, stored
+	from optimus.ai_guardrails import render_limited, stored_policy_violations
 
-		if stored_policy_violations(suggestion):
-			return FIX_OUTDATED, stored
-	return (FIX_CURRENT if usable and is_current(stored, current_version) else FIX_OUTDATED), stored
+	violations = stored_policy_violations(suggestion)
+	if violations:
+		return (FIX_PROCESSING_LIMITED if render_limited(violations) else FIX_OUTDATED), stored
+	return FIX_CURRENT, stored
 
 
 UNTRUSTED_DATA_CLAUSE = (

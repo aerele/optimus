@@ -136,7 +136,8 @@ def _read_evidence(table: str, dialect) -> TableEvidence | None:
 				is_custom_field=bool(getattr(df, "is_custom_field", 0)),
 			)
 	indexes = tuple(
-		IndexEvidence(name=str(ix.name), columns=tuple(ix.columns or ()), unique=bool(ix.unique))
+		IndexEvidence(name=str(ix.name), columns=tuple(ix.columns or ()), unique=bool(ix.unique),
+			eligible=bool(ix.eligible), reason=ix.reason)
 		for ix in dialect.existing_indexes(table) or []
 	)
 	if not indexes:

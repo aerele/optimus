@@ -28,7 +28,7 @@ When AI is enabled, three knobs gate every outbound call:
 | Knob (Optimus Settings → AI) | Default | What it does |
 |---|---|---|
 | `ai_enabled` | OFF | Master gate. OFF → zero LLM calls ever. |
-| `ai_auto_suggest` | ON | Batch mode (takes effect only once `ai_enabled` is on). ON → a separate background run sends eligible findings after profiling is saved as Ready. OFF → AI runs only when the operator uses the session's **Refresh AI suggestions** action. |
+| `ai_auto_suggest` | ON | Batch mode (takes effect only once `ai_enabled` is on). ON → a separate background run sends the enabled finding fixes and fresh captured Steps after profiling is saved as Ready. OFF → AI runs only when the operator uses the session's **Refresh AI suggestions** action. |
 | `ai_excluded_finding_types` | empty | One finding type per line (v0.9.0+). Listed types are skipped in **both** auto-suggest and on-demand the request body is never built and never sent. |
 
 With the master `ai_enabled=OFF` nothing is sent regardless. Once AI is enabled, three axes of consent remain: feature-level (the master), event-level (`ai_auto_suggest` — on by default so suggestions are built into the report; set it OFF to require a session refresh) and type-level (the exclusion list).
@@ -85,7 +85,7 @@ Oversized title and callsite text are clipped before wrapping. A source line is 
 
 ### 2.2 Humanize "Steps to Reproduce" (`/v1/messages` or `/chat/completions`)
 
-Included in manual Refresh AI suggestions when `ai_humanize_steps` is enabled; automatic fix enrichment does not rewrite Steps. Built by `_build_steps_messages` in `optimus/ai_fix.py`.
+Included in Refresh AI suggestions when `ai_humanize_steps` is enabled. With `ai_auto_suggest` on, automatic work also humanizes freshly captured Steps. User-written notes, prior humanized notes, and any captured note saved through Desk are preserved by automatic work. Manual refresh can replace notes. Built by `_build_steps_messages` in `optimus/ai_fix.py`.
 
 **System prompt** (static, ~2.9 KB): ERPNext workflow knowledge, Frappe API decoding rules, collapse rules, output spec (ordered Markdown list + one-sentence summary).
 
@@ -328,6 +328,8 @@ A cut-off answer is never automatically re-asked. The received final-answer text
 The 16,384-character threshold now selects a literal renderer instead of truncating the answer. Long answers are validated using explicit fenced code, with no recursive Markdown conversion. Resource limits are explicit: 1,048,576 characters for validation, 4,096 per line, 64 fenced blocks and 131,072 total fenced-code characters; ambiguous indented/nested prose requires local review. Exceeding these limits produces `processing_limited`, preserving the provider's actual finish reason. Storage retains up to 4,194,304 UTF-8 bytes per received answer (at most two attempts), with a full-text hash, original length and an explicit retention-truncated flag. These are resource envelopes, not generation-length targets. Raw retained text is unvalidated, never applied, excluded from report views and exports, and shares the parent session's access permissions and deletion/reset lifecycle. It is not written to logs or usage journals. Numeric reasoning-token counts are retained when reported, without adding them to total usage again; absent counts remain unknown.
 
 This retention happens when the finding result is saved. It does not checkpoint a running request, recover bytes lost in a transport timeout, or restore partial code discarded by older versions. There is no prefix continuation or streaming recovery yet. Refresh requests a fresh answer and spends provider tokens; retained text is not automatically re-sent.
+
+Report rendering checks at most `RENDER_VALIDATION_CHARS = 262144` characters and `RENDER_VALIDATION_ANSWERS = 128` distinct saved answers, in report order. Identical answers share one check within that render. An answer that does not fit is withheld without consuming the remaining budget, so later smaller answers can still be checked. Limited answers show “Response needs local review”, without an outdated label or an automatic paid retry. The saved answer is unchanged. Generation and refresh eligibility outside rendering still perform the full individual safety check; no provider call is made while rendering.
 
 ### 4.2 Context window and answer size
 
@@ -693,3 +695,11 @@ A cheaper read that replaces a read inside the same visible loop gets an advisor
 The same reconstructable blocking checks classify saved Fix code locally. Affected answers show “Safety review needed”, retain diagnosis and withhold code and obsolete rationale. Raw-SQL answers retain “Frappe API update needed”. Original response text and usage stay in the private saved finding. Prompt version stays 4; unrelated good answers remain current. Manual Refresh can replace affected answers after the existing cost confirmation; automatic missing-only runs and report regeneration do not retry them. Existing HTML files remain snapshots.
 
 Permission or paired SQL changes supplied as full replacement code require a grounded diff at generation so before/after evidence is available. Stored non-diff permission bodies are not retroactively classified as behavior changes. Parser failures withhold code rather than breaking the report; repaired fragments carry an unverified-structure note. Dynamic permission argument expansion requires explicit arguments. Checks are static and do not prove assigned-result dataflow, arbitrary control flow, or all Frappe conventions.
+
+Static alias analysis also limits logical resolution to 100 nested hops, 10,000
+resolution visits and 128 candidate identities per lookup, in addition to the
+4,000-node / 100-level AST limits. Each identity is limited to 1,024 characters,
+with at most 1,048,576 characters allocated by identity extension per resolver.
+Deep or branching aliases that exceed these bounds receive `unverified-safety`;
+their code is withheld without crashing report
+rendering. These checks execute no suggested code and make no provider requests.

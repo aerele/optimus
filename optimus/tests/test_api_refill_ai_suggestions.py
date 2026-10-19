@@ -148,11 +148,13 @@ def test_read_sharee_can_poll_but_only_actor_sees_refresh_plan(env, monkeypatch,
 	monkeypatch.setattr(fake, "get_doc", lambda *a: fake_session_doc(owner=OWNER, status="Ready"))
 	jobs = import_module("optimus.ai_jobs")
 	monkeypatch.setattr(jobs, "refresh_state", lambda *a: {"state": "complete", "seq": 9})
+	monkeypatch.setattr(jobs, "uncertain_attempts", lambda *a: ["unknown-attempt"])
 	plan = MagicMock(return_value={"pending": 3})
 	monkeypatch.setattr(jobs, "refresh_plan", plan)
 	out = api.ai_refresh_status(SESSION_UUID)
 	assert out["status"] == "ok" and out["refresh"]["seq"] == 9
 	assert out["can_act"] is owner
+	assert out["session_uncertain_count"] == 1
 	assert bool(out["plan"]) is owner
 	assert plan.call_count == int(owner)
 	assert not fake.cache.calls

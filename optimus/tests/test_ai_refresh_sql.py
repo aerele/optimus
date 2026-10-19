@@ -2481,3 +2481,18 @@ def test_raw_retry_consent_reads_current_commit_without_touching_caller_snapshot
 		admin.rollback()
 		sql.primary.sql(f"DROP TABLE {table}")
 		sql.primary.commit()
+
+
+def test_unknown_send_certainty_is_durable_and_trips_the_breaker_once(sql):
+ claimed()
+ for i in range(3):
+  attempt=begun(target='unknown-'+str(i))
+  def finish():
+   return store.settle_attempt('run-a',attempt['name'],docname='parent-a',worker_token='worker-a',outcome='uncertain',tokens=0,usage_complete=False,now=13,error_kind='timeout',send_certainty='sent_unknown')
+  assert ai_jobs._retry_sql(finish)
+  assert not ai_jobs._retry_sql(finish)
+  assert value(sql,store.ATTEMPT,attempt['name'],'send_certainty')=='sent_unknown'
+  assert value(sql,store.RUN,'run-a','consecutive_failures')==i+1
+ assert value(sql,store.RUN,'run-a','breaker_kind')=='timeout'
+ assert value(sql,store.RUN,'run-a','uncertain')==3
+ assert begun(target='fourth') is None

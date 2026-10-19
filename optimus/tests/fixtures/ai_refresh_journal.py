@@ -128,7 +128,9 @@ class Database:
 						return False
 					if value[0] == ">" and (actual is None or actual <= value[1]):
 						return False
-					if value[0] not in {"in", "<=", ">"}:
+					if value[0] == "is" and value[1] == "not set" and actual not in (None, ""):
+						return False
+					if value[0] not in {"in", "<=", ">", "is"}:
 						raise AssertionError("unsupported fake query operator")
 				elif row.get(key) != value:
 					return False
@@ -149,6 +151,9 @@ class Database:
 @pytest.fixture(name="journal")
 def journal(monkeypatch):
 	from datetime import datetime
+
+	from optimus import ai_jobs
+	monkeypatch.setattr(ai_jobs, "_consent_enabled", lambda field: True)
 
 	monkeypatch.setattr("frappe.utils.now_datetime", lambda: datetime(2026, 10, 14, 12))
 	mod = import_module("optimus.ai_refresh_store")

@@ -62,11 +62,26 @@ class TestExistingIndexes:
 			{"Key_name": "idx_ab", "Seq_in_index": 1, "Column_name": "a", "Non_unique": 1},
 			{"Key_name": "PRIMARY", "Seq_in_index": 1, "Column_name": "name", "Non_unique": 0},
 		]
+		rows = [dict(row, Index_type="BTREE", Ignored="NO", Sub_part=None) for row in rows]
 		_install_db(monkeypatch, lambda q, *a, **k: rows)
 		by = {i.name: i for i in MariaDBDialect().existing_indexes("tabUser")}
 		assert by["idx_ab"].columns == ["a", "b"]   # ordered by Seq_in_index
 		assert by["idx_ab"].leftmost == "a" and by["idx_ab"].unique is False
 		assert by["PRIMARY"].unique is True and by["PRIMARY"].leftmost == "name"
+
+	@pytest.mark.parametrize("override", [{"Ignored": "YES"}, {"Sub_part": 5}, {"Index_type": "FULLTEXT"}, {"Ignored": None}])
+	def test_nonordinary_index_is_not_coverage_evidence(self, monkeypatch, override):
+		row = dict(Key_name="candidate", Seq_in_index=1, Column_name="customer", Non_unique=1,
+			Index_type="BTREE", Ignored="NO", Sub_part=None)
+		_install_db(monkeypatch, lambda *a, **k: [{**row, **override}])
+		assert not MariaDBDialect().existing_indexes("tabSales Invoice")[0].eligible
+
+	def test_one_prefix_part_disqualifies_the_entire_composite(self, monkeypatch):
+		rows = [dict(Key_name="candidate", Seq_in_index=i, Column_name=col, Non_unique=1,
+			Index_type="BTREE", Ignored="NO", Sub_part=prefix)
+			for i, col, prefix in [(1, "customer", None), (2, "status", 5)]]
+		_install_db(monkeypatch, lambda *a, **k: rows)
+		assert not MariaDBDialect().existing_indexes("tabSales Invoice")[0].eligible
 
 	def test_unsafe_name_never_reaches_db(self, monkeypatch):
 		called = []

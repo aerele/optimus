@@ -1039,12 +1039,13 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 	except Exception:
 		raw_llm = {}
 	if isinstance(raw_llm, dict) and (raw_llm.get("suggestion") or "").strip():
-		from optimus.ai_guardrails import FIX_HEADINGS, section, stored_policy_violations
-		from optimus.ai_prompts import response_status
+		from optimus.ai_guardrails import FIX_HEADINGS, render_limited, section, stored_policy_violations
+		from optimus.ai_prompts import FIX_PROCESSING_LIMITED, response_status
 
 		status = response_status(raw_llm)
 		suggestion = raw_llm["suggestion"]
 		policy_violations = stored_policy_violations(suggestion) if status in (None, "complete") else []
+		limited = render_limited(policy_violations)
 		policy_codes = [v.code for v in policy_violations]
 		if policy_violations:
 			# The old explanation describes rejected code; keep only its diagnosis
@@ -1067,7 +1068,7 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 		llm_fix = {
 			"suggestion_html": _markdown_to_safe_html(suggestion),
 			"sql_policy_outdated": "raw-sql" in policy_codes,
-			"policy_outdated": bool(policy_violations),
+			"policy_outdated": bool(policy_violations) and not limited,
 			"policy_codes": policy_codes,
 			"model": raw_llm.get("model") or "",
 			"provider": raw_llm.get("provider") or "",
@@ -1075,7 +1076,7 @@ def _finding_to_dict(child, file_cache: dict | None = None) -> dict:
 			"source_available": raw_llm.get("source_available", True),
 			"prompt_version": raw_llm.get("prompt_version"),
 			"finish_reason": raw_llm.get("finish_reason"),
-			"completion_status": status,
+			"completion_status": FIX_PROCESSING_LIMITED if limited else status,
 			"guardrail": raw_llm.get("guardrail"),
 			# Token usage the provider reported (Aerele managed proxy forwards
 			# the real billed count). None when the suggestion predates this or

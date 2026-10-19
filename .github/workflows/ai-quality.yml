@@ -236,7 +236,7 @@ jobs:
           OPTIMUS_TEST_SQL: ${{ matrix.database }}
           OPTIMUS_TEST_SQL_SNAPSHOT: ${{ matrix.snapshot }}
           PYTHONDONTWRITEBYTECODE: '1'
-        run: python -m pytest optimus/tests/test_ai_refresh_sql.py -q -rA -p no:cacheprovider
+        run: python -m pytest optimus/tests/test_ai_refresh_sql.py optimus/tests/test_index_catalog_sql.py -q -rA -p no:cacheprovider
       - name: Show database service logs on failure
         if: failure()
         env:

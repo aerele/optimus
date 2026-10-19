@@ -195,3 +195,13 @@ class TestMaxQueriesPerRecordingZeroIsUnlimited:
 		assert len(big["calls"]) == 100
 		truncation_warnings = [w for w in warnings if "TRUNCATED" in w]
 		assert truncation_warnings, "positive cap must emit a truncation warning"
+
+
+def test_over_budget_query_is_preserved_without_formatting(enrich_env,monkeypatch):
+	query='SELECT '+'('*101+'1'+')'*101
+	def forbidden(*args,**kwargs):
+		raise AssertionError('over-budget query reached formatting')
+	monkeypatch.setattr(analyze.sqlparse,'format',forbidden)
+	recording={'calls':[{'query':query,'explain_result':[{'already':'present'}]}]}
+	analyze._enrich_recordings([recording])
+	assert recording['calls'][0]['query']==query

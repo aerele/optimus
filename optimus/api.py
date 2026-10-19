@@ -284,7 +284,9 @@ def _save_parent_bypassing_perms(parent) -> None:
 	enforced by the caller's _session_action_gate / _phase2_run_gate before this runs,
 	so the DocType write-perm is bypassed here."""
 	parent.flags.ignore_validate_update_after_submit = True
-	parent.save(ignore_permissions=True)
+	from optimus.managed import save_session
+
+	save_session(parent)
 	safe_commit()
 
 
@@ -367,7 +369,9 @@ def start(
 		doc_fields["notes"] = notes_clean
 	# Caller passed _require_profiler_user; the profiler creates their own
 	# session, which regular users have no create-perm for.
-	doc = frappe.get_doc(doc_fields).insert(ignore_permissions=True)
+	from optimus.managed import save_session
+
+	doc = save_session(frappe.get_doc(doc_fields), insert=True)
 
 	# Store metadata in Redis (used by the analyze pipeline later).
 	session.set_session_meta(
@@ -384,7 +388,14 @@ def start(
 
 	# Flip the user's active flag last once this is set, the next
 	# request from this user will start being recorded.
-	session.set_active_session(user, session_uuid)
+	try:
+		session.set_active_session(user, session_uuid)
+	except BaseException:
+		# The Redis admission precedes the SQL commit. A refused Phase 1
+		# must leave neither a Session row nor its metadata behind.
+		frappe.db.rollback()
+		session.delete_session_state(session_uuid)
+		raise
 
 	return {
 		"session_uuid": session_uuid,
@@ -1369,22 +1380,6 @@ def ai_capabilities() -> dict:
 	}
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _refresh_flag(value) -> bool:
 	if type(value) is bool:
 		return value
@@ -1456,7 +1451,8 @@ def ai_refresh_status(session_uuid: str) -> dict:
 		)
 		busy = bool(refresh and refresh["state"] in {"queued", "running", "unknown"})
 		plan = ai_jobs.refresh_plan(doc) if can_act and not busy and doc.status == "Ready" else None
-		return {"status": "ok", "refresh": refresh, "can_act": can_act, "plan": plan}
+		return {"status": "ok", "refresh": refresh, "can_act": can_act, "plan": plan,
+			"session_uncertain_count": len(ai_jobs.uncertain_attempts(docname))}
 
 	out, failed = analyze._run_ai_step(status_view, title="optimus ai refresh status", session_uuid=session_uuid)
 	return {"status": "unknown", "refresh": None, "can_act": False, "plan": None} if failed else out

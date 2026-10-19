@@ -26,6 +26,7 @@
   "tokens_reported",
   "usage_complete",
   "error_kind",
+  "send_certainty",
   "started_at_epoch",
   "finished_at_epoch",
   "session_name"
@@ -132,6 +133,14 @@
    "read_only": 1,
    "search_index": 1,
    "reqd": 1
+  },
+  {
+   "fieldname": "send_certainty",
+   "fieldtype": "Select",
+   "label": "Send Certainty",
+   "read_only": 1,
+   "options": "\nnot_sent\nknown_response\nsent_unknown"
   }
- ]
+ ],
+ "modified": "2026-10-18 17:30:00.000000"
 }

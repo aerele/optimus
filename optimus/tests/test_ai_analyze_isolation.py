@@ -102,7 +102,7 @@ def test_timeout_in_optional_admission_cannot_mark_profile_failed(pipeline, monk
 
 
 @pytest.mark.parametrize("fixes,steps", [(True, True), (False, True), (True, False), (False, False)])
-def test_auto_admission_uses_the_session_owner_and_independent_section_toggles(monkeypatch, fixes, steps):
+def test_auto_admission_uses_the_owner_and_never_rewrites_steps(monkeypatch, fixes, steps):
 	cfg = SimpleNamespace(ai_enabled=True, ai_auto_suggest=fixes, ai_suggest_findings=True,
 		ai_humanize_steps=steps, ai_auto_suggest_max=5)
 	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
@@ -111,10 +111,10 @@ def test_auto_admission_uses_the_session_owner_and_independent_section_toggles(m
 	calls = []
 	monkeypatch.setattr(ai_jobs, "start_refresh", lambda **kw: calls.append(kw) or {"status": "queued"})
 	analyze.queue_analyze_time_ai("fake-doc")
-	assert len(calls) == int(fixes or steps)
+	assert len(calls) == int(fixes)
 	if calls:
 		assert calls[0] == dict(docname="fake-doc", session_uuid="fake-session", requested_by="fake-owner",
-			scope="fixes_missing", cap=5, include_fixes=fixes, include_steps=steps)
+			scope="fixes_missing", cap=5, include_fixes=fixes, include_steps=bool(fixes and steps))
 
 
 def test_auto_admission_failure_is_logged_without_undoing_the_profile(monkeypatch):
@@ -131,7 +131,8 @@ def test_auto_admission_failure_is_logged_without_undoing_the_profile(monkeypatc
 
 def test_persistence_writes_deterministic_steps_without_a_provider_call(monkeypatch):
 	doc = MagicMock(notes="", title="fake title")
-	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(get_doc=lambda *a: doc))
+	monkeypatch.setattr(analyze, "frappe", SimpleNamespace(get_doc=lambda *a: doc,
+		db=SimpleNamespace(get_value=lambda *a: doc.notes, set_value=lambda *a, **kw: None)))
 	monkeypatch.setattr(analyze, "safe_commit", lambda: None)
 	monkeypatch.setattr(analyze.session, "get_jobs", lambda *a: [])
 	monkeypatch.setattr(analyze, "_build_auto_notes_html", lambda *a: "deterministic steps")

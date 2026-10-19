@@ -593,4 +593,6 @@ def _persist_run(
 		parent.append("findings", finding)
 
 	parent.flags.ignore_validate_update_after_submit = True
-	parent.save(ignore_permissions=True)
+	from optimus.managed import save_session
+
+	save_session(parent)

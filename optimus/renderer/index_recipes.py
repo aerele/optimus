@@ -372,6 +372,11 @@ def table_aliases(query: str) -> dict:
 	cannot parse the query. A second parse of the query, so a render memoises it per query
 	text (``recipe_enrichment.make_query_parser``)."""
 
+	from optimus.sql_budget import within_budget
+
+	if not within_budget(query):
+		return {}
+
 	def aliases() -> dict:
 		from sql_metadata import Parser
 
@@ -529,7 +534,7 @@ def _key_lookup(valued: Mapping[str, str], evidence: TableEvidence | None) -> st
 	if evidence is None or by_name.get("parent") not in _EQUALITY_KINDS:
 		return ""
 	columns = {col.lower() for col in evidence.column_types}
-	index = next((ix for ix in evidence.indexes if ix.columns[:1] == ("parent",)), None)
+	index = next((ix for ix in evidence.usable_indexes if ix.columns[:1] == ("parent",)), None)
 	if index is not None and {"parent", "parenttype"} <= columns:
 		return (
 			f'The query finds its rows by parent, which the index "{index.name}" on table "{evidence.table}" '
@@ -1072,7 +1077,7 @@ def _unique_alone(evidence: TableEvidence, col: str) -> bool:
 	"""True when ``col`` is unique on its own: a Unique field or a one-column unique index
 	(a composite unique index it leads is only an index it leads)."""
 	field = evidence.fields.get(col)
-	return (field is not None and field.unique) or any(ix.unique and ix.columns == (col,) for ix in evidence.indexes)
+	return (field is not None and field.unique) or any(ix.unique and ix.columns == (col,) for ix in evidence.usable_indexes)
 
 
 def _serves(index_columns: tuple[str, ...], equality: tuple[str, ...], rest: tuple[str, ...]) -> bool:
@@ -1141,14 +1146,14 @@ def _existing_index_problem(
 				f"new index would not help. {tail}"
 			), "", False
 		# a unique index whose columns the equality filter all fixes returns at most one row
-		pinned = next((ix for ix in evidence.indexes if ix.unique and ix.columns and set(ix.columns) <= set(eq)), None)
+		pinned = next((ix for ix in evidence.usable_indexes if ix.unique and ix.columns and set(ix.columns) <= set(eq)), None)
 		if pinned is not None:
 			return (
 				f'The unique index "{pinned.name}" on table "{table}" covers {_cols_text(pinned.columns)}, which '
 				f"{compares} with known values, so the database finds the rows through it and a new index "
 				f"would not help. {tail}"
 			), pinned.name, False
-		covering = next((ix for ix in evidence.indexes if _serves(ix.columns, eq, rest)), None)
+		covering = next((ix for ix in evidence.usable_indexes if _serves(ix.columns, eq, rest)), None)
 		if covering is not None:
 			starts = tuple(covering.columns[: len(whole)])
 			same = "" if starts == whole else " (the same equality columns in another order)"
@@ -1161,7 +1166,7 @@ def _existing_index_problem(
 		if checks and (plain or rest):
 			# an existing index serves every other column (the range or sort tail too, as
 			# Frappe's creation index serves creation > ?), and Check fields add nothing
-			prefix = next((ix for ix in evidence.indexes if _serves(ix.columns, plain, rest)), None)
+			prefix = next((ix for ix in evidence.usable_indexes if _serves(ix.columns, plain, rest)), None)
 			if prefix is not None:
 				if not plain and sort_tail and _has_limit(query):
 					return None, "", False
@@ -1175,17 +1180,17 @@ def _existing_index_problem(
 		return None, "", False
 	col = whole[0]
 	if _unique_alone(evidence, col):
-		unique_ix = next((ix.name for ix in evidence.indexes if ix.unique and ix.columns == (col,)), "")
+		unique_ix = next((ix.name for ix in evidence.usable_indexes if ix.unique and ix.columns == (col,)), "")
 		return f'Column "{col}" is already unique, so the database already has an index on it. {tail}', unique_ix, False
-	led = next((ix for ix in evidence.indexes if ix.columns[:1] == (col,)), None)
+	led = next((ix for ix in evidence.usable_indexes if ix.columns[:1] == (col,)), None)
 	if led is not None:
 		return (
 			f'Column "{col}" already leads the index "{led.name}" on table "{table}", so a new '
 			f"index would not help. {tail}"
 		), led.name, False
 	for name, used in _explain_index_names(explain_row):
-		named = next((ix for ix in evidence.indexes if ix.name == name), None)
-		if (named is not None and named.columns[:1] == (col,)) or name in (col, f"{col}_index"):
+		named = next((ix for ix in evidence.usable_indexes if ix.name == name), None)
+		if named is not None and named.columns[:1] == (col,):
 			how = "uses" if used else "can use"
 			return (
 				f'EXPLAIN shows the database {how} the index "{name}" on column "{col}", so a new index '
@@ -1625,7 +1630,7 @@ def _advise(
 		# stays. The verdict is about the filter only, never the sort, so it
 		# names no sort-serving index
 		cut = [
-			ix for ix in evidence.indexes
+			ix for ix in evidence.usable_indexes
 			if ix.columns and set(ix.columns) <= equality and not set(ix.columns) & set(cols)
 		]
 		compares = "this query compares" if query else "the slow queries compare"
@@ -1703,7 +1708,7 @@ def _serves_sort(evidence: TableEvidence, name: str, equality: set[str], sorts: 
 	``sorts`` (the ORDER BY or GROUP BY columns, in order): it starts with equality columns
 	(in any order), then every sort column in order; or it is a unique index whose columns
 	are all equality columns, which returns at most one row."""
-	index = next((ix for ix in evidence.indexes if ix.name == name), None) if name else None
+	index = next((ix for ix in evidence.usable_indexes if ix.name == name), None) if name else None
 	if index is None or not sorts:
 		return False
 	if index.unique and set(index.columns) <= equality:
@@ -1741,7 +1746,7 @@ def _cap(cols: list[str], equality: set[str], evidence: TableEvidence | None) ->
 	block = [col for col in cols if col in equality]
 	if evidence is None or len(block) <= MAX_INDEX_COLUMNS:
 		return cols[:MAX_INDEX_COLUMNS], cols[MAX_INDEX_COLUMNS:]
-	full = [ix for ix in evidence.indexes if ix.columns and set(ix.columns) <= set(block)]
+	full = [ix for ix in evidence.usable_indexes if ix.columns and set(ix.columns) <= set(block)]
 	width = {col: max((len(ix.columns) for ix in full if col in ix.columns), default=0) for col in block}
 
 	def key(col: str) -> tuple:

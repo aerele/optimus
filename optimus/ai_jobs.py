@@ -310,8 +310,11 @@ def _drive(run_id, docname, slice_no, worker_token):
 			return
 		result = failure = None
 		guard = safe_call.InterruptGuard()
+		from optimus import ai_transport
+
 		try:
-			result = item.send(min(call_limit, remaining))
+			with ai_transport.attempt() as transport:
+				result = item.send(min(call_limit, remaining))
 		except Exception as exc:
 			guard.note(exc)
 			failure = exc
@@ -329,6 +332,8 @@ def _drive(run_id, docname, slice_no, worker_token):
 		outcome = (
 			"skipped" if kind in ai_fix.AI_SKIP_KINDS else "failed" if failure is not None else "succeeded"
 		)
+		if failure is not None and transport.certainty == "sent_unknown":
+			outcome = "uncertain"
 		if guard.pending():
 			outcome, kind = "uncertain", "timeout"
 		if tokens > ai_fix.MAX_TOKEN_COUNT:
@@ -369,6 +374,7 @@ def _drive(run_id, docname, slice_no, worker_token):
 				usage_complete=complete is True,
 				now=_now(),
 				error_kind=error_kind,
+				send_certainty=transport.certainty,
 				persist=(lambda: item.persist(result)) if persist else None,
 				signals=signals,
 			)
@@ -681,7 +687,7 @@ def _yield(run_id, docname, worker_token, *, progressed=True):
 		_note_ending(run, docname)
 
 
-def _check_run(run, *, locked=False):
+def _check_run(run, *, locked=False, kind=None):
 	"""Recheck the session, the requester and Phase 2 activity; raise ``StopRefresh``.
 
 	With ``locked`` the session and Phase 2 rows are read with locks, and both locking reads
@@ -728,7 +734,25 @@ def _check_run(run, *, locked=False):
 		raise StopRefresh("permission")
 	if phase2:
 		raise StopRefresh("phase2")
+	_check_ai_consent(run, kind=kind)
 	return parent
+
+
+def _consent_enabled(field):
+	from optimus.ai_privacy import opted_in
+	return opted_in(frappe.db.get_single_value("Optimus Settings", field, cache=False))
+
+
+def _check_ai_consent(run, *, kind=None):
+	if run.get("scope") and run["scope"] != "all":
+		if not (_consent_enabled("ai_enabled") and _consent_enabled("ai_auto_suggest")):
+			raise StopRefresh("disabled")
+		fixes = run.get("include_fixes") and _consent_enabled("ai_suggest_findings")
+		steps = run.get("include_steps") and _consent_enabled("ai_humanize_steps")
+		if not (fixes or steps):
+			raise StopRefresh("disabled")
+	if kind and not (_consent_enabled("ai_enabled") and _consent_enabled("ai_humanize_steps" if kind == "steps" else "ai_suggest_findings")):
+		raise StopRefresh("disabled")
 
 
 def _the_row_answers_as_the_name(user):
@@ -790,6 +814,26 @@ def _chain(run):
 	return names
 
 
+def uncertain_attempts(docname):
+	"""The same bounded predicate backs retry blocking and the session UI count.
+
+	Pre-release timeout/transport failures without certainty may have been billed.
+	History is preserved; new workers conservatively block these legacy rows.
+	"""
+	fields = ["name", "run_id", "kind", "target_name", "input_hash", "state"]
+	rows = []
+	for filters in (
+		{"state": "uncertain"},
+		{"state": "failed", "error_kind": ["in", ["timeout", "transport"]], "send_certainty": ["is", "not set"]},
+	):
+		part = frappe.get_all(store.ATTEMPT, filters={"session_name": docname, **filters},
+			fields=fields, limit_page_length=10001)
+		if len(part) > 10000:
+			raise StopRefresh("history_limit")
+		rows.extend(part)
+	return rows
+
+
 def _attempts(run):
 	"""``(tried, uncertain, fixes_spent)``: this run's attempts, the session's uncertain
 	attempts as ``(kind, target, input_hash)`` keys, and the fix attempts of the whole resume
@@ -802,12 +846,7 @@ def _attempts(run):
 	)
 	uncertain = []
 	if not run.get("retry_uncertain"):
-		uncertain = frappe.get_all(
-			store.ATTEMPT,
-			filters={"session_name": run["session_name"], "state": "uncertain"},
-			fields=fields,
-			limit_page_length=10001,
-		)
+		uncertain = uncertain_attempts(run["session_name"])
 	if len(attempts) > 10000 or len(uncertain) > 10000:
 		raise StopRefresh("history_limit")
 	tried = [a for a in attempts if a["run_id"] == run["name"]]
@@ -842,7 +881,7 @@ def _valid_item(run, doc, row, fingerprint):
 			return False
 	reason = None
 	try:
-		_check_run(run, locked=True)
+		_check_run(run, locked=True, kind="steps" if row is None else "fix")
 	except StopRefresh as exc:
 		reason = exc.reason
 	if reason:
@@ -992,7 +1031,7 @@ def _steps_item(run, doc, memo):
 		# A total above the bound never reaches ``ai_tokens_spent`` either (``_token_count``
 		# reads it as 0); only the run and the attempt keep it, and ``_drive`` logs one row.
 		tokens = min(result["tokens"].get("total_tokens", 0), ai_fix.MAX_TOKEN_COUNT)
-		_touch_session(doc.name, notes=result["notes"], ai_steps_tokens=tokens)
+		_touch_session(doc.name, notes=result["notes"], ai_steps_tokens=tokens, auto_notes_sha256=None)
 		return True
 
 	return PreparedItem("steps", doc.name, fingerprint, send, valid, persist)
@@ -1012,6 +1051,7 @@ def _next_item(run, memo):
 	if not ai_fix.is_available():
 		# Switched off mid-run: nothing more can be sent, which is not a complete refresh.
 		raise StopRefresh("disabled")
+	_check_ai_consent(run)
 	doc = frappe.get_doc("Optimus Session", run["session_name"])
 	tried, uncertain, fixes_spent = _attempts(run)
 	names = {(a["kind"], a["target_name"]) for a in tried}
@@ -1029,23 +1069,25 @@ def _next_item(run, memo):
 	# Hash only the rows an uncertain attempt names: none, on the usual run.
 	maybe = {target for kind, target, _ in uncertain if kind == "fix"}
 	blocked = {
-		row.name for row in rows if row.name in maybe and ("fix", row.name, _signature(doc, row)) in uncertain
+		row.name for row in rows if row.name in maybe and (
+			run["scope"] != "all" or ("fix", row.name, _signature(doc, row)) in uncertain
+		)
 	}
 	step_state = run.get("steps_state") or "not_requested"
 	steps = bool(run.get("include_steps") and step_state != "carried" and ("steps", doc.name) not in names)
+	if steps and run["scope"] != "all":
+		from optimus.auto_steps import may_rewrite
+		if not may_rewrite(doc):
+			step_state, steps = "kept", False
 	if steps and not ai_fix.is_available(section="humanize"):
 		step_state, steps = "toggle_off", False
 	if steps:
 		step_state = "pending"
-		notes = (doc.get("notes") or "").strip()
-		if (
-			run["scope"] != "all"
-			and notes
-			and not notes.startswith((analyze._AUTO_NOTES_PREAMBLE, analyze._HUMANIZED_NOTES_PREAMBLE))
-		):
-			step_state, steps = "kept", False
-		elif uncertain and ("steps", doc.name, _signature(doc)) in uncertain:
+		if uncertain and any(kind == "steps" and target == doc.name and (
+			run["scope"] != "all" or fingerprint == _signature(doc)
+		) for kind, target, fingerprint in uncertain):
 			step_state, steps = "uncertain", False
+
 	blocked_count = min(remaining, len(blocked)) + int(step_state == "uncertain")
 
 	def progress():
@@ -1188,9 +1230,17 @@ def start_refresh(
 	"""
 	if any(not isinstance(v, str) or not v or len(v) > 140 for v in (docname, session_uuid, requested_by)):
 		raise ValueError("Invalid AI refresh identity")
+	if resume_from:
+		previous = frappe.db.get_value(store.RUN, resume_from, "*", as_dict=True)
+		if not previous or previous.get("session_name") != docname:
+			raise ValueError("Invalid refresh resume parent")
+		scope = previous["scope"]
+		include_fixes, include_steps = bool(previous.get("include_fixes")), bool(previous.get("include_steps"))
+		regenerate_all = bool(previous.get("regenerate_all"))
 	reason = None
 	try:
-		_check_run({"session_name": docname, "session_uuid": session_uuid, "requested_by": requested_by})
+		_check_run({"session_name": docname, "session_uuid": session_uuid, "requested_by": requested_by, "scope": scope,
+			"include_fixes": include_fixes, "include_steps": include_steps})
 	except StopRefresh as exc:
 		reason = exc.reason
 	if reason:

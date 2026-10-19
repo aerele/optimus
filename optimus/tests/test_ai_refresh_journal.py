@@ -1611,3 +1611,19 @@ def test_a_claim_needs_a_worker_and_a_lease(journal, worker, lease_seconds):
 			lease_seconds=lease_seconds,
 		)
 	assert out is None and journal.run["state"] == "queued" and journal.run["worker_token"] is None
+
+
+def test_three_settled_unknown_sends_trip_the_breaker_once_each(journal):
+ claim(journal)
+ for i in range(3):
+  attempt=begin(journal,name='unknown-'+str(i))
+  def settle():
+   return journal.mod.settle_attempt('fake-run',attempt['name'],docname='fake-session-doc',worker_token='worker-a',outcome='uncertain',tokens=0,usage_complete=False,now=12,error_kind='timeout',send_certainty='sent_unknown')
+  with journal.db.transaction():
+   assert settle()
+  with journal.db.transaction():
+   assert not settle()
+  assert journal.run['consecutive_failures']==i+1
+ assert journal.run['breaker_kind']=='timeout'
+ assert journal.run['uncertain']==3
+ assert begin(journal,name='fourth') is None

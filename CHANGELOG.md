@@ -8,6 +8,42 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.82] - 2026-10-18
+
+### Security and correctness
+
+- Protect Session identities, profiling data, child rows and generated Files from
+  generic document writes, including attachment aliases. Remove generic Session
+  creation from Optimus User. Title and notes remain editable.
+- Restore lazy PDF generation for text File contents; bind source/cache/deletion
+  to the exact private Session attachment. Fence stale and competing renders,
+  remove pdfkit option metadata and prevent privileged private-image embedding.
+- Preserve visible source characters in safety checks; resolve Frappe aliases by
+  lexical scope and reject ambiguous/dynamic access or removed permission denials.
+  Bound alias depth, visits, identity count and string allocations; withhold
+  unchecked code instead of crashing. Normalize PDF styles and declarations
+  across framework reparses.
+- Retain Frappe identities for literal dynamic imports and skip enclosing class
+  namespaces when checking nested class bodies, preventing unsafe code from
+  being displayed as an unrelated object call.
+- Use only eligible full b-tree keys for index coverage, preserving expression
+  positions and excluding partial, ignored, prefix, invalid and non-btree proofs.
+- Bound optional SQL parsing and formatting. Prevent Phase 1/2 capture overlap
+  with atomic Redis admission. Roll back each failed retention deletion separately.
+- Bound saved-answer validation per report to `RENDER_VALIDATION_CHARS = 262144`
+  characters and `RENDER_VALIDATION_ANSWERS = 128` distinct answers. Withhold code
+  beyond that budget for local review, without marking it outdated or retrying AI.
+
+### AI behavior and upgrade
+
+- Automatic finding fixes and captured Steps share the automatic-consent toggle.
+  Steps rewriting preserves user-written/edited notes and concurrent saves.
+- Record provider-send certainty; block unknown outcomes and legacy timeout rows
+  until explicit retry consent. Unknown sends count toward the failure breaker.
+- Run `bench migrate`, then restart all web and queue workers together. See
+  docs/AI-REFRESH.md for additive fields, pre-release worker overlap and Custom
+  DocPerm cleanup. Session read sharing includes raw artifact downloads.
+
 ## [0.12.72] - 2026-10-14
 
 ### Security

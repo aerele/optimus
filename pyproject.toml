@@ -28,6 +28,10 @@ dependencies = [
 	# nh3 0.2.22 first supports allowed_classes with attribute_filter.
 	"nh3>=0.2.22",
 	"markdown2>=2.5",
+	# Normalize report HTML before PDF generation (also provided by Frappe).
+	"beautifulsoup4>=4.12",
+	"html5lib>=1.1",
+	"tinycss2>=1.2",
 ]
 
 [build-system]

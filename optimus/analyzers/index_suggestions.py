@@ -193,7 +193,7 @@ def _get_indexed_columns(table: str) -> set[str]:
 	filter on just that column, so a Missing Index suggestion stays actionable).
 	Returns an empty set on any DB error, conservatively keeping all suggestions.
 	"""
-	return {ix.leftmost for ix in get_dialect().existing_indexes(table) if ix.leftmost}
+	return {ix.leftmost for ix in get_dialect().existing_indexes(table) if ix.eligible and ix.leftmost}
 
 
 def _get_column_types(table: str) -> dict[str, str]:
@@ -362,6 +362,10 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	dropped_meta_table_tables: set[str] = set()
 	logged_real = 0
 	for normalized, info in unique_queries.items():
+		from optimus.sql_budget import within_budget
+		if not within_budget(info["raw"]):
+			parser_limit_failures["ParseBudgetExceeded"] += 1
+			continue
 		try:
 			# DBOptimizer parses with sql_metadata which doesn't care about
 			# literal values, so passing the normalized query is fine.

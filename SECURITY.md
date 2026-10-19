@@ -355,17 +355,28 @@ installed on the site.
   hiding a field is not an access control. Restricting URL visibility alone
   would not protect a URL already known to the recipient. Do not use a
   Session read share to provide sanitized-only access; share a separately
-  reviewed safe export instead. The File-hook fix does not close this gap.
-- SQL parameter redaction is **best-effort**; a regex pattern over
-  known-sensitive column names catches `WHERE password = '...'`
-  shapes but won't catch obscure column names or UPDATE SET
-  clauses with sensitive values.
-- An Optimus User can view and act on the sessions they recorded. Sharing a
-  session read-only lets another user open it in Desk; sharing it with
-  write also lets them run Refresh AI suggestions, Regenerate Reports,
-  Retry Analyze and Phase 2 on it. The PDF download and JSON export stay
-  limited to the recording user and System Managers. There is no
-  finer-grained ACL.
+  reviewed safe export instead. This sharing contract is intentional; managed-field guards prevent a recipient from creating a second attachment binding to retain access after revocation.
+- Read access to an Optimus Session includes its raw HTML report, cached PDF
+  and recordings through their private download URLs. Sharing is a disclosure
+  decision by the sharer. Revoking a share stops subsequent access through the
+  parent permission rule; copies already downloaded remain with the recipient.
+  Core File form/REST permission checks and Optimus's PDF-generation and JSON
+  export APIs remain restricted to the recording user and System Managers.
+  Session ownership governs action authorization; it may differ from the
+  recording user used by artifact API checks. Overflow call-tree attachments
+  have no managed attachment field and follow Frappe's ordinary parent rule.
+- SQL literals/comments and Steps names are removed before provider dispatch
+  unless the site enables raw-value consent. Capture-time redaction remains
+  best effort; sharing a session can disclose its captured business data.
+- A write share also permits Refresh AI suggestions, Regenerate Reports,
+  Retry Analyze and Phase 2. Normal document edits are limited to title and
+  notes. Session creation, identities, status, generated attachments, accounting
+  and child rows belong to Optimus's internal writers. Generated File changes
+  are guarded before core can move bytes; URL and content-hash aliases are
+  included. Optimus User has no generic Session create permission.
+  The File guard performs these alias lookups on all File inserts and updates.
+  Frappe's `content_hash` column has no index, so this adds a File table query
+  alongside the framework's existing upload deduplication lookup.
 - The per-user limits on AI and report actions live in Redis. If Redis is
   down the limiter refuses the action (fails closed); Frappe sessions need
   Redis anyway, so this changes nothing in practice.
@@ -588,3 +599,34 @@ counts-only logging. Deletion ends this retry history. A restored profiling
 record is not a way to resume deleted jobs. Ordinary Session saves cannot replace
 worker-maintained usage counters. These counters are informational, not a wallet
 or an enforceable provider spending balance.
+
+
+## Generated artifacts and retention
+
+PDF generation loads only the exact private File bound to its Session and field.
+It renders outside parent locks, then rechecks the current Ready session and HTML
+reference under lock before publishing. A competing publisher's valid cache is
+reused. User-controlled pdfkit meta options are removed on Frappe 15 and 16,
+including after HTML normalization. PDF images must use raster data URLs. External resource attributes, SVG references
+and CSS URL/import channels are removed, preventing the privileged downloader's
+private images or cookies from being used to populate a shared cache.
+Stylesheets are serialized without comments; styles containing markup or entity
+openers are withheld so subsequent framework parses cannot reconstruct resources.
+Declarations are normalized while preserving whether the original had a doctype.
+Notes and legacy stored summaries are sanitized before safe HTML rendering.
+
+Retention commits each parent independently. A failed deletion rolls back its
+rows and after-commit Redis callbacks before logging a fixed diagnostic, then
+continues with siblings. Frappe deletes physical files before SQL commit: a late
+File or commit failure can restore a File row after its bytes are gone. Loaders
+report missing artifacts in a controlled way; the next sweep removes the restored
+parent. Superseded generated reports remain attached until normal retention.
+
+Pre-release sites that allowed generic Session creation should review historical
+Sessions and File bindings before relying on share revocation. Earlier v15 code
+could create a second attachment binding to a recipient-owned Session. New guards
+prevent creating or changing such bindings; they do not infer which historical
+Sessions were fabricated or delete existing copies automatically. Review duplicate
+artifact URLs across parents and remove unauthorized pre-release Sessions through
+normal document deletion. Sharing or downloading previously disclosed data cannot
+be undone by a permission change.

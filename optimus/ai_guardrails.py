@@ -32,11 +32,14 @@ Tiers (``Violation.action``):
 from __future__ import annotations
 
 import ast
+import hashlib
 import html
 import io
 import re
 import textwrap
 import tokenize
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from optimus import ai_prompts, ai_responses
@@ -48,6 +51,10 @@ BLOCK = "block"
 TRUNCATED = "truncated"
 ADVISE = "advise"
 NOTE = "note"
+
+RENDER_VALIDATION_CHARS = 262_144
+RENDER_VALIDATION_ANSWERS = 128
+VALIDATION_LIMITED = "validation-limited"
 
 # Every code verify_fix / ai_fix can emit, with its tier.
 CODE_ACTIONS: dict[str, str] = {
@@ -203,14 +210,11 @@ def _rendered_code(text: str) -> list[str]:
 	"""The text of every ``<pre>`` block the report renders for ``text``: PR-0c's
 	``_markdown_to_safe_html`` is the reference for code a reader sees (ruling
 	R-RENDERED). Imported lazily: this module stays pure."""
+	from optimus.ai_code_html import rendered_code
 	from optimus.renderer.finding_enrichment import _markdown_to_safe_html
 
-	out = []
-	for body in re.findall(r"<pre\b[^>]{0,4096}>(.*?)</pre>", _markdown_to_safe_html(text) or "", re.S | re.I):
-		body = re.sub(r'<span class="dh-line[^"]*">', "\n", body)  # the diff highlighter: one span per line
-		code = html.unescape(re.sub(r"<[^>]+>", "", body)).replace("\u200b", "")
-		out.append(re.sub(r"<[^>\n]+>", "", code).strip("\n"))  # tag text escaped inside the block
-	return out
+	return rendered_code(_markdown_to_safe_html(text) or "")
+
 
 
 def _line_set(lines) -> set[str]:
@@ -452,18 +456,23 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 			return any(i in _new and (include_moved or _norm(_after[i][0]) not in _minus)
 				for i in range(max(0, start), min(len(_after), end)))
 
-		aliases = {
-			t.id
-			for n in ast.walk(tree)
-			if isinstance(n, ast.Assign)
-			for t in n.targets
-			if isinstance(t, ast.Name) and _dotted(n.value) in ("frappe.db", "frappe.local.db")
-		}
+		from optimus.ai_aliases import Aliases
+		try:
+			aliases = Aliases(tree)
+		except (ValueError, RecursionError):
+			out.append(_v("unverified-safety", "the code exceeds the static analysis budget"))
+			continue
+		if any(introduced(node, include_moved=True) for node in aliases.unsupported):
+			out.append(_v("unverified-safety", "dynamic Frappe imports"))
 		for n in ast.walk(tree):
+			if introduced(n, include_moved=True) and (
+				aliases.dynamic(n) or isinstance(n, (ast.Name, ast.Attribute)) and aliases.ambiguous_policy(n)
+			):
+				out.append(_v("unverified-safety", "dynamic or ambiguous Frappe access"))
 			if isinstance(n, ast.Call):
-				name = _dotted(n.func)
+				name = aliases.call_name(n, _dotted)
 				head, _, tail = name.rpartition(".")
-				if name in _RAW_SQL or (head in aliases and tail in ("sql", "multisql", "sql_list", "sql_ddl")):
+				if name in _RAW_SQL:
 					# Moving a call is still proposed code. A retained opener does
 					# not exempt new arguments; unchanged diff context stays allowed.
 					if introduced(n, include_moved=True):
@@ -764,7 +773,7 @@ def can_validate(text: str) -> bool:
 	return not any(line.startswith((" ", "\t", ">")) and line.strip() for n, line in enumerate(lines) if n not in inside)
 
 
-def stored_sql_violations(text: str) -> list[Violation]:
+def _stored_sql_violations(text: str) -> list[Violation]:
 	"""Recheck saved proposed code without invalidating unrelated good answers.
 
 	No source is needed for diff additions; removed lines and unchanged context
@@ -779,7 +788,7 @@ def stored_sql_violations(text: str) -> list[Violation]:
 	return _dedupe([v for v in check_code(blocks, []) if v.code == "raw-sql"])
 
 
-def stored_policy_violations(text: str) -> list[Violation]:
+def _stored_policy_violations(text: str) -> list[Violation]:
 	"""Reclassify only provable new safety violations; no source or provider I/O.
 
 	Historical SQL checks retain their contract. Other comparative checks require
@@ -787,7 +796,7 @@ def stored_policy_violations(text: str) -> list[Violation]:
 	"""
 	if not isinstance(text, str) or not can_validate(text):
 		return []
-	if not re.search(r"sql|delete|set_value|truncate|has_permission|\bqb\b|limit", text, re.I):
+	if not re.search(r"frappe|sql|delete|set_value|truncate|has_permission|\bqb\b|limit|getattr|setattr|vars|__dict__", text, re.I):
 		return []
 	fix = section(text, "Fix", FIX_HEADINGS) or text
 	if not re.search(r"```|~~~|<pre\b|<code\b|(?m:^(?: {4}|\t))", fix, re.I):
@@ -800,7 +809,7 @@ def stored_policy_violations(text: str) -> list[Violation]:
 	return _dedupe([v for v in out if v.action == BLOCK])
 
 
-def verify_fix(text: str, *, source_lines: list[str], finish_reason: str | None = None) -> list[Violation]:
+def _verify_fix(text: str, *, source_lines: list[str], finish_reason: str | None = None) -> list[Violation]:
 	"""Every rule the fix answer ``text`` breaks, given the source lines that were
 	shown to the model. A truncated answer returns only the truncation violation."""
 	text = text or ""
@@ -816,13 +825,74 @@ def verify_fix(text: str, *, source_lines: list[str], finish_reason: str | None 
 	from optimus.ai_fix_checks import check_changes
 
 	out += check_changes(every, source_lines)
-	out += stored_policy_violations(text)  # accepted code must also pass the saved-answer gate
+	# Generation must get the full check even when called from an active render.
+	out += _stored_policy_violations(text)
 	out += check_prose_ddl(fix, every)
 	out += check_metadata_index(text)
 	out += check_customize_form(text)
 	out += check_markup(text)
 	return _dedupe(out)
 
+
+
+def _html_checked(check, *args, **kwargs):
+	from optimus.ai_aliases import AnalysisLimitExceeded
+	from optimus.ai_code_html import InvalidCodeHTML
+	try:
+		return check(*args, **kwargs)
+	except (InvalidCodeHTML, AnalysisLimitExceeded, RecursionError):
+		return [_v("unverified-safety", "the rendered code structure could not be checked")]
+
+
+def stored_sql_violations(text):
+	return _html_checked(_stored_sql_violations, text)
+
+
+@dataclass
+class _RenderBudget:
+	chars: int
+	answers: int
+	memo: dict[str, tuple[Violation, ...]]
+
+
+_render_budget: ContextVar[_RenderBudget | None] = ContextVar("optimus_render_budget", default=None)
+
+
+@contextmanager
+def render_validation_budget():
+	"""Bound saved-answer checks for one report; nested renders share its budget."""
+	if _render_budget.get() is not None:
+		yield
+		return
+	token = _render_budget.set(_RenderBudget(RENDER_VALIDATION_CHARS, RENDER_VALIDATION_ANSWERS, {}))
+	try:
+		yield
+	finally:
+		_render_budget.reset(token)
+
+
+def stored_policy_violations(text):
+	budget = _render_budget.get()
+	if budget is None or not isinstance(text, str):
+		return _html_checked(_stored_policy_violations, text)
+	key = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+	if key not in budget.memo:
+		if len(text) > budget.chars or budget.answers < 1:
+			result = (_v(VALIDATION_LIMITED, "report validation budget reached"),)
+		else:
+			budget.chars -= len(text)
+			budget.answers -= 1
+			result = tuple(_html_checked(_stored_policy_violations, text))
+		budget.memo[key] = result
+	return list(budget.memo[key])
+
+
+def render_limited(violations) -> bool:
+	return any(v.code == VALIDATION_LIMITED for v in violations)
+
+
+def verify_fix(text, *, source_lines, finish_reason=None):
+	return _html_checked(_verify_fix, text, source_lines=source_lines, finish_reason=finish_reason)
 
 
 def _dedupe(vs: list[Violation]) -> list[Violation]:
@@ -877,7 +947,9 @@ def strip_code(text: str, blocks: list[Block] | None = None) -> str:
 
 def _code_key(line: str) -> str:
 	# a line's text without tags, markup and spacing, so a source line matches its rendering
-	return re.sub(r"<[^>]+>|[\s`*_]", "", html.unescape(line))
+	from optimus.ai_code_html import code_key
+
+	return code_key(line)
 
 
 def _neutralise_rendered_code(text: str, unlocated: list[list[str]] = ()) -> str:
@@ -887,18 +959,26 @@ def _neutralise_rendered_code(text: str, unlocated: list[list[str]] = ()) -> str
 	and indents are dropped, raw ``<pre>`` / ``<code>`` / ``<details>`` escaped and the
 	fences that exposes stripped. Last resort (never reached by the tested shapes): the
 	body becomes the placeholder. The result renders no ``<pre>``."""
-	raws = [raw.splitlines() for raw in _rendered_code(text)]
+	from optimus.ai_code_html import InvalidCodeHTML
+	try:
+		raws = [raw.splitlines() for raw in _rendered_code(text)]
+	except InvalidCodeHTML:
+		return _CODE_REMOVED
 	if not raws and not unlocated:
 		return text
 	code = {_code_key(ln) for block in [*unlocated, *raws] for ln in block} - {""}
+	remaining = set(code)
 	lines: list[str] = []
 	for ln in text.splitlines():
 		ln = re.sub(r"^\s*(?:>\s?)+", "", ln).lstrip()
 		if _code_key(ln) in code:
+			remaining.discard(_code_key(ln))
 			if lines and lines[-1] == _CODE_REMOVED:
 				continue
 			ln = _CODE_REMOVED
 		lines.append(ln)
+	if remaining:
+		return _CODE_REMOVED
 	text = re.sub(r"<(/?)(pre|code|details)\b", r"&lt;\1\2", "\n".join(lines), flags=re.I)
 	text = strip_code(text)
 	return _CODE_REMOVED if _rendered_code(text) else text

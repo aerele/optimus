@@ -69,7 +69,10 @@ def _render_and_save(docname, recordings, *, run_id, worker_token):
 		try:
 			# Keep the existing code-generated HTML extension exception narrow.
 			frappe.local.request = None
-			file_doc.insert(ignore_permissions=True)
+			from optimus.managed import artifact_writer
+
+			with artifact_writer(docname, "raw_report_file"):
+				file_doc.insert(ignore_permissions=True)
 		finally:
 			frappe.local.request = request
 		url = file_doc.file_url

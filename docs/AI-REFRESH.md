@@ -754,3 +754,40 @@ Saved suggestions that add, move or change raw SQL are now locally classified as
 
 
 As of v0.12.80 the same local classification also catches reconstructable unbounded writes, ignored/new or behavior-changing permission checks, and lost literal query bounds/order in a paired SQL-to-ORM diff. These answers show “Safety review needed” and are eligible for manual Refresh only. Partial N+1 improvements receive an advisory and stay current. Classification and rendering preserve the original answer and usage, and never call a provider. See [AI-FIXING.md](AI-FIXING.md#visible-frappe-safety-checks-v01280) for the supported shapes and limits.
+
+
+## Upgrade to 0.12.82
+
+Run `bench migrate` before restarting web and queue workers. Two nullable fields
+are additive: Attempt `send_certainty` and Session `auto_notes_sha256`. Existing
+history is preserved. A failed timeout/transport attempt without certainty is
+conservatively treated as unknown; new unknown sends are stored as `uncertain`,
+which earlier pre-release workers already block. Do not run old pre-release
+workers alongside new workers: they cannot apply the legacy-failure predicate or
+the automatic consent/provenance rules. Stop old workers before upgrading and
+restart all processes together after migration. Generic Session create permission
+is removed from Optimus User; sites with a Custom DocPerm granting create must
+remove that customization separately. The managed creation guard also refuses it.
+
+`ai_auto_suggest` governs all automatic provider work. Its finding and Steps
+section settings select the work independently. Automatic Steps require the
+managed hash recorded after saving newly generated captured Steps. Every external
+Session save revokes that provenance, even if the note text is unchanged. Retry
+Analyze revokes it unless it generates a new captured note. Earlier humanized or
+user-edited notes are kept; manual refresh can replace them. The send and save
+transactions recheck current SQL consent. A toggle change can race the send check and leave one already admitted call
+per active run; its result is discarded when the
+save recheck fails, while reported tokens remain recorded.
+
+Send certainty distinguishes `not_sent`, `known_response` and `sent_unknown`.
+Read timeouts, broken reads and HTTP 502/504/520–524 may already have been billed.
+They become `uncertain` and count once toward the three-failure breaker; an
+interrupt alone does not increment it. Automatic follow-ups block unknown targets
+even when their input hash changed. Manual refresh uses input hashes. Retrying an
+unknown call requires the explicit duplicate-charge checkbox; the UI consults the
+same bounded historical predicate as the worker. Its session count is historical,
+not a claim about the current prompt selection.
+
+A report-rendering failure marks analysis Failed; Retry Analyze recovers it.
+Generated files are managed and private; see SECURITY.md for the sharing contract
+and the framework's late physical-deletion rollback limitation.

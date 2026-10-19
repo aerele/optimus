@@ -111,7 +111,15 @@ class MariaDBDialect(Dialect):
 			if not key_name:
 				continue
 			entry = by_name.setdefault(
-				key_name, {"_cols": [], "unique": not r.get("Non_unique")}
+				key_name, {"_cols": [], "unique": not r.get("Non_unique"), "usable": True}
+			)
+			# Every key part must be an ordinary, full-column, enabled b-tree.
+			# Missing visibility/type metadata is not proof that an index is usable.
+			entry["usable"] &= (
+				str(r.get("Index_type", "")).upper() == "BTREE"
+				and str(r.get("Ignored", "")).upper() == "NO"
+				and "Sub_part" in r and r["Sub_part"] is None
+				and bool(r.get("Column_name") or r.get("column_name"))
 			)
 			try:
 				seq = int(r.get("Seq_in_index") or r.get("seq_in_index") or 0)
@@ -127,7 +135,8 @@ class MariaDBDialect(Dialect):
 					name=key_name,
 					columns=cols,
 					unique=bool(e["unique"]),
-					leftmost=(cols[0] if cols else None),
+					leftmost=(cols[0] if cols and e["usable"] else None),
+					eligible=e["usable"], reason="" if e["usable"] else "not_full_btree",
 				)
 			)
 		return out
