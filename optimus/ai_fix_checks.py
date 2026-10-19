@@ -290,9 +290,12 @@ def _denial_changes(before, after):
 	return ambiguous
 
 
-def _read(view, call):
-	name = view.name(call)
+def _read_name(name):
 	return name in _READS | _SQL_READS or name.startswith("frappe.qb.") and name.endswith(".run")
+
+
+def _read(view, call):
+	return _read_name(view.name(call))
 
 
 def _loop_contexts(view, call):
@@ -606,7 +609,7 @@ def _check_loop_changes(blocks, source_lines):
 				parent = after.parents.get(node)
 				if isinstance(parent, ast.Call) and parent.func is node:
 					continue
-				if after.aliases.name(node) in _READS | _SQL_READS:
+				if _read_name(after.aliases.name(node)):
 					out.append(_v("unverified-loop-fix", "passing a read as a function reference does not establish fewer calls"))
 		if is_diff:
 			before = View([(line, tag == "-") for tag, line in rows if tag != "+"])

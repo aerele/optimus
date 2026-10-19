@@ -143,6 +143,8 @@ def test_uncached_read_still_in_same_loop_is_blocked(header, old):
 	(['for name in names:', '    doc = frappe.get_doc("User", name)'],
 	 ['from frappe import get_doc as fetch', 'docs = list(map(fetch, names))']),
 	(['for name in names:', '    doc = frappe.get_doc("User", name)'],
+	 ['docs = list(map(frappe.qb.from_(T).select(T.name).run, names))']),
+	(['for name in names:', '    doc = frappe.get_doc("User", name)'],
 	 ['memo = {}', 'for name in names:', '    if name not in memo:', '        pass', '    else:', '        memo[name] = frappe.db.get_value("User", name)']),
 ])
 def test_disguised_repeated_reads_are_rejected(before, after):
