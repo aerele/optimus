@@ -110,7 +110,7 @@ class Aliases(ast.NodeVisitor):
 
 	def visit_ImportFrom(self, node):
 		for item in node.names:
-			if item.name == "*" and (node.module == "frappe" or str(node.module).startswith("frappe.")):
+			if item.name == "*" and (node.module in {"frappe", "importlib"} or str(node.module).startswith("frappe.")):
 				self.unsupported.append(node)
 			identity = f"{node.module}.{item.name}"
 			self.current.bindings[item.asname or item.name].append(
@@ -120,7 +120,7 @@ class Aliases(ast.NodeVisitor):
 					node.module == "frappe"
 					or str(node.module).startswith("frappe.")
 					or identity == "operator.attrgetter"
-					or identity in {"importlib.import_module", "builtins.__import__"}
+					or identity in {"importlib.import_module", "importlib.__import__", "builtins.__import__"}
 				)
 				else None
 			)
@@ -265,7 +265,7 @@ class Aliases(ast.NodeVisitor):
 		if isinstance(node, ast.Call):
 			out = set()
 			for value in self.values(node.func, seen, depth + 1):
-				if value in {"__import__", "builtins.__import__", "importlib.import_module"}:
+				if value in {"__import__", "builtins.__import__", "importlib.__import__", "importlib.import_module"}:
 					out.update(self._imported(node, value))
 				else:
 					out.add(self._extend(value, "()") if value and value.startswith("frappe.qb.") else None)
@@ -280,19 +280,26 @@ class Aliases(ast.NodeVisitor):
 				node.args[index] if len(node.args) > index else None)
 
 		module = argument(0, "name")
+		if any(isinstance(arg, ast.Starred) for arg in node.args) or any(kw.arg is None for kw in node.keywords):
+			return {None, "frappe"}
+		if loader != "importlib.import_module":
+			level = argument(4, "level")
+			if level is not None and not (isinstance(level, ast.Constant) and level.value == 0):
+				return {None, "frappe"}
 		if not isinstance(module, ast.Constant) or not isinstance(module.value, str):
 			return {None, "frappe"}
 		name = module.value
+		if loader == "importlib.import_module" and name.startswith("."):
+			package = argument(1, "package")
+			if (isinstance(package, ast.Constant) and isinstance(package.value, str)
+				and package.value != "frappe" and not package.value.startswith("frappe.")):
+				return {None}
+			return {None, "frappe"}
 		if name != "frappe" and not name.startswith("frappe."):
 			return {None}
 		uncertain = {None, "frappe", name}
-		if any(isinstance(arg, ast.Starred) for arg in node.args) or any(kw.arg is None for kw in node.keywords):
-			return uncertain
 		if loader == "importlib.import_module":
 			return {name}
-		level = argument(4, "level")
-		if level is not None and not (isinstance(level, ast.Constant) and level.value == 0):
-			return uncertain
 		fromlist = argument(3, "fromlist")
 		if fromlist is None or isinstance(fromlist, ast.Constant) and not fromlist.value:
 			return {"frappe"}

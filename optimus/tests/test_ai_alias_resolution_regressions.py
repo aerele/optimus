@@ -18,6 +18,8 @@ IMPORTS = [
 	'frappe = importlib.import_module("frappe")',
 	'import importlib\nfrappe = importlib.import_module("frappe")',
 	'import importlib as modules\nfrappe = modules.import_module("frappe")',
+	'frappe = importlib.__import__("frappe")',
+	'from importlib import __import__ as load\nfrappe = load("frappe")',
 	'from importlib import import_module as load\nfrappe = load("frappe")',
 	'load = __import__\nfrappe = load("frappe")',
 	'from builtins import __import__ as load\nfrappe = load("frappe")',
@@ -168,3 +170,26 @@ def test_harmless_dynamic_imports_remain_displayable(binding):
 	assert not G.strips_code(G.stored_policy_violations(text))
 	assert not G.strips_code(G.verify_fix(text, source_lines=[]))
 	assert P.fix_state(dict(suggestion=text, prompt_version=P.PROMPT_VERSION))[0] == P.FIX_CURRENT
+
+
+@pytest.mark.parametrize("binding", [
+	'f=importlib.import_module(".", "frappe")',
+	'f=importlib.import_module(".", package=pkg)',
+	'f=__import__("", {"__package__": "frappe"}, None, (), 1)',
+	'f=__import__("", **options)',
+	'f=importlib.import_module(".", *options)',
+])
+def test_relative_or_unresolved_import_arguments_cannot_prove_unrelated(binding):
+	_assert_withheld(binding + '\nf.db.delete("User", {})', "unverified-safety")
+
+
+def test_importlib_star_import_cannot_hide_a_frappe_loader():
+	_assert_withheld('from importlib import *\nf=import_module("frappe")\nf.db.delete("User", {})', "unverified-safety")
+
+
+@pytest.mark.parametrize("binding", [
+	'f=importlib.import_module(".x", "other")',
+	'f=__import__("x", level=0)',
+])
+def test_known_unrelated_relative_or_absolute_imports_stay_displayable(binding):
+	assert not G.strips_code(G.stored_policy_violations(H.format("```python\n" + binding + '\nf.db.delete("User", {})\n```')))
