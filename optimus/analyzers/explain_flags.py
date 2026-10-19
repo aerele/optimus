@@ -316,38 +316,6 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	return AnalyzerResult(findings=findings, warnings=warnings)
 
 
-# ---------------------------------------------------------------------------
-# Numeric coercion
-# ---------------------------------------------------------------------------
-# MariaDB's `rows` and `filtered` columns come back as int/float in the
-# typical PyMySQL path, but certain driver versions and EXPLAIN FORMAT
-# variants have been observed to return Decimal, str, or even None any
-# of which would crash a Python 3 `>` comparison with a numeric literal.
-# v0.5.1 adds explicit coercion helpers so one weird row doesn't take out
-# the whole session.
-
-
-def _to_int(val) -> int:
-	"""Coerce EXPLAIN numeric fields to int. Returns 0 on any failure
-	(None, unparseable string, unexpected type)."""
-	if val is None:
-		return 0
-	if isinstance(val, bool):
-		# bool is a subclass of int treat False as 0, True as 1
-		return int(val)
-	if isinstance(val, int):
-		return val
-	if isinstance(val, float):
-		return int(val)
-	try:
-		return int(val)
-	except (TypeError, ValueError):
-		try:
-			return int(float(val))
-		except (TypeError, ValueError):
-			return 0
-
-
 def _is_framework_origin(
 	stack: list,
 	tracked_apps: tuple[str, ...] | None = None,

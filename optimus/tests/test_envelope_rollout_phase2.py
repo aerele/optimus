@@ -48,6 +48,7 @@ class TestRetentionBacklogEnvelope:
 	monitoring metric only), so the contract under test is the write shape."""
 
 	def test_janitor_writes_envelope_when_setting_backlog(self):
+		import optimus.janitor as janitor  # load canary: anchors the test to janitor.py importing
 		from optimus import redis_schema
 
 		# Synthesize the cache + frappe stub. We only exercise the

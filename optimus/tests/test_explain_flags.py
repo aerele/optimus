@@ -139,8 +139,8 @@ def test_empty_recordings(empty_context):
 
 def test_rows_as_string_does_not_crash_analyzer(empty_context):
 	"""A string ``rows`` value (some MariaDB drivers return it) must not crash
-	the analyzer: ``_to_int`` coercion + per-row try/except means it is coerced
-	if parseable, else treated as 0."""
+	the analyzer: dbdialect-layer coercion + per-row try/except means it is
+	coerced if parseable, else treated as 0."""
 	recording = {
 		"uuid": "str-rows",
 		"path": "/", "cmd": None, "method": "GET",

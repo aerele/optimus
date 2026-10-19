@@ -12,9 +12,11 @@ versions may contain breaking changes see migration notes below).
 
 ### Internal
 
-- Removed 28 unused imports from test modules and the dead `_to_float` helper
-  in `analyzers/explain_flags.py` (it was never called; the analyzer coerces
-  the EXPLAIN `filtered` column inline). No behaviour change.
+- Removed unused imports from test modules and two dead numeric-coercion
+  helpers (`_to_float`, `_to_int`) in `analyzers/explain_flags.py`. Both were
+  unreferenced; EXPLAIN numeric columns are coerced in the dbdialect layer
+  (`dbdialect.base.to_float` / `to_int`, used from `dbdialect/mariadb.py`). No
+  behaviour change.
 
 ---
 
