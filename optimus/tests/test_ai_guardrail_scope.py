@@ -276,3 +276,48 @@ def test_cached_alias_checks_also_charge_the_aggregate_work_budget():
 		assert resolver.values(tree.body[-1].value.func.value) == {"frappe.db"}
 	with pytest.raises(AnalysisLimitExceeded):
 		resolver.values(tree.body[-1].value.func.value)
+
+
+@pytest.mark.parametrize("width", [5, 10, 20, 240])
+def test_cached_alias_prefix_growth_has_a_fixed_memory_bound(width):
+	import ast
+	import time
+	import tracemalloc
+
+	from optimus.ai_aliases import Aliases, AnalysisLimitExceeded
+
+	code = ["a=" + " or ".join(f"frappe.x{i}" for i in range(128))]
+	for i in range(489):
+		previous = f"b{i}" if i else "a"
+		code.append(f"b{i + 1}={previous}." + "x" * width)
+	code.append("b489.sql(query)")
+	text = "**Fix**\n```python\n" + "\n".join(code) + "\n```"
+	assert len(text) < 131072
+	tree = ast.parse("\n".join(code))
+	assert len(list(ast.walk(tree))) < 4000
+	resolver = Aliases(tree)
+	# Warm ordinary parser/checker imports before measuring untrusted growth.
+	G.stored_policy_violations("**Fix**\n```python\nwork()\n```")
+	tracemalloc.start()
+	try:
+		started = time.perf_counter()
+		# Match check_code's breadth-first cache warm-up; direct resolution of
+		# the final name would only exercise the independent depth cap.
+		with pytest.raises(AnalysisLimitExceeded, match="size budget"):
+			for node in ast.walk(tree):
+				if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+					resolver.values(node)
+		assert resolver.identity_chars <= 1048576 + 1024
+		assert max(len(value) for values in resolver.cache.values() for value in values if value) <= 1024
+		for result in (G.stored_policy_violations(text), G.verify_fix(text, source_lines=[])):
+			assert "unverified-safety" in {v.code for v in result}
+		peak = tracemalloc.get_traced_memory()[1]
+		assert peak < 64 * 1024 * 1024
+		assert time.perf_counter() - started < 2
+	finally:
+		tracemalloc.stop()
+
+
+def test_oversized_imported_alias_identity_also_fails_closed():
+	text = "**Fix**\n```python\nfrom frappe import " + "x" * 1100 + " as alias\nalias.sql(query)\n```"
+	assert "unverified-safety" in {v.code for v in G.stored_policy_violations(text)}

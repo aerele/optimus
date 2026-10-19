@@ -698,6 +698,8 @@ Permission or paired SQL changes supplied as full replacement code require a gro
 
 Static alias analysis also limits logical resolution to 100 nested hops, 10,000
 resolution visits and 128 candidate identities per lookup, in addition to the
-4,000-node / 100-level AST limits. Deep or branching aliases that exceed these
-bounds receive `unverified-safety`; their code is withheld without crashing report
+4,000-node / 100-level AST limits. Each identity is limited to 1,024 characters,
+with at most 1,048,576 characters allocated by identity extension per resolver.
+Deep or branching aliases that exceed these bounds receive `unverified-safety`;
+their code is withheld without crashing report
 rendering. These checks execute no suggested code and make no provider requests.

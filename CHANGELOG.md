@@ -20,8 +20,9 @@ versions may contain breaking changes see migration notes below).
   remove pdfkit option metadata and prevent privileged private-image embedding.
 - Preserve visible source characters in safety checks; resolve Frappe aliases by
   lexical scope and reject ambiguous/dynamic access or removed permission denials.
-  Bound logical alias depth and withhold unchecked code instead of crashing on
-  deep chains. Normalize PDF styles and declarations across framework reparses.
+  Bound alias depth, visits, identity count and string allocations; withhold
+  unchecked code instead of crashing. Normalize PDF styles and declarations
+  across framework reparses.
 - Use only eligible full b-tree keys for index coverage, preserving expression
   positions and excluding partial, ignored, prefix, invalid and non-btree proofs.
 - Bound optional SQL parsing and formatting. Prevent Phase 1/2 capture overlap

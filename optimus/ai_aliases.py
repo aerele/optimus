@@ -37,6 +37,7 @@ class Aliases(ast.NodeVisitor):
 		self.at = {}
 		self.cache = {}
 		self.resolution_work = 0
+		self.identity_chars = 0
 		self.unsupported = []
 		self.visit(tree)
 		# Redirect global/nonlocal writes only after all scopes' locals exist.
@@ -256,20 +257,30 @@ class Aliases(ast.NodeVisitor):
 			return frozenset({node.id if node.id == "frappe" else None})
 		if isinstance(node, ast.Attribute):
 			return frozenset(
-				value + "." + node.attr if value else None for value in self.values(node.value, seen, depth + 1)
+				self._extend(value, "." + node.attr) if value else None
+				for value in self.values(node.value, seen, depth + 1)
 			)
 		if isinstance(node, ast.Call):
 			return frozenset(
-				value + "()" if value and value.startswith("frappe.qb.") else None
+				self._extend(value, "()") if value and value.startswith("frappe.qb.") else None
 				for value in self.values(node.func, seen, depth + 1)
 			)
 		return frozenset({None})
+
+	def _extend(self, value, suffix):
+		length = len(value) + len(suffix)
+		self.identity_chars += length
+		# Bound allocations before concatenating; cached prefixes can otherwise
+		# grow quadratically even when depth and identity counts stay small.
+		if length > 1024 or self.identity_chars > 1048576:
+			raise AnalysisLimitExceeded("Static alias identity size budget exceeded")
+		return value + suffix
 
 	@staticmethod
 	def _bounded(values):
 		# Repeated alternative bindings can double the identity set at every
 		# level even in a tiny AST. Never cache or combine an unbounded set.
-		if len(values) > 128:
+		if len(values) > 128 or any(value is not None and len(value) > 1024 for value in values):
 			raise AnalysisLimitExceeded("Static alias identity budget exceeded")
 		return frozenset(values)
 
