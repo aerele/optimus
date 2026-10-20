@@ -16,7 +16,7 @@ import json
 import os
 import re
 import time
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import asdict
 
 import frappe
@@ -1244,10 +1244,15 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 	for recording in recordings:
 		calls = recording.get("calls") or []
 		total_queries_seen += len(calls)
+		past_cap = []
 		if cap and len(calls) > cap:
 			truncated_queries += len(calls) - cap
+			past_cap = calls[cap:]
+			calls = calls[:cap]
+		# Raw SQL before formatting, so past-cap calls compare like with like.
+		enriched_raw = [c.get("query") or "" for c in calls] if past_cap else []
 
-		for i, call in enumerate(calls):
+		for call in calls:
 			query = call.get("query", "")
 			if not query:
 				continue
@@ -1262,10 +1267,6 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 				)
 			except Exception:
 				pass
-
-			# Past the cap: keep the call for counts (formatted so it groups with the rest), skip EXPLAIN.
-			if cap and i >= cap:
-				continue
 
 			# Skip EXPLAIN if already populated
 			if call.get("explain_result"):
@@ -1332,7 +1333,10 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 
 		# mark_duplicates adds normalized_query, exact_copies, normalized_copies, index
 		try:
-			mark_duplicates(recording)
+			if past_cap:
+				_mark_duplicates_past_cap(recording, calls, enriched_raw, past_cap)
+			else:
+				mark_duplicates(recording)
 		except Exception:
 			pass
 
@@ -1352,7 +1356,7 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 			f"⚠ TRUNCATED: {truncated_queries} queries "
 			f"({pct}% of the flow) exceeded the {cap}-queries-per-"
 			"recording enrichment cap and were analyzed without "
-			"EXPLAIN. They still count in query totals, N+1 and "
+			"EXPLAIN or index lookups. They still count in query totals, N+1 and "
 			"Top Queries, but not in index-suggestion / full-scan / "
 			"filter-ratio findings. "
 			"To get full coverage, raise "
@@ -1361,6 +1365,51 @@ def _enrich_recordings(recordings: list[dict]) -> list[str]:
 			" OR profile a shorter flow."
 		)
 	return warnings
+
+
+_LITERAL_RE = re.compile(r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.)*\"|\b\d+(?:\.\d+)?\b")
+_IN_LIST_RE = re.compile(r"\bin\s*\(\s*\?(?:\s*,\s*\?)*\s*\)")
+
+
+def _literal_shape(query: str) -> str:
+	"""Cheap literal-free key (regex only) so past-cap calls group without a sqlparse pass each."""
+	key = re.sub(r"\s+", " ", _LITERAL_RE.sub("?", query)).strip().lower()
+	return _IN_LIST_RE.sub("in (?)", key)
+
+
+def _mark_duplicates_past_cap(recording: dict, enriched: list, enriched_raw: list, past_cap: list) -> None:
+	"""mark_duplicates for a capped recording: full normalize for the enriched
+	calls, then past-cap calls reuse the normalized form of their literal shape."""
+	from frappe.recorder import normalize_query
+
+	past_raw = [c.get("query") or "" for c in past_cap]
+	mark_duplicates({"calls": enriched})
+
+	normalized_by_shape: dict[str, str] = {}
+	for call, q in zip(enriched, enriched_raw, strict=True):
+		if call.get("normalized_query"):
+			normalized_by_shape.setdefault(_literal_shape(q), call["normalized_query"])
+	for call, q in zip(past_cap, past_raw, strict=True):
+		call["past_enrich_cap"] = True
+		shape = _literal_shape(q)
+		if shape not in normalized_by_shape:
+			# A shape the enriched calls never saw: pay one format + normalize for it.
+			try:
+				formatted = sqlparse.format(q.strip(), keyword_case="upper", reindent=True, strip_comments=True)
+				normalized_by_shape[shape] = normalize_query(formatted)
+			except Exception:
+				normalized_by_shape[shape] = shape
+		call["normalized_query"] = normalized_by_shape[shape]
+
+	calls = enriched + past_cap
+	raw = enriched_raw + past_raw
+	recording["calls"] = calls
+	exact = Counter(raw)
+	normalized = Counter(c.get("normalized_query") for c in calls)
+	for index, call in enumerate(calls):
+		call["index"] = index
+		call["exact_copies"] = exact[raw[index]]
+		call["normalized_copies"] = normalized[call.get("normalized_query")]
 
 
 def _shape_key(query: str) -> str:

@@ -13,7 +13,7 @@ versions may contain breaking changes see migration notes below).
 ### Fixed
 
 - The daily orphan Redis sweep and the uninstall cleanup now delete keys. Both called `frappe.cache.get_redis_connection()`, which Frappe's cache wrapper doesn't have, so they silently returned without deleting anything.
-- Queries past Max Queries per Recording are no longer removed from the recording. Only the first N get a query plan (EXPLAIN); the rest still count in query totals, N+1 and Top Queries. Before, they were dropped while the report said they were still visible.
+- Queries past Max Queries per Recording are no longer removed from the recording. Only the first N are fully enriched (formatting, EXPLAIN, index lookups); the rest are grouped by a cheap literal-free shape and still count in query totals, N+1 and Top Queries. Before, they were dropped while the report said they were still visible.
 
 ---
 
