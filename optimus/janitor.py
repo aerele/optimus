@@ -88,10 +88,8 @@ def _sweep_orphan_redis_state():
 	"""
 	from optimus import redis_keys
 
-	try:
-		redis_conn = frappe.cache.get_redis_connection()
-	except Exception:
-		return
+	# RedisWrapper subclasses redis.Redis, so it is the raw connection.
+	redis_conn = frappe.cache
 
 	# Get the site-qualified prefix so we only scan our own keys, not
 	# other sites sharing the same Redis instance.

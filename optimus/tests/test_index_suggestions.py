@@ -82,6 +82,27 @@ def test_single_suggestion_per_table_column(monkeypatch, empty_context):
 	assert "ALTER TABLE" in detail["suggested_ddl"]
 
 
+def test_past_enrich_cap_calls_skip_the_optimizer(monkeypatch, empty_context):
+	"""Calls past the enrichment cap must not trigger DESCRIBE / SHOW INDEX lookups."""
+	seen = []
+
+	def fake_optimize(query: str):
+		seen.append(query)
+		return None
+
+	_install_fake_recorder_module(monkeypatch, fake_optimize)
+	call = {"duration": 30.0, "stack": []}
+	recording = {
+		"uuid": "ixcap",
+		"calls": [
+			dict(call, query="SELECT * FROM tabLead WHERE status = 'Open'", normalized_query="SELECT * FROM tabLead WHERE status = ?"),
+			dict(call, query="SELECT * FROM tabTask WHERE owner = 'a'", normalized_query="SELECT * FROM tabTask WHERE owner = ?", past_enrich_cap=True),
+		],
+	}
+	index_suggestions.analyze([recording], empty_context)
+	assert seen == ["SELECT * FROM tabLead WHERE status = 'Open'"]
+
+
 def test_optimizer_skipped_when_dialect_unsupported(monkeypatch, empty_context):
 	"""On a dialect whose ``supports_query_optimizer`` is False (Postgres),
 	the analyzer must never call ``_optimize_query``: it returns a single

@@ -328,6 +328,9 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			normalized = call.get("normalized_query")
 			if not normalized:
 				continue
+			# The enrichment cap bounds the DESCRIBE / SHOW INDEX lookups too.
+			if call.get("past_enrich_cap"):
+				continue
 
 			raw = call.get("query") or normalized
 			qtype = _get_query_type(raw) or _get_query_type(normalized)
