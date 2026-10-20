@@ -10,6 +10,8 @@ result-invariant.
 
 import inspect
 import os
+import re
+import sys
 import types
 
 import frappe
@@ -176,25 +178,56 @@ class TestMaxQueriesPerRecordingZeroIsUnlimited:
 			f"cap = 0 must not truncate, got {truncation_warnings!r}"
 		)
 
-	def test_positive_cap_limits_explain_and_keeps_every_call(self, enrich_env, monkeypatch):
-		"""A positive cap still bounds EXPLAIN, but calls past it stay (formatted) so counts are right."""
+	def _cap(self, monkeypatch, cap):
 		import optimus.settings as settings_mod
 		monkeypatch.setattr(
 			settings_mod, "get_config",
-			lambda: types.SimpleNamespace(max_queries_per_recording=100),
+			lambda: types.SimpleNamespace(max_queries_per_recording=cap),
 			raising=False,
 		)
+		normalized = []
 
-		big = _recording([
-			f"SELECT * FROM tab{i} WHERE x = {i}" for i in range(250)
-		])
+		def fake_normalize(q):
+			normalized.append(q)
+			return re.sub(r"\d+", "?", q)
+
+		def fake_mark(rec):
+			for c in rec["calls"]:
+				c["normalized_query"] = fake_normalize(c["query"])
+
+		monkeypatch.setattr(sys.modules["frappe.recorder"], "normalize_query", fake_normalize, raising=False)
+		monkeypatch.setattr(analyze, "mark_duplicates", fake_mark, raising=False)
+		return normalized
+
+	def test_positive_cap_limits_explain_and_keeps_every_call(self, enrich_env, monkeypatch):
+		"""A positive cap still bounds EXPLAIN and normalize; past-cap calls stay and are grouped by shape."""
+		normalized = self._cap(monkeypatch, 100)
+		big = _recording([f"SELECT * FROM tabFoo WHERE x = {i}" for i in range(250)])
 		warnings = analyze._enrich_recordings([big])
 
 		assert len(big["calls"]) == 250
 		assert len(enrich_env.explain_queries) == 100
-		assert all("explain_result" not in c for c in big["calls"][100:])
-		# Formatted like the enriched calls so both normalize to the same shape.
-		assert all(c["query"].startswith("SELECT *\nFROM") for c in big["calls"])
+		# Past-cap calls reuse the enriched shape: no format or normalize each.
+		assert len(normalized) == 100
+		past = big["calls"][100:]
+		assert all(c["past_enrich_cap"] and "explain_result" not in c for c in past)
+		assert past[0]["query"] == "SELECT * FROM tabFoo WHERE x = 100"
+		assert len({c["normalized_query"] for c in big["calls"]}) == 1
+		assert big["calls"][0]["normalized_copies"] == 250
+		assert [c["index"] for c in big["calls"]] == list(range(250))
 		truncation_warnings = [w for w in warnings if "TRUNCATED" in w]
 		assert truncation_warnings, "positive cap must emit a truncation warning"
 		assert "still count in query totals" in truncation_warnings[0]
+
+	def test_new_shape_past_cap_is_normalized_once(self, enrich_env, monkeypatch):
+		normalized = self._cap(monkeypatch, 2)
+		queries = ["SELECT * FROM tabFoo WHERE x = 1", "SELECT * FROM tabFoo WHERE x = 2"]
+		queries += [f"SELECT name FROM tabBar WHERE y IN ('a', '{i}')" for i in range(5)]
+		rec = _recording(queries)
+		analyze._enrich_recordings([rec])
+
+		assert len(normalized) == 3  # two enriched + one for the new tabBar shape
+		bar = rec["calls"][2:]
+		assert len({c["normalized_query"] for c in bar}) == 1
+		assert bar[0]["normalized_copies"] == 5
+		assert bar[0]["exact_copies"] == 1
