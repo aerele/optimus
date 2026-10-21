@@ -24,6 +24,7 @@ typo can't disable redaction of a known-sensitive key.
 
 from __future__ import annotations
 
+import json
 import re
 from functools import lru_cache
 
@@ -79,12 +80,32 @@ def redact_sensitive(payload, *, extra_keys: tuple[str, ...] = ()):
 				out[k] = f"<REDACTED:{k}>"
 			else:
 				out[k] = redact_sensitive(v, extra_keys=extra_keys)
+		# set_value style args: the secret sits under "value", named by "fieldname".
+		field = out.get("fieldname")
+		if "value" in out and is_sensitive_key(field, extra=extra_keys):
+			out["value"] = f"<REDACTED:{field}>"
 		return out
 	if isinstance(payload, list):
 		return [redact_sensitive(item, extra_keys=extra_keys) for item in payload]
 	if isinstance(payload, tuple):
 		return tuple(redact_sensitive(item, extra_keys=extra_keys) for item in payload)
+	if isinstance(payload, str):
+		return _redact_json_string(payload, extra_keys)
 	return payload
+
+
+def _redact_json_string(text: str, extra_keys: tuple[str, ...]) -> str:
+	"""Redact inside a JSON-encoded object or list (savedocs ``doc``, ``args``)."""
+	if not text.lstrip().startswith(("{", "[")):
+		return text
+	try:
+		parsed = json.loads(text)
+	except ValueError:
+		return text
+	if not isinstance(parsed, dict | list):
+		return text
+	redacted = redact_sensitive(parsed, extra_keys=extra_keys)
+	return text if redacted == parsed else json.dumps(redacted)
 
 
 @lru_cache(maxsize=16)
