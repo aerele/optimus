@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.68] - 2026-10-21
+
+### Fixed
+
+- Index suggestions now cap each optimizer statement at 5 seconds on MariaDB. Frappe's optimizer checks column cardinality with a full-table `COUNT(DISTINCT)`, which ran with no limit on the live database. A query whose check times out is skipped, and the report says so.
+
+---
+
 ## [0.12.67] - 2026-10-21
 
 ### Fixed
