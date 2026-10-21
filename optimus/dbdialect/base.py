@@ -14,6 +14,7 @@ in ``mariadb.py`` / ``postgres.py``.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
@@ -153,6 +154,14 @@ class Dialect(ABC):
 	@abstractmethod
 	def infra_snapshot(self) -> InfraSnapshot:
 		"""Live DB connection / load counters; any field may be ``None``."""
+
+	def statement_time_limit(self, seconds: float):
+		"""Cap each statement's run time on this connection while the block runs (no-op by default)."""
+		return nullcontext()
+
+	def is_statement_timeout(self, error: Exception) -> bool:
+		"""True when ``error`` came from a statement_time_limit cap."""
+		return False
 
 	# Shared, non-abstract type classification (overridable per dialect).
 	def prefix_required(self, data_type: str) -> bool:
