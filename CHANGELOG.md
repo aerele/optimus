@@ -8,6 +8,15 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.67] - 2026-10-21
+
+### Fixed
+
+- Secrets inside JSON string payloads are now redacted at capture, such as the `doc` that `savedocs` sends with a User's `new_password`. So is `set_value`'s `value` when `fieldname` names a sensitive field. Before, only dict keys were checked, so both reached Redis and the report.
+- The stale-recording sweep no longer clears a user's active session pointer after it has moved to a newer session. Before, it stopped the user's new recording.
+
+---
+
 ## [0.12.66] - 2026-10-19
 
 ### Fixed
