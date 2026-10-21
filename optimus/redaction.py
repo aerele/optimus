@@ -100,11 +100,11 @@ def _redact_json_string(text: str, extra_keys: tuple[str, ...]) -> str:
 		return text
 	try:
 		parsed = json.loads(text)
-	except ValueError:
+		if not isinstance(parsed, dict | list):
+			return text
+		redacted = redact_sensitive(parsed, extra_keys=extra_keys)
+	except (ValueError, RecursionError):
 		return text
-	if not isinstance(parsed, dict | list):
-		return text
-	redacted = redact_sensitive(parsed, extra_keys=extra_keys)
 	return text if redacted == parsed else json.dumps(redacted)
 
 
