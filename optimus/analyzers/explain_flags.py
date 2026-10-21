@@ -230,8 +230,12 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 		filtered_pct = None
 		if f["finding_type"] == "Low Filter Ratio":
-			explain_row = td.get("explain_row") or {}
-			filtered_pct = to_float(explain_row.get("filtered")) or None
+			# selectivity_pct is dialect-blind; findings stored before it was
+			# recorded only carry MariaDB's raw ``filtered`` in explain_row.
+			filtered_pct = to_float(td.get("selectivity_pct"))
+			if filtered_pct is None:
+				filtered_pct = to_float((td.get("explain_row") or {}).get("filtered"))
+			filtered_pct = filtered_pct or None
 
 		projected = project_post_fix_ms(
 			f["finding_type"], avg_ms, filtered_pct=filtered_pct,
@@ -523,6 +527,7 @@ def _inspect_table(pt, normalized_query, action_idx, query_duration, buckets):
 				"selectivity. Check the key_len in EXPLAIN to confirm the "
 				"full index is being used."
 			),
+			selectivity_pct=filtered,
 		)
 
 
@@ -539,6 +544,7 @@ def _upsert(
 	title,
 	customer_description,
 	fix_hint,
+	selectivity_pct=None,
 ):
 	"""Insert or merge a finding into the buckets dict.
 
@@ -566,6 +572,7 @@ def _upsert(
 				"explain_row": row,
 				"normalized_query": normalized_query,
 				"fix_hint": fix_hint,
+				**({"selectivity_pct": selectivity_pct} if selectivity_pct is not None else {}),
 			},
 			default=str,
 		),

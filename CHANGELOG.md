@@ -19,7 +19,16 @@ versions may contain breaking changes see migration notes below).
 - Removed unused imports from test modules and the dead numeric-coercion
   helpers (`_to_float`, `_to_int`) in `analyzers/explain_flags.py`. EXPLAIN
   numeric columns are coerced in the dbdialect layer (`dbdialect.base.to_float` /
-  `to_int`, used from `dbdialect/mariadb.py`). No behaviour change.
+  `to_int`, used from `dbdialect/mariadb.py`).
+
+### Fixed
+
+- The "after fix" projection for Low Filter Ratio findings now uses the
+  dialect-blind `selectivity_pct` instead of MariaDB's raw `filtered` key, so it
+  also works for Postgres plans.
+- Normalized EXPLAIN rows are coerced with `to_int` / `to_float`, so a string or
+  `Decimal` value no longer drops that row's findings. `to_int` / `to_float` also
+  treat `nan` / `inf` as missing instead of passing them to threshold checks.
 
 ---
 

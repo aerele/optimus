@@ -7,6 +7,8 @@ Exercises all four red-flag patterns: Full Table Scan, Filesort, Temporary
 Table and Low Filter Ratio.
 """
 
+import json
+
 from optimus.analyzers import explain_flags
 
 
@@ -595,3 +597,54 @@ def test_filtered_as_string_does_not_crash(empty_context):
 	result = explain_flags.analyze([recording], empty_context)
 	low_filter = [f for f in result.findings if f["finding_type"] == "Low Filter Ratio"]
 	assert len(low_filter) == 1
+
+
+def _normalized_recording(uuid, **plan):
+	return {
+		"uuid": uuid,
+		"path": "/", "cmd": None, "method": "GET",
+		"event_type": "HTTP Request", "duration": 300,
+		"calls": [
+			{
+				"query": "SELECT * FROM tabLead WHERE status = ?",
+				"normalized_query": "SELECT * FROM tabLead WHERE status = ?",
+				"duration": 250.0,
+				"stack": [],
+				"explain_result": [
+					{"table": "tabLead", "full_scan": False, "raw": {}, **plan},
+				],
+			},
+		],
+	}
+
+
+def _low_filter(result):
+	return [f for f in result.findings if f["finding_type"] == "Low Filter Ratio"]
+
+
+def test_normalized_item_with_string_and_decimal_values_does_not_drop_row(empty_context):
+	"""Normalized (non-MariaDB) rows are coerced like raw rows: a str/Decimal
+	value must not raise TypeError and drop the row's findings."""
+	from decimal import Decimal
+
+	recording = _normalized_recording(
+		"norm-coerce", rows_examined=Decimal("5000"), selectivity_pct="2.5",
+	)
+	assert len(_low_filter(explain_flags.analyze([recording], empty_context))) == 1
+
+
+def test_normalized_non_finite_selectivity_is_skipped(empty_context):
+	recording = _normalized_recording(
+		"norm-nan", rows_examined=5000, selectivity_pct=float("nan"),
+	)
+	assert not _low_filter(explain_flags.analyze([recording], empty_context))
+
+
+def test_selectivity_is_recorded_for_the_post_fix_projection(empty_context):
+	"""A normalized row's raw blob has no MariaDB ``filtered`` key, so the
+	finding must carry selectivity_pct for the projection to read."""
+	recording = _normalized_recording(
+		"norm-proj", rows_examined=5000, selectivity_pct=2.0,
+	)
+	finding = _low_filter(explain_flags.analyze([recording], empty_context))[0]
+	assert json.loads(finding["technical_detail_json"])["selectivity_pct"] == 2.0
