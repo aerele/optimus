@@ -71,6 +71,9 @@ MIN_AVG_SAVINGS_PER_QUERY_MS = 2.0
 # with thousands of unparseable queries.
 MAX_LOGGED_FAILURES = 3
 
+# Per-statement cap (seconds) on the optimizer's table scans, which run on the live DB.
+OPTIMIZER_STATEMENT_TIMEOUT_SECONDS = 5
+
 # v0.5.1: Classify exceptions from DBOptimizer / sql_metadata.
 #
 # sql_metadata is a third-party SQL parser with well-known limitations: it
@@ -361,17 +364,24 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# suggest an index on them. Skip before we even bucket the suggestion.
 	dropped_meta_table_tables: set[str] = set()
 	logged_real = 0
+	timed_out = 0
+	dialect = get_dialect()
 	for normalized, info in unique_queries.items():
 		try:
 			# DBOptimizer parses with sql_metadata which doesn't care about
 			# literal values, so passing the normalized query is fine.
-			index = _optimize_query(info["raw"])
+			# Its COUNT(DISTINCT) cardinality check scans the whole table, so cap it.
+			with dialect.statement_time_limit(OPTIMIZER_STATEMENT_TIMEOUT_SECONDS):
+				index = _optimize_query(info["raw"])
 		except _PARSER_LIMITATION_EXCEPTIONS as e:
 			# Expected path for complex queries sql_metadata can't parse.
 			# Count but don't log the user can't act on these.
 			parser_limit_failures[type(e).__name__] += 1
 			continue
 		except Exception as e:
+			if dialect.is_statement_timeout(e):
+				timed_out += 1
+				continue
 			# Unexpected path this might indicate a real profiler bug.
 			# Count, log the first few to Error Log (so they're discoverable
 			# for investigation) and continue.
@@ -520,6 +530,12 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			f"SELECT statements for index suggestions ({failure_summary}). "
 			"The report may be missing some optimization opportunities "
 			"see Error Log for the first few failed queries."
+		)
+	if timed_out:
+		warnings.append(
+			f"Skipped index suggestions for {timed_out} SELECT statement(s) because the "
+			f"optimizer's table scan ran past {OPTIMIZER_STATEMENT_TIMEOUT_SECONDS}s. "
+			"Their tables are likely large; check them with EXPLAIN by hand."
 		)
 
 	# v0.5.1: Parser limitations (sql_metadata can't parse this shape) get

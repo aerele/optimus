@@ -8,6 +8,7 @@ function; the tests monkeypatch that import with a stub returning a canned
 DBIndex or None.
 """
 
+import contextlib
 import json
 import sys
 import types
@@ -15,6 +16,7 @@ import types
 import pytest
 
 from optimus.analyzers import index_suggestions
+from optimus.dbdialect.mariadb import MariaDBDialect
 
 
 class _FakeDBIndex:
@@ -101,6 +103,47 @@ def test_past_enrich_cap_calls_skip_the_optimizer(monkeypatch, empty_context):
 	}
 	index_suggestions.analyze([recording], empty_context)
 	assert seen == ["SELECT * FROM tabLead WHERE status = 'Open'"]
+
+
+def test_optimizer_runs_under_a_statement_time_limit(monkeypatch, empty_context):
+	"""Each optimizer call is capped; a timed-out scan is skipped with a warning, not logged as a failure."""
+
+	class _StatementTimeout(Exception):
+		pass
+
+	def fake_optimize(query: str):
+		if "tabBig" in query:
+			raise _StatementTimeout(1969, "max_statement_time exceeded")
+		return _FakeDBIndex("tabLead", "status")
+
+	limits = []
+
+	class _CappedDialect(MariaDBDialect):
+		def statement_time_limit(self, seconds):
+			limits.append(seconds)
+			return contextlib.nullcontext()
+
+		def is_statement_timeout(self, error):
+			return isinstance(error, _StatementTimeout)
+
+	_install_fake_recorder_module(monkeypatch, fake_optimize)
+	monkeypatch.setattr(index_suggestions, "get_dialect", lambda: _CappedDialect())
+	logged = []
+	monkeypatch.setattr(sys.modules["frappe"], "log_error", lambda **kw: logged.append(kw), raising=False)
+	call = {"duration": 30.0, "stack": []}
+	recording = {
+		"uuid": "ixcap",
+		"calls": [
+			dict(call, query="SELECT * FROM tabLead WHERE status = 'Open'", normalized_query="SELECT * FROM tabLead WHERE status = ?"),
+			dict(call, query="SELECT * FROM tabBig WHERE owner = 'a'", normalized_query="SELECT * FROM tabBig WHERE owner = ?"),
+		],
+	}
+	result = index_suggestions.analyze([recording], empty_context)
+
+	assert limits == [index_suggestions.OPTIMIZER_STATEMENT_TIMEOUT_SECONDS] * 2
+	assert logged == []
+	assert any("Skipped index suggestions for 1 SELECT" in w for w in result.warnings)
+	assert not any("Could not analyze" in w for w in result.warnings)
 
 
 def test_optimizer_skipped_when_dialect_unsupported(monkeypatch, empty_context):
