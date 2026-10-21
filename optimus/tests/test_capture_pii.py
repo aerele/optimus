@@ -3,7 +3,6 @@
 
 """Tests for PII identifier hashing in capture.py."""
 
-import pytest
 
 from optimus import capture
 

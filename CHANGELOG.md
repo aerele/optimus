@@ -8,6 +8,30 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- Slowest-queries table no longer clips SQL at 500 characters; the full normalized statement is shown (scrollable in the cell).
+
+### Internal
+
+- Removed unused imports from test modules and the dead numeric-coercion
+  helpers (`_to_float`, `_to_int`) in `analyzers/explain_flags.py`. EXPLAIN
+  numeric columns are coerced in the dbdialect layer (`dbdialect.base.to_float` /
+  `to_int`, used from `dbdialect/mariadb.py`).
+
+### Fixed
+
+- The "after fix" projection for Low Filter Ratio findings now uses the
+  dialect-blind `selectivity_pct` instead of MariaDB's raw `filtered` key, so it
+  also works for Postgres plans.
+- Normalized EXPLAIN rows are coerced with `to_int` / `to_float`, so a string or
+  `Decimal` value no longer drops that row's findings. `to_int` / `to_float` also
+  treat `nan` / `inf` as missing instead of passing them to threshold checks.
+
+---
+
 ## [0.12.68] - 2026-10-21
 
 ### Fixed

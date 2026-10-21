@@ -317,7 +317,6 @@ class TestIgnoredAppsFilter:
 		# The "Issues found" stat card sums to the kept count, not the total.
 		# Build 3 high-severity findings (one per app); ignore frappe+erpnext;
 		# the card should show "1" (myapp survives) not "3".
-		import re
 
 		from optimus import renderer
 
