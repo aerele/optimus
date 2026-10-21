@@ -9,6 +9,8 @@ they exercise the regex + substring patterns directly so the same code
 is provably equivalent in both call paths.
 """
 
+import json
+
 from optimus import redaction
 
 # ---------------------------------------------------------------------------
@@ -86,6 +88,23 @@ class TestRedactSensitive:
 		out = redaction.redact_sensitive(original)
 		assert original == {"password": "x", "name": "Alice"}, "input must be unchanged"
 		assert out is not original
+
+	def test_json_string_payload_is_redacted(self):
+		"""savedocs sends the doc as a JSON string under a non-sensitive key."""
+		doc = json.dumps({"doctype": "User", "name": "a@x.com", "new_password": "Hunter2!"})
+		out = redaction.redact_sensitive({"action": "Save", "doc": doc})
+		assert json.loads(out["doc"]) == {"doctype": "User", "name": "a@x.com", "new_password": "<REDACTED:new_password>"}
+
+	def test_clean_or_invalid_json_string_is_unchanged(self):
+		clean = '{"doctype": "Item",  "name": "X"}'
+		assert redaction.redact_sensitive({"doc": clean})["doc"] == clean
+		assert redaction.redact_sensitive({"doc": "{not json"})["doc"] == "{not json"
+
+	def test_set_value_value_named_by_sensitive_fieldname(self):
+		out = redaction.redact_sensitive({"doctype": "User", "fieldname": "new_password", "value": "Hunter2!"})
+		assert out["value"] == "<REDACTED:new_password>"
+		out = redaction.redact_sensitive({"doctype": "User", "fieldname": "full_name", "value": "Alice"})
+		assert out["value"] == "Alice"
 
 
 # ---------------------------------------------------------------------------
