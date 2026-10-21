@@ -10,6 +10,10 @@ versions may contain breaking changes see migration notes below).
 
 ## [Unreleased]
 
+### Fixed
+
+- Slowest-queries table no longer clips SQL at 500 characters; the full normalized statement is shown (scrollable in the cell).
+
 ### Internal
 
 - Removed unused imports from test modules and the dead numeric-coercion
