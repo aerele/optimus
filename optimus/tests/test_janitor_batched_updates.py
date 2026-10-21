@@ -163,6 +163,21 @@ class TestSweepStaleRecording:
 		assert filters == {"name": ("in", ["PS-GONE"])}     # only the walked-away one
 		assert len(stub._enqueue_calls) == 1                # analyze enqueued once
 
+	def test_pointer_moved_to_new_session_is_kept(self, monkeypatch):
+		"""Stopping a stale session must not clear a pointer that now names the user's new session."""
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [
+			{"name": "PS-OLD", "session_uuid": "u-old", "user": "a@x.com"},
+		]
+		stub._active_pointers = {"a@x.com": "u-new"}
+		cleared = []
+		sys.modules["optimus.session"].clear_active_session = cleared.append
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_recording()
+
+		assert len(stub._enqueue_calls) == 1  # the old session is still stopped
+		assert cleared == []
+
 
 # --------------------------------------------------------------------------
 # Stuck Analyzing sweep single batched UPDATE.

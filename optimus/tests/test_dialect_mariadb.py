@@ -100,3 +100,26 @@ class TestInfraSnapshot:
 		snap = MariaDBDialect().infra_snapshot()
 		assert snap.threads_connected == 12 and snap.threads_running == 3
 		assert snap.slow_queries == 7 and snap.max_connections == 151
+
+
+class TestStatementTimeLimit:
+	def test_sets_cap_and_restores_previous_even_on_error(self, monkeypatch):
+		seen = []
+
+		def sql(q, *a, **k):
+			seen.append(q)
+			return [[2.5]] if q.startswith("SELECT @@") else []
+
+		_install_db(monkeypatch, sql)
+		try:
+			with MariaDBDialect().statement_time_limit(5):
+				raise RuntimeError("optimizer failed")
+		except RuntimeError:
+			pass
+		assert seen[1:] == ["SET SESSION max_statement_time = 5.0", "SET SESSION max_statement_time = 2.5"]
+
+	def test_is_statement_timeout_matches_1969_only(self):
+		d = MariaDBDialect()
+		assert d.is_statement_timeout(Exception(1969, "max_statement_time exceeded")) is True
+		assert d.is_statement_timeout(Exception(1205, "lock wait timeout")) is False
+		assert d.is_statement_timeout(Exception()) is False
