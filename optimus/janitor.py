@@ -364,10 +364,10 @@ def _sweep_stale_recording():
 	safe_commit()
 
 	for row in stale:
-		# The user's Redis active pointer should already be expired (TTL),
-		# but call clear to be defensive.
+		# Clear the pointer only while it still names this session; the user may have started a new one.
 		try:
-			session.clear_active_session(row["user"])
+			if session.get_active_session_for(row["user"]) == row["session_uuid"]:
+				session.clear_active_session(row["user"])
 		except Exception:
 			pass
 
