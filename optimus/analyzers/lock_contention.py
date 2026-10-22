@@ -16,11 +16,11 @@ import json
 from collections import Counter
 
 from optimus.analyzers.base import (
-	FRAMEWORK_PREFIXES,
 	AnalyzerResult,
 	humanize_duration_ms,
+	installed_apps_allowlist,
 	short_filename,
-	walk_callsite,
+	user_callsite,
 )
 
 # A single contended callsite can fail on several distinct statements; show them
@@ -28,30 +28,21 @@ from optimus.analyzers.base import (
 _MAX_EXAMPLE_QUERIES = 10
 
 
-def _user_callsite(stack) -> dict | None:
-	"""The deepest USER-code frame that issued the query, or None.
-
-	``walk_callsite`` skips framework frames but falls back to the deepest
-	frappe/* frame when the whole stack is framework. We treat that fallback
-	(and an unresolved / profiler-own stack) as "no user callsite" and drop the
-	event: a deadlock with no user frame is either benign framework contention
-	Frappe handles itself (a session touch, change-log write or dashboard
-	refresh, wrapped in ``savepoint`` / ``suppress``) or something the app
-	developer cannot act on. Only user-code contention becomes a finding."""
-	frame = walk_callsite(stack)
-	if not frame:
-		return None
-	filename = (frame.get("filename") or "").replace("\\", "/")
-	if any(prefix in filename for prefix in FRAMEWORK_PREFIXES):
-		return None
-	return frame
-
-
 _KNOWN_KINDS = frozenset({"deadlock", "lock_wait_timeout"})
 
 
 def analyze(recordings, context):
-	"""Bucket user-code lock events by callsite across recordings, one finding each."""
+	"""Bucket user-code lock events by callsite across recordings, one finding each.
+
+	Only contention at a callsite in the developer's own app code becomes a finding.
+	Contention with no such frame is either benign framework contention that Frappe
+	handles itself or something the developer cannot act on, so it is dropped. The
+	classification (``user_callsite``) is the one the redundant-call and N+1
+	analyzers use, so ERPNext / HRMS code counts as framework here too."""
+	from optimus.settings import get_config
+
+	tracked_apps = get_config().tracked_apps
+	installed_apps = installed_apps_allowlist()
 	buckets: dict = {}
 	truncated = False
 	for action_idx, rec in enumerate(recordings):
@@ -63,7 +54,9 @@ def analyze(recordings, context):
 				continue
 			if ev.get("kind") not in _KNOWN_KINDS:
 				continue  # unknown kind: don't guess a label
-			frame = _user_callsite(ev.get("caller_stack"))
+			frame = user_callsite(
+				ev.get("caller_stack"), tracked_apps=tracked_apps, installed_apps=installed_apps
+			)
 			if frame is None:
 				continue  # framework-only / benign contention not a finding
 			key = (frame.get("filename"), frame.get("lineno"))
@@ -98,7 +91,7 @@ def _build_finding(bucket: dict) -> dict:
 	count = len(events)
 
 	# "Deadlock" wins the label when the callsite hit both kinds, since it's the
-	# stricter failure (the DB chose a victim and rolled its transaction back).
+	# stricter failure (the DB aborted a statement to break the cycle).
 	has_deadlock = "deadlock" in kinds
 	kind_label = "Deadlock" if has_deadlock else "Lock-wait timeout"
 	where = f"{short_filename(filename)}:{lineno}" if filename else None
@@ -149,7 +142,7 @@ def _build_finding(bucket: dict) -> dict:
 
 	return {
 		"finding_type": "Lock Contention",
-		# Reliability issue: the query failed and its transaction was aborted or
+		# Reliability issue: the query failed and the write was aborted or
 		# retried. Always High it's a correctness/availability problem, not a
 		# "this is a bit slow" one, so impact-in-ms doesn't capture its weight
 		# (the report sorts severity-first, floating it above timed findings).
@@ -188,8 +181,8 @@ def _description(has_deadlock: bool, count: int, where: str | None, max_wait_ms:
 		# over-claimed.
 		return (
 			f"A database query{loc} hit a deadlock {count} time{plural} during this "
-			"flow. The database picked this transaction as the victim and rolled it "
-			"back to break the lock, so the write failed or had to be retried. This "
+			"flow. The database aborted the query to break the lock (usually rolling "
+			"back the whole transaction), so the write failed or had to be retried. This "
 			"usually means two transactions locked the same rows in a different "
 			"order, or a row changed underneath the transaction under a strict "
 			f"isolation level.{wait}"

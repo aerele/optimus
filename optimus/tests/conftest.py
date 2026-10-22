@@ -15,7 +15,6 @@ with JSON fixtures and no running site. Run with:
 
 import json
 import os
-import re
 import sys
 
 import pytest
@@ -161,10 +160,7 @@ except ImportError:
 		mark_duplicates=lambda *a, **kw: None,
 		record=lambda *a, **kw: None,
 		dump=lambda *a, **kw: None,
-		# Minimal stand-in for the real normalizer: strip quoted strings and bare
-		# numbers to ``?`` so lock-capture tests exercise real literal-stripping
-		# (the real frappe.recorder.normalize_query does richer masking).
-		normalize_query=lambda q: re.sub(r"'[^']*'|\b\d+\b", "?", q or ""),
+		get_current_stack_frames=lambda: iter(()),
 	)
 	_mk_module("frappe.model")
 	_mk_module("frappe.model.document", Document=type("Document", (object,), {}))

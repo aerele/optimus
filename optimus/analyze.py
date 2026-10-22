@@ -2785,7 +2785,10 @@ def _build_summary_html(
 				title = title[len(prefix):]
 			pri = _PRIORITY_WORD.get(f.get("severity") or "", "")
 			impact = f.get("estimated_impact_ms") or 0
-			tail = f" (~{dur(impact)}" + (f" - {pri} priority" if pri else "") + ")"
+			# A finding with no measured impact (Lock Contention) shows only its
+			# priority; "~0ms" would contradict a high-priority label.
+			bits = ([f"~{dur(impact)}"] if impact else []) + ([f"{pri} priority"] if pri else [])
+			tail = f" ({' - '.join(bits)})" if bits else ""
 			return f"<strong>{html.escape(title)}</strong>{tail}"
 
 		# Prefer a finding tied to this specific action (via action_ref);
@@ -2806,9 +2809,12 @@ def _build_summary_html(
 		if tied_finding:
 			# v0.7.x: the "See the Findings section below …" pointer lives once,
 			# on the issue-count sentence below don't repeat it here.
+			# Time "went into" a finding only when it measured some; a reliability
+			# finding (Lock Contention) is something the operation ran into.
+			lead = "most of its time went into" if tied_finding.get("estimated_impact_ms") else "it also hit"
 			parts.append(
 				f"The slowest one was <strong>{slowest_label_esc}</strong> at "
-				f"{dur(slowest_ms)} - and most of its time went into "
+				f"{dur(slowest_ms)} - and {lead} "
 				f"{_finding_phrase(tied_finding)}."
 			)
 		elif overall_finding:

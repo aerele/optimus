@@ -237,28 +237,15 @@ def before_request(*args, **kwargs):
 		# instance do NOT create a second Recorder because that would
 		# overwrite frappe.local._recorder and orphan the first one's
 		# SQL patch, corrupting both recordings.
-		piggyback = getattr(frappe.local, "_recorder", None) is not None
-		if not piggyback:
-			# Force-activate the existing recorder for THIS request only.
-			# We pass force=True so the recorder runs regardless of the
-			# global RECORDER_INTERCEPT_FLAG, leaving the standalone
-			# Recorder UI's flag untouched.
-			# (frappe.recorder is imported at module top see comment there.)
-			frappe.recorder.record(force=True)
-
-		# v0.12.x: capture DB deadlocks / lock-wait timeouts. The recorder only
-		# logs queries that SUCCEED, so a failed (deadlocked) query is otherwise
-		# invisible. Must run AFTER the recorder is active (both the force and the
-		# piggyback paths above) so this interceptor sits outermost; it re-raises
-		# unchanged (see wrap_db_sql_for_lock_capture).
-		_capture.wrap_db_sql_for_lock_capture(frappe.local)
-
-		if piggyback:
-			# Standalone recorder already active do NOT create a second Recorder
-			# (it would overwrite frappe.local._recorder and orphan the first
-			# one's SQL patch, corrupting both recordings) and skip the infra /
-			# pyinstrument setup below, which the active recorder already owns.
+		if getattr(frappe.local, "_recorder", None) is not None:
 			return
+
+		# Force-activate the existing recorder for THIS request only.
+		# We pass force=True so the recorder runs regardless of the
+		# global RECORDER_INTERCEPT_FLAG, leaving the standalone
+		# Recorder UI's flag untouched.
+		# (frappe.recorder is imported at module top see comment there.)
+		frappe.recorder.record(force=True)
 
 		# v0.5.1: snapshot infra metrics FIRST, BEFORE pyinstrument starts.
 		# Pre-v0.5.1 the order was reversed: _start_pyi_session was called
@@ -540,17 +527,11 @@ def before_job(method=None, kwargs=None, **rest):
 		# Same clobber protection as before_request: if the standalone
 		# recorder already activated (global flag + frappe's own
 		# before_job hook), piggyback on its instance.
-		piggyback = getattr(frappe.local, "_recorder", None) is not None
-		if not piggyback:
-			# (frappe.recorder is imported at module top see comment there.)
-			frappe.recorder.record(force=True)
-
-		# v0.12.x: capture DB deadlocks / lock-wait timeouts for jobs too (see
-		# the before_request rationale). Must run after the recorder is active.
-		_capture.wrap_db_sql_for_lock_capture(frappe.local)
-
-		if piggyback:
+		if getattr(frappe.local, "_recorder", None) is not None:
 			return
+
+		# (frappe.recorder is imported at module top see comment there.)
+		frappe.recorder.record(force=True)
 
 		# v0.5.1: snapshot BEFORE _start_pyi_session mirrors the order
 		# fix in before_request. See the rationale comment there.

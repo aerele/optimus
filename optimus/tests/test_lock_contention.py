@@ -6,7 +6,7 @@
 Two layers:
   * ``lock_contention.analyze`` the pure analyzer that turns captured
     ``rec["lock_events"]`` into ``Lock Contention`` findings.
-  * ``capture.wrap_db_sql_for_lock_capture`` the request-scoped SQL wrapper
+  * ``capture.install_lock_capture`` the class-level ``Database.sql`` patch
     that records deadlocks / lock-wait timeouts and re-raises them unchanged.
 """
 
@@ -133,224 +133,367 @@ class _FakeLocal:
 	pass
 
 
-_BENCH = "/home/frappe/frappe-bench/apps"
-_RAW_STACK = [  # innermost first, absolute paths, like _capture_caller_stack
-	{"filename": f"{_BENCH}/frappe/frappe/database/database.py", "lineno": 230, "function": "sql"},
-	{"filename": f"{_BENCH}/ugly_code/ugly_code/stock.py", "lineno": 42, "function": "reserve"},
-	{"filename": f"{_BENCH}/ugly_code/ugly_code/api.py", "lineno": 10, "function": "endpoint"},
-	{"filename": "/usr/lib/python3.12/threading.py", "lineno": 1010, "function": "run"},
+# Outermost first, app-relative, like frappe.recorder.get_current_stack_frames.
+_FRAMES = [
+	{"filename": "ugly_code/ugly_code/api.py", "lineno": 10, "function": "endpoint"},
+	{"filename": "ugly_code/ugly_code/stock.py", "lineno": 42, "function": "reserve"},
+	{"filename": "frappe/frappe/database/database.py", "lineno": 230, "function": "sql"},
 ]
 
 
+def _frames(*extra):
+	return [dict(f) for f in _FRAMES] + list(extra)
+
+
 @pytest.fixture
-def bench_stack(monkeypatch):
-	# Accept *a/**k: the lock path calls _capture_caller_stack(max_depth=None).
-	monkeypatch.setattr(capture, "_capture_caller_stack", lambda *a, **k: list(_RAW_STACK))
+def lock_env(monkeypatch):
+	"""A fake ``Database`` class patched by ``install_lock_capture``, plus the
+	request-local namespace of an active Optimus session."""
+	local = _FakeLocal()
+	local.optimus_session_id = "SESSION"
+
+	class FakeDatabase:
+		db_type = "mariadb"
+		outcome = staticmethod(lambda query: "OK")
+
+		def sql(self, query, *args, **kwargs):
+			return type(self).outcome(query)
+
+	original = FakeDatabase.sql
+	monkeypatch.setattr(capture, "_database_class", lambda: FakeDatabase)
+	monkeypatch.setattr(capture, "_lock_caller_frames", lambda: _frames())
+	capture.install_lock_capture(local)
+
+	def raises(exc):
+		def outcome(query):
+			raise exc
+
+		FakeDatabase.outcome = staticmethod(outcome)
+
+	return types.SimpleNamespace(
+		local=local, database=FakeDatabase, db=FakeDatabase(), raises=raises, original=original
+	)
 
 
-class _FakeDB:
-	"""Mimics a Frappe request DB. ``_sql`` is the underlying executor the lock
-	wrap targets; ``sql`` is a thin shim that delegates to the CURRENT ``_sql``
-	(like ``frappe.recorder.record_sql``), so wrapping ``_sql`` is seen through
-	``sql`` too and survives the recorder swapping ``sql`` out and back."""
-
-	def __init__(self, sql_fn):
-		self._sql = sql_fn
-
-		def _sql_entry(*a, **k):
-			return self._sql(*a, **k)
-
-		self.sql = _sql_entry
-
-
-def test_wrap_records_deadlock_and_reraises(bench_stack):
+def _lock_error(name="QueryDeadlockError", message="Deadlock found", pgcode=None):
 	import frappe
 
-	hits = {"n": 0}
+	exc = getattr(frappe, name)(message)
+	if pgcode:
+		cause = Exception("db error")
+		cause.pgcode = pgcode
+		exc.__cause__ = cause
+	return exc
 
-	def boom(*a, **k):
-		hits["n"] += 1
-		raise frappe.QueryDeadlockError("Deadlock found when trying to get lock")
 
-	local = _FakeLocal()
-	local.db = _FakeDB(boom)
-	capture.wrap_db_sql_for_lock_capture(local)
+def test_wrap_records_deadlock_and_reraises(lock_env):
+	import frappe
 
+	lock_env.raises(_lock_error())
 	with pytest.raises(frappe.QueryDeadlockError):
-		local.db.sql("UPDATE `tabX` SET a = 1 WHERE name = 'SECRET-VALUE'")
+		lock_env.db.sql("UPDATE `tabX` SET a = 1 WHERE name = 'SECRET-VALUE'")
 
-	assert hits["n"] == 1
-	events = local.optimus_lock_events
+	events = lock_env.local.optimus_lock_events
 	assert len(events) == 1
 	assert events[0]["kind"] == "deadlock"
-	# The query is normalized: the raw literal is stripped to a placeholder. The
-	# normalized form is also populated (conftest stubs normalize_query).
 	nq = events[0]["normalized_query"]
 	assert "SECRET-VALUE" not in nq
 	assert nq and "?" in nq and "UPDATE" in nq
-	assert isinstance(events[0]["caller_stack"], list)
+	assert events[0]["caller_stack"][0]["function"] == "reserve"  # the user callsite
 
 
-def test_wrap_passes_through_success_without_recording():
-	local = _FakeLocal()
-	local.db = _FakeDB(lambda *a, **k: "OK")
-	capture.wrap_db_sql_for_lock_capture(local)
-	assert local.db.sql("SELECT 1") == "OK"
-	assert not hasattr(local, "optimus_lock_events")
+def test_wrap_passes_through_success_without_recording(lock_env):
+	assert lock_env.db.sql("SELECT 1") == "OK"
+	assert not hasattr(lock_env.local, "optimus_lock_events")
 
 
-def test_wrap_reraises_non_lock_exception_without_recording():
-	local = _FakeLocal()
-
-	def boom(*a, **k):
-		raise ValueError("unrelated")
-
-	local.db = _FakeDB(boom)
-	capture.wrap_db_sql_for_lock_capture(local)
+def test_wrap_reraises_non_lock_exception_without_recording(lock_env):
+	lock_env.raises(ValueError("unrelated"))
 	with pytest.raises(ValueError):
-		local.db.sql("SELECT 1")
-	assert not hasattr(local, "optimus_lock_events")
+		lock_env.db.sql("SELECT 1")
+	assert not hasattr(lock_env.local, "optimus_lock_events")
 
 
-def test_wrap_is_idempotent():
-	local = _FakeLocal()
-	local.db = _FakeDB(lambda *a, **k: "OK")
-	capture.wrap_db_sql_for_lock_capture(local)
-	wrapped_once = local.db._sql
-	capture.wrap_db_sql_for_lock_capture(local)
-	assert local.db._sql is wrapped_once
-
-
-def test_wrap_records_timeout_kind(bench_stack):
+def test_wrap_ignores_requests_without_an_active_session(lock_env):
+	"""The class-level patch is gated on an Optimus session: any other request
+	passes straight through and records nothing."""
 	import frappe
 
-	def boom(*a, **k):
-		raise frappe.QueryTimeoutError("Lock wait timeout exceeded")
+	del lock_env.local.optimus_session_id
+	lock_env.raises(_lock_error())
+	with pytest.raises(frappe.QueryDeadlockError):
+		lock_env.db.sql("UPDATE `tabX` SET a = 1")
+	assert not hasattr(lock_env.local, "optimus_lock_events")
 
-	local = _FakeLocal()
-	local.db = _FakeDB(boom)
-	capture.wrap_db_sql_for_lock_capture(local)
+
+def test_install_is_idempotent_and_uninstall_restores(lock_env):
+	wrapped_once = lock_env.database.sql
+	capture.install_lock_capture(lock_env.local)
+	assert lock_env.database.sql is wrapped_once
+	capture.uninstall_lock_capture()
+	assert lock_env.database.sql is lock_env.original
+
+
+def test_install_without_database_class_is_noop(monkeypatch):
+	monkeypatch.setattr(capture, "_database_class", lambda: None)
+	capture.install_lock_capture(_FakeLocal())  # must not raise
+	capture.uninstall_lock_capture()
+
+
+def test_capture_survives_every_recorder_state(lock_env):
+	"""Issue 2/10: Frappe's recorder patches and unpatches the DB INSTANCE (it sets
+	``db._sql`` and swaps ``db.sql``, and none of that happens with Record SQL
+	off). The class-level patch records in every state."""
+	import frappe
+
+	db = lock_env.db
+	lock_env.raises(_lock_error())
+
+	def attempt():
+		with pytest.raises(frappe.QueryDeadlockError):
+			db.sql("UPDATE `tabX` SET a = 1")
+
+	attempt()  # 1) recorder never patched (Record SQL off)
+
+	db._sql, db.sql = db.sql, lambda *a, **k: db._sql(*a, **k)  # 2) recorder patched
+	attempt()
+
+	db.sql = db._sql  # 3) recorder unpatched (record_sql swapped back out)
+	attempt()
+
+	del db._sql  # 4) a recorder that drops _sql on unpatch, then patches again
+	db._sql, db.sql = db.sql, lambda *a, **k: db._sql(*a, **k)
+	attempt()
+	assert len(lock_env.local.optimus_lock_events) == 4
+
+
+def test_wrap_records_timeout_kind(lock_env):
+	import frappe
+
+	lock_env.raises(_lock_error("QueryTimeoutError", "Lock wait timeout exceeded"))
 	with pytest.raises(frappe.QueryTimeoutError):
-		local.db.sql("SELECT 1 FOR UPDATE")
-	assert local.optimus_lock_events[0]["kind"] == "lock_wait_timeout"
+		lock_env.db.sql("SELECT 1 FOR UPDATE")
+	assert lock_env.local.optimus_lock_events[0]["kind"] == "lock_wait_timeout"
 
 
-def test_wrap_no_db_is_noop():
-	local = _FakeLocal()  # no .db attribute
-	capture.wrap_db_sql_for_lock_capture(local)  # must not raise
-	assert not hasattr(local, "optimus_lock_events")
-
-
-def test_caller_stack_unbounded_keeps_deep_user_frame():
-	"""Issue #4: the lock path walks the stack UNBOUNDED (max_depth=None) so a
-	deep ORM / hook chain can't push the user frame past the default 20-frame cap
-	and get the real contention dropped or misattributed."""
-
-	def deep(n):
-		if n > 0:
-			return deep(n - 1)
-		return (
-			capture._capture_caller_stack(),              # default cap (20)
-			capture._capture_caller_stack(max_depth=None),  # unbounded
-		)
-
-	capped, full = deep(40)
-	assert len(capped) <= 20
-	assert len(full) > 20  # the deep frames the cap would have dropped are kept
-
-
-def test_wrap_no_underlying_sql_is_noop():
-	# A DB object without ``_sql`` (exotic wrapper) degrades to no capture.
-	local = _FakeLocal()
-	local.db = types.SimpleNamespace()  # no _sql
-	capture.wrap_db_sql_for_lock_capture(local)  # must not raise
-	assert not hasattr(local, "optimus_lock_events")
-
-
-def test_wrap_survives_recorder_sql_unpatch_and_repatch(bench_stack):
-	"""Issue #10: the recorder swaps ``db.sql`` between ``record_sql`` and
-	``db._sql`` (do_not_record / record_queries / teardown). Because the wrap
-	lives on ``_sql``, lock capture keeps firing across such a swap instead of
-	silently stopping for the rest of the request."""
+def test_postgres_statement_timeout_is_not_a_lock_wait(lock_env):
+	"""Issue 3: Frappe maps a cancelled slow query (SQLSTATE 57014) to the same
+	QueryTimeoutError as a lock timeout (55P03). Only the latter is contention."""
 	import frappe
 
-	def boom(*a, **k):
-		raise frappe.QueryDeadlockError("Deadlock found")
-
-	local = _FakeLocal()
-	local.db = _FakeDB(boom)
-	capture.wrap_db_sql_for_lock_capture(local)
-
-	# 1) normal recorder-patched path (sql shim -> wrapped _sql)
-	with pytest.raises(frappe.QueryDeadlockError):
-		local.db.sql("UPDATE `tabX` SET a = 1")
-	assert len(local.optimus_lock_events) == 1
-
-	# 2) recorder UNPATCH: db.sql = db._sql (our wrapped _sql). Still captures.
-	local.db.sql = local.db._sql
-	with pytest.raises(frappe.QueryDeadlockError):
-		local.db.sql("UPDATE `tabX` SET a = 2")
-	assert len(local.optimus_lock_events) == 2
-
-	# 3) recorder RE-PATCH with a record_sql-like shim delegating to _sql.
-	def record_sql_like(*a, **k):
-		return local.db._sql(*a, **k)
-
-	local.db.sql = record_sql_like
-	with pytest.raises(frappe.QueryDeadlockError):
-		local.db.sql("UPDATE `tabX` SET a = 3")
-	assert len(local.optimus_lock_events) == 3
-
-
-def test_wrap_skips_nowait_probe(bench_stack):
-	"""Issue #2: a ``NOWAIT`` lock probe's failure is the caller's designed
-	fast-fail path (Frappe uses them, e.g. delete_doc), not contention so it must
-	not be recorded as a finding."""
-	import frappe
-
-	def boom(*a, **k):
-		raise frappe.QueryTimeoutError("could not obtain lock")
-
-	local = _FakeLocal()
-	local.db = _FakeDB(boom)
-	capture.wrap_db_sql_for_lock_capture(local)
+	lock_env.raises(_lock_error("QueryTimeoutError", "canceling statement", pgcode="57014"))
 	with pytest.raises(frappe.QueryTimeoutError):
-		local.db.sql("SELECT name FROM `tabX` WHERE name = 'y' FOR UPDATE NOWAIT")
-	assert getattr(local, "optimus_lock_events", []) == []
+		lock_env.db.sql("SELECT pg_sleep(100)")
+	assert not hasattr(lock_env.local, "optimus_lock_events")
+
+	lock_env.raises(_lock_error("QueryTimeoutError", "lock timeout", pgcode="55P03"))
+	with pytest.raises(frappe.QueryTimeoutError):
+		lock_env.db.sql("UPDATE tabx SET a = 1")
+	assert lock_env.local.optimus_lock_events[0]["kind"] == "lock_wait_timeout"
 
 
-def test_wrap_does_not_skip_data_literal_nowait(bench_stack):
-	"""The NOWAIT skip keys off the SQL KEYWORD (checked after normalization, where
-	literals are stripped), so a genuine deadlock on a query that merely compares a
-	column to the row value 'nowait' is still recorded not false-skipped."""
+def test_statement_timeout_is_found_in_exception_args():
+	"""``QueryTimeoutError(e)`` carries the DB error as args[0] when it was not
+	raised ``from`` it."""
 	import frappe
 
-	def boom(*a, **k):
-		raise frappe.QueryDeadlockError("Deadlock found")
-
-	local = _FakeLocal()
-	local.db = _FakeDB(boom)
-	capture.wrap_db_sql_for_lock_capture(local)
-	with pytest.raises(frappe.QueryDeadlockError):
-		local.db.sql("UPDATE `tabTask` SET x = 1 WHERE status = 'nowait'")
-	assert len(getattr(local, "optimus_lock_events", [])) == 1
+	cause = Exception("db error")
+	cause.pgcode = "57014"
+	assert capture._is_statement_timeout(frappe.QueryTimeoutError(cause))
+	assert not capture._is_statement_timeout(frappe.QueryTimeoutError("no cause"))
 
 
-def test_wrap_records_duration_ms(bench_stack):
-	"""Issue #5: the wall-time the failed query burned is captured on the event."""
+def test_wrap_skips_nowait_probe(lock_env):
+	"""A ``NOWAIT`` probe's failure is the caller's designed fast-fail path."""
 	import frappe
 
-	def boom(*a, **k):
-		raise frappe.QueryDeadlockError("Deadlock found")
+	lock_env.raises(_lock_error("QueryTimeoutError", "could not obtain lock"))
+	with pytest.raises(frappe.QueryTimeoutError):
+		lock_env.db.sql("SELECT name FROM `tabX` WHERE name = 'y' FOR UPDATE NOWAIT")
+	assert not hasattr(lock_env.local, "optimus_lock_events")
 
-	local = _FakeLocal()
-	local.db = _FakeDB(boom)
-	capture.wrap_db_sql_for_lock_capture(local)
+
+def test_nowait_probe_is_skipped_even_when_sql_cannot_be_parsed(lock_env, monkeypatch):
+	"""Issue 7: the probe check must not depend on sqlparse. When parsing fails the
+	normalized text is "", which used to hide the keyword and record the probe."""
+	import frappe
+	import sqlparse
+
+	def broken(*a, **k):
+		raise ValueError("cannot parse")
+
+	monkeypatch.setattr(sqlparse, "parse", broken)
+	lock_env.raises(_lock_error("QueryTimeoutError", "could not obtain lock"))
+	with pytest.raises(frappe.QueryTimeoutError):
+		lock_env.db.sql("SELECT name FROM `tabX` WHERE name = 'y' FOR UPDATE NOWAIT")
+	assert not hasattr(lock_env.local, "optimus_lock_events")
+
+	# A genuine deadlock is still recorded, with no query text since it did not parse.
+	lock_env.raises(_lock_error())
 	with pytest.raises(frappe.QueryDeadlockError):
-		local.db.sql("UPDATE `tabX` SET a = 1")
-	ev = local.optimus_lock_events[0]
-	assert "duration_ms" in ev
+		lock_env.db.sql("UPDATE `tabX` SET a = 'v'")
+	assert lock_env.local.optimus_lock_events[0]["normalized_query"] == ""
+
+
+@pytest.mark.parametrize(
+	("query", "is_probe"),
+	[
+		("SELECT 1 FROM t WHERE a = 1 FOR UPDATE NOWAIT", True),
+		("select 1 from t for update nowait", True),
+		("SELECT 1 FROM t FOR UPDATE", False),
+		("UPDATE t SET x = 1 WHERE status = 'nowait'", False),  # data value
+		("UPDATE t SET x = 1 WHERE status = 'it''s nowait'", False),  # escaped quote
+		('SELECT "nowait" FROM t', False),  # quoted identifier
+		("SELECT `nowait` FROM t", False),
+		("SELECT 1 /* nowait */ FROM t", False),  # comment
+		("SELECT nowait_x FROM t", False),  # not the whole word
+		(None, False),
+	],
+)
+def test_is_nowait_probe(query, is_probe):
+	assert capture._is_nowait_probe(query) is is_probe
+
+
+def test_wrap_records_duration_ms(lock_env):
+	import frappe
+
+	lock_env.raises(_lock_error())
+	with pytest.raises(frappe.QueryDeadlockError):
+		lock_env.db.sql("UPDATE `tabX` SET a = 1")
+	ev = lock_env.local.optimus_lock_events[0]
 	assert ev["duration_ms"] is not None and ev["duration_ms"] >= 0
+
+
+def test_event_error_keeps_only_the_first_line(lock_env):
+	"""Postgres appends DETAIL lines that quote the other sessions' SQL, literals
+	included. Only the first line is stored."""
+	import frappe
+
+	lock_env.raises(_lock_error(message="deadlock detected\nDETAIL: Process 1: UPDATE t SET x = 'SECRET'"))
+	with pytest.raises(frappe.QueryDeadlockError):
+		lock_env.db.sql("UPDATE t SET x = 1")
+	assert lock_env.local.optimus_lock_events[0]["error"] == "deadlock detected"
+
+
+def test_wrap_respects_events_cap(lock_env):
+	import frappe
+
+	lock_env.raises(_lock_error())
+	for _ in range(capture.LOCK_EVENTS_CAP_PER_RECORDING + 25):
+		with pytest.raises(frappe.QueryDeadlockError):
+			lock_env.db.sql("SELECT 1")
+	assert len(lock_env.local.optimus_lock_events) == capture.LOCK_EVENTS_CAP_PER_RECORDING
+	assert lock_env.local.optimus_lock_events_truncated is True
+
+
+def test_recording_failure_never_replaces_the_db_error(lock_env, monkeypatch):
+	import frappe
+
+	def explode(*a, **k):
+		raise RuntimeError("recording is broken")
+
+	monkeypatch.setattr(capture, "_lock_caller_frames", explode)
+	lock_env.raises(_lock_error())
+	with pytest.raises(frappe.QueryDeadlockError):
+		lock_env.db.sql("UPDATE `tabX` SET a = 1")
+
+
+def test_recording_does_not_reenter_itself(lock_env, monkeypatch):
+	"""Recording reads settings, which can query the DB. A lock error inside that
+	nested query must not recurse into recording again."""
+	import frappe
+
+	calls = {"n": 0}
+
+	def nested(*a, **k):
+		calls["n"] += 1
+		with pytest.raises(frappe.QueryDeadlockError):
+			lock_env.db.sql("SELECT nested")
+		return _frames()
+
+	monkeypatch.setattr(capture, "_lock_caller_frames", nested)
+	lock_env.raises(_lock_error())
+	with pytest.raises(frappe.QueryDeadlockError):
+		lock_env.db.sql("UPDATE `tabX` SET a = 1")
+	assert calls["n"] == 1
+
+
+def test_framework_app_contention_is_not_recorded_and_skips_the_cap(lock_env, monkeypatch):
+	"""Issue 1: ERPNext / HRMS code is framework. Its deadlocks are dropped at
+	capture without using up the cap that real findings need."""
+	import frappe
+
+	erpnext = [
+		{"filename": "erpnext/erpnext/stock/stock_ledger.py", "lineno": 90, "function": "repost"},
+		{"filename": "frappe/frappe/database/database.py", "lineno": 230, "function": "sql"},
+	]
+	monkeypatch.setattr(capture, "_lock_caller_frames", lambda: [dict(f) for f in erpnext])
+	lock_env.raises(_lock_error())
+	for _ in range(capture.LOCK_EVENTS_CAP_PER_RECORDING + 5):
+		with pytest.raises(frappe.QueryDeadlockError):
+			lock_env.db.sql("UPDATE `tabBin` SET qty = 1")
+	assert getattr(lock_env.local, "optimus_lock_events", []) == []
+	assert not getattr(lock_env.local, "optimus_lock_events_truncated", False)
+
+
+def test_user_code_calling_into_erpnext_is_attributed_to_the_user_frame(lock_env, monkeypatch):
+	import frappe
+
+	stack = [
+		{"filename": "ugly_code/ugly_code/api.py", "lineno": 10, "function": "endpoint"},
+		{"filename": "erpnext/erpnext/stock/stock_ledger.py", "lineno": 90, "function": "repost"},
+		{"filename": "frappe/frappe/database/database.py", "lineno": 230, "function": "sql"},
+	]
+	monkeypatch.setattr(capture, "_lock_caller_frames", lambda: [dict(f) for f in stack])
+	lock_env.raises(_lock_error())
+	with pytest.raises(frappe.QueryDeadlockError):
+		lock_env.db.sql("UPDATE `tabBin` SET qty = 1")
+	assert lock_env.local.optimus_lock_events[0]["caller_stack"][0]["function"] == "endpoint"
+
+
+@pytest.mark.parametrize(
+	("filename", "function"),
+	[
+		("frappe/frappe/utils/change_log.py", "update_last_known_versions"),
+		("frappe/frappe/utils/dashboard.py", "generate_and_cache_results"),
+		("frappe/frappe/sessions.py", "update_user_metadata"),
+	],
+)
+def test_lock_errors_frappe_handles_itself_are_not_recorded(lock_env, monkeypatch, filename, function):
+	"""Issue 6: a deadlock Frappe catches (``suppress`` / ``savepoint``) never
+	reaches the caller, so user code above it in the stack is not a finding."""
+	import frappe
+
+	handler = {"filename": filename, "lineno": 5, "function": function}
+	monkeypatch.setattr(capture, "_lock_caller_frames", lambda: _frames(handler))
+	lock_env.raises(_lock_error())
+	with pytest.raises(frappe.QueryDeadlockError):
+		lock_env.db.sql("UPDATE `tabUser` SET x = 1")
+	assert not hasattr(lock_env.local, "optimus_lock_events")
+
+
+def test_stored_stack_is_trimmed_to_the_callsite_and_a_short_tail(lock_env, monkeypatch):
+	import frappe
+
+	deep = [{"filename": "frappe/frappe/model/document.py", "lineno": i, "function": f"f{i}"} for i in range(1, 80)]
+	monkeypatch.setattr(capture, "_lock_caller_frames", lambda: _frames()[:2] + deep)
+	lock_env.raises(_lock_error())
+	with pytest.raises(frappe.QueryDeadlockError):
+		lock_env.db.sql("UPDATE `tabX` SET a = 1")
+	stored = lock_env.local.optimus_lock_events[0]["caller_stack"]
+	assert len(stored) == 1 + capture._LOCK_STACK_TAIL_FRAMES
+	assert stored[0]["function"] == "reserve"
+	assert stored[-1]["function"] == "f79"  # innermost kept
+
+
+def test_stored_stack_still_resolves_to_the_same_callsite():
+	"""The analyzer re-derives the callsite from the trimmed stack."""
+	stack = [
+		{"filename": "ugly_code/ugly_code/stock.py", "lineno": 42, "function": "reserve"},
+		{"filename": "frappe/frappe/model/document.py", "lineno": 3, "function": "save"},
+	]
+	f = lock_contention.analyze([{"lock_events": [_event(stack=stack)]}], _ctx()).findings[0]
+	assert json.loads(f["technical_detail_json"])["callsite"]["function"] == "reserve"
 
 
 # ----- render -------------------------------------------------------------
@@ -416,60 +559,7 @@ def test_lock_contention_tldr_hero_has_no_zero_ms_badge():
 	assert "&middot;" not in headline and "·" not in headline
 
 
-def test_wrap_respects_events_cap(bench_stack):
-	import frappe
-
-	def boom(*a, **k):
-		raise frappe.QueryDeadlockError("Deadlock found")
-
-	local = _FakeLocal()
-	local.db = _FakeDB(boom)
-	capture.wrap_db_sql_for_lock_capture(local)
-	for _ in range(capture.LOCK_EVENTS_CAP_PER_RECORDING + 25):
-		with pytest.raises(frappe.QueryDeadlockError):
-			local.db.sql("SELECT 1")
-	assert len(local.optimus_lock_events) == capture.LOCK_EVENTS_CAP_PER_RECORDING
-
-
 # ----- review fixes -------------------------------------------------------
-
-
-def test_bench_under_frappe_home_still_attributes_user_frame(bench_stack):
-	"""Absolute /home/frappe/... paths must not read as framework frames."""
-	import frappe
-
-	def boom(*a, **k):
-		raise frappe.QueryDeadlockError("Deadlock found")
-
-	local = _FakeLocal()
-	local.db = _FakeDB(boom)
-	capture.wrap_db_sql_for_lock_capture(local)
-	with pytest.raises(frappe.QueryDeadlockError):
-		local.db.sql("UPDATE `tabBin` SET qty = 1")
-	stored = local.optimus_lock_events[0]["caller_stack"]
-	assert [f["filename"] for f in stored] == [
-		"ugly_code/ugly_code/api.py", "ugly_code/ugly_code/stock.py", "frappe/frappe/database/database.py",
-	]
-	f = lock_contention.analyze([{"lock_events": local.optimus_lock_events}], _ctx()).findings[0]
-	# Deepest user frame wins over the outer entry point.
-	assert json.loads(f["technical_detail_json"])["callsite"]["function"] == "reserve"
-
-
-def test_framework_only_events_do_not_use_the_cap(monkeypatch):
-	fw = [{"filename": "/home/x/apps/frappe/frappe/sessions.py", "lineno": 1, "function": "update"}]
-	monkeypatch.setattr(capture, "_capture_caller_stack", lambda: fw)
-	local = _FakeLocal()
-	for _ in range(capture.LOCK_EVENTS_CAP_PER_RECORDING + 5):
-		capture._record_lock_event(local, "deadlock", Exception("d"), "SELECT 1", fw)
-	assert getattr(local, "optimus_lock_events", []) == []
-	assert not getattr(local, "optimus_lock_events_truncated", False)
-
-
-def test_cap_sets_truncated_flag(bench_stack):
-	local = _FakeLocal()
-	for _ in range(capture.LOCK_EVENTS_CAP_PER_RECORDING + 1):
-		capture._record_lock_event(local, "deadlock", Exception("d"), "SELECT 1", list(_RAW_STACK))
-	assert local.optimus_lock_events_truncated is True
 
 
 def test_truncation_marker_becomes_warning():
@@ -601,3 +691,162 @@ def test_finding_wait_duration_absent_when_events_lack_it():
 	detail = json.loads(f["technical_detail_json"])
 	assert detail["max_wait_ms"] is None and detail["total_wait_ms"] is None
 	assert "waited" not in f["customer_description"].lower()
+
+
+# ----- analyzer: framework apps, normalization, render, summary -----------
+
+
+def _stack(*frames):
+	return [{"filename": f, "lineno": 7, "function": fn} for f, fn in frames]
+
+
+def test_erpnext_only_contention_is_not_a_finding():
+	"""Issue 1: a deadlock inside ERPNext / HRMS code is framework contention."""
+	for path in ("erpnext/erpnext/stock/stock_ledger.py", "hrms/hrms/payroll/x.py"):
+		stack = _stack((path, "repost"), ("frappe/frappe/database/database.py", "sql"))
+		assert lock_contention.analyze([{"lock_events": [_event(stack=stack)]}], _ctx()).findings == []
+
+
+def test_user_frame_calling_into_erpnext_is_the_callsite():
+	stack = _stack(
+		("ugly_code/ugly_code/api.py", "endpoint"),
+		("erpnext/erpnext/stock/stock_ledger.py", "repost"),
+		("frappe/frappe/database/database.py", "sql"),
+	)
+	f = lock_contention.analyze([{"lock_events": [_event(stack=stack)]}], _ctx()).findings[0]
+	assert json.loads(f["technical_detail_json"])["callsite"]["function"] == "endpoint"
+
+
+def test_tracked_apps_inclusion_mode_is_honoured(monkeypatch):
+	"""With Tracked Apps set, only those apps' frames are the developer's code."""
+	from optimus import settings
+
+	monkeypatch.setattr(
+		settings, "get_config", lambda: types.SimpleNamespace(tracked_apps=("ugly_code",))
+	)
+	other = _stack(("other_app/other_app/jobs.py", "run"))
+	assert lock_contention.analyze([{"lock_events": [_event(stack=other)]}], _ctx()).findings == []
+	assert len(lock_contention.analyze([{"lock_events": [_event()]}], _ctx()).findings) == 1
+
+
+def test_postgres_quoted_identifiers_survive_normalization():
+	"""Issue (first review): ``"tabX"`` is an identifier, not data."""
+	query = 'UPDATE "tabBin" SET "qty" = 5 WHERE "name" = \'SECRET\''
+	out = capture._normalize_sql_safe(query, keep_quoted_identifiers=True)
+	assert '"tabBin"' in out and '"qty"' in out
+	assert "SECRET" not in out and "5" not in out
+
+
+def test_mariadb_double_quoted_values_are_still_stripped():
+	"""On MariaDB a double-quoted token can be a string value, so it is stripped."""
+	out = capture._normalize_sql_safe('SELECT * FROM `tabX` WHERE name = "SECRET"')
+	assert "SECRET" not in out
+	assert "`tabX`" in out
+
+
+def test_summary_does_not_claim_zero_ms_for_a_lock_finding():
+	"""Issue 5: no "~0ms - high priority" and no "time went into" for a finding that
+	has no measured impact."""
+	from optimus import analyze
+
+	finding = lock_contention.analyze([{"lock_events": [_event()]}], _ctx()).findings[0]
+	ctx = AnalyzeContext(session_uuid="t", docname="t")
+	ctx.actions = [{"action_label": "GET x", "duration_ms": 50000, "recording_uuid": "r0"}]
+	ctx.findings = [finding]
+	summary = analyze._build_summary_html(ctx, total_queries=1, recordings=[])
+	assert "~0" not in summary
+	assert "went into" not in summary
+	assert "it also hit" in summary and "high priority" in summary
+
+
+def test_summary_keeps_time_wording_for_timed_findings():
+	from optimus import analyze
+
+	timed = {
+		"finding_type": "Slow Query", "severity": "High", "title": "Slow query on tabX",
+		"estimated_impact_ms": 1200.0, "action_ref": "0",
+	}
+	ctx = AnalyzeContext(session_uuid="t", docname="t")
+	ctx.actions = [{"action_label": "GET x", "duration_ms": 2000, "recording_uuid": "r0"}]
+	ctx.findings = [timed]
+	summary = analyze._build_summary_html(ctx, total_queries=1, recordings=[])
+	assert "most of its time went into" in summary and "~1200ms" in summary
+
+
+def test_lock_finding_shows_no_zero_ms_badge_in_report():
+	"""Issue 4: a 50s lock wait must not render as '0ms consolidated'."""
+	import re
+	import types as _types
+
+	from optimus import renderer
+
+	ev = _event(kind="lock_wait_timeout")
+	ev["duration_ms"] = 50000.0
+	finding_dict = lock_contention.analyze([{"lock_events": [ev, ev, ev]}], _ctx()).findings[0]
+	html = _render_single(finding_dict)
+	assert not re.search(r'class="big">\s*0(\.0+)?\s*ms', html)
+	# 3 x 50s of waiting, shown instead of the missing impact.
+	assert re.search(r'class="big"><span[^>]*>150\.00s</span></span><small class="scope-tag">waited', html)
+	assert "3× hits" in html
+
+
+def test_lock_finding_without_wait_shows_kind_not_a_number():
+	html = _render_single(lock_contention.analyze([{"lock_events": [_event()]}], _ctx()).findings[0])
+	assert "reliability issue" in html
+
+
+def test_reliability_finding_outranks_timed_one_in_a_root_cause_group():
+	"""The 0ms deadlock must not lose the primary card to a same-severity timed
+	finding in the same function."""
+	from optimus.renderer import finding_enrichment as fe
+
+	callsite = {"filename": "app/app/stock.py", "function": "reserve", "lineno": 3}
+	lock = {
+		"finding_type": "Lock Contention", "severity": "High", "estimated_impact_ms": 0.0,
+		"technical_detail": {"callsite": callsite},
+	}
+	slow = {
+		"finding_type": "Slow Query", "severity": "High", "estimated_impact_ms": 900.0,
+		"technical_detail": {"callsite": callsite},
+	}
+	grouped = fe._group_findings_by_root_cause([slow, lock])
+	assert len(grouped) == 1
+	assert grouped[0]["finding_type"] == "Lock Contention"
+	assert grouped[0]["sub_findings"][0]["finding_type"] == "Slow Query"
+
+
+def test_ai_hint_does_not_claim_every_timeout_rolls_back():
+	from optimus import ai_fix
+
+	hint = ai_fix._FINDING_TYPE_HINTS["Lock Contention"]
+	assert "its transaction was rolled back" not in hint
+	assert "transaction may still be open" in hint
+
+
+def _render_single(finding_dict):
+	import types as _types
+
+	from optimus import renderer
+
+	finding = _types.SimpleNamespace(llm_fix_json=None, **finding_dict)
+	action = _types.SimpleNamespace(
+		action_label="GET bg_chained_audit", event_type="HTTP Request",
+		http_method="GET", path="/x", recording_uuid="r0", duration_ms=100,
+		queries_count=0, query_time_ms=0, slowest_query_ms=0,
+		call_tree_json=json.dumps({
+			"function": "<root>", "filename": "", "lineno": 0,
+			"self_ms": 0, "cumulative_ms": 100, "children": [],
+		}),
+	)
+	doc = _types.SimpleNamespace(
+		name="PS-lc", session_uuid="lc", title="lock test", user="a@b.com",
+		status="Ready", started_at="2026-05-13T00:00:00",
+		stopped_at="2026-05-13T00:00:01", notes=None, top_severity="High",
+		summary_html=None, total_duration_ms=100, total_query_time_ms=0,
+		total_queries=0, total_requests=1, top_queries_json="[]",
+		table_breakdown_json="[]", hot_frames_json="[]",
+		session_time_breakdown_json=None, total_python_ms=None, total_sql_ms=None,
+		analyzer_warnings=None, v5_aggregate_json="{}",
+		actions=[action], findings=[finding], phase_2_runs=[],
+	)
+	return renderer.render_raw(doc, recordings=[])

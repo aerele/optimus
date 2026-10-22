@@ -1908,7 +1908,16 @@
         {# The scope tag is analyzer-declared: a finding whose estimated_impact_ms
            is not the session-wide total sets detail.impact_scope_label (e.g. N+1 →
            "recoverable"). Everything else falls back to "consolidated". #}
+        {# A reliability finding (Lock Contention) has no ms to reclaim, so a
+           "0ms consolidated" badge would say the opposite of what happened. Show
+           the wait it burned instead, or just the kind when none was measured. #}
+        {% if f.estimated_impact_ms %}
         <span class="big">{{ fmt_ms(f.estimated_impact_ms) }}</span><small class="scope-tag">{{ detail.impact_scope_label or "consolidated" }}</small>
+        {% elif detail.total_wait_ms %}
+        <span class="big">{{ fmt_ms(detail.total_wait_ms) }}</span><small class="scope-tag">waited</small>
+        {% else %}
+        <small class="scope-tag">reliability issue</small>
+        {% endif %}
         {% if f.affected_count and f.affected_count > 1 %}
         {% set _per_hit_ms = f.estimated_impact_ms / f.affected_count %}
         <div class="small">{{ f.affected_count }}× hits{% if _per_hit_ms >= 0.05 %} &middot; {{ fmt_ms(_per_hit_ms, 1) }}<small class="scope-tag">per hit</small>{% endif %}</div>

@@ -16,23 +16,34 @@ versions may contain breaking changes see migration notes below).
   (`QueryDeadlockError`) or a lock-wait timeout (`QueryTimeoutError`) is now
   recorded and reported as a new High-severity "Lock Contention" finding. The
   Frappe recorder only logs queries that succeed, so these failed queries were
-  previously invisible to the profiler. An Optimus-side wrapper on the DB's
-  low-level `_sql` records the contended callsite plus the normalized query (no
-  row data) and re-raises the error unchanged, so Frappe's own retry and
-  suppress behaviour is untouched. Wrapping `_sql` (not `sql`) keeps the capture
-  in place when the recorder unpatches and re-patches `sql` mid-request, so it no
-  longer stops silently. Findings are raised only for contention at a callsite in
-  your own code; benign framework-internal races that Frappe catches itself
-  (session touch, change-log write, dashboard refresh), framework-app (ERPNext /
-  HRMS) code and deliberate `NOWAIT` lock probes are filtered out. The finding is
-  actionable (it joins the "Fix these first" plan), names the callsite, lists
-  every distinct contended query (so a multi-statement `doc.save()` points at the
-  right table), surfaces the wall-time the query waited before failing, and gives
-  a fix hint (short transactions, consistent lock ordering, indexing,
-  retry-safety). The callsite stack is walked in full on the failure path so a
-  deep ORM / hook chain can't hide the user frame, and the wait-timeout
-  description names `innodb_lock_wait_timeout` as a MariaDB/MySQL example rather
-  than asserting it on every backend.
+  previously invisible to the profiler. Optimus patches `Database.sql` once at
+  class level, gated on an active Optimus session, records the contended
+  callsite plus the normalized query (no row data) and re-raises the error
+  unchanged, so Frappe's own retry and suppress behaviour is untouched. Because
+  it does not depend on the recorder's per-request `db.sql` / `db._sql` swap, it
+  keeps working across the recorder's patch / unpatch cycle and when the
+  recorder runs with "Record SQL" off.
+- Findings are raised only for contention at a callsite in your own code. The
+  same app classification as the Redundant Call and N+1 analyzers applies, so
+  ERPNext / HRMS code counts as framework (a deadlock in `stock_ledger.py` is
+  not a finding, but your app calling into it is attributed to your frame).
+  Lock errors that Frappe catches itself (session touch, change-log write,
+  dashboard refresh) are dropped even when your code is above them in the stack,
+  deliberate `NOWAIT` probes are skipped (detected on the raw SQL, so it holds
+  when the statement cannot be parsed), and a Postgres statement timeout
+  (a cancelled slow query) is not reported as a lock wait.
+- The finding is actionable (it joins the "Fix these first" plan), names the
+  callsite, lists every distinct contended query, shows the wall-time the query
+  waited before failing instead of a "0ms" badge, and gives a fix hint (short
+  transactions, consistent lock ordering, indexing, retry-safety). Within a
+  root-cause group it outranks timed findings of the same severity. The session
+  summary no longer says time "went into" it or attaches "~0ms".
+- Stored events are bounded: the callsite plus a short tail of frames, the
+  error is cut to its first line (Postgres appends other sessions' SQL), and
+  Postgres quoted identifiers are kept in the normalized query.
+- The Lock Contention AI hint no longer says the transaction was always rolled
+  back: a deadlock usually rolls back the whole transaction, a lock-wait
+  timeout fails only the statement.
 
 ---
 

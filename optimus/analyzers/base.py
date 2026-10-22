@@ -652,6 +652,30 @@ def walk_callsite(stack: list | None) -> dict | None:
 	return None
 
 
+def user_callsite(
+	stack: list | None,
+	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
+) -> dict | None:
+	"""Return the deepest frame in the application developer's own code, or None.
+
+	Unlike ``walk_callsite`` this never falls back to a framework frame and it
+	classifies with ``is_framework_callsite``, so ERPNext, HRMS and other stock apps
+	count as framework just as they do for the redundant-call and N+1 analyzers.
+	The returned dict is the frame object from ``stack`` (not a copy). Used where
+	only contention the developer can act on should surface (lock contention)."""
+	for frame in reversed(stack or []):
+		if not isinstance(frame, dict):
+			continue
+		filename = frame.get("filename") or ""
+		if not filename or frame.get("lineno") is None:
+			continue
+		if is_framework_callsite(filename, tracked_apps=tracked_apps, installed_apps=installed_apps):
+			continue
+		return frame
+	return None
+
+
 def walk_callsite_str(stack: list | None) -> str | None:
 	"""String-form convenience wrapper: 'filename:lineno' or None."""
 	frame = walk_callsite(stack)
