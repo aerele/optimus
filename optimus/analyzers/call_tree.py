@@ -542,6 +542,22 @@ def _frames_match(node: dict, frame: dict) -> bool:
 	return (node.get("function") or "") == (frame.get("function") or "")
 
 
+def _same_file(node: dict, frame: dict) -> bool:
+	"""True when one filename is a path suffix of the other (recorder and pyinstrument trim differently)."""
+	a = (node.get("filename") or "").replace("\\", "/").strip("/")
+	b = (frame.get("filename") or "").replace("\\", "/").strip("/")
+	return bool(a and b) and (a == b or a.endswith("/" + b) or b.endswith("/" + a))
+
+
+def _match_child(current: dict, frame: dict):
+	"""Child matching ``frame`` by name, preferring the same file; a name-only match must be unambiguous."""
+	named = [c for c in current.get("children", []) if _frames_match(c, frame)]
+	for child in named:
+		if _same_file(child, frame):
+			return child
+	return named[0] if len(named) == 1 else None
+
+
 def _find_graft_point(root: dict, stack: list):
 	"""Walk a recorder stack against the pyi tree; return (graft_node, partial).
 
@@ -560,12 +576,7 @@ def _find_graft_point(root: dict, stack: list):
 	last_matched_index = -1
 
 	for i, frame in enumerate(stack):
-		# Look for a child of `current` that matches this frame
-		next_child = None
-		for child in current.get("children", []):
-			if _frames_match(child, frame):
-				next_child = child
-				break
+		next_child = _match_child(current, frame)
 		if next_child is None:
 			# No further match stop descending
 			break
