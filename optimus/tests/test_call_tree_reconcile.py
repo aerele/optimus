@@ -133,6 +133,27 @@ def test_find_graft_point_partial_match_returns_deepest_visible():
 	assert partial is True
 
 
+def test_find_graft_point_picks_the_same_named_node_in_the_same_file():
+	tree = _make_node("<root>", "", 100, [
+		_make_node("validate", "my_app/a.py", 40),
+		_make_node("validate", "my_app/b.py", 60),
+	])
+	stack = [{"function": "validate", "filename": "my_app/my_app/b.py", "lineno": 3}]
+	graft, _ = call_tree._find_graft_point(tree, stack)
+	assert graft["filename"] == "my_app/b.py"
+
+
+def test_find_graft_point_stops_on_an_ambiguous_name_without_a_file_match():
+	tree = _make_node("<root>", "", 100, [
+		_make_node("validate", "my_app/a.py", 40),
+		_make_node("validate", "my_app/b.py", 60),
+	])
+	stack = [{"function": "validate", "filename": "other_app/c.py", "lineno": 3}]
+	graft, partial = call_tree._find_graft_point(tree, stack)
+	assert graft["function"] == "<root>"
+	assert partial is True
+
+
 def test_find_graft_point_skips_framework_frames_for_graft_point():
 	"""Even when pyi tree has frappe.db.sql, graft at the user-code parent."""
 	tree = _make_node("<root>", "", 100, [

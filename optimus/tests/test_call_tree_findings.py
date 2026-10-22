@@ -3,6 +3,8 @@
 
 """Tests for findings, aggregation and analyzer entry point of call_tree."""
 
+import json
+
 from optimus.analyzers import call_tree
 from optimus.analyzers.base import AnalyzeContext
 
@@ -159,6 +161,35 @@ def test_self_referential_hot_path_uses_clear_phrasing():
 	# Still carries the function name + percentage.
 	assert "apply_pricing_rule" in title
 	assert "96%" in title
+
+
+def test_self_referential_endpoint_surfaces_the_slow_child():
+	tree = _node("<root>", "", 1000, [
+		_node("get_report", "apps/my_app/api.py", 1000, [
+			_node("slow_child", "apps/my_app/calc.py", 950, self_ms=950),
+		], self_ms=50),
+	])
+	findings = call_tree._emit_per_action_findings(
+		tree, action_idx=0, action_label="my_app.api.get_report", action_wall_time_ms=1000,
+	)
+	slow = [f for f in findings if f["finding_type"] == "Slow Hot Path"]
+	assert len(slow) == 1
+	assert "slow_child" in slow[0]["title"]
+	assert "self-time" not in slow[0]["title"]
+
+
+def test_self_referential_endpoint_with_spread_callees_is_not_self_time():
+	children = [_node(f"step_{i}", "apps/my_app/calc.py", 100, self_ms=100) for i in range(9)]
+	tree = _node("<root>", "", 1000, [
+		_node("get_report", "apps/my_app/api.py", 1000, children, self_ms=100),
+	])
+	findings = call_tree._emit_per_action_findings(
+		tree, action_idx=0, action_label="my_app.api.get_report", action_wall_time_ms=1000,
+	)
+	slow = [f for f in findings if f["finding_type"] == "Slow Hot Path"]
+	assert len(slow) == 1
+	assert slow[0]["title"].startswith("get_report and its callees took 100%")
+	assert json.loads(slow[0]["technical_detail_json"])["is_self_referential"] is False
 
 
 def test_non_self_referential_hot_path_keeps_classic_phrasing():
