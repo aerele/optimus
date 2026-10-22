@@ -12,8 +12,6 @@ flashes a warning at save time when framework apps are added.
 import sys
 import types
 
-import pytest
-
 
 def _install_frappe_stub(monkeypatch):
 	"""Install a frappe stub with the minimum surface the controller

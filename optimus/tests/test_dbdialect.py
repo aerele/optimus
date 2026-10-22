@@ -128,3 +128,13 @@ class TestQueryOptimizerCapability:
 
 	def test_postgres_does_not_support_optimizer(self):
 		assert PostgresDialect().supports_query_optimizer is False
+
+
+def test_to_int_and_to_float_handle_non_finite_values():
+	assert base.to_int(float("inf")) == 0
+	assert base.to_int(float("nan")) == 0
+	assert base.to_int("inf") == 0
+	assert base.to_float(float("nan")) is None
+	assert base.to_float("inf") is None
+	assert base.to_float("2.5") == 2.5
+	assert base.to_float(True) == 1.0

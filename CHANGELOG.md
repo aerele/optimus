@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.65] - 2026-10-07
+## [0.12.70] - 2026-10-22
 
 ### Added
 
@@ -33,6 +33,67 @@ versions may contain breaking changes see migration notes below).
   deep ORM / hook chain can't hide the user frame, and the wait-timeout
   description names `innodb_lock_wait_timeout` as a MariaDB/MySQL example rather
   than asserting it on every backend.
+
+---
+
+## [Unreleased]
+
+### Fixed
+
+- Slowest-queries table no longer clips SQL at 500 characters; the full normalized statement is shown (scrollable in the cell).
+
+### Internal
+
+- Removed unused imports from test modules and the dead numeric-coercion
+  helpers (`_to_float`, `_to_int`) in `analyzers/explain_flags.py`. EXPLAIN
+  numeric columns are coerced in the dbdialect layer (`dbdialect.base.to_float` /
+  `to_int`, used from `dbdialect/mariadb.py`).
+
+### Fixed
+
+- The "after fix" projection for Low Filter Ratio findings now uses the
+  dialect-blind `selectivity_pct` instead of MariaDB's raw `filtered` key, so it
+  also works for Postgres plans.
+- Normalized EXPLAIN rows are coerced with `to_int` / `to_float`, so a string or
+  `Decimal` value no longer drops that row's findings. `to_int` / `to_float` also
+  treat `nan` / `inf` as missing instead of passing them to threshold checks.
+
+---
+
+## [0.12.68] - 2026-10-21
+
+### Fixed
+
+- Index suggestions now cap each optimizer statement at 5 seconds on MariaDB. Frappe's optimizer checks column cardinality with a full-table `COUNT(DISTINCT)`, which ran with no limit on the live database. A query whose check times out is skipped, and the report says so.
+
+---
+
+## [0.12.67] - 2026-10-21
+
+### Fixed
+
+- Secrets inside JSON string payloads are now redacted at capture, such as the `doc` that `savedocs` sends with a User's `new_password`. So is `set_value`'s `value` when `fieldname` names a sensitive field. Before, only dict keys were checked, so both reached Redis and the report.
+- The stale-recording sweep no longer clears a user's active session pointer after it has moved to a newer session. Before, it stopped the user's new recording.
+
+---
+
+## [0.12.66] - 2026-10-19
+
+### Fixed
+
+- The daily orphan Redis sweep and the uninstall cleanup now delete keys. Both called `frappe.cache.get_redis_connection()`, which Frappe's cache wrapper doesn't have, so they silently returned without deleting anything.
+- Queries past Max Queries per Recording are no longer removed from the recording. Only the first N are fully enriched (formatting, EXPLAIN, index lookups); the rest are grouped by a cheap literal-free shape and still count in query totals, N+1 and Top Queries. Before, they were dropped while the report said they were still visible.
+
+---
+
+## [0.12.65] - 2026-10-18
+
+### Fixed
+
+- The floating widget no longer mounts for users without a profiler role
+  (System Manager, Optimus User or Administrator). Before, it mounted for
+  everyone and its `api.status` call returned 403, which popped an error
+  modal on every Desk load for those users.
 
 ---
 

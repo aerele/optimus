@@ -582,7 +582,6 @@ class TestHideFrameworkTablesToggle:
 		# leaderboard, full recordings, etc. The filter must NOT touch those.
 		# Here we use a doc with an action whose path mentions tabUser as a
 		# smoke test that other sections still render the name.
-		import json
 		import types
 		breakdown = [self._four_tables()[0]]  # only tabSales Invoice in the breakdown
 		from optimus import renderer
@@ -610,7 +609,6 @@ class TestRenderConfigFooter:
 	settings."""
 
 	def _doc(self):
-		import json
 		import types
 		return types.SimpleNamespace(
 			name="PS", session_uuid="u", title="t", user="a", status="Ready",
