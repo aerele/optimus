@@ -772,6 +772,7 @@ HOT_PATH_HIGH_MS_MULTIPLIER = 2.5      # 500 / 200
 # severity its absolute impact deserves without this, the TL;DR
 # headline picks smaller High findings over larger Medium ones.
 HOT_PATH_HIGH_ABS_MULTIPLIER = 2.0     # 2× high_ms → 1000ms by default
+SELF_TIME_MIN_PCT = 0.5                # callees at or above this share mean it isn't self-time
 SQL_DOMINANCE_SUPPRESSION_PCT = 0.80
 
 
@@ -1144,7 +1145,34 @@ def _walk_for_findings(
 					or action_label.endswith(f".{fn_name}")
 					or action_label.endswith(f":{fn_name}")
 				)
-				if self_referential:
+				# Time mostly in callees: surface the slow child instead of calling it self-time.
+				callee_ms = sum(
+					c.get("cumulative_ms", 0) for c in node.get("children") or []
+					if c.get("kind") == "python"
+				)
+				callees_dominate = self_referential and callee_ms >= cumulative * SELF_TIME_MIN_PCT
+				if callees_dominate:
+					before = len(findings)
+					_walk_children(
+						node, parent_chain, action_idx, action_label, action_wall_time_ms,
+						findings, tracked_apps, installed_apps,
+					)
+					if len(findings) > before:
+						return
+					self_referential = False
+				if callees_dominate:
+					title = (
+						f"{fn_name} and its callees took "
+						f"{pct_str} of the action ({dur(impact_ms)})"
+					)
+					desc = (
+						f"**{fn_name}** and the functions it calls consumed "
+						f"{pct_str} of the action time ({dur(impact_ms)}). "
+						"Most of it is in its callees, spread so that none of "
+						"them is a hot path on its own. Open the call tree to "
+						"see where it goes."
+					)
+				elif self_referential:
 					title = (
 						f"{fn_name} is a self-time hot path "
 						f"({pct_str} of the action, {dur(impact_ms)})"
@@ -1202,7 +1230,23 @@ def _walk_for_findings(
 			# overlapping nested findings.
 			return
 
-	# Recurse into children
+	_walk_children(
+		node, parent_chain, action_idx, action_label, action_wall_time_ms, findings,
+		tracked_apps, installed_apps,
+	)
+
+
+def _walk_children(
+	node: dict,
+	parent_chain: list,
+	action_idx: int,
+	action_label: str,
+	action_wall_time_ms: float,
+	findings: list,
+	tracked_apps: tuple[str, ...] | None = None,
+	installed_apps: frozenset[str] | None = None,
+) -> None:
+	"""Run ``_walk_for_findings`` over the node's python children."""
 	new_chain = parent_chain + [node]
 	for child in node.get("children", []):
 		if child.get("kind") == "sql":
