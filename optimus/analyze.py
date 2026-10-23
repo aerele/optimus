@@ -3246,6 +3246,10 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 				"recordings": recordings,
 			}
 			payload, degraded = recording_bundle.encode_snapshot(bundle)
+			if degraded:
+				warnings = frappe.db.get_value("Optimus Session", docname, "analyzer_warnings") or ""
+				if recording_bundle.DEGRADED_WARNING not in warnings.splitlines():
+					frappe.db.set_value("Optimus Session", docname, "analyzer_warnings", (warnings + "\n" + recording_bundle.DEGRADED_WARNING).strip())
 			# A lost commit acknowledgement may leave a valid snapshot already
 			# bound. Reuse it instead of creating duplicate File rows/URLs.
 			previous = frappe.db.get_value("Optimus Session", docname, "recordings_file")
@@ -3265,9 +3269,6 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 			if not url:
 				raise recording_bundle.InvalidBundle("snapshot_file_missing")
 			frappe.db.set_value("Optimus Session", docname, "recordings_file", url)
-			if degraded:
-				warnings = frappe.db.get_value("Optimus Session", docname, "analyzer_warnings") or ""
-				frappe.db.set_value("Optimus Session", docname, "analyzer_warnings", (warnings + "\n" + recording_bundle.DEGRADED_WARNING).strip())
 			# File row and parent binding must be durable before Redis cleanup.
 			safe_commit()
 	except Exception:

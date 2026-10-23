@@ -589,11 +589,11 @@ def _check_changes(blocks, source_lines, *, stored=False):
 					out.extend(_loop_replacements(before, after))
 			elif any(new and "has_permission" in line for line, new in after.rows):
 				out.append(_v("permission-behavior-change", "unverifiable permission fragment"))
-		elif not stored and source_lines and block.info.lower() in {"", "py", "python", "python3"} and after.tree is not None:
+		elif not stored and source_lines and after.tree is not None:
 			# Full replacements provide no reliable line correspondence. Require a
 			# grounded diff for comparative safety rather than guessing a pairing.
 			before = View([(line, True) for line in source_lines])
-			permission_source = any(before.name(c) == "frappe.has_permission" for c in before.calls)
+			permission_source = any(before.name(c) in {"frappe.has_permission", "frappe.get_list", "frappe.db.get_list"} for c in before.calls)
 			sql_source = _assigned_calls(before, {f"{db}.sql" for db in _DB})
 			replacements = _assigned_calls(after, _READS)
 			changed_shape = [line for line, _ in before.rows] != [line for line, _ in after.rows]

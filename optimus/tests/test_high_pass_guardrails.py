@@ -100,6 +100,13 @@ def test_get_all_cannot_replace_permission_checked_get_list():
 	assert G.strips_code(violations(before, after))
 
 
+@pytest.mark.parametrize("label", ["python", "text", "sql"])
+def test_whole_block_permission_downgrade_requires_a_grounded_diff(label):
+	from optimus.tests.test_ai_guardrails import H
+	text = H.format(f'```{label}\nrows = frappe.get_all("User", fields=["name"])\n```')
+	assert G.strips_code(G.verify_fix(text, source_lines=['rows = frappe.get_list("User", fields=["name"])']))
+
+
 def test_conditional_write_cannot_hide_behind_unchanged_run():
 	before = ["q = frappe.qb.update(T).set(T.enabled, 0).where(T.name == name)", "q.run()"]
 	after = [

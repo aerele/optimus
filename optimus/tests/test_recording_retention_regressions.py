@@ -53,9 +53,17 @@ def test_over_detail_limit_keeps_every_query_in_a_disclosed_snapshot(monkeypatch
 	assert all(len(c["stack"]) == 3 and "explain_result" not in c for c in calls)
 
 
-def test_retry_reuses_a_snapshot_after_lost_commit_ack(monkeypatch):
+@pytest.mark.parametrize("degraded", [False, True])
+@pytest.mark.parametrize("prior_warning", ["", recording_bundle.DEGRADED_WARNING])
+def test_retry_reuses_a_snapshot_after_lost_commit_ack(monkeypatch, degraded, prior_warning):
 	rec = {"uuid": "r", "calls": [{"query": "SELECT 1"}]}
 	bundle = {"schema": 1, "session_uuid": "s", "session_state": {}, "recordings": {"r": {"rec": rec}}}
+	warnings = [prior_warning]
+	def get_value(doctype, name, field):
+		return warnings[-1] if field == "analyzer_warnings" else "/private/files/existing.json.gz"
+	def set_value(doctype, name, field, value):
+		assert field == "analyzer_warnings"
+		warnings.append(value)
 	monkeypatch.setattr(
 		analyze,
 		"frappe",
@@ -64,16 +72,18 @@ def test_retry_reuses_a_snapshot_after_lost_commit_ack(monkeypatch):
 				hget=lambda key, uuid: rec if key == analyze.RECORDER_REQUEST_HASH else None,
 				get_value=lambda key: None,
 			),
-			db=SimpleNamespace(get_value=lambda *a: "/private/files/existing.json.gz"),
+			db=SimpleNamespace(get_value=get_value, set_value=set_value),
 		),
 	)
 	monkeypatch.setattr(session, "get_session_meta", lambda uuid: {})
 	monkeypatch.setattr(analyze, "_load_recordings_bundle", lambda doc: bundle)
+	monkeypatch.setattr(recording_bundle, "encode_snapshot", lambda obj: (recording_bundle.encode(obj), degraded))
 	monkeypatch.setattr(analyze, "_save_report_file", lambda **kw: pytest.fail("duplicate File created"))
 	commits = []
 	monkeypatch.setattr(analyze, "safe_commit", lambda: commits.append(True))
 	analyze._persist_recordings_file("doc", "s", ["r"])
 	assert commits == [True]
+	assert warnings[-1].splitlines().count(recording_bundle.DEGRADED_WARNING) == int(degraded or bool(prior_warning))
 
 
 def test_real_analyze_orchestrator_never_cleans_up_after_snapshot_failure(monkeypatch):
