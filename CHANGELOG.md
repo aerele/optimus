@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [Unreleased]
+## [0.12.69] - 2026-10-21
 
 ### Fixed
 
@@ -37,7 +37,7 @@ versions may contain breaking changes see migration notes below).
 ### Fixed
 
 - SQL in the call tree is now attached to the function in the same file when two functions share a name, such as two `validate` methods. Before, it went under whichever came first.
-- A whitelisted endpoint whose time is really in a callee is no longer reported as a self-time hot path. The slow callee gets the finding, or, when the time is spread across callees, the title says "and its callees".
+- A whitelisted endpoint whose time is really in a callee is no longer reported as a self-time hot path. The slow callee gets the finding, the function's own time is reported only when it is a hot path by itself, and otherwise the title says "and its callees".
 
 ---
 
