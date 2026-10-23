@@ -297,10 +297,8 @@ def before_uninstall():
 
 def _clear_redis_state():
 	"""Scan-and-delete all profiler:* keys from the site's Redis namespace."""
-	try:
-		redis_conn = frappe.cache.get_redis_connection()
-	except Exception:
-		return
+	# RedisWrapper subclasses redis.Redis, so it is the raw connection.
+	redis_conn = frappe.cache
 
 	# Frappe's cache wrapper auto-prefixes keys with the site namespace
 	# via make_key(). To SCAN for our patterns we need to use the raw

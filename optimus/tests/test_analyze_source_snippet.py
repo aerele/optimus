@@ -7,7 +7,6 @@ asserts the source_snippet shape after enriching finding dicts against a real fi
 
 import json
 import os
-import tempfile
 
 from optimus import analyze
 

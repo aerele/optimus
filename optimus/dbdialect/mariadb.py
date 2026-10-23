@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 
 from optimus import safe_call
 from optimus.analyzers.base import TAB_TABLE_RE
@@ -53,6 +54,30 @@ class MariaDBDialect(Dialect):
 		# (the factory keeps one adapter per process). Mirrors the old
 		# module-level infra_capture._db_max_connections_cached.
 		self._max_connections_cached: int | None = None
+
+	# -- statement time limit -------------------------------------------
+
+	@contextmanager
+	def statement_time_limit(self, seconds: float):
+		import frappe
+
+		try:
+			previous = frappe.db.sql("SELECT @@SESSION.max_statement_time")[0][0]
+			frappe.db.sql(f"SET SESSION max_statement_time = {float(seconds)}")
+		except Exception:
+			previous = None
+		try:
+			yield
+		finally:
+			if previous is not None:
+				try:
+					frappe.db.sql(f"SET SESSION max_statement_time = {float(previous)}")
+				except Exception:
+					pass
+
+	def is_statement_timeout(self, error: Exception) -> bool:
+		# ER_STATEMENT_TIMEOUT, raised when max_statement_time is exceeded.
+		return bool(getattr(error, "args", None)) and error.args[0] == 1969
 
 	# -- EXPLAIN ---------------------------------------------------------
 

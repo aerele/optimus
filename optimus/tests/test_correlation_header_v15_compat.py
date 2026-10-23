@@ -13,8 +13,6 @@ whichever object is the authoritative sink on each version.
 import sys
 import types
 
-import pytest
-
 
 def _install_frappe_stub_with_local(monkeypatch):
 	"""Install a minimal frappe stub with a configurable ``frappe.local`` so

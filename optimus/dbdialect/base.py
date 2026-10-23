@@ -13,7 +13,9 @@ in ``mariadb.py`` / ``postgres.py``.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
@@ -32,30 +34,29 @@ def to_int(val) -> int:
 		return int(val)
 	if isinstance(val, int):
 		return val
-	if isinstance(val, float):
-		return int(val)
 	try:
-		return int(val)
-	except (TypeError, ValueError):
+		if isinstance(val, float):
+			return int(val)
 		try:
-			return int(float(val))
+			return int(val)
 		except (TypeError, ValueError):
-			return 0
+			return int(float(val))
+	except (TypeError, ValueError, OverflowError):
+		# OverflowError: float("inf"); ValueError: float("nan") or garbage.
+		return 0
 
 
 def to_float(val):
 	"""Coerce a plan float (MariaDB `filtered`, PG-derived selectivity) to
-	float. Returns None on failure so a threshold check can cleanly skip."""
+	float. Returns None on failure or a non-finite value (nan/inf) so a
+	threshold check can cleanly skip."""
 	if val is None:
 		return None
-	if isinstance(val, bool):
-		return float(val)
-	if isinstance(val, (int, float)):
-		return float(val)
 	try:
-		return float(val)
-	except (TypeError, ValueError):
+		out = float(val)
+	except (TypeError, ValueError, OverflowError):
 		return None
+	return out if math.isfinite(out) else None
 
 
 def to_int_or_none(val):
@@ -176,6 +177,14 @@ class Dialect(ABC):
 	@abstractmethod
 	def infra_snapshot(self) -> InfraSnapshot:
 		"""Live DB connection / load counters; any field may be ``None``."""
+
+	def statement_time_limit(self, seconds: float):
+		"""Cap each statement's run time on this connection while the block runs (no-op by default)."""
+		return nullcontext()
+
+	def is_statement_timeout(self, error: Exception) -> bool:
+		"""True when ``error`` came from a statement_time_limit cap."""
+		return False
 
 	# Shared, non-abstract type classification (overridable per dialect).
 	def prefix_required(self, data_type: str) -> bool:

@@ -1,7 +1,7 @@
 """The legacy refresh route now admits background work, preserving its session gates."""
 from importlib import import_module
 from types import SimpleNamespace
-from unittest.mock import DEFAULT, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 

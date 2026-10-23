@@ -8,7 +8,6 @@ distinct query shapes) emits NO finding; only the single-variant classic
 "Same query ran N× at file:line" case is flagged.
 """
 
-import json
 
 from optimus.analyzers import n_plus_one
 from optimus.analyzers.base import AnalyzeContext

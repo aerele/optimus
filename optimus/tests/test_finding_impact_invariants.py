@@ -9,8 +9,6 @@ latter must be ≤ that action's ``duration_ms`` (a finding claiming more than t
 action took would mislead both the reader and the action-plan ranking).
 """
 
-import json
-from types import SimpleNamespace
 
 from optimus.analyzers import call_tree
 

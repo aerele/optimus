@@ -117,10 +117,8 @@ def _sweep_orphan_redis_state():
 	"""
 	from optimus import redis_keys
 
-	try:
-		redis_conn = frappe.cache.get_redis_connection()
-	except Exception:
-		return
+	# RedisWrapper subclasses redis.Redis, so it is the raw connection.
+	redis_conn = frappe.cache
 
 	# Get the site-qualified prefix so we only scan our own keys, not
 	# other sites sharing the same Redis instance.
@@ -361,10 +359,10 @@ def _sweep_stale_recording():
 	safe_commit()
 
 	for row in stale:
-		# The user's Redis active pointer should already be expired (TTL),
-		# but call clear to be defensive.
+		# Clear the pointer only while it still names this session; the user may have started a new one.
 		try:
-			session.clear_active_session(row["user"])
+			if session.get_active_session_for(row["user"]) == row["session_uuid"]:
+				session.clear_active_session(row["user"])
 		except Exception:
 			pass
 
