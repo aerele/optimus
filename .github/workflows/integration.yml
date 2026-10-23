@@ -2,9 +2,9 @@ name: Integration
 
 # Real-bench integration tests. Slower than the pure-pytest ``CI`` workflow
 # (``ci.yml``), so the trigger surface is narrower:
-#   * pull requests targeting main gate merges on real-Frappe behaviour
-#   * push to main catch regressions on the trunk
-#   * scheduled daily catch Frappe v16 upstream drift
+#   * pull requests targeting main/develop gate merges on real-Frappe behaviour
+#   * push to main/develop catch regressions on the trunk
+#   * scheduled daily catch Frappe v15/v16 upstream drift
 #   * manual dispatch replay a flake / debug a CI bug
 #
 # This workflow does NOT replace ``ci.yml``; the two run in parallel.
@@ -13,12 +13,12 @@ name: Integration
 # NB: intentionally NO ``paths-ignore``. This job is a required check in the
 # main branch protection rule; a required check skipped on a docs-only PR
 # never reports and would block the PR forever. Always-run keeps the gate
-# honest and integration only runs on main-targeted PRs / pushes anyway.
+# honest; both supported trunk branches receive integration results.
 on:
   pull_request:
-    branches: [main]
+    branches: [main, develop]
   push:
-    branches: [main]
+    branches: [main, develop]
   schedule:
     # 04:00 UTC daily outside the typical European / Indian working day,
     # before North American developers wake up. A failed scheduled run
@@ -37,10 +37,23 @@ permissions:
   contents: read
 
 jobs:
-  integration:
-    name: real-bench integration
+  integration-matrix:
+    name: real-bench integration (Frappe ${{ matrix.frappe }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - frappe: '15'
+            ref: version-15
+            python: '3.10'
+          - frappe: '15.83.0'
+            ref: v15.83.0
+            python: '3.10'
+          - frappe: '16'
+            ref: version-16
+            python: '3.14'
 
     services:
       mariadb:
@@ -67,22 +80,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.14
-        # v0.12.28: Frappe v16.18.3 (current head of ``version-16``)
-        # requires Python >=3.14,<3.15. Pinning 3.12 here was the
-        # immediate cause of exit 167 (uv's "resolution failed" code)
-        # during ``bench init``: uv refused to install Frappe v16 into
-        # a 3.12 venv. 3.14 matches the upstream-mandated minimum and
-        # the dev bench's interpreter (Python 3.14.2 locally).
-        #
-        # NB: the pure-pytest ``ci.yml`` workflow also runs on 3.14 it
-        # doesn't install Frappe (the conftest stubs it), so it doesn't
-        # need the ``bench init`` toolchain. This integration workflow needs
-        # the upstream-mandated 3.14 because it actually runs ``bench init``
-        # → ``uv pip install frappe``.
+      - name: Set up Python ${{ matrix.python }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: ${{ matrix.python }}
           cache: 'pip'
 
       - name: Set up Node 24
@@ -108,7 +109,7 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Cache the Frappe checkout across runs
+      - name: Cache Frappe dependency downloads across runs
         # Bench provisioning's dominant cost is the Frappe clone (~150 MB)
         # + its pip + yarn deps. Cache the whole apps/frappe directory
         # keyed on the workflow file's hash so any infrastructure change
@@ -118,12 +119,13 @@ jobs:
           path: |
             ~/.cache/pip
             ~/.cache/yarn
-          key: integration-${{ runner.os }}-${{ hashFiles('.github/workflows/integration.yml', '.github/helper/install.sh', 'pyproject.toml') }}
+          key: integration-${{ matrix.frappe }}-${{ matrix.python }}-${{ runner.os }}-${{ hashFiles('.github/workflows/integration.yml', '.github/helper/install.sh', 'pyproject.toml') }}
           restore-keys: |
-            integration-${{ runner.os }}-
+            integration-${{ matrix.frappe }}-${{ matrix.python }}-${{ runner.os }}-
 
-      - name: Provision a Frappe v16 bench with optimus installed
+      - name: Provision a Frappe bench with optimus installed
         env:
+          FRAPPE_BRANCH: ${{ matrix.ref }}
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
           chmod +x .github/helper/install.sh
@@ -146,6 +148,7 @@ jobs:
             test_phase2_tool_orphan_recovery
             test_safe_report_self_contained_on_real_bench
             test_janitor_sweeps_actually_delete
+            test_managed_artifact_boundaries
         run: |
           set -uo pipefail
           BENCH_DIR="${RUNNER_TEMP}/frappe-bench"
@@ -166,10 +169,18 @@ jobs:
             module="${module%% }"
             log="${RUNNER_TEMP}/integration-${module}.log"
             echo "::group::${module}"
+            module_failed=0
             if ! bench --site test_site run-tests \
                 --app optimus \
                 --module "optimus.tests_integration.${module}" \
                 2>&1 | tee "${log}"; then
+              module_failed=1
+            fi
+            # Frappe v15 can return exit 0 for a failing unittest result.
+            if ! python "$GITHUB_WORKSPACE/scripts/check_integration_log.py" "$log"; then
+              module_failed=1
+            fi
+            if [ "$module_failed" -ne 0 ]; then
               FAILED_MODULES+=("${module}")
             fi
             echo "::endgroup::"
@@ -203,10 +214,22 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: integration-logs
+          name: integration-logs-${{ matrix.frappe }}
           path: |
             ${{ runner.temp }}/integration-*.log
             ${{ runner.temp }}/frappe-bench/logs/*.log
             ${{ runner.temp }}/frappe-bench/sites/test_site/logs/*.log
           if-no-files-found: warn
           retention-days: 14
+
+  # Keep the branch-protection check stable and fail if either framework fails.
+  integration:
+    name: real-bench integration
+    if: always()
+    needs: integration-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both supported frameworks
+        env:
+          RESULT: ${{ needs.integration-matrix.result }}
+        run: test "$RESULT" = success

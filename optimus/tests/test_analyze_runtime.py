@@ -115,6 +115,27 @@ _FIVE = [f"SELECT * FROM tab{i} WHERE x = {i}" for i in range(5)]
 
 
 class TestEnrichThrottle:
+	@pytest.mark.parametrize("bad", [None, "bad-call", 42, False, [], ["stack"]])
+	def test_enrichment_filters_malformed_calls_before_the_cap_and_session_totals(self, enrich_env, monkeypatch, bad):
+		from optimus.analyzers import per_action
+
+		monkeypatch.setattr("optimus.settings.get_config", lambda: types.SimpleNamespace(max_queries_per_recording=3))
+		valid = {"query": "SELECT name FROM tabLead", "duration": 23.0, "stack": []}
+		hook = {"query": "SELECT password FROM __Auth", "duration": 1000,
+			"stack": [{"filename": "apps/optimus/optimus/error_log_mask.py"}]}
+		recording = {"uuid": "mixed", "calls": [bad, valid, bad, hook, dict(valid), bad]}
+		assert analyze._enrich_recordings([recording]) == []
+		assert len(recording["calls"]) == 3
+		assert all(isinstance(c, dict) and c.get("explain_result") for c in recording["calls"])
+		assert len(enrich_env.explain_queries) == 2  # valid shape deduped, hook shape distinct
+		assert analyze._session_query_totals([recording]) == (2, 46.0)
+		action = per_action._build_action(recording)
+		assert (action["queries_count"], action["query_time_ms"]) == (2, 46.0)
+
+	def test_unenriched_session_totals_skip_malformed_entries_too(self):
+		calls = [None, "bad-call", 42, False, [], ["stack"], {"duration": 23.0}]
+		assert analyze._session_query_totals([{"calls": calls}]) == (1, 23.0)
+
 	def test_disabled_by_default_never_sleeps(self, enrich_env):
 		analyze._enrich_recordings([_recording(_FIVE)])
 		assert len(enrich_env.explain_queries) == 5
@@ -231,3 +252,13 @@ class TestMaxQueriesPerRecordingZeroIsUnlimited:
 		assert len({c["normalized_query"] for c in bar}) == 1
 		assert bar[0]["normalized_copies"] == 5
 		assert bar[0]["exact_copies"] == 1
+
+
+def test_over_budget_query_is_preserved_without_formatting(enrich_env,monkeypatch):
+	query='SELECT '+'('*101+'1'+')'*101
+	def forbidden(*args,**kwargs):
+		raise AssertionError('over-budget query reached formatting')
+	monkeypatch.setattr(analyze.sqlparse,'format',forbidden)
+	recording={'calls':[{'query':query,'explain_result':[{'already':'present'}]}]}
+	analyze._enrich_recordings([recording])
+	assert recording['calls'][0]['query']==query

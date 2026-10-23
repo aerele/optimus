@@ -4,6 +4,15 @@ This document inventories **exactly** what data leaves your host when Optimus's 
 
 If you're picking up Optimus for the first time: every AI feature here is **off by default**. The rest of this doc only matters once an operator explicitly turns one on.
 
+Saved answers remain available when findings are grouped under another finding.
+Expand the related finding in **Findings**, or follow **View AI suggestion** from
+its action or background job. Each answer appears once, with its original review
+status and safety warnings. Incomplete or withheld answers use **View AI response**.
+**Regenerate Reports** displays these saved answers without requesting new ones;
+**Refresh AI suggestions** requests new answers and uses provider tokens. A related
+query's observed time is separate from the enclosing function's time; a query fix
+does not establish that all of the function's time is recoverable.
+
 ---
 
 ## 1. TL;DR: default OFF
@@ -19,53 +28,64 @@ When AI is enabled, three knobs gate every outbound call:
 | Knob (Optimus Settings → AI) | Default | What it does |
 |---|---|---|
 | `ai_enabled` | OFF | Master gate. OFF → zero LLM calls ever. |
-| `ai_auto_suggest` | ON | Batch mode (takes effect only once `ai_enabled` is on). ON → analyze.run sends the top-N eligible findings during the background analyze pass. OFF → AI runs only when the operator clicks **Suggest a fix (AI)** on one finding. |
+| `ai_auto_suggest` | ON | Batch mode (takes effect only once `ai_enabled` is on). ON → a separate background run sends the enabled finding fixes and fresh captured Steps after profiling is saved as Ready. OFF → AI runs only when the operator uses the session's **Refresh AI suggestions** action. |
 | `ai_excluded_finding_types` | empty | One finding type per line (v0.9.0+). Listed types are skipped in **both** auto-suggest and on-demand the request body is never built and never sent. |
 
-With the master `ai_enabled=OFF` nothing is sent regardless. Once AI is enabled, three axes of consent remain: feature-level (the master), event-level (`ai_auto_suggest` — on by default so suggestions are built into the report; set it OFF to require a per-finding click) and type-level (the exclusion list).
+With the master `ai_enabled=OFF` nothing is sent regardless. Once AI is enabled, three axes of consent remain: feature-level (the master), event-level (`ai_auto_suggest` — on by default so suggestions are built into the report; set it OFF to require a session refresh) and type-level (the exclusion list).
 
 ---
 
 ## 2. What data leaves the host
 
-There are four outbound request shapes. Each table lists every distinct field that crosses the network boundary, the typical size and the source.
+`ai_send_raw_values` defaults to OFF. Both prompt builders enforce it, including
+for SQL already saved in a finding. SQL literals/comments and Steps document
+names/session title are omitted unless explicitly enabled. A fresh SQL consent
+check accompanies an opt-in. Source code, titles and schema names still leave
+the host and may contain sensitive business information. Disable AI or exclude
+types when this disclosure is unacceptable. Settings changes are versioned.
+
+
+There are three outbound request shapes. Each table lists every distinct field that crosses the network boundary, the typical size and the source.
 
 ### 2.1 Finding fix suggestion (`/v1/messages` or `/chat/completions`)
 
-Triggered by **Suggest a fix (AI)** (on-demand) or auto-suggest at analyze time. Built by `ai_fix._build_messages(finding)` in `optimus/ai_fix.py`.
+Triggered by the session's **Refresh AI suggestions** action or automatic enrichment after profiling is Ready. Built by `ai_fix._build_fix_request` in `optimus/ai_fix.py`.
 
-**System prompt** (static template, ~2.3 KB): Frappe / ERPNext idiom rules, source verbatim-copy discipline, SQL-equivalence rules, metadata-column guardrails, output-format spec (Markdown: Diagnosis / Fix / Why it works / Verify). Static text; identical across every call for a given finding type.
+**System prompt** (static, about 6.1 KB, about 1,850 conservatively estimated tokens): Frappe framework rules for the proposed code, caching and data-layer idioms, grounding rules and the output format (Diagnosis / Fix / Why it works / Verify). It is byte-identical for every finding, so providers can reuse its prefix. Anthropic requests include one cache breakpoint; caching still depends on the model's minimum prefix size.
 
-**User message** (per-finding, ~2–8 KB typical, **18 KB hard cap**):
+**User message** (per-finding, sized to the model's context window; 18,000 budget-unit cap):
+
+Every value captured from your site (title, callsite, source, SQL, EXPLAIN, hot line) is wrapped in a `<data-NONCE kind="...">` block with a per-request nonce and source and SQL fences longer than any captured backtick run; the system prompt tells the model to treat those blocks as data only.
 
 | Field | Source | Typical size | Notes |
 |---|---|---|---|
-| `finding_type` | Optimus Finding | ~15 chars | One of the 10 eligible types (§ 5). |
+| `finding_type` | Optimus Finding | ~15 chars | One of the 4 eligible types (§ 5). |
 | `severity` | Optimus Finding | 4–6 chars | High / Medium / Low. |
 | `title` | Optimus Finding | 60–200 chars | Profiler-generated label (e.g. "`frappe.get_doc` on line 12 loops 18×"). |
-| `customer_description` | Optimus Finding | 0–500 chars | Optional user-facing description. |
 | `estimated_impact_ms` | Optimus Finding | ~5 chars | Profiler's impact estimate. |
 | `affected_count` | Optimus Finding | ~3 chars | Occurrence count. |
 | `callsite.filename` | technical_detail_json | 40–80 chars | Relative path under your bench, e.g. `apps/myapp/myapp/forms/invoice.py`. |
 | `callsite.lineno` | technical_detail_json | 3–5 chars | Line number. |
 | `callsite.function` | technical_detail_json | 20–60 chars | Function name from your code. |
-| **`source_window`** | `renderer._read_source_window` | **1–2 KB typical** | Up to 80 lines of your source: 24 before / 24 after the callsite, capped at `_MAX_SOURCE_WINDOW_LINES`. Verbatim including comments, strings, variable names. **This is the largest field in a typical request.** |
+| **`source_window`** | `analyze._ai_grounding_window` | **1-2 KB typical** | The whole enclosing function, including decorators, when it fits in 80 lines; otherwise 24 lines before and after the callsite. The request budget can shorten it further. Verbatim comments, strings and names are included, with a 200-character cap per source line. **This is the largest field in a typical request.** |
+| loop facts | `ai_grounding.loop_facts_from_tree` over the whole source file's AST | bounded by the request budget | N+1 Query, Redundant Call and Hot Line only: the loops around the callsite (innermost first, comprehensions and `while` included), which variables of each loop its call uses, whether its result is used and the writes the profiler can name (subscript and formatted-SQL writes among them). A container changed in place inside the loop (`filters.update(...)`, `conditions.append(...)`) counts as a variable that changes in the loop when the call reads it; a Frappe document's `doc.append("items", row)` changes only that table, and a `frappe.qb` receiver builds a query rather than changing anything. The file is parsed once per run and shared by all its findings; source lines split on `\n` only, as Python numbers them. They are computed after the budget trims the window and cover only lines the trimmed prompt still shows. Identifiers only, no values, inside a data block (fenced). A line in no loop of its function gets a caller hint, for N+1 Query and Redundant Call, that a caller may loop. |
+| index advice | `index_recipes.advise_finding` | up to 1,600 chars | Slow Query only: the profiler's deterministic index advice (route, DocType, columns and explanation), inside a data block. |
 | `phase2_hotline` | Phase 2 line-profile | 100–400 chars | When available, the hottest single line from line-profiling (line number, content, total ms, hit count). |
 | `technical_detail.function` | technical_detail_json | 30–80 chars | Hot function name (for Slow-Hot-Path-type findings). |
 | `technical_detail.cumulative_ms` | technical_detail_json | ~5 chars | Time in that function. |
 | `technical_detail.action_wall_time_ms` | technical_detail_json | ~5 chars | Action's total wall time. |
 | `technical_detail.normalized_query` | technical_detail_json | 100–2400 chars | **Capped 2400.** Normalized SQL table names, column names, WHERE clause structure preserved; literals replaced by `?` (then redacted again by `optimus.redaction` if they match sensitive column names). |
-| `technical_detail.suggested_ddl` | technical_detail_json | 50–300 chars | Profiler's heuristic DDL pick, e.g. `ALTER TABLE tabBOMItem ADD INDEX ...`. |
 | `technical_detail.explain_row` | technical_detail_json | 100–800 chars | `EXPLAIN` output, capped type / rows / key / Extra etc. |
-| `technical_detail.fix_hint` | technical_detail_json | 50–200 chars | Profiler's deterministic suggestion. |
 | `technical_detail.validation_note` | technical_detail_json | 0–300 chars | Caveats. |
-| **`technical_detail.example_queries`** | live recording (Redis) | **0–4800 chars** | Up to 2 of the slowest **raw** SQL queries from this action's recording, each capped at 2400 chars. These are real production queries table names, column names, WHERE values are preserved (after `password = '…'`-style literal redaction at capture time, see `optimus.redaction`). |
+| **`technical_detail.example_queries`** | live recording (Redis) | **0–4800 chars** | Up to 2 query examples, each capped at 2400 chars. SQL literals and comments are removed by default, including in previously saved examples. Raw-value consent retains business literals subject to sensitive-column redaction. Malformed or oversized SQL is omitted. |
 
-Total user content is truncated to `_MAX_USER_CONTENT_CHARS = 18000` characters before sending (`ai_fix._truncate`).
+The user message is assembled to fit the provider's context window (section 4.2): optional parts (example queries, EXPLAIN row, the normalized query and loop facts) are dropped whole, the least useful first, and only then does the source window shrink around the target line. Nothing is cut inside a block.
+
+Oversized title and callsite text are clipped before wrapping. A source line is kept verbatim or omitted with a no-source notice; omitted lines cannot ground a proposed diff.
 
 ### 2.2 Humanize "Steps to Reproduce" (`/v1/messages` or `/chat/completions`)
 
-Triggered by `ai_humanize_steps`. Built by `_build_steps_messages` in `optimus/ai_fix.py`.
+Included in Refresh AI suggestions when `ai_humanize_steps` is enabled. With `ai_auto_suggest` on, automatic work also humanizes freshly captured Steps. User-written notes, prior humanized notes, and any captured note saved through Desk are preserved by automatic work. Manual refresh can replace notes. Built by `_build_steps_messages` in `optimus/ai_fix.py`.
 
 **System prompt** (static, ~2.9 KB): ERPNext workflow knowledge, Frappe API decoding rules, collapse rules, output spec (ordered Markdown list + one-sentence summary).
 
@@ -73,34 +93,169 @@ Triggered by `ai_humanize_steps`. Built by `_build_steps_messages` in `optimus/a
 
 | Field per action | Source | Typical size | Notes |
 |---|---|---|---|
-| `label` | `per_action.humanized_label(recording)` | 20–100 chars | E.g. "Save Sales Order SO-0001". |
+| `label` | `per_action.humanized_label(recording)` | 20–100 chars | Default: "Save Sales Order". The document name is included only with raw-value consent. |
 | `cmd` | recording.cmd | 20–80 chars | E.g. "frappe.desk.form.save.savedocs". |
-| `path` | recording.path | 30–100 chars | URL path, when applicable. |
+| `path` | recording.path | 30–100 chars | Default: route shape with document names, query and fragment removed; raw-value consent permits original paths. |
 | `method` | recording.method | 4–8 chars | HTTP verb. |
 | `doctype` | extracted from form_dict | 20–60 chars | E.g. "Sales Invoice". |
 | `duration_ms` | recording.duration | ~5 chars | Wall time. |
 
-Up to `_MAX_STEPS_ACTIONS = 60` actions; total truncated to `_MAX_STEPS_USER_CHARS = 8000` chars. `_is_reproducer_noise` pre-filters polling, form-load and asset requests.
+Up to `_MAX_STEPS_ACTIONS = 60` actions, sent inside one data block and limited to 8,000 chars or the context budget, whichever is smaller. `_is_reproducer_noise` pre-filters polling, form-load and asset requests.
 
-### 2.3 Index suggestion (`/v1/messages` or `/chat/completions`)
+### 2.3 Index suggestion (removed)
 
-Triggered by **Suggest an index (AI)** (on-demand) or auto-suggest. Built by `_build_index_messages` in `optimus/ai_fix.py`.
+Index advice for Missing Index, Full Table Scan, Filesort, Temporary Table and Low Filter Ratio findings, and for the per-table index cards, is built by Optimus itself (`optimus/renderer/index_recipes.py`, one advisor for both, so a finding and a card never disagree) from the DocType metadata, the real column types and the table's existing indexes. This path sends nothing to the AI provider; a Slow Query prompt carries the same advice as data.
 
-**System prompt** (static, ~1.2 KB): DBA-perspective index design rules, Frappe metadata-column guardrails, write-hot-table warnings.
+**Evidence comes first.** Before any code, the advisor checks the final recipe (after any column is left out) against the table's real indexes. A finding recipe's equality columns (compared by `=`, `IN` or `IS NULL`) are put in one fixed order: business columns, then Check fields, then `creation` and `modified`, then a column that cannot lead an index (JSON, a Postgres text column, one too wide alone), each group by name. An equality filter uses a leading set of index columns the same way in any order, so the same filter written in another predicate order gives the same recipe and the same index name, and a column that cannot lead never decides the verdict by its name. A table card keeps the analyzer's most-used-first order, which its text promises ("leftmost-first"), so a card and a finding on the same columns can still name different indexes; for the checks below every column of a card counts as an equality column. A recipe of several columns gets no code when an existing index starts with its equality columns in any order and then its range or sort columns in order: `(posting_date, company)` serves `company = ? AND posting_date = ?` (ERPNext's GL Entry and Stock Ledger Entry indexes would otherwise be duplicated), but not `company = ? ORDER BY posting_date`. It also gets no code when one of its equality columns is unique on its own, or a unique index's columns are all among its equality columns (UNIQUE `(po_no, customer)` with `po_no = ? AND customer = ? AND company = ?`, tabBin's `(item_code, warehouse)`): the database finds the row through that index. A unique range or sort column, as in `ORDER BY username`, needs the composite. And it gets no code when an existing index serves every column but its Check fields (its equality columns in any order, then its range or sort columns in order): A Check field usually matches most of the table's rows, so `creation > ? AND is_return = ?` is served by Frappe's own `creation` index and ERPNext's stock-ledger lookups `item_code = ? AND warehouse = ? AND is_cancelled = 0 ORDER BY posting_datetime` by `(item_code, warehouse, posting_datetime, creation)`. Optimus cannot see how a Check field's values are spread, so the text says "usually" and names the index that helps a query for the rare value ("if this query looks for the rare value, an index on (is_return, posting_date) can help"), and a filter on Check fields alone says the same instead of "an index would not help". The verdict stays no code. When the equality columns are all Check fields, that index serves only the range or sort column and none of the filter, so the text never says it serves the filter. A list-view query that sorts and takes its first rows, `is_return = ? ORDER BY creation DESC LIMIT ?`, gets `(is_return, creation)`: the database sorted although `creation` exists, and an index on the Check field and then the sort returns the first rows directly for either value, which a note says when the Check field is compared with `=` (a collapsed `IN (?)` may hold both values, and the first sentence says so instead). Without the LIMIT the query reads every row of that value, so the Check verdict stays. A table card and a Missing Index finding have no query, so their Check text speaks of the slow queries ("if the slow queries look for the rare value") and tells the reader to check them with EXPLAIN, never to filter on a more selective field. A query that finds its row by `name` (the primary key), or a child table's rows by `parent` (one parent has only a few rows), gets no code: no other index can help it. That needs the key compared with a value: `?`, a literal, an `IN` list or subquery, or another table's column that the query itself fixes to a value (`mpa.parent = mp.name AND mp.name = ?`: the database carries the value over). A query whose main FROM reads the table more than once (a self-join, `tabAccount a JOIN tabAccount p ON a.parent_account = p.name WHERE p.name = ?`) gets no code and the "could not read how this query filters" text: a filter or a key on one reference says nothing about the other, and Optimus cannot tell which reference the finding is about. A key compared with another table's column is a join condition, never a lookup: in `pr.supplier = ? AND pr_item.parent = pr.name` the database can read Purchase Receipt first, by `(supplier, posting_date)`, so that table still gets its index. The `parent` rule also needs a real index that `parent` leads in the table's index list: Frappe adds `index parent(parent)` to every child table on MariaDB (`mariadb/schema.py`) but none on Postgres (`postgres/schema.py`), and the real index list decides, as for every other check. An index here holds at most four columns. When a recipe has more equality columns than that, the kept ones are chosen by evidence, never by name: first the columns of an existing index whose columns are all compared with known values, then by field type (Link and Data before dates, numbers and Select), Check fields last; the note names the columns left out. When that would leave out every column of an index the query fixes, there is no code when that index narrows the rows at least as well as the new one could: when it is unique ("an existing index already finds these rows": a unique index returns at most one row), or when its lead column ranks by field type (the cap's own rank) at least as well as the weakest column the new index would keep. ERPNext's GL lookup `company = ? AND account = ? AND voucher_type = ? AND voucher_no = ? AND voucher_detail_no = ?` keeps four Link columns and leaves out the Data column `voucher_detail_no`, whose own index already narrows the rows to a handful, so it gets no code. Otherwise the capped recipe stays and the note names the columns it left out: Optimus cannot know a left-out index's selectivity, and a `status_index` on a Select field left out behind Link columns may match many rows. That no-code is about the filter only and never claims the sort. A Filesort or Temporary Table finding whose sort an existing index already serves means the database chose another plan, so the advice is the recipe without the sort (with the range filter), and its note names that index ("can already remove the sort for this filter, but the captured query did not use it that way"). Only a `LIMIT` (the query takes its first rows, which that index returns in order) keeps that "already serves" verdict, and its text then names the range recipe as the alternative instead of saying a new index would not help. The capture-time EXPLAIN is no evidence either way: MariaDB's `possible_keys` never lists an index that only serves the ORDER BY, and a Postgres plan node names only the index it used, so an index missing from it may well have existed. The verdict also needs an index that returns the rows in the order of the whole ORDER BY (equality columns first, then every sort column in order, or a unique index the filter fixes): an index that only refused a recipe the parser or the column cap had cut short of a sort column says nothing about the sort. That the first column leads an index of its own, or is the index EXPLAIN uses, says nothing about a composite: `WHERE customer = ? ORDER BY creation` needs `(customer, creation)` even when `customer` has its own index. A one-column recipe also gets no code when the column is unique on its own (a Unique field or a one-column unique index; leading a composite unique index is only leading an index), already leads an index under any name, or leads the index the EXPLAIN row names (`key` or `possible_keys`). The Search Index flag is never proof of an index: on Postgres Frappe names a Search Index after the bare field name and index names are schema-wide, so only the first table with that field name gets one. `creation` and `modified` never stand alone in a recipe, so Frappe's own `creation` index never turns one into "no code".
 
-**User message** (per-table, ~2–10 KB, **10 KB hard cap**):
+- **No code** when the index exists already (above); when the column does not exist (or differs in case), is not a field, is a MariaDB reserved word on MariaDB, cannot be indexed or is a leading text column on Postgres. A JSON field cannot be indexed whatever type the database reports: MariaDB's information_schema reports JSON as `longtext`, which would otherwise get a `(255)` prefix that schema sync drops, so the DocField type decides. Postgres `add_index` quotes column names, so a reserved word is no problem there; such an entry gets a `postgres` stamp, since MariaDB `add_index` writes names unquoted. A wide key keeps its leading columns: trailing columns are left out until the key fits 3072 bytes (2704 on Postgres) and the note names them; there is no code only when the first column alone is too wide. A query longer than 4 KB is not parsed, except for Missing Index findings, which need no parse. The report says why. For an existing index it names only a filter shape the scan found on the query's other columns (a LIKE, a function, an OR), says the filter looks index-friendly when it found none, and with no query (a Missing Index finding, a table card) only says to check the slow queries with EXPLAIN, never to rewrite a filter it has not seen.
+- **Shapes that give no code** because an index on the column could not be used: an `OR` between conditions, a `LIKE` with a leading wildcard, a function around the column (`IFNULL`, `YEAR`, `DATE`, the rewrite of `!=` into `IFNULL(col, ?) <> ?`), a `CASE` expression, arithmetic, or the column compared with another column. The text names only the shapes the scan found and only their rewrites (an exact match or a pattern without a leading wildcard for a LIKE, one query per branch for an OR, the bare column for a function, CASE or arithmetic), and never calls one column a composite. A `!=`, `<>` or `NOT` comparison usually matches most of the table's rows, so Optimus never uses it to narrow an index (`IS NOT NULL` stays a range; a bare `NOT col = ?` counts as one too, so `NOT name = ?` is no lookup by name). It may keep only the rare rows, though (`project != ''` on Stock Entries, most of which have no project), so a filter with nothing else gets the same hedge as a Check field ("if the rows this query looks for are rare, an index on (project) can help") and no code, never "an index would not help". A query Optimus cannot read (cut at 500 characters, a UNION, a derived table) gets "Optimus could not read how this query combines its filters" text and the EXPLAIN advice, never a claim that an index would not help. A UNION that filters the table in more than one top-level branch gets no code with the same honest "could not read" text: the scan reads only the first branch's filter, so code built from it would be partial advice. The same holds when the WHERE clause names a column of the table that the SQL parser (sql_metadata) did not report: it leaves out some unquoted names (`account`, `user`, `role`, `type`, `date`, `comment`, `language`, `source`, `data`, `level` and others) and every unqualified column of a query on several tables, and advice without such a column could call an index on the rest "already there". Quoted names (`` `account` ``), as Frappe's query builder writes them, are read. Only a table of the main query's FROM is checked, never one that appears only in a subquery; a table joined with `JOIN ... ON` is one of them (a qualified column of the ON clause, `ON gl.voucher_no = p.name`, is never read as a table name). When the table is the only one in that FROM, it owns every unqualified column, so a column the parser left out is read from the WHERE clause and advised (Frappe's query builder adds a subquery for `IN (SELECT ...)`, which makes the parser drop every unqualified column). The same holds for a Filesort's ORDER BY and a Temporary Table's GROUP BY: a bare column of that only table that the parser left out (the outer `ORDER BY posting_date` next to a WHERE subquery, or an unquoted `ORDER BY account`) is read from the clause, and the sort columns keep the clause's order; an ORDER BY of a UNION sorts the union's rows and is never read that way. With other tables in the FROM, the "could not read" no code is given only when the filter shape would let an index use the column; a column only compared inside an `OR` or a function keeps its shape verdict. About a dozen scanner gaps are recorded as residuals; each fails closed (no code) and never produces a wrong migration.
+- **Column order** is equality columns first, then either one range column or the sort/group columns, not both. For a Filesort or Temporary Table finding whose index serves the sort or grouping, the sort/group columns win: the index is (equality columns, sort columns) and the note says the range filter cannot also use it. A Filesort query with no `LIMIT` is the exception: it reads every row it matches, so a usable range filter on another column wins, the recipe is (equality columns, range column), and the note says the sort stays (`posting_date > ? ORDER BY due_date` gets `(posting_date)`). Otherwise one range column follows the equality columns and the sort columns are left out, with the reason; a sort column the index cannot return in order (an `IN` list of several values, an expression sort) is always left out, never appended where it would only widen the index ("it would not remove the sort", or "the temporary table"), and a column that is both the range filter and a sort column then stays as the range. Frappe's recorder writes every `IN` list as `IN (?)` (normalize_query), so a captured `IN (?)` may hold one value, the usual case for a user-permission `company in (...)`: it keeps the sort column, and the finding's first sentence says the sort stays if the list has more than one value. Only an `IN` on a column the index keeps counts: `docstatus IN (?, ?)` never costs the sort. A sort on `creation` or `modified` can only follow an equality filter column, and the text says so instead of claiming Optimus never indexes it. A table column that a `LEFT JOIN` only uses as a probe value (it sits in the `ON` clause of a join to another table, and the `WHERE` names a column of that joined table only as `col IS NULL`, if at all, as an anti-join `WHERE c.name IS NULL` does) is no index candidate for it; any other `WHERE` on the joined table rejects NULLs, which turns the join into an inner join the database may drive either way, so the column stays. When leaving out the probe leaves nothing to index (an anti-join with no other filter on the table), the finding says Optimus could not find a filter an index could use, instead of keeping the analyzer's "Add an index on the WHERE/JOIN columns". A sort or group recipe on a query of several tables whose equality column only a join binds (`si JOIN tabCustomer c ON c.name = si.customer WHERE c.territory = ? ORDER BY si.posting_date`, or the same join written in the WHERE) gets no code and the "could not read how this query sorts" text: that column takes every value the join brings, so an index on it and then the sort column may not return the rows in order. The joined table's own `ON` column is its lookup key and stays, at every SELECT level, derived tables included. The sort wins only when every sort or group item is a bare column of the target table in the same direction; an `IN` or `IS NULL OR =` filter still sorts and does not claim "already sorted". The sort-first recipe stands only when it keeps every sort or group column: when the four-column cap or the key width leaves some out, the index cannot return the rows in the query's order, so the recipe without the sort is the advice (`voucher_type = ? AND voucher_no = ? ORDER BY account, debit, credit` on GL Entry gets the existing `(voucher_type, voucher_no)` verdict, with a note that the sort stays), and no first sentence says "already sorted" or that the grouping reads the index unless every sort or group column is in the index or fixed by an equality filter (a `GROUP BY ..., parent` keeps its temporary table: Optimus never indexes `parent`). A Filesort recipe that would hold only sort columns, for a query with no `LIMIT` and no filter that index could narrow (an `OR`, or only `col IS NOT NULL`), gets no code: MariaDB rarely walks a whole index instead of sorting when the query has no LIMIT; add a LIMIT or a narrowing filter first. `creation` and `modified` never lead. When the sort or the temporary table stays, the finding's first sentence opens "This index narrows the filter, but" (never the Full Table Scan promise that the index stops a whole-table read) and names the one cause the query has: an aggregate in ORDER BY (`ORDER BY SUM(x)` or its select alias), GROUP BY and ORDER BY naming different columns, a DISTINCT without GROUP BY, a sort or group column of another table, no ORDER BY (or no GROUP BY or DISTINCT) on this table at all, a Frappe metadata sort or group column, a select alias, a name that is no column of the table, a text or JSON column, ASC and DESC mixed, or an expression (a function, CASE, arithmetic or a parameter).
+- **Tick Search Index** for one non-text column of a field you control on MariaDB: your app's DocType (an app in Tracked Apps; with Tracked Apps empty no installed app counts as yours), a Custom Field, or a DocType created in the UI. Frappe's schema sync then owns the index. With Tracked Apps empty, a single column of an app outside the Frappe framework apps gets the Property Setter entry below, and the note says "if <app> is your app, tick Search Index on the field instead; set Tracked Apps in Optimus Settings so Optimus can tell" instead of "do not edit it": Optimus cannot tell whose app it is, and treating every app as yours would send third-party DocTypes (hrms, india_compliance) to "tick Search Index".
+- **`ensure_indexes()`** for everything else: composites, a text column (a 255-character prefix on MariaDB), another app's field, and any index on Postgres. Save the module below in your app and register it on `after_install`, `after_sync` and `after_migrate` in hooks.py, as the last item of each list, so your own hooks (which may create the fields it indexes) run first. Many apps set these hooks as a string: a list pasted under that string replaces it, or is replaced by it, so make it a list that keeps the string first (`after_migrate = ["<the string already there>", "your_app.optimus_indexes.ensure_indexes"]`). `after_sync` runs right after the install's fixture sync, so a fixture-shipped Custom Field is indexed on a fresh install too. If the file already exists, add only the new entry to its `INDEXES` list. Each entry is committed on its own (the previous work is committed first, so a failed entry rolls back only itself), checks the table, its columns and the index first, and a failure writes an Error Log row and moves on, so it never blocks `bench migrate`. The failure handling is three separate steps: roll back, write the Error Log row and commit it, roll back again. On Postgres one failed statement aborts the whole transaction, so the last rollback makes sure that a failed Error Log write never leaves the next `after_migrate` hook (another app's) facing an aborted transaction, and a rollback that raises never costs the row. If the Error Log write fails too, the module writes one line to stderr (the Error Log title, which holds the index name and the error type, plus "the Error Log row could not be written either") so `bench migrate`'s output still names the failed index. The 300-second lock cap is put back at the end of the run, and the module commits right after it puts the old lock setting back: on Postgres the setting is part of the open transaction, so without that commit a later `after_migrate` hook that rolls back its own work would undo the restore and leave the 300-second cap on for the rest of the migrate session. The row's title starts with the index name (the field for a Property Setter entry) and the error type, and ends with the DocType (`ensure_indexes: idx_sales_invoice_04c198b9 was not created (OperationalError) on Sales Invoice`): the index name grows with the DocType's name, so the 140-character cut on v15 can shorten only the DocType, which the row's reference also holds; the row keeps the traceback and links to the DocType (Reference DocType `DocType`). An entry gets a `db` stamp (`mariadb` or `postgres`) when it is right on only one database: a Property Setter entry, a text-prefix entry, a Postgres single column, or a MariaDB key wider than 2704 bytes. A stamped entry is skipped, with one Error Log row, on the other database; the check for that row filters on the reference columns, which Error Log indexes on MariaDB (`reference_name` on v16, `reference_doctype` on v15), never on the unindexed title alone, so on MariaDB it never reads the whole Error Log table on every migrate. On Postgres that holds only when Error Log got the index: Frappe names a Search Index after the bare field name and index names are schema-wide, so only the first table with a `reference_name` (or `reference_doctype`) Search Index gets one, and on a site where another table took the name the check reads the whole Error Log table. It runs only for a stamped entry on the other database, once per migrate. A plain composite has no stamp and runs on both databases, so it carries the Postgres caveat below too. For another app's single column on MariaDB the entry builds `<field>_index` first, unless the column already has a single-column index of its own under any name (`frappe.db.get_column_index`, the check Frappe's own sync makes before it adds `<field>_index`), and only then writes the `search_index` Property Setter, so Frappe's schema sync keeps that index. That order matters: a Property Setter written before a build that then fails would make the next sync of that DocType (a migrate of the owner app, a Custom Field insert, a Customize Form save) build the index outside this guard and fail there. It never calls `updatedb`, so a later migrate runs no DDL at all once the index exists. `ensure_indexes()` caps the connection's lock wait at 300 seconds while it runs (MariaDB `lock_wait_timeout`, Postgres `lock_timeout`) and puts the old value back afterwards: an install has no cap (only a v16 migrate sets 300 seconds), and an index build that waits for a lock on a busy table holds every later query on that table behind it. Index names are `idx_<doctype>_<hash>`: at most 53 characters and unique across the schema (Postgres index names are schema-wide).
+- **The finding's own text follows its advice.** The analyzers write a Missing Index title ("Add index on ...") and descriptions ("Ask your developer to add this index in a database migration", "Adding an appropriate index is usually the fix") into the stored finding at analyze time, before any advice exists. At render time, and in the export, a Missing Index with no code (or whose advice failed) is titled "Index on <table>(<column>): no new index recommended", gets a neutral description and the action-plan step "Check the query with EXPLAIN" instead of "Add a database index"; an EXPLAIN-family finding with no code loses the sentence that promises an index fixes it. When the advice is no verdict (Optimus could not tell, or the advisor failed) the description says Optimus cannot say whether an index would help, never that it recommends none; the export's `index_advice` carries the same `unknown` flag. With code, the description points at "the code and steps under How to fix" instead of "a database migration". A Missing Index whose advice is no verdict is titled "Index on <table>(<column>): Optimus cannot say". A Filesort or Temporary Table finding whose code narrows the filter but leaves the sort or the temporary table in place (its first sentence says why) loses "Adding an index that covers the ORDER BY clause usually fixes it", gains "The index under How to fix does not remove the sort: How to fix says why." (or the temporary table; "may not remove" when the query has no ORDER BY, GROUP BY or DISTINCT on this table, so the sort comes from elsewhere and only may stay) and the step "Check the query with EXPLAIN" instead of "Avoid the filesort"; the export's `index_advice` carries the same `sort_stays` value. The stored finding keeps the analyzer's text, so Regenerate Reports applies this to older sessions too.
+- **A card says "Do not add this index." only when that is a verdict.** When Optimus has no information about the table (a core table such as `tabSessions` or `tabSeries`, a virtual or a removed DocType, or evidence it could not read), could not read the filter, or skipped a query over 4 KB, the card opens with "Optimus cannot say whether this index would help." instead. So does a card whose no-code only hedges on Check fields ("if the slow queries look for the rare value, an index on (is_return) can help"): "Do not add this index." would contradict it.
+- **An index list that comes back empty is a failed read.** Every DocType table has a primary key on `name`, so a table with columns and no index at all means the index read failed (the database adapters turn an ordinary SQL error into an empty list). Optimus then says it could not read the table's details and writes `optimus: evidence read failed for <table>: EmptyIndexList` to the bench log, instead of advising a table it thinks has no index (which would give code for an index that may exist). An RQ job timeout during a column or index read is no longer read as an empty list: it escapes the report render (`render_raw`) and the export (`export_session`). The step that renders and attaches the report (during analyze and Regenerate Reports) and analyze's analyzer loop (whose Missing Index analyzer reads the same indexes) catch every exception, so there the timeout is logged (Error Log `optimus render raw report` or `optimus analyzer <module>`) and the job goes on. On Postgres the whole read of a table (`exists`, `get_meta`, the catalog queries) runs under a savepoint and rolls back to it on failure: one failed statement aborts a Postgres transaction, and the rest of the render must still be able to query.
+- **When advice cannot be built**, the finding says "Optimus could not build index advice for this finding" and the card "Optimus cannot say whether this index would help. It could not build index advice for this table", each with a next step: check the query with EXPLAIN yourself and, if it keeps happening, send the bench log line "optimus: index advice failed" to the Optimus maintainers. The failure is counted and written once to the bench log, and the export carries the same note. It never blocks the render. The report and the export run one shared advice step (`recipe_enrichment.export_advice`), and one parser per render or export memoises each query's parse and its alias map, so a query behind several findings is parsed once.
 
-| Field | Source | Typical size | Notes |
-|---|---|---|---|
-| `table` | table_breakdown | 15–50 chars | E.g. `tabSales Invoice Item`. |
-| `doctype` | table_breakdown | 20–60 chars | DocType label. |
-| `read_count` / `write_count` | table_breakdown | ~3–4 chars each | Session counts. |
-| `is_write_hot` | table_breakdown | 4–5 chars | Boolean. |
-| `recommended_index` | table_breakdown | 50–200 chars | Profiler's heuristic pick (columns + together_count). |
-| `candidates` | table_breakdown | 100–400 chars | Each candidate column + sources + hit count. |
-| `framework_cols_filtered` | table_breakdown | 30–150 chars | Frappe metadata columns touched (the LLM is told NOT to index these). |
-| `existing_indexes` | `SHOW INDEX` | 100–600 chars | Name / columns / unique flag per index already on the table. |
-| **`sample_queries`** | live recording (Redis) | **0–9600 chars** | Up to 4 distinct normalized SELECT queries from the session that touched this table. Each capped 2400 chars. |
+```python
+# your_app/your_app/optimus_indexes.py
+# In your_app/hooks.py run it after install, right after the install's fixture sync and after
+# every migrate. Add it as the last item of each list:
+#   after_install = ["your_app.optimus_indexes.ensure_indexes"]
+#   after_sync = ["your_app.optimus_indexes.ensure_indexes"]
+#   after_migrate = ["your_app.optimus_indexes.ensure_indexes"]
+# When hooks.py sets one of them as a string, make it a list that keeps that string first:
+#   after_migrate = ["<the string already there>", "your_app.optimus_indexes.ensure_indexes"]
+import contextlib
+import sys
+
+import frappe
+
+# An entry with "db" runs only on that database (frappe.db.db_type).
+INDEXES = [
+	{"doctype": "Sales Invoice", "columns": ["customer", "status"], "index_name": "idx_sales_invoice_04c198b9"},
+	{"doctype": "Sales Invoice", "search_index_field": "po_no", "db": "mariadb"},
+]
+
+
+def ensure_indexes():
+	"""Create each index in INDEXES once. One failed entry never stops the others."""
+	previous = None
+	try:
+		# commit what ran before, so a rollback below undoes only this function's own work
+		frappe.db.commit()
+		previous = _lock_wait()
+	except Exception:
+		_rollback()
+	try:
+		for entry in INDEXES:
+			try:
+				# commit what ran before this entry, so the rollback below undoes only this entry
+				frappe.db.commit()
+				_ensure_index(entry)
+				frappe.db.commit()
+			except Exception as error:
+				_rollback()
+				# a hand-edited entry can lack a "doctype" or not be a dict: the handler itself must
+				# not raise, or one bad entry would fail the migrate and skip the entries after it
+				title = f"ensure_indexes: an entry was not created ({type(error).__name__})"
+				reference = {}
+				with contextlib.suppress(Exception):
+					title = _title(entry, f"was not created ({type(error).__name__})")
+					reference = {"reference_doctype": "DocType", "reference_name": entry["doctype"]}
+				try:
+					frappe.log_error(title=title, **reference)
+					frappe.db.commit()
+				except Exception:
+					# the Error Log row failed too: migrate's output is the only record left
+					with contextlib.suppress(Exception):
+						sys.stderr.write(f"optimus_indexes: {title}; the Error Log row could not be written either\n")
+				# a failed Error Log write must not leave a failed transaction for the next hook
+				_rollback()
+	finally:
+		if previous is not None:
+			try:
+				_lock_wait(previous)
+				# on Postgres the restore is part of the open transaction: commit it now, or a
+				# later hook's rollback would undo it and the 300 s cap would stay for the session
+				frappe.db.commit()
+			except Exception:
+				_rollback()
+
+
+def _lock_wait(value=None):
+	"""Cap how long this connection waits for a table lock at 300 seconds and return the old
+	setting, so an index build on a busy table gives up instead of holding every later query
+	on that table behind it. Called with that old setting, put it back."""
+	if frappe.db.db_type == "mariadb":
+		read, cap = "select @@session.lock_wait_timeout", 300
+		write = "set session lock_wait_timeout = %s"
+	elif frappe.db.db_type == "postgres":
+		read, cap = "select current_setting('lock_timeout')", "300s"
+		write = "select set_config('lock_timeout', %s, false)"
+	else:
+		return None
+	previous = frappe.db.sql(read)[0][0] if value is None else None
+	frappe.db.sql(write, (cap if value is None else value,))
+	return previous
+
+
+def _rollback():
+	# on Postgres a failed statement aborts the transaction until it is rolled back
+	with contextlib.suppress(Exception):
+		frappe.db.rollback()
+
+
+def _title(entry, what):
+	# the key and what happened first: a cut to 140 characters (Error Log.method) can only
+	# shorten the DocType, which reference_name also holds
+	key = entry.get("index_name") or entry.get("search_index_field")
+	return f"ensure_indexes: {key} {what} on {entry['doctype']}"[:140]
+
+
+def _ensure_index(entry):
+	doctype = entry["doctype"]
+	if entry.get("db", frappe.db.db_type) != frappe.db.db_type:
+		title = _title(entry, f"skipped on {frappe.db.db_type} (the entry is for {entry['db']})")
+		# one row per entry, looked up by the reference columns: MariaDB indexes one of them,
+		# never the title (method); on Postgres Frappe may not have indexed either
+		reference = {"reference_doctype": "DocType", "reference_name": doctype}
+		if not frappe.db.exists("Error Log", {**reference, "method": title}):
+			frappe.log_error(title=title, **reference)
+		return
+	if not frappe.db.table_exists(doctype, cached=False):
+		return
+	field = entry.get("search_index_field")
+	if field:
+		if not frappe.db.has_column(doctype, field):
+			return
+		# the index first: a failed build leaves no Property Setter that a later sync of
+		# this DocType would act on outside this guard
+		if not frappe.db.get_column_index(f"tab{doctype}", field, unique=False):
+			frappe.db.add_index(doctype, [field], index_name=f"{field}_index")
+		# then Search Index on the field, so Frappe's schema sync keeps the index
+		if not frappe.db.exists(
+			"Property Setter",
+			{"doc_type": doctype, "field_name": field, "property": "search_index", "value": "1"},
+		):
+			from frappe.custom.doctype.property_setter.property_setter import make_property_setter
+
+			make_property_setter(doctype, field, "search_index", 1, "Check", validate_fields_for_doctype=False)
+		return
+	columns = entry["columns"]
+	if not all(frappe.db.has_column(doctype, column.split("(", 1)[0]) for column in columns):
+		return
+	if frappe.db.has_index(f"tab{doctype}", entry["index_name"]):
+		return
+	frappe.db.add_index(doctype, columns, index_name=entry["index_name"])
+```
+
+On Postgres, building an index blocks writes to the table, so add indexes on write-hot tables in a maintenance window; Frappe's schema sync can also drop a Search Index named after a column of a composite index on another table until that table syncs again (a Frappe issue). Every entry that can run on Postgres carries this caveat, a plain composite profiled on MariaDB included.
+
+**Silent skips.** When an entry's table or one of its columns does not exist yet (a DocType or a Custom Field that is not synced on this site), `ensure_indexes()` skips it without an Error Log row and tries again on the next migrate. A missing Error Log row therefore does not prove the index exists: check ``SHOW INDEX FROM `tabSales Invoice` `` on MariaDB or `pg_indexes` on Postgres.
+
+**Removing an index or an entry.** Delete the entry from `INDEXES` first, or the next migrate builds the index again. Then drop the index: an `idx_*` index by its name, and for a Property Setter entry delete the Property Setter named `"Sales Invoice-po_no-search_index"` (`<DocType>-<field>-search_index`) and drop `<field>_index`, or let Frappe drop it the next time it syncs that DocType. `bench --site <site> uninstall-app` (and later `bench remove-app`) removes neither: the Property Setter belongs to no module and the indexes belong to another app's table, so do the same by hand when you uninstall the app that holds `optimus_indexes.py`. To drop them automatically, add a `before_uninstall` hook in that app that deletes the Property Setters and drops the indexes of your `INDEXES` entries.
 
 ### 2.4 Connectivity probe (Optimus Settings → AI → "Test connection" button)
 
@@ -114,10 +269,14 @@ These items are **never** sent in any AI request body:
 
 - **Sensitive SQL literals.** `password = '...'`, `api_key = '...'`, `token = '...'` and the 12 other patterns in `optimus.redaction.DEFAULT_SENSITIVE_SQL_COLUMNS` are replaced with `<REDACTED>` at capture time, so even the `example_queries` field sees the redacted form. Operators can extend this list via `sensitive_sql_columns` in Optimus Settings.
 - **HTTP form bodies.** `form_dict` keys matching `password` / `api_key` / `token` / etc. are redacted at capture (`optimus.redaction.DEFAULT_SENSITIVE_KEYS`) and form bodies themselves are never included in AI payloads only summary fields like `cmd` / `doctype` reach the humanize-steps path.
-- **Your API keys.** The provider API key is read from a Password field decrypted on demand (`frappe.utils.password.get_decrypted_password`). It is sent **only** in HTTP headers (`x-api-key` or `Authorization: Bearer …`), never echoed in the prompt, never logged, never returned to the client. The OpenAI-compatible provider with `needs_key=False` (local endpoints) omits the header entirely.
+A guardrail repair request is a separate completion: it reads the current key once
+when sent. Same-origin redirects and parameter retries reuse that completion's
+auth object without decrypting again.
+
+- **Your API keys.** The provider API key is stored in an encrypted Password field. Sending reads current settings and encrypted `__Auth` together in one SQL statement, refuses a changed destination/configuration, then decrypts the bound key once per completion. Logging and the Error Log hook also read the stored key for masking. For a provider that needs a key it must be plain printable ASCII: a key with any other character (a space inside it, a pasted smart quote or no-break space, a control character) is refused before any request is made, with a message that names the usual causes (a pasted smart quote, a stray space, a no-break space, a control character), and such a key is refused when Optimus Settings is saved, with the same message. The OpenAI-compatible provider needs no key (Ollama, LM Studio, vLLM): there such a key is neither sent nor refused, and the request goes without one; a key it can send is still sent (a router such as OpenRouter needs one). In Optimus's code it sits only in local variables named `api_key` or `secret` (names Frappe's traceback sanitizer and Sentry redact), for a moment in the `literals` parameter of `redaction.scrub_secrets` (which moves the key into `secret` before it scrubs anything), and in a masked `requests` auth object (`_ApiKeyAuth`). It travels only in the HTTP header (`x-api-key` or `Authorization: Bearer ...`), which that object sets on the HTTP library's own prepared request, whose headers hold it while the request is sent (the response keeps that request, and neither one's `repr` shows its headers). The HTTP library never follows a redirect: it drops only a header named `Authorization` when it follows one to another host, so the `x-api-key` header would have been sent on to the redirect target. Optimus follows at most three 307 or 308 redirects itself, only to the same host and port (with the same scheme, or http to https on that host), sending the same request and key again; any other 3xx reply (a 301, 302 or 303, another host or port, a downgrade, a fourth redirect) is reported as an unexpected response instead, which says that a Base URL that redirects (301, 302 or 303, or a 307 or 308 to another host) must be set to the final URL it redirects to, and the address a redirect points to is never logged or shown. Apart from those it is never part of a settings dict, a header dict, the prompt or an exception message. A provider's error reply is scrubbed before it is shown, of the key the request was sent with (the only key the provider received, so an echo is masked even when the key in Settings was changed while the request ran), or of the key stored in Optimus Settings when the request carried none, each in its raw and its JSON-escaped form. Scrubbed provider replies and 404 URL details are administrator-only `AiFixError.detail`; public exception strings and AI logs omit them. Escaping provider exceptions have prompt/reply/URL frames detached, but live debugger or telemetry stack capture remains a deployment consideration. In each of the failure scenarios the canary test (`optimus/tests/test_ai_secret_canary.py`) models, it appears in no Error Log row, traceback or Sentry event (earlier releases could log it: see the API key advisory in `CHANGELOG.md`), and it is never returned to the client. The OpenAI-compatible provider with `needs_key=False` (local endpoints) sends no auth header at all when no key is set.
 - **Recording UUIDs.** Internal Redis keys.
 - **Your full DB schema.** Only tables observed in this profile's recordings are mentioned by name.
-- **Other sessions / users / findings.** Each LLM call is one-shot per finding (or per table / per session). No cross-session context.
+- **Other sessions / users / findings.** Each suggestion is scoped to one finding (or table or session). A repair request includes that finding's first answer and the broken-rule list. No cross-session context.
 - **The signed pickle blobs in Redis.** These hold the raw recording state mid-pipeline; the AI payload reads only finalized analyzer output.
 
 ---
@@ -131,47 +290,158 @@ These items are **never** sent in any AI request body:
 | `Anthropic` | Messages | `https://api.anthropic.com` | Yes | Default model: `claude-sonnet-4-6`. |
 | `OpenAI` | Chat completions | `https://api.openai.com/v1` | Yes | Default model: `gpt-4.1-mini`. |
 | `Kimi (Moonshot)` | Chat completions | `https://api.moonshot.ai/v1` | Yes | Default model: `kimi-k2-0905-preview`. |
-| `DeepSeek` | Chat completions | `https://api.deepseek.com/v1` | Yes | Default model: `deepseek-chat` (V3). `deepseek-reasoner` (R1) also works. |
+| `DeepSeek` | Chat completions | `https://api.deepseek.com/v1` | Yes | Default model: `deepseek-flash`. Thinking is explicitly disabled so the completion budget goes to the answer. |
 | `Aerele` | Chat completions | `https://api.aerele.in/optimus/v1` | Yes | Managed service buy a fixed token pack up front. See § 10. |
 | `OpenAI-compatible` | Chat completions | (you set it) | No (configurable) | Use this for local LLMs and any other OpenAI-shaped server. |
 
-`ai_base_url`, `ai_model` and `ai_api_key` (Password) all override the provider defaults. The HTTP timeout is `ai_request_timeout_seconds` (v0.9.0+, default 60s, clamped 10–600s).
+`ai_model` overrides the default model and `ai_api_key` supplies the credential. `ai_base_url` overrides the endpoint only for OpenAI-compatible providers. The HTTP timeout is `ai_request_timeout_seconds` (v0.9.0+, default 60s, clamped 10–600s).
 
 For an explicit data-residency choice, use `OpenAI-compatible` pointed at a process you run yourself see § 6.
 
+URL validation allows loopback and LAN HTTP(S), rejects credentials, queries,
+fragments, ambiguous syntax and literal metadata/link-local addresses, and runs
+again for each allowed redirect. Keys are withheld on non-loopback plain HTTP
+unless the operator explicitly enables `optimus_ai_allow_key_over_http`.
+Prefer HTTPS. DNS resolution/rebinding is not policed; apply network egress
+controls. An endpoint change clears an unchanged stored key. Provider settings
+and the encrypted credential are bound by a single SQL snapshot at dispatch.
+Test connection is capped at 60 seconds and displays escaped, scrubbed details
+only to administrators. [Security policy](../SECURITY.md) describes residuals.
+
+
 ---
+
+Every fix suggestion is verified before it is stored (`optimus/ai_guardrails.py`): the diff's `-` and context lines must match the source Optimus sent, and every block the report would show as code (any section, any indent, including indented code blocks and `~~~` fences) is parsed and checked against the Frappe rules the prompt teaches; code quoted verbatim from the shown source counts as context.
+
+Adding a whitelist decorator or editing an argument on a later signature line triggers the type-hint check, including positional-only and keyword-only arguments. Adding a child-row mutation inside an existing loop also triggers its check. An unrelated body edit does not turn an unchanged signature or mutation into a new violation.
+
+### 4.1 Guardrail tiers
+
+The rules come in tiers.
+
+Newly generated or manually refreshed **N+1 Query** fixes must show how repeated
+reads change. A SQL-to-ORM rewrite, an IN filter still inside the same loop, or a
+dummy wrapping loop does not establish fewer calls. Such answers trigger the
+existing optional single repair request; if repair is disabled, unavailable or
+unsuccessful, Optimus withholds both the code and its unsupported improvement
+claim. Read replacements whose diff omits the enclosing loop need a complete
+grounded diff or directional advice without code. Other finding types retain
+advisory notes for partial per-query improvements. These are bounded static
+checks, not proof of runtime equivalence or measured query savings. Prompt
+version remains 4: saved answers are not invalidated or automatically regenerated
+by this quality check. Replace existing suggestions explicitly to regenerate them.
+For new N+1 fixes, function references, lambdas and newly extracted query helpers
+require local review or directional advice: static inspection cannot establish
+how often their caller runs. A memo must visibly persist outside the loop and
+must not be reset. Ambiguous loop/header rewrites can be withheld conservatively.
+
+- **Block rules** mean the code is fabricated, unsafe or wrong: code not copied from the shown source, added, moved or changed raw SQL (including parameter-only changes) or any DDL, formatted SQL, a removed permission check or `ignore_permissions` / `allow_guest`, `eval` / `exec`, pickle or marshal loads, shell commands, switching to Administrator, a manual commit, a process-wide cache, `enqueue` without `enqueue_after_commit=True`, the four headings, and every Frappe rule a pinned semgrep rule checks: untranslated messages, untyped whitelisted arguments, a positional `order` in `orderby`, `get_value` on a Single DocType, controller writes that are never saved, child rows changed while iterating, module or request-proxy state, and an unchecked `has_permission`. Optimus sends the model one follow-up turn listing every broken block rule and keeps the rewrite only if it has the four headings and breaks fewer block rules. Code that still breaks a block rule is removed, and a profiler note names each broken rule in plain English (the first two, then how many more). A heading problem alone never removes code.
+- **Advise rules** are conventions no pinned semgrep rule checks: no dynamic imports, and no index led by a Frappe metadata column. They never cost a follow-up turn and never remove code: one profiler note lists them.
+- **Notes** tell you about the answer: Customize Form has no index option, the model saw only part of the prompt, an image or an off-site link was removed, captured-data markers were echoed.
+
+A cut-off answer is never automatically re-asked. The received final-answer text is retained in the finding's `llm_fix_json.received_responses` before guardrail fallback, while unfinished code stays out of the report. Provider termination is recorded separately from local validation. New answers are `complete` after local validation, `incomplete`, `blocked`, or `processing_limited`. A missing or unfamiliar finish reason alone does not discard valid text; the original provider reason and its unconfirmed status remain in retained evidence. A reported exhausted output budget, explicit truncation, paused turn, tool request, abort or unclosed fence remains incomplete. Empty replies fail without a repair call. Blocked responses never trigger a guardrail repair call. Manual Refresh includes incomplete answers and historical unknown answers; blocked and locally limited answers are kept unless the operator explicitly chooses to replace all suggestions. The optional repair of a complete answer with rule violations remains controlled by `optimus_ai_reask` in site_config.
+
+The 16,384-character threshold now selects a literal renderer instead of truncating the answer. Long answers are validated using explicit fenced code, with no recursive Markdown conversion. Resource limits are explicit: 1,048,576 characters for validation, 4,096 per line, 64 fenced blocks and 131,072 total fenced-code characters; ambiguous indented/nested prose requires local review. Exceeding these limits produces `processing_limited`, preserving the provider's actual finish reason. Storage retains up to 4,194,304 UTF-8 bytes per received answer (at most two attempts), with a full-text hash, original length and an explicit retention-truncated flag. These are resource envelopes, not generation-length targets. Raw retained text is unvalidated, never applied, excluded from report views and exports, and shares the parent session's access permissions and deletion/reset lifecycle. It is not written to logs or usage journals. Numeric reasoning-token counts are retained when reported, without adding them to total usage again; absent counts remain unknown.
+
+This retention happens when the finding result is saved. It does not checkpoint a running request, recover bytes lost in a transport timeout, or restore partial code discarded by older versions. There is no prefix continuation or streaming recovery yet. Refresh requests a fresh answer and spends provider tokens; retained text is not automatically re-sent.
+
+Report rendering checks at most `RENDER_VALIDATION_CHARS = 262144` characters and `RENDER_VALIDATION_ANSWERS = 128` distinct saved answers, in report order. Identical answers share one check within that render. An answer that does not fit is withheld without consuming the remaining budget, so later smaller answers can still be checked. Limited answers show “Response needs local review”, without an outdated label or an automatic paid retry. The saved answer is unchanged. Generation and refresh eligibility outside rendering still perform the full individual safety check; no provider call is made while rendering.
+
+### 4.2 Context window and answer size
+
+DeepSeek’s request options follow its [thinking-mode API](https://api-docs.deepseek.com/guides/thinking_mode/); provider defaults are data in `_PROVIDER_DEFAULTS`, and other providers receive no DeepSeek-specific options.
+
+Input assembly reserves a minimum answer and tokenization margin first; the final request's allowance is `min(requested output budget, known model output maximum, context window − estimated input − margin)`. The margin is at least 256 tokens and 10% of estimated input. Re-asks recalculate from their full conversation history and reported usage, without the former twice-first-answer ceiling. Small local models use the same remaining-context calculation. Counts remain estimates, so a provider can still reject a prompt its tokenizer counts differently.
+
+Default model capabilities are data in `_PROVIDER_DEFAULTS`, scoped to exact model IDs: [GPT-4.1 mini](https://developers.openai.com/api/docs/models/gpt-4.1-mini) (1,047,576 context / 32,768 output), [Claude Sonnet 4.6](https://platform.claude.com/docs/en/models/sonnet-4-6/overview) (1M / 128K), and [DeepSeek Flash](https://api-docs.deepseek.com/api/create-chat-completion/) (1M / 393,216). The configured `deepseek-v4-flash` alias retains its identity. The default requested output budget is 4,096 tokens (8,192 for reasoning models or enabled thinking); it is separate from model capacity. Set `optimus_ai_max_output_tokens` to an integer from 512 through 131,072 to change it (for example, `bench --site <site> set-config -p optimus_ai_max_output_tokens 4096`; `-p` preserves its numeric type). Reasoning consumes this same budget, so a reasoning-heavy model may need a larger setting. Unknown models also receive the bounded requested budget. Unknown Anthropic IDs use a conservative 200,000-token context fallback, which operators can override with actual capacities. Retained `budget_source` distinguishes known capacities from context fallbacks. Test AI connection sends the same resolved budget as a real request and asks only for OK. No provider discovery or paid probe runs automatically. See the [Messages max_tokens contract](https://platform.claude.com/docs/en/api/typescript/messages/create) and [Chat Completions max_completion_tokens contract](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
+
+Operators can declare model capacities in site_config: `"optimus_ai_model_limits": {"Provider name": {"model-id": [context_tokens, output_tokens]}}`. Both values must be positive integers and describe actual model limits. The existing Context window setting still takes precedence for custom OpenAI-compatible endpoints. A different model never inherits the default model's output maximum. DeepSeek thinking defaults to disabled; `"optimus_ai_thinking": {"DeepSeek": "enabled"}` opts into the provider's declared thinking mode. The exact configured alias and mode still require a user-triggered live conformance test.
+
+The code guardrails apply to finding fixes in every rendered block, regardless of its fence label or section. Static checks do not establish that a suggestion fixes the performance problem. Review its semantics before applying it.
 
 ## 5. Eligible finding types
 
-These ten finding types are the only ones for which Optimus builds an AI payload. All other types (Slow Hot Path, Hook Bottleneck, Repeated Hot Frame, infra / frontend findings, etc.) are skipped they don't carry enough code/SQL context for the LLM to add value over the profiler's own deterministic suggestions.
+These four finding types are the only ones for which Optimus builds an AI payload. Infrastructure, frontend and call-tree findings lack enough code or SQL context. Index findings receive deterministic recipes; Framework N+1 findings refer to framework code the app cannot change. A Hot Line is also skipped when it sits in framework code, when Phase 1 named the function that holds its time, or when Phase 2 measured at least 1,000 microseconds per hit (`per_hit_us`) on a line that calls a non-builtin (`ai_grounding.HOT_LINE_CALLEE_US`). The opener of a multi-line call (`total = sum(`) counts as calling something unnamed, because its callee is on a later line. A line whose call runs once per item of its own comprehension or generator (not in the first iterable, and not in an argument beside the comprehension) is explained as running its own loop over its items, whose whole time is the line's, not the inner call's; no item count is quoted, since the profiler's hits count line executions. The report shows an explanation instead. If the gate itself raises, it fails closed: no AI call, and a neutral note that the check could not run.
 
-- Filesort
-- Framework N+1
-- Full Table Scan
 - Hot Line
-- Low Filter Ratio
-- Missing Index
 - N+1 Query
 - Redundant Call
 - Slow Query
-- Temporary Table
+
+Redundant Call findings recorded before the callsite correction are excluded from AI suggestions. Newly analyzed findings carry a `callsite_walk: outermost_first` stamp. Re-record the flow to obtain a corrected finding. Stored suggestions remain in the database. Regeneration hides index, Framework N+1 and gated Hot Line suggestions. An older Redundant Call suggestion stays visible with a re-recording caveat. Every displayed suggestion from an earlier prompt version is marked outdated.
 
 The exact set lives in `optimus/ai_fix.py::AI_ELIGIBLE_FINDING_TYPES`. A test (`test_ai_privacy.py::TestDocStaysFresh`) compares this section's list against the frozenset to make sure the doc never drifts from the code.
 
 ### 5.1 Per-type opt-out (`ai_excluded_finding_types`)
 
-`Optimus Settings → AI → Privacy & Operations → Excluded finding types` is a multi-line list. Each line names one of the ten types above (exact match, case-sensitive). Lines starting with `#` are comments. Listed types are skipped in **both** auto-suggest and on-demand calls no payload is built, no request is sent, the on-demand button surfaces a clear "excluded by Optimus Settings" message.
+`Optimus Settings → AI → Privacy & Operations → Excluded finding types` is a multi-line list. Each line names one of the four types above (exact match, case-sensitive). Lines starting with `#` are comments. Listed types are skipped in **both** auto-suggest and on-demand calls no payload is built, no request is sent, Refresh AI suggestions counts them as excluded in its toast, and the analyze-time step adds an analyzer note.
 
 Use this when the SQL or source for a particular finding category embeds business logic you don't want flowing to a hosted provider:
 
 ```text
 # We're fine sending N+1 patterns to Anthropic, but our pricing-rule SQL
-# embeds margin formulas: skip Slow Query and Full Table Scan.
+# embeds margin formulas: skip Slow Query and N+1 Query.
 Slow Query
-Full Table Scan
+N+1 Query
 ```
 
 The list is empty by default. The exclusion list is **additive**: types not listed continue to flow normally.
+
+### 5.2 Errors, Refresh AI suggestions and the analyze-time step
+
+`ai_fix.AiFixError` carries a `kind`: `config` (Optimus Settings cannot serve any call: AI off, no model, key or Base URL, an unknown provider, a context window too small for any Optimus prompt), `context` (this one prompt did not fit the model's context window: Optimus refused it before sending, or the provider rejected it), `not_eligible` (the gate or the per-type exclusion refused the finding and no request was built), `auth`, `quota`, `rate_limited`, `not_found`, `server` and `bad_request` (an HTTP error status, classified as described in section 5.3, "Request failures and retries"), `refused` (the provider's content moderation refused this prompt: an HTTP 400 or 403 whose reply says the input was flagged, or Azure's `content_filter`), `transport`, `timeout`, `bad_response`, `internal` (an unexpected error while sending or processing) and `unknown`. **Only `not_eligible` counts as a skip** (`AI_SKIP_KINDS`); every other kind, `config` and `context` included, is a failure that is logged to the Error Log and counted.
+
+`AiFixError.fatal` is True for `auth`, `quota`, `not_found` and `config` (`AI_FATAL_KINDS`): the next call fails the same way until the operator changes the key, the credit, the model or Base URL, or the settings. It is the only list of such kinds, so code that stops a run early on a failure reads `fatal` and keeps no list of its own. `context` and `refused` are not fatal: one prompt that does not fit, or that moderation refuses, says nothing about the next finding's prompt. A 403 counts as `auth` unless its reply is such a moderation refusal. `rate_limited`, `server`, `transport`, `timeout`, `bad_request`, `bad_response`, `internal` and `unknown` are not fatal either.
+
+Each failure message says what happened and what to do next, and it is translated. A context failure names the cause ("The prompt did not fit the model's context window") and, for a hosted provider, points at a model with a larger window; for your own model server it gives the server's context setting (Ollama: `OLLAMA_CONTEXT_LENGTH` or `num_ctx`). A timeout names the call's whole time budget in seconds, also when a guardrail re-ask had only what was left of it. A connect timeout with the full 10 seconds to connect (the cap on connecting) is a `transport` failure that asks you to check the network, not a slow model; when less than that was left of the call's budget (a parameter retry, a redirect, a guardrail re-ask), it is a `timeout`, since the budget ran out. A rejected request names the Model, and the Base URL only for a provider whose Base URL you set. When the provider sent a reply, it follows the message as "The provider replied: ...", scrubbed and cut at 300 characters. An unexpected error names only its type; its Error Log row adds where it happened, as plain `file:line:function` frames, never what it said. A transport failure's row keeps only the error's type and the type of the error it wraps (for example `ConnectionError (NameResolutionError)`), never its message, which can quote the URL and a key in it.
+
+`optimus.api.refill_ai_suggestions` returns, in its `fixes` result, `added`, `failed`, `skipped_time`, `skipped`, `gated` (AI-eligible findings and Framework N+1 that the report answers with Optimus's own advice or a note; index findings are not counted), `excluded` (AI-eligible types under Excluded finding types in Optimus Settings) and `skipped_ineligible`. The old `indexes` result is removed: `optimus.api.ai_capabilities` always reports `indexes: false`. Missing, incomplete and outdated suggestions are refreshed first, so repeated refreshes make every eligible finding current.
+
+**How findings are selected.** One selection (`analyze.eligible_findings`) is the shared definition, and one rule (`ai_prompts.fix_state`) classifies a finding's stored answer, the same rule that decides the report's "earlier version" footer:
+
+- `missing`: nothing stored. Always picked.
+- `incomplete`: a provider output cutoff (`length` / `max_tokens`) or the guardrail’s `truncated` violation. Manual Refresh retries it; automatic missing-only runs do not. Unfinished code remains removed.
+- `current`: a usable answer (suggestion text, as the report shows a card) made with this prompt version or a newer one. A newer answer is current, not downgraded. A non-truncation guardrail fallback (its code removed) remains usable and current.
+- `outdated`: anything else that is stored: unparseable text, an older, absent, float, boolean or string `prompt_version`, or no suggestion text. Picked by a selection that includes outdated answers.
+
+The **Refresh AI suggestions** button queues missing, incomplete and outdated eligible findings by default. Replacing current answers requires the explicit **Also replace current suggestions** choice. The worker applies the same eligibility rules after admission and before sending each call.
+
+Order: missing, incomplete, outdated, then current. Inside each, severity (High first, a blank severity as Low, an unrecognised one last), the larger impact, then the older answer. Findings whose type is excluded, and findings the eligibility gate refuses, are never picked; the selection also returns how many of each (`gated`, `excluded`). To resume an interrupted run, `requested_at` skips answers generated at or after the request: a naive datetime is read in the site's System Settings timezone (as Frappe stores it), an aware one keeps its offset, a value of another type raises `TypeError` and an unparseable string raises `ValueError`.
+
+**Token spend and refresh count.** Session counters change through atomic SQL increments with savepoint isolation. Every queued provider attempt settles its reported tokens with its answer and durable outcome, once. There is no worker-local spend marker: `suggest_fix` and `humanize_steps` return usage to their caller and attribute Error Logs only to the explicit session reference. Missing usage remains unknown, never a known zero. The journal records incomplete attempts and retains known tokens from interrupted or unusable replies. A failed counter statement is logged while the durable attempt remains the reconciliation source; a whole-transaction conflict retries the short write, never the provider call. A normal Session save retains the counters stored in SQL.
+
+**Refresh AI suggestions and the database.** The API commits a SQL reservation and returns queued progress. One accepted user refresh or resume increments the refresh count; attachment, refusal and completion do not. Session-first locking and the unique active reservation serialize competing clicks. Each attempt commits its send intent before HTTP and its answer, usage and outcome afterward. No SQL locks span provider calls. Settlement retries SQL conflicts at most three times and reads back the attempt after an ambiguous commit. Saved answers survive cancellation, report failures and later worker failures. Phase 2 uses the same parent lock and changes the parent on admission, fencing older PostgreSQL snapshots. See [background refresh operations](AI-REFRESH.md).
+
+The analyze-time step touches the single-flight flag (the Redis key that stops two analyses from overlapping) before every AI call, and only while it still holds that flag, so it never takes over another session's flag. Each call's timeout is capped at 240 seconds, below the flag's 300-second lifetime, so two heartbeats are never further apart than the flag lives. Every check reads the flag from Redis, not from the job's `frappe.local.cache` (that cache lives for the whole RQ job, so a cached holder goes stale): the flag is taken only when free with one atomic `SET NX EX`, a heartbeat renews it with `EXPIRE` (a session that already held the flag starts only if that renewal confirms it still does), and a run releases it only while Redis still names it the holder. A heartbeat that fails or finds another session's flag writes one `optimus` log line per run at ERROR, and the janitor's note on a stuck Analyzing session names a lapsed analyze heartbeat as a possible cause.
+
+### 5.3 Request failures and retries
+
+Optimus classifies authentication, missing endpoint/model, exhausted quota, rate limit, context, configuration, server, transport, timeout and malformed response failures separately (section 5.2 lists the kinds and which are fatal; the runbook table in section 6.5 says what to do for each). A context-limit rejection is recognised from the wording of OpenAI, Anthropic, Moonshot, llama.cpp and vLLM replies and from the provider's `context_length_exceeded` or `exceed_context_size_error` code; Moonshot's `exceeded_current_quota_error` (a spent balance or a suspended account) is a quota failure, not a rate limit. A validation rejection (HTTP 400 or 422) may trigger removal of `temperature` when the reply names it, or replacement of `max_tokens` with `max_completion_tokens` when the reply says `max_tokens` itself is not supported, or the provider's `unsupported_parameter` code comes with a reply that names `max_tokens` (a value error such as "max_tokens is too large" is not retried), each at most once. There are at most three validation attempts for this parameter adaptation; each can follow the permitted redirects. A guardrail re-ask starts from the parameters the first call ended with, so it does not repeat a rejected request; nothing is remembered from one suggestion to the next. Context-limit and quota failures never use it; network failures are not automatically retried.
+
+Parameter retries and permitted redirects use the remaining request budget. Each connection attempt is limited to 10 seconds, or the remaining budget when shorter. The read timeout uses the remaining budget. The HTTP library's read timeout measures socket inactivity, not a strict overall wall-clock limit; background worker limits remain necessary. A guardrail repair request also uses the remaining completion budget. Reasoning models retain the same provider-aware output cap. Leading inline thinking blocks are removed (at most three, and only at the start of the reply), and unfinished thinking is an unusable response. Reported tokens stay attached to a failure after a billed response, including a validation failure.
+
+**The Error Log row of a failed call.** Every Error Log row the AI writes has a title that starts with `optimus ai`: search the Error Log for `optimus ai` to see them all. The titles:
+
+- `optimus ai_fix`: provider/protocol failures, with the explicit session reference and call metadata.
+- `optimus ai spend` and `optimus ai refresh count`: counter writes and their reconciliation outcomes.
+- `optimus ai recording cache read`, `optimus ai load recordings bundle` and `optimus ai phase 2 context`: unavailable grounding or recording data.
+- `optimus ai admission after analyze`, `optimus ai refresh admission` and `optimus ai refresh status`: automatic admission, manual admission and status-read failures.
+- `optimus ai refresh prepare`, `optimus ai refresh worker`, `optimus ai refresh cleanup`, `optimus ai refresh item`, `optimus ai refresh result storage`, `optimus ai refresh enqueue`, `optimus ai refresh worker availability`, `optimus ai refresh recovery`, `optimus ai refresh release`, `optimus ai refresh selection`, `optimus ai refresh evidence`, `optimus ai refresh discarded`, `optimus ai refresh duplicate blocked`, `optimus ai refresh uncertain` and `optimus ai refresh ended`: worker transitions, calls, settlement and recovery. See [the engine runbook](AI-REFRESH.md) for each outcome and its action.
+- `optimus ai refresh report`, `optimus ai regenerate report` and `optimus ai phase 2 report`: report replacement failed. Saved results remain; reload and use Regenerate Reports. A lost commit acknowledgement can mean the new attachment was already saved.
+- `optimus ai recording tree read`, `optimus ai recording sidecar read`, `optimus ai recording tree load`, `optimus ai save recording File`, `optimus ai persist recordings` and `optimus ai analyze`: recording verification, snapshot persistence and analysis failures.
+- `optimus ai auto-arm phase 2`, `optimus ai Phase 2 admission cleanup` and `optimus ai Phase 2 capture recovery`: optional capture admission or recovery failures.
+- `optimus ai phase 2 worker availability`, `optimus ai phase 2 enqueue`, `optimus ai phase 2 worker`, `optimus ai phase 2 recovery` and `optimus ai phase 2 queue recovery`: durable Phase 2 dispatch, execution and recovery failures. Retry analysis only for a failed generation; a pending report needs rendering, not repeated analysis.
+
+A failure row opens with the lines that tell you what to do, then the technical detail:
+
+- `kind=` is the failure kind (section 5.2) and `fatal=` says whether the next call fails the same way until you act (`fatal=True`) or the failure is about this call (`fatal=False`). `hint=` is one fixed sentence for the kind; the table in section 6.5 gives the full action.
+- `tokens=` appears when the failed call was still billed (the provider answered, and the reply was then unusable); these tokens are added to the session's AI Tokens Spent.
+- On an `optimus ai_fix` row only (a request that failed): `provider=`, `where=`, `status=` and, when the provider sent a code, `provider_error=`. Never the reply body, the prompt or the key.
+- On an `optimus ai_fix` row only, for a call that went through the parameter retries: `attempts=` and `dropped=`, the requests it took (1 to 3) and the parameters changed (`temperature` removed, `max_tokens` renamed to `max_completion_tokens`, or `none`). A model that needs a changed parameter on every call shows `attempts=2` or `3` and takes that many times as long per call. A call that succeeds after a change writes no row, so there the change shows only as latency, and so does a call whose reply arrived and was then unusable: its row is the step's (`optimus ai refresh item`, `optimus ai admission after analyze`, `optimus ai refresh item`) and has no request lines.
+
+Regenerate Reports renders stored data and saved AI suggestions without calling the AI provider and without re-running the analyzer. Refresh AI suggestions (available when AI is enabled and the session is Ready) remains the action for new AI answers; the Regenerate Reports confirmation points at it only then. Both report regeneration and step humanization can load the saved recording JSON without deserializing its Python trees or sidecars. This release supplies helpers for the upcoming background engine; it does not yet move optional AI work out of analysis or make refresh asynchronous.
+
+**Phase 2 and AI suggestions.** A Phase 2 (line-profile) run adds Hot Line findings to the session, then re-renders the report from stored data. After saving results and attempting the report update, normal completion queues missing finding suggestions through the same automatic admission used after profiling, when enabled. Manual Refresh AI suggestions can also fill them in. Duplicate delivery and a hard timeout do not repeat that admission. If the re-render itself fails or is interrupted, or the job fails after the run was committed (an error once the run was saved, before the re-render started), the run stays Ready with the warning "The report re-render did not finish. Use Regenerate Reports on this session to refresh it."; the failure is in the Error Log under `optimus ai phase 2 report`.
 
 ---
 
@@ -195,6 +465,7 @@ Optimus Settings → AI:
 - Base URL: `http://localhost:11434/v1`
 - Model: `qwen2.5-coder:7b` (the exact tag you pulled)
 - API Key: leave blank
+- Context window (tokens): leave 0 for Optimus's 4,096-token budget; check your server's effective window. For better answers start Ollama with a larger window (`OLLAMA_CONTEXT_LENGTH=8192 ollama serve`, or `PARAMETER num_ctx 8192` in a Modelfile) and enter the same number here. Ollama's OpenAI endpoint cannot change the window per request.
 - `ai_request_timeout_seconds`: `180` (first-token cold-start can exceed 60s)
 
 First call after restart pays the model-load cost (often 5–30s on CPU; <1s on a warm GPU). Subsequent calls are fast.
@@ -239,6 +510,83 @@ Default `ai_request_timeout_seconds = 60` is fine for hosted providers (Anthropi
 
 ---
 
+### Request failures and retries
+
+Optimus classifies authentication, missing endpoint/model, exhausted quota,
+rate limit, context/configuration, server, transport, timeout and malformed
+response failures separately. Error Logs retain status and validated error
+codes, never the provider response body. A validation rejection (HTTP 400 or
+422) may trigger removal of `temperature` or replacement of `max_tokens` with
+`max_completion_tokens`, each at most once. There are at most three validation attempts for
+this parameter adaptation; each can follow the permitted redirects. Context-limit and quota failures never use it;
+network failures are not automatically retried.
+
+Parameter retries and permitted redirects use the remaining request budget.
+Each connection attempt is limited to 10 seconds, or the remaining budget
+when shorter. The read timeout uses the remaining budget. The HTTP library's
+read timeout measures socket inactivity, not a strict overall wall-clock
+limit; background worker limits remain necessary. A guardrail repair request
+also uses the remaining completion budget. Reasoning models retain the same
+provider-aware output cap. Leading inline thinking blocks are removed, and
+unfinished thinking is an unusable response. Reported tokens stay attached to
+a failure after a billed response, including a validation failure.
+
+Regenerate Reports renders stored data and saved AI suggestions without
+calling the provider. Refresh AI suggestions remains the action for new AI
+answers. Both report regeneration and step humanization can load the saved
+recording JSON without deserializing its Python trees or sidecars. This
+feature queues optional AI only after the profiling result is saved. Manual
+refresh is asynchronous, selects missing, incomplete and outdated suggestions by default,
+and shows its capped selection before admission. A listening worker and an
+enabled scheduler are required for execution and recovery. See
+[background refresh operations](AI-REFRESH.md) for deployment, cancellation,
+uncertain usage, resume limits, report recovery and API response changes.
+
+### 6.5 Troubleshooting
+
+- **"The model's context window (N tokens) is too small for the Optimus prompt."** The window cannot hold the system prompt plus a minimal answer (about 2,760 tokens for a fix suggestion, 2,168 for the Steps to Reproduce rewrite). Raise the server's window and the Context window (tokens) setting together.
+- **A suggestion ends with "the model saw only part of the prompt".** The server reported far fewer prompt tokens than Optimus sent, which is what Ollama does when its real `num_ctx` is smaller than the prompt (it drops tokens silently). Set `OLLAMA_CONTEXT_LENGTH` (or `num_ctx`) and the Context window (tokens) setting to the same value.
+- **"the suggested code was removed because it was cut off at the output limit".** The stored answer is incomplete. The old fixed completion ceiling and destructive 16K-character cutoff are removed. Use **Refresh AI suggestions** with replacement of current suggestions unchecked to request a fresh answer while keeping completed ones. Old discarded partial code cannot be reconstructed; future received text is retained privately. No automatic paid continuation occurs.
+- **"the suggested code was removed because it broke these Frappe rules: ..."** The model's code broke a block rule it was told about and the one follow-up turn did not fix it; the note quotes each rule (the first two, then "And N more"; section 4.1 lists them all). Review the diagnosis and treat the fix as a direction.
+- **"change the suggested code before you apply it: ..."** The code is kept, but it breaks a convention the profiler only advises on (a dynamic import, index advice led by a metadata column). Apply the listed changes when you copy the code.
+- **"The prompt did not fit the model's context window."** One prompt was too large for the window: Optimus refused it before sending, or the provider rejected it (its reply follows the message). On your own model server, raise its window and the Context window (tokens) setting together; on a hosted provider, choose a model with a larger window. It is a `context` failure: counted and logged, not fatal, so the other findings are still asked.
+
+**Error Log rows from the AI: what `kind=` means and what to do.** Every Error Log row for a failed AI call opens with `kind=`, `fatal=` and `hint=` (section 5.3). The row says `fatal=True` when the next call fails the same way until you act, so a run that stops early stops on these, and `fatal=False` otherwise. `not_eligible` is a skip, not an error, and writes no row.
+
+| `kind=` | `fatal=` | Symptom | What to do |
+| --- | --- | --- | --- |
+| `kind=config` | True | Optimus Settings cannot serve any AI call: AI is off, no Model, key or Base URL, an unknown provider, or a context window too small for any Optimus prompt. | Open Optimus Settings > AI Fix Suggestions, fix the setting the message names, then run AI > Refresh AI suggestions. |
+| `kind=auth` | True | The provider refused the API key (HTTP 401, or a 403 that is not a moderation refusal). | Replace the key in Optimus Settings with one that belongs to the selected provider. Every call fails until you do. |
+| `kind=quota` | True | The account has no credit or quota left (HTTP 402; a 429 with `insufficient_quota`, `billing_not_active` or Moonshot's `exceeded_current_quota_error`; "credit balance is too low"). | Add credit or raise the limit at the provider, then Refresh AI suggestions. |
+| `kind=not_found` | True | The Model or the Base URL does not exist at the provider (HTTP 404). | Check the Model name and the Base URL in Optimus Settings. For Azure, the Model is the deployment name. |
+| `kind=context` | False | One prompt did not fit the model's context window, refused before sending or rejected by the provider. The other findings are still asked. | Hosted provider: choose a Model with a larger window. Your own model server: raise its window (Ollama: `OLLAMA_CONTEXT_LENGTH` or `num_ctx`) and the Context window (tokens) setting together. |
+| `kind=refused` | False | The provider's content moderation refused this one prompt (a 400 or 403 whose reply says the input was flagged, or Azure's `content_filter`). | Nothing to change in the settings; the finding gets no AI suggestion. Add its type to Excluded finding types if it keeps happening. |
+| `kind=rate_limited` | False | The provider is throttling requests (HTTP 429 for request or token rate). | Wait a few minutes and Refresh AI suggestions again; it picks up the findings still missing. |
+| `kind=server` | False | The provider had a server error (HTTP 5xx, or 529 overloaded). | Try again in a few minutes. |
+| `kind=bad_request` | False | The provider rejected the request (HTTP 400 or 422) for a reason that is not context, quota or moderation, after the parameter retries. | Check the Model and the Base URL. `attempts=` and `dropped=` in the row show what Optimus already tried. |
+| `kind=transport` | False | The provider could not be reached: DNS, refused connection, TLS, or a connect timeout that had the full 10 seconds (the cap on connecting). | Check the network, proxy and Base URL from the server that runs the worker. |
+| `kind=timeout` | False | The provider did not answer within the request timeout, or the request ran out of it while still connecting. | Raise Request timeout (seconds) under Optimus Settings > AI Fix Suggestions > Privacy & Operations (section 6.4 suggests values), or try again. |
+| `kind=bad_response` | False | The provider answered, but the reply is unusable: not JSON, no text, only reasoning, or a redirect instead of a reply. `tokens=` shows what was billed. | A redirect: set the Base URL to the final URL it redirects to. Otherwise try again, use a non-reasoning model and check that the Base URL is the provider's API address. |
+| `kind=internal` | False | An unexpected error in Optimus while sending the request or processing the reply. The row lists `file:line:function` frames, never what the error said. | Send the row (it holds no reply text and no key) to the Optimus maintainers. |
+| `kind=unknown` | False | A failure no rule classified. | Read the message in the row and the provider's reply it quotes. |
+
+Signals from index advice, the Hot Line gate and Refresh AI suggestions. The `optimus` lines are in `logs/optimus.log`; they are written at ERROR because Frappe's production loggers drop anything lower. Each says why in one place, so you can answer without a debugger:
+
+| Signal | What it means | What to do |
+| --- | --- | --- |
+| The report says "Optimus could not build index advice" and `logs/optimus.log` has `optimus: index advice failed for N finding(s) or table(s) in one render (<finding type or table>: <ErrorType>, ...)` (`in one export` for the JSON export) | The index advisor raised for those findings or tables. No verdict was given on the index, and nothing else in the report is affected. | Check the query with EXPLAIN yourself. If it keeps happening, send that log line (it carries no query text or values) to the Optimus maintainers. |
+| The report says "Optimus could not read the details" of a table, with `optimus: evidence read failed for <table>: <ErrorType>` in the log | Optimus raised while reading that table's columns and indexes (a database error, say), or the index list came back empty (`EmptyIndexList`: every DocType table has a primary key, so the read failed). Not the same as a table with no DocType on this site. | Check the database is reachable and the table readable, then regenerate the report. |
+| Error Log title `ensure_indexes: <index> was not created (<ErrorType>) on <DocType>` | The generated `ensure_indexes()` hook tried to create that index and the database refused. The hook rolled back that one entry and went on with the others. | Read the row's error, fix the cause (permissions, a duplicate or too-wide key) and run `bench migrate` again. |
+| Error Log title `ensure_indexes: <index> was not created (OperationalError)` with error 1205 (lock wait timeout), or a line `optimus_indexes: ensure_indexes: <index> was not created (<ErrorType>) on <DocType>; the Error Log row could not be written either` in the `bench migrate` output | The index build waited the full 300 s for a table lock (a busy table) and gave up; the printed line means the Error Log write failed as well, so the console is the only record. | Run `bench migrate` again in a quiet window (no traffic on that table). |
+| Error Log title `ensure_indexes: <index> skipped on <db> (the entry is for <other db>) on <DocType>` | The entry is stamped for the other database, so this site skips it by design. One row per entry. | Nothing to do on this site. |
+| A Hot Line finding says "Optimus could not check this Hot Line" (`GATE_CHECK_FAILED_NOTE`), with `optimus: hot-line gate failed: <ErrorType>` in the log | The check that decides whether the AI may see the line raised, so the line was not sent (fail closed). | Look at what the line calls and how often it runs. If it keeps happening, send the log line to the Optimus maintainers. |
+| AI refresh progress `failed` | The AI call failed, or its answer could not be saved; old suggestions were kept. | Open the Error Log and search for titles starting with `optimus ai` (`optimus ai_fix` for a provider failure, `optimus ai refresh item` for a failure while processing a reply or saving the answer). The row's `kind=` and `hint=` say what to do; see the `kind=` table above. |
+| AI refresh Steps state `failed` | The Steps to Reproduce rewrite failed; the toast quotes why. The old steps are kept. | The message says what to do; the Error Log row is `optimus ai refresh item`. |
+| Refresh AI suggestions toast "A refresh is already running for this session" | Another refresh of the same session (another tab, another user) is still running. Nothing was counted or billed. | Wait for it to finish, then reload the form. Expired work is recovered from the SQL lease and deadline. The form distinguishes interrupted work and offers an explicit resume. |
+| Refresh toast `gated` ("were not sent to the AI") | Those findings get Optimus's own advice or a note in the report, not an AI suggestion (a gated Hot Line, a Framework N+1, an old Redundant Call). Index findings are not counted. | Nothing to fix; each finding says why. |
+| Refresh toast `excluded` | The finding's type is listed under Excluded finding types in Optimus Settings. | Remove the type from that list to let the AI see it (section 5.1). |
+| A run stays in Analyzing or becomes Failed with "its analyze heartbeat lapsed" | The analyze job stopped renewing its single-flight flag (timeout, crash or a lost Redis key); the janitor then marked the run Failed. | Look for `optimus` heartbeat lines in `logs/optimus.log`, then retry from a console: `optimus.analyze.run('<session_uuid>')`. |
+
 ## 7. Threat model
 
 What this design protects against:
@@ -253,7 +601,13 @@ What this design does **not** protect against:
 - **A compromised LLM provider.** If you're using Anthropic / OpenAI / a third-party, your finding context is at the mercy of their logging, retention and abuse-monitoring policies. Read each provider's data-use policy.
 - **On-disk caching by the LLM client.** Local servers (Ollama, LM Studio, vLLM) may log requests to disk depending on their flags. Check their docs and configure logging off if you're paranoid.
 - **Backups and audit logs.** The AI suggestion (the response text) is persisted to `Optimus Finding.llm_fix_json`. Your DB backups include it. If a fix suggestion contains a paraphrase of sensitive code/SQL, it'll be in those backups.
-- **The Optimus Telemetry Event DocType** (v0.8.0+). When telemetry is enabled, Optimus's own failures (including AI HTTP errors) are recorded with the provider name + endpoint label + status code but never with the prompt or the payload. See `optimus/telemetry.py`.
+- **AI failure rows in the Error Log.** Optimus's own AI failures are written by `ai_fix.log_ai_failure`, the only function on the AI surface that writes an Error Log row: one row per failure, linked to the Optimus Session, with an explicit message scrubbed of secrets by `redaction.scrub_secrets`. For an HTTP failure it names the provider, the call site, the status and the provider's error code (`provider_error=`, only when it is made of lowercase words: letters joined by `_`, `.`, `:` or `-`, at most 64 characters), never the prompt, the reply body or any frame's local variables. That holds when this row cannot be written and the caller logs the error instead: the caller's row shows the status, the call site and `provider_error=` in place of the error's message, which can quote the reply. When such a row may be missing (its write failed; after a rollback, its existence could not be checked or it could not be queued again; or the rollback callback could not be registered), or a hook that runs after the insert failed (a broken Error Log notification, say: the row is then written, and a caller that logs the same error again writes a second row), one line naming only the error type goes to the `optimus` log (`logs/optimus.log`) at error level, the lowest level Frappe's loggers keep on a production site. These rows are in your backups like any other Error Log row. Frappe's own error snapshots (a server error, a background job that fails or times out, any error in developer mode) still print frame locals, which can include prompt text and a custom Base URL typed with credentials in it; see `SECURITY.md`. An Error Log `before_insert` hook (`optimus.error_log_mask`) masks the stored key, the key shapes `scrub_secrets` knows (among them an `x-api-key: <key>` header line and a header value quoted in an "Invalid header value" error, so a rotated key in those forms is masked too) and the bare header value lines in every Error Log row from Optimus's AI code (an `optimus/ai_fix.py` or `frappe_profiler/ai_fix.py` frame in its error, title or metadata) or holding the stored key, as Frappe inserts it, the rows Frappe inserts from its deferred-insert queue in Redis included; every other row, another app's included, is stored exactly as it was. It normally reads the stored key once per Error Log insert when one is stored (no key is read on a site where none is stored), cuts each text field of a row it masks to 65536 characters, and never raises (except an RQ job timeout, which still stops the job). A row from Optimus's AI code is withheld whenever it cannot be masked ("Optimus withheld this error text: it could not be masked. See logs/optimus.log for the reason."). After an in-place upgrade, a process still running the previous release withholds a row from the AI code and masks only the stored key in other rows, and only once it reads the new hooks. While Optimus profiles a flow, the per-table and per-action breakdowns, index suggestions, the N+1 and slowest-query findings and the session's query count and query time leave these reads out, as Optimus's own queries. When the caller logs an AI failure the HTTP layer already logged, its context (title and `k=v` lines, scrubbed) is appended to the row already written. The scrub's `residual` count checks the stored key first, then known provider key shapes: 0 means no current key and no known provider-shaped key is left in the rows it reads. `SECURITY.md` ("API key handling" and "Known limitations") says when the hook takes effect after an upgrade, and why an image-based or rolling deployment must stop or replace every old process before the migrate.
+
+An unexpected hook failure triggers one independent stored-key read with
+Frappe alone. A row holding that key, including its JSON-escaped or repr-escaped form, is withheld even without an AI frame. A row from the AI code is
+withheld whenever it cannot be masked; unrelated rows remain unchanged. Quoted
+header values cut off before their closing quote are masked through the end of
+that line, including keys that have since been rotated.
 
 ---
 
@@ -265,6 +619,8 @@ The "safe report" HTML file Optimus produces (the dev-shop interchange format) *
 - AI fix suggestions, if any, are **baked into the report** at analyze time. The HTML embeds the suggestion text as static markup; opening the report locally never triggers an AI call.
 - The dev shop doesn't need an API key / provider configured to read the report they need it only if they want to **regenerate** suggestions on their own bench.
 
+The JSON export (`optimus.api.export_session`) carries no raw DDL and no `ai_index`. Each index-family finding gains `index_advice` (`route`, `doctype`, `table`, `columns`, `index_name`, `text`, `code`, `unknown`: no verdict, Optimus could not tell or the advisor failed, and `sort_stays`: `"stays"` when the code of a Filesort or Temporary Table finding leaves the sort or the temporary table in place, `"may stay"` when it may, `""` otherwise), its `technical_detail.fix_hint` is the same text the report shows, when the advisor has no advice the stored hint is kept and `index_advice` is null; a table's `recommended_index` carries `requested_columns` (the columns the analyzer asked for, before the advisor changed them). The permission check is unchanged.
+
 This means: if you're worried about a profile shared with a third party leaking your code to their LLM provider, the answer is "the profile itself doesn't." But it also means: AI suggestions baked into the report carry the same content the LLM produced review those before sharing if they paraphrase sensitive logic.
 
 ---
@@ -273,13 +629,27 @@ This means: if you're worried about a profile shared with a third party leaking 
 
 | Concern | File | Symbol |
 |---|---|---|
+| Index advice (findings and table cards) | `optimus/renderer/index_recipes.py`, `optimus/renderer/recipe_enrichment.py` | `advise`, `advise_finding`, `advise_table`, `ensure_indexes_code`, `make_evidence_lookup` |
+| AI grounding and eligibility | `optimus/ai_grounding.py` | `grounding_window`, `loop_facts_from_tree`, `format_loop_facts`, `hot_line_gate` |
+| Where-clause scan for index advice | `optimus/renderer/where_scan.py` | the WHERE-clause tokenizer the advisor reads filters with |
+| Index evidence (columns, types, existing indexes) | `optimus/renderer/index_evidence.py` | `TableEvidence`, `IndexEvidence` |
+| The generated `optimus_indexes.py` text | `optimus/renderer/ensure_indexes_template.py` | `ensure_indexes_code`, `optimus_index_name` |
+| Best-effort calls and job timeouts | `optimus/safe_call.py` | `best_effort`, `InterruptGuard` |
 | Eligible-types frozenset | `optimus/ai_fix.py` | `AI_ELIGIBLE_FINDING_TYPES` |
 | Provider matrix | `optimus/ai_fix.py` | `_PROVIDER_DEFAULTS` |
-| Payload builders | `optimus/ai_fix.py` | `_build_messages`, `_build_steps_messages`, `_build_index_messages` |
+| Payload builders | `optimus/ai_fix.py` | `_build_fix_request` (`_build_messages` wrapper), `_build_steps_messages` |
+| Prompt text | `optimus/ai_prompts.py` | `SYSTEM_PROMPT`, `FINDING_TYPE_HINTS`, `RULE_TEXT`, `PROMPT_VERSION` |
+| Answer verification | `optimus/ai_guardrails.py` | `verify_fix`, `reask_message`, `apply_fallback` |
+| Context budget | `optimus/ai_budget.py` | `user_char_budget`, `data_block`, `assemble`, `reask_fits` |
 | HTTP layer | `optimus/ai_fix.py` | `_http_post` |
+| API key on the request (masked `repr`; the key never enters a header dict of Optimus's) | `optimus/ai_fix.py` | `_ApiKeyAuth` |
+| AI failure rows (the only Error Log writer on the AI surface) | `optimus/ai_fix.py` | `log_ai_failure` |
+| Secret scrubbing of log text | `optimus/redaction.py` | `scrub_secrets` |
+| Cleaning keys out of old Error Log rows | `optimus/maintenance.py` | `scrub_error_log_secrets`, `purge_ai_error_logs` |
+| Masking the key in Error Log rows as Frappe inserts them | `optimus/error_log_mask.py` | `mask_error_log` (the Error Log `before_insert` hook) |
 | Per-type exclusion gate | `optimus/ai_fix.py` | `is_finding_type_excluded` |
-| On-demand entry point | `optimus/api.py` | `suggest_fix`, `suggest_index`, `humanize_steps` |
-| Auto-suggest entry point | `optimus/analyze.py` | `_enrich_findings_with_ai_suggestions`, `_enrich_table_breakdown_with_ai_suggestions` |
+| On-demand entry points | `optimus/api.py` | `refill_ai_suggestions` (the "Refresh AI suggestions" button), `test_ai_connection` (Optimus Settings), `ai_capabilities` (which AI buttons the form shows) |
+| Auto-suggest entry point | `optimus/analyze.py` | `_enrich_findings_with_ai_suggestions` |
 | Settings dataclass | `optimus/settings.py` | `OptimusConfig` |
 
 ---
@@ -311,10 +681,79 @@ When a pack runs out, the next AI fix attempt from Optimus surfaces Aerele's "pa
 Compared to the per-pathway data inventory in § 2, picking `Aerele` adds nothing structural over what the other hosted providers already send:
 
 - The customer's Aerele API key as `Authorization: Bearer <key>` on every call to `api.aerele.in`.
-- The same OpenAI-shaped finding / steps / index payload from § 2.1–2.3.
+- The same OpenAI-shaped finding / steps payload from sections 2.1 and 2.2.
 
 What is **NOT** sent (matches § 3):
 
 - The bench's `encryption_key` or any other site secret beyond the Aerele key itself.
 - Cross-session correlation IDs, recording UUIDs, schema, or DocType names beyond what the finding-specific payload already includes.
 - Heartbeat / pack-status / usage-counting calls. Aerele tracks consumption from the actual `/chat/completions` traffic; the bench never pings out otherwise.
+
+### Frappe API policy for saved suggestions (0.12.77)
+
+The initial and repair prompts prefer `frappe.db.get_value` for one value, `get_all`/`get_list` for rows, `frappe.db.count` for counts, and query builder for complex queries. `frappe.db` itself is a supported API namespace. Moving a raw SQL call or replacing its parameters no longer exempts it from validation. Removed lines and unchanged diff context may still show existing SQL. An unused read should be removed only when its lack of required side effects is established; moving a call must preserve permissions, return shape, ordering, conditions and exception handling.
+
+This is maintained, condensed Frappe guidance in the runtime prompt, not dynamic loading of external skills. Static checks enforce changed SQL calls, not general semantic equivalence: suggestions still require review. The existing single repair request and private received-answer retention apply unchanged.
+
+Saved answers are checked locally against this SQL policy. Only affected answers become outdated and eligible for explicit manual Refresh; prompt version remains 4 so unrelated good answers stay current. Missing-only automatic runs do not retry these answers. Regenerated reports withhold the affected code and show “Frappe API update needed”, keeping the original answer and usage in the saved finding. Checking, rendering and opening the dialog make no provider requests. Previously downloaded HTML remains a snapshot; regenerate reports to see the new status.
+
+
+### Visible Frappe safety checks (v0.12.80)
+
+Suggestion checking now rejects newly introduced or moved unfiltered deletes, literal-empty `set_value` selectors, truncation and visibly executed Query Builder writes without a `where`. Computed filters are unknown to this static check; it does not establish that they are safe. `None` for `set_value` remains governed by the Single DocType helper rule, not a claim that it always updates every row.
+
+Known `frappe.has_permission` calls must keep their arguments, denial mode, immediate result-use category and visible execution conditions. Direct permission conditionals also retain visible raise/return/throw branches; later uses of an assigned Boolean are not tracked. Adding `throw=True` to a previously ignored Boolean check changes behavior and is rejected. A new discarded non-throwing check is rejected too. Verbatim moves of existing discarded checks remain allowed; enforced checks cannot move outside a visible loop or conditional/exception boundary.
+
+For one literal SQL SELECT replaced by one ORM read assigned to the same result variable in the same function and table, the checker rejects lost/changed literal LIMIT/OFFSET and missing/empty explicit ORDER BY. This is not general SQL equivalence: filters, joins, field shape, arbitrary aliases, runtime values and hidden control flow still require review. Unparseable sensitive permission fragments fail closed.
+
+A cheaper read that replaces a read inside the same visible loop gets an advisory that per-row database work remains. Its code stays available and the warning does not trigger a paid repair. Batch, cached and simple per-key memoized replacements are exempt. Hidden loops and opaque helpers remain outside this check.
+
+The same reconstructable blocking checks classify saved Fix code locally. Affected answers show “Safety review needed”, retain diagnosis and withhold code and obsolete rationale. Raw-SQL answers retain “Frappe API update needed”. Original response text and usage stay in the private saved finding. Prompt version stays 4; unrelated good answers remain current. Manual Refresh can replace affected answers after the existing cost confirmation; automatic missing-only runs and report regeneration do not retry them. Existing HTML files remain snapshots.
+
+Permission or paired SQL changes supplied as full replacement code require a grounded diff at generation so before/after evidence is available. Stored non-diff permission bodies are not retroactively classified as behavior changes. Parser failures withhold code rather than breaking the report; repaired fragments carry an unverified-structure note. Dynamic permission argument expansion requires explicit arguments. Checks are static and do not prove assigned-result dataflow, arbitrary control flow, or all Frappe conventions.
+
+Static alias analysis also limits logical resolution to 100 nested hops, 10,000
+resolution visits and 128 candidate identities per lookup, in addition to the
+4,000-node / 100-level AST limits. Each identity is limited to 1,024 characters,
+with at most 1,048,576 characters allocated by identity extension per resolver.
+Deep or branching aliases that exceed these bounds receive `unverified-safety`;
+their code is withheld without crashing report
+rendering. These checks execute no suggested code and make no provider requests.
+
+Preparation failures are recorded as unsent skips (`optimus ai refresh prepare`), with zero tokens and complete usage. They do not consume the provider-call cap or trip the breaker; subsequent findings and Steps can continue. Shared SQL failures retain worker recovery semantics.
+
+Raw SQL uses current committed `sensitive_sql_columns` rules at the input boundary. If those rules cannot be read, or sensitive-literal redaction fails, the query is omitted. Error Log masking covers schemeless Authorization and oversized quoted header values; when an AI record cannot be scrubbed, its error, title and metadata are withheld together.
+
+Phase 2 requires a worker on the long queue; a stopped capture without an available worker is marked Failed without using an analysis attempt. Start a worker and retry while the captured input remains available. A late concurrent flush asks for a retry; genuinely missing or corrupt input still asks for a new pass. Idle Session forms stop AI status polling; active and unknown runs continue recovery polling.
+
+
+### Recording snapshots and recovery
+
+Analysis commits a private JSON recording File and its Session binding before deleting
+Recorder input from Redis. A missing recording, encoding, File or commit failure
+marks the session Failed with a fixed recovery message; Retry Analyze can reuse the
+retained input. Redis is temporary: clearing Frappe Recorder or eviction can remove
+it. The daily janitor removes input from sessions that remain Failed with the snapshot-failure
+warning after a seven-day recovery window, in batches of at most 100 independently
+of report retention. A subsequent retry crash can replace that warning; broader
+Recorder cleanup across all failure and deletion states remains outside this bound.
+With the scheduler disabled that sweep must be run manually. The last report remains
+available; regeneration refuses to replace it when expected recordings are missing.
+AI refresh skips affected items without sending a request when required input is absent.
+Representative SQL finding callsites are persisted with the findings.
+
+Both the writer and reader enforce 4,000,000 JSON nodes, 64 MiB decompressed and
+16 MiB compressed, depth 64 and 20,000 recordings. The measured full-detail envelope
+is 12 recordings of 1,300 queries with 20 four-field stack frames and an EXPLAIN row
+per query. On the local Python 3.14 check this encoded in 3.04s, read in 1.63s, and
+peaked at 241MiB RSS in a standalone process; these are measurements, not production
+latency or memory guarantees. A 26,000-query test exceeded the structural budget
+and round-tripped every query with at most 3 application frames and no EXPLAIN
+results (0.59s read, 89MiB peak). A reduced snapshot records its detail mode and
+shows a warning. If even this bounded form cannot fit, analysis retains Redis and
+fails; queries are never silently truncated from a snapshot.
+
+Raw SQL consent preserves business literals only in queries without sensitive-column
+names. Queries mentioning a default or configured sensitive column use the private
+literal-stripping path (or are omitted when that cannot be established), including
+PostgreSQL dollar strings, ILIKE, casts and array expressions in example queries.

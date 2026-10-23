@@ -8,9 +8,11 @@ pin that health() assembles their results into the documented response shape
 from __future__ import annotations
 
 from optimus import api
+from optimus.tests.gate_fakes import install_handler_context
 
 
 def test_health_assembles_helper_results(monkeypatch):
+	install_handler_context(monkeypatch)
 	monkeypatch.setattr(api, "_require_profiler_user", lambda: "Administrator", raising=False)
 	monkeypatch.setattr(api, "_session_count_by_status", lambda: {"Ready": 3, "Failed": 1}, raising=False)
 	monkeypatch.setattr(api, "_session_count_by_severity", lambda: {"High": 2, "None": 1}, raising=False)
@@ -29,6 +31,7 @@ def test_health_assembles_helper_results(monkeypatch):
 
 def test_health_empty_site(monkeypatch):
 	"""No sessions → empty maps + zeroed perf, no crash."""
+	install_handler_context(monkeypatch)
 	monkeypatch.setattr(api, "_require_profiler_user", lambda: "Administrator", raising=False)
 	monkeypatch.setattr(api, "_session_count_by_status", lambda: {}, raising=False)
 	monkeypatch.setattr(api, "_session_count_by_severity", lambda: {}, raising=False)

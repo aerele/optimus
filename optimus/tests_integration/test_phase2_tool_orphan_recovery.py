@@ -18,9 +18,9 @@ debugger/profiler) owns it. They manipulate
 from __future__ import annotations
 
 import sys
+import unittest
 
 import frappe
-import pytest
 from frappe.tests.utils import FrappeTestCase
 
 import optimus
@@ -29,7 +29,7 @@ _HAS_MON = hasattr(sys, "monitoring")
 _PID = sys.monitoring.PROFILER_ID if _HAS_MON else None
 
 
-@pytest.mark.skipif(not _HAS_MON, reason="sys.monitoring requires Python 3.12+")
+@unittest.skipUnless(_HAS_MON, "sys.monitoring requires Python 3.12+")
 class TestPhase2ToolOrphanRecovery(FrappeTestCase):
 	"""End-to-end: _startup_probe_tool2 reclaims a leaked tool 2."""
 
@@ -143,3 +143,69 @@ class TestPhase2ToolOrphanRecovery(FrappeTestCase):
 			"probe accidentally reclaimed a tool owned by a non-line_profiler "
 			"this would silently break the third-party tool's tracing"
 		)
+
+
+class TestPhase2CaptureRedisContract(FrappeTestCase):
+	"""Exercise the production cache serialization and TTLs on real Redis.
+
+	Only synthetic, uniquely owned keys are touched. These cases run in the
+	existing disposable CI module; they do not require enabling AI or a key.
+	"""
+
+	def setUp(self):
+		super().setUp()
+		import json
+
+		from optimus.line_profile import capture
+		self.capture = capture
+		self.actor = "test-capture-" + frappe.generate_hash(length=12)
+		self.run = "test-run-" + frappe.generate_hash(length=12)
+		self.other = self.run + "-other"
+		meta = {"dotted_path": "optimus.fake.example", "qualname": "example",
+			"file": "fake.py", "first_lineno": 1, "source": "freeform"}
+		self.prepared = capture.PreparedCapture((dict(meta, eligible=True),), json.dumps([meta]),
+			json.dumps({meta["dotted_path"]: [{"lineno": 1, "content": "return 1"}]}))
+		self.batch = [{"file": "fake.py", "qualname": "example", "lineno": 1, "hits": 1, "total_us": 1}]
+
+	def tearDown(self):
+		try:
+			for run in (self.run, self.other):
+				self.capture.stop_line_profile_pass(run, self.actor)
+				self.capture.cleanup_run(run)
+		finally:
+			super().tearDown()
+
+	def start(self):
+		return self.capture.start_line_profile_pass("fake-session", self.run, self.actor, prepared=self.prepared)
+
+	def test_prepared_start_matches_frappe_serialization_and_stops_only_its_generation(self):
+		from optimus import redis_keys
+		self.start()
+		assert frappe.cache.get_value(redis_keys.lp_active(self.actor)) == self.run
+		assert self.capture.read_picks_meta(self.run)[0]["source_lines"] == [{"lineno": 1, "content": "return 1"}]
+		frappe.cache.set_value(redis_keys.lp_active(self.actor), self.other)
+		assert not self.capture.stop_line_profile_pass(self.run, self.actor)
+		assert frappe.cache.get_value(redis_keys.lp_active(self.actor)) == self.other
+		assert self.capture.stop_line_profile_pass(self.other, self.actor)
+		assert frappe.cache.get_value(redis_keys.lp_active(self.actor)) is None
+
+	def test_duplicate_start_publishes_no_losing_input(self):
+		from optimus import redis_keys
+		self.start()
+		with self.assertRaises(self.capture.CaptureError):
+			self.capture.start_line_profile_pass("fake-session", self.other, self.actor, prepared=self.prepared)
+		# RedisWrapper.exists namespaces its argument itself. Double-prefixing
+		# would inspect an unrelated key and make these assertions vacuous.
+		assert not frappe.cache.exists(redis_keys.lp_picks(self.other))
+		assert not frappe.cache.exists(redis_keys.lp_source(self.other))
+
+	def test_raw_counter_round_trip_expiry_and_eviction_detection(self):
+		from optimus import redis_keys
+		self.start()
+		self.capture.flush_samples(self.run, self.batch)
+		assert self.capture.read_all_samples(self.run) == [self.batch]
+		for fn in (redis_keys.lp_picks, redis_keys.lp_source, redis_keys.lp_samples, redis_keys.lp_sample_state):
+			assert 0 < frappe.cache.ttl(frappe.cache.make_key(fn(self.run))) <= self.capture.DATA_TTL_SECONDS
+		frappe.cache.delete_value(redis_keys.lp_samples(self.run))
+		with self.assertRaises(self.capture.CaptureInputError):
+			self.capture.read_all_samples(self.run)
