@@ -173,7 +173,7 @@ def test_expired_failed_inputs_include_unpersisted_recordings_and_recheck_retry(
 	monkeypatch.setattr(janitor, "now_datetime", lambda: clock)
 	monkeypatch.setattr(janitor, "add_to_date", lambda d, *, days: d + timedelta(days=days))
 	monkeypatch.setattr(janitor, "safe_commit", lambda: None)
-	monkeypatch.setattr(janitor.session, "get_recordings", lambda uuid: ["not-yet-persisted"])
+	monkeypatch.setattr(janitor, "session", SimpleNamespace(get_recordings=lambda uuid: ["not-yet-persisted"]))
 	monkeypatch.setattr(analyze, "_cleanup_redis", lambda *a: cleaned.append(a))
 	janitor._sweep_failed_snapshot_inputs()
 	assert bool(cleaned) is expired and bool(changes) is expired

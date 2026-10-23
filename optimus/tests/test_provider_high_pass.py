@@ -112,3 +112,19 @@ def test_unclosed_answer_with_unknown_finish_is_withheld(monkeypatch):
 	assert out["completion_status"] == "incomplete" and out["guardrail"]["fallback"]
 	assert out["received_responses"][0]["text"] == answer
 	assert len(fake.calls) == 1
+
+
+def test_fluent_builder_answer_does_not_pay_for_a_reask(monkeypatch):
+	case = CompletionFixture()
+	case._FINDING = {
+		"finding_type": "Hot Line", "title": "Repeated lookup",
+		"source_window": [{"lineno": 11, "content": "old_work()", "is_target": True}],
+	}
+	answer = ("**Diagnosis**: Repeated lookup.\n**Fix**\n```diff\n-old_work()\n"
+		"+q = frappe.qb.from_(T).select(T.name)\n+if enabled:\n+    q = q.where(T.enabled == 1)\n+q.run()\n```\n"
+		"**Why it works**: Batches reads.\n**Verify**: Compare query counts.")
+	fake = _post_sequence(case._resp(answer))
+	out = case._run(fake, monkeypatch)
+	assert len(fake.calls) == 1 and not out["guardrail"]["reasked"]
+	assert not out["guardrail"]["fallback"] and "q = q.where" in out["suggestion"]
+	assert ai_prompts.fix_state(out)[0] == "current"
