@@ -63,15 +63,15 @@ def test_raw_sql_applies_current_sensitive_columns(monkeypatch, identifier):
 	monkeypatch.setattr(ai_privacy, '_fresh_sensitive_columns', lambda: 'private_marker')
 	query = f"SELECT name FROM tabCustomer WHERE {identifier}='CANARY_8123' AND enabled=1"
 	text = ai_privacy.query_text(query, send_raw=True)
-	assert 'CANARY_8123' not in text and 'enabled=1' in text
+	assert 'CANARY_8123' not in text and 'enabled=?' in text
 
 
-@pytest.mark.parametrize('boundary', ['settings', 'redactor'])
+@pytest.mark.parametrize('boundary', ['settings', 'parser'])
 def test_raw_sql_omitted_on_redaction_failure(monkeypatch, boundary):
 	def fail(*a, **kw):
 		raise ValueError('synthetic failure')
 	monkeypatch.setattr(ai_privacy, '_fresh_sensitive_columns', lambda: '')
-	monkeypatch.setattr('optimus.ai_privacy._fresh_sensitive_columns' if boundary == 'settings' else 'optimus.redaction._sql_literal_regex', fail)
+	monkeypatch.setattr('optimus.ai_privacy._fresh_sensitive_columns' if boundary == 'settings' else 'optimus.ai_privacy.sqlparse.parse', fail)
 	assert ai_privacy.query_text("SELECT name FROM tabUser WHERE password='CANARY_8123'", send_raw=True) == ''
 
 

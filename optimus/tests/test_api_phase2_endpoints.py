@@ -80,6 +80,19 @@ def test_start_accepts_json_picks_and_string_flag(monkeypatch):
 	assert seen.saved == [DOCNAME] and len(doc.phase_2_runs) == 2
 
 
+def test_api_marks_only_server_derived_descendants_as_expanded(monkeypatch):
+	_, _, seen = _env(monkeypatch)
+	monkeypatch.setattr(sys.modules["optimus.line_profile.picker"], "expand_hot_chain", lambda *a, **k: [
+		{"dotted_path": "app.mod.fn", "depth": 0}, {"dotted_path": "json.loads", "depth": 1}])
+	def prepare(picks, *, server_expanded):
+		assert server_expanded == {"json.loads"}
+		assert [p["dotted_path"] for p in picks] == ["app.mod.fn", "json.loads"]
+		return [{**p, "eligible": p["dotted_path"] not in server_expanded} for p in picks]
+	monkeypatch.setattr(sys.modules["optimus.line_profile.capture"], "prepare_line_profile_picks", prepare)
+	api.start_line_profile_pass(SESSION_UUID, '[{"dotted_path":"app.mod.fn","source":"curated"}]', auto_expand=True)
+	assert seen.capture[0][1]["prepared"][1]["eligible"] is False
+
+
 def test_start_runs_as_the_caller_not_the_owner(monkeypatch):
 	perms = {("read", DOCNAME, MANAGER): True, ("write", DOCNAME, MANAGER): True}
 	_, _, seen = _env(monkeypatch, user=MANAGER, roles=("System Manager",), perms=perms)

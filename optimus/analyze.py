@@ -807,8 +807,18 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# each recording's pyi_session is dropped after call_tree finishes
 		# with it (handled in the analyzer itself).
 		recordings = list(_fetch_recordings(recording_uuids))
+		from optimus.recording_bundle import SnapshotUnavailable
+		if set(recording_uuids) - {rec.get("uuid") for rec in recordings}:
+			raise SnapshotUnavailable("snapshot_recording_missing")
 
 		if not recordings:
+			previous_queries = frappe.db.get_value("Optimus Session", docname, "total_queries")
+			try:
+				had_queries = float(previous_queries or 0) > 0
+			except (TypeError, ValueError):
+				had_queries = False
+			if had_queries:
+				raise SnapshotUnavailable("snapshot_inputs_missing")
 			_finalize_with_empty_session(docname)
 			session.delete_session_state(session_uuid)
 			_publish_progress(100, "Complete (no data)", session_uuid)
