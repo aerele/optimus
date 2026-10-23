@@ -325,6 +325,17 @@ def test_analyze_enrichment_checks_session_owner(scripts):
 	assert not scripts["body_reads"]
 
 
+def test_representative_sql_callsite_does_not_read_an_owners_forbidden_script(scripts):
+	import json
+	scripts["allowed"].remove("fake-owner")
+	findings = [{"finding_type": "Missing Index", "technical_detail_json": json.dumps({"normalized_query": "SELECT name FROM tabUser"})}]
+	recordings = [{"calls": [{"normalized_query": "SELECT name FROM tabUser", "query": "SELECT name FROM tabUser", "duration": 1,
+		"stack": [{"filename": "<serverscript>: fake_script", "lineno": 1, "function": "run"}]}]}]
+	analyze._persist_representative_callsites(findings, recordings, owner="fake-owner")
+	assert "PRIVATE-SCRIPT-CANARY" not in findings[0]["technical_detail_json"]
+	assert not scripts["body_reads"]
+
+
 @pytest.mark.parametrize("denied", [None, "fake-actor", "fake-owner"])
 def test_phase2_hotline_obeys_server_script_read_permissions(scripts, denied):
 	import json

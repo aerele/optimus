@@ -589,7 +589,10 @@ def _check_changes(blocks, source_lines, *, stored=False):
 					out.extend(_loop_replacements(before, after))
 			elif any(new and "has_permission" in line for line, new in after.rows):
 				out.append(_v("permission-behavior-change", "unverifiable permission fragment"))
-		elif not stored and source_lines and after.tree is not None:
+		elif not stored and source_lines and after.tree is not None and (
+			block.info.lower() in {"", "py", "python", "python3"}
+			or any(after.name(call).startswith("frappe.") for call in after.calls)
+		):
 			# Full replacements provide no reliable line correspondence. Require a
 			# grounded diff for comparative safety rather than guessing a pairing.
 			before = View([(line, True) for line in source_lines])

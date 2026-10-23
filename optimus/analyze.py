@@ -940,8 +940,9 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# v0.6.0: attach ±1-line source snippets to each finding's callsite
 		# before persisting, so finding cards can show the offending line
 		# without requiring a per-render file read.
-		_persist_representative_callsites(context.findings, recordings)
-		_enrich_findings_with_source_snippets(context.findings, owner=frappe.db.get_value("Optimus Session", docname, "owner"))
+		owner = frappe.db.get_value("Optimus Session", docname, "owner")
+		_persist_representative_callsites(context.findings, recordings, owner=owner)
+		_enrich_findings_with_source_snippets(context.findings, owner=owner)
 
 		_publish_progress(80, "Writing session data", session_uuid)
 		_touch_singleflight(session_uuid)  # _persist's humanize call is capped below the TTL too
@@ -2086,9 +2087,10 @@ def _truncate_finding_titles(findings: list[dict]) -> None:
 _FINDING_SNIPPET_TRUNCATE_CHARS = 200
 
 
-def _persist_representative_callsites(findings, recordings):
+def _persist_representative_callsites(findings, recordings, *, owner=None):
 	"""Keep SQL findings actionable independently of the recording File lifecycle."""
 	from optimus.renderer.finding_enrichment import _attach_representative_callsites
+	from optimus.renderer.source import server_script_readers
 	views = []
 	originals = []
 	for finding in findings:
@@ -2099,7 +2101,8 @@ def _persist_representative_callsites(findings, recordings):
 		if isinstance(detail, dict):
 			views.append({**finding, "technical_detail": detail})
 			originals.append(finding)
-	_attach_representative_callsites(views, recordings)
+	with server_script_readers(owner):
+		_attach_representative_callsites(views, recordings)
 	for finding, view in zip(originals, views, strict=True):
 		finding["technical_detail_json"] = json.dumps(view["technical_detail"], default=str)
 
