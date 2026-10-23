@@ -11,6 +11,7 @@ def _decorate(fn):
 	@functools.wraps(fn)
 	def wrapper(*args, **kwargs):
 		return fn(*args, **kwargs)
+
 	return wrapper
 
 
@@ -31,4 +32,6 @@ def test_decorated_callable_profiles_the_unwrapped_source(monkeypatch):
 	finally:
 		profiler.disable_by_count()
 	rows = capture.serialize_stats(profiler)
-	assert any(row["lineno"] == _profile_target.__code__.co_firstlineno + 1 and row["hits"] == 3 for row in rows), rows
+	assert any(
+		row["lineno"] == _profile_target.__code__.co_firstlineno + 1 and row["hits"] == 3 for row in rows
+	), rows

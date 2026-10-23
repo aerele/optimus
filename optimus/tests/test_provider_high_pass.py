@@ -1,4 +1,5 @@
 """Captured wire requests and saved-answer behavior; no live provider calls."""
+
 import pytest
 
 from optimus import ai_fix, ai_prompts
@@ -14,15 +15,26 @@ def test_anthropic_model_and_probe_use_bounded_budget(monkeypatch, model):
 	import requests
 
 	from optimus.tests.test_ai_fix import _FakeResp
-	responses = iter([_FakeResp(200, {"content": [{"type": "text", "text": "OK"}], "stop_reason": "end_turn"}) for _ in range(2)])
+
+	responses = iter(
+		[
+			_FakeResp(200, {"content": [{"type": "text", "text": "OK"}], "stop_reason": "end_turn"})
+			for _ in range(2)
+		]
+	)
+
 	def post(url, **kw):
 		fake.calls.append(kw["json"])
 		return next(responses)
+
 	monkeypatch.setattr(requests, "post", post)
 	monkeypatch.setattr(ai_fix, "_get_api_key", lambda *a, **k: "test-key")
 	monkeypatch.setattr(ai_fix, "_provider_config", lambda: provider)
 	assert ai_fix.test_connection()["ok"]
-	assert ai_fix._dispatch_call(provider, "system", [{"role": "user", "content": "hello"}], usage_out={}) == "OK"
+	assert (
+		ai_fix._dispatch_call(provider, "system", [{"role": "user", "content": "hello"}], usage_out={})
+		== "OK"
+	)
 	assert [b["max_tokens"] for b in fake.calls] == [4096, 4096]
 
 
@@ -62,12 +74,14 @@ def test_missing_finish_at_budget_is_incomplete(monkeypatch):
 @pytest.mark.parametrize("raw", [False, 0, "False", "false", "0"])
 def test_reask_false_spellings(monkeypatch, raw):
 	import frappe
+
 	monkeypatch.setattr(frappe, "conf", {"optimus_ai_reask": raw}, raising=False)
 	assert ai_fix._reask_enabled() is False
 
 
 def test_budget_setting_validation_and_capacity(monkeypatch):
 	import frappe
+
 	monkeypatch.setattr(frappe, "conf", {"optimus_ai_max_output_tokens": 3000}, raising=False)
 	p = ai_fix._provider_config(_cfg(ai_provider="OpenAI"))
 	assert ai_fix._output_tokens(p) == 3000

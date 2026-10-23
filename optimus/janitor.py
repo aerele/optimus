@@ -100,7 +100,8 @@ def _sweep_failed_snapshot_inputs():
 			doc = frappe.get_doc("Optimus Session", row["name"], for_update=True)
 			if doc.status != "Failed" or doc.modified >= cutoff or doc.analyzer_warnings != SNAPSHOT_FAILURE_WARNING:
 				continue
-			uuids = list({a.recording_uuid for a in doc.actions or [] if a.recording_uuid})
+			uuids = sorted({a.recording_uuid for a in doc.actions or [] if a.recording_uuid}
+				| set(session.get_recordings(doc.session_uuid)))
 			analyze._cleanup_redis(doc.session_uuid, uuids)
 			doc.db_set("analyzer_warnings", "Recording snapshot recovery window expired. Record a new session.")
 			safe_commit()

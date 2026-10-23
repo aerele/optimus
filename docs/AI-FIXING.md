@@ -741,13 +741,13 @@ AI refresh skips affected items without sending a request when required input is
 Representative SQL finding callsites are persisted with the findings.
 
 Both the writer and reader enforce 4,000,000 JSON nodes, 64 MiB decompressed and
-16 MiB compressed, depth64 and20,000 recordings. The measured full-detail envelope
-is12 recordings of1,300 queries with20 four-field stack frames and an EXPLAIN row
-per query. On the local Python3.14 check this encoded in3.04s, read in1.63s, and
-peaked at241MiB RSS in a standalone process; these are measurements, not production
-latency or memory guarantees. A26,000-query test exceeded the structural budget
-and round-tripped every query with at most3 application frames and no EXPLAIN
-results (0.59s read,89MiB peak). A reduced snapshot records its detail mode and
+16 MiB compressed, depth 64 and 20,000 recordings. The measured full-detail envelope
+is 12 recordings of 1,300 queries with 20 four-field stack frames and an EXPLAIN row
+per query. On the local Python 3.14 check this encoded in 3.04s, read in 1.63s, and
+peaked at 241MiB RSS in a standalone process; these are measurements, not production
+latency or memory guarantees. A 26,000-query test exceeded the structural budget
+and round-tripped every query with at most 3 application frames and no EXPLAIN
+results (0.59s read, 89MiB peak). A reduced snapshot records its detail mode and
 shows a warning. If even this bounded form cannot fit, analysis retains Redis and
 fails; queries are never silently truncated from a snapshot.
 

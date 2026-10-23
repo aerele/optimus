@@ -453,11 +453,11 @@ def _fragment_changes_sql(after: list[tuple[str, bool]]) -> bool:
 
 
 def _nonliteral_tokens(text):
- try:
-  return " ".join(t.string for t in tokenize.generate_tokens(io.StringIO(text).readline)
-   if t.type not in {tokenize.STRING, tokenize.COMMENT})
- except (tokenize.TokenError, IndentationError, SyntaxError):
-  return text
+	try:
+		return " ".join(t.string for t in tokenize.generate_tokens(io.StringIO(text).readline)
+			if t.type not in {tokenize.STRING, tokenize.COMMENT})
+	except (tokenize.TokenError, IndentationError, SyntaxError):
+		return text
 
 
 def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
