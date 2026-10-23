@@ -192,6 +192,39 @@ def test_self_referential_endpoint_with_spread_callees_is_not_self_time():
 	assert json.loads(slow[0]["technical_detail_json"])["is_self_referential"] is False
 
 
+def test_self_referential_endpoint_reports_hot_own_time_next_to_the_slow_child():
+	tree = _node("<root>", "", 1000, [
+		_node("get_report", "apps/my_app/api.py", 1000, [
+			_node("slow_child", "apps/my_app/calc.py", 500, self_ms=500),
+		], self_ms=500),
+	])
+	findings = call_tree._emit_per_action_findings(
+		tree, action_idx=0, action_label="my_app.api.get_report", action_wall_time_ms=1000,
+	)
+	slow = {f["title"]: f for f in findings if f["finding_type"] == "Slow Hot Path"}
+	assert len(slow) == 2
+	own = next(f for t, f in slow.items() if "self-time" in t)
+	assert own["estimated_impact_ms"] == 500
+	assert any("slow_child" in t for t in slow)
+
+
+def test_self_referential_endpoint_with_sql_heavy_callee_makes_no_spread_claim():
+	sql = {"function": "<sql>", "filename": "x", "lineno": 1, "self_ms": 900,
+		"cumulative_ms": 900, "kind": "sql", "children": []}
+	tree = _node("<root>", "", 1000, [
+		_node("get_report", "apps/my_app/api.py", 1000, [
+			_node("load_rows", "apps/my_app/calc.py", 950, [sql], self_ms=50),
+		], self_ms=50),
+	])
+	findings = call_tree._emit_per_action_findings(
+		tree, action_idx=0, action_label="my_app.api.get_report", action_wall_time_ms=1000,
+	)
+	slow = [f for f in findings if f["finding_type"] == "Slow Hot Path"]
+	assert len(slow) == 1
+	assert slow[0]["title"].startswith("get_report and its callees took")
+	assert "spread" not in slow[0]["customer_description"]
+
+
 def test_non_self_referential_hot_path_keeps_classic_phrasing():
 	"""Sanity: the self-time fix must NOT change the classic shape
 	when action_label and fn_name are different (the common case)."""
