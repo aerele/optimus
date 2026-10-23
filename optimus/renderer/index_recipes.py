@@ -668,7 +668,7 @@ def _index_order(
 
 _CLAUSE_ENDS: frozenset[str] = frozenset({
 	"limit", "for", "lock", "union", "having", "order", "group", "window", "offset", "into", "procedure",
-	"with",
+	"with", ";",
 })
 
 
@@ -2159,8 +2159,18 @@ def _advise_finding(
 			# rows matching several values (IN, IS NULL OR =) never come back in one sorted run;
 			# a collapsed IN (?) may be one value, so it keeps the sort and the lead hedges
 			serves = _SERVES[ftype] if not sort_problem and not multi else ""
+	candidate_columns = [col for _label, col in labelled]
+	if serves:
+		# sql_metadata can order clause columns by their first SELECT mention.
+		# An index's sort suffix must follow the actual ORDER/GROUP BY sequence,
+		# including a column also used by a range predicate.
+		ordered = _clause_columns(query, "order" if ftype == "Filesort" else "group", qualifiers, names)
+		positions = {col: index for index, col in enumerate(ordered)}
+		candidate_columns.sort(key=lambda col: (
+			comparisons.get(col) in {"sort", "rsort"}, positions.get(col, len(positions))
+			if comparisons.get(col) in {"sort", "rsort"} else 0))
 	advice = advise(
-		table, [col for _label, col in labelled], evidence=evidence,
+		table, candidate_columns, evidence=evidence,
 		tracked_apps=tracked_apps, explain_row=detail.get("explain_row"), query=query, unusable=unusable,
 		comparisons=comparisons, serves=serves, removes=_SERVES.get(ftype, ""),
 	)

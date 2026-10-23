@@ -12,6 +12,31 @@ sql_metadata = pytest.importorskip("sql_metadata")
 from optimus.analyzers import table_breakdown
 
 
+def test_large_batch_insert_retains_table_counts_and_timing(empty_context):
+	columns = ",".join(f"c{i}" for i in range(12))
+	values = ",".join(["(" + ",".join(["?"] * 12) + ")"] * 100)
+	query = f"INSERT INTO `tabLarge Batch` ({columns}) VALUES {values}"
+	result = table_breakdown.analyze([{"calls": [{"query": query, "duration": 123.0}]}], empty_context)
+	row = next(row for row in result.aggregate["table_breakdown"] if row["table"] == "tabLarge Batch")
+	assert row["queries"] == row["write_count"] == 1
+	assert row["consolidated_time_ms"] == row["write_time_ms"] == 123.0
+	assert row["index_candidates"] == []
+	assert result.warnings, "bounded fallback must disclose omitted index parsing"
+
+
+def test_oversized_unrecognized_statement_reports_omission(empty_context):
+	query = "SELECT " + ",".join(["name"] * 2000) + " FROM tabLead"
+	result = table_breakdown.analyze([{"calls": [{"query": query, "duration": 123.0}]}], empty_context)
+	assert result.warnings, "an advisory must not silently lose recorded query time"
+
+
+@pytest.mark.parametrize("prefix", ["INSERT INTO", "INSERT IGNORE INTO", "REPLACE INTO", "REPLACE"])
+def test_large_write_fallback_never_mistakes_into_for_a_table(empty_context, prefix):
+	query = prefix + ' "tabBatch" VALUES ' + ",".join(["(" + ",".join(["?"] * 12) + ")"] * 100)
+	result = table_breakdown.analyze([{"calls": [{"query": query, "duration": 1.0}]}], empty_context)
+	assert [row["table"] for row in result.aggregate["table_breakdown"]] == ["tabBatch"]
+
+
 def test_single_table_aggregated(clean_recording, empty_context):
 	result = table_breakdown.analyze([clean_recording], empty_context)
 	breakdown = result.aggregate["table_breakdown"]

@@ -930,11 +930,14 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# v0.6.0: attach ±1-line source snippets to each finding's callsite
 		# before persisting, so finding cards can show the offending line
 		# without requiring a per-render file read.
+		_persist_representative_callsites(context.findings, recordings)
 		_enrich_findings_with_source_snippets(context.findings, owner=frappe.db.get_value("Optimus Session", docname, "owner"))
 
 		_publish_progress(80, "Writing session data", session_uuid)
 		_touch_singleflight(session_uuid)  # _persist's humanize call is capped below the TTL too
 		_persist(docname, context, recordings, analyze_elapsed_ms)
+		# Commit the complete recording snapshot before rendering and deleting Redis.
+		_persist_recordings_file(docname, session_uuid, recording_uuids)
 
 		_touch_singleflight(session_uuid)  # M2 heartbeat before the render phase
 		_publish_progress(90, "Rendering reports", session_uuid)
@@ -948,8 +951,6 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# v0.13: snapshot the raw recordings to a File BEFORE cleanup deletes
 		# them, so AI re-runs (steps humanize / fix grounding) and report
 		# drill-down regeneration still work on this session post-analyze.
-		_persist_recordings_file(docname, session_uuid, recording_uuids)
-
 		_cleanup_redis(session_uuid, recording_uuids)
 
 		# Phase: Ready
@@ -972,6 +973,9 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		frappe.db.rollback()
 		try:
 			frappe.db.set_value("Optimus Session", docname, "status", "Failed")
+			from optimus.recording_bundle import SNAPSHOT_FAILURE_WARNING, SnapshotUnavailable
+			if isinstance(exc, SnapshotUnavailable):
+				frappe.db.set_value("Optimus Session", docname, "analyzer_warnings", SNAPSHOT_FAILURE_WARNING)
 			safe_commit()
 		except Exception:
 			pass
@@ -2020,6 +2024,24 @@ def _truncate_finding_titles(findings: list[dict]) -> None:
 # reader having to jump into the codebase. Truncate per-line so a single
 # multi-kilobyte minified string can't blow the technical_detail_json blob.
 _FINDING_SNIPPET_TRUNCATE_CHARS = 200
+
+
+def _persist_representative_callsites(findings, recordings):
+	"""Keep SQL findings actionable independently of the recording File lifecycle."""
+	from optimus.renderer.finding_enrichment import _attach_representative_callsites
+	views = []
+	originals = []
+	for finding in findings:
+		try:
+			detail = json.loads(finding.get("technical_detail_json") or "{}")
+		except (ValueError, TypeError):
+			continue
+		if isinstance(detail, dict):
+			views.append({**finding, "technical_detail": detail})
+			originals.append(finding)
+	_attach_representative_callsites(views, recordings)
+	for finding, view in zip(originals, views, strict=True):
+		finding["technical_detail_json"] = json.dumps(view["technical_detail"], default=str)
 
 
 def _enrich_findings_with_source_snippets(findings: list[dict], *, owner: str | None = None) -> None:
@@ -3135,8 +3157,10 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 			for uuid in recording_uuids:
 				rec = frappe.cache.hget(RECORDER_REQUEST_HASH, uuid)
 				if not isinstance(rec, dict):
-					continue
+					raise recording_bundle.InvalidBundle("snapshot_recording_missing")
 				rec = {key: value for key, value in rec.items() if key not in {"pyi_session", "sidecar", "tree_b64"}}
+				if isinstance(rec.get("calls"), list):
+					rec["calls"] = [call for call in rec["calls"] if isinstance(call, dict)]
 				entry: dict = {"rec": rec}
 				sparse = frappe.cache.hget(RECORDER_REQUEST_SPARSE_HASH, uuid)
 				if isinstance(sparse, dict):
@@ -3151,6 +3175,8 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 				recordings[uuid] = entry
 
 			if not recordings:
+				if recording_uuids:
+					raise recording_bundle.InvalidBundle("snapshot_inputs_missing")
 				return
 
 			bundle = {
@@ -3159,22 +3185,40 @@ def _persist_recordings_file(docname: str, session_uuid: str, recording_uuids: l
 				"session_state": session.get_session_meta(session_uuid),
 				"recordings": recordings,
 			}
-			payload = recording_bundle.encode(bundle)
+			payload, degraded = recording_bundle.encode_snapshot(bundle)
+			# A lost commit acknowledgement may leave a valid snapshot already
+			# bound. Reuse it instead of creating duplicate File rows/URLs.
+			previous = frappe.db.get_value("Optimus Session", docname, "recordings_file")
+			if previous:
+				from types import SimpleNamespace
+				existing = _load_recordings_bundle(SimpleNamespace(
+					name=docname, session_uuid=session_uuid, recordings_file=previous))
+				if existing is not None and recording_bundle.encode(existing) == payload:
+					safe_commit()
+					return
 			url = _save_report_file(
 				docname=docname,
 				filename=f"optimus_recordings_{session_uuid}.json.gz",
 				attached_to_field="recordings_file",
 				content=payload,
 			)
-			if url:
-				frappe.db.set_value("Optimus Session", docname, "recordings_file", url)
+			if not url:
+				raise recording_bundle.InvalidBundle("snapshot_file_missing")
+			frappe.db.set_value("Optimus Session", docname, "recordings_file", url)
+			if degraded:
+				warnings = frappe.db.get_value("Optimus Session", docname, "analyzer_warnings") or ""
+				frappe.db.set_value("Optimus Session", docname, "analyzer_warnings", (warnings + "\n" + recording_bundle.DEGRADED_WARNING).strip())
+			# File row and parent binding must be durable before Redis cleanup.
+			safe_commit()
 	except Exception:
 		failed = True
 	if guard.pending():
 		recordings = rec = bundle = payload = None
 		raise guard.interrupt()
 	if failed:
+		recordings = rec = entry = sparse = infra_blob = resolved_doc = bundle = payload = existing = None
 		log_ai_failure("optimus ai persist recordings", reason="snapshot_write_failed")
+		raise recording_bundle.SnapshotUnavailable("snapshot_write_failed")
 
 
 def _load_recordings_bundle(session_doc):

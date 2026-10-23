@@ -187,7 +187,7 @@ def query_text(query, *, send_raw: bool) -> str:
 	sensitive-column redaction.
 	"""
 	from optimus.ai_fix import _InterruptGuard
-	from optimus.redaction import redact_sql_literals
+	from optimus.redaction import DEFAULT_SENSITIVE_SQL_COLUMNS
 	from optimus.sql_budget import within_budget
 
 	if not within_budget(query, max_chars=MAX_QUERY_CHARS) or not query.strip():
@@ -198,7 +198,11 @@ def query_text(query, *, send_raw: bool) -> str:
 		with guard:
 			if send_raw:
 				columns = _sensitive_columns()
-				return redact_sql_literals(query.strip(), extra_columns=columns, strict=True)
+				# Sensitive SQL can use ILIKE, casts, arrays or dialect expressions.
+				# Regex replacement cannot prove those private: strip all literals
+				# using the same fail-closed parser boundary as redacted mode.
+				if not any(col.lower() in query.lower() for col in (*DEFAULT_SENSITIVE_SQL_COLUMNS, *columns)):
+					return query.strip()
 			parts = []
 			statements = sqlparse.parse(query)
 			for statement in statements:
@@ -212,7 +216,7 @@ def query_text(query, *, send_raw: bool) -> str:
 					else:
 						parts.append(token.value)
 			text = "".join(parts).strip()
-			if any(marker in text for marker in ("'", '"', "/*", "--", "#")):
+			if any(marker in text for marker in ("'", '"', "$", "/*", "--", "#")):
 				return ""  # An unparsed quote/comment may still hold a value.
 			return text
 	except Exception:

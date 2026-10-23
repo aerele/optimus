@@ -281,6 +281,26 @@ def _finalize_prose(text: str, threshold_ms: float, *, scan: bool = True) -> str
 	return fmt(text, threshold_ms).replace("—", "-")
 
 
+def _sanitize_report_html(value):
+	"""Preserve rich notes on older v15 while excluding resource-bearing tags."""
+	from frappe.utils.html_utils import sanitize_html
+
+	try:
+		return sanitize_html(value, always_sanitize=True, disallowed_tags=["meta", "link"])
+	except TypeError as exc:
+		if "disallowed_tags" not in str(exc):
+			raise
+	# Old v15 lacks the keyword. Sanitize before parsing, strip resource tags,
+	# then sanitize the serialized DOM again to retain the fail-closed boundary.
+	from bs4 import BeautifulSoup
+
+	cleaned = sanitize_html(value, always_sanitize=True)
+	soup = BeautifulSoup(cleaned, "html.parser")
+	for tag in soup.find_all(["meta", "link"]):
+		tag.decompose()
+	return sanitize_html(str(soup), always_sanitize=True)
+
+
 @render_validation_budget()
 def render(
 	session_doc: Any,
@@ -732,8 +752,7 @@ def render(
 	notes_html = getattr(session_doc, "notes", None) or ""
 	if notes_html:
 		try:
-			from frappe.utils.html_utils import sanitize_html
-			notes_html = sanitize_html(notes_html, always_sanitize=True, disallowed_tags=["meta", "link"])
+			notes_html = _sanitize_report_html(notes_html)
 		except Exception:
 			# If sanitize_html blows up for any reason (unexpected input
 			# type, nh3/bleach internal error), fall back to HTML-escaping
@@ -1002,10 +1021,7 @@ def render(
 	stored_summary_html = getattr(session_doc, "summary_html", None) or ""
 	if stored_summary_html:
 		try:
-			from frappe.utils.html_utils import sanitize_html
-			stored_summary_html = sanitize_html(
-				stored_summary_html, always_sanitize=True, disallowed_tags=["meta", "link"],
-			)
+			stored_summary_html = _sanitize_report_html(stored_summary_html)
 		except Exception:
 			import html as html_mod
 			stored_summary_html = html_mod.escape(html_mod.unescape(stored_summary_html))

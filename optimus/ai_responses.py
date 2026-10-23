@@ -19,9 +19,23 @@ def completion_status(reason):
 		return "complete"
 	if reason in ("content_filter", "refusal"):
 		return "blocked"
-	if reason in ("length", "max_tokens", "model_context_window_exceeded", "aborted", "insufficient_system_resource"):
+	if reason in ("length", "max_tokens", "model_context_window_exceeded", "aborted", "abort", "pause_turn", "tool_use", "tool_calls", "function_call", "insufficient_system_resource"):
 		return "incomplete"
 	return "unknown"
+
+
+def validatable_status(reason, *, completion_tokens=None, output_budget=None):
+	"""Unknown metadata permits local validation, not provider confirmation.
+
+	Keep the raw provider status in retained evidence. Explicit partial replies
+	and reported exhausted output budgets still withhold unfinished code.
+	"""
+	status = completion_status(reason)
+	if status != "unknown":
+		return status
+	if type(completion_tokens) is int and type(output_budget) is int and completion_tokens >= output_budget:
+		return "incomplete"
+	return "complete"
 
 
 def fingerprint(system, messages):

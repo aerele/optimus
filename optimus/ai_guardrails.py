@@ -376,9 +376,20 @@ def _parse(code: str):
 	"""(tree, text_parsed, line_offset) or (None, '', 0). Tries the dedented code,
 	then the code wrapped in a def; a hunk ending on a block opener gets a body."""
 	code = textwrap.dedent(code.replace("\t", "    "))
-	last = next((ln for ln in reversed(code.splitlines()) if ln.strip()), "")
-	if last.rstrip().endswith(":"):
-		code += "\n" + " " * (len(last) - len(last.lstrip()) + 4) + "pass"
+	# The renderer can expose its own outer wrappers as literal code in a
+	# nested list. Inspect the interior without stripping arbitrary source tags.
+	outer = '<pre><code class="python language-python">'
+	if code.startswith(outer) and code.rstrip().endswith("</code></pre>"):
+		code = code[len(outer):].rstrip()[:-len("</code></pre>")]
+	code = re.sub(r"(?m)^([ \t]*)<rest unchanged>[ \t]*$", r"\1pass", code)
+	try:
+		tokens = [t for t in tokenize.generate_tokens(io.StringIO(code).readline)
+			if t.type not in {tokenize.COMMENT, tokenize.NEWLINE, tokenize.NL, tokenize.INDENT, tokenize.DEDENT, tokenize.ENDMARKER}]
+		if tokens and tokens[-1].type == tokenize.OP and tokens[-1].string == ":":
+			last = tokens[-1].line
+			code += "\n" + " " * (len(last) - len(last.lstrip()) + 4) + "pass"
+	except (tokenize.TokenError, IndentationError, SyntaxError):
+		pass
 	for cand, off in ((code, 0), ("def _f():\n" + textwrap.indent(code, "    "), 1)):
 		try:
 			return ast.parse(cand), cand, off
@@ -387,7 +398,7 @@ def _parse(code: str):
 	return None, "", 0
 
 
-def _code_units(blocks: list[Block], source_lines: list[str]):
+def _code_units(blocks: list[Block], source_lines: list[str], *, with_block=False):
 	"""Yield (after_rows, minus_text) per code block. after_rows = [(code, is_new)]."""
 	src = {_norm(s) for s in source_lines}
 	for b in blocks:
@@ -398,7 +409,7 @@ def _code_units(blocks: list[Block], source_lines: list[str]):
 		else:  # a non-diff block: lines verbatim from the source are context
 			after = [(ln, _norm(ln) not in src) for ln in b.lines]
 			minus = set()
-		yield after, minus
+		yield (after, minus, b) if with_block else (after, minus)
 
 
 def _fragment_changes_sql(after: list[tuple[str, bool]]) -> bool:
@@ -441,15 +452,33 @@ def _fragment_changes_sql(after: list[tuple[str, bool]]) -> bool:
 	return False
 
 
+def _nonliteral_tokens(text):
+ try:
+  return " ".join(t.string for t in tokenize.generate_tokens(io.StringIO(text).readline)
+   if t.type not in {tokenize.STRING, tokenize.COMMENT})
+ except (tokenize.TokenError, IndentationError, SyntaxError):
+  return text
+
+
 def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 	out: list[Violation] = []
-	for after, minus in _code_units(blocks, source_lines):
+	for after, minus, block in _code_units(blocks, source_lines, with_block=True):
 		text = "\n".join(c for c, _ in after)
 		new_idx = {i for i, (_, new) in enumerate(after) if new}
 		if not new_idx:
 			continue
 		tree, parsed, off = _parse(text)
+		if tree is None:
+			from optimus.ai_fix_checks import View
+			recovered = View(after, minus)
+			if recovered.tree is not None:
+				tree, parsed, off = recovered.tree, recovered.parsed, recovered.off
+				out.append(_v("unverified-structure"))
 		if tree is None:  # fallback: line regex over new lines only
+			python_policy = re.search(
+				r"\b(?:import|from|eval|exec|__import__|safe_exec|safe_eval|frappe|builtins|os|subprocess|pickle|marshal|dill|ignore_permissions|Administrator)\b", _nonliteral_tokens(text))
+			if block.info not in {"sql", "bash", "sh", "shell", "json", "text"} or python_policy:
+				out.append(_v("unverified-safety", "the proposed code could not be parsed"))
 			if _fragment_changes_sql(after):
 				out.append(_v("raw-sql", "unparseable block"))
 			for i in sorted(new_idx):
@@ -486,7 +515,7 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 				out.append(_v("unverified-safety", "dynamic or ambiguous access to a protected API"))
 			if isinstance(n, (ast.Name, ast.Attribute)) and isinstance(n.ctx, ast.Load) and introduced(n):
 				identity = aliases.name(n)
-				if identity in {"builtins.eval", "builtins.exec"}:
+				if identity in {"builtins.eval", "builtins.exec", "safe_exec", "safe_eval"}:
 					out.append(_v("eval-exec", identity))
 				elif identity in _SHELL or identity in _SUBPROCESS_SINKS:
 					out.append(_v("shell-exec", identity))
@@ -576,21 +605,29 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 						out.append(_v("ignore-permissions"))
 					if k.arg == "allow_guest" and isinstance(k.value, ast.Constant) and k.value.value and introduced(n):
 						out.append(_v("allow-guest"))
+				if (introduced(n) and isinstance(n.func, ast.Attribute) and n.func.attr in {"insert", "save"}
+					and isinstance(n.func.value, ast.Name) and n.func.value.id in {"doc", "self"}
+					and n.args and isinstance(n.args[0], ast.Constant) and n.args[0].value is True):
+					out.append(_v("ignore-permissions"))
 			elif (
 				isinstance(n, ast.Assign)
 				and introduced(n)
 				and any(
-					isinstance(t, ast.Attribute) and _dotted(t) == "frappe.flags.ignore_permissions" for t in n.targets
+					isinstance(t, ast.Attribute) and _dotted(t).endswith(".flags.ignore_permissions") for t in n.targets
 				)
 			):
 				out.append(_v("ignore-permissions"))
+			elif (isinstance(n, ast.Assign) and introduced(n)
+				and isinstance(n.value, ast.Constant) and n.value.value == "Administrator"
+				and any(aliases.name(t) == "frappe.session.user" for t in n.targets)):
+				out.append(_v("set-user-admin"))
 			elif isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef):
 				arguments = [*n.args.posonlyargs, *n.args.args, *n.args.kwonlyargs]
 				# A kept def line can gain a whitelist decorator or lose an argument
 				# annotation on a later line. A body edit alone keeps the signature old.
 				signature_changed = introduced(n) or any(introduced(a) for a in arguments)
 				for d in n.decorator_list:
-					dn = _dotted(d.func if isinstance(d, ast.Call) else d)
+					dn = aliases.name(d.func if isinstance(d, ast.Call) else d) or _dotted(d.func if isinstance(d, ast.Call) else d)
 					if dn.split(".")[-1] in ("lru_cache", "cache") and introduced(d):
 						out.append(_v("multitenant-cache", dn))
 					if dn == "frappe.whitelist" and (signature_changed or introduced(d)):
@@ -654,7 +691,7 @@ def check_code(blocks: list[Block], source_lines: list[str]) -> list[Violation]:
 		for n in ast.walk(tree):
 			if (
 				isinstance(n, ast.Call)
-				and _dotted(n.func) in ("frappe.throw", "frappe.msgprint")
+				and aliases.call_name(n, _dotted) in ("frappe.throw", "frappe.msgprint")
 				and introduced(n)
 				and n.args
 				and isinstance(n.args[0], ast.Constant | ast.JoinedStr)

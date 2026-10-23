@@ -46,8 +46,13 @@ jobs:
       matrix:
         include:
           - frappe: '15'
+            ref: version-15
+            python: '3.10'
+          - frappe: '15.83.0'
+            ref: v15.83.0
             python: '3.10'
           - frappe: '16'
+            ref: version-16
             python: '3.14'
 
     services:
@@ -120,7 +125,7 @@ jobs:
 
       - name: Provision a Frappe bench with optimus installed
         env:
-          FRAPPE_BRANCH: version-${{ matrix.frappe }}
+          FRAPPE_BRANCH: ${{ matrix.ref }}
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
           chmod +x .github/helper/install.sh

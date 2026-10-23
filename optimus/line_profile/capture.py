@@ -370,7 +370,7 @@ def validate_picks(picks):
 
 
 @_interrupt_boundary
-def prepare_line_profile_picks(picks: list[dict]) -> PreparedCapture:
+def prepare_line_profile_picks(picks: list[dict], *, server_expanded=frozenset()) -> PreparedCapture:
 	"""Resolve and snapshot before acquiring SQL admission locks."""
 	_require_line_profiler()
 	from optimus.line_profile import picker
@@ -378,7 +378,8 @@ def prepare_line_profile_picks(picks: list[dict]) -> PreparedCapture:
 	validate_picks(picks)
 	from optimus.renderer.source import _installed_apps
 	installed = _installed_apps()
-	if any(entry["dotted_path"].split(".", 1)[0] not in installed for entry in picks):
+	if any(entry["dotted_path"].split(".", 1)[0] not in installed
+		and entry["dotted_path"] not in server_expanded for entry in picks):
 		raise CaptureError(_("Select a function from an installed app."))
 	resolved: list[dict] = []
 	seen = set()
@@ -387,6 +388,12 @@ def prepare_line_profile_picks(picks: list[dict]) -> PreparedCapture:
 		if dotted in seen:
 			continue
 		seen.add(dotted)
+		if dotted.split(".", 1)[0] not in installed:
+			# Only the private, server-derived expansion set reaches this path.
+			# Keep it visible as skipped; never import a library from client input.
+			resolved.append({"dotted_path": dotted, "source": "auto_expand", "eligible": False,
+				"ineligible_reason": _("This auto-expanded function is outside installed apps.")})
+			continue
 		try:
 			meta = picker.resolve_freeform(dotted)
 		except picker.PickerError as exc:
@@ -771,7 +778,7 @@ def make_profiler(run_uuid: str):
 	profiler = LineProfiler()
 	for fn in fns:
 		try:
-			profiler.add_function(fn)
+			profiler.add_function(inspect.unwrap(fn))
 		except Exception as exc:
 			_raise_if_interrupt(exc)
 			# A single bad pick shouldn't sink the whole request.

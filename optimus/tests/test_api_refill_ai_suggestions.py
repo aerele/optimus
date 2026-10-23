@@ -139,6 +139,26 @@ def test_status_checks_read_permission_before_touching_journal(env, monkeypatch)
 		api.ai_refresh_status(SESSION_UUID)
 
 
+def test_shared_viewer_without_profiler_role_can_poll_but_cannot_spend(env, monkeypatch):
+	user = "reader@example.com"
+	fake, h = env(user=user, perms={("read", DOCNAME, user): True})
+	monkeypatch.setattr(fake, "get_roles", lambda *a: [])
+	permission = fake.has_permission
+	monkeypatch.setattr(fake, "has_permission", lambda dt, ptype, doc, user=None:
+		permission(dt, ptype, doc, user=user or fake.session.user))
+	monkeypatch.setattr(fake, "get_doc", lambda *a: fake_session_doc(owner=OWNER, status="Ready"))
+	jobs = import_module("optimus.ai_jobs")
+	monkeypatch.setattr(jobs, "refresh_state", lambda *a: {"state": "complete", "seq": 1})
+	monkeypatch.setattr(jobs, "uncertain_attempts", lambda *a: [])
+	monkeypatch.setattr(jobs, "refresh_plan", lambda *a: pytest.fail("viewer must not prepare AI spend"))
+	out = api.ai_refresh_status(SESSION_UUID)
+	assert out["status"] == "ok" and out["refresh"]["state"] == "complete"
+	assert out["can_act"] is False and out["plan"] is None
+	with pytest.raises(FakePermissionError):
+		api.refill_ai_suggestions(SESSION_UUID)
+	h.start.assert_not_called()
+
+
 @pytest.mark.parametrize("owner", [True, False])
 def test_read_sharee_can_poll_but_only_actor_sees_refresh_plan(env, monkeypatch, owner):
 	user = OWNER if owner else "reader@example.com"

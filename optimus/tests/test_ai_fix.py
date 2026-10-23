@@ -1145,7 +1145,7 @@ class TestGuardedCompletion:
 		fake = _post_sequence(self._resp(self._GOOD, usage=usage, finish=finish))
 		out = self._run(fake, monkeypatch, provider=provider)
 		assert len(fake.calls) == 1
-		assert fake.calls[0].body["max_tokens"] == {"DeepSeek": 393216, "OpenAI": 32768}[provider_name]
+		assert fake.calls[0].body["max_tokens"] == 4096
 		if provider_name == "DeepSeek":
 			assert fake.calls[0].body["thinking"] == {"type": "disabled"}
 		else:
@@ -1494,7 +1494,7 @@ class TestAnthropicEndToEnd:
 		assert call.body["system"] == [
 			{"type": "text", "text": ai_prompts.SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
 		]
-		assert call.body["max_tokens"] == 128000
+		assert call.body["max_tokens"] == 4096
 		assert call.headers["anthropic-version"] and "x-api-key" not in call.raw_headers  # the key rides on auth
 		assert call.auth is not None
 		assert out["suggestion"] == self._G._GOOD

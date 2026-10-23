@@ -36,6 +36,12 @@ def _render_and_save(docname, recordings, *, run_id, worker_token):
 	doc = frappe.get_doc("Optimus Session", docname)
 	if recordings is None:
 		recordings = analyze.load_recordings_light(doc)
+		requested = {analyze.row_get(action, "recording_uuid") for action in (doc.actions or [])}
+		requested.discard(None)
+		requested.discard("")
+		available = {rec.get("uuid") for rec in recordings}
+		if requested - available or (not recordings and getattr(doc, "total_queries", 0)):
+			raise ValueError("Retained recordings are unavailable. The existing report was preserved; record a new session.")
 	_transaction(lambda: None)
 	content = renderer.render_raw(doc, recordings)
 	if not isinstance(content, str) or not content.strip():

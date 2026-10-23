@@ -41,6 +41,7 @@ class Aliases(ast.NodeVisitor):
 		self.cache = {}
 		self.resolution_work = 0
 		self.identity_chars = 0
+		self.cut_cycles = 0
 		self.unsupported = []
 		self.visit(tree)
 		# Redirect global/nonlocal writes only after all scopes' locals exist.
@@ -245,17 +246,32 @@ class Aliases(ast.NodeVisitor):
 				if node.id in scope.bindings:
 					key = (scope, node.id)
 					if key in seen:
+						self.cut_cycles += 1
 						return frozenset({None})
 					if key not in self.cache:
+						cycle = self.cut_cycles
+						bases, suffixes = self._self_updates(scope, node.id)
 						out = set()
-						for value in scope.bindings[node.id]:
+						for value in bases:
 							out.update(
 								{value}
 								if isinstance(value, str) or value is None
 								else self.values(value, seen | {key}, depth + 1)
 							)
 							self._bounded(out)
-						self.cache[key] = frozenset(out or {None})
+						if suffixes and out and all(v and v.startswith("frappe.qb.") for v in out):
+							# One bounded unfolding preserves every possible write verb
+							# without making an optional WHERE look unconditional.
+							seeds = tuple(out)
+							for suffix in suffixes:
+								out.update(self._extend(v, suffix) for v in seeds)
+								self._bounded(out)
+						elif suffixes:
+							out.add(None)
+						result = self._bounded(out or {None})
+						if self.cut_cycles == cycle:
+							self.cache[key] = result
+						return result
 					return self.cache[key]
 				scope = scope.parent
 			if node.id in {"eval", "exec"}:
@@ -274,9 +290,30 @@ class Aliases(ast.NodeVisitor):
 				if value in {"__import__", "builtins.__import__", "importlib.__import__", "importlib.import_module"}:
 					out.update(self._imported(node, value))
 				else:
+					if value == "frappe.qb.get_query":
+						# v16 constructs writes through keyword flags as well as verbs.
+						for keyword in node.keywords:
+							if keyword.arg in {"delete", "update", "into", None} and not (isinstance(keyword.value, ast.Constant) and keyword.value.value is False):
+								value = self._extend(value, "." + (keyword.arg or "update") + "()")
 					out.add(self._extend(value, "()") if value and value.startswith("frappe.qb.") else None)
 			return self._bounded(out)
 		return frozenset({None})
+
+	def _self_updates(self, scope, name):
+		bases, suffixes = [], []
+		for value in scope.bindings[name]:
+			root, parts = value, []
+			while isinstance(root, ast.Call) and isinstance(root.func, ast.Attribute):
+				parts.append("." + root.func.attr + "()")
+				root = root.func.value
+			if (parts and isinstance(root, ast.Name) and root.id == name
+				and self._binding_scope(self.at.get(root, scope), name) is scope):
+				suffixes.append("".join(reversed(parts)))
+			else:
+				bases.append(value)
+		if len(suffixes) > 16:
+			raise AnalysisLimitExceeded("Static query-builder update budget exceeded")
+		return bases, suffixes
 
 	@staticmethod
 	def _imported(node, loader):
@@ -336,7 +373,27 @@ class Aliases(ast.NodeVisitor):
 
 	def name(self, node):
 		values = self.values(node)
-		return next(iter(values)) if len(values) == 1 and None not in values else ""
+		if len(values) > 1 and all(self._qb_read(value) for value in values):
+			return max(values, key=lambda value: (len(value), value))
+		return self._canonical(next(iter(values))) if len(values) == 1 and None not in values else ""
+
+	def names(self, node):
+		return frozenset(self._canonical(value) for value in self.values(node) if value)
+
+	@staticmethod
+	def _canonical(value):
+		if value in {"frappe.utils.background_jobs.enqueue", "frappe.utils.background_jobs.enqueue_doc"}:
+			return "frappe." + value.rsplit(".", 1)[-1]
+		if value in {"frappe.utils.safe_exec.safe_exec", "frappe.utils.safe_exec.safe_eval", "frappe.safe_eval", "frappe.utils.safe_eval"}:
+			return value.rsplit(".", 1)[-1]
+		if (value.startswith("frappe.database.") or value.startswith("frappe.local.db.")) and value.rsplit(".", 1)[-1] in {"commit", "rollback"}:
+			return "frappe.db." + value.rsplit(".", 1)[-1]
+		return value
+
+	@staticmethod
+	def _qb_read(value):
+		return bool(value and value.startswith("frappe.qb.") and not
+			{"delete", "update", "insert", "into", "truncate"}.intersection(value.replace("()", "").split(".")))
 
 	def call_name(self, node, dotted):
 		known = self.name(node.func)
@@ -345,6 +402,10 @@ class Aliases(ast.NodeVisitor):
 
 	def ambiguous_policy(self, node, *, sinks=frozenset()):
 		values = self.values(node)
+		if len(values) > 1 and all(value and value.startswith("frappe.qb.") for value in values):
+			# Consumers check writes across every identity, rather than picking
+			# a filtered alternative. Mixed read/write alternatives stay uncertain.
+			return not all(self._qb_read(value) for value in values)
 		return len(values) > 1 and any(
 			value
 			and (
@@ -366,6 +427,7 @@ class Aliases(ast.NodeVisitor):
 					"get_values",
 					"count",
 					"exists",
+					"safe_exec", "safe_eval", "enqueue", "enqueue_doc", "whitelist", "throw", "commit", "rollback", "set_user",
 				}
 			)
 			for value in values

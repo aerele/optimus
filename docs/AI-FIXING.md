@@ -339,7 +339,7 @@ must not be reset. Ambiguous loop/header rewrites can be withheld conservatively
 - **Advise rules** are conventions no pinned semgrep rule checks: no dynamic imports, and no index led by a Frappe metadata column. They never cost a follow-up turn and never remove code: one profiler note lists them.
 - **Notes** tell you about the answer: Customize Form has no index option, the model saw only part of the prompt, an image or an off-site link was removed, captured-data markers were echoed.
 
-A cut-off answer is never automatically re-asked. The received final-answer text is retained in the finding's `llm_fix_json.received_responses` before guardrail fallback, while unfinished code stays out of the report. Provider termination is recorded separately from local validation. New answers are `complete`, `incomplete`, `blocked`, `unknown` (missing/unrecognised termination), or `processing_limited`. Blocked/unknown responses never trigger a guardrail repair call. Manual Refresh includes incomplete and unknown answers; blocked and locally limited answers are kept unless the operator explicitly chooses to replace all suggestions. The optional repair of a complete answer with rule violations remains controlled by `optimus_ai_reask` in site_config.
+A cut-off answer is never automatically re-asked. The received final-answer text is retained in the finding's `llm_fix_json.received_responses` before guardrail fallback, while unfinished code stays out of the report. Provider termination is recorded separately from local validation. New answers are `complete` after local validation, `incomplete`, `blocked`, or `processing_limited`. A missing or unfamiliar finish reason alone does not discard valid text; the original provider reason and its unconfirmed status remain in retained evidence. A reported exhausted output budget, explicit truncation, paused turn, tool request, abort or unclosed fence remains incomplete. Empty replies fail without a repair call. Blocked responses never trigger a guardrail repair call. Manual Refresh includes incomplete answers and historical unknown answers; blocked and locally limited answers are kept unless the operator explicitly chooses to replace all suggestions. The optional repair of a complete answer with rule violations remains controlled by `optimus_ai_reask` in site_config.
 
 The 16,384-character threshold now selects a literal renderer instead of truncating the answer. Long answers are validated using explicit fenced code, with no recursive Markdown conversion. Resource limits are explicit: 1,048,576 characters for validation, 4,096 per line, 64 fenced blocks and 131,072 total fenced-code characters; ambiguous indented/nested prose requires local review. Exceeding these limits produces `processing_limited`, preserving the provider's actual finish reason. Storage retains up to 4,194,304 UTF-8 bytes per received answer (at most two attempts), with a full-text hash, original length and an explicit retention-truncated flag. These are resource envelopes, not generation-length targets. Raw retained text is unvalidated, never applied, excluded from report views and exports, and shares the parent session's access permissions and deletion/reset lifecycle. It is not written to logs or usage journals. Numeric reasoning-token counts are retained when reported, without adding them to total usage again; absent counts remain unknown.
 
@@ -351,9 +351,9 @@ Report rendering checks at most `RENDER_VALIDATION_CHARS = 262144` characters an
 
 DeepSeek’s request options follow its [thinking-mode API](https://api-docs.deepseek.com/guides/thinking_mode/); provider defaults are data in `_PROVIDER_DEFAULTS`, and other providers receive no DeepSeek-specific options.
 
-Input assembly reserves a minimum answer and tokenization margin first; the final request's allowance is `min(model output maximum, context window − estimated input − margin)`. The margin is at least 256 tokens and 10% of estimated input. Re-asks recalculate from their full conversation history and reported usage, without the former twice-first-answer ceiling. Small local models use the same remaining-context calculation. Counts remain estimates, so a provider can still reject a prompt its tokenizer counts differently.
+Input assembly reserves a minimum answer and tokenization margin first; the final request's allowance is `min(requested output budget, known model output maximum, context window − estimated input − margin)`. The margin is at least 256 tokens and 10% of estimated input. Re-asks recalculate from their full conversation history and reported usage, without the former twice-first-answer ceiling. Small local models use the same remaining-context calculation. Counts remain estimates, so a provider can still reject a prompt its tokenizer counts differently.
 
-Default model capabilities are data in `_PROVIDER_DEFAULTS`, scoped to exact model IDs: [GPT-4.1 mini](https://developers.openai.com/api/docs/models/gpt-4.1-mini) (1,047,576 context / 32,768 output), [Claude Sonnet 4.6](https://platform.claude.com/docs/en/models/sonnet-4-6/overview) (1M / 128K), and [DeepSeek Flash](https://api-docs.deepseek.com/api/create-chat-completion/) (1M / 393,216). The configured `deepseek-v4-flash` alias retains its identity. Unknown hosted OpenAI-compatible models, including Kimi without declared output capabilities, omit the output parameter and record `budget_source: provider_default`; their provider's default may be lower than its maximum. Unknown Anthropic models require declared capacities because Messages requires `max_tokens`. No provider discovery or paid probe runs automatically.
+Default model capabilities are data in `_PROVIDER_DEFAULTS`, scoped to exact model IDs: [GPT-4.1 mini](https://developers.openai.com/api/docs/models/gpt-4.1-mini) (1,047,576 context / 32,768 output), [Claude Sonnet 4.6](https://platform.claude.com/docs/en/models/sonnet-4-6/overview) (1M / 128K), and [DeepSeek Flash](https://api-docs.deepseek.com/api/create-chat-completion/) (1M / 393,216). The configured `deepseek-v4-flash` alias retains its identity. The default requested output budget is 4,096 tokens (8,192 for reasoning models or enabled thinking); it is separate from model capacity. Set `optimus_ai_max_output_tokens` to an integer from 512 through 131,072 to change it. Reasoning consumes this same budget, so a reasoning-heavy model may need a larger setting. Unknown models also receive the bounded requested budget. Unknown Anthropic IDs use a conservative 200,000-token context fallback, which operators can override with actual capacities. Retained `budget_source` distinguishes known capacities from context fallbacks. Test AI connection sends the same resolved budget as a real request and asks only for OK. No provider discovery or paid probe runs automatically. See the [Messages max_tokens contract](https://platform.claude.com/docs/en/api/typescript/messages/create) and [Chat Completions max_completion_tokens contract](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create).
 
 Operators can declare model capacities in site_config: `"optimus_ai_model_limits": {"Provider name": {"model-id": [context_tokens, output_tokens]}}`. Both values must be positive integers and describe actual model limits. The existing Context window setting still takes precedence for custom OpenAI-compatible endpoints. A different model never inherits the default model's output maximum. DeepSeek thinking defaults to disabled; `"optimus_ai_thinking": {"DeepSeek": "enabled"}` opts into the provider's declared thinking mode. The exact configured alias and mode still require a user-triggered live conformance test.
 
@@ -725,3 +725,33 @@ Preparation failures are recorded as unsent skips (`optimus ai refresh prepare`)
 Raw SQL uses current committed `sensitive_sql_columns` rules at the input boundary. If those rules cannot be read, or sensitive-literal redaction fails, the query is omitted. Error Log masking covers schemeless Authorization and oversized quoted header values; when an AI record cannot be scrubbed, its error, title and metadata are withheld together.
 
 Phase 2 requires a worker on the long queue; a stopped capture without an available worker is marked Failed without using an analysis attempt. Start a worker and retry while the captured input remains available. A late concurrent flush asks for a retry; genuinely missing or corrupt input still asks for a new pass. Idle Session forms stop AI status polling; active and unknown runs continue recovery polling.
+
+
+### Recording snapshots and recovery
+
+Analysis commits a private JSON recording File and its Session binding before deleting
+Recorder input from Redis. A missing recording, encoding, File or commit failure
+marks the session Failed with a fixed recovery message; Retry Analyze can reuse the
+retained input. Redis is temporary: clearing Frappe Recorder or eviction can remove
+it. The daily janitor removes snapshot-failure input after a seven-day recovery
+window, in batches of at most 100 terminal sessions independently of report retention.
+With the scheduler disabled that sweep must be run manually. The last report remains
+available; regeneration refuses to replace it when expected recordings are missing.
+AI refresh skips affected items without sending a request when required input is absent.
+Representative SQL finding callsites are persisted with the findings.
+
+Both the writer and reader enforce 4,000,000 JSON nodes, 64 MiB decompressed and
+16 MiB compressed, depth64 and20,000 recordings. The measured full-detail envelope
+is12 recordings of1,300 queries with20 four-field stack frames and an EXPLAIN row
+per query. On the local Python3.14 check this encoded in3.04s, read in1.63s, and
+peaked at241MiB RSS in a standalone process; these are measurements, not production
+latency or memory guarantees. A26,000-query test exceeded the structural budget
+and round-tripped every query with at most3 application frames and no EXPLAIN
+results (0.59s read,89MiB peak). A reduced snapshot records its detail mode and
+shows a warning. If even this bounded form cannot fit, analysis retains Redis and
+fails; queries are never silently truncated from a snapshot.
+
+Raw SQL consent preserves business literals only in queries without sensitive-column
+names. Queries mentioning a default or configured sensitive column use the private
+literal-stripping path (or are omitted when that cannot be established), including
+PostgreSQL dollar strings, ILIKE, casts and array expressions in example queries.

@@ -1441,7 +1441,7 @@ def refill_ai_suggestions(
 @frappe.whitelist()
 def ai_refresh_status(session_uuid: str) -> dict:
 	"""Read SQL progress even during a queue outage. No per-user polling limit."""
-	user = _require_profiler_user()
+	user = _require_user()
 	docname = _require_session_permission(session_uuid)
 	from optimus import ai_jobs, analyze
 
@@ -1449,7 +1449,7 @@ def ai_refresh_status(session_uuid: str) -> dict:
 		refresh = ai_jobs.refresh_state(docname)
 		doc = frappe.get_doc("Optimus Session", docname)
 		can_write = frappe.has_permission("Optimus Session", "write", docname, user=user)
-		can_act = may_act_on_session(
+		can_act = is_profiler_user(user) and may_act_on_session(
 			user=user, owner=doc.owner or "", can_read=True,
 			can_write=bool(can_write),
 		)
@@ -1724,6 +1724,7 @@ def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: b
 	# (source != "curated") aren't expanded we don't know if they appeared
 	# in phase 1 at all.
 	expansions: list[dict] = []
+	server_expanded: set[str] = set()
 	if auto_expand:
 		# Load the phase-1 call trees once so expand_hot_chain can search
 		# across all action recordings for the hottest match.
@@ -1790,6 +1791,8 @@ def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: b
 			})
 			for chain_entry in chain:
 				cdp = chain_entry["dotted_path"]
+				if chain_entry["depth"] > 0:
+					server_expanded.add(cdp)
 				if cdp and cdp not in seen:
 					seen.add(cdp)
 					expanded_picks.append({
@@ -1802,7 +1805,8 @@ def start_line_profile_pass(session_uuid: str, picks: str | list, auto_expand: b
 
 	run_uuid = _uuid.uuid4().hex
 	try:
-		prepared = _lp_capture.prepare_line_profile_picks(picks_list)
+		prepared = (_lp_capture.prepare_line_profile_picks(picks_list, server_expanded=frozenset(server_expanded))
+			if server_expanded else _lp_capture.prepare_line_profile_picks(picks_list))
 	except _lp_capture.CaptureError as exc:
 		frappe.throw(str(exc), frappe.ValidationError, title=_("Optimus"))
 

@@ -69,6 +69,10 @@ def sweep_old_sessions():
 	to the 5-minute janitor.
 	"""
 	try:
+		_sweep_failed_snapshot_inputs()
+	except Exception:
+		frappe.log_error(title="optimus janitor failed recording inputs")
+	try:
 		_sweep_old_sessions()
 	except Exception:
 		frappe.log_error(title="optimus janitor sweep_old_sessions")
@@ -77,6 +81,31 @@ def sweep_old_sessions():
 		_sweep_orphan_redis_state()
 	except Exception:
 		frappe.log_error(title="optimus janitor sweep_orphan_redis_state")
+
+
+def _sweep_failed_snapshot_inputs():
+	"""Bound retained Recorder input to a seven-day manual recovery window.
+
+	Only terminal snapshot failures qualify; session retention may keep the
+	report longer. Recheck under the parent lock so Retry Analyze cannot race
+	Redis deletion. Work in batches, independently of normal session retention.
+	"""
+	from optimus import analyze
+	from optimus.recording_bundle import SNAPSHOT_FAILURE_WARNING
+	cutoff = add_to_date(now_datetime(), days=-7)
+	rows = frappe.get_all("Optimus Session", filters={"status": "Failed", "modified": ["<", cutoff],
+		"analyzer_warnings": SNAPSHOT_FAILURE_WARNING}, fields=["name"], limit_page_length=100)
+	for row in rows:
+		try:
+			doc = frappe.get_doc("Optimus Session", row["name"], for_update=True)
+			if doc.status != "Failed" or doc.modified >= cutoff or doc.analyzer_warnings != SNAPSHOT_FAILURE_WARNING:
+				continue
+			uuids = list({a.recording_uuid for a in doc.actions or [] if a.recording_uuid})
+			analyze._cleanup_redis(doc.session_uuid, uuids)
+			doc.db_set("analyzer_warnings", "Recording snapshot recovery window expired. Record a new session.")
+			safe_commit()
+		finally:
+			frappe.db.rollback()
 
 
 def _sweep_orphan_redis_state():

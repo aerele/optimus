@@ -303,15 +303,16 @@ def test_persist_recordings_file_builds_parseable_bundle(monkeypatch):
 
 	monkeypatch.setattr(ps_session, "get_session_meta", lambda u: {"user": "x@y"}, raising=True)
 
-	# Capture the gzipped content; return None so the frappe.db.set_value path
-	# is skipped (no site needed).
+	# Capture the gzipped content and model its committed File binding.
 	captured = {}
+	monkeypatch.setattr(frappe, "db", SimpleNamespace(get_value=lambda *a: None, set_value=lambda *a: None))
+	monkeypatch.setattr(analyze, "safe_commit", lambda: None)
 
 	def _fake_save(*, docname, filename, attached_to_field, content):
 		captured.update(
 			docname=docname, filename=filename, field=attached_to_field, content=content
 		)
-		return None
+		return "/private/files/capture.json.gz"
 
 	monkeypatch.setattr(analyze, "_save_report_file", _fake_save, raising=True)
 

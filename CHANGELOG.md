@@ -8,6 +8,21 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## Unreleased — PR69 review fixes
+
+- Commit recording snapshots before deleting Recorder input; retain failed captures
+  for Retry Analyze, preserve reports when evidence is missing, and disclose bounded
+  reduced-detail snapshots. Failed snapshot input has a seven-day recovery window.
+- Accept ordinary Query Builder read updates while withholding ambiguous writes and
+  unparseable proposed Python. Check qualified Frappe policy APIs consistently.
+- Request bounded AI output budgets, support unknown Anthropic model IDs, validate
+  alternate completion metadata, and keep PostgreSQL sensitive examples private.
+- Skip server-expanded library picks before import, profile decorated source bodies,
+  permit shared readers to read refresh status, and show an actionable Phase2 error.
+- Preserve SQL sort order and semicolon handling in index advice, account for large
+  write statements, and retain rich notes on older v15 sanitizers. Add a pinned
+  Frappe15.83 integration leg and correct duplicate-start Redis assertions.
+
 ## [0.12.82] - 2026-10-18
 
 ### Security and correctness

@@ -113,7 +113,7 @@ def test_a_touch_refreshes_only_a_flag_this_session_may_hold(monkeypatch, holder
 
 
 
-def _drive_run(monkeypatch, *, cache, scheduler_disabled, deadline=None, configured=600, n=3, build=0.0, touch=None):
+def _drive_run(monkeypatch, *, cache, scheduler_disabled, deadline=None, configured=600, n=3, build=0.0, touch=None, snapshot=None, cleanup=None):
 	"""Run the real ``analyze.run`` on a virtual clock, from the single-flight gate through
 	the AI loop, _persist's humanize call and the render step (stubbed); every provider
 	call uses its whole timeout and each finding's payload costs ``build`` seconds."""
@@ -162,6 +162,10 @@ def _drive_run(monkeypatch, *, cache, scheduler_disabled, deadline=None, configu
 	for name in ("_publish_session_event", "_publish_progress", "queue_analyze_time_ai", "_render_and_attach_reports",
 	             "_persist_recordings_file", "_cleanup_redis", "_auto_arm_phase2"):
 		monkeypatch.setattr(analyze, name, lambda *a, **k: None)
+	if snapshot is not None:
+		monkeypatch.setattr(analyze, "_persist_recordings_file", snapshot)
+	if cleanup is not None:
+		monkeypatch.setattr(analyze, "_cleanup_redis", cleanup)
 	if touch is not None:
 		monkeypatch.setattr(analyze, "_touch_singleflight", lambda uuid: touch(clock.now))
 	with patch("optimus.settings.get_config", return_value=_AI_CFG), \

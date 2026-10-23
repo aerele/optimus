@@ -53,7 +53,7 @@ class View:
 	def __init__(self, rows, moved=()):
 		self.rows, self.moved = rows, set(moved)
 		text = "\n".join(line for line, _ in rows)
-		self.tree, _, self.off = _parse(text)
+		self.tree, self.parsed, self.off = _parse(text)
 		self.repaired = False
 		if self.tree is None:
 			# Repair only clause/opening indentation for inspection. Original rows
@@ -65,7 +65,7 @@ class View:
 			levels = sorted({len(s) - len(s.lstrip()) for s in lines if s.strip() and len(s) - len(s.lstrip()) < first})
 			if len(levels) <= 16:
 				prefix = [" " * n + "if True:" for n in levels]
-				self.tree, _, extra = _parse("\n".join(prefix + lines))
+				self.tree, self.parsed, extra = _parse("\n".join(prefix + lines))
 				self.off = len(prefix) + extra
 				self.repaired = self.tree is not None
 		self.parents = {child: node for node in ast.walk(self.tree) for child in ast.iter_child_nodes(node)} if self.tree else {}
@@ -564,9 +564,10 @@ def _check_changes(blocks, source_lines, *, stored=False):
 			for call in after.calls:
 				name = after.name(call)
 				if after.changed(call, True):
-					violation = _write_check(call, name)
-					if violation:
-						out.append(violation)
+					for candidate in after.aliases.names(call.func) or {name}:
+						violation = _write_check(call, candidate)
+						if violation:
+							out.append(violation)
 				if name == "frappe.has_permission" and after.changed(call) and (is_diff or not stored):
 					if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords) or len(call.args) > 5:
 						out.append(_v("unverified-safety", "dynamic or unsupported permission arguments"))
@@ -575,6 +576,13 @@ def _check_changes(blocks, source_lines, *, stored=False):
 		if is_diff:
 			before = View([(line, tag == "-") for tag, line in rows if tag != "+"])
 			if before.tree is not None and after.tree is not None:
+				for old in before.calls:
+					if before.name(old) not in {"frappe.get_list", "frappe.db.get_list"} or not before.changed(old, True):
+						continue
+					for new in after.calls:
+						if (after.name(new) in {"frappe.get_all", "frappe.db.get_all"} and after.changed(new, True)
+							and _key(_arg(old, 0, {"doctype"})) == _key(_arg(new, 0, {"doctype"}))):
+							out.append(_v("permission-downgrade", "get_list replaced by get_all"))
 				out.extend(_permission_changes(before, after))
 				out.extend(_sql_replacement(before, after))
 				if not stored:

@@ -194,8 +194,10 @@ class TestPhase2CaptureRedisContract(FrappeTestCase):
 		self.start()
 		with self.assertRaises(self.capture.CaptureError):
 			self.capture.start_line_profile_pass("fake-session", self.other, self.actor, prepared=self.prepared)
-		assert not frappe.cache.exists(frappe.cache.make_key(redis_keys.lp_picks(self.other)))
-		assert not frappe.cache.exists(frappe.cache.make_key(redis_keys.lp_source(self.other)))
+		# RedisWrapper.exists namespaces its argument itself. Double-prefixing
+		# would inspect an unrelated key and make these assertions vacuous.
+		assert not frappe.cache.exists(redis_keys.lp_picks(self.other))
+		assert not frappe.cache.exists(redis_keys.lp_source(self.other))
 
 	def test_raw_counter_round_trip_expiry_and_eviction_detection(self):
 		from optimus import redis_keys

@@ -924,6 +924,8 @@ def _grounding(doc, row, memo, run_id=None):
 	recordings = analyze.load_recordings_light(
 		doc, [uuid] if uuid else [], memo=memo.setdefault("recordings", {})
 	)
+	if uuid and not any(rec.get("uuid") == uuid for rec in recordings):
+		raise ValueError("Required recording unavailable; no AI request was sent.")
 	if "phase2_index" not in memo:
 		memo["phase2_index"] = analyze.phase2_index_for(doc)
 	if "evidence" not in memo:
@@ -1000,9 +1002,11 @@ def _steps_item(run, doc, memo):
 	from optimus import analyze
 
 	fingerprint = _signature(doc)
-	actions = analyze.actions_for_humanizer(
-		analyze.load_recordings_light(doc, memo=memo.setdefault("recordings", {}))
-	)
+	recordings = analyze.load_recordings_light(doc, memo=memo.setdefault("recordings", {}))
+	expected = {a.get("recording_uuid") for a in doc.get("actions") or [] if a.get("recording_uuid")}
+	if expected - {rec.get("uuid") for rec in recordings}:
+		raise ValueError("Required recordings unavailable; no Steps request was sent.")
+	actions = analyze.actions_for_humanizer(recordings)
 	if not actions:
 		return None
 
@@ -1155,9 +1159,8 @@ def _next_item(run, memo):
 	if remaining:
 		for row in rows:
 			if row.name not in blocked:
-				grounding = _grounding(doc, row, memo, run["name"])
 				item = _prepare_item(run, kind="fix", target=row.name,
-					prepare=lambda: _fix_item(run, doc, row, memo, grounding=grounding))
+					prepare=lambda: _fix_item(run, doc, row, memo))
 				if item is not None:
 					return item
 				return _PREPARATION_SKIPPED

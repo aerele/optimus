@@ -60,7 +60,7 @@ def test_unparseable_fragment_with_kept_opener_still_checks_arguments(call):
 def test_unparseable_fragment_keeps_unmodified_sql_context():
     source = ["else:", "    frappe.db.sql(query)", "    old_work()"]
     body = '```diff\n else:\n     frappe.db.sql(query)\n-    old_work()\n+    new_work()\n```'
-    assert not G.verify_fix(H.format(body), source_lines=source)
+    assert not G.strips_code(G.verify_fix(H.format(body), source_lines=source))
 
 
 @pytest.mark.parametrize("replacement", [

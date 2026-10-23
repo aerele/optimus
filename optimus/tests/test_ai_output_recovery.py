@@ -17,7 +17,7 @@ def test_complete_long_answer_survives(monkeypatch):
 	assert out["finish_reason"] == "stop"
 
 
-@pytest.mark.parametrize("reason,status", [("length", "incomplete"), (None, "unknown"), ("content_filter", "blocked"), ("aborted", "incomplete")])
+@pytest.mark.parametrize("reason,status", [("length", "incomplete"), ("content_filter", "blocked"), ("aborted", "incomplete")])
 def test_noncomplete_response_is_retained_without_reask(monkeypatch, reason, status):
 	h = _Harness()
 	fake = _post_sequence(h._resp(h._RAW, finish=reason))
@@ -29,12 +29,12 @@ def test_noncomplete_response_is_retained_without_reask(monkeypatch, reason, sta
 	assert ai_prompts.fix_state(out)[0] != "current"
 
 
-def test_deepseek_uses_model_output_limit(monkeypatch):
+def test_deepseek_uses_requested_output_budget(monkeypatch):
 	h = _Harness()
 	provider = dict(h._PROVIDER, name="DeepSeek", model="deepseek-v4-flash", context_tokens=1000000)
 	fake = _post_sequence(h._resp(h._GOOD))
 	h._run(fake, monkeypatch, provider=provider)
-	assert fake.calls[0].body["max_tokens"] == 393216
+	assert fake.calls[0].body["max_tokens"] == 4096
 
 
 def test_budget_uses_remaining_context_and_margin():
@@ -57,27 +57,27 @@ def test_reask_budget_uses_full_history_without_twice_first_answer_cap(monkeypat
 	fake = _post_sequence(h._resp(h._RAW, usage={"prompt_tokens": 2500, "completion_tokens": 150}), h._resp(h._GOOD))
 	h._run(fake, monkeypatch)
 	assert len(fake.calls) == 2
-	assert fake.calls[1].body["max_tokens"] == 32768
+	assert fake.calls[1].body["max_tokens"] == 4096
 	body = fake.calls[1].body
 	assert ai_budget.input_tokens(body["messages"][0]["content"], body["messages"][1:]) + body["max_tokens"] < 128000
 
 
-def test_unknown_hosted_model_uses_disclosed_server_default(monkeypatch):
+def test_unknown_hosted_model_uses_bounded_requested_budget(monkeypatch):
 	h = _Harness()
 	fake = _post_sequence(h._resp(h._GOOD))
 	out = h._run(fake, monkeypatch, provider=dict(h._PROVIDER, model="new-custom-model"))
-	assert "max_tokens" not in fake.calls[0].body
+	assert fake.calls[0].body["max_tokens"] == 4096
 	assert "max_completion_tokens" not in fake.calls[0].body
-	assert out["received_responses"][0]["budget_source"] == "provider_default"
+	assert out["received_responses"][0]["budget_source"] == "requested/context-fallback"
 	assert out["received_responses"][0]["reasoning_tokens"] is None
 
 
-def test_unknown_anthropic_model_requires_capabilities_before_http(monkeypatch):
+def test_unknown_anthropic_model_has_a_bounded_fallback_without_http(monkeypatch):
 	h = _Harness()
 	fake = _post_sequence(h._resp(h._GOOD))
-	with pytest.raises(ai_fix.AiFixError, match="model_limits"):
-		h._run(fake, monkeypatch, provider=dict(h._PROVIDER, name="Anthropic", protocol="anthropic", model="custom-claude"))
-	assert not fake.calls
+	provider = dict(h._PROVIDER, name="Anthropic", protocol="anthropic", model="custom-claude")
+	assert ai_fix._output_tokens(provider) == 4096
+	assert not fake.calls  # Capability resolution never calls a provider.
 
 
 def test_operator_capabilities_and_thinking_are_scoped(monkeypatch):

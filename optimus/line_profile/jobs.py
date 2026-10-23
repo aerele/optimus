@@ -517,6 +517,7 @@ def _notify(run, event):
 		"session_uuid": run["session_uuid"], "run_uuid": run["run_uuid"],
 		"parent": run["parent"], "user": run.get("analyze_requested_by"),
 		"render_pending": bool(run.get("analyze_render_pending")),
+		**({"error": "Analysis did not finish. Open the session for details and Retry Analyze."} if event == "phase_2_run_failed" else {}),
 	})
 
 

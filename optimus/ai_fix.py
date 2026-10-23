@@ -766,7 +766,7 @@ def test_connection() -> dict:
 	usage: dict = {}
 	try:
 		text = _dispatch_call(
-			provider, "You are a connectivity probe. Reply with exactly: OK", messages, usage_out=usage, max_tokens=16,
+			provider, "You are a connectivity probe. Reply with exactly: OK", messages, usage_out=usage,
 			timeout=min(request_timeout_seconds(), 60),
 		)
 	except AiFixError as e:
@@ -1196,6 +1196,9 @@ def _provider_config(cfg=None) -> dict:
 			limits = override
 
 	options = deepcopy(defaults.get("request_options", {}))
+	requested = safe_call.best_effort(lambda: frappe.conf.get("optimus_ai_max_output_tokens"), None)
+	if requested is not None and (type(requested) is not int or not ai_budget.MIN_OUTPUT_TOKENS <= requested <= 131072):
+		raise AiFixError("optimus_ai_max_output_tokens must be an integer between 512 and 131072.", kind="config")
 	thinking = safe_call.best_effort(lambda: frappe.conf.get("optimus_ai_thinking", {}), {})
 	mode = thinking.get(name) if isinstance(thinking, dict) else None
 	if mode is not None:
@@ -1212,8 +1215,9 @@ def _provider_config(cfg=None) -> dict:
 		"base_url": base_url,
 		"model": model,
 		"needs_key": bool(defaults["needs_key"]),
-		"context_tokens": ctx_override if ctx_override > 0 else int(limits[0] if limits else defaults["context_tokens"]),
+		"context_tokens": ctx_override if ctx_override > 0 else int(limits[0] if limits else (200000 if name == "Anthropic" else defaults["context_tokens"])),
 		"max_output_tokens": limits[1] if limits else defaults.get("max_output_tokens"),
+		"requested_output_tokens": requested,
 		"send_session_metadata": bool(defaults.get("send_session_metadata", False)),
 		"request_options": options,
 	}
@@ -2427,9 +2431,7 @@ def _call_anthropic(
 	The caller owns SQL settlement. Failure rows use only the explicit session reference.
 	The total call budget includes response processing and any parameter retries."""
 	if max_tokens is None:
-		max_tokens = _output_tokens({"name": "Anthropic", "protocol": "anthropic", "base_url": base_url, "model": model, "context_tokens": 1000000}, system, messages)
-	if max_tokens is None:
-		raise AiFixError("This model requires an output limit. Configure optimus_ai_model_limits with its context and output capacities.", kind="config")
+		max_tokens = _output_tokens({"name": "Anthropic", "protocol": "anthropic", "base_url": base_url, "model": model, "context_tokens": 200000}, system, messages)
 	url = base_url.rstrip("/") + "/v1/messages"
 	headers = {
 		"content-type": "application/json",
@@ -2682,7 +2684,10 @@ def _reask_enabled() -> bool:
 	try:
 		import frappe
 
-		return bool(frappe.conf.get("optimus_ai_reask", True))
+		value = frappe.conf.get("optimus_ai_reask", True)
+		if isinstance(value, str):
+			return value.strip().lower() not in ("false", "0", "off", "no", "")
+		return bool(value)
 	except Exception as exc:
 		failure = exc
 	if isinstance(failure, _job_timeout_types()):
@@ -2707,7 +2712,7 @@ def _context_tokens(provider: dict) -> int:
 	return int(provider.get("context_tokens") or _DEFAULT_CONTEXT_TOKENS)
 
 
-def _output_tokens(provider: dict, system: str = "", messages=(), *, input_floor: int = 0) -> int | None:
+def _output_tokens(provider: dict, system: str = "", messages=(), *, input_floor: int = 0) -> int:
 	limits = _PROVIDER_DEFAULTS.get(provider.get("name"), {}).get("model_limits", {}).get(provider.get("model"))
 	maximum = provider.get("max_output_tokens") or (limits[1] if limits else None)
 	ctx = _context_tokens(provider)
@@ -2715,15 +2720,9 @@ def _output_tokens(provider: dict, system: str = "", messages=(), *, input_floor
 	available = ai_budget.output_tokens(ctx, input_tokens=estimated, model_max=maximum)
 	if available < ai_budget.MIN_OUTPUT_TOKENS:
 		raise AiFixError(_context_message(hosted=_is_hosted_endpoint(provider.get("base_url")), window=ctx), kind="context")
-	if maximum:
-		return available
-	if provider.get("protocol") == "anthropic":
-		raise AiFixError("Configure optimus_ai_model_limits for this model's context and output capacities before requesting suggestions.", kind="config")
-	if not _is_hosted_endpoint(provider.get("base_url")):
-		return available
-	# Unknown hosted OpenAI-compatible model: let its server supply the default.
-	# Recorded on the response; no invented maximum from another model.
-	return None
+	thinking = provider.get("request_options", {}).get("thinking", {}).get("type") == "enabled"
+	requested = provider.get("requested_output_tokens") or (8192 if thinking or _is_reasoning_model(provider.get("model")) else 4096)
+	return min(available, requested)
 
 
 def _context_advice(*, hosted: bool = False) -> str:
@@ -2805,7 +2804,9 @@ def _dispatch_call(
 	out = max_tokens if max_tokens is not None else _output_tokens(provider, system, messages)
 	if meta_out is not None:
 		meta_out["output_budget"] = out
-		meta_out["budget_source"] = "model/context" if out is not None else "provider_default"
+		meta_out["budget_source"] = "requested/context/model" if provider.get("max_output_tokens") else "requested/context-fallback"
+		if provider["protocol"] == "anthropic" and not provider.get("max_output_tokens") and provider.get("model") not in _PROVIDER_DEFAULTS.get("Anthropic", {}).get("model_limits", {}):
+			meta_out["budget_source"] += f":{_context_tokens(provider)}"
 	if provider["protocol"] == "anthropic":
 		return _call_anthropic(
 			provider["base_url"], api_key, provider["model"], system, messages,
@@ -2871,7 +2872,7 @@ def _complete_with_guardrails(
 	if response_out is not None:
 		response_out["received_responses"].append(ai_responses.retain(text or "", meta, system=system, messages=messages, provider=provider, send_raw=send_raw))
 	text = (text or "").strip()
-	if not text and ai_responses.completion_status(meta.get("finish_reason")) == "complete":
+	if not text and ai_responses.completion_status(meta.get("finish_reason")) in ("complete", "unknown"):
 		from frappe import _
 
 		raise AiFixError(_(
@@ -2882,8 +2883,8 @@ def _complete_with_guardrails(
 	if meta.get("prompt_tokens_reported") is False:
 		first_usage.pop("prompt_tokens", None)  # normalized zero is not a reported zero
 	finish = meta.get("finish_reason")
-	status = ai_responses.completion_status(finish)
-	if status in ("unknown", "blocked") or not ai_guardrails.can_validate(text):
+	status = ai_responses.validatable_status(finish, completion_tokens=usage.get("completion_tokens"), output_budget=meta.get("output_budget"))
+	if status == "blocked" or not ai_guardrails.can_validate(text):
 		status = status if status != "complete" else "processing_limited"
 		if response_out is not None:
 			response_out.update(completion_status=status, provider_finish_reason=meta.get("provider_finish_reason"))
@@ -2951,7 +2952,7 @@ def _complete_with_guardrails(
 			if rewritten is not None and response_out is not None:
 				response_out["received_responses"].append(ai_responses.retain(rewritten, reask_meta, system=system, messages=reask_messages, provider=provider, send_raw=send_raw))
 			rewritten = (rewritten or "").strip()
-			if rewritten and ai_responses.completion_status(reask_meta.get("finish_reason")) == "complete" and ai_guardrails.can_validate(rewritten):
+			if rewritten and ai_responses.validatable_status(reask_meta.get("finish_reason"), completion_tokens=reask_usage.get("completion_tokens"), output_budget=reask_meta.get("output_budget")) == "complete" and ai_guardrails.can_validate(rewritten):
 				rewritten_finish = reask_meta.get("finish_reason")
 				new = ai_guardrails.verify_fix(rewritten, source_lines=shown_lines, finish_reason=rewritten_finish, finding_type=finding_type)
 				adopt = (
@@ -2966,7 +2967,7 @@ def _complete_with_guardrails(
 	sent_size = ai_budget.text_size(system) + sum(ai_budget.text_size(m.get("content") or "") for m in messages)
 	if ctx <= _TRUNCATION_CHECK_MAX_CONTEXT and ai_budget.context_truncated(first_usage, sent_size):
 		violations = [*violations, ai_guardrails.Violation("context-truncated")]
-	status = "incomplete" if any(v.code == "truncated" for v in violations) else ai_responses.completion_status(finish)
+	status = "incomplete" if any(v.code == "truncated" for v in violations) else ai_responses.validatable_status(finish)
 	if response_out is not None:
 		response_out.update(completion_status=status, provider_finish_reason=meta.get("provider_finish_reason"))
 	final = ai_guardrails.apply_fallback(text, violations)

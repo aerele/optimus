@@ -196,6 +196,33 @@ def sample_target():
 	return 1
 
 
+def test_server_expanded_library_pick_is_skipped_before_import(env, monkeypatch):
+	from optimus.line_profile import picker
+	resolve = picker.resolve_freeform
+	seen = []
+	def checked(path):
+		seen.append(path)
+		assert not path.startswith("json."), "library frames must not reach import resolution"
+		return resolve(path)
+	monkeypatch.setattr(picker, "resolve_freeform", checked)
+	app = __name__ + ".sample_target"
+	prepared = capture.prepare_line_profile_picks([
+		{"dotted_path": app, "source": "curated"},
+		{"dotted_path": "json.loads", "source": "auto_expand"},
+	], server_expanded=frozenset({"json.loads"}))
+	assert seen == [app]
+	assert prepared.resolved[0]["eligible"]
+	assert not prepared.resolved[1]["eligible"]
+	assert "installed app" in prepared.resolved[1]["ineligible_reason"]
+
+
+def test_client_auto_expand_label_does_not_authorize_import(env, monkeypatch):
+	from optimus.line_profile import picker
+	monkeypatch.setattr(picker, "resolve_freeform", lambda path: pytest.fail("untrusted import"))
+	with pytest.raises(capture.CaptureError):
+		capture.prepare_line_profile_picks([{"dotted_path": "json.loads", "source": "auto_expand"}])
+
+
 def test_competing_starts_publish_only_one_complete_capture(env):
 	cache, _local = env
 	picks = [{"dotted_path": __name__ + ".sample_target", "source": "freeform"}]

@@ -46,7 +46,23 @@ def test_malformed_or_excessive_sql_is_omitted(privacy, query):
 def test_opt_in_keeps_business_literals_but_still_redacts_sensitive_columns(privacy):
 	query = f"SELECT * FROM `tabCustomer` WHERE name='{PRIVATE}' AND password='PASSWORD-CANARY'"
 	result = privacy.query_text(query, send_raw=True)
-	assert PRIVATE in result and "PASSWORD-CANARY" not in result
+	assert PRIVATE not in result and "PASSWORD-CANARY" not in result
+	assert "tabCustomer" in result
+
+
+@pytest.mark.parametrize("literal", ["$$PG-PRIVATE-CANARY$$", "$tag$PG-PRIVATE-CANARY$tag$", "E'PG-PRIVATE-CANARY'", "U&'PG-PRIVATE-CANARY'", "$tag$PG-PRIVATE-CANARY"])
+@pytest.mark.parametrize("send_raw", [True, False])
+def test_postgres_example_queries_never_send_sensitive_values(privacy, literal, send_raw):
+	finding = {"finding_type": "Slow Query", "technical_detail": {
+		"example_queries": [f'SELECT name FROM "tabUser" WHERE "password" = {literal}'],
+	}}
+	_, messages, _ = ai_fix._build_fix_request(finding, threshold_ms=1000, context_tokens=32768, send_raw=send_raw)
+	assert "PG-PRIVATE-CANARY" not in json.dumps(messages)
+
+
+@pytest.mark.parametrize("comparison", ["ILIKE '%PRIVATE-CANARY%'", "NOT LIKE 'PRIVATE-CANARY'", "!= 'PRIVATE-CANARY'", "<> 'PRIVATE-CANARY'", "= ANY(ARRAY['PRIVATE-CANARY'])", "= CAST('PRIVATE-CANARY' AS text)", "IS DISTINCT FROM 'PRIVATE-CANARY'"])
+def test_raw_sql_sensitive_expression_is_private(privacy, comparison):
+	assert "PRIVATE-CANARY" not in privacy.query_text(f'SELECT name FROM "tabUser" WHERE "api_key" {comparison}', send_raw=True)
 
 
 @pytest.mark.parametrize("value,expected", [(None, False), (False, False), ("0", False), ("false", False), (2, False), ({}, False),
