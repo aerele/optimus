@@ -139,6 +139,14 @@ _step "pip install -e apps/optimus + test deps"
 ./env/bin/pip install --quiet \
 	pytest pytest-github-actions-annotate-failures \
 	hypothesis Faker pdfplumber pypdf sql_metadata jsonschema
+# The pinned older framework imports Dropbox's legacy pkg_resources API during
+# new-site. Setuptools 82 removed it; keep this compatibility dependency inside
+# that disposable bench, without constraining the moving supported branches.
+# https://setuptools.pypa.io/en/latest/history.html#v82-0-0
+if [[ "${FRAPPE_BRANCH}" == "v15.83.0" ]]; then
+	./env/bin/pip install --quiet 'setuptools==80.10.2'
+	./env/bin/python -c 'import dropbox.session; import pkg_resources'
+fi
 _end
 
 _step "build framework print assets"
