@@ -552,6 +552,8 @@ def _same_file(node: dict, frame: dict) -> bool:
 def _match_child(current: dict, frame: dict):
 	"""Child matching ``frame`` by name, preferring the same file; a name-only match must be unambiguous."""
 	named = [c for c in current.get("children", []) if _frames_match(c, frame)]
+	if len(named) < 2:
+		return named[0] if named else None
 	for child in named:
 		if _same_file(child, frame):
 			return child
@@ -772,7 +774,7 @@ HOT_PATH_HIGH_MS_MULTIPLIER = 2.5      # 500 / 200
 # severity its absolute impact deserves without this, the TL;DR
 # headline picks smaller High findings over larger Medium ones.
 HOT_PATH_HIGH_ABS_MULTIPLIER = 2.0     # 2× high_ms → 1000ms by default
-SELF_TIME_MIN_PCT = 0.5                # callees at or above this share mean it isn't self-time
+SELF_TIME_MIN_SHARE = 0.5              # fraction of time in callees at which it is not reported as self-time
 SQL_DOMINANCE_SUPPRESSION_PCT = 0.80
 
 
@@ -1145,22 +1147,33 @@ def _walk_for_findings(
 					or action_label.endswith(f".{fn_name}")
 					or action_label.endswith(f":{fn_name}")
 				)
-				# Time mostly in callees: surface the slow child instead of calling it self-time.
+				# Time mostly in callees: report the slow callees, and own time only when hot by itself.
 				callee_ms = sum(
 					c.get("cumulative_ms", 0) for c in node.get("children") or []
 					if c.get("kind") == "python"
 				)
-				callees_dominate = self_referential and callee_ms >= cumulative * SELF_TIME_MIN_PCT
-				if callees_dominate:
+				own_time_unreported = False
+				if self_referential and callee_ms >= cumulative * SELF_TIME_MIN_SHARE:
 					before = len(findings)
 					_walk_children(
 						node, parent_chain, action_idx, action_label, action_wall_time_ms,
 						findings, tracked_apps, installed_apps,
 					)
-					if len(findings) > before:
+					own_ms = node.get("self_ms") or 0
+					own_pct = min(1.0, own_ms / action_wall_time_ms) if action_wall_time_ms else 0
+					if own_pct >= med_pct and own_ms >= med_ms:
+						impact_ms = own_ms
+						pct_str = f"{own_pct * 100:.0f}%"
+						severity = "High" if (
+							(own_pct >= high_pct and own_ms >= high_ms)
+							or own_ms >= HOT_PATH_HIGH_ABS_MULTIPLIER * high_ms
+						) else "Medium"
+					elif len(findings) > before:
 						return
-					self_referential = False
-				if callees_dominate:
+					else:
+						self_referential = False
+						own_time_unreported = True
+				if own_time_unreported:
 					title = (
 						f"{fn_name} and its callees took "
 						f"{pct_str} of the action ({dur(impact_ms)})"
@@ -1168,9 +1181,8 @@ def _walk_for_findings(
 					desc = (
 						f"**{fn_name}** and the functions it calls consumed "
 						f"{pct_str} of the action time ({dur(impact_ms)}). "
-						"Most of it is in its callees, spread so that none of "
-						"them is a hot path on its own. Open the call tree to "
-						"see where it goes."
+						"Its own body is not the hot spot. Open the call tree "
+						"to see which callees and queries the time goes to."
 					)
 				elif self_referential:
 					title = (
