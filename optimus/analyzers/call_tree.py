@@ -557,7 +557,8 @@ def _match_child(current: dict, frame: dict):
 	for child in named:
 		if _same_file(child, frame):
 			return child
-	return named[0] if len(named) == 1 else None
+	# Several share the name and none is in this file: too ambiguous to descend.
+	return None
 
 
 def _find_graft_point(root: dict, stack: list):
