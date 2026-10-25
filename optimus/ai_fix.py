@@ -18,7 +18,12 @@ helpers are unit-testable without a bench.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import signal
+import subprocess
+import tempfile
 from datetime import datetime, timezone
 from typing import Any
 
@@ -130,6 +135,8 @@ _DEFAULT_PROVIDER = "Anthropic"
 # bench, or a settings cache miss during early bootstrap). v0.9.0+ the live
 # value comes from cfg.ai_request_timeout_seconds (clamped 10–600s).
 _HTTP_TIMEOUT = 60            # seconds; one shot, no retries
+_CLI_DEFAULT_TIMEOUT = 45     # seconds; local-CLI fallback when settings are unreadable
+_CLI_MAX_OUTPUT_CHARS = 100_000
 _MAX_OUTPUT_TOKENS = 2000
 _SOURCE_LINES_BEFORE = 24     # how much code window the caller should gather
 _SOURCE_LINES_AFTER = 24
@@ -497,14 +504,31 @@ def _resolve_timeout_seconds() -> int:
 		return _HTTP_TIMEOUT
 
 
-def is_available(section: str | None = None) -> bool:
+def _resolve_cli_timeout_seconds() -> int:
+	"""The configured timeout (seconds) for a local-CLI call, clamped to
+	``[10, 90]`` (default 45 when settings can't be read). The clamp is much
+	tighter than the HTTP one because a long wait would block a web worker; 90s
+	plus the 5s login check stays under a 120s worker timeout."""
+	try:
+		from optimus.settings import get_config
+		v = get_config().ai_request_timeout_seconds
+		return max(10, min(90, int(v or _CLI_DEFAULT_TIMEOUT)))
+	except Exception:
+		return _CLI_DEFAULT_TIMEOUT
+
+
+def is_available(section: str | None = None, *, on_demand: bool = False) -> bool:
 	"""True when AI fix suggestions are on and minimally configured:
 	``ai_enabled`` set, a model resolvable for the chosen provider and an API
 	key present unless the provider needs none (local endpoints).
 
 	When ``section`` is ``"findings"`` / ``"indexes"`` / ``"humanize"``, also
 	requires the matching per-section toggle. Fails soft: an unknown ``section``
-	or an unreadable config attr does not block once ``ai_enabled`` has passed."""
+	or an unreadable config attr does not block once ``ai_enabled`` has passed.
+
+	``on_demand`` marks a click-driven call (the per-table "Suggest index"
+	button). In subscription mode only the automatic section passes stay off, so
+	an on-demand one is allowed."""
 	try:
 		from optimus.settings import get_config
 		cfg = get_config()
@@ -516,6 +540,20 @@ def is_available(section: str | None = None) -> bool:
 		provider = _resolve_provider()
 	except AiFixError:
 		return False
+	if provider.get("protocol") == "subscription":
+		# Every analyze-time / auto AI pass passes a section without on_demand,
+		# so a subscription never spends the quota unattended. The check is
+		# filesystem-only: no subprocess on the availability path.
+		if section is not None and not on_demand:
+			return False
+		if not _subscription_allowed():
+			return False
+		if _cli_installed(cfg) is None:
+			return False
+		flag = _AI_SECTION_FLAGS.get(section) if section else None
+		if flag and not getattr(cfg, flag, True):
+			return False
+		return True
 	if not provider.get("model") or not provider.get("base_url"):
 		return False
 	if provider.get("needs_key") and not provider.get("api_key"):
@@ -572,17 +610,10 @@ def suggest_fix(finding: dict) -> dict:
 	system, messages = _build_messages(finding, threshold_ms=_resolve_display_threshold_ms())
 
 	usage: dict = {}
-	if provider["protocol"] == "anthropic":
-		text = _call_anthropic(
-			provider["base_url"], provider.get("api_key") or "",
-			provider["model"], system, messages, usage_out=usage,
-		)
-	else:
-		text = _call_openai_chat(
-			provider["base_url"], provider.get("api_key") or "",
-			provider["model"], system, messages, usage_out=usage,
-			metadata=_aerele_call_metadata(provider, finding.get("finding_type")),
-		)
+	text = _dispatch_chat(
+		provider, system, messages, usage_out=usage,
+		metadata=_aerele_call_metadata(provider, finding.get("finding_type")),
+	)
 
 	text = (text or "").strip()
 	if not text:
@@ -626,17 +657,10 @@ def humanize_steps(
 	system, messages = _build_steps_messages(
 		actions, session_title, threshold_ms=_resolve_display_threshold_ms()
 	)
-	if provider["protocol"] == "anthropic":
-		text = _call_anthropic(
-			provider["base_url"], provider.get("api_key") or "",
-			provider["model"], system, messages, usage_out=usage_out,
-		)
-	else:
-		text = _call_openai_chat(
-			provider["base_url"], provider.get("api_key") or "",
-			provider["model"], system, messages, usage_out=usage_out,
-			metadata=_aerele_call_metadata(provider, "Steps to Reproduce"),
-		)
+	text = _dispatch_chat(
+		provider, system, messages, usage_out=usage_out,
+		metadata=_aerele_call_metadata(provider, "Steps to Reproduce"),
+	)
 	text = (text or "").strip()
 	if not text:
 		raise AiFixError("The AI provider returned an empty response.")
@@ -664,17 +688,10 @@ def suggest_index(table_payload: dict) -> dict:
 		raise AiFixError("No API key is configured for this AI provider.")
 	system, messages = _build_index_messages(table_payload)
 	usage: dict = {}
-	if provider["protocol"] == "anthropic":
-		text = _call_anthropic(
-			provider["base_url"], provider.get("api_key") or "",
-			provider["model"], system, messages, usage_out=usage,
-		)
-	else:
-		text = _call_openai_chat(
-			provider["base_url"], provider.get("api_key") or "",
-			provider["model"], system, messages, usage_out=usage,
-			metadata=_aerele_call_metadata(provider, "Table Index"),
-		)
+	text = _dispatch_chat(
+		provider, system, messages, usage_out=usage,
+		metadata=_aerele_call_metadata(provider, "Table Index"),
+	)
 	text = (text or "").strip()
 	if not text:
 		raise AiFixError("The AI provider returned an empty response.")
@@ -695,6 +712,30 @@ def suggest_index(table_payload: dict) -> dict:
 	if usage.get("total_tokens"):
 		result["tokens"] = usage
 	return result
+
+
+def _dispatch_chat(
+	provider: dict, system: str, messages: list[dict],
+	*, max_tokens: int = _MAX_OUTPUT_TOKENS, usage_out: dict | None = None,
+	metadata: dict | None = None,
+) -> str:
+	"""The single place the generation entrypoints branch on transport: local
+	CLI subscription, Anthropic Messages or OpenAI Chat Completions. The CLI
+	path reports no token usage, so ``usage_out`` is left untouched there."""
+	proto = provider.get("protocol")
+	if proto == "subscription":
+		return _call_local_cli(provider, system, messages, max_tokens=max_tokens)
+	if proto == "anthropic":
+		return _call_anthropic(
+			provider["base_url"], provider.get("api_key") or "",
+			provider["model"], system, messages,
+			max_tokens=max_tokens, usage_out=usage_out,
+		)
+	return _call_openai_chat(
+		provider["base_url"], provider.get("api_key") or "",
+		provider["model"], system, messages,
+		max_tokens=max_tokens, usage_out=usage_out, metadata=metadata,
+	)
 
 
 def _had_concrete_context(finding: dict) -> bool:
@@ -720,6 +761,12 @@ def test_connection() -> dict:
 	except AiFixError as e:
 		return {"ok": False, "message": str(e), "model": ""}
 
+	if provider.get("protocol") == "subscription":
+		# Read-only status check: never run `codex exec` here (it would bill the
+		# subscription and send data just to test a button).
+		status = _cli_session_status()
+		return {"ok": status["ok"], "message": status["message"], "model": provider["model"]}
+
 	if not provider.get("model") or not provider.get("base_url"):
 		return {
 			"ok": False,
@@ -732,18 +779,10 @@ def test_connection() -> dict:
 	messages = [{"role": "user", "content": "Reply with exactly: OK"}]
 	usage: dict = {}
 	try:
-		if provider["protocol"] == "anthropic":
-			text = _call_anthropic(
-				provider["base_url"], provider.get("api_key") or "",
-				provider["model"], "You are a connectivity probe. Reply with exactly: OK",
-				messages, max_tokens=16, usage_out=usage,
-			)
-		else:
-			text = _call_openai_chat(
-				provider["base_url"], provider.get("api_key") or "",
-				provider["model"], "You are a connectivity probe. Reply with exactly: OK",
-				messages, max_tokens=16, usage_out=usage,
-			)
+		text = _dispatch_chat(
+			provider, "You are a connectivity probe. Reply with exactly: OK",
+			messages, max_tokens=16, usage_out=usage,
+		)
 	except AiFixError as e:
 		return {"ok": False, "message": str(e), "model": provider["model"]}
 
@@ -776,6 +815,16 @@ def _resolve_provider() -> dict:
 	"""
 	from optimus.settings import get_config
 	cfg = get_config()
+	# Subscription mode bypasses the provider table entirely. base_url / model
+	# are deliberately non-empty and needs_key False so the preflight gates in
+	# the entrypoints pass unchanged; the transport is chosen in _dispatch_chat.
+	conn = (getattr(cfg, "ai_connection_type", "") or "API Key").strip()
+	if conn == "Subscription (local CLI)":
+		return {
+			"name": "Codex CLI", "protocol": "subscription", "cli": "codex",
+			"base_url": "cli://codex", "model": "codex",
+			"needs_key": False, "api_key": "",
+		}
 	name = (getattr(cfg, "ai_provider", "") or _DEFAULT_PROVIDER).strip()
 	if name not in _PROVIDER_DEFAULTS:
 		raise AiFixError(f"Unknown AI provider {name!r}. Pick one in Optimus Settings.")
@@ -1474,3 +1523,219 @@ def _call_openai_chat(
 	except Exception:
 		pass
 	raise AiFixError("The AI provider's response didn't contain any text.")
+
+
+# ---------------------------------------------------------------------------
+# Local CLI subscription layer (Codex CLI). Never logs in, never touches an
+# account: it only reuses a session the operator already created with
+# `codex login` on this machine. The prompt travels on stdin, never on argv.
+# ---------------------------------------------------------------------------
+
+def _subscription_allowed() -> bool:
+	"""True only on a developer-mode bench whose site config also opts in with
+	``optimus_allow_subscription_cli``. Fails closed on any error, so a
+	production site (or an unreadable config) never shells out."""
+	try:
+		import frappe
+		conf = frappe.conf
+		return bool(conf.get("developer_mode")) and bool(conf.get("optimus_allow_subscription_cli"))
+	except Exception:
+		return False
+
+
+def _cli_installed(cfg) -> str | None:
+	"""Path of the Codex CLI, or None. An explicit ``ai_cli_path`` must be an
+	executable file; otherwise look ``codex`` up on PATH. No subprocess."""
+	configured = (getattr(cfg, "ai_cli_path", "") or "").strip()
+	if configured:
+		if os.path.isfile(configured) and os.access(configured, os.X_OK):
+			return configured
+		return None
+	return shutil.which("codex")
+
+
+def _compose_cli_prompt(system: str, messages: list[dict]) -> str:
+	"""One stdin prompt from the system prompt plus every message body, joined
+	with blank lines (the CLI has no separate system channel)."""
+	parts = [system or ""] + [m.get("content") or "" for m in messages]
+	return "\n\n".join(p.strip() for p in parts if p and p.strip()).strip()
+
+
+def _build_cli_argv(cli_path: str, scratch_dir: str, out_file: str) -> list[str]:
+	"""Fixed argv for a read-only, ephemeral ``codex exec``. Pure. The trailing
+	``-`` makes the CLI read the prompt from stdin, so no finding text is ever
+	part of the command line."""
+	return [
+		cli_path, "exec", "--sandbox", "read-only", "--skip-git-repo-check",
+		"--ignore-user-config", "--ignore-rules", "--ephemeral", "--color", "never",
+		"-C", scratch_dir, "-o", out_file, "-",
+	]
+
+
+def _cli_login_ok(cli_path: str) -> bool:
+	"""True when ``codex login status`` reports a ChatGPT subscription session.
+	Read-only; any failure counts as not signed in. The CLI prints the status to
+	stderr, so both streams are read. Requiring "chatgpt" rejects an API-key
+	login ("Logged in using an API key") because only the subscription is wanted."""
+	try:
+		res = subprocess.run(
+			[cli_path, "login", "status"], capture_output=True, text=True, timeout=5,
+		)
+		combined = ((res.stdout or "") + "\n" + (res.stderr or "")).lower()
+		return res.returncode == 0 and "chatgpt" in combined
+	except Exception:
+		return False
+
+
+def _cli_session_status() -> dict:
+	"""Read-only status of the local Codex CLI for the Connect button. Never
+	logs in and never includes an account id or email."""
+	result = {"ok": False, "state": "error", "message": "", "cli": "codex", "version": None}
+	if not _subscription_allowed():
+		result.update(
+			state="blocked",
+			message=(
+				"Subscription mode is blocked. Set developer_mode and "
+				"optimus_allow_subscription_cli in this site's config to enable it."
+			),
+		)
+		return result
+	try:
+		from optimus.settings import get_config
+		path = _cli_installed(get_config())
+	except Exception:
+		path = None
+	if not path:
+		result.update(
+			state="missing",
+			message="Codex CLI not found. Install it or set the CLI path in Optimus Settings.",
+		)
+		return result
+	try:
+		ver = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10)
+		if ver.returncode == 0:
+			# codex may print the version to either stream.
+			result["version"] = ((ver.stdout or "") + (ver.stderr or "")).strip()[:80] or None
+	except Exception:
+		pass
+	if _cli_login_ok(path):
+		result.update(
+			ok=True, state="connected",
+			message="Connected. Codex CLI is signed in on this machine.",
+		)
+	else:
+		result.update(
+			state="signed_out",
+			message="Codex CLI is not signed in. Run `codex login` in a terminal on this machine.",
+		)
+	return result
+
+
+def _log_cli_error(cli: str, where: str, exit_code: int | None) -> None:
+	"""Best-effort error log. NEVER includes stderr / stdout, the prompt or any
+	account detail: only the CLI name, the call site and the exit code."""
+	try:
+		import frappe
+		frappe.log_error(
+			message=f"AI fix CLI call failed: cli={cli} at={where} exit={exit_code}",
+			title="optimus ai_fix cli",
+		)
+	except Exception:
+		pass
+
+
+def _kill_process_group(proc) -> None:
+	"""Stop a timed-out or failed CLI and everything it spawned: SIGTERM the
+	group, give it a moment, then SIGKILL unconditionally (a descendant can
+	outlive a reaped leader). ``start_new_session`` makes the child's pid its
+	pgid, so no getpgid lookup is needed. Each step is best-effort."""
+	pgid = proc.pid
+	try:
+		os.killpg(pgid, signal.SIGTERM)
+	except Exception:
+		pass
+	try:
+		proc.wait(timeout=3)
+	except Exception:
+		pass
+	try:
+		os.killpg(pgid, signal.SIGKILL)
+	except Exception:
+		pass
+	try:
+		proc.wait()
+	except Exception:
+		pass
+
+
+# Billing-override variables dropped from the child env so the CLI can only use
+# the ChatGPT subscription session (HOME / PATH / CODEX_HOME etc. are kept).
+_CLI_ENV_DENYLIST = frozenset({
+	"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORGANIZATION", "OPENAI_ORG_ID",
+	"CODEX_API_KEY",
+})
+
+
+def _call_local_cli(
+	provider: dict, system: str, messages: list[dict],
+	*, max_tokens: int = _MAX_OUTPUT_TOKENS,
+) -> str:
+	"""Run one read-only ``codex exec`` and return its reply text. The prompt is
+	sent on stdin (never argv) and the child runs in a throwaway directory with
+	no API-key variables in its environment so it can only use the ChatGPT
+	subscription session. ``max_tokens`` is accepted for parity with the HTTP
+	callers; the CLI has no equivalent flag.
+
+	Residual risk: a read-only sandbox can still READ files. That is mitigated
+	by the empty scratch cwd and by treating the prompt as untrusted."""
+	from optimus.settings import get_config
+	path = _cli_installed(get_config())
+	if not path:
+		raise AiFixError("Codex CLI was not found on this machine.")
+	if not _cli_login_ok(path):
+		raise AiFixError(
+			"Codex CLI isn't signed in. Run `codex login` in a terminal on this "
+			"machine, then try again."
+		)
+	# A lone surrogate in attacker-influenced SQL would make the stdin encode
+	# raise after the child spawned; replace it up front.
+	prompt = _compose_cli_prompt(system, messages).encode("utf-8", "replace").decode("utf-8")
+	scratch = tempfile.mkdtemp(prefix="optimus-codex-")
+	proc = None
+	try:
+		out_file = os.path.join(scratch, "out.txt")
+		argv = _build_cli_argv(path, scratch, out_file)
+		env = {k: v for k, v in os.environ.items() if k not in _CLI_ENV_DENYLIST}
+		timeout = _resolve_cli_timeout_seconds()
+		try:
+			proc = subprocess.Popen(
+				argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+				cwd=scratch, env=env, start_new_session=True, text=True, errors="replace",
+			)
+		except OSError:
+			_log_cli_error("codex", "spawn", None)
+			raise AiFixError("Codex CLI could not be started.")
+		try:
+			out, _err = proc.communicate(input=prompt, timeout=timeout)
+		except subprocess.TimeoutExpired:
+			_kill_process_group(proc)
+			raise AiFixError(f"Codex CLI didn't respond within {timeout}s.")
+		if proc.returncode != 0:
+			_log_cli_error("codex", "exec", proc.returncode)
+			raise AiFixError(f"Codex CLI could not produce a suggestion (exit {proc.returncode}).")
+		text = ""
+		try:
+			if os.path.isfile(out_file):
+				with open(out_file, encoding="utf-8", errors="replace") as f:
+					text = f.read(_CLI_MAX_OUTPUT_CHARS)
+		except OSError:
+			text = ""
+		text = (text.strip() or (out or "")[:_CLI_MAX_OUTPUT_CHARS]).strip()
+		if not text:
+			raise AiFixError("Codex CLI returned an empty response.")
+		return text
+	finally:
+		# Whatever went wrong, never leave the child (or its group) running.
+		if proc is not None and proc.poll() is None:
+			_kill_process_group(proc)
+		shutil.rmtree(scratch, ignore_errors=True)

@@ -2437,7 +2437,7 @@ def _run_table_index_ai_backfill(doc, *, table_name: str) -> dict:
 	if not table_name:
 		return {"ok": False, "reason": "no table specified"}
 	from optimus import ai_fix
-	if not ai_fix.is_available(section="indexes"):
+	if not ai_fix.is_available(section="indexes", on_demand=True):
 		return {"ok": False, "table": table_name, "reason": "AI index recommendations not available"}
 	try:
 		breakdown = json.loads(doc.table_breakdown_json or "[]")
