@@ -117,7 +117,12 @@ frappe.ui.form.on("Optimus Settings", {
 		// when the operator toggles ai_enabled (see the ai_enabled
 		// handler below it re-runs refresh() so this conditional
 		// fires again).
-		if (frm.doc.ai_enabled) {
+		// Shown only in API-key mode; the Subscription (local CLI) mode has its
+		// own "Connect" button below.
+		if (
+			frm.doc.ai_enabled &&
+			frm.doc.ai_connection_type !== "Subscription (local CLI)"
+		) {
 			frm.add_custom_button(__("Test AI connection"), () => {
 				if (frm.is_dirty()) {
 					frappe.msgprint(
@@ -146,6 +151,63 @@ frappe.ui.form.on("Optimus Settings", {
 					error() {
 						frappe.show_alert({
 							message: __("AI connection test failed"),
+							indicator: "red",
+						});
+					},
+				});
+			});
+		}
+
+		// "Connect (check Codex CLI)" only in Subscription (local CLI) mode. The
+		// endpoint is read-only (it never logs in) and saves its message to
+		// ai_subscription_status server-side, so after showing the result we just
+		// reload the doc to display the stored status without dirtying the form.
+		if (
+			frm.doc.ai_enabled &&
+			frm.doc.ai_connection_type === "Subscription (local CLI)"
+		) {
+			frm.add_custom_button(__("Connect (check Codex CLI)"), () => {
+				if (frm.is_dirty()) {
+					frappe.msgprint(
+						__("Save your settings first, then check the CLI session.")
+					);
+					return;
+				}
+				frappe.show_alert({
+					message: __("Checking the Codex CLI session..."),
+					indicator: "blue",
+				});
+				frappe.call({
+					method: "optimus.api.check_cli_session",
+					callback(r) {
+						const m = (r && r.message) || {};
+						let indicator = "red";
+						if (m.state === "connected") {
+							indicator = "green";
+						} else if (
+							["signed_out", "missing", "blocked"].includes(m.state)
+						) {
+							indicator = "orange";
+						}
+						frappe.msgprint({
+							title:
+								m.state === "connected"
+									? __("Codex CLI connected")
+									: __("Codex CLI not ready"),
+							indicator,
+							message:
+								frappe.utils.escape_html(m.message || "") +
+								(m.version
+									? "<br>" + frappe.utils.escape_html(m.version)
+									: ""),
+						});
+						if (!frm.is_dirty()) {
+							frm.reload_doc();
+						}
+					},
+					error() {
+						frappe.show_alert({
+							message: __("CLI session check failed"),
 							indicator: "red",
 						});
 					},
@@ -201,6 +263,10 @@ frappe.ui.form.on("Optimus Settings", {
 		frm.refresh_field("ai_base_url");
 		frm.refresh_field("ai_model");
 		frm.refresh_field("ai_api_key");
+		frm.refresh_field("ai_connection_type");
+		frm.refresh_field("ai_subscription_cli");
+		frm.refresh_field("ai_cli_path");
+		frm.refresh_field("ai_subscription_status");
 		frm.refresh_field("ai_sections_break");
 		frm.refresh_field("ai_suggest_findings");
 		frm.refresh_field("ai_suggest_indexes");
@@ -219,6 +285,24 @@ frappe.ui.form.on("Optimus Settings", {
 		// default endpoint. Re-evaluate depends_on so Base URL hides/shows
 		// immediately when the provider changes, without a save + reload.
 		frm.refresh_field("ai_base_url");
+	},
+
+	ai_connection_type(frm) {
+		// Switching between API Key and Subscription (local CLI) swaps which
+		// fields apply. Re-evaluate depends_on so they show/hide immediately
+		// without a save + reload, then rebuild the custom buttons so the right
+		// one ("Test AI connection" vs "Connect") is shown.
+		[
+			"ai_provider",
+			"ai_base_url",
+			"ai_model",
+			"ai_api_key",
+			"ai_subscription_cli",
+			"ai_cli_path",
+			"ai_subscription_status",
+		].forEach((f) => frm.refresh_field(f));
+		frm.clear_custom_buttons();
+		frm.trigger("refresh");
 	},
 });
 
