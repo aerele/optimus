@@ -116,6 +116,9 @@ _DEFAULTS = {
 	# ai_fix.py via frappe.utils.password.get_decrypted_password.
 	"ai_enabled": False,
 	"ai_provider": "Anthropic",
+	"ai_connection_type": "API Key",
+	"ai_subscription_cli": "Codex CLI",
+	"ai_cli_path": "",
 	"ai_base_url": "",
 	"ai_model": "",
 	# When True, the analyze pipeline auto-generates a fix for the top
@@ -356,6 +359,9 @@ class OptimusConfig:
 	# never cached here (see _DEFAULTS note + ai_fix._resolve_provider).
 	ai_enabled: bool = False
 	ai_provider: str = "Anthropic"
+	ai_connection_type: str = "API Key"
+	ai_subscription_cli: str = "Codex CLI"
+	ai_cli_path: str = ""
 	ai_base_url: str = ""
 	ai_model: str = ""
 	ai_auto_suggest: bool = True
@@ -513,6 +519,9 @@ def _read_doctype_row() -> dict | None:
 		# False is legitimate. ``ai_auto_suggest_max`` allows 0 (= all).
 		"ai_enabled": bool(doc.get("ai_enabled")),
 		"ai_provider": (doc.get("ai_provider") or "").strip() or None,
+		"ai_connection_type": (doc.get("ai_connection_type") or "").strip() or None,
+		"ai_subscription_cli": (doc.get("ai_subscription_cli") or "").strip() or None,
+		"ai_cli_path": (doc.get("ai_cli_path") or "").strip() or None,
 		"ai_base_url": (doc.get("ai_base_url") or "").strip() or None,
 		"ai_model": (doc.get("ai_model") or "").strip() or None,
 		"ai_auto_suggest": bool(doc.get("ai_auto_suggest")),
@@ -712,6 +721,9 @@ def _resolve() -> OptimusConfig:
 			else _DEFAULTS["ai_enabled"]
 		),
 		ai_provider=row.get("ai_provider") or _DEFAULTS["ai_provider"],
+		ai_connection_type=row.get("ai_connection_type") or _DEFAULTS["ai_connection_type"],
+		ai_subscription_cli=row.get("ai_subscription_cli") or _DEFAULTS["ai_subscription_cli"],
+		ai_cli_path=row.get("ai_cli_path") or _DEFAULTS["ai_cli_path"],
 		ai_base_url=row.get("ai_base_url") or _DEFAULTS["ai_base_url"],
 		ai_model=row.get("ai_model") or _DEFAULTS["ai_model"],
 		ai_auto_suggest=bool(
