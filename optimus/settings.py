@@ -14,6 +14,11 @@ from dataclasses import dataclass, field
 
 from optimus.analyzers.base import DEFAULT_DISPLAY_THRESHOLD_MS
 
+# The ``ai_connection_type`` Select option that routes AI calls through the
+# developer's local CLI session instead of an API key. Single source of truth
+# for the Python side (ai_fix imports it); a test pins it to the doctype JSON.
+SUBSCRIPTION_CONNECTION = "Subscription (local CLI)"
+
 # NOTE: frappe is imported lazily inside each function rather than at
 # module top. Importing at top forces every unit test that touches
 # ``from optimus import settings`` to run under bench, which

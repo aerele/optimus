@@ -214,6 +214,14 @@ def analyze_inflight() -> str:
 	return "optimus:analyze:inflight"
 
 
+def ai_refill_lock(session_uuid: str) -> str:
+	"""Per-session guard so two AI refresh / bulk-fix runs never overlap on one
+	session (each can take minutes in subscription mode). Set atomically (SETNX)
+	with a TTL by ``api._ai_refresh_lock`` and released in a ``finally``; the TTL
+	self-heals a crashed worker."""
+	return f"optimus:ai_refill_lock:{session_uuid}"
+
+
 def retention_backlog() -> str:
 	"""Janitor backlog counter written when the daily sweep hits its
 	per-run cap and can't finish in one tick. Read by the operator
@@ -273,6 +281,7 @@ KEY_PATTERNS: tuple[str, ...] = (
 	"profiler:onboarding_seen:<user>",
 	"profiler:explain:<cache_key>",
 	"optimus:analyze:inflight",
+	"optimus:ai_refill_lock:<session_uuid>",
 	"optimus:retention_backlog",
 	"optimus_settings_cached",
 	"optimus:schema_version",

@@ -14,6 +14,12 @@ versions may contain breaking changes see migration notes below).
 
 - AI fix suggestions can now use a local Codex CLI subscription instead of a cloud API key. In Optimus Settings > AI, set Connection to "Subscription (local CLI)". It runs the logged-in `codex` CLI on the bench machine.
 - Subscription mode works like the API-key path: the normal auto-suggest during analyze and the "Refresh AI suggestions" button both work, now driven by the local Codex CLI. Codex is the only CLI supported in this version. It requires `developer_mode` and the `optimus_allow_subscription_cli` site-config flag. The default stays "API Key", so existing setups are unchanged.
+- To enable it, set `"optimus_allow_subscription_cli": 1` in the site's `site_config.json` (in addition to `developer_mode`). A site-config change reaches running workers only after a bench restart or `bench clear-cache`.
+- The bulk AI actions are bounded in subscription mode. "Refresh AI suggestions" shares one 180 second budget across its findings, steps and index phases and stops early when the CLI is missing or signed out. The index refill handles at most 3 tables per click. Regenerating the report after a bulk AI action no longer runs a second findings backfill. The bulk endpoints and the Connect check are rate limited, and a second refresh on the same session is refused while one is running.
+
+### Security
+
+- The Codex CLI runs as an agent with a read-only sandbox, which can still READ files on the bench machine. A prompt injection hidden in profiled data is mitigated (a security preamble in the prompt and a secret scrub on the output) but not eliminated. Keep subscription mode to data you trust.
 
 ---
 

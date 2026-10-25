@@ -197,3 +197,50 @@ def test_on_demand_endpoints_use_connection_aware_message(fake_frappe, monkeypat
 		fn(**kwargs)
 
 	assert "Codex CLI isn't ready" in str(excinfo.value)
+
+
+# ---------------------------------------------- rate limits + ai_backfill
+
+
+def _api_source():
+	from pathlib import Path
+
+	return (Path(api.__file__)).read_text()
+
+
+@pytest.mark.parametrize(
+	"key,limit,fn",
+	[
+		("optimus_refill_ai", 5, "refill_ai_suggestions"),
+		("optimus_backfill_ai", 5, "backfill_ai_fixes"),
+		("optimus_check_cli", 10, "check_cli_session"),
+	],
+)
+def test_bulk_and_connect_endpoints_are_rate_limited(key, limit, fn):
+	import re
+
+	pattern = (
+		r"@frappe\.whitelist\(\)\s*\n"
+		rf'@rate_limit\(key="{key}", limit={limit}, seconds=60\)\s*\n'
+		rf"def {fn}\("
+	)
+	assert re.search(pattern, _api_source())
+
+
+def test_endpoints_that_did_ai_work_skip_the_second_findings_backfill():
+	import re
+
+	src = _api_source()
+	for fn in ("backfill_ai_fixes", "humanize_steps", "suggest_index", "_refill_ai_sections"):
+		start = src.index(f"def {fn}(")
+		nxt = re.search(r"\n(?:def |@frappe\.whitelist|@contextlib)", src[start + 10:])
+		body = src[start:start + 10 + nxt.start()]
+		assert "regenerate_reports(session_uuid, ai_backfill=False)" in body, fn
+
+
+def test_regenerate_reports_signature_is_backward_compatible():
+	import inspect
+
+	sig = inspect.signature(api.regenerate_reports)
+	assert list(sig.parameters) == ["session_uuid", "ai_backfill"]
+	assert sig.parameters["ai_backfill"].default is True

@@ -89,4 +89,4 @@ def test_persists_notes_and_re_renders():
 	# the set_value is preserved.
 	assert ("frappe.db.commit()" in core_body) or ("safe_commit()" in core_body)
 	endpoint_body = _fn_body("humanize_steps")
-	assert "regenerate_reports(session_uuid)" in endpoint_body
+	assert "regenerate_reports(session_uuid, ai_backfill=False)" in endpoint_body

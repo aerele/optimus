@@ -32,3 +32,14 @@ def test_patch_registered_under_post_model_sync():
 def test_patch_module_imports_with_execute():
 	module = importlib.import_module(PATCH)
 	assert callable(getattr(module, "execute", None))
+
+
+def test_execute_reloads_optimus_settings(monkeypatch):
+	from unittest.mock import MagicMock
+
+	module = importlib.import_module(PATCH)
+	fake_frappe = MagicMock()
+	monkeypatch.setattr(module, "frappe", fake_frappe)
+	module.execute()
+	fake_frappe.reload_doc.assert_called_once_with("optimus", "doctype", "optimus_settings")
+	fake_frappe.db.commit.assert_called_once()

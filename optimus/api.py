@@ -7,6 +7,7 @@ Endpoints the floating widget and custom integrations call. Decorated with
 `@frappe.whitelist()`, reachable as `/api/method/optimus.api.<name>`.
 """
 
+import contextlib
 import json
 import time
 
@@ -22,6 +23,17 @@ from optimus import safe_commit, session
 # on install via install.after_install. Adding Administrator explicitly
 # because frappe.get_roles("Administrator") doesn't include "System Manager".
 ALLOWED_ROLES = {"System Manager", "Optimus User", "Administrator"}
+
+# Total wall-time budget for one "Refresh AI suggestions" click. The three AI
+# phases (findings, steps, indexes) share it so a slow transport (the local
+# CLI takes up to ~90s per call) cannot stack their individual budgets into a
+# request that runs for many minutes. Each phase checks the deadline before it
+# starts, so the real ceiling is this plus one in-flight call.
+REFILL_TOTAL_BUDGET_SECONDS = 180
+
+# TTL of the per-session AI refresh lock. Longer than the refill budget plus a
+# worst-case in-flight call; a crashed worker's lock self-heals after this.
+AI_REFRESH_LOCK_TTL_SECONDS = 600
 
 
 def _require_user() -> str:
@@ -1047,10 +1059,16 @@ def retry_analyze(session_uuid: str) -> dict:
 
 @frappe.whitelist()
 @rate_limit(key="optimus_regenerate_reports", limit=30, seconds=60)
-def regenerate_reports(session_uuid: str) -> dict:
+def regenerate_reports(session_uuid: str, ai_backfill: bool = True) -> dict:
 	"""Re-render the HTML report from stored session data without re-running
 	any analyzer (fast, idempotent). Use it when the template or renderer
 	changed and you want the new UI on an already-analyzed session.
+
+	``ai_backfill`` (default True) lets the render also fill missing AI fix
+	suggestions when auto-suggest is on. Endpoints that JUST did their own AI
+	work and only need the re-render (backfill_ai_fixes, refill_ai_suggestions,
+	humanize_steps, suggest_index) pass False so the findings backfill does not
+	run a second time.
 
 	Each call replaces the report File attachment and clears the cached PDF.
 	Recordings are best-effort: if they've expired from Redis the per-query
@@ -1062,6 +1080,7 @@ def regenerate_reports(session_uuid: str) -> dict:
 	if not session_uuid:
 		frappe.throw(_("session_uuid is required"))
 	_require_session_permission(session_uuid, "write")
+	ai_backfill = bool(frappe.utils.cint(ai_backfill))
 
 	row = frappe.db.get_value(
 		"Optimus Session",
@@ -1120,10 +1139,11 @@ def regenerate_reports(session_uuid: str) -> dict:
 	# Regenerate. Best-effort + tightly time-budgeted (it runs synchronously
 	# in this web request). The persisted llm_fix_json is what the renderer
 	# below reads to draw the "Suggested fix (AI)" block under each finding.
-	try:
-		_analyze_mod._backfill_ai_suggestions(doc)
-	except Exception:
-		frappe.log_error(title="optimus regenerate ai backfill")
+	if ai_backfill:
+		try:
+			_analyze_mod._backfill_ai_suggestions(doc)
+		except Exception:
+			frappe.log_error(title="optimus regenerate ai backfill")
 
 	# Invalidate the cached PDF next /api/method/download_pdf call
 	# will regenerate it from the freshly-rendered HTML.
@@ -1143,6 +1163,36 @@ def regenerate_reports(session_uuid: str) -> dict:
 		"recordings_available": len(recordings),
 		"actions_total": len(doc.actions or []),
 	}
+
+
+@contextlib.contextmanager
+def _ai_refresh_lock(session_uuid: str):
+	"""Hold a per-session lock around a long AI run so two concurrent clicks
+	(or tabs) cannot both burn the transport on the same session. Atomic SETNX
+	with a TTL, released in a ``finally``; the TTL self-heals a crashed worker.
+	Fails OPEN if the cache is unreachable (a missing guard must not block the
+	feature)."""
+	from optimus import redis_keys
+
+	key = redis_keys.ai_refill_lock(session_uuid)
+	held = False
+	try:
+		held = bool(frappe.cache.set(
+			frappe.cache.make_key(key), "1", nx=True, ex=AI_REFRESH_LOCK_TTL_SECONDS,
+		))
+		busy = not held
+	except Exception:
+		busy = False
+	if busy:
+		frappe.throw(_("An AI refresh is already running for this session."))
+	try:
+		yield
+	finally:
+		if held:
+			try:
+				frappe.cache.delete_value(key)
+			except Exception:
+				pass
 
 
 def _ai_unavailable_message() -> str:
@@ -1336,6 +1386,7 @@ def test_ai_connection() -> dict:
 
 
 @frappe.whitelist()
+@rate_limit(key="optimus_check_cli", limit=10, seconds=60)
 def check_cli_session() -> dict:
 	"""Read-only check that the local Codex CLI is installed and signed in, for
 	the Connect button in Optimus Settings. Never logs in. System-Manager-only
@@ -1383,6 +1434,7 @@ def ai_capabilities() -> dict:
 
 
 @frappe.whitelist()
+@rate_limit(key="optimus_backfill_ai", limit=5, seconds=60)
 def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
 	"""Generate AI fix suggestions for eligible findings, then re-render the
 	report.
@@ -1441,13 +1493,14 @@ def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
 	doc = frappe.get_doc("Optimus Session", row["name"])
 	# cap=0 → do as many target findings as fit in the time budget, ignoring
 	# the auto-suggest cap (the operator asked for them explicitly).
-	counts = _analyze_mod._run_ai_backfill(doc, cap=0, regenerate_all=regenerate_all)
+	with _ai_refresh_lock(session_uuid):
+		counts = _analyze_mod._run_ai_backfill(doc, cap=0, regenerate_all=regenerate_all)
 
 	# Re-render so the new/updated suggestions land in the HTML report.
 	# regenerate_reports re-fetches the doc (seeing the just-committed
-	# llm_fix_json), clears the cached PDF and re-renders; its own
-	# auto-suggest-gated backfill is then a no-op.
-	regen = regenerate_reports(session_uuid)
+	# llm_fix_json), clears the cached PDF and re-renders. ai_backfill=False
+	# stops it running a second findings backfill right after this one.
+	regen = regenerate_reports(session_uuid, ai_backfill=False)
 
 	return {
 		"ok": True,
@@ -1457,6 +1510,8 @@ def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
 		"failed": counts["failed"],
 		"skipped_time": counts["skipped_time"],
 		"total_pending": counts["total_pending"],
+		"first_error": counts.get("first_error"),
+		"aborted": bool(counts.get("aborted")),
 		"regenerated": bool(regen.get("regenerated")),
 	}
 
@@ -1518,7 +1573,7 @@ def humanize_steps(session_uuid: str) -> dict:
 		reason = status.get("reason") or _("Couldn't humanize the steps.")
 		frappe.throw(reason)
 
-	regen = regenerate_reports(session_uuid)
+	regen = regenerate_reports(session_uuid, ai_backfill=False)
 	return {
 		"ok": True,
 		"session_uuid": session_uuid,
@@ -1563,7 +1618,10 @@ def _humanize_steps_core(doc, *, title: str | None = None) -> dict:
 	try:
 		steps_md = ai_fix.humanize_steps(actions, session_title=title, usage_out=_steps_usage)
 	except ai_fix.AiFixError as e:
-		return {"updated": False, "reason": str(e)}
+		return {
+			"updated": False, "reason": str(e), "error": str(e),
+			"retryable": bool(getattr(e, "retryable", True)),
+		}
 
 	frappe.db.set_value(
 		"Optimus Session", doc.name, {
@@ -1639,7 +1697,7 @@ def suggest_index(session_uuid: str, table_name: str) -> dict:
 	if not out.get("ok"):
 		frappe.throw(out.get("reason") or _("Couldn't generate an index suggestion for that table."))
 
-	regen = regenerate_reports(session_uuid)
+	regen = regenerate_reports(session_uuid, ai_backfill=False)
 	return {
 		"ok": True,
 		"session_uuid": session_uuid,
@@ -1648,16 +1706,28 @@ def suggest_index(session_uuid: str, table_name: str) -> dict:
 	}
 
 
-def _refill_indexes_for_doc(doc) -> dict:
+def _refill_indexes_for_doc(doc, *, time_budget: float | None = None) -> dict:
 	"""Walk the session's table breakdown and run the per-table index AI
-	helper for every table that has a heuristic ``recommended_index`` but
-	no ``ai_index`` yet. Returns ``{"added": N, "failed": N, "skipped": N}``.
-	Caller is responsible for permission / status / AI-available gates and
-	for the final re-render.
+	helper for tables that have a heuristic ``recommended_index`` but no
+	``ai_index`` yet. Bounded like the analyze-time auto path: at most
+	``AI_AUTO_INDEX_MAX_TABLES`` tables per call and a monotonic time budget
+	(``AI_AUTO_INDEX_TIME_BUDGET_SECONDS``, or ``time_budget`` if smaller)
+	checked before each table; run it again for the rest. A non-retryable
+	``AiFixError`` (CLI missing, signed out, usage limit) stops the loop since
+	every later table would fail the same way.
+
+	Returns ``{"added", "failed", "skipped", "skipped_cap", "skipped_time",
+	"first_error", "aborted"}``. Caller is responsible for permission / status /
+	AI-available gates and for the final re-render.
 	"""
 	import json as _json
 
+	from optimus import ai_fix
 	from optimus import analyze as _analyze_mod
+
+	budget = _analyze_mod.AI_AUTO_INDEX_TIME_BUDGET_SECONDS
+	if time_budget is not None:
+		budget = min(budget, time_budget)
 
 	try:
 		breakdown = _json.loads(doc.table_breakdown_json or "[]")
@@ -1670,14 +1740,32 @@ def _refill_indexes_for_doc(doc) -> dict:
 		and (t.get("recommended_index") or {}).get("columns")
 		and not t.get("ai_index")
 	]
-	added = failed = skipped = 0
-	for t in eligible:
+	max_tables = _analyze_mod.AI_AUTO_INDEX_MAX_TABLES
+	skipped_cap = max(0, len(eligible) - max_tables)
+	eligible = eligible[:max_tables]
+
+	added = failed = skipped = skipped_time = 0
+	first_error = None
+	aborted = False
+	started = time.monotonic()
+	for idx, t in enumerate(eligible):
+		if time.monotonic() - started > budget:
+			skipped_time = len(eligible) - idx
+			break
 		table_name = t.get("table")
 		if not table_name:
 			skipped += 1
 			continue
 		try:
 			out = _analyze_mod._run_table_index_ai_backfill(doc, table_name=table_name)
+		except ai_fix.AiFixError as e:
+			failed += 1
+			if first_error is None:
+				first_error = str(e)
+			if not getattr(e, "retryable", True):
+				aborted = True
+				break
+			continue
 		except Exception:
 			frappe.log_error(title=f"optimus refill_indexes {table_name}")
 			failed += 1
@@ -1688,10 +1776,19 @@ def _refill_indexes_for_doc(doc) -> dict:
 			# Helper returned a reason (e.g. provider missing for one call)
 			# treat as skipped, not failed, since the doc state is unchanged.
 			skipped += 1
-	return {"added": added, "failed": failed, "skipped": skipped}
+	return {
+		"added": added,
+		"failed": failed,
+		"skipped": skipped,
+		"skipped_cap": skipped_cap,
+		"skipped_time": skipped_time,
+		"first_error": first_error,
+		"aborted": aborted,
+	}
 
 
 @frappe.whitelist()
+@rate_limit(key="optimus_refill_ai", limit=5, seconds=60)
 def refill_ai_suggestions(session_uuid: str) -> dict:
 	"""Single-button entry point: re-fills every AI-generated report section
 	in one round-trip: (1) overwrite every eligible finding's fix suggestion,
@@ -1734,8 +1831,23 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 	if not ai_fix.is_available():
 		frappe.throw(_ai_unavailable_message())
 
+	with _ai_refresh_lock(session_uuid):
+		return _refill_ai_sections(session_uuid, row)
+
+
+def _refill_ai_sections(session_uuid: str, row: dict) -> dict:
+	"""Body of ``refill_ai_suggestions`` (runs under the per-session lock).
+	The three phases share ``REFILL_TOTAL_BUDGET_SECONDS``: a phase whose
+	deadline has already passed is skipped with reason ``deadline``; once the
+	findings phase aborts on a systemic error the later phases are skipped with
+	reason ``aborted`` (same root cause)."""
 	from optimus import analyze as _analyze_mod
 	from optimus.settings import get_config
+
+	started = time.monotonic()
+
+	def remaining() -> float:
+		return max(0.0, REFILL_TOTAL_BUDGET_SECONDS - (time.monotonic() - started))
 
 	cfg = get_config()
 	doc = frappe.get_doc("Optimus Session", row["name"])
@@ -1751,41 +1863,67 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 		update_modified=False,
 	)
 
-	fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None}
+	aborted = False
+	errors: list[str] = []
+
+	fixes = {"added": 0, "failed": 0, "skipped_time": 0, "skipped": None, "first_error": None}
 	if cfg.ai_suggest_findings:
-		counts = _analyze_mod._run_ai_backfill(doc, cap=0, regenerate_all=True)
+		counts = _analyze_mod._run_ai_backfill(
+			doc, cap=0, regenerate_all=True,
+			time_budget=min(_analyze_mod.AI_BACKFILL_TIME_BUDGET_SECONDS, remaining()),
+		)
 		fixes = {
 			"added": counts.get("added", 0),
 			"failed": counts.get("failed", 0),
 			"skipped_time": counts.get("skipped_time", 0),
 			"skipped": None,
+			"first_error": counts.get("first_error"),
 		}
+		aborted = bool(counts.get("aborted"))
+		if fixes["first_error"]:
+			errors.append(fixes["first_error"])
 	else:
 		fixes["skipped"] = "toggle_off"
 
 	steps = {"updated": False, "reason": None}
-	if cfg.ai_humanize_steps:
+	if not cfg.ai_humanize_steps:
+		steps["reason"] = "toggle_off"
+	elif aborted:
+		steps["reason"] = "aborted"
+	elif remaining() <= 0:
+		steps["reason"] = "deadline"
+	else:
 		# Re-fetch the doc the backfill above may have mutated rows.
 		doc = frappe.get_doc("Optimus Session", row["name"])
 		steps = _humanize_steps_core(doc, title=row.get("title") or None)
-	else:
-		steps["reason"] = "toggle_off"
+		if steps.get("error"):
+			errors.append(steps["error"])
+			if steps.get("retryable") is False:
+				aborted = True
 
-	indexes = {"added": 0, "failed": 0, "skipped": 0, "skipped_reason": None}
-	if cfg.ai_suggest_indexes:
-		doc = frappe.get_doc("Optimus Session", row["name"])
-		indexes = _refill_indexes_for_doc(doc)
-		indexes["skipped_reason"] = None
-	else:
+	indexes = {"added": 0, "failed": 0, "skipped": 0, "skipped_reason": None, "first_error": None}
+	if not cfg.ai_suggest_indexes:
 		indexes["skipped_reason"] = "toggle_off"
+	elif aborted:
+		indexes["skipped_reason"] = "aborted"
+	elif remaining() <= 0:
+		indexes["skipped_reason"] = "deadline"
+	else:
+		doc = frappe.get_doc("Optimus Session", row["name"])
+		indexes = _refill_indexes_for_doc(doc, time_budget=remaining())
+		indexes["skipped_reason"] = None
+		if indexes.get("first_error"):
+			errors.append(indexes["first_error"])
 
-	regen = regenerate_reports(session_uuid)
+	regen = regenerate_reports(session_uuid, ai_backfill=False)
 	return {
 		"ok": True,
 		"session_uuid": session_uuid,
 		"fixes": fixes,
 		"steps": steps,
 		"indexes": indexes,
+		"first_error": errors[0] if errors else None,
+		"aborted": aborted,
 		"regenerated": bool(regen.get("regenerated")),
 	}
 

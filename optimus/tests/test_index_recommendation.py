@@ -410,4 +410,69 @@ class TestSuggestIndexApi:
 		body = _fn_body(_api_src(), "suggest_index")
 		assert "_run_table_index_ai_backfill(doc, table_name=table_name)" in body
 		assert "ai_fix.AiFixError" in body and "frappe.throw(str(e))" in body
-		assert "regenerate_reports(session_uuid)" in body
+		assert "regenerate_reports(session_uuid, ai_backfill=False)" in body
+
+
+class TestRefillIndexesBounds:
+	"""``api._refill_indexes_for_doc`` is capped and circuit-broken."""
+
+	@staticmethod
+	def _doc(n):
+		breakdown = [
+			{"table": f"tabT{i}", "recommended_index": {"columns": ["a"]}} for i in range(n)
+		]
+		return types.SimpleNamespace(name="opt-x", table_breakdown_json=json.dumps(breakdown))
+
+	def test_caps_eligible_tables_and_records_skipped_cap(self, monkeypatch):
+		from unittest.mock import MagicMock
+
+		from optimus import api
+
+		backfill = MagicMock(return_value={"ok": True})
+		monkeypatch.setattr("optimus.analyze._run_table_index_ai_backfill", backfill)
+		monkeypatch.setattr(api, "frappe", MagicMock())
+		out = api._refill_indexes_for_doc(self._doc(5))
+		assert backfill.call_count == _analyze.AI_AUTO_INDEX_MAX_TABLES == 3
+		assert out["added"] == 3 and out["skipped_cap"] == 2
+		assert out["first_error"] is None and out["aborted"] is False
+
+	def test_non_retryable_error_stops_loop_and_sets_first_error(self, monkeypatch):
+		from unittest.mock import MagicMock
+
+		from optimus import api
+		from optimus.ai_fix import AiFixError
+
+		backfill = MagicMock(side_effect=AiFixError("Codex is not signed in.", retryable=False))
+		monkeypatch.setattr("optimus.analyze._run_table_index_ai_backfill", backfill)
+		monkeypatch.setattr(api, "frappe", MagicMock())
+		out = api._refill_indexes_for_doc(self._doc(3))
+		assert backfill.call_count == 1
+		assert out["aborted"] is True
+		assert out["first_error"] == "Codex is not signed in."
+		assert out["failed"] == 1
+
+	def test_retryable_error_continues(self, monkeypatch):
+		from unittest.mock import MagicMock
+
+		from optimus import api
+		from optimus.ai_fix import AiFixError
+
+		backfill = MagicMock(side_effect=[AiFixError("flaky"), {"ok": True}, {"ok": True}])
+		monkeypatch.setattr("optimus.analyze._run_table_index_ai_backfill", backfill)
+		monkeypatch.setattr(api, "frappe", MagicMock())
+		out = api._refill_indexes_for_doc(self._doc(3))
+		assert backfill.call_count == 3
+		assert out["failed"] == 1 and out["added"] == 2
+		assert out["first_error"] == "flaky" and out["aborted"] is False
+
+	def test_time_budget_skips_remaining_tables(self, monkeypatch):
+		from unittest.mock import MagicMock
+
+		from optimus import api
+
+		backfill = MagicMock(return_value={"ok": True})
+		monkeypatch.setattr("optimus.analyze._run_table_index_ai_backfill", backfill)
+		monkeypatch.setattr(api, "frappe", MagicMock())
+		out = api._refill_indexes_for_doc(self._doc(3), time_budget=-1)
+		assert backfill.call_count == 0
+		assert out["skipped_time"] == 3

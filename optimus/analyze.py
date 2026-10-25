@@ -2252,10 +2252,18 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 	``cap``: max findings this run. None uses Optimus Settings'
 	``ai_auto_suggest_max``; 0 means no cap (as many as fit ``time_budget``).
 	Best-effort and time-budgeted (callers run in a web request). Returns
-	``{"added", "failed", "skipped_time", "total_pending"}``, where
-	``total_pending`` is the count targeted before the cap.
+	``{"added", "failed", "skipped_time", "total_pending", "first_error",
+	"aborted"}``, where ``total_pending`` is the count targeted before the cap,
+	``first_error`` is the first ``ai_fix.AiFixError`` message (or None) and
+	``aborted`` is True when a NON-retryable AiFixError (CLI missing, signed
+	out, usage limit) stopped the loop early, since every later finding would
+	fail for the same systemic reason. Each success is committed immediately so
+	partial progress survives a mid-run worker kill.
 	"""
-	out = {"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0}
+	out = {
+		"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0,
+		"first_error": None, "aborted": False,
+	}
 	_mark_ai_spend_session(getattr(doc, "session_uuid", None))
 
 	from optimus import ai_fix
@@ -2298,13 +2306,26 @@ def _run_ai_backfill(doc, *, cap: int | None = None,
 			frappe.db.set_value("Optimus Finding", r.name, "llm_fix_json", blob)
 			r.llm_fix_json = blob
 			out["added"] += 1
+		except ai_fix.AiFixError as e:
+			out["failed"] += 1
+			# ai_fix already logs CLI errors, so record only the first one here.
+			if out["first_error"] is None:
+				out["first_error"] = str(e)
+				try:
+					frappe.log_error(title="optimus ai backfill")
+				except Exception:
+					pass
+			if not getattr(e, "retryable", True):
+				out["aborted"] = True
+				break
+			continue
 		except Exception:
 			out["failed"] += 1
 			try:
 				frappe.log_error(title="optimus ai backfill")
 			except Exception:
 				pass
-	if out["added"]:
+			continue
 		try:
 			safe_commit()
 		except Exception:

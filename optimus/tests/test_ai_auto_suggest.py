@@ -300,7 +300,7 @@ class TestRunAiBackfillCore:
 		p1, p2, p3 = _patches(_cfg(ai_auto_suggest=False))
 		with p1, p2, p3, patch.object(analyze, "frappe", _fake_frappe()) as fk:
 			out = analyze._run_ai_backfill(doc, cap=0)
-		assert out == {"added": 2, "failed": 0, "skipped_time": 0, "total_pending": 2}
+		assert out == {"added": 2, "failed": 0, "skipped_time": 0, "total_pending": 2, "first_error": None, "aborted": False}
 		assert sorted(w[1] for w in fk.db.writes) == ["F1", "F3"]
 		assert json.loads(rows[0].llm_fix_json)["suggestion"] == "**Fix**\n\ndo X"
 		# Already-suggested / ineligible rows untouched.
@@ -313,8 +313,87 @@ class TestRunAiBackfillCore:
 		p1, p2, p3 = _patches(_cfg(), available=False)
 		with p1, p2, p3, patch.object(analyze, "frappe", _fake_frappe()) as fk:
 			out = analyze._run_ai_backfill(doc, cap=0)
-		assert out == {"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0}
+		assert out == {"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0, "first_error": None, "aborted": False}
 		assert fk.db.writes == []
+
+	def test_non_retryable_error_aborts_loop_and_surfaces_first_error(self):
+		from optimus.ai_fix import AiFixError
+
+		calls = {"n": 0}
+
+		def _suggest(payload):
+			calls["n"] += 1
+			raise AiFixError("Codex is not signed in.", retryable=False)
+
+		rows = [_row("a", "N+1 Query", "High", 500), _row("b", "Slow Query", "Medium", 200)]
+		doc = SimpleNamespace(findings=rows)
+		p1, p2, p3 = _patches(_cfg(), suggest=_suggest)
+		with p1, p2, p3, patch.object(analyze, "frappe", _fake_frappe()):
+			out = analyze._run_ai_backfill(doc, cap=0)
+		assert calls["n"] == 1  # the second finding was never attempted
+		assert out["aborted"] is True
+		assert out["first_error"] == "Codex is not signed in."
+		assert out["failed"] == 1 and out["added"] == 0
+
+	def test_retryable_error_continues_and_records_only_the_first_error(self):
+		from optimus.ai_fix import AiFixError
+
+		calls = {"n": 0}
+
+		def _suggest(payload):
+			calls["n"] += 1
+			if calls["n"] <= 2:
+				raise AiFixError(f"transient {calls['n']}")
+			return dict(_FAKE_RESULT)
+
+		rows = [
+			_row("a", "N+1 Query", "High", 500),
+			_row("b", "Slow Query", "Medium", 200),
+			_row("c", "Missing Index", "Low", 50),
+		]
+		doc = SimpleNamespace(findings=rows)
+		logged = []
+		fk = _fake_frappe()
+		fk.log_error = lambda *a, **k: logged.append(k.get("title"))
+		p1, p2, p3 = _patches(_cfg(), suggest=_suggest)
+		with p1, p2, p3, patch.object(analyze, "frappe", fk):
+			out = analyze._run_ai_backfill(doc, cap=0)
+		assert out["aborted"] is False
+		assert out["first_error"] == "transient 1"
+		assert out["failed"] == 2 and out["added"] == 1
+		# AiFixError is logged at most once per run (ai_fix logs CLI errors itself).
+		assert len(logged) == 1
+
+	def test_unexpected_exceptions_still_log_each_time(self):
+		rows = [_row("a", "N+1 Query", "High", 500), _row("b", "Slow Query", "Medium", 200)]
+		doc = SimpleNamespace(findings=rows)
+		logged = []
+		fk = _fake_frappe()
+		fk.log_error = lambda *a, **k: logged.append(1)
+
+		def _suggest(payload):
+			raise RuntimeError("boom")
+
+		p1, p2, p3 = _patches(_cfg(), suggest=_suggest)
+		with p1, p2, p3, patch.object(analyze, "frappe", fk):
+			out = analyze._run_ai_backfill(doc, cap=0)
+		assert out["failed"] == 2 and out["first_error"] is None
+		assert len(logged) == 2
+
+	def test_commits_after_each_successful_finding(self):
+		rows = [
+			_row("a", "N+1 Query", "High", 500),
+			_row("b", "Slow Query", "Medium", 200),
+			_row("c", "Missing Index", "Low", 50),
+		]
+		doc = SimpleNamespace(findings=rows)
+		commits = []
+		p1, p2, p3 = _patches(_cfg())
+		with p1, p2, p3, patch.object(analyze, "frappe", _fake_frappe()), \
+				patch.object(analyze, "safe_commit", lambda: commits.append(1)):
+			out = analyze._run_ai_backfill(doc, cap=0)
+		assert out["added"] == 3
+		assert len(commits) == 3
 
 	def test_counts_per_finding_failures(self):
 		calls = {"n": 0}
@@ -348,7 +427,7 @@ class TestRunAiBackfillCore:
 		p1, p2, p3 = _patches(_cfg())
 		with p1, p2, p3, patch.object(analyze, "frappe", _fake_frappe()) as fk:
 			out = analyze._run_ai_backfill(doc, cap=0)
-		assert out == {"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0}
+		assert out == {"added": 0, "failed": 0, "skipped_time": 0, "total_pending": 0, "first_error": None, "aborted": False}
 		assert fk.db.writes == []
 
 	def test_regenerate_all_overwrites_existing(self):

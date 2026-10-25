@@ -30,7 +30,7 @@ def _fn_body(name: str) -> str:
 
 def test_whitelisted_and_signature():
 	src = _read_api_source()
-	assert re.search(r"@frappe\.whitelist\(\)\s*\ndef backfill_ai_fixes", src)
+	assert re.search(r"@frappe\.whitelist\(\)\s*\n(?:@rate_limit\([^)]*\)\s*\n)?def backfill_ai_fixes", src)
 	assert "def backfill_ai_fixes(session_uuid:" in src
 
 
@@ -76,6 +76,6 @@ def test_supports_regenerate_all_passthrough():
 
 def test_re_renders_via_regenerate_reports_and_returns_counts():
 	body = _fn_body("backfill_ai_fixes")
-	assert "regenerate_reports(session_uuid)" in body
+	assert "regenerate_reports(session_uuid, ai_backfill=False)" in body
 	for key in ('"added"', '"failed"', '"skipped_time"', '"total_pending"'):
 		assert key in body
