@@ -1145,6 +1145,22 @@ def regenerate_reports(session_uuid: str) -> dict:
 	}
 
 
+def _ai_unavailable_message() -> str:
+	"""The "AI isn't ready" message for the on-demand AI endpoints, worded for
+	the active connection type (API key vs local Codex CLI)."""
+	from optimus import ai_fix
+
+	if ai_fix.subscription_mode_active():
+		return _(
+			"Codex CLI isn't ready. Open Optimus Settings, click Connect, and make sure "
+			"developer_mode and optimus_allow_subscription_cli are set in the site config."
+		)
+	return _(
+		"AI fix suggestions aren't configured enable them in Optimus Settings ▸ "
+		"AI Fix Suggestions and set a provider, model and API key."
+	)
+
+
 @frappe.whitelist()
 @rate_limit(key="optimus_suggest_fix", limit=10, seconds=60)
 def suggest_fix(session_uuid: str, finding_ref: str, regenerate=0) -> dict:
@@ -1197,12 +1213,7 @@ def suggest_fix(session_uuid: str, finding_ref: str, regenerate=0) -> dict:
 	from optimus import ai_fix
 
 	if not ai_fix.is_available():
-		frappe.throw(
-			_(
-				"AI fix suggestions aren't configured enable them in Profiler "
-				"Settings ▸ AI Fix Suggestions and set a provider, model and API key."
-			)
-		)
+		frappe.throw(_ai_unavailable_message())
 	from optimus.settings import get_config
 	if not get_config().ai_suggest_findings:
 		frappe.throw(
@@ -1325,6 +1336,36 @@ def test_ai_connection() -> dict:
 
 
 @frappe.whitelist()
+def check_cli_session() -> dict:
+	"""Read-only check that the local Codex CLI is installed and signed in, for
+	the Connect button in Optimus Settings. Never logs in. System-Manager-only
+	(Optimus Settings itself is SysMgr-only). Returns
+	``ai_fix._cli_session_status()`` and persists its message to the read-only
+	``ai_subscription_status`` field (best effort)."""
+	user = _require_profiler_user()
+	roles = set(frappe.get_roles(user))
+	if "System Manager" not in roles and user != "Administrator":
+		frappe.throw(
+			_("Only a System Manager can check the CLI session."),
+			frappe.PermissionError,
+		)
+	from optimus import ai_fix
+
+	status = ai_fix._cli_session_status()
+	try:
+		frappe.db.set_value(
+			"Optimus Settings",
+			"Optimus Settings",
+			"ai_subscription_status",
+			(status.get("message") or "")[:140],
+		)
+		safe_commit()
+	except Exception:
+		frappe.log_error(title="optimus check_cli_session persist")
+	return status
+
+
+@frappe.whitelist()
 def ai_capabilities() -> dict:
 	"""The per-section LLM toggles, for the Optimus Session form to decide
 	which AI buttons to show. Any logged-in profiler user no Profiler
@@ -1383,6 +1424,14 @@ def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
 		)
 
 	from optimus import ai_fix
+
+	if ai_fix.subscription_mode_active():
+		frappe.throw(
+			_(
+				"Bulk AI suggestions aren't available in Subscription (local CLI) mode. "
+				"Use the per-finding 'Suggest a fix' action on each finding instead."
+			)
+		)
 
 	if not ai_fix.is_available():
 		frappe.throw(
@@ -1464,10 +1513,7 @@ def humanize_steps(session_uuid: str) -> dict:
 	from optimus import ai_fix
 
 	if not ai_fix.is_available():
-		frappe.throw(
-			_("AI isn't configured enable it under Optimus Settings ▸ "
-			"AI Fix Suggestions and set a provider, model and API key.")
-		)
+		frappe.throw(_ai_unavailable_message())
 	from optimus.settings import get_config
 	if not get_config().ai_humanize_steps:
 		frappe.throw(
@@ -1586,10 +1632,7 @@ def suggest_index(session_uuid: str, table_name: str) -> dict:
 	from optimus import ai_fix
 
 	if not ai_fix.is_available():
-		frappe.throw(
-			_("AI isn't configured enable it under Optimus Settings ▸ "
-			"AI Fix Suggestions and set a provider, model and API key.")
-		)
+		frappe.throw(_ai_unavailable_message())
 	from optimus.settings import get_config
 	if not get_config().ai_suggest_indexes:
 		frappe.throw(
@@ -1700,6 +1743,14 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 		)
 
 	from optimus import ai_fix
+
+	if ai_fix.subscription_mode_active():
+		frappe.throw(
+			_(
+				"Bulk AI suggestions aren't available in Subscription (local CLI) mode. "
+				"Use the per-finding 'Suggest a fix' action on each finding instead."
+			)
+		)
 
 	if not ai_fix.is_available():
 		frappe.throw(

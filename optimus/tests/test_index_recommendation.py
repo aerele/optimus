@@ -404,7 +404,7 @@ class TestSuggestIndexApi:
 		assert "_require_profiler_user()" in body
 		assert 'row["user"] != user' in body and "frappe.PermissionError" in body
 		assert 'row["status"] != "Ready"' in body
-		assert "ai_fix.is_available()" in body and "AI Fix Suggestions" in body
+		assert "ai_fix.is_available()" in body and "_ai_unavailable_message()" in body
 
 	def test_calls_backfill_then_rerenders(self):
 		body = _fn_body(_api_src(), "suggest_index")

@@ -517,6 +517,16 @@ def _resolve_cli_timeout_seconds() -> int:
 		return _CLI_DEFAULT_TIMEOUT
 
 
+def subscription_mode_active() -> bool:
+	"""True when Optimus Settings selects the local-CLI subscription transport.
+	Config read only (no CLI probe), so it is cheap enough to gate bulk endpoints."""
+	try:
+		from optimus.settings import get_config
+		return (getattr(get_config(), "ai_connection_type", "") or "").strip() == "Subscription (local CLI)"
+	except Exception:
+		return False
+
+
 def is_available(section: str | None = None, *, on_demand: bool = False) -> bool:
 	"""True when AI fix suggestions are on and minimally configured:
 	``ai_enabled`` set, a model resolvable for the chosen provider and an API

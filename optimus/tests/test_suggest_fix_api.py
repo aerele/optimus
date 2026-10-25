@@ -61,8 +61,8 @@ class TestSuggestFixSurface:
 	def test_ai_enabled_guard(self):
 		body = _fn_body("suggest_fix")
 		assert "ai_fix.is_available()" in body
-		# A clear, actionable message pointing at Optimus Settings.
-		assert "Optimus Settings" in body and "AI Fix Suggestions" in body
+		# A clear, actionable message, worded for the active connection type.
+		assert "_ai_unavailable_message()" in body
 
 	def test_eligible_finding_type_guard(self):
 		body = _fn_body("suggest_fix")

@@ -54,7 +54,7 @@ def test_requires_ready_session():
 def test_ai_enabled_guard():
 	body = _fn_body("humanize_steps")
 	assert "ai_fix.is_available()" in body
-	assert "AI Fix Suggestions" in body
+	assert "_ai_unavailable_message()" in body
 
 
 def test_fetches_recordings_and_builds_actions():
