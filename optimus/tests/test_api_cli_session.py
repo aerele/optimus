@@ -3,8 +3,8 @@
 
 """Tests for the subscription (local CLI) API surface: the cheap
 ``ai_fix.subscription_mode_active`` predicate, the ``check_cli_session``
-Connect-button endpoint, the bulk-endpoint guard and the connection-aware
-"AI isn't ready" message. The frappe boundary is replaced with a MagicMock
+Connect-button endpoint, the bulk endpoints (no longer blocked in subscription
+mode) and the connection-aware "AI isn't ready" message. The frappe boundary is replaced with a MagicMock
 (same pattern as ``test_api_refill_ai_suggestions``)."""
 
 from types import SimpleNamespace
@@ -126,21 +126,22 @@ def test_check_cli_session_persist_failure_still_returns_status(fake_frappe, mon
 	fake_frappe.log_error.assert_called_once()
 
 
-# -------------------------------------------------------------- bulk guard
+# ------------------------------------------- bulk endpoints (no guard)
 
 
 @pytest.fixture
 def bulk_calls(monkeypatch):
-	"""Every bulk-work entry point raises if reached."""
+	"""Subscription mode on; the availability check is a spy that reports not
+	ready, so a bulk endpoint stops right after it and no backfill work runs."""
 	def _must_not_run(*a, **k):
-		raise AssertionError("bulk AI work ran in subscription mode")
+		raise AssertionError("bulk AI work ran although AI is not available")
 
 	monkeypatch.setattr("optimus.analyze._run_ai_backfill", _must_not_run)
 	monkeypatch.setattr(api, "_humanize_steps_core", _must_not_run)
 	monkeypatch.setattr(api, "_refill_indexes_for_doc", _must_not_run)
 	monkeypatch.setattr(api, "regenerate_reports", _must_not_run)
 	monkeypatch.setattr(ai_fix, "subscription_mode_active", lambda: True)
-	available = MagicMock(return_value=True)
+	available = MagicMock(return_value=False)
 	monkeypatch.setattr(ai_fix, "is_available", available)
 	return available
 
@@ -148,14 +149,16 @@ def bulk_calls(monkeypatch):
 @pytest.mark.parametrize(
 	"endpoint", ["backfill_ai_fixes", "refill_ai_suggestions"]
 )
-def test_bulk_endpoints_throw_in_subscription_mode(fake_frappe, bulk_calls, endpoint):
+def test_bulk_endpoints_do_not_short_circuit_on_subscription_mode(fake_frappe, bulk_calls, endpoint):
 	with pytest.raises(Exception) as excinfo:
 		getattr(api, endpoint)(session_uuid="sess-1")
 
-	assert "Subscription (local CLI)" in str(excinfo.value)
-	assert "Suggest a fix" in str(excinfo.value)
-	# The guard fires before the availability check and any backfill work.
-	bulk_calls.assert_not_called()
+	# Subscription mode no longer blocks bulk: the endpoint reaches the normal
+	# availability check and fails there, not on a subscription-specific throw.
+	# The message is the connection-aware one (Codex wording in subscription mode).
+	assert "Bulk AI suggestions aren't available" not in str(excinfo.value)
+	assert "Codex CLI isn't ready" in str(excinfo.value)
+	bulk_calls.assert_called_once_with()
 
 
 # ------------------------------------------------- _ai_unavailable_message

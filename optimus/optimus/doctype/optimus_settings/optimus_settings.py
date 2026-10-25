@@ -151,6 +151,9 @@ class OptimusSettings(Document):
 		sees a clear hint instead of a cryptic error on first use."""
 		if not self.get("ai_enabled"):
 			return
+		# The API key, model and base URL fields do not apply to the local CLI.
+		if (self.get("ai_connection_type") or "").strip() == "Subscription (local CLI)":
+			return
 		provider = (self.get("ai_provider") or "Anthropic").strip()
 		needs_key = provider != "OpenAI-compatible"
 		# ai_model can be blank when a hosted default exists for the

@@ -149,7 +149,7 @@ def test_refill_fails_fast_when_provider_missing(mock_session_environment, monke
 
 	with pytest.raises(Exception) as excinfo:
 		api.refill_ai_suggestions(session_uuid="sess-1")
-	assert "AI isn't configured" in str(excinfo.value)
+	assert "aren't configured" in str(excinfo.value)
 
 	assert backfill.call_count == 0
 	assert humanize.call_count == 0

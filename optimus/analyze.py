@@ -2016,10 +2016,17 @@ def _enrich_findings_with_ai_suggestions(context, *, recordings: list | None = N
 	from optimus import ai_fix
 
 	if not ai_fix.is_available(section="findings"):
-		context.warnings.append(
-			"AI auto-suggest is on but the AI provider isn't fully configured "
-			"no suggestions were generated (see Optimus Settings ▸ AI Fix Suggestions)."
-		)
+		if ai_fix.subscription_mode_active():
+			context.warnings.append(
+				"AI auto-suggest is on but the Codex CLI subscription isn't ready "
+				"(check Optimus Settings > AI > Connect, and developer_mode / "
+				"optimus_allow_subscription_cli)."
+			)
+		else:
+			context.warnings.append(
+				"AI auto-suggest is on but the AI provider isn't fully configured "
+				"no suggestions were generated (see Optimus Settings ▸ AI Fix Suggestions)."
+			)
 		return
 
 	eligible = [
@@ -2437,7 +2444,7 @@ def _run_table_index_ai_backfill(doc, *, table_name: str) -> dict:
 	if not table_name:
 		return {"ok": False, "reason": "no table specified"}
 	from optimus import ai_fix
-	if not ai_fix.is_available(section="indexes", on_demand=True):
+	if not ai_fix.is_available(section="indexes"):
 		return {"ok": False, "table": table_name, "reason": "AI index recommendations not available"}
 	try:
 		breakdown = json.loads(doc.table_breakdown_json or "[]")

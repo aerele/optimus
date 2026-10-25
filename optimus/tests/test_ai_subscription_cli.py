@@ -41,9 +41,11 @@ def _cfg(**kw):
 
 @pytest.fixture
 def sub_cfg(monkeypatch):
-	"""Subscription mode on; get_config returns the cfg."""
+	"""Subscription mode on and the dev-bench guard open; get_config returns the
+	cfg. Tests that need the guard closed re-patch ``_subscription_allowed``."""
 	cfg = _cfg()
 	monkeypatch.setattr("optimus.settings.get_config", lambda: cfg)
+	monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
 	return cfg
 
 
@@ -173,6 +175,27 @@ class TestCallLocalCli:
 		return ai_fix._call_local_cli(
 			{"protocol": "subscription"}, system, [{"role": "user", "content": content}],
 		)
+
+	def test_refuses_to_run_when_guard_is_off(self, monkeypatch, sub_cfg):
+		"""Defense in depth: a direct caller that bypasses is_available still
+		cannot run codex on a non-dev site."""
+		fake = _FakeSubprocess()
+		monkeypatch.setattr(ai_fix, "subprocess", fake)
+		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
+		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: False)
+		with pytest.raises(ai_fix.AiFixError, match="developer-mode"):
+			self._call()
+		assert not fake.popen_calls
+		assert not fake.run_calls
+
+	def test_mkdtemp_oserror_becomes_aifixerror(self, monkeypatch, fake_cli):
+		def boom(*a, **k):
+			raise OSError("disk full")
+
+		monkeypatch.setattr(ai_fix.tempfile, "mkdtemp", boom)
+		with pytest.raises(ai_fix.AiFixError, match="working directory"):
+			self._call()
+		assert not fake_cli.popen_calls
 
 	def test_prompt_goes_to_stdin_never_argv(self, fake_cli):
 		"""AC-SEC-1 + AC-RES-2: metacharacters ride in communicate(input=...);
@@ -440,31 +463,29 @@ class TestAvailability:
 		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
 		assert ai_fix.is_available() is True
 
-	@pytest.mark.parametrize("section", ["findings", "indexes", "humanize"])
-	def test_sections_disabled_in_subscription_mode(self, sub_cfg, monkeypatch, section):
-		"""AC-AVAIL-1: auto / analyze-time passes always carry a section."""
+	@pytest.mark.parametrize("section,attr", [
+		("findings", "ai_suggest_findings"),
+		("indexes", "ai_suggest_indexes"),
+		("humanize", "ai_humanize_steps"),
+	])
+	def test_sections_follow_their_toggle(self, sub_cfg, monkeypatch, section, attr):
+		"""Subscription mode behaves like the API path: a section is available
+		when its toggle is on and unavailable when it is off."""
 		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
+		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
+		assert ai_fix.is_available(section=section) is True
+		setattr(sub_cfg, attr, False)
+		assert ai_fix.is_available(section=section) is False
+		assert ai_fix.is_available() is True
+
+	@pytest.mark.parametrize("section", [None, "findings", "indexes", "humanize"])
+	def test_sections_need_guard_and_cli(self, sub_cfg, monkeypatch, section):
+		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: False)
 		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
 		assert ai_fix.is_available(section=section) is False
-
-	def test_on_demand_index_allowed_in_subscription_mode(self, sub_cfg, monkeypatch):
-		"""The per-table Suggest index button is click-driven, so it stays usable."""
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		assert ai_fix.is_available(section="indexes", on_demand=True) is True
-		assert ai_fix.is_available(section="indexes") is False
-
-	def test_on_demand_honours_section_toggle_guard_and_cli(self, sub_cfg, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
-		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
-		sub_cfg.ai_suggest_indexes = False
-		assert ai_fix.is_available(section="indexes", on_demand=True) is False
-		sub_cfg.ai_suggest_indexes = True
-		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: False)
-		assert ai_fix.is_available(section="indexes", on_demand=True) is False
 		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
 		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: None)
-		assert ai_fix.is_available(section="indexes", on_demand=True) is False
+		assert ai_fix.is_available(section=section) is False
 
 	def test_unavailable_when_cli_missing(self, sub_cfg, monkeypatch):
 		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
@@ -486,7 +507,7 @@ class TestAvailability:
 		monkeypatch.setattr(ai_fix, "_subscription_allowed", lambda: True)
 		monkeypatch.setattr(ai_fix.shutil, "which", lambda name: "/usr/bin/codex")
 		assert ai_fix.is_available() is True
-		assert ai_fix.is_available(section="findings") is False
+		assert ai_fix.is_available(section="findings") is True
 		trap.run.assert_not_called()
 		trap.Popen.assert_not_called()
 
@@ -498,6 +519,14 @@ class TestAvailability:
 		exe.chmod(0o755)
 		assert ai_fix._cli_installed(cfg) == str(exe)
 		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(tmp_path / "nope"))) is None
+
+	def test_configured_path_basename_must_be_codex(self, tmp_path):
+		"""A SysMgr cannot point the path at an arbitrary executable."""
+		other = tmp_path / "sh"
+		other.write_text("#!/bin/sh\n")
+		other.chmod(0o755)
+		assert ai_fix._cli_installed(_cfg(ai_cli_path=str(other))) is None
+		assert ai_fix._cli_installed(_cfg(ai_cli_path="/bin/sh")) is None
 
 
 # ---------------------------------------------------------------------------

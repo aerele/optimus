@@ -51,9 +51,9 @@ def test_requires_ready_session():
 def test_ai_enabled_guard():
 	body = _fn_body("backfill_ai_fixes")
 	assert "ai_fix.is_available()" in body
-	# (the "Optimus Settings" hint is wrapped across two source lines, so
-	# match on contiguous fragments)
-	assert "aren't configured" in body and "AI Fix Suggestions" in body
+	# The unavailable-config message is shared, worded for the active
+	# connection type (API key vs local Codex CLI).
+	assert "_ai_unavailable_message()" in body
 
 
 def test_calls_ungated_backfill_core_with_no_cap():

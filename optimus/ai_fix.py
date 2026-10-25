@@ -519,7 +519,7 @@ def _resolve_cli_timeout_seconds() -> int:
 
 def subscription_mode_active() -> bool:
 	"""True when Optimus Settings selects the local-CLI subscription transport.
-	Config read only (no CLI probe), so it is cheap enough to gate bulk endpoints."""
+	Config read only (no CLI probe), so it is cheap enough to word messages per connection type."""
 	try:
 		from optimus.settings import get_config
 		return (getattr(get_config(), "ai_connection_type", "") or "").strip() == "Subscription (local CLI)"
@@ -527,18 +527,18 @@ def subscription_mode_active() -> bool:
 		return False
 
 
-def is_available(section: str | None = None, *, on_demand: bool = False) -> bool:
+def is_available(section: str | None = None) -> bool:
 	"""True when AI fix suggestions are on and minimally configured:
 	``ai_enabled`` set, a model resolvable for the chosen provider and an API
 	key present unless the provider needs none (local endpoints).
 
+	In subscription (local CLI) mode the API fields do not apply: it needs the
+	developer-mode guard and an installed Codex CLI instead. That check is
+	filesystem-only (no subprocess), so it is cheap on the availability path.
+
 	When ``section`` is ``"findings"`` / ``"indexes"`` / ``"humanize"``, also
 	requires the matching per-section toggle. Fails soft: an unknown ``section``
-	or an unreadable config attr does not block once ``ai_enabled`` has passed.
-
-	``on_demand`` marks a click-driven call (the per-table "Suggest index"
-	button). In subscription mode only the automatic section passes stay off, so
-	an on-demand one is allowed."""
+	or an unreadable config attr does not block once ``ai_enabled`` has passed."""
 	try:
 		from optimus.settings import get_config
 		cfg = get_config()
@@ -551,18 +551,15 @@ def is_available(section: str | None = None, *, on_demand: bool = False) -> bool
 	except AiFixError:
 		return False
 	if provider.get("protocol") == "subscription":
-		# Every analyze-time / auto AI pass passes a section without on_demand,
-		# so a subscription never spends the quota unattended. The check is
-		# filesystem-only: no subprocess on the availability path.
-		if section is not None and not on_demand:
-			return False
 		if not _subscription_allowed():
 			return False
 		if _cli_installed(cfg) is None:
 			return False
-		flag = _AI_SECTION_FLAGS.get(section) if section else None
-		if flag and not getattr(cfg, flag, True):
-			return False
+		# honor the per-section toggle exactly like the API path below
+		if section:
+			flag = _AI_SECTION_FLAGS.get(section)
+			if flag and not getattr(cfg, flag, True):
+				return False
 		return True
 	if not provider.get("model") or not provider.get("base_url"):
 		return False
@@ -1558,6 +1555,9 @@ def _cli_installed(cfg) -> str | None:
 	executable file; otherwise look ``codex`` up on PATH. No subprocess."""
 	configured = (getattr(cfg, "ai_cli_path", "") or "").strip()
 	if configured:
+		# Only a binary named codex: a SysMgr must not point this at /bin/sh etc.
+		if os.path.basename(configured) != "codex":
+			return None
 		if os.path.isfile(configured) and os.access(configured, os.X_OK):
 			return configured
 		return None
@@ -1698,6 +1698,11 @@ def _call_local_cli(
 
 	Residual risk: a read-only sandbox can still READ files. That is mitigated
 	by the empty scratch cwd and by treating the prompt as untrusted."""
+	if not _subscription_allowed():
+		raise AiFixError(
+			"The local CLI subscription is only available on a developer-mode bench "
+			"with optimus_allow_subscription_cli set."
+		)
 	from optimus.settings import get_config
 	path = _cli_installed(get_config())
 	if not path:
@@ -1710,7 +1715,10 @@ def _call_local_cli(
 	# A lone surrogate in attacker-influenced SQL would make the stdin encode
 	# raise after the child spawned; replace it up front.
 	prompt = _compose_cli_prompt(system, messages).encode("utf-8", "replace").decode("utf-8")
-	scratch = tempfile.mkdtemp(prefix="optimus-codex-")
+	try:
+		scratch = tempfile.mkdtemp(prefix="optimus-codex-")
+	except OSError:
+		raise AiFixError("Codex CLI could not create a working directory.")
 	proc = None
 	try:
 		out_file = os.path.join(scratch, "out.txt")

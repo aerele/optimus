@@ -12,8 +12,8 @@ versions may contain breaking changes see migration notes below).
 
 ### Added
 
-- AI fix suggestions can now use a local Codex CLI subscription instead of a cloud API key. In Optimus Settings > AI, set Connection to "Subscription (local CLI)". Codex is the only CLI supported in this version. It runs the logged-in `codex` CLI on the bench machine.
-- In subscription mode only per-finding suggestions are available. Bulk and auto suggestions are disabled. It requires `developer_mode` and the `optimus_allow_subscription_cli` site-config flag. The default stays "API Key", so existing setups are unchanged.
+- AI fix suggestions can now use a local Codex CLI subscription instead of a cloud API key. In Optimus Settings > AI, set Connection to "Subscription (local CLI)". It runs the logged-in `codex` CLI on the bench machine.
+- Subscription mode works like the API-key path: the normal auto-suggest during analyze and the "Refresh AI suggestions" button both work, now driven by the local Codex CLI. Codex is the only CLI supported in this version. It requires `developer_mode` and the `optimus_allow_subscription_cli` site-config flag. The default stays "API Key", so existing setups are unchanged.
 
 ---
 

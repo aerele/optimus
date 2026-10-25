@@ -1425,21 +1425,8 @@ def backfill_ai_fixes(session_uuid: str, regenerate_all=0) -> dict:
 
 	from optimus import ai_fix
 
-	if ai_fix.subscription_mode_active():
-		frappe.throw(
-			_(
-				"Bulk AI suggestions aren't available in Subscription (local CLI) mode. "
-				"Use the per-finding 'Suggest a fix' action on each finding instead."
-			)
-		)
-
 	if not ai_fix.is_available():
-		frappe.throw(
-			_(
-				"AI fix suggestions aren't configured enable them in Profiler "
-				"Settings ▸ AI Fix Suggestions and set a provider, model and API key."
-			)
-		)
+		frappe.throw(_ai_unavailable_message())
 	from optimus.settings import get_config
 	if not get_config().ai_suggest_findings:
 		frappe.throw(
@@ -1744,19 +1731,8 @@ def refill_ai_suggestions(session_uuid: str) -> dict:
 
 	from optimus import ai_fix
 
-	if ai_fix.subscription_mode_active():
-		frappe.throw(
-			_(
-				"Bulk AI suggestions aren't available in Subscription (local CLI) mode. "
-				"Use the per-finding 'Suggest a fix' action on each finding instead."
-			)
-		)
-
 	if not ai_fix.is_available():
-		frappe.throw(
-			_("AI isn't configured enable it under Optimus Settings ▸ "
-			"AI Fix Suggestions and set a provider, model and API key.")
-		)
+		frappe.throw(_ai_unavailable_message())
 
 	from optimus import analyze as _analyze_mod
 	from optimus.settings import get_config
