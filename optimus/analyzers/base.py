@@ -573,6 +573,16 @@ def is_framework_callsite_str(
 	return is_framework_callsite(filename, tracked_apps, installed_apps)
 
 
+_OPTIMUS_PATH_RE = re.compile(r"(?:^|/)optimus/")
+
+
+def is_optimus_path(filename: str | None) -> bool:
+	"""True if ``filename`` is inside the Optimus app (matched on a path boundary)."""
+	if not filename:
+		return False
+	return bool(_OPTIMUS_PATH_RE.search(filename.replace("\\", "/")))
+
+
 def is_profiler_own_query(stack: list | None) -> bool:
 	"""True if a SQL call's Python stack originates from the profiler's own
 	instrumentation (e.g. the ``SHOW GLOBAL STATUS`` / ``SHOW VARIABLES`` snapshots
@@ -592,14 +602,7 @@ def is_profiler_own_query(stack: list | None) -> bool:
 		filename = (frame.get("filename") or "").replace("\\", "/")
 		if not filename:
 			continue
-		# v0.5.1: substring (not startswith) so we match bench-relative
-		# paths like ``apps/optimus/optimus/capture.py``
-		# and absolute paths like ``/Users/.../apps/optimus/...``
-		# in addition to pyinstrument's ``optimus/capture.py``
-		# short form. startswith missed both the bench and absolute
-		# shapes, letting profiler frames slip through to be blamed
-		# as Framework N+1 findings.
-		if "optimus/" in filename:
+		if is_optimus_path(filename):
 			has_profiler_frame = True
 			continue
 		if "frappe/" in filename:
@@ -611,12 +614,24 @@ def is_profiler_own_query(stack: list | None) -> bool:
 	return has_profiler_frame
 
 
+def strip_profiler_own_calls(recording: dict) -> int:
+	"""Drop Optimus's own SQL calls from ``recording["calls"]``; return how many."""
+	calls = recording.get("calls")
+	if not isinstance(calls, list) or not calls:
+		return 0
+	kept = [c for c in calls if not (isinstance(c, dict) and is_profiler_own_query(c.get("stack")))]
+	dropped = len(calls) - len(kept)
+	if dropped:
+		recording["calls"] = kept
+	return dropped
+
+
 def walk_callsite(stack: list | None) -> dict | None:
 	"""Return the deepest non-framework frame that issued a query, or None.
 
 	The recorder builds ``stack`` outermost-to-innermost; we walk from innermost
 	outward and return the first frame not inside a framework directory
-	(``FRAMEWORK_PREFIXES``). Returns a dict with ``filename``, ``lineno``,
+	(``frappe/`` or Optimus). Returns a dict with ``filename``, ``lineno``,
 	``function``. Falls back to the innermost frame when every frame is in
 	``frappe/`` (so legitimate framework queries still surface), but returns None
 	when the stack is profiler instrumentation (``is_profiler_own_query``).
@@ -634,7 +649,7 @@ def walk_callsite(stack: list | None) -> dict | None:
 		# v0.5.1: substring (not startswith) matches bench and absolute
 		# path shapes in addition to pyinstrument's short form. See the
 		# matching fix in is_profiler_own_query for context.
-		if any(prefix in filename for prefix in FRAMEWORK_PREFIXES):
+		if is_optimus_path(filename) or "frappe/" in filename:
 			continue
 		return frame
 

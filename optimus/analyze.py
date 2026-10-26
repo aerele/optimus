@@ -42,7 +42,13 @@ from optimus.analyzers import (
 	table_breakdown,
 	top_queries,
 )
-from optimus.analyzers.base import _DUR_SEP, SEVERITY_ORDER, AnalyzeContext, dur
+from optimus.analyzers.base import (
+	_DUR_SEP,
+	SEVERITY_ORDER,
+	AnalyzeContext,
+	dur,
+	strip_profiler_own_calls,
+)
 from optimus.dbdialect import get_dialect
 
 # v0.3.0: per-analyzer wall-clock budget. If the cumulative analyze
@@ -1101,6 +1107,7 @@ def _fetch_recordings(recording_uuids: list[str], *, recordings_bundle=None):
 			# post-cleanup (same verified tree-load as the Redis branch).
 			rec = _rehydrate_from_bundle(recordings_bundle, uuid)
 			if rec is not None:
+				strip_profiler_own_calls(rec)
 				yield rec
 			continue
 
@@ -1132,6 +1139,7 @@ def _fetch_recordings(recording_uuids: list[str], *, recordings_bundle=None):
 
 		rec["pyi_session"] = pyi_session
 		rec["sidecar"] = sidecar
+		strip_profiler_own_calls(rec)
 		yield rec
 
 

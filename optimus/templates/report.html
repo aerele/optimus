@@ -3481,26 +3481,8 @@
       the callsite so your developer knows where to look. Sorted by duration.
     </p>
 
-    {# Flatten each action's queries into one list, then show the global slowest
-       in a single flat table (like Server Resource). Collecting each action's
-       top-20 bounds the work and still captures the overall top-N a query
-       outside its own action's top-20 can't be in the global top-N. #}
-    {% set ns = namespace(rows=[]) %}
-    {% for action in (report_data.actions + (report_data.actions_framework or [])) %}
-      {% set recording = recordings_by_uuid.get(action.recording_uuid) %}
-      {% if recording and recording.calls %}
-        {% for call in (recording.calls | sort(attribute='duration', reverse=True))[:20] %}
-          {% set _frame = call.stack[-1] if call.stack and call.stack[-1] is mapping else none %}
-          {% set ns.rows = ns.rows + [{
-              "action": action.action_label,
-              "duration": call.duration or 0,
-              "copies": call.normalized_copies or 0,
-              "callsite": ((_frame.filename ~ ":" ~ _frame.lineno) if _frame else ""),
-          }] %}
-        {% endfor %}
-      {% endif %}
-    {% endfor %}
-    {% if ns.rows %}
+    {% set qpa = report_data.get("queries_per_action") or {"rows": [], "total": 0, "hidden_untracked": 0} %}
+    {% if qpa.rows %}
     <table class="data tbl-clip queries-flat-table">
       <colgroup>
         <col class="col-idx">
@@ -3519,7 +3501,7 @@
         </tr>
       </thead>
       <tbody>
-      {% for r in (ns.rows | sort(attribute='duration', reverse=True))[:40] %}
+      {% for r in qpa.rows %}
         <tr>
           <td class="num">{{ loop.index }}</td>
           <td>{{ r.action }}</td>
@@ -3530,9 +3512,12 @@
       {% endfor %}
       </tbody>
     </table>
-    {% if ns.rows | length > 40 %}
-      <p class="small muted"><em>Showing the 40 slowest queries of {{ ns.rows | length }} collected across actions.</em></p>
+    {% if qpa.total > qpa.rows | length %}
+      <p class="small muted"><em>Showing the {{ qpa.rows | length }} slowest queries of {{ qpa.total }} collected across actions.</em></p>
     {% endif %}
+    {% endif %}
+    {% if qpa.hidden_untracked %}
+      <p class="small muted"><em>{{ qpa.hidden_untracked }} quer{{ "y" if qpa.hidden_untracked == 1 else "ies" }} from apps not listed in Optimus Settings (Tracked Apps) not shown.</em></p>
     {% endif %}
   </section>
   {% endif %}
