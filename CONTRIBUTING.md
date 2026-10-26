@@ -28,6 +28,9 @@ cd <bench-root> && env/bin/python -m pytest apps/optimus/optimus/tests/ -q
 
 # Lint:
 env/bin/python -m ruff check apps/optimus/optimus/
+
+# Coverage (needs pytest-cov; settings in pyproject.toml):
+env/bin/python -m pytest apps/optimus/optimus/tests/ --cov --cov-report=term-missing:skip-covered
 ```
 
 The `test_pdf_export.py` 3-test module requires a writable

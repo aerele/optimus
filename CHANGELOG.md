@@ -8,6 +8,19 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.82] - 2026-10-26
+
+### Added
+
+- Test coverage is now configured for the unit suite (line and branch, tests, integration tests and data patches excluded). Run `python -m pytest optimus/tests/ --cov --cov-report=term-missing:skip-covered`.
+- New behaviour tests for the session start/stop/retry endpoints, the request and background-job hooks, install/uninstall, the report file permission gate, the AI settings warning, the janitor and the Redis schema sentinel.
+
+### Changed
+
+- Removed an unused test fixture (`sidecar_with_pii.json`).
+
+---
+
 ## [0.12.70] - 2026-10-22
 
 ### Fixed
