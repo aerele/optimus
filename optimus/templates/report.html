@@ -43,6 +43,12 @@
     padding: 6px 8px;
     font-size: 0.78rem;
   }
+  /* Slow Query card: complete SQL in a bounded scroll box. */
+  pre.sql-full {
+    max-height: 480px;
+    overflow: auto;
+    font-size: 0.78rem;
+  }
   .muted { color: #6b7280; }
   .small { font-size: 0.85rem; }
 
@@ -237,6 +243,13 @@
   table.query-table pre.sql-inline {
     max-height: 200px;
     overflow: auto;
+  }
+  /* Paper cannot scroll; must stay after the screen rules above (same specificity). */
+  @media print {
+    pre.sql-full, pre.sql-inline, table.query-table pre.sql-inline {
+      max-height: none;
+      overflow: visible;
+    }
   }
 
   /* v0.7.x: shared "fixed-layout + content wraps" behaviour, applied
@@ -2087,10 +2100,11 @@
         </p>
       {% endif %}
 
-      {# v0.7.x: the "Query (normalized)" block was dropped from finding cards
-         per user request - the callsite + fix already say what to change and
-         the normalized SQL still lives in the Slowest-queries / per-action
-         tables. #}
+      {# Slow Query only: other types keep their SQL in the queries tables. #}
+      {% if f.finding_type == "Slow Query" and detail.normalized_query %}
+        <span class="label">Query (complete, literals normalized)</span>
+        <pre class="sql-full">{{ detail.normalized_query }}</pre>
+      {% endif %}
 
       {% if detail.suggested_ddl %}
         <span class="label">Suggested DDL</span>

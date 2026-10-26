@@ -356,6 +356,11 @@ def render(
 		_finding_to_dict(f, _finding_file_cache)
 		for f in (session_doc.findings or [])
 	]
+	# Slow Query cards show the full SQL; redact it like the slowest-queries table.
+	for _f in all_findings:
+		_d = _f.get("technical_detail")
+		if _f.get("finding_type") == "Slow Query" and isinstance(_d, dict) and _d.get("normalized_query"):
+			_d["normalized_query"] = _redact_sql_literals(_d["normalized_query"])
 	# v0.6.x: SQL "red flag" findings carry no callsite derive a
 	# representative one (the hottest user-app frame that ran the offending
 	# query) from the recordings so their smoking-gun block can render too.

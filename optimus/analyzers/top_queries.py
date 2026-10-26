@@ -37,6 +37,16 @@ MAX_FINDINGS = 5  # only flag the top 5 slow queries to avoid noise
 # empty state instead of a list of trivially-fast queries.
 TOP_QUERY_FLOOR_MS = 10.0
 
+# Upper bound on SQL kept per slow query; longer text ends with a visible note.
+MAX_SQL_CHARS = 200_000
+
+
+def cap_sql(sql: str) -> str:
+	"""Cut ``sql`` to ``MAX_SQL_CHARS`` and append a visible truncation note."""
+	if not isinstance(sql, str) or len(sql) <= MAX_SQL_CHARS:
+		return sql
+	return f"{sql[:MAX_SQL_CHARS]}\n-- [Optimus: query truncated at {MAX_SQL_CHARS} of {len(sql)} characters]"
+
 
 def _resolve_slow_query_threshold() -> tuple[float, float]:
 	"""Return (slow_threshold_ms, high_severity_threshold_ms). Reads Optimus
@@ -79,7 +89,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 				continue
 			all_queries.append(
 				{
-					"normalized_query": call.get("normalized_query") or call.get("query") or "",
+					"normalized_query": cap_sql(call.get("normalized_query") or call.get("query") or ""),
 					# v0.7.x M5: renamed from ``duration_ms`` to disambiguate
 				# from action.duration_ms (per-request wall) and
 				# t.duration_ms (consolidated per-table). This is the

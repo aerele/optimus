@@ -8,6 +8,16 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.74] - 2026-10-26
+
+### Fixed
+
+- The Slow Query finding card now shows the complete query (it previously showed only the title and callsite). Long statements wrap in a scrollable block.
+- The slowest-queries table and the Slow Query card are no longer clipped when exported to PDF or printed; the whole statement is shown.
+- Statements larger than 200,000 characters are stored up to that size with a visible "query truncated at N of M characters" note instead of growing the session record without limit.
+
+---
+
 ## [0.12.70] - 2026-10-22
 
 ### Fixed
