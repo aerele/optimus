@@ -168,6 +168,7 @@ from optimus.renderer.line_drilldown import (
 	_render_phase2_function_table,
 	_render_phase2_panel,
 )
+from optimus.renderer.query_callsite import query_callsite
 from optimus.renderer.source import (
 	_FILE_CACHE_MAX_ENTRIES,
 	_SNIPPET_TRUNCATE_CHARS,
@@ -234,12 +235,14 @@ _TEMPLATES_DIR = os.path.join(
 def _get_jinja_env() -> Environment:
 	"""Build and cache the Jinja environment. Autoescape is on for HTML so
 	user-provided strings (action labels, finding titles) can't inject markup."""
-	return Environment(
+	env = Environment(
 		loader=FileSystemLoader(_TEMPLATES_DIR),
 		autoescape=select_autoescape(["html"]),
 		trim_blocks=True,
 		lstrip_blocks=True,
 	)
+	env.globals["query_callsite"] = query_callsite
+	return env
 
 
 # Duration formatting lives in analyzers/base.py: analyzers tag durations with

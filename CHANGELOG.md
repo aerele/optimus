@@ -8,6 +8,16 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.76] - 2026-10-26
+
+### Added
+
+- The "Queries per action" table has a separate Function column showing the function that issued each query, next to the callsite. Long names are cut with an ellipsis (full name on hover and when copied) and wrap in PDF export; queries with no captured stack show a dash.
+
+### Changed
+
+- The callsite in that table now points to your app's code that issued the query, matching the rest of the report, instead of the innermost framework frame.
+
 ## [0.12.70] - 2026-10-22
 
 ### Fixed

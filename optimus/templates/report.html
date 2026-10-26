@@ -333,7 +333,21 @@
   table.queries-flat-table col.col-idx      { width: 44px; }
   table.queries-flat-table col.col-num      { width: 110px; }
   table.queries-flat-table col.col-copies   { width: 60px; }
-  table.queries-flat-table col.col-callsite { width: 34%; }
+  table.queries-flat-table col.col-function { width: 16%; }
+  table.queries-flat-table col.col-callsite { width: 28%; }
+  /* One line with an ellipsis; the full name stays in the text and title. */
+  table.queries-flat-table td.fn-cell code {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    /* Room below the baseline so overflow:hidden doesn't clip underscores. */
+    line-height: 1.5;
+    padding-bottom: 2px;
+  }
+  @media print {
+    table.queries-flat-table td.fn-cell code { white-space: normal; overflow-wrap: anywhere; }
+  }
 
   /* Tight horizontal padding for the # column so 1-3 digit row
      indexes fit inside the narrow col-idx without wrapping. The
@@ -3490,12 +3504,13 @@
       {% set recording = recordings_by_uuid.get(action.recording_uuid) %}
       {% if recording and recording.calls %}
         {% for call in (recording.calls | sort(attribute='duration', reverse=True))[:20] %}
-          {% set _frame = call.stack[-1] if call.stack and call.stack[-1] is mapping else none %}
+          {% set _site = query_callsite(call) %}
           {% set ns.rows = ns.rows + [{
               "action": action.action_label,
               "duration": call.duration or 0,
               "copies": call.normalized_copies or 0,
-              "callsite": ((_frame.filename ~ ":" ~ _frame.lineno) if _frame else ""),
+              "callsite": _site.callsite,
+              "function": _site.function,
           }] %}
         {% endfor %}
       {% endif %}
@@ -3507,6 +3522,7 @@
         <col class="col-action">
         <col class="col-num">
         <col class="col-copies">
+        <col class="col-function">
         <col class="col-callsite">
       </colgroup>
       <thead>
@@ -3515,6 +3531,7 @@
           <th>Action</th>
           <th class="num">Duration <small class="scope-tag">per hit</small></th>
           <th class="num">Copies</th>
+          <th>Function</th>
           <th>Callsite</th>
         </tr>
       </thead>
@@ -3525,6 +3542,7 @@
           <td>{{ r.action }}</td>
           <td class="num">{{ fmt_ms(r.duration, 1) }}</td>
           <td class="num">{% if r.copies and r.copies > 1 %}{{ r.copies }}×{% endif %}</td>
+          <td class="fn-cell">{% if r.function %}<code class="small" title="{{ r.function }}">{{ r.function }}</code>{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
           <td>{% if r.callsite %}<code class="small">{{ r.callsite }}</code>{% endif %}</td>
         </tr>
       {% endfor %}
