@@ -726,6 +726,13 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 			_finalize_with_empty_session(docname)
 			session.delete_session_state(session_uuid)
 			_publish_progress(100, "Complete (no data)", session_uuid)
+			# Lets the widget show a "no data" popup.
+			_publish_session_event(
+				"optimus_session_ready",
+				session_uuid=session_uuid,
+				docname=docname,
+				empty=True,
+			)
 			return
 
 		_touch_singleflight(session_uuid)  # M2 heartbeat before the EXPLAIN burst

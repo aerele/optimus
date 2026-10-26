@@ -697,6 +697,59 @@
 		});
 	}
 
+	// Completion popup, shown once per session and outcome (localStorage dedupes across tabs).
+	function showSessionPopup(data, kind) {
+		const docname = data && data.docname;
+		if (!docname || !frappe.ui || !frappe.ui.Dialog) return;
+		const key = "optimus_popup_shown:" + docname + ":" + kind;
+		try {
+			if (localStorage.getItem(key)) return;
+			localStorage.setItem(key, "1");
+		} catch (e) {
+			if (popupShown.has(key)) return;
+		}
+		popupShown.add(key);
+
+		const messages = {
+			ready: __("Profiling is complete. Your Optimus Session is ready."),
+			empty: __("Profiling finished, but no requests were recorded in this session."),
+			failed: __("Analysis failed for this session. Open it to see the status and retry."),
+		};
+		const titles = {
+			ready: __("Optimus Session ready"),
+			empty: __("Optimus Session has no data"),
+			failed: __("Optimus analysis failed"),
+		};
+		const open = () => {
+			const d = new frappe.ui.Dialog({
+				title: titles[kind],
+				fields: [{
+					fieldtype: "HTML",
+					fieldname: "body",
+					options: "<p>" + frappe.utils.escape_html(messages[kind]) + "</p>"
+						+ "<p><b>" + frappe.utils.escape_html(__("Session ID")) + ":</b> "
+						+ frappe.utils.escape_html(docname) + "</p>",
+				}],
+				primary_action_label: __("Open Session"),
+				primary_action: () => {
+					d.hide();
+					frappe.set_route("Form", "Optimus Session", docname);
+				},
+			});
+			d.show();
+		};
+
+		// Don't steal focus from a field being typed in.
+		const el = document.activeElement;
+		const typing = el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable);
+		if (typing) {
+			el.addEventListener("blur", () => setTimeout(open, 300), { once: true });
+		} else {
+			open();
+		}
+	}
+	const popupShown = new Set();
+
 	function subscribeRealtime() {
 		// v0.5.1: realtime is now the PRIMARY state-transition channel
 		// (polling is gone). Server emits:
@@ -745,6 +798,7 @@
 		});
 
 		frappe.realtime.on("optimus_session_failed", (data) => {
+			showSessionPopup(data, "failed");
 			if (!matchesCurrentSession(data)) return;
 			currentState.display = "ready";  // reuse ready slot so click opens the doc
 			currentState.docname = data.docname || currentState.docname;
@@ -756,6 +810,7 @@
 		});
 
 		frappe.realtime.on("optimus_session_ready", (data) => {
+			showSessionPopup(data, data && data.empty ? "empty" : "ready");
 			if (!matchesCurrentSession(data)) return;
 			currentState.display = "ready";
 			currentState.docname = data.docname;

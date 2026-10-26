@@ -8,6 +8,15 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.77] - 2026-10-26
+
+### Added
+
+- When a profiling session finishes, a popup now shows the Optimus Session ID with an "Open Session" button that takes you to the record. It appears once per session even with several tabs open, wherever you are in Desk, and waits if you are typing in a field.
+- A session that ends with no recorded requests, or whose analysis fails, shows its own message instead of a "ready" claim.
+
+---
+
 ## [0.12.70] - 2026-10-22
 
 ### Fixed
