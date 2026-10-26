@@ -1134,7 +1134,10 @@ def regenerate_reports(session_uuid: str) -> dict:
 	except Exception:
 		pass
 
-	_analyze_mod._render_and_attach_reports(row["name"], recordings)
+	try:
+		_analyze_mod._render_and_attach_reports(row["name"], recordings)
+	except _analyze_mod.ReportAttachError as exc:
+		frappe.throw(_("The report could not be regenerated: {0}").format(exc))
 
 	return {
 		"regenerated": True,

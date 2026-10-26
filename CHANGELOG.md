@@ -8,6 +8,18 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.86] - 2026-10-26
+
+### Fixed
+
+- A session or a line-profiling (phase 2) run is no longer marked Ready before its report exists. Ready is now set only after the report file is rendered and attached, and, for phase 2, after the run's results and findings are saved.
+- If the report cannot be rendered or attached, the session or run is marked Failed with the reason shown (in the session's analyzer warnings, or the run's warnings), instead of showing Ready with no report. A job killed by a timeout is also marked Failed.
+- Regenerate Reports now reports an error when the report cannot be produced instead of saying it succeeded. Phase-2 re-renders are no longer blocked by the Regenerate Reports rate limit.
+- Retrying a phase-2 run no longer adds its findings to the session a second time, and its captured data is kept until the run succeeds so a failed run can be retried.
+- A phase-2 run that captured no line data is Ready with a note saying so. A session with no recordings now gets an (empty) report before it is marked Ready.
+
+---
+
 ## [0.12.70] - 2026-10-22
 
 ### Fixed

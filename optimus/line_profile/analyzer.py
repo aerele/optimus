@@ -568,17 +568,20 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 				"optimus_phase2_overhead_budget_seconds in site_config (lower = "
 				"snappier flow, higher = fuller data; 0 = unlimited)."
 			)
+		if not result.aggregate.get("phase2_functions"):
+			result.warnings.append(
+				"No line data was captured for this run: none of the picked functions "
+				"executed while the pass was recording."
+			)
 		total_ms = sum(s.get("total_ms") or 0 for s in result.aggregate.get("phase2_functions", []))
 
-		# Persist to the run row + propagate findings to the parent session.
+		# Not committed yet: the report only renders Ready runs, and the re-render's
+		# commit (after the File is attached) makes it durable.
 		_persist_run(parent_docname, run_uuid, results_json, result, total_ms)
+		_regenerate_parent_reports(parent_docname, session_uuid)
+		_assert_run_ready(parent_docname, run_uuid)
 
-		# Re-render the parent session's report so the new phase-2
-		# panel appears. Reuses the existing regenerate_reports code
-		# path (which expects session_uuid, not docname).
-		_regenerate_parent_reports(session_uuid)
-
-		# Done drop ephemeral Redis state.
+		# Only now, so a failed run can be retried from the same samples.
 		capture.cleanup_run(run_uuid)
 
 		_publish("phase_2_run_ready", {
@@ -588,7 +591,8 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 			"user": owner,
 		})
 
-	except Exception as exc:
+	except BaseException as exc:
+		# BaseException: RQ's JobTimeoutException is not an Exception.
 		try:
 			frappe.db.rollback()
 		except Exception:
@@ -652,15 +656,9 @@ def _persist_run(
 			child.ended_at = frappe.utils.now_datetime()
 			break
 
-	# Promote findings into the unified Session.findings table so the
-	# existing finding rendering / filtering picks them up alongside
-	# phase-1 findings.
-	for finding in result.findings:
-		# Optimus Finding.title is a Data(140) field. Phase-2 findings are
-		# appended directly here (bypassing analyze._truncate_finding_titles),
-		# so clamp defensively a long title must not trip Frappe's truncation
-		# warning while stopping phase 2. Full context lives in the description /
-		# technical_detail_json.
+	# Skip findings already present so a retried job doesn't duplicate them.
+	for finding in _new_findings(parent.findings or [], result.findings):
+		# Title is Data(140) and these bypass analyze._truncate_finding_titles.
 		_title = finding.get("title") or ""
 		if len(_title) > 140:
 			finding["title"] = _title[:137].rstrip() + "..."
@@ -668,7 +666,39 @@ def _persist_run(
 
 	parent.flags.ignore_validate_update_after_submit = True
 	parent.save(ignore_permissions=True)
-	safe_commit()
+	# No commit: the report re-render commits.
+
+
+def _finding_key(finding) -> tuple:
+	get = finding.get if isinstance(finding, dict) else lambda k: getattr(finding, k, None)
+	return (get("finding_type"), (get("title") or "")[:137], get("technical_detail_json"))
+
+
+def _new_findings(existing, candidates: list[dict]) -> list[dict]:
+	"""Candidates not already in ``existing`` (by type, title and detail)."""
+	seen = {_finding_key(f) for f in existing}
+	fresh = []
+	for f in candidates:
+		key = _finding_key(f)
+		if key not in seen:
+			seen.add(key)
+			fresh.append(f)
+	return fresh
+
+
+def _assert_run_ready(parent_docname: str, run_uuid: str) -> None:
+	"""Raise unless the run row is Ready with results and the report File is attached."""
+	from optimus import analyze as _analyze
+
+	row = frappe.db.get_value(
+		"Optimus Phase Two Run",
+		{"parent": parent_docname, "run_uuid": run_uuid},
+		["status", "results_json"],
+		as_dict=True,
+	)
+	if not row or row.get("status") != "Ready" or not row.get("results_json"):
+		raise RuntimeError(f"phase 2 run {run_uuid} is not persisted as Ready with results")
+	_analyze._assert_report_attached(parent_docname)
 
 
 def _mark_run_failed(parent_docname: str, run_uuid: str, error: str, tb: str) -> None:
@@ -699,19 +729,8 @@ def _mark_run_failed(parent_docname: str, run_uuid: str, error: str, tb: str) ->
 			pass
 
 
-def _regenerate_parent_reports(session_uuid: str) -> None:
-	"""Trigger re-render of the parent Optimus Session's HTML reports via
-	``api.regenerate_reports(session_uuid)`` (the shared re-render path).
-	"""
-	try:
-		from optimus import api as optimus_api
+def _regenerate_parent_reports(parent_docname: str, session_uuid: str) -> None:
+	"""Re-render the parent session's report; raises ReportAttachError on failure."""
+	from optimus import analyze as _analyze
 
-		optimus_api.regenerate_reports(session_uuid)  # type: ignore[attr-defined]
-	except Exception as exc:
-		# Re-render failure is non-fatal: data is persisted, the customer
-		# just needs to click "Regenerate Reports" manually. Surface the
-		# error in the run row for debuggability.
-		frappe.log_error(
-			title="phase 2 re-render failed",
-			message=f"{session_uuid}: {exc}\n{traceback.format_exc()}",
-		)
+	_analyze.regenerate_reports_internal(parent_docname, session_uuid)

@@ -900,43 +900,34 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 		# drill-down regeneration still work on this session post-analyze.
 		_persist_recordings_file(docname, session_uuid, recording_uuids)
 
-		_cleanup_redis(session_uuid, recording_uuids)
-
-		# Phase: Ready
+		# Phase: Ready, only once the report File is verified attached.
+		_assert_report_attached(docname)
 		frappe.db.set_value("Optimus Session", docname, "status", "Ready")
 		safe_commit()
-		# v0.7.x (P3): opt-in arm a phase-2 pass on the hot paths so the user
-		# just re-runs the flow once for line data. Best-effort; never fails analyze.
-		_auto_arm_phase2(docname, context)
-		_publish_progress(100, "Report ready", session_uuid)
+		# After Ready is durable, so an earlier failure keeps the recordings for a retry.
+		_cleanup_redis(session_uuid, recording_uuids)
+		# Already Ready: these must not flip it to Failed.
+		try:
+			_auto_arm_phase2(docname, context)
+		except Exception:
+			frappe.log_error(title=f"optimus auto-arm {session_uuid}")
+		try:
+			_publish_progress(100, "Report ready", session_uuid)
+			_publish_session_event(
+				"optimus_session_ready", session_uuid=session_uuid, docname=docname
+			)
+		except Exception:
+			frappe.log_error(title=f"optimus post-ready notify {session_uuid}")
 
-		# Notify the UI so the floating widget can navigate the user to
-		# the report. v0.5.1: routed through _publish_session_event so
-		# it looks up the user consistently with the other state
-		# transitions (analyzing / failed).
-		_publish_session_event(
-			"optimus_session_ready",
-			session_uuid=session_uuid,
-			docname=docname,
-		)
-
-	except Exception:
+	except BaseException as exc:
+		# BaseException: RQ's JobTimeoutException is not an Exception.
 		frappe.db.rollback()
 		frappe.log_error(title=f"optimus analyze {session_uuid}")
-		try:
-			frappe.db.set_value("Optimus Session", docname, "status", "Failed")
-			safe_commit()
-		except Exception:
-			pass
-		# v0.5.1: push "failed" to any open widgets so they transition
-		# out of "Analyzing…" immediately instead of hanging forever.
-		# Best-effort and isolated so a publish failure can't mask the
-		# original exception the outer `raise` is about to re-raise.
+		_mark_session_failed(docname, exc)
+		# Isolated so a publish failure can't mask the original exception.
 		try:
 			_publish_session_event(
-				"optimus_session_failed",
-				session_uuid=session_uuid,
-				docname=docname,
+				"optimus_session_failed", session_uuid=session_uuid, docname=docname
 			)
 		except Exception:
 			pass
@@ -955,6 +946,18 @@ def run(session_uuid: str, _bg_wait_until: float | None = None,
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _mark_session_failed(docname: str, exc: BaseException) -> None:
+	"""Set status Failed and store the reason in ``analyzer_warnings``."""
+	try:
+		reason = f"Analyze failed: {type(exc).__name__}: {exc}"[:500]
+		frappe.db.set_value(
+			"Optimus Session", docname, {"status": "Failed", "analyzer_warnings": reason}
+		)
+		safe_commit()
+	except Exception:
+		frappe.log_error(title="optimus mark session failed")
 
 
 def _mark_ai_spend_session(session_uuid) -> None:
@@ -2851,9 +2854,8 @@ def _build_summary_html(
 
 
 def _finalize_with_empty_session(docname: str) -> None:
-	"""Mark a session Ready when it had no recordings."""
+	"""Mark a session with no recordings Ready once its empty report is attached."""
 	doc = frappe.get_doc("Optimus Session", docname)
-	doc.status = "Ready"
 	doc.total_requests = 0
 	doc.total_queries = 0
 	# v0.7.x: same bullet shape as the populated Summary for visual
@@ -2868,34 +2870,69 @@ def _finalize_with_empty_session(docname: str) -> None:
 	)
 	doc.save(ignore_permissions=True)
 	safe_commit()
+	_render_and_attach_reports(docname, [])
+	frappe.db.set_value("Optimus Session", docname, "status", "Ready")
+	safe_commit()
 
 
-def _render_and_attach_reports(docname: str, recordings: list[dict]) -> None:
-	"""Render the HTML report and attach it as a PRIVATE File on the Optimus
-	Session. Private-file read permission plus the ``if_owner=1`` rule and
-	``permissions.file_has_permission`` gate mean non-admins can only download
-	reports for their own sessions."""
+class ReportAttachError(Exception):
+	"""The HTML report could not be rendered or attached."""
+
+
+def _render_and_attach_reports(docname: str, recordings: list[dict]) -> str:
+	"""Render the report, attach it as a private File and return its URL; raises ReportAttachError."""
 	# Re-fetch the doc so child rows persisted by _persist are visible.
 	doc = frappe.get_doc("Optimus Session", docname)
 
-	# v0.6.0 Round 7: safe-mode reporting removed. Single admin-scoped
-	# raw report only see product_thesis_self_hosted.md memory for
-	# the rationale (PII redaction was a moat the user opted to drop in
-	# favor of single-rendering-path simplicity).
 	try:
 		raw_html = renderer.render_raw(doc, recordings)
-		raw_url = _save_report_file(
-			docname=docname,
-			filename=f"optimus_raw_report_{doc.session_uuid}.html",
-			attached_to_field="raw_report_file",
-			content=raw_html,
-		)
-		if raw_url:
-			frappe.db.set_value("Optimus Session", docname, "raw_report_file", raw_url)
-	except Exception:
+	except Exception as exc:
 		frappe.log_error(title="optimus render raw report")
+		raise ReportAttachError(f"report render failed: {exc}") from exc
 
+	raw_url = _save_report_file(
+		docname=docname,
+		filename=f"optimus_raw_report_{doc.session_uuid}.html",
+		attached_to_field="raw_report_file",
+		content=raw_html,
+	)
+	if not raw_url:
+		raise ReportAttachError("report File could not be saved (see error log)")
+	frappe.db.set_value("Optimus Session", docname, "raw_report_file", raw_url)
+	_assert_report_attached(docname, raw_url)
 	safe_commit()
+	return raw_url
+
+
+def _assert_report_attached(docname: str, expected_url: str | None = None) -> None:
+	"""Raise ReportAttachError unless the session's report File exists and is attached."""
+	url = frappe.db.get_value("Optimus Session", docname, "raw_report_file")
+	if not url or (expected_url and url != expected_url):
+		raise ReportAttachError("raw_report_file is not set on the session")
+	if not frappe.db.exists(
+		"File", {"file_url": url, "attached_to_doctype": "Optimus Session", "attached_to_name": docname}
+	):
+		raise ReportAttachError(f"report File {url} is not attached to {docname}")
+
+
+def regenerate_reports_internal(docname: str, session_uuid: str) -> str:
+	"""Re-render the report for background callers, without the endpoint's rate limit or AI backfill."""
+	doc = frappe.get_doc("Optimus Session", docname)
+	recording_uuids = [a.recording_uuid for a in (doc.actions or []) if getattr(a, "recording_uuid", None)]
+	try:
+		recordings = list(
+			_fetch_recordings(recording_uuids, recordings_bundle=_load_recordings_bundle(doc))
+		)
+	except Exception:
+		frappe.log_error(title="optimus phase-2 regenerate fetch")
+		recordings = []
+	try:
+		from optimus import pdf_export
+
+		pdf_export.clear_cached_pdf(session_uuid)
+	except Exception:
+		frappe.log_error(title="optimus phase-2 clear cached pdf")
+	return _render_and_attach_reports(docname, recordings)
 
 
 def _save_report_file(*, docname: str, filename: str, attached_to_field: str, content) -> str | None:
