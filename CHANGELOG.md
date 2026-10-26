@@ -8,6 +8,18 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.85] - 2026-10-26
+
+### Changed
+
+- A line-level (phase 2) run now rechecks the phase 1 findings. When a finding's function was line-profiled, the finding shows the measured hottest line, its time, hit count and call chain. If the measured function time is under a quarter of the sampled estimate, the finding is downgraded one severity step; a measurement is never used to raise severity. Findings the line profile did not cover are labelled "not rechecked".
+
+### Fixed
+
+- Running phase 2 again no longer adds a second Hot Line row for the same function. The row is updated in place, and old duplicate rows are removed.
+
+---
+
 ## [0.12.70] - 2026-10-22
 
 ### Fixed

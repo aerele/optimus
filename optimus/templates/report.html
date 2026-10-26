@@ -1982,6 +1982,20 @@
         {% endif %}
       {% endif %}
 
+      {# Phase-2 recheck of this phase-1 finding (see line_profile/recheck.py). #}
+      {% set _rc = (f.technical_detail or {}).get("phase2_recheck") if f.technical_detail else None %}
+      {% if _rc and f.finding_type != "Hot Line" %}
+      <div class="phase2-line">
+        {% if _rc.status == "not_rechecked" %}
+        <strong>Line-level recheck:</strong> not rechecked (not covered by the line profile).
+        {% else %}
+        <strong>Line-level recheck:</strong>
+        {{ {"confirmed": "confirmed", "downgraded": "downgraded to " ~ f.severity ~ " (measured " ~ fmt_ms(_rc.function_total_ms) ~ " vs " ~ fmt_ms(_rc.phase1_impact_ms) ~ " estimated)", "measured": "measured"}.get(_rc.status, _rc.status) }}
+        {% if _rc.hot_line %}- hottest line {{ _rc.hot_line.lineno }}, {{ fmt_ms(_rc.hot_line.total_ms) }} / {{ _rc.hot_line.hits }} hit{{ "s" if _rc.hot_line.hits != 1 else "" }}{% endif %}
+        {% endif %}
+      </div>
+      {% endif %}
+
       {# Call chain (Phase 2 instrumented chain). Nested-call tree, terminal red. #}
       {% set _phase2_chain = (f.technical_detail or {}).get("call_chain") if f.technical_detail else None %}
       {% if _phase2_chain and _phase2_chain | length > 1 %}
