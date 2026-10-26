@@ -106,7 +106,7 @@ function _single_banner(frm, idClass, extraClasses, html, styler) {
 	let $b = root.find("." + idClass);
 	if (!$b.length) {
 		const cls = extraClasses ? idClass + " " + extraClasses : idClass;
-		$b = $('<div class="' + cls + '"></div>');
+		$b = $('<div class="' + cls + '" role="status"></div>');
 		if (styler) styler($b);
 		const $host = root.find(".form-layout").first();
 		($host.length ? $host : root).prepend($b);
@@ -115,13 +115,9 @@ function _single_banner(frm, idClass, extraClasses, html, styler) {
 	return $b;
 }
 
-// The analyze "preparing report" banner. Uses Frappe's native .form-message.blue
-// theme (same padding, font size, blue scheme plus dark-theme variants) so it
-// matches the bar the old set_headline produced, no inline styling needed. It is
-// tagged with the owning session so render_analyze_progress can drop it once the
-// form shows a different or a new session. Pass html=null to remove it.
+// Analyze "preparing report" banner, tagged with its session. Pass html=null to remove it.
 function _progress_banner(frm, html) {
-	const $b = _single_banner(frm, "optimus-analyze-banner", "form-message blue", html);
+	const $b = _single_banner(frm, "optimus-analyze-banner", "optimus-status", html);
 	if ($b) $b.attr("data-optimus-session", frm.doc.session_uuid || "");
 }
 
@@ -164,16 +160,23 @@ function subscribe_session_progress(frm) {
 
 	frappe.realtime.on("optimus_progress", (p) => {
 		if (!mine(p)) return;
-		const pct = typeof p.percent === "number" ? Math.round(p.percent) : null;
-		const desc = frappe.utils.escape_html(p.description || "Analyzing…");
-		// Update one in-place banner rather than frm.dashboard.set_headline,
-		// which appends a new bar on every progress tick (see _progress_banner).
+		const pct = Number.isFinite(p.percent) ? Math.round(p.percent) : null;
+		const desc = frappe.utils.escape_html(p.description || __("Analyzing…"));
+		const width = pct === null ? 0 : Math.max(0, Math.min(100, pct));
 		_progress_banner(
 			frm,
-			'<span class="text-muted">' +
-				'<i class="fa fa-spinner fa-spin" style="margin-right:6px;"></i>' +
+			'<span class="optimus-status-text">' +
+				'<i class="fa fa-spinner fa-spin" aria-hidden="true"></i> ' +
 				(pct !== null ? __("Preparing report {0}% · {1}", [pct, desc]) : desc) +
-				"</span>"
+				"</span>" +
+				(pct !== null
+					? '<span class="optimus-status-bar" role="progressbar" aria-valuemin="0"' +
+						' aria-valuemax="100" aria-valuenow="' +
+						width +
+						'"><span style="width:' +
+						width +
+						'%"></span></span>'
+					: "")
 		);
 	});
 	frappe.realtime.on("optimus_session_ready", (p) => {
@@ -1000,20 +1003,13 @@ function _drain_suffix(d) {
 	return win ? __(" · up to {0}", [win]) : "";
 }
 
-// The background-jobs drain banner. Same single-element mechanism as the analyze
-// banner (see _single_banner); it keeps its own orange inline styling rather than
-// a .form-message theme class. Pass html=null to remove it.
+// Background-jobs drain banner (orange variant). Pass html=null to remove it.
 function _drain_banner(frm, html) {
-	_single_banner(frm, "optimus-drain-banner", "", html, ($b) =>
-		$b.css({
-			padding: "10px 14px",
-			margin: "8px",
-			background: "#fff7ed",
-			border: "1px solid #fed7aa",
-			"border-radius": "6px",
-			color: "#9a3412",
-			"font-size": "0.9rem",
-		})
+	_single_banner(
+		frm,
+		"optimus-drain-banner",
+		"optimus-status optimus-status-warn",
+		html === null ? null : '<span class="optimus-status-text">' + html + "</span>"
 	);
 }
 

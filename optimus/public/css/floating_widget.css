@@ -94,3 +94,54 @@
 		font-size: 0.72rem;
 	}
 }
+
+/* Compact status strip for the in-form analyze and drain banners. */
+.optimus-status {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 2px 8px;
+	margin: 0 0 8px;
+	padding: 4px 10px;
+	box-sizing: border-box;
+	max-width: 100%;
+	border-left: 3px solid var(--blue-500, #2563eb);
+	border-radius: var(--border-radius-sm, 4px);
+	background: var(--bg-blue, #eff6ff);
+	color: var(--text-muted, #6b7280);
+	font-size: var(--text-sm, 0.8rem);
+	line-height: 1.4;
+}
+
+.optimus-status.optimus-status-warn {
+	border-left-color: var(--orange-500, #d97706);
+	background: var(--bg-orange, #fff7ed);
+}
+
+.optimus-status .optimus-status-text {
+	flex: 1 1 12rem;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.optimus-status .optimus-status-bar {
+	flex: 0 1 140px;
+	height: 3px;
+	min-width: 60px;
+	border-radius: 2px;
+	background: var(--border-color, rgba(0, 0, 0, 0.1));
+	overflow: hidden;
+}
+
+.optimus-status .optimus-status-bar > span {
+	display: block;
+	height: 100%;
+	background: var(--blue-500, #2563eb);
+	transition: width 0.3s ease;
+}
+
+@media (max-width: 600px) {
+	.optimus-status .optimus-status-bar {
+		flex: 1 1 100%;
+	}
+}
