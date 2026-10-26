@@ -21,6 +21,8 @@ from optimus.analyzers.base import (
 	dur,
 	is_frappe_meta_table,
 )
+from optimus.analyzers.index_harm import assess_harm, collect_writes
+from optimus.analyzers.index_where import USABLE_INDEX_TYPES, is_served, parse_where
 from optimus.dbdialect import get_dialect
 
 
@@ -190,12 +192,48 @@ def _is_safe_table_name(name) -> bool:
 
 
 def _get_indexed_columns(table: str) -> set[str]:
-	"""Return the columns on ``table`` that are the leftmost of at least one
-	index. Non-leftmost composite columns are excluded (a btree can't serve a
-	filter on just that column, so a Missing Index suggestion stays actionable).
-	Returns an empty set on any DB error, conservatively keeping all suggestions.
-	"""
-	return {ix.leftmost for ix in get_dialect().existing_indexes(table) if ix.leftmost}
+	"""Columns that lead at least one usable b-tree index on ``table``; empty on a DB error."""
+	return _usable_leftmost(get_dialect().existing_indexes(table))
+
+
+def _usable_leftmost(indexes: list) -> set[str]:
+	return {
+		ix.leftmost for ix in indexes if ix.leftmost and str(ix.index_type or "").upper() in USABLE_INDEX_TYPES
+	}
+
+
+def _query_aliases(sql: str) -> dict:
+	"""``{alias: table}`` via sql_metadata; empty if it can't parse the query."""
+	try:
+		from sql_metadata import Parser
+
+		return dict(Parser(sql).tables_aliases)
+	except Exception:
+		return {}
+
+
+def _partition_queries(table: str, column: str, entries: list, indexes: list) -> tuple[list, list, list]:
+	"""Split queries into ``(kept, served_by_existing_index, function_wrapped)``."""
+	kept, served, wrapped = [], [], []
+	for entry in entries:
+		shape = parse_where(entry["raw"], table, _query_aliases(entry["raw"]))
+		if is_served(column, shape, indexes):
+			served.append(entry)
+		elif column.lower() in shape.wrapped and column.lower() not in shape.plain:
+			wrapped.append(entry)
+		else:
+			kept.append(entry)
+	return kept, served, wrapped
+
+
+def _composite_hint(column: str, indexes: list) -> str | None:
+	"""Describe an existing index holding ``column`` at a non-leading position, if any."""
+	col = column.lower()
+	for ix in indexes:
+		cols = [c.lower() for c in ix.columns if c]
+		if col in cols[1:] and str(ix.index_type or "").upper() in USABLE_INDEX_TYPES:
+			return f"`{ix.name}` ({', '.join(ix.columns)})"
+	return None
 
 
 def _get_column_types(table: str) -> dict[str, str]:
@@ -354,7 +392,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# customer reads "no index suggestions" as "no missing indexes"
 	# when the real answer might be "we couldn't analyze your queries".
 	suggestion_buckets: dict[tuple, dict] = defaultdict(
-		lambda: {"duration": 0.0, "count": 0, "queries": []}
+		lambda: {"duration": 0.0, "count": 0, "queries": [], "entries": [], "cardinality": None}
 	)
 	parser_limit_failures: Counter = Counter()
 	real_failures: Counter = Counter()
@@ -411,6 +449,8 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 		bucket = suggestion_buckets[key]
 		bucket["duration"] += info["duration"]
 		bucket["count"] += info["count"]
+		bucket["entries"].append(info)
+		bucket["cardinality"] = getattr(index, "cardinality", bucket["cardinality"])
 		if len(bucket["queries"]) < MAX_EXAMPLE_QUERIES:
 			bucket["queries"].append(normalized[:300])
 
@@ -436,6 +476,11 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	drop_never_suggest = 0
 	never_suggest_columns: list[str] = []
 	unindexable_reasons: list[str] = []
+	index_cache: dict[str, list] = {}
+	writes = collect_writes(recordings)
+	covered_targets: list[str] = []
+	wrapped_targets: list[str] = []
+	harm_targets: list[str] = []
 
 	findings = []
 	for (table, column), bucket in suggestion_buckets.items():
@@ -455,6 +500,13 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 				drop_low_per_query += 1
 				continue
 
+		# One SHOW INDEX per table feeds both checks.
+		never = (column or "").strip().lower() in _NEVER_SUGGEST_COLUMNS
+		if not never and table not in index_cache:
+			index_cache[table] = get_dialect().existing_indexes(table)
+			indexed_cache.setdefault(table, _usable_leftmost(index_cache[table]))
+		indexes = index_cache.get(table, [])
+
 		status, ddl_or_reason = _classify_column(
 			table, column, indexed_cache, type_cache
 		)
@@ -470,6 +522,25 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			drop_unindexable += 1
 			unindexable_reasons.append(ddl_or_reason)
 			continue
+
+		kept, served, wrapped = _partition_queries(table, column, bucket["entries"], indexes)
+		if not kept:
+			(covered_targets if served else wrapped_targets).append(f"{table}.{column}")
+			continue
+		bucket["count"] = sum(e["count"] for e in kept)
+		bucket["duration"] = sum(e["duration"] for e in kept)
+
+		harm = assess_harm(table, column, bucket["count"], writes, bucket["cardinality"])
+		if harm.suppress_reason:
+			harm_targets.append(f"{table}.{column}")
+			continue
+		cautions = list(harm.cautions)
+		if hint := _composite_hint(column, indexes):
+			cautions.append(
+				f"existing index {hint} already contains `{column}` but these queries do not filter "
+				"by its leading column(s) with equality; check whether changing that index serves "
+				"them better than a new single-column index."
+			)
 
 		# status is "actionable" or "unknown" both keep the
 		# suggestion. "unknown" uses the legacy plain-DDL template,
@@ -488,6 +559,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 					f"queries in this session, saving roughly "
 					f"{dur(impact_ms)} total. Ask your developer to add this "
 					"index in a database migration."
+					+ "".join(f" Consider: {c}" for c in cautions)
 				),
 				"technical_detail_json": json.dumps(
 					{
@@ -498,6 +570,8 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 						"estimated_savings_ms": round(impact_ms, 2),
 						"example_queries": bucket["queries"],
 						"verified_not_indexed": status == "actionable",
+						"cautions": cautions,
+						"write_impact": harm.stats,
 						"validation_note": (
 							"The developer must validate this suggestion against "
 							"the actual schema and production query patterns "
@@ -596,6 +670,23 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			"(indexes included) a hand-added index there is pointless and "
 			"would be clobbered on the next migrate."
 		)
+	if covered_targets:
+		warnings.append(
+			f"Suppressed index suggestion(s) already served by an existing index "
+			f"({_sample(covered_targets)}): a single or composite index covers the column "
+			"for every query that triggered the suggestion."
+		)
+	if wrapped_targets:
+		warnings.append(
+			f"Suppressed index suggestion(s) where the column is only used inside a function "
+			f"({_sample(wrapped_targets)}), e.g. DATE(col); a plain index cannot serve that filter."
+		)
+	if harm_targets:
+		warnings.append(
+			f"Suppressed index suggestion(s) whose write cost in this session outweighs the read "
+			f"gain ({_sample(harm_targets)}): the column or table is written more often than the "
+			"index would help reads."
+		)
 	if drop_already_indexed:
 		warnings.append(
 			f"Suppressed {drop_already_indexed} index suggestion(s) whose "
@@ -622,6 +713,12 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			pass
 
 	return AnalyzerResult(findings=findings, warnings=warnings)
+
+
+def _sample(targets: list[str]) -> str:
+	unique = sorted(set(targets))
+	more = f" (+{len(unique) - 5} more)" if len(unique) > 5 else ""
+	return ", ".join(unique[:5]) + more
 
 
 def _severity(impact_ms: float) -> str:

@@ -103,6 +103,7 @@ class IndexInfo:
 	columns: list                  # ordered by sequence-in-index
 	unique: bool = False
 	leftmost: str | None = None    # columns[0] if any the col a b-tree accelerates a single-col filter on
+	index_type: str = "BTREE"      # BTREE / FULLTEXT / SPATIAL / HASH
 
 
 @dataclass

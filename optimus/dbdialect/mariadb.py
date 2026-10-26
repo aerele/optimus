@@ -124,7 +124,12 @@ class MariaDBDialect(Dialect):
 			if not key_name:
 				continue
 			entry = by_name.setdefault(
-				key_name, {"_cols": [], "unique": not r.get("Non_unique")}
+				key_name,
+				{
+					"_cols": [],
+					"unique": not r.get("Non_unique"),
+					"type": str(r.get("Index_type") or "BTREE").upper(),
+				},
 			)
 			try:
 				seq = int(r.get("Seq_in_index") or r.get("seq_in_index") or 0)
@@ -141,6 +146,7 @@ class MariaDBDialect(Dialect):
 					columns=cols,
 					unique=bool(e["unique"]),
 					leftmost=(cols[0] if cols else None),
+					index_type=e["type"],
 				)
 			)
 		return out

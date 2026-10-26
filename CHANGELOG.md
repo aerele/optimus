@@ -8,6 +8,19 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.79] - 2026-10-26
+
+### Fixed
+
+- Missing-index suggestions no longer propose an index that an existing index already serves for the same query. A composite index such as (a, b) now counts for a query that filters `a` and `b` by equality, and a FULLTEXT index no longer hides a real missing index.
+- A suggestion is dropped when the column is only used inside a function, such as `DATE(col)`, because a plain index cannot serve that filter.
+
+### Changed
+
+- Before suggesting an index, Optimus now checks the other queries in the same session. It drops the suggestion when the column is updated, or the table is written, far more often than the index would help reads, and otherwise adds a "Consider:" note naming the write counts and the flows that write. It also notes an existing composite index that already holds the column.
+
+---
+
 ## [0.12.70] - 2026-10-22
 
 ### Fixed
