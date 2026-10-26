@@ -3550,14 +3550,6 @@
        index_candidates / is_meta_table / framework_cols_filtered /
        ai_index without translation. #}
     {% if report_data.db and report_data.db.tables %}
-      {% set written = report_data.db.tables | selectattr("write_count") | sort(attribute="write_count", reverse=True) | list %}
-      {% if written %}
-      <p class="small muted" style="margin-bottom:10px;">
-        <strong>Tables written to this session</strong> ({{ written | length }}):
-        {% for t in written[:12] %}<code title="{{ t.write_count }} write(s){% if t.get('write_time_ms') %}, {{ fmt_ms(t.write_time_ms) }}{% endif %}">{{ t.table }}</code>&nbsp;({{ t.write_count }}){% if not loop.last %}, {% endif %}{% endfor %}{% if written | length > 12 %} … and {{ written | length - 12 }} more{% endif %}.
-        <br>Writes are usually cheap (a handful of sub-millisecond <code>INSERT</code>&nbsp;/&nbsp;<code>UPDATE</code> rows), so a write-heavy table normally won't be near the top of the time-sorted list below - that's why a document save doesn't dominate this section. Drill into the <a href="#per-action">per-action breakdown</a> to see exactly what each save / submit wrote.
-      </p>
-      {% endif %}
       <p class="small muted">Where the time goes and how each table was used. A query touching multiple tables is counted against each, so the rows sum to more than the session total. <strong>Reads</strong> = <code>SELECT</code>; <strong>Writes</strong> = <code>INSERT</code> / <code>UPDATE</code> / <code>DELETE</code>. Sorted by time desc.</p>
       <table class="data db-tables-table">
         <colgroup>
@@ -3687,7 +3679,7 @@
     <ul class="small" style="margin:6px 0 0 18px;padding:0;line-height:1.7;">
       <li>Start with <strong>Findings</strong> - that's the punch list of what to fix.{% if report_data.observational_findings %} The <em>Observations</em> sub-list under it is FYI signal (framework-level issues, system pressure) with no concrete fix you can ship.{% endif %}</li>
       <li>The per-action table below lists every request the session captured, sorted by duration; the background-jobs section lists the jobs those requests enqueued (captured and analyzed too).</li>
-      <li>The database-tables section shows where DB time went; the <em>tables written to</em> line at the top of it lists every table the session wrote - writes are cheap, so they rank low by time. The slowest-queries section covers your own app's code only.</li>
+      <li>The database-tables section shows where DB time went; its Reads / Writes columns show how each table was used. The slowest-queries section covers your own app's code only.</li>
       <li>The server-resource and frontend panels show CPU / memory / queue pressure and browser timings - only when captured.</li>
       <li>Expand any row of the per-action breakdown for that action's queries and timings - the deep-dive detail.</li>
       <li>Click any <code>file.py:123</code> callsite to open it in VS&nbsp;Code. Anything starting with <code>tab</code> is a database table; the DocType is the part after <code>tab</code>.</li>

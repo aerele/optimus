@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.78] - 2026-10-26
+
+### Changed
+
+- Removed the "Tables written to this session" line from the "Time spent per database table" section. The table itself, including its Reads and Writes columns, is unchanged.
+
+---
+
 ## [0.12.70] - 2026-10-22
 
 ### Fixed
