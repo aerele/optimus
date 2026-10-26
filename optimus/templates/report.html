@@ -628,7 +628,8 @@
   .masthead-brand-contact a:hover {
     color: var(--ink); border-bottom-color: var(--ink-mute);
   }
-  .masthead-brand-contact a + a::before {
+  .masthead-brand-contact a + a::before,
+  .masthead-brand-contact a + .masthead-brand-phone::before {
     content: "\00b7"; color: var(--ink-mute);
     margin-right: 10px; margin-left: -8px;
   }
@@ -2435,7 +2436,7 @@
           <div class="masthead-brand-contact-row">
             <a href="https://aerele.in" target="_blank" rel="noopener">aerele.in</a>
             <a href="mailto:hello@aerele.in">hello@aerele.in</a>
-            <a href="tel:+917790844832">+91 77908 44832</a>
+            <span class="masthead-brand-phone">+91 77908 44832</span>
           </div>
           <div class="masthead-brand-contact-row">
             <a href="https://github.com/aerele" target="_blank" rel="noopener">GitHub</a>

@@ -8,6 +8,12 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.81] - 2026-10-26
+
+### Changed
+
+- The phone number in the report header is now plain text instead of a clickable `tel:` link. The website, email and social links are unchanged.
+
 ## [0.12.70] - 2026-10-22
 
 ### Fixed
