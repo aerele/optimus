@@ -8,6 +8,18 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.73] - 2026-10-26
+
+### Fixed
+
+- The Hot frames section now reliably separates your app's code from framework code. Before, the split guessed the app from a shortened file name, so frames from `frappe` could appear under your app and, with Tracked Apps set, your own tracked app's frames could be pushed into the framework group. Each frame is now classified from its full file path, using the same rules as the rest of the report, and Optimus's own code is never shown as your app.
+
+### Changed
+
+- Hot frames now has two labelled groups, "Your app's code" first and "Framework code" second.
+
+---
+
 ## [0.12.70] - 2026-10-22
 
 ### Fixed

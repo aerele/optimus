@@ -870,11 +870,7 @@ def render(
 	# (shape: ``"<short_path>::<func>"`` from _redacted_module_key), which
 	# `build_hot_frames_table` strips on the way to `display_name`. So split
 	# the raw rows first, then build each table separately.
-	_hf_raw_custom, _hf_raw_framework = _split_by_framework_app(
-		_hot_frames_raw,
-		lambda r: (r.get("function") or "").split("::", 1)[0],
-		tracked_apps,
-	)
+	_hf_raw_custom, _hf_raw_framework = _split_hot_frames(_hot_frames_raw, tracked_apps)
 	hot_frames_rows = build_hot_frames_table(_hf_raw_custom, is_hot=True)
 	hot_frames_rows_framework = build_hot_frames_table(_hf_raw_framework, is_hot=False)
 
@@ -2109,6 +2105,25 @@ def _is_framework_app(filename_or_app, tracked_apps: tuple[str, ...] = ()) -> bo
 		val = f"{first}/x.py"
 	from optimus.analyzers.base import is_framework_callsite
 	return is_framework_callsite(val, tracked_apps=tracked_apps or None)
+
+
+def _split_hot_frames(rows, tracked_apps: tuple[str, ...] = ()):
+	"""Split hot-frame rows into ``(custom, framework)``; rows without ``is_framework`` use the key."""
+	custom, framework = [], []
+	legacy = []
+	for r in rows or []:
+		flag = r.get("is_framework") if isinstance(r, dict) else None
+		if flag is None:
+			legacy.append(r)
+		else:
+			(framework if flag else custom).append(r)
+	if legacy:
+		l_custom, l_framework = _split_by_framework_app(
+			legacy, lambda r: (r.get("function") or "").split("::", 1)[0], tracked_apps
+		)
+		custom += l_custom
+		framework += l_framework
+	return custom, framework
 
 
 def _split_by_framework_app(rows, app_key, tracked_apps: tuple[str, ...] = ()):

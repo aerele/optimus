@@ -14,7 +14,7 @@ Findings emitted:
   - Repeated Hot Frame (F2): same redacted frame in ≥3 actions, ≥500ms total
 
 Aggregates:
-  - hot_frames_json: top-20 leaderboard of hottest frames in the session
+  - hot_frames_json: top-20 hottest frames per app/framework group
   - session_time_breakdown_json: SQL ms + per-app Python ms for the donut
 
 Terminology gotcha: internal field names use ``cumulative_ms`` (pyinstrument's
@@ -29,6 +29,7 @@ from collections import defaultdict
 from optimus.analyzers.base import (
 	_THIRD_PARTY_LIB_NAMES,
 	AnalyzerResult,
+	_extract_app_segment,
 	_last_app_segment,
 	dur,
 	installed_apps_allowlist,
@@ -1321,9 +1322,11 @@ def _aggregate_hot_frames(
 	"""
 	# {function_key: [(action_idx, self_ms, cumulative_ms), ...]}
 	occurrences: dict = defaultdict(list)
+	# {function_key: is_framework}; the key drops the app root, so classify from the full path
+	frame_class: dict = {}
 
 	for action_idx, tree in enumerate(per_action_trees):
-		_walk_for_aggregation(tree, action_idx, occurrences, tracked_apps, installed_apps)
+		_walk_for_aggregation(tree, action_idx, occurrences, tracked_apps, installed_apps, frame_class)
 		# Cap intermediate map size to bound memory.
 		if len(occurrences) > HOT_FRAMES_INTERMEDIATE_CAP * 2:
 			by_total = sorted(
@@ -1332,6 +1335,8 @@ def _aggregate_hot_frames(
 				reverse=True,
 			)[:HOT_FRAMES_INTERMEDIATE_CAP]
 			occurrences = defaultdict(list, dict(by_total))
+			for k in [k for k in frame_class if k not in occurrences]:
+				del frame_class[k]
 
 	findings = []
 	leaderboard_rows = []
@@ -1352,6 +1357,7 @@ def _aggregate_hot_frames(
 			"occurrences": len(occs),
 			"distinct_actions": len(distinct_actions),
 			"action_refs": sorted(distinct_actions),
+			"is_framework": frame_class.get(key, False),
 		}
 		leaderboard_rows.append(row)
 		total_ms = total_self_ms  # alias for downstream Repeated Hot Frame logic
@@ -1384,8 +1390,16 @@ def _aggregate_hot_frames(
 				"action_ref": None,
 			})
 
-	leaderboard_rows.sort(key=lambda r: r["total_ms"], reverse=True)
-	leaderboard = leaderboard_rows[:HOT_FRAMES_LEADERBOARD_SIZE]
+	# Cap each group separately so app frames cannot crowd out the framework group.
+	custom_rows = sorted(
+		(r for r in leaderboard_rows if not r["is_framework"]),
+		key=lambda r: r["total_ms"], reverse=True,
+	)[:HOT_FRAMES_LEADERBOARD_SIZE]
+	framework_rows = sorted(
+		(r for r in leaderboard_rows if r["is_framework"]),
+		key=lambda r: r["total_cumulative_ms"], reverse=True,
+	)[:HOT_FRAMES_LEADERBOARD_SIZE]
+	leaderboard = sorted(custom_rows + framework_rows, key=lambda r: r["total_ms"], reverse=True)
 
 	return findings, leaderboard
 
@@ -1394,6 +1408,7 @@ def _walk_for_aggregation(
 	node: dict, action_idx: int, occurrences: dict,
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
+	frame_class: dict | None = None,
 ) -> None:
 	if node.get("kind") == "python":
 		# v0.5.1: skip PURE HELPER frames only, not all framework code.
@@ -1415,6 +1430,12 @@ def _walk_for_aggregation(
 				node.get("filename", ""),
 			)
 			if key:
+				if frame_class is not None:
+					# Files can share a shortened key; framework only if every file is.
+					is_fw = _is_framework_frame_file(
+						node.get("filename", ""), tracked_apps, installed_apps
+					)
+					frame_class[key] = frame_class.get(key, True) and is_fw
 				# v0.7.x A.AE1: track self_ms (immune to recursion
 				# double-counting) for the user-app variant that's
 				# the exact "time in this function's body across the
@@ -1434,7 +1455,17 @@ def _walk_for_aggregation(
 					(action_idx, node.get("self_ms", 0), node.get("cumulative_ms", 0))
 				)
 	for child in node.get("children", []):
-		_walk_for_aggregation(child, action_idx, occurrences, tracked_apps, installed_apps)
+		_walk_for_aggregation(
+			child, action_idx, occurrences, tracked_apps, installed_apps, frame_class
+		)
+
+
+def _is_framework_frame_file(filename: str, tracked_apps, installed_apps) -> bool:
+	"""True for framework or third-party code; Optimus's own code always counts."""
+	norm = (filename or "").replace("\\", "/")
+	if is_framework_callsite(norm, tracked_apps, installed_apps):
+		return True
+	return _extract_app_segment(norm) == "optimus"
 
 
 # ---------------------------------------------------------------------------

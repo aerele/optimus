@@ -3353,6 +3353,7 @@
     </div>
     {% endif %}
     {% if report_data.hot_frames %}
+    <h3 class="hot-frames-group-title" id="hot-frames-app">Your app's code ({{ report_data.hot_frames | length }})</h3>
     <table class="data hot-frames-table">
       <thead>
         <tr>
@@ -3372,6 +3373,7 @@
       <p class="small muted">No hot frames in your own app's code - all frames ran in framework code. Expand the block below to see what.</p>
     {% endif %}
     {% if report_data.hot_frames_framework %}
+    <h3 class="hot-frames-group-title" id="hot-frames-framework">Framework code ({{ report_data.hot_frames_framework | length }})</h3>
     <details class="subsection">
       <summary class="small muted"><strong>{{ report_data.hot_frames_framework | length }}</strong> framework frame{{ "s" if report_data.hot_frames_framework | length != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
       <p class="small muted" style="margin: 6px 0 8px; font-style: italic;">
