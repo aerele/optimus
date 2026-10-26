@@ -296,12 +296,25 @@ def recording_count(session_uuid: str) -> int:
 # even after Stop (see `draining_until` below) so they aren't lost.
 
 
+# A job finishing after cleanup would re-create these keys without an expiry.
+JOB_KEYS_TTL_SECONDS = 24 * 60 * 60
+
+
+def _bound_ttl(key: str) -> None:
+	"""Best-effort expiry on a per-session job key."""
+	try:
+		expire_key(key, JOB_KEYS_TTL_SECONDS)
+	except Exception:
+		pass
+
+
 def register_pending_job(session_uuid: str, job_id: str) -> None:
 	"""Record that the flow enqueued RQ job ``job_id``. Best-effort."""
 	if not session_uuid or not job_id:
 		return
 	try:
 		frappe.cache.sadd(_pending_jobs_key(session_uuid), job_id)
+		_bound_ttl(_pending_jobs_key(session_uuid))
 	except Exception:
 		pass
 
@@ -456,6 +469,7 @@ def _atomic_merge_job_meta(
 		# fallback path target the same Redis key.
 		prefixed = frappe.cache.make_key(_jobs_key(session_uuid))
 		frappe.cache.eval(script, 1, prefixed, job_id, json.dumps(fields))
+		_bound_ttl(_jobs_key(session_uuid))
 		return
 	except Exception:
 		# Fall through to the non-atomic path. Loses the multi-worker safety
@@ -470,6 +484,7 @@ def _atomic_merge_job_meta(
 	else:
 		meta.update(fields)
 	_write_job(session_uuid, job_id, meta)
+	_bound_ttl(_jobs_key(session_uuid))
 
 
 def record_job(session_uuid: str, job_id: str, method: str) -> None:
@@ -486,6 +501,27 @@ def record_job(session_uuid: str, job_id: str, method: str) -> None:
 	except Exception:
 		enqueued_at = None
 	fields = {"method": method or "", "enqueued_at": enqueued_at}
+	_atomic_merge_job_meta(session_uuid, job_id, fields, setdefault=True)
+
+
+def record_enqueued_job(
+	session_uuid: str, job_id: str, method: str, parent_recording_uuid: str | None = None
+) -> None:
+	"""Record an enqueued job as Queued with its parent recording, set-if-absent."""
+	if not session_uuid or not job_id:
+		return
+	try:
+		from frappe.utils import now_datetime
+
+		enqueued_at = str(now_datetime())
+	except Exception:
+		enqueued_at = None
+	fields = {
+		"method": method or "",
+		"enqueued_at": enqueued_at,
+		"status": "Queued",
+		"parent_recording_uuid": parent_recording_uuid,
+	}
 	_atomic_merge_job_meta(session_uuid, job_id, fields, setdefault=True)
 
 

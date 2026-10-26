@@ -8,6 +8,21 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.83] - 2026-10-26
+
+### Fixed
+
+- Profiling a flow that calls `frappe.enqueue(..., now=True)` (or `is_async=False`) no longer passes Optimus's internal marker to your method, which crashed methods that do not accept extra keyword arguments.
+- Background jobs queued with `enqueue_after_commit=True` are now tracked like any other job, so the report waits for them and includes their recording instead of dropping them.
+- Jobs started by another background job after you press Stop (while the report is still collecting jobs) are now captured and attributed to the same session.
+- A job that is still waiting in the queue when the wait ends is shown as "Queued" instead of "Running". A job RQ has no record of is shown as "Stopped" with an explanation, not left as "Running".
+
+### Added
+
+- Each background job in the report now says which action (or parent job) triggered it ("Triggered by #3 POST ..."). Existing sessions are unaffected; a migration adds the column.
+
+---
+
 ## [0.12.70] - 2026-10-22
 
 ### Fixed

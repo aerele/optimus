@@ -1,4 +1,4 @@
-__version__ = "0.12.70"
+__version__ = "0.12.83"
 
 
 def safe_commit() -> None:
@@ -41,6 +41,55 @@ def safe_commit() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _is_synchronous_enqueue(kwargs) -> bool:
+	"""True when frappe.enqueue will run the method inline instead of queueing it."""
+	if kwargs.get("now"):
+		return True
+	if kwargs.get("is_async", True):
+		return False
+	try:
+		import frappe
+
+		return not getattr(frappe, "in_test", False)
+	except ImportError:
+		return False
+
+
+def _enqueue_session_for(user, _profiler_session):
+	"""Session for a job enqueued now: the one being recorded, else the user's active one."""
+	import frappe
+
+	local = getattr(frappe, "local", None)
+	inherited = getattr(local, "optimus_session_id", None) if local is not None else None
+	return inherited or _profiler_session.get_active_session_for(user)
+
+
+def _preassign_deferred_job_id(kwargs, _bg):
+	"""Give an after-commit job a known id and return its RQ id, else None."""
+	try:
+		if not kwargs.get("enqueue_after_commit"):
+			return None
+		if not kwargs.get("job_id"):
+			import frappe
+
+			kwargs["job_id"] = frappe.generate_hash(length=20)
+		return _bg.create_job_id(kwargs["job_id"])
+	except Exception:
+		return None
+
+
+def _track_enqueued_job(session_uuid, job_id, method) -> None:
+	"""Register an enqueued job as pending and record its parent recording."""
+	import frappe
+
+	from optimus import session as _profiler_session
+
+	_profiler_session.register_pending_job(session_uuid, job_id)
+	method_str = method if isinstance(method, str) else getattr(method, "__name__", str(method))
+	parent = getattr(getattr(frappe.local, "_recorder", None), "uuid", None)
+	_profiler_session.record_enqueued_job(session_uuid, job_id, method_str, parent)
+
+
 def _patch_enqueue():
 	"""Install the enqueue wrapper. No-ops when frappe isn't installed (e.g.
 	running analyzer unit tests from a plain Python interpreter)."""
@@ -59,14 +108,16 @@ def _patch_enqueue():
 
 	def _profiler_enqueue(method, *args, **kwargs):
 		active = None
+		synchronous = _is_synchronous_enqueue(kwargs)
 		try:
 			# Lazy import to avoid circular dependency on app init.
 			from optimus import session as _profiler_session
 
 			user = getattr(frappe.session, "user", None) if hasattr(frappe, "session") else None
 			if user and user != "Guest":
-				active = _profiler_session.get_active_session_for(user)
-				if active:
+				active = _enqueue_session_for(user, _profiler_session)
+				# Inline calls would pass the marker to the method as a kwarg.
+				if active and not synchronous:
 					# Inject our marker into the job kwargs. The before_job
 					# hook will pop it before the method runs.
 					kwargs["_profiler_session_id"] = active
@@ -80,7 +131,7 @@ def _patch_enqueue():
 					from optimus.line_profile import capture as _lp_capture
 
 					lp_active = _lp_capture.is_active(user)
-					if lp_active:
+					if lp_active and not synchronous:
 						kwargs["_lp_session_id"] = lp_active
 				except Exception:
 					# line_profiler not installed, or any other failure
@@ -91,6 +142,11 @@ def _patch_enqueue():
 			# Never break enqueue. The profiler is best-effort by design.
 			pass
 
+		# enqueue_after_commit returns None, so pick the id ourselves.
+		deferred_job_id = None
+		if active and not synchronous:
+			deferred_job_id = _preassign_deferred_job_id(kwargs, _bg)
+
 		job = _original_enqueue(method, *args, **kwargs)
 
 		# v0.6.0: register the RQ job id with the session so analyze waits
@@ -99,22 +155,10 @@ def _patch_enqueue():
 		# None for `now=True` inline jobs (nothing async to wait for). Never
 		# track our own analyze job (it would deadlock the wait on itself).
 		try:
-			if (
-				active
-				and job is not None
-				and getattr(job, "id", None)
-				and method != "optimus.analyze.run"
-			):
-				from optimus import session as _profiler_session
-
-				_profiler_session.register_pending_job(active, job.id)
-				# v0.7.x: also record the job's identity in the never-pruned
-				# jobs hash so analyze can report its terminal status (incl.
-				# failed / timed-out jobs that produce no recording).
-				_method_str = method if isinstance(method, str) else getattr(
-					method, "__name__", str(method)
-				)
-				_profiler_session.record_job(active, job.id, _method_str)
+			if active and not synchronous and method != "optimus.analyze.run":
+				job_id = getattr(job, "id", None) or deferred_job_id
+				if job_id:
+					_track_enqueued_job(active, job_id, method)
 		except Exception:
 			pass
 

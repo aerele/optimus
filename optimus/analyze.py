@@ -382,9 +382,14 @@ def _capture_job_terminal_status(session_uuid: str, job_id: str) -> None:
 	can persist it. Best-effort, never blocks the wait."""
 	try:
 		from frappe.utils.background_jobs import get_redis_conn
+		from rq.exceptions import NoSuchJobError
 		from rq.job import Job
 
-		job = Job.fetch(job_id, connection=get_redis_conn())
+		try:
+			job = Job.fetch(job_id, connection=get_redis_conn())
+		except NoSuchJobError:
+			_mark_vanished_job(session_uuid, job_id)
+			return
 		rq_status = job.get_status(refresh=True)
 		exc = job.exc_info or ""
 		if rq_status == "finished":
@@ -418,14 +423,39 @@ def _capture_job_terminal_status(session_uuid: str, job_id: str) -> None:
 		pass
 
 
+def _mark_vanished_job(session_uuid: str, job_id: str) -> None:
+	"""Mark a never-started job that RQ no longer knows as Stopped."""
+	meta = session._read_job(session_uuid, job_id) or {}
+	if meta.get("status") in (None, "", "Queued"):
+		session.set_job_status(
+			session_uuid,
+			job_id,
+			status="Stopped",
+			error="Never ran: no RQ record found (the enqueueing transaction may have "
+			"rolled back, or the job expired before a worker picked it up).",
+		)
+
+
 def _finalize_pending_statuses(session_uuid: str, job_ids) -> None:
-	"""At the wait ceiling: record a terminal status for finished jobs and mark
-	any still-active job ``Running`` so it's reported rather than vanishing."""
+	"""At the wait ceiling: record finished jobs' status, label active ones Running or Queued."""
 	for jid in job_ids:
 		if _rq_job_active(jid):
-			session.set_job_status(session_uuid, jid, status="Running")
+			session.set_job_status(session_uuid, jid, status=_active_job_label(jid))
 		else:
 			_capture_job_terminal_status(session_uuid, jid)
+
+
+def _active_job_label(job_id: str) -> str:
+	""""Running" for a started RQ job, "Queued" for one still waiting."""
+	try:
+		from frappe.utils.background_jobs import get_redis_conn
+		from rq.job import Job
+
+		job = Job.fetch(job_id, connection=get_redis_conn())
+		waiting = job.get_status(refresh=True) in ("queued", "deferred", "scheduled")
+		return "Queued" if waiting else "Running"
+	except Exception:
+		return "Running"
 
 
 def _bg_wait_for_pending_jobs(session_uuid: str, docname: str, deadline):
@@ -1701,7 +1731,7 @@ def _persist(
 	# didn't (e.g. the wait was skipped/disabled), then read the final hash.
 	try:
 		for _jm in session.get_jobs(context.session_uuid):
-			if not _jm.get("status"):
+			if _jm.get("status") in (None, "", "Queued"):
 				_capture_job_terminal_status(context.session_uuid, _jm["job_id"])
 		doc.set("background_jobs", [])
 		for _jm in session.get_jobs(context.session_uuid):
@@ -1713,7 +1743,7 @@ def _persist(
 					# report save (the datetimes are already DB-safe via _rq_dt_to_db).
 					"job_id": (_jm.get("job_id") or "")[:140],
 					"method": (_jm.get("method") or "")[:140],
-					"status": _jm.get("status") or "Running",
+					"status": _jm.get("status") or "Queued",
 					"error": (_jm.get("error") or "") or None,
 					# DB-safety guard: strip any tz offset a pre-fix build may have
 					# stored in Redis, so MariaDB's DATETIME column accepts them.
@@ -1722,6 +1752,7 @@ def _persist(
 					"ended_at": _db_datetime_str(_jm.get("ended_at")),
 					"duration_ms": _jm.get("duration_ms") or 0,
 					"recording_uuid": _jm.get("recording_uuid") or "",
+					"parent_recording_uuid": (_jm.get("parent_recording_uuid") or "")[:140],
 				})
 			except Exception:
 				frappe.log_error(title="optimus persist background_job row")
