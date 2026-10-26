@@ -1879,8 +1879,7 @@ def _compose_tldr(
 				"{title}"
 			).format(impact=impact_html, title=title)
 	elif category == "lock_contention":
-		# Reliability finding with no ms to reclaim (impact is 0): lead with the
-		# title alone, never a misleading "0ms ·" badge.
+		# No ms to reclaim, so no "0ms" badge.
 		headline = Markup("{title}").format(title=title)
 	else:
 		# Fallback verbatim title with the impact called out.
@@ -2274,8 +2273,7 @@ _ACTIONABLE_FINDING_TYPES = frozenset({
 	"Heavy Response",
 	# v0.6.0 phase-2 line profiler
 	"Hot Line",            # one source line concentrates the function's time
-	# v0.12.x DB lock contention
-	"Lock Contention",     # user-callsite only (framework races filtered out)
+	"Lock Contention",     # user callsites only
 })
 # Observation-only finding types (informational, no direct fix):
 #   Framework N+1 loop inside frappe/*

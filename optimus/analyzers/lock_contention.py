@@ -1,15 +1,9 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Lock-contention analyzer: surfaces DB deadlocks and lock-wait timeouts.
+"""Lock-contention analyzer: turns captured deadlocks and lock-wait timeouts into findings.
 
-Reads ``rec["lock_events"]`` captured by :mod:`optimus.capture`'s SQL wrapper
-(the Frappe recorder only logs queries that SUCCEED, so a query that raised
-``frappe.QueryDeadlockError`` / ``frappe.QueryTimeoutError`` is invisible to it).
-Emits one High-severity ``Lock Contention`` finding per contended callsite.
-
-Pure function over recording dicts: no Frappe, DB, Redis or IO, so it stays
-fixture-testable like every other analyzer.
+Pure function over recording dicts (reads ``rec["lock_events"]``): no Frappe, DB or IO.
 """
 
 import json
@@ -23,22 +17,12 @@ from optimus.analyzers.base import (
 	user_callsite,
 )
 
-# A single contended callsite can fail on several distinct statements; show them
-# all but cap so a pathological retry storm can't bloat the finding.
 _MAX_EXAMPLE_QUERIES = 10
-
-
 _KNOWN_KINDS = frozenset({"deadlock", "lock_wait_timeout"})
 
 
 def analyze(recordings, context):
-	"""Bucket user-code lock events by callsite across recordings, one finding each.
-
-	Only contention at a callsite in the developer's own app code becomes a finding.
-	Contention with no such frame is either benign framework contention that Frappe
-	handles itself or something the developer cannot act on, so it is dropped. The
-	classification (``user_callsite``) is the one the redundant-call and N+1
-	analyzers use, so ERPNext / HRMS code counts as framework here too."""
+	"""One finding per user-code callsite that hit a deadlock or lock-wait timeout."""
 	from optimus.settings import get_config
 
 	tracked_apps = get_config().tracked_apps
@@ -53,12 +37,12 @@ def analyze(recordings, context):
 				truncated = True
 				continue
 			if ev.get("kind") not in _KNOWN_KINDS:
-				continue  # unknown kind: don't guess a label
+				continue
 			frame = user_callsite(
 				ev.get("caller_stack"), tracked_apps=tracked_apps, installed_apps=installed_apps
 			)
 			if frame is None:
-				continue  # framework-only / benign contention not a finding
+				continue  # framework-only contention
 			key = (frame.get("filename"), frame.get("lineno"))
 			bucket = buckets.get(key)
 			if bucket is None:
@@ -90,18 +74,12 @@ def _build_finding(bucket: dict) -> dict:
 	function = site.get("function")
 	count = len(events)
 
-	# "Deadlock" wins the label when the callsite hit both kinds, since it's the
-	# stricter failure (the DB aborted a statement to break the cycle).
+	# Deadlock wins the label when a callsite hit both kinds.
 	has_deadlock = "deadlock" in kinds
 	kind_label = "Deadlock" if has_deadlock else "Lock-wait timeout"
 	where = f"{short_filename(filename)}:{lineno}" if filename else None
 
-	# ALL distinct normalized queries at this callsite, not just the first. One
-	# doc.save() can deadlock on several different statements at the same line, so
-	# showing only the first would point the developer (and the AI fix prompt) at
-	# the wrong table. Stored under ``example_queries`` the key the finding card
-	# ("Affected queries") and the AI-fix prompt actually read; ``sample_queries``
-	# is rendered nowhere. Capped so a pathological bucket can't bloat the report.
+	# Every distinct query at the callsite: one doc.save() can deadlock on several.
 	example_queries: list = []
 	seen: set = set()
 	for e in events:
@@ -113,9 +91,7 @@ def _build_finding(bucket: dict) -> dict:
 	normalized = example_queries[0] if example_queries else ""
 	sample_error = next((e.get("error") for e in events if e.get("error")), "")
 
-	# Wall-time the failed queries burned before raising (a lock-wait timeout can
-	# sit for the full innodb_lock_wait_timeout, ~50s). None when no event carries
-	# a duration (older recordings / the pure-analyzer fixtures).
+	# Wall-time the failed queries burned; None when no event carries a duration.
 	durations = [e.get("duration_ms") for e in events if isinstance(e.get("duration_ms"), (int, float))]
 	total_wait_ms = round(sum(durations), 2) if durations else None
 	max_wait_ms = round(max(durations), 2) if durations else None
@@ -127,9 +103,6 @@ def _build_finding(bucket: dict) -> dict:
 			else {}
 		),
 		"normalized_query": normalized,
-		# The card renders example_queries; the failed query is not in the recorder.
-		# All distinct queries at the callsite (not just the first) so a multi-
-		# statement doc.save() points at the right table.
 		"example_queries": example_queries,
 		"lock_kinds": sorted(kinds),
 		"occurrences": count,
@@ -142,18 +115,12 @@ def _build_finding(bucket: dict) -> dict:
 
 	return {
 		"finding_type": "Lock Contention",
-		# Reliability issue: the query failed and the write was aborted or
-		# retried. Always High it's a correctness/availability problem, not a
-		# "this is a bit slow" one, so impact-in-ms doesn't capture its weight
-		# (the report sorts severity-first, floating it above timed findings).
+		# A failed write is a reliability problem, so always High.
 		"severity": "High",
 		"title": _title(kind_label, count, where),
 		"customer_description": _description(has_deadlock, count, where, max_wait_ms),
 		"technical_detail_json": json.dumps(findings_detail, default=str),
-		# No measured ms to RECLAIM on the happy path: the cost is a failed /
-		# retried transaction, not wall-time a fix gives back, so this stays 0 and
-		# severity carries the ranking. The wait burned is surfaced in the
-		# description + technical detail instead (total_wait_ms / max_wait_ms).
+		# No ms to reclaim; the wait is in total_wait_ms / max_wait_ms instead.
 		"estimated_impact_ms": 0.0,
 		"affected_count": count,
 		"action_ref": str(action_idx),
@@ -174,11 +141,7 @@ def _description(has_deadlock: bool, count: int, where: str | None, max_wait_ms:
 	if max_wait_ms and max_wait_ms >= 1.0:
 		wait = f" The slowest attempt waited {humanize_duration_ms(max_wait_ms)} before failing."
 	if has_deadlock:
-		# Mechanism is phrased as the COMMON cause, not the only one: the DB layer
-		# also reports a snapshot / optimistic-lock conflict (MariaDB err 1020,
-		# "record changed since last read") as a deadlock, which is not a classic
-		# lock-order cycle, so the old "locking rows in opposite orders" wording
-		# over-claimed.
+		# MariaDB also reports snapshot conflicts as deadlocks, so lock order is only the usual cause.
 		return (
 			f"A database query{loc} hit a deadlock {count} time{plural} during this "
 			"flow. The database aborted the query to break the lock (usually rolling "
@@ -187,10 +150,7 @@ def _description(has_deadlock: bool, count: int, where: str | None, max_wait_ms:
 			"order, or a row changed underneath the transaction under a strict "
 			f"isolation level.{wait}"
 		)
-	# DB-agnostic: the wait-timeout knob is innodb_lock_wait_timeout on
-	# MariaDB/MySQL but the same QueryTimeoutError also covers a Postgres statement
-	# timeout, so the description names the MariaDB knob as an example, not a fact
-	# about every backend.
+	# The MariaDB setting is an example only; Postgres reports timeouts differently.
 	return (
 		f"A database query{loc} hit a lock-wait timeout {count} time{plural} during "
 		"this flow. The query waited for rows another transaction was holding and "

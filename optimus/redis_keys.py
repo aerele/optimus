@@ -120,12 +120,7 @@ def resolved_doc(recording_uuid: str) -> str:
 
 
 def lock_events(recording_uuid: str) -> str:
-	"""List of DB lock-contention events captured during a recording: queries
-	that raised ``frappe.QueryDeadlockError`` / ``frappe.QueryTimeoutError`` in
-	``optimus.capture``'s SQL wrapper (the recorder only logs queries that
-	succeed). Frappe-pickled ``list[dict]`` (``kind``, ``normalized_query``,
-	``error``, ``caller_stack``, ``time``); read into ``rec["lock_events"]`` at
-	analyze time. TTL: ``SESSION_TTL_SECONDS``."""
+	"""Deadlock / lock-wait events of a recording (``list[dict]``). TTL: ``SESSION_TTL_SECONDS``."""
 	return f"profiler:lock_events:{recording_uuid}"
 
 

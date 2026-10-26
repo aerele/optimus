@@ -657,13 +657,7 @@ def user_callsite(
 	tracked_apps: tuple[str, ...] | None = None,
 	installed_apps: frozenset[str] | None = None,
 ) -> dict | None:
-	"""Return the deepest frame in the application developer's own code, or None.
-
-	Unlike ``walk_callsite`` this never falls back to a framework frame and it
-	classifies with ``is_framework_callsite``, so ERPNext, HRMS and other stock apps
-	count as framework just as they do for the redundant-call and N+1 analyzers.
-	The returned dict is the frame object from ``stack`` (not a copy). Used where
-	only contention the developer can act on should surface (lock contention)."""
+	"""Deepest frame in the developer's own code (no framework fallback), or None."""
 	for frame in reversed(stack or []):
 		if not isinstance(frame, dict):
 			continue

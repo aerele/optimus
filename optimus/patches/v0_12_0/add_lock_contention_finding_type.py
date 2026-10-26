@@ -1,11 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Reload the Optimus Finding doctype so its finding_type Select picks up the
-new "Lock Contention" option from disk on existing installs. Without the reload,
-analyze fails Select validation when it writes a Lock Contention finding row.
-Fresh installs get the option automatically.
-"""
+"""Reload Optimus Finding so existing installs get the "Lock Contention" type."""
 
 import frappe
 

@@ -718,13 +718,10 @@ def _dump_capture_state_to_redis(recording_uuid: str | None) -> None:
 		except Exception:
 			frappe.log_error(title="optimus sidecar dump")
 
-	# v0.12.x: flush captured DB lock-contention events (deadlocks / lock-wait
-	# timeouts). Same key TTL as the sidecar; read into rec["lock_events"] at
-	# analyze time by the lock_contention analyzer.
 	lock_events = getattr(frappe.local, "optimus_lock_events", None)
 	if lock_events:
 		try:
-			# Same in-band truncation marker as the sidecar.
+			# In-band truncation marker, as for the sidecar.
 			payload = list(lock_events)
 			if getattr(frappe.local, "optimus_lock_events_truncated", False):
 				payload.append({"_truncated": True})

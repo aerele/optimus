@@ -230,75 +230,44 @@ def _make_wrap(orig, fn_name: str, local_proxy=None):
 
 
 # ----- DB lock-contention capture (deadlocks / lock-wait timeouts) ---------
-#
-# The Frappe recorder only logs queries that SUCCEED (``record_sql`` records
-# after the query returns), so a query that raises a deadlock
-# (``frappe.QueryDeadlockError``) or lock-wait timeout (``frappe.QueryTimeoutError``)
-# is never recorded. ``install_lock_capture`` patches ``Database.sql`` at CLASS
-# level: it records those two exception types to a request-local list and
-# RE-RAISES them unchanged, so Frappe's own savepoint / suppress / retry behaviour
-# is untouched. Patching the class (like ``RedisWrapper.get_value`` above) keeps
-# the interceptor in the call path whatever the recorder does to the instance
-# (it swaps ``db.sql`` and sets ``db._sql`` per request), and works when the
-# recorder runs with "Record SQL" off. It is gated on an active Optimus session,
-# so the cost for everyone else is one attribute lookup.
 
-# Deadlocks are rare; a request that retries one can hit a handful. The cap keeps
-# a pathological retry storm from growing the list unbounded.
+# Patched at CLASS level because the recorder swaps db.sql per instance and may be off.
 LOCK_EVENTS_CAP_PER_RECORDING = 200
 
-# Frames kept below the user callsite. The analyzer only needs the callsite, so
-# the rest of a deep ORM / hook chain is dropped instead of stored per event.
 _LOCK_STACK_TAIL_FRAMES = 10
 
-# Frappe code that catches a lock error ITSELF (``suppress`` / ``savepoint``), so
-# the failure never reaches the caller and is not a finding even when user code
-# sits above it in the stack. Tuples of (path suffix, function). Extend this when
-# Frappe or a framework app adds another handler.
+# Frappe code that catches a lock error itself: (path suffix, function).
 _FRAPPE_HANDLED_LOCK_SITES = (
 	("frappe/sessions.py", "update_user_metadata"),  # savepoint(QueryDeadlockError)
 	("frappe/utils/change_log.py", "update_last_known_versions"),  # suppress(...)
 	("frappe/utils/dashboard.py", "generate_and_cache_results"),  # suppress(...)
 )
 
-# Quoted strings / identifiers and comments. Blanked before looking for the
-# NOWAIT keyword, so a value or a column named "nowait" cannot trigger the skip.
 _QUOTED_OR_COMMENT_RE = re.compile(
 	r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.|\"\")*\"|`[^`]*`|/\*.*?\*/|--[^\n]*",
 	re.DOTALL,
 )
 
-# A ``FOR UPDATE ... NOWAIT`` probe is a DELIBERATE non-blocking lock check (Frappe
-# uses it, e.g. in delete_doc): failing fast is the designed path, not contention.
-# On Postgres it surfaces as QueryTimeoutError, so without this it would become a
-# false "lock-wait timeout" finding.
+# NOWAIT probes fail fast by design (and surface as QueryTimeoutError on Postgres), so skip them.
 _NOWAIT_RE = re.compile(r"\bnowait\b", re.IGNORECASE)
 
-# Postgres SQLSTATE for "canceling statement due to statement timeout".
-# A lock timeout is 55P03 and is a real lock wait.
-_PG_QUERY_CANCELED = "57014"
+_PG_QUERY_CANCELED = "57014"  # Postgres SQLSTATE for a statement timeout
 
 
 def _is_nowait_probe(query) -> bool:
-	"""True for a ``... NOWAIT`` lock probe. Works on the raw text (not the
-	normalized one), so it holds when sqlparse cannot parse the statement."""
+	"""True for a ``... NOWAIT`` lock probe, judged on the raw text."""
 	return bool(_NOWAIT_RE.search(_QUOTED_OR_COMMENT_RE.sub(" ", str(query or ""))))
 
 
 def _is_statement_timeout(exc) -> bool:
-	"""True when a ``QueryTimeoutError`` wraps a Postgres statement timeout (a slow
-	query that was cancelled), which is not a lock wait. Frappe maps both that and
-	a lock timeout to ``QueryTimeoutError``, so look at the original DB error."""
+	"""True when a QueryTimeoutError wraps a Postgres statement timeout (not a lock wait)."""
 	cause = exc.__cause__ or next((a for a in exc.args if isinstance(a, BaseException)), None)
 	return getattr(cause, "pgcode", None) == _PG_QUERY_CANCELED
 
 
 def _lock_event_kind(exc) -> str | None:
-	"""``"deadlock"`` / ``"lock_wait_timeout"`` for a Frappe lock error, else None.
-
-	The single source of truth for whether an exception is a lock error and which
-	kind it is. Resolved via ``getattr`` so it stays safe when the attributes are
-	absent (older Frappe, or the unit-test frappe stub without them)."""
+	"""``"deadlock"`` / ``"lock_wait_timeout"`` for a Frappe lock error, else None."""
+	# getattr: older Frappe and the unit-test stub may lack these classes.
 	import frappe
 
 	deadlock = getattr(frappe, "QueryDeadlockError", None)
@@ -321,16 +290,8 @@ def _handled_by_frappe(frames) -> bool:
 
 
 def _normalize_sql_safe(query, keep_quoted_identifiers=False) -> str:
-	"""Return ``query`` with literals replaced by ``?``, or "" on ANY failure.
-
-	NOT ``frappe.recorder.normalize_query``: that one catches its own sqlparse
-	errors internally and returns the RAW query (literals intact), so a caller never
-	sees the failure. Persisting that raw query would leak row data into the report,
-	so this returns "" on failure instead. Differences from Frappe's version:
-	  * comments are dropped (they can carry row data and are not literals);
-	  * on Postgres (``keep_quoted_identifiers``) ``"tabX"`` is an identifier, not
-	    data, and is kept. On MariaDB double quotes can delimit a string value;
-	  * ``query`` is str()-coerced, as db.sql accepts query-builder objects."""
+	"""``query`` with literals and comments replaced or dropped, or "" on any failure."""
+	# Not frappe.recorder.normalize_query: on a parse failure it returns the raw query, leaking values.
 	try:
 		import sqlparse
 		from sqlparse import tokens as T
@@ -348,14 +309,12 @@ def _normalize_sql_safe(query, keep_quoted_identifiers=False) -> str:
 				token.value = "?"
 		return re.sub(r"( IN )\(\?[\s\n\?,]*\)", r"\1(?)", str(parsed), flags=re.IGNORECASE)
 	except Exception:
-		# Unparseable / exotic query: store nothing rather than risk raw literals.
+		# Store nothing rather than risk raw literals.
 		return ""
 
 
 def _lock_caller_frames() -> list:
-	"""App and Server Script frames above the failed query, outermost first, with
-	app-relative filenames. Frappe's own recorder helper, so the shape matches
-	the recorded queries. Only called on the rare lock failure, never per query."""
+	"""App and Server Script frames above the failed query, outermost first."""
 	try:
 		from frappe.recorder import get_current_stack_frames
 
@@ -367,16 +326,7 @@ def _lock_caller_frames() -> list:
 def _record_lock_event(
 	local_proxy, kind, exc, query, duration_ms=None, keep_quoted_identifiers=False
 ) -> None:
-	"""Append one lock-contention event to ``local_proxy.optimus_lock_events``.
-
-	Best-effort: any failure is swallowed so it can never mask the DB exception
-	the caller is about to re-raise. Nothing is stored for a ``NOWAIT`` probe, for
-	a lock error Frappe handles itself, or when no frame belongs to the developer's
-	own app code; those skip the cap too. The query is stored NORMALIZED (literals
-	and comments stripped, "" on any parse failure) and the error is cut to its
-	first line (Postgres appends DETAIL lines that quote other sessions' SQL), so
-	no row data is persisted. ``duration_ms`` is the wall-time the failed query
-	spent before raising (a lock-wait timeout can burn the full lock wait, ~50s)."""
+	"""Append one lock event to ``local_proxy.optimus_lock_events``; never raises."""
 	try:
 		if _is_nowait_probe(query):
 			return
@@ -411,7 +361,7 @@ def _record_lock_event(
 			"time": time.time(),
 		})
 	except Exception:
-		pass
+		pass  # must never mask the DB exception the caller re-raises
 
 
 def _make_lock_wrap(orig, local_proxy):
@@ -425,9 +375,6 @@ def _make_lock_wrap(orig, local_proxy):
 		try:
 			return orig(self, *args, **kwargs)
 		except Exception as exc:
-			# Detection and recording are guarded so nothing here can raise and
-			# displace the original DB exception; the bare ``raise`` re-raises it
-			# unchanged, keeping Frappe's own ``except QueryDeadlockError`` matching.
 			# The flag stops the settings read inside recording from re-entering.
 			if not getattr(local_proxy, "_optimus_recording_lock", False):
 				local_proxy._optimus_recording_lock = True
@@ -441,7 +388,7 @@ def _make_lock_wrap(orig, local_proxy):
 							keep_quoted_identifiers=getattr(self, "db_type", None) == "postgres",
 						)
 				except Exception:
-					pass
+					pass  # must never mask the DB exception re-raised below
 				finally:
 					local_proxy._optimus_recording_lock = False
 			raise
@@ -461,15 +408,14 @@ def _database_class():
 
 
 def install_lock_capture(local_proxy) -> None:
-	"""Patch ``Database.sql`` once to record lock errors. Idempotent. A no-op when
-	there is no ``Database`` class (unit tests) or it cannot be patched."""
+	"""Patch ``Database.sql`` once to record lock errors (idempotent; no-op without Database)."""
 	database = _database_class()
 	if database is None or getattr(database.sql, "_optimus_lock_wrap", False):
 		return
 	try:
 		database.sql = _make_lock_wrap(database.sql, local_proxy)
 	except Exception:
-		pass  # degrade to no lock capture rather than break the app load
+		pass  # no lock capture is better than a broken app load
 
 
 def uninstall_lock_capture() -> None:

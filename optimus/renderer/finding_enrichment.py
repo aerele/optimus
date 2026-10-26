@@ -20,9 +20,7 @@ import re
 # renderer doesn't drag an analyzer import into hot paths.
 _GROUPING_SEVERITY_RANK = {"High": 0, "Medium": 1, "Low": 2}
 
-# Reliability findings carry no measured ms (their cost is a failed write, not
-# wall-time), so within a severity they must outrank timed findings or a 0ms
-# deadlock would always lose the primary card to any timed one.
+# No measured ms, so they must outrank timed findings within a severity.
 _RELIABILITY_FINDING_TYPES = frozenset({"Lock Contention"})
 
 

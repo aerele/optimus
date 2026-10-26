@@ -1908,9 +1908,7 @@
         {# The scope tag is analyzer-declared: a finding whose estimated_impact_ms
            is not the session-wide total sets detail.impact_scope_label (e.g. N+1 →
            "recoverable"). Everything else falls back to "consolidated". #}
-        {# A reliability finding (Lock Contention) has no ms to reclaim, so a
-           "0ms consolidated" badge would say the opposite of what happened. Show
-           the wait it burned instead, or just the kind when none was measured. #}
+        {# No ms to reclaim (Lock Contention): show the wait instead of "0ms". #}
         {% if f.estimated_impact_ms %}
         <span class="big">{{ fmt_ms(f.estimated_impact_ms) }}</span><small class="scope-tag">{{ detail.impact_scope_label or "consolidated" }}</small>
         {% elif detail.total_wait_ms %}

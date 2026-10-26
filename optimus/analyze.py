@@ -36,7 +36,7 @@ from optimus.analyzers import (
 	frontend_timings,  # v0.5.0
 	index_suggestions,
 	infra_pressure,  # v0.5.0
-	lock_contention,  # v0.12.x
+	lock_contention,
 	n_plus_one,
 	per_action,
 	redundant_calls,
@@ -91,7 +91,7 @@ _BUILTIN_ANALYZERS = [
 	table_breakdown.analyze,
 	call_tree.analyze,        # v0.3.0 must run after per_action
 	redundant_calls.analyze,  # v0.3.0 independent
-	lock_contention.analyze,  # v0.12.x reads rec["lock_events"]
+	lock_contention.analyze,  # reads rec["lock_events"]
 	infra_pressure.analyze,   # v0.5.0 reads rec["infra"]
 	frontend_timings.analyze, # v0.5.0 reads context.frontend_data
 ]
@@ -2785,8 +2785,7 @@ def _build_summary_html(
 				title = title[len(prefix):]
 			pri = _PRIORITY_WORD.get(f.get("severity") or "", "")
 			impact = f.get("estimated_impact_ms") or 0
-			# A finding with no measured impact (Lock Contention) shows only its
-			# priority; "~0ms" would contradict a high-priority label.
+			# No "~0ms" for a finding with no measured impact (Lock Contention).
 			bits = ([f"~{dur(impact)}"] if impact else []) + ([f"{pri} priority"] if pri else [])
 			tail = f" ({' - '.join(bits)})" if bits else ""
 			return f"<strong>{html.escape(title)}</strong>{tail}"
@@ -2809,8 +2808,7 @@ def _build_summary_html(
 		if tied_finding:
 			# v0.7.x: the "See the Findings section below …" pointer lives once,
 			# on the issue-count sentence below don't repeat it here.
-			# Time "went into" a finding only when it measured some; a reliability
-			# finding (Lock Contention) is something the operation ran into.
+			# A reliability finding has no time to attribute.
 			lead = "most of its time went into" if tied_finding.get("estimated_impact_ms") else "it also hit"
 			parts.append(
 				f"The slowest one was <strong>{slowest_label_esc}</strong> at "
@@ -3095,7 +3093,7 @@ def _cleanup_redis(session_uuid: str, recording_uuids: list[str]) -> None:
 		try:
 			frappe.cache.delete_value(_redis_keys.lock_events(uuid))
 		except Exception:
-			pass
+			pass  # best-effort cleanup
 		try:
 			frappe.cache.delete_value(_redis_keys.resolved_doc(uuid))
 		except Exception:

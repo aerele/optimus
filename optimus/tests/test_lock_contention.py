@@ -1,14 +1,7 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
-"""Tests for DB lock-contention capture + analysis.
-
-Two layers:
-  * ``lock_contention.analyze`` the pure analyzer that turns captured
-    ``rec["lock_events"]`` into ``Lock Contention`` findings.
-  * ``capture.install_lock_capture`` the class-level ``Database.sql`` patch
-    that records deadlocks / lock-wait timeouts and re-raises them unchanged.
-"""
+"""Tests for DB lock-contention capture and the Lock Contention analyzer."""
 
 import json
 import types
@@ -92,15 +85,12 @@ def test_distinct_callsites_produce_distinct_findings():
 
 
 def test_event_with_no_resolvable_callsite_is_skipped():
-	# Empty stack → no user frame → dropped. The renderer suppresses frameless
-	# findings anyway; such a deadlock is usually benign framework contention
-	# that Frappe handles itself.
+	# An empty stack has no user frame, so the event is dropped.
 	assert lock_contention.analyze([{"lock_events": [_event(stack=[])]}], _ctx()).findings == []
 
 
 def test_framework_only_callsite_is_skipped():
-	# An all-framework stack (frappe/*) is benign contention Frappe catches via
-	# savepoint/suppress; it must not become a user-facing finding.
+	# An all-framework stack is contention Frappe handles itself.
 	fw = [{"filename": "frappe/sessions.py", "lineno": 481, "function": "update"}]
 	assert lock_contention.analyze([{"lock_events": [_event(stack=fw)]}], _ctx()).findings == []
 
@@ -147,8 +137,7 @@ def _frames(*extra):
 
 @pytest.fixture
 def lock_env(monkeypatch):
-	"""A fake ``Database`` class patched by ``install_lock_capture``, plus the
-	request-local namespace of an active Optimus session."""
+	"""A fake Database class patched by install_lock_capture, with an active session."""
 	local = _FakeLocal()
 	local.optimus_session_id = "SESSION"
 
@@ -215,8 +204,7 @@ def test_wrap_reraises_non_lock_exception_without_recording(lock_env):
 
 
 def test_wrap_ignores_requests_without_an_active_session(lock_env):
-	"""The class-level patch is gated on an Optimus session: any other request
-	passes straight through and records nothing."""
+	"""The class-level patch is gated on an Optimus session."""
 	import frappe
 
 	del lock_env.local.optimus_session_id
@@ -241,9 +229,7 @@ def test_install_without_database_class_is_noop(monkeypatch):
 
 
 def test_capture_survives_every_recorder_state(lock_env):
-	"""Issue 2/10: Frappe's recorder patches and unpatches the DB INSTANCE (it sets
-	``db._sql`` and swaps ``db.sql``, and none of that happens with Record SQL
-	off). The class-level patch records in every state."""
+	"""Capture records whatever the recorder does to the DB instance, including Record SQL off."""
 	import frappe
 
 	db = lock_env.db
@@ -277,8 +263,7 @@ def test_wrap_records_timeout_kind(lock_env):
 
 
 def test_postgres_statement_timeout_is_not_a_lock_wait(lock_env):
-	"""Issue 3: Frappe maps a cancelled slow query (SQLSTATE 57014) to the same
-	QueryTimeoutError as a lock timeout (55P03). Only the latter is contention."""
+	"""A Postgres statement timeout (57014) is not a lock wait."""
 	import frappe
 
 	lock_env.raises(_lock_error("QueryTimeoutError", "canceling statement", pgcode="57014"))
@@ -293,8 +278,7 @@ def test_postgres_statement_timeout_is_not_a_lock_wait(lock_env):
 
 
 def test_statement_timeout_is_found_in_exception_args():
-	"""``QueryTimeoutError(e)`` carries the DB error as args[0] when it was not
-	raised ``from`` it."""
+	"""The DB error is found in exception args when the timeout was not raised from it."""
 	import frappe
 
 	cause = Exception("db error")
@@ -314,8 +298,7 @@ def test_wrap_skips_nowait_probe(lock_env):
 
 
 def test_nowait_probe_is_skipped_even_when_sql_cannot_be_parsed(lock_env, monkeypatch):
-	"""Issue 7: the probe check must not depend on sqlparse. When parsing fails the
-	normalized text is "", which used to hide the keyword and record the probe."""
+	"""The NOWAIT check does not depend on sqlparse."""
 	import frappe
 	import sqlparse
 
@@ -365,8 +348,7 @@ def test_wrap_records_duration_ms(lock_env):
 
 
 def test_event_error_keeps_only_the_first_line(lock_env):
-	"""Postgres appends DETAIL lines that quote the other sessions' SQL, literals
-	included. Only the first line is stored."""
+	"""Only the first line of the error is stored."""
 	import frappe
 
 	lock_env.raises(_lock_error(message="deadlock detected\nDETAIL: Process 1: UPDATE t SET x = 'SECRET'"))
@@ -399,8 +381,7 @@ def test_recording_failure_never_replaces_the_db_error(lock_env, monkeypatch):
 
 
 def test_recording_does_not_reenter_itself(lock_env, monkeypatch):
-	"""Recording reads settings, which can query the DB. A lock error inside that
-	nested query must not recurse into recording again."""
+	"""A lock error inside recording's own settings query does not recurse."""
 	import frappe
 
 	calls = {"n": 0}
@@ -419,8 +400,7 @@ def test_recording_does_not_reenter_itself(lock_env, monkeypatch):
 
 
 def test_framework_app_contention_is_not_recorded_and_skips_the_cap(lock_env, monkeypatch):
-	"""Issue 1: ERPNext / HRMS code is framework. Its deadlocks are dropped at
-	capture without using up the cap that real findings need."""
+	"""ERPNext / HRMS contention is dropped at capture without using the cap."""
 	import frappe
 
 	erpnext = [
@@ -460,8 +440,7 @@ def test_user_code_calling_into_erpnext_is_attributed_to_the_user_frame(lock_env
 	],
 )
 def test_lock_errors_frappe_handles_itself_are_not_recorded(lock_env, monkeypatch, filename, function):
-	"""Issue 6: a deadlock Frappe catches (``suppress`` / ``savepoint``) never
-	reaches the caller, so user code above it in the stack is not a finding."""
+	"""A lock error Frappe handles itself is not recorded."""
 	import frappe
 
 	handler = {"filename": filename, "lineno": 5, "function": function}
@@ -500,8 +479,7 @@ def test_stored_stack_still_resolves_to_the_same_callsite():
 
 
 def test_lock_contention_finding_renders_in_report():
-	"""An analyzer-produced Lock Contention finding renders through the real
-	report template (title, callsite, query and fix hint all visible)."""
+	"""A Lock Contention finding renders through the real report template."""
 	import types
 
 	from optimus import renderer
@@ -532,20 +510,15 @@ def test_lock_contention_finding_renders_in_report():
 	assert "Deadlock on a query" in html   # the finding title
 	assert "jobs.py:316" in html           # the callsite
 	assert "consistent order" in html      # the fix hint
-	# The contended query must actually render (via example_queries): the card's
-	# "Query (normalized)" block was removed, so a finding that only set
-	# normalized_query would show no SQL at all.
+	# The contended query renders from example_queries.
 	assert "Affected queries" in html
 	assert "UPDATE `tabUser` SET x = ?" in html  # the failed query, normalized
-	# Issue #6: Lock Contention is actionable (joins "Fix these first") but has
-	# impact 0, so its action-plan step must NOT render a dangling "est. saving"
-	# label with no number. This is the only finding, so the label must be absent.
+	# Impact is 0, so the action plan must not render a dangling "est. saving" label.
 	assert "est. saving" not in html
 
 
 def test_lock_contention_tldr_hero_has_no_zero_ms_badge():
-	"""A top-ranked deadlock (impact 0) must not headline the TL;DR hero as
-	'0ms · ...'; the lock_contention branch leads with the title alone."""
+	"""A deadlock leads the TL;DR with its title, not a 0ms badge."""
 	import types
 
 	from optimus.renderer import _internal
@@ -559,7 +532,6 @@ def test_lock_contention_tldr_hero_has_no_zero_ms_badge():
 	assert "&middot;" not in headline and "·" not in headline
 
 
-# ----- review fixes -------------------------------------------------------
 
 
 def test_truncation_marker_becomes_warning():
@@ -605,15 +577,13 @@ def test_normalize_sql_safe_strips_literals():
 
 
 def test_normalize_sql_safe_never_returns_raw_literals():
-	# Even on a statement that doesn't cleanly normalize, the literal must never
-	# survive (frappe.recorder.normalize_query would return the raw text here).
+	# frappe.recorder.normalize_query would return the raw text here.
 	out = capture._normalize_sql_safe("GARBAGE 'rowsecret' ;;; not valid")
 	assert "rowsecret" not in out
 
 
 def test_normalize_sql_safe_strips_comment_literals():
-	# Comments can carry row data; frappe's normalize_query leaves them intact
-	# (they're not Token.Literal), so we strip them to honor "no row data".
+	# Comments can carry row data and are not literals, so they are stripped.
 	out = capture._normalize_sql_safe("SELECT 1 /* user secretpii@x.com */ FROM `tabX`")
 	assert "secretpii" not in out
 	assert "SELECT" in out
@@ -625,8 +595,7 @@ def test_normalize_sql_safe_empty_and_none():
 
 
 def test_normalize_sql_safe_coerces_non_str_query():
-	# db.sql accepts non-str query objects (query builders) str()-coerce, then
-	# normalize, so the finding shows the shape instead of a blank query.
+	# db.sql accepts query-builder objects, so the query is str()-coerced.
 	class _QB:
 		def __str__(self):
 			return "SELECT * FROM `tabX` WHERE id = 42"
@@ -640,32 +609,25 @@ def test_normalize_sql_safe_coerces_non_str_query():
 
 
 def test_finding_lists_all_distinct_queries_at_callsite():
-	"""Issue #7: multiple DISTINCT statements deadlocking at one callsite all
-	appear, not just the first otherwise the developer and the AI fix prompt are
-	pointed at the wrong table."""
+	"""Every distinct query at one callsite is listed."""
 	q1 = "UPDATE `tabA` SET x = ? WHERE name = ?"
 	q2 = "UPDATE `tabB` SET y = ? WHERE name = ?"
 	rec = {"lock_events": [_event(query=q1), _event(query=q2), _event(query=q1)]}
 	f = lock_contention.analyze([rec], _ctx()).findings[0]
 	detail = json.loads(f["technical_detail_json"])
-	# Stored under example_queries the key the report card + AI prompt render;
-	# sample_queries renders nowhere.
 	assert sorted(detail["example_queries"]) == sorted([q1, q2])  # both, deduped
 	assert "sample_queries" not in detail
 	assert detail["normalized_query"] in (q1, q2)
 
 
 def test_deadlock_description_does_not_overclaim_mechanism():
-	"""Issue #3: MariaDB reports a snapshot conflict (err 1020) as a deadlock too,
-	so the description must not assert 'rows in opposite orders' as the only cause."""
+	"""A deadlock description does not claim lock order is the only cause."""
 	f = lock_contention.analyze([{"lock_events": [_event(kind="deadlock")]}], _ctx()).findings[0]
 	assert "opposite orders" not in f["customer_description"]
 
 
 def test_timeout_description_is_db_agnostic():
-	"""Issue #3: the lock-wait description names innodb_lock_wait_timeout as a
-	MariaDB/MySQL EXAMPLE, not a fact about every backend (the same
-	QueryTimeoutError also covers a Postgres statement timeout)."""
+	"""The lock-wait description names the MariaDB timeout setting as an example."""
 	f = lock_contention.analyze(
 		[{"lock_events": [_event(kind="lock_wait_timeout")]}], _ctx()
 	).findings[0]
@@ -673,8 +635,7 @@ def test_timeout_description_is_db_agnostic():
 
 
 def test_finding_surfaces_wait_duration():
-	"""Issue #5: when events carry a duration, the finding exposes the wait time
-	(so the cost of a lock-wait timeout that burned ~50s is not invisible)."""
+	"""The finding exposes the wait time when events carry a duration."""
 	ev = _event(kind="lock_wait_timeout")
 	ev["duration_ms"] = 50000.0
 	f = lock_contention.analyze([{"lock_events": [ev]}], _ctx()).findings[0]
@@ -685,8 +646,7 @@ def test_finding_surfaces_wait_duration():
 
 
 def test_finding_wait_duration_absent_when_events_lack_it():
-	"""Events without a duration (older recordings) leave the wait fields None and
-	add no wait sentence no crash, no fabricated number."""
+	"""Events without a duration leave the wait fields None."""
 	f = lock_contention.analyze([{"lock_events": [_event()]}], _ctx()).findings[0]
 	detail = json.loads(f["technical_detail_json"])
 	assert detail["max_wait_ms"] is None and detail["total_wait_ms"] is None
@@ -701,7 +661,7 @@ def _stack(*frames):
 
 
 def test_erpnext_only_contention_is_not_a_finding():
-	"""Issue 1: a deadlock inside ERPNext / HRMS code is framework contention."""
+	"""A deadlock inside ERPNext / HRMS code is framework contention."""
 	for path in ("erpnext/erpnext/stock/stock_ledger.py", "hrms/hrms/payroll/x.py"):
 		stack = _stack((path, "repost"), ("frappe/frappe/database/database.py", "sql"))
 		assert lock_contention.analyze([{"lock_events": [_event(stack=stack)]}], _ctx()).findings == []
@@ -730,7 +690,7 @@ def test_tracked_apps_inclusion_mode_is_honoured(monkeypatch):
 
 
 def test_postgres_quoted_identifiers_survive_normalization():
-	"""Issue (first review): ``"tabX"`` is an identifier, not data."""
+	"""``"tabX"`` is an identifier, not data."""
 	query = 'UPDATE "tabBin" SET "qty" = 5 WHERE "name" = \'SECRET\''
 	out = capture._normalize_sql_safe(query, keep_quoted_identifiers=True)
 	assert '"tabBin"' in out and '"qty"' in out
@@ -745,8 +705,7 @@ def test_mariadb_double_quoted_values_are_still_stripped():
 
 
 def test_summary_does_not_claim_zero_ms_for_a_lock_finding():
-	"""Issue 5: no "~0ms - high priority" and no "time went into" for a finding that
-	has no measured impact."""
+	"""A finding with no measured impact has no ~0ms and no 'time went into'."""
 	from optimus import analyze
 
 	finding = lock_contention.analyze([{"lock_events": [_event()]}], _ctx()).findings[0]
@@ -774,7 +733,7 @@ def test_summary_keeps_time_wording_for_timed_findings():
 
 
 def test_lock_finding_shows_no_zero_ms_badge_in_report():
-	"""Issue 4: a 50s lock wait must not render as '0ms consolidated'."""
+	"""A 50s lock wait does not render as 0ms."""
 	import re
 	import types as _types
 
@@ -796,8 +755,7 @@ def test_lock_finding_without_wait_shows_kind_not_a_number():
 
 
 def test_reliability_finding_outranks_timed_one_in_a_root_cause_group():
-	"""The 0ms deadlock must not lose the primary card to a same-severity timed
-	finding in the same function."""
+	"""A deadlock outranks a same-severity timed finding in its group."""
 	from optimus.renderer import finding_enrichment as fe
 
 	callsite = {"filename": "app/app/stock.py", "function": "reserve", "lineno": 3}
