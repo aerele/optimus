@@ -1200,7 +1200,7 @@ def _build_messages(finding: dict, *, threshold_ms: float = 1000.0) -> tuple[str
 		hl_ms = hot.get("total_ms") or 0
 		hl_hits = hot.get("hits") or 0
 		parts.append(
-			f"Line-profile (Phase 2) over this function found its hottest line is "
+			f"Line profiling over this function found its hottest line is "
 			f"line {hot['lineno']}"
 			+ (f" `{hl_content}`" if hl_content else "")
 			+ (f" ({humanize_duration_ms(float(hl_ms), threshold_ms=threshold_ms)}" + (f" over {int(hl_hits)} call(s)" if hl_hits else "") + ")"

@@ -346,14 +346,14 @@
 		if (!run_uuid) return;
 		// Optimistic UI: the realtime phase_2_run_analyzing event will
 		// arrive within ~1s and confirm the transition.
-		setDisplay("stopping", "Stopping phase 2…", "");
+		setDisplay("stopping", "Stopping line profiling…", "");
 		frappe.call({
 			method: "optimus.api.stop_line_profile_pass",
 			args: { run_uuid: run_uuid },
 			callback: () => {
 				frappe.show_alert({
 					message: __(
-						"Phase 2 stopped analyzing now. Open the session " +
+						"Line profiling stopped analyzing now. Open the session " +
 						"to see the line-level report when it's ready."
 					),
 					indicator: "blue",
@@ -361,7 +361,7 @@
 			},
 			error: () => {
 				// Server rejected: surface the error and revert state.
-				setDisplay("recording", "Phase 2 recording…", "click form to stop");
+				setDisplay("recording", "Line profiling recording…", "click form to stop");
 			},
 		});
 	}
@@ -790,7 +790,7 @@
 			currentState.session_uuid = data.session_uuid;
 			setDisplay(
 				"recording",
-				"Phase 2 recording…",
+				"Line profiling recording…",
 				"click pill or form to stop"
 			);
 		});
@@ -800,7 +800,7 @@
 			currentState.display = "analyzing";
 			currentState.phase2 = true;
 			currentState.run_uuid = data.run_uuid || currentState.run_uuid;
-			setDisplay("analyzing", "Phase 2 analyzing…", "");
+			setDisplay("analyzing", "Line profiling analyzing…", "");
 		});
 
 		frappe.realtime.on("phase_2_run_ready", (data) => {
@@ -809,9 +809,9 @@
 			currentState.phase2 = false;
 			currentState.run_uuid = null;
 			currentState.docname = data.parent || currentState.docname;
-			setDisplay("ready", "Phase 2 report ready", "click to view");
+			setDisplay("ready", "Line profiling report ready", "click to view");
 			frappe.show_alert({
-				message: __("Phase 2 line-profile report ready"),
+				message: __("Line profiling report ready"),
 				indicator: "blue",
 			});
 		});
@@ -820,9 +820,9 @@
 			if (!matchesCurrentSession(data)) return;
 			currentState.display = "ready";
 			currentState.phase2 = false;
-			setDisplay("ready", "Phase 2 failed", "click to view");
+			setDisplay("ready", "Line profiling failed", "click to view");
 			frappe.show_alert({
-				message: __("Phase 2 analyze failed: " + (data.error || "unknown")),
+				message: __("Line profiling analyze failed: " + (data.error || "unknown")),
 				indicator: "red",
 			});
 		});

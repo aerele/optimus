@@ -50,7 +50,7 @@ Triggered by **Suggest a fix (AI)** (on-demand) or auto-suggest at analyze time.
 | `callsite.lineno` | technical_detail_json | 3–5 chars | Line number. |
 | `callsite.function` | technical_detail_json | 20–60 chars | Function name from your code. |
 | **`source_window`** | `renderer._read_source_window` | **1–2 KB typical** | Up to 80 lines of your source: 24 before / 24 after the callsite, capped at `_MAX_SOURCE_WINDOW_LINES`. Verbatim including comments, strings, variable names. **This is the largest field in a typical request.** |
-| `phase2_hotline` | Phase 2 line-profile | 100–400 chars | When available, the hottest single line from line-profiling (line number, content, total ms, hit count). |
+| `phase2_hotline` | Line profiling | 100–400 chars | When available, the hottest single line from line-profiling (line number, content, total ms, hit count). |
 | `technical_detail.function` | technical_detail_json | 30–80 chars | Hot function name (for Slow-Hot-Path-type findings). |
 | `technical_detail.cumulative_ms` | technical_detail_json | ~5 chars | Time in that function. |
 | `technical_detail.action_wall_time_ms` | technical_detail_json | ~5 chars | Action's total wall time. |

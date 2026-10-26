@@ -644,7 +644,7 @@ def _auto_arm_phase2(docname: str, context) -> None:
 		)
 	except Exception:
 		# Never let auto-arm break a finished analyze.
-		frappe.log_error(title="optimus auto-arm phase 2")
+		frappe.log_error(title="optimus auto-arm line profiling")
 
 
 def run(session_uuid: str, _bg_wait_until: float | None = None,

@@ -1985,8 +1985,8 @@ def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 	# read separate Redis flags but only one can be active at a time.
 	if session.get_active_session_for(user):
 		frappe.throw(
-			_("You currently have a phase-1 session recording. Stop it before "
-			"starting a phase-2 line-profile run."),
+			_("You currently have a profiling session recording. Stop it before "
+			"starting a line profiling run."),
 		)
 
 	# Look up the parent Optimus Session and verify it's Ready.
@@ -2001,14 +2001,14 @@ def start_line_profile_pass(session_uuid: str, picks, auto_expand=True) -> dict:
 	if parent_status != "Ready":
 		frappe.throw(
 			_(
-				"Phase-2 requires a finished session (status=Ready); current "
+				"Line profiling requires a finished session (status=Ready); current "
 				"status is {0!r}."
 			).format(parent_status)
 		)
 
 	# Reject if the user already has a phase-2 run in flight elsewhere.
 	if _lp_capture.is_active(user):
-		frappe.throw(_("You already have a phase-2 line-profile run active."))
+		frappe.throw(_("You already have a line profiling run active."))
 
 	# Auto-expand curated picks via phase-1's call tree. Curated picks come
 	# in as {dotted_path, source: "curated"}; the expansion adds their hot
@@ -2241,9 +2241,9 @@ def stop_line_profile_pass(run_uuid: str) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(_("Phase 2 run {0!r} not found.").format(run_uuid))
+		frappe.throw(_("Line profiling run {0!r} not found.").format(run_uuid))
 	if row.status != "Recording":
-		frappe.throw(_("Phase 2 run is in status {0!r}, not Recording.").format(row.status))
+		frappe.throw(_("Line profiling run is in status {0!r}, not Recording.").format(row.status))
 
 	parent_docname = row.parent
 	session_uuid = frappe.db.get_value("Optimus Session", parent_docname, "session_uuid")
@@ -2278,7 +2278,7 @@ def stop_line_profile_pass(run_uuid: str) -> dict:
 	try:
 		run_inline = bool(is_scheduler_disabled())
 	except Exception:
-		frappe.log_error(title="optimus phase-2 scheduler check")
+		frappe.log_error(title="optimus line profiling scheduler check")
 
 	if run_inline:
 		frappe.logger().warning(
@@ -2346,7 +2346,7 @@ def retry_phase2_analyze(run_uuid: str) -> dict:
 		as_dict=True,
 	)
 	if not row:
-		frappe.throw(_("Phase 2 run {0!r} not found.").format(run_uuid))
+		frappe.throw(_("Line profiling run {0!r} not found.").format(run_uuid))
 	parent_docname = row.parent
 	session_uuid = frappe.db.get_value("Optimus Session", parent_docname, "session_uuid")
 	# SECURITY: ownership gate on the resolved parent session (run_uuid alone is

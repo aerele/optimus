@@ -481,22 +481,22 @@ def _sweep_stale_phase2_runs():
 				{
 					"status": "Failed",
 					"warnings_json": frappe.as_json([
-						"Phase 2 run expired before any line data was captured "
+						"Line profiling run expired before any line data was captured "
 						"(no flow re-run within the window) auto-stopped by "
 						"janitor. To retry: click \"Run Line-Profile Pass\", "
-						"re-run your flow, then \"Stop Phase 2 Run\".",
+						"re-run your flow, then \"Stop Line Profiling Run\".",
 					]),
 					"ended_at": now_datetime(),
 				},
 			)
 			safe_commit()
 		except Exception:
-			frappe.log_error(title="optimus janitor stale phase-2 recording")
+			frappe.log_error(title="optimus janitor stale line profiling recording")
 		for row in rec_stale:
 			try:
 				_lp_capture.cleanup_run(row["run_uuid"])
 			except Exception:
-				frappe.log_error(title="optimus janitor stale phase-2 recording cleanup")
+				frappe.log_error(title="optimus janitor stale line profiling recording cleanup")
 
 	ana_cutoff = add_to_date(now_datetime(), minutes=-STALE_ANALYZING_MINUTES)
 	ana_stuck = frappe.db.get_all(
@@ -512,7 +512,7 @@ def _sweep_stale_phase2_runs():
 				{
 					"status": "Failed",
 					"warnings_json": frappe.as_json([
-						"Phase 2 analyze timed out or crashed. Retry from a "
+						"Line profiling analyze timed out or crashed. Retry from a "
 						"Frappe console: "
 						"optimus.line_profile.analyzer.run_analyze("
 						"'<session_uuid>', '<run_uuid>')",
@@ -522,9 +522,9 @@ def _sweep_stale_phase2_runs():
 			)
 			safe_commit()
 		except Exception:
-			frappe.log_error(title="optimus janitor stuck phase-2 analyzing")
+			frappe.log_error(title="optimus janitor stuck line profiling analyzing")
 		for row in ana_stuck:
 			try:
 				_lp_capture.cleanup_run(row["run_uuid"])
 			except Exception:
-				frappe.log_error(title="optimus janitor stuck phase-2 analyzing cleanup")
+				frappe.log_error(title="optimus janitor stuck line profiling analyzing cleanup")

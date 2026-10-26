@@ -358,7 +358,7 @@ class TestLeafPickAndChain:
 		assert hint["phase1_cumulative_ms"] == 340.0
 		# Customer description appended with the hint sentence.
 		# v0.7.x A.AE2: reworded for clarity about cross-call aggregation.
-		assert "In phase 1, this descendant" in hot[0]["customer_description"]
+		assert "In the normal profile, this descendant" in hot[0]["customer_description"]
 		assert "_check_user_exists" in hot[0]["customer_description"]
 
 	def test_no_phase1_hint_when_no_eligible_descendant(self):

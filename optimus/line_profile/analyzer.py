@@ -182,7 +182,7 @@ def _compute_phase1_hint(
 		"next_hot_callee": callee_dotted,
 		"phase1_cumulative_ms": round(float(hottest.get("cumulative_ms") or 0), 2),
 		"suggested_action": (
-			f"Re-run Phase 2 with {callee_dotted} picked for line-level breakdown."
+			f"Re-run line profiling with {callee_dotted} picked for line-level breakdown."
 		),
 	}
 
@@ -340,7 +340,7 @@ def _attach_phase1_hint(finding: dict, hint: dict) -> None:
 	finding["technical_detail_json"] = json.dumps(td, default=str)
 
 	finding["customer_description"] = finding["customer_description"] + (
-		f"\n\nIn phase 1, this descendant **{hint['next_hot_callee']}** "
+		f"\n\nIn the normal profile, this descendant **{hint['next_hot_callee']}** "
 		f"accumulated {dur(hint['phase1_cumulative_ms'])} across all calls "
 		f"of the parent function (not a single-action wall time). "
 		f"{hint['suggested_action']}"
@@ -509,7 +509,7 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 	run_row = _find_run_row(session_uuid, run_uuid)
 	if run_row is None:
 		raise RuntimeError(
-			f"Phase 2 Run {run_uuid} not found on session {session_uuid}"
+			f"Line profiling run {run_uuid} not found on session {session_uuid}"
 		)
 	parent_docname = run_row.parent
 	# Resolve the session owner so realtime events reach their Desk tab. This runs
@@ -683,7 +683,7 @@ def _mark_run_failed(parent_docname: str, run_uuid: str, error: str, tb: str) ->
 			if child.run_uuid == run_uuid:
 				child.status = "Failed"
 				child.warnings_json = json.dumps([
-					f"phase 2 analyze failed: {error}",
+					f"line profiling analyze failed: {error}",
 					tb,
 				], default=str)
 				child.ended_at = frappe.utils.now_datetime()
@@ -712,6 +712,6 @@ def _regenerate_parent_reports(session_uuid: str) -> None:
 		# just needs to click "Regenerate Reports" manually. Surface the
 		# error in the run row for debuggability.
 		frappe.log_error(
-			title="phase 2 re-render failed",
+			title="line profiling re-render failed",
 			message=f"{session_uuid}: {exc}\n{traceback.format_exc()}",
 		)

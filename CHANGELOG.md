@@ -8,6 +8,15 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.80] - 2026-10-26
+
+### Changed
+
+- The "Phase 2" feature is now called "Line profiling" everywhere you see it: the Optimus Session form buttons and dialog (Line Profiling > Run Line-Profile Pass, Stop Line Profiling Run, Retry), the floating widget status text, notifications and error messages, the Optimus Settings section and field labels, and the line profiling wording in reports. Existing data, runs and settings are unaffected.
+- Reports now say "in the normal profile" instead of "in phase 1" in the line profiling fallback hint.
+
+---
+
 ## [0.12.70] - 2026-10-22
 
 ### Fixed

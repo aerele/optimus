@@ -1,4 +1,4 @@
-__version__ = "0.12.70"
+__version__ = "0.12.80"
 
 
 def safe_commit() -> None:
@@ -299,8 +299,8 @@ def _startup_probe_tool2() -> None:
 		if owner == "line_profiler":
 			log(
 				"optimus._startup_probe_tool2: reclaiming line_profiler "
-				"orphan on sys.monitoring tool 2 (worker died mid-Phase-2). "
-				"Auto-released; next Phase 2 run starts clean."
+				"orphan on sys.monitoring tool 2 (worker died mid line profiling). "
+				"Auto-released; next line profiling run starts clean."
 			)
 			try:
 				mon.set_events(pid, 0)
@@ -310,7 +310,7 @@ def _startup_probe_tool2() -> None:
 		else:
 			log(
 				f"optimus._startup_probe_tool2: sys.monitoring tool 2 is "
-				f"already owned by {owner!r} at app-import. Phase 2 will "
+				f"already owned by {owner!r} at app-import. Line profiling will "
 				f"conflict; check for a third-party profiler / debugger."
 			)
 	except Exception:

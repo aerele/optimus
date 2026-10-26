@@ -107,7 +107,7 @@ def before_request_line_profile(*args, **kwargs) -> None:
 		)
 	except Exception as exc:
 		frappe.log_error(
-			title="phase 2 before_request failed",
+			title="line profiling before_request failed",
 			message=f"{type(exc).__name__}: {exc}",
 		)
 
@@ -140,7 +140,7 @@ def after_request_line_profile(*args, **kwargs) -> None:
 		capture.flush_samples(run_uuid, samples)
 	except Exception as exc:
 		frappe.log_error(
-			title="phase 2 after_request failed",
+			title="line profiling after_request failed",
 			message=f"{type(exc).__name__}: {exc}",
 		)
 	finally:
@@ -223,7 +223,7 @@ def before_job_line_profile(method=None, kwargs=None, **rest) -> None:
 		)
 	except Exception as exc:
 		frappe.log_error(
-			title="phase 2 before_job failed",
+			title="line profiling before_job failed",
 			message=f"{type(exc).__name__}: {exc}",
 		)
 
@@ -252,7 +252,7 @@ def after_job_line_profile(method=None, kwargs=None, result=None, **rest) -> Non
 		capture.flush_samples(run_uuid, samples)
 	except Exception as exc:
 		frappe.log_error(
-			title="phase 2 after_job failed",
+			title="line profiling after_job failed",
 			message=f"{type(exc).__name__}: {exc}",
 		)
 	finally:
