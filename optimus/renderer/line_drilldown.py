@@ -351,12 +351,7 @@ def _render_line_drilldown_panel(session_doc: Any, threshold_ms: float = DEFAULT
 					"source": picks_source.get(fn.get("dotted_path"), "curated"),
 				}
 			)
-		# A run whose results are persisted is finished. The parent flips its stored
-		# status to Ready only AFTER this render runs (so the badge lands in step
-		# with the completion popup), so a just-finished run is still "Analyzing"
-		# here. The shared rule keys off persisted results (so an empty-but-done
-		# "[]" run still shows Ready, not a frozen "Analyzing"), with Failed winning
-		# identical logic to _build_line_drilldown_runs so the two never disagree.
+		# Stored status flips to Ready only after this render, so derive it from persisted results.
 		display_status = phase2_run_display_status(child)
 		parsed_runs.append(
 			{

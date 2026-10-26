@@ -417,22 +417,11 @@ def test_publish_swallows_errors(monkeypatch):
 	analyzer._publish("phase_2_run_ready", {"user": "x@y.z"})
 
 
-# ---------------------------------------------------------------------------
-# run_analyze status/commit sequencing (v0.12.x): the findings are committed
-# durably as "Analyzing" BEFORE the slow re-render (so a worker kill mid-render
-# can't lose them; no write lock is held across the AI backfill). The run flips
-# to "Ready" (committed) only AFTER the report is attached, so the status the
-# client polls and the phase_2_run_ready popup land together. Previously
-# _persist_run marked Ready + committed before the re-render + AI backfill.
-# ---------------------------------------------------------------------------
+# run_analyze commit sequencing: results commit as Analyzing, Ready only after the render.
 
 
 def _wire_run_analyze(monkeypatch, order, child, doc, *, render_ok=True, findings=None):
-	"""Shared harness for run_analyze sequencing tests. Wires a fake frappe whose
-	``db.set_value`` MUTATES the in-memory child row (mirroring the real targeted
-	UPDATE that _mark_run_ready / _mark_run_failed now do), so each recorded event
-	carries the row's true status at that instant. ``render_ok`` drives the mocked
-	_regenerate_parent_reports' bool return."""
+	"""Wire a fake frappe whose set_value mutates the child row, recording each event in order."""
 	import types
 
 	from optimus.analyzers.base import AnalyzerResult
@@ -441,13 +430,11 @@ def _wire_run_analyze(monkeypatch, order, child, doc, *, render_ok=True, finding
 	def _get_value(doctype, filters, field, *a, **k):
 		if doctype == "Optimus Session" and field == "user":
 			return "u@e.com"
-		# Row-name lookup used by _mark_run_ready / _mark_run_failed.
 		if doctype == "Optimus Phase Two Run" and field == "name":
 			return "PTR-1"
 		return None
 
 	def _set_value(doctype, name, values, *a, **k):
-		# Simulate the targeted child-row UPDATE by mutating the in-memory row.
 		for key, val in (values or {}).items():
 			setattr(child, key, val)
 
@@ -469,7 +456,6 @@ def _wire_run_analyze(monkeypatch, order, child, doc, *, render_ok=True, finding
 	monkeypatch.setattr(lp_capture, "budget_was_hit", lambda r: False, raising=False)
 	monkeypatch.setattr(lp_capture, "cleanup_run",
 		lambda r: order.append(("cleanup", child.status)), raising=False)
-	# Record the render event AND return the bool the finalize gates on.
 	monkeypatch.setattr(analyzer, "_regenerate_parent_reports",
 		lambda s: (order.append(("regenerate", child.status)), render_ok)[1])
 	monkeypatch.setattr(analyzer, "safe_commit",
@@ -487,7 +473,6 @@ def _fresh_run_doc():
 	doc = types.SimpleNamespace(
 		phase_2_runs=[child], actions=[], findings=[], flags=types.SimpleNamespace(),
 	)
-	# Mirror Frappe: parent.append wraps the dict in an attribute-access child row.
 	doc.append = lambda field, value: getattr(doc, field).append(types.SimpleNamespace(**value))
 	doc.save = lambda **kw: None
 	return child, doc
@@ -500,63 +485,48 @@ def test_run_analyze_persists_analyzing_then_flips_ready_after_render(monkeypatc
 
 	analyzer.run_analyze("sess-1", "run-1")
 
-	# The analysis is committed durably with the run still Analyzing (NOT Ready),
-	# so a worker kill during the slow render can't lose it.
 	assert ("commit", "Analyzing") in order, order
 	persist_commit = order.index(("commit", "Analyzing"))
-	# The re-render runs while the run is still Analyzing.
 	assert ("regenerate", "Analyzing") in order, order
 	regen = order.index(("regenerate", "Analyzing"))
-	# The run flips to Ready and commits only AFTER the render.
 	assert ("commit", "Ready") in order, order
 	ready_commit = order.index(("commit", "Ready"))
-	# The ready popup fires with the run already Ready, right after that commit.
 	ready_popup = order.index(("publish", "phase_2_run_ready", "Ready"))
 
 	assert persist_commit < regen < ready_commit < ready_popup, order
 	assert child.status == "Ready"
-	# cleanup always runs (Redis never leaked).
 	assert any(ev[0] == "cleanup" for ev in order), order
-	# No commit ever observes Ready before the render (the old bug).
 	assert not any(
 		ev == ("commit", "Ready") and i < regen for i, ev in enumerate(order)
 	), order
 
 
 def test_run_analyze_render_failure_marks_failed_never_ready(monkeypatch):
-	"""Headline invariant: a FAILED re-render must never flip the run to Ready or
-	fire the ready popup it marks Failed with an actionable message, fires the
-	failed popup, and still cleans up Redis."""
+	"""A failed render marks the run Failed, never Ready."""
 	order: list = []
 	child, doc = _fresh_run_doc()
 	_wire_run_analyze(monkeypatch, order, child, doc, render_ok=False)
 
 	analyzer.run_analyze("sess-1", "run-1")
 
-	# Findings were persisted durably first.
 	assert ("commit", "Analyzing") in order, order
-	# Render failed, so the run is Failed never Ready.
 	assert child.status == "Failed", order
 	assert not any(ev[:2] == ("publish", "phase_2_run_ready") for ev in order), order
-	# The user is told via the failed popup rather than left waiting silently.
 	assert any(ev[:2] == ("publish", "phase_2_run_failed") for ev in order), order
-	# cleanup still runs on the failure branch (no Redis leak).
 	assert any(ev[0] == "cleanup" for ev in order), order
 
 
 def test_run_analyze_vanished_row_after_render_does_not_pop_ready(monkeypatch):
-	"""If the run row vanished before the Ready flip, _mark_run_ready returns False
-	the ready popup must NOT fire (honouring the return), but cleanup still runs."""
+	"""A vanished run row skips the ready popup but still cleans up."""
 	import types
 	order: list = []
 	child, doc = _fresh_run_doc()
 	_wire_run_analyze(monkeypatch, order, child, doc, render_ok=True)
 
-	# Row lookup for the flip now returns nothing (row deleted mid-finalize).
 	def _get_value_vanished(doctype, filters, field, *a, **k):
 		if doctype == "Optimus Session" and field == "user":
 			return "u@e.com"
-		return None  # Phase Two Run name lookup -> vanished
+		return None
 	monkeypatch.setattr(analyzer.frappe, "db",
 		types.SimpleNamespace(get_value=_get_value_vanished, set_value=lambda *a, **k: None))
 
@@ -568,8 +538,7 @@ def test_run_analyze_vanished_row_after_render_does_not_pop_ready(monkeypatch):
 
 
 def test_persist_run_is_idempotent_no_duplicate_findings_on_retry(monkeypatch):
-	"""Re-running _persist_run for the SAME run_uuid replaces that run's findings
-	instead of appending a second copy (retry no longer doubles the count)."""
+	"""Persisting the same run_uuid twice does not duplicate findings."""
 	import types
 
 	from optimus.analyzers.base import AnalyzerResult
@@ -592,27 +561,23 @@ def test_persist_run_is_idempotent_no_duplicate_findings_on_retry(monkeypatch):
 	analyzer._persist_run("PS-1", "run-1",
 		[], AnalyzerResult(findings=_findings(), aggregate={"phase2_functions": []}, warnings=[]), 0.0)
 	assert len(doc.findings) == 2
-	# Each row carries the owning run_uuid tag inside technical_detail_json.
 	assert all(
 		_json.loads(f.technical_detail_json).get("_phase2_run_uuid") == "run-1"
 		for f in doc.findings
 	)
 
-	# Retry with the same run_uuid the prior two rows must be dropped, not doubled.
 	analyzer._persist_run("PS-1", "run-1",
 		[], AnalyzerResult(findings=_findings(), aggregate={"phase2_functions": []}, warnings=[]), 0.0)
 	assert len(doc.findings) == 2, [getattr(f, "title", None) for f in doc.findings]
 
 
 def test_persist_run_preserves_other_runs_and_phase1_findings(monkeypatch):
-	"""Idempotent dedup drops ONLY this run's findings phase-1 findings (no tag)
-	and another run's findings (different tag) survive a re-run."""
+	"""A re-run drops only its own findings, keeping phase-1 and other runs'."""
 	import types
 
 	from optimus.analyzers.base import AnalyzerResult
 
 	child, doc = _fresh_run_doc()
-	# Pre-seed: a phase-1 finding (no tag) and another run's finding (run-OTHER).
 	doc.findings = [
 		types.SimpleNamespace(finding_type="N+1 Query", title="p1",
 			technical_detail_json=_json.dumps({"q": "x"})),
@@ -632,7 +597,6 @@ def test_persist_run_preserves_other_runs_and_phase1_findings(monkeypatch):
 
 	titles = sorted(f.title for f in doc.findings)
 	assert titles == ["mine", "other", "p1"], titles
-	# Re-run: still exactly one "mine" (deduped), p1 + other untouched.
 	analyzer._persist_run("PS-1", "run-1", [], AnalyzerResult(
 		findings=[{"finding_type": "Hot Line", "title": "mine",
 			"technical_detail_json": _json.dumps({"lineno": 1})}],
@@ -642,8 +606,7 @@ def test_persist_run_preserves_other_runs_and_phase1_findings(monkeypatch):
 
 
 def test_persist_run_raises_when_row_vanished(monkeypatch):
-	"""A missing run row aborts the persist (raise) rather than appending orphan
-	findings with no run to mark Ready."""
+	"""A missing run row aborts the persist."""
 	import types
 
 	import pytest
@@ -661,13 +624,11 @@ def test_persist_run_raises_when_row_vanished(monkeypatch):
 			findings=[{"finding_type": "Hot Line", "title": "x",
 				"technical_detail_json": "{}"}],
 			aggregate={"phase2_functions": []}, warnings=[]), 0.0)
-	# Nothing was appended.
 	assert doc.findings == []
 
 
 def test_phase2_run_display_status_rules():
-	"""The shared display rule: Failed wins, persisted results (even '[]') read as
-	Ready while the flip is pending, no results stays in-progress."""
+	"""Failed wins, persisted results read as Ready, otherwise the stored status."""
 	import types
 
 	from optimus.analyzers.base import phase2_run_display_status

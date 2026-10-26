@@ -504,12 +504,7 @@ def _sweep_stale_phase2_runs():
 		filters={"status": "Analyzing", "modified": ["<", ana_cutoff]},
 		fields=["name", "parent", "run_uuid", "results_json"],
 	)
-	# Split the stuck rows. A run whose ``results_json`` is already persisted
-	# FINISHED analyzing the worker died during the finalize (re-render / Ready
-	# flip), so its findings are durable. Marking it Failed would show a red badge
-	# over a populated drill-down and discard the result the user waited for, so
-	# recover it: flip to Ready and enqueue a re-render so the panel lands. Only a
-	# run with NO persisted results is genuinely stuck in analysis Failed that.
+	# Results already saved: the worker died while finalizing, so recover the run instead of failing it.
 	finalize_stuck = [r for r in ana_stuck if (r.get("results_json") or "") != ""]
 	analyze_stuck = [r for r in ana_stuck if (r.get("results_json") or "") == ""]
 
@@ -524,9 +519,7 @@ def _sweep_stale_phase2_runs():
 		except Exception:
 			frappe.log_error(title="optimus janitor finalize-stuck phase-2 flip")
 		for row in finalize_stuck:
-			# Re-render so the report picks up the phase-2 panel (the worker may
-			# have died before the render ran). Idempotent + harmless if the panel
-			# is already there.
+			# The worker may have died before the render ran.
 			try:
 				session_uuid = frappe.db.get_value(
 					"Optimus Session", row["parent"], "session_uuid"
@@ -539,7 +532,6 @@ def _sweep_stale_phase2_runs():
 					)
 			except Exception:
 				frappe.log_error(title="optimus janitor finalize-stuck phase-2 regenerate")
-			# Redis samples are no longer needed (no re-analysis), so release them.
 			try:
 				_lp_capture.cleanup_run(row["run_uuid"])
 			except Exception:

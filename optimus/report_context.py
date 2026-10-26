@@ -370,9 +370,7 @@ def _build_line_drilldown_runs(session_doc, threshold_ms: float = DEFAULT_DISPLA
 	result = []
 	number = 0
 	for run in runs:
-		# Shared display rule: include a run once its results are persisted, even
-		# while its stored status is still the pending-flip "Analyzing" matches
-		# the renderer's panel so the two surfaces never disagree.
+		# Same display rule as the renderer panel.
 		display_status = phase2_run_display_status(run)
 		if display_status != "Ready":
 			continue
