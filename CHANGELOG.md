@@ -8,7 +8,7 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.70] - 2026-10-22
+## [0.12.88] - 2026-10-26
 
 ### Added
 
@@ -47,11 +47,26 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [Unreleased]
+## [0.12.70] - 2026-10-22
+
+### Fixed
+
+- SQL in the call tree is now attached to the function in the same file when two functions share a name, such as two `validate` methods. Before, it went under whichever came first.
+- A whitelisted endpoint whose time is really in a callee is no longer reported as a self-time hot path. The slow callee gets the finding, the function's own time is reported only when it is a hot path by itself, and otherwise the title says "and its callees".
+
+---
+
+## [0.12.69] - 2026-10-21
 
 ### Fixed
 
 - Slowest-queries table no longer clips SQL at 500 characters; the full normalized statement is shown (scrollable in the cell).
+- The "after fix" projection for Low Filter Ratio findings now uses the
+  dialect-blind `selectivity_pct` instead of MariaDB's raw `filtered` key, so it
+  also works for Postgres plans.
+- Normalized EXPLAIN rows are coerced with `to_int` / `to_float`, so a string or
+  `Decimal` value no longer drops that row's findings. `to_int` / `to_float` also
+  treat `nan` / `inf` as missing instead of passing them to threshold checks.
 
 ### Internal
 
@@ -59,15 +74,6 @@ versions may contain breaking changes see migration notes below).
   helpers (`_to_float`, `_to_int`) in `analyzers/explain_flags.py`. EXPLAIN
   numeric columns are coerced in the dbdialect layer (`dbdialect.base.to_float` /
   `to_int`, used from `dbdialect/mariadb.py`).
-
-### Fixed
-
-- The "after fix" projection for Low Filter Ratio findings now uses the
-  dialect-blind `selectivity_pct` instead of MariaDB's raw `filtered` key, so it
-  also works for Postgres plans.
-- Normalized EXPLAIN rows are coerced with `to_int` / `to_float`, so a string or
-  `Decimal` value no longer drops that row's findings. `to_int` / `to_float` also
-  treat `nan` / `inf` as missing instead of passing them to threshold checks.
 
 ---
 
