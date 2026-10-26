@@ -9,7 +9,6 @@ monkeypatched (no network, no live site); ``_resolve_provider`` / ``is_available
 are tested with ``settings.get_config`` patched.
 """
 
-import json
 from types import SimpleNamespace
 from unittest.mock import patch
 

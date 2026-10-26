@@ -11,7 +11,7 @@ provider / non-Ready / non-owning user all raise before any work).
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 

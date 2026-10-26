@@ -79,7 +79,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 				continue
 			all_queries.append(
 				{
-					"normalized_query": (call.get("normalized_query") or call.get("query") or "")[:500],
+					"normalized_query": call.get("normalized_query") or call.get("query") or "",
 					# v0.7.x M5: renamed from ``duration_ms`` to disambiguate
 				# from action.duration_ms (per-request wall) and
 				# t.duration_ms (consolidated per-table). This is the
