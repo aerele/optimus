@@ -71,14 +71,16 @@
 
 	let widget = null;
 	let elapsedHandle = null;
-	let currentState = {
-		active: false,
-		session_uuid: null,
-		docname: null,
-		label: null,
-		started_at: null,
-		display: "inactive", // inactive | recording | stopping | analyzing | ready
-	};
+	// State logic is in optimus_pill_state.js.
+	const Pill = window.OptimusPillState;
+	if (!Pill) {
+		_diag("[optimus] optimus_pill_state.js missing, widget will not mount");
+		return;
+	}
+	let currentState = Pill.initialState();
+	let fallbackTimer = null;
+	let pollStartedAt = 0;
+	let pollAttempt = 0;
 
 	function init() {
 		// v0.5.2 round 4: hide widget entirely when Optimus Settings ▸
@@ -253,67 +255,79 @@
 		widget.classList.add(`fp-state-${display}`);
 		widget.querySelector(".fp-label").textContent = label;
 		widget.querySelector(".fp-elapsed").textContent = elapsed || "";
+		syncPoll(display);
 	}
 
-	function refreshStatus() {
-		// If we're locally in a transient state (stopping/analyzing/ready),
-		// don't override it with status() server may not have reflected
-		// our local action yet.
-		if (currentState.display === "stopping" || currentState.display === "analyzing") {
+	// Apply a {state, ui, alert} result from the pill reducers.
+	function applyResult(res) {
+		if (!res) return;
+		currentState = res.state;
+		if (res.ui) setDisplay(res.ui.display, res.ui.label, res.ui.elapsed);
+		if (res.alert) {
+			frappe.show_alert({ message: __(res.alert.message), indicator: res.alert.indicator });
+		}
+		if (widget && !currentState.session_uuid) {
+			widget.removeAttribute("data-session-uuid");
+		}
+	}
+
+	// Fallback poll for missed realtime events, with backoff and a hard stop.
+	function syncPoll(display) {
+		if (!Pill.isTransient(display)) {
+			stopPoll();
+		} else if (!fallbackTimer) {
+			pollStartedAt = Date.now();
+			pollAttempt = 0;
+			schedulePoll();
+		}
+	}
+
+	function schedulePoll() {
+		fallbackTimer = setTimeout(pollTick, Pill.nextDelay(pollAttempt));
+	}
+
+	function stopPoll() {
+		if (fallbackTimer) clearTimeout(fallbackTimer);
+		fallbackTimer = null;
+	}
+
+	function pollTick() {
+		fallbackTimer = null;
+		if (!Pill.isTransient(currentState.display)) return;
+		if (document.hidden) {
+			// No request while hidden; the visibility handler resyncs.
+			schedulePoll();
 			return;
 		}
-		frappe.call({
-			method: "optimus.api.status",
-			callback: (r) => {
-				// v0.5.0 pass-4 fix: re-check the display state inside
-				// the callback. The guard at the top of refreshStatus
-				// only prevents NEW polls from firing during transient
-				// states it doesn't help an in-flight poll whose
-				// frappe.call was already dispatched before the user
-				// clicked Stop. Without this check, a late-arriving
-				// status response would overwrite the "stopping"
-				// display back to "recording" and break the state
-				// machine.
-				if (
-					currentState.display === "stopping"
-					|| currentState.display === "analyzing"
-					|| currentState.display === "ready"
-				) {
-					return;
-				}
+		if (Pill.pollExpired(Date.now() - pollStartedAt)) {
+			applyResult(Pill.reduceHardStop(currentState));
+			return;
+		}
+		pollAttempt += 1;
+		refreshStatus(() => {
+			if (Pill.isTransient(currentState.display) && !fallbackTimer) schedulePoll();
+		});
+	}
 
-				const data = r.message || {};
-				if (data.active) {
-					currentState.active = true;
-					currentState.session_uuid = data.session_uuid;
-					currentState.docname = data.docname;
-					currentState.label = data.label;
-					currentState.started_at = data.started_at;
-					currentState.display = "recording";
+	function refreshStatus(done) {
+		// Resync the pill from api.pill_state.
+		frappe.call({
+			method: "optimus.api.pill_state",
+			args: {
+				session_uuid: currentState.session_uuid || undefined,
+				run_uuid: currentState.run_uuid || undefined,
+			},
+			callback: (r) => {
+				const prev = currentState.display;
+				applyResult(Pill.reduceServer(currentState, (r && r.message) || {}, Date.now()));
+				if (currentState.display === "recording" && prev !== "recording") {
 					startElapsedTimer();
 					setDisplay("recording", "Recording", computeElapsed());
-					// v0.5.0: expose session UUID on the widget element so
-					// optimus_frontend.js can tag its flush payloads without
-					// a shared global.
-					if (widget) {
-						widget.setAttribute("data-session-uuid", data.session_uuid || "");
-					}
-				} else {
-					if (currentState.display === "recording") {
-						// We thought we were recording but server says no auto-stop
-						// fired or someone called stop from elsewhere. Reset.
-						currentState.display = "inactive";
-						currentState.active = false;
-						stopElapsedTimer();
-					}
-					if (currentState.display !== "ready") {
-						setDisplay("inactive", "Profiler", "");
-					}
-					if (widget) {
-						widget.removeAttribute("data-session-uuid");
-					}
+					if (widget) widget.setAttribute("data-session-uuid", currentState.session_uuid || "");
 				}
+				if (done) done();
 			},
+			error: () => { if (done) done(); },
 		});
 	}
 
@@ -334,9 +348,14 @@
 			// Navigate to the session detail view
 			if (currentState.docname) {
 				frappe.set_route("Form", "Optimus Session", currentState.docname);
-				currentState.display = "inactive";
-				setDisplay("inactive", "Profiler", "");
 			}
+			// Drop the finished session so a resync cannot revive the pill.
+			currentState.display = "inactive";
+			currentState.session_uuid = null;
+			currentState.run_uuid = null;
+			currentState.phase2 = false;
+			if (widget) widget.removeAttribute("data-session-uuid");
+			setDisplay("inactive", "Profiler", "");
 		}
 		// stopping/analyzing: clicks are no-op until the state resolves
 	}
@@ -628,9 +647,13 @@
 							indicator: "blue",
 						});
 					}
+				} else if (currentState.display === "ready") {
+					// The ready event arrived before the stop response.
+					currentState.docname = data.docname || currentState.docname;
 				} else {
 					setDisplay("analyzing", "Analyzing…", "");
 					currentState.display = "analyzing";
+					currentState.docname = data.docname || currentState.docname;
 					frappe.show_alert({
 						message: __("Profiler stopped analyzing session…"),
 						indicator: "orange",
@@ -737,43 +760,6 @@
 			}
 		});
 
-		frappe.realtime.on("optimus_session_analyzing", (data) => {
-			if (!matchesCurrentSession(data)) return;
-			currentState.display = "analyzing";
-			currentState.docname = data.docname || currentState.docname;
-			setDisplay("analyzing", "Analyzing…", "0%");
-		});
-
-		frappe.realtime.on("optimus_session_failed", (data) => {
-			if (!matchesCurrentSession(data)) return;
-			currentState.display = "ready";  // reuse ready slot so click opens the doc
-			currentState.docname = data.docname || currentState.docname;
-			setDisplay("ready", "Analyze failed", "click to view");
-			frappe.show_alert({
-				message: __("Profiler analyze failed check Error Log"),
-				indicator: "red",
-			});
-		});
-
-		frappe.realtime.on("optimus_session_ready", (data) => {
-			if (!matchesCurrentSession(data)) return;
-			currentState.display = "ready";
-			currentState.docname = data.docname;
-			setDisplay("ready", "Report ready", "click to view");
-			frappe.show_alert({
-				message: __("Profiler report ready"),
-				indicator: "blue",
-			});
-		});
-
-		// Round 2 fix #17: show live progress during analyze
-		frappe.realtime.on("optimus_progress", (data) => {
-			if (!matchesCurrentSession(data)) return;
-			if (currentState.display !== "analyzing") return;
-			const pct = typeof data.percent === "number" ? Math.round(data.percent) : 0;
-			setDisplay("analyzing", `Analyzing ${pct}%`, data.description || "");
-		});
-
 		// v0.6.0: phase-2 line-profile events. Widget reflects the same
 		// state-machine slots as phase-1 (recording → analyzing → ready),
 		// but the labels are prefixed with "Phase 2" so the user knows
@@ -795,37 +781,17 @@
 			);
 		});
 
-		frappe.realtime.on("phase_2_run_analyzing", (data) => {
-			if (!matchesCurrentSession(data)) return;
-			currentState.display = "analyzing";
-			currentState.phase2 = true;
-			currentState.run_uuid = data.run_uuid || currentState.run_uuid;
-			setDisplay("analyzing", "Phase 2 analyzing…", "");
-		});
-
-		frappe.realtime.on("phase_2_run_ready", (data) => {
-			if (!matchesCurrentSession(data)) return;
-			currentState.display = "ready";
-			currentState.phase2 = false;
-			currentState.run_uuid = null;
-			currentState.docname = data.parent || currentState.docname;
-			setDisplay("ready", "Phase 2 report ready", "click to view");
-			frappe.show_alert({
-				message: __("Phase 2 line-profile report ready"),
-				indicator: "blue",
+		// analyzing / progress / ready / failed for both phases.
+		Pill.EVENT_NAMES.forEach((name) => {
+			frappe.realtime.on(name, (data) => {
+				applyResult(Pill.reduceEvent(currentState, name, data, Date.now()));
 			});
 		});
 
-		frappe.realtime.on("phase_2_run_failed", (data) => {
-			if (!matchesCurrentSession(data)) return;
-			currentState.display = "ready";
-			currentState.phase2 = false;
-			setDisplay("ready", "Phase 2 failed", "click to view");
-			frappe.show_alert({
-				message: __("Phase 2 analyze failed: " + (data.error || "unknown")),
-				indicator: "red",
-			});
-		});
+		// Events may be lost across a reconnect.
+		if (frappe.realtime.socket && frappe.realtime.socket.on) {
+			frappe.realtime.socket.on("connect", () => refreshStatus());
+		}
 	}
 
 	function computeElapsed() {

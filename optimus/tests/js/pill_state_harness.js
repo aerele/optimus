@@ -1,0 +1,132 @@
+// Node harness for optimus_pill_state.js. Run by tests/test_pill_state_js.py.
+"use strict";
+const assert = require("assert");
+const path = require("path");
+const Pill = require(path.join(__dirname, "..", "..", "public", "js", "optimus_pill_state.js"));
+
+const T0 = 1_000_000;
+const analyzing = (extra) => Object.assign({}, Pill.initialState(), { display: "analyzing", session_uuid: "s1", docname: "OS-1" }, extra);
+const ev = (state, name, data, now) => Pill.reduceEvent(state, name, Object.assign({ session_uuid: "s1", docname: "OS-1" }, data), now || T0);
+const tests = [];
+const test = (name, fn) => tests.push([name, fn]);
+
+test("ready event clears analyzing and toasts", () => {
+	const r = ev(analyzing(), "optimus_session_ready");
+	assert.strictEqual(r.state.display, "ready");
+	assert.strictEqual(r.ui.label, "Report ready");
+	assert.ok(r.alert);
+});
+
+test("failed event clears analyzing", () => {
+	const r = ev(analyzing(), "optimus_session_failed");
+	assert.strictEqual(r.ui.label, "Analyze failed");
+	assert.strictEqual(r.alert.indicator, "red");
+});
+
+test("phase 2 ready/failed clear analyzing and drop the run", () => {
+	const s = analyzing({ phase2: true, run_uuid: "r1" });
+	const ok = ev(s, "phase_2_run_ready", { run_uuid: "r1", parent: "OS-1" });
+	assert.strictEqual(ok.state.display, "ready");
+	assert.strictEqual(ok.state.run_uuid, null);
+	const bad = ev(s, "phase_2_run_failed", { run_uuid: "r1", error: "boom" });
+	assert.strictEqual(bad.state.display, "ready");
+	assert.ok(bad.alert.message.includes("boom"));
+});
+
+test("late analyzing event after ready is ignored (reordered delivery)", () => {
+	const done = ev(analyzing(), "optimus_session_ready", {}, T0).state;
+	assert.strictEqual(ev(done, "optimus_session_analyzing", {}, T0 + 100), null);
+	assert.strictEqual(ev(done, "optimus_progress", { percent: 40 }, T0 + 100), null);
+});
+
+test("a retry analyze after the stale window shows analyzing again", () => {
+	const failed = ev(analyzing(), "optimus_session_failed", {}, T0).state;
+	const r = ev(failed, "optimus_session_analyzing", {}, T0 + Pill.STALE_EVENT_WINDOW_MS + 1);
+	assert.strictEqual(r.state.display, "analyzing");
+});
+
+test("events for another session are ignored", () => {
+	assert.strictEqual(ev(analyzing(), "optimus_session_ready", { session_uuid: "other" }), null);
+});
+
+test("progress only repaints while analyzing", () => {
+	assert.strictEqual(ev(Pill.initialState(), "optimus_progress", { percent: 5 }), null);
+	assert.strictEqual(ev(analyzing(), "optimus_progress", { percent: 41.6 }).ui.label, "Analyzing 42%");
+});
+
+test("server ready clears a stuck analyzing pill (missed event)", () => {
+	const r = Pill.reduceServer(analyzing(), { phase: "ready", scope: "session", session_uuid: "s1", docname: "OS-1" }, T0);
+	assert.strictEqual(r.state.display, "ready");
+	assert.strictEqual(r.ui.label, "Report ready");
+});
+
+test("server failed and phase 2 ready are mapped", () => {
+	assert.strictEqual(Pill.reduceServer(analyzing(), { phase: "failed", scope: "session", session_uuid: "s1" }, T0).ui.label, "Analyze failed");
+	const p2 = Pill.reduceServer(analyzing({ phase2: true }), { phase: "ready", scope: "phase2", session_uuid: "s1", run_uuid: "r1" }, T0);
+	assert.strictEqual(p2.ui.label, "Phase 2 report ready");
+});
+
+test("server idle clears analyzing, leaves stopping and phase 2 recording alone", () => {
+	assert.strictEqual(Pill.reduceServer(analyzing(), { phase: "idle" }, T0).state.display, "inactive");
+	assert.strictEqual(Pill.reduceServer(analyzing({ display: "stopping" }), { phase: "idle" }, T0), null);
+	assert.strictEqual(Pill.reduceServer(analyzing({ display: "recording", phase2: true }), { phase: "idle" }, T0), null);
+});
+
+test("server analyzing never overrides a ready pill", () => {
+	const ready = analyzing({ display: "ready" });
+	assert.strictEqual(Pill.reduceServer(ready, { phase: "analyzing", scope: "session", session_uuid: "s1" }, T0), null);
+});
+
+test("reload recovery: inactive pill adopts an in-flight analyze, phase 2 included", () => {
+	const r = Pill.reduceServer(Pill.initialState(), { phase: "analyzing", scope: "phase2", session_uuid: "s1", docname: "OS-1", run_uuid: "r1" }, T0);
+	assert.strictEqual(r.state.display, "analyzing");
+	assert.strictEqual(r.state.run_uuid, "r1");
+	assert.strictEqual(r.ui.label, "Phase 2 analyzing…");
+});
+
+test("stale recording snapshot is ignored once stopping/analyzing/ready", () => {
+	for (const display of ["stopping", "analyzing", "ready"]) {
+		assert.strictEqual(Pill.reduceServer(analyzing({ display }), { phase: "recording", session_uuid: "s1" }, T0), null);
+	}
+	assert.strictEqual(Pill.reduceServer(Pill.initialState(), { phase: "recording", session_uuid: "s1" }, T0).state.display, "recording");
+});
+
+test("duplicate ready (event then poll) toasts once", () => {
+	const first = ev(analyzing(), "optimus_session_ready");
+	const again = Pill.reduceServer(first.state, { phase: "ready", scope: "session", session_uuid: "s1", docname: "OS-1" }, T0 + 1);
+	assert.strictEqual(again.alert, null);
+});
+
+test("hard stop clears a transient pill", () => {
+	assert.strictEqual(Pill.reduceHardStop(analyzing()).ui.label, "Check report");
+	const noDoc = Pill.reduceHardStop(analyzing({ docname: null }));
+	assert.strictEqual(noDoc.state.display, "inactive");
+	assert.strictEqual(Pill.reduceHardStop(analyzing({ display: "ready" })), null);
+});
+
+test("poll backoff grows, caps, and hard stop is bounded", () => {
+	const delays = [0, 1, 2, 3, 20].map(Pill.nextDelay);
+	assert.strictEqual(delays[0], Pill.POLL.baseMs);
+	assert.ok(delays[1] > delays[0] && delays[2] > delays[1]);
+	assert.strictEqual(delays[4], Pill.POLL.maxMs);
+	assert.ok(!Pill.pollExpired(Pill.POLL.hardStopMs - 1));
+	assert.ok(Pill.pollExpired(Pill.POLL.hardStopMs));
+	// Total requests before the hard stop stay modest.
+	let t = 0, n = 0;
+	while (!Pill.pollExpired(t)) { t += Pill.nextDelay(n++); }
+	assert.ok(n < 60, "too many polls: " + n);
+});
+
+test("reducers never mutate their input", () => {
+	const s = analyzing();
+	const frozen = JSON.stringify(s);
+	ev(s, "optimus_session_ready");
+	Pill.reduceServer(s, { phase: "idle" }, T0);
+	assert.strictEqual(JSON.stringify(s), frozen);
+});
+
+let failed = 0;
+for (const [name, fn] of tests) {
+	try { fn(); console.log("ok   " + name); } catch (e) { failed++; console.log("FAIL " + name + "\n" + e.stack); }
+}
+process.exit(failed ? 1 : 0);

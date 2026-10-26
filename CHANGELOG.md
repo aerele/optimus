@@ -8,6 +8,16 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.84] - 2026-10-26
+
+### Fixed
+
+- The small pill in the bottom-right corner no longer stays on "Analyzing" after the report is ready. It now checks the server when the page loads, when you come back to the tab and while it is waiting (with a growing delay and a hard stop), so a missed live update can no longer leave it stuck. This covers both the normal analyze after stopping and the second-pass analyze.
+- A page reload while a report is still being built now brings the "Analyzing" pill back and clears it when the report is done.
+- A late "analyzing" update can no longer replace a "Report ready" pill.
+
+---
+
 ## [0.12.70] - 2026-10-22
 
 ### Fixed

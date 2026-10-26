@@ -54,8 +54,11 @@ def _asset_version(relative_path: str) -> str:
 _widget_js_v = _asset_version("js/floating_widget.js")
 _frontend_js_v = _asset_version("js/optimus_frontend.js")
 _widget_css_v = _asset_version("css/floating_widget.css")
+_pill_js_v = _asset_version("js/optimus_pill_state.js")
 
 app_include_js = [
+	# Pure pill state logic; must load before floating_widget.js.
+	f"/assets/optimus/js/optimus_pill_state.js?v={_pill_js_v}",
 	f"/assets/optimus/js/floating_widget.js?v={_widget_js_v}",
 	# v0.5.0: browser-side metrics shim (fetch/XHR wrap + Web Vitals).
 	# Loads after floating_widget.js so the widget is already in the DOM
