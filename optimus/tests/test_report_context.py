@@ -755,3 +755,55 @@ class TestRowDangerThreshold:
 		xhr = report_context._build_frontend(ctx)["xhrs"][0]
 		assert xhr["backend_is_hot"] is False  # 1500 < 2000 (retuned)
 		assert xhr["browser_is_hot"] is True   # 2500 >= 2000
+
+
+class TestResourceRowNumbers:
+	"""Server Resource "#" numbering."""
+
+	@staticmethod
+	def _row(idx, label="a"):
+		return {"action_idx": idx, "action_label": label, "cpu": 1}
+
+	@staticmethod
+	def _numbers(timeline, actions, framework=()):
+		res = report_context._build_resource(
+			{"cpu_avg": 1, "cpu_peak": 1}, timeline, list(actions), list(framework)
+		)
+		return [r["row_number"] for r in res["timeline"]]
+
+	def test_no_gaps_starts_at_one(self):
+		actions = [{"idx": i} for i in range(3)]
+		assert self._numbers([self._row(i) for i in range(3)], actions) == ["1", "2", "3"]
+
+	def test_gaps_keep_actions_table_numbers(self):
+		actions = [{"idx": i} for i in range(9)]
+		rows = [self._row(i) for i in (0, 3, 6, 8)]
+		assert self._numbers(rows, actions) == ["1", "4", "7", "9"]
+
+	def test_framework_actions_are_prefixed_and_use_their_own_table_position(self):
+		own = [{"idx": 0}, {"idx": 2}]
+		fw = [{"idx": 1}, {"idx": 3}]
+		rows = [self._row(i) for i in range(4)]
+		assert self._numbers(rows, own, fw) == ["1", "fw 1", "2", "fw 2"]
+
+	def test_no_idx_on_actions_falls_back_to_idx_plus_one(self):
+		assert self._numbers([self._row(4)], []) == ["5"]
+		assert self._numbers([self._row(4)], [{"x": 1}]) == ["5"]
+
+	def test_action_hidden_from_actions_table_shows_dash(self):
+		# idx 1 was dropped by the Min Action Duration filter, so it has no Actions-table number
+		actions = [{"idx": 0}, {"idx": 2}]
+		assert self._numbers([self._row(0), self._row(1), self._row(2)], actions) == ["1", "-", "2"]
+
+	def test_corrupt_non_int_idx_does_not_raise(self):
+		rows = [{"action_idx": ["x"], "action_label": "a"}, self._row(0)]
+		assert self._numbers(rows, [{"idx": "bad"}, {"idx": 0}]) == ["-", "2"]
+
+	def test_duplicate_idx_first_table_wins(self):
+		assert self._numbers([self._row(0)], [{"idx": 0}], [{"idx": 0}]) == ["1"]
+
+	def test_action_idx_data_key_is_unchanged_and_input_not_mutated(self):
+		rows = [self._row(0)]
+		res = report_context._build_resource({"cpu_avg": 1}, rows, [{"idx": 0}], [])
+		assert res["timeline"][0]["action_idx"] == 0
+		assert "row_number" not in rows[0]

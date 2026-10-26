@@ -3176,7 +3176,7 @@
       <tbody>
         {% for row in report_data.resource.timeline %}
         <tr>
-          <td class="num">{{ row.action_idx }}</td>
+          <td class="num">{{ row.row_number }}</td>
           <td>{{ row.action_label }}</td>
           <td class="num">{{ "%.0f" | format(row.cpu or 0) }}%</td>
           <td class="num">{{ ((row.rss or 0) / 1000000) | round(0) | int }}MB</td>
