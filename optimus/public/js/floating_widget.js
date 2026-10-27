@@ -703,6 +703,9 @@
 	const popupClaimed = new Set();
 	let popupBusy = false;
 	let popupTimer = null;
+	let popupDeferrals = 0;
+	const POPUP_MAX_DEFERRALS = 30;
+	const TEXT_INPUT_TYPES = /^(text|search|email|url|tel|password|number)?$/i;
 
 	function claimPopup(key, token) {
 		try {
@@ -716,9 +719,18 @@
 		}
 	}
 
+	function releasePopup(key, token) {
+		try {
+			localStorage.removeItem(key);
+		} catch (e) { /* storage unavailable */ }
+		popupClaimed.delete(key + token);
+	}
+
 	function isTyping() {
 		const el = document.activeElement;
-		return !!el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || !!el.isContentEditable);
+		if (!el) return false;
+		if (el.isContentEditable || el.tagName === "TEXTAREA") return true;
+		return el.tagName === "INPUT" && TEXT_INPUT_TYPES.test(el.type || "");
 	}
 
 	function openPopup(item) {
@@ -758,8 +770,9 @@
 		clearTimeout(popupTimer);
 		popupTimer = null;
 		if (popupBusy || !popupQueue.length) return;
-		// Don't steal focus from a field being typed in; re-check until it is free.
-		if (isTyping()) {
+		// Don't steal focus from a field being typed in; re-check, then open anyway after the cap.
+		if (isTyping() && popupDeferrals < POPUP_MAX_DEFERRALS) {
+			popupDeferrals += 1;
 			popupTimer = setTimeout(flushPopups, 1000);
 			return;
 		}
@@ -768,11 +781,13 @@
 			flushPopups();
 			return;
 		}
+		popupDeferrals = 0;
 		popupBusy = true;
 		try {
 			openPopup(item);
 		} catch (e) {
 			popupBusy = false;
+			releasePopup(item.key, item.token);
 			_diag("popup failed", e);
 			flushPopups();
 		}
@@ -866,12 +881,15 @@
 
 		frappe.realtime.on("optimus_session_ready", (data) => {
 			if (matchesCurrentSession(data)) {
+				const empty = !!(data && data.empty);
 				currentState.display = "ready";
 				currentState.docname = data.docname;
-				setDisplay("ready", "Report ready", "click to view");
+				setDisplay("ready", empty ? "No data" : "Report ready", "click to view");
 				frappe.show_alert({
-					message: __("Profiler report ready"),
-					indicator: "blue",
+					message: empty
+						? __("Profiling finished, but no requests were recorded")
+						: __("Profiler report ready"),
+					indicator: empty ? "orange" : "blue",
 				});
 			}
 			showSessionPopup(data, data && data.empty ? "empty" : "ready");

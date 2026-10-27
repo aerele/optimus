@@ -17,13 +17,13 @@ function desk(opts = {}) {
  const handlers={},dialogs=[],alerts=[],timers=[],store=opts.store||{};
  const doc={activeElement:null};
  class Dialog {
-  constructor(cfg){ if(opts.dialogThrows) throw new Error('boom'); this.cfg=cfg; dialogs.push(this); }
+  constructor(cfg){ if(opts.dialogThrows && opts.throwsLeft-- !== 0) throw new Error('boom'); this.cfg=cfg; dialogs.push(this); }
   show(){ this.shown=true; }
   hide(){ this.shown=false; if(this.onhide) this.onhide(); }
  }
  const ctx={window:{},document:Object.assign(doc,{readyState:'loading',addEventListener:()=>{}}),
   setTimeout:(fn)=>{timers.push(fn);return timers.length;},clearTimeout:()=>{},clearInterval:()=>{},
-  localStorage:{getItem:k=>(k in store?store[k]:null),setItem:(k,v)=>{store[k]=v;}},
+  localStorage:{getItem:k=>(k in store?store[k]:null),setItem:(k,v)=>{store[k]=v;},removeItem:k=>{delete store[k];}},
   __:t=>t,
   frappe:{session:{user:'owner'},set_route:()=>{},ui:{Dialog},utils:{escape_html:s=>String(s)},
    realtime:{on:(n,fn)=>handlers[n]=fn},show_alert:a=>alerts.push(a)}};
@@ -111,6 +111,56 @@ assert.equal(a.dialogs.length, 2);
 a.dialogs[1].hide();
 a.handlers.optimus_session_ready(ev({event_id:'e2'}));
 assert.equal(a.dialogs.length, 2);
+""")
+
+
+def test_empty_session_sets_no_data_pill_and_toast():
+	_run(r"""
+const d = desk();
+d.handlers.optimus_session_ready(ev({empty:true}));
+assert.equal(d.state.display, 'ready');
+assert.equal(d.alerts.length, 1);
+assert.ok(!/ready/i.test(d.alerts[0].message), d.alerts[0].message);
+""")
+
+
+def test_only_text_like_inputs_count_as_typing():
+	_run(r"""
+for (const el of [{tagName:'INPUT',type:'checkbox'},{tagName:'INPUT',type:'button'},
+                  {tagName:'INPUT',type:'radio'},{tagName:'SELECT'},{tagName:'BUTTON'}]) {
+ const d = desk(); d.doc.activeElement = el;
+ d.handlers.optimus_session_ready(ev());
+ assert.equal(d.dialogs.length, 1, JSON.stringify(el));
+}
+for (const el of [{tagName:'INPUT',type:'text'},{tagName:'INPUT'},{tagName:'TEXTAREA'},
+                  {tagName:'DIV',isContentEditable:true}]) {
+ const d = desk(); d.doc.activeElement = el;
+ d.handlers.optimus_session_ready(ev());
+ assert.equal(d.dialogs.length, 0, JSON.stringify(el));
+}
+""")
+
+
+def test_popup_opens_after_deferral_cap_even_if_still_typing():
+	_run(r"""
+const d = desk();
+d.doc.activeElement = {tagName:'INPUT', type:'text'};
+d.handlers.optimus_session_ready(ev());
+for (let i = 0; i < 29; i++) { d.tick(); assert.equal(d.dialogs.length, 0, 'tick ' + i); }
+d.tick();
+assert.equal(d.dialogs.length, 1);
+""")
+
+
+def test_claim_released_when_dialog_throws_so_a_retry_can_show():
+	_run(r"""
+const store = {};
+const d = desk({dialogThrows:true, throwsLeft:1, store});
+d.handlers.optimus_session_ready(ev());
+assert.deepEqual(Object.keys(store), [], 'claim released');
+assert.equal(d.dialogs.length, 0);
+d.handlers.optimus_session_ready(ev());
+assert.equal(d.dialogs.length, 1, 'same run can still show');
 """)
 
 
