@@ -25,6 +25,20 @@ _POLL_INTERVAL_SECONDS = 0.5
 _TERMINAL_STATUSES = ("Ready", "Failed")
 
 
+def _next_request():
+	"""Commit and rebuild the site's request-local state as separate HTTP calls do."""
+	site, sites_path = frappe.local.site, frappe.local.sites_path
+	user = frappe.session.user
+	flags = dict(frappe.local.flags)
+	# The fixture models the commit between independent HTTP requests.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
+	frappe.destroy()
+	frappe.init(site=site, sites_path=sites_path)
+	frappe.connect()
+	frappe.local.flags.update(flags)
+	frappe.set_user(user)
+
+
 def _wait_for_terminal(session_uuid: str, *, timeout_seconds: int = 60) -> str | None:
 	"""Poll the session's ``status`` every 500 ms until terminal (``Ready`` /
 	``Failed``) or ``timeout_seconds`` elapses. Returns the final status or
@@ -38,6 +52,7 @@ def _wait_for_terminal(session_uuid: str, *, timeout_seconds: int = 60) -> str |
 		)
 		if status in _TERMINAL_STATUSES:
 			return status
+		frappe.db.rollback()  # A worker's next commit must be visible to this poll.
 		time.sleep(_POLL_INTERVAL_SECONDS)
 	return None
 
@@ -51,12 +66,37 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 		# pipeline, not the auth surface (that's covered by other tests).
 		frappe.set_user("Administrator")
 
+	def setUp(self):
+		super().setUp()
+		_next_request()
+
+	def _start(self, **kwargs):
+		from optimus import api
+
+		result = api.start(**kwargs)
+		self.addCleanup(self._delete_owned_session, result["docname"])
+		_next_request()
+		return result
+
+	def _stop(self):
+		from optimus import api
+
+		result = api.stop()
+		_next_request()
+		return result
+
+	def _delete_owned_session(self, docname):
+		# bench run-tests uses unittest, so pytest's autouse cleanup is not invoked.
+		# Remove only the row this test created, including its attached reports.
+		_next_request()
+		frappe.delete_doc("Optimus Session", docname, ignore_permissions=True, force=True)
+		# Test requests committed this owned fixture, so its cleanup must commit too.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
+
 	# --- 1: start creates session row + redis pointer ----------------------
 
 	def test_start_creates_session_row_and_redis_pointer(self):
-		from optimus import api
-
-		result = api.start(label="integration: start creates session")
+		result = self._start(label="integration: start creates session")
 		try:
 			session_uuid = result["session_uuid"]
 			assert session_uuid and isinstance(session_uuid, str)
@@ -82,23 +122,20 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 				f"{session_uuid!r}"
 			)
 		finally:
-			# Clean up so the next test starts from a known state the
-			# autouse cleanup_session fixture handles this too, but
-			# defence-in-depth keeps the test self-contained.
+			# Stop capture even if an assertion fails; unittest cleanup deletes
+			# this test's session and its attached reports afterward.
 			try:
-				api.stop()
+				self._stop()
 			except Exception:
 				pass
 
 	# --- 2: stop clears active + marks Stopping (or finalises inline) ------
 
 	def test_stop_clears_active_and_marks_stopping(self):
-		from optimus import api
-
-		start_result = api.start(label="integration: stop semantics")
+		start_result = self._start(label="integration: stop semantics")
 		session_uuid = start_result["session_uuid"]
 
-		stop_result = api.stop()
+		stop_result = self._stop()
 		assert stop_result["stopped"] is True
 		assert stop_result["session_uuid"] == session_uuid
 
@@ -131,7 +168,7 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 		"""
 		from optimus import api
 
-		start_result = api.start(label="integration: full lifecycle")
+		start_result = self._start(label="integration: full lifecycle")
 		session_uuid = start_result["session_uuid"]
 		docname = start_result["docname"]
 
@@ -140,7 +177,7 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 		# that gracefully (renders a "no recordings" report) so this is
 		# still a valid smoke. A future PR can add an actual recorded
 		# operation here for richer coverage.
-		api.stop()
+		self._stop()
 
 		final_status = _wait_for_terminal(session_uuid, timeout_seconds=60)
 		assert final_status == "Ready", (
@@ -164,6 +201,7 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 		# "did the whole pipeline including render produce an
 		# attachable artifact".
 		api.regenerate_reports(session_uuid)
+		_next_request()
 
 		# Report URL is persisted on the session's ``raw_report_file``
 		# field that's the authoritative side-effect contract
@@ -189,11 +227,9 @@ class TestRecordingLifecycleE2E(FrappeTestCase):
 	def test_session_totals_populated_after_analyze(self):
 		"""After analyze, the session's persisted totals are set to something (zero
 		is fine on an empty session). None/missing means a totals write was skipped."""
-		from optimus import api
-
-		start_result = api.start(label="integration: totals populated")
+		start_result = self._start(label="integration: totals populated")
 		session_uuid = start_result["session_uuid"]
-		api.stop()
+		self._stop()
 		_wait_for_terminal(session_uuid, timeout_seconds=60)
 
 		row = frappe.db.get_value(

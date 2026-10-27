@@ -10,6 +10,8 @@ result-invariant.
 
 import inspect
 import os
+import re
+import sys
 import types
 
 import frappe
@@ -113,6 +115,27 @@ _FIVE = [f"SELECT * FROM tab{i} WHERE x = {i}" for i in range(5)]
 
 
 class TestEnrichThrottle:
+	@pytest.mark.parametrize("bad", [None, "bad-call", 42, False, [], ["stack"]])
+	def test_enrichment_filters_malformed_calls_before_the_cap_and_session_totals(self, enrich_env, monkeypatch, bad):
+		from optimus.analyzers import per_action
+
+		monkeypatch.setattr("optimus.settings.get_config", lambda: types.SimpleNamespace(max_queries_per_recording=3))
+		valid = {"query": "SELECT name FROM tabLead", "duration": 23.0, "stack": []}
+		hook = {"query": "SELECT password FROM __Auth", "duration": 1000,
+			"stack": [{"filename": "apps/optimus/optimus/error_log_mask.py"}]}
+		recording = {"uuid": "mixed", "calls": [bad, valid, bad, hook, dict(valid), bad]}
+		assert analyze._enrich_recordings([recording]) == []
+		assert len(recording["calls"]) == 3
+		assert all(isinstance(c, dict) and c.get("explain_result") for c in recording["calls"])
+		assert len(enrich_env.explain_queries) == 2  # valid shape deduped, hook shape distinct
+		assert analyze._session_query_totals([recording]) == (2, 46.0)
+		action = per_action._build_action(recording)
+		assert (action["queries_count"], action["query_time_ms"]) == (2, 46.0)
+
+	def test_unenriched_session_totals_skip_malformed_entries_too(self):
+		calls = [None, "bad-call", 42, False, [], ["stack"], {"duration": 23.0}]
+		assert analyze._session_query_totals([{"calls": calls}]) == (1, 23.0)
+
 	def test_disabled_by_default_never_sleeps(self, enrich_env):
 		analyze._enrich_recordings([_recording(_FIVE)])
 		assert len(enrich_env.explain_queries) == 5
@@ -176,22 +199,66 @@ class TestMaxQueriesPerRecordingZeroIsUnlimited:
 			f"cap = 0 must not truncate, got {truncation_warnings!r}"
 		)
 
-	def test_positive_cap_still_truncates(self, enrich_env, monkeypatch):
-		"""A positive cap still truncates, guarding against an over-eager
-		rewrite that accidentally unbounds every deployment."""
+	def _cap(self, monkeypatch, cap):
 		import optimus.settings as settings_mod
 		monkeypatch.setattr(
 			settings_mod, "get_config",
-			lambda: types.SimpleNamespace(max_queries_per_recording=100),
+			lambda: types.SimpleNamespace(max_queries_per_recording=cap),
 			raising=False,
 		)
+		normalized = []
 
-		big = _recording([
-			f"SELECT * FROM tab{i} WHERE x = {i}" for i in range(250)
-		])
+		def fake_normalize(q):
+			normalized.append(q)
+			return re.sub(r"\d+", "?", q)
+
+		def fake_mark(rec):
+			for c in rec["calls"]:
+				c["normalized_query"] = fake_normalize(c["query"])
+
+		monkeypatch.setattr(sys.modules["frappe.recorder"], "normalize_query", fake_normalize, raising=False)
+		monkeypatch.setattr(analyze, "mark_duplicates", fake_mark, raising=False)
+		return normalized
+
+	def test_positive_cap_limits_explain_and_keeps_every_call(self, enrich_env, monkeypatch):
+		"""A positive cap still bounds EXPLAIN and normalize; past-cap calls stay and are grouped by shape."""
+		normalized = self._cap(monkeypatch, 100)
+		big = _recording([f"SELECT * FROM tabFoo WHERE x = {i}" for i in range(250)])
 		warnings = analyze._enrich_recordings([big])
 
-		# Sliced to the cap.
-		assert len(big["calls"]) == 100
+		assert len(big["calls"]) == 250
+		assert len(enrich_env.explain_queries) == 100
+		# Past-cap calls reuse the enriched shape: no format or normalize each.
+		assert len(normalized) == 100
+		past = big["calls"][100:]
+		assert all(c["past_enrich_cap"] and "explain_result" not in c for c in past)
+		assert past[0]["query"] == "SELECT * FROM tabFoo WHERE x = 100"
+		assert len({c["normalized_query"] for c in big["calls"]}) == 1
+		assert big["calls"][0]["normalized_copies"] == 250
+		assert [c["index"] for c in big["calls"]] == list(range(250))
 		truncation_warnings = [w for w in warnings if "TRUNCATED" in w]
 		assert truncation_warnings, "positive cap must emit a truncation warning"
+		assert "still count in query totals" in truncation_warnings[0]
+
+	def test_new_shape_past_cap_is_normalized_once(self, enrich_env, monkeypatch):
+		normalized = self._cap(monkeypatch, 2)
+		queries = ["SELECT * FROM tabFoo WHERE x = 1", "SELECT * FROM tabFoo WHERE x = 2"]
+		queries += [f"SELECT name FROM tabBar WHERE y IN ('a', '{i}')" for i in range(5)]
+		rec = _recording(queries)
+		analyze._enrich_recordings([rec])
+
+		assert len(normalized) == 3  # two enriched + one for the new tabBar shape
+		bar = rec["calls"][2:]
+		assert len({c["normalized_query"] for c in bar}) == 1
+		assert bar[0]["normalized_copies"] == 5
+		assert bar[0]["exact_copies"] == 1
+
+
+def test_over_budget_query_is_preserved_without_formatting(enrich_env,monkeypatch):
+	query='SELECT '+'('*101+'1'+')'*101
+	def forbidden(*args,**kwargs):
+		raise AssertionError('over-budget query reached formatting')
+	monkeypatch.setattr(analyze.sqlparse,'format',forbidden)
+	recording={'calls':[{'query':query,'explain_result':[{'already':'present'}]}]}
+	analyze._enrich_recordings([recording])
+	assert recording['calls'][0]['query']==query

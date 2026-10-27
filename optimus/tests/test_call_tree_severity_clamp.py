@@ -10,7 +10,6 @@ clamps ``estimated_impact_ms`` to the action wall, so a finding never claims to
 consume more than the action took. This guards against that regressing.
 """
 
-import json
 
 from optimus.analyzers import call_tree
 

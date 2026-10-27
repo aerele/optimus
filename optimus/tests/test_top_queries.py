@@ -203,3 +203,14 @@ def test_slow_query_title_stays_ms_below_one_second(empty_context):
 	]
 	assert len(slow) == 1
 	assert slow[0]["title"] == f"Slow query: {dur(850)}"
+
+
+def test_long_query_is_not_truncated(full_scan_recording, empty_context):
+	"""The slow-queries table must show the whole statement, not a clipped prefix."""
+	cols = ", ".join(f"`col_{i}`" for i in range(150))
+	long_sql = f"SELECT {cols} FROM `tabSales Invoice` WHERE `name` = ?"
+	assert len(long_sql) > 500
+	call = dict(full_scan_recording["calls"][0], normalized_query=long_sql)
+	rec = dict(full_scan_recording, calls=[call])
+	top = top_queries.analyze([rec], empty_context).aggregate["top_queries"]
+	assert top[0]["normalized_query"] == long_sql

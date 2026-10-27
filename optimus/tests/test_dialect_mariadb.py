@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import types
 
+import pytest
+
 from optimus.dbdialect.mariadb import MariaDBDialect
 
 
@@ -60,17 +62,68 @@ class TestExistingIndexes:
 			{"Key_name": "idx_ab", "Seq_in_index": 1, "Column_name": "a", "Non_unique": 1},
 			{"Key_name": "PRIMARY", "Seq_in_index": 1, "Column_name": "name", "Non_unique": 0},
 		]
+		rows = [dict(row, Index_type="BTREE", Ignored="NO", Sub_part=None) for row in rows]
 		_install_db(monkeypatch, lambda q, *a, **k: rows)
 		by = {i.name: i for i in MariaDBDialect().existing_indexes("tabUser")}
 		assert by["idx_ab"].columns == ["a", "b"]   # ordered by Seq_in_index
 		assert by["idx_ab"].leftmost == "a" and by["idx_ab"].unique is False
 		assert by["PRIMARY"].unique is True and by["PRIMARY"].leftmost == "name"
 
+	@pytest.mark.parametrize("override", [{"Ignored": "YES"}, {"Sub_part": 5}, {"Index_type": "FULLTEXT"}, {"Ignored": None}])
+	def test_nonordinary_index_is_not_coverage_evidence(self, monkeypatch, override):
+		row = dict(Key_name="candidate", Seq_in_index=1, Column_name="customer", Non_unique=1,
+			Index_type="BTREE", Ignored="NO", Sub_part=None)
+		_install_db(monkeypatch, lambda *a, **k: [{**row, **override}])
+		assert not MariaDBDialect().existing_indexes("tabSales Invoice")[0].eligible
+
+	def test_one_prefix_part_disqualifies_the_entire_composite(self, monkeypatch):
+		rows = [dict(Key_name="candidate", Seq_in_index=i, Column_name=col, Non_unique=1,
+			Index_type="BTREE", Ignored="NO", Sub_part=prefix)
+			for i, col, prefix in [(1, "customer", None), (2, "status", 5)]]
+		_install_db(monkeypatch, lambda *a, **k: rows)
+		assert not MariaDBDialect().existing_indexes("tabSales Invoice")[0].eligible
+
 	def test_unsafe_name_never_reaches_db(self, monkeypatch):
 		called = []
 		_install_db(monkeypatch, lambda q, *a, **k: called.append(q) or [])
 		assert MariaDBDialect().existing_indexes("tabUser; DROP TABLE x") == []
 		assert called == []
+
+
+class _JobTimeout(Exception):
+	"""Stands in for rq's JobTimeoutException."""
+
+
+class TestJobTimeoutsEscape:
+	"""An ordinary SQL error still gives the empty default, but an RQ job timeout must stop
+	the job, so the index and column reads raise it again."""
+
+	@pytest.fixture
+	def deadline(self, monkeypatch):
+		from optimus import safe_call
+
+		monkeypatch.setattr(safe_call, "job_timeout_types", lambda: (_JobTimeout,))
+
+		def boom(*a, **k):
+			raise _JobTimeout("deadline")
+
+		_install_db(monkeypatch, boom)
+
+	def test_the_index_read_raises_a_job_timeout(self, deadline):
+		with pytest.raises(_JobTimeout):
+			MariaDBDialect().existing_indexes("tabUser")
+
+	def test_the_column_read_raises_a_job_timeout(self, deadline):
+		with pytest.raises(_JobTimeout):
+			MariaDBDialect().column_types("tabUser")
+
+	def test_an_ordinary_error_still_gives_the_empty_default(self, monkeypatch):
+		def boom(*a, **k):
+			raise RuntimeError("Lock wait timeout exceeded")
+
+		_install_db(monkeypatch, boom)
+		assert MariaDBDialect().existing_indexes("tabUser") == []
+		assert MariaDBDialect().column_types("tabUser") == {}
 
 
 class TestColumnTypesAndDdl:
@@ -100,3 +153,30 @@ class TestInfraSnapshot:
 		snap = MariaDBDialect().infra_snapshot()
 		assert snap.threads_connected == 12 and snap.threads_running == 3
 		assert snap.slow_queries == 7 and snap.max_connections == 151
+
+
+class TestStatementTimeLimit:
+	def test_sets_cap_and_restores_previous_even_on_error(self, monkeypatch):
+		seen = []
+
+		def sql(q, *a, **k):
+			seen.append((q, a))
+			return [[2.5]] if q.startswith("SELECT @@") else []
+
+		_install_db(monkeypatch, sql)
+		try:
+			with MariaDBDialect().statement_time_limit(5):
+				raise RuntimeError("optimizer failed")
+		except RuntimeError:
+			pass
+		# The limit is bound as a value, never formatted into the SQL text.
+		assert seen[1:] == [
+			("SET SESSION max_statement_time = %s", ((5.0,),)),
+			("SET SESSION max_statement_time = %s", ((2.5,),)),
+		]
+
+	def test_is_statement_timeout_matches_1969_only(self):
+		d = MariaDBDialect()
+		assert d.is_statement_timeout(Exception(1969, "max_statement_time exceeded")) is True
+		assert d.is_statement_timeout(Exception(1205, "lock wait timeout")) is False
+		assert d.is_statement_timeout(Exception()) is False

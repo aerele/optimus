@@ -94,6 +94,30 @@ def after_install():
 		except Exception:
 			pass
 
+	# The same idempotent seed runs after model sync on existing installs.
+	from optimus.patches.v0_12_0 import initialize_ai_refresh_store
+
+	initialize_ai_refresh_store.execute()
+
+
+def after_migrate():
+	"""Seed the AI refresh admission mutex again after every migrate (D4).
+
+	The seed patch runs once per site. A rollback to a release without the journal removes
+	its DocTypes, and ``bench trim-database`` then drops their tables; on the redeploy the
+	patch is already in the Patch Log, so without this the mutex row stayed missing and
+	every user refresh failed closed for good. Do not run ``trim-database`` during a
+	rollback you may undo: it also drops the journal's uncertain attempts, which keep an
+	unknown provider call from being sent again. The seed is idempotent; the same repair by
+	hand is ``bench --site <site> execute
+	optimus.patches.v0_12_0.initialize_ai_refresh_store.execute``. Without the journal
+	table nothing is seeded and admission keeps failing closed."""
+	if not frappe.db.table_exists("Optimus AI Refresh Control"):
+		return
+	from optimus.patches.v0_12_0 import initialize_ai_refresh_store
+
+	initialize_ai_refresh_store.execute()
+
 
 # v0.13.x: the Frappe-organization-maintained apps seeded into Ignored
 # Apps on fresh install. Mirrors ``FRAMEWORK_APPS`` in
@@ -273,10 +297,8 @@ def before_uninstall():
 
 def _clear_redis_state():
 	"""Scan-and-delete all profiler:* keys from the site's Redis namespace."""
-	try:
-		redis_conn = frappe.cache.get_redis_connection()
-	except Exception:
-		return
+	# RedisWrapper subclasses redis.Redis, so it is the raw connection.
+	redis_conn = frappe.cache
 
 	# Frappe's cache wrapper auto-prefixes keys with the site namespace
 	# via make_key(). To SCAN for our patterns we need to use the raw

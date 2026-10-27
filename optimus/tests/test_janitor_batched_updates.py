@@ -3,9 +3,9 @@
 
 """Tests for the janitor sweeps' batched updates.
 
-Every sweep calls ``frappe.db.set_value`` ONCE with a ``{"name": ("in",
+The lifecycle sweeps call ``frappe.db.set_value`` ONCE with a ``{"name": ("in",
 [...])}`` filter; ``_sweep_old_sessions`` preloads every File-doc name in a
-single ``frappe.get_all``. ``frappe`` is stubbed via
+single ``frappe.get_all``. Phase 2 additionally checks current ownership under row locks. ``frappe`` is stubbed via
 ``monkeypatch.setitem(sys.modules, ...)`` so these run pure (no bench / no
 MariaDB) and the real module is restored at teardown.
 """
@@ -40,6 +40,9 @@ def _install_frappe_stub(monkeypatch):
 
 		def commit(self):
 			stub._committed += 1
+
+		def rollback(self):
+			pass
 
 		def get_value(self, *args, **kwargs):
 			return None
@@ -96,6 +99,12 @@ def _install_frappe_stub(monkeypatch):
 	# run.
 	stub._holder_uuid = None
 	analyze_mod = types.ModuleType("optimus.analyze")
+	def run_step(fn, **kwargs):
+		try:
+			return fn(), False
+		except Exception:
+			return None, True
+	analyze_mod._run_ai_step = run_step
 	analyze_mod.is_singleflight_holder = lambda uuid: uuid is not None and uuid == stub._holder_uuid
 	monkeypatch.setitem(sys.modules, "optimus.analyze", analyze_mod)
 
@@ -163,6 +172,21 @@ class TestSweepStaleRecording:
 		assert filters == {"name": ("in", ["PS-GONE"])}     # only the walked-away one
 		assert len(stub._enqueue_calls) == 1                # analyze enqueued once
 
+	def test_pointer_moved_to_new_session_is_kept(self, monkeypatch):
+		"""Stopping a stale session must not clear a pointer that now names the user's new session."""
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [
+			{"name": "PS-OLD", "session_uuid": "u-old", "user": "a@x.com"},
+		]
+		stub._active_pointers = {"a@x.com": "u-new"}
+		cleared = []
+		sys.modules["optimus.session"].clear_active_session = cleared.append
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stale_recording()
+
+		assert len(stub._enqueue_calls) == 1  # the old session is still stopped
+		assert cleared == []
+
 
 # --------------------------------------------------------------------------
 # Stuck Analyzing sweep single batched UPDATE.
@@ -180,9 +204,22 @@ class TestSweepStuckAnalyzing:
 		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Session"]
 		assert len(set_value_calls) == 1
 		_, filters, fields = set_value_calls[0]
-		assert filters == {"name": ("in", ["PS-A", "PS-B"])}
+		assert filters["name"] == ("in", ["PS-A", "PS-B"])
+		assert filters["status"] == "Analyzing" and "modified" in filters
 		assert fields["status"] == "Failed"
 		assert "analyzer_warnings" in fields
+
+	def test_the_failed_note_names_a_lapsed_heartbeat(self, monkeypatch):
+		"""A run whose flag lapsed looks stuck to this sweep, so the note names that
+		cause next to a timeout or a crash."""
+		stub = _install_frappe_stub(monkeypatch)
+		stub._get_all_return["Optimus Session"] = [{"name": "PS-A", "session_uuid": "u-a"}]
+		janitor = _reload_janitor(monkeypatch)
+		janitor._sweep_stuck_analyzing()
+		_, _, fields = stub._set_value_calls[0]
+		note = fields["analyzer_warnings"]
+		assert "its analyze heartbeat lapsed (the optimus log names a failed or yielded heartbeat)" in note
+		assert "timed out" in note and "crashed" in note and "Retry Analyze" in note
 
 	def test_no_set_value_when_no_stuck_rows(self, monkeypatch):
 		stub = _install_frappe_stub(monkeypatch)
@@ -207,7 +244,8 @@ class TestSweepStuckAnalyzing:
 		assert len(set_value_calls) == 1
 		_, filters, fields = set_value_calls[0]
 		# Only the dead one is failed; the live holder is skipped.
-		assert filters == {"name": ("in", ["PS-DEAD"])}
+		assert filters["name"] == ("in", ["PS-DEAD"])
+		assert filters["status"] == "Analyzing" and "modified" in filters
 		assert fields["status"] == "Failed"
 
 
@@ -229,7 +267,8 @@ class TestSweepStaleStopping:
 		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Session"]
 		assert len(set_value_calls) == 1
 		_, filters, fields = set_value_calls[0]
-		assert filters == {"name": ("in", ["PS-1", "PS-2"])}
+		assert filters["name"] == ("in", ["PS-1", "PS-2"])
+		assert filters["status"] == ["in", ["Stopping", "Capturing Background Jobs"]]
 		assert fields["status"] == "Stopping"
 		# Analyze re-enqueued once per stranded row.
 		assert len(stub._enqueue_calls) == 2
@@ -258,45 +297,53 @@ class TestSweepStaleStopping:
 # --------------------------------------------------------------------------
 
 class TestSweepStalePhase2Runs:
-	def test_one_set_value_call_per_branch(self, monkeypatch):
+	def test_only_locked_expired_recordings_are_cleaned(self, monkeypatch):
+		from optimus import ai_jobs
+		from optimus.line_profile import capture, jobs
 		stub = _install_frappe_stub(monkeypatch)
-		# The janitor calls get_all twice on "Optimus Phase Two Run" (formerly
-		# "Optimus Phase 2 Run" before the v0.6.x Title-Case rename) once for
-		# Recording rows, once for Analyzing. We return DIFFERENT row sets on
-		# each call, so the side-effect channel needs an index counter.
-		rec_rows = [
-			{"name": "PR-rec-1", "parent": "PS-x", "run_uuid": "rrec1"},
-			{"name": "PR-rec-2", "parent": "PS-x", "run_uuid": "rrec2"},
+		recordings = [
+			{"name": "rec-1", "parent": "fake-parent", "run_uuid": "expired"},
+			{"name": "rec-2", "parent": "fake-parent", "run_uuid": "newer-generation"},
 		]
-		ana_rows = [
-			{"name": "PR-ana-1", "parent": "PS-y", "run_uuid": "rana1"},
-		]
-		# Override get_all to alternate per call.
-		state = {"i": 0, "sequence": [rec_rows, ana_rows]}
-		def _get_all(doctype, filters=None, fields=None, **kwargs):
-			stub._get_all_calls.append((doctype, filters, tuple(fields or ())))
-			if doctype == "Optimus Phase Two Run":
-				out = state["sequence"][state["i"]] if state["i"] < len(state["sequence"]) else []
-				state["i"] += 1
-				return list(out)
-			return []
-		stub.db.get_all = _get_all
-		stub.get_all = _get_all
-
+		analyses = [{"name": "ana-1", "parent": "fake-parent", "run_uuid": "stale-analysis"}]
+		stub.db.get_all = lambda doctype, **kw: recordings if kw["filters"]["status"] == "Recording" else analyses
+		calls, cleanups = [], []
+		def expire(parent, run_uuid, **kw):
+			calls.append((run_uuid, kw["status"]))
+			return run_uuid != "newer-generation"
+		monkeypatch.setattr(jobs, "expire_legacy", expire)
+		monkeypatch.setattr(capture, "cleanup_run", cleanups.append)
+		monkeypatch.setattr(ai_jobs, "_transaction", lambda fn: fn())
+		monkeypatch.setattr(ai_jobs, "_retry_sql", lambda fn: fn())
 		janitor = _reload_janitor(monkeypatch)
 		janitor._sweep_stale_phase2_runs()
+		assert calls == [("expired", "Recording"), ("newer-generation", "Recording"), ("stale-analysis", "Analyzing")]
+		assert cleanups == ["expired"], "analysis failure must preserve samples for retry"
+		assert not stub._set_value_calls, "the journal checks current status under a lock"
 
-		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Phase Two Run"]
-		# Exactly 2 batched set_values (one per branch).
-		assert len(set_value_calls) == 2
-		# Recording branch first call.
-		assert set_value_calls[0][1] == {"name": ("in", ["PR-rec-1", "PR-rec-2"])}
-		# Analyzing branch second call.
-		assert set_value_calls[1][1] == {"name": ("in", ["PR-ana-1"])}
+	def test_one_phase2_cleanup_failure_does_not_skip_other_rows(self, monkeypatch):
+		from optimus import ai_jobs
+		from optimus.line_profile import capture, jobs
+		stub = _install_frappe_stub(monkeypatch)
+		rows = [{"parent": "p", "run_uuid": name} for name in ("bad", "good")]
+		stub.db.get_all = lambda doctype, **kw: rows if kw["filters"]["status"] == "Recording" else []
+		seen = []
+		def cleanup(run_uuid):
+			seen.append(run_uuid)
+			if run_uuid == "bad":
+				raise ConnectionError("synthetic Redis failure")
+		monkeypatch.setattr(jobs, "expire_legacy", lambda *a, **kw: True)
+		monkeypatch.setattr(capture, "cleanup_run", cleanup)
+		monkeypatch.setattr(ai_jobs, "_transaction", lambda fn: fn())
+		monkeypatch.setattr(ai_jobs, "_retry_sql", lambda fn: fn())
+		_reload_janitor(monkeypatch)._sweep_stale_phase2_runs()
+		assert seen == ["bad", "good"]
 
 	def test_no_set_value_when_no_phase2_rows(self, monkeypatch):
+		from optimus import ai_jobs
 		stub = _install_frappe_stub(monkeypatch)
 		stub._get_all_return["Optimus Phase Two Run"] = []
+		monkeypatch.setattr(ai_jobs, "_transaction", lambda fn: fn())
 		janitor = _reload_janitor(monkeypatch)
 		janitor._sweep_stale_phase2_runs()
 		set_value_calls = [c for c in stub._set_value_calls if c[0] == "Optimus Phase Two Run"]
@@ -336,18 +383,11 @@ class TestSweepOldSessionsBulkFileFetch:
 		janitor = _reload_janitor(monkeypatch)
 		janitor._sweep_old_sessions()
 
-		# EXACTLY one get_all call against "File" not 6.
-		file_calls = [c for c in stub._get_all_calls if c[0] == "File"]
-		assert len(file_calls) == 1, (
-			f"expected ONE batched File lookup, got {len(file_calls)}: {file_calls}"
-		)
-		# And the in-list matches every candidate URL.
-		filters = file_calls[0][1]
-		assert set(filters["file_url"][1]) == {
-			"/private/files/r0.html", "/private/files/r0.pdf",
-			"/private/files/r1.html", "/private/files/r1.pdf",
-			"/private/files/r2.html", "/private/files/r2.pdf",
-		}
+		# Core parent deletion checks links before removing attached files.
+		# No File is looked up/deleted by URL ahead of that transaction.
+		assert not [c for c in stub._get_all_calls if c[0] == "File"]
+		assert not [c for c in stub._delete_doc_calls if c[0][0] == "File"]
+		assert stub._committed == 4  # candidate snapshot, then each parent
 		# Session deletion fires per row (that part isn't batched it's a
 		# delete with permissions + lifecycle events).
 		ps_delete_calls = [c for c in stub._delete_doc_calls if c[0][0] == "Optimus Session"]

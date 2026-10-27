@@ -153,6 +153,70 @@ class TestWidgetGuard:
 			"hide the widget fail-open shape"
 		)
 
+	@pytest.mark.parametrize("boot, expected", [
+		({"optimus_can_profile": True}, "mounted"),
+		({"optimus_can_profile": False}, "hidden"),
+		({}, "mounted"),  # old cached boot without the flag
+		({"optimus_can_profile": True, "optimus_enabled": False}, "hidden"),
+	])
+	def test_widget_mounts_only_for_profilers(self, boot, expected):
+		"""Runs the real widget in node: non-profilers must not mount (api.status 403s)."""
+		import json
+		import os
+		import shutil
+		import subprocess
+		if not shutil.which("node"):
+			pytest.skip("node not installed")
+		here = os.path.dirname(__file__)
+		result = subprocess.run(
+			[
+				"node",
+				os.path.join(here, "fixtures", "widget_mount.js"),
+				os.path.join(here, "..", "public", "js", "floating_widget.js"),
+				json.dumps(boot),
+			],
+			capture_output=True,
+			text=True,
+		)
+		assert result.stdout == expected, result.stderr
+
+
+class TestCanProfileFlag:
+	"""boot_session sets optimus_can_profile with the same check as the API gate."""
+
+	@pytest.fixture
+	def run_boot(self, monkeypatch):
+		import frappe
+
+		from optimus import boot, settings
+		monkeypatch.setattr(settings, "get_config", lambda: _cfg(True))
+
+		def _run(user, get_roles):
+			monkeypatch.setattr(frappe, "session", types.SimpleNamespace(user=user), raising=False)
+			monkeypatch.setattr(frappe, "get_roles", get_roles, raising=False)
+			bootinfo = _fresh_bootinfo()
+			boot.boot_session(bootinfo)
+			return bootinfo.optimus_can_profile
+
+		return _run
+
+	def test_optimus_user_can_profile(self, run_boot):
+		assert run_boot("a@example.com", lambda u: ["Optimus User"]) is True
+
+	def test_system_manager_can_profile(self, run_boot):
+		assert run_boot("a@example.com", lambda u: ["System Manager"]) is True
+
+	def test_administrator_can_profile(self, run_boot):
+		assert run_boot("Administrator", lambda u: []) is True
+
+	def test_user_without_role_cannot_profile(self, run_boot):
+		assert run_boot("a@example.com", lambda u: ["Sales User"]) is False
+
+	def test_role_lookup_error_hides_widget(self, run_boot):
+		def _boom(u):
+			raise RuntimeError("redis down")
+		assert run_boot("a@example.com", _boom) is False
+
 
 class TestSessionJsFormatterParity:
 	"""The Desk-side duration formatter (optimus_session.js optimus_fmt_ms) must

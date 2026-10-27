@@ -20,6 +20,7 @@ from optimus.analyzers.base import (
 	walk_callsite,
 )
 from optimus.dbdialect import PlanTable
+from optimus.dbdialect.base import to_float, to_int
 from optimus.dbdialect.mariadb import MariaDBDialect
 
 
@@ -35,8 +36,8 @@ def _item_to_plan_table(item: dict) -> PlanTable:
 			sort_without_index=bool(item.get("sort_without_index")),
 			temp_used=bool(item.get("temp_used")),
 			used_index=item.get("used_index"),
-			rows_examined=item.get("rows_examined") or 0,
-			selectivity_pct=item.get("selectivity_pct"),
+			rows_examined=to_int(item.get("rows_examined")),
+			selectivity_pct=to_float(item.get("selectivity_pct")),
 			raw=item.get("raw") or {},
 		)
 	return MariaDBDialect._row_to_plan_table(item)
@@ -169,7 +170,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			for item in explain_rows:
 				if not isinstance(item, dict):
 					continue
-				# v0.5.1: per-item try/except for resilience (see previous comment).
+				# v0.5.1: per-item try/except so one malformed row cannot drop the rest.
 				try:
 					plan_table = _item_to_plan_table(item)
 					skipped = _inspect_table(
@@ -229,11 +230,12 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 		filtered_pct = None
 		if f["finding_type"] == "Low Filter Ratio":
-			try:
-				explain_row = td.get("explain_row") or {}
-				filtered_pct = float(explain_row.get("filtered") or 0) or None
-			except (TypeError, ValueError):
-				filtered_pct = None
+			# selectivity_pct is dialect-blind; findings stored before it was
+			# recorded only carry MariaDB's raw ``filtered`` in explain_row.
+			filtered_pct = to_float(td.get("selectivity_pct"))
+			if filtered_pct is None:
+				filtered_pct = to_float((td.get("explain_row") or {}).get("filtered"))
+			filtered_pct = filtered_pct or None
 
 		projected = project_post_fix_ms(
 			f["finding_type"], avg_ms, filtered_pct=filtered_pct,
@@ -314,53 +316,6 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			pass
 
 	return AnalyzerResult(findings=findings, warnings=warnings)
-
-
-# ---------------------------------------------------------------------------
-# Numeric coercion
-# ---------------------------------------------------------------------------
-# MariaDB's `rows` and `filtered` columns come back as int/float in the
-# typical PyMySQL path, but certain driver versions and EXPLAIN FORMAT
-# variants have been observed to return Decimal, str, or even None any
-# of which would crash a Python 3 `>` comparison with a numeric literal.
-# v0.5.1 adds explicit coercion helpers so one weird row doesn't take out
-# the whole session.
-
-
-def _to_int(val) -> int:
-	"""Coerce EXPLAIN numeric fields to int. Returns 0 on any failure
-	(None, unparseable string, unexpected type)."""
-	if val is None:
-		return 0
-	if isinstance(val, bool):
-		# bool is a subclass of int treat False as 0, True as 1
-		return int(val)
-	if isinstance(val, int):
-		return val
-	if isinstance(val, float):
-		return int(val)
-	try:
-		return int(val)
-	except (TypeError, ValueError):
-		try:
-			return int(float(val))
-		except (TypeError, ValueError):
-			return 0
-
-
-def _to_float(val):
-	"""Coerce EXPLAIN `filtered` to float. Returns None on failure so the
-	filtered-threshold check can cleanly skip."""
-	if val is None:
-		return None
-	if isinstance(val, bool):
-		return float(val)
-	if isinstance(val, (int, float)):
-		return float(val)
-	try:
-		return float(val)
-	except (TypeError, ValueError):
-		return None
 
 
 def _is_framework_origin(
@@ -543,8 +498,6 @@ def _inspect_table(pt, normalized_query, action_idx, query_duration, buckets):
 	# of rows examined are actually returned after filtering. Values under
 	# 10 mean the query is reading 10x or more of what it needs the WHERE
 	# clause isn't selective enough (or isn't using an index to filter).
-	# v0.5.1: coerce explicitly so Decimal/str values from unusual drivers
-	# don't silently fall through the isinstance guard.
 	filtered = pt.selectivity_pct
 	if (
 		filtered is not None
@@ -574,6 +527,7 @@ def _inspect_table(pt, normalized_query, action_idx, query_duration, buckets):
 				"selectivity. Check the key_len in EXPLAIN to confirm the "
 				"full index is being used."
 			),
+			selectivity_pct=filtered,
 		)
 
 
@@ -590,6 +544,7 @@ def _upsert(
 	title,
 	customer_description,
 	fix_hint,
+	selectivity_pct=None,
 ):
 	"""Insert or merge a finding into the buckets dict.
 
@@ -617,6 +572,7 @@ def _upsert(
 				"explain_row": row,
 				"normalized_query": normalized_query,
 				"fix_hint": fix_hint,
+				**({"selectivity_pct": selectivity_pct} if selectivity_pct is not None else {}),
 			},
 			default=str,
 		),

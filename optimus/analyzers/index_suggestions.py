@@ -17,8 +17,10 @@ from collections import Counter, defaultdict
 from optimus.analyzers.base import (
 	FRAPPE_METADATA_COLUMNS,
 	SEVERITY_ORDER,
+	TAB_TABLE_RE,
 	AnalyzerResult,
 	dur,
+	is_error_log_hook_query,
 	is_frappe_meta_table,
 )
 from optimus.dbdialect import get_dialect
@@ -70,6 +72,9 @@ MIN_AVG_SAVINGS_PER_QUERY_MS = 2.0
 # count. Prevents the Error Log from being flooded by one bad session
 # with thousands of unparseable queries.
 MAX_LOGGED_FAILURES = 3
+
+# Per-statement cap (seconds) on the optimizer's table scans, which run on the live DB.
+OPTIMIZER_STATEMENT_TIMEOUT_SECONDS = 5
 
 # v0.5.1: Classify exceptions from DBOptimizer / sql_metadata.
 #
@@ -168,13 +173,12 @@ _NEVER_SUGGEST_COLUMNS = FRAPPE_METADATA_COLUMNS
 #      legitimately introspects.
 # Anything else is rejected outright and the index-introspection helper
 # returns an empty set (its "I couldn't read indexes" fall-through).
-_SAFE_TAB_TABLE_RE = re.compile(r"^tab[A-Za-z0-9 _\-]+$")
 _SAFE_INFOSCHEMA_RE = re.compile(r"^information_schema\.[A-Za-z0-9_]+$")
 
 
 def _is_safe_table_name(name) -> bool:
 	"""True iff ``name`` is a table-name shape the indexer may inspect via raw
-	SQL (see ``_SAFE_TAB_TABLE_RE`` / ``_SAFE_INFOSCHEMA_RE``). Any other shape
+	SQL (see ``TAB_TABLE_RE`` / ``_SAFE_INFOSCHEMA_RE``). Any other shape
 	(SQL-injection attempt, stray space, backtick, semicolon, …) returns False
 	so the caller falls back to its empty set."""
 	if not isinstance(name, str) or not name:
@@ -183,7 +187,7 @@ def _is_safe_table_name(name) -> bool:
 	# the regexes wouldn't match them make the intent obvious to readers.
 	if any(c in name for c in ("`", "'", '"', ";", "\\", "\n", "\r", "\x00")):
 		return False
-	return bool(_SAFE_TAB_TABLE_RE.match(name) or _SAFE_INFOSCHEMA_RE.match(name))
+	return bool(TAB_TABLE_RE.fullmatch(name) or _SAFE_INFOSCHEMA_RE.match(name))
 
 
 def _get_indexed_columns(table: str) -> set[str]:
@@ -192,7 +196,7 @@ def _get_indexed_columns(table: str) -> set[str]:
 	filter on just that column, so a Missing Index suggestion stays actionable).
 	Returns an empty set on any DB error, conservatively keeping all suggestions.
 	"""
-	return {ix.leftmost for ix in get_dialect().existing_indexes(table) if ix.leftmost}
+	return {ix.leftmost for ix in get_dialect().existing_indexes(table) if ix.leftmost and (ix.eligible or ix.usable_prefix)}
 
 
 def _get_column_types(table: str) -> dict[str, str]:
@@ -325,8 +329,13 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 	for recording in recordings:
 		for call in recording.get("calls") or []:
+			if not isinstance(call, dict) or is_error_log_hook_query(call.get("stack")):
+				continue
 			normalized = call.get("normalized_query")
 			if not normalized:
+				continue
+			# The enrichment cap bounds the DESCRIBE / SHOW INDEX lookups too.
+			if call.get("past_enrich_cap"):
 				continue
 
 			raw = call.get("query") or normalized
@@ -358,17 +367,28 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	# suggest an index on them. Skip before we even bucket the suggestion.
 	dropped_meta_table_tables: set[str] = set()
 	logged_real = 0
+	timed_out = 0
+	dialect = get_dialect()
 	for normalized, info in unique_queries.items():
+		from optimus.sql_budget import within_budget
+		if not within_budget(info["raw"]):
+			parser_limit_failures["ParseBudgetExceeded"] += 1
+			continue
 		try:
 			# DBOptimizer parses with sql_metadata which doesn't care about
 			# literal values, so passing the normalized query is fine.
-			index = _optimize_query(info["raw"])
+			# Its COUNT(DISTINCT) cardinality check scans the whole table, so cap it.
+			with dialect.statement_time_limit(OPTIMIZER_STATEMENT_TIMEOUT_SECONDS):
+				index = _optimize_query(info["raw"])
 		except _PARSER_LIMITATION_EXCEPTIONS as e:
 			# Expected path for complex queries sql_metadata can't parse.
 			# Count but don't log the user can't act on these.
 			parser_limit_failures[type(e).__name__] += 1
 			continue
 		except Exception as e:
+			if dialect.is_statement_timeout(e):
+				timed_out += 1
+				continue
 			# Unexpected path this might indicate a real profiler bug.
 			# Count, log the first few to Error Log (so they're discoverable
 			# for investigation) and continue.
@@ -517,6 +537,12 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			f"SELECT statements for index suggestions ({failure_summary}). "
 			"The report may be missing some optimization opportunities "
 			"see Error Log for the first few failed queries."
+		)
+	if timed_out:
+		warnings.append(
+			f"Skipped index suggestions for {timed_out} SELECT statement(s) because the "
+			f"optimizer's table scan ran past {OPTIMIZER_STATEMENT_TIMEOUT_SECONDS}s. "
+			"Their tables are likely large; check them with EXPLAIN by hand."
 		)
 
 	# v0.5.1: Parser limitations (sql_metadata can't parse this shape) get
