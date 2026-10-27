@@ -52,7 +52,7 @@ def test_widget_resyncs_from_server_and_polls():
 	# The old early return that let a reload never clear "analyzing" must stay gone.
 	body = src[src.index("function refreshStatus"):src.index("function onClick")]
 	assert 'display === "analyzing"' not in body
-	for symbol in ("syncPoll", "pollTick", "reduceHardStop", "pollExpired", "visibilitychange"):
+	for symbol in ("syncPoll", "pollTick", "reduceHardStop", "pollAction", "visibilitychange"):
 		assert symbol in src, symbol
 
 
