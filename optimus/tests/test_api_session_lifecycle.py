@@ -101,6 +101,7 @@ def env(monkeypatch):
 	monkeypatch.setattr(api, "_publish_session_event", lambda *a, **kw: None)
 	monkeypatch.setattr(capture, "_force_stop_inflight_capture", lambda **kw: None)
 	monkeypatch.setattr(infra_capture, "_force_stop_inflight", lambda *a, **kw: None)
+	monkeypatch.setattr(api.ratelimit, "enforce_user_rate_limit", lambda *a, **kw: None)
 	monkeypatch.setattr(api, "_require_profiler_user", lambda: "alice@example.com")
 	monkeypatch.setattr(api, "_require_session_permission", lambda *a, **kw: "OPT-0001")
 	monkeypatch.setattr(frappe, "db", db, raising=False)
@@ -120,7 +121,7 @@ def _scheduler(monkeypatch, disabled):
 
 
 def _row(env, uuid="u1", name="OPT-1", user="alice@example.com", status="Recording"):
-	env.db.rows[uuid] = {"name": name, "user": user, "status": status}
+	env.db.rows[uuid] = {"name": name, "user": user, "owner": user, "status": status}
 
 
 def _bg_wait(monkeypatch, seconds):
@@ -367,16 +368,30 @@ class TestDrainProgress:
 
 class TestRetryAnalyze:
 	@pytest.fixture(autouse=True)
-	def _roles(self, monkeypatch):
+	def _roles(self, env, monkeypatch):
 		frappe = api.frappe
+		from optimus import ai_jobs
 
 		self.roles = ["Optimus User"]
-		monkeypatch.setattr(api, "_require_profiler_user", lambda: "alice@example.com")
 		monkeypatch.setattr(frappe, "get_roles", lambda user=None: self.roles, raising=False)
+
+		def _has_permission(doctype, ptype, name, user=None):
+			owner = next((r["owner"] for r in env.db.rows.values() if r["name"] == name), None)
+			if "System Manager" in self.roles:
+				return True
+			return ptype == "read" and owner == user
+
+		def _prepare(docname, session_uuid, *, requested_by):
+			row = env.db.rows[session_uuid]
+			row.update(status="Stopping", analyzer_warnings=None)
+			return True
 
 		def _throw(msg, exc=None, **kw):
 			raise (exc or frappe.ValidationError)(msg)
 
+		monkeypatch.setattr(frappe, "has_permission", _has_permission, raising=False)
+		monkeypatch.setattr(frappe, "session", types.SimpleNamespace(user="alice@example.com"), raising=False)
+		monkeypatch.setattr(ai_jobs, "prepare_analyze_retry", _prepare)
 		monkeypatch.setattr(frappe, "throw", _throw, raising=False)
 		monkeypatch.setattr(api, "_", lambda m: m)
 
@@ -389,18 +404,8 @@ class TestRetryAnalyze:
 	def test_unknown_session_is_rejected(self, env):
 		frappe = api.frappe
 
-		with pytest.raises(frappe.ValidationError, match="No Optimus Session found"):
+		with pytest.raises(frappe.DoesNotExistError, match="No Optimus Session found"):
 			api.retry_analyze("missing")
-
-	def test_only_failed_sessions_are_retried(self, env):
-		_row(env, status="Ready")
-
-		out = api.retry_analyze("u1")
-
-		assert out["retried"] is False
-		assert "'Ready'" in out["reason"]
-		assert env.db.rows["u1"]["status"] == "Ready"
-		assert env.enqueued == []
 
 	def test_other_users_failed_session_is_refused(self, env):
 		frappe = api.frappe
@@ -441,6 +446,18 @@ class TestRetryAnalyze:
 		assert env.db.rows["u1"]["analyzer_warnings"] is None
 		assert cleared == ["u1"], "stale PDF must be dropped so it regenerates from the new HTML"
 		assert env.enqueued[0][1]["now"] is False
+
+	def test_retry_refused_when_the_session_changed_before_the_reset(self, env, monkeypatch):
+		frappe = api.frappe
+		from optimus import ai_jobs
+
+		monkeypatch.setattr(ai_jobs, "prepare_analyze_retry", lambda *a, **kw: False)
+		_row(env, status="Failed")
+
+		with pytest.raises(frappe.ValidationError, match="changed before Retry Analyze"):
+			api.retry_analyze("u1")
+
+		assert env.enqueued == []
 
 	def test_inline_retry_reports_the_final_status(self, env, monkeypatch):
 		frappe = api.frappe

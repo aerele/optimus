@@ -47,7 +47,7 @@ def site(monkeypatch):
 	monkeypatch.setattr(
 		frappe,
 		"db",
-		types.SimpleNamespace(exists=lambda dt, name=None: (dt, name) in state.exists),
+		types.SimpleNamespace(db_type="mariadb", exists=lambda dt, name=None: (dt, name) in state.exists),
 		raising=False,
 	)
 	monkeypatch.setattr(frappe, "get_single", lambda dt: state.settings, raising=False)
@@ -149,13 +149,17 @@ class TestTrackedAppsSeed:
 		assert site.settings.saved == 0
 
 
+def _roles_inserted(site):
+	return [row for row in site.inserted if row["doctype"] == "Role"]
+
+
 class TestAfterInstall:
 	def test_creates_the_role_once_and_runs_every_seed(self, site, monkeypatch):
 		monkeypatch.setattr(install, "_assign_profiler_user_to_system_managers", lambda: None)
 
 		install.after_install()
 
-		assert site.inserted == [
+		assert _roles_inserted(site) == [
 			{"doctype": "Role", "role_name": "Optimus User", "desk_access": 1, "is_custom": 0}
 		]
 		assert site.settings.tracked_apps == ["my_app"]
@@ -167,7 +171,7 @@ class TestAfterInstall:
 
 		install.after_install()
 
-		assert site.inserted == []
+		assert _roles_inserted(site) == []
 
 	def test_a_failing_step_is_logged_and_does_not_abort_the_install(self, site, monkeypatch):
 		def _boom():

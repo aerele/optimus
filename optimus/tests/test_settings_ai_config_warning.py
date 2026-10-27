@@ -93,13 +93,20 @@ class TestValidateAndOnUpdate:
 			"Tracked Apps possible misconfiguration",
 		]
 
-	def test_on_update_drops_the_cached_settings(self, make_doc):
+	def test_on_update_drops_the_cached_settings_after_commit(self, make_doc, monkeypatch):
 		make, stub = make_doc
 		from optimus import redis_keys
 
-		deleted = []
-		stub.cache = types.SimpleNamespace(delete_value=deleted.append)
+		deleted, after_commit = [], []
+		monkeypatch.setattr(stub, "cache", types.SimpleNamespace(delete_value=deleted.append), raising=False)
+		monkeypatch.setattr(
+			stub, "db", types.SimpleNamespace(after_commit=types.SimpleNamespace(add=after_commit.append)),
+			raising=False,
+		)
 
 		make().on_update()
 
+		assert deleted == [], "nothing is dropped before the commit"
+		for callback in after_commit:
+			callback()
 		assert deleted == [redis_keys.settings_cache()]

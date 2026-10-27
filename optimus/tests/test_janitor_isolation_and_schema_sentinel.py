@@ -23,6 +23,10 @@ def _boom():
 
 
 class TestJanitorEntryPoints:
+	@pytest.fixture(autouse=True)
+	def _no_snapshot_sweep(self, monkeypatch):
+		monkeypatch.setattr(janitor, "_sweep_failed_snapshot_inputs", lambda: None)
+
 	def test_one_failing_sweep_does_not_stop_the_other_stale_sweeps(self, errors, monkeypatch):
 		ran = []
 		monkeypatch.setattr(janitor, "_sweep_stale_recording", _boom)
@@ -47,6 +51,17 @@ class TestJanitorEntryPoints:
 
 		assert ran == ["orphans"]
 		assert errors == ["optimus janitor sweep_old_sessions"]
+
+	def test_failed_snapshot_input_sweep_does_not_stop_the_other_sweeps(self, errors, monkeypatch):
+		ran = []
+		monkeypatch.setattr(janitor, "_sweep_failed_snapshot_inputs", _boom)
+		monkeypatch.setattr(janitor, "_sweep_old_sessions", lambda: ran.append("old"))
+		monkeypatch.setattr(janitor, "_sweep_orphan_redis_state", lambda: ran.append("orphans"))
+
+		janitor.sweep_old_sessions()
+
+		assert ran == ["old", "orphans"]
+		assert errors == ["optimus janitor failed recording inputs"]
 
 	def test_failed_orphan_sweep_is_logged_not_raised(self, errors, monkeypatch):
 		monkeypatch.setattr(janitor, "_sweep_old_sessions", lambda: None)
