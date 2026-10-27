@@ -192,7 +192,7 @@ class TestDrilldownRender:
 		assert "--ctd: 1" in dd and "--ctd: 2" in dd
 
 	def test_call_chain_renders_as_indented_tree(self):
-		"""The Phase-2 Call chain block goes through the same nested-tree macro:
+		"""The line-profiling Drill-down block goes through the same nested-tree macro:
 		every step keeps its `qualname:lineno`, the first is the root and the
 		deepest is the terminal node."""
 		from optimus import renderer
@@ -220,7 +220,7 @@ class TestDrilldownRender:
 		)
 		html = renderer.render_raw(doc, recordings=[])
 
-		start = html.find('chain-label">Call chain')
+		start = html.find('chain-label">Drill-down')
 		assert start > 0
 		cc = html[start:html.find("chain-foot", start)]
 		assert 'class="chain-tree"' in cc
@@ -264,7 +264,7 @@ class TestDrilldownRender:
 		)
 		html = renderer.render_raw(doc, recordings=[])
 
-		start = html.find('chain-label">Call chain')
+		start = html.find('chain-label">Drill-down')
 		assert start > 0
 		cc = html[start:html.find("chain-foot", start)]
 		assert ":None" not in cc
@@ -405,3 +405,66 @@ class TestDrilldownRender:
 		)
 		html = renderer.render_raw(doc, recordings=[])
 		assert "Drill-down" not in html
+
+
+class TestDrilldownHeadingWithBothBlocks:
+	"""A card shows the Drill-down heading once, whichever blocks it has."""
+
+	LABEL = '<div class="chain-label">Drill-down</div>'
+	CHAIN = [
+		{"qualname": "compute", "lineno": 30},
+		{"qualname": "_inner_loop", "lineno": 41},
+	]
+
+	def _render(self, function, lineno, call_chain=None, with_tree=True):
+		from optimus import renderer
+
+		detail = {"callsite": {
+			"filename": "apps/ugly_code/ugly_code/python/common.py",
+			"lineno": lineno, "function": function,
+		}}
+		if call_chain:
+			detail["call_chain"] = call_chain
+		f = types.SimpleNamespace(
+			finding_type="Hot Line", severity="High", title="t",
+			customer_description="", estimated_impact_ms=120.0, affected_count=1,
+			action_ref="0", technical_detail_json=json.dumps(detail), llm_fix_json=None,
+		)
+		tree = _tree_for_screenshot() if with_tree else None
+		doc = _doc(actions=[_action("POST /x", "r0", 689, tree)], findings=[f])
+		return renderer.render_raw(doc, recordings=[])
+
+	def test_only_sampled_tree_block(self):
+		html = self._render("looped_validate", 6)
+		assert html.count(self.LABEL) == 1
+		assert "time inside <code>looped_validate</code> walked through" in html
+		assert "Call chain" not in html
+
+	def test_only_line_profiling_block(self):
+		html = self._render("compute", 30, call_chain=self.CHAIN, with_tree=False)
+		assert html.count(self.LABEL) == 1
+		assert "deepest line is where the cost is incurred" in html
+		assert "Call chain" not in html
+
+	def test_both_blocks_share_one_heading(self):
+		html = self._render("looped_validate", 6, call_chain=self.CHAIN)
+		assert html.count(self.LABEL) == 1
+		assert "deepest line is where the cost is incurred" in html
+		assert "time inside <code>looped_validate</code> walked through" in html
+		# The labelled block is the line-profiling one; the sampled tree follows it unlabelled.
+		assert html.find(self.LABEL) < html.find("deepest line is where")
+		assert html.find("deepest line is where") < html.find("walked through")
+		assert "Call chain" not in html
+
+	def test_neither_block_keeps_single_placeholder_heading(self):
+		html = self._render("not_in_tree", 1)
+		assert html.count(self.LABEL) == 1
+		assert "no deeper user-code frame" in html
+		assert "deepest line is where" not in html
+		assert "Call chain" not in html
+
+	def test_line_profiling_chain_with_placeholder_keeps_one_heading(self):
+		html = self._render("not_in_tree", 1, call_chain=self.CHAIN)
+		assert html.count(self.LABEL) == 1
+		assert html.find(self.LABEL) < html.find("deepest line is where")
+		assert "no deeper user-code frame" in html

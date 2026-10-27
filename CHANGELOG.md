@@ -8,6 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
+## [0.12.106] - 2026-10-27
+
+### Changed
+
+- The "Call chain" block on a finding card is now labelled "Drill-down", matching the existing Drill-down block. When a card has both, they sit under a single "Drill-down" heading: the line-profiling chain first, then the sampled call path without a second heading, each keeping its own footer line.
+
+---
+
 ## [0.12.92] - 2026-10-27
 
 ### Internal

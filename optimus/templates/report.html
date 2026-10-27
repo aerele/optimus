@@ -905,7 +905,7 @@
      Editorial card: paper white background, 1px rule border, 6px
      radius. Severity colour moves from a left rail to a small pill
      in the top-left. Title is serif 18px. Impact is large red serif
-     pushed to the right. Body holds the smoking-gun + call chain +
+     pushed to the right. Body holds the smoking-gun + drill-down +
      fix box. The old `.finding-header` / `.severity-badge` /
      `.smoking-gun` / `.ai-fix` rules above are orphaned but left in
      place - clean up in a later phase. */
@@ -1895,7 +1895,7 @@
    when there is a descent (more than one row) so a lone root is never
    reddened. Named for its .chain-tree output, distinct from the separate
    call_tree_renderer that builds the .call-tree panel. Shared by the
-   Drill-down and Call chain blocks so every finding card reads the same way. #}
+   two Drill-down blocks so every finding card reads the same way. #}
 {% macro chain_tree(rows) %}
 <div class="chain-tree">
   {% for row in rows %}
@@ -2060,11 +2060,14 @@
         {% endif %}
       {% endif %}
 
-      {# Call chain (Phase 2 instrumented chain). Nested-call tree, terminal red. #}
+      {# Drill-down from the line-profiling run (data key call_chain). Nested-call
+         tree, terminal red. When the sampled drill-down below also renders, this
+         block owns the single "Drill-down" heading and that one drops its label. #}
       {% set _phase2_chain = (f.technical_detail or {}).get("call_chain") if f.technical_detail else None %}
-      {% if _phase2_chain and _phase2_chain | length > 1 %}
+      {% set _show_p2_chain = _phase2_chain and _phase2_chain | length > 1 %}
+      {% if _show_p2_chain %}
       <div class="chain">
-        <div class="chain-label">Call chain</div>
+        <div class="chain-label">Drill-down</div>
         {% set _cc_rows = [] %}
         {% for step in _phase2_chain %}{% set _ = _cc_rows.append(step.qualname ~ (":" ~ step.lineno if step.lineno else "")) %}{% endfor %}
         {{ chain_tree(_cc_rows) }}
@@ -2084,7 +2087,7 @@
       </div>
       {% endif %}
 
-      {# Drill-down chain. Renders as a nested-call tree ending in red
+      {# Sampled drill-down chain. Renders as a nested-call tree ending in red
          (terminal = deepest user-code frame). A finding that sits at a leaf
          user frame has no descent, so it falls back to its ancestry (the
          nested call path that leads to it); only a truly top-level leaf keeps
@@ -2094,7 +2097,7 @@
       {% set _drill_root_fn = callsite.original_wrapper.function if callsite.original_wrapper else callsite.function %}
       {% if _drilldown %}
       <div class="chain">
-        <div class="chain-label">Drill-down</div>
+        {% if not _show_p2_chain %}<div class="chain-label">Drill-down</div>{% endif %}
         {% set _dd_rows = [_drill_root_fn] %}
         {% for level in _drilldown %}{% set _ = _dd_rows.append(level.function ~ (":" ~ level.lineno if level.lineno else "")) %}{% endfor %}
         {{ chain_tree(_dd_rows) }}
@@ -2102,7 +2105,7 @@
       </div>
       {% elif _drill_ancestry %}
       <div class="chain">
-        <div class="chain-label">Drill-down</div>
+        {% if not _show_p2_chain %}<div class="chain-label">Drill-down</div>{% endif %}
         {% set _an_rows = [] %}
         {% for level in _drill_ancestry %}{% set _ = _an_rows.append(level.function ~ (":" ~ level.lineno if level.lineno else "")) %}{% endfor %}
         {{ chain_tree(_an_rows) }}
@@ -2110,7 +2113,7 @@
       </div>
       {% elif _drilldown is not none %}
       <div class="chain">
-        <div class="chain-label">Drill-down</div>
+        {% if not _show_p2_chain %}<div class="chain-label">Drill-down</div>{% endif %}
         <div class="chain-foot">no deeper user-code frame - <code>{{ _drill_root_fn }}</code> calls framework code directly. Check the N+1 Query or related findings for inner-loop details.</div>
       </div>
       {% endif %}
