@@ -2393,7 +2393,7 @@
         </div>
       {% endif %}
       {% if job.triggered_by %}
-        <div class="action-meta">Triggered by {% if job.triggered_by.idx is not none %}#{{ job.triggered_by.idx + 1 }} {% endif %}{{ job.triggered_by.label }}</div>
+        <div class="action-meta">Triggered by {{ job.triggered_by.label }}</div>
       {% endif %}
     </td>
     <td>{{ bg_status_badge(job.status) }}</td>

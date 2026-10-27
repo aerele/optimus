@@ -1318,7 +1318,7 @@ def _tracked_row_get(row, key, default=None):
 
 
 def _triggered_by(tracked_row, action_by_uuid, recordings_by_uuid) -> dict | None:
-	"""The action that enqueued a job as ``{idx, label}``, or None if unknown."""
+	"""The action that enqueued a job as ``{label}``, or None if unknown."""
 	parent = (_tracked_row_get(tracked_row, "parent_recording_uuid") or "").strip()
 	action = action_by_uuid.get(parent) if parent else None
 	if not action:
@@ -1328,7 +1328,7 @@ def _triggered_by(tracked_row, action_by_uuid, recordings_by_uuid) -> dict | Non
 		label = "job " + _clean_job_method(action.get("action_label"), action.get("path"), rec)
 	else:
 		label = action.get("action_label") or action.get("path") or ""
-	return {"idx": action.get("idx"), "label": label}
+	return {"label": label}
 
 
 def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jobs=None) -> dict:

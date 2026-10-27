@@ -19,7 +19,7 @@ versions may contain breaking changes see migration notes below).
 
 ### Added
 
-- Each background job in the report now says which action (or parent job) triggered it ("Triggered by #3 POST ..."). Existing sessions are unaffected; a migration adds the column.
+- Each background job in the report now says which action (or parent job) triggered it ("Triggered by POST ..."). Existing sessions are unaffected; a migration adds the column.
 
 ---
 
