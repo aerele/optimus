@@ -9,6 +9,7 @@ renderer.render_raw end-to-end so the macro is verified in its real context.
 import html as _html
 import inspect
 import json
+import os
 import re
 from types import SimpleNamespace
 
@@ -806,7 +807,7 @@ class TestLazySnippetRead:
 # Same constraint as test_action_entry_callsite: walk_callsite excludes any
 # path containing "frappe/" or "optimus/", so the "user code" frame
 # must be a path with neither a stdlib module's absolute file works.
-_USER_FRAME_FILE = inspect.__file__
+_USER_FRAME_FILE = os.path.realpath(inspect.__file__)
 
 
 def _repeated_hot_frame(function_key, total_ms=679.0):

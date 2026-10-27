@@ -13,6 +13,7 @@ list stays in the per-action breakdown.
 import json
 
 from optimus.analyzers.base import (
+	QUERY_TEXT_LIMIT,
 	AnalyzerResult,
 	dur,
 	installed_apps_allowlist,

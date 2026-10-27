@@ -19,11 +19,13 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
 
+from optimus.ai_guardrails import render_validation_budget
 from optimus.analyzers.base import (
 	DEFAULT_DISPLAY_THRESHOLD_MS,
 	SEVERITY_ORDER,
 	format_duration_markers,
 	format_durations,
+	installed_apps_allowlist,
 	strip_profiler_own_calls,
 )
 
@@ -136,6 +138,9 @@ from optimus.renderer.doc_event_renderer import (
 from optimus.renderer.finding_enrichment import (
 	_GROUPING_SEVERITY_RANK,
 	_SQL_REDFLAG_FINDING_TYPES,
+	_action_ref_key,
+	_ai_links_by_action,
+	_assign_finding_ids,
 	_attach_drilldown_chains,
 	_attach_representative_callsites,
 	_expand_self_time_snippets,
@@ -170,13 +175,24 @@ from optimus.renderer.line_drilldown import (
 	_render_phase2_panel,
 )
 from optimus.renderer.queries_per_action import build_queries_per_action
+
+# render-time deterministic recipes (index advice, Hot Line gate notes).
+from optimus.renderer.recipe_enrichment import (
+	apply_finding_recipes,
+	apply_table_recipes,
+	count_ai_tokens,
+	log_recipe_failures,
+	make_evidence_lookup,
+	make_query_parser,
+	make_refresh_check,
+	mark_outdated_ai_fixes,
+)
 from optimus.renderer.source import (
 	_FILE_CACHE_MAX_ENTRIES,
 	_SNIPPET_TRUNCATE_CHARS,
 	_BoundedFileCache,
 	_path_within_bench,
 	_read_source_snippet,
-	_read_source_window,
 	_resolve_source_path,
 )
 
@@ -267,6 +283,27 @@ def _finalize_prose(text: str, threshold_ms: float, *, scan: bool = True) -> str
 	return fmt(text, threshold_ms).replace("—", "-")
 
 
+def _sanitize_report_html(value):
+	"""Preserve rich notes on older v15 while excluding resource-bearing tags."""
+	from frappe.utils.html_utils import sanitize_html
+
+	try:
+		return sanitize_html(value, always_sanitize=True, disallowed_tags=["meta", "link"])
+	except TypeError as exc:
+		if "disallowed_tags" not in str(exc):
+			raise
+	# Old v15 lacks the keyword. Sanitize before parsing, strip resource tags,
+	# then sanitize the serialized DOM again to retain the fail-closed boundary.
+	from bs4 import BeautifulSoup
+
+	cleaned = sanitize_html(value, always_sanitize=True)
+	soup = BeautifulSoup(cleaned, "html.parser")
+	for tag in soup.find_all(["meta", "link"]):
+		tag.decompose()
+	return sanitize_html(str(soup), always_sanitize=True)
+
+
+@render_validation_budget()
 def render(
 	session_doc: Any,
 	recordings: list[dict] | None = None,
@@ -359,6 +396,10 @@ def render(
 		_finding_to_dict(f, _finding_file_cache)
 		for f in (session_doc.findings or [])
 	]
+	_assign_finding_ids(all_findings, session_doc.findings or [])
+	# Tokens every stored AI fix cost, counted before any filter or hide step below drops
+	# a finding (the tables' retired index-AI tokens are added where the tables are read).
+	_ai_fix_tokens = count_ai_tokens(all_findings, [])
 	# v0.6.x: SQL "red flag" findings carry no callsite derive a
 	# representative one (the hottest user-app frame that ran the offending
 	# query) from the recordings so their smoking-gun block can render too.
@@ -512,18 +553,6 @@ def render(
 		table_breakdown = json.loads(session_doc.table_breakdown_json or "[]")
 	except Exception:
 		table_breakdown = []
-	# v0.6.0: an LLM-vetted index recommendation may be stashed on a table
-	# entry (by analyze.py's auto step or the "Suggest an index (AI)" button)
-	# as ``ai_index = {"suggestion": <markdown>, "model": ..., ...}``. Render
-	# the markdown → sanitized HTML here so the template can `| safe` it
-	# (same path as the finding AI-fix blocks).
-	for _t in table_breakdown:
-		if isinstance(_t, dict) and isinstance(_t.get("ai_index"), dict):
-			raw = (_t["ai_index"].get("suggestion") or "").strip()
-			if raw:
-				_t["ai_index"]["suggestion_html"] = _markdown_to_safe_html(raw)
-
-
 	# v0.6.x: a per-section LLM toggle being off is a hard disable drop any
 	# previously-generated AI output for that section so re-rendering an older
 	# session (analyzed while it was on) doesn't show the block. (Humanized
@@ -534,7 +563,6 @@ def render(
 		from optimus.settings import get_config as _get_cfg
 		_cfg = _get_cfg()
 		_ai_findings_on = getattr(_cfg, "ai_suggest_findings", True)
-		_ai_indexes_on = getattr(_cfg, "ai_suggest_indexes", True)
 		_hide_framework_tables = getattr(_cfg, "hide_framework_tables", True)
 		# v0.6.x: snapshot the render-affecting settings so the footer can
 		# stamp THIS file with the values that were in effect. Saved HTML
@@ -554,7 +582,6 @@ def render(
 			"tracked_apps": tuple(getattr(_cfg, "tracked_apps", ()) or ()),
 			"ignored_apps": tuple(getattr(_cfg, "ignored_apps", ()) or ()),
 			"ai_suggest_findings": _ai_findings_on,
-			"ai_suggest_indexes": _ai_indexes_on,
 			"min_action_duration_ms": float(
 				getattr(_cfg, "min_action_duration_ms", 0.0) or 0.0
 			),
@@ -563,7 +590,7 @@ def render(
 			"config_profile": getattr(_cfg, "config_profile", "Custom"),
 		}
 	except Exception:
-		_ai_findings_on = _ai_indexes_on = True
+		_ai_findings_on = True
 		_hide_framework_tables = True
 		_large_duration_threshold_ms = DEFAULT_DISPLAY_THRESHOLD_MS
 		render_config = {
@@ -571,7 +598,6 @@ def render(
 			"tracked_apps": (),
 			"ignored_apps": (),
 			"ai_suggest_findings": True,
-			"ai_suggest_indexes": True,
 			"min_action_duration_ms": 0.0,
 			"large_duration_threshold_ms": DEFAULT_DISPLAY_THRESHOLD_MS,
 			"config_profile": "Custom",
@@ -598,13 +624,25 @@ def render(
 			_f["customer_description"] = _finalize_prose(
 				_f["customer_description"], _large_duration_threshold_ms
 			)
+	# The tables' retired index-AI output cost tokens too, counted before it is hidden below.
+	_ai_fix_tokens += count_ai_tokens([], table_breakdown)
 	if not _ai_findings_on:
 		for _f in all_findings:
 			_f["llm_fix"] = None
-	if not _ai_indexes_on:
-		for _t in table_breakdown:
-			if isinstance(_t, dict):
-				_t.pop("ai_index", None)
+	# deterministic index advice fills the existing fix-hint / code / table-card
+	# slots from ONE advisor and one per-render evidence lookup, retired AI output
+	# (index-family and Framework N+1 suggestions, table ``ai_index``) is hidden and
+	# gated Hot Lines get their note. Render time, so regenerating an older session
+	# picks it up.
+	_installed_apps = installed_apps_allowlist()
+	_evidence_lookup = make_evidence_lookup()
+	_recipe_errors: list = []
+	_finding_recipe_stats = apply_finding_recipes(
+		all_findings, evidence_lookup=_evidence_lookup,
+		tracked_apps=render_config["tracked_apps"], installed_apps=_installed_apps,
+		parser=make_query_parser(), errors=_recipe_errors,
+	)
+	mark_outdated_ai_fixes(all_findings, refresh_check=make_refresh_check())
 
 	# v0.6.x: drop framework/internal db tables from the "Time spent per
 	# database table" section schema/meta (DocType/DocField/…), user-
@@ -622,6 +660,16 @@ def render(
 				continue
 			_kept_tb.append(_t)
 		table_breakdown = _kept_tb
+	# Table cards are advised after the hide filter, so hidden framework tables cost no
+	# evidence queries (the recipe stage grew with session size).
+	_table_recipe_stats = apply_table_recipes(
+		table_breakdown, evidence_lookup=_evidence_lookup, tracked_apps=render_config["tracked_apps"],
+		errors=_recipe_errors,
+	)
+	log_recipe_failures(
+		_finding_recipe_stats["failed"] + _table_recipe_stats["failed"], errors=_recipe_errors,
+	)
+	_evidence_lookup.log_unlisted_failures()
 
 	# Sort all findings: highest severity first, then highest impact.
 	all_findings.sort(
@@ -707,15 +755,14 @@ def render(
 	notes_html = getattr(session_doc, "notes", None) or ""
 	if notes_html:
 		try:
-			from frappe.utils.html_utils import sanitize_html
-			notes_html = sanitize_html(notes_html, always_sanitize=True)
+			notes_html = _sanitize_report_html(notes_html)
 		except Exception:
 			# If sanitize_html blows up for any reason (unexpected input
 			# type, nh3/bleach internal error), fall back to HTML-escaping
 			# via html.escape so the report NEVER renders unsanitized
 			# user input - safe by default.
 			import html as html_mod
-			notes_html = html_mod.escape(notes_html)
+			notes_html = html_mod.escape(html_mod.unescape(notes_html))
 		# The Steps-to-Reproduce list bakes raw-ms durations at analyze time (e.g.
 		# "Submit Delivery Note: 12418.3 ms") and the AI humanizer writes free-text
 		# durations, so reformat with the prose fallback and strip em dashes. Order
@@ -798,6 +845,7 @@ def render(
 	observational_findings_by_app = _bucket_findings_by_app(
 		observational_findings, tracked_apps
 	)
+	_ai_links = _ai_links_by_action(findings_by_app + observational_findings_by_app)
 
 	# v0.6.x: prioritise custom-app rows in each of the 4 main listing
 	# sections (per-action, top-queries, background-jobs, hot-frames).
@@ -836,12 +884,14 @@ def render(
 	# still appear in their respective top-level sections.
 	_findings_by_action_ref: dict[str, list] = {}
 	for _f in actionable_findings:
-		_ref = str(_f.get("action_ref") or "").strip()
+		_ref = _action_ref_key(_f.get("action_ref"))
 		if _ref:
 			_findings_by_action_ref.setdefault(_ref, []).append(_f)
 	for _a in list(actions) + list(actions_framework):
+		_ref = _action_ref_key(_a.get("idx"))
+		_a["ai_suggestion_links"] = _ai_links.get(_ref, [])
 		_a["related_findings"] = _findings_by_action_ref.get(
-			str(_a.get("idx", "")), [],
+			_ref, [],
 		)
 	# v0.7.x: same linkage for RQ Jobs rows. Jobs carry the
 	# original action ``idx`` (set in ``build_background_jobs``) so
@@ -852,8 +902,10 @@ def render(
 		list(background_jobs.get("jobs", []) or [])
 		+ list(background_jobs.get("jobs_framework", []) or [])
 	):
+		_ref = _action_ref_key(_job.get("idx"))
+		_job["ai_suggestion_links"] = _ai_links.get(_ref, [])
 		_job["related_findings"] = _findings_by_action_ref.get(
-			str(_job.get("idx", "")), [],
+			_ref, [],
 		)
 	top_queries, top_queries_framework = _split_by_framework_app(
 		top_queries,
@@ -970,6 +1022,12 @@ def render(
 	# threshold caption to "(&gt;0.20s)" under a custom threshold <= 200 (the ";" in
 	# "&gt;" is not a URL-guard char), the very corruption the render-time path avoids.
 	stored_summary_html = getattr(session_doc, "summary_html", None) or ""
+	if stored_summary_html:
+		try:
+			stored_summary_html = _sanitize_report_html(stored_summary_html)
+		except Exception:
+			import html as html_mod
+			stored_summary_html = html_mod.escape(html_mod.unescape(stored_summary_html))
 	if not summary_html_rendered and stored_summary_html:
 		stored_summary_html = _finalize_prose(
 			stored_summary_html, _large_duration_threshold_ms, scan=False
@@ -991,6 +1049,7 @@ def render(
 		# `.count` → the template omits the section.
 		"doc_event_breakdown": doc_event_breakdown,
 		"analyzer_warnings": analyzer_warnings,
+		"ai_fix_tokens": _ai_fix_tokens,
 		"truncation_banner": truncation_banner,
 		"findings_by_app": findings_by_app,
 		"observational_findings_by_app": observational_findings_by_app,
@@ -1172,7 +1231,10 @@ def render_raw(session_doc: Any, recordings: list[dict]) -> str:
 	(raw SQL, headers, form_dict and full stack traces are not stored on the
 	DocType).
 	"""
-	return render(session_doc, recordings)
+	from optimus.renderer.source import server_script_readers
+
+	with server_script_readers(getattr(session_doc, "owner", None)):
+		return render(session_doc, recordings)
 
 
 # ---------------------------------------------------------------------------
@@ -1402,11 +1464,6 @@ def build_background_jobs(actions, recordings_by_uuid, findings=None, tracked_jo
 # module so call sites resolve unchanged.
 
 
-# (_read_source_window duplicate definition removed the function now
-# lives in optimus/renderer/source.py and is re-imported at the top of
-# this file.)
-
-
 # ---------------------------------------------------------------------------
 # v0.5.2 round 3: Executive summary
 # ---------------------------------------------------------------------------
@@ -1508,7 +1565,9 @@ def _build_action_plan(
 	out: list[dict] = []
 	for i, f in enumerate(ranked, start=1):
 		ftype = f.get("finding_type") or ""
-		verb = _action_verb_for(ftype)
+		# A render-only label wins: a Missing Index with no index code is never "Add a
+		# database index" (recipe_enrichment.apply_finding_recipes).
+		verb = f.get("action_title") or _action_verb_for(ftype)
 		title = verb or (f.get("title") or "Investigate this finding")
 		desc = (f.get("customer_description") or "").strip()
 		if not desc:
