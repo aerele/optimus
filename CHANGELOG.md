@@ -8,11 +8,21 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.94] - 2026-10-27
+## [0.12.98] - 2026-10-27
 
 ### Changed
 
 - The Optimus Session form is reorganised so the most useful things come first. An Overview tab shows the status, top severity and report links, then the totals, the summary, the session details and your notes. Findings, the recorded actions and background jobs, line-profiling runs and the technical and AI usage details each get their own tab or collapsed section. Existing sessions pick this up on the next migrate, and no session data changes.
+
+---
+
+## [0.12.91] - 2026-10-27
+
+### Fixed
+
+- Optimus's own queries (such as the server-resource snapshots) no longer appear anywhere in the report. They are removed when a recording is loaded, so the query counts, DB time, table breakdown, slowest queries and findings never include them.
+- "Queries per action" now respects Optimus Settings. When Tracked Apps is set, it lists only queries issued from those apps and says how many queries from other apps were left out. When it is empty, every non-Optimus query is listed as before. The callsite shown is now the app code that issued the query, not the innermost Frappe frame.
+- Apps whose name merely ends in "optimus" are no longer mistaken for the profiler.
 
 ---
 
