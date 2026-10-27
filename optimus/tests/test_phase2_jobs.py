@@ -255,7 +255,7 @@ def test_late_worker_does_not_fail_or_clean_input_of_a_new_retry(worker, monkeyp
 
 
 @pytest.mark.rq
-def test_hard_timeout_after_results_commit_keeps_ready(worker, monkeypatch):
+def test_hard_timeout_after_results_commit_is_completed_by_recovery(worker, monkeypatch):
 	Timeout = pytest.importorskip("rq.timeouts", exc_type=ImportError).JobTimeoutException
 	admit(worker)
 	def timeout(*a):
@@ -263,9 +263,14 @@ def test_hard_timeout_after_results_commit_keeps_ready(worker, monkeypatch):
 	monkeypatch.setattr(worker.mod, "_render", timeout)
 	with pytest.raises(Timeout):
 		run_worker(worker)
-	assert worker.row()["status"] == "Ready" and worker.row()["analyze_render_pending"] == 1
+	# Results are saved; the run is not Ready until the report is attached.
+	assert worker.row()["status"] == "Analyzing" and worker.row()["analyze_render_pending"] == 1
 	assert len(worker.calls.persist) == 1
 	assert not worker.calls.ai
+	with worker.db.transaction():
+		assert worker.mod._recover("fake-session-doc", "fake-phase2", now=10**9) == "Ready"
+	assert worker.row()["status"] == "Ready" and worker.row()["analyze_render_pending"] == 1
+	assert len(worker.calls.persist) == 1
 
 
 def test_queue_dispatch_failure_leaves_durable_intent(worker, monkeypatch):
@@ -415,7 +420,9 @@ def test_interrupt_is_not_replaced_by_a_secondary_log_failure(worker, monkeypatc
 	worker.db.rollback = lambda: (_ for _ in ()).throw(ConnectionError("fake rollback outage"))
 	with pytest.raises(Timeout):
 		run_worker(worker)
-	assert worker.row()["status"] == "Ready"
+	assert worker.row()["status"] == "Analyzing" and worker.row()["analyze_render_pending"] == 1
+	with worker.db.transaction():
+		assert worker.mod._recover("fake-session-doc", "fake-phase2", now=10**9) == "Ready"
 
 
 def test_missing_child_cannot_promote_orphaned_phase2_findings(monkeypatch):
