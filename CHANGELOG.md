@@ -8,15 +8,21 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.93] - 2026-10-27
+## [0.12.96] - 2026-10-27
 
 ### Added
 
 - The "Queries per action" table has a separate Function column showing the function that issued each query, next to the callsite. Long names are cut with an ellipsis (full name on hover and when copied) and wrap in PDF export; queries with no captured stack show a dash.
 
-### Changed
+---
 
-- The callsite in that table now points to your app's code that issued the query, matching the rest of the report, instead of the innermost framework frame. Optimus's own queries show a blank callsite and a dash until the profiler-query attribution change (#96) lands.
+## [0.12.91] - 2026-10-27
+
+### Fixed
+
+- Optimus's own queries (such as the server-resource snapshots) no longer appear anywhere in the report. They are removed when a recording is loaded, so the query counts, DB time, table breakdown, slowest queries and findings never include them.
+- "Queries per action" now respects Optimus Settings. When Tracked Apps is set, it lists only queries issued from those apps and says how many queries from other apps were left out. When it is empty, every non-Optimus query is listed as before. The callsite shown is now the app code that issued the query, not the innermost Frappe frame.
+- Apps whose name merely ends in "optimus" are no longer mistaken for the profiler.
 
 ---
 

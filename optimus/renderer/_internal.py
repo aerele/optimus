@@ -26,6 +26,7 @@ from optimus.analyzers.base import (
 	format_duration_markers,
 	format_durations,
 	installed_apps_allowlist,
+	strip_profiler_own_calls,
 )
 
 # Sensitive-data redaction lives in ``optimus/redaction.py`` (pure
@@ -173,7 +174,7 @@ from optimus.renderer.line_drilldown import (
 	_render_phase2_function_table,
 	_render_phase2_panel,
 )
-from optimus.renderer.query_callsite import query_callsite
+from optimus.renderer.queries_per_action import build_queries_per_action
 
 # render-time deterministic recipes (index advice, Hot Line gate notes).
 from optimus.renderer.recipe_enrichment import (
@@ -251,14 +252,12 @@ _TEMPLATES_DIR = os.path.join(
 def _get_jinja_env() -> Environment:
 	"""Build and cache the Jinja environment. Autoescape is on for HTML so
 	user-provided strings (action labels, finding titles) can't inject markup."""
-	env = Environment(
+	return Environment(
 		loader=FileSystemLoader(_TEMPLATES_DIR),
 		autoescape=select_autoescape(["html"]),
 		trim_blocks=True,
 		lstrip_blocks=True,
 	)
-	env.globals["query_callsite"] = query_callsite
-	return env
 
 
 # Duration formatting lives in analyzers/base.py: analyzers tag durations with
@@ -354,6 +353,7 @@ def render(
 					dict(c) if isinstance(c, dict) else c
 					for c in rec_copy["calls"]
 				]
+				strip_profiler_own_calls(rec_copy)
 				_redact_call_queries(rec_copy["calls"])
 			recordings_by_uuid[uid] = rec_copy
 
@@ -1075,6 +1075,9 @@ def render(
 		"frame_truncation": frame_truncation,
 		"table_breakdown": table_breakdown,
 		"recordings_by_uuid": recordings_by_uuid,
+		"queries_per_action": build_queries_per_action(
+			list(actions) + list(actions_framework), recordings_by_uuid, tracked_apps
+		),
 		"generated_at": generated_at or _now_iso(),
 		"server_tz": _get_server_timezone(),
 		# Format datetimes per the site's System Settings (drops microseconds).
@@ -1183,7 +1186,7 @@ def render(
 		"infra_summary", "infra_timeline",
 		"frontend_vitals_by_page", "frontend_xhr_matched",
 		"frontend_orphans", "frontend_summary",
-		"doc_event_breakdown",
+		"doc_event_breakdown", "queries_per_action",
 		"actions", "actions_framework",
 		"background_jobs",
 		"findings", "findings_by_app",
