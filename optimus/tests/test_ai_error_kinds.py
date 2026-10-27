@@ -52,7 +52,6 @@ def wire(monkeypatch):
 	monkeypatch.setattr(ai_fix, "_current_key_or_empty", lambda: "")
 	monkeypatch.setattr(ai_fix, "_log_http_error", lambda *a, **kw: logs.append((a, kw)))
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: logs.append((a, kw)))
-	monkeypatch.setattr(ai_fix, "_record_session_spend", lambda *_: None)
 
 	def install(*replies, cost=0.0):
 		"""Each post takes ``cost`` seconds on the fake clock; a ``(reply, seconds)`` pair overrides it."""
@@ -660,7 +659,7 @@ def test_billed_usage_is_filtered_once_for_every_failure():
 		raise ai_fix.AiFixError("fake", kind="bad_response")
 
 	with pytest.raises(ai_fix.AiFixError) as caught:
-		ai_fix._with_usage_on_failure(failed, usage)
+		ai_fix.with_usage_on_failure(failed, usage)
 	assert caught.value.usage == ai_fix.AiFixError("x", usage=usage).usage == {"total_tokens": 5}
 
 

@@ -34,12 +34,17 @@ _API_PATH = os.path.join(os.path.dirname(__file__), "..", "api.py")
 def _retry_env(monkeypatch, *, status="Failed", conf=None):
 	fake = make_fake_frappe(sessions={SESSION_UUID: session_row(status=status)}, perms=owner_perms(), conf=conf)
 	install(monkeypatch, fake)
-	seen = SimpleNamespace(commits=[], enqueued=[], cleared=[])
+	seen = SimpleNamespace(commits=[], enqueued=[], cleared=[], prepared=[])
 	monkeypatch.setattr(api, "safe_commit", lambda: seen.commits.append(True))
 	monkeypatch.setattr(
 		api, "_enqueue_analyze", lambda uuid, docname=None: seen.enqueued.append((uuid, docname)) or False
 	)
 	install_module(monkeypatch, "optimus.pdf_export", SimpleNamespace(clear_cached_pdf=lambda u: seen.cleared.append(u)))
+	def prepare(*args, **kwargs):
+		seen.prepared.append((args, kwargs))
+		assert not seen.enqueued
+		return True
+	install_module(monkeypatch, "optimus.ai_jobs", SimpleNamespace(prepare_analyze_retry=prepare))
 	return fake, seen
 
 
@@ -47,9 +52,8 @@ def test_owner_retries_a_failed_session(monkeypatch):
 	fake, seen = _retry_env(monkeypatch)
 	out = api.retry_analyze(session_uuid=SESSION_UUID)
 	assert out == {"retried": True, "session_uuid": SESSION_UUID, "docname": DOCNAME, "ran_inline": False, "status": None}
-	((args, _kwargs),) = fake.spies.set_value
-	assert args == ("Optimus Session", DOCNAME, {"status": "Stopping", "analyzer_warnings": None})
-	assert seen.commits == [True]
+	assert seen.prepared == [((DOCNAME, SESSION_UUID), {"requested_by": OWNER})]
+	assert not fake.spies.set_value
 	assert seen.enqueued == [(SESSION_UUID, DOCNAME)]
 	assert seen.cleared == [SESSION_UUID]
 

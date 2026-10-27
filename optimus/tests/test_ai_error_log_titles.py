@@ -17,7 +17,7 @@ from optimus import ai_fix
 _PKG = Path(__file__).resolve().parents[1]
 _DOCS = _PKG.parent / "docs" / "AI-FIXING.md"
 _JS = _PKG / "optimus" / "doctype" / "optimus_session" / "optimus_session.js"
-_MODULES = ("analyze.py", "api.py", "ai_fix.py", "maintenance.py", "line_profile/analyzer.py", "ai_jobs.py")
+_MODULES = ("analyze.py", "api.py", "ai_fix.py", "maintenance.py", "line_profile/analyzer.py", "ai_jobs.py", "line_profile/jobs.py")
 PREFIX = "optimus ai"
 
 
@@ -35,7 +35,7 @@ def _code_titles() -> dict[str, set[str]]:
 				continue
 			name = _callee(node)
 			title = None
-			if name in ("log_ai_failure", "_log_ai_step_failure") and node.args:
+			if name in ("log_ai_failure", "_log_ai_step_failure", "_log") and node.args:
 				title = node.args[0]
 			elif name in ("_run_ai_step", "_increment_session_counter", "log_ai_failure"):
 				title = next((kw.value for kw in node.keywords if kw.arg == "title"), None)
@@ -50,7 +50,7 @@ def _documented_titles() -> set[str]:
 
 def test_the_code_titles_are_found():
 	titles = _code_titles()
-	for expected in ("optimus ai_fix", "optimus ai backfill", "optimus ai auto-suggest", "optimus ai humanize_steps"):
+	for expected in ("optimus ai_fix", "optimus ai refresh item", "optimus ai admission after analyze", "optimus ai refresh report"):
 		assert expected in titles, expected
 
 

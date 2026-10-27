@@ -993,8 +993,7 @@ class TestIsAvailableSection:
 
 
 # --------------------------------------------------------------------------
-# v0.13: per-session AI-token spend recording (_record_session_spend) + the
-# two _call_* chokepoints that drive Optimus Session.ai_tokens_spent.
+# Protocol handlers expose usage; only the journal worker persists spending.
 # --------------------------------------------------------------------------
 
 
@@ -1009,42 +1008,11 @@ def _counter_spy(monkeypatch):
 	return seen
 
 
-class TestRecordSessionSpend:
-	def test_increments_active_session(self, monkeypatch):
-		import frappe
-
-		seen = _counter_spy(monkeypatch)
-		monkeypatch.setattr(
-			frappe, "local", SimpleNamespace(_optimus_spend_session="uuid-1"), raising=False
-		)
-		ai_fix._record_session_spend(150)
-		# the shared, portable counter (savepoint, log and continue), matched on session_uuid
-		assert seen == [("uuid-1", "ai_tokens_spent", 150, "session_uuid")]
-
-	def test_noop_without_active_session(self, monkeypatch):
-		import frappe
-
-		seen = _counter_spy(monkeypatch)
-		monkeypatch.setattr(frappe, "local", SimpleNamespace(), raising=False)
-		ai_fix._record_session_spend(150)
-		assert seen == []
-
-	def test_noop_on_zero_or_missing_tokens(self, monkeypatch):
-		import frappe
-
-		seen = _counter_spy(monkeypatch)
-		monkeypatch.setattr(
-			frappe, "local", SimpleNamespace(_optimus_spend_session="uuid-1"), raising=False
-		)
-		ai_fix._record_session_spend(0)
-		ai_fix._record_session_spend(None)
-		assert seen == []
-
-
-class TestCallChokepointRecordsSpend:
+class TestCallChokepointCollectsUsage:
 	def test_openai_call_records_total_tokens(self, monkeypatch):
 		recorded = []
-		monkeypatch.setattr(ai_fix, "_record_session_spend", recorded.append, raising=True)
+		import frappe
+		monkeypatch.setattr(frappe, "db", SimpleNamespace(sql=lambda *a, **kw: recorded.append(True)))
 		payload = {
 			"choices": [{"message": {"content": "hi"}}],
 			"usage": {"prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10},
@@ -1055,11 +1023,12 @@ class TestCallChokepointRecordsSpend:
 			"u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage
 		)
 		assert usage["total_tokens"] == 10
-		assert recorded == [10]
+		assert recorded == []
 
 	def test_anthropic_call_records_total_tokens(self, monkeypatch):
 		recorded = []
-		monkeypatch.setattr(ai_fix, "_record_session_spend", recorded.append, raising=True)
+		import frappe
+		monkeypatch.setattr(frappe, "db", SimpleNamespace(sql=lambda *a, **kw: recorded.append(True)))
 		payload = {
 			"content": [{"type": "text", "text": "hi"}],
 			"usage": {"input_tokens": 4, "output_tokens": 6},
@@ -1070,7 +1039,7 @@ class TestCallChokepointRecordsSpend:
 			"u", "k", "m", "s", [{"role": "user", "content": "x"}], usage_out=usage
 		)
 		assert usage["total_tokens"] == 10
-		assert recorded == [10]
+		assert recorded == []
 
 
 class TestFinishReason:
@@ -1264,7 +1233,7 @@ class TestGuardedCompletion:
 		assert fake.calls[0].body["max_tokens"] == 2048
 
 	def test_over_budget_first_call_skips_reask(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_resolve_timeout_seconds", lambda: 60)
+		monkeypatch.setattr(ai_fix, "request_timeout_seconds", lambda: 60)
 		clock = {"n": 0}
 
 		def fake_monotonic():
@@ -1279,7 +1248,7 @@ class TestGuardedCompletion:
 
 	@pytest.mark.parametrize("elapsed,reasked", [(29.0, True), (30.0, False), (31.0, False)])
 	def test_reask_needs_under_half_the_budget(self, monkeypatch, elapsed, reasked):
-		monkeypatch.setattr(ai_fix, "_resolve_timeout_seconds", lambda: 60)
+		monkeypatch.setattr(ai_fix, "request_timeout_seconds", lambda: 60)
 		clock = {"n": 0}
 
 		def fake_monotonic():
@@ -1292,7 +1261,7 @@ class TestGuardedCompletion:
 		assert out["guardrail"]["reasked"] is reasked
 
 	def test_reask_bounded_by_remaining_budget(self, monkeypatch):
-		monkeypatch.setattr(ai_fix, "_resolve_timeout_seconds", lambda: 60)
+		monkeypatch.setattr(ai_fix, "request_timeout_seconds", lambda: 60)
 		clock = {"n": 0}
 
 		def fake_monotonic():
@@ -1608,7 +1577,7 @@ class TestRawSqlPolicy:
 
 
 # The 15 real findings, built exactly as the product's refresh path builds them
-# (PR-E's scripts/ai_eval/_corpus.build_finding -> analyze._ai_payload_for_finding).
+# (PR-E's scripts/ai_eval/_corpus.build_finding -> analyze.ai_payload_for_finding).
 _EVAL_CORPUS = load_eval_script("_corpus")
 
 

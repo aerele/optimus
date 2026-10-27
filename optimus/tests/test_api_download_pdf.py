@@ -6,6 +6,7 @@
 import pytest
 
 from optimus import api
+from optimus.tests.gate_fakes import install_handler_context
 
 
 class FakeDB:
@@ -28,6 +29,7 @@ class FakeDB:
 def fake_env(monkeypatch):
 	import frappe
 
+	install_handler_context(monkeypatch)
 	rows = {
 		"uuid-001": {"name": "PS-001", "user": "Administrator", "status": "Ready"},
 		"uuid-failed": {"name": "PS-failed", "user": "Administrator", "status": "Failed"},

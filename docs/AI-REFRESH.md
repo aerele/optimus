@@ -1,15 +1,20 @@
 # Background AI refresh engine
 
-The engine is an internal foundation. Nothing starts a refresh yet: no UI, API
-endpoint, analyzer or scheduler calls `start_refresh`, `cancel_refresh` or
-`recover_pending`. The one touch point is #72's synchronous Refresh, which asks
-`live_run` and refuses while the engine holds the session (see "One path at a
-time"). The refresh wiring follow-up must land before the feature is released.
-That follow-up moves optional AI work after saved profiling results, connects
-progress/cancellation, schedules recovery and replaces report attachments
-safely. The security follow-up adds the recording, provider URL, source and
-privacy restrictions. This document describes the engine that is implemented
-and how to operate it. The operator runbook is "Operating the engine" below.
+Refresh AI suggestions queues optional work after the profiling result has
+been saved. Analyze-time AI also starts only after the session is Ready. A
+provider timeout, queue outage, cancellation or failed report replacement does
+not roll back the saved profile. Regenerate Reports renders saved results
+without contacting a provider.
+
+The Desk form shows progress, cancellation, reported usage and uncertainty.
+Manual refresh selects missing and outdated suggestions by default. The
+confirmation shows the selected count; replacing current suggestions requires
+an explicit checkbox. Refresh and an active Phase 2 pass exclude one another.
+Auto-armed Phase 2 therefore takes precedence over automatic AI, with an
+admission notice on the session. Refresh AI after Phase 2 finishes.
+
+This is part of a staged integration. Recording/provider/source/privacy
+hardening and final acceptance remain required before release.
 
 ## Durable state and duplicate delivery
 
@@ -18,6 +23,11 @@ provider attempts. They grant no ordinary Desk/REST permissions. Records hold
 identities, input hashes, fixed states and counts, never prompts, provider
 responses or credentials. An active session reservation is unique; terminal
 runs release it.
+
+Shared transaction, SQL conflict, HTTP wait and interrupt rules live in
+`optimus/sql_work.py`. Public progress and selection summaries live in
+`optimus/ai_refresh_view.py`; the queued entry point remains
+`optimus.ai_jobs.run_ai_refresh_slice` for existing deliveries.
 
 Every journal transition starts a fresh transaction and its first data read locks
 the session row (Postgres HTTP paths read and set the lock timeout first, below).
@@ -111,13 +121,13 @@ run, which is no click. No ending of a run counts anything, whatever it had
 answered: not complete, stopped, cancelled, interrupted, abandoned, idle or
 disabled.
 
-Settlement follows #72's `_write_ai_answer` discipline. The first try commits
+Settlement uses the shared `sql_work` transaction discipline. The first try commits
 whatever the worker's transaction holds, so no read view from before the call
 remains. A conflict, including a whole-transaction rollback, is rolled back and
 the write tried again, three tries in all. The attempt's `settled` bit makes a
 repeated write a no-op, so neither the provider call nor the usage increment
 repeats. Settlement also retries a lock wait timeout and a Postgres
-serialization failure, which #72's write does not. Only this write takes
+serialization failure. Only this write takes
 locking reads, and its `settled` bit makes a retry safe. After any other
 failure, the `settled` bit is read again in a fresh query. When it is set, the
 outcome is saved even though the COMMIT reported an error. When it cannot be
@@ -189,7 +199,7 @@ without another call or usage increment; an unfinished report remains marked
 for regeneration. There are at
 most three resumes in a chain, and a prior run can be
 resumed only once. A deliberate new refresh is a new request, subject to
-permission/rate/admission controls in the wiring layer. There is no automatic
+permission, rate and admission controls. There is no automatic
 provider retry after transport failure; the existing bounded parameter-repair
 and guardrail re-ask behavior still applies inside a call.
 
@@ -221,32 +231,24 @@ unavailable, the committed Calling intent remains for later recovery.
 
 ## One path at a time
 
-The synchronous Refresh (`api.refill_ai_suggestions`) and this engine must not
-run on one session together: both would bill every finding and overwrite each
-other's answers. Each refuses while the other holds the session, and a refusal
-counts and bills nothing.
+The manual API and analyze-time enrichment both admit work into the SQL journal.
+There is no synchronous provider path or Redis refresh flag. An existing live
+reservation attaches without a second refresh count. An expired reservation is
+recovered by the next admission or the scheduler; its unknown call is never
+repeated automatically.
 
-- The engine reads #72's Refresh flag (`optimus:ai_refresh:<session_uuid>`)
-  fresh from Redis, with a raw GET, before it admits. While it is held, the
-  answer is `{"status": "refused", "reason": "refresh_running"}` with a
-  message. A run that already exists is still shown (attach), not refused.
-- The Refresh looks up the session's live engine run (`ai_jobs.live_run`, read
-  in a fresh transaction) before it takes its flag, counts itself or calls the
-  provider. While one is live, it answers `{"ok": False, "busy": True}` with a
-  message. A run whose lease or deadline has passed is dead and does not hold
-  the session. A lookup that fails never blocks the Refresh, as a cache
-  failure does not.
-
-The two checks are separate reads, so a click on each path in the same
-millisecond can still start both. The window is narrow and the engine is not
-wired yet; the wiring follow-up removes the synchronous path and its flag.
+AI and Phase 2 serialize through the Session row. Both admissions change the
+parent, including automatic AI with no refresh-count increment, so PostgreSQL
+rejects an older snapshot before it can miss an opposing admission. Manual AI
+also locks the site capacity row with NOWAIT after its Session. Phase 2 does not
+hold the site mutex while waiting for a session.
 
 ## Selection, grounding and the Error Log
 
 The run keeps the selection's `gated` and `excluded` counts
 (`AiSelection.gated` and `.excluded`, #71's two Refresh toasts), taken once at
 admission, and progress returns them. A background fix prompt gets the same
-grounding as the synchronous Refresh: the Phase 2 hottest-line index and the
+grounding as the report analysis: the Phase 2 hottest-line index and the
 Slow Query index evidence. Both are built once per slice, not once per finding;
 a failure of either is logged once with the session and the slice goes on
 without it.
@@ -271,6 +273,7 @@ row has neither `docname` nor `run_id`. Search the Error Log for `optimus ai`.
 | `optimus ai refresh discarded` | A release-blocking signal: a paid answer was not saved because its attempt is stale or fenced. |
 | `optimus ai refresh duplicate blocked` | A release-blocking signal: the journal stopped a second send or a second delivery. |
 | `optimus ai refresh uncertain` | A call's outcome is unknown: the job timeout cut it, or a takeover, the sweep, a cancel or the worker cleanup found it still Calling. Carries `attempt` and `reason`. It is never sent again automatically and its usage may be missing. |
+| `optimus ai refresh report` | Report replacement failed after answers committed. The previous report stays attached; use Regenerate Reports after the refresh stops. |
 | `optimus ai refresh ended` | A run ended `interrupted` (`reason` `lease_expired`, `deadline` or `worker_interrupted`) or stopped for `no_progress`, `history_limit`, `disabled`, `phase2` or `permission`. Carries `state` and `reason`. |
 
 What state each title leaves the run in, and what to do, is in "Operating the
@@ -281,10 +284,12 @@ and a Phase 2 index failure keeps `optimus ai phase 2 context`.
 
 ## Configuration and deployment
 
-Normal Frappe migration installs the journal schema and its admission mutex.
-Fresh installation seeds the same mutex, and every migrate seeds it again if it
-is missing (`after_migrate`). Deploy code/schema before enabling
-callers; restart web and workers together through the normal deployment process.
+Normal Frappe migration installs the journal schema, Phase 2 queue fields and
+admission mutex. Fresh installation and every migration seed the same mutex. A post-model-sync
+patch gives previously saved Settings a manual refresh cap of 20 when the
+field was absent; an explicitly saved zero remains unlimited. Deploy code and
+schema before routing traffic to new callers. Restart web, workers and the
+scheduler together through the normal deployment process.
 Do not route work to a worker running older code. A missing journal is an error,
 never permission to run without concurrency controls. A missing mutex row
 fails a user refresh closed: admission raises `JournalUnavailable`, because the
@@ -318,6 +323,20 @@ it keeps its session reservation until its lease or deadline expires, and a
 manual run also keeps its capacity slot until then. Correct the named setting, then let the next click or recovery sweep
 redeliver the pending slice. A queued lease lasts 1800 seconds unless the run's
 deadline comes first.
+
+Invalid configuration is rejected. A custom queue needs a listening worker.
+Keep the scheduler enabled: minute recovery sweeps expire lost leases and
+redeliver committed queue intents. The scheduler does not replace a worker.
+Phase 2 additionally requires a worker on `long`, even when AI uses a custom
+queue. Disabling the scheduler or losing all workers delays recovery; it never
+enables synchronous AI or Phase 2 analysis in a web request.
+
+Optimus Settings exposes **Maximum findings per AI refresh** (20 by default; zero is
+unlimited within the job deadline) separately from **Max auto-suggested findings per session**.
+Sensitivity profiles do not change the manual cap. **AI model context window (tokens)**
+exposes the existing context-fit limit; zero selects the provider/model default.
+Settings cache failures during the seed print a fixed recovery instruction to
+clear the cache after restart.
 Manual runs additionally have a per-requester cap of two. Analyze-time
 `fixes_missing` runs reserve their own session but do not consume the manual
 site/user cap. The item cap applies even to Regenerate all, and across a resume
@@ -399,7 +418,7 @@ Use the attempt epochs to locate the call in the provider's usage page;
 | **Incomplete usage**: `usage_incomplete` above 0 on the run, `usage_complete` 0 on an attempt | The provider's usage was missing, contradictory or unknown for that call, so the reported tokens may undercount. | Do not trust the run's token total for those attempts; compare with the provider's bill. |
 | **Busy**: a click answers `{"status": "refused", "reason": "busy"}` | Another transaction holds the session row for a whole lock wait (the server's `innodb_lock_wait_timeout` on MariaDB; on Postgres 30 seconds at most, or a stricter `lock_timeout` setting), or another admission holds the site mutex. Nothing was started or counted. | Try again. If it stays busy, look for a long or dead transaction on that Optimus Session row (`SHOW PROCESSLIST` on MariaDB, `pg_stat_activity` on Postgres). |
 | **Already running**: a click answers `{"status": "already_running", ...}` | The session has a live run; the answer carries its progress. | Nothing: the click attached to it. |
-| **Refused**: `refresh_running`, `disabled`, `no_worker`, `queue_unavailable`, `not_ready`, `permission`, `phase2`, `site_cap`, `user_cap`, `not_resumable`, `already_resumed`, `retry_limit` | `refresh_running`: #72's Refresh holds the session. `disabled`: AI is off. `no_worker`: no worker listens on the queue. `queue_unavailable`: Redis could not say. `not_ready`: the session is not Ready. `permission`: the requester has no access to the session. `phase2`: a Phase 2 run is in progress. `site_cap`, `user_cap`: the site, or this requester, already has as many live user refreshes as the cap allows. A live run is `queued` or `running` with its lease and deadline not passed, so a dead worker holds its slot only until its lease or deadline expires. The last three refuse a resume. | Fix the cause named; none of them counts or bills. An error naming a site setting that is not a valid whole number raises instead of answering (see Configuration). |
+| **Refused**: `disabled`, `no_worker`, `queue_unavailable`, `not_ready`, `permission`, `phase2`, `site_cap`, `user_cap`, `not_resumable`, `already_resumed`, `retry_limit` | `disabled`: AI is off. `no_worker`: no worker listens on the queue. `queue_unavailable`: Redis could not say. `not_ready`: the session is not Ready. `permission`: the requester has no access to the session. `phase2`: a Phase 2 run is in progress. `site_cap`, `user_cap`: the site, or this requester, already has as many live user refreshes as the cap allows. A live run is `queued` or `running` with its lease and deadline not passed, so a dead worker holds its slot only until its lease or deadline expires. The last three refuse a resume. | Fix the cause named; none of them counts or bills. An error naming a site setting that is not a valid whole number raises instead of answering (see Configuration). |
 | **Journal unavailable**: the error `AI refresh storage is not initialized` | The admission mutex row is missing (a rollback, or a failed install). A user refresh fails closed. | Run the repair command below. |
 | **Inconsistent**: the error `Refresh journal ... is inconsistent` | A run's reservation or attempt row disagrees with the run. | Use the administrator cancellation command below: it releases the run, treats an open call as uncertain with unknown usage, and writes one `optimus ai refresh release` row. A takeover or the sweep does the same for an expired run. |
 
@@ -595,6 +614,72 @@ session exists, because that would erase the protection against repeating an
 unknown call. The retention work of the security follow-up (#75) owns pruning
 and the treatment of those ids; nothing here implements it.
 
+## API compatibility and report recovery
+
+`refill_ai_suggestions(session_uuid)` still accepts an existing session-only
+request, but now returns `queued`, `already_running` or `refused` with SQL
+progress or a fixed explanation. It no longer returns completed inline work.
+`regenerate_all` explicitly includes current answers. `resume_from` identifies
+a stopped run; `retry_uncertain` is explicit consent to possible duplicate
+provider charges. Resume preserves the original selection time and cap.
+
+`ai_refresh_status` requires session read permission and returns counts, states
+and usage. Only an actor who may update the session receives a new selection
+plan. `cancel_ai_refresh` requires the action gate and binds its run identity
+to that session. Polling and cancellation are not rate-limited and do not need
+Redis. New manual requests retain the per-user rate limit. Permission checks
+always precede queue/provider activity.
+
+A status-read failure is unknown, never proof of completion. Desk keeps Save
+held until state becomes known, polls again with backoff, and rejects late
+responses. It releases only the Save hold it acquired. Completion does not
+reload over unsaved edits. Save or discard those edits before reloading to see
+new results; the server may reject an old form's save after background changes.
+
+Report HTML is built outside SQL locks. The new private File, report reference,
+PDF-reference invalidation and pending-render flags commit together after a
+current session/worker check. The previous attachment survives a failed or
+stale replacement. Old File records remain for normal retention. A pending
+report can be repaired with Regenerate Reports, without repeating AI calls.
+Retry Analyze atomically fences optional workers before resetting a Failed
+session to Stopping; late AI usage can still be accounted without saving a
+stale answer.
+
+## Phase 2 delivery
+
+Stopping or retrying Phase 2 queues analysis on `long`. The response reports
+`Analyzing` and `ran_inline: false`; a disabled scheduler never selects inline
+compute. Batch retry accepts at most five runs and uses each run's per-user
+limit. A live generation is attached to, not restarted. Completed or Recording
+runs cannot be retried through the analysis retry endpoint.
+
+SQL child state stores each generation, requester, claim, dispatch intent and
+lease. Parent and direct child saves cannot forge, reset or erase that internal state. There
+are at most four admitted attempts per captured run, including the initial
+attempt. A queued generation expires after 30 minutes; a claimed job has a
+25-minute worker timeout and a 27-minute SQL lease. Queue redelivery is
+throttled to 30 seconds and never repeats a claimed generation. After failure
+or expiry, use explicit Retry; after the attempt limit, record a new pass.
+
+Missing capture metadata is a failure, not a successful empty analysis. Valid
+picks with no invocations still produce uninvoked-function diagnostics. Failed
+analysis retains available Redis input for explicit retry; missing/expired
+input requires a new capture. Findings and Ready commit together under the
+current generation. A later render failure leaves those findings Ready and
+marks the report pending. Regenerate Reports repairs that report without
+repeating analysis. Old queued deliveries are adopted only while their row is
+Analyzing and has no new generation. Replace old workers during deployment;
+an already-running old process does not gain the new ownership checks.
+
+Phase 2 admission bounds PostgreSQL row waits and refuses a busy request without
+retrying that wait. Dispatch and expiry scans use NOWAIT, leaving a busy row for
+the next pass. A refused or attached request leaves the session timestamp alone.
+After an ordinary result-commit error, the worker reads back its exact generation
+and token before reporting failure. A committed result is never recomputed.
+Successful completion queues missing-only automatic AI as the session owner;
+a hard timeout leaves saved results and pending report state for recovery and
+does not enqueue another AI run.
+
 ## Validation and remaining acceptance
 
 Automated tests cover duplicate delivery, stale workers, cancellation during
@@ -623,7 +708,7 @@ initialization fails before steps can run, use the job's **Initialize containers
 log. Reproduce only against a disposable database with the fixed test credentials;
 the SQL adapter does not read a site's database configuration.
 
-The wiring follow-up owns scheduled recovery, report replacement and UI/API
-compatibility. Journal retention is described under "Data retention". Final
+The scheduler recovers delivery intents; Regenerate Reports repairs pending attachments.
+Journal retention is described under "Data retention". Final
 model evaluations and both-database end-user/deployment acceptance remain
 release requirements, not results established by these unit tests.

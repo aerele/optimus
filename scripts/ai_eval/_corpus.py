@@ -9,7 +9,7 @@ a captured optimus.local test flow, the answers qwen3-coder:30b gave on 2026-09-
 the owner's label per stored answer.
 
 ``build_finding`` never re-implements the payload. It hands a finding-row-shaped object
-and a pre-filled source cache to ``optimus.analyze._ai_payload_for_finding``, the same
+and a pre-filled source cache to ``optimus.analyze.ai_payload_for_finding``, the same
 function the product's refresh path uses, so the eval sends exactly what the product
 sends. When a later PR changes what that function needs, the offline test in
 optimus/tests/test_ai_eval_corpus.py fails and this module is updated in the same PR.
@@ -102,11 +102,14 @@ def phase2_index(case: dict) -> dict:
 
 def build_finding(case: dict, *, source_lines: list[str] | None = None) -> dict:
 	"""The dict the product hands ``ai_fix.suggest_fix`` for this finding on the refresh
-	path (``analyze._run_ai_backfill``: phase-2 index, no recordings)."""
+	path (Phase 2 index, no recordings)."""
 	from optimus import analyze
 
 	file_cache = {callsite_filename(case): file_lines(case, source_lines)}
-	return analyze._ai_payload_for_finding(build_child(case), file_cache, phase2_index=phase2_index(case))
+	builder = getattr(analyze, "ai_payload_for_finding", None)
+	if builder is None:  # The eval runner also supports historical checkouts.
+		builder = analyze._ai_payload_for_finding
+	return builder(build_child(case), file_cache, phase2_index=phase2_index(case))
 
 
 def hydrate(case: dict, apps_dir: str) -> tuple[list[str], list[str]]:

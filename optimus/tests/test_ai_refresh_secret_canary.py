@@ -3,8 +3,8 @@
 import pytest
 
 from optimus import ai_fix, ai_jobs
-from optimus.tests import test_ai_refresh_journal as journal_tests
 from optimus.tests import test_ai_secret_canary as base
+from optimus.tests.fixtures import ai_refresh_journal as journal_tests
 
 pytestmark = pytest.mark.rq
 
@@ -61,6 +61,7 @@ def test_queued_worker_keeps_all_secret_failure_channels_clean(canary, monkeypat
 		)
 
 	monkeypatch.setattr(ai_jobs, "_next_item", next_item)
+	monkeypatch.setattr(ai_jobs, "_render_pending", lambda *a: None)
 	base._drive(
 		"ai_jobs.run_ai_refresh_slice",
 		ai_jobs.run_ai_refresh_slice,

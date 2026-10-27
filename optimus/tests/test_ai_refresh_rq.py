@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from optimus import ai_fix, ai_jobs, analyze
-from optimus.tests.test_ai_refresh_journal import journal as _journal_fixture  # noqa: F401
-from optimus.tests.test_ai_refresh_worker import worker  # noqa: F401
+from optimus.tests.fixtures.ai_refresh_journal import journal as _journal_fixture  # noqa: F401
+from optimus.tests.fixtures.ai_refresh_worker import worker  # noqa: F401
 
 
 @pytest.mark.parametrize("kind", ["rq", "exit"])
@@ -38,7 +38,7 @@ def test_phase2_grounding_does_not_swallow_the_workers_timeout(monkeypatch):
 
 	monkeypatch.setattr(analyze.renderer, "_build_line_drilldown_callsite_index", fail)
 	with pytest.raises(JobTimeoutException) as caught:
-		analyze._phase2_index_for(SimpleNamespace())
+		analyze.phase2_index_for(SimpleNamespace())
 	assert caught.value is not original and caught.value.__context__ is None
 
 
@@ -50,7 +50,7 @@ def test_missing_phase2_context_is_reported_without_breaking_enrichment(monkeypa
 
 	monkeypatch.setattr(analyze.renderer, "_build_line_drilldown_callsite_index", fail)
 	monkeypatch.setattr(ai_fix, "log_ai_failure", lambda *a, **kw: logs.append(type(a[1]).__name__))
-	assert analyze._phase2_index_for(SimpleNamespace()) == {}
+	assert analyze.phase2_index_for(SimpleNamespace()) == {}
 	assert logs == ["ValueError"]
 
 

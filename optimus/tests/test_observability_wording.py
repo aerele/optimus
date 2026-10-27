@@ -124,34 +124,10 @@ def _ctx(findings):
 	return SimpleNamespace(session_uuid="u", docname=None, warnings=[], actions=[], findings=findings)
 
 
-def test_index_only_gating_writes_no_note():
-	findings = [{"finding_type": t, "severity": "High", "technical_detail_json": "{}"} for t in ("Missing Index", "Full Table Scan")]
-	ctx = _ctx(findings)
-	cfg = SimpleNamespace(
-		ai_enabled=True, ai_suggest_findings=True, ai_auto_suggest=True, ai_excluded_finding_types=(),
-		ai_auto_suggest_max=5, tracked_apps=(), ai_max_findings=5,
-	)
-	with patch("optimus.settings.get_config", return_value=cfg), patch("optimus.ai_fix.is_available", return_value=True):
-		analyze._enrich_findings_with_ai_suggestions(ctx)
-	assert ctx.warnings == []
 
 
-def test_warnings_name_the_setting_the_menu_and_the_error_log_title():
-	source = _read("optimus", "analyze.py")
-	assert "Generate AI fixes\" button" not in source and "use 'Generate AI fixes'" not in source
-	assert "AI > Refresh AI suggestions" in source
-	assert 'Search the Error Log for titles starting with \\"optimus ai\\"' in source
-	assert "ai_excluded_finding_types)" not in source
-	assert "Excluded finding types" in source
 
 
-def test_refresh_toasts_say_where_to_look():
-	js = _read("optimus", "optimus", "doctype", "optimus_session", "optimus_session.js")
-	assert "failed, old suggestions kept (search the Error Log for titles starting with optimus ai)" in js
-	assert "skipped (time budget). Run it again" in js
-	assert "were not sent to the AI. Their own advice or note is in the report." in js
-	assert "Excluded finding types" in js
-	assert "get advice or a note from Optimus" not in js
 
 
 def test_texts_use_the_label_not_the_fieldname():
@@ -171,7 +147,7 @@ def test_the_runbook_covers_each_signal():
 	for needle in (
 		"| Signal | What it means | What to do |", "could not build index advice", "optimus: index advice failed",
 		"optimus: evidence read failed", "was not created", "skipped on", "Optimus could not check this Hot Line",
-		"optimus: hot-line gate failed", "optimus ai backfill", "gated", "excluded", "heartbeat",
+		"optimus: hot-line gate failed", "optimus ai refresh item", "gated", "excluded", "heartbeat",
 	):
 		assert needle in section, needle
 

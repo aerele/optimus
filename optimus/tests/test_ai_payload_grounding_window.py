@@ -33,17 +33,17 @@ def test_uses_whole_enclosing_function(tmp_path):
 		"def other():\n"
 		"\treturn 1\n"
 	)
-	window = analyze._ai_payload_for_finding(_row(str(src), 6, "small_fn"), {})["source_window"]
+	window = analyze.ai_payload_for_finding(_row(str(src), 6, "small_fn"), {})["source_window"]
 	assert [r["lineno"] for r in window] == [4, 5, 6, 7]
 	assert [r["lineno"] for r in window if r["is_target"]] == [6]
-	payload = analyze._ai_payload_for_finding(_row(str(src), 6, "small_fn"), {})
+	payload = analyze.ai_payload_for_finding(_row(str(src), 6, "small_fn"), {})
 	assert payload["loop_facts"]["loops"][0]["line"] == 5  # from the whole file's tree
 
 
 def test_too_big_function_falls_back_to_49_lines(tmp_path):
 	src = tmp_path / "big.py"
 	src.write_text("\n".join(["def big():"] + [f"\tx = {i}" for i in range(200)] + ["\treturn x"]) + "\n")
-	window = analyze._ai_payload_for_finding(_row(str(src), 100, "big"), {})["source_window"]
+	window = analyze.ai_payload_for_finding(_row(str(src), 100, "big"), {})["source_window"]
 	assert (len(window), window[0]["lineno"], window[-1]["lineno"]) == (49, 76, 124)
 
 
@@ -53,19 +53,19 @@ def test_unparseable_falls_back_to_49_lines(tmp_path):
 	src.write_text(
 		"\n".join([f"x{i} = {i}" for i in range(60)] + ["return x1"] + [f"y{i} = {i}" for i in range(60)]) + "\n"
 	)
-	window = analyze._ai_payload_for_finding(_row(str(src), 61, "?"), {})["source_window"]
+	window = analyze.ai_payload_for_finding(_row(str(src), 61, "?"), {})["source_window"]
 	assert (len(window), window[0]["lineno"], window[-1]["lineno"]) == (49, 37, 85)
 
 
 def test_unreadable_file_has_no_window():
-	payload = analyze._ai_payload_for_finding(_row("/nonexistent/path/nope.py", 5, "x"), {})
+	payload = analyze.ai_payload_for_finding(_row("/nonexistent/path/nope.py", 5, "x"), {})
 	assert not payload.get("source_window")
 
 
 def test_applies_to_any_ai_eligible_type(tmp_path):
 	src = tmp_path / "mod.py"
 	src.write_text("def small_fn(doc):\n\treturn doc.owner\n")
-	window = analyze._ai_payload_for_finding(
+	window = analyze.ai_payload_for_finding(
 		_row(str(src), 2, "small_fn", finding_type="Slow Query"), {},
 	)["source_window"]
 	assert window[0]["content"].startswith("def small_fn")
@@ -74,7 +74,7 @@ def test_applies_to_any_ai_eligible_type(tmp_path):
 def test_long_line_truncated_like_read_source_window(tmp_path):
 	src = tmp_path / "mod.py"
 	src.write_text("def f():\n\tx = '" + "a" * 400 + "'\n")
-	window = analyze._ai_payload_for_finding(_row(str(src), 2, "f"), {})["source_window"]
+	window = analyze.ai_payload_for_finding(_row(str(src), 2, "f"), {})["source_window"]
 	assert window[1]["content"].endswith("...") and len(window[1]["content"]) == 203
 
 
@@ -167,7 +167,7 @@ def test_two_findings_of_one_file_build_the_parent_map_once(tmp_path, monkeypatc
 	monkeypatch.setattr(ai_grounding, "_parent_map", lambda tree: built.append(1) or real(tree))
 	cache = {}
 	for line in (3, 4):
-		analyze._ai_payload_for_finding(_row(str(src), line, "f", finding_type="N+1 Query"), cache)
+		analyze.ai_payload_for_finding(_row(str(src), line, "f", finding_type="N+1 Query"), cache)
 	assert len(built) == 1
 
 

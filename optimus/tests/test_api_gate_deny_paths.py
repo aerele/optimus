@@ -25,6 +25,7 @@ from optimus.tests.gate_fakes import (
 )
 
 CALLS = {
+	"cancel_ai_refresh": {"session_uuid": SESSION_UUID, "run_id": "fake-run"},
 	"refill_ai_suggestions": {"session_uuid": SESSION_UUID},
 	"regenerate_reports": {"session_uuid": SESSION_UUID},
 	"retry_analyze": {"session_uuid": SESSION_UUID},
@@ -66,10 +67,12 @@ def test_denied_caller_leaves_no_trace(monkeypatch, endpoint, caller):
 	wires = install_tripwires(
 		monkeypatch,
 		"optimus.ai_fix",
+		"optimus.ai_jobs",
 		"optimus.analyze",
 		"optimus.pdf_export",
 		"optimus.line_profile.capture",
 		"optimus.line_profile.analyzer",
+		"optimus.line_profile.jobs",
 		"optimus.line_profile.picker",
 	)
 

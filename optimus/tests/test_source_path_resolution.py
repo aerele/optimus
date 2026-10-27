@@ -129,7 +129,7 @@ class TestAiPayloadForFinding:
 			"lineno": 1, "content": "first line", "total_ms": 387, "hits": 2,
 			"run_uuid": "r", "dotted_path": "optimus.renderer._internal.render",
 		}}
-		payload = analyze._ai_payload_for_finding(child, {}, phase2_index=phase2_index)
+		payload = analyze.ai_payload_for_finding(child, {}, phase2_index=phase2_index)
 		assert payload.get("source_window"), "a wider source window should be attached"
 		assert any(row.get("is_target") for row in payload["source_window"])
 		assert payload.get("phase2_hotline", {}).get("lineno") == 1
@@ -144,7 +144,7 @@ class TestAiPayloadForFinding:
 			technical_detail_json=json.dumps({"filename": _APP_REL, "lineno": 1, "function": "render"}),
 			llm_fix_json=None,
 		)
-		payload = analyze._ai_payload_for_finding(child, {}, phase2_index={("other.py", "other"): {"lineno": 9}})
+		payload = analyze.ai_payload_for_finding(child, {}, phase2_index={("other.py", "other"): {"lineno": 9}})
 		assert "phase2_hotline" not in payload
 
 
@@ -177,7 +177,7 @@ class TestAiPayloadRecordedQueries:
 			],
 		}}
 		actions_by_idx = {0: {"idx": 0, "recording_uuid": "r0"}}
-		payload = analyze._ai_payload_for_finding(
+		payload = analyze.ai_payload_for_finding(
 			self._child(action_ref="0"), {},
 			recordings_by_uuid=recordings_by_uuid,
 			actions_by_idx=actions_by_idx,
@@ -193,7 +193,7 @@ class TestAiPayloadRecordedQueries:
 	def test_no_attach_when_recordings_missing(self):
 		"""On-demand path with expired Redis: no recordings → no crash, no
 		example_queries key (falls back to existing context)."""
-		payload = analyze._ai_payload_for_finding(self._child(), {})
+		payload = analyze.ai_payload_for_finding(self._child(), {})
 		assert "example_queries" not in (payload["technical_detail"] or {})
 
 	def test_existing_example_queries_not_overwritten(self):
@@ -214,7 +214,7 @@ class TestAiPayloadRecordedQueries:
 			"calls": [{"duration": 500.0, "query": "SELECT * FROM tabBaz"}],
 		}}
 		actions_by_idx = {0: {"idx": 0, "recording_uuid": "r0"}}
-		payload = analyze._ai_payload_for_finding(
+		payload = analyze.ai_payload_for_finding(
 			child, {},
 			recordings_by_uuid=recordings_by_uuid,
 			actions_by_idx=actions_by_idx,
@@ -235,7 +235,7 @@ class TestAiPayloadRecordedQueries:
 			],
 		}}
 		actions_by_idx = {0: {"idx": 0, "recording_uuid": "r0"}}
-		payload = analyze._ai_payload_for_finding(
+		payload = analyze.ai_payload_for_finding(
 			self._child(), {},
 			recordings_by_uuid=recordings_by_uuid,
 			actions_by_idx=actions_by_idx,
@@ -248,7 +248,7 @@ class TestAiPayloadRecordedQueries:
 		attachment, no crash."""
 		recordings_by_uuid = {"r0": {"uuid": "r0", "calls": []}}
 		actions_by_idx = {0: {"idx": 0, "recording_uuid": "r0"}}
-		payload = analyze._ai_payload_for_finding(
+		payload = analyze.ai_payload_for_finding(
 			self._child(action_ref="42"), {},
 			recordings_by_uuid=recordings_by_uuid,
 			actions_by_idx=actions_by_idx,
@@ -261,7 +261,7 @@ class TestAiPayloadRecordedQueries:
 			{"duration": 100.0, "query": "SELECT 1"}
 		]}}
 		actions_by_idx = {0: {"idx": 0, "recording_uuid": "r0"}}
-		payload = analyze._ai_payload_for_finding(
+		payload = analyze.ai_payload_for_finding(
 			self._child(action_ref=""), {},
 			recordings_by_uuid=recordings_by_uuid,
 			actions_by_idx=actions_by_idx,

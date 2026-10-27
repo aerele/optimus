@@ -12,3 +12,8 @@ class OptimusSession(Document):
 		from optimus.analyze import _keep_session_counters
 
 		_keep_session_counters(self)
+
+	def validate(self):
+		from optimus.line_profile.jobs import validate_parent_journal
+
+		validate_parent_journal(self)
