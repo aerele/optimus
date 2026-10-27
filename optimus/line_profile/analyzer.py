@@ -15,9 +15,8 @@ per-line timings) into findings plus a per-function aggregate.
 
 import json
 import re
-import traceback
 
-from optimus import safe_commit
+from optimus import safe_call
 from optimus.analyzers.base import AnalyzerResult, dur
 
 try:
@@ -45,15 +44,16 @@ def _resolve_hot_line_thresholds() -> tuple[float, float, float, float]:
 	"""Return (high_pct, high_ms, med_pct, med_ms) from Optimus Settings
 	(cached). Falls back to module constants when settings can't be read
 	(pure-test path, fresh install before migrate)."""
-	try:
-		from optimus.settings import get_config
+	from optimus.settings import _best_effort, get_config
+
+	def read():
 		cfg = get_config()
 		# Settings store percentage as 0-100 for UX; convert here.
 		high_pct = float(cfg.hot_line_high_pct or 50.0) / 100.0
 		high_ms = float(cfg.hot_line_high_min_ms or HOT_LINE_HIGH_MIN_MS_FALLBACK)
-	except Exception:
-		high_pct = HOT_LINE_HIGH_FRACTION_FALLBACK
-		high_ms = HOT_LINE_HIGH_MIN_MS_FALLBACK
+		return high_pct, high_ms
+
+	high_pct, high_ms = _best_effort(read, (HOT_LINE_HIGH_FRACTION_FALLBACK, HOT_LINE_HIGH_MIN_MS_FALLBACK))
 	return (
 		high_pct,
 		high_ms,
@@ -486,60 +486,49 @@ def analyze(
 
 def _publish(event: str, payload: dict) -> None:
 	"""Best-effort realtime event for the floating widget + form."""
+
+	guard = safe_call.InterruptGuard(base=True)
 	try:
-		frappe.publish_realtime(event, payload, user=payload.get("user"))
+		with guard:
+			from optimus.realtime import publish_session_event
+			publish_session_event(event, payload)
 	except Exception:
 		pass
+	if guard.pending():
+		raise guard.interrupt()
 
 
-def run_analyze(session_uuid: str, run_uuid: str) -> None:
-	"""RQ entry point. Reads phase-2 samples from Redis, builds the
-	results_json, persists findings to the parent Optimus Session, marks
-	the Phase 2 Run as Ready (or Failed) and triggers re-render.
+def run_analyze(session_uuid: str, run_uuid: str, generation: str | None = None) -> None:
+	"""Compatible RQ entry; SQL ownership prevents duplicate/stale writes."""
+	from optimus.line_profile.jobs import run
 
-	On any uncaught exception: rollback, mark Failed, publish failed event,
-	re-raise so RQ logs it.
-	"""
-	if not _FRAPPE_AVAILABLE:
-		raise RuntimeError("frappe not importable, run under bench")
+	run(session_uuid, run_uuid, generation=generation)
 
+
+def _compute_run(parent_docname: str, run_uuid: str):
+	"""Compute outside SQL locks. Missing Redis input is not a successful run."""
 	from optimus.line_profile import capture
-
-	# Lookup the Phase 2 Run row + parent Session docname
-	run_row = _find_run_row(session_uuid, run_uuid)
-	if run_row is None:
-		raise RuntimeError(
-			f"Phase 2 Run {run_uuid} not found on session {session_uuid}"
-		)
-	parent_docname = run_row.parent
-	# Resolve the session owner so realtime events reach their Desk tab. This runs
-	# in an RQ worker with no browser socket, so publish_realtime needs an EXPLICIT
-	# user (a None target won't reach the form) same as phase-1's
-	# _publish_session_event. Without this the form never auto-updates the run row.
-	try:
-		owner = frappe.db.get_value("Optimus Session", parent_docname, "user")
-	except Exception:
-		owner = None
+	from optimus.line_profile.jobs import InputChanged, MissingInput
 
 	try:
-		_publish("phase_2_run_analyzing", {
-			"session_uuid": session_uuid,
-			"run_uuid": run_uuid,
-			"user": owner,
-		})
-
-		# Drain samples + load picks meta with source snapshot.
 		samples = capture.read_all_samples(run_uuid)
 		picks = capture.read_picks_meta(run_uuid)
-
-		# Aggregate raw samples into the analyzer's input shape, then run
-		# the pure classifier. Phase-1's pyinstrument call trees feed the
-		# ancestry-based pass-through detection so wrappers/leaves
-		# instrumented across a thin uninstrumented intermediate still
-		# merge into a single deepest finding.
+	except capture.CaptureChanged:
+		raise InputChanged() from None
+	except capture.CaptureInputError:
+		raise MissingInput() from None
+	if (not isinstance(samples, list) or not isinstance(picks, list) or not picks
+		or any(not isinstance(batch, list) or any(not isinstance(item, dict) for item in batch) for batch in samples)
+		or any(not isinstance(pick, dict) or not isinstance(pick.get("dotted_path"), str) or not pick["dotted_path"] for pick in picks)):
+		raise MissingInput()
+	try:
 		results_json = capture.aggregate_samples(samples, picks)
-		call_trees: list[dict] = []
-		try:
+	except capture.CaptureInputError:
+		raise MissingInput() from None
+	call_trees: list[dict] = []
+	guard = safe_call.InterruptGuard(base=True)
+	try:
+		with guard:
 			parent_session = frappe.get_doc("Optimus Session", parent_docname)
 			for action in (parent_session.actions or []):
 				raw_tree = getattr(action, "call_tree_json", None)
@@ -553,141 +542,33 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 					tree = tree["root"]
 				if isinstance(tree, dict):
 					call_trees.append(tree)
-		except Exception:
-			# Loading phase-1 trees is best-effort without them we
-			# fall back to regex-only pass-through detection.
-			call_trees = []
-		result = analyze(results_json, call_trees=call_trees or None)
-		# Observe, don't spoil: if the overhead watchdog cut tracing short to
-		# protect the user's flow, the line data is partial say so (read the
-		# flag before cleanup_run clears it below).
-		if capture.budget_was_hit(run_uuid):
-			result.warnings.append(
-				"Line profiling was time-budgeted to avoid freezing the flow, so "
-				"results are partial for the longest-running call(s). Tune "
-				"optimus_phase2_overhead_budget_seconds in site_config (lower = "
-				"snappier flow, higher = fuller data; 0 = unlimited)."
-			)
-		total_ms = sum(s.get("total_ms") or 0 for s in result.aggregate.get("phase2_functions", []))
-
-		# Commit results while still Analyzing: they survive a worker kill and row locks are
-		# released before the slow re-render.
-		_persist_run(parent_docname, run_uuid, results_json, result, total_ms)
-
-	except Exception as exc:
-		try:
-			frappe.db.rollback()
-		except Exception:
-			pass
-		_mark_run_failed(parent_docname, run_uuid, str(exc), traceback.format_exc())
-		_publish("phase_2_run_failed", {
-			"session_uuid": session_uuid,
-			"run_uuid": run_uuid,
-			"error": str(exc),
-			"user": owner,
-		})
-		raise
-
-	# Outside the try above so a finalize error cannot mark a saved run Failed or retry it.
-	try:
-		# The render commits internally; safe because the run is still Analyzing.
-		render_ok = _regenerate_parent_reports(session_uuid)
-
-		if render_ok:
-			# Pop only after the Ready commit, and only if the row still exists.
-			if _mark_run_ready(parent_docname, run_uuid):
-				_publish("phase_2_run_ready", {
-					"session_uuid": session_uuid,
-					"run_uuid": run_uuid,
-					"parent": parent_docname,
-					"user": owner,
-				})
-			else:
-				_safe_log_error(
-					"optimus phase 2 finalize",
-					f"run {run_uuid} vanished before Ready flip; report rendered, "
-					"status left unchanged",
-				)
-		else:
-			# Findings are durable but the report has no phase-2 panel flipping to
-			# Ready would reproduce the Ready-before-report bug, so mark Failed with
-			# an actionable message instead. The Hot Line findings still show in the
-			# main findings list; "Regenerate Reports" or a Phase 2 retry rebuilds
-			# the drill-down panel.
-			render_fail_msg = (
-				"the report re-render failed. The line-profile findings were saved, "
-				"so click \"Regenerate Reports\" on the session, or retry the Phase 2 "
-				"pass, to rebuild the drill-down panel."
-			)
-			_mark_run_failed(parent_docname, run_uuid, render_fail_msg, "")
-			_publish("phase_2_run_failed", {
-				"session_uuid": session_uuid,
-				"run_uuid": run_uuid,
-				"error": render_fail_msg,
-				"user": owner,
-			})
 	except Exception:
-		_safe_log_error("optimus phase 2 finalize", traceback.format_exc())
-	finally:
-		try:
-			capture.cleanup_run(run_uuid)
-		except Exception:
-			_safe_log_error("optimus phase 2 cleanup_run", traceback.format_exc())
+		# Historical sessions may lack call trees; classification still works.
+		call_trees = []
+	if guard.pending():
+		raise guard.interrupt()
+	result = analyze(results_json, call_trees=call_trees or None)
+	if capture.budget_was_hit(run_uuid):
+		result.warnings.append(
+			"Line profiling was time-budgeted to avoid freezing the flow, so "
+			"results are partial for the longest-running call(s). Tune "
+			"optimus_phase2_overhead_budget_seconds in site_config "
+			"(lower = snappier flow, higher = fuller data; 0 = unlimited)."
+		)
+	total_ms = sum(s.get("total_ms") or 0 for s in result.aggregate.get("phase2_functions", []))
+	return results_json, result, total_ms
 
 
-def _find_run_row(session_uuid: str, run_uuid: str):
-	"""Return the Optimus Phase Two Run child row whose parent session
-	matches session_uuid. None if not found."""
-	parent_docname = frappe.db.get_value(
-		"Optimus Session", {"session_uuid": session_uuid}, "name"
-	)
-	if not parent_docname:
-		return None
-	matches = frappe.get_all(
-		"Optimus Phase Two Run",
-		filters={"parent": parent_docname, "run_uuid": run_uuid},
-		fields=["name", "parent"],
-		limit=1,
-	)
-	if not matches:
-		return None
-	# Return a tiny shape with .parent for the caller's convenience.
-	row = matches[0]
-
-	class _Row:
-		pass
-
-	r = _Row()
-	r.name = row["name"]
-	r.parent = row["parent"]
-	return r
-
-
-def _safe_log_error(title: str, message: str | None = None) -> None:
-	"""frappe.log_error that can never itself raise (Error Log write can fail /
-	validate). Keeps best-effort cleanup + finalize paths from escaping to the
-	caller and flipping a succeeded run to Failed."""
-	try:
-		frappe.log_error(title=title, message=message or title)
-	except Exception:
-		pass
-
-
-# Each phase-2 finding is stamped with the run_uuid that produced it (under this
-# underscore-prefixed, non-sensitive key inside ``technical_detail_json``) so a
-# re-run of the SAME run can find and drop its own prior findings before
-# re-appending idempotent persist, no duplicate findings on retry.
+# Each phase-2 finding carries its run_uuid here so a re-persist of the same run replaces its own findings.
 _PHASE2_RUN_TAG = "_phase2_run_uuid"
 
 
 def _tag_phase2_finding(finding: dict, run_uuid: str) -> None:
-	"""Stamp the owning ``run_uuid`` into the finding's ``technical_detail_json``
-	so ``_drop_prior_run_findings`` can recognise and replace it on a retry."""
-	raw = finding.get("technical_detail_json")
+	"""Stamp the owning run_uuid into the finding's technical_detail_json."""
 	detail: dict = {}
-	if raw:
+	if finding.get("technical_detail_json"):
 		try:
-			loaded = json.loads(raw)
+			loaded = json.loads(finding["technical_detail_json"])
 			if isinstance(loaded, dict):
 				detail = loaded
 		except (TypeError, ValueError):
@@ -697,22 +578,16 @@ def _tag_phase2_finding(finding: dict, run_uuid: str) -> None:
 
 
 def _drop_prior_run_findings(parent, run_uuid: str) -> None:
-	"""Remove findings a PRIOR run of this ``run_uuid`` left on the session so a
-	retry (janitor re-enqueue, ``retry_phase2_analyze``, a worker killed
-	mid-finalize then re-run) replaces its findings rather than appending a second
-	copy. Only this run's rows are dropped phase-1 findings and other phase-2
-	runs' findings carry a different tag (or none) and are preserved."""
-	existing = list(parent.findings or [])
+	"""Drop findings an earlier persist of this run left, so a retry never doubles them."""
+	existing = list(getattr(parent, "findings", None) or [])
 	kept = []
 	for row in existing:
-		raw = getattr(row, "technical_detail_json", None)
 		owned = False
-		if raw:
-			try:
-				detail = json.loads(raw)
-				owned = isinstance(detail, dict) and detail.get(_PHASE2_RUN_TAG) == run_uuid
-			except (TypeError, ValueError):
-				owned = False
+		try:
+			detail = json.loads(getattr(row, "technical_detail_json", None) or "")
+			owned = isinstance(detail, dict) and detail.get(_PHASE2_RUN_TAG) == run_uuid
+		except (TypeError, ValueError):
+			owned = False
 		if not owned:
 			kept.append(row)
 	if len(kept) != len(existing):
@@ -726,30 +601,25 @@ def _persist_run(
 	result: AnalyzerResult,
 	total_ms: float,
 ) -> None:
-	"""Save results and findings on the session and commit, leaving the run Analyzing; replaces this run's prior findings."""
+	"""Save results and findings in the caller's locked transaction; the run stays Analyzing until its report is attached."""
 	parent = frappe.get_doc("Optimus Session", parent_docname)
 
-	# A vanished run row is fatal: raise so the caller rolls back and marks Failed.
-	matched_child = None
 	for child in (parent.phase_2_runs or []):
 		if child.run_uuid == run_uuid:
-			matched_child = child
+			child.results_json = json.dumps(results_json, default=str)
+			child.warnings_json = json.dumps(result.warnings, default=str)
+			child.total_ms = round(total_ms, 2)
 			break
-	if matched_child is None:
-		raise RuntimeError(
-			f"no Phase Two Run {run_uuid} on {parent_docname}; aborting persist"
-		)
-
-	matched_child.results_json = json.dumps(results_json, default=str)
-	matched_child.warnings_json = json.dumps(result.warnings, default=str)
-	matched_child.total_ms = round(total_ms, 2)
+	else:
+		raise ValueError("Phase 2 result row is missing")
 
 	_drop_prior_run_findings(parent, run_uuid)
 
 	# Promote findings into the unified Session.findings table so the
 	# existing finding rendering / filtering picks them up alongside
 	# phase-1 findings.
-	for finding in result.findings:
+	for original in result.findings:
+		finding = dict(original)
 		# Optimus Finding.title is a Data(140) field. Phase-2 findings are
 		# appended directly here (bypassing analyze._truncate_finding_titles),
 		# so clamp defensively a long title must not trip Frappe's truncation
@@ -762,76 +632,6 @@ def _persist_run(
 		parent.append("findings", finding)
 
 	parent.flags.ignore_validate_update_after_submit = True
-	parent.save(ignore_permissions=True)
-	safe_commit()
+	from optimus.managed import save_session
 
-
-def _mark_run_ready(parent_docname: str, run_uuid: str) -> bool:
-	"""Set the run Ready and commit; False if the row is gone.
-
-	Uses set_value, not parent.save(), which can hit TimestampMismatchError on the submitted session."""
-	name = frappe.db.get_value(
-		"Optimus Phase Two Run",
-		{"parent": parent_docname, "run_uuid": run_uuid},
-		"name",
-	)
-	if not name:
-		_safe_log_error(
-			"optimus phase 2 mark ready",
-			f"no Phase Two Run {run_uuid} on {parent_docname}; left not-Ready",
-		)
-		return False
-	frappe.db.set_value(
-		"Optimus Phase Two Run",
-		name,
-		{"status": "Ready", "ended_at": frappe.utils.now_datetime()},
-	)
-	safe_commit()
-	return True
-
-
-def _mark_run_failed(parent_docname: str, run_uuid: str, error: str, tb: str) -> None:
-	"""Best-effort: set the run Failed with the error in warnings_json; tolerates a missing row."""
-	if not parent_docname:
-		return
-	try:
-		name = frappe.db.get_value(
-			"Optimus Phase Two Run",
-			{"parent": parent_docname, "run_uuid": run_uuid},
-			"name",
-		)
-		if not name:
-			return
-		frappe.db.set_value(
-			"Optimus Phase Two Run",
-			name,
-			{
-				"status": "Failed",
-				"warnings_json": json.dumps(
-					[f"phase 2 analyze failed: {error}", tb], default=str
-				),
-				"ended_at": frappe.utils.now_datetime(),
-			},
-		)
-		safe_commit()
-	except Exception:
-		# Truly best-effort don't mask the original exception.
-		try:
-			frappe.db.rollback()
-		except Exception:
-			pass
-
-
-def _regenerate_parent_reports(session_uuid: str) -> bool:
-	"""Re-render the parent session's reports; True on success, False if the render raised."""
-	try:
-		from optimus import api as optimus_api
-
-		optimus_api.regenerate_reports(session_uuid)  # type: ignore[attr-defined]
-		return True
-	except Exception as exc:
-		frappe.log_error(
-			title="phase 2 re-render failed",
-			message=f"{session_uuid}: {exc}\n{traceback.format_exc()}",
-		)
-		return False
+	save_session(parent)

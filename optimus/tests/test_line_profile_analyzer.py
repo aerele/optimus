@@ -386,24 +386,30 @@ class TestLeafPickAndChain:
 
 
 # ---------------------------------------------------------------------------
-# Realtime targeting phase-2 events must reach the session OWNER's Desk tab.
-# run_analyze runs in an RQ worker with no browser socket, so publish_realtime
-# needs an explicit user (a None target won't reach the form). This pins that
-# _publish forwards the payload's "user" as the target.
+# Phase 2 targets the recording user, shared forms, and the authorized actor.
 # ---------------------------------------------------------------------------
 
 
-def test_publish_targets_user_from_payload(monkeypatch):
+def test_publish_targets_recording_user_and_shared_form(monkeypatch):
+	from types import SimpleNamespace
+
 	import frappe
 
 	calls = []
+	monkeypatch.setattr(frappe, "db", SimpleNamespace(get_value=lambda *a, **k: {
+		"name": "session-doc", "user": "recorder@example.com",
+	}), raising=False)
 	monkeypatch.setattr(
 		frappe, "publish_realtime",
-		lambda event, payload=None, user=None, **k: calls.append((event, user)),
+		lambda event, payload=None, **k: calls.append((event, k)),
 		raising=False,
 	)
 	analyzer._publish("phase_2_run_ready", {"session_uuid": "s", "user": "alice@example.com"})
-	assert calls == [("phase_2_run_ready", "alice@example.com")]
+	assert calls == [
+		("phase_2_run_ready", {"room": "user:recorder@example.com"}),
+		("phase_2_run_ready", {"room": "doc:Optimus Session/session-doc"}),
+		("phase_2_run_ready", {"room": "user:alice@example.com"}),
+	]
 
 
 def test_publish_swallows_errors(monkeypatch):
@@ -417,51 +423,7 @@ def test_publish_swallows_errors(monkeypatch):
 	analyzer._publish("phase_2_run_ready", {"user": "x@y.z"})
 
 
-# run_analyze commit sequencing: results commit as Analyzing, Ready only after the render.
-
-
-def _wire_run_analyze(monkeypatch, order, child, doc, *, render_ok=True, findings=None):
-	"""Wire a fake frappe whose set_value mutates the child row, recording each event in order."""
-	import types
-
-	from optimus.analyzers.base import AnalyzerResult
-	from optimus.line_profile import capture as lp_capture
-
-	def _get_value(doctype, filters, field, *a, **k):
-		if doctype == "Optimus Session" and field == "user":
-			return "u@e.com"
-		if doctype == "Optimus Phase Two Run" and field == "name":
-			return "PTR-1"
-		return None
-
-	def _set_value(doctype, name, values, *a, **k):
-		for key, val in (values or {}).items():
-			setattr(child, key, val)
-
-	fake_frappe = types.SimpleNamespace(
-		get_doc=lambda *a, **k: doc,
-		db=types.SimpleNamespace(get_value=_get_value, set_value=_set_value),
-		utils=types.SimpleNamespace(now_datetime=lambda: "2026-01-01 00:00:00"),
-		log_error=lambda *a, **k: None,
-	)
-	monkeypatch.setattr(analyzer, "frappe", fake_frappe)
-	monkeypatch.setattr(analyzer, "_find_run_row",
-		lambda s, r: types.SimpleNamespace(name="PTR-1", parent="PS-1"))
-	monkeypatch.setattr(analyzer, "analyze",
-		lambda *a, **k: AnalyzerResult(findings=list(findings or []),
-			aggregate={"phase2_functions": []}, warnings=[]))
-	monkeypatch.setattr(lp_capture, "read_all_samples", lambda r: [], raising=False)
-	monkeypatch.setattr(lp_capture, "read_picks_meta", lambda r: [], raising=False)
-	monkeypatch.setattr(lp_capture, "aggregate_samples", lambda s, p: [], raising=False)
-	monkeypatch.setattr(lp_capture, "budget_was_hit", lambda r: False, raising=False)
-	monkeypatch.setattr(lp_capture, "cleanup_run",
-		lambda r: order.append(("cleanup", child.status)), raising=False)
-	monkeypatch.setattr(analyzer, "_regenerate_parent_reports",
-		lambda s: (order.append(("regenerate", child.status)), render_ok)[1])
-	monkeypatch.setattr(analyzer, "safe_commit",
-		lambda: order.append(("commit", child.status)))
-	monkeypatch.setattr(analyzer, "_publish",
-		lambda event, payload: order.append(("publish", event, child.status)))
+# Persist semantics: the run stays Analyzing; the job flips it Ready after the report.
 
 
 def _fresh_run_doc():
@@ -478,65 +440,6 @@ def _fresh_run_doc():
 	return child, doc
 
 
-def test_run_analyze_persists_analyzing_then_flips_ready_after_render(monkeypatch):
-	order: list = []
-	child, doc = _fresh_run_doc()
-	_wire_run_analyze(monkeypatch, order, child, doc, render_ok=True)
-
-	analyzer.run_analyze("sess-1", "run-1")
-
-	assert ("commit", "Analyzing") in order, order
-	persist_commit = order.index(("commit", "Analyzing"))
-	assert ("regenerate", "Analyzing") in order, order
-	regen = order.index(("regenerate", "Analyzing"))
-	assert ("commit", "Ready") in order, order
-	ready_commit = order.index(("commit", "Ready"))
-	ready_popup = order.index(("publish", "phase_2_run_ready", "Ready"))
-
-	assert persist_commit < regen < ready_commit < ready_popup, order
-	assert child.status == "Ready"
-	assert any(ev[0] == "cleanup" for ev in order), order
-	assert not any(
-		ev == ("commit", "Ready") and i < regen for i, ev in enumerate(order)
-	), order
-
-
-def test_run_analyze_render_failure_marks_failed_never_ready(monkeypatch):
-	"""A failed render marks the run Failed, never Ready."""
-	order: list = []
-	child, doc = _fresh_run_doc()
-	_wire_run_analyze(monkeypatch, order, child, doc, render_ok=False)
-
-	analyzer.run_analyze("sess-1", "run-1")
-
-	assert ("commit", "Analyzing") in order, order
-	assert child.status == "Failed", order
-	assert not any(ev[:2] == ("publish", "phase_2_run_ready") for ev in order), order
-	assert any(ev[:2] == ("publish", "phase_2_run_failed") for ev in order), order
-	assert any(ev[0] == "cleanup" for ev in order), order
-
-
-def test_run_analyze_vanished_row_after_render_does_not_pop_ready(monkeypatch):
-	"""A vanished run row skips the ready popup but still cleans up."""
-	import types
-	order: list = []
-	child, doc = _fresh_run_doc()
-	_wire_run_analyze(monkeypatch, order, child, doc, render_ok=True)
-
-	def _get_value_vanished(doctype, filters, field, *a, **k):
-		if doctype == "Optimus Session" and field == "user":
-			return "u@e.com"
-		return None
-	monkeypatch.setattr(analyzer.frappe, "db",
-		types.SimpleNamespace(get_value=_get_value_vanished, set_value=lambda *a, **k: None))
-
-	analyzer.run_analyze("sess-1", "run-1")
-
-	assert ("regenerate", "Analyzing") in order, order
-	assert not any(ev[:2] == ("publish", "phase_2_run_ready") for ev in order), order
-	assert any(ev[0] == "cleanup" for ev in order), order
-
-
 def test_persist_run_is_idempotent_no_duplicate_findings_on_retry(monkeypatch):
 	"""Persisting the same run_uuid twice does not duplicate findings."""
 	import types
@@ -548,7 +451,6 @@ def test_persist_run_is_idempotent_no_duplicate_findings_on_retry(monkeypatch):
 		get_doc=lambda *a, **k: doc, log_error=lambda *a, **k: None,
 	)
 	monkeypatch.setattr(analyzer, "frappe", fake_frappe)
-	monkeypatch.setattr(analyzer, "safe_commit", lambda: None)
 
 	def _findings():
 		return [
@@ -588,7 +490,6 @@ def test_persist_run_preserves_other_runs_and_phase1_findings(monkeypatch):
 		get_doc=lambda *a, **k: doc, log_error=lambda *a, **k: None,
 	)
 	monkeypatch.setattr(analyzer, "frappe", fake_frappe)
-	monkeypatch.setattr(analyzer, "safe_commit", lambda: None)
 
 	analyzer._persist_run("PS-1", "run-1", [], AnalyzerResult(
 		findings=[{"finding_type": "Hot Line", "title": "mine",
@@ -617,14 +518,26 @@ def test_persist_run_raises_when_row_vanished(monkeypatch):
 	doc.phase_2_runs = []  # no matching child row
 	monkeypatch.setattr(analyzer, "frappe", types.SimpleNamespace(
 		get_doc=lambda *a, **k: doc, log_error=lambda *a, **k: None))
-	monkeypatch.setattr(analyzer, "safe_commit", lambda: None)
 
-	with pytest.raises(RuntimeError):
+	with pytest.raises(ValueError):
 		analyzer._persist_run("PS-1", "run-1", [], AnalyzerResult(
 			findings=[{"finding_type": "Hot Line", "title": "x",
 				"technical_detail_json": "{}"}],
 			aggregate={"phase2_functions": []}, warnings=[]), 0.0)
 	assert doc.findings == []
+
+
+def test_persist_run_leaves_status_analyzing(monkeypatch):
+	"""Saving results does not flip the run; the job does that after the report."""
+	import types
+
+	from optimus.analyzers.base import AnalyzerResult
+
+	child, doc = _fresh_run_doc()
+	monkeypatch.setattr(analyzer, "frappe", types.SimpleNamespace(get_doc=lambda *a, **k: doc))
+	analyzer._persist_run("PS-1", "run-1", [], AnalyzerResult(
+		findings=[], aggregate={"phase2_functions": []}, warnings=[]), 1.0)
+	assert child.status == "Analyzing" and child.results_json == "[]"
 
 
 def test_phase2_run_display_status_rules():

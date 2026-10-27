@@ -15,34 +15,7 @@ import types
 
 import pytest
 
-
-class _FakeCache:
-	"""Minimal stand-in for frappe.cache. Stores dict + supports get/set/
-	delete + the rpush/lrange list ops used by capture.flush_samples."""
-
-	def __init__(self):
-		self.kv = {}
-		self.lists = {}
-
-	def set_value(self, key, value, expires_in_sec=None):
-		self.kv[key] = value
-
-	def get_value(self, key):
-		return self.kv.get(key)
-
-	def delete_value(self, key):
-		self.kv.pop(key, None)
-		self.lists.pop(key, None)
-
-	def rpush(self, key, value):
-		self.lists.setdefault(key, []).append(value)
-
-	def lrange(self, key, start, stop):
-		items = self.lists.get(key, [])
-		# Negative stop=-1 means end.
-		if stop == -1:
-			return items[start:]
-		return items[start : stop + 1]
+from optimus.tests.phase2_cache_fake import Cache as _FakeCache
 
 
 def _install_fake_frappe(monkeypatch):
@@ -50,10 +23,12 @@ def _install_fake_frappe(monkeypatch):
 	so the real frappe is restored at teardown. Returns the fake cache
 	object the tests can introspect."""
 	fake_frappe = types.ModuleType("frappe")
-	fake_local = types.SimpleNamespace()
+	fake_local = types.SimpleNamespace(cache={})
 	fake_cache = _FakeCache()
 	fake_frappe.local = fake_local
 	fake_frappe.cache = fake_cache
+	fake_frappe.flags = types.SimpleNamespace(in_test=True)
+	fake_frappe.get_installed_apps = lambda: ["optimus"]
 	fake_frappe.log_error = lambda *a, **k: None  # swallow
 	monkeypatch.setitem(sys.modules, "frappe", fake_frappe)
 	return fake_cache
@@ -74,10 +49,20 @@ class TestPhase2Lifecycle:
 		# monkeypatch.setitem so the real frappe + line_profile.* modules
 		# are restored at teardown (no pollution to subsequent test files).
 		_install_fake_frappe(monkeypatch)
+		from optimus.renderer import source
+		monkeypatch.setattr(source, "_installed_apps", lambda: {"optimus"})
 		# Force-reload capture so its module-level state (the
 		# _resolved_fns_by_run dict) and frappe references are clean.
+		# The re-import also rebinds the parent package's attribute
+		# (optimus.line_profile), so that comes back at teardown too:
+		# otherwise a later ``import optimus.line_profile.capture`` would
+		# reach the fresh module while the code under test still uses the
+		# original one from sys.modules.
 		for name in list(sys.modules):
 			if name.startswith("optimus.line_profile"):
+				parent, _, leaf = name.rpartition(".")
+				if parent in sys.modules:
+					monkeypatch.setattr(sys.modules[parent], leaf, sys.modules[name], raising=False)
 				monkeypatch.delitem(sys.modules, name, raising=False)
 
 	def test_is_active_returns_run_uuid_after_start(self):
