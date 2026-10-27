@@ -32,10 +32,12 @@ optimus/renderer/
                            # `from optimus.renderer import X` still works)
   _internal.py             # the legacy bulk content (~4,400 LOC,
                            # was 4,958 before the v0.10.0 extractions)
+  index_recipes.py         # the one index advisor (findings and table cards) + ensure_indexes() generator
+  recipe_enrichment.py     # per-render evidence lookup and recipe/stale-note render glue
   README.md                # this file
   source.py                # source-file I/O + _BoundedFileCache (LRU)
-                           # _path_within_bench, _resolve_source_path,
-                           #    _read_source_snippet, _read_source_window
+                           # _path_within_bench, _resolve_source_path, _read_source_snippet
+                           # (the AI window lives in optimus/ai_grounding.py)
   syntax.py                # Pygments highlighting + diff-block wrapper
                            # _ensure_pygments, _highlight_*, _highlight_diff_html
   time_format.py           # duration + datetime formatting

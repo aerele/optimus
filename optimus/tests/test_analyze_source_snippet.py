@@ -6,6 +6,7 @@ asserts the source_snippet shape after enriching finding dicts against a real fi
 """
 
 import json
+import os
 
 from optimus import analyze
 
@@ -254,13 +255,14 @@ class TestEnrichFindingsWithSourceSnippets:
 		]
 
 		open_calls = []
-		real_open = open
+
+		real_open = os.open
 
 		def counting_open(path, *args, **kwargs):
 			open_calls.append(path)
 			return real_open(path, *args, **kwargs)
 
-		monkeypatch.setattr("builtins.open", counting_open)
+		monkeypatch.setattr(os, "open", counting_open)
 
 		analyze._enrich_findings_with_source_snippets(findings)
 

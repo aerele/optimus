@@ -29,6 +29,7 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from optimus import janitor
+from optimus.managed import artifact_writer, save_session
 
 _SESSION_DOCTYPE = "Optimus Session"
 _FILE_DOCTYPE = "File"
@@ -107,7 +108,7 @@ class TestJanitorSweepsActuallyDelete(FrappeTestCase):
 				"stopped_at": started,
 			}
 		)
-		doc.insert(ignore_permissions=True)
+		save_session(doc, insert=True)
 		frappe.db.commit()
 		self._uuids.append(uuid)
 
@@ -135,7 +136,8 @@ class TestJanitorSweepsActuallyDelete(FrappeTestCase):
 					frappe.local.request = None
 				except Exception:
 					pass
-				file_doc.insert(ignore_permissions=True)
+				with artifact_writer(doc.name, "raw_report_file"):
+					file_doc.insert(ignore_permissions=True)
 				file_url = file_doc.file_url
 			finally:
 				try:

@@ -25,6 +25,7 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import now_datetime
 
 from optimus import api
+from optimus.managed import artifact_writer, save_session
 
 _SESSION_DOCTYPE = "Optimus Session"
 _FILE_DOCTYPE = "File"
@@ -95,7 +96,7 @@ class TestRegenerateReportsIdempotent(FrappeTestCase):
 				"stopped_at": now_datetime(),
 			}
 		)
-		doc.insert(ignore_permissions=True)
+		save_session(doc, insert=True)
 		frappe.db.commit()
 		return doc
 
