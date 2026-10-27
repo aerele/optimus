@@ -93,6 +93,7 @@ when you add a new key; the audit test asserts this table matches
 | `optimus:retention_backlog` | **enveloped** integer (v0.12.13+) | Frappe pickle around `{"_v": 1, "data": <int>}` | 3600s | Janitor backlog counter when daily sweep hits its per-run cap. Migrated to the v0.12.0 envelope in v0.12.13. Write-only inside the app operator dashboards reading directly from Redis see the envelope shape. |
 | `optimus_settings_cached` | **enveloped** dataclass dict (v0.12.11+) | Frappe pickle around `{"_v": 1, "data": {...}}` | none (invalidated by DocType `on_update`) | Pre-prefix legacy name; kept as-is to avoid a one-shot cache miss on upgrade. **First value migrated to the v0.12.0 versioned envelope (v0.12.11).** Reads still accept legacy bare-dict shape for backward compat with pre-v0.12.11 writers. |
 | `optimus:schema_version` | integer | raw | none | v0.12.0+ sentinel. Written at app import. See § 4. |
+| `optimus:ratelimit:<action>:<window>:<user>` | integer counter | raw (`INCR`, then `EXPIRE` when the counter is new or has no TTL) | `<window>` seconds (armed by the call that opens the window; a counter found without a TTL is re-armed) | Per-user fixed-window rate limit for mutating endpoints (`optimus/ratelimit.py`). Keyed only on action, window length and user, so no request field can open a fresh bucket. Written through `frappe.cache.make_key` (site-prefixed). Override limits in site_config `optimus_rate_limits`. |
 
 ---
 

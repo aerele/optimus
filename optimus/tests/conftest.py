@@ -22,6 +22,14 @@ import pytest
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
+def pytest_configure(config):
+	# Tests that need an optional tool carry one of these markers so CI's ai-quality
+	# workflow (which installs rq and semgrep) selects them with -k "semgrep or rq";
+	# without the tool they skip locally.
+	config.addinivalue_line("markers", "rq: needs the rq package (installed by the ai-quality workflow)")
+	config.addinivalue_line("markers", "semgrep: needs the semgrep CLI and OPTIMUS_SEMGREP_RULES_DIR")
+
+
 # --- CI-friendly baseline frappe stub ---------------------------------------
 # On a bench host frappe is importable and we use the real module. On CI
 # (the GitHub Actions runner, or any pure pip venv) frappe is NOT installed,
@@ -51,6 +59,19 @@ except ImportError:
 			debug=lambda *a, **kw: None,
 			error=lambda *a, **kw: None,
 		)
+
+	def _stub_sbool(x):
+		# frappe.utils.sbool: "true" / "1" -> True, "false" / "0" -> False,
+		# anything else is returned as is.
+		try:
+			val = x.lower()
+		except Exception:
+			return x
+		if val in ("true", "1"):
+			return True
+		if val in ("false", "0"):
+			return False
+		return x
 
 	def _stub_get_bench_path():
 		# Two levels above the package root, so a relpath of files inside
@@ -120,6 +141,7 @@ except ImportError:
 		PermissionError=type("PermissionError", (Exception,), {}),
 		ValidationError=_StubValidationError,
 		DoesNotExistError=type("DoesNotExistError", (Exception,), {}),
+		RateLimitExceededError=type("RateLimitExceededError", (_StubValidationError,), {}),
 	)
 	_mk_module(
 		"frappe.utils",
@@ -131,6 +153,7 @@ except ImportError:
 		get_datetime=lambda *a, **kw: _dt.datetime.now(),
 		time_diff_in_seconds=lambda *a, **kw: 0,
 		get_bench_path=_stub_get_bench_path,
+		sbool=_stub_sbool,
 	)
 	_mk_module("frappe.utils.scheduler", is_scheduler_disabled=lambda: False)
 	_mk_module("frappe.utils.background_jobs", enqueue=lambda *a, **kw: None)
@@ -209,6 +232,7 @@ _FRAPPE_DEPENDENT_LEAVES = frozenset({
 	"optimus.janitor",
 	"optimus.pdf_export",
 	"optimus.permissions",
+	"optimus.ratelimit",
 	"optimus.session",
 })
 

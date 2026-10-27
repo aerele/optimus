@@ -19,6 +19,7 @@ from optimus.analyzers.base import (
 	SEVERITY_ORDER,
 	AnalyzerResult,
 	dur,
+	is_error_log_hook_query,
 	is_frappe_meta_table,
 )
 from optimus.dbdialect import get_dialect
@@ -325,6 +326,8 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 
 	for recording in recordings:
 		for call in recording.get("calls") or []:
+			if is_error_log_hook_query(call.get("stack")):
+				continue
 			normalized = call.get("normalized_query")
 			if not normalized:
 				continue

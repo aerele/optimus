@@ -61,7 +61,7 @@ bench --site <your-site> install-app optimus
 bench restart
 ```
 
-Tested on **Frappe v16** with MariaDB and Redis. The app declares `required_apps = ["frappe"]`. Runtime dependencies (installed automatically by `bench get-app`) are listed in [`pyproject.toml`](./pyproject.toml) currently `pyinstrument`, `line_profiler`, `requests`, `sqlparse` and `Jinja2`, all pure-Python with no compiled extensions (`line_profiler` ships a small C extension; pre-built wheels exist for cpython 3.10–3.14).
+Tested on **Frappe v16** with MariaDB and Redis. The app declares `required_apps = ["frappe"]`. Runtime dependencies are listed in [`pyproject.toml`](./pyproject.toml) and installed by `bench get-app` or `bench setup requirements`: `pyinstrument`, `line_profiler`, `requests`, `sqlparse`, `Jinja2`, `nh3` and `markdown2`. Some include compiled extensions with pre-built wheels; `nh3` is the Rust HTML sanitizer used for AI suggestions. Frappe v16 already installs `nh3` and `markdown2`. On Frappe v15, run `bench setup requirements` after pulling Optimus to install `nh3`; without it, AI suggestions safely fall back to escaped plain text in a `<pre>` block.
 
 After install, an **Optimus User** role is created automatically. All existing System Managers are granted this role and new System Managers get it automatically via a `User.validate` hook.
 
@@ -126,8 +126,11 @@ read-only sections:
    - **Download Safe Report** / **Open Safe Report**: the customer-
      safe HTML. Email-shareable.
    - **Download Raw Report** / **Open Raw Report**: the un-redacted
-     version. Hidden from non-admins; the link itself is permission-
-     gated server-side, so guessing the file name does not bypass it.
+     version. A `File.has_permission` hook runs in Frappe's permission
+     checks (the File form, REST, `frappe.has_permission`) and lets
+     only a System Manager or the recording user through; a direct
+     download URL bypasses the hook and grants access to anyone who
+     can read the parent Optimus Session, including a read-sharee.
    - **Re-analyze**: re-runs the analyze pipeline from the captured
      recordings (which live in Redis for 10 minutes after Stop).
      Useful when a session ends `Failed` because of a transient
@@ -451,9 +454,7 @@ When a session moves to `Ready`, the source recordings in Redis (`RECORDER_REQUE
 ### Two report modes
 
 - **`safe_report_file`**: Normalized SQL, redacted URLs/headers/form data, sanitized notes, redacted custom-app function names. Safe to email to a third-party.
-- **`raw_report_file`**: Full data: raw SQL with literals, request headers, form data, complete stack traces. **Gated at two layers:**
-  1. The "Download Raw Report" button is hidden in the form UI unless the user has `System Manager` role or recorded the session themselves.
-  2. A `File.has_permission` hook (`optimus.permissions.file_has_permission`) blocks direct URL access even if the user guesses the file name.
+- **`raw_report_file`**: Full data: raw SQL with literals, request headers, form data, complete stack traces. A `File.has_permission` hook (`optimus.permissions.file_has_permission`) runs in Frappe's permission checks (the File form, REST, `frappe.has_permission`) and lets only a System Manager or the recording user through. Direct `/private/files` downloads bypass this hook and allow a parent Session read-sharee access to raw HTML, PDF and recordings. The hidden `recordings_file` field remains at permlevel 0, so its URL can be returned when the parent is read through REST. A Session read share does not restrict the recipient to sanitized output; share a separately reviewed safe export when raw access is inappropriate.
 
 ---
 
@@ -652,6 +653,7 @@ as pre-DocType fallbacks. The DocType row wins if both are set.
 
 | Key | Default | Purpose |
 |---|---|---|
+| `optimus_ai_reask` | `True` | When an AI fix suggestion breaks a block rule the guardrail checks (code not copied from the shown source, new raw SQL or DDL, a removed permission check, ...), send the model ONE follow-up turn listing the broken rules; the rewrite is kept only if it has the four headings and breaks fewer block rules. Advise rules (conventions no pinned semgrep rule checks) never cost a follow-up turn. Skipped when the first answer was cut off, when half the timeout budget is used or when the follow-up would not fit the context window. Set `False` to avoid the extra round-trip on a slow local model. |
 | `optimus_max_recordings_per_session` | `200` | Soft cap on HTTP requests + bg jobs per session. When hit, further recordings are silently dropped and the report shows a truncation banner. |
 | `optimus_inline_analyze_limit` | `50` | Max recordings allowed for inline analyze on scheduler-disabled sites. Sessions larger than this are refused with an actionable error pointing at `bench enable-scheduler` + the Retry Analyze button. |
 

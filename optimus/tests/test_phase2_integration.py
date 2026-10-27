@@ -78,8 +78,16 @@ class TestPhase2Lifecycle:
 		_install_fake_frappe(monkeypatch)
 		# Force-reload capture so its module-level state (the
 		# _resolved_fns_by_run dict) and frappe references are clean.
+		# The re-import also rebinds the parent package's attribute
+		# (optimus.line_profile), so that comes back at teardown too:
+		# otherwise a later ``import optimus.line_profile.capture`` would
+		# reach the fresh module while the code under test still uses the
+		# original one from sys.modules.
 		for name in list(sys.modules):
 			if name.startswith("optimus.line_profile"):
+				parent, _, leaf = name.rpartition(".")
+				if parent in sys.modules:
+					monkeypatch.setattr(sys.modules[parent], leaf, sys.modules[name], raising=False)
 				monkeypatch.delitem(sys.modules, name, raising=False)
 
 	def test_is_active_returns_run_uuid_after_start(self):

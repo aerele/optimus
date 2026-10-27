@@ -117,6 +117,9 @@ _DEFAULTS = {
 	"ai_enabled": False,
 	"ai_provider": "Anthropic",
 	"ai_base_url": "",
+	# 0 = the provider's own window (ai_fix._PROVIDER_DEFAULTS). Only the
+	# OpenAI-compatible provider reads it (the field is hidden for hosted ones).
+	"ai_context_tokens": 0,
 	"ai_model": "",
 	# When True, the analyze pipeline auto-generates a fix for the top
 	# ai_auto_suggest_max eligible findings (0 = all).
@@ -357,6 +360,7 @@ class OptimusConfig:
 	ai_enabled: bool = False
 	ai_provider: str = "Anthropic"
 	ai_base_url: str = ""
+	ai_context_tokens: int = 0
 	ai_model: str = ""
 	ai_auto_suggest: bool = True
 	ai_auto_suggest_max: int = 5
@@ -514,6 +518,7 @@ def _read_doctype_row() -> dict | None:
 		"ai_enabled": bool(doc.get("ai_enabled")),
 		"ai_provider": (doc.get("ai_provider") or "").strip() or None,
 		"ai_base_url": (doc.get("ai_base_url") or "").strip() or None,
+		"ai_context_tokens": int(_opt_float(doc.get("ai_context_tokens")) or 0),
 		"ai_model": (doc.get("ai_model") or "").strip() or None,
 		"ai_auto_suggest": bool(doc.get("ai_auto_suggest")),
 		"ai_auto_suggest_max": int(doc.get("ai_auto_suggest_max") or 0),
@@ -713,6 +718,7 @@ def _resolve() -> OptimusConfig:
 		),
 		ai_provider=row.get("ai_provider") or _DEFAULTS["ai_provider"],
 		ai_base_url=row.get("ai_base_url") or _DEFAULTS["ai_base_url"],
+		ai_context_tokens=max(0, int(row.get("ai_context_tokens") or 0)),
 		ai_model=row.get("ai_model") or _DEFAULTS["ai_model"],
 		ai_auto_suggest=bool(
 			row.get("ai_auto_suggest")
