@@ -99,6 +99,18 @@ class TestPerGroupCap:
 		assert sum(1 for r in board if not r["is_framework"]) == 20
 		assert [r["function"] for r in board if r["is_framework"]] == ["user/user.py::fw"]
 
+	def test_framework_group_capped_by_cumulative_time(self):
+		kids = []
+		for i in range(25):
+			node = _n(f"fw{i}", f"/bench/apps/frappe/frappe/core/m{i}/f.py", 0)
+			node["cumulative_ms"] = 100 + i
+			kids.append(node)
+		tree = _n("<root>", "", 0, kids)
+		_, board = call_tree._aggregate_hot_frames([tree], None, frozenset({"frappe"}))
+		fw = [r for r in board if r["is_framework"]]
+		assert len(fw) == 20
+		assert {r["total_cumulative_ms"] for r in fw} == {float(100 + i) for i in range(5, 25)}
+
 
 class TestRenderedGroups:
 	def _html(self, rows):
@@ -127,6 +139,7 @@ class TestRenderedGroups:
 		html = self._html([{"function": "c/d.py::fw_fn", "total_cumulative_ms": 9, "is_framework": True}])
 		assert 'id="hot-frames-app"' not in html
 		assert 'id="hot-frames-framework"' in html
+		assert "Framework code (" not in html
 		assert "all frames ran in framework code" in html
 
 	def test_only_app_has_no_framework_heading(self):

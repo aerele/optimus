@@ -3411,7 +3411,7 @@
   {% if report_data.hot_frames or report_data.hot_frames_framework %}
   <section class="section">
     <a id="hot-frames"></a>{# v0.7.x Phase I.1: mock-spec ID anchor #}
-    <h2>Hot frames (top {{ (report_data.hot_frames | length) + (report_data.hot_frames_framework | length) }})</h2>
+    <h2>Hot frames</h2>
     {% if report_data.frame_truncation and report_data.frame_truncation.actions_affected > 0 %}
     <div class="warning-banner" style="background:#fff3cd; border-left:4px solid #f0ad4e; padding:10px 14px; margin:8px 0 14px; border-radius:4px;">
       <p class="small" style="margin:0;">
@@ -3447,7 +3447,7 @@
       <p class="small muted">No hot frames in your own app's code - all frames ran in framework code. Expand the block below to see what.</p>
     {% endif %}
     {% if report_data.hot_frames_framework %}
-    <h3 class="hot-frames-group-title" id="hot-frames-framework">Framework code ({{ report_data.hot_frames_framework | length }})</h3>
+    <h3 class="hot-frames-group-title" id="hot-frames-framework">Framework code</h3>
     <details class="subsection">
       <summary class="small muted"><strong>{{ report_data.hot_frames_framework | length }}</strong> framework frame{{ "s" if report_data.hot_frames_framework | length != 1 else "" }} (click to expand) - <code>frappe</code>, <code>erpnext</code> and friends; the developer can't easily patch these</summary>
       <p class="small muted" style="margin: 6px 0 8px; font-style: italic;">
