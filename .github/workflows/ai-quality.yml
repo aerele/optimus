@@ -17,6 +17,11 @@ name: AI Quality
 #             test selected by -k "semgrep or rq" (module names and the rq / semgrep
 #             markers) with REQUIRE_SEMGREP=1, so a missing tool fails instead of
 #             skipping. Also lints scripts/ (ci.yml lints optimus/ only).
+#   sql-journal  Runs optimus/tests/test_ai_refresh_sql.py, the refresh journal's
+#             transactions, on real databases, one matrix leg each: MariaDB 10.6
+#             (snapshot isolation off), MariaDB 11.8 (innodb_snapshot_isolation on, the
+#             default of Frappe v16's CI) and PostgreSQL 16. The Postgres role must be
+#             a superuser (CI's POSTGRES_USER is): one test sets deadlock_timeout.
 on:
   pull_request:
     branches: ['**']
@@ -166,3 +171,80 @@ jobs:
             echo "::error::an rq test was skipped although rq is installed"
             exit 1
           fi
+
+  sql-journal:
+    name: AI journal (${{ matrix.leg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Snapshot isolation off: a lock never fails because a read view is older.
+          - leg: mariadb 10.6
+            database: mariadb
+            mariadb: '10.6'
+            snapshot: '0'
+          # innodb_snapshot_isolation is on by default since 11.8 (Frappe v16's CI database):
+          # a locking read of a row changed after the read view fails with 1020.
+          - leg: mariadb 11.8
+            database: mariadb
+            mariadb: '11.8'
+            snapshot: '1'
+          - leg: postgres 16
+            database: postgres
+            mariadb: ''
+            snapshot: '0'
+    services:
+      mariadb:
+        image: ${{ matrix.database == 'mariadb' && format('mariadb:{0}', matrix.mariadb) || '' }}
+        env:
+          MARIADB_ROOT_PASSWORD: optimus_test
+          MARIADB_DATABASE: optimus_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+      postgres:
+        image: ${{ matrix.database == 'postgres' && 'postgres:16' || '' }}
+        env:
+          POSTGRES_USER: optimus_test
+          POSTGRES_PASSWORD: optimus_test
+          POSTGRES_DB: optimus_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U optimus_test -d optimus_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install app and SQL validation dependencies
+        run: |
+          python -m pip install --quiet -e . pytest hypothesis Faker 'sql_metadata~=2.19.0' jsonschema PyMySQL==1.1.2 psycopg2-binary==2.9.12
+      - name: Check journal transactions on a real database
+        env:
+          OPTIMUS_TEST_SQL: ${{ matrix.database }}
+          OPTIMUS_TEST_SQL_SNAPSHOT: ${{ matrix.snapshot }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -m pytest optimus/tests/test_ai_refresh_sql.py -q -rA -p no:cacheprovider
+      - name: Show database service logs on failure
+        if: failure()
+        env:
+          MARIADB_SERVICE_ID: ${{ job.services.mariadb.id }}
+          POSTGRES_SERVICE_ID: ${{ job.services.postgres.id }}
+        run: |
+          for service_id in "$MARIADB_SERVICE_ID" "$POSTGRES_SERVICE_ID"; do
+            if [ -n "$service_id" ]; then
+              docker logs "$service_id"
+            fi
+          done

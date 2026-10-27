@@ -17,7 +17,7 @@ import json
 import re
 import traceback
 
-from optimus import safe_commit
+from optimus import safe_call, safe_commit
 from optimus.analyzers.base import AnalyzerResult, dur
 
 try:
@@ -497,8 +497,15 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 	results_json, persists findings to the parent Optimus Session, marks
 	the Phase 2 Run as Ready (or Failed) and triggers re-render.
 
-	On any uncaught exception: rollback, mark Failed, publish failed event,
-	re-raise so RQ logs it.
+	On an uncaught exception before the run is committed: rollback, mark Failed,
+	publish the failed event, re-raise so RQ logs it. Once ``_persist_run`` has
+	committed the run as Ready, nothing after it can flip it to Failed: a re-render
+	that fails or is interrupted leaves the run Ready with a warning (use Regenerate
+	Reports), and an RQ job timeout still stops the job, raised fresh. ``_persist_run``
+	commits inside, so an error that leaves it after its COMMIT (an ``after_commit``
+	callback that raised, an RQ job timeout before the commit was noted) is not taken for a
+	failure before it: after the rollback, the run's status is read again from the database
+	(``_committed_ready``), and a committed Ready run is kept, with the same warning.
 	"""
 	if not _FRAPPE_AVAILABLE:
 		raise RuntimeError("frappe not importable, run under bench")
@@ -521,6 +528,8 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 	except Exception:
 		owner = None
 
+	persisted = False
+	interrupt = safe_call.InterruptGuard()
 	try:
 		_publish("phase_2_run_analyzing", {
 			"session_uuid": session_uuid,
@@ -572,14 +581,20 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 
 		# Persist to the run row + propagate findings to the parent session.
 		_persist_run(parent_docname, run_uuid, results_json, result, total_ms)
+		persisted = True
 
-		# Re-render the parent session's report so the new phase-2
-		# panel appears. Reuses the existing regenerate_reports code
-		# path (which expects session_uuid, not docname).
-		_regenerate_parent_reports(session_uuid)
+		# The run is committed Ready: its Redis state is no longer needed, so drop it
+		# before the (slower, interruptible) re-render. A failed cleanup is not a failed run.
+		safe_call.best_effort(
+			lambda: capture.cleanup_run(run_uuid), None,
+			on_error=lambda error_type: safe_call.log_error_line(
+				f"optimus: phase 2 could not clean up the state of run {run_uuid}: {error_type}"
+			),
+		)
 
-		# Done drop ephemeral Redis state.
-		capture.cleanup_run(run_uuid)
+		# Re-render the parent session's report so the new phase-2 panel appears.
+		if not _regenerate_parent_reports(session_uuid):
+			_append_run_warning(parent_docname, run_uuid, _RERENDER_INCOMPLETE_WARNING)
 
 		_publish("phase_2_run_ready", {
 			"session_uuid": session_uuid,
@@ -589,18 +604,57 @@ def run_analyze(session_uuid: str, run_uuid: str) -> None:
 		})
 
 	except Exception as exc:
-		try:
-			frappe.db.rollback()
-		except Exception:
-			pass
-		_mark_run_failed(parent_docname, run_uuid, str(exc), traceback.format_exc())
-		_publish("phase_2_run_failed", {
-			"session_uuid": session_uuid,
-			"run_uuid": run_uuid,
-			"error": str(exc),
-			"user": owner,
-		})
-		raise
+		if not persisted:
+			try:
+				frappe.db.rollback()
+			except Exception:
+				pass
+			# _persist_run commits inside: an error after its COMMIT must not fail a Ready run
+			persisted = _committed_ready(parent_docname, run_uuid)
+		if persisted:
+			# An RQ job timeout in the re-render, or an error that left _persist_run after its
+			# COMMIT. The run is committed Ready: keep it, say the report may be stale, let the
+			# form reload, and let the error end the job (a timeout raised fresh, below).
+			_append_run_warning(parent_docname, run_uuid, _RERENDER_INCOMPLETE_WARNING)
+			_publish("phase_2_run_ready", {
+				"session_uuid": session_uuid,
+				"run_uuid": run_uuid,
+				"parent": parent_docname,
+				"user": owner,
+			})
+			interrupt.note(exc)
+			if not interrupt.pending():
+				raise
+		else:
+			_mark_run_failed(parent_docname, run_uuid, str(exc), traceback.format_exc())
+			_publish("phase_2_run_failed", {
+				"session_uuid": session_uuid,
+				"run_uuid": run_uuid,
+				"error": str(exc),
+				"user": owner,
+			})
+			raise
+	if interrupt.pending():
+		raise interrupt.interrupt()
+
+
+def _committed_ready(parent_docname: str, run_uuid: str) -> bool:
+	"""True when the database holds this run as Ready. ``_persist_run`` commits inside, so an
+	error can leave it after its COMMIT (an ``after_commit`` callback that raised, an RQ job
+	timeout before ``run_analyze`` noted the commit): such a run is Ready, not failed. A fresh
+	query (``frappe.get_all``, after the caller's rollback), never the in-memory row; False when
+	the row is gone or cannot be read. An RQ job timeout escapes fresh."""
+
+	def _read() -> bool:
+		rows = frappe.get_all(
+			"Optimus Phase Two Run",
+			filters={"parent": parent_docname, "run_uuid": run_uuid},
+			fields=["status"],
+			limit=1,
+		)
+		return bool(rows) and rows[0].get("status") == "Ready"
+
+	return bool(safe_call.best_effort(_read, False))
 
 
 def _find_run_row(session_uuid: str, run_uuid: str):
@@ -699,19 +753,72 @@ def _mark_run_failed(parent_docname: str, run_uuid: str, error: str, tb: str) ->
 			pass
 
 
-def _regenerate_parent_reports(session_uuid: str) -> None:
-	"""Trigger re-render of the parent Optimus Session's HTML reports via
-	``api.regenerate_reports(session_uuid)`` (the shared re-render path).
-	"""
-	try:
-		from optimus import api as optimus_api
+_RERENDER_INCOMPLETE_WARNING = (
+	"The report re-render did not finish. Use Regenerate Reports on this session to refresh it."
+)
 
-		optimus_api.regenerate_reports(session_uuid)  # type: ignore[attr-defined]
-	except Exception as exc:
-		# Re-render failure is non-fatal: data is persisted, the customer
-		# just needs to click "Regenerate Reports" manually. Surface the
-		# error in the run row for debuggability.
-		frappe.log_error(
-			title="phase 2 re-render failed",
-			message=f"{session_uuid}: {exc}\n{traceback.format_exc()}",
+
+def _append_run_warning(parent_docname: str, run_uuid: str, text: str) -> None:
+	"""Add ``text`` to the run row's ``warnings_json`` (a list) and commit, best effort: the run
+	stays as it is when this fails (one line in the ``optimus`` log). Does not save the parent
+	session. An RQ job timeout escapes fresh."""
+
+	def _append() -> None:
+		rows = frappe.get_all(
+			"Optimus Phase Two Run",
+			filters={"parent": parent_docname, "run_uuid": run_uuid},
+			fields=["name", "warnings_json"],
+			limit=1,
 		)
+		if not rows:
+			return
+		try:
+			warnings = json.loads(rows[0].get("warnings_json") or "[]")
+		except (TypeError, ValueError):
+			warnings = []
+		if not isinstance(warnings, list):
+			warnings = []
+		warnings.append(text)
+		frappe.db.set_value(
+			"Optimus Phase Two Run", rows[0]["name"], "warnings_json",
+			json.dumps(warnings, default=str), update_modified=False,
+		)
+		safe_commit()
+
+	safe_call.best_effort(
+		_append, None,
+		on_error=lambda error_type: safe_call.log_error_line(
+			f"optimus: phase 2 could not record the re-render warning: {error_type}"
+		),
+	)
+
+
+def _regenerate_parent_reports(session_uuid: str) -> bool:
+	"""Re-render saved results from the authorized Phase-2 worker. True when the report was
+	rendered; False when the render failed (one Error Log row, ``optimus ai phase 2 re-render``)
+	or the session no longer exists (one neutral ``optimus`` log line, nothing to render).
+	An RQ job timeout is logged and escapes as a fresh instance."""
+	from optimus import analyze as analyze_mod
+	from optimus import api as optimus_api
+
+	def _render() -> bool:
+		try:
+			docname = frappe.db.get_value("Optimus Session", {"session_uuid": session_uuid}, "name")
+			if not docname:
+				return False
+			optimus_api._render_session_report(docname)
+			return True
+		except Exception:
+			# Undo the failed render so the rows written after it (the Error Log row, the
+			# run's warning) are not lost to an aborted transaction.
+			safe_call.best_effort(frappe.db.rollback, None)
+			raise
+
+	rendered, failed = analyze_mod._run_ai_step(
+		_render, title="optimus ai phase 2 re-render", session_uuid=session_uuid,
+	)
+	if not failed and not rendered:
+		safe_call.log_error_line(
+			f"optimus: phase 2 report not re-rendered, session {session_uuid} no longer exists"
+		)
+	return bool(rendered)
