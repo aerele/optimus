@@ -7,9 +7,11 @@ import copy
 
 from optimus.analyzers import per_action, table_breakdown, top_queries
 from optimus.analyzers.base import (
+	is_frappe_path,
 	is_optimus_path,
 	is_profiler_own_query,
 	strip_profiler_own_calls,
+	walk_callsite_str,
 )
 from optimus.renderer.queries_per_action import build_queries_per_action
 
@@ -71,6 +73,24 @@ def test_is_optimus_path_anchors_on_path_boundary():
 	assert not is_optimus_path("apps/myoptimus/myoptimus/x.py")
 	assert not is_optimus_path("apps/foo_optimus/foo_optimus/x.py")
 	assert not is_optimus_path("")
+
+
+def test_user_app_optimus_folder_is_not_the_profiler():
+	assert not is_optimus_path("foo/optimus/billing.py")
+	assert not is_optimus_path("/home/u/bench/apps/foo/optimus/billing.py")
+	assert is_optimus_path("env/lib/python3.14/site-packages/optimus/ai_fix.py")
+	stack = [_frame("foo/optimus/billing.py"), _frame("frappe/database/database.py")]
+	assert not is_profiler_own_query(stack)
+	assert walk_callsite_str(stack) == "foo/optimus/billing.py:10"
+
+
+def test_frappe_path_matches_on_boundary_only():
+	assert is_frappe_path("frappe/database/database.py")
+	assert is_frappe_path("apps/frappe/frappe/model/document.py")
+	assert not is_frappe_path("apps/myfrappe/myfrappe/x.py")
+	assert not is_frappe_path("x_frappe/api.py")
+	stack = [_frame("myfrappe/api.py", 3), _frame("frappe/database/database.py")]
+	assert walk_callsite_str(stack) == "myfrappe/api.py:3"
 
 
 def test_user_frame_between_keeps_query():
@@ -143,7 +163,7 @@ def test_section_caps_rows_and_reports_total():
 	acts = [{"recording_uuid": "r2", "action_label": f"a{i}"} for i in range(3)]
 	out = build_queries_per_action(acts, {"r2": rec}, ())
 	assert len(out["rows"]) == 40
-	assert out["total"] == 60  # 20 per action x 3
+	assert out["total"] == 90  # every visible query, not the per-action top 20
 
 
 def _render(recordings, tracked, monkeypatch):
@@ -182,6 +202,19 @@ def test_rendered_report_inclusion_mode_hides_untracked_apps(monkeypatch):
 	assert "SHOW GLOBAL STATUS" not in html
 	assert "otherapp/x.py:7" not in html
 	assert "myapp/api.py:42" in html
+
+
+def test_rendered_report_hides_section_when_no_queries_and_nothing_hidden(monkeypatch):
+	rec = _recording()
+	rec["calls"] = [rec["calls"][0]]
+	html = _render([rec], (), monkeypatch)
+	assert "Queries per action" not in html
+
+
+def test_rendered_report_says_no_tracked_queries_when_all_hidden(monkeypatch):
+	html = _render([_recording()], ("nothere",), monkeypatch)
+	assert "No queries from tracked apps." in html
+	assert "not shown" in html
 
 
 def test_callsite_treats_myoptimus_app_as_user_code():
