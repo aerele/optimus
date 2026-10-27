@@ -41,11 +41,23 @@ def safe_commit() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _is_synchronous_enqueue(kwargs) -> bool:
+# Positions of enqueue's flags among its positional args after `method`.
+_ENQUEUE_POSITIONS = {"is_async": 3, "now": 5, "enqueue_after_commit": 6}
+
+
+def _enqueue_flag(name, args, kwargs, default=False):
+	"""Value of an enqueue flag passed by keyword or by position."""
+	if name in kwargs:
+		return kwargs[name]
+	pos = _ENQUEUE_POSITIONS[name]
+	return args[pos] if len(args) > pos else default
+
+
+def _is_synchronous_enqueue(args, kwargs) -> bool:
 	"""True when frappe.enqueue will run the method inline instead of queueing it."""
-	if kwargs.get("now"):
+	if _enqueue_flag("now", args, kwargs):
 		return True
-	if kwargs.get("is_async", True):
+	if _enqueue_flag("is_async", args, kwargs, True):
 		return False
 	try:
 		import frappe
@@ -60,14 +72,20 @@ def _enqueue_session_for(user, _profiler_session):
 	import frappe
 
 	local = getattr(frappe, "local", None)
-	inherited = getattr(local, "optimus_session_id", None) if local is not None else None
+	inherited = None
+	if local is not None:
+		inherited = getattr(local, "optimus_session_id", None) or getattr(
+			local, "optimus_bg_session_uuid", None
+		)
 	return inherited or _profiler_session.get_active_session_for(user)
 
 
-def _preassign_deferred_job_id(kwargs, _bg):
+def _preassign_deferred_job_id(args, kwargs, _bg):
 	"""Give an after-commit job a known id and return its RQ id, else None."""
 	try:
-		if not kwargs.get("enqueue_after_commit"):
+		if not _enqueue_flag("enqueue_after_commit", args, kwargs):
+			return None
+		if kwargs.get("deduplicate") and not kwargs.get("job_id"):
 			return None
 		if not kwargs.get("job_id"):
 			import frappe
@@ -108,7 +126,7 @@ def _patch_enqueue():
 
 	def _profiler_enqueue(method, *args, **kwargs):
 		active = None
-		synchronous = _is_synchronous_enqueue(kwargs)
+		synchronous = _is_synchronous_enqueue(args, kwargs)
 		try:
 			# Lazy import to avoid circular dependency on app init.
 			from optimus import session as _profiler_session
@@ -145,7 +163,7 @@ def _patch_enqueue():
 		# enqueue_after_commit returns None, so pick the id ourselves.
 		deferred_job_id = None
 		if active and not synchronous:
-			deferred_job_id = _preassign_deferred_job_id(kwargs, _bg)
+			deferred_job_id = _preassign_deferred_job_id(args, kwargs, _bg)
 
 		job = _original_enqueue(method, *args, **kwargs)
 

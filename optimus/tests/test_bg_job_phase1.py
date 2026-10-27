@@ -32,8 +32,8 @@ def env(fake_frappe):  # noqa: F811
 	fake_utils.now_datetime = lambda: "2026-10-26 10:00:00"
 	ret = {"job": {"id": None}}  # what the "original" enqueue returns
 
-	def original(method, **kwargs):
-		calls.append({"method": method, "kwargs": dict(kwargs)})
+	def original(method, *args, **kwargs):
+		calls.append({"method": method, "args": args, "kwargs": dict(kwargs)})
 		return ret["job"]
 
 	fake_bg.enqueue = original
@@ -72,6 +72,15 @@ class TestSynchronousEnqueue:
 		env.enqueue("m.f", is_async=False)
 		assert env.calls[0]["kwargs"]["_profiler_session_id"] == SESSION
 
+	def test_positional_now_gets_no_marker(self, env):
+		env.enqueue("m.f", "default", None, None, True, None, True)
+		assert "_profiler_session_id" not in env.calls[0]["kwargs"]
+		assert _pending(env) == set()
+
+	def test_positional_is_async_false_gets_no_marker(self, env):
+		env.enqueue("m.f", "default", None, None, False)
+		assert "_profiler_session_id" not in env.calls[0]["kwargs"]
+
 	def test_async_enqueue_keeps_marker(self, env):
 		env.enqueue("m.f")
 		assert env.calls[0]["kwargs"]["_profiler_session_id"] == SESSION
@@ -91,6 +100,10 @@ class TestDeferredEnqueue:
 		assert env.calls[0]["kwargs"]["job_id"] == "mine"
 		assert _pending(env) == {"site::mine"}
 
+	def test_deduplicate_without_job_id_is_left_for_frappe_to_reject(self, env):
+		env.enqueue("m.f", enqueue_after_commit=True, deduplicate=True)
+		assert "job_id" not in env.calls[0]["kwargs"]
+
 	def test_plain_enqueue_does_not_invent_a_job_id(self, env):
 		env.enqueue("m.f")
 		assert "job_id" not in env.calls[0]["kwargs"]
@@ -102,6 +115,11 @@ class TestNestedAndForeignJobs:
 		env.fake.local.optimus_session_id = SESSION  # we are recording a job
 		env.enqueue("m.nested")
 		assert env.calls[0]["kwargs"]["_profiler_session_id"] == SESSION
+
+	def test_child_of_orphaned_job_keeps_the_orphans_session(self, env):
+		env.fake.local.optimus_bg_session_uuid = "old-session"  # the job's own session, not the user's new one
+		env.enqueue("m.nested")
+		assert env.calls[0]["kwargs"]["_profiler_session_id"] == "old-session"
 
 	def test_no_session_no_marker(self, env):
 		env.fake.cache.delete_value(USER_KEY)
@@ -250,9 +268,9 @@ class TestTriggeredBy:
 		]
 		jobs = build_background_jobs(self._actions(), {}, tracked_jobs=tracked)["jobs"]
 		by_method = {j["method"]: j for j in jobs}
-		assert by_method["a.b.send"]["triggered_by"] == {"idx": 0, "label": "POST: submit"}
+		assert by_method["a.b.send"]["triggered_by"] == {"label": "POST: submit"}
 		nested = by_method["a.b.late"]["triggered_by"]
-		assert nested["idx"] == 1 and nested["label"].startswith("job ")
+		assert nested["label"].startswith("job ")
 
 	def test_unknown_parent_is_none(self):
 		from optimus.renderer._internal import build_background_jobs
