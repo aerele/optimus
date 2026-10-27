@@ -1,9 +1,39 @@
 # Copyright (c) 2026, Optimus contributors
 # For license information, please see license.txt
 
+from urllib.parse import urlsplit
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
+
+
+def _text(value):
+	return value.strip() if isinstance(value, str) else ""
+
+
+def _invalidate_settings_cache():
+	"""A lost post-commit callback is bounded by CONFIG_CACHE_SECONDS."""
+	from optimus import redis_keys, safe_call
+	def invalidate():
+		frappe.cache.delete_value(redis_keys.settings_cache())
+		return True
+	if not safe_call.best_effort(invalidate, False):
+		safe_call.best_effort(lambda: frappe.logger("optimus").error("Optimus settings cache invalidation failed; the bounded cache will expire."))
+
+
+def _effective_endpoint(provider, base_url):
+	"""The effective provider and URL, with case-sensitive paths preserved."""
+	from optimus import ai_fix
+
+	name = _text(provider) or ai_fix._DEFAULT_PROVIDER
+	raw = (ai_fix._PROVIDER_DEFAULTS.get(name) or {}).get("base_url") or _text(base_url)
+	try:
+		parts = urlsplit(raw)
+		# Default ports and host/scheme spelling do not change the destination.
+		return name, parts.scheme, (parts.hostname or "").lower(), parts.port or ai_fix._DEFAULT_PORTS.get(parts.scheme), parts.path.rstrip("/"), parts.query, parts.fragment
+	except ValueError:
+		return name, raw
 
 
 class OptimusSettings(Document):
@@ -18,15 +48,17 @@ class OptimusSettings(Document):
 		self._normalize_tracked_apps()
 		self._clamp_numeric_floors()
 		self._warn_on_framework_apps_in_tracked()
+		self._check_ai_base_url()
+		self._clear_api_key_on_endpoint_change()
+		self._warn_key_not_sent_over_http()
 		self._warn_on_incomplete_ai_config()
+		self._refuse_an_unsendable_ai_key()
 
 	def on_update(self):
 		# Settings are read on every request (via the `enabled` gate in
 		# hooks_callbacks), so the cache version bumps on every save.
 		# The settings module's reader respects the cache version.
-		from optimus import redis_keys
-
-		frappe.cache.delete_value(redis_keys.settings_cache())
+		frappe.db.after_commit.add(_invalidate_settings_cache)
 
 	# Numeric floors per field a value below the floor would either
 	# break the analyzer at runtime (negative interval, zero retention)
@@ -58,6 +90,8 @@ class OptimusSettings(Document):
 		"redundant_perm_threshold": 1,
 		"n_plus_one_min_occurrences": 1,
 		"ai_auto_suggest_max": 0,
+		"ai_refresh_max_findings": 0,
+		"ai_context_tokens": 0,
 		# v0.9.0: AI request timeout. Below 10s breaks the LLM round-trip
 		# entirely; the ceiling 600s is applied in settings.py:_resolve
 		# (we can't enforce it from a floor). Clamping below pairs with
@@ -144,6 +178,104 @@ class OptimusSettings(Document):
 			indicator="orange",
 		)
 
+	def _refuse_an_unsendable_ai_key(self):
+		"""Refuse, on save, an API key the AI calls would refuse to send: for a
+		provider that needs a key, one holding a character that is not
+		printable ASCII (a space, a smart quote, a no-break space, a control
+		character) after its surrounding whitespace is stripped, with the same
+		message (``ai_fix._unsendable_key_message``). ``validate`` runs before
+		Frappe encrypts the field, so a newly typed key is here in plain text;
+		a key left unchanged is Frappe's asterisks, which pass the check. A
+		keyless provider ("OpenAI-compatible") never sends such a key, so it
+		is not refused there. The key is held only as ``api_key``, a name the
+		traceback sanitizers redact, and never put in the message."""
+		from optimus.ai_fix import _PROVIDER_DEFAULTS, _key_is_sendable, _unsendable_key_message
+
+		provider = _text(self.get("ai_provider")) or "Anthropic"
+		if not _PROVIDER_DEFAULTS.get(provider, {}).get("needs_key", True):
+			return
+		api_key = self.get("ai_api_key")
+		api_key = api_key.strip() if isinstance(api_key, str) else ""
+		if not api_key or _key_is_sendable(api_key):
+			return
+		frappe.throw(_unsendable_key_message())
+
+	def _check_ai_base_url(self):
+		"""Warn on refused endpoints; call-time validation prevents the request.
+
+		Throwing here can snapshot a newly typed key in developer mode. Strip
+		authority credentials from both sides of the version diff even when AI
+		is off or a hosted provider ignores this field.
+		"""
+		from optimus import ai_fix
+
+		before = self.get_doc_before_save() if hasattr(self, "get_doc_before_save") else None
+		if before is not None:
+			before.ai_base_url = ai_fix.strip_url_userinfo(before.get("ai_base_url"))
+		raw = self.get("ai_base_url")
+		self.ai_base_url = ai_fix.strip_url_userinfo(raw)
+		if isinstance(raw, str) and raw != self.ai_base_url:
+			frappe.msgprint(_(
+				"The AI Base URL contained a user name or password. Optimus removed it before "
+				"saving so it is not kept in the settings history; use the API Key field."
+			), title=_("Optimus"), indicator="orange")
+		name = _text(self.get("ai_provider")) or ai_fix._DEFAULT_PROVIDER
+		if not self.get("ai_enabled") or (ai_fix._PROVIDER_DEFAULTS.get(name) or {}).get("base_url"):
+			return
+		problem = ""
+		guard = ai_fix._InterruptGuard(base=True)
+		try:
+			with guard:
+				self.ai_base_url = ai_fix.validate_base_url(self.ai_base_url)
+		except ai_fix.AiFixError as exc:
+			problem = str(exc)
+		except Exception:
+			problem = _("The AI Base URL could not be checked.")
+		if guard.pending():
+			raw = None
+			raise guard.interrupt()
+		if problem:
+			frappe.msgprint(_(
+				"{0} AI suggestions stay off until this is corrected. Use Test AI connection after saving."
+			).format(problem), title=_("Optimus"), indicator="orange")
+
+	def _clear_api_key_on_endpoint_change(self):
+		"""A masked password means unchanged. Clearing it also removes __Auth
+		during Frappe's normal password save, in the same transaction."""
+		before = self.get_doc_before_save() if hasattr(self, "get_doc_before_save") else None
+		if before is None:
+			return
+		if _effective_endpoint(before.get("ai_provider"), before.get("ai_base_url")) == _effective_endpoint(
+			self.get("ai_provider"), self.get("ai_base_url"),
+		):
+			return
+		api_key = self.get("ai_api_key")
+		if not isinstance(api_key, str) or not api_key or set(api_key) != {"*"}:
+			return
+		self.ai_api_key = ""
+		frappe.msgprint(_(
+			"The API key was cleared because the AI provider or Base URL changed. "
+			"Enter the API key for the new endpoint if it needs one."
+		), title=_("Optimus"), indicator="orange")
+
+	def _warn_key_not_sent_over_http(self):
+		from optimus import ai_fix
+
+		if not self.get("ai_enabled") or not self.get("ai_api_key"):
+			return
+		name = _text(self.get("ai_provider")) or ai_fix._DEFAULT_PROVIDER
+		url = (ai_fix._PROVIDER_DEFAULTS.get(name) or {}).get("base_url") or self.ai_base_url
+		try:
+			url = ai_fix.validate_base_url(url)
+		except ai_fix.AiFixError:
+			return  # The endpoint warning above already explains the refusal.
+		if ai_fix.key_over_http_blocked(url, allow=ai_fix._allow_key_over_http()):
+			frappe.msgprint(_(
+				"The API key will not be sent over plain http:// to another machine. "
+				"Local models such as Ollama need no key. If this endpoint needs a key, use https:// "
+				"or explicitly set optimus_ai_allow_key_over_http in the site configuration."
+			), title=_("Optimus"), indicator="orange")
+
 	def _warn_on_incomplete_ai_config(self):
 		"""Non-blocking warning when AI fix suggestions are enabled but
 		the config is incomplete (no model, or no API key for a provider
@@ -151,19 +283,21 @@ class OptimusSettings(Document):
 		sees a clear hint instead of a cryptic error on first use."""
 		if not self.get("ai_enabled"):
 			return
-		provider = (self.get("ai_provider") or "Anthropic").strip()
-		needs_key = provider != "OpenAI-compatible"
+		provider = _text(self.get("ai_provider")) or "Anthropic"
+		from optimus import ai_fix
+
+		needs_key = ai_fix.provider_needs_key(provider)
 		# ai_model can be blank when a hosted default exists for the
 		# provider; only "OpenAI-compatible" truly requires it (no
 		# default to fall back to). We still nudge if it's blank for the
 		# custom provider.
 		missing = []
 		if provider == "OpenAI-compatible":
-			if not (self.get("ai_base_url") or "").strip():
+			if not _text(self.get("ai_base_url")):
 				missing.append(_("Base URL"))
-			if not (self.get("ai_model") or "").strip():
+			if not _text(self.get("ai_model")):
 				missing.append(_("Model"))
-		if needs_key and not (self.get("ai_api_key") or "").strip():
+		if needs_key and not _text(self.get("ai_api_key")):
 			missing.append(_("API Key"))
 		if not missing:
 			return
@@ -171,13 +305,13 @@ class OptimusSettings(Document):
 		if len(missing) == 1:
 			body = _(
 				"AI Fix Suggestions are enabled but {0} is not set. The "
-				"<b>Suggest a fix (AI)</b> button will report a configuration "
+				"<b>Refresh AI suggestions</b> button will report a configuration "
 				"error until you fill it in."
 			).format(names)
 		else:
 			body = _(
 				"AI Fix Suggestions are enabled but {0} are not set. The "
-				"<b>Suggest a fix (AI)</b> button will report a configuration "
+				"<b>Refresh AI suggestions</b> button will report a configuration "
 				"error until you fill them in."
 			).format(names)
 		frappe.msgprint(

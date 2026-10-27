@@ -16,6 +16,7 @@ until the analyze pipeline finalizes the session and deletes them.
 import hashlib
 import hmac
 import json
+import pickle
 import time
 
 import frappe
@@ -171,11 +172,32 @@ def set_active_session(user: str, session_uuid: str) -> None:
 
 	The active key carries a TTL so a forgotten Stop button auto-clears.
 	"""
-	frappe.cache.set_value(
-		_active_key(user),
-		session_uuid,
-		expires_in_sec=SESSION_TTL_SECONDS,
-	)
+	from redis.exceptions import WatchError
+
+	from optimus import redis_keys, safe_call
+
+	active, phase2 = [frappe.cache.make_key(key) for key in (
+		_active_key(user), redis_keys.lp_active(user),
+	)]
+	guard = safe_call.InterruptGuard(base=True)
+	conflict = False
+	try:
+		with guard, frappe.cache.pipeline() as pipe:
+			pipe.watch(active, phase2)
+			if pipe.exists(active, phase2):
+				conflict = True
+			else:
+				pipe.multi()
+				pipe.set(active, pickle.dumps(session_uuid, protocol=4), ex=SESSION_TTL_SECONDS)
+				pipe.execute()
+	except WatchError:
+		conflict = True
+	finally:
+		frappe.local.cache.pop(active, None)
+	if guard.pending():
+		raise guard.interrupt()
+	if conflict:
+		frappe.throw(frappe._("A profiling capture is already active. Stop it before starting another."))
 
 
 def clear_active_session(user: str) -> None:

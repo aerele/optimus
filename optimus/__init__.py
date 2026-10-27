@@ -1,4 +1,4 @@
-__version__ = "0.12.83"
+__version__ = "0.12.88"
 
 
 def safe_commit() -> None:
@@ -396,6 +396,12 @@ _startup_probe_tool2()
 # time frappe is fully initialized.
 
 
+
+def _try_install_file_input_guard() -> bool:
+	from optimus.managed import install_file_input_guard
+	return install_file_input_guard()
+
+
 def _try_install_capture_wraps() -> bool:
 	"""Install the sidecar wraps. Returns True if installed, False if deferred
 	(frappe still bootstrapping) or errored. Idempotent (the capture module
@@ -413,6 +419,8 @@ def _try_install_capture_wraps() -> bool:
 	# init ImportError. Defer until hooks fire.
 	if not hasattr(frappe, "_"):
 		return False
+
+	_try_install_file_input_guard()
 
 	try:
 		from optimus import capture
