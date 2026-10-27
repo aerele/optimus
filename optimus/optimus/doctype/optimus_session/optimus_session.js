@@ -350,8 +350,8 @@ function _progress_banner(frm, html, update) {
 	if ($b) $b.attr("data-optimus-session", frm.doc.session_uuid || "");
 }
 
-// Slim progress strip: the percent is clamped to 0-100 and the bar width is updated in
-// place so its CSS transition animates between ticks.
+// Slim progress strip: only the text span is a live region (the bar is not), so ticks of
+// the bar do not re-announce. Percent is clamped to 0-100 and the bar is patched in place.
 function _analyze_progress_strip(frm, percent, description) {
 	const pct = Number.isFinite(percent) ? Math.max(0, Math.min(100, Math.round(percent))) : null;
 	const desc = description || __("Analyzing…");
@@ -362,7 +362,7 @@ function _analyze_progress_strip(frm, percent, description) {
 			' aria-label="' + frappe.utils.escape_html(text) + '" aria-valuenow="' + pct + '">' +
 			'<span style="width:' + pct + '%"></span></span>'
 		: "";
-	const html = '<span class="optimus-status-text">' + lead + "</span>" + bar;
+	const html = '<span class="optimus-status-text" role="status" aria-live="polite">' + lead + "</span>" + bar;
 	_progress_banner(frm, html, ($b) => {
 		const $bar = $b.find(".optimus-status-bar");
 		if (!!$bar.length !== (pct !== null)) return $b.html(html);
@@ -1243,7 +1243,7 @@ function _drain_banner(frm, html) {
 		frm,
 		"optimus-drain-banner",
 		"optimus-status optimus-status-warn",
-		html === null ? null : '<span class="optimus-status-text">' + html + "</span>",
+		html === null ? null : '<span class="optimus-status-text" role="status" aria-live="polite">' + html + "</span>",
 		($b) => $b.find(".optimus-status-text").html(html)
 	);
 }

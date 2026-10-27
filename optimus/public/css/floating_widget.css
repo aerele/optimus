@@ -108,7 +108,7 @@
 	border-left: 3px solid var(--blue-500, #2563eb);
 	border-radius: var(--border-radius-sm, 4px);
 	background: var(--bg-blue, #eff6ff);
-	color: var(--text-muted, #6b7280);
+	color: var(--text-color, #1f2937);
 	font-size: var(--text-sm, 0.8rem);
 	line-height: 1.4;
 }
@@ -129,7 +129,7 @@
 	height: 3px;
 	min-width: 60px;
 	border-radius: 2px;
-	background: var(--border-color, rgba(0, 0, 0, 0.1));
+	background: rgba(128, 128, 128, 0.3);
 	overflow: hidden;
 }
 

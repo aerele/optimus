@@ -22,7 +22,7 @@ function make(html) {
   const set = h => { rewrites++; b.html_src = h;
     const m = h.match(/aria-valuenow="(\d+)"[^]*?style="width:(\d+)%"/);
     b.bar = m ? {now: +m[1], width: m[2] + "%", label: h.match(/aria-label="([^"]*)"/)[1]} : null;
-    b.text = h.match(/optimus-status-text">([^]*?)<\/span>/)[1]; };
+    b.text = h.match(/optimus-status-text"[^>]*>([^]*?)<\/span>/)[1]; };
   set(html);
   b.html = set;
   b.attr = (k, v) => { b.attrs[k] = v; };
@@ -62,6 +62,12 @@ assert.equal(banner.bar, null, "no percent means no bar");
 assert.match(banner.html_src, /&lt;b>x&lt;\/b>/);
 strip(10, "y");
 assert.equal(banner.bar.now, 10, "bar comes back when a percent arrives");
+assert.match(banner.html_src, /<span class="optimus-status-text" role="status" aria-live="polite">/);
+assert.doesNotMatch(banner.html_src, /optimus-status-bar"[^>]*role="status"/, "the bar is not a live region");
+let drained = null;
+ctx._single_banner = (frm, id, cls, html) => { drained = html; };
+vm.runInContext("_drain_banner(frm, 'Waiting for jobs')", ctx);
+assert.match(drained, /^<span class="optimus-status-text" role="status" aria-live="polite">Waiting for jobs<\/span>$/);
 console.log("ok");
 """
 
