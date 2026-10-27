@@ -20,7 +20,9 @@ _WHERE_END_RE = re.compile(
 _EQ_RE = re.compile(r"^([\w.]+)\s*(?:=|<=>|IN\b|IS\s+NULL\b)", re.IGNORECASE)
 _PLAIN_RE = re.compile(r"^([\w.]+)\s*(?:[<>!]|BETWEEN\b|NOT\b|LIKE\b|IS\b|REGEXP\b|RLIKE\b)", re.IGNORECASE)
 _LEADING_WILDCARD_RE = re.compile(r"^([\w.]+)\s*(?:NOT\s+)?LIKE\s+'%", re.IGNORECASE)
-_FUNC_LEAF_RE = re.compile(r"^\w+\s*\(")
+_FUNC_LEAF_RE = re.compile(r"^(?!(?:NOT|EXISTS|ANY|ALL|SOME|IN)\b)\w+\s*\(", re.IGNORECASE)
+_NOT_PREFIX_RE = re.compile(r"^NOT\s*(?=\()|^NOT\s+(?=EXISTS\b)", re.IGNORECASE)
+_WEAK_RE = re.compile(r"^[\w.]+\s*(?:!=|<>|NOT\s+(?:IN|LIKE|BETWEEN|REGEXP|RLIKE)\b|IS\s+NOT\b)", re.IGNORECASE)
 _SUBQUERY_RE = re.compile(r"\bSELECT\b", re.IGNORECASE)
 _IDENT_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*(?:\.\w+)?)(?!\s*\(|\w)")
 _NOT_COLUMNS = frozenset({"null", "true", "false", "as", "and", "or", "not", "unsigned", "signed", "char"})
@@ -35,6 +37,8 @@ class WhereShape:
 	plain: set = field(default_factory=set)  # col used bare in any comparison
 	wrapped: set = field(default_factory=set)  # col inside a function call, e.g. DATE(col)
 	scan: set = field(default_factory=set)  # col filtered by LIKE '%...', which an index can't narrow
+	weak: set = field(default_factory=set)  # col under !=, NOT IN, NOT LIKE or NOT (...)
+	narrow: set = field(default_factory=set)  # col under a predicate an index can narrow
 	has_or: bool = False
 	# Repeated table or unqualified columns in a join: the columns can't be attributed safely.
 	ambiguous: bool = False
@@ -69,6 +73,12 @@ def is_served(column: str, shape: WhereShape, indexes: list) -> bool:
 		if all(c in shape.equality for c in cols[: cols.index(col)]):
 			return True
 	return False
+
+
+def is_weak_only(column: str, shape: WhereShape) -> bool:
+	"""True if the only predicates on ``column`` are negations an index may not be able to use."""
+	col = (column or "").lower()
+	return col in shape.weak and col not in shape.narrow
 
 
 def covered_columns(ix) -> list[str]:
@@ -179,6 +189,9 @@ def _wrapped_refs(leaf: str) -> list[str]:
 def _classify_leaf(
 	leaf: str, under_or: bool, own: str, aliases: dict, shape: WhereShape, multi: bool = False
 ) -> None:
+	if _NOT_PREFIX_RE.match(leaf):
+		_classify_negated(leaf, own, aliases, shape, multi)
+		return
 	if _FUNC_LEAF_RE.match(leaf):
 		if _SUBQUERY_RE.search(leaf):
 			return
@@ -195,8 +208,23 @@ def _classify_leaf(
 		col = _resolve(m.group(1), own, aliases, shape, multi)
 		if col:
 			shape.plain.add(col)
+			shape.narrow.add(col)
 			if not under_or:
 				shape.equality.add(col)
 	elif m := _PLAIN_RE.match(leaf):
 		if col := _resolve(m.group(1), own, aliases, shape, multi):
 			shape.plain.add(col)
+			(shape.weak if _WEAK_RE.match(leaf) else shape.narrow).add(col)
+
+
+def _classify_negated(leaf: str, own: str, aliases: dict, shape: WhereShape, multi: bool) -> None:
+	"""Classify the operand of a leading NOT: its columns are plain but never equalities."""
+	inner = _NOT_PREFIX_RE.sub("", leaf, count=1).strip()
+	scratch = WhereShape()
+	for sub, _ in _leaves(inner, True):
+		_classify_leaf(sub, True, own, aliases, scratch, multi)
+	shape.ambiguous = shape.ambiguous or scratch.ambiguous
+	shape.wrapped |= scratch.wrapped
+	shape.scan |= scratch.scan
+	shape.plain |= scratch.plain
+	shape.weak |= scratch.plain - scratch.wrapped

@@ -8,12 +8,14 @@ versions may contain breaking changes see migration notes below).
 
 ---
 
-## [0.12.85] - 2026-10-27
+## [0.12.99] - 2026-10-27
 
 ### Fixed
 
 - Missing-index suggestions no longer propose an index that an existing index already serves for the same query. A composite index such as (a, b) now counts for a query that filters `a` and `b` by equality, and a FULLTEXT index no longer hides a real missing index.
-- A suggestion is dropped when the column is only used inside a function, such as `DATE(col)`, because a plain index cannot serve that filter.
+- A suggestion is dropped when the column is only used inside a function, such as `DATE(col)`, because a plain index cannot serve that filter. The warning now names Frappe's `ifnull(col, '')` and says to remove it from the filter.
+- `NOT (col = ...)`, `NOT EXISTS (...)`, `ANY`, `ALL` and `IN (...)` are no longer mistaken for function calls.
+- When a column leads an existing index but the only filter on it is `!=`, `NOT IN` or `NOT LIKE`, the warning says the index exists but may not be able to serve that filter.
 
 ### Changed
 

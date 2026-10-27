@@ -24,7 +24,7 @@ from optimus.analyzers.base import (
 	is_frappe_meta_table,
 )
 from optimus.analyzers.index_harm import assess_harm, collect_writes
-from optimus.analyzers.index_where import covered_columns, is_served, parse_where
+from optimus.analyzers.index_where import covered_columns, is_served, is_weak_only, parse_where
 from optimus.dbdialect import get_dialect
 
 
@@ -211,18 +211,28 @@ def _query_aliases(sql: str) -> dict:
 		return {}
 
 
-def _partition_queries(table: str, column: str, entries: list, indexes: list) -> tuple[list, list, list]:
-	"""Split queries into ``(kept, served_by_existing_index, function_wrapped)``."""
-	kept, served, wrapped = [], [], []
+def _partition_queries(
+	table: str, column: str, entries: list, indexes: list
+) -> tuple[list, list, list, list]:
+	"""Split queries into ``(kept, served, function_wrapped, weakly_served)``; the last is a subset of served."""
+	kept, served, wrapped, weak = [], [], [], []
 	for entry in entries:
 		shape = parse_where(entry["raw"], table, _query_aliases(entry["raw"]))
 		if is_served(column, shape, indexes):
 			served.append(entry)
+			if is_weak_only(column, shape):
+				weak.append(entry)
 		elif column.lower() in shape.wrapped and column.lower() not in shape.plain:
 			wrapped.append(entry)
 		else:
 			kept.append(entry)
-	return kept, served, wrapped
+	return kept, served, wrapped, weak
+
+
+def _all_weakly_served(table: str, column: str, entries: list, indexes: list) -> bool:
+	"""True if every query only negates ``column`` (!=, NOT IN, ...) though an index leads with it."""
+	_, _, _, weak = _partition_queries(table, column, entries, indexes)
+	return bool(entries) and len(weak) == len(entries)
 
 
 def _composite_hint(column: str, indexes: list) -> str | None:
@@ -485,6 +495,7 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	writes = collect_writes(recordings)
 	covered_targets: list[str] = []
 	wrapped_targets: list[str] = []
+	weak_targets: list[str] = []
 	harm_targets: list[str] = []
 
 	findings = []
@@ -521,16 +532,24 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 			never_suggest_columns.append(f"{table}.{column}")
 			continue
 		if status == "already_indexed":
-			drop_already_indexed += 1
+			if _all_weakly_served(table, column, bucket["entries"], indexes):
+				weak_targets.append(f"{table}.{column}")
+			else:
+				drop_already_indexed += 1
 			continue
 		if status == "unindexable":
 			drop_unindexable += 1
 			unindexable_reasons.append(ddl_or_reason)
 			continue
 
-		kept, served, wrapped = _partition_queries(table, column, bucket["entries"], indexes)
+		kept, served, wrapped, weak = _partition_queries(table, column, bucket["entries"], indexes)
 		if not kept:
-			(covered_targets if served else wrapped_targets).append(f"{table}.{column}")
+			if not served:
+				wrapped_targets.append(f"{table}.{column}")
+			elif len(weak) == len(served):
+				weak_targets.append(f"{table}.{column}")
+			else:
+				covered_targets.append(f"{table}.{column}")
 			continue
 		bucket["count"] = sum(e["count"] for e in kept)
 		bucket["duration"] = sum(e["duration"] for e in kept)
@@ -684,7 +703,15 @@ def analyze(recordings: list[dict], context) -> AnalyzerResult:
 	if wrapped_targets:
 		warnings.append(
 			f"Suppressed index suggestion(s) where the column is only used inside a function "
-			f"({_sample(wrapped_targets)}), e.g. DATE(col); a plain index cannot serve that filter."
+			f"({_sample(wrapped_targets)}), e.g. DATE(col) or Frappe's ifnull(col, ''); a plain index "
+			"cannot serve that filter. Remove the function (for example ifnull) from the filter so "
+			"an index can be used."
+		)
+	if weak_targets:
+		warnings.append(
+			f"Index suggestion(s) not made because an index on the column already exists "
+			f"({_sample(weak_targets)}), but the only filter on it is !=, NOT IN, NOT LIKE or NOT (...), "
+			"so the existing index may not be able to serve it."
 		)
 	if harm_targets:
 		warnings.append(

@@ -12,7 +12,7 @@ from collections import Counter
 import pytest
 
 from optimus.analyzers import index_harm, index_suggestions
-from optimus.analyzers.index_where import is_served, parse_where
+from optimus.analyzers.index_where import is_served, is_weak_only, parse_where
 from optimus.dbdialect.base import IndexInfo
 from optimus.dbdialect.mariadb import MariaDBDialect
 
@@ -472,3 +472,90 @@ def test_mariadb_existing_indexes_reports_usability(monkeypatch):
 	assert not by_name["ig"].eligible
 	assert by_name["ab"].columns == ["a", "b"]
 	assert not by_name["ab"].eligible and by_name["ab"].usable_prefix == ("a",)
+
+
+@pytest.mark.parametrize(
+	"where",
+	["NOT (status = 'x')", "NOT(status = 'x')", "not (status = 'x')", "NOT (status = 'x' AND y = 1)"],
+)
+def test_not_group_is_a_plain_predicate_not_a_function(where):
+	shape = parse_where(f"SELECT * FROM tabT WHERE {where}", "tabT")
+	assert "status" in shape.plain
+	assert shape.wrapped == set()
+	assert shape.equality == set()
+
+
+def test_not_group_around_a_real_function_is_still_wrapped():
+	shape = parse_where("SELECT * FROM tabT WHERE NOT (DATE(a) = '2026-01-01')", "tabT")
+	assert shape.wrapped == {"a"}
+	assert shape.plain == set()
+
+
+@pytest.mark.parametrize(
+	"where",
+	[
+		"NOT EXISTS (SELECT 1 FROM tabU WHERE tabU.p = tabT.a)",
+		"EXISTS (SELECT 1 FROM tabU WHERE tabU.p = tabT.a)",
+		"a = ANY (SELECT p FROM tabU)",
+		"a IN (SELECT p FROM tabU)",
+	],
+)
+def test_keyword_groups_are_not_function_calls(where):
+	shape = parse_where(f"SELECT * FROM tabT WHERE {where}", "tabT")
+	assert shape.wrapped == set()
+
+
+def test_not_group_suggestion_is_kept_without_the_function_warning(monkeypatch, empty_context):
+	_install(monkeypatch, "c", [])
+	result = _analyze(empty_context, _select("NOT (c = 'x')", n=3))
+	assert len(_missing(result)) == 1
+	assert not any("only used inside a function" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+	"where, weak",
+	[
+		("status != 'x'", True),
+		("status <> 'x'", True),
+		("status NOT IN ('x', 'y')", True),
+		("status NOT LIKE 'x%'", True),
+		("NOT (status = 'x')", True),
+		("status != 'x' AND status = 'y'", False),
+		("status = 'x'", False),
+		("status > 'x'", False),
+		("status != 'x' AND status > 'a'", False),
+	],
+)
+def test_weak_only_predicates(where, weak):
+	shape = parse_where(f"SELECT * FROM tabT WHERE {where}", "tabT")
+	assert is_weak_only("status", shape) is weak
+
+
+@pytest.mark.parametrize("where", ["c != 'Cancelled'", "c NOT IN ('A', 'B')"])
+def test_negation_on_an_indexed_column_stays_served_with_its_own_warning(monkeypatch, empty_context, where):
+	_install(monkeypatch, "c", [ix("s", ["c"])])
+	result = _analyze(empty_context, _select(where, n=3))
+	assert not _missing(result)
+	assert any("may not be able to serve it" in w and "tabT.c" in w for w in result.warnings)
+	assert not any("already served by an existing index" in w for w in result.warnings)
+
+
+def test_equality_on_an_indexed_column_keeps_the_already_indexed_warning(monkeypatch, empty_context):
+	_install(monkeypatch, "c", [ix("s", ["c"])])
+	result = _analyze(empty_context, _select("c = 'x'", n=3))
+	assert any("already indexed" in w for w in result.warnings)
+	assert not any("may not be able to serve it" in w for w in result.warnings)
+
+
+def test_function_warning_mentions_ifnull_and_the_fix(monkeypatch, empty_context):
+	_install(monkeypatch, "b", [])
+	result = _analyze(empty_context, _select("ifnull(b, '') = 'x'", n=3))
+	warning = next(w for w in result.warnings if "only used inside a function" in w)
+	assert "ifnull" in warning and "Remove the function" in warning
+
+
+def test_negation_after_an_equality_prefix_of_a_composite_gets_the_weak_warning(monkeypatch, empty_context):
+	_install(monkeypatch, "b", [ix("ab", ["a", "b"])])
+	result = _analyze(empty_context, _select("a = 'x' AND b != 'y'", n=3))
+	assert not _missing(result)
+	assert any("may not be able to serve it" in w and "tabT.b" in w for w in result.warnings)
